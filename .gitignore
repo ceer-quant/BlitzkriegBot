@@ -103,3 +103,7 @@ CLAWDBOT_ARCHITECTURE.md
 # Standalone compute API server (monetization layer — hosted only)
 src/api/
 .vercel
+
+# Rotated/archived runtime logs (cost-opt: bounded logs)
+*.log.gz
+run.log.*
