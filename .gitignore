@@ -97,8 +97,13 @@ apps/
 apps/
 
 # Placeholder folders
-ui/
 vendor/
+
+# Legacy local HFT dashboards (hand-authoured HTML/JS, local-only, never pushed).
+# The tracked Rust UI crates live NEXT TO these under ui/ui_kit & ui/ui_kit_panel.
+ui/*
+!ui/ui_kit/
+!ui/ui_kit_panel/
 
 # Development workspace
 workspace/
