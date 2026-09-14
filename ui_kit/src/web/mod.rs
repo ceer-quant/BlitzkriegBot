@@ -1,11 +1,23 @@
-//! Web adapter — renders a `UiSnapshot` to HTML (and a JSON endpoint) and serves
+//! Web adapter — renders a `UiSnapshot` to HTML (and JSON endpoints) and serves
 //! it from a dependency-free HTTP/1.1 server so the browser panel can be opened
 //! directly. This is the browser-facing sibling of the TUI and app adapters; it
 //! contains no trading logic.
+//!
+//! When constructed with a [`Dispatcher`] (gateway mode) the server additionally
+//! exposes the command surface:
+//!
+//!   GET  /                    HTML panel (auto-refresh)
+//!   GET  /api/snapshot        JSON snapshot
+//!   GET  /api/command?cmd=..  dispatch one command → JSON outcome
+//!   POST /api/command         body = command text (or `{"cmd":"..."}`) → JSON
+//!
+//! Command dispatch is trading-logic-free: it starts/stops the *process* and
+//! reads state. No order is ever placed from here.
 
 use crate::core::ipc_client::IpcClient;
 use crate::core::types::UiSnapshot;
-use std::io::{BufRead, BufReader, Write};
+use crate::gateway::Dispatcher;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +34,11 @@ fn pct(v: f64) -> String {
 
 /// Render the whole panel as a single self-refreshing HTML document.
 pub fn render_html(s: &UiSnapshot) -> String {
+    render_html_with(s, false)
+}
+
+/// As [`render_html`], optionally including the command console (gateway mode).
+pub fn render_html_with(s: &UiSnapshot, console: bool) -> String {
     let mode = esc(s.mode());
     let mut rows = String::new();
     if let Some(r) = &s.round {
@@ -92,6 +109,31 @@ pub fn render_html(s: &UiSnapshot) -> String {
         .map(|e| format!("<div class=err>last error: {}</div>", esc(e)))
         .unwrap_or_default();
 
+    let console_html = if console {
+        r#"<div class=panel><h2>Command console</h2>
+<form id=cmdform onsubmit="return runCmd(event)">
+<input id=cmdinput name=cmd placeholder="status | start BTC,ETH --size 5 | stop | positions 25" autocomplete=off>
+<button type=submit>Run</button>
+</form>
+<pre id=cmdout class=sub>try: status</pre></div>
+<script>
+async function runCmd(e){
+ e.preventDefault();
+ var v=document.getElementById('cmdinput').value;
+ var out=document.getElementById('cmdout');
+ out.textContent='…';
+ try{
+  var r=await fetch('/api/command',{method:'POST',body:v});
+  var j=await r.json();
+  out.textContent=(j.ok?'OK ':('ERR '))+j.action+' — '+j.message;
+ }catch(err){ out.textContent='request failed: '+err; }
+ return false;
+}
+</script>"#
+    } else {
+        ""
+    };
+
     format!(
         r#"<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
@@ -111,15 +153,19 @@ th{{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.06e
 .pill{{display:inline-block;background:var(--card);border:1px solid var(--bd);border-radius:999px;padding:2px 10px;margin:2px;font-size:12px}}
 .panel{{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:14px;margin-bottom:20px}}
 .panel h2{{margin:0 0 10px;font-size:13px}}
+#cmdinput{{width:min(560px,70%);background:#0d1117;color:var(--fg);border:1px solid var(--bd);border-radius:6px;padding:8px 10px;font:inherit}}
+button{{background:#21262d;color:var(--fg);border:1px solid var(--bd);border-radius:6px;padding:8px 14px;font:inherit;cursor:pointer}}
+pre{{white-space:pre-wrap;margin:10px 0 0}}
 </style></head><body>
 <h1>Blitzkrieg UI Kit</h1>
-<div class=mode>core mode: <b>{mode}</b> · connected: {} · source: UDS JSON-RPC (read-only)</div>
+<div class=mode>core mode: <b>{mode}</b> · connected: {} · source: UDS JSON-RPC (read-only panel){gateway_note}</div>
 <div class=grid>{rows}</div>
 <div class=panel><h2>Open Positions</h2><table>
 <tr><th>Asset</th><th>Dir</th><th>Entry</th><th>Cur</th><th>PnL</th><th>Left</th></tr>{pos_rows}</table></div>
 <div class=panel><h2>Recent Trades</h2><table>
 <tr><th>Asset</th><th>Dir</th><th>Entry→Exit</th><th>Net</th><th>Reason</th></tr>{trade_rows}</table></div>
 <div class=panel><h2>Prices</h2>{price_rows}</div>
+{console_html}
 {err}
 </body></html>"#,
         s.connected,
@@ -128,6 +174,8 @@ th{{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.06e
         trade_rows = trade_rows,
         price_rows = price_rows,
         mode = mode,
+        gateway_note = if console { " · gateway: commands enabled" } else { "" },
+        console_html = console_html,
         err = err,
     )
 }
@@ -150,21 +198,80 @@ pub fn render_json(s: &UiSnapshot) -> String {
     .to_string()
 }
 
+/// Minimal parsed HTTP request.
+struct HttpRequest {
+    method: String,
+    target: String,
+    body: String,
+}
+
+impl HttpRequest {
+    fn path(&self) -> &str {
+        self.target.split('?').next().unwrap_or(&self.target)
+    }
+    /// First `cmd` value from the query string, percent-decoded (`+` → space).
+    fn query_cmd(&self) -> Option<String> {
+        let q = self.target.split_once('?')?.1;
+        for pair in q.split('&') {
+            if let Some(v) = pair.strip_prefix("cmd=") {
+                return Some(url_decode(v));
+            }
+        }
+        None
+    }
+}
+
+fn url_decode(s: &str) -> String {
+    let bytes = s.replace('+', " ").into_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(&String::from_utf8_lossy(&bytes[i + 1..i + 3]), 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// A trivial, dependency-free HTTP server that always renders a fresh snapshot.
 pub struct WebServer {
     snapshot_src: Arc<Mutex<IpcClient>>,
     trade_limit: usize,
+    /// Present only in gateway mode (`--manage`); enables `/api/command`.
+    dispatcher: Option<Arc<Mutex<Dispatcher>>>,
 }
 
 impl WebServer {
+    /// Read-only panel (no command API).
     pub fn new(client: IpcClient, trade_limit: usize) -> Self {
-        Self { snapshot_src: Arc::new(Mutex::new(client)), trade_limit }
+        Self { snapshot_src: Arc::new(Mutex::new(client)), trade_limit, dispatcher: None }
+    }
+
+    /// Panel + command API. Lifecycle verbs are gated by the dispatcher's own
+    /// `lifecycle_enabled` flag.
+    pub fn with_gateway(client: IpcClient, trade_limit: usize, dispatcher: Dispatcher) -> Self {
+        Self {
+            snapshot_src: Arc::new(Mutex::new(client)),
+            trade_limit,
+            dispatcher: Some(Arc::new(Mutex::new(dispatcher))),
+        }
     }
 
     /// Serve until the process is stopped. `addr` e.g. `127.0.0.1:18888`.
     pub fn serve(&self, addr: &str) -> std::io::Result<()> {
         let listener = TcpListener::bind(addr)?;
+        let console = self.dispatcher.is_some();
         println!("ui_kit web adapter listening on http://{addr}/  (panel) and /api/snapshot (JSON)");
+        if console {
+            println!("  gateway: /api/command (GET ?cmd=… or POST body){}",
+                if self.lifecycle_enabled() { " · lifecycle ENABLED" } else { " · read-only (pass --manage for start/stop)" });
+        }
         for stream in listener.incoming() {
             match stream {
                 Ok(s) => self.handle(s),
@@ -174,53 +281,159 @@ impl WebServer {
         Ok(())
     }
 
+    fn lifecycle_enabled(&self) -> bool {
+        self.dispatcher
+            .as_ref()
+            .map(|d| d.lock().map(|d| d.lifecycle_enabled()).unwrap_or(false))
+            .unwrap_or(false)
+    }
+
     fn handle(&self, mut stream: TcpStream) {
         // A client that connects and stalls must not wedge the accept loop.
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
         let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
-        let mut reader = BufReader::new(match stream.try_clone() {
-            Ok(s) => s,
-            Err(_) => return,
-        });
-        let mut line = String::new();
-        if reader.read_line(&mut line).is_err() {
-            return;
+        let Some(req) = read_request(&mut stream) else { return };
+        let target = req.path().to_string();
+
+        let (status, ctype, body) = match (req.method.as_str(), target.as_str()) {
+            ("GET", "/api/snapshot") => {
+                let snap = self.snapshot();
+                (200, "application/json", render_json(&snap))
+            }
+            ("GET", "/api/command") | ("POST", "/api/command") => {
+                let cmd = if req.method == "POST" {
+                    body_to_command(&req.body)
+                } else {
+                    req.query_cmd().unwrap_or_default()
+                };
+                (200, "application/json", self.run_command(&cmd))
+            }
+            ("GET", _) => {
+                let snap = self.snapshot();
+                (200, "text/html; charset=utf-8", render_html_with(&snap, self.dispatcher.is_some()))
+            }
+            _ => (404, "text/plain; charset=utf-8", "not found".to_string()),
+        };
+
+        if std::env::var("UIKIT_WEB_TRACE").is_ok() {
+            eprintln!("ui_kit web: {} {} -> {} bytes ({status})", req.method, target, body.len());
         }
-        // Drain headers.
-        loop {
-            let mut h = String::new();
-            match reader.read_line(&mut h) {
+        let reason = if status == 200 { "OK" } else { "Not Found" };
+        let head = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(body.as_bytes());
+        let _ = stream.flush();
+    }
+
+    fn snapshot(&self) -> UiSnapshot {
+        match self.snapshot_src.lock() {
+            Ok(mut c) => c.snapshot(self.trade_limit),
+            Err(_) => UiSnapshot::default(),
+        }
+    }
+
+    fn run_command(&self, cmd: &str) -> String {
+        let Some(d) = &self.dispatcher else {
+            return serde_json::json!({
+                "ok": false, "action": "error",
+                "message": "command API disabled; run ui_kit_web with --manage"
+            })
+            .to_string();
+        };
+        match d.lock() {
+            Ok(mut d) => serde_json::to_string(&d.dispatch_line(cmd)).unwrap_or_else(|e| {
+                format!("{{\"ok\":false,\"action\":\"error\",\"message\":\"serialize: {e}\"}}")
+            }),
+            Err(_) => "{\"ok\":false,\"action\":\"error\",\"message\":\"dispatcher poisoned\"}".to_string(),
+        }
+    }
+}
+
+/// Parse one HTTP/1.1 request (request line + headers + optional body).
+fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
+    let mut reader = BufReader::new(stream.try_clone().ok()?);
+    let mut line = String::new();
+    if reader.read_line(&mut line).ok()? == 0 {
+        return None;
+    }
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let target = parts.next()?.to_string();
+
+    let mut content_length = 0usize;
+    loop {
+        let mut h = String::new();
+        if reader.read_line(&mut h).ok()? == 0 {
+            break;
+        }
+        let h = h.trim();
+        if h.is_empty() {
+            break;
+        }
+        if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_length = v.trim().parse().unwrap_or(0);
+        }
+    }
+    let body = if content_length > 0 {
+        let mut buf = vec![0u8; content_length.min(64 * 1024)];
+        let mut read = 0;
+        while read < buf.len() {
+            match reader.read(&mut buf[read..]) {
                 Ok(0) => break,
-                Ok(_) => {
-                    if h.trim().is_empty() {
-                        break;
-                    }
-                }
+                Ok(n) => read += n,
                 Err(_) => break,
             }
         }
+        buf.truncate(read);
+        String::from_utf8_lossy(&buf).into_owned()
+    } else {
+        String::new()
+    };
+    Some(HttpRequest { method, target, body })
+}
 
-        let snap = {
-            let mut c = match self.snapshot_src.lock() {
-                Ok(c) => c,
-                Err(_) => return,
-            };
-            c.snapshot(self.trade_limit)
+/// POST bodies may be raw command text or `{"cmd":"..."}`.
+fn body_to_command(body: &str) -> String {
+    let t = body.trim();
+    if t.starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
+            if let Some(c) = v.get("cmd").and_then(|c| c.as_str()) {
+                return c.to_string();
+            }
+        }
+    }
+    t.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_cmd_decodes() {
+        let r = HttpRequest {
+            method: "GET".into(),
+            target: "/api/command?cmd=start+BTC,ETH".into(),
+            body: String::new(),
         };
-        let (ctype, body) = if line.contains("/api/snapshot") {
-            ("application/json", render_json(&snap))
-        } else {
-            ("text/html; charset=utf-8", render_html(&snap))
-        };
-        if std::env::var("UIKIT_WEB_TRACE").is_ok() {
-            eprintln!("ui_kit web: {} -> {} bytes (connected={})", line.trim(), body.len(), snap.connected);
-        };
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        let _ = stream.write_all(resp.as_bytes());
-        let _ = stream.write_all(body.as_bytes());
-        let _ = stream.flush();
+        assert_eq!(r.path(), "/api/command");
+        assert_eq!(r.query_cmd().as_deref(), Some("start BTC,ETH"));
+    }
+
+    #[test]
+    fn body_json_or_raw() {
+        assert_eq!(body_to_command("{\"cmd\":\"status\"}"), "status");
+        assert_eq!(body_to_command("  stop  "), "stop");
+    }
+
+    #[test]
+    fn render_html_escaping_and_console() {
+        let snap = UiSnapshot::default();
+        assert!(render_html(&snap).contains("Blitzkrieg UI Kit"));
+        assert!(!render_html(&snap).contains("Command console"));
+        assert!(render_html_with(&snap, true).contains("Command console"));
     }
 }

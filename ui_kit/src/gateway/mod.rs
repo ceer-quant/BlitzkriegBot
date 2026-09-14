@@ -1,0 +1,22 @@
+//! UI Kit **gateway** — the command-dispatch + minimal-gateway layer that lets
+//! the Node shell be removed (D-4, step ②).
+//!
+//! Two responsibilities, both deliberately trading-logic-free:
+//!
+//! * [`supervisor`] — spawn / stop / adopt the `blitzkrieg-core` child process,
+//!   i.e. the lifecycle half of Node's `BlitzkriegCoreClient`.
+//! * [`command`] — parse and dispatch `/crypto-hft`-equivalent verbs
+//!   (`start|stop|status|positions`) and render their results.
+//!
+//! This module does NOT place, cancel or size any order. The `web` adapter
+//! serves these over HTTP; the TUI/app adapters may call [`command::Dispatcher`]
+//! directly.
+
+pub mod command;
+pub mod supervisor;
+
+pub use command::{parse_command, Command, CommandOutcome, Dispatcher, HELP};
+pub use supervisor::{
+    discover_binary, socket_served, StartOutcome, StopOutcome, Supervisor, SupervisorConfig,
+    SupervisorError,
+};

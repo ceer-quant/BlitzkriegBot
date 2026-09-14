@@ -60,13 +60,19 @@
   任务书要求「删除 CloddsBot 目录」，实际等价于删除整个 Node 外壳——远超「删一个遗留目录」。
 - **已完成的替代**：`ui_kit/`（core/web/tui/app）已实现并三前端跑通，可替代**展示层**
   （`ui/hft.html`、`src/tui`）。
-- **未完成的替代**：命令下发（`/crypto-hft start|stop`）与网关（Express+WS，服务 webchat）**仍依赖 Node**；
-  且 `src/gateway` 在模块顶层静态 import 了整张 Node 交易图，删除需同步改造。
+- **命令下发已补齐（2026-09-14，本次）**：`ui_kit/src/gateway/`（新）实现了命令通道——
+  `Supervisor`（spawn/stop/**adopt** 内核进程，含"绝不重复起核"守卫）+ `Dispatcher`
+  （`start|stop|status|positions`，语义对齐 Node 的 Rust-core 路径），并经 `ui_kit_web --manage`
+  暴露 `/api/command`（GET/POST）。端到端验证脚本 `scripts/ui-kit-gateway-check.mjs` **PASS**
+  （status→start→status→positions→start(adopt)→stop→unknown 拒绝→help）。**无任何下单 API**。
+- **仍未完成的替代**：webchat 的聊天/网关（Express+WS，服务 `/chat`、命令派发到聊天流）**仍依赖 Node**；
+  且 `src/gateway` 在模块顶层静态 import 了整张 Node 交易图，删除需同步改造。UI Kit gateway 目前提供的是
+  **HTTP 命令面**，尚未接入 `ui/hft.html` 现有的 `ws://…/chat` 通道。
 - **选项 A（AI 已采用）**：**暂不删除**。保留 `src/`，先冻结 §2.1 的 Node 交易域，分阶段迁移后再说。
 - **选项 B**：立即删除 `src/` 中的 Node 交易域目录（strategies/execution/feeds/risk/trading/…）——
   **会中断当前生产进程与 webchat 命令通道**。
-- **AI 倾向**：**A**。分阶段：① 冻结 Node 交易域只读；② UI Kit 增补命令下发+最小网关；
-  ③ HFT 面板切到 UI Kit web；④ 逐目录删 Node 交易域（每步跑 `cycle-check`）；⑤ 最后评估网关/聊天域。
+- **AI 倾向**：**A**。分阶段：① 冻结 Node 交易域只读；② **UI Kit 增补命令下发 + 最小网关（✅ 本次已完成）**；
+  ③ HFT 面板切到 UI Kit web（待做）；④ 逐目录删 Node 交易域（每步跑 `cycle-check`）；⑤ 最后评估网关/聊天域。
 - **理由**：任务全局约束明令「禁止删除未经备份的文件、禁止破坏运行」；且删除范围与风险远大于任务书预期。
   在命令通道未被 UI Kit 接管前删除，等于让机器人失去人工控制入口。
 - **需要用户确认的点**：

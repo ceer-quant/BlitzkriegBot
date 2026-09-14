@@ -15,12 +15,15 @@
 //!   `core::types`      — DTOs one-to-one with the core's IPC messages
 //!   `core::ipc_client` — blocking UDS JSON-RPC client
 //!   `core::event_bus`  — subscribe/dispatch of `core.event` notifications
+//!   `gateway`          — command dispatch (start/stop/status/positions) +
+//!                        core process supervisor (D-4 step ②); no order API
 //!   `web`              — HTML/JSON renderers + a dependency-free HTTP server
 //!   `tui`              — ANSI renderers + a polling run loop
 //!   `app`              — adapter trait + headless stub for the native app
 
 pub mod app;
 pub mod core;
+pub mod gateway;
 pub mod tui;
 pub mod web;
 

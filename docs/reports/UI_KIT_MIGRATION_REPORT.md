@@ -194,3 +194,47 @@ git reset --hard fc6e93c
 2. **`src/` 暂不可删**：网关与命令派发未迁，且它是运行中的生产外壳。
 3. **下一步最高优先级**：让 UI Kit 增补**命令下发 + 最小网关**（D-4 的第 2 步），
    这是解锁「删除 Node 交易域」的唯一前置。
+
+---
+
+## 9. 追加：命令下发 + 最小网关（D-4 第②步，已完成）
+
+**状态**：✅ 完成。这是删除 Node 交易域的唯一前置。
+
+### 9.1 新增模块 `ui_kit/src/gateway/`
+
+| 文件 | 职责 |
+|---|---|
+| `gateway/supervisor.rs` | 内核**进程**生命周期：spawn / stop / **adopt**。含"绝不重复起核"守卫（socket 已被占用即接管而非重启，对齐 Node `BlitzkriegCoreClient::tryAdopt`）。仅对**自己 spawn** 的进程发信号；adopt 的进程 `stop()` 不杀。SIGTERM 经 `/bin/kill`（零依赖），超时升级 SIGKILL（持久化按状态变更落盘，SIGKILL 安全）。 |
+| `gateway/command.rs` | 命令解析与派发：`start [ASSETS] [--size N] [--dry-run]`、`stop`、`status`、`positions [N]`、`help`。语义对齐 Node 的 Rust-core 路径（`src/skills/bundled/crypto-hft/index.ts::executeRust`）。**无任何下单动词**。 |
+
+### 9.2 网关 HTTP 面（`ui_kit_web --manage`）
+
+```
+GET  /                     HTML 面板（含命令控制台；始终只读）
+GET  /api/snapshot         JSON 快照
+GET  /api/command?cmd=…    派发一条命令 → JSON
+POST /api/command          body = 命令文本 或 {"cmd":"…"} → JSON
+```
+
+- 无 `--manage` 时命令面**只读**（`start/stop` 被拒并提示加 `--manage`）；`status/positions/help` 恒可用。
+- 环境变量：`UIKIT_MANAGE=1` 同 `--manage`；`UIKIT_CORE_BIN`/`UIKIT_CORE_CWD`/`UIKIT_CORE_EXTRA_ARGS`
+  用于测试隔离（钉二进制、隔离 `data/`、追加 `--no-*-log`）。
+
+### 9.3 验收证据
+
+- **端到端脚本** `scripts/ui-kit-gateway-check.mjs`（隔离 socket + 临时 workdir + 关闭三类日志）：
+  `status(down)` → `start` → `status(managed pid, dry, round slot)` → `positions` → `start`(必须 **adopted**) →
+  `stop` → `status(down)` → 未知动词拒绝 → `help`。**14 项全 ok，RESULT: PASS**。
+- `cargo test -p blitzkrieg-ui-kit` → **13 项通过**（新增 supervisor/command/web 10 项）。
+- 内核 98 项测试不受影响；`cargo build --release` 通过。
+- **无下单 API**：`grep -rniE "orders\.place|place_order" ui_kit/src` 无命中；IPC 只用
+  `ready/balance/round/stats/positions.list/orders.list/trades.history`（后三者皆读）。
+- **生产未被扰动**：隔离 socket/workdir，测试期间生产内核（PID 73052）与账本照常。
+
+### 9.4 尚未完成（留给第③步）
+
+- UI Kit gateway 目前是 **HTTP 命令面**，尚未接入 `ui/hft.html` 现用的 `ws://…/chat` 通道——
+  第③步「HFT 面板切到 UI Kit web」时一并处理。
+- webchat 聊天/网关（`/chat`、命令派发）仍在 Node；它属 Agent 平台能力，按 §5 分阶段处理。
+
