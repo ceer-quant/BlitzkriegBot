@@ -320,7 +320,7 @@ export function createCryptoFeed(): CryptoFeed {
     if (ws) return;
 
     // Subscribe to all ticker streams
-    const streams = SYMBOLS.map((s) => `${s.toLowerCase()}@ticker`).join('/');
+    const streams = SYMBOLS.map((s) => `${s.toLowerCase()}@trade`).join('/');
     const url = `${BINANCE_WS_URL}/${streams}`;
 
     logger.info({ symbols: SYMBOLS.length }, 'Connecting to Binance WebSocket');
@@ -386,6 +386,34 @@ export function createCryptoFeed(): CryptoFeed {
             emitter.emit('prices', combined);
           }
         }
+
+        // Handle trade messages (faster updates)
+        if (message.e === 'trade' && message.s && message.p) {
+          const symbol = SYMBOL_TO_NAME[message.s] || message.s;
+          const price = parseFloat(message.p);
+
+          if (!isNaN(price) && price > 0) {
+            prices.set(symbol, price);
+            lastUpdate = new Date();
+
+            const update: PriceUpdate = {
+              symbol,
+              price,
+              change24h: 0,
+              changePct24h: 0,
+              high24h: 0,
+              low24h: 0,
+              volume24h: 0,
+              timestamp: lastUpdate,
+              source: 'binance',
+            };
+            priceData.set(symbol, update);
+
+            emitter.emit('price', update);
+            emitter.emit(`price:${symbol}`, update);
+          }
+        }
+
       } catch (err) {
         logger.debug({ err }, 'Failed to parse Binance message');
       }

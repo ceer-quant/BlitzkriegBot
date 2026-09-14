@@ -5,6 +5,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
+import { getAnthropicBaseUrl, getAnthropicHeaders, getAnthropicMessagesUrl } from '../../utils/anthropic';
 
 let rl: readline.Interface;
 
@@ -30,13 +31,9 @@ function spinner(text: string): { stop: (success: boolean, result?: string) => v
 
 async function validateAnthropicKey(key: string): Promise<{ valid: boolean; error?: string }> {
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch(getAnthropicMessagesUrl(getAnthropicBaseUrl()), {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
-      },
+      headers: getAnthropicHeaders(key),
       body: JSON.stringify({
         model: 'claude-3-haiku-20240307',
         max_tokens: 1,
@@ -113,7 +110,7 @@ export async function runOnboard(): Promise<void> {
   console.log('\n\x1b[1m🎯 Welcome to Clodds Setup!\x1b[0m\n');
   console.log("Let's get you set up with your prediction markets assistant.\n");
   console.log('\x1b[90mThis wizard will:\x1b[0m');
-  console.log('  1. Set up your Claude API key (required)');
+  console.log('  1. Set up your Claude-compatible API key (required)');
   console.log('  2. Configure messaging channels (Telegram/Discord)');
   console.log('  3. Choose which market feeds to enable');
   console.log('  4. Validate all credentials before saving\n');
@@ -138,11 +135,12 @@ export async function runOnboard(): Promise<void> {
   // Step 1: Anthropic API Key (Required)
   // ==========================================================================
   console.log('\x1b[1m1️⃣  Claude API (Required)\x1b[0m\n');
-  console.log('\x1b[90m   Get your API key from: https://console.anthropic.com\x1b[0m\n');
+  console.log(`\x1b[90m   Using Anthropic base URL: ${getAnthropicBaseUrl()}\x1b[0m\n`);
+  console.log('\x1b[90m   Set ANTHROPIC_BASE_URL for compatible providers like DeepSeek\x1b[0m\n');
 
   let anthropicKey = '';
   while (!anthropicKey) {
-    anthropicKey = await question('   Enter your Anthropic API key: ');
+    anthropicKey = await question('   Enter your Claude-compatible API key: ');
     if (!anthropicKey) {
       console.log('\x1b[31m   API key is required to continue.\x1b[0m\n');
       continue;

@@ -16,6 +16,7 @@ import { execApprovals } from '../../permissions';
 import type { User } from '../../types';
 import { loadConfig } from '../../utils/config';
 import { loginWhatsAppWithQr, resolveWhatsAppAuthDir } from '../../channels/whatsapp/index';
+import { getAnthropicBaseUrl, getAnthropicHeaders, getAnthropicMessagesUrl } from '../../utils/anthropic';
 
 // =============================================================================
 // CONFIG COMMANDS
@@ -2175,31 +2176,23 @@ export function createCredsCommands(program: Command): void {
 
       // Test Anthropic
       const anthropicKey = process.env.ANTHROPIC_API_KEY;
+      const anthropicBaseUrl = getAnthropicBaseUrl();
       if (!platform || platform === 'anthropic') {
         if (!anthropicKey) {
           results.push({
             name: 'Anthropic API',
             status: 'fail',
             message: 'ANTHROPIC_API_KEY not set',
-            fix: 'Get key from: https://console.anthropic.com',
-          });
-        } else if (!anthropicKey.startsWith('sk-ant-')) {
-          results.push({
-            name: 'Anthropic API',
-            status: 'warn',
-            message: 'Key format looks wrong (should start with sk-ant-)',
-            fix: 'Verify key at: https://console.anthropic.com',
+            fix: anthropicBaseUrl === 'https://api.anthropic.com'
+              ? 'Get key from: https://console.anthropic.com'
+              : `Set ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL=${anthropicBaseUrl}`,
           });
         } else {
           // Test the key
           try {
-            const response = await fetch('https://api.anthropic.com/v1/messages', {
+            const response = await fetch(getAnthropicMessagesUrl(anthropicBaseUrl), {
               method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'x-api-key': anthropicKey,
-                'anthropic-version': '2023-06-01',
-              },
+              headers: getAnthropicHeaders(anthropicKey),
               body: JSON.stringify({
                 model: 'claude-3-haiku-20240307',
                 max_tokens: 1,
@@ -2211,14 +2204,18 @@ export function createCredsCommands(program: Command): void {
               results.push({
                 name: 'Anthropic API',
                 status: 'pass',
-                message: 'Key valid and working',
+                message: anthropicBaseUrl === 'https://api.anthropic.com'
+                  ? 'Key valid and working'
+                  : `Compatible API valid (${anthropicBaseUrl})`,
               });
             } else if (response.status === 401) {
               results.push({
                 name: 'Anthropic API',
                 status: 'fail',
                 message: 'Invalid API key',
-                fix: 'Check key at: https://console.anthropic.com',
+                fix: anthropicBaseUrl === 'https://api.anthropic.com'
+                  ? 'Check key at: https://console.anthropic.com'
+                  : `Check key and ANTHROPIC_BASE_URL=${anthropicBaseUrl}`,
               });
             } else if (response.status === 429) {
               results.push({
@@ -3427,13 +3424,14 @@ export function createDoctorCommand(program: Command): void {
       console.log('Checking AI providers...');
 
       const anthropicKey = process.env.ANTHROPIC_API_KEY;
+      const anthropicBaseUrl = getAnthropicBaseUrl();
       if (!anthropicKey) {
         results.push({ name: 'Anthropic', status: 'fail', message: 'ANTHROPIC_API_KEY not set', fix: 'https://console.anthropic.com' });
       } else {
         try {
-          const r = await fetch('https://api.anthropic.com/v1/messages', {
+          const r = await fetch(getAnthropicMessagesUrl(anthropicBaseUrl), {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
+            headers: getAnthropicHeaders(anthropicKey),
             body: JSON.stringify({ model: 'claude-3-haiku-20240307', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
           });
           if (r.ok || r.status === 429) {
@@ -3789,17 +3787,14 @@ export function createOnboardCommand(program: Command): void {
       }
 
       envVars.ANTHROPIC_API_KEY = apiKey;
+      const anthropicBaseUrl = getAnthropicBaseUrl();
 
       // Validate
       process.stdout.write(`  ${dim('Validating...')}`);
       try {
-        const r = await fetch('https://api.anthropic.com/v1/messages', {
+        const r = await fetch(getAnthropicMessagesUrl(anthropicBaseUrl), {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-          },
+          headers: getAnthropicHeaders(apiKey),
           body: '{}',
         });
         // 401 = bad key. Anything else (400, 429, etc.) = key authenticated fine.

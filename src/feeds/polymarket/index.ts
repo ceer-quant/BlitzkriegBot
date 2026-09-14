@@ -113,14 +113,21 @@ export async function createPolymarketFeed(): Promise<PolymarketFeed> {
 
       // Resubscribe to all markets
       const assetIds = Array.from(subscriptions.keys());
+      logger.info({ subscriptionCount: assetIds.length, assetIds: assetIds.slice(0, 5) }, 'Poly WS resubscribing');
       if (assetIds.length > 0) {
         sendInitialSubscription(assetIds);
+      } else {
+        logger.warn('No subscriptions to resubscribe');
       }
     });
 
     socket.on('message', (data) => {
       try {
         const message = JSON.parse(data.toString());
+        // Debug: log first few messages to see what's coming in
+        if (Math.random() < 0.01) {
+          logger.info({ type: message.event_type, assetId: message.asset_id }, 'Poly WS message');
+        }
         handleMessage(message);
       } catch (err) {
         logger.error({ err }, 'Failed to parse Polymarket message');
@@ -172,14 +179,17 @@ export async function createPolymarketFeed(): Promise<PolymarketFeed> {
       return;
     }
 
-    ws.send(
-      JSON.stringify({
-        assets_ids: [marketId],
-        operation: 'subscribe',
-        initial_dump: true,
-        custom_feature_enabled: true,
-      })
-    );
+    // Only send if WS is actually open
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          assets_ids: [marketId],
+          operation: 'subscribe',
+          initial_dump: true,
+          custom_feature_enabled: true,
+        })
+      );
+    }
   }
 
   function toNumber(value: unknown): number | null {
@@ -395,10 +405,8 @@ export async function createPolymarketFeed(): Promise<PolymarketFeed> {
 
   async function fetchOrderbook(tokenId: string): Promise<Orderbook | null> {
     try {
-      const res = await fetch(`${REST_URL}/orderbook`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token_id: tokenId }),
+      const res = await fetch(`${REST_URL}/book?token_id=${tokenId}`, {
+        method: 'GET',
         signal: AbortSignal.timeout(15000),
       });
       if (!res.ok) {
@@ -538,19 +546,17 @@ export async function createPolymarketFeed(): Promise<PolymarketFeed> {
     marketId: string,
     callback: (update: PriceUpdate) => void
   ) => {
+    // Always add to subscriptions Map (even if WS is down)
+    // This ensures reconnection logic can resubscribe
     if (!subscriptions.has(marketId)) {
       subscriptions.set(marketId, new Set());
-      subscribeToMarket(marketId);
-
-      // Start freshness tracking with polling fallback
-      freshnessTracker.track('polymarket', marketId, async () => {
-        // Polling fallback: fetch orderbook and emit update
-        const orderbook = await fetchOrderbook(marketId);
-        if (orderbook && orderbook.midPrice) {
-          emitPriceUpdate(marketId, marketId, orderbook.midPrice, Date.now());
-        }
-      });
     }
+    
+    // Try to subscribe if WS is open
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      subscribeToMarket(marketId);
+    }
+    
     subscriptions.get(marketId)!.add(callback);
 
     // Return unsubscribe function

@@ -153,6 +153,19 @@ export class Sidebar {
       panel.classList.toggle('active', panel.dataset.panel === tab);
     });
 
+    // Show/hide HFT dashboard in main area
+    const hftPanel = document.getElementById('hft-panel');
+    const chatMain = document.querySelector('main.main');
+    if (hftPanel && chatMain) {
+      if (tab === 'hft') {
+        hftPanel.style.display = 'block';
+        chatMain.style.display = 'none';
+      } else {
+        hftPanel.style.display = 'none';
+        chatMain.style.display = '';
+      }
+    }
+
     // Update search placeholder
     if (this.searchEl) {
       const placeholders = {

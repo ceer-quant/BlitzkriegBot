@@ -59,8 +59,8 @@ const DEFAULT_STEPS: WizardStep[] = [
     async run(ctx) {
       logger.info('Anthropic API Key - Get your API key from: https://console.anthropic.com/');
 
-      const key = await prompt(ctx.rl, 'Enter your Anthropic API key (sk-ant-...): ');
-      if (key && key.startsWith('sk-ant-')) {
+      const key = await prompt(ctx.rl, 'Enter your Claude-compatible API key: ');
+      if (key) {
         ctx.config.ANTHROPIC_API_KEY = key;
         logger.info('API key saved');
       } else {

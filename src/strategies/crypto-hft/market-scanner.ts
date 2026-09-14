@@ -16,10 +16,14 @@ const GAMMA_URL = 'https://gamma-api.polymarket.com';
 /** Raw Gamma API market shape */
 interface GammaMarket {
   condition_id: string;
+  conditionId: string;
   question_id: string;
   question: string;
-  tokens: Array<{ token_id: string; outcome: string; price: number }>;
+  outcomes: string; // JSON string: '["Up", "Down"]'
+  outcomePrices: string; // JSON string: '["0.5", "0.5"]'
+  clobTokenIds: string; // JSON string: '["token1", "token2"]'
   end_date_iso: string;
+  endDate: string;
   active: boolean;
   closed: boolean;
   neg_risk: boolean;
@@ -35,6 +39,7 @@ export interface MarketScanner {
   getRound(): RoundState;
   /** Get market for a specific asset in current round */
   getMarket(asset: string): CryptoMarket | null;
+  getClockOffset(): number;
   /** Check if we're in a tradeable window (not too early, not too late) */
   canTrade(): { ok: boolean; reason?: string };
   /** Start auto-refresh loop (checks for new rounds every 10s) */
@@ -55,15 +60,35 @@ export function createMarketScanner(config: CryptoHftConfig | (() => CryptoHftCo
     return Math.floor(Date.now() / 1000 / getConfig().roundDurationSec);
   }
 
+  // Track actual Polymarket end time
+  let actualEndTime = 0; // ms timestamp from Polymarket
+  let actualStartTime = 0; // ms timestamp from Polymarket
+  let clockOffset = 0; // Polymarket time - local time (ms)
+
   function getSlotExpiry(slot: number): number {
     return (slot + 1) * getConfig().roundDurationSec * 1000;
   }
 
   function getRoundState(): RoundState {
     const cfg = getConfig();
+    // Apply clock offset to get accurate Polymarket time
+    const localNow = Date.now();
+    const polymarketNow = localNow + clockOffset;
+    const slot = Math.floor(polymarketNow / 1000 / cfg.roundDurationSec);
+    let expiresAt = getSlotExpiry(slot);
+    // If we have actual Polymarket end time, use it (most accurate)
+    if (actualEndTime > 0) {
+      const now = localNow;
+      const actualTimeLeft = Math.max(0, (actualEndTime - now) / 1000);
+      return {
+        slot,
+        expiresAt: actualEndTime,
+        markets,
+        ageSec: cfg.roundDurationSec - actualTimeLeft,
+        timeLeftSec: actualTimeLeft,
+      };
+    }
     const now = Date.now();
-    const slot = getCurrentSlot();
-    const expiresAt = getSlotExpiry(slot);
     const timeLeftSec = Math.max(0, (expiresAt - now) / 1000);
     const ageSec = cfg.roundDurationSec - timeLeftSec;
 
@@ -108,38 +133,68 @@ export function createMarketScanner(config: CryptoHftConfig | (() => CryptoHftCo
           `${GAMMA_URL}/markets?slug=${encodeURIComponent(slug)}&active=true&closed=false`
         );
 
+        if (slugRes.status === 429) {
+          // Rate limited, skip this refresh
+          logger.warn('Gamma API rate limited');
+          continue;
+        }
         if (slugRes.ok) {
           const slugData = (await slugRes.json()) as GammaMarket[];
           if (slugData.length > 0) {
             const m = slugData[0]; // slug should return exactly 1 result
-            if (!m.closed && m.active && m.tokens && m.tokens.length >= 2) {
-              const upToken = m.tokens.find(
-                (t) => t.outcome.toLowerCase() === 'yes' || t.outcome.toLowerCase() === 'up'
-              );
-              const downToken = m.tokens.find(
-                (t) => t.outcome.toLowerCase() === 'no' || t.outcome.toLowerCase() === 'down'
-              );
+            if (!m.closed && m.active) {
+              // Capture actual Polymarket end time for accurate countdown
+              const apiEndTime = new Date(m.endDate || m.end_date_iso).getTime();
+              if (apiEndTime > 0) {
+                actualEndTime = apiEndTime;
+                // Calculate clock offset: how much our local clock is off from Polymarket
+                // Local expected end = (slot+1) * duration
+                // Polymarket actual end = apiEndTime
+                // offset = actualEndTime - localExpectedEnd
+                const localSlot = Math.floor(Date.now() / 1000 / cfg.roundDurationSec);
+                const localExpectedEnd = (localSlot + 1) * cfg.roundDurationSec * 1000;
+                clockOffset = apiEndTime - localExpectedEnd;
+              }
+              // Parse outcomes and clobTokenIds from Gamma API response
+              let outcomes: string[] = [];
+              let tokenIds: string[] = [];
+              try {
+                outcomes = JSON.parse(m.outcomes || '[]');
+                tokenIds = JSON.parse(m.clobTokenIds || '[]');
+              } catch { /* ignore parse errors */ }
 
-              if (upToken && downToken) {
-                const expiresAt = new Date(m.end_date_iso).getTime();
-                const roundSlot = Math.floor(expiresAt / 1000 / cfg.roundDurationSec);
+              if (outcomes.length >= 2 && tokenIds.length >= 2) {
+                const upIdx = outcomes.findIndex(o => o.toLowerCase() === 'up' || o.toLowerCase() === 'yes');
+                const downIdx = outcomes.findIndex(o => o.toLowerCase() === 'down' || o.toLowerCase() === 'no');
 
-                found.push({
-                  asset: asset.toUpperCase(),
-                  conditionId: m.condition_id,
-                  questionId: m.question_id,
-                  upTokenId: upToken.token_id,
-                  downTokenId: downToken.token_id,
-                  upPrice: upToken.price,
-                  downPrice: downToken.price,
-                  expiresAt,
-                  roundSlot,
-                  negRisk: m.neg_risk ?? true,
-                  question: m.question,
-                });
+                if (upIdx !== -1 && downIdx !== -1) {
+                  const upTokenId = tokenIds[upIdx];
+                  const downTokenId = tokenIds[downIdx];
+                  const prices = JSON.parse(m.outcomePrices || '[]');
+                  const upPrice = parseFloat(prices[upIdx]) || 0.5;
+                  const downPrice = parseFloat(prices[downIdx]) || 0.5;
+                  const expiresAt = new Date(m.endDate || m.end_date_iso).getTime();
+                  const roundSlot = Math.floor(expiresAt / 1000 / cfg.roundDurationSec);
+                  // Update actualEndTime from search results too
+                  if (expiresAt > 0) actualEndTime = expiresAt;
 
-                logger.debug({ asset, slug, slot: roundSlot }, 'Found market by slug');
-                continue; // Successfully found, move to next asset
+                  found.push({
+                    asset: asset.toUpperCase(),
+                    conditionId: m.conditionId || m.condition_id,
+                    questionId: m.question_id,
+                    upTokenId,
+                    downTokenId,
+                    upPrice,
+                    downPrice,
+                    expiresAt,
+                    roundSlot,
+                    negRisk: m.neg_risk ?? true,
+                    question: m.question,
+                  });
+
+                  logger.debug({ asset, slug, slot: roundSlot }, 'Found market by slug');
+                  continue; // Successfully found, move to next asset
+                }
               }
             }
           }
@@ -147,8 +202,6 @@ export function createMarketScanner(config: CryptoHftConfig | (() => CryptoHftCo
 
         // Fallback: try generic search if slug query fails (between rounds, market not yet live)
         const searchQueries = [
-          `Will ${asset} go up`,
-          `${asset} price`,
           `${asset}-updown`,
         ];
 
@@ -162,7 +215,18 @@ export function createMarketScanner(config: CryptoHftConfig | (() => CryptoHftCo
 
           for (const m of searchData) {
             if (m.closed || !m.active) continue;
-            if (!m.tokens || m.tokens.length < 2) continue;
+
+            // Parse outcomes and token IDs from Gamma API
+            let outcomes: string[] = [];
+            let tokenIds: string[] = [];
+            let prices: string[] = [];
+            try {
+              outcomes = JSON.parse(m.outcomes || '[]');
+              tokenIds = JSON.parse(m.clobTokenIds || '[]');
+              prices = JSON.parse(m.outcomePrices || '[]');
+            } catch { continue; }
+
+            if (outcomes.length < 2 || tokenIds.length < 2) continue;
 
             // Verify this is the right duration market
             const q = m.question.toLowerCase();
@@ -179,13 +243,14 @@ export function createMarketScanner(config: CryptoHftConfig | (() => CryptoHftCo
             if (!m.slug.includes(`-${durationLabel}-`)) continue;
 
             // Find UP/YES and DOWN/NO tokens
-            const upToken = m.tokens.find(
-              (t) => t.outcome.toLowerCase() === 'yes' || t.outcome.toLowerCase() === 'up'
-            );
-            const downToken = m.tokens.find(
-              (t) => t.outcome.toLowerCase() === 'no' || t.outcome.toLowerCase() === 'down'
-            );
-            if (!upToken || !downToken) continue;
+            const upIdx = outcomes.findIndex(o => o.toLowerCase() === 'yes' || o.toLowerCase() === 'up');
+            const downIdx = outcomes.findIndex(o => o.toLowerCase() === 'no' || o.toLowerCase() === 'down');
+            if (upIdx === -1 || downIdx === -1) continue;
+
+            const upTokenId = tokenIds[upIdx];
+            const downTokenId = tokenIds[downIdx];
+            const upPrice = parseFloat(prices[upIdx]) || 0.5;
+            const downPrice = parseFloat(prices[downIdx]) || 0.5;
 
             // Skip if already found a closer-expiry market for this asset
             const existing = found.find((f) => f.asset === asset.toUpperCase());
@@ -201,10 +266,10 @@ export function createMarketScanner(config: CryptoHftConfig | (() => CryptoHftCo
               asset: asset.toUpperCase(),
               conditionId: m.condition_id,
               questionId: m.question_id,
-              upTokenId: upToken.token_id,
-              downTokenId: downToken.token_id,
-              upPrice: upToken.price,
-              downPrice: downToken.price,
+              upTokenId,
+              downTokenId,
+              upPrice,
+              downPrice,
               expiresAt,
               roundSlot,
               negRisk: m.neg_risk ?? true,
@@ -222,6 +287,8 @@ export function createMarketScanner(config: CryptoHftConfig | (() => CryptoHftCo
           { err, asset, durationLabel, roundDurationSec: cfg.roundDurationSec },
           'Market scan failed for asset'
         );
+        // Wait before next asset to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
 
@@ -231,13 +298,15 @@ export function createMarketScanner(config: CryptoHftConfig | (() => CryptoHftCo
   async function maybeRefresh() {
     const slot = getCurrentSlot();
 
-    // New round started, or we have no markets
+    // Only refresh on new round or if we have no markets
     if (slot !== currentSlot || markets.length === 0) {
       const prevSlot = currentSlot;
       currentSlot = slot;
 
-      // Don't spam Gamma — rate limit to once per 10s
-      if (Date.now() - lastRefreshAt < 10_000) return;
+      // Always refresh on new round, but rate limit if same slot
+      if (slot === prevSlot) {
+        if (Date.now() - lastRefreshAt < 60_000) return; // 30s between same-slot refreshes
+      }
       lastRefreshAt = Date.now();
 
       markets = await fetchMarkets();
@@ -270,6 +339,10 @@ export function createMarketScanner(config: CryptoHftConfig | (() => CryptoHftCo
       return markets.find((m) => m.asset === asset.toUpperCase()) ?? null;
     },
 
+    getClockOffset() {
+      return clockOffset;
+    },
+
     canTrade() {
       const cfg = getConfig();
       const round = getRoundState();
@@ -287,8 +360,8 @@ export function createMarketScanner(config: CryptoHftConfig | (() => CryptoHftCo
     },
 
     start() {
-      // Check for new rounds every 10 seconds
-      refreshTimer = setInterval(() => maybeRefresh(), 10_000);
+      // Check for new rounds every 5 seconds
+      refreshTimer = setInterval(() => maybeRefresh(), 5_000);
       // Immediate first refresh
       maybeRefresh();
     },

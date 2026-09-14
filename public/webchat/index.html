@@ -46,6 +46,11 @@
               <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
             </svg>
           </button>
+          <button class="rail-btn" data-tab="hft" title="HFT Dashboard">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 3v18h18"/><path d="M18.7 8l-5.1 5.2-2.8-2.7L7 14.3"/>
+            </svg>
+          </button>
         </nav>
         <div class="rail-bottom">
           <button class="rail-btn rail-profile-btn" id="rail-profile-btn" title="Profile">
@@ -298,6 +303,11 @@
         </div>
       </div>
     </main>
+
+    <!-- HFT Dashboard (shown when HFT tab is active) -->
+    <div id="hft-panel" style="display:none;flex:1;overflow:hidden;">
+      <iframe src="/webchat/hft.html" style="width:100%;height:100%;border:none;background:#0a0a0f;" title="HFT Dashboard"></iframe>
+    </div>
   </div>
 
   <!-- Command Palette -->

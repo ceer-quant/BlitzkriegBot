@@ -26,6 +26,20 @@ pids/
 *.seed
 *.pid.lock
 
+# Runtime state + logs (trade ledger, soak, shadow, order DB). Machine-generated,
+# may contain real trade history; kept on disk but not versioned.
+data/
+
+# Model/transformers cache (large, reproducible)
+.transformers-cache/
+
+# Rust build output (workspace root)
+target/
+user_layer/strategies/target/
+
+# Scratch files
+*.tmp.mjs
+
 # Coverage
 coverage/
 

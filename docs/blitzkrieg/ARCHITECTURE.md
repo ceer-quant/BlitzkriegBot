@@ -1,0 +1,158 @@
+# Blitzkrieg Quant Core — 架构说明（ARCHITECTURE）
+
+> 版本：**P0.6**（市场插件化：内核零市场代码）
+> 核心原则：**内核只负责规则，扩展负责玩法。市场细节不进内核。**
+
+## 1. 分层
+
+```
+┌──────────────────────────────────────────────────────┐
+│  用户层（User Layer）                                 │
+│  ├─ 策略逻辑文件（user_layer/strategies/*.rs|*.toml） │
+│  ├─ UI（ui/）                                         │
+│  └─ 参数编排与日志渲染（src/skills, src/core runner） │
+│  ⚠ 只表达"意图"，不执行"交易"                        │
+└──────────────────────────────────────────────────────┘
+                        │ UDS JSON-RPC（Signal / Config / Event）
+                        ↓
+┌──────────────────────────────────────────────────────┐
+│  内核层（Blitzkrieg_core，Rust）                      │
+│  ├─ strategy_engine/ 策略引擎（加载/执行用户策略）    │
+│  ├─ market/          市场接缝（registry + MarketHost）│
+│  ├─ order/           订单语义（OrderIntent）          │
+│  ├─ ome/             订单管理引擎（市场无关）         │
+│  ├─ risk/ + risk_context/  风控（市场无关）           │
+│  ├─ ledger/ + ledger_api/  资金账本（市场无关）       │
+│  ├─ marketdata/ signal/  行情与信号（市场无关）       │
+│  └─ extension/       扩展系统（插件生命周期）         │
+│  ✅ 执行一切"交易"，拥有所有敏感能力                  │
+│  ⚠ 不含任何具体市场代码（无 Polymarket SDK 依赖）     │
+└──────────────────────────────────────────────────────┘
+                        │ 编译期链接（Cargo feature）
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│  market_api（blitzkrieg-market-api，无内部依赖）      │
+│  = 市场契约：DTO + DataFeed/MarketDiscovery/          │
+│    OrderExecutor + MarketHost + MarketPlugin          │
+└──────────────────────────────────────────────────────┘
+                        ▲
+                        │ 实现
+┌──────────────────────────────────────────────────────┐
+│  extensions/polymarket（独立 crate）                  │
+│  venue / live / feed / discovery / gamma / plugin     │
+│  ⚠ 唯一持有 Polymarket SDK 与 POLYMARKET_* 的地方     │
+└──────────────────────────────────────────────────────┘
+```
+
+## 2. 职责与禁止
+
+| 组件 | 位置 | 职责 | 禁止 |
+|:---|:---|:---|:---|
+| 策略引擎 | 内核 | 加载/执行策略逻辑、计算信号、输出 Signal | 直接签名/下单 |
+| 策略逻辑文件 | 用户层 | 定义参数、阈值、判断逻辑 | 私钥、网络、签名、订单 |
+| UI | 用户层 | 渲染、参数编排、日志 | 交易执行路径 |
+| OME | 内核 | 订单状态机、对账、幽灵单 | — |
+| 风控/账本 | 内核 | 硬熔断、资金预扣/释放/结算 | — |
+
+## 3. 市场插件契约（`market_api`）
+
+市场无关的内核只认这套接口；具体市场由独立 crate 实现（Polymarket 是第一个）。
+
+### 3.1 三个专职 trait + 门面
+```rust
+pub trait DataFeed: Send + Sync {          // 长连推送：盘口 / 现货
+    fn name(&self) -> &str;
+    fn start(&self, host: Arc<dyn MarketHost>, cfg: DataFeedConfig, tokens: Vec<TokenId>) -> BoxFuture<'_, CoreResult<()>>;
+}
+pub trait MarketDiscovery: Send + Sync {   // 轮询：回合发现
+    fn start(&self, host: Arc<dyn MarketHost>, cfg: DiscoveryConfig) -> BoxFuture<'_, CoreResult<()>>;
+}
+pub trait OrderExecutor: Send + Sync {     // 请求/响应：下单/撤单/成交/对账
+    fn start(&self, host: Arc<dyn MarketHost>, cfg: ExecutorConfig) -> BoxFuture<'_, CoreResult<()>>;
+}
+pub trait MarketPlugin: Send + Sync {      // 把三者打包为一个注册单元
+    fn name(&self) -> &str;
+    fn market_type(&self) -> MarketType;
+    fn data_feed(&self) -> Option<&dyn DataFeed> { None }
+    fn discovery(&self) -> Option<&dyn MarketDiscovery> { None }
+    fn executor(&self) -> Option<&dyn OrderExecutor> { None }
+    fn info(&self) -> PluginInfo { ... }   // market.list 的能力报告
+}
+```
+
+### 3.2 `MarketHost`（内核唯一出入口）
+插件只能通过它推数据、取订单、回报成交——**拿不到 OME/账本/风控/私钥/socket**：
+`on_book` / `on_top_of_book` / `on_spot` / `on_round_markets` / `subscribe_tokens`（入站）；
+`take_pending_orders` / `on_order_accepted` / `on_order_rejected` / `on_fill` / `on_order_live`
+/ `on_order_cancelled` / `on_reconcile` / `seed_balance` / `report_error`（出站）。
+内核实现 `market::host::CoreHost`（纯转发到 `Core`）。
+
+### 3.3 OrderIntent（`order/`，已并入 market_api）
+市场无关的订单意图：`market` / `symbol` / `side` / `order_kind` / `price` / `size` /
+`time_in_force` / `metadata`。`MarketType` 覆盖 Prediction/Spot/Futures/Options。内核路径仍用
+`model::OrderRequest`（含 token/condition），插件在边界做映射。
+
+### 3.4 RiskContext / LedgerApi
+`RiskContext` 与 `LedgerApi` 保留为市场无关抽象；当前交易路径直接调 `Ledger` 固有方法，
+trait 作为后续多市场（含杠杆/强平）的占位。
+
+## 4. 策略引擎（`strategy_engine/`）
+
+- `Strategy` trait：`on_tick(&MarketTick) -> Option<Signal>`，纯逻辑、无 I/O。
+- `Signal`：`Buy{price,size}` / `Sell{price}` / `Hold`——只表达意图，不含签名/订单号。
+- `validate_signal`：内核校验闸（价格范围、symbol 匹配、size 为正），**在风控/账本/下单之前**执行，用户层无法绕过。
+- `loader`：动态库加载（`libloading`，feature `strategy-loading`）。`policy_allows` 拒绝凭据样式文件名（含 `key/secret/private/credential`）与非共享库扩展名。
+- `builtins::SpreadArbStrategy`：把既有 `spread_arb` 评估器包装为 `Strategy`，行为不变。
+
+## 5. 两套"插件"系统（务必区分）
+
+内核里有**两个互不相干**的注册表，名字都像"扩展"，职责完全不同：
+
+| | `extension/`（`ExtensionRegistry`） | `market/`（`MarketPluginRegistry`） |
+|:---|:---|:---|
+| 目的 | 审计/事件钩子/生命周期 | 接入一个**市场**（下单+行情+发现） |
+| 契约 | `Extension`（`on_load`/`on_unload`/`on_event`） | `MarketPlugin`（`DataFeed`/`MarketDiscovery`/`OrderExecutor`） |
+| 能力 | 只能 `emit`/`log`/读策略名——**无交易能力** | 经 `MarketHost` 推行情、取订单、报成交 |
+| IPC | `extension.list/enable/disable` | `market.list`（含 `active`） |
+| 现存 | 内建示例 `BinanceSpotExtension`（installed，默认未启用） | 官方 `polymarket`（默认编译并 active） |
+
+`Extension` 是"观察者/钩子"，**刻意不给交易能力**；`MarketPlugin` 才是"市场接入点"。
+新增一个市场 = 实现 `MarketPlugin` 并加一个 Cargo feature；新增一个审计钩子 = 实现 `Extension`。
+
+> 注意：`extensions/<name>/config.toml` 目前**仅作文档**，内核不解析（见 `EXTENSION_GUIDE.md §5`）。
+> 装配走 Cargo feature，选择走 `--market-plugin <name>`。
+
+## 6. 通用化边界（不做的事）
+
+- 内核不得依赖 Node 侧代码。
+- **内核不得有具体市场代码**：Polymarket 细节全在 `extensions/polymarket/`；内核里唯一的
+  名字出现在 `market::register_builtin_markets()` 的 `#[cfg(feature="polymarket")]` 注册行。
+- 内核 Cargo 不含 `polymarket-client-sdk-v2`；扩展不依赖 `blitzkrieg-core`（无依赖环）。
+- 扩展不得直接访问内核内部状态或私钥（只能经 `MarketHost`）。
+
+## 7. 与既有 P0–P5 的关系
+
+P0.6 **不改变交易语义**：`ome / ledger / risk / position / exit_policy / marketdata / signal /
+engine / scanner（回合时序）/ reconcile / shadow` 全部保持原实现与行为；Polymarket 的
+venue/feed/discovery/gamma 从内核**物理迁出**到扩展，行为逐笔等价（见 `MIGRATION_LOG.md §19`）。
+
+## 8. 目录
+
+```
+market_api/               # 市场契约（无内部依赖；内核与扩展共享）
+Blitzkrieg_core/          # Rust 内核（零市场代码）
+├── src/
+│   ├── strategy_engine/  # 策略引擎（mod/builtins/loader）
+│   ├── market/           # 接缝：mod（选择/注册）/ host / registry
+│   ├── order/            # 订单语义（re-export market_api）
+│   ├── extension/        # 扩展系统（生命周期/审计，与 market 插件分离）
+│   ├── scanner.rs        # 回合时序数学（市场无关）
+│   ├── ledger_api.rs risk_context.rs
+│   └── （既有 P0–P5 模块）
+extensions/polymarket/    # 官方 Polymarket 市场插件（独立 crate：rlib+cdylib）
+├── src/ venue.rs live.rs feed.rs discovery.rs gamma.rs plugin.rs
+ui/                       # 用户层 UI（hft.html 等）
+user_layer/               # 用户层策略逻辑与配置
+src/                      # Node 侧编排 + IPC client（无 UI 渲染、无交易逻辑）
+docs/blitzkrieg/          # 本文档集
+```

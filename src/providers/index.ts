@@ -13,6 +13,7 @@
 
 import { EventEmitter } from 'events';
 import { logger } from '../utils/logger';
+import { getAnthropicBaseUrl, getAnthropicHeaders, getAnthropicMessagesUrl } from '../utils/anthropic';
 import {
   withRetry,
   RetryConfig,
@@ -264,8 +265,8 @@ export class AnthropicProvider implements Provider {
 
   constructor(config: ProviderConfig) {
     this.config = {
-      baseUrl: 'https://api.anthropic.com',
-      defaultModel: 'claude-3-5-sonnet-20241022',
+      baseUrl: getAnthropicBaseUrl(),
+      defaultModel: process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022',
       timeout: 120000,
       maxRetries: 3,
       ...config,
@@ -342,13 +343,9 @@ export class AnthropicProvider implements Provider {
       stream: true,
     };
 
-    const response = await fetch(`${this.config.baseUrl}/v1/messages`, {
+    const response = await fetch(getAnthropicMessagesUrl(this.config.baseUrl), {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.config.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
+      headers: getAnthropicHeaders(this.config.apiKey),
       body: JSON.stringify(body),
     });
 
@@ -412,13 +409,9 @@ export class AnthropicProvider implements Provider {
 
   async isAvailable(): Promise<boolean> {
     try {
-      const response = await fetch(`${this.config.baseUrl}/v1/messages`, {
+      const response = await fetch(getAnthropicMessagesUrl(this.config.baseUrl), {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': this.config.apiKey,
-          'anthropic-version': '2023-06-01',
-        },
+        headers: getAnthropicHeaders(this.config.apiKey),
         body: JSON.stringify({
           model: 'claude-3-haiku-20240307',
           max_tokens: 1,
@@ -435,11 +428,7 @@ export class AnthropicProvider implements Provider {
     return withRetry(async () => {
       const response = await fetch(`${this.config.baseUrl}${path}`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': this.config.apiKey,
-          'anthropic-version': '2023-06-01',
-        },
+        headers: getAnthropicHeaders(this.config.apiKey),
         body: JSON.stringify(body),
       });
 

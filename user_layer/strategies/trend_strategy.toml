@@ -1,0 +1,25 @@
+# Example user-layer strategy LOGIC file (declarative form).
+# The kernel's strategy engine reads these parameters and applies the named
+# built-in template. This file contains PARAMETERS ONLY — no code, no secrets.
+#
+# A TOML strategy cannot express side effects by construction, which is the
+# safest form for non-programmer users.
+
+[meta]
+name = "trend_follow"
+template = "spread_arb"      # which built-in evaluator template to use
+version = "1.0.0"
+description = "Trend-confirmed dip buyer (declarative form of spread_arb)"
+
+[params]
+trend_min_price = 0.55       # confirm a trend when the token holds above this
+trend_confirm_sec = 60       # ...for this many seconds
+trend_ratio = 0.80           # ...this fraction of the window
+trend_broken_price = 0.35    # regime break below this cancels the thesis
+trend_entry_factor = 0.98    # resting bid = mid * factor
+trend_max_entry_price = 0.45 # never buy above this
+
+[risk]
+size_usd = 2.5
+max_positions = 2
+max_daily_loss_usd = 200

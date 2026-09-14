@@ -20,6 +20,7 @@ import { promisify } from 'util';
 import { randomBytes } from 'crypto';
 import { generateId as generateSecureId } from '../utils/id';
 import { logger } from '../utils/logger';
+import { getAnthropicBaseUrl, getAnthropicHeaders, getAnthropicMessagesUrl } from '../utils/anthropic';
 
 // =============================================================================
 // CONSTANTS
@@ -793,19 +794,16 @@ export interface VisionService {
 /** Create vision service using Claude API */
 export function createVisionService(): VisionService {
   const apiKey = process.env.ANTHROPIC_API_KEY;
+  const baseUrl = getAnthropicBaseUrl();
 
   async function callClaudeVision(imageBase64: string, mimeType: string, prompt: string): Promise<string> {
     if (!apiKey) {
       throw new Error('Vision not configured. Set ANTHROPIC_API_KEY.');
     }
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch(getAnthropicMessagesUrl(baseUrl), {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
+      headers: getAnthropicHeaders(apiKey),
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1024,

@@ -15,6 +15,15 @@
 
 import { logger } from '../../utils/logger.js';
 import { takerFeePct } from './types.js';
+import { saveTrade } from './trade-db.js';
+import {
+  createExitState,
+  updateExitState,
+  decideExit,
+  executableBid,
+  referenceMid,
+  type ExitState,
+} from './exit-policy.js';
 import type {
   CryptoHftConfig,
   OpenPosition,
@@ -25,51 +34,14 @@ import type {
   OrderbookSnapshot,
 } from './types.js';
 
-// ── Ratchet Floor Table (from firstorder.rs Jan 19 2026) ────────────────────
-// confirmedHighPct → floorPct
-// Progressive giveback: higher highs get tighter floors
-
-const RATCHET_TABLE: Array<[number, number]> = [
-  [100, 94],
-  [50, 44],
-  [40, 35],
-  [30, 25],
-  [25, 20],
-  [20, 15],
-  [15, 10],
-  [10, 6],
-  [8, 4],
-  [6, 3],
-  [5, 2],
-  [4, 1],
-  [3, 0],
-  [2, -2],
-  [1, -4],
-];
-const RATCHET_DEFAULT_FLOOR = -12; // Initial stop before any confirmed high
-
-function getRatchetFloor(confirmedHighPct: number): number {
-  for (const [threshold, floor] of RATCHET_TABLE) {
-    if (confirmedHighPct >= threshold) return floor;
-  }
-  return RATCHET_DEFAULT_FLOOR;
-}
-
-// ── Trailing stop table (from firstorder.rs, profit-based) ──────────────────
-
-function getProfitTrailPct(highPnlPct: number): number {
-  if (highPnlPct >= 20) return 12;
-  if (highPnlPct >= 15) return 10;
-  if (highPnlPct >= 10) return 7;
-  if (highPnlPct >= 5) return 5;
-  return 8; // wide, let it develop
-}
-
-function getTimeTrailPct(timeLeftSec: number): number {
-  if (timeLeftSec > 420) return 15; // >7 min
-  if (timeLeftSec > 180) return 10; // 3-7 min
-  return 7; // <3 min — tight
-}
+// Re-exported for any module/tests that imported the tables from here. The
+// single source of truth now lives in exit-policy.ts (shared with the replay).
+export {
+  getRatchetFloor,
+  getProfitTrailPct,
+  getTimeTrailPct,
+  effectiveStopPct,
+} from './exit-policy.js';
 
 // ── Position Manager ────────────────────────────────────────────────────────
 
@@ -84,6 +56,7 @@ export interface PositionManager {
     shares: number;
     expiresAt: number;
     wasMaker: boolean;
+    targetExitPrice?: number;
   }): OpenPosition;
 
   /** Check all positions for exit conditions. Returns exits to execute. */
@@ -107,8 +80,20 @@ export interface PositionManager {
   resetDaily(): void;
 }
 
-export function createPositionManager(getConfig: () => CryptoHftConfig): PositionManager {
+export interface PositionHooks {
+  onOpen?: (pos: OpenPosition) => void;
+  onClose?: (pos: ClosedPosition) => void;
+}
+
+export function createPositionManager(
+  getConfig: () => CryptoHftConfig,
+  hooks?: PositionHooks
+): PositionManager {
   const positions = new Map<string, OpenPosition>();
+  // Replayable exit state per open position (HWM, staleness, depth). The pure
+  // exit policy in exit-policy.ts reads this; it is the same state the offline
+  // replay reconstructs, keeping backtest and live identical.
+  const exitStates = new Map<string, ExitState>();
   const closed: ClosedPosition[] = [];
   let dailyPnl = 0;
   let lastStopLossAt = 0;
@@ -116,6 +101,10 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
 
   // Per coin+direction exit cooldowns
   const exitCooldowns = new Map<string, number>();
+  // Per-asset cooldowns to avoid whipsawing a chopping market (e.g. SOL up then
+  // SOL down within a minute, both stopped out).
+  const assetLastExitAt = new Map<string, number>();
+  const assetLastLossAt = new Map<string, number>();
 
   function cooldownKey(asset: string, direction: SignalDirection): string {
     return `${asset}_${direction}`;
@@ -136,10 +125,12 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
         conditionId: params.conditionId,
         entryPrice: params.entryPrice,
         currentPrice: params.entryPrice,
+        prevPrice: params.entryPrice,
         shares: params.shares,
         costUsd: params.entryPrice * params.shares,
         wasMakerEntry: params.wasMaker,
         entryFeePct,
+        targetExitPrice: params.targetExitPrice,
         highWaterMark: params.entryPrice,
         hwmConfirmCount: 0,
         confirmedHigh: params.entryPrice,
@@ -169,6 +160,7 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
         },
         'Position opened'
       );
+      hooks?.onOpen?.(pos);
       return pos;
     },
 
@@ -176,50 +168,32 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
       const config = getConfig();
       const pos = positions.get(positionId);
       if (!pos) return;
-
-      pos.currentPrice = price;
-      if (pos.entryPrice <= 0) return;
-      const pnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
-
-      // Track PnL extremes
-      if (pnlPct > pos.highPnlPct) pos.highPnlPct = pnlPct;
-      if (pnlPct < pos.lowPnlPct) pos.lowPnlPct = pnlPct;
-      if (pnlPct > 0) pos.wasEverPositive = true;
-
-      // HWM + confirmation (ratchet needs confirmed highs, not spikes)
-      if (price > pos.highWaterMark) {
-        pos.highWaterMark = price;
-        pos.hwmConfirmCount = 1;
-      } else {
-        const nearHigh = pos.highWaterMark > 0
-          && (Math.abs(price - pos.highWaterMark) / pos.highWaterMark * 100
-            < config.ratchetConfirmTolerancePct);
-        if (nearHigh) {
-          pos.hwmConfirmCount++;
-          if (pos.hwmConfirmCount >= config.ratchetConfirmTicks) {
-            pos.confirmedHigh = pos.highWaterMark;
-          }
-        } else {
-          pos.hwmConfirmCount = 0;
-        }
+      let state = exitStates.get(positionId);
+      if (!state) {
+        state = createExitState(pos.entryPrice, pos.enteredAt);
+        exitStates.set(positionId, state);
       }
+      const now = Date.now();
 
-      // Bid staleness tracking
-      if (book) {
-        if (pos.initialDepth === 0) {
-          pos.initialDepth = book.bidDepth + book.askDepth;
-        }
-        if (book.bestBid !== pos.lastBidPrice) {
-          pos.lastBidPrice = book.bestBid;
-          pos.bidUnchangedSince = Date.now();
-        }
-      }
+      // HWM / staleness / depth are tracked off the EXECUTABLE bid (same price a
+      // sell actually realizes), so recorded peaks match tradeable value.
+      updateExitState(state, pos.entryPrice, book, now, config);
 
-      // Stagnant tracking — progress = PnL improved by >1% since last check
-      if (Math.abs(pnlPct - pos.lastProgressPct) > 1) {
-        pos.lastProgressAt = Date.now();
-        pos.lastProgressPct = pnlPct;
-      }
+      // Mirror state back onto the position for logs / persistence / dashboard.
+      const val = book ? (executableBid(book) || referenceMid(book, price)) : price;
+      pos.prevPrice = pos.currentPrice;
+      pos.currentPrice = val;
+      pos.highPnlPct = state.highPnlPct;
+      pos.lowPnlPct = state.lowPnlPct;
+      pos.wasEverPositive = state.wasEverPositive;
+      pos.highWaterMark = state.highWaterMark;
+      pos.hwmConfirmCount = state.hwmConfirmCount;
+      pos.confirmedHigh = state.confirmedHigh;
+      pos.lastBidPrice = state.lastBidPrice;
+      pos.bidUnchangedSince = state.bidUnchangedSince;
+      pos.lastProgressAt = state.lastProgressAt;
+      pos.lastProgressPct = state.lastProgressPct;
+      pos.initialDepth = state.initialDepth;
     },
 
     checkExits(getBook, now = Date.now()) {
@@ -228,87 +202,39 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
 
       for (const pos of positions.values()) {
         const book = getBook(pos.tokenId);
-        const price = book?.bestBid ?? pos.currentPrice;
-        if (pos.entryPrice <= 0) continue;
-        const pnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
+        let state = exitStates.get(pos.id);
+        if (!state) {
+          state = createExitState(pos.entryPrice, pos.enteredAt);
+          exitStates.set(pos.id, state);
+        }
+        // Update from this tick's book BEFORE deciding, so the trigger and the
+        // recorded HWM use the same quote (previously the decision ran on a tick
+        // newer than the HWM, understating peaks).
+        updateExitState(state, pos.entryPrice, book, now, config);
+
+        const exitPrice = executableBid(book) || referenceMid(book, pos.currentPrice);
         const timeLeftSec = (pos.expiresAt - now) / 1000;
         const holdSec = (now - pos.enteredAt) / 1000;
 
-        // 1. Force exit — absolute deadline
-        if (timeLeftSec <= config.forceExitSec) {
-          exits.push({ position: pos, reason: 'force_exit', exitPrice: price, useMaker: false });
+        // Fixed-target strategies (sharp_reversal): sell into the bid once it
+        // reaches the target. A maker offer at the target is appropriate.
+        if (pos.targetExitPrice && exitPrice >= pos.targetExitPrice && holdSec >= (config.exitGraceSec ?? 3)) {
+          exits.push({ position: pos, reason: 'take_profit', exitPrice: pos.targetExitPrice, useMaker: true });
           continue;
         }
 
-        // 2. Take profit
-        if (pnlPct >= config.takeProfitPct) {
-          exits.push({ position: pos, reason: 'take_profit', exitPrice: price, useMaker: config.makerExitsForTpOnly });
-          continue;
-        }
-
-        // 3. Stop loss — always taker (speed matters when losing)
-        if (pnlPct <= -config.stopLossPct) {
-          exits.push({ position: pos, reason: 'stop_loss', exitPrice: price, useMaker: false });
-          continue;
-        }
-
-        // 4. Ratchet floor (progressive giveback from confirmed high)
-        if (config.ratchetEnabled) {
-          const confirmedHighPct = ((pos.confirmedHigh - pos.entryPrice) / pos.entryPrice) * 100;
-          const floor = getRatchetFloor(confirmedHighPct);
-          if (pnlPct <= floor) {
-            exits.push({ position: pos, reason: 'ratchet_floor', exitPrice: price, useMaker: false });
-            continue;
-          }
-        }
-
-        // 5. Trailing stop (time-aware: tighter near expiry)
-        if (config.trailingEnabled && pos.highPnlPct > 0) {
-          const profitTrail = getProfitTrailPct(pos.highPnlPct);
-          const timeTrail = getTimeTrailPct(timeLeftSec);
-          const trail = Math.min(profitTrail, timeTrail);
-          const dropFromHigh = pos.highPnlPct - pnlPct;
-
-          if (dropFromHigh >= trail) {
-            exits.push({ position: pos, reason: 'trailing_stop', exitPrice: price, useMaker: false });
-            continue;
-          }
-        }
-
-        // 6. Depth collapse
-        if (book && pos.initialDepth > 0) {
-          const currentDepth = book.bidDepth + book.askDepth;
-          const depthChangePct = ((currentDepth - pos.initialDepth) / pos.initialDepth) * 100;
-          const priceDropping = price < pos.currentPrice;
-
-          if (depthChangePct <= -config.depthCollapseThresholdPct && priceDropping && pnlPct >= 2) {
-            exits.push({ position: pos, reason: 'depth_collapse', exitPrice: price, useMaker: false });
-            continue;
-          }
-        }
-
-        // 7. Stale profit (bid unchanged while in profit)
-        if (pnlPct >= config.staleProfitPct) {
-          const bidStaleSec = (now - pos.bidUnchangedSince) / 1000;
-          if (bidStaleSec >= config.staleProfitBidUnchangedSec) {
-            exits.push({ position: pos, reason: 'stale_profit', exitPrice: price, useMaker: true });
-            continue;
-          }
-        }
-
-        // 8. Stagnant profit (at +3% for 13s, no progress)
-        if (pnlPct >= config.stagnantProfitPct && pnlPct < config.takeProfitPct) {
-          const stagnantSec = (now - pos.lastProgressAt) / 1000;
-          if (stagnantSec >= config.stagnantDurationSec) {
-            exits.push({ position: pos, reason: 'stagnant_profit', exitPrice: price, useMaker: true });
-            continue;
-          }
-        }
-
-        // 9. Time exit (approaching min time left)
-        if (timeLeftSec <= config.minTimeLeftSec) {
-          exits.push({ position: pos, reason: 'time_exit', exitPrice: price, useMaker: config.makerExitsForTpOnly });
-          continue;
+        const decision = decideExit({
+          entryPrice: pos.entryPrice,
+          book,
+          fallbackPrice: pos.currentPrice,
+          timeLeftSec,
+          holdSec,
+          state,
+          now,
+          cfg: config,
+        });
+        if (decision) {
+          exits.push({ position: pos, reason: decision.reason, exitPrice, useMaker: decision.useMaker });
         }
       }
 
@@ -316,10 +242,12 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
     },
 
     close(positionId, exitPrice, reason, wasMaker) {
+      const config = getConfig();
       const pos = positions.get(positionId);
       if (!pos) return null;
 
       positions.delete(positionId);
+      exitStates.delete(positionId);
 
       const exitFeePct = wasMaker ? 0 : takerFeePct(exitPrice);
       const pnlPct = pos.entryPrice > 0 ? ((exitPrice - pos.entryPrice) / pos.entryPrice) * 100 : 0;
@@ -335,6 +263,8 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
 
       // Set exit cooldown for this coin+direction
       exitCooldowns.set(cooldownKey(pos.asset, pos.direction), Date.now());
+      assetLastExitAt.set(pos.asset, Date.now());
+      if (netPnlUsd < 0) assetLastLossAt.set(pos.asset, Date.now());
 
       const result: ClosedPosition = {
         ...pos,
@@ -370,6 +300,26 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
         },
         'Position closed'
       );
+
+      // Save to trade database
+      const settings = {
+        stopPct: config.tightStopEnabled !== false ? (config.tightStopPct ?? 12) : config.stopLossPct,
+        tightStop: config.tightStopEnabled !== false,
+        crashFilter: config.crashFilterEnabled !== false,
+        crashMinHighAgeSec: config.crashFilterMinHighAgeSec ?? 20,
+        crashMaxSpotMovePct: config.crashFilterMaxSpotMovePct ?? 3,
+        slippageGuard: config.slippageGuardEnabled !== false,
+        slippageGuardMaxPct: config.slippageGuardMaxPct ?? 4,
+        propTrail: config.proportionalTrailEnabled !== false,
+        propTrailPct: config.proportionalTrailPct ?? 10,
+        trailingMinHighPct: config.trailingMinHighPct ?? 5,
+        minTrailPct: config.minTrailPct ?? 5,
+        exitGraceSec: config.exitGraceSec ?? 3,
+        entryFactor: config.trendEntryFactor ?? 0.9,
+      };
+      saveTrade(result, pos.entryPrice, exitPrice, settings);
+      hooks?.onClose?.(result);
+
       return result;
     },
 
@@ -403,6 +353,21 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
           return { ok: false, reason: `Exit cooldown ${asset} ${direction}: ${left}s` };
         }
       }
+      // Per-asset cooldown after a loss (avoid whipsawing a chopping asset)
+      if (asset) {
+        const lossSec = config.lossCooldownSec ?? 0;
+        const lastLoss = assetLastLossAt.get(asset);
+        if (lossSec > 0 && lastLoss && Date.now() - lastLoss < lossSec * 1000) {
+          const left = Math.ceil((lossSec * 1000 - (Date.now() - lastLoss)) / 1000);
+          return { ok: false, reason: `Loss cooldown ${asset}: ${left}s` };
+        }
+        const assetSec = config.assetCooldownSec ?? 0;
+        const lastExit = assetLastExitAt.get(asset);
+        if (assetSec > 0 && lastExit && Date.now() - lastExit < assetSec * 1000) {
+          const left = Math.ceil((assetSec * 1000 - (Date.now() - lastExit)) / 1000);
+          return { ok: false, reason: `Asset cooldown ${asset}: ${left}s` };
+        }
+      }
       return { ok: true };
     },
 
@@ -418,12 +383,8 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
       const wins = closed.filter((c) => c.netPnlUsd > 0);
       const losses = closed.filter((c) => c.netPnlUsd <= 0);
       const grossPnl = closed.reduce((s, c) => s + c.pnlUsd, 0);
-      const fees = closed.reduce((s, c) => {
-        const entryFee = (c.entryFeePct / 100) * c.entryPrice * c.shares;
-        const exitFee = (c.exitFeePct / 100) * c.exitPrice * c.shares;
-        return s + entryFee + exitFee;
-      }, 0);
       const netPnl = closed.reduce((s, c) => s + c.netPnlUsd, 0);
+      const fees = grossPnl - netPnl;
       const holdTimes = closed.map((c) => c.holdTimeSec);
       const makerEntries = closed.filter((c) => c.wasMakerEntry).length;
       const makerExits = closed.filter((c) => c.wasMakerExit).length;
