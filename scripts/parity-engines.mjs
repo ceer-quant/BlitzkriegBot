@@ -22,10 +22,11 @@ import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
 import { mkdtempSync } from 'fs';
 import { BlitzkriegCoreClient } from '../dist/core/blitzkrieg-core-client.js';
+import { scratchSocketPath } from './lib/core-socket.mjs';
 
 // Throwaway working dir: the core writes its trade log at a relative path, so
 // this keeps the harness's synthetic orders out of data/trades/trades.jsonl.
-const WORKDIR = mkdtempSync(join(tmpdir(), 'clodds-parity-eng-'));
+const WORKDIR = mkdtempSync(join(tmpdir(), 'blitzkrieg-parity-eng-'));
 
 const require = createRequire(import.meta.url);
 const { createTrendTracker } = require('../dist/strategies/crypto-hft/trend-tracker.js');
@@ -144,7 +145,7 @@ function nodeDecision() {
 
 // ── Rust side: real engine over UDS ──────────────────────────────────────────
 async function rustDecision() {
-  const sock = join(tmpdir(), `clodds-parity-engines-${process.pid}.sock`);
+  const sock = scratchSocketPath('parity-engines');
   const client = new BlitzkriegCoreClient({
     binaryPath: BIN,
     socketPath: sock,

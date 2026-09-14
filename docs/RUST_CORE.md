@@ -41,6 +41,14 @@ blitzkrieg-core  ── Unix Domain Socket ($TMPDIR/blitzkrieg-core-$USER.sock)
   （`src/core/schema.ts`），非法消息拒绝，不使用 any。
 - 凭证：Rust 进程自己读 `POLYMARKET_PRIVATE_KEY` / `POLYMARKET_FUNDER_ADDRESS`；
   Node 不显式传私钥。
+- **socket 名是四方契约**（内核 / `ui_kit` / `ui_panel` / TS 外壳），任一方算错都会
+  「找不到内核 → 再起一个 → 两个内核共用同一份订单/持仓日志」（并触发归档单写者锁）。
+  命名与解析因此统一在 `core-socket`：TS `src/core/core-socket.ts`、脚本
+  `scripts/lib/core-socket.mjs`、Rust `core/.../main.rs` 与 `ui/ui_kit/src/lib.rs`。
+  **兼容期**：`clodds-core-<user>.sock` 是改名前的名字，仍可发现——旧外壳用 `--socket <旧路径>`
+  显式拉起的内核，新客户端会**领养**它而不是另起一个（`resolve_socket_path()` /
+  `resolveSocketPath()`）；显式指定 socket 的调用方（夹具/测试）行为不变。
+  回归见 `scripts/socket-migration-check.mjs`（`MIGRATION_LOG §38`）。
 
 ## Rust crate 模块（P0）
 

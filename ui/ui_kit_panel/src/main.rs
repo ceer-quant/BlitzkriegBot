@@ -43,7 +43,7 @@ struct Args {
 }
 
 fn parse_args() -> Args {
-    let mut socket = blitzkrieg_ui_kit::default_socket_path();
+    let mut socket = blitzkrieg_ui_kit::resolve_socket_path();
     let mut interval_ms = 1000u64;
     // Lifecycle verbs are opt-in, exactly like the web gateway's `--manage`.
     let mut manage = std::env::var("UIKIT_MANAGE").map(|v| v == "1" || v == "true").unwrap_or(false);
@@ -86,7 +86,7 @@ USAGE:
   ui_kit_panel [--socket <path>] [--interval-ms N] [--manage] [--tab 1|2|3]
 
 FLAGS:
-  --socket       Core UDS socket (default: $TMPDIR/clodds-core-$USER.sock)
+  --socket       Core UDS socket (default: $TMPDIR/blitzkrieg-core-$USER.sock)
   --interval-ms  Snapshot refresh interval (default 1000)
   --manage       Enable lifecycle commands (start/stop). Off by default.
   --tab          Initial view: 1 Overview (default), 2 Positions, 3 Trades

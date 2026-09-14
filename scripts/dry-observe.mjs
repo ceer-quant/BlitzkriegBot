@@ -27,6 +27,7 @@ import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
 import { mkdtempSync } from 'fs';
 import { BlitzkriegCoreClient } from '../dist/core/blitzkrieg-core-client.js';
+import { scratchSocketPath } from './lib/core-socket.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BIN = join(__dirname, '..', 'target', 'release', 'blitzkrieg-core');
@@ -34,7 +35,7 @@ const GAMMA = 'https://gamma-api.polymarket.com';
 
 // Throwaway working dir: the core writes its trade log at a relative path, so
 // this keeps observation orders out of the production data directory.
-const WORKDIR = mkdtempSync(join(tmpdir(), 'clodds-dry-observe-'));
+const WORKDIR = mkdtempSync(join(tmpdir(), 'blitzkrieg-dry-observe-'));
 
 // ── Args ─────────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
@@ -164,7 +165,7 @@ async function main() {
   }
   console.log(`round duration: ${roundSec}s (${DURATION_LABELS[roundSec]})  assets: ${ASSETS.join(',')}`);
 
-  const sock = join(tmpdir(), `clodds-dry-observe-${process.pid}.sock`);
+  const sock = scratchSocketPath('dry-observe');
   const extraArgs = [
     '--engine',
     '--no-event-archive',

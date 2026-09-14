@@ -56,6 +56,16 @@
 **现状（盘点结论）**：约 260 个文件、905 行命中（不含 `dist/`；`dist/` 另有 221 个编译产物）。
 绝大多数是文案/注释，但以下**承载运行时契约**，必须按「有迁移路径」处理而不是直接改名。
 
+**进度**
+
+| 子任务 | 状态 |
+| --- | --- |
+| [#22](https://github.com/ceer-quant/BlitzkriegBot/issues/22) E1-b socket 改名 + 兼容期 | ✅ 已交付（`MIGRATION_LOG §38`，PR #37）——`blitzkrieg-core-<user>.sock` 为规范名，旧名可发现并**领养**而非另起内核；回归 `scripts/socket-migration-check.mjs` |
+| [#21](https://github.com/ceer-quant/BlitzkriegBot/issues/21) E1-a 加密盐 / 链上备注 | ⏸ 待裁决（`DECISIONS_PENDING` D-13） |
+| [#23](https://github.com/ceer-quant/BlitzkriegBot/issues/23) E1-c `CLODDS_*` / `~/.clodds` | ⏳ 未开始 |
+| [#24](https://github.com/ceer-quant/BlitzkriegBot/issues/24) E1-d 协议面 + 化妆项 | ⏳ 未开始 |
+| [#25](https://github.com/ceer-quant/BlitzkriegBot/issues/25) E1-e `origin` remote | ⏸ 待裁决（`DECISIONS_PENDING` D-13） |
+
 ### 2.1 分级（决定改法）
 
 | 级别 | 对象 | 处理方式 |
