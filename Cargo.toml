@@ -8,8 +8,8 @@ members = [
     "Blitzkrieg_core",
     "extensions/polymarket",
     "user_layer/strategy_api",
-    "ui_kit",
-    "ui_kit_panel",
+    "ui/ui_kit",
+    "ui/ui_kit_panel",
 ]
 # user_layer/strategies is a SEPARATE nested workspace (it has [workspace]
 # and builds the example dynamic strategy cdylib) — intentionally excluded.
