@@ -75,8 +75,8 @@ async function postJson(url: string, payload: unknown, signature?: string) {
 }
 
 test('webhook HTTP middleware validates signature', async () => {
-  const previous = process.env.CLODDS_WEBHOOK_REQUIRE_SIGNATURE;
-  delete process.env.CLODDS_WEBHOOK_REQUIRE_SIGNATURE;
+  const previous = process.env.BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE;
+  delete process.env.BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE;
 
   const { manager, server, port } = await startWebhookServer();
   manager.register('t1', '/webhook/test', async () => {}, { secret: 'secret', enabled: true });
@@ -93,16 +93,16 @@ test('webhook HTTP middleware validates signature', async () => {
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (previous === undefined) {
-      delete process.env.CLODDS_WEBHOOK_REQUIRE_SIGNATURE;
+      delete process.env.BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE;
     } else {
-      process.env.CLODDS_WEBHOOK_REQUIRE_SIGNATURE = previous;
+      process.env.BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE = previous;
     }
   }
 });
 
 test('webhook HTTP middleware enforces rate limit', async () => {
-  const previous = process.env.CLODDS_WEBHOOK_REQUIRE_SIGNATURE;
-  delete process.env.CLODDS_WEBHOOK_REQUIRE_SIGNATURE;
+  const previous = process.env.BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE;
+  delete process.env.BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE;
 
   const { manager, server, port } = await startWebhookServer();
   manager.register('t2', '/webhook/limited', async () => {}, { secret: 'secret', enabled: true, rateLimit: 1 });
@@ -118,9 +118,9 @@ test('webhook HTTP middleware enforces rate limit', async () => {
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (previous === undefined) {
-      delete process.env.CLODDS_WEBHOOK_REQUIRE_SIGNATURE;
+      delete process.env.BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE;
     } else {
-      process.env.CLODDS_WEBHOOK_REQUIRE_SIGNATURE = previous;
+      process.env.BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE = previous;
     }
   }
 });

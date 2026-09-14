@@ -22,8 +22,8 @@ function isOpenAIModel(model?: string): boolean {
 
 function getDefaultModel(): string | undefined {
   return (
-    process.env.CLODDS_TOKENIZER_MODEL ||
-    process.env.CLODDS_MODEL ||
+    process.env.BLITZKRIEG_TOKENIZER_MODEL ||
+    process.env.BLITZKRIEG_MODEL ||
     process.env.ANTHROPIC_MODEL ||
     process.env.OPENAI_MODEL ||
     undefined

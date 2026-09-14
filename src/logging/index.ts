@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, appendFileSync, statSync, renameSync, unlinkSync, readdirSync } from 'fs';
 import { homedir } from 'os';
 import { join, basename } from 'path';
+import { statePath } from '../utils/brand-paths';
 
 // =============================================================================
 // TYPES
@@ -151,7 +152,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
     if (typeof options.file === 'string') {
       filePath = options.file;
     } else {
-      const logsDir = join(homedir(), '.clodds', 'logs');
+      const logsDir = statePath('logs');
       if (!existsSync(logsDir)) {
         mkdirSync(logsDir, { recursive: true });
       }

@@ -61,7 +61,7 @@ function stripProviderPrefix(model: string): string {
 }
 
 export function getModelStrategy(): ModelStrategy {
-  return normalizeStrategy(process.env.CLODDS_MODEL_STRATEGY);
+  return normalizeStrategy(process.env.BLITZKRIEG_MODEL_STRATEGY);
 }
 
 export function selectAdaptiveModel(input: AdaptiveModelInput): string {

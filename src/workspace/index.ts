@@ -15,6 +15,7 @@ import { homedir } from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { logger } from '../utils/logger';
+import { CANONICAL_WORKSPACE_CONFIG_FILE, resolveWorkspaceConfigFile, statePath } from '../utils/brand-paths';
 
 const execFileAsync = promisify(execFile);
 
@@ -80,9 +81,11 @@ const CONTEXT_FILES = [
   'AGENTS.md',
   'SOUL.md',
   'CLAUDE.md',
+  'README.md',
+  '.blitzkrieg.md',
+  '.blitzkrieg.json',
   '.clodds.md',
   '.clodds.json',
-  'README.md',
 ];
 
 // =============================================================================
@@ -188,7 +191,7 @@ async function getGitInfo(path: string): Promise<GitInfo> {
 
 /** Load project config from .clodds.json */
 function loadProjectConfig(path: string): ProjectConfig | undefined {
-  const configPath = join(path, '.clodds.json');
+  const configPath = resolveWorkspaceConfigFile(path);
   if (!existsSync(configPath)) return undefined;
 
   try {
@@ -377,13 +380,13 @@ This file provides instructions for AI assistants working on this project.
     this.load(this.current.path);
   }
 
-  /** Create .clodds.json config */
+  /** Create the workspace config file (canonical name). */
   createConfig(config: ProjectConfig): void {
     if (!this.current) return;
 
-    const filePath = join(this.current.path, '.clodds.json');
+    const filePath = resolveWorkspaceConfigFile(this.current.path);
     writeFileSync(filePath, JSON.stringify(config, null, 2));
-    logger.info({ path: filePath }, 'Created .clodds.json');
+    logger.info({ path: filePath }, `Created ${CANONICAL_WORKSPACE_CONFIG_FILE}`);
 
     // Reload
     this.load(this.current.path);
@@ -449,7 +452,7 @@ This file provides instructions for AI assistants working on this project.
 /** Get user-level AGENTS.md */
 export function getUserAgentsMd(): string | null {
   const paths = [
-    join(homedir(), '.clodds', 'AGENTS.md'),
+    statePath('AGENTS.md'),
     join(homedir(), 'AGENTS.md'),
   ];
 
@@ -465,7 +468,7 @@ export function getUserAgentsMd(): string | null {
 /** Get user-level SOUL.md */
 export function getUserSoulMd(): string | null {
   const paths = [
-    join(homedir(), '.clodds', 'SOUL.md'),
+    statePath('SOUL.md'),
     join(homedir(), 'SOUL.md'),
   ];
 

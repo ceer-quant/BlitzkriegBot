@@ -234,7 +234,7 @@ export function createServer(
   let chatConnectionHandler: ((ws: WebSocket, req: IncomingMessage) => void) | null = null;
 
   // Auth middleware for sensitive endpoints
-  const authToken = process.env.CLODDS_TOKEN;
+  const authToken = process.env.BLITZKRIEG_TOKEN;
   const requireAuth = (req: Request, res: express.Response, next: express.NextFunction) => {
     if (!authToken) {
       // No token configured - allow access (for development)
@@ -290,7 +290,7 @@ export function createServer(
 
   // IP-based rate limiting
   const ipRequestCounts = new Map<string, { count: number; resetAt: number }>();
-  const IP_RATE_LIMIT = parseInt(process.env.CLODDS_IP_RATE_LIMIT || '100', 10); // requests per minute
+  const IP_RATE_LIMIT = parseInt(process.env.BLITZKRIEG_IP_RATE_LIMIT || '100', 10); // requests per minute
   const IP_RATE_WINDOW_MS = 60 * 1000; // 1 minute
 
   app.use((req, res, next) => {
@@ -338,7 +338,7 @@ export function createServer(
   // HTTPS enforcement & security headers
   app.use((req, res, next) => {
     // HSTS header (only send over HTTPS or if explicitly enabled)
-    const hstsEnabled = process.env.CLODDS_HSTS_ENABLED === 'true';
+    const hstsEnabled = process.env.BLITZKRIEG_HSTS_ENABLED === 'true';
     const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
 
     if (hstsEnabled || isSecure) {
@@ -352,10 +352,10 @@ export function createServer(
     res.setHeader('X-XSS-Protection', '1; mode=block');
 
     // Redirect HTTP to HTTPS if forced
-    const forceHttps = process.env.CLODDS_FORCE_HTTPS === 'true';
+    const forceHttps = process.env.BLITZKRIEG_FORCE_HTTPS === 'true';
     if (forceHttps && !isSecure) {
       const allowedHosts = new Set([
-        process.env.CLODDS_PUBLIC_HOST || 'localhost',
+        process.env.BLITZKRIEG_PUBLIC_HOST || 'localhost',
         'localhost',
         '127.0.0.1',
         'compute.cloddsbot.com',
@@ -492,7 +492,7 @@ export function createServer(
     }
   });
 
-  // Metrics endpoint (for monitoring) - requires auth if CLODDS_TOKEN is set
+  // Metrics endpoint (for monitoring) - requires auth if BLITZKRIEG_TOKEN is set
   app.get('/metrics', requireAuth, (_req, res) => {
     const requestMetrics = getRequestMetrics();
     const errorStats = getErrorStats();
@@ -560,7 +560,7 @@ export function createServer(
       category: 'Core',
       vars: [
         { key: 'ANTHROPIC_API_KEY', label: 'Anthropic API Key', secret: true, required: true, helpUrl: 'https://console.anthropic.com' },
-        { key: 'CLODDS_LOCALE', label: 'Language (en, es, zh, ja, ko...)', secret: false, required: false },
+        { key: 'BLITZKRIEG_LOCALE', label: 'Language (en, es, zh, ja, ko...)', secret: false, required: false },
       ],
     },
     {
@@ -661,13 +661,13 @@ export function createServer(
     {
       category: 'Gateway & Security',
       vars: [
-        { key: 'CLODDS_TOKEN', label: 'Gateway Auth Token', secret: true, required: false },
-        { key: 'CLODDS_CREDENTIAL_KEY', label: 'Credential Encryption Key', secret: true, required: false },
-        { key: 'CLODDS_PUBLIC_HOST', label: 'Public Hostname', secret: false, required: false },
-        { key: 'CLODDS_PUBLIC_SCHEME', label: 'Public Scheme (http/https)', secret: false, required: false },
+        { key: 'BLITZKRIEG_TOKEN', label: 'Gateway Auth Token', secret: true, required: false },
+        { key: 'BLITZKRIEG_CREDENTIAL_KEY', label: 'Credential Encryption Key', secret: true, required: false },
+        { key: 'BLITZKRIEG_PUBLIC_HOST', label: 'Public Hostname', secret: false, required: false },
+        { key: 'BLITZKRIEG_PUBLIC_SCHEME', label: 'Public Scheme (http/https)', secret: false, required: false },
         { key: 'LOG_LEVEL', label: 'Log Level (debug/info/warn/error)', secret: false, required: false },
-        { key: 'CLODDS_IP_RATE_LIMIT', label: 'IP Rate Limit (req/min)', secret: false, required: false },
-        { key: 'CLODDS_FORCE_HTTPS', label: 'Force HTTPS', secret: false, required: false },
+        { key: 'BLITZKRIEG_IP_RATE_LIMIT', label: 'IP Rate Limit (req/min)', secret: false, required: false },
+        { key: 'BLITZKRIEG_FORCE_HTTPS', label: 'Force HTTPS', secret: false, required: false },
       ],
     },
   ];

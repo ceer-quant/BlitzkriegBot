@@ -16,6 +16,7 @@ import type { WebSocket } from 'ws';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
+import { resolveStateDir } from '../utils/brand-paths';
 
 /** Node types */
 export type NodeType = 'macos' | 'ios' | 'android' | 'web';
@@ -191,7 +192,7 @@ export function createNodesTool(): NodesTool {
     reject: (error: Error) => void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
-  const stateDir = join(homedir(), '.clodds');
+  const stateDir = resolveStateDir();
   const knownNodesPath = join(stateDir, 'nodes.json');
   const knownNodes = new Map<string, KnownNodeRecord>();
 

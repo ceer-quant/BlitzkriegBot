@@ -2,19 +2,17 @@
  * Configuration loading and management
  */
 
-import { readFileSync, existsSync } from 'fs';
+import './brand-bootstrap';
+
+import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
-import { join, resolve } from 'path';
+import { resolve } from 'path';
 import JSON5 from 'json5';
-import { config as dotenvConfig } from 'dotenv';
 import type { Config } from '../types';
 import { createLogger } from './logger';
+import { resolveConfigPath, resolveStateDir, resolveWorkspaceDir } from './brand-paths';
 
 const logger = createLogger('config');
-
-// Load .env file — check ~/.clodds/.env first (onboard writes here), then CWD
-dotenvConfig({ path: join(homedir(), '.clodds', '.env') });
-dotenvConfig(); // CWD fallback (won't override existing vars)
 
 function resolveUserPath(input: string): string {
   const trimmed = input.trim();
@@ -25,23 +23,9 @@ function resolveUserPath(input: string): string {
   return resolve(trimmed);
 }
 
-export function resolveStateDir(env = process.env): string {
-  const override = env.CLODDS_STATE_DIR?.trim();
-  if (override) return resolveUserPath(override);
-  return join(homedir(), '.clodds');
-}
-
-export function resolveConfigPath(env = process.env): string {
-  const override = env.CLODDS_CONFIG_PATH?.trim();
-  if (override) return resolveUserPath(override);
-  return join(resolveStateDir(env), 'clodds.json');
-}
-
-export function resolveWorkspaceDir(env = process.env): string {
-  const override = env.CLODDS_WORKSPACE?.trim();
-  if (override) return resolveUserPath(override);
-  return join(homedir(), 'clodds');
-}
+// Path resolution lives in `brand-paths`; re-exported here so the existing
+// import sites (`utils/config`) keep working unchanged.
+export { resolveConfigPath, resolveStateDir, resolveWorkspaceDir };
 
 const CONFIG_DIR = resolveStateDir();
 const CONFIG_FILE = resolveConfigPath();
@@ -468,9 +452,9 @@ export async function loadConfig(customPath?: string): Promise<Config> {
   }
 
   // Apply group policies from env JSON
-  if (process.env.CLODDS_GROUP_POLICIES) {
+  if (process.env.BLITZKRIEG_GROUP_POLICIES) {
     try {
-      const parsed = JSON.parse(process.env.CLODDS_GROUP_POLICIES) as Record<string, unknown>;
+      const parsed = JSON.parse(process.env.BLITZKRIEG_GROUP_POLICIES) as Record<string, unknown>;
       if (!config.channels) config.channels = {};
       for (const [channel, value] of Object.entries(parsed)) {
         if (!value || typeof value !== 'object') continue;
@@ -479,7 +463,7 @@ export async function loadConfig(customPath?: string): Promise<Config> {
         (config.channels as Record<string, any>)[channel] = channelConfig;
       }
     } catch (error) {
-      logger.warn({ error }, 'Failed to parse CLODDS_GROUP_POLICIES');
+      logger.warn({ error }, 'Failed to parse BLITZKRIEG_GROUP_POLICIES');
     }
   }
 

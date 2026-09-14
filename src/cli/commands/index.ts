@@ -17,6 +17,15 @@ import type { User } from '../../types';
 import { loadConfig } from '../../utils/config';
 import { loginWhatsAppWithQr, resolveWhatsAppAuthDir } from '../../channels/whatsapp/index';
 import { getAnthropicBaseUrl, getAnthropicHeaders, getAnthropicMessagesUrl } from '../../utils/anthropic';
+import {
+  CANONICAL_WORKSPACE_CONFIG_FILE,
+  resolveConfigPath,
+  resolveStateDir,
+  resolveUserConfigDir,
+  resolveUserConfigPath,
+  resolveWorkspaceConfigFile,
+  statePath,
+} from '../../utils/brand-paths';
 
 // =============================================================================
 // CONFIG COMMANDS
@@ -31,7 +40,7 @@ export function createConfigCommands(program: Command): void {
     .command('get [key]')
     .description('Get config value or show all')
     .action(async (key?: string) => {
-      const configPath = join(homedir(), '.clodds', 'config.json');
+      const configPath = statePath('config.json');
       if (!existsSync(configPath)) {
         console.log('No configuration file found');
         return;
@@ -51,7 +60,7 @@ export function createConfigCommands(program: Command): void {
     .command('set <key> <value>')
     .description('Set a config value')
     .action(async (key: string, value: string) => {
-      const configDir = join(homedir(), '.clodds');
+      const configDir = resolveStateDir();
       const configPath = join(configDir, 'config.json');
 
       if (!existsSync(configDir)) {
@@ -87,7 +96,7 @@ export function createConfigCommands(program: Command): void {
     .command('unset <key>')
     .description('Remove a config value')
     .action(async (key: string) => {
-      const configPath = join(homedir(), '.clodds', 'config.json');
+      const configPath = statePath('config.json');
       if (!existsSync(configPath)) {
         console.log('No configuration file found');
         return;
@@ -110,7 +119,7 @@ export function createConfigCommands(program: Command): void {
     .command('path')
     .description('Show config file path')
     .action(() => {
-      console.log(join(homedir(), '.clodds', 'config.json'));
+      console.log(statePath('config.json'));
     });
 }
 
@@ -164,7 +173,7 @@ export function createModelCommands(program: Command): void {
     .command('default [model]')
     .description('Get or set default model')
     .action(async (model?: string) => {
-      const configPath = join(homedir(), '.clodds', 'config.json');
+      const configPath = statePath('config.json');
       let data: Record<string, unknown> = {};
 
       if (existsSync(configPath)) {
@@ -194,7 +203,7 @@ export function createSessionCommands(program: Command): void {
     .command('list')
     .description('List active sessions')
     .action(async () => {
-      const sessionsDir = join(homedir(), '.clodds', 'sessions');
+      const sessionsDir = statePath('sessions');
       if (!existsSync(sessionsDir)) {
         console.log('No sessions found');
         return;
@@ -218,7 +227,7 @@ export function createSessionCommands(program: Command): void {
     .description('Clear a session or all sessions')
     .option('-a, --all', 'Clear all sessions')
     .action(async (sessionId?: string, options?: { all?: boolean }) => {
-      const sessionsDir = join(homedir(), '.clodds', 'sessions');
+      const sessionsDir = statePath('sessions');
 
       if (options?.all) {
         if (existsSync(sessionsDir)) {
@@ -1255,7 +1264,7 @@ export function createMcpCommands(program: Command): void {
     .action(async () => {
       const mcpConfigPaths = [
         join(process.cwd(), '.mcp.json'),
-        join(homedir(), '.config', 'clodds', 'mcp.json'),
+        resolveUserConfigPath('mcp.json'),
       ];
 
       for (const path of mcpConfigPaths) {
@@ -1296,15 +1305,12 @@ export function createMcpCommands(program: Command): void {
     .option('--global', 'Add to global config instead of project')
     .action(async (name: string, command: string, options: { args?: string; env?: string; global?: boolean }) => {
       const configPath = options.global
-        ? join(homedir(), '.config', 'clodds', 'mcp.json')
+        ? resolveUserConfigPath('mcp.json')
         : join(process.cwd(), '.mcp.json');
 
-      // Ensure directory exists for global config
-      if (options.global) {
-        const configDir = join(homedir(), '.config', 'clodds');
-        if (!existsSync(configDir)) {
-          mkdirSync(configDir, { recursive: true });
-        }
+      // Ensure the directory exists for a global config written to the canonical location
+      if (options.global && !existsSync(configPath)) {
+        mkdirSync(resolveUserConfigDir(), { recursive: true });
       }
 
       // Load or create config
@@ -1365,7 +1371,7 @@ export function createMcpCommands(program: Command): void {
     .option('--global', 'Remove from global config instead of project')
     .action(async (name: string, options: { global?: boolean }) => {
       const configPath = options.global
-        ? join(homedir(), '.config', 'clodds', 'mcp.json')
+        ? resolveUserConfigPath('mcp.json')
         : join(process.cwd(), '.mcp.json');
 
       if (!existsSync(configPath)) {
@@ -1398,8 +1404,8 @@ export function createMcpCommands(program: Command): void {
     .option('--timeout <ms>', 'Timeout in milliseconds', '5000')
     .action(async (name: string, options: { global?: boolean; timeout?: string }) => {
       const configPaths = options.global
-        ? [join(homedir(), '.config', 'clodds', 'mcp.json')]
-        : [join(process.cwd(), '.mcp.json'), join(homedir(), '.config', 'clodds', 'mcp.json')];
+        ? [resolveUserConfigPath('mcp.json')]
+        : [join(process.cwd(), '.mcp.json'), resolveUserConfigPath('mcp.json')];
 
       let serverConfig: { command?: string; args?: string[]; env?: Record<string, string> } | null = null;
       let foundPath = '';
@@ -2025,15 +2031,15 @@ export function createInitCommand(program: Command): void {
     .description('Initialize Clodds in current directory')
     .option('-f, --force', 'Overwrite existing config')
     .action(async (options: { force?: boolean }) => {
-      const configPath = join(process.cwd(), '.clodds.json');
-
-      if (existsSync(configPath) && !options.force) {
-        console.log('Clodds already initialized. Use --force to overwrite.');
+      const existingConfigPath = resolveWorkspaceConfigFile(process.cwd());
+      if (existsSync(existingConfigPath) && !options.force) {
+        console.log('Blitzkrieg already initialized. Use --force to overwrite.');
         return;
       }
+      const configPath = join(process.cwd(), CANONICAL_WORKSPACE_CONFIG_FILE);
 
       const defaultConfig = {
-        name: 'clodds-project',
+        name: 'blitzkrieg-project',
         version: '0.1.0',
         model: 'claude-3-5-sonnet-20241022',
         features: {
@@ -2044,7 +2050,7 @@ export function createInitCommand(program: Command): void {
       };
 
       writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
-      console.log('Initialized Clodds project.');
+      console.log('Initialized Blitzkrieg project.');
       console.log(`Config written to ${configPath}`);
     });
 }
@@ -2526,7 +2532,7 @@ export function createLocaleCommands(program: Command): void {
         console.log(`  ${loc.code}  ${loc.nativeName.padEnd(10)} (${loc.name})${marker}`);
       }
       console.log('\nSet with: clodds locale set <code>');
-      console.log('Or: CLODDS_LOCALE=<code> in .env\n');
+      console.log('Or: BLITZKRIEG_LOCALE=<code> in .env\n');
     });
 
   locale
@@ -2555,7 +2561,7 @@ export function createLocaleCommands(program: Command): void {
       }
 
       // Save to config
-      const configPath = join(homedir(), '.clodds', 'config.json');
+      const configPath = statePath('config.json');
       let config: Record<string, unknown> = {};
 
       if (existsSync(configPath)) {
@@ -2563,7 +2569,7 @@ export function createLocaleCommands(program: Command): void {
       }
 
       config.locale = code.toLowerCase();
-      const configDir = join(homedir(), '.clodds');
+      const configDir = resolveStateDir();
       if (!existsSync(configDir)) {
         mkdirSync(configDir, { recursive: true });
       }
@@ -2772,7 +2778,7 @@ export function createLedgerCommands(program: Command): void {
     .command('config')
     .description('Show ledger configuration')
     .action(async () => {
-      const configPath = join(homedir(), '.clodds', 'config.json');
+      const configPath = statePath('config.json');
       let ledgerConfig = {
         enabled: false,
         captureAll: false,
@@ -3017,8 +3023,8 @@ export function createBittensorCommands(program: Command): void {
 
       // Step 4: Write config
       console.log('\n[4/5] Configuring Clodds...');
-      const cloddsDir = join(homedir(), '.clodds');
-      const configPath = join(cloddsDir, 'clodds.json');
+      const cloddsDir = resolveStateDir();
+      const configPath = resolveConfigPath();
 
       let existingConfig: Record<string, unknown> = {};
       if (existsSync(configPath)) {
@@ -3165,7 +3171,7 @@ export function createBittensorCommands(program: Command): void {
 
       // Read network from config
       let network = 'mainnet';
-      const cfgPath = join(homedir(), '.clodds', 'clodds.json');
+      const cfgPath = resolveConfigPath();
       if (existsSync(cfgPath)) {
         try {
           const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8'));
@@ -3236,7 +3242,7 @@ export function createBittensorCommands(program: Command): void {
       const port = options.port ?? '18789';
       const period = options.period ?? 'daily';
       try {
-        const token = process.env.CLODDS_TOKEN;
+        const token = process.env.BLITZKRIEG_TOKEN;
         const headers: Record<string, string> = {};
         if (token) headers['Authorization'] = `Bearer ${token}`;
         const r = await fetch(`http://127.0.0.1:${port}/api/bittensor/earnings?period=${period}`, { headers });
@@ -3269,7 +3275,7 @@ export function createBittensorCommands(program: Command): void {
     .action(async (options: { port?: string }) => {
       const port = options.port ?? '18789';
       try {
-        const token = process.env.CLODDS_TOKEN;
+        const token = process.env.BLITZKRIEG_TOKEN;
         const headers: Record<string, string> = {};
         if (token) headers['Authorization'] = `Bearer ${token}`;
         const r = await fetch(`http://127.0.0.1:${port}/api/bittensor/miners`, { headers });
@@ -3301,7 +3307,7 @@ export function createBittensorCommands(program: Command): void {
     .action(async (options: { port?: string }) => {
       const port = options.port ?? '18789';
       try {
-        const token = process.env.CLODDS_TOKEN;
+        const token = process.env.BLITZKRIEG_TOKEN;
         const headers: Record<string, string> = {};
         if (token) headers['Authorization'] = `Bearer ${token}`;
         const r = await fetch(`http://127.0.0.1:${port}/api/bittensor/subnets`, { headers });
@@ -3363,7 +3369,7 @@ export function createBittensorCommands(program: Command): void {
       }
 
       // Config
-      const configPath = join(homedir(), '.clodds', 'clodds.json');
+      const configPath = resolveConfigPath();
       if (existsSync(configPath)) {
         try {
           const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
@@ -3397,14 +3403,14 @@ export function createDoctorCommand(program: Command): void {
 
       // ── 1. Core: Config + DB ─────────────────────────────────────────────
       console.log('Checking core...');
-      const configPath = join(homedir(), '.clodds', 'clodds.json');
+      const configPath = resolveConfigPath();
       if (existsSync(configPath)) {
         results.push({ name: 'Config file', status: 'pass', message: configPath });
       } else {
         results.push({ name: 'Config file', status: 'warn', message: 'Not found', fix: 'Run: clodds onboard' });
       }
 
-      const envPath = join(homedir(), '.clodds', '.env');
+      const envPath = statePath('.env');
       if (existsSync(envPath)) {
         results.push({ name: '.env file', status: 'pass', message: envPath });
       } else {
@@ -3705,9 +3711,9 @@ export function createOnboardCommand(program: Command): void {
       const magenta = (s: string) => `\x1b[35m${s}\x1b[0m`;
       const bgCyan = (s: string) => `\x1b[46m\x1b[30m${s}\x1b[0m`;
 
-      const cloddsDir = join(homedir(), '.clodds');
+      const cloddsDir = resolveStateDir();
       const envPath = join(cloddsDir, '.env');
-      const configPath = join(cloddsDir, 'clodds.json');
+      const configPath = resolveConfigPath();
 
       // Track what we'll write
       const envVars: Record<string, string> = {};
@@ -3932,9 +3938,9 @@ export function createOnboardCommand(program: Command): void {
       }
 
       // Auto-generate credential encryption key if not set
-      if (!envVars.CLODDS_CREDENTIAL_KEY && !process.env.CLODDS_CREDENTIAL_KEY) {
+      if (!envVars.BLITZKRIEG_CREDENTIAL_KEY && !process.env.BLITZKRIEG_CREDENTIAL_KEY) {
         const { randomBytes } = await import('crypto');
-        envVars.CLODDS_CREDENTIAL_KEY = randomBytes(32).toString('hex');
+        envVars.BLITZKRIEG_CREDENTIAL_KEY = randomBytes(32).toString('hex');
       }
 
       // Write .env
@@ -3965,7 +3971,7 @@ export function createOnboardCommand(program: Command): void {
       console.log('');
       const { networkInterfaces } = await import('os');
       const getHost = (): string => {
-        if (process.env.CLODDS_PUBLIC_HOST) return process.env.CLODDS_PUBLIC_HOST;
+        if (process.env.BLITZKRIEG_PUBLIC_HOST) return process.env.BLITZKRIEG_PUBLIC_HOST;
         const nets = networkInterfaces();
         for (const iface of Object.values(nets)) {
           for (const cfg of iface || []) {

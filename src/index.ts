@@ -5,15 +5,14 @@
  * Entry point - starts the gateway and all services
  */
 
-import { config as dotenvConfig } from 'dotenv';
+// Must be the first import: loads .env and mirrors legacy CLODDS_* variables
+// onto their canonical BLITZKRIEG_* names before any other module initialises.
+import './utils/brand-bootstrap';
+
 import { randomBytes } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync } from 'fs';
-import { homedir } from 'os';
 import { join } from 'path';
-
-// Load .env from ~/.clodds/.env first (where onboard writes), then CWD fallback
-dotenvConfig({ path: join(homedir(), '.clodds', '.env') });
-dotenvConfig();
+import { resolveStateDir } from './utils/brand-paths';
 
 import { createGateway } from './gateway/index';
 import { loadConfig } from './utils/config';
@@ -125,29 +124,30 @@ function validateStartupRequirements(): void {
   }
 
   // Auto-generate credential encryption key if not set
-  if (!process.env.CLODDS_CREDENTIAL_KEY) {
+  if (!process.env.BLITZKRIEG_CREDENTIAL_KEY) {
     const generated = randomBytes(32).toString('hex');
-    process.env.CLODDS_CREDENTIAL_KEY = generated;
+    process.env.BLITZKRIEG_CREDENTIAL_KEY = generated;
 
-    // Persist to ~/.clodds/.env so it survives restarts
-    const cloddsDir = join(homedir(), '.clodds');
-    const envPath = join(cloddsDir, '.env');
+    // Persist to the state directory's .env so it survives restarts
+    const stateDir = resolveStateDir();
+    const envPath = join(stateDir, '.env');
     try {
-      if (!existsSync(cloddsDir)) {
-        mkdirSync(cloddsDir, { recursive: true });
+      if (!existsSync(stateDir)) {
+        mkdirSync(stateDir, { recursive: true });
       }
       if (existsSync(envPath)) {
-        // Append if file exists and doesn't already contain the key
+        // Append only when neither the canonical nor the legacy name is present,
+        // so an existing key is never shadowed by a fresh one.
         const existing = readFileSync(envPath, 'utf-8');
-        if (!existing.includes('CLODDS_CREDENTIAL_KEY=')) {
-          appendFileSync(envPath, `\nCLODDS_CREDENTIAL_KEY=${generated}\n`);
+        if (!/(BLITZKRIEG|CLODDS)_CREDENTIAL_KEY=/.test(existing)) {
+          appendFileSync(envPath, `\nBLITZKRIEG_CREDENTIAL_KEY=${generated}\n`);
         }
       } else {
-        writeFileSync(envPath, `CLODDS_CREDENTIAL_KEY=${generated}\n`, { mode: 0o600 });
+        writeFileSync(envPath, `BLITZKRIEG_CREDENTIAL_KEY=${generated}\n`, { mode: 0o600 });
       }
-      logger.info('Auto-generated CLODDS_CREDENTIAL_KEY for credential encryption');
+      logger.info('Auto-generated BLITZKRIEG_CREDENTIAL_KEY for credential encryption');
     } catch (err) {
-      logger.warn({ err }, 'Could not persist CLODDS_CREDENTIAL_KEY to .env file — key is set for this session only');
+      logger.warn({ err }, 'Could not persist BLITZKRIEG_CREDENTIAL_KEY to .env file — key is set for this session only');
     }
   }
 

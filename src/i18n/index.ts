@@ -9,7 +9,7 @@
  *   t('errors.notFound');            // Nested keys supported
  *
  * Configuration:
- *   - Environment: CLODDS_LOCALE=zh
+ *   - Environment: BLITZKRIEG_LOCALE=zh
  *   - Config: { "locale": "zh" }
  *   - Runtime: setLocale('zh')
  *
@@ -165,7 +165,7 @@ export function getSupportedLocales(): Array<{ code: Locale; name: string; nativ
 export function initI18n(config?: { locale?: string }): void {
   // Priority: config > env > default
   const locale = config?.locale
-    || process.env.CLODDS_LOCALE
+    || process.env.BLITZKRIEG_LOCALE
     || process.env.LANG?.split('.')[0]?.split('_')[0]
     || DEFAULT_LOCALE;
 

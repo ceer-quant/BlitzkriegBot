@@ -127,9 +127,9 @@ function detectMediaTypeFromFile(filePath: string): SupportedMediaType {
 function enforceVisionRateLimit(): void {
   const now = Date.now();
   const windowMs =
-    parseInt(process.env.CLODDS_VISION_RATE_WINDOW_MS || '', 10) || DEFAULT_RATE_LIMIT_WINDOW_MS;
+    parseInt(process.env.BLITZKRIEG_VISION_RATE_WINDOW_MS || '', 10) || DEFAULT_RATE_LIMIT_WINDOW_MS;
   const maxRequests =
-    parseInt(process.env.CLODDS_VISION_RATE_MAX || '', 10) || DEFAULT_RATE_LIMIT_MAX;
+    parseInt(process.env.BLITZKRIEG_VISION_RATE_MAX || '', 10) || DEFAULT_RATE_LIMIT_MAX;
 
   if (rateLimitState.resetAt <= now) {
     rateLimitState.count = 0;
@@ -172,7 +172,7 @@ function getCached(cacheKey: string): AnalysisResult | null {
   const entry = responseCache.get(cacheKey);
   if (!entry) return null;
   const ttl =
-    parseInt(process.env.CLODDS_VISION_CACHE_TTL_MS || '', 10) || DEFAULT_CACHE_TTL_MS;
+    parseInt(process.env.BLITZKRIEG_VISION_CACHE_TTL_MS || '', 10) || DEFAULT_CACHE_TTL_MS;
   if (Date.now() - entry.timestamp > Math.max(1_000, ttl)) {
     responseCache.delete(cacheKey);
     return null;
@@ -182,7 +182,7 @@ function getCached(cacheKey: string): AnalysisResult | null {
 
 function evictStaleCacheEntries(): void {
   const ttl =
-    parseInt(process.env.CLODDS_VISION_CACHE_TTL_MS || '', 10) || DEFAULT_CACHE_TTL_MS;
+    parseInt(process.env.BLITZKRIEG_VISION_CACHE_TTL_MS || '', 10) || DEFAULT_CACHE_TTL_MS;
   const now = Date.now();
   for (const [key, entry] of responseCache) {
     if (now - entry.timestamp > Math.max(1_000, ttl)) {

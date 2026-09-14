@@ -12,6 +12,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { logger } from '../utils/logger';
+import { statePath } from '../utils/brand-paths';
 
 export interface QwenConfig {
   /** API key for DashScope */
@@ -45,7 +46,7 @@ export class QwenAuthClient {
   constructor(config: QwenConfig = {}) {
     this.config = config;
     this.credStorePath = config.tokenStorePath ||
-      path.join(process.env.HOME || '', '.clodds', 'tokens', 'qwen.json');
+      statePath('tokens', 'qwen.json');
     this.loadCredentials();
   }
 

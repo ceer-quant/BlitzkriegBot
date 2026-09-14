@@ -13,6 +13,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { logger } from '../utils/logger';
+import { statePath } from '../utils/brand-paths';
 
 /** Browser configuration */
 export interface BrowserConfig {
@@ -152,7 +153,7 @@ export interface BrowserTool {
 const DEFAULT_CONFIG: Required<BrowserConfig> = {
   enabled: true,
   executablePath: '',
-  userDataDir: path.join(os.homedir(), '.clodds', 'browser'),
+  userDataDir: statePath('browser'),
   profile: 'default',
   viewportWidth: 1280,
   viewportHeight: 720,

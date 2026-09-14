@@ -11,6 +11,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from '../utils/logger';
+import { statePath } from '../utils/brand-paths';
 
 export interface CopilotConfig {
   /** GitHub OAuth client ID (for Copilot) */
@@ -39,7 +40,7 @@ export class CopilotAuthClient {
   constructor(config: CopilotConfig = {}) {
     this.config = config;
     this.tokenStorePath = config.tokenStorePath ||
-      path.join(process.env.HOME || '', '.clodds', 'tokens', 'copilot.json');
+      statePath('tokens', 'copilot.json');
     this.loadTokens();
   }
 

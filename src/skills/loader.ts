@@ -24,6 +24,7 @@ import { Skill, SkillManagerConfig } from '../types';
 import { logger } from '../utils/logger';
 import { parseFrontmatter, resolveMetadata, mergeGates, type SkillGates } from './frontmatter.js';
 import { registerDispatchSkill, clearDispatchSkills } from './executor';
+import { projectManagedSkillsDirs } from '../utils/brand-paths';
 
 // =============================================================================
 // BINARY CHECKING
@@ -473,10 +474,11 @@ export function createSkillManager(workspacePath?: string, config?: SkillManager
     }
 
     // 3. Load managed skills (medium priority)
-    const managedDir = path.join(process.cwd(), '.clodds', 'skills');
-    const managedSkills = loadDirCached(managedDir, loaderOpts);
-    for (const skill of managedSkills) {
-      skillsMap.set(skill.name, skill);
+    for (const managedDir of projectManagedSkillsDirs()) {
+      const managedSkills = loadDirCached(managedDir, loaderOpts);
+      for (const skill of managedSkills) {
+        skillsMap.set(skill.name, skill);
+      }
     }
 
     // 4. Load workspace skills (highest priority)
@@ -521,7 +523,7 @@ export function createSkillManager(workspacePath?: string, config?: SkillManager
     const debounceMs = config?.watchDebounceMs ?? 500;
     const dirs = [
       path.join(__dirname, 'bundled'),
-      path.join(process.cwd(), '.clodds', 'skills'),
+      ...projectManagedSkillsDirs(),
       ...(config?.extraDirs || []),
     ];
     if (workspacePath) {

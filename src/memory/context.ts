@@ -379,7 +379,7 @@ export function createContextManager(
     }
 
     const summaryTokens = 500;
-    const inputTokenLimit = Math.max(1, Number(process.env.CLODDS_SUMMARY_INPUT_TOKENS) || 4000);
+    const inputTokenLimit = Math.max(1, Number(process.env.BLITZKRIEG_SUMMARY_INPUT_TOKENS) || 4000);
     const maxDepth = 3;
 
     const toText = (msgs: Message[]) =>

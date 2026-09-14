@@ -17,6 +17,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { color, bold, dim, box, spinner, Spinner, success, error as errorLog, info as infoLog } from '../tui';
 import { logger } from '../utils/logger';
+import { statePath } from '../utils/brand-paths';
 
 // =============================================================================
 // TYPES
@@ -278,7 +279,7 @@ export class Repl extends EventEmitter {
     this.commands = commands;
     this.promptString = options.prompt || color('> ', 'cyan');
     this.history = new HistoryManager(
-      options.historyFile ?? join(homedir(), '.clodds', 'history'),
+      options.historyFile ?? statePath('history'),
       options.historySize ?? 1000
     );
     this.autocomplete = options.autocomplete;
