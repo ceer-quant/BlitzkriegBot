@@ -13,6 +13,7 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from '../utils/logger';
+import { statePath } from '../utils/brand-paths';
 
 export interface OAuthConfig {
   provider: 'anthropic' | 'openai' | 'google' | 'github' | 'azure';
@@ -97,7 +98,7 @@ export class OAuthClient {
     }
 
     this.tokenStorePath = config.tokenStorePath ||
-      path.join(process.env.HOME || '', '.clodds', 'tokens', `${config.provider}.json`);
+      statePath('tokens', `${config.provider}.json`);
 
     this.loadTokens();
   }

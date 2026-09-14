@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import { getAnthropicBaseUrl, getAnthropicHeaders, getAnthropicMessagesUrl } from '../../utils/anthropic';
+import { resolveStateDir } from '../../utils/brand-paths';
 
 let rl: readline.Interface;
 
@@ -278,7 +279,7 @@ export async function runOnboard(): Promise<void> {
   console.log('\n');
   const spin = spinner('Saving configuration...');
 
-  const configDir = path.join(process.env.HOME || '', '.clodds');
+  const configDir = resolveStateDir();
   const configPath = path.join(configDir, 'config.json');
 
   if (!fs.existsSync(configDir)) {
@@ -298,14 +299,14 @@ export async function runOnboard(): Promise<void> {
   const { randomBytes } = await import('crypto');
   const envPath = path.join(configDir, '.env');
 
-  // Preserve existing CLODDS_CREDENTIAL_KEY if .env already exists (don't invalidate stored creds)
+  // Preserve existing BLITZKRIEG_CREDENTIAL_KEY if .env already exists (don't invalidate stored creds)
   let existingCredKey = '';
   if (fs.existsSync(envPath)) {
     const existing = fs.readFileSync(envPath, 'utf-8');
-    const match = existing.match(/^CLODDS_CREDENTIAL_KEY=(.+)$/m);
+    const match = existing.match(/^BLITZKRIEG_CREDENTIAL_KEY=(.+)$/m);
     if (match) existingCredKey = match[1];
   }
-  envLines.push(`CLODDS_CREDENTIAL_KEY=${existingCredKey || randomBytes(32).toString('hex')}`);
+  envLines.push(`BLITZKRIEG_CREDENTIAL_KEY=${existingCredKey || randomBytes(32).toString('hex')}`);
 
   fs.writeFileSync(envPath, envLines.join('\n') + '\n', { mode: 0o600 });
 

@@ -13,6 +13,7 @@ import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { createHash, randomBytes } from 'crypto';
 import { logger } from '../utils/logger';
+import { statePath } from '../utils/brand-paths';
 
 const execAsync = promisify(exec);
 
@@ -85,7 +86,7 @@ export class SkillRegistry extends EventEmitter {
   constructor(skillsDir?: string, registryUrl?: string) {
     super();
     this.setMaxListeners(50);
-    this.skillsDir = skillsDir || join(homedir(), '.clodds', 'skills');
+    this.skillsDir = skillsDir || statePath('skills');
     this.registryUrl = registryUrl || 'https://registry.clodds.dev';
     this.ensureDir();
     this.loadSkills();
@@ -207,7 +208,7 @@ export class SkillsManager {
   private loadedSkills: Skill[] = [];
 
   constructor(config: SkillsManagerConfig = {}) {
-    this.skillsDir = config.skillsDir || join(homedir(), '.clodds', 'skills');
+    this.skillsDir = config.skillsDir || statePath('skills');
   }
 
   /** Load skills from disk */
@@ -280,7 +281,7 @@ export class SkillsRegistryClient {
 
   constructor(config: SkillsRegistryConfig = {}) {
     this.registryUrl = config.registryUrl || 'https://registry.clodds.dev';
-    this.skillsDir = config.skillsDir || join(homedir(), '.clodds', 'skills');
+    this.skillsDir = config.skillsDir || statePath('skills');
   }
 
   /** Search for skills in the registry */

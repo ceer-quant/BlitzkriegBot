@@ -85,11 +85,11 @@ function checkEngineRateLimit(engine: string): { allowed: boolean; resetInMs: nu
   const now = Date.now();
   const windowMs = Math.max(
     1_000,
-    parseInt(process.env.CLODDS_SEARCH_RATE_WINDOW_MS || '', 10) || DEFAULT_RATE_LIMIT_WINDOW_MS
+    parseInt(process.env.BLITZKRIEG_SEARCH_RATE_WINDOW_MS || '', 10) || DEFAULT_RATE_LIMIT_WINDOW_MS
   );
   const maxRequests = Math.max(
     1,
-    parseInt(process.env.CLODDS_SEARCH_RATE_MAX || '', 10) || DEFAULT_RATE_LIMIT_MAX
+    parseInt(process.env.BLITZKRIEG_SEARCH_RATE_MAX || '', 10) || DEFAULT_RATE_LIMIT_MAX
   );
 
   let entry = engineRateLimits.get(engine);

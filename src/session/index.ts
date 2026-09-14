@@ -15,6 +15,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { logger } from '../utils/logger';
+import { statePath } from '../utils/brand-paths';
 
 // =============================================================================
 // TYPES
@@ -97,7 +98,7 @@ export class SessionManager extends EventEmitter {
       ...config,
     };
 
-    this.storageDir = config.storageDir || join(homedir(), '.clodds', 'sessions');
+    this.storageDir = config.storageDir || statePath('sessions');
     this.localParticipantId = this.generateId();
     this.ensureStorageDir();
     this.loadSessions();

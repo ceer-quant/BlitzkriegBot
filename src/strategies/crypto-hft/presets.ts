@@ -9,8 +9,9 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { logger } from '../../utils/logger.js';
 import type { CryptoHftConfig, StrategyPreset } from './types.js';
+import { resolveStateDir } from '../../utils/brand-paths';
 
-const PRESETS_DIR = join(homedir(), '.clodds');
+const PRESETS_DIR = resolveStateDir();
 const PRESETS_FILE = join(PRESETS_DIR, 'crypto-hft-presets.json');
 
 function ensureDir() {

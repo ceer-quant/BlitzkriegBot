@@ -14,6 +14,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { logger } from '../utils/logger.js';
 import { getRegistryService } from '../acp/registry.js';
+import { resolveStateDir } from '../utils/brand-paths';
 
 // ── Launch Registry (persisted to disk) ─────────────────────────────────────
 
@@ -54,7 +55,7 @@ interface LaunchRecord {
   feeDelegates?: string[];
 }
 
-const STATE_DIR = process.env.CLODDS_STATE_DIR || join(process.cwd(), '.clodds');
+const STATE_DIR = resolveStateDir();
 const LAUNCHES_FILE = join(STATE_DIR, 'launches.json');
 
 function loadLaunches(): LaunchRecord[] {

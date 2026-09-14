@@ -14,6 +14,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { loadConfig } from '../../utils/config';
 import { resolveWhatsAppAccounts } from '../../channels/whatsapp/index';
+import { resolveConfigPath, resolveDbPath, resolveStateDir, statePath } from '../../utils/brand-paths';
 
 interface CheckResult {
   name: string;
@@ -53,9 +54,10 @@ export async function runDoctor(): Promise<CheckResult[]> {
 
   // 2. Config file exists
   const configPaths = [
-    path.join(process.cwd(), 'clodds.json'),
+    path.join(process.cwd(), '.blitzkrieg.json'),
+    path.join(process.cwd(), '.clodds.json'),
     path.join(process.cwd(), 'clodds.config.json'),
-    path.join(process.env.HOME || '', '.clodds', 'clodds.json'),
+    resolveConfigPath(),
   ];
 
   let configFound = false;
@@ -376,7 +378,7 @@ export async function runDoctor(): Promise<CheckResult[]> {
   }
 
   // 5. Data directory
-  const dataDir = path.join(process.env.HOME || '', '.clodds');
+  const dataDir = resolveStateDir();
   if (fs.existsSync(dataDir)) {
     try {
       fs.accessSync(dataDir, fs.constants.W_OK);
@@ -403,7 +405,7 @@ export async function runDoctor(): Promise<CheckResult[]> {
   }
 
   // 6. Database file
-  const dbPath = path.join(dataDir, 'clodds.db');
+  const dbPath = resolveDbPath();
   if (fs.existsSync(dbPath)) {
     const stats = fs.statSync(dbPath);
     const sizeMb = (stats.size / 1024 / 1024).toFixed(2);
@@ -434,7 +436,7 @@ export async function runDoctor(): Promise<CheckResult[]> {
           name: 'Database validity',
           status: 'warn',
           message: 'File exists but may not be valid SQLite',
-          fix: 'Delete ~/.clodds/clodds.db and restart to recreate',
+          fix: `Delete ${dbPath} and restart to recreate`,
         });
       }
     } catch (error) {
@@ -499,8 +501,8 @@ export async function runDoctor(): Promise<CheckResult[]> {
   }
 
   // 9. Webhook endpoints
-  const scheme = process.env.CLODDS_PUBLIC_SCHEME || 'http';
-  const host = process.env.CLODDS_PUBLIC_HOST || 'localhost';
+  const scheme = process.env.BLITZKRIEG_PUBLIC_SCHEME || 'http';
+  const host = process.env.BLITZKRIEG_PUBLIC_HOST || 'localhost';
   const portSuffix = config.gateway?.port && ![80, 443].includes(config.gateway.port)
     ? `:${config.gateway.port}`
     : '';

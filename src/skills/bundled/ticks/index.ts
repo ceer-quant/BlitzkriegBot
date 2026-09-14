@@ -8,7 +8,7 @@
  * /ticks stats                              Get recorder stats
  */
 
-const GATEWAY_URL = process.env.CLODDS_GATEWAY_URL || 'http://localhost:3000';
+const GATEWAY_URL = process.env.BLITZKRIEG_GATEWAY_URL || 'http://localhost:3000';
 
 interface TicksResponse {
   ticks: Array<{

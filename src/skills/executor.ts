@@ -445,9 +445,9 @@ const ENV_VAR_DOCS: Record<string, { description: string; example: string; url?:
     description: 'When "true", simulates trades without executing',
     example: 'export DRY_RUN="true"',
   },
-  CLODDS_CREDENTIAL_KEY: {
+  BLITZKRIEG_CREDENTIAL_KEY: {
     description: 'Encryption key for credential storage (AES-256-GCM)',
-    example: 'export CLODDS_CREDENTIAL_KEY="your-32-char-key"',
+    example: 'export BLITZKRIEG_CREDENTIAL_KEY="your-32-char-key"',
   },
   COMPOSIO_API_KEY: {
     description: 'Composio API key for X/Twitter research (free tier available)',

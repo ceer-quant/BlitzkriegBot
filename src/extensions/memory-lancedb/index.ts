@@ -1,3 +1,4 @@
+import { statePath } from '../../utils/brand-paths';
 /**
  * Memory LanceDB Backend Extension
  * Provides vector storage using LanceDB for long-term memory
@@ -83,7 +84,7 @@ interface LanceDB {
 }
 
 export async function createLanceDBExtension(config: LanceDBConfig): Promise<LanceDBExtension> {
-  const dbPath = config.dbPath || path.join(process.env.HOME || '.', '.clodds', 'memory.lance');
+  const dbPath = config.dbPath || statePath('memory.lance');
   const tableName = config.tableName || 'memories';
   const dimensions = config.dimensions ?? (config.embeddingModel === 'local' ? 384 : 1536);
 

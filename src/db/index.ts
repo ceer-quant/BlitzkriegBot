@@ -1,3 +1,4 @@
+import { resolveDbPath } from '../utils/brand-paths';
 /**
  * Database - SQLite (sql.js WASM) for local persistence
  */
@@ -31,7 +32,7 @@ export type SqlBindValue = string | number | boolean | null | undefined;
 type SqlParams = SqlBindValue[] | unknown[];
 
 const DB_DIR = resolveStateDir();
-const DB_FILE = join(DB_DIR, 'clodds.db');
+const DB_FILE = resolveDbPath();
 const BACKUP_DIR = join(DB_DIR, 'backups');
 
 // Hyperliquid types
@@ -1954,8 +1955,8 @@ export async function initDatabase(): Promise<Database> {
   }
 
   function getBackupConfig(): { enabled: boolean; intervalMs: number; maxFiles: number } {
-    const intervalMinutes = Number.parseInt(process.env.CLODDS_DB_BACKUP_INTERVAL_MINUTES || '60', 10);
-    const maxFiles = Number.parseInt(process.env.CLODDS_DB_BACKUP_MAX || '10', 10);
+    const intervalMinutes = Number.parseInt(process.env.BLITZKRIEG_DB_BACKUP_INTERVAL_MINUTES || '60', 10);
+    const maxFiles = Number.parseInt(process.env.BLITZKRIEG_DB_BACKUP_MAX || '10', 10);
     const intervalMs = Math.max(1, intervalMinutes) * 60 * 1000;
     return {
       enabled: intervalMinutes > 0 && maxFiles > 0,

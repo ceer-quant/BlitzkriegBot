@@ -162,7 +162,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<JsonRpcResponse | nul
         return errorResponse(req.id, -32602, injectionMsg);
       }
 
-      const TOOL_TIMEOUT_MS = Number(process.env.CLODDS_MCP_TOOL_TIMEOUT_MS || 30000);
+      const TOOL_TIMEOUT_MS = Number(process.env.BLITZKRIEG_MCP_TOOL_TIMEOUT_MS || 30000);
       let toolResult: Awaited<ReturnType<typeof callTool>>;
       try {
         toolResult = await Promise.race([

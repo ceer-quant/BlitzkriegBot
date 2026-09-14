@@ -89,9 +89,9 @@ async function execute(args: string): Promise<string> {
       }
 
       case 'status': {
-        const hasKey = Boolean(process.env.CLODDS_CREDENTIAL_KEY);
+        const hasKey = Boolean(process.env.BLITZKRIEG_CREDENTIAL_KEY);
         return `**Credential System Status**\n\n` +
-          `Encryption key: ${hasKey ? 'Set (CLODDS_CREDENTIAL_KEY)' : 'NOT SET - credentials cannot be encrypted'}\n` +
+          `Encryption key: ${hasKey ? 'Set (BLITZKRIEG_CREDENTIAL_KEY)' : 'NOT SET - credentials cannot be encrypted'}\n` +
           `Algorithm: AES-256-GCM\n` +
           `Storage: SQLite (encrypted at rest)`;
       }
@@ -115,7 +115,7 @@ function helpText(): string {
   /creds status                        - Encryption system status
 
 **Platforms:** polymarket, kalshi, manifold
-Credentials encrypted with AES-256-GCM. Set CLODDS_CREDENTIAL_KEY env var.`;
+Credentials encrypted with AES-256-GCM. Set BLITZKRIEG_CREDENTIAL_KEY env var.`;
 }
 
 export default {

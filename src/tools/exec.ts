@@ -86,7 +86,7 @@ const MAX_BG_OUTPUT_BYTES = 512 * 1024; // 512KB per stream
 
 const DEFAULT_TIMEOUT = 30000; // 30 seconds
 const DEFAULT_MAX_OUTPUT = 1024 * 1024; // 1MB
-const DEFAULT_DOCKER_IMAGE = process.env.CLODDS_SANDBOX_IMAGE || 'debian:bookworm-slim';
+const DEFAULT_DOCKER_IMAGE = process.env.BLITZKRIEG_SANDBOX_IMAGE || 'debian:bookworm-slim';
 
 function runProcess(
   command: string,
@@ -292,7 +292,7 @@ export function createExecTool(workspaceDir: string, defaultAgentId: string = 'd
       const maxOutput = options.maxOutput || DEFAULT_MAX_OUTPUT;
       const agentId = options.agentId || defaultAgentId;
       const sandboxMode =
-        options.sandboxMode || (process.env.CLODDS_SANDBOX_MODE === 'docker' ? 'docker' : 'off');
+        options.sandboxMode || (process.env.BLITZKRIEG_SANDBOX_MODE === 'docker' ? 'docker' : 'off');
 
       logger.info({ command, cwd, background: options.background, agentId }, 'Executing command');
 

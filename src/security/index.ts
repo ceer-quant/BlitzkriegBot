@@ -16,6 +16,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { promisify } from 'util';
 import { logger } from '../utils/logger';
+import { statePath } from '../utils/brand-paths';
 
 const scryptAsync = promisify(scrypt);
 
@@ -85,7 +86,7 @@ export class PairingManager {
   private storePath: string;
 
   constructor(storePath?: string) {
-    this.storePath = storePath || join(homedir(), '.clodds', 'paired-users.json');
+    this.storePath = storePath || statePath('paired-users.json');
     this.loadPairedUsers();
   }
 
@@ -416,7 +417,7 @@ export class SecretStore {
   private _ready: Promise<void>;
 
   constructor(encryptionKey?: string, storePath?: string) {
-    this.storePath = storePath || join(homedir(), '.clodds', 'secrets.enc');
+    this.storePath = storePath || statePath('secrets.enc');
 
     // initEncryption must complete before load() to decrypt properly
     this._ready = (async () => {

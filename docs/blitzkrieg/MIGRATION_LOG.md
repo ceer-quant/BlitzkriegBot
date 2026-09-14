@@ -1198,3 +1198,61 @@ spawn 时拼进命令行。上线后发现这在两个场景下都会**静默失
   这个内核而非另起一个。待外壳随下次受控重启更新后，规范名自动生效，无需额外迁移动作。
 - E1 其余分级（A 加密盐/链上备注需用户裁决；C `CLODDS_*` 与 `~/.clodds`；D MCP 命名空间等协议面；
   E 化妆项；F `dist/` 重建；G `origin` remote）见 Issue #21–#25，未在本轮触碰。
+
+
+---
+
+## 39. 【E1-c 品牌清理】配置面改名：`BLITZKRIEG_*` 规范环境变量 + 磁盘路径统一裁决（零数据迁移）
+
+**背景**
+E1 C 级（Issue #23）：约 40 个源文件直接读 `process.env.CLODDS_*`，另有约 47 处
+`join(homedir(), '.clodds', …)` 硬编码，且路径逻辑在 `utils/config` 与 `config/index` 两处重复。
+硬改名会让现有用户的 `~/.clodds/clodds.json`、`clodds.db`、`.env` 里的凭证一夜失效，因此本轮的
+铁律是：**规范名全部切换为 `BLITZKRIEG_*` / `.blitzkrieg`，但旧名保留一个发布周期的可发现别名；
+任何情况下都不移动、不复制、不删除用户数据；规范名存在时永远以规范名为准。**
+
+**实现**
+1. **环境变量契约 `src/utils/env.ts`（新）**：`BLITZKRIEG_*` 为规范名、`CLODDS_*` 为同构废弃别名。
+   `adoptLegacyEnv()` 在进程启动时把旧名镜像到规范名（已设置的规范名/非空值优先，空串视为未设置）；
+   `readBrandEnv(suffix)` 供读取点规范名优先、旧名兜底并只警告一次；每个进程对旧名只输出一行汇总
+   弃用告警（`[config]` 前缀，刻意不引 logger 以避免依赖环）。
+2. **磁盘路径单一裁决源 `src/utils/brand-paths.ts`（新）**：集中状态目录、配置文件、db、工作区、
+   XDG 配置、项目级配置、项目托管 skills 目录、launchd/systemd 服务名共 8 类路径。核心规则
+   「规范路径存在则用规范路径；规范路径不存在而旧路径存在则沿用旧路径」——
+   即 `~/.blitzkrieg` 不存在但 `~/.clodds` 存在时继续用旧目录（沿用 `clodds.db`/`clodds.json`），
+   新装直接落 `~/.blitzkrieg`；`BLITZKRIEG_STATE_DIR`/`CLODDS_STATE_DIR` 显式覆盖同样遵守
+   规范名优先。全部函数接受可注入的 `env`/`home`，路径裁决因此可做纯单测。
+3. **启动引导 `src/utils/brand-bootstrap.ts`（新，幂等）**：按状态目录候选（显式环境变量 →
+   已存在的 `~/.blitzkrieg` → 已存在的 `~/.clodds`）依次加载其 `.env`，再 CWD 兜底，最后
+   `adoptLegacyEnv()`。`src/index.ts`、`src/cli/index.ts`、`src/bin/worker.ts`、`src/utils/config.ts`
+   四个入口把它作为**第一个 import**（shebang/LOG_LEVEL 静音块之后），删除各自内联的 dotenv/镜像代码。
+4. **全量机械改名**：约 40 个文件中的 `process.env.CLODDS_X` → `process.env.BLITZKRIEG_X`；
+   约 47 处 `join(homedir(), '.clodds', …)` → `statePath(…)`。`utils/config` 与 `config/index`
+   保留原导出面，内部改为对 `brand-paths` 的薄包装/再导出，调用方零改动。
+5. **服务与包名**：daemon 写 `com.blitzkrieg.gateway`（launchd）/ `blitzkrieg.service`（systemd），
+   安装前先卸载同名旧单元（`removeLegacyService()`，失败不阻断），杜绝双单元并存；
+   `package.json` bin 同时暴露 `blitzkrieg`（新单元使用）与 `clodds`（一个发布周期兼容）。
+   `.env.example` 21 个键全部改为 `BLITZKRIEG_*` 并加头部说明。npm 包的 `name` 字段与 MCP
+   工具命名空间刻意**不动**——属于 E1-d（#24）协议面，需双前缀兼容期。
+6. **项目级面**：工作区初始化写 `.blitzkrieg.json`/`blitzkrieg-project`；已存在的
+   `.clodds/skills` 仍在托管 skills 搜索路径内（`projectManagedSkillsDirs` 返回新旧两个目录）。
+
+**验证**
+- 新增 36 个测试：`tests/unit/brand-env.test.ts`（10，镜像/规范优先/空串/只警告一次）、
+  `tests/unit/brand-paths.test.ts`（~16，假 HOME 覆盖新装/仅旧目录/两者并存/XDG/显式覆盖）、
+  重写 `config-paths.test.ts`（7）与集成 `db-state-dir.test.ts`（2：规范目录下建 `blitzkrieg.db`；
+  已存在的零字节 `clodds.db` 被沿用且不出现 `blitzkrieg.db`）。
+- `npm test`：**175 pass / 0 fail / 31 suites**；`npx tsc --noEmit` 0 错；`npm run build` OK
+  （`dist/` 由构建重建，未手改）。
+- `cargo test --workspace`：**169 passed / 0 failed**（本轮不动 Rust）。
+- 8 个脚本门禁全绿：`parity-engines` PARITY OK、`core-parity` RUST CORE PARITY OK、
+  `cycle-check` PASS、`backtest-check` 21/21、`position-recovery-check` PASS、
+  `ui-kit-gateway-check` PASS、`core-adopt-check` PASS、`socket-migration-check` PASS
+  （旧名内核领养 + 无名时规范名 spawn 两阶段均过）；`scripts/secret-scan.sh` OK。
+
+**遗留**
+- 旧名别名计划保留一个发布周期：届时需先统计 `CLODDS_*`/`~/.clodds` 实际存量，再定移除节奏，
+  不做静默迁移。
+- 仍未触碰：A 级加密盐/链上备注与 G 级 `origin` remote（待用户裁决 D-13）、
+  D 级 MCP 命名空间/`clodds://` URI/UA/健康检查名称、E 级 CLI 帮助文本与文档化妆项、
+  F 级随发布重建的 `dist/`、npm 包 `name`——均归 #21/#24/#25。

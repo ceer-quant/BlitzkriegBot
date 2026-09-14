@@ -87,7 +87,7 @@ export class GeminiProvider implements Provider {
   name = 'gemini';
   private apiKey: string;
   private baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
-  private defaultModel = process.env.CLODDS_GEMINI_MODEL || 'gemini-1.5-pro';
+  private defaultModel = process.env.BLITZKRIEG_GEMINI_MODEL || 'gemini-1.5-pro';
 
   constructor(apiKey: string) {
     this.apiKey = apiKey;
@@ -841,9 +841,9 @@ export class ProviderManager extends EventEmitter {
   }> = new Map();
 
   private readonly circuitConfig = {
-    failureThreshold: (() => { const v = Number(process.env.CLODDS_PROVIDER_CB_FAILURE_THRESHOLD); return Number.isNaN(v) ? 3 : v; })(),
-    cooldownMs: (() => { const v = Number(process.env.CLODDS_PROVIDER_CB_COOLDOWN_MS); return Number.isNaN(v) ? 60_000 : v; })(),
-    successResetThreshold: (() => { const v = Number(process.env.CLODDS_PROVIDER_CB_SUCCESS_RESET); return Number.isNaN(v) ? 2 : v; })(),
+    failureThreshold: (() => { const v = Number(process.env.BLITZKRIEG_PROVIDER_CB_FAILURE_THRESHOLD); return Number.isNaN(v) ? 3 : v; })(),
+    cooldownMs: (() => { const v = Number(process.env.BLITZKRIEG_PROVIDER_CB_COOLDOWN_MS); return Number.isNaN(v) ? 60_000 : v; })(),
+    successResetThreshold: (() => { const v = Number(process.env.BLITZKRIEG_PROVIDER_CB_SUCCESS_RESET); return Number.isNaN(v) ? 2 : v; })(),
   };
 
   private getCircuit(provider: string) {

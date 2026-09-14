@@ -18,6 +18,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { logger } from '../utils/logger';
 import Anthropic from '@anthropic-ai/sdk';
+import { statePath } from '../utils/brand-paths';
 
 // =============================================================================
 // TYPES
@@ -244,7 +245,7 @@ export function classifyError(error: Error): { category: ErrorCategory; retryabl
 // SESSION PERSISTENCE
 // =============================================================================
 
-const PERSISTENCE_DIR = join(homedir(), '.clodds', 'subagents');
+const PERSISTENCE_DIR = statePath('subagents');
 
 /**
  * Ensure persistence directory exists

@@ -20,7 +20,7 @@ import { logger } from '../utils/logger';
 
 const MCP_RESOURCE_CHUNK_BYTES = Math.max(
   1024,
-  Number(process.env.CLODDS_MCP_RESOURCE_CHUNK_BYTES || 64 * 1024)
+  Number(process.env.BLITZKRIEG_MCP_RESOURCE_CHUNK_BYTES || 64 * 1024)
 );
 
 // =============================================================================
@@ -287,7 +287,7 @@ class StdioMcpClient implements McpClient {
   private buffer = '';
   private events = new EventEmitter();
   private reconnectAttempts = 0;
-  private defaultTimeoutMs = Number(process.env.CLODDS_MCP_REQUEST_TIMEOUT_MS || 15000);
+  private defaultTimeoutMs = Number(process.env.BLITZKRIEG_MCP_REQUEST_TIMEOUT_MS || 15000);
 
   serverInfo?: McpServerInfo;
   connected = false;
@@ -572,7 +572,7 @@ class SseMcpClient implements McpClient {
   private buffer = '';
   private abortController: AbortController | null = null;
   private reconnectAttempts = 0;
-  private defaultTimeoutMs = Number(process.env.CLODDS_MCP_REQUEST_TIMEOUT_MS || 15000);
+  private defaultTimeoutMs = Number(process.env.BLITZKRIEG_MCP_REQUEST_TIMEOUT_MS || 15000);
 
   serverInfo?: McpServerInfo;
   connected = false;
@@ -869,7 +869,7 @@ export function createMcpRegistry(): McpRegistry {
   const servers: Map<string, McpServerConfig> = new Map();
   const clients: Map<string, McpClient> = new Map();
   const promptCache = new Map<string, { content: McpContent[]; expiresAt: number }>();
-  const promptTtlMs = Number(process.env.CLODDS_MCP_PROMPT_CACHE_TTL_MS || 5 * 60 * 1000);
+  const promptTtlMs = Number(process.env.BLITZKRIEG_MCP_PROMPT_CACHE_TTL_MS || 5 * 60 * 1000);
   const PROMPT_CACHE_MAX_SIZE = 500;
 
   // Evict expired entries (called periodically)

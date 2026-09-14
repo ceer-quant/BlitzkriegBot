@@ -293,8 +293,8 @@ describe('Metrics Endpoint', () => {
   });
 
   it('should return metrics without auth when no token set', async () => {
-    const originalToken = process.env.CLODDS_TOKEN;
-    delete process.env.CLODDS_TOKEN;
+    const originalToken = process.env.BLITZKRIEG_TOKEN;
+    delete process.env.BLITZKRIEG_TOKEN;
 
     try {
       const response = await makeRequest(testPort, 'GET', '/metrics');
@@ -303,14 +303,14 @@ describe('Metrics Endpoint', () => {
       assert.ok('totalRequests' in (response.body as any));
     } finally {
       if (originalToken) {
-        process.env.CLODDS_TOKEN = originalToken;
+        process.env.BLITZKRIEG_TOKEN = originalToken;
       }
     }
   });
 
   it('should require auth when token is set', async () => {
-    const originalToken = process.env.CLODDS_TOKEN;
-    process.env.CLODDS_TOKEN = 'test-secret-token';
+    const originalToken = process.env.BLITZKRIEG_TOKEN;
+    process.env.BLITZKRIEG_TOKEN = 'test-secret-token';
 
     try {
       const response = await makeRequest(testPort, 'GET', '/metrics');
@@ -318,16 +318,16 @@ describe('Metrics Endpoint', () => {
       assert.strictEqual(response.status, 401);
     } finally {
       if (originalToken) {
-        process.env.CLODDS_TOKEN = originalToken;
+        process.env.BLITZKRIEG_TOKEN = originalToken;
       } else {
-        delete process.env.CLODDS_TOKEN;
+        delete process.env.BLITZKRIEG_TOKEN;
       }
     }
   });
 
   it('should accept valid token via header', async () => {
-    const originalToken = process.env.CLODDS_TOKEN;
-    process.env.CLODDS_TOKEN = 'test-secret-token';
+    const originalToken = process.env.BLITZKRIEG_TOKEN;
+    process.env.BLITZKRIEG_TOKEN = 'test-secret-token';
 
     try {
       const response = await makeRequest(testPort, 'GET', '/metrics', {
@@ -337,16 +337,16 @@ describe('Metrics Endpoint', () => {
       assert.strictEqual(response.status, 200);
     } finally {
       if (originalToken) {
-        process.env.CLODDS_TOKEN = originalToken;
+        process.env.BLITZKRIEG_TOKEN = originalToken;
       } else {
-        delete process.env.CLODDS_TOKEN;
+        delete process.env.BLITZKRIEG_TOKEN;
       }
     }
   });
 
   it('should accept valid token via query param', async () => {
-    const originalToken = process.env.CLODDS_TOKEN;
-    process.env.CLODDS_TOKEN = 'test-secret-token';
+    const originalToken = process.env.BLITZKRIEG_TOKEN;
+    process.env.BLITZKRIEG_TOKEN = 'test-secret-token';
 
     try {
       const response = await makeRequest(testPort, 'GET', '/metrics?token=test-secret-token');
@@ -354,9 +354,9 @@ describe('Metrics Endpoint', () => {
       assert.strictEqual(response.status, 200);
     } finally {
       if (originalToken) {
-        process.env.CLODDS_TOKEN = originalToken;
+        process.env.BLITZKRIEG_TOKEN = originalToken;
       } else {
-        delete process.env.CLODDS_TOKEN;
+        delete process.env.BLITZKRIEG_TOKEN;
       }
     }
   });

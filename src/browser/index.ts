@@ -16,6 +16,7 @@ import { join } from 'path';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import * as http from 'http';
 import * as https from 'https';
+import { statePath } from '../utils/brand-paths';
 
 // =============================================================================
 // CDP (Chrome DevTools Protocol) Client
@@ -429,7 +430,7 @@ export function createBrowserService(): BrowserService {
       debuggingPort = 9222 + Math.floor(Math.random() * 100);
 
       // User data dir for profile persistence
-      const userDataDir = options.userDataDir || join(homedir(), '.clodds', 'browser-profile');
+      const userDataDir = options.userDataDir || statePath('browser-profile');
       if (!existsSync(userDataDir)) {
         mkdirSync(userDataDir, { recursive: true });
       }
