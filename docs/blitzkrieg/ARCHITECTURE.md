@@ -96,13 +96,31 @@ pub trait MarketPlugin: Send + Sync {      // 把三者打包为一个注册单�
 `RiskContext` 与 `LedgerApi` 保留为市场无关抽象；当前交易路径直接调 `Ledger` 固有方法，
 trait 作为后续多市场（含杠杆/强平）的占位。
 
-## 4. 策略引擎（`strategy_engine/`）
+## 4. 策略引擎（`strategies/` 宿主 + `strategy_engine/` 加载器）
+
+**P-1.1 起：自驱动引擎是多策略宿主。** `engine::Engine` 遍历已注册且启用的策略产生候选单，
+再统一执行共享闸门（回合时序、现货动量、每 token 每周期最多一单、按 `compute_shares` 定仓）与
+per-strategy 限额/分账。策略标签贯穿订单（`OrderRequest.strategy`）→ 持仓 → 平仓账本，
+`engine.stats` 的 `strategies[]` 按策略给出敞口与会话 PnL。
+
+- `strategies::EngineStrategy`（宿主契约）：`on_book`/`on_round`/`find_candidates`/`take_breaks`/
+  `confirmed_tokens`/`diagnostics`/`set_hot_params`/`on_config`；只读视图 `StrategyCtx`（markets、
+  回合剩余、`fresh_book`）——**策略无法绕过宿主闸门**（sizing/风控/限额都在宿主与 Core 侧）。
+- `strategies::SpreadArbBuiltin`：现役 `spread_arb` 的宿主化实现（趋势跟踪 + 热参数 + 入场评估），
+  `internal_key` 与候选顺序与旧 `Engine` 逐位一致（parity 硬门槛）。
+- `strategies::UserStrategyAdapter`：把 C-ABI 用户策略（`Strategy` trait，见下）适配为宿主策略；
+  **注册后默认 `enabled=false`**，需显式 `strategy.enable` 才开始交易。
+- 单策略注册表：`Engine::supported_strategies()`（注册序）/ `enabled_strategies()` / `set_strategy_enabled()` /
+  `register_user_strategy()` / `strategy_source()`。`load_strategy_lib` 在引擎在位时把动态库策略
+  **注册进引擎调度（disabled）**，否则退回独立 `StrategyEngine` 注册表。
+
+`strategy_engine/` 保留为**用户策略的加载/校验/独立注册表**（非自驱动引擎时的诊断用途）：
 
 - `Strategy` trait：`on_tick(&MarketTick) -> Option<Signal>`，纯逻辑、无 I/O。
 - `Signal`：`Buy{price,size}` / `Sell{price}` / `Hold`——只表达意图，不含签名/订单号。
 - `validate_signal`：内核校验闸（价格范围、symbol 匹配、size 为正），**在风控/账本/下单之前**执行，用户层无法绕过。
 - `loader`：动态库加载（`libloading`，feature `strategy-loading`）。`policy_allows` 拒绝凭据样式文件名（含 `key/secret/private/credential`）与非共享库扩展名。
-- `builtins::SpreadArbStrategy`：把既有 `spread_arb` 评估器包装为 `Strategy`，行为不变。
+- 用户策略的 `Sell` 信号不执行：出场/止损归内核 `exit_policy` 所有（见 `STRATEGY_GUIDE.md`）。
 
 ## 5. 两套"插件"系统（务必区分）
 
@@ -142,7 +160,8 @@ venue/feed/discovery/gamma 从内核**物理迁出**到扩展，行为逐笔等�
 market_api/               # 市场契约（无内部依赖；内核与扩展共享）
 Blitzkrieg_core/          # Rust 内核（零市场代码）
 ├── src/
-│   ├── strategy_engine/  # 策略引擎（mod/builtins/loader）
+│   ├── strategies/       # 多策略宿主契约 + 内建 spread_arb + 用户策略适配器
+│   ├── strategy_engine/  # 用户策略加载/校验/独立注册表（mod/loader）
 │   ├── market/           # 接缝：mod（选择/注册）/ host / registry
 │   ├── order/            # 订单语义（re-export market_api）
 │   ├── extension/        # 扩展系统（生命周期/审计，与 market 插件分离）

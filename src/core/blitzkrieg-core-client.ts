@@ -575,8 +575,17 @@ export class BlitzkriegCoreClient extends EventEmitter {
   async stats(): Promise<{
     books: number; tops: number; spots: number; rounds: number;
     evaluations: number; signals: number; placeRejected: number;
+    strategyLimitRejected: number;
     blocked: { timing: number; momentum: number } | null;
     confirmed: string[];
+    /** Per-strategy session ledger + live exposure (P-1.1). */
+    strategies: Array<{
+      name: string; enabled: boolean; source: string;
+      openPositions: number; openNotionalUsd: number;
+      ordersPlaced: number; ordersRejected: number; limitRejected: number;
+      closedTrades: number; wins: number; losses: number;
+      feesUsd: number; netPnlUsd: number;
+    }>;
   } | null> {
     return this.request('engine.stats');
   }

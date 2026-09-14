@@ -228,20 +228,39 @@ pub fn load_and_register(
     engine: &mut crate::strategy_engine::StrategyEngine,
     path: &Path,
 ) -> LoadOutcome {
+    match load_boxed(path) {
+        Ok(loaded) => {
+            engine.register(loaded.strategy, format!("dylib:{}", path.display()));
+            LoadOutcome::Loaded { path: path.to_path_buf(), name: loaded.name, version: loaded.version }
+        }
+        Err(outcome) => outcome,
+    }
+}
+
+/// A loaded user strategy, before it is registered anywhere.
+#[cfg(feature = "strategy-loading")]
+pub struct LoadedStrategy {
+    pub strategy: Box<dyn crate::strategy_engine::Strategy>,
+    pub name: String,
+    pub version: String,
+}
+
+/// Load a user strategy library and hand back the instance boxed as the
+/// user-layer `Strategy` contract. The caller decides which registry it lands
+/// in: the self-driving engine's live dispatch, or the standalone engine.
+#[cfg(feature = "strategy-loading")]
+pub fn load_boxed(path: &Path) -> Result<LoadedStrategy, LoadOutcome> {
     match DynamicStrategy::load(path) {
-        Ok(ds) => {
-            let name = ds.name().to_string();
-            let version = ds.version.clone();
-            engine.register(Box::new(ds), format!("dylib:{}", path.display()));
-            LoadOutcome::Loaded { path: path.to_path_buf(), name, version }
-        }
-        Err(reason) => {
-            if policy_allows(path).is_err() {
-                LoadOutcome::Rejected { path: path.to_path_buf(), reason }
-            } else {
-                LoadOutcome::Failed { path: path.to_path_buf(), reason }
-            }
-        }
+        Ok(ds) => Ok(LoadedStrategy {
+            name: ds.name().to_string(),
+            version: ds.version.clone(),
+            strategy: Box::new(ds),
+        }),
+        Err(reason) => Err(if policy_allows(path).is_err() {
+            LoadOutcome::Rejected { path: path.to_path_buf(), reason }
+        } else {
+            LoadOutcome::Failed { path: path.to_path_buf(), reason }
+        }),
     }
 }
 

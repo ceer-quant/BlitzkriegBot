@@ -310,6 +310,13 @@ async function executeRust(cmd: string, args: string, parts: string[]): Promise<
         // small live balance (e.g. 4.8u → HFT_MAX_SHARES=4) without a rebuild.
         const minShares = parseInt(process.env.HFT_MIN_SHARES || String(DEFAULT_CONFIG.minShares), 10);
         const maxShares = parseInt(process.env.HFT_MAX_SHARES || String(DEFAULT_CONFIG.maxShares), 10);
+        // Optional per-strategy entry caps (P-1.1), comma-separated
+        // `name:maxOpen:maxNotional` (`-`/empty segment = uncapped). Ops-only knob:
+        // unset → no flag → per-strategy behaviour unchanged.
+        const strategyLimits = (process.env.HFT_STRATEGY_LIMITS || '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
         await runner.start({
           assets,
           roundSec,
@@ -321,11 +328,13 @@ async function executeRust(cmd: string, args: string, parts: string[]): Promise<
           maxDailyLossUsd: DEFAULT_CONFIG.maxDailyLossUsd,
           minRoundAgeSec: DEFAULT_CONFIG.minRoundAgeSec,
           minTimeLeftSec: DEFAULT_CONFIG.minTimeLeftSec,
+          strategyLimits,
         });
         return [
           `**Crypto HFT Started (Rust core) [${dryRun ? 'DRY RUN' : 'LIVE'}]**`,
           `Assets: ${assets.join(', ')}`,
           `Round: ${roundSec}s | Size: $${sizeUsd}/trade | Lot: ${minShares}–${maxShares} sh`,
+          ...(strategyLimits.length ? [`Strategy caps: ${strategyLimits.join(' | ')}`] : []),
           `Engine: blitzkrieg-core (Rust owns discovery, market data, signals, risk, orders, positions)`,
           `Node role: UI / parameters / logs only`,
         ].join('\n');
