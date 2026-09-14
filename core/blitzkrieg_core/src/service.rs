@@ -88,8 +88,19 @@ pub struct CoreConfig {
     /// replays.
     pub event_archive_path: Option<String>,
     /// Stop recording once the archive reaches this size (MiB); 0 = unlimited.
-    /// Nothing is ever deleted — a full archive just stops growing.
+    /// Nothing is ever deleted — a full archive just stops growing. This is the
+    /// whole-session bound; `event_archive_rotate_mb` bounds one segment.
     pub event_archive_max_mb: u64,
+    /// Rotate the archive into a new segment every this many MiB (0 = never).
+    /// A 24/7 capture needs this: `≈11 MB/min` reaches any sane session cap within
+    /// hours, and an un-rotated archive that hits the cap goes dark silently.
+    /// Rotation renames the finished segment (UTC-stamped) and opens a fresh one;
+    /// nothing is ever deleted.
+    pub event_archive_rotate_mb: u64,
+    /// Stop recording rather than let the archive's volume drop below this many
+    /// MiB free (0 = no guard). Checked once per rotation, so it costs nothing on
+    /// the hot path.
+    pub event_archive_min_free_mb: u64,
 }
 
 impl CoreConfig {
@@ -182,6 +193,8 @@ impl Default for CoreConfig {
             fill_model: crate::sim::FillModel::default(),
             event_archive_path: None,
             event_archive_max_mb: 512,
+            event_archive_rotate_mb: 0,
+            event_archive_min_free_mb: 0,
         }
     }
 }
@@ -257,9 +270,23 @@ impl Core {
         // recording — trading must never be blocked by an archive path problem.
         let event_archive = config.event_archive_path.as_ref().and_then(|p| {
             let cap_bytes = config.event_archive_max_mb.saturating_mul(1024 * 1024);
-            match crate::data_source::EventArchive::open(std::path::Path::new(p), cap_bytes) {
+            let rotate_bytes = config.event_archive_rotate_mb.saturating_mul(1024 * 1024);
+            let min_free_bytes =
+                config.event_archive_min_free_mb.saturating_mul(1024 * 1024);
+            match crate::data_source::EventArchive::open_full(
+                std::path::Path::new(p),
+                cap_bytes,
+                rotate_bytes,
+                min_free_bytes,
+            ) {
                 Ok(a) => {
-                    tracing::info!(path = %p, "recording market-data archive");
+                    tracing::info!(
+                        path = %p,
+                        cap_mb = config.event_archive_max_mb,
+                        rotate_mb = config.event_archive_rotate_mb,
+                        min_free_mb = config.event_archive_min_free_mb,
+                        "recording market-data archive"
+                    );
                     Some(a)
                 }
                 Err(e) => {

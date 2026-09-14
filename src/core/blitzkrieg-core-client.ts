@@ -598,6 +598,12 @@ export class BlitzkriegCoreClient extends EventEmitter {
       closedTrades: number; wins: number; losses: number;
       feesUsd: number; netPnlUsd: number;
     }>;
+    /** Market-data capture state (P-1.3); null when archiving is off. */
+    archive: {
+      path: string; events: number; bytes: number; dropped: number;
+      recording: boolean; rotateBytes: number; segmentBytes: number;
+      segments: number; freeBytes: number; stoppedReason: string | null;
+    } | null;
   } | null> {
     return this.request('engine.stats');
   }

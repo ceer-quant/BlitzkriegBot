@@ -126,7 +126,8 @@ Node 客户端：`src/core/blitzkrieg-core-client.ts`（spawn/就绪握手/崩�
 ```bash
 # 采集：真实 core 把喂给引擎的原始事件按到达顺序落盘（live 侧零改动，只多一个 writer）
 target/release/blitzkrieg-core --mode dry --engine --feed-ws --assets BTC,ETH,SOL,XRP \
-  --event-archive data/archive/events.jsonl --event-archive-max-mb 512
+  --event-archive data/archive/events.jsonl \
+  --event-archive-rotate-mb 256 --event-archive-max-mb 0 --event-archive-min-free-mb 5120
 
 # 回放：同一份二进制、同一组策略参数（务必一致，否则比较无意义）
 target/release/blitzkrieg-core --backtest data/archive/events.jsonl \
@@ -136,8 +137,14 @@ target/release/blitzkrieg-core --backtest data/archive/events.jsonl \
 
 - **归档格式**：JSONL，每行一个事件 `{"at":<ms>,"k":"book|top|spot|round",...}`，Decimal 全部以字符串
   精确编码（无浮点损失）。到上限**丢弃新事件**、绝不删除已有行；`engine.stats.archive` 暴露
-  `{path,events,bytes,dropped,recording}`。真实 feed 的吞吐参考 **≈11 MB/分钟 ≈16 GB/天**，生产环境务必配
-  `--event-archive-max-mb` 并按天轮转。
+  `{path,events,bytes,dropped,recording,rotateBytes,segmentBytes,segments,freeBytes,stoppedReason}`。
+- **分段轮转（常开采集的前提）**：`--event-archive-rotate-mb 256` 到量即把当前段改名成 UTC 时间戳兄弟
+  文件（`events.jsonl` → `events.20250914T140000Z.jsonl`）并续写新 `events.jsonl`；**只改名、不删除**，
+  同秒多次轮转用零填充序号消歧。`--event-archive-min-free-mb 5120` 在每次轮转点检查可用空间，低于阈值
+  即停录（`stoppedReason:"disk"`）——真实 feed 吞吐 **≈11 MB/分钟 ≈16 GB/天**，无限期采集的界是磁盘而
+  非文件大小，`--event-archive-max-mb 0`（无会话上限）+ 轮转 + 磁盘护栏才是"常开"的正确组合。
+- **多段重放**：`--backtest events.jsonl` 自动读入该归档**及其全部轮转段**（按名称时间戳排序、live 段在
+  后），无需人工拼接；`sourceStats` 跨段汇总。
 - **维护节拍**：回放的 `tick + engine_evaluate` 跑在**自己的 `tick_ms` 定时表**上（与 live 的
   `ipc::server` interval 同频），**与事件密度无关**。真实 feed 是亚毫秒级突发，若按"事件间隙"驱动
   评估周期，13 分钟真实归档只会跑 803 个周期（应为 15 610），出场检查变粗、`blockedTiming/Momentum`
