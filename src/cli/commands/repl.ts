@@ -119,7 +119,7 @@ export async function startRepl(options: ReplOptions = {}): Promise<void> {
     closed = true;
   });
 
-  console.log('\nClodds REPL');
+  console.log('\nBlitzkrieg REPL');
   console.log('Type messages to chat locally.');
   console.log('Commands: /help, /markets <query>, /portfolio, /status, /new');
   console.log('Exit: /exit, /quit, or Ctrl+C\n');

@@ -18,7 +18,7 @@ export function setBittensorService(svc: BittensorService | null): void {
 export const bittensorHandlers: HandlersMap = {
   bittensor: async (input: ToolInput) => {
     if (!service) {
-      return errorResult('Bittensor is not enabled. Run `clodds bittensor setup` or set BITTENSOR_ENABLED=true.');
+      return errorResult('Bittensor is not enabled. Run `blitzkrieg bittensor setup` or set BITTENSOR_ENABLED=true.');
     }
 
     const action = input.action as string;

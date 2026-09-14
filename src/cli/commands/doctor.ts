@@ -78,7 +78,7 @@ export async function runDoctor(): Promise<CheckResult[]> {
       name: 'Config file',
       status: 'warn',
       message: 'No config file found',
-      fix: 'Run: clodds onboard',
+      fix: 'Run: blitzkrieg onboard',
     });
   }
 
@@ -198,7 +198,7 @@ export async function runDoctor(): Promise<CheckResult[]> {
               name: `WhatsApp channel (${account.accountId})`,
               status: 'warn',
               message: 'Needs QR pairing',
-              fix: 'Run `clodds whatsapp login` and scan the QR code',
+              fix: 'Run `blitzkrieg whatsapp login` and scan the QR code',
             });
           }
           const accountPolicy = whatsappConfig.accounts?.[account.accountId]?.dmPolicy;
@@ -522,7 +522,7 @@ export function formatDoctorResults(results: CheckResult[]): string {
 
   lines.push('');
   lines.push('╔══════════════════════════════════════════════════════════════╗');
-  lines.push('║                      Clodds Doctor                           ║');
+  lines.push('║                      Blitzkrieg Doctor                           ║');
   lines.push('╚══════════════════════════════════════════════════════════════╝');
   lines.push('');
 
@@ -595,7 +595,7 @@ export function formatDoctorResults(results: CheckResult[]): string {
 
   if (failCount > 0) {
     lines.push('');
-    lines.push(`${statusColors.fail}Fix the critical issues above to run Clodds.${reset}`);
+    lines.push(`${statusColors.fail}Fix the critical issues above to run Blitzkrieg.${reset}`);
     lines.push('');
     lines.push('Quick fixes:');
     for (const result of failedResults) {
@@ -605,14 +605,14 @@ export function formatDoctorResults(results: CheckResult[]): string {
     }
   } else if (warnCount > 0) {
     lines.push('');
-    lines.push(`${statusColors.warn}Clodds can run, but consider fixing warnings.${reset}`);
+    lines.push(`${statusColors.warn}Blitzkrieg can run, but consider fixing warnings.${reset}`);
   } else {
     lines.push('');
     lines.push(`${statusColors.pass}✨ Everything looks good! Run: npm start${reset}`);
   }
 
   lines.push('');
-  lines.push('Need help? https://github.com/your-repo/clodds/issues');
+  lines.push('Need help? https://github.com/ceer-quant/BlitzkriegBot/issues');
 
   return lines.join('\n');
 }

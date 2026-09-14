@@ -1,7 +1,7 @@
 /**
  * Presets — Save/load named strategy configurations
  *
- * Persisted to ~/.clodds/crypto-hft-presets.json
+ * Persisted to <state dir>/crypto-hft-presets.json (brand-resolved)
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';

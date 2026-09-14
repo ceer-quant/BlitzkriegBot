@@ -86,7 +86,7 @@ export class VoiceRecognition extends EventEmitter {
   constructor(config: VoiceConfig = {}) {
     super();
     this.config = {
-      wakeWord: config.wakeWord || 'hey clodds',
+      wakeWord: config.wakeWord || 'hey blitzkrieg',
       language: config.language || 'en-US',
       sttEngine: config.sttEngine || 'whisper',
       ttsEngine: config.ttsEngine || 'say',
@@ -125,7 +125,7 @@ export class VoiceRecognition extends EventEmitter {
     logger.info('Voice recognition started');
 
     // Record audio using sox or arecord
-    const tempFile = join(tmpdir(), `clodds-audio-${randomBytes(4).toString('hex')}.wav`);
+    const tempFile = join(tmpdir(), `blitzkrieg-audio-${randomBytes(4).toString('hex')}.wav`);
 
     try {
       // Use sox to record audio
@@ -251,7 +251,7 @@ export class VoiceRecognition extends EventEmitter {
    * IMPORTANT: Caller is responsible for deleting the returned temp file.
    */
   async record(durationMs: number): Promise<string> {
-    const tempFile = join(tmpdir(), `clodds-recording-${randomBytes(4).toString('hex')}.wav`);
+    const tempFile = join(tmpdir(), `blitzkrieg-recording-${randomBytes(4).toString('hex')}.wav`);
     const durationSec = Math.max(0, Math.floor(durationMs / 1000));
 
     await execAsync(
@@ -275,7 +275,7 @@ export class TextToSpeech extends EventEmitter {
     // Default to 'say' on macOS, 'espeak' on Linux/other
     const defaultTtsEngine = platform() === 'darwin' ? 'say' : 'espeak';
     this.config = {
-      wakeWord: config.wakeWord || 'hey clodds',
+      wakeWord: config.wakeWord || 'hey blitzkrieg',
       language: config.language || 'en-US',
       sttEngine: config.sttEngine || 'whisper',
       ttsEngine: config.ttsEngine || defaultTtsEngine,
@@ -633,7 +633,7 @@ export class WakeWordDetector extends EventEmitter {
   private recognition: VoiceRecognition;
   private isRunning = false;
 
-  constructor(wakeWords: string[] = ['hey clodds', 'okay clodds']) {
+  constructor(wakeWords: string[] = ['hey blitzkrieg', 'okay blitzkrieg']) {
     super();
     this.wakeWords = wakeWords.map(w => w.toLowerCase());
     this.recognition = new VoiceRecognition();

@@ -1,4 +1,4 @@
-# Clodds User Guide
+# Blitzkrieg User Guide
 
 This guide focuses on day-to-day usage: starting the gateway, pairing users,
 chat commands, and common workflows.
@@ -6,15 +6,15 @@ chat commands, and common workflows.
 ## Quick start
 
 ```bash
-npm install -g clodds
-clodds onboard
+npm install -g blitzkrieg
+blitzkrieg onboard
 ```
 
 The wizard sets up your API key, picks a channel, and starts the gateway.
 
 **From source (alternative):**
 ```bash
-git clone https://github.com/alsk1992/CloddsBot.git && cd CloddsBot
+git clone https://github.com/alsk1992/BlitzkriegBot.git && cd BlitzkriegBot
 npm install && cp .env.example .env
 # Add ANTHROPIC_API_KEY to .env
 npm run build && npm start
@@ -24,208 +24,208 @@ The gateway listens on `http://127.0.0.1:18789` by default.
 
 ## CLI Commands Reference
 
-All `clodds` CLI commands:
+All `blitzkrieg` CLI commands:
 
 ### Core Commands
 
 ```bash
-clodds start                    # Start the gateway
-clodds repl                     # Interactive REPL mode
-clodds doctor                   # System diagnostics and health checks
-clodds status                   # Show gateway status
-clodds endpoints                # List all registered endpoints
-clodds secure [--dry-run]       # Server security hardening (Linux)
-clodds secure audit             # Run security audit only
+blitzkrieg start                    # Start the gateway
+blitzkrieg repl                     # Interactive REPL mode
+blitzkrieg doctor                   # System diagnostics and health checks
+blitzkrieg status                   # Show gateway status
+blitzkrieg endpoints                # List all registered endpoints
+blitzkrieg secure [--dry-run]       # Server security hardening (Linux)
+blitzkrieg secure audit             # Run security audit only
 ```
 
 ### Pairing Commands
 
 ```bash
-clodds pairing list <channel>              # List pending pairing requests
-clodds pairing approve <channel> <code>    # Approve a pairing request
-clodds pairing reject <channel> <code>     # Reject a pairing request
-clodds pairing users <channel>             # List paired users
-clodds pairing set-owner <channel> <id>    # Set channel owner
-clodds pairing remove-owner <channel> <id> # Remove channel owner
-clodds pairing owners <channel>            # List channel owners
-clodds pairing add <channel> <userId>      # Manually add user
-clodds pairing remove <channel> <userId>   # Remove user
+blitzkrieg pairing list <channel>              # List pending pairing requests
+blitzkrieg pairing approve <channel> <code>    # Approve a pairing request
+blitzkrieg pairing reject <channel> <code>     # Reject a pairing request
+blitzkrieg pairing users <channel>             # List paired users
+blitzkrieg pairing set-owner <channel> <id>    # Set channel owner
+blitzkrieg pairing remove-owner <channel> <id> # Remove channel owner
+blitzkrieg pairing owners <channel>            # List channel owners
+blitzkrieg pairing add <channel> <userId>      # Manually add user
+blitzkrieg pairing remove <channel> <userId>   # Remove user
 ```
 
 ### Configuration Commands
 
 ```bash
-clodds config get [key]         # Get config value or show all
-clodds config set <key> <value> # Set config value
-clodds config unset <key>       # Remove config value
-clodds config path              # Show config file path
+blitzkrieg config get [key]         # Get config value or show all
+blitzkrieg config set <key> <value> # Set config value
+blitzkrieg config unset <key>       # Remove config value
+blitzkrieg config path              # Show config file path
 ```
 
 ### Model Commands
 
 ```bash
-clodds model list               # List available models
-clodds model default [model]    # Get or set default model
+blitzkrieg model list               # List available models
+blitzkrieg model default [model]    # Get or set default model
 ```
 
 ### Session Commands
 
 ```bash
-clodds session list             # List active sessions
-clodds session clear [id]       # Clear all or specific session
+blitzkrieg session list             # List active sessions
+blitzkrieg session clear [id]       # Clear all or specific session
 ```
 
 ### Cron Commands (Scheduled Tasks)
 
 ```bash
-clodds cron list                # List scheduled jobs
-clodds cron show <id>           # Show job details
-clodds cron enable <id>         # Enable a job
-clodds cron disable <id>        # Disable a job
-clodds cron delete <id>         # Delete a job
+blitzkrieg cron list                # List scheduled jobs
+blitzkrieg cron show <id>           # Show job details
+blitzkrieg cron enable <id>         # Enable a job
+blitzkrieg cron disable <id>        # Disable a job
+blitzkrieg cron delete <id>         # Delete a job
 ```
 
 ### User Management Commands
 
 ```bash
-clodds users list                                    # List all users
-clodds users settings <platform> <platformUserId>   # Show user settings
-clodds users settings-by-id <userId>                # Show settings by ID
-clodds users set-settings <platform> <platformUserId> [options]  # Update settings
-clodds users set-settings-by-id <userId> [options]  # Update settings by ID
+blitzkrieg users list                                    # List all users
+blitzkrieg users settings <platform> <platformUserId>   # Show user settings
+blitzkrieg users settings-by-id <userId>                # Show settings by ID
+blitzkrieg users set-settings <platform> <platformUserId> [options]  # Update settings
+blitzkrieg users set-settings-by-id <userId> [options]  # Update settings by ID
 ```
 
 ### Memory Commands
 
 ```bash
-clodds memory list <userId>           # List user's memories
-clodds memory search <userId> <query> # Search user's memories
-clodds memory clear <userId>          # Clear user's memories
-clodds memory export <userId>         # Export user's memories
+blitzkrieg memory list <userId>           # List user's memories
+blitzkrieg memory search <userId> <query> # Search user's memories
+blitzkrieg memory clear <userId>          # Clear user's memories
+blitzkrieg memory export <userId>         # Export user's memories
 ```
 
 ### Hooks Commands
 
 ```bash
-clodds hooks list               # List all hooks
-clodds hooks install <path>     # Install a hook from path
-clodds hooks uninstall <name>   # Uninstall a hook
-clodds hooks enable <name>      # Enable a hook
-clodds hooks disable <name>     # Disable a hook
-clodds hooks trace              # Show hook execution trace
-clodds hooks state get <name> [key]        # Get hook state
-clodds hooks state set <name> <key> <val>  # Set hook state
-clodds hooks state clear <name> [key]      # Clear hook state
+blitzkrieg hooks list               # List all hooks
+blitzkrieg hooks install <path>     # Install a hook from path
+blitzkrieg hooks uninstall <name>   # Uninstall a hook
+blitzkrieg hooks enable <name>      # Enable a hook
+blitzkrieg hooks disable <name>     # Disable a hook
+blitzkrieg hooks trace              # Show hook execution trace
+blitzkrieg hooks state get <name> [key]        # Get hook state
+blitzkrieg hooks state set <name> <key> <val>  # Set hook state
+blitzkrieg hooks state clear <name> [key]      # Clear hook state
 ```
 
 ### MCP (Model Context Protocol) Commands
 
 ```bash
-clodds mcp list                 # List MCP servers
-clodds mcp add <name> <command> # Add an MCP server
-clodds mcp remove <name>        # Remove an MCP server
-clodds mcp test <name>          # Test an MCP server
-clodds mcp stats                # Show MCP stats
-clodds mcp sync                 # Sync MCP servers
+blitzkrieg mcp list                 # List MCP servers
+blitzkrieg mcp add <name> <command> # Add an MCP server
+blitzkrieg mcp remove <name>        # Remove an MCP server
+blitzkrieg mcp test <name>          # Test an MCP server
+blitzkrieg mcp stats                # Show MCP stats
+blitzkrieg mcp sync                 # Sync MCP servers
 ```
 
 ### Permissions Commands
 
 ```bash
-clodds permissions list              # List permission rules
-clodds permissions allow <pattern>   # Allow a command pattern
-clodds permissions remove <entryId>  # Remove permission rule
-clodds permissions mode <mode>       # Set permission mode
-clodds permissions ask <mode>        # Set ask mode
-clodds permissions pending           # Show pending approvals
-clodds permissions approve <reqId>   # Approve pending request
-clodds permissions deny <reqId>      # Deny pending request
+blitzkrieg permissions list              # List permission rules
+blitzkrieg permissions allow <pattern>   # Allow a command pattern
+blitzkrieg permissions remove <entryId>  # Remove permission rule
+blitzkrieg permissions mode <mode>       # Set permission mode
+blitzkrieg permissions ask <mode>        # Set ask mode
+blitzkrieg permissions pending           # Show pending approvals
+blitzkrieg permissions approve <reqId>   # Approve pending request
+blitzkrieg permissions deny <reqId>      # Deny pending request
 ```
 
 ### Usage & Analytics Commands
 
 ```bash
-clodds usage summary            # Usage summary
-clodds usage by-model           # Usage breakdown by model
-clodds usage by-user            # Usage breakdown by user
-clodds usage export             # Export usage data
-clodds usage today              # Today's usage
+blitzkrieg usage summary            # Usage summary
+blitzkrieg usage by-model           # Usage breakdown by model
+blitzkrieg usage by-user            # Usage breakdown by user
+blitzkrieg usage export             # Export usage data
+blitzkrieg usage today              # Today's usage
 ```
 
 ### Credentials Commands
 
 ```bash
-clodds creds test [platform]    # Test credentials for a platform
+blitzkrieg creds test [platform]    # Test credentials for a platform
 ```
 
 ### Skills Commands
 
 ```bash
-clodds skills list              # List available skills
-clodds skills search <query>    # Search for skills
-clodds skills install <slug>    # Install a skill
-clodds skills update [slug]     # Update skill(s)
-clodds skills uninstall <slug>  # Uninstall a skill
-clodds skills info <slug>       # Show skill details
-clodds skills check-updates     # Check for skill updates
+blitzkrieg skills list              # List available skills
+blitzkrieg skills search <query>    # Search for skills
+blitzkrieg skills install <slug>    # Install a skill
+blitzkrieg skills update [slug]     # Update skill(s)
+blitzkrieg skills uninstall <slug>  # Uninstall a skill
+blitzkrieg skills info <slug>       # Show skill details
+blitzkrieg skills check-updates     # Check for skill updates
 ```
 
 ### MCP Server Commands
 
 ```bash
-clodds mcp                      # Start MCP server (stdio JSON-RPC)
-clodds mcp install              # Auto-configure Claude Desktop & Claude Code
-clodds mcp uninstall            # Remove Clodds from Claude config
+blitzkrieg mcp                      # Start MCP server (stdio JSON-RPC)
+blitzkrieg mcp install              # Auto-configure Claude Desktop & Claude Code
+blitzkrieg mcp uninstall            # Remove Blitzkrieg from Claude config
 ```
 
-Exposes all 119 skills as MCP tools. After `clodds mcp install`, restart Claude Desktop/Code to use Clodds skills directly from Claude.
+Exposes all 119 skills as MCP tools. After `blitzkrieg mcp install`, restart Claude Desktop/Code to use Blitzkrieg skills directly from Claude.
 
 ### QMD (Quantitative Market Data) Commands
 
 ```bash
-clodds qmd status               # Show QMD status
-clodds qmd update               # Update market data
-clodds qmd embed                # Generate embeddings
-clodds qmd get <target>         # Get market data
-clodds qmd multi-get <targets>  # Get multiple markets
-clodds qmd collection add <path>           # Add collection
-clodds qmd context add <collection> <desc> # Add context
-clodds qmd polymarket <query>   # Search Polymarket
-clodds qmd kalshi <query>       # Search Kalshi
-clodds qmd metaculus <query>    # Search Metaculus
-clodds qmd manifold <query>     # Search Manifold
+blitzkrieg qmd status               # Show QMD status
+blitzkrieg qmd update               # Update market data
+blitzkrieg qmd embed                # Generate embeddings
+blitzkrieg qmd get <target>         # Get market data
+blitzkrieg qmd multi-get <targets>  # Get multiple markets
+blitzkrieg qmd collection add <path>           # Add collection
+blitzkrieg qmd context add <collection> <desc> # Add context
+blitzkrieg qmd polymarket <query>   # Search Polymarket
+blitzkrieg qmd kalshi <query>       # Search Kalshi
+blitzkrieg qmd metaculus <query>    # Search Metaculus
+blitzkrieg qmd manifold <query>     # Search Manifold
 ```
 
 ### Market Index Commands
 
 ```bash
-clodds market-index stats       # Show index statistics
-clodds market-index sync        # Sync market index
+blitzkrieg market-index stats       # Show index statistics
+blitzkrieg market-index sync        # Sync market index
 ```
 
 ### WhatsApp Commands
 
 ```bash
-clodds whatsapp login           # Login with QR code
+blitzkrieg whatsapp login           # Login with QR code
 ```
 
 ### Bittensor Commands
 
 ```bash
-clodds bittensor setup          # Interactive setup wizard (Python, btcli, wallet, config)
-clodds bittensor status         # Show mining configuration and status
-clodds bittensor check          # Verify all dependencies are installed
-clodds bittensor wallet show    # Show wallet address and balance
-clodds bittensor wallet create  # Create a new Bittensor wallet
-clodds bittensor wallet balance # Check TAO balance
-clodds bittensor register <id>  # Register on a subnet (e.g. 64 for Chutes)
+blitzkrieg bittensor setup          # Interactive setup wizard (Python, btcli, wallet, config)
+blitzkrieg bittensor status         # Show mining configuration and status
+blitzkrieg bittensor check          # Verify all dependencies are installed
+blitzkrieg bittensor wallet show    # Show wallet address and balance
+blitzkrieg bittensor wallet create  # Create a new Bittensor wallet
+blitzkrieg bittensor wallet balance # Check TAO balance
+blitzkrieg bittensor register <id>  # Register on a subnet (e.g. 64 for Chutes)
 ```
 
 ### Doctor Command
 
 ```bash
-clodds doctor                   # Comprehensive system health check
-clodds doctor --verbose         # Include all optional features and services
+blitzkrieg doctor                   # Comprehensive system health check
+blitzkrieg doctor --verbose         # Include all optional features and services
 ```
 
 Checks AI providers, messaging channels, trading platforms, external services, and Bittensor dependencies. Use this to diagnose configuration issues.
@@ -233,10 +233,10 @@ Checks AI providers, messaging channels, trading platforms, external services, a
 ### Locale Commands (i18n)
 
 ```bash
-clodds locale list              # List supported languages
-clodds locale get               # Show current locale
-clodds locale set <code>        # Set locale (en, zh, es, ja, ko, de, fr, pt, ru, ar)
-clodds locale test [key]        # Test a translation key
+blitzkrieg locale list              # List supported languages
+blitzkrieg locale get               # Show current locale
+blitzkrieg locale set <code>        # Set locale (en, zh, es, ja, ko, de, fr, pt, ru, ar)
+blitzkrieg locale test [key]        # Test a translation key
 ```
 
 ### Trade Ledger Commands
@@ -244,64 +244,64 @@ clodds locale test [key]        # Test a translation key
 Decision audit trail for AI trading transparency.
 
 ```bash
-clodds ledger list [userId]         # List recent decisions
-clodds ledger list -n 50            # List more decisions
-clodds ledger list -c trade         # Filter by category (trade/copy/arbitrage/risk)
-clodds ledger list -d rejected      # Filter by decision (approved/rejected/blocked)
-clodds ledger stats [userId]        # Show decision statistics
-clodds ledger stats -p 30d          # Stats for last 30 days
-clodds ledger calibration [userId]  # Show confidence calibration
-clodds ledger export [userId]       # Export decisions to JSON
-clodds ledger export -f csv         # Export as CSV
-clodds ledger prune --days 90       # Delete decisions older than 90 days
-clodds ledger verify <id>           # Verify decision hash integrity
-clodds ledger config                # Show ledger configuration
+blitzkrieg ledger list [userId]         # List recent decisions
+blitzkrieg ledger list -n 50            # List more decisions
+blitzkrieg ledger list -c trade         # Filter by category (trade/copy/arbitrage/risk)
+blitzkrieg ledger list -d rejected      # Filter by decision (approved/rejected/blocked)
+blitzkrieg ledger stats [userId]        # Show decision statistics
+blitzkrieg ledger stats -p 30d          # Stats for last 30 days
+blitzkrieg ledger calibration [userId]  # Show confidence calibration
+blitzkrieg ledger export [userId]       # Export decisions to JSON
+blitzkrieg ledger export -f csv         # Export as CSV
+blitzkrieg ledger prune --days 90       # Delete decisions older than 90 days
+blitzkrieg ledger verify <id>           # Verify decision hash integrity
+blitzkrieg ledger config                # Show ledger configuration
 ```
 
 Enable the ledger:
 ```bash
-clodds config set ledger.enabled true
-clodds config set ledger.hashIntegrity true  # Optional: SHA-256 hashing
+blitzkrieg config set ledger.enabled true
+blitzkrieg config set ledger.hashIntegrity true  # Optional: SHA-256 hashing
 ```
 
 Onchain anchoring (tamper-proof verification):
 ```bash
-clodds ledger anchor <id>                    # Anchor to Solana (default)
-clodds ledger anchor <id> -c polygon         # Anchor to Polygon
-clodds ledger anchor <id> -c base            # Anchor to Base
-clodds ledger verify-anchor <txHash> <hash>  # Verify onchain anchor
+blitzkrieg ledger anchor <id>                    # Anchor to Solana (default)
+blitzkrieg ledger anchor <id> -c polygon         # Anchor to Polygon
+blitzkrieg ledger anchor <id> -c base            # Anchor to Base
+blitzkrieg ledger verify-anchor <txHash> <hash>  # Verify onchain anchor
 ```
 
 ### Auth Commands
 
 ```bash
-clodds login                    # Login to Clodds
-clodds logout                   # Logout from Clodds
-clodds version                  # Show version
+blitzkrieg login                    # Login to Blitzkrieg
+blitzkrieg logout                   # Logout from Blitzkrieg
+blitzkrieg version                  # Show version
 ```
 
 ### Other Commands
 
 ```bash
-clodds init                     # Initialize config
-clodds upgrade                  # Check for updates
+blitzkrieg init                     # Initialize config
+blitzkrieg upgrade                  # Check for updates
 ```
 
 ## Pairing and access control
 
-Clodds uses a pairing flow to protect DMs.
+Blitzkrieg uses a pairing flow to protect DMs.
 
 ### Approve a pairing request (CLI)
 
 ```
-clodds pairing list telegram
-clodds pairing approve telegram ABC123
+blitzkrieg pairing list telegram
+blitzkrieg pairing approve telegram ABC123
 ```
 
 ### Set an owner (can approve via chat)
 
 ```
-clodds pairing set-owner telegram 123456789 -u "username"
+blitzkrieg pairing set-owner telegram 123456789 -u "username"
 ```
 
 ## WebChat (browser)
@@ -473,7 +473,7 @@ Note: automated stop-loss execution respects `trading.dryRun` in config.
 
 ## Advanced Trading Configuration
 
-Configure advanced trading features in `clodds.json`:
+Configure advanced trading features in `blitzkrieg.json`:
 
 ```json
 {
@@ -557,7 +557,7 @@ The executor listens for opportunities from the opportunity finder and automatic
 
 ## Real-time Alerts
 
-Push notifications for trading events. Configure in `clodds.json`:
+Push notifications for trading events. Configure in `blitzkrieg.json`:
 
 ```json
 {
@@ -655,13 +655,13 @@ by default:
 - Header: `x-webhook-signature` (or `x-hub-signature-256`)
 - Value: hex HMAC-SHA256 of the raw request body using the webhook secret
 
-Set `CLODDS_WEBHOOK_REQUIRE_SIGNATURE=0` to disable signature checks.
+Set `BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE=0` to disable signature checks.
 
 ## Troubleshooting
 
 Common checks:
 
-- `clodds doctor` - environment and config checks
+- `blitzkrieg doctor` - environment and config checks
 - `npm run build` - verify TypeScript compilation
 - `npm run dev` - start in dev mode with logs
 
@@ -683,7 +683,7 @@ WhatsApp:
 }
 ```
 
-If you omit `accountId`, Clodds will attempt to route alerts using the most
+If you omit `accountId`, Blitzkrieg will attempt to route alerts using the most
 recent session for that chat (when available).
 
 You can also specify per-account WhatsApp DM policies under
@@ -716,7 +716,7 @@ Monitor whale activity across Solana and EVM chains:
 
 **Supported chains:** Solana, Ethereum, Polygon, Arbitrum, Base, Optimism
 
-Configure thresholds in `clodds.json`:
+Configure thresholds in `blitzkrieg.json`:
 
 ```json
 {
@@ -1165,7 +1165,7 @@ All trades are logged to SQLite with full PnL tracking:
 
 ## Telegram Mini App
 
-Access Clodds as a Telegram Mini App (Web App) for mobile-friendly portfolio and market access.
+Access Blitzkrieg as a Telegram Mini App (Web App) for mobile-friendly portfolio and market access.
 
 ### Setup
 
@@ -1198,7 +1198,7 @@ https://t.me/YourBot/app
 
 ## Data Sources
 
-Clodds integrates multiple external data sources for edge detection and trading signals.
+Blitzkrieg integrates multiple external data sources for edge detection and trading signals.
 
 ### News Feed
 
@@ -1242,28 +1242,28 @@ Real-time prices via Binance WebSocket with Coinbase/CoinGecko fallback:
 
 ## Authentication
 
-Clodds supports multiple authentication methods for AI providers:
+Blitzkrieg supports multiple authentication methods for AI providers:
 
 ### OAuth Authentication
 
 ```bash
 # Interactive OAuth flow
-clodds auth login anthropic
-clodds auth login openai
-clodds auth login google
+blitzkrieg auth login anthropic
+blitzkrieg auth login openai
+blitzkrieg auth login google
 
 # Check status
-clodds auth status
+blitzkrieg auth status
 
 # Revoke tokens
-clodds auth logout anthropic
+blitzkrieg auth logout anthropic
 ```
 
 ### GitHub Copilot
 
 ```bash
 # Authenticate with GitHub Copilot
-clodds auth copilot
+blitzkrieg auth copilot
 ```
 
 ### Google/Gemini
@@ -1272,7 +1272,7 @@ clodds auth copilot
 # API key authentication
 export GOOGLE_API_KEY=your-key
 # Or OAuth
-clodds auth login google
+blitzkrieg auth login google
 ```
 
 ### Qwen/DashScope
@@ -1289,7 +1289,7 @@ Enable OpenTelemetry for observability:
 {
   "telemetry": {
     "enabled": true,
-    "serviceName": "clodds",
+    "serviceName": "blitzkrieg",
     "otlpEndpoint": "http://localhost:4318",
     "metricsPort": 9090,
     "sampleRate": 1.0
@@ -1314,13 +1314,13 @@ AI-powered task execution with planning:
 
 ```bash
 # Run a complex task
-clodds task run "Build a REST API with authentication"
+blitzkrieg task run "Build a REST API with authentication"
 
 # View task status
-clodds task status
+blitzkrieg task status
 
 # Cancel running task
-clodds task cancel <id>
+blitzkrieg task cancel <id>
 ```
 
 ### Open Prose
@@ -1329,13 +1329,13 @@ AI-assisted document editing:
 
 ```bash
 # Create a document
-clodds prose create "My Article"
+blitzkrieg prose create "My Article"
 
 # Edit with AI
-clodds prose edit <id> "Make it more concise"
+blitzkrieg prose edit <id> "Make it more concise"
 
 # Export
-clodds prose export <id> html
+blitzkrieg prose export <id> html
 ```
 
 ## Production Deployment
@@ -1350,7 +1350,7 @@ All channel adapters include production-grade features:
 - **Auto-Reconnection**: Exponential backoff reconnection
 - **Metrics**: Request counts, latency, error rates
 
-Configure in `clodds.json`:
+Configure in `blitzkrieg.json`:
 
 ```json
 {
@@ -1372,13 +1372,13 @@ For production Linux deployments, use the built-in security hardening CLI:
 
 ```bash
 # Preview changes (safe, no modifications)
-clodds secure --dry-run
+blitzkrieg secure --dry-run
 
 # Apply all hardening
-sudo clodds secure
+sudo blitzkrieg secure
 
 # Run security audit only
-clodds secure audit
+blitzkrieg secure audit
 ```
 
 ### What gets hardened
@@ -1404,4 +1404,4 @@ See [SECURITY_AUDIT.md](./SECURITY_AUDIT.md) for detailed security documentation
 - Keep the gateway on loopback unless you add auth and a reverse proxy.
 - Use WebChat for fast local testing before wiring up a messaging platform.
 - For production, use Docker or a process manager and enable monitoring.
-- Run `clodds secure` on production servers for security hardening.
+- Run `blitzkrieg secure` on production servers for security hardening.

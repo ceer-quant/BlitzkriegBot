@@ -610,7 +610,7 @@ export async function createWhatsAppChannel(
                   const request = await pairing.validateCode(potentialCode);
                   if (request) {
                     await account.sock?.sendMessage(jid, {
-                      text: '✅ *Successfully paired!*\n\nYou can now chat with Clodds. Ask me anything about prediction markets!',
+                      text: '✅ *Successfully paired!*\n\nYou can now chat with Blitzkrieg. Ask me anything about prediction markets!',
                     });
                     logger.info({ userId: normalizedUserId, code: potentialCode }, 'User paired via direct code');
                     continue;
@@ -626,7 +626,7 @@ export async function createWhatsAppChannel(
                         `🔐 *Pairing Required*\n\n` +
                         `Your pairing code: \`${code}\`\n\n` +
                         `To complete pairing, either:\n` +
-                        `1. Run \`clodds pairing approve whatsapp ${code}\` on your computer\n` +
+                        `1. Run \`blitzkrieg pairing approve whatsapp ${code}\` on your computer\n` +
                         `2. Or ask the bot owner to approve your code\n\n` +
                         `Code expires in 1 hour.`,
                     });

@@ -108,7 +108,7 @@ export async function runOnboard(): Promise<void> {
     output: process.stdout,
   });
 
-  console.log('\n\x1b[1m🎯 Welcome to Clodds Setup!\x1b[0m\n');
+  console.log('\n\x1b[1m🎯 Welcome to Blitzkrieg Setup!\x1b[0m\n');
   console.log("Let's get you set up with your prediction markets assistant.\n");
   console.log('\x1b[90mThis wizard will:\x1b[0m');
   console.log('  1. Set up your Claude-compatible API key (required)');
@@ -336,7 +336,7 @@ export async function runOnboard(): Promise<void> {
   console.log('\n\x1b[1mNext steps:\x1b[0m');
   console.log('\n   1. Copy the .env file to your project:');
   console.log(`      \x1b[36mcp ${envPath} ./.env\x1b[0m`);
-  console.log('\n   2. Start Clodds:');
+  console.log('\n   2. Start Blitzkrieg:');
   console.log('      \x1b[36mnpm start\x1b[0m');
   console.log('\n   3. Open WebChat:');
   console.log('      \x1b[36mhttp://localhost:18789/webchat\x1b[0m\n');

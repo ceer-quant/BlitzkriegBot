@@ -71,7 +71,7 @@ The risk engine is the single entry point for all pre-trade validation. It orche
 10. Kelly sizing recommendation
 
 ```typescript
-import { createRiskEngine } from 'clodds/risk';
+import { createRiskEngine } from 'blitzkrieg/risk';
 
 const engine = createRiskEngine(
   {
@@ -150,7 +150,7 @@ console.log(`Drawdown: ${risk.drawdownPct}%`);
 ### Value-at-Risk
 
 ```typescript
-import { createVaRCalculator, calculateVaR, calculateCVaR } from 'clodds/risk';
+import { createVaRCalculator, calculateVaR, calculateCVaR } from 'blitzkrieg/risk';
 
 // Full calculator with rolling window
 const calc = createVaRCalculator({ windowSize: 100, confidenceLevel: 0.95 });
@@ -167,7 +167,7 @@ const cvar95 = calculateCVaR(pnlArray, 0.95);
 ### Volatility Regime Detection
 
 ```typescript
-import { createVolatilityDetector, detectRegime } from 'clodds/risk';
+import { createVolatilityDetector, detectRegime } from 'blitzkrieg/risk';
 
 const detector = createVolatilityDetector({
   lookbackWindow: 30,
@@ -188,7 +188,7 @@ const regime = detectRegime(recentPnLPcts);
 ### Stress Testing
 
 ```typescript
-import { runStressTest, runAllScenarios, getAvailableScenarios } from 'clodds/risk';
+import { runStressTest, runAllScenarios, getAvailableScenarios } from 'blitzkrieg/risk';
 
 const result = runStressTest(positions, 'flash_crash');
 console.log(`Estimated loss: $${result.estimatedLoss} (${result.estimatedLossPct}%)`);
@@ -207,7 +207,7 @@ const custom = runStressTest(positions, 'flash_crash', {
 ### Risk Dashboard
 
 ```typescript
-import { getRiskDashboard } from 'clodds/risk';
+import { getRiskDashboard } from 'blitzkrieg/risk';
 
 const dashboard = engine.getDashboard();
 console.log(`VaR (95%): $${dashboard.portfolioVaR95}`);
@@ -222,7 +222,7 @@ console.log(`Warnings: ${dashboard.warnings}`);
 ### Circuit Breaker (Standalone)
 
 ```typescript
-import { createCircuitBreaker, MODERATE_CONFIG } from 'clodds/risk';
+import { createCircuitBreaker, MODERATE_CONFIG } from 'blitzkrieg/risk';
 
 // Feature-engineering circuit breaker (market-condition-aware)
 const breaker = createCircuitBreaker(MODERATE_CONFIG);

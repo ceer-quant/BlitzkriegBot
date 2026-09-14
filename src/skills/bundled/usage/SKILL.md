@@ -45,7 +45,7 @@ Track token usage, estimate costs, and analyze AI consumption across sessions an
 ### Create Usage Service
 
 ```typescript
-import { createUsageService } from 'clodds/usage';
+import { createUsageService } from 'blitzkrieg/usage';
 
 const usage = createUsageService({
   // Storage

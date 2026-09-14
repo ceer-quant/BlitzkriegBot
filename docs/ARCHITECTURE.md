@@ -1,6 +1,6 @@
-# Clodds Architecture
+# Blitzkrieg Architecture
 
-System architecture and design overview for Clodds - the AI trading terminal.
+System architecture and design overview for Blitzkrieg - the AI trading terminal.
 
 ## Table of Contents
 
@@ -16,14 +16,14 @@ System architecture and design overview for Clodds - the AI trading terminal.
 
 ## System Overview
 
-Clodds is a modular AI trading terminal built on three core principles:
+Blitzkrieg is a modular AI trading terminal built on three core principles:
 
 1. **Multi-Channel Communication**: Connect through any of 21 messaging platforms
 2. **Multi-Market Integration**: Access 10 prediction markets and 7 futures exchanges (including on-chain Solana perps)
 3. **AI-First Design**: Claude-powered agent with semantic memory and specialized tools
 
 ```
-                            CLODDS ARCHITECTURE
+                            BLITZKRIEG ARCHITECTURE
     ===============================================================
 
     +-----------------------------------------------------------------+
@@ -619,7 +619,7 @@ The easiest way to add a skill is via a SKILL.md file. See **[docs/SKILLS.md](SK
 
 **Quick example — prompt-only skill:**
 ```
-.clodds/skills/my-skill/SKILL.md
+.blitzkrieg/skills/my-skill/SKILL.md
 ```
 ```markdown
 ---
@@ -653,7 +653,7 @@ export default {
 
 ```typescript
 // hooks/my-hook.ts
-import { Hook, HookContext } from 'clodds';
+import { Hook, HookContext } from 'blitzkrieg';
 
 export const myHook: Hook = {
   name: 'my_hook',

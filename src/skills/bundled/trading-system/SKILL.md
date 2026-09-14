@@ -72,7 +72,7 @@ Unified trading system with auto-logging to SQLite, bot management, and performa
 ### Create Trading System
 
 ```typescript
-import { createTradingSystem } from 'clodds/trading';
+import { createTradingSystem } from 'blitzkrieg/trading';
 
 const trading = createTradingSystem({
   // Execution service

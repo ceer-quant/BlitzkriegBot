@@ -114,7 +114,7 @@ import {
   // AMM Liquidity
   addAmmLiquidity,
   removeAmmLiquidity,
-} from 'clodds/solana/raydium';
+} from 'blitzkrieg/solana/raydium';
 
 // Execute swap
 const swap = await executeRaydiumSwap(connection, keypair, {

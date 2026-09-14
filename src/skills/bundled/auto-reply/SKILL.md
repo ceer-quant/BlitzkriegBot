@@ -63,7 +63,7 @@ Create rules for automatic responses based on patterns, keywords, and conditions
 ### Create Auto-Reply Manager
 
 ```typescript
-import { createAutoReplyManager } from 'clodds/auto-reply';
+import { createAutoReplyManager } from 'blitzkrieg/auto-reply';
 
 const autoReply = createAutoReplyManager({
   // Storage

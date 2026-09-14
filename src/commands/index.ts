@@ -305,7 +305,7 @@ export function createCommandsService(
             handled: true,
             action: 'show_help',
             response:
-              `🎲 *Clodds Commands*\n\n` +
+              `🎲 *Blitzkrieg Commands*\n\n` +
               `*Native Commands:*\n${commandList}\n\n` +
               `*Tips:*\n` +
               `• Just chat naturally for most things\n` +

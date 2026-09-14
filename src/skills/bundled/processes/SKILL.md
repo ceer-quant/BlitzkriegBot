@@ -46,7 +46,7 @@ Spawn and manage background processes, long-running jobs, and scheduled tasks.
 ### Create Process Manager
 
 ```typescript
-import { createProcessManager } from 'clodds/processes';
+import { createProcessManager } from 'blitzkrieg/processes';
 
 const processes = createProcessManager({
   // Working directory

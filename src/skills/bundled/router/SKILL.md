@@ -43,7 +43,7 @@ Route orders to the best platform based on price, liquidity, fees, and execution
 ### Create Smart Router
 
 ```typescript
-import { createSmartRouter } from 'clodds/router';
+import { createSmartRouter } from 'blitzkrieg/router';
 
 const router = createSmartRouter({
   // Supported platforms

@@ -406,7 +406,7 @@ export function formatReport(report: DoctorReport): string {
   const lines: string[] = [];
 
   lines.push('╭─────────────────────────────────────────────╮');
-  lines.push('│            Clodds Health Check              │');
+  lines.push('│            Blitzkrieg Health Check              │');
   lines.push('╰─────────────────────────────────────────────╯');
   lines.push('');
 

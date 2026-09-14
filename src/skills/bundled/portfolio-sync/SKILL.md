@@ -437,7 +437,7 @@ from datetime import datetime
 
 def sync_to_db():
     """Sync all positions to SQLite"""
-    conn = sqlite3.connect("~/.clodds/clodds.db")
+    conn = sqlite3.connect("~/.blitzkrieg/blitzkrieg.db")
     positions = sync_all_portfolios()
 
     for p in positions:
@@ -462,5 +462,5 @@ if __name__ == "__main__":
 Add to crontab:
 ```bash
 # Sync every hour
-0 * * * * cd /path/to/clodds && python3 -c "from skills.portfolio_sync import sync_to_db; sync_to_db()"
+0 * * * * cd /path/to/blitzkrieg && python3 -c "from skills.portfolio_sync import sync_to_db; sync_to_db()"
 ```

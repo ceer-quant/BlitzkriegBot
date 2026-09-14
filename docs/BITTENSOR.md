@@ -1,15 +1,15 @@
 # Bittensor Subnet Mining
 
-Mine TAO tokens on Bittensor subnets directly from Clodds. Supports wallet management, subnet registration, earnings tracking, and Chutes (SN64) GPU compute.
+Mine TAO tokens on Bittensor subnets directly from Blitzkrieg. Supports wallet management, subnet registration, earnings tracking, and Chutes (SN64) GPU compute.
 
 ## Quick Start
 
 ```bash
-# 1. Run the setup wizard (installs Python, btcli, creates wallet, configures Clodds)
-clodds bittensor setup
+# 1. Run the setup wizard (installs Python, btcli, creates wallet, configures Blitzkrieg)
+blitzkrieg bittensor setup
 
-# 2. Start Clodds
-clodds start
+# 2. Start Blitzkrieg
+blitzkrieg start
 
 # 3. Check status in chat
 /tao status
@@ -20,14 +20,14 @@ clodds start
 ### Interactive Setup (Recommended)
 
 ```bash
-clodds bittensor setup
+blitzkrieg bittensor setup
 ```
 
 The wizard will:
 1. **Choose network** — mainnet (real TAO) or testnet (free experimentation)
 2. **Find/install Python 3** and btcli
 3. **Create a Bittensor wallet** (coldkey + hotkey)
-4. **Write config** to `~/.clodds/clodds.json`
+4. **Write config** to `~/.blitzkrieg/blitzkrieg.json`
 
 ### Manual Setup
 
@@ -44,7 +44,7 @@ BITTENSOR_EARNINGS_POLL_INTERVAL_MS=300000  # optional, default 5 min
 BITTENSOR_TAO_PRICE_USD=                   # optional, override CoinGecko price
 ```
 
-Or in `~/.clodds/clodds.json`:
+Or in `~/.blitzkrieg/blitzkrieg.json`:
 
 ```json
 {
@@ -72,22 +72,22 @@ Or in `~/.clodds/clodds.json`:
 ### Verify Dependencies
 
 ```bash
-clodds bittensor check
+blitzkrieg bittensor check
 ```
 
 ## CLI Commands
 
 ```bash
-clodds bittensor setup           # Interactive setup wizard
-clodds bittensor status          # Show config and mining status
-clodds bittensor check           # Verify Python, btcli, wallet, config
-clodds bittensor wallet show     # Show wallet address and overview
-clodds bittensor wallet create   # Create a new wallet
-clodds bittensor wallet balance  # Check TAO balance
-clodds bittensor register <id>   # Register on a subnet (e.g. 64)
-clodds bittensor earnings        # Show earnings (queries running gateway)
-clodds bittensor miners          # Show miner statuses
-clodds bittensor subnets         # List available subnets
+blitzkrieg bittensor setup           # Interactive setup wizard
+blitzkrieg bittensor status          # Show config and mining status
+blitzkrieg bittensor check           # Verify Python, btcli, wallet, config
+blitzkrieg bittensor wallet show     # Show wallet address and overview
+blitzkrieg bittensor wallet create   # Create a new wallet
+blitzkrieg bittensor wallet balance  # Check TAO balance
+blitzkrieg bittensor register <id>   # Register on a subnet (e.g. 64)
+blitzkrieg bittensor earnings        # Show earnings (queries running gateway)
+blitzkrieg bittensor miners          # Show miner statuses
+blitzkrieg bittensor subnets         # List available subnets
 ```
 
 ## Chat Commands
@@ -107,7 +107,7 @@ Available via `/tao` (alias: `/bittensor`) in any messaging channel:
 
 ## HTTP API
 
-All endpoints require authentication (`CLODDS_TOKEN`).
+All endpoints require authentication (`BLITZKRIEG_TOKEN`).
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -124,13 +124,13 @@ All endpoints require authentication (`CLODDS_TOKEN`).
 
 ```bash
 # Check status
-curl -H "Authorization: Bearer $CLODDS_TOKEN" localhost:18789/api/bittensor/status
+curl -H "Authorization: Bearer $BLITZKRIEG_TOKEN" localhost:18789/api/bittensor/status
 
 # Get daily earnings
-curl -H "Authorization: Bearer $CLODDS_TOKEN" localhost:18789/api/bittensor/earnings?period=daily
+curl -H "Authorization: Bearer $BLITZKRIEG_TOKEN" localhost:18789/api/bittensor/earnings?period=daily
 
 # Register on Chutes (SN64)
-curl -X POST -H "Authorization: Bearer $CLODDS_TOKEN" \
+curl -X POST -H "Authorization: Bearer $BLITZKRIEG_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"subnetId": 64}' \
   localhost:18789/api/bittensor/register
@@ -200,16 +200,16 @@ src/bittensor/
 
 **"Python not found"** — Install Python 3.8+ (`brew install python3` / `apt install python3`)
 
-**"btcli not found"** — Run `pip install bittensor` or `clodds bittensor setup`
+**"btcli not found"** — Run `pip install bittensor` or `blitzkrieg bittensor setup`
 
-**"Wallet not found"** — Run `clodds bittensor wallet create` or `btcli wallet create`
+**"Wallet not found"** — Run `blitzkrieg bittensor wallet create` or `btcli wallet create`
 
 **"Not connected"** — Check network config. Default mainnet URL: `wss://entrypoint-finney.opentensor.ai:443`
 
-**"Could not reach gateway"** — The `earnings`, `miners`, and `subnets` CLI commands query the running gateway. Start it first with `clodds start`.
+**"Could not reach gateway"** — The `earnings`, `miners`, and `subnets` CLI commands query the running gateway. Start it first with `blitzkrieg start`.
 
 **Stale USD values** — TAO/USD price is fetched from CoinGecko. If it returns 0, set `taoPriceUsd` in config as a fallback.
 
 ## System Health
 
-Run `clodds doctor` to verify Bittensor dependencies are installed and configured correctly.
+Run `blitzkrieg doctor` to verify Bittensor dependencies are installed and configured correctly.

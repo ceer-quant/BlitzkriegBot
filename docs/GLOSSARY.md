@@ -1,6 +1,6 @@
-# Clodds Technical Glossary
+# Blitzkrieg Technical Glossary
 
-Comprehensive glossary of terms used throughout the Clodds platform for prediction markets, crypto trading, DeFi, and futures.
+Comprehensive glossary of terms used throughout the Blitzkrieg platform for prediction markets, crypto trading, DeFi, and futures.
 
 ---
 
@@ -337,7 +337,7 @@ Mainnet launched **January 29, 2026**. Live on Ethereum, Base, Optimism, Arbitru
 | Term | Definition |
 |------|------------|
 | **SSH Hardening** | Disabling password auth, root login, and limiting auth attempts to prevent unauthorized access. |
-| **ufw** | Uncomplicated Firewall. Linux firewall frontend for iptables. Clodds uses it to restrict incoming connections. |
+| **ufw** | Uncomplicated Firewall. Linux firewall frontend for iptables. Blitzkrieg uses it to restrict incoming connections. |
 | **fail2ban** | Intrusion prevention software that bans IPs after repeated failed login attempts. |
 | **sysctl** | Linux kernel parameter configuration. Used for hardening network stack and preventing attacks. |
 | **Unattended Upgrades** | Automatic security patch installation on Debian/Ubuntu systems. |
@@ -353,4 +353,4 @@ Mainnet launched **January 29, 2026**. Live on Ethereum, Base, Optimism, Arbitru
 
 ---
 
-*This glossary covers 185+ terms used across the Clodds platform.*
+*This glossary covers 185+ terms used across the Blitzkrieg platform.*

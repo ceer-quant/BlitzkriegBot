@@ -46,7 +46,7 @@ HYPERLIQUID_PRIVATE_KEY=your_private_key
 HYPERLIQUID_WALLET_ADDRESS=0x...
 
 # Optional: Database for trade tracking
-DATABASE_URL=postgres://user:pass@localhost:5432/clodds
+DATABASE_URL=postgres://user:pass@localhost:5432/blitzkrieg
 ```
 
 ---
@@ -125,7 +125,7 @@ DATABASE_URL=postgres://user:pass@localhost:5432/clodds
 ### Quick Setup
 
 ```typescript
-import { setupFromEnv } from 'clodds/trading/futures';
+import { setupFromEnv } from 'blitzkrieg/trading/futures';
 
 // Auto-configure from environment variables
 const { clients, database, strategyEngine } = await setupFromEnv();
@@ -147,7 +147,7 @@ import {
   HyperliquidClient,
   FuturesDatabase,
   StrategyEngine,
-} from 'clodds/trading/futures';
+} from 'blitzkrieg/trading/futures';
 
 // Binance
 const binance = new BinanceFuturesClient({
@@ -706,7 +706,7 @@ await mexc.autoAddMargin('BTC_USDT', true);
 ### Initialize Database
 
 ```typescript
-import { FuturesDatabase } from 'clodds/trading/futures';
+import { FuturesDatabase } from 'blitzkrieg/trading/futures';
 
 const db = new FuturesDatabase(process.env.DATABASE_URL!);
 await db.initialize();  // Creates tables if not exist
@@ -756,7 +756,7 @@ const results = await db.getVariantPerformance('momentum');
 ### Strategy Interface
 
 ```typescript
-import { FuturesStrategy, StrategySignal } from 'clodds/trading/futures';
+import { FuturesStrategy, StrategySignal } from 'blitzkrieg/trading/futures';
 
 interface FuturesStrategy {
   name: string;
@@ -836,7 +836,7 @@ engine.registerVariant('rsi-strategy', 'conservative', { oversold: 35, overbough
 All clients throw typed errors:
 
 ```typescript
-import { FuturesError, InsufficientBalanceError, InvalidOrderError } from 'clodds/trading/futures';
+import { FuturesError, InsufficientBalanceError, InvalidOrderError } from 'blitzkrieg/trading/futures';
 
 try {
   await binance.placeOrder({ ... });

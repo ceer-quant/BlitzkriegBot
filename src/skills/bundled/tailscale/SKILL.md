@@ -57,7 +57,7 @@ Share local services via Tailscale Serve (private) and Funnel (public internet a
 ### Create Tailscale Client
 
 ```typescript
-import { createTailscaleClient } from 'clodds/tailscale';
+import { createTailscaleClient } from 'blitzkrieg/tailscale';
 
 const tailscale = createTailscaleClient({
   // Auth (optional if already logged in)
@@ -89,7 +89,7 @@ await tailscale.serve({
 // Share with custom hostname
 await tailscale.serve({
   port: 3000,
-  hostname: 'clodds',  // clodds.tailnet-name.ts.net
+  hostname: 'blitzkrieg',  // blitzkrieg.tailnet-name.ts.net
 });
 
 // Stop sharing

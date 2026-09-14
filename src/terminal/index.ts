@@ -326,7 +326,7 @@ export class Repl extends EventEmitter {
       this.rl?.prompt();
     });
 
-    console.log(box(bold('Welcome to Clodds'), {
+    console.log(box(bold('Welcome to Blitzkrieg'), {
       borderStyle: 'rounded',
       borderColor: 'cyan',
       padding: 1,

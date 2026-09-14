@@ -1,6 +1,6 @@
 /**
  * Percolator transaction builder + sender.
- * Adapted from percolator-cli/src/runtime/tx.ts — simplified for Clodds.
+ * Adapted from percolator-cli/src/runtime/tx.ts — simplified for Blitzkrieg.
  */
 
 import {

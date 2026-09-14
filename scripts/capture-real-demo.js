@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Capture REAL Clodds WebChat Demo
+ * Capture REAL Blitzkrieg WebChat Demo
  * Records actual interaction with the live webchat
  */
 

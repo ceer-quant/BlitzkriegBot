@@ -1,7 +1,7 @@
 /**
  * LRU Cache with TTL Support
  *
- * High-performance caching for Clodds hot paths:
+ * High-performance caching for Blitzkrieg hot paths:
  * - Market lookups
  * - API key validation
  * - Price subscriptions

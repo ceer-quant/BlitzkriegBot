@@ -1,7 +1,7 @@
 /**
  * Bittensor Persistence Layer
  * SQLite tables for earnings, miner status, and cost tracking.
- * Uses the Clodds Database interface (sql.js WASM).
+ * Uses the Blitzkrieg Database interface (sql.js WASM).
  */
 
 import type { Database } from '../db';

@@ -156,7 +156,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
       if (!existsSync(logsDir)) {
         mkdirSync(logsDir, { recursive: true });
       }
-      filePath = join(logsDir, 'clodds.log');
+      filePath = join(logsDir, 'blitzkrieg.log');
     }
   }
 

@@ -6,7 +6,7 @@ emoji: "🌐"
 
 # Remote - Complete API Reference
 
-Manage SSH tunnels, ngrok exposure, and remote access to your local Clodds instance.
+Manage SSH tunnels, ngrok exposure, and remote access to your local Blitzkrieg instance.
 
 ---
 
@@ -45,7 +45,7 @@ Manage SSH tunnels, ngrok exposure, and remote access to your local Clodds insta
 ### Create Remote Manager
 
 ```typescript
-import { createRemoteManager } from 'clodds/remote';
+import { createRemoteManager } from 'blitzkrieg/remote';
 
 const remote = createRemoteManager({
   // ngrok auth
@@ -71,7 +71,7 @@ const tunnel = await remote.createNgrokTunnel({
   protocol: 'http',  // 'http' | 'tcp' | 'tls'
 
   // Optional
-  subdomain: 'my-clodds',  // Requires paid plan
+  subdomain: 'my-blitzkrieg',  // Requires paid plan
   authToken: process.env.NGROK_AUTH_TOKEN,
 });
 
@@ -84,7 +84,7 @@ console.log(`Tunnel ID: ${tunnel.id}`);
 ```typescript
 const tunnel = await remote.createCloudflareTunnel({
   port: 3000,
-  hostname: 'clodds.example.com',
+  hostname: 'blitzkrieg.example.com',
   token: process.env.CLOUDFLARE_TUNNEL_TOKEN,
 });
 
@@ -186,9 +186,9 @@ console.log(`Set webhook URL to: ${tunnel.url}/webhooks/trading-signals`);
 // Access bot from phone while at home
 const tunnel = await remote.createCloudflareTunnel({
   port: 3000,
-  hostname: 'clodds.mysite.com',
+  hostname: 'blitzkrieg.example.com',
 });
-// Now access at https://clodds.mysite.com
+// Now access at https://blitzkrieg.example.com
 ```
 
 ---

@@ -54,7 +54,7 @@ Manage user identity, OAuth provider connections, and device authentication.
 ### Create Identity Service
 
 ```typescript
-import { createIdentityService } from 'clodds/identity';
+import { createIdentityService } from 'blitzkrieg/identity';
 
 const identity = createIdentityService({
   // OAuth providers

@@ -104,7 +104,7 @@ export interface SandboxResult {
 export class DockerClient extends EventEmitter {
   private prefix: string;
 
-  constructor(prefix = 'clodds') {
+  constructor(prefix = 'blitzkrieg') {
     super();
     this.prefix = prefix;
   }

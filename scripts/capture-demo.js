@@ -145,7 +145,7 @@ function generateHTML(messages) {
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Clodds WebChat</title>
+  <title>Blitzkrieg WebChat</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -239,8 +239,7 @@ function generateHTML(messages) {
 </head>
 <body>
   <div class="header">
-    <img src="https://cloddsbot.com/logo.png" alt="Clodds" />
-    <h1>Clodds WebChat</h1>
+    <h1>Blitzkrieg WebChat</h1>
   </div>
   <div id="messages">
     <div class="msg system">Connected. Ready!</div>

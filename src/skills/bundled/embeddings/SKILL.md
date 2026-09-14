@@ -51,7 +51,7 @@ Configure embedding providers, manage vector storage, and perform semantic searc
 ### Create Embeddings Service
 
 ```typescript
-import { createEmbeddingsService } from 'clodds/embeddings';
+import { createEmbeddingsService } from 'blitzkrieg/embeddings';
 
 const embeddings = createEmbeddingsService({
   // Provider

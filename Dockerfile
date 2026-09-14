@@ -13,8 +13,8 @@ FROM node:22-bookworm-slim AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
-ENV CLODDS_STATE_DIR=/data
-ENV CLODDS_WORKSPACE=/data/workspace
+ENV BLITZKRIEG_STATE_DIR=/data
+ENV BLITZKRIEG_WORKSPACE=/data/workspace
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --legacy-peer-deps

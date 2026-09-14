@@ -1,7 +1,7 @@
 /**
  * Trade Ledger - Type Definitions
  *
- * Decision audit trail with confidence calibration for Clodds.
+ * Decision audit trail with confidence calibration for Blitzkrieg.
  */
 
 // =============================================================================

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
-# Clodds Installation Script
-# Usage: curl -fsSL https://clodds.com/install.sh | bash
+# Blitzkrieg Installation Script
+# Usage: curl -fsSL https://raw.githubusercontent.com/ceer-quant/BlitzkriegBot/main/scripts/install.sh | bash
 #
 
 set -e
 
-CLODDS_VERSION="${CLODDS_VERSION:-latest}"
-INSTALL_DIR="${INSTALL_DIR:-$HOME/.clodds}"
+# CLODDS_VERSION is accepted as a deprecated alias for one release.
+VERSION="${BLITZKRIEG_VERSION:-${CLODDS_VERSION:-latest}}"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.blitzkrieg}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 
 # Colors
@@ -77,24 +78,28 @@ create_dirs() {
   success "Created $INSTALL_DIR"
 }
 
-# Install Clodds
-install_clodds() {
-  info "Installing Clodds..."
+# Install Blitzkrieg
+install_blitzkrieg() {
+  info "Installing Blitzkrieg..."
+
+  if [ -n "$CLODDS_VERSION" ] && [ -z "$BLITZKRIEG_VERSION" ]; then
+    warn "CLODDS_VERSION is deprecated; use BLITZKRIEG_VERSION instead (the old name stops working in the next release)"
+  fi
 
   cd "$INSTALL_DIR"
 
-  if [ "$CLODDS_VERSION" = "latest" ]; then
+  if [ "$VERSION" = "latest" ]; then
     npm init -y > /dev/null 2>&1 || true
-    npm install clodds@latest
+    npm install blitzkrieg-bot@latest
   else
     npm init -y > /dev/null 2>&1 || true
-    npm install "clodds@$CLODDS_VERSION"
+    npm install "blitzkrieg-bot@$VERSION"
   fi
 
   # Create symlink
-  ln -sf "$INSTALL_DIR/node_modules/.bin/clodds" "$BIN_DIR/clodds"
+  ln -sf "$INSTALL_DIR/node_modules/.bin/blitzkrieg" "$BIN_DIR/blitzkrieg"
 
-  success "Installed Clodds"
+  success "Installed Blitzkrieg"
 }
 
 # Add to PATH
@@ -111,7 +116,7 @@ setup_path() {
   if [ -f "$SHELL_RC" ]; then
     if ! grep -q "$BIN_DIR" "$SHELL_RC"; then
       echo "" >> "$SHELL_RC"
-      echo "# Clodds" >> "$SHELL_RC"
+      echo "# Blitzkrieg" >> "$SHELL_RC"
       echo "export PATH=\"$BIN_DIR:\$PATH\"" >> "$SHELL_RC"
       success "Added $BIN_DIR to PATH in $SHELL_RC"
     fi
@@ -122,7 +127,7 @@ setup_path() {
 print_success() {
   echo ""
   echo -e "${GREEN}========================================${NC}"
-  echo -e "${GREEN}  Clodds installed successfully! 🎉${NC}"
+  echo -e "${GREEN}  Blitzkrieg installed successfully! 🎉${NC}"
   echo -e "${GREEN}========================================${NC}"
   echo ""
   echo "To get started:"
@@ -131,20 +136,20 @@ print_success() {
   echo "     source $SHELL_RC"
   echo ""
   echo "  2. Run the setup wizard:"
-  echo "     clodds onboard"
+  echo "     blitzkrieg onboard"
   echo ""
-  echo "  3. Start Clodds:"
-  echo "     clodds start"
+  echo "  3. Start Blitzkrieg:"
+  echo "     blitzkrieg start"
   echo ""
-  echo "Documentation: https://clodds.com/docs"
-  echo "Discord: https://discord.gg/clodds"
+  echo "Repository: https://github.com/ceer-quant/BlitzkriegBot"
+  echo "Issues: https://github.com/ceer-quant/BlitzkriegBot/issues"
   echo ""
 }
 
 # Main
 main() {
   echo ""
-  echo -e "${BLUE}Clodds Installer${NC}"
+  echo -e "${BLUE}Blitzkrieg Installer${NC}"
   echo "================"
   echo ""
 
@@ -152,7 +157,7 @@ main() {
   detect_arch
   check_deps
   create_dirs
-  install_clodds
+  install_blitzkrieg
   setup_path
   print_success
 }

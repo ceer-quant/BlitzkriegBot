@@ -1,7 +1,7 @@
 /**
  * Market Index - Lightweight semantic search for prediction markets
  *
- * Ported concepts from pm-indexer, adapted for Clodds + SQLite.
+ * Ported concepts from pm-indexer, adapted for Blitzkrieg + SQLite.
  */
 
 import { logger } from '../utils/logger';

@@ -344,7 +344,7 @@ function helpText(): string {
   /autoreply clear-cooldowns                   - Clear all cooldowns
   /autoreply reload                            - Reload rules from disk
 
-Rules saved to ~/.clodds/auto-reply-rules.json`;
+Rules saved to ~/.blitzkrieg/auto-reply-rules.json`;
 }
 
 export default {

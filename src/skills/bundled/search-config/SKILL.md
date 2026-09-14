@@ -45,7 +45,7 @@ Configure search indexing, manage search backends, and optimize full-text search
 ### Create Search Service
 
 ```typescript
-import { createSearchService } from 'clodds/search';
+import { createSearchService } from 'blitzkrieg/search';
 
 const search = createSearchService({
   // Backend
@@ -195,7 +195,7 @@ await search.clearAll();
 // Switch to Elasticsearch
 await search.setBackend('elasticsearch', {
   url: process.env.ELASTICSEARCH_URL,
-  index: 'clodds',
+  index: 'blitzkrieg',
 });
 
 // Switch to Typesense

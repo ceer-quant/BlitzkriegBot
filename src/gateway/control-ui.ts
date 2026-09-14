@@ -142,7 +142,7 @@ export function mountControlUI(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Clodds Control</title>
+  <title>Blitzkrieg Control</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -205,7 +205,7 @@ export function mountControlUI(
 </head>
 <body>
   <div class="container">
-    <h1>🎯 Clodds Control</h1>
+    <h1>🎯 Blitzkrieg Control</h1>
 
     <div class="grid">
       <div class="card">

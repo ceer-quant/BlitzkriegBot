@@ -61,7 +61,7 @@ Set up conditional orders that automatically execute trades when price condition
 ### Create Trigger Service
 
 ```typescript
-import { createTriggerService } from 'clodds/triggers';
+import { createTriggerService } from 'blitzkrieg/triggers';
 
 const triggers = createTriggerService({
   // Price monitoring

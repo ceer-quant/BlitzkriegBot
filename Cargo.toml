@@ -13,7 +13,9 @@ members = [
 ]
 # user_layer/strategies is a SEPARATE nested workspace (it has [workspace]
 # and builds the example dynamic strategy cdylib) — intentionally excluded.
-exclude = ["user_layer/strategies"]
+# rust-executor is a standalone sidecar binary with its own Cargo.lock
+# (Polymarket CLOB subprocess), not part of the core workspace.
+exclude = ["user_layer/strategies", "rust-executor"]
 
 [workspace.dependencies]
 rust_decimal = "1"

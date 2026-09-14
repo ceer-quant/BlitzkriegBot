@@ -96,7 +96,7 @@ export async function createSlackChannel(
               const request = await pairing.validateCode(potentialCode);
               if (request) {
                 await say({
-                  text: ':white_check_mark: *Successfully paired!*\n\nYou can now chat with Clodds. Ask me anything about prediction markets!',
+                  text: ':white_check_mark: *Successfully paired!*\n\nYou can now chat with Blitzkrieg. Ask me anything about prediction markets!',
                   mrkdwn: true,
                 });
                 logger.info({ userId, code: potentialCode }, 'Slack user paired via direct code');
@@ -113,7 +113,7 @@ export async function createSlackChannel(
                     `:lock: *Pairing Required*\n\n` +
                     `Your pairing code: \`${code}\`\n\n` +
                     `To complete pairing, either:\n` +
-                    `1. Run \`clodds pairing approve slack ${code}\` on your computer\n` +
+                    `1. Run \`blitzkrieg pairing approve slack ${code}\` on your computer\n` +
                     `2. Or ask the bot owner to approve your code\n\n` +
                     `Code expires in 1 hour.`,
                   mrkdwn: true,
@@ -196,9 +196,10 @@ export async function createSlackChannel(
 
   // app_mention events are handled by the generic message handler
 
-  // Handle slash commands (optional)
+  // Handle slash commands. `/blitzkrieg` is canonical; `/clodds` is kept for
+  // one release so workspaces that registered the old command keep working.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  app.command('/clodds', async ({ command, ack, respond }: any) => {
+  const handleSlashCommand = async ({ command, ack }: any) => {
     await ack();
 
     const incomingMessage: IncomingMessage = {
@@ -217,7 +218,9 @@ export async function createSlackChannel(
     );
 
     await callbacks.onMessage(incomingMessage);
-  });
+  };
+  app.command('/blitzkrieg', handleSlashCommand);
+  app.command('/clodds', handleSlashCommand);
 
   // Error handling
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

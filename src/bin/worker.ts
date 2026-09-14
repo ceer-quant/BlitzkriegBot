@@ -11,9 +11,9 @@
  *
  *   node dist/bin/worker.js
  *
- * Configuration (reads from ~/.clodds/clodds.json then env vars):
+ * Configuration (resolved state dir + env vars; brand-bootstrap runs first):
  *
- *   // clodds.json
+ *   // blitzkrieg.json (or legacy clodds.json)
  *   {
  *     "queue": {
  *       "enabled": true,
@@ -39,7 +39,7 @@ import type { RedisOptions } from 'ioredis';
 async function main(): Promise<void> {
   logger.info('Starting execution worker process');
 
-  // Load config (reads ~/.clodds/clodds.json + env vars)
+  // Load config (resolved state dir + env vars)
   const config = await loadConfig();
 
   // Build Redis connection — config.queue.redis takes priority, env vars as fallback

@@ -53,7 +53,7 @@ Monitor system health, track performance metrics, and analyze telemetry data.
 ### Create Metrics Service
 
 ```typescript
-import { createMetricsService } from 'clodds/metrics';
+import { createMetricsService } from 'blitzkrieg/metrics';
 
 const metrics = createMetricsService({
   // Collection

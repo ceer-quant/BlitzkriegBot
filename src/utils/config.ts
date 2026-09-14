@@ -270,7 +270,7 @@ const DEFAULT_CONFIG: Config = {
     alertTargets: [],
     email: {
       enabled: false,
-      subjectPrefix: 'Clodds',
+      subjectPrefix: 'Blitzkrieg',
     },
     providerHealth: {
       enabled: true,

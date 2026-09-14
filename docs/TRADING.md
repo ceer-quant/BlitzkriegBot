@@ -26,7 +26,7 @@ Complete trading infrastructure for prediction markets.
 
 ## Quick Start
 
-### 1. Configure credentials in `~/.clodds/clodds.json`:
+### 1. Configure credentials in `~/.blitzkrieg/blitzkrieg.json`:
 
 ```json
 {
@@ -1418,7 +1418,7 @@ await binance.placeOrder({
     },
     "database": {
       "enabled": true,
-      "url": "postgres://user:pass@localhost:5432/clodds"
+      "url": "postgres://user:pass@localhost:5432/blitzkrieg"
     },
     "riskManagement": {
       "maxPositionSize": 10000,
@@ -1590,7 +1590,7 @@ Database tracking is available for all 4 futures exchanges:
 **Programmatic Usage:**
 
 ```typescript
-import { initDatabase } from 'clodds/db';
+import { initDatabase } from 'blitzkrieg/db';
 
 const db = await initDatabase();
 
@@ -1675,7 +1675,7 @@ export SOLANA_RPC_URL="https://api.mainnet-beta.solana.com"  # Optional
 ### API Usage
 
 ```typescript
-import { executeJupiterSwap } from 'clodds/solana/jupiter';
+import { executeJupiterSwap } from 'blitzkrieg/solana/jupiter';
 
 const result = await executeJupiterSwap(connection, keypair, {
   inputMint: 'So11111111111111111111111111111111111111112',  // SOL
@@ -1712,7 +1712,7 @@ Raydium is a high-volume AMM on Solana with concentrated liquidity pools.
 ### API Usage
 
 ```typescript
-import { executeRaydiumSwap, listRaydiumPools } from 'clodds/solana/raydium';
+import { executeRaydiumSwap, listRaydiumPools } from 'blitzkrieg/solana/raydium';
 
 // Swap
 const result = await executeRaydiumSwap(connection, keypair, {
@@ -1750,7 +1750,7 @@ Orca provides concentrated liquidity pools (Whirlpools) on Solana.
 ### API Usage
 
 ```typescript
-import { executeOrcaWhirlpoolSwap, listOrcaWhirlpoolPools } from 'clodds/solana/orca';
+import { executeOrcaWhirlpoolSwap, listOrcaWhirlpoolPools } from 'blitzkrieg/solana/orca';
 
 // Find pool and swap
 const pools = await listOrcaWhirlpoolPools({ tokenMints: [solMint, usdcMint] });
@@ -1786,7 +1786,7 @@ Meteora uses Dynamic Liquidity Market Maker (DLMM) pools with bin-based pricing.
 ### API Usage
 
 ```typescript
-import { executeMeteoraDlmmSwap, listMeteoraDlmmPools } from 'clodds/solana/meteora';
+import { executeMeteoraDlmmSwap, listMeteoraDlmmPools } from 'blitzkrieg/solana/meteora';
 
 // Find pool
 const pools = await listMeteoraDlmmPools(connection, { tokenMints: [solMint] });
@@ -1854,7 +1854,7 @@ import {
   borrowFromKamino,
   getKaminoObligation,
   getKaminoReserves,
-} from 'clodds/solana/kamino';
+} from 'blitzkrieg/solana/kamino';
 
 // Deposit collateral
 const deposit = await depositToKamino(connection, keypair, {
@@ -1888,7 +1888,7 @@ import {
   depositToKaminoVault,
   withdrawFromKaminoVault,
   getKaminoUserShares,
-} from 'clodds/solana/kamino';
+} from 'blitzkrieg/solana/kamino';
 
 // List strategies
 const strategies = await getKaminoStrategies(connection);
@@ -1952,7 +1952,7 @@ import {
   marginfiBorrow,
   getMarginfiAccount,
   getMarginfiBanks,
-} from 'clodds/solana/marginfi';
+} from 'blitzkrieg/solana/marginfi';
 
 // Deposit collateral
 const deposit = await marginfiDeposit(connection, keypair, {
@@ -2020,7 +2020,7 @@ import {
   solendBorrow,
   getSolendObligation,
   getSolendReserves,
-} from 'clodds/solana/solend';
+} from 'blitzkrieg/solana/solend';
 
 // Deposit collateral
 const deposit = await solendDeposit(connection, keypair, {
@@ -2075,7 +2075,7 @@ Pump.fun is a token launchpad on Solana for trading new memecoins.
 ### API Usage
 
 ```typescript
-import { executePumpFunTrade } from 'clodds/solana/pumpapi';
+import { executePumpFunTrade } from 'blitzkrieg/solana/pumpapi';
 
 // Buy token
 const result = await executePumpFunTrade(connection, keypair, {
@@ -2364,7 +2364,7 @@ export PREDICTFUN_API_KEY="your-api-key"
 export PREDICTFUN_PRIVATE_KEY="0x..."
 ```
 
-Or in `~/.clodds/clodds.json`:
+Or in `~/.blitzkrieg/blitzkrieg.json`:
 
 ```json
 {

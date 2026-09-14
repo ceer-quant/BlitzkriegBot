@@ -50,7 +50,7 @@ Configure response streaming, typing indicators, and real-time message delivery.
 ### Create Streaming Config
 
 ```typescript
-import { createStreamingConfig } from 'clodds/streaming';
+import { createStreamingConfig } from 'blitzkrieg/streaming';
 
 const streaming = createStreamingConfig({
   // Enable streaming

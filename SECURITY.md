@@ -13,7 +13,7 @@
 Instead, please report them via one of these methods:
 
 1. **GitHub Security Advisories** (Preferred)
-   - Go to the [Security tab](https://github.com/alsk1992/CloddsBot/security/advisories)
+   - Go to the [Security tab](https://github.com/alsk1992/BlitzkriegBot/security/advisories)
    - Click "Report a vulnerability"
    - Fill out the form with details
 
@@ -65,7 +65,7 @@ Instead, please report them via one of these methods:
 
 ### Agent Identity Verification (ERC-8004)
 
-Clodds supports [ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) for on-chain agent identity verification. This prevents impersonation attacks where malicious actors claim to be trusted traders.
+Blitzkrieg supports [ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) for on-chain agent identity verification. This prevents impersonation attacks where malicious actors claim to be trusted traders.
 
 **Why it matters:** On January 29, 2026, an agent named "samaltman" attempted to hijack bots via prompt injection. Anyone can claim to be anyone without verification.
 
@@ -110,15 +110,15 @@ Only enable these if you understand the risks. For untrusted code execution, use
 
 ### MCP Server Security
 
-When exposing Clodds as an MCP tool server, use these controls to restrict access:
+When exposing Blitzkrieg as an MCP tool server, use these controls to restrict access:
 
 | Feature | Environment Variable | Default |
 |---------|---------------------|---------|
-| Tool blocklist | `CLODDS_MCP_BLOCKED_TOOLS` | _(none)_ |
-| Tool allowlist | `CLODDS_MCP_ALLOWED_TOOLS` | _(all)_ |
-| Tool profile | `CLODDS_MCP_TOOL_PROFILE` | `full` |
-| Rate limit | `CLODDS_MCP_RATE_LIMIT` | `60` calls/min |
-| Audit logging | `CLODDS_MCP_AUDIT` | `true` |
+| Tool blocklist | `BLITZKRIEG_MCP_BLOCKED_TOOLS` | _(none)_ |
+| Tool allowlist | `BLITZKRIEG_MCP_ALLOWED_TOOLS` | _(all)_ |
+| Tool profile | `BLITZKRIEG_MCP_TOOL_PROFILE` | `full` |
+| Rate limit | `BLITZKRIEG_MCP_RATE_LIMIT` | `60` calls/min |
+| Audit logging | `BLITZKRIEG_MCP_AUDIT` | `true` |
 
 Tool profiles provide predefined access levels:
 - **`read-only`** — feeds, markets, analytics, portfolio, watchlist, search
@@ -133,11 +133,11 @@ Production deployments should enable:
 
 ```bash
 # IP-based rate limiting (requests per minute)
-CLODDS_IP_RATE_LIMIT=100
+BLITZKRIEG_IP_RATE_LIMIT=100
 
 # HTTPS enforcement
-CLODDS_FORCE_HTTPS=true
-CLODDS_HSTS_ENABLED=true
+BLITZKRIEG_FORCE_HTTPS=true
+BLITZKRIEG_HSTS_ENABLED=true
 ```
 
 ## Security Audit

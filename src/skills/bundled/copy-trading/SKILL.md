@@ -74,7 +74,7 @@ Automatically mirror trades from successful wallets with configurable sizing, de
 ### Create Copy Trading Service
 
 ```typescript
-import { createCopyTradingService } from 'clodds/trading/copy-trading';
+import { createCopyTradingService } from 'blitzkrieg/trading/copy-trading';
 
 const copyTrader = createCopyTradingService({
   // Polymarket credentials
@@ -195,7 +195,7 @@ console.log(`Active positions: ${status.activePositions}`);
 ### Find Best Traders
 
 ```typescript
-import { findBestAddressesToCopy } from 'clodds/trading/copy-trading';
+import { findBestAddressesToCopy } from 'blitzkrieg/trading/copy-trading';
 
 // Find top traders
 const topTraders = await findBestAddressesToCopy({

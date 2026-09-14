@@ -71,7 +71,7 @@ Execute trades on Polymarket and Kalshi with slippage protection, maker orders, 
 ### Create Execution Service
 
 ```typescript
-import { createExecutionService } from 'clodds/execution';
+import { createExecutionService } from 'blitzkrieg/execution';
 
 const executor = createExecutionService({
   polymarket: {

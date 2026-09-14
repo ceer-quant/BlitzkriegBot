@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * Clodds CLI - Command-line interface for Clodds
+ * Blitzkrieg CLI - Command-line interface for Blitzkrieg
  *
  * Commands:
- * - clodds start - Start the gateway
- * - clodds pairing list <channel> - List pending pairing requests
- * - clodds pairing approve <channel> <code> - Approve a pairing request
- * - clodds pairing reject <channel> <code> - Reject a pairing request
- * - clodds pairing users <channel> - List paired users
+ * - blitzkrieg start - Start the gateway
+ * - blitzkrieg pairing list <channel> - List pending pairing requests
+ * - blitzkrieg pairing approve <channel> <code> - Approve a pairing request
+ * - blitzkrieg pairing reject <channel> <code> - Reject a pairing request
+ * - blitzkrieg pairing users <channel> - List paired users
  */
 
 // Silence pino during onboard/setup so log spam doesn't pollute the wizard.
@@ -45,22 +45,22 @@ process.on('uncaughtException', (error) => {
 });
 
 program
-  .name('clodds')
+  .name('blitzkrieg')
   .description('Claude + Odds: AI assistant for prediction markets')
   .version('0.1.0');
 
 // Start command
 program
   .command('start')
-  .description('Start the Clodds gateway')
+  .description('Start the Blitzkrieg gateway')
   .action(async () => {
-    logger.info('Starting Clodds...');
+    logger.info('Starting Blitzkrieg...');
     const config = await loadConfig();
     configureHttpClient(config.http);
     const gateway = await createGateway(config);
     await gateway.start();
 
-    logger.info('Clodds is running!');
+    logger.info('Blitzkrieg is running!');
 
     const shutdown = async () => {
       logger.info('Shutting down...');
@@ -122,7 +122,7 @@ pairing
       );
     }
 
-    console.log(`\nTo approve: clodds pairing approve ${channel} <CODE>`);
+    console.log(`\nTo approve: blitzkrieg pairing approve ${channel} <CODE>`);
     db.close();
   });
 
@@ -138,10 +138,10 @@ pairing
 
     if (success) {
       console.log(`\n✅ Approved pairing request: ${code.toUpperCase()}`);
-      console.log('User can now chat with Clodds via DM.');
+      console.log('User can now chat with Blitzkrieg via DM.');
     } else {
       console.log(`\n❌ Failed to approve: Code not found or expired`);
-      console.log(`Run "clodds pairing list ${channel}" to see pending requests.`);
+      console.log(`Run "blitzkrieg pairing list ${channel}" to see pending requests.`);
     }
 
     db.close();
@@ -238,7 +238,7 @@ pairing
 
     if (owners.length === 0) {
       console.log(`No owners for ${channel}`);
-      console.log(`\nUse 'clodds pairing set-owner ${channel} <userId>' to add an owner.`);
+      console.log(`\nUse 'blitzkrieg pairing set-owner ${channel} <userId>' to add an owner.`);
       return;
     }
 
@@ -312,13 +312,13 @@ program
 // Status command
 program
   .command('status')
-  .description('Show Clodds status')
+  .description('Show Blitzkrieg status')
   .action(async () => {
     const db = createDatabase();
     createMigrationRunner(db).migrate();
     const pairingService = createPairingService(db);
 
-    console.log('\nClodds Status\n');
+    console.log('\nBlitzkrieg Status\n');
 
     // Count paired users per channel
     const channels = ['telegram', 'discord', 'webchat', 'matrix', 'signal', 'imessage', 'line', 'googlechat'];

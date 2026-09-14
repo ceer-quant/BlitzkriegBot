@@ -55,7 +55,7 @@ Monitor system health, track errors, and receive alerts when issues occur.
 ### Create Monitoring Service
 
 ```typescript
-import { createMonitoringService } from 'clodds/monitoring';
+import { createMonitoringService } from 'blitzkrieg/monitoring';
 
 const monitor = createMonitoringService({
   // Health check interval

@@ -47,10 +47,10 @@ const DEFAULT_STEPS: WizardStep[] = [
   {
     id: 'welcome',
     title: 'Welcome',
-    description: 'Welcome to Clodds setup',
+    description: 'Welcome to Blitzkrieg setup',
     async run(ctx) {
-      logger.info('Welcome to Clodds - Your AI Prediction Markets Assistant');
-      logger.info('This wizard will help you set up Clodds.');
+      logger.info('Welcome to Blitzkrieg - Your AI Prediction Markets Assistant');
+      logger.info('This wizard will help you set up Blitzkrieg.');
     },
   },
   {
@@ -131,7 +131,7 @@ const DEFAULT_STEPS: WizardStep[] = [
       writeFileSync(envPath, envContent);
 
       logger.info('Configuration saved to .env');
-      logger.info('Setup complete! Run `npm start` to launch Clodds.');
+      logger.info('Setup complete! Run `npm start` to launch Blitzkrieg.');
     },
   },
 ];

@@ -1,6 +1,6 @@
-# Clodds API Reference
+# Blitzkrieg API Reference
 
-Complete reference for the Clodds HTTP and WebSocket APIs.
+Complete reference for the Blitzkrieg HTTP and WebSocket APIs.
 
 ## Base URL
 
@@ -10,11 +10,7 @@ The gateway binds to loopback by default on port 18789:
 http://127.0.0.1:18789
 ```
 
-For the Compute API (agent marketplace):
-
-```
-https://api.cloddsbot.com
-```
+All endpoints are served by your own gateway deployment.
 
 ---
 
@@ -34,7 +30,7 @@ Two authentication methods:
 
 **1. Bearer Token (API Key)**
 ```http
-Authorization: Bearer clodds_apikey_xxxxx
+Authorization: Bearer blitzkrieg_apikey_xxxxx
 ```
 
 **2. Wallet Address in Body**
@@ -60,11 +56,11 @@ Rate limit headers:
 
 ## What Can You Build With This API?
 
-The HTTP API turns Clodds from a CLI chatbot into a **headless trading platform** that any software can control. Skills and agents running inside Clodds call services directly in-process — the HTTP API is for everything external.
+The HTTP API turns Blitzkrieg from a CLI chatbot into a **headless trading platform** that any software can control. Skills and agents running inside Blitzkrieg call services directly in-process — the HTTP API is for everything external.
 
 ### Trading Dashboards / UIs
 
-Build a React, Next.js, or mobile frontend on top of Clodds. Show live positions, PnL charts, and portfolio stats. Let users manage TP/SL visually, monitor whale activity, and act on arbitrage opportunities — all powered by the REST endpoints below.
+Build a React, Next.js, or mobile frontend on top of Blitzkrieg. Show live positions, PnL charts, and portfolio stats. Let users manage TP/SL visually, monitor whale activity, and act on arbitrage opportunities — all powered by the REST endpoints below.
 
 ### Automation Scripts
 
@@ -79,7 +75,7 @@ POST /api/positions/managed/:id/stop-loss  →  set risk controls
 
 ### Multi-Bot Orchestration
 
-Run multiple Clodds instances. A master controller queries each one via HTTP — one instance scans for opportunities, another executes trades, a third monitors risk.
+Run multiple Blitzkrieg instances. A master controller queries each one via HTTP — one instance scans for opportunities, another executes trades, a third monitors risk.
 
 ### Telegram / Discord Bots
 
@@ -95,7 +91,7 @@ Scrape `GET /api/monitoring/health` and `GET /api/monitoring/process` for system
 
 ### AI Agent Integration
 
-Other AI agents (AutoGPT, CrewAI, LangChain, etc.) can use Clodds as a "trading tool" by calling the REST API. Wrap endpoints as MCP tools so Claude or other LLMs can trade, check positions, and manage risk through function calling.
+Other AI agents (AutoGPT, CrewAI, LangChain, etc.) can use Blitzkrieg as a "trading tool" by calling the REST API. Wrap endpoints as MCP tools so Claude or other LLMs can trade, check positions, and manage risk through function calling.
 
 ### Scheduled Jobs & Workflows
 
@@ -124,7 +120,7 @@ API info and available endpoints.
 **Response:**
 ```json
 {
-  "name": "clodds",
+  "name": "blitzkrieg",
   "version": "0.3.10",
   "description": "AI assistant for prediction markets",
   "endpoints": {
@@ -576,7 +572,7 @@ const signature = crypto
 | 404 | Unknown webhook path |
 | 429 | Rate limited |
 
-Set `CLODDS_WEBHOOK_REQUIRE_SIGNATURE=0` to disable signature checks.
+Set `BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE=0` to disable signature checks.
 
 ### POST /channels/:platform
 
@@ -787,7 +783,7 @@ Health check.
 ```json
 {
   "status": "ok",
-  "service": "clodds-compute",
+  "service": "blitzkrieg-compute",
   "version": "v1",
   "uptime": 123456,
   "activeJobs": 2
@@ -1912,7 +1908,7 @@ When you provide a `callbackUrl` in compute requests, results are POSTed:
 ```
 
 **Verification Header:**
-- `X-Clodds-Signature`: HMAC-SHA256 of body using webhook secret
+- `X-Blitzkrieg-Signature`: HMAC-SHA256 of body using webhook secret
 
 ---
 

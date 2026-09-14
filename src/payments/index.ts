@@ -1,5 +1,5 @@
 /**
- * Clodds Payments Module
+ * Blitzkrieg Payments Module
  *
  * Supports:
  * - x402: HTTP 402 machine-to-machine crypto payments

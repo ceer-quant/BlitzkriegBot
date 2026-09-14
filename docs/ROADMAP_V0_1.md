@@ -22,7 +22,7 @@
 
 | 史诗 | Issue | 子任务 |
 | --- | --- | --- |
-| E1 Clodds 清零 | [#15](https://github.com/ceer-quant/BlitzkriegBot/issues/15) | [#21](https://github.com/ceer-quant/BlitzkriegBot/issues/21) 裁决 · [#22](https://github.com/ceer-quant/BlitzkriegBot/issues/22) socket · [#23](https://github.com/ceer-quant/BlitzkriegBot/issues/23) 配置面 · [#24](https://github.com/ceer-quant/BlitzkriegBot/issues/24) 协议/化妆 · [#25](https://github.com/ceer-quant/BlitzkriegBot/issues/25) remote |
+| E1 Blitzkrieg 清零 | [#15](https://github.com/ceer-quant/BlitzkriegBot/issues/15) | [#21](https://github.com/ceer-quant/BlitzkriegBot/issues/21) 裁决 · [#22](https://github.com/ceer-quant/BlitzkriegBot/issues/22) socket · [#23](https://github.com/ceer-quant/BlitzkriegBot/issues/23) 配置面 · [#24](https://github.com/ceer-quant/BlitzkriegBot/issues/24) 协议/化妆 · [#25](https://github.com/ceer-quant/BlitzkriegBot/issues/25) remote |
 | E2 多策略底座 | [#16](https://github.com/ceer-quant/BlitzkriegBot/issues/16) | [#26](https://github.com/ceer-quant/BlitzkriegBot/issues/26) 按策略资金 · [#27](https://github.com/ceer-quant/BlitzkriegBot/issues/27) 门禁 opt-out · [#28](https://github.com/ceer-quant/BlitzkriegBot/issues/28) 进化按策略化 |
 | E3 策略重构（HFT） | [#17](https://github.com/ceer-quant/BlitzkriegBot/issues/17) | [#29](https://github.com/ceer-quant/BlitzkriegBot/issues/29) 先设计后实现 |
 | E4 对冲策略 | [#18](https://github.com/ceer-quant/BlitzkriegBot/issues/18) | [#30](https://github.com/ceer-quant/BlitzkriegBot/issues/30) 趋势 · [#31](https://github.com/ceer-quant/BlitzkriegBot/issues/31) 逆向 |
@@ -38,7 +38,7 @@
 
 | # | 史诗 | 内容 | 依赖 |
 | --- | --- | --- | --- |
-| **E1** | Clodds 清零 | 彻底移除 cloddsbot 遗留，运行时零相关性 | — （最先做，否则新代码会继承旧命名） |
+| **E1** | Blitzkrieg 清零 | 彻底移除 cloddsbot 遗留，运行时零相关性 | — （最先做，否则新代码会继承旧命名） |
 | **E2** | 多策略底座 | 按策略资金分配 + 门禁按策略 opt-out + 影子进化按策略化 | — （E3/E4 的前置） |
 | **E3** | 策略重构（疯狗/HFT） | 用影子进化优化并**允许完全重构**现有主策略，真正吃高频特性 | E2 |
 | **E4** | 对冲策略 | ≥1 个趋势策略 + ≥1 个逆向策略，与主策略对冲 | E2 |
@@ -55,7 +55,7 @@
 
 ---
 
-## 2. E1 — Clodds 清零
+## 2. E1 — Blitzkrieg 清零
 
 **现状（盘点结论）**：约 260 个文件、905 行命中（不含 `dist/`；`dist/` 另有 221 个编译产物）。
 绝大多数是文案/注释，但以下**承载运行时契约**，必须按「有迁移路径」处理而不是直接改名。
@@ -80,7 +80,7 @@
 | **D 接线协议** | MCP 工具命名空间 `clodds_<skill>`、`clodds://session/<id>`、Copilot integration id、User-Agent 串、health `name` | 版本化变更；MCP 命名空间需同时接受新旧前缀一个版本 |
 | **E 纯化妆** | 文档、i18n、HTML/公开文案、注释、技能 markdown、npm 包名、仓库字段、docker 服务名、度量/遥测前缀 | 可整批改，风险低 |
 | **F 构建产物** | `dist/` 下 221 个文件 | 源码清零后重新构建即自然清零，**不手工编辑** |
-| **G 仓库元数据** | git remote `origin` = `alsk1992/CloddsBot`（禁止推送，403） | 走 `git remote remove origin`（需用户确认，因为它是历史上游） |
+| **G 仓库元数据** | git remote `origin` = `alsk1992/BlitzkriegBot`（禁止推送，403） | 走 `git remote remove origin`（需用户确认，因为它是历史上游） |
 
 ### 2.2 验收
 

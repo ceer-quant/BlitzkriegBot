@@ -320,7 +320,7 @@ await registry.rateService(service.id, 'BuyerAddress...', 5, 'Excellent data qua
 ## Configuration
 
 No special configuration required. ACP uses:
-- The shared SQLite database (`~/.clodds/clodds.db`)
+- The shared SQLite database (`~/.blitzkrieg/blitzkrieg.db`)
 - Solana RPC from `SOLANA_RPC_URL` or mainnet default
 
 ## Identity System
@@ -331,7 +331,7 @@ ACP includes a complete identity system for agent handles, ownership transfers, 
 
 Unique identifiers for agents in the format `@name`:
 - 3-20 characters, lowercase alphanumeric and underscores
-- Reserved words blocked (admin, clodds, system, etc.)
+- Reserved words blocked (admin, blitzkrieg, system, etc.)
 - Transferable ownership
 
 ```typescript

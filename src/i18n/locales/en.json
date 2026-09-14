@@ -1,11 +1,11 @@
 {
   "app": {
-    "name": "Clodds",
+    "name": "Blitzkrieg",
     "tagline": "AI Trading Terminal",
     "version": "Version {version}"
   },
   "welcome": {
-    "message": "Welcome to Clodds",
+    "message": "Welcome to Blitzkrieg",
     "greeting": "Hello, {name}!",
     "firstTime": "Let's get you set up.",
     "returning": "Welcome back!"
@@ -208,8 +208,8 @@
     "share": "Share"
   },
   "cli": {
-    "starting": "Starting Clodds...",
-    "ready": "Clodds is ready!",
+    "starting": "Starting Blitzkrieg...",
+    "ready": "Blitzkrieg is ready!",
     "shutting_down": "Shutting down...",
     "doctor": {
       "title": "System Diagnostics",

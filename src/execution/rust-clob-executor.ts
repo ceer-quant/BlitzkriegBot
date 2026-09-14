@@ -42,7 +42,7 @@ let queue = Promise.resolve();
 const pending = new Map<number, { resolve: (value: RustResponse) => void; reject: (error: Error) => void }>();
 
 function binaryPath(): string {
-  return join(process.cwd(), 'rust-executor', 'target', 'release', 'clodds-rust-executor');
+  return join(process.cwd(), 'rust-executor', 'target', 'release', 'blitzkrieg-rust-executor');
 }
 
 function ensureProcess(): ChildProcessWithoutNullStreams {

@@ -112,7 +112,7 @@ export async function createTelegramChannel(
         await callTelegramApi(ctx.chat?.id, 'reply(pairing-success)', () =>
           ctx.reply(
             '✅ *Successfully paired!*\n\n' +
-              'You can now chat with Clodds. Try asking about prediction markets!',
+              'You can now chat with Blitzkrieg. Try asking about prediction markets!',
             { parse_mode: 'Markdown' }
           )
         );
@@ -124,7 +124,7 @@ export async function createTelegramChannel(
     // Welcome message
     await callTelegramApi(ctx.chat?.id, 'reply(welcome)', () =>
       ctx.reply(
-        `🎲 *Welcome to Clodds!*\n\n` +
+        `🎲 *Welcome to Blitzkrieg!*\n\n` +
           `Claude + Odds — your AI assistant for prediction markets.\n\n` +
           `*What I can do:*\n` +
           `• Search markets across platforms\n` +
@@ -338,7 +338,7 @@ export async function createTelegramChannel(
                 await callTelegramApi(ctx.chat?.id, 'reply(pairing-direct)', () =>
                   ctx.reply(
                     '✅ *Successfully paired!*\n\n' +
-                      'You can now chat with Clodds. Ask me anything about prediction markets!',
+                      'You can now chat with Blitzkrieg. Ask me anything about prediction markets!',
                     { parse_mode: 'Markdown' }
                   )
                 );
@@ -356,7 +356,7 @@ export async function createTelegramChannel(
                     `🔐 *Pairing Required*\n\n` +
                       `Your pairing code: \`${code}\`\n\n` +
                       `To complete pairing, either:\n` +
-                      `1. Run \`clodds pairing approve telegram ${code}\` on your computer\n` +
+                      `1. Run \`blitzkrieg pairing approve telegram ${code}\` on your computer\n` +
                       `2. Or ask the bot owner to approve your code\n\n` +
                       `Code expires in 1 hour.`,
                     { parse_mode: 'Markdown' }
@@ -515,7 +515,7 @@ export async function createTelegramChannel(
               title: 'Search Prediction Markets',
               description: 'Type a query to search markets (e.g., "Trump 2028", "Bitcoin 100k")',
               input_message_content: {
-                message_text: '🎲 *Clodds - Prediction Markets*\n\nUse inline mode to search:\n`@botname Trump 2028`',
+                message_text: '🎲 *Blitzkrieg - Prediction Markets*\n\nUse inline mode to search:\n`@botname Trump 2028`',
                 parse_mode: 'Markdown',
               },
             },

@@ -87,7 +87,7 @@ function generateId(length: number = 16): string {
 }
 
 export async function createOTelExtension(config: OTelConfig): Promise<OTelExtension> {
-  const serviceName = config.serviceName || 'clodds';
+  const serviceName = config.serviceName || 'blitzkrieg';
   const sampleRate = config.sampleRate ?? 1.0;
   const MAX_BUFFERED_SPANS = 10000;
   const MAX_BUFFERED_METRICS = 10000;

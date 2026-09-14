@@ -1,5 +1,5 @@
 /**
- * Clodds - Core Type Definitions
+ * Blitzkrieg - Core Type Definitions
  * Claude + Odds: AI assistant for prediction markets
  */
 
