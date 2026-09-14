@@ -13,6 +13,8 @@
 //!  - `service`  typed command layer assembling ome/ledger/risk/sim
 //!  - `ipc`      UDS JSON-RPC 2.0 schema + transport
 
+pub mod backtest;
+pub mod data_source;
 pub mod decimal;
 pub mod engine;
 pub mod exit_policy;

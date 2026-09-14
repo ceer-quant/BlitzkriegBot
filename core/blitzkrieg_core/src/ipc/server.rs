@@ -54,24 +54,8 @@ pub async fn run(
         core.set_balance(config.dry_seed_balance);
     }
     if config.engine_enabled {
-        let ecfg = crate::engine::EngineConfig {
-            scanner: crate::scanner::ScannerConfig {
-                assets: config.assets.clone(),
-                round_duration_sec: config.round_duration_sec,
-                min_round_age_sec: config.min_round_age_sec,
-                min_time_left_sec: config.positions.exit.min_time_left_sec,
-            },
-            trend: crate::signal::TrendConfig {
-                confirm_sec: config.trend_confirm_sec,
-                window_floor_ms: config.trend_window_floor_ms,
-                ..Default::default()
-            },
-            size_usd: config.size_usd,
-            min_shares: config.min_shares,
-            max_shares: config.max_shares,
-            ..Default::default()
-        };
-        core.enable_engine(crate::engine::Engine::new(ecfg));
+        // One mapping shared with the backtester (`CoreConfig::install_engine`).
+        config.install_engine(&mut core);
         eprintln!("blitzkrieg-core: self-driving engine enabled");
     }
     let core = Arc::new(AsyncMutex::new(core));
@@ -414,6 +398,27 @@ async fn handle_line(
                 if c.has_engine() {
                     c.engine_on_data(
                         crate::engine::DataEvent::Book { token_id: p.token_id.clone(), bids, asks, now_ms: now },
+                        now,
+                    );
+                }
+                Ok::<_, CoreError>(serde_json::json!({ "ok": true }))
+            }
+        })
+        .await,
+
+        method::ENGINE_BOOK => typed(params, |p: BookSnapshotParams| {
+            let core = core.clone();
+            async move {
+                let bids: Vec<(Decimal, Decimal)> = p.bids.into_iter().map(|l| (l.price, l.size)).collect();
+                let asks: Vec<(Decimal, Decimal)> = p.asks.into_iter().map(|l| (l.price, l.size)).collect();
+                let now = now_ms();
+                let mut c = core.lock().await;
+                // Engine feed only: no `book_snapshot`, so no DRY maker-fill
+                // simulation. This is the path the Rust-native feed drives, and
+                // the one the archive/replay pair must agree with.
+                if c.has_engine() {
+                    c.engine_on_data(
+                        crate::engine::DataEvent::Book { token_id: p.token_id, bids, asks, now_ms: now },
                         now,
                     );
                 }

@@ -105,6 +105,7 @@ node scripts/final-exit-opt.mjs              # 出场参数全网格+稳健性
 | 8 | 测试数据污染生产账本 | §21/§22 |
 | 9 | **孤儿订单**（订单状态不持久化） | **§29** |
 | 10 | **持仓失管**（持仓状态不持久化） | **§32** |
+| 11 | **回测维护节拍被事件密度绑架**（真实数据暴露：803 vs 15 610 周期） | **§35** |
 
 ## 7. 未完成 / 待办
 
@@ -115,7 +116,22 @@ node scripts/final-exit-opt.mjs              # 出场参数全网格+稳健性
   用户策略（dylib）注册后默认禁用需显式 `strategy.enable`。行为等价已过 parity 硬门槛。
   已合并 main/develop（PR #9 → `ab6a13c`），并随 **2026-09-14 18:53 dry 内核重启**生效
   （新 pid 36014，`engine.stats.strategies[]` 已在线；证据见 `MIGRATION_LOG §34` 生效说明）。
-- **P-1.2/1.3（下一项）**：事件驱动回测器 + `DataSource` 数据抽象（`ROADMAP_INSTITUTIONAL.md` §4/§5）。
+- **P-1.2/1.3 事件驱动回测 + 数据抽象**：**已完成**（`MIGRATION_LOG §35`）——`--event-archive` 把
+  引擎消费的每个行情事件镜像成 JSONL（Decimal 精确、到顶只停不删），`--backtest` 用**同一个 `Core`**
+  在虚拟时钟上全链路重放；`FillModel` 提供滑点/延迟/成交概率（默认恒等 = 行为不变）；
+  新增 IPC `engine.book` 把盘口直送 `engine_on_data`（与 `--feed-ws` 同路径、不跑 dry 撮合）。
+  验收：`scripts/backtest-check.mjs` **21/21**（含成交的 live vs 回放**逐位相等**：净盈亏 5.12208717）；
+  真实 feed 归档（1 025 963 事件 / 13 分钟 / 145.7 MB）重放 **19/19**：归档逐类行数 == 回放计数、
+  `blocked.momentum` 88=88、`blocked.timing` 810 vs 805（0.6%，定时器相位）、`confirmed` 诊断逐值一致
+  （该窗口无成交，故订单/PnL 为 0=0）；同参数两次回放报告**逐字节相同**。
+  真机回放同时暴露并修掉两个**只影响回测保真度**的缺陷：维护节拍被事件密度绑架（803 → 15 610 周期）、
+  报告不可复现（HashSet 迭代序 + 宿主时钟诊断）。**不改任何 live 行为**——生产 dry 内核（pid 36014）
+  无需为此重启，下次常规重启即随二进制生效；若要事后复现某笔出场，需显式 `--event-archive`
+  （是否常开见 `DECISIONS_PENDING.md` D-12 附注）。
+- **实况复盘（2026-09-14 晚，8 笔 dry spread_arb）**：6W/2L、+$2.90；两笔 stop_loss 落袋
+  −16.6%/−23.2% net（12% 触发线被 bid 在相邻观测间一步跳过，再加 3.2–3.5% 往返 taker 费），
+  一笔 trailing_stop 峰值 +18.2% 回吐 13.7 点后仅 +1.07% net。机制复盘与待选项见
+  `DECISIONS_PENDING.md` **D-12**；入场全部升级 taker 的成因见 **D-11**。
 - **P0.7**：运行期 dylib 热加载（C-ABI vtable + 版本协商 + catch_unwind）——暂缓。
 - **实盘未验证**：全程 DRY；live 链路（Poly1271 签名/授权/启动清算）**首次真实下单才能验证**。
   尤其 **live 启动孤儿扫单**只在 DRY 验证过，首次 live 启动须确认日志 `startup sweep cancelled N orphan order(s)`。

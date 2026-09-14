@@ -561,6 +561,18 @@ export class BlitzkriegCoreClient extends EventEmitter {
     await this.request('engine.markets', { markets });
   }
 
+  /** Full L2 book straight to the engine: the Rust-native feed's path
+   *  (`--feed-ws`) and the one `--backtest` replays, with no dry maker-fill
+   *  simulation (that lives in `books.snapshot`). Use it to capture a session
+   *  that is decision-for-decision replayable offline. */
+  async engineBook(tokenId: string, bids: Array<[number, number]>, asks: Array<[number, number]>): Promise<void> {
+    await this.request('engine.book', {
+      tokenId,
+      bids: bids.map(([price, size]) => ({ price, size })),
+      asks: asks.map(([price, size]) => ({ price, size })),
+    });
+  }
+
   /** Binance spot price tick (feeds the momentum filter). */
   async spotPrice(asset: string, price: number): Promise<void> {
     await this.request('spot.price', { asset, price });

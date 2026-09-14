@@ -980,3 +980,76 @@ HFT_MAX_SHARES=4 HFT_MIN_SHARES=4 node dist/index.js   # /crypto-hft start
 - 重启后 feed 正常：25s 内 `tops=32170`、`books=88`、`spots=761`、`evaluations=615`，无新增 ERROR/WARN。
 - 重启前状态快照：`data/backup-20260914-185256-prerestart-p1.1/`（positions/orders/trades/evolution/shadow/signals）。
 - 未配置 `--strategy-limit`、未加载任何动态库 → 生产行为与改动前一致；Live 未启用。
+
+## 35. 【P-1.2/P-1.3 回测地基】事件驱动回测器 + 数据抽象（归档/重放）+ 真实数据暴露的两个缺陷修复
+
+### 背景
+`ROADMAP_INSTITUTIONAL.md` §5 P-1 交付物 2/3：**没有回测，任何策略/参数改动都不可验证**。
+目标是"回测与 live 共用同一 feed 接口"，验收是**同一策略在 live 与回测上对同一历史区间给出一致 PnL**。
+
+### 实现
+- **`data_source.rs`（P-1.3）**：`DataSource`/`DataSink` trait、`TimedEvent`、`SourceStats`；
+  JSONL 事件归档（Decimal 一律字符串精确编码：`{"at":<ms>,"k":"book|top|spot|round",...}`）；
+  `EventArchive::open/record_at/flush_if_due`（到上限**丢弃新事件、绝不删除已有行**）；
+  `ReplaySource` 流式读取：跳过畸形行并计数（`malformedLines`），时间戳回退只计数（`outOfOrderEvents`）并钳制时钟。
+- **`backtest.rs`（P-1.2）**：`Backtester` trait（`run`/`describe`）、`BacktestConfig{core,tick_ms,tail_ms}`、
+  `VecSource`（内存源，测试/合成用）、`EventBacktester`——持有**真实 `Core`**，强制 `Dry`：无 trade/order/position
+  落盘、无 near-miss、无 discovery、无 feed-ws、无 shadow；`BacktestReport` 可序列化 + `render()` 文本报告。
+- **`sim.rs`**：`FillModel{taker_slippage_ticks, maker_latency_ms, maker_fill_prob_bps}`，默认**恒等**（0/0/10000）
+  → 重放与 live 逐位可比；`apply_slippage`（买上浮/卖下压，钳制 0.01–0.99）、`maker_eligible_at_ms`、
+  `maker_fill_wins`（按订单 id 的确定性 FNV-1a 抽签，可复现）。
+- **`service.rs`**：单一引擎装配入口 `CoreConfig::engine_config()`/`install_engine()`——**live server 与回测器共用**
+  （杜绝两套参数映射漂移）；`engine_on_data` 在**任何消费者之前**归档原始事件；`tick()` 按 1s 触发归档 flush；
+  `engine.stats` 新增 `archive{path,events,bytes,dropped,recording}`；新增 `engine_stats_at(as_of_ms)`。
+- **CLI**：`--event-archive`、`--event-archive-max-mb`（默认 512）、`--entry-maker-timeout-ms`、
+  `--backtest <archive>`、`--backtest-report`、`--backtest-tick-ms`（默认 50）、`--backtest-tail-ms`、
+  `--slippage-ticks`、`--latency-ms`、`--fill-prob-bps`。`--backtest` 恒为 dry，且强制关闭归档。
+- **IPC/Node**：新增 **`engine.book`**（L2 直送 `engine_on_data`，**不跑** dry 撮合——与 `--feed-ws` 同路径，
+  也就是回测重放的路径；`books.snapshot` 保留 dry 撮合语义，差异见 D-11）+ 客户端 `engineBook()`。
+
+### 真实数据暴露的两个缺陷（已修复 + 回归测试）
+1. **维护节拍被事件密度绑架**（fidelity bug）：原 `run()` 只在"到下一事件的间隙 ≥ `tick_ms`"时推进维护周期，
+   而真实 feed 是**亚毫秒级突发**（1 025 963 事件 / 780.5 s），13 分钟归档只跑了 **803** 个维护周期
+   （live 同区间 **15 618**，`span/tick = 15 610`）。后果：出场检查（TP/SL/追踪/强平）在回测里粗了 ~19 倍
+   → PnL 保真度受损；`blocked` 逐周期计数被饿死（28 vs 805）。
+   **修复**：维护跑在**独立的 `tick_ms` 定时表**上（= live `ipc::server` 的 interval），与事件密度解耦；
+   事件仍按自身时间戳投递、晚到事件钳制不回退。回归测试：
+   `dense_stream_keeps_live_evaluation_cadence`（2 002 个 1 ms 间隔事件 → **40** 个周期，晚到事件不多买一拍）、
+   `sparse_stream_evaluates_every_due_cycle`（10 000 ms → **200** 个周期，静市也要评估出场）。
+2. **报告不可复现**：`confirmed`/`confirmedDetail` 源自 `HashSet`（迭代序每进程随机）→ 同参数两次回放报告不同；
+   且诊断用**宿主时钟**取盘口新鲜度 → 离线回放里所有盘口"过期"、`mid` 显示为 0。
+   **修复**：`engine_stats_at(as_of_ms)`（回测传**虚拟钟**）+ 两个诊断列表按 token 排序。
+   现在同参数两次回放报告**逐字节相同**（`diff` 为空），且 `confirmedDetail` 与 live 快照逐值一致。
+
+### 验证（离线，无网络/无凭证）
+- **`scripts/backtest-check.mjs` → 21/21 PASS**：同一 `engine.book` 驱动两侧（采集 core vs 离线回放），
+  事件数 20=20、无乱序、订单 3（2 成交 + 1 超时撤单）、平仓 1、净盈亏 **5.12208717 逐位相等**、
+  分策略账本一致、回放强制 dry 且不写 trade/order/position 日志。
+- **真实 feed 归档重放 → 19/19 PASS**（`--feed-ws` 采集 1 025 963 事件 / 780.5 s / 145.7 MB；临时 harness，
+  未提交；归档留在 `$TMPDIR/blitzkrieg-real-*`）：
+  - 归档**逐类行数 == 回放 feed 计数**（book 8 598 / top 982 502 / spot 34 860 / round 3）→ 重放零丢失；
+  - live 快照 vs 回放：`books/spots/rounds/signals/placeRejected/strategyLimitRejected` 完全相等，
+    `trades/orders/fills/net PnL/持仓/分策略账本`完全相等（该 13 分钟窗口无成交，故均为 0——PnL 一致性在此窗口
+    是"零对零"，真正的**含成交逐位相等**由 `backtest-check.mjs` 覆盖）；
+  - `evaluations` 15 610 = span/tick（live 15 618，宿主定时器相位/启动差 8 拍）；
+    `blocked.momentum` **88 == 88**；`blocked.timing` 810 vs 805（0.6%，逐周期累计量在两个独立相位的定时器上
+    天然 ±1/区间）；`confirmed` 集合与每 token 的 `mid/entry/cap/inBand` **逐值一致**；
+  - 把 `--backtest-tick-ms` 减半（25 ms）→ 周期 31 220（正好 2×）、timing 1 617（≈2×810）、momentum 177（≈2×88）：
+    证实计数差异是**节拍相位**而非状态分歧；两次同参数回放**逐字节相同**（决定性）。
+  - **已知非对称（测量口径，非缺陷）**：live 的 `engine.stats` 快照比 SIGTERM 早 ~5 ms，因此比归档少
+    6 个 top 事件（归档含这 6 个、回放全量消费）；归档内 **73 332** 个乱序到达（中位滞后 11 ms / p90 18 ms /
+    p99 767 ms / 最大 8.6 s）是真实多流 feed 的结构属性（Binance spot + CLOB book/top 到达序抖动），
+    重放**不重排、只钳制**，与 live "到达顺序即真实顺序"的语义一致。
+- **归档速率实测** ≈11 MB/分钟 ≈16 GB/天 → 生产常开归档必须配 `--event-archive-max-mb` + 按天轮转（D-12 附注）。
+
+### 测试与门禁
+- Rust：`cargo test --workspace` **150 项**通过（core **131** = 基线 129 + 节拍回归 2；ui_kit 13；panel 2；polymarket 4），
+  0 失败；`cargo build --release`（默认特性）与 `--features strategy-loading` 均通过（生产二进制恢复为**默认特性**构建）。
+- Node/工具链：`npx tsc --noEmit` 干净；`npm test` **135/135**；`npm run build` OK；
+  `scripts/secret-scan.sh` **OK: no secrets detected**；`parity-engines` **PARITY OK**；`core-parity` **RUST CORE PARITY OK**；
+  `cycle-check` **PASS**；`backtest-check` **21/21**。
+
+### 默认安全
+- 不设 `--event-archive` / `--backtest` → 生产行为与改动前一致（归档与回测都是显式 opt-in）。
+- `--backtest` 恒 dry、强制关闭归档与 discovery；`FillModel` 默认恒等 → 不改任何 live 决策。
+- 未启用 Live、未改任何凭证；临时 harness 只在私有 socket + 临时目录里跑，不碰生产数据文件。

@@ -57,12 +57,13 @@
 ### 2.3 行情 / 引擎
 | method | params | result |
 |:---|:---|:---|
-| `books.snapshot` | `{ tokenId, bids:[{price,size}], asks:[...] }` | `{ ok: true }` |
+| `books.snapshot` | `{ tokenId, bids:[{price,size}], asks:[...] }` | `{ ok: true }`（含 dry 撮合：会驱动挂单穿越成交） |
 | `books.top` | `{ tokenId, bestBid?, bestAsk? }` | `{ ok: true }` |
+| `engine.book` | `{ tokenId, bids:[{price,size}], asks:[...] }` | `{ ok: true }`（P-1.2：**直送 `engine_on_data`**，不跑 dry 撮合——`--feed-ws` 原生 feed 与回测重放的同一条路径） |
 | `spot.price` | `{ asset, price }` | `{ ok: true }` |
 | `engine.markets` | `{ markets: [CryptoMarket...] }` | `{ ok: true }` |
 | `engine.round` | `{}` | `{ slot, ageSec, timeLeftSec, markets, canTrade, marketPrices:[{asset,up,down}] }` |
-| `engine.stats` | `{}` | `{ books, tops, spots, rounds, evaluations, signals, placeRejected, blocked:{timing,momentum}, confirmed:[...] }` |
+| `engine.stats` | `{}` | `{ books, tops, spots, rounds, evaluations, signals, placeRejected, strategyLimitRejected, blocked:{timing,momentum}, confirmed:[...], confirmedDetail:[{token,mid,entry,cap,inBand}], strategies:[...]（P-1.1 按策略分账）, archive:{ path, events, bytes, dropped, recording }\|null（P-1.3 归档状态） }`。诊断列表按 token 排序、按调用时刻计算（回测报告内用虚拟钟），因此可复现、可 diff |
 
 ### 2.4 策略（P0.5）
 | method | params | result |

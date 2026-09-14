@@ -77,6 +77,50 @@ pub struct CoreConfig {
     /// absent entry means unlimited — the builtin `spread_arb` keeps its current
     /// behaviour unless an operator configures a cap.
     pub strategy_limits: HashMap<String, StrategyLimit>,
+    /// Maker→taker escalation deadline for engine entries (P-1.2). Defaults to the
+    /// long-standing 5000 ms; a backtest may model a different venue latency.
+    pub entry_maker_timeout_ms: i64,
+    /// Fill-realism model for the dry matcher (P-1.2). Default = identity, so the
+    /// live/dry path is unchanged; a backtest raises slippage/latency/probability.
+    pub fill_model: crate::sim::FillModel,
+    /// Where to mirror every market-data event the engine consumes (P-1.3).
+    /// None = off (default). Used to build the local L2/tick corpus a backtest
+    /// replays.
+    pub event_archive_path: Option<String>,
+    /// Stop recording once the archive reaches this size (MiB); 0 = unlimited.
+    /// Nothing is ever deleted — a full archive just stops growing.
+    pub event_archive_max_mb: u64,
+}
+
+impl CoreConfig {
+    /// Build the engine config from this core config — the ONE mapping used by
+    /// both the live server and the backtester, so a replay drives the identical
+    /// engine a live run would (P-1.2).
+    pub fn engine_config(&self) -> crate::engine::EngineConfig {
+        crate::engine::EngineConfig {
+            scanner: crate::scanner::ScannerConfig {
+                assets: self.assets.clone(),
+                round_duration_sec: self.round_duration_sec,
+                min_round_age_sec: self.min_round_age_sec,
+                min_time_left_sec: self.positions.exit.min_time_left_sec,
+            },
+            trend: crate::signal::TrendConfig {
+                confirm_sec: self.trend_confirm_sec,
+                window_floor_ms: self.trend_window_floor_ms,
+                ..Default::default()
+            },
+            size_usd: self.size_usd,
+            min_shares: self.min_shares,
+            max_shares: self.max_shares,
+            ..Default::default()
+        }
+    }
+
+    /// Install the engine described by this config (the live server's startup
+    /// step, reused verbatim by the backtester).
+    pub fn install_engine(&self, core: &mut Core) {
+        core.enable_engine(crate::engine::Engine::new(self.engine_config()));
+    }
 }
 
 /// Entry caps for one strategy. Both are optional; `None` = no cap.
@@ -134,6 +178,10 @@ impl Default for CoreConfig {
             shadow_evolution_enabled: false,
             shadow_evolution_tuning: None,
             strategy_limits: HashMap::new(),
+            entry_maker_timeout_ms: 5000,
+            fill_model: crate::sim::FillModel::default(),
+            event_archive_path: None,
+            event_archive_max_mb: 512,
         }
     }
 }
@@ -171,6 +219,9 @@ pub struct Core {
     position_db: Option<crate::position_db::PositionDb>,
     /// Feed/decision counters for observability (P4 diagnostics).
     stats: CoreStats,
+    /// Optional mirror of every market-data event into a JSONL archive (P-1.3).
+    /// The backtester replays this file.
+    event_archive: Option<crate::data_source::EventArchive>,
     /// Per-strategy order/trade accounting (P-1.1). Session-scoped: reset on
     /// restart, like `stats`; the durable per-trade record is the trade log.
     strategy_accounting: HashMap<String, StrategyAccounting>,
@@ -202,6 +253,21 @@ impl Core {
         };
         let breaker = LossBreaker::new(config.max_consecutive_losses, config.breaker_cooldown_sec);
         let positions = PositionManager::new(config.positions.clone());
+        // Optional market-data archive (P-1.3). A failure to open only disables
+        // recording — trading must never be blocked by an archive path problem.
+        let event_archive = config.event_archive_path.as_ref().and_then(|p| {
+            let cap_bytes = config.event_archive_max_mb.saturating_mul(1024 * 1024);
+            match crate::data_source::EventArchive::open(std::path::Path::new(p), cap_bytes) {
+                Ok(a) => {
+                    tracing::info!(path = %p, "recording market-data archive");
+                    Some(a)
+                }
+                Err(e) => {
+                    tracing::warn!(path = %p, error = %e, "cannot open event archive; recording disabled");
+                    None
+                }
+            }
+        });
         let mut ledger = Ledger::new();
         // DRY mode has no venue to reconcile against; seed the local cash so the
         // reserve/overspend gate is meaningful for embedders that don't seed it.
@@ -231,6 +297,7 @@ impl Core {
             order_db,
             position_db,
             stats: CoreStats::default(),
+            event_archive,
             strategy_accounting: HashMap::new(),
             next_id: 1,
             tx: None,
@@ -336,6 +403,11 @@ impl Core {
     /// Mutable access to config (engine wiring adjusts exits/positions live).
     pub fn config_mut(&mut self) -> &mut CoreConfig {
         &mut self.config
+    }
+
+    /// Read-only view of the active config (diagnostics/backtest reports).
+    pub fn config(&self) -> &CoreConfig {
+        &self.config
     }
 
     // ── Strategy engine & extensions (P0.5) ─────────────────────────────────
@@ -583,6 +655,15 @@ impl Core {
     /// Feed a market-data event to the engine; applies any trend-break bid
     /// cancellation and, for round updates, nothing else.
     pub fn engine_on_data(&mut self, ev: crate::engine::DataEvent, now_ms: i64) {
+        // Archive the raw event BEFORE anything consumes it, so a replay sees
+        // exactly the stream the engine saw (P-1.3). The event's own timestamp is
+        // authoritative (it is the clock the engine decides on); the caller's
+        // `now_ms` is only a fallback for an event that arrived unstamped.
+        if let Some(a) = self.event_archive.as_mut() {
+            let own = crate::data_source::event_at_ms(&ev);
+            let at = if own > 0 { own } else { now_ms };
+            a.record_at(at, &ev);
+        }
         match &ev {
             crate::engine::DataEvent::Book { .. } => self.stats.books += 1,
             crate::engine::DataEvent::TopOfBook { .. } => self.stats.tops += 1,
@@ -715,7 +796,7 @@ impl Core {
                     continue;
                 }
             }
-            match self.place(req, 5000, now_ms) {
+            match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
                 Ok((_id, _)) => {
                     self.strategy_accounting.entry(name).or_default().placed += 1;
                     if let Some(engine) = self.engine.as_mut() {
@@ -810,16 +891,25 @@ impl Core {
 
     /// Diagnostic snapshot: feed counters + engine trend/confirmed state.
     pub fn engine_stats(&self) -> serde_json::Value {
-        let confirmed = self
+        self.engine_stats_at(now_ms())
+    }
+
+    /// The same snapshot as of an explicit instant. The token lists are sorted:
+    /// their source is a `HashSet`, whose iteration order is randomised per
+    /// process, and a report that shuffles between runs cannot be diffed.
+    pub fn engine_stats_at(&self, as_of_ms: i64) -> serde_json::Value {
+        let mut confirmed = self
             .engine
             .as_ref()
             .map(|e| e.confirmed_tokens().into_iter().collect::<Vec<_>>())
             .unwrap_or_default();
-        let confirmed_detail = self
+        confirmed.sort();
+        let mut confirmed_detail = self
             .engine
             .as_ref()
-            .map(|e| e.confirmed_diagnostics(now_ms()))
+            .map(|e| e.confirmed_diagnostics(as_of_ms))
             .unwrap_or_default();
+        confirmed_detail.sort_by(|a, b| a["token"].as_str().cmp(&b["token"].as_str()));
         let blocked = self
             .engine
             .as_ref()
@@ -843,6 +933,11 @@ impl Core {
             "confirmed": confirmed,
             "confirmedDetail": confirmed_detail,
             "strategies": self.strategy_stats(),
+            "archive": self
+                .event_archive
+                .as_ref()
+                .map(|a| serde_json::to_value(a.status()).unwrap_or(serde_json::Value::Null))
+                .unwrap_or(serde_json::Value::Null),
         })
     }
 
@@ -1266,8 +1361,11 @@ impl Core {
                 self.ome.mark_live(id, now_ms)?;
                 match order.mode {
                     FillPolicy::Taker => {
-                        // Cross immediately and fully at the buffered limit.
-                        self.authoritative_fill(id, order.size, order.price, now_ms)?;
+                        // Cross immediately and fully at the buffered limit,
+                        // worsened by the fill model's taker slippage (identity by
+                        // default, so the live/dry path is unchanged).
+                        let fill_price = self.config.fill_model.apply_slippage(order.side, order.price);
+                        self.authoritative_fill(id, order.size, fill_price, now_ms)?;
                     }
                     FillPolicy::Maker | FillPolicy::MakerThenTaker => {
                         if order.mode == FillPolicy::MakerThenTaker {
@@ -1328,6 +1426,17 @@ impl Core {
         }
         let crosses = self.books.get(&order.token_id).map(|b| b.crosses(&order)).unwrap_or(false);
         if !crosses {
+            return;
+        }
+        // Fill model (P-1.2), identity by default so this path is unchanged:
+        //  - latency: the order cannot be hit before the venue could have it;
+        //  - fill probability: a crossing does not guarantee a fill (queue
+        //    position) — a deterministic per-order draw keeps replays exact.
+        let model = self.config.fill_model;
+        if now_ms < model.maker_eligible_at_ms(order.submitted_at_ms) {
+            return;
+        }
+        if !model.maker_fill_wins(&order.order_id) {
             return;
         }
         // Dry maker fills are full fills at the resting limit (Node parity).
@@ -1439,6 +1548,13 @@ impl Core {
 
     // ── Maintenance: pending-fill retry + maker→taker escalation + exits ────
     pub fn tick(&mut self, now_ms: i64) -> CoreResult<()> {
+        // Flush the market-data archive at most once a second, so a reader of the
+        // live file stays close behind without paying a write syscall every tick
+        // (P-1.3).
+        if let Some(a) = self.event_archive.as_mut() {
+            a.flush_if_due(now_ms, 1000);
+        }
+
         // Retry buffered fills (orders registered since the event arrived).
         let pending = self.ome.drain_pending(now_ms)?;
         for d in pending {
@@ -2202,5 +2318,92 @@ mod strategy_dispatch_tests {
         assert!(dec_of(&s["netPnlUsd"]) > Decimal::ZERO, "expected positive realized PnL");
         assert!(dec_of(&s["feesUsd"]) > Decimal::ZERO, "taker exit pays a fee");
         assert_eq!(dec_of(&s["openNotionalUsd"]), Decimal::ZERO, "closed position leaves no exposure");
+    }
+}
+
+/// P-1.2: the dry matcher honours the configured [`crate::sim::FillModel`]. The
+/// default is the identity (existing tests cover it); these pin down the opt-in
+/// deviations and the maker-only nature of the latency/probability gates.
+#[cfg(test)]
+mod fill_model_tests {
+    use super::*;
+    use crate::risk::RiskConfig;
+    use crate::sim::FillModel;
+    use rust_decimal_macros::dec;
+
+    fn core_with(model: FillModel) -> Core {
+        Core::new(CoreConfig {
+            mode: Mode::Dry,
+            risk: RiskConfig { max_order_notional: dec!(100), ..Default::default() },
+            dry_seed_balance: dec!(1000),
+            auto_exits_enabled: false,
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            fill_model: model,
+            ..Default::default()
+        })
+    }
+
+    fn buy(mode: FillPolicy, price: Decimal, size: Decimal) -> OrderRequest {
+        OrderRequest {
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode,
+            price,
+            size,
+            internal_key: "k1".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 1,
+        }
+    }
+
+    #[test]
+    fn default_model_fills_a_crossing_maker_at_its_own_limit() {
+        let mut c = core_with(FillModel::default());
+        let (id, _) = c.place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000).unwrap();
+        c.book_snapshot("tok", vec![(dec!(0.39), dec!(100))], vec![(dec!(0.40), dec!(100))], 1_100);
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Filled);
+        let pos = &c.positions().open_positions()[0];
+        assert_eq!(pos.entry_price, dec!(0.40), "a maker fill is priced by your own quote");
+    }
+
+    #[test]
+    fn taker_slippage_worsens_the_fill_price() {
+        let mut c = core_with(FillModel { taker_slippage_ticks: 2, ..FillModel::default() });
+        let (id, st) = c.place(buy(FillPolicy::Taker, dec!(0.40), dec!(10)), 0, 1_000).unwrap();
+        assert_eq!(st, OrderStatus::Filled);
+        // 2 ticks = 0.02: a taker buy pays up rather than filling at the limit.
+        assert_eq!(c.ome().get(&id).unwrap().avg_fill_price, Some(dec!(0.42)));
+        assert_eq!(c.positions().open_positions()[0].entry_price, dec!(0.42));
+    }
+
+    #[test]
+    fn maker_latency_delays_the_crossing_fill() {
+        let mut c = core_with(FillModel { maker_latency_ms: 5_000, ..FillModel::default() });
+        let (id, _) = c.place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000).unwrap();
+        // Crossed 100 ms after submission: the venue could not have the order yet.
+        c.book_snapshot("tok", vec![(dec!(0.39), dec!(100))], vec![(dec!(0.40), dec!(100))], 1_100);
+        assert_eq!(c.positions().open_positions().len(), 0, "no fill inside the latency window");
+        assert!(c.ome().get(&id).unwrap().status.is_live(), "the order stays live");
+        // Crossed again after the window: fills.
+        c.book_snapshot("tok", vec![(dec!(0.39), dec!(100))], vec![(dec!(0.40), dec!(100))], 6_100);
+        assert_eq!(c.positions().open_positions().len(), 1, "fills once the latency has elapsed");
+        assert_eq!(c.positions().open_positions()[0].entry_price, dec!(0.40));
+    }
+
+    #[test]
+    fn zero_fill_probability_never_fills_on_a_crossing() {
+        let mut c = core_with(FillModel { maker_fill_prob_bps: 0, ..FillModel::default() });
+        let (id, _) = c.place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000).unwrap();
+        for t in [1_100i64, 2_000, 9_000] {
+            c.book_snapshot("tok", vec![(dec!(0.39), dec!(100))], vec![(dec!(0.40), dec!(100))], t);
+        }
+        assert_eq!(c.positions().open_positions().len(), 0, "a losing queue draw keeps the order unfilled");
+        assert!(c.ome().get(&id).unwrap().status.is_live());
+        assert_eq!(c.ome().get(&id).unwrap().filled_size, Decimal::ZERO);
     }
 }

@@ -46,6 +46,90 @@ pub fn rests_on_book(mode: FillPolicy) -> bool {
     matches!(mode, FillPolicy::Maker | FillPolicy::MakerThenTaker)
 }
 
+/// Tradable price grid on the binary markets (1 tick = 0.01).
+fn tick() -> Decimal {
+    Decimal::new(1, 2)
+}
+fn price_min() -> Decimal {
+    Decimal::new(1, 2)
+}
+fn price_max() -> Decimal {
+    Decimal::new(99, 2)
+}
+
+/// Fill-realism model for the dry matcher (P-1.2 backtesting).
+///
+/// The default is the **identity** — no slippage, no latency, always fill — i.e.
+/// exactly the behaviour the dry path has always had, so live/dry runs are
+/// unaffected. A backtest raises these knobs to price in the friction the venue
+/// adds (crossing the spread, queue position, being slow):
+///
+///  - `taker_slippage_ticks`: taker fills cross N extra ticks (buys pay up, sells
+///    give up), clamped to the tradable grid.
+///  - `maker_latency_ms`: a resting maker order cannot fill until this long after
+///    it was submitted.
+///  - `maker_fill_prob_bps`: chance a crossing maker order actually fills. The
+///    draw is a hash of the order id, so a given replay is reproducible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FillModel {
+    pub taker_slippage_ticks: u32,
+    pub maker_latency_ms: i64,
+    pub maker_fill_prob_bps: u32,
+}
+
+impl Default for FillModel {
+    fn default() -> Self {
+        Self { taker_slippage_ticks: 0, maker_latency_ms: 0, maker_fill_prob_bps: 10_000 }
+    }
+}
+
+impl FillModel {
+    /// True when the model cannot change any outcome (the default).
+    pub fn is_identity(&self) -> bool {
+        self.taker_slippage_ticks == 0 && self.maker_latency_ms <= 0 && self.maker_fill_prob_bps >= 10_000
+    }
+
+    /// Price a taker fill would actually get, given the side.
+    pub fn apply_slippage(&self, side: Side, price: Decimal) -> Decimal {
+        if self.taker_slippage_ticks == 0 {
+            return price;
+        }
+        let slip = tick() * Decimal::from(self.taker_slippage_ticks);
+        let p = match side {
+            Side::Buy => price + slip,
+            Side::Sell => price - slip,
+        };
+        p.max(price_min()).min(price_max())
+    }
+
+    /// Earliest time a maker order may fill.
+    pub fn maker_eligible_at_ms(&self, submitted_at_ms: i64) -> i64 {
+        submitted_at_ms.saturating_add(self.maker_latency_ms.max(0))
+    }
+
+    /// Whether a crossing maker order fills (deterministic per order id).
+    pub fn maker_fill_wins(&self, order_id: &str) -> bool {
+        if self.maker_fill_prob_bps >= 10_000 {
+            return true;
+        }
+        if self.maker_fill_prob_bps == 0 {
+            return false;
+        }
+        draw(order_id) % 10_000 < self.maker_fill_prob_bps
+    }
+}
+
+/// FNV-1a over the order id → a stable pseudo-random draw.
+fn draw(order_id: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in order_id.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +181,55 @@ mod tests {
         assert_eq!(FillPolicy::MakerThenTaker.venue_order_type(), OrderType::Gtc);
         assert!(rests_on_book(FillPolicy::MakerThenTaker));
         assert!(!rests_on_book(FillPolicy::Taker));
+    }
+
+    #[test]
+    fn fill_model_default_is_the_identity() {
+        let m = FillModel::default();
+        assert!(m.is_identity());
+        // No slippage: the requested price is the filled price, both sides.
+        assert_eq!(m.apply_slippage(Side::Buy, dec!(0.42)), dec!(0.42));
+        assert_eq!(m.apply_slippage(Side::Sell, dec!(0.42)), dec!(0.42));
+        // No latency: eligible immediately; always fills.
+        assert_eq!(m.maker_eligible_at_ms(1_000), 1_000);
+        assert!(m.maker_fill_wins("dry_1"));
+    }
+
+    #[test]
+    fn slippage_worsens_both_sides_and_clamps_to_the_grid() {
+        let m = FillModel { taker_slippage_ticks: 2, maker_latency_ms: 0, maker_fill_prob_bps: 10_000 };
+        assert_eq!(m.apply_slippage(Side::Buy, dec!(0.42)), dec!(0.44));
+        assert_eq!(m.apply_slippage(Side::Sell, dec!(0.42)), dec!(0.40));
+        // Clamped: a 5-tick slip cannot push the price off the tradable grid.
+        let wide = FillModel { taker_slippage_ticks: 5, ..Default::default() };
+        assert_eq!(wide.apply_slippage(Side::Buy, dec!(0.99)), dec!(0.99));
+        assert_eq!(wide.apply_slippage(Side::Sell, dec!(0.01)), dec!(0.01));
+    }
+
+    #[test]
+    fn latency_delays_maker_eligibility() {
+        let m = FillModel { maker_latency_ms: 250, ..Default::default() };
+        assert_eq!(m.maker_eligible_at_ms(10_000), 10_250);
+        assert!(!m.is_identity());
+    }
+
+    #[test]
+    fn fill_probability_is_deterministic_and_bounded() {
+        let never = FillModel { maker_fill_prob_bps: 0, ..Default::default() };
+        assert!(!never.maker_fill_wins("dry_1"));
+        assert!(!never.maker_fill_wins("dry_2"));
+
+        let always = FillModel { maker_fill_prob_bps: 10_000, ..Default::default() };
+        assert!(always.maker_fill_wins("dry_1"));
+
+        let half = FillModel { maker_fill_prob_bps: 5_000, ..Default::default() };
+        // Same order id → same verdict on every call (replays are reproducible).
+        let first = half.maker_fill_wins("dry_42");
+        for _ in 0..10 {
+            assert_eq!(half.maker_fill_wins("dry_42"), first);
+        }
+        // And the draw is not degenerate: over many ids roughly half win.
+        let wins = (0..400).filter(|i| half.maker_fill_wins(&format!("dry_{i}"))).count();
+        assert!((120..=280).contains(&wins), "expected ~50% wins, got {wins}/400");
     }
 }
