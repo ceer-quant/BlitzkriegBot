@@ -1256,3 +1256,52 @@ E1 C 级（Issue #23）：约 40 个源文件直接读 `process.env.CLODDS_*`，
 - 仍未触碰：A 级加密盐/链上备注与 G 级 `origin` remote（待用户裁决 D-13）、
   D 级 MCP 命名空间/`clodds://` URI/UA/健康检查名称、E 级 CLI 帮助文本与文档化妆项、
   F 级随发布重建的 `dist/`、npm 包 `name`——均归 #21/#24/#25。
+
+
+---
+
+## 40. 【E1-d·上】D 级接线协议改名：MCP 命名空间 / 会话 URI / User-Agent / Copilot / health（旧名保留一期）
+
+**背景**
+E1-d（Issue #24）的 D 级是"接线协议"——这些名字出现在对外的线上格式里，硬改名会让既有 MCP 客户端、
+已分享的会话链接、带白名单的 MCP 配置立刻失效。故一律采用「**新名为规范且对外宣告，旧名静默接受
+一个发布周期**」。
+
+**实现**
+1. **MCP 工具命名空间 `src/mcp/tool-names.ts`（新）**：规范前缀 `blitzkrieg_`，旧前缀 `clodds_`
+   仅在入站 `tools/call` 时被 `skillFromToolName()` 接受；`tools/list` 只宣告规范名（旧客户端按名
+   调用仍可路由到对应 skill）。
+2. **白/黑名单与工具画像兼容**：`security.ts` 画像（read-only/trading）全部改写为 `blitzkrieg_*`；
+   `isToolAllowed()` 对入站名和配置项都做规范化，并以 `setHasEither()` 双前缀兜底——既有配置里的
+   `clodds_*` 白名单继续生效；旧名调用/旧名配置项各触发一次弃用告警。
+3. **MCP 身份**：stdio server 的 `serverInfo.name` 与两处出站 `clientInfo.name` 改为 `blitzkrieg`。
+4. **会话分享 URI `src/session/uri.ts`（新）**：`getShareLink()` 现在生成
+   `blitzkrieg://session/<id>?key=<hash>`；`parseSessionUri()` 同时能解析新旧两种 scheme 并对旧链
+   标记 `legacy`（此前根本没有解析器，本轮补齐，为将来接收深链留口）。
+5. **出站身份集中到 `src/utils/identity.ts`（新）**：`userAgent(detail?)` 产出 `Blitzkrieg/1.0 (…)`，
+   替换 10 个文件里硬编码的 `Clodds/1.0` / `CloddsBot/1.0` / `Clodds-Weather/1.0`
+   （copilot-proxy、lobster、external/news/weather-nws feeds、reddit alt-data、skills registry、
+   web-fetch、noaa、link-understanding）。
+6. **Copilot 头**：`Editor-Version` / `Editor-Plugin-Version` / `Copilot-Integration-Id` 三处
+   （共 3 个请求点）改由 identity 常量提供 `Blitzkrieg/…`、`blitzkrieg/…`、`blitzkrieg`。
+   这些值本就是自报的编辑器伪装，新旧名对 GitHub 端点同为未知客户端，行为中性。
+7. **gateway**：根信息端点 `GET /` 的 `name` 由 `clodds` 改 `blitzkrieg`，描述同步更新；
+   集成测试 `gateway-health.test.ts` 的断言随之改。
+
+**刻意不改（例外）**
+- `src/agents/handlers/acp.ts` 里两条 `https://clodds.com/...`（handle 主页 / 推荐链接）指向**外部
+  身份服务的真实域名**，改成尚不存在的 blitzkrieg 域名会让功能直接 404；属"待部署自有服务后再换"，
+  非纯改名。handle 展示后缀 `@name.clodds` 与保留字 `'clodds'` 同理，进入 E 级化妆批时连同身份服务
+  归属一并处理/记录。
+
+**验证**
+- 新增 17 个单测：`tests/unit/mcp-tool-names.test.ts`（9：宣告名、双前缀路由、未知空间拒绝、
+  画像/白/黑名单双前缀命中）、`session-uri.test.ts`（6）、`identity.test.ts`（2）。
+- `npm test`：**192 pass / 0 fail / 34 suites**；`tsc --noEmit` 0；`npm run build` OK；
+  `secret-scan` OK；`ui-kit-gateway-check`、`socket-migration-check` PASS。
+- 本轮不动 Rust，cargo 门禁在 E 级批合并前一并复跑。
+
+**遗留**
+- 旧 `clodds_*` 工具名与 `clodds://` scheme 的接受逻辑计划保留一个发布周期，移除前需先统计调用存量。
+- E 级（文案/i18n/public/55 个 SKILL.md/注释/npm 包字段/docker/metrics）与 F 级（`dist/` 重建）
+  在随后的提交完成，同属 Issue #24。

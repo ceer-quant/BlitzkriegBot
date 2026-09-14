@@ -7,6 +7,7 @@
  * API docs: https://www.weather.gov/documentation/services-web-api
  */
 
+import { userAgent, PRODUCT_CONTACT_URL } from '../../utils/identity';
 import { EventEmitter } from 'events';
 import { logger } from '../../utils/logger';
 
@@ -92,7 +93,7 @@ export interface NWSFeed extends EventEmitter {
 // =============================================================================
 
 const BASE_URL = 'https://api.weather.gov';
-const USER_AGENT = 'CloddsBot/1.0 (weather-feed; contact@clodds.com)';
+const USER_AGENT = userAgent(`weather-feed; +${PRODUCT_CONTACT_URL}`);
 
 async function nwsFetch<T>(url: string): Promise<T> {
   const res = await fetch(url, {

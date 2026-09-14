@@ -6,7 +6,9 @@
  */
 
 import { RateLimiter, detectInjection } from '../security/index.js';
+import { warnLegacyOnce } from '../utils/env.js';
 import type { McpTool } from './index.js';
+import { canonicalizeToolName, isLegacyToolName } from './tool-names.js';
 
 // =============================================================================
 // CONFIG
@@ -25,16 +27,16 @@ export interface McpSecurityConfig {
   toolProfile: string;
 }
 
-/** Tool profiles — predefined sets of allowed tool prefixes */
+/** Tool profiles — predefined sets of allowed tool prefixes (canonical `blitzkrieg_` names) */
 const TOOL_PROFILES: Record<string, string[]> = {
   'read-only': [
-    'clodds_feeds', 'clodds_markets', 'clodds_analytics',
-    'clodds_portfolio', 'clodds_watchlist', 'clodds_search',
+    'blitzkrieg_feeds', 'blitzkrieg_markets', 'blitzkrieg_analytics',
+    'blitzkrieg_portfolio', 'blitzkrieg_watchlist', 'blitzkrieg_search',
   ],
   'trading': [
-    'clodds_feeds', 'clodds_markets', 'clodds_analytics',
-    'clodds_portfolio', 'clodds_watchlist', 'clodds_search',
-    'clodds_trading', 'clodds_execution', 'clodds_order',
+    'blitzkrieg_feeds', 'blitzkrieg_markets', 'blitzkrieg_analytics',
+    'blitzkrieg_portfolio', 'blitzkrieg_watchlist', 'blitzkrieg_search',
+    'blitzkrieg_trading', 'blitzkrieg_execution', 'blitzkrieg_order',
   ],
   'full': [],
 };
@@ -46,9 +48,25 @@ export function loadSecurityConfig(): McpSecurityConfig {
   const auditEnabled = process.env.BLITZKRIEG_MCP_AUDIT !== 'false';
   const toolProfile = process.env.BLITZKRIEG_MCP_TOOL_PROFILE || 'full';
 
+  // Normalise entries so legacy `clodds_*` tool names in existing config keep
+  // matching; a deprecation warning is emitted once per legacy entry.
+  const parseEntries = (raw: string): Set<string> =>
+    new Set(
+      raw
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((name) => {
+          if (isLegacyToolName(name)) {
+            warnLegacyOnce(name, `legacy MCP tool name "${name}" in config; use "${canonicalizeToolName(name)}"`);
+          }
+          return canonicalizeToolName(name);
+        }),
+    );
+
   return {
-    allowedTools: allowed ? new Set(allowed.split(',').map((s) => s.trim())) : new Set(),
-    blockedTools: blocked ? new Set(blocked.split(',').map((s) => s.trim())) : new Set(),
+    allowedTools: allowed ? parseEntries(allowed) : new Set(),
+    blockedTools: blocked ? parseEntries(blocked) : new Set(),
     rateLimit: isNaN(rateLimit) || rateLimit <= 0 ? 60 : rateLimit,
     auditEnabled,
     toolProfile,
@@ -59,20 +77,36 @@ export function loadSecurityConfig(): McpSecurityConfig {
 // TOOL ALLOWLISTING
 // =============================================================================
 
-/** Check whether a single tool name is allowed by the config */
+/** Set lookup that matches regardless of which prefix a configured entry was written with. */
+function setHasEither(set: Set<string>, name: string): boolean {
+  if (set.has(name)) return true;
+  const other = name.startsWith('blitzkrieg_')
+    ? 'clodds_' + name.slice('blitzkrieg_'.length)
+    : name.startsWith('clodds_')
+      ? 'blitzkrieg_' + name.slice('clodds_'.length)
+      : null;
+  return other !== null && set.has(other);
+}
+
+/** Check whether a single tool name is allowed by the config (legacy incoming names are canonicalised) */
 export function isToolAllowed(toolName: string, config: McpSecurityConfig): boolean {
+  if (isLegacyToolName(toolName)) {
+    warnLegacyOnce(toolName, `legacy MCP tool call "${toolName}"; use "${canonicalizeToolName(toolName)}"`);
+  }
+  const name = canonicalizeToolName(toolName);
+
   // Blocklist always wins
-  if (config.blockedTools.has(toolName)) return false;
+  if (setHasEither(config.blockedTools, name)) return false;
 
   // Explicit allowlist
   if (config.allowedTools.size > 0) {
-    return config.allowedTools.has(toolName);
+    return setHasEither(config.allowedTools, name);
   }
 
   // Profile-based filtering
   const prefixes = TOOL_PROFILES[config.toolProfile];
   if (prefixes && prefixes.length > 0) {
-    return prefixes.some((prefix) => toolName.startsWith(prefix));
+    return prefixes.some((prefix) => name.startsWith(prefix));
   }
 
   // 'full' profile or unknown — allow everything

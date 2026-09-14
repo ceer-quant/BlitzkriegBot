@@ -5,6 +5,7 @@
  * Deduplicates by tracking seen post IDs.
  */
 
+import { userAgent } from '../../../utils/identity';
 import type { AltDataEvent } from '../types.js';
 import { logger } from '../../../utils/logger.js';
 
@@ -67,7 +68,7 @@ export function createRedditFeed(
     try {
       const res = await fetch(url, {
         signal: controller.signal,
-        headers: { 'User-Agent': 'Clodds/1.0 (alt-data feed)' },
+        headers: { 'User-Agent': userAgent('alt-data feed') },
       });
 
       if (!res.ok) {

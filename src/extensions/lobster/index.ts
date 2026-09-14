@@ -5,6 +5,7 @@
  * Lobste.rs is a computing-focused link aggregation site
  */
 
+import { userAgent } from '../../utils/identity';
 import { logger } from '../../utils/logger';
 
 export interface LobsterConfig {
@@ -101,7 +102,7 @@ export async function createLobsterExtension(config: LobsterConfig): Promise<Lob
 
     const headers: Record<string, string> = {
       Accept: 'application/json',
-      'User-Agent': 'Clodds/1.0 (prediction market assistant)',
+      'User-Agent': userAgent('prediction market assistant'),
     };
 
     if (config.userToken) {

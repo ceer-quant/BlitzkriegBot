@@ -9,6 +9,7 @@
  * - Preview generation
  */
 
+import { userAgent, PRODUCT_CONTACT_URL } from '../utils/identity';
 import * as https from 'https';
 import * as http from 'http';
 import { URL } from 'url';
@@ -64,7 +65,7 @@ export interface FetchOptions {
 
 const DEFAULT_TIMEOUT = 10000;
 const DEFAULT_MAX_REDIRECTS = 5;
-const DEFAULT_USER_AGENT = 'Mozilla/5.0 (compatible; CloddsBot/1.0; +https://clodds.com)';
+const DEFAULT_USER_AGENT = `Mozilla/5.0 (compatible; ${userAgent()}; +${PRODUCT_CONTACT_URL})`;
 const MAX_CONTENT_LENGTH = 1024 * 1024; // 1MB
 
 // =============================================================================
