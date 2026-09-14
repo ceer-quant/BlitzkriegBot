@@ -9,12 +9,20 @@
 //!   group A  = shadow evolution OFF (control)
 //!   group B  = shadow evolution ON  (experiment)
 //!
-//! Scripted market: 40 synthetic UP tokens. Half (even index) take a "marginal"
-//! dip whose entry sits exactly at the default 0.45 cap and then LOSE; half (odd)
-//! take a "deep" dip well under the cap and WIN. A variant that tightens the cap
-//! (the knob evolution mutates) skips the marginal losers, so evolution has a real
-//! counterfactual to find. This mirrors the production symptom the feature targets:
-//! entering at the cap is where the losses live.
+//! Scripted market: 70 synthetic UP tokens. A marginal minority (`i % 7 == 0`,
+//! 10 tokens) takes a dip whose entry sits exactly at the default 0.45 cap and
+//! then LOSES; the rest take a "deep" dip well under the cap and WIN. A variant
+//! that tightens the cap (a directed single-knob mutation) skips the marginal
+//! losers, so evolution has a real counterfactual to find — and, once it applies,
+//! the live engine's own cap rises out of the losers' reach, so group B's
+//! realised trades diverge from group A's. This mirrors the production symptom
+//! the feature targets: entering at the cap is where the losses live.
+//!
+//! Fidelity fixes baked into the run (D-2/D-3): the shadow sees the SAME tick the
+//! live engine just consumed (no one-tick lag); variants mutate ONE knob at a
+//! time (not four in lockstep, which cancelled out); variants replay the live
+//! `ExitConfig` (SL 12), not a fabricated 50% hard stop; and variant trade
+//! history accumulates across round boundaries.
 //!
 //! Raw output under `docs/reports/data/`: trade CSV, evolution audit JSONL, a
 //! machine-readable summary, and a safety-lock probe result. Run:
@@ -170,6 +178,7 @@ struct ManagerExp {
 ///   * "cap" tokens offer a dip at mid 0.47 clamped to the 0.45 cap, then collapse.
 /// The baseline takes both; a variant whose cap is 2% lower skips the cap losers.
 fn run_manager_experiment() -> ManagerExp {
+    use blitzkrieg_core::exit_policy::ExitConfig;
     use blitzkrieg_core::model::OrderbookSnapshot;
     use blitzkrieg_core::shadow_evolution::config::{ImmutableConfig, MutableParams, ShadowEvolutionConfig};
     use blitzkrieg_core::shadow_evolution::ShadowEvolution;
@@ -186,6 +195,7 @@ fn run_manager_experiment() -> ManagerExp {
         variant_count: 3,
         audit_log_path: std::env::temp_dir().join("shadow_ab_manager_audit.jsonl").to_string_lossy().into_owned(),
         risk: ImmutableConfig::default(),
+        exit_cfg: ExitConfig::default(),
     };
     let mut se = ShadowEvolution::new(cfg, MutableParams::default());
     se.enable(0);
@@ -369,34 +379,30 @@ fn run_group(group: char, se_enabled: bool) -> (Vec<TradeRow>, Core) {
     //    entry under the cap that wins on a trailing exit. Keeping the losing
     //    minority small (~15%) matters: a cap-tightening variant must still see
     //    >= `min_sample_count` (30) trades to be considered, so the winners have
-    //    to dominate. The LAST tick of each block crosses any resting SELL so the
-    //    position actually closes (a maker exit only fills when the bid reaches
-    //    its limit).
+    //    to dominate. Winner exits are maker SELLs, so the LAST tick of each
+    //    winner block crosses the resting SELL to actually fill it.
     for i in 0..N_ASSETS {
         let token = up_token(i);
         let marginal = i % 7 == 0;
         if marginal {
-            // Best bid 0.45 / ask 0.49 (mid 0.47) held for TWO ticks. LIVE places
-            // its resting bid 0.45 on the first tick (== the default cap → TAKEN).
-            // The shadow is fed the book one tick BEHIND the live engine (it reads
-            // the engine's book before this tick's on_data), so the second tick is
-            // what lets it SEE this dip: a cap-tightened variant then computes
-            // round2(0.47*0.9604)=0.45 > its cap 0.441 and SKIPS the trade. That is
-            // the exact decision this counterfactual turns on.
+            // Dip to the cap, fill, then collapse. Two ticks are needed to FILL:
+            // the engine's entry is a resting maker BUY at the cap, which only
+            // executes when the ask crosses it. Crucial detail — the fill tick
+            // (bid 0.44 / ask 0.45, mid 0.445) still computes an entry of 0.44 for
+            // a variant whose factor is 0.98, so a mere 2% cap tightening would
+            // re-enter here. The directed cap variant tightens 3% (cap 0.4365 <
+            // 0.44), so it skips BOTH ticks and never takes this loser. The trend
+            // stays above `broken_price` (0.35) through the fill tick, so the
+            // resting bid is NOT cancelled before it fills; only the collapse
+            // (mid 0.21) breaks the trend, tripping the live 12% stop as a taker
+            // sell that fills immediately.
             tick_token(&mut core, &token, dec!(0.45), dec!(0.49), now);
             now += STEP_MS;
-            tick_token(&mut core, &token, dec!(0.45), dec!(0.49), now); // shadow now sees the dip
+            tick_token(&mut core, &token, dec!(0.44), dec!(0.45), now); // ask crosses → fill @0.45
             now += STEP_MS;
-            tick_token(&mut core, &token, dec!(0.44), dec!(0.45), now); // cross → live fills @0.45
+            tick_token(&mut core, &token, dec!(0.20), dec!(0.22), now); // collapse → SL taker sell fills
             now += STEP_MS;
-            // Collapse: bid 0.20 → −56% on entry 0.45. Trips BOTH the live stop
-            // (12%) and the shadow simulation's hard stop (50%), so live and
-            // simulated agree on the exit — no confound from the SL divergence.
-            tick_token(&mut core, &token, dec!(0.20), dec!(0.22), now);
-            now += STEP_MS;
-            tick_token(&mut core, &token, dec!(0.22), dec!(0.23), now); // cross the exit SELL
-            now += STEP_MS;
-            tick_token(&mut core, &token, dec!(0.60), dec!(0.62), now); // settle
+            tick_token(&mut core, &token, dec!(0.20), dec!(0.21), now); // settle (mid < broken → no re-entry)
             now += STEP_MS;
         } else {
             // Dip mid 0.44 → resting bid 0.42 (under cap) → fills.
@@ -479,8 +485,9 @@ fn main() {
     // ── Model self-check: confirm a cap-tightened variant really skips the
     //    marginal entry while the baseline takes it. Validates the premise above.
     if std::env::var("AB_PROBE").is_ok() {
+        use blitzkrieg_core::exit_policy::ExitConfig;
         use blitzkrieg_core::model::OrderbookSnapshot;
-        use blitzkrieg_core::shadow_evolution::config::{ImmutableConfig, MutableParams};
+        use blitzkrieg_core::shadow_evolution::config::MutableParams;
         use blitzkrieg_core::shadow_evolution::variants::Variant;
         let book = OrderbookSnapshot::from_levels(
             "T",
@@ -490,7 +497,7 @@ fn main() {
         );
         for (label, factor) in [("baseline", dec!(1)), ("tight-2pct", dec!(0.98))] {
             let p = MutableParams::default().scaled(factor);
-            let mut v = Variant::new(label.into(), label.into(), p.clone(), false, 0, &ImmutableConfig::default());
+            let mut v = Variant::new(label.into(), label.into(), p.clone(), false, 0, &ExitConfig::default());
             v.on_tick("T", &book, true, 900_000, 1000);
             eprintln!("[probe] {label}: cap={} factor={} entry_decision open={}",
                 p.trend_max_entry_price, p.trend_entry_factor, v.open_positions());
