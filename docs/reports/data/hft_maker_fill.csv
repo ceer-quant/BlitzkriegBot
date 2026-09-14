@@ -1,0 +1,16 @@
+population,price_rule,horizon_s,filled,n,rate_pct,fill_time_p50_s
+near-miss (blocked),capped,5,102,188,54.26,2.52
+near-miss (blocked),capped,10,124,188,65.96,
+near-miss (blocked),capped,20,133,188,70.74,
+near-miss (blocked),capped,30,137,188,72.87,
+near-miss (blocked),capped,60,153,188,81.38,
+near-miss (blocked),uncapped,5,127,188,67.55,0.89
+near-miss (blocked),uncapped,10,144,188,76.6,
+near-miss (blocked),uncapped,20,146,188,77.66,
+near-miss (blocked),uncapped,30,152,188,80.85,
+near-miss (blocked),uncapped,60,161,188,85.64,
+taken (62 shadow, mid<=entry UPPER BOUND),exact capped,5,36,62,58.06,
+taken (62 shadow, mid<=entry UPPER BOUND),exact capped,10,38,62,61.29,
+taken (62 shadow, mid<=entry UPPER BOUND),exact capped,20,39,62,62.9,
+taken (62 shadow, mid<=entry UPPER BOUND),exact capped,30,42,62,67.74,
+taken (62 shadow, mid<=entry UPPER BOUND),exact capped,60,46,62,74.19,

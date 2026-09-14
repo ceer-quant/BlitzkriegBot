@@ -300,10 +300,12 @@ async fn main() -> anyhow::Result<()> {
 /// live core trades with. Prints an in-sample grid and the out-of-sample result.
 fn run_replay(path: &std::path::Path) {
     use blitzkrieg_core::exit_policy::ExitConfig;
-    use blitzkrieg_core::shadow::{bucket_by_entry, default_grid, walk_forward_file};
+    use blitzkrieg_core::shadow::{bucket_by_entry, default_grid, frozen_holdout, walk_forward_file};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-    match walk_forward_file(path, &ExitConfig::default(), &default_grid(), 6) {
+    let base_exit = ExitConfig::default();
+    let grid = default_grid();
+    match walk_forward_file(path, &base_exit, &grid, 6) {
         Ok(r) => {
             println!("shadow replay: {}", path.display());
             println!("\nIn-sample grid (optimistic):");
@@ -315,6 +317,40 @@ fn run_replay(path: &std::path::Path) {
             println!("\nWalk-forward out-of-sample: {} records, PnL {:.2} (train from {})", r.oos_count, r.oos_pnl, r.min_train);
             if let Some((name, best)) = rows.first() {
                 println!("In-sample best: {} {:.2} — compare with OOS to judge overfitting", name, best);
+            }
+
+            // Strict frozen holdout: choose once on the early window, apply frozen
+            // to the later window. The shipped cell must win on BOTH to be trusted;
+            // an adaptive walk-forward alone can flatter a single era.
+            if let Ok(text) = std::fs::read_to_string(path) {
+                let mut recs: Vec<_> = text
+                    .lines()
+                    .filter_map(blitzkrieg_core::shadow::parse_shadow_line)
+                    .collect();
+                recs.sort_by_key(|rec| rec.entered_at_ms);
+                for frac in [0.5_f64, 0.6] {
+                    let h = frozen_holdout(&recs, &base_exit, &grid, frac);
+                    if h.test_n == 0 {
+                        continue;
+                    }
+                    println!(
+                        "\nFrozen holdout (train first {:.0}% = {} trades, test last = {} trades):",
+                        frac * 100.0,
+                        h.train_n,
+                        h.test_n
+                    );
+                    println!("  {:<20} {:>9} {:>6} | {:>9} {:>6}", "cell", "train$", "win%", "test$", "win%");
+                    for row in &h.rows {
+                        let tw = if h.train_n > 0 { row.train_wins as f64 / h.train_n as f64 * 100.0 } else { 0.0 };
+                        let ew = if h.test_n > 0 { row.test_wins as f64 / h.test_n as f64 * 100.0 } else { 0.0 };
+                        let mark = if row.name == h.train_best { " <-train-best" } else { "" };
+                        println!(
+                            "  {:<20} {:>9.2} {:>5.0}% | {:>9.2} {:>5.0}%{}",
+                            row.name, row.train_pnl, tw, row.test_pnl, ew, mark
+                        );
+                    }
+                    println!("  frozen forward: {} -> test PnL {:.2}", h.train_best, h.frozen_test_pnl);
+                }
             }
 
             // Entry-side analysis over the same records (tests the entry cap and
