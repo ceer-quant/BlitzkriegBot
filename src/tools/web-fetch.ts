@@ -9,6 +9,7 @@
  * - Auto-rewrite to LLM-friendly .md URLs for supported doc sites
  */
 
+import { userAgent } from '../utils/identity';
 import { logger } from '../utils/logger';
 
 // =============================================================================
@@ -253,7 +254,7 @@ export function createWebFetchTool(): WebFetchTool {
         const response = await fetch(fetchUrl, {
           signal: controller.signal,
           headers: {
-            'User-Agent': 'Clodds/1.0 (Web Fetch Tool)',
+            'User-Agent': userAgent('Web Fetch Tool'),
             Accept: 'text/markdown,text/html,application/xhtml+xml,text/plain,*/*',
           },
         });

@@ -8,6 +8,7 @@
  * - Auto-discovery for agent
  */
 
+import { userAgent } from '../utils/identity';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
@@ -162,7 +163,7 @@ export function createSkillsRegistry(config: RegistryConfig): SkillsRegistry {
     const response = await fetch(`${registryUrl}${endpoint}`, {
       headers: {
         'Accept': 'application/json',
-        'User-Agent': 'Clodds/1.0',
+        'User-Agent': userAgent(),
       },
     });
 

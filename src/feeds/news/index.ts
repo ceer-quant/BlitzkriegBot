@@ -2,6 +2,7 @@
  * News Feed - RSS and Twitter monitoring for market-moving news
  */
 
+import { userAgent } from '../../utils/identity';
 import { EventEmitter } from 'events';
 import { XMLParser } from 'fast-xml-parser';
 import { NewsItem } from '../../types';
@@ -101,7 +102,7 @@ export async function createNewsFeed(config?: {
       }
 
       const response = await fetch(feedUrl, {
-        headers: { 'User-Agent': 'Clodds/1.0 News Aggregator' },
+        headers: { 'User-Agent': userAgent('News Aggregator') },
       });
 
       if (!response.ok) {

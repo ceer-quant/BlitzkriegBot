@@ -5,6 +5,7 @@
  * Provides forecasts, current conditions, and historical data.
  */
 
+import { userAgent, PRODUCT_CONTACT_URL } from '../utils/identity';
 import { logger } from '../utils/logger';
 
 // ============================================================================
@@ -128,7 +129,7 @@ export const CITY_COORDINATES: Record<string, { lat: number; lon: number; name: 
 };
 
 const NOAA_BASE_URL = 'https://api.weather.gov';
-const USER_AGENT = 'Clodds-Weather/1.0 (contact@clodds.ai)';
+const USER_AGENT = userAgent(`weather; +${PRODUCT_CONTACT_URL}`);
 
 // ============================================================================
 // NOAA API Client

@@ -525,9 +525,9 @@ export function createServer(
   // API info endpoint
   app.get('/', (_req, res) => {
     res.json({
-      name: 'clodds',
+      name: 'blitzkrieg',
       version: process.env.npm_package_version || '0.1.0',
-      description: 'AI assistant for prediction markets',
+      description: 'BlitzkriegBot trading core gateway',
       endpoints: {
         websocket: '/ws',
         webchat: '/chat',
