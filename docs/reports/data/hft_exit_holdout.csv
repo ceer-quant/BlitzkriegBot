@@ -1,0 +1,13 @@
+split,cell,train_n,train_pnl_usd,train_win_pct,test_n,test_pnl_usd,test_win_pct,train_best
+50/50,old-SL50/trail10,31,11.13,65,31,1.81,65,no
+50/50,shipped-SL12/trail8,31,14.50,61,31,10.07,65,yes
+50/50,SL12/trail10,31,14.00,61,31,9.28,61,no
+50/50,SL15/trail8,31,13.71,61,31,8.15,65,no
+50/50,SL10/trail8,31,11.21,58,31,8.73,58,no
+50/50,SL20/trail10,31,11.84,61,31,5.44,61,no
+60/40,old-SL50/trail10,37,11.65,62,25,1.30,68,no
+60/40,shipped-SL12/trail8,37,16.11,62,25,8.47,64,yes
+60/40,SL12/trail10,37,15.11,59,25,8.17,64,no
+60/40,SL15/trail8,37,15.17,62,25,6.70,64,no
+60/40,SL10/trail8,37,12.02,57,25,7.92,60,no
+60/40,SL20/trail10,37,12.60,59,25,4.68,64,no
