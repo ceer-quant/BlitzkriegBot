@@ -16,12 +16,9 @@ if (process.argv.includes('onboard') || process.argv.includes('setup')) {
   process.env.LOG_LEVEL = 'silent';
 }
 
-import { config as dotenvConfig } from 'dotenv';
-import { homedir } from 'os';
-import { join } from 'path';
-// Load .env from ~/.clodds/.env first (where onboard writes), then CWD fallback
-dotenvConfig({ path: join(homedir(), '.clodds', '.env') });
-dotenvConfig();
+// Load .env and mirror legacy CLODDS_* names onto BLITZKRIEG_* before first use.
+import '../utils/brand-bootstrap';
+
 import { Command } from 'commander';
 import { createDatabase } from '../db/index';
 import { createMigrationRunner } from '../db/migrations';
@@ -287,8 +284,8 @@ pairing
 program
   .command('endpoints')
   .description('Show webhook endpoints for channels')
-  .option('--host <host>', 'Public host for webhooks', process.env.CLODDS_PUBLIC_HOST || 'localhost')
-  .option('--scheme <scheme>', 'URL scheme (http or https)', process.env.CLODDS_PUBLIC_SCHEME || 'http')
+  .option('--host <host>', 'Public host for webhooks', process.env.BLITZKRIEG_PUBLIC_HOST || 'localhost')
+  .option('--scheme <scheme>', 'URL scheme (http or https)', process.env.BLITZKRIEG_PUBLIC_SCHEME || 'http')
   .option('--port <port>', 'Override gateway port')
   .action(async (options: { host: string; scheme: string; port?: string }) => {
     const config = await loadConfig();
@@ -332,8 +329,8 @@ program
     }
 
     const config = await loadConfig();
-    const scheme = process.env.CLODDS_PUBLIC_SCHEME || 'http';
-    const host = process.env.CLODDS_PUBLIC_HOST || 'localhost';
+    const scheme = process.env.BLITZKRIEG_PUBLIC_SCHEME || 'http';
+    const host = process.env.BLITZKRIEG_PUBLIC_HOST || 'localhost';
     const portSuffix = config.gateway?.port && ![80, 443].includes(config.gateway.port)
       ? `:${config.gateway.port}`
       : '';

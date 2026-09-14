@@ -15,6 +15,13 @@ import { homedir } from 'os';
 import { join, resolve } from 'path';
 import { createHash } from 'crypto';
 import { logger } from '../utils/logger';
+import {
+  resolveConfigPath as brandResolveConfigPath,
+  resolveCredentialsDir as brandResolveCredentialsDir,
+  resolveLogsDir as brandResolveLogsDir,
+  resolveStateDir as brandResolveStateDir,
+  resolveWorkspaceDir as brandResolveWorkspaceDir,
+} from '../utils/brand-paths';
 
 // =============================================================================
 // PATHS
@@ -42,35 +49,33 @@ function readPackageVersion(): string {
   return 'unknown';
 }
 
-/** State directory for mutable data */
-export function resolveStateDir(env = process.env): string {
-  const override = env.CLODDS_STATE_DIR?.trim();
-  if (override) return resolveUserPath(override);
-  return join(homedir(), '.clodds');
+/**
+ * Path resolution is shared with the rest of the runtime (`utils/brand-paths`),
+ * so config loading, the database and the CLI cannot drift apart on where state
+ * lives. The wrappers below keep this module's existing call signatures.
+ */
+export function resolveStateDir(env: NodeJS.ProcessEnv = process.env): string {
+  return brandResolveStateDir(env);
 }
 
 /** Config file path */
-export function resolveConfigPath(env = process.env): string {
-  const override = env.CLODDS_CONFIG_PATH?.trim();
-  if (override) return resolveUserPath(override);
-  return join(resolveStateDir(env), 'clodds.json');
+export function resolveConfigPath(env: NodeJS.ProcessEnv = process.env): string {
+  return brandResolveConfigPath(env);
 }
 
 /** Credentials directory */
-export function resolveCredentialsDir(env = process.env): string {
-  return join(resolveStateDir(env), 'credentials');
+export function resolveCredentialsDir(env: NodeJS.ProcessEnv = process.env): string {
+  return brandResolveCredentialsDir(env);
 }
 
 /** Logs directory */
-export function resolveLogsDir(env = process.env): string {
-  return join(resolveStateDir(env), 'logs');
+export function resolveLogsDir(env: NodeJS.ProcessEnv = process.env): string {
+  return brandResolveLogsDir(env);
 }
 
 /** Workspace directory */
-export function resolveWorkspaceDir(env = process.env): string {
-  const override = env.CLODDS_WORKSPACE?.trim();
-  if (override) return resolveUserPath(override);
-  return join(homedir(), 'clodds');
+export function resolveWorkspaceDir(env: NodeJS.ProcessEnv = process.env): string {
+  return brandResolveWorkspaceDir(env);
 }
 
 export const STATE_DIR = resolveStateDir();
@@ -1000,16 +1005,16 @@ const ENV_MAPPINGS: Record<string, (cfg: CloddsConfig) => void> = {
     };
     cfg.channels.googlechat.credentials.project_id = process.env.GOOGLECHAT_PROJECT_ID || '';
   },
-  CLODDS_GATEWAY_TOKEN: (cfg) => {
+  BLITZKRIEG_GATEWAY_TOKEN: (cfg) => {
     if (!cfg.gateway) cfg.gateway = {};
     if (!cfg.gateway.auth) cfg.gateway.auth = {};
-    cfg.gateway.auth.token = process.env.CLODDS_GATEWAY_TOKEN;
+    cfg.gateway.auth.token = process.env.BLITZKRIEG_GATEWAY_TOKEN;
     cfg.gateway.auth.mode = 'token';
   },
-  CLODDS_GATEWAY_PASSWORD: (cfg) => {
+  BLITZKRIEG_GATEWAY_PASSWORD: (cfg) => {
     if (!cfg.gateway) cfg.gateway = {};
     if (!cfg.gateway.auth) cfg.gateway.auth = {};
-    cfg.gateway.auth.password = process.env.CLODDS_GATEWAY_PASSWORD;
+    cfg.gateway.auth.password = process.env.BLITZKRIEG_GATEWAY_PASSWORD;
     cfg.gateway.auth.mode = 'password';
   },
   BITTENSOR_ENABLED: (cfg) => {
@@ -1178,10 +1183,10 @@ const ENV_MAPPINGS: Record<string, (cfg: CloddsConfig) => void> = {
     const raw = process.env.ML_PIPELINE_CLEANUP_DAYS;
     if (raw) cfg.mlPipeline.cleanupDays = safeParseInt(raw) ?? cfg.mlPipeline.cleanupDays;
   },
-  CLODDS_GROUP_POLICIES: (cfg) => {
-    if (!process.env.CLODDS_GROUP_POLICIES) return;
+  BLITZKRIEG_GROUP_POLICIES: (cfg) => {
+    if (!process.env.BLITZKRIEG_GROUP_POLICIES) return;
     try {
-      const parsed = JSON.parse(process.env.CLODDS_GROUP_POLICIES) as Record<string, unknown>;
+      const parsed = JSON.parse(process.env.BLITZKRIEG_GROUP_POLICIES) as Record<string, unknown>;
       if (!cfg.channels) cfg.channels = {};
       for (const [channel, value] of Object.entries(parsed)) {
         if (!value || typeof value !== 'object') continue;
@@ -1190,7 +1195,7 @@ const ENV_MAPPINGS: Record<string, (cfg: CloddsConfig) => void> = {
         (cfg.channels as Record<string, any>)[channel] = channelConfig;
       }
     } catch (error) {
-      logger.warn({ error }, 'Failed to parse CLODDS_GROUP_POLICIES');
+      logger.warn({ error }, 'Failed to parse BLITZKRIEG_GROUP_POLICIES');
     }
   },
 };

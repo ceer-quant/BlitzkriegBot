@@ -16,12 +16,13 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { logger } from '../utils/logger';
 import type { IncomingMessage } from '../types';
+import { statePath } from '../utils/brand-paths';
 
 // =============================================================================
 // CONSTANTS
 // =============================================================================
 
-const RULES_FILE = join(homedir(), '.clodds', 'auto-reply-rules.json');
+const RULES_FILE = statePath('auto-reply-rules.json');
 
 // =============================================================================
 // TYPES

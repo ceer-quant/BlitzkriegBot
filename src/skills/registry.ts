@@ -12,6 +12,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { logger } from '../utils/logger';
+import { statePath } from '../utils/brand-paths';
 
 /** Registry skill metadata */
 export interface RegistrySkill {
@@ -111,7 +112,7 @@ const DEFAULT_CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
 export function createSkillsRegistry(config: RegistryConfig): SkillsRegistry {
   const registryUrl = config.registryUrl || DEFAULT_REGISTRY_URL;
-  const skillsDir = config.skillsDir || path.join(process.env.HOME || '', '.clodds', 'skills');
+  const skillsDir = config.skillsDir || statePath('skills');
   const cacheTtl = config.cacheTtl || DEFAULT_CACHE_TTL;
 
   // Ensure skills directory exists

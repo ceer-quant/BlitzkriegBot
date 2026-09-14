@@ -12,6 +12,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { logger } from '../utils/logger';
+import { statePath } from '../utils/brand-paths';
 
 export interface GoogleAuthConfig {
   /** Project ID for Vertex AI */
@@ -55,7 +56,7 @@ export class GoogleAuthClient {
   constructor(config: GoogleAuthConfig = {}) {
     this.config = config;
     this.tokenStorePath = config.tokenStorePath ||
-      path.join(process.env.HOME || '', '.clodds', 'tokens', 'google.json');
+      statePath('tokens', 'google.json');
 
     if (config.serviceAccountPath) {
       this.loadServiceAccount();
@@ -442,7 +443,7 @@ export class GeminiApiKeyManager {
 
   constructor(keyStorePath?: string) {
     this.keyStorePath = keyStorePath ||
-      path.join(process.env.HOME || '', '.clodds', 'keys', 'gemini.txt');
+      statePath('keys', 'gemini.txt');
     this.loadKey();
   }
 

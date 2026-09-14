@@ -13,6 +13,7 @@ import { writeFileSync, existsSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { logger } from '../utils/logger';
+import { resolveStateDir } from '../utils/brand-paths';
 
 export interface WizardStep {
   id: string;
@@ -117,7 +118,7 @@ const DEFAULT_STEPS: WizardStep[] = [
     async run(ctx) {
       logger.info('Saving configuration...');
 
-      const configDir = join(homedir(), '.clodds');
+      const configDir = resolveStateDir();
       if (!existsSync(configDir)) {
         mkdirSync(configDir, { recursive: true });
       }

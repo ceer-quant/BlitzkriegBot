@@ -19,6 +19,7 @@ import { homedir } from 'os';
 import { execSync, execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { logger } from '../utils/logger';
+import { statePath } from '../utils/brand-paths';
 
 // =============================================================================
 // TYPES
@@ -447,9 +448,9 @@ export class ExecApprovalsManager extends EventEmitter {
 
   constructor(configPath?: string) {
     super();
-    this.configPath = configPath || join(homedir(), '.clodds', 'exec-approvals.json');
-    this.pendingPath = join(homedir(), '.clodds', 'exec-approvals.pending.json');
-    this.decisionsPath = join(homedir(), '.clodds', 'exec-approvals.decisions.json');
+    this.configPath = configPath || statePath('exec-approvals.json');
+    this.pendingPath = statePath('exec-approvals.pending.json');
+    this.decisionsPath = statePath('exec-approvals.decisions.json');
     this.config = this.loadConfig();
 
     const pending = this.loadPendingFile();

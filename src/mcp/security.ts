@@ -40,11 +40,11 @@ const TOOL_PROFILES: Record<string, string[]> = {
 };
 
 export function loadSecurityConfig(): McpSecurityConfig {
-  const allowed = process.env.CLODDS_MCP_ALLOWED_TOOLS?.trim();
-  const blocked = process.env.CLODDS_MCP_BLOCKED_TOOLS?.trim();
-  const rateLimit = parseInt(process.env.CLODDS_MCP_RATE_LIMIT || '60', 10);
-  const auditEnabled = process.env.CLODDS_MCP_AUDIT !== 'false';
-  const toolProfile = process.env.CLODDS_MCP_TOOL_PROFILE || 'full';
+  const allowed = process.env.BLITZKRIEG_MCP_ALLOWED_TOOLS?.trim();
+  const blocked = process.env.BLITZKRIEG_MCP_BLOCKED_TOOLS?.trim();
+  const rateLimit = parseInt(process.env.BLITZKRIEG_MCP_RATE_LIMIT || '60', 10);
+  const auditEnabled = process.env.BLITZKRIEG_MCP_AUDIT !== 'false';
+  const toolProfile = process.env.BLITZKRIEG_MCP_TOOL_PROFILE || 'full';
 
   return {
     allowedTools: allowed ? new Set(allowed.split(',').map((s) => s.trim())) : new Set(),

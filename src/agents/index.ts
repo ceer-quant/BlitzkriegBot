@@ -329,10 +329,10 @@ function toEvmChain(chain: string): EvmChain {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type ApiResponse<T = Record<string, unknown>> = T;
 
-const STREAM_TOOL_CALLS_ENABLED = process.env.CLODDS_STREAM_TOOL_CALLS !== '0';
-const TOOL_STREAM_DELAY_MS = Math.max(0, Number(process.env.CLODDS_STREAM_TOOL_DELAY_MS || 750));
-const STREAM_RESPONSES_ENABLED = process.env.CLODDS_STREAM_RESPONSES !== '0';
-const STREAM_RESPONSE_INTERVAL_MS = Math.max(150, Number(process.env.CLODDS_STREAM_RESPONSE_INTERVAL_MS || 500));
+const STREAM_TOOL_CALLS_ENABLED = process.env.BLITZKRIEG_STREAM_TOOL_CALLS !== '0';
+const TOOL_STREAM_DELAY_MS = Math.max(0, Number(process.env.BLITZKRIEG_STREAM_TOOL_DELAY_MS || 750));
+const STREAM_RESPONSES_ENABLED = process.env.BLITZKRIEG_STREAM_RESPONSES !== '0';
+const STREAM_RESPONSE_INTERVAL_MS = Math.max(150, Number(process.env.BLITZKRIEG_STREAM_RESPONSE_INTERVAL_MS || 500));
 const STREAM_RESPONSE_PLATFORMS = new Set([
   'telegram',
   'discord',
@@ -342,7 +342,7 @@ const STREAM_RESPONSE_PLATFORMS = new Set([
   'teams',
   'webchat',
 ]);
-const MEMORY_EXTRACT_MODEL = process.env.CLODDS_MEMORY_EXTRACT_MODEL || process.env.CLODDS_SUMMARY_MODEL || 'claude-3-5-haiku-20241022';
+const MEMORY_EXTRACT_MODEL = process.env.BLITZKRIEG_MEMORY_EXTRACT_MODEL || process.env.BLITZKRIEG_SUMMARY_MODEL || 'claude-3-5-haiku-20241022';
 const KALSHI_API_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
 const DRIFT_GATEWAY_URL = process.env.DRIFT_GATEWAY_URL || 'http://localhost:8080';
 
@@ -17487,8 +17487,8 @@ export async function createAgentManager(
           }
         }
 
-        const semanticTopK = memoryAuto.semanticSearchTopK ?? (process.env.CLODDS_MEMORY_SEARCH === '1'
-          ? Number(process.env.CLODDS_MEMORY_SEARCH_TOPK || 5)
+        const semanticTopK = memoryAuto.semanticSearchTopK ?? (process.env.BLITZKRIEG_MEMORY_SEARCH === '1'
+          ? Number(process.env.BLITZKRIEG_MEMORY_SEARCH_TOPK || 5)
           : 0);
 
         if (semanticTopK > 0 && processedMessage.text?.trim()) {
@@ -17587,9 +17587,9 @@ export async function createAgentManager(
         compactThreshold: 0.85,
         minMessagesAfterCompact: 6,
         summarizer,
-        dedupe: process.env.CLODDS_CONTEXT_DEDUPE === '1',
-        dedupeThreshold: Number(process.env.CLODDS_CONTEXT_DEDUPE_THRESHOLD || 0.92),
-        dedupeWindow: Number(process.env.CLODDS_CONTEXT_DEDUPE_WINDOW || 12),
+        dedupe: process.env.BLITZKRIEG_CONTEXT_DEDUPE === '1',
+        dedupeThreshold: Number(process.env.BLITZKRIEG_CONTEXT_DEDUPE_THRESHOLD || 0.92),
+        dedupeWindow: Number(process.env.BLITZKRIEG_CONTEXT_DEDUPE_WINDOW || 12),
         embedder: memory?.embed,
         similarity: memory?.cosineSimilarity,
       };

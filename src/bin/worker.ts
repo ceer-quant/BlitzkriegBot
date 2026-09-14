@@ -29,7 +29,7 @@
  *   WORKER_CONCURRENCY  - Max concurrent jobs (default: 10)
  */
 
-import 'dotenv/config';
+import '../utils/brand-bootstrap';
 import { createExecutionWorker } from '../queue/jobs';
 import { createExecutionService, type ExecutionConfig } from '../execution';
 import { loadConfig } from '../utils/config';

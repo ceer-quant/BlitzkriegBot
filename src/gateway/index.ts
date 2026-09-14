@@ -76,6 +76,7 @@ import { createBotManager, createMeanReversionStrategy, createMomentumStrategy, 
 import { createStrategyBuilder, type StrategyBuilder } from '../trading/builder';
 import { createTradeLogger, type TradeLogger } from '../trading/logger';
 import { createMMStrategy, type MMConfig } from '../trading/market-making';
+import { projectManagedSkillsDirs } from '../utils/brand-paths';
 
 // =============================================================================
 // TYPES
@@ -438,7 +439,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
   }
   let currentConfig = config;
   configureHttpClient(currentConfig.http);
-  const configPath = process.env.CLODDS_CONFIG_PATH || CONFIG_FILE;
+  const configPath = CONFIG_FILE; // resolved from BLITZKRIEG_CONFIG_PATH (legacy alias honoured)
   const db = await initDatabase();
   try {
     const runner = createMigrationRunner(db);
@@ -1504,9 +1505,8 @@ export async function createGateway(config: Config): Promise<AppGateway> {
 
   function getSkillWatchPaths(cfg: Config): string[] {
     const bundledDir = path.join(__dirname, '..', 'skills', 'bundled');
-    const managedDir = path.join(process.cwd(), '.clodds', 'skills');
     const workspaceDir = path.join(cfg.agents.defaults.workspace, 'skills');
-    return [bundledDir, managedDir, workspaceDir];
+    return [bundledDir, ...projectManagedSkillsDirs(), workspaceDir];
   }
 
   function scheduleSkillReload(trigger: string): void {

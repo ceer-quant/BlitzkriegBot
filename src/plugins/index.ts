@@ -16,13 +16,14 @@ import { join, basename } from 'path';
 import { logger } from '../utils/logger';
 import type { HookFn, HookEvent, HooksService } from '../hooks';
 import type { IncomingMessage, OutgoingMessage } from '../types';
+import { statePath } from '../utils/brand-paths';
 
 // =============================================================================
 // CONSTANTS
 // =============================================================================
 
-const PLUGINS_DIR = join(homedir(), '.clodds', 'plugins');
-const PLUGIN_SETTINGS_FILE = join(homedir(), '.clodds', 'plugin-settings.json');
+const PLUGINS_DIR = statePath('plugins');
+const PLUGIN_SETTINGS_FILE = statePath('plugin-settings.json');
 
 // Ensure directories exist
 if (!existsSync(PLUGINS_DIR)) {

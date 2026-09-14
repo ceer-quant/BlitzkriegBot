@@ -12,7 +12,7 @@ interface ClaudeSummarizerOptions {
   model?: string;
 }
 
-const DEFAULT_SUMMARY_MODEL = process.env.CLODDS_SUMMARY_MODEL || 'claude-3-5-haiku-20241022';
+const DEFAULT_SUMMARY_MODEL = process.env.BLITZKRIEG_SUMMARY_MODEL || 'claude-3-5-haiku-20241022';
 
 export function createClaudeSummarizer(options: ClaudeSummarizerOptions = {}): SummarizerFn | undefined {
   const apiKey = options.apiKey || process.env.ANTHROPIC_API_KEY;

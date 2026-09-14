@@ -93,7 +93,7 @@ export function createWebhookManager(): WebhookManager {
   const webhooks = new Map<string, Webhook>();
   const pathIndex = new Map<string, string>(); // path -> webhook id
   const rateLimits = new Map<string, RateLimitEntry>();
-  const requireSignature = process.env.CLODDS_WEBHOOK_REQUIRE_SIGNATURE !== '0';
+  const requireSignature = process.env.BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE !== '0';
 
   function pruneRateLimits(): void {
     const now = Date.now();

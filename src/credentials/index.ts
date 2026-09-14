@@ -34,7 +34,7 @@ import { logger } from '../utils/logger.js';
 
 // Encryption key from environment (lazy — read at call time so startup can auto-generate)
 function getEncryptionKey(): string | undefined {
-  return process.env.CLODDS_CREDENTIAL_KEY;
+  return process.env.BLITZKRIEG_CREDENTIAL_KEY;
 }
 function hasEncryptionKey(): boolean {
   const k = getEncryptionKey();
@@ -52,7 +52,7 @@ const VERSION_PREFIX = 'v2';
 function encrypt(data: string): string {
   const encKey = getEncryptionKey();
   if (!encKey) {
-    throw new Error('CLODDS_CREDENTIAL_KEY is required to encrypt credentials');
+    throw new Error('BLITZKRIEG_CREDENTIAL_KEY is required to encrypt credentials');
   }
 
   const salt = crypto.randomBytes(16);
@@ -77,7 +77,7 @@ function encrypt(data: string): string {
 function decrypt(encryptedData: string): string {
   const encKey = getEncryptionKey();
   if (!encKey) {
-    throw new Error('CLODDS_CREDENTIAL_KEY is required to decrypt credentials');
+    throw new Error('BLITZKRIEG_CREDENTIAL_KEY is required to decrypt credentials');
   }
 
   const parts = encryptedData.split(':');
@@ -166,7 +166,7 @@ const MAX_FAILED_ATTEMPTS = 5;
 
 export function createCredentialsManager(db: Database): CredentialsManager {
   if (!hasEncryptionKey()) {
-    logger.warn('CLODDS_CREDENTIAL_KEY is not set. Credential encryption is disabled and operations will fail.');
+    logger.warn('BLITZKRIEG_CREDENTIAL_KEY is not set. Credential encryption is disabled and operations will fail.');
   }
   return {
     async setCredentials(userId, platform, credentials) {

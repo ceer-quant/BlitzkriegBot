@@ -78,7 +78,7 @@ async function getSplToken(): Promise<SplTokenModule> {
 // KEYPAIR ENCRYPTION (AES-256-GCM)
 // =============================================================================
 
-const ESCROW_ENCRYPTION_KEY = process.env.CLODDS_ESCROW_KEY || process.env.CLODDS_CREDENTIAL_KEY;
+const ESCROW_ENCRYPTION_KEY = process.env.BLITZKRIEG_ESCROW_KEY || process.env.BLITZKRIEG_CREDENTIAL_KEY;
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 
 /**
@@ -86,7 +86,7 @@ const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
  */
 function encryptKeypair(keypair: Keypair): string {
   if (!ESCROW_ENCRYPTION_KEY) {
-    throw new Error('CLODDS_ESCROW_KEY or CLODDS_CREDENTIAL_KEY required for escrow keypair encryption');
+    throw new Error('BLITZKRIEG_ESCROW_KEY or BLITZKRIEG_CREDENTIAL_KEY required for escrow keypair encryption');
   }
 
   const secretKeyBase58 = bs58.encode(keypair.secretKey);
@@ -112,7 +112,7 @@ function encryptKeypair(keypair: Keypair): string {
  */
 function decryptKeypair(encryptedData: string): Keypair {
   if (!ESCROW_ENCRYPTION_KEY) {
-    throw new Error('CLODDS_ESCROW_KEY or CLODDS_CREDENTIAL_KEY required for escrow keypair decryption');
+    throw new Error('BLITZKRIEG_ESCROW_KEY or BLITZKRIEG_CREDENTIAL_KEY required for escrow keypair decryption');
   }
 
   const parts = encryptedData.split(':');
@@ -791,7 +791,7 @@ export function createSolanaEscrowService(connection: Connection): EscrowService
         // Get escrow keypair from encrypted DB storage
         const escrowKeypair = await getEscrowKeypair(escrowId);
         if (!escrowKeypair) {
-          return { success: false, escrowId, error: 'Escrow keypair not available - check CLODDS_ESCROW_KEY env var' };
+          return { success: false, escrowId, error: 'Escrow keypair not available - check BLITZKRIEG_ESCROW_KEY env var' };
         }
 
         const sellerPubkey = new PublicKey(escrow.seller);
@@ -914,7 +914,7 @@ export function createSolanaEscrowService(connection: Connection): EscrowService
         // Get escrow keypair from encrypted DB storage
         const escrowKeypair = await getEscrowKeypair(escrowId);
         if (!escrowKeypair) {
-          return { success: false, escrowId, error: 'Escrow keypair not available - check CLODDS_ESCROW_KEY env var' };
+          return { success: false, escrowId, error: 'Escrow keypair not available - check BLITZKRIEG_ESCROW_KEY env var' };
         }
 
         const buyerPubkey = new PublicKey(escrow.buyer);

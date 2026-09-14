@@ -13,19 +13,55 @@ import { existsSync, writeFileSync, unlinkSync, readFileSync } from 'fs';
 import { homedir, platform } from 'os';
 import { join } from 'path';
 import { logger } from '../utils/logger';
+import {
+  CANONICAL_SERVICE_FILE,
+  CANONICAL_SERVICE_NAME,
+  LEGACY_SERVICE_FILE,
+  LEGACY_SERVICE_NAME,
+  statePath,
+} from '../utils/brand-paths';
 
-const SERVICE_NAME = 'com.clodds.gateway';
+const SERVICE_NAME = CANONICAL_SERVICE_NAME;
 
-function getLaunchdPlist() {
-  return join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_NAME}.plist`);
+function getLaunchdPlist(label = SERVICE_NAME) {
+  return join(homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
 }
 
-function getSystemdService() {
-  return join(homedir(), '.config', 'systemd', 'user', 'clodds.service');
+function getSystemdService(file = CANONICAL_SERVICE_FILE) {
+  return join(homedir(), '.config', 'systemd', 'user', file);
+}
+
+/**
+ * Remove a unit installed under the legacy brand, so an upgrade never leaves
+ * both `com.clodds.gateway` and `com.blitzkrieg.gateway` loaded at once.
+ * Failures are ignored: a missing or already-unloaded legacy unit is the norm.
+ */
+function removeLegacyService(): void {
+  if (platform() === 'darwin') {
+    const legacyPlist = getLaunchdPlist(LEGACY_SERVICE_NAME);
+    if (existsSync(legacyPlist)) {
+      try {
+        execFileSync('launchctl', ['unload', legacyPlist]);
+      } catch {
+        // Already unloaded; deleting the file below is the durable part.
+      }
+      unlinkSync(legacyPlist);
+    }
+  } else {
+    try {
+      execFileSync('systemctl', ['--user', 'disable', 'clodds']);
+    } catch {
+      // The legacy unit was never enabled.
+    }
+    const legacyUnit = getSystemdService(LEGACY_SERVICE_FILE);
+    if (existsSync(legacyUnit)) {
+      unlinkSync(legacyUnit);
+    }
+  }
 }
 
 function getLogPath() {
-  return join(homedir(), '.clodds', 'gateway.log');
+  return statePath('gateway.log');
 }
 
 export interface DaemonService {
@@ -56,7 +92,7 @@ export function createDaemonService(): DaemonService {
   <array>
     <string>/usr/bin/env</string>
     <string>npx</string>
-    <string>clodds</string>
+    <string>blitzkrieg</string>
     <string>gateway</string>
   </array>
   <key>RunAtLoad</key>
@@ -70,12 +106,13 @@ export function createDaemonService(): DaemonService {
 </dict>
 </plist>`;
         const plistPath = getLaunchdPlist();
+        removeLegacyService();
         writeFileSync(plistPath, plist);
         execFileSync('launchctl', ['load', plistPath]);
         logger.info('Daemon installed (launchd)');
       } else if (os === 'linux') {
         const service = `[Unit]
-Description=Clodds Gateway
+Description=Blitzkrieg Gateway
 After=network.target
 
 [Service]
@@ -87,9 +124,10 @@ RestartSec=10
 [Install]
 WantedBy=default.target`;
         const servicePath = getSystemdService();
+        removeLegacyService();
         writeFileSync(servicePath, service);
         execFileSync('systemctl', ['--user', 'daemon-reload']);
-        execFileSync('systemctl', ['--user', 'enable', 'clodds']);
+        execFileSync('systemctl', ['--user', 'enable', 'blitzkrieg']);
         logger.info('Daemon installed (systemd)');
       } else {
         throw new Error(`Unsupported platform: ${os}`);

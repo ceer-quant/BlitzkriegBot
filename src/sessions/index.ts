@@ -89,7 +89,7 @@ export interface SessionConfig {
   /** Encryption settings for transcript storage */
   encryption?: {
     enabled: boolean;
-    /** Password for encryption (or use CLODDS_SESSION_KEY env var) */
+    /** Password for encryption (or use BLITZKRIEG_SESSION_KEY env var) */
     password?: string;
   };
 }
@@ -168,7 +168,7 @@ const DEFAULT_CONFIG: SessionConfig = {
  */
 function getEncryptionPassword(config: SessionConfig): string | null {
   if (!config.encryption?.enabled) return null;
-  return config.encryption.password || process.env.CLODDS_SESSION_KEY || null;
+  return config.encryption.password || process.env.BLITZKRIEG_SESSION_KEY || null;
 }
 
 /**

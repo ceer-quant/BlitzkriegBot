@@ -22,6 +22,7 @@ import type {
   StreamChunk,
 } from './index';
 import { withRetry, RETRY_POLICIES, TransientError } from '../infra/retry';
+import { statePath } from '../utils/brand-paths';
 
 // =============================================================================
 // MODEL DISCOVERY
@@ -190,7 +191,7 @@ export interface AuthProfileManager {
   load(): void;
 }
 
-const PROFILES_DIR = join(homedir(), '.clodds', 'auth');
+const PROFILES_DIR = statePath('auth');
 const PROFILES_FILE = join(PROFILES_DIR, 'profiles.json');
 
 /**

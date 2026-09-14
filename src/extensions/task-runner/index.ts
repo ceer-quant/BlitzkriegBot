@@ -14,6 +14,7 @@ import { logger } from '../../utils/logger';
 import type { ProviderManager } from '../../providers/index';
 import * as fs from 'fs';
 import * as path from 'path';
+import { statePath } from '../../utils/brand-paths';
 
 export interface TaskDefinition {
   id: string;
@@ -422,7 +423,7 @@ export class TaskRunner {
     this.results = new Map();
     this.variables = {};
     this.runningTasks = new Set();
-    this.stateDir = config.stateDir || path.join(process.env.HOME || '', '.clodds', 'task-runner');
+    this.stateDir = config.stateDir || statePath('task-runner');
 
     if (!fs.existsSync(this.stateDir)) {
       fs.mkdirSync(this.stateDir, { recursive: true });

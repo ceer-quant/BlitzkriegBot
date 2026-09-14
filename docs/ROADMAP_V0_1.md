@@ -66,7 +66,7 @@
 | --- | --- |
 | [#22](https://github.com/ceer-quant/BlitzkriegBot/issues/22) E1-b socket 改名 + 兼容期 | ✅ 已交付（`MIGRATION_LOG §38`，PR #37）——`blitzkrieg-core-<user>.sock` 为规范名，旧名可发现并**领养**而非另起内核；回归 `scripts/socket-migration-check.mjs` |
 | [#21](https://github.com/ceer-quant/BlitzkriegBot/issues/21) E1-a 加密盐 / 链上备注 | ⏸ 待裁决（`DECISIONS_PENDING` D-13） |
-| [#23](https://github.com/ceer-quant/BlitzkriegBot/issues/23) E1-c `CLODDS_*` / `~/.clodds` | ⏳ 未开始 |
+| [#23](https://github.com/ceer-quant/BlitzkriegBot/issues/23) E1-c `CLODDS_*` / `~/.clodds` | ✅ 已交付（`MIGRATION_LOG §39`）——`BLITZKRIEG_*` 为规范名，旧名保留一个发布周期的启动期镜像别名；路径裁决「规范存在用规范，仅旧存在则沿用旧」，零数据移动；36 个新测试 |
 | [#24](https://github.com/ceer-quant/BlitzkriegBot/issues/24) E1-d 协议面 + 化妆项 | ⏳ 未开始 |
 | [#25](https://github.com/ceer-quant/BlitzkriegBot/issues/25) E1-e `origin` remote | ⏸ 待裁决（`DECISIONS_PENDING` D-13） |
 
