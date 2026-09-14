@@ -1,6 +1,6 @@
 //! Shared UI data model — ONE-TO-ONE with the core's IPC messages.
 //!
-//! These are deliberately a *mirror* of `Blitzkrieg_core/src/ipc/schema.rs` and
+//! These are deliberately a *mirror* of `core/blitzkrieg_core/src/ipc/schema.rs` and
 //! `model.rs`, not a re-export: the UI Kit must not link the core's trading
 //! crate, so it stays a replaceable presentation layer. Every field name matches
 //! the wire (camelCase) so deserialisation is direct.

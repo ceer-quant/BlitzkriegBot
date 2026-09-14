@@ -166,9 +166,9 @@ pub fn discover_binary() -> PathBuf {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let candidates = [
         root.join("target/release/blitzkrieg-core"),
-        root.join("Blitzkrieg_core/target/release/blitzkrieg-core"),
+        root.join("core/blitzkrieg_core/target/release/blitzkrieg-core"),
         root.join("target/debug/blitzkrieg-core"),
-        root.join("Blitzkrieg_core/target/debug/blitzkrieg-core"),
+        root.join("core/blitzkrieg_core/target/debug/blitzkrieg-core"),
     ];
     candidates.iter().find(|p| p.exists()).cloned().unwrap_or_else(|| candidates[0].clone())
 }

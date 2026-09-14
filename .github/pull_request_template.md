@@ -12,7 +12,7 @@
 
 ## 涉及模块
 <!-- 勾选受影响范围 -->
-- [ ] rust-core (Blitzkrieg_core)
+- [ ] rust-core (core/blitzkrieg_core)
 - [ ] strategy / engine
 - [ ] risk / safety
 - [ ] shadow-evolution

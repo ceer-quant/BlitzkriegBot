@@ -39,13 +39,13 @@ rust_decimal = "1"
 rust_decimal_macros = "1"
 libloading = { version = "0.8", optional = true }
 # Frozen C ABI for user-layer dynamic strategies (path dep; rlib+cdylib).
-blitzkrieg-strategy-api = { path = "../user_layer/strategy_api" }
+blitzkrieg-strategy-api = { path = "../../user_layer/strategy_api" }
 # Market-plugin contract (no internal deps): DTOs + the DataFeed/Discovery/
 # OrderExecutor traits + MarketHost. The core implements the host side here.
 blitzkrieg-market-api = { path = "../market_api" }
 # Official Polymarket market extension (optional; the default feature links it).
 # The core never imports it directly except at the single assembly seam.
-polymarket-extension = { path = "../extensions/polymarket", optional = true }
+polymarket-extension = { path = "../../extensions/polymarket", optional = true }
 async-trait = "0.1"
 # Lock-free atomic parameter swap for Shadow Evolution (strategy hot path).
 arc-swap = "1"

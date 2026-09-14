@@ -99,7 +99,7 @@
 - **背景**：仓库规范化新增 `rust-check` 作业。实测：`cargo build --release` ✅、
   `cargo test` ✅（120 用例）；但 `cargo fmt --all --check` 有 **537 处 diff（约 57 个文件）**，
   `cargo clippy --workspace --all-targets -- -D warnings` 有 **3 个既存错误**
-  （`market_api/src/types.rs:245` `collapsible_if`；`ui_kit/src/core/event_bus.rs:144` `unused_mut`）。
+  （`core/market_api/src/types.rs:245` `collapsible_if`；`ui/ui_kit/src/core/event_bus.rs:144` `unused_mut`）。
 - **选项 A（AI 已采用）**：CI 中 `rustfmt` / `clippy` 设为 **建议性（continue-on-error）**，
   由独立 PR 专项清理后再转为阻塞。理由：治理 PR 不应顺带重排 57 个无关文件
   （违反「禁止顺手优化业务逻辑」）。

@@ -1,11 +1,11 @@
 # Cargo workspace: the generic core plus official market extensions.
-# The core (Blitzkrieg_core) must NOT depend on any specific market SDK;
+# The core (core/blitzkrieg_core) must NOT depend on any specific market SDK;
 # concrete markets live under extensions/* and are wired in by feature.
 [workspace]
 resolver = "2"
 members = [
-    "market_api",
-    "Blitzkrieg_core",
+    "core/market_api",
+    "core/blitzkrieg_core",
     "extensions/polymarket",
     "user_layer/strategy_api",
     "ui/ui_kit",

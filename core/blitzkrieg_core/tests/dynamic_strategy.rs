@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 fn lib_path() -> PathBuf {
-    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("user_layer").join("strategies").join("target").join("release");
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("user_layer").join("strategies").join("target").join("release");
     for name in ["libdog_strategy.dylib", "libdog_strategy.so", "dog_strategy.dll"] {
         let p = base.join(name);
         if p.exists() {
