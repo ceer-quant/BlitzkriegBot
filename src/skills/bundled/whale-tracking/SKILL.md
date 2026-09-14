@@ -81,7 +81,7 @@ Note: `/whales` also works as an alias for `/whale`.
 ### Polymarket Whale Tracker
 
 ```typescript
-import { createWhaleTracker, isWhaleAddress, getMarketWhaleActivity } from 'clodds/feeds/polymarket/whale-tracker';
+import { createWhaleTracker, isWhaleAddress, getMarketWhaleActivity } from 'blitzkrieg/feeds/polymarket/whale-tracker';
 
 // Create tracker
 const tracker = createWhaleTracker({
@@ -166,7 +166,7 @@ for (const trader of topTraders) {
 ### Crypto Whale Tracker
 
 ```typescript
-import { createCryptoWhaleTracker } from 'clodds/feeds/crypto/whale-tracker';
+import { createCryptoWhaleTracker } from 'blitzkrieg/feeds/crypto/whale-tracker';
 
 // Create multi-chain tracker
 const cryptoTracker = createCryptoWhaleTracker({

@@ -61,7 +61,7 @@ Receive signals via HTTP POST to a custom webhook URL.
 
 ```
 /signal add webhook --name "custom"
-# Returns: POST https://clodds.io/webhook/abc123
+# Returns: POST https://your-host.example/webhook/abc123
 ```
 
 Webhook payload:

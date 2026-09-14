@@ -2000,7 +2000,7 @@ export async function initDatabase(): Promise<Database> {
     if (!sqlJsDb) return;
     ensureBackupDir();
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const filePath = join(BACKUP_DIR, `clodds-${timestamp}.db`);
+    const filePath = join(BACKUP_DIR, `blitzkrieg-${timestamp}.db`);
     const data = sqlJsDb.export();
     writeFileSync(filePath, Buffer.from(data));
 

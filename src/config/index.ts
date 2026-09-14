@@ -355,7 +355,7 @@ export interface LedgerConfig {
   anchorChain?: 'solana' | 'polygon' | 'base';
 }
 
-export interface CloddsConfig {
+export interface BlitzkriegConfig {
   agent?: AgentConfig;
   gateway?: GatewayConfig;
   session?: {
@@ -504,7 +504,7 @@ export interface SolanaConfig {
 // DEFAULTS
 // =============================================================================
 
-export const DEFAULT_CONFIG: CloddsConfig = {
+export const DEFAULT_CONFIG: BlitzkriegConfig = {
   agent: {
     model: 'claude-opus-4-6',
     maxTokens: 4096,
@@ -598,7 +598,7 @@ export const DEFAULT_CONFIG: CloddsConfig = {
     alertTargets: [],
     email: {
       enabled: false,
-      subjectPrefix: 'Clodds',
+      subjectPrefix: 'Blitzkrieg',
     },
     providerHealth: {
       enabled: true,
@@ -655,7 +655,7 @@ function safeParseFloat(raw: string): number | undefined {
 }
 
 /** Environment variables that can be used in config */
-const ENV_MAPPINGS: Record<string, (cfg: CloddsConfig) => void> = {
+const ENV_MAPPINGS: Record<string, (cfg: BlitzkriegConfig) => void> = {
   ANTHROPIC_API_KEY: () => {}, // Used directly by agent
   OPENAI_API_KEY: () => {},
   ELEVENLABS_API_KEY: (cfg) => {
@@ -1201,7 +1201,7 @@ const ENV_MAPPINGS: Record<string, (cfg: CloddsConfig) => void> = {
 };
 
 /** Apply environment variable overrides */
-function applyEnvOverrides(cfg: CloddsConfig): CloddsConfig {
+function applyEnvOverrides(cfg: BlitzkriegConfig): BlitzkriegConfig {
   for (const [envKey, applier] of Object.entries(ENV_MAPPINGS)) {
     if (process.env[envKey]) {
       applier(cfg);
@@ -1259,11 +1259,11 @@ function parseJson5(text: string): unknown {
 }
 
 /** Deep merge configs */
-function deepMerge(target: CloddsConfig, source: CloddsConfig): CloddsConfig {
+function deepMerge(target: BlitzkriegConfig, source: BlitzkriegConfig): BlitzkriegConfig {
   const result = { ...target };
   const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
-  for (const key of Object.keys(source) as Array<keyof CloddsConfig>) {
+  for (const key of Object.keys(source) as Array<keyof BlitzkriegConfig>) {
     if (DANGEROUS_KEYS.has(key as string)) continue;
     const sourceVal = source[key];
     const targetVal = target[key];
@@ -1283,8 +1283,8 @@ function deepMerge(target: CloddsConfig, source: CloddsConfig): CloddsConfig {
 }
 
 /** Load config from file */
-export function loadConfig(configPath = CONFIG_PATH): CloddsConfig {
-  let userConfig: CloddsConfig = {};
+export function loadConfig(configPath = CONFIG_PATH): BlitzkriegConfig {
+  let userConfig: BlitzkriegConfig = {};
 
   // Ensure state dir exists
   const stateDir = resolveStateDir();
@@ -1298,7 +1298,7 @@ export function loadConfig(configPath = CONFIG_PATH): CloddsConfig {
       const raw = readFileSync(configPath, 'utf-8');
       const parsed = parseJson5(raw);
       userConfig = (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
-        ? parsed as CloddsConfig
+        ? parsed as BlitzkriegConfig
         : {};
       logger.debug({ configPath }, 'Config loaded');
     } catch (error) {
@@ -1307,7 +1307,7 @@ export function loadConfig(configPath = CONFIG_PATH): CloddsConfig {
   }
 
   // Substitute env vars in config values
-  userConfig = substituteEnvVars(userConfig) as CloddsConfig;
+  userConfig = substituteEnvVars(userConfig) as BlitzkriegConfig;
 
   // Merge with defaults
   let config = deepMerge(DEFAULT_CONFIG, userConfig);
@@ -1319,7 +1319,7 @@ export function loadConfig(configPath = CONFIG_PATH): CloddsConfig {
 }
 
 /** Load config and return raw snapshot */
-export function loadConfigSnapshot(configPath = CONFIG_PATH): { config: CloddsConfig; raw: string | null; hash: string } {
+export function loadConfigSnapshot(configPath = CONFIG_PATH): { config: BlitzkriegConfig; raw: string | null; hash: string } {
   let raw: string | null = null;
 
   if (existsSync(configPath)) {
@@ -1361,7 +1361,7 @@ function rotateBackups(configPath: string): void {
 }
 
 /** Save config to file */
-export function saveConfig(config: CloddsConfig, configPath = CONFIG_PATH): void {
+export function saveConfig(config: BlitzkriegConfig, configPath = CONFIG_PATH): void {
   // Ensure directory exists
   const dir = resolve(configPath, '..');
   if (!existsSync(dir)) {
@@ -1378,7 +1378,7 @@ export function saveConfig(config: CloddsConfig, configPath = CONFIG_PATH): void
   }
 
   // Stamp version
-  const stamped: CloddsConfig = {
+  const stamped: BlitzkriegConfig = {
     ...config,
     meta: {
       ...config.meta,
@@ -1403,7 +1403,7 @@ export interface ValidationError {
 }
 
 /** Validate config structure */
-export function validateConfig(config: CloddsConfig): ValidationError[] {
+export function validateConfig(config: BlitzkriegConfig): ValidationError[] {
   const errors: ValidationError[] = [];
   const isRecord = (value: unknown): value is Record<string, unknown> =>
     !!value && typeof value === 'object' && !Array.isArray(value);
@@ -1692,24 +1692,24 @@ export function validateConfig(config: CloddsConfig): ValidationError[] {
 
 export interface ConfigService {
   /** Get current config */
-  get(): CloddsConfig;
+  get(): BlitzkriegConfig;
   /** Get a specific config value */
   getValue<T>(path: string): T | undefined;
   /** Set a config value */
   setValue(path: string, value: unknown): void;
   /** Reload config from file */
-  reload(): CloddsConfig;
+  reload(): BlitzkriegConfig;
   /** Save current config to file */
   save(): void;
   /** Get config hash */
   getHash(): string;
   /** Watch for config changes */
-  watch(callback: (config: CloddsConfig) => void): () => void;
+  watch(callback: (config: BlitzkriegConfig) => void): () => void;
 }
 
 export function createConfigService(configPath = CONFIG_PATH): ConfigService {
   let { config, hash } = loadConfigSnapshot(configPath);
-  const watchers: Array<(config: CloddsConfig) => void> = [];
+  const watchers: Array<(config: BlitzkriegConfig) => void> = [];
 
   return {
     get() {

@@ -1,5 +1,5 @@
 /**
- * Clodds - AI Assistant for Prediction Markets
+ * Blitzkrieg - AI Assistant for Prediction Markets
  * Claude + Odds
  *
  * Entry point - starts the gateway and all services
@@ -55,7 +55,7 @@ function renderProgress(): void {
   const linesToClear = startupSteps.length + 2;
   process.stdout.write(`\x1b[${linesToClear}A\x1b[0J`);
 
-  console.log('\n\x1b[1m🚀 Starting Clodds...\x1b[0m\n');
+  console.log('\n\x1b[1m🚀 Starting Blitzkrieg...\x1b[0m\n');
 
   for (const step of startupSteps) {
     let icon: string;
@@ -119,7 +119,7 @@ function validateStartupRequirements(): void {
       'ANTHROPIC_API_KEY is not set. The AI agent will not function.\n' +
       '  Fix: Add ANTHROPIC_API_KEY to your .env file\n' +
       '  Optional: set ANTHROPIC_BASE_URL for Anthropic-compatible providers\n' +
-      '  Or run: clodds onboard'
+      '  Or run: blitzkrieg onboard'
     );
   }
 
@@ -166,11 +166,11 @@ function validateStartupRequirements(): void {
 
   // Exit with errors if critical requirements missing
   if (errors.length > 0) {
-    logger.error('Clodds Startup Failed');
+    logger.error('Blitzkrieg Startup Failed');
     for (const error of errors) {
       logger.error(error);
     }
-    logger.error('Run "clodds doctor" for full diagnostics.');
+    logger.error('Run "blitzkrieg doctor" for full diagnostics.');
     process.exit(1);
   }
 }
@@ -202,7 +202,7 @@ async function main() {
     const idxGateway = addStep('Starting HTTP gateway');
 
     // Print initial state
-    console.log('\n\x1b[1m🚀 Starting Clodds...\x1b[0m\n');
+    console.log('\n\x1b[1m🚀 Starting Blitzkrieg...\x1b[0m\n');
     for (const step of startupSteps) {
       console.log(`  \x1b[90m○\x1b[0m ${step.name}`);
     }
@@ -271,7 +271,7 @@ async function main() {
     renderProgress();
 
     // Final success message
-    console.log('\n\x1b[32m\x1b[1m✓ Clodds is running!\x1b[0m');
+    console.log('\n\x1b[32m\x1b[1m✓ Blitzkrieg is running!\x1b[0m');
     console.log(`\n  WebChat: \x1b[36mhttp://localhost:${config.gateway.port}/webchat\x1b[0m`);
     if (process.env.TELEGRAM_BOT_TOKEN) {
       console.log('  Telegram: \x1b[32mConnected\x1b[0m');
@@ -308,7 +308,7 @@ async function main() {
 
   } else {
     // Non-TTY mode: simple logging
-    logger.info('Starting Clodds...');
+    logger.info('Starting Blitzkrieg...');
 
     validateStartupRequirements();
 
@@ -319,7 +319,7 @@ async function main() {
     const gateway = await createGateway(config);
     await gateway.start();
 
-    logger.info('Clodds is running!');
+    logger.info('Blitzkrieg is running!');
 
     let shuttingDown = false;
     const SHUTDOWN_TIMEOUT_MS = 15000;

@@ -85,7 +85,7 @@ Automated detection and monitoring of arbitrage opportunities across prediction 
 ### Create Arbitrage Service
 
 ```typescript
-import { createArbitrageService } from 'clodds/arbitrage';
+import { createArbitrageService } from 'blitzkrieg/arbitrage';
 
 const arbService = createArbitrageService({
   platforms: ['polymarket', 'kalshi', 'manifold', 'betfair'],

@@ -93,7 +93,7 @@ Based on [arXiv:2508.03474](https://arxiv.org/abs/2508.03474) which found **$40M
 ### Create Opportunity Finder
 
 ```typescript
-import { createOpportunityFinder } from 'clodds/opportunity';
+import { createOpportunityFinder } from 'blitzkrieg/opportunity';
 
 const finder = createOpportunityFinder({
   platforms: ['polymarket', 'kalshi', 'betfair', 'manifold'],

@@ -1,11 +1,11 @@
 {
   "app": {
-    "name": "Clodds",
+    "name": "Blitzkrieg",
     "tagline": "AI トレーディングターミナル",
     "version": "バージョン {version}"
   },
   "welcome": {
-    "message": "Clodds へようこそ",
+    "message": "Blitzkrieg へようこそ",
     "greeting": "こんにちは、{name}さん！",
     "firstTime": "セットアップを始めましょう。",
     "returning": "おかえりなさい！"
@@ -208,8 +208,8 @@
     "share": "共有"
   },
   "cli": {
-    "starting": "Clodds を起動中...",
-    "ready": "Clodds の準備ができました！",
+    "starting": "Blitzkrieg を起動中...",
+    "ready": "Blitzkrieg の準備ができました！",
     "shutting_down": "シャットダウン中...",
     "doctor": {
       "title": "システム診断",

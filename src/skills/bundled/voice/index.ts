@@ -49,7 +49,7 @@ async function execute(args: string): Promise<string> {
           return `**Voice Recognition Started**\n\n` +
             `STT Engine: ${config.sttEngine || 'whisper'}\n` +
             `Language: ${config.language || 'en-US'}\n` +
-            `Wake word: "hey clodds"\n` +
+            `Wake word: "hey blitzkrieg"\n` +
             `Sensitivity: ${voiceConfigOverrides.sensitivity || 0.5}\n` +
             `Continuous: ${voiceConfigOverrides.continuous ? 'on' : 'off'}\n\n` +
             `Listening for voice input... Stop with /voice stop`;
@@ -103,7 +103,7 @@ async function execute(args: string): Promise<string> {
           return `**Voice Config**\n\n` +
             `STT Engine: ${voiceConfigOverrides.sttEngine || 'whisper'} ${sttAvailable ? '(available)' : '(not found)'}\n` +
             `TTS Engine: ${voiceConfigOverrides.ttsEngine || 'say'}\n` +
-            `Wake Word: "${voiceConfigOverrides.wakeWord || 'hey clodds'}"\n` +
+            `Wake Word: "${voiceConfigOverrides.wakeWord || 'hey blitzkrieg'}"\n` +
             `Language: ${voiceConfigOverrides.language || 'en-US'}\n` +
             `Sample Rate: 16000 Hz\n` +
             `Sensitivity: ${voiceConfigOverrides.sensitivity || 0.5}\n` +
@@ -145,7 +145,7 @@ async function execute(args: string): Promise<string> {
 
       case 'wake': {
         const wakeWord = parts.slice(1).join(' ');
-        if (!wakeWord) return 'Usage: /voice wake <word or phrase>\n\nExample: /voice wake hey clodds';
+        if (!wakeWord) return 'Usage: /voice wake <word or phrase>\n\nExample: /voice wake hey blitzkrieg';
 
         voiceConfigOverrides.wakeWord = wakeWord;
 

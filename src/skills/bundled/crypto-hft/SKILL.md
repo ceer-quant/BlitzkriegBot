@@ -42,7 +42,7 @@ Each round has UP/DOWN token pairs that settle at 0 or 1 using Chainlink price f
 
 Starts in **dry-run mode** by default (no real orders). Test for free before going live!
 
-## Talk to Clodds Naturally
+## Talk to Blitzkrieg Naturally
 
 Just say what you want to trade:
 ```

@@ -131,7 +131,7 @@ export async function createMattermostChannel(
             if (/^[A-Z0-9]{8}$/.test(potentialCode) && pairing) {
               const request = await pairing.validateCode(potentialCode);
               if (request) {
-                await createPost(post.channel_id, ':white_check_mark: **Successfully paired!**\n\nYou can now chat with Clodds.');
+                await createPost(post.channel_id, ':white_check_mark: **Successfully paired!**\n\nYou can now chat with Blitzkrieg.');
                 logger.info({ userId: post.user_id, code: potentialCode }, 'Mattermost user paired via direct code');
                 return;
               }
@@ -144,7 +144,7 @@ export async function createMattermostChannel(
                   post.channel_id,
                   `:lock: **Pairing Required**\n\n` +
                     `Your pairing code: \`${code}\`\n\n` +
-                    `Run \`clodds pairing approve mattermost ${code}\` to complete pairing.\n\n` +
+                    `Run \`blitzkrieg pairing approve mattermost ${code}\` to complete pairing.\n\n` +
                     `Code expires in 1 hour.`
                 );
                 logger.info({ userId: post.user_id, code }, 'Generated Mattermost pairing code');
@@ -167,7 +167,8 @@ export async function createMattermostChannel(
       const requireMention = config.groups?.[post.channel_id]?.requireMention ?? true;
       if (requireMention && botUserId) {
         const escapedBotId = botUserId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const mentionPattern = new RegExp(`@${escapedBotId}|@clodds`, 'i');
+        // @blitzkrieg is canonical; @clodds accepted during the rename window.
+        const mentionPattern = new RegExp(`@${escapedBotId}|@blitzkrieg|@clodds`, 'i');
         if (!mentionPattern.test(text)) {
           return;
         }

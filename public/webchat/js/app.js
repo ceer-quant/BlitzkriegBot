@@ -332,7 +332,7 @@ class App {
         ] : [
           'Time to predict the future.',
           'What odds do you want to explore?',
-          'Markets never sleep. Neither does Clodds.',
+          'Markets never sleep. Neither does Blitzkrieg.',
         ];
         subEl.textContent = subs[Math.floor(Math.random() * subs.length)];
       }
@@ -392,7 +392,7 @@ class App {
         }
         if (document.hidden) {
           this._unreadCount++;
-          document.title = `(${this._unreadCount}) New message - Clodds`;
+          document.title = `(${this._unreadCount}) New message - Blitzkrieg`;
         }
       } else if (msg.type === 'edit') {
         this.chat.editMessage(msg.messageId, msg.text);
@@ -444,7 +444,7 @@ class App {
     const session = this.sidebar.sessions.find(s => s.id === sessionId);
     const headerTitle = document.getElementById('header-title');
     if (headerTitle) {
-      headerTitle.textContent = session?.title || 'Clodds';
+      headerTitle.textContent = session?.title || 'Blitzkrieg';
     }
 
     // Load messages from API (guard against race if user switched again)
@@ -545,7 +545,7 @@ class App {
         this._setWelcomeMode(true);
         Storage.remove('lastSessionId');
         const headerTitle = document.getElementById('header-title');
-        if (headerTitle) headerTitle.textContent = 'Clodds';
+        if (headerTitle) headerTitle.textContent = 'Blitzkrieg';
       }
     }
   }

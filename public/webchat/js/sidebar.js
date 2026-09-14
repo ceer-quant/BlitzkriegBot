@@ -95,7 +95,7 @@ export class Sidebar {
     const helpItem = this.sidebarEl.querySelector('#popover-help');
     if (helpItem) {
       helpItem.addEventListener('click', () => {
-        window.open('https://docs.cloddsbot.com', '_blank');
+        window.open('https://github.com/ceer-quant/BlitzkriegBot#readme', '_blank');
         popover?.classList.remove('visible');
       });
     }

@@ -332,7 +332,7 @@ export function createDevTools(config: DevToolsConfig = {}): DevTools {
     if (!cfg.datadog?.apiKey) return;
 
     const ddTags = {
-      service: cfg.datadog.service || 'clodds',
+      service: cfg.datadog.service || 'blitzkrieg',
       env: cfg.datadog.env || 'production',
       ...cfg.datadog.tags,
       ...tags,

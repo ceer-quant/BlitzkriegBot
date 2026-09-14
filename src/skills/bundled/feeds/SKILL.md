@@ -78,7 +78,7 @@ Real-time and historical market data from Polymarket, Kalshi, Manifold, Metaculu
 ### Create Feed Manager
 
 ```typescript
-import { createFeedManager } from 'clodds/feeds';
+import { createFeedManager } from 'blitzkrieg/feeds';
 
 const feeds = createFeedManager({
   platforms: ['polymarket', 'kalshi', 'manifold', 'betfair'],

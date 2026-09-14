@@ -52,7 +52,7 @@ Securely store and manage API credentials for trading platforms with AES-256-GCM
 ### Create Credentials Manager
 
 ```typescript
-import { createCredentialsManager } from 'clodds/credentials';
+import { createCredentialsManager } from 'blitzkrieg/credentials';
 
 const creds = createCredentialsManager({
   // Encryption key (required)

@@ -52,11 +52,11 @@
 
 ---
 
-## [待决策] D-4 「删除 CloddsBot」的实际范围与时机（关键）
+## [待决策] D-4 「删除 BlitzkriegBot」的实际范围与时机（关键）
 
-- **背景**：`CloddsBot/` 目录**已不存在**（更早提交 `fc6e93c` 已扁平化）。
+- **背景**：`BlitzkriegBot/` 目录**已不存在**（更早提交 `fc6e93c` 已扁平化）。
   今天存在的 Node 侧是 **`src/`（584 个 .ts 文件）+ `dist/`**，且**正在运行**（`node dist/index.js`，:18789）。
-  任务书要求「删除 CloddsBot 目录」，实际等价于删除整个 Node 外壳——远超「删一个遗留目录」。
+  任务书要求「删除 BlitzkriegBot 目录」，实际等价于删除整个 Node 外壳——远超「删一个遗留目录」。
 - **已完成的替代**：`ui_kit/`（core/web/tui/app）已实现并三前端跑通，可替代**展示层**
   （`ui/hft.html`、`src/tui`）。
 - **命令下发已补齐（2026-09-14，提交 `1b1c98a`）**：`ui_kit/src/gateway/`（新）实现了命令通道——
@@ -75,7 +75,7 @@
 - **理由**：任务全局约束明令「禁止删除未经备份的文件、禁止破坏运行」；且删除范围与风险远大于任务书预期。
   在命令通道未被 UI Kit 接管前删除，等于让机器人失去人工控制入口。
 - **需要用户确认的点**：
-  1. 「删除 CloddsBot」是否确指删除整个 `src/` Node 外壳？还是仅指 §2.1 的 8 个交易域目录？
+  1. 「删除 BlitzkriegBot」是否确指删除整个 `src/` Node 外壳？还是仅指 §2.1 的 8 个交易域目录？
   2. 是否接受「先让 UI Kit 接管命令下发与网关，再删除」的分阶段路径？
   3. 聊天/Agent 域（agents/channels/mcp/…）是否也在删除范围内？（这些与交易无关，删除会移除机器人交互能力）
 
@@ -111,9 +111,9 @@
 
 ## [待决策] D-7 仓库身份元数据（npm 包名 / package.json）仍为旧品牌
 
-- **背景**：`package.json` 的 `name=clodds`、`author=alsk1992`、`repository.url=github.com/alsk1992/CloddsBot`
+- **背景**：`package.json` 的 `name=clodds`、`author=alsk1992`、`repository.url=github.com/alsk1992/BlitzkriegBot`
   仍是旧品牌；而仓库本体为私有的 `ceer-quant/BlitzkriegBot`。
-- **已处理（2026-09-14）**：**`README.md` 已整体重写**，彻底移除 CloddsBot 产品文案/外链，改为
+- **已处理（2026-09-14）**：**`README.md` 已整体重写**，彻底移除 BlitzkriegBot 产品文案/外链，改为
   BlitzkriegBot（Rust 核心 + Node 外壳 + Polymarket 扩展）的真实入口；`CONTRIBUTING.md` 标题与署名行也已更正。
   **但 `package.json` 的分发元数据未动**（改 `name`/`repository`/`author` 影响 npm 发布与锁文件，属外向变更）。
   其余 260+ 个文件中的 `clodds` 字样多为历史迁移日志、带日期的报告、`package-lock.json`，以及运行时默认
@@ -306,7 +306,7 @@
 
 ---
 
-## [待决策] D-13 Clodds 清零中的三项「不可逆」遗留（E1-a / E1-e 汇总）
+## [待决策] D-13 Blitzkrieg 清零中的三项「不可逆」遗留（E1-a / E1-e 汇总）
 
 - **背景**：`ROADMAP_V0_1.md` E1 要求「彻底移除 cloddsbot 遗留，确保完全 0 clodds 相关性」。
   盘点把 905 行命中按风险分为 A–G 七级；其中 **B 级（socket 名）已交付**（`MIGRATION_LOG §38`，
@@ -328,7 +328,7 @@
 - **性质**：该前缀**已随交易上链持久化**，改前缀会让历史锚点无法再被校验。
 - **需要用户确认**：改（接受历史锚点不可校验）／双读（新旧前缀都认）／保留？
 
-### D-13.3 git remote `origin`（`alsk1992/CloddsBot`，无推送权限 403）
+### D-13.3 git remote `origin`（`alsk1992/BlitzkriegBot`，无推送权限 403）
 
 - **性质**：仅本地配置，移除不影响 `ceer` 远端与已推送历史；唯一作用是**历史参照**
   （`scripts/github/bootstrap-repo.sh` 把它列为禁止推送目标）。
@@ -343,3 +343,25 @@
 - **F `dist/`**：源码清零后 `npm run build` 自然重建，**不手工编辑**产物。（Issue #24）
 - **例外**：`MIGRATION_LOG.md`、`docs/reports/*GOVERNANCE*`、`CHANGELOG.md` 中的 clodds 是
   迁移历史，保留原文并在顶部标注「历史记录，命名已废弃」。（`ROADMAP_V0_1.md §2.3`）
+
+---
+
+## [待决策] D-14 托管身份服务/技能注册表的域名占位（E1-d/E 批次落地）
+
+- **背景**：旧代码与文档硬编码了 `cloddsbot.com`、`compute.cloddsbot.com`、
+  `api.cloddsbot.com`、`docs.cloddsbot.com`、`plugins.clodds.ai`、
+  `registry.clodds.dev`、`clodds.io` 等**旧项目托管服务**地址。这些服务不属于
+  BlitzkriegBot，且直接把新品牌名拼上去（`blitzkrieg.io` 等）会形成**真实可解析的
+  第三方域名**，有引流/误连风险。
+- **已按默认实施（如需推翻请拍板）**：
+  - 身份/资料服务基址：`BLITZKRIEG_IDENTITY_BASE_URL` 可覆盖，默认
+    `https://blitzkrieg.example`（IANA 保留 TLD，永不解析到真实主机）；
+  - 技能注册表基址：`BLITZKRIEG_SKILLS_REGISTRY_URL` 可覆盖，默认
+    `https://registry.blitzkrieg.example`；
+  - 文档中其余"你的主机"示例统一用 `your-host.example` / `blitzkrieg.example.com`；
+  - 网关自身的 API 文档（docs/API.md、docs/openapi.yaml 等）基址改为自托管
+    `http://127.0.0.1:18789`。
+- **AI 倾向**：保持上述占位，直到真实托管服务部署时再换域名；不在代码中预埋
+  任何可解析的第三方地址。
+- **需要用户确认**：0.1 是否维持「自托管 + `.example` 占位」口径；若已有计划内
+  的真实域名，告知后一次性替换常量与文档。

@@ -54,7 +54,7 @@ Manage external data sources, add custom connectors, and plug in new data stream
 ### Create Integrations Manager
 
 ```typescript
-import { createIntegrationsManager } from 'clodds/integrations';
+import { createIntegrationsManager } from 'blitzkrieg/integrations';
 
 const integrations = createIntegrationsManager({
   // Storage
@@ -261,8 +261,8 @@ const all = await integrations.getAllStatuses();
 ## Using Data in Bots
 
 ```typescript
-import { createTradingBot } from 'clodds/trading';
-import { createIntegrationsManager } from 'clodds/integrations';
+import { createTradingBot } from 'blitzkrieg/trading';
+import { createIntegrationsManager } from 'blitzkrieg/integrations';
 
 const integrations = createIntegrationsManager();
 const bot = createTradingBot();

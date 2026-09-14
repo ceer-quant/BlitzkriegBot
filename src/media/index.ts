@@ -573,7 +573,7 @@ async function transcribeWithOpenAI(audioPath: string, options: TranscriptionOpt
 
 async function transcribeWithWhisperCli(audioPath: string, options: TranscriptionOptions, startedAt: number): Promise<TranscriptionResult> {
   const language = normalizeLanguage(options.language) || 'en';
-  const outputDir = mkdtempSync(join(tmpdir(), 'clodds-whisper-'));
+  const outputDir = mkdtempSync(join(tmpdir(), 'blitzkrieg-whisper-'));
   const base = basename(audioPath, extname(audioPath));
   const timeoutMs = options.timeoutMs ?? DEFAULT_TRANSCRIBE_TIMEOUT_MS;
   const whisperCmd = resolveCommand('whisper');

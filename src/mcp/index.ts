@@ -17,6 +17,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { logger } from '../utils/logger';
+import { resolveUserConfigPath } from '../utils/brand-paths';
 
 const MCP_RESOURCE_CHUNK_BYTES = Math.max(
   1024,
@@ -1291,7 +1292,7 @@ export function loadMcpConfig(configPath?: string): McpConfigFile {
     : [
         join(process.cwd(), '.mcp.json'),
         join(process.cwd(), 'mcp.json'),
-        join(homedir(), '.config', 'clodds', 'mcp.json'),
+        resolveUserConfigPath('mcp.json'),
         join(homedir(), '.claude', 'mcp.json'),
       ];
 
@@ -1344,9 +1345,9 @@ export function initializeFromConfig(registry: McpRegistry, config: McpConfigFil
 // =============================================================================
 
 /**
- * Convert MCP tool to Clodds tool format
+ * Convert MCP tool to Blitzkrieg tool format
  */
-export function mcpToolToClodds(mcpTool: McpTool & { server: string }): {
+export function mcpToolToBlitzkrieg(mcpTool: McpTool & { server: string }): {
   name: string;
   description: string;
   parameters: JsonSchema;
@@ -1394,5 +1395,5 @@ export const mcp = {
   initializeFromConfig,
   validateSchema,
   importSkills: importSkillsFromDirectory,
-  toolToClodds: mcpToolToClodds,
+  toolToBlitzkrieg: mcpToolToBlitzkrieg,
 };

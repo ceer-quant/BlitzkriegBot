@@ -51,7 +51,7 @@ Estimate, minimize, and protect against slippage across all trading platforms.
 ### Create Slippage Manager
 
 ```typescript
-import { createSlippageManager } from 'clodds/slippage';
+import { createSlippageManager } from 'blitzkrieg/slippage';
 
 const slippage = createSlippageManager({
   // Default tolerance

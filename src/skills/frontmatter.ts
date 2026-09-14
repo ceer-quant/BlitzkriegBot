@@ -1,6 +1,6 @@
 /**
  * Shared frontmatter parser for SKILL.md files
- * Supports both Clodds-native and OpenClaw-format frontmatter
+ * Supports both Blitzkrieg-native and OpenClaw-format frontmatter
  */
 
 import YAML from 'yaml';
@@ -61,7 +61,9 @@ export interface OpenClawMetadata {
 // PARSER
 // =============================================================================
 
-const MANIFEST_KEYS = ['clodds', 'openclaw', 'clawdbot'] as const;
+// Canonical first; legacy/ecosystem keys still accepted when reading skills
+// installed before the rename.
+const MANIFEST_KEYS = ['blitzkrieg', 'clodds', 'openclaw', 'clawdbot'] as const;
 
 /**
  * Parse YAML frontmatter from a SKILL.md file.
@@ -103,7 +105,7 @@ export function parseFrontmatter(content: string): { frontmatter: ParsedFrontmat
     frontmatter.metadata = JSON.stringify(parsed.metadata);
   }
 
-  // Gates (Clodds native)
+  // Gates (Blitzkrieg native)
   if (typeof parsed.gates === 'object' && parsed.gates !== null) {
     const g = parsed.gates as Record<string, unknown>;
     frontmatter.gates = {};
@@ -204,7 +206,7 @@ export function resolveMetadata(frontmatter: ParsedFrontmatter): OpenClawMetadat
 // =============================================================================
 
 /**
- * Merge Clodds-native gates with OpenClaw requires into a unified SkillGates.
+ * Merge Blitzkrieg-native gates with OpenClaw requires into a unified SkillGates.
  */
 export function mergeGates(gates?: SkillGates, ocRequires?: OpenClawMetadata['requires']): SkillGates {
   const merged: SkillGates = {};
@@ -217,7 +219,7 @@ export function mergeGates(gates?: SkillGates, ocRequires?: OpenClawMetadata['re
   const anyBins = [...(gates?.anyBins || []), ...(ocRequires?.anyBins || [])];
   if (anyBins.length > 0) merged.anyBins = [...new Set(anyBins)];
 
-  // Envs: Clodds uses 'envs', OpenClaw uses 'env'
+  // Envs: Blitzkrieg uses 'envs', OpenClaw uses 'env'
   const envs = [...(gates?.envs || []), ...(ocRequires?.env || [])];
   if (envs.length > 0) merged.envs = [...new Set(envs)];
 

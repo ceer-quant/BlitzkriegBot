@@ -53,7 +53,7 @@ Analyze trading performance with attribution by edge source, time-of-day analysi
 ### Create Analytics Service
 
 ```typescript
-import { createAnalyticsService } from 'clodds/analytics';
+import { createAnalyticsService } from 'blitzkrieg/analytics';
 
 const analytics = createAnalyticsService({
   // Data source

@@ -1,6 +1,6 @@
-# Clodds Deployment Guide
+# Blitzkrieg Deployment Guide
 
-Complete guide for deploying Clodds in production environments.
+Complete guide for deploying Blitzkrieg in production environments.
 
 ## Table of Contents
 
@@ -150,34 +150,34 @@ ALCHEMY_API_KEY=
 
 ```bash
 # Server binding
-CLODDS_PORT=18789
-CLODDS_HOST=127.0.0.1
+BLITZKRIEG_PORT=18789
+BLITZKRIEG_HOST=127.0.0.1
 
 # State directory (database, backups)
-CLODDS_STATE_DIR=~/.clodds
-CLODDS_CONFIG_PATH=~/.clodds/clodds.json
+BLITZKRIEG_STATE_DIR=~/.blitzkrieg
+BLITZKRIEG_CONFIG_PATH=~/.blitzkrieg/blitzkrieg.json
 
 # Security
-CLODDS_TOKEN=your-secret-token
-CLODDS_IP_RATE_LIMIT=100
-CLODDS_FORCE_HTTPS=false
-CLODDS_HSTS_ENABLED=false
+BLITZKRIEG_TOKEN=your-secret-token
+BLITZKRIEG_IP_RATE_LIMIT=100
+BLITZKRIEG_FORCE_HTTPS=false
+BLITZKRIEG_HSTS_ENABLED=false
 
 # Webhooks
-CLODDS_WEBHOOK_SECRET=your-webhook-secret
-CLODDS_WEBHOOK_REQUIRE_SIGNATURE=1
+BLITZKRIEG_WEBHOOK_SECRET=your-webhook-secret
+BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE=1
 ```
 
 ### Database Configuration
 
 ```bash
 # SQLite (default, auto-created)
-CLODDS_DB_PATH=~/.clodds/clodds.db
+BLITZKRIEG_DB_PATH=~/.blitzkrieg/blitzkrieg.db
 
 # Backup settings
-CLODDS_DB_BACKUP_ENABLED=true
-CLODDS_DB_BACKUP_INTERVAL=86400000
-CLODDS_DB_BACKUP_KEEP=7
+BLITZKRIEG_DB_BACKUP_ENABLED=true
+BLITZKRIEG_DB_BACKUP_INTERVAL=86400000
+BLITZKRIEG_DB_BACKUP_KEEP=7
 ```
 
 ### Market Index
@@ -233,7 +233,7 @@ ENCRYPTION_KEY=
 
 ```bash
 OTEL_ENABLED=true
-OTEL_SERVICE_NAME=clodds
+OTEL_SERVICE_NAME=blitzkrieg
 OTEL_ENDPOINT=http://localhost:4318
 OTEL_METRICS_PORT=9090
 OTEL_SAMPLE_RATE=1.0
@@ -246,18 +246,18 @@ OTEL_SAMPLE_RATE=1.0
 ### 1. npm Install (Recommended)
 
 ```bash
-npm install -g clodds
-clodds onboard
+npm install -g blitzkrieg
+blitzkrieg onboard
 ```
 
-The `onboard` wizard handles API key setup, channel selection, and config generation. After setup, start anytime with `clodds start`.
+The `onboard` wizard handles API key setup, channel selection, and config generation. After setup, start anytime with `blitzkrieg start`.
 
 ### 2. From Source
 
 ```bash
 # Clone repository
-git clone https://github.com/alsk1992/CloddsBot.git
-cd CloddsBot
+git clone https://github.com/alsk1992/BlitzkriegBot.git
+cd BlitzkriegBot
 
 # Install dependencies
 npm ci
@@ -278,7 +278,7 @@ npm start
 
 **Build:**
 ```bash
-docker build -t clodds .
+docker build -t blitzkrieg .
 ```
 
 **Run:**
@@ -288,12 +288,12 @@ docker run --rm \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -e TELEGRAM_BOT_TOKEN=... \
   -e WEBCHAT_TOKEN=... \
-  -v clodds_data:/data \
-  clodds
+  -v blitzkrieg_data:/data \
+  blitzkrieg
 ```
 
-The container sets `CLODDS_STATE_DIR=/data`, so:
-- Database: `/data/clodds.db`
+The container sets `BLITZKRIEG_STATE_DIR=/data`, so:
+- Database: `/data/blitzkrieg.db`
 - Backups: `/data/backups`
 
 ### 4. Docker Compose
@@ -303,7 +303,7 @@ The container sets `CLODDS_STATE_DIR=/data`, so:
 version: '3.8'
 
 services:
-  clodds:
+  blitzkrieg:
     build: .
     ports:
       - "18789:18789"
@@ -312,7 +312,7 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - WEBCHAT_TOKEN=${WEBCHAT_TOKEN}
     volumes:
-      - clodds_data:/data
+      - blitzkrieg_data:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:18789/health"]
@@ -321,7 +321,7 @@ services:
       retries: 3
 
 volumes:
-  clodds_data:
+  blitzkrieg_data:
 ```
 
 **Start:**
@@ -337,20 +337,20 @@ docker compose up -d --build
 
 ### 5. Systemd Service (Linux)
 
-Create `/etc/systemd/system/clodds.service`:
+Create `/etc/systemd/system/blitzkrieg.service`:
 
 ```ini
 [Unit]
-Description=Clodds Gateway
+Description=Blitzkrieg Gateway
 After=network.target
 
 [Service]
 Type=simple
-User=clodds
-Group=clodds
-WorkingDirectory=/opt/clodds
-EnvironmentFile=/etc/clodds/clodds.env
-ExecStart=/usr/bin/node /opt/clodds/dist/index.js
+User=blitzkrieg
+Group=blitzkrieg
+WorkingDirectory=/opt/blitzkrieg
+EnvironmentFile=/etc/blitzkrieg/blitzkrieg.env
+ExecStart=/usr/bin/node /opt/blitzkrieg/dist/index.js
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -360,7 +360,7 @@ StandardError=journal
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/clodds
+ReadWritePaths=/var/lib/blitzkrieg
 PrivateTmp=true
 
 [Install]
@@ -370,32 +370,32 @@ WantedBy=multi-user.target
 **Setup:**
 ```bash
 # Create user
-sudo useradd -r -s /sbin/nologin clodds
+sudo useradd -r -s /sbin/nologin blitzkrieg
 
 # Create directories
-sudo mkdir -p /opt/clodds /var/lib/clodds /etc/clodds
-sudo chown clodds:clodds /var/lib/clodds
+sudo mkdir -p /opt/blitzkrieg /var/lib/blitzkrieg /etc/blitzkrieg
+sudo chown blitzkrieg:blitzkrieg /var/lib/blitzkrieg
 
 # Copy application
-sudo cp -r dist/* /opt/clodds/
+sudo cp -r dist/* /opt/blitzkrieg/
 
 # Create environment file
-sudo cp .env /etc/clodds/clodds.env
-sudo chmod 600 /etc/clodds/clodds.env
+sudo cp .env /etc/blitzkrieg/blitzkrieg.env
+sudo chmod 600 /etc/blitzkrieg/blitzkrieg.env
 
 # Enable and start
 sudo systemctl daemon-reload
-sudo systemctl enable clodds
-sudo systemctl start clodds
+sudo systemctl enable blitzkrieg
+sudo systemctl start blitzkrieg
 
 # Check status
-sudo systemctl status clodds
-sudo journalctl -u clodds -f
+sudo systemctl status blitzkrieg
+sudo journalctl -u blitzkrieg -f
 ```
 
 ### 6. Vercel (Serverless)
 
-Clodds includes a Cloudflare Worker variant for serverless deployment. See `apps/clodds-worker/`.
+Blitzkrieg includes a Cloudflare Worker variant for serverless deployment. See `apps/blitzkrieg-worker/`.
 
 **For Vercel deployment of the docs site:**
 ```bash
@@ -413,10 +413,10 @@ SQLite is used by default with the sql.js library (pure JavaScript, no native de
 
 ```bash
 # Database location
-~/.clodds/clodds.db
+~/.blitzkrieg/blitzkrieg.db
 
 # Or specify custom path
-CLODDS_DB_PATH=/var/lib/clodds/clodds.db
+BLITZKRIEG_DB_PATH=/var/lib/blitzkrieg/blitzkrieg.db
 ```
 
 The database is created automatically on first run with all required tables.
@@ -442,21 +442,21 @@ The database is created automatically on first run with all required tables.
 
 ```bash
 # Enable automatic backups
-CLODDS_DB_BACKUP_ENABLED=true
+BLITZKRIEG_DB_BACKUP_ENABLED=true
 
 # Backup interval (default: daily)
-CLODDS_DB_BACKUP_INTERVAL=86400000
+BLITZKRIEG_DB_BACKUP_INTERVAL=86400000
 
 # Number of backups to keep
-CLODDS_DB_BACKUP_KEEP=7
+BLITZKRIEG_DB_BACKUP_KEEP=7
 
 # Backup directory
-CLODDS_DB_BACKUP_PATH=~/.clodds/backups
+BLITZKRIEG_DB_BACKUP_PATH=~/.blitzkrieg/backups
 ```
 
 **Manual backup:**
 ```bash
-cp ~/.clodds/clodds.db ~/.clodds/backups/clodds-$(date +%Y%m%d).db
+cp ~/.blitzkrieg/blitzkrieg.db ~/.blitzkrieg/backups/blitzkrieg-$(date +%Y%m%d).db
 ```
 
 ---
@@ -476,8 +476,8 @@ cp ~/.clodds/clodds.db ~/.clodds/backups/clodds-$(date +%Y%m%d).db
 
 - [ ] Gateway bound to loopback (`127.0.0.1`)
 - [ ] Reverse proxy configured (nginx/Caddy) with TLS
-- [ ] `CLODDS_WEBHOOK_REQUIRE_SIGNATURE=1`
-- [ ] `CLODDS_TOKEN` set for metrics endpoint
+- [ ] `BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE=1`
+- [ ] `BLITZKRIEG_TOKEN` set for metrics endpoint
 - [ ] Firewall configured (SSH + app ports only)
 - [ ] SSH password auth disabled
 - [ ] fail2ban installed and configured
@@ -485,7 +485,7 @@ cp ~/.clodds/clodds.db ~/.clodds/backups/clodds-$(date +%Y%m%d).db
 ### Monitoring
 
 - [ ] Health check endpoint monitored (`/health`)
-- [ ] `clodds doctor` runs without errors
+- [ ] `blitzkrieg doctor` runs without errors
 - [ ] Log aggregation configured
 - [ ] Alerts set for service downtime
 - [ ] OpenTelemetry configured (if needed)
@@ -514,7 +514,7 @@ curl http://localhost:18789/health
 # {"status":"ok","timestamp":1706500000000}
 
 # CLI diagnostics
-clodds doctor
+blitzkrieg doctor
 ```
 
 ### Prometheus Metrics
@@ -534,8 +534,8 @@ Access at `http://localhost:9090/metrics`.
 **Key Metrics:**
 | Metric | Description |
 |--------|-------------|
-| `clodds_requests_total` | Total HTTP requests |
-| `clodds_request_duration_ms` | Request latency |
+| `blitzkrieg_requests_total` | Total HTTP requests |
+| `blitzkrieg_request_duration_ms` | Request latency |
 | `llm_tokens_total` | LLM token usage |
 | `llm_requests_total` | LLM API calls |
 | `trades_total` | Total trades executed |
@@ -558,7 +558,7 @@ LOG_LEVEL=debug  # trace, debug, info, warn, error
 
 ### Alerts
 
-Configure alert targets in `clodds.json`:
+Configure alert targets in `blitzkrieg.json`:
 
 ```json
 {
@@ -578,19 +578,19 @@ Configure alert targets in `clodds.json`:
 ### nginx
 
 ```nginx
-upstream clodds {
+upstream blitzkrieg {
     server 127.0.0.1:18789;
 }
 
 server {
     listen 443 ssl http2;
-    server_name clodds.example.com;
+    server_name blitzkrieg.example.com;
 
-    ssl_certificate /etc/letsencrypt/live/clodds.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/clodds.example.com/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/blitzkrieg.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/blitzkrieg.example.com/privkey.pem;
 
     location / {
-        proxy_pass http://clodds;
+        proxy_pass http://blitzkrieg;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -606,7 +606,7 @@ server {
 ### Caddy
 
 ```caddyfile
-clodds.example.com {
+blitzkrieg.example.com {
     reverse_proxy localhost:18789
 }
 ```
@@ -619,16 +619,16 @@ clodds.example.com {
 
 ```bash
 # Preview changes (safe)
-clodds secure --dry-run
+blitzkrieg secure --dry-run
 
 # Apply all hardening
-sudo clodds secure
+sudo blitzkrieg secure
 
 # Non-interactive
-sudo clodds secure --yes
+sudo blitzkrieg secure --yes
 
 # Run audit only
-clodds secure audit
+blitzkrieg secure audit
 ```
 
 ### What Gets Hardened
@@ -673,10 +673,10 @@ sudo dpkg-reconfigure -plow unattended-upgrades
 **Gateway won't start:**
 ```bash
 # Check logs
-journalctl -u clodds -f
+journalctl -u blitzkrieg -f
 
 # Run diagnostics
-clodds doctor
+blitzkrieg doctor
 
 # Check if port is in use
 lsof -i :18789
@@ -691,13 +691,13 @@ lsof -i :18789
 **Database errors:**
 ```bash
 # Check file permissions
-ls -la ~/.clodds/
+ls -la ~/.blitzkrieg/
 
 # Verify database exists
-sqlite3 ~/.clodds/clodds.db ".tables"
+sqlite3 ~/.blitzkrieg/blitzkrieg.db ".tables"
 
 # Reset database (loses data!)
-rm ~/.clodds/clodds.db
+rm ~/.blitzkrieg/blitzkrieg.db
 ```
 
 **Memory issues:**
@@ -723,6 +723,6 @@ node --inspect dist/index.js
 
 ### Support
 
-- GitHub Issues: https://github.com/alsk1992/CloddsBot/issues
-- Documentation: https://docs.cloddsbot.com
-- Discord: https://discord.gg/clodds
+- GitHub Issues: https://github.com/alsk1992/BlitzkriegBot/issues
+- Repository: https://github.com/ceer-quant/BlitzkriegBot
+- Issues: https://github.com/ceer-quant/BlitzkriegBot/issues

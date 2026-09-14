@@ -1,6 +1,6 @@
 /**
  * OpenTelemetry Diagnostics Module
- * Full observability stack for Clodds
+ * Full observability stack for Blitzkrieg
  *
  * Supports:
  * - Distributed tracing (Jaeger, Zipkin, OTLP)
@@ -379,7 +379,7 @@ export class TelemetryService {
           ],
         },
         scopeSpans: [{
-          scope: { name: 'clodds', version: '0.1.0' },
+          scope: { name: 'blitzkrieg', version: '0.1.0' },
           spans: otlpSpans,
         }],
       }],

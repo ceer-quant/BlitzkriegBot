@@ -140,7 +140,7 @@ export async function createGoogleChatChannel(
     if (event.type === 'ADDED_TO_SPACE') {
       const spaceName = event.space?.name || 'unknown';
       logger.info({ space: spaceName }, 'Bot added to Google Chat space');
-      return 'Hello! I\'m Clodds, your prediction market assistant. How can I help?';
+      return 'Hello! I\'m Blitzkrieg, your prediction market assistant. How can I help?';
     }
 
     if (event.type === 'REMOVED_FROM_SPACE') {
@@ -174,7 +174,7 @@ export async function createGoogleChatChannel(
         // Generate pairing code
         const code = await pairing.createPairingRequest('googlechat', msg.sender.name, email);
         if (code) {
-          return `Hi! I need to verify you first.\n\nYour pairing code is: **${code}**\n\nAsk an admin to run: \`clodds pairing approve googlechat ${code}\``;
+          return `Hi! I need to verify you first.\n\nYour pairing code is: **${code}**\n\nAsk an admin to run: \`blitzkrieg pairing approve googlechat ${code}\``;
         }
       }
       return 'Sorry, you\'re not authorized to use this bot.';

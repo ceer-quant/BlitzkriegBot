@@ -2,13 +2,13 @@
  * Skills CLI Commands - Manage skills from command line
  *
  * Commands:
- * - clodds skills list - List installed skills
- * - clodds skills list --verbose - Show detailed info (requirements, commands)
- * - clodds skills search <query> - Search registry
- * - clodds skills install <slug> - Install a skill
- * - clodds skills update [slug] - Update skill(s)
- * - clodds skills uninstall <slug> - Uninstall a skill
- * - clodds skills info <slug> - Show skill details
+ * - blitzkrieg skills list - List installed skills
+ * - blitzkrieg skills list --verbose - Show detailed info (requirements, commands)
+ * - blitzkrieg skills search <query> - Search registry
+ * - blitzkrieg skills install <slug> - Install a skill
+ * - blitzkrieg skills update [slug] - Update skill(s)
+ * - blitzkrieg skills uninstall <slug> - Uninstall a skill
+ * - blitzkrieg skills info <slug> - Show skill details
  */
 
 import * as fs from 'fs';
@@ -68,8 +68,8 @@ export function createSkillsCommands(): SkillsCommands {
 
       if (skills.length === 0) {
         console.log('No skills installed.\n');
-        console.log('Search for skills: clodds skills search <query>');
-        console.log('Install a skill:   clodds skills install <slug>\n');
+        console.log('Search for skills: blitzkrieg skills search <query>');
+        console.log('Install a skill:   blitzkrieg skills install <slug>\n');
         return;
       }
 
@@ -155,7 +155,7 @@ export function createSkillsCommands(): SkillsCommands {
           console.log(formatRegistrySkill(skill));
         }
 
-        console.log('\nInstall with: clodds skills install <slug>\n');
+        console.log('\nInstall with: blitzkrieg skills install <slug>\n');
       } catch (error) {
         console.error('Search failed:', error instanceof Error ? error.message : 'Unknown error');
       }
@@ -293,7 +293,7 @@ export function createSkillsCommands(): SkillsCommands {
           console.log(`  ${update.slug}: ${update.currentVersion} → ${update.latestVersion}`);
         }
 
-        console.log('\nRun "clodds skills update" to update all.\n');
+        console.log('\nRun "blitzkrieg skills update" to update all.\n');
       } catch (error) {
         console.error('Check failed:', error instanceof Error ? error.message : 'Unknown error');
       }

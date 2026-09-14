@@ -766,7 +766,7 @@ export function createDefaultCommands(): CommandDefinition[] {
       description: 'Show available commands',
       usage: '/help',
       handler: (_args, ctx) => {
-        const lines = ['Clodds Commands', ''];
+        const lines = ['Blitzkrieg Commands', ''];
         for (const cmd of ctx.commands.list()) {
           lines.push(`${cmd.name} - ${cmd.description}`);
         }
@@ -1372,7 +1372,7 @@ export function createDefaultCommands(): CommandDefinition[] {
         // Get trading system from context if available
         const trading = (ctx as any).trading;
         if (!trading?.bots) {
-          return 'Trading system not initialized. Configure trading in clodds.json.';
+          return 'Trading system not initialized. Configure trading in blitzkrieg.json.';
         }
 
         const parts = args.trim().split(/\s+/).filter(Boolean);
@@ -1911,7 +1911,7 @@ export function createDefaultCommands(): CommandDefinition[] {
               `Platform: ${platform}`,
               `Type: ${type}`,
               '',
-              'Configure credentials in clodds.json or via:',
+              'Configure credentials in blitzkrieg.json or via:',
               `  /account config ${account.id} apiKey=xxx apiSecret=xxx`,
             ].join('\n');
           }
@@ -2506,7 +2506,7 @@ export function createDefaultCommands(): CommandDefinition[] {
               return 'Usage: /devtools datadog <api-key> [service-name]';
             }
 
-            const service = rest[1] || 'clodds-trading';
+            const service = rest[1] || 'blitzkrieg-trading';
 
             trading.devtools.configure({
               datadog: { enabled: true, apiKey, service },
@@ -3308,7 +3308,7 @@ export function createDefaultCommands(): CommandDefinition[] {
             '/wallet list              - List saved wallets',
             '/wallet balance [address] - Check balances across chains',
             '',
-            'Keys are stored locally in ~/.clodds/wallets/',
+            'Keys are stored locally in ~/.blitzkrieg/wallets/',
           ].join('\n');
         }
 
@@ -3542,7 +3542,7 @@ export function createDefaultCommands(): CommandDefinition[] {
       handler: async (args, ctx) => {
         const svc = ctx.bittensorService;
         if (!svc) {
-          return 'Bittensor is not enabled. Run `clodds bittensor setup` or set `BITTENSOR_ENABLED=true` in your config.';
+          return 'Bittensor is not enabled. Run `blitzkrieg bittensor setup` or set `BITTENSOR_ENABLED=true` in your config.';
         }
 
         const parts = args.trim().split(/\s+/);

@@ -55,7 +55,7 @@ Manage command execution approvals, tool access policies, and security controls.
 ### Create Permissions Manager
 
 ```typescript
-import { createPermissionsManager } from 'clodds/permissions';
+import { createPermissionsManager } from 'blitzkrieg/permissions';
 
 const perms = createPermissionsManager({
   // Security mode
@@ -246,16 +246,16 @@ Always blocked regardless of mode:
 
 ```bash
 # List permission rules
-clodds permissions list
+blitzkrieg permissions list
 
 # Add allow pattern
-clodds permissions allow "npm run *"
+blitzkrieg permissions allow "npm run *"
 
 # View pending approvals
-clodds permissions pending
+blitzkrieg permissions pending
 
 # Approve request
-clodds permissions approve req-123
+blitzkrieg permissions approve req-123
 ```
 
 ---

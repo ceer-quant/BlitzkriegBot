@@ -47,7 +47,7 @@ Store and recall user preferences, facts, and notes across conversations. Semant
 ### Create Memory Service
 
 ```typescript
-import { createMemoryService } from 'clodds/memory';
+import { createMemoryService } from 'blitzkrieg/memory';
 
 const memory = createMemoryService({
   // Storage backend

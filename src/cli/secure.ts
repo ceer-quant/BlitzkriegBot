@@ -2,7 +2,7 @@
 /**
  * Server Security Hardening CLI
  *
- * Usage: clodds secure [options]
+ * Usage: blitzkrieg secure [options]
  *
  * Automatically applies security best practices:
  * - SSH hardening (disable password auth, root login)
@@ -391,7 +391,7 @@ function hardenKernel(options: HardeningOptions): void {
     return;
   }
 
-  const sysctlConfig = `# Clodds Security Hardening
+  const sysctlConfig = `# Blitzkrieg Security Hardening
 # IP Spoofing protection
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
@@ -433,7 +433,7 @@ net.ipv6.conf.default.accept_redirects = 0
 net.ipv4.tcp_rfc1337 = 1
 `;
 
-  const sysctlPath = '/etc/sysctl.d/99-clodds-security.conf';
+  const sysctlPath = '/etc/sysctl.d/99-blitzkrieg-security.conf';
 
   if (options.dryRun) {
     log('info', '[DRY RUN] Would apply kernel hardening:');
@@ -591,7 +591,7 @@ function runSecurityAudit(): void {
   console.log(`\n${passCount} passed, ${warnCount} warnings, ${failCount} failed`);
 
   if (failCount > 0) {
-    console.log('\nRun `clodds secure` to fix security issues.');
+    console.log('\nRun `blitzkrieg secure` to fix security issues.');
   }
 }
 
@@ -600,7 +600,7 @@ function runSecurityAudit(): void {
 // =============================================================================
 
 export async function runSecure(args: string[]): Promise<void> {
-  console.log('\n\x1b[1m🔒 Clodds Server Security Hardening\x1b[0m\n');
+  console.log('\n\x1b[1m🔒 Blitzkrieg Server Security Hardening\x1b[0m\n');
 
   // Parse arguments
   const options: HardeningOptions = {
@@ -621,7 +621,7 @@ export async function runSecure(args: string[]): Promise<void> {
   }
 
   if (args.includes('--help') || args.includes('-h')) {
-    console.log(`Usage: clodds secure [options]
+    console.log(`Usage: blitzkrieg secure [options]
 
 Commands:
   audit              Run security audit without making changes
@@ -638,10 +638,10 @@ Options:
   --help, -h         Show this help message
 
 Examples:
-  clodds secure --dry-run          Preview changes
-  clodds secure --yes              Apply all hardening without prompts
-  clodds secure --ssh-port=2222    Change SSH port to 2222
-  clodds secure audit              Run security audit only
+  blitzkrieg secure --dry-run          Preview changes
+  blitzkrieg secure --yes              Apply all hardening without prompts
+  blitzkrieg secure --ssh-port=2222    Change SSH port to 2222
+  blitzkrieg secure audit              Run security audit only
 `);
     return;
   }
@@ -649,7 +649,7 @@ Examples:
   // Check platform
   if (!isLinux()) {
     log('error', 'Server hardening is only supported on Linux');
-    log('info', 'Run `clodds secure audit` to check current security status');
+    log('info', 'Run `blitzkrieg secure audit` to check current security status');
     return;
   }
 
@@ -717,7 +717,7 @@ Examples:
       if (options.sshPort && options.sshPort !== 22) {
         console.log(`  3. Use: ssh -p ${options.sshPort} user@server`);
       }
-      console.log('\nRun `clodds secure audit` to verify security status');
+      console.log('\nRun `blitzkrieg secure audit` to verify security status');
     }
   } catch (err) {
     log('error', `Hardening failed: ${err instanceof Error ? err.message : err}`);

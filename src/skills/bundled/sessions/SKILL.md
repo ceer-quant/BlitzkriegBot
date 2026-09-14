@@ -55,7 +55,7 @@ Manage conversation sessions, history, checkpoints, and resets across channels.
 ### Create Session Manager
 
 ```typescript
-import { createSessionManager } from 'clodds/sessions';
+import { createSessionManager } from 'blitzkrieg/sessions';
 
 const sessions = createSessionManager({
   // Session scope

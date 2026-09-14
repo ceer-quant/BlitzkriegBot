@@ -5,7 +5,7 @@ This directory contains visual assets for the README and documentation.
 ## Required Files
 
 ### Demo GIF
-- `demo.gif` - Main demo showing Clodds in action (recommended: 800x500px, <5MB)
+- `demo.gif` - Main demo showing Blitzkrieg in action (recommended: 800x500px, <5MB)
 
 ### Screenshots (in `/screenshots`)
 - `telegram.png` - Telegram chat interface

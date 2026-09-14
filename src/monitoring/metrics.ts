@@ -329,7 +329,7 @@ export class MetricsRegistry {
   private histograms: Map<string, Histogram> = new Map();
   private prefix: string;
 
-  constructor(prefix = 'clodds') {
+  constructor(prefix = 'blitzkrieg') {
     this.prefix = prefix;
   }
 

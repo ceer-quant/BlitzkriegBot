@@ -126,7 +126,7 @@ export async function createZaloChannel(
           if (/^[A-Z0-9]{8}$/.test(potentialCode) && pairing) {
             const request = await pairing.validateCode(potentialCode);
             if (request) {
-              await sendTextMessage(userId, 'Successfully paired! You can now chat with Clodds.');
+              await sendTextMessage(userId, 'Successfully paired! You can now chat with Blitzkrieg.');
               logger.info({ userId, code: potentialCode }, 'Zalo user paired');
               return;
             }
@@ -137,7 +137,7 @@ export async function createZaloChannel(
             if (code) {
               await sendTextMessage(
                 userId,
-                `Pairing Required\n\nYour pairing code: ${code}\n\nRun 'clodds pairing approve zalo ${code}' to complete.\n\nCode expires in 1 hour.`
+                `Pairing Required\n\nYour pairing code: ${code}\n\nRun 'blitzkrieg pairing approve zalo ${code}' to complete.\n\nCode expires in 1 hour.`
               );
               logger.info({ userId, code }, 'Generated Zalo pairing code');
             } else {

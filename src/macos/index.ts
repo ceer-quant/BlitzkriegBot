@@ -88,7 +88,7 @@ function assertMacOS(): void {
 export async function runAppleScript(script: string): Promise<string> {
   assertMacOS();
 
-  const tempFile = join(tmpdir(), `clodds-applescript-${Date.now()}.scpt`);
+  const tempFile = join(tmpdir(), `blitzkrieg-applescript-${Date.now()}.scpt`);
   writeFileSync(tempFile, script);
 
   try {
@@ -103,7 +103,7 @@ export async function runAppleScript(script: string): Promise<string> {
 export function runAppleScriptSync(script: string): string {
   assertMacOS();
 
-  const tempFile = join(tmpdir(), `clodds-applescript-${Date.now()}.scpt`);
+  const tempFile = join(tmpdir(), `blitzkrieg-applescript-${Date.now()}.scpt`);
   writeFileSync(tempFile, script);
 
   try {

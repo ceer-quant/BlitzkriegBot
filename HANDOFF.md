@@ -1,7 +1,7 @@
 # HANDOFF — Blitzkrieg Core（项目交接/迁移说明）
 
 > 生成于 2026-09-14，项目准备更换路径时。**项目根目录现为 `/Volumes/Hard Disk/BlitzkriegBot/`**
-> （已与 CloddsBot 分家，不再有 `CloddsBot/` 子目录；`/Volumes/Hard Disk/BlitzkriegBot/CloddsBot`
+> （已与 BlitzkriegBot 分家，不再有 `BlitzkriegBot/` 子目录；`/Volumes/Hard Disk/BlitzkriegBot/BlitzkriegBot`
 > 已不存在）。新会话先读本文件 + `docs/blitzkrieg/MIGRATION_LOG.md`（§1–§29）+ `git log`，
 > 即可恢复完整项目知识，**不依赖聊天历史**。
 
@@ -164,7 +164,7 @@ node scripts/final-exit-opt.mjs              # 出场参数全网格+稳健性
 
 1. **先 commit**（本次已做）——之前整个 Rust core 都未入库，风险极高。
 2. **停进程**：`pkill -f 'node dist/index.js'; pkill -f blitzkrieg-core; pkill -f soak-monitor`
-3. 移动整个 `CloddsBot/` 目录（含未提交的 `data/`、`ui/`、`.env`、`node_modules/`）。
+3. 移动整个 `BlitzkriegBot/` 目录（含未提交的 `data/`、`ui/`、`.env`、`node_modules/`）。
 4. **搬后必须 `cargo clean && cargo build --release`**：`target/` 内是绝对路径产物，不重编会错乱。
 5. Node 若异常：`npm ci`。
 6. 从**项目根**启动（二进制/相对数据路径靠 `process.cwd()` 解析）。

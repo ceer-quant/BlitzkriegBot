@@ -145,7 +145,7 @@ export async function createBlueBubblesChannel(
             if (/^[A-Z0-9]{8}$/.test(potentialCode) && pairing) {
               const request = await pairing.validateCode(potentialCode);
               if (request) {
-                await sendText(chatGuid, 'Successfully paired! You can now chat with Clodds.');
+                await sendText(chatGuid, 'Successfully paired! You can now chat with Blitzkrieg.');
                 logger.info({ address, code: potentialCode }, 'BlueBubbles user paired');
                 return;
               }
@@ -156,7 +156,7 @@ export async function createBlueBubblesChannel(
               if (code) {
                 await sendText(
                   chatGuid,
-                  `Pairing Required\n\nYour pairing code: ${code}\n\nRun 'clodds pairing approve bluebubbles ${code}' to complete.\n\nCode expires in 1 hour.`
+                  `Pairing Required\n\nYour pairing code: ${code}\n\nRun 'blitzkrieg pairing approve bluebubbles ${code}' to complete.\n\nCode expires in 1 hour.`
                 );
                 logger.info({ address, code }, 'Generated BlueBubbles pairing code');
               } else {

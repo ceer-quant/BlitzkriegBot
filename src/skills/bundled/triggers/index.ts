@@ -109,7 +109,7 @@ async function execute(args: string): Promise<string> {
       }
 
       case 'hooks':
-        return 'Event hooks are managed via the hooks configuration file.\nSee the Clodds docs for hook setup.';
+        return 'Event hooks are managed via the hooks configuration file.\nSee the Blitzkrieg docs for hook setup.';
 
       case 'events':
         return `**Available Events**

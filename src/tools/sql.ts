@@ -1,5 +1,5 @@
 /**
- * SQL Tool - safe, read-only SQL queries against the local clodds database
+ * SQL Tool - safe, read-only SQL queries against the local blitzkrieg database
  */
 
 import type { Database } from '../db';

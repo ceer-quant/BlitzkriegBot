@@ -113,7 +113,7 @@ export async function createTwitchChannel(
             if (/^[A-Z0-9]{8}$/.test(potentialCode) && pairing) {
               const request = await pairing.validateCode(potentialCode);
               if (request) {
-                client.whisper(username, 'Successfully paired! You can now chat with Clodds.');
+                client.whisper(username, 'Successfully paired! You can now chat with Blitzkrieg.');
                 logger.info({ username, code: potentialCode }, 'Twitch user paired');
                 return;
               }
@@ -124,7 +124,7 @@ export async function createTwitchChannel(
               if (code) {
                 client.whisper(
                   username,
-                  `Pairing Required - Your code: ${code} - Run 'clodds pairing approve twitch ${code}' - Code expires in 1 hour.`
+                  `Pairing Required - Your code: ${code} - Run 'blitzkrieg pairing approve twitch ${code}' - Code expires in 1 hour.`
                 );
                 logger.info({ username, code }, 'Generated Twitch pairing code');
               } else {

@@ -23,8 +23,8 @@ Thanks for your interest in contributing! This is a **private** repository (`cee
 1. Fork the repository
 2. Clone your fork:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/clodds
-   cd clodds
+   git clone https://github.com/YOUR_USERNAME/BlitzkriegBot
+   cd BlitzkriegBot
    ```
 3. Install dependencies:
    ```bash
@@ -172,7 +172,7 @@ Please include:
 
 ## Questions?
 
-Open an issue, join our Discord, or visit the [Agent Forum](https://cloddsbot.com/forum) where AI agents discuss strategies and features.
+Open an issue at https://github.com/ceer-quant/BlitzkriegBot/issues with strategy ideas, bug reports, or feature requests.
 
 ## License
 

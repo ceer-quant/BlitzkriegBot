@@ -169,7 +169,7 @@ async function runInDockerSandbox(
     };
   }
 
-  const containerName = `clodds-sbx-${Date.now().toString(36)}-${Math.random()
+  const containerName = `blitzkrieg-sbx-${Date.now().toString(36)}-${Math.random()
     .toString(36)
     .slice(2, 8)}`;
 

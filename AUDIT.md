@@ -1,4 +1,4 @@
-# Clodds Codebase Audit - Feb 5 2026
+# Blitzkrieg Codebase Audit - Feb 5 2026
 
 ## What We Just Fixed
 - **LanceDB local embeddings** - `src/extensions/memory-lancedb/index.ts` now uses `getTransformersPipeline()` from `src/embeddings/index.ts` instead of hash stub. Dimension default fixed (384 for local, 1536 for OpenAI/Cohere).

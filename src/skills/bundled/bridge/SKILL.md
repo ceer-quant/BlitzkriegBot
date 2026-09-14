@@ -66,7 +66,7 @@ Transfer tokens across chains using Wormhole and Circle CCTP protocols.
 ### Wormhole Bridge
 
 ```typescript
-import { executeWormholeBridge, executeWormholeRedeem } from 'clodds/bridge/wormhole';
+import { executeWormholeBridge, executeWormholeRedeem } from 'blitzkrieg/bridge/wormhole';
 
 // Get quote
 const quote = await getWormholeQuote({
@@ -112,7 +112,7 @@ console.log(`Amount received: ${redeem.amount} USDC`);
 ### CCTP (Circle) Bridge
 
 ```typescript
-import { executeCCTPBridge, redeemCCTP } from 'clodds/bridge/cctp';
+import { executeCCTPBridge, redeemCCTP } from 'blitzkrieg/bridge/cctp';
 
 // CCTP is optimized for USDC transfers
 const transfer = await executeCCTPBridge({
@@ -141,7 +141,7 @@ const redeem = await redeemCCTP({
 ### Check Status
 
 ```typescript
-import { getTransferStatus } from 'clodds/bridge';
+import { getTransferStatus } from 'blitzkrieg/bridge';
 
 const status = await getTransferStatus(txHash);
 
@@ -160,7 +160,7 @@ if (status.status === 'redeemable') {
 ### Get Pending Redemptions
 
 ```typescript
-import { getPendingRedemptions } from 'clodds/bridge';
+import { getPendingRedemptions } from 'blitzkrieg/bridge';
 
 const pending = await getPendingRedemptions({
   chains: ['ethereum', 'solana', 'arbitrum'],

@@ -1,6 +1,6 @@
 # Skills System
 
-Clodds uses a SKILL.md-based skill system for extending the AI agent with new capabilities. Skills are markdown files with YAML frontmatter that define commands, documentation, and requirements.
+Blitzkrieg uses a SKILL.md-based skill system for extending the AI agent with new capabilities. Skills are markdown files with YAML frontmatter that define commands, documentation, and requirements.
 
 **Full backwards compatibility with OpenClaw-format SKILL.md files.** Drop in any OpenClaw skill and it works out of the box.
 
@@ -50,7 +50,7 @@ Skills are loaded from four directories. Higher priority overrides lower:
 | Priority | Location | Use Case |
 |----------|----------|----------|
 | 1 (highest) | `<workspace>/skills/` | Project-specific skills |
-| 2 | `.clodds/skills/` | User-managed skills |
+| 2 | `.blitzkrieg/skills/` | User-managed skills |
 | 3 | Config `extraDirs` | Custom directories |
 | 4 (lowest) | `src/skills/bundled/` | Built-in skills |
 
@@ -126,17 +126,17 @@ command-arg-mode: raw        # 'raw' = pass args as-is, 'parsed' = structured
 ---
 ```
 
-When a user types `/himalaya list`, Clodds routes directly to the Bash tool with `himalaya list` instead of sending it through the AI.
+When a user types `/himalaya list`, Blitzkrieg routes directly to the Bash tool with `himalaya list` instead of sending it through the AI.
 
 ---
 
 ## OpenClaw Compatibility
 
-Clodds accepts OpenClaw-format SKILL.md files with zero changes. All OpenClaw features are supported:
+Blitzkrieg accepts OpenClaw-format SKILL.md files with zero changes. All OpenClaw features are supported:
 
 ### OpenClaw Metadata Block
 
-OpenClaw stores extended metadata in a JSON/JSON5 `metadata` field under a manifest key (`openclaw`, `clodds`, or `clawdbot`):
+OpenClaw stores extended metadata in a JSON/JSON5 `metadata` field under a manifest key (`openclaw`, `blitzkrieg`, or `clawdbot`):
 
 ```yaml
 ---
@@ -168,7 +168,7 @@ user-invocable: true
 
 ### What Gets Merged
 
-| OpenClaw Field | Clodds Equivalent | Behavior |
+| OpenClaw Field | Blitzkrieg Equivalent | Behavior |
 |---------------|-------------------|----------|
 | `requires.bins` | `gates.bins` | Combined (both checked) |
 | `requires.env` | `gates.envs` | Combined |
@@ -182,11 +182,11 @@ user-invocable: true
 | `skillKey` | `skillKey` | Passed through |
 | `always` | `always` | Passed through |
 
-If both Clodds-native `gates` and OpenClaw `requires` are present, they're merged (deduplicated).
+If both Blitzkrieg-native `gates` and OpenClaw `requires` are present, they're merged (deduplicated).
 
 ### Compatibility Matrix
 
-| Feature | Clodds Native | OpenClaw Format | Works? |
+| Feature | Blitzkrieg Native | OpenClaw Format | Works? |
 |---------|--------------|-----------------|--------|
 | `name:` frontmatter | Yes | Yes | Both |
 | `description:` (multi-line YAML) | Yes | Yes | Both |
@@ -210,20 +210,20 @@ If both Clodds-native `gates` and OpenClaw `requires` are present, they're merge
 
 ```bash
 # Copy an OpenClaw skill into any skill directory
-cp -r ~/openclaw-skills/himalaya .clodds/skills/himalaya
+cp -r ~/openclaw-skills/himalaya .blitzkrieg/skills/himalaya
 ```
 
 The folder should contain at minimum a `SKILL.md` file:
 
 ```
-.clodds/skills/himalaya/
+.blitzkrieg/skills/himalaya/
   SKILL.md
 ```
 
 ### Step 2: Verify
 
 ```bash
-clodds skills list --verbose
+blitzkrieg skills list --verbose
 ```
 
 You should see the skill listed with its gates status (green check if requirements met, yellow warning if missing deps).
@@ -334,7 +334,7 @@ Config keys are passed via `SkillManagerConfig.configKeys` and support dot-notat
 
 ## Two Skill Systems
 
-Clodds has two complementary skill systems:
+Blitzkrieg has two complementary skill systems:
 
 ### 1. SKILL.md (Prompt Skills)
 
@@ -361,13 +361,13 @@ A skill can have both: a SKILL.md for AI instructions and an index.ts for progra
 ## CLI Commands
 
 ```bash
-clodds skills list              # List all installed skills
-clodds skills list --verbose    # Show requirements and commands
-clodds skills search <query>    # Search skill registry
-clodds skills install <slug>    # Install from registry
-clodds skills update [slug]     # Update skill(s)
-clodds skills uninstall <slug>  # Remove a skill
-clodds skills info <slug>       # Show skill details
+blitzkrieg skills list              # List all installed skills
+blitzkrieg skills list --verbose    # Show requirements and commands
+blitzkrieg skills search <query>    # Search skill registry
+blitzkrieg skills install <slug>    # Install from registry
+blitzkrieg skills update [slug]     # Update skill(s)
+blitzkrieg skills uninstall <slug>  # Remove a skill
+blitzkrieg skills info <slug>       # Show skill details
 ```
 
 ---

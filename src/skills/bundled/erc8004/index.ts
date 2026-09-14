@@ -107,7 +107,7 @@ async function handleRegister(options: {
     const registration = {
       type: 'https://eips.ethereum.org/EIPS/eip-8004#registration-v1',
       name: options.name || `Agent ${walletClient.account.address.slice(0, 8)}`,
-      description: options.description || 'An AI agent registered via Clodds',
+      description: options.description || 'An AI agent registered via Blitzkrieg',
       image: options.image || '',
       active: true,
       registrations: [],

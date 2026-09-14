@@ -1,7 +1,7 @@
 /**
  * Test Mocks and Fixtures
  *
- * Reusable mock utilities for Clodds test suite.
+ * Reusable mock utilities for the Blitzkrieg test suite.
  */
 
 import type { LedgerDb } from '../../src/ledger/storage';
@@ -337,7 +337,7 @@ export function createMockLedgerConfig(overrides: Partial<LedgerConfig> = {}): L
 export function createMockApiKeyData(overrides: Partial<ApiKeyData> = {}): ApiKeyData {
   const now = Date.now();
   return {
-    id: `clodds_${Math.random().toString(16).slice(2, 18)}`,
+    id: `blitzkrieg_${Math.random().toString(16).slice(2, 18)}`,
     secretHash: 'mock-hash-' + Math.random().toString(36).slice(2),
     owner: '0x1234567890abcdef1234567890abcdef12345678',
     name: 'Test Key',

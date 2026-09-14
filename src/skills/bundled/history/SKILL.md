@@ -76,7 +76,7 @@ Fetch, sync, and analyze trade history from Polymarket and Kalshi with detailed 
 ### Create History Service
 
 ```typescript
-import { createTradeHistoryService } from 'clodds/history';
+import { createTradeHistoryService } from 'blitzkrieg/history';
 
 const history = createTradeHistoryService({
   polymarket: {

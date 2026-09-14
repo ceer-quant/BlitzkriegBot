@@ -21,7 +21,7 @@ const webchatHTML = `
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Clodds WebChat</title>
+  <title>Blitzkrieg WebChat</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -109,9 +109,9 @@ const webchatHTML = `
   </style>
 </head>
 <body>
-  <h1>🎲 Clodds WebChat</h1>
+  <h1>🎲 Blitzkrieg WebChat</h1>
   <div id="messages">
-    <div class="msg system">Connected to Clodds. Ready!</div>
+    <div class="msg system">Connected to Blitzkrieg. Ready!</div>
 
     <div class="msg user">/opportunity scan election</div>
     <div class="msg bot">
@@ -219,7 +219,7 @@ const arbitrageHTML = `
       <div class="dot yellow"></div>
       <div class="dot green"></div>
     </div>
-    <div class="cmd">$ clodds opportunity scan election --minEdge=1</div>
+    <div class="cmd">$ blitzkrieg opportunity scan election --minEdge=1</div>
     <div class="output">
       <div class="header">🔍 Scanning 9 platforms for arbitrage...</div>
       <div class="muted">Polymarket ✓ | Kalshi ✓ | Betfair ✓ | Manifold ✓ | PredictIt ✓</div>
@@ -543,7 +543,7 @@ const telegramHTML = `
     <div class="header">
       <div class="avatar">🎲</div>
       <div class="header-text">
-        <h2>Clodds Bot</h2>
+        <h2>Blitzkrieg Bot</h2>
         <p>online</p>
       </div>
     </div>

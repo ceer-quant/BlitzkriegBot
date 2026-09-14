@@ -89,12 +89,12 @@ found 0 vulnerabilities
 #### 2.8 Missing Rate Limiting ✅ FIXED (Feb 2026)
 - **Original:** No IP-based rate limiting on gateway
 - **Fix:** Added sliding window rate limiter (100 req/min default, configurable)
-- **Status:** ✅ FIXED - `CLODDS_IP_RATE_LIMIT` env var
+- **Status:** ✅ FIXED - `BLITZKRIEG_IP_RATE_LIMIT` env var
 
 #### 2.9 Missing Security Headers ✅ FIXED (Feb 2026)
 - **Original:** No HSTS, X-Frame-Options, etc.
 - **Fix:** Added all recommended security headers + HTTPS enforcement option
-- **Status:** ✅ FIXED - `CLODDS_HSTS_ENABLED`, `CLODDS_FORCE_HTTPS` env vars
+- **Status:** ✅ FIXED - `BLITZKRIEG_HSTS_ENABLED`, `BLITZKRIEG_FORCE_HTTPS` env vars
 
 #### 2.10 WebSocket Message Validation ✅ FIXED (Feb 2026)
 - **Original:** No validation of incoming WebSocket message structure
@@ -110,7 +110,7 @@ found 0 vulnerabilities
 - **Original:** Escrow keypairs stored only in memory (`Map<string, Keypair>`)
 - **Risk:** Server restart = lost keypairs = funds unrecoverable
 - **Fix:** Keypairs now encrypted (AES-256-GCM) and stored in SQLite database
-- **Encryption:** Uses `CLODDS_ESCROW_KEY` or `CLODDS_CREDENTIAL_KEY` env var
+- **Encryption:** Uses `BLITZKRIEG_ESCROW_KEY` or `BLITZKRIEG_CREDENTIAL_KEY` env var
 - **Status:** ✅ FIXED - Keypairs survive server restarts
 
 ### All Previously Accepted Risks - NOW FIXED
@@ -178,7 +178,7 @@ The following headers are now automatically added by the gateway:
 'X-Frame-Options': 'DENY'
 'X-XSS-Protection': '1; mode=block'
 
-// When CLODDS_HSTS_ENABLED=true or connection is HTTPS:
+// When BLITZKRIEG_HSTS_ENABLED=true or connection is HTTPS:
 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains'
 ```
 
@@ -186,13 +186,13 @@ The following headers are now automatically added by the gateway:
 
 ```bash
 # Enable HSTS header
-CLODDS_HSTS_ENABLED=true
+BLITZKRIEG_HSTS_ENABLED=true
 
 # Force HTTP to HTTPS redirect
-CLODDS_FORCE_HTTPS=true
+BLITZKRIEG_FORCE_HTTPS=true
 
 # IP rate limiting (requests per minute)
-CLODDS_IP_RATE_LIMIT=100
+BLITZKRIEG_IP_RATE_LIMIT=100
 ```
 
 ### MCP Server Security
@@ -201,19 +201,19 @@ The MCP stdio server includes 5 security layers, all opt-in via environment vari
 
 | Layer | Env Var | Default | Description |
 |-------|---------|---------|-------------|
-| Tool allowlist | `CLODDS_MCP_ALLOWED_TOOLS` | _(all)_ | Comma-separated list of allowed tool names |
-| Tool blocklist | `CLODDS_MCP_BLOCKED_TOOLS` | _(none)_ | Comma-separated list of blocked tool names |
-| Tool profiles | `CLODDS_MCP_TOOL_PROFILE` | `full` | Predefined access: `read-only`, `trading`, `full` |
-| Rate limiting | `CLODDS_MCP_RATE_LIMIT` | `60` | Max calls per minute per client |
-| Audit logging | `CLODDS_MCP_AUDIT` | `true` | Structured JSON audit logs to stderr |
+| Tool allowlist | `BLITZKRIEG_MCP_ALLOWED_TOOLS` | _(all)_ | Comma-separated list of allowed tool names |
+| Tool blocklist | `BLITZKRIEG_MCP_BLOCKED_TOOLS` | _(none)_ | Comma-separated list of blocked tool names |
+| Tool profiles | `BLITZKRIEG_MCP_TOOL_PROFILE` | `full` | Predefined access: `read-only`, `trading`, `full` |
+| Rate limiting | `BLITZKRIEG_MCP_RATE_LIMIT` | `60` | Max calls per minute per client |
+| Audit logging | `BLITZKRIEG_MCP_AUDIT` | `true` | Structured JSON audit logs to stderr |
 
 Input sanitization runs automatically on all tool calls — string arguments are scanned for SQL injection, command injection, XSS, and path traversal patterns using the existing `detectInjection()` function.
 
 ```bash
 # Example: restrict MCP to read-only tools with audit logging
-CLODDS_MCP_TOOL_PROFILE=read-only
-CLODDS_MCP_RATE_LIMIT=30
-CLODDS_MCP_AUDIT=true
+BLITZKRIEG_MCP_TOOL_PROFILE=read-only
+BLITZKRIEG_MCP_RATE_LIMIT=30
+BLITZKRIEG_MCP_AUDIT=true
 ```
 
 ---
@@ -233,7 +233,7 @@ CLODDS_MCP_AUDIT=true
 
 ## 7. Disclosure Policy
 
-Security issues should be reported to: security@clodds.dev (or GitHub Security Advisories)
+Security issues should be reported to: GitHub Security Advisories at https://github.com/ceer-quant/BlitzkriegBot/security/advisories
 
 Do NOT create public issues for security vulnerabilities.
 
@@ -247,28 +247,28 @@ Do NOT create public issues for security vulnerabilities.
 
 ## 8. Server Hardening CLI
 
-Clodds includes a built-in server hardening command for production deployments.
+Blitzkrieg includes a built-in server hardening command for production deployments.
 
 ### Usage
 
 ```bash
 # Apply all hardening with interactive prompts
-clodds secure
+blitzkrieg secure
 
 # Preview changes without modifying
-clodds secure --dry-run
+blitzkrieg secure --dry-run
 
 # Run security audit only
-clodds secure audit
+blitzkrieg secure audit
 
 # Non-interactive mode (skip prompts)
-clodds secure --yes
+blitzkrieg secure --yes
 
 # Custom SSH port
-clodds secure --ssh-port=2222
+blitzkrieg secure --ssh-port=2222
 
 # Skip specific components
-clodds secure --skip-firewall --skip-fail2ban
+blitzkrieg secure --skip-firewall --skip-fail2ban
 ```
 
 ### What it hardens
@@ -284,9 +284,9 @@ clodds secure --skip-firewall --skip-fail2ban
 ### Security Audit Output
 
 ```
-$ clodds secure audit
+$ blitzkrieg secure audit
 
-🔒 Clodds Server Security Hardening
+🔒 Blitzkrieg Server Security Hardening
 
 ℹ === Security Audit ===
 

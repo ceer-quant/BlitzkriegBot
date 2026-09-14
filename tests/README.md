@@ -1,6 +1,6 @@
 # Tests
 
-This folder contains unit and integration tests for Clodds.
+This folder contains unit and integration tests for Blitzkrieg.
 
 Structure:
 

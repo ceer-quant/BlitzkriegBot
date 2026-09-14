@@ -1,6 +1,6 @@
 /**
  * Discord Channel Adapter
- * Connects Clodds to Discord via discord.js
+ * Connects Blitzkrieg to Discord via discord.js
  * Supports DM pairing (Clawdbot-style), allowlists, and guild channels
  */
 
@@ -105,7 +105,7 @@ export async function createDiscordChannel(
       new EmbedBuilder()
         .setColor(0x5865f2)
         .setDescription(chunk)
-        .setFooter(index === 0 ? { text: 'Clodds' } : null)
+        .setFooter(index === 0 ? { text: 'Blitzkrieg' } : null)
     );
   }
 
@@ -184,7 +184,7 @@ export async function createDiscordChannel(
               `🔐 **Pairing Required**\n\n` +
               `Your pairing code: \`${code}\`\n\n` +
               `To complete pairing, either:\n` +
-              `1. Run \`clodds pairing approve discord ${code}\` on your computer\n` +
+              `1. Run \`blitzkrieg pairing approve discord ${code}\` on your computer\n` +
               `2. Or ask the bot owner to approve your code\n\n` +
               `Code expires in 1 hour.`,
             ephemeral: true,
@@ -255,7 +255,7 @@ export async function createDiscordChannel(
               if (request) {
                 await message.reply(
                   '✅ **Successfully paired!**\n\n' +
-                    'You can now chat with Clodds. Ask me anything about prediction markets!'
+                    'You can now chat with Blitzkrieg. Ask me anything about prediction markets!'
                 );
                 logger.info({ userId, code: potentialCode }, 'Discord: User paired via direct code');
                 return;
@@ -270,7 +270,7 @@ export async function createDiscordChannel(
                   `🔐 **Pairing Required**\n\n` +
                     `Your pairing code: \`${code}\`\n\n` +
                     `To complete pairing, either:\n` +
-                    `1. Run \`clodds pairing approve discord ${code}\` on your computer\n` +
+                    `1. Run \`blitzkrieg pairing approve discord ${code}\` on your computer\n` +
                     `2. Or ask the bot owner to approve your code\n\n` +
                     `Code expires in 1 hour.`
                 );

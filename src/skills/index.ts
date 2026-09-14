@@ -1,5 +1,5 @@
 /**
- * Skills Module - Clawdbot-style skills registry (ClawdHub style)
+ * Skills Module - local registry and remote registry client
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, createWriteStream, cpSync } from 'fs';
@@ -14,8 +14,16 @@ import { Readable } from 'stream';
 import { createHash, randomBytes } from 'crypto';
 import { logger } from '../utils/logger';
 import { statePath } from '../utils/brand-paths';
+import { readBrandEnv } from '../utils/env';
 
 const execAsync = promisify(exec);
+
+// Remote skills registry. Not deployed yet; operators point this at their
+// own registry via BLITZKRIEG_SKILLS_REGISTRY_URL. `.example` is the
+// IANA-reserved placeholder and never resolves to a third-party host.
+const DEFAULT_REGISTRY_URL =
+  readBrandEnv('SKILLS_REGISTRY_URL')?.replace(/\/+$/, '') ||
+  'https://registry.blitzkrieg.example';
 
 // =============================================================================
 // TYPES
@@ -87,7 +95,7 @@ export class SkillRegistry extends EventEmitter {
     super();
     this.setMaxListeners(50);
     this.skillsDir = skillsDir || statePath('skills');
-    this.registryUrl = registryUrl || 'https://registry.clodds.dev';
+    this.registryUrl = registryUrl || DEFAULT_REGISTRY_URL;
     this.ensureDir();
     this.loadSkills();
   }
@@ -280,7 +288,7 @@ export class SkillsRegistryClient {
   private skillsDir: string;
 
   constructor(config: SkillsRegistryConfig = {}) {
-    this.registryUrl = config.registryUrl || 'https://registry.clodds.dev';
+    this.registryUrl = config.registryUrl || DEFAULT_REGISTRY_URL;
     this.skillsDir = config.skillsDir || statePath('skills');
   }
 
@@ -467,7 +475,7 @@ export class SkillsRegistryClient {
     // Get download info
     const { url, type } = this.deriveDownloadUrl(skill);
     const tempId = randomBytes(8).toString('hex');
-    const tempDir = join(tmpdir(), `clodds-skill-${tempId}`);
+    const tempDir = join(tmpdir(), `blitzkrieg-skill-${tempId}`);
 
     try {
       logger.info({ slug, url, type }, 'Downloading skill');

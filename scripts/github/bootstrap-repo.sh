@@ -9,7 +9,7 @@
 # It is IDEMPOTENT and SAFE-BY-DEFAULT:
 #   * default mode is --dry-run (prints what it WOULD do, changes nothing)
 #   * every step is guarded so re-running is a no-op
-#   * it REFUSES to push to the current upstream (alsk1992/CloddsBot)
+#   * it REFUSES to push to the current upstream (alsk1992/BlitzkriegBot)
 #
 # Usage:
 #   bash scripts/github/bootstrap-repo.sh                 # dry-run, prints plan
@@ -33,7 +33,7 @@ set -uo pipefail
 ORG="ceer-quant"
 REPO="BlitzkriegBot"
 FULL="${ORG}/${REPO}"
-UPSTREAM_FORBIDDEN="alsk1992/CloddsBot"
+UPSTREAM_FORBIDDEN="alsk1992/BlitzkriegBot"
 
 EXECUTE=0
 LABELS_ONLY=0

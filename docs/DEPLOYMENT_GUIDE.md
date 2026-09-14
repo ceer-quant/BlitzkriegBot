@@ -1,6 +1,6 @@
-# Clodds Deployment Guide
+# Blitzkrieg Deployment Guide
 
-This guide covers production-style deployment for Clodds using Node.js,
+This guide covers production-style deployment for Blitzkrieg using Node.js,
 Docker, or a systemd service.
 
 ## Prerequisites
@@ -20,32 +20,32 @@ Optional:
 
 ## Runtime data locations
 
-Clodds stores persistent data in the state directory (defaults to the user's
-home directory under `~/.clodds`). You can override it with
-`CLODDS_STATE_DIR`.
+Blitzkrieg stores persistent data in the state directory (defaults to the user's
+home directory under `~/.blitzkrieg`). You can override it with
+`BLITZKRIEG_STATE_DIR`.
 
-- Database: `~/.clodds/clodds.db` (or `$CLODDS_STATE_DIR/clodds.db`)
-- Backups: `~/.clodds/backups` (or `$CLODDS_STATE_DIR/backups`)
+- Database: `~/.blitzkrieg/blitzkrieg.db` (or `$BLITZKRIEG_STATE_DIR/blitzkrieg.db`)
+- Backups: `~/.blitzkrieg/backups` (or `$BLITZKRIEG_STATE_DIR/backups`)
 
 You can control paths for config and workspace with:
-- `CLODDS_CONFIG_PATH`
-- `CLODDS_WORKSPACE`
+- `BLITZKRIEG_CONFIG_PATH`
+- `BLITZKRIEG_WORKSPACE`
 
 ## Deployment options
 
 ### 1) npm install (recommended)
 
 ```bash
-npm install -g clodds
-clodds onboard
+npm install -g blitzkrieg
+blitzkrieg onboard
 ```
 
-The `onboard` wizard handles API key setup, channel selection, and config generation. After setup, start anytime with `clodds start`.
+The `onboard` wizard handles API key setup, channel selection, and config generation. After setup, start anytime with `blitzkrieg start`.
 
 ### 2) Node.js (from source)
 
 ```
-git clone https://github.com/alsk1992/CloddsBot.git && cd CloddsBot
+git clone https://github.com/alsk1992/BlitzkriegBot.git && cd BlitzkriegBot
 npm ci
 npm run build
 node dist/index.js
@@ -62,7 +62,7 @@ node dist/cli/index.js start
 Build the image:
 
 ```
-docker build -t clodds .
+docker build -t blitzkrieg .
 ```
 
 Run it:
@@ -73,12 +73,12 @@ docker run --rm \
   -e ANTHROPIC_API_KEY=... \
   -e TELEGRAM_BOT_TOKEN=... \
   -e WEBCHAT_TOKEN=... \
-  -v clodds_data:/data \
-  clodds
+  -v blitzkrieg_data:/data \
+  blitzkrieg
 ```
 
-Note: the container sets `CLODDS_STATE_DIR=/data`, so the database lives at
-`/data/clodds.db` (backups at `/data/backups`).
+Note: the container sets `BLITZKRIEG_STATE_DIR=/data`, so the database lives at
+`/data/blitzkrieg.db` (backups at `/data/backups`).
 
 ### 3) Docker Compose
 
@@ -93,20 +93,20 @@ there, or edit the `environment:` section.
 
 ### 4) systemd (Linux)
 
-Create a unit file (example: `/etc/systemd/system/clodds.service`):
+Create a unit file (example: `/etc/systemd/system/blitzkrieg.service`):
 
 ```
 [Unit]
-Description=Clodds Gateway
+Description=Blitzkrieg Gateway
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/clodds
-EnvironmentFile=/etc/clodds/clodds.env
-ExecStart=/usr/bin/node /opt/clodds/dist/index.js
+WorkingDirectory=/opt/blitzkrieg
+EnvironmentFile=/etc/blitzkrieg/blitzkrieg.env
+ExecStart=/usr/bin/node /opt/blitzkrieg/dist/index.js
 Restart=on-failure
-User=clodds
+User=blitzkrieg
 
 [Install]
 WantedBy=multi-user.target
@@ -116,8 +116,8 @@ Then:
 
 ```
 systemctl daemon-reload
-systemctl enable clodds
-systemctl start clodds
+systemctl enable blitzkrieg
+systemctl start blitzkrieg
 ```
 
 ## Reverse proxy and TLS
@@ -132,7 +132,7 @@ port 18789 from the proxy.
 git pull
 npm ci
 npm run build
-systemctl restart clodds
+systemctl restart blitzkrieg
 ```
 
 For Docker:
@@ -145,29 +145,29 @@ docker compose up -d --build
 ## Monitoring and health checks
 
 - `GET /health` returns gateway status.
-- `clodds doctor` runs local checks for config and channel health.
+- `blitzkrieg doctor` runs local checks for config and channel health.
 
 ## Backups
 
-The SQLite DB is stored at `$CLODDS_STATE_DIR/clodds.db` (defaults to
-`~/.clodds/clodds.db`). Backups are written to
-`$CLODDS_STATE_DIR/backups` (see `CLODDS_DB_BACKUP_*` in `.env.example`).
+The SQLite DB is stored at `$BLITZKRIEG_STATE_DIR/blitzkrieg.db` (defaults to
+`~/.blitzkrieg/blitzkrieg.db`). Backups are written to
+`$BLITZKRIEG_STATE_DIR/backups` (see `BLITZKRIEG_DB_BACKUP_*` in `.env.example`).
 
 ## Server Security Hardening
 
-Clodds includes a built-in server hardening CLI for production Linux servers.
+Blitzkrieg includes a built-in server hardening CLI for production Linux servers.
 
 ### Quick Start
 
 ```bash
 # Preview what will be changed (safe)
-clodds secure --dry-run
+blitzkrieg secure --dry-run
 
 # Apply all hardening interactively
-sudo clodds secure
+sudo blitzkrieg secure
 
 # Non-interactive mode
-sudo clodds secure --yes
+sudo blitzkrieg secure --yes
 ```
 
 ### What it does
@@ -185,7 +185,7 @@ sudo clodds secure --yes
 Run an audit without making changes:
 
 ```bash
-clodds secure audit
+blitzkrieg secure audit
 ```
 
 This checks:

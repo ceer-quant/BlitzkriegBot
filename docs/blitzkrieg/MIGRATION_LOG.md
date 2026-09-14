@@ -1,5 +1,7 @@
 # 迁移日志（MIGRATION_LOG）
 
+> **历史记录，命名已废弃。** 各节记录迁移当时的旧名→新名对照，按原样保留用于溯源。
+>
 > 范围：P0.5 — 结构重构 / 通用化抽象 / 插件化扩展。
 > 硬性约束：不改业务逻辑、不改 UDS 协议（仅新增 `version` 字段）、不改 DryRun 链路行为。
 
@@ -1305,3 +1307,56 @@ E1-d（Issue #24）的 D 级是"接线协议"——这些名字出现在对外�
 - 旧 `clodds_*` 工具名与 `clodds://` scheme 的接受逻辑计划保留一个发布周期，移除前需先统计调用存量。
 - E 级（文案/i18n/public/55 个 SKILL.md/注释/npm 包字段/docker/metrics）与 F 级（`dist/` 重建）
   在随后的提交完成，同属 Issue #24。
+
+---
+
+## 41. E1-e / E 化妆批收尾（Issue #24，2026-09-15）
+
+D 批（§40）之后剩余的全部用户可见命名面。**不改业务逻辑**；协议侧继续沿用
+「新名出站、旧名入站兼容一版」。
+
+**包与分发**
+- `package.json`：`name` clodds → `blitzkrieg-bot`，`version` 1.8.0 → `0.1.0`，
+  description/author/homepage/bugs/repository 全部指向 ceer-quant/BlitzkriegBot；
+  `bin.blitzkrieg` 为规范命令，`bin.clodds` 作为**一期废弃别名**保留；lock 仅根名/版本变化。
+- `scripts/install.sh`：安装 `blitzkrieg-bot`，`~/.blitzkrieg` 安装目录，`blitzkrieg` 符号链接，
+  `BLITZKRIEG_VERSION` 规范（`CLODDS_VERSION` 兼容一期并告警），帮助链接指向仓库。
+- Docker：服务/卷 `blitzkrieg` / `blitzkrieg_data`，`BLITZKRIEG_*` 环境变量，`/data/blitzkrieg.json`。
+- rust-executor：crate 名 `blitzkrieg-rust-executor`（含独立 Cargo.lock 与 TS 侧二进制路径）；
+  根 workspace `exclude` 同时列出 `user_layer/strategies` 与 `rust-executor`（独立 sidecar）。
+
+**运行时用户可见串**
+- CLI：commander 程序名 `blitzkrieg`；各渠道配对提示、doctor 修复建议统一 `blitzkrieg …`
+  （doctor 对 `.clodds.json` / `clodds.config.json` 的**检测路径保留**）。
+- daemon：修复了 systemd 单元名不一致（安装/启用 `blitzkrieg.service`，但 start/stop/status/
+  uninstall 此前仍操作 `clodds`），全部对齐规范名；`ExecStart` 改 `npx blitzkrieg gateway`；
+  legacy 单元卸载逻辑保留。
+- Slack：同时注册 `/blitzkrieg`（规范）与 `/clodds`（兼容一期）；Mattermost：提及正则双认。
+- MCP：`src/mcp/index.ts` 的 XDG 描述符路径改走 `resolveUserConfigPath('mcp.json')`
+  （规范存在用规范，仅旧存在则沿用旧并告警），不再硬编码 `~/.config/clodds`。
+- gateway：移除 force-HTTPS 白名单里的旧项目主机 `compute.cloddsbot.com`；两处旧 logo 外链
+  改本地 `/webchat/logo.png`。
+- 技能注册表默认 URL 改 `BLITZKRIEG_SKILLS_REGISTRY_URL` 可覆盖，默认
+  `https://registry.blitzkrieg.example`（见 DECISIONS D-14）；Datadog 默认 service tag
+  `blitzkrieg`；监控/遥测命名空间 `blitzkrieg`。
+
+**文档/技能/文案**
+- 54 个 bundled `SKILL.md`：import 示例 `blitzkrieg/…`、CLI 示例、路径、唤醒词全部更新；
+  批量改名产生的「伪真实域名」（`blitzkrieg.io/.ai/.dev`、`docs.blitzkriegbot.com`、
+  `discord.gg/blitzkrieg` 等）逐一替换为 `.example` 占位或仓库地址（D-14）。
+- 20 个现行文档（USER_GUIDE、DEPLOYMENT、API、openapi、TELEMETRY 等）与 SECURITY.md 的
+  `BLITZKRIEG_*` 环境变量更新；`public/SKILL.md` 重写为**自托管**集成指南（原内容通篇指向
+  不存在的托管 compute/marketplace 服务）；webchat 帮助链接指向仓库。
+- 历史文件（CHANGELOG、REPO_GOVERNANCE_REPORT、本日志）顶部加「历史记录，命名已废弃」banner，
+  原文保留。
+- 测试：helper 的临时目录前缀/mock id 更新；两个**孤儿测试**（`tests/unit/api/*`，require 已删除
+  的 `src/api`，glob 不执行）内品牌串一并更新。
+
+**验证（本批）**
+- `tsc --noEmit` 0；`npm test` **192 pass / 0 fail**；`npm run build` OK
+  （先备份旧 `dist/` 到 `data/backup-<UTC>-dist-rebuild/` 后干净重建——旧 dist 残留
+  已删除源码 `rust-core-client` 的编译产物；新 dist 的 clodds 命中全部为有意兼容串）。
+- `cargo test --workspace` **169 pass / 0 fail**；`secret-scan` OK；9 个脚本门禁全 PASS。
+- `git grep -il clodds` 剩余 48 个文件，全部属：legacy 别名常量与双前缀兼容、D-13 两项
+  （盐/链上备注）、兼容路径检测、品牌兼容测试、历史/规划文档（带 banner 或为验收标准本身）、
+  `clodds` bin 别名与其 lockfile 镜像、真实运行内核的 socket 取证快照。

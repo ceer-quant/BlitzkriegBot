@@ -285,7 +285,7 @@ export async function createiMessageChannel(
 
         const tempPath = path.join(
           os.tmpdir(),
-          `clodds-imessage-${Date.now()}-${resolved.filename}`
+          `blitzkrieg-imessage-${Date.now()}-${resolved.filename}`
         );
         await fsPromises.writeFile(tempPath, resolved.buffer);
         await sendFile(tempPath);
@@ -314,7 +314,7 @@ export async function createiMessageChannel(
           if (!resolved) continue;
           const tempPath = path.join(
             os.tmpdir(),
-            `clodds-imessage-${Date.now()}-${resolved.filename}`
+            `blitzkrieg-imessage-${Date.now()}-${resolved.filename}`
           );
           await fsPromises.writeFile(tempPath, resolved.buffer);
           const escapedGroupChatId = escapeAppleScript(chatId);

@@ -85,7 +85,7 @@ import {
   resolveToken,
   getTokenInfo,
   getEvmBalance
-} from 'clodds/evm/uniswap';
+} from 'blitzkrieg/evm/uniswap';
 
 // Get quote
 const quote = await getUniswapQuote({
@@ -132,7 +132,7 @@ import {
   getOneInchQuote,
   getOneInchProtocols,
   compareDexRoutes
-} from 'clodds/evm/oneinch';
+} from 'blitzkrieg/evm/oneinch';
 
 // Get quote from 1inch
 const quote = await getOneInchQuote({
@@ -315,7 +315,7 @@ console.log(`Total gas cost: ${quote.gasCostUsd} USD`);
 ## Error Handling
 
 ```typescript
-import { EvmSwapError, InsufficientBalanceError, SlippageExceededError } from 'clodds/evm';
+import { EvmSwapError, InsufficientBalanceError, SlippageExceededError } from 'blitzkrieg/evm';
 
 try {
   await executeUniswapSwap({ ... });

@@ -304,7 +304,7 @@ Wallets are encrypted using:
 - **Cipher**: AES-256-CTR
 - **MAC**: Keccak256
 
-Storage location: `~/.clodds/wallets/`
+Storage location: `~/.blitzkrieg/wallets/`
 
 ```typescript
 // Encrypt
@@ -331,7 +331,7 @@ const privateKey = decryptKeystore(keystore, 'mypassword');
 
 ### Config File
 
-In `~/.clodds/clodds.json`:
+In `~/.blitzkrieg/blitzkrieg.json`:
 
 ```json
 {
