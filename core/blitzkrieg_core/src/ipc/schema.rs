@@ -118,6 +118,12 @@ pub mod method {
     pub const BOOK_SNAPSHOT: &str = "books.snapshot";
     /// Top-of-book only update (price_change / best_bid_ask).
     pub const TOP_OF_BOOK: &str = "books.top";
+    /// Data-feed bridge: deliver a full L2 book straight to the self-driving
+    /// engine (`Core::engine_on_data`) — the same choke point the Rust-native
+    /// market feed (`--feed-ws`) drives and the one the backtester replays.
+    /// Unlike `books.snapshot` it does NOT run the DRY maker-fill simulation, so
+    /// a session captured through this method replays decision-for-decision.
+    pub const ENGINE_BOOK: &str = "engine.book";
     /// Binance spot price tick (feeds the momentum filter).
     pub const SPOT_PRICE: &str = "spot.price";
     /// Current round state (slot / timing / market count).

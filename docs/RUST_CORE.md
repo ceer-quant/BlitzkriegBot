@@ -30,7 +30,7 @@
 Node (UI / 参数 / 日志)
    │  spawn + 生命周期管理
    ▼
-clodds-rust-core  ── Unix Domain Socket ($TMPDIR/clodds-core-$USER.sock)
+blitzkrieg-core  ── Unix Domain Socket ($TMPDIR/blitzkrieg-core-$USER.sock)
                    ── 一行一个 JSON 对象（'\n' 分帧），JSON-RPC 2.0
 ```
 
@@ -51,7 +51,7 @@ clodds-rust-core  ── Unix Domain Socket ($TMPDIR/clodds-core-$USER.sock)
 | `ome.rs` | 权威订单状态机；按 tradeKey 的幂等成交账本、累计 delta、按单 size 封顶、加权均价、FAILED 回滚、未知成交缓冲 |
 | `ledger.rs` | USDC 预扣/释放/成交结算，防止超额下单 |
 | `risk.rs` | kill switch、单笔名义上限（完整日亏/连亏/冷却在 P1/P2） |
-| `sim.rs` | Dry 撮合：taker 即时成交、maker 盘口穿越成交（与 live 共用同一 OME） |
+| `sim.rs` | Dry 撮合：taker 即时成交、maker 盘口穿越成交（与 live 共用同一 OME）；`FillModel`（taker 滑点 / maker 延迟 / 成交概率，**默认恒等**） |
 | `marketdata.rs` | 本地 L2 重建：快照/增量/top-of-book，交叉自愈，陈旧判定 |
 | `signal.rs` | 纯信号：PriceBuffer、TrendTracker（滚动窗口确认/破裂）、`spread_arb` 评估器（mid/bestBid 定价纪律） |
 | `scanner.rs` | 回合/时钟偏移/slug/时间闸；Gamma 字段解析（outcomes/clobTokenIds/outcomePrices） |
@@ -66,6 +66,8 @@ clodds-rust-core  ── Unix Domain Socket ($TMPDIR/clodds-core-$USER.sock)
 | `live.rs` | **Live 桥**：提交未绑定订单、泵送 venue 事件到 core、每 ~5s REST 对账、启动时用真实余额播种账本 |
 | `ipc/schema.rs` | JSON-RPC 契约 |
 | `ipc/server.rs` | UDS server：多会话、事件广播、维护 tick、信号退出 |
+| `data_source.rs` | **数据抽象（P-1.3）**：`DataSource`/`DataSink` trait、JSONL 事件归档（`--event-archive`）、`ReplaySource` 回放源、事件编解码 |
+| `backtest.rs` | **事件驱动回测（P-1.2）**：`Backtester` trait + `EventBacktester`（虚拟时钟驱动真实 `Core`）+ 可序列化报告 |
 
 **dry / shadow / 回测 / live 同核心**：Dry 模式不模拟成交后另起状态机，而是通过
 `orders.place` + 盘口穿越走和 live 完全相同的 OME/账本/风控路径。Live 适配器通过
@@ -77,9 +79,11 @@ clodds-rust-core  ── Unix Domain Socket ($TMPDIR/clodds-core-$USER.sock)
 `core.ping` · `core.ready` · `risk.kill` · `risk.resume` ·
 `orders.place` · `orders.cancel` · `orders.cancel_all` · `orders.list` ·
 `orders.reconcile` · `ledger.balance` · `positions.list` · `positions.exit` ·
-`books.snapshot` · `books.top` · `spot.price` · `engine.markets` · `engine.round`
+`books.snapshot` · `books.top` · `spot.price` · `engine.markets` · `engine.round` · `engine.book`
 （P3：Node 通过 `books.*`/`spot.price`/`engine.markets` 喂数据，Rust 引擎自驱决策并于内部 tick 下单；
-P4 起 Rust 自带 WS 接入后这些桥将退回为可选）。
+P4 起 Rust 自带 WS 接入后这些桥将退回为可选。P-1.2 新增 **`engine.book`**：把 L2 盘口**直送
+`engine_on_data`**、**不跑** dry 撮合——与 `--feed-ws` 原生 feed 同一条路径，也是回测重放的路径；
+`books.snapshot` 则保留 dry 撮合语义。两者差异见 D-11）。
 
 事件：`ORDER_UPDATE`、`FILL`（含权威 `FillDelta`）、`POSITION_CLOSED`、`RISK_ALERT`、
 `RECONCILE_REPORT`、`ERROR`、`READY`。
@@ -95,26 +99,68 @@ P4 起 Rust 自带 WS 接入后这些桥将退回为可选）。
 ## 构建与验收
 
 ```bash
-npm run core:build     # cargo build --release（产物 rust-core/target/release/clodds-rust-core）
-npm run core:test      # 57 个 Rust 单测：OME/账本/风控/熔断/撮合/对账/出场/持仓/信号/扫描/L2/shadow
-npm run core:parity    # 真实 Node RustCoreClient 经 UDS 跑 22 项端到端 parity 断言
+npm run core:build     # cargo build --release（产物 target/release/blitzkrieg-core）
+npm run core:test      # Rust 单测（core 库 131 个：OME/账本/风控/熔断/撮合/对账/出场/持仓/信号/扫描/L2/data_source/回测）
+npm run core:parity    # 真实 Node RustCoreClient 经 UDS 跑端到端 parity 断言
 npm run core:parity-engines  # 引擎对照：Node 决策管线 vs Rust 自驱引擎，同一输数据逐笔比对
 npm run core:observe   # 真实回合 DRY 观察：发现当前回合代币喂给 Rust 引擎并实时监控
+node scripts/cycle-check.mjs      # 回合全链路（发现→入场→出场→账本）离线检查
+node scripts/backtest-check.mjs   # P-1.2 验收：捕获真实 core 的行情流，离线重放要求结果一致
+node scripts/secret-scan.sh       # 凭证/密钥泄漏扫描（提交前必跑）
 
 # 离线 walk-forward：对影子 JSONL 跑同一份出场策略的网格 + 样本外评估，
 # 并按入场价 / 入场时剩余时间分桶（辅助判断入场闸门是否值得调整）
-rust-core/target/release/clodds-rust-core --replay data/shadow/positions.jsonl
+target/release/blitzkrieg-core --replay data/shadow/positions.jsonl
 
 # 近失回放：评估"放宽入场闸"的净效果（需先有 near-miss 记录，见下）
-rust-core/target/release/clodds-rust-core --replay-near-miss data/shadow/near-miss.jsonl
+target/release/blitzkrieg-core --replay-near-miss data/shadow/near-miss.jsonl
 ```
 
-Node 客户端：`src/core/rust-core-client.ts`（spawn/就绪握手/崩溃重启/超时/zod 校验/事件订阅/reconcile）。
+Node 客户端：`src/core/blitzkrieg-core-client.ts`（spawn/就绪握手/崩溃重启/超时/zod 校验/事件订阅/reconcile）。
+
+## 事件驱动回测 + 数据归档（P-1.2 / P-1.3）
+
+没有第二套模拟引擎：`EventBacktester` 持有真实的 `Core`（强制 `Dry`、无落盘、无 feed、无 shadow），
+在虚拟时钟上跑 **同一条** 行情→信号→风控→账本→OME→出场链路，事件经 **同一个 `engine_on_data`** 入口投递。
+
+```bash
+# 采集：真实 core 把喂给引擎的原始事件按到达顺序落盘（live 侧零改动，只多一个 writer）
+target/release/blitzkrieg-core --mode dry --engine --feed-ws --assets BTC,ETH,SOL,XRP \
+  --event-archive data/archive/events.jsonl --event-archive-max-mb 512
+
+# 回放：同一份二进制、同一组策略参数（务必一致，否则比较无意义）
+target/release/blitzkrieg-core --backtest data/archive/events.jsonl \
+  --assets BTC,ETH,SOL,XRP --min-round-age 30 --min-time-left 180 \
+  --backtest-tick-ms 50 --backtest-tail-ms 0 --backtest-report report.json
+```
+
+- **归档格式**：JSONL，每行一个事件 `{"at":<ms>,"k":"book|top|spot|round",...}`，Decimal 全部以字符串
+  精确编码（无浮点损失）。到上限**丢弃新事件**、绝不删除已有行；`engine.stats.archive` 暴露
+  `{path,events,bytes,dropped,recording}`。真实 feed 的吞吐参考 **≈11 MB/分钟 ≈16 GB/天**，生产环境务必配
+  `--event-archive-max-mb` 并按天轮转。
+- **维护节拍**：回放的 `tick + engine_evaluate` 跑在**自己的 `tick_ms` 定时表**上（与 live 的
+  `ipc::server` interval 同频），**与事件密度无关**。真实 feed 是亚毫秒级突发，若按"事件间隙"驱动
+  评估周期，13 分钟真实归档只会跑 803 个周期（应为 15 610），出场检查变粗、`blockedTiming/Momentum`
+  计数被饿死——已修复并加回归测试（`dense_stream_keeps_live_evaluation_cadence`）。
+- **乱序**：多流（Binance spot + CLOB book/top）到达顺序天然抖动——实测 1 025 963 事件中 73 332 个
+  时间戳回退，中位滞后 11 ms / p99 767 ms / 最大 8.6 s。`ReplaySource` 不重排，只把时钟**钳制**为不回退
+  （`outOfOrderEvents` 计数上报），与 live 的"到达顺序即真实顺序"一致。
+- **摩擦旋钮**（默认恒等 = 与 live 逐位可比）：`--slippage-ticks`（买价上浮/卖价下压，1 tick=0.001）、
+  `--latency-ms`（maker 挂单延迟生效）、`--fill-prob-bps`（按订单 id 确定性抽签的成交概率）。
+- **报告**：`orders{orders,filled,cancelled,rejected,failed,liveAtEnd}`、`fills`、`trades`（含盈亏、
+  胜率、盈亏比、最大回撤）、`strategies[]`（按策略分账）、`feed`（计数器 + `blocked` + `confirmed`）、
+  `riskAlerts`/`errors`、`tradeLines`。报告**逐字节可复现**：诊断列表按 token 排序（`HashSet` 迭代序
+  每进程随机），诊断取**虚拟时钟**而非宿主时钟（否则离线回放的盘口全部"过期"，mid 显示为 0）。
+- **验收**：`scripts/backtest-check.mjs` 同一驱动两侧（`engine.book` 采集）**21/21 逐位相等**——订单/成交/
+  平仓/净盈亏/分策略账本全部一致，同样事件数、无乱序；真实 feed 归档（1 025 963 事件 / 13 分钟）重放
+  **19/19**：归档逐类计数 = 回放 feed 计数、`evaluations`=span/tick、`blocked.momentum` 88=88、
+  `blocked.timing` 810 vs 805（≤1%，宿主定时器相位）、`confirmed` 集合与 mid/entry/cap/inBand 逐值一致。
+  已知非对称：live 的 `engine.stats` 快照比 SIGTERM 早约 5 ms，比归档少 6 个 top 事件（归档含、回放全量消费）。
 
 ## Live 运行
 
 ```bash
-rust-core/target/release/clodds-rust-core --socket <path> --mode live \
+target/release/blitzkrieg-core --socket <path> --mode live \
   --max-order-notional 2.5 --market 0x<conditionId> [--market 0x...]
 ```
 
@@ -122,7 +168,7 @@ rust-core/target/release/clodds-rust-core --socket <path> --mode live \
 
 ```bash
 # Node 只下发参数/回合代币，Rust 自带 WS 取行情并自行决策下单：
-clodds-rust-core --socket <path> --mode dry --engine --feed-ws \
+target/release/blitzkrieg-core --socket <path> --mode dry --engine --feed-ws \
   --min-round-age 30 --min-time-left 180
 ```
 
@@ -177,7 +223,7 @@ HFT_CORE=rust node dist/index.js
 - **默认仍是 Node 引擎**：不设 `HFT_CORE` 时行为与以前完全一致——切换不会静默发生，可随时
   去掉该变量回退到原路径。
 - 未设 `HFT_CORE` 时 `/crypto-hft status` 走原 Node 引擎；设了则走 Rust 内核，两条路径互不干扰。
-- Rust 内核需要 `rust-core/target/release/clodds-rust-core`（`npm run core:build`）。
+- Rust 内核需要 `target/release/blitzkrieg-core`（`npm run core:build`）。
 - 相关参数（`HFT_ASSETS`、`HFT_ROUND_SEC`）可选，缺省用项目默认。
 
 > 为什么不是"桥接 ExecutionService 让旧 Node 引擎继续跑"：Node 引擎的成交处理会按 BUY 成交无条件
@@ -190,7 +236,7 @@ HFT_CORE=rust node dist/index.js
 （可用 `--near-miss-path` 覆盖，进程退出时强制 flush，避免窗口未满丢失）。随后：
 
 ```bash
-clodds-rust-core --replay-near-miss data/shadow/near-miss.jsonl
+target/release/blitzkrieg-core --replay-near-miss data/shadow/near-miss.jsonl
 ```
 
 它回放**两种**情形并对照：

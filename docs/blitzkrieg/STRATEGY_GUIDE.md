@@ -154,3 +154,37 @@ rustc --crate-type=dylib user_layer/strategies/dog_strategy.rs \
 - **为什么我的策略能编译但不下单？** 信号只表达意图，是否成交取决于内核的风控/资金/入场闸门（例如 `min-time-left`、入场上限、资金预扣）。
 - **策略能自己平仓吗？** 不能。平仓由内核的持仓/出场策略负责；策略只发 `Buy`/`Sell`/`Hold`。
 - **能访问盘口深度吗？** `MarketTick` 目前给最优买卖价与 mid；更深的盘口将随行情层扩展逐步加入契约（保持向后兼容）。
+
+## 6. 回测你的策略（P-1.2 / P-1.3）
+
+回测不是一个另写的模拟器：**内核自带全链路回放**（`--backtest`）在虚拟时钟上驱动**同一个 `Core`**，
+把归档的行情按原时间戳喂回同一入口 `engine_on_data` —— 策略、风控、账本、下单、出场、费用
+与 live 是同一条代码路径。
+
+```bash
+# 1) 运行时归档行情（Dry/Live 均可；归档只镜像行情事件，不读写任何凭证）
+target/release/blitzkrieg-core --socket <path> --mode dry --engine --feed-ws \
+  --event-archive data/archives/events.jsonl
+
+# 2) 用同一策略回放这段时间（永远 Dry：不起 feed、不写 trade/order/position 日志）
+target/release/blitzkrieg-core --backtest data/archives/events.jsonl --engine \
+  --backtest-report data/archives/report.json \
+  --assets BTC,ETH,SOL,XRP --min-round-age 30 --min-time-left 180 --round-sec 900 \
+  [--slippage-ticks 1] [--latency-ms 250] [--fill-prob-bps 5000]
+```
+
+- **回放参数必须与采集时一致**（`--assets`/`--round-sec`/`--min-*`/`--max-*`/策略开关），
+  否则重放的不是同一个决策环境。
+- 想比较**不同参数**：换参数重放同一归档，对比报告里的净 PnL / 胜率 / 每策略分账。
+- 报告（`--backtest-report` JSON）：feed 计数、blocked、订单终态计数、逐笔明细、净/毛 PnL、
+  费用、每策略账本、源统计（坏行/乱序）、`forcedDry: true`。报告**逐字节可复现**（同参数两次回放
+  完全相同），可以直接用 `diff` 做参数回归。
+- 摩擦三旋钮默认全关（恒等 = 与 live 等价）；逐步打开可回答「滑点/延迟/成交率吃掉多少收益」。
+- **评估节拍**：回放的 `tick + engine_evaluate` 跑在自己的 `--backtest-tick-ms` 定时表上（默认 50 ms，
+  与 live 的 `ipc::server` interval 同频），**与事件密度无关**——出场（TP/SL/追踪/强平）因此与 live 同等灵敏。
+  真实 feed 是亚毫秒级突发：若把维护周期挂到"到下一事件的间隙"上，13 分钟只会跑 803 个周期（应 15 610），
+  回测出场会比 live 迟钝。该缺陷已修复（`MIGRATION_LOG §35`），并有回归测试钉住两种密度下的周期数。
+- 一致性验收：`node scripts/backtest-check.mjs`（**21/21**）——同一次采集的 live 与回放**逐位相等**
+  （含成交：净盈亏 5.12208717）；真实 feed 归档（1 025 963 事件 / 13 分钟）重放 **19/19**。
+- 已知口径（D-11）：dry 行情路径的 maker 挂单除下单瞬间外不会成交，入场最终升级为 taker（付 taker 费）；
+  归档+回放如实复现，因此 dry 回测的入场成本是**保守**的。
