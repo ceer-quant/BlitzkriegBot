@@ -1142,3 +1142,59 @@ spawn 时拼进命令行。上线后发现这在两个场景下都会**静默失
 - 本轮仍是"方案与实现"而非"已生效"：生效需要**内核重启**，而当前外壳内存里是旧代码（见背景 1），
   单纯 `SIGTERM` 内核会被旧参数拉起。故先合入 + 重建，再由运维择机重启外壳使新默认落地。
 
+
+---
+
+## 38. 【E1-b 品牌清理·起手】内核 UDS socket 改名 + 兼容期（Clodds 清零第一步）
+
+**背景**
+用户要求「彻底移除 cloddsbot 遗留，确保完全 0 clodds 相关性」（`ROADMAP_V0_1.md` E1）。盘点把
+遗留分为 A–G 七级，其中 **B 级（跨语言运行时契约）** 是最危险也最该先做的一类：UDS socket 名
+`clodds-core-<user>.sock` 同时出现在 **4 种语言**（Rust 内核 / Rust ui_kit / Rust ui_panel / TS 外壳）
+与 **6 个脚本** 中，且**正在被生产进程使用**——改错就是「客户端找不到内核 → 再 spawn 一个 →
+两个内核共用同一份订单/持仓日志」，并触发 §37 引入的归档单写者锁（后启动的那个会静默停录）。
+
+**实现**
+1. **规范名下沉为常量**：`blitzkrieg-core`（`SOCKET_PREFIX`），旧名 `clodds-core`
+   （`LEGACY_SOCKET_PREFIX`）保留为可发现别名。两侧各自实现同一套：
+   - Rust 内核 `main.rs`：`socket_path_for()` + `default_socket()`；
+   - Rust ui_kit `lib.rs`：`socket_path_for()` / `default_socket_path()` / `legacy_socket_path()` /
+     `socket_served()` / `resolve_socket_path()`；
+   - TS `src/core/core-socket.ts`（新）：同名一套 + `resolveSocketPath()`；
+   - 脚本 `scripts/lib/core-socket.mjs`（新）：镜像 TS 版，供 `soak-monitor` / `feed-live-probe` /
+     `price-compare` 等共用；另有 `scratchSocketPath(label)` 给隔离夹具。
+   三处 `USER` 兜底统一为 `user`（原为 `clodds`），否则客户端与内核在同一台机器上永远碰不到面。
+2. **验证器可测**：`resolve_socket_path()` 与 `resolveSocketPath()` 的优先级规则拆出纯函数
+   （`resolve_socket_path_from`），使「规范名优先、旧名兜底」可被单元测试断言，而不依赖机器上
+   恰好在跑哪个内核。
+3. **客户端迁移窗口**：`BlitzkriegCoreClient.start()` 新增 `adoptLegacyCoreIfAny()`——
+   仅当调用方**未显式**指定 `socketPath`、且规范名无人监听、而旧名**正在服务**时，改连旧名并
+   **领养**那个内核（`ownsProc=false`，`stop()` 不会杀它）。这正是兼容期存在的意义：
+   旧外壳用 `--socket <旧路径>` 显式拉起的内核，直到外壳重启前都合法地占着旧名。
+4. **显式指定者不做探测**：`ownDefaultSocket` 标志确保夹具/测试传死 `--socket` 时行为完全不变。
+5. **夹具品牌同步**：`core-parity` / `parity-engines` / `dry-observe` 的私有 socket 与临时目录名
+   由 `clodds-*` 改为 `blitzkrieg-*`（它们本就是每次进程独立的隔离名，不承载契约）。
+
+**验证**
+- `cargo test --workspace`：137 core + 6 main + **20** ui_kit（+7 socket 测试）+ 2 panel = **165**。
+- `npm test`：**143**（+8，`tests/unit/core-socket.test.ts`：命名、TMPDIR 兜底、尾斜杠、
+  `USER` 回落、`socketServed` 生命周期）。
+- **端到端（真实二进制，两阶段，`scripts/socket-migration-check.mjs` 新增）**：
+  ① 用旧名手工起一个「旧世代」内核 → 新客户端 `start()` **领养**它：客户端 socket = 旧名、
+    规范名**仍无人监听**（未产生竞争者）、旧名上**恰好 1 个**内核进程、`client.stop()` 后旧内核存活；
+  ② 无任何内核时新客户端在**规范名**上 spawn 自己的内核。
+  两项全过（`RESULT: PASS`）。
+- 默认 socket 实测：`USER=zzprobe TMPDIR=/tmp` 不带 `--socket` 启动 → 绑定
+  `/tmp/blitzkrieg-core-zzprobe.sock`（此前为 `clodds-core-*`）。
+- 全门禁复跑：`npm run build` OK、`tsc --noEmit` 0、`core-parity` **RUST CORE PARITY OK**、
+  `parity-engines` **PARITY OK**、`cycle-check` PASS、`backtest-check` **21/21**、
+  `position-recovery-check` PASS、`ui-kit-gateway-check` PASS、`core-adopt-check` PASS、
+  `secret-scan` OK。
+
+**遗留**
+- **生产内核当前仍绑在旧 socket 名上**，原因不是本次改动失效，而是**正在跑的 node 外壳（pid 72966）
+  是改名前的代码**，它用内存里的 `--socket <旧路径>` 显式指定，重启内核会被同样的旧参数拉起。
+  兼容期正是为这种状态设计的：此刻任何**新**客户端（含 `ui_kit_panel`、`soak-monitor`）都会领养
+  这个内核而非另起一个。待外壳随下次受控重启更新后，规范名自动生效，无需额外迁移动作。
+- E1 其余分级（A 加密盐/链上备注需用户裁决；C `CLODDS_*` 与 `~/.clodds`；D MCP 命名空间等协议面；
+  E 化妆项；F `dist/` 重建；G `origin` remote）见 Issue #21–#25，未在本轮触碰。

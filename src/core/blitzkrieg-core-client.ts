@@ -19,6 +19,9 @@ import { join } from 'path';
 import { existsSync } from 'fs';
 import { logger } from '../utils/logger.js';
 import {
+  defaultSocketPath,
+  resolveSocketPath,
+} from './core-socket.js';import {
   EventSchema,
   PositionViewSchema,
   RpcErrorSchema,
@@ -31,7 +34,7 @@ import {
 export interface BlitzkriegCoreOptions {
   /** Path to the compiled binary. Defaults to core/blitzkrieg_core/target/release/blitzkrieg-core. */
   binaryPath?: string;
-  /** Override the UDS path. Default: $TMPDIR/clodds-core-$USER.sock. */
+  /** Override the UDS path. Default: $TMPDIR/blitzkrieg-core-$USER.sock. */
   socketPath?: string;
   mode?: 'dry' | 'live';
   /** Simulated starting balance for dry mode. */
@@ -97,12 +100,6 @@ interface Pending {
 const REQUEST_TIMEOUT_MS = 5000;
 const STARTUP_TIMEOUT_MS = 15000;
 
-function defaultSocketPath(): string {
-  const user = process.env.USER || 'clodds';
-  const dir = process.env.TMPDIR && process.env.TMPDIR.length > 0 ? process.env.TMPDIR : tmpdir();
-  return join(dir.replace(/\/$/, ''), `clodds-core-${user}.sock`);
-}
-
 function defaultBinaryPath(): string {
   // The repo is a cargo WORKSPACE, so the binary lands in the workspace-level
   // target/ at the repo root (NOT in core/blitzkrieg_core/target/). Check root
@@ -131,7 +128,8 @@ export class BlitzkriegCoreError extends Error {
 
 export class BlitzkriegCoreClient extends EventEmitter {
   private readonly binaryPath: string;
-  private readonly socketPath: string;
+  /** Mutable: `start()` may redirect to the legacy name to adopt an old core. */
+  private socketPath: string;
   private readonly mode: 'dry' | 'live';
   private readonly seedBalance: number;
   private readonly maxOrderNotional: number;
@@ -144,6 +142,8 @@ export class BlitzkriegCoreClient extends EventEmitter {
   private readonly noOrderLog: boolean;
   private readonly noPositionLog: boolean;
   private readonly marketPlugin: string | undefined;
+  /** False when the caller pinned `socketPath`; the legacy probe is then skipped. */
+  private readonly ownDefaultSocket: boolean;
 
   private proc: ChildProcess | null = null;
   private socket: Socket | null = null;
@@ -175,6 +175,7 @@ export class BlitzkriegCoreClient extends EventEmitter {
     super();
     this.binaryPath = opts.binaryPath ?? defaultBinaryPath();
     this.socketPath = opts.socketPath ?? defaultSocketPath();
+    this.ownDefaultSocket = opts.socketPath === undefined;
     this.mode = opts.mode ?? 'dry';
     this.seedBalance = opts.seedBalance ?? 10000;
     this.maxOrderNotional = opts.maxOrderNotional ?? 100;
@@ -195,7 +196,7 @@ export class BlitzkriegCoreClient extends EventEmitter {
     if (this.connected) return;
     this.stopped = false;
     this.restartAttempts = 0; // a manual start always gets a fresh budget
-    this.starting = this.boot();
+    this.starting = this.adoptLegacyCoreIfAny().then((adopted) => (adopted ? undefined : this.boot()));
     try {
       await this.starting;
     } catch (e) {
@@ -206,6 +207,35 @@ export class BlitzkriegCoreClient extends EventEmitter {
     } finally {
       this.starting = null;
     }
+  }
+
+  /**
+   * Migration window: if an old-branded core still owns `clodds-core-<user>.sock`,
+   * connect to THAT instead of spawning a rival beside it. Two cores sharing one
+   * cwd would interleave their order/position logs, and the archive's single-writer
+   * lock would make one of them stop recording without anyone noticing.
+   *
+   * Returns true when an existing core was adopted (so no spawn is needed).
+   */
+  private async adoptLegacyCoreIfAny(): Promise<boolean> {
+    if (!this.ownDefaultSocket) return false;
+    const target = await resolveSocketPath();
+    if (target === this.socketPath) return false;
+    logger.warn(
+      { socket: target },
+      'a pre-rename core is serving the legacy socket — adopting it instead of spawning'
+    );
+    const previous = this.socketPath;
+    this.socketPath = target;
+    try {
+      await this.connectExisting(Date.now() + STARTUP_TIMEOUT_MS);
+    } catch (e) {
+      logger.error({ err: e, socket: target }, 'failed to adopt the pre-rename core');
+      this.socketPath = previous;
+      return false;
+    }
+    this.ownsProc = false;
+    return true;
   }
 
   /** Kill the child we own (if any) and clear the socket, without touching state. */
@@ -670,5 +700,13 @@ export class BlitzkriegCoreClient extends EventEmitter {
 
   isConnected(): boolean {
     return this.connected;
+  }
+
+  /**
+   * The socket actually in use. Differs from the canonical name only during the
+   * migration window, when a pre-rename core is adopted instead of duplicated.
+   */
+  resolvedSocketPath(): string {
+    return this.socketPath;
   }
 }

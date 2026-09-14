@@ -14,8 +14,8 @@ import net from 'net';
 import { readFileSync, appendFileSync, existsSync, mkdirSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { tmpdir } from 'os';
 import { execSync } from 'child_process';
+import { resolveSocketPath } from './lib/core-socket.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -27,12 +27,7 @@ const opt = (n, d) => { const i = argv.indexOf(n); return i >= 0 && argv[i + 1] 
 const HOURS = parseFloat(opt('--hours', '12'));
 const INTERVAL_SEC = parseInt(opt('--interval-sec', '600'), 10);
 
-function socketPath() {
-  const user = process.env.USER || 'clodds';
-  const dir = process.env.TMPDIR && process.env.TMPDIR.length ? process.env.TMPDIR : tmpdir();
-  return join(dir.replace(/\/$/, ''), `clodds-core-${user}.sock`);
-}
-const SOCK = socketPath();
+const SOCK = await resolveSocketPath();
 
 function ensureDir() { if (!existsSync(SOAK_DIR)) mkdirSync(SOAK_DIR, { recursive: true }); }
 

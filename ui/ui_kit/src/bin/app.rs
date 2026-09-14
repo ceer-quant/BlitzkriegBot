@@ -6,11 +6,11 @@
 //! Usage: `ui_kit_app [--socket <path>] [--once] [--interval-sec N]`
 
 use blitzkrieg_ui_kit::app::{render_headless, AppViewModel};
-use blitzkrieg_ui_kit::{default_socket_path, IpcClient};
+use blitzkrieg_ui_kit::{resolve_socket_path, IpcClient};
 use std::time::Duration;
 
 fn main() {
-    let mut socket = default_socket_path();
+    let mut socket = resolve_socket_path();
     let mut once = false;
     let mut interval = 2u64;
     let mut args = std::env::args().skip(1);

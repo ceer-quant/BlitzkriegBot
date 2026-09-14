@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /** Compare panel prices vs real Polymarket CLOB; detect staleness. */
 import net from 'net';
-import { tmpdir } from 'os';
+import { resolveSocketPath } from './lib/core-socket.mjs';
 
-const SOCK = (process.env.TMPDIR || tmpdir()).replace(/\/$/, '') + '/clodds-core-fancer.sock';
+const SOCK = await resolveSocketPath();
 const ROUND_SEC = 900;
 const timeout = (p, ms, label) => Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error('timeout ' + label)), ms))]);
 const get = async (url) => {

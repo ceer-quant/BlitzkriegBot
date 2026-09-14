@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /** Tight probe: is the panel price feed live, and does it lag real CLOB? */
 import net from 'net';
-const SOCK = (process.env.TMPDIR || '') + 'clodds-core-fancer.sock';
+import { resolveSocketPath } from './lib/core-socket.mjs';
+const SOCK = await resolveSocketPath();
 const RS = 900;
 const rpc = (m, p = {}) => new Promise((res) => {
   const c = net.connect(SOCK); let b = ''; let d = false;

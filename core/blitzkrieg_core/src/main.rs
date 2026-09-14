@@ -109,10 +109,19 @@ struct Args {
     fill_prob_bps: Option<u32>,
 }
 
-fn default_socket() -> String {
-    let user = std::env::var("USER").unwrap_or_else(|_| "clodds".into());
+/// Canonical socket name. `clodds-core-<user>.sock` is the pre-rename name, still
+/// discoverable by clients for one release (see `blitzkrieg_ui_kit`).
+pub const SOCKET_PREFIX: &str = "blitzkrieg-core";
+pub const LEGACY_SOCKET_PREFIX: &str = "clodds-core";
+
+fn socket_path_for(prefix: &str) -> String {
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
     let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
-    format!("{dir}/clodds-core-{user}.sock").replace("//", "/")
+    format!("{dir}/{prefix}-{user}.sock").replace("//", "/")
+}
+
+fn default_socket() -> String {
+    socket_path_for(SOCKET_PREFIX)
 }
 
 fn parse_args() -> Args {
