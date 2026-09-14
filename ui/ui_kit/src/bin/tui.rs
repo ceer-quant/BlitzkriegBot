@@ -2,11 +2,11 @@
 //!
 //! Usage: `ui_kit_tui [--socket <path>] [--interval-sec N] [--once]`
 
-use blitzkrieg_ui_kit::{default_socket_path, tui, IpcClient};
+use blitzkrieg_ui_kit::{resolve_socket_path, tui, IpcClient};
 use std::time::Duration;
 
 fn main() {
-    let mut socket = default_socket_path();
+    let mut socket = resolve_socket_path();
     let mut interval = 2u64;
     let mut once = false;
     let mut args = std::env::args().skip(1);

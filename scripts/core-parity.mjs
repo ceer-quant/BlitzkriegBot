@@ -18,14 +18,15 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { mkdtempSync } from 'fs';
 import { BlitzkriegCoreClient } from '../dist/core/blitzkrieg-core-client.js';
+import { scratchSocketPath } from './lib/core-socket.mjs';
 
-const SOCK = join(tmpdir(), `clodds-core-parity-${process.pid}.sock`);
+const SOCK = scratchSocketPath('parity');
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 
 // The core persists its trade log at a RELATIVE path, so every synthetic order
 // this harness places would be appended to the real data/trades/trades.jsonl.
 // Run each core in a throwaway working directory to keep test data out of prod.
-const WORKDIR = mkdtempSync(join(tmpdir(), 'clodds-parity-'));
+const WORKDIR = mkdtempSync(join(tmpdir(), 'blitzkrieg-parity-'));
 
 let failures = 0;
 function check(name, cond, detail = '') {
@@ -130,7 +131,7 @@ try {
 }
 
 // ── Position/exit layer (auto-exits ON) on a separate core instance ──────────
-const POS_SOCK = join(tmpdir(), `clodds-core-parity-pos-${process.pid}.sock`);
+const POS_SOCK = scratchSocketPath('parity-pos');
 const pc = new BlitzkriegCoreClient({
   binaryPath: BIN,
   socketPath: POS_SOCK,
@@ -172,7 +173,7 @@ try {
 }
 
 // ── P3: self-driving engine (Node feeds data, Rust decides and trades) ────────
-const ENG_SOCK = join(tmpdir(), `clodds-core-parity-eng-${process.pid}.sock`);
+const ENG_SOCK = scratchSocketPath('parity-eng');
 const ec = new BlitzkriegCoreClient({
   binaryPath: BIN,
   socketPath: ENG_SOCK,
