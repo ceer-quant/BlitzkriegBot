@@ -209,25 +209,55 @@ fn policy_rejects_bad_paths() {
 
 #[test]
 fn a_library_without_the_version_symbol_fails_negotiation() {
-    // A shared object that is NOT a strategy: libc itself exports plenty but
-    // never bk_strategy_abi_version, so it is rejected as v1/pre-v2 rather than
-    // misread. Locating libc is best-effort; skip where unavailable.
-    let candidates = [
-        "/usr/lib/x86_64-linux-gnu/libc.so.6",
-        "/usr/lib/libc.so.6",
-        "/lib/x86_64-linux-gnu/libc.so.6",
-        "/usr/lib/aarch64-linux-gnu/libc.so.6",
+    // A real shared object that is NOT a strategy: libc exports plenty but never
+    // bk_strategy_abi_version, so after dlopen it is rejected as v1/pre-v2
+    // rather than misread. The on-disk name is `libc.so.6`, which the path
+    // policy would reject on extension; copy it to a `.so` temp path so the test
+    // actually exercises the VERSION negotiation step. Best-effort: skip on
+    // hosts without such a file (e.g. macOS, whose system libs are not plain .so).
+    // A real shared object that is NOT a strategy: it exports plenty but never
+    // bk_strategy_abi_version, so after dlopen it is rejected as v1/pre-v2
+    // rather than misread. On Linux the on-disk name is `libc.so.6`, which the
+    // extension policy would reject, so it is copied to a `.so` temp path; on
+    // macOS libSystem is already a `.dylib` and passes the policy as-is.
+    let candidates: &[(&str, bool)] = &[
+        ("/usr/lib/x86_64-linux-gnu/libc.so.6", true),
+        ("/usr/lib/libc.so.6", true),
+        ("/lib/x86_64-linux-gnu/libc.so.6", true),
+        ("/usr/lib/aarch64-linux-gnu/libc.so.6", true),
+        ("/usr/lib/libSystem.B.dylib", false),
+        ("/usr/lib/libSystem.dylib", false),
     ];
-    let Some(c) = candidates.into_iter().find(|c| Path::new(c).exists()) else {
-        eprintln!("skipping: no libc candidate on this host (macOS system libs are not plain .so)");
+    let Some((src, needs_copy)) = candidates.into_iter().find(|(c, _)| Path::new(c).exists()) else {
+        eprintln!("skipping: no non-strategy shared library on this host");
         return;
     };
+    let tmp;
+    let target = if *needs_copy {
+        tmp = std::env::temp_dir().join(format!(
+            "bk_non_strategy_{}_{}.so",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::copy(src, &tmp).expect("copy system lib to temp .so");
+        tmp.as_path()
+    } else {
+        Path::new(src)
+    };
+
     use blitzkrieg_core::strategy_engine::loader::LoadOutcome;
-    let msg = match load_foreign(Path::new(c)) {
-        Err(LoadOutcome::Failed { reason, .. }) | Err(LoadOutcome::Rejected { reason, .. }) => reason,
-        Ok(_) => panic!("non-strategy library must be rejected"),
-        // load_foreign never returns an Err(Loaded), but the enum allows it.
+    let result = load_foreign(target);
+    if *needs_copy {
+        let _ = std::fs::remove_file(target);
+    }
+    let msg = match result {
+        Err(LoadOutcome::Failed { reason, .. }) => reason,
+        Err(LoadOutcome::Rejected { reason, .. }) => panic!("expected a negotiation failure, policy rejected first: {reason}"),
         Err(LoadOutcome::Loaded { name, .. }) => panic!("impossible load outcome for {name}"),
+        Ok(_) => panic!("non-strategy shared object must fail negotiation"),
     };
     assert!(msg.contains("abi_version") || msg.contains("v1"), "unexpected: {msg}");
 }
