@@ -149,6 +149,20 @@ pub async fn run(
         config.mode,
         crate::CORE_VERSION
     );
+    // Log the EFFECTIVE risk/exit tuning at boot: a stale binary silently ran the
+    // old wide stop for a whole soak; this makes the deployed parameters visible
+    // in the run log without trusting that the running file matches current source.
+    let ex = &config.positions.exit;
+    eprintln!(
+        "exit tuning: stop_loss={}% take_profit={}% trail_min={}% trail_arm={}% min_time_left={}s force_exit={}s maker_timeout={}ms",
+        ex.stop_loss_pct,
+        ex.take_profit_pct,
+        ex.min_trail_pct,
+        ex.trailing_min_high_pct,
+        ex.min_time_left_sec,
+        ex.force_exit_sec,
+        config.default_maker_timeout_ms
+    );
 
     // Maintenance loop: maker→taker escalation + pending-fill retry, and (when
     // the self-driving engine is enabled) a periodic evaluate→place cycle.

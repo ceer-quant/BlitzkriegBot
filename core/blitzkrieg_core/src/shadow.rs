@@ -623,20 +623,105 @@ fn cfg_for(base: &ExitConfig, g: &GridPoint) -> ExitConfig {
     c
 }
 
-/// Default grid matching the earlier offline study (tight stop vs loose).
 /// Default grid for the exit walk-forward study. The first point is the OLD
-/// shipped config, the second is the current shipped default (see MIGRATION_LOG
-/// §27: Node-aligned profit side — TP100 backstop + trail10 — with the stop-loss
-/// tightened to 15). The rest probe the neighbouring stop/trail space.
+/// shipped config (SL50, the wide stop the pre-tuning binary ran); the second is
+/// the ACTUAL current shipped default (`ExitConfig::default`: SL12 + trail8, see
+/// exit_policy.rs). The remaining points probe the neighbouring stop/trail space.
+///
+/// `shipped` MUST stay in sync with `ExitConfig::default`: an earlier grid
+/// mislabelled an SL15/trail10 point as "shipped" and omitted the real SL12/trail8
+/// cell, so the offline study never scored what production actually trades and a
+/// stale wide-stop binary went unnoticed.
 pub fn default_grid() -> Vec<GridPoint> {
     vec![
         GridPoint { name: "old-SL50/trail10".into(), stop_loss_pct: dec!(50), min_trail_pct: dec!(10), trailing_min_high_pct: dec!(15) },
-        GridPoint { name: "shipped-SL15/trail10".into(), stop_loss_pct: dec!(15), min_trail_pct: dec!(10), trailing_min_high_pct: dec!(15) },
-        GridPoint { name: "SL20/trail10".into(), stop_loss_pct: dec!(20), min_trail_pct: dec!(10), trailing_min_high_pct: dec!(15) },
+        GridPoint { name: "shipped-SL12/trail8".into(), stop_loss_pct: dec!(12), min_trail_pct: dec!(8), trailing_min_high_pct: dec!(15) },
         GridPoint { name: "SL12/trail10".into(), stop_loss_pct: dec!(12), min_trail_pct: dec!(10), trailing_min_high_pct: dec!(15) },
         GridPoint { name: "SL15/trail8".into(), stop_loss_pct: dec!(15), min_trail_pct: dec!(8), trailing_min_high_pct: dec!(15) },
-        GridPoint { name: "SL15/trail12/arm10".into(), stop_loss_pct: dec!(15), min_trail_pct: dec!(12), trailing_min_high_pct: dec!(10) },
+        GridPoint { name: "SL10/trail8".into(), stop_loss_pct: dec!(10), min_trail_pct: dec!(8), trailing_min_high_pct: dec!(15) },
+        GridPoint { name: "SL20/trail10".into(), stop_loss_pct: dec!(20), min_trail_pct: dec!(10), trailing_min_high_pct: dec!(15) },
     ]
+}
+
+/// One cell's train/test score in the frozen holdout study.
+#[derive(Debug, Clone)]
+pub struct HoldoutRow {
+    pub name: String,
+    pub train_pnl: Decimal,
+    pub train_wins: usize,
+    pub test_pnl: Decimal,
+    pub test_wins: usize,
+}
+
+/// Result of choosing an exit cell ONCE on the early window and applying it
+/// frozen (no per-record re-optimization) to the later window — a stricter
+/// overfit check than the adaptive expanding-window `walk_forward`.
+#[derive(Debug, Clone)]
+pub struct HoldoutResult {
+    pub rows: Vec<HoldoutRow>,
+    /// Cell with the highest training PnL.
+    pub train_best: String,
+    /// That cell's PnL over the unseen test window.
+    pub frozen_test_pnl: Decimal,
+    pub train_n: usize,
+    pub test_n: usize,
+}
+
+/// Strict chronological holdout. `records` MUST be time-ordered (ascending); the
+/// first `train_frac` fraction is the training window, the rest the test window.
+pub fn frozen_holdout(
+    records: &[ShadowRecord],
+    base: &ExitConfig,
+    grid: &[GridPoint],
+    train_frac: f64,
+) -> HoldoutResult {
+    let cut = ((records.len() as f64) * train_frac).round() as usize;
+    let cut = cut.clamp(1, records.len().saturating_sub(1));
+    let (train, test) = records.split_at(cut);
+
+    let mut rows = Vec::with_capacity(grid.len());
+    for g in grid {
+        let cfg = cfg_for(base, g);
+        let mut train_pnl = Decimal::ZERO;
+        let mut train_wins = 0usize;
+        for r in train {
+            let p = replay(r, &cfg).pnl;
+            train_pnl += p;
+            if p > Decimal::ZERO {
+                train_wins += 1;
+            }
+        }
+        let mut test_pnl = Decimal::ZERO;
+        let mut test_wins = 0usize;
+        for r in test {
+            let p = replay(r, &cfg).pnl;
+            test_pnl += p;
+            if p > Decimal::ZERO {
+                test_wins += 1;
+            }
+        }
+        rows.push(HoldoutRow {
+            name: g.name.clone(),
+            train_pnl,
+            train_wins,
+            test_pnl,
+            test_wins,
+        });
+    }
+
+    let best_idx = rows
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, row)| row.train_pnl)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    HoldoutResult {
+        train_best: rows[best_idx].name.clone(),
+        frozen_test_pnl: rows[best_idx].test_pnl,
+        rows,
+        train_n: train.len(),
+        test_n: test.len(),
+    }
 }
 
 /// Bucketed realized-PnL analysis over recorded trades — the answerable half of
@@ -918,6 +1003,29 @@ mod tests {
         assert_eq!(out.oos_count, 2);
         // The in-sample list is named and ordered by the grid.
         assert_eq!(out.in_sample[0].0, default_grid()[0].name);
+    }
+
+    #[test]
+    fn frozen_holdout_picks_on_train_and_scores_test_once() {
+        let recs: Vec<ShadowRecord> = (0..6)
+            .map(|i| {
+                // Alternating loser/winner paths, time-ordered via entered_at.
+                let end = if i % 2 == 0 { 0.30 } else { 0.62 };
+                let mut r = rec_with_path(dec!(0.40), &[(0, 0.40), (1000, end)]);
+                r.entered_at_ms = i as i64 * 1000;
+                r
+            })
+            .collect();
+        let grid = default_grid();
+        let out = frozen_holdout(&recs, &ExitConfig::default(), &grid, 0.5);
+        assert_eq!(out.train_n, 3);
+        assert_eq!(out.test_n, 3);
+        assert_eq!(out.rows.len(), grid.len());
+        // The reported frozen score must equal the train-best row's test score.
+        let best = out.rows.iter().find(|r| r.name == out.train_best).unwrap();
+        assert_eq!(out.frozen_test_pnl, best.test_pnl);
+        // The shipped cell is present and scored (regression: it used to be absent).
+        assert!(out.rows.iter().any(|r| r.name == "shipped-SL12/trail8"));
     }
 
     #[test]
