@@ -57,6 +57,8 @@ nohup node scripts/soak-monitor.mjs --hours 12 --interval-sec 300 >> data/soak/m
 内核起动参数（由 `blitzkrieg-core-runner.ts` 拼装，勿手改）：
 `--engine --feed-ws --assets BTC,ETH,SOL,XRP --round-sec 900 --min-round-age 30
 --min-time-left 180 --max-positions 2 --max-order-notional 6`
+（可选 `--strategy-limit <name>:<maxOpen>:<maxNotional>` 由环境变量 `HFT_STRATEGY_LIMITS`
+逗号分隔透传，P-1.1；不设置则无该参数、行为不变。）
 
 ## 4. 当前策略参数（`core/blitzkrieg_core/src/exit_policy.rs::ExitConfig::default()`）
 
@@ -108,6 +110,11 @@ node scripts/final-exit-opt.mjs              # 出场参数全网格+稳健性
 
 - **每 2 小时 soak 健康巡检**（本会话既定目标，已配 ZCode 定时任务）：检查进程存活、`/health` 200、
   崩溃/孤儿告警、账本增长与净盈亏趋势。
+- **P-1.1 多策略执行打通**：**已完成**（`MIGRATION_LOG §34`）——`engine.rs` 成为多策略宿主，
+  订单/持仓带 `strategy` 标签，`engine.stats.strategies[]` 按策略分账，`--strategy-limit` 可选限额；
+  用户策略（dylib）注册后默认禁用需显式 `strategy.enable`。行为等价已过 parity 硬门槛。
+  生产下次内核重启后生效。
+- **P-1.2/1.3（下一项）**：事件驱动回测器 + `DataSource` 数据抽象（`ROADMAP_INSTITUTIONAL.md` §4/§5）。
 - **P0.7**：运行期 dylib 热加载（C-ABI vtable + 版本协商 + catch_unwind）——暂缓。
 - **实盘未验证**：全程 DRY；live 链路（Poly1271 签名/授权/启动清算）**首次真实下单才能验证**。
   尤其 **live 启动孤儿扫单**只在 DRY 验证过，首次 live 启动须确认日志 `startup sweep cancelled N orphan order(s)`。

@@ -123,7 +123,21 @@ rustc --crate-type=dylib user_layer/strategies/dog_strategy.rs \
 加载器会先做策略检查：文件名含 `key/secret/private/credential` 或非 `.so/.dylib/.dll` 一律拒绝。
 
 ### 3.3 内建（内核自带）
-`spread_arb` 已作为 `builtins::SpreadArbStrategy` 注册在策略引擎中，可用 `strategy.list` / `strategy.enable` 查询与开关。
+`spread_arb` 是内建策略（`strategies::SpreadArbBuiltin`，宿主化实现），可用 `strategy.list` / `strategy.enable` 查询与开关。
+加载进自驱动引擎的用户策略**默认禁用**：`strategy.list` 会显示它，但必须 `strategy.enable` 之后才会参与下单。
+
+### 3.4 多策略并发（P-1.1）
+自驱动引擎遍历**所有已启用**的策略产生候选单，然后统一过共享闸门：
+- 回合时序（`--min-round-age` / `--min-time-left`）与现货动量闸门对所有策略一视同仁；
+- **每个 token 每个评估周期至多一单**（按注册顺序，先到先得），避免多策略抢同一 token；
+- 仓位/名义金额仍受全局风控与 `--max-positions` 约束；
+- 可选的 **per-strategy 限额**（`--strategy-limit <name>:<max_open_positions>:<max_notional_usd>`，
+  可重复；`-` 或空段表示该维度不限）。生产由环境变量 **`HFT_STRATEGY_LIMITS`**（逗号分隔）透传到内核。
+  超限的入场**在下单层之前**被拒，计入
+  `engine.stats.strategyLimitRejected` 与该策略的 `limitRejected`（每次评估尝试计一次，语义同 `placeRejected`）。
+- `engine.stats.strategies[]` 给出每策略的会话账本：`openPositions`/`openNotionalUsd`（实况敞口）、
+  `ordersPlaced`/`ordersRejected`/`limitRejected`（入场上报）、`closedTrades`/`wins`/`losses`/`feesUsd`/`netPnlUsd`
+  （已实现盈亏）。默认无任何限额配置 → 行为与单策略时代一致。
 
 ## 4. 生命周期与开关
 

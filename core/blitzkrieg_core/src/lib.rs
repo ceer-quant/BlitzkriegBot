@@ -37,6 +37,7 @@ pub mod shadow;
 pub mod shadow_evolution;
 pub mod signal;
 pub mod sim;
+pub mod strategies;
 pub mod strategy_engine;
 pub mod trade_db;
 
