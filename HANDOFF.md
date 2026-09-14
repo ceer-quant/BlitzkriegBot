@@ -113,7 +113,8 @@ node scripts/final-exit-opt.mjs              # 出场参数全网格+稳健性
 - **P-1.1 多策略执行打通**：**已完成**（`MIGRATION_LOG §34`）——`engine.rs` 成为多策略宿主，
   订单/持仓带 `strategy` 标签，`engine.stats.strategies[]` 按策略分账，`--strategy-limit` 可选限额；
   用户策略（dylib）注册后默认禁用需显式 `strategy.enable`。行为等价已过 parity 硬门槛。
-  生产下次内核重启后生效。
+  已合并 main/develop（PR #9 → `ab6a13c`），并随 **2026-09-14 18:53 dry 内核重启**生效
+  （新 pid 36014，`engine.stats.strategies[]` 已在线；证据见 `MIGRATION_LOG §34` 生效说明）。
 - **P-1.2/1.3（下一项）**：事件驱动回测器 + `DataSource` 数据抽象（`ROADMAP_INSTITUTIONAL.md` §4/§5）。
 - **P0.7**：运行期 dylib 热加载（C-ABI vtable + 版本协商 + catch_unwind）——暂缓。
 - **实盘未验证**：全程 DRY；live 链路（Poly1271 签名/授权/启动清算）**首次真实下单才能验证**。
@@ -122,7 +123,7 @@ node scripts/final-exit-opt.mjs              # 出场参数全网格+稳健性
   设 `HFT_MAX_SHARES=4`（或内核 `--max-shares 4`）把每笔降到 ~4 股（≈$1.8），两仓约需 $3.6。
   （CLI 已实现，见 MIGRATION_LOG §31。）
 - **`OpenPosition` 持久化**：**已实现**（MIGRATION_LOG §32）——`position_db.rs` + `restore_positions()`，
-  与 §29 订单恢复同类闭环。生产下次内核重启后生效（当前进程仍跑旧二进制）。
+  与 §29 订单恢复同类闭环。已随 2026-09-14 18:53 内核重启加载新二进制。
 - **胜率 vs 盈亏比**：不可兼得（§28）。当前取舍：盈亏比优先（PF~2.9，WR~63–67%）。
 - `ui/hft.html` 在 .gitignore 中（历史遗留），迁移后仍在磁盘。
 

@@ -971,6 +971,12 @@ HFT_MAX_SHARES=4 HFT_MIN_SHARES=4 node dist/index.js   # /crypto-hft start
 - 无 `--strategy-limit`、无动态库 → 生产行为与改动前一致。
 - 动态库策略**注册即禁用**，需显式 `strategy.enable`；Live 未启用、未改任何凭证。
 
-### 生效说明
-生产当前进程跑的是**旧二进制**；本改动在下次内核重启后生效（重启后 `engine.stats` 将出现
-`strategies[]` 分账块，`/health` 与 DRY 模式不变）。
+### 生效说明（已重启验证）
+生产 dry 内核已于 2026-09-14 18:53 重启（本地门禁 + PR #9 CI 全绿后，按 AI_WORKFLOW §2.1 第 8 条授权）：
+
+- 新进程 pid 36014（`--mode dry`）；`core.ready` → `mode: "Dry"`，`version: 0.1.0`。
+- `engine.stats` 已出现 **`strategies[]`**：`[{name:"spread_arb", enabled:true, source:"builtin", 各项计数 0}]`
+  与新增计数器 `strategyLimitRejected: 0`；重启后计数归零属预期（分账是会话级）。
+- 重启后 feed 正常：25s 内 `tops=32170`、`books=88`、`spots=761`、`evaluations=615`，无新增 ERROR/WARN。
+- 重启前状态快照：`data/backup-20260914-185256-prerestart-p1.1/`（positions/orders/trades/evolution/shadow/signals）。
+- 未配置 `--strategy-limit`、未加载任何动态库 → 生产行为与改动前一致；Live 未启用。
