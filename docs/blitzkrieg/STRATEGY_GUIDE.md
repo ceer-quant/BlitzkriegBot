@@ -23,63 +23,86 @@ grep -r "POLYMARKET_PRIVATE_KEY" user_layer/strategies/   # 应为空
 grep -rE "reqwest|hyper|http" user_layer/strategies/      # 应为空
 ```
 
-## 1.5 冻结的 C ABI（动态库）
+## 1.5 冻结的 C ABI v2（动态库）
 
-用户层策略以共享库（`.dylib`/`.so`/`.dll`）交付时，走 **冻结的 C ABI v1**（crate `blitzkrieg-strategy-api`，`#[repr(C)]`，无 Rust 特有类型）：
+用户层策略以共享库（`.dylib`/`.so`/`.dll`）交付时，走 **冻结的 C ABI v2**（crate `blitzkrieg-strategy-api`，`#[repr(C)]`，无 Rust 特有类型）。v2 是**全功能**契约：外挂策略与内建策略实现同一个 `EngineStrategy`，「外挂」只是加载方式不同。设计全文见 [ABI_V2_DESIGN.md](ABI_V2_DESIGN.md)。
 
 ```c
-uint32_t bk_strategy_abi_version(void);          // 版本协商（可选但推荐）
-const BkStrategyVtable* bk_strategy_create(void);// 工厂（必须）
+uint32_t bk_strategy_abi_version(void);           // 必须 == 2（协商先于读 vtable）
+const BkStrategyVtable* bk_strategy_create(void); // 工厂（必须）
+void bk_strategy_free_string(char* p);            // 释放本库产出的 JSON（同一分配器）
 ```
 ```c
-typedef struct { const char* symbol; const char* asset; const char* best_bid;
-                 const char* best_ask; const char* mid; int64_t timestamp_ms; } BkTick;
-typedef struct { int side; /*0 None,1 Buy,2 Sell*/ const char* symbol;
-                 const char* price; const char* size; } BkSignal;
-typedef struct { const char* name; const char* version; uint32_t abi_version;
-                 BkHandle (*create)(void); void (*destroy)(BkHandle);
-                 BkSignal (*on_tick)(BkHandle, const BkTick*);
-                 void (*on_round)(BkHandle, int64_t); } BkStrategyVtable;
+typedef struct { const char* price; const char* size; } BkLevel;
+typedef struct {
+    const char* symbol; const char* asset;
+    const BkLevel* bids; size_t bid_count;
+    const BkLevel* asks; size_t ask_count;
+    const char *best_bid, *best_ask, *mid, *bid_depth, *ask_depth,
+               *obi, *spread, *spread_pct;
+    int64_t timestamp_ms;
+} BkBookView;
+typedef struct {
+    const char* name; const char* version;
+    uint32_t abi_version; uint32_t min_abi;
+    BkHandle (*create)(void); void (*destroy)(BkHandle);
+    void (*on_book)(BkHandle, const BkBookView*);
+    void (*on_round)(BkHandle, const BkRound*);
+    char* (*evaluate)(BkHandle, const BkRoundView*);
+    char* (*confirmed_tokens)(BkHandle);
+    char* (*take_breaks)(BkHandle);
+    char* (*diagnostics)(BkHandle);
+    int32_t (*on_config)(BkHandle, const char* json);
+    int32_t (*on_hot_params)(BkHandle, const char* json);
+    char* (*knobs)(BkHandle);
+} BkStrategyVtable;
 ```
+
+`evaluate` 返回由**本库分配**的 JSON 字符串（`bk_string_out`），结构为
+`{"entries":[{"token","price","reason"}], "exits":[{"token","reason"}], "breaks":[{"token","broken_price"}]}`，
+内核复制后用本库的 `bk_strategy_free_string` 归还——分配器不跨边界混用。
 
 规则（**必须**）：
-- 字符串为借用的 NUL 结尾指针，**仅在调用期间有效**；内核立即复制。
-- 价格/数量用**十进制字符串**（避免浮点漂移）。
-- 策略拥有自己的 `handle`；内核不释放，只在卸载时调用 `destroy`。
-- 策略**禁止** I/O、凭据、venue 调用——边界上只传 tick 与 signal。
-- 变更结构体/vtable **必须**递增 `BK_ABI_VERSION`；内核加载时校验，不匹配即拒绝。
+- 借入的字符串/数组/视图**仅在调用期间有效**；策略需要保留就自己复制。
+- 价格/数量一律用**十进制字符串**（避免浮点漂移）。
+- 入场**不带张数**（内核 `compute_shares` 定张数），出场**不带价格**（内核按盘口定价）。
+- 策略拥有自己的 `handle`；内核不直接释放，只在卸载时调用 `destroy`。
+- 策略**禁止** I/O、凭据、网络、OME/UDS——边界上只传只读盘口/回合视图与意图数据。
+- 协商顺序固定：路径策略 → dlopen → `bk_strategy_abi_version()`（必须为 2，**无 v1 兼容层**）→ vtable 校验；v1 库在版本步即被拒绝。
+- 变更结构体/vtable **必须**递增 `BK_ABI_VERSION`。
 
-最小实现见 `user_layer/strategies/dog_strategy.rs`（含 `bk_strategy_create` 与 `bk_strategy_abi_version`），其 crate 见 `user_layer/strategies/Cargo.toml`：
-```bash
-cd user_layer/strategies && cargo build --release   # → libdog_strategy.{dylib,so}
-```
+两个可直接参考的真实外挂：
+- `user_layer/strategies/dog_strategy.rs`（疯狗策略）：
+  ```bash
+  cd user_layer/strategies && cargo build --release   # → target/release/libdog_strategy.{dylib,so}
+  ```
+- `user_layer/parity_strategy/parity_strategy.rs`（对拍策略，与内树路径共用 `parity_logic`）。
 
 ## 2. 契约
 
+内核只有**一个**全功能策略 trait `EngineStrategy`（内建与外挂共用）：
+
 ```rust
-pub struct MarketTick {
-    pub symbol: String,      // 代币/合约标识
-    pub asset: String,       // BTC/ETH/...
-    pub best_bid: f64,
-    pub best_ask: f64,
-    pub mid: f64,
-    pub timestamp_ms: i64,
-}
-
-pub enum Signal {
-    Buy  { symbol: String, price: f64, size: f64 },
-    Sell { symbol: String, price: f64 },
-    Hold,
-}
-
-pub trait Strategy: Send + Sync {
+pub trait EngineStrategy: Send + Sync {
     fn name(&self) -> &str;
-    fn on_tick(&mut self, tick: &MarketTick) -> Option<Signal>;
-    fn on_round(&mut self, slot: i64) {}   // 回合切换时清状态（可选）
+    fn on_book(&mut self, token_id: &str, snap: &OrderbookSnapshot, now_ms: i64);
+    fn on_round(&mut self, slot: i64);
+
+    fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal>;
+
+    // 以下均为可选（有默认实现）：
+    fn take_exit_intents(&mut self) -> Vec<StrategyExitIntent>;   // 平仓意图
+    fn take_breaks(&mut self) -> Vec<(String, Decimal)>;          // 趋势破位
+    fn confirmed_tokens(&self) -> HashSet<String>;                // 自证
+    fn diagnostics(&self, ctx: &StrategyCtx<'_>) -> Vec<Value>;   // 诊断
+    fn set_hot_params(&mut self, handle: Arc<ArcSwap<MutableParams>>); // 影子进化热参
+    fn on_config(&mut self, trend: &TrendConfig, arb: &SpreadArbConfig); // 配置
 }
 ```
 
-内核会在调用 `on_tick` 之外执行 **信号校验闸**（`validate_signal`）：价格必须在 (0,1]、symbol 必须与 tick 一致、size 必须为正。非法信号被丢弃，不会进入风控/下单。
+`StrategyCtx` 提供本轮 `markets`、`round_slot/time_left/now`，以及按 token 取**仍新鲜**的盘口 `fresh_book(token)`。
+策略返回的全部是**候选/意图**：内核随后统一执行回合时序、现货动量、单 token 去重、定张数、风控/资金/签名/下单。
+平仓意图经 `ExitReason::StrategySignal` 路由，即使 `auto_exits_enabled=false` 也会被处理（类似手动平仓），但仍受 kill switch / 风控 / 去重 / 持仓存在性约束。
 
 ## 3. 三种形态
 
@@ -99,28 +122,26 @@ max_positions = 2
 ```
 你只填参数，内核套用内建模板。TOML 天然无副作用，最安全。
 
-### 3.2 Rust 源文件（动态库）
-`user_layer/strategies/dog_strategy.rs`（见该文件）：
+### 3.2 Rust 动态库（v2，全功能）
+`user_layer/strategies/dog_strategy.rs` 是最小完整范例（独立 nested workspace，依赖 `blitzkrieg-strategy-api`）：
 ```rust
-pub struct DogStrategy { pub buy_price: f64, pub take_profit: f64, pub stop_loss: f64 }
-impl DogStrategy {
-    pub fn on_tick(&mut self, tick: &MarketTick) -> Option<Signal> {
-        if tick.mid <= self.buy_price {
-            Some(Signal::Buy { symbol: tick.symbol.clone(), price: self.buy_price, size: 10.0 })
-        } else { None }
-    }
+unsafe extern "C" fn evaluate(handle: BkHandle, view: *const BkRoundView) -> *mut c_char {
+    // 遍历 view.markets 的 up/down token，读 on_book 缓存的盘口状态，
+    // 返回 {"entries":[...], "exits":[...], "breaks":[...]}；JSON 用
+    // bk_string_out 分配，内核用本库 bk_strategy_free_string 归还。
 }
 ```
-编译为动态库后由内核加载：
+编译（cdylib 由 cargo 产出，**不是** 直接 `rustc` 单文件）：
 ```bash
-rustc --crate-type=dylib user_layer/strategies/dog_strategy.rs \
-      -o user_layer/strategies/libdog_strategy.dylib
+(cd user_layer/strategies && cargo build --release --locked)
+# → user_layer/strategies/target/release/libdog_strategy.{dylib,so,dll}
 ```
-加载（需内核以 `--features strategy-loading` 编译）：
+加载（`strategy-loading` 自 E7 起**默认开启**；无需另加 feature）：
 ```
-/crypto-hft ... → IPC: { "method": "strategy.load", "params": { "path": "user_layer/strategies/libdog_strategy.dylib" } }
+/crypto-hft ... → IPC: { "method": "strategy.load", "params": { "path": ".../libdog_strategy.dylib" } }
 ```
-加载器会先做策略检查：文件名含 `key/secret/private/credential` 或非 `.so/.dylib/.dll` 一律拒绝。
+加载器协商顺序：路径策略 → dlopen → `bk_strategy_abi_version()==2`（v1 直接拒绝）→ vtable/必需钩子校验 → `create()`。
+文件名含 `key/secret/private/credential/.env` 或非 `.so/.dylib/.dll` 一律在 dlopen 之前拒绝。
 
 ### 3.3 内建（内核自带）
 `spread_arb` 是内建策略（`strategies::SpreadArbBuiltin`，宿主化实现），可用 `strategy.list` / `strategy.enable` 查询与开关。
@@ -151,9 +172,10 @@ rustc --crate-type=dylib user_layer/strategies/dog_strategy.rs \
 
 ## 5. 常见问题
 
-- **为什么我的策略能编译但不下单？** 信号只表达意图，是否成交取决于内核的风控/资金/入场闸门（例如 `min-time-left`、入场上限、资金预扣）。
-- **策略能自己平仓吗？** 不能。平仓由内核的持仓/出场策略负责；策略只发 `Buy`/`Sell`/`Hold`。
-- **能访问盘口深度吗？** `MarketTick` 目前给最优买卖价与 mid；更深的盘口将随行情层扩展逐步加入契约（保持向后兼容）。
+- **为什么我的策略能编译但不下单？** 信号只表达意图，是否成交取决于内核的风控/资金/入场闸门（例如 `min-time-left`、入场上限、资金预扣）。入场不带张数、出场不带价格——都由内核按盘口与配置决定。
+- **策略能自己平仓吗？** 能表达**出场意图**（v2 `exits` / `take_exit_intents`，记录为 `ExitReason::strategy_signal`），但平仓本身仍由内核执行（按盘口定价、live 卖单去重、风控/账本/签名）。即使关闭了自动出场（`auto_exits_enabled=false`），策略出场也会被处理，语义同手动平仓；没有持仓的 token 会被丢弃。
+- **能访问盘口深度吗？** v2 可以：`BkBookView` 携带**全档位** `bids/asks`（price/size 字符串）以及 `bid_depth/ask_depth/obi/spread/spread_pct`，每次盘口回调都送达。`confirmed_tokens`/`diagnostics` 可据此自证看到的深度。
+- **v1 的策略库还能加载吗？** 不能，v2 是干净断点（无兼容层；v1 从未默认启用、无外部消费者，见 DECISIONS_PENDING D-15）。请用 strategy-api v2（`bk_strategy_abi_version()==2`）重新编译。
 
 ## 6. 回测你的策略（P-1.2 / P-1.3）
 

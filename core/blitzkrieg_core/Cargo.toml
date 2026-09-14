@@ -16,11 +16,13 @@ path = "src/lib.rs"
 # The core itself is market-agnostic and has NO market SDK dependency. A market
 # is supplied by an extension crate, linked in via a feature (see below). The
 # default ships with the official Polymarket extension.
-default = ["polymarket"]
+default = ["polymarket", "strategy-loading"]
 # Link the official Polymarket market extension as the operative market.
 polymarket = ["dep:polymarket-extension"]
-# Dynamic user-layer strategy loading (shared libraries). Off by default so the
-# core builds without it; enable to load `strategy/*.dylib` at runtime.
+# Dynamic user-layer strategy loading (shared libraries). On by default since
+# E7 (#38): the external v2 strategy interface is the SAME full contract as an
+# in-tree strategy, and CI builds/drives a real cdylib. Exclude with
+# `--no-default-features --features polymarket`.
 strategy-loading = ["dep:libloading"]
 
 [dependencies]
@@ -56,4 +58,7 @@ libc = "0.2"
 
 [dev-dependencies]
 rust_decimal_macros = "1"
+# Shared deterministic algorithm used by the E7 in-tree-vs-dylib parity harness
+# (tests/foreign_parity.rs). Dev-only: never linked into the shipped library.
+parity-logic = { path = "../../user_layer/parity_logic" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "sync", "time"] }

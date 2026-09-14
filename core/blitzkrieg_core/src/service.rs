@@ -11,7 +11,7 @@ use crate::shadow_evolution::{EvolutionOutcome, EvolutionStatus, MutableParams, 
 use crate::risk::{LossBreaker, RiskConfig, RiskGate};
 use crate::sim::{rests_on_book, Book};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
@@ -210,13 +210,14 @@ pub struct Core {
     /// Exit reason chosen for an in-flight closing SELL, keyed by token id, so a
     /// full sell fill closes the position with the right reason.
     exit_reasons: HashMap<TokenId, ExitReason>,
+    /// Strategy close intents drained from the engine in `engine_evaluate` and
+    /// consumed by the shared exit-submission path in `run_exit_checks`.
+    strategy_exits: Vec<crate::strategies::StrategyExitIntent>,
     /// Optional self-driving engine (P3). When present, book/spot/round events
     /// flow in and the core evaluates strategies and places orders on its own.
     engine: Option<crate::engine::Engine>,
     /// Optional Rust-native feed handle (P4); set when `--feed-ws` is enabled.
     feed: Option<std::sync::Arc<dyn blitzkrieg_market_api::SubscriptionControl>>,
-    /// Kernel strategy engine (user-layer strategy logic runs behind it).
-    strategy_engine: crate::strategy_engine::StrategyEngine,
     /// Extension registry (plugin lifecycle).
     extensions: crate::extension::ExtensionRegistry,
     /// Shadow Evolution (opt-in; disabled by default).
@@ -310,9 +311,9 @@ impl Core {
             positions,
             books: HashMap::new(),
             exit_reasons: HashMap::new(),
+            strategy_exits: Vec::new(),
             engine: None,
             feed: None,
-            strategy_engine: crate::strategy_engine::StrategyEngine::new(),
             extensions: {
                 let mut reg = crate::extension::ExtensionRegistry::new();
                 // Built-in example extension (installed, not enabled by default).
@@ -438,57 +439,46 @@ impl Core {
     }
 
     // ── Strategy engine & extensions (P0.5) ─────────────────────────────────
-    pub fn strategy_engine_mut(&mut self) -> &mut crate::strategy_engine::StrategyEngine {
-        &mut self.strategy_engine
-    }
-    /// Strategy names the kernel supports. Reports the active self-driving
-    /// engine's set when present, else the standalone strategy engine's.
+    /// Strategy names the kernel supports (the self-driving engine's set).
     pub fn strategy_names(&self) -> Vec<String> {
-        if let Some(e) = self.engine.as_ref() {
-            return e.supported_strategies();
-        }
-        self.strategy_engine.names()
+        self.engine.as_ref().map(|e| e.supported_strategies()).unwrap_or_default()
     }
     /// Enabled strategy names.
     pub fn enabled_strategy_names(&self) -> Vec<String> {
-        if let Some(e) = self.engine.as_ref() {
-            return e.enabled_strategies();
-        }
-        Vec::new()
+        self.engine.as_ref().map(|e| e.enabled_strategies()).unwrap_or_default()
     }
-    /// Toggle a strategy. Routes to the active engine; falls back to the
-    /// standalone strategy engine.
+    /// Toggle a strategy on the driving engine. Returns false when the engine
+    /// is not attached or the name is unknown.
     pub fn set_strategy_enabled(&mut self, name: &str, enabled: bool) -> bool {
-        if let Some(e) = self.engine.as_mut() {
-            return e.set_strategy_enabled(name, enabled);
-        }
-        self.strategy_engine.set_enabled(name, enabled)
+        self.engine.as_mut().map(|e| e.set_strategy_enabled(name, enabled)).unwrap_or(false)
     }
-    /// Load a user-layer strategy shared library. With the self-driving engine
-    /// attached, the strategy is registered into the engine's live dispatch
-    /// (DISABLED — an explicit `strategy.enable` is required before it trades);
-    /// otherwise it lands in the standalone engine as a diagnostic registry.
-    /// Only meaningful with `strategy-loading`.
+    /// Load an external v2 strategy shared library and register it into the
+    /// driving engine's live dispatch. It starts DISABLED — an explicit
+    /// `strategy.enable` is required before it can trade. External and in-tree
+    /// strategies implement the same full `EngineStrategy` contract; this is
+    /// only a loading difference. Requires `strategy-loading`.
     pub fn load_strategy_lib(&mut self, path: &str) -> String {
         #[cfg(feature = "strategy-loading")]
         {
-            use crate::strategy_engine::loader::{load_and_register, load_boxed, LoadedStrategy};
+            use crate::strategy_engine::loader::load_foreign;
             let p = std::path::Path::new(path);
-            if let Some(engine) = self.engine.as_mut() {
-                return match load_boxed(p) {
-                    Ok(LoadedStrategy { strategy, name, version }) => {
-                        match engine.register_user_strategy(strategy, format!("dylib:{}", p.display())) {
-                            Ok(_) => {
-                                format!("{name}@{version} registered into the engine dispatch (disabled)")
-                            }
-                            Err(reason) => format!("rejected: {reason}"),
-                        }
+            let Some(engine) = self.engine.as_mut() else {
+                return "Failed: strategy engine not attached (load libraries after engine init)".into();
+            };
+            return match load_foreign(p) {
+                Ok(loaded) => {
+                    let name = loaded.name.clone();
+                    let version = loaded.version.clone();
+                    match engine.register_user_strategy(
+                        Box::new(loaded.strategy),
+                        format!("dylib:{}", p.display()),
+                    ) {
+                        Ok(_) => format!("{name}@{version} registered into the engine dispatch (disabled)"),
+                        Err(reason) => format!("rejected: {reason}"),
                     }
-                    Err(outcome) => format!("{outcome:?}"),
-                };
-            }
-            let outcome = load_and_register(&mut self.strategy_engine, p);
-            format!("{outcome:?}")
+                }
+                Err(outcome) => format!("{outcome:?}"),
+            };
         }
         #[cfg(not(feature = "strategy-loading"))]
         {
@@ -809,6 +799,9 @@ impl Core {
         self.shadow_evolution_evaluate(now_ms);
         let engine = self.engine.as_mut().expect("engine present");
         let orders = engine.evaluate(now_ms);
+        // Close intents produced by strategies this cycle join the SAME exit
+        // submission path as policy exits (handled in run_exit_checks).
+        self.strategy_exits.extend(engine.drain_strategy_exits());
         engine.tally_blocked();
         self.stats.signals += orders.len() as u64;
         let tokens: Vec<(String, crate::model::OrderRequest)> =
@@ -1658,7 +1651,18 @@ impl Core {
     }
 
     /// Check exits and submit a closing SELL for each triggered position.
+    ///
+    /// Two sources converge on ONE submission loop so both are subject to the
+    /// same rules (live-sell dedup, `sell_shares`, risk/ledger/sign in `place`):
+    ///  - the kernel's automated exit policy (`check_exits`), suppressed by
+    ///    `auto_exits_enabled = false`;
+    ///  - explicit strategy close intents (`StrategySignal`), which like a
+    ///    manual flatten are honoured even when automated exits are disabled,
+    ///    but still cannot bypass the kill switch/risk/dedup/position checks.
     fn run_exit_checks(&mut self, now_ms: i64) -> CoreResult<()> {
+        // Consume this cycle's intents up front: an intent on a token with no
+        // open position is dropped, never left to fire on a later position.
+        let intents = std::mem::take(&mut self.strategy_exits);
         if self.positions.open_positions().is_empty() {
             return Ok(());
         }
@@ -1676,41 +1680,115 @@ impl Core {
             })
         };
         self.positions.valuate(&book_fn, now_ms);
-        if !self.config.auto_exits_enabled {
-            return Ok(());
-        }
-        let requests = self.positions.check_exits(&book_fn, now_ms);
 
-        for req in requests {
-            // Skip if a sell order for this position is already live.
-            let Some(pos) = self.positions.open_positions().iter().find(|p| p.id == req.position_id).cloned() else {
+        // A unit of closing work resolved against a concrete open position.
+        #[derive(Clone)]
+        struct ExitJob {
+            position_id: String,
+            token: String,
+            condition_id: String,
+            price: Decimal,
+            reason: ExitReason,
+            use_maker: bool,
+            internal_key: String,
+            strategy: String,
+            asset: String,
+            direction: String,
+        }
+
+        let mut jobs: Vec<ExitJob> = Vec::new();
+        let mut has_job: HashSet<String> = HashSet::new();
+
+        if self.config.auto_exits_enabled {
+            for req in self.positions.check_exits(&book_fn, now_ms) {
+                let Some(pos) = self
+                    .positions
+                    .open_positions()
+                    .iter()
+                    .find(|p| p.id == req.position_id)
+                    .cloned()
+                else {
+                    continue;
+                };
+                has_job.insert(pos.id.clone());
+                jobs.push(ExitJob {
+                    position_id: pos.id.clone(),
+                    token: pos.token_id.clone(),
+                    condition_id: pos.condition_id.clone(),
+                    price: req.exit_price,
+                    reason: req.reason,
+                    use_maker: req.use_maker,
+                    internal_key: format!("exit:{}:{:?}", pos.token_id, req.reason),
+                    strategy: pos.strategy.clone(),
+                    asset: pos.asset.clone(),
+                    direction: pos.direction.as_str().to_string(),
+                });
+            }
+        }
+
+        // Strategy-signal exits: resolve the token to a live position and price
+        // off its latest valuation, exactly like a manual flatten.
+        for intent in intents {
+            let Some(pos) = self
+                .positions
+                .open_positions()
+                .iter()
+                .find(|p| p.token_id == intent.token_id)
+                .cloned()
+            else {
                 continue;
             };
+            if !has_job.insert(pos.id.clone()) {
+                continue; // an automated/policy exit already closes it this cycle
+            }
+            let price = if pos.current_price > Decimal::ZERO { pos.current_price } else { Decimal::new(1, 2) };
+            let tag: String = intent
+                .reason
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+                .take(32)
+                .collect();
+            jobs.push(ExitJob {
+                position_id: pos.id.clone(),
+                token: pos.token_id.clone(),
+                condition_id: pos.condition_id.clone(),
+                price,
+                reason: ExitReason::StrategySignal,
+                use_maker: false,
+                internal_key: format!("exit-strategy:{}:{}", pos.token_id, tag),
+                strategy: pos.strategy.clone(),
+                asset: pos.asset.clone(),
+                direction: pos.direction.as_str().to_string(),
+            });
+        }
+
+        for job in jobs {
+            // Skip if a sell order for this position is already live.
             let already_live = self
                 .ome
-                .live_for(&pos.token_id, Side::Sell)
+                .live_for(&job.token, Side::Sell)
                 .into_iter()
                 .any(|o| o.status.is_live());
             if already_live {
                 continue;
             }
-            let Some(size) = self.positions.sell_shares(&req.position_id) else { continue };
-            let mode = if req.use_maker { FillPolicy::Maker } else { FillPolicy::Taker };
+            let Some(size) = self.positions.sell_shares(&job.position_id) else { continue };
+            let mode = if job.use_maker { FillPolicy::Maker } else { FillPolicy::Taker };
             let order = OrderRequest {
-                token_id: pos.token_id.clone(),
-                condition_id: pos.condition_id.clone(),
+                token_id: job.token.clone(),
+                condition_id: job.condition_id,
                 side: Side::Sell,
                 mode,
-                price: req.exit_price,
+                price: job.price,
                 size,
-                internal_key: format!("exit:{}:{:?}", pos.token_id, req.reason),
-                strategy: pos.strategy.clone(),
-                asset: pos.asset.clone(),
-                direction: pos.direction.as_str().to_string(),
+                internal_key: job.internal_key,
+                strategy: job.strategy,
+                asset: job.asset,
+                direction: job.direction,
                 round_slot: 0,
             };
             // Record the intended exit reason so a full sell fill closes with it.
-            self.exit_reasons.insert(pos.token_id.clone(), req.reason);
+            self.exit_reasons.insert(job.token.clone(), job.reason);
             if let Err(e) = self.place(order, 0, now_ms) {
                 self.emit_error(e);
             }
