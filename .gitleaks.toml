@@ -1,0 +1,26 @@
+# Gitleaks configuration for BlitzkriegBot.
+#
+# Used by the advisory gitleaks step in .github/workflows/secret-scan.yml and by
+# anyone running gitleaks locally:
+#   gitleaks detect --config .gitleaks.toml --redact --verbose
+#
+# The primary defence is GitHub native Secret Scanning + Push Protection
+# (enabled by scripts/github/bootstrap-repo.sh); this file governs the
+# local/secondary scan.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Example/fake credentials, generated files, and scanner definitions that must not fail the scan"
+paths = [
+  '''^\.env\.example$''',
+  '''^docs/''',
+  '''^tests/''',
+  '''\.md$''',
+  '''^assets/''',
+  '''^public/''',
+  '''package-lock\.json$''',
+  '''Cargo\.lock$''',
+  '''^scripts/secret-scan\.(sh|patterns)$''',
+]

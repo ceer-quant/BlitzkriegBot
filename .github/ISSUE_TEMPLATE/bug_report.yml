@@ -1,0 +1,70 @@
+name: "🐞 Bug 报告 / Bug report"
+description: 报告一个可复现的缺陷（交易核心、策略、UI、网关等）
+title: "[bug] "
+labels: ["type/bug", "status/triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请勿在此粘贴任何 **私钥、API Key、助记词或 .env 内容**。
+        如需附日志，请先脱敏。
+  - type: dropdown
+    id: module
+    attributes:
+      label: 影响模块
+      options:
+        - "rust-core (Blitzkrieg_core)"
+        - "strategy / engine"
+        - "risk / safety"
+        - "shadow-evolution"
+        - "market extension (polymarket 等)"
+        - "ui-kit / panel"
+        - "node shell / gateway"
+        - "ci / tooling / docs"
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 严重程度
+      options:
+        - "P0 资金/安全风险（可能真实下单或亏损）"
+        - "P1 功能不可用"
+        - "P2 体验/性能问题"
+        - "P3 轻微/文档"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象描述
+      description: 实际发生了什么？期望是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 尽量给出可复现的命令/回放（优先确定性复现器，勿依赖实时行情）。
+      placeholder: |
+        1. 模式为 DRY（HFT_CORE=rust, dry=true）
+        2. 运行 `cargo test -p blitzkrieg-core` 或 `node scripts/cycle-check.mjs`
+        3. 观察到 ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / 提交
+      placeholder: "commit SHA 或 tag"
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 安全确认
+      options:
+        - label: 我已确认报告中不含任何真实凭证、私钥或资金信息
+          required: true
+        - label: 该问题可在 DRY / 离线模式下复现（无需 Live 交易）
+          required: false

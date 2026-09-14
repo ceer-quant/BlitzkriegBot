@@ -23,6 +23,13 @@
   <img src="./assets/screenshots/clones-14d.jpeg" alt="10,746 Git clones in last 14 days" width="520">
 </p>
 
+> **🔒 Private repository — `ceer-quant/BlitzkriegBot`**
+> 本仓库为私有仓库。协作规范见 [`CONTRIBUTING.md`](./CONTRIBUTING.md) 与
+> [`docs/AI_WORKFLOW.md`](./docs/AI_WORKFLOW.md)；安全报告请走 GitHub Security Advisory，
+> 切勿在公开 Issue 中粘贴任何私钥 / API Key / `.env` 内容。
+> 提交前必须通过门禁：`cargo build --release`、`cargo test`、`npm run typecheck`、
+> DryRun `node scripts/cycle-check.mjs`、`bash scripts/secret-scan.sh`。
+
 <p align="center">
   <a href="#quick-start">Quick Start</a> •
   <a href="#webchat">WebChat</a> •
