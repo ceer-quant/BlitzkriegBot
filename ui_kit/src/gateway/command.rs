@@ -125,6 +125,22 @@ impl Dispatcher {
         }
     }
 
+    /// Assemble a full read-only snapshot through this dispatcher's client.
+    /// Exposed for the interactive panel; the web adapter uses its own client.
+    pub fn snapshot(&mut self) -> UiSnapshot {
+        self.client.snapshot(0)
+    }
+
+    /// True when this dispatcher spawned (and owns) the running core.
+    pub fn managed(&self) -> bool {
+        self.sup.owns()
+    }
+
+    /// PID of the core this dispatcher spawned, if any.
+    pub fn pid(&self) -> Option<u32> {
+        self.sup.pid()
+    }
+
     pub fn dispatch(&mut self, cmd: Command, raw: &str) -> CommandOutcome {
         let raw = raw.trim();
         match cmd {
@@ -210,10 +226,6 @@ impl Dispatcher {
                 "no core spawned by this gateway; an adopted core is left running",
             ),
         }
-    }
-
-    fn snapshot(&mut self) -> UiSnapshot {
-        self.client.snapshot(0)
     }
 
     fn cmd_status(&mut self, raw: &str) -> CommandOutcome {

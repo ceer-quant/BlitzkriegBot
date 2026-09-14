@@ -240,3 +240,59 @@ POST /api/command          body = 命令文本 或 {"cmd":"…"} → JSON
   第③步「HFT 面板切到 UI Kit web」时一并处理。
 - webchat 聊天/网关（`/chat`、命令派发）仍在 Node；它属 Agent 平台能力，按 §5 分阶段处理。
 
+---
+
+## 10. 追加：交互式命令行面板（ratatui + crossterm + tokio）
+
+**状态**：✅ 完成。新增独立 workspace crate `ui_kit_panel`（bin 名 `ui_kit_panel`，crate 名
+`blitzkrieg-ui-panel`），依赖 `blitzkrieg-ui-kit`（复用 `UiSnapshot` + gateway `Dispatcher`）。
+
+### 10.1 为什么独立成 crate
+
+`blitzkrieg-ui-kit` 的设计约束是**零额外依赖、可无头验证**（这是它能在三适配器间共享且"可替换"的前提）。
+ratatui 会拖入 `ratatui-core`/`ratatui-widgets`/`crossterm`/`kasuari`/`strum` 等一整棵依赖树，放进 lib
+会污染该契约。因此**面板是独立 crate**，只把 UI Kit 当数据层复用——内核与 UI Kit 都不因此新增依赖。
+
+### 10.2 结构
+
+| 文件 | 职责 |
+|---|---|
+| `ui_kit_panel/src/app.rs` | 面板状态 + 按键处理（纯数据，无 I/O）：tab、命令输入、日志环（上限 500 行） |
+| `ui_kit_panel/src/ui.rs` | ratatui 渲染（纯函数）：状态头 / 标签页 / Overview·Positions·Trades / 命令栏 / 日志 |
+| `ui_kit_panel/src/input.rs` | crossterm 事件读取线程（250ms poll，通道关闭即退出） |
+| `ui_kit_panel/src/main.rs` | tokio 主循环：`select!` 合并输入、快照刷新、命令结果；终端 setup/restore |
+
+### 10.3 关键设计
+
+- **tokio 主循环 + `spawn_blocking`**：UI Kit 的 IPC 客户端是阻塞式 UDS（`UnixStream`）。直接在主循环调用会卡住
+  `select!`。因此快照刷新与命令派发都丢进 `spawn_blocking`，主循环只做渲染与按键，保持响应。
+- **命令与展示同源**：面板命令走 **同一个 `Dispatcher`**（gateway 模块），所以 `start/stop/status/positions`
+  语义与 web gateway、与 Node 的 `/crypto-hft` 完全一致——不是第三套实现。
+- **生命周期默认关闭**：`--manage`（或 `UIKIT_MANAGE=1`）才启用 `start/stop`；否则命令栏只做只读
+  （`status/positions/help`）。面板**没有任何下单动词**。
+- **渲染健壮性**：`confirmed` 字段是 77 位 token id，面板只显示前 8 位 + 计数，避免撑爆一行。
+
+### 10.4 用法
+
+```bash
+cargo build --release -p blitzkrieg-ui-panel
+./target/release/ui_kit_panel [--socket <path>] [--interval-ms N] [--manage] [--tab 1|2|3]
+# 按键： q/Ctrl-C 退出 · 1/2/3/Tab 切视图 · r 立即刷新 · : 命令栏 · Enter 执行 · Esc 取消
+# 命令： status | positions [N] | help | start [ASSETS] [--size N] [--dry-run] | stop   (需 --manage)
+```
+
+### 10.5 验收证据
+
+- **PTY 实测（真实生产内核，只读模式）**：面板渲染出真实数据 —— Round `#1988173`、Balance `$1006.63`、
+  `79 trades · 67% WR`、BTC/ETH/SOL/XRP 盘口价；按 `2` 切到 Positions 页正常。
+- **命令栏实测**（PTY 注入按键）：`:status` → `Round #… Trades: 79 net -1.48 (67% WR) Open positions: 0`；
+  `:positions 5` → 真实成交明细（XRP/BTC/… `+12.1%` 等）。
+- **`--manage` 生命周期实测（隔离 socket + 临时 workdir + 关闭三类日志）**：
+  `:start BTC,ETH --dry-run` → `core started (pid 32650)`；`:status` → `Feed: books=6 … Balance: $1000.00`；
+  `:stop` → `core stopped (pid 32650)`；`:status` → `ERR core not reachable`。**全链路通过**。
+- `cargo test -p blitzkrieg-ui-panel` → **2 项**（按键/切页、命令栏收集与提交）；`cargo build --release` 通过。
+- **无下单 API**：`grep -rniE "orders\.place|place_order|OrderIntent" ui_kit_panel/src` 无命中。
+- **生产未被扰动**：只读模式直连生产 socket；`--manage` 测试全程用私有 socket 与临时 workdir。
+  生产内核单实例存活、`/health` healthy、账本照常增长。
+
+

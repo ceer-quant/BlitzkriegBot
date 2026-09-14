@@ -1,0 +1,15 @@
+[package]
+name = "blitzkrieg-ui-panel"
+version = "0.1.0"
+edition = "2021"
+description = "Blitzkrieg interactive terminal panel: ratatui + crossterm + tokio over the UI Kit's core data layer. Presentation + command dispatch only — no trading logic."
+
+[[bin]]
+name = "ui_kit_panel"
+path = "src/main.rs"
+
+[dependencies]
+blitzkrieg-ui-kit = { path = "../ui_kit" }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net"] }
