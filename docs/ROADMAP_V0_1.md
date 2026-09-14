@@ -28,6 +28,7 @@
 | E4 对冲策略 | [#18](https://github.com/ceer-quant/BlitzkriegBot/issues/18) | [#30](https://github.com/ceer-quant/BlitzkriegBot/issues/30) 趋势 · [#31](https://github.com/ceer-quant/BlitzkriegBot/issues/31) 逆向 |
 | E5 TUI + 插件管理器 | [#19](https://github.com/ceer-quant/BlitzkriegBot/issues/19) | [#32](https://github.com/ceer-quant/BlitzkriegBot/issues/32) 插件管理器 · [#33](https://github.com/ceer-quant/BlitzkriegBot/issues/33) 推送 · [#34](https://github.com/ceer-quant/BlitzkriegBot/issues/34) TUI 收敛 |
 | E6 Tauri WebUI | [#20](https://github.com/ceer-quant/BlitzkriegBot/issues/20) | [#35](https://github.com/ceer-quant/BlitzkriegBot/issues/35) 脚手架 + 鉴权 |
+| E7 策略接口全功能化 | [#38](https://github.com/ceer-quant/BlitzkriegBot/issues/38) | ABI v2：完整盘口 + 盘口回调 + 出场意图 + 热参 + 诊断 + 加载门禁 |
 
 ---
 
@@ -43,9 +44,12 @@
 | **E4** | 对冲策略 | ≥1 个趋势策略 + ≥1 个逆向策略，与主策略对冲 | E2 |
 | **E5** | TUI + 插件管理器 | 基于已有 `ui_kit`（Ratatui + Crossterm）做完整 TUI 与插件管理器 | E2（要管的就是策略/扩展/市场插件） |
 | **E6** | Tauri WebUI | 用 Tauri 完成 WebUI | E5（复用同一份 view-model 与网关命令） |
+| **E7** | 策略接口全功能化 | 策略接口全功能/全实现；策略必须能**外挂**（dylib）——「树内 / 外挂」只是加载方式不同，能力必须一致 | E2（按策略参数）；与 E3/E4 联动 |
 
-**推荐执行序**：`E1 → E2 → E4 → E3 → E5 → E6`。
-理由：E1 是确定性重命名，越晚做返工越多；E2 是 E3/E4 的共同前置；E4 的两个策略逻辑比 E3 的主策略 HFT 化更直白，
+**推荐执行序**：`E1 → E7 → E2 → E4 → E3 → E5 → E6`。
+理由：E1 是确定性重命名，越晚做返工越多；**E7 提到 E2 之前**，因为它决定 E3/E4 写出来的策略
+「长在哪个接口上」——先有全功能接口，E2 的分账/门禁/进化参数才有统一的挂载点，
+否则 E4 的两个新策略会先写死在树内、E7 再改一遍。E2 是 E3/E4 的共同前置；E4 的两个策略逻辑比 E3 的主策略 HFT 化更直白，
 先用它把「多策略真正并发 + 分账 + 门禁差异」这条链路跑通，E3 再在已验证的链路上重构主策略；UI 放最后，
 因为 UI 只是视图，不该在底座还在动的时候定型。
 
@@ -151,8 +155,14 @@
 | **趋势跟随** | 顺势追（突破/动量确认后入场） | 主策略抄底失效（单边下跌）时它是另一条腿 |
 | **逆向/均值回归** | 逆势接（超跌反弹、假突破回落） | 与趋势策略天然对冲；需关闭动量门禁 |
 
-要点：两者都必须实现内核原生 `EngineStrategy` 接缝（`on_book` / `on_round` / `find_candidates`），
-不走走 C-ABI dylib 路线（那条路**无法表达出场**，且看不到多 tick 盘口）。
+要点（**2026-09-14 用户修正后**）：策略一律实现**全功能策略接口**，且**必须能外挂**（dylib）——
+「外挂」与「树内」只是**加载方式**的差别，**不是能力**的差别（E7）。
+
+原先本节写「两者都走内核原生 `EngineStrategy`、不走 C-ABI dylib（那条路无法表达出场、看不到多 tick 盘口）」，
+该表述**只描述当时的 ABI v1 现状，不是设计目标**，已作废。用户裁定：策略接口必须全功能、全实现，
+策略必须能外挂出去，这才是解耦/标准化——所以正确做法是**把 ABI 补成全保真**（E7），
+而不是把策略都塞回树内。
+
 TS 侧已有的 `momentum` / `mean_reversion` 只能作**逻辑参考**，不是可调用实现。
 
 验收：各策略独立可启停、独立分账、有独立单元测试与回放证据；与主策略并发时不会互相饿死；
@@ -205,10 +215,34 @@ TS 侧已有的 `momentum` / `mean_reversion` 只能作**逻辑参考**，不是
 
 ---
 
-## 8. 不在 0.1 范围（登记不执行）
+## 8. E7 — 策略接口全功能化 + 外挂标准化（Issue [#38](https://github.com/ceer-quant/BlitzkriegBot/issues/38)）
+
+**用户裁定（2026-09-14）**：「策略接口必须是全功能、全实现的；策略必须外挂出去，这样才是解耦、标准化设计。」
+
+**现状**：内核有**两套能力不对等**的策略接缝——树内 `EngineStrategy`（10 个方法，全功能）
+与外部 C ABI v1（4 个方法，只收 `best_bid/ask/mid`，`Sell` 被丢弃，`on_book` 空实现，
+且 `strategy-loading` 非默认 feature）。结果是「全功能」只能长在树内，外挂即残废——与裁定相反。
+
+**范围（ABI v2）**：
+1. `BkTick` → 完整市场视图：档位数组 + `bid_depth`/`ask_depth`/`obi`/`spread`/`spread_pct`。
+2. vtable 补齐 `on_book`（每次盘口更新回调，而非每评估周期一次）与 `on_config`；
+   诊断/热参用 JSON 字符串过界（不把 serde 类型泄漏进 ABI）。
+3. 出场以**意图**过界：外挂策略可表达平仓请求，但报价/仓位/风控/下单/签名仍全部归内核。
+4. 外挂策略声明**自己的**可进化旋钮集 → 对齐 E2-c 的按策略 `MutableParams`。
+5. 树内策略与外挂策略实现**同一契约**；两个新对冲策略（E4）直接按此契约写。
+6. ABI 版本协商与明确拒绝路径；`strategy-loading` 纳入常规构建，**至少一个真实 dylib 进 CI 被加载驱动**。
+
+**安全边界（不可豁免）**：外挂策略拿不到凭证/订单管理器/UDS socket，也不能绕过
+`RiskGate`/`ImmutableConfig`/kill switch。
+
+验收见 Issue #38「验收」小节（核心一条：同一策略逻辑，树内实现与外挂 dylib 实现回放对拍逐信号一致）。
+
+---
+
+## 9. 不在 0.1 范围（登记不执行）
 
 来自 `ROADMAP_INSTITUTIONAL.md §5` 的 P-2..P-6 大部分事项（组合级风险量化、资金效率与策略生命周期
-的完整形态、密钥治理与合规审计、HA 与低延迟优化）**不在 0.1**。0.1 只做上表 E1–E6，
+的完整形态、密钥治理与合规审计、HA 与低延迟优化）**不在 0.1**。0.1 只做上表 E1–E7，
 外加已有 P-1 系列的收尾（归档/回测已落地，见 `MIGRATION_LOG §35–§37`）。
 
 **明确不做**：启用 Live、任何真实资金操作、把新策略直接放到生产启用而不经回放验证。
