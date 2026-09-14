@@ -91,3 +91,32 @@
 - **AI 倾向**：**A（用户在场时尽快做）**。live 链路是唯一无法离线证伪的环节，越早小额打通越好。
 - **理由**：所有抽象与回测的地基都建立在「live 真的能下单且能恢复」之上；不验证就扩张等于沙地建楼。
 - **需要用户确认的点**：验证额度、时间窗、以及是否允许把 `DRY_RUN=false`（**本 AI 不会自行开启**）。
+
+---
+
+## [待决策] D-6 既有 Rust 代码未通过 rustfmt / clippy（新 CI 中为建议性检查）
+
+- **背景**：仓库规范化新增 `rust-check` 作业。实测：`cargo build --release` ✅、
+  `cargo test` ✅（120 用例）；但 `cargo fmt --all --check` 有 **537 处 diff（约 57 个文件）**，
+  `cargo clippy --workspace --all-targets -- -D warnings` 有 **3 个既存错误**
+  （`market_api/src/types.rs:245` `collapsible_if`；`ui_kit/src/core/event_bus.rs:144` `unused_mut`）。
+- **选项 A（AI 已采用）**：CI 中 `rustfmt` / `clippy` 设为 **建议性（continue-on-error）**，
+  由独立 PR 专项清理后再转为阻塞。理由：治理 PR 不应顺带重排 57 个无关文件
+  （违反「禁止顺手优化业务逻辑」）。
+- **选项 B**：在本次治理 PR 内一并 `cargo fmt` + 修 3 个 lint，CI 直接阻塞。
+- **AI 倾向**：**A**。清理应可独立审阅、可回滚；A 让治理变更保持最小且可审计。
+- **需要用户确认的点**：何时启动格式/静态检查清理专项？（清理完成后本项转阻塞）
+
+---
+
+## [待决策] D-7 仓库身份元数据（npm / README / CONTRIBUTING）未随私有仓库改名
+
+- **背景**：`package.json` 的 `name=clodds`、`author=alsk1992`、`repository.url=github.com/alsk1992/CloddsBot`，
+  以及 `README.md`/`CONTRIBUTING.md` 的品牌文案仍指向旧上游；而新私有仓库为 `ceer-quant/BlitzkriegBot`。
+- **本次已做的最小改动**：README 顶部与 CONTRIBUTING 顶部加入私有仓库 + AI 协作规范横幅，
+  指向 `docs/AI_WORKFLOW.md`；**未**改动 `package.json` 与全文品牌文案。
+- **选项 A（AI 已采用）**：暂不改分发元数据。改 `name`/`repository`/`author` 影响 npm 发布与 CI，
+  属于外向变更，需用户明确决定。
+- **需要用户确认的点**：
+  1. 是否重命名 npm 包（`clodds` → 其他）？还是本仓库不再发布 npm、仅内部使用？
+  2. 是否把 `repository.url` 指向 `ceer-quant/BlitzkriegBot` 并清理 README 旧上游品牌？

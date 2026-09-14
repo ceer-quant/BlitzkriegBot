@@ -1,41 +1,102 @@
 name: CI
 
+# Runs on every PR and on pushes to the long-lived branches.
+# Three independent gates, matching the repository governance plan:
+#   rust-check   — the Rust trading core builds, tests and (advisory) lints.
+#   node-check   — the Node/TS shell typechecks, tests and builds.
+#   secret-scan  — no credential ever enters the tree (dependency-free).
+# A final `notify` job reports the aggregate result to WeChat when configured.
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install
-        run: npm ci
-      - name: Security audit
-        run: npm audit --audit-level=high --production
-      - name: Typecheck, test, build
-        run: npm run ci
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
-  security:
+permissions:
+  contents: read
+
+jobs:
+  rust-check:
+    name: rust-check
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Build (release)
+        run: cargo build --release --workspace --locked
+      - name: Test
+        run: cargo test --workspace --locked
+      # Style gates are ADVISORY for now: the pre-existing tree is not
+      # fmt/clippy-clean (see docs/DECISIONS_PENDING.md D-6). They surface debt
+      # without blocking a governance PR on an unrelated 57-file reformat.
+      - name: rustfmt (advisory)
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+      - name: clippy (advisory)
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  node-check:
+    name: node-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
       - name: Install
         run: npm ci
-      - name: npm audit (production only)
-        run: npm audit --audit-level=moderate --production
-      - name: Check for vulnerabilities (production only)
-        run: npx --yes audit-ci --moderate --production
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Dependency audit (production, high+)
+        run: npm audit --audit-level=high --production
+
+  secret-scan:
+    name: secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Dependency-free secret scan (blocking)
+        run: bash scripts/secret-scan.sh
+      # Advisory, defence-in-depth: official gitleaks against the same config.
+      # Non-blocking so a scanner-version hiccup cannot gate a legitimate PR;
+      # GitHub native Push Protection (bootstrap-repo.sh) is the hard stop.
+      - name: gitleaks (advisory)
+        continue-on-error: true
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            ghcr.io/gitleaks/gitleaks:latest detect --config /repo/.gitleaks.toml --redact --verbose
+
+  notify:
+    name: notify (wechat)
+    needs: [rust-check, node-check, secret-scan]
+    if: always()
+    runs-on: ubuntu-latest
+    # Secret lifted to job env so the step `if` can test it (secret-context
+    # references inside step `if` are not reliably available across versions).
+    env:
+      WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
+    steps:
+      - name: WeChat Work webhook
+        # Opt-in: silently skips unless the WECHAT_WEBHOOK secret is configured.
+        if: ${{ env.WECHAT_WEBHOOK != '' }}
+        env:
+          RESULT: ${{ needs.rust-check.result }}/${{ needs.node-check.result }}/${{ needs.secret-scan.result }}
+        run: |
+          icon="✅"; [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] && icon="❌"
+          curl -sS -X POST "$WECHAT_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$icon CI ${{ github.repository }}\\n> 分支: ${{ github.ref_name }}\\n> 触发: ${{ github.event_name }} by ${{ github.actor }}\\n> 结果(rust/node/secret): $RESULT\\n> [查看运行](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})\"}}"

@@ -2,6 +2,22 @@
 
 Thanks for your interest in contributing! Clodds is open-source and welcomes contributions.
 
+> ## 🤖 AI 协作与仓库规范
+>
+> 本仓库以 **cyborg 模式** 维护：人类定目标/决策，AI 代理负责分析、实现、验证与写证据。
+> 完整规范见 **[`docs/AI_WORKFLOW.md`](docs/AI_WORKFLOW.md)**，其中包含**硬约束**
+> （禁止启用 Live 交易、禁止改动凭证、禁止删除未备份文件、禁止未验证直推主分支、
+> 禁止顺手优化无关逻辑）。以下为速查：
+>
+> - **作者署名**：`ceer_quant`；人机协作提交追加 `Co-authored-by:` trailer。
+> - **分支**：`main`（发布）、`develop`（集成）、`feature/*`、`fix/*`、`chore/*`、`release/*`。
+>   AI 只能推功能分支，受保护分支需 PR + 评审 + 门禁全绿。
+> - **提交门禁**：`cargo build --release`、`cargo test`、`npm run typecheck`、
+>   DryRun `node scripts/cycle-check.mjs`、`bash scripts/secret-scan.sh`，且 CI
+>   （`rust-check` / `node-check` / `secret-scan`）全绿。
+> - **Issue / PR**：先开 Issue（模板见 `.github/ISSUE_TEMPLATE/`），PR 须逐条勾选安全约束。
+> - **不确定的分歧** 写入 [`docs/DECISIONS_PENDING.md`](docs/DECISIONS_PENDING.md)，不在 PR 中悬置。
+
 ## Getting Started
 
 1. Fork the repository

@@ -11,6 +11,33 @@ dist/
 # Pre-merge backup of a DIFFERENT project's .env (holds its own credentials)
 .env.other-project-backup-*
 
+# --- Secrets: never version (repo-governance hardening) ---------------------
+# The ONLY env file that is ever committed is the template.
+.env.*
+!.env.example
+# Private keys / certificates / keystores
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.ppk
+*.der
+id_rsa*
+id_ed25519*
+id_ecdsa*
+# Cloud / service credentials
+.aws/
+.ssh/
+.netrc
+credentials.json
+service-account*.json
+gcp-*.json
+# Local secret bundles
+secrets/
+.secrets/
+
 # Old session/temp left after the path migration; safe to delete by hand
 polymarket-5m-bot/
 

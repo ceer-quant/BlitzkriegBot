@@ -1,0 +1,55 @@
+# =============================================================================
+# Git attributes — line-ending + binary hygiene for BlitzkriegBot
+# Rationale: developed on macOS (LF), CI runs on Linux, so normalise text to LF
+# and never let git "fix" binaries or generated lockfiles.
+# =============================================================================
+
+# Default: let git decide text vs binary, store text with LF in the repo.
+* text=auto eol=lf
+
+# Shell / script files must stay LF (a CRLF shebang breaks `#!/usr/bin/env bash`).
+*.sh   text eol=lf
+*.bash text eol=lf
+*.zsh  text eol=lf
+*.mjs  text eol=lf
+*.js   text eol=lf
+*.ts   text eol=lf
+*.rs   text eol=lf
+*.toml text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# Windows-only scripts keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets: never diff, never merge, never normalise.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.gz   binary
+*.mp4  binary
+*.woff  binary
+*.woff2 binary
+*.ttf  binary
+*.so    binary
+*.dylib binary
+*.dll  binary
+*.wasm binary
+*.sqlite binary
+*.db     binary
+
+# Generated lockfiles: collapse in review, exclude from language statistics.
+package-lock.json -diff linguist-generated=true
+Cargo.lock        -diff linguist-generated=true
+**/Cargo.lock     -diff linguist-generated=true
+
+# Machine-generated evidence/repro data (committed on purpose, see .gitignore).
+docs/reports/data/*.jsonl linguist-generated=true
+docs/reports/data/*.csv   linguist-generated=true

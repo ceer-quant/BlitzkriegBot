@@ -1,0 +1,45 @@
+name: "🛠 任务 / Task"
+description: 一项可执行、可验证的工程任务（含 AI 托管任务）
+title: "[task] "
+labels: ["type/chore", "status/ready"]
+body:
+  - type: dropdown
+    id: module
+    attributes:
+      label: 模块
+      options:
+        - "rust-core (Blitzkrieg_core)"
+        - "strategy / engine"
+        - "risk / safety"
+        - "shadow-evolution"
+        - "market extension"
+        - "ui-kit / panel"
+        - "node shell / gateway"
+        - "ci / tooling / docs"
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目标与验收标准
+      description: 写清「完成 = 什么可被检验的证据」。
+    validations:
+      required: true
+  - type: textarea
+    id: gates
+    attributes:
+      label: 必须通过的门禁
+      value: |
+        - [ ] cargo build --release
+        - [ ] cargo test
+        - [ ] npm run typecheck
+        - [ ] DryRun / cycle-check（如涉及下单链）
+    validations:
+      required: true
+  - type: checkboxes
+    id: ai
+    attributes:
+      label: 执行方式
+      options:
+        - label: 由 AI 托管执行（需遵守 docs/AI_WORKFLOW.md 的硬约束）
+          required: false
