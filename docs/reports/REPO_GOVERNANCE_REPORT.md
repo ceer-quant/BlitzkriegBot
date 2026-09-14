@@ -4,7 +4,10 @@
 - **落地分支**：治理改动经 `chore/repo-governance`（→ `main`/`develop` @ `258f911`）与
   `chore/ci-advisory-audit`（PR #4 rebase-merge → `main`/`develop` @ **`87febb0`**）两次提交。
 - **目标仓库**：[`github.com/ceer-quant/BlitzkriegBot`](https://github.com/ceer-quant/BlitzkriegBot)（**private**）
-- **作者署名**：`ceer_quant <ceer_quant@users.noreply.github.com>`，AI 以 `Co-authored-by: ZCode` 署名。
+- **作者署名**：唯一 Git 作者为 `ceer_quant <ceer_quant@users.noreply.github.com>`；
+  **不使用任何 AI 署名**（提交信息不含 `Co-authored-by:` / `Generated with` 等 trailer）。
+  注：仓库迁移初期的少数历史提交含 `Co-authored-by: ZCode` trailer，属既有事实，未改写已推送历史；
+  自 2026-09-14 政策明确后，新提交一律只署 ceer_quant。
 - **安全边界**：全程 **DryRun**；未开启 Live、未改动任何凭证/私钥、未删除未备份文件；
   对 `main` 的更新均走 **PR + 全绿 CI 后才合并**（尽管免费版无服务端强制）。
 
@@ -78,8 +81,9 @@ Scanning/Push Protection**（API 实测 403/422/404），需升级 Pro/Team 才�
 
 ### 2.4 文档
 - **`docs/AI_WORKFLOW.md`**（新）：角色、**7 条硬约束**、分支模型、提交门禁（DoD）、
-  `Co-authored-by:` 署名约定、证据与可复现性、Issue/PR 流、安全红线。
-- **`README.md`**：顶部加私有仓库 + 门禁横幅（**最小改动**，未重排全文品牌）。
+  作者署名规范（唯一作者 ceer_quant，**禁止 AI 署名**）、证据与可复现性、Issue/PR 流、安全红线。
+- **`README.md`**：已**整体重写**为 BlitzkriegBot（Rust 核心 + Node 外壳 + Polymarket 扩展）的
+  私有仓库入口，彻底移除旧 CloddsBot 产品文案与外链。
 - **`CONTRIBUTING.md`**：顶部加 AI 协作/仓库规范区块，指向 `docs/AI_WORKFLOW.md`。
 - **`docs/DECISIONS_PENDING.md`**：新增 **D-6**（既有 lint 债）、**D-7**（仓库身份元数据未改名）、
   **D-8**（免费版私有仓库无法强制分支保护/原生密钥扫描）、**D-9**（旧 Node 树 86 个传递依赖漏洞）。
