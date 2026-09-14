@@ -178,7 +178,7 @@
 
 ---
 
-## [待决策] D-10 运行中的 dry 内核是旧二进制（跑旧的 ~50% 宽止损）——重启换新需授权
+## [已结案] D-10 运行中的 dry 内核是旧二进制（跑旧的 ~50% 宽止损）——重启换新需授权 → 采纳选项 A
 
 - **背景**：HFT 影子优化复盘（见 `docs/reports/HFT_OPTIMIZATION_REPORT.md`）确认：
   - 当前**源码默认值**已是 walk-forward 验证过的 `stop_loss=12% / trail_min=8%`
@@ -190,11 +190,13 @@
     实盘成交里 47 笔 stop_loss 的净亏在 **−17%～−58%**（如 0.45→0.22、0.41→0.20），
     没有一笔接近 −12%，证明在跑的是**旧宽止损**——这是「当前表现不忍直视」的直接原因，
     而非新策略本身失效。
-  - 受 **Soak 红线**（不得擅自重启进程/改代码，除非已授权）约束，AI **未重启**该进程。
-- **选项 A（AI 倾向）**：用户授权后，用仓库根 `target/release/blitzkrieg-core`（已通过
-  build/test/cycle-check）重启 dry 内核（由 node 外壳以原 CLI 参数重新拉起），随后核对
-  启动日志新增的 `exit tuning: stop_loss=12% …` 行确认生效；继续 DryRun，不开 Live。
-- **选项 B**：暂不重启，保留旧进程继续观察，先只合入本次的工具/可观测性修复（holdout、
-  grid 订正、启动参数日志）。
-- **需要用户确认的点**：**是否现在授权重启 dry 内核以加载 SL12/trail8 的新二进制？**
-  （AI 不会自行重启；Live 交易在任何情况下都不启用。）
+  - 受 **Soak 红线**（不得擅自重启进程/改代码，除非已授权）约束，AI 当时**未重启**该进程。
+- **结论（2026-09-14 18:01）**：**用户授权「今后只要全部门禁通过，允许 AI 自行重启
+  dry 内核」（已固化到 `docs/AI_WORKFLOW.md` §2.1 第 8 条），AI 随即执行选项 A**：
+  - 重启前快照 `data/backup-20260914-180105-prerestart/`（只拷贝未删除）；
+  - `SIGTERM` 旧内核 PID 73052，node 外壳（`BlitzkriegCoreClient` autoRestart）
+    1 秒内自动以新二进制原参数拉起新内核 **PID 12189**（二进制 12,951,728 字节）；
+  - 启动日志验证生效参数：`exit tuning: stop_loss=12% take_profit=100% trail_min=8%
+    trail_arm=15% min_time_left=180s force_exit=120s maker_timeout=5000ms`；
+  - `health` 端点正常，引擎重新发现回合并连接 Polymarket WS。
+  - 仍为 DryRun，Live 未启用。今后重启 dry 内核按 §2.1 规则执行（门禁全绿为前提）。
