@@ -162,7 +162,7 @@ async function rustDecision() {
     // `engine.markets`, and Rust-native round discovery would otherwise overwrite
     // it with a real round, making the comparison non-deterministic.
     extraArgs: [
-      '--engine', '--no-auto-exits', '--no-discovery',
+      '--engine', '--no-event-archive', '--no-auto-exits', '--no-discovery',
       '--min-round-age', '0', '--min-time-left', '0',
       '--trend-confirm-sec', String(TREND_CONFIRM_SEC),
       '--trend-window-floor-ms', String(WINDOW_MS),
