@@ -31,6 +31,8 @@ Node/TS（UI、参数、日志）──IPC(UDS JSON-RPC)──▶ Rust 内核 bl
 | `extensions/polymarket/` | Polymarket 插件（venue/live/feed/discovery/gamma/plugin） |
 | `src/` | Node/TS 外壳（gateway、webchat、skills；`HFT_CORE=rust` 时只做 UI/参数/日志） |
 | `ui/hft.html` | HFT 面板（**被 .gitignore 忽略**，仅存在于磁盘） |
+| `ui_kit/` | UI Kit（纯展示层 + gateway 命令通道；core/web/tui/app 四层，无交易逻辑） |
+| `ui_kit_panel/` | 交互式命令行面板（ratatui + crossterm + tokio，复用 UI Kit 数据层；`ui_kit_panel --manage` 可管内核生命周期） |
 | `scripts/` | 验证/分析脚本（见 §5） |
 | `docs/blitzkrieg/MIGRATION_LOG.md` | **权威变更史**（§1–§29），必读 |
 | `data/` | 运行时数据（不提交，但随目录移动）：`trades/`、`orders/`、`positions/`、`soak/`、`shadow/`、`backup-*` |
