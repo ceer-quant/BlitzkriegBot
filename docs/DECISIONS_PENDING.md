@@ -120,3 +120,55 @@
 - **需要用户确认的点**：
   1. 是否重命名 npm 包（`clodds` → 其他）？还是本仓库不再发布 npm、仅内部使用？
   2. 是否把 `repository.url` 指向 `ceer-quant/BlitzkriegBot` 并清理 README 旧上游品牌？
+
+---
+
+## [待决策] D-8 私有仓库在 GitHub Free 计划下无法强制分支保护 / 规则集 / 原生密钥扫描
+
+- **背景**：建仓后实测 `ceer-quant/BlitzkriegBot`（私有，组织 `ceer-quant`，当前账号为 owner/admin）：
+  - 分支保护（branch protection）→ `403 "Upgrade to GitHub Pro"`；
+  - 仓库规则集（rulesets）→ `403`；
+  - 原生 Secret scanning / Push protection → `422 "not available"` / `404`。
+  - 这些能力在**私有仓库**上属于 GitHub Pro/Team/Enterprise（Advanced Security）付费能力，
+  无法通过配置或 API 开启。
+- **影响**：`main`/`develop` 在服务端**没有**强制 PR、必需状态检查、禁止 force-push 或推送前密钥拦截。
+  目前的强约束只靠**流程自律 + CI**。
+- **已落地的缓解（AI 已采用）**：
+  1. CI `secret-scan` 作业为**阻塞门**：零依赖 `scripts/secret-scan.sh` 扫工作树，
+     另有每周 `secret-scan.yml --history` 扫全历史，gitleaks 作建议性二道防线；
+  2. `docs/AI_WORKFLOW.md` 写明分支模型、DoD 与「禁止未验证提交到主分支」等红线；
+  3. `.gitignore`/`.gitattributes` 在提交侧规避密钥与换行/二进制问题。
+- **选项 A**：维持现状（流程 + CI 阻塞门），不升级套餐。
+- **选项 B**：升级到 GitHub Pro（个人账户）或 Team/Enterprise（组织），开启分支保护、
+  必需检查与 Push Protection；组织级还可评估 Advanced Security。
+- **选项 C（折中）**：把仓库改为 **public** 以获得免费分支保护/规则集（但代码公开，不适用于交易系统）。
+- **AI 倾向**：短期 **A**（私有 + CI 阻塞门 + 文档约束已覆盖主要风险）；预算允许时走 **B**。
+  **不建议 C**（交易核心不应公开）。
+- **需要用户确认的点**：是否升级 GitHub 套餐以获得服务端强制保护？若升级，Pro 还是组织 Team？
+
+---
+
+## [待决策] D-9 既有 Node 依赖树的 86 个生产层漏洞（npm audit 在 CI 中为建议性）
+
+- **背景**：真实 CI（ubuntu-latest, Node 22）对**现有锁定依赖**跑
+  `npm audit --audit-level=high --omit=dev`，报告 **86 个生产漏洞**
+  （**2 critical / 49 high / 33 moderate / 2 low**）。全部位于**旧 Node 外壳**的
+  交易所/消息 SDK 传递依赖链，非本仓代码，例如：
+  - `protobufjs <=7.6.4`（critical，RCE/DoS），经 `@grpc/grpc-js → @drift-labs/sdk` 引入；
+  - `@whiskeysockets/baileys <=6.7.21`（critical，消息欺骗/状态破坏）；
+  - `@grpc/grpc-js 1.14.x`（high，畸形消息致崩）；
+  - `ws` 旧版（high），散见于 `ethers`/`viem`/`binance`/`bybit-api` 等。
+  npm 给出的唯一解是 `npm audit fix --force`，即对**交易 SDK 做大版本破坏性升级**
+  （明确提示会装 `@drift-labs/sdk@2.141.0` 等 breaking change）。
+- **本次已做的最小改动（AI 已采用）**：把 `.github/workflows/ci.yml` 与遗留
+  `.github/workflows/security.yml` 中的 `npm audit` / `audit-ci` 步骤设为
+  **建议性（continue-on-error）**，但**仍每次运行并打印报告**，债务始终可见。
+  理由与 D-6 一致：治理变更不得「顺手」破坏性升级交易 SDK（违反「禁止顺手优化业务逻辑」）。
+- **选项 A**：维持建议性，单独立项升级旧 Node 外壳依赖（配合其去留，见 D-4）。
+- **选项 B**：现在就 `npm audit fix --force` 全量升级并回归实盘对接（风险高、范围大）。
+- **选项 C**：随 Rust 核心迁移，逐步把依赖这些 SDK 的旧 Node 模块下线（与 D-4 合并推进）。
+- **AI 倾向**：**A → C**。鉴于生产交易路径正在迁移到 Rust 核心（D-4 已规划删除 Node 外壳），
+  优先按模块下线而非升级旧树；对仍在用的模块才考虑定点升级。
+- **需要用户确认的点**：旧 Node 外壳依赖升级是「立即修」还是「随 D-4 下线」？在仍保留的模块上，
+  是否接受对 `ethers`/`viem`/交易所 SDK 做大版本升级带来的回归风险？
+
