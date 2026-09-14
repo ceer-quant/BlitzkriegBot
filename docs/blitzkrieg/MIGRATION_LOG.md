@@ -1053,3 +1053,44 @@ HFT_MAX_SHARES=4 HFT_MIN_SHARES=4 node dist/index.js   # /crypto-hft start
 - 不设 `--event-archive` / `--backtest` → 生产行为与改动前一致（归档与回测都是显式 opt-in）。
 - `--backtest` 恒 dry、强制关闭归档与 discovery；`FillModel` 默认恒等 → 不改任何 live 决策。
 - 未启用 Live、未改任何凭证；临时 harness 只在私有 socket + 临时目录里跑，不碰生产数据文件。
+
+---
+
+## 36. 【生产常开行情归档】分段轮转 + 磁盘护栏 + 多段重放（P-1.3 运维化）
+
+**背景**：用户要求给生产 dry 内核**常开** `--event-archive`。直接加一个 flag 是不安全的——实测吞吐
+≈11 MB/min ≈16 GB/天，原来的归档只支持"到顶即停"（`--event-archive-max-mb`），512 MB 上限下
+**约 46 分钟就静默停录**，之后所有"这笔单为什么亏"的问题永久失去盘口证据。常开的前提是先让归档
+**可以无限期跑下去**。
+
+**实现**
+1. **分段轮转**（`data_source.rs`）：`--event-archive-rotate-mb <N>` 到量即把当前段改名为带 UTC
+   时间戳的同目录兄弟文件（`events.jsonl` → `events.20250914T140000Z.jsonl`），再打开新的
+   `events.jsonl` 继续写。**只改名、绝不删除**；同一秒内多次轮转用零填充序号消歧
+   （`-0002`…`-0010`，避免字典序把 `-10` 排到 `-2` 之前）。改名前先释放 fd，改名失败则原地继续写。
+2. **磁盘护栏**（`--event-archive-min-free-mb <N>`，默认生产值 5120）：每次轮转点做一次 `statvfs`
+   （热路径零成本），可用空间低于阈值即停录并记录原因——无限期采集的真正的界是磁盘，不是文件大小。
+3. **停止原因可观测**：`engine.stats.archive` 增加 `rotateBytes/segmentBytes/segments/freeBytes/
+   stoppedReason("cap"|"disk"|"io")`；`/crypto-hft status` 打印录制状态，停录时显示**加粗告警**。
+4. **多段重放**：`SegmentSource` + `open_replay_all`——`--backtest events.jsonl` 现在自动按写入顺序
+   读入该归档的**全部轮转段**（按名称解析时间戳排序，live 段排最后），无需人工拼接；源统计跨段汇总。
+5. **生产接通**（`blitzkrieg-core-runner.ts` + `crypto-hft` skill）：**默认开**，路径
+   `data/archive/events.jsonl`、每段 256 MB、无会话上限、保留 ≥5 GB 空闲；
+   `HFT_EVENT_ARCHIVE=off`（或 `0`/`none`）关闭，`HFT_EVENT_ARCHIVE_{ROTATE,MAX,MIN_FREE}_MB` 可调。
+6. **巡检**（`soak-health.sh`）：新增归档新鲜度检查——最新段 5 分钟无写入即报警，日志出现
+   `event archive stopped recording` 即报警；健康行新增 `archive=ok(3s)|stale|off|no-segments`。
+
+**验证**
+- `cargo test --workspace`：**136** core + 13 ui_kit + 2 panel + 4 polymarket = 155 passed
+  （新增 5 项：轮转不丢事件、UTC 命名、磁盘护栏、多段按序重放、异目录文件不误读 + 拼错路径报错）。
+- CLI 实测（临时 socket + 临时目录，不碰生产）：20 001 个 book 事件 / 5 段 → `--backtest` 单段
+  **20 001 events / 0 malformed / 0 out-of-order**，与捕获计数逐位一致。
+- 过程中测试**逮到两个真缺陷**并修复：（a）同秒轮转撞名会**静默覆盖**前一段；（b）`-0002` 与
+  `-0010` 字典序错排 → 重放乱序。两者都会"静默丢一段数据"，是常开归档的致命失效模式。
+- 全门禁：`npm test` 135、`npx tsc --noEmit` 0 error、`npm run build` OK、`parity-engines` PARITY OK、
+  `core-parity` RUST CORE PARITY OK、`cycle-check` PASS、`backtest-check` **21/21**、`secret-scan` OK。
+
+**默认安全**
+- 归档**只镜像行情事件**（book/top/spot/round），不写订单/成交/持仓，不读任何凭证。
+- 不改任何交易决策：`FillModel` 恒等、无 live 行为变化；归档关闭时行为与改动前完全一致。
+- 未启用 Live、未改凭证；`data/` 已在 `.gitignore`（归档不入版本库）。

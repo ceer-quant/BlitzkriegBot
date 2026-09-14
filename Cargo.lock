@@ -1088,6 +1088,7 @@ dependencies = [
  "blitzkrieg-strategy-api",
  "futures",
  "futures-util",
+ "libc",
  "libloading",
  "polymarket-extension",
  "rust_decimal",

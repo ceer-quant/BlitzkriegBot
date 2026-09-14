@@ -32,7 +32,34 @@ import type { ExecutionService } from '../../../execution/index.js';
 import { formatHelp } from '../../help.js';
 import { wrapSkillError } from '../../errors.js';
 import { logger } from '../../../utils/logger.js';
-import { blitzkriegCoreEnabled, getBlitzkriegCoreRunner } from '../../../core/blitzkrieg-core-runner.js';
+import { blitzkriegCoreEnabled, getBlitzkriegCoreRunner, type EventArchiveConfig } from '../../../core/blitzkrieg-core-runner.js';
+
+/**
+ * Always-on market-data capture (P-1.3). Default ON: the data for a past stop-out
+ * only exists if capture was already running when it happened — that is the whole
+ * point. `≈11 MB/min ≈16 GB/day`, so rotation and the free-space floor are not
+ * optional extras; they are what makes leaving it on safe.
+ *
+ * Ops knobs: HFT_EVENT_ARCHIVE (path; `off`/`0`/`none` disables),
+ * HFT_EVENT_ARCHIVE_ROTATE_MB, HFT_EVENT_ARCHIVE_MAX_MB,
+ * HFT_EVENT_ARCHIVE_MIN_FREE_MB.
+ */
+function resolveEventArchive(): EventArchiveConfig | null {
+  const raw = (process.env.HFT_EVENT_ARCHIVE ?? 'data/archive/events.jsonl').trim();
+  if (!raw || raw === '0' || ['off', 'none', 'false'].includes(raw.toLowerCase())) return null;
+  const num = (v: string | undefined, dflt: number) => {
+    const n = parseInt(v ?? '', 10);
+    return Number.isFinite(n) && n >= 0 ? n : dflt;
+  };
+  return {
+    path: raw,
+    rotateMb: num(process.env.HFT_EVENT_ARCHIVE_ROTATE_MB, 256),
+    // 0 = no session cap: rotation keeps the files replayable and the free-space
+    // floor bounds the volume, so a hard cap would only mean going dark silently.
+    maxMb: num(process.env.HFT_EVENT_ARCHIVE_MAX_MB, 0),
+    minFreeMb: num(process.env.HFT_EVENT_ARCHIVE_MIN_FREE_MB, 5120),
+  };
+}
 
 // ── Lazy service instances ──────────────────────────────────────────────────
 
@@ -317,6 +344,7 @@ async function executeRust(cmd: string, args: string, parts: string[]): Promise<
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean);
+        const eventArchive = resolveEventArchive();
         await runner.start({
           assets,
           roundSec,
@@ -329,12 +357,16 @@ async function executeRust(cmd: string, args: string, parts: string[]): Promise<
           minRoundAgeSec: DEFAULT_CONFIG.minRoundAgeSec,
           minTimeLeftSec: DEFAULT_CONFIG.minTimeLeftSec,
           strategyLimits,
+          eventArchive,
         });
         return [
           `**Crypto HFT Started (Rust core) [${dryRun ? 'DRY RUN' : 'LIVE'}]**`,
           `Assets: ${assets.join(', ')}`,
           `Round: ${roundSec}s | Size: $${sizeUsd}/trade | Lot: ${minShares}–${maxShares} sh`,
           ...(strategyLimits.length ? [`Strategy caps: ${strategyLimits.join(' | ')}`] : []),
+          ...(eventArchive
+            ? [`Market data: → ${eventArchive.path} (${eventArchive.rotateMb} MB/segment, keep ≥${eventArchive.minFreeMb} MB free)`]
+            : ['Market data: archive OFF (no replay data will exist for this session)']),
           `Engine: blitzkrieg-core (Rust owns discovery, market data, signals, risk, orders, positions)`,
           `Node role: UI / parameters / logs only`,
         ].join('\n');
@@ -379,6 +411,13 @@ async function executeRust(cmd: string, args: string, parts: string[]): Promise<
         out += `Clock offset: 0.00s\n`;
         out += `Volume: $${(agg?.volumeUsd ?? 0).toFixed(2)} | Avg: $${(agg?.avgPrice ?? 0).toFixed(4)}\n`;
         out += `Feed: books=${st.stats.books} spots=${st.stats.spots} confirmed=${st.stats.confirmed} signals=${st.stats.signals}\n`;
+        if (st.stats.archive) {
+          const a = st.stats.archive;
+          const mb = (b: number) => (b / 1024 / 1024).toFixed(1);
+          out += a.recording
+            ? `Market data: recording → ${a.path} (${a.events} events, ${mb(a.bytes)} MB, ${a.segments} rotated, segment ${mb(a.segmentBytes)}/${mb(a.rotateBytes)} MB)\n`
+            : `Market data: **RECORDING STOPPED** (${a.stoppedReason ?? 'unknown'}) — ${a.events} events, ${a.dropped} dropped; replay data ends here\n`;
+        }
         out += `Blocked (near-miss): timing=${st.stats.blockedTiming} momentum=${st.stats.blockedMomentum} | connected=${st.connected ? 'yes' : 'NO'}\n`;
         if (err) out += `Last error: ${err}\n`;
         if (st.marketPrices.length > 0) {

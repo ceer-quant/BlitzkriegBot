@@ -24,6 +24,25 @@ export interface BlitzkriegRunConfig {
   minTimeLeftSec: number;
   /** Per-strategy entry caps, raw `name:maxOpen:maxNotional` (P-1.1). */
   strategyLimits?: string[];
+  /** Market-data archive for post-hoc replay (P-1.3). null/absent = off. */
+  eventArchive?: EventArchiveConfig | null;
+}
+
+/**
+ * Always-on market-data capture (P-1.3): the core mirrors every event it consumes
+ * into JSONL so a later `--backtest` can replay the exact stream — that is how a
+ * past stop-out gets its order book path reconstructed. Rotation is mandatory in
+ * practice (`≈11 MB/min`), and the free-space floor is what actually bounds disk
+ * use: the archive never deletes, so retention is the operator's decision.
+ */
+export interface EventArchiveConfig {
+  path: string;
+  /** Rotate into a new UTC-stamped segment past this size (MiB). 0 = never. */
+  rotateMb: number;
+  /** Whole-session cap (MiB). 0 = unlimited (rotation + the floor bound usage). */
+  maxMb: number;
+  /** Stop recording before the volume drops below this many MiB free. */
+  minFreeMb: number;
 }
 
 export interface BlitzkriegRunStatus {
@@ -49,7 +68,23 @@ export interface BlitzkriegRunStatus {
     dailyPnlUsd: number;
     wins: number;
     losses: number;
+    /** Market-data capture state (P-1.3); null when archiving is off. */
+    archive: ArchiveStatusWire | null;
   };
+}
+
+/** `engine.stats.archive` as the core reports it (camelCase wire form). */
+export interface ArchiveStatusWire {
+  path: string;
+  events: number;
+  bytes: number;
+  dropped: number;
+  recording: boolean;
+  rotateBytes: number;
+  segmentBytes: number;
+  segments: number;
+  freeBytes: number;
+  stoppedReason: string | null;
 }
 
 /** Whether the Rust core should drive trading instead of the Node engine. */
@@ -135,6 +170,17 @@ export class BlitzkriegCoreRunner {
         // malformed entries. Absent → no flag → behaviour unchanged.
         ...(cfg.strategyLimits ?? []).flatMap((s) => ['--strategy-limit', s]),
         '--max-order-notional', String(Math.max(cfg.sizeUsd, maxShares * 0.6)),
+        // Always-on market-data capture (P-1.3). Rotation keeps the file replayable
+        // in chunks; the free-space floor stops recording before the volume fills.
+        // Passing no archive flag (eventArchive: null) disables it entirely.
+        ...(cfg.eventArchive
+          ? [
+              '--event-archive', cfg.eventArchive.path,
+              '--event-archive-rotate-mb', String(cfg.eventArchive.rotateMb),
+              '--event-archive-max-mb', String(cfg.eventArchive.maxMb),
+              '--event-archive-min-free-mb', String(cfg.eventArchive.minFreeMb),
+            ]
+          : []),
       ],
     };
     const client = new BlitzkriegCoreClient(opts);
@@ -220,6 +266,7 @@ export class BlitzkriegCoreRunner {
         dailyPnlUsd: this.dailyPnl,
         wins: this.wins,
         losses: this.losses,
+        archive: (stats?.archive ?? null) as ArchiveStatusWire | null,
       },
     };
   }
