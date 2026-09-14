@@ -33,12 +33,12 @@
 
 | 抽象 | 状态 | 位置 | 备注 |
 |:---|:---:|:---|:---|
-| 市场抽象 | ✅ 已做 | `market_api/src/plugin.rs` | `MarketPlugin`/`DataFeed`/`MarketDiscovery`/`OrderExecutor`/`MarketHost` |
-| 订单抽象 | ✅ 已做 | `market_api/src/types.rs`、`Blitzkrieg_core/src/order/mod.rs` | `OrderIntent`/`FillPolicy`/`OrderStatus`/`TimeInForce` |
-| 风控抽象 | 🟡 已做未接线 | `Blitzkrieg_core/src/risk_context.rs` | `RiskContext` trait + Prediction/Futures 上下文；live 路径未使用 |
-| 账本抽象 | ✅ 已做 | `Blitzkrieg_core/src/ledger_api.rs` | `LedgerApi`；单抵押品 |
+| 市场抽象 | ✅ 已做 | `core/market_api/src/plugin.rs` | `MarketPlugin`/`DataFeed`/`MarketDiscovery`/`OrderExecutor`/`MarketHost` |
+| 订单抽象 | ✅ 已做 | `core/market_api/src/types.rs`、`core/blitzkrieg_core/src/order/mod.rs` | `OrderIntent`/`FillPolicy`/`OrderStatus`/`TimeInForce` |
+| 风控抽象 | 🟡 已做未接线 | `core/blitzkrieg_core/src/risk_context.rs` | `RiskContext` trait + Prediction/Futures 上下文；live 路径未使用 |
+| 账本抽象 | ✅ 已做 | `core/blitzkrieg_core/src/ledger_api.rs` | `LedgerApi`；单抵押品 |
 | 策略抽象 | ✅ 已做 | `strategy_engine/mod.rs` + `user_layer/strategy_api` | `Strategy`/`Signal`/冻结 C ABI |
-| 扩展抽象 | 🟡 已做未调用 | `Blitzkrieg_core/src/extension/mod.rs` | 生命周期存在；`dispatch_to_extensions` 生产未调用 |
+| 扩展抽象 | 🟡 已做未调用 | `core/blitzkrieg_core/src/extension/mod.rs` | 生命周期存在；`dispatch_to_extensions` 生产未调用 |
 | **数据抽象** | ❌ **待做** | — | 无历史/参考数据源 trait；无 bar/tick/L2 归档接口；`marketdata.rs` 只是 L2 簿 |
 | **回测抽象** | ❌ **待做** | — | 无 `Backtester`/模拟 trait；回放是出场专用 |
 | 组合/账户抽象 | ❌ 待做 | — | 无组合/多账户/多资产资金抽象 |

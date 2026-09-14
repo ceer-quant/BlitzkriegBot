@@ -15,7 +15,7 @@ crate-type = ["rlib", "cdylib"]
 # The extension depends ONLY on the market contract + the SDK. It must NOT
 # depend on blitzkrieg-core (that would form a dependency cycle once the core
 # links this crate via its `polymarket` feature).
-blitzkrieg-market-api = { path = "../../market_api" }
+blitzkrieg-market-api = { path = "../../core/market_api" }
 polymarket-client-sdk-v2 = { package = "polymarket_client_sdk_v2", git = "https://github.com/Polymarket/rs-clob-client-v2.git", rev = "561830b9ee502c6e67cce314f0e53a80b8885b09", features = ["clob", "ws", "data", "gamma"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }
 async-trait = { workspace = true }

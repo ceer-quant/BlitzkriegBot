@@ -19,20 +19,20 @@ Node/TS（UI、参数、日志）──IPC(UDS JSON-RPC)──▶ Rust 内核 bl
                                         market_api（契约，无内部依赖）
 ```
 
-**硬约束**：内核零市场代码；`grep -ri polymarket Blitzkrieg_core/src` 仅剩 2 行 feature 注册；
+**硬约束**：内核零市场代码；`grep -ri polymarket core/blitzkrieg_core/src` 仅剩 2 行 feature 注册；
 扩展不得依赖内核（否则 Cargo 成环）。
 
 ## 2. 关键目录
 
 | 路径 | 说明 |
 |---|---|
-| `Blitzkrieg_core/` | Rust 内核（OME/风控/账本/持仓/引擎/scanner/IPC） |
-| `market_api/` | 市场插件契约（DTO + DataFeed/MarketDiscovery/OrderExecutor/MarketHost） |
+| `core/blitzkrieg_core/` | Rust 内核（OME/风控/账本/持仓/引擎/scanner/IPC） |
+| `core/market_api/` | 市场插件契约（DTO + DataFeed/MarketDiscovery/OrderExecutor/MarketHost） |
 | `extensions/polymarket/` | Polymarket 插件（venue/live/feed/discovery/gamma/plugin） |
 | `src/` | Node/TS 外壳（gateway、webchat、skills；`HFT_CORE=rust` 时只做 UI/参数/日志） |
 | `ui/hft.html` | HFT 面板（**被 .gitignore 忽略**，仅存在于磁盘） |
-| `ui_kit/` | UI Kit（纯展示层 + gateway 命令通道；core/web/tui/app 四层，无交易逻辑） |
-| `ui_kit_panel/` | 交互式命令行面板（ratatui + crossterm + tokio，复用 UI Kit 数据层；`ui_kit_panel --manage` 可管内核生命周期） |
+| `ui/ui_kit/` | UI Kit（纯展示层 + gateway 命令通道；core/web/tui/app 四层，无交易逻辑） |
+| `ui/ui_kit_panel/` | 交互式命令行面板（ratatui + crossterm + tokio，复用 UI Kit 数据层；`ui_kit_panel --manage` 可管内核生命周期） |
 | `scripts/` | 验证/分析脚本（见 §5） |
 | `docs/blitzkrieg/MIGRATION_LOG.md` | **权威变更史**（§1–§29），必读 |
 | `data/` | 运行时数据（不提交，但随目录移动）：`trades/`、`orders/`、`positions/`、`soak/`、`shadow/`、`backup-*` |
@@ -58,7 +58,7 @@ nohup node scripts/soak-monitor.mjs --hours 12 --interval-sec 300 >> data/soak/m
 `--engine --feed-ws --assets BTC,ETH,SOL,XRP --round-sec 900 --min-round-age 30
 --min-time-left 180 --max-positions 2 --max-order-notional 6`
 
-## 4. 当前策略参数（`Blitzkrieg_core/src/exit_policy.rs::ExitConfig::default()`）
+## 4. 当前策略参数（`core/blitzkrieg_core/src/exit_policy.rs::ExitConfig::default()`）
 
 | 参数 | 值 | 来历 |
 |---|---|---|

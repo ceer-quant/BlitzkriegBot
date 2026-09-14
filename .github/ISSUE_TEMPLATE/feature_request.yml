@@ -8,7 +8,7 @@ body:
     attributes:
       label: 目标模块
       options:
-        - "rust-core (Blitzkrieg_core)"
+        - "rust-core (core/blitzkrieg_core)"
         - "strategy / engine"
         - "risk / safety"
         - "shadow-evolution"

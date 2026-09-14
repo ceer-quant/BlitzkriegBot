@@ -69,7 +69,7 @@
 # ── module ──────────────────────────────────────────────────────────────────
 - name: "module/rust-core"
   color: "5319e7"
-  description: "Blitzkrieg_core Rust 交易内核"
+  description: "core/blitzkrieg_core Rust 交易内核"
 - name: "module/strategy"
   color: "6f42c1"
   description: "策略 / 引擎"

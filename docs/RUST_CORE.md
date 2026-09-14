@@ -4,6 +4,16 @@
 > crate `clodds-rust-core` → `blitzkrieg-core`（lib `blitzkrieg_core`）；UI 移入 `ui/`（旧
 > `/webchat/hft.html` 仍兼容）。本文档中出现的旧路径/旧 crate 名可按此对照。新的分层与
 > 扩展体系见 `docs/blitzkrieg/{ARCHITECTURE,INTERFACES,STRATEGY_GUIDE,EXTENSION_GUIDE,MIGRATION_LOG}.md`。
+>
+> **P0.6 更新（2026-09-14，目录规整）**：Rust 工作区改为四层布局，**crate/二进制名不变**
+> （仍是 `blitzkrieg-core`，产物仍在仓库根 `target/release/blitzkrieg-core`）：
+> - `Blitzkrieg_core/` → **`core/blitzkrieg_core/`**（小写、归入 `core/`）
+> - `market_api/` → **`core/market_api/`**
+> - `ui_kit/` → **`ui/ui_kit/`**，`ui_kit_panel/` → **`ui/ui_kit_panel/`**
+> - `extensions/polymarket/`、`user_layer/` 位置不变
+>
+> 路径依赖相应更新（core→market_api/extension/user_layer、extension→market_api）。
+> 本文档及历史迁移日志中出现的旧路径按 P0.5/P0.6 两条对照即可。
 
 
 ## 架构原则

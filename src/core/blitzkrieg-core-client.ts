@@ -29,7 +29,7 @@ import {
 } from './schema.js';
 
 export interface BlitzkriegCoreOptions {
-  /** Path to the compiled binary. Defaults to Blitzkrieg_core/target/release/blitzkrieg-core. */
+  /** Path to the compiled binary. Defaults to core/blitzkrieg_core/target/release/blitzkrieg-core. */
   binaryPath?: string;
   /** Override the UDS path. Default: $TMPDIR/clodds-core-$USER.sock. */
   socketPath?: string;
@@ -105,14 +105,14 @@ function defaultSocketPath(): string {
 
 function defaultBinaryPath(): string {
   // The repo is a cargo WORKSPACE, so the binary lands in the workspace-level
-  // target/ at the repo root (NOT in Blitzkrieg_core/target/). Check root first
-  // (authoritative), then the legacy crate-local path for older builds.
+  // target/ at the repo root (NOT in core/blitzkrieg_core/target/). Check root
+  // first (authoritative), then the crate-local path for older builds.
   const root = process.cwd();
   const candidates = [
     join(root, 'target', 'release', 'blitzkrieg-core'),
-    join(root, 'Blitzkrieg_core', 'target', 'release', 'blitzkrieg-core'),
+    join(root, 'core', 'blitzkrieg_core', 'target', 'release', 'blitzkrieg-core'),
     join(root, 'target', 'debug', 'blitzkrieg-core'),
-    join(root, 'Blitzkrieg_core', 'target', 'debug', 'blitzkrieg-core'),
+    join(root, 'core', 'blitzkrieg_core', 'target', 'debug', 'blitzkrieg-core'),
   ];
   return candidates.find((p) => existsSync(p)) ?? candidates[0];
 }
