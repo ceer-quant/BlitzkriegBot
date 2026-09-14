@@ -92,3 +92,43 @@ cd "/Volumes/Hard Disk/BlitzkriegBot"
 ./scripts/offpeak.sh --run <costly-cmd>  # 仅闲时执行
 plutil -lint scripts/launchd/com.blitzkrieg.soak-health.plist
 ```
+
+---
+
+## 7. 已落实（第二轮：把"能自动化的"全部做掉）
+
+### 7.1 数据修正：真因是「会话永不重置」，不是窗口配错
+用 `~/.zcode/cli/log/zcode-2026-09-14.jsonl` 实测：当天 50 个 turn、**1,175 次模型请求**；
+其中 `sess_b10620ee`（巡检+开发所在会话）**跨 24 小时、1,938 次模型请求、从不重置**。
+1,000,000 的 context **不是误配**——它是 ZCode 模型目录对 `deepseek-v4-flash` 的声明值
+（`models_catalog_china_llm_zcode_2026-06-03.json`）。所以改小它是「主动设护栏、逼自动压缩触发」，
+而非「修 bug」。
+
+### 7.2 已改配置
+- `~/.zcode/v2/config.json`（provider `345d3549…`，模型 `deepseek-flash`）：
+  `context` **1,000,000 → 200,000**，`output` **128,000 → 32,768**。已备份
+  `config.json.bak-20260914-115236`；diff 仅这两行，9 个 provider 全在。
+  > 选 200K 而非 64K：代码库工作需大量文件阅读，压太狠会反复截断重读、**反而更贵**。
+
+### 7.3 零 token 主监控（替代 LLM 巡检）
+- `scripts/soak-health-loop.sh`：nohup 常驻，每 30 分钟跑零 token 巡检，写 `data/soak/health.log`；
+  异常时落 `data/soak/HEALTH_ALERT`（人工/agent 只需 `cat` 一个小文件即可判断），恢复时自动清除。
+  已启动（`nohup … --interval-sec 1800 >> data/soak/health-loop.out 2>&1 &`）。
+- **为何用 nohup 而非 launchd/cron**：本机仓库在外置卷，`launchctl load` 直接
+  `Input/output error`（退出码 78），cron 守护进程亦未加载——两者都无法访问该卷。soak-monitor
+  已证明 nohup 在此环境可行，故沿用。
+- `scripts/rotate-run-log.sh`：run.log 超 20MiB 即 gzip 归档并**原地截断**（`>>` 为 O_APPEND，
+  实测截断后从偏移 0 续写、无稀疏空洞）。已由健康循环每轮自动调用。首次执行：69MiB → 2MB.gz。
+
+### 7.4 死日志归档
+`run-pre-*.log`（7 个，9.5MB 历史遗留）已 `gzip -9` → 约 290KB。`.gitignore` 增 `*.log.gz` / `run.log.*`。
+
+### 7.5 ZCode 巡检降级为「每日兜底」
+定时任务由「每 2 小时跑完整巡检」改为 **每日 08:00（闲时）1 次**，且只做两件事：
+查 `HEALTH_ALERT` 是否存在 / 查 `soak-health-loop` 是否存活。主监控职责已交给零 token 循环。
+预计 API 巡检成本从 ~1–2 元/天降到 ≈0。
+
+### 7.6 顺带发现（非成本项，待观察）
+Node 侧日志出现 `Provider health check failing repeatedly: provider "anthropic"`,
+`consecutiveFailures: 304`——与 DeepSeek 成本无关，属 Node 外壳自身健康检查，记录待查。
+
