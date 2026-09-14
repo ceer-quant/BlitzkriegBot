@@ -174,6 +174,10 @@ impl Core {
                 if let Some(v) = t.cooldown_secs { c.cooldown_secs = v; }
                 if let Some(v) = t.variant_count { c.variant_count = v; }
             }
+            // D-2: variant exits must replay the SAME policy the live position
+            // manager runs, or the counterfactual is judged against an exit
+            // mechanism the live path never uses.
+            c.exit_cfg = config.positions.exit.clone();
             c
         };
         let breaker = LossBreaker::new(config.max_consecutive_losses, config.breaker_cooldown_sec);
@@ -583,47 +587,68 @@ impl Core {
             _ => {}
         }
 
-        // Shadow Evolution observation: feed the same tick to the virtual
-        // variants before the live engine consumes it. Uses the CURRENT trend
-        // confirmation so entry gating matches the live strategy.
-        if self.shadow_evolution.is_enabled() {
+        // Shadow Evolution observation. D-3 fidelity: the shadow is fed AFTER the
+        // live engine consumes this very event, so a variant replays the SAME tick
+        // instant — same book and same trend confirmation — the live strategy
+        // decided on. Feeding it before `engine.on_data` (the old behaviour) gave
+        // every variant the PREVIOUS book, a one-tick lag that mis-timed entries
+        // and diluted the counterfactual. Capture what we need before `ev` moves.
+        enum ShadowFeed {
+            Book(String, i64),
+            Round(Vec<CryptoMarket>, i64),
+        }
+        let shadow_feed = if self.shadow_evolution.is_enabled() {
             match &ev {
                 crate::engine::DataEvent::Book { token_id, now_ms: t, .. }
                 | crate::engine::DataEvent::TopOfBook { token_id, now_ms: t, .. } => {
-                    let confirmed = self
-                        .engine
-                        .as_ref()
-                        .map(|e| e.confirmed_tokens().contains(token_id))
-                        .unwrap_or(false);
-                    let book = self
-                        .engine
-                        .as_ref()
-                        .and_then(|e| e.book_snapshot(token_id));
-                    if let Some(book) = book {
-                        self.shadow_evolution_on_tick(token_id, &book, confirmed, *t);
-                    }
+                    Some(ShadowFeed::Book(token_id.clone(), *t))
                 }
                 crate::engine::DataEvent::RoundMarkets { markets, now_ms: t } => {
-                    self.shadow_evolution_on_round(markets, *t);
+                    Some(ShadowFeed::Round(markets.clone(), *t))
                 }
-                _ => {}
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        // Drive the live engine (when attached). Absence must not skip the shadow
+        // round feed below, so this is an `if let`, not an early return.
+        if let Some(engine) = self.engine.as_mut() {
+            let broken = engine.on_data(ev);
+            for (token, _price) in broken {
+                // Regime change: pull resting entry bids for this token.
+                let ids: Vec<String> = self
+                    .ome
+                    .live_orders()
+                    .into_iter()
+                    .filter(|o| o.side == Side::Buy && o.token_id == token)
+                    .map(|o| o.order_id.clone())
+                    .collect();
+                for id in ids {
+                    let _ = self.cancel(&id, now_ms);
+                }
             }
         }
 
-        let Some(engine) = self.engine.as_mut() else { return };
-        let broken = engine.on_data(ev);
-        for (token, _price) in broken {
-            // Regime change: pull resting entry bids for this token.
-            let ids: Vec<String> = self
-                .ome
-                .live_orders()
-                .into_iter()
-                .filter(|o| o.side == Side::Buy && o.token_id == token)
-                .map(|o| o.order_id.clone())
-                .collect();
-            for id in ids {
-                let _ = self.cancel(&id, now_ms);
+        // Now feed the shadow the tick the live engine just consumed.
+        match shadow_feed {
+            Some(ShadowFeed::Book(token_id, t)) => {
+                let confirmed = self
+                    .engine
+                    .as_ref()
+                    .map(|e| e.confirmed_tokens().contains(&token_id))
+                    .unwrap_or(false);
+                let book = self
+                    .engine
+                    .as_ref()
+                    .and_then(|e| e.book_snapshot(&token_id));
+                if let Some(book) = book {
+                    self.shadow_evolution_on_tick(&token_id, &book, confirmed, t);
+                }
             }
+            Some(ShadowFeed::Round(markets, t)) => self.shadow_evolution_on_round(&markets, t),
+            None => {}
         }
     }
 

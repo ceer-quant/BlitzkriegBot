@@ -6,6 +6,7 @@
 //!     per-order notional. Shadow evolution can NEVER touch these, because they
 //!     are not part of the swapped object at all (structural, not a check).
 
+use crate::exit_policy::ExitConfig;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,18 @@ impl MutableParams {
             "trend_max_entry_price" => self.trend_max_entry_price = value,
             "trend_broken_price" => self.trend_broken_price = value,
             _ => {}
+        }
+    }
+
+    /// Read one field by name (inverse of `set`; used by directed variant
+    /// generation to step a single knob).
+    pub fn get(&self, name: &str) -> Decimal {
+        match name {
+            "trend_min_price" => self.trend_min_price,
+            "trend_entry_factor" => self.trend_entry_factor,
+            "trend_max_entry_price" => self.trend_max_entry_price,
+            "trend_broken_price" => self.trend_broken_price,
+            _ => Decimal::ZERO,
         }
     }
 
@@ -126,6 +139,11 @@ pub struct ShadowEvolutionConfig {
     pub audit_log_path: String,
     /// Risk parameters used for the virtual exit simulation (immutable laws).
     pub risk: ImmutableConfig,
+    /// Exit policy the virtual variants replay. This MUST be the SAME config the
+    /// live position manager uses (D-2), otherwise a variant is judged against an
+    /// exit mechanism the live path never runs — a biased counterfactual. The
+    /// caller passes `PositionConfig.exit`.
+    pub exit_cfg: ExitConfig,
 }
 
 impl Default for ShadowEvolutionConfig {
@@ -142,6 +160,7 @@ impl Default for ShadowEvolutionConfig {
             variant_count: 3,
             audit_log_path: "data/evolution/evolution.jsonl".into(),
             risk: ImmutableConfig::default(),
+            exit_cfg: ExitConfig::default(),
         }
     }
 }

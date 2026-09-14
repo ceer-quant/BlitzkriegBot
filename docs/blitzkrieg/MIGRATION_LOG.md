@@ -864,3 +864,46 @@ HFT_MAX_SHARES=4 HFT_MIN_SHARES=4 node dist/index.js   # /crypto-hft start
 ### 结论
 "重启后持仓失管"链已断：**持仓落盘 → 重启恢复 HWM/出场状态 → 继续估值与出场**。
 与 §29 合起来，订单与持仓两条崩溃恢复路径均已闭环。
+
+---
+
+## 33. 【影子进化保真度】D-2/D-3 修复：同刻观测 + 定向变异 + 统一 ExitConfig + 样本跨回合
+
+### 背景
+§shadow（`docs/reports/SHADOW_EVOLUTION_REPORT.md` 首版，提交 `3f28e0d`）曾报告：影子进化机制正确且安全，
+但在整机 A/B 中 **0 次触发**（B 组 ≡ A 组）。深入定位后确认这不是工况偶然，而是**三处建模保真度缺陷**
+（DECISIONS_PENDING 的 D-2/D-3）。本次全部修复并复跑，进化为整机 A/B 带来真实增益。
+
+### 三处缺陷与修复
+1. **变体等比例缩放四参数**（`variants.rs::build_variants`）：收紧入场价上限的同时也下调了入场因子，
+   两个方向对入场价**相消** → 变体决策与基准逐位相同，永远无法"更优"。
+   **修复**：改为**定向单旋钮变异**——每个变体只动 4 个可变参数中的 1 个（奇偶交替保守/激进），
+   差异可归因到单一旋钮。
+2. **变体每回合重建**（`mod.rs::on_round`）：每回合重置样本，生产 900s 回合内凑不满 `min_sample_count=30`，
+   进化**结构上不可达**。**修复**：`on_round` 只更新到期时间 + `Variant::retain_tokens`（丢弃已过期 token 的
+   未平仓虚拟仓），**保留 closed 历史 → 样本跨回合累积**。
+3. **(a) 影子滞后一档观测；(b) 变体出场用 50% 硬止损而 live 用 12%**。
+   **修复**：(a) `service.rs::engine_on_data` 改为在引擎**消费该 tick 之后**喂入**同刻盘口与同刻确认**；
+   (b) `ShadowEvolutionConfig` 新增 `exit_cfg: ExitConfig`，由 `Core::new` 从 `config.positions.exit` 注入，
+   变体一律复用 **live 的 `ExitConfig`**。
+
+### 防自强化
+应用一次进化后**按新参数重建变体集**：此时旧历史描述的是已作废的参数，若沿用会让基准的历史亏损
+持续让同一旋钮"获胜"、形成每冷却周期下调一档的**棘轮**。重建不是旧的"每回合清零"缺陷——
+样本现已跨回合累积，进化仍可达。
+
+### 验收
+- **整机 A/B（修复后）**：A=`70 trades / WR 85.7% / PF 4.09 / net 78.36 / dd 2.532`；
+  **B=`65 trades / WR 92.3% / PF 8.19 / net 91.02 / dd 2.532`**。进化 **applied=1**，
+  轨迹单调：`trend_max_entry_price 0.45 → 0.4365`（−3%，在 ±5% 锁内）。**B>A 且回撤不变**。
+- **安全锁**：`+20%` 手工下发仍被 Lock 1 硬拒（`gradient too large ... 0.20 > 0.05`）。
+- **EXP-C**（组件级，直接驱动生产 `ShadowEvolution`）：`applied=1`，best variant `wr 1.0 / pnl 54.93` vs
+  baseline `wr 0.75 / pnl 24.55`。
+- 新增单测 4 项（定向单旋钮 / live ExitConfig / 历史跨回合保留 / 配置含 exit_cfg）；内核测试 **101 项**通过。
+- 门禁全 PASS：`cargo build --release`、`cycle-check`、`core-parity`、`parity-engines`、
+  `order-recovery`、`position-recovery`、`npm run typecheck`。
+- 生产未扰动：内核单实例（PID 73052）照常、`/health` healthy、DRY、未改动 `.env`；实验全程关闭四类日志。
+
+### 生效说明
+生产当前进程跑的是**旧二进制**；本次改动将在**下次内核重启**后生效。是否在生产开启影子进化
+（默认仍 `enabled=false`）由用户决定（见报告 §6）。

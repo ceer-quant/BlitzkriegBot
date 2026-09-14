@@ -113,8 +113,9 @@ pub fn evaluate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::config::{ImmutableConfig, MutableParams};
+    use super::super::config::MutableParams;
     use super::super::variants::{build_variants, Variant};
+    use crate::exit_policy::ExitConfig;
     use rust_decimal_macros::dec;
 
     /// Drive a variant with a scripted price path to produce a known PnL.
@@ -148,19 +149,19 @@ mod tests {
 
     #[test]
     fn no_signal_when_baseline_has_too_few_samples() {
-        let risk = ImmutableConfig::default();
+        let exit = ExitConfig::default();
         let base = MutableParams::default();
-        let mut vs = build_variants(&base, 2, dec!(0.05), &risk, 0);
+        let mut vs = build_variants(&base, 2, dec!(0.05), &exit, 0);
         let baseline_metrics = Metrics::default(); // 0 samples
         assert!(evaluate(&cfg(), &baseline_metrics, &mut vs, 1000, 0).is_none());
     }
 
     #[test]
     fn emits_signal_when_a_variant_clearly_wins() {
-        let risk = ImmutableConfig::default();
+        let exit = ExitConfig::default();
         let base = MutableParams::default();
         // Baseline: one winner, one loser (50% WR).
-        let mut vs = build_variants(&base, 2, dec!(0.05), &risk, 0);
+        let mut vs = build_variants(&base, 2, dec!(0.05), &exit, 0);
         // Variant: two winners (100% WR, higher PF).
         drive(
             &mut vs[1],
@@ -190,9 +191,9 @@ mod tests {
 
     #[test]
     fn cooldown_suppresses_signals() {
-        let risk = ImmutableConfig::default();
+        let exit = ExitConfig::default();
         let base = MutableParams::default();
-        let mut vs = build_variants(&base, 2, dec!(0.05), &risk, 0);
+        let mut vs = build_variants(&base, 2, dec!(0.05), &exit, 0);
         drive(&mut vs[1], &[(0.43, 0.45), (0.95, 0.97), (0.43, 0.45), (0.95, 0.97)], 10_000);
         let mut c = cfg();
         c.cooldown_secs = 600;

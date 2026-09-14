@@ -58,7 +58,7 @@ impl ShadowEvolution {
         let swap = HotSwap::new(initial.clone());
         let audit = AuditLog::new(&cfg.audit_log_path);
         let variants = if cfg.enabled {
-            build_variants(&initial, cfg.variant_count.max(2), cfg.max_gradient, &cfg.risk, 0)
+            build_variants(&initial, cfg.variant_count.max(2), cfg.max_gradient, &cfg.exit_cfg, 0)
         } else {
             Vec::new()
         };
@@ -98,7 +98,7 @@ impl ShadowEvolution {
         self.enabled = true;
         self.cfg.enabled = true;
         let base = self.current_params();
-        self.variants = build_variants(&base, self.cfg.variant_count.max(2), self.cfg.max_gradient, &self.cfg.risk, now_ms);
+        self.variants = build_variants(&base, self.cfg.variant_count.max(2), self.cfg.max_gradient, &self.cfg.exit_cfg, now_ms);
     }
 
     pub fn disable(&mut self) {
@@ -108,18 +108,28 @@ impl ShadowEvolution {
     }
 
     /// Record the current round's markets so variants know token expiries.
-    pub fn on_round(&mut self, markets: &[crate::model::CryptoMarket], now_ms: i64) {
+    ///
+    /// D-3: this does NOT rebuild the variant set. Rebuilding every round reset
+    /// every variant's sample counter, so across a 900s production round it could
+    /// never reach `min_sample_count`. Instead we only advance token expiries and
+    /// drop virtual positions for tokens that are no longer in the live round
+    /// (their market expired, which live force-exits); closed-trade history is
+    /// retained so metrics accumulate across round boundaries.
+    pub fn on_round(&mut self, markets: &[crate::model::CryptoMarket], _now_ms: i64) {
         if !self.enabled {
             return;
         }
         self.token_expiry.clear();
+        let mut valid: std::collections::HashSet<String> = std::collections::HashSet::new();
         for m in markets {
             self.token_expiry.insert(m.up_token_id.clone(), m.expires_at_ms);
             self.token_expiry.insert(m.down_token_id.clone(), m.expires_at_ms);
+            valid.insert(m.up_token_id.clone());
+            valid.insert(m.down_token_id.clone());
         }
-        // New round: reset variant state so simulations are per-round clean.
-        let base = self.current_params();
-        self.variants = build_variants(&base, self.cfg.variant_count.max(2), self.cfg.max_gradient, &self.cfg.risk, now_ms);
+        for v in self.variants.iter_mut() {
+            v.retain_tokens(&valid);
+        }
     }
 
     /// Feed a market tick to every variant (baseline + mutated). Observation
@@ -200,8 +210,13 @@ impl ShadowEvolution {
         self.last_evolution_ms = now_ms;
         self.evolution_count += 1;
         self.audit.record_applied(&sel.signal);
-        // Fresh epoch: variants now explore around the new live parameters.
-        self.variants = build_variants(&applied, self.cfg.variant_count.max(2), self.cfg.max_gradient, &self.cfg.risk, now_ms);
+        // Re-anchor: parameters just changed, so the previous variants' trade
+        // history describes params that are no longer in force. Rebuilding here
+        // is correct (and is NOT the old every-round reset bug: samples now
+        // accumulate across rounds, so the next evolution is still reachable). It
+        // also prevents a self-reinforcing ratchet, where the baseline's stale
+        // pre-evolution losses would let the same knob "win" again every cooldown.
+        self.variants = build_variants(&applied, self.cfg.variant_count.max(2), self.cfg.max_gradient, &self.cfg.exit_cfg, now_ms);
         out.push(EvolutionOutcome::Applied(sel.signal));
         out
     }
