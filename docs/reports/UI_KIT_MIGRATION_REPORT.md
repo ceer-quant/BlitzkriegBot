@@ -158,21 +158,32 @@ ui_kit/
 
 ## 7. Commit / 回滚说明
 
-**执行前基线**：`fc6e93c`（clean tree 起始点）。
+**执行前基线**：`fc6e93c`（clean tree 起始点）。分支：`rust-core-p0`（非 main）。
 
-本次改动**独立提交**（不推主分支），回滚方式：
+本次全托管执行产生 **4 个独立提交**（每个可单独回滚）：
+
+| # | commit | 内容 |
+|---|---|---|
+| 1 | `80b4dc2` | `feat(core)`：股数 CLI（`--min-shares/--max-shares`）+ 持仓持久化 |
+| 2 | `3f28e0d` | `test(shadow)`：影子进化确定性 A/B 复现器 + 报告 |
+| 3 | `61067db` | `feat(ui-kit)`：UI Kit（core/web/tui/app）+ 迁移报告 |
+| 4 | `b8fc023` | `docs`：机构级路线图 + 待决策清单 |
+
+回滚方式：
 
 ```bash
-# 查看本次提交
-git log --oneline -1
-# 回滚单个提交（保留后续历史用 revert；彻底回退用 reset）
-git revert <sha>            # 生成反向提交
-# 或回到基线
+# 回滚「某一个」提交（生成反向提交，保留历史）：
+git revert <sha>
+# 例如只回滚 UI Kit：git revert 61067db
+# 或彻底回到执行前基线：
 git reset --hard fc6e93c
 ```
 
-> 说明：`docs/reports/data/**` 为实验原始数据与前端证据（体积小、确定性可复现）；
-> 若 `data/` 已被 `.gitignore` 忽略，这些证据文件仍会随目录移动保留在磁盘。
+**天然保护**：UI Kit 是独立 crate，回滚提交 3 只需从 workspace `members` 移除 `ui_kit` 并 `git revert 61067db`；
+提交 1 与 2 分别只触碰内核安全层与一个 `examples/` 文件，互不依赖，可任意单独撤销。
+
+> 说明：`docs/reports/data/**` 为实验原始数据与前端证据（约 36K、确定性可复现），
+> 已通过 `.gitignore` 的 `!docs/reports/data/**` 例外**纳入版本控制**；运行时 `data/` 仍被忽略。
 
 ---
 

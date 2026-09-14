@@ -160,6 +160,8 @@ cargo run --release -p blitzkrieg-core --example shadow_evolution_ab -- docs/rep
 
 输出：`docs/reports/data/{shadow_ab_trades.csv, shadow_ab_summary.md, shadow_ab_evolution_B.jsonl}`。
 
+**本任务对应的提交**：`3f28e0d`（`test(shadow)`）。回滚：`git revert 3f28e0d`。
+
 **验证证据清单**
 
 - [x] 两组原始日志/数据：`docs/reports/data/shadow_ab_trades.csv`（A/B 全部成交明细）
