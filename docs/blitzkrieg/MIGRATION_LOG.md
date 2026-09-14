@@ -51,7 +51,7 @@
 - `risk_context.rs`：`RiskContext` trait + `PredictionRiskContext` + `FuturesRiskContext`
 - `ledger_api.rs`：`LedgerApi` trait；既有 `Ledger` 增加该 trait 的实现（委托既有方法）
 - `strategy_engine/mod.rs`：`Strategy`/`Signal`/`MarketTick`/`StrategyEngine`/`validate_signal`
-- `strategy_engine/builtins.rs`：`SpreadArbStrategy`（包装既有评估器）
+- `strategy_engine/builtins.rs`：`SpreadArbStrategy`（包装既有评估器）〔**已于 §34 删除**：除自身定义外无任何引用的第三份实现〕
 - `strategy_engine/loader.rs`：`libloading` 动态加载 + `policy_allows` 安全策略
 - 用户层示例：`user_layer/strategies/dog_strategy.rs`、`user_layer/strategies/trend_strategy.toml`、`user_layer/configs/default.toml`
 
@@ -907,3 +907,70 @@ HFT_MAX_SHARES=4 HFT_MIN_SHARES=4 node dist/index.js   # /crypto-hft start
 ### 生效说明
 生产当前进程跑的是**旧二进制**；本次改动将在**下次内核重启**后生效。是否在生产开启影子进化
 （默认仍 `enabled=false`）由用户决定（见报告 §6）。
+
+## 34. 【P-1.1 多策略执行打通】engine.rs 宿主化 + 统一注册表 + 按策略分账/限额
+
+### 背景
+`ROADMAP_INSTITUTIONAL.md` §1/§3 的最大结构性债务：**两套分裂的注册表**——`strategy_engine/`
+（C ABI 用户策略，`register/enable/on_tick`）与生产路径 `engine.rs`（硬编码 `spread_arb`）。
+用户策略抽象"已写好但从不影响交易"。本次把 `engine.rs` 改造成**多策略宿主**，保持行为逐位等价。
+
+### 实现
+- **新模块 `strategies/`**：
+  - `EngineStrategy`（宿主契约，`Send + Sync`）：`on_book`/`on_round`/`find_candidates`/`take_breaks`/
+    `confirmed_tokens`/`diagnostics`/`set_hot_params`/`spread_arb_view`/`on_config`；只读视图 `StrategyCtx`
+    （markets、回合 slot/剩余时间、`fresh_book` 新鲜度过滤闭包）。
+  - `SpreadArbBuiltin`：现役 `spread_arb` 的宿主化实现（趋势跟踪 + 热参数覆盖 + 候选评估 +
+    `{token,mid,entry,cap,inBand}` 诊断），`internal_key` 格式 `spread_arb:{asset}:{dir}:{slot}` 不变。
+  - `UserStrategyAdapter`：C-ABI `Strategy` → 宿主策略（`MarketTick` 由 `StrategyCtx.fresh_book` 构造，
+    过 `validate_signal` 闸；`Sell` 仍由内核退出策略管理，适配器忽略）。**注册后默认 `enabled=false`**。
+- **`engine.rs` 宿主化**：`Engine` 持有 `Vec<HostedStrategy{strategy, enabled, source}>`，`new()` 注册
+  builtin（enabled、`source="builtin"`）。`on_data` 把 Book/TopOfBook/RoundMarkets 转发给每个策略
+  （再喂 near-miss 记录器），`take_breaks` 取并集。`evaluate()` 汇总各启用策略候选，**共享闸门**：
+  pending token 抑制 → **每 token 每周期至多一单**（注册序先到先得）→ 回合时序闸 → 现货动量闸 →
+  `compute_shares` 定仓 → 下单。注册表 API：`supported_strategies`/`enabled_strategies`/
+  `set_strategy_enabled`/`register_user_strategy`（重名拒绝）/`strategy_source`。
+- **`strategy_engine/` 收敛**：删除死代码 `builtins.rs`（第三份 `SpreadArbStrategy`，无引用）；
+  新增 `loader::load_boxed`（返回 `LoadedStrategy{strategy,name,version}`，供引擎注册）。
+  `load_strategy_lib`：引擎在位 → 注册进引擎调度（disabled）；否则退回独立注册表。
+  删除前用 `git grep "SpreadArbStrategy" main -- '*.rs'` 确认**除该文件自身定义外全树无引用**。
+- **按策略分账（`service.rs`）**：`StrategyAccounting{placed,rejected,limit_rejected,closed_trades,
+  wins,losses,fees_usd,net_pnl_usd}`（会话级）；入场在 `engine_evaluate` 记账；平仓在
+  `on_position_closed` 按 `closed.strategy` 记 PnL/费用/胜负。`engine.stats` 新增
+  `strategyLimitRejected` 与 **`strategies[]`**（含实况敞口 `openPositions`/`openNotionalUsd`，
+  金额为 JSON 数字，Node 侧类型同步）。
+- **按策略限额**：`CoreConfig.strategy_limits: HashMap<String, StrategyLimit{max_open_positions?,
+  max_open_notional_usd?}>`（默认空 = 完全不改行为）；CLI `--strategy-limit name:max_open:max_notional`
+  （可重复，`-`/空段 = 不限，畸形值告警跳过）。超限入场在 `place` 之前被拒，**不产生订单**。
+  语义：`limitRejected` 按「被拒的入场尝试」计数（每次评估一次，同 `placeRejected` 的口径），
+  候选持续存在时会逐周期累加——这是刻意与既有计数器口径一致。
+- **Node 侧透传（生产可运维）**：`BlitzkriegRunConfig.strategyLimits?: string[]` →
+  `blitzkrieg-core-runner.ts` 逐条转 `--strategy-limit`；`/crypto-hft start` 读取环境变量
+  **`HFT_STRATEGY_LIMITS`**（逗号分隔，如 `spread_arb:2:20`）并在启动回执中列出。未设置 = 无参数 = 行为不变。
+  客户端 `stats()` 类型同步新增 `strategyLimitRejected` 与 `strategies[]`（金额为数字）。
+
+### 行为等价（硬门槛）
+- 单策略（默认配置）下逐位等价：候选顺序、`internal_key`、near-miss/blocked 遥测（时序/动量）、
+  新鲜度规则（`is_fresh` + 非空簿 + `max_orderbook_stale_ms`）全部保持；`emitted` 去重对单策略是 no-op。
+- `node scripts/parity-engines.mjs` → **`PARITY OK: identical token/direction/price`**（Node 参考实现 vs Rust）。
+- `node scripts/cycle-check.mjs` → **`RESULT: PASS — order placed, filled, and position valued`**。
+- `node scripts/core-parity.mjs` → **`RUST CORE PARITY OK`**。
+- 端到端限额验证（临时 harness，/tmp）：无限制 → 1 张 LIVE 单、`ordersPlaced=1`；
+  `--strategy-limit spread_arb:0:-` → **0 张单**、`strategyLimitRejected>=1`、`ordersPlaced=0`、敞口 0。
+
+### 测试与门禁
+- 内核单测 **110 项**通过（基线 102 + 引擎宿主 4 + 服务分账/限额 4）：
+  注册表初始仅 builtin/未知开关拒绝、用户策略默认禁用+启用后带标签下单、双策略并行各自记账、
+  禁用 spread_arb 即停单、无限额行为不变、仓位上限拒绝且计数、名义上限拒绝/放行、
+  平仓落账（closedTrades/wins/fees/netPnl/敞口归零）。
+- `cargo build --release`（默认特性）与 `cargo build --release --features strategy-loading` 均通过；
+  特性下 `cargo test --lib` 110 项通过。
+- `npm run typecheck` / `npm test`（135 项）/ `npm run build` / `scripts/secret-scan.sh` 全通过。
+
+### 默认安全
+- 无 `--strategy-limit`、无动态库 → 生产行为与改动前一致。
+- 动态库策略**注册即禁用**，需显式 `strategy.enable`；Live 未启用、未改任何凭证。
+
+### 生效说明
+生产当前进程跑的是**旧二进制**；本改动在下次内核重启后生效（重启后 `engine.stats` 将出现
+`strategies[]` 分账块，`/health` 与 DRY 模式不变）。

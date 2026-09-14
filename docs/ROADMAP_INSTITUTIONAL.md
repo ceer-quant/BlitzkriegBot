@@ -13,7 +13,7 @@
 | 能力 | 当前状态 | 差距 | 下一步（优先级） |
 |:---|:---|:---|:---|
 | **多市场接入** | 🟡 契约完备（`market_api`：DataFeed/Discovery/OrderExecutor/MarketHost + `MarketPluginRegistry`），但**仅实现 1 个** venue（Polymarket）；`binance_spot` 仅文档 | 无第二个可交易 venue；无多 venue **并行**（`active_market_plugin` 返回单个）；无跨 venue 标的映射 | **P-2** 落地第二个 venue 插件（Kalshi/OKX），验证契约；**P-5** 多 venue 并发 |
-| **多策略并行** | 🔴 有 `StrategyEngine`（C ABI、`register/enable`、`on_tick` 遍历），但**生产从不调用**；live 路径 `engine.rs` **硬编码单策略** `spread_arb`（`supported_strategies()` 只返回它） | 载入的策略不产生订单；无 per-strategy PnL/限额；两套注册表（`strategy_engine` vs `engine.rs`）分裂 | **P-1（最高杠杆）** 让引擎遍历已注册策略并经 `Core::place` 下单；统一注册表；按策略分账 |
+| **多策略并行** | 🟢 **已打通（P-1.1，`MIGRATION_LOG §34`）**：`engine.rs` 改为多策略宿主，遍历已注册/启用策略并经 `Core::place` 下单；订单/持仓/平仓全链带 `strategy` 标签；`engine.stats.strategies[]` 按策略分账（敞口 + 会话 PnL）；`--strategy-limit` 支持 per-strategy 限额（默认无限制，行为与单策略时代逐位等价，parity 硬门槛通过）。加载的用户策略默认禁用，需显式 enable | 策略晋级/金丝雀/回滚仍缺（见「策略生命周期管理」行）；无按策略资金分配（P-3） | **P-3** 策略注册表持久化 + 晋级流程；**P-3** 资金分配器 |
 | **组合级风控** | 🟡 订单级 `RiskGate`（kill/价格带/名义上限）+ `LossBreaker`；持仓级 `can_open`（仓位数、日亏、冷却）。`risk_context.rs`（含杠杆/清算）**已定义未接线** | 无跨策略/跨资产聚合暴露、无 gross/net 敞口上限、无相关性/波动率调整、无 VaR/压力测试、无保证金 | **P-2** 组合风控层：敞口聚合 + 上限；**P-4** 相关性/VaR |
 | **资金效率优化** | 🟡 `Ledger` 预留/释放/结算（单抵押品 USDC）；`available=balance-reserved`；size 由 `size_usd/price` 夹取 | 无闲置资金管理、无按权益/波动率缩放、无保证金/杠杆、无跨策略资金分配、预留未含费用/滑点缓冲 | **P-3** 资金分配器 + 波动率目标 sizing |
 | **回测框架** | 🟡 Rust `--replay`（仅**出场策略**网格+walk-forward）；`data/shadow/near-miss.jsonl` 路径回放；Node 侧有独立 `src/trading/backtest.ts`（**与内核不通**） | **无**事件驱动、全链路（行情→信号→风控→账本→OME→出场）回测；无历史数据抽象/L2 归档；无滑点/延迟/成交概率模型 | **P-1（核心基建）** 事件驱动回测器 + 数据抽象 |
@@ -57,6 +57,9 @@
 1. **两套分裂的注册表/路径**：`extension/` vs `market/`；`strategy_engine/` vs `engine.rs`。
    生产只走 `engine.rs`（单硬编码策略），抽象层（Strategy/Extension/RiskContext）**处于休眠**。
    → 「抽象已写好但没人用」是当前**最大的结构性债务**，也是 P-1 的根因。
+   **进展（P-1.1）**：策略侧已统一——`engine.rs` 成为多策略宿主，用户策略经
+   `strategies::UserStrategyAdapter` 进入同一调度与下单路径，`strategy_engine/` 退为加载器/独立注册表
+   （`MIGRATION_LOG §34`）。**`extension/`（`dispatch_to_extensions` 未接线）与 `risk_context` 仍休眠**，待 P-2。
 2. **DRY-only、实盘未验证**：启动孤儿清算、live executor、余额播种均已实现但**未经真实下单验证**
    （`MIGRATION_LOG §29/§30/§32`）。任何机构化路线都必须先把 live 链路跑通一遍小额验证。
 3. **持久化全是明文尽力而为**：orders/positions/trades/audit 均 `std::fs` 直写、无 fsync/原子/校验。
@@ -73,11 +76,14 @@
 ### P-1 让抽象生效 + 回测地基（最高杠杆，2–4 周）
 **目标**：策略抽象真正能下单；有真正的回测能验证策略。
 - **交付物**
-  1. 多策略执行：`engine.rs` 改为遍历 `StrategyEngine` 已注册/启用策略，统一两套注册表，订单带正确 `strategy` 标签，按策略分账（per-strategy PnL/限额）。
+  1. 多策略执行 ✅ **已完成（P-1.1，`MIGRATION_LOG §34`）**：宿主化 `engine.rs` 遍历已注册/启用策略，
+     订单带 `strategy` 标签，按策略分账 + 可选 per-strategy 限额；用户策略经适配器进入同一调度（默认禁用）。
+     遗留：加载的 dylib 策略与生产同进程内的「策略晋级/回滚」属 P-3。
   2. 事件驱动回测器：新增 `Backtester` trait + 全链路重放（行情→信号→风控→账本→OME→出场），支持滑点/延迟/成交概率模型。
   3. 数据抽象：`DataSource` trait + L2/tick 归档格式（本地落盘），回测与 live 共用同一 feed 接口。
-  4. 影子进化保真度修复（定向变异、同时刻盘口、统一 `ExitConfig`）。
-- **验收**：同一策略在 live 与回测上对同一历史区间给出一致 PnL（±容差）；两种策略可同时运行并各自记账。
+  4. 影子进化保真度修复 ✅ **已完成（`MIGRATION_LOG §33`）**：定向变异、同时刻盘口、统一 `ExitConfig`。
+- **验收**：同一策略在 live 与回测上对同一历史区间给出一致 PnL（±容差）；两种策略可同时运行并各自记账
+  （多策略 ✅ 已满足：`strategy.list` 可见两策略、各自 `strategies[]` 账本互不混淆；live/回测一致性待 P-1.2/1.3）。
 
 ### P-2 组合风控 + 多市场（2–3 周）
 - **交付物**：组合风控层（跨资产/跨策略敞口聚合、gross/net 上限、相关性粗筛）；接线 `risk_context.rs`；落地**第二个 venue 插件**验证 `market_api` 契约；内核指标 Prometheus 导出 + `RiskAlert/Error` 接告警；持久化加固（原子写+fsync+校验和）。
@@ -105,8 +111,8 @@
 
 | 序 | 事项 | 理由 |
 |---|---|---|
-| 1 | **多策略执行打通（P-1.1）** | 抽象已就绪却无法影响交易——投入最小、解锁最多 |
-| 2 | **事件驱动回测 + 数据抽象（P-1.2/1.3）** | 没有它，任何策略/参数改动都不可验证 |
+| 1 | **多策略执行打通（P-1.1）** ✅ 已完成（`MIGRATION_LOG §34`） | 抽象已就绪却无法影响交易——投入最小、解锁最多 |
+| 2 | **事件驱动回测 + 数据抽象（P-1.2/1.3）** ← 下一项 | 没有它，任何策略/参数改动都不可验证 |
 | 3 | **组合风控 + 资金分配（P-2/P-3）** | 规模化的前提；单笔风控已够当前小资金 |
 | 4 | **实盘小额验证（P-1 前置/并行）** | 全流程 DRY，live 链路未证；先小额打通再放量 |
 | 5 | **密钥治理 + 合规审计（P-5）** | 涉及真实资金后即为刚需 |

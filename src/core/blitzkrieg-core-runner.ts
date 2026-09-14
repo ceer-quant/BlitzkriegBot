@@ -22,6 +22,8 @@ export interface BlitzkriegRunConfig {
   maxDailyLossUsd: number;
   minRoundAgeSec: number;
   minTimeLeftSec: number;
+  /** Per-strategy entry caps, raw `name:maxOpen:maxNotional` (P-1.1). */
+  strategyLimits?: string[];
 }
 
 export interface BlitzkriegRunStatus {
@@ -128,6 +130,10 @@ export class BlitzkriegCoreRunner {
         '--max-positions', String(cfg.maxPositions),
         '--min-shares', String(minShares),
         '--max-shares', String(maxShares),
+        // Optional per-strategy entry caps (P-1.1): raw `name:maxOpen:maxNotional`
+        // strings passed straight through; the core validates and warns on
+        // malformed entries. Absent → no flag → behaviour unchanged.
+        ...(cfg.strategyLimits ?? []).flatMap((s) => ['--strategy-limit', s]),
         '--max-order-notional', String(Math.max(cfg.sizeUsd, maxShares * 0.6)),
       ],
     };

@@ -58,6 +58,9 @@ struct Args {
     se_min_samples: Option<u32>,
     se_cooldown_secs: Option<i64>,
     se_min_obs_secs: Option<i64>,
+    /// Per-strategy entry caps: `name:max_open_positions:max_notional_usd`
+    /// (repeatable; `-` or empty = no cap on that segment).
+    strategy_limits: Vec<String>,
 }
 
 fn default_socket() -> String {
@@ -77,6 +80,7 @@ fn parse_args() -> Args {
     let mut markets: Vec<String> = Vec::new();
     let mut auto_exits = true;
     let mut max_positions: usize = 2;
+    let mut strategy_limits: Vec<String> = Vec::new();
     let mut engine = false;
     let mut min_round_age: i64 = 30;
     let mut min_time_left: i64 = 180;
@@ -143,6 +147,11 @@ fn parse_args() -> Args {
             "--se-min-samples" => se_min_samples = it.next().and_then(|v| v.parse().ok()),
             "--se-cooldown-secs" => se_cooldown_secs = it.next().and_then(|v| v.parse().ok()),
             "--se-min-obs-secs" => se_min_obs_secs = it.next().and_then(|v| v.parse().ok()),
+            "--strategy-limit" => {
+                if let Some(v) = it.next() {
+                    strategy_limits.push(v);
+                }
+            }
             "--assets" => assets_arg = it.next(),
             "--round-sec" => {
                 round_sec = it.next().and_then(|v| v.parse().ok()).unwrap_or(round_sec)
@@ -170,7 +179,48 @@ fn parse_args() -> Args {
             other => eprintln!("ignoring unknown arg: {other}"),
         }
     }
-    Args { socket, mode, tick_ms, seed_balance, max_order_notional, min_shares, max_shares, markets, auto_exits, max_positions, engine, min_round_age, min_time_left, trend_confirm, trend_floor_ms, feed_ws, replay, replay_near_miss, round_sec, near_miss_path, trade_log, no_trade_log, order_log, no_order_log, position_log, no_position_log, market_plugin, discovery, shadow_evolution, assets: assets_arg, se_min_samples, se_cooldown_secs, se_min_obs_secs }
+    Args { socket, mode, tick_ms, seed_balance, max_order_notional, min_shares, max_shares, markets, auto_exits, max_positions, engine, min_round_age, min_time_left, trend_confirm, trend_floor_ms, feed_ws, replay, replay_near_miss, round_sec, near_miss_path, trade_log, no_trade_log, order_log, no_order_log, position_log, no_position_log, market_plugin, discovery, shadow_evolution, assets: assets_arg, se_min_samples, se_cooldown_secs, se_min_obs_secs, strategy_limits }
+}
+
+/// Parse repeated `--strategy-limit <name>:<max_open_positions>:<max_notional_usd>`
+/// flags ("-" or an empty segment = no cap there). Malformed flags are ignored
+/// with a warning so a typo cannot brick startup.
+fn parse_strategy_limits(
+    args: &[String],
+) -> std::collections::HashMap<String, blitzkrieg_core::service::StrategyLimit> {
+    let mut out = std::collections::HashMap::new();
+    for raw in args {
+        let parts: Vec<&str> = raw.split(':').collect();
+        if parts.len() != 3 || parts[0].trim().is_empty() {
+            eprintln!("blitzkrieg-core: ignoring malformed --strategy-limit '{raw}' (want name:max_open:max_notional)");
+            continue;
+        }
+        let max_open_positions = match parts[1].trim() {
+            "" | "-" => None,
+            v => match v.parse::<usize>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!("blitzkrieg-core: ignoring --strategy-limit '{raw}' (bad position cap)");
+                    continue;
+                }
+            },
+        };
+        let max_open_notional_usd = match parts[2].trim() {
+            "" | "-" => None,
+            v => match Decimal::from_str(v) {
+                Ok(d) => Some(d),
+                Err(_) => {
+                    eprintln!("blitzkrieg-core: ignoring --strategy-limit '{raw}' (bad notional cap)");
+                    continue;
+                }
+            },
+        };
+        out.insert(
+            parts[0].trim().to_string(),
+            blitzkrieg_core::service::StrategyLimit { max_open_positions, max_open_notional_usd },
+        );
+    }
+    out
 }
 
 #[tokio::main]
@@ -246,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
         default_maker_timeout_ms: 5000,
         risk: RiskConfig { max_order_notional: args.max_order_notional, ..Default::default() },
         dry_seed_balance: args.seed_balance,
+        strategy_limits: parse_strategy_limits(&args.strategy_limits),
         markets: args.markets,
         auto_exits_enabled: args.auto_exits,
         engine_enabled: args.engine,

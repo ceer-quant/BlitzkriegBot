@@ -7,12 +7,14 @@
 //! the signal, applies risk, reserves funds, signs and submits.
 //!
 //! Two loading paths are supported:
-//!  1. **Built-in strategies** (implementations compiled into the kernel, e.g.
-//!     the existing `spread_arb` evaluator) — registered at startup.
+//!  1. **Built-in strategies** — compiled into the kernel and registered into
+//!     the self-driving engine's dispatch at startup (P-1.1 moved these to
+//!     `crate::strategies`, e.g. the proven `spread_arb` builtin).
 //!  2. **Dynamic libraries** (`strategy/*.dylib`/`.so`) — loaded via
-//!     `libloading` through [`loader`], each exposing a C ABI factory.
+//!     `libloading` through [`loader`], each exposing a C ABI factory. A loaded
+//!     strategy is registered (disabled) into the engine dispatch when the
+//!     engine is attached, else into this standalone registry.
 
-pub mod builtins;
 pub mod loader;
 
 use crate::model::{CoreResult, OrderbookSnapshot, Side};

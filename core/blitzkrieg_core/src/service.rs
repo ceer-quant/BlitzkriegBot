@@ -73,6 +73,22 @@ pub struct CoreConfig {
     pub shadow_evolution_enabled: bool,
     /// Optional Shadow Evolution tuning (tests/ops). None = crate defaults.
     pub shadow_evolution_tuning: Option<ShadowEvolutionTuning>,
+    /// Optional per-strategy entry caps, keyed by strategy name (P-1.1). An
+    /// absent entry means unlimited — the builtin `spread_arb` keeps its current
+    /// behaviour unless an operator configures a cap.
+    pub strategy_limits: HashMap<String, StrategyLimit>,
+}
+
+/// Entry caps for one strategy. Both are optional; `None` = no cap.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyLimit {
+    /// Max simultaneously open positions held by the strategy.
+    pub max_open_positions: Option<usize>,
+    /// Max notional (USD, sum of entry cost) held open by the strategy. A new
+    /// entry is rejected when open notional + its own notional would exceed it.
+    #[serde(with = "crate::decimal::opt", default)]
+    pub max_open_notional_usd: Option<Decimal>,
 }
 
 /// Overridable Shadow Evolution thresholds (all optional).
@@ -117,6 +133,7 @@ impl Default for CoreConfig {
             discovery_enabled: true,
             shadow_evolution_enabled: false,
             shadow_evolution_tuning: None,
+            strategy_limits: HashMap::new(),
         }
     }
 }
@@ -154,6 +171,9 @@ pub struct Core {
     position_db: Option<crate::position_db::PositionDb>,
     /// Feed/decision counters for observability (P4 diagnostics).
     stats: CoreStats,
+    /// Per-strategy order/trade accounting (P-1.1). Session-scoped: reset on
+    /// restart, like `stats`; the durable per-trade record is the trade log.
+    strategy_accounting: HashMap<String, StrategyAccounting>,
     next_id: u64,
     tx: Option<mpsc::UnboundedSender<Event>>,
 }
@@ -211,6 +231,7 @@ impl Core {
             order_db,
             position_db,
             stats: CoreStats::default(),
+            strategy_accounting: HashMap::new(),
             next_id: 1,
             tx: None,
         }
@@ -344,16 +365,31 @@ impl Core {
         }
         self.strategy_engine.set_enabled(name, enabled)
     }
-    /// Load a user-layer strategy shared library and register it into the
-    /// standalone strategy engine. Only meaningful with `strategy-loading`.
+    /// Load a user-layer strategy shared library. With the self-driving engine
+    /// attached, the strategy is registered into the engine's live dispatch
+    /// (DISABLED — an explicit `strategy.enable` is required before it trades);
+    /// otherwise it lands in the standalone engine as a diagnostic registry.
+    /// Only meaningful with `strategy-loading`.
     pub fn load_strategy_lib(&mut self, path: &str) -> String {
         #[cfg(feature = "strategy-loading")]
         {
-            let outcome = crate::strategy_engine::loader::load_and_register(
-                &mut self.strategy_engine,
-                std::path::Path::new(path),
-            );
-            return format!("{outcome:?}");
+            use crate::strategy_engine::loader::{load_and_register, load_boxed, LoadedStrategy};
+            let p = std::path::Path::new(path);
+            if let Some(engine) = self.engine.as_mut() {
+                return match load_boxed(p) {
+                    Ok(LoadedStrategy { strategy, name, version }) => {
+                        match engine.register_user_strategy(strategy, format!("dylib:{}", p.display())) {
+                            Ok(_) => {
+                                format!("{name}@{version} registered into the engine dispatch (disabled)")
+                            }
+                            Err(reason) => format!("rejected: {reason}"),
+                        }
+                    }
+                    Err(outcome) => format!("{outcome:?}"),
+                };
+            }
+            let outcome = load_and_register(&mut self.strategy_engine, p);
+            format!("{outcome:?}")
         }
         #[cfg(not(feature = "strategy-loading"))]
         {
@@ -654,6 +690,7 @@ impl Core {
 
     /// Run one evaluation cycle: engine produces entry orders, core places them.
     /// Entries go through the usual risk/capacity gates; rejections are skipped.
+    /// A configured per-strategy cap (P-1.1) is checked before the order layer.
     pub fn engine_evaluate(&mut self, now_ms: i64) -> usize {
         if self.engine.is_none() {
             return 0;
@@ -670,17 +707,105 @@ impl Core {
             orders.into_iter().map(|o| (o.token_id.clone(), o)).collect();
         let mut placed = 0;
         for (token, req) in tokens {
+            let name = req.strategy.clone();
+            if let Some(limit) = self.config.strategy_limits.get(&name).cloned() {
+                if self.strategy_limit_ok(&req, &limit).is_err() {
+                    self.stats.strategy_limit_rejected += 1;
+                    self.strategy_accounting.entry(name).or_default().limit_rejected += 1;
+                    continue;
+                }
+            }
             match self.place(req, 5000, now_ms) {
                 Ok((_id, _)) => {
+                    self.strategy_accounting.entry(name).or_default().placed += 1;
                     if let Some(engine) = self.engine.as_mut() {
                         engine.note_order_placed(&token);
                     }
                     placed += 1;
                 }
-                Err(_) => self.stats.place_rejected += 1,
+                Err(_) => {
+                    self.stats.place_rejected += 1;
+                    self.strategy_accounting.entry(name).or_default().rejected += 1;
+                }
             }
         }
         placed
+    }
+
+    /// Check a configured per-strategy entry cap against the strategy's current
+    /// open exposure. Returns the rejection reason when a cap would be exceeded.
+    fn strategy_limit_ok(
+        &self,
+        req: &crate::model::OrderRequest,
+        limit: &StrategyLimit,
+    ) -> Result<(), String> {
+        let open: Vec<&crate::position::OpenPosition> = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.strategy == req.strategy)
+            .collect();
+        if let Some(max_pos) = limit.max_open_positions {
+            if open.len() >= max_pos {
+                return Err(format!(
+                    "strategy {} at position cap ({}/{})",
+                    req.strategy,
+                    open.len(),
+                    max_pos
+                ));
+            }
+        }
+        if let Some(max_notional) = limit.max_open_notional_usd {
+            let used: Decimal = open.iter().map(|p| p.cost_usd).sum();
+            let incoming = req.price * req.size;
+            if used + incoming > max_notional {
+                return Err(format!(
+                    "strategy {} notional cap ({used}+{incoming} > {max_notional})",
+                    req.strategy
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Per-strategy accounting (P-1.1): open exposure (live) plus session order
+    /// counters and realized PnL per registered strategy.
+    pub fn strategy_stats(&self) -> Vec<serde_json::Value> {
+        let enabled = self.enabled_strategy_names();
+        self.strategy_names()
+            .into_iter()
+            .map(|name| {
+                let acc = self.strategy_accounting.get(&name).cloned().unwrap_or_default();
+                let opens: Vec<&crate::position::OpenPosition> = self
+                    .positions
+                    .open_positions()
+                    .iter()
+                    .filter(|p| p.strategy == name)
+                    .collect();
+                let open_notional: Decimal = opens.iter().map(|p| p.cost_usd).sum();
+                let source = self
+                    .engine
+                    .as_ref()
+                    .and_then(|e| e.strategy_source(&name))
+                    .unwrap_or("")
+                    .to_string();
+                serde_json::json!({
+                    "name": name,
+                    "enabled": enabled.contains(&name),
+                    "source": source,
+                    "openPositions": opens.len(),
+                    "openNotionalUsd": dec_json(open_notional),
+                    "ordersPlaced": acc.placed,
+                    "ordersRejected": acc.rejected,
+                    "limitRejected": acc.limit_rejected,
+                    "closedTrades": acc.closed_trades,
+                    "wins": acc.wins,
+                    "losses": acc.losses,
+                    "feesUsd": dec_json(acc.fees_usd),
+                    "netPnlUsd": dec_json(acc.net_pnl_usd),
+                })
+            })
+            .collect()
     }
 
     /// Diagnostic snapshot: feed counters + engine trend/confirmed state.
@@ -713,9 +838,11 @@ impl Core {
             "evaluations": self.stats.evaluations,
             "signals": self.stats.signals,
             "placeRejected": self.stats.place_rejected,
+            "strategyLimitRejected": self.stats.strategy_limit_rejected,
             "blocked": blocked,
             "confirmed": confirmed,
             "confirmedDetail": confirmed_detail,
+            "strategies": self.strategy_stats(),
         })
     }
 
@@ -926,6 +1053,22 @@ impl Core {
         if let Some(db) = self.trade_db.as_mut() {
             let rec = crate::trade_db::TradeRecord::from_closed(closed);
             db.record(&rec, now_ms);
+        }
+        // Per-strategy accounting (P-1.1): session realized PnL + fee totals.
+        {
+            let entry_fee =
+                (closed.entry_fee_pct / Decimal::ONE_HUNDRED) * closed.entry_price * closed.shares;
+            let exit_fee =
+                (closed.exit_fee_pct / Decimal::ONE_HUNDRED) * closed.exit_price * closed.shares;
+            let acc = self.strategy_accounting.entry(closed.strategy.clone()).or_default();
+            acc.closed_trades += 1;
+            if closed.net_pnl_usd >= Decimal::ZERO {
+                acc.wins += 1;
+            } else {
+                acc.losses += 1;
+            }
+            acc.fees_usd += entry_fee + exit_fee;
+            acc.net_pnl_usd += closed.net_pnl_usd;
         }
         let tripped = self.breaker.record(closed.net_pnl_usd, now_ms);
         self.emit(Event::PositionClosed {
@@ -1467,6 +1610,13 @@ fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
+/// Decimal → JSON number for the diagnostics payloads, matching the `crate::decimal`
+/// wire convention (Node sees a plain number, not a string).
+fn dec_json(d: Decimal) -> serde_json::Value {
+    use rust_decimal::prelude::ToPrimitive;
+    serde_json::Value::from(d.to_f64().unwrap_or_default())
+}
+
 /// Feed/decision counters for P4 observability.
 #[derive(Debug, Default, Clone)]
 struct CoreStats {
@@ -1477,6 +1627,21 @@ struct CoreStats {
     evaluations: u64,
     signals: u64,
     place_rejected: u64,
+    /// Entries rejected by a configured per-strategy cap (P-1.1).
+    strategy_limit_rejected: u64,
+}
+
+/// Session-scoped per-strategy aggregates (P-1.1 accounting).
+#[derive(Debug, Default, Clone)]
+struct StrategyAccounting {
+    placed: u64,
+    rejected: u64,
+    limit_rejected: u64,
+    closed_trades: u64,
+    wins: u64,
+    losses: u64,
+    fees_usd: Decimal,
+    net_pnl_usd: Decimal,
 }
 
 /// Compact round info for the UI.
@@ -1838,5 +2003,204 @@ mod tests {
         let e = c.place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k2"), 0, 900_000).unwrap_err();
         assert_eq!(e.code, CoreErrorCode::RiskRejected);
         assert!(e.message.to_lowercase().contains("daily"), "got {}", e.message);
+    }
+}
+
+/// P-1.1: host dispatch to the builtin strategy through Core, with per-strategy
+/// caps and per-strategy accounting.
+#[cfg(test)]
+mod strategy_dispatch_tests {
+    use super::*;
+    use crate::engine::{DataEvent, Engine, EngineConfig};
+    use crate::model::CryptoMarket;
+    use crate::risk::RiskConfig;
+    use rust_decimal_macros::dec;
+
+    /// Mirrors the production engine knobs closely enough to trade the feed below
+    /// (same shape as the engine.rs unit tests).
+    fn engine_cfg() -> EngineConfig {
+        EngineConfig {
+            scanner: crate::scanner::ScannerConfig {
+                assets: vec!["BTC".into()],
+                round_duration_sec: 900,
+                min_round_age_sec: 0,
+                min_time_left_sec: 0,
+            },
+            trend: crate::signal::TrendConfig {
+                confirm_sec: 5,
+                ratio: dec!(0.5),
+                min_price: dec!(0.5),
+                broken_price: dec!(0.35),
+                window_floor_ms: 0,
+            },
+            spread_arb: crate::signal::SpreadArbConfig {
+                trend_max_entry_price: dec!(0.45),
+                ..Default::default()
+            },
+            max_orderbook_stale_ms: 8000,
+            momentum_window_sec: 30,
+            momentum_tol_pct: dec!(0.03),
+            size_usd: dec!(2.5),
+            min_shares: dec!(10),
+            max_shares: dec!(10),
+        }
+    }
+
+    fn core_with_engine(limits: HashMap<String, StrategyLimit>) -> Core {
+        let mut c = Core::new(CoreConfig {
+            risk: RiskConfig { max_order_notional: dec!(100), ..Default::default() },
+            dry_seed_balance: dec!(1000),
+            engine_enabled: true,
+            round_duration_sec: 900,
+            auto_exits_enabled: true,
+            strategy_limits: limits,
+            ..Default::default()
+        });
+        c.enable_engine(Engine::new(engine_cfg()));
+        c
+    }
+
+    fn market(now: i64) -> CryptoMarket {
+        let slot = now / 1000 / 900;
+        CryptoMarket {
+            asset: "BTC".into(), condition_id: "cond".into(), question_id: "q".into(),
+            up_token_id: "up".into(), down_token_id: "down".into(),
+            up_price: dec!(0.6), down_price: dec!(0.4),
+            expires_at_ms: (slot + 1) * 900 * 1000, round_slot: slot,
+            neg_risk: true, question: "BTC up or down".into(),
+        }
+    }
+
+    /// Round + confirmed UP trend + calm spot + one dip book: the builtin emits
+    /// exactly one spread_arb entry (0.43 x 10 = 4.30 USD) on the next cycle.
+    fn feed_entry_setup(c: &mut Core, now: i64) {
+        c.engine_on_data(DataEvent::RoundMarkets { markets: vec![market(now)], now_ms: now }, now);
+        for i in 0..12 {
+            let t = now + i * 1000;
+            c.engine_on_data(
+                DataEvent::Book {
+                    token_id: "up".into(),
+                    bids: vec![(dec!(0.55), dec!(100))],
+                    asks: vec![(dec!(0.57), dec!(100))],
+                    now_ms: t,
+                },
+                t,
+            );
+        }
+        let t = now + 12_000;
+        c.engine_on_data(
+            DataEvent::Book {
+                token_id: "up".into(),
+                bids: vec![(dec!(0.43), dec!(100))],
+                asks: vec![(dec!(0.45), dec!(100))],
+                now_ms: t,
+            },
+            t,
+        );
+        c.engine_on_data(DataEvent::Spot { asset: "BTC".into(), price: dec!(60000), now_ms: t }, t);
+    }
+
+    /// The payload decimals arrive as JSON numbers (Node wire convention).
+    fn dec_of(v: &serde_json::Value) -> Decimal {
+        match v {
+            serde_json::Value::Number(n) => Decimal::from_str_exact(&n.to_string()),
+            serde_json::Value::String(s) => Decimal::from_str_exact(s.trim()),
+            other => panic!("not a decimal: {other}"),
+        }
+        .unwrap_or_else(|e| panic!("not a decimal: {v} ({e})"))
+    }
+
+    fn strategy_entry<'a>(stats: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
+        stats.iter().find(|s| s["name"] == name).unwrap_or_else(|| panic!("no stats for {name}: {stats:?}"))
+    }
+
+    #[test]
+    fn default_config_has_no_limits_and_places_the_entry() {
+        let mut c = core_with_engine(HashMap::new());
+        let now = 1_000_000i64;
+        feed_entry_setup(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 12_000), 1, "no caps configured must not change behaviour");
+        assert_eq!(c.engine_stats()["strategyLimitRejected"], 0);
+
+        // Fill the resting maker entry so exposure is live, then read the ledger.
+        c.book_snapshot("up", vec![(dec!(0.42), dec!(100))], vec![(dec!(0.42), dec!(100))], now + 13_000);
+        let stats = c.strategy_stats();
+        let s = strategy_entry(&stats, "spread_arb");
+        assert_eq!(s["enabled"], true);
+        assert_eq!(s["source"], "builtin");
+        assert_eq!(s["ordersPlaced"], 1);
+        assert_eq!(s["openPositions"], 1);
+        assert_eq!(dec_of(&s["openNotionalUsd"]), dec!(4.30));
+    }
+
+    #[test]
+    fn strategy_position_cap_rejects_the_entry_and_is_counted() {
+        let mut limits = HashMap::new();
+        limits.insert(
+            "spread_arb".to_string(),
+            StrategyLimit { max_open_positions: Some(0), max_open_notional_usd: None },
+        );
+        let mut c = core_with_engine(limits);
+        let now = 1_000_000i64;
+        feed_entry_setup(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 12_000), 0, "position cap 0 must block the entry");
+        assert!(c.ome().live_orders().is_empty(), "no order may reach the OME");
+        assert_eq!(c.engine_stats()["strategyLimitRejected"], 1);
+        let stats = c.strategy_stats();
+        let s = strategy_entry(&stats, "spread_arb");
+        assert_eq!(s["limitRejected"], 1);
+        assert_eq!(s["ordersPlaced"], 0);
+        assert_eq!(s["openPositions"], 0);
+    }
+
+    #[test]
+    fn strategy_notional_cap_blocks_below_and_passes_above_the_entry() {
+        // Entry notional is 0.43 * 10 = 4.30: a 1.00 cap rejects, a 10.00 cap passes.
+        let mut tight = HashMap::new();
+        tight.insert(
+            "spread_arb".to_string(),
+            StrategyLimit { max_open_positions: None, max_open_notional_usd: Some(dec!(1)) },
+        );
+        let mut c = core_with_engine(tight);
+        let now = 1_000_000i64;
+        feed_entry_setup(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 12_000), 0, "notional cap 1.00 must block a 4.30 entry");
+        assert_eq!(c.engine_stats()["strategyLimitRejected"], 1);
+
+        let mut loose = HashMap::new();
+        loose.insert(
+            "spread_arb".to_string(),
+            StrategyLimit { max_open_positions: None, max_open_notional_usd: Some(dec!(10)) },
+        );
+        let mut c2 = core_with_engine(loose);
+        feed_entry_setup(&mut c2, now);
+        assert_eq!(c2.engine_evaluate(now + 12_000), 1, "cap above the entry notional must not block");
+        assert_eq!(c2.engine_stats()["strategyLimitRejected"], 0);
+    }
+
+    #[test]
+    fn closed_trade_lands_in_the_strategy_ledger() {
+        let mut c = core_with_engine(HashMap::new());
+        let now = 1_000_000i64;
+        feed_entry_setup(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 12_000), 1);
+        assert_eq!(c.positions().open_positions().len(), 0, "maker entry rests until the book crosses");
+
+        // Fill the resting bid (ask 0.42 crosses the 0.43 bid), then push a
+        // +100%-ish book so the exit engine closes the position at a profit.
+        c.book_snapshot("up", vec![(dec!(0.42), dec!(100))], vec![(dec!(0.42), dec!(100))], now + 13_000);
+        assert_eq!(c.positions().open_positions().len(), 1, "crossing ask must fill the maker entry");
+        c.book_snapshot("up", vec![(dec!(0.95), dec!(100))], vec![(dec!(0.97), dec!(100))], now + 14_000);
+        c.tick(now + 14_200).unwrap();
+        assert_eq!(c.positions().open_positions().len(), 0, "profit target must close the position");
+
+        let stats = c.strategy_stats();
+        let s = strategy_entry(&stats, "spread_arb");
+        assert_eq!(s["closedTrades"], 1);
+        assert_eq!(s["wins"], 1);
+        assert_eq!(s["losses"], 0);
+        assert!(dec_of(&s["netPnlUsd"]) > Decimal::ZERO, "expected positive realized PnL");
+        assert!(dec_of(&s["feesUsd"]) > Decimal::ZERO, "taker exit pays a fee");
+        assert_eq!(dec_of(&s["openNotionalUsd"]), Decimal::ZERO, "closed position leaves no exposure");
     }
 }
