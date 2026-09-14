@@ -1,8 +1,9 @@
 # HANDOFF — Blitzkrieg Core（项目交接/迁移说明）
 
-> 生成于 2026-09-14，项目准备更换路径时。新路径下开新会话时，先读本文件 +
-> `docs/blitzkrieg/MIGRATION_LOG.md`（§1–§29）+ `git log`，即可恢复完整项目知识，
-> **不依赖聊天历史**。
+> 生成于 2026-09-14，项目准备更换路径时。**项目根目录现为 `/Volumes/Hard Disk/BlitzkriegBot/`**
+> （已与 CloddsBot 分家，不再有 `CloddsBot/` 子目录；`/Volumes/Hard Disk/BlitzkriegBot/CloddsBot`
+> 已不存在）。新会话先读本文件 + `docs/blitzkrieg/MIGRATION_LOG.md`（§1–§29）+ `git log`，
+> 即可恢复完整项目知识，**不依赖聊天历史**。
 
 ## 1. 这是什么
 

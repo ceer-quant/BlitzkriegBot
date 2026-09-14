@@ -8,6 +8,11 @@ dist/
 .env
 .env.local
 .env.*.local
+# Pre-merge backup of a DIFFERENT project's .env (holds its own credentials)
+.env.other-project-backup-*
+
+# Old session/temp left after the path migration; safe to delete by hand
+polymarket-5m-bot/
 
 # IDE
 .vscode/
