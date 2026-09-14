@@ -314,7 +314,8 @@ impl EventArchive {
                 "event archive: volume already below the free-space floor — not recording"
             );
         }
-        Ok(Self {
+        let owned = claim(&file);
+        let mut archive = Self {
             path: path.to_path_buf(),
             file: BufWriter::new(file),
             max_bytes,
@@ -329,7 +330,11 @@ impl EventArchive {
             stopped: false,
             stopped_reason: None,
             last_flush_ms: i64::MIN / 2,
-        })
+        };
+        if !owned {
+            archive.stop("locked", "another process is already recording this archive");
+        }
+        Ok(archive)
     }
 
     pub fn status(&self) -> ArchiveStatus {
@@ -377,6 +382,12 @@ impl EventArchive {
         // 3. Reopen the configured path for the next segment.
         match OpenOptions::new().create(true).append(true).open(&self.path) {
             Ok(f) => {
+                if !claim(&f) {
+                    // Someone else grabbed the path between the rename and here.
+                    // Appending anyway would interleave two writers' lines.
+                    self.stop("locked", "another process took the archive during rotate");
+                    return;
+                }
                 self.file = BufWriter::new(f);
                 self.segment_bytes = 0;
                 self.segments += 1;
@@ -469,7 +480,8 @@ fn segment_sort_key(stem: &str, name: &str, live: Option<&str>) -> (u8, String, 
     }
 }
 
-/// A writable sink used to park the file handle while a segment is renamed. It/// is never written to (only swapped out again on the next open), so a temp path
+/// A writable sink used to park the file handle while a segment is renamed. It
+/// is never written to (only swapped out again on the next open), so a temp path
 /// is fine and keeps the rename off any shared state.
 fn sink_file() -> File {
     OpenOptions::new()
@@ -477,6 +489,21 @@ fn sink_file() -> File {
         .append(true)
         .open(std::env::temp_dir().join(format!("bk-archive-sink-{}", std::process::id())))
         .unwrap_or_else(|_| File::create(std::env::temp_dir().join("bk-archive-sink")).expect("temp sink"))
+}
+
+/// Take an exclusive advisory lock on the archive file. Two cores pointed at one
+/// archive would interleave lines and (worse) rotate the file out from under each
+/// other, so capture is single-writer by construction.
+///
+/// Returns false only when another process holds the lock. A platform or
+/// filesystem without the lock API counts as "not held" — losing the guard is
+/// better than silently recording nothing.
+fn claim(file: &File) -> bool {
+    match file.try_lock() {
+        Ok(()) => true,
+        Err(std::fs::TryLockError::WouldBlock) => false,
+        Err(std::fs::TryLockError::Error(_)) => true,
+    }
 }
 
 /// Free bytes on the filesystem holding `path` (None when unknowable, e.g. a
@@ -1220,6 +1247,36 @@ mod tests {
             n += 1;
         }
         assert_eq!(n as u64, st.events);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two cores pointed at one archive would interleave lines and rotate the file
+    /// out from under each other. The second opener must lose cleanly (recording
+    /// off, reason visible) instead of corrupting the stream.
+    #[test]
+    fn a_second_writer_cannot_share_the_archive() {
+        let dir = std::env::temp_dir().join(format!("bk-archive-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let _ = std::fs::remove_file(&path);
+
+        let ev = DataEvent::Spot { asset: "BTC".into(), price: dec!(1), now_ms: 1 };
+        let mut first = EventArchive::open(&path, 0).unwrap();
+        assert!(first.status().recording, "the first writer owns the archive");
+        first.record(&ev);
+
+        let mut second = EventArchive::open(&path, 0).unwrap();
+        let st = second.status();
+        assert!(!st.recording, "the second writer must not record");
+        assert_eq!(st.stopped_reason.as_deref(), Some("locked"));
+        second.record(&ev);
+        assert_eq!(second.status().events, 0, "the loser writes nothing");
+
+        // Dropping the owner releases the lock for the next writer.
+        drop(first);
+        let third = EventArchive::open(&path, 0).unwrap();
+        assert!(third.status().recording, "the lock is released with the owner");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

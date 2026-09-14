@@ -185,7 +185,7 @@ const ec = new BlitzkriegCoreClient({
     noTradeLog: true,  // these harnesses assert via events/positions, never the persisted ledger
     noOrderLog: true,  // and must not restore a prior harness's resting orders
     noPositionLog: true,  // nor its open positions (keeps co-located cores independent)
-  extraArgs: ['--engine', '--min-round-age', '0', '--min-time-left', '0', '--trend-confirm-sec', '0', '--trend-window-floor-ms', '0'],
+  extraArgs: ['--engine', '--no-event-archive', '--min-round-age', '0', '--min-time-left', '0', '--trend-confirm-sec', '0', '--trend-window-floor-ms', '0'],
 });
 
 try {

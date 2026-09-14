@@ -71,7 +71,7 @@ try {
       ...process.env,
       UIKIT_CORE_BIN: BIN,
       UIKIT_CORE_CWD: WORK,
-      UIKIT_CORE_EXTRA_ARGS: '--engine --feed-ws --no-trade-log --no-order-log --no-position-log',
+      UIKIT_CORE_EXTRA_ARGS: '--engine --no-event-archive --feed-ws --no-trade-log --no-order-log --no-position-log',
       HFT_ASSETS: 'BTC,ETH',
       DRY_RUN: 'true',
     },

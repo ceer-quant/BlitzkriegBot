@@ -66,7 +66,7 @@ blitzkrieg-core  ── Unix Domain Socket ($TMPDIR/blitzkrieg-core-$USER.sock)
 | `live.rs` | **Live 桥**：提交未绑定订单、泵送 venue 事件到 core、每 ~5s REST 对账、启动时用真实余额播种账本 |
 | `ipc/schema.rs` | JSON-RPC 契约 |
 | `ipc/server.rs` | UDS server：多会话、事件广播、维护 tick、信号退出 |
-| `data_source.rs` | **数据抽象（P-1.3）**：`DataSource`/`DataSink` trait、JSONL 事件归档（`--event-archive`）、`ReplaySource` 回放源、事件编解码 |
+| `data_source.rs` | **数据抽象（P-1.3）**：`DataSource`/`DataSink` trait、JSONL 事件归档（`--engine` 会话默认常开，`--no-event-archive` 关闭）、`ReplaySource`/`SegmentSource` 回放源、事件编解码 |
 | `backtest.rs` | **事件驱动回测（P-1.2）**：`Backtester` trait + `EventBacktester`（虚拟时钟驱动真实 `Core`）+ 可序列化报告 |
 
 **dry / shadow / 回测 / live 同核心**：Dry 模式不模拟成交后另起状态机，而是通过
@@ -125,6 +125,11 @@ Node 客户端：`src/core/blitzkrieg-core-client.ts`（spawn/就绪握手/崩�
 
 ```bash
 # 采集：真实 core 把喂给引擎的原始事件按到达顺序落盘（live 侧零改动，只多一个 writer）
+# 常开默认：--engine 会话无需任何归档参数，自动落 data/archive/events.jsonl
+# （rotate 256 MB / 无会话上限 / 保留 ≥5 GB 空闲）；--no-event-archive 关闭。
+target/release/blitzkrieg-core --mode dry --engine --feed-ws --assets BTC,ETH,SOL,XRP
+
+# 需要换路径或调参时显式给出（显式值优先于默认）：
 target/release/blitzkrieg-core --mode dry --engine --feed-ws --assets BTC,ETH,SOL,XRP \
   --event-archive data/archive/events.jsonl \
   --event-archive-rotate-mb 256 --event-archive-max-mb 0 --event-archive-min-free-mb 5120
@@ -135,6 +140,12 @@ target/release/blitzkrieg-core --backtest data/archive/events.jsonl \
   --backtest-tick-ms 50 --backtest-tail-ms 0 --backtest-report report.json
 ```
 
+- **默认常开**：只要带 `--engine`，采集即默认打开（路径 `data/archive/events.jsonl`，相对内核 cwd）。
+  这是唯一**事后无法重建**的数据——某笔止损发生时的盘口路径；"默认关"意味着需要时它一定不在。
+  `--no-event-archive` 显式关闭（供测试/夹具使用），显式 `--event-archive <path>` 覆盖默认路径；
+  调参 `--event-archive-{max,rotate,min-free}-mb` 显式给出即生效。
+- **单写者**：归档文件加排他 advisory 锁。第二个指向同一归档的内核不会交错写行、也不会把文件从对方
+  脚下轮转走，而是干净地停录（`stoppedReason:"locked"`）。
 - **归档格式**：JSONL，每行一个事件 `{"at":<ms>,"k":"book|top|spot|round",...}`，Decimal 全部以字符串
   精确编码（无浮点损失）。到上限**丢弃新事件**、绝不删除已有行；`engine.stats.archive` 暴露
   `{path,events,bytes,dropped,recording,rotateBytes,segmentBytes,segments,freeBytes,stoppedReason}`。

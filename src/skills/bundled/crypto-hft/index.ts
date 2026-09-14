@@ -35,10 +35,15 @@ import { logger } from '../../../utils/logger.js';
 import { blitzkriegCoreEnabled, getBlitzkriegCoreRunner, type EventArchiveConfig } from '../../../core/blitzkrieg-core-runner.js';
 
 /**
- * Always-on market-data capture (P-1.3). Default ON: the data for a past stop-out
- * only exists if capture was already running when it happened — that is the whole
- * point. `≈11 MB/min ≈16 GB/day`, so rotation and the free-space floor are not
- * optional extras; they are what makes leaving it on safe.
+ * Always-on market-data capture (P-1.3). The data for a past stop-out only exists
+ * if capture was already running when it happened — that is the whole point.
+ * `≈11 MB/min ≈16 GB/day`, so rotation and the free-space floor are what make
+ * leaving it on safe rather than merely available.
+ *
+ * The DEFAULT lives in the core: an `--engine` session records without any flag,
+ * so a core started by another shell (the UI-kit gateway) is covered too. This
+ * resolver only decides whether to pass explicit settings or tell the core to
+ * switch off.
  *
  * Ops knobs: HFT_EVENT_ARCHIVE (path; `off`/`0`/`none` disables),
  * HFT_EVENT_ARCHIVE_ROTATE_MB, HFT_EVENT_ARCHIVE_MAX_MB,

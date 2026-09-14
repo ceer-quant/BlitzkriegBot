@@ -172,7 +172,8 @@ export class BlitzkriegCoreRunner {
         '--max-order-notional', String(Math.max(cfg.sizeUsd, maxShares * 0.6)),
         // Always-on market-data capture (P-1.3). Rotation keeps the file replayable
         // in chunks; the free-space floor stops recording before the volume fills.
-        // Passing no archive flag (eventArchive: null) disables it entirely.
+        // The core defaults this ON for an engine session, so an explicit opt-out
+        // must say so — omitting the flags would leave the default in place.
         ...(cfg.eventArchive
           ? [
               '--event-archive', cfg.eventArchive.path,
@@ -180,7 +181,7 @@ export class BlitzkriegCoreRunner {
               '--event-archive-max-mb', String(cfg.eventArchive.maxMb),
               '--event-archive-min-free-mb', String(cfg.eventArchive.minFreeMb),
             ]
-          : []),
+          : ['--no-event-archive']),
       ],
     };
     const client = new BlitzkriegCoreClient(opts);
