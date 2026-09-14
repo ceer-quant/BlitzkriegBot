@@ -201,6 +201,8 @@ git reset --hard fc6e93c
 
 **状态**：✅ 完成。这是删除 Node 交易域的唯一前置。
 
+**对应提交**：`1b1c98a`（`feat(ui-kit)`，分支 `rust-core-p0`）。回滚：`git revert 1b1c98a`。
+
 ### 9.1 新增模块 `ui_kit/src/gateway/`
 
 | 文件 | 职责 |

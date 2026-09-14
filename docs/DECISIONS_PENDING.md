@@ -60,7 +60,7 @@
   任务书要求「删除 CloddsBot 目录」，实际等价于删除整个 Node 外壳——远超「删一个遗留目录」。
 - **已完成的替代**：`ui_kit/`（core/web/tui/app）已实现并三前端跑通，可替代**展示层**
   （`ui/hft.html`、`src/tui`）。
-- **命令下发已补齐（2026-09-14，本次）**：`ui_kit/src/gateway/`（新）实现了命令通道——
+- **命令下发已补齐（2026-09-14，提交 `1b1c98a`）**：`ui_kit/src/gateway/`（新）实现了命令通道——
   `Supervisor`（spawn/stop/**adopt** 内核进程，含"绝不重复起核"守卫）+ `Dispatcher`
   （`start|stop|status|positions`，语义对齐 Node 的 Rust-core 路径），并经 `ui_kit_web --manage`
   暴露 `/api/command`（GET/POST）。端到端验证脚本 `scripts/ui-kit-gateway-check.mjs` **PASS**
