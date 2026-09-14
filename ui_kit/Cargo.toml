@@ -1,0 +1,28 @@
+[package]
+name = "blitzkrieg-ui-kit"
+version = "0.1.0"
+edition = "2021"
+description = "Blitzkrieg UI Kit: a pure presentation layer over the Rust core's UDS JSON-RPC. Shared data model + IPC client + event bus, with web / TUI / app adapters. Holds NO trading logic."
+
+[lib]
+name = "blitzkrieg_ui_kit"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ui_kit_tui"
+path = "src/bin/tui.rs"
+
+[[bin]]
+name = "ui_kit_web"
+path = "src/bin/web.rs"
+
+[[bin]]
+name = "ui_kit_app"
+path = "src/bin/app.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

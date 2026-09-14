@@ -1,0 +1,28 @@
+ui_kit TUI → socket /var/folders/_9/gsqw2xvd78ld2prrd6pngb980000gn/T/clodds-core-fancer.sock
+[2J[H[1m[36mBlitzkrieg UI Kit — TUI[0m
+[2mmode=dry · connected=true · source=UDS JSON-RPC (read-only)[0m
+
+  Round [1m#1988168[0m  274s old  [1m626s left[0m  [[32mTRADING[0m]
+  Balance $1004.68   reserved $0.00   available $1004.68
+  Trades 50   WR 70%   Net [31m-0.73[0m
+  [2mbooks=10206 signals=4 rejected=0 confirmed=4[0m
+
+[1mOpen Positions[0m
+  [2m(none)[0m
+
+[1mRecent Trades[0m
+  XRP    UP    0.40→0.68  [32m   +2.67$[0m  trailing_stop
+  BTC    DOWN  0.45→0.48  [32m   +0.15$[0m  trailing_stop
+  ETH    DOWN  0.45→0.50  [32m   +0.35$[0m  trailing_stop
+  BTC    UP    0.45→0.56  [32m   +0.95$[0m  trailing_stop
+  ETH    UP    0.45→0.38  [31m   -0.85$[0m  stop_loss
+  SOL    UP    0.41→0.34  [31m   -0.84$[0m  stop_loss
+  XRP    UP    0.45→0.47  [32m   +0.05$[0m  trailing_stop
+  ETH    DOWN  0.43→0.52  [32m   +0.75$[0m  take_profit
+  SOL    UP    0.45→0.54  [32m   +0.75$[0m  take_profit
+  XRP    UP    0.45→0.54  [32m   +0.75$[0m  take_profit
+
+[1mPrices[0m
+  BTC ↑0.30 ↓0.69   ETH ↑0.24 ↓0.76   SOL ↑0.20 ↓0.80   XRP ↑0.27 ↓0.73   
+
+[2mCtrl-C to exit[0m

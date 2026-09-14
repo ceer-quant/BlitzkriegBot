@@ -34,6 +34,9 @@ pids/
 # Runtime state + logs (trade ledger, soak, shadow, order DB). Machine-generated,
 # may contain real trade history; kept on disk but not versioned.
 data/
+# ...but DO version committed evidence/repro data under docs (A/B runs, UI screenshots).
+!docs/reports/data/
+!docs/reports/data/**
 
 # Model/transformers cache (large, reproducible)
 .transformers-cache/
