@@ -1,9 +1,11 @@
-# Standalone crate for the example user-layer dynamic strategy.
+# Standalone crate for the example external dynamic strategy (C ABI v2).
 # `cargo build --release` produces libdog_strategy.{dylib,so,dll}, which the
-# kernel loads via the frozen ABI (feature `strategy-loading`).
+# kernel loads via the full-featured ABI v2 (feature `strategy-loading`, on by
+# default). A SEPARATE nested workspace (its own Cargo.lock) like a real
+# third-party strategy author would have.
 [package]
 name = "dog_strategy"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [lib]
@@ -13,5 +15,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 blitzkrieg-strategy-api = { path = "../strategy_api" }
+serde_json = "1"
 
 [workspace]

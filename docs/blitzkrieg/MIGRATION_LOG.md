@@ -1360,3 +1360,62 @@ D 批（§40）之后剩余的全部用户可见命名面。**不改业务逻辑
 - `git grep -il clodds` 剩余 48 个文件，全部属：legacy 别名常量与双前缀兼容、D-13 两项
   （盐/链上备注）、兼容路径检测、品牌兼容测试、历史/规划文档（带 banner 或为验收标准本身）、
   `clodds` bin 别名与其 lockfile 镜像、真实运行内核的 socket 取证快照。
+
+## 42. E7 策略接口全功能化 + 外挂标准化：C ABI v2（Issue #38，2026-09-15）
+
+**动机**：v1 动态策略只能拿到 best bid/ask + mid 的 `BkTick`，返回 `Buy/Sell/Hold`
+且 `Sell` 在适配层被丢弃——外挂策略结构性地弱于内建，违背「策略接口必须全功能、
+策略必须外挂解耦」的裁决。v2 用**同一个全功能契约**统一内建与外挂，「外挂」仅是
+加载方式不同。设计基线：[ABI_V2_DESIGN.md](blitzkrieg/ABI_V2_DESIGN.md)；
+干净断点（无 v1 shim）裁决记录为 DECISIONS_PENDING D-15。
+
+**契约（破坏性，v1 无消费者、从未默认启用）**
+- `blitzkrieg-strategy-api` 重写为 ABI v2（`BK_ABI_VERSION=2`，min=2）：
+  - 入参 `BkBookView` 携带**全档位** `bids/asks`（price/size 字符串）+
+    `best_bid/best_ask/mid/bid_depth/ask_depth/obi/spread/spread_pct`；
+    `BkRound`/`BkRoundView`/`BkMarket` 提供回合与市场上下文。
+  - 出参统一为**本库分配的堆 JSON**（`bk_string_out`），由内核复制后经**同一库**
+    的 `bk_strategy_free_string` 归还，分配器不跨边界。
+  - vtable：`on_book/on_round/evaluate`（必需）+ `confirmed_tokens/take_breaks/
+    diagnostics/on_config/on_hot_params/knobs`（可选）。
+  - `evaluate` JSON：`{"entries":[{token,price,reason}], "exits":[{token,reason}],
+    "breaks":[{token,broken_price}]}`。入场**不带张数**（内核定张数）、
+    出场**不带价格**（内核按盘口定价）。
+- 删除：v1 精简 trait `strategy_engine::Strategy`、`MarketTick/Signal`、
+  `UserStrategyAdapter`（`strategies/user_adapter.rs`，删前备份于
+  `data/backup-20260914T223340Z-e7-abi-v2-removed/`）、独立 `StrategyEngine` 注册表。
+- 内核现在只有一个 trait `strategies::EngineStrategy`，内建 `SpreadArbBuiltin` 与
+  外挂 `foreign::ForeignStrategy` 都实现它；`register_user_strategy` 直接吃
+  `Box<dyn EngineStrategy>`。
+
+**内核行为**
+- 新增出场意图通道：策略 `exits` → `EngineStrategy::take_exit_intents` →
+  `Engine::drain_strategy_exits` → `service::run_exit_checks` 与策略出场合入
+  **同一条**提交循环（live 卖单去重、`sell_shares`、`place` 风控/账本/签名）。
+  新 `ExitReason::StrategySignal`（序列化为 `"strategy_signal"`）；策略出场即使
+  `auto_exits_enabled=false` 也处理（语义同手动平仓），但仍受 kill switch/风控/
+  去重/持仓存在性约束，无持仓的 token 被丢弃。
+- 协商顺序：路径策略 → dlopen → 强制 `bk_strategy_abi_version()==2`（在读 vtable
+  之前；缺失即按 v1/pre-v2 拒绝）→ free_string/create → vtable abi/min 与必需钩子
+  校验 → `create()`。feature `strategy-loading` 转为**默认开启**。
+- 外挂**仍无**凭证/下单管理器/UDS/网络句柄；无法绕过 RiskGate/ImmutableConfig/
+  kill switch（边界只传只读借用视图与意图数据）。
+
+**对拍（验收核心）**
+- 新增确定性算法 crate `user_layer/parity_logic`（仅依赖 serde_json；定点 i128 比较
+  十进制字符串，SCALE=1e18），被两条加载路径共用：
+  内树 `EngineStrategy` 包装（仅存在于测试）与独立 nested workspace 的
+  `user_layer/parity_strategy` cdylib（C ABI v2）。
+- `tests/foreign_parity.rs`：两台 `Engine` 回放同一组 `DataEvent`，逐周期比对
+  入场 `OrderRequest`（token/price/size/strategy/asset/direction/internal_key）、
+  出场意图、趋势破位、confirmed 集合、规范化 diagnostics JSON；任一不一致即失败。
+- `tests/dynamic_strategy.rs` 按 v2 重写：真加载 dog_strategy dylib 驱动全档位
+  盘口（入场/TP 出场/confirmed/diagnostics）、热参下推、路径策略、以及
+  「无版本符号的非策略库协商失败」。两个测试在 `BK_REQUIRE_DYLIB=1` 下硬失败而非
+  跳过；CI 先在两个独立 workspace 内 `--locked` 构建 cdylib，再以
+  `BK_REQUIRE_DYLIB=1` 跑 workspace 测试。
+- 示例外挂 `user_layer/strategies/dog_strategy.rs` 升级到 v2（0.2.0）：全档位
+  深度门槛、出场意图、confirmed/diagnostics、on_config/on_hot_params。
+
+**验证（本批）**：见对应 PR 的 CI（rust-check 在 ubuntu 真构建并驱动 2 个 cdylib；
+node-check / secret-scan 不变）。

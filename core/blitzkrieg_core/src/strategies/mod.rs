@@ -1,4 +1,4 @@
-//! Strategy host seam — how the self-driving engine runs strategies (P-1.1).
+//! Strategy host seam — how the self-driving engine runs strategies.
 //!
 //! The engine owns the market state (books, spot, round timing) and the shared
 //! entry gates (one-entry-per-token, round timing, spot momentum, sizing). A
@@ -6,21 +6,34 @@
 //! size or risk-check anything itself — the host does, so every strategy is
 //! subject to the same kernel-side gates.
 //!
-//! Two implementations:
-//!  - [`spread_arb::SpreadArbBuiltin`] — the proven builtin. P-1.1 moved it
-//!    behind this seam with its behaviour kept bit-for-bit (the engine parity
-//!    harnesses are the gate).
-//!  - [`user_adapter::UserStrategyAdapter`] — bridges user-layer strategies
-//!    loaded through the frozen `strategy_engine::Strategy` C ABI onto the
-//!    round-based dispatch.
+//! There is exactly ONE full-featured contract: [`EngineStrategy`]. The proven
+//! in-tree [`spread_arb::SpreadArbBuiltin`] and an external dylib loaded through
+//! C ABI v2 ([`foreign::ForeignStrategy`]) both implement it. Being external is
+//! only a loading difference — an external strategy sees every book callback,
+//! the full depth ladder, round/market context, and can express entries, exits,
+//! breaks, confirmation, diagnostics, config and hot parameters. The old
+//! best-only reduced trait/adapter (which dropped `Sell` and no-op'd `on_book`)
+//! was removed in E7 (#38) so the capability gap cannot reopen.
 
+#[cfg(feature = "strategy-loading")]
+pub mod foreign;
 pub mod spread_arb;
-pub mod user_adapter;
 
 use crate::model::{CryptoMarket, OrderbookSnapshot};
 use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
 use rust_decimal::Decimal;
 use std::collections::HashSet;
+
+/// A strategy's wish to CLOSE an open position. Like an entry candidate it is
+/// only an intent: the host resolves it against a live position, prices it off
+/// the current book, runs the same risk/dedup/sizing path and submits the sell.
+/// `reason` is a short strategy-owned tag for tracing (e.g. "tp"); the kernel
+/// records the close under [`crate::model::ExitReason::StrategySignal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrategyExitIntent {
+    pub token_id: String,
+    pub reason: String,
+}
 
 /// Read-only host market view handed to a strategy for one evaluation cycle.
 pub struct StrategyCtx<'a> {
@@ -91,6 +104,15 @@ pub trait EngineStrategy: Send + Sync {
     /// (round timing, spot momentum, one-entry-per-token) and sizing afterwards,
     /// so strategies cannot bypass them.
     fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal>;
+
+    /// Close intents accumulated since the last drain. The host resolves each
+    /// token to a live position and routes it through the SAME exit submission
+    /// path as an automated/policy exit (live-sell dedup, `sell_shares`, risk +
+    /// ledger + sign in `place`); an intent on a token with no open position is
+    /// dropped. Drains: each intent is returned at most once.
+    fn take_exit_intents(&mut self) -> Vec<StrategyExitIntent> {
+        Vec::new()
+    }
 
     /// Optional diagnostics payload (surfaced per strategy by `engine.stats`).
     fn diagnostics(&self, _ctx: &StrategyCtx<'_>) -> Vec<serde_json::Value> {

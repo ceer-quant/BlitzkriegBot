@@ -1,0 +1,21 @@
+# Standalone crate for the E7 parity-harness external strategy.
+# `cargo build --release` produces libparity_strategy.{dylib,so,dll}, which the
+# kernel loads via C ABI v2 (feature `strategy-loading`). It is a SEPARATE nested
+# workspace (like user_layer/strategies) so it mirrors how a real external author
+# builds against the strategy API with their own Cargo.lock.
+[package]
+name = "parity_strategy"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "parity_strategy"
+path = "parity_strategy.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+blitzkrieg-strategy-api = { path = "../strategy_api" }
+parity-logic = { path = "../parity_logic" }
+serde_json = "1"
+
+[workspace]

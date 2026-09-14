@@ -72,6 +72,9 @@ data/
 target/
 user_layer/strategies/target/
 
+# Local agent/tooling session state (hook state, continue files)
+.mimosa/
+
 # Scratch files
 *.tmp.mjs
 

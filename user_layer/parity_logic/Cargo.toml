@@ -1,0 +1,12 @@
+[package]
+name = "parity-logic"
+version = "0.1.0"
+edition = "2024"
+description = "Deterministic reference strategy logic shared by the in-tree and external dylib parity harness (E7/#38)."
+
+[lib]
+name = "parity_logic"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json = "1"

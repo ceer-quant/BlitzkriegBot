@@ -23,7 +23,7 @@ use crate::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
 use crate::scanner::{Scanner, ScannerConfig};
 use crate::signal::{PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig};
 use crate::strategies::{
-    spread_arb::SpreadArbBuiltin, user_adapter::UserStrategyAdapter, EngineStrategy, StrategyCtx,
+    spread_arb::SpreadArbBuiltin, EngineStrategy, StrategyCtx, StrategyExitIntent,
 };
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -124,6 +124,9 @@ pub struct Engine {
     /// Registered strategies. The builtin `spread_arb` is first; user-layer
     /// strategies are appended (disabled until explicitly enabled).
     strategies: Vec<HostedStrategy>,
+    /// Strategy close intents gathered during the latest evaluate(), drained by
+    /// the host (`Core`) into its shared exit-submission path.
+    strategy_exits: Vec<StrategyExitIntent>,
 }
 
 impl Engine {
@@ -144,6 +147,7 @@ impl Engine {
             blocked_momentum_total: 0,
             hot_params: None,
             strategies,
+            strategy_exits: Vec::new(),
             cfg,
         }
     }
@@ -295,6 +299,9 @@ impl Engine {
             for s in self.strategies.iter_mut() {
                 if s.enabled {
                     candidates.extend(s.strategy.find_candidates(&ctx));
+                    // Close intents accumulate regardless of the entry timing
+                    // gate: an open position's exit is never round-timing-gated.
+                    self.strategy_exits.extend(s.strategy.take_exit_intents());
                 }
             }
         }
@@ -472,23 +479,23 @@ impl Engine {
         false
     }
 
-    /// Register a user-layer strategy into the dispatch (P-1.1). It starts
-    /// DISABLED: an explicit enable is required before it can place orders.
-    /// Returns the registered name, or an error when the name is taken.
+    /// Register a strategy into the live dispatch.
+    ///
+    /// The strategy implements the SAME full [`EngineStrategy`] contract whether
+    /// it is in-tree or an external v2 dylib — external is only a loading
+    /// difference. It starts DISABLED: an explicit enable is required before it
+    /// can place orders. Returns the registered name, or an error when the name
+    /// is taken.
     pub fn register_user_strategy(
         &mut self,
-        inner: Box<dyn crate::strategy_engine::Strategy>,
+        strategy: Box<dyn EngineStrategy>,
         source: String,
     ) -> Result<String, String> {
-        let name = inner.name().to_string();
+        let name = strategy.name().to_string();
         if self.strategies.iter().any(|s| s.strategy.name() == name) {
             return Err(format!("strategy name already registered: {name}"));
         }
-        let mut hosted = HostedStrategy {
-            strategy: Box::new(UserStrategyAdapter::new(inner, source.clone())),
-            enabled: false,
-            source,
-        };
+        let mut hosted = HostedStrategy { strategy, enabled: false, source };
         // Registered after Shadow Evolution was configured? Forward the handle
         // so a later evolution still reaches this strategy.
         if let Some(h) = &self.hot_params {
@@ -509,6 +516,12 @@ impl Engine {
     /// Mark a token as having a live entry order this round (suppresses repeats).
     pub fn note_order_placed(&mut self, token_id: &str) {
         self.pending_tokens.insert(token_id.to_string());
+    }
+
+    /// Drain strategy close intents gathered during the latest evaluate(). The
+    /// host routes these into the same exit-submission path as policy exits.
+    pub fn drain_strategy_exits(&mut self) -> Vec<StrategyExitIntent> {
+        std::mem::take(&mut self.strategy_exits)
     }
 
     fn compute_shares(&self, price: Decimal) -> Decimal {
@@ -708,28 +721,41 @@ mod tests {
 
     // ── P-1.1 strategy dispatch ─────────────────────────────────────────────
 
-    /// A trivial user-layer strategy: buy when the mid drops to/below a level.
+    /// A trivial hosted strategy: buy either outcome token when its mid dips to
+    /// or below a level. Implements the SAME full EngineStrategy contract an
+    /// external v2 dylib does (external is only a loading difference).
     struct DipBuyer {
         name: String,
         buy_below: Decimal,
     }
-    impl crate::strategy_engine::Strategy for DipBuyer {
+    impl EngineStrategy for DipBuyer {
         fn name(&self) -> &str {
             &self.name
         }
-        fn on_tick(
-            &mut self,
-            tick: &crate::strategy_engine::MarketTick,
-        ) -> Option<crate::strategy_engine::Signal> {
-            if tick.mid <= self.buy_below {
-                Some(crate::strategy_engine::Signal::Buy {
-                    symbol: tick.symbol.clone(),
-                    price: tick.mid,
-                    size: dec!(10),
-                })
-            } else {
-                None
+        fn on_book(&mut self, _token_id: &str, _snap: &crate::model::OrderbookSnapshot, _now_ms: i64) {}
+        fn on_round(&mut self, _slot: i64) {}
+        fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
+            let mut out = Vec::new();
+            for market in ctx.markets() {
+                for (token_id, direction) in [
+                    (&market.up_token_id, SignalDirection::Up),
+                    (&market.down_token_id, SignalDirection::Down),
+                ] {
+                    let Some(book) = ctx.fresh_book(token_id) else { continue };
+                    if book.mid_price <= self.buy_below {
+                        out.push(TradeSignal {
+                            strategy: self.name.clone(),
+                            asset: market.asset.clone(),
+                            direction,
+                            token_id: token_id.clone(),
+                            condition_id: market.condition_id.clone(),
+                            price: book.mid_price,
+                            reason: format!("{} dip", self.name),
+                        });
+                    }
+                }
             }
+            out
         }
     }
 

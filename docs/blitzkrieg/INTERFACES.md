@@ -70,7 +70,7 @@
 |:---|:---|:---|
 | `strategy.list` | `{}` | `{ "version": "1.1", "strategies": [{ "name", "enabled" }] }` |
 | `strategy.enable` | `{ name, enabled }` | `{ name, enabled, found }` |
-| `strategy.load` | `{ path }` | `"Loaded { path, name, version }"` / `"Rejected {...}"` / `"Failed {...}"`（真加载需 feature `strategy-loading`） |
+| `strategy.load` | `{ path }` | 成功 `"<name>@<version> registered into the engine dispatch (disabled)"`（注册后默认禁用，需再 `strategy.enable`）；失败返回 `"Rejected { path, reason }"`（路径策略）/ `"Failed { path, reason }"`（dlopen/协商/`create` 失败）。走 **C ABI v2**：`bk_strategy_abi_version()` 必须为 2（无 v1 兼容层）。`strategy-loading` 自 E7 起默认开启 |
 
 ### 2.5 风控
 | method | params | result |

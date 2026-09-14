@@ -30,10 +30,20 @@ jobs:
           components: rustfmt, clippy
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+      # External strategy cdylibs live in their OWN nested workspaces (separate
+      # Cargo.lock), like a real third-party strategy author's project, so they
+      # are not members of the root workspace and must be built explicitly. E7
+      # (#38) acceptance requires a real dylib loaded and driven in CI.
+      - name: Build external strategy cdylibs (standalone workspaces)
+        run: |
+          (cd user_layer/strategies && cargo build --release --locked)
+          (cd user_layer/parity_strategy && cargo build --release --locked)
       - name: Build (release)
         run: cargo build --release --workspace --locked
+      # BK_REQUIRE_DYLIB=1 turns the dylib-driven tests from skip into hard
+      # failure if the artifacts above are missing or fail negotiation.
       - name: Test
-        run: cargo test --workspace --locked
+        run: BK_REQUIRE_DYLIB=1 cargo test --workspace --locked
       # Style gates are ADVISORY for now: the pre-existing tree is not
       # fmt/clippy-clean (see docs/DECISIONS_PENDING.md D-6). They surface debt
       # without blocking a governance PR on an unrelated 57-file reformat.
