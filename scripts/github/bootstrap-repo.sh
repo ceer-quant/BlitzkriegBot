@@ -18,6 +18,16 @@
 #   bash scripts/github/bootstrap-repo.sh --execute --wechat <webhook-url>
 #
 # Requirements: gh (GitHub CLI) authenticated with repo/admin scope.
+#
+# PLATFORM NOTE (verified 2026-09-14, docs/DECISIONS_PENDING.md D-8):
+#   ceer-quant is on GitHub FREE. On a PRIVATE repo steps 3 (Secret Scanning /
+#   Push Protection) and 4 (branch protection) return 403 "Upgrade to GitHub
+#   Pro" / 422 "not available". The script keeps them so a future Pro/Team org
+#   enables enforcement on re-run, but treats their failure as NON-FATAL today.
+#   The operative safeguards on the free plan are therefore:
+#     * blocking CI job `secret-scan` + weekly --history sweep
+#     * AI_WORKFLOW.md red lines (PR + green checks before touching main)
+#   Upgrade the plan, then re-run this script to turn on server-side enforcement.
 set -uo pipefail
 
 ORG="ceer-quant"
@@ -99,14 +109,14 @@ else
   run gh api --method POST "repos/${FULL}/git/refs" \
     -f ref="refs/heads/develop" -f sha="$(git rev-parse "$INTEGRATION_BRANCH")" 2>/dev/null || true
 
-  section "3. enable Secret Scanning + Push Protection"
+  section "3. enable Secret Scanning + Push Protection (free plan -> expected 403/422, non-fatal, D-8)"
   run gh api --method PATCH "repos/${FULL}" \
     -F "security_and_analysis[secret_scanning][status]=enabled" \
-    -F "security_and_analysis[secret_scanning_push_protection][status]=enabled"
+    -F "security_and_analysis[secret_scanning_push_protection][status]=enabled" 2>/dev/null || true
   # Also enable via the dedicated endpoints (older gh versions).
   run gh api --method PATCH "repos/${FULL}/secret-scanning/push-protection" 2>/dev/null || true
 
-  section "4. branch protection: main / develop"
+  section "4. branch protection: main / develop (free plan -> expected 403, non-fatal, D-8)"
   for BR in main develop; do
     run gh api --method PUT "repos/${FULL}/branches/${BR}/protection" \
       -F "required_status_checks[strict]=true" \
@@ -117,7 +127,7 @@ else
       -F "required_pull_request_reviews[required_approving_review_count]=1" \
       -F "restrictions=" \
       -F "allow_force_pushes=false" \
-      -F "allow_deletions=false"
+      -F "allow_deletions=false" 2>/dev/null || true
   done
 
   section "5. WeChat webhook secret"

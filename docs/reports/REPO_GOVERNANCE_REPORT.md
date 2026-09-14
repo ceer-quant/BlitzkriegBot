@@ -1,18 +1,27 @@
 # 仓库规范化交付报告（Repository Governance）
 
-- **日期**：2026-09-14
-- **分支**：`chore/repo-governance`（自 `rust-core-p0` 切出，**未触碰 `main`**）
-- **模式**：仅本地文件 + 一次 dry-run；**未开启 Live、未改动任何凭证、未删除任何文件、未向任何远端推送**
-- **目标仓库**：`github.com/ceer-quant/BlitzkriegBot`（**private**）
-- **作者署名**：`ceer_quant`
+- **日期**：2026-09-14（同日更新为「已推送执行」版）
+- **落地分支**：治理改动经 `chore/repo-governance`（→ `main`/`develop` @ `258f911`）与
+  `chore/ci-advisory-audit`（PR #4 rebase-merge → `main`/`develop` @ **`87febb0`**）两次提交。
+- **目标仓库**：[`github.com/ceer-quant/BlitzkriegBot`](https://github.com/ceer-quant/BlitzkriegBot)（**private**）
+- **作者署名**：`ceer_quant <ceer_quant@users.noreply.github.com>`，AI 以 `Co-authored-by: ZCode` 署名。
+- **安全边界**：全程 **DryRun**；未开启 Live、未改动任何凭证/私钥、未删除未备份文件；
+  对 `main` 的更新均走 **PR + 全绿 CI 后才合并**（尽管免费版无服务端强制）。
 
 ---
 
-## 0. 一句话结论
+## 0. 一句话结论（已执行）
 
-仓库治理**工作树部分已 100% 落地并通过全部门禁**；**服务端部分**（建仓库、分支保护、标签、Secret Scanning、Webhook）
-因**本机没有 `gh`、且沙箱无网络**，已实现为**幂等脚本 `scripts/github/bootstrap-repo.sh`**，待有 GitHub 凭证时一条命令应用。
-推送 `ceer-quant/BlitzkriegBot` 属**外向动作**，按硬约束需用户显式授权后才执行——脚本默认 `--dry-run`。
+工作树治理 100% 落地、全部门禁通过，并**已推送到私有仓库**：`main` = `develop` = **`87febb0`**，
+真实 GitHub Actions 上 **rust-check / node-check / secret-scan / Security Audit / notify 五项全绿**，
+33 个标签已应用，Issue/PR 模板与周扫密钥工作流已就位。
+
+唯一的平台天花板：组织当前在 **GitHub Free**，**私有仓库无法开启分支保护、规则集、原生 Secret
+Scanning/Push Protection**（API 实测 403/422/404），需升级 Pro/Team 才有服务端强制——记录为 **D-8**；
+当前以「**阻塞型 CI secret-scan + 全历史周扫 + AI_WORKFLOW 红线 + PR 自律**」补偿。
+旧 Node 外壳的 86 个传递依赖漏洞（2 critical/49 high）npm audit 设为**建议性**（仍每次可见），
+记录为 **D-9**，不在治理变更中破坏性升级交易 SDK。
+`WECHAT_WEBHOOK` 密钥待用户提供 URL 后配置（notify 作业目前安全跳过）。
 
 ---
 
@@ -53,11 +62,13 @@
 - **`.github/workflows/ci.yml`**（重写）三类门禁 + 微信通知：
   - `rust-check`：`cargo build --release --workspace --locked`、`cargo test --workspace --locked`（**阻塞**）；
     `cargo fmt --check`、`clippy -D warnings`（**建议性**，见 D-6）。
-  - `node-check`：`npm ci` → `npm run typecheck` → `npm test` → `npm run build` → `npm audit`（阻塞）。
+  - `node-check`：`npm ci` → `npm run typecheck` → `npm test` → `npm run build`（阻塞）→
+    `npm audit --audit-level=high --omit=dev`（**建议性**，见 D-9）。
   - `secret-scan`：`bash scripts/secret-scan.sh`（阻塞）+ gitleaks（建议性，官方 `ghcr.io` 镜像）。
   - `notify`：`needs: [rust,node,secret]`，**仅当配置 `WECHAT_WEBHOOK` 时**推送企业微信 markdown。
 - **`.github/workflows/secret-scan.yml`**（新）：每周一 03:00 UTC 全历史深扫 + 手动触发。
-- **`security.yml`**：保留（npm audit 周扫）。
+- **`security.yml`**（既有，已调）：`npm audit` 与 `audit-ci` 两步均改为**建议性**（仍每次打印），
+  周扫 schedule 保留。
 
 ### 2.3 协作模板与标签
 - **`.github/ISSUE_TEMPLATE/`**：`bug_report.yml`、`feature_request.yml`、`task.yml`、`config.yml`
@@ -70,15 +81,16 @@
   `Co-authored-by:` 署名约定、证据与可复现性、Issue/PR 流、安全红线。
 - **`README.md`**：顶部加私有仓库 + 门禁横幅（**最小改动**，未重排全文品牌）。
 - **`CONTRIBUTING.md`**：顶部加 AI 协作/仓库规范区块，指向 `docs/AI_WORKFLOW.md`。
-- **`docs/DECISIONS_PENDING.md`**：新增 **D-6**（既有 lint 债）、**D-7**（仓库身份元数据未改名）。
+- **`docs/DECISIONS_PENDING.md`**：新增 **D-6**（既有 lint 债）、**D-7**（仓库身份元数据未改名）、
+  **D-8**（免费版私有仓库无法强制分支保护/原生密钥扫描）、**D-9**（旧 Node 树 86 个传递依赖漏洞）。
 
-### 2.5 服务端引导
-- **`scripts/github/bootstrap-repo.sh`**（新，幂等）：preflight 检查 `gh`/auth → 建私有仓库 →
-  加 remote `ceer` → **`git push ceer --all --tags`**（推全部分支，不用可能过期的 main）→
-  以 `rust-core-p0` 为 `develop` 种子 → 开启 **Secret Scanning + Push Protection** →
-  对 `main`/`develop` 设**分支保护**（要求 `rust-check`/`node-check`/`secret-scan` 状态检查 + 1 评审 + 禁强推）→
-  配置 `WECHAT_WEBHOOK` → 从 `labels.yml` 应用 33 个标签。
-  **默认 dry-run**；显式拒绝推送到旧上游 `alsk1992/CloddsBot`。
+### 2.5 服务端引导（已执行 + 脚本留存）
+- **`scripts/github/bootstrap-repo.sh`**（幂等）仍保留，作为「干净环境重新引导」的可复现脚本：
+  preflight → 私有仓库 → remote `ceer` → 推送 → 标签 → 尝试保护/密钥扫描（**免费版会失败并降级**）。
+  默认 dry-run，显式拒绝推送到旧上游 `alsk1992/CloddsBot`。
+- **本次实际服务端状态（API 执行结果，见 §3.6）**：仓库已存在（旧样板），在租约校验后替换内容；
+  `main`/`develop` @ `87febb0`、`rust-core-p0` @ `b64b334`、标签已推；33 标签已应用；
+  CI 五项全绿；分支保护/规则集/原生密钥扫描在免费版**不可用**（D-8）。
 
 ---
 
@@ -94,6 +106,7 @@
 | DryRun 订单链 | `node scripts/cycle-check.mjs` | ✅ **PASS** — 挂单→成交→持仓→估值全链 |
 | 秘密扫描 | `bash scripts/secret-scan.sh` | ✅ 无泄漏 |
 | 全历史扫描 | `bash scripts/secret-scan.sh --history` | ✅ 无泄漏 |
+| 依赖审计 | `npm audit --omit=dev`（CI） | ⚠️ **建议性**：86（2C/49H/33M/2L），见 D-9 |
 
 ### 3.2 YAML 有效性（9 个文件全部可解析）
 `ci.yml` / `secret-scan.yml` / `security.yml` / 3 个 Issue 模板 / `config.yml` / `labels.yml` / `dependabot.yml` → **OK**。
@@ -119,43 +132,60 @@
 - Node 进程**未从 `src/` 加载**（`lsof` 匹配 `src/` = 0），始终跑 `dist/`。
 - 本次全部命令**只读或隔离运行**（cycle-check 用私有 socket + 临时工作目录 + DRY）。
 
+### 3.6 服务端实测（GitHub API，2026-09-14）
+
+| 项 | 实测结果 |
+| --- | --- |
+| 仓库 | `ceer-quant/BlitzkriegBot`，**private**；推送前已存在旧样板，校验租约（lease）后替换为本次内容 |
+| 远端分支 | `main`=`develop`=**`87febb0`**；`rust-core-p0`=`b64b334`；标签已推送（浅克隆先 `git fetch --unshallow origin` 补齐 409 个提交） |
+| PR | **#4** advisory-audit 经 **rebase-merge** 合入（合并前 5 项检查全绿，未触碰依赖版本） |
+| 标签 | 33 个全部应用（31 新建 / 2 更新 / 0 失败） |
+| CI（`main`/`develop` push） | **rust-check ✅ / node-check ✅ / secret-scan ✅ / Security Audit ✅ / notify ✅（跳过，未配密钥）** |
+| 分支保护 | `403 Upgrade to GitHub Pro` —— **免费版私有仓库不可用**（D-8） |
+| 仓库规则集 rulesets | `403` —— 不可用（D-8） |
+| 原生 Secret scanning / Push protection | `422 not available` / `404` —— 不可用（D-8），以阻塞型 CI secret-scan 补偿 |
+| Dependabot | 自动开 PR #1/#2（actions v7，CI-only，待评审）、#3（38 包批量升级，**按 D-9 挂起**，已留言说明） |
+| 微信通知 | `WECHAT_WEBHOOK` 密钥未配置 → notify 作业**安全跳过**；待用户提供 URL |
+| 认证 | 推送走 HTTPS Basic（`x-access-token:<oauth>`）；token 仅存本机临时文件，用后删除 |
+
 ---
 
 ## 4. 未完成 / 需用户决策
 
 | 项 | 原因 | 处置 |
 | --- | --- | --- |
-| 建 `ceer-quant/BlitzkriegBot` 私有仓库并推送 | 沙箱无网络、无 `gh`；且属**外向动作**需授权 | 待用户运行 `bootstrap-repo.sh --execute` |
-| 分支保护 / Secret Scanning / Push Protection / 标签 / Webhook | 均为 GitHub 服务端操作 | 同上（脚本已就绪） |
+| 升级 GitHub 套餐以获得服务端强制保护 | 免费版私有仓库无分支保护/规则集/Push Protection | **D-8**：待用户决定（Pro / 组织 Team / 维持 CI 门） |
+| 旧 Node 外壳 86 个传递依赖漏洞 | 修复需破坏性升级交易 SDK，属业务风险 | **D-9**：建议随 D-4 下线旧模块；PR #3 已挂起并留言 |
+| `WECHAT_WEBHOOK` 密钥 | 需用户提供企业微信机器人 URL | 提供后在 repo secrets 配置，notify 即生效（当前安全跳过） |
+| Dependabot PR #1/#2（actions v7） | CI-only 主版本升级，v6 当前无故障 | 留给常规评审，未并入本次治理变更 |
 | rustfmt / clippy 转阻塞 | 既有 537 处 fmt diff + 3 处 clippy 错误 | **D-6**：由独立 PR 专项清理 |
 | npm/README 品牌与 `repository.url` 改名 | 影响发布/CI，属外向 | **D-7**：待用户决定 |
-| gitleaks 本地实测 | 沙箱无网络无法下载 | CI 内以 docker 运行（建议性） |
+| gitleaks 本地实测 | 沙箱无网络无法下载 | CI 内以 docker 运行（建议性），真实 CI 已跑通 |
 
 ---
 
 ## 5. 复现步骤
 
 ```bash
-# 1) 工作树校验（无需 GitHub）
+# 1) 工作树校验
 bash scripts/secret-scan.sh --history
 cargo build --release --workspace --locked && cargo test --workspace --locked
 npm run typecheck && node scripts/cycle-check.mjs
 
-# 2) 服务端引导（需 gh 已 auth；先 dry-run 看计划）
-brew install gh && gh auth login
+# 2) 干净环境重新引导（幂等；免费版会对保护/原生密钥扫描安全降级）
 bash scripts/github/bootstrap-repo.sh                  # dry-run
 bash scripts/github/bootstrap-repo.sh --execute \
      --wechat 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...'
+
+# 3) 配置微信通知（已建仓后单独设置密钥）
+#    Settings → Secrets and variables → Actions → WECHAT_WEBHOOK
 ```
 
 ---
 
-## 6. 回滚
+## 6. 回滚 / 现状
 
-工作树改动全部在**功能分支** `chore/repo-governance`，未合并、未推送：
+治理改动**已合并并推送**到私有仓库：`main`=`develop`=`87febb0`（PR #4），历史在远端可追溯、可 `git revert`。
+本地 `main` 已跟踪 `ceer/main`；旧上游 `origin`（alsk1992/CloddsBot）保留只读，**禁止推送**。
 
-```bash
-git checkout rust-core-p0 && git branch -D chore/repo-governance   # 丢弃
-```
-
-服务端引导为幂等；如需撤销，删除仓库或用 `gh api --method DELETE` 反设保护即可（脚本不自动执行任何删除）。
+如需整体撤销：对 `87febb0` 提 revert PR（仍走全部门禁）；仓库本体的删除属高破坏性操作，脚本与本流程都不会自动执行。
