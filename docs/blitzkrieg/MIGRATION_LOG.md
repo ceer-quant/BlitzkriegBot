@@ -1094,3 +1094,51 @@ HFT_MAX_SHARES=4 HFT_MIN_SHARES=4 node dist/index.js   # /crypto-hft start
 - 归档**只镜像行情事件**（book/top/spot/round），不写订单/成交/持仓，不读任何凭证。
 - 不改任何交易决策：`FillModel` 恒等、无 live 行为变化；归档关闭时行为与改动前完全一致。
 - 未启用 Live、未改凭证；`data/` 已在 `.gitignore`（归档不入版本库）。
+
+---
+
+## 37. 【归档默认收到内核】常开不再依赖外壳 + 单写者锁（P-1.3 收尾）
+
+**背景**：§36 把"常开"做在了 **node 外壳**（`blitzkrieg-core-runner.ts`）里——归档 flag 由外壳
+spawn 时拼进命令行。上线后发现这在两个场景下都会**静默失效**：
+
+1. **外壳内存里没有新代码**：生产外壳（`node dist/index.js`）早于 §36 启动，`BlitzkriegCoreClient`
+   的 `autoRestart` 复用**内存中的** `extraArgs`。此时 `SIGTERM` 内核只会用旧参数原样拉起——
+   **重启无论多少次都不会让归档生效**。
+2. **有别的外壳能拉起内核**：UI-kit 网关（`ui_kit` supervisor）也 spawn `blitzkrieg-core`，
+   它根本不知道归档这回事。
+
+结论：**"生产常开"这种属性属于内核，不属于某一个外壳**。只在外壳里实现的默认，等于"谁记得传参数谁才有"。
+
+**实现**
+1. **内核默认常开**（`main.rs`）：`--engine` 会话下归档默认打开（`data/archive/events.jsonl`，
+   相对内核 cwd），无需任何 flag。`--no-event-archive` 显式关闭，显式 `--event-archive <path>`
+   覆盖默认路径。解析集中在纯函数 `resolve_event_archive`，6 项单测覆盖：engine 默认开、非 engine
+   不建空文件、显式路径在非 engine 下也生效、显式调参优先、**显式 `0` 不被默认值吃掉**、关闭优先。
+   调参 flag 由 `u64` 改为 `Option<u64>`：`0` 是有意义的请求（无上限/不轮转/无护栏），只有**缺省**
+   才回落到默认。
+2. **单写者锁**（`data_source.rs`）：归档文件加排他 advisory 锁（`File::try_lock`）。两个内核指向
+   同一归档时，第二个**干净停录**（`stoppedReason:"locked"`）而不是交错写行、更不会把文件从对方
+   脚下轮转走；锁随 owner 释放，下一个写入者可正常接管。轮转的"改名→重开"之间也重新取锁，防止那个
+   窗口里被人抢走。
+3. **外壳改为显式关断**（`blitzkrieg-core-runner.ts`）：`eventArchive: null`（`HFT_EVENT_ARCHIVE=off`）
+   现在**下发 `--no-event-archive`**——否则"省略 flag"会被内核默认重新打开，env 开关形同虚设。
+4. **夹具显式关断**：所有 spawn `--engine` 的脚本（`core-parity`/`parity-engines`/`cycle-check`/
+   `position-recovery-check`/`dry-observe`/`ui-kit-gateway-check`）加 `--no-event-archive`，
+   防止未来的门禁把合成数据写进生产归档路径。（它们的 cwd 都是临时目录，实际早已隔离。）
+
+**验证**
+- `cargo test --workspace`：137 core（含 +1 锁测试）+ **6** main（+6 解析测试）+ 13 ui_kit + 2 panel = **158**。
+- **跨进程实测**：两个**独立** `blitzkrieg-core` 进程、同 cwd（→ 同默认归档路径）——A `recording=true`，
+  B `recording=false / stoppedReason="locked"`，无交错写行。
+- **端到端实测**（临时 cwd，不碰生产）：只传 `--engine`（不带任何归档参数）→ `engine.stats.archive
+  .recording=true`、`rotateBytes=268435456`、默认路径落盘；`--no-event-archive` → `archive=null`；
+  `--event-archive data/archive/custom.jsonl` → 路径被覆盖。三项全过。
+- 全门禁复跑：`npm test` 135、`tsc --noEmit` 0、`build` OK、`parity-engines` OK、`core-parity` OK、
+  `cycle-check` PASS、`backtest-check` **21/21**、`position-recovery-check` PASS、
+  `ui-kit-gateway-check` PASS、`secret-scan` OK。
+
+**遗留**
+- 本轮仍是"方案与实现"而非"已生效"：生效需要**内核重启**，而当前外壳内存里是旧代码（见背景 1），
+  单纯 `SIGTERM` 内核会被旧参数拉起。故先合入 + 重建，再由运维择机重启外壳使新默认落地。
+

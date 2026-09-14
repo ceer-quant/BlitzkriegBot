@@ -167,6 +167,7 @@ async function main() {
   const sock = join(tmpdir(), `clodds-dry-observe-${process.pid}.sock`);
   const extraArgs = [
     '--engine',
+    '--no-event-archive',
     '--round-sec', String(roundSec),
     '--min-round-age', '30',
     '--min-time-left', '180',

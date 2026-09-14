@@ -13,11 +13,16 @@
 //!                   [--order-log <path>] [--no-order-log]
 //!                   [--position-log <path>] [--no-position-log]
 //!                   [--near-miss-path <path>]
-//!                   [--event-archive <path>] [--event-archive-max-mb 512]
+//!                   [--event-archive <path>] [--no-event-archive]
+//!                   [--event-archive-max-mb 0]
 //!                   [--event-archive-rotate-mb 256]
 //!                   [--event-archive-min-free-mb 5120]
 //!                   [--entry-maker-timeout-ms 5000]
 //!                   [--slippage-ticks 0] [--latency-ms 0] [--fill-prob-bps 10000]
+//!
+//! Market-data capture is ON by default for an engine session (`--no-event-archive`
+//! disables it): the events behind a past stop-out only exist if recording was
+//! already running when it happened.
 //!
 //! Backtest (offline; forces dry mode, starts no feeds and writes no logs):
 //!   blitzkrieg-core --backtest <archive.jsonl> [--backtest-report <path>]
@@ -70,17 +75,22 @@ struct Args {
     /// Per-strategy entry caps: `name:max_open_positions:max_notional_usd`
     /// (repeatable; `-` or empty = no cap on that segment).
     strategy_limits: Vec<String>,
-    /// Mirror every market-data event into this JSONL archive (P-1.3). None = off.
+    /// Mirror every market-data event into this JSONL archive (P-1.3).
+    /// None = use the always-on default for an engine session (see `--no-event-archive`).
     event_archive: Option<String>,
-    /// Stop recording at this archive size (MiB); 0 = unlimited.
-    event_archive_max_mb: u64,
+    /// Disable market-data capture entirely. Required for a harness that spawns
+    /// the engine: it would otherwise record into the default archive path.
+    no_event_archive: bool,
+    /// Stop recording at this archive size (MiB); 0 = unlimited (the default).
+    /// None = not given; the always-on default then supplies its own value.
+    event_archive_max_mb: Option<u64>,
     /// Rotate into a new UTC-stamped segment every this many MiB (0 = never).
     /// Required for a 24/7 capture: an un-rotated archive hits the cap and goes
     /// dark. Rotation only renames; nothing is ever deleted.
-    event_archive_rotate_mb: u64,
+    event_archive_rotate_mb: Option<u64>,
     /// Stop recording before the volume has less than this many MiB free
     /// (0 = no guard). Checked once per rotation.
-    event_archive_min_free_mb: u64,
+    event_archive_min_free_mb: Option<u64>,
     /// Maker→taker escalation deadline for engine entries (ms).
     entry_maker_timeout_ms: i64,
     /// Offline replay of an archive through the same core (P-1.2).
@@ -141,9 +151,12 @@ fn parse_args() -> Args {
     let mut se_min_obs_secs: Option<i64> = None;
     let mut assets_arg: Option<String> = None;
     let mut event_archive: Option<String> = None;
-    let mut event_archive_max_mb = 512u64;
-    let mut event_archive_rotate_mb = 0u64;
-    let mut event_archive_min_free_mb = 0u64;
+    // Tuning is tracked as Option so the always-on default can supply its own
+    // values without clobbering an explicit flag (and vice versa).
+    let mut event_archive_max_mb: Option<u64> = None;
+    let mut event_archive_rotate_mb: Option<u64> = None;
+    let mut event_archive_min_free_mb: Option<u64> = None;
+    let mut no_event_archive = false;
     let mut entry_maker_timeout_ms: i64 = 5000;
     let mut backtest: Option<String> = None;
     let mut backtest_report: Option<String> = None;
@@ -225,16 +238,15 @@ fn parse_args() -> Args {
                 }
             }
             "--event-archive" => event_archive = it.next(),
+            "--no-event-archive" => no_event_archive = true,
             "--event-archive-max-mb" => {
-                event_archive_max_mb = it.next().and_then(|v| v.parse().ok()).unwrap_or(event_archive_max_mb)
+                event_archive_max_mb = it.next().and_then(|v| v.parse().ok())
             }
             "--event-archive-rotate-mb" => {
-                event_archive_rotate_mb =
-                    it.next().and_then(|v| v.parse().ok()).unwrap_or(event_archive_rotate_mb)
+                event_archive_rotate_mb = it.next().and_then(|v| v.parse().ok())
             }
             "--event-archive-min-free-mb" => {
-                event_archive_min_free_mb =
-                    it.next().and_then(|v| v.parse().ok()).unwrap_or(event_archive_min_free_mb)
+                event_archive_min_free_mb = it.next().and_then(|v| v.parse().ok())
             }
             "--entry-maker-timeout-ms" => {
                 entry_maker_timeout_ms =
@@ -256,7 +268,39 @@ fn parse_args() -> Args {
             other => eprintln!("ignoring unknown arg: {other}"),
         }
     }
-    Args { socket, mode, tick_ms, seed_balance, max_order_notional, min_shares, max_shares, markets, auto_exits, max_positions, engine, min_round_age, min_time_left, trend_confirm, trend_floor_ms, feed_ws, replay, replay_near_miss, round_sec, near_miss_path, trade_log, no_trade_log, order_log, no_order_log, position_log, no_position_log, market_plugin, discovery, shadow_evolution, assets: assets_arg, se_min_samples, se_cooldown_secs, se_min_obs_secs, strategy_limits, event_archive, event_archive_max_mb, event_archive_rotate_mb, event_archive_min_free_mb, entry_maker_timeout_ms, backtest, backtest_report, backtest_tick_ms, backtest_tail_ms, slippage_ticks, latency_ms, fill_prob_bps }
+    Args { socket, mode, tick_ms, seed_balance, max_order_notional, min_shares, max_shares, markets, auto_exits, max_positions, engine, min_round_age, min_time_left, trend_confirm, trend_floor_ms, feed_ws, replay, replay_near_miss, round_sec, near_miss_path, trade_log, no_trade_log, order_log, no_order_log, position_log, no_position_log, market_plugin, discovery, shadow_evolution, assets: assets_arg, se_min_samples, se_cooldown_secs, se_min_obs_secs, strategy_limits, event_archive, no_event_archive, event_archive_max_mb, event_archive_rotate_mb, event_archive_min_free_mb, entry_maker_timeout_ms, backtest, backtest_report, backtest_tick_ms, backtest_tail_ms, slippage_ticks, latency_ms, fill_prob_bps }
+}
+
+/// Default archive path, relative to the core's working directory (the repo root
+/// for the production shell).
+const DEFAULT_EVENT_ARCHIVE: &str = "data/archive/events.jsonl";
+
+/// Resolve the market-data capture settings.
+///
+/// Capture is ON by default for an engine session (see the rationale at the call
+/// site). `--no-event-archive` disables it; an explicit `--event-archive <path>`
+/// wins over the default path. Unset tuning gets the 24/7-safe values: no session
+/// cap (`0`), 256 MiB segments, and a 5 GiB free-space floor — a cap with no
+/// rotation would silently go dark, which is the failure this default exists to
+/// avoid.
+fn resolve_event_archive(
+    engine: bool,
+    no_event_archive: bool,
+    path: Option<&str>,
+    max_mb: Option<u64>,
+    rotate_mb: Option<u64>,
+    min_free_mb: Option<u64>,
+) -> (Option<String>, u64, u64, u64) {
+    if no_event_archive {
+        return (None, 0, 0, 0);
+    }
+    let path = path.map(str::to_string).or_else(|| {
+        engine.then(|| DEFAULT_EVENT_ARCHIVE.to_string())
+    });
+    match path {
+        Some(p) => (Some(p), max_mb.unwrap_or(0), rotate_mb.unwrap_or(256), min_free_mb.unwrap_or(5120)),
+        None => (None, 0, 0, 0),
+    }
 }
 
 /// Parse repeated `--strategy-limit <name>:<max_open_positions>:<max_notional_usd>`
@@ -368,6 +412,21 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Market-data capture is ON by default for an engine session. The data for a
+    // past stop-out only exists if recording was already running when it happened,
+    // which makes "opt in" the wrong default for the one thing that cannot be
+    // reconstructed after the fact. Rotation + a free-space floor are what make
+    // leaving it on safe, so the default supplies those too.
+    let (event_archive_path, event_archive_max_mb, event_archive_rotate_mb, event_archive_min_free_mb) =
+        resolve_event_archive(
+            args.engine,
+            args.no_event_archive,
+            args.event_archive.as_deref(),
+            args.event_archive_max_mb,
+            args.event_archive_rotate_mb,
+            args.event_archive_min_free_mb,
+        );
+
     let config = CoreConfig {
         mode,
         default_maker_timeout_ms: 5000,
@@ -407,10 +466,10 @@ async fn main() -> anyhow::Result<()> {
             maker_latency_ms: args.latency_ms,
             maker_fill_prob_bps: args.fill_prob_bps.unwrap_or(10_000),
         },
-        event_archive_path: args.event_archive.clone(),
-        event_archive_max_mb: args.event_archive_max_mb,
-        event_archive_rotate_mb: args.event_archive_rotate_mb,
-        event_archive_min_free_mb: args.event_archive_min_free_mb,
+        event_archive_path,
+        event_archive_max_mb,
+        event_archive_rotate_mb,
+        event_archive_min_free_mb,
         ..Default::default()
     };
 
@@ -648,4 +707,58 @@ fn run_replay_near_miss(path: &std::path::Path) {
 
 fn pct(wins: usize, n: usize) -> usize {
     if n > 0 { (wins * 100) / n } else { 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_session_records_by_default() {
+        let (path, max, rotate, min_free) =
+            resolve_event_archive(true, false, None, None, None, None);
+        assert_eq!(path.as_deref(), Some(DEFAULT_EVENT_ARCHIVE));
+        assert_eq!(max, 0, "no session cap: rotation + the space floor bound the volume");
+        assert_eq!(rotate, 256);
+        assert_eq!(min_free, 5120);
+    }
+
+    #[test]
+    fn non_engine_session_does_not_record() {
+        // The plain trading core (no --engine) has no market-data consumers, so
+        // there is nothing to archive; the default must not leave an empty file.
+        let (path, _, rotate, _) = resolve_event_archive(false, false, None, None, None, None);
+        assert_eq!(path, None);
+        assert_eq!(rotate, 0);
+    }
+
+    #[test]
+    fn explicit_path_opts_in_without_engine() {
+        let (path, ..) = resolve_event_archive(false, false, Some("/tmp/x.jsonl"), None, None, None);
+        assert_eq!(path.as_deref(), Some("/tmp/x.jsonl"));
+    }
+
+    #[test]
+    fn explicit_tuning_beats_the_default() {
+        let (path, max, rotate, min_free) =
+            resolve_event_archive(true, false, None, Some(64), Some(8), Some(100));
+        assert_eq!(path.as_deref(), Some(DEFAULT_EVENT_ARCHIVE));
+        assert_eq!((max, rotate, min_free), (64, 8, 100));
+    }
+
+    #[test]
+    fn explicit_zero_tuning_is_honoured_not_defaulted() {
+        // 0 is a meaningful request (no cap / never rotate / no space guard) and
+        // must survive; only an ABSENT flag falls back to the default.
+        let (_, max, rotate, min_free) =
+            resolve_event_archive(true, false, None, Some(0), Some(0), Some(0));
+        assert_eq!((max, rotate, min_free), (0, 0, 0));
+    }
+
+    #[test]
+    fn no_event_archive_disables_capture_even_with_a_path() {
+        let (path, max, rotate, min_free) =
+            resolve_event_archive(true, true, Some("/tmp/x.jsonl"), Some(64), Some(8), Some(100));
+        assert_eq!((path, max, rotate, min_free), (None, 0, 0, 0));
+    }
 }
