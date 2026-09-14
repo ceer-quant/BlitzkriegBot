@@ -29,6 +29,22 @@
 6. **不确定的分歧写入 `docs/DECISIONS_PENDING.md`，不要询问用户**（托管执行时），也不得自行拍板高风险项。
 7. **提交前必须通过门禁**（见 §4）。门禁不过 = 不允许提交。
 
+### 2.1 已授权的长期规则（用户明确授予，逐字记录）
+
+8. **【2026-09-14 用户授权】今后只要全部门禁通过，允许 AI 自行重启 dry 内核。**
+   - 适用范围：**仅 DryRun 模式**的 `blitzkrieg-core` 内核（node 外壳拉起的那个）。
+     **绝不适用于**：Live 模式（任何情况下都不启用）、node 外壳本身、或其他任何进程。
+   - 前置条件（缺一不可）：§4 门禁全绿（`cargo build --release`、`cargo test`、
+     `npm run typecheck`、`npm run build`、`scripts/secret-scan.sh`、
+     `node scripts/cycle-check.mjs`），且合入 `main` 的代码 CI 绿灯。
+   - 执行方式：`SIGTERM` 旧内核进程即可——node 外壳（`BlitzkriegCoreClient`）
+     `autoRestart` 默认开启，约 1 秒内以仓库根 `target/release/blitzkrieg-core`
+     （新二进制）原参数自动拉起。重启前先快照 `data/` 运行数据（只拷贝不删除），
+     重启后核对 `run.log` 启动行 `exit tuning: stop_loss=…` 与 `health` 端点。
+   - 首次执行记录：2026-09-14 18:01，旧二进制（SL50 时代，inode 12,884,112）→
+     新二进制（SL12/trail8，12,951,728），新 PID 12189，见 D-10 结案与
+     `docs/reports/HFT_OPTIMIZATION_REPORT.md`。
+
 ---
 
 ## 3. 分支模型
