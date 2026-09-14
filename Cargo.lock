@@ -1090,6 +1090,7 @@ dependencies = [
  "futures-util",
  "libc",
  "libloading",
+ "parity-logic",
  "polymarket-extension",
  "rust_decimal",
  "rust_decimal_macros",
@@ -3242,6 +3243,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e6eb142958d64335fb0e345c5b9ead2ecd6fc438c307e9d7d3c4fd428dbaf12"
 dependencies = [
  "libm",
+]
+
+[[package]]
+name = "parity-logic"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

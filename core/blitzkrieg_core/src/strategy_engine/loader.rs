@@ -1,40 +1,40 @@
-//! Dynamic strategy loader — loads user-layer strategy logic from shared
-//! libraries (`.dylib` / `.so` / `.dll`) via `libloading`, driving the FROZEN
-//! C ABI defined in the `blitzkrieg_strategy_api` crate.
+//! Dynamic strategy loader — dlopen user-layer strategy libraries (`.dylib` /
+//! `.so` / `.dll`) implementing C ABI **v2** and wrap them as a full
+//! [`crate::strategies::foreign::ForeignStrategy`] (which itself implements the
+//! same `EngineStrategy` contract as an in-tree strategy).
 //!
-//! ARCHITECTURAL GUARANTEE: a loaded strategy only ever receives a `MarketTick`
-//! and returns a `Signal`. It has no handle to credentials, the CLOB client, the
-//! order manager or the UDS socket — none of those are passed across the dynamic
-//! boundary. `policy_allows` additionally refuses credential-looking files.
+//! ARCHITECTURAL GUARANTEE: a loaded strategy only ever receives borrowed
+//! read-only market/context views and returns intents as data. It has no handle
+//! to credentials, the CLOB client, the order manager or the UDS socket — none
+//! of those cross the dynamic boundary. [`policy_allows`] additionally refuses
+//! credential-looking filenames before dlopen.
+//!
+//! Negotiation order is deliberate: policy → dlopen → read the version symbol
+//! → read the vtable. Version is settled BEFORE the vtable layout is trusted, so
+//! a v1 library is rejected on version and never misread as v2.
 //!
 //! Runtime flow:
-//!   1. `policy_allows(path)` — static policy check.
+//!   1. [`policy_allows`] — static path policy.
 //!   2. `dlopen` the library.
-//!   3. `bk_strategy_abi_version()` (optional) — negotiate ABI version.
-//!   4. `bk_strategy_create()` — obtain the frozen vtable.
-//!   5. wrap the vtable into a `DynamicStrategy` implementing `Strategy`.
+//!   3. `bk_strategy_abi_version()` — MUST equal 2 (clean break, no v1 shim).
+//!   4. resolve `bk_strategy_free_string` and `bk_strategy_create` → vtable.
+//!   5. verify vtable.abi_version/min_abi and the REQUIRED hooks.
+//!   6. `create()` → handle, then wrap as `ForeignStrategy`.
 
 #[cfg(feature = "strategy-loading")]
-use crate::strategy_engine::{MarketTick, Signal, Strategy};
-#[cfg(feature = "strategy-loading")]
 use blitzkrieg_strategy_api::{
-    BkHandle, BkSide, BkStrategyVtable, BkTick, BK_ABI_VERSION, BK_CREATE_SYMBOL, BK_VERSION_SYMBOL,
+    bk_strategy_free_string, BkHandle, BkStrategyVtable, BK_ABI_VERSION, BK_CREATE_SYMBOL,
+    BK_FREE_STRING_SYMBOL, BK_MIN_ABI_VERSION, BK_VERSION_SYMBOL,
 };
-#[cfg(feature = "strategy-loading")]
-use rust_decimal::Decimal;
-#[cfg(feature = "strategy-loading")]
-use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
-#[cfg(feature = "strategy-loading")]
-use std::str::FromStr;
 
 /// Outcome of attempting to load a strategy library.
 pub enum LoadOutcome {
     /// Policy rejected the path before any dlopen.
     Rejected { path: PathBuf, reason: String },
-    /// Library opened and loaded into the engine.
+    /// Library opened, negotiated and registered.
     Loaded { path: PathBuf, name: String, version: String },
-    /// A failure at any stage (policy passed but load/negotiate/create failed).
+    /// Policy passed but load/negotiate/create failed.
     Failed { path: PathBuf, reason: String },
 }
 
@@ -69,147 +69,122 @@ pub fn policy_allows(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Holds the loaded library so it stays resident for the process lifetime, plus
-/// the vtable + instance handle for one strategy.
+/// A loaded, negotiated v2 strategy before registration.
 #[cfg(feature = "strategy-loading")]
-pub struct DynamicStrategy {
-    _lib: Option<libloading::Library>,
-    vtable: BkStrategyVtable,
-    handle: BkHandle,
-    name: String,
-    version: String,
+pub struct LoadedForeign {
+    pub strategy: crate::strategies::foreign::ForeignStrategy,
+    pub name: String,
+    pub version: String,
 }
 
+/// Load and negotiate a v2 strategy library, returning it boxed as the full
+/// `EngineStrategy` contract ready for `Engine::register_user_strategy`.
 #[cfg(feature = "strategy-loading")]
-impl DynamicStrategy {
-    /// Load a strategy shared library and wrap its frozen vtable.
-    pub fn load(path: &Path) -> Result<Self, String> {
-        policy_allows(path)?;
+pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
+    let fail = |reason: String| -> Result<LoadedForeign, LoadOutcome> {
+        Err(if policy_allows(path).is_err() {
+            LoadOutcome::Rejected { path: path.to_path_buf(), reason }
+        } else {
+            LoadOutcome::Failed { path: path.to_path_buf(), reason }
+        })
+    };
 
-        // SAFETY: opening a shared library runs its initialisers. We only load
-        // libraries the operator placed in the strategy directory and the policy
-        // check has passed.
-        let lib = unsafe { libloading::Library::new(path) }.map_err(|e| format!("dlopen failed: {e}"))?;
-
-        // Optional ABI-version negotiation.
-        let abi = unsafe {
-            lib.get::<unsafe extern "C" fn() -> u32>(BK_VERSION_SYMBOL)
-                .ok()
-                .map(|f| f())
-        };
-        if let Some(v) = abi {
-            if v != BK_ABI_VERSION {
-                return Err(format!(
-                    "ABI version mismatch: library={v}, kernel={BK_ABI_VERSION}"
-                ));
-            }
-        }
-
-        // Factory → vtable.
-        let create = unsafe {
-            lib.get::<unsafe extern "C" fn() -> *const BkStrategyVtable>(BK_CREATE_SYMBOL)
-        }
-        .map_err(|e| format!("missing symbol bk_strategy_create: {e}"))?;
-
-        let vt_ptr = unsafe { create() };
-        if vt_ptr.is_null() {
-            return Err("bk_strategy_create returned null".into());
-        }
-        // Copy the vtable by value (the library guarantees it is 'static).
-        let vtable = unsafe { std::ptr::read(vt_ptr) };
-        if vtable.abi_version != BK_ABI_VERSION {
-            return Err(format!(
-                "vtable ABI version mismatch: lib={}, kernel={BK_ABI_VERSION}",
-                vtable.abi_version
-            ));
-        }
-
-        let name = unsafe { cstr_to_string(vtable.name) }.unwrap_or_else(|| "unnamed".into());
-        let version = unsafe { cstr_to_string(vtable.version) }.unwrap_or_else(|| "0.0.0".into());
-
-        let handle = match vtable.create {
-            Some(f) => unsafe { f() },
-            None => std::ptr::null_mut(),
-        };
-        if handle.is_null() {
-            return Err("strategy create() returned a null handle".into());
-        }
-
-        Ok(Self { _lib: Some(lib), vtable, handle, name, version })
-    }
-}
-
-// SAFETY: a DynamicStrategy owns a single library instance whose handle is only
-// ever driven by the kernel's single-threaded strategy loop; the vtable points
-// at static data. Sending the instance between threads (never done concurrently)
-// and sharing the &self view are therefore sound under the documented contract.
-#[cfg(feature = "strategy-loading")]
-unsafe impl Send for DynamicStrategy {}
-#[cfg(feature = "strategy-loading")]
-unsafe impl Sync for DynamicStrategy {}
-
-#[cfg(feature = "strategy-loading")]
-impl Strategy for DynamicStrategy {
-    fn name(&self) -> &str {
-        &self.name
+    if let Err(reason) = policy_allows(path) {
+        return Err(LoadOutcome::Rejected { path: path.to_path_buf(), reason });
     }
 
-    fn on_tick(&mut self, tick: &MarketTick) -> Option<Signal> {
-        let on_tick = self.vtable.on_tick?;
+    // SAFETY: opening a shared library runs its initialisers. We only load
+    // libraries the operator placed in the strategy directory after policy.
+    let lib = match unsafe { libloading::Library::new(path) } {
+        Ok(l) => l,
+        Err(e) => return fail(format!("dlopen failed: {e}")),
+    };
 
-        // Marshal the internal tick into the frozen C struct. Strings are kept
-        // alive for the duration of the call via the CString locals below.
-        let symbol = CString::new(tick.symbol.as_str()).ok()?;
-        let asset = CString::new(tick.asset.as_str()).ok()?;
-        let bid = CString::new(tick.best_bid.to_string()).ok()?;
-        let ask = CString::new(tick.best_ask.to_string()).ok()?;
-        let mid = CString::new(tick.mid.to_string()).ok()?;
-        let c_tick = BkTick {
-            symbol: symbol.as_ptr(),
-            asset: asset.as_ptr(),
-            best_bid: bid.as_ptr(),
-            best_ask: ask.as_ptr(),
-            mid: mid.as_ptr(),
-            timestamp_ms: tick.timestamp_ms,
-        };
-
-        // SAFETY: the vtable declares this as an extern "C" fn taking a valid
-        // handle created by this library and a pointer to a live tick.
-        let out = unsafe { on_tick(self.handle, &c_tick) };
-
-        // Copy the returned signal out immediately (borrowed pointers expire).
-        let side = out.side;
-        if side == BkSide::None {
-            return None;
+    // 1) Mandatory version symbol — negotiate before trusting the vtable layout.
+    let version_fn = match unsafe {
+        lib.get::<unsafe extern "C" fn() -> u32>(BK_VERSION_SYMBOL)
+    } {
+        Ok(f) => f,
+        Err(_) => {
+            return fail(format!(
+                "missing symbol bk_strategy_abi_version; a v1/pre-v2 library? rebuild against strategy-api ABI v{BK_ABI_VERSION}"
+            ))
         }
-        let sym = unsafe { cstr_to_string(out.symbol) }.unwrap_or_else(|| tick.symbol.clone());
-        let price = unsafe { cstr_to_string(out.price) }.and_then(|s| Decimal::from_str(&s).ok())?;
-        let size = unsafe { cstr_to_string(out.size) }.and_then(|s| Decimal::from_str(&s).ok());
-
-        match side {
-            BkSide::Buy => Some(Signal::Buy { symbol: sym, price, size: size.unwrap_or_else(|| Decimal::from(10)) }),
-            BkSide::Sell => Some(Signal::Sell { symbol: sym, price }),
-            BkSide::None => None,
-        }
+    };
+    let reported = unsafe { version_fn() };
+    if reported != BK_ABI_VERSION {
+        return fail(format!(
+            "ABI version mismatch: library exports {reported}, kernel requires {BK_ABI_VERSION}; \
+             rebuild the strategy against strategy-api ABI v{BK_ABI_VERSION} (no v1 shim)"
+        ));
     }
 
-    fn on_round(&mut self, slot: i64) {
-        if let Some(f) = self.vtable.on_round {
-            // SAFETY: same contract as on_tick; no pointers borrowed.
-            unsafe { f(self.handle, slot) };
-        }
+    // 2) JSON deallocator, resolved from THIS library.
+    let free_string = unsafe {
+        lib.get::<unsafe extern "C" fn(*mut std::ffi::c_char)>(BK_FREE_STRING_SYMBOL)
     }
-}
+    .ok()
+    .map(|s| *s)
+    .unwrap_or(bk_strategy_free_string as unsafe extern "C" fn(*mut std::ffi::c_char));
 
-#[cfg(feature = "strategy-loading")]
-impl Drop for DynamicStrategy {
-    fn drop(&mut self) {
-        if let Some(destroy) = self.vtable.destroy {
-            // SAFETY: handle came from this library's create().
-            unsafe { destroy(self.handle) };
-        }
-        // `_lib` (if any) drops here, unloading the library after destroy.
+    // 3) Factory → vtable.
+    let create_sym = match unsafe {
+        lib.get::<unsafe extern "C" fn() -> *const BkStrategyVtable>(BK_CREATE_SYMBOL)
+    } {
+        Ok(s) => s,
+        Err(e) => return fail(format!("missing symbol bk_strategy_create: {e}")),
+    };
+    let vt_ptr = unsafe { create_sym() };
+    if vt_ptr.is_null() {
+        return fail("bk_strategy_create returned null".into());
     }
+    // SAFETY: library guarantees a pointer to a static vtable; copy by value.
+    let vtable = unsafe { std::ptr::read(vt_ptr) };
+    if vtable.abi_version != BK_ABI_VERSION {
+        return fail(format!(
+            "vtable ABI mismatch: vtable={}, kernel={BK_ABI_VERSION}", vtable.abi_version
+        ));
+    }
+    if vtable.min_abi > BK_ABI_VERSION || vtable.abi_version < BK_MIN_ABI_VERSION {
+        return fail(format!(
+            "ABI range unsupported: library needs >= {}, speaks {}; kernel speaks {BK_ABI_VERSION}",
+            vtable.min_abi, vtable.abi_version
+        ));
+    }
+
+    // 4) Required hooks. Presence only — the copied vtable carries the pointers.
+    let missing = |hook: &str| format!("v2 vtable missing required hook: {hook}");
+    let required = [
+        (vtable.create.is_some(), "create"),
+        (vtable.destroy.is_some(), "destroy"),
+        (vtable.on_book.is_some(), "on_book"),
+        (vtable.on_round.is_some(), "on_round"),
+        (vtable.evaluate.is_some(), "evaluate"),
+    ];
+    let missing_hooks: Vec<String> =
+        required.into_iter().filter(|(present, _)| !*present).map(|(_, h)| missing(h)).collect();
+    if !missing_hooks.is_empty() {
+        return fail(missing_hooks.join("; "));
+    }
+
+    let name = unsafe { cstr_to_string(vtable.name) }.unwrap_or_else(|| "unnamed".into());
+    let version = unsafe { cstr_to_string(vtable.version) }.unwrap_or_else(|| "0.0.0".into());
+
+    // 5) Instance.
+    let handle: BkHandle = unsafe { vtable.create.unwrap_or_else(|| unreachable!())() };
+    if handle.is_null() {
+        return fail("strategy create() returned a null handle".into());
+    }
+
+    // SAFETY: negotiation above established a v2 library with a static vtable,
+    // valid handle and matching allocator; ForeignStrategy drives it single-
+    // threaded and frees the handle in Drop.
+    let strategy = unsafe {
+        crate::strategies::foreign::ForeignStrategy::from_loaded(
+            lib, vtable, handle, name.clone(), version.clone(), Some(free_string),
+        )
+    };
+    Ok(LoadedForeign { strategy, name, version })
 }
 
 /// Read a NUL-terminated C string into an owned `String` (None for null).
@@ -218,49 +193,17 @@ unsafe fn cstr_to_string(p: *const std::ffi::c_char) -> Option<String> {
     if p.is_null() {
         return None;
     }
-    unsafe { CStr::from_ptr(p) }.to_str().ok().map(|s| s.to_string())
+    unsafe { std::ffi::CStr::from_ptr(p) }.to_str().ok().map(|s| s.to_string())
 }
 
-/// High-level entry: load from a path and register into a strategy engine.
-/// Kept here (not in the engine) so the engine stays free of `libloading`.
+/// Diagnostic summary of loading a library (does not register anywhere).
 #[cfg(feature = "strategy-loading")]
-pub fn load_and_register(
-    engine: &mut crate::strategy_engine::StrategyEngine,
-    path: &Path,
-) -> LoadOutcome {
-    match load_boxed(path) {
-        Ok(loaded) => {
-            engine.register(loaded.strategy, format!("dylib:{}", path.display()));
-            LoadOutcome::Loaded { path: path.to_path_buf(), name: loaded.name, version: loaded.version }
+pub fn load_strategy(path: &Path) -> LoadOutcome {
+    match load_foreign(path) {
+        Ok(LoadedForeign { name, version, .. }) => {
+            LoadOutcome::Loaded { path: path.to_path_buf(), name, version }
         }
         Err(outcome) => outcome,
-    }
-}
-
-/// A loaded user strategy, before it is registered anywhere.
-#[cfg(feature = "strategy-loading")]
-pub struct LoadedStrategy {
-    pub strategy: Box<dyn crate::strategy_engine::Strategy>,
-    pub name: String,
-    pub version: String,
-}
-
-/// Load a user strategy library and hand back the instance boxed as the
-/// user-layer `Strategy` contract. The caller decides which registry it lands
-/// in: the self-driving engine's live dispatch, or the standalone engine.
-#[cfg(feature = "strategy-loading")]
-pub fn load_boxed(path: &Path) -> Result<LoadedStrategy, LoadOutcome> {
-    match DynamicStrategy::load(path) {
-        Ok(ds) => Ok(LoadedStrategy {
-            name: ds.name().to_string(),
-            version: ds.version.clone(),
-            strategy: Box::new(ds),
-        }),
-        Err(reason) => Err(if policy_allows(path).is_err() {
-            LoadOutcome::Rejected { path: path.to_path_buf(), reason }
-        } else {
-            LoadOutcome::Failed { path: path.to_path_buf(), reason }
-        }),
     }
 }
 
@@ -273,24 +216,6 @@ pub fn load_strategy(path: &Path) -> LoadOutcome {
             reason: "dynamic strategy loading not compiled in (enable feature `strategy-loading`)".into(),
         },
         Err(reason) => LoadOutcome::Rejected { path: path.to_path_buf(), reason },
-    }
-}
-
-#[cfg(feature = "strategy-loading")]
-pub fn load_strategy(path: &Path) -> LoadOutcome {
-    match DynamicStrategy::load(path) {
-        Ok(ds) => LoadOutcome::Loaded {
-            path: path.to_path_buf(),
-            name: ds.name().to_string(),
-            version: ds.version.clone(),
-        },
-        Err(reason) => {
-            if policy_allows(path).is_err() {
-                LoadOutcome::Rejected { path: path.to_path_buf(), reason }
-            } else {
-                LoadOutcome::Failed { path: path.to_path_buf(), reason }
-            }
-        }
     }
 }
 

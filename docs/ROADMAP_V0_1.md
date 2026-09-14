@@ -237,6 +237,14 @@ TS 侧已有的 `momentum` / `mean_reversion` 只能作**逻辑参考**，不是
 
 验收见 Issue #38「验收」小节（核心一条：同一策略逻辑，树内实现与外挂 dylib 实现回放对拍逐信号一致）。
 
+> **落地状态（2026-09-15，见 MIGRATION_LOG §42 / `docs/blitzkrieg/ABI_V2_DESIGN.md`）**：
+> ABI v2 已实现并合入——全档位 `BkBookView`、逐回调 `on_book`、出场意图（`ExitReason::strategy_signal`）、
+> `confirmed_tokens/diagnostics/take_breaks/on_config/on_hot_params/knobs`、堆 JSON 同库分配/释放、
+> 强制版本协商（无 v1 shim，D-15）、`strategy-loading` 默认开启。树内/外挂共用同一个
+> `EngineStrategy`；`tests/foreign_parity.rs` 用共享算法 crate `parity_logic` 在两台 Engine 上
+> 逐信号对拍；CI 在 ubuntu 真构建并驱动 `dog_strategy` 与 `parity_strategy` 两个真实 cdylib
+> （`BK_REQUIRE_DYLIB=1`）。E4（#30/#31）按此契约实现即可，不得退回原生-only。
+
 ---
 
 ## 9. 不在 0.1 范围（登记不执行）

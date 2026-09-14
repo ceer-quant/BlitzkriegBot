@@ -8,14 +8,17 @@ members = [
     "core/blitzkrieg_core",
     "extensions/polymarket",
     "user_layer/strategy_api",
+    "user_layer/parity_logic",
     "ui/ui_kit",
     "ui/ui_kit_panel",
 ]
-# user_layer/strategies is a SEPARATE nested workspace (it has [workspace]
-# and builds the example dynamic strategy cdylib) — intentionally excluded.
+# user_layer/strategies and user_layer/parity_strategy are SEPARATE nested
+# workspaces (each has [workspace]) that build example/test cdylibs —
+# intentionally excluded so they carry their own Cargo.lock like a real external
+# strategy author would.
 # rust-executor is a standalone sidecar binary with its own Cargo.lock
 # (Polymarket CLOB subprocess), not part of the core workspace.
-exclude = ["user_layer/strategies", "rust-executor"]
+exclude = ["user_layer/strategies", "user_layer/parity_strategy", "rust-executor"]
 
 [workspace.dependencies]
 rust_decimal = "1"

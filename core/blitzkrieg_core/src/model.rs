@@ -136,6 +136,10 @@ pub enum ExitReason {
     SpotReversal,
     QuickProfit,
     Manual,
+    /// Explicit close requested by a hosted (in-tree or external) strategy via
+    /// an exit *intent*. The kernel still prices, sizes, risk-checks and
+    /// submits it — the strategy never places anything itself.
+    StrategySignal,
 }
 
 /// A binary UP/DOWN market for one asset in the current round.

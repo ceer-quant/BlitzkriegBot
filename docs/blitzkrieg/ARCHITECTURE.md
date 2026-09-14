@@ -103,24 +103,31 @@ trait 作为后续多市场（含杠杆/强平）的占位。
 per-strategy 限额/分账。策略标签贯穿订单（`OrderRequest.strategy`）→ 持仓 → 平仓账本，
 `engine.stats` 的 `strategies[]` 按策略给出敞口与会话 PnL。
 
-- `strategies::EngineStrategy`（宿主契约）：`on_book`/`on_round`/`find_candidates`/`take_breaks`/
-  `confirmed_tokens`/`diagnostics`/`set_hot_params`/`on_config`；只读视图 `StrategyCtx`（markets、
-  回合剩余、`fresh_book`）——**策略无法绕过宿主闸门**（sizing/风控/限额都在宿主与 Core 侧）。
+- `strategies::EngineStrategy`（**唯一**的全功能宿主契约，E7/ABI v2 起内建与外挂共用）：
+  `on_book`/`on_round`/`find_candidates`/`take_exit_intents`/`take_breaks`/
+  `confirmed_tokens`/`diagnostics`/`set_hot_params`/`spread_arb_view`/`on_config`；只读视图
+  `StrategyCtx`（markets、回合剩余、`fresh_book`）——**策略无法绕过宿主闸门**
+  （sizing/风控/限额都在宿主与 Core 侧；入场不带张数、出场不带价格）。
 - `strategies::SpreadArbBuiltin`：现役 `spread_arb` 的宿主化实现（趋势跟踪 + 热参数 + 入场评估），
   `internal_key` 与候选顺序与旧 `Engine` 逐位一致（parity 硬门槛）。
-- `strategies::UserStrategyAdapter`：把 C-ABI 用户策略（`Strategy` trait，见下）适配为宿主策略；
-  **注册后默认 `enabled=false`**，需显式 `strategy.enable` 才开始交易。
+- `strategies::foreign::ForeignStrategy`（feature `strategy-loading`，**默认开启**）：把 dlopen 来的
+  C ABI **v2** 策略适配为同一个 `EngineStrategy`——全档位盘口、逐回调 `on_book`、出场意图、热参、
+  诊断全部过界；**注册后默认 `enabled=false`**，需显式 `strategy.enable` 才开始交易。
 - 单策略注册表：`Engine::supported_strategies()`（注册序）/ `enabled_strategies()` / `set_strategy_enabled()` /
-  `register_user_strategy()` / `strategy_source()`。`load_strategy_lib` 在引擎在位时把动态库策略
-  **注册进引擎调度（disabled）**，否则退回独立 `StrategyEngine` 注册表。
+  `register_user_strategy()` / `strategy_source()`。`load_strategy_lib` 协商通过后把动态库策略
+  **注册进引擎调度（disabled）**；引擎未挂载时返回失败。
 
-`strategy_engine/` 保留为**用户策略的加载/校验/独立注册表**（非自驱动引擎时的诊断用途）：
+`strategy_engine/loader.rs` 是**外挂策略的加载/协商器**（E7 重写；旧的精简 trait/独立注册表已删除）：
 
-- `Strategy` trait：`on_tick(&MarketTick) -> Option<Signal>`，纯逻辑、无 I/O。
-- `Signal`：`Buy{price,size}` / `Sell{price}` / `Hold`——只表达意图，不含签名/订单号。
-- `validate_signal`：内核校验闸（价格范围、symbol 匹配、size 为正），**在风控/账本/下单之前**执行，用户层无法绕过。
-- `loader`：动态库加载（`libloading`，feature `strategy-loading`）。`policy_allows` 拒绝凭据样式文件名（含 `key/secret/private/credential`）与非共享库扩展名。
-- 用户策略的 `Sell` 信号不执行：出场/止损归内核 `exit_policy` 所有（见 `STRATEGY_GUIDE.md`）。
+- 协商顺序：`policy_allows`（拒绝凭据样式文件名 `.env/private/secret/key/credential` 与非
+  `.so/.dylib/.dll`，**在 dlopen 之前**）→ dlopen → 强制 `bk_strategy_abi_version()==2`
+  （无 v1 兼容层，D-15）→ vtable abi/min + 必需钩子（create/destroy/on_book/on_round/evaluate）
+  校验 → `create()` → `ForeignStrategy`。
+- 结构化出参（entries/exits/breaks/confirmed/diagnostics/knobs）一律是**本库分配的堆 JSON**，
+  内核复制后经同一库的 `bk_strategy_free_string` 归还，分配器不跨边界。
+- 外挂边界只传只读借用视图与意图数据：策略拿不到凭证/下单管理器/UDS/网络，无法绕过
+  RiskGate/ImmutableConfig/kill switch。出场意图经 `ExitReason::StrategySignal` 与策略出场合流到
+  同一条提交路径（见 `STRATEGY_GUIDE.md`、`ABI_V2_DESIGN.md`）。
 
 ## 5. 两套"插件"系统（务必区分）
 
