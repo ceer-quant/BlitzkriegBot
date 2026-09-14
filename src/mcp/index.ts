@@ -481,7 +481,7 @@ class StdioMcpClient implements McpClient {
     }>('initialize', {
       protocolVersion: '2024-11-05',
       clientInfo: {
-        name: 'clodds',
+        name: 'blitzkrieg',
         version: '0.1.0',
       },
       capabilities: {},
@@ -777,7 +777,7 @@ class SseMcpClient implements McpClient {
     }>('initialize', {
       protocolVersion: '2024-11-05',
       clientInfo: {
-        name: 'clodds',
+        name: 'blitzkrieg',
         version: '0.1.0',
       },
       capabilities: {},

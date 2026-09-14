@@ -5,6 +5,7 @@
  * Supports GitHub token exchange and Copilot API proxying
  */
 
+import { userAgent } from '../../utils/identity';
 import { logger } from '../../utils/logger';
 
 export interface CopilotProxyConfig {
@@ -75,7 +76,7 @@ export async function createCopilotProxyExtension(
         headers: {
           Authorization: `token ${config.githubToken}`,
           Accept: 'application/json',
-          'User-Agent': 'Clodds/1.0',
+          'User-Agent': userAgent(),
         },
       });
 
@@ -144,7 +145,7 @@ export async function createCopilotProxyExtension(
       const headers = new Headers(options?.headers);
       headers.set('Authorization', `Bearer ${token.token}`);
       headers.set('Content-Type', 'application/json');
-      headers.set('User-Agent', 'Clodds/1.0');
+      headers.set('User-Agent', userAgent());
 
       return fetch(url, {
         ...options,

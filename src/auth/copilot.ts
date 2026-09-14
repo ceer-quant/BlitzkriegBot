@@ -12,6 +12,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from '../utils/logger';
 import { statePath } from '../utils/brand-paths';
+import { COPILOT_EDITOR_VERSION, COPILOT_PLUGIN_VERSION, COPILOT_INTEGRATION_ID } from '../utils/identity';
 
 export interface CopilotConfig {
   /** GitHub OAuth client ID (for Copilot) */
@@ -192,8 +193,8 @@ export class CopilotAuthClient {
       headers: {
         Authorization: `token ${this.tokens.githubToken}`,
         Accept: 'application/json',
-        'Editor-Version': 'Clodds/1.0.0',
-        'Editor-Plugin-Version': 'clodds/1.0.0',
+        'Editor-Version': COPILOT_EDITOR_VERSION,
+        'Editor-Plugin-Version': COPILOT_PLUGIN_VERSION,
       },
     });
 
@@ -232,8 +233,8 @@ export class CopilotAuthClient {
       headers: {
         Authorization: `token ${this.tokens.githubToken}`,
         Accept: 'application/json',
-        'Editor-Version': 'Clodds/1.0.0',
-        'Editor-Plugin-Version': 'clodds/1.0.0',
+        'Editor-Version': COPILOT_EDITOR_VERSION,
+        'Editor-Plugin-Version': COPILOT_PLUGIN_VERSION,
       },
     });
 
@@ -260,9 +261,9 @@ export class CopilotAuthClient {
     return {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
-      'Editor-Version': 'Clodds/1.0.0',
-      'Editor-Plugin-Version': 'clodds/1.0.0',
-      'Copilot-Integration-Id': 'clodds',
+      'Editor-Version': COPILOT_EDITOR_VERSION,
+      'Editor-Plugin-Version': COPILOT_PLUGIN_VERSION,
+      'Copilot-Integration-Id': COPILOT_INTEGRATION_ID,
       'OpenAI-Intent': 'conversation-agent',
     };
   }

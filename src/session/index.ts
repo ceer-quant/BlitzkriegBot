@@ -16,6 +16,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { logger } from '../utils/logger';
 import { statePath } from '../utils/brand-paths';
+import { buildSessionUri } from './uri';
 
 // =============================================================================
 // TYPES
@@ -499,7 +500,7 @@ export class SessionManager extends EventEmitter {
     }
 
     const hash = createHash('sha256').update(sessionId + session.createdAt.toISOString()).digest('hex').slice(0, 16);
-    return `clodds://session/${sessionId}?key=${hash}`;
+    return buildSessionUri(sessionId, hash);
   }
 }
 

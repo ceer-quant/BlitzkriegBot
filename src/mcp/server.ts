@@ -16,6 +16,7 @@ import {
   logAudit,
   type McpSecurityConfig,
 } from './security.js';
+import { mcpToolName, skillFromToolName } from './tool-names.js';
 
 // =============================================================================
 // TYPES
@@ -66,8 +67,8 @@ async function ensureSkills(): Promise<void> {
 async function listTools(): Promise<McpTool[]> {
   await ensureSkills();
   return skillManifest!.map((name) => ({
-    name: `clodds_${name.replace(/-/g, '_')}`,
-    description: `Clodds skill: ${name}`,
+    name: mcpToolName(name),
+    description: `Blitzkrieg skill: ${name}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -80,8 +81,14 @@ async function listTools(): Promise<McpTool[]> {
 async function callTool(toolName: string, args: Record<string, unknown>): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
   await ensureSkills();
 
-  // clodds_trading_polymarket → trading-polymarket
-  const skillName = toolName.replace(/^clodds_/, '').replace(/_/g, '-');
+  // blitzkrieg_trading_polymarket (or legacy clodds_*) → trading-polymarket
+  const skillName = skillFromToolName(toolName);
+  if (!skillName) {
+    return {
+      content: [{ type: 'text', text: `Unknown tool: ${toolName}` }],
+      isError: true,
+    };
+  }
   const skillArgs = typeof args.args === 'string' ? args.args : '';
 
   // Build command string like "/trading-polymarket balance"
@@ -118,7 +125,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<JsonRpcResponse | nul
       const result: McpInitializeResult = {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'clodds', version: '0.1.0' },
+        serverInfo: { name: 'blitzkrieg', version: '0.1.0' },
       };
       return { jsonrpc: '2.0', id: req.id, result };
     }

@@ -39,7 +39,7 @@ test('gateway health and info endpoints respond', async (t) => {
     const infoRes = await fetch(`http://127.0.0.1:${port}/`);
     assert.equal(infoRes.status, 200);
     const info = await infoRes.json();
-    assert.equal(info.name, 'clodds');
+    assert.equal(info.name, 'blitzkrieg');
     assert.ok(info.endpoints);
     assert.equal(info.endpoints.health, '/health');
   } finally {
