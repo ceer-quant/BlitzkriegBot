@@ -1084,6 +1084,14 @@ name = "blitzkrieg-strategy-api"
 version = "0.1.0"
 
 [[package]]
+name = "blitzkrieg-ui-kit"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
