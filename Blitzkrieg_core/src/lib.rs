@@ -27,6 +27,7 @@ pub mod ome;
 pub mod order;
 pub mod order_db;
 pub mod position;
+pub mod position_db;
 pub mod reconcile;
 pub mod risk;
 pub mod risk_context;

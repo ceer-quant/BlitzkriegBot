@@ -31,6 +31,7 @@ console.log('owner core pid', owner.pid, 'listening');
 const client = new BlitzkriegCoreClient({
   binaryPath: BIN, socketPath: SOCK, mode: 'dry', seedBalance: 1000,
   maxOrderNotional: 5, tickMs: 50, autoRestart: true, cwd: WORKDIR, noTradeLog: true,
+  noOrderLog: true, noPositionLog: true,
 });
 let fatal = null;
 client.on('fatal', (e) => { fatal = e; });

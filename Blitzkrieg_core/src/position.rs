@@ -11,6 +11,7 @@ use crate::exit_policy::{
 use crate::model::{ExitReason, OrderbookSnapshot, Side, SignalDirection};
 
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
 /// Per-unit taker fee percentage (Polymarket formula).
 fn taker_fee_pct(price: Decimal) -> Decimal {
@@ -45,7 +46,8 @@ impl Default for PositionConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OpenPosition {
     pub id: String,
     pub strategy: String,
@@ -161,6 +163,22 @@ impl PositionManager {
 
     pub fn open_positions(&self) -> &[OpenPosition] {
         &self.open
+    }
+
+    /// Rebuild the open book from durable storage (crash recovery). Replaces any
+    /// in-memory state and advances `next_id` past the restored ids so a new
+    /// position can never collide with a recovered one (`hft-N`).
+    pub fn restore_open(&mut self, positions: Vec<OpenPosition>) {
+        let max_id = positions
+            .iter()
+            .filter_map(|p| p.id.strip_prefix("hft-"))
+            .filter_map(|n| n.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        if max_id + 1 > self.next_id {
+            self.next_id = max_id + 1;
+        }
+        self.open = positions;
     }
     pub fn closed_positions(&self) -> &[ClosedPosition] {
         &self.closed

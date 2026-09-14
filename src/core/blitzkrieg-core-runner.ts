@@ -16,6 +16,7 @@ export interface BlitzkriegRunConfig {
   roundSec: number;
   dryRun: boolean;
   sizeUsd: number;
+  minShares: number;
   maxShares: number;
   maxPositions: number;
   maxDailyLossUsd: number;
@@ -100,6 +101,11 @@ export class BlitzkriegCoreRunner {
     this.losses = 0;
     this.dailyPnl = 0;
 
+    // Per-order share bounds. Node owns the parameter, the core enforces it. Keep
+    // min<=max so a bad config cannot invert the clamp (the core guards too).
+    const minShares = Math.max(0, cfg.minShares || 0);
+    const maxShares = Math.max(minShares, cfg.maxShares || minShares);
+
     const opts: BlitzkriegCoreOptions = {
       mode: cfg.dryRun ? 'dry' : 'live',
       seedBalance: Math.max(1000, cfg.maxDailyLossUsd * 5),
@@ -109,7 +115,7 @@ export class BlitzkriegCoreRunner {
       // here rejected every 10-share order (10*0.43 > 2.5). Size it from the real
       // worst case so it never blocks a legitimate order but still catches runaway
       // sizing bugs: maxShares * 0.6 (covers the 0.45 entry cap + taker buffer).
-      maxOrderNotional: Math.max(cfg.sizeUsd, cfg.maxShares * 0.6),
+      maxOrderNotional: Math.max(cfg.sizeUsd, maxShares * 0.6),
       tickMs: 50,
       autoRestart: true,
       extraArgs: [
@@ -120,7 +126,9 @@ export class BlitzkriegCoreRunner {
         '--min-round-age', String(cfg.minRoundAgeSec),
         '--min-time-left', String(cfg.minTimeLeftSec),
         '--max-positions', String(cfg.maxPositions),
-        '--max-order-notional', String(Math.max(cfg.sizeUsd, cfg.maxShares * 0.6)),
+        '--min-shares', String(minShares),
+        '--max-shares', String(maxShares),
+        '--max-order-notional', String(Math.max(cfg.sizeUsd, maxShares * 0.6)),
       ],
     };
     const client = new BlitzkriegCoreClient(opts);

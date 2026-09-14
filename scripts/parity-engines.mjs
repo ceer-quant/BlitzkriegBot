@@ -155,6 +155,8 @@ async function rustDecision() {
     autoRestart: false,
     cwd: WORKDIR,
     noTradeLog: true,  // these harnesses assert via events/positions, never the persisted ledger
+    noOrderLog: true,  // keep recovery files of co-located cores from leaking across
+    noPositionLog: true,
     // Match the Node timing gates + trend window; disable exits so no SELL noise.
     // `--no-discovery` is required: this harness injects one synthetic market via
     // `engine.markets`, and Rust-native round discovery would otherwise overwrite

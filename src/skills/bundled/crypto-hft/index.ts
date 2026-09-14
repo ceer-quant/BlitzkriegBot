@@ -306,12 +306,17 @@ async function executeRust(cmd: string, args: string, parts: string[]): Promise<
         const sizeMatch = args.match(/--size\s+(\d+(?:\.\d+)?)/);
         const sizeUsd = sizeMatch ? parseFloat(sizeMatch[1]) : DEFAULT_CONFIG.sizeUsd;
         const roundSec = parseInt(process.env.HFT_ROUND_SEC || String(DEFAULT_CONFIG.roundDurationSec), 10);
+        // Per-order lot bounds. Env override lets ops right-size the lot for a
+        // small live balance (e.g. 4.8u → HFT_MAX_SHARES=4) without a rebuild.
+        const minShares = parseInt(process.env.HFT_MIN_SHARES || String(DEFAULT_CONFIG.minShares), 10);
+        const maxShares = parseInt(process.env.HFT_MAX_SHARES || String(DEFAULT_CONFIG.maxShares), 10);
         await runner.start({
           assets,
           roundSec,
           dryRun,
           sizeUsd,
-          maxShares: DEFAULT_CONFIG.maxShares,
+          minShares,
+          maxShares,
           maxPositions: DEFAULT_CONFIG.maxPositions,
           maxDailyLossUsd: DEFAULT_CONFIG.maxDailyLossUsd,
           minRoundAgeSec: DEFAULT_CONFIG.minRoundAgeSec,
@@ -320,7 +325,7 @@ async function executeRust(cmd: string, args: string, parts: string[]): Promise<
         return [
           `**Crypto HFT Started (Rust core) [${dryRun ? 'DRY RUN' : 'LIVE'}]**`,
           `Assets: ${assets.join(', ')}`,
-          `Round: ${roundSec}s | Size: $${sizeUsd}/trade`,
+          `Round: ${roundSec}s | Size: $${sizeUsd}/trade | Lot: ${minShares}–${maxShares} sh`,
           `Engine: blitzkrieg-core (Rust owns discovery, market data, signals, risk, orders, positions)`,
           `Node role: UI / parameters / logs only`,
         ].join('\n');

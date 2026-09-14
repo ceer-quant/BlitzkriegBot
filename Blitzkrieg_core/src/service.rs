@@ -63,6 +63,9 @@ pub struct CoreConfig {
     /// Where to persist tracked ORDERS (crash recovery + orphan detection).
     /// None = off. Default `data/orders/orders.jsonl`.
     pub order_log_path: Option<String>,
+    /// Where to persist OPEN POSITIONS (crash recovery). None = off.
+    /// Default `data/positions/positions.jsonl`.
+    pub position_log_path: Option<String>,
     /// Discover rounds inside the core (Gamma slug queries) instead of relying on
     /// Node to push `engine.markets`. Default true when the engine is on.
     pub discovery_enabled: bool,
@@ -110,6 +113,7 @@ impl Default for CoreConfig {
             near_miss_path: None,
             trade_log_path: Some("data/trades/trades.jsonl".to_string()),
             order_log_path: Some("data/orders/orders.jsonl".to_string()),
+            position_log_path: Some("data/positions/positions.jsonl".to_string()),
             discovery_enabled: true,
             shadow_evolution_enabled: false,
             shadow_evolution_tuning: None,
@@ -144,6 +148,10 @@ pub struct Core {
     /// Durable order log, when `order_log_path` is set. Orders are restored from
     /// it at startup so a restart never forgets resting orders (orphan guard).
     order_db: Option<crate::order_db::OrderDb>,
+    /// Durable snapshot of the OPEN position book, when `position_log_path` is
+    /// set. Restored at startup so a restart never forgets open positions
+    /// (unmanaged-exit guard; same failure class as the orphan-order bug).
+    position_db: Option<crate::position_db::PositionDb>,
     /// Feed/decision counters for observability (P4 diagnostics).
     stats: CoreStats,
     next_id: u64,
@@ -154,6 +162,7 @@ impl Core {
     pub fn new(config: CoreConfig) -> Self {
         let trade_db = config.trade_log_path.as_ref().map(crate::trade_db::TradeDb::new);
         let order_db = config.order_log_path.as_ref().map(crate::order_db::OrderDb::new);
+        let position_db = config.position_log_path.as_ref().map(crate::position_db::PositionDb::new);
         let shadow_cfg = {
             let mut c = ShadowEvolutionConfig::default();
             c.enabled = config.shadow_evolution_enabled;
@@ -196,6 +205,7 @@ impl Core {
             shadow_evolution: ShadowEvolution::new(shadow_cfg, MutableParams::default()),
             trade_db,
             order_db,
+            position_db,
             stats: CoreStats::default(),
             next_id: 1,
             tx: None,
@@ -234,6 +244,36 @@ impl Core {
     fn persist_order(&self, id: &str) {
         if let (Some(db), Some(o)) = (self.order_db.as_ref(), self.ome.get(id)) {
             db.append(o);
+        }
+    }
+
+    /// Restore the OPEN position book from durable storage (crash recovery). Call
+    /// once at startup, BEFORE trading begins. Without this a restart forgets
+    /// every open position: it is no longer valued or exit-managed, so the trade
+    /// drifts to expiry unmanaged. Mirrors `restore_orders`.
+    pub fn restore_positions(&mut self) -> usize {
+        let Some(db) = self.position_db.as_ref() else { return 0 };
+        let loaded = db.load();
+        if loaded.is_empty() {
+            return 0;
+        }
+        let n = loaded.len();
+        self.positions.restore_open(loaded);
+        if n > 0 {
+            self.emit(Event::RiskAlert {
+                code: CoreErrorCode::Internal,
+                message: format!("recovered {n} open position(s) from the position log after restart"),
+            });
+        }
+        n
+    }
+
+    /// Persist the current OPEN position set (best effort). Positions are few and
+    /// short-lived, so the whole set is rewritten on every change rather than
+    /// appended (a close needs no tombstone).
+    fn persist_positions(&self) {
+        if let Some(db) = self.position_db.as_ref() {
+            db.save(self.positions.open_positions());
         }
     }
 
@@ -798,6 +838,7 @@ impl Core {
                         // Mutate through the manager API (kept minimal: adjust
                         // via close-with-avg is not applicable, so re-open path).
                         self.positions.adjust_open(&id, new_entry, new_shares);
+                        self.persist_positions();
                     }
                 } else {
                     let direction = parse_direction(&d.direction);
@@ -822,6 +863,7 @@ impl Core {
                         target_exit_price: None,
                     };
                     self.positions.open(p, now_ms);
+                    self.persist_positions();
                 }
             }
             Side::Sell => {
@@ -838,11 +880,13 @@ impl Core {
                         // SELL was produced by the exit engine, else Manual.
                         let reason = self.exit_reasons.remove(token).unwrap_or(ExitReason::Manual);
                         if let Some(closed) = self.positions.close(&id, d.price, reason, false, now_ms) {
+                            self.persist_positions();
                             self.on_position_closed(&closed, now_ms);
                         }
                     } else {
                         let new_cost = entry * remaining;
                         self.positions.adjust_open(&id, entry, remaining);
+                        self.persist_positions();
                         let _ = new_cost;
                     }
                 }
