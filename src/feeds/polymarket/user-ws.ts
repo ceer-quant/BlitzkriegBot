@@ -25,6 +25,7 @@ const RECONNECT_BACKOFF_MULTIPLIER = 1.5;
 
 export interface FillEvent {
   orderId: string;
+  tradeId?: string;
   marketId: string;
   tokenId: string;
   side: 'BUY' | 'SELL';
@@ -169,7 +170,8 @@ export function createUserWebSocket(
             // Handle trade events (fills)
             if (message.event_type === 'trade' || message.type === 'trade') {
               const fill: FillEvent = {
-                orderId: message.order_id || message.id || '',
+                orderId: message.order_id || '',
+                tradeId: message.trade_id || message.id || message.tradeId || '',
                 marketId: message.market || message.condition_id || '',
                 tokenId: message.asset_id || message.token_id || '',
                 side: (message.side?.toUpperCase() || 'BUY') as 'BUY' | 'SELL',

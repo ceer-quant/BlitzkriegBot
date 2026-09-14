@@ -1,0 +1,55 @@
+[package]
+name = "blitzkrieg-core"
+version = "0.1.0"
+edition = "2024"
+description = "Blitzkrieg Quant Core: market-agnostic trading core (strategy engine, OME, risk, ledger, market data, execution). Node/UI is a shell over this."
+
+[[bin]]
+name = "blitzkrieg-core"
+path = "src/main.rs"
+
+[lib]
+name = "blitzkrieg_core"
+path = "src/lib.rs"
+
+[features]
+# The core itself is market-agnostic and has NO market SDK dependency. A market
+# is supplied by an extension crate, linked in via a feature (see below). The
+# default ships with the official Polymarket extension.
+default = ["polymarket"]
+# Link the official Polymarket market extension as the operative market.
+polymarket = ["dep:polymarket-extension"]
+# Dynamic user-layer strategy loading (shared libraries). Off by default so the
+# core builds without it; enable to load `strategy/*.dylib` at runtime.
+strategy-loading = ["dep:libloading"]
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
+futures = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rust_decimal = "1"
+rust_decimal_macros = "1"
+libloading = { version = "0.8", optional = true }
+# Frozen C ABI for user-layer dynamic strategies (path dep; rlib+cdylib).
+blitzkrieg-strategy-api = { path = "../user_layer/strategy_api" }
+# Market-plugin contract (no internal deps): DTOs + the DataFeed/Discovery/
+# OrderExecutor traits + MarketHost. The core implements the host side here.
+blitzkrieg-market-api = { path = "../market_api" }
+# Official Polymarket market extension (optional; the default feature links it).
+# The core never imports it directly except at the single assembly seam.
+polymarket-extension = { path = "../extensions/polymarket", optional = true }
+async-trait = "0.1"
+# Lock-free atomic parameter swap for Shadow Evolution (strategy hot path).
+arc-swap = "1"
+
+[dev-dependencies]
+rust_decimal_macros = "1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "sync", "time"] }

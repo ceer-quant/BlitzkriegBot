@@ -15,6 +15,7 @@ import { promisify } from 'util';
 import { platform, totalmem, freemem } from 'os';
 import { logger } from '../utils/logger';
 import { resolveStateDir } from '../utils/config';
+import { getAnthropicBaseUrl, getAnthropicHeaders, getAnthropicMessagesUrl } from '../utils/anthropic';
 
 const execAsync = promisify(exec);
 
@@ -249,6 +250,7 @@ const checks: Record<string, Check> = {
 
   async anthropicApi(): Promise<CheckResult> {
     const apiKey = process.env.ANTHROPIC_API_KEY;
+    const baseUrl = getAnthropicBaseUrl();
 
     if (!apiKey) {
       return {
@@ -260,13 +262,9 @@ const checks: Record<string, Check> = {
     }
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const response = await fetch(getAnthropicMessagesUrl(baseUrl), {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
+        headers: getAnthropicHeaders(apiKey),
         body: JSON.stringify({
           model: 'claude-3-haiku-20240307',
           max_tokens: 1,
@@ -279,7 +277,7 @@ const checks: Record<string, Check> = {
         return {
           name: 'Anthropic API',
           status: 'pass',
-          message: 'API key is valid',
+          message: baseUrl === 'https://api.anthropic.com' ? 'API key is valid' : `Compatible API is valid (${baseUrl})`,
         };
       }
 

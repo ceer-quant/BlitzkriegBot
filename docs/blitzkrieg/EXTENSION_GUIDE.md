@@ -1,0 +1,157 @@
+# 扩展开发指南（EXTENSION_GUIDE）
+
+> 内核是骨架，扩展是插件。新市场、新策略、新 UI、新数据源都以"扩展"接入，不改内核代码。
+>
+> **先读这一段**：内核有**两套**插件机制，别混用——
+> - **市场插件**（`MarketPlugin`，本指南 §2.5）：接入一个**市场**，有下单/行情/发现能力，
+>   经 `MarketHost` 与内核交互。Polymarket 就是它。要加新市场看 §2.5。
+> - **通用扩展**（`Extension`，§2–§4）：只是**观察者/钩子**（事件+日志），**无交易能力**。
+>   要加审计/通知这类钩子看 §2–§4。
+
+## 1. 扩展类型
+
+| 类型 | 说明 | 示例 |
+|:---|:---|:---|
+| `market` | 新市场接入 | Polymarket（已实现）；Kalshi / OKX / Deribit（待做） |
+| `strategy` | 新策略引擎 | 疯狗策略、趋势策略 |
+| `ui` | 新界面 | Web UI、TUI、Telegram Bot |
+| `data` | 新数据源 | CoinGecko、Glassnode |
+| `risk` | 新风控规则 | 最大杠杆、相关性风控 |
+
+## 2. 契约
+
+```rust
+#[async_trait]
+pub trait Extension: Send + Sync {
+    fn name(&self) -> &str;
+    fn version(&self) -> &str;
+    fn extension_type(&self) -> ExtensionType;
+    async fn on_load(&self, ctx: &dyn ExtensionContext) -> Result<(), String>;
+    async fn on_unload(&self) -> Result<(), String>;
+    async fn on_event(&self, event: &Event) -> Result<(), String> { Ok(()) }
+}
+
+pub trait ExtensionContext: Send + Sync {
+    fn emit(&self, event: Event);          // 建议一个内核事件
+    fn strategy_names(&self) -> Vec<String>; // 只读
+    fn log(&self, message: &str);
+}
+```
+
+## 2.5 市场插件契约（`MarketPlugin`）
+
+接入一个市场 = 实现 `blitzkrieg-market-api` 的三个 trait 并把它们打包成 `MarketPlugin`：
+
+```rust
+pub trait DataFeed: Send + Sync {          // 长连推送：盘口 / 现货
+    fn name(&self) -> &str;
+    fn start(&self, host: Arc<dyn MarketHost>, cfg: DataFeedConfig, tokens: Vec<TokenId>)
+        -> BoxFuture<'_, CoreResult<()>>;
+}
+pub trait MarketDiscovery: Send + Sync {   // 轮询：回合/市场发现
+    fn start(&self, host: Arc<dyn MarketHost>, cfg: DiscoveryConfig) -> BoxFuture<'_, CoreResult<()>>;
+}
+pub trait OrderExecutor: Send + Sync {     // 下单 / 撤单 / 成交回报 / 对账
+    fn start(&self, host: Arc<dyn MarketHost>, cfg: ExecutorConfig) -> BoxFuture<'_, CoreResult<()>>;
+}
+pub trait MarketPlugin: Send + Sync {
+    fn name(&self) -> &str;                // 也用于 --market-plugin <name>
+    fn market_type(&self) -> MarketType;
+    fn data_feed(&self)  -> Option<&dyn DataFeed>      { None }  // 任一可为空
+    fn discovery(&self)  -> Option<&dyn MarketDiscovery> { None }
+    fn executor(&self)   -> Option<&dyn OrderExecutor>  { None }
+    fn info(&self) -> PluginInfo { ... }   // market.list 的能力报告（含 active）
+}
+```
+
+**`MarketHost` 是插件唯一能碰内核的地方**：`on_book`/`on_top_of_book`/`on_spot`/
+`on_round_markets`/`subscribe_tokens`（推数据），`take_pending_orders`/`on_order_accepted`/
+`on_order_rejected`/`on_fill`/`on_order_live`/`on_order_cancelled`/`on_reconcile`/
+`seed_balance`/`report_error`（取订单、报成交、报错）。
+插件**拿不到** OME、账本、风控、私钥、socket。
+
+**依赖方向（硬性）**：`market_api ← 内核`、`market_api ← 扩展`；扩展**不得**依赖内核
+（否则成环）。参考实现：`extensions/polymarket/`。
+
+**装配与选择**：扩展是 workspace 成员，用 Cargo feature 静态链接进内核；内核里**唯一**点名市场的
+地方是 `market::register_builtin_markets()`。运行时用 `--market-plugin <name>` 选择（未注册则回退
+第一个并告警）。
+
+## 3. 生命周期
+
+```
+discovered → installed → enabled → (running) → disabled → uninstalled
+```
+
+- `install`：注册（state=Installed）。
+- `enable`：调用 `on_load`；失败 → state=Failed（**不 panic**）。
+- `disable`：调用 `on_unload`。
+- `uninstall`：移除。
+- `dispatch`：仅向 Enabled 的扩展推送 `core.event`；某扩展 `on_event` 出错只记 warn，不影响内核与其它扩展。
+
+## 4. 隔离与安全（硬性）
+
+- 每个扩展运行在独立异步任务；**扩展崩溃不得影响内核**（注册表 + 结果隔离）。
+- 扩展**绝不能**获得：私钥、签名器、venue 客户端、OME、UDS socket、内核内部状态。
+- 扩展只能通过 `ExtensionContext` 交互（事件 + 只读策略名 + 日志 + 建议意图）。
+- 任何扩展崩溃或被禁用，内核继续运行。
+
+## 5. 配置
+
+> **状态：尚未实现。** 下列 `config.toml` 目前**仅作文档/占位**，内核**不解析**（无 toml 依赖）。
+> 现状：装配走 Cargo feature，运行期选择走 `--market-plugin <name>`；扩展不读配置文件。
+> 若将来要做配置驱动的加载（热加载/版本校验/依赖声明），再按此格式实现。
+
+每个扩展一个目录 `extensions/<name>/config.toml`：
+
+```toml
+[meta]
+name = "binance_spot"
+version = "0.1.0"
+extension_type = "market"
+enabled = false
+description = "Binance spot market adapter (extension-point proof)"
+
+[dependencies]
+blitzkrieg_core = ">=0.1.0"
+
+[market]
+data_endpoint = "wss://stream.binance.com:9443/ws"
+symbols = ["BTCUSDT", "ETHUSDT"]
+trading_enabled = false
+
+[risk]
+max_position_size = 1.0
+max_daily_loss = 500.0
+```
+
+（规划中）配置需支持：热加载、版本校验、依赖声明。
+
+## 6. IPC
+
+| method | 说明 |
+|:---|:---|
+| `extension.list` | `{ version, extensions: [{ name, type, state }] }` |
+| `extension.enable` | 启用通用扩展（执行 `on_load`）；返回 `{ name, enabled: true }` |
+| `extension.disable` | 停用通用扩展（执行 `on_unload`）；返回 `{ name, enabled: false }` |
+| `market.list` | `{ version, active, plugins: [{ name, type, hasDataFeed, hasDiscovery, hasExecutor, enabled, active }] }` |
+
+内建示例扩展 `binance_spot`（`Extension`）默认 installed，可 `extension.enable`/`disable`。
+市场插件（`MarketPlugin`）走 `market.list` 只读查询；选择用 `--market-plugin`（暂无 enable/disable IPC）。
+
+## 7. 最小示例
+
+- **市场插件**：`extensions/polymarket/`——`PolymarketPlugin` 组装 `feed`/`discovery`/`live` 三组件，
+  经 `MarketHost` 驱动内核。这是新增市场应照抄的形状。
+- **通用扩展**：`extension/builtins.rs::BinanceSpotExtension`——只统计事件数、写日志，演示
+  `on_load`/`on_event` 生命周期与隔离（**无交易能力**）。
+
+## 8. 验收清单
+
+- [x] `MarketPlugin` + 三组件 trait 定义完成，注册表可装配、可选 `active`
+- [x] 至少一个真实市场插件（`extensions/polymarket`），内核零市场代码
+- [x] `Extension` trait 定义完成，注册表可装配与生命周期切换
+- [x] 扩展/插件崩溃不影响内核（`on_load` 失败 → Failed，`on_event` 出错 → warn）
+- [x] 插件无法访问私钥/OME/socket（只能经 `MarketHost`）
+- [ ] 配置驱动加载（`config.toml` 解析、热加载、版本校验）——**未实现**
+- [ ] 运行期 dylib 热加载（P0.7 C-ABI）——**暂缓**

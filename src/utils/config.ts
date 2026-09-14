@@ -402,6 +402,23 @@ export async function loadConfig(customPath?: string): Promise<Config> {
 
   // Apply trading feature env overrides
   const envBool = (v: string | undefined) => v === '1' || v?.toLowerCase() === 'true';
+
+  // Apply feed / market-index enablement env overrides
+  if (process.env.KALSHI_ENABLED !== undefined) config.feeds.kalshi.enabled = envBool(process.env.KALSHI_ENABLED);
+  if (process.env.MANIFOLD_ENABLED !== undefined) config.feeds.manifold.enabled = envBool(process.env.MANIFOLD_ENABLED);
+  if (process.env.METACULUS_ENABLED !== undefined) config.feeds.metaculus.enabled = envBool(process.env.METACULUS_ENABLED);
+  if (process.env.POLYMARKET_FEED_ENABLED !== undefined) config.feeds.polymarket.enabled = envBool(process.env.POLYMARKET_FEED_ENABLED);
+  if (process.env.MARKET_INDEX_ENABLED !== undefined || process.env.MARKET_INDEX_PLATFORMS) {
+    const mi = (config.marketIndex ?? (config.marketIndex = { enabled: true } as any)) as any;
+    if (process.env.MARKET_INDEX_ENABLED !== undefined) mi.enabled = envBool(process.env.MARKET_INDEX_ENABLED);
+    if (process.env.MARKET_INDEX_PLATFORMS) {
+      mi.platforms = process.env.MARKET_INDEX_PLATFORMS
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+  }
+
   if (process.env.MARKET_MAKING_ENABLED) {
     if (!config.trading) config.trading = { enabled: false, dryRun: true, maxOrderSize: 100, maxDailyLoss: 200 };
     config.trading.marketMaking = {

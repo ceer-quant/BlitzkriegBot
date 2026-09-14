@@ -1,0 +1,21 @@
+# Extension config for the binance_spot market extension (structural shell).
+# Each extension has its own config, hot-reloadable, with version + deps.
+
+[meta]
+name = "binance_spot"
+version = "0.1.0"
+extension_type = "market"
+enabled = false            # shell only; not wired to trading yet
+description = "Binance spot market adapter (extension-point proof)"
+
+[dependencies]
+blitzkrieg_core = ">=0.1.0"
+
+[market]
+data_endpoint = "wss://stream.binance.com:9443/ws"
+symbols = ["BTCUSDT", "ETHUSDT"]
+trading_enabled = false
+
+[risk]
+max_position_size = 1.0
+max_daily_loss = 500.0

@@ -46,6 +46,7 @@ import { createCopyTradingService, type CopyTradingService } from '../trading/co
 import { createSmartRouter, type SmartRouter } from '../execution/smart-router';
 import { createExecutionService, type ExecutionService } from '../execution';
 import { createRealtimeAlertsService, connectWhaleTracker, connectOpportunityFinder, type RealtimeAlertsService } from '../alerts';
+import { isSkillCommand, executeSkillCommand } from '../skills/executor';
 import { createOpportunityExecutor, type OpportunityExecutor } from '../opportunity/executor';
 import { createTickRecorder, type TickRecorder } from '../services/tick-recorder';
 import { createTickStreamer, type TickStreamer } from '../services/tick-streamer';
@@ -1854,6 +1855,28 @@ export async function createGateway(config: Config): Promise<AppGateway> {
         thread: normalized.thread,
       });
       return;
+    }
+
+    // Check for skill commands (e.g., /hft, /crypto-hft)
+    if (normalized.text.startsWith('/')) {
+      try {
+        const skillResult = await executeSkillCommand(normalized.text);
+        if (skillResult.handled) {
+          const response = skillResult.error
+            ? `❌ Error: ${skillResult.error}`
+            : skillResult.response || '(no response)';
+          await sendMessage({
+            platform: normalized.platform,
+            chatId: normalized.chatId,
+            text: response,
+            parseMode: 'Markdown',
+            thread: normalized.thread,
+          });
+          return;
+        }
+      } catch (err) {
+        logger.error({ error: err }, 'Skill command execution failed');
+      }
     }
 
     const responseText = await agents.handleMessage(normalized, session);

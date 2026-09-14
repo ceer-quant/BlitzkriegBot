@@ -118,7 +118,8 @@ function validateStartupRequirements(): void {
   if (!process.env.ANTHROPIC_API_KEY) {
     errors.push(
       'ANTHROPIC_API_KEY is not set. The AI agent will not function.\n' +
-      '  Fix: Add ANTHROPIC_API_KEY=sk-ant-... to your .env file\n' +
+      '  Fix: Add ANTHROPIC_API_KEY to your .env file\n' +
+      '  Optional: set ANTHROPIC_BASE_URL for Anthropic-compatible providers\n' +
       '  Or run: clodds onboard'
     );
   }

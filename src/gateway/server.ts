@@ -348,7 +348,7 @@ export function createServer(
 
     // Additional security headers
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader('X-XSS-Protection', '1; mode=block');
 
     // Redirect HTTP to HTTPS if forced
@@ -430,6 +430,65 @@ export function createServer(
         timestamp: Date.now(),
         error: 'Health check failed',
       });
+    }
+  });
+
+  // Simple wallet balance endpoint for HFT panel
+  app.get('/api/trading/balance', async (_req, res) => {
+    try {
+      const address = process.env.POLYMARKET_FUNDER_ADDRESS || '';
+
+      // Prefer the Rust SDK's authenticated balance (works for Poly1271 / deposit
+      // wallets, where the plain HMAC /balance endpoint fails).
+      try {
+        const { rustBalance } = await import('../execution/rust-clob-executor.js');
+        const r = await rustBalance();
+        if (r.success && typeof r.balance === 'number') {
+          res.json({ address, usdcBalance: r.balance.toFixed(2) });
+          return;
+        }
+      } catch { /* fall through to the HMAC method below */ }
+
+      const apiKey = process.env.POLYMARKET_API_KEY || '';
+      const apiSecret = process.env.POLYMARKET_API_SECRET || '';
+      const apiPassphrase = process.env.POLYMARKET_API_PASSPHRASE || '';
+      
+      if (!address || !apiKey) {
+        res.json({ address: '', usdcBalance: '0', error: 'Not configured' });
+        return;
+      }
+
+      // Get balance from CLOB API with HMAC auth
+      const crypto = await import('crypto');
+      const timestamp = Math.floor(Date.now() / 1000).toString();
+      const path = '/balance';
+      const body = '';
+      const hmac = crypto.createHmac('sha256', Buffer.from(apiSecret, 'base64'));
+      hmac.update(timestamp + 'GET' + path + body);
+      const signature = hmac.digest('base64');
+
+      const headers = {
+        POLY_ADDRESS: address,
+        POLY_API_KEY: apiKey,
+        POLY_PASSPHRASE: apiPassphrase,
+        POLY_TIMESTAMP: timestamp,
+        POLY_SIGNATURE: signature,
+      };
+
+      const response = await fetch(`https://clob.polymarket.com${path}`, { headers });
+      if (!response.ok) {
+        res.json({ address, usdcBalance: '0', error: `HTTP ${response.status}` });
+        return;
+      }
+
+      const data = await response.json() as { balance?: string; allowance?: string };
+      res.json({
+        address,
+        usdcBalance: data.balance || '0',
+        allowance: data.allowance || '0',
+      });
+    } catch (err) {
+      res.json({ address: '', usdcBalance: '0', error: 'Failed to fetch balance' });
     }
   });
 
@@ -847,6 +906,17 @@ export function createServer(
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     },
   }));
+
+  // ── User-layer UI (ui/) — HFT panel and dashboards, separated from Node logic ──
+  app.use('/ui', express.static(join(__dirname, '../../ui'), {
+    setHeaders: (res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    },
+  }));
+  // Backward-compatible URL for the HFT panel (now served from ui/).
+  app.get('/webchat/hft.html', (_req, res) => {
+    res.sendFile(join(__dirname, '../../ui/hft.html'));
+  });
 
   // Legacy inline WebChat HTML client
   app.get('/webchat/legacy', (_req, res) => {

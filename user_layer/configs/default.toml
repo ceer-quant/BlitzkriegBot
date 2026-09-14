@@ -1,0 +1,11 @@
+# User-layer runtime configuration. Parameters only; no credentials here.
+# Credentials are read by the kernel process from its own environment.
+
+[engine]
+assets = ["BTC", "ETH", "SOL", "XRP"]
+round_sec = 300              # 5m markets
+min_round_age_sec = 30
+min_time_left_sec = 180
+
+[strategy]
+active = ["spread_arb"]      # strategy names to enable in the kernel engine

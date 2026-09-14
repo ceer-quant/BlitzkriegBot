@@ -455,20 +455,11 @@ export async function runDoctor(): Promise<CheckResult[]> {
 
   // 7. API key format validation
   if (anthropicKey) {
-    if (anthropicKey.startsWith('sk-ant-')) {
-      results.push({
-        name: 'Anthropic API key format',
-        status: 'pass',
-        message: 'Valid format (sk-ant-...)',
-      });
-    } else {
-      results.push({
-        name: 'Anthropic API key format',
-        status: 'warn',
-        message: 'Unexpected format (should start with sk-ant-)',
-        fix: 'Verify your API key at console.anthropic.com',
-      });
-    }
+    results.push({
+      name: 'Anthropic API key format',
+      status: 'pass',
+      message: process.env.ANTHROPIC_BASE_URL ? 'Using compatible provider key format' : 'Key present',
+    });
   }
 
   // 8. Port availability check

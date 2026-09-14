@@ -13,6 +13,7 @@
 
 import { createHmac, randomBytes } from 'crypto';
 import { logger } from '../utils/logger';
+import { rustPlaceLimitOrder } from './rust-clob-executor';
 import {
   buildPolymarketHeadersForUrl,
   PolymarketApiKeyAuth,
@@ -122,6 +123,8 @@ export interface TrackedFill {
   size: number;
   price: number;
   status: 'MATCHED' | 'MINED' | 'CONFIRMED' | 'FAILED';
+  /** Stable per-trade identifier used to dedupe status transitions (MATCHED→MINED→CONFIRMED) */
+  tradeId?: string;
   transactionHash?: string;
   timestamp: number;
   receivedAt: number;
@@ -214,6 +217,28 @@ export interface ExecutionService {
   cancelAllOrders(platform?: 'polymarket' | 'kalshi' | 'opinion' | 'predictfun', marketId?: string): Promise<number>;
   getOpenOrders(platform?: 'polymarket' | 'kalshi' | 'opinion' | 'predictfun'): Promise<OpenOrder[]>;
   getOrder(platform: 'polymarket' | 'kalshi' | 'opinion' | 'predictfun', orderId: string): Promise<OpenOrder | null>;
+
+  /** Get recent Polymarket trades for the configured account (authoritative fill history). Returns null if the query failed. */
+  getTrades(limit?: number): Promise<Array<{
+    id: string;
+    tokenId: string;
+    side: 'BUY' | 'SELL';
+    price: number;
+    size: number;
+    timestamp: Date;
+    transactionHash?: string;
+  }> | null>;
+  /** Get current Polymarket positions held by the configured account. Returns null if the query failed. */
+  getPositions(): Promise<Array<{
+    tokenId: string;
+    conditionId: string;
+    size: number;
+    avgPrice: number;
+    currentPrice: number;
+    outcome?: string;
+  }> | null>;
+  /** Get open orders, returning null (instead of []) when the query failed — safe for reconciliation. */
+  getOpenOrdersChecked(platform?: 'polymarket' | 'kalshi' | 'opinion' | 'predictfun'): Promise<OpenOrder[] | null>;
 
   // Batch operations (Opinion only for now)
   placeOrdersBatch(orders: Array<Omit<OrderRequest, 'orderType'>>): Promise<OrderResult[]>;
@@ -668,7 +693,8 @@ export async function getPolymarketBalance(
  */
 export async function getPolymarketPositions(
   auth: PolymarketApiKeyAuth,
-  address?: string
+  address?: string,
+  throwOnError = false
 ): Promise<Array<{
   tokenId: string;
   conditionId: string;
@@ -713,6 +739,7 @@ export async function getPolymarketPositions(
     }));
   } catch (error) {
     logger.error({ error, walletAddress: walletAddress }, 'Failed to fetch Polymarket positions');
+    if (throwOnError) throw error;
     return [];
   }
 }
@@ -722,7 +749,8 @@ export async function getPolymarketPositions(
  */
 export async function getPolymarketTrades(
   auth: PolymarketApiKeyAuth,
-  limit = 100
+  limit = 100,
+  throwOnError = false
 ): Promise<Array<{
   id: string;
   tokenId: string;
@@ -770,6 +798,7 @@ export async function getPolymarketTrades(
       }));
   } catch (error) {
     logger.error({ error }, 'Failed to fetch Polymarket trades');
+    if (throwOnError) throw error;
     return [];
   }
 }
@@ -1083,6 +1112,33 @@ async function placePolymarketOrder(
   negRisk?: boolean,
   postOnly?: boolean
 ): Promise<OrderResult> {
+  // Deposit Wallets require the Rust SDK's Poly1271 flow (signature type 3).
+  if (auth.privateKey && auth.funderAddress && auth.signatureType === 3 && orderType === 'GTC') {
+    const rustResult = await rustPlaceLimitOrder({
+      tokenId,
+      side: side === 'buy' ? 'BUY' : 'SELL',
+      price,
+      size,
+      postOnly: postOnly === true,
+    });
+    // Map Rust SDK status to our OrderStatus type
+    const rustStatus = rustResult.status;
+    let mappedStatus: OrderStatus = 'rejected';
+    if (rustStatus === 'matched') mappedStatus = 'filled';
+    else if (rustStatus === 'live') mappedStatus = 'open';
+    else if (rustStatus === 'delayed') mappedStatus = 'open';
+    else if (rustResult.success) mappedStatus = 'open';
+
+    return {
+      success: rustResult.success,
+      orderId: rustResult.orderId,
+      status: mappedStatus,
+      filledSize: rustStatus === 'matched' ? size : undefined,
+      avgFillPrice: rustStatus === 'matched' ? price : undefined,
+      error: rustResult.error,
+    };
+  }
+
   // Validate tick size
   const tickSize = await getPolymarketTickSize(tokenId);
   const tickError = validatePriceTickSize(price, tickSize);
@@ -1172,6 +1228,16 @@ async function placeSignedPolymarketOrder(
 ): Promise<OrderResult> {
   const url = `${POLY_CLOB_URL}/order`;
 
+  if (!auth.apiKey || !auth.apiSecret || !auth.apiPassphrase || !auth.address) {
+    logger.error({
+      hasApiKey: Boolean(auth.apiKey),
+      hasApiSecret: Boolean(auth.apiSecret),
+      hasApiPassphrase: Boolean(auth.apiPassphrase),
+      address: auth.address || 'missing',
+    }, 'Polymarket order auth configuration incomplete');
+    return { success: false, error: 'Polymarket L2 credentials incomplete' };
+  }
+
   const signerCfg: SignerConfig = {
     privateKey: auth.privateKey,
     funderAddress: auth.funderAddress,
@@ -1202,13 +1268,32 @@ async function placeSignedPolymarketOrder(
         headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify(postOrder),
       });
-      const json = (await resp.json()) as PolymarketOrderResponse;
+      const responseText = await resp.text();
+      let json: PolymarketOrderResponse;
+      try {
+        json = JSON.parse(responseText) as PolymarketOrderResponse;
+      } catch {
+        json = { errorMsg: responseText || `HTTP ${resp.status}` } as PolymarketOrderResponse;
+      }
       return { response: resp, data: json };
     });
 
     if (!response.ok || data.errorMsg) {
       const { code, message } = parsePolymarketError(data.errorMsg, response.status);
-      logger.error({ status: response.status, errorCode: code, error: message }, 'Polymarket signed order failed');
+      logger.error({
+        status: response.status,
+        errorCode: code,
+        error: message,
+        responseError: data.errorMsg,
+        responseBody: data,
+        address: auth.address,
+        funderAddress: auth.funderAddress,
+        signatureType: auth.signatureType,
+        tokenId,
+        side,
+        price,
+        size,
+      }, 'Polymarket signed order failed');
       return { success: false, error: `[${code}] ${message}` };
     }
 
@@ -1238,12 +1323,21 @@ async function cancelPolymarketOrder(auth: PolymarketApiKeyAuth, orderId: string
     });
 
     if (!response.ok) {
-      logger.error({ status: response.status, orderId }, 'Failed to cancel Polymarket order');
+      const body = await response.text().catch(() => '');
+      logger.error({ status: response.status, orderId, body: body.slice(0, 200) }, 'Failed to cancel Polymarket order');
       return false;
     }
 
-    logger.info({ orderId }, 'Polymarket order cancelled');
-    return true;
+    // Parse response body to confirm cancellation
+    const body = await response.text().catch(() => '{}');
+    let parsed: any;
+    try { parsed = JSON.parse(body); } catch { parsed = {}; }
+    const cancelled = parsed.canceled?.includes(orderId) ?? parsed.not_canceled?.[orderId] === undefined;
+    if (!cancelled) {
+      logger.warn({ orderId, body: body.slice(0, 200) }, 'Cancel response indicates order not cancelled');
+    }
+    logger.info({ orderId, cancelled }, 'Polymarket order cancel response');
+    return cancelled;
   } catch (error) {
     logger.error({ error, orderId }, 'Error cancelling Polymarket order after retries');
     return false;
@@ -1445,8 +1539,8 @@ async function cancelPolymarketOrdersBatch(
   }
 }
 
-async function getPolymarketOpenOrders(auth: PolymarketApiKeyAuth): Promise<OpenOrder[]> {
-  const url = `${POLY_CLOB_URL}/orders?state=OPEN`;
+async function getPolymarketOpenOrders(auth: PolymarketApiKeyAuth, throwOnError = false): Promise<OpenOrder[]> {
+  const url = `${POLY_CLOB_URL}/data/orders`;
   const headers = buildPolymarketHeadersForUrl(auth, 'GET', url);
 
   try {
@@ -1460,10 +1554,12 @@ async function getPolymarketOpenOrders(auth: PolymarketApiKeyAuth): Promise<Open
 
     if (!response.ok) {
       logger.error({ status: response.status }, 'Failed to fetch Polymarket orders');
+      if (throwOnError) throw new Error(`Failed to fetch Polymarket orders: HTTP ${response.status}`);
       return [];
     }
 
-    const data = (await response.json()) as PolymarketOpenOrder[];
+    const payload = await response.json() as { data?: PolymarketOpenOrder[] } | PolymarketOpenOrder[];
+    const data = Array.isArray(payload) ? payload : (payload.data ?? []);
 
     return data.map((o) => ({
       orderId: o.id,
@@ -1482,6 +1578,7 @@ async function getPolymarketOpenOrders(auth: PolymarketApiKeyAuth): Promise<Open
     }));
   } catch (error) {
     logger.error({ error }, 'Error fetching Polymarket orders');
+    if (throwOnError) throw error;
     return [];
   }
 }
@@ -2493,35 +2590,38 @@ export function createExecutionService(config: ExecutionConfig): ExecutionServic
       size: event.size,
       price: event.price,
       status: event.status,
+      tradeId: event.tradeId,
       transactionHash: event.transactionHash,
       timestamp: event.timestamp,
       receivedAt: Date.now(),
     };
 
-    // Update or insert (only if higher priority status)
+    // Track latest fill status per order (for waitForFill / UI), but ALWAYS
+    // notify subscribers for every event. The HFT engine maintains its own
+    // per-trade ledger so it can dedupe MATCHED→MINED→CONFIRMED by tradeId
+    // itself, and it MUST receive FAILED to roll back a provisional fill.
     const existing = trackedFills.get(event.orderId);
-    if (!existing || getStatusPriority(fill.status) > getStatusPriority(existing.status)) {
+    if (!existing || getStatusPriority(fill.status) >= getStatusPriority(existing.status)) {
       trackedFills.set(event.orderId, fill);
-      logger.info({ fill }, 'Fill tracked via WebSocket');
+    }
+    logger.info({ fill }, 'Fill tracked via WebSocket');
 
-      // Notify subscribers
-      for (const callback of fillCallbacks) {
-        try {
-          callback(fill);
-        } catch (err) {
-          logger.error({ err }, 'Fill callback error');
-        }
+    for (const callback of fillCallbacks) {
+      try {
+        callback(fill);
+      } catch (err) {
+        logger.error({ err }, 'Fill callback error');
       }
+    }
 
-      // Resolve waiters if CONFIRMED or FAILED
-      if (fill.status === 'CONFIRMED' || fill.status === 'FAILED') {
-        const waiters = fillWaiters.get(event.orderId);
-        if (waiters) {
-          for (const resolve of waiters) {
-            resolve(fill);
-          }
-          fillWaiters.delete(event.orderId);
+    // Resolve waiters if CONFIRMED or FAILED
+    if (fill.status === 'CONFIRMED' || fill.status === 'FAILED') {
+      const waiters = fillWaiters.get(event.orderId);
+      if (waiters) {
+        for (const resolve of waiters) {
+          resolve(fill);
         }
+        fillWaiters.delete(event.orderId);
       }
     }
   }
@@ -3085,6 +3185,45 @@ export function createExecutionService(config: ExecutionConfig): ExecutionServic
     async getOrder(platform, orderId) {
       const orders = await this.getOpenOrders(platform);
       return orders.find((o) => o.orderId === orderId) || null;
+    },
+
+    async getTrades(limit = 100) {
+      if (!config.polymarket) return null;
+      try {
+        return await getPolymarketTrades(config.polymarket, limit, true);
+      } catch {
+        return null;
+      }
+    },
+
+    async getPositions() {
+      if (!config.polymarket) return null;
+      try {
+        return await getPolymarketPositions(
+          config.polymarket,
+          config.polymarket.funderAddress || config.polymarket.address,
+          true
+        );
+      } catch {
+        return null;
+      }
+    },
+
+    async getOpenOrdersChecked(platform) {
+      if (platform && platform !== 'polymarket') {
+        // Other platforms keep the lenient behavior
+        try {
+          return await this.getOpenOrders(platform);
+        } catch {
+          return null;
+        }
+      }
+      if (!config.polymarket) return [];
+      try {
+        return await getPolymarketOpenOrders(config.polymarket, true);
+      } catch {
+        return null;
+      }
     },
 
     async estimateFill(request) {

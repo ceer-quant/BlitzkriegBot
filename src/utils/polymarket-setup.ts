@@ -105,7 +105,7 @@ function signHash(hash: string, privateKey: string): string {
   return '0x' + r + s + v.toString(16).padStart(2, '0');
 }
 
-function deriveAddress(privateKey: string): string {
+export function deriveAddress(privateKey: string): string {
   const keyHex = privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey;
   const pubKey = secp256k1.getPublicKey(keyHex, false).slice(1);
   const hash = keccak256(pubKey);
@@ -133,10 +133,10 @@ function buildL1AuthHeaders(
   return {
     address,
     headers: {
-      'POLY-ADDRESS': address,
-      'POLY-SIGNATURE': signature,
-      'POLY-TIMESTAMP': timestamp,
-      'POLY-NONCE': nonce.toString(),
+      POLY_ADDRESS: address,
+      POLY_SIGNATURE: signature,
+      POLY_TIMESTAMP: timestamp,
+      POLY_NONCE: nonce.toString(),
     },
   };
 }

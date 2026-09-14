@@ -1,0 +1,25 @@
+# Shadow Evolution — opt-in adaptive parameter tuning (DISABLED by default).
+#
+# When enabled, the kernel runs parallel VIRTUAL variants of the live strategy
+# on the same tick stream (zero real cost) and, when one is significantly better
+# for long enough, atomically hot-swaps the live mutable parameters via ArcSwap.
+#
+# Two hard safety locks (not configurable here — enforced in code):
+#   Lock 1 gradient : each mutable field may move at most +/-5% per evolution.
+#   Lock 2 immutable: hard stop / loss breaker / daily loss / order notional are
+#                     NOT part of the swappable object and can never evolve.
+#
+# Enable at runtime with IPC `shadow_evolution.enable` (or start with the
+# kernel flag `--shadow-evolution`).
+
+[shadow_evolution]
+enabled = false                      # default OFF (opt-in)
+evaluation_window_minutes = 30       # rolling metrics window
+min_sample_count = 30                # >=30 virtual trades before judging
+min_win_rate_improvement = 0.05      # variant WR must beat live by +5pp
+min_profit_factor_improvement = 0.10 # variant PF must beat live by +10%
+min_observation_minutes = 5          # variant must exist >=5 min
+cooldown_minutes = 10                # min gap between applied evolutions
+max_gradient = 0.05                  # +/-5% per step (Lock 1)
+variant_count = 3                    # shadow variants (>=2)
+audit_log_path = "data/evolution/evolution.jsonl"

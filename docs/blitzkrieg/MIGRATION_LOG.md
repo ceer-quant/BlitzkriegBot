@@ -1,0 +1,764 @@
+# 迁移日志（MIGRATION_LOG）
+
+> 范围：P0.5 — 结构重构 / 通用化抽象 / 插件化扩展。
+> 硬性约束：不改业务逻辑、不改 UDS 协议（仅新增 `version` 字段）、不改 DryRun 链路行为。
+
+## 0. 基线（改动前）
+
+| 项 | 结果 |
+|:---|:---|
+| `cargo build --release` | 通过 |
+| `cargo test --lib` | 61 passed |
+| `npm run typecheck` | 0 errors |
+| `npm run core:parity`（22 项） | 退出码 0 |
+
+## 1. 目标一：`rust-core` → `Blitzkrieg_core`
+
+改动：
+- 目录 `rust-core/` → `Blitzkrieg_core/`
+- `Cargo.toml`：`package.name` = `blitzkrieg-core`；`[lib] name` = `blitzkrieg_core`；description 更新
+- Rust 源码：`clodds_rust_core` → `blitzkrieg_core`；`clodds-rust-core` → `blitzkrieg-core`；日志前缀 `rust-core:` → `blitzkrieg-core:`
+- Node：`src/core/rust-core-client.ts` → `blitzkrieg-core-client.ts`；`rust-core-runner.ts` → `blitzkrieg-core-runner.ts`；类名 `RustCoreClient/Runner` → `BlitzkriegCoreClient/Runner`；二进制路径指向 `Blitzkrieg_core/target/release/blitzkrieg-core`
+- scripts：`rust-core-parity.mjs` → `core-parity.mjs`；`dry-observe.mjs`/`parity-engines.mjs` 路径与类名同步；删除过时的 `rust-core-smoke.cjs`
+- `package.json`：`core:build/test` 指向 `Blitzkrieg_core/Cargo.toml`；`core:parity` 指向新脚本名
+- UDS socket 路径**未变**（`clodds-core-<user>.sock`）
+
+验证：
+- `cargo build --release` 通过；`cargo test --lib` **61 passed**
+- `npm run typecheck` **0 errors**；`npm run build` 通过
+- `node scripts/core-parity.mjs`（22 项，经新二进制名与客户端）**退出码 0**
+- `grep -rn "rust-core" src scripts package.json Blitzkrieg_core/src` **为空**
+
+## 2. 目标二：UI 迁移
+
+改动：
+- `public/webchat/hft.html` → `ui/hft.html`；根目录 `hft-dashboard.html`、`hft-server.js` → `ui/`
+- gateway `server.ts`：新增 `app.use('/ui', express.static('../../ui'))`；新增 `/webchat/hft.html` 兼容路由（`sendFile ui/hft.html`）
+- `docs/CRYPTO_HFT.md`：面板路径更新为 `ui/hft.html`
+
+验证：
+- `GET /ui/hft.html` → **200**；`GET /webchat/hft.html`（兼容）→ **200**；`GET /ui/hft-dashboard.html` → **200**
+- 浏览器打开面板：轮次/倒计时/四资产价格/统计卡片正常渲染（截图确认）
+- `grep -r "POLYMARKET_PRIVATE_KEY" ui/` 为空
+
+## 3. 目标三：通用量化底座抽象
+
+新增（纯新增，不改既有实现）：
+- `order/mod.rs`：`OrderIntent` + `MarketType`/`OrderKind`/`TimeInForce` + `validate()`
+- `market/mod.rs`：`MarketAdapter` trait + `AdapterFuture`/`AdapterOrderResult`/`AdapterBalance`/`AdapterPosition`/`AdapterCapabilities`
+- `market/polymarket.rs`：`PolymarketAdapter`（包装既有 `LiveVenue`）
+- `market/binance_spot.rs`：`BinanceSpotAdapter` 结构空壳（`submit_order` 明确报错）
+- `risk_context.rs`：`RiskContext` trait + `PredictionRiskContext` + `FuturesRiskContext`
+- `ledger_api.rs`：`LedgerApi` trait；既有 `Ledger` 增加该 trait 的实现（委托既有方法）
+- `strategy_engine/mod.rs`：`Strategy`/`Signal`/`MarketTick`/`StrategyEngine`/`validate_signal`
+- `strategy_engine/builtins.rs`：`SpreadArbStrategy`（包装既有评估器）
+- `strategy_engine/loader.rs`：`libloading` 动态加载 + `policy_allows` 安全策略
+- 用户层示例：`user_layer/strategies/dog_strategy.rs`、`user_layer/strategies/trend_strategy.toml`、`user_layer/configs/default.toml`
+
+验证：`cargo test --lib` **74 passed**（新增 13 个：OrderIntent 校验、Adapter 空壳 ×2、RiskContext ×2、Strategy engine ×3、loader ×3、其余）；`cargo build --features strategy-loading` 通过且 `libloading v0.8.9` 被编入。
+
+## 4. 目标四：扩展体系
+
+新增：
+- `extension/mod.rs`：`Extension` trait、`ExtensionRegistry`（生命周期 + 隔离分发）、`ExtensionContext`、`ExtensionType`/`ExtensionState`
+- `extensions/binance_spot/config.toml`、`extensions/README.md`
+
+验证：`cargo test --lib` 含 2 个扩展测试（完整生命周期 install→enable→dispatch→disable→uninstall；`on_load` 失败记 `Failed` 而不 panic）。
+
+## 5. IPC 扩展
+
+改动：
+- `Request` 新增 `version` 字段（默认 `PROTOCOL_VERSION = "1.1"`）
+- 新增方法：`strategy.list` / `strategy.enable` / `strategy.load` / `extension.list`；`engine.stats` 增 `blocked`
+- `Core` 新增 `strategy_engine`、`extensions` 字段与查询/开关方法
+
+验证（真实内核进程 + IPC）：
+```
+strategy.list  → {"strategies":[{"name":"spread_arb","enabled":true}],"version":"1.1"}
+extension.list → {"extensions":[],"version":"1.1"}
+strategy.enable→ {"enabled":true,"found":true,"name":"spread_arb"}
+```
+
+## 6. 全量回归
+
+| 项 | 结果 |
+|:---|:---|
+| `cargo build --release` | 通过 |
+| `cargo build --release --features strategy-loading` | 通过 |
+| `cargo test --lib` | 74 passed |
+| `npm run typecheck` | 0 errors |
+| `npm run build` | 通过 |
+| `node scripts/core-parity.mjs` | 22/22，退出码 0 |
+| `node scripts/parity-engines.mjs` | PARITY OK |
+| DryRun 面板（`ui/hft.html`） | 渲染正常，Rust 内核自驱运行 |
+
+## 7. 追加完成（P0.5 收尾）
+
+### 7.1 `extension.enable` / `extension.disable` IPC 接线（完成）
+- `Core::enable_extension` / `disable_extension`（含 `CoreExtensionContext`——扩展仅得事件广播 + 只读策略名 + 日志，无凭据/venue/socket/内部状态）。
+- 内建示例扩展 `extension::builtins::BinanceSpotExtension`（默认 installed）。
+- IPC 实测：`installed → enable → enabled → disable → disabled`；未知扩展返回 `extension not installed: <name>`。
+
+### 7.2 策略动态库 C ABI 冻结（完成）
+- 新增 crate `user_layer/strategy_api`（`blitzkrieg-strategy-api`，`#[repr(C)]`，`crate-type=["rlib","cdylib"]`）：`BK_ABI_VERSION=1`、`BkTick`/`BkSignal`/`BkSide`/`BkStrategyVtable`、符号 `bk_strategy_create` / `bk_strategy_abi_version`。
+- `strategy_engine/loader.rs`：真实 `dlopen` → ABI 版本协商（不匹配即拒绝）→ 读取 vtable → 包装为内部 `DynamicStrategy: Strategy`（tick 编组为 C 结构、signal 立即复制、`Drop` 调 `destroy`）。默认构建**不编译** `libloading` 路径（`--features strategy-loading` 启用）。
+- 示例用户层策略 `user_layer/strategies/dog_strategy.rs`（独立 crate）编译出 `libdog_strategy.dylib`。
+- 端到端测试 `Blitzkrieg_core/tests/dynamic_strategy.rs`（2 passed）：加载 → `name()=="dog_strategy"` → 高位返回 Hold、跌到 0.42 返回 `Buy@0.42 x10` → `on_round` 不 panic；凭据样式路径被 `Rejected`。
+- IPC 实测：`strategy.load` 成功返回 `Loaded { path, name: dog_strategy, version: 0.1.0 }` 并经 `strategy.list` 确认注册；`secret.dylib` 被拒。
+
+## 8. 影子进化（Shadow Evolution，v1.0）
+
+新增 `Blitzkrieg_core/src/shadow_evolution/`：`config`（Mutable/Immutable 分离）、`variants`（虚拟账本 +
+变异策略，复用 `exit_policy`）、`evaluator`（六条件触发）、`guard`（渐变 ≤5% + 风控不可变）、`hot_swap`
+（`ArcSwap`）、`audit`（JSONL + 环形历史）、`signal`。
+- 依赖新增 `arc-swap = "1"`。
+- Engine：`set_hot_params` + `effective_spread_arb()` 每轮叠加热参数；`engine.on_data` 把 tick 喂给变体；
+  `engine_evaluate` 先评估进化再下单（下一 tick 生效）。
+- Core/IPC：`shadow_evolution.enable/disable/status/history/rollback`、`--shadow-evolution` 与
+  `--se-min-samples/--se-cooldown-secs/--se-min-obs-secs`；事件 `EVOLUTION_SIGNAL/APPLIED/REJECTED`。
+- 默认关闭（opt-in）；配置样例 `user_layer/configs/shadow_evolution.toml`；命令
+  `/crypto-hft shadow-evolution …`。
+- 测试：**95 passed**（含渐变拒绝、风控不可变、热切换到达引擎、回滚、崩溃隔离、审计完整性）。
+- 文档：`docs/blitzkrieg/SHADOW_EVOLUTION.md`。
+
+## 9. 面板打通 + 严重 bug 修复（v1.1 追加）
+
+### 9.1 Rust 落盘成交（面板历史订单数据源）
+- 新增 `Blitzkrieg_core/src/trade_db.rs`：`close()` 时把已平仓交易写入 `data/trades/trades.jsonl`
+  （27 字段，与 Node `TradeRecord` 逐字段兼容；`exitReason` 用 serde snake_case 如 `take_profit`）
+  并更新 `summary.json`。
+- 新增 IPC `trades.history { limit }` → `{ version, trades: [...] }`；Node 客户端 `tradesHistory()`。
+
+### 9.2 Rust 模式 `positions` 对齐面板
+- `ui/hft.html` 的「历史订单」表只在回复含 `Last` + `Trades:` 时解析，且要求特定行格式。
+- 技能层 Rust 模式 `positions` 现在输出 `**Last N Trades:**` + 面板期望的每行格式
+  （`BTC UP +49.3% (+$1.97) [spread_arb] 23:23:20->23:24:24 $0.40->$0.60 (+0.200) 64s`）。
+  该行已用面板的**原正则**验证匹配。
+
+### 9.3 严重 bug：持仓被立即强平（"永远不交易"的真因）
+- 症状：E2E 中开仓后立刻 `force_exit hold=0s`；soak 期间零成交。
+- 根因：`service.rs::project_fill_delta` 用 `expires = round_slot * round_duration`——这是回合的
+  **开始**时刻（已过去），持仓一建立即判定到期。扫描器用的是 `(slot+1)*duration`（回合**结束**）。
+- 修复：改为 `(slot + 1) * round_duration_sec * 1000`，与 `scanner::slot_expiry_ms` 一致。
+- 回归测试：`round_expiry_tests::filled_entry_expires_at_round_end_not_start`；并修正 2 个依赖旧
+  错误语义的既有测试。
+- 验证：修复后 E2E 持仓正常（`tLeft=235s`），并在 0.95 获利平仓（`take_profit`, `net $5.20`）。
+
+> 结论修正：此前"零成交"的主因是此 expiry bug（结构上无法持仓），而非仅时间窗偏窄。修复后
+> 引擎具备正常持仓/出场能力。
+
+## 10. 剩余边界（非阻塞）
+
+- 动态策略加载默认未编译（需 `--features strategy-loading`），以保持默认产物体积与依赖精简。
+- 内建策略目前仅 `spread_arb`（与既有行为一致）；更多模板随扩展体系接入。
+- 策略动态库的 signal → 下单流转仍由内核 `validate_signal` + 风控/账本闸门控制（用户层无法绕过）。
+- **P0.5 全程未改动任何交易/风控/订单业务逻辑**；DryRun 与 live 链路逐项回归通过。
+
+## 11. P0.6（Polymarket 扩展化）— 已建脚手架，主体暂缓（方案 A）
+
+### 已完成（安全脚手架，不影响运行中的二进制）
+- 根 `Cargo.toml`：建立 workspace，members = `Blitzkrieg_core`、`extensions/polymarket`、
+  `user_layer/strategy_api`；exclude `user_layer/strategies`（独立嵌套 workspace）。
+- `extensions/polymarket/`：独立 crate（`polymarket-extension`，`crate-type=["rlib","cdylib"]`），
+  依赖 `rs-clob-client-v2`，通过 path 依赖 `blitzkrieg-core`（default-features=false）。
+- 验证：`cargo build -p blitzkrieg-core` 干净通过；正在跑的 soak 进程使用既有二进制，不受影响。
+
+### 关键技术结论（决定后续做法）
+- 文档 §3.3 的 `*mut dyn Extension` 跨 dylib 传 Rust trait object **不可行**（fat pointer / vtable
+  无稳定 ABI）。正确做法是 `#[repr(C)]` C 函数指针表（沿用 P0.5 策略动态库已验证的 ABI 模式）。
+- Polymarket 不是单一适配器：SDK 集中在 3 文件（`venue.rs` 420 行签名/CLOB、`feed.rs` Poly WS、
+  `discovery.rs` Gamma），但深耦合三条热路径（行情→engine、发现→标的、Poly1271 actor→OME 对账）。
+  要"内核 grep 不到 polymarket 且运行时加载"，须将行情/发现/下单全改为 trait 对象注册。
+
+### 决策（已与指挥官确认，方案 A）
+- **暂缓 P0.6 主体**：先用 5m soak 验证"持仓秒平"修复在真实行情下成立。
+- 顺序：5m soak 通过 → 独立回合做 trait 边界（DataFeed / MarketDiscovery / OrderExecutor）
+  + 独立 crate + feature 接线（内核零市场代码）→ 再做 C-ABI dylib 热加载（P0.7）。
+- 风险原因：刚修复交易链路，5m soak 仅 20 分钟，不宜同时动 venue/feed 热路径并重建。
+
+### P0.6 待办（下一回合）
+1. 内核定义 `DataFeed` / `MarketDiscovery` trait（与 `MarketAdapter` 并列），`ExtensionContext` 提供注册。
+2. 把 venue/feed/discovery 物理迁入 `extensions/polymarket/src/{adapter,poly1271,clob_client,gamma_scanner,error_map}`。
+3. 内核 Cargo.toml 移除 `rs-clob-client-v2` 直依赖，改 `polymarket` feature 引入扩展 crate。
+4. main/server 经 trait + 注册表装配；manifest.json/config.toml；扩展 enable/disable/unload 跑通。
+5. P0 全量回归（DryRun/Live/对账/影子进化/策略加载）；`grep -r polymarket Blitzkrieg_core/src` 仅注释。
+6. P0.7：在干净 trait 边界上加 C-ABI dylib（版本协商 + catch_unwind 隔离）。
+
+## 12. 更正：回合时长应保持 900s（15m），5m 会显著减少机会
+
+### 结论（用数据推翻我此前的建议）
+此前我建议把回合改成 5m（`HFT_ROUND_SEC=300`），理由是"持仓中位 130s，短回合更匹配"。
+**这个推断是错的**。实证数据：
+
+- 历史（Node）62 条影子记录的 `context.timeLeftSec`：min 266、中位 576、**max 779**，
+  其中 **60/62 > 300s** → 说明 Node 当时跑的是 **15m 回合**（`roundDurationSec=900`，
+  与 `CRYPTO_HFT.md` 一致）。
+- Node 成交频率：61 笔 / 20.3 小时 = **约 3 笔/小时**。
+
+### 为什么 5m 更差（关键：min-time-left 是绝对秒数）
+`minTimeLeftSec=180` 与 `minRoundAgeSec=30` 是绝对值，因此可交易窗口为 round 的 `[30s, dur-180s]`：
+
+| 回合 | 可交易窗口(age) | 60s 趋势确认后可等回调的时间 |
+|:--|:--|:--|
+| 15m (900s) | 30s – 720s | **约 660 秒** |
+| 5m (300s) | 30s – 120s | **约 30 秒** |
+
+把回合从 900s 改成 300s，等于把"趋势确认后等待回调"的窗口缩小约 **22 倍**。这就是切到 5m 后
+`signals=0`、交易停止的直接原因。
+
+近失数据佐证：8 条被拦信号中 6 条因 timing 被拒（tLeft 35–160s，均在 5m 窗口外），
+其中 `SOL down 0.41→0.98`、`BTC down 0.28→0.87` 本可盈利。
+
+### 处置
+- **回退**：`.env` 设 `HFT_ROUND_SEC=900`，恢复与 Node 历史一致的 15m 回合。
+- 验证：重启后 `--round-sec 900`，`canTrade=true`、`blocked.timing=0`（窗口不再被时间闸挤压）。
+- 教训：**改回合时长前必须核对策略的时间窗需求，而不是只看持仓时长**。
+
+
+## 13. 严重 bug #2：单笔名义上限拒绝 100% 订单（"毫无动静"的真因）
+
+### 症状
+切到 15m 后仍无成交。实时 `engine.stats` 显示 **`signals=799、placeRejected=799`**——
+引擎产生了 799 个候选订单，**每一个都被 `place()` 拒绝**；`orders.list` 恒为 0。
+
+### 根因
+切换内核时，Node 侧 runner 把核心的"单笔名义上限"传成了 `sizeUsd`（$2.5）：
+```
+--max-order-notional 2.5
+```
+但真实订单是 `maxShares(10) × price(≈0.43) = $4.3`（`minShares=maxShares=10` 使 sizeUsd 实际不生效）。
+于是 `RiskGate` 的单笔名义上限 `$4.3 > $2.5` → **全部 RiskRejected**。
+每个评估 tick 重试同一 token（`pending_tokens` 仅在 place 成功后才记录），遂累积到 799 次拒绝。
+
+Node 时代不存在此问题：`sizeUsd` 只参与股数计算且被 clamp，名义上限不是用它。
+
+### 修复（Node 侧，无需重建内核）
+`src/core/blitzkrieg-core-runner.ts`：名义上限改为按**真实最坏订单**定价，而非策略名义 size：
+```
+maxOrderNotional = max(sizeUsd, maxShares × 0.6)   // 10 × 0.6 = 6 > 10 × 0.45 上限
+```
+并传入 `--max-order-notional 6`；runner 配置新增 `maxShares`，技能层从 `DEFAULT_CONFIG.maxShares` 注入。
+
+### 验证
+- 生产 cmdline：`--max-order-notional 6`（原 2.5）。
+- 一次性内核（同参数）实测：`signals=1 placeRejected=0`，订单 `BTC LIVE@0.43` **被接受**。
+
+## 14. 剩余的"无成交"归因（非 bug）
+
+修复后仍可能长时间无成交，原因是**动量过滤器**（与 Node 同逻辑、同参数）：
+- `engine.stats.blocked.momentum` 持续增长（单回合达 108 次），`blocked.timing=0`。
+- 动量过滤：UP 候选要求现货 30s 内跌幅 ≤0.03%，DOWN 候选要求涨幅 ≤0.03%——容差极紧，
+  强单边行情下会拦掉绝大多数候选。这是**策略设计**（避免在现货逆行时抄底），非引擎缺陷。
+- 结论：Rust 引擎在"能下单"层面已与 Node 等价（名义上限修复后）；成交频率取决于行情是否符合
+  "趋势确认 + 深回调 + 现货不逆行"三条件。历史 Node 61 笔即在该三条件下产生（约 3 笔/小时）。
+
+## 15. 基准澄清：Node 时代本身大多回合不成交（避免误判）
+
+用 61 笔历史成交反推 Node 的真实频率：
+- **81 个 15m 回合中只有 36 个回合有成交**（56% 的回合零成交）。
+- 平均 **0.75 笔/回合**、3.0 笔/小时。
+- 相邻成交间隔：中位 12 分钟，**最大 206 分钟（3.4 小时）**；>60 分钟的间隔有 4 次。
+
+结论：**"连续几个回合没有成交"是 Node 时代的正常状态**，不是引擎故障。要判断 Rust 是否与 Node 等价，
+必须观察 **数小时（至少覆盖多次成交间隔）**，而不是几分钟或一两个回合。
+（注：修复 bug#2 前，Rust 是 100% 拒单、永不可能成交；修复后才具备与 Node 等价的成交能力。）
+
+## 16. 二进制路径错位 + bug#3 修复验证 + 单实例守护（2026-09-13 23:0x）
+
+### 16.1 根因：生产跑的是旧二进制（本轮"所有修复看起来无效"的真正原因）
+Cargo workspace 化后输出落在**根 `target/release/blitzkrieg-core`**，但运行路径仍指向
+**`Blitzkrieg_core/target/release/blitzkrieg-core`**（21:22 的旧构建，不含任何修复）。
+23:52 前所有"验证"其实都在测旧二进制。
+
+- 修复 `src/core/blitzkrieg-core-client.ts` `defaultBinaryPath()`：候选顺序改为根 `target/release` 优先。
+- 同步修 `scripts/core-parity.mjs` / `dry-observe.mjs` / `parity-engines.mjs`。
+- 证据：重启后 `ps` 显示核心来自 `.../CloddsBot/target/release/blitzkrieg-core`（22:52 构建）。
+
+### 16.2 bug#3（持仓价格/盈亏冻结）已在**部署二进制**上闭环验证
+新增 `scripts/cycle-check.mjs`：私有 socket、短确认窗口，确定性驱动
+`回合 → 趋势确认 → 回调 → 挂单 → maker 成交 → 开仓 → 盘口上行 → 实时重估`。
+实跑结果（正确百分比单位）：
+```
+[2] confirmed=1
+[3] dip -> live orders: 1    bid 0.4300 x 10 (maker_then_taker)
+[4] crossed -> open: 1       entry=0.4300 cur=0.4100 pnl=-4.65%
+[5] bid 0.50 -> cur=0.50 pnl=+16.28%
+    bid 0.60 -> cur=0.60 pnl=+39.53%
+    bid 0.70 -> cur=0.70 pnl=+62.79%
+    bid 0.85 -> cur=0.85 pnl=+97.67%
+RESULT: PASS
+```
+即：开仓后 cur/pnl 随盘口实时变动——正是用户截图缺失的行为。
+
+### 16.3 单实例守护（并发 start 竞态）
+症状：23:57:44 日志出现两条 `Rust core engine started` 相隔 1ms，其一因
+`Address already in use (os error 48)` 退出。根因：`Runner.start()` 在 `client` 检查与赋值之间有
+`await`，两个并发 `/crypto-hft start` 都通过检查 → 各起一个核心；内核启动时会
+`remove_file(socket)`，后起者可能**静默接管/顶掉**健康内核的 socket。
+
+双重加固：
+- **Rust**（`ipc/server.rs`）：绑定前先 `UnixStream::connect` 探测；若已有活内核在听则
+  `bail!("another blitzkrieg-core is already listening")`，绝不 unlink 活 socket；陈旧的
+  （连接失败）才删除。实测：第二个核心 exit=1，第一个存活且保留 socket。
+- **Node**（`blitzkrieg-core-runner.ts`）：`start()` 用 `starting` Promise 串行化，并发调用复用同一
+  in-flight 启动；`stop()` 先 await 在途启动再停止，避免"停完又冒出一个无人管理的核心"。
+
+### 16.4 soak
+`scripts/soak-monitor.mjs --hours 12 --interval-sec 300` 后台运行，写
+`data/soak/soak.jsonl`。判据：core=up、ping=ok、feed 计数增长、err 不增；成交频率对比 Node 基准
+（0.75 笔/回合、3 笔/小时、56% 回合零成交）。
+
+## 17. bug#4: 面板顶部卡片未接通（盈亏/胜率/笔数/今日/交易量）
+
+### 症状
+机器人自 23:03 起真实交易（核心账本 64 笔 / 36W28L / 净 +$22.37），但面板顶部四张卡显示
+`盈亏 $+0.00`、`交易笔数 1`、`今日 +$0.00`、`交易量 $0.00`；而下方"历史订单"却能显示单笔
+`-$2.31`。用户据此判断"顶部板块没实现数据联通"——判断正确。
+
+### 根因
+Node 引擎的 `status` 有一条明确规则（原注释）：
+```
+// Cumulative stats come from persisted trades (survive restarts); the
+// in-memory engine stats reset to zero on every start.
+const persisted = computePersistedStats();
+```
+而 Rust 分支的 `status` **丢掉了这层持久化聚合**：
+- `Trades/Gross/Net/Today` 全部取 `runner` 进程内计数器——每次 Node/核心重启归零，
+  且只统计本进程内发生的平仓；顶部 `交易笔数` 因此=1（本轮首笔）而非累计 64。
+- `Fees / Best / Worst / Volume / Avg` 直接**硬编码为 0**（`$0.00 | Avg: $0.0000`）。
+- `positions`（历史订单）走的是核心 `trades.history`，所以那张表是对的——正是这个"表对卡不对"
+  的割裂暴露了问题。
+
+### 修复
+1. 把 Node 的聚合逻辑抽成共享函数 `aggregateTrades(trades)`，`computePersistedStats()` 复用它。
+2. Rust 分支 `status` 改为从**核心权威账本**聚合：`client.tradesHistory(0)`（0=全部）→
+   `aggregateTrades` → 覆盖 `totalTrades/wins/losses/winRate/gross/fees/net/daily/best/worst/volume/avg`；
+   取不到时回退到内存计数器。字段单位与 Node 完全一致（`netPnlPct` 是百分数，同 §16.2 的 `pnl_pct`）。
+3. `positions` 默认 `limit` 由 `50` 改为 `0`（=全部），与 Node 引擎一致，避免历史订单被截断。
+
+### 验证
+- `tsc` 0 error，build ok。
+- 重启后 `/crypto-hft status` 实输出：
+  `Trades: 64 (36W/28L) 56% WR` / `Gross: +$30.20 | Fees: $7.83 | Net: +$22.37` /
+  `Today: +$24.60 | Best: +145.7% | Worst: -99.5%` / `Volume: $270.10 | Avg: $0.4287`。
+- 用 `ui/hft.html` 的四个正则对上述文本离线解析：四张卡全部得到真实数值（盈亏 22.37 / 胜率 56% /
+  笔数 64 / 今日 24.60，量 270.10，均价 0.4287）。
+
+### 附带加固：cycle-check 隔离
+`cycle-check.mjs` 会把核心的**相对**路径 `data/trades/trades.jsonl` 写入当前工作目录，
+若不隔离，测试的合成成交会污染生产账本。已改为在 `mkdtemp` 出的临时目录里 spawn
+（`cwd: WORKDIR`）。实测：跑完 cycle-check 前后生产 `trades.jsonl` 行数不变（64 → 64）。
+
+### 说明：截图那笔 BTC 做空
+23:24:05 入场 / 23:24:19 出场、$0.43 → $0.21、net -$2.31、reason=stop_loss——这是**机器人在
+DRY 模拟盘上的真实记录**（核心账本可查），不是人工/测试写入。
+
+## 18. bug#5: 盘口价格会"卡住"——SDK 丢弃 price_change 增量（面板价格刷新停滞）
+
+### 症状
+用户对比面板与 polymarket.com：同一时刻面板 XRP=0.58，真实已 0.74~0.85，且长时间不动。
+实测复现（旧二进制，生产核心）：XRP 面板价**冻结在 0.4650 约 27s**，而真实中价一路
+0.585 → 0.645 → 0.655；同期 BTC/ETH/SOL 正常跳动。即**按 token 选择性停滞**，活跃的 BTC 更新频繁、
+清淡的 XRP 几乎不动。
+
+### 根因（关键）
+Polymarket 市场频道的行为是：订阅时推**一次完整 `book` 快照**，之后只推 `price_change` 增量
+（抓包确认：`price_change` 每项都带 `best_bid`/`best_ask`）。
+而 SDK 的 `subscribe_orderbook` 实现是：
+```rust
+Ok(WsMessage::Book(book)) => Some(Ok(book)),
+Err(e) => Some(Err(e)),
+_ => None,          // <-- PriceChange / BestBidAsk 被静默丢弃
+```
+我们**只**消费了这个流。结果：本地 book 只在罕见的整快照时刷新，事后全靠增量跳动的部分完全收不到。
+清淡 token 的增量少、快照间隔长，于是卡几十秒；BTC 增量多，看起来正常。SDK 另有一条
+`subscribe_prices()` 流专门产出 `PriceChange`，我们从未订阅。
+
+### 修复（`Blitzkrieg_core/src/feed.rs`）
+在 `poly_orderbook_loop` 里**同时**订阅两路流，`tokio::select!` 一起收：
+- `subscribe_orderbook` → 整快照 → `FeedEvent::Book`（原样）；
+- `subscribe_prices` → 每个 `price_change` 的 `best_bid`/`best_ask` → `FeedEvent::TopOfBook`。
+引擎的 `TopOfBook` → `LocalBook::update_top` 早已实现（会挤掉穿越档位，保持 best 正确），只是此前
+没有数据源。两路订阅共享同一个 MARKET channel、对 asset 做引用计数，互不干扰（读 SDK
+`subscribe_market_with_options` 确认 interest 置为整个 MARKET）。
+
+### 验证
+- 隔离诊断核心（同参数、独立 socket/cwd）：日志出现 `poly orderbook+price subscribed 8 tokens`。
+- 修复前后（同一探测脚本，XRP）：
+  | | 50s 内更新次数 | 最大 Δ |
+  |---|---|---|
+  | 修复前 | 3–4 | **0.19**（冻结 ~27s）|
+  | 修复后 | 13 | 0.065（单次瞬时，采样与 CLOB REST 的时序差）|
+- 部署到生产后复测：XRP 50s 内更新 9 次，各标的 Δ 常态 ≤0.02，无停滞。
+- 残留的偶发 0.03–0.07 Δ 是"快速行情下 REST 中价 vs 内核 WS 时刻差"，非死档。
+
+### 影响（为什么重要）
+这不只是显示问题：**持仓重估、止盈/移动止损都读同一个本地 book**。价格卡住会让
+`unrealizedPct`/HWM 失真，进而延迟或错过出场。修复后 feed 与真实盘口同步。
+
+## 19. P0.6 落地：Polymarket SDK 插件化（Stage 1 接缝 + Stage 2 物理迁移）
+
+§11 曾把主体暂缓（方案 A）。本轮完成，验收标准达成：**内核零市场代码**、
+`grep -ri polymarket Blitzkrieg_core/src` 只剩 2 行 feature 注册，且 SDK 依赖已从内核移除。
+
+### 关键结构约束与解法
+Cargo 不允许依赖环：扩展若依赖内核，内核就不能再依赖扩展。解法沿用既有
+`user_layer/strategy_api` 先例——**再建一个无内部依赖的契约 crate**：
+```
+blitzkrieg-market-api (新, 无内部依赖: serde/rust_decimal/tokio)
+   ↑                                  ↑
+blitzkrieg-core                 extensions/polymarket (只依赖 market-api + SDK)
+   ↑__________________________________/
+             (core 通过 `polymarket` feature 静态链接扩展)
+```
+
+### Stage 1 — 接缝（行为零变化）
+- 新增 crate `market_api/`：DTO（`Side`/`FillPolicy`/`OrderStatus`/`Fill`/`CoreError`/`OrderIntent`
+  /`MarketDescriptor`/`PendingOrder`/`MarketFill`/`ReconcileSnapshot`…）+ 三专职 trait
+  `DataFeed`/`MarketDiscovery`/`OrderExecutor` + `MarketPlugin` 打包 + `MarketHost`（内核唯一出入口）
+  + `SubscriptionControl`（feed 订阅控制）。全部 boxed-future，对象安全，无 async-trait 依赖。
+- **类型单一来源**：`model.rs`/`order/mod.rs` 改为 re-export market_api 的 primitives，消除了重复枚举
+  （此前内核与 api 各有一份 `Side`/`FillPolicy`…）。
+- 内核 `src/market/host.rs`：`CoreHost` 实现 `MarketHost`，每个方法**纯转发**到既有
+  `Core` 方法（`engine_on_data`/`pending_unbound`/`bind_venue`/`ingest_fill`/`reconcile`…）。
+- `feed.rs`/`discovery.rs`/`live.rs` 改为直说 `MarketHost`，不再持有 `Core`；`Core.feed` 抽象为
+  `Arc<dyn SubscriptionControl>`。
+- `src/market/registry.rs`：`MarketPluginRegistry`（与审计用 `ExtensionRegistry` 分离）。
+- IPC 新增 `market.list`；Node 客户端加 `listMarketPlugins()`。
+
+### Stage 2 — 物理迁移（内核去 SDK）
+- `git mv` 迁移：`venue.rs`、`live.rs`、`feed.rs`、`discovery.rs` → `extensions/polymarket/src/`；
+  Gamma slug/解析拆到新 `gamma.rs`（内核只留回合时序数学 `scanner.rs`）。
+- 新增 `extensions/polymarket/src/plugin.rs`：`PolymarketPlugin` 组装三组件。
+- 内核 `Cargo.toml`：**删除 `polymarket-client-sdk-v2` 与 clob/ws/data/gamma features**；
+  新增 optional `polymarket-extension` + `polymarket` feature（默认开启）。
+- 装配：`market::register_builtin_markets()` 是内核**唯一**点名具体市场之处，`#[cfg(feature="polymarket")]`。
+- 清理死代码：删除孤儿 `MarketAdapter` trait、`PolymarketAdapter`、`BinanceSpotAdapter`
+  （零调用点，已被 plugin 接缝取代）。
+
+### 验收证据
+| 检查 | 结果 |
+|---|---|
+| `cargo build --release` / `--workspace` | 通过，零 warning |
+| `cargo build -p blitzkrieg-core --no-default-features` | **通过（无市场代码也能编）** |
+| 内核测试 | 93 passed（+扩展 4 = 97；差异 2 为删除的孤儿 adapter 测试） |
+| `tsc --noEmit` / `npm run build` | 0 error / ok |
+| `core-parity.mjs` | 22 ok |
+| `parity-engines.mjs` | PARITY OK（identical token/direction/price）|
+| `cycle-check.mjs` | PASS（确认→挂单→成交→实时重估）|
+| `grep -ri polymarket Blitzkrieg_core/src` | 仅 2 行（`market/mod.rs` feature 注册）|
+| 运行期 | 日志显示 `polymarket_extension::feed` 驱动订单簿；`market.list` 返回 polymarket/enabled；books/spots 增长 |
+
+### 附带修复
+`scripts/parity-engines.mjs` 注入合成市场却未禁原生 discovery，导致真实回合覆盖注入数据、
+比对不确定；补 `--no-discovery`（此为既存测试脚手架缺陷，非本次引入）。
+
+## 20. 下一步（未做）
+- 运行期 C-ABI dylib 热加载（P0.7）：扩展已 `crate-type=["rlib","cdylib"]`，需 `#[repr(C)]` vtable +
+  `libloading` + 版本协商 + `catch_unwind`（可复用 `strategy_engine/loader.rs` 模式）。
+- `--market <name>` 多市场选择（当前 `active_market_plugin` 取第一个已注册）。
+
+## 21. 生产账本混入测试合成数据（core-parity 未隔离工作目录）
+
+### 症状
+面板「历史订单」出现 ADA/DOT 做多记录，且**同一对记录重复 3 次**：`$0.40→$0.99`（force_exit）
+与 `$0.40→$0.40`（manual），均 `hold=0s`。ADA/DOT 根本不在交易资产（BTC/ETH/SOL/XRP）内，
+且 `0s 持有 + 固定价格` 是典型合成数据特征。
+
+### 根因
+内核在**相对路径** `data/trades/trades.jsonl` 落盘。两个测试脚手架
+（`scripts/core-parity.mjs`、`scripts/parity-engines.mjs`）用 `BlitzkriegCoreClient` 起内核时
+**未设置工作目录**，于是继承了仓库根 → 测试下的合成单直接写进了**生产账本**。
+`core-parity.mjs` 恰好断言 ADA/DOT 持仓，所以每次运行都追加这一对记录。
+（`cycle-check.mjs` 早前已用 `mkdtemp` 隔离；这两个更早的脚本漏了。）
+
+### 修复（两层）
+1. **客户端能力**：`BlitzkriegCoreOptions` 新增 `cwd`，`boot()` 传给 `spawn`——测试可把内核跑到
+   临时目录；生产不设该字段，行为不变。
+2. **各脚手架隔离**：`core-parity.mjs`（3 个客户端）、`parity-engines.mjs`、`dry-observe.mjs`
+   全部改为 `cwd: mkdtempSync(...)`。
+   - 验证：跑 `core-parity.mjs` 前后生产 `trades.jsonl` 行数不变（11 → 11）。
+
+### 数据清理
+- 从生产账本删除 6 行合成记录（ADA/DOT ×3 对），保留 5 行真实成交；`summary.json` 按剩余真实
+  记录重算。原始（含假数据）账本另存 `data/backup-with-fake-<ts>.jsonl` 备查。
+- 重启内核后 `/crypto-hft status`：`Trades: 5 (3W/2L) 60% WR`，面板不再出现 ADA/DOT。
+
+### 教训
+任何会 spawn 内核的脚本都必须隔离 `cwd`，或改用绝对路径的 `--trade-log` / `--near-miss-path`
+覆盖；否则测试合成数据会污染生产账本。后续若给内核加 `--trade-log` CLI 覆盖项，可进一步根治。
+
+## 22. 内核新增 `--trade-log` / `--no-trade-log`（根治测试污染）
+
+### 背景
+§21 用「隔离工作目录」修补了测试污染，但那仍依赖「内核用相对路径」这一隐含约定。
+本轮给内核加**显式 CLI 覆盖**，让测试不再依赖 cwd。
+
+### 改动
+- `Blitzkrieg_core/src/main.rs`：新增 `--trade-log <path>`（覆盖默认
+  `data/trades/trades.jsonl`）与 `--no-trade-log`（完全关闭成交持久化）；装配进
+  `CoreConfig.trade_log_path`。
+- `src/core/blitzkrieg-core-client.ts`：`BlitzkriegCoreOptions` 增 `tradeLogPath` / `noTradeLog`，
+  `boot()` 据此拼参数（`noTradeLog` 优先）。
+- 所有测试脚手架（`core-parity.mjs` 3 个客户端、`parity-engines.mjs`、`dry-observe.mjs`）
+  改用 `noTradeLog: true`——它们只用事件/持仓断言，不需要持久化账本；`cycle-check.mjs`
+  加 `--no-trade-log`。这样与 cwd 无关，**双保险**。
+
+### 验证
+- 新增 `scripts/trade-log-flag-check.mjs`：`--trade-log <tmp>` 只写临时文件（核心仍见 1 笔），
+  `--no-trade-log` 只留内存态；两次运行生产账本 **7 → 7 不变**。
+- 依次跑 core-parity / parity-engines / cycle-check / flag-check，生产账本 7 → 7 不变。
+- 生产核心无 `--trade-log`/`--no-trade-log` 参数 → 仍用默认常规账本（行为不变）。
+
+## 23. P0.6 收尾完善（多市场选择 + 文档对齐）
+
+P0.7（运行期 dylib 热加载）按用户决定**暂缓**；本轮只把 P0.6 的松散点补齐。
+
+### 功能
+1. **运行期市场选择**：内核新增 `--market-plugin <name>`，`CoreConfig.market_plugin`，
+   `active_market_plugin(registry, preferred)` 按名选择；未注册则回退第一个并打印告警（不 brick）。
+   Node 客户端加 `marketPlugin` 选项。
+2. **`market.list` 标注生效项**：`PluginInfo` 增 `active`；结果增顶层 `active`。
+   内核实测：`{"active":"polymarket","plugins":[{"name":"polymarket",...,"enabled":true,"active":true}]}`。
+   新增 `scripts/market-plugin-check.mjs` 覆盖显式/默认/未知三种选择（PASS）。
+3. Node zod：`MarketListSchema` / `MarketPluginInfoSchema`。
+
+### 文档对齐（此前与实现脱节）
+- `ARCHITECTURE.md`：版本改 P0.6；分层图改为「内核 → market_api → extensions/polymarket」；
+  删除已移除的 `MarketAdapter`/`PolymarketAdapter`/`BinanceSpotAdapter` 章节，改为
+  三专职 trait + `MarketHost` 契约；新增 §5「两套插件系统（Extension vs MarketPlugin）」对照表；
+  目录树更新（market_api / extensions/polymarket）。
+- `EXTENSION_GUIDE.md`：新增 §2.5 市场插件契约；`config.toml` 明确标注**尚未实现（仅文档）**；
+  IPC 表加 `market.list`；验收清单改为实际情况（配置驱动加载、P0.7 未做）。
+- `INTERFACES.md` §2.6：加 `market.list` 契约，区分 `extension.*` 与 `market.*`。
+- `extensions/README.md`：重写为两套插件对照 + 依赖方向硬约束 + 配置仅文档说明；
+  修正失效的 `docs/EXTENSION_GUIDE.md` 路径。
+
+### 验收
+93 内核测试 / 4 扩展测试 / 0 warning；`--no-default-features` 可编；tsc 0 error；
+core-parity 22 ok；parity-engines PARITY OK；cycle-check PASS；market-plugin-check PASS。
+生产重启后单实例、`market.list` active=polymarket。
+
+## 24. Soak 观察期（进行中）
+
+生产运行在新的插件化构建上，`scripts/soak-monitor.mjs --hours 12 --interval-sec 300`
+每 5 分钟写 `data/soak/soak.jsonl`（人类可读汇总 `data/soak/soak.log`）。
+
+### 健康判据（每周期应满足）
+- `node=up core=up ping=ok`
+- `books`/`spots` 计数持续增长（feed 活性）
+- `err+0`（无新增 ERROR）
+- 单核心（`pgrep -f clodds-core-fancer.sock` = 1）
+
+### 待对比的经营指标
+1. **成交频率 vs Node 基准**：Node 历史约 0.75 笔/回合、3 笔/小时，56% 回合零成交。
+   需覆盖 ≥3–4 小时（Node 时代最大成交间隔 3.4h）才具可比性。
+2. **胜率 / 盈亏比 / 净额**：当前真实样本仅个位数，不足以判断策略优劣。
+3. **出场原因分布**：重点看是否有 `holdTimeSec=0` 的 `force_exit`（秒平 bug 复发的信号，
+   若出现须立即排查——历史上该 bug 已修，但需持续确认）。
+4. **entry-gate 松紧**：`blocked.timing` 与 `blocked.momentum` 的累计值，配合
+   `data/shadow/near-miss.jsonl` 用 `--replay-near-miss` 离线评估是否值得放宽。
+
+### 复看命令
+```
+tail -40 data/soak/soak.log
+grep -c "⚠" data/soak/soak.log        # 异常周期数
+wc -l data/trades/trades.jsonl          # 真实成交数（清账后从 5 起）
+node -e "const fs=require('fs');const r=fs.readFileSync('data/trades/trades.jsonl','utf8').trim().split('\n').map(JSON.parse).slice(-10);console.log('n',r.length,'wins',r.filter(t=>t.netPnlUsd>=0).length,'avgHold',Math.round(r.reduce((a,b)=>a+b.holdTimeSec,0)/r.length)+'s','reasons',[...new Set(r.map(t=>t.exitReason))].join(','),'net',r.reduce((a,b)=>a+b.netPnlUsd,0).toFixed(2))"
+```
+
+## 25. 【已修复】核心崩溃重启自锁循环（"not connected" 故障）
+
+### 症状
+`/crypto-hft status` 报 `Error: blitzkrieg-core not connected`。日志显示 5 分钟内
+**~1300 次** `blitzkrieg-core process exited`，紧凑循环。
+
+### 根因链
+日志里每个崩溃都带：
+```
+Error: another blitzkrieg-core is already listening on .../clodds-core-fancer.sock
+code: 1
+```
+即 **§16.3 加的 socket 单实例守护**（本该是好事）与 Node 客户端的自动重启逻辑相互作用，
+引爆了一个潜伏缺陷：
+
+1. 存在一个健康核心占用 socket（本例是 00:51 启动的孤儿，其父进程已不在）。
+2. Node 客户端 `spawn` 新核心 → 新核心探测到 socket 已被占用 → **bail (exit 1)**。
+3. `handleExit` 立刻无退避、无上限地 `start()` 重试 → 再 spawn → 再 exit 1……
+   每轮仅 ~15ms，形成 ~80 次/秒的 spawn/crash 风暴。
+4. 同时 `connectWithRetry` 又连上了那个**健康**核心 → `connected` 短暂 true，
+   进程一退又 false。状态查询永远拿不到稳定连接 → "not connected"。
+
+历史对比：修复前（无单实例守护）第二个核心会**静默 unlink 并抢占 socket**，
+于是循环"自愈"——正是 §16.3 修掉的那个静默接管 bug。守护本身正确，暴露的是客户端侧问题。
+
+### 四个客户端缺陷（均已修，`src/core/blitzkrieg-core-client.ts`）
+1. **失败的 `start()` 遗弃客户端**：`doStart` 里 `await client.start()` reject 时，
+   `this.client` 仍为 null 且**这个 client 无人引用**，但它的 auto-restart 已在后台跑；
+   `runner.stop()` 只停 `this.client`，够不着它 → 孤儿循环。
+   修复：`start()` reject 时 `teardownProc()` 杀掉子进程；runner 捕获并保持 `client=null`。
+2. **重启无退避、无上限**：改为指数退避（300ms→30s 封顶）+ 硬上限 5 次；
+   超限 emit `fatal` 并停止（可恢复为可见错误，而非无限风暴）；连接成功即清零计数。
+3. **socket close 与 process exit 双重调度重启**：加 `restartTimer` 去重，单次调度；
+   并用 `activeSocket` 忽略旧 socket 的 stale close。
+4. **"已被占用"时无限重试**：识别 stderr 中的 `already listening/in use` →
+   **改为接管（adopt）现有核心**（只连接、不 kill），而非继续 spawn。
+   `stop()` 只杀自己 spawn 的进程（`ownsProc`），接管的核心不动。
+
+### 验证
+新增 `scripts/core-adopt-check.mjs`：健康核心 + 第二个客户端指向同一 socket →
+客户端**接管成功**（`adopted the existing blitzkrieg-core`）、无 spawn 循环、
+`stop()` 后核心仍存活。PASS。
+回归：core-parity 22 ok / parity-engines OK / cycle-check PASS / market-plugin-check PASS；
+重启生产后崩溃计数 **0**。
+
+### 运维注意
+若再次出现 `not connected`：`pgrep -f blitzkrieg-core` 看是否有多个核心；
+`grep -c "process exited" run.log` 看是否在循环；正常情况下客户端现在会接管而非循环。
+
+## 26. 基于交易+影子数据的策略调优（出场参数）
+
+### 数据与方法
+- `data/trades/trades.jsonl`（59 笔）+ `data/shadow/near-miss.jsonl`（61 条被拦候选）
+  + `data/backup-20260914-001139/shadow/positions.jsonl`（62 笔**带完整价格路径**的记录）。
+- 用内核自带的 `--replay`（`shadow::walk_forward_file`，逐 tick 重放真实退出策略）做
+  走前验证；入场用 `--replay-near-miss` 做反事实。分析脚本 `scripts/analyze-strategy.mjs`。
+
+### 诊断（交易数据）
+- 总体 WR 66%(39W/20L) 但净 **−$6.69**，PF **0.83**：赢家 +$0.81/笔，输家 **−$1.91/笔**，**不对称**。
+- **17 笔 stop_loss 全亏、合计 −$36.85**，每笔 lowPnl 达 −30~−60%（打到 −50% 止损）；
+  平均亏损 −$2.17 vs 平均盈利 +$0.77。**结论：问题在出场，不在入场。**
+- 近失反事实：放宽入场/时点闸门只值 **+$1.16/61 笔（≈持平）** → 入场闸门没做错，不动它。
+
+### 反事实（路径回放，按 62 笔）
+| 配置 | 胜率 | 盈亏比 PF | 净额 |
+|---|---|---|---|
+| 旧 SL50/trail10/TP100 | 66% | 1.55 | $15.89 |
+| **新 SL15/trail8/TP20** | **66%** | **2.69** | **$27.01** |
+
+- 止损收紧到 **15%**：把单笔最大亏损从 ~−50% 压到 −15%（约 −$2.4 → −$0.7）。
+- `min_trail_pct` 由 10→**8**：减少赢家回吐（该项是回吐**下限**，10 会强制多吐）。
+- 止盈由"关闭"→**20%**：把边际赢家落袋，**同时抬高胜率**（TP 是提升 WR 的杠杆）。
+- 稳健性：去掉贡献最大的 2 笔后仍优于旧配置（PF 2.19 vs 2.28→旧 1.28）；去掉最差 2 笔同样更好。
+  止损曲线在 8% 以下转差，15% 为稳定中位（未取 12% 的过拟合尖峰）。
+- **胜率 vs 盈亏比 是权衡**：TP=15 可把 WR 提到 68% 但 PF 降到 2.49；TP=20 保 WR 66% 且 PF 最高。
+  采用 TP=20 兼顾"胜率持平/略优 + 盈亏比大幅提升"。加 breakeven 止损会再抬 PF 但**降** WR，未采用。
+
+### 改动
+`Blitzkrieg_core/src/exit_policy.rs` `ExitConfig::default()`：`take_profit_pct` 100→20、
+`stop_loss_pct` 50→15、`min_trail_pct` 10→8（含解释注释）。`shadow::default_grid()` 重写为
+"旧配置 / 新配置 / 邻居点"用于持续验证。更新受影响的 1 个测试。
+验收：93 tests、0 warning、core-parity 22 ok、parity-engines OK、cycle-check PASS；生产已重启生效。
+
+### 适用性与局限
+样本 62 笔、单一 regime（多为低波动），个位数显著性；**需在新参数下继续 soak 验证**，
+若 WR/PF 不及回放预期则回退（改回 50/10/100）。入场侧无稳健可用的过滤因子
+（方向不对称在修好出场后即消失——说明它本是出场问题；入场上下文各桶样本 n≤5，不可用）。
+
+## 27. 止盈改为「固定兜底 + 移动止盈」，与 Node 对齐
+
+用户要求止盈设计回到 Node 一致：**固定止盈仅作兜底，正常由移动止盈锁利**。
+核对后发现 Rust 的移动止盈逻辑**本就与 Node 完全一致**（`get_profit_trail_pct`
+表 15/12/9/6/4/3/2、`get_time_trail_pct` 12/8/6、`trailing_min_high_pct=15`、
+`proportional_trail_*` 同值）；Node 侧的 `trailingLatePct/trailingMidPct/trailingWidePct`
+是**定义了但从未使用**的死配置。唯一真正的分歧是我 §26 调的三个值。
+
+### 改动（`ExitConfig::default()`）
+| 参数 | Node | §26 我改的 | 现在 | 理由 |
+|---|---|---|---|---|
+| `take_profit_pct` | 100 | 20 | **100** | 固定止盈回归"只作兜底"；正常利润交给移动止盈 |
+| `trailing_min_high_pct` | 15 | 15 | **15** | 移动止盈触发线，本就一致 |
+| `min_trail_pct` | 10 | 8 | **10** | 移动止盈回吐下限，与 Node 一致 |
+| `stop_loss_pct` | 50 | 15 | **15** | **唯一保留的偏离**：数据证明 50% 是最大亏损源 |
+
+### 为什么保留止损偏离（而非全套照抄 Node）
+62 笔路径回放（`--replay`）：
+- Node 原配（TP100/SL50/tr10）：WR 66%、PF **1.55**、净 $15.89、平均亏损 −$1.37。
+- 本次部署（TP100/**SL15**/tr10）：WR ~61-63%、PF **2.44-2.51**、净 $24-25、平均亏损 −$0.70。
+
+即：止盈对齐 Node **不损失**收益；真正止血的是止损 50→15。两者的**组合**就是
+"固定兜底 + 移动止盈 + 合理止损"。已向用户说明；若要求 100% 与 Node 一致，
+把 `stop_loss_pct` 改回 50 并 `SHADOW`/重启即可（不建议，回归 PF 1.55）。
+
+### 其它
+`shadow::default_grid()` 的基准点更新为「旧 / 现部署 / 邻居」，用于持续走前验证。
+93 tests、0 warning；生产已重启（binary 08:31:05，核心 08:31 起，单实例，0 崩溃）。
+
+## 28. 【更正 §26/§27】出场参数定稿：SL12 / trail8 / TP100（追求最终利润）
+
+### 更正声明
+§26 报告的「新 SL15/trail8/TP20 → WR66% / PF2.69 / net$27.01」**无法用规范模拟器复现**，
+属**错误数字**（当时用了两套不一致的脚本，TP 触发价按 `pct` 而非封顶到 `c.tp`，
+且净额换算有误）。以 `scripts/reconcile-exits.mjs`（单一实现、镜像 Rust `decide_exit`）重算：
+
+| 配置 | 胜率 | 盈亏比 | 净额 | 平均盈/亏 |
+|---|---|---|---|---|
+| 旧 SL50/tr10/TP100 | 66% | 1.53 | $15.11 | +$1.07 / −$1.37 |
+| §26 TP20/SL15/tr8 | 66% | 1.60 | **$9.64** | +$0.63 / −$0.76 |
+| 现部署前 TP100/SL15/tr10 | 61% | 2.39 | $23.39 | +$1.06 / −$0.70 |
+
+即 **§26 把净额夸大了近 3 倍**。TP20 提前截断赢家，净额反而从 $15 掉到 $9.6，是错的。
+§27 的止盈"回到 Node 兜底 TP100"方向正确（纠正了 §26）。
+
+### 定稿（按用户目标：最大化最终利润）
+单一规范模拟器在 `SL∈{8,10,12,15,20} × trail∈{6,8,10,12} × TP∈{15..100}` 上全网格搜索：
+
+| 配置 | 胜率 | 盈亏比 | 净额 | 去最赚2 | 去最赚5 | 去最亏5 |
+|---|---|---|---|---|---|---|
+| **SL12/tr8/TP100（部署）** | 63% | 2.93 | **$27.35** | P2.44/$20.3 | P1.93/$13.1 | P3.90/$30.8 |
+| SL12/tr6/TP100 | 63% | 2.97 | $27.89 | P2.48/$20.9 | P1.96/$13.6 | P3.95/$31.4 |
+| SL8/tr6/TP100 | 56% | 3.02 | $25.33 | — | — | — |
+| 前部署 SL15/tr10 | 61% | 2.39 | $23.39 | — | — | — |
+
+**选择 SL12/tr8**：净额 $27.35 与冠军 tr6($27.89) 相差仅 ~$0.5（噪音级，且 tr6 偏离 Node 更大），
+却明显优于 SL15/tr10（+$4 净额、PF 2.39→2.93），且在四次稳健性检验中均不劣。
+
+### 关键澄清（回答"能否 75% 胜率 + 放大盈亏比"）
+- **75% 胜率可达，但只能牺牲盈亏比**：`TP10/SL12` → WR76% 但 PF1.08、去最赚5 笔后 PF<1（不赚钱）。
+  胜率与盈亏比在此样本上是**跷跷板**，二者不可兼得。
+- **保本锁（breakeven）在修正语义后并不提升净额**：完整期货回放显示`SL12/tr6/BE@8` 净额 $24.74
+  **低于**不带 BE 的 $27.89（BE 把本会反弹的赢家提前扫出）。故**未启用**。
+  （§之前的 $27.22 是 BE 在成本价成交的过乐观假设所致。）
+- 结论：**追求最终利润 = SL12 / trail8 / TP100**（已部署）。
+
+### 改动与验收
+`exit_policy.rs::ExitConfig::default()`：`stop_loss_pct` 15→**12**、`min_trail_pct` 10→**8**，
+`take_profit_pct` 保持 100。93 tests、0 warning；生产已重启（binary 08:53:07，单实例，0 崩溃）。
+分析脚本：`scripts/reconcile-exits.mjs`（权威）、`scripts/final-exit-opt.mjs`（含稳健性）。
+
+## 29. 【实盘安全层】订单持久化 + 崩溃恢复 + 启动清算（修复孤儿订单）
+
+### 背景 / 根因
+用户反馈：早期 Node↔Rust SDK 桥接时亏掉约 12u（链上核实：该 funder 15 笔成交，买 $33.14/卖 $22.19，
+净 **−$10.95**；含一笔 59.99 股 SOL 在 −53% 清仓 ≈ 当年 SL50 病），且"机器人不知道自己下了单、
+无提示、全是孤儿订单、最后人工平仓"。
+
+根因：**Rust 内核的订单状态只在内存**（`ome.rs` 无任何持久化），而 Node 时代的
+`order-manager.ts` 本来有 `data/orders/orders.jsonl` + `loadAllOrders()` 重启恢复——重写时丢了。
+于是：重启/崩溃 → 内存清空 → 交易所仍有挂单 → 内核不认识 → 不撤、不报 → 孤儿。
+
+### 实现（全部落地）
+1. **`order_db.rs`（新）**：`TrackedOrder` 快照追加到 `data/orders/orders.jsonl`（append-only，含
+   `venueOrderId`）；`load()` 折叠为每单最新状态；`compact()` 重写为仅存未结单；损坏/旧格式行跳过不致命。
+2. **`Ome::restore()` + `known_venue_ids()`**：从持久化记录重建订单状态；导出"本地认为在挂的 venue id"。
+3. **Core 接线**：`CoreConfig.order_log_path`（默认 `data/orders/orders.jsonl`）；`emit_order`/`emit_fill`
+   两个汇聚点调用 `persist_order`，覆盖 submit/confirm/reject/bind/cancel/fill **所有**状态变更；
+   `restore_orders()` 启动时恢复未结单并把日志 compact。
+4. **启动清算**：`live.rs` 启动时拉交易所快照 → 凡"交易所有、本地 `known_venue_ids` 里没有"的，
+   `cancel` 掉（孤儿归零）并 `note_orphan_cancelled` 上报。每次 live 启动只跑一次。
+5. **可见性**：孤儿撤销、恢复 N 单等均经 `Event::RiskAlert` 推送（不再静默）。
+6. **拆除无状态下单路径**：`rustPlaceLimitOrder` 加硬闸——默认**拒绝**下单并返回明确错误，
+   仅 `ALLOW_STATELESS_RUST_EXECUTOR=true` 才放行（该 executor 签单但不追踪，正是孤儿根源）。
+7. **CLI**：`--order-log <path>` / `--no-order-log`。
+
+### 验收
+- 新增 `scripts/order-recovery-check.mjs`：放置挂单 → `SIGKILL` 内核 → 新内核同 order-log 启动 →
+  **挂单被恢复**（status=LIVE，key 一致）。**PASS**。
+- 95 内核测试（含 order_db 的 append/load-latest/legacy-skip 2 项）+ 4 扩展测试、0 warning、tsc 0。
+- 全部脚本门禁：core-parity 22 / parity-engines OK / cycle-check PASS / market-plugin-check PASS /
+  order-recovery PASS / core-adopt PASS。
+- 生产已重启（binary 09:07:34，单实例，0 崩溃）；订单库将在首次下单时生成。
+
+### 结论
+"机器人不知道自己下单"的失效链已断：**订单落盘 → 重启恢复 → 孤儿自动撤销 → 全程可见**。
+这是 4.8u 实盘的前置条件，现已具备。

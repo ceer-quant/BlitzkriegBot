@@ -213,7 +213,10 @@ export function createTradingOrchestrator(deps: OrchestratorDeps): TradingOrches
     cancelOrder: execution.cancelOrder.bind(execution),
     cancelAllOrders: execution.cancelAllOrders.bind(execution),
     getOpenOrders: execution.getOpenOrders.bind(execution),
+    getOpenOrdersChecked: execution.getOpenOrdersChecked.bind(execution),
     getOrder: execution.getOrder.bind(execution),
+    getTrades: execution.getTrades.bind(execution),
+    getPositions: execution.getPositions.bind(execution),
     estimateFill: execution.estimateFill.bind(execution),
     estimateSlippage: execution.estimateSlippage.bind(execution),
     placeOrdersBatch: async (orders) => {

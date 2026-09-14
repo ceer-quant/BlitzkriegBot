@@ -1,0 +1,168 @@
+//! Market data — local L2 orderbook reconstruction.
+//!
+//! Rust port of the book-building responsibilities in
+//! `src/strategies/crypto-hft/orderbook.ts` (buildOrderbookSnapshot) plus a
+//! delta-capable local book (the TS `local-orderbook.ts` which was never wired).
+//!
+//! The Polymarket market channel delivers either a full `book` snapshot or a
+//! `price_change` / `best_bid_ask` top-of-book update; this book accepts both and
+//! always exposes a consistent `OrderbookSnapshot` for the strategy and exits.
+
+use crate::model::OrderbookSnapshot;
+use rust_decimal::Decimal;
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Default)]
+pub struct LocalBook {
+    /// price → size; BTreeMap keeps levels sorted for deterministic snapshots.
+    bids: BTreeMap<Decimal, Decimal>,
+    asks: BTreeMap<Decimal, Decimal>,
+    timestamp: i64,
+}
+
+impl LocalBook {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the book with a full snapshot from the market channel.
+    pub fn apply_snapshot(&mut self, bids: &[(Decimal, Decimal)], asks: &[(Decimal, Decimal)], now_ms: i64) {
+        self.bids.clear();
+        self.asks.clear();
+        for (p, s) in bids {
+            if *s > Decimal::ZERO {
+                self.bids.insert(*p, *s);
+            }
+        }
+        for (p, s) in asks {
+            if *s > Decimal::ZERO {
+                self.asks.insert(*p, *s);
+            }
+        }
+        self.timestamp = now_ms;
+    }
+
+    /// Merge incremental level updates (size 0 removes the level).
+    pub fn apply_delta(&mut self, bids: &[(Decimal, Decimal)], asks: &[(Decimal, Decimal)], now_ms: i64) {
+        apply_levels(&mut self.bids, bids);
+        apply_levels(&mut self.asks, asks);
+        self.timestamp = now_ms;
+    }
+
+    /// Update only the top of book (used by price_change / best_bid_ask which do
+    /// not carry full depth). Sizes are unknown, so we set a nominal size.
+    pub fn update_top(&mut self, best_bid: Option<Decimal>, best_ask: Option<Decimal>, now_ms: i64) {
+        let nominal = Decimal::new(1, 0);
+        if let Some(b) = best_bid {
+            if b > Decimal::ZERO {
+                // Drop crossed/over levels so best_bid really is the best.
+                self.asks.retain(|p, _| *p > b);
+                self.bids.insert(b, nominal);
+                // Remove any bids above the new best (shouldn't happen, but be safe).
+                let above: Vec<Decimal> = self.bids.keys().filter(|p| **p > b).copied().collect();
+                for p in above {
+                    self.bids.remove(&p);
+                }
+            }
+        }
+        if let Some(a) = best_ask {
+            if a > Decimal::ZERO {
+                self.bids.retain(|p, _| *p < a);
+                self.asks.insert(a, nominal);
+                let below: Vec<Decimal> = self.asks.keys().filter(|p| **p < a).copied().collect();
+                for p in below {
+                    self.asks.remove(&p);
+                }
+            }
+        }
+        self.timestamp = now_ms;
+    }
+
+    pub fn best_bid(&self) -> Decimal {
+        self.bids.keys().next_back().copied().unwrap_or(Decimal::ZERO)
+    }
+    pub fn best_ask(&self) -> Decimal {
+        self.asks.keys().next().copied().unwrap_or(Decimal::ZERO)
+    }
+
+    /// Build the immutable snapshot the strategy/exit layers consume.
+    pub fn snapshot(&self, token_id: &str) -> OrderbookSnapshot {
+        let bids: Vec<(Decimal, Decimal)> = self.bids.iter().rev().map(|(p, s)| (*p, *s)).collect();
+        let asks: Vec<(Decimal, Decimal)> = self.asks.iter().map(|(p, s)| (*p, *s)).collect();
+        OrderbookSnapshot::from_levels(token_id.to_string(), bids, asks, self.timestamp)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bids.is_empty() && self.asks.is_empty()
+    }
+
+    pub fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+}
+
+fn apply_levels(side: &mut BTreeMap<Decimal, Decimal>, levels: &[(Decimal, Decimal)]) {
+    for (p, s) in levels {
+        if *s <= Decimal::ZERO {
+            side.remove(p);
+        } else {
+            side.insert(*p, *s);
+        }
+    }
+}
+
+/// True when the snapshot is fresh enough to price off (mirrors
+/// maxOrderbookStaleMs in `getBook`).
+pub fn is_fresh(book: &OrderbookSnapshot, now_ms: i64, max_stale_ms: i64) -> bool {
+    now_ms - book.timestamp <= max_stale_ms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn snapshot_computes_depth_obi_best() {
+        let mut b = LocalBook::new();
+        b.apply_snapshot(&[(dec!(0.40), dec!(100)), (dec!(0.39), dec!(50))], &[(dec!(0.42), dec!(200))], 5);
+        let s = b.snapshot("tok");
+        assert_eq!(s.best_bid, dec!(0.40));
+        assert_eq!(s.best_ask, dec!(0.42));
+        assert_eq!(s.mid_price, dec!(0.41));
+        assert_eq!(s.bid_depth, dec!(150));
+        assert_eq!(s.ask_depth, dec!(200));
+        assert_eq!(s.obi, (dec!(150) - dec!(200)) / dec!(350));
+    }
+
+    #[test]
+    fn delta_removes_zero_size_and_reorders() {
+        let mut b = LocalBook::new();
+        b.apply_snapshot(&[(dec!(0.40), dec!(100))], &[(dec!(0.42), dec!(100))], 0);
+        // Add a better bid, remove the ask, add a new ask lower.
+        b.apply_delta(&[(dec!(0.41), dec!(10))], &[(dec!(0.42), dec!(0)), (dec!(0.43), dec!(5))], 1);
+        assert_eq!(b.best_bid(), dec!(0.41));
+        assert_eq!(b.best_ask(), dec!(0.43));
+        let s = b.snapshot("t");
+        assert_eq!(s.bids.len(), 2);
+    }
+
+    #[test]
+    fn top_update_uncrosses_book() {
+        let mut b = LocalBook::new();
+        b.apply_snapshot(&[(dec!(0.40), dec!(100))], &[(dec!(0.42), dec!(100))], 0);
+        // best_bid_ask pushes bid up past the old ask → crossed levels dropped.
+        b.update_top(Some(dec!(0.45)), Some(dec!(0.46)), 1);
+        assert_eq!(b.best_bid(), dec!(0.45));
+        assert_eq!(b.best_ask(), dec!(0.46));
+    }
+
+    #[test]
+    fn freshness_gate() {
+        let mut b = LocalBook::new();
+        b.apply_snapshot(&[(dec!(0.40), dec!(100))], &[(dec!(0.42), dec!(100))], 1000);
+        let s = b.snapshot("t");
+        assert!(is_fresh(&s, 5000, 8000));
+        assert!(!is_fresh(&s, 20_000, 8000));
+    }
+}

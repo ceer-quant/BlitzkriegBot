@@ -7,7 +7,7 @@
  * Reference:
  *   - Contract: https://github.com/Polymarket/ctf-exchange
  *   - Order utils: https://github.com/Polymarket/clob-order-utils
- *   - EIP-712 domain: { name: "Polymarket CTF Exchange", version: "1", chainId: 137, verifyingContract: <exchange> }
+ *   - EIP-712 domain: { name: "Polymarket CTF Exchange", version: "2", chainId: 137, verifyingContract: <exchange> }
  */
 
 import { keccak_256 } from '@noble/hashes/sha3';
@@ -19,23 +19,23 @@ import { secp256k1 } from '@noble/curves/secp256k1';
 // =============================================================================
 
 const PROTOCOL_NAME = 'Polymarket CTF Exchange';
-const PROTOCOL_VERSION = '1';
+const PROTOCOL_VERSION = '2';
 const CHAIN_ID = 137; // Polygon
 
 /** CTF Exchange (standard binary markets) */
-export const CTF_EXCHANGE = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E';
+export const CTF_EXCHANGE = '0xE111180000d2663C0091e4f400237545B87B996B';
 /** Neg Risk CTF Exchange (multi-outcome / crypto markets) */
-export const NEG_RISK_CTF_EXCHANGE = '0xC5d563A36AE78145C45a50134d48A1215220f80a';
+export const NEG_RISK_CTF_EXCHANGE = '0xe2222d279d744050d28e00520010520000310F59';
+
+const ZERO_BYTES32 = '0x' + '0'.repeat(64);
 
 /** Operator/taker address (Polymarket's operator) */
-const OPERATOR_ADDRESS = '0x0000000000000000000000000000000000000000';
-
 /** USDC has 6 decimals on Polygon */
 const USDC_DECIMALS = 6;
 
 // EIP-712 type string for Order struct
 const ORDER_TYPE_STRING =
-  'Order(uint256 salt,address maker,address signer,address taker,uint256 tokenId,uint256 makerAmount,uint256 takerAmount,uint256 expiration,uint256 nonce,uint256 feeRateBps,uint8 side,uint8 signatureType)';
+  'Order(uint256 salt,address maker,address signer,uint256 tokenId,uint256 makerAmount,uint256 takerAmount,uint8 side,uint8 signatureType,uint256 timestamp,bytes32 metadata,bytes32 builder)';
 
 // Signature types
 export enum SignatureType {
@@ -58,15 +58,14 @@ export interface PolymarketOrder {
   salt: string;
   maker: string;
   signer: string;
-  taker: string;
   tokenId: string;
   makerAmount: string;
   takerAmount: string;
-  expiration: string;
-  nonce: string;
-  feeRateBps: string;
   side: string;
   signatureType: number;
+  timestamp: string;
+  metadata: string;
+  builder: string;
 }
 
 /**
@@ -76,7 +75,7 @@ export interface PolymarketOrder {
  *   - salt: number (integer, NOT string)
  *   - side: "BUY" | "SELL" (string, NOT numeric 0/1)
  *   - signatureType: number (0, 1, or 2)
- *   - makerAmount/takerAmount/tokenId/expiration/nonce/feeRateBps: string
+ *   - makerAmount/takerAmount/tokenId/timestamp: string
  *   - owner: API key (NOT wallet address)
  */
 export interface PostOrderBody {
@@ -84,16 +83,15 @@ export interface PostOrderBody {
     salt: number;
     maker: string;
     signer: string;
-    taker: string;
     tokenId: string;
     makerAmount: string;
     takerAmount: string;
-    expiration: string;
-    nonce: string;
-    feeRateBps: string;
     side: 'BUY' | 'SELL';
     signatureType: number;
     signature: string;
+    timestamp: string;
+    metadata: string;
+    builder: string;
   };
   owner: string;
   orderType: 'GTC' | 'GTD' | 'FOK';
@@ -280,15 +278,14 @@ function hashOrder(order: PolymarketOrder): string {
     Buffer.from(encodeUint256(order.salt), 'hex'),
     Buffer.from(encodeAddress(order.maker), 'hex'),
     Buffer.from(encodeAddress(order.signer), 'hex'),
-    Buffer.from(encodeAddress(order.taker), 'hex'),
     Buffer.from(encodeUint256(order.tokenId), 'hex'),
     Buffer.from(encodeUint256(order.makerAmount), 'hex'),
     Buffer.from(encodeUint256(order.takerAmount), 'hex'),
-    Buffer.from(encodeUint256(order.expiration), 'hex'),
-    Buffer.from(encodeUint256(order.nonce), 'hex'),
-    Buffer.from(encodeUint256(order.feeRateBps), 'hex'),
     Buffer.from(encodeUint256(order.side), 'hex'),
     Buffer.from(encodeUint256(order.signatureType), 'hex'),
+    Buffer.from(encodeUint256(order.timestamp), 'hex'),
+    Buffer.from(encodeUint256(order.metadata), 'hex'),
+    Buffer.from(encodeUint256(order.builder), 'hex'),
   ]);
 
   return '0x' + keccak256(encoded);
@@ -386,14 +383,12 @@ export function buildSignedOrder(
   // signatureType must match how the account was created on Polymarket:
   //   0 = EOA (direct wallet, no proxy)
   //   1 = POLY_PROXY (Magic Link / email login)
-  //   2 = POLY_GNOSIS_SAFE (MetaMask / browser wallet — most common)
-  // Default: EOA if no funder, POLY_GNOSIS_SAFE if funder is set (most Polymarket web accounts)
-  const signatureType = signer.signatureType ?? (signer.funderAddress ? SignatureType.POLY_GNOSIS_SAFE : SignatureType.EOA);
+  //   2 = POLY_GNOSIS_SAFE (MetaMask/browser wallet — most common)
+  const signatureType = signer.signatureType ?? (signer.funderAddress ? SignatureType.POLY_PROXY : SignatureType.EOA);
   const exchange = params.negRisk ? NEG_RISK_CTF_EXCHANGE : CTF_EXCHANGE;
 
   const { makerAmount, takerAmount } = getOrderAmounts(params.price, params.size, params.side);
   const salt = generateSalt();
-  const nonce = params.nonce || generateNonce(); // Use unique nonce if not provided
   const sideNum = params.side === 'buy' ? OrderSide.BUY : OrderSide.SELL;
 
   // Build the order struct for EIP-712 signing (uses numeric side)
@@ -401,15 +396,14 @@ export function buildSignedOrder(
     salt,
     maker,
     signer: signerAddress,
-    taker: OPERATOR_ADDRESS,
     tokenId: params.tokenId,
     makerAmount,
     takerAmount,
-    expiration: (params.expiration || 0).toString(),
-    nonce,
-    feeRateBps: (params.feeRateBps || 0).toString(),
     side: sideNum.toString(),
     signatureType,
+    timestamp: Date.now().toString(),
+    metadata: ZERO_BYTES32,
+    builder: ZERO_BYTES32,
   };
 
   const hash = createTypedDataHash(exchange, order);
@@ -421,16 +415,15 @@ export function buildSignedOrder(
       salt: parseInt(salt, 10),
       maker,
       signer: signerAddress,
-      taker: OPERATOR_ADDRESS,
       tokenId: params.tokenId,
       makerAmount,
       takerAmount,
-      expiration: (params.expiration || 0).toString(),
-      nonce,
-      feeRateBps: (params.feeRateBps || 0).toString(),
       side: params.side === 'buy' ? 'BUY' : 'SELL',
       signatureType,
       signature,
+      timestamp: order.timestamp,
+      metadata: order.metadata,
+      builder: order.builder,
     },
     owner: '', // Caller MUST set this to the API key
     orderType: 'GTC',

@@ -53,10 +53,16 @@ export interface CryptoHftConfig {
   roundDurationSec: number;
   /** Don't enter if fewer than this many seconds left */
   minTimeLeftSec: number;
+  /** Stop resting entry bids this many seconds before minTimeLeftSec (avoid fills too close to expiry) */
+  entryCutoffSec?: number;
   /** Don't enter in the first N seconds (spreads unstable) */
   minRoundAgeSec: number;
   /** Force exit at this many seconds before expiry */
   forceExitSec: number;
+  /** In the final N seconds of a round, flush stale resting orders */
+  roundEndClearSec?: number;
+  /** Resting orders older than this (seconds) are cancelled during the round-end window */
+  staleOrderAgeSec?: number;
   /** Warmup: don't trade for N seconds after engine start */
   warmupSec: number;
 
@@ -69,6 +75,12 @@ export interface CryptoHftConfig {
   exitOrder: OrderExecution;
   /** Use maker exits only for TP and TIME exits (not SL — speed matters) */
   makerExitsForTpOnly: boolean;
+  /** Non-urgent exits (take_profit) post a maker offer first, then cross after
+   *  exitOrder.makerTimeoutMs. Urgent exits (stop/force/trailing) always taker. */
+  makerFirstExitEnabled?: boolean;
+  /** A protective stop only fires when the executable bid is within this % of the
+   *  mid — guards against selling into a one-tick pulled bid wick (default 8) */
+  maxBidWickPct?: number;
   /** Cooldown between sell attempts (ms) */
   sellCooldownMs: number;
   /** Share buffer subtracted from exit size for rounding (e.g. 0.02) */
@@ -77,6 +89,13 @@ export interface CryptoHftConfig {
   // ── Take Profit / Stop Loss ──
   takeProfitPct: number;
   stopLossPct: number;
+
+  // ── Quick scalp exit ──
+  quickProfitMinHoldSec: number;
+  quickProfitMinPct: number;
+
+  // ── Spot reversal exit ──
+  spotReversalThresholdPct: number;
 
   // ── Ratchet floor (progressive giveback from confirmed high) ──
   ratchetEnabled: boolean;
@@ -102,13 +121,89 @@ export interface CryptoHftConfig {
   stagnantDurationSec: number;
   /** Exit on depth collapse: depth dropped this % while price dropping */
   depthCollapseThresholdPct: number;
+  /** spread_arb maker limit = currentPrice * this factor (legacy) */
+  spreadArbEntryFactor?: number;
+  /** spread_arb trend confirmation price (token must hold above this) */
+  trendMinPrice?: number;
+  /** spread_arb: if a confirmed trend falls below this price it is treated as a
+   *  regime change (reversal), not a pullback — bids cancelled + position exited */
+  trendBrokenPrice?: number;
+  /** Require Binance spot short-term momentum to agree with the token direction */
+  momentumFilterEnabled?: boolean;
+  /** Spot momentum lookback window (seconds) */
+  momentumFilterWindowSec?: number;
+  /** Max adverse spot move % tolerated (0 = must not be moving against at all) */
+  momentumFilterMinPct?: number;
+  /** Never fill a buy more than this % above the current mid (stale-price guard) */
+  maxFillVsMidPct?: number;
+  /** spread_arb seconds the token must hold above trendMinPrice */
+  trendConfirmSec?: number;
+  /** Fraction of the confirm window that must be above trendMinPrice (default 0.8) */
+  trendRatio?: number;
+  /** spread_arb fixed resting bid price once the trend is confirmed (0 = use factor) */
+  trendEntryPrice?: number;
+  /** spread_arb resting bid = currentPrice * factor (when trendEntryPrice is 0) */
+  trendEntryFactor?: number;
+  /** spread_arb: never rest a bid above this price (default 0.70) */
+  trendMaxEntryPrice?: number;
+  /** Cancel a resting bid when mid has fallen this % below it (default on) */
+  cancelStaleBids?: boolean;
+  /** Stale-bid threshold in % (default 5) */
+  staleBidPct?: number;
+  /** Trail high-profit positions as a percentage of the high instead of fixed points */
+  proportionalTrailEnabled?: boolean;
+  /** Giveback as % of high when proportional trailing applies (default 10) */
+  proportionalTrailPct?: number;
+  /** Only apply proportional trailing once high >= this % (default 15) */
+  proportionalTrailMinPct?: number;
+  /** Minimum giveback (points) for proportional trailing (default 3) */
+  proportionalTrailMinGivebackPct?: number;
+  /** Trailing only arms once high PnL reaches this % (default 5) — avoids noise exits */
+  trailingMinHighPct?: number;
+  /** Absolute minimum trailing giveback in points (default 5) */
+  minTrailPct?: number;
+  /** Grace period after open before any signal-based exit can fire (default 3s) */
+  exitGraceSec?: number;
+  /** Simple exit mode: only TP / wide SL / expiry. Disables breakeven, trailing,
+   *  stale, stagnant, depth, spot-reversal and quick-profit exits. */
+  simpleExitEnabled?: boolean;
+  /** Dynamic stop: tighten the stop as expiry approaches (default on) */
+  dynamicStopEnabled?: boolean;
+  /** Begin tightening the stop when time left drops below this (default 300s = 5 min) */
+  stopTightenStartSec?: number;
+  /** Tightest stop (points) applied at the force-exit horizon (default 10) */
+  stopMinPct?: number;
+
+  // ── Risk controls (toggleable for A/B testing) ──
+  /** Use a tighter hard stop instead of stopLossPct (default on) */
+  tightStopEnabled?: boolean;
+  /** Hard stop percent used when tightStopEnabled (default 12) */
+  tightStopPct?: number;
+  /** Reject entries right after a violent move (falling-knife filter) */
+  crashFilterEnabled?: boolean;
+  /** Require the ≥0.55 high reading to be at least this old before entering */
+  crashFilterMinHighAgeSec?: number;
+  /** Max adverse Binance spot move (%) over the lookback to allow entry */
+  crashFilterMaxSpotMovePct?: number;
+  /** Lookback seconds for the crash spot-move check */
+  crashFilterLookbackSec?: number;
+  /** Skip non-mandatory exits when the book gapped below the last tick */
+  slippageGuardEnabled?: boolean;
+  /** One-tick adverse move (%) that triggers the slippage guard */
+  slippageGuardMaxPct?: number;
 
   // ── Risk ──
   maxDailyLossUsd: number;
   /** Cooldown after stop loss hit (seconds) */
   stopLossCooldownSec: number;
+  /** Cooldown after the consecutive-loss circuit breaker trips (seconds) */
+  breakerCooldownSec?: number;
   /** Cooldown after any exit before re-entering same coin+direction (seconds) */
   exitCooldownSec: number;
+  /** Cooldown (seconds) before touching the SAME asset again after any exit, regardless of direction */
+  assetCooldownSec?: number;
+  /** Cooldown (seconds) after a LOSING exit before touching the same asset again */
+  lossCooldownSec?: number;
   negRisk: boolean;
   dryRun: boolean;
 }
@@ -198,10 +293,14 @@ export interface OpenPosition {
   conditionId: string;
   entryPrice: number;
   currentPrice: number;
+  /** Price at the previous tick (used to detect one-tick flash gaps on exit) */
+  prevPrice?: number;
   shares: number;
   costUsd: number;
   wasMakerEntry: boolean;
   entryFeePct: number;
+  /** Fixed exit price for strategies like sharp_reversal (optional) */
+  targetExitPrice?: number;
 
   // HWM tracking
   highWaterMark: number;
@@ -235,11 +334,14 @@ export type ExitReason =
   | 'stop_loss'
   | 'ratchet_floor'
   | 'trailing_stop'
+  | 'breakeven_lock'
   | 'depth_collapse'
   | 'stale_profit'
   | 'stagnant_profit'
   | 'time_exit'
   | 'force_exit'
+  | 'spot_reversal'
+  | 'quick_profit'
   | 'manual';
 
 export interface ClosedPosition extends OpenPosition {
