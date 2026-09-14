@@ -44,6 +44,12 @@ pub async fn run(
     if recovered > 0 {
         eprintln!("blitzkrieg-core: restored {recovered} live order(s) from the order log");
     }
+    // Then rebuild the OPEN position book, so a restart keeps valuing and
+    // exit-managing positions that were already filled before the restart.
+    let recovered_pos = core.restore_positions();
+    if recovered_pos > 0 {
+        eprintln!("blitzkrieg-core: restored {recovered_pos} open position(s) from the position log");
+    }
     if config.mode == Mode::Dry {
         core.set_balance(config.dry_seed_balance);
     }

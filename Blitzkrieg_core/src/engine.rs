@@ -609,4 +609,23 @@ mod tests {
         // Very low price would exceed max → clamped to 10.
         assert_eq!(e.compute_shares(dec!(0.01)), dec!(10));
     }
+
+    #[test]
+    fn compute_shares_honours_custom_bounds() {
+        // Small-balance live sizing: a 4-share fixed lot (2 positions on ~4.8u).
+        let mut c = cfg();
+        c.size_usd = dec!(2.5);
+        c.min_shares = dec!(4);
+        c.max_shares = dec!(4);
+        let e = Engine::new(c);
+        // 2.5 / 0.45 ≈ 5.56 → rounds to 6, then clamped down to the 4-share lot.
+        assert_eq!(e.compute_shares(dec!(0.45)), dec!(4));
+        // A wide band lets the nominal size win: 2.5 / 0.25 = 10 within [2,20].
+        let mut c2 = cfg();
+        c2.min_shares = dec!(2);
+        c2.max_shares = dec!(20);
+        let e2 = Engine::new(c2);
+        assert_eq!(e2.compute_shares(dec!(0.25)), dec!(10));
+        assert_eq!(e2.compute_shares(dec!(1.25)), dec!(2));
+    }
 }

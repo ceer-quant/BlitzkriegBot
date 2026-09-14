@@ -7,9 +7,11 @@
 //! Usage:
 //!   blitzkrieg-core --socket <path> [--mode dry|live] [--tick-ms 50]
 //!                   [--seed-balance 10000] [--max-order-notional 100]
+//!                   [--min-shares 10] [--max-shares 10]
 //!                   [--market-plugin <name>]
 //!                   [--trade-log <path>] [--no-trade-log]
 //!                   [--order-log <path>] [--no-order-log]
+//!                   [--position-log <path>] [--no-position-log]
 //!                   [--near-miss-path <path>]
 //!
 //! Env (live): POLYMARKET_PRIVATE_KEY, POLYMARKET_FUNDER_ADDRESS, CLOB_API_URL.
@@ -28,6 +30,8 @@ struct Args {
     tick_ms: u64,
     seed_balance: Decimal,
     max_order_notional: Decimal,
+    min_shares: Option<Decimal>,
+    max_shares: Option<Decimal>,
     markets: Vec<String>,
     auto_exits: bool,
     max_positions: usize,
@@ -45,6 +49,8 @@ struct Args {
     no_trade_log: bool,
     order_log: Option<String>,
     no_order_log: bool,
+    position_log: Option<String>,
+    no_position_log: bool,
     market_plugin: Option<String>,
     discovery: bool,
     shadow_evolution: bool,
@@ -66,6 +72,8 @@ fn parse_args() -> Args {
     let mut tick_ms = 50u64;
     let mut seed_balance = Decimal::from(10_000);
     let mut max_order_notional = Decimal::from(100);
+    let mut min_shares: Option<Decimal> = None;
+    let mut max_shares: Option<Decimal> = None;
     let mut markets: Vec<String> = Vec::new();
     let mut auto_exits = true;
     let mut max_positions: usize = 2;
@@ -83,6 +91,8 @@ fn parse_args() -> Args {
     let mut no_trade_log = false;
     let mut order_log: Option<String> = None;
     let mut no_order_log = false;
+    let mut position_log: Option<String> = None;
+    let mut no_position_log = false;
     let mut market_plugin: Option<String> = None;
     let mut discovery = true;
     let mut shadow_evolution = false;
@@ -109,6 +119,12 @@ fn parse_args() -> Args {
                 max_order_notional =
                     it.next().and_then(|v| Decimal::from_str(&v).ok()).unwrap_or(max_order_notional)
             }
+            "--min-shares" => {
+                min_shares = it.next().and_then(|v| Decimal::from_str(&v).ok()).or(min_shares)
+            }
+            "--max-shares" => {
+                max_shares = it.next().and_then(|v| Decimal::from_str(&v).ok()).or(max_shares)
+            }
             "--no-auto-exits" => auto_exits = false,
             "--engine" => engine = true,
             "--feed-ws" => feed_ws = true,
@@ -119,6 +135,8 @@ fn parse_args() -> Args {
             "--no-trade-log" => no_trade_log = true,
             "--order-log" => order_log = it.next(),
             "--no-order-log" => no_order_log = true,
+            "--position-log" => position_log = it.next(),
+            "--no-position-log" => no_position_log = true,
             "--market-plugin" => market_plugin = it.next(),
             "--no-discovery" => discovery = false,
             "--shadow-evolution" => shadow_evolution = true,
@@ -152,7 +170,7 @@ fn parse_args() -> Args {
             other => eprintln!("ignoring unknown arg: {other}"),
         }
     }
-    Args { socket, mode, tick_ms, seed_balance, max_order_notional, markets, auto_exits, max_positions, engine, min_round_age, min_time_left, trend_confirm, trend_floor_ms, feed_ws, replay, replay_near_miss, round_sec, near_miss_path, trade_log, no_trade_log, order_log, no_order_log, market_plugin, discovery, shadow_evolution, assets: assets_arg, se_min_samples, se_cooldown_secs, se_min_obs_secs }
+    Args { socket, mode, tick_ms, seed_balance, max_order_notional, min_shares, max_shares, markets, auto_exits, max_positions, engine, min_round_age, min_time_left, trend_confirm, trend_floor_ms, feed_ws, replay, replay_near_miss, round_sec, near_miss_path, trade_log, no_trade_log, order_log, no_order_log, position_log, no_position_log, market_plugin, discovery, shadow_evolution, assets: assets_arg, se_min_samples, se_cooldown_secs, se_min_obs_secs }
 }
 
 #[tokio::main]
@@ -198,10 +216,30 @@ async fn main() -> anyhow::Result<()> {
         Some(args.order_log.clone().unwrap_or_else(|| "data/orders/orders.jsonl".to_string()))
     };
 
+    // Position log: durable snapshot of the OPEN position book (crash recovery).
+    let position_log_path = if args.no_position_log {
+        None
+    } else {
+        Some(args.position_log.clone().unwrap_or_else(|| "data/positions/positions.jsonl".to_string()))
+    };
+
     let assets_override: Option<Vec<String>> = args
         .assets
         .as_ref()
         .map(|s| s.split(',').map(|a| a.trim().to_uppercase()).filter(|a| !a.is_empty()).collect());
+
+    // Per-order share sizing. Both default to 10 (fixed lot) when neither flag is
+    // given. Clamp min<=max so a stray flag order cannot invert the range.
+    let (min_shares, max_shares) = {
+        let mn = args.min_shares.unwrap_or_else(|| Decimal::from(10));
+        let mx = args.max_shares.unwrap_or_else(|| Decimal::from(10));
+        if mn > mx {
+            eprintln!("blitzkrieg-core: --min-shares {mn} > --max-shares {mx}; clamping min to max");
+            (mx, mx)
+        } else {
+            (mn, mx)
+        }
+    };
 
     let config = CoreConfig {
         mode,
@@ -211,9 +249,12 @@ async fn main() -> anyhow::Result<()> {
         markets: args.markets,
         auto_exits_enabled: args.auto_exits,
         engine_enabled: args.engine,
+        min_shares,
+        max_shares,
         near_miss_path,
         trade_log_path,
         order_log_path,
+        position_log_path,
         discovery_enabled: args.discovery,
         shadow_evolution_enabled: args.shadow_evolution,
         shadow_evolution_tuning: if args.se_min_samples.is_some() || args.se_cooldown_secs.is_some() || args.se_min_obs_secs.is_some() {

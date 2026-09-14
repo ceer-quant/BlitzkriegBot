@@ -61,6 +61,17 @@ export interface BlitzkriegCoreOptions {
   /** Disable trade-log persistence entirely (`--no-trade-log`). */
   noTradeLog?: boolean;
   /**
+   * Disable order-log persistence (`--no-order-log`). Test harnesses that assert
+   * only via events/positions set this so crash-recovery files never leak between
+   * co-located cores.
+   */
+  noOrderLog?: boolean;
+  /**
+   * Disable open-position persistence (`--no-position-log`). Same rationale as
+   * `noOrderLog`: keeps one harness's restored positions from perturbing the next.
+   */
+  noPositionLog?: boolean;
+  /**
    * Select the operative market plugin by name (`--market-plugin <name>`).
    * Unset = the core uses its first registered plugin (Polymarket).
    */
@@ -130,6 +141,8 @@ export class BlitzkriegCoreClient extends EventEmitter {
   private readonly cwd: string | undefined;
   private readonly tradeLogPath: string | undefined;
   private readonly noTradeLog: boolean;
+  private readonly noOrderLog: boolean;
+  private readonly noPositionLog: boolean;
   private readonly marketPlugin: string | undefined;
 
   private proc: ChildProcess | null = null;
@@ -171,6 +184,8 @@ export class BlitzkriegCoreClient extends EventEmitter {
     this.cwd = opts.cwd;
     this.tradeLogPath = opts.tradeLogPath;
     this.noTradeLog = opts.noTradeLog ?? false;
+    this.noOrderLog = opts.noOrderLog ?? false;
+    this.noPositionLog = opts.noPositionLog ?? false;
     this.marketPlugin = opts.marketPlugin;
   }
 
@@ -224,6 +239,11 @@ export class BlitzkriegCoreClient extends EventEmitter {
           : this.tradeLogPath
             ? ['--trade-log', this.tradeLogPath]
             : []),
+        // Recovery logs are DISABLED by default when the caller asked for an
+        // isolated test harness; otherwise a previous harness's resting order /
+        // open position would be restored into this core.
+        ...(this.noOrderLog ? ['--no-order-log'] : []),
+        ...(this.noPositionLog ? ['--no-position-log'] : []),
         ...(this.marketPlugin ? ['--market-plugin', this.marketPlugin] : []),
         ...this.extraArgs,
       ];

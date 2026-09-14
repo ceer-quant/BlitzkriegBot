@@ -762,3 +762,105 @@ code: 1
 ### 结论
 "机器人不知道自己下单"的失效链已断：**订单落盘 → 重启恢复 → 孤儿自动撤销 → 全程可见**。
 这是 4.8u 实盘的前置条件，现已具备。
+
+## 30. 迁移后清理 + 订单落盘线上确认（新根目录）
+
+### 背景
+`fc6e93c` 把项目根从 `/Volumes/Hard Disk/BlitzkriegBot/CloddsBot` 上移一层。迁移留下两处
+残留，且 §29 的订单库"首次下单才生成"尚未在真实运行中确认。
+
+### 清理动作
+1. **删除 `polymarket-5m-bot/`**：迁移时的 cwd 锚点目录，内容只剩 `.DS_Store`，无任何进程
+   cwd 指向它（`ps` 核实），已删。
+2. **游离凭据文件 `.env.other-project-backup-2025-11`**（属另一个项目 *Hummingbot Deploy*，
+   含其真实 USERNAME/PASSWORD/BROKER_*/DATABASE_URL/AWS_* 凭据）：代码中无引用（`.gitignore`
+   除外），本机附近也不存在该 Hummingbot 项目 → 已**移入废纸篓**（`~/.Trash/`）而非直接销毁，
+   可恢复。`.gitignore` 的 `.env.other-project-backup-*` 规则保留，防止误提交同类文件。
+
+### 线上确认（§29 订单持久化）
+- 恢复 soak 后，`data/orders/orders.jsonl` 已由空增长到多次快照：`dry_1..dry_6`，
+  覆盖 `LIVE→CANCELLED`、`FILLED` 等终态，说明 `emit_order`/`emit_fill` 落盘链路在真实运行时
+  正常工作（不再只存在于 DRY 单元验证）。
+- 生产账本 `data/trades/trades.jsonl`：**67 笔 / 45 胜（67% WR）/ 净 −$4.79**
+  （出场分布：trailing_stop 43 / stop_loss 19 / take_profit 3 / time_exit 2）。
+- 健康 `http://localhost:18789/health` → 200。
+
+### 仍未闭环
+- **live 启动清算（孤儿扫单）只在 DRY 验证过**：首次真实 live 启动须确认日志出现
+  `startup sweep cancelled N orphan order(s)`。
+- **`--min-shares`/`--max-shares` CLI 尚未加**：当前硬编码每笔 10 股（≈$4.5/笔），
+  4.8u 资金只够 1 仓；若要在该资金下持 2 仓需降到 ~4 股。
+- **`OpenPosition` 仍未持久化**：与 §29 同失效类——内核重启会忘记未平仓持仓，
+  可能错过止损/止盈。建议下一步按 `order_db` 同款实现。
+
+## 31. 每笔股数可配：`--min-shares` / `--max-shares`（4.8u 实盘前置）
+
+### 背景
+§30 遗留项：每笔固定 10 股是硬编码（`min_shares=max_shares=10`），无 CLI 可调。
+小资金实盘（4.8u）只够 1 仓；要在该资金下持 2 仓必须能把单笔降到 ~4 股。
+
+### 改动
+1. **内核 CLI**（`main.rs`）：新增 `--min-shares <n>` / `--max-shares <n>`，解析为 `Decimal`
+   并接入 `CoreConfig.min_shares/max_shares`（`engine.rs::compute_shares` 已消费该字段）。
+   防御：解析失败/缺省回落 10；若 `min>max` 则告警并把 min 夹到 max。
+2. **Node 透传**（`blitzkrieg-core-runner.ts`）：`BlitzkriegRunConfig` 增 `minShares`；
+   `extraArgs` 追加 `--min-shares`/`--max-shares`；`maxOrderNotional` 由 `maxShares*0.6` 推导，
+   已随之下调（4 股 → 上限 2.4，不再误拒小单）。
+3. **Skill 参数**（`crypto-hft/index.ts`）：`/crypto-hft start` 读取 `HFT_MIN_SHARES`/`HFT_MAX_SHARES`
+   环境变量（缺省用 `DEFAULT_CONFIG` 的 10/10），启动回显 `Lot: min–max sh`。
+4. **文档**：`.env.example` 增 HFT 段；`HANDOFF.md` §4/§7 更新。
+
+### 验收
+- 内核测试 **96 项**通过（新增 `compute_shares_honours_custom_bounds`：4 股固定档 + 宽档 [2,20]）。
+- `tsc --noEmit` 干净；门禁脚本全 PASS：core-parity 22 / parity-engines / cycle-check /
+  order-recovery / market-plugin-check。
+- 新 CLI 冒烟：传入 `--min-shares 4 --max-shares 4` 启动无 `unknown arg`，正常监听。
+
+### 用法
+```bash
+# 经 Node（推荐）：
+HFT_MAX_SHARES=4 HFT_MIN_SHARES=4 node dist/index.js   # /crypto-hft start
+# 直接跑内核：
+./target/release/blitzkrieg-core --socket <path> --min-shares 4 --max-shares 4 ...
+```
+
+## 32. 【实盘安全层·续】持仓持久化 + 崩溃恢复（修复"重启后持仓失管"）
+
+### 背景 / 根因
+§29 修好了**订单**的孤儿问题，但**未平仓持仓**仍是内存态（`PositionManager`）。内核重启/崩溃后
+持仓清空 → 不再估值、不再跑出场规则、也不知道自己持有该 token → 该笔交易"漂到"到期无人管理。
+这与孤儿订单是同一失效类，只是对象从"挂单"换成"已成交持仓"。
+
+### 实现
+1. **`position_db.rs`（新）**：`save()` 每次把当前**未平仓集合**整体重写为
+   `data/positions/positions.jsonl`（每行一个 `OpenPosition` 快照）；`load()` 读回。
+   持仓数受 `max_positions` 限制且生命周期短，故用"整体重写"而非追加日志——平仓无需墓碑行即可表达。
+   损坏/外来行跳过不致命（与 `order_db` 一致）。
+2. **类型**：`OpenPosition` 与 `ExitState` 加 `Serialize/Deserialize`（`ExitState` 带
+   HWM/确认计数等，必须一起恢复，否则出场逻辑从头开始）。
+3. **`PositionManager::restore_open()`**：替换内存 open 书，并把 `next_id` 推进到恢复的
+   `hft-N` 之后，避免新仓与恢复仓 id 冲突。
+4. **Core 接线**：`CoreConfig.position_log_path`（默认 `data/positions/positions.jsonl`）；
+   在 `project_fill_delta` 的**每个** open/adjust/close 分支后调用 `persist_positions()`；
+   `restore_positions()` 启动时恢复（`ipc/server.rs` 中在 `restore_orders()` 之后）并经
+   `Event::RiskAlert` 上报。
+5. **CLI**：`--position-log <path>` / `--no-position-log`。
+6. **测试隔离**（回归修复）：`BlitzkriegCoreClient` 新增 `noOrderLog`/`noPositionLog`；
+   core-parity / parity-engines / core-adopt 各自关闭订单/持仓日志——否则同一 WORKDIR 下
+   前一个 harness 的持仓会被下一个内核恢复进来（与 §21/§22 账本污染同类）。
+
+### 验收
+- **新增 `scripts/position-recovery-check.mjs`**：开仓 → `SIGKILL` 内核 → 新内核同 position-log
+  启动 → **持仓被恢复且继续估值**（`cur=0.70`，unrealized 62.8%）。**PASS**。
+- 内核测试 **98 项**通过（新增 position_db 的 round-trip 与 corrupt-skip 2 项）。
+- 门禁全 PASS：core-parity 22 / parity-engines / cycle-check / order-recovery /
+  **position-recovery** / market-plugin-check / core-adopt。
+- `tsc --noEmit` 干净、`npm run build` OK。
+
+### 生效说明
+生产当前进程（09:22 启动）跑的是**旧二进制**；新持仓日志将在**下次内核重启**后开始写入。
+不改动正在进行的 soak，重启时机由用户决定。
+
+### 结论
+"重启后持仓失管"链已断：**持仓落盘 → 重启恢复 HWM/出场状态 → 继续估值与出场**。
+与 §29 合起来，订单与持仓两条崩溃恢复路径均已闭环。

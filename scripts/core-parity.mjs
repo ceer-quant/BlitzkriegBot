@@ -51,6 +51,8 @@ const c = new BlitzkriegCoreClient({
   // Order-layer assertions must not be perturbed by the position/exit engine.
   cwd: WORKDIR,
     noTradeLog: true,  // these harnesses assert via events/positions, never the persisted ledger
+    noOrderLog: true,  // and must not restore a prior harness's resting orders
+    noPositionLog: true,  // nor its open positions (keeps co-located cores independent)
   extraArgs: ['--no-auto-exits', '--max-positions', '99'],
 });
 
@@ -139,6 +141,8 @@ const pc = new BlitzkriegCoreClient({
   autoRestart: false,
   cwd: WORKDIR,
     noTradeLog: true,  // these harnesses assert via events/positions, never the persisted ledger
+    noOrderLog: true,  // and must not restore a prior harness's resting orders
+    noPositionLog: true,  // nor its open positions (keeps co-located cores independent)
 });
 
 try {
@@ -179,6 +183,8 @@ const ec = new BlitzkriegCoreClient({
   autoRestart: false,
   cwd: WORKDIR,
     noTradeLog: true,  // these harnesses assert via events/positions, never the persisted ledger
+    noOrderLog: true,  // and must not restore a prior harness's resting orders
+    noPositionLog: true,  // nor its open positions (keeps co-located cores independent)
   extraArgs: ['--engine', '--min-round-age', '0', '--min-time-left', '0', '--trend-confirm-sec', '0', '--trend-window-floor-ms', '0'],
 });
 

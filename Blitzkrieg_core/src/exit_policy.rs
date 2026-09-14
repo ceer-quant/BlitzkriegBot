@@ -12,6 +12,7 @@
 use crate::model::{ExitReason, OrderbookSnapshot};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use serde::{Deserialize, Serialize};
 
 /// Exit-relevant config subset. Mirrors fields read by the TS `decideExit`.
 #[derive(Debug, Clone)]
@@ -193,7 +194,7 @@ pub fn taker_fee_pct(price: Decimal) -> Decimal {
 
 // ── State ───────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExitState {
     pub high_pnl_pct: Decimal,
     pub low_pnl_pct: Decimal,
