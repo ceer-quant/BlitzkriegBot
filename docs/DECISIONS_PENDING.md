@@ -109,17 +109,20 @@
 
 ---
 
-## [待决策] D-7 仓库身份元数据（npm / README / CONTRIBUTING）未随私有仓库改名
+## [待决策] D-7 仓库身份元数据（npm 包名 / package.json）仍为旧品牌
 
-- **背景**：`package.json` 的 `name=clodds`、`author=alsk1992`、`repository.url=github.com/alsk1992/CloddsBot`，
-  以及 `README.md`/`CONTRIBUTING.md` 的品牌文案仍指向旧上游；而新私有仓库为 `ceer-quant/BlitzkriegBot`。
-- **本次已做的最小改动**：README 顶部与 CONTRIBUTING 顶部加入私有仓库 + AI 协作规范横幅，
-  指向 `docs/AI_WORKFLOW.md`；**未**改动 `package.json` 与全文品牌文案。
-- **选项 A（AI 已采用）**：暂不改分发元数据。改 `name`/`repository`/`author` 影响 npm 发布与 CI，
-  属于外向变更，需用户明确决定。
+- **背景**：`package.json` 的 `name=clodds`、`author=alsk1992`、`repository.url=github.com/alsk1992/CloddsBot`
+  仍是旧品牌；而仓库本体为私有的 `ceer-quant/BlitzkriegBot`。
+- **已处理（2026-09-14）**：**`README.md` 已整体重写**，彻底移除 CloddsBot 产品文案/外链，改为
+  BlitzkriegBot（Rust 核心 + Node 外壳 + Polymarket 扩展）的真实入口；`CONTRIBUTING.md` 标题与署名行也已更正。
+  **但 `package.json` 的分发元数据未动**（改 `name`/`repository`/`author` 影响 npm 发布与锁文件，属外向变更）。
+  其余 260+ 个文件中的 `clodds` 字样多为历史迁移日志、带日期的报告、`package-lock.json`，以及运行时默认
+  socket 名（`core/blitzkrieg_core/src/main.rs` 的 `clodds-core-$USER.sock`，改动会影响在跑进程），需专项处理。
+- **选项 A（AI 已采用）**：暂不改 `package.json` 分发元数据，避免在文档变更中牵动发布/CI。
 - **需要用户确认的点**：
-  1. 是否重命名 npm 包（`clodds` → 其他）？还是本仓库不再发布 npm、仅内部使用？
-  2. 是否把 `repository.url` 指向 `ceer-quant/BlitzkriegBot` 并清理 README 旧上游品牌？
+  1. 是否重命名 npm 包（`clodds` → 其他）？还是本仓库不再发布 npm、仅内部使用（可移除发布脚本）？
+  2. 是否做一次**独立、可回归**的品牌清理：`package.json`/`repository.url`、运行时 socket 默认名、
+     历史文档以外的代码引用（历史日志与 lockfile 保持原样以保留审计轨迹）？
 
 ---
 

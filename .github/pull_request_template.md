@@ -41,4 +41,4 @@
 <!-- 贴上关键测试输出、A/B 数字、日志片段。证据文件请提交到 docs/reports/data/ 并在此引用。 -->
 
 ## 🤖 AI 参与说明（如适用）
-<!-- 使用的模型 / 会话；AI 生成部分与人工复核范围。AI 协作者以 Co-authored-by 记录。 -->
+<!-- 如使用了 AI：写清人工复核范围即可。注意：提交信息中禁止任何 AI 署名（Co-authored-by / Generated with 等），Git 作者一律为 ceer_quant。 -->
