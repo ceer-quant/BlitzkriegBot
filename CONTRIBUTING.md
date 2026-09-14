@@ -1,6 +1,6 @@
-# Contributing to Clodds
+# Contributing to BlitzkriegBot
 
-Thanks for your interest in contributing! Clodds is open-source and welcomes contributions.
+Thanks for your interest in contributing! This is a **private** repository (`ceer-quant/BlitzkriegBot`).
 
 > ## 🤖 AI 协作与仓库规范
 >
@@ -9,7 +9,7 @@ Thanks for your interest in contributing! Clodds is open-source and welcomes con
 > （禁止启用 Live 交易、禁止改动凭证、禁止删除未备份文件、禁止未验证直推主分支、
 > 禁止顺手优化无关逻辑）。以下为速查：
 >
-> - **作者署名**：`ceer_quant`；人机协作提交追加 `Co-authored-by:` trailer。
+> - **作者署名**：唯一 Git 作者为 `ceer_quant`；**禁止任何 AI 署名**（不加 `Co-authored-by:` / `Generated with` 等 trailer）。
 > - **分支**：`main`（发布）、`develop`（集成）、`feature/*`、`fix/*`、`chore/*`、`release/*`。
 >   AI 只能推功能分支，受保护分支需 PR + 评审 + 门禁全绿。
 > - **提交门禁**：`cargo build --release`、`cargo test`、`npm run typecheck`、

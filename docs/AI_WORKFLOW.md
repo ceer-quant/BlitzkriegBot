@@ -65,22 +65,24 @@
 
 ---
 
-## 5. 署名与 AI 共同作者（Co-authored-by）
+## 5. 作者署名
 
-- **作者署名**：所有提交的作者为 `ceer_quant`。
-- **人类与 AI 协作的提交**：在提交信息末尾追加 `Co-authored-by:` trailer，记录参与该提交的代理/模型。
+- **唯一作者署名**：所有提交的 Git 作者一律为 `ceer_quant <ceer_quant@users.noreply.github.com>`。
+- **禁止任何 AI 署名**：提交信息中**不得**出现 `Co-authored-by:`、`Generated with`、`🤖` 等
+  将代理/模型列为共同作者或生成者的标记；不写模型名、不加 AI trailer。
+- 人机协作的事实通过正常的评审记录与 PR 讨论体现，**不在提交署名中体现**。
 
-示例：
+示例提交信息：
 
 ```
 feat(core): add shadow-evolution re-anchor after apply
 
 ...
-Co-authored-by: ZCode <noreply@zcode.local>
 ```
 
-- 纯 AI 生成、尚未人工复核的改动，打标签 `ai/authored`；人工复核后改 `ai/reviewed`。
-- PR 模板中保留「AI 参与说明」区块，需写清使用的会话与复核范围。
+- AI 生成但**尚未人工复核**的改动打标签 `ai/authored`；人工复核后改 `ai/reviewed`
+  （这是评审状态标记，不是署名）。
+- PR 模板中的「AI 参与说明」区块只用于写清复核范围，**不**用于署名。
 
 ---
 
