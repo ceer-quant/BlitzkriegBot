@@ -18,6 +18,7 @@ import {
   type ServiceCategory,
 } from '../../acp';
 import { getEscrowService, initEscrowService, createEscrowId } from '../../acp/escrow';
+import { identityUrl } from '../../utils/identity';
 import { Connection, Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import bs58 from 'bs58';
 
@@ -536,7 +537,7 @@ async function acpRegisterHandleHandler(toolInput: ToolInput): Promise<HandlerRe
       handle: `@${result.handle}`,
       agentId: result.agentId,
       ownerAddress: result.ownerAddress.slice(0, 8) + '...',
-      url: `https://clodds.com/@${result.handle}`,
+      url: identityUrl(`/@${result.handle}`),
     };
   });
 }
@@ -696,7 +697,7 @@ async function acpGetReferralCodeHandler(toolInput: ToolInput): Promise<HandlerR
     const code = await identity.referrals.createCode(referrerAddress);
     return {
       code,
-      shareUrl: `https://clodds.com/join?ref=${code}`,
+      shareUrl: identityUrl(`/join?ref=${code}`),
       feeShare: '5%',
     };
   });

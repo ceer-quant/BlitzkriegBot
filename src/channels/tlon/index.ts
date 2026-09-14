@@ -188,7 +188,7 @@ export async function createTlonChannel(
             if (/^[A-Z0-9]{8}$/.test(potentialCode) && pairing) {
               const request = await pairing.validateCode(potentialCode);
               if (request) {
-                await sendMessage(path, 'Successfully paired! You can now chat with Clodds.');
+                await sendMessage(path, 'Successfully paired! You can now chat with Blitzkrieg.');
                 logger.info({ ship: author, code: potentialCode }, 'Tlon user paired');
                 return;
               }
@@ -199,7 +199,7 @@ export async function createTlonChannel(
               if (code) {
                 await sendMessage(
                   path,
-                  `Pairing Required\n\nYour pairing code: ${code}\n\nRun 'clodds pairing approve tlon ${code}' to complete.\n\nCode expires in 1 hour.`
+                  `Pairing Required\n\nYour pairing code: ${code}\n\nRun 'blitzkrieg pairing approve tlon ${code}' to complete.\n\nCode expires in 1 hour.`
                 );
                 logger.info({ ship: author, code }, 'Generated Tlon pairing code');
               } else {
@@ -232,7 +232,7 @@ export async function createTlonChannel(
   function connectEventSource(): void {
     if (!sessionCookie) return;
 
-    channelId = `clodds-${Date.now()}`;
+    channelId = `blitzkrieg-${Date.now()}`;
     const url = `${baseUrl}/~/channel/${channelId}`;
 
     // Use fetch for SSE since EventSource doesn't support custom headers

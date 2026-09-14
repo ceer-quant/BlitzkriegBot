@@ -47,7 +47,7 @@ Route messages to specialized agents, configure channel bindings, and manage too
 ### Create Routing Service
 
 ```typescript
-import { createRoutingService } from 'clodds/routing';
+import { createRoutingService } from 'blitzkrieg/routing';
 
 const routing = createRoutingService({
   // Default agent

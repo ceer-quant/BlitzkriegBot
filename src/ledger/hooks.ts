@@ -1,7 +1,7 @@
 /**
  * Trade Ledger - Hook Integration
  *
- * Auto-capture decisions via the Clodds hooks system.
+ * Auto-capture decisions via the Blitzkrieg hooks system.
  */
 
 import type {
@@ -14,7 +14,7 @@ import type {
 import type { LedgerStorage } from './storage';
 
 // =============================================================================
-// HOOK CONTEXT TYPES (matches Clodds hooks)
+// HOOK CONTEXT TYPES (matches Blitzkrieg hooks)
 // =============================================================================
 
 export interface HookContext {

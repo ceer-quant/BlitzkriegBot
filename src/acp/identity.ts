@@ -2,7 +2,7 @@
  * ACP Identity System
  *
  * Provides agent identity features:
- * - Unique handles (@name.clodds)
+ * - Unique handles (@name.blitzkrieg)
  * - Takeover/acquisition via escrow
  * - Referral tracking with fee sharing
  * - Public agent profiles
@@ -197,7 +197,7 @@ const HANDLE_MIN_LENGTH = 3;
 const HANDLE_MAX_LENGTH = 20;
 const HANDLE_REGEX = /^[a-z0-9_]+$/;
 const RESERVED_HANDLES = new Set([
-  'admin', 'clodds', 'system', 'api', 'help', 'support',
+  'admin', 'blitzkrieg', 'clodds', 'system', 'api', 'help', 'support',
   'official', 'verified', 'bot', 'agent', 'null', 'undefined',
   'root', 'mod', 'moderator', 'staff', 'team',
 ]);

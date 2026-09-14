@@ -1,7 +1,7 @@
 # Rust 交易核心（rust-core）— 架构与 P0 状态
 
 > **P0.5 更新（2026-09-13）**：目录与 crate 已改名：`rust-core/` → `Blitzkrieg_core/`，
-> crate `clodds-rust-core` → `blitzkrieg-core`（lib `blitzkrieg_core`）；UI 移入 `ui/`（旧
+> crate `blitzkrieg-rust-core` → `blitzkrieg-core`（lib `blitzkrieg_core`）；UI 移入 `ui/`（旧
 > `/webchat/hft.html` 仍兼容）。本文档中出现的旧路径/旧 crate 名可按此对照。新的分层与
 > 扩展体系见 `docs/blitzkrieg/{ARCHITECTURE,INTERFACES,STRATEGY_GUIDE,EXTENSION_GUIDE,MIGRATION_LOG}.md`。
 >
@@ -45,7 +45,7 @@ blitzkrieg-core  ── Unix Domain Socket ($TMPDIR/blitzkrieg-core-$USER.sock)
   「找不到内核 → 再起一个 → 两个内核共用同一份订单/持仓日志」（并触发归档单写者锁）。
   命名与解析因此统一在 `core-socket`：TS `src/core/core-socket.ts`、脚本
   `scripts/lib/core-socket.mjs`、Rust `core/.../main.rs` 与 `ui/ui_kit/src/lib.rs`。
-  **兼容期**：`clodds-core-<user>.sock` 是改名前的名字，仍可发现——旧外壳用 `--socket <旧路径>`
+  **兼容期**：`blitzkrieg-core-<user>.sock` 是改名前的名字，仍可发现——旧外壳用 `--socket <旧路径>`
   显式拉起的内核，新客户端会**领养**它而不是另起一个（`resolve_socket_path()` /
   `resolveSocketPath()`）；显式指定 socket 的调用方（夹具/测试）行为不变。
   回归见 `scripts/socket-migration-check.mjs`（`MIGRATION_LOG §38`）。

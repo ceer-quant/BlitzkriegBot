@@ -1,9 +1,9 @@
 # Crypto HFT Bot —— 完整文档
 
 > Polymarket 加密二元市场（UP/DOWN）自动交易机器人。
-> 基于 Clodds（AI 交易终端）的 `crypto-hft` 技能，本仓库为专注 Polymarket 15 分钟加密市场的定制版。
+> 基于 Blitzkrieg（AI 交易终端）的 `crypto-hft` 技能，本仓库为专注 Polymarket 15 分钟加密市场的定制版。
 >
-> 文档版本：v1.8.0 ｜ 适用目录：`polymarket-5m-bot/CloddsBot`
+> 文档版本：v1.8.0 ｜ 适用目录：`polymarket-5m-bot/BlitzkriegBot`
 
 ---
 
@@ -109,7 +109,7 @@
 ## 3. 目录结构
 
 ```
-CloddsBot/
+BlitzkriegBot/
 ├── src/
 │   ├── index.ts                     # 进程入口：启动 gateway + 各服务
 │   ├── gateway/                      # HTTP + WebSocket 网关（默认端口 18789）
@@ -161,7 +161,7 @@ CloddsBot/
 - macOS / Linux
 
 ```bash
-git clone <repo> && cd polymarket-5m-bot/CloddsBot
+git clone <repo> && cd polymarket-5m-bot/BlitzkriegBot
 npm install
 cp .env.example .env      # 然后填写下方变量
 ```
@@ -171,7 +171,7 @@ cp .env.example .env      # 然后填写下方变量
 ```bash
 cd rust-executor
 cargo build --release
-# 产物：rust-executor/target/release/clodds-rust-executor
+# 产物：rust-executor/target/release/blitzkrieg-rust-executor
 ```
 
 > 若未编译 Rust 二进制，签名类型 3（Poly1271 / 充值钱包）无法下单；普通 EOA(HMAC) 不受影响。
@@ -191,7 +191,7 @@ cargo build --release
 | `POLYMARKET_API_PASSPHRASE` | L2 认证 | CLOB API Passphrase |
 | `DRY_RUN` | 否 | `true` = 模拟盘（默认）；`false` = 实盘 |
 | `ANTHROPIC_API_KEY` | 运行网关 | Claude 模型调用 |
-| `CLODDS_TOKEN` | 否 | 网关 API 令牌 |
+| `BLITZKRIEG_TOKEN` | 否 | 网关 API 令牌 |
 | `LOG_LEVEL` | 否 | `debug/info/warn/error` |
 
 > **注意**：`.env.example` 中写的是 `POLY_*`，但本定制版代码读取的是
@@ -383,7 +383,7 @@ DRY_RUN 与实盘共用同一套成交处理路径，确保行为一致。
 
 ## 14. Rust 执行器与 Poly1271
 
-- 位置：`rust-executor/`，产物 `rust-executor/target/release/clodds-rust-executor`。
+- 位置：`rust-executor/`，产物 `rust-executor/target/release/blitzkrieg-rust-executor`。
 - 协议：stdin/stdout 逐行 JSON（`{id, method, params}` → `{id, ok, result|error}`）。
 - 方法：`auth_check`、`open_orders`、`balance`、`place_limit`、`cancel`。
 - TS 封装：`src/execution/rust-clob-executor.ts`（`rustPlaceLimitOrder` / `rustBalance` / `rustAuthCheck`）。

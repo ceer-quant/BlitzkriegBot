@@ -274,7 +274,7 @@ export async function createSignalChannel(
 
             const tempPath = path.join(
               os.tmpdir(),
-              `clodds-signal-${Date.now()}-${resolved.filename}`
+              `blitzkrieg-signal-${Date.now()}-${resolved.filename}`
             );
             await fs.writeFile(tempPath, resolved.buffer);
             filePaths.push(tempPath);

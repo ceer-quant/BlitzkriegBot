@@ -1,6 +1,10 @@
 # Changelog
 
-All notable changes to Clodds will be documented in this file.
+> **历史记录，命名已废弃。** 本文件 0.1 品牌迁移（E1）之前的条目按原样保留，
+> 其中的旧名称、旧域名、旧命令仅作溯源用；新变更使用 BlitzkriegBot 命名，
+> 迁移过程见 [docs/blitzkrieg/MIGRATION_LOG.md](docs/blitzkrieg/MIGRATION_LOG.md)。
+
+All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).

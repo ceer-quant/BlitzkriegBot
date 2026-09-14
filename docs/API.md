@@ -1,6 +1,6 @@
-# Clodds API
+# Blitzkrieg API
 
-This document describes the HTTP and WebSocket endpoints exposed by the Clodds gateway.
+This document describes the HTTP and WebSocket endpoints exposed by the Blitzkrieg gateway.
 
 ## Base URL
 
@@ -18,7 +18,7 @@ http://127.0.0.1:18789
 
 ## What is this API for?
 
-Skills and agents running *inside* Clodds call services directly — no HTTP needed. The REST API is for **everything external**: dashboards, mobile apps, automation scripts, Telegram/Discord bots, monitoring (Grafana/Datadog), AI agent integrations (MCP tools, LangChain), multi-instance orchestration, and copy trading platforms. See [API_REFERENCE.md](API_REFERENCE.md#what-can-you-build-with-this-api) for detailed examples.
+Skills and agents running *inside* Blitzkrieg call services directly — no HTTP needed. The REST API is for **everything external**: dashboards, mobile apps, automation scripts, Telegram/Discord bots, monitoring (Grafana/Datadog), AI agent integrations (MCP tools, LangChain), multi-instance orchestration, and copy trading platforms. See [API_REFERENCE.md](API_REFERENCE.md#what-can-you-build-with-this-api) for detailed examples.
 
 ## HTTP endpoints
 
@@ -38,7 +38,7 @@ API info and supported endpoints.
 Response:
 ```
 {
-  "name": "clodds",
+  "name": "blitzkrieg",
   "version": "0.3.10",
   "description": "AI assistant for prediction markets",
   "endpoints": { "websocket": "/ws", "webchat": "/chat", "health": "/health" }
@@ -58,7 +58,7 @@ Headers:
 
 Signature:
 - HMAC SHA-256 hex digest of the raw request body using the webhook secret.
-- To disable signature requirements, set `CLODDS_WEBHOOK_REQUIRE_SIGNATURE=0`.
+- To disable signature requirements, set `BLITZKRIEG_WEBHOOK_REQUIRE_SIGNATURE=0`.
 
 Responses:
 - `200 { "ok": true }` on success
@@ -454,12 +454,12 @@ Messages are stored in a dedicated `messages` table (one row per message, append
 
 ## Cloudflare Worker API
 
-The lightweight Clodds Worker (`apps/clodds-worker`) exposes a separate REST API on Cloudflare's edge network.
+The lightweight Blitzkrieg Worker (`apps/blitzkrieg-worker`) exposes a separate REST API on Cloudflare's edge network.
 
 ### Base URL
 
 ```
-https://clodds-worker.<account>.workers.dev
+https://blitzkrieg-worker.<account>.workers.dev
 ```
 
 ### GET /api/health
@@ -580,7 +580,7 @@ Query parameters:
 - `POST /webhook/discord` - Discord Interactions endpoint
 - `POST /webhook/slack` - Slack Events API endpoint
 
-See [apps/clodds-worker/README.md](../apps/clodds-worker/README.md) for webhook setup instructions.
+See [apps/blitzkrieg-worker/README.md](../apps/blitzkrieg-worker/README.md) for webhook setup instructions.
 
 ---
 
@@ -591,7 +591,7 @@ The following modules can be imported and used directly in your TypeScript/JavaS
 ### EVM DEX Trading
 
 ```typescript
-import { executeUniswapSwap, getUniswapQuote, executeOneInchSwap, compareDexRoutes } from 'clodds/evm';
+import { executeUniswapSwap, getUniswapQuote, executeOneInchSwap, compareDexRoutes } from 'blitzkrieg/evm';
 
 // Get quote from Uniswap V3
 const quote = await getUniswapQuote({
@@ -623,7 +623,7 @@ console.log(`Best route: ${comparison.best}, saves ${comparison.savings}`);
 ### MEV Protection
 
 ```typescript
-import { createMevProtectionService, sendFlashbotsProtect, submitJitoBundle } from 'clodds/execution/mev-protection';
+import { createMevProtectionService, sendFlashbotsProtect, submitJitoBundle } from 'blitzkrieg/execution/mev-protection';
 
 // Create protection service
 const mev = createMevProtectionService({
@@ -643,7 +643,7 @@ await mev.submitSolanaBundle(bundle);
 ### Whale Tracking (Polymarket)
 
 ```typescript
-import { createWhaleTracker, getMarketWhaleActivity } from 'clodds/feeds/polymarket/whale-tracker';
+import { createWhaleTracker, getMarketWhaleActivity } from 'blitzkrieg/feeds/polymarket/whale-tracker';
 
 const tracker = createWhaleTracker({
   minTradeSize: 10000,    // $10k minimum
@@ -669,7 +669,7 @@ console.log(`Buy volume: $${activity.buyVolume}, Sell volume: $${activity.sellVo
 ### Crypto Whale Tracking (Multi-Chain)
 
 ```typescript
-import { createCryptoWhaleTracker } from 'clodds/feeds/crypto/whale-tracker';
+import { createCryptoWhaleTracker } from 'blitzkrieg/feeds/crypto/whale-tracker';
 
 const tracker = createCryptoWhaleTracker({
   chains: ['solana', 'ethereum', 'polygon', 'arbitrum', 'base', 'optimism'],
@@ -723,7 +723,7 @@ const wallet = tracker.getWallet('solana', 'ABC123...');
 ### Copy Trading
 
 ```typescript
-import { createCopyTradingService, findBestAddressesToCopy } from 'clodds/trading/copy-trading';
+import { createCopyTradingService, findBestAddressesToCopy } from 'blitzkrieg/trading/copy-trading';
 
 // Find profitable addresses to copy
 const topTraders = await findBestAddressesToCopy(whaleTracker, {
@@ -769,7 +769,7 @@ copyTrader.unfollow('0x...');
 ### Smart Order Routing
 
 ```typescript
-import { createSmartRouter, quickPriceCompare } from 'clodds/execution/smart-router';
+import { createSmartRouter, quickPriceCompare } from 'blitzkrieg/execution/smart-router';
 
 const router = createSmartRouter(feeds, {
   mode: 'balanced',  // 'best_price' | 'best_liquidity' | 'lowest_fee' | 'balanced'
@@ -805,10 +805,10 @@ import {
   createAnthropicOAuth,
   createOpenAIOAuth,
   createGoogleOAuth
-} from 'clodds/auth/oauth';
-import { CopilotAuthClient, interactiveCopilotAuth } from 'clodds/auth/copilot';
-import { GoogleAuthClient, GeminiClient, interactiveGoogleAuth } from 'clodds/auth/google';
-import { QwenAuthClient, QwenClient } from 'clodds/auth/qwen';
+} from 'blitzkrieg/auth/oauth';
+import { CopilotAuthClient, interactiveCopilotAuth } from 'blitzkrieg/auth/copilot';
+import { GoogleAuthClient, GeminiClient, interactiveGoogleAuth } from 'blitzkrieg/auth/google';
+import { QwenAuthClient, QwenClient } from 'blitzkrieg/auth/qwen';
 
 // OAuth for Anthropic/OpenAI
 const anthropicOAuth = createAnthropicOAuth('client-id', 'client-secret');
@@ -842,12 +842,12 @@ import {
   TelemetryService,
   LLMInstrumentation,
   createLLMInstrumentation
-} from 'clodds/telemetry';
+} from 'blitzkrieg/telemetry';
 
 // Initialize telemetry
 const telemetry = initTelemetry({
   enabled: true,
-  serviceName: 'clodds',
+  serviceName: 'blitzkrieg',
   otlpEndpoint: 'http://localhost:4318', // OTLP collector
   jaegerEndpoint: 'http://localhost:14268', // Jaeger
   metricsPort: 9090, // Prometheus metrics
@@ -884,7 +884,7 @@ telemetry.startMetricsServer(9090);
 ### Task Runner Extension
 
 ```typescript
-import { createTaskRunner, TaskRunner, TaskDefinition } from 'clodds/extensions/task-runner';
+import { createTaskRunner, TaskRunner, TaskDefinition } from 'blitzkrieg/extensions/task-runner';
 
 const runner = createTaskRunner({
   maxConcurrent: 4,
@@ -920,7 +920,7 @@ runner.registerExecutor({
 ### Open Prose Extension
 
 ```typescript
-import { createOpenProseExtension } from 'clodds/extensions/open-prose';
+import { createOpenProseExtension } from 'blitzkrieg/extensions/open-prose';
 
 const prose = await createOpenProseExtension({
   enabled: true,
@@ -949,7 +949,7 @@ const html = await prose.exportDocument(doc.id, 'html');
 ### Auto-Arbitrage Execution
 
 ```typescript
-import { createOpportunityExecutor } from 'clodds/opportunity/executor';
+import { createOpportunityExecutor } from 'blitzkrieg/opportunity/executor';
 
 const executor = createOpportunityExecutor(finder, execution, {
   minEdge: 1.0,           // Minimum 1% edge
@@ -985,7 +985,7 @@ import {
   getRCPPollingAverage,
   analyzeEdge,
   calculateKelly
-} from 'clodds/feeds/external';
+} from 'blitzkrieg/feeds/external';
 
 // Get Fed rate probabilities
 const fedWatch = await getFedWatchProbabilities();
@@ -1474,14 +1474,14 @@ All endpoints require auth. Prefix: `/api/twap`.
 
 ---
 
-# Clodds Compute API
+# Blitzkrieg Compute API
 
 The Compute API allows agents to pay for compute resources with USDC. No API keys needed - just a wallet.
 
 ## Base URL
 
 ```
-https://api.cloddsbot.com
+http://127.0.0.1:18789
 ```
 
 ## Authentication
@@ -1490,7 +1490,7 @@ No API keys required. Agents authenticate by:
 1. Depositing USDC to the treasury wallet on any supported network
 2. Including payment proof in requests
 
-**Treasury wallet:** Set via `CLODDS_TREASURY_WALLET` env var on the server.
+**Treasury wallet:** Set via `BLITZKRIEG_TREASURY_WALLET` env var on the server.
 
 **Supported networks:** Base, Ethereum, Polygon (USDC)
 
@@ -1513,7 +1513,7 @@ Health check and service info.
 ```json
 {
   "status": "ok",
-  "service": "clodds-compute",
+  "service": "blitzkrieg-compute",
   "version": "v1",
   "uptime": 123456,
   "activeJobs": 2
@@ -2003,7 +2003,7 @@ If you provide a `callbackUrl`, the API will POST results when jobs complete:
 }
 ```
 
-The webhook includes an `X-Clodds-Signature` header (HMAC-SHA256) for verification.
+The webhook includes an `X-Blitzkrieg-Signature` header (HMAC-SHA256) for verification.
 
 ## Streaming LLM Endpoint
 
@@ -2056,7 +2056,7 @@ data: {"type": "done", "response": {"content": "In the realm of code...", "model
 
 **JavaScript example:**
 ```javascript
-const response = await fetch('https://api.cloddsbot.com/v1/stream/llm', {
+const response = await fetch('http://127.0.0.1:18789/v1/stream/llm', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({

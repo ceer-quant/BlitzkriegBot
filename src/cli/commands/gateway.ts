@@ -1,5 +1,5 @@
 /**
- * Gateway command - starts the Clodds server
+ * Gateway command - starts the Blitzkrieg server
  */
 
 import { loadConfig } from '../../utils/config';
@@ -10,14 +10,14 @@ const _gwPath = '../../gateway/index.js';
 
 export async function startGateway(options: { config?: string }): Promise<void> {
   try {
-    logger.info('Starting Clodds gateway...');
+    logger.info('Starting Blitzkrieg gateway...');
 
     const config = await loadConfig(options.config);
     const { createGateway } = await import(_gwPath);
     const gateway = await createGateway(config);
     await gateway.start();
 
-    logger.info('Clodds is running!');
+    logger.info('Blitzkrieg is running!');
     logger.info(`Gateway: ws://127.0.0.1:${config.gateway.port}`);
 
     // Handle shutdown

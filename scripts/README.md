@@ -1,4 +1,4 @@
-# Clodds Scripts
+# Blitzkrieg Scripts
 
 Build, deployment, and utility scripts.
 
@@ -32,7 +32,7 @@ Build, deployment, and utility scripts.
 
 ```bash
 # Install
-curl -fsSL https://clodds.com/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ceer-quant/BlitzkriegBot/main/scripts/install.sh | bash
 
 # Development
 ./scripts/dev.sh

@@ -53,7 +53,7 @@ Create custom trading strategies using natural language or templates, then deplo
 ### Create Strategy Builder
 
 ```typescript
-import { createStrategyBuilder } from 'clodds/strategy';
+import { createStrategyBuilder } from 'blitzkrieg/strategy';
 
 const builder = createStrategyBuilder({
   // Validation

@@ -120,7 +120,7 @@ export async function createVoiceChannel(
               res.end(
                 generateTwiML(
                   `Pairing required. Your pairing code is: ${code.split('').join(' ')}. ` +
-                    `Please run clodds pairing approve voice ${code} on your computer. Goodbye.`
+                    `Please run blitzkrieg pairing approve voice ${code} on your computer. Goodbye.`
                 )
               );
             } else {

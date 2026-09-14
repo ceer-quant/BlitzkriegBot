@@ -1,5 +1,5 @@
 /**
- * MCP Server Mode - Expose all Clodds skills as MCP tools via stdio
+ * MCP Server Mode - Expose all Blitzkrieg skills as MCP tools via stdio
  *
  * Reads JSON-RPC from stdin, writes to stdout, logs to stderr.
  * Protocol version: 2024-11-05
@@ -238,5 +238,5 @@ export async function startMcpServer(): Promise<void> {
   });
 
   // Signal readiness via stderr
-  process.stderr.write('Clodds MCP server started (stdio)\n');
+  process.stderr.write('Blitzkrieg MCP server started (stdio)\n');
 }

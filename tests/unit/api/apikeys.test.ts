@@ -15,7 +15,7 @@ import { tmpdir } from 'os';
 // TEST SETUP
 // =============================================================================
 
-const TEST_STORAGE_DIR = join(tmpdir(), 'clodds-test-apikeys-' + Date.now());
+const TEST_STORAGE_DIR = join(tmpdir(), 'blitzkrieg-test-apikeys-' + Date.now());
 
 function cleanupTestDir(): void {
   if (existsSync(TEST_STORAGE_DIR)) {
@@ -52,7 +52,7 @@ describe('API Key Creation', () => {
     assert.ok(result.data, 'Should have data');
 
     // Verify key format
-    assert.ok(result.keyId.startsWith('clodds_'), 'Key should start with clodds_');
+    assert.ok(result.keyId.startsWith('blitzkrieg_'), 'Key should start with blitzkrieg_');
     assert.strictEqual(result.fullKey, `${result.keyId}.${result.secret}`);
   });
 
@@ -211,21 +211,21 @@ describe('parseApiKey', () => {
   const { parseApiKey } = require('../../../src/api/apikeys');
 
   it('should parse Bearer token format', () => {
-    const parsed = parseApiKey('Bearer clodds_abc123.secretxyz');
+    const parsed = parseApiKey('Bearer blitzkrieg_abc123.secretxyz');
 
     assert.deepStrictEqual(parsed, {
-      keyId: 'clodds_abc123',
+      keyId: 'blitzkrieg_abc123',
       secret: 'secretxyz',
     });
   });
 
   it('should parse Basic auth format', () => {
-    // Base64 encode "clodds_abc:secret123"
-    const credentials = Buffer.from('clodds_abc:secret123').toString('base64');
+    // Base64 encode "blitzkrieg_abc:secret123"
+    const credentials = Buffer.from('blitzkrieg_abc:secret123').toString('base64');
     const parsed = parseApiKey(`Basic ${credentials}`);
 
     assert.deepStrictEqual(parsed, {
-      keyId: 'clodds_abc',
+      keyId: 'blitzkrieg_abc',
       secret: 'secret123',
     });
   });
@@ -251,10 +251,10 @@ describe('parseApiKey', () => {
   });
 
   it('should handle Bearer with URL-safe base64 secret', () => {
-    const parsed = parseApiKey('Bearer clodds_key.abc-def_123');
+    const parsed = parseApiKey('Bearer blitzkrieg_key.abc-def_123');
 
     assert.deepStrictEqual(parsed, {
-      keyId: 'clodds_key',
+      keyId: 'blitzkrieg_key',
       secret: 'abc-def_123',
     });
   });

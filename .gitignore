@@ -93,7 +93,7 @@ apps/
 # Development/Internal - Not for production repo
 # =============================================================================
 
-# Frontend website (separate repo: cloddsbot-docs)
+# Frontend website (separate repo, not part of this workspace)
 apps/
 
 # Placeholder folders

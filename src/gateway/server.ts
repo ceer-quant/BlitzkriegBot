@@ -358,7 +358,6 @@ export function createServer(
         process.env.BLITZKRIEG_PUBLIC_HOST || 'localhost',
         'localhost',
         '127.0.0.1',
-        'compute.cloddsbot.com',
       ].filter(Boolean));
       const host = req.headers.host?.split(':')[0] || 'localhost';
       if (!allowedHosts.has(host)) {
@@ -926,7 +925,7 @@ export function createServer(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Clodds</title>
+  <title>Blitzkrieg</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1392,9 +1391,9 @@ export function createServer(
 </head>
 <body>
   <div class="header">
-    <img class="header-logo" src="https://cloddsbot.com/logo.png" alt="Clodds" onerror="this.textContent=''" />
+    <img class="header-logo" src="/webchat/logo.png" alt="Blitzkrieg" onerror="this.textContent=''" />
     <div class="header-info">
-      <div class="header-title">Clodds</div>
+      <div class="header-title">Blitzkrieg</div>
       <div class="header-subtitle">AI Trading Terminal</div>
     </div>
     <div class="status-dot" id="status-dot" title="Connecting..."></div>
@@ -1402,7 +1401,7 @@ export function createServer(
 
   <div id="messages">
     <div class="welcome" id="welcome">
-      <img class="welcome-logo" src="https://cloddsbot.com/logo.png" alt="" onerror="this.style.display='none'" />
+      <img class="welcome-logo" src="/webchat/logo.png" alt="" onerror="this.style.display='none'" />
       <h2>What can I help you with?</h2>
       <p>I can trade prediction markets, analyze odds, track positions, and more.</p>
       <div class="welcome-chips">
@@ -2190,7 +2189,7 @@ export function createServer(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Clodds</title>
+  <title>Blitzkrieg</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2281,7 +2280,7 @@ export function createServer(
 </head>
 <body>
   <div class="header">
-    <h1>Clodds</h1>
+    <h1>Blitzkrieg</h1>
     <p>Prediction Markets AI</p>
   </div>
 
@@ -2440,7 +2439,7 @@ export function createServer(
     res.send(`<!DOCTYPE html>
 <html>
 <head>
-  <title>Clodds Performance Dashboard</title>
+  <title>Blitzkrieg Performance Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }

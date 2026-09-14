@@ -1,7 +1,7 @@
 /**
  * WebChat Channel - WebSocket-based browser chat interface
  *
- * Allows users to chat with Clodds via a web browser.
+ * Allows users to chat with Blitzkrieg via a web browser.
  * Uses WebSocket for real-time communication.
  */
 
@@ -96,7 +96,7 @@ export function createWebChatChannel(
     ws.send(JSON.stringify({
       type: 'connected',
       sessionId,
-      message: 'Connected to Clodds. Send { "type": "auth", "token": "..." } to authenticate (token required if configured).',
+      message: 'Connected to Blitzkrieg. Send { "type": "auth", "token": "..." } to authenticate (token required if configured).',
     }));
 
     ws.on('message', async (data: Buffer) => {

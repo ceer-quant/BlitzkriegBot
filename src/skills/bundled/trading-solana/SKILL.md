@@ -81,7 +81,7 @@ import {
   createJupiterDCA,
   closeJupiterDCA,
   listJupiterDCAs,
-} from 'clodds/solana/jupiter';
+} from 'blitzkrieg/solana/jupiter';
 
 // Execute swap via Jupiter (best route)
 const result = await executeJupiterSwap(connection, keypair, {
@@ -151,7 +151,7 @@ import {
   harvestClmmRewards,
   addAmmLiquidity,
   removeAmmLiquidity,
-} from 'clodds/solana/raydium';
+} from 'blitzkrieg/solana/raydium';
 
 // Get quote
 const quote = await getRaydiumQuote({
@@ -197,7 +197,7 @@ await addAmmLiquidity(connection, keypair, {
 ### Orca Whirlpools
 
 ```typescript
-import { executeOrcaWhirlpoolSwap, getOrcaWhirlpoolQuote, listOrcaWhirlpoolPools } from 'clodds/solana/orca';
+import { executeOrcaWhirlpoolSwap, getOrcaWhirlpoolQuote, listOrcaWhirlpoolPools } from 'blitzkrieg/solana/orca';
 
 // Get quote
 const quote = await getOrcaWhirlpoolQuote({
@@ -221,7 +221,7 @@ const pools = await listOrcaWhirlpoolPools({ token: 'SOL' });
 ### Meteora DLMM
 
 ```typescript
-import { executeMeteoraDlmmSwap, getMeteoraDlmmQuote, listMeteoraDlmmPools } from 'clodds/solana/meteora';
+import { executeMeteoraDlmmSwap, getMeteoraDlmmQuote, listMeteoraDlmmPools } from 'blitzkrieg/solana/meteora';
 
 // Get quote
 const quote = await getMeteoraDlmmQuote({
@@ -254,7 +254,7 @@ import {
   isGraduated,
   getTokenInfo,
   getPumpPortalQuote,
-} from 'clodds/solana/pumpapi';
+} from 'blitzkrieg/solana/pumpapi';
 
 // Buy token on Pump.fun
 const result = await executePumpFunTrade(connection, keypair, {
@@ -328,7 +328,7 @@ console.log(`Input: ${quote.inputAmount}, Output: ${quote.outputAmount}`);
 ### Token Resolution
 
 ```typescript
-import { resolveTokenMints, getTokenList } from 'clodds/solana/tokenlist';
+import { resolveTokenMints, getTokenList } from 'blitzkrieg/solana/tokenlist';
 
 // Resolve token symbols to mint addresses
 const mints = await resolveTokenMints(['SOL', 'USDC', 'JUP', 'BONK']);
@@ -341,7 +341,7 @@ const tokens = await getTokenList();
 ### Pool Discovery
 
 ```typescript
-import { listAllPools, selectBestPool } from 'clodds/solana/pools';
+import { listAllPools, selectBestPool } from 'blitzkrieg/solana/pools';
 
 // List all pools for a token pair
 const pools = await listAllPools({
@@ -360,7 +360,7 @@ const best = await selectBestPool({
 ### Wallet Utilities
 
 ```typescript
-import { loadSolanaKeypair, getSolanaConnection, signAndSendTransaction } from 'clodds/solana/wallet';
+import { loadSolanaKeypair, getSolanaConnection, signAndSendTransaction } from 'blitzkrieg/solana/wallet';
 
 // Load keypair from env
 const keypair = loadSolanaKeypair();
@@ -404,7 +404,7 @@ Common token symbols that can be used:
 ## Error Handling
 
 ```typescript
-import { SolanaSwapError, InsufficientBalanceError, SlippageExceededError } from 'clodds/solana';
+import { SolanaSwapError, InsufficientBalanceError, SlippageExceededError } from 'blitzkrieg/solana';
 
 try {
   await executeJupiterSwap({ ... });

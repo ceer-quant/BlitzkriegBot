@@ -44,7 +44,7 @@ Validate trading strategies using historical data, walk-forward analysis, and Mo
 ### Create Backtest Engine
 
 ```typescript
-import { createBacktestEngine } from 'clodds/backtest';
+import { createBacktestEngine } from 'blitzkrieg/backtest';
 
 const backtest = createBacktestEngine({
   // Data source

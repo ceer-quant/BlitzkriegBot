@@ -1,11 +1,11 @@
 {
   "app": {
-    "name": "Clodds",
+    "name": "Blitzkrieg",
     "tagline": "AI 交易终端",
     "version": "版本 {version}"
   },
   "welcome": {
-    "message": "欢迎使用 Clodds",
+    "message": "欢迎使用 Blitzkrieg",
     "greeting": "你好，{name}！",
     "firstTime": "让我们开始设置。",
     "returning": "欢迎回来！"
@@ -208,8 +208,8 @@
     "share": "分享"
   },
   "cli": {
-    "starting": "启动 Clodds...",
-    "ready": "Clodds 已就绪！",
+    "starting": "启动 Blitzkrieg...",
+    "ready": "Blitzkrieg 已就绪！",
     "shutting_down": "正在关闭...",
     "doctor": {
       "title": "系统诊断",

@@ -18,7 +18,7 @@ import type {
 } from './types';
 import { hashDecision } from './hash';
 
-// Database interface (matches Clodds db pattern)
+// Database interface (matches Blitzkrieg db pattern)
 export interface LedgerDb {
   run(sql: string, params?: unknown[]): void;
   get<T>(sql: string, params?: unknown[]): T | undefined;

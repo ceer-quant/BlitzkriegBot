@@ -76,7 +76,7 @@ export PREDICTFUN_API_KEY="your-api-key"
 export PREDICTFUN_PRIVATE_KEY="0x..."
 ```
 
-Or in `~/.clodds/clodds.json`:
+Or in `~/.blitzkrieg/blitzkrieg.json`:
 
 ```json
 {

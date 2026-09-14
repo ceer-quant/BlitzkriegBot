@@ -1,10 +1,10 @@
 /**
- * Clodds i18n - Lightweight internationalization
+ * Blitzkrieg i18n - Lightweight internationalization
  *
  * Usage:
  *   import { t, setLocale, getLocale } from './i18n';
  *
- *   t('welcome');                    // "Welcome to Clodds"
+ *   t('welcome');                    // "Welcome to Blitzkrieg"
  *   t('greeting', { name: 'Alex' }); // "Hello, Alex!"
  *   t('errors.notFound');            // Nested keys supported
  *

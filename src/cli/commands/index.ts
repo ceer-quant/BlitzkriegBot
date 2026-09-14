@@ -2028,7 +2028,7 @@ export function createUsageCommands(program: Command): void {
 export function createInitCommand(program: Command): void {
   program
     .command('init')
-    .description('Initialize Clodds in current directory')
+    .description('Initialize Blitzkrieg in current directory')
     .option('-f, --force', 'Overwrite existing config')
     .action(async (options: { force?: boolean }) => {
       const existingConfigPath = resolveWorkspaceConfigFile(process.cwd());
@@ -2062,7 +2062,7 @@ export function createInitCommand(program: Command): void {
 export function createUpgradeCommand(program: Command): void {
   program
     .command('upgrade')
-    .description('Upgrade Clodds to latest version')
+    .description('Upgrade Blitzkrieg to latest version')
     .option('--check', 'Check for updates only')
     .action(async (options: { check?: boolean }) => {
       console.log('Checking for updates...');
@@ -2072,7 +2072,7 @@ export function createUpgradeCommand(program: Command): void {
         console.log('Latest version: 0.1.0');
         console.log('You are up to date!');
       } else {
-        console.log('To upgrade, run: npm install -g clodds@latest');
+        console.log('To upgrade, run: npm install -g blitzkrieg-bot@latest');
       }
     });
 }
@@ -2084,12 +2084,12 @@ export function createUpgradeCommand(program: Command): void {
 export function createLoginCommand(program: Command): void {
   program
     .command('login')
-    .description('Login to Clodds services')
+    .description('Login to Blitzkrieg services')
     .option('-p, --provider <provider>', 'Provider (anthropic, openai)')
     .action(async (options: { provider?: string }) => {
       const provider = options.provider || 'anthropic';
       console.log(`\nTo configure ${provider}:`);
-      console.log(`  clodds config set ${provider}.apiKey YOUR_API_KEY`);
+      console.log(`  blitzkrieg config set ${provider}.apiKey YOUR_API_KEY`);
     });
 }
 
@@ -2100,10 +2100,10 @@ export function createLoginCommand(program: Command): void {
 export function createLogoutCommand(program: Command): void {
   program
     .command('logout')
-    .description('Logout from Clodds services')
+    .description('Logout from Blitzkrieg services')
     .option('-a, --all', 'Logout from all providers')
     .action(async (options: { all?: boolean }) => {
-      console.log('Logged out from Clodds services');
+      console.log('Logged out from Blitzkrieg services');
     });
 }
 
@@ -2116,7 +2116,7 @@ export function createVersionCommand(program: Command): void {
     .command('version')
     .description('Show detailed version info')
     .action(async () => {
-      console.log('\nClodds Version Info\n');
+      console.log('\nBlitzkrieg Version Info\n');
       console.log('  Version: 0.1.0');
       console.log('  Node.js: ' + process.version);
       console.log('  Platform: ' + process.platform);
@@ -2503,7 +2503,7 @@ export function createCredsCommands(program: Command): void {
       console.log(`\nSummary: ${passed} passed, ${warned} warnings, ${failed} failed`);
 
       if (failed > 0) {
-        console.log('\n💡 Run `clodds doctor` for full system diagnostics');
+        console.log('\n💡 Run `blitzkrieg doctor` for full system diagnostics');
         process.exitCode = 1;
       }
     });
@@ -2531,7 +2531,7 @@ export function createLocaleCommands(program: Command): void {
         const marker = loc.code === current ? ' ← current' : '';
         console.log(`  ${loc.code}  ${loc.nativeName.padEnd(10)} (${loc.name})${marker}`);
       }
-      console.log('\nSet with: clodds locale set <code>');
+      console.log('\nSet with: blitzkrieg locale set <code>');
       console.log('Or: BLITZKRIEG_LOCALE=<code> in .env\n');
     });
 
@@ -2798,7 +2798,7 @@ export function createLedgerCommands(program: Command): void {
       console.log(`  hashIntegrity:  ${ledgerConfig.hashIntegrity ? 'SHA-256 enabled' : 'Disabled'}`);
       console.log(`  retentionDays:  ${ledgerConfig.retentionDays}`);
       console.log(`  onchainAnchor:  ${ledgerConfig.onchainAnchor ? 'Enabled' : 'Disabled'}`);
-      console.log('\nEnable with: clodds config set ledger.enabled true\n');
+      console.log('\nEnable with: blitzkrieg config set ledger.enabled true\n');
     });
 
   ledger
@@ -2906,7 +2906,7 @@ export function createBittensorCommands(program: Command): void {
   // ── setup: full onboarding wizard ──────────────────────────────────────────
   bittensor
     .command('setup')
-    .description('One-command setup: installs btcli, creates wallet, configures Clodds')
+    .description('One-command setup: installs btcli, creates wallet, configures Blitzkrieg')
     .option('--wallet-name <name>', 'Wallet name', 'default')
     .option('--skip-install', 'Skip btcli installation')
     .action(async (options: { walletName?: string; skipInstall?: boolean }) => {
@@ -3022,8 +3022,8 @@ export function createBittensorCommands(program: Command): void {
       }
 
       // Step 4: Write config
-      console.log('\n[4/5] Configuring Clodds...');
-      const cloddsDir = resolveStateDir();
+      console.log('\n[4/5] Configuring Blitzkrieg...');
+      const stateDir = resolveStateDir();
       const configPath = resolveConfigPath();
 
       let existingConfig: Record<string, unknown> = {};
@@ -3034,7 +3034,7 @@ export function createBittensorCommands(program: Command): void {
           // fresh config
         }
       } else {
-        mkdirSync(cloddsDir, { recursive: true });
+        mkdirSync(stateDir, { recursive: true });
       }
 
       existingConfig.bittensor = {
@@ -3062,9 +3062,9 @@ export function createBittensorCommands(program: Command): void {
         }
       }
       console.log('  Register on a subnet (Chutes SN64 recommended):');
-      console.log('    clodds bittensor register 64\n');
-      console.log('  Then start Clodds:');
-      console.log('    clodds start\n');
+      console.log('    blitzkrieg bittensor register 64\n');
+      console.log('  Then start Blitzkrieg:');
+      console.log('    blitzkrieg start\n');
       console.log('  Monitor in chat:');
       console.log('    /tao status');
       console.log('    /tao earnings\n');
@@ -3082,7 +3082,7 @@ export function createBittensorCommands(program: Command): void {
     .action(async (options: { name?: string }) => {
       const pythonPath = process.env.BITTENSOR_PYTHON_PATH || detectPython();
       if (!pythonPath) {
-        console.log('\nPython not found. Run: clodds bittensor setup\n');
+        console.log('\nPython not found. Run: blitzkrieg bittensor setup\n');
         return;
       }
 
@@ -3098,7 +3098,7 @@ export function createBittensorCommands(program: Command): void {
       if (overview.ok) {
         console.log(overview.stdout);
       } else {
-        console.log(`  Not found. Create: clodds bittensor setup\n`);
+        console.log(`  Not found. Create: blitzkrieg bittensor setup\n`);
       }
     });
 
@@ -3109,7 +3109,7 @@ export function createBittensorCommands(program: Command): void {
     .action(async (options: { name?: string }) => {
       const pythonPath = process.env.BITTENSOR_PYTHON_PATH || detectPython();
       if (!pythonPath || !hasBtcli(pythonPath)) {
-        console.log('\nbtcli not found. Run: clodds bittensor setup\n');
+        console.log('\nbtcli not found. Run: blitzkrieg bittensor setup\n');
         return;
       }
 
@@ -3138,7 +3138,7 @@ export function createBittensorCommands(program: Command): void {
     .action(async (options: { name?: string }) => {
       const pythonPath = process.env.BITTENSOR_PYTHON_PATH || detectPython();
       if (!pythonPath || !hasBtcli(pythonPath)) {
-        console.log('\nbtcli not found. Run: clodds bittensor setup\n');
+        console.log('\nbtcli not found. Run: blitzkrieg bittensor setup\n');
         return;
       }
 
@@ -3159,13 +3159,13 @@ export function createBittensorCommands(program: Command): void {
     .action(async (subnetId: string, options: { name?: string }) => {
       const pythonPath = process.env.BITTENSOR_PYTHON_PATH || detectPython();
       if (!pythonPath || !hasBtcli(pythonPath)) {
-        console.log('\nbtcli not found. Run: clodds bittensor setup\n');
+        console.log('\nbtcli not found. Run: blitzkrieg bittensor setup\n');
         return;
       }
 
       const id = parseInt(subnetId, 10);
       if (isNaN(id)) {
-        console.log('\nInvalid subnet ID. Example: clodds bittensor register 64\n');
+        console.log('\nInvalid subnet ID. Example: blitzkrieg bittensor register 64\n');
         return;
       }
 
@@ -3180,7 +3180,7 @@ export function createBittensorCommands(program: Command): void {
       }
 
       console.log(`\nRegistering on subnet ${id} (${network})...`);
-      console.log('This may cost TAO. Check your balance first: clodds bittensor wallet balance\n');
+      console.log('This may cost TAO. Check your balance first: blitzkrieg bittensor wallet balance\n');
 
       const args = [
         'subnet', 'register',
@@ -3212,7 +3212,7 @@ export function createBittensorCommands(program: Command): void {
       const { loadConfig } = await import('../../utils/config');
       const config = await loadConfig();
       if (!config.bittensor?.enabled) {
-        console.log('\nBittensor is not enabled. Run: clodds bittensor setup\n');
+        console.log('\nBittensor is not enabled. Run: blitzkrieg bittensor setup\n');
         return;
       }
       console.log('\nBittensor Configuration:');
@@ -3247,7 +3247,7 @@ export function createBittensorCommands(program: Command): void {
         if (token) headers['Authorization'] = `Bearer ${token}`;
         const r = await fetch(`http://127.0.0.1:${port}/api/bittensor/earnings?period=${period}`, { headers });
         if (!r.ok) {
-          console.log(`\nGateway returned ${r.status}. Is Clodds running? (clodds start)\n`);
+          console.log(`\nGateway returned ${r.status}. Is Blitzkrieg running? (blitzkrieg start)\n`);
           return;
         }
         const body = await r.json() as { ok: boolean; data?: Array<{ subnetId: number; hotkey: string; taoEarned: number; usdEarned: number }> };
@@ -3263,7 +3263,7 @@ export function createBittensorCommands(program: Command): void {
         console.log(`  USD: $${totalUsd.toFixed(2)}`);
         console.log(`  Records: ${data.length}\n`);
       } catch {
-        console.log('\nCould not reach gateway. Is Clodds running? (clodds start)\n');
+        console.log('\nCould not reach gateway. Is Blitzkrieg running? (blitzkrieg start)\n');
       }
     });
 
@@ -3280,7 +3280,7 @@ export function createBittensorCommands(program: Command): void {
         if (token) headers['Authorization'] = `Bearer ${token}`;
         const r = await fetch(`http://127.0.0.1:${port}/api/bittensor/miners`, { headers });
         if (!r.ok) {
-          console.log(`\nGateway returned ${r.status}. Is Clodds running? (clodds start)\n`);
+          console.log(`\nGateway returned ${r.status}. Is Blitzkrieg running? (blitzkrieg start)\n`);
           return;
         }
         const body = await r.json() as { ok: boolean; data?: Array<{ subnetId: number; hotkey: string; uid: number; trust: number; incentive: number; emission: number; rank: number; active: boolean }> };
@@ -3295,7 +3295,7 @@ export function createBittensorCommands(program: Command): void {
         }
         console.log('');
       } catch {
-        console.log('\nCould not reach gateway. Is Clodds running? (clodds start)\n');
+        console.log('\nCould not reach gateway. Is Blitzkrieg running? (blitzkrieg start)\n');
       }
     });
 
@@ -3312,7 +3312,7 @@ export function createBittensorCommands(program: Command): void {
         if (token) headers['Authorization'] = `Bearer ${token}`;
         const r = await fetch(`http://127.0.0.1:${port}/api/bittensor/subnets`, { headers });
         if (!r.ok) {
-          console.log(`\nGateway returned ${r.status}. Is Clodds running? (clodds start)\n`);
+          console.log(`\nGateway returned ${r.status}. Is Blitzkrieg running? (blitzkrieg start)\n`);
           return;
         }
         const body = await r.json() as { ok: boolean; data?: Array<{ netuid: number; name: string; minerCount: number; registrationCost: number }> };
@@ -3328,7 +3328,7 @@ export function createBittensorCommands(program: Command): void {
         if (data.length > 30) console.log(`  ... and ${data.length - 30} more`);
         console.log('');
       } catch {
-        console.log('\nCould not reach gateway. Is Clodds running? (clodds start)\n');
+        console.log('\nCould not reach gateway. Is Blitzkrieg running? (blitzkrieg start)\n');
       }
     });
 
@@ -3381,7 +3381,7 @@ export function createBittensorCommands(program: Command): void {
         console.log('  Config:       not found');
       }
 
-      console.log('\nIf anything is missing, run: clodds bittensor setup\n');
+      console.log('\nIf anything is missing, run: blitzkrieg bittensor setup\n');
     });
 }
 
@@ -3396,7 +3396,7 @@ export function createDoctorCommand(program: Command): void {
     .option('--verbose', 'Show detailed output')
     .action(async (options: { verbose?: boolean }) => {
       const verbose = !!options.verbose;
-      console.log('\n=== Clodds System Doctor ===\n');
+      console.log('\n=== Blitzkrieg System Doctor ===\n');
 
       type CheckResult = { name: string; status: 'pass' | 'warn' | 'fail'; message: string; fix?: string };
       const results: CheckResult[] = [];
@@ -3407,7 +3407,7 @@ export function createDoctorCommand(program: Command): void {
       if (existsSync(configPath)) {
         results.push({ name: 'Config file', status: 'pass', message: configPath });
       } else {
-        results.push({ name: 'Config file', status: 'warn', message: 'Not found', fix: 'Run: clodds onboard' });
+        results.push({ name: 'Config file', status: 'warn', message: 'Not found', fix: 'Run: blitzkrieg onboard' });
       }
 
       const envPath = statePath('.env');
@@ -3544,7 +3544,7 @@ export function createDoctorCommand(program: Command): void {
       if (existsSync(waDir)) {
         results.push({ name: 'WhatsApp', status: 'pass', message: `Auth at ${waDir}` });
       } else if (verbose) {
-        results.push({ name: 'WhatsApp', status: 'warn', message: 'No auth session', fix: 'Run: clodds whatsapp setup' });
+        results.push({ name: 'WhatsApp', status: 'warn', message: 'No auth session', fix: 'Run: blitzkrieg whatsapp setup' });
       }
 
       // ── 4. Trading Platforms ─────────────────────────────────────────────
@@ -3614,7 +3614,7 @@ export function createDoctorCommand(program: Command): void {
           if (hasBtcli(py)) {
             results.push({ name: 'btcli', status: 'pass', message: 'Installed' });
           } else {
-            results.push({ name: 'btcli', status: 'fail', message: 'Not installed', fix: 'Run: clodds bittensor setup' });
+            results.push({ name: 'btcli', status: 'fail', message: 'Not installed', fix: 'Run: blitzkrieg bittensor setup' });
           }
         } else {
           results.push({ name: 'Python', status: 'fail', message: 'Not found', fix: 'Install Python 3' });
@@ -3625,7 +3625,7 @@ export function createDoctorCommand(program: Command): void {
           name: 'Bittensor wallet',
           status: existsSync(walletDir) ? 'pass' : 'fail',
           message: existsSync(walletDir) ? walletDir : 'Not found',
-          fix: existsSync(walletDir) ? undefined : 'Run: clodds bittensor setup',
+          fix: existsSync(walletDir) ? undefined : 'Run: blitzkrieg bittensor setup',
         });
       } else if (verbose) {
         results.push({ name: 'Bittensor', status: 'warn', message: 'Not enabled' });
@@ -3671,7 +3671,7 @@ export function createDoctorCommand(program: Command): void {
       console.log(`\n  ${passed} passed, ${warned} warnings, ${failed} failed`);
 
       if (failed > 0) {
-        console.log('\n  Fix the failures above and run `clodds doctor` again.');
+        console.log('\n  Fix the failures above and run `blitzkrieg doctor` again.');
         process.exitCode = 1;
       } else if (warned > 0) {
         console.log('\n  Warnings are optional — fix them if you need those features.');
@@ -3679,7 +3679,7 @@ export function createDoctorCommand(program: Command): void {
         console.log('\n  Everything looks good!');
       }
 
-      console.log(`\n  Tip: Run \`clodds doctor --verbose\` to see all features and optional services.\n`);
+      console.log(`\n  Tip: Run \`blitzkrieg doctor --verbose\` to see all features and optional services.\n`);
     });
 }
 
@@ -3711,8 +3711,8 @@ export function createOnboardCommand(program: Command): void {
       const magenta = (s: string) => `\x1b[35m${s}\x1b[0m`;
       const bgCyan = (s: string) => `\x1b[46m\x1b[30m${s}\x1b[0m`;
 
-      const cloddsDir = resolveStateDir();
-      const envPath = join(cloddsDir, '.env');
+      const stateDir = resolveStateDir();
+      const envPath = join(stateDir, '.env');
       const configPath = resolveConfigPath();
 
       // Track what we'll write
@@ -3741,7 +3741,7 @@ export function createOnboardCommand(program: Command): void {
       // WELCOME
       // ═══════════════════════════════════════════════════════════════════
       const figlet = await import('figlet');
-      const banner = figlet.default.textSync('Clodds', { font: 'ANSI Shadow' });
+      const banner = figlet.default.textSync('Blitzkrieg', { font: 'ANSI Shadow' });
       console.log('');
       console.log(`              ${cyan('\u2584\u2584\u2588\u2588\u2588\u2588\u2588\u2588\u2584\u2584')}`);
       console.log(`            ${cyan('\u2584\u2588\u2588')}${magenta('\u2580')}      ${magenta('\u2580')}${cyan('\u2588\u2588\u2584')}`);
@@ -3778,7 +3778,7 @@ export function createOnboardCommand(program: Command): void {
         if (!apiKey || apiKey.length < 10) {
           console.log('');
           console.log(`  ${red('No key provided.')} Add it later:`);
-          console.log(`  ${dim('echo "ANTHROPIC_API_KEY=sk-ant-..." >> ~/.clodds/.env')}`);
+          console.log(`  ${dim('echo "ANTHROPIC_API_KEY=sk-ant-..." >> ~/.blitzkrieg/.env')}`);
           console.log('');
           rl.close();
           return;
@@ -3872,7 +3872,7 @@ export function createOnboardCommand(program: Command): void {
             console.log(`\r  ${yellow('Offline')} — skipped validation       `);
           }
         } else {
-          console.log(`  ${dim('Skipped. Add later: TELEGRAM_BOT_TOKEN=... in ~/.clodds/.env')}`);
+          console.log(`  ${dim('Skipped. Add later: TELEGRAM_BOT_TOKEN=... in ~/.blitzkrieg/.env')}`);
         }
 
       } else if (channelChoice === 'discord') {
@@ -3897,7 +3897,7 @@ export function createOnboardCommand(program: Command): void {
           configObj.channels = { ...(configObj.channels as object || {}), discord: { enabled: true } };
           console.log(`  ${green('Discord configured')}`);
         } else {
-          console.log(`  ${dim('Skipped. Add later: DISCORD_BOT_TOKEN=... in ~/.clodds/.env')}`);
+          console.log(`  ${dim('Skipped. Add later: DISCORD_BOT_TOKEN=... in ~/.blitzkrieg/.env')}`);
         }
 
       } else if (channelChoice === 'slack') {
@@ -3920,7 +3920,7 @@ export function createOnboardCommand(program: Command): void {
           configObj.channels = { ...(configObj.channels as object || {}), slack: { enabled: true } };
           console.log(`  ${green('Slack configured')}`);
         } else {
-          console.log(`  ${dim('Incomplete. Add tokens later in ~/.clodds/.env')}`);
+          console.log(`  ${dim('Incomplete. Add tokens later in ~/.blitzkrieg/.env')}`);
         }
 
       } else {
@@ -3933,8 +3933,8 @@ export function createOnboardCommand(program: Command): void {
       // ═══════════════════════════════════════════════════════════════════
       console.log(`  ${bgCyan(' 4 ')} ${bold('Saving')}`);
 
-      if (!existsSync(cloddsDir)) {
-        mkdirSync(cloddsDir, { recursive: true });
+      if (!existsSync(stateDir)) {
+        mkdirSync(stateDir, { recursive: true });
       }
 
       // Auto-generate credential encryption key if not set
@@ -3965,9 +3965,9 @@ export function createOnboardCommand(program: Command): void {
       console.log(`  ${green(bold('Setup complete.'))}  Everything you need is ready.`);
       console.log('');
       console.log(`  ${dim('Quick reference:')}`);
-      console.log(`    ${bold('clodds start')}     ${dim('launch the gateway')}`);
-      console.log(`    ${bold('clodds doctor')}    ${dim('run diagnostics')}`);
-      console.log(`    ${bold('clodds repl')}      ${dim('local test shell')}`);
+      console.log(`    ${bold('blitzkrieg start')}     ${dim('launch the gateway')}`);
+      console.log(`    ${bold('blitzkrieg doctor')}    ${dim('run diagnostics')}`);
+      console.log(`    ${bold('blitzkrieg repl')}      ${dim('local test shell')}`);
       console.log('');
       const { networkInterfaces } = await import('os');
       const getHost = (): string => {
@@ -3992,7 +3992,7 @@ export function createOnboardCommand(program: Command): void {
       console.log('');
 
       if (options.start !== false) {
-        const startNow = await ask(`  ${bold('Start Clodds now?')} ${dim('[Y/n]')} `);
+        const startNow = await ask(`  ${bold('Start Blitzkrieg now?')} ${dim('[Y/n]')} `);
         rl.close();
 
         if (!startNow || startNow.toLowerCase() === 'y' || startNow.toLowerCase() === 'yes') {
@@ -4016,7 +4016,7 @@ export function createOnboardCommand(program: Command): void {
           const { logger: rootLog } = await import('../../utils/logger.js');
           (rootLog as any).level = 'info';
 
-          console.log(`\r  ${green(bold('Clodds is running'))}                `);
+          console.log(`\r  ${green(bold('Blitzkrieg is running'))}                `);
           console.log('');
           console.log(`  ${cyan(`http://${webHost}:${config.gateway.port}/webchat`)}`);
           console.log(`  ${dim('Press Ctrl+C to stop')}`);

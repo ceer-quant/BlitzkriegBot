@@ -1,18 +1,18 @@
 # Quick Start
 
-Get Clodds running in 2 commands.
+Get Blitzkrieg running in 2 commands.
 
 ## Install & Setup
 
 ```bash
-npm install -g clodds
-clodds onboard
+npm install -g blitzkrieg
+blitzkrieg onboard
 ```
 
 The setup wizard will:
 1. Ask for your [Anthropic API key](https://console.anthropic.com)
 2. Let you pick a messaging channel (WebChat, Telegram, Discord, or Slack)
-3. Write your config to `~/.clodds/`
+3. Write your config to `~/.blitzkrieg/`
 4. Offer to start the gateway immediately
 
 Once running, open **http://localhost:18789/webchat** in your browser.
@@ -27,8 +27,8 @@ Ask anything:
 ## Verify Setup
 
 ```bash
-clodds doctor       # Full system diagnostics
-clodds creds test   # Check credentials are working
+blitzkrieg doctor       # Full system diagnostics
+blitzkrieg creds test   # Check credentials are working
 ```
 
 ## From Source (Alternative)
@@ -36,8 +36,8 @@ clodds creds test   # Check credentials are working
 If you prefer to build from source:
 
 ```bash
-git clone https://github.com/alsk1992/CloddsBot.git
-cd CloddsBot
+git clone https://github.com/alsk1992/BlitzkriegBot.git
+cd BlitzkriegBot
 npm install
 cp .env.example .env
 # Add ANTHROPIC_API_KEY to .env
@@ -48,7 +48,7 @@ npm start
 ## Common Issues
 
 ### "ANTHROPIC_API_KEY not set"
-Run `clodds onboard` again — it will prompt for your key and save it to `~/.clodds/.env`.
+Run `blitzkrieg onboard` again — it will prompt for your key and save it to `~/.blitzkrieg/.env`.
 
 ### "Port 18789 is in use"
 Another instance is running. Kill it or change the port:
@@ -56,17 +56,17 @@ Another instance is running. Kill it or change the port:
 lsof -i :18789 | grep LISTEN | awk '{print $2}' | xargs kill
 
 # Or change port
-clodds config set gateway.port 18790
+blitzkrieg config set gateway.port 18790
 ```
 
 ### Telegram bot not responding
 1. Make sure you're messaging your bot directly (not a group)
-2. Run `clodds doctor` to check connectivity
+2. Run `blitzkrieg doctor` to check connectivity
 3. If using pairing mode, approve access first
 
 ## Next Steps
 
-- **Add channels**: Run `clodds onboard` again to add more messaging platforms
+- **Add channels**: Run `blitzkrieg onboard` again to add more messaging platforms
 - **Trading**: See [TRADING.md](TRADING.md) to connect trading accounts
 - **Arbitrage**: See [OPPORTUNITY_FINDER.md](OPPORTUNITY_FINDER.md) for cross-platform arbitrage
 - **All commands**: See [USER_GUIDE.md](USER_GUIDE.md) for the full CLI and chat reference
@@ -74,8 +74,8 @@ clodds config set gateway.port 18790
 ## Need Help?
 
 ```bash
-clodds doctor                  # Full diagnostics
-clodds creds test polymarket   # Test specific credentials
+blitzkrieg doctor                  # Full diagnostics
+blitzkrieg creds test polymarket   # Test specific credentials
 ```
 
-Report issues: https://github.com/alsk1992/CloddsBot/issues
+Report issues: https://github.com/alsk1992/BlitzkriegBot/issues

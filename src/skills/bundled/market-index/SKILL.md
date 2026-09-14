@@ -57,7 +57,7 @@ Search, discover, and browse markets across all prediction market platforms with
 ### Create Market Index
 
 ```typescript
-import { createMarketIndex } from 'clodds/market-index';
+import { createMarketIndex } from 'blitzkrieg/market-index';
 
 const index = createMarketIndex({
   platforms: ['polymarket', 'kalshi', 'manifold', 'betfair'],

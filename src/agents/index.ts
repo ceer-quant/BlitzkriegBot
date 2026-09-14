@@ -217,7 +217,7 @@ export interface AgentManager {
   getSkillCommands: () => Array<{ name: string; description: string; subcommands?: Array<{ name: string; description: string; category: string }> }>;
 }
 
-const SYSTEM_PROMPT = `You are Clodds, an AI assistant for prediction markets. Claude + Odds.
+const SYSTEM_PROMPT = `You are Blitzkrieg, an AI assistant for prediction markets. Claude + Odds.
 
 You help users:
 - Track prediction markets across platforms (Polymarket, Kalshi, Manifold, Metaculus, PredictIt)
@@ -7285,7 +7285,7 @@ function buildTools(): ToolDefinition[] {
     },
     {
       name: 'sql_query',
-      description: 'Run a safe, read-only SQL query against the local Clodds database (SELECT/WITH/PRAGMA/EXPLAIN/VALUES only)',
+      description: 'Run a safe, read-only SQL query against the local Blitzkrieg database (SELECT/WITH/PRAGMA/EXPLAIN/VALUES only)',
       input_schema: {
         type: 'object',
         properties: {
@@ -16021,7 +16021,7 @@ async function executeTool(
         const timeout = ((toolInput.timeout as number) || 30) * 1000;
 
         // Write code to temp file
-        const tempFile = join('/tmp', `clodds_exec_${Date.now()}.py`);
+        const tempFile = join('/tmp', `blitzkrieg_exec_${Date.now()}.py`);
         writeFileSync(tempFile, code);
 
         try {
@@ -16075,7 +16075,7 @@ async function executeTool(
           return JSON.stringify({
             error: approval.reason || 'Approval required',
             requestId: approval.requestId,
-            hint: 'Run: clodds permissions pending / clodds permissions approve <id>',
+            hint: 'Run: blitzkrieg permissions pending / blitzkrieg permissions approve <id>',
           });
         }
 
@@ -16111,7 +16111,7 @@ async function executeTool(
 
         if (script.includes('\n') || script.startsWith('import ') || script.startsWith('from ')) {
           // It's code - write to temp file
-          const tempFile = join('/tmp', `clodds_bot_${botId}.py`);
+          const tempFile = join('/tmp', `blitzkrieg_bot_${botId}.py`);
           writeFileSync(tempFile, script);
           cmd = `python3 ${tempFile} ${args}`;
         } else {

@@ -54,7 +54,7 @@ async function execute(args: string): Promise<string> {
       case 'ls': {
         const servers = registry.listServers();
         if (servers.length === 0) {
-          return '**MCP Servers**\n\nNo MCP servers configured.\n\nAdd servers to `.mcp.json` or `~/.config/clodds/mcp.json`:\n```json\n{\n  "mcpServers": {\n    "my-server": {\n      "command": "npx",\n      "args": ["-y", "@my/mcp-server"]\n    }\n  }\n}\n```';
+          return '**MCP Servers**\n\nNo MCP servers configured.\n\nAdd servers to `.mcp.json` or `~/.config/blitzkrieg/mcp.json`:\n```json\n{\n  "mcpServers": {\n    "my-server": {\n      "command": "npx",\n      "args": ["-y", "@my/mcp-server"]\n    }\n  }\n}\n```';
         }
 
         let output = `**MCP Servers** (${servers.length})\n\n`;

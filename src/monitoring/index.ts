@@ -127,8 +127,8 @@ export function createMonitoringService(options: {
       if (!emailTool.isAvailable()) {
         logger.warn('Email tool not available; skipping email alert');
       } else {
-        const from = emailConfig.from || 'clodds@localhost';
-        const subjectPrefix = opts?.subjectPrefix ?? emailConfig.subjectPrefix ?? 'Clodds';
+        const from = emailConfig.from || 'blitzkrieg@localhost';
+        const subjectPrefix = opts?.subjectPrefix ?? emailConfig.subjectPrefix ?? 'Blitzkrieg';
         const subject = `[${subjectPrefix}] ${title}`;
         try {
           await emailTool.send({

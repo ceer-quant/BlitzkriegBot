@@ -189,7 +189,7 @@ async function getGitInfo(path: string): Promise<GitInfo> {
   return info;
 }
 
-/** Load project config from .clodds.json */
+/** Load project config from .blitzkrieg.json (legacy .clodds.json accepted one release) */
 function loadProjectConfig(path: string): ProjectConfig | undefined {
   const configPath = resolveWorkspaceConfigFile(path);
   if (!existsSync(configPath)) return undefined;

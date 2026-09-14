@@ -1,5 +1,5 @@
 /**
- * Daemon Service - Clawdbot-style background service management
+ * Daemon Service - background service management
  *
  * Features:
  * - Install as launchd (macOS) or systemd (Linux) service
@@ -117,7 +117,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env npx clodds gateway
+ExecStart=/usr/bin/env npx blitzkrieg gateway
 Restart=always
 RestartSec=10
 
@@ -144,7 +144,7 @@ WantedBy=default.target`;
         logger.info('Daemon uninstalled');
       } else if (os === 'linux') {
         const servicePath = getSystemdService();
-        execFileSync('systemctl', ['--user', 'disable', 'clodds']);
+        execFileSync('systemctl', ['--user', 'disable', 'blitzkrieg']);
         if (existsSync(servicePath)) {
           unlinkSync(servicePath);
         }
@@ -157,7 +157,7 @@ WantedBy=default.target`;
       if (os === 'darwin') {
         execFileSync('launchctl', ['start', SERVICE_NAME]);
       } else if (os === 'linux') {
-        execFileSync('systemctl', ['--user', 'start', 'clodds']);
+        execFileSync('systemctl', ['--user', 'start', 'blitzkrieg']);
       }
       logger.info('Daemon started');
     },
@@ -166,7 +166,7 @@ WantedBy=default.target`;
       if (os === 'darwin') {
         execFileSync('launchctl', ['stop', SERVICE_NAME]);
       } else if (os === 'linux') {
-        execFileSync('systemctl', ['--user', 'stop', 'clodds']);
+        execFileSync('systemctl', ['--user', 'stop', 'blitzkrieg']);
       }
       logger.info('Daemon stopped');
     },
@@ -189,7 +189,7 @@ WantedBy=default.target`;
           const pid = parseInt(parts[0], 10);
           return { installed: true, running: !isNaN(pid) && pid > 0, pid: isNaN(pid) ? undefined : pid };
         } else if (os === 'linux') {
-          const output = execFileSync('systemctl', ['--user', 'is-active', 'clodds'], { encoding: 'utf-8' });
+          const output = execFileSync('systemctl', ['--user', 'is-active', 'blitzkrieg'], { encoding: 'utf-8' });
           return { installed: true, running: output.trim() === 'active' };
         }
       } catch {

@@ -1,7 +1,7 @@
 /**
  * Skill Loader
  * Parses SKILL.md files with YAML frontmatter and loads them for the agent.
- * Supports both Clodds-native and OpenClaw-format SKILL.md files.
+ * Supports both Blitzkrieg-native and OpenClaw-format SKILL.md files.
  *
  * Features:
  * - YAML frontmatter parsing (shared parser)
@@ -272,7 +272,7 @@ export function loadSkill(skillPath: string, configKeys?: Record<string, unknown
     // Resolve OpenClaw metadata block
     const ocMeta = resolveMetadata(frontmatter);
 
-    // Merge gates: Clodds native gates + OpenClaw requires
+    // Merge gates: Blitzkrieg native gates + OpenClaw requires
     const gates = mergeGates(frontmatter.gates, ocMeta?.requires);
 
     // Merge OS from frontmatter gates and OpenClaw metadata

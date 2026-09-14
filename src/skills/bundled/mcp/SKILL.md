@@ -46,7 +46,7 @@ Manage Model Context Protocol (MCP) servers, external tools, and AI integrations
 ### Create MCP Client
 
 ```typescript
-import { createMCPClient } from 'clodds/mcp';
+import { createMCPClient } from 'blitzkrieg/mcp';
 
 const mcp = createMCPClient({
   // Transport
@@ -141,7 +141,7 @@ console.log(prompt.messages);
 ### MCP Registry
 
 ```typescript
-import { createMCPRegistry } from 'clodds/mcp';
+import { createMCPRegistry } from 'blitzkrieg/mcp';
 
 const registry = createMCPRegistry({
   configPath: './mcp-servers.json',
@@ -212,16 +212,16 @@ await registry.stopAll();
 
 ```bash
 # List MCP servers
-clodds mcp list
+blitzkrieg mcp list
 
 # Add MCP server
-clodds mcp add filesystem "npx -y @modelcontextprotocol/server-filesystem /home"
+blitzkrieg mcp add filesystem "npx -y @modelcontextprotocol/server-filesystem /home"
 
 # Test server connection
-clodds mcp test filesystem
+blitzkrieg mcp test filesystem
 
 # Remove server
-clodds mcp remove filesystem
+blitzkrieg mcp remove filesystem
 ```
 
 ---

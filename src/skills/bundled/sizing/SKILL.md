@@ -43,7 +43,7 @@ Calculate optimal position sizes using Kelly criterion, fractional Kelly, and po
 ### Create Sizing Calculator
 
 ```typescript
-import { createSizingCalculator } from 'clodds/sizing';
+import { createSizingCalculator } from 'blitzkrieg/sizing';
 
 const sizing = createSizingCalculator({
   // Bankroll

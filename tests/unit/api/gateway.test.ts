@@ -597,13 +597,13 @@ describe('Response Headers', () => {
   it('should include X-Powered-By header', async () => {
     const response = await makeRequest(testPort, 'GET', '/health');
 
-    assert.strictEqual(response.headers['x-powered-by'], 'Clodds');
+    assert.strictEqual(response.headers['x-powered-by'], 'Blitzkrieg');
   });
 
-  it('should include X-Clodds-Version header', async () => {
+  it('should include X-Blitzkrieg-Version header', async () => {
     const response = await makeRequest(testPort, 'GET', '/health');
 
-    assert.ok(response.headers['x-clodds-version']);
+    assert.ok(response.headers['x-blitzkrieg-version']);
   });
 
   it('should include X-Request-Id header', async () => {

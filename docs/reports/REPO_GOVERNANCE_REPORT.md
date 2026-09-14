@@ -1,5 +1,8 @@
 # 仓库规范化交付报告（Repository Governance）
 
+> **历史记录，命名已废弃。** 本报告记录仓库迁移当时的事实（含旧上游名称与处置），
+> 按原样保留用于溯源；当前规范命名为 BlitzkriegBot，旧上游禁止推送。
+
 - **日期**：2026-09-14（同日更新为「已推送执行」版）
 - **落地分支**：治理改动经 `chore/repo-governance`（→ `main`/`develop` @ `258f911`）与
   `chore/ci-advisory-audit`（PR #4 rebase-merge → `main`/`develop` @ **`87febb0`**）两次提交。

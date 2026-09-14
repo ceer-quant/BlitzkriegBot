@@ -7,7 +7,7 @@ export interface TempState {
   cleanup: () => void;
 }
 
-export function createTempStateDir(prefix = 'clodds-test-'): TempState {
+export function createTempStateDir(prefix = 'blitzkrieg-test-'): TempState {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   return {
     dir,

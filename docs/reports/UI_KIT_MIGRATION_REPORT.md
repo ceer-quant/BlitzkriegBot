@@ -1,4 +1,4 @@
-# UI Kit 迁移报告 — Node 外壳职责盘点 + UI Kit 落地 + CloddsBot 删除评估
+# UI Kit 迁移报告 — Node 外壳职责盘点 + UI Kit 落地 + BlitzkriegBot 删除评估
 
 - **日期**：2026-09-14
 - **模式**：全程 DRY / 只读展示层，**未触发 Live、未改动凭证**
@@ -8,15 +8,15 @@
 
 ---
 
-## 1. 关键事实更正：`CloddsBot/` 目录已不存在
+## 1. 关键事实更正：`BlitzkriegBot/` 目录已不存在
 
-任务书 Step 4 要求「删除 CloddsBot 目录」。**核查结果**：
+任务书 Step 4 要求「删除 BlitzkriegBot 目录」。**核查结果**：
 
-- `/Volumes/Hard Disk/BlitzkriegBot/CloddsBot/` **不存在** —— 更早的迁移（commit `fc6e93c`）已把项目根上移、扁平化，`CloddsBot` 这一层已消失。
+- `/Volumes/Hard Disk/BlitzkriegBot/BlitzkriegBot/` **不存在** —— 更早的迁移（commit `fc6e93c`）已把项目根上移、扁平化，`BlitzkriegBot` 这一层已消失。
 - 今天仍存在的「Node 侧」是 **`src/`（584 个 .ts 文件）+ `dist/`（编译产物）**，即真正在跑的外壳。
 - 当前生产进程正是 `node dist/index.js`（PID 72966，:18789）。
 
-因此「删除 CloddsBot」的实际含义 = **删除 `src/` 这 584 文件的外壳**。这是一个比任务书设想大得多的动作，且与「禁止删除未经备份的文件、禁止破坏运行」直接冲突 → **不做，记录待决策（D-4）**。
+因此「删除 BlitzkriegBot」的实际含义 = **删除 `src/` 这 584 文件的外壳**。这是一个比任务书设想大得多的动作，且与「禁止删除未经备份的文件、禁止破坏运行」直接冲突 → **不做，记录待决策（D-4）**。
 
 ---
 
@@ -50,7 +50,7 @@
 
 ### 2.3 与交易无关（保留，不在删除范围）
 
-`agents/`、`channels/`、`commands/`、`sessions/`、`db/`、`config/`、`utils/`、`types/`、`logging/`、`security/`、`alerts/`、`monitoring/`、`mcp/`、`memory/`、`cron/`、`automation/` 及绝大多数 (c)/(d)/(e) 目录（详见子代理盘点：区块链域 bankr/evm/solana/… 、聊天域 browser/canvas/voice/… ）—— **这些不属「删除 CloddsBot」范围**，是通用 Agent 平台能力。
+`agents/`、`channels/`、`commands/`、`sessions/`、`db/`、`config/`、`utils/`、`types/`、`logging/`、`security/`、`alerts/`、`monitoring/`、`mcp/`、`memory/`、`cron/`、`automation/` 及绝大多数 (c)/(d)/(e) 目录（详见子代理盘点：区块链域 bankr/evm/solana/… 、聊天域 browser/canvas/voice/… ）—— **这些不属「删除 BlitzkriegBot」范围**，是通用 Agent 平台能力。
 
 ### 2.4 盘点小结
 
@@ -123,7 +123,7 @@ ui_kit/
 
 | 前置条件（任务书） | 现状 |
 |---|---|
-| 先禁用 CloddsBot 入口、保留代码 | `CloddsBot/` 已不存在；禁用 `src/` 入口会**停掉生产进程**（当前 PID 72966 在跑），违反「禁止破坏运行」→ 不做 |
+| 先禁用 BlitzkriegBot 入口、保留代码 | `BlitzkriegBot/` 已不存在；禁用 `src/` 入口会**停掉生产进程**（当前 PID 72966 在跑），违反「禁止破坏运行」→ 不做 |
 | 验证 Rust 内核 + UI Kit 完整替代 | ✅ 内核替代交易路径；✅ UI Kit 替代展示；❌ **网关/命令派发未由 UI Kit 接管** |
 | 验证通过后删除目录 | **前置未全满足 → 不删** |
 | 删除前完整备份 commit hash | 本次改动将独立提交（见 §7），可作为回滚点 |

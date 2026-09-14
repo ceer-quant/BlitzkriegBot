@@ -595,7 +595,7 @@ const CHAT_HTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Clodds Chat</title>
+  <title>Blitzkrieg Chat</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -675,7 +675,7 @@ const CHAT_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <header>
-    <h1>Clodds</h1>
+    <h1>Blitzkrieg</h1>
     <div id="status">Connecting...</div>
   </header>
   <div id="messages"></div>

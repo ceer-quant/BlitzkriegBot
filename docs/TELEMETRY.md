@@ -1,6 +1,6 @@
 # Telemetry & Observability Guide
 
-Clodds includes a comprehensive OpenTelemetry integration for monitoring and debugging.
+Blitzkrieg includes a comprehensive OpenTelemetry integration for monitoring and debugging.
 
 ## Overview
 
@@ -18,7 +18,7 @@ The telemetry module (`src/telemetry/index.ts`) provides:
 {
   "telemetry": {
     "enabled": true,
-    "serviceName": "clodds",
+    "serviceName": "blitzkrieg",
     "serviceVersion": "0.1.0",
     "environment": "production"
   }
@@ -31,7 +31,7 @@ The telemetry module (`src/telemetry/index.ts`) provides:
 {
   "telemetry": {
     "enabled": true,
-    "serviceName": "clodds",
+    "serviceName": "blitzkrieg",
     "serviceVersion": "0.1.0",
     "environment": "production",
     "otlpEndpoint": "http://localhost:4318",
@@ -49,7 +49,7 @@ The telemetry module (`src/telemetry/index.ts`) provides:
 | Option | Description | Default |
 |--------|-------------|---------|
 | `enabled` | Enable telemetry collection | `false` |
-| `serviceName` | Service name in traces | `clodds` |
+| `serviceName` | Service name in traces | `blitzkrieg` |
 | `serviceVersion` | Service version | `0.1.0` |
 | `environment` | Deployment environment | `development` |
 | `otlpEndpoint` | OTLP collector endpoint | - |
@@ -63,10 +63,10 @@ The telemetry module (`src/telemetry/index.ts`) provides:
 ### Basic Tracing
 
 ```typescript
-import { initTelemetry, getTelemetry } from 'clodds/telemetry';
+import { initTelemetry, getTelemetry } from 'blitzkrieg/telemetry';
 
 // Initialize
-const telemetry = initTelemetry({ enabled: true, serviceName: 'clodds' });
+const telemetry = initTelemetry({ enabled: true, serviceName: 'blitzkrieg' });
 
 // Create trace
 const span = telemetry.startTrace('my-operation', {
@@ -115,9 +115,9 @@ try {
 Specialized instrumentation for AI/LLM operations:
 
 ```typescript
-import { createLLMInstrumentation, initTelemetry } from 'clodds/telemetry';
+import { createLLMInstrumentation, initTelemetry } from 'blitzkrieg/telemetry';
 
-initTelemetry({ enabled: true, serviceName: 'clodds' });
+initTelemetry({ enabled: true, serviceName: 'blitzkrieg' });
 const llmInstr = createLLMInstrumentation();
 
 // Trace completion
@@ -211,7 +211,7 @@ llm_request_duration_ms{provider="anthropic",model="claude-3-5-sonnet"} 150
 
 ```yaml
 scrape_configs:
-  - job_name: 'clodds'
+  - job_name: 'blitzkrieg'
     static_configs:
       - targets: ['localhost:9090']
 ```
@@ -286,7 +286,7 @@ process.on('SIGTERM', async () => {
 ```yaml
 version: '3'
 services:
-  clodds:
+  blitzkrieg:
     build: .
     environment:
       - TELEMETRY_ENABLED=true

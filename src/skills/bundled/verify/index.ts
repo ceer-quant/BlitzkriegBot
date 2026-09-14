@@ -33,8 +33,8 @@ async function execute(args: string): Promise<string> {
         }
         const client = erc8004.createERC8004Client('base', privateKey);
         const card = erc8004.buildAgentCard({
-          name: 'clodds-agent',
-          description: 'Clodds AI Trading Terminal agent',
+          name: 'blitzkrieg-agent',
+          description: 'Blitzkrieg AI Trading Terminal agent',
         });
         const tokenURI = `data:application/json,${encodeURIComponent(JSON.stringify(card))}`;
         const result = await client.register(tokenURI);

@@ -1,5 +1,5 @@
 /**
- * Extensions - Additional capabilities for Clodds
+ * Extensions - Additional capabilities for Blitzkrieg
  */
 
 // Diagnostics
