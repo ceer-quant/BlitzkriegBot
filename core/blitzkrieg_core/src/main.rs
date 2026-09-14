@@ -14,6 +14,8 @@
 //!                   [--position-log <path>] [--no-position-log]
 //!                   [--near-miss-path <path>]
 //!                   [--event-archive <path>] [--event-archive-max-mb 512]
+//!                   [--event-archive-rotate-mb 256]
+//!                   [--event-archive-min-free-mb 5120]
 //!                   [--entry-maker-timeout-ms 5000]
 //!                   [--slippage-ticks 0] [--latency-ms 0] [--fill-prob-bps 10000]
 //!
@@ -72,6 +74,13 @@ struct Args {
     event_archive: Option<String>,
     /// Stop recording at this archive size (MiB); 0 = unlimited.
     event_archive_max_mb: u64,
+    /// Rotate into a new UTC-stamped segment every this many MiB (0 = never).
+    /// Required for a 24/7 capture: an un-rotated archive hits the cap and goes
+    /// dark. Rotation only renames; nothing is ever deleted.
+    event_archive_rotate_mb: u64,
+    /// Stop recording before the volume has less than this many MiB free
+    /// (0 = no guard). Checked once per rotation.
+    event_archive_min_free_mb: u64,
     /// Maker→taker escalation deadline for engine entries (ms).
     entry_maker_timeout_ms: i64,
     /// Offline replay of an archive through the same core (P-1.2).
@@ -133,6 +142,8 @@ fn parse_args() -> Args {
     let mut assets_arg: Option<String> = None;
     let mut event_archive: Option<String> = None;
     let mut event_archive_max_mb = 512u64;
+    let mut event_archive_rotate_mb = 0u64;
+    let mut event_archive_min_free_mb = 0u64;
     let mut entry_maker_timeout_ms: i64 = 5000;
     let mut backtest: Option<String> = None;
     let mut backtest_report: Option<String> = None;
@@ -217,6 +228,14 @@ fn parse_args() -> Args {
             "--event-archive-max-mb" => {
                 event_archive_max_mb = it.next().and_then(|v| v.parse().ok()).unwrap_or(event_archive_max_mb)
             }
+            "--event-archive-rotate-mb" => {
+                event_archive_rotate_mb =
+                    it.next().and_then(|v| v.parse().ok()).unwrap_or(event_archive_rotate_mb)
+            }
+            "--event-archive-min-free-mb" => {
+                event_archive_min_free_mb =
+                    it.next().and_then(|v| v.parse().ok()).unwrap_or(event_archive_min_free_mb)
+            }
             "--entry-maker-timeout-ms" => {
                 entry_maker_timeout_ms =
                     it.next().and_then(|v| v.parse().ok()).unwrap_or(entry_maker_timeout_ms)
@@ -237,7 +256,7 @@ fn parse_args() -> Args {
             other => eprintln!("ignoring unknown arg: {other}"),
         }
     }
-    Args { socket, mode, tick_ms, seed_balance, max_order_notional, min_shares, max_shares, markets, auto_exits, max_positions, engine, min_round_age, min_time_left, trend_confirm, trend_floor_ms, feed_ws, replay, replay_near_miss, round_sec, near_miss_path, trade_log, no_trade_log, order_log, no_order_log, position_log, no_position_log, market_plugin, discovery, shadow_evolution, assets: assets_arg, se_min_samples, se_cooldown_secs, se_min_obs_secs, strategy_limits, event_archive, event_archive_max_mb, entry_maker_timeout_ms, backtest, backtest_report, backtest_tick_ms, backtest_tail_ms, slippage_ticks, latency_ms, fill_prob_bps }
+    Args { socket, mode, tick_ms, seed_balance, max_order_notional, min_shares, max_shares, markets, auto_exits, max_positions, engine, min_round_age, min_time_left, trend_confirm, trend_floor_ms, feed_ws, replay, replay_near_miss, round_sec, near_miss_path, trade_log, no_trade_log, order_log, no_order_log, position_log, no_position_log, market_plugin, discovery, shadow_evolution, assets: assets_arg, se_min_samples, se_cooldown_secs, se_min_obs_secs, strategy_limits, event_archive, event_archive_max_mb, event_archive_rotate_mb, event_archive_min_free_mb, entry_maker_timeout_ms, backtest, backtest_report, backtest_tick_ms, backtest_tail_ms, slippage_ticks, latency_ms, fill_prob_bps }
 }
 
 /// Parse repeated `--strategy-limit <name>:<max_open_positions>:<max_notional_usd>`
@@ -390,6 +409,8 @@ async fn main() -> anyhow::Result<()> {
         },
         event_archive_path: args.event_archive.clone(),
         event_archive_max_mb: args.event_archive_max_mb,
+        event_archive_rotate_mb: args.event_archive_rotate_mb,
+        event_archive_min_free_mb: args.event_archive_min_free_mb,
         ..Default::default()
     };
 
@@ -407,6 +428,8 @@ async fn main() -> anyhow::Result<()> {
         let mut cfg = config.clone();
         cfg.event_archive_path = None;
         cfg.event_archive_max_mb = 0;
+        cfg.event_archive_rotate_mb = 0;
+        cfg.event_archive_min_free_mb = 0;
         run_backtest(path, args.backtest_report.as_deref(), cfg, args.backtest_tick_ms, args.backtest_tail_ms);
         return Ok(());
     }
@@ -433,12 +456,14 @@ fn run_backtest(
     tail_ms: i64,
 ) {
     use blitzkrieg_core::backtest::{Backtester, BacktestConfig, EventBacktester};
-    use blitzkrieg_core::data_source::open_replay;
+    use blitzkrieg_core::data_source::open_replay_all;
 
     if !cfg.engine_enabled {
         eprintln!("blitzkrieg-core: --backtest without --engine: no strategy will run (pass --engine)");
     }
-    let src = match open_replay(archive) {
+    // Reads the archive plus any rotated segments beside it, so replaying a 24/7
+    // capture (which rotates) needs no manual concatenation.
+    let src = match open_replay_all(archive) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("backtest: {e}");

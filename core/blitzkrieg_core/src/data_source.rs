@@ -219,17 +219,36 @@ fn levels(v: Option<&Value>) -> Result<Vec<(Decimal, Decimal)>, String> {
 
 /// Append-only JSONL archive of the events the engine consumed.
 ///
-/// `max_bytes == 0` means unlimited. When the cap is reached the archive stops
-/// recording (counting `dropped`) instead of deleting or truncating anything —
-/// an operator decides what to do with a full archive.
+/// Two independent bounds, both of which only ever *stop writing* — nothing is
+/// ever deleted or truncated, an operator decides what to do with old data:
+///
+/// * `max_bytes` — session cap. `0` means unlimited. Reached → recording stops
+///   and `dropped` counts the rest.
+/// * `rotate_bytes` — segment size for 24/7 capture. `0` means never rotate.
+///   Reached → the current file is renamed to a UTC-stamped sibling
+///   (`events.jsonl` → `events.20260914T210000Z.jsonl`) and a fresh `path` is
+///   opened, so a long-running archive stays in replayable chunks instead of
+///   either growing unbounded or hitting the session cap and going dark. Renames
+///   only: the number of segments is unbounded and no segment is ever removed.
 pub struct EventArchive {
     path: PathBuf,
     file: BufWriter<File>,
     max_bytes: u64,
+    rotate_bytes: u64,
+    /// Stop before the filesystem drops below this many free bytes (0 = no guard).
+    min_free_bytes: u64,
+    /// Session totals (survive rotation).
     bytes: u64,
     events: u64,
     dropped: u64,
+    /// Current segment totals (reset by rotation).
+    segment_bytes: u64,
+    segments: u64,
+    /// Venue time of the last recorded event, used to name rotated segments.
+    last_at_ms: i64,
     stopped: bool,
+    /// Why recording stopped (`"cap"`/`"disk"`/`"io"`), for diagnostics.
+    stopped_reason: Option<String>,
     /// Caller clock (ms) of the last periodic flush, for `flush_if_due`.
     last_flush_ms: i64,
 }
@@ -242,11 +261,43 @@ pub struct ArchiveStatus {
     pub bytes: u64,
     pub dropped: u64,
     pub recording: bool,
+    /// Size bound of one segment in bytes (`0` = rotation disabled).
+    pub rotate_bytes: u64,
+    /// Bytes in the segment currently being written.
+    pub segment_bytes: u64,
+    /// How many segments were completed by rotation (0 = still the first).
+    pub segments: u64,
+    /// Free bytes on the archive's filesystem, re-read after each rotation and
+    /// whenever the guard trips (`0` = not measured, e.g. non-unix).
+    pub free_bytes: u64,
+    /// Why recording stopped, if it did: `"cap"` | `"disk"` | `"io"`.
+    pub stopped_reason: Option<String>,
 }
 
 impl EventArchive {
-    /// Open (append/create) an archive at `path`.
+    /// Open (append/create) an archive at `path` that never rotates. Prefer
+    /// [`EventArchive::open_with_rotation`] for a long-running capture.
     pub fn open(path: &Path, max_bytes: u64) -> std::io::Result<Self> {
+        Self::open_with_rotation(path, max_bytes, 0)
+    }
+
+    /// Open (append/create) an archive with `rotate_bytes` per segment.
+    pub fn open_with_rotation(path: &Path, max_bytes: u64, rotate_bytes: u64) -> std::io::Result<Self> {
+        Self::open_full(path, max_bytes, rotate_bytes, 0)
+    }
+
+    /// Full form: also refuse to spend the last `min_free_bytes` of the volume.
+    ///
+    /// A 24/7 capture writes tens of GB/day, so "cap the file" is not enough — a
+    /// rotating archive with no session cap would happily fill the disk. The guard
+    /// is checked once per rotation (cheap: one `statvfs`), and stops recording
+    /// before the volume runs out rather than after some other process fails.
+    pub fn open_full(
+        path: &Path,
+        max_bytes: u64,
+        rotate_bytes: u64,
+        min_free_bytes: u64,
+    ) -> std::io::Result<Self> {
         if let Some(dir) = path.parent() {
             if !dir.as_os_str().is_empty() {
                 std::fs::create_dir_all(dir)?;
@@ -254,14 +305,29 @@ impl EventArchive {
         }
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let free_bytes = free_bytes_at(path).unwrap_or(0);
+        if min_free_bytes > 0 && free_bytes > 0 && free_bytes <= min_free_bytes {
+            tracing::warn!(
+                path = %path.display(),
+                free_mb = free_bytes / (1024 * 1024),
+                min_free_mb = min_free_bytes / (1024 * 1024),
+                "event archive: volume already below the free-space floor — not recording"
+            );
+        }
         Ok(Self {
             path: path.to_path_buf(),
             file: BufWriter::new(file),
             max_bytes,
+            rotate_bytes,
+            min_free_bytes,
             bytes,
             events: 0,
             dropped: 0,
+            segment_bytes: bytes,
+            segments: 0,
+            last_at_ms: 0,
             stopped: false,
+            stopped_reason: None,
             last_flush_ms: i64::MIN / 2,
         })
     }
@@ -273,6 +339,72 @@ impl EventArchive {
             bytes: self.bytes,
             dropped: self.dropped,
             recording: !self.stopped,
+            rotate_bytes: self.rotate_bytes,
+            segment_bytes: self.segment_bytes,
+            segments: self.segments,
+            free_bytes: free_bytes_at(&self.path).unwrap_or(0),
+            stopped_reason: self.stopped_reason.clone(),
+        }
+    }
+
+    /// Stop recording and remember why (surfaced in `engine.stats.archive`).
+    fn stop(&mut self, reason: &str, detail: &str) {
+        if !self.stopped {
+            self.stopped = true;
+            self.stopped_reason = Some(reason.to_string());
+            tracing::warn!(path = %self.path.display(), reason, detail, "event archive stopped recording");
+        }
+    }
+
+    /// Close the current segment under a UTC-stamped name and start a fresh one
+    /// at the configured path. Rename-only: the rotated file is never altered.
+    fn rotate(&mut self) {
+        let rotated = next_segment_path(&self.path, self.last_at_ms);
+        let wrote = self.segment_bytes;
+        // 1. Close the current segment (fd must be released before the rename).
+        let old = std::mem::replace(&mut self.file, BufWriter::new(sink_file()));
+        let _ = old.into_inner().map(|mut f| f.flush());
+        // 2. Move it aside.
+        if let Err(e) = std::fs::rename(&self.path, &rotated) {
+            tracing::warn!(
+                path = %self.path.display(),
+                target = %rotated.display(),
+                error = %e,
+                "event archive: rotate failed; keeping the current segment open"
+            );
+            return;
+        }
+        // 3. Reopen the configured path for the next segment.
+        match OpenOptions::new().create(true).append(true).open(&self.path) {
+            Ok(f) => {
+                self.file = BufWriter::new(f);
+                self.segment_bytes = 0;
+                self.segments += 1;
+                tracing::info!(
+                    path = %self.path.display(),
+                    rotated = %rotated.display(),
+                    bytes = wrote,
+                    segment = self.segments,
+                    "event archive rotated"
+                );
+            }
+            Err(e) => {
+                // Nothing can be written any more; stop loudly rather than
+                // silently dropping the rest of the stream.
+                self.stop("io", &format!("cannot reopen after rotate: {e}"));
+            }
+        }
+    }
+
+    /// Whether the volume still has room for another segment, judged once per
+    /// rotation. A guard that cannot read the filesystem never blocks recording.
+    fn disk_ok(&self) -> bool {
+        if self.min_free_bytes == 0 {
+            return true;
+        }
+        match free_bytes_at(&self.path) {
+            Some(free) => free > self.min_free_bytes,
+            None => true,
         }
     }
 
@@ -315,6 +447,125 @@ fn stamped_event(at: i64, ev: &DataEvent) -> DataEvent {
     out
 }
 
+/// Sort key for an archive segment name: rotated segments first (in write order),
+/// the live path last (it is the segment still being written). Within the rotated
+/// group, `base` is the timestamp in the name — a fixed-width UTC stamp, or the
+/// numeric fallback — so comparing it as text still matches chronological order.
+fn segment_sort_key(stem: &str, name: &str, live: Option<&str>) -> (u8, String, u32) {
+    if live == Some(name) {
+        return (1, String::new(), 0);
+    }
+    let body = name
+        .strip_prefix(&format!("{stem}."))
+        .unwrap_or(name)
+        .strip_suffix(".jsonl")
+        .unwrap_or(name);
+    match body.rsplit_once('-') {
+        // `20250914T120000Z-0002` → ("20250914T120000Z", 2)
+        Some((base, seq)) if !seq.is_empty() && seq.chars().all(|c| c.is_ascii_digit()) => {
+            (0, base.to_string(), seq.parse().unwrap_or(0))
+        }
+        _ => (0, body.to_string(), 0),
+    }
+}
+
+/// A writable sink used to park the file handle while a segment is renamed. It/// is never written to (only swapped out again on the next open), so a temp path
+/// is fine and keeps the rename off any shared state.
+fn sink_file() -> File {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join(format!("bk-archive-sink-{}", std::process::id())))
+        .unwrap_or_else(|_| File::create(std::env::temp_dir().join("bk-archive-sink")).expect("temp sink"))
+}
+
+/// Free bytes on the filesystem holding `path` (None when unknowable, e.g. a
+/// non-unix target or a stat failure). Used to keep a 24/7 capture from filling
+/// the volume.
+fn free_bytes_at(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+        // SAFETY: `c` is a valid NUL-terminated path and `st` is only read after
+        // statvfs reports success.
+        unsafe {
+            let mut st: libc::statvfs = std::mem::zeroed();
+            if libc::statvfs(c.as_ptr(), &mut st) != 0 {
+                return None;
+            }
+            Some(st.f_bavail as u64 * st.f_frsize as u64)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// `events.jsonl` + venue time 1757851200123 → `events.20250914T140000Z.jsonl`
+/// (UTC). Falls back to a numeric stamp when the time cannot be decoded.
+fn next_segment_path(path: &Path, at_ms: i64) -> PathBuf {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "events".into());
+    let ext = path.extension().map(|s| s.to_string_lossy().to_string());
+    let name = match utc_stamp(at_ms) {
+        Some(stamp) => format!("{stem}.{stamp}"),
+        None => format!("{stem}.{at_ms}"),
+    };
+    let file = match ext {
+        Some(e) if !e.is_empty() => format!("{name}.{e}"),
+        _ => name,
+    };
+    let candidate = path.with_file_name(file);
+    // Two rotations can land in the same second (a small threshold, or a burst),
+    // and the second rename would silently clobber the first segment. Disambiguate
+    // until the name is free — a rename target must never exist. The suffix is
+    // zero-padded so a lexicographic sort of segment names still matches write
+    // order (`-0010` must not sort before `-0002`).
+    if !candidate.exists() {
+        return candidate;
+    }
+    for n in 2..10_000u32 {
+        let alt = match (utc_stamp(at_ms), path.extension().map(|s| s.to_string_lossy().to_string())) {
+            (Some(stamp), Some(e)) if !e.is_empty() => format!("{stem}.{stamp}-{n:04}.{e}"),
+            (Some(stamp), _) => format!("{stem}.{stamp}-{n:04}"),
+            (None, Some(e)) if !e.is_empty() => format!("{stem}.{at_ms}-{n:04}.{e}"),
+            (None, _) => format!("{stem}.{at_ms}-{n:04}"),
+        };
+        let alt = path.with_file_name(alt);
+        if !alt.exists() {
+            return alt;
+        }
+    }
+    candidate
+}
+
+/// `YYYYMMDDTHHMMSSZ` for a unix-ms instant. Hand-rolled UTC conversion so the
+/// core keeps no date-library dependency for one filename.
+fn utc_stamp(ms: i64) -> Option<String> {
+    if ms <= 0 {
+        return None;
+    }
+    let secs = ms / 1000;
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (h, mi, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    // Howard Hinnant's civil_from_days, shifted to the 1970 epoch.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    Some(format!("{y:04}{m:02}{d:02}T{h:02}{mi:02}{s:02}Z"))
+}
+
 impl DataSink for EventArchive {
     fn record(&mut self, ev: &DataEvent) {
         if self.stopped {
@@ -331,22 +582,33 @@ impl DataSink for EventArchive {
         };
         let n = line.len() as u64 + 1;
         if let Err(e) = self.file.write_all(line.as_bytes()).and_then(|_| self.file.write_all(b"\n")) {
-            tracing::warn!(error = %e, path = %self.path.display(), "event archive: write failed; recording stopped");
-            self.stopped = true;
+            let msg = format!("write failed: {e}");
             self.dropped += 1;
+            self.stop("io", &msg);
             return;
         }
         self.events += 1;
         self.bytes += n;
+        self.segment_bytes += n;
+        self.last_at_ms = event_at_ms(ev);
+
+        // Rotation first: a long capture must stay in replayable chunks instead of
+        // growing until the session cap silences it.
+        if self.rotate_bytes > 0 && self.segment_bytes >= self.rotate_bytes {
+            self.rotate();
+            // The free-space guard is evaluated at the one cheap boundary we have.
+            if !self.disk_ok() {
+                let free = free_bytes_at(&self.path).unwrap_or(0);
+                self.stop("disk", &format!("free space {free} bytes below the floor"));
+            }
+        }
+        if self.stopped {
+            return;
+        }
         if self.max_bytes > 0 && self.bytes >= self.max_bytes {
             let _ = self.file.flush();
-            self.stopped = true;
-            tracing::warn!(
-                path = %self.path.display(),
-                bytes = self.bytes,
-                cap = self.max_bytes,
-                "event archive cap reached — recording stopped (nothing deleted; start a new archive to continue)"
-            );
+            let bytes = self.bytes;
+            self.stop("cap", &format!("session cap {bytes} bytes reached"));
         }
     }
 
@@ -485,6 +747,116 @@ impl DataSource for ReplaySource {
 /// Convenience: open a replay source, mapping the io error to a message.
 pub fn open_replay(path: &str) -> Result<ReplaySource, String> {
     ReplaySource::open(Path::new(path)).map_err(|e| format!("cannot open archive {path}: {e}"))
+}
+
+/// A 24/7 capture rotates, so a replay must be able to read a whole directory of
+/// segments in time order rather than one file. Segments are the archive plus its
+/// rotated siblings (`events.jsonl` + `events.<UTC>.jsonl`); ordering is by the
+/// UTC stamp in the name, which is also the order they were written in.
+pub struct SegmentSource {
+    sources: Vec<ReplaySource>,
+    current: usize,
+    events: u64,
+    skipped: u64,
+    out_of_order: u64,
+    last_at_ms: Option<i64>,
+    label: String,
+}
+
+impl SegmentSource {
+    /// Open every `.jsonl` segment that belongs to `path` (the archive itself plus
+    /// its UTC-stamped siblings), in write order. Returns an error when nothing
+    /// matched, so a typo in the path is still reported.
+    pub fn open_dir(path: &Path) -> Result<Self, String> {
+        let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "events".into());
+        let live = path.file_name().map(|s| s.to_string_lossy().to_string());
+
+        let mut names: Vec<String> = Vec::new();
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("cannot read archive dir {}: {e}", dir.display()))?;
+        for e in entries.flatten() {
+            let Some(name) = e.file_name().to_str().map(str::to_string) else { continue };
+            if !name.ends_with(".jsonl") {
+                continue;
+            }
+            // Belongs to this archive when it is the archive itself, or a rotated
+            // sibling `stem.<stamp>.jsonl`.
+            let is_mine = Some(&name) == live.as_ref()
+                || (name.starts_with(&format!("{stem}.")) && name.len() > stem.len() + 6);
+            if is_mine {
+                names.push(name);
+            }
+        }
+        if names.is_empty() {
+            return Err(format!("no archive segments matching {} in {}", path.display(), dir.display()));
+        }
+        // Order by write time, derived from the name, not by raw bytes: a rotated
+        // segment is `stem.<stamp>[-<seq>].jsonl` and the live path is `stem.jsonl`.
+        // Raw lexicographic order would put `-0002` before `.jsonl` and the live
+        // path in the middle — replay would then mix different instants together.
+        names.sort_by(|a, b| segment_sort_key(&stem, a, live.as_deref()).cmp(&segment_sort_key(&stem, b, live.as_deref())));
+
+        let mut sources = Vec::with_capacity(names.len());
+        for name in &names {
+            let p = dir.join(name);
+            sources
+                .push(ReplaySource::open(&p).map_err(|e| format!("cannot open segment {}: {e}", p.display()))?);
+        }
+        let label = format!("{} ({} segment(s))", path.display(), sources.len());
+        Ok(Self { sources, current: 0, events: 0, skipped: 0, out_of_order: 0, last_at_ms: None, label })
+    }
+
+    pub fn segments(&self) -> usize {
+        self.sources.len()
+    }
+}
+
+impl DataSource for SegmentSource {
+    fn next_event(&mut self) -> Option<TimedEvent> {
+        loop {
+            let src = self.sources.get_mut(self.current)?;
+            if let Some(te) = src.next_event() {
+                // Carry the counters and the cross-segment clock clamp forward, so
+                // a boundary that goes backwards is still reported like any other
+                // out-of-order arrival.
+                let at_ms = te.at_ms;
+                if let Some(prev) = self.last_at_ms {
+                    if at_ms < prev {
+                        self.out_of_order += 1;
+                    }
+                }
+                self.last_at_ms = Some(at_ms.max(self.last_at_ms.unwrap_or(at_ms)));
+                self.events += 1;
+                return Some(te);
+            }
+            // Exhausted: fold in this segment's parse counters and move on.
+            self.skipped += src.skipped_lines();
+            self.current += 1;
+        }
+    }
+
+    fn describe(&self) -> String {
+        format!("replay {}", self.label)
+    }
+
+    fn stats(&self) -> SourceStats {
+        SourceStats {
+            events: self.events,
+            malformed_lines: self.skipped,
+            out_of_order_events: self.out_of_order,
+        }
+    }
+}
+
+/// Open a replay that covers an archive and (when present) its rotated segments.
+/// A single-file archive and a directory of segments both work; the returned
+/// source reports aggregate counters either way.
+pub fn open_replay_all(path: &str) -> Result<SegmentSource, String> {
+    SegmentSource::open_dir(Path::new(path))
 }
 
 /// Parse a decimal the way the archive writes it (used by tests and tools).
@@ -667,6 +1039,162 @@ mod tests {
         assert_eq!(src.out_of_order_events(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_rotates_segments_without_losing_events() {
+        let dir = std::env::temp_dir().join(format!("bk-archive-rot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let _ = std::fs::remove_file(&path);
+
+        // 200 spot events, ~40 bytes each → rotate well before the session cap.
+        let total = 200u64;
+        let mut a = EventArchive::open_with_rotation(&path, 1_000_000, 500).unwrap();
+        for i in 0..total {
+            // Distinct venue timestamps so segment names are deterministic.
+            let ev = DataEvent::Spot { asset: "BTC".into(), price: dec!(1), now_ms: 1_757_851_200_000 + i as i64 * 1000 };
+            a.record_at(event_at_ms(&ev), &ev);
+        }
+        a.flush();
+        let st = a.status();
+        assert!(st.recording, "rotation must not stop recording");
+        assert!(st.segments >= 2, "expected several segments, got {}", st.segments);
+        assert_eq!(st.events, total, "session counter spans all segments");
+        assert_eq!(st.dropped, 0, "rotation must not drop events");
+
+        // Every event is still readable: the live path plus every rotated sibling.
+        let mut segments: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|x| x == "jsonl").unwrap_or(false))
+            .collect();
+        segments.sort();
+        assert_eq!(segments.len() as u64, st.segments + 1, "segments found: {segments:?}");
+        let mut seen = 0u64;
+        for seg in &segments {
+            let mut src = ReplaySource::open(seg).unwrap();
+            while src.next_event().is_some() {
+                seen += 1;
+            }
+            assert_eq!(src.skipped_lines(), 0, "corrupt segment {}", seg.display());
+        }
+        assert_eq!(seen, total, "replaying all segments must yield every event exactly once");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disk_guard_stops_before_the_volume_fills() {
+        let dir = std::env::temp_dir().join(format!("bk-archive-disk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let _ = std::fs::remove_file(&path);
+
+        // A floor larger than any real volume: the first rotation must stop us.
+        let mut a = EventArchive::open_full(&path, 0, 200, u64::MAX / 2).unwrap();
+        for i in 0..200 {
+            let ev = DataEvent::Spot { asset: "BTC".into(), price: dec!(1), now_ms: 1_757_851_200_000 + i };
+            a.record_at(event_at_ms(&ev), &ev);
+        }
+        let st = a.status();
+        assert!(!st.recording, "guard must stop recording, not just warn");
+        assert_eq!(st.stopped_reason.as_deref(), Some("disk"));
+        assert!(st.dropped > 0, "events after the stop are counted as dropped");
+
+        // Nothing was deleted: every event written before the stop still replays,
+        // across the rotated segment and the (now idle) live path.
+        let mut segments: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|x| x == "jsonl").unwrap_or(false))
+            .collect();
+        segments.sort();
+        let mut n = 0u64;
+        for seg in &segments {
+            let mut src = ReplaySource::open(seg).unwrap();
+            while src.next_event().is_some() {
+                n += 1;
+            }
+        }
+        assert!(n > 0, "the segments written before the stop are intact: {segments:?}");
+        assert!(n <= st.events, "replay cannot exceed what was recorded");
+        assert_eq!(n, st.events, "every recorded event is still readable");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn segment_source_reads_every_rotated_segment_in_order() {
+        let dir = std::env::temp_dir().join(format!("bk-segments-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+
+        let total = 150u64;
+        let mut a = EventArchive::open_with_rotation(&path, 0, 400).unwrap();
+        for i in 0..total {
+            let ev = DataEvent::Spot { asset: "BTC".into(), price: dec!(1), now_ms: 1_757_851_200_000 + i as i64 };
+            a.record_at(event_at_ms(&ev), &ev);
+        }
+        a.flush();
+        assert!(a.status().segments >= 2);
+
+        let mut src = SegmentSource::open_dir(&path).unwrap();
+        assert!(src.segments() >= 3, "live path + rotated siblings");
+        let mut times = Vec::new();
+        while let Some(te) = src.next_event() {
+            times.push(te.at_ms);
+        }
+        assert_eq!(times.len() as u64, total, "every event across every segment is replayed");
+        let mut sorted = times.clone();
+        sorted.sort();
+        assert_eq!(times, sorted, "segments are read in write (time) order");
+        assert_eq!(src.stats().malformed_lines, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn segment_source_ignores_unrelated_files_and_reports_a_typo() {
+        let dir = std::env::temp_dir().join(format!("bk-segments-mix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+        // Our archive, a rotated sibling, and two files that are NOT ours.
+        std::fs::write(&path, "{\"at\":1,\"k\":\"spot\",\"s\":\"BTC\",\"p\":\"1\"}\n").unwrap();
+        std::fs::write(dir.join("events.20250914T120000Z.jsonl"), "{\"at\":2,\"k\":\"spot\",\"s\":\"BTC\",\"p\":\"2\"}\n")
+            .unwrap();
+        std::fs::write(dir.join("other.jsonl"), "{\"at\":3,\"k\":\"spot\",\"s\":\"BTC\",\"p\":\"3\"}\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "not an archive\n").unwrap();
+
+        let mut src = SegmentSource::open_dir(&path).unwrap();
+        assert_eq!(src.segments(), 2, "only our two segments");
+        let mut n = 0;
+        while src.next_event().is_some() {
+            n += 1;
+        }
+        assert_eq!(n, 2);
+
+        assert!(SegmentSource::open_dir(&dir.join("nope.jsonl")).is_err(), "a typo must not silently replay nothing");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn segment_names_are_utc_stamped() {
+        // 2025-09-14T12:00:00Z
+        let name = next_segment_path(Path::new("/tmp/events.jsonl"), 1_757_851_200_000);
+        assert_eq!(name.file_name().unwrap().to_string_lossy(), "events.20250914T120000Z.jsonl");
+        // A pre-epoch / unset timestamp still yields a usable distinct name.
+        let fallback = next_segment_path(Path::new("/tmp/events.jsonl"), 0);
+        assert_ne!(fallback.file_name().unwrap().to_string_lossy(), "events.jsonl");
     }
 
     #[test]

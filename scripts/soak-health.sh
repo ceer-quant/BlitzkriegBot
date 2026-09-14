@@ -83,12 +83,40 @@ if [ -f run.log ]; then
   [ "${scan:-0}" -gt 0 ] && problems+=("run.log tail has $scan crash/orphan hits")
 fi
 
-# ── 5. report ───────────────────────────────────────────────────────────────
+# ── 5. market-data archive freshness (P-1.3) ────────────────────────────────
+# Capture is on by default and only useful if it is actually recording: a stopped
+# archive (cap/disk) or a stale one means a future "why did this trade lose?" is
+# unanswerable. Cheap check: how long since the newest segment was written.
+ARCH_DIR=data/archive
+arch_note="off"
+if [ -d "$ARCH_DIR" ]; then
+  newest=$(ls -t "$ARCH_DIR"/*.jsonl 2>/dev/null | head -1)
+  if [ -z "$newest" ]; then
+    arch_note="no-segments"
+    problems+=("market-data archive dir exists but holds no segments")
+  else
+    now_s=$(date +%s)
+    mt_s=$(stat -f%m "$newest" 2>/dev/null || stat -c%Y "$newest" 2>/dev/null || echo "$now_s")
+    age=$((now_s - mt_s))
+    arch_note="ok(${age}s)"
+    # The core flushes the BufWriter once a second while events arrive, and a live
+    # round trades continuously, so 5 minutes of silence means capture is down.
+    if [ "$age" -gt 300 ]; then
+      arch_note="stale(${age}s)"
+      problems+=("market-data archive stale (${age}s since last write: $newest)")
+    fi
+  fi
+  tail -c 200000 run.log 2>/dev/null | grep -q "event archive stopped recording" \
+    && problems+=("market-data archive stopped recording (see run.log)")
+fi
+
+# ── 6. report ───────────────────────────────────────────────────────────────
 round_disp=${round_sec:-?}
+arch_disp=${arch_note:-?}
 if [ ${#problems[@]} -eq 0 ]; then
-  echo "OK  core=${core_n} node=${node_n} soak=${soak_n} round=${round_disp} trades=${trades_n} health=healthy"
+  echo "OK  core=${core_n} node=${node_n} soak=${soak_n} round=${round_disp} trades=${trades_n} archive=${arch_disp} health=healthy"
   exit 0
 fi
-echo "ANOMALY  core=${core_n} node=${node_n} soak=${soak_n} round=${round_disp} trades=${trades_n}"
+echo "ANOMALY  core=${core_n} node=${node_n} soak=${soak_n} round=${round_disp} trades=${trades_n} archive=${arch_disp}"
 for p in "${problems[@]}"; do echo "  - $p"; done
 exit 1
