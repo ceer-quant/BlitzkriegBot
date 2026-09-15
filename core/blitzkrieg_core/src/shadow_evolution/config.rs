@@ -1,91 +1,23 @@
 //! Shadow Evolution — configuration and the mutable/immutable parameter split.
 //!
 //! SAFETY SPINE: parameters are split into two halves.
-//!   - `MutableParams`   — legitimately evolvable knobs (entry/exit tuning).
+//!   - `MutableParams`   — the per-strategy evolvable knob sets (E2-c / #28).
 //!   - `ImmutableConfig` — "physics": hard stop, loss breaker, daily loss cap,
 //!     per-order notional. Shadow evolution can NEVER touch these, because they
 //!     are not part of the swapped object at all (structural, not a check).
+//!
+//! A strategy's own evolvable surface — which knobs, and within which domain —
+//! is declared by the strategy itself ([`super::knobs::KnobSpec`], produced by
+//! `EngineStrategy::evolvable_knobs` in-tree and by the optional
+//! `bk_strategy_evolvable_knobs` symbol across the C ABI). The kernel never
+//! invents a knob for a strategy.
 
 use crate::exit_policy::ExitConfig;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
-/// Evolution-tunable strategy parameters (the only thing an ArcSwap can hold).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MutableParams {
-    /// Trend confirmation threshold (a token must hold above this).
-    #[serde(with = "crate::decimal")]
-    pub trend_min_price: Decimal,
-    /// Resting bid = mid * factor.
-    #[serde(with = "crate::decimal")]
-    pub trend_entry_factor: Decimal,
-    /// Never rest a bid above this price.
-    #[serde(with = "crate::decimal")]
-    pub trend_max_entry_price: Decimal,
-    /// A confirmed trend below this is treated as reversed.
-    #[serde(with = "crate::decimal")]
-    pub trend_broken_price: Decimal,
-}
-
-impl Default for MutableParams {
-    fn default() -> Self {
-        // Mirrors the live spread_arb defaults so evolution starts from reality.
-        Self {
-            trend_min_price: dec!(0.55),
-            trend_entry_factor: dec!(0.98),
-            trend_max_entry_price: dec!(0.45),
-            trend_broken_price: dec!(0.35),
-        }
-    }
-}
-
-impl MutableParams {
-    /// Named fields for gradient checking and variant generation.
-    pub fn fields(&self) -> [(&'static str, Decimal); 4] {
-        [
-            ("trend_min_price", self.trend_min_price),
-            ("trend_entry_factor", self.trend_entry_factor),
-            ("trend_max_entry_price", self.trend_max_entry_price),
-            ("trend_broken_price", self.trend_broken_price),
-        ]
-    }
-
-    /// Set one field by name (used by the guard's exact-application path).
-    pub fn set(&mut self, name: &str, value: Decimal) {
-        match name {
-            "trend_min_price" => self.trend_min_price = value,
-            "trend_entry_factor" => self.trend_entry_factor = value,
-            "trend_max_entry_price" => self.trend_max_entry_price = value,
-            "trend_broken_price" => self.trend_broken_price = value,
-            _ => {}
-        }
-    }
-
-    /// Read one field by name (inverse of `set`; used by directed variant
-    /// generation to step a single knob).
-    pub fn get(&self, name: &str) -> Decimal {
-        match name {
-            "trend_min_price" => self.trend_min_price,
-            "trend_entry_factor" => self.trend_entry_factor,
-            "trend_max_entry_price" => self.trend_max_entry_price,
-            "trend_broken_price" => self.trend_broken_price,
-            _ => Decimal::ZERO,
-        }
-    }
-
-    /// Apply a multiplicative factor to every field (used to build variants and
-    /// to step toward a target under the gradient limit).
-    pub fn scaled(&self, factor: Decimal) -> Self {
-        Self {
-            trend_min_price: self.trend_min_price * factor,
-            trend_entry_factor: self.trend_entry_factor * factor,
-            trend_max_entry_price: self.trend_max_entry_price * factor,
-            trend_broken_price: self.trend_broken_price * factor,
-        }
-    }
-}
+pub use super::knobs::{KnobDeclaration, KnobSpec, MutableParams, StrategyParams};
 
 /// Parameters that are PHYSICAL LAW and must never evolve.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,10 +65,12 @@ pub struct ShadowEvolutionConfig {
     pub cooldown_secs: i64,
     /// Maximum per-field relative change per evolution step (0.05 = ±5%).
     pub max_gradient: Decimal,
-    /// Number of shadow variants to run (>= 2 per spec).
+    /// Number of shadow variants to run **per strategy** (>= 2 per spec).
     pub variant_count: usize,
-    /// Audit JSONL path (relative to CWD).
-    pub audit_log_path: String,
+    /// Directory holding the audit logs. Each strategy writes its OWN file,
+    /// `<dir>/<strategy>.jsonl` (E2-c / #28), so one strategy's history can
+    /// never be read as another's.
+    pub audit_dir: String,
     /// Risk parameters used for the virtual exit simulation (immutable laws).
     pub risk: ImmutableConfig,
     /// Exit policy the virtual variants replay. This MUST be the SAME config the
@@ -144,6 +78,8 @@ pub struct ShadowEvolutionConfig {
     /// exit mechanism the live path never runs — a biased counterfactual. The
     /// caller passes `PositionConfig.exit`.
     pub exit_cfg: ExitConfig,
+    /// Cap on strategies tracked simultaneously (bounded memory / audit fan-out).
+    pub max_strategies: usize,
 }
 
 impl Default for ShadowEvolutionConfig {
@@ -158,10 +94,27 @@ impl Default for ShadowEvolutionConfig {
             cooldown_secs: 600,
             max_gradient: dec!(0.05),
             variant_count: 3,
-            audit_log_path: "data/evolution/evolution.jsonl".into(),
+            audit_dir: "data/evolution".into(),
             risk: ImmutableConfig::default(),
             exit_cfg: ExitConfig::default(),
+            max_strategies: 16,
         }
+    }
+}
+
+impl ShadowEvolutionConfig {
+    /// Audit path for one strategy: `<audit_dir>/<strategy>.jsonl`.
+    ///
+    /// The strategy name is used verbatim because it is already a
+    /// kernel-validated identifier (registry-unique); the only sanitisation
+    /// needed is to keep a path separator out, so a name can never escape the
+    /// audit directory.
+    pub fn audit_path_for(&self, strategy: &str) -> std::path::PathBuf {
+        let safe: String = strategy
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') { c } else { '_' })
+            .collect();
+        std::path::Path::new(&self.audit_dir).join(format!("{safe}.jsonl"))
     }
 }
 
@@ -180,6 +133,8 @@ pub enum EvolutionStatus {
 pub struct VariantView {
     pub id: String,
     pub label: String,
+    /// Which strategy this variant belongs to (E2-c: variants are per-strategy).
+    pub strategy: String,
     pub sample_count: u32,
     #[serde(with = "crate::decimal")]
     pub win_rate: Decimal,
@@ -189,4 +144,19 @@ pub struct VariantView {
     pub total_pnl_usd: Decimal,
     pub age_sec: i64,
     pub is_baseline: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_path_is_per_strategy_and_sanitised() {
+        let cfg = ShadowEvolutionConfig::default();
+        assert_eq!(cfg.audit_path_for("spread_arb").to_string_lossy(), "data/evolution/spread_arb.jsonl");
+        assert_eq!(cfg.audit_path_for("dog_strategy").to_string_lossy(), "data/evolution/dog_strategy.jsonl");
+        // A separator cannot escape the audit directory.
+        assert_eq!(cfg.audit_path_for("../evil").to_string_lossy(), "data/evolution/.._evil.jsonl");
+        assert_ne!(cfg.audit_path_for("a"), cfg.audit_path_for("b"));
+    }
 }

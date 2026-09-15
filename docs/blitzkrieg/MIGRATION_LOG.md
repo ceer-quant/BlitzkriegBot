@@ -1521,3 +1521,140 @@ node-check / secret-scan 不变）。
 
 **验证（本批）**：`BK_REQUIRE_DYLIB=1 cargo test --workspace --locked` 全绿；
 `npm run typecheck`/`test`/`core:strategy-gate` 通过；其余门禁与默认配置行为见 PR 的 CI。
+
+## 45. E2-c 影子进化按策略化：参数集 / 孪生 / 审计 / 回滚四维隔离（Issue #28，2026-09-15）
+
+**问题**：影子进化名义上「让策略适应市场」，实际上只能碰一个策略——
+`MutableParams` 是**全局单值**且写死成 spread_arb 的四个 `trend_*` 旋钮；
+`Variant` 把 spread_arb 的入场逻辑**硬编码在内核里**；`Engine::set_hot_params` 转发给每个策略，
+但只有 `SpreadArbBuiltin` 覆写，`UserStrategyAdapter` 用默认 no-op 静默忽略；
+审计写单个全局文件 `data/evolution/evolution.jsonl`，因生产 `enabled=false` 而**始终 0 字节**；
+`rollback` 无参数、语义上是「回滚那唯一的全局参数」。三个策略并发时，这条链路既不隔离也不可用。
+
+**改动（参数、评估、审计、回滚四个维度全部按策略隔离）**
+
+_参数模型按策略化_
+- `shadow_evolution/knobs.rs`（新）：`KnobSpec { name, value, min, max }`（serde camelCase，
+  十进制字符串走线）；`KnobDeclaration::parse` 解析外挂 JSON，**非法/缺字段一律降级为空声明，永不 panic**；
+  `StrategyParams` = `BTreeMap<String, Decimal>` 参数袋，手写 serde（出线为字符串，
+  入线兼容 JSON 数字，`Decimal::from_str_exact`），并提供
+  `set_declared`/`domain_violation`/`undeclared`/`clamp_to`/`scaled`；
+  `MutableParams` = `BTreeMap<strategy, StrategyParams>`，同样手写 serde。
+- `shadow_evolution/registry.rs`（新）：`ParamRegistry` = 策略名 → `Arc<ArcSwap<StrategyParams>>`，
+  提供 `publish`/`handle_for`/`names`/`remove`/`get`/`snapshot`。**每个策略有自己的原子单元**，
+  读写都不跨策略。
+- 删除 `shadow_evolution/hot_swap.rs`（全局 `HotSwap` 随全局参数模型一并退场）。
+
+_策略自证旋钮 + 自造孪生_
+- `EngineStrategy` 新增 `evolvable_knobs() -> Vec<KnobSpec>`（默认空）与
+  `shadow_factory() -> Option<Box<dyn ShadowFactory>>`（默认 `None`）；`set_hot_params` 签名改为
+  `Option<Arc<ParamRegistry>>`。
+- `strategies/shadow_twin.rs`（新）：`ShadowFactory { strategy(), knobs(), make(&StrategyParams) }`
+  —— 影子变体是**策略自己造的孪生**，与主策略同代码、同出场策略，只有旋钮不同；
+  内核侧 `EngineStrategyShadow` + `TwinReplay` 只负责按回放流驱动它。**内核不再硬编码任何策略的入场逻辑**，
+  这正是「策略外挂、标准化接口」裁决（E7）在进化链路上的兑现。
+- 孪生出场复用 live 的 `ExitConfig`（`config.positions.exit`），D-2 的保真度约束由单测
+  `the_exit_policy_replayed_is_the_configured_one` 钉住。
+
+_三层锁（新增第 0 层）_
+- 校验顺序固定为 `validate_declared` → `validate_domain` → `validate_gradient` → `validate_immutable`：
+  **取值域是外层硬边界**，越界在步长检查之前就被拒绝——「渐变地爬出域外」不成立；
+  单步仍受 `max_gradient`（默认 ±5%）约束；风控参数不在任何 `StrategyParams` 里，结构上不可达。
+
+_热参覆盖层可摘除_
+- `Engine::set_hot_params(Some(registry))` 挂载、`None` **摘除**。摘除不是「忽略参数」而是
+  **物理上没有句柄可读**，于是「关闭进化 ⇒ 与改动前逐位一致」是**可证明的**而非约定俗成的；
+  新增 `Core::has_hot_params()` 作为可观测形式。
+- 关闭/开启/加载库都会 `rewire_hot_params()`。
+- **修复一个真实缺陷**：`strategy.load` 载入的库此前不会登记到进化管理器，
+  若在 `shadow_evolution.enable` 之后载入，则要等到重启才能进化。现在注册成功后立即
+  `rewire_hot_params()`；加载回执同时写明 `not evolvable (no knobs declared)` 或
+  `declares evolvable knobs: <names>`。
+
+_按策略评估 / 审计 / 应用 / 回滚_
+- `ShadowEvolution` 内部改为 per-strategy 单元：独立的变体集、基准、计数器、冷却期。
+  `EvolutionOutcome{Signal,Applied,Rejected{signal,reason},RolledBack{strategy,from,to}}` 全部带策略。
+- `ShadowEvolutionConfig.audit_dir`（**目录**）+ `audit_path_for(strategy)` 派生
+  `data/evolution/<strategy>.jsonl`（非 `[A-Za-z0-9_\-.]` 字符替换为 `_`），
+  `AuditRecord` 增 `strategy`/`manual`/`rollback` 字段，`recent(strategy, limit)` 按策略查。
+- `apply_params` 多策略袋子**全有或全无**；`rollback(strategy, …)` 按策略独立，
+  对未声明旋钮的策略或未知策略返回 Err（不静默成功）。
+- `service`：`shadow_evolution_status_for`/`shadow_evolution_rollback(strategy)`/
+  `shadow_evolution_history(Option<&str>, limit)`；`engine_evaluate` 仍**先**跑
+  `shadow_evolution_evaluate`，因此本周期内刚应用的切换立刻生效。
+- IPC：`shadow_evolution.status` 增 `strategies[]`（每策略 `status`/`params`/`knobs[]`/三个计数，
+  `params===null` 即「不可进化」）；`history` 增可选 `strategy`；新增 `shadow_evolution.apply`;
+  `rollback` 改为**必需** `strategy`。聚合键保持不变。
+
+**外挂（ABI 仍 v2）**
+- 新增**独立可选符号** `bk_strategy_evolvable_knobs(handle) -> char*`，出参
+  `{"knobs":[{name,value,min,max}]}`（十进制字符串，同库 `bk_string_out`/`free_string` 规则）。
+  **符号缺失 = 明确「不可进化」**：不建单元、不出现在 status、apply/rollback 一律拒绝。
+  与 E2-b 同理走可选符号而非 vtable 字段（内核按值拷贝 vtable），`BK_ABI_VERSION=2` 维持不变。
+  新常量 `BK_EVOLVABLE_KNOBS_SYMBOL`（`blitzkrieg-strategy-api`）。
+- `foreign.rs`：`set_hot_params` 只解析**自己那格**（`handle_for(&self.name)`），
+  推送给库的是**本策略自己的参数袋**（不是别人的字段表），并在热路径上去重后调 `on_hot_params`；
+  `shadow_factory()` 调用库的 `create()` 再建独立实例并 `apply_params_direct` 灌入反事实值——
+  孪生跑的是**该库自己的**逻辑。库由 `Arc<LoadedLibrary>` 持有，孪生存活期间不会被卸载。
+- `dog_strategy` 与 `parity_strategy` 都已导出该符号（dog 声明 `trendMaxEntryPrice` 0.05–0.90，
+  当前 0.43）；内建 `spread_arb` 覆写 trait 声明 4 个 `trend_*` 旋钮。
+
+**Node 侧**
+- `blitzkrieg-core-client.ts`：`shadowEvolutionStatus` 类型补 `strategies[]`；
+  `shadowEvolutionHistory(limit, strategy?)`；`shadowEvolutionRollback(strategy)`（**必需**）；
+  新增 `shadowEvolutionApply(strategy, params)`。
+- `crypto-hft` 技能：`/crypto-hft shadow-evolution [enable|disable|status|history [strategy]|
+  apply <strategy> …|rollback <strategy>]`，status 逐策略分块并打印每个旋钮的值**与取值域**，
+  对不可进化策略的 rollback 给出解释性拒绝（而非泛化错误）。
+
+**测试（真实 Core + Engine 端到端）**
+- 新增 `core/blitzkrieg_core/tests/shadow_evolution_per_strategy.rs`（4 项）：
+  1. `two_strategies_evolve_in_parallel_without_cross_talk_through_the_core`——注册
+     `spread_arb`（托管但关闭）+ `alpha`(BTC) + `beta`(ETH)，断言三个单元是**不同的 `Arc`**
+     （`Arc::ptr_eq`）；阶段一只有 BTC → 只有 alpha 进化，`alpha.jsonl` 内无 beta/spread_arb 记录，
+     `beta.jsonl`/`spread_arb.jsonl` **不存在**；阶段二只有 ETH → alpha 冻结、beta 进化，
+     且 `evolution_count("spread_arb")==0`。
+  2. `evolution_off_is_byte_for_byte_the_previous_behaviour`——未开启时无注册、`has_hot_params()==false`、
+     `variant_count()==0`；驱动两个资产后**依然**没有任何审计文件；然后 `enable` 发布的是
+     live 值本身（0.40），挂载本身不移动任何值。
+  3. `apply_and_rollback_move_exactly_one_strategy`——apply alpha 只动 alpha；
+     `RolledBack{strategy,from,to}` 的 `from` 是 0.412、`to` 是 0.40；回滚 beta 与未知策略均 Err；
+     两策略袋子 Err 且**无部分应用**；越界 0.99 Err；history 恰 2 条且都在 `alpha.jsonl` 内。
+  4. `an_undeclared_strategy_is_reported_not_evolvable`——`Inert` 策略 `declared_knobs` 空、
+     `params_for` 为 `None`、`status` 为 `None`；内建**确实**声明且每个域 `is_coherent()`。
+- 单元测试（`shadow_evolution/` 内）：`knobs.rs` 参数模型；`registry.rs` 单元隔离；
+  `variants.rs` 基线+定向变体、扫遍每个旋钮双向、未声明即零变体、零宽域不可变、确定性；
+  `evaluator.rs` 逐策略冷却、基准样本不足不发信号、亏损变体不合格、空集不发信号、
+  反事实是真实决策差异、信号带策略标签；`guard.rs` 域/步长拒绝、风控不可削弱；
+  `audit.rs` 每策略独立文件与历史、禁用时不写文件、manual/rollback 有标记；
+  `mod.rs` 默认惰性、未声明无单元、开启为每策略建单元并发布自己的 cell、两策略并行不串扰、
+  回滚按策略、手动 apply 审计+域检查、仅观察永不移动参数。
+
+**门禁（新增）**
+- `scripts/strategy-evolution-check.mjs`（npm `core:strategy-evolve`，已加入 `package.json`）：
+  在**真 release 二进制 + 真 dog cdylib** 上、私有 socket + `mkdtemp` 工作目录、
+  `--mode dry --no-discovery --no-event-archive --no-trade-log --no-order-log --no-position-log
+  --shadow-evolution --se-min-samples 2 --se-cooldown-secs 0 --se-min-obs-secs 0` 下断言：
+  加载回执含 `declares evolvable knobs: trendMaxEntryPrice`；`status.strategies[]` 同时有
+  dog（0.43）与 spread_arb 两块且各带自己的旋钮与域；apply 0.4429（+3%）**只**移动 dog；
+  0.99（越域）、0.60（+35% 越步）、未知策略三种输入全部被拒且值**未移动**；
+  `dog_strategy.jsonl` 存在且全是 dog 全 manual，`spread_arb` 历史为空且
+  `spread_arb.jsonl` **从未产生**；回滚恢复 0.43 并留下 `rollback:true` 记录；
+  回滚 spread_arb 与不带 strategy 的回滚均被拒；disable 后 status 为 `disabled` 且值不变，
+  重新 enable 后值仍不变。
+
+**验证（本批）**
+- `BK_REQUIRE_DYLIB=1 cargo test --workspace --locked`：**232 项全绿，0 失败**
+  （blitzkrieg_core lib 181 / 主程序 10 / dynamic_strategy 6 / foreign_parity 1 /
+  **shadow_evolution_per_strategy 4**（本批新增）/ ui_kit 20 / ui_kit_panel 2 / parity_logic 4 /
+  polymarket_extension 4；doc-tests 0）。
+- `npx tsc --noEmit`、`npm test` 通过。
+- 本地 11 个 rust 侧门禁 + `core:parity` + `core:parity-engines` + `ui-kit-gateway-check` 全绿，
+  其中新增 `core:strategy-evolve`。
+
+**已知缺口（登记不隐藏）**
+- 孪生 panic 隔离（`catch_unwind` + `crashed` 标记）机制在位，但 E2-c 重写时旧测试随
+  `hot_swap.rs` 删除，暂无专门回归测试。
+- 旧的全局审计文件 `data/evolution/evolution.jsonl`（0 字节）**保留不删**（D-17），
+  新代码不读不写；是否物理删除待用户裁决。
+- 生产**仍未开启**影子进化（`enabled=false`）：「影子进化转正」属 v0.2。

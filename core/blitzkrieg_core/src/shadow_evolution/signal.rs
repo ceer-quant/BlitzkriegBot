@@ -1,6 +1,6 @@
-//! Shadow Evolution — the evolve signal.
+//! Shadow Evolution — the evolve signal (per strategy, E2-c / #28).
 
-use super::config::MutableParams;
+use super::knobs::MutableParams;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -13,12 +13,17 @@ pub enum EvolutionReason {
     CombinedImprovement,
 }
 
-/// A proposal to switch the live mutable parameters to a variant's.
+/// A proposal to switch ONE strategy's parameters to a variant's.
+///
+/// `strategy` is the isolation key: the signal names whose parameters move, so
+/// the guard, the hot swap and the audit file all address exactly one strategy.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvolveSignal {
     pub signal_id: String,
     pub timestamp: i64,
+    /// The strategy whose parameters this proposal would change.
+    pub strategy: String,
     pub from_params: MutableParams,
     pub to_params: MutableParams,
     pub reason: EvolutionReason,
@@ -33,9 +38,11 @@ pub struct EvolveSignal {
 }
 
 impl EvolveSignal {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         signal_id: String,
         timestamp: i64,
+        strategy: String,
         from_params: MutableParams,
         to_params: MutableParams,
         reason: EvolutionReason,
@@ -47,6 +54,7 @@ impl EvolveSignal {
         Self {
             signal_id,
             timestamp,
+            strategy,
             from_params,
             to_params,
             reason,

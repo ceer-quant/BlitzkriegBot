@@ -183,6 +183,10 @@ pub struct ShadowEvolutionTuning {
     pub min_observation_secs: Option<i64>,
     pub cooldown_secs: Option<i64>,
     pub variant_count: Option<usize>,
+    /// Directory for the per-strategy audit files (`<dir>/<strategy>.jsonl`).
+    /// Defaults to `data/evolution`; a harness points it at a scratch directory
+    /// so an experiment never writes into the operator's real audit history.
+    pub audit_dir: Option<String>,
 }
 
 impl Default for CoreConfig {
@@ -286,6 +290,7 @@ impl Core {
                 if let Some(v) = t.min_observation_secs { c.min_observation_secs = v; }
                 if let Some(v) = t.cooldown_secs { c.cooldown_secs = v; }
                 if let Some(v) = t.variant_count { c.variant_count = v; }
+                if let Some(v) = &t.audit_dir { c.audit_dir = v.clone(); }
             }
             // D-2: variant exits must replay the SAME policy the live position
             // manager runs, or the counterfactual is judged against an exit
@@ -348,7 +353,7 @@ impl Core {
                 reg.install(Box::new(crate::extension::builtins::BinanceSpotExtension::new()), None);
                 reg
             },
-            shadow_evolution: ShadowEvolution::new(shadow_cfg, MutableParams::default()),
+            shadow_evolution: ShadowEvolution::new(shadow_cfg, &[]),
             trade_db,
             order_db,
             position_db,
@@ -504,11 +509,28 @@ impl Core {
                     } else {
                         String::new()
                     };
+                    // E2-c: the same receipt names the evolvable knobs, so "not
+                    // evolvable" (no optional symbol) is distinguishable at load
+                    // from "evolvable but nothing applied yet".
+                    let evolvable = if loaded.evolvable_knobs.is_empty() {
+                        "; not evolvable (no knobs declared)".to_string()
+                    } else {
+                        let names: Vec<&str> =
+                            loaded.evolvable_knobs.iter().map(|k| k.name.as_str()).collect();
+                        format!("; declares evolvable knobs: {}", names.join(","))
+                    };
                     match engine.register_user_strategy(
                         Box::new(loaded.strategy),
                         format!("dylib:{}", p.display()),
                     ) {
-                        Ok(_) => format!("{name}@{version} registered into the engine dispatch (disabled{declared})"),
+                        Ok(_) => {
+                            // The new strategy's declaration must reach the manager
+                            // too: a library loaded AFTER evolution was enabled would
+                            // otherwise never get a unit, so it could not evolve at
+                            // all until a restart.
+                            self.rewire_hot_params();
+                            format!("{name}@{version} registered into the engine dispatch (disabled{declared}{evolvable})")
+                        }
                         Err(reason) => format!("rejected: {reason}"),
                     }
                 }
@@ -585,16 +607,28 @@ impl Core {
         &self.shadow_evolution
     }
 
-    /// Operator override: validate + hot-swap mutable parameters.
+    /// Operator override for ONE strategy: validate + hot-swap + audit. `params`
+    /// must name exactly one strategy; a multi-strategy bag is refused rather than
+    /// partially applied.
     pub fn shadow_evolution_apply(&mut self, params: MutableParams, now_ms: i64) -> Result<(), String> {
         self.shadow_evolution.apply_params(params, now_ms)
     }
 
-    /// Attach the evolution hot-swap handle to the driving engine so parameter
-    /// changes take effect on the next tick.
+    /// Attach the per-strategy parameter registry to the driving engine so an
+    /// evolution takes effect on the next tick with no restart. Also re-reads the
+    /// strategies' knob declarations (their twins are built from them).
+    ///
+    /// While evolution is DISABLED the overlay is detached (`None`): strategies
+    /// then run on the config the host pushed, which is byte-for-byte the
+    /// pre-evolution behaviour (acceptance: "关闭进化时行为与改动前一致").
     fn rewire_hot_params(&mut self) {
         if let Some(e) = self.engine.as_mut() {
-            e.set_hot_params(self.shadow_evolution.handle());
+            if self.shadow_evolution.is_enabled() {
+                self.shadow_evolution.register_strategies(&e.strategy_refs());
+                e.set_hot_params(Some(self.shadow_evolution.registry()));
+            } else {
+                e.set_hot_params(None);
+            }
         }
     }
 
@@ -606,40 +640,62 @@ impl Core {
 
     pub fn shadow_evolution_disable(&mut self) -> bool {
         self.shadow_evolution.disable();
+        self.rewire_hot_params();
         true
     }
 
+    /// Aggregate status across every evolvable strategy (kept for callers that
+    /// predate per-strategy status). `shadow_evolution_status_for` is the precise
+    /// per-strategy query.
     pub fn shadow_evolution_status(&self, now_ms: i64) -> EvolutionStatus {
-        self.shadow_evolution.status(now_ms)
+        self.shadow_evolution.aggregate_status(now_ms)
     }
 
-    pub fn shadow_evolution_rollback(&mut self, now_ms: i64) -> Result<EvolutionOutcome, String> {
-        self.shadow_evolution.rollback(now_ms)
+    /// One strategy's status (`None` = not evolvable).
+    pub fn shadow_evolution_status_for(&self, strategy: &str, now_ms: i64) -> Option<EvolutionStatus> {
+        self.shadow_evolution.status(strategy, now_ms)
+    }
+
+    /// Roll back ONE strategy to the parameters in force before its last change.
+    pub fn shadow_evolution_rollback(&mut self, strategy: &str, now_ms: i64) -> Result<EvolutionOutcome, String> {
+        self.shadow_evolution.rollback(strategy, now_ms)
     }
 
     pub fn shadow_evolution_variants(&mut self, now_ms: i64) -> Vec<crate::shadow_evolution::VariantView> {
         self.shadow_evolution.variant_views(now_ms)
     }
 
-    pub fn shadow_evolution_history(&self, limit: usize) -> Vec<crate::shadow_evolution::audit::AuditRecord> {
-        self.shadow_evolution.history(limit)
+    /// Audit history. `None` = every strategy; `Some(name)` = that strategy's file.
+    pub fn shadow_evolution_history(
+        &self,
+        strategy: Option<&str>,
+        limit: usize,
+    ) -> Vec<crate::shadow_evolution::audit::AuditRecord> {
+        self.shadow_evolution.history(strategy, limit)
     }
 
-    /// Feed the evolution engine a round's markets (sets token expiries).
-    pub fn shadow_evolution_on_round(&mut self, markets: &[CryptoMarket], now_ms: i64) {
-        self.shadow_evolution.on_round(markets, now_ms);
+    /// Feed the evolution engine a round's markets plus the opening book seeds the
+    /// live engine is about to replay, so every twin's confirmation clock starts on
+    /// the same tick as the live strategy's.
+    pub fn shadow_evolution_on_round(
+        &mut self,
+        markets: &[CryptoMarket],
+        seeds: &[(String, crate::model::OrderbookSnapshot)],
+        now_ms: i64,
+    ) {
+        self.shadow_evolution.on_round(markets, seeds, now_ms);
     }
 
-    /// Feed the evolution engine a book tick (observation only). `confirmed`
-    /// comes from the same trend tracker the live engine uses.
+    /// Feed the evolution engine a book tick (observation only). Twins derive
+    /// their own trend state from the books they see, exactly as an external
+    /// strategy does, so no externally-computed confirmation flag is passed in.
     pub fn shadow_evolution_on_tick(
         &mut self,
         token_id: &str,
         book: &crate::model::OrderbookSnapshot,
-        confirmed: bool,
         now_ms: i64,
     ) {
-        self.shadow_evolution.on_tick(token_id, book, confirmed, now_ms);
+        self.shadow_evolution.on_tick(token_id, book, now_ms);
     }
 
     /// Run one evolution evaluation and map outcomes to kernel events.
@@ -659,15 +715,17 @@ impl Core {
             EvolutionOutcome::Rejected { signal, reason } => {
                 self.emit(Event::EvolutionRejected { signal, reason })
             }
-            EvolutionOutcome::RolledBack { .. } => {
-                // Rollback is surfaced via the status/history IPC; the audit log
-                // already records it. Emitting an applied event keeps the UI in sync.
+            EvolutionOutcome::RolledBack { strategy, from, to } => {
+                // Rollback restores the pre-change parameters for ONE strategy; the
+                // audit file already records it. Emitting an applied-shaped signal
+                // keeps the UI's "parameters changed" path single.
                 self.emit(Event::EvolutionApplied {
                     signal: crate::shadow_evolution::EvolveSignal::new(
-                        "rollback".into(),
-                        0,
-                        MutableParams::default(),
-                        MutableParams::default(),
+                        format!("rollback-{strategy}"),
+                        crate::ipc::server::now_ms(),
+                        strategy,
+                        from,
+                        to,
                         crate::shadow_evolution::EvolutionReason::CombinedImprovement,
                         rust_decimal::Decimal::ONE,
                         0,
@@ -682,9 +740,23 @@ impl Core {
     // ── Self-driving engine (P3) ────────────────────────────────────────────
     pub fn enable_engine(&mut self, engine: crate::engine::Engine) {
         self.engine = Some(engine);
+        // E2-c: each strategy declares its own evolvable knobs, so the manager can
+        // only build its units once the strategies exist. This also attaches the
+        // parameter registry, so installing an engine never leaves the overlay
+        // unwired.
+        self.rewire_hot_params();
     }
     pub fn has_engine(&self) -> bool {
         self.engine.is_some()
+    }
+
+    /// Whether the driving engine currently holds a Shadow Evolution parameter
+    /// overlay (E2-c / #28). `false` while evolution is off, because the overlay
+    /// is DETACHED rather than merely ignored — the observable form of the
+    /// acceptance criterion "evolution off ⇒ behaviour unchanged". A strategy can
+    /// then only read the config the host pushed through `on_config`.
+    pub fn has_hot_params(&self) -> bool {
+        self.engine.as_ref().is_some_and(|e| e.has_hot_params())
     }
 
     /// Install the running data feed's subscription control (P4). Called by the
@@ -803,20 +875,34 @@ impl Core {
         // Now feed the shadow the tick the live engine just consumed.
         match shadow_feed {
             Some(ShadowFeed::Book(token_id, t)) => {
-                let confirmed = self
-                    .engine
-                    .as_ref()
-                    .map(|e| e.confirmed_tokens().contains(&token_id))
-                    .unwrap_or(false);
                 let book = self
                     .engine
                     .as_ref()
                     .and_then(|e| e.book_snapshot(&token_id));
                 if let Some(book) = book {
-                    self.shadow_evolution_on_tick(&token_id, &book, confirmed, t);
+                    self.shadow_evolution_on_tick(&token_id, &book, t);
                 }
             }
-            Some(ShadowFeed::Round(markets, t)) => self.shadow_evolution_on_round(&markets, t),
+            Some(ShadowFeed::Round(markets, t)) => {
+                // Seed the twins with the same opening mids the live engine replays
+                // for this round (engine.rs RoundMarkets), so confirmation clocks
+                // start together instead of one book late.
+                let tokens: Vec<String> = markets
+                    .iter()
+                    .flat_map(|m| [m.up_token_id.clone(), m.down_token_id.clone()])
+                    .collect();
+                let seeds: Vec<(String, crate::model::OrderbookSnapshot)> = self
+                    .engine
+                    .as_ref()
+                    .map(|e| {
+                        tokens
+                            .into_iter()
+                            .filter_map(|t| e.book_snapshot(&t).map(|b| (t, b)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.shadow_evolution_on_round(&markets, &seeds, t)
+            }
             None => {}
         }
     }
@@ -2125,11 +2211,26 @@ mod round_expiry_tests {
 mod shadow_evolution_tests {
     use super::*;
     use crate::risk::RiskConfig;
+    use crate::shadow_evolution::{MutableParams, StrategyParams};
     use rust_decimal_macros::dec;
 
-    /// Acceptance: enabling Shadow Evolution attaches the hot-swap handle to the
-    /// engine, and a parameter change is visible to the engine on the next read
-    /// (no restart). Also: enabling is opt-in and rollback restores the prior set.
+    /// One strategy's override bag, built the way the IPC handler builds it.
+    fn bag(strategy: &str, knob: &str, value: Decimal) -> MutableParams {
+        let mut p = StrategyParams::new();
+        p.set(knob, value);
+        let mut m = MutableParams::new();
+        m.set_strategy(strategy, p);
+        m
+    }
+
+    fn cap(c: &Core) -> Decimal {
+        c.engine.as_ref().unwrap().current_spread_arb().trend_max_entry_price
+    }
+
+    /// Acceptance: enabling Shadow Evolution attaches the per-strategy hot-swap
+    /// registry to the engine, and a parameter change is visible to the engine on
+    /// the next read (no restart). Also: enabling is opt-in, apply is per-strategy
+    /// and rollback restores the prior set for that strategy only.
     #[test]
     fn hot_swap_reaches_the_engine_and_rolls_back() {
         let mut c = Core::new(CoreConfig {
@@ -2145,19 +2246,55 @@ mod shadow_evolution_tests {
         // Enable → engine gains the hot-swap handle.
         c.shadow_evolution_enable(1000);
         assert!(c.engine.as_ref().unwrap().has_hot_params());
+        assert_eq!(c.shadow_evolution().strategy_names(), vec!["spread_arb".to_string()]);
 
-        let before = c.engine.as_ref().unwrap().current_spread_arb().trend_max_entry_price;
+        let before = cap(&c);
         // Simulate an applied evolution via the operator override path (+3%).
-        let mut newp = c.shadow_evolution().current_params();
-        newp.trend_max_entry_price = before * dec!(1.03);
-        c.shadow_evolution_apply(newp.clone(), 1500).unwrap();
-        let after = c.engine.as_ref().unwrap().current_spread_arb().trend_max_entry_price;
-        assert_eq!(after, before * dec!(1.03), "engine must observe hot-swapped params");
+        c.shadow_evolution_apply(bag("spread_arb", "trend_max_entry_price", before * dec!(1.03)), 1500)
+            .unwrap();
+        assert_eq!(cap(&c), before * dec!(1.03), "engine must observe hot-swapped params");
 
-        // Rollback restores the previous set.
-        let _ = c.shadow_evolution_rollback(2000);
-        let restored = c.engine.as_ref().unwrap().current_spread_arb().trend_max_entry_price;
-        assert_eq!(restored, before, "rollback must restore prior params in the engine");
+        // Rollback restores the previous set — for that strategy only.
+        c.shadow_evolution_rollback("spread_arb", 2000).unwrap();
+        assert_eq!(cap(&c), before, "rollback must restore prior params in the engine");
+        assert_eq!(c.shadow_evolution().evolution_count("spread_arb"), 0, "rollback is not an evolution");
+
+        // A manual apply is now traced; the audit is per strategy.
+        let recs = c.shadow_evolution_history(Some("spread_arb"), 10);
+        assert_eq!(recs.len(), 2, "manual apply + rollback");
+        assert!(recs[0].manual);
+        assert!(recs.iter().all(|r| r.strategy == "spread_arb"));
+        assert!(c.shadow_evolution_history(Some("nope"), 10).is_empty());
+    }
+
+    /// Apply names exactly one strategy: a multi-strategy bag is refused rather
+    /// than partially applied, and an unknown strategy is an error (not a silent
+    /// no-op that another strategy's change could be mistaken for).
+    #[test]
+    fn apply_and_rollback_are_per_strategy() {
+        let mut c = Core::new(CoreConfig {
+            dry_seed_balance: dec!(1000),
+            ..Default::default()
+        });
+        c.enable_engine(crate::engine::Engine::new(crate::engine::EngineConfig::default()));
+        c.shadow_evolution_enable(0);
+
+        let before = cap(&c);
+        let mut both = bag("spread_arb", "trend_max_entry_price", before * dec!(1.03));
+        both.set_strategy("dog_strategy", StrategyParams::new());
+        assert!(c.shadow_evolution_apply(both, 1000).is_err(), "one strategy at a time");
+        assert_eq!(cap(&c), before, "a refused apply must not move anything");
+
+        assert!(c.shadow_evolution_apply(bag("nope", "x", dec!(1)), 1100).is_err());
+        assert!(c.shadow_evolution_rollback("nope", 1200).is_err());
+        assert!(c.shadow_evolution_rollback("spread_arb", 1300).is_err(), "nothing to roll back yet");
+
+        // An undeclared knob for spread_arb is refused: a proposal can never
+        // smuggle in a field the strategy did not open to evolution.
+        assert!(c
+            .shadow_evolution_apply(bag("spread_arb", "hard_stop_loss_pct", dec!(1)), 1400)
+            .is_err());
+        assert_eq!(cap(&c), before);
     }
 
     #[test]
@@ -2167,10 +2304,40 @@ mod shadow_evolution_tests {
             ..Default::default()
         });
         c.enable_engine(crate::engine::Engine::new(crate::engine::EngineConfig::default()));
+        let before = cap(&c);
         assert!(!c.shadow_evolution().is_enabled());
         assert_eq!(c.shadow_evolution().variant_count(), 0);
+        assert!(!c.engine.as_ref().unwrap().has_hot_params(), "no overlay while disabled");
         c.shadow_evolution_evaluate(1000);
-        assert_eq!(c.shadow_evolution().history(10).len(), 0);
+        assert_eq!(c.shadow_evolution_history(None, 10).len(), 0);
+        // Nothing is registered and nothing moves, so the strategy runs on the
+        // config the host pushed — the pre-evolution behaviour exactly.
+        assert!(c.shadow_evolution().strategy_names().is_empty());
+        assert!(c.shadow_evolution().current_params().is_empty());
+        assert!(c.shadow_evolution_status_for("spread_arb", 0).is_none());
+        assert_eq!(c.shadow_evolution_status(0), EvolutionStatus::Disabled);
+        c.shadow_evolution_apply(bag("spread_arb", "trend_max_entry_price", dec!(0.50)), 1200)
+            .unwrap_err();
+        assert_eq!(cap(&c), before, "a disabled engine cannot be written to");
+
+        // Enabling registers the declared names and attaches the overlay; the
+        // published values are the declaration, not an invented parameter.
+        c.shadow_evolution_enable(2000);
+        assert_eq!(c.shadow_evolution().strategy_names(), vec!["spread_arb".to_string()]);
+        assert!(c.engine.as_ref().unwrap().has_hot_params());
+        assert_eq!(
+            c.shadow_evolution().current_params().get("spread_arb", "trend_max_entry_price"),
+            Some(before),
+        );
+        assert_eq!(cap(&c), before, "attaching the overlay must not itself move a value");
+
+        // Disabling DETACHES it again: back to the untouched base config.
+        c.shadow_evolution_apply(bag("spread_arb", "trend_max_entry_price", before * dec!(1.03)), 2100)
+            .unwrap();
+        assert_ne!(cap(&c), before);
+        c.shadow_evolution_disable();
+        assert!(!c.engine.as_ref().unwrap().has_hot_params());
+        assert_eq!(cap(&c), before, "disabling restores the base config exactly");
     }
 }
 

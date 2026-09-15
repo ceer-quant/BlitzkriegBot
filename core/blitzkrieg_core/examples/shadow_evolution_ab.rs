@@ -19,10 +19,16 @@
 //! the feature targets: entering at the cap is where the losses live.
 //!
 //! Fidelity fixes baked into the run (D-2/D-3): the shadow sees the SAME tick the
-//! live engine just consumed (no one-tick lag); variants mutate ONE knob at a
-//! time (not four in lockstep, which cancelled out); variants replay the live
-//! `ExitConfig` (SL 12), not a fabricated 50% hard stop; and variant trade
+//! live engine just consumed (no one-tick lag); variants mutate ONE declared knob
+//! at a time (not four in lockstep, which cancelled out); variants replay the
+//! live `ExitConfig` (SL 12), not a fabricated 50% hard stop; and variant trade
 //! history accumulates across round boundaries.
+//!
+//! E2-c (#28): a variant is no longer a kernel-side copy of spread_arb's entry
+//! rule. It is a TWIN of the strategy itself (`ShadowFactory::make`), driven with
+//! a counterfactual parameter bag. The manager owns one evolution unit per
+//! strategy, each with its own parameter cell and its own audit file
+//! (`data/evolution/<strategy>.jsonl`), so two strategies cannot cross-talk.
 //!
 //! Raw output under `docs/reports/data/`: trade CSV, evolution audit JSONL, a
 //! machine-readable summary, and a safety-lock probe result. Run:
@@ -34,6 +40,7 @@ use blitzkrieg_core::position::PositionConfig;
 use blitzkrieg_core::risk::RiskConfig;
 use blitzkrieg_core::scanner::ScannerConfig;
 use blitzkrieg_core::service::{Core, CoreConfig, ShadowEvolutionTuning};
+use blitzkrieg_core::shadow_evolution::{MutableParams, StrategyParams};
 use blitzkrieg_core::signal::{SpreadArbConfig, TrendConfig};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -44,6 +51,8 @@ use std::path::PathBuf;
 const STEP_MS: i64 = 4_000; // 4s per scripted tick
 const ROUND_SEC: i64 = 86_400; // ~1 day: far longer than the run so time-based exits never fire
 const N_ASSETS: usize = 70;
+/// The strategy under evolution in this harness (the builtin's own name).
+const STRATEGY: &str = "spread_arb";
 
 fn up_token(i: usize) -> String {
     format!("A{i:02}_UP")
@@ -102,7 +111,10 @@ fn build_core(se_enabled: bool) -> Core {
         min_sample_count: Some(30),
         min_observation_secs: Some(300),
         cooldown_secs: Some(600),
-        variant_count: Some(3),
+        // Nine variants = the baseline plus eight directed single-knob moves,
+        // which is exactly two directions for each of spread_arb's four declared
+        // knobs. Fewer variants would leave the cap knob unreachable in this run.
+        variant_count: Some(9),
         ..Default::default()
     });
     let mut core = Core::new(cfg);
@@ -155,6 +167,33 @@ fn tick_token(core: &mut Core, token: &str, bid: Decimal, ask: Decimal, now: i64
     let _ = core.engine_evaluate(now);
 }
 
+/// Knobs whose value differs between two parameter bags, as `name:from->to`.
+/// Addresses ONE strategy's namespace, so a record can only ever show that
+/// strategy's own knobs.
+fn changed_knobs(from: &MutableParams, to: &MutableParams, strategy: &str) -> Vec<String> {
+    let empty = StrategyParams::new();
+    let f = from.for_strategy(strategy).unwrap_or(&empty);
+    let t = to.for_strategy(strategy).unwrap_or(&empty);
+    let mut names: Vec<&str> = f.names();
+    for n in t.names() {
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    names
+        .into_iter()
+        .filter_map(|n| {
+            let (fv, tv) = (f.get(n), t.get(n));
+            if fv == tv {
+                None
+            } else {
+                let show = |v: Option<Decimal>| v.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
+                Some(format!("{n}:{}->{}", show(fv), show(tv)))
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Default)]
 struct ManagerExp {
     baseline_wr: Decimal,
@@ -176,12 +215,14 @@ struct ManagerExp {
 /// cap-tightened variant genuinely beats the baseline:
 ///   * "winner" tokens offer a dip at mid 0.44 (entry 0.42, under cap) then rally;
 ///   * "cap" tokens offer a dip at mid 0.47 clamped to the 0.45 cap, then collapse.
-/// The baseline takes both; a variant whose cap is 2% lower skips the cap losers.
+/// The baseline takes both; a variant whose cap is 3% lower skips the cap losers.
 fn run_manager_experiment() -> ManagerExp {
     use blitzkrieg_core::exit_policy::ExitConfig;
     use blitzkrieg_core::model::OrderbookSnapshot;
-    use blitzkrieg_core::shadow_evolution::config::{ImmutableConfig, MutableParams, ShadowEvolutionConfig};
+    use blitzkrieg_core::shadow_evolution::config::{ImmutableConfig, ShadowEvolutionConfig};
     use blitzkrieg_core::shadow_evolution::ShadowEvolution;
+    use blitzkrieg_core::strategies::spread_arb::SpreadArbBuiltin;
+    use blitzkrieg_core::strategies::EngineStrategy;
 
     let cfg = ShadowEvolutionConfig {
         enabled: true,
@@ -192,12 +233,17 @@ fn run_manager_experiment() -> ManagerExp {
         min_observation_secs: 300,
         cooldown_secs: 0,
         max_gradient: dec!(0.05),
-        variant_count: 3,
-        audit_log_path: std::env::temp_dir().join("shadow_ab_manager_audit.jsonl").to_string_lossy().into_owned(),
+        // Baseline + 8 directed moves = both directions of all four knobs.
+        variant_count: 9,
+        audit_dir: std::env::temp_dir().join("shadow_ab_manager_audit").to_string_lossy().into_owned(),
         risk: ImmutableConfig::default(),
         exit_cfg: ExitConfig::default(),
+        ..Default::default()
     };
-    let mut se = ShadowEvolution::new(cfg, MutableParams::default());
+    // The manager builds one unit per EVOLVABLE strategy, and a strategy is the
+    // only thing that can declare its own knobs — so it needs a live instance.
+    let strat = SpreadArbBuiltin::new(TrendConfig::default(), SpreadArbConfig::default());
+    let mut se = ShadowEvolution::new(cfg, &[&strat as &dyn EngineStrategy]);
     se.enable(0);
 
     let n_tokens = 48usize;
@@ -217,7 +263,7 @@ fn run_manager_experiment() -> ManagerExp {
             question: "m".into(),
         })
         .collect();
-    se.on_round(&market, now);
+    se.on_round(&market, &[], now);
 
     let book = |bid: Decimal, ask: Decimal, ts: i64| {
         OrderbookSnapshot::from_levels("t", vec![(bid, dec!(500))], vec![(ask, dec!(500))], ts)
@@ -229,18 +275,18 @@ fn run_manager_experiment() -> ManagerExp {
         if cap_loser {
             // Dip at mid 0.47 → entry clamped to 0.45 == cap (baseline takes it;
             // tighter variant skips), then collapse (both SL levels trip).
-            se.on_tick(&token, &book(dec!(0.45), dec!(0.49), now), true, now);
+            se.on_tick(&token, &book(dec!(0.45), dec!(0.49), now), now);
             now += 10_000;
-            se.on_tick(&token, &book(dec!(0.20), dec!(0.22), now), true, now);
+            se.on_tick(&token, &book(dec!(0.20), dec!(0.22), now), now);
             now += 10_000;
         } else {
             // Dip at mid 0.44 → entry 0.42 for EVERY variant, then rally high and
             // retrace so the shared trailing stop closes it as a WIN.
-            se.on_tick(&token, &book(dec!(0.42), dec!(0.46), now), true, now);
+            se.on_tick(&token, &book(dec!(0.42), dec!(0.46), now), now);
             now += 10_000;
-            se.on_tick(&token, &book(dec!(0.80), dec!(0.82), now), true, now);
+            se.on_tick(&token, &book(dec!(0.80), dec!(0.82), now), now);
             now += 10_000;
-            se.on_tick(&token, &book(dec!(0.58), dec!(0.60), now), true, now);
+            se.on_tick(&token, &book(dec!(0.58), dec!(0.60), now), now);
             now += 10_000;
         }
     }
@@ -250,8 +296,8 @@ fn run_manager_experiment() -> ManagerExp {
     let evals_now = now + 1_000;
     let pre_views = se.variant_views(evals_now);
     let outcomes = se.evaluate(evals_now);
-    let applied = se.evolution_count();
-    let rejected = se.rejected_count();
+    let applied = se.evolution_count(STRATEGY);
+    let rejected = se.rejected_count(STRATEGY);
 
     let mut out = ManagerExp { applied, rejected, ..Default::default() };
     for v in &pre_views {
@@ -268,22 +314,14 @@ fn run_manager_experiment() -> ManagerExp {
         }
     }
     let cur = se.current_params();
-    out.final_cap = cur.trend_max_entry_price;
-    out.final_min_price = cur.trend_min_price;
-    for rec in se.history(50) {
-        let changed: Vec<String> = rec
-            .from_params
-            .fields()
-            .iter()
-            .zip(rec.to_params.fields().iter())
-            .filter(|((_, f), (_, t))| f != t)
-            .map(|((name, f), (_, t))| format!("{name}:{f}->{t}"))
-            .collect();
+    out.final_cap = cur.get(STRATEGY, "trend_max_entry_price").unwrap_or_default();
+    out.final_min_price = cur.get(STRATEGY, "trend_min_price").unwrap_or_default();
+    for rec in se.history(Some(STRATEGY), 50) {
         out.trajectory.push(format!(
             "applied={} reason={:?} {}",
             rec.applied,
             rec.reason,
-            changed.join(", ")
+            changed_knobs(&rec.from_params, &rec.to_params, STRATEGY).join(", ")
         ));
     }
     let _ = outcomes;
@@ -446,8 +484,14 @@ fn run_group(group: char, se_enabled: bool) -> (Vec<TradeRow>, Core) {
     // window is not accidentally exceeded (which would prune every sample).
     if std::env::var("AB_PROBE").is_ok() {
         let cur = core.shadow_evolution().current_params();
-        eprintln!("[{group}] PARAMS cap={} factor={} min={} broken={}",
-            cur.trend_max_entry_price, cur.trend_entry_factor, cur.trend_min_price, cur.trend_broken_price);
+        let g = |k: &str| cur.get(STRATEGY, k).map(|v| v.to_string()).unwrap_or_else(|| "-".into());
+        eprintln!(
+            "[{group}] PARAMS cap={} factor={} min={} broken={}",
+            g("trend_max_entry_price"),
+            g("trend_entry_factor"),
+            g("trend_min_price"),
+            g("trend_broken_price"),
+        );
         let vv = core.shadow_evolution_variants(now + 1_000);
         for v in &vv {
             eprintln!("[{group}] FINAL {} baseline={} samples={} wr={} pf={} pnl={} age={}",
@@ -466,10 +510,12 @@ fn debug_dump(tag: char, core: &mut Core, rows: &[TradeRow]) {
     let status = core.shadow_evolution_status(now);
     let variants = core.shadow_evolution_variants(now);
     eprintln!("[{tag}] trades={} status={status:?} variants={} applied={} rejected={}",
-        rows.len(), variants.len(), core.shadow_evolution().evolution_count(), core.shadow_evolution().rejected_count());
+        rows.len(), variants.len(),
+        core.shadow_evolution().evolution_count(STRATEGY),
+        core.shadow_evolution().rejected_count(STRATEGY));
     for v in &variants {
-        eprintln!("[{tag}]   variant {} baseline={} samples={} wr={} pf={} pnl={} age={}",
-            v.id, v.is_baseline, v.sample_count, v.win_rate, v.profit_factor, v.total_pnl_usd, v.age_sec);
+        eprintln!("[{tag}]   variant {} strategy={} baseline={} samples={} wr={} pf={} pnl={} age={}",
+            v.id, v.strategy, v.is_baseline, v.sample_count, v.win_rate, v.profit_factor, v.total_pnl_usd, v.age_sec);
     }
 }
 
@@ -484,24 +530,9 @@ fn main() {
 
     // ── Model self-check: confirm a cap-tightened variant really skips the
     //    marginal entry while the baseline takes it. Validates the premise above.
+    //    This drives a real spread_arb TWIN (the strategy's own code path).
     if std::env::var("AB_PROBE").is_ok() {
-        use blitzkrieg_core::exit_policy::ExitConfig;
-        use blitzkrieg_core::model::OrderbookSnapshot;
-        use blitzkrieg_core::shadow_evolution::config::MutableParams;
-        use blitzkrieg_core::shadow_evolution::variants::Variant;
-        let book = OrderbookSnapshot::from_levels(
-            "T",
-            vec![(dec!(0.45), dec!(500))],
-            vec![(dec!(0.49), dec!(500))],
-            0,
-        );
-        for (label, factor) in [("baseline", dec!(1)), ("tight-2pct", dec!(0.98))] {
-            let p = MutableParams::default().scaled(factor);
-            let mut v = Variant::new(label.into(), label.into(), p.clone(), false, 0, &ExitConfig::default());
-            v.on_tick("T", &book, true, 900_000, 1000);
-            eprintln!("[probe] {label}: cap={} factor={} entry_decision open={}",
-                p.trend_max_entry_price, p.trend_entry_factor, v.open_positions());
-        }
+        model_self_check();
     }
 
     let out_dir = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("docs/reports/data"));
@@ -518,9 +549,15 @@ fn main() {
     // ── Safety-lock probe (group B's manager): a +20% manual apply must be
     //    REJECTED by Lock 1 (gradient ±5%). This is the demonstrable proof that
     //    the lock is live regardless of whether natural proposals trip it.
-    let base_params = core_b.shadow_evolution().current_params();
-    let mut far = base_params.clone();
-    far.trend_max_entry_price = base_params.trend_max_entry_price * dec!(1.20);
+    let before_cap = core_b
+        .shadow_evolution()
+        .current_params()
+        .get(STRATEGY, "trend_max_entry_price")
+        .unwrap_or(dec!(0.45));
+    let mut far_p = StrategyParams::new();
+    far_p.set("trend_max_entry_price", before_cap * dec!(1.20));
+    let mut far = MutableParams::new();
+    far.set_strategy(STRATEGY, far_p);
     let lock_probe = match core_b.shadow_evolution_apply(far, 1_700_000_999_999) {
         Ok(()) => "ACCEPTED (UNEXPECTED — lock failed)".to_string(),
         Err(e) => format!("REJECTED by Lock 1: {e}"),
@@ -533,8 +570,9 @@ fn main() {
     }
     let _ = fs::write(out_dir.join("shadow_ab_trades.csv"), &csv);
 
-    // ── Group B audit (applied + rejected) → JSONL on disk.
-    let history = core_b.shadow_evolution().history(500);
+    // ── Group B audit (applied + rejected) → JSONL on disk. Read from the
+    //    strategy's OWN file, so the artefact is exactly that strategy's history.
+    let history = core_b.shadow_evolution_history(Some(STRATEGY), 500);
     let mut audit_jsonl = String::new();
     for rec in &history {
         if let Ok(line) = serde_json::to_string(rec) {
@@ -555,20 +593,26 @@ fn main() {
     let _ = writeln!(s, "A,{},{},{:.4},{:.4},{:.4},{:.4}", ma.n, ma.wins, ma.win_rate(), ma.profit_factor(), ma.net, ma.max_dd);
     let _ = writeln!(s, "B,{},{},{:.4},{:.4},{:.4},{:.4}", mb.n, mb.wins, mb.win_rate(), mb.profit_factor(), mb.net, mb.max_dd);
     let _ = writeln!(s);
-    let _ = writeln!(s, "## Group B evolution");
-    let _ = writeln!(s, "evolutions_applied: {}", core_b.shadow_evolution().evolution_count());
-    let _ = writeln!(s, "evolutions_rejected_natural: {}", core_b.shadow_evolution().rejected_count());
+    let _ = writeln!(s, "## Group B evolution ({STRATEGY})");
+    let _ = writeln!(s, "audited_strategies: {:?}", core_b.shadow_evolution().audited_strategies());
+    let _ = writeln!(s, "evolutions_applied: {}", core_b.shadow_evolution().evolution_count(STRATEGY));
+    let _ = writeln!(s, "evolutions_rejected_natural: {}", core_b.shadow_evolution().rejected_count(STRATEGY));
     let _ = writeln!(s, "audit_records: {}", history.len());
     let _ = writeln!(s, "safety_lock_probe: {lock_probe}");
-    let _ = writeln!(s, "final_params_vs_initial_max_entry_cap: {} -> {}", base_params.trend_max_entry_price, core_b.shadow_evolution().current_params().trend_max_entry_price);
+    let final_cap = core_b
+        .shadow_evolution()
+        .current_params()
+        .get(STRATEGY, "trend_max_entry_price")
+        .unwrap_or(before_cap);
+    let _ = writeln!(s, "final_params_vs_initial_max_entry_cap: {before_cap} -> {final_cap}");
     let _ = writeln!(s);
-    let _ = writeln!(s, "## Group B parameter trajectory (changed fields only)");
-    let _ = writeln!(s, "ts,field,from,to,reason,applied,rejection");
+    let _ = writeln!(s, "## Group B parameter trajectory (changed knobs only)");
+    let _ = writeln!(s, "ts,knob,from,to,reason,applied,rejection");
     for rec in &history {
-        for ((name, f), (_, t)) in rec.from_params.fields().iter().zip(rec.to_params.fields().iter()) {
-            if f != t {
-                let _ = writeln!(s, "{},{},{},{},{:?},{},{}", rec.timestamp, name, f, t, rec.reason, rec.applied, rec.rejection.clone().unwrap_or_default());
-            }
+        for change in changed_knobs(&rec.from_params, &rec.to_params, STRATEGY) {
+            let (knob, rest) = change.split_once(':').unwrap_or((change.as_str(), ""));
+            let (from, to) = rest.split_once("->").unwrap_or((rest, ""));
+            let _ = writeln!(s, "{},{},{},{},{:?},{},{}", rec.timestamp, knob, from, to, rec.reason, rec.applied, rec.rejection.clone().unwrap_or_default());
         }
     }
     let _ = writeln!(s);
@@ -588,4 +632,56 @@ fn main() {
     println!("raw files written to: {}", out_dir.display());
     println!("  - shadow_ab_trades.csv  - shadow_ab_summary.md  - shadow_ab_evolution_B.jsonl");
     let _ = core_a;
+}
+
+/// Drive a real spread_arb twin at two cap values through the same dip and
+/// report whether it would open a position. Proves the counterfactual the
+/// evolution search depends on is produced by the strategy's OWN logic.
+fn model_self_check() {
+    use blitzkrieg_core::exit_policy::ExitConfig;
+    use blitzkrieg_core::strategies::shadow_twin::{tick_ctx, TwinReplay};
+    use blitzkrieg_core::strategies::spread_arb::SpreadArbBuiltin;
+    use blitzkrieg_core::strategies::EngineStrategy;
+
+    let m = CryptoMarket {
+        asset: "T".into(),
+        condition_id: "c".into(),
+        question_id: "q".into(),
+        up_token_id: "T".into(),
+        down_token_id: "T_DOWN".into(),
+        up_price: dec!(0.5),
+        down_price: dec!(0.5),
+        expires_at_ms: 900_000,
+        round_slot: 1,
+        neg_risk: false,
+        question: "?".into(),
+    };
+    let strat = SpreadArbBuiltin::new(TrendConfig::default(), SpreadArbConfig::default());
+    let factory = strat.shadow_factory().expect("spread_arb declares itself evolvable");
+    for (label, cap) in [("baseline", dec!(0.45)), ("tight-3pct", dec!(0.4365))] {
+        let mut p = StrategyParams::from_knobs(&factory.knobs());
+        p.set("trend_max_entry_price", cap);
+        let Some(twin) = factory.make(&p) else { continue };
+        let mut replay = TwinReplay::new(twin, &ExitConfig::default());
+        replay.on_round(&[m.clone()], &[], 0);
+        let mut now = 0i64;
+        for _ in 0..70 {
+            now += 1_000;
+            let b = book(dec!(0.60), dec!(0.62));
+            replay.on_tick(&tick_ctx(&[m.clone()], "T", &b, 1, 880, now));
+        }
+        now += 1_000;
+        let dip = book(dec!(0.45), dec!(0.49)); // mid 0.47 → entry clamps to 0.45
+        replay.on_tick(&tick_ctx(&[m.clone()], "T", &dip, 1, 870, now));
+        eprintln!("[probe] {label}: cap={cap} open={}", replay.open_positions());
+    }
+}
+
+fn book(bid: Decimal, ask: Decimal) -> blitzkrieg_core::model::OrderbookSnapshot {
+    blitzkrieg_core::model::OrderbookSnapshot::from_levels(
+        "T",
+        vec![(bid, dec!(500))],
+        vec![(ask, dec!(500))],
+        0,
+    )
 }

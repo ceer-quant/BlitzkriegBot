@@ -590,12 +590,42 @@ async fn handle_line(
             let status = c.shadow_evolution_status(now);
             let params = c.shadow_evolution().current_params();
             let variants = c.shadow_evolution_variants(now);
-            let evolved = c.shadow_evolution().evolution_count();
-            let rejected = c.shadow_evolution().rejected_count();
-            let since = c.shadow_evolution().seconds_since_last_evolution(now);
             let variant_count = c.shadow_evolution().variant_count();
+            // Per-strategy blocks. Isolation is only observable if the caller can
+            // see each strategy's own counters and knob values side by side.
+            let strategies: Vec<serde_json::Value> = c
+                .shadow_evolution()
+                .strategy_names()
+                .into_iter()
+                .map(|name| {
+                    let st = c.shadow_evolution_status_for(&name, now);
+                    serde_json::json!({
+                        "strategy": name,
+                        "status": st,
+                        "params": c.shadow_evolution().params_for(&name),
+                        "knobs": c.shadow_evolution().declared_knobs(&name),
+                        "evolutionsApplied": c.shadow_evolution().evolution_count(&name),
+                        "evolutionsRejected": c.shadow_evolution().rejected_count(&name),
+                        "secondsSinceLastEvolution": c
+                            .shadow_evolution()
+                            .seconds_since_last_evolution(&name, now),
+                    })
+                })
+                .collect();
+            let evolved: u64 = c.shadow_evolution().strategy_names().iter().map(|n| c.shadow_evolution().evolution_count(n)).sum();
+            let rejected: u64 = c.shadow_evolution().strategy_names().iter().map(|n| c.shadow_evolution().rejected_count(n)).sum();
+            let since = c
+                .shadow_evolution()
+                .strategy_names()
+                .iter()
+                .map(|n| c.shadow_evolution().seconds_since_last_evolution(n, now))
+                .filter(|s| *s >= 0)
+                .min()
+                .unwrap_or(-1);
             Ok(serde_json::json!({
                 "version": crate::ipc::schema::PROTOCOL_VERSION,
+                // Aggregate keys kept unchanged so an existing Node consumer keeps
+                // working; `strategies` carries the per-strategy detail.
                 "status": status,
                 "currentParams": params,
                 "variantCount": variant_count,
@@ -603,23 +633,48 @@ async fn handle_line(
                 "evolutionsApplied": evolved,
                 "evolutionsRejected": rejected,
                 "secondsSinceLastEvolution": since,
+                "strategies": strategies,
             }))
         }
         method::SE_HISTORY => {
             let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
-            let records = core.lock().await.shadow_evolution_history(limit);
+            let strategy = params.get("strategy").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let records = core.lock().await.shadow_evolution_history(strategy.as_deref(), limit);
             Ok(serde_json::json!({
                 "version": crate::ipc::schema::PROTOCOL_VERSION,
+                "strategy": strategy,
                 "history": records,
             }))
         }
         method::SE_ROLLBACK => {
             let now = now_ms();
-            match core.lock().await.shadow_evolution_rollback(now) {
-                Ok(_) => Ok(serde_json::json!({ "rolledBack": true })),
-                Err(e) => Err((Failure::APPLICATION, e, None)),
+            match params.get("strategy").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                None => Err((Failure::INVALID_PARAMS, "strategy required".into(), None)),
+                Some(strategy) => match core.lock().await.shadow_evolution_rollback(strategy, now) {
+                    Ok(_) => Ok(serde_json::json!({ "rolledBack": true, "strategy": strategy })),
+                    Err(e) => Err((Failure::APPLICATION, e, None)),
+                },
             }
         }
+        method::SE_APPLY => match params.get("strategy").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            // Manual override for ONE strategy. Shape: {strategy, params:{knob:value}},
+            // validated against that strategy's own declaration + domain + gradient.
+            None => Err((Failure::INVALID_PARAMS, "strategy required".into(), None)),
+            Some(strategy) => {
+                let bag = params.get("params").cloned().unwrap_or(serde_json::Value::Null);
+                match serde_json::from_value::<crate::shadow_evolution::StrategyParams>(bag) {
+                    Err(e) => Err((Failure::INVALID_PARAMS, format!("params: {e}"), None)),
+                    Ok(typed) => {
+                        let mut bag = crate::shadow_evolution::MutableParams::new();
+                        bag.set_strategy(strategy, typed);
+                        match core.lock().await.shadow_evolution_apply(bag, now_ms()) {
+                            Ok(()) => Ok(serde_json::json!({ "applied": true, "strategy": strategy })),
+                            Err(e) => Err((Failure::APPLICATION, e, None)),
+                        }
+                    }
+                }
+            }
+        },
 
         method::ENGINE_ROUND => {
             let view = core.lock().await.round_view();

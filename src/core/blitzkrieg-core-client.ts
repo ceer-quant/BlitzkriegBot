@@ -686,21 +686,69 @@ export class BlitzkriegCoreClient extends EventEmitter {
     return this.request('market.list');
   }
 
-  // ── Shadow Evolution (opt-in) ────────────────────────────────────────────
+  // ── Shadow Evolution (opt-in, per-strategy since E2-c) ───────────────────
+  //
+  // Every mutation names exactly ONE strategy: parameters, audit files, evaluate
+  // decisions and rollback anchors are all per strategy, so two strategies can
+  // evolve in parallel without touching each other. `status` reports each
+  // strategy's own block (`strategies[]`) alongside the aggregate counters kept
+  // for older consumers.
   async shadowEvolutionEnable(): Promise<{ enabled: boolean }> {
     return this.request('shadow_evolution.enable');
   }
   async shadowEvolutionDisable(): Promise<{ enabled: boolean }> {
     return this.request('shadow_evolution.disable');
   }
-  async shadowEvolutionStatus(): Promise<any> {
+  /**
+   * Per-strategy status. `strategies[]` is the authoritative view: one entry per
+   * strategy that declared evolvable knobs, carrying its own params, declared
+   * knob domains, counters and cooldown. A strategy absent from it declared
+   * nothing and is therefore **not evolvable** — an explicit answer, not a
+   * "disabled".
+   */
+  async shadowEvolutionStatus(): Promise<{
+    status: string;
+    currentParams: Record<string, Record<string, string>>;
+    variantCount: number;
+    variants: any[];
+    evolutionsApplied: number;
+    evolutionsRejected: number;
+    secondsSinceLastEvolution: number;
+    strategies: Array<{
+      strategy: string;
+      status: string | null;
+      params: Record<string, string> | null;
+      knobs: Array<{ name: string; value: string; min: string; max: string }>;
+      evolutionsApplied: number;
+      evolutionsRejected: number;
+      secondsSinceLastEvolution: number;
+    }>;
+  }> {
     return this.request('shadow_evolution.status');
   }
-  async shadowEvolutionHistory(limit = 50): Promise<{ history: any[] }> {
-    return this.request('shadow_evolution.history', { limit });
+  /** Audit history, optionally narrowed to ONE strategy's own file. */
+  async shadowEvolutionHistory(limit = 50, strategy?: string): Promise<{ strategy: string | null; history: any[] }> {
+    return this.request('shadow_evolution.history', strategy ? { limit, strategy } : { limit });
   }
-  async shadowEvolutionRollback(): Promise<{ rolledBack: boolean }> {
-    return this.request('shadow_evolution.rollback');
+  /**
+   * Roll back ONE strategy to the parameters in force before its last change.
+   * Errors when that strategy has nothing to roll back to, so one strategy's
+   * rollback can never be mistaken for another's silent no-op.
+   */
+  async shadowEvolutionRollback(strategy: string): Promise<{ rolledBack: boolean; strategy: string }> {
+    return this.request('shadow_evolution.rollback', { strategy });
+  }
+  /**
+   * Operator override for ONE strategy. Values are validated against that
+   * strategy's own declaration, domain and the ±gradient lock, and the change is
+   * audited as a manual (operator) action. Send decimals as strings to keep the
+   * no-float wire rule.
+   */
+  async shadowEvolutionApply(
+    strategy: string,
+    params: Record<string, string | number>,
+  ): Promise<{ applied: boolean; strategy: string }> {
+    return this.request('shadow_evolution.apply', { strategy, params });
   }
 
   async stop(): Promise<void> {
