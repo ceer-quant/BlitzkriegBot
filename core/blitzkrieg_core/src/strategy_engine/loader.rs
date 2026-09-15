@@ -23,9 +23,9 @@
 
 #[cfg(feature = "strategy-loading")]
 use blitzkrieg_strategy_api::{
-    bk_strategy_free_string, BkStrategyVtable, BK_ABI_VERSION, BK_CREATE_SYMBOL,
-    BK_EVOLVABLE_KNOBS_SYMBOL, BK_FREE_STRING_SYMBOL, BK_GATE_EXEMPTIONS_SYMBOL,
-    BK_MIN_ABI_VERSION, BK_VERSION_SYMBOL,
+    BK_ABI_VERSION, BK_CREATE_SYMBOL, BK_EVOLVABLE_KNOBS_SYMBOL, BK_FREE_STRING_SYMBOL,
+    BK_GATE_EXEMPTIONS_SYMBOL, BK_MIN_ABI_VERSION, BK_VERSION_SYMBOL, BkStrategyVtable,
+    bk_strategy_free_string,
 };
 use std::path::{Path, PathBuf};
 
@@ -34,7 +34,11 @@ pub enum LoadOutcome {
     /// Policy rejected the path before any dlopen.
     Rejected { path: PathBuf, reason: String },
     /// Library opened, negotiated and registered.
-    Loaded { path: PathBuf, name: String, version: String },
+    Loaded {
+        path: PathBuf,
+        name: String,
+        version: String,
+    },
     /// Policy passed but load/negotiate/create failed.
     Failed { path: PathBuf, reason: String },
 }
@@ -43,13 +47,33 @@ impl std::fmt::Debug for LoadOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LoadOutcome::Rejected { path, reason } => {
-                write!(f, "Rejected {{ path: {}, reason: {} }}", path.display(), reason)
+                write!(
+                    f,
+                    "Rejected {{ path: {}, reason: {} }}",
+                    path.display(),
+                    reason
+                )
             }
-            LoadOutcome::Loaded { path, name, version } => {
-                write!(f, "Loaded {{ path: {}, name: {}, version: {} }}", path.display(), name, version)
+            LoadOutcome::Loaded {
+                path,
+                name,
+                version,
+            } => {
+                write!(
+                    f,
+                    "Loaded {{ path: {}, name: {}, version: {} }}",
+                    path.display(),
+                    name,
+                    version
+                )
             }
             LoadOutcome::Failed { path, reason } => {
-                write!(f, "Failed {{ path: {}, reason: {} }}", path.display(), reason)
+                write!(
+                    f,
+                    "Failed {{ path: {}, reason: {} }}",
+                    path.display(),
+                    reason
+                )
             }
         }
     }
@@ -60,7 +84,9 @@ pub fn policy_allows(path: &Path) -> Result<(), String> {
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     for bad in [".env", "private", "secret", "key", "credential"] {
         if name.to_lowercase().contains(bad) {
-            return Err(format!("strategy library name looks like it bundles credentials: {name}"));
+            return Err(format!(
+                "strategy library name looks like it bundles credentials: {name}"
+            ));
         }
     }
     let ext_ok = name.ends_with(".so") || name.ends_with(".dylib") || name.ends_with(".dll");
@@ -91,14 +117,23 @@ pub struct LoadedForeign {
 pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
     let fail = |reason: String| -> Result<LoadedForeign, LoadOutcome> {
         Err(if policy_allows(path).is_err() {
-            LoadOutcome::Rejected { path: path.to_path_buf(), reason }
+            LoadOutcome::Rejected {
+                path: path.to_path_buf(),
+                reason,
+            }
         } else {
-            LoadOutcome::Failed { path: path.to_path_buf(), reason }
+            LoadOutcome::Failed {
+                path: path.to_path_buf(),
+                reason,
+            }
         })
     };
 
     if let Err(reason) = policy_allows(path) {
-        return Err(LoadOutcome::Rejected { path: path.to_path_buf(), reason });
+        return Err(LoadOutcome::Rejected {
+            path: path.to_path_buf(),
+            reason,
+        });
     }
 
     // SAFETY: opening a shared library runs its initialisers. We only load
@@ -109,14 +144,12 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
     };
 
     // 1) Mandatory version symbol — negotiate before trusting the vtable layout.
-    let version_fn = match unsafe {
-        lib.get::<unsafe extern "C" fn() -> u32>(BK_VERSION_SYMBOL)
-    } {
+    let version_fn = match unsafe { lib.get::<unsafe extern "C" fn() -> u32>(BK_VERSION_SYMBOL) } {
         Ok(f) => f,
         Err(_) => {
             return fail(format!(
                 "missing symbol bk_strategy_abi_version; a v1/pre-v2 library? rebuild against strategy-api ABI v{BK_ABI_VERSION}"
-            ))
+            ));
         }
     };
     let reported = unsafe { version_fn() };
@@ -128,12 +161,11 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
     }
 
     // 2) JSON deallocator, resolved from THIS library.
-    let free_string = unsafe {
-        lib.get::<unsafe extern "C" fn(*mut std::ffi::c_char)>(BK_FREE_STRING_SYMBOL)
-    }
-    .ok()
-    .map(|s| *s)
-    .unwrap_or(bk_strategy_free_string as unsafe extern "C" fn(*mut std::ffi::c_char));
+    let free_string =
+        unsafe { lib.get::<unsafe extern "C" fn(*mut std::ffi::c_char)>(BK_FREE_STRING_SYMBOL) }
+            .ok()
+            .map(|s| *s)
+            .unwrap_or(bk_strategy_free_string as unsafe extern "C" fn(*mut std::ffi::c_char));
 
     // 2b) OPTIONAL per-strategy gate exemption declaration (E2-b / #27). Absent
     // symbol = nothing declared = fully gated, which is why adding this
@@ -170,7 +202,8 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
     let vtable = unsafe { std::ptr::read(vt_ptr) };
     if vtable.abi_version != BK_ABI_VERSION {
         return fail(format!(
-            "vtable ABI mismatch: vtable={}, kernel={BK_ABI_VERSION}", vtable.abi_version
+            "vtable ABI mismatch: vtable={}, kernel={BK_ABI_VERSION}",
+            vtable.abi_version
         ));
     }
     if vtable.min_abi > BK_ABI_VERSION || vtable.abi_version < BK_MIN_ABI_VERSION {
@@ -189,8 +222,11 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
         (vtable.on_round.is_some(), "on_round"),
         (vtable.evaluate.is_some(), "evaluate"),
     ];
-    let missing_hooks: Vec<String> =
-        required.into_iter().filter(|(present, _)| !*present).map(|(_, h)| missing(h)).collect();
+    let missing_hooks: Vec<String> = required
+        .into_iter()
+        .filter(|(present, _)| !*present)
+        .map(|(_, h)| missing(h))
+        .collect();
     if !missing_hooks.is_empty() {
         return fail(missing_hooks.join("; "));
     }
@@ -215,14 +251,24 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
     // SAFETY: as above — the shared library is valid, the vtable is static and the
     // instance is driven single-threaded and destroys its handle in Drop.
     let strategy = unsafe {
-        crate::strategies::foreign::ForeignStrategy::from_loaded(shared, name.clone(), version.clone())
+        crate::strategies::foreign::ForeignStrategy::from_loaded(
+            shared,
+            name.clone(),
+            version.clone(),
+        )
     };
     // Read the OPTIONAL declarations once, here, so the load report can state
     // them: an opt-out (E2-b) or "not evolvable" (E2-c) must be visible at
     // registration, not only inferred later.
     let gate_exemptions = crate::strategies::EngineStrategy::gate_exemptions(&strategy);
     let evolvable_knobs = crate::strategies::EngineStrategy::evolvable_knobs(&strategy);
-    Ok(LoadedForeign { strategy, name, version, gate_exemptions, evolvable_knobs })
+    Ok(LoadedForeign {
+        strategy,
+        name,
+        version,
+        gate_exemptions,
+        evolvable_knobs,
+    })
 }
 
 /// Read a NUL-terminated C string into an owned `String` (None for null).
@@ -231,16 +277,21 @@ unsafe fn cstr_to_string(p: *const std::ffi::c_char) -> Option<String> {
     if p.is_null() {
         return None;
     }
-    unsafe { std::ffi::CStr::from_ptr(p) }.to_str().ok().map(|s| s.to_string())
+    unsafe { std::ffi::CStr::from_ptr(p) }
+        .to_str()
+        .ok()
+        .map(|s| s.to_string())
 }
 
 /// Diagnostic summary of loading a library (does not register anywhere).
 #[cfg(feature = "strategy-loading")]
 pub fn load_strategy(path: &Path) -> LoadOutcome {
     match load_foreign(path) {
-        Ok(LoadedForeign { name, version, .. }) => {
-            LoadOutcome::Loaded { path: path.to_path_buf(), name, version }
-        }
+        Ok(LoadedForeign { name, version, .. }) => LoadOutcome::Loaded {
+            path: path.to_path_buf(),
+            name,
+            version,
+        },
         Err(outcome) => outcome,
     }
 }
@@ -251,9 +302,13 @@ pub fn load_strategy(path: &Path) -> LoadOutcome {
     match policy_allows(path) {
         Ok(()) => LoadOutcome::Failed {
             path: path.to_path_buf(),
-            reason: "dynamic strategy loading not compiled in (enable feature `strategy-loading`)".into(),
+            reason: "dynamic strategy loading not compiled in (enable feature `strategy-loading`)"
+                .into(),
         },
-        Err(reason) => LoadOutcome::Rejected { path: path.to_path_buf(), reason },
+        Err(reason) => LoadOutcome::Rejected {
+            path: path.to_path_buf(),
+            reason,
+        },
     }
 }
 

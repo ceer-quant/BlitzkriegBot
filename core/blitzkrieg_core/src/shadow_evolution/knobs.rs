@@ -39,7 +39,12 @@ pub struct KnobSpec {
 
 impl KnobSpec {
     pub fn new(name: impl Into<String>, value: Decimal, min: Decimal, max: Decimal) -> Self {
-        Self { name: name.into(), value, min, max }
+        Self {
+            name: name.into(),
+            value,
+            min,
+            max,
+        }
     }
 
     /// Is this value inside the declared domain?
@@ -82,7 +87,9 @@ impl KnobDeclaration {
     /// (never a panic — a bad library output must not take the kernel down).
     pub fn parse(text: &str) -> Self {
         serde_json::from_str::<KnobDeclaration>(text)
-            .map(|d| KnobDeclaration { knobs: d.knobs.into_iter().filter(|k| k.is_coherent()).collect() })
+            .map(|d| KnobDeclaration {
+                knobs: d.knobs.into_iter().filter(|k| k.is_coherent()).collect(),
+            })
             .unwrap_or_default()
     }
 }
@@ -144,11 +151,20 @@ impl StrategyParams {
     /// clamp to a domain (the guard does that on the proposal path), so this is
     /// only safe where the caller keeps the factor tiny (tests, stepping).
     pub fn scaled(&self, factor: Decimal) -> Self {
-        Self { values: self.values.iter().map(|(k, v)| (k.clone(), *v * factor)).collect() }
+        Self {
+            values: self
+                .values
+                .iter()
+                .map(|(k, v)| (k.clone(), *v * factor))
+                .collect(),
+        }
     }
 
     /// First value outside its declared domain, as `(knob, value, min, max)`.
-    pub fn domain_violation(&self, specs: &[KnobSpec]) -> Option<(String, Decimal, Decimal, Decimal)> {
+    pub fn domain_violation(
+        &self,
+        specs: &[KnobSpec],
+    ) -> Option<(String, Decimal, Decimal, Decimal)> {
         for k in specs {
             if let Some(v) = self.values.get(&k.name) {
                 if !k.contains(*v) {
@@ -209,7 +225,9 @@ impl<'de> Deserialize<'de> for StrategyParams {
                     out.values.insert(k, dec);
                 }
                 other => {
-                    return Err(D::Error::custom(format!("knob {k}: expected decimal string, got {other}")))
+                    return Err(D::Error::custom(format!(
+                        "knob {k}: expected decimal string, got {other}"
+                    )));
                 }
             }
         }
@@ -295,11 +313,15 @@ mod tests {
     fn params_round_trip_as_string_decimals() {
         let p = StrategyParams::from_knobs(&specs());
         let json = serde_json::to_string(&p).unwrap();
-        assert_eq!(json, r#"{"trendBrokenPrice":"0.35","trendMaxEntryPrice":"0.45"}"#);
+        assert_eq!(
+            json,
+            r#"{"trendBrokenPrice":"0.35","trendMaxEntryPrice":"0.45"}"#
+        );
         let back: StrategyParams = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
         // A number form is accepted too (Node callers may send one).
-        let from_num: StrategyParams = serde_json::from_str(r#"{"trendBrokenPrice":0.35}"#).unwrap();
+        let from_num: StrategyParams =
+            serde_json::from_str(r#"{"trendBrokenPrice":0.35}"#).unwrap();
         assert_eq!(from_num.get("trendBrokenPrice"), Some(dec!(0.35)));
     }
 
@@ -312,7 +334,10 @@ mod tests {
         assert!(json.contains(r#""spread_arb":{"trendBrokenPrice":"0.35""#));
         let back: MutableParams = serde_json::from_str(&json).unwrap();
         assert_eq!(back, m);
-        assert_eq!(back.get("spread_arb", "trendMaxEntryPrice"), Some(dec!(0.45)));
+        assert_eq!(
+            back.get("spread_arb", "trendMaxEntryPrice"),
+            Some(dec!(0.45))
+        );
         // No cross-strategy read: a knob one strategy declares is invisible to
         // another strategy's namespace.
         assert_eq!(back.get("dog", "trendMaxEntryPrice"), None);
@@ -329,9 +354,13 @@ mod tests {
         assert_eq!(p.clamp_to(&s).get("trendMaxEntryPrice"), Some(dec!(0.95)));
         // A declaration that cannot contain its own current value is unusable.
         assert!(!KnobSpec::new("x", dec!(2), dec!(0.1), dec!(0.9)).is_coherent());
-        assert!(KnobDeclaration::parse(r#"{"knobs":[{"name":"x","value":"2","min":"0.1","max":"0.9"}]}"#)
+        assert!(
+            KnobDeclaration::parse(
+                r#"{"knobs":[{"name":"x","value":"2","min":"0.1","max":"0.9"}]}"#
+            )
             .knobs
-            .is_empty());
+            .is_empty()
+        );
     }
 
     #[test]
@@ -339,7 +368,10 @@ mod tests {
         let s = specs();
         let mut p = StrategyParams::new();
         assert!(!p.set_declared("hardStopLossPct", dec!(0), &s));
-        assert!(p.is_empty(), "an undeclared knob must not enter the parameter set");
+        assert!(
+            p.is_empty(),
+            "an undeclared knob must not enter the parameter set"
+        );
         assert!(p.set_declared("trendBrokenPrice", dec!(0.30), &s));
         assert_eq!(p.undeclared(&s), Vec::<String>::new());
     }

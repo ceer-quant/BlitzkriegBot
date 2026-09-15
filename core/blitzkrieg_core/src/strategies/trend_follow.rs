@@ -37,12 +37,12 @@
 use super::shadow_twin::ShadowFactory;
 use super::{EngineStrategy, StrategyCtx};
 use crate::model::OrderbookSnapshot;
+use crate::model::SignalDirection;
 use crate::shadow_evolution::{KnobSpec, ParamRegistry, StrategyParams};
 use crate::signal::{PriceBuffer, TradeSignal};
-use crate::model::SignalDirection;
 use arc_swap::ArcSwap;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -253,7 +253,10 @@ impl MomentumTracker {
     /// The move (%) currently measured for a token, for the entry reason string.
     pub fn move_pct(&self, token_id: &str, now_ms: i64) -> Decimal {
         let window = self.cfg.momentum_window_sec.max(1);
-        self.buffers.get(token_id).map(|b| b.move_pct(window, now_ms)).unwrap_or(Decimal::ZERO)
+        self.buffers
+            .get(token_id)
+            .map(|b| b.move_pct(window, now_ms))
+            .unwrap_or(Decimal::ZERO)
     }
 
     /// Drain tokens whose move just died (the kernel cancels their bids).
@@ -346,7 +349,11 @@ pub struct TrendFollowBuiltin {
 
 impl TrendFollowBuiltin {
     pub fn new(cfg: TrendFollowConfig) -> Self {
-        Self { tracker: MomentumTracker::new(cfg.clone()), cfg, hot_params: None }
+        Self {
+            tracker: MomentumTracker::new(cfg.clone()),
+            cfg,
+            hot_params: None,
+        }
     }
 
     /// The config currently in force: base overlaid with the hot-swapped
@@ -426,12 +433,17 @@ impl EngineStrategy for TrendFollowBuiltin {
             .confirmed_tokens()
             .into_iter()
             .map(|t| {
-                let mid = ctx.fresh_book(&t).map(|b| b.mid_price).unwrap_or(Decimal::ZERO);
+                let mid = ctx
+                    .fresh_book(&t)
+                    .map(|b| b.mid_price)
+                    .unwrap_or(Decimal::ZERO);
                 let move_pct = self.tracker.move_pct(&t, ctx.now_ms());
-                let entry = ctx.fresh_book(&t).map(|b| round2(b.best_ask)).unwrap_or(Decimal::ZERO);
-                let chaseable = entry > mid
-                    && entry <= eff.max_entry_price
-                    && mid >= eff.min_confirm_price;
+                let entry = ctx
+                    .fresh_book(&t)
+                    .map(|b| round2(b.best_ask))
+                    .unwrap_or(Decimal::ZERO);
+                let chaseable =
+                    entry > mid && entry <= eff.max_entry_price && mid >= eff.min_confirm_price;
                 serde_json::json!({
                     "token": t,
                     "mid": mid,
@@ -459,7 +471,9 @@ impl EngineStrategy for TrendFollowBuiltin {
     fn shadow_factory(&self) -> Option<Box<dyn ShadowFactory>> {
         // Built from the config in force WITHOUT the hot overlay: the overlay is
         // exactly what the factory's parameter argument applies.
-        Some(Box::new(TrendFollowShadowFactory { base: self.cfg.clone() }))
+        Some(Box::new(TrendFollowShadowFactory {
+            base: self.cfg.clone(),
+        }))
     }
 }
 
@@ -482,13 +496,15 @@ impl ShadowFactory for TrendFollowShadowFactory {
     }
 
     fn make(&self, params: &StrategyParams) -> Option<Box<dyn EngineStrategy>> {
-        Some(Box::new(TrendFollowBuiltin::new(apply_knobs(&self.base, params))))
+        Some(Box::new(TrendFollowBuiltin::new(apply_knobs(
+            &self.base, params,
+        ))))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::shadow_twin::{tick_ctx, TwinReplay};
+    use super::super::shadow_twin::{TwinReplay, tick_ctx};
     use super::*;
     use crate::exit_policy::ExitConfig;
     use crate::model::CryptoMarket;
@@ -496,16 +512,14 @@ mod tests {
 
     fn book(bid: f64, ask: f64) -> OrderbookSnapshot {
         use rust_decimal::prelude::FromPrimitive;
-        book_d(Decimal::from_f64(bid).unwrap(), Decimal::from_f64(ask).unwrap())
+        book_d(
+            Decimal::from_f64(bid).unwrap(),
+            Decimal::from_f64(ask).unwrap(),
+        )
     }
 
     fn book_d(bid: Decimal, ask: Decimal) -> OrderbookSnapshot {
-        OrderbookSnapshot::from_levels(
-            "t",
-            vec![(bid, dec!(100))],
-            vec![(ask, dec!(100))],
-            0,
-        )
+        OrderbookSnapshot::from_levels("t", vec![(bid, dec!(100))], vec![(ask, dec!(100))], 0)
     }
 
     fn market() -> CryptoMarket {
@@ -527,7 +541,14 @@ mod tests {
     /// Drive a RISE from `from` to `to` on `token` in `count` steps, then return
     /// the clock. The move is read from the token's own buffer, so two samples
     /// far enough apart already span it.
-    fn rise(t: &mut MomentumTracker, token: &str, from: Decimal, to: Decimal, steps: usize, start: i64) -> i64 {
+    fn rise(
+        t: &mut MomentumTracker,
+        token: &str,
+        from: Decimal,
+        to: Decimal,
+        steps: usize,
+        start: i64,
+    ) -> i64 {
         let mut now = start;
         for i in 0..steps {
             let p = from + (to - from) * Decimal::from(i as u32) / Decimal::from(steps as u32 - 1);
@@ -551,7 +572,10 @@ mod tests {
         assert_eq!(cap.max, dec!(0.98));
         // An out-of-domain starting config widens the declared domain instead of
         // declaring a box the strategy cannot fit in.
-        let cfg = TrendFollowConfig { momentum_window_sec: 900, ..Default::default() };
+        let cfg = TrendFollowConfig {
+            momentum_window_sec: 900,
+            ..Default::default()
+        };
         let k = trend_follow_knobs(&cfg);
         let win = k.iter().find(|s| s.name == "momentum_window_sec").unwrap();
         assert!(win.contains(dec!(900)), "{win:?}");
@@ -572,7 +596,10 @@ mod tests {
         // A non-positive window can never be written through the overlay.
         let mut bad = StrategyParams::new();
         bad.set("momentum_window_sec", dec!(0));
-        assert_eq!(apply_knobs(&base, &bad).momentum_window_sec, base.momentum_window_sec);
+        assert_eq!(
+            apply_knobs(&base, &bad).momentum_window_sec,
+            base.momentum_window_sec
+        );
     }
 
     #[test]
@@ -590,7 +617,10 @@ mod tests {
         assert!(t.confirmed_tokens().contains("t"));
         // Shallow pullback stays confirmed (hysteresis: break_price 0.45 < 0.55).
         t.on_price("t", dec!(0.50), now + 1_000);
-        assert!(t.is_confirmed("t"), "a pullback inside the band must not flap");
+        assert!(
+            t.is_confirmed("t"),
+            "a pullback inside the band must not flap"
+        );
         assert!(t.take_broken().is_empty());
         // Below the break price → broken, drained exactly once.
         t.on_price("t", dec!(0.40), now + 2_000);
@@ -620,21 +650,30 @@ mod tests {
         let now = rise(&mut t, "t", dec!(0.50), dec!(0.62), 5, 0);
         // mid 0.625, ask 0.63 → entry 0.63, strictly ABOVE the mid: paying up.
         let b = book(0.62, 0.63);
-        let sig = evaluate_trend_follow(
-            "BTC", "c", "t", "t-down", Some(&b), None, &t, now, &cfg,
-        )
-        .expect("a rising, favoured, tight book is chaseable");
+        let sig = evaluate_trend_follow("BTC", "c", "t", "t-down", Some(&b), None, &t, now, &cfg)
+            .expect("a rising, favoured, tight book is chaseable");
         assert_eq!(sig.strategy, "trend_follow");
         assert_eq!(sig.direction, SignalDirection::Up);
         assert_eq!(sig.price, dec!(0.63));
-        assert!(sig.price > b.mid_price, "{} must be above mid {}", sig.price, b.mid_price);
+        assert!(
+            sig.price > b.mid_price,
+            "{} must be above mid {}",
+            sig.price,
+            b.mid_price
+        );
 
         // The same book through spread_arb's rule is rejected: its entry is
         // capped at the best bid, which is BELOW mid.
         let mut confirmed = HashSet::new();
         confirmed.insert("t".to_string());
         let arb = crate::signal::evaluate_spread_arb(
-            "BTC", "c", "t", "t-down", Some(&b), None, &confirmed,
+            "BTC",
+            "c",
+            "t",
+            "t-down",
+            Some(&b),
+            None,
+            &confirmed,
             &crate::signal::SpreadArbConfig::default(),
         );
         assert!(arb.is_none(), "the dip buyer must not chase this book");
@@ -660,11 +699,19 @@ mod tests {
         let now = rise(&mut t, "t", dec!(0.50), dec!(0.62), 5, 0);
         // mid 0.60, spread 0.04 → 6.7% > max_spread_pct 3.0 → refuse to chase.
         let wide = book(0.58, 0.62);
-        assert!(evaluate_trend_follow("BTC", "c", "t", "d", Some(&wide), None, &t, now, &cfg).is_none());
+        assert!(
+            evaluate_trend_follow("BTC", "c", "t", "d", Some(&wide), None, &t, now, &cfg).is_none()
+        );
         // Tighten the cap and the same book becomes acceptable — the knob is the
         // only thing that changed.
-        let loose = TrendFollowConfig { max_spread_pct: dec!(10), ..cfg.clone() };
-        assert!(evaluate_trend_follow("BTC", "c", "t", "d", Some(&wide), None, &t, now, &loose).is_some());
+        let loose = TrendFollowConfig {
+            max_spread_pct: dec!(10),
+            ..cfg.clone()
+        };
+        assert!(
+            evaluate_trend_follow("BTC", "c", "t", "d", Some(&wide), None, &t, now, &loose)
+                .is_some()
+        );
     }
 
     #[test]
@@ -674,17 +721,24 @@ mod tests {
         let now = rise(&mut t, "t", dec!(0.80), dec!(0.92), 5, 0);
         // ask 0.93 > max_entry_price 0.88 → paying that leaves ~7% for a 100% risk.
         let rich = book(0.92, 0.93);
-        assert!(evaluate_trend_follow("BTC", "c", "t", "d", Some(&rich), None, &t, now, &cfg).is_none());
+        assert!(
+            evaluate_trend_follow("BTC", "c", "t", "d", Some(&rich), None, &t, now, &cfg).is_none()
+        );
         // A book inside the cap is taken.
         let ok = book(0.85, 0.86);
-        assert!(evaluate_trend_follow("BTC", "c", "t", "d", Some(&ok), None, &t, now, &cfg).is_some());
+        assert!(
+            evaluate_trend_follow("BTC", "c", "t", "d", Some(&ok), None, &t, now, &cfg).is_some()
+        );
     }
 
     #[test]
     fn a_lower_entry_cap_is_a_real_counterfactual_in_the_same_tick_stream() {
         let m = market();
         let run = |cap: Decimal| -> usize {
-            let base = TrendFollowConfig { max_entry_price: cap, ..Default::default() };
+            let base = TrendFollowConfig {
+                max_entry_price: cap,
+                ..Default::default()
+            };
             let strat = TrendFollowBuiltin::new(base);
             let factory = strat.shadow_factory().unwrap();
             let mut params = StrategyParams::from_knobs(&factory.knobs());
@@ -706,7 +760,11 @@ mod tests {
             replay.on_tick(&tick_ctx(&[m.clone()], "t", &jump, 1, 880, now));
             replay.closed_trades() + replay.open_positions()
         };
-        assert_eq!(run(dec!(0.90)), 1, "the lifted offer 0.86 is inside a 0.90 cap");
+        assert_eq!(
+            run(dec!(0.90)),
+            1,
+            "the lifted offer 0.86 is inside a 0.90 cap"
+        );
         assert_eq!(run(dec!(0.80)), 0, "the same offer is outside a 0.80 cap");
     }
 
@@ -739,7 +797,11 @@ mod tests {
             let b = book_d(mid - dec!(0.005), mid + dec!(0.005));
             replay.on_tick(&tick_ctx(&[m.clone()], "t", &b, 1, 880, now));
         }
-        assert_eq!(replay.open_positions(), 1, "twin must enter via its own logic");
+        assert_eq!(
+            replay.open_positions(),
+            1,
+            "twin must enter via its own logic"
+        );
 
         // Run-up → the shared exit policy is now armed (a >50% high) but rides the
         // winner: a chase entry at ~0.58 can never reach the 100% fixed
@@ -747,7 +809,11 @@ mod tests {
         now += 1_000;
         let up = book(0.88, 0.90);
         replay.on_tick(&tick_ctx(&[m.clone()], "t", &up, 1, 870, now));
-        assert_eq!(replay.open_positions(), 1, "the policy rides a rising position");
+        assert_eq!(
+            replay.open_positions(),
+            1,
+            "the policy rides a rising position"
+        );
 
         // Give back a third of the move → the trailing stop takes the profit.
         now += 1_000;
@@ -757,7 +823,11 @@ mod tests {
         let metrics = Metrics::from_trades(&replay.windowed_trades(1800, now));
         assert_eq!(metrics.sample_count, 1);
         assert_eq!(metrics.wins, 1);
-        assert!(metrics.total_pnl > Decimal::ZERO, "expected a profit, got {}", metrics.total_pnl);
+        assert!(
+            metrics.total_pnl > Decimal::ZERO,
+            "expected a profit, got {}",
+            metrics.total_pnl
+        );
     }
 
     #[test]
@@ -766,7 +836,10 @@ mod tests {
         // strategy's own code path in both cases.
         let m = market();
         let run = |need: Decimal| -> usize {
-            let base = TrendFollowConfig { min_move_pct: need, ..Default::default() };
+            let base = TrendFollowConfig {
+                min_move_pct: need,
+                ..Default::default()
+            };
             let strat = TrendFollowBuiltin::new(base);
             let factory = strat.shadow_factory().unwrap();
             let mut params = StrategyParams::from_knobs(&factory.knobs());
@@ -803,7 +876,11 @@ mod tests {
         let rise = |s: &mut TrendFollowBuiltin, token: &str| {
             for i in 0..5 {
                 let mid = dec!(0.55) + (dec!(0.02) * Decimal::from(i as u32) / dec!(4));
-                s.on_book(token, &book_d(mid - dec!(0.005), mid + dec!(0.005)), i as i64 * 1_000);
+                s.on_book(
+                    token,
+                    &book_d(mid - dec!(0.005), mid + dec!(0.005)),
+                    i as i64 * 1_000,
+                );
             }
         };
         rise(&mut s, "hot");

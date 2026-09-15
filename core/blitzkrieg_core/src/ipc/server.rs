@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex as AsyncMutex};
+use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, oneshot};
 
 /// Run the UDS server until the shutdown oneshot fires or a signal arrives.
 pub async fn run(
@@ -48,7 +48,9 @@ pub async fn run(
     // exit-managing positions that were already filled before the restart.
     let recovered_pos = core.restore_positions();
     if recovered_pos > 0 {
-        eprintln!("blitzkrieg-core: restored {recovered_pos} open position(s) from the position log");
+        eprintln!(
+            "blitzkrieg-core: restored {recovered_pos} open position(s) from the position log"
+        );
     }
     if config.mode == Mode::Dry {
         core.set_balance(config.dry_seed_balance);
@@ -80,7 +82,9 @@ pub async fn run(
             if let Err(e) = feed.start(host.clone(), cfg, Vec::new()).await {
                 eprintln!("blitzkrieg-core: data feed start failed: {e}");
             }
-            eprintln!("blitzkrieg-core: rust-native feeds enabled (binance spot; poly on first round)");
+            eprintln!(
+                "blitzkrieg-core: rust-native feeds enabled (binance spot; poly on first round)"
+            );
         }
     }
 
@@ -105,7 +109,9 @@ pub async fn run(
     // credentials from the environment and stays inert when they are absent.
     if config.mode == Mode::Live {
         if let Some(exec) = active.executor() {
-            let cfg = blitzkrieg_market_api::ExecutorConfig { markets: config.markets.clone() };
+            let cfg = blitzkrieg_market_api::ExecutorConfig {
+                markets: config.markets.clone(),
+            };
             match exec.start(host.clone(), cfg).await {
                 Ok(()) => eprintln!("blitzkrieg-core: live order executor started"),
                 Err(e) => eprintln!("blitzkrieg-core: live executor failed to start: {e}"),
@@ -153,7 +159,8 @@ pub async fn run(
     {
         let core = core.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(tick_ms.max(10)));
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_millis(tick_ms.max(10)));
             loop {
                 interval.tick().await;
                 let mut c = core.lock().await;
@@ -192,7 +199,10 @@ pub async fn run(
 }
 
 pub fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn spawn_session(
@@ -260,7 +270,14 @@ async fn handle_line(
 ) -> String {
     let req: Request = match serde_json::from_str(&line) {
         Ok(r) => r,
-        Err(e) => return fail(Value::Null, Failure::PARSE_ERROR, format!("parse error: {e}"), None),
+        Err(e) => {
+            return fail(
+                Value::Null,
+                Failure::PARSE_ERROR,
+                format!("parse error: {e}"),
+                None,
+            );
+        }
     };
     let id = req.id;
     let method = req.method.as_str();
@@ -281,7 +298,11 @@ async fn handle_line(
         }
 
         method::RISK_KILL => {
-            let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("manual").to_string();
+            let reason = params
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("manual")
+                .to_string();
             core.lock().await.kill(reason);
             Ok(serde_json::json!({ "killed": true }))
         }
@@ -290,29 +311,43 @@ async fn handle_line(
             Ok(serde_json::json!({ "killed": false }))
         }
 
-        method::ORDER_PLACE => typed(params, |p: PlaceParams| {
-            let core = core.clone();
-            async move {
-                let mut c = core.lock().await;
-                let (order_id, status) = c.place(p.order, p.maker_timeout_ms, now_ms())?;
-                Ok::<_, CoreError>(serde_json::to_value(PlaceResult { order_id, status }).unwrap_or(Value::Null))
-            }
-        })
-        .await,
+        method::ORDER_PLACE => {
+            typed(params, |p: PlaceParams| {
+                let core = core.clone();
+                async move {
+                    let mut c = core.lock().await;
+                    let (order_id, status) = c.place(p.order, p.maker_timeout_ms, now_ms())?;
+                    Ok::<_, CoreError>(
+                        serde_json::to_value(PlaceResult { order_id, status })
+                            .unwrap_or(Value::Null),
+                    )
+                }
+            })
+            .await
+        }
 
-        method::ORDER_CANCEL => typed(params, |p: CancelParams| {
-            let core = core.clone();
-            async move {
-                core.lock().await.cancel(&p.order_id, now_ms())?;
-                Ok::<_, CoreError>(serde_json::json!({ "success": true }))
-            }
-        })
-        .await,
+        method::ORDER_CANCEL => {
+            typed(params, |p: CancelParams| {
+                let core = core.clone();
+                async move {
+                    core.lock().await.cancel(&p.order_id, now_ms())?;
+                    Ok::<_, CoreError>(serde_json::json!({ "success": true }))
+                }
+            })
+            .await
+        }
 
         method::ORDER_CANCEL_ALL => {
             let p: CancelAllParams = serde_json::from_value(params.clone()).unwrap_or_default();
-            match core.lock().await.cancel_all(p.token_id.as_deref(), now_ms()) {
-                Ok(n) => Ok(serde_json::to_value(CancelAllResult { cancelled: n }).unwrap_or(Value::Null)),
+            match core
+                .lock()
+                .await
+                .cancel_all(p.token_id.as_deref(), now_ms())
+            {
+                Ok(n) => {
+                    Ok(serde_json::to_value(CancelAllResult { cancelled: n })
+                        .unwrap_or(Value::Null))
+                }
                 Err(e) => Err(core_err(e)),
             }
         }
@@ -332,37 +367,66 @@ async fn handle_line(
             .unwrap_or(Value::Null))
         }
 
-        method::ORDER_RECONCILE => typed(params, |p: ReconcileParams| {
-            let core = core.clone();
-            async move {
-                let snap = crate::reconcile::VenueSnapshot {
-                    open_order_ids: p.open_order_ids,
-                    trades: p
-                        .trades
-                        .into_iter()
-                        .map(|t| crate::reconcile::VenueTrade {
-                            venue_order_id: t.venue_order_id,
-                            trade_id: t.trade_id,
-                            token_id: t.token_id,
-                            side: t.side,
-                            size: t.size,
-                            price: t.price,
-                            ts_ms: t.ts_ms,
-                            tx_hash: None,
+        method::ORDER_RECONCILE => {
+            typed(params, |p: ReconcileParams| {
+                let core = core.clone();
+                async move {
+                    let snap = crate::reconcile::VenueSnapshot {
+                        open_order_ids: p.open_order_ids,
+                        trades: p
+                            .trades
+                            .into_iter()
+                            .map(|t| crate::reconcile::VenueTrade {
+                                venue_order_id: t.venue_order_id,
+                                trade_id: t.trade_id,
+                                token_id: t.token_id,
+                                side: t.side,
+                                size: t.size,
+                                price: t.price,
+                                ts_ms: t.ts_ms,
+                                tx_hash: None,
+                            })
+                            .collect(),
+                        now_ms: now_ms(),
+                    };
+                    let r = core.lock().await.reconcile(snap)?;
+                    Ok::<_, CoreError>(
+                        serde_json::to_value(ReconcileResultView {
+                            filled: r
+                                .actions
+                                .iter()
+                                .filter(|a| {
+                                    matches!(a, crate::reconcile::ReconcileAction::FilledGap { .. })
+                                })
+                                .count(),
+                            marked_filled: r
+                                .actions
+                                .iter()
+                                .filter(|a| {
+                                    matches!(
+                                        a,
+                                        crate::reconcile::ReconcileAction::MarkedFilled { .. }
+                                    )
+                                })
+                                .count(),
+                            marked_cancelled: r
+                                .actions
+                                .iter()
+                                .filter(|a| {
+                                    matches!(
+                                        a,
+                                        crate::reconcile::ReconcileAction::MarkedCancelled { .. }
+                                    )
+                                })
+                                .count(),
+                            ghost_ids: r.suspect_ghost_ids,
                         })
-                        .collect(),
-                    now_ms: now_ms(),
-                };
-                let r = core.lock().await.reconcile(snap)?;
-                Ok::<_, CoreError>(serde_json::to_value(ReconcileResultView {
-                    filled: r.actions.iter().filter(|a| matches!(a, crate::reconcile::ReconcileAction::FilledGap { .. })).count(),
-                    marked_filled: r.actions.iter().filter(|a| matches!(a, crate::reconcile::ReconcileAction::MarkedFilled { .. })).count(),
-                    marked_cancelled: r.actions.iter().filter(|a| matches!(a, crate::reconcile::ReconcileAction::MarkedCancelled { .. })).count(),
-                    ghost_ids: r.suspect_ghost_ids,
-                }).unwrap_or(Value::Null))
-            }
-        })
-        .await,
+                        .unwrap_or(Value::Null),
+                    )
+                }
+            })
+            .await
+        }
 
         method::POSITIONS_LIST => {
             let views = core.lock().await.position_views(now_ms());
@@ -379,99 +443,136 @@ async fn handle_line(
         }
 
         method::POSITION_EXIT => {
-            let p: PositionExitParams = serde_json::from_value(params.clone()).unwrap_or(PositionExitParams { position_id: None });
-            match core.lock().await.flatten(p.position_id.as_deref(), now_ms()) {
-                Ok(n) => Ok(serde_json::to_value(PositionExitResult { closed: n }).unwrap_or(Value::Null)),
+            let p: PositionExitParams = serde_json::from_value(params.clone())
+                .unwrap_or(PositionExitParams { position_id: None });
+            match core
+                .lock()
+                .await
+                .flatten(p.position_id.as_deref(), now_ms())
+            {
+                Ok(n) => {
+                    Ok(serde_json::to_value(PositionExitResult { closed: n })
+                        .unwrap_or(Value::Null))
+                }
                 Err(e) => Err(core_err(e)),
             }
         }
 
-        method::BOOK_SNAPSHOT => typed(params, |p: BookSnapshotParams| {
-            let core = core.clone();
-            async move {
-                let bids: Vec<(Decimal, Decimal)> = p.bids.into_iter().map(|l| (l.price, l.size)).collect();
-                let asks: Vec<(Decimal, Decimal)> = p.asks.into_iter().map(|l| (l.price, l.size)).collect();
-                let now = now_ms();
-                let mut c = core.lock().await;
-                c.book_snapshot(&p.token_id, bids.clone(), asks.clone(), now);
-                // Feed the self-driving engine (inert if disabled).
-                if c.has_engine() {
-                    c.engine_on_data(
-                        crate::engine::DataEvent::Book { token_id: p.token_id.clone(), bids, asks, now_ms: now },
-                        now,
-                    );
-                }
-                Ok::<_, CoreError>(serde_json::json!({ "ok": true }))
-            }
-        })
-        .await,
-
-        method::ENGINE_BOOK => typed(params, |p: BookSnapshotParams| {
-            let core = core.clone();
-            async move {
-                let bids: Vec<(Decimal, Decimal)> = p.bids.into_iter().map(|l| (l.price, l.size)).collect();
-                let asks: Vec<(Decimal, Decimal)> = p.asks.into_iter().map(|l| (l.price, l.size)).collect();
-                let now = now_ms();
-                let mut c = core.lock().await;
-                // Engine feed only: no `book_snapshot`, so no DRY maker-fill
-                // simulation. This is the path the Rust-native feed drives, and
-                // the one the archive/replay pair must agree with.
-                if c.has_engine() {
-                    c.engine_on_data(
-                        crate::engine::DataEvent::Book { token_id: p.token_id, bids, asks, now_ms: now },
-                        now,
-                    );
-                }
-                Ok::<_, CoreError>(serde_json::json!({ "ok": true }))
-            }
-        })
-        .await,
-
-        method::TOP_OF_BOOK => typed(params, |p: TopOfBookParams| {
-            let core = core.clone();
-            async move {
-                let now = now_ms();
-                let mut c = core.lock().await;
-                if let Some(b) = p.best_bid {
-                    if let Some(a) = p.best_ask {
-                        c.book_snapshot(&p.token_id, vec![(b, Decimal::ONE)], vec![(a, Decimal::ONE)], now);
+        method::BOOK_SNAPSHOT => {
+            typed(params, |p: BookSnapshotParams| {
+                let core = core.clone();
+                async move {
+                    let bids: Vec<(Decimal, Decimal)> =
+                        p.bids.into_iter().map(|l| (l.price, l.size)).collect();
+                    let asks: Vec<(Decimal, Decimal)> =
+                        p.asks.into_iter().map(|l| (l.price, l.size)).collect();
+                    let now = now_ms();
+                    let mut c = core.lock().await;
+                    c.book_snapshot(&p.token_id, bids.clone(), asks.clone(), now);
+                    // Feed the self-driving engine (inert if disabled).
+                    if c.has_engine() {
+                        c.engine_on_data(
+                            crate::engine::DataEvent::Book {
+                                token_id: p.token_id.clone(),
+                                bids,
+                                asks,
+                                now_ms: now,
+                            },
+                            now,
+                        );
                     }
+                    Ok::<_, CoreError>(serde_json::json!({ "ok": true }))
                 }
-                if c.has_engine() {
-                    c.engine_on_data(
-                        crate::engine::DataEvent::TopOfBook {
-                            token_id: p.token_id.clone(),
-                            best_bid: p.best_bid,
-                            best_ask: p.best_ask,
-                            now_ms: now,
-                        },
-                        now,
-                    );
-                }
-                Ok::<_, CoreError>(serde_json::json!({ "ok": true }))
-            }
-        })
-        .await,
-
-        method::SPOT_PRICE => typed(params, |p: SpotPriceParams| {
-            let core = core.clone();
-            async move {
-                let now = now_ms();
-                let mut c = core.lock().await;
-                if c.has_engine() {
-                    c.engine_on_data(
-                        crate::engine::DataEvent::Spot { asset: p.asset, price: p.price, now_ms: now },
-                        now,
-                    );
-                }
-                Ok::<_, CoreError>(serde_json::json!({ "ok": true }))
-            }
-        })
-        .await,
-
-        method::ENGINE_STATS => {
-            Ok(core.lock().await.engine_stats())
+            })
+            .await
         }
+
+        method::ENGINE_BOOK => {
+            typed(params, |p: BookSnapshotParams| {
+                let core = core.clone();
+                async move {
+                    let bids: Vec<(Decimal, Decimal)> =
+                        p.bids.into_iter().map(|l| (l.price, l.size)).collect();
+                    let asks: Vec<(Decimal, Decimal)> =
+                        p.asks.into_iter().map(|l| (l.price, l.size)).collect();
+                    let now = now_ms();
+                    let mut c = core.lock().await;
+                    // Engine feed only: no `book_snapshot`, so no DRY maker-fill
+                    // simulation. This is the path the Rust-native feed drives, and
+                    // the one the archive/replay pair must agree with.
+                    if c.has_engine() {
+                        c.engine_on_data(
+                            crate::engine::DataEvent::Book {
+                                token_id: p.token_id,
+                                bids,
+                                asks,
+                                now_ms: now,
+                            },
+                            now,
+                        );
+                    }
+                    Ok::<_, CoreError>(serde_json::json!({ "ok": true }))
+                }
+            })
+            .await
+        }
+
+        method::TOP_OF_BOOK => {
+            typed(params, |p: TopOfBookParams| {
+                let core = core.clone();
+                async move {
+                    let now = now_ms();
+                    let mut c = core.lock().await;
+                    if let Some(b) = p.best_bid {
+                        if let Some(a) = p.best_ask {
+                            c.book_snapshot(
+                                &p.token_id,
+                                vec![(b, Decimal::ONE)],
+                                vec![(a, Decimal::ONE)],
+                                now,
+                            );
+                        }
+                    }
+                    if c.has_engine() {
+                        c.engine_on_data(
+                            crate::engine::DataEvent::TopOfBook {
+                                token_id: p.token_id.clone(),
+                                best_bid: p.best_bid,
+                                best_ask: p.best_ask,
+                                now_ms: now,
+                            },
+                            now,
+                        );
+                    }
+                    Ok::<_, CoreError>(serde_json::json!({ "ok": true }))
+                }
+            })
+            .await
+        }
+
+        method::SPOT_PRICE => {
+            typed(params, |p: SpotPriceParams| {
+                let core = core.clone();
+                async move {
+                    let now = now_ms();
+                    let mut c = core.lock().await;
+                    if c.has_engine() {
+                        c.engine_on_data(
+                            crate::engine::DataEvent::Spot {
+                                asset: p.asset,
+                                price: p.price,
+                                now_ms: now,
+                            },
+                            now,
+                        );
+                    }
+                    Ok::<_, CoreError>(serde_json::json!({ "ok": true }))
+                }
+            })
+            .await
+        }
+
+        method::ENGINE_STATS => Ok(core.lock().await.engine_stats()),
 
         method::STRATEGY_LIST => {
             let c = core.lock().await;
@@ -492,7 +593,10 @@ async fn handle_line(
 
         method::STRATEGY_ENABLE => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let enabled = params
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             let found = core.lock().await.set_strategy_enabled(name, enabled);
             Ok(serde_json::json!({ "name": name, "enabled": enabled, "found": found }))
         }
@@ -544,7 +648,11 @@ async fn handle_line(
         }
 
         method::EXTENSION_ENABLE => {
-            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if name.is_empty() {
                 Err((Failure::INVALID_PARAMS, "name required".into(), None))
             } else {
@@ -553,14 +661,21 @@ async fn handle_line(
                     Err(e) => Err((
                         Failure::APPLICATION,
                         e,
-                        Some(ErrorData { core_code: crate::model::CoreErrorCode::InvalidParams, raw: None }),
+                        Some(ErrorData {
+                            core_code: crate::model::CoreErrorCode::InvalidParams,
+                            raw: None,
+                        }),
                     )),
                 }
             }
         }
 
         method::EXTENSION_DISABLE => {
-            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if name.is_empty() {
                 Err((Failure::INVALID_PARAMS, "name required".into(), None))
             } else {
@@ -569,7 +684,10 @@ async fn handle_line(
                     Err(e) => Err((
                         Failure::APPLICATION,
                         e,
-                        Some(ErrorData { core_code: crate::model::CoreErrorCode::InvalidParams, raw: None }),
+                        Some(ErrorData {
+                            core_code: crate::model::CoreErrorCode::InvalidParams,
+                            raw: None,
+                        }),
                     )),
                 }
             }
@@ -612,8 +730,18 @@ async fn handle_line(
                     })
                 })
                 .collect();
-            let evolved: u64 = c.shadow_evolution().strategy_names().iter().map(|n| c.shadow_evolution().evolution_count(n)).sum();
-            let rejected: u64 = c.shadow_evolution().strategy_names().iter().map(|n| c.shadow_evolution().rejected_count(n)).sum();
+            let evolved: u64 = c
+                .shadow_evolution()
+                .strategy_names()
+                .iter()
+                .map(|n| c.shadow_evolution().evolution_count(n))
+                .sum();
+            let rejected: u64 = c
+                .shadow_evolution()
+                .strategy_names()
+                .iter()
+                .map(|n| c.shadow_evolution().rejected_count(n))
+                .sum();
             let since = c
                 .shadow_evolution()
                 .strategy_names()
@@ -638,8 +766,14 @@ async fn handle_line(
         }
         method::SE_HISTORY => {
             let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
-            let strategy = params.get("strategy").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let records = core.lock().await.shadow_evolution_history(strategy.as_deref(), limit);
+            let strategy = params
+                .get("strategy")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let records = core
+                .lock()
+                .await
+                .shadow_evolution_history(strategy.as_deref(), limit);
             Ok(serde_json::json!({
                 "version": crate::ipc::schema::PROTOCOL_VERSION,
                 "strategy": strategy,
@@ -648,27 +782,44 @@ async fn handle_line(
         }
         method::SE_ROLLBACK => {
             let now = now_ms();
-            match params.get("strategy").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            match params
+                .get("strategy")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
                 None => Err((Failure::INVALID_PARAMS, "strategy required".into(), None)),
-                Some(strategy) => match core.lock().await.shadow_evolution_rollback(strategy, now) {
-                    Ok(_) => Ok(serde_json::json!({ "rolledBack": true, "strategy": strategy })),
-                    Err(e) => Err((Failure::APPLICATION, e, None)),
-                },
+                Some(strategy) => {
+                    match core.lock().await.shadow_evolution_rollback(strategy, now) {
+                        Ok(_) => {
+                            Ok(serde_json::json!({ "rolledBack": true, "strategy": strategy }))
+                        }
+                        Err(e) => Err((Failure::APPLICATION, e, None)),
+                    }
+                }
             }
         }
-        method::SE_APPLY => match params.get("strategy").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        method::SE_APPLY => match params
+            .get("strategy")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             // Manual override for ONE strategy. Shape: {strategy, params:{knob:value}},
             // validated against that strategy's own declaration + domain + gradient.
             None => Err((Failure::INVALID_PARAMS, "strategy required".into(), None)),
             Some(strategy) => {
-                let bag = params.get("params").cloned().unwrap_or(serde_json::Value::Null);
+                let bag = params
+                    .get("params")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 match serde_json::from_value::<crate::shadow_evolution::StrategyParams>(bag) {
                     Err(e) => Err((Failure::INVALID_PARAMS, format!("params: {e}"), None)),
                     Ok(typed) => {
                         let mut bag = crate::shadow_evolution::MutableParams::new();
                         bag.set_strategy(strategy, typed);
                         match core.lock().await.shadow_evolution_apply(bag, now_ms()) {
-                            Ok(()) => Ok(serde_json::json!({ "applied": true, "strategy": strategy })),
+                            Ok(()) => {
+                                Ok(serde_json::json!({ "applied": true, "strategy": strategy }))
+                            }
                             Err(e) => Err((Failure::APPLICATION, e, None)),
                         }
                     }
@@ -681,31 +832,40 @@ async fn handle_line(
             Ok(serde_json::to_value(view).unwrap_or(Value::Null))
         }
 
-        method::ENGINE_MARKETS => typed(params, |p: EngineMarketsParams| {
-            let core = core.clone();
-            async move {
-                let now = now_ms();
-                let tokens: Vec<String> = p
-                    .markets
-                    .iter()
-                    .flat_map(|m| [m.up_token_id.clone(), m.down_token_id.clone()])
-                    .collect();
-                let mut c = core.lock().await;
-                if c.has_engine() {
-                    c.engine_on_data(
-                        crate::engine::DataEvent::RoundMarkets { markets: p.markets, now_ms: now },
-                        now,
-                    );
+        method::ENGINE_MARKETS => {
+            typed(params, |p: EngineMarketsParams| {
+                let core = core.clone();
+                async move {
+                    let now = now_ms();
+                    let tokens: Vec<String> = p
+                        .markets
+                        .iter()
+                        .flat_map(|m| [m.up_token_id.clone(), m.down_token_id.clone()])
+                        .collect();
+                    let mut c = core.lock().await;
+                    if c.has_engine() {
+                        c.engine_on_data(
+                            crate::engine::DataEvent::RoundMarkets {
+                                markets: p.markets,
+                                now_ms: now,
+                            },
+                            now,
+                        );
+                    }
+                    // P4: if Rust-native feeds are on, subscribe the round's tokens so
+                    // Node no longer pushes books for them.
+                    c.subscribe_feed_tokens(tokens).await;
+                    Ok::<_, CoreError>(serde_json::json!({ "ok": true }))
                 }
-                // P4: if Rust-native feeds are on, subscribe the round's tokens so
-                // Node no longer pushes books for them.
-                c.subscribe_feed_tokens(tokens).await;
-                Ok::<_, CoreError>(serde_json::json!({ "ok": true }))
-            }
-        })
-        .await,
+            })
+            .await
+        }
 
-        other => Err((Failure::METHOD_NOT_FOUND, format!("unknown method: {other}"), None)),
+        other => Err((
+            Failure::METHOD_NOT_FOUND,
+            format!("unknown method: {other}"),
+            None,
+        )),
     };
 
     match reply {
@@ -729,7 +889,10 @@ where
         (
             Failure::APPLICATION,
             format!("{e}"),
-            Some(ErrorData { core_code: e.code, raw: e.raw }),
+            Some(ErrorData {
+                core_code: e.code,
+                raw: e.raw,
+            }),
         )
     })
 }
@@ -740,5 +903,12 @@ fn fail(id: Value, code: i32, message: String, data: Option<ErrorData>) -> Strin
 
 fn core_err(e: crate::model::CoreError) -> (i32, String, Option<ErrorData>) {
     let msg = format!("{e}");
-    (Failure::APPLICATION, msg, Some(ErrorData { core_code: e.code, raw: e.raw }))
+    (
+        Failure::APPLICATION,
+        msg,
+        Some(ErrorData {
+            core_code: e.code,
+            raw: e.raw,
+        }),
+    )
 }

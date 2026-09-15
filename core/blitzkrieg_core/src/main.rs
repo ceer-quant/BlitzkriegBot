@@ -201,17 +201,28 @@ fn parse_args() -> Args {
             }
             "--tick-ms" => tick_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(tick_ms),
             "--seed-balance" => {
-                seed_balance = it.next().and_then(|v| Decimal::from_str(&v).ok()).unwrap_or(seed_balance)
+                seed_balance = it
+                    .next()
+                    .and_then(|v| Decimal::from_str(&v).ok())
+                    .unwrap_or(seed_balance)
             }
             "--max-order-notional" => {
-                max_order_notional =
-                    it.next().and_then(|v| Decimal::from_str(&v).ok()).unwrap_or(max_order_notional)
+                max_order_notional = it
+                    .next()
+                    .and_then(|v| Decimal::from_str(&v).ok())
+                    .unwrap_or(max_order_notional)
             }
             "--min-shares" => {
-                min_shares = it.next().and_then(|v| Decimal::from_str(&v).ok()).or(min_shares)
+                min_shares = it
+                    .next()
+                    .and_then(|v| Decimal::from_str(&v).ok())
+                    .or(min_shares)
             }
             "--max-shares" => {
-                max_shares = it.next().and_then(|v| Decimal::from_str(&v).ok()).or(max_shares)
+                max_shares = it
+                    .next()
+                    .and_then(|v| Decimal::from_str(&v).ok())
+                    .or(max_shares)
             }
             "--no-auto-exits" => auto_exits = false,
             "--engine" => engine = true,
@@ -251,19 +262,34 @@ fn parse_args() -> Args {
                 round_sec = it.next().and_then(|v| v.parse().ok()).unwrap_or(round_sec)
             }
             "--min-round-age" => {
-                min_round_age = it.next().and_then(|v| v.parse().ok()).unwrap_or(min_round_age)
+                min_round_age = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(min_round_age)
             }
             "--min-time-left" => {
-                min_time_left = it.next().and_then(|v| v.parse().ok()).unwrap_or(min_time_left)
+                min_time_left = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(min_time_left)
             }
             "--trend-confirm-sec" => {
-                trend_confirm = it.next().and_then(|v| v.parse().ok()).unwrap_or(trend_confirm)
+                trend_confirm = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(trend_confirm)
             }
             "--trend-window-floor-ms" => {
-                trend_floor_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(trend_floor_ms)
+                trend_floor_ms = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(trend_floor_ms)
             }
             "--max-positions" => {
-                max_positions = it.next().and_then(|v| v.parse().ok()).unwrap_or(max_positions)
+                max_positions = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(max_positions)
             }
             "--market" => {
                 if let Some(m) = it.next() {
@@ -282,26 +308,89 @@ fn parse_args() -> Args {
                 event_archive_min_free_mb = it.next().and_then(|v| v.parse().ok())
             }
             "--entry-maker-timeout-ms" => {
-                entry_maker_timeout_ms =
-                    it.next().and_then(|v| v.parse().ok()).unwrap_or(entry_maker_timeout_ms)
+                entry_maker_timeout_ms = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(entry_maker_timeout_ms)
             }
             "--backtest" => backtest = it.next(),
             "--backtest-report" => backtest_report = it.next(),
             "--backtest-tick-ms" => {
-                backtest_tick_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(backtest_tick_ms)
+                backtest_tick_ms = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(backtest_tick_ms)
             }
             "--backtest-tail-ms" => {
-                backtest_tail_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(backtest_tail_ms)
+                backtest_tail_ms = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(backtest_tail_ms)
             }
             "--slippage-ticks" => {
-                slippage_ticks = it.next().and_then(|v| v.parse().ok()).unwrap_or(slippage_ticks)
+                slippage_ticks = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(slippage_ticks)
             }
-            "--latency-ms" => latency_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(latency_ms),
+            "--latency-ms" => {
+                latency_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(latency_ms)
+            }
             "--fill-prob-bps" => fill_prob_bps = it.next().and_then(|v| v.parse().ok()),
             other => eprintln!("ignoring unknown arg: {other}"),
         }
     }
-    Args { socket, mode, tick_ms, seed_balance, max_order_notional, min_shares, max_shares, markets, auto_exits, max_positions, engine, min_round_age, min_time_left, trend_confirm, trend_floor_ms, feed_ws, replay, replay_near_miss, round_sec, near_miss_path, trade_log, no_trade_log, order_log, no_order_log, position_log, no_position_log, market_plugin, discovery, shadow_evolution, assets: assets_arg, se_min_samples, se_cooldown_secs, se_min_obs_secs, strategy_limits, enable_strategy, disable_strategy, event_archive, no_event_archive, event_archive_max_mb, event_archive_rotate_mb, event_archive_min_free_mb, entry_maker_timeout_ms, backtest, backtest_report, backtest_tick_ms, backtest_tail_ms, slippage_ticks, latency_ms, fill_prob_bps }
+    Args {
+        socket,
+        mode,
+        tick_ms,
+        seed_balance,
+        max_order_notional,
+        min_shares,
+        max_shares,
+        markets,
+        auto_exits,
+        max_positions,
+        engine,
+        min_round_age,
+        min_time_left,
+        trend_confirm,
+        trend_floor_ms,
+        feed_ws,
+        replay,
+        replay_near_miss,
+        round_sec,
+        near_miss_path,
+        trade_log,
+        no_trade_log,
+        order_log,
+        no_order_log,
+        position_log,
+        no_position_log,
+        market_plugin,
+        discovery,
+        shadow_evolution,
+        assets: assets_arg,
+        se_min_samples,
+        se_cooldown_secs,
+        se_min_obs_secs,
+        strategy_limits,
+        enable_strategy,
+        disable_strategy,
+        event_archive,
+        no_event_archive,
+        event_archive_max_mb,
+        event_archive_rotate_mb,
+        event_archive_min_free_mb,
+        entry_maker_timeout_ms,
+        backtest,
+        backtest_report,
+        backtest_tick_ms,
+        backtest_tail_ms,
+        slippage_ticks,
+        latency_ms,
+        fill_prob_bps,
+    }
 }
 
 /// Default archive path, relative to the core's working directory (the repo root
@@ -327,11 +416,16 @@ fn resolve_event_archive(
     if no_event_archive {
         return (None, 0, 0, 0);
     }
-    let path = path.map(str::to_string).or_else(|| {
-        engine.then(|| DEFAULT_EVENT_ARCHIVE.to_string())
-    });
+    let path = path
+        .map(str::to_string)
+        .or_else(|| engine.then(|| DEFAULT_EVENT_ARCHIVE.to_string()));
     match path {
-        Some(p) => (Some(p), max_mb.unwrap_or(0), rotate_mb.unwrap_or(256), min_free_mb.unwrap_or(5120)),
+        Some(p) => (
+            Some(p),
+            max_mb.unwrap_or(0),
+            rotate_mb.unwrap_or(256),
+            min_free_mb.unwrap_or(5120),
+        ),
         None => (None, 0, 0, 0),
     }
 }
@@ -370,7 +464,9 @@ fn parse_strategy_limits(
             v => match v.parse::<usize>() {
                 Ok(n) => Some(n),
                 Err(_) => {
-                    eprintln!("blitzkrieg-core: ignoring --strategy-limit '{raw}' (bad position cap)");
+                    eprintln!(
+                        "blitzkrieg-core: ignoring --strategy-limit '{raw}' (bad position cap)"
+                    );
                     continue;
                 }
             },
@@ -431,7 +527,10 @@ async fn main() -> anyhow::Result<()> {
     // DRY_RUN env honours the existing convention when --mode is not explicit.
     let mode = if std::env::args().any(|a| a == "--mode") {
         args.mode
-    } else if std::env::var("DRY_RUN").map(|v| v == "false").unwrap_or(false) {
+    } else if std::env::var("DRY_RUN")
+        .map(|v| v == "false")
+        .unwrap_or(false)
+    {
         Mode::Live
     } else {
         Mode::Dry
@@ -440,7 +539,9 @@ async fn main() -> anyhow::Result<()> {
     // When the self-driving engine is on, record near-misses to disk by default
     // so the entry-gate question can be evaluated offline.
     let near_miss_path = if args.engine {
-        args.near_miss_path.clone().or_else(|| Some("data/shadow/near-miss.jsonl".to_string()))
+        args.near_miss_path
+            .clone()
+            .or_else(|| Some("data/shadow/near-miss.jsonl".to_string()))
     } else {
         args.near_miss_path.clone()
     };
@@ -451,27 +552,41 @@ async fn main() -> anyhow::Result<()> {
     let trade_log_path = if args.no_trade_log {
         None
     } else {
-        Some(args.trade_log.clone().unwrap_or_else(|| "data/trades/trades.jsonl".to_string()))
+        Some(
+            args.trade_log
+                .clone()
+                .unwrap_or_else(|| "data/trades/trades.jsonl".to_string()),
+        )
     };
 
     // Order log: durable tracked-order storage for crash recovery + orphan sweep.
     let order_log_path = if args.no_order_log {
         None
     } else {
-        Some(args.order_log.clone().unwrap_or_else(|| "data/orders/orders.jsonl".to_string()))
+        Some(
+            args.order_log
+                .clone()
+                .unwrap_or_else(|| "data/orders/orders.jsonl".to_string()),
+        )
     };
 
     // Position log: durable snapshot of the OPEN position book (crash recovery).
     let position_log_path = if args.no_position_log {
         None
     } else {
-        Some(args.position_log.clone().unwrap_or_else(|| "data/positions/positions.jsonl".to_string()))
+        Some(
+            args.position_log
+                .clone()
+                .unwrap_or_else(|| "data/positions/positions.jsonl".to_string()),
+        )
     };
 
-    let assets_override: Option<Vec<String>> = args
-        .assets
-        .as_ref()
-        .map(|s| s.split(',').map(|a| a.trim().to_uppercase()).filter(|a| !a.is_empty()).collect());
+    let assets_override: Option<Vec<String>> = args.assets.as_ref().map(|s| {
+        s.split(',')
+            .map(|a| a.trim().to_uppercase())
+            .filter(|a| !a.is_empty())
+            .collect()
+    });
 
     // Per-order share sizing. Both default to 10 (fixed lot) when neither flag is
     // given. Clamp min<=max so a stray flag order cannot invert the range.
@@ -479,7 +594,9 @@ async fn main() -> anyhow::Result<()> {
         let mn = args.min_shares.unwrap_or_else(|| Decimal::from(10));
         let mx = args.max_shares.unwrap_or_else(|| Decimal::from(10));
         if mn > mx {
-            eprintln!("blitzkrieg-core: --min-shares {mn} > --max-shares {mx}; clamping min to max");
+            eprintln!(
+                "blitzkrieg-core: --min-shares {mn} > --max-shares {mx}; clamping min to max"
+            );
             (mx, mx)
         } else {
             (mn, mx)
@@ -491,20 +608,27 @@ async fn main() -> anyhow::Result<()> {
     // which makes "opt in" the wrong default for the one thing that cannot be
     // reconstructed after the fact. Rotation + a free-space floor are what make
     // leaving it on safe, so the default supplies those too.
-    let (event_archive_path, event_archive_max_mb, event_archive_rotate_mb, event_archive_min_free_mb) =
-        resolve_event_archive(
-            args.engine,
-            args.no_event_archive,
-            args.event_archive.as_deref(),
-            args.event_archive_max_mb,
-            args.event_archive_rotate_mb,
-            args.event_archive_min_free_mb,
-        );
+    let (
+        event_archive_path,
+        event_archive_max_mb,
+        event_archive_rotate_mb,
+        event_archive_min_free_mb,
+    ) = resolve_event_archive(
+        args.engine,
+        args.no_event_archive,
+        args.event_archive.as_deref(),
+        args.event_archive_max_mb,
+        args.event_archive_rotate_mb,
+        args.event_archive_min_free_mb,
+    );
 
     let config = CoreConfig {
         mode,
         default_maker_timeout_ms: 5000,
-        risk: RiskConfig { max_order_notional: args.max_order_notional, ..Default::default() },
+        risk: RiskConfig {
+            max_order_notional: args.max_order_notional,
+            ..Default::default()
+        },
         dry_seed_balance: args.seed_balance,
         strategy_limits: parse_strategy_limits(&args.strategy_limits),
         enabled_strategies: args.enable_strategy,
@@ -520,22 +644,35 @@ async fn main() -> anyhow::Result<()> {
         position_log_path,
         discovery_enabled: args.discovery,
         shadow_evolution_enabled: args.shadow_evolution,
-        shadow_evolution_tuning: if args.se_min_samples.is_some() || args.se_cooldown_secs.is_some() || args.se_min_obs_secs.is_some() {
+        shadow_evolution_tuning: if args.se_min_samples.is_some()
+            || args.se_cooldown_secs.is_some()
+            || args.se_min_obs_secs.is_some()
+        {
             Some(blitzkrieg_core::service::ShadowEvolutionTuning {
                 min_sample_count: args.se_min_samples,
                 cooldown_secs: args.se_cooldown_secs,
                 min_observation_secs: args.se_min_obs_secs,
                 ..Default::default()
             })
-        } else { None },
-        assets: assets_override.unwrap_or_else(|| vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()]),
+        } else {
+            None
+        },
+        assets: assets_override
+            .unwrap_or_else(|| vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()]),
         min_round_age_sec: args.min_round_age,
         trend_confirm_sec: args.trend_confirm,
         trend_window_floor_ms: args.trend_floor_ms,
         feed_ws_enabled: args.feed_ws,
         market_plugin: args.market_plugin,
         round_duration_sec: args.round_sec,
-        positions: PositionConfig { max_positions: args.max_positions, exit: blitzkrieg_core::exit_policy::ExitConfig { min_time_left_sec: args.min_time_left, ..Default::default() }, ..Default::default() },
+        positions: PositionConfig {
+            max_positions: args.max_positions,
+            exit: blitzkrieg_core::exit_policy::ExitConfig {
+                min_time_left_sec: args.min_time_left,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         entry_maker_timeout_ms: args.entry_maker_timeout_ms,
         fill_model: blitzkrieg_core::sim::FillModel {
             taker_slippage_ticks: args.slippage_ticks,
@@ -565,7 +702,13 @@ async fn main() -> anyhow::Result<()> {
         cfg.event_archive_max_mb = 0;
         cfg.event_archive_rotate_mb = 0;
         cfg.event_archive_min_free_mb = 0;
-        run_backtest(path, args.backtest_report.as_deref(), cfg, args.backtest_tick_ms, args.backtest_tail_ms);
+        run_backtest(
+            path,
+            args.backtest_report.as_deref(),
+            cfg,
+            args.backtest_tick_ms,
+            args.backtest_tail_ms,
+        );
         return Ok(());
     }
 
@@ -590,11 +733,13 @@ fn run_backtest(
     tick_ms: i64,
     tail_ms: i64,
 ) {
-    use blitzkrieg_core::backtest::{Backtester, BacktestConfig, EventBacktester};
+    use blitzkrieg_core::backtest::{BacktestConfig, Backtester, EventBacktester};
     use blitzkrieg_core::data_source::open_replay_all;
 
     if !cfg.engine_enabled {
-        eprintln!("blitzkrieg-core: --backtest without --engine: no strategy will run (pass --engine)");
+        eprintln!(
+            "blitzkrieg-core: --backtest without --engine: no strategy will run (pass --engine)"
+        );
     }
     // Reads the archive plus any rotated segments beside it, so replaying a 24/7
     // capture (which rotates) needs no manual concatenation.
@@ -606,7 +751,14 @@ fn run_backtest(
         }
     };
     let core_cfg = cfg.clone();
-    let mut bt = EventBacktester::new(BacktestConfig { core: cfg, tick_ms, tail_ms }, Box::new(src));
+    let mut bt = EventBacktester::new(
+        BacktestConfig {
+            core: cfg,
+            tick_ms,
+            tail_ms,
+        },
+        Box::new(src),
+    );
     eprintln!("blitzkrieg-core: {}", bt.describe());
     eprintln!(
         "blitzkrieg-core: replay is always dry (tick {tick_ms} ms, tail {tail_ms} ms, seed ${})",
@@ -643,7 +795,9 @@ fn run_backtest(
 /// live core trades with. Prints an in-sample grid and the out-of-sample result.
 fn run_replay(path: &std::path::Path) {
     use blitzkrieg_core::exit_policy::ExitConfig;
-    use blitzkrieg_core::shadow::{bucket_by_entry, default_grid, frozen_holdout, walk_forward_file};
+    use blitzkrieg_core::shadow::{
+        bucket_by_entry, default_grid, frozen_holdout, walk_forward_file,
+    };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     let base_exit = ExitConfig::default();
@@ -657,9 +811,15 @@ fn run_replay(path: &std::path::Path) {
             for (name, pnl) in &rows {
                 println!("  {:<20} {:>8.2}", name, pnl);
             }
-            println!("\nWalk-forward out-of-sample: {} records, PnL {:.2} (train from {})", r.oos_count, r.oos_pnl, r.min_train);
+            println!(
+                "\nWalk-forward out-of-sample: {} records, PnL {:.2} (train from {})",
+                r.oos_count, r.oos_pnl, r.min_train
+            );
             if let Some((name, best)) = rows.first() {
-                println!("In-sample best: {} {:.2} — compare with OOS to judge overfitting", name, best);
+                println!(
+                    "In-sample best: {} {:.2} — compare with OOS to judge overfitting",
+                    name, best
+                );
             }
 
             // Strict frozen holdout: choose once on the early window, apply frozen
@@ -682,17 +842,35 @@ fn run_replay(path: &std::path::Path) {
                         h.train_n,
                         h.test_n
                     );
-                    println!("  {:<20} {:>9} {:>6} | {:>9} {:>6}", "cell", "train$", "win%", "test$", "win%");
+                    println!(
+                        "  {:<20} {:>9} {:>6} | {:>9} {:>6}",
+                        "cell", "train$", "win%", "test$", "win%"
+                    );
                     for row in &h.rows {
-                        let tw = if h.train_n > 0 { row.train_wins as f64 / h.train_n as f64 * 100.0 } else { 0.0 };
-                        let ew = if h.test_n > 0 { row.test_wins as f64 / h.test_n as f64 * 100.0 } else { 0.0 };
-                        let mark = if row.name == h.train_best { " <-train-best" } else { "" };
+                        let tw = if h.train_n > 0 {
+                            row.train_wins as f64 / h.train_n as f64 * 100.0
+                        } else {
+                            0.0
+                        };
+                        let ew = if h.test_n > 0 {
+                            row.test_wins as f64 / h.test_n as f64 * 100.0
+                        } else {
+                            0.0
+                        };
+                        let mark = if row.name == h.train_best {
+                            " <-train-best"
+                        } else {
+                            ""
+                        };
                         println!(
                             "  {:<20} {:>9.2} {:>5.0}% | {:>9.2} {:>5.0}%{}",
                             row.name, row.train_pnl, tw, row.test_pnl, ew, mark
                         );
                     }
-                    println!("  frozen forward: {} -> test PnL {:.2}", h.train_best, h.frozen_test_pnl);
+                    println!(
+                        "  frozen forward: {} -> test PnL {:.2}",
+                        h.train_best, h.frozen_test_pnl
+                    );
                 }
             }
 
@@ -709,20 +887,34 @@ fn run_replay(path: &std::path::Path) {
                     &[dec!(420), dec!(600), dec!(720)],
                 );
                 println!("\nBy entry price (entry-cap question):");
-                println!("  {:<12} {:>4} {:>9} {:>9} {:>7}", "bucket", "n", "sum$", "med$", "win%");
+                println!(
+                    "  {:<12} {:>4} {:>9} {:>9} {:>7}",
+                    "bucket", "n", "sum$", "med$", "win%"
+                );
                 for b in &by_price {
                     if b.n > 0 {
-                        println!("  {:<12} {:>4} {:>9.2} {:>9.3} {:>6.0}%", b.label, b.n, b.sum, b.median, b.win_rate);
+                        println!(
+                            "  {:<12} {:>4} {:>9.2} {:>9.3} {:>6.0}%",
+                            b.label, b.n, b.sum, b.median, b.win_rate
+                        );
                     }
                 }
                 println!("\nBy time-left at entry (timing-gate question):");
-                println!("  {:<12} {:>4} {:>9} {:>9} {:>7}", "bucket", "n", "sum$", "med$", "win%");
+                println!(
+                    "  {:<12} {:>4} {:>9} {:>9} {:>7}",
+                    "bucket", "n", "sum$", "med$", "win%"
+                );
                 for b in &by_time {
                     if b.n > 0 {
-                        println!("  {:<12} {:>4} {:>9.2} {:>9.3} {:>6.0}%", b.label, b.n, b.sum, b.median, b.win_rate);
+                        println!(
+                            "  {:<12} {:>4} {:>9.2} {:>9.3} {:>6.0}%",
+                            b.label, b.n, b.sum, b.median, b.win_rate
+                        );
                     }
                 }
-                println!("\nNOTE: shadow data only holds trades that ALREADY passed the entry gate;");
+                println!(
+                    "\nNOTE: shadow data only holds trades that ALREADY passed the entry gate;"
+                );
                 println!("it cannot see opportunities the gate rejected (never recorded).");
                 let _ = Decimal::ZERO;
             }
@@ -761,22 +953,43 @@ fn run_replay_near_miss(path: &std::path::Path) {
     let s_relaxed = evaluate_near_misses(&recs, &relaxed);
 
     println!("near-miss replay: {}", path.display());
-    println!("  blocked signals   : {} (timing {}, momentum {})", s_same.n, s_same.timing_n, s_same.momentum_n);
-    println!("  notional tradable : ${:.0}", s_same.total_feeable_notional);
+    println!(
+        "  blocked signals   : {} (timing {}, momentum {})",
+        s_same.n, s_same.timing_n, s_same.momentum_n
+    );
+    println!(
+        "  notional tradable : ${:.0}",
+        s_same.total_feeable_notional
+    );
     println!();
     println!("  A) same exit gate (entry relaxed only):");
-    println!("     PnL ${:.2}  avg ${:.3}  win {}%", s_same.total_pnl, s_same.avg_pnl, pct(s_same.wins, s_same.n));
+    println!(
+        "     PnL ${:.2}  avg ${:.3}  win {}%",
+        s_same.total_pnl,
+        s_same.avg_pnl,
+        pct(s_same.wins, s_same.n)
+    );
     println!("  B) entry AND exit time gate relaxed   :");
-    println!("     PnL ${:.2}  avg ${:.3}  win {}%", s_relaxed.total_pnl, s_relaxed.avg_pnl, pct(s_relaxed.wins, s_relaxed.n));
+    println!(
+        "     PnL ${:.2}  avg ${:.3}  win {}%",
+        s_relaxed.total_pnl,
+        s_relaxed.avg_pnl,
+        pct(s_relaxed.wins, s_relaxed.n)
+    );
     println!();
     println!("  (A) is near-zero because blocked signals have tLeft < min_time_left and");
     println!("  are time-exited immediately — this is the entry/exit timing COUPLING.");
     println!("  (B) is the real test of relaxing the timing gate.");
     if s_relaxed.total_pnl > rust_decimal::Decimal::ZERO {
         println!("  => On this sample, relaxing the timing gate would have HELPED (B > 0),");
-        println!("     but n={} is small and regime-dependent — gather more before acting.", s_relaxed.n);
+        println!(
+            "     but n={} is small and regime-dependent — gather more before acting.",
+            s_relaxed.n
+        );
     } else {
-        println!("  => On this sample, blocked trades would have LOST even with relaxed timing (B <= 0):");
+        println!(
+            "  => On this sample, blocked trades would have LOST even with relaxed timing (B <= 0):"
+        );
         println!("     the gate is doing its job; do not relax it on this evidence.");
     }
 }
@@ -793,7 +1006,10 @@ mod tests {
     // ── E2-a: the --strategy-limit grammar ──────────────────────────────────
 
     fn parse_one(flag: &str) -> Option<blitzkrieg_core::service::StrategyLimit> {
-        parse_strategy_limits(&[flag.to_string()]).into_iter().next().map(|(_, l)| l)
+        parse_strategy_limits(&[flag.to_string()])
+            .into_iter()
+            .next()
+            .map(|(_, l)| l)
     }
 
     #[test]
@@ -802,7 +1018,10 @@ mod tests {
         assert_eq!(l.max_open_positions, Some(0));
         assert_eq!(l.max_open_notional_usd, None);
         assert!(l.size_usd.is_none() && l.min_shares.is_none() && l.max_shares.is_none());
-        assert!(!l.sizing().overrides_anything(), "caps-only must not masquerade as a sizing override");
+        assert!(
+            !l.sizing().overrides_anything(),
+            "caps-only must not masquerade as a sizing override"
+        );
 
         let l2 = parse_one("dip_buyer:-:12.5").expect("blank cap segment = uncapped");
         assert_eq!(l2.max_open_positions, None);
@@ -824,20 +1043,23 @@ mod tests {
         assert_eq!(l2.size_usd, None);
         assert_eq!(l2.min_shares, Some(dec!(3)));
         assert_eq!(l2.max_shares, None);
-        assert!(l2.sizing().overrides_anything(), "one set dimension is enough");
+        assert!(
+            l2.sizing().overrides_anything(),
+            "one set dimension is enough"
+        );
     }
 
     #[test]
     fn malformed_strategy_limits_are_dropped_not_half_applied() {
         for bad in [
-            "spread_arb:0",              // too few segments
-            "spread_arb:0:-:1:2:3:4",    // too many
-            ":0:-",                      // no name
-            "spread_arb:x:-",            // bad position cap
-            "spread_arb:0:abc",          // bad notional
-            "spread_arb:0:-:abc:1:2",    // bad size_usd
-            "spread_arb:0:-:1:abc:2",    // bad min_shares
-            "spread_arb:0:-:1:2:abc",    // bad max_shares
+            "spread_arb:0",           // too few segments
+            "spread_arb:0:-:1:2:3:4", // too many
+            ":0:-",                   // no name
+            "spread_arb:x:-",         // bad position cap
+            "spread_arb:0:abc",       // bad notional
+            "spread_arb:0:-:abc:1:2", // bad size_usd
+            "spread_arb:0:-:1:abc:2", // bad min_shares
+            "spread_arb:0:-:1:2:abc", // bad max_shares
         ] {
             assert!(parse_one(bad).is_none(), "must be ignored: {bad}");
         }
@@ -861,7 +1083,10 @@ mod tests {
         let (path, max, rotate, min_free) =
             resolve_event_archive(true, false, None, None, None, None);
         assert_eq!(path.as_deref(), Some(DEFAULT_EVENT_ARCHIVE));
-        assert_eq!(max, 0, "no session cap: rotation + the space floor bound the volume");
+        assert_eq!(
+            max, 0,
+            "no session cap: rotation + the space floor bound the volume"
+        );
         assert_eq!(rotate, 256);
         assert_eq!(min_free, 5120);
     }
@@ -877,7 +1102,8 @@ mod tests {
 
     #[test]
     fn explicit_path_opts_in_without_engine() {
-        let (path, ..) = resolve_event_archive(false, false, Some("/tmp/x.jsonl"), None, None, None);
+        let (path, ..) =
+            resolve_event_archive(false, false, Some("/tmp/x.jsonl"), None, None, None);
         assert_eq!(path.as_deref(), Some("/tmp/x.jsonl"));
     }
 
@@ -900,8 +1126,14 @@ mod tests {
 
     #[test]
     fn no_event_archive_disables_capture_even_with_a_path() {
-        let (path, max, rotate, min_free) =
-            resolve_event_archive(true, true, Some("/tmp/x.jsonl"), Some(64), Some(8), Some(100));
+        let (path, max, rotate, min_free) = resolve_event_archive(
+            true,
+            true,
+            Some("/tmp/x.jsonl"),
+            Some(64),
+            Some(8),
+            Some(100),
+        );
         assert_eq!((path, max, rotate, min_free), (None, 0, 0, 0));
     }
 }

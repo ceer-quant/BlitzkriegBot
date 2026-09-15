@@ -7,7 +7,9 @@
 //!
 //! Observation-only: the recorder never trades.
 
-use crate::exit_policy::{decide_exit, executable_bid, update_exit_state, ExitConfig, ExitState, ExitTickInput};
+use crate::exit_policy::{
+    ExitConfig, ExitState, ExitTickInput, decide_exit, executable_bid, update_exit_state,
+};
 use crate::model::OrderbookSnapshot;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -55,7 +57,11 @@ pub struct ShadowRecorder {
 
 impl ShadowRecorder {
     pub fn new(sample_min_interval_ms: i64, window_ms: i64) -> Self {
-        Self { tracked: HashMap::new(), sample_min_interval_ms, window_ms }
+        Self {
+            tracked: HashMap::new(),
+            sample_min_interval_ms,
+            window_ms,
+        }
     }
 
     pub fn on_open(
@@ -126,7 +132,8 @@ impl ShadowRecorder {
     /// Record an opposite-side sample explicitly.
     pub fn on_opposite(&mut self, position_id: &str, book: &OrderbookSnapshot, now_ms: i64) {
         if let Some(t) = self.tracked.get_mut(position_id) {
-            if now_ms >= t.rec.entered_at_ms && now_ms <= t.window_end_ms
+            if now_ms >= t.rec.entered_at_ms
+                && now_ms <= t.window_end_ms
                 && now_ms - t.last_opp_at >= self.sample_min_interval_ms
             {
                 t.last_opp_at = now_ms;
@@ -212,7 +219,12 @@ pub struct NearMissRecorder {
 
 impl NearMissRecorder {
     pub fn new(sample_min_interval_ms: i64, window_ms: i64) -> Self {
-        Self { tracked: HashMap::new(), sample_min_interval_ms, window_ms, max_tracked: 64 }
+        Self {
+            tracked: HashMap::new(),
+            sample_min_interval_ms,
+            window_ms,
+            max_tracked: 64,
+        }
     }
 
     /// Begin tracking a blocked candidate. Dedup: one record per token at a time
@@ -254,7 +266,9 @@ impl NearMissRecorder {
     }
 
     pub fn on_book(&mut self, token_id: &str, book: &OrderbookSnapshot, now_ms: i64) {
-        let Some(t) = self.tracked.get_mut(token_id) else { return };
+        let Some(t) = self.tracked.get_mut(token_id) else {
+            return;
+        };
         if now_ms < t.rec.blocked_at_ms || now_ms > t.rec.window_end_ms {
             return;
         }
@@ -324,7 +338,11 @@ pub fn replay_near_miss(rec: &NearMissRecord, cfg: &ExitConfig) -> ReplayResult 
     // A resting maker entry would pay no entry fee.
     let entry_fee = Decimal::ZERO;
 
-    let mut exit_price = rec.path.last().map(|s| s.bid.unwrap_or(s.price)).unwrap_or(entry);
+    let mut exit_price = rec
+        .path
+        .last()
+        .map(|s| s.bid.unwrap_or(s.price))
+        .unwrap_or(entry);
     let mut exit_reason = crate::model::ExitReason::ForceExit;
 
     for s in &rec.path {
@@ -355,9 +373,14 @@ pub fn replay_near_miss(rec: &NearMissRecord, cfg: &ExitConfig) -> ReplayResult 
         }
     }
 
-    let exit_fee = crate::exit_policy::taker_fee_pct(exit_price) / Decimal::ONE_HUNDRED * exit_price * shares;
+    let exit_fee =
+        crate::exit_policy::taker_fee_pct(exit_price) / Decimal::ONE_HUNDRED * exit_price * shares;
     let pnl = shares * (exit_price - entry) - entry_fee - exit_fee;
-    ReplayResult { pnl, exit_reason, exit_price }
+    ReplayResult {
+        pnl,
+        exit_reason,
+        exit_price,
+    }
 }
 
 /// Summary of replaying every blocked near-miss: what relaxing the gate would
@@ -452,12 +475,18 @@ pub fn parse_near_miss_line(line: &str) -> Option<NearMissRecord> {
     })
 }
 
-pub fn persist_near_misses(path: &std::path::Path, records: &[NearMissRecord]) -> std::io::Result<()> {
+pub fn persist_near_misses(
+    path: &std::path::Path,
+    records: &[NearMissRecord],
+) -> std::io::Result<()> {
     use std::io::Write as _;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     for r in records {
         writeln!(f, "{}", near_miss_to_json(r))?;
     }
@@ -476,7 +505,11 @@ pub struct ReplayResult {
 /// the taker fee on every exit (a live maker-first TP can only do better).
 pub fn replay(rec: &ShadowRecord, cfg: &ExitConfig) -> ReplayResult {
     if rec.own.is_empty() {
-        return ReplayResult { pnl: Decimal::ZERO, exit_reason: crate::model::ExitReason::Manual, exit_price: rec.entry_price };
+        return ReplayResult {
+            pnl: Decimal::ZERO,
+            exit_reason: crate::model::ExitReason::Manual,
+            exit_price: rec.entry_price,
+        };
     }
     let entry = rec.entry_price;
     let shares = rec.shares;
@@ -487,7 +520,11 @@ pub fn replay(rec: &ShadowRecord, cfg: &ExitConfig) -> ReplayResult {
         crate::exit_policy::taker_fee_pct(entry) / Decimal::ONE_HUNDRED * entry * shares
     };
 
-    let mut exit_price = rec.own.last().map(|s| s.bid.unwrap_or(s.price)).unwrap_or(entry);
+    let mut exit_price = rec
+        .own
+        .last()
+        .map(|s| s.bid.unwrap_or(s.price))
+        .unwrap_or(entry);
     let mut exit_reason = crate::model::ExitReason::ForceExit;
 
     for s in &rec.own {
@@ -517,9 +554,14 @@ pub fn replay(rec: &ShadowRecord, cfg: &ExitConfig) -> ReplayResult {
         }
     }
 
-    let exit_fee = crate::exit_policy::taker_fee_pct(exit_price) / Decimal::ONE_HUNDRED * exit_price * shares;
+    let exit_fee =
+        crate::exit_policy::taker_fee_pct(exit_price) / Decimal::ONE_HUNDRED * exit_price * shares;
     let pnl = shares * (exit_price - entry) - entry_fee - exit_fee;
-    ReplayResult { pnl, exit_reason, exit_price }
+    ReplayResult {
+        pnl,
+        exit_reason,
+        exit_price,
+    }
 }
 
 // ── Persistence (Node-analyzer compatible JSONL) ─────────────────────────────
@@ -597,7 +639,10 @@ pub fn persist_records(path: &std::path::Path, records: &[ShadowRecord]) -> std:
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     for r in records {
         writeln!(f, "{}", r.to_json())?;
     }
@@ -634,12 +679,42 @@ fn cfg_for(base: &ExitConfig, g: &GridPoint) -> ExitConfig {
 /// stale wide-stop binary went unnoticed.
 pub fn default_grid() -> Vec<GridPoint> {
     vec![
-        GridPoint { name: "old-SL50/trail10".into(), stop_loss_pct: dec!(50), min_trail_pct: dec!(10), trailing_min_high_pct: dec!(15) },
-        GridPoint { name: "shipped-SL12/trail8".into(), stop_loss_pct: dec!(12), min_trail_pct: dec!(8), trailing_min_high_pct: dec!(15) },
-        GridPoint { name: "SL12/trail10".into(), stop_loss_pct: dec!(12), min_trail_pct: dec!(10), trailing_min_high_pct: dec!(15) },
-        GridPoint { name: "SL15/trail8".into(), stop_loss_pct: dec!(15), min_trail_pct: dec!(8), trailing_min_high_pct: dec!(15) },
-        GridPoint { name: "SL10/trail8".into(), stop_loss_pct: dec!(10), min_trail_pct: dec!(8), trailing_min_high_pct: dec!(15) },
-        GridPoint { name: "SL20/trail10".into(), stop_loss_pct: dec!(20), min_trail_pct: dec!(10), trailing_min_high_pct: dec!(15) },
+        GridPoint {
+            name: "old-SL50/trail10".into(),
+            stop_loss_pct: dec!(50),
+            min_trail_pct: dec!(10),
+            trailing_min_high_pct: dec!(15),
+        },
+        GridPoint {
+            name: "shipped-SL12/trail8".into(),
+            stop_loss_pct: dec!(12),
+            min_trail_pct: dec!(8),
+            trailing_min_high_pct: dec!(15),
+        },
+        GridPoint {
+            name: "SL12/trail10".into(),
+            stop_loss_pct: dec!(12),
+            min_trail_pct: dec!(10),
+            trailing_min_high_pct: dec!(15),
+        },
+        GridPoint {
+            name: "SL15/trail8".into(),
+            stop_loss_pct: dec!(15),
+            min_trail_pct: dec!(8),
+            trailing_min_high_pct: dec!(15),
+        },
+        GridPoint {
+            name: "SL10/trail8".into(),
+            stop_loss_pct: dec!(10),
+            min_trail_pct: dec!(8),
+            trailing_min_high_pct: dec!(15),
+        },
+        GridPoint {
+            name: "SL20/trail10".into(),
+            stop_loss_pct: dec!(20),
+            min_trail_pct: dec!(10),
+            trailing_min_high_pct: dec!(15),
+        },
     ]
 }
 
@@ -774,14 +849,20 @@ fn summarize(label: &str, mut pnls: Vec<Decimal>) -> Bucket {
 
 /// Bucket realized PnL by entry price (tests the entry cap) and by time-left at
 /// entry (tests the timing gate). Only trades with a recorded actual PnL count.
-pub fn bucket_by_entry(records: &[ShadowRecord], entry_edges: &[Decimal], time_edges: &[Decimal]) -> (Vec<Bucket>, Vec<Bucket>) {
+pub fn bucket_by_entry(
+    records: &[ShadowRecord],
+    entry_edges: &[Decimal],
+    time_edges: &[Decimal],
+) -> (Vec<Bucket>, Vec<Bucket>) {
     let price_labels = labels_for(entry_edges);
     let time_labels = labels_for(time_edges);
     let mut by_price: Vec<Vec<Decimal>> = vec![Vec::new(); price_labels.len()];
     let mut by_time: Vec<Vec<Decimal>> = vec![Vec::new(); time_labels.len()];
 
     for r in records {
-        let Some(pnl) = r.actual_net_pnl else { continue };
+        let Some(pnl) = r.actual_net_pnl else {
+            continue;
+        };
         let pi = bucket_of(r.entry_price, entry_edges);
         if pi < by_price.len() {
             by_price[pi].push(pnl);
@@ -795,8 +876,16 @@ pub fn bucket_by_entry(records: &[ShadowRecord], entry_edges: &[Decimal], time_e
         }
     }
     (
-        price_labels.iter().zip(by_price).map(|(l, v)| summarize(l, v)).collect(),
-        time_labels.iter().zip(by_time).map(|(l, v)| summarize(l, v)).collect(),
+        price_labels
+            .iter()
+            .zip(by_price)
+            .map(|(l, v)| summarize(l, v))
+            .collect(),
+        time_labels
+            .iter()
+            .zip(by_time)
+            .map(|(l, v)| summarize(l, v))
+            .collect(),
     )
 }
 
@@ -827,11 +916,19 @@ pub struct WalkForwardResult {
 
 /// Expanding-window walk-forward: pick the best grid point on records[0..k],
 /// apply it once to record k. Guards against curve-fitting a handful of paths.
-pub fn walk_forward(records: &[ShadowRecord], base: &ExitConfig, grid: &[GridPoint], min_train: usize) -> WalkForwardResult {
+pub fn walk_forward(
+    records: &[ShadowRecord],
+    base: &ExitConfig,
+    grid: &[GridPoint],
+    min_train: usize,
+) -> WalkForwardResult {
     let in_sample: Vec<(String, Decimal)> = grid
         .iter()
         .map(|g| {
-            let total = records.iter().map(|r| replay(r, &cfg_for(base, g)).pnl).sum();
+            let total = records
+                .iter()
+                .map(|r| replay(r, &cfg_for(base, g)).pnl)
+                .sum();
             (g.name.clone(), total)
         })
         .collect();
@@ -843,14 +940,24 @@ pub fn walk_forward(records: &[ShadowRecord], base: &ExitConfig, grid: &[GridPoi
             let train = &records[..k];
             let best = grid
                 .iter()
-                .max_by_key(|g| train.iter().map(|r| replay(r, &cfg_for(base, g)).pnl).sum::<Decimal>())
+                .max_by_key(|g| {
+                    train
+                        .iter()
+                        .map(|r| replay(r, &cfg_for(base, g)).pnl)
+                        .sum::<Decimal>()
+                })
                 .or_else(|| grid.first());
             let Some(best) = best else { continue };
             oos_pnl += replay(&records[k], &cfg_for(base, best)).pnl;
             oos_count += 1;
         }
     }
-    WalkForwardResult { in_sample, oos_count, oos_pnl, min_train }
+    WalkForwardResult {
+        in_sample,
+        oos_count,
+        oos_pnl,
+        min_train,
+    }
 }
 
 /// Parse one Node-format shadow JSONL line (as written by the TS shadow engine)
@@ -921,7 +1028,12 @@ fn dec_from(v: &serde_json::Value) -> Option<Decimal> {
 }
 
 /// Read a shadow JSONL file and run walk-forward over its records.
-pub fn walk_forward_file(path: &std::path::Path, base: &ExitConfig, grid: &[GridPoint], min_train: usize) -> std::io::Result<WalkForwardResult> {
+pub fn walk_forward_file(
+    path: &std::path::Path,
+    base: &ExitConfig,
+    grid: &[GridPoint],
+    min_train: usize,
+) -> std::io::Result<WalkForwardResult> {
     let text = std::fs::read_to_string(path)?;
     let mut records: Vec<ShadowRecord> = text.lines().filter_map(parse_shadow_line).collect();
     records.sort_by_key(|r| r.entered_at_ms);
@@ -961,7 +1073,10 @@ mod tests {
 
     #[test]
     fn replay_takes_profit_on_a_run_up() {
-        let r = rec_with_path(dec!(0.40), &[(0, 0.40), (1000, 0.50), (2000, 1.0), (3000, 0.99)]);
+        let r = rec_with_path(
+            dec!(0.40),
+            &[(0, 0.40), (1000, 0.50), (2000, 1.0), (3000, 0.99)],
+        );
         let cfg = ExitConfig::default(); // TP 100%
         let out = replay(&r, &cfg);
         // +150% mid but bid 1.0 → capped by TP at ~100%; fee small → positive.
@@ -980,7 +1095,12 @@ mod tests {
     fn recorder_finalizes_after_window() {
         let mut rec = ShadowRecorder::new(0, 1000);
         rec.on_open("p1", "BTC", "up", "tok", dec!(0.4), dec!(10), true, 0, 0);
-        let book = OrderbookSnapshot::from_levels("tok", vec![(dec!(0.4), dec!(1))], vec![(dec!(0.42), dec!(1))], 100);
+        let book = OrderbookSnapshot::from_levels(
+            "tok",
+            vec![(dec!(0.4), dec!(1))],
+            vec![(dec!(0.42), dec!(1))],
+            100,
+        );
         rec.on_book("tok", &book, 100);
         assert_eq!(rec.pending(), 1);
         let done = rec.tick(2000);
@@ -1056,14 +1176,44 @@ mod tests {
         let mut rec = NearMissRecorder::new(0, 1000);
         // time_left must be > min_time_left(180) for a relaxed gate to be able to
         // hold the trade; a block recorded below that is a pure timing exit.
-        rec.on_blocked("tok", "BTC", "up", dec!(0.43), dec!(0.44), NearMissReason::Timing, 190, 7, 0);
+        rec.on_blocked(
+            "tok",
+            "BTC",
+            "up",
+            dec!(0.43),
+            dec!(0.44),
+            NearMissReason::Timing,
+            190,
+            7,
+            0,
+        );
         // Dedup: a second block for the same token does not spawn a new record.
-        rec.on_blocked("tok", "BTC", "up", dec!(0.43), dec!(0.44), NearMissReason::Timing, 190, 7, 100);
+        rec.on_blocked(
+            "tok",
+            "BTC",
+            "up",
+            dec!(0.43),
+            dec!(0.44),
+            NearMissReason::Timing,
+            190,
+            7,
+            100,
+        );
         assert_eq!(rec.pending(), 1);
 
-        let up = OrderbookSnapshot::from_levels("tok", vec![(dec!(0.43), dec!(1))], vec![(dec!(0.45), dec!(1))], 100);
+        let up = OrderbookSnapshot::from_levels(
+            "tok",
+            vec![(dec!(0.43), dec!(1))],
+            vec![(dec!(0.45), dec!(1))],
+            100,
+        );
         rec.on_book("tok", &up, 100);
-        let big = OrderbookSnapshot::from_levels("tok", vec![(dec!(0.90), dec!(1))], vec![(dec!(0.92), dec!(1))], 500);
+        let big = OrderbookSnapshot::from_levels(
+            "tok",
+            vec![(dec!(0.90), dec!(1))],
+            vec![(dec!(0.92), dec!(1))],
+            500,
+        );
         rec.on_book("tok", &big, 500);
         let done = rec.tick(2000);
         assert_eq!(done.len(), 1);
@@ -1071,7 +1221,11 @@ mod tests {
 
         // Hypothetical replay from the blocked bid: a run-up should profit.
         let res = replay_near_miss(&done[0], &ExitConfig::default());
-        assert!(res.pnl > Decimal::ZERO, "run-up near-miss should replay positive, got {}", res.pnl);
+        assert!(
+            res.pnl > Decimal::ZERO,
+            "run-up near-miss should replay positive, got {}",
+            res.pnl
+        );
     }
 
     #[test]
@@ -1088,13 +1242,33 @@ mod tests {
             round_slot: 7,
             path: if up {
                 vec![
-                    Sample { t_ms: 100, price: dec!(0.43), bid: Some(dec!(0.43)), ask: Some(dec!(0.45)) },
-                    Sample { t_ms: 500, price: dec!(0.95), bid: Some(dec!(0.95)), ask: Some(dec!(0.97)) },
+                    Sample {
+                        t_ms: 100,
+                        price: dec!(0.43),
+                        bid: Some(dec!(0.43)),
+                        ask: Some(dec!(0.45)),
+                    },
+                    Sample {
+                        t_ms: 500,
+                        price: dec!(0.95),
+                        bid: Some(dec!(0.95)),
+                        ask: Some(dec!(0.97)),
+                    },
                 ]
             } else {
                 vec![
-                    Sample { t_ms: 100, price: dec!(0.43), bid: Some(dec!(0.43)), ask: Some(dec!(0.45)) },
-                    Sample { t_ms: 500, price: dec!(0.10), bid: Some(dec!(0.10)), ask: Some(dec!(0.12)) },
+                    Sample {
+                        t_ms: 100,
+                        price: dec!(0.43),
+                        bid: Some(dec!(0.43)),
+                        ask: Some(dec!(0.45)),
+                    },
+                    Sample {
+                        t_ms: 500,
+                        price: dec!(0.10),
+                        bid: Some(dec!(0.10)),
+                        ask: Some(dec!(0.12)),
+                    },
                 ]
             },
             window_end_ms: 1000,
@@ -1116,8 +1290,23 @@ mod tests {
     #[test]
     fn near_miss_json_round_trips() {
         let mut rec = NearMissRecorder::new(0, 1000);
-        rec.on_blocked("tok", "BTC", "up", dec!(0.43), dec!(0.44), NearMissReason::Timing, 150, 7, 0);
-        let b = OrderbookSnapshot::from_levels("tok", vec![(dec!(0.43), dec!(1))], vec![(dec!(0.45), dec!(1))], 100);
+        rec.on_blocked(
+            "tok",
+            "BTC",
+            "up",
+            dec!(0.43),
+            dec!(0.44),
+            NearMissReason::Timing,
+            150,
+            7,
+            0,
+        );
+        let b = OrderbookSnapshot::from_levels(
+            "tok",
+            vec![(dec!(0.43), dec!(1))],
+            vec![(dec!(0.45), dec!(1))],
+            100,
+        );
         rec.on_book("tok", &b, 100);
         let done = rec.tick(2000);
         let json = near_miss_to_json(&done[0]);
@@ -1128,5 +1317,4 @@ mod tests {
         assert_eq!(back.entry_price, dec!(0.43));
         assert_eq!(back.path.len(), 1);
     }
-
 }

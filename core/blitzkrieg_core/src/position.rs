@@ -6,7 +6,7 @@
 //! the open/closed books, daily PnL, and per-asset/direction cooldowns.
 
 use crate::exit_policy::{
-    decide_exit, executable_bid, pnl_pct, update_exit_state, ExitConfig, ExitState, ExitTickInput,
+    ExitConfig, ExitState, ExitTickInput, decide_exit, executable_bid, pnl_pct, update_exit_state,
 };
 use crate::model::{ExitReason, OrderbookSnapshot, Side, SignalDirection};
 
@@ -195,7 +195,11 @@ impl PositionManager {
     pub fn open(&mut self, p: OpenParams, now_ms: i64) -> OpenPosition {
         let id = format!("hft-{}", self.next_id);
         self.next_id += 1;
-        let entry_fee_pct = if p.was_maker { Decimal::ZERO } else { taker_fee_pct(p.entry_price) };
+        let entry_fee_pct = if p.was_maker {
+            Decimal::ZERO
+        } else {
+            taker_fee_pct(p.entry_price)
+        };
         let pos = OpenPosition {
             id,
             strategy: p.strategy,
@@ -230,7 +234,12 @@ impl PositionManager {
     /// Update a single position's exit state AND its `current_price` from a book.
     /// This is what makes the UI's unrealized PnL move; it must run independently
     /// of whether automated exits are enabled.
-    fn valuate_one(pos: &mut OpenPosition, book: Option<&OrderbookSnapshot>, now_ms: i64, cfg: &ExitConfig) {
+    fn valuate_one(
+        pos: &mut OpenPosition,
+        book: Option<&OrderbookSnapshot>,
+        now_ms: i64,
+        cfg: &ExitConfig,
+    ) {
         update_exit_state(&mut pos.state, pos.entry_price, book, now_ms, cfg);
         let val = executable_bid(book);
         if val > Decimal::ZERO {
@@ -255,7 +264,11 @@ impl PositionManager {
     /// Evaluate every open position; returns exit requests for those that hit a
     /// rule. Updates exit state from the book first so the decision and the
     /// recorded HWM share the same quote.
-    pub fn check_exits(&mut self, books: &dyn Fn(&str) -> Option<OrderbookSnapshot>, now_ms: i64) -> Vec<ExitRequest> {
+    pub fn check_exits(
+        &mut self,
+        books: &dyn Fn(&str) -> Option<OrderbookSnapshot>,
+        now_ms: i64,
+    ) -> Vec<ExitRequest> {
         let cfg = self.config.exit.clone();
         let mut out = Vec::new();
         for pos in self.open.iter_mut() {
@@ -307,14 +320,26 @@ impl PositionManager {
     }
 
     /// Close a position, computing gross/net PnL and setting cooldowns.
-    pub fn close(&mut self, position_id: &str, exit_price: Decimal, reason: ExitReason, was_maker: bool, now_ms: i64) -> Option<ClosedPosition> {
+    pub fn close(
+        &mut self,
+        position_id: &str,
+        exit_price: Decimal,
+        reason: ExitReason,
+        was_maker: bool,
+        now_ms: i64,
+    ) -> Option<ClosedPosition> {
         let idx = self.open.iter().position(|p| p.id == position_id)?;
         let pos = self.open.remove(idx);
 
-        let exit_fee_pct = if was_maker { Decimal::ZERO } else { taker_fee_pct(exit_price) };
+        let exit_fee_pct = if was_maker {
+            Decimal::ZERO
+        } else {
+            taker_fee_pct(exit_price)
+        };
         let pnl_pct_val = pnl_pct(exit_price, pos.entry_price);
         let gross = (exit_price - pos.entry_price) * pos.shares;
-        let entry_fee_usd = (pos.entry_fee_pct / Decimal::ONE_HUNDRED) * pos.entry_price * pos.shares;
+        let entry_fee_usd =
+            (pos.entry_fee_pct / Decimal::ONE_HUNDRED) * pos.entry_price * pos.shares;
         let exit_fee_usd = (exit_fee_pct / Decimal::ONE_HUNDRED) * exit_price * pos.shares;
         let net = gross - entry_fee_usd - exit_fee_usd;
         let net_pct = if pos.cost_usd > Decimal::ZERO {
@@ -328,7 +353,8 @@ impl PositionManager {
         if reason == ExitReason::StopLoss {
             self.last_stop_loss_at = now_ms;
         }
-        self.exit_cooldowns.insert(cooldown_key(&pos.asset, pos.direction), now_ms);
+        self.exit_cooldowns
+            .insert(cooldown_key(&pos.asset, pos.direction), now_ms);
         self.asset_last_exit_at.insert(pos.asset.clone(), now_ms);
         if net < Decimal::ZERO {
             self.asset_last_loss_at.insert(pos.asset.clone(), now_ms);
@@ -390,18 +416,29 @@ impl PositionManager {
     }
 
     /// Capacity + cooldown gate (mirrors TS `canOpen`).
-    pub fn can_open(&self, asset: Option<&str>, direction: Option<SignalDirection>, now_ms: i64) -> Result<(), String> {
+    pub fn can_open(
+        &self,
+        asset: Option<&str>,
+        direction: Option<SignalDirection>,
+        now_ms: i64,
+    ) -> Result<(), String> {
         if self.open.len() >= self.config.max_positions {
             return Err(format!("Max positions ({})", self.config.max_positions));
         }
         if self.daily_pnl <= -self.config.max_daily_loss_usd {
-            return Err(format!("Daily loss limit (${})", self.config.max_daily_loss_usd));
+            return Err(format!(
+                "Daily loss limit (${})",
+                self.config.max_daily_loss_usd
+            ));
         }
         if self.config.stop_loss_cooldown_sec > 0
             && self.last_stop_loss_at > 0
             && now_ms - self.last_stop_loss_at < self.config.stop_loss_cooldown_sec * 1000
         {
-            let left = (self.config.stop_loss_cooldown_sec * 1000 - (now_ms - self.last_stop_loss_at)) / 1000 + 1;
+            let left = (self.config.stop_loss_cooldown_sec * 1000
+                - (now_ms - self.last_stop_loss_at))
+                / 1000
+                + 1;
             return Err(format!("SL cooldown: {left}s"));
         }
         if let Some(asset) = asset {
@@ -414,7 +451,10 @@ impl PositionManager {
             if let Some(&last) = self.exit_cooldowns.get(&key) {
                 if now_ms - last < self.config.exit_cooldown_sec * 1000 {
                     let left = (self.config.exit_cooldown_sec * 1000 - (now_ms - last)) / 1000 + 1;
-                    return Err(format!("Exit cooldown {asset} {}: {left}s", direction.as_str()));
+                    return Err(format!(
+                        "Exit cooldown {asset} {}: {left}s",
+                        direction.as_str()
+                    ));
                 }
             }
         }
@@ -422,7 +462,8 @@ impl PositionManager {
             if self.config.loss_cooldown_sec > 0 {
                 if let Some(&last) = self.asset_last_loss_at.get(asset) {
                     if now_ms - last < self.config.loss_cooldown_sec * 1000 {
-                        let left = (self.config.loss_cooldown_sec * 1000 - (now_ms - last)) / 1000 + 1;
+                        let left =
+                            (self.config.loss_cooldown_sec * 1000 - (now_ms - last)) / 1000 + 1;
                         return Err(format!("Loss cooldown {asset}: {left}s"));
                     }
                 }
@@ -430,7 +471,8 @@ impl PositionManager {
             if self.config.asset_cooldown_sec > 0 {
                 if let Some(&last) = self.asset_last_exit_at.get(asset) {
                     if now_ms - last < self.config.asset_cooldown_sec * 1000 {
-                        let left = (self.config.asset_cooldown_sec * 1000 - (now_ms - last)) / 1000 + 1;
+                        let left =
+                            (self.config.asset_cooldown_sec * 1000 - (now_ms - last)) / 1000 + 1;
                         return Err(format!("Asset cooldown {asset}: {left}s"));
                     }
                 }
@@ -480,7 +522,9 @@ mod tests {
         let p = pm.open(params("BTC", SignalDirection::Up, dec!(0.4)), 0);
         assert_eq!(p.shares, dec!(10));
         // Sell at 0.6 as taker → gross 2.0 minus taker exit fee.
-        let c = pm.close(&p.id, dec!(0.6), ExitReason::TakeProfit, false, 1000).unwrap();
+        let c = pm
+            .close(&p.id, dec!(0.6), ExitReason::TakeProfit, false, 1000)
+            .unwrap();
         assert!(c.net_pnl_usd < dec!(2.0));
         assert!(c.net_pnl_usd > dec!(1.9)); // fee is small around 0.6
         assert_eq!(pm.daily_pnl(), c.net_pnl_usd);
@@ -495,10 +539,19 @@ mod tests {
         cfg.exit_cooldown_sec = 0;
         let mut pm = PositionManager::new(cfg);
         pm.open(params("BTC", SignalDirection::Up, dec!(0.4)), 0);
-        assert!(pm.can_open(Some("BTC"), Some(SignalDirection::Up), 1000).is_err());
-        assert!(pm.can_open(Some("ETH"), Some(SignalDirection::Up), 1000).is_ok());
+        assert!(
+            pm.can_open(Some("BTC"), Some(SignalDirection::Up), 1000)
+                .is_err()
+        );
+        assert!(
+            pm.can_open(Some("ETH"), Some(SignalDirection::Up), 1000)
+                .is_ok()
+        );
         pm.open(params("ETH", SignalDirection::Up, dec!(0.4)), 1000);
-        assert!(pm.can_open(Some("SOL"), Some(SignalDirection::Up), 1000).is_err()); // max positions
+        assert!(
+            pm.can_open(Some("SOL"), Some(SignalDirection::Up), 1000)
+                .is_err()
+        ); // max positions
     }
 
     #[test]
@@ -508,11 +561,18 @@ mod tests {
         cfg.loss_cooldown_sec = 180;
         let mut pm = PositionManager::new(cfg);
         let p = pm.open(params("BTC", SignalDirection::Up, dec!(0.4)), 0);
-        pm.close(&p.id, dec!(0.3), ExitReason::StopLoss, false, 10_000).unwrap();
+        pm.close(&p.id, dec!(0.3), ExitReason::StopLoss, false, 10_000)
+            .unwrap();
         // Immediately after a loss, re-entry is blocked by asset/loss cooldown.
-        assert!(pm.can_open(Some("BTC"), Some(SignalDirection::Down), 11_000).is_err());
+        assert!(
+            pm.can_open(Some("BTC"), Some(SignalDirection::Down), 11_000)
+                .is_err()
+        );
         // Far in the future it clears.
-        assert!(pm.can_open(Some("BTC"), Some(SignalDirection::Down), 10_000 + 200_000).is_ok());
+        assert!(
+            pm.can_open(Some("BTC"), Some(SignalDirection::Down), 10_000 + 200_000)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -524,8 +584,12 @@ mod tests {
         cfg.stop_loss_cooldown_sec = 0;
         let mut pm = PositionManager::new(cfg);
         let p = pm.open(params("BTC", SignalDirection::Up, dec!(0.4)), 0);
-        pm.close(&p.id, dec!(0.05), ExitReason::StopLoss, false, 1000).unwrap();
+        pm.close(&p.id, dec!(0.05), ExitReason::StopLoss, false, 1000)
+            .unwrap();
         assert!(pm.daily_pnl() < dec!(-1));
-        assert!(pm.can_open(Some("ETH"), Some(SignalDirection::Up), 2000).is_err());
+        assert!(
+            pm.can_open(Some("ETH"), Some(SignalDirection::Up), 2000)
+                .is_err()
+        );
     }
 }

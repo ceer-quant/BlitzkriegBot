@@ -31,27 +31,34 @@ pub mod signal;
 pub mod variants;
 
 pub use config::{
-    EvolutionStatus, ImmutableConfig, KnobDeclaration, KnobSpec, MutableParams, ShadowEvolutionConfig,
-    StrategyParams, VariantView,
+    EvolutionStatus, ImmutableConfig, KnobDeclaration, KnobSpec, MutableParams,
+    ShadowEvolutionConfig, StrategyParams, VariantView,
 };
 pub use registry::ParamRegistry;
 pub use signal::{EvolutionReason, EvolveSignal};
 
 use crate::model::{CryptoMarket, OrderbookSnapshot};
-use crate::strategies::shadow_twin::ShadowTickCtx;
 use crate::strategies::EngineStrategy;
+use crate::strategies::shadow_twin::ShadowTickCtx;
 use audit::AuditLog;
 use std::collections::HashMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use variants::{build_variants, VariantSet};
+use variants::{VariantSet, build_variants};
 
 /// Result of one evaluation/action, mapped to events by the caller.
 pub enum EvolutionOutcome {
     Signal(EvolveSignal),
     Applied(EvolveSignal),
-    Rejected { signal: EvolveSignal, reason: String },
-    RolledBack { strategy: String, from: MutableParams, to: MutableParams },
+    Rejected {
+        signal: EvolveSignal,
+        reason: String,
+    },
+    RolledBack {
+        strategy: String,
+        from: MutableParams,
+        to: MutableParams,
+    },
 }
 
 /// One strategy's evolution state. Every field is private to that strategy.
@@ -144,7 +151,15 @@ impl ShadowEvolution {
             .units
             .drain(..)
             .map(|u| {
-                (u.strategy.clone(), (u.last_evolution_ms, u.evolution_count, u.rejected_count, u.previous))
+                (
+                    u.strategy.clone(),
+                    (
+                        u.last_evolution_ms,
+                        u.evolution_count,
+                        u.rejected_count,
+                        u.previous,
+                    ),
+                )
             })
             .collect();
         for s in strategies {
@@ -153,7 +168,10 @@ impl ShadowEvolution {
                 continue; // explicit "not evolvable"
             }
             let Some(factory) = s.shadow_factory() else {
-                tracing::debug!(strategy = s.name(), "declared knobs but no shadow_factory — inert");
+                tracing::debug!(
+                    strategy = s.name(),
+                    "declared knobs but no shadow_factory — inert"
+                );
                 continue;
             };
             if self.units.len() >= self.cfg.max_strategies {
@@ -206,12 +224,18 @@ impl ShadowEvolution {
 
     /// One strategy's parameters (`None` when it is not evolvable).
     pub fn params_for(&self, strategy: &str) -> Option<StrategyParams> {
-        self.registry.handle_for(strategy).map(|c| (**c.load()).clone())
+        self.registry
+            .handle_for(strategy)
+            .map(|c| (**c.load()).clone())
     }
 
     /// The knobs a strategy declared (empty ⇒ not evolvable).
     pub fn declared_knobs(&self, strategy: &str) -> Vec<KnobSpec> {
-        self.units.iter().find(|u| u.strategy == strategy).map(|u| u.specs.clone()).unwrap_or_default()
+        self.units
+            .iter()
+            .find(|u| u.strategy == strategy)
+            .map(|u| u.specs.clone())
+            .unwrap_or_default()
     }
 
     /// Evolvable strategy names, in registration order.
@@ -255,8 +279,10 @@ impl ShadowEvolution {
     ) {
         self.token_expiry.clear();
         for m in markets {
-            self.token_expiry.insert(m.up_token_id.clone(), m.expires_at_ms);
-            self.token_expiry.insert(m.down_token_id.clone(), m.expires_at_ms);
+            self.token_expiry
+                .insert(m.up_token_id.clone(), m.expires_at_ms);
+            self.token_expiry
+                .insert(m.down_token_id.clone(), m.expires_at_ms);
         }
         self.round_markets = markets.to_vec();
         if !self.enabled {
@@ -273,8 +299,16 @@ impl ShadowEvolution {
         if !self.enabled || self.round_markets.is_empty() {
             return;
         }
-        let round_slot = self.round_markets.first().map(|m| m.round_slot).unwrap_or(0);
-        let expires_at = self.token_expiry.get(token_id).copied().unwrap_or(now_ms + 900_000);
+        let round_slot = self
+            .round_markets
+            .first()
+            .map(|m| m.round_slot)
+            .unwrap_or(0);
+        let expires_at = self
+            .token_expiry
+            .get(token_id)
+            .copied()
+            .unwrap_or(now_ms + 900_000);
         let time_left_sec = (expires_at - now_ms) / 1000;
         let ctx = ShadowTickCtx {
             markets: &self.round_markets,
@@ -375,7 +409,8 @@ impl ShadowEvolution {
         // of what was decided and why.
         if let Some((signal, reason)) = rejection {
             tracing::warn!(strategy = %signal.strategy, reason = %reason, "shadow evolution rejected");
-            self.audit.record_rejection(&signal, reason.clone(), "failed", "n/a");
+            self.audit
+                .record_rejection(&signal, reason.clone(), "failed", "n/a");
             outcome = Some(EvolutionOutcome::Rejected { signal, reason });
         } else if let Some(signal) = applied {
             self.audit.record_applied(&signal);
@@ -388,7 +423,12 @@ impl ShadowEvolution {
 
     /// Apply a parameter set for ONE strategy directly (internal/tests). The same
     /// locks as an evolved proposal are enforced.
-    pub fn set_params(&mut self, strategy: &str, params: StrategyParams, now_ms: i64) -> Result<(), String> {
+    pub fn set_params(
+        &mut self,
+        strategy: &str,
+        params: StrategyParams,
+        now_ms: i64,
+    ) -> Result<(), String> {
         let cfg = self.cfg.clone();
         let u = self
             .units
@@ -427,7 +467,8 @@ impl ShadowEvolution {
             m.set_strategy(&strategy, newp);
             m
         };
-        self.audit.record_manual(&strategy, now_ms, &old, &new_full, "operator override");
+        self.audit
+            .record_manual(&strategy, now_ms, &old, &new_full, "operator override");
         Ok(())
     }
 
@@ -441,7 +482,9 @@ impl ShadowEvolution {
             .find(|u| u.strategy == strategy)
             .ok_or_else(|| format!("strategy {strategy} is not evolvable"))?;
         let Some(prev) = u.previous.clone() else {
-            return Err(format!("strategy {strategy} has no previous parameters to roll back to"));
+            return Err(format!(
+                "strategy {strategy} has no previous parameters to roll back to"
+            ));
         };
         let from: StrategyParams = (**u.cell.load()).clone();
         u.cell.store(Arc::new(prev.clone()));
@@ -451,7 +494,11 @@ impl ShadowEvolution {
         fm.set_strategy(strategy, from);
         tm.set_strategy(strategy, prev);
         self.audit.record_rollback(strategy, now_ms, &fm, &tm);
-        Ok(EvolutionOutcome::RolledBack { strategy: strategy.to_string(), from: fm, to: tm })
+        Ok(EvolutionOutcome::RolledBack {
+            strategy: strategy.to_string(),
+            from: fm,
+            to: tm,
+        })
     }
 
     /// Status of one strategy. `None` = this strategy is **not evolvable** (it
@@ -476,11 +523,9 @@ impl ShadowEvolution {
         if !self.enabled {
             return EvolutionStatus::Disabled;
         }
-        if self
-            .units
-            .iter()
-            .any(|u| u.last_evolution_ms > 0 && now_ms - u.last_evolution_ms < self.cfg.cooldown_secs * 1000)
-        {
+        if self.units.iter().any(|u| {
+            u.last_evolution_ms > 0 && now_ms - u.last_evolution_ms < self.cfg.cooldown_secs * 1000
+        }) {
             return EvolutionStatus::Cooling;
         }
         EvolutionStatus::Evaluating
@@ -530,10 +575,18 @@ impl ShadowEvolution {
     }
 
     pub fn evolution_count(&self, strategy: &str) -> u64 {
-        self.units.iter().find(|u| u.strategy == strategy).map(|u| u.evolution_count).unwrap_or(0)
+        self.units
+            .iter()
+            .find(|u| u.strategy == strategy)
+            .map(|u| u.evolution_count)
+            .unwrap_or(0)
     }
     pub fn rejected_count(&self, strategy: &str) -> u64 {
-        self.units.iter().find(|u| u.strategy == strategy).map(|u| u.rejected_count).unwrap_or(0)
+        self.units
+            .iter()
+            .find(|u| u.strategy == strategy)
+            .map(|u| u.rejected_count)
+            .unwrap_or(0)
     }
     /// Total variants across every strategy (0 when disabled).
     pub fn variant_count(&self) -> usize {
@@ -553,10 +606,10 @@ mod tests {
     use crate::exit_policy::ExitConfig;
     use crate::model::SignalDirection;
     use crate::signal::TradeSignal;
-    use crate::strategies::shadow_twin::{tick_ctx, ShadowFactory};
     use crate::strategies::StrategyCtx;
-    use rust_decimal::prelude::FromPrimitive;
+    use crate::strategies::shadow_twin::{ShadowFactory, tick_ctx};
     use rust_decimal::Decimal;
+    use rust_decimal::prelude::FromPrimitive;
     use rust_decimal_macros::dec;
 
     /// A synthetic strategy: buys when the mid is at or under `cap`. Exactly one
@@ -596,12 +649,17 @@ mod tests {
             vec![KnobSpec::new("cap", self.cap, dec!(0.05), dec!(0.95))]
         }
         fn shadow_factory(&self) -> Option<Box<dyn ShadowFactory>> {
-            Some(Box::new(CapFactory { name: self.name.clone(), cap: self.cap }))
+            Some(Box::new(CapFactory {
+                name: self.name.clone(),
+                cap: self.cap,
+            }))
         }
         fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
             let market = &ctx.markets()[0];
             let token = market.up_token_id.clone();
-            let Some(book) = ctx.fresh_book(&token) else { return Vec::new() };
+            let Some(book) = ctx.fresh_book(&token) else {
+                return Vec::new();
+            };
             if book.mid_price > self.cap {
                 return Vec::new();
             }
@@ -675,8 +733,14 @@ mod tests {
 
     fn strategies() -> (CapStrategy, CapStrategy) {
         (
-            CapStrategy { name: "alpha".into(), cap: dec!(0.40) },
-            CapStrategy { name: "beta".into(), cap: dec!(0.40) },
+            CapStrategy {
+                name: "alpha".into(),
+                cap: dec!(0.40),
+            },
+            CapStrategy {
+                name: "beta".into(),
+                cap: dec!(0.40),
+            },
         )
     }
 
@@ -754,7 +818,11 @@ mod tests {
         assert_eq!(m.variant_count(), 6, "3 variants x 2 strategies");
         let ca = m.registry().handle_for("alpha").unwrap();
         let cb = m.registry().handle_for("beta").unwrap();
-        assert_ne!(Arc::as_ptr(&ca), Arc::as_ptr(&cb), "each strategy has its own cell");
+        assert_ne!(
+            Arc::as_ptr(&ca),
+            Arc::as_ptr(&cb),
+            "each strategy has its own cell"
+        );
         let views = m.variant_views(0);
         assert!(views.iter().any(|v| v.strategy == "alpha" && v.is_baseline));
         assert!(views.iter().any(|v| v.strategy == "beta" && v.is_baseline));
@@ -786,7 +854,10 @@ mod tests {
                 assert_eq!(sig.to_params.strategies(), vec!["alpha"]);
             }
             EvolutionOutcome::Rejected { signal, reason } => {
-                panic!("alpha should have applied, was rejected: {} ({reason})", signal.strategy)
+                panic!(
+                    "alpha should have applied, was rejected: {} ({reason})",
+                    signal.strategy
+                )
             }
             _ => panic!("expected an applied outcome"),
         }
@@ -796,10 +867,16 @@ mod tests {
         assert_eq!(m.evolution_count("alpha"), 1);
         assert_eq!(m.evolution_count("beta"), 0);
         assert_eq!(m.audited_strategies(), vec!["alpha".to_string()]);
-        assert!(m.history(Some("beta"), 10).is_empty(), "beta has no records");
+        assert!(
+            m.history(Some("beta"), 10).is_empty(),
+            "beta has no records"
+        );
         assert_eq!(m.history(Some("alpha"), 10).len(), 1);
         assert!(dir.join("alpha.jsonl").exists());
-        assert!(!dir.join("beta.jsonl").exists(), "no write may create beta's file");
+        assert!(
+            !dir.join("beta.jsonl").exists(),
+            "no write may create beta's file"
+        );
         let alpha_log = std::fs::read_to_string(dir.join("alpha.jsonl")).unwrap();
         assert!(alpha_log.contains("\"strategy\":\"alpha\""));
         assert!(!alpha_log.contains("beta"));
@@ -812,22 +889,37 @@ mod tests {
         match &outcomes[0] {
             EvolutionOutcome::Applied(sig) => assert_eq!(sig.strategy, "beta"),
             EvolutionOutcome::Rejected { signal, reason } => {
-                panic!("beta should have applied, was rejected: {} ({reason})", signal.strategy)
+                panic!(
+                    "beta should have applied, was rejected: {} ({reason})",
+                    signal.strategy
+                )
             }
             _ => panic!("expected an applied outcome"),
         }
-        assert_eq!(m.registry().get("alpha", "cap").unwrap(), alpha_after, "alpha must not move");
+        assert_eq!(
+            m.registry().get("alpha", "cap").unwrap(),
+            alpha_after,
+            "alpha must not move"
+        );
         assert_eq!(m.evolution_count("alpha"), 1);
         assert_eq!(m.evolution_count("beta"), 1);
         let beta_log = std::fs::read_to_string(dir.join("beta.jsonl")).unwrap();
         assert!(beta_log.contains("\"strategy\":\"beta\""));
-        assert!(!beta_log.contains("alpha"), "beta's file must not mention alpha");
+        assert!(
+            !beta_log.contains("alpha"),
+            "beta's file must not mention alpha"
+        );
         // And the two proposals differ: each carries its own knob set.
-        assert!(m
-            .history(Some("alpha"), 10)
-            .iter()
-            .all(|r| r.strategy == "alpha"));
-        assert!(m.history(Some("beta"), 10).iter().all(|r| r.strategy == "beta"));
+        assert!(
+            m.history(Some("alpha"), 10)
+                .iter()
+                .all(|r| r.strategy == "alpha")
+        );
+        assert!(
+            m.history(Some("beta"), 10)
+                .iter()
+                .all(|r| r.strategy == "beta")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -859,8 +951,16 @@ mod tests {
         // no-op that could be mistaken for alpha's.
         assert!(m.rollback("beta", 3000).is_err());
         assert!(m.rollback("nope", 3000).is_err());
-        assert_eq!(m.history(Some("beta"), 10).len(), 0, "beta's history stays empty");
-        assert_eq!(m.history(Some("alpha"), 10).len(), 1, "only alpha's rollback was recorded");
+        assert_eq!(
+            m.history(Some("beta"), 10).len(),
+            0,
+            "beta's history stays empty"
+        );
+        assert_eq!(
+            m.history(Some("alpha"), 10).len(),
+            1,
+            "only alpha's rollback was recorded"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -880,7 +980,10 @@ mod tests {
         m.apply_params(params, 5000).unwrap();
         let rec = m.history(Some("alpha"), 10);
         assert_eq!(rec.len(), 1);
-        assert!(rec[0].manual && rec[0].applied, "a manual override is traced now");
+        assert!(
+            rec[0].manual && rec[0].applied,
+            "a manual override is traced now"
+        );
         assert_eq!(rec[0].from_params.get("alpha", "cap"), Some(dec!(0.40)));
         assert_eq!(rec[0].to_params.get("alpha", "cap"), Some(dec!(0.412)));
 
@@ -942,7 +1045,10 @@ mod tests {
         let (a, b) = strategies();
         let refs: Vec<&dyn EngineStrategy> = vec![&a, &b];
         let mut cfg = fast_cfg(false, "exit");
-        cfg.exit_cfg = ExitConfig { stop_loss_pct: dec!(12), ..ExitConfig::default() };
+        cfg.exit_cfg = ExitConfig {
+            stop_loss_pct: dec!(12),
+            ..ExitConfig::default()
+        };
         let m = ShadowEvolution::new(cfg, &refs);
         assert_eq!(m.cfg.exit_cfg.stop_loss_pct, dec!(12));
     }

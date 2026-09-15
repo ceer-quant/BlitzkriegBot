@@ -27,7 +27,10 @@ pub struct PredictionRiskContext {
 
 impl Default for PredictionRiskContext {
     fn default() -> Self {
-        Self { max_position_size: Decimal::from(100), max_daily_loss: Decimal::from(200) }
+        Self {
+            max_position_size: Decimal::from(100),
+            max_daily_loss: Decimal::from(200),
+        }
     }
 }
 

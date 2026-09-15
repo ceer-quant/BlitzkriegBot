@@ -31,7 +31,11 @@ fn dylib_dir() -> PathBuf {
 
 fn lib_path() -> Option<PathBuf> {
     let base = dylib_dir();
-    for name in ["libdog_strategy.dylib", "libdog_strategy.so", "dog_strategy.dll"] {
+    for name in [
+        "libdog_strategy.dylib",
+        "libdog_strategy.so",
+        "dog_strategy.dll",
+    ] {
         let p = base.join(name);
         if p.exists() {
             return Some(p);
@@ -45,7 +49,8 @@ fn require_lib() -> PathBuf {
     match lib_path() {
         Some(p) => p,
         None => {
-            let msg = "build the v2 dylib first: (cd user_layer/strategies && cargo build --release)";
+            let msg =
+                "build the v2 dylib first: (cd user_layer/strategies && cargo build --release)";
             if std::env::var_os("BK_REQUIRE_DYLIB").is_some() {
                 panic!("{msg} (looked in {})", dylib_dir().display());
             }
@@ -71,7 +76,10 @@ fn engine_cfg() -> EngineConfig {
             broken_price: dec!(0.35),
             window_floor_ms: 0,
         },
-        spread_arb: SpreadArbConfig { trend_max_entry_price: dec!(0.45), ..Default::default() },
+        spread_arb: SpreadArbConfig {
+            trend_max_entry_price: dec!(0.45),
+            ..Default::default()
+        },
         trend_follow: Default::default(),
         max_orderbook_stale_ms: 8000,
         momentum_window_sec: 30,
@@ -128,14 +136,23 @@ fn loads_and_drives_the_v2_dog_strategy_dylib() {
     // The builtin must not fire in this replay: no 12-sample UP trend.
     assert!(engine.set_strategy_enabled("spread_arb", false));
     engine
-        .register_user_strategy(Box::new(loaded.strategy), format!("dylib:{}", path.display()))
+        .register_user_strategy(
+            Box::new(loaded.strategy),
+            format!("dylib:{}", path.display()),
+        )
         .unwrap();
     assert!(engine.set_strategy_enabled("dog_strategy", true));
     let expected_source = format!("dylib:{}", path.display());
-    assert_eq!(engine.strategy_source("dog_strategy"), Some(expected_source.as_str()));
+    assert_eq!(
+        engine.strategy_source("dog_strategy"),
+        Some(expected_source.as_str())
+    );
 
     let now = 1_800_000i64;
-    engine.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+    engine.on_data(DataEvent::RoundMarkets {
+        markets: vec![market(1_800_000)],
+        now_ms: now,
+    });
 
     // Deep two-sided book, but mid 0.50 is ABOVE the 0.43 dip ceiling → idle.
     engine.on_data(DataEvent::Book {
@@ -146,9 +163,17 @@ fn loads_and_drives_the_v2_dog_strategy_dylib() {
     });
     assert!(engine.evaluate(now + 1_000).is_empty());
     // Two levels each side → the dylib confirms the token (proves full ladder).
-    assert!(engine.confirmed_tokens().contains("up"), "{:?}", engine.confirmed_tokens());
+    assert!(
+        engine.confirmed_tokens().contains("up"),
+        "{:?}",
+        engine.confirmed_tokens()
+    );
     let diag = engine.confirmed_diagnostics(now + 1_000);
-    assert!(diag.iter().any(|d| d.get("symbol").and_then(|s| s.as_str()) == Some("up")), "{diag:?}");
+    assert!(
+        diag.iter()
+            .any(|d| d.get("symbol").and_then(|s| s.as_str()) == Some("up")),
+        "{diag:?}"
+    );
 
     // Dip to mid 0.42 with >=50 bid depth → one BUY entry priced at best ask.
     engine.on_data(DataEvent::Book {
@@ -199,7 +224,10 @@ fn hot_params_reach_the_dylib_on_the_next_evaluation() {
     assert!(engine.set_strategy_enabled("dog_strategy", true));
 
     let now = 1_800_000i64;
-    engine.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+    engine.on_data(DataEvent::RoundMarkets {
+        markets: vec![market(1_800_000)],
+        now_ms: now,
+    });
     // mid 0.47 > default ceiling 0.43 → no entry.
     engine.on_data(DataEvent::Book {
         token_id: "down".into(),
@@ -235,8 +263,14 @@ fn the_dylib_declares_its_evolvable_knobs_over_the_optional_symbol() {
     assert_eq!(knobs.len(), 1, "the dog strategy declares exactly one knob");
     assert_eq!(knobs[0].name, "trendMaxEntryPrice");
     assert_eq!(knobs[0].value, dec!(0.43));
-    assert!(knobs[0].contains(dec!(0.50)), "the kernel's override must be inside the domain");
-    assert!(!knobs[0].contains(dec!(0.99)), "and an out-of-domain value must be rejectable");
+    assert!(
+        knobs[0].contains(dec!(0.50)),
+        "the kernel's override must be inside the domain"
+    );
+    assert!(
+        !knobs[0].contains(dec!(0.99)),
+        "and an out-of-domain value must be rejectable"
+    );
 }
 
 #[test]
@@ -249,7 +283,10 @@ fn the_dylib_gate_declaration_reaches_the_engine_and_is_honoured() {
     let loaded = load_foreign(&path).unwrap_or_else(|e| panic!("load failed: {e:?}"));
     assert_eq!(
         loaded.gate_exemptions,
-        blitzkrieg_core::strategies::GateExemptions { timing: true, momentum: false },
+        blitzkrieg_core::strategies::GateExemptions {
+            timing: true,
+            momentum: false
+        },
         "the load report must carry the library's declaration"
     );
 
@@ -258,12 +295,18 @@ fn the_dylib_gate_declaration_reaches_the_engine_and_is_honoured() {
     cfg.scanner.min_round_age_sec = 10_000;
     let mut engine = Engine::new(cfg);
     engine
-        .register_user_strategy(Box::new(loaded.strategy), format!("dylib:{}", path.display()))
+        .register_user_strategy(
+            Box::new(loaded.strategy),
+            format!("dylib:{}", path.display()),
+        )
         .unwrap();
     assert!(engine.set_strategy_enabled("dog_strategy", true));
     assert_eq!(
         engine.strategy_gate_exemptions("dog_strategy"),
-        Some(blitzkrieg_core::strategies::GateExemptions { timing: true, momentum: false })
+        Some(blitzkrieg_core::strategies::GateExemptions {
+            timing: true,
+            momentum: false
+        })
     );
     assert_eq!(
         engine.strategy_gate_exemptions("spread_arb"),
@@ -303,16 +346,33 @@ fn the_dylib_gate_declaration_reaches_the_engine_and_is_honoured() {
     }
 
     let orders = engine.evaluate(now + 12_000);
-    assert_eq!(orders.len(), 1, "only the declaring strategy may enter: {orders:?}");
+    assert_eq!(
+        orders.len(),
+        1,
+        "only the declaring strategy may enter: {orders:?}"
+    );
     assert_eq!(orders[0].strategy, "dog_strategy");
-    assert_eq!(orders[0].asset, "ETH", "the builtin's own market stayed gated");
-    assert!(engine.last_blocked().iter().any(|b| b.strategy == "spread_arb"), "builtin stays gated");
+    assert_eq!(
+        orders[0].asset, "ETH",
+        "the builtin's own market stayed gated"
+    );
+    assert!(
+        engine
+            .last_blocked()
+            .iter()
+            .any(|b| b.strategy == "spread_arb"),
+        "builtin stays gated"
+    );
 
     let ex = engine.last_exemptions();
     assert_eq!(ex.len(), 1, "{ex:?}");
     assert_eq!(ex[0].strategy, "dog_strategy");
     assert_eq!(ex[0].gate, "timing");
-    assert!(ex[0].audit_line().contains("本单因策略 dog_strategy 豁免门禁 timing"));
+    assert!(
+        ex[0]
+            .audit_line()
+            .contains("本单因策略 dog_strategy 豁免门禁 timing")
+    );
 }
 
 #[test]
@@ -344,7 +404,8 @@ fn a_library_without_the_version_symbol_fails_negotiation() {
         ("/usr/lib/libSystem.B.dylib", false),
         ("/usr/lib/libSystem.dylib", false),
     ];
-    let Some((src, needs_copy)) = candidates.into_iter().find(|(c, _)| Path::new(c).exists()) else {
+    let Some((src, needs_copy)) = candidates.into_iter().find(|(c, _)| Path::new(c).exists())
+    else {
         eprintln!("skipping: no non-strategy shared library on this host");
         return;
     };
@@ -371,9 +432,14 @@ fn a_library_without_the_version_symbol_fails_negotiation() {
     }
     let msg = match result {
         Err(LoadOutcome::Failed { reason, .. }) => reason,
-        Err(LoadOutcome::Rejected { reason, .. }) => panic!("expected a negotiation failure, policy rejected first: {reason}"),
+        Err(LoadOutcome::Rejected { reason, .. }) => {
+            panic!("expected a negotiation failure, policy rejected first: {reason}")
+        }
         Err(LoadOutcome::Loaded { name, .. }) => panic!("impossible load outcome for {name}"),
         Ok(_) => panic!("non-strategy shared object must fail negotiation"),
     };
-    assert!(msg.contains("abi_version") || msg.contains("v1"), "unexpected: {msg}");
+    assert!(
+        msg.contains("abi_version") || msg.contains("v1"),
+        "unexpected: {msg}"
+    );
 }

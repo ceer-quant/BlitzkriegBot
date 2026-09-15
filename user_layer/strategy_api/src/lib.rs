@@ -207,9 +207,8 @@ pub struct BkStrategyVtable {
     ///   "breaks":[{"token","broken_price"}]}`.
     /// Entries carry NO size (the host sizes); exits carry NO price (the host
     /// prices off the live book). REQUIRED.
-    pub evaluate: Option<
-        unsafe extern "C" fn(handle: BkHandle, view: *const BkRoundView) -> *mut c_char,
-    >,
+    pub evaluate:
+        Option<unsafe extern "C" fn(handle: BkHandle, view: *const BkRoundView) -> *mut c_char>,
 
     /// Tokens the strategy currently considers entry-eligible, as a JSON array
     /// of strings. Optional.

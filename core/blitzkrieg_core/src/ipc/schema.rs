@@ -75,12 +75,24 @@ pub struct Failure {
 
 impl Success {
     pub fn new(id: serde_json::Value, result: serde_json::Value) -> Self {
-        Self { jsonrpc: JSONRPC.into(), id, result }
+        Self {
+            jsonrpc: JSONRPC.into(),
+            id,
+            result,
+        }
     }
 }
 impl Failure {
     pub fn new(id: serde_json::Value, code: i32, message: String, data: Option<ErrorData>) -> Self {
-        Self { jsonrpc: JSONRPC.into(), id, error: RpcError { code, message, data } }
+        Self {
+            jsonrpc: JSONRPC.into(),
+            id,
+            error: RpcError {
+                code,
+                message,
+                data,
+            },
+        }
     }
     /// JSON-RPC reserved codes.
     pub const PARSE_ERROR: i32 = -32700;
@@ -442,6 +454,10 @@ pub struct Notification {
 }
 impl Notification {
     pub fn new(event: Event) -> Self {
-        Self { jsonrpc: JSONRPC.into(), method: EVENT_METHOD.into(), params: event }
+        Self {
+            jsonrpc: JSONRPC.into(),
+            method: EVENT_METHOD.into(),
+            params: event,
+        }
     }
 }

@@ -10,5 +10,8 @@ pub mod decimal;
 pub mod plugin;
 pub mod types;
 
-pub use plugin::{BoxFuture, DataFeed, MarketDiscovery, MarketHost, MarketPlugin, OrderExecutor, SubscriptionControl};
+pub use plugin::{
+    BoxFuture, DataFeed, MarketDiscovery, MarketHost, MarketPlugin, OrderExecutor,
+    SubscriptionControl,
+};
 pub use types::*;

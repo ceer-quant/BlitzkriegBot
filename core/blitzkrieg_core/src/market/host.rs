@@ -13,7 +13,10 @@ use tokio::sync::Mutex as AsyncMutex;
 
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 // ── DTO ↔ core-model conversions ─────────────────────────────────────────────
@@ -181,7 +184,11 @@ impl MarketHost for CoreHost {
             let now = now_ms();
             let mut c = self.core.lock().await;
             c.engine_on_data(
-                crate::engine::DataEvent::Spot { asset: update.asset, price: update.price, now_ms: update.ts_ms },
+                crate::engine::DataEvent::Spot {
+                    asset: update.asset,
+                    price: update.price,
+                    now_ms: update.ts_ms,
+                },
                 now,
             );
         })
@@ -198,7 +205,13 @@ impl MarketHost for CoreHost {
             // Single lock: register the round, then subscribe its tokens (matches
             // the historical ordering exactly).
             let mut c = self.core.lock().await;
-            c.engine_on_data(crate::engine::DataEvent::RoundMarkets { markets: models, now_ms: now }, now);
+            c.engine_on_data(
+                crate::engine::DataEvent::RoundMarkets {
+                    markets: models,
+                    now_ms: now,
+                },
+                now,
+            );
             drop(c);
             self.subscribe_tokens(tokens).await;
         })
@@ -210,7 +223,10 @@ impl MarketHost for CoreHost {
         })
     }
 
-    fn install_subscription_control(&self, control: Arc<dyn api::SubscriptionControl>) -> BoxFuture<'_, ()> {
+    fn install_subscription_control(
+        &self,
+        control: Arc<dyn api::SubscriptionControl>,
+    ) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             self.core.lock().await.set_subscription(control);
         })
@@ -302,7 +318,12 @@ impl MarketHost for CoreHost {
 
     fn known_venue_order_ids(&self) -> BoxFuture<'_, Vec<String>> {
         Box::pin(async move {
-            self.core.lock().await.known_venue_ids().into_iter().collect()
+            self.core
+                .lock()
+                .await
+                .known_venue_ids()
+                .into_iter()
+                .collect()
         })
     }
 

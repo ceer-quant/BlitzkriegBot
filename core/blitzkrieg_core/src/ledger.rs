@@ -30,7 +30,10 @@ impl Ledger {
     }
 
     pub fn reserved(&self) -> Decimal {
-        self.reservations.values().copied().fold(Decimal::ZERO, |a, b| a + b)
+        self.reservations
+            .values()
+            .copied()
+            .fold(Decimal::ZERO, |a, b| a + b)
     }
 
     /// Collateral free to commit to new BUY orders.
@@ -41,7 +44,10 @@ impl Ledger {
     /// Reserve notional for a resting BUY (price * size). Idempotent per order.
     pub fn reserve(&mut self, order_id: &str, notional: Decimal) -> CoreResult<()> {
         if notional < Decimal::ZERO {
-            return Err(CoreError::new(CoreErrorCode::InvalidParams, "negative notional"));
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "negative notional",
+            ));
         }
         if self.reservations.contains_key(order_id) {
             return Ok(());
@@ -69,7 +75,11 @@ impl Ledger {
     /// Settle a BUY fill: spend `cost` cash and draw down its reservation by up
     /// to the same amount (a resting buy reserved price*size; a fill realises it).
     pub fn settle_buy_fill(&mut self, order_id: &str, cost: Decimal) {
-        let reserved = self.reservations.get(order_id).copied().unwrap_or(Decimal::ZERO);
+        let reserved = self
+            .reservations
+            .get(order_id)
+            .copied()
+            .unwrap_or(Decimal::ZERO);
         let draw = reserved.min(cost);
         if draw > Decimal::ZERO {
             let left = reserved - draw;

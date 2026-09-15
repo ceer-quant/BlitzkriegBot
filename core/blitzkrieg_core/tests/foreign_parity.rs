@@ -42,13 +42,18 @@ fn dylib_dir() -> PathBuf {
 
 fn parity_lib() -> PathBuf {
     let base = dylib_dir();
-    for name in ["libparity_strategy.dylib", "libparity_strategy.so", "parity_strategy.dll"] {
+    for name in [
+        "libparity_strategy.dylib",
+        "libparity_strategy.so",
+        "parity_strategy.dll",
+    ] {
         let p = base.join(name);
         if p.exists() {
             return p;
         }
     }
-    let msg = "build the parity cdylib first: (cd user_layer/parity_strategy && cargo build --release)";
+    let msg =
+        "build the parity cdylib first: (cd user_layer/parity_strategy && cargo build --release)";
     if std::env::var_os("BK_REQUIRE_DYLIB").is_some() {
         panic!("{msg} (looked in {})", base.display());
     }
@@ -72,7 +77,10 @@ fn engine_cfg() -> EngineConfig {
             broken_price: dec!(0.35),
             window_floor_ms: 0,
         },
-        spread_arb: SpreadArbConfig { trend_max_entry_price: dec!(0.45), ..Default::default() },
+        spread_arb: SpreadArbConfig {
+            trend_max_entry_price: dec!(0.45),
+            ..Default::default()
+        },
         trend_follow: Default::default(),
         max_orderbook_stale_ms: 8000,
         momentum_window_sec: 30,
@@ -114,7 +122,8 @@ fn hot_registry(cap: Decimal) -> ParamRegistry {
 
 /// In-tree twin of the external parity cdylib: the SAME algorithm crate behind
 /// the SAME full EngineStrategy contract, only the loading differs.
-struct InTreeParity {    inner: ParityStrategy,
+struct InTreeParity {
+    inner: ParityStrategy,
     exits: Vec<StrategyExitIntent>,
     breaks: Vec<(String, Decimal)>,
     /// This strategy's OWN cell in the per-strategy registry (E2-c): a parity
@@ -150,7 +159,10 @@ impl InTreeParity {
 fn snapshot_to_pbook(token: &str, s: &OrderbookSnapshot) -> PBook {
     let levels = |v: &[(Decimal, Decimal)]| {
         v.iter()
-            .map(|(p, sz)| PLevel { price: p.to_string(), size: sz.to_string() })
+            .map(|(p, sz)| PLevel {
+                price: p.to_string(),
+                size: sz.to_string(),
+            })
             .collect()
     };
     PBook {
@@ -174,7 +186,8 @@ impl EngineStrategy for InTreeParity {
     }
 
     fn on_book(&mut self, token_id: &str, snap: &OrderbookSnapshot, _now_ms: i64) {
-        self.inner.observe(token_id, snapshot_to_pbook(token_id, snap));
+        self.inner
+            .observe(token_id, snapshot_to_pbook(token_id, snap));
     }
 
     fn on_round(&mut self, slot: i64) {
@@ -194,7 +207,10 @@ impl EngineStrategy for InTreeParity {
         let markets: Vec<PMarket> = ctx
             .markets()
             .iter()
-            .map(|m| PMarket { up_token: m.up_token_id.clone(), down_token: m.down_token_id.clone() })
+            .map(|m| PMarket {
+                up_token: m.up_token_id.clone(),
+                down_token: m.down_token_id.clone(),
+            })
             .collect();
         let d = self.inner.evaluate(&markets);
         for b in d.breaks {
@@ -202,11 +218,18 @@ impl EngineStrategy for InTreeParity {
             self.breaks.push((b.token, price));
         }
         for e in d.exits {
-            self.exits.push(StrategyExitIntent { token_id: e.token, reason: e.reason });
+            self.exits.push(StrategyExitIntent {
+                token_id: e.token,
+                reason: e.reason,
+            });
         }
         let mut out = Vec::new();
         for e in d.entries {
-            let Some(m) = ctx.markets().iter().find(|m| m.up_token_id == e.token || m.down_token_id == e.token) else {
+            let Some(m) = ctx
+                .markets()
+                .iter()
+                .find(|m| m.up_token_id == e.token || m.down_token_id == e.token)
+            else {
                 continue;
             };
             let (direction, token) = if m.up_token_id == e.token {
@@ -320,20 +343,39 @@ fn replay() -> Vec<Step> {
     let t0 = 1_000_000i64;
     vec![
         // Round 1: clock slot at t0=1_000_000 is 1 (boundary at 1_800_000).
-        Step::Data(DataEvent::RoundMarkets { markets: vec![market(1_800_000, 1)], now_ms: t0 }),
+        Step::Data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000, 1)],
+            now_ms: t0,
+        }),
         // Deep neutral book above the 0.50 hot ceiling → no entry; confirmed.
         Step::Data(DataEvent::Book {
             token_id: "up".into(),
-            bids: vec![(dec!(0.51), dec!(60)), (dec!(0.50), dec!(60)), (dec!(0.49), dec!(60))],
-            asks: vec![(dec!(0.53), dec!(60)), (dec!(0.54), dec!(60)), (dec!(0.55), dec!(60))],
+            bids: vec![
+                (dec!(0.51), dec!(60)),
+                (dec!(0.50), dec!(60)),
+                (dec!(0.49), dec!(60)),
+            ],
+            asks: vec![
+                (dec!(0.53), dec!(60)),
+                (dec!(0.54), dec!(60)),
+                (dec!(0.55), dec!(60)),
+            ],
             now_ms: t0 + 1_000,
         }),
         Step::Eval(t0 + 1_000),
         // Dip: mid 0.42, deep two-sided → one BUY at the 0.43 best ask.
         Step::Data(DataEvent::Book {
             token_id: "up".into(),
-            bids: vec![(dec!(0.41), dec!(100)), (dec!(0.40), dec!(100)), (dec!(0.39), dec!(100))],
-            asks: vec![(dec!(0.43), dec!(100)), (dec!(0.44), dec!(100)), (dec!(0.45), dec!(100))],
+            bids: vec![
+                (dec!(0.41), dec!(100)),
+                (dec!(0.40), dec!(100)),
+                (dec!(0.39), dec!(100)),
+            ],
+            asks: vec![
+                (dec!(0.43), dec!(100)),
+                (dec!(0.44), dec!(100)),
+                (dec!(0.45), dec!(100)),
+            ],
             now_ms: t0 + 2_000,
         }),
         Step::Eval(t0 + 2_000),
@@ -373,7 +415,10 @@ fn replay() -> Vec<Step> {
         Step::Eval(t0 + 5_000),
         // Round 2 (clock slot 2): on_round resets per-round state; the slot
         // embedded in the internal key must change.
-        Step::Data(DataEvent::RoundMarkets { markets: vec![market(2_700_000, 2)], now_ms: t0 + 900_000 }),
+        Step::Data(DataEvent::RoundMarkets {
+            markets: vec![market(2_700_000, 2)],
+            now_ms: t0 + 900_000,
+        }),
         Step::Data(DataEvent::Book {
             token_id: "up".into(),
             bids: vec![(dec!(0.41), dec!(100)), (dec!(0.40), dec!(100))],
@@ -398,18 +443,24 @@ fn in_tree_and_dylib_parity_match_signal_for_signal() {
     // ── Side A: in-tree EngineStrategy over parity_logic ─────────────────────
     let mut in_tree = Engine::new(engine_cfg());
     assert!(in_tree.set_strategy_enabled("spread_arb", false));
-    in_tree.register_user_strategy(Box::new(InTreeParity::new()), "in-tree:parity_logic".into()).unwrap();
+    in_tree
+        .register_user_strategy(Box::new(InTreeParity::new()), "in-tree:parity_logic".into())
+        .unwrap();
     assert!(in_tree.set_strategy_enabled("parity", true));
     in_tree.set_hot_params(Some(Arc::new(hot_registry(dec!(0.50)))));
     let a = run_replay(&steps, &mut in_tree);
 
     // ── Side B: the external parity_strategy cdylib via C ABI v2 ─────────────
-    let loaded = load_foreign(&path).unwrap_or_else(|e| panic!("load {} failed: {e:?}", path.display()));
+    let loaded =
+        load_foreign(&path).unwrap_or_else(|e| panic!("load {} failed: {e:?}", path.display()));
     assert_eq!(loaded.name, "parity");
     let mut foreign = Engine::new(engine_cfg());
     assert!(foreign.set_strategy_enabled("spread_arb", false));
     foreign
-        .register_user_strategy(Box::new(loaded.strategy), format!("dylib:{}", path.display()))
+        .register_user_strategy(
+            Box::new(loaded.strategy),
+            format!("dylib:{}", path.display()),
+        )
         .unwrap();
     assert!(foreign.set_strategy_enabled("parity", true));
     foreign.set_hot_params(Some(Arc::new(hot_registry(dec!(0.50)))));
@@ -420,21 +471,48 @@ fn in_tree_and_dylib_parity_match_signal_for_signal() {
     for (i, (ca, cb)) in a.cycles.iter().zip(b.cycles.iter()).enumerate() {
         assert_eq!(ca.entries, cb.entries, "entry orders differ at cycle {i}");
         assert_eq!(ca.exits, cb.exits, "exit intents differ at cycle {i}");
-        assert_eq!(ca.confirmed, cb.confirmed, "confirmed tokens differ at cycle {i}");
-        assert_eq!(ca.diagnostics, cb.diagnostics, "diagnostics differ at cycle {i}");
+        assert_eq!(
+            ca.confirmed, cb.confirmed,
+            "confirmed tokens differ at cycle {i}"
+        );
+        assert_eq!(
+            ca.diagnostics, cb.diagnostics,
+            "diagnostics differ at cycle {i}"
+        );
     }
 
     // Spot-check the behaviour actually exercised (so this test cannot pass on
     // an empty replay): entry, break, exit, round-reset slot and both tokens.
     let flat_entries: Vec<_> = a.cycles.iter().flat_map(|c| c.entries.iter()).collect();
-    assert!(flat_entries.iter().any(|e| e.0 == "up" && e.1 == "0.43" && e.5 == "up" && e.6 == "parity:BTC:up:1"), "{flat_entries:?}");
-    assert!(flat_entries.iter().any(|e| e.0 == "down" && e.1 == "0.45" && e.5 == "down"), "{flat_entries:?}");
-    assert!(flat_entries.iter().any(|e| e.6 == "parity:BTC:up:2"), "round reset not reflected: {flat_entries:?}");
+    assert!(
+        flat_entries
+            .iter()
+            .any(|e| e.0 == "up" && e.1 == "0.43" && e.5 == "up" && e.6 == "parity:BTC:up:1"),
+        "{flat_entries:?}"
+    );
+    assert!(
+        flat_entries
+            .iter()
+            .any(|e| e.0 == "down" && e.1 == "0.45" && e.5 == "down"),
+        "{flat_entries:?}"
+    );
+    assert!(
+        flat_entries.iter().any(|e| e.6 == "parity:BTC:up:2"),
+        "round reset not reflected: {flat_entries:?}"
+    );
     assert!(
         a.breaks.contains(&("up".to_string(), "0.30".to_string())),
         "parity break missing: {:?}",
         a.breaks
     );
-    assert!(a.cycles.iter().any(|c| c.exits == vec![("up".to_string(), "parity_tp".to_string())]));
-    assert!(a.cycles.iter().any(|c| c.confirmed == vec!["up".to_string()]));
+    assert!(
+        a.cycles
+            .iter()
+            .any(|c| c.exits == vec![("up".to_string(), "parity_tp".to_string())])
+    );
+    assert!(
+        a.cycles
+            .iter()
+            .any(|c| c.confirmed == vec!["up".to_string()])
+    );
 }

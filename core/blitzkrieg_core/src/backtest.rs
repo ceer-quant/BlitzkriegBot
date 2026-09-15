@@ -56,7 +56,11 @@ pub struct BacktestConfig {
 
 impl Default for BacktestConfig {
     fn default() -> Self {
-        Self { core: CoreConfig::default(), tick_ms: 50, tail_ms: 0 }
+        Self {
+            core: CoreConfig::default(),
+            tick_ms: 50,
+            tail_ms: 0,
+        }
     }
 }
 
@@ -71,7 +75,11 @@ pub struct VecSource {
 impl VecSource {
     pub fn new(events: Vec<TimedEvent>) -> Self {
         let total = events.len() as u64;
-        Self { events: events.into_iter(), label: format!("memory ({total} events)"), total }
+        Self {
+            events: events.into_iter(),
+            label: format!("memory ({total} events)"),
+            total,
+        }
     }
 }
 
@@ -83,7 +91,10 @@ impl DataSource for VecSource {
         self.label.clone()
     }
     fn stats(&self) -> SourceStats {
-        SourceStats { events: self.total, ..Default::default() }
+        SourceStats {
+            events: self.total,
+            ..Default::default()
+        }
     }
 }
 
@@ -190,7 +201,9 @@ impl BacktestReport {
         ));
         s.push_str(&format!(
             "  events           : {} ({} malformed skipped, {} out-of-order)\n",
-            self.source_stats.events, self.source_stats.malformed_lines, self.source_stats.out_of_order_events
+            self.source_stats.events,
+            self.source_stats.malformed_lines,
+            self.source_stats.out_of_order_events
         ));
         s.push_str(&format!(
             "  fill model       : slippage {} tick(s), maker latency {} ms, maker fill {} bps\n",
@@ -198,7 +211,10 @@ impl BacktestReport {
             self.fill_model.maker_latency_ms,
             self.fill_model.maker_fill_prob_bps
         ));
-        s.push_str(&format!("  entry escalate   : {} ms\n", self.entry_maker_timeout_ms));
+        s.push_str(&format!(
+            "  entry escalate   : {} ms\n",
+            self.entry_maker_timeout_ms
+        ));
         s.push_str(&format!(
             "  orders           : {} ({} filled, {} cancelled, {} rejected, {} failed, {} live at end)\n",
             self.orders.orders,
@@ -233,13 +249,27 @@ impl BacktestReport {
         ));
         for strat in &self.strategies {
             let name = strat.get("name").and_then(Value::as_str).unwrap_or("?");
-            let pnl = strat.get("netPnlUsd").map(render_num).unwrap_or_else(|| "?".into());
-            let n = strat.get("closedTrades").and_then(Value::as_u64).unwrap_or(0);
-            let open = strat.get("openPositions").and_then(Value::as_u64).unwrap_or(0);
-            s.push_str(&format!("  strategy {name:<12}: net {pnl}, {n} closed, {open} open\n"));
+            let pnl = strat
+                .get("netPnlUsd")
+                .map(render_num)
+                .unwrap_or_else(|| "?".into());
+            let n = strat
+                .get("closedTrades")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let open = strat
+                .get("openPositions")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            s.push_str(&format!(
+                "  strategy {name:<12}: net {pnl}, {n} closed, {open} open\n"
+            ));
         }
         if !self.risk_alerts.is_empty() {
-            s.push_str(&format!("  risk alerts      : {}\n", self.risk_alerts.len()));
+            s.push_str(&format!(
+                "  risk alerts      : {}\n",
+                self.risk_alerts.len()
+            ));
             for a in self.risk_alerts.iter().take(5) {
                 s.push_str(&format!("    - {a}\n"));
             }
@@ -368,11 +398,27 @@ impl EventBacktester {
     fn drain(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
-                Event::PositionClosed { id, asset, direction, reason, net_pnl_usd, net_pnl_pct, .. } => {
-                    self.trades.push(TradeLine { id, asset, direction, reason, net_pnl_usd, net_pnl_pct });
+                Event::PositionClosed {
+                    id,
+                    asset,
+                    direction,
+                    reason,
+                    net_pnl_usd,
+                    net_pnl_pct,
+                    ..
+                } => {
+                    self.trades.push(TradeLine {
+                        id,
+                        asset,
+                        direction,
+                        reason,
+                        net_pnl_usd,
+                        net_pnl_pct,
+                    });
                 }
                 Event::OrderUpdate { order } => {
-                    self.order_status.insert(order.order_id.clone(), format!("{:?}", order.status));
+                    self.order_status
+                        .insert(order.order_id.clone(), format!("{:?}", order.status));
                 }
                 Event::Fill { .. } => self.fills += 1,
                 Event::RiskAlert { code, message } => {
@@ -397,7 +443,10 @@ impl EventBacktester {
     }
 
     fn order_counts(&self) -> OrderCounts {
-        let mut c = OrderCounts { orders: self.order_status.len() as u64, ..Default::default() };
+        let mut c = OrderCounts {
+            orders: self.order_status.len() as u64,
+            ..Default::default()
+        };
         for status in self.order_status.values() {
             match status.as_str() {
                 "Filled" => c.filled += 1,
@@ -454,7 +503,11 @@ impl EventBacktester {
             }
         }
         let pct = |n: u64, d: u64| {
-            if d == 0 { Decimal::ZERO } else { Decimal::from(n) * Decimal::ONE_HUNDRED / Decimal::from(d) }
+            if d == 0 {
+                Decimal::ZERO
+            } else {
+                Decimal::from(n) * Decimal::ONE_HUNDRED / Decimal::from(d)
+            }
         };
         TradeStats {
             closed,
@@ -464,9 +517,17 @@ impl EventBacktester {
             gross_profit_usd: gross_profit,
             gross_loss_usd: gross_loss,
             net_pnl_usd: net,
-            avg_pnl_usd: if closed == 0 { Decimal::ZERO } else { net / Decimal::from(closed) },
+            avg_pnl_usd: if closed == 0 {
+                Decimal::ZERO
+            } else {
+                net / Decimal::from(closed)
+            },
             win_rate_pct: pct(wins, closed),
-            profit_factor: if gross_loss > Decimal::ZERO { Some(gross_profit / gross_loss) } else { None },
+            profit_factor: if gross_loss > Decimal::ZERO {
+                Some(gross_profit / gross_loss)
+            } else {
+                None
+            },
             max_drawdown_usd: max_dd,
             max_drawdown_pct: max_dd_pct,
             fees_usd,
@@ -543,12 +604,18 @@ impl Backtester for EventBacktester {
         let open_notional: Decimal = views.iter().map(|p| p.entry_price * p.shares).sum();
         let stats = self.source.stats();
         let (trade_lines, truncated) = if self.trades.len() > MAX_TRADE_LINES {
-            (self.trades[..MAX_TRADE_LINES].to_vec(), (self.trades.len() - MAX_TRADE_LINES) as u64)
+            (
+                self.trades[..MAX_TRADE_LINES].to_vec(),
+                (self.trades.len() - MAX_TRADE_LINES) as u64,
+            )
         } else {
             (self.trades.clone(), 0)
         };
         let trades = self.trade_stats(fees_usd);
-        debug_assert_eq!(delivered, stats.events, "source delivered a different event count");
+        debug_assert_eq!(
+            delivered, stats.events,
+            "source delivered a different event count"
+        );
 
         Ok(BacktestReport {
             source: self.source.describe(),
@@ -617,7 +684,10 @@ mod tests {
     fn scenario_events(now: i64) -> Vec<TimedEvent> {
         let mut evs = vec![TimedEvent {
             at_ms: now,
-            event: DataEvent::RoundMarkets { markets: vec![market(now)], now_ms: now },
+            event: DataEvent::RoundMarkets {
+                markets: vec![market(now)],
+                now_ms: now,
+            },
         }];
         for i in 0..12 {
             let t = now + i * 1000;
@@ -643,7 +713,11 @@ mod tests {
         });
         evs.push(TimedEvent {
             at_ms: t,
-            event: DataEvent::Spot { asset: "BTC".into(), price: dec!(60000), now_ms: t },
+            event: DataEvent::Spot {
+                asset: "BTC".into(),
+                price: dec!(60000),
+                now_ms: t,
+            },
         });
         let t = now + 14_000;
         evs.push(TimedEvent {
@@ -663,7 +737,10 @@ mod tests {
     fn base_core(archive: Option<String>) -> CoreConfig {
         CoreConfig {
             mode: Mode::Dry,
-            risk: RiskConfig { max_order_notional: dec!(100), ..Default::default() },
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
             dry_seed_balance: dec!(1000),
             engine_enabled: true,
             assets: vec!["BTC".into()],
@@ -673,7 +750,10 @@ mod tests {
             trend_window_floor_ms: 0,
             auto_exits_enabled: true,
             positions: PositionConfig {
-                exit: ExitConfig { min_time_left_sec: 0, ..Default::default() },
+                exit: ExitConfig {
+                    min_time_left_sec: 0,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             event_archive_path: archive,
@@ -682,7 +762,14 @@ mod tests {
     }
 
     fn bt(core: CoreConfig, src: Box<dyn DataSource>, tail_ms: i64) -> BacktestReport {
-        let mut b = EventBacktester::new(BacktestConfig { core, tick_ms: 50, tail_ms }, src);
+        let mut b = EventBacktester::new(
+            BacktestConfig {
+                core,
+                tick_ms: 50,
+                tail_ms,
+            },
+            src,
+        );
         b.run().expect("replay runs")
     }
 
@@ -702,13 +789,35 @@ mod tests {
 
     #[test]
     fn identity_replay_trades_the_scenario_and_reports_it() {
-        let r = bt(base_core(None), Box::new(VecSource::new(scenario_events(NOW))), 10_000);
-        assert_eq!(r.trades.closed, 1, "one round trip expected:\n{}", r.render());
-        assert_eq!(r.trades.wins, 1, "the +100% book must take profit:\n{}", r.render());
+        let r = bt(
+            base_core(None),
+            Box::new(VecSource::new(scenario_events(NOW))),
+            10_000,
+        );
+        assert_eq!(
+            r.trades.closed,
+            1,
+            "one round trip expected:\n{}",
+            r.render()
+        );
+        assert_eq!(
+            r.trades.wins,
+            1,
+            "the +100% book must take profit:\n{}",
+            r.render()
+        );
         assert!(r.trades.net_pnl_usd > Decimal::ZERO, "\n{}", r.render());
         assert_eq!(r.open_positions, 0, "the exit must flatten the position");
-        assert_eq!(r.orders.filled, 2, "escalated entry + exit:\n{}", r.render());
-        assert_eq!(r.orders.cancelled, 1, "the unfilled maker is cancelled at escalation");
+        assert_eq!(
+            r.orders.filled,
+            2,
+            "escalated entry + exit:\n{}",
+            r.render()
+        );
+        assert_eq!(
+            r.orders.cancelled, 1,
+            "the unfilled maker is cancelled at escalation"
+        );
         assert_eq!(r.fills, 2);
         assert_eq!(r.source_stats.events, 16);
         assert_eq!(r.fill_model, FillModel::default());
@@ -717,7 +826,10 @@ mod tests {
         let s = strategy(&r, "spread_arb");
         assert_eq!(json_decimal(s.get("netPnlUsd")), Some(r.trades.net_pnl_usd));
         assert_eq!(json_decimal(s.get("feesUsd")), Some(r.trades.fees_usd));
-        assert!(r.trades.fees_usd > Decimal::ZERO, "the escalated taker entry pays a fee");
+        assert!(
+            r.trades.fees_usd > Decimal::ZERO,
+            "the escalated taker entry pays a fee"
+        );
     }
 
     /// A real feed delivers bursts of sub-millisecond events, but maintenance in
@@ -729,13 +841,20 @@ mod tests {
     fn dense_stream_keeps_live_evaluation_cadence() {
         let mut evs = vec![TimedEvent {
             at_ms: NOW,
-            event: DataEvent::RoundMarkets { markets: vec![market(NOW)], now_ms: NOW },
+            event: DataEvent::RoundMarkets {
+                markets: vec![market(NOW)],
+                now_ms: NOW,
+            },
         }];
         for i in 0..=2_000 {
             let t = NOW + i;
             evs.push(TimedEvent {
                 at_ms: t,
-                event: DataEvent::Spot { asset: "BTC".into(), price: dec!(60000), now_ms: t },
+                event: DataEvent::Spot {
+                    asset: "BTC".into(),
+                    price: dec!(60000),
+                    now_ms: t,
+                },
             });
         }
         // Out-of-order arrivals are a normal property of a multi-stream feed:
@@ -743,7 +862,11 @@ mod tests {
         // buy itself an extra maintenance cycle.
         evs.push(TimedEvent {
             at_ms: NOW + 500,
-            event: DataEvent::Spot { asset: "BTC".into(), price: dec!(60001), now_ms: NOW + 500 },
+            event: DataEvent::Spot {
+                asset: "BTC".into(),
+                price: dec!(60001),
+                now_ms: NOW + 500,
+            },
         });
 
         let r = bt(base_core(None), Box::new(VecSource::new(evs)), 0);
@@ -751,8 +874,14 @@ mod tests {
         // 2 000 ms of stream at the live 50 ms cadence = 40 maintenance cycles,
         // regardless of the 2 002 events that arrived in between.
         assert_eq!(r.feed["evaluations"], 40, "\n{}", r.render());
-        assert_eq!(r.source_stats.events, 2_003, "every event is still delivered");
-        assert_eq!(r.virtual_ms, 2_000, "the late event must not move the clock");
+        assert_eq!(
+            r.source_stats.events, 2_003,
+            "every event is still delivered"
+        );
+        assert_eq!(
+            r.virtual_ms, 2_000,
+            "the late event must not move the clock"
+        );
     }
 
     /// The other half of the cadence contract: a sparse stream (gaps far larger
@@ -763,11 +892,18 @@ mod tests {
         let events = vec![
             TimedEvent {
                 at_ms: NOW,
-                event: DataEvent::RoundMarkets { markets: vec![market(NOW)], now_ms: NOW },
+                event: DataEvent::RoundMarkets {
+                    markets: vec![market(NOW)],
+                    now_ms: NOW,
+                },
             },
             TimedEvent {
                 at_ms: NOW + 10_000,
-                event: DataEvent::Spot { asset: "BTC".into(), price: dec!(60000), now_ms: NOW + 10_000 },
+                event: DataEvent::Spot {
+                    asset: "BTC".into(),
+                    price: dec!(60000),
+                    now_ms: NOW + 10_000,
+                },
             },
         ];
         let r = bt(base_core(None), Box::new(VecSource::new(events)), 0);
@@ -781,21 +917,42 @@ mod tests {
         let events = scenario_events(NOW);
 
         // "Live" run: the real core consumes the events and mirrors them to disk.
-        let live = bt(base_core(Some(archive.clone())), Box::new(VecSource::new(events)), 10_000);
-        assert!(std::path::Path::new(&archive).exists(), "the live run must record an archive");
-        assert!(live.trades.closed >= 1, "the equivalence fixture must trade:\n{}", live.render());
+        let live = bt(
+            base_core(Some(archive.clone())),
+            Box::new(VecSource::new(events)),
+            10_000,
+        );
+        assert!(
+            std::path::Path::new(&archive).exists(),
+            "the live run must record an archive"
+        );
+        assert!(
+            live.trades.closed >= 1,
+            "the equivalence fixture must trade:\n{}",
+            live.render()
+        );
 
         // Backtest run: the same core, fed from the archive.
-        let replay = bt(base_core(None), Box::new(open_replay(&archive).unwrap()), 10_000);
+        let replay = bt(
+            base_core(None),
+            Box::new(open_replay(&archive).unwrap()),
+            10_000,
+        );
 
-        assert_eq!(replay.source_stats, live.source_stats, "same event stream, no parse damage");
+        assert_eq!(
+            replay.source_stats, live.source_stats,
+            "same event stream, no parse damage"
+        );
         assert_eq!(replay.source_stats.malformed_lines, 0);
         assert_eq!(replay.start_at_ms, live.start_at_ms);
         assert_eq!(replay.end_at_ms, live.end_at_ms);
         assert_eq!(replay.trades.closed, live.trades.closed);
         assert_eq!(replay.trades.wins, live.trades.wins);
         assert_eq!(replay.trades.losses, live.trades.losses);
-        assert_eq!(replay.trades.net_pnl_usd, live.trades.net_pnl_usd, "PnL must match exactly");
+        assert_eq!(
+            replay.trades.net_pnl_usd, live.trades.net_pnl_usd,
+            "PnL must match exactly"
+        );
         assert_eq!(replay.trades.fees_usd, live.trades.fees_usd);
         assert_eq!(replay.fills, live.fills);
         assert_eq!(replay.orders.filled, live.orders.filled);
@@ -804,7 +961,10 @@ mod tests {
         assert_eq!(replay.feed["books"], live.feed["books"]);
         assert_eq!(replay.feed["evaluations"], live.feed["evaluations"]);
         assert_eq!(replay.blocked, live.blocked);
-        assert_eq!(replay.strategies, live.strategies, "per-strategy ledger must match");
+        assert_eq!(
+            replay.strategies, live.strategies,
+            "per-strategy ledger must match"
+        );
         assert_eq!(
             replay
                 .trade_lines
@@ -824,7 +984,11 @@ mod tests {
     fn malformed_archive_lines_are_skipped_without_changing_the_result() {
         let dir = tmp_dir("badline");
         let archive = dir.join("events.jsonl").display().to_string();
-        let clean = bt(base_core(Some(archive.clone())), Box::new(VecSource::new(scenario_events(NOW))), 10_000);
+        let clean = bt(
+            base_core(Some(archive.clone())),
+            Box::new(VecSource::new(scenario_events(NOW))),
+            10_000,
+        );
 
         // Damage the tail the way a killed process would: a truncated record plus
         // junk that no writer should ever produce.
@@ -835,10 +999,23 @@ mod tests {
         damaged.push_str("\nnot json at all\n");
         std::fs::write(&archive, damaged).unwrap();
 
-        let replay = bt(base_core(None), Box::new(open_replay(&archive).unwrap()), 10_000);
-        assert_eq!(replay.source_stats.malformed_lines, 2, "truncated + junk lines are both counted");
-        assert_eq!(replay.source_stats.events, clean.source_stats.events, "no event is lost");
-        assert_eq!(replay.trades.closed, clean.trades.closed, "a damaged tail is not fatal");
+        let replay = bt(
+            base_core(None),
+            Box::new(open_replay(&archive).unwrap()),
+            10_000,
+        );
+        assert_eq!(
+            replay.source_stats.malformed_lines, 2,
+            "truncated + junk lines are both counted"
+        );
+        assert_eq!(
+            replay.source_stats.events, clean.source_stats.events,
+            "no event is lost"
+        );
+        assert_eq!(
+            replay.trades.closed, clean.trades.closed,
+            "a damaged tail is not fatal"
+        );
         assert_eq!(replay.trades.wins, clean.trades.wins);
         assert_eq!(replay.trades.net_pnl_usd, clean.trades.net_pnl_usd);
         let _ = std::fs::remove_dir_all(&dir);
@@ -847,10 +1024,17 @@ mod tests {
     #[test]
     fn slippage_worsens_the_replay_pnl() {
         let events = scenario_events(NOW);
-        let identity = bt(base_core(None), Box::new(VecSource::new(events.clone())), 10_000);
+        let identity = bt(
+            base_core(None),
+            Box::new(VecSource::new(events.clone())),
+            10_000,
+        );
 
         let mut slipped_core = base_core(None);
-        slipped_core.fill_model = FillModel { taker_slippage_ticks: 2, ..FillModel::default() };
+        slipped_core.fill_model = FillModel {
+            taker_slippage_ticks: 2,
+            ..FillModel::default()
+        };
         let slipped = bt(slipped_core, Box::new(VecSource::new(events)), 10_000);
 
         assert_eq!(slipped.trades.closed, identity.trades.closed);
@@ -873,14 +1057,26 @@ mod tests {
         let mut core = base_core(None);
         core.entry_maker_timeout_ms = 60_000;
         let r = bt(core, Box::new(VecSource::new(scenario_events(NOW))), 10_000);
-        assert_eq!(r.orders.orders, 1, "the entry is still placed:\n{}", r.render());
-        assert_eq!(r.orders.live_at_end, 1, "it is still resting when the replay ends");
+        assert_eq!(
+            r.orders.orders,
+            1,
+            "the entry is still placed:\n{}",
+            r.render()
+        );
+        assert_eq!(
+            r.orders.live_at_end, 1,
+            "it is still resting when the replay ends"
+        );
         assert_eq!(r.fills, 0);
         assert_eq!(r.trades.closed, 0);
         assert_eq!(r.open_positions, 0);
 
         // Same events, default deadline: the escalation fills it and the exit closes.
-        let r2 = bt(base_core(None), Box::new(VecSource::new(scenario_events(NOW))), 10_000);
+        let r2 = bt(
+            base_core(None),
+            Box::new(VecSource::new(scenario_events(NOW))),
+            10_000,
+        );
         assert_eq!(r2.fills, 2);
         assert_eq!(r2.trades.closed, 1);
     }
