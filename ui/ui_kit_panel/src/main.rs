@@ -39,6 +39,8 @@ enum Msg {
     RefreshError(String),
     /// The plugin registry was re-read (after entering the tab or a toggle).
     PluginsLoaded(UiSnapshot),
+    /// A decoded core-event batch arrived on the EventBus.
+    Events(Vec<blitzkrieg_ui_kit::core::types::CoreEvent>),
 }
 
 struct Args {
@@ -132,6 +134,38 @@ async fn main() -> std::io::Result<()> {
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
+
+    // Push channel: a dedicated listener connection feeds the shared EventBus;
+    // the main loop drains it and refreshes what actually changed.
+    let bus = blitzkrieg_ui_kit::core::event_bus::EventBus::new(1024);
+    {
+        let reader = blitzkrieg_ui_kit::core::notifier::NotificationReader::new(
+            args.socket.clone(),
+            bus.clone(),
+            1000,
+        );
+        std::thread::spawn(move || reader.run());
+    }
+    {
+        let bus = bus.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let sub = bus.subscribe();
+            loop {
+                let drained = tokio::task::spawn_blocking({
+                    let bus = bus.clone();
+                    let mut sub = sub.clone();
+                    move || bus.drain_new(&mut sub)
+                })
+                .await
+                .unwrap_or_default();
+                if !drained.is_empty() && tx.send(Msg::Events(drained)).is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        });
+    }
 
     // Input thread (crossterm event reader).
     {
@@ -236,6 +270,53 @@ async fn main() -> std::io::Result<()> {
             }
             Msg::Input(_) => {}
             Msg::Snapshot { snap, managed, pid } => app.on_snapshot(snap, managed, pid),
+            Msg::Events(events) => {
+                let mut need_snapshot = false;
+                for ev in events {
+                    use blitzkrieg_ui_kit::core::types::CoreEvent;
+                    match ev {
+                        // Account-affecting events refresh the whole snapshot
+                        // immediately (the poller runs at interval-ms; the
+                        // push path makes fills/closes visible at once).
+                        CoreEvent::Fill { .. }
+                        | CoreEvent::PositionClosed { .. }
+                        | CoreEvent::ReconcileReport { .. }
+                        | CoreEvent::Ready { .. }
+                        | CoreEvent::OrderUpdate { .. } => need_snapshot = true,
+                        // Pure notices go to the log pane.
+                        CoreEvent::RiskAlert { message, .. } => {
+                            app.log(format!("risk alert: {message}"))
+                        }
+                        CoreEvent::Error { error } => app.log(format!("core: {error}")),
+                        CoreEvent::EvolutionSignal { signal }
+                        | CoreEvent::EvolutionApplied { signal }
+                        | CoreEvent::EvolutionRejected { signal, .. } => {
+                            app.log(format!("evolution: {signal}"))
+                        }
+                        CoreEvent::Unknown => {}
+                    }
+                }
+                if need_snapshot {
+                    // Coalesce a burst into at most one immediate refresh; the
+                    // poll loop will pick up anything that happens meanwhile.
+                    let d = dispatcher.clone();
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let out = tokio::task::spawn_blocking(move || {
+                            let mut g = match d.lock() {
+                                Ok(g) => g,
+                                Err(_) => return None,
+                            };
+                            Some((g.snapshot(), g.managed(), g.pid()))
+                        })
+                        .await
+                        .unwrap_or(None);
+                        if let Some((snap, managed, pid)) = out {
+                            let _ = tx.send(Msg::Snapshot { snap, managed, pid });
+                        }
+                    });
+                }
+            }
             Msg::PluginsLoaded(snap) => {
                 let n = snap.strategies.len() + snap.extensions.len();
                 app.snap.strategies = snap.strategies;
