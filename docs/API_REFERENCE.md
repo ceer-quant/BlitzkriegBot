@@ -20,7 +20,7 @@ All endpoints are served by your own gateway deployment.
 
 By default, HTTP endpoints do not require authentication. For production deployments:
 
-1. **Panel Token**: Set `PANEL_CHAT_TOKEN` environment variable
+1. **Panel Auth**: Set `BLITZKRIEG_PANEL_USER` and `BLITZKRIEG_PANEL_PASSWORD`; the panel login (`POST /api/login`) issues a session token required by every `/api/*` call on `ui_kit_web`
 2. **Webhook Signatures**: HMAC-SHA256 signatures required by default
 3. **Network Controls**: Use a reverse proxy with TLS for public exposure
 

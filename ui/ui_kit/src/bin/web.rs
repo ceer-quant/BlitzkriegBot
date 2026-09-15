@@ -43,11 +43,24 @@ fn main() {
     let cfg = SupervisorConfig::from_env(socket);
     let dispatcher = Dispatcher::new(cfg, manage);
     let mut server = WebServer::with_gateway(client, 200, dispatcher);
-    // E6-a: one-time session token — printed ONCE; every /api/* request must
-    // carry it (query, X-Auth-Token, or basic-auth user). The panel itself
-    // stays reachable without it (read-only HTML).
-    let token = server.generate_auth_token();
-    println!("token {token}");
+    // E6-a: user/password auth from env. Set BLITZKRIEG_PANEL_USER and
+    // BLITZKRIEG_PANEL_PASSWORD to require a panel login; the WebUI login page
+    // exchanges them for a session token via POST /api/login. Unset (or
+    // half-set) credentials disable auth — bind to loopback in that case.
+    server.set_panel_credentials(
+        std::env::var("BLITZKRIEG_PANEL_USER").ok(),
+        std::env::var("BLITZKRIEG_PANEL_PASSWORD").ok(),
+    );
+    println!(
+        "panel auth: {}",
+        if std::env::var("BLITZKRIEG_PANEL_USER").map(|v| !v.trim().is_empty()).unwrap_or(false)
+            && std::env::var("BLITZKRIEG_PANEL_PASSWORD").map(|v| !v.trim().is_empty()).unwrap_or(false)
+        {
+            "user/password enabled (login via the panel)"
+        } else {
+            "OFF — loopback-only deployment"
+        }
+    );
     if let Err(e) = server.serve(&addr) {
         eprintln!("web server error: {e}");
         std::process::exit(1);

@@ -13,7 +13,7 @@ http://127.0.0.1:51888
 ## Authentication and security
 
 - HTTP endpoints do not enforce authentication by default. Protect the gateway with network controls or a reverse proxy if you expose it publicly.
-- The panel chat supports an optional token. Set `PANEL_CHAT_TOKEN` and send it in the WebSocket auth message.
+- The blitzkrieg panel (`/panel`) authenticates by user/password: POST `/api/login` with `{"user","password"}` (credentials from `BLITZKRIEG_PANEL_USER`/`BLITZKRIEG_PANEL_PASSWORD`) returns a session token; every `/api/*` call then carries it (query `?token=`, `X-Auth-Token` header, or `Authorization: Bearer`).
 - Webhooks require HMAC signatures by default. See the webhook section below.
 
 ## What is this API for?

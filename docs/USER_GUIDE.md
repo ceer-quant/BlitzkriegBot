@@ -306,14 +306,15 @@ blitzkrieg pairing set-owner telegram 123456789 -u "username"
 
 ## WebChat (browser)
 
-WebChat is a local browser chat UI at:
+The trading panel is a local browser UI at:
 
 ```
 http://127.0.0.1:51888/panel
 ```
 
-If you set `PANEL_CHAT_TOKEN`, the browser will prompt for it on first load and
-store it in localStorage.
+Authentication is by user/password: set `BLITZKRIEG_PANEL_USER` and
+`BLITZKRIEG_PANEL_PASSWORD` before starting `ui_kit_web`; the panel shows a
+login page and issues a session token stored in localStorage.
 
 Features:
 - **Unlimited message history** — messages stored in a dedicated database table, not capped

@@ -4,6 +4,7 @@ import vue from '@vitejs/plugin-vue'
 // Dev proxy targets the Blitzkrieg gateway (ui_kit_web) serving /api/* on the
 // same host; no cross-origin in dev, none needed in prod (same origin).
 export default defineConfig({
+  base: '/panel/',
   plugins: [vue()],
   server: {
     port: 51889,
