@@ -1117,6 +1117,9 @@ dependencies = [
 [[package]]
 name = "blitzkrieg-strategy-api"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "blitzkrieg-ui-kit"
