@@ -1,19 +1,18 @@
 /**
  * Gateway API client for the Blitzkrieg panel.
  *
- * A single token must be provided via `?token=` URL fragment, `localStorage`,
- * or direct `setToken()` — the gateway (ui_kit_web) issues a one-time 40-hex
- * token printed at startup and every /api call must carry it (401 otherwise).
+ * Auth: user/password login (`POST /api/login`, set via
+ * `BLITZKRIEG_PANEL_USER`/`BLITZKRIEG_PANEL_PASSWORD` on the server) issues a
+ * session token kept in localStorage; every /api call carries it as
+ * `X-Auth-Token`. A `?token=…` link is also accepted (session hand-off).
  */
 
 const LS_KEY = 'blitzkrieg-panel-token'
 
 let token = (() => {
-  // URL query first (one-time links), then remembered localStorage.
   const q = new URLSearchParams(window.location.search).get('token')
   if (q) {
     localStorage.setItem(LS_KEY, q)
-    // Scrub from the address bar so pastis/Copyscape style tooling doesn't log it.
     history.replaceState(null, '', window.location.pathname)
     return q
   }
@@ -24,10 +23,9 @@ export function getToken(): string {
   return token
 }
 
-export function setToken(next: string): void {
-  token = next.trim()
-  if (token) localStorage.setItem(LS_KEY, token)
-  else localStorage.removeItem(LS_KEY)
+export function clearToken(): void {
+  token = ''
+  localStorage.removeItem(LS_KEY)
 }
 
 export function hasToken(): boolean {
@@ -43,6 +41,44 @@ export class ApiError extends Error {
   }
 }
 
+export function setToken(next: string): void {
+  token = next.trim()
+  if (token) localStorage.setItem(LS_KEY, token)
+  else localStorage.removeItem(LS_KEY)
+}
+
+/** Exchange user/password for a session token. Throws ApiError on failure. */
+export async function login(user: string, password: string): Promise<void> {
+  const res = await fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user, password }),
+  })
+  if (!res.ok) {
+    let msg = '用户名或密码错误'
+    try {
+      const doc = (await res.json()) as { error?: string }
+      if (doc?.error) msg = doc.error
+    } catch {
+      /* server returned no body; keep default */
+    }
+    throw new ApiError(res.status, msg)
+  }
+  const doc = (await res.json()) as { ok: boolean; token?: string; error?: string }
+  if (!doc.ok || !doc.token) throw new ApiError(res.status, doc.error ?? '登录失败')
+  setToken(doc.token)
+}
+
+export async function logout(): Promise<void> {
+  try {
+    await fetch('/api/logout', { headers: { 'X-Auth-Token': token } })
+  } catch {
+    /* network errors during logout are non-fatal */
+  }
+  clearToken()
+  window.location.reload()
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     ...init,
@@ -53,7 +89,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     },
   })
   if (res.status === 401) {
-    throw new ApiError(401, '需要鉴权：请输入网关启动时打印的一次性 token。')
+    throw new ApiError(401, '未登录或会话已失效，请重新登录。')
   }
   if (res.status === 403) {
     throw new ApiError(403, 'Origin 被拒（CORS）：请从面板地址访问。')
@@ -95,23 +131,52 @@ export interface StrategyStatsRow {
 }
 
 export interface EngineStats {
-  dataTicks?: number
-  engineTicks?: number
+  books?: number
+  tops?: number
+  spots?: number
+  rounds?: number
+  evaluations?: number
   signals?: number
-  ordersPlaced?: number
-  ordersRejected?: number
   placeRejected?: number
-  strategyLimitRejected?: number
+  confirmed?: string[]
+  strategies?: StrategyStatsRow[]
+}
+
+export interface Position {
+  asset: string
+  direction: string
+  entryPrice: number
+  currentPrice: number
+  unrealizedPct: number
+  remainingSec?: number
+}
+
+export interface TradeSummary {
+  count: number
+  net: number
+  winRate: number
+}
+
+export interface Round {
+  slot: number
+  ageSec: number
+  timeLeftSec: number
+  canTrade: boolean
 }
 
 export interface Snapshot {
   connected: boolean
+  mode?: string
   lastError?: string | null
   stats?: EngineStats
-  positions?: unknown[]
+  balance?: { balance: number; reserved: number; available: number } | null
+  round?: Round | null
+  positions?: Position[]
+  trades?: TradeSummary
   strategies?: unknown[]
   extensions?: unknown[]
-  marketPlugins?: unknown[]
+  marketPlugins?: PluginRow[]
+  strategyStats?: StrategyStatsRow[]
 }
 
 export interface PluginRow {

@@ -1,6 +1,8 @@
-//! E6-a auth acceptance — spec of #35: 无 token 拒绝、token 错误拒绝、
-//! token 正确通过、跨域 Origin 拒绝。Server is driven over a real socket on
-//! an ephemeral loopback port with a tiny std client.
+//! E6-a auth acceptance — user/password login spec (#57 WebUI direction):
+//! wrong credentials rejected, correct credentials issue a session, the
+//! session passes on query/header/cookie, missing credentials 401, cross-origin
+//! 403. Server is driven over a real socket on an ephemeral loopback port
+//! with a tiny std client.
 
 use crate::core::ipc_client::IpcClient;
 use crate::web::WebServer;
@@ -9,8 +11,9 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
-/// Bind :0 and drive the real handle loop on a thread; returns addr + token.
-fn start(token: bool) -> (SocketAddr, Option<String>) {
+/// Bind :0 and drive the real handle loop on a thread; arms the given
+/// credentials when `creds` is Some.
+fn start(creds: Option<(&str, &str)>) -> SocketAddr {
     let probe = TcpListener::bind("127.0.0.1:0").expect("probe bind");
     let addr = probe.local_addr().expect("addr");
     drop(probe);
@@ -24,16 +27,14 @@ fn start(token: bool) -> (SocketAddr, Option<String>) {
     ));
     drop(dummy);
     let mut server = WebServer::new(IpcClient::new(sock.to_string_lossy().to_string()), 10);
-    let tok = if token {
-        Some(server.generate_auth_token())
-    } else {
-        None
-    };
+    if let Some((u, p)) = creds {
+        server.set_panel_credentials(Some(u.to_string()), Some(p.to_string()));
+    }
     thread::spawn(move || {
         let _ = server.serve(&addr.to_string());
     });
     thread::sleep(Duration::from_millis(150));
-    (addr, tok)
+    addr
 }
 
 fn request(addr: SocketAddr, raw: &str) -> u16 {
@@ -48,58 +49,114 @@ fn request(addr: SocketAddr, raw: &str) -> u16 {
         .unwrap_or(0)
 }
 
-#[test]
-fn no_token_is_rejected() {
-    let (addr, _) = start(true);
-    assert_eq!(request(addr, "GET /api/snapshot HTTP/1.1\r\n\r\n"), 401);
+fn request_body(addr: SocketAddr, raw: &str) -> (u16, String) {
+    let mut s = TcpStream::connect(addr).expect("connect");
+    s.write_all(raw.as_bytes()).unwrap();
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    let status = out
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let body = out.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("").to_string();
+    (status, body)
 }
 
 #[test]
-fn wrong_token_is_rejected() {
-    let (addr, _) = start(true);
+fn login_with_wrong_password_is_rejected() {
+    let addr = start(Some(("admin", "s3cret")));
+    let (code, _) = request_body(
+        addr,
+        "POST /api/login HTTP/1.1\r\nContent-Length: 33\r\n\r\n{\"user\":\"admin\",\"password\":\"wrongx\"",
+    );
+    assert_eq!(code, 401, "wrong password must 401");
+}
+
+#[test]
+fn login_then_session_passes_via_header_query_and_cookie() {
+    let addr = start(Some(("admin", "s3cret")));
+    let body = format!(
+        "POST /api/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n{{\"user\":\"admin\",\"password\":\"s3cret\"}}",
+        "{\"user\":\"admin\",\"password\":\"s3cret\"}".len()
+    );
+    let (code, out) = request_body(addr, &body);
+    assert_eq!(code, 200, "good credentials must 200");
+    let token = serde_json::from_str::<serde_json::Value>(&out)
+        .ok()
+        .and_then(|v| v["token"].as_str().map(String::from))
+        .expect("login must return a token");
+
+    assert_eq!(
+        request(
+            addr,
+            &format!("GET /api/snapshot HTTP/1.1\r\nX-Auth-Token: {token}\r\n\r\n")
+        ),
+        200,
+        "session header passes"
+    );
+    assert_eq!(
+        request(addr, &format!("GET /api/snapshot?token={token} HTTP/1.1\r\n\r\n")),
+        200,
+        "session query passes"
+    );
+    assert_eq!(
+        request(
+            addr,
+            &format!("GET /api/snapshot HTTP/1.1\r\nCookie: bk_session={token}\r\n\r\n")
+        ),
+        200,
+        "session cookie passes"
+    );
+}
+
+#[test]
+fn api_without_session_is_rejected_when_creds_armed() {
+    let addr = start(Some(("admin", "s3cret")));
+    assert_eq!(request(addr, "GET /api/snapshot HTTP/1.1\r\n\r\n"), 401);
     assert_eq!(
         request(addr, "GET /api/snapshot?token=NOPE HTTP/1.1\r\n\r\n"),
         401
     );
-}
-
-#[test]
-fn good_token_passes_via_query_and_header() {
-    let (addr, tok) = start(true);
-    let tok = tok.expect("token generated");
-    assert_eq!(
-        request(
-            addr,
-            &format!("GET /api/snapshot?token={tok} HTTP/1.1\r\n\r\n")
-        ),
-        200,
-        "query token must pass"
-    );
-    assert_eq!(
-        request(
-            addr,
-            &format!("GET /api/snapshot HTTP/1.1\r\nX-Auth-Token: {tok}\r\n\r\n")
-        ),
-        200,
-        "header token must pass"
-    );
+    // The static panel itself stays reachable (logged-in gate lives in the UI).
+    assert_eq!(request(addr, "GET /panel HTTP/1.1\r\n\r\n"), 200);
 }
 
 #[test]
 fn no_auth_configured_passes_loopback() {
-    let (addr, _) = start(false);
+    let addr = start(None);
+    assert_eq!(request(addr, "GET /api/snapshot HTTP/1.1\r\n\r\n"), 200);
+}
+
+#[test]
+fn half_configured_credentials_disable_auth() {
+    // Only one half set must not silently arm a password-less panel.
+    let addr = start(None);
     assert_eq!(request(addr, "GET /api/snapshot HTTP/1.1\r\n\r\n"), 200);
 }
 
 #[test]
 fn cross_origin_refused_and_loopback_origin_ok() {
-    let (addr, tok) = start(true);
-    let tok = tok.unwrap();
+    let addr = start(Some(("admin", "s3cret")));
+    let (code, out) = request_body(
+        addr,
+        &format!(
+            "POST /api/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n{{\"user\":\"admin\",\"password\":\"s3cret\"}}",
+            "{\"user\":\"admin\",\"password\":\"s3cret\"}".len()
+        ),
+    );
+    assert_eq!(code, 200);
+    let token = serde_json::from_str::<serde_json::Value>(&out)
+        .ok()
+        .and_then(|v| v["token"].as_str().map(String::from))
+        .expect("token");
+
     assert_eq!(
         request(
             addr,
             &format!(
-                "GET /api/snapshot?token={tok} HTTP/1.1\r\nOrigin: http://evil.example\r\n\r\n"
+                "GET /api/snapshot?token={token} HTTP/1.1\r\nOrigin: http://evil.example\r\n\r\n"
             )
         ),
         403,
@@ -108,9 +165,33 @@ fn cross_origin_refused_and_loopback_origin_ok() {
     assert_eq!(
         request(
             addr,
-            &format!("GET /api/snapshot?token={tok} HTTP/1.1\r\nOrigin: http://127.0.0.1\r\n\r\n")
+            &format!("GET /api/snapshot?token={token} HTTP/1.1\r\nOrigin: http://127.0.0.1\r\n\r\n")
         ),
         200,
         "loopback origin passes"
+    );
+}
+
+#[test]
+fn session_accepts_bearer_form() {
+    let addr = start(Some(("admin", "s3cret")));
+    let (_, out) = request_body(
+        addr,
+        &format!(
+            "POST /api/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n{{\"user\":\"admin\",\"password\":\"s3cret\"}}",
+            "{\"user\":\"admin\",\"password\":\"s3cret\"}".len()
+        ),
+    );
+    let token = serde_json::from_str::<serde_json::Value>(&out).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        request(
+            addr,
+            &format!("GET /api/snapshot HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n")
+        ),
+        200,
+        "Bearer session form passes"
     );
 }

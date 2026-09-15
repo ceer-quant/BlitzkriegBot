@@ -225,6 +225,28 @@ pub fn render_json(s: &UiSnapshot) -> String {
             "netPnlUsd": r.net_pnl_usd,
             "rejectionCauses": r.rejection_causes,
         })).collect::<Vec<_>>(),
+        // E9-g: engine counters for the overview page (older cores omit).
+        "stats": s.stats.as_ref().map(|st| serde_json::json!({
+            "books": st.books, "tops": st.tops, "spots": st.spots,
+            "rounds": st.rounds, "evaluations": st.evaluations,
+            "signals": st.signals, "placeRejected": st.place_rejected,
+            "orderCounts": st.confirmed.len(),
+            "strategies": st.strategies.iter().map(|r| serde_json::json!({
+                "name": r.name, "enabled": r.enabled, "source": r.source,
+                "ordersPlaced": r.orders_placed, "ordersRejected": r.orders_rejected,
+                "limitRejected": r.limit_rejected,
+                "blockedTiming": r.blocked_timing, "blockedMomentum": r.blocked_momentum,
+                "gateExemptedTiming": r.gate_exempted_timing,
+                "gateExemptedMomentum": r.gate_exempted_momentum,
+                "gateExemptions": r.gate_exemptions,
+                "closedTrades": r.closed_trades, "wins": r.wins, "losses": r.losses,
+                "netPnlUsd": r.net_pnl_usd,
+                "rejectionCauses": r.rejection_causes,
+            })).collect::<Vec<_>>(),
+        })),
+        "strategies": s.strategies.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),
+        "extensions": s.extensions.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),
+        "marketPlugins": s.market_plugins.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),
         "lastError": s.last_error,
     })
     .to_string()
@@ -288,6 +310,73 @@ impl HttpRequest {
     }
 }
 
+/// Byte-equal compare in time proportional to the expected value, so short
+/// wrong guesses are not observably faster than long ones.
+fn same_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        // Do not leak length via early exit: still burn a compare pass.
+        let sink = a.iter().chain(b.iter()).fold(0u8, |acc, x| acc ^ x);
+        return sink == !0u8; // practically never true
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Repo-rooted path to the built Vue panel's `index.html`/assets. Relative to
+/// the ui_kit crate so it holds for both `cargo run` and a repo checkout.
+fn vue_panel_dir() -> Option<std::path::PathBuf> {
+    // CARGO_MANIFEST_DIR is <repo>/ui/ui_kit; the built Vue app lives at
+    // <repo>/ui/webapp/webui/dist.
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let dir = std::path::Path::new(manifest)
+        .join("../webapp/webui/dist/index.html")
+        .canonicalize()
+        .ok()?;
+    dir.is_file().then(|| dir.parent().map(std::path::Path::to_path_buf)).flatten()
+}
+
+/// Serve a static asset from the Vue panel dir; `/panel/` or `/panel` (no
+/// trailing file) resolves to `index.html`. System path traversal is blocked.
+fn serve_vue_panel_asset(path: &str) -> Option<(String, &'static str)> {
+    let rel = path.strip_prefix("/panel/")?;
+    if rel.split('/').any(|seg| seg == ".." || seg.is_empty()) {
+        return None;
+    }
+    serve_vue_panel_file(&std::path::PathBuf::from(rel))
+}
+
+fn serve_vue_panel() -> Option<(String, &'static str)> {
+    serve_vue_panel_file(&std::path::PathBuf::from("index.html"))
+}
+
+fn serve_vue_panel_file(rel: &std::path::Path) -> Option<(String, &'static str)> {
+    let dir = vue_panel_dir()?;
+    let full = dir.join(rel).canonicalize().ok()?;
+    // Canonical path must stay inside the panel dir.
+    if !full.starts_with(&dir) {
+        return None;
+    }
+    let body = std::fs::read(&full).ok()?;
+    let ctype = match full.extension().and_then(|e| e.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        Some("json") => "application/json",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    };
+    Some((
+        String::from_utf8_lossy(&body).into_owned(),
+        ctype,
+    ))
+}
+
 fn url_decode(s: &str) -> String {
     let bytes = s.replace('+', " ").into_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -312,9 +401,13 @@ pub struct WebServer {
     trade_limit: usize,
     /// Present only in gateway mode (`--manage`); enables `/api/command`.
     dispatcher: Option<Arc<Mutex<Dispatcher>>>,
-    /// E6-a: per-process one-time token. `None` disables auth (binds to
-    /// loopback only in that case — the caller's contract).
-    auth_token: Option<String>,
+    /// E6-a panel credentials from `BLITZKRIEG_PANEL_USER` /
+    /// `BLITZKRIEG_PANEL_PASSWORD`. Unset disables auth (loopback-only
+    /// deployment contract).
+    panel_user: Option<String>,
+    panel_password: Option<String>,
+    /// Session tokens issued by a successful `POST /api/login`.
+    sessions: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl WebServer {
@@ -324,30 +417,10 @@ impl WebServer {
             snapshot_src: Arc::new(Mutex::new(client)),
             trade_limit,
             dispatcher: None,
-            auth_token: None,
+            panel_user: None,
+            panel_password: None,
+            sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
-    }
-
-    /// Generate the one-time session token (40 hex chars) and arm the gate.
-    /// Callers must print it exactly once at boot — it never round-trips
-    /// through config files or logs.
-    pub fn generate_auth_token(&mut self) -> String {
-        // Process entropy via std (no external deps): time + address entropy.
-        let mut seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407)
-            ^ (self as *const _ as *const () as usize as u128);
-        let mut hex = String::with_capacity(40);
-        while hex.len() < 40 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            hex.push_str(&format!("{:08x}", (seed >> 33) as u32));
-        }
-        hex.truncate(40);
-        self.auth_token = Some(hex.clone());
-        hex
     }
 
     fn token_from_query(&self, req: &HttpRequest) -> Option<String> {
@@ -360,27 +433,108 @@ impl WebServer {
         None
     }
 
-    /// E6-a gate: token (query / X-Auth-Token header / basic-auth user) when
-    /// one is armed; Origin policy — foreign origins 403, loopback allowed.
-    fn authorize(&self, req: &HttpRequest) -> u16 {
-        if !req.path().starts_with("/api/") {
-            return 200; // the HTML panel itself is read-only and harmless
+    /// Arm user/password auth from env (`BLITZKRIEG_PANEL_USER` +
+    /// `BLITZKRIEG_PANEL_PASSWORD`). Both must be non-empty; empty/unset
+    /// disables auth (loopback-only deployment contract).
+    pub fn set_panel_credentials(&mut self, user: Option<String>, password: Option<String>) {
+        self.panel_user = user.filter(|u| !u.trim().is_empty());
+        self.panel_password = password.filter(|p| !p.trim().is_empty());
+        if self.panel_user.is_none() || self.panel_password.is_none() {
+            // Half-configured is a config error — refuse the whole pair so a
+            // password-less panel never ships.
+            self.panel_user = None;
+            self.panel_password = None;
         }
-        if let Some(expected) = &self.auth_token {
+    }
+
+    /// Issue a session token for valid panel credentials.
+    fn login(&self, user: &str, password: &str) -> Option<String> {
+        let (expected_user, expected_pass) =
+            (self.panel_user.as_deref()?, self.panel_password.as_deref()?);
+        // Constant-ish time compare to blunt trivial timing probes.
+        if !same_time_eq(user.as_bytes(), expected_user.as_bytes())
+            || !same_time_eq(password.as_bytes(), expected_pass.as_bytes())
+        {
+            return None;
+        }
+        // Session token: time + address entropy via std only.
+        let mut seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407)
+            ^ (std::process::id() as u128) << 32
+            ^ (&password as *const _ as *const () as usize as u128);
+        let mut hex = String::with_capacity(40);
+        while hex.len() < 40 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            hex.push_str(&format!("{:08x}", (seed >> 33) as u32));
+        }
+        hex.truncate(40);
+        if let Ok(mut s) = self.sessions.lock() {
+            s.insert(hex.clone());
+        }
+        Some(hex)
+    }
+
+    fn session_valid(&self, token: &str) -> bool {
+        match self.sessions.lock() {
+            Ok(s) => s.contains(token),
+            Err(_) => false,
+        }
+    }
+
+    /// Revoke a session (logout).
+    fn logout(&self, token: &str) {
+        if let Ok(mut s) = self.sessions.lock() {
+            s.remove(token);
+        }
+    }
+
+    fn token_from_cookies(&self, req: &HttpRequest) -> Option<String> {
+        let cookies = req.header("cookie")?;
+        for pair in cookies.split(';') {
+            let pair = pair.trim();
+            if let Some(v) = pair.strip_prefix("bk_session=") {
+                return Some(v.to_string());
+            }
+        }
+        None
+    }
+
+    /// E6-a gate: user/password login issues a session; every /api/* call then
+    /// carries the session (query / X-Auth-Token / Bearer / bk_session cookie).
+    /// Origin policy — foreign origins 403, loopback allowed.
+    fn authorize(&self, req: &HttpRequest) -> u16 {
+        if req.path() == "/api/login" {
+            return 200; // the login endpoint itself must be reachable
+        }
+        if !req.path().starts_with("/api/") {
+            return 200; // the panel itself is served to unauthenticated clients
+        }
+        if self.panel_user.is_some() {
             let supplied = self
                 .token_from_query(req)
+                .or_else(|| self.token_from_cookies(req))
                 .or_else(|| req.header("x-auth-token").map(String::from))
                 .or_else(|| {
                     req.header("authorization").and_then(|a| {
-                        a.strip_prefix("Basic ").and_then(|b| {
-                            let raw = data_encoding_free_base64(b);
-                            let decoded = std::str::from_utf8(&raw).ok()?;
-                            decoded.split(':').next().map(String::from)
-                        })
+                        a.strip_prefix("Bearer ")
+                            .map(String::from)
+                            .or_else(|| {
+                                // Legacy basic-auth user form still accepted.
+                                a.strip_prefix("Basic ").and_then(|b| {
+                                    let raw = data_encoding_free_base64(b);
+                                    std::str::from_utf8(&raw)
+                                        .ok()
+                                        .and_then(|d| d.split(':').next().map(String::from))
+                                })
+                            })
                     })
                 });
             match supplied {
-                Some(t) if t == expected.as_str() => {}
+                Some(t) if self.session_valid(&t) => {}
                 _ => return 401,
             }
         }
@@ -405,7 +559,9 @@ impl WebServer {
             snapshot_src: Arc::new(Mutex::new(client)),
             trade_limit,
             dispatcher: Some(Arc::new(Mutex::new(dispatcher))),
-            auth_token: None,
+            panel_user: None,
+            panel_password: None,
+            sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -504,6 +660,70 @@ impl WebServer {
                     req.query_cmd().unwrap_or_default()
                 };
                 (200, "application/json", self.run_command(&cmd))
+            }
+            ("POST", "/api/login") => {
+                // body: {"user":"…","password":"…"} → {"ok":true,"token":…,
+                // "user":…} so the WebUI can store it as a session.
+                let creds = body_to_command(&req.body); // reuse tiny parse? no — dedicated parse below
+                let _ = creds;
+                let doc = match parse_login_body(&req.body) {
+                    Some((u, p)) => match self.login(&u, &p) {
+                        Some(tok) => serde_json::json!({
+                            "ok": true, "token": tok, "user": u,
+                        }),
+                        None => serde_json::json!({
+                            "ok": false, "error": "用户名或密码错误",
+                        }),
+                    },
+                    None => serde_json::json!({
+                        "ok": false, "error": "请求格式错误（需要 JSON {user, password}）",
+                    }),
+                };
+                let status = if doc["ok"] == serde_json::json!(true) { 200 } else { 401 };
+                (
+                    status,
+                    "application/json; charset=utf-8",
+                    serde_json::to_string(&doc).unwrap_or_default(),
+                )
+            }
+            ("GET", "/api/logout") | ("POST", "/api/logout") => {
+                // Session token via any channel; revoke it. Harmless if absent.
+                let token = self
+                    .token_from_query(&req)
+                    .or_else(|| self.token_from_cookies(&req))
+                    .or_else(|| req.header("x-auth-token").map(String::from))
+                    .unwrap_or_default();
+                self.logout(&token);
+                (200, "application/json", "{\"ok\":true}".to_string())
+            }
+            ("GET", "/") | ("GET", "/panel") | ("GET", "/panel/") => {
+                // /panel is the canonical entry: the E9-g Vue app when built
+                // (ui/webapp/webui/dist), else the built-in HTML panel. `/`
+                // redirects so human-typed origins always land in the same place.
+                if target != "/panel" && target != "/panel/" {
+                    let head = "HTTP/1.1 302 Found\r\nLocation: /panel\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.flush();
+                    return;
+                }
+                match serve_vue_panel() {
+                    Some((body, ctype)) => (200, ctype, body),
+                    None => {
+                        let snap = self.snapshot();
+                        (
+                            200,
+                            "text/html; charset=utf-8",
+                            render_html_with(&snap, self.dispatcher.is_some()),
+                        )
+                    }
+                }
+            }
+            ("GET", path) if path.starts_with("/panel/") => {
+                // Vue app assets (`/panel/assets/*.js|css`, favicon, …).
+                match serve_vue_panel_asset(path) {
+                    Some((body, ctype)) => (200, ctype, body),
+                    None => (404, "text/plain; charset=utf-8", "not found".to_string()),
+                }
             }
             ("GET", _) => {
                 let snap = self.snapshot();
@@ -611,6 +831,29 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
 }
 
 /// POST bodies may be raw command text or `{"cmd":"..."}`.
+/// Parse a login request body: JSON `{"user": “…”, “password”: “…”}` (or the
+/// url-encoded `user=…&password=…` form). Returns None on malformed input.
+fn parse_login_body(body: &str) -> Option<(String, String)> {
+    let trimmed = body.trim();
+    if trimmed.starts_with('{') {
+        let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+        let user = v.get("user")?.as_str()?.to_string();
+        let password = v.get("password")?.as_str()?.to_string();
+        Some((user, password))
+    } else {
+        let mut user = None;
+        let mut password = None;
+        for pair in trimmed.split('&') {
+            if let Some(v) = pair.strip_prefix("user=") {
+                user = Some(url_decode(v));
+            } else if let Some(v) = pair.strip_prefix("password=") {
+                password = Some(url_decode(v));
+            }
+        }
+        Some((user?, password?))
+    }
+}
+
 fn body_to_command(body: &str) -> String {
     let t = body.trim();
     if t.starts_with('{') {

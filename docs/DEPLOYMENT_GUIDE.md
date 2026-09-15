@@ -14,7 +14,8 @@ Required environment variables (minimum):
 - `TELEGRAM_BOT_TOKEN` (if using Telegram)
 
 Optional:
-- `PANEL_CHAT_TOKEN` (panel chat auth)
+- `BLITZKRIEG_PANEL_USER` / `BLITZKRIEG_PANEL_PASSWORD` (panel user/password auth)
+- `PANEL_CHAT_TOKEN` (panel chat WebSocket auth)
 - `SMTP_*` (email alerts)
 - `MARKET_INDEX_*` (market index tuning)
 
@@ -72,7 +73,8 @@ docker run --rm \
   -p 51888:51888 \
   -e ANTHROPIC_API_KEY=... \
   -e TELEGRAM_BOT_TOKEN=... \
-  -e PANEL_CHAT_TOKEN=... \
+  -e BLITZKRIEG_PANEL_USER=admin \
+  -e BLITZKRIEG_PANEL_PASSWORD=... \
   -v blitzkrieg_data:/data \
   blitzkrieg
 ```
