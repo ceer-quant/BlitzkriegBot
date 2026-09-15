@@ -71,6 +71,11 @@ async function anchorToSolana(
     const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
 
     // Create memo instruction with the hash
+    // Historical contract, naming deprecated (D-13 / E1-a #21): this memo prefix
+    // is already persisted on-chain under existing anchors. A rename would make
+    // past anchors unverifiable, so the prefix is deliberately kept verbatim.
+    // New-format memos may adopt a different scheme ONLY as a new version that
+    // still validates the old one (dual-read), never as an in-place rename.
     const memoData = `clodds:ledger:${hash}`;
     const memoIx = new TransactionInstruction({
       keys: [],
