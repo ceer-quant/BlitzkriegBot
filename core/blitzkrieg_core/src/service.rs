@@ -1179,12 +1179,21 @@ impl Core {
         for (token, req) in tokens {
             let name = req.strategy.clone();
             if let Some(limit) = self.config.strategy_limits.get(&name).cloned() {
-                if self.strategy_limit_ok(&req, &limit).is_err() {
+                if let Err(reason) = self.strategy_limit_ok(&req, &limit) {
+                    // E9-c: the reason existed before but was discarded — bucket
+                    // it so operator tooling can answer "why did this strategy
+                    // stop placing?".
+                    let bucket = if reason.contains("position cap") {
+                        "limit.positionCap"
+                    } else if reason.contains("notional cap") {
+                        "limit.notionalCap"
+                    } else {
+                        "limit.other"
+                    };
                     self.stats.strategy_limit_rejected += 1;
-                    self.strategy_accounting
-                        .entry(name)
-                        .or_default()
-                        .limit_rejected += 1;
+                    let acc = self.strategy_accounting.entry(name).or_default();
+                    acc.limit_rejected += 1;
+                    *acc.rejection_causes.entry(bucket.into()).or_default() += 1;
                     continue;
                 }
             }
@@ -1196,9 +1205,18 @@ impl Core {
                     }
                     placed += 1;
                 }
-                Err(_) => {
+                Err(err) => {
                     self.stats.place_rejected += 1;
-                    self.strategy_accounting.entry(name).or_default().rejected += 1;
+                    let bucket = classify_rejection(&err);
+                    // E9-c: attach the live reason text verbatim to the receipt
+                    // log line so per-strategy accounting and logs tell the
+                    // same story.
+                    tracing::info!(target: "strategy",
+                        "entry rejected: strategy={name} cause={bucket} reason={}",
+                        err.message);
+                    let acc = self.strategy_accounting.entry(name).or_default();
+                    acc.rejected += 1;
+                    *acc.rejection_causes.entry(bucket).or_default() += 1;
                 }
             }
         }
@@ -1318,6 +1336,12 @@ impl Core {
                     "ordersPlaced": acc.placed,
                     "ordersRejected": acc.rejected,
                     "limitRejected": acc.limit_rejected,
+                    // E9-c: cause → count; only counted buckets appear.
+                    "rejectionCauses": if acc.rejection_causes.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(acc.rejection_causes)
+                    },
                     "closedTrades": acc.closed_trades,
                     "wins": acc.wins,
                     "losses": acc.losses,
@@ -1808,6 +1832,12 @@ impl Core {
     }
     pub fn is_killed(&self) -> bool {
         self.risk.is_killed()
+    }
+
+    /// Hot-swap the live risk gate configuration without a restart (test and
+    /// runtime-config path; `place()` reads it on every check).
+    pub fn risk_config_mut(&mut self) -> &mut RiskConfig {
+        self.risk.config_mut()
     }
     /// Broadcast a structured error to Node (never swallowed).
     pub fn emit_error(&self, e: CoreError) {
@@ -2421,11 +2451,64 @@ struct StrategyAccounting {
     placed: u64,
     rejected: u64,
     limit_rejected: u64,
+    /// E9-c: rejection-cause buckets for this strategy. The cause label is the
+    /// machine-parseable part (see `classify_rejection`), so an operator can
+    /// see WHY entries bounced without grep-ing logs. Only counted buckets are
+    /// serialized (empty map → absent from the row).
+    rejection_causes: std::collections::BTreeMap<String, u64>,
     closed_trades: u64,
     wins: u64,
     losses: u64,
     fees_usd: Decimal,
     net_pnl_usd: Decimal,
+}
+
+/// E9-c: classify a rejection message into a stable bucket label. Messages
+/// come from `Risk::check`, `breaker.is_halted`, `positions.can_open`,
+/// `strategy_limit_ok` and the ledger/OME reserve paths — matched by their
+/// canonical prefixes so wording tweaks elsewhere stay visible: anything
+/// unrecognized falls into a `other:<len-capped text>` bucket rather than
+/// being silently lumped with a wrong cause.
+fn classify_rejection(err: &crate::model::CoreError) -> String {
+    let msg = &err.message;
+    let code_label = |c: crate::model::CoreErrorCode| {
+        use crate::model::CoreErrorCode as E;
+        match c {
+            E::KillSwitchActive => "killswitch".to_string(),
+            E::RiskRejected => "risk".to_string(),
+            E::InsufficientFunds => "ledger.reserve".to_string(),
+            E::WouldCross | E::InvalidTickSize | E::InvalidSize => "ome".to_string(),
+            _ => "other".to_string(),
+        }
+    };
+    let bucket = if msg.contains("breaker active until") {
+        "risk:breaker".to_string()
+    } else if msg.starts_with("Max positions")
+        || msg.starts_with("Already in")
+        || msg.starts_with("Daily loss limit")
+    {
+        format!(
+            "positions.{}",
+            msg.split_whitespace()
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("_")
+                .to_lowercase()
+        )
+    } else if msg.starts_with("SL cooldown") || msg.starts_with("Exit cooldown") {
+        "positions.exitCooldown".to_string()
+    } else if msg.starts_with("Loss cooldown") || msg.starts_with("Asset cooldown") {
+        "positions.lossCooldown".to_string()
+    } else if msg.contains("position cap") || msg.contains("notional cap") {
+        "limit.cap".to_string()
+    } else if msg.starts_with("notional") && msg.contains("exceeds per-order cap") {
+        "risk.perOrderCap".to_string()
+    } else if msg.contains("outside") && msg.contains("price band") {
+        "risk.priceBand".to_string()
+    } else {
+        format!("{}.{}", code_label(err.code), "other")
+    };
+    bucket
 }
 
 /// Compact round info for the UI.
@@ -4091,6 +4174,61 @@ mod strategy_dispatch_tests {
         assert_eq!(s["limitRejected"], 1);
         assert_eq!(s["ordersPlaced"], 0);
         assert_eq!(s["openPositions"], 0);
+    }
+
+    #[test]
+    fn rejection_causes_report_position_cap_bucket() {
+        // E9-c: the limit rejection lands in a machine-parseable bucket next
+        // to the live counters, so an operator can see WHY without logs.
+        let mut limits = HashMap::new();
+        limits.insert(
+            "spread_arb".to_string(),
+            StrategyLimit {
+                max_open_positions: Some(0),
+                ..Default::default()
+            },
+        );
+        let mut c = core_with_engine(limits);
+        let now = 1_000_000i64;
+        feed_entry_setup(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 12_000), 0);
+        let stats = c.strategy_stats();
+        let s = strategy_entry(&stats, "spread_arb");
+        assert_eq!(
+            s["rejectionCauses"]["limit.positionCap"], 1,
+            "position-cap rejection must be bucketed: {s}"
+        );
+        assert_eq!(
+            s["ordersRejected"], 0,
+            "cap rejections are not place rejections"
+        );
+        // A strategy that never placed has NO causes object at all.
+        let clean_core = core_with_engine(HashMap::new());
+        let clean_stats = clean_core.strategy_stats();
+        let clean = strategy_entry(&clean_stats, "spread_arb");
+        assert!(clean["rejectionCauses"].is_null());
+    }
+
+    #[test]
+    fn rejection_causes_report_per_order_cap_risk_bucket() {
+        // E9-c: a Risk::check per-order-cap rejection inside place() is
+        // bucketed as risk.perOrderCap (previously the reason was dropped).
+        let mut c = core_with_engine(HashMap::new());
+        let now = 1_000_000i64;
+        feed_entry_setup(&mut c, now);
+        c.risk_config_mut().max_order_notional = dec!(1);
+        assert_eq!(
+            c.engine_evaluate(now + 12_000),
+            0,
+            "1 USD per-order cap must reject the 4.30 entry"
+        );
+        let stats = c.strategy_stats();
+        let s = strategy_entry(&stats, "spread_arb");
+        assert_eq!(s["ordersRejected"], 1);
+        assert_eq!(
+            s["rejectionCauses"]["risk.perOrderCap"], 1,
+            "must count and bucket the risk reason: {s}"
+        );
     }
 
     #[test]

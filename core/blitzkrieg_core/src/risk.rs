@@ -112,6 +112,10 @@ impl RiskGate {
         self.config = c;
     }
 
+    pub fn config_mut(&mut self) -> &mut RiskConfig {
+        &mut self.config
+    }
+
     pub fn check(&self, req: &OrderRequest) -> CoreResult<()> {
         if self.killed {
             return Err(CoreError::new(
