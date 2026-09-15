@@ -14,7 +14,7 @@ use crate::core::ipc_client::IpcClient;
 use crate::core::types::{CoreEvent, UiSnapshot};
 
 /// A flat, render-ready view model for a native panel.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct AppView {
     pub connected: bool,
     pub mode: String,
@@ -31,7 +31,7 @@ pub struct AppView {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AppRow {
     pub asset: String,
     pub direction: String,

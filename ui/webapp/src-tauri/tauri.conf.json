@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Blitzkrieg Panel",
+  "version": "0.1.0",
+  "identifier": "com.ceer-quant.blitzkrieg-panel",
+  "build": {
+    "frontendDist": "../webui"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Blitzkrieg Panel",
+        "width": 1100,
+        "height": 760,
+        "url": "index.html"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:*"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"]
+  }
+}

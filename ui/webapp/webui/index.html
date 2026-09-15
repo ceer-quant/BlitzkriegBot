@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<title>Blitzkrieg Panel</title>
+<style>
+  body { font: 14px/1.5 -apple-system, monospace; background:#111; color:#eee; margin:24px; }
+  h1 { color:#7fd7ff; font-size:18px; }
+  .card { border:1px solid #333; border-radius:6px; padding:12px 16px; margin:8px 0; }
+  .big { font-size:20px; font-weight:700; }
+  .sub { color:#999; }
+  button { background:#2a2a2a; color:#eee; border:1px solid #444; border-radius:4px; padding:4px 10px; cursor:pointer; }
+  input { background:#1a1a1a; color:#eee; border:1px solid #444; border-radius:4px; padding:4px 8px; }
+  #log { color:#aaa; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Blitzkrieg Panel (Tauri)</h1>
+<div id="view" class="card">loading…</div>
+<div class="card">
+  <input id="cmd" placeholder="status / positions / strategies / markets" style="width:70%" />
+  <button onclick="run()">run</button>
+</div>
+<pre id="log" class="card"></pre>
+<script>
+const { invoke } = window.__TAURI__;
+async function refresh() {
+  try {
+    const v = JSON.parse(await invoke('desktop_snapshot'));
+    document.getElementById('view').innerHTML =
+      `<div class="big">${v.headline || ''}</div>` +
+      `<div class="sub">balance ${v.balance ?? '—'} · round ${v.round_slot || '—'} · ` +
+      `${v.open_positions} open · ${v.trades} trades · net ${v.net_pnl}</div>`;
+  } catch (e) { document.getElementById('view').textContent = 'offline: ' + e; }
+}
+async function run() {
+  const cmd = document.getElementById('cmd').value.trim();
+  if (!cmd) return;
+  try {
+    const out = JSON.stringify(JSON.parse(await invoke('desktop_command', { cmd })), null, 2);
+    append(out);
+  } catch (e) { append('error: ' + e); }
+}
+function append(s) {
+  const el = document.getElementById('log');
+  el.textContent = (s + '\n' + el.textContent).slice(0, 8000);
+}
+document.getElementById('cmd').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') run();
+});
+refresh(); setInterval(refresh, 1000);
+</script>
+</body>
+</html>
