@@ -35,7 +35,11 @@ pub fn render(s: &UiSnapshot) -> String {
             r.slot,
             r.age_sec,
             r.time_left_sec,
-            if r.can_trade { format!("{GREEN}TRADING{RESET}") } else { format!("{DIM}WAITING{RESET}") }
+            if r.can_trade {
+                format!("{GREEN}TRADING{RESET}")
+            } else {
+                format!("{DIM}WAITING{RESET}")
+            }
         ));
     } else {
         o.push_str(&format!("  {DIM}round: (engine not running){RESET}\n"));
@@ -68,7 +72,10 @@ pub fn render(s: &UiSnapshot) -> String {
     if s.positions.is_empty() {
         o.push_str(&format!("  {DIM}(none){RESET}\n"));
     } else {
-        o.push_str(&format!("  {DIM}{:<6} {:<5} {:>6} {:>6} {:>8} {:>6}{RESET}\n", "ASSET", "DIR", "ENTRY", "CUR", "PNL", "LEFT"));
+        o.push_str(&format!(
+            "  {DIM}{:<6} {:<5} {:>6} {:>6} {:>8} {:>6}{RESET}\n",
+            "ASSET", "DIR", "ENTRY", "CUR", "PNL", "LEFT"
+        ));
         for p in &s.positions {
             let c = if p.unrealized_pct >= 0.0 { GREEN } else { RED };
             o.push_str(&format!(

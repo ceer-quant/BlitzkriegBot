@@ -37,7 +37,11 @@ impl Default for EventBus {
 impl EventBus {
     pub fn new(cap: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Inner { seq: 0, events: VecDeque::new(), cap: cap.max(1) })),
+            inner: Arc::new(Mutex::new(Inner {
+                seq: 0,
+                events: VecDeque::new(),
+                cap: cap.max(1),
+            })),
         }
     }
 
@@ -106,7 +110,10 @@ mod tests {
     use super::*;
 
     fn risk_alert(msg: &str) -> CoreEvent {
-        CoreEvent::RiskAlert { code: serde_json::json!("Internal"), message: msg.into() }
+        CoreEvent::RiskAlert {
+            code: serde_json::json!("Internal"),
+            message: msg.into(),
+        }
     }
 
     #[test]
