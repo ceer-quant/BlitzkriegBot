@@ -29,7 +29,7 @@ Blitzkrieg is a modular AI trading terminal built on three core principles:
     +-----------------------------------------------------------------+
     |                          GATEWAY LAYER                          |
     |    HTTP Server (Express) | WebSocket | Rate Limiting | Auth     |
-    |    Port: 18789 | Connections: 1000+ | TLS via reverse proxy     |
+    |    Port: 51888 | Connections: 1000+ | TLS via reverse proxy     |
     +-----------------------------------------------------------------+
                 |                    |                    |
         --------+--------    --------+--------    --------+--------
@@ -87,7 +87,7 @@ src/gateway/
 **Key Configuration:**
 ```typescript
 interface GatewayConfig {
-  port: number;           // Default: 18789
+  port: number;           // Default: 51888
   host: string;           // Default: 127.0.0.1
   maxConnections: number; // Default: 1000
   rateLimit: {

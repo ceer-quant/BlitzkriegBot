@@ -15,7 +15,7 @@ The setup wizard will:
 3. Write your config to `~/.blitzkrieg/`
 4. Offer to start the gateway immediately
 
-Once running, open **http://localhost:18789/webchat** in your browser.
+Once running, open **http://localhost:51888/webchat** in your browser.
 
 ## Try It Out
 
@@ -50,10 +50,10 @@ npm start
 ### "ANTHROPIC_API_KEY not set"
 Run `blitzkrieg onboard` again — it will prompt for your key and save it to `~/.blitzkrieg/.env`.
 
-### "Port 18789 is in use"
+### "Port 51888 is in use"
 Another instance is running. Kill it or change the port:
 ```bash
-lsof -i :18789 | grep LISTEN | awk '{print $2}' | xargs kill
+lsof -i :51888 | grep LISTEN | awk '{print $2}' | xargs kill
 
 # Or change port
 blitzkrieg config set gateway.port 18790

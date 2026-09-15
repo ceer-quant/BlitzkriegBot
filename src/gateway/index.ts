@@ -425,7 +425,7 @@ export interface AppGateway {
  * Create the full application gateway (HTTP + channels + agent).
  *
  * This wires together:
- * - HTTP/WebSocket server (for webchat + health)
+ * - HTTP/WebSocket server (for panel + health)
  * - Channel manager (Telegram/Slack/etc)
  * - Sessions, feeds, DB, memory
  * - Command registry and command handling
@@ -1459,7 +1459,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
     queuedExecutionRef ?? executionService
   );
 
-  // Wire command palette for webchat — merges registry commands + skill commands
+  // Wire command palette for the panel chat — merges registry commands + skill commands
   httpGateway.setCommandListHandler(() => {
     const registryCommands = commands.listAll();
     const registryNames = new Set(registryCommands.map(c => c.name));
@@ -1482,7 +1482,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       .sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
   });
 
-  // Clean up in-memory session cache when a webchat session is deleted via API
+  // Clean up in-memory session cache when a panel session is deleted via API
   httpGateway.setOnSessionDelete((key: string) => {
     sessions.deleteSession(key);
   });

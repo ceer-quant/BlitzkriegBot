@@ -5,7 +5,7 @@
 import { WebSocketServer } from 'ws';
 import { createTelegramChannel } from './telegram/index';
 import { createDiscordChannel } from './discord/index';
-import { createWebChatChannel, WebChatChannel } from './webchat/index';
+import { createPanelChatChannel, PanelChatChannel } from './panel/index';
 import { createWhatsAppChannel, WhatsAppConfig } from './whatsapp/index';
 import { createSlackChannel, SlackConfig } from './slack/index';
 import { createGoogleChatChannel, GoogleChatConfig } from './googlechat/index';
@@ -86,7 +86,7 @@ export async function createChannelManager(
   options?: { offlineQueue?: OfflineQueueConfig }
 ): Promise<ChannelManager> {
   const channels = new Map<string, ChannelAdapter>();
-  let webchat: WebChatChannel | null = null;
+  let panelChat: PanelChatChannel | null = null;
   const offlineQueue = resolveOfflineQueueConfig(options?.offlineQueue);
   const queueByPlatform = new Map<string, Array<QueuedMessage>>();
   let queueTimer: NodeJS.Timeout | null = null;
@@ -118,10 +118,10 @@ export async function createChannelManager(
       createDiscordChannel(config.discord!, callbacks, callbacks.pairing, callbacks.commands));
   }
 
-  // Initialize WebChat if enabled (starts when WebSocket attached)
-  if (config.webchat?.enabled) {
-    logger.info('Initializing WebChat channel');
-    webchat = createWebChatChannel(config.webchat, callbacks);
+  // Initialize the panel chat if enabled (starts when WebSocket attached)
+  if (config.panel?.enabled) {
+    logger.info('Initializing PanelChat channel');
+    panelChat = createPanelChatChannel(config.panel, callbacks);
   }
 
   // Initialize WhatsApp if enabled
@@ -254,8 +254,8 @@ export async function createChannelManager(
           logger.error({ error, channel: name }, `Failed to stop ${name} channel — continuing`);
         }
       }
-      if (webchat) {
-        webchat.stop();
+      if (panelChat) {
+        panelChat.stop();
       }
       if (queueTimer) {
         clearInterval(queueTimer);
@@ -266,24 +266,24 @@ export async function createChannelManager(
     async send(message: OutgoingMessage): Promise<string | null> {
       const formatted = formatOutgoingMessage(message);
       await flushQueueFor(formatted.platform);
-      // Handle webchat separately
-      if (formatted.platform === 'webchat') {
-        if (webchat) {
-          if (!isAdapterConnected(webchat, formatted)) {
-            enqueueMessage(formatted, 'WebChat not connected');
+      // Handle panelChat separately
+      if (formatted.platform === 'panelChat') {
+        if (panelChat) {
+          if (!isAdapterConnected(panelChat, formatted)) {
+            enqueueMessage(formatted, 'PanelChat not connected');
             return null;
           }
           try {
-            return await webchat.sendMessage(formatted);
+            return await panelChat.sendMessage(formatted);
           } catch (error) {
-            enqueueMessage(formatted, 'WebChat send failed', error);
+            enqueueMessage(formatted, 'PanelChat send failed', error);
             return null;
           }
         } else {
-          if (isPlatformEnabled('webchat')) {
-            enqueueMessage(formatted, 'WebChat not enabled');
+          if (isPlatformEnabled('panelChat')) {
+            enqueueMessage(formatted, 'PanelChat not enabled');
           } else {
-            logger.warn('WebChat not enabled');
+            logger.warn('PanelChat not enabled');
           }
           return null;
         }
@@ -316,7 +316,7 @@ export async function createChannelManager(
         ...formatOutgoingMessage(message),
         messageId: message.messageId,
       };
-      const channel = formatted.platform === 'webchat' ? webchat : channels.get(formatted.platform);
+      const channel = formatted.platform === 'panelChat' ? panelChat : channels.get(formatted.platform);
       if (channel?.editMessage) {
         await channel.editMessage(formatted);
       } else {
@@ -329,7 +329,7 @@ export async function createChannelManager(
         ...formatOutgoingMessage(message),
         messageId: message.messageId,
       };
-      const channel = formatted.platform === 'webchat' ? webchat : channels.get(formatted.platform);
+      const channel = formatted.platform === 'panelChat' ? panelChat : channels.get(formatted.platform);
       if (channel?.deleteMessage) {
         await channel.deleteMessage(formatted);
       } else {
@@ -382,17 +382,17 @@ export async function createChannelManager(
     },
 
     attachWebSocket(wss: WebSocketServer) {
-      if (webchat) {
-        webchat.start(wss);
-        logger.info('WebChat attached to WebSocket server');
-        flushQueueFor('webchat').catch((error) => {
-          logger.warn({ error }, 'Failed to flush WebChat queue');
+      if (panelChat) {
+        panelChat.start(wss);
+        logger.info('Panel chat attached to WebSocket server');
+        flushQueueFor('panelChat').catch((error) => {
+          logger.warn({ error }, 'Failed to flush PanelChat queue');
         });
       }
     },
 
     getChatConnectionHandler() {
-      return webchat?.getConnectionHandler?.() ?? null;
+      return panelChat?.getConnectionHandler?.() ?? null;
     },
 
     getAdapters(): Record<string, ChannelAdapter> {
@@ -483,13 +483,13 @@ export async function createChannelManager(
         continue;
       }
 
-      const adapter = platform === 'webchat' ? webchat : channels.get(platform);
+      const adapter = platform === 'panelChat' ? panelChat : channels.get(platform);
       if (!adapter) return;
       if (!isAdapterConnected(adapter, item.message)) return;
 
       try {
-        if (platform === 'webchat') {
-          await (adapter as WebChatChannel).sendMessage(item.message);
+        if (platform === 'panelChat') {
+          await (adapter as PanelChatChannel).sendMessage(item.message);
         } else {
           await (adapter as ChannelAdapter).sendMessage(item.message);
         }

@@ -167,8 +167,7 @@ export async function createMattermostChannel(
       const requireMention = config.groups?.[post.channel_id]?.requireMention ?? true;
       if (requireMention && botUserId) {
         const escapedBotId = botUserId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        // @blitzkrieg is canonical; @clodds accepted during the rename window.
-        const mentionPattern = new RegExp(`@${escapedBotId}|@blitzkrieg|@clodds`, 'i');
+        const mentionPattern = new RegExp(`@${escapedBotId}|@blitzkrieg`, 'i');
         if (!mentionPattern.test(text)) {
           return;
         }

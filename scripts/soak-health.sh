@@ -46,7 +46,7 @@ if [ -n "$core_pid" ]; then
 fi
 
 # ── 2. health endpoint ──────────────────────────────────────────────────────
-health=$(curl -s -m 5 http://127.0.0.1:18789/health 2>/dev/null)
+health=$(curl -s -m 5 http://127.0.0.1:51888/health 2>/dev/null)
 case "$health" in
   *'"status":"healthy"'*|*'"status": "healthy"'*) : ;;
   *) problems+=("health not healthy (${health:0:60})") ;;

@@ -899,7 +899,6 @@ mod tests {
     use super::*;
     use crate::risk::RiskConfig;
     use crate::service::{Core, CoreConfig};
-    use rust_decimal::prelude::FromPrimitive;
     use rust_decimal_macros::dec;
 
     fn cfg() -> EngineConfig {
@@ -959,7 +958,7 @@ mod tests {
             ..Default::default()
         });
         // Keep the exit engine out of the way for signal tests.
-        let mut cc = c.config_mut();
+        let cc = c.config_mut();
         cc.auto_exits_enabled = false;
         c
     }
@@ -1027,7 +1026,7 @@ mod tests {
     #[test]
     fn engine_blocks_entry_when_spot_moves_against() {
         let mut e = Engine::new(cfg());
-        let mut c = core();
+        let _c = core();
         let now = 1_000_000i64;
         e.on_data(DataEvent::RoundMarkets {
             markets: vec![market(1_800_000)],

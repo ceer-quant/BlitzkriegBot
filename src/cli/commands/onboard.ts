@@ -117,7 +117,7 @@ export async function runOnboard(): Promise<void> {
   console.log('  4. Validate all credentials before saving\n');
 
   const config: Record<string, unknown> = {
-    gateway: { port: 18789 },
+    gateway: { port: 51888 },
     agents: {
       defaults: {
         workspace: process.cwd(),
@@ -323,7 +323,7 @@ export async function runOnboard(): Promise<void> {
 
   console.log('\n\x1b[1mEnabled services:\x1b[0m');
   console.log(`   \x1b[32m✓\x1b[0m Claude AI (Anthropic)`);
-  console.log(`   \x1b[32m✓\x1b[0m WebChat (http://localhost:18789/webchat)`);
+  console.log(`   \x1b[32m✓\x1b[0m Web panel (http://localhost:51888/panel)`);
   if (telegramToken) console.log(`   \x1b[32m✓\x1b[0m Telegram (@${telegramBotName})`);
   if (discordToken) console.log(`   \x1b[32m✓\x1b[0m Discord`);
 
@@ -339,7 +339,7 @@ export async function runOnboard(): Promise<void> {
   console.log('\n   2. Start Blitzkrieg:');
   console.log('      \x1b[36mnpm start\x1b[0m');
   console.log('\n   3. Open WebChat:');
-  console.log('      \x1b[36mhttp://localhost:18789/webchat\x1b[0m\n');
+  console.log('      \x1b[36mhttp://localhost:51888/panel\x1b[0m\n');
 
   rl.close();
 }

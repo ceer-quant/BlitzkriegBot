@@ -3,9 +3,6 @@
  * spawn a second core beside a healthy one — two cores on one cwd interleave
  * their order/position logs, and the archive's single-writer lock silently stops
  * one of them from recording.
- *
- * These tests pin the naming and the migration-window precedence. See
- * `docs/blitzkrieg/MIGRATION_LOG.md` §38.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,27 +12,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   SOCKET_PREFIX,
-  LEGACY_SOCKET_PREFIX,
   socketPathFor,
   defaultSocketPath,
-  legacySocketPath,
   socketServed,
 } from '../../src/core/core-socket.js';
 
 const env = { USER: 'tester', TMPDIR: '/var/tmp/probe' } as NodeJS.ProcessEnv;
 
 describe('core socket naming', () => {
-  it('canonical name carries the new brand only', () => {
+  it('canonical name carries the brand only', () => {
     const p = defaultSocketPath(env);
     assert.equal(p, '/var/tmp/probe/blitzkrieg-core-tester.sock');
-    assert.ok(!p.includes('clodds'), `canonical path must not carry the old brand: ${p}`);
-  });
-
-  it('canonical and legacy share dir and user but differ in prefix', () => {
-    const c = defaultSocketPath(env);
-    const l = legacySocketPath(env);
-    assert.notEqual(c, l);
-    assert.equal(c.replace(SOCKET_PREFIX, ''), l.replace(LEGACY_SOCKET_PREFIX, ''));
+    assert.ok(!p.includes('clodds'), `path must not carry the old brand: ${p}`);
   });
 
   it('falls back to the OS temp dir when TMPDIR is empty or missing', () => {

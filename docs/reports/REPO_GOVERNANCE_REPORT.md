@@ -135,7 +135,7 @@ Scanning/Push Protection**（API 实测 403/422/404），需升级 Pro/Team 才�
 ### 3.5 生产完好性（未受影响）
 - 进程：`node dist/index.js`（PID 72966）、`target/release/blitzkrieg-core`（PID 73052，**单实例**）、
   `soak-health-loop.sh`（PID 45628）。
-- `GET :18789/health` → `{"status":"healthy", ...}`。
+- `GET :51888/health` → `{"status":"healthy", ...}`。
 - Node 进程**未从 `src/` 加载**（`lsof` 匹配 `src/` = 0），始终跑 `dist/`。
 - 本次全部命令**只读或隔离运行**（cycle-check 用私有 socket + 临时工作目录 + DRY）。
 

@@ -4,10 +4,10 @@ Complete reference for the Blitzkrieg HTTP and WebSocket APIs.
 
 ## Base URL
 
-The gateway binds to loopback by default on port 18789:
+The gateway binds to loopback by default on port 51888:
 
 ```
-http://127.0.0.1:18789
+http://127.0.0.1:51888
 ```
 
 All endpoints are served by your own gateway deployment.
@@ -749,7 +749,7 @@ Real-time tick data streaming.
 
 **JavaScript Example:**
 ```javascript
-const ws = new WebSocket('ws://localhost:18789/api/ticks/stream');
+const ws = new WebSocket('ws://localhost:51888/api/ticks/stream');
 
 ws.onopen = () => {
   ws.send(JSON.stringify({

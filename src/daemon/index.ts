@@ -16,8 +16,6 @@ import { logger } from '../utils/logger';
 import {
   CANONICAL_SERVICE_FILE,
   CANONICAL_SERVICE_NAME,
-  LEGACY_SERVICE_FILE,
-  LEGACY_SERVICE_NAME,
   statePath,
 } from '../utils/brand-paths';
 
@@ -29,35 +27,6 @@ function getLaunchdPlist(label = SERVICE_NAME) {
 
 function getSystemdService(file = CANONICAL_SERVICE_FILE) {
   return join(homedir(), '.config', 'systemd', 'user', file);
-}
-
-/**
- * Remove a unit installed under the legacy brand, so an upgrade never leaves
- * both `com.clodds.gateway` and `com.blitzkrieg.gateway` loaded at once.
- * Failures are ignored: a missing or already-unloaded legacy unit is the norm.
- */
-function removeLegacyService(): void {
-  if (platform() === 'darwin') {
-    const legacyPlist = getLaunchdPlist(LEGACY_SERVICE_NAME);
-    if (existsSync(legacyPlist)) {
-      try {
-        execFileSync('launchctl', ['unload', legacyPlist]);
-      } catch {
-        // Already unloaded; deleting the file below is the durable part.
-      }
-      unlinkSync(legacyPlist);
-    }
-  } else {
-    try {
-      execFileSync('systemctl', ['--user', 'disable', 'clodds']);
-    } catch {
-      // The legacy unit was never enabled.
-    }
-    const legacyUnit = getSystemdService(LEGACY_SERVICE_FILE);
-    if (existsSync(legacyUnit)) {
-      unlinkSync(legacyUnit);
-    }
-  }
 }
 
 function getLogPath() {
@@ -106,7 +75,6 @@ export function createDaemonService(): DaemonService {
 </dict>
 </plist>`;
         const plistPath = getLaunchdPlist();
-        removeLegacyService();
         writeFileSync(plistPath, plist);
         execFileSync('launchctl', ['load', plistPath]);
         logger.info('Daemon installed (launchd)');
@@ -124,7 +92,6 @@ RestartSec=10
 [Install]
 WantedBy=default.target`;
         const servicePath = getSystemdService();
-        removeLegacyService();
         writeFileSync(servicePath, service);
         execFileSync('systemctl', ['--user', 'daemon-reload']);
         execFileSync('systemctl', ['--user', 'enable', 'blitzkrieg']);

@@ -84,8 +84,6 @@ const CONTEXT_FILES = [
   'README.md',
   '.blitzkrieg.md',
   '.blitzkrieg.json',
-  '.clodds.md',
-  '.clodds.json',
 ];
 
 // =============================================================================
@@ -189,7 +187,7 @@ async function getGitInfo(path: string): Promise<GitInfo> {
   return info;
 }
 
-/** Load project config from .blitzkrieg.json (legacy .clodds.json accepted one release) */
+/** Load project config from .blitzkrieg.json */
 function loadProjectConfig(path: string): ProjectConfig | undefined {
   const configPath = resolveWorkspaceConfigFile(path);
   if (!existsSync(configPath)) return undefined;

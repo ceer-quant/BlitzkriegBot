@@ -74,7 +74,8 @@ export function formatOutgoingMessage(message: OutgoingMessage): OutgoingMessage
     case 'discord':
       text = formatForPlatform(text, 'discord');
       return { ...normalized, text };
-    case 'webchat':
+    case 'panel':
+    case 'webchat': // historical rows in DB keep the old channel label
       text = strip(text);
       return { ...normalized, text };
     case 'plain':

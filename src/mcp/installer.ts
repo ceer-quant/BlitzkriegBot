@@ -117,11 +117,8 @@ export function uninstallMcpServer(): { removed: string[]; skipped: string[] } {
         continue;
       }
       const config = readJsonFile(path);
-      const hadCanonical = Boolean(config.mcpServers?.blitzkrieg);
-      const hadLegacy = Boolean(config.mcpServers?.clodds);
-      if (hadCanonical || hadLegacy) {
+      if (Boolean(config.mcpServers?.blitzkrieg)) {
         delete config.mcpServers.blitzkrieg;
-        delete config.mcpServers.clodds;
         backupAndWrite(path, config);
         removed.push(`${name}: ${path}`);
       } else {

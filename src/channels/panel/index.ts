@@ -1,5 +1,5 @@
 /**
- * WebChat Channel - WebSocket-based browser chat interface
+ * Panel Chat Channel — WebSocket-based browser chat interface
  *
  * Allows users to chat with Blitzkrieg via a web browser.
  * Uses WebSocket for real-time communication.
@@ -10,16 +10,16 @@ import { randomUUID } from 'crypto';
 import { logger } from '../../utils/logger';
 import type { IncomingMessage, OutgoingMessage, MessageAttachment } from '../../types';
 
-export interface WebChatConfig {
+export interface PanelChatConfig {
   enabled: boolean;
   authToken?: string;
 }
 
-export interface WebChatCallbacks {
+export interface PanelChatCallbacks {
   onMessage: (message: IncomingMessage) => Promise<void>;
 }
 
-export interface WebChatChannel {
+export interface PanelChatChannel {
   start(wss: WebSocketServer): void;
   stop(): void;
   sendMessage(msg: OutgoingMessage): Promise<string | null>;
@@ -38,10 +38,10 @@ interface ChatSession {
   lastActivity: Date;
 }
 
-export function createWebChatChannel(
-  config: WebChatConfig,
-  callbacks: WebChatCallbacks
-): WebChatChannel {
+export function createPanelChatChannel(
+  config: PanelChatConfig,
+  callbacks: PanelChatCallbacks
+): PanelChatChannel {
   const sessions = new Map<string, ChatSession>();
   const userSockets = new Map<string, Set<string>>(); // userId -> sessionIds
   let heartbeatInterval: NodeJS.Timeout | null = null;
@@ -65,7 +65,7 @@ export function createWebChatChannel(
     // Replace any existing connection using this sessionId (silently close old socket)
     const existing = sessions.get(sessionId);
     if (existing && existing.ws !== ws) {
-      logger.info({ sessionId, oldState: existing.ws.readyState }, 'WebChat: Replacing old connection (silent)');
+      logger.info({ sessionId, oldState: existing.ws.readyState }, 'PanelChat: Replacing old connection (silent)');
       // Detach old socket handlers so it can't interfere
       existing.ws.removeAllListeners();
       // Do NOT close the old socket — let it die naturally.
@@ -90,7 +90,7 @@ export function createWebChatChannel(
     };
 
     sessions.set(sessionId, session);
-    logger.info({ sessionId }, 'WebChat: New connection');
+    logger.info({ sessionId }, 'PanelChat: New connection');
 
     // Send welcome message
     ws.send(JSON.stringify({
@@ -116,7 +116,7 @@ export function createWebChatChannel(
                 type: 'error',
                 message: 'Invalid token',
               }));
-              logger.warn({ sessionId }, 'WebChat: Invalid auth token');
+              logger.warn({ sessionId }, 'PanelChat: Invalid auth token');
               return;
             }
             if (message.token || !config.authToken) {
@@ -134,7 +134,7 @@ export function createWebChatChannel(
                 userId: session.userId,
               }));
 
-              logger.info({ sessionId, userId: session.userId, wsVersion: message._wsVersion || 0, totalSessions: sessions.size }, 'WebChat: Authenticated');
+              logger.info({ sessionId, userId: session.userId, wsVersion: message._wsVersion || 0, totalSessions: sessions.size }, 'PanelChat: Authenticated');
             } else {
               ws.send(JSON.stringify({
                 type: 'error',
@@ -167,7 +167,7 @@ export function createWebChatChannel(
             // Convert to IncomingMessage
             const incomingMessage: IncomingMessage = {
               id: randomUUID(),
-              platform: 'webchat',
+              platform: 'panel',
               userId: session.userId,
               chatId: session.id, // Use current session id (updated by switch)
               chatType: 'dm',
@@ -266,7 +266,7 @@ export function createWebChatChannel(
                 type: 'switched',
                 sessionId: newSessionId,
               }));
-              logger.info({ oldSessionId, newSessionId, userId: session.userId }, 'WebChat: Session switched');
+              logger.info({ oldSessionId, newSessionId, userId: session.userId }, 'PanelChat: Session switched');
             }
             break;
 
@@ -281,7 +281,7 @@ export function createWebChatChannel(
             }));
         }
       } catch (error) {
-        logger.error({ error, sessionId: session.id }, 'WebChat: Error processing message');
+        logger.error({ error, sessionId: session.id }, 'PanelChat: Error processing message');
         try {
           ws.send(JSON.stringify({
             type: 'error',
@@ -294,7 +294,7 @@ export function createWebChatChannel(
     ws.on('close', (code: number, reason: Buffer) => {
       // Use session.id (not the closure's sessionId) since it may have been updated by switch
       const currentId = session.id;
-      logger.info({ sessionId: currentId, code, reason: reason?.toString() || '' }, 'WebChat: Connection closed');
+      logger.info({ sessionId: currentId, code, reason: reason?.toString() || '' }, 'PanelChat: Connection closed');
 
       // Only clean up if this session still owns the map entry (not evicted by a replacement)
       const mapped = sessions.get(currentId);
@@ -314,13 +314,13 @@ export function createWebChatChannel(
     });
 
     ws.on('error', (error) => {
-      logger.error({ error, sessionId: session.id }, 'WebChat: WebSocket error');
+      logger.error({ error, sessionId: session.id }, 'PanelChat: WebSocket error');
     });
   }
 
   return {
     start(wss: WebSocketServer): void {
-      logger.info('WebChat: Starting channel');
+      logger.info('PanelChat: Starting channel');
 
       wssRef = wss;
 
@@ -361,12 +361,12 @@ export function createWebChatChannel(
               }
             }
 
-            logger.info({ sessionId }, 'WebChat: Closed idle connection');
+            logger.info({ sessionId }, 'PanelChat: Closed idle connection');
           }
         }
       }, 60000); // Check every minute
 
-      logger.info('WebChat: Channel started');
+      logger.info('PanelChat: Channel started');
     },
 
     stop(): void {
@@ -388,7 +388,7 @@ export function createWebChatChannel(
 
       sessions.clear();
       userSockets.clear();
-      logger.info('WebChat: Channel stopped');
+      logger.info('PanelChat: Channel stopped');
     },
 
     async sendMessage(msg: OutgoingMessage): Promise<string | null> {
@@ -408,13 +408,13 @@ export function createWebChatChannel(
             timestamp: new Date().toISOString(),
           }));
         } catch (err) {
-          logger.warn({ chatId: msg.chatId, err }, 'WebChat: Send failed (connection closed mid-send)');
-          throw new Error('WebChat session not connected');
+          logger.warn({ chatId: msg.chatId, err }, 'PanelChat: Send failed (connection closed mid-send)');
+          throw new Error('PanelChat session not connected');
         }
         return messageId;
       } else {
-        logger.warn({ chatId: msg.chatId }, 'WebChat: Session not found or closed');
-        throw new Error('WebChat session not connected');
+        logger.warn({ chatId: msg.chatId }, 'PanelChat: Session not found or closed');
+        throw new Error('PanelChat session not connected');
       }
     },
 

@@ -98,7 +98,7 @@ async function execute(args: string): Promise<string> {
       case 'chunk': {
         const platform = parts[1] || 'telegram';
         const text = parts.slice(2).join(' ');
-        if (!text) return 'Usage: /stream chunk <platform> <text>\n\nPlatforms: telegram, discord, webchat';
+        if (!text) return 'Usage: /stream chunk <platform> <text>\n\nPlatforms: telegram, discord, panel';
         const chunks = chunkForPlatform(text, platform);
         const output = chunks.map((c, i) => `**Chunk ${i + 1}** (${c.length} chars):\n${c}`).join('\n\n');
         return `**Chunked for ${platform}** (${chunks.length} chunks)\n\n${output}`;

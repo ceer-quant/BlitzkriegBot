@@ -196,8 +196,7 @@ export async function createSlackChannel(
 
   // app_mention events are handled by the generic message handler
 
-  // Handle slash commands. `/blitzkrieg` is canonical; `/clodds` is kept for
-  // one release so workspaces that registered the old command keep working.
+  // Handle slash commands.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleSlashCommand = async ({ command, ack }: any) => {
     await ack();
@@ -220,7 +219,6 @@ export async function createSlackChannel(
     await callbacks.onMessage(incomingMessage);
   };
   app.command('/blitzkrieg', handleSlashCommand);
-  app.command('/clodds', handleSlashCommand);
 
   // Error handling
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

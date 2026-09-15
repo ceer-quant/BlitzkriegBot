@@ -8,17 +8,9 @@ test('resolveStateDir uses the BLITZKRIEG_STATE_DIR override', () => {
   assert.equal(resolveStateDir(env), resolve('/tmp/bk-state'));
 });
 
-test('resolveStateDir still honours the deprecated CLODDS_STATE_DIR alias', () => {
+test('resolveStateDir ignores the deprecated CLODDS_STATE_DIR alias', () => {
   const env = { CLODDS_STATE_DIR: '/tmp/clodds-state' } as NodeJS.ProcessEnv;
-  assert.equal(resolveStateDir(env), resolve('/tmp/clodds-state'));
-});
-
-test('resolveStateDir lets BLITZKRIEG_STATE_DIR win over the legacy name', () => {
-  const env = {
-    BLITZKRIEG_STATE_DIR: '/tmp/new-state',
-    CLODDS_STATE_DIR: '/tmp/old-state',
-  } as NodeJS.ProcessEnv;
-  assert.equal(resolveStateDir(env), resolve('/tmp/new-state'));
+  assert.notEqual(resolveStateDir(env), resolve('/tmp/clodds-state'));
 });
 
 test('resolveConfigPath uses the BLITZKRIEG_CONFIG_PATH override', () => {
@@ -26,9 +18,9 @@ test('resolveConfigPath uses the BLITZKRIEG_CONFIG_PATH override', () => {
   assert.equal(resolveConfigPath(env), resolve('/tmp/blitzkrieg.json'));
 });
 
-test('resolveConfigPath still honours the deprecated CLODDS_CONFIG_PATH alias', () => {
+test('resolveConfigPath ignores the deprecated CLODDS_CONFIG_PATH alias', () => {
   const env = { CLODDS_CONFIG_PATH: '/tmp/clodds.json' } as NodeJS.ProcessEnv;
-  assert.equal(resolveConfigPath(env), resolve('/tmp/clodds.json'));
+  assert.notEqual(resolveConfigPath(env), resolve('/tmp/clodds.json'));
 });
 
 test('resolveWorkspaceDir uses the BLITZKRIEG_WORKSPACE override', () => {
@@ -36,7 +28,7 @@ test('resolveWorkspaceDir uses the BLITZKRIEG_WORKSPACE override', () => {
   assert.equal(resolveWorkspaceDir(env), resolve('/tmp/bk-workspace'));
 });
 
-test('resolveWorkspaceDir still honours the deprecated CLODDS_WORKSPACE alias', () => {
+test('resolveWorkspaceDir ignores the deprecated CLODDS_WORKSPACE alias', () => {
   const env = { CLODDS_WORKSPACE: '/tmp/clodds-workspace' } as NodeJS.ProcessEnv;
-  assert.equal(resolveWorkspaceDir(env), resolve('/tmp/clodds-workspace'));
+  assert.notEqual(resolveWorkspaceDir(env), resolve('/tmp/clodds-workspace'));
 });
