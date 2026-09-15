@@ -1,0 +1,201 @@
+{
+  "source": "replay /Volumes/Hard Disk/BlitzkriegBot/data/e4a-evidence/slice-20260915T041830Z-round2.jsonl (1 segment(s))",
+  "sourceStats": {
+    "events": 1192701,
+    "malformedLines": 0,
+    "outOfOrderEvents": 3776
+  },
+  "tickMs": 50,
+  "tailMs": 0,
+  "startAtMs": 1789444803822,
+  "endAtMs": 1789445705439,
+  "virtualMs": 901617,
+  "fillModel": {
+    "takerSlippageTicks": 0,
+    "makerLatencyMs": 0,
+    "makerFillProbBps": 10000
+  },
+  "entryMakerTimeoutMs": 5000,
+  "orders": {
+    "orders": 5,
+    "filled": 2,
+    "cancelled": 3,
+    "rejected": 0,
+    "failed": 0,
+    "liveAtEnd": 0
+  },
+  "fills": 2,
+  "trades": {
+    "closed": 1,
+    "wins": 1,
+    "losses": 0,
+    "flat": 0,
+    "grossProfitUsd": 0.7463014875,
+    "grossLossUsd": 0.0,
+    "netPnlUsd": 0.7463014875,
+    "avgPnlUsd": 0.7463014875,
+    "winRatePct": 100.0,
+    "maxDrawdownUsd": 0.0,
+    "maxDrawdownPct": 0.0,
+    "feesUsd": 0.1536985125
+  },
+  "strategies": [
+    {
+      "blockedMomentum": 422,
+      "blockedTiming": 194,
+      "closedTrades": 1,
+      "effectiveMaxShares": 10.0,
+      "effectiveMinShares": 10.0,
+      "effectiveSizeUsd": 2.5,
+      "enabled": true,
+      "feesUsd": 0.1536985125,
+      "gateExemptedMomentum": 0,
+      "gateExemptedTiming": 0,
+      "gateExemptions": [],
+      "limitRejected": 0,
+      "losses": 0,
+      "maxOpenNotionalUsd": null,
+      "maxOpenPositions": null,
+      "name": "spread_arb",
+      "netPnlUsd": 0.7463014875,
+      "openNotionalUsd": 0.0,
+      "openPositions": 0,
+      "ordersPlaced": 3,
+      "ordersRejected": 0,
+      "sizingSource": "global",
+      "source": "builtin",
+      "wins": 1
+    },
+    {
+      "blockedMomentum": 0,
+      "blockedTiming": 0,
+      "closedTrades": 0,
+      "effectiveMaxShares": 10.0,
+      "effectiveMinShares": 10.0,
+      "effectiveSizeUsd": 2.5,
+      "enabled": false,
+      "feesUsd": 0.0,
+      "gateExemptedMomentum": 0,
+      "gateExemptedTiming": 0,
+      "gateExemptions": [],
+      "limitRejected": 0,
+      "losses": 0,
+      "maxOpenNotionalUsd": null,
+      "maxOpenPositions": null,
+      "name": "trend_follow",
+      "netPnlUsd": 0.0,
+      "openNotionalUsd": 0.0,
+      "openPositions": 0,
+      "ordersPlaced": 0,
+      "ordersRejected": 0,
+      "sizingSource": "global",
+      "source": "builtin",
+      "wins": 0
+    }
+  ],
+  "feed": {
+    "archive": null,
+    "blocked": {
+      "byStrategy": {
+        "spread_arb": {
+          "momentum": 422,
+          "timing": 194
+        }
+      },
+      "declaredExemptions": [],
+      "momentum": 422,
+      "timing": 194
+    },
+    "books": 3774,
+    "confirmed": [],
+    "confirmedDetail": [],
+    "evaluations": 18032,
+    "placeRejected": 0,
+    "rounds": 2,
+    "signals": 3,
+    "spots": 54857,
+    "strategies": [
+      {
+        "blockedMomentum": 422,
+        "blockedTiming": 194,
+        "closedTrades": 1,
+        "effectiveMaxShares": 10.0,
+        "effectiveMinShares": 10.0,
+        "effectiveSizeUsd": 2.5,
+        "enabled": true,
+        "feesUsd": 0.1536985125,
+        "gateExemptedMomentum": 0,
+        "gateExemptedTiming": 0,
+        "gateExemptions": [],
+        "limitRejected": 0,
+        "losses": 0,
+        "maxOpenNotionalUsd": null,
+        "maxOpenPositions": null,
+        "name": "spread_arb",
+        "netPnlUsd": 0.7463014875,
+        "openNotionalUsd": 0.0,
+        "openPositions": 0,
+        "ordersPlaced": 3,
+        "ordersRejected": 0,
+        "sizingSource": "global",
+        "source": "builtin",
+        "wins": 1
+      },
+      {
+        "blockedMomentum": 0,
+        "blockedTiming": 0,
+        "closedTrades": 0,
+        "effectiveMaxShares": 10.0,
+        "effectiveMinShares": 10.0,
+        "effectiveSizeUsd": 2.5,
+        "enabled": false,
+        "feesUsd": 0.0,
+        "gateExemptedMomentum": 0,
+        "gateExemptedTiming": 0,
+        "gateExemptions": [],
+        "limitRejected": 0,
+        "losses": 0,
+        "maxOpenNotionalUsd": null,
+        "maxOpenPositions": null,
+        "name": "trend_follow",
+        "netPnlUsd": 0.0,
+        "openNotionalUsd": 0.0,
+        "openPositions": 0,
+        "ordersPlaced": 0,
+        "ordersRejected": 0,
+        "sizingSource": "global",
+        "source": "builtin",
+        "wins": 0
+      }
+    ],
+    "strategyLimitRejected": 0,
+    "tops": 1134068
+  },
+  "blocked": {
+    "byStrategy": {
+      "spread_arb": {
+        "momentum": 422,
+        "timing": 194
+      }
+    },
+    "declaredExemptions": [],
+    "momentum": 422,
+    "timing": 194
+  },
+  "openPositions": 0,
+  "openNotionalUsd": 0.0,
+  "riskAlerts": [],
+  "errors": [],
+  "tradeLines": [
+    {
+      "id": "hft-1",
+      "asset": "ETH",
+      "direction": "up",
+      "reason": "TrailingStop",
+      "netPnlUsd": 0.7463014875,
+      "netPnlPct": 16.5844775
+    }
+  ],
+  "tradeLinesTruncated": 0,
+  "forcedDry": true
+}

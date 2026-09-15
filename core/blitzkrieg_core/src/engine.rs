@@ -23,7 +23,8 @@ use crate::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
 use crate::scanner::{Scanner, ScannerConfig};
 use crate::signal::{PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig};
 use crate::strategies::{
-    spread_arb::SpreadArbBuiltin, EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent,
+    spread_arb::SpreadArbBuiltin, trend_follow::TrendFollowBuiltin, EngineStrategy, GateExemptions,
+    StrategyCtx, StrategyExitIntent, TrendFollowConfig,
 };
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -33,6 +34,10 @@ pub struct EngineConfig {
     pub scanner: ScannerConfig,
     pub trend: TrendConfig,
     pub spread_arb: SpreadArbConfig,
+    /// The chase leg's own entry parameters (E4-a / #30). Compiled defaults for
+    /// now: `CoreConfig` does not expose them, and the runtime tuning path is
+    /// Shadow Evolution's per-strategy hot parameters.
+    pub trend_follow: TrendFollowConfig,
     /// Max orderbook staleness before we refuse to price off it.
     pub max_orderbook_stale_ms: i64,
     /// Spot momentum window (sec) used by the alignment filter.
@@ -82,6 +87,7 @@ impl Default for EngineConfig {
             scanner: ScannerConfig::default(),
             trend: TrendConfig::default(),
             spread_arb: SpreadArbConfig::default(),
+            trend_follow: TrendFollowConfig::default(),
             max_orderbook_stale_ms: 8000,
             momentum_window_sec: 30,
             momentum_tol_pct: Decimal::new(3, 2), // 0.03%
@@ -213,11 +219,22 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(cfg: EngineConfig) -> Self {
-        let strategies = vec![HostedStrategy {
-            strategy: Box::new(SpreadArbBuiltin::new(cfg.trend.clone(), cfg.spread_arb.clone())),
-            enabled: true,
-            source: "builtin".to_string(),
-        }];
+        let strategies = vec![
+            HostedStrategy {
+                strategy: Box::new(SpreadArbBuiltin::new(cfg.trend.clone(), cfg.spread_arb.clone())),
+                enabled: true,
+                source: "builtin".to_string(),
+            },
+            // E4-a / #30: the chase leg is a builtin but starts DISABLED, so
+            // adding it cannot change what an existing session trades. Enabling
+            // it is an explicit operator action (`strategy.enable`), the same
+            // rule every user-layer strategy already follows.
+            HostedStrategy {
+                strategy: Box::new(TrendFollowBuiltin::new(cfg.trend_follow.clone())),
+                enabled: false,
+                source: "builtin".to_string(),
+            },
+        ];
         Self {
             scanner: Scanner::new(cfg.scanner.clone()),
             books: HashMap::new(),
@@ -639,6 +656,11 @@ impl Engine {
     }
     /// Borrow every hosted strategy. Shadow Evolution asks each one which knobs it
     /// declares (E2-c), so the declaration has to be read off the live instances.
+    ///
+    /// Deliberately NOT filtered by `enabled`: `register_strategies` drops the cell
+    /// of any strategy it is not handed, so filtering here would make a runtime
+    /// disable destroy that strategy's evolved parameters and rollback anchor.
+    /// A switched-off strategy just never emits the candidates that would use them.
     pub fn strategy_refs(&self) -> Vec<&dyn EngineStrategy> {
         self.strategies.iter().map(|s| s.strategy.as_ref()).collect()
     }
@@ -776,6 +798,7 @@ mod tests {
             },
             trend: TrendConfig { confirm_sec: 5, ratio: dec!(0.5), min_price: dec!(0.5), broken_price: dec!(0.35), window_floor_ms: 0 },
             spread_arb: SpreadArbConfig { trend_max_entry_price: dec!(0.45), ..Default::default() },
+            trend_follow: TrendFollowConfig::default(),
             max_orderbook_stale_ms: 8000,
             momentum_window_sec: 30,
             momentum_tol_pct: dec!(0.03),
@@ -1168,11 +1191,190 @@ mod tests {
     }
 
     #[test]
-    fn registry_starts_with_the_builtin_only_and_rejects_unknown_toggles() {
+    fn registry_starts_with_both_builtins_the_chase_leg_disabled() {
         let mut e = Engine::new(cfg());
-        assert_eq!(e.supported_strategies(), vec!["spread_arb".to_string()]);
-        assert_eq!(e.enabled_strategies(), vec!["spread_arb".to_string()]);
+        // Registration order matters: it is the tie-break when two strategies
+        // want the same token in the same cycle (one entry per token per cycle),
+        // and `spread_arb` is the incumbent.
+        assert_eq!(
+            e.supported_strategies(),
+            vec!["spread_arb".to_string(), "trend_follow".to_string()]
+        );
+        assert_eq!(
+            e.enabled_strategies(),
+            vec!["spread_arb".to_string()],
+            "the new builtin must not trade until it is explicitly enabled"
+        );
+        assert_eq!(e.strategy_source("trend_follow"), Some("builtin"));
         assert!(!e.set_strategy_enabled("nope", true), "unknown name must not toggle");
+        assert!(e.set_strategy_enabled("trend_follow", true));
+        assert_eq!(
+            e.enabled_strategies(),
+            vec!["spread_arb".to_string(), "trend_follow".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_chase_leg_declares_no_gate_exemption_but_is_evolvable() {
+        // E4-a / #30: entering WITH the move is exactly what the shared spot
+        // momentum gate wants, so the chase leg opts out of nothing. (E4-b, the
+        // counter-trend leg, is the one that needs `momentum: true`.)
+        let e = Engine::new(cfg());
+        let ex = e.strategy_gate_exemptions("trend_follow").expect("registered");
+        assert_eq!(ex, GateExemptions::none());
+        assert!(!ex.any());
+        assert!(e.declared_gate_exemptions().is_empty());
+        // It IS evolvable, with a coherent declaration and a twin that builds —
+        // a declaration without a factory would be inert.
+        let s = e
+            .strategy_refs()
+            .into_iter()
+            .find(|s| s.name() == "trend_follow")
+            .expect("registered");
+        let knobs = s.evolvable_knobs();
+        assert_eq!(knobs.len(), 6);
+        assert!(knobs.iter().all(|k| k.is_coherent()));
+        assert!(s.shadow_factory().is_some());
+    }
+
+    /// A rising 1-cent-tick book: `bid` climbs `steps` cents from 0.50, the offer
+    /// sits one tick above. Prices live on the real cent grid (mid `x.xx5`), which
+    /// matters: a half-cent-offset book would let `round2` collapse the ask onto
+    /// the mid and the chase leg refuses to "lift" an offer that is not above mid.
+    fn rising_books(e: &mut Engine, token: &str, steps: i64, start_ms: i64) {
+        for i in 0..=steps {
+            let bid = dec!(0.50) + Decimal::from(i) / Decimal::ONE_HUNDRED;
+            e.on_data(DataEvent::Book {
+                token_id: token.into(),
+                bids: vec![(bid, dec!(100))],
+                asks: vec![(bid + dec!(0.01), dec!(100))],
+                now_ms: start_ms + i * 1000,
+            });
+        }
+    }
+
+    #[test]
+    fn the_chase_leg_trades_a_breakout_the_dip_buyer_would_not() {
+        let mut e = Engine::new(cfg());
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        // A RISING up-token: bid 0.50 → 0.62 (mid 0.505 → 0.625, +24%).
+        rising_books(&mut e, "up", 12, now);
+        let at = now + 12_000;
+        // Disabled → nothing, however good the setup looks.
+        assert!(e.evaluate(at).is_empty(), "the chase leg must not trade while disabled");
+        assert!(e.set_strategy_enabled("trend_follow", true));
+        let orders = e.evaluate(at);
+        assert_eq!(orders.len(), 1, "{orders:?}");
+        assert_eq!(orders[0].strategy, "trend_follow");
+        assert_eq!(orders[0].token_id, "up");
+        assert_eq!(orders[0].direction, "up");
+        // It LIFTS the offer: the entry is above the mid, the inverse of the dip
+        // buyer's below-mid resting bid.
+        let mid = dec!(0.625);
+        assert_eq!(orders[0].price, dec!(0.63), "the lifted offer");
+        assert!(orders[0].price > mid, "{} must be above the mid {mid}", orders[0].price);
+        assert!(orders[0].internal_key.starts_with("trend_follow:BTC:up:"), "{}", orders[0].internal_key);
+        // And it cleared the spot gate without an exemption: with no spot buffer
+        // at all the gate is a pass, so a breach here would mean a declaration.
+        assert!(e.last_exemptions().is_empty(), "the chase leg waived nothing");
+    }
+
+    #[test]
+    fn the_chase_leg_is_blocked_by_the_shared_spot_gate_when_spot_falls() {
+        // The gate rejects a bet whose direction fights the spot move. A chase
+        // entry is WITH the token's move, but when spot opposes it the candidate
+        // must be stopped (it declares no exemption) — proving the new strategy
+        // is subject to the same gates as the incumbent.
+        let mut e = Engine::new(cfg());
+        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: 1_000_000 });
+        assert!(e.set_strategy_enabled("trend_follow", true));
+        // Spot falls: the momentum filter will refuse an UP bet.
+        for i in 0..10 {
+            e.on_data(DataEvent::Spot {
+                asset: "BTC".into(),
+                price: dec!(60000) - Decimal::from(i) * dec!(10),
+                now_ms: 1_000_000 + i * 1000,
+            });
+        }
+        rising_books(&mut e, "up", 12, 1_000_000);
+        let orders = e.evaluate(1_000_000 + 12_000);
+        assert!(orders.is_empty(), "spot moved against the bet: {orders:?}");
+        assert!(
+            e.last_blocked().iter().any(|b| b.strategy == "trend_follow" && b.reason == BlockReason::Momentum),
+            "{:?}",
+            e.last_blocked()
+        );
+    }
+
+    #[test]
+    fn the_two_builtins_do_not_starve_each_other() {
+        // Both strategies enabled, both presented with the setups they want on
+        // DIFFERENT tokens: each gets its own entry in the same cycle, each
+        // tagged with its own name, and neither is dropped.
+        let mut e = Engine::new(cfg());
+        assert!(e.set_strategy_enabled("trend_follow", true));
+        let now = 1_000_000i64;
+        let mut m = market(1_800_000);
+        m.down_token_id = "down".into();
+        e.on_data(DataEvent::RoundMarkets { markets: vec![m.clone()], now_ms: now });
+
+        // "up" climbs (chase), "down" holds then dips (dip buy).
+        for i in 0..=12 {
+            let up_bid = dec!(0.50) + Decimal::from(i) / Decimal::ONE_HUNDRED;
+            e.on_data(DataEvent::Book {
+                token_id: "up".into(),
+                bids: vec![(up_bid, dec!(100))],
+                asks: vec![(up_bid + dec!(0.01), dec!(100))],
+                now_ms: now + i * 1000,
+            });
+            e.on_data(DataEvent::Book {
+                token_id: "down".into(),
+                bids: vec![(dec!(0.61), dec!(100))],
+                asks: vec![(dec!(0.63), dec!(100))],
+                now_ms: now + i * 1000,
+            });
+        }
+        // Dip on "down": mid 0.44 → the dip buyer's resting bid is 0.43, inside its
+        // 0.45 ceiling, while the chase leg wants the OTHER token and is unaffected.
+        e.on_data(DataEvent::Book {
+            token_id: "down".into(),
+            bids: vec![(dec!(0.43), dec!(100))],
+            asks: vec![(dec!(0.45), dec!(100))],
+            now_ms: now + 12_000,
+        });
+        let orders = e.evaluate(now + 12_000);
+        assert_eq!(orders.len(), 2, "one entry per strategy per token: {orders:?}");
+        assert!(orders.iter().any(|o| o.strategy == "trend_follow" && o.token_id == "up"), "{orders:?}");
+        assert!(orders.iter().any(|o| o.strategy == "spread_arb" && o.token_id == "down"), "{orders:?}");
+        // Neither strategy was blocked out of existence.
+        assert!(e.last_blocked().is_empty(), "{:?}", e.last_blocked());
+    }
+
+    #[test]
+    fn a_shared_token_is_settled_by_registration_order_not_by_starvation() {
+        // When both want the SAME token in the SAME cycle the kernel emits one
+        // entry (one entry per token per cycle) and the registered-first strategy
+        // wins. This is the documented, deterministic tie-break — not a race.
+        //
+        // The default engine config cannot produce this collision at all: the dip
+        // buyer's ceiling is 0.45 while the chase leg only looks above 0.55. So the
+        // collision is constructed deliberately by raising the dip buyer's ceiling,
+        // which is exactly the configuration where the tie-break has to be decided.
+        let mut c = cfg();
+        c.spread_arb.trend_max_entry_price = dec!(0.70);
+        let mut e = Engine::new(c);
+        assert!(e.set_strategy_enabled("trend_follow", true));
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        // A book both want: "up" rising on the cent grid (the chase leg lifts the
+        // 0.63 offer) while the mid 0.625 is still inside the dip buyer's raised
+        // band (it would rest 0.61, below the mid).
+        rising_books(&mut e, "up", 12, now);
+        let orders = e.evaluate(now + 12_000);
+        assert_eq!(orders.len(), 1, "one entry per token per cycle: {orders:?}");
+        assert_eq!(orders[0].strategy, "spread_arb", "the incumbent holds the tie-break");
+        assert!(orders[0].price < dec!(0.625), "and it rests below the mid: {}", orders[0].price);
     }
 
     #[test]
@@ -1185,7 +1387,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(name, "dip_buyer");
-        assert_eq!(e.supported_strategies(), vec!["spread_arb".to_string(), "dip_buyer".to_string()]);
+        assert_eq!(
+            e.supported_strategies(),
+            vec!["spread_arb".to_string(), "trend_follow".to_string(), "dip_buyer".to_string()]
+        );
         assert_eq!(e.enabled_strategies(), vec!["spread_arb".to_string()], "starts disabled");
         assert_eq!(e.strategy_source("dip_buyer"), Some("test"));
         // Duplicate names are rejected outright.

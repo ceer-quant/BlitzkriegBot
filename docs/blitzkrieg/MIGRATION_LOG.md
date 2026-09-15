@@ -1658,3 +1658,76 @@ _按策略评估 / 审计 / 应用 / 回滚_
 - 旧的全局审计文件 `data/evolution/evolution.jsonl`（0 字节）**保留不删**（D-17），
   新代码不读不写；是否物理删除待用户裁决。
 - 生产**仍未开启**影子进化（`enabled=false`）：「影子进化转正」属 v0.2。
+
+---
+
+## 46. E4-a 趋势跟随策略转正：内建追涨腿 + 启动期策略选择（Issue #30，2026-09-15）
+
+**问题**：E4 要求至少两个与主策略互补的对冲策略，第一个是**趋势跟随**（顺势追）。
+但在 E2 之前，内核只认一个策略：`spread_arb` 是唯一内建，`Engine::new` 里写死注册它；
+没有任何"选择启用哪些策略"的入口——`--strategy-limit` 只调限额，`strategy.enable` 只有 IPC 一路，
+开机态永远是硬编码的。于是"多策略"在能力上存在、在**可用性**上不存在：
+一个跑在生产里的 dry 核心无法在不改代码的情况下带上第二条腿。
+
+**改动**
+
+_新策略：`strategies/trend_follow.rs`（≈810 行含测试）_
+- `TrendFollowConfig`（6 个旋钮全部可进化）+ `TREND_FOLLOW_KNOBS`（名称/默认值/`[min,max]` 域）
+  + `trend_follow_knobs()`/`apply_knobs()`（域自证：把"当前生效值"并入域，避免热更新把值推到域外）。
+- `MomentumTracker`：**每个 token 一份自己的 `PriceBuffer`**（`on_book` 喂入），
+  确认条件是"窗口内上涨 ≥ `min_move_pct` 且当前价 ≥ `min_confirm_price`"；
+  确认后只有跌破 `break_price` 才解除（滞回），解除时把 `(token, price)` 交给 `take_breaks()`
+  让内核撤销该 token 的挂单。所有状态取自**该 token 自己的盘口历史**，不读扫描器缓存价——
+  这是"回测=重放实盘决策，而非近似"的前提。
+- `evaluate_trend_follow()`：结构上是 `evaluate_spread_arb` 的**逆**——
+  必须双边有价、`spread_pct <= max_spread_pct`、`entry = round2(best_ask)`、
+  `entry > mid`（抬价，而非挂 mid 之下）、`entry <= max_entry_price`（收益仍有不对称性）。
+- **不实现任何出场意图**：成交后的仓位交给共享出场策略（D-2），与 `spread_arb` 完全一致。
+- **不声明门禁豁免**（`gate_exemptions()` 留默认 = 全保留）：顺势入场天然通过现货动量闸门；
+  需要豁免的是 E4-b 的逆向腿。
+
+_`engine.rs`_
+- `EngineConfig.trend_follow`；`Engine::new` 注册两个内建，`trend_follow` 默认 `enabled: false`。
+
+_`service.rs` / `main.rs`（启动期选择）_
+- `CoreConfig` 新增 `enabled_strategies` / `disabled_strategies`；
+  `install_engine` 在建好引擎后按名字走**与 IPC 同一个** `set_strategy_enabled`，
+  未知名 `tracing::warn` 后忽略（不静默、不 panic）。
+- `set_strategy_enabled` 成功后重新接线热参数，因此运行期开关与开机开关行为一致。
+- CLI：`--enable-strategy <name>` / `--disable-strategy <name>`（均可重复、后者优先），
+  回测/回放复用同一份 `CoreConfig`，所以离线验证开机选择无需另写代码。
+
+_实现中途的一处设计修正（留档）_
+曾把 Shadow Evolution 的登记面改成「只登记已启用策略」（新增 `enabled_strategy_refs()`），
+理由是"关掉的策略不交易，不该占参数单元"。**该改动被撤回**，因为与 E2-c 的既有契约冲突
+且被 3 个集成测试当场挡住：`register_strategies` 会**移除**任何没被交给它的策略的单元与参数格，
+所以按 `enabled` 过滤会让一次运行期 disable **销毁该策略已进化的参数与回滚锚点**——
+开关变成有损操作。而「读声明」本就是读活实例的属性，与是否正在交易无关。
+最终 `rewire_hot_params` 仍传全量 `strategy_refs()`；新增
+`evolution_keeps_the_cell_of_a_disabled_strategy_across_a_toggle` 守护这一点
+（关→开之后 `min_move_pct` 仍是 3.1），门禁脚本第 6 段也从二进制侧复核同一条不变量。
+
+**验证（本批）**
+- `cargo test -p blitzkrieg-core --lib`：**200 项通过，0 失败**
+  （本批新增 12 项 trend_follow 单测 + 引擎层注册/并发/门禁不豁免/启动选择/进化范围等）。
+- `cargo build -p blitzkrieg-core`（= `blitzkrieg-core`，注意包名是连字符）无警告失败。
+- 新增门禁 `scripts/trend-follow-check.mjs`（`npm run core:trend-follow`），
+  在**真实二进制**上验证 6 件事：默认关、运行期双向切换且互不影响、
+  `--enable-strategy` 开机即启、独立分账行（`source=builtin`、`gateExemptions=[]`、无豁免计数）、
+  与抄底腿并发时两个资产各自入场且归属正确、
+  以及影子进化**只**在启用时登记它且旋钮名/顺序正确。
+- 留出段回放四腿（`docs/reports/data/trend_follow_holdout_leg*.json`）：
+  仅 spread_arb **+0.7463**（1 平仓）；仅 trend_follow **-1.8683**（5 平仓，2 胜 3 负）；
+  两者同跑结果与"仅 trend_follow"逐字段相同。
+- 报告：[TREND_FOLLOW_HOLDOUT_REPORT.md](../reports/TREND_FOLLOW_HOLDOUT_REPORT.md)。
+
+**已知缺口（登记不隐藏）**
+- 回放里"两者同跑"时 `spread_arb` 归零，根因**不是**饿死也不是仓位容量
+  （把 `--max-positions` 从 2 放宽到 8 结果逐字段不变），而是**全局连亏熔断**：
+  `Core` 只有一个 `LossBreaker`（`service.rs:266`），每次平仓不分策略地喂入
+  `record()`（`service.rs:1418`），而 `place()` 对 BUY 单先查 `is_halted()`（`service.rs:1575`）——
+  追涨腿连亏 3 笔即冻结**全核**入场 300 秒。这属于 0.3 里程碑
+  「策略级独立风控（连亏熔断互不影响）」，E4-a 不越界修改。
+- `trend_follow` 在其留出段上为负收益；该证据等级是**留出段**而非"标定语料之外"的样本外
+  （两个阈值默认值即由同一批 18 h 语料定标），报告开头已显式声明。
+- 默认 `trend_follow` 关闭即上线：不改变任何在运行会话的交易行为。
