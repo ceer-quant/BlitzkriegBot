@@ -84,13 +84,22 @@ pub struct ExtensionRegistry {
 
 impl ExtensionRegistry {
     pub fn new() -> Self {
-        Self { entries: HashMap::new() }
+        Self {
+            entries: HashMap::new(),
+        }
     }
 
     /// Register an extension (state = Installed).
     pub fn install(&mut self, ext: Box<dyn Extension>, config_path: Option<std::path::PathBuf>) {
         let name = ext.name().to_string();
-        self.entries.insert(name, RegisteredExtension { extension: ext, state: ExtensionState::Installed, config_path });
+        self.entries.insert(
+            name,
+            RegisteredExtension {
+                extension: ext,
+                state: ExtensionState::Installed,
+                config_path,
+            },
+        );
     }
 
     /// Enable an extension; runs `on_load`.
@@ -139,12 +148,21 @@ impl ExtensionRegistry {
     pub fn list(&self) -> Vec<(String, ExtensionType, ExtensionState)> {
         self.entries
             .values()
-            .map(|e| (e.extension.name().to_string(), e.extension.extension_type(), e.state))
+            .map(|e| {
+                (
+                    e.extension.name().to_string(),
+                    e.extension.extension_type(),
+                    e.state,
+                )
+            })
             .collect()
     }
 
     pub fn enabled_count(&self) -> usize {
-        self.entries.values().filter(|e| e.state == ExtensionState::Enabled).count()
+        self.entries
+            .values()
+            .filter(|e| e.state == ExtensionState::Enabled)
+            .count()
     }
 }
 
@@ -158,8 +176,8 @@ pub mod async_trait_lite {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct CountingCtx {
         emitted: Arc<AtomicUsize>,
@@ -206,26 +224,43 @@ mod tests {
     async fn lifecycle_install_enable_dispatch_disable_uninstall() {
         let loaded = Arc::new(AtomicUsize::new(0));
         let events = Arc::new(AtomicUsize::new(0));
-        let ctx = CountingCtx { emitted: Arc::new(AtomicUsize::new(0)) };
+        let ctx = CountingCtx {
+            emitted: Arc::new(AtomicUsize::new(0)),
+        };
         let mut reg = ExtensionRegistry::new();
 
         reg.install(
-            Box::new(DemoExt { loaded: loaded.clone(), events: events.clone() }),
+            Box::new(DemoExt {
+                loaded: loaded.clone(),
+                events: events.clone(),
+            }),
             None,
         );
         assert_eq!(reg.list().len(), 1);
         // Dispatch before enable → no delivery.
-        reg.dispatch(&Event::Ready { version: "1".into(), mode: crate::model::Mode::Dry }).await;
+        reg.dispatch(&Event::Ready {
+            version: "1".into(),
+            mode: crate::model::Mode::Dry,
+        })
+        .await;
         assert_eq!(events.load(Ordering::SeqCst), 0);
 
         reg.enable("demo_market", &ctx).await.unwrap();
         assert_eq!(loaded.load(Ordering::SeqCst), 1);
         assert_eq!(reg.enabled_count(), 1);
-        reg.dispatch(&Event::Ready { version: "1".into(), mode: crate::model::Mode::Dry }).await;
+        reg.dispatch(&Event::Ready {
+            version: "1".into(),
+            mode: crate::model::Mode::Dry,
+        })
+        .await;
         assert_eq!(events.load(Ordering::SeqCst), 1);
 
         reg.disable("demo_market").await.unwrap();
-        reg.dispatch(&Event::Ready { version: "1".into(), mode: crate::model::Mode::Dry }).await;
+        reg.dispatch(&Event::Ready {
+            version: "1".into(),
+            mode: crate::model::Mode::Dry,
+        })
+        .await;
         assert_eq!(events.load(Ordering::SeqCst), 1); // disabled → no delivery
         assert!(reg.uninstall("demo_market"));
         assert_eq!(reg.list().len(), 0);
@@ -252,7 +287,9 @@ mod tests {
                 Ok(())
             }
         }
-        let ctx = CountingCtx { emitted: Arc::new(AtomicUsize::new(0)) };
+        let ctx = CountingCtx {
+            emitted: Arc::new(AtomicUsize::new(0)),
+        };
         let mut reg = ExtensionRegistry::new();
         reg.install(Box::new(BadExt), None);
         assert!(reg.enable("bad", &ctx).await.is_err());

@@ -15,8 +15,8 @@ use super::config::KnobSpec;
 use super::knobs::StrategyParams;
 use crate::exit_policy::ExitConfig;
 use crate::model::{CryptoMarket, OrderbookSnapshot};
-use crate::strategies::shadow_twin::{ShadowFactory, ShadowTickCtx, TwinReplay};
 use crate::strategies::EngineStrategy;
+use crate::strategies::shadow_twin::{ShadowFactory, ShadowTickCtx, TwinReplay};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -98,7 +98,15 @@ impl Variant {
         exit_cfg: &ExitConfig,
     ) -> Option<Self> {
         let twin = factory.make(&params)?;
-        Some(Self::from_twin(id, label, params, is_baseline, now_ms, twin, exit_cfg))
+        Some(Self::from_twin(
+            id,
+            label,
+            params,
+            is_baseline,
+            now_ms,
+            twin,
+            exit_cfg,
+        ))
     }
 
     /// Test/observability constructor from an already-built twin.
@@ -123,7 +131,12 @@ impl Variant {
         }
     }
 
-    pub fn on_round(&mut self, markets: &[CryptoMarket], seeds: &[(String, OrderbookSnapshot)], now_ms: i64) {
+    pub fn on_round(
+        &mut self,
+        markets: &[CryptoMarket],
+        seeds: &[(String, OrderbookSnapshot)],
+        now_ms: i64,
+    ) {
         self.replay.on_round(markets, seeds, now_ms);
     }
 
@@ -155,7 +168,10 @@ pub struct VariantSet {
 impl VariantSet {
     /// A set that observes nothing — the disabled / not-yet-scaffolded state.
     pub fn empty(strategy: &str) -> Self {
-        Self { strategy: strategy.to_string(), variants: Vec::new() }
+        Self {
+            strategy: strategy.to_string(),
+            variants: Vec::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -176,7 +192,12 @@ impl VariantSet {
     /// virtual positions whose market left the round, which live force-exits).
     /// Closed-trade history is kept so metrics accumulate across round
     /// boundaries (D-3) instead of resetting every 900s round.
-    pub fn on_round(&mut self, markets: &[CryptoMarket], seeds: &[(String, OrderbookSnapshot)], now_ms: i64) {
+    pub fn on_round(
+        &mut self,
+        markets: &[CryptoMarket],
+        seeds: &[(String, OrderbookSnapshot)],
+        now_ms: i64,
+    ) {
         for v in self.variants.iter_mut() {
             v.on_round(markets, seeds, now_ms);
         }
@@ -240,7 +261,11 @@ pub fn build_variants(
     for i in 1..count {
         let m = sweep as usize + i - 1;
         let spec = mutable[(m / 2) % n];
-        let factor = if m % 2 == 0 { Decimal::ONE + VARIANT_STEP } else { Decimal::ONE - VARIANT_STEP };
+        let factor = if m % 2 == 0 {
+            Decimal::ONE + VARIANT_STEP
+        } else {
+            Decimal::ONE - VARIANT_STEP
+        };
 
         let mut want = base.clone();
         // Step from the value IN FORCE, not from the value the strategy happened
@@ -272,7 +297,7 @@ mod tests {
     use crate::shadow_evolution::knobs::KnobSpec;
     use crate::signal::{SpreadArbConfig, TrendConfig};
     use crate::strategies::shadow_twin::tick_ctx;
-    use crate::strategies::spread_arb::{spread_arb_knobs, SpreadArbBuiltin};
+    use crate::strategies::spread_arb::{SpreadArbBuiltin, spread_arb_knobs};
     use rust_decimal::prelude::FromPrimitive;
 
     fn specs() -> Vec<KnobSpec> {
@@ -314,12 +339,24 @@ mod tests {
     fn build_produces_a_baseline_plus_directed_single_knob_variants() {
         let base = StrategyParams::from_knobs(&specs());
         let f = factory();
-        let set =
-            build_variants("spread_arb", &specs(), &base, f.as_ref(), 4, dec!(0.05), &ExitConfig::default(), 0, 0);
+        let set = build_variants(
+            "spread_arb",
+            &specs(),
+            &base,
+            f.as_ref(),
+            4,
+            dec!(0.05),
+            &ExitConfig::default(),
+            0,
+            0,
+        );
         assert_eq!(set.variants.len(), 4);
         assert!(set.variants[0].is_baseline);
         for v in set.variants.iter().skip(1) {
-            let changed = base.iter().filter(|(n, val)| v.params.get(n) != Some(*val)).count();
+            let changed = base
+                .iter()
+                .filter(|(n, val)| v.params.get(n) != Some(*val))
+                .count();
             assert_eq!(changed, 1, "variant {} changed {changed} knobs", v.id);
             assert!(super::super::guard::validate_gradient(&base, &v.params, dec!(0.05)).is_ok());
             assert!(super::super::guard::validate_domain(&v.params, &specs()).is_ok());
@@ -332,7 +369,17 @@ mod tests {
         let f = factory();
         let mut moved: Vec<(String, bool)> = Vec::new(); // (knob, moved up?)
         for sweep in 0..8u64 {
-            let set = build_variants("s", &specs(), &base, f.as_ref(), 3, dec!(0.05), &ExitConfig::default(), 0, sweep);
+            let set = build_variants(
+                "s",
+                &specs(),
+                &base,
+                f.as_ref(),
+                3,
+                dec!(0.05),
+                &ExitConfig::default(),
+                0,
+                sweep,
+            );
             for v in set.variants.iter().skip(1) {
                 for (name, val) in v.params.iter() {
                     let old = base.get(name).unwrap();
@@ -343,10 +390,17 @@ mod tests {
             }
         }
         for spec in specs() {
-            let hits: Vec<bool> =
-                moved.iter().filter(|(n, _)| *n == spec.name).map(|(_, up)| *up).collect();
+            let hits: Vec<bool> = moved
+                .iter()
+                .filter(|(n, _)| *n == spec.name)
+                .map(|(_, up)| *up)
+                .collect();
             assert!(hits.contains(&true), "{} never explored upward", spec.name);
-            assert!(hits.contains(&false), "{} never explored downward", spec.name);
+            assert!(
+                hits.contains(&false),
+                "{} never explored downward",
+                spec.name
+            );
         }
     }
 
@@ -354,7 +408,17 @@ mod tests {
     fn no_declaration_means_no_variants_at_all() {
         let base = StrategyParams::new();
         let f = factory();
-        let set = build_variants("spread_arb", &[], &base, f.as_ref(), 4, dec!(0.05), &ExitConfig::default(), 0, 0);
+        let set = build_variants(
+            "spread_arb",
+            &[],
+            &base,
+            f.as_ref(),
+            4,
+            dec!(0.05),
+            &ExitConfig::default(),
+            0,
+            0,
+        );
         assert!(set.is_empty(), "nothing declared ⇒ nothing to compare");
     }
 
@@ -363,16 +427,38 @@ mod tests {
         let specs = vec![KnobSpec::new("fixed", dec!(1), dec!(1), dec!(1))];
         let base = StrategyParams::from_knobs(&specs);
         let f = factory();
-        let set = build_variants("s", &specs, &base, f.as_ref(), 3, dec!(0.05), &ExitConfig::default(), 0, 0);
-        assert!(set.is_empty(), "a knob that cannot move cannot produce a variant");
+        let set = build_variants(
+            "s",
+            &specs,
+            &base,
+            f.as_ref(),
+            3,
+            dec!(0.05),
+            &ExitConfig::default(),
+            0,
+            0,
+        );
+        assert!(
+            set.is_empty(),
+            "a knob that cannot move cannot produce a variant"
+        );
     }
 
     #[test]
     fn metrics_are_windowed_and_identical_for_baseline_and_variant() {
         let base = StrategyParams::from_knobs(&specs());
         let f = factory();
-        let mut set =
-            build_variants("spread_arb", &specs(), &base, f.as_ref(), 2, dec!(0.05), &ExitConfig::default(), 0, 0);
+        let mut set = build_variants(
+            "spread_arb",
+            &specs(),
+            &base,
+            f.as_ref(),
+            2,
+            dec!(0.05),
+            &ExitConfig::default(),
+            0,
+            0,
+        );
         let m = market();
         set.on_round(&[m.clone()], &[], 0);
         // Confirm the trend, dip in, run up, exit — for every variant.
@@ -408,8 +494,28 @@ mod tests {
     fn variants_are_deterministic() {
         let base = StrategyParams::from_knobs(&specs());
         let f = factory();
-        let a = build_variants("s", &specs(), &base, f.as_ref(), 4, dec!(0.05), &ExitConfig::default(), 0, 3);
-        let b = build_variants("s", &specs(), &base, f.as_ref(), 4, dec!(0.05), &ExitConfig::default(), 0, 3);
+        let a = build_variants(
+            "s",
+            &specs(),
+            &base,
+            f.as_ref(),
+            4,
+            dec!(0.05),
+            &ExitConfig::default(),
+            0,
+            3,
+        );
+        let b = build_variants(
+            "s",
+            &specs(),
+            &base,
+            f.as_ref(),
+            4,
+            dec!(0.05),
+            &ExitConfig::default(),
+            0,
+            3,
+        );
         let ap: Vec<_> = a.variants.iter().map(|v| v.params.clone()).collect();
         let bp: Vec<_> = b.variants.iter().map(|v| v.params.clone()).collect();
         assert_eq!(ap, bp);

@@ -22,7 +22,10 @@ pub struct PriceBuffer {
 
 impl PriceBuffer {
     pub fn new(max_age_sec: i64) -> Self {
-        Self { prices: Vec::new(), max_age_ms: max_age_sec * 1000 }
+        Self {
+            prices: Vec::new(),
+            max_age_ms: max_age_sec * 1000,
+        }
     }
 
     pub fn push(&mut self, price: Decimal, now_ms: i64) {
@@ -103,7 +106,10 @@ impl PriceBuffer {
 
     /// Newest sample (0 when empty) — the same value the last `push` inserted.
     pub fn latest(&self) -> Decimal {
-        self.prices.first().map(|(_, p)| *p).unwrap_or(Decimal::ZERO)
+        self.prices
+            .first()
+            .map(|(_, p)| *p)
+            .unwrap_or(Decimal::ZERO)
     }
 
     /// Count direction reversals (steps >= min_step) in the window.
@@ -189,7 +195,12 @@ pub struct TrendTracker {
 
 impl TrendTracker {
     pub fn new(cfg: TrendConfig) -> Self {
-        Self { cfg, states: Default::default(), round_slot: i64::MIN, broken: Vec::new() }
+        Self {
+            cfg,
+            states: Default::default(),
+            round_slot: i64::MIN,
+            broken: Vec::new(),
+        }
     }
 
     pub fn set_config(&mut self, cfg: TrendConfig) {
@@ -205,10 +216,13 @@ impl TrendTracker {
         let broken_price = self.cfg.broken_price;
         let ratio_needed = self.cfg.ratio;
 
-        let s = self.states.entry(token_id.to_string()).or_insert_with(|| TrendEntry {
-            phase: TrendPhase::Idle,
-            samples: Vec::new(),
-        });
+        let s = self
+            .states
+            .entry(token_id.to_string())
+            .or_insert_with(|| TrendEntry {
+                phase: TrendPhase::Idle,
+                samples: Vec::new(),
+            });
         s.samples.push((now_ms, price));
         let cutoff = now_ms - window_ms;
         s.samples.retain(|(t, _)| *t >= cutoff);
@@ -240,7 +254,11 @@ impl TrendTracker {
         }
 
         if s.phase != TrendPhase::Confirmed && s.phase != TrendPhase::Broken {
-            s.phase = if above_ratio > dec!(0.5) { TrendPhase::Building } else { TrendPhase::Idle };
+            s.phase = if above_ratio > dec!(0.5) {
+                TrendPhase::Building
+            } else {
+                TrendPhase::Idle
+            };
         }
     }
 
@@ -252,7 +270,10 @@ impl TrendTracker {
     }
 
     pub fn is_confirmed(&self, token_id: &str) -> bool {
-        self.states.get(token_id).map(|s| s.phase == TrendPhase::Confirmed).unwrap_or(false)
+        self.states
+            .get(token_id)
+            .map(|s| s.phase == TrendPhase::Confirmed)
+            .unwrap_or(false)
     }
 
     pub fn confirmed_tokens(&self) -> std::collections::HashSet<String> {
@@ -396,7 +417,10 @@ mod tests {
 
     #[test]
     fn trend_confirms_after_window_with_high_ratio() {
-        let mut t = TrendTracker::new(TrendConfig { confirm_sec: 10, ..Default::default() });
+        let mut t = TrendTracker::new(TrendConfig {
+            confirm_sec: 10,
+            ..Default::default()
+        });
         // Feed 12 samples over >9s all above 0.55.
         for i in 0..12 {
             t.on_price("tok", dec!(0.60), i * 1000);
@@ -407,7 +431,10 @@ mod tests {
 
     #[test]
     fn trend_breaks_below_break_price() {
-        let mut t = TrendTracker::new(TrendConfig { confirm_sec: 10, ..Default::default() });
+        let mut t = TrendTracker::new(TrendConfig {
+            confirm_sec: 10,
+            ..Default::default()
+        });
         for i in 0..12 {
             t.on_price("tok", dec!(0.60), i * 1000);
         }
@@ -427,16 +454,22 @@ mod tests {
         confirmed.insert("up".to_string());
 
         // No book → no signal (guards against stale-price entries).
-        assert!(evaluate_spread_arb("BTC", "c", "up", "down", None, None, &confirmed, &cfg).is_none());
+        assert!(
+            evaluate_spread_arb("BTC", "c", "up", "down", None, None, &confirmed, &cfg).is_none()
+        );
 
         // Book mid 0.50, bid 0.49 → entry = round2(0.50*0.98)=0.49, capped at bid 0.49,
         // but 0.49 > max_entry 0.45 → rejected.
         let b = book(0.49, 0.51);
-        assert!(evaluate_spread_arb("BTC", "c", "up", "down", Some(&b), None, &confirmed, &cfg).is_none());
+        assert!(
+            evaluate_spread_arb("BTC", "c", "up", "down", Some(&b), None, &confirmed, &cfg)
+                .is_none()
+        );
 
         // Book mid 0.44, bid 0.43 → entry = round2(0.4312)=0.43 ≤ 0.45, below mid → signal.
         let b2 = book(0.43, 0.45);
-        let sig = evaluate_spread_arb("BTC", "c", "up", "down", Some(&b2), None, &confirmed, &cfg).unwrap();
+        let sig = evaluate_spread_arb("BTC", "c", "up", "down", Some(&b2), None, &confirmed, &cfg)
+            .unwrap();
         assert_eq!(sig.direction, SignalDirection::Up);
         assert_eq!(sig.price, dec!(0.43));
         assert!(sig.price < dec!(0.44));
@@ -448,13 +481,18 @@ mod tests {
         let empty = std::collections::HashSet::new();
         let b = book(0.43, 0.45);
         // Not confirmed → no signal.
-        assert!(evaluate_spread_arb("BTC", "c", "up", "down", Some(&b), None, &empty, &cfg).is_none());
+        assert!(
+            evaluate_spread_arb("BTC", "c", "up", "down", Some(&b), None, &empty, &cfg).is_none()
+        );
 
         // Confirmed but mid below broken price → no signal.
         let mut confirmed = std::collections::HashSet::new();
         confirmed.insert("up".to_string());
         let low = book(0.30, 0.32); // mid 0.31 < 0.35
-        assert!(evaluate_spread_arb("BTC", "c", "up", "down", Some(&low), None, &confirmed, &cfg).is_none());
+        assert!(
+            evaluate_spread_arb("BTC", "c", "up", "down", Some(&low), None, &confirmed, &cfg)
+                .is_none()
+        );
     }
 
     #[test]

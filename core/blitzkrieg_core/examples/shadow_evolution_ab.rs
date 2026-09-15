@@ -79,7 +79,10 @@ fn build_core(se_enabled: bool) -> Core {
         ..Default::default()
     };
     let mut cfg = CoreConfig {
-        risk: RiskConfig { max_order_notional: dec!(8), ..Default::default() },
+        risk: RiskConfig {
+            max_order_notional: dec!(8),
+            ..Default::default()
+        },
         dry_seed_balance: dec!(100_000),
         engine_enabled: true,
         auto_exits_enabled: true,
@@ -125,7 +128,13 @@ fn build_core(se_enabled: bool) -> Core {
             min_round_age_sec: 0,
             min_time_left_sec: 0,
         },
-        trend: TrendConfig { confirm_sec: 60, min_price: dec!(0.55), broken_price: dec!(0.35), ratio: dec!(0.8), window_floor_ms: 1_000 },
+        trend: TrendConfig {
+            confirm_sec: 60,
+            min_price: dec!(0.55),
+            broken_price: dec!(0.35),
+            ratio: dec!(0.8),
+            window_floor_ms: 1_000,
+        },
         spread_arb: SpreadArbConfig::default(),
         size_usd: dec!(2.5),
         min_shares: dec!(10),
@@ -161,7 +170,15 @@ fn markets(slot: i64) -> Vec<CryptoMarket> {
 fn tick_token(core: &mut Core, token: &str, bid: Decimal, ask: Decimal, now: i64) {
     let bids = vec![(bid, dec!(500))];
     let asks = vec![(ask, dec!(500))];
-    core.engine_on_data(DataEvent::Book { token_id: token.into(), bids: bids.clone(), asks: asks.clone(), now_ms: now }, now);
+    core.engine_on_data(
+        DataEvent::Book {
+            token_id: token.into(),
+            bids: bids.clone(),
+            asks: asks.clone(),
+            now_ms: now,
+        },
+        now,
+    );
     core.book_snapshot(token, bids, asks, now);
     let _ = core.tick(now);
     let _ = core.engine_evaluate(now);
@@ -187,7 +204,8 @@ fn changed_knobs(from: &MutableParams, to: &MutableParams, strategy: &str) -> Ve
             if fv == tv {
                 None
             } else {
-                let show = |v: Option<Decimal>| v.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
+                let show =
+                    |v: Option<Decimal>| v.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
                 Some(format!("{n}:{}->{}", show(fv), show(tv)))
             }
         })
@@ -219,10 +237,10 @@ struct ManagerExp {
 fn run_manager_experiment() -> ManagerExp {
     use blitzkrieg_core::exit_policy::ExitConfig;
     use blitzkrieg_core::model::OrderbookSnapshot;
-    use blitzkrieg_core::shadow_evolution::config::{ImmutableConfig, ShadowEvolutionConfig};
     use blitzkrieg_core::shadow_evolution::ShadowEvolution;
-    use blitzkrieg_core::strategies::spread_arb::SpreadArbBuiltin;
+    use blitzkrieg_core::shadow_evolution::config::{ImmutableConfig, ShadowEvolutionConfig};
     use blitzkrieg_core::strategies::EngineStrategy;
+    use blitzkrieg_core::strategies::spread_arb::SpreadArbBuiltin;
 
     let cfg = ShadowEvolutionConfig {
         enabled: true,
@@ -235,7 +253,10 @@ fn run_manager_experiment() -> ManagerExp {
         max_gradient: dec!(0.05),
         // Baseline + 8 directed moves = both directions of all four knobs.
         variant_count: 9,
-        audit_dir: std::env::temp_dir().join("shadow_ab_manager_audit").to_string_lossy().into_owned(),
+        audit_dir: std::env::temp_dir()
+            .join("shadow_ab_manager_audit")
+            .to_string_lossy()
+            .into_owned(),
         risk: ImmutableConfig::default(),
         exit_cfg: ExitConfig::default(),
         ..Default::default()
@@ -299,7 +320,11 @@ fn run_manager_experiment() -> ManagerExp {
     let applied = se.evolution_count(STRATEGY);
     let rejected = se.rejected_count(STRATEGY);
 
-    let mut out = ManagerExp { applied, rejected, ..Default::default() };
+    let mut out = ManagerExp {
+        applied,
+        rejected,
+        ..Default::default()
+    };
     for v in &pre_views {
         if v.is_baseline {
             out.baseline_wr = v.win_rate;
@@ -314,7 +339,9 @@ fn run_manager_experiment() -> ManagerExp {
         }
     }
     let cur = se.current_params();
-    out.final_cap = cur.get(STRATEGY, "trend_max_entry_price").unwrap_or_default();
+    out.final_cap = cur
+        .get(STRATEGY, "trend_max_entry_price")
+        .unwrap_or_default();
     out.final_min_price = cur.get(STRATEGY, "trend_min_price").unwrap_or_default();
     for rec in se.history(Some(STRATEGY), 50) {
         out.trajectory.push(format!(
@@ -352,11 +379,19 @@ struct Metrics {
 
 impl Metrics {
     fn win_rate(&self) -> Decimal {
-        if self.n == 0 { Decimal::ZERO } else { Decimal::from(self.wins) / Decimal::from(self.n) }
+        if self.n == 0 {
+            Decimal::ZERO
+        } else {
+            Decimal::from(self.wins) / Decimal::from(self.n)
+        }
     }
     fn profit_factor(&self) -> Decimal {
         if self.gross_loss <= Decimal::ZERO {
-            if self.gross_profit > Decimal::ZERO { Decimal::from(100) } else { Decimal::ZERO }
+            if self.gross_profit > Decimal::ZERO {
+                Decimal::from(100)
+            } else {
+                Decimal::ZERO
+            }
         } else {
             self.gross_profit / self.gross_loss
         }
@@ -400,7 +435,13 @@ fn run_group(group: char, se_enabled: bool) -> (Vec<TradeRow>, Core) {
     // sees a stale expiry and blocks every entry).
     let slot = now / 1000 / ROUND_SEC;
 
-    core.engine_on_data(DataEvent::RoundMarkets { markets: markets(slot), now_ms: now }, now);
+    core.engine_on_data(
+        DataEvent::RoundMarkets {
+            markets: markets(slot),
+            now_ms: now,
+        },
+        now,
+    );
 
     // 1) Warm-up: hold every token at mid 0.61 so all trends confirm. The trend
     //    window is 60s and confirmation needs >=90% of it spanned, so 20 ticks at
@@ -475,7 +516,10 @@ fn run_group(group: char, se_enabled: bool) -> (Vec<TradeRow>, Core) {
         // Probe: how many virtual trades have the variants accumulated so far?
         if std::env::var("AB_PROBE").is_ok() && i % 10 == 0 {
             let vv = core.shadow_evolution_variants(now);
-            let s: Vec<String> = vv.iter().map(|v| format!("{}:{}", v.id, v.sample_count)).collect();
+            let s: Vec<String> = vv
+                .iter()
+                .map(|v| format!("{}:{}", v.id, v.sample_count))
+                .collect();
             eprintln!("[{group}] after token {i} (t={}) samples {s:?}", now / 1000);
         }
     }
@@ -484,7 +528,11 @@ fn run_group(group: char, se_enabled: bool) -> (Vec<TradeRow>, Core) {
     // window is not accidentally exceeded (which would prune every sample).
     if std::env::var("AB_PROBE").is_ok() {
         let cur = core.shadow_evolution().current_params();
-        let g = |k: &str| cur.get(STRATEGY, k).map(|v| v.to_string()).unwrap_or_else(|| "-".into());
+        let g = |k: &str| {
+            cur.get(STRATEGY, k)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".into())
+        };
         eprintln!(
             "[{group}] PARAMS cap={} factor={} min={} broken={}",
             g("trend_max_entry_price"),
@@ -494,8 +542,16 @@ fn run_group(group: char, se_enabled: bool) -> (Vec<TradeRow>, Core) {
         );
         let vv = core.shadow_evolution_variants(now + 1_000);
         for v in &vv {
-            eprintln!("[{group}] FINAL {} baseline={} samples={} wr={} pf={} pnl={} age={}",
-                v.id, v.is_baseline, v.sample_count, v.win_rate, v.profit_factor, v.total_pnl_usd, v.age_sec);
+            eprintln!(
+                "[{group}] FINAL {} baseline={} samples={} wr={} pf={} pnl={} age={}",
+                v.id,
+                v.is_baseline,
+                v.sample_count,
+                v.win_rate,
+                v.profit_factor,
+                v.total_pnl_usd,
+                v.age_sec
+            );
         }
     }
 
@@ -509,13 +565,25 @@ fn debug_dump(tag: char, core: &mut Core, rows: &[TradeRow]) {
     let now = 1_700_000_000_000 + 10_000_000;
     let status = core.shadow_evolution_status(now);
     let variants = core.shadow_evolution_variants(now);
-    eprintln!("[{tag}] trades={} status={status:?} variants={} applied={} rejected={}",
-        rows.len(), variants.len(),
+    eprintln!(
+        "[{tag}] trades={} status={status:?} variants={} applied={} rejected={}",
+        rows.len(),
+        variants.len(),
         core.shadow_evolution().evolution_count(STRATEGY),
-        core.shadow_evolution().rejected_count(STRATEGY));
+        core.shadow_evolution().rejected_count(STRATEGY)
+    );
     for v in &variants {
-        eprintln!("[{tag}]   variant {} strategy={} baseline={} samples={} wr={} pf={} pnl={} age={}",
-            v.id, v.strategy, v.is_baseline, v.sample_count, v.win_rate, v.profit_factor, v.total_pnl_usd, v.age_sec);
+        eprintln!(
+            "[{tag}]   variant {} strategy={} baseline={} samples={} wr={} pf={} pnl={} age={}",
+            v.id,
+            v.strategy,
+            v.is_baseline,
+            v.sample_count,
+            v.win_rate,
+            v.profit_factor,
+            v.total_pnl_usd,
+            v.age_sec
+        );
     }
 }
 
@@ -535,7 +603,10 @@ fn main() {
         model_self_check();
     }
 
-    let out_dir = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("docs/reports/data"));
+    let out_dir = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("docs/reports/data"));
     let _ = fs::create_dir_all(&out_dir);
 
     let (rows_a, mut core_a) = run_group('A', false);
@@ -566,7 +637,11 @@ fn main() {
     // ── Raw trades CSV.
     let mut csv = String::from("group,idx,asset,entry,exit,net,reason,hold_sec\n");
     for r in rows_a.iter().chain(rows_b.iter()) {
-        let _ = writeln!(csv, "{},{},{},{},{},{},{},{}", r.group, r.idx, r.asset, r.entry, r.exit, r.net, r.reason, r.hold_sec);
+        let _ = writeln!(
+            csv,
+            "{},{},{},{},{},{},{},{}",
+            r.group, r.idx, r.asset, r.entry, r.exit, r.net, r.reason, r.hold_sec
+        );
     }
     let _ = fs::write(out_dir.join("shadow_ab_trades.csv"), &csv);
 
@@ -585,18 +660,54 @@ fn main() {
     // ── Summary (markdown + machine-readable numbers).
     let mut s = String::new();
     let _ = writeln!(s, "# Shadow Evolution A/B — raw summary");
-    let _ = writeln!(s, "groups: A=evolution OFF, B=evolution ON (identical tick stream, params, balance)");
-    let _ = writeln!(s, "assets_per_round: {N_ASSETS}, round_sec: {ROUND_SEC}, tick_ms: {STEP_MS}, scripted_rounds: 1");
+    let _ = writeln!(
+        s,
+        "groups: A=evolution OFF, B=evolution ON (identical tick stream, params, balance)"
+    );
+    let _ = writeln!(
+        s,
+        "assets_per_round: {N_ASSETS}, round_sec: {ROUND_SEC}, tick_ms: {STEP_MS}, scripted_rounds: 1"
+    );
     let _ = writeln!(s);
     let _ = writeln!(s, "## Realised (dry) metrics");
     let _ = writeln!(s, "group,trades,wins,win_rate,pf_ratio,net_pnl,max_dd");
-    let _ = writeln!(s, "A,{},{},{:.4},{:.4},{:.4},{:.4}", ma.n, ma.wins, ma.win_rate(), ma.profit_factor(), ma.net, ma.max_dd);
-    let _ = writeln!(s, "B,{},{},{:.4},{:.4},{:.4},{:.4}", mb.n, mb.wins, mb.win_rate(), mb.profit_factor(), mb.net, mb.max_dd);
+    let _ = writeln!(
+        s,
+        "A,{},{},{:.4},{:.4},{:.4},{:.4}",
+        ma.n,
+        ma.wins,
+        ma.win_rate(),
+        ma.profit_factor(),
+        ma.net,
+        ma.max_dd
+    );
+    let _ = writeln!(
+        s,
+        "B,{},{},{:.4},{:.4},{:.4},{:.4}",
+        mb.n,
+        mb.wins,
+        mb.win_rate(),
+        mb.profit_factor(),
+        mb.net,
+        mb.max_dd
+    );
     let _ = writeln!(s);
     let _ = writeln!(s, "## Group B evolution ({STRATEGY})");
-    let _ = writeln!(s, "audited_strategies: {:?}", core_b.shadow_evolution().audited_strategies());
-    let _ = writeln!(s, "evolutions_applied: {}", core_b.shadow_evolution().evolution_count(STRATEGY));
-    let _ = writeln!(s, "evolutions_rejected_natural: {}", core_b.shadow_evolution().rejected_count(STRATEGY));
+    let _ = writeln!(
+        s,
+        "audited_strategies: {:?}",
+        core_b.shadow_evolution().audited_strategies()
+    );
+    let _ = writeln!(
+        s,
+        "evolutions_applied: {}",
+        core_b.shadow_evolution().evolution_count(STRATEGY)
+    );
+    let _ = writeln!(
+        s,
+        "evolutions_rejected_natural: {}",
+        core_b.shadow_evolution().rejected_count(STRATEGY)
+    );
     let _ = writeln!(s, "audit_records: {}", history.len());
     let _ = writeln!(s, "safety_lock_probe: {lock_probe}");
     let final_cap = core_b
@@ -604,7 +715,10 @@ fn main() {
         .current_params()
         .get(STRATEGY, "trend_max_entry_price")
         .unwrap_or(before_cap);
-    let _ = writeln!(s, "final_params_vs_initial_max_entry_cap: {before_cap} -> {final_cap}");
+    let _ = writeln!(
+        s,
+        "final_params_vs_initial_max_entry_cap: {before_cap} -> {final_cap}"
+    );
     let _ = writeln!(s);
     let _ = writeln!(s, "## Group B parameter trajectory (changed knobs only)");
     let _ = writeln!(s, "ts,knob,from,to,reason,applied,rejection");
@@ -612,16 +726,41 @@ fn main() {
         for change in changed_knobs(&rec.from_params, &rec.to_params, STRATEGY) {
             let (knob, rest) = change.split_once(':').unwrap_or((change.as_str(), ""));
             let (from, to) = rest.split_once("->").unwrap_or((rest, ""));
-            let _ = writeln!(s, "{},{},{},{},{:?},{},{}", rec.timestamp, knob, from, to, rec.reason, rec.applied, rec.rejection.clone().unwrap_or_default());
+            let _ = writeln!(
+                s,
+                "{},{},{},{},{:?},{},{}",
+                rec.timestamp,
+                knob,
+                from,
+                to,
+                rec.reason,
+                rec.applied,
+                rec.rejection.clone().unwrap_or_default()
+            );
         }
     }
     let _ = writeln!(s);
-    let _ = writeln!(s, "## EXP-C: manager-level qualification (real ShadowEvolution, no engine lag)");
-    let _ = writeln!(s, "baseline: n={} wr={:.4} pf={:.4} pnl={:.4}", exp_c.baseline_n, exp_c.baseline_wr, exp_c.baseline_pf, exp_c.base_pnl);
-    let _ = writeln!(s, "best_variant: n={} wr={:.4} pf={:.4} pnl={:.4}", exp_c.best_variant_n, exp_c.best_variant_wr, exp_c.best_variant_pf, exp_c.best_variant_pnl);
+    let _ = writeln!(
+        s,
+        "## EXP-C: manager-level qualification (real ShadowEvolution, no engine lag)"
+    );
+    let _ = writeln!(
+        s,
+        "baseline: n={} wr={:.4} pf={:.4} pnl={:.4}",
+        exp_c.baseline_n, exp_c.baseline_wr, exp_c.baseline_pf, exp_c.base_pnl
+    );
+    let _ = writeln!(
+        s,
+        "best_variant: n={} wr={:.4} pf={:.4} pnl={:.4}",
+        exp_c.best_variant_n, exp_c.best_variant_wr, exp_c.best_variant_pf, exp_c.best_variant_pnl
+    );
     let _ = writeln!(s, "evolutions_applied: {}", exp_c.applied);
     let _ = writeln!(s, "evolutions_rejected: {}", exp_c.rejected);
-    let _ = writeln!(s, "final_cap: {}  final_min_price: {}", exp_c.final_cap, exp_c.final_min_price);
+    let _ = writeln!(
+        s,
+        "final_cap: {}  final_min_price: {}",
+        exp_c.final_cap, exp_c.final_min_price
+    );
     let _ = writeln!(s, "trajectory:");
     for t in &exp_c.trajectory {
         let _ = writeln!(s, "  {t}");
@@ -639,9 +778,9 @@ fn main() {
 /// evolution search depends on is produced by the strategy's OWN logic.
 fn model_self_check() {
     use blitzkrieg_core::exit_policy::ExitConfig;
-    use blitzkrieg_core::strategies::shadow_twin::{tick_ctx, TwinReplay};
-    use blitzkrieg_core::strategies::spread_arb::SpreadArbBuiltin;
     use blitzkrieg_core::strategies::EngineStrategy;
+    use blitzkrieg_core::strategies::shadow_twin::{TwinReplay, tick_ctx};
+    use blitzkrieg_core::strategies::spread_arb::SpreadArbBuiltin;
 
     let m = CryptoMarket {
         asset: "T".into(),
@@ -657,11 +796,15 @@ fn model_self_check() {
         question: "?".into(),
     };
     let strat = SpreadArbBuiltin::new(TrendConfig::default(), SpreadArbConfig::default());
-    let factory = strat.shadow_factory().expect("spread_arb declares itself evolvable");
+    let factory = strat
+        .shadow_factory()
+        .expect("spread_arb declares itself evolvable");
     for (label, cap) in [("baseline", dec!(0.45)), ("tight-3pct", dec!(0.4365))] {
         let mut p = StrategyParams::from_knobs(&factory.knobs());
         p.set("trend_max_entry_price", cap);
-        let Some(twin) = factory.make(&p) else { continue };
+        let Some(twin) = factory.make(&p) else {
+            continue;
+        };
         let mut replay = TwinReplay::new(twin, &ExitConfig::default());
         replay.on_round(&[m.clone()], &[], 0);
         let mut now = 0i64;
@@ -673,7 +816,10 @@ fn model_self_check() {
         now += 1_000;
         let dip = book(dec!(0.45), dec!(0.49)); // mid 0.47 → entry clamps to 0.45
         replay.on_tick(&tick_ctx(&[m.clone()], "T", &dip, 1, 870, now));
-        eprintln!("[probe] {label}: cap={cap} open={}", replay.open_positions());
+        eprintln!(
+            "[probe] {label}: cap={cap} open={}",
+            replay.open_positions()
+        );
     }
 }
 

@@ -95,7 +95,10 @@ pub enum OrderStatus {
 
 impl OrderStatus {
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Filled | Self::Cancelled | Self::Rejected | Self::Failed)
+        matches!(
+            self,
+            Self::Filled | Self::Cancelled | Self::Rejected | Self::Failed
+        )
     }
     pub fn is_live(self) -> bool {
         matches!(self, Self::Pending | Self::Live | Self::PartiallyFilled)
@@ -153,7 +156,11 @@ pub struct CoreError {
 
 impl CoreError {
     pub fn new(code: CoreErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), raw: None }
+        Self {
+            code,
+            message: message.into(),
+            raw: None,
+        }
     }
     pub fn with_raw(mut self, raw: impl Into<String>) -> Self {
         self.raw = Some(raw.into());
@@ -233,19 +240,34 @@ impl OrderIntent {
     /// Confirm the intent is internally consistent for submission.
     pub fn validate(&self) -> Result<(), CoreError> {
         if self.symbol.is_empty() {
-            return Err(CoreError::new(CoreErrorCode::InvalidParams, "symbol is required"));
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "symbol is required",
+            ));
         }
         if self.size <= Decimal::ZERO {
-            return Err(CoreError::new(CoreErrorCode::InvalidSize, "size must be positive"));
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidSize,
+                "size must be positive",
+            ));
         }
-        let needs_price = matches!(self.order_kind, OrderKind::Limit | OrderKind::StopLimit | OrderKind::PostOnly);
+        let needs_price = matches!(
+            self.order_kind,
+            OrderKind::Limit | OrderKind::StopLimit | OrderKind::PostOnly
+        );
         if needs_price && self.price.is_none() {
-            return Err(CoreError::new(CoreErrorCode::InvalidParams, "limit/stop/post-only orders require a price"));
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "limit/stop/post-only orders require a price",
+            ));
         }
         if let Some(p) = self.price {
             if p <= Decimal::ZERO || p > Decimal::ONE {
                 if self.market == MarketType::Prediction {
-                    return Err(CoreError::new(CoreErrorCode::InvalidParams, "prediction price must be in (0,1]"));
+                    return Err(CoreError::new(
+                        CoreErrorCode::InvalidParams,
+                        "prediction price must be in (0,1]",
+                    ));
                 }
             }
         }

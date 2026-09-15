@@ -45,7 +45,12 @@ pub struct LossBreaker {
 
 impl LossBreaker {
     pub fn new(max_consecutive_losses: u32, cooldown_sec: i64) -> Self {
-        Self { max_consecutive_losses, cooldown_sec, consecutive_losses: 0, halted_until_ms: 0 }
+        Self {
+            max_consecutive_losses,
+            cooldown_sec,
+            consecutive_losses: 0,
+            halted_until_ms: 0,
+        }
     }
 
     pub fn record(&mut self, net_pnl: Decimal, now_ms: i64) -> bool {
@@ -85,7 +90,11 @@ impl LossBreaker {
 
 impl RiskGate {
     pub fn new(config: RiskConfig) -> Self {
-        Self { config, killed: false, kill_reason: None }
+        Self {
+            config,
+            killed: false,
+            kill_reason: None,
+        }
     }
 
     pub fn kill(&mut self, reason: impl Into<String>) {
@@ -107,17 +116,25 @@ impl RiskGate {
         if self.killed {
             return Err(CoreError::new(
                 CoreErrorCode::KillSwitchActive,
-                self.kill_reason.clone().unwrap_or_else(|| "kill switch active".into()),
+                self.kill_reason
+                    .clone()
+                    .unwrap_or_else(|| "kill switch active".into()),
             ));
         }
         if req.price <= self.config.min_price || req.price > self.config.max_price {
             return Err(CoreError::new(
                 CoreErrorCode::RiskRejected,
-                format!("price {} outside ({}..{}]", req.price, self.config.min_price, self.config.max_price),
+                format!(
+                    "price {} outside ({}..{}]",
+                    req.price, self.config.min_price, self.config.max_price
+                ),
             ));
         }
         if req.size <= Decimal::ZERO {
-            return Err(CoreError::new(CoreErrorCode::RiskRejected, "size must be positive"));
+            return Err(CoreError::new(
+                CoreErrorCode::RiskRejected,
+                "size must be positive",
+            ));
         }
         // Notional cap applies to BUY commitment; SELL is bounded by position (P2).
         if req.side == Side::Buy {
@@ -125,7 +142,10 @@ impl RiskGate {
             if notional > self.config.max_order_notional {
                 return Err(CoreError::new(
                     CoreErrorCode::RiskRejected,
-                    format!("notional {notional} exceeds per-order cap {}", self.config.max_order_notional),
+                    format!(
+                        "notional {notional} exceeds per-order cap {}",
+                        self.config.max_order_notional
+                    ),
                 ));
             }
         }
@@ -166,7 +186,9 @@ mod tests {
         g.check(&req(Side::Buy, dec!(0.5), dec!(8))).unwrap_err();
         g.kill("manual");
         assert_eq!(
-            g.check(&req(Side::Buy, dec!(0.5), dec!(1))).unwrap_err().code,
+            g.check(&req(Side::Buy, dec!(0.5), dec!(1)))
+                .unwrap_err()
+                .code,
             CoreErrorCode::KillSwitchActive
         );
         g.resume();

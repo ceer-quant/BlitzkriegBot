@@ -16,9 +16,7 @@ use super::shadow_twin::ShadowFactory;
 use super::{EngineStrategy, StrategyCtx};
 use crate::model::OrderbookSnapshot;
 use crate::shadow_evolution::{KnobSpec, ParamRegistry, StrategyParams};
-use crate::signal::{
-    evaluate_spread_arb, SpreadArbConfig, TradeSignal, TrendConfig, TrendTracker,
-};
+use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig, TrendTracker, evaluate_spread_arb};
 use arc_swap::ArcSwap;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -274,7 +272,7 @@ impl ShadowFactory for SpreadArbShadowFactory {
 
 #[cfg(test)]
 mod tests {
-    use super::super::shadow_twin::{tick_ctx, TwinReplay};
+    use super::super::shadow_twin::{TwinReplay, tick_ctx};
     use super::*;
     use crate::exit_policy::ExitConfig;
     use crate::model::CryptoMarket;
@@ -330,9 +328,15 @@ mod tests {
         assert_eq!(k[0].value, dec!(0.55));
         // An out-of-domain starting config widens the declared domain instead of
         // declaring a box the strategy cannot fit in.
-        let cfg = SpreadArbConfig { trend_max_entry_price: dec!(0.99), ..Default::default() };
+        let cfg = SpreadArbConfig {
+            trend_max_entry_price: dec!(0.99),
+            ..Default::default()
+        };
         let k = spread_arb_knobs(&cfg);
-        let cap = k.iter().find(|s| s.name == "trend_max_entry_price").unwrap();
+        let cap = k
+            .iter()
+            .find(|s| s.name == "trend_max_entry_price")
+            .unwrap();
         assert!(cap.contains(dec!(0.99)));
         assert!(cap.is_coherent());
     }
@@ -360,13 +364,21 @@ mod tests {
         let m = market();
         replay.on_round(&[m.clone()], &[], 0);
         let mut now = confirm(&mut replay, &m, 0, 70);
-        assert_eq!(replay.open_positions(), 0, "above-threshold prices are not a dip");
+        assert_eq!(
+            replay.open_positions(),
+            0,
+            "above-threshold prices are not a dip"
+        );
 
         // Dip while confirmed → the strategy's own entry fires.
         now += 1_000;
         let dip = book(0.43, 0.45);
         replay.on_tick(&tick_ctx(&[m.clone()], "t", &dip, 1, 870, now));
-        assert_eq!(replay.open_positions(), 1, "twin must enter via its own logic");
+        assert_eq!(
+            replay.open_positions(),
+            1,
+            "twin must enter via its own logic"
+        );
 
         // Run-up → the shared exit policy takes profit.
         now += 1_000;
@@ -376,7 +388,11 @@ mod tests {
         let metrics = Metrics::from_trades(&replay.windowed_trades(1800, now));
         assert_eq!(metrics.sample_count, 1);
         assert_eq!(metrics.wins, 1);
-        assert!(metrics.total_pnl > Decimal::ZERO, "expected a profit, got {}", metrics.total_pnl);
+        assert!(
+            metrics.total_pnl > Decimal::ZERO,
+            "expected a profit, got {}",
+            metrics.total_pnl
+        );
     }
 
     #[test]
@@ -387,7 +403,10 @@ mod tests {
         let m = market();
         let dip = book(0.43, 0.45);
         let run = |cap: Decimal| -> usize {
-            let base = SpreadArbConfig { trend_max_entry_price: cap, ..Default::default() };
+            let base = SpreadArbConfig {
+                trend_max_entry_price: cap,
+                ..Default::default()
+            };
             let strat = SpreadArbBuiltin::new(TrendConfig::default(), base);
             let factory = strat.shadow_factory().unwrap();
             let mut params = StrategyParams::from_knobs(&factory.knobs());

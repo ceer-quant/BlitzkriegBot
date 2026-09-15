@@ -95,7 +95,11 @@ impl AuditLog {
             }
             if let Ok(line) = serde_json::to_string(&rec) {
                 use std::io::Write as _;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
                     let _ = writeln!(f, "{line}");
                 }
             }
@@ -184,7 +188,13 @@ impl AuditLog {
     }
 
     /// Record a rollback for one strategy.
-    pub fn record_rollback(&mut self, strategy: &str, timestamp: i64, from: &MutableParams, to: &MutableParams) {
+    pub fn record_rollback(
+        &mut self,
+        strategy: &str,
+        timestamp: i64,
+        from: &MutableParams,
+        to: &MutableParams,
+    ) {
         self.record(AuditRecord {
             timestamp,
             signal_id: format!("rollback-{timestamp}"),
@@ -207,14 +217,20 @@ impl AuditLog {
     /// Recent records for one strategy (newest last). An unknown strategy has no
     /// history — never another strategy's.
     pub fn recent(&self, strategy: &str, limit: usize) -> Vec<AuditRecord> {
-        let Some(ring) = self.history.get(strategy) else { return Vec::new() };
+        let Some(ring) = self.history.get(strategy) else {
+            return Vec::new();
+        };
         let n = limit.min(ring.len());
         ring.iter().skip(ring.len() - n).cloned().collect()
     }
 
     /// Every strategy that has at least one record.
     pub fn strategies(&self) -> Vec<String> {
-        self.history.iter().filter(|(_, r)| !r.is_empty()).map(|(k, _)| k.clone()).collect()
+        self.history
+            .iter()
+            .filter(|(_, r)| !r.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 
     pub fn len(&self) -> usize {
@@ -294,8 +310,14 @@ mod tests {
         assert_eq!(log.recent("beta", 10).len(), 1);
         assert!(log.recent("alpha", 10)[0].applied);
         assert!(!log.recent("beta", 10)[0].applied);
-        assert!(log.recent("gamma", 10).is_empty(), "an unknown strategy has no history");
-        assert_eq!(log.strategies(), vec!["alpha".to_string(), "beta".to_string()]);
+        assert!(
+            log.recent("gamma", 10).is_empty(),
+            "an unknown strategy has no history"
+        );
+        assert_eq!(
+            log.strategies(),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
         let _ = std::fs::remove_dir_all(&cfg.audit_dir);
     }
 
@@ -309,7 +331,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cfg.audit_dir);
         let mut log = AuditLog::new(&cfg);
         log.record_applied(&sig("alpha"));
-        assert!(!cfg.audit_path_for("alpha").exists(), "an inert engine must not create files");
+        assert!(
+            !cfg.audit_path_for("alpha").exists(),
+            "an inert engine must not create files"
+        );
         assert_eq!(log.len(), 1, "the in-memory record is still kept for IPC");
         let _ = std::fs::remove_dir_all(&cfg.audit_dir);
     }
@@ -318,7 +343,13 @@ mod tests {
     fn manual_and_rollback_records_are_flagged() {
         let cfg = tmp_cfg("flags");
         let mut log = AuditLog::new(&cfg);
-        log.record_manual("alpha", 5, &params(dec!(0.45)), &params(dec!(0.46)), "operator");
+        log.record_manual(
+            "alpha",
+            5,
+            &params(dec!(0.45)),
+            &params(dec!(0.46)),
+            "operator",
+        );
         log.record_rollback("alpha", 6, &params(dec!(0.46)), &params(dec!(0.45)));
         let r = log.recent("alpha", 10);
         assert!(r[0].manual && !r[0].rollback);

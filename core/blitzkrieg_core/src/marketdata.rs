@@ -26,7 +26,12 @@ impl LocalBook {
     }
 
     /// Replace the book with a full snapshot from the market channel.
-    pub fn apply_snapshot(&mut self, bids: &[(Decimal, Decimal)], asks: &[(Decimal, Decimal)], now_ms: i64) {
+    pub fn apply_snapshot(
+        &mut self,
+        bids: &[(Decimal, Decimal)],
+        asks: &[(Decimal, Decimal)],
+        now_ms: i64,
+    ) {
         self.bids.clear();
         self.asks.clear();
         for (p, s) in bids {
@@ -43,7 +48,12 @@ impl LocalBook {
     }
 
     /// Merge incremental level updates (size 0 removes the level).
-    pub fn apply_delta(&mut self, bids: &[(Decimal, Decimal)], asks: &[(Decimal, Decimal)], now_ms: i64) {
+    pub fn apply_delta(
+        &mut self,
+        bids: &[(Decimal, Decimal)],
+        asks: &[(Decimal, Decimal)],
+        now_ms: i64,
+    ) {
         apply_levels(&mut self.bids, bids);
         apply_levels(&mut self.asks, asks);
         self.timestamp = now_ms;
@@ -51,7 +61,12 @@ impl LocalBook {
 
     /// Update only the top of book (used by price_change / best_bid_ask which do
     /// not carry full depth). Sizes are unknown, so we set a nominal size.
-    pub fn update_top(&mut self, best_bid: Option<Decimal>, best_ask: Option<Decimal>, now_ms: i64) {
+    pub fn update_top(
+        &mut self,
+        best_bid: Option<Decimal>,
+        best_ask: Option<Decimal>,
+        now_ms: i64,
+    ) {
         let nominal = Decimal::new(1, 0);
         if let Some(b) = best_bid {
             if b > Decimal::ZERO {
@@ -79,7 +94,11 @@ impl LocalBook {
     }
 
     pub fn best_bid(&self) -> Decimal {
-        self.bids.keys().next_back().copied().unwrap_or(Decimal::ZERO)
+        self.bids
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(Decimal::ZERO)
     }
     pub fn best_ask(&self) -> Decimal {
         self.asks.keys().next().copied().unwrap_or(Decimal::ZERO)
@@ -125,7 +144,11 @@ mod tests {
     #[test]
     fn snapshot_computes_depth_obi_best() {
         let mut b = LocalBook::new();
-        b.apply_snapshot(&[(dec!(0.40), dec!(100)), (dec!(0.39), dec!(50))], &[(dec!(0.42), dec!(200))], 5);
+        b.apply_snapshot(
+            &[(dec!(0.40), dec!(100)), (dec!(0.39), dec!(50))],
+            &[(dec!(0.42), dec!(200))],
+            5,
+        );
         let s = b.snapshot("tok");
         assert_eq!(s.best_bid, dec!(0.40));
         assert_eq!(s.best_ask, dec!(0.42));
@@ -140,7 +163,11 @@ mod tests {
         let mut b = LocalBook::new();
         b.apply_snapshot(&[(dec!(0.40), dec!(100))], &[(dec!(0.42), dec!(100))], 0);
         // Add a better bid, remove the ask, add a new ask lower.
-        b.apply_delta(&[(dec!(0.41), dec!(10))], &[(dec!(0.42), dec!(0)), (dec!(0.43), dec!(5))], 1);
+        b.apply_delta(
+            &[(dec!(0.41), dec!(10))],
+            &[(dec!(0.42), dec!(0)), (dec!(0.43), dec!(5))],
+            1,
+        );
         assert_eq!(b.best_bid(), dec!(0.41));
         assert_eq!(b.best_ask(), dec!(0.43));
         let s = b.snapshot("t");

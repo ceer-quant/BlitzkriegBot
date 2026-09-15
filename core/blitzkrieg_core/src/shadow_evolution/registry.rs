@@ -29,7 +29,9 @@ impl Default for ParamRegistry {
 
 impl ParamRegistry {
     pub fn new() -> Self {
-        Self { cells: RwLock::new(BTreeMap::new()) }
+        Self {
+            cells: RwLock::new(BTreeMap::new()),
+        }
     }
 
     /// Publish the initial parameter set for `strategy`, creating its cell.
@@ -49,18 +51,30 @@ impl ParamRegistry {
     /// `None` = not evolvable (it declares no knobs) — the strategy then never
     /// receives hot parameters, which is an explicit declaration, not an error.
     pub fn handle_for(&self, strategy: &str) -> Option<Arc<ArcSwap<StrategyParams>>> {
-        self.cells.read().expect("param registry poisoned").get(strategy).cloned()
+        self.cells
+            .read()
+            .expect("param registry poisoned")
+            .get(strategy)
+            .cloned()
     }
 
     /// Strategy names that have a cell (i.e. declared evolvable).
     pub fn names(&self) -> Vec<String> {
-        self.cells.read().expect("param registry poisoned").keys().cloned().collect()
+        self.cells
+            .read()
+            .expect("param registry poisoned")
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Drop the cell for a strategy that no longer exists / no longer declares
     /// knobs, so a stale handle cannot outlive its unit.
     pub fn remove(&self, strategy: &str) {
-        self.cells.write().expect("param registry poisoned").remove(strategy);
+        self.cells
+            .write()
+            .expect("param registry poisoned")
+            .remove(strategy);
     }
 
     /// Current value of one knob, if published (observability/tests).
@@ -98,7 +112,11 @@ mod tests {
         let r = ParamRegistry::new();
         let a = r.publish("a", knobs(dec!(1)));
         let b = r.publish("b", knobs(dec!(5)));
-        assert_ne!(Arc::as_ptr(&a), Arc::as_ptr(&b), "each strategy gets its own cell");
+        assert_ne!(
+            Arc::as_ptr(&a),
+            Arc::as_ptr(&b),
+            "each strategy gets its own cell"
+        );
         a.store(Arc::new(knobs(dec!(2))));
         assert_eq!(r.get("a", "k"), Some(dec!(2)));
         assert_eq!(r.get("b", "k"), Some(dec!(5)), "writing A must not move B");
@@ -109,7 +127,11 @@ mod tests {
         let r = ParamRegistry::new();
         let first = r.publish("s", StrategyParams::new());
         let second = r.publish("s", StrategyParams::new());
-        assert_eq!(Arc::as_ptr(&first), Arc::as_ptr(&second), "wired handles must stay valid");
+        assert_eq!(
+            Arc::as_ptr(&first),
+            Arc::as_ptr(&second),
+            "wired handles must stay valid"
+        );
         assert_eq!(r.names(), vec!["s".to_string()]);
         r.remove("s");
         assert!(r.handle_for("s").is_none());

@@ -72,7 +72,13 @@ impl LoadedLibrary {
         gate_exemptions_fn: Option<BkGateExemptionsFn>,
         evolvable_knobs_fn: Option<BkEvolvableKnobsFn>,
     ) -> Arc<Self> {
-        Arc::new(Self { lib, create_sym, free_string, gate_exemptions_fn, evolvable_knobs_fn })
+        Arc::new(Self {
+            lib,
+            create_sym,
+            free_string,
+            gate_exemptions_fn,
+            evolvable_knobs_fn,
+        })
     }
 
     /// The library's static vtable, copied by value.
@@ -385,7 +391,9 @@ impl EngineStrategy for ForeignStrategy {
         // SAFETY: valid handle; the returned JSON string is owned by the library
         // and freed through the library's own deallocator by take_json.
         let v = unsafe { self.take_json(f(self.handle)) };
-        v.as_ref().map(GateExemptions::from_json).unwrap_or_default()
+        v.as_ref()
+            .map(GateExemptions::from_json)
+            .unwrap_or_default()
     }
 
     /// E2-c / #28: the knobs this library declared evolvable (empty ⇒ not
@@ -410,7 +418,11 @@ impl EngineStrategy for ForeignStrategy {
         let Some(f) = self.vtable.on_book else { return };
         // on_book carries only a token; label the view with the asset resolved
         // from the last round's markets (falls back to the token itself).
-        let asset = self.assets.get(token_id).map(|s| s.as_str()).unwrap_or(token_id);
+        let asset = self
+            .assets
+            .get(token_id)
+            .map(|s| s.as_str())
+            .unwrap_or(token_id);
         let Some(m) = BookMarshal::new(token_id, asset, snap) else {
             return;
         };
@@ -440,7 +452,9 @@ impl EngineStrategy for ForeignStrategy {
         if let Some(f) = self.vtable.take_breaks {
             // SAFETY: hook returns a heap JSON array owned by the library.
             if let Some(v) = unsafe { self.take_json(f(self.handle)) } {
-                parse_breaks(&v).into_iter().for_each(|b| self.breaks.push(b));
+                parse_breaks(&v)
+                    .into_iter()
+                    .for_each(|b| self.breaks.push(b));
             }
         }
         std::mem::take(&mut self.breaks)
@@ -452,9 +466,10 @@ impl EngineStrategy for ForeignStrategy {
         };
         // SAFETY: hook returns a heap JSON array owned by the library.
         match unsafe { self.take_json(f(self.handle)) } {
-            Some(serde_json::Value::Array(a)) => {
-                a.into_iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
-            }
+            Some(serde_json::Value::Array(a)) => a
+                .into_iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect(),
             _ => HashSet::new(),
         }
     }

@@ -140,7 +140,11 @@ impl TradeDb {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
-        Self { jsonl_path, summary_path, summary }
+        Self {
+            jsonl_path,
+            summary_path,
+            summary,
+        }
     }
 
     /// Append a closed trade and update the summary (best effort, never panics).
@@ -150,7 +154,11 @@ impl TradeDb {
         }
         if let Ok(line) = serde_json::to_string(rec) {
             use std::io::Write as _;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.jsonl_path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.jsonl_path)
+            {
                 let _ = writeln!(f, "{line}");
             }
         }
@@ -170,7 +178,8 @@ impl TradeDb {
         self.summary.total_fees += f64_of(rec.fees_usd);
         self.summary.total_net_pnl += net;
         let n = self.summary.total_trades as f64;
-        self.summary.avg_hold_time_sec = ((self.summary.avg_hold_time_sec * (n - 1.0)) + rec.hold_time_sec as f64) / n;
+        self.summary.avg_hold_time_sec =
+            ((self.summary.avg_hold_time_sec * (n - 1.0)) + rec.hold_time_sec as f64) / n;
         self.summary.best_trade_pnl = self.summary.best_trade_pnl.max(net);
         self.summary.worst_trade_pnl = self.summary.worst_trade_pnl.min(net);
         self.summary.last_updated = now_ms;
@@ -240,8 +249,20 @@ mod tests {
         let rec = TradeRecord::from_closed(&closed());
         let v = serde_json::to_value(&rec).unwrap();
         // Fields the panel / analysis scripts read.
-        for k in ["id", "strategy", "asset", "direction", "entryPrice", "exitPrice",
-                  "netPnlUsd", "netPnlPct", "exitReason", "entryTime", "exitTime", "holdTimeSec"] {
+        for k in [
+            "id",
+            "strategy",
+            "asset",
+            "direction",
+            "entryPrice",
+            "exitPrice",
+            "netPnlUsd",
+            "netPnlPct",
+            "exitReason",
+            "entryTime",
+            "exitTime",
+            "holdTimeSec",
+        ] {
             assert!(v.get(k).is_some(), "missing field {k}");
         }
         assert_eq!(v["direction"], "up");

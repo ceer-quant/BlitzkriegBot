@@ -80,7 +80,8 @@ impl Ome {
     /// reconcile/cancel anything the venue still holds. Idempotent per order id.
     pub fn restore(&mut self, orders: Vec<TrackedOrder>) {
         for o in orders {
-            self.by_internal.insert(o.internal_key.clone(), o.order_id.clone());
+            self.by_internal
+                .insert(o.internal_key.clone(), o.order_id.clone());
             self.orders.insert(o.order_id.clone(), o);
         }
     }
@@ -100,7 +101,10 @@ impl Ome {
         v
     }
     pub fn live_orders(&self) -> Vec<&TrackedOrder> {
-        self.all().into_iter().filter(|o| o.status.is_live()).collect()
+        self.all()
+            .into_iter()
+            .filter(|o| o.status.is_live())
+            .collect()
     }
     pub fn live_for(&self, token_id: &str, side: Side) -> Vec<&TrackedOrder> {
         self.live_orders()
@@ -154,7 +158,8 @@ impl Ome {
             venue_order_id: None,
             escalate_at_ms: None,
         };
-        self.by_internal.insert(r.internal_key.clone(), p.order_id.clone());
+        self.by_internal
+            .insert(r.internal_key.clone(), p.order_id.clone());
         self.orders.insert(p.order_id.clone(), order);
         Ok(())
     }
@@ -168,12 +173,7 @@ impl Ome {
         })
     }
 
-    pub fn mark_terminal(
-        &mut self,
-        id: &str,
-        status: OrderStatus,
-        now_ms: i64,
-    ) -> CoreResult<()> {
+    pub fn mark_terminal(&mut self, id: &str, status: OrderStatus, now_ms: i64) -> CoreResult<()> {
         debug_assert!(status.is_terminal());
         self.mutate(id, now_ms, |o| {
             o.status = status;
@@ -201,7 +201,9 @@ impl Ome {
         if let Some(o) = self.orders.get(external) {
             return Some(o);
         }
-        self.orders.values().find(|o| o.venue_order_id.as_deref() == Some(external))
+        self.orders
+            .values()
+            .find(|o| o.venue_order_id.as_deref() == Some(external))
     }
 
     /// Find a live order by venue id, token and side (fallback for user-WS
@@ -212,9 +214,9 @@ impl Ome {
                 return Some(o);
             }
         }
-        self.live_for(token, side).into_iter().find(|o| {
-            o.venue_order_id.as_deref() == Some(venue_id)
-        })
+        self.live_for(token, side)
+            .into_iter()
+            .find(|o| o.venue_order_id.as_deref() == Some(venue_id))
     }
 
     fn mutate(
@@ -223,10 +225,9 @@ impl Ome {
         now_ms: i64,
         f: impl FnOnce(&mut TrackedOrder) -> CoreResult<()>,
     ) -> CoreResult<()> {
-        let o = self
-            .orders
-            .get_mut(id)
-            .ok_or_else(|| CoreError::new(CoreErrorCode::UnknownOrder, format!("unknown order: {id}")))?;
+        let o = self.orders.get_mut(id).ok_or_else(|| {
+            CoreError::new(CoreErrorCode::UnknownOrder, format!("unknown order: {id}"))
+        })?;
         f(o)?;
         o.updated_at_ms = now_ms;
         Ok(())
@@ -253,7 +254,10 @@ impl Ome {
         let order_id = match self.resolve(&fill) {
             Some(id) => id,
             None => {
-                self.pending_fills.push(PendingFill { fill, at_ms: now_ms });
+                self.pending_fills.push(PendingFill {
+                    fill,
+                    at_ms: now_ms,
+                });
                 if self.pending_fills.len() > 500 {
                     self.pending_fills.remove(0);
                 }
@@ -276,7 +280,10 @@ impl Ome {
             let delta = self.record_delta(&order_id, -prev.applied, prev.price, now_ms)?;
             self.applied.insert(
                 trade_key,
-                AppliedFill { applied: Decimal::ZERO, price: prev.price },
+                AppliedFill {
+                    applied: Decimal::ZERO,
+                    price: prev.price,
+                },
             );
             return Ok(delta);
         }
@@ -292,7 +299,10 @@ impl Ome {
             // Status progression for an already-seen trade (MATCHED→CONFIRMED): no delta.
             self.applied.insert(
                 trade_key.clone(),
-                AppliedFill { applied: prev_applied.max(reported), price: prev_price },
+                AppliedFill {
+                    applied: prev_applied.max(reported),
+                    price: prev_price,
+                },
             );
             return Ok(None);
         }
@@ -300,7 +310,10 @@ impl Ome {
         let delta = self.record_delta(&order_id, delta_raw, fill.price, now_ms)?;
         self.applied.insert(
             trade_key.clone(),
-            AppliedFill { applied: reported, price: fill.price },
+            AppliedFill {
+                applied: reported,
+                price: fill.price,
+            },
         );
         if self.applied.len() > 5000 {
             if let Some(oldest) = self.applied.keys().next().cloned() {
@@ -318,10 +331,9 @@ impl Ome {
         price: Decimal,
         now_ms: i64,
     ) -> CoreResult<Option<FillDelta>> {
-        let order = self
-            .orders
-            .get_mut(id)
-            .ok_or_else(|| CoreError::new(CoreErrorCode::UnknownOrder, format!("unknown order: {id}")))?;
+        let order = self.orders.get_mut(id).ok_or_else(|| {
+            CoreError::new(CoreErrorCode::UnknownOrder, format!("unknown order: {id}"))
+        })?;
 
         let prev = order.filled_size;
         let requested = (prev + signed_delta).max(Decimal::ZERO);
@@ -424,7 +436,13 @@ mod tests {
         }
     }
 
-    fn fill(order_id: &str, trade: &str, size: Decimal, price: Decimal, status: FillStatus) -> Fill {
+    fn fill(
+        order_id: &str,
+        trade: &str,
+        size: Decimal,
+        price: Decimal,
+        status: FillStatus,
+    ) -> Fill {
         Fill {
             order_id: order_id.into(),
             trade_id: Some(trade.into()),
@@ -441,21 +459,44 @@ mod tests {
     #[test]
     fn cumulative_deltas_idempotent_and_capped() {
         let mut ome = Ome::new();
-        ome.submit(SubmitParams { order_id: "o1".into(), request: req("k1", dec!(10)), submitted_at_ms: 1 })
-            .unwrap();
+        ome.submit(SubmitParams {
+            order_id: "o1".into(),
+            request: req("k1", dec!(10)),
+            submitted_at_ms: 1,
+        })
+        .unwrap();
         ome.mark_live("o1", 2).unwrap();
 
         // First trade 6 @ 0.40 → +6
-        let d1 = ome.apply_fill(fill("o1", "t1", dec!(6), dec!(0.40), FillStatus::Confirmed), 3).unwrap().unwrap();
+        let d1 = ome
+            .apply_fill(
+                fill("o1", "t1", dec!(6), dec!(0.40), FillStatus::Confirmed),
+                3,
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(d1.delta, dec!(6));
         assert_eq!(d1.price, dec!(0.40));
         assert_eq!(ome.get("o1").unwrap().status, OrderStatus::PartiallyFilled);
 
         // Duplicate CONFIRMED for same trade → no delta.
-        assert!(ome.apply_fill(fill("o1", "t1", dec!(6), dec!(0.40), FillStatus::Confirmed), 4).unwrap().is_none());
+        assert!(
+            ome.apply_fill(
+                fill("o1", "t1", dec!(6), dec!(0.40), FillStatus::Confirmed),
+                4
+            )
+            .unwrap()
+            .is_none()
+        );
 
         // Second trade pushes cumulative to 12 but order size caps at 10 → +4.
-        let d2 = ome.apply_fill(fill("o1", "t2", dec!(12), dec!(0.42), FillStatus::Confirmed), 5).unwrap().unwrap();
+        let d2 = ome
+            .apply_fill(
+                fill("o1", "t2", dec!(12), dec!(0.42), FillStatus::Confirmed),
+                5,
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(d2.delta, dec!(4));
         assert_eq!(ome.get("o1").unwrap().filled_size, dec!(10));
         assert_eq!(ome.get("o1").unwrap().status, OrderStatus::Filled);
@@ -466,13 +507,24 @@ mod tests {
     #[test]
     fn failed_fill_rolls_back_provisional() {
         let mut ome = Ome::new();
-        ome.submit(SubmitParams { order_id: "o1".into(), request: req("k1", dec!(10)), submitted_at_ms: 1 }).unwrap();
+        ome.submit(SubmitParams {
+            order_id: "o1".into(),
+            request: req("k1", dec!(10)),
+            submitted_at_ms: 1,
+        })
+        .unwrap();
         // MATCHED provisional +5
-        let d = ome.apply_fill(fill("o1", "t1", dec!(5), dec!(0.4), FillStatus::Matched), 2).unwrap().unwrap();
+        let d = ome
+            .apply_fill(fill("o1", "t1", dec!(5), dec!(0.4), FillStatus::Matched), 2)
+            .unwrap()
+            .unwrap();
         assert_eq!(d.delta, dec!(5));
         assert_eq!(ome.get("o1").unwrap().filled_size, dec!(5));
         // FAILED same trade → -5 rollback
-        let r = ome.apply_fill(fill("o1", "t1", dec!(5), dec!(0.4), FillStatus::Failed), 3).unwrap().unwrap();
+        let r = ome
+            .apply_fill(fill("o1", "t1", dec!(5), dec!(0.4), FillStatus::Failed), 3)
+            .unwrap()
+            .unwrap();
         assert_eq!(r.delta, dec!(-5));
         assert_eq!(ome.get("o1").unwrap().filled_size, dec!(0));
     }
@@ -481,13 +533,25 @@ mod tests {
     fn unknown_fill_buffers_then_applies_after_submit() {
         let mut ome = Ome::new();
         // Fill arrives before order known → buffered, no delta.
-        assert!(ome.apply_fill(fill("ghost", "t9", dec!(3), dec!(0.4), FillStatus::Confirmed), 1).unwrap().is_none());
+        assert!(
+            ome.apply_fill(
+                fill("ghost", "t9", dec!(3), dec!(0.4), FillStatus::Confirmed),
+                1
+            )
+            .unwrap()
+            .is_none()
+        );
         assert_eq!(ome.pending_unknown_count(), 1);
         // Still unknown on drain → retained.
         assert!(ome.drain_pending(2).unwrap().is_empty());
         assert_eq!(ome.pending_unknown_count(), 1);
         // Order registered (resolution falls back to token+side) → buffered fill applies.
-        ome.submit(SubmitParams { order_id: "o1".into(), request: req("k1", dec!(10)), submitted_at_ms: 3 }).unwrap();
+        ome.submit(SubmitParams {
+            order_id: "o1".into(),
+            request: req("k1", dec!(10)),
+            submitted_at_ms: 3,
+        })
+        .unwrap();
         let drained = ome.drain_pending(4).unwrap();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].delta, dec!(3));
@@ -497,10 +561,29 @@ mod tests {
     #[test]
     fn duplicate_internal_key_rejected_while_live() {
         let mut ome = Ome::new();
-        ome.submit(SubmitParams { order_id: "o1".into(), request: req("k1", dec!(10)), submitted_at_ms: 1 }).unwrap();
-        assert!(ome.submit(SubmitParams { order_id: "o2".into(), request: req("k1", dec!(10)), submitted_at_ms: 2 }).is_err());
+        ome.submit(SubmitParams {
+            order_id: "o1".into(),
+            request: req("k1", dec!(10)),
+            submitted_at_ms: 1,
+        })
+        .unwrap();
+        assert!(
+            ome.submit(SubmitParams {
+                order_id: "o2".into(),
+                request: req("k1", dec!(10)),
+                submitted_at_ms: 2
+            })
+            .is_err()
+        );
         ome.mark_terminal("o1", OrderStatus::Cancelled, 3).unwrap();
         // Same key reusable once terminal.
-        assert!(ome.submit(SubmitParams { order_id: "o3".into(), request: req("k1", dec!(10)), submitted_at_ms: 4 }).is_ok());
+        assert!(
+            ome.submit(SubmitParams {
+                order_id: "o3".into(),
+                request: req("k1", dec!(10)),
+                submitted_at_ms: 4
+            })
+            .is_ok()
+        );
     }
 }

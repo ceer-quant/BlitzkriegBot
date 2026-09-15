@@ -23,24 +23,56 @@ use rust_decimal::Decimal;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GuardError {
-    GradientTooLarge { field: String, change: Decimal, limit: Decimal },
-    DomainViolation { field: String, value: Decimal, min: Decimal, max: Decimal },
-    UndeclaredField { field: String },
-    ImmutableViolation { field: String, detail: String },
-    DegenerateParams { field: String, value: Decimal },
+    GradientTooLarge {
+        field: String,
+        change: Decimal,
+        limit: Decimal,
+    },
+    DomainViolation {
+        field: String,
+        value: Decimal,
+        min: Decimal,
+        max: Decimal,
+    },
+    UndeclaredField {
+        field: String,
+    },
+    ImmutableViolation {
+        field: String,
+        detail: String,
+    },
+    DegenerateParams {
+        field: String,
+        value: Decimal,
+    },
 }
 
 impl std::fmt::Display for GuardError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GuardError::GradientTooLarge { field, change, limit } => {
+            GuardError::GradientTooLarge {
+                field,
+                change,
+                limit,
+            } => {
                 write!(f, "gradient too large for {field}: {change} > {limit}")
             }
-            GuardError::DomainViolation { field, value, min, max } => {
-                write!(f, "out of domain for {field}: {value} not in [{min}, {max}]")
+            GuardError::DomainViolation {
+                field,
+                value,
+                min,
+                max,
+            } => {
+                write!(
+                    f,
+                    "out of domain for {field}: {value} not in [{min}, {max}]"
+                )
             }
             GuardError::UndeclaredField { field } => {
-                write!(f, "field {field} was not declared evolvable by this strategy")
+                write!(
+                    f,
+                    "field {field} was not declared evolvable by this strategy"
+                )
             }
             GuardError::ImmutableViolation { field, detail } => {
                 write!(f, "immutable violation on {field}: {detail}")
@@ -66,9 +98,14 @@ pub fn validate_declared(proposal: &StrategyParams, specs: &[KnobSpec]) -> Resul
 /// positive (a zero/negative knob is degenerate regardless of domain).
 pub fn validate_domain(proposal: &StrategyParams, specs: &[KnobSpec]) -> Result<(), GuardError> {
     for spec in specs {
-        let Some(v) = proposal.get(&spec.name) else { continue };
+        let Some(v) = proposal.get(&spec.name) else {
+            continue;
+        };
         if v <= Decimal::ZERO {
-            return Err(GuardError::DegenerateParams { field: spec.name.clone(), value: v });
+            return Err(GuardError::DegenerateParams {
+                field: spec.name.clone(),
+                value: v,
+            });
         }
         if !spec.contains(v) {
             return Err(GuardError::DomainViolation {
@@ -95,7 +132,10 @@ pub fn validate_gradient(
     for (name, new_v) in new.iter() {
         let Some(old_v) = old.get(name) else { continue };
         if new_v <= Decimal::ZERO {
-            return Err(GuardError::DegenerateParams { field: name.to_string(), value: new_v });
+            return Err(GuardError::DegenerateParams {
+                field: name.to_string(),
+                value: new_v,
+            });
         }
         if old_v == Decimal::ZERO {
             // Nothing to scale from; require exact equality to be safe.
@@ -155,7 +195,12 @@ pub fn validate_immutable(risk: &ImmutableConfig) -> Result<(), GuardError> {
 /// Step `from` toward `to` by at most `max_gradient` per field, then clamp into
 /// the declared domains. Returns the nearest admissible parameters — this is how
 /// a large target is reached over several evolutions instead of one jump.
-pub fn clamped_step(from: &StrategyParams, to: &StrategyParams, max_gradient: Decimal, specs: &[KnobSpec]) -> StrategyParams {
+pub fn clamped_step(
+    from: &StrategyParams,
+    to: &StrategyParams,
+    max_gradient: Decimal,
+    specs: &[KnobSpec],
+) -> StrategyParams {
     let mut out = from.clone();
     for (name, target_v) in to.iter() {
         let old_v = from.get(name).unwrap_or(Decimal::ZERO);
@@ -166,7 +211,11 @@ pub fn clamped_step(from: &StrategyParams, to: &StrategyParams, max_gradient: De
         let delta = target_v - old_v;
         let max_delta = old_v.abs() * max_gradient;
         let applied = if delta.abs() > max_delta {
-            if delta > Decimal::ZERO { max_delta } else { -max_delta }
+            if delta > Decimal::ZERO {
+                max_delta
+            } else {
+                -max_delta
+            }
         } else {
             delta
         };
@@ -223,7 +272,11 @@ mod tests {
             p = next;
         }
         // factor's ceiling is 1.00 → the walk must have stopped there.
-        assert_eq!(p.get("factor"), Some(dec!(1.00)), "domain must bound the walk");
+        assert_eq!(
+            p.get("factor"),
+            Some(dec!(1.00)),
+            "domain must bound the walk"
+        );
         assert!(validate_domain(&p, &specs).is_ok());
         // And a direct jump far outside is refused with the domain named.
         let mut wild = base();
@@ -260,7 +313,10 @@ mod tests {
 
     #[test]
     fn immutable_risk_cannot_be_weakened() {
-        let risk = ImmutableConfig { max_consecutive_losses: 0, ..Default::default() };
+        let risk = ImmutableConfig {
+            max_consecutive_losses: 0,
+            ..Default::default()
+        };
         assert!(matches!(
             validate_immutable(&risk),
             Err(GuardError::ImmutableViolation { .. })
@@ -277,7 +333,10 @@ mod tests {
             let change = (s - o) / o;
             // Never more than the gradient...
             assert!(change <= dec!(0.05), "field {name} moved {change} > 5%");
-            assert!(change > Decimal::ZERO, "field {name} must still step toward the target");
+            assert!(
+                change > Decimal::ZERO,
+                "field {name} must still step toward the target"
+            );
             // ...and `factor`'s ceiling (1.00) is closer than +5%, so the DOMAIN
             // is what stops it. The domain is the outer bound; the gradient only
             // bounds an individual step.

@@ -112,7 +112,13 @@ impl ShadowEvolutionConfig {
     pub fn audit_path_for(&self, strategy: &str) -> std::path::PathBuf {
         let safe: String = strategy
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         std::path::Path::new(&self.audit_dir).join(format!("{safe}.jsonl"))
     }
@@ -153,10 +159,19 @@ mod tests {
     #[test]
     fn audit_path_is_per_strategy_and_sanitised() {
         let cfg = ShadowEvolutionConfig::default();
-        assert_eq!(cfg.audit_path_for("spread_arb").to_string_lossy(), "data/evolution/spread_arb.jsonl");
-        assert_eq!(cfg.audit_path_for("dog_strategy").to_string_lossy(), "data/evolution/dog_strategy.jsonl");
+        assert_eq!(
+            cfg.audit_path_for("spread_arb").to_string_lossy(),
+            "data/evolution/spread_arb.jsonl"
+        );
+        assert_eq!(
+            cfg.audit_path_for("dog_strategy").to_string_lossy(),
+            "data/evolution/dog_strategy.jsonl"
+        );
         // A separator cannot escape the audit directory.
-        assert_eq!(cfg.audit_path_for("../evil").to_string_lossy(), "data/evolution/.._evil.jsonl");
+        assert_eq!(
+            cfg.audit_path_for("../evil").to_string_lossy(),
+            "data/evolution/.._evil.jsonl"
+        );
         assert_ne!(cfg.audit_path_for("a"), cfg.audit_path_for("b"));
     }
 }

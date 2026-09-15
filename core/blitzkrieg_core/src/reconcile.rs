@@ -42,7 +42,10 @@ pub struct VenueSnapshot {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReconcileAction {
     /// A fill missing from the local OME was applied (WS gap repaired).
-    FilledGap { core_order_id: OrderId, delta: FillDelta },
+    FilledGap {
+        core_order_id: OrderId,
+        delta: FillDelta,
+    },
     /// Local-live order is fully filled per the venue (no longer open).
     MarkedFilled { core_order_id: OrderId },
     /// Local-live order vanished from the venue with no fill → marked cancelled.
@@ -63,23 +66,26 @@ pub struct ReconcileReport {
 /// ghosts is done through mark_terminal so the state machine stays consistent.
 pub fn reconcile(ome: &mut Ome, snap: &VenueSnapshot) -> CoreResult<ReconcileReport> {
     let mut report = ReconcileReport::default();
-    let open: std::collections::HashSet<&str> = snap.open_order_ids.iter().map(String::as_str).collect();
+    let open: std::collections::HashSet<&str> =
+        snap.open_order_ids.iter().map(String::as_str).collect();
 
     // 1) Repair missed fills. Aggregate per order so a cumulative Fill reflects
     //    everything the venue saw, then push through the idempotent ledger.
     let mut by_order: HashMap<String, (rust_decimal::Decimal, rust_decimal::Decimal, &VenueTrade)> =
         HashMap::new();
     for t in &snap.trades {
-        let entry = by_order.entry(t.venue_order_id.clone()).or_insert_with(|| {
-            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO, t)
-        });
+        let entry = by_order
+            .entry(t.venue_order_id.clone())
+            .or_insert_with(|| (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO, t));
         entry.0 += t.size;
         // volume-weighted price accumulator (numerator)
         entry.1 += t.price * t.size;
     }
 
     for (venue_id, (total_size, price_num, last)) in by_order {
-        let Some(order) = ome.by_venue_or_id(&venue_id).cloned() else { continue };
+        let Some(order) = ome.by_venue_or_id(&venue_id).cloned() else {
+            continue;
+        };
         let core_id = order.order_id.clone();
         // Only repair if the venue reports more filled size than the OME knows.
         if total_size <= order.filled_size {
@@ -102,7 +108,10 @@ pub fn reconcile(ome: &mut Ome, snap: &VenueSnapshot) -> CoreResult<ReconcileRep
             tx_hash: last.tx_hash.clone(),
         };
         if let Some(delta) = ome.apply_fill(fill, snap.now_ms)? {
-            report.actions.push(ReconcileAction::FilledGap { core_order_id: core_id.clone(), delta });
+            report.actions.push(ReconcileAction::FilledGap {
+                core_order_id: core_id.clone(),
+                delta,
+            });
         }
     }
 
@@ -129,16 +138,22 @@ pub fn reconcile(ome: &mut Ome, snap: &VenueSnapshot) -> CoreResult<ReconcileRep
                 if status != OrderStatus::Filled {
                     ome.mark_terminal(&core_id, OrderStatus::Filled, snap.now_ms)?;
                 }
-                report.actions.push(ReconcileAction::MarkedFilled { core_order_id: core_id });
+                report.actions.push(ReconcileAction::MarkedFilled {
+                    core_order_id: core_id,
+                });
             }
             Some((_, filled, _)) if filled > rust_decimal::Decimal::ZERO => {
                 ome.mark_terminal(&core_id, OrderStatus::Cancelled, snap.now_ms)?;
-                report.actions.push(ReconcileAction::MarkedCancelled { core_order_id: core_id });
+                report.actions.push(ReconcileAction::MarkedCancelled {
+                    core_order_id: core_id,
+                });
             }
             _ => {
                 ome.mark_terminal(&core_id, OrderStatus::Cancelled, snap.now_ms)?;
                 report.suspect_ghost_ids.push(core_id.clone());
-                report.actions.push(ReconcileAction::MarkedCancelled { core_order_id: core_id });
+                report.actions.push(ReconcileAction::MarkedCancelled {
+                    core_order_id: core_id,
+                });
             }
         }
     }
@@ -169,7 +184,12 @@ mod tests {
     }
 
     fn live_order(ome: &mut Ome, key: &str, core_id: &str, venue_id: &str, now: i64) {
-        ome.submit(SubmitParams { order_id: core_id.into(), request: req(key, dec!(10)), submitted_at_ms: now }).unwrap();
+        ome.submit(SubmitParams {
+            order_id: core_id.into(),
+            request: req(key, dec!(10)),
+            submitted_at_ms: now,
+        })
+        .unwrap();
         ome.bind_venue(core_id, venue_id.into(), now).unwrap();
         ome.mark_live(core_id, now).unwrap();
     }
@@ -194,7 +214,12 @@ mod tests {
             now_ms: 3,
         };
         let report = reconcile(&mut ome, &snap).unwrap();
-        assert!(report.actions.iter().any(|a| matches!(a, ReconcileAction::FilledGap { .. })));
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| matches!(a, ReconcileAction::FilledGap { .. }))
+        );
         assert_eq!(ome.get("c1").unwrap().status, OrderStatus::Filled);
         assert_eq!(ome.get("c1").unwrap().filled_size, dec!(10));
     }
@@ -204,7 +229,11 @@ mod tests {
         let mut ome = Ome::new();
         live_order(&mut ome, "k1", "c1", "v1", 1);
         // Venue no longer lists it open and there are no trades → ghost/cancelled.
-        let snap = VenueSnapshot { open_order_ids: vec![], trades: vec![], now_ms: 5 };
+        let snap = VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![],
+            now_ms: 5,
+        };
         let report = reconcile(&mut ome, &snap).unwrap();
         assert_eq!(report.suspect_ghost_ids, vec!["c1".to_string()]);
         assert_eq!(ome.get("c1").unwrap().status, OrderStatus::Cancelled);
@@ -214,7 +243,11 @@ mod tests {
     fn leaves_open_orders_untouched_and_is_idempotent() {
         let mut ome = Ome::new();
         live_order(&mut ome, "k1", "c1", "v1", 1);
-        let snap = VenueSnapshot { open_order_ids: vec!["v1".into()], trades: vec![], now_ms: 2 };
+        let snap = VenueSnapshot {
+            open_order_ids: vec!["v1".into()],
+            trades: vec![],
+            now_ms: 2,
+        };
         let r1 = reconcile(&mut ome, &snap).unwrap();
         assert!(r1.actions.is_empty());
         assert_eq!(ome.get("c1").unwrap().status, OrderStatus::Live);
@@ -226,9 +259,18 @@ mod tests {
     #[test]
     fn dry_orders_without_venue_id_are_ignored() {
         let mut ome = Ome::new();
-        ome.submit(SubmitParams { order_id: "dry1".into(), request: req("k9", dec!(10)), submitted_at_ms: 1 }).unwrap();
+        ome.submit(SubmitParams {
+            order_id: "dry1".into(),
+            request: req("k9", dec!(10)),
+            submitted_at_ms: 1,
+        })
+        .unwrap();
         ome.mark_live("dry1", 1).unwrap();
-        let snap = VenueSnapshot { open_order_ids: vec![], trades: vec![], now_ms: 2 };
+        let snap = VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![],
+            now_ms: 2,
+        };
         let report = reconcile(&mut ome, &snap).unwrap();
         assert!(report.actions.is_empty());
         assert_eq!(ome.get("dry1").unwrap().status, OrderStatus::Live);

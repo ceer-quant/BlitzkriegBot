@@ -7,9 +7,11 @@ use crate::ledger::Ledger;
 use crate::model::*;
 use crate::ome::{FillDelta, Ome, SubmitParams};
 use crate::position::{OpenParams, PositionConfig, PositionManager};
-use crate::shadow_evolution::{EvolutionOutcome, EvolutionStatus, MutableParams, ShadowEvolution, ShadowEvolutionConfig};
 use crate::risk::{LossBreaker, RiskConfig, RiskGate};
-use crate::sim::{rests_on_book, Book};
+use crate::shadow_evolution::{
+    EvolutionOutcome, EvolutionStatus, MutableParams, ShadowEvolution, ShadowEvolutionConfig,
+};
+use crate::sim::{Book, rests_on_book};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
@@ -153,12 +155,18 @@ impl CoreConfig {
         core.enable_engine(crate::engine::Engine::new(self.engine_config()));
         for name in &self.enabled_strategies {
             if !core.set_strategy_enabled(name, true) {
-                tracing::warn!(strategy = name, "unknown strategy requested at startup; ignored");
+                tracing::warn!(
+                    strategy = name,
+                    "unknown strategy requested at startup; ignored"
+                );
             }
         }
         for name in &self.disabled_strategies {
             if !core.set_strategy_enabled(name, false) {
-                tracing::warn!(strategy = name, "unknown strategy requested at startup; ignored");
+                tracing::warn!(
+                    strategy = name,
+                    "unknown strategy requested at startup; ignored"
+                );
             }
         }
     }
@@ -304,20 +312,43 @@ pub struct Core {
 
 impl Core {
     pub fn new(config: CoreConfig) -> Self {
-        let trade_db = config.trade_log_path.as_ref().map(crate::trade_db::TradeDb::new);
-        let order_db = config.order_log_path.as_ref().map(crate::order_db::OrderDb::new);
-        let position_db = config.position_log_path.as_ref().map(crate::position_db::PositionDb::new);
+        let trade_db = config
+            .trade_log_path
+            .as_ref()
+            .map(crate::trade_db::TradeDb::new);
+        let order_db = config
+            .order_log_path
+            .as_ref()
+            .map(crate::order_db::OrderDb::new);
+        let position_db = config
+            .position_log_path
+            .as_ref()
+            .map(crate::position_db::PositionDb::new);
         let shadow_cfg = {
             let mut c = ShadowEvolutionConfig::default();
             c.enabled = config.shadow_evolution_enabled;
             if let Some(t) = &config.shadow_evolution_tuning {
-                if let Some(v) = t.min_sample_count { c.min_sample_count = v; }
-                if let Some(v) = t.min_win_rate_improvement { c.min_win_rate_improvement = v; }
-                if let Some(v) = t.min_profit_factor_improvement { c.min_profit_factor_improvement = v; }
-                if let Some(v) = t.min_observation_secs { c.min_observation_secs = v; }
-                if let Some(v) = t.cooldown_secs { c.cooldown_secs = v; }
-                if let Some(v) = t.variant_count { c.variant_count = v; }
-                if let Some(v) = &t.audit_dir { c.audit_dir = v.clone(); }
+                if let Some(v) = t.min_sample_count {
+                    c.min_sample_count = v;
+                }
+                if let Some(v) = t.min_win_rate_improvement {
+                    c.min_win_rate_improvement = v;
+                }
+                if let Some(v) = t.min_profit_factor_improvement {
+                    c.min_profit_factor_improvement = v;
+                }
+                if let Some(v) = t.min_observation_secs {
+                    c.min_observation_secs = v;
+                }
+                if let Some(v) = t.cooldown_secs {
+                    c.cooldown_secs = v;
+                }
+                if let Some(v) = t.variant_count {
+                    c.variant_count = v;
+                }
+                if let Some(v) = &t.audit_dir {
+                    c.audit_dir = v.clone();
+                }
             }
             // D-2: variant exits must replay the SAME policy the live position
             // manager runs, or the counterfactual is judged against an exit
@@ -377,7 +408,10 @@ impl Core {
             extensions: {
                 let mut reg = crate::extension::ExtensionRegistry::new();
                 // Built-in example extension (installed, not enabled by default).
-                reg.install(Box::new(crate::extension::builtins::BinanceSpotExtension::new()), None);
+                reg.install(
+                    Box::new(crate::extension::builtins::BinanceSpotExtension::new()),
+                    None,
+                );
                 reg
             },
             shadow_evolution: ShadowEvolution::new(shadow_cfg, &[]),
@@ -401,7 +435,9 @@ impl Core {
     /// venue ids) so the startup sweep can reconcile them; terminal orders are
     /// dropped and the log compacted to just the restored set.
     pub fn restore_orders(&mut self) -> usize {
-        let Some(db) = self.order_db.as_ref() else { return 0 };
+        let Some(db) = self.order_db.as_ref() else {
+            return 0;
+        };
         let loaded = db.load();
         if loaded.is_empty() {
             return 0;
@@ -432,7 +468,9 @@ impl Core {
     /// every open position: it is no longer valued or exit-managed, so the trade
     /// drifts to expiry unmanaged. Mirrors `restore_orders`.
     pub fn restore_positions(&mut self) -> usize {
-        let Some(db) = self.position_db.as_ref() else { return 0 };
+        let Some(db) = self.position_db.as_ref() else {
+            return 0;
+        };
         let loaded = db.load();
         if loaded.is_empty() {
             return 0;
@@ -442,7 +480,9 @@ impl Core {
         if n > 0 {
             self.emit(Event::RiskAlert {
                 code: CoreErrorCode::Internal,
-                message: format!("recovered {n} open position(s) from the position log after restart"),
+                message: format!(
+                    "recovered {n} open position(s) from the position log after restart"
+                ),
             });
         }
         n
@@ -501,11 +541,17 @@ impl Core {
     // ── Strategy engine & extensions (P0.5) ─────────────────────────────────
     /// Strategy names the kernel supports (the self-driving engine's set).
     pub fn strategy_names(&self) -> Vec<String> {
-        self.engine.as_ref().map(|e| e.supported_strategies()).unwrap_or_default()
+        self.engine
+            .as_ref()
+            .map(|e| e.supported_strategies())
+            .unwrap_or_default()
     }
     /// Enabled strategy names.
     pub fn enabled_strategy_names(&self) -> Vec<String> {
-        self.engine.as_ref().map(|e| e.enabled_strategies()).unwrap_or_default()
+        self.engine
+            .as_ref()
+            .map(|e| e.enabled_strategies())
+            .unwrap_or_default()
     }
     /// Toggle a strategy on the driving engine. Returns false when the engine
     /// is not attached or the name is unknown.
@@ -515,7 +561,11 @@ impl Core {
     /// strategy on brings its parameters and variants in, switching it off drops
     /// them. No restart, and nothing is traded by a strategy that is off.
     pub fn set_strategy_enabled(&mut self, name: &str, enabled: bool) -> bool {
-        let ok = self.engine.as_mut().map(|e| e.set_strategy_enabled(name, enabled)).unwrap_or(false);
+        let ok = self
+            .engine
+            .as_mut()
+            .map(|e| e.set_strategy_enabled(name, enabled))
+            .unwrap_or(false);
         if ok {
             self.rewire_hot_params();
         }
@@ -532,7 +582,8 @@ impl Core {
             use crate::strategy_engine::loader::load_foreign;
             let p = std::path::Path::new(path);
             let Some(engine) = self.engine.as_mut() else {
-                return "Failed: strategy engine not attached (load libraries after engine init)".into();
+                return "Failed: strategy engine not attached (load libraries after engine init)"
+                    .into();
             };
             return match load_foreign(p) {
                 Ok(loaded) => {
@@ -541,7 +592,10 @@ impl Core {
                     // E2-b: the load receipt names the gates the library declared
                     // unnecessary, so an opt-out is visible before it is enabled.
                     let declared = if loaded.gate_exemptions.any() {
-                        format!("; declares gate exemptions: {}", loaded.gate_exemptions.gates().join(","))
+                        format!(
+                            "; declares gate exemptions: {}",
+                            loaded.gate_exemptions.gates().join(",")
+                        )
                     } else {
                         String::new()
                     };
@@ -551,8 +605,11 @@ impl Core {
                     let evolvable = if loaded.evolvable_knobs.is_empty() {
                         "; not evolvable (no knobs declared)".to_string()
                     } else {
-                        let names: Vec<&str> =
-                            loaded.evolvable_knobs.iter().map(|k| k.name.as_str()).collect();
+                        let names: Vec<&str> = loaded
+                            .evolvable_knobs
+                            .iter()
+                            .map(|k| k.name.as_str())
+                            .collect();
                         format!("; declares evolvable knobs: {}", names.join(","))
                     };
                     match engine.register_user_strategy(
@@ -565,7 +622,9 @@ impl Core {
                             // otherwise never get a unit, so it could not evolve at
                             // all until a restart.
                             self.rewire_hot_params();
-                            format!("{name}@{version} registered into the engine dispatch (disabled{declared}{evolvable})")
+                            format!(
+                                "{name}@{version} registered into the engine dispatch (disabled{declared}{evolvable})"
+                            )
                         }
                         Err(reason) => format!("rejected: {reason}"),
                     }
@@ -590,7 +649,11 @@ impl Core {
     /// List installed extensions (name, type, lifecycle state).
     pub fn extension_list(
         &self,
-    ) -> Vec<(String, crate::extension::ExtensionType, crate::extension::ExtensionState)> {
+    ) -> Vec<(
+        String,
+        crate::extension::ExtensionType,
+        crate::extension::ExtensionState,
+    )> {
         self.extensions.list()
     }
 
@@ -607,7 +670,10 @@ impl Core {
     /// Enable an extension (runs `on_load`). The extension receives ONLY a
     /// narrowed context — no credentials, venue client, socket or internal state.
     pub async fn enable_extension(&mut self, name: &str) -> Result<(), String> {
-        let ctx = CoreExtensionContext { tx: self.tx.clone(), strategies: self.strategy_names() };
+        let ctx = CoreExtensionContext {
+            tx: self.tx.clone(),
+            strategies: self.strategy_names(),
+        };
         self.extensions.enable(name, &ctx).await
     }
 
@@ -631,10 +697,17 @@ impl Core {
             }
         }
         let closed = self.positions.closed_positions();
-        let start = if limit > 0 && closed.len() > limit { closed.len() - limit } else { 0 };
+        let start = if limit > 0 && closed.len() > limit {
+            closed.len() - limit
+        } else {
+            0
+        };
         closed[start..]
             .iter()
-            .map(|c| serde_json::to_value(crate::trade_db::TradeRecord::from_closed(c)).unwrap_or(serde_json::Value::Null))
+            .map(|c| {
+                serde_json::to_value(crate::trade_db::TradeRecord::from_closed(c))
+                    .unwrap_or(serde_json::Value::Null)
+            })
             .collect()
     }
 
@@ -646,7 +719,11 @@ impl Core {
     /// Operator override for ONE strategy: validate + hot-swap + audit. `params`
     /// must name exactly one strategy; a multi-strategy bag is refused rather than
     /// partially applied.
-    pub fn shadow_evolution_apply(&mut self, params: MutableParams, now_ms: i64) -> Result<(), String> {
+    pub fn shadow_evolution_apply(
+        &mut self,
+        params: MutableParams,
+        now_ms: i64,
+    ) -> Result<(), String> {
         self.shadow_evolution.apply_params(params, now_ms)
     }
 
@@ -666,7 +743,8 @@ impl Core {
                 // switched-off strategy's evolved parameters and rollback anchor,
                 // making a toggle lossy. A disabled strategy simply never emits the
                 // candidates that would consume them.
-                self.shadow_evolution.register_strategies(&e.strategy_refs());
+                self.shadow_evolution
+                    .register_strategies(&e.strategy_refs());
                 e.set_hot_params(Some(self.shadow_evolution.registry()));
             } else {
                 e.set_hot_params(None);
@@ -694,16 +772,27 @@ impl Core {
     }
 
     /// One strategy's status (`None` = not evolvable).
-    pub fn shadow_evolution_status_for(&self, strategy: &str, now_ms: i64) -> Option<EvolutionStatus> {
+    pub fn shadow_evolution_status_for(
+        &self,
+        strategy: &str,
+        now_ms: i64,
+    ) -> Option<EvolutionStatus> {
         self.shadow_evolution.status(strategy, now_ms)
     }
 
     /// Roll back ONE strategy to the parameters in force before its last change.
-    pub fn shadow_evolution_rollback(&mut self, strategy: &str, now_ms: i64) -> Result<EvolutionOutcome, String> {
+    pub fn shadow_evolution_rollback(
+        &mut self,
+        strategy: &str,
+        now_ms: i64,
+    ) -> Result<EvolutionOutcome, String> {
         self.shadow_evolution.rollback(strategy, now_ms)
     }
 
-    pub fn shadow_evolution_variants(&mut self, now_ms: i64) -> Vec<crate::shadow_evolution::VariantView> {
+    pub fn shadow_evolution_variants(
+        &mut self,
+        now_ms: i64,
+    ) -> Vec<crate::shadow_evolution::VariantView> {
         self.shadow_evolution.variant_views(now_ms)
     }
 
@@ -804,7 +893,10 @@ impl Core {
     /// Install the running data feed's subscription control (P4). Called by the
     /// market plugin when its `DataFeed` starts, so the core stays unaware of
     /// any concrete feed implementation.
-    pub fn set_subscription(&mut self, control: std::sync::Arc<dyn blitzkrieg_market_api::SubscriptionControl>) {
+    pub fn set_subscription(
+        &mut self,
+        control: std::sync::Arc<dyn blitzkrieg_market_api::SubscriptionControl>,
+    ) {
         self.feed = Some(control);
     }
 
@@ -842,13 +934,26 @@ impl Core {
         // left Core.books empty, so open positions never re-valued and NO
         // non-forced exit (TP/trailing/SL) could ever fire.
         match &ev {
-            crate::engine::DataEvent::Book { token_id, bids, asks, .. } => {
+            crate::engine::DataEvent::Book {
+                token_id,
+                bids,
+                asks,
+                ..
+            } => {
                 self.books.insert(
                     token_id.clone(),
-                    crate::sim::Book { bids: bids.clone(), asks: asks.clone() },
+                    crate::sim::Book {
+                        bids: bids.clone(),
+                        asks: asks.clone(),
+                    },
                 );
             }
-            crate::engine::DataEvent::TopOfBook { token_id, best_bid, best_ask, .. } => {
+            crate::engine::DataEvent::TopOfBook {
+                token_id,
+                best_bid,
+                best_ask,
+                ..
+            } => {
                 let mut bids = Vec::new();
                 let mut asks = Vec::new();
                 if let Some(b) = best_bid {
@@ -864,7 +969,8 @@ impl Core {
                 // Only overwrite when we actually have a side (don't clobber a
                 // full book with an empty top-of-book update).
                 if !bids.is_empty() || !asks.is_empty() {
-                    self.books.insert(token_id.clone(), crate::sim::Book { bids, asks });
+                    self.books
+                        .insert(token_id.clone(), crate::sim::Book { bids, asks });
                 }
             }
             _ => {}
@@ -882,10 +988,16 @@ impl Core {
         }
         let shadow_feed = if self.shadow_evolution.is_enabled() {
             match &ev {
-                crate::engine::DataEvent::Book { token_id, now_ms: t, .. }
-                | crate::engine::DataEvent::TopOfBook { token_id, now_ms: t, .. } => {
-                    Some(ShadowFeed::Book(token_id.clone(), *t))
+                crate::engine::DataEvent::Book {
+                    token_id,
+                    now_ms: t,
+                    ..
                 }
+                | crate::engine::DataEvent::TopOfBook {
+                    token_id,
+                    now_ms: t,
+                    ..
+                } => Some(ShadowFeed::Book(token_id.clone(), *t)),
                 crate::engine::DataEvent::RoundMarkets { markets, now_ms: t } => {
                     Some(ShadowFeed::Round(markets.clone(), *t))
                 }
@@ -972,15 +1084,20 @@ impl Core {
             tracing::info!(target: "strategy", "{}", rec.audit_line());
         }
         self.stats.signals += orders.len() as u64;
-        let tokens: Vec<(String, crate::model::OrderRequest)> =
-            orders.into_iter().map(|o| (o.token_id.clone(), o)).collect();
+        let tokens: Vec<(String, crate::model::OrderRequest)> = orders
+            .into_iter()
+            .map(|o| (o.token_id.clone(), o))
+            .collect();
         let mut placed = 0;
         for (token, req) in tokens {
             let name = req.strategy.clone();
             if let Some(limit) = self.config.strategy_limits.get(&name).cloned() {
                 if self.strategy_limit_ok(&req, &limit).is_err() {
                     self.stats.strategy_limit_rejected += 1;
-                    self.strategy_accounting.entry(name).or_default().limit_rejected += 1;
+                    self.strategy_accounting
+                        .entry(name)
+                        .or_default()
+                        .limit_rejected += 1;
                     continue;
                 }
             }
@@ -1044,7 +1161,11 @@ impl Core {
         self.strategy_names()
             .into_iter()
             .map(|name| {
-                let acc = self.strategy_accounting.get(&name).cloned().unwrap_or_default();
+                let acc = self
+                    .strategy_accounting
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_default();
                 let opens: Vec<&crate::position::OpenPosition> = self
                     .positions
                     .open_positions()
@@ -1164,9 +1285,7 @@ impl Core {
                 let declared: Vec<serde_json::Value> = e
                     .declared_gate_exemptions()
                     .into_iter()
-                    .map(|(name, x)| {
-                        serde_json::json!({ "strategy": name, "gates": x.gates() })
-                    })
+                    .map(|(name, x)| serde_json::json!({ "strategy": name, "gates": x.gates() }))
                     .collect();
                 serde_json::json!({
                     "timing": e.blocked_timing_count(),
@@ -1217,7 +1336,11 @@ impl Core {
                     .map(|b| b.mid_price)
                     .filter(|p| *p > Decimal::ZERO)
                     .unwrap_or(m.down_price);
-                MarketPriceView { asset: m.asset.clone(), up, down }
+                MarketPriceView {
+                    asset: m.asset.clone(),
+                    up,
+                    down,
+                }
             })
             .collect();
         Some(RoundView {
@@ -1276,7 +1399,11 @@ impl Core {
         if req.side == Side::Buy {
             self.ledger.reserve(&id, req.price * req.size)?;
         }
-        self.ome.submit(SubmitParams { order_id: id.clone(), request: req, submitted_at_ms: now_ms })?;
+        self.ome.submit(SubmitParams {
+            order_id: id.clone(),
+            request: req,
+            submitted_at_ms: now_ms,
+        })?;
         self.emit_order(&id);
         Ok((id, OrderStatus::Pending))
     }
@@ -1331,7 +1458,12 @@ impl Core {
         let token = &d.token_id;
         match d.side {
             Side::Buy => {
-                if let Some(pos) = self.positions.open_positions().iter().find(|p| &p.token_id == token) {
+                if let Some(pos) = self
+                    .positions
+                    .open_positions()
+                    .iter()
+                    .find(|p| &p.token_id == token)
+                {
                     let id = pos.id.clone();
                     let (old_shares, old_entry) = (pos.shares, pos.entry_price);
                     let add = d.delta;
@@ -1362,7 +1494,8 @@ impl Core {
                         entry_price: d.price,
                         shares: d.delta,
                         expires_at_ms,
-                        was_maker: d.mode == FillPolicy::Maker || d.mode == FillPolicy::MakerThenTaker,
+                        was_maker: d.mode == FillPolicy::Maker
+                            || d.mode == FillPolicy::MakerThenTaker,
                         target_exit_price: None,
                     };
                     self.positions.open(p, now_ms);
@@ -1381,8 +1514,13 @@ impl Core {
                     if remaining <= Decimal::new(1, 2) {
                         // Fully closed: use the recorded exit reason when this
                         // SELL was produced by the exit engine, else Manual.
-                        let reason = self.exit_reasons.remove(token).unwrap_or(ExitReason::Manual);
-                        if let Some(closed) = self.positions.close(&id, d.price, reason, false, now_ms) {
+                        let reason = self
+                            .exit_reasons
+                            .remove(token)
+                            .unwrap_or(ExitReason::Manual);
+                        if let Some(closed) =
+                            self.positions.close(&id, d.price, reason, false, now_ms)
+                        {
                             self.persist_positions();
                             self.on_position_closed(&closed, now_ms);
                         }
@@ -1411,7 +1549,10 @@ impl Core {
                 (closed.entry_fee_pct / Decimal::ONE_HUNDRED) * closed.entry_price * closed.shares;
             let exit_fee =
                 (closed.exit_fee_pct / Decimal::ONE_HUNDRED) * closed.exit_price * closed.shares;
-            let acc = self.strategy_accounting.entry(closed.strategy.clone()).or_default();
+            let acc = self
+                .strategy_accounting
+                .entry(closed.strategy.clone())
+                .or_default();
             acc.closed_trades += 1;
             if closed.net_pnl_usd >= Decimal::ZERO {
                 acc.wins += 1;
@@ -1446,7 +1587,9 @@ impl Core {
     /// Map a venue order id to a core order (for user-WS events). Returns the
     /// core id when known.
     pub fn core_id_for_venue(&self, venue_or_core: &str) -> Option<String> {
-        self.ome.by_venue_or_id(venue_or_core).map(|o| o.order_id.clone())
+        self.ome
+            .by_venue_or_id(venue_or_core)
+            .map(|o| o.order_id.clone())
     }
 
     /// Live orders accepted locally but not yet submitted to the venue (no
@@ -1461,7 +1604,12 @@ impl Core {
     }
 
     /// Attach the venue id returned by a successful LIVE POST and mark it live.
-    pub fn bind_venue(&mut self, core_id: &str, venue_order_id: String, now_ms: i64) -> CoreResult<()> {
+    pub fn bind_venue(
+        &mut self,
+        core_id: &str,
+        venue_order_id: String,
+        now_ms: i64,
+    ) -> CoreResult<()> {
         self.ome.bind_venue(core_id, venue_order_id, now_ms)?;
         self.ome.mark_live(core_id, now_ms)?;
         self.emit_order(core_id);
@@ -1470,7 +1618,10 @@ impl Core {
 
     /// Run a reconciliation sweep against a venue snapshot. Applies missed fills
     /// and repairs ghost/partial orders, emitting a report event.
-    pub fn reconcile(&mut self, snap: crate::reconcile::VenueSnapshot) -> CoreResult<crate::reconcile::ReconcileReport> {
+    pub fn reconcile(
+        &mut self,
+        snap: crate::reconcile::VenueSnapshot,
+    ) -> CoreResult<crate::reconcile::ReconcileReport> {
         let report = crate::reconcile::reconcile(&mut self.ome, &snap)?;
         // Ledger + position effects for any gap fills the OME just applied.
         for gap in report.actions.iter().filter_map(|a| match a {
@@ -1494,7 +1645,9 @@ impl Core {
                 marked_cancelled: report
                     .actions
                     .iter()
-                    .filter(|a| matches!(a, crate::reconcile::ReconcileAction::MarkedCancelled { .. }))
+                    .filter(|a| {
+                        matches!(a, crate::reconcile::ReconcileAction::MarkedCancelled { .. })
+                    })
                     .count(),
                 ghost_ids: report.suspect_ghost_ids.clone(),
             });
@@ -1519,12 +1672,19 @@ impl Core {
     fn emit_fill(&self, d: FillDelta) {
         if let Some(o) = self.ome.get(&d.order_id) {
             self.persist_order(&d.order_id);
-            self.emit(Event::Fill { delta: d.into(), order: o.clone() });
+            self.emit(Event::Fill {
+                delta: d.into(),
+                order: o.clone(),
+            });
         }
     }
 
     fn new_order_id(&mut self) -> String {
-        let prefix = if self.config.mode == Mode::Dry { "dry" } else { "live" };
+        let prefix = if self.config.mode == Mode::Dry {
+            "dry"
+        } else {
+            "live"
+        };
         let id = format!("{prefix}_{}", self.next_id);
         self.next_id += 1;
         id
@@ -1533,7 +1693,10 @@ impl Core {
     // ── Risk ───────────────────────────────────────────────────────────────
     pub fn kill(&mut self, reason: String) {
         self.risk.kill(reason.clone());
-        self.emit(Event::RiskAlert { code: CoreErrorCode::KillSwitchActive, message: reason });
+        self.emit(Event::RiskAlert {
+            code: CoreErrorCode::KillSwitchActive,
+            message: reason,
+        });
     }
     /// Flush pending near-miss records to disk (call on shutdown).
     pub fn flush_near_misses(&mut self) {
@@ -1544,7 +1707,9 @@ impl Core {
                 .map(|e| e.flush_near_misses())
                 .unwrap_or_default();
             if !recs.is_empty() {
-                if let Err(e) = crate::shadow::persist_near_misses(std::path::Path::new(&path), &recs) {
+                if let Err(e) =
+                    crate::shadow::persist_near_misses(std::path::Path::new(&path), &recs)
+                {
                     tracing::warn!(error = %e, path = %path, "near-miss flush failed");
                 }
             }
@@ -1585,7 +1750,10 @@ impl Core {
                 ));
             }
             let direction = parse_direction(&req.direction);
-            if let Err(reason) = self.positions.can_open(Some(&req.asset), Some(direction), now_ms) {
+            if let Err(reason) = self
+                .positions
+                .can_open(Some(&req.asset), Some(direction), now_ms)
+            {
                 return Err(CoreError::new(CoreErrorCode::RiskRejected, reason));
             }
         }
@@ -1597,20 +1765,32 @@ impl Core {
             self.ledger.reserve(&id, req.price * req.size)?;
         }
 
-        self.ome.submit(SubmitParams { order_id: id.clone(), request: req, submitted_at_ms: now_ms })?;
+        self.ome.submit(SubmitParams {
+            order_id: id.clone(),
+            request: req,
+            submitted_at_ms: now_ms,
+        })?;
         self.place_after_submit(&id, maker_timeout_ms, now_ms)?;
 
-        let status = self.ome.get(&id).map(|o| o.status).unwrap_or(OrderStatus::Pending);
+        let status = self
+            .ome
+            .get(&id)
+            .map(|o| o.status)
+            .unwrap_or(OrderStatus::Pending);
         self.emit_order(&id);
         Ok((id, status))
     }
 
-    fn place_after_submit(&mut self, id: &str, maker_timeout_ms: i64, now_ms: i64) -> CoreResult<()> {
-        let order = self
-            .ome
-            .get(id)
-            .cloned()
-            .ok_or_else(|| CoreError::new(CoreErrorCode::Internal, "order missing after submit"))?;
+    fn place_after_submit(
+        &mut self,
+        id: &str,
+        maker_timeout_ms: i64,
+        now_ms: i64,
+    ) -> CoreResult<()> {
+        let order =
+            self.ome.get(id).cloned().ok_or_else(|| {
+                CoreError::new(CoreErrorCode::Internal, "order missing after submit")
+            })?;
 
         match self.config.mode {
             Mode::Dry => {
@@ -1620,7 +1800,10 @@ impl Core {
                         // Cross immediately and fully at the buffered limit,
                         // worsened by the fill model's taker slippage (identity by
                         // default, so the live/dry path is unchanged).
-                        let fill_price = self.config.fill_model.apply_slippage(order.side, order.price);
+                        let fill_price = self
+                            .config
+                            .fill_model
+                            .apply_slippage(order.side, order.price);
                         self.authoritative_fill(id, order.size, fill_price, now_ms)?;
                     }
                     FillPolicy::Maker | FillPolicy::MakerThenTaker => {
@@ -1676,11 +1859,17 @@ impl Core {
 
     /// Fill a resting maker order if the latest book crosses its limit.
     fn try_maker_fill(&mut self, id: &str, now_ms: i64) {
-        let Some(order) = self.ome.get(id).cloned() else { return };
+        let Some(order) = self.ome.get(id).cloned() else {
+            return;
+        };
         if !order.status.is_live() || order.filled_size >= order.size {
             return;
         }
-        let crosses = self.books.get(&order.token_id).map(|b| b.crosses(&order)).unwrap_or(false);
+        let crosses = self
+            .books
+            .get(&order.token_id)
+            .map(|b| b.crosses(&order))
+            .unwrap_or(false);
         if !crosses {
             return;
         }
@@ -1733,7 +1922,16 @@ impl Core {
     /// many were closed. Exits are SELL orders; in dry mode they cross at the
     /// latest book bid, in live mode the venue bridge submits them.
     pub fn flatten(&mut self, position_id: Option<&str>, now_ms: i64) -> CoreResult<usize> {
-        let targets: Vec<(String, String, String, Decimal, String, String, String, Decimal)> = self
+        let targets: Vec<(
+            String,
+            String,
+            String,
+            Decimal,
+            String,
+            String,
+            String,
+            Decimal,
+        )> = self
             .positions
             .open_positions()
             .iter()
@@ -1754,10 +1952,19 @@ impl Core {
         let mut closed = 0usize;
         for (id, token, condition, shares, strategy, asset, direction, current) in targets {
             // Already have a live sell for this token? skip.
-            if self.ome.live_for(&token, Side::Sell).into_iter().any(|o| o.status.is_live()) {
+            if self
+                .ome
+                .live_for(&token, Side::Sell)
+                .into_iter()
+                .any(|o| o.status.is_live())
+            {
                 continue;
             }
-            let price = if current > Decimal::ZERO { current } else { Decimal::new(1, 2) };
+            let price = if current > Decimal::ZERO {
+                current
+            } else {
+                Decimal::new(1, 2)
+            };
             self.exit_reasons.insert(token.clone(), ExitReason::Manual);
             let order = OrderRequest {
                 token_id: token,
@@ -1833,7 +2040,9 @@ impl Core {
                 .map(|e| e.take_near_misses(now_ms))
                 .unwrap_or_default();
             if !recs.is_empty() {
-                if let Err(e) = crate::shadow::persist_near_misses(std::path::Path::new(&path), &recs) {
+                if let Err(e) =
+                    crate::shadow::persist_near_misses(std::path::Path::new(&path), &recs)
+                {
                     tracing::warn!(error = %e, path = %path, "near-miss persist failed");
                 }
             }
@@ -1843,7 +2052,18 @@ impl Core {
         self.run_exit_checks(now_ms)?;
 
         // Escalate due maker_then_taker orders: cancel maker, cross as taker.
-        let due: Vec<(String, Decimal, Decimal, Side, String, String, String, String, String, i64)> = self
+        let due: Vec<(
+            String,
+            Decimal,
+            Decimal,
+            Side,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+        )> = self
             .ome
             .live_orders()
             .into_iter()
@@ -1863,7 +2083,8 @@ impl Core {
                 )
             })
             .collect();
-        for (id, price, remaining, side, token, condition, strategy, asset, direction, slot) in due {
+        for (id, price, remaining, side, token, condition, strategy, asset, direction, slot) in due
+        {
             self.cancel(&id, now_ms)?;
             if remaining <= Decimal::ZERO {
                 continue;
@@ -1977,11 +2198,21 @@ impl Core {
             if !has_job.insert(pos.id.clone()) {
                 continue; // an automated/policy exit already closes it this cycle
             }
-            let price = if pos.current_price > Decimal::ZERO { pos.current_price } else { Decimal::new(1, 2) };
+            let price = if pos.current_price > Decimal::ZERO {
+                pos.current_price
+            } else {
+                Decimal::new(1, 2)
+            };
             let tag: String = intent
                 .reason
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .take(32)
                 .collect();
             jobs.push(ExitJob {
@@ -2008,8 +2239,14 @@ impl Core {
             if already_live {
                 continue;
             }
-            let Some(size) = self.positions.sell_shares(&job.position_id) else { continue };
-            let mode = if job.use_maker { FillPolicy::Maker } else { FillPolicy::Taker };
+            let Some(size) = self.positions.sell_shares(&job.position_id) else {
+                continue;
+            };
+            let mode = if job.use_maker {
+                FillPolicy::Maker
+            } else {
+                FillPolicy::Taker
+            };
             let order = OrderRequest {
                 token_id: job.token.clone(),
                 condition_id: job.condition_id,
@@ -2064,7 +2301,10 @@ impl crate::extension::ExtensionContext for CoreExtensionContext {
 
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Decimal → JSON number for the diagnostics payloads, matching the `crate::decimal`
@@ -2136,14 +2376,19 @@ mod books_mirror_tests {
     #[test]
     fn engine_feed_populates_core_books_and_enables_exits() {
         let cfg = CoreConfig {
-            risk: RiskConfig { max_order_notional: dec!(100), ..Default::default() },
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
             dry_seed_balance: dec!(1000),
             round_duration_sec: 900,
             auto_exits_enabled: true,
             ..Default::default()
         };
         let mut c = Core::new(cfg);
-        c.enable_engine(crate::engine::Engine::new(crate::engine::EngineConfig::default()));
+        c.enable_engine(crate::engine::Engine::new(
+            crate::engine::EngineConfig::default(),
+        ));
         let now = 1_000_000_000i64;
         let slot = now / 1000 / 900;
         let end = (slot + 1) * 900 * 1000;
@@ -2152,10 +2397,17 @@ mod books_mirror_tests {
         c.engine_on_data(
             crate::engine::DataEvent::RoundMarkets {
                 markets: vec![crate::model::CryptoMarket {
-                    asset: "BTC".into(), condition_id: "c".into(), question_id: "q".into(),
-                    up_token_id: "tok".into(), down_token_id: "d".into(),
-                    up_price: dec!(0.6), down_price: dec!(0.4),
-                    expires_at_ms: end, round_slot: slot, neg_risk: true, question: "?".into(),
+                    asset: "BTC".into(),
+                    condition_id: "c".into(),
+                    question_id: "q".into(),
+                    up_token_id: "tok".into(),
+                    down_token_id: "d".into(),
+                    up_price: dec!(0.6),
+                    down_price: dec!(0.4),
+                    expires_at_ms: end,
+                    round_slot: slot,
+                    neg_risk: true,
+                    question: "?".into(),
                 }],
                 now_ms: now,
             },
@@ -2173,10 +2425,17 @@ mod books_mirror_tests {
         // Open a position directly, then feed a profitable book via engine_on_data
         // and tick: the exit path must now see the higher price and exit.
         let req = crate::model::OrderRequest {
-            token_id: "tok".into(), condition_id: "c".into(), side: crate::model::Side::Buy,
-            mode: crate::model::FillPolicy::Taker, price: dec!(0.43), size: dec!(10),
-            internal_key: "k".into(), strategy: "spread_arb".into(), asset: "BTC".into(),
-            direction: "up".into(), round_slot: slot,
+            token_id: "tok".into(),
+            condition_id: "c".into(),
+            side: crate::model::Side::Buy,
+            mode: crate::model::FillPolicy::Taker,
+            price: dec!(0.43),
+            size: dec!(10),
+            internal_key: "k".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: slot,
         };
         c.place(req, 0, now).unwrap();
         assert_eq!(c.positions().open_positions().len(), 1);
@@ -2196,9 +2455,16 @@ mod books_mirror_tests {
 
         // Position closed with a profit, and the recorded exit reflects the
         // higher price (not frozen at entry).
-        assert_eq!(c.positions().open_positions().len(), 0, "exit engine must close on profit");
+        assert_eq!(
+            c.positions().open_positions().len(),
+            0,
+            "exit engine must close on profit"
+        );
         let closed = &c.positions().closed_positions()[0];
-        assert!(closed.exit_price > entry, "exit must be above entry (was frozen before fix)");
+        assert!(
+            closed.exit_price > entry,
+            "exit must be above entry (was frozen before fix)"
+        );
         assert!(closed.net_pnl_usd > Decimal::ZERO);
     }
 }
@@ -2215,7 +2481,10 @@ mod round_expiry_tests {
     #[test]
     fn filled_entry_expires_at_round_end_not_start() {
         let cfg = CoreConfig {
-            risk: RiskConfig { max_order_notional: dec!(100), ..Default::default() },
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
             dry_seed_balance: dec!(1000),
             round_duration_sec: 300,
             ..Default::default()
@@ -2241,11 +2510,17 @@ mod round_expiry_tests {
         c.place(req, 0, now_ms).unwrap();
         let pos = &c.positions().open_positions()[0];
         let expected_end = (slot + 1) * duration * 1000;
-        assert_eq!(pos.expires_at_ms, expected_end, "expiry must be the round END");
+        assert_eq!(
+            pos.expires_at_ms, expected_end,
+            "expiry must be the round END"
+        );
         assert!(pos.expires_at_ms > now_ms, "expiry must be in the future");
         // time_left must be comfortably positive (not an instant force-exit).
         let time_left = (pos.expires_at_ms - now_ms) / 1000;
-        assert!(time_left > 0 && time_left <= duration, "time_left={time_left}");
+        assert!(
+            time_left > 0 && time_left <= duration,
+            "time_left={time_left}"
+        );
     }
 }
 
@@ -2266,7 +2541,11 @@ mod shadow_evolution_tests {
     }
 
     fn cap(c: &Core) -> Decimal {
-        c.engine.as_ref().unwrap().current_spread_arb().trend_max_entry_price
+        c.engine
+            .as_ref()
+            .unwrap()
+            .current_spread_arb()
+            .trend_max_entry_price
     }
 
     /// Acceptance: enabling Shadow Evolution attaches the per-strategy hot-swap
@@ -2281,7 +2560,9 @@ mod shadow_evolution_tests {
             shadow_evolution_enabled: false,
             ..Default::default()
         });
-        c.enable_engine(crate::engine::Engine::new(crate::engine::EngineConfig::default()));
+        c.enable_engine(crate::engine::Engine::new(
+            crate::engine::EngineConfig::default(),
+        ));
         assert!(!c.shadow_evolution().is_enabled());
         assert!(!c.engine.as_ref().unwrap().has_hot_params());
 
@@ -2290,21 +2571,40 @@ mod shadow_evolution_tests {
         assert!(c.engine.as_ref().unwrap().has_hot_params());
         assert_eq!(
             c.shadow_evolution().strategy_names(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string(), "mean_reversion".to_string()],
+            vec![
+                "spread_arb".to_string(),
+                "trend_follow".to_string(),
+                "mean_reversion".to_string()
+            ],
             "every hosted strategy that declares knobs is evolved; the chase leg \
              starts disabled but its declaration is read off the live instance"
         );
 
         let before = cap(&c);
         // Simulate an applied evolution via the operator override path (+3%).
-        c.shadow_evolution_apply(bag("spread_arb", "trend_max_entry_price", before * dec!(1.03)), 1500)
-            .unwrap();
-        assert_eq!(cap(&c), before * dec!(1.03), "engine must observe hot-swapped params");
+        c.shadow_evolution_apply(
+            bag("spread_arb", "trend_max_entry_price", before * dec!(1.03)),
+            1500,
+        )
+        .unwrap();
+        assert_eq!(
+            cap(&c),
+            before * dec!(1.03),
+            "engine must observe hot-swapped params"
+        );
 
         // Rollback restores the previous set — for that strategy only.
         c.shadow_evolution_rollback("spread_arb", 2000).unwrap();
-        assert_eq!(cap(&c), before, "rollback must restore prior params in the engine");
-        assert_eq!(c.shadow_evolution().evolution_count("spread_arb"), 0, "rollback is not an evolution");
+        assert_eq!(
+            cap(&c),
+            before,
+            "rollback must restore prior params in the engine"
+        );
+        assert_eq!(
+            c.shadow_evolution().evolution_count("spread_arb"),
+            0,
+            "rollback is not an evolution"
+        );
 
         // A manual apply is now traced; the audit is per strategy.
         let recs = c.shadow_evolution_history(Some("spread_arb"), 10);
@@ -2323,24 +2623,36 @@ mod shadow_evolution_tests {
             dry_seed_balance: dec!(1000),
             ..Default::default()
         });
-        c.enable_engine(crate::engine::Engine::new(crate::engine::EngineConfig::default()));
+        c.enable_engine(crate::engine::Engine::new(
+            crate::engine::EngineConfig::default(),
+        ));
         c.shadow_evolution_enable(0);
 
         let before = cap(&c);
         let mut both = bag("spread_arb", "trend_max_entry_price", before * dec!(1.03));
         both.set_strategy("dog_strategy", StrategyParams::new());
-        assert!(c.shadow_evolution_apply(both, 1000).is_err(), "one strategy at a time");
+        assert!(
+            c.shadow_evolution_apply(both, 1000).is_err(),
+            "one strategy at a time"
+        );
         assert_eq!(cap(&c), before, "a refused apply must not move anything");
 
-        assert!(c.shadow_evolution_apply(bag("nope", "x", dec!(1)), 1100).is_err());
+        assert!(
+            c.shadow_evolution_apply(bag("nope", "x", dec!(1)), 1100)
+                .is_err()
+        );
         assert!(c.shadow_evolution_rollback("nope", 1200).is_err());
-        assert!(c.shadow_evolution_rollback("spread_arb", 1300).is_err(), "nothing to roll back yet");
+        assert!(
+            c.shadow_evolution_rollback("spread_arb", 1300).is_err(),
+            "nothing to roll back yet"
+        );
 
         // An undeclared knob for spread_arb is refused: a proposal can never
         // smuggle in a field the strategy did not open to evolution.
-        assert!(c
-            .shadow_evolution_apply(bag("spread_arb", "hard_stop_loss_pct", dec!(1)), 1400)
-            .is_err());
+        assert!(
+            c.shadow_evolution_apply(bag("spread_arb", "hard_stop_loss_pct", dec!(1)), 1400)
+                .is_err()
+        );
         assert_eq!(cap(&c), before);
     }
 
@@ -2350,11 +2662,16 @@ mod shadow_evolution_tests {
             risk: RiskConfig::default(),
             ..Default::default()
         });
-        c.enable_engine(crate::engine::Engine::new(crate::engine::EngineConfig::default()));
+        c.enable_engine(crate::engine::Engine::new(
+            crate::engine::EngineConfig::default(),
+        ));
         let before = cap(&c);
         assert!(!c.shadow_evolution().is_enabled());
         assert_eq!(c.shadow_evolution().variant_count(), 0);
-        assert!(!c.engine.as_ref().unwrap().has_hot_params(), "no overlay while disabled");
+        assert!(
+            !c.engine.as_ref().unwrap().has_hot_params(),
+            "no overlay while disabled"
+        );
         c.shadow_evolution_evaluate(1000);
         assert_eq!(c.shadow_evolution_history(None, 10).len(), 0);
         // Nothing is registered and nothing moves, so the strategy runs on the
@@ -2372,23 +2689,40 @@ mod shadow_evolution_tests {
         c.shadow_evolution_enable(2000);
         assert_eq!(
             c.shadow_evolution().strategy_names(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string(), "mean_reversion".to_string()],
+            vec![
+                "spread_arb".to_string(),
+                "trend_follow".to_string(),
+                "mean_reversion".to_string()
+            ],
             "E4-a hosts a second evolvable builtin; both declare knobs"
         );
         assert!(c.engine.as_ref().unwrap().has_hot_params());
         assert_eq!(
-            c.shadow_evolution().current_params().get("spread_arb", "trend_max_entry_price"),
+            c.shadow_evolution()
+                .current_params()
+                .get("spread_arb", "trend_max_entry_price"),
             Some(before),
         );
-        assert_eq!(cap(&c), before, "attaching the overlay must not itself move a value");
+        assert_eq!(
+            cap(&c),
+            before,
+            "attaching the overlay must not itself move a value"
+        );
 
         // Disabling DETACHES it again: back to the untouched base config.
-        c.shadow_evolution_apply(bag("spread_arb", "trend_max_entry_price", before * dec!(1.03)), 2100)
-            .unwrap();
+        c.shadow_evolution_apply(
+            bag("spread_arb", "trend_max_entry_price", before * dec!(1.03)),
+            2100,
+        )
+        .unwrap();
         assert_ne!(cap(&c), before);
         c.shadow_evolution_disable();
         assert!(!c.engine.as_ref().unwrap().has_hot_params());
-        assert_eq!(cap(&c), before, "disabling restores the base config exactly");
+        assert_eq!(
+            cap(&c),
+            before,
+            "disabling restores the base config exactly"
+        );
     }
 }
 
@@ -2400,7 +2734,10 @@ mod tests {
 
     fn dry_core(balance: Decimal) -> Core {
         let mut c = Core::new(CoreConfig {
-            risk: RiskConfig { max_order_notional: dec!(3), ..Default::default() },
+            risk: RiskConfig {
+                max_order_notional: dec!(3),
+                ..Default::default()
+            },
             dry_seed_balance: Decimal::from(10_000),
             ..Default::default()
         });
@@ -2427,7 +2764,9 @@ mod tests {
     #[test]
     fn taker_fills_immediately_and_spends() {
         let mut c = dry_core(dec!(10));
-        let (id, st) = c.place(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1).unwrap();
+        let (id, st) = c
+            .place(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1)
+            .unwrap();
         assert_eq!(st, OrderStatus::Filled);
         assert_eq!(c.ome().get(&id).unwrap().filled_size, dec!(5));
         // 10 - 0.4*5 = 8; reservation fully consumed.
@@ -2439,7 +2778,9 @@ mod tests {
     fn maker_rests_until_book_crosses() {
         let mut c = dry_core(dec!(10));
         // BUY maker 0.40*5 = 2.0 reserved, not filled yet.
-        let (id, st) = c.place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1).unwrap();
+        let (id, st) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1)
+            .unwrap();
         assert_eq!(st, OrderStatus::Live);
         assert_eq!(c.ledger().available(), dec!(8));
 
@@ -2456,7 +2797,13 @@ mod tests {
     #[test]
     fn maker_then_taker_escalates_after_timeout() {
         let mut c = dry_core(dec!(10));
-        let (id, st) = c.place(order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(5), "k1"), 1000, 1).unwrap();
+        let (id, st) = c
+            .place(
+                order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(5), "k1"),
+                1000,
+                1,
+            )
+            .unwrap();
         assert_eq!(st, OrderStatus::Live);
         // Book never crosses within the maker window.
         c.book_snapshot("tok", vec![], vec![(dec!(0.50), dec!(100))], 2);
@@ -2465,7 +2812,12 @@ mod tests {
         c.tick(1002).unwrap();
         assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Cancelled);
         // A new escalated taker order exists and is filled.
-        let filled: Vec<_> = c.ome().all().into_iter().filter(|o| o.status == OrderStatus::Filled).collect();
+        let filled: Vec<_> = c
+            .ome()
+            .all()
+            .into_iter()
+            .filter(|o| o.status == OrderStatus::Filled)
+            .collect();
         assert_eq!(filled.len(), 1);
         assert_eq!(filled[0].filled_size, dec!(5));
         assert_eq!(c.ledger().balance(), dec!(8));
@@ -2474,7 +2826,9 @@ mod tests {
     #[test]
     fn cancel_releases_reservation() {
         let mut c = dry_core(dec!(10));
-        let (id, _) = c.place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1).unwrap();
+        let (id, _) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1)
+            .unwrap();
         assert_eq!(c.ledger().available(), dec!(8));
         c.cancel(&id, 2).unwrap();
         assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Cancelled);
@@ -2485,17 +2839,23 @@ mod tests {
     fn risk_and_ledger_reject_oversize_and_kill() {
         let mut c = dry_core(dec!(10));
         // notional 0.4*10 = 4 > cap 3 → rejected before reservation.
-        let e = c.place(order(FillPolicy::Taker, dec!(0.4), dec!(10), "k1"), 0, 1).unwrap_err();
+        let e = c
+            .place(order(FillPolicy::Taker, dec!(0.4), dec!(10), "k1"), 0, 1)
+            .unwrap_err();
         assert_eq!(e.code, CoreErrorCode::RiskRejected);
 
         // Balance gate: only 2 available after a 2 reservation → a 3 buy fails.
         let mut c2 = dry_core(dec!(2));
-        let e2 = c2.place(order(FillPolicy::Taker, dec!(0.3), dec!(10), "k2"), 0, 1).unwrap_err();
+        let e2 = c2
+            .place(order(FillPolicy::Taker, dec!(0.3), dec!(10), "k2"), 0, 1)
+            .unwrap_err();
         assert_eq!(e2.code, CoreErrorCode::InsufficientFunds);
 
         let mut c3 = dry_core(dec!(10));
         c3.kill("manual".into());
-        let e3 = c3.place(order(FillPolicy::Taker, dec!(0.4), dec!(1), "k3"), 0, 1).unwrap_err();
+        let e3 = c3
+            .place(order(FillPolicy::Taker, dec!(0.4), dec!(1), "k3"), 0, 1)
+            .unwrap_err();
         assert_eq!(e3.code, CoreErrorCode::KillSwitchActive);
     }
 
@@ -2503,18 +2863,33 @@ mod tests {
     fn buy_fill_opens_position_and_exit_closes_it() {
         let mut c = dry_core(dec!(100));
         // Taker BUY 0.40 x 5 fills → position opened.
-        let (id, st) = c.place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k1"), 0, 1).unwrap();
+        let (id, st) = c
+            .place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k1"), 0, 1)
+            .unwrap();
         assert_eq!(st, OrderStatus::Filled);
         assert_eq!(c.positions().open_positions().len(), 1);
 
         // Push a book showing a large profit → tick must emit a closing SELL.
-        c.book_snapshot("tok", vec![(dec!(0.99), dec!(100))], vec![(dec!(1.0), dec!(100))], 2);
+        c.book_snapshot(
+            "tok",
+            vec![(dec!(0.99), dec!(100))],
+            vec![(dec!(1.0), dec!(100))],
+            2,
+        );
         c.tick(2).unwrap();
         // Exit SELL (taker) crosses immediately at 0.99 → position closed.
-        assert_eq!(c.positions().open_positions().len(), 0, "position should be closed");
+        assert_eq!(
+            c.positions().open_positions().len(),
+            0,
+            "position should be closed"
+        );
         assert_eq!(c.positions().closed_positions().len(), 1);
         let closed = &c.positions().closed_positions()[0];
-        assert!(closed.net_pnl_usd > Decimal::ZERO, "expected profit, got {}", closed.net_pnl_usd);
+        assert!(
+            closed.net_pnl_usd > Decimal::ZERO,
+            "expected profit, got {}",
+            closed.net_pnl_usd
+        );
         let _ = id;
     }
 
@@ -2522,14 +2897,28 @@ mod tests {
     fn forced_exit_closes_at_a_loss() {
         let mut c = dry_core(dec!(100));
         // Buy at 0.40 (round_slot 1 → expires at the END of slot 1 = 1_800_000ms).
-        c.place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k1"), 0, 0).unwrap();
+        c.place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k1"), 0, 0)
+            .unwrap();
         assert_eq!(c.positions().open_positions().len(), 1);
         // Push a lower book, then tick at the force-exit horizon (100s left).
-        c.book_snapshot("tok", vec![(dec!(0.30), dec!(100))], vec![(dec!(0.31), dec!(100))], 1);
+        c.book_snapshot(
+            "tok",
+            vec![(dec!(0.30), dec!(100))],
+            vec![(dec!(0.31), dec!(100))],
+            1,
+        );
         c.tick(1_800_000 - 100).unwrap();
-        assert_eq!(c.positions().open_positions().len(), 0, "force exit should close the position");
+        assert_eq!(
+            c.positions().open_positions().len(),
+            0,
+            "force exit should close the position"
+        );
         let closed = &c.positions().closed_positions()[0];
-        assert!(closed.net_pnl_usd < Decimal::ZERO, "expected a loss, got {}", closed.net_pnl_usd);
+        assert!(
+            closed.net_pnl_usd < Decimal::ZERO,
+            "expected a loss, got {}",
+            closed.net_pnl_usd
+        );
     }
 
     #[test]
@@ -2543,13 +2932,29 @@ mod tests {
         pc.stop_loss_cooldown_sec = 0;
         pc.exit_cooldown_sec = 0;
         c.positions.set_config(pc);
-        c.place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k1"), 0, 0).unwrap();
-        c.book_snapshot("tok", vec![(dec!(0.20), dec!(100))], vec![(dec!(0.21), dec!(100))], 1);
+        c.place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k1"), 0, 0)
+            .unwrap();
+        c.book_snapshot(
+            "tok",
+            vec![(dec!(0.20), dec!(100))],
+            vec![(dec!(0.21), dec!(100))],
+            1,
+        );
         c.tick(1_800_000 - 100).unwrap();
         assert!(c.positions().daily_pnl() < dec!(-1));
-        let e = c.place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k2"), 0, 900_000).unwrap_err();
+        let e = c
+            .place(
+                order(FillPolicy::Taker, dec!(0.40), dec!(5), "k2"),
+                0,
+                900_000,
+            )
+            .unwrap_err();
         assert_eq!(e.code, CoreErrorCode::RiskRejected);
-        assert!(e.message.to_lowercase().contains("daily"), "got {}", e.message);
+        assert!(
+            e.message.to_lowercase().contains("daily"),
+            "got {}",
+            e.message
+        );
     }
 }
 
@@ -2599,7 +3004,10 @@ mod strategy_dispatch_tests {
 
     fn core_with_engine(limits: HashMap<String, StrategyLimit>) -> Core {
         let mut c = Core::new(CoreConfig {
-            risk: RiskConfig { max_order_notional: dec!(100), ..Default::default() },
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
             dry_seed_balance: dec!(1000),
             engine_enabled: true,
             round_duration_sec: 900,
@@ -2644,7 +3052,9 @@ mod strategy_dispatch_tests {
                     (&market.up_token_id, crate::model::SignalDirection::Up),
                     (&market.down_token_id, crate::model::SignalDirection::Down),
                 ] {
-                    let Some(book) = ctx.fresh_book(token_id) else { continue };
+                    let Some(book) = ctx.fresh_book(token_id) else {
+                        continue;
+                    };
                     if book.mid_price <= self.buy_below {
                         out.push(crate::signal::TradeSignal {
                             strategy: self.name.clone(),
@@ -2662,7 +3072,8 @@ mod strategy_dispatch_tests {
         }
     }
 
-    const DIPS: [(&str, &[&str]); 3] = [("small", &["BTC"]), ("mid", &["ETH"]), ("unset", &["SOL"])];
+    const DIPS: [(&str, &[&str]); 3] =
+        [("small", &["BTC"]), ("mid", &["ETH"]), ("unset", &["SOL"])];
 
     /// Core with a three-asset engine and the given dip strategies registered
     /// enabled. `spread_arb` is switched off so only the test strategies emit.
@@ -2698,7 +3109,10 @@ mod strategy_dispatch_tests {
             dips,
             global_max_positions,
             min_round_age_sec,
-            RiskConfig { max_order_notional: dec!(100), ..Default::default() },
+            RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
             gates,
         )
     }
@@ -2722,7 +3136,10 @@ mod strategy_dispatch_tests {
             assets: vec!["BTC".into(), "ETH".into(), "SOL".into()],
             positions: crate::position::PositionConfig {
                 max_positions: global_max_positions,
-                exit: crate::exit_policy::ExitConfig { min_time_left_sec: 0, ..Default::default() },
+                exit: crate::exit_policy::ExitConfig {
+                    min_time_left_sec: 0,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             strategy_limits: limits,
@@ -2743,7 +3160,10 @@ mod strategy_dispatch_tests {
             .unwrap();
             assert!(eng.set_strategy_enabled(name, true));
         }
-        assert!(eng.set_strategy_enabled("spread_arb", false), "isolate the test strategies");
+        assert!(
+            eng.set_strategy_enabled("spread_arb", false),
+            "isolate the test strategies"
+        );
         c.enable_engine(eng);
         c
     }
@@ -2788,18 +3208,31 @@ mod strategy_dispatch_tests {
     /// Round + a 0.44-mid book on every asset's up token. Each strategy that
     /// targets one of those assets emits one entry priced at 0.44.
     fn feed_three_asset_dip(c: &mut Core, now: i64) {
-        c.engine_on_data(DataEvent::RoundMarkets { markets: three_markets(now), now_ms: now }, now);
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: three_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
         feed_dip_on(c, now + 1_000, &["BTC", "ETH", "SOL"]);
     }
 
     /// Cross the book so the resting maker bid fills and a position opens.
     fn fill(c: &mut Core, asset: &str, now: i64) {
         let token = format!("{}_up", asset.to_lowercase());
-        c.book_snapshot(&token, vec![(dec!(0.42), dec!(100))], vec![(dec!(0.42), dec!(100))], now);
+        c.book_snapshot(
+            &token,
+            vec![(dec!(0.42), dec!(100))],
+            vec![(dec!(0.42), dec!(100))],
+            now,
+        );
     }
 
     fn limits_of(rows: &[(&str, StrategyLimit)]) -> HashMap<String, StrategyLimit> {
-        rows.iter().map(|(n, l)| ((*n).to_string(), l.clone())).collect()
+        rows.iter()
+            .map(|(n, l)| ((*n).to_string(), l.clone()))
+            .collect()
     }
 
     /// One strategy's override bag for the startup-selection tests, built the way
@@ -2834,10 +3267,17 @@ mod strategy_dispatch_tests {
 
         // Default: the incumbent trades, the chase leg does not.
         let plain = install(base.clone());
-        assert_eq!(plain.enabled_strategy_names(), vec!["spread_arb".to_string()]);
+        assert_eq!(
+            plain.enabled_strategy_names(),
+            vec!["spread_arb".to_string()]
+        );
         assert_eq!(
             plain.strategy_names(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string(), "mean_reversion".to_string()],
+            vec![
+                "spread_arb".to_string(),
+                "trend_follow".to_string(),
+                "mean_reversion".to_string()
+            ],
             "both builtins are hosted; only one is on"
         );
 
@@ -2853,7 +3293,10 @@ mod strategy_dispatch_tests {
             by_flag.enabled_strategy_names(),
             vec!["spread_arb".to_string(), "trend_follow".to_string()]
         );
-        assert_eq!(by_flag.enabled_strategy_names(), by_toggle.enabled_strategy_names());
+        assert_eq!(
+            by_flag.enabled_strategy_names(),
+            by_toggle.enabled_strategy_names()
+        );
 
         // An explicit "off" wins over an "on" for the same name, and a name the
         // engine does not host is ignored without taking the session down.
@@ -2862,10 +3305,17 @@ mod strategy_dispatch_tests {
             disabled_strategies: vec!["trend_follow".into()],
             ..base.clone()
         });
-        assert_eq!(both.enabled_strategy_names(), vec!["spread_arb".to_string()]);
+        assert_eq!(
+            both.enabled_strategy_names(),
+            vec!["spread_arb".to_string()]
+        );
         assert_eq!(
             both.strategy_names(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string(), "mean_reversion".to_string()],
+            vec![
+                "spread_arb".to_string(),
+                "trend_follow".to_string(),
+                "mean_reversion".to_string()
+            ],
             "an unknown name must not register anything"
         );
     }
@@ -2891,7 +3341,11 @@ mod strategy_dispatch_tests {
         // Registered from the start even though it starts disabled.
         assert_eq!(
             c.shadow_evolution().strategy_names(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string(), "mean_reversion".to_string()],
+            vec![
+                "spread_arb".to_string(),
+                "trend_follow".to_string(),
+                "mean_reversion".to_string()
+            ],
         );
         assert!(c.shadow_evolution_status_for("trend_follow", 0).is_some());
         // Its declared knobs are the strategy's own, not an invented set.
@@ -2914,15 +3368,25 @@ mod strategy_dispatch_tests {
         );
 
         assert!(c.set_strategy_enabled("trend_follow", true));
-        assert!(c.shadow_evolution_apply(one_param("trend_follow", "min_move_pct", dec!(3.1)), 1_200).is_ok());
-        let evolved = c.shadow_evolution().params_for("trend_follow").unwrap().get("min_move_pct");
+        assert!(
+            c.shadow_evolution_apply(one_param("trend_follow", "min_move_pct", dec!(3.1)), 1_200)
+                .is_ok()
+        );
+        let evolved = c
+            .shadow_evolution()
+            .params_for("trend_follow")
+            .unwrap()
+            .get("min_move_pct");
         assert_eq!(evolved, Some(dec!(3.1)));
 
         // Off and on again: same cell, same value — a toggle is not a reset.
         assert!(c.set_strategy_enabled("trend_follow", false));
         assert!(c.set_strategy_enabled("trend_follow", true));
         assert_eq!(
-            c.shadow_evolution().params_for("trend_follow").unwrap().get("min_move_pct"),
+            c.shadow_evolution()
+                .params_for("trend_follow")
+                .unwrap()
+                .get("min_move_pct"),
             Some(dec!(3.1)),
             "a runtime toggle must not discard the strategy's evolved value"
         );
@@ -2933,22 +3397,40 @@ mod strategy_dispatch_tests {
         // Global band is [10,10] at a 2.5u budget; two strategies tighten it and
         // one inherits it. All three trade the same cycle without interfering.
         let limits = limits_of(&[
-            ("small", StrategyLimit {
-                size_usd: Some(dec!(1)), min_shares: Some(dec!(2)), max_shares: Some(dec!(2)),
-                ..Default::default()
-            }),
-            ("mid", StrategyLimit {
-                size_usd: Some(dec!(2)), min_shares: Some(dec!(4)), max_shares: Some(dec!(4)),
-                ..Default::default()
-            }),
+            (
+                "small",
+                StrategyLimit {
+                    size_usd: Some(dec!(1)),
+                    min_shares: Some(dec!(2)),
+                    max_shares: Some(dec!(2)),
+                    ..Default::default()
+                },
+            ),
+            (
+                "mid",
+                StrategyLimit {
+                    size_usd: Some(dec!(2)),
+                    min_shares: Some(dec!(4)),
+                    max_shares: Some(dec!(4)),
+                    ..Default::default()
+                },
+            ),
         ]);
         let mut c = core_with_dips(limits, &DIPS, 5);
         let now = 1_000_000i64;
         feed_three_asset_dip(&mut c, now);
-        assert_eq!(c.engine_evaluate(now + 1_000), 3, "one entry per strategy: {:#?}", c.list_orders());
+        assert_eq!(
+            c.engine_evaluate(now + 1_000),
+            3,
+            "one entry per strategy: {:#?}",
+            c.list_orders()
+        );
 
-        let sizes: Vec<(String, Decimal)> =
-            c.list_orders().iter().map(|o| (o.strategy.clone(), o.size)).collect();
+        let sizes: Vec<(String, Decimal)> = c
+            .list_orders()
+            .iter()
+            .map(|o| (o.strategy.clone(), o.size))
+            .collect();
         assert_eq!(
             sizes.iter().find(|(s, _)| s == "small").map(|(_, v)| *v),
             Some(dec!(2)),
@@ -2987,28 +3469,58 @@ mod strategy_dispatch_tests {
             "capped",
             StrategyLimit {
                 max_open_positions: Some(0),
-                size_usd: Some(dec!(1)), min_shares: Some(dec!(2)), max_shares: Some(dec!(2)),
+                size_usd: Some(dec!(1)),
+                min_shares: Some(dec!(2)),
+                max_shares: Some(dec!(2)),
                 ..Default::default()
             },
         )]);
-        let mut c = core_with_dips(limits, &[("capped", &["BTC", "ETH"]), ("other", &["SOL"])], 5);
+        let mut c = core_with_dips(
+            limits,
+            &[("capped", &["BTC", "ETH"]), ("other", &["SOL"])],
+            5,
+        );
         let now = 1_000_000i64;
         feed_three_asset_dip(&mut c, now);
-        assert_eq!(c.engine_evaluate(now + 1_000), 1, "only `other` may place: {:#?}", c.list_orders());
-        assert_eq!(c.engine_stats()["strategyLimitRejected"], 2, "both capped candidates were rejected");
+        assert_eq!(
+            c.engine_evaluate(now + 1_000),
+            1,
+            "only `other` may place: {:#?}",
+            c.list_orders()
+        );
+        assert_eq!(
+            c.engine_stats()["strategyLimitRejected"],
+            2,
+            "both capped candidates were rejected"
+        );
         assert_eq!(c.list_orders()[0].strategy, "other");
 
         let stats = c.strategy_stats();
         let capped = strategy_entry(&stats, "capped");
         assert_eq!(capped["ordersPlaced"], 0);
-        assert_eq!(capped["limitRejected"], 2, "counted against the capped strategy only");
+        assert_eq!(
+            capped["limitRejected"], 2,
+            "counted against the capped strategy only"
+        );
         assert_eq!(capped["maxOpenPositions"], 0);
-        assert_eq!(dec_of(&capped["effectiveMaxShares"]), dec!(2), "its own lot is 2 shares");
+        assert_eq!(
+            dec_of(&capped["effectiveMaxShares"]),
+            dec!(2),
+            "its own lot is 2 shares"
+        );
         let other = strategy_entry(&stats, "other");
         assert_eq!(other["ordersPlaced"], 1, "the sibling still trades");
         assert_eq!(other["limitRejected"], 0);
-        assert_eq!(other["maxOpenPositions"], serde_json::Value::Null, "unset = uncapped");
-        assert_eq!(dec_of(&other["effectiveSizeUsd"]), dec!(2.5), "and inherits the global sizing");
+        assert_eq!(
+            other["maxOpenPositions"],
+            serde_json::Value::Null,
+            "unset = uncapped"
+        );
+        assert_eq!(
+            dec_of(&other["effectiveSizeUsd"]),
+            dec!(2.5),
+            "and inherits the global sizing"
+        );
     }
 
     #[test]
@@ -3018,12 +3530,23 @@ mod strategy_dispatch_tests {
         // invisible to `capped`'s quota (and vice versa).
         let limits = limits_of(&[(
             "capped",
-            StrategyLimit { max_open_positions: Some(1), ..Default::default() },
+            StrategyLimit {
+                max_open_positions: Some(1),
+                ..Default::default()
+            },
         )]);
-        let mut c = core_with_dips(limits, &[("capped", &["BTC", "ETH"]), ("other", &["SOL"])], 5);
+        let mut c = core_with_dips(
+            limits,
+            &[("capped", &["BTC", "ETH"]), ("other", &["SOL"])],
+            5,
+        );
         let now = 1_000_000i64;
         feed_three_asset_dip(&mut c, now);
-        assert_eq!(c.engine_evaluate(now + 1_000), 3, "two capped candidates + one sibling");
+        assert_eq!(
+            c.engine_evaluate(now + 1_000),
+            3,
+            "two capped candidates + one sibling"
+        );
 
         // Fill BTC (capped) and SOL (other): two live positions, one per strategy.
         fill(&mut c, "BTC", now + 2_000);
@@ -3033,7 +3556,6 @@ mod strategy_dispatch_tests {
         assert_eq!(open.iter().filter(|p| p.strategy == "capped").count(), 1);
         assert_eq!(open.iter().filter(|p| p.strategy == "other").count(), 1);
     }
-
 
     #[test]
     fn the_global_position_ceiling_still_binds_across_strategies() {
@@ -3046,7 +3568,13 @@ mod strategy_dispatch_tests {
             2,
         );
         let now = 1_000_000i64;
-        c.engine_on_data(DataEvent::RoundMarkets { markets: three_markets(now), now_ms: now }, now);
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: three_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
 
         feed_dip_on(&mut c, now + 1_000, &["BTC"]);
         assert_eq!(c.engine_evaluate(now + 1_000), 1, "a takes BTC");
@@ -3054,23 +3582,41 @@ mod strategy_dispatch_tests {
         feed_dip_on(&mut c, now + 3_000, &["ETH"]);
         assert_eq!(c.engine_evaluate(now + 3_000), 1, "b takes ETH");
         fill(&mut c, "ETH", now + 4_000);
-        assert_eq!(c.positions().open_positions().len(), 2, "global ceiling reached");
+        assert_eq!(
+            c.positions().open_positions().len(),
+            2,
+            "global ceiling reached"
+        );
 
         feed_dip_on(&mut c, now + 5_000, &["SOL"]);
-        assert_eq!(c.engine_evaluate(now + 5_000), 0, "the third strategy must be gated out");
-        assert_eq!(c.engine_stats()["placeRejected"], 1, "rejected by the global capacity gate");
-        assert_eq!(c.engine_stats()["strategyLimitRejected"], 0, "and NOT by a per-strategy quota");
+        assert_eq!(
+            c.engine_evaluate(now + 5_000),
+            0,
+            "the third strategy must be gated out"
+        );
+        assert_eq!(
+            c.engine_stats()["placeRejected"],
+            1,
+            "rejected by the global capacity gate"
+        );
+        assert_eq!(
+            c.engine_stats()["strategyLimitRejected"],
+            0,
+            "and NOT by a per-strategy quota"
+        );
         assert_eq!(c.positions().open_positions().len(), 2);
 
         let stats = c.strategy_stats();
         // No strategy configured a quota, so all three report uncapped yet the
         // global gate still held the line.
         for name in ["a", "b", "c"] {
-            assert_eq!(strategy_entry(&stats, name)["maxOpenPositions"], serde_json::Value::Null);
+            assert_eq!(
+                strategy_entry(&stats, name)["maxOpenPositions"],
+                serde_json::Value::Null
+            );
         }
         assert_eq!(strategy_entry(&stats, "c")["ordersRejected"], 1);
     }
-
 
     #[test]
     fn a_greedy_strategy_override_is_clamped_to_the_global_risk_band() {
@@ -3094,9 +3640,21 @@ mod strategy_dispatch_tests {
         let stats = c.strategy_stats();
         let s = strategy_entry(&stats, "small");
         assert_eq!(s["sizingSource"], "strategy");
-        assert_eq!(dec_of(&s["effectiveSizeUsd"]), dec!(2.5), "notional clamped to the global budget");
-        assert_eq!(dec_of(&s["effectiveMaxShares"]), dec!(10), "share ceiling clamped to the global");
-        assert_eq!(dec_of(&s["effectiveMinShares"]), dec!(10), "floor raised to the global min");
+        assert_eq!(
+            dec_of(&s["effectiveSizeUsd"]),
+            dec!(2.5),
+            "notional clamped to the global budget"
+        );
+        assert_eq!(
+            dec_of(&s["effectiveMaxShares"]),
+            dec!(10),
+            "share ceiling clamped to the global"
+        );
+        assert_eq!(
+            dec_of(&s["effectiveMinShares"]),
+            dec!(10),
+            "floor raised to the global min"
+        );
     }
 
     // ── E2-b: per-strategy gate opt-out (#27) ───────────────────────────────
@@ -3111,7 +3669,10 @@ mod strategy_dispatch_tests {
             &[("fader", &["BTC"]), ("gated", &["ETH"])],
             5,
             WINDOW_SHUT,
-            |name| crate::strategies::GateExemptions { timing: name == "fader", momentum: false },
+            |name| crate::strategies::GateExemptions {
+                timing: name == "fader",
+                momentum: false,
+            },
         );
         let now = 1_000_000i64;
         feed_three_asset_dip(&mut c, now);
@@ -3122,12 +3683,19 @@ mod strategy_dispatch_tests {
             c.list_orders()
         );
         assert_eq!(c.list_orders()[0].strategy, "fader");
-        assert_eq!(c.engine_stats()["blocked"]["timing"], 1, "the sibling stayed gated");
+        assert_eq!(
+            c.engine_stats()["blocked"]["timing"],
+            1,
+            "the sibling stayed gated"
+        );
 
         let stats = c.strategy_stats();
         let fader = strategy_entry(&stats, "fader");
         assert_eq!(fader["gateExemptions"], serde_json::json!(["timing"]));
-        assert_eq!(fader["gateExemptedTiming"], 1, "the honoured exemption is counted");
+        assert_eq!(
+            fader["gateExemptedTiming"], 1,
+            "the honoured exemption is counted"
+        );
         assert_eq!(fader["blockedTiming"], 0);
         let gated = strategy_entry(&stats, "gated");
         assert_eq!(gated["gateExemptions"], serde_json::json!([]));
@@ -3198,22 +3766,37 @@ mod strategy_dispatch_tests {
             &[("all_in", &["BTC"])],
             5,
             WINDOW_SHUT,
-            RiskConfig { max_order_notional: dec!(1), ..Default::default() },
+            RiskConfig {
+                max_order_notional: dec!(1),
+                ..Default::default()
+            },
             |_| crate::strategies::GateExemptions::all(),
         );
         let now = 1_000_000i64;
         feed_three_asset_dip(&mut c, now);
 
-        assert_eq!(c.engine_evaluate(now + 1_000), 0, "risk gate must still reject");
+        assert_eq!(
+            c.engine_evaluate(now + 1_000),
+            0,
+            "risk gate must still reject"
+        );
         assert_eq!(c.engine_stats()["placeRejected"], 1);
         assert!(c.list_orders().is_empty());
-        assert!(c.strategy_stats().iter().any(|s| {
-            s["name"] == "all_in" && s["gateExemptions"] == serde_json::json!(["timing", "momentum"])
-        }), "the declaration is still reported even though the order was refused");
+        assert!(
+            c.strategy_stats().iter().any(|s| {
+                s["name"] == "all_in"
+                    && s["gateExemptions"] == serde_json::json!(["timing", "momentum"])
+            }),
+            "the declaration is still reported even though the order was refused"
+        );
 
         // Kill switch: identical exemption, hard stop wins.
         c.kill("test".into());
-        assert_eq!(c.engine_evaluate(now + 2_000), 0, "kill switch is not exemptible");
+        assert_eq!(
+            c.engine_evaluate(now + 2_000),
+            0,
+            "kill switch is not exemptible"
+        );
         assert!(c.positions().open_positions().is_empty());
 
         // Global capacity ceiling: also outside the entry gates.
@@ -3225,69 +3808,97 @@ mod strategy_dispatch_tests {
             |_| crate::strategies::GateExemptions::all(),
         );
         feed_three_asset_dip(&mut c2, now);
-        assert_eq!(c2.engine_evaluate(now + 1_000), 0, "global capacity is not exemptible");
+        assert_eq!(
+            c2.engine_evaluate(now + 1_000),
+            0,
+            "global capacity is not exemptible"
+        );
         assert_eq!(c2.engine_stats()["placeRejected"], 1);
 
         // And the exemption cannot conjure a market (structural precondition).
-        let mut c3 = core_with_declared_dips(
-            HashMap::new(),
-            &[("all_in", &["BTC"])],
-            5,
+        let mut c3 = core_with_declared_dips(HashMap::new(), &[("all_in", &["BTC"])], 5, 0, |_| {
+            crate::strategies::GateExemptions::all()
+        });
+        assert_eq!(
+            c3.engine_evaluate(now),
             0,
-            |_| crate::strategies::GateExemptions::all(),
+            "no round markets → nothing to exempt"
         );
-        assert_eq!(c3.engine_evaluate(now), 0, "no round markets → nothing to exempt");
     }
 
     #[test]
     fn a_gate_exemption_does_not_lift_the_daily_loss_cap() {
         // Realise a loss through the ordinary exit path, then confirm the
         // exempting strategy is refused exactly like any other.
-        let mut c = core_with_declared_dips(
-            HashMap::new(),
-            &[("all_in", &["BTC"])],
-            5,
-            0,
-            |_| crate::strategies::GateExemptions::all(),
-        );
+        let mut c = core_with_declared_dips(HashMap::new(), &[("all_in", &["BTC"])], 5, 0, |_| {
+            crate::strategies::GateExemptions::all()
+        });
         c.config_mut().auto_exits_enabled = true;
         c.config_mut().positions.max_daily_loss_usd = dec!(0.0001);
         let now = 1_000_000i64;
         feed_three_asset_dip(&mut c, now);
-        assert_eq!(c.engine_evaluate(now + 1_000), 1, "the exemption still lets the entry in");
+        assert_eq!(
+            c.engine_evaluate(now + 1_000),
+            1,
+            "the exemption still lets the entry in"
+        );
         fill(&mut c, "BTC", now + 2_000);
         assert_eq!(c.positions().open_positions().len(), 1);
 
         // Crash the book and tick at the force-exit horizon → a realized loss.
         let token = "btc_up";
-        c.book_snapshot(token, vec![(dec!(0.05), dec!(100))], vec![(dec!(0.06), dec!(100))], now + 3_000);
+        c.book_snapshot(
+            token,
+            vec![(dec!(0.05), dec!(100))],
+            vec![(dec!(0.06), dec!(100))],
+            now + 3_000,
+        );
         c.tick(1_800_000 - 100_000).unwrap();
-        assert!(c.positions().daily_pnl() < Decimal::ZERO, "expected a realized loss");
+        assert!(
+            c.positions().daily_pnl() < Decimal::ZERO,
+            "expected a realized loss"
+        );
 
         // A fresh dip on the NEXT round: the exempted strategy is refused by the
         // daily-loss cap, proving the exemption stops at the entry gates.
         let now2 = 1_800_000i64;
         feed_three_asset_dip(&mut c, now2);
         let before = c.list_orders().len();
-        assert_eq!(c.engine_evaluate(now2 + 1_000), 0, "daily loss cap is not exemptible");
+        assert_eq!(
+            c.engine_evaluate(now2 + 1_000),
+            0,
+            "daily loss cap is not exemptible"
+        );
         assert_eq!(c.list_orders().len(), before, "no new order was tracked");
     }
 
     fn market(now: i64) -> CryptoMarket {
         let slot = now / 1000 / 900;
         CryptoMarket {
-            asset: "BTC".into(), condition_id: "cond".into(), question_id: "q".into(),
-            up_token_id: "up".into(), down_token_id: "down".into(),
-            up_price: dec!(0.6), down_price: dec!(0.4),
-            expires_at_ms: (slot + 1) * 900 * 1000, round_slot: slot,
-            neg_risk: true, question: "BTC up or down".into(),
+            asset: "BTC".into(),
+            condition_id: "cond".into(),
+            question_id: "q".into(),
+            up_token_id: "up".into(),
+            down_token_id: "down".into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: (slot + 1) * 900 * 1000,
+            round_slot: slot,
+            neg_risk: true,
+            question: "BTC up or down".into(),
         }
     }
 
     /// Round + confirmed UP trend + calm spot + one dip book: the builtin emits
     /// exactly one spread_arb entry (0.43 x 10 = 4.30 USD) on the next cycle.
     fn feed_entry_setup(c: &mut Core, now: i64) {
-        c.engine_on_data(DataEvent::RoundMarkets { markets: vec![market(now)], now_ms: now }, now);
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: vec![market(now)],
+                now_ms: now,
+            },
+            now,
+        );
         for i in 0..12 {
             let t = now + i * 1000;
             c.engine_on_data(
@@ -3310,7 +3921,14 @@ mod strategy_dispatch_tests {
             },
             t,
         );
-        c.engine_on_data(DataEvent::Spot { asset: "BTC".into(), price: dec!(60000), now_ms: t }, t);
+        c.engine_on_data(
+            DataEvent::Spot {
+                asset: "BTC".into(),
+                price: dec!(60000),
+                now_ms: t,
+            },
+            t,
+        );
     }
 
     /// The payload decimals arrive as JSON numbers (Node wire convention).
@@ -3324,7 +3942,10 @@ mod strategy_dispatch_tests {
     }
 
     fn strategy_entry<'a>(stats: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
-        stats.iter().find(|s| s["name"] == name).unwrap_or_else(|| panic!("no stats for {name}: {stats:?}"))
+        stats
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("no stats for {name}: {stats:?}"))
     }
 
     #[test]
@@ -3332,11 +3953,20 @@ mod strategy_dispatch_tests {
         let mut c = core_with_engine(HashMap::new());
         let now = 1_000_000i64;
         feed_entry_setup(&mut c, now);
-        assert_eq!(c.engine_evaluate(now + 12_000), 1, "no caps configured must not change behaviour");
+        assert_eq!(
+            c.engine_evaluate(now + 12_000),
+            1,
+            "no caps configured must not change behaviour"
+        );
         assert_eq!(c.engine_stats()["strategyLimitRejected"], 0);
 
         // Fill the resting maker entry so exposure is live, then read the ledger.
-        c.book_snapshot("up", vec![(dec!(0.42), dec!(100))], vec![(dec!(0.42), dec!(100))], now + 13_000);
+        c.book_snapshot(
+            "up",
+            vec![(dec!(0.42), dec!(100))],
+            vec![(dec!(0.42), dec!(100))],
+            now + 13_000,
+        );
         let stats = c.strategy_stats();
         let s = strategy_entry(&stats, "spread_arb");
         assert_eq!(s["enabled"], true);
@@ -3351,13 +3981,23 @@ mod strategy_dispatch_tests {
         let mut limits = HashMap::new();
         limits.insert(
             "spread_arb".to_string(),
-            StrategyLimit { max_open_positions: Some(0), ..Default::default() },
+            StrategyLimit {
+                max_open_positions: Some(0),
+                ..Default::default()
+            },
         );
         let mut c = core_with_engine(limits);
         let now = 1_000_000i64;
         feed_entry_setup(&mut c, now);
-        assert_eq!(c.engine_evaluate(now + 12_000), 0, "position cap 0 must block the entry");
-        assert!(c.ome().live_orders().is_empty(), "no order may reach the OME");
+        assert_eq!(
+            c.engine_evaluate(now + 12_000),
+            0,
+            "position cap 0 must block the entry"
+        );
+        assert!(
+            c.ome().live_orders().is_empty(),
+            "no order may reach the OME"
+        );
         assert_eq!(c.engine_stats()["strategyLimitRejected"], 1);
         let stats = c.strategy_stats();
         let s = strategy_entry(&stats, "spread_arb");
@@ -3372,22 +4012,36 @@ mod strategy_dispatch_tests {
         let mut tight = HashMap::new();
         tight.insert(
             "spread_arb".to_string(),
-            StrategyLimit { max_open_notional_usd: Some(dec!(1)), ..Default::default() },
+            StrategyLimit {
+                max_open_notional_usd: Some(dec!(1)),
+                ..Default::default()
+            },
         );
         let mut c = core_with_engine(tight);
         let now = 1_000_000i64;
         feed_entry_setup(&mut c, now);
-        assert_eq!(c.engine_evaluate(now + 12_000), 0, "notional cap 1.00 must block a 4.30 entry");
+        assert_eq!(
+            c.engine_evaluate(now + 12_000),
+            0,
+            "notional cap 1.00 must block a 4.30 entry"
+        );
         assert_eq!(c.engine_stats()["strategyLimitRejected"], 1);
 
         let mut loose = HashMap::new();
         loose.insert(
             "spread_arb".to_string(),
-            StrategyLimit { max_open_notional_usd: Some(dec!(10)), ..Default::default() },
+            StrategyLimit {
+                max_open_notional_usd: Some(dec!(10)),
+                ..Default::default()
+            },
         );
         let mut c2 = core_with_engine(loose);
         feed_entry_setup(&mut c2, now);
-        assert_eq!(c2.engine_evaluate(now + 12_000), 1, "cap above the entry notional must not block");
+        assert_eq!(
+            c2.engine_evaluate(now + 12_000),
+            1,
+            "cap above the entry notional must not block"
+        );
         assert_eq!(c2.engine_stats()["strategyLimitRejected"], 0);
     }
 
@@ -3397,24 +4051,56 @@ mod strategy_dispatch_tests {
         let now = 1_000_000i64;
         feed_entry_setup(&mut c, now);
         assert_eq!(c.engine_evaluate(now + 12_000), 1);
-        assert_eq!(c.positions().open_positions().len(), 0, "maker entry rests until the book crosses");
+        assert_eq!(
+            c.positions().open_positions().len(),
+            0,
+            "maker entry rests until the book crosses"
+        );
 
         // Fill the resting bid (ask 0.42 crosses the 0.43 bid), then push a
         // +100%-ish book so the exit engine closes the position at a profit.
-        c.book_snapshot("up", vec![(dec!(0.42), dec!(100))], vec![(dec!(0.42), dec!(100))], now + 13_000);
-        assert_eq!(c.positions().open_positions().len(), 1, "crossing ask must fill the maker entry");
-        c.book_snapshot("up", vec![(dec!(0.95), dec!(100))], vec![(dec!(0.97), dec!(100))], now + 14_000);
+        c.book_snapshot(
+            "up",
+            vec![(dec!(0.42), dec!(100))],
+            vec![(dec!(0.42), dec!(100))],
+            now + 13_000,
+        );
+        assert_eq!(
+            c.positions().open_positions().len(),
+            1,
+            "crossing ask must fill the maker entry"
+        );
+        c.book_snapshot(
+            "up",
+            vec![(dec!(0.95), dec!(100))],
+            vec![(dec!(0.97), dec!(100))],
+            now + 14_000,
+        );
         c.tick(now + 14_200).unwrap();
-        assert_eq!(c.positions().open_positions().len(), 0, "profit target must close the position");
+        assert_eq!(
+            c.positions().open_positions().len(),
+            0,
+            "profit target must close the position"
+        );
 
         let stats = c.strategy_stats();
         let s = strategy_entry(&stats, "spread_arb");
         assert_eq!(s["closedTrades"], 1);
         assert_eq!(s["wins"], 1);
         assert_eq!(s["losses"], 0);
-        assert!(dec_of(&s["netPnlUsd"]) > Decimal::ZERO, "expected positive realized PnL");
-        assert!(dec_of(&s["feesUsd"]) > Decimal::ZERO, "taker exit pays a fee");
-        assert_eq!(dec_of(&s["openNotionalUsd"]), Decimal::ZERO, "closed position leaves no exposure");
+        assert!(
+            dec_of(&s["netPnlUsd"]) > Decimal::ZERO,
+            "expected positive realized PnL"
+        );
+        assert!(
+            dec_of(&s["feesUsd"]) > Decimal::ZERO,
+            "taker exit pays a fee"
+        );
+        assert_eq!(
+            dec_of(&s["openNotionalUsd"]),
+            Decimal::ZERO,
+            "closed position leaves no exposure"
+        );
     }
 }
 
@@ -3431,7 +4117,10 @@ mod fill_model_tests {
     fn core_with(model: FillModel) -> Core {
         Core::new(CoreConfig {
             mode: Mode::Dry,
-            risk: RiskConfig { max_order_notional: dec!(100), ..Default::default() },
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
             dry_seed_balance: dec!(1000),
             auto_exits_enabled: false,
             trade_log_path: None,
@@ -3461,17 +4150,33 @@ mod fill_model_tests {
     #[test]
     fn default_model_fills_a_crossing_maker_at_its_own_limit() {
         let mut c = core_with(FillModel::default());
-        let (id, _) = c.place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000).unwrap();
-        c.book_snapshot("tok", vec![(dec!(0.39), dec!(100))], vec![(dec!(0.40), dec!(100))], 1_100);
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        c.book_snapshot(
+            "tok",
+            vec![(dec!(0.39), dec!(100))],
+            vec![(dec!(0.40), dec!(100))],
+            1_100,
+        );
         assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Filled);
         let pos = &c.positions().open_positions()[0];
-        assert_eq!(pos.entry_price, dec!(0.40), "a maker fill is priced by your own quote");
+        assert_eq!(
+            pos.entry_price,
+            dec!(0.40),
+            "a maker fill is priced by your own quote"
+        );
     }
 
     #[test]
     fn taker_slippage_worsens_the_fill_price() {
-        let mut c = core_with(FillModel { taker_slippage_ticks: 2, ..FillModel::default() });
-        let (id, st) = c.place(buy(FillPolicy::Taker, dec!(0.40), dec!(10)), 0, 1_000).unwrap();
+        let mut c = core_with(FillModel {
+            taker_slippage_ticks: 2,
+            ..FillModel::default()
+        });
+        let (id, st) = c
+            .place(buy(FillPolicy::Taker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
         assert_eq!(st, OrderStatus::Filled);
         // 2 ticks = 0.02: a taker buy pays up rather than filling at the limit.
         assert_eq!(c.ome().get(&id).unwrap().avg_fill_price, Some(dec!(0.42)));
@@ -3480,26 +4185,66 @@ mod fill_model_tests {
 
     #[test]
     fn maker_latency_delays_the_crossing_fill() {
-        let mut c = core_with(FillModel { maker_latency_ms: 5_000, ..FillModel::default() });
-        let (id, _) = c.place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000).unwrap();
+        let mut c = core_with(FillModel {
+            maker_latency_ms: 5_000,
+            ..FillModel::default()
+        });
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
         // Crossed 100 ms after submission: the venue could not have the order yet.
-        c.book_snapshot("tok", vec![(dec!(0.39), dec!(100))], vec![(dec!(0.40), dec!(100))], 1_100);
-        assert_eq!(c.positions().open_positions().len(), 0, "no fill inside the latency window");
-        assert!(c.ome().get(&id).unwrap().status.is_live(), "the order stays live");
+        c.book_snapshot(
+            "tok",
+            vec![(dec!(0.39), dec!(100))],
+            vec![(dec!(0.40), dec!(100))],
+            1_100,
+        );
+        assert_eq!(
+            c.positions().open_positions().len(),
+            0,
+            "no fill inside the latency window"
+        );
+        assert!(
+            c.ome().get(&id).unwrap().status.is_live(),
+            "the order stays live"
+        );
         // Crossed again after the window: fills.
-        c.book_snapshot("tok", vec![(dec!(0.39), dec!(100))], vec![(dec!(0.40), dec!(100))], 6_100);
-        assert_eq!(c.positions().open_positions().len(), 1, "fills once the latency has elapsed");
+        c.book_snapshot(
+            "tok",
+            vec![(dec!(0.39), dec!(100))],
+            vec![(dec!(0.40), dec!(100))],
+            6_100,
+        );
+        assert_eq!(
+            c.positions().open_positions().len(),
+            1,
+            "fills once the latency has elapsed"
+        );
         assert_eq!(c.positions().open_positions()[0].entry_price, dec!(0.40));
     }
 
     #[test]
     fn zero_fill_probability_never_fills_on_a_crossing() {
-        let mut c = core_with(FillModel { maker_fill_prob_bps: 0, ..FillModel::default() });
-        let (id, _) = c.place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000).unwrap();
+        let mut c = core_with(FillModel {
+            maker_fill_prob_bps: 0,
+            ..FillModel::default()
+        });
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
         for t in [1_100i64, 2_000, 9_000] {
-            c.book_snapshot("tok", vec![(dec!(0.39), dec!(100))], vec![(dec!(0.40), dec!(100))], t);
+            c.book_snapshot(
+                "tok",
+                vec![(dec!(0.39), dec!(100))],
+                vec![(dec!(0.40), dec!(100))],
+                t,
+            );
         }
-        assert_eq!(c.positions().open_positions().len(), 0, "a losing queue draw keeps the order unfilled");
+        assert_eq!(
+            c.positions().open_positions().len(),
+            0,
+            "a losing queue draw keeps the order unfilled"
+        );
         assert!(c.ome().get(&id).unwrap().status.is_live());
         assert_eq!(c.ome().get(&id).unwrap().filled_size, Decimal::ZERO);
     }

@@ -17,7 +17,7 @@
 //! emits exits and trend breaks; confirmation/diagnostics reflect depth; the
 //! entry threshold is hot-parameter driven (`trendMaxEntryPrice`).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
 const SCALE: i128 = 1_000_000_000_000_000_000; // 1e18
@@ -174,7 +174,9 @@ impl ParityStrategy {
     /// Apply hot parameters. Understands the kernel MutableParams camelCase
     /// field `trendMaxEntryPrice` as the entry threshold.
     pub fn apply_hot_json(&mut self, json: &str) -> bool {
-        let Ok(v) = serde_json::from_str::<Value>(json) else { return false };
+        let Ok(v) = serde_json::from_str::<Value>(json) else {
+            return false;
+        };
         if let Some(s) = v.get("trendMaxEntryPrice").and_then(|x| x.as_str()) {
             if fp(s).is_some() {
                 self.buy_below = s.to_string();
@@ -190,11 +192,16 @@ impl ParityStrategy {
         let mut d = Decision::default();
         for m in markets {
             for token in [&m.up_token, &m.down_token] {
-                let Some(b) = self.books.get(token) else { continue };
+                let Some(b) = self.books.get(token) else {
+                    continue;
+                };
 
                 // Trend break fires once per round when mid collapses.
                 if le(&b.mid, &self.broken_price) && self.broke.insert(token.clone()) {
-                    d.breaks.push(PBreak { token: token.clone(), broken_price: self.broken_price.clone() });
+                    d.breaks.push(PBreak {
+                        token: token.clone(),
+                        broken_price: self.broken_price.clone(),
+                    });
                 }
 
                 match self.phase.get(token).copied().unwrap_or(Phase::Idle) {
@@ -217,7 +224,10 @@ impl ParityStrategy {
                     Phase::InPosition => {
                         // Take profit once the bid recovers to the exit level.
                         if ge(&b.best_bid, &self.exit_above) {
-                            d.exits.push(PExit { token: token.clone(), reason: "parity_tp".into() });
+                            d.exits.push(PExit {
+                                token: token.clone(),
+                                reason: "parity_tp".into(),
+                            });
                             self.phase.insert(token.clone(), Phase::Idle);
                         }
                     }
@@ -233,9 +243,7 @@ impl ParityStrategy {
         let mut v: Vec<String> = self
             .books
             .iter()
-            .filter(|(_, b)| {
-                b.bids.len() >= 2 && b.asks.len() >= 2 && ge(&b.mid, "0")
-            })
+            .filter(|(_, b)| b.bids.len() >= 2 && b.asks.len() >= 2 && ge(&b.mid, "0"))
             .map(|(t, _)| t.clone())
             .collect();
         v.sort();
@@ -293,7 +301,10 @@ mod tests {
     use super::*;
 
     fn book(mid: &str, bid: &str, ask: &str, depth: &str, levels: usize) -> PBook {
-        let lvl = |p: &str| PLevel { price: p.into(), size: depth.into() };
+        let lvl = |p: &str| PLevel {
+            price: p.into(),
+            size: depth.into(),
+        };
         PBook {
             symbol: "tok".into(),
             bids: vec![lvl(bid); levels],
@@ -321,7 +332,10 @@ mod tests {
     #[test]
     fn dips_to_entry_then_recovers_to_exit() {
         let mut s = ParityStrategy::default();
-        let m = PMarket { up_token: "up".into(), down_token: "down".into() };
+        let m = PMarket {
+            up_token: "up".into(),
+            down_token: "down".into(),
+        };
         s.observe("up", book("0.50", "0.49", "0.51", "100", 3));
         assert!(s.evaluate(std::slice::from_ref(&m)).entries.is_empty());
         s.observe("up", book("0.42", "0.41", "0.43", "100", 3));
@@ -339,7 +353,10 @@ mod tests {
     #[test]
     fn shallow_book_blocks_entry_but_still_confirms_with_two_levels() {
         let mut s = ParityStrategy::default();
-        let m = PMarket { up_token: "up".into(), down_token: "down".into() };
+        let m = PMarket {
+            up_token: "up".into(),
+            down_token: "down".into(),
+        };
         s.observe("up", book("0.40", "0.39", "0.41", "10", 2));
         assert!(s.evaluate(std::slice::from_ref(&m)).entries.is_empty());
         assert_eq!(s.confirmed_tokens(), vec!["up".to_string()]);
@@ -348,7 +365,10 @@ mod tests {
     #[test]
     fn hot_param_moves_entry_ceiling() {
         let mut s = ParityStrategy::default();
-        let m = PMarket { up_token: "up".into(), down_token: "down".into() };
+        let m = PMarket {
+            up_token: "up".into(),
+            down_token: "down".into(),
+        };
         s.observe("up", book("0.48", "0.47", "0.49", "100", 3));
         assert!(s.evaluate(std::slice::from_ref(&m)).entries.is_empty());
         assert!(s.apply_hot_json(r#"{"trendMaxEntryPrice":"0.50"}"#));

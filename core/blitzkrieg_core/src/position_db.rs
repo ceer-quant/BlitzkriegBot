@@ -21,7 +21,9 @@ pub struct PositionDb {
 
 impl PositionDb {
     pub fn new(path: impl AsRef<Path>) -> Self {
-        Self { path: path.as_ref().to_path_buf() }
+        Self {
+            path: path.as_ref().to_path_buf(),
+        }
     }
 
     pub fn path(&self) -> &Path {

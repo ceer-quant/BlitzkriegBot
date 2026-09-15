@@ -17,8 +17,12 @@ where
     let v = serde_json::Value::deserialize(d)?;
     match v {
         serde_json::Value::String(s) => Decimal::from_str_exact(s.trim()).map_err(Error::custom),
-        serde_json::Value::Number(n) => Decimal::from_str_exact(&n.to_string()).map_err(Error::custom),
-        other => Err(Error::custom(format!("expected number/string, got {other}"))),
+        serde_json::Value::Number(n) => {
+            Decimal::from_str_exact(&n.to_string()).map_err(Error::custom)
+        }
+        other => Err(Error::custom(format!(
+            "expected number/string, got {other}"
+        ))),
     }
 }
 
@@ -43,13 +47,15 @@ pub mod opt {
         let v = Option::<serde_json::Value>::deserialize(d)?;
         match v {
             None | Some(serde_json::Value::Null) => Ok(None),
-            Some(serde_json::Value::String(s)) => {
-                Decimal::from_str_exact(s.trim()).map(Some).map_err(Error::custom)
-            }
-            Some(serde_json::Value::Number(n)) => {
-                Decimal::from_str_exact(&n.to_string()).map(Some).map_err(Error::custom)
-            }
-            Some(other) => Err(Error::custom(format!("expected number/string, got {other}"))),
+            Some(serde_json::Value::String(s)) => Decimal::from_str_exact(s.trim())
+                .map(Some)
+                .map_err(Error::custom),
+            Some(serde_json::Value::Number(n)) => Decimal::from_str_exact(&n.to_string())
+                .map(Some)
+                .map_err(Error::custom),
+            Some(other) => Err(Error::custom(format!(
+                "expected number/string, got {other}"
+            ))),
         }
     }
     pub fn serialize<S>(d: &Option<Decimal>, s: S) -> Result<S::Ok, S::Error>
