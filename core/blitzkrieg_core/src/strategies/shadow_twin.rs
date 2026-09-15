@@ -15,7 +15,10 @@
 //! loading difference).
 
 use super::{EngineStrategy, StrategyCtx};
-use crate::exit_policy::{decide_exit, executable_bid, taker_fee_pct, update_exit_state, ExitConfig, ExitState, ExitTickInput};
+use crate::exit_policy::{
+    ExitConfig, ExitState, ExitTickInput, decide_exit, executable_bid, taker_fee_pct,
+    update_exit_state,
+};
 use crate::model::{CryptoMarket, OrderbookSnapshot};
 use crate::shadow_evolution::{KnobSpec, StrategyParams};
 use rust_decimal::Decimal;
@@ -105,13 +108,15 @@ impl EngineStrategyShadow {
         let token = ctx.token_id;
         let book = ctx.book;
         let fresh = move |t: &str| -> Option<OrderbookSnapshot> {
-            if t == token {
-                Some(book.clone())
-            } else {
-                None
-            }
+            if t == token { Some(book.clone()) } else { None }
         };
-        let sctx = StrategyCtx::new(ctx.markets, ctx.round_slot, ctx.time_left_sec, ctx.now_ms, &fresh);
+        let sctx = StrategyCtx::new(
+            ctx.markets,
+            ctx.round_slot,
+            ctx.time_left_sec,
+            ctx.now_ms,
+            &fresh,
+        );
         let mut out = ShadowTickResult::default();
         for sig in self.inner.find_candidates(&sctx) {
             if sig.token_id == token && out.entry.is_none() {
@@ -197,7 +202,13 @@ impl TwinReplay {
         let token = ctx.token_id;
 
         if let Some(pos) = self.open.get_mut(token) {
-            update_exit_state(&mut pos.state, pos.entry_price, Some(ctx.book), ctx.now_ms, &self.exit_cfg);
+            update_exit_state(
+                &mut pos.state,
+                pos.entry_price,
+                Some(ctx.book),
+                ctx.now_ms,
+                &self.exit_cfg,
+            );
             let time_left = (pos.expires_at_ms - ctx.now_ms) / 1000;
             let hold = (ctx.now_ms - (pos.expires_at_ms - 900_000)).max(0) / 1000;
             let policy_exit = decide_exit(ExitTickInput {
@@ -276,5 +287,12 @@ pub fn tick_ctx<'a>(
     time_left_sec: i64,
     now_ms: i64,
 ) -> ShadowTickCtx<'a> {
-    ShadowTickCtx { markets, token_id, book, round_slot, time_left_sec, now_ms }
+    ShadowTickCtx {
+        markets,
+        token_id,
+        book,
+        round_slot,
+        time_left_sec,
+        now_ms,
+    }
 }

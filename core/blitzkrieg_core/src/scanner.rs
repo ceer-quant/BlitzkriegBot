@@ -54,7 +54,10 @@ pub enum TimingBlock {
     /// Round younger than `min_round_age_sec`.
     TooYoung { age_sec: i64, min_age_sec: i64 },
     /// Fewer than `min_time_left_sec` seconds remain in the round.
-    TooCloseToExpiry { time_left_sec: i64, min_time_left_sec: i64 },
+    TooCloseToExpiry {
+        time_left_sec: i64,
+        min_time_left_sec: i64,
+    },
 }
 
 impl TimingBlock {
@@ -69,11 +72,20 @@ impl std::fmt::Display for TimingBlock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TimingBlock::NoMarkets => write!(f, "No active markets"),
-            TimingBlock::TooYoung { age_sec, min_age_sec } => {
+            TimingBlock::TooYoung {
+                age_sec,
+                min_age_sec,
+            } => {
                 write!(f, "Round too young ({age_sec}s < {min_age_sec}s)")
             }
-            TimingBlock::TooCloseToExpiry { time_left_sec, min_time_left_sec } => {
-                write!(f, "Too close to expiry ({time_left_sec}s < {min_time_left_sec}s)")
+            TimingBlock::TooCloseToExpiry {
+                time_left_sec,
+                min_time_left_sec,
+            } => {
+                write!(
+                    f,
+                    "Too close to expiry ({time_left_sec}s < {min_time_left_sec}s)"
+                )
             }
         }
     }
@@ -99,7 +111,12 @@ pub struct Scanner {
 
 impl Scanner {
     pub fn new(cfg: ScannerConfig) -> Self {
-        Self { cfg, markets: Vec::new(), actual_end_time_ms: 0, clock_offset_ms: 0 }
+        Self {
+            cfg,
+            markets: Vec::new(),
+            actual_end_time_ms: 0,
+            clock_offset_ms: 0,
+        }
     }
 
     pub fn set_config(&mut self, cfg: ScannerConfig) {
@@ -163,7 +180,8 @@ impl Scanner {
 
     /// Tradeable window: markets present, round old enough, not too close to expiry.
     pub fn can_trade(&self, local_now_ms: i64) -> Result<(), String> {
-        self.can_trade_reason(local_now_ms).map_err(|b| b.to_string())
+        self.can_trade_reason(local_now_ms)
+            .map_err(|b| b.to_string())
     }
 
     /// The same check as [`Self::can_trade`], as a structured reason so the
@@ -202,7 +220,11 @@ impl Scanner {
 
     /// Update live UP/DOWN prices from WS/feed data.
     pub fn update_price(&mut self, condition_id: &str, up: Decimal, down: Decimal) {
-        if let Some(m) = self.markets.iter_mut().find(|m| m.condition_id == condition_id) {
+        if let Some(m) = self
+            .markets
+            .iter_mut()
+            .find(|m| m.condition_id == condition_id)
+        {
             m.up_price = up;
             m.down_price = down;
         }
@@ -230,7 +252,10 @@ mod tests {
 
     #[test]
     fn slot_and_round_state_math() {
-        let s = Scanner::new(ScannerConfig { round_duration_sec: 900, ..Default::default() });
+        let s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            ..Default::default()
+        });
         // 900_000 ms boundary: slot 1, expiry 1_800_000.
         let now = 1_000_000i64;
         assert_eq!(s.current_slot(now), 1);
@@ -242,7 +267,10 @@ mod tests {
 
     #[test]
     fn clock_offset_from_reported_end_time() {
-        let mut s = Scanner::new(ScannerConfig { round_duration_sec: 900, ..Default::default() });
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            ..Default::default()
+        });
         let now = 1_000_000i64;
         // Local expected end for slot 1 = 1_800_000; the venue says 1_800_500.
         s.observe_end_time(1_800_500, now);
@@ -307,11 +335,17 @@ mod tests {
         // Round is 10s old at t=1_000_000 + ... → age 10s < 30s.
         assert_eq!(
             s.can_trade_reason(900_000),
-            Err(TimingBlock::TooYoung { age_sec: 0, min_age_sec: 30 })
+            Err(TimingBlock::TooYoung {
+                age_sec: 0,
+                min_age_sec: 30
+            })
         );
         assert_eq!(
             s.can_trade_reason(1_799_900),
-            Err(TimingBlock::TooCloseToExpiry { time_left_sec: 0, min_time_left_sec: 180 })
+            Err(TimingBlock::TooCloseToExpiry {
+                time_left_sec: 0,
+                min_time_left_sec: 180
+            })
         );
         assert!(s.can_trade_reason(1_000_000).is_ok());
     }
@@ -321,11 +355,27 @@ mod tests {
         // A per-strategy declaration may waive the window gates; a round with no
         // market at all is a structural precondition and never waivable.
         assert!(!TimingBlock::NoMarkets.exemptible());
-        assert!(TimingBlock::TooYoung { age_sec: 0, min_age_sec: 30 }.exemptible());
-        assert!(TimingBlock::TooCloseToExpiry { time_left_sec: 0, min_time_left_sec: 180 }
-            .exemptible());
-        assert!(TimingBlock::TooCloseToExpiry { time_left_sec: 120, min_time_left_sec: 180 }
+        assert!(
+            TimingBlock::TooYoung {
+                age_sec: 0,
+                min_age_sec: 30
+            }
+            .exemptible()
+        );
+        assert!(
+            TimingBlock::TooCloseToExpiry {
+                time_left_sec: 0,
+                min_time_left_sec: 180
+            }
+            .exemptible()
+        );
+        assert!(
+            TimingBlock::TooCloseToExpiry {
+                time_left_sec: 120,
+                min_time_left_sec: 180
+            }
             .to_string()
-            .contains("Too close to expiry (120s < 180s)"));
+            .contains("Too close to expiry (120s < 180s)")
+        );
     }
 }

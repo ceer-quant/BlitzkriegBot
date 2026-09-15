@@ -338,7 +338,16 @@ const BREAKEVEN_LOCK_TRIGGER_PCT: i64 = 3;
 
 /// Pure exit decision; mutates nothing. Mandatory exits return use_maker=false.
 pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
-    let ExitTickInput { entry_price, book, fallback_price, time_left_sec, hold_sec, state, now_ms, cfg } = input;
+    let ExitTickInput {
+        entry_price,
+        book,
+        fallback_price,
+        time_left_sec,
+        hold_sec,
+        state,
+        now_ms,
+        cfg,
+    } = input;
     if entry_price <= Decimal::ZERO {
         return None;
     }
@@ -347,7 +356,9 @@ pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
     let usable = if bid > Decimal::ZERO {
         bid
     } else {
-        fallback_price.filter(|p| *p > Decimal::ZERO).unwrap_or(Decimal::ZERO)
+        fallback_price
+            .filter(|p| *p > Decimal::ZERO)
+            .unwrap_or(Decimal::ZERO)
     };
 
     // 1. Force exit — absolute deadline; must fire even without a fresh book.
@@ -355,7 +366,10 @@ pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
         if usable <= Decimal::ZERO {
             return None;
         }
-        return Some(ExitDecision { reason: ExitReason::ForceExit, use_maker: false });
+        return Some(ExitDecision {
+            reason: ExitReason::ForceExit,
+            use_maker: false,
+        });
     }
 
     if bid <= Decimal::ZERO {
@@ -368,23 +382,35 @@ pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
             && cfg.take_profit_pct < dec!(9999)
             && pct >= cfg.take_profit_pct
         {
-            return Some(ExitDecision { reason: ExitReason::TakeProfit, use_maker: cfg.maker_first_exit_enabled });
+            return Some(ExitDecision {
+                reason: ExitReason::TakeProfit,
+                use_maker: cfg.maker_first_exit_enabled,
+            });
         }
         if pct <= -effective_stop_pct(cfg.stop_loss_pct, time_left_sec, cfg)
             && book.map(|b| bid_confirmed_by_mid(b, cfg)).unwrap_or(true)
         {
-            return Some(ExitDecision { reason: ExitReason::StopLoss, use_maker: false });
+            return Some(ExitDecision {
+                reason: ExitReason::StopLoss,
+                use_maker: false,
+            });
         }
         if cfg.trailing_enabled && state.high_pnl_pct >= cfg.trailing_min_high_pct {
             let profit_trail = get_profit_trail_pct(state.high_pnl_pct, cfg);
             let time_trail = get_time_trail_pct(time_left_sec);
             let trail = cfg.min_trail_pct.max(profit_trail.min(time_trail));
             if state.high_pnl_pct - pct >= trail {
-                return Some(ExitDecision { reason: ExitReason::TrailingStop, use_maker: false });
+                return Some(ExitDecision {
+                    reason: ExitReason::TrailingStop,
+                    use_maker: false,
+                });
             }
         }
         if time_left_sec <= cfg.min_time_left_sec {
-            return Some(ExitDecision { reason: ExitReason::TimeExit, use_maker: false });
+            return Some(ExitDecision {
+                reason: ExitReason::TimeExit,
+                use_maker: false,
+            });
         }
         return None;
     }
@@ -395,26 +421,42 @@ pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
     }
 
     if pct >= cfg.take_profit_pct {
-        return Some(ExitDecision { reason: ExitReason::TakeProfit, use_maker: cfg.maker_first_exit_enabled });
+        return Some(ExitDecision {
+            reason: ExitReason::TakeProfit,
+            use_maker: cfg.maker_first_exit_enabled,
+        });
     }
 
-    let base_stop = if cfg.tight_stop_enabled { cfg.tight_stop_pct } else { cfg.stop_loss_pct };
+    let base_stop = if cfg.tight_stop_enabled {
+        cfg.tight_stop_pct
+    } else {
+        cfg.stop_loss_pct
+    };
     let stop = effective_stop_pct(base_stop, time_left_sec, cfg);
     if pct <= -stop && book.map(|b| bid_confirmed_by_mid(b, cfg)).unwrap_or(true) {
-        return Some(ExitDecision { reason: ExitReason::StopLoss, use_maker: false });
+        return Some(ExitDecision {
+            reason: ExitReason::StopLoss,
+            use_maker: false,
+        });
     }
 
     if cfg.ratchet_enabled {
         let confirmed_high_pct = pnl_pct(state.confirmed_high, entry_price);
         if pct <= get_ratchet_floor(confirmed_high_pct) {
-            return Some(ExitDecision { reason: ExitReason::RatchetFloor, use_maker: false });
+            return Some(ExitDecision {
+                reason: ExitReason::RatchetFloor,
+                use_maker: false,
+            });
         }
     }
 
     if state.high_pnl_pct >= Decimal::from(BREAKEVEN_LOCK_TRIGGER_PCT) {
         let lock_floor = dec!(0.5).max(taker_fee_pct(bid) + dec!(0.2));
         if pct <= lock_floor {
-            return Some(ExitDecision { reason: ExitReason::BreakevenLock, use_maker: false });
+            return Some(ExitDecision {
+                reason: ExitReason::BreakevenLock,
+                use_maker: false,
+            });
         }
     }
 
@@ -423,7 +465,10 @@ pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
         let time_trail = get_time_trail_pct(time_left_sec);
         let trail = cfg.min_trail_pct.max(profit_trail.min(time_trail));
         if state.high_pnl_pct - pct >= trail {
-            return Some(ExitDecision { reason: ExitReason::TrailingStop, use_maker: false });
+            return Some(ExitDecision {
+                reason: ExitReason::TrailingStop,
+                use_maker: false,
+            });
         }
     }
 
@@ -436,7 +481,10 @@ pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
                 && bid < state.high_water_mark
                 && pct >= dec!(2)
             {
-                return Some(ExitDecision { reason: ExitReason::DepthCollapse, use_maker: false });
+                return Some(ExitDecision {
+                    reason: ExitReason::DepthCollapse,
+                    use_maker: false,
+                });
             }
         }
     }
@@ -444,19 +492,28 @@ pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
     if pct >= cfg.stale_profit_pct {
         let stale_sec = (now_ms - state.bid_unchanged_since) / 1000;
         if stale_sec >= cfg.stale_profit_bid_unchanged_sec {
-            return Some(ExitDecision { reason: ExitReason::StaleProfit, use_maker: true });
+            return Some(ExitDecision {
+                reason: ExitReason::StaleProfit,
+                use_maker: true,
+            });
         }
     }
 
     if pct >= cfg.stagnant_profit_pct && pct < cfg.take_profit_pct {
         let stagnant_sec = (now_ms - state.last_progress_at) / 1000;
         if stagnant_sec >= cfg.stagnant_duration_sec {
-            return Some(ExitDecision { reason: ExitReason::StagnantProfit, use_maker: true });
+            return Some(ExitDecision {
+                reason: ExitReason::StagnantProfit,
+                use_maker: true,
+            });
         }
     }
 
     if time_left_sec <= cfg.min_time_left_sec {
-        return Some(ExitDecision { reason: ExitReason::TimeExit, use_maker: cfg.maker_exits_for_tp_only });
+        return Some(ExitDecision {
+            reason: ExitReason::TimeExit,
+            use_maker: cfg.maker_exits_for_tp_only,
+        });
     }
 
     None
@@ -492,8 +549,14 @@ mod tests {
         let st = ExitState::new(dec!(0.4), 0);
         let b = book(0.39, 0.41);
         let d = decide_exit(ExitTickInput {
-            entry_price: dec!(0.4), book: Some(&b), fallback_price: None,
-            time_left_sec: 100, hold_sec: 50, state: &st, now_ms: 1000, cfg: &cfg,
+            entry_price: dec!(0.4),
+            book: Some(&b),
+            fallback_price: None,
+            time_left_sec: 100,
+            hold_sec: 50,
+            state: &st,
+            now_ms: 1000,
+            cfg: &cfg,
         });
         assert_eq!(d.unwrap().reason, ExitReason::ForceExit);
     }
@@ -505,9 +568,16 @@ mod tests {
         // Bid +150% ≥ TP 100%.
         let b = book(1.0, 1.0);
         let d = decide_exit(ExitTickInput {
-            entry_price: dec!(0.4), book: Some(&b), fallback_price: None,
-            time_left_sec: 600, hold_sec: 20, state: &st, now_ms: 1000, cfg: &cfg,
-        }).unwrap();
+            entry_price: dec!(0.4),
+            book: Some(&b),
+            fallback_price: None,
+            time_left_sec: 600,
+            hold_sec: 20,
+            state: &st,
+            now_ms: 1000,
+            cfg: &cfg,
+        })
+        .unwrap();
         assert_eq!(d.reason, ExitReason::TakeProfit);
         assert!(d.use_maker);
     }
@@ -520,8 +590,14 @@ mod tests {
         let st = ExitState::new(dec!(0.4), 0);
         let b = book(0.28, 0.30); // -30%
         let d = decide_exit(ExitTickInput {
-            entry_price: dec!(0.4), book: Some(&b), fallback_price: None,
-            time_left_sec: 600, hold_sec: 20, state: &st, now_ms: 1000, cfg: &cfg,
+            entry_price: dec!(0.4),
+            book: Some(&b),
+            fallback_price: None,
+            time_left_sec: 600,
+            hold_sec: 20,
+            state: &st,
+            now_ms: 1000,
+            cfg: &cfg,
         })
         .unwrap();
         assert_eq!(d.reason, ExitReason::StopLoss);
@@ -530,10 +606,19 @@ mod tests {
         // An explicit wide stop (the old 50%) still holds through -30%.
         let mut wide = ExitConfig::default();
         wide.stop_loss_pct = dec!(50);
-        assert!(decide_exit(ExitTickInput {
-            entry_price: dec!(0.4), book: Some(&b), fallback_price: None,
-            time_left_sec: 600, hold_sec: 20, state: &st, now_ms: 1000, cfg: &wide,
-        }).is_none());
+        assert!(
+            decide_exit(ExitTickInput {
+                entry_price: dec!(0.4),
+                book: Some(&b),
+                fallback_price: None,
+                time_left_sec: 600,
+                hold_sec: 20,
+                state: &st,
+                now_ms: 1000,
+                cfg: &wide,
+            })
+            .is_none()
+        );
     }
 
     #[test]
@@ -542,9 +627,18 @@ mod tests {
         let cfg = ExitConfig::default();
         let st = ExitState::new(dec!(0.4), 0);
         let b = book(0.20, 0.60);
-        assert!(decide_exit(ExitTickInput {
-            entry_price: dec!(0.4), book: Some(&b), fallback_price: None,
-            time_left_sec: 600, hold_sec: 20, state: &st, now_ms: 1000, cfg: &cfg,
-        }).is_none());
+        assert!(
+            decide_exit(ExitTickInput {
+                entry_price: dec!(0.4),
+                book: Some(&b),
+                fallback_price: None,
+                time_left_sec: 600,
+                hold_sec: 20,
+                state: &st,
+                now_ms: 1000,
+                cfg: &cfg,
+            })
+            .is_none()
+        );
     }
 }

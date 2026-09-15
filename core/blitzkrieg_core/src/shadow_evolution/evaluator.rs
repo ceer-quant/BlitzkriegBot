@@ -64,7 +64,8 @@ pub fn evaluate(
         }
         // Conditions 3 & 4.
         let wr_ok = m.win_rate() > base_wr + cfg.min_win_rate_improvement;
-        let pf_ok = m.profit_factor() > base_pf * (Decimal::ONE + cfg.min_profit_factor_improvement);
+        let pf_ok =
+            m.profit_factor() > base_pf * (Decimal::ONE + cfg.min_profit_factor_improvement);
         if !wr_ok || !pf_ok {
             continue;
         }
@@ -104,7 +105,10 @@ pub fn evaluate(
         wr_delta,
         variant_id,
     );
-    Some(Selection { signal, variant_index: idx })
+    Some(Selection {
+        signal,
+        variant_index: idx,
+    })
 }
 
 /// The parameters in force for this strategy, as recorded by its baseline twin.
@@ -128,12 +132,12 @@ fn params_for(strategy: &str, params: StrategyParams) -> MutableParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shadow_evolution::variants::build_variants;
     use crate::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
     use crate::shadow_evolution::knobs::KnobSpec;
-    use crate::strategies::shadow_twin::{tick_ctx, ShadowFactory};
-    use crate::strategies::{EngineStrategy, StrategyCtx};
+    use crate::shadow_evolution::variants::build_variants;
     use crate::signal::TradeSignal;
+    use crate::strategies::shadow_twin::{ShadowFactory, tick_ctx};
+    use crate::strategies::{EngineStrategy, StrategyCtx};
     use rust_decimal::prelude::FromPrimitive;
     use rust_decimal_macros::dec;
 
@@ -155,7 +159,9 @@ mod tests {
             vec![KnobSpec::new("cap", dec!(0.40), dec!(0.05), dec!(0.95))]
         }
         fn make(&self, params: &StrategyParams) -> Option<Box<dyn EngineStrategy>> {
-            Some(Box::new(CapStrategy { cap: params.get("cap").unwrap_or(dec!(0.40)) }))
+            Some(Box::new(CapStrategy {
+                cap: params.get("cap").unwrap_or(dec!(0.40)),
+            }))
         }
     }
 
@@ -168,7 +174,9 @@ mod tests {
         fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
             let market = &ctx.markets()[0];
             let token = market.up_token_id.clone();
-            let Some(book) = ctx.fresh_book(&token) else { return Vec::new() };
+            let Some(book) = ctx.fresh_book(&token) else {
+                return Vec::new();
+            };
             if book.mid_price > self.cap {
                 return Vec::new();
             }
@@ -227,12 +235,27 @@ mod tests {
         let f: Box<dyn ShadowFactory> = Box::new(CapFactory);
         let mut base = StrategyParams::new();
         base.set("cap", dec!(0.40));
-        build_variants("cap", &f.knobs(), &base, f.as_ref(), count, dec!(0.05), &cfg().exit_cfg, 0, 0)
+        build_variants(
+            "cap",
+            &f.knobs(),
+            &base,
+            f.as_ref(),
+            count,
+            dec!(0.05),
+            &cfg().exit_cfg,
+            0,
+            0,
+        )
     }
 
     /// Enter at a mid only the loosened variant admits, then exit rich: a
     /// guaranteed winner per repetition.
-    fn drive_wins(v: &mut super::super::variants::Variant, m: &CryptoMarket, t0: i64, times: usize) {
+    fn drive_wins(
+        v: &mut super::super::variants::Variant,
+        m: &CryptoMarket,
+        t0: i64,
+        times: usize,
+    ) {
         let mut now = t0;
         for _ in 0..times {
             now += 1_000;
@@ -257,9 +280,17 @@ mod tests {
         vs.on_round(&[m.clone()], &[], 0);
         let tick = book(0.40, 0.41);
         vs.variants[0].on_tick(&tick_ctx(&[m.clone()], "t", &tick, 1, 880, 1_000));
-        assert_eq!(vs.variants[0].open_positions(), 0, "cap 0.40 must not buy a 0.405 mid");
+        assert_eq!(
+            vs.variants[0].open_positions(),
+            0,
+            "cap 0.40 must not buy a 0.405 mid"
+        );
         vs.variants[1].on_tick(&tick_ctx(&[m.clone()], "t", &tick, 1, 880, 1_000));
-        assert_eq!(vs.variants[1].open_positions(), 1, "cap 0.412 must buy the same tick");
+        assert_eq!(
+            vs.variants[1].open_positions(),
+            1,
+            "cap 0.412 must buy the same tick"
+        );
     }
 
     #[test]
@@ -270,13 +301,21 @@ mod tests {
         drive_wins(&mut vs.variants[1], &m, 10_000, 2);
 
         // Baseline reference: 50% win rate (one win, one loss).
-        let baseline =
-            Metrics { sample_count: 2, wins: 1, gross_profit: dec!(2), gross_loss: dec!(2), total_pnl: dec!(0) };
+        let baseline = Metrics {
+            sample_count: 2,
+            wins: 1,
+            gross_profit: dec!(2),
+            gross_loss: dec!(2),
+            total_pnl: dec!(0),
+        };
         let sel = evaluate(&cfg(), "cap", &mut vs, &baseline, 100_000, 0)
             .expect("expected a qualifying evolution signal");
         let sig = sel.signal;
 
-        assert_eq!(sig.strategy, "cap", "the signal names the strategy it moves");
+        assert_eq!(
+            sig.strategy, "cap",
+            "the signal names the strategy it moves"
+        );
         assert!(sig.confidence >= dec!(0.5) && sig.confidence <= dec!(1));
         assert_eq!(sig.expected_improvement, dec!(0.5), "100% - 50% win rate");
         assert_eq!(sig.variant_id, "variant-1");
@@ -289,12 +328,14 @@ mod tests {
         assert_eq!(sig.to_params.get("cap", "cap"), Some(dec!(0.412)));
         // And the proposed step is inside the gradient lock (it is a variant
         // parameter set, which is what the manager then re-validates).
-        assert!(super::super::guard::validate_gradient(
-            sig.from_params.for_strategy("cap").unwrap(),
-            sig.to_params.for_strategy("cap").unwrap(),
-            dec!(0.05),
-        )
-        .is_ok());
+        assert!(
+            super::super::guard::validate_gradient(
+                sig.from_params.for_strategy("cap").unwrap(),
+                sig.to_params.for_strategy("cap").unwrap(),
+                dec!(0.05),
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -305,8 +346,13 @@ mod tests {
         drive_wins(&mut vs.variants[1], &m, 10_000, 2);
         let mut c = cfg();
         c.cooldown_secs = 600;
-        let baseline =
-            Metrics { sample_count: 2, wins: 1, gross_profit: dec!(2), gross_loss: dec!(2), total_pnl: dec!(0) };
+        let baseline = Metrics {
+            sample_count: 2,
+            wins: 1,
+            gross_profit: dec!(2),
+            gross_loss: dec!(2),
+            total_pnl: dec!(0),
+        };
         let now = 1_000_000i64;
         assert!(evaluate(&c, "cap", &mut vs, &baseline, now, now - 100_000).is_none());
         assert!(evaluate(&c, "cap", &mut vs, &baseline, now, now - 700_000).is_some());
@@ -315,8 +361,13 @@ mod tests {
     #[test]
     fn an_empty_set_never_signals() {
         let mut empty = VariantSet::empty("cap");
-        let baseline =
-            Metrics { sample_count: 99, wins: 99, gross_profit: dec!(1), gross_loss: dec!(0), total_pnl: dec!(1) };
+        let baseline = Metrics {
+            sample_count: 99,
+            wins: 99,
+            gross_profit: dec!(1),
+            gross_loss: dec!(0),
+            total_pnl: dec!(1),
+        };
         assert!(evaluate(&cfg(), "cap", &mut empty, &baseline, 1000, 0).is_none());
     }
 
@@ -333,8 +384,13 @@ mod tests {
             now += 1_000;
             vs.variants[1].on_tick(&tick_ctx(&[m.clone()], "t", &book(0.10, 0.12), 1, 880, now));
         }
-        let baseline =
-            Metrics { sample_count: 2, wins: 1, gross_profit: dec!(2), gross_loss: dec!(2), total_pnl: dec!(0) };
+        let baseline = Metrics {
+            sample_count: 2,
+            wins: 1,
+            gross_profit: dec!(2),
+            gross_loss: dec!(2),
+            total_pnl: dec!(0),
+        };
         assert!(evaluate(&cfg(), "cap", &mut vs, &baseline, 100_000, 0).is_none());
     }
 }

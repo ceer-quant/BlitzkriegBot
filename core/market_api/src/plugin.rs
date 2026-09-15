@@ -31,7 +31,10 @@ pub trait MarketHost: Send + Sync {
     fn subscribe_tokens(&self, tokens: Vec<TokenId>) -> BoxFuture<'_, ()>;
     /// A [`DataFeed`] registers its control handle here at start-up so later
     /// `subscribe_tokens` calls (and the `engine.markets` bridge) reach it.
-    fn install_subscription_control(&self, control: Arc<dyn SubscriptionControl>) -> BoxFuture<'_, ()>;
+    fn install_subscription_control(
+        &self,
+        control: Arc<dyn SubscriptionControl>,
+    ) -> BoxFuture<'_, ()>;
 
     // ── Execution egress ────────────────────────────────────────────────────
     /// Orders accepted locally with no venue id yet.

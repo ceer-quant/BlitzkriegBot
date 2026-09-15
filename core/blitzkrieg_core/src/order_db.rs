@@ -22,7 +22,9 @@ pub struct OrderDb {
 
 impl OrderDb {
     pub fn new(jsonl_path: impl AsRef<Path>) -> Self {
-        Self { jsonl_path: jsonl_path.as_ref().to_path_buf() }
+        Self {
+            jsonl_path: jsonl_path.as_ref().to_path_buf(),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -36,7 +38,11 @@ impl OrderDb {
             let _ = std::fs::create_dir_all(dir);
         }
         if let Ok(line) = serde_json::to_string(order) {
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.jsonl_path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.jsonl_path)
+            {
                 let _ = writeln!(f, "{line}");
             }
         }
@@ -137,7 +143,11 @@ mod tests {
         assert_eq!(loaded.len(), 2, "one latest snapshot per order id");
         let o1 = loaded.iter().find(|o| o.order_id == "o1").unwrap();
         assert_eq!(o1.status, OrderStatus::Live, "later snapshot wins");
-        assert_eq!(o1.venue_order_id.as_deref(), Some("0xdef"), "venue id preserved");
+        assert_eq!(
+            o1.venue_order_id.as_deref(),
+            Some("0xdef"),
+            "venue id preserved"
+        );
 
         // Compact keeps only what we pass.
         db.compact(&[order("o2", "k2", OrderStatus::Live)]);
@@ -156,7 +166,8 @@ mod tests {
         let path = dir.join("orders.jsonl");
         // A legacy Node-format line (side 'BUY', status 'SUBMITTED') followed by a
         // valid core line: the loader must keep the valid one and skip the other.
-        let mut body = String::from("{\"orderId\":\"old\",\"side\":\"BUY\",\"status\":\"SUBMITTED\"}\n");
+        let mut body =
+            String::from("{\"orderId\":\"old\",\"side\":\"BUY\",\"status\":\"SUBMITTED\"}\n");
         body.push_str(&serde_json::to_string(&order("new", "kn", OrderStatus::Live)).unwrap());
         body.push('\n');
         std::fs::write(&path, body).unwrap();

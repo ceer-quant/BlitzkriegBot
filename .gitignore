@@ -107,6 +107,7 @@ vendor/
 ui/*
 !ui/ui_kit/
 !ui/ui_kit_panel/
+!ui/webapp/
 
 # Development workspace
 workspace/

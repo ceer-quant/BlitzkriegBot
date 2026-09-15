@@ -18,14 +18,14 @@
 //! asks the `Core` to place orders. Everything here is deterministic given the
 //! events and an injected clock, so it is unit-testable without network.
 
-use crate::marketdata::{is_fresh, LocalBook};
+use crate::marketdata::{LocalBook, is_fresh};
 use crate::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
 use crate::scanner::{Scanner, ScannerConfig};
 use crate::signal::{PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig};
 use crate::strategies::{
-    mean_reversion::MeanReversionBuiltin, spread_arb::SpreadArbBuiltin,
-    trend_follow::TrendFollowBuiltin, EngineStrategy, GateExemptions, MeanReversionConfig,
-    StrategyCtx, StrategyExitIntent, TrendFollowConfig,
+    EngineStrategy, GateExemptions, MeanReversionConfig, StrategyCtx, StrategyExitIntent,
+    TrendFollowConfig, mean_reversion::MeanReversionBuiltin, spread_arb::SpreadArbBuiltin,
+    trend_follow::TrendFollowBuiltin,
 };
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -172,13 +172,30 @@ impl GateExemptionRecord {
 #[derive(Debug, Clone)]
 pub enum DataEvent {
     /// Full or incremental orderbook update for a token.
-    Book { token_id: String, bids: Vec<(Decimal, Decimal)>, asks: Vec<(Decimal, Decimal)>, now_ms: i64 },
+    Book {
+        token_id: String,
+        bids: Vec<(Decimal, Decimal)>,
+        asks: Vec<(Decimal, Decimal)>,
+        now_ms: i64,
+    },
     /// Top-of-book only update (price_change / best_bid_ask).
-    TopOfBook { token_id: String, best_bid: Option<Decimal>, best_ask: Option<Decimal>, now_ms: i64 },
+    TopOfBook {
+        token_id: String,
+        best_bid: Option<Decimal>,
+        best_ask: Option<Decimal>,
+        now_ms: i64,
+    },
     /// Binance spot price for an asset (e.g. "BTC").
-    Spot { asset: String, price: Decimal, now_ms: i64 },
+    Spot {
+        asset: String,
+        price: Decimal,
+        now_ms: i64,
+    },
     /// Fresh round markets discovered by the scanner.
-    RoundMarkets { markets: Vec<CryptoMarket>, now_ms: i64 },
+    RoundMarkets {
+        markets: Vec<CryptoMarket>,
+        now_ms: i64,
+    },
 }
 
 /// A strategy registered with the engine, plus its enablement and provenance.
@@ -226,7 +243,10 @@ impl Engine {
     pub fn new(cfg: EngineConfig) -> Self {
         let strategies = vec![
             HostedStrategy {
-                strategy: Box::new(SpreadArbBuiltin::new(cfg.trend.clone(), cfg.spread_arb.clone())),
+                strategy: Box::new(SpreadArbBuiltin::new(
+                    cfg.trend.clone(),
+                    cfg.spread_arb.clone(),
+                )),
                 enabled: true,
                 source: "builtin".to_string(),
             },
@@ -295,9 +315,8 @@ impl Engine {
     /// currently satisfies the entry band (per strategy).
     pub fn confirmed_diagnostics(&self, now_ms: i64) -> Vec<serde_json::Value> {
         let round = self.scanner.round_state(now_ms);
-        let fresh = |token: &str| {
-            fresh_book(&self.books, token, now_ms, self.cfg.max_orderbook_stale_ms)
-        };
+        let fresh =
+            |token: &str| fresh_book(&self.books, token, now_ms, self.cfg.max_orderbook_stale_ms);
         let ctx = StrategyCtx::new(
             self.scanner.markets(),
             round.slot,
@@ -305,18 +324,29 @@ impl Engine {
             now_ms,
             &fresh,
         );
-        self.strategies.iter().flat_map(|s| s.strategy.diagnostics(&ctx)).collect()
+        self.strategies
+            .iter()
+            .flat_map(|s| s.strategy.diagnostics(&ctx))
+            .collect()
     }
 
     pub fn book_snapshot(&self, token_id: &str) -> Option<OrderbookSnapshot> {
-        self.books.get(token_id).filter(|b| !b.is_empty()).map(|b| b.snapshot(token_id))
+        self.books
+            .get(token_id)
+            .filter(|b| !b.is_empty())
+            .map(|b| b.snapshot(token_id))
     }
 
     /// Feed one market-data event. Returns tokens whose confirmed trend broke so
     /// the caller can cancel their resting bids.
     pub fn on_data(&mut self, ev: DataEvent) -> Vec<(String, Decimal)> {
         match ev {
-            DataEvent::Book { token_id, bids, asks, now_ms } => {
+            DataEvent::Book {
+                token_id,
+                bids,
+                asks,
+                now_ms,
+            } => {
                 let b = self.books.entry(token_id.clone()).or_default();
                 b.apply_snapshot(&bids, &asks, now_ms);
                 let snap = b.snapshot(&token_id);
@@ -325,7 +355,12 @@ impl Engine {
                 }
                 self.near_miss.on_book(&token_id, &snap, now_ms);
             }
-            DataEvent::TopOfBook { token_id, best_bid, best_ask, now_ms } => {
+            DataEvent::TopOfBook {
+                token_id,
+                best_bid,
+                best_ask,
+                now_ms,
+            } => {
                 let b = self.books.entry(token_id.clone()).or_default();
                 b.update_top(best_bid, best_ask, now_ms);
                 let snap = b.snapshot(&token_id);
@@ -334,8 +369,15 @@ impl Engine {
                 }
                 self.near_miss.on_book(&token_id, &snap, now_ms);
             }
-            DataEvent::Spot { asset, price, now_ms } => {
-                self.spot.entry(asset).or_insert_with(|| PriceBuffer::new(180)).push(price, now_ms);
+            DataEvent::Spot {
+                asset,
+                price,
+                now_ms,
+            } => {
+                self.spot
+                    .entry(asset)
+                    .or_insert_with(|| PriceBuffer::new(180))
+                    .push(price, now_ms);
                 return Vec::new();
             }
             DataEvent::RoundMarkets { markets, now_ms } => {
@@ -378,7 +420,9 @@ impl Engine {
     /// Returns the reason it rejected, so an exempting strategy's audit record can
     /// state exactly what was waived.
     fn momentum_ok(&self, asset: &str, dir: SignalDirection, now_ms: i64) -> Result<(), String> {
-        let Some(buf) = self.spot.get(asset) else { return Ok(()) };
+        let Some(buf) = self.spot.get(asset) else {
+            return Ok(());
+        };
         let move_pct = buf.move_pct(self.cfg.momentum_window_sec, now_ms);
         let against = match dir {
             SignalDirection::Up => move_pct < -self.cfg.momentum_tol_pct,
@@ -642,7 +686,10 @@ impl Engine {
     /// `None` DETACHES: strategies fall back to the config pushed via
     /// `on_config`, which is what makes "evolution disabled" provably identical
     /// to the pre-feature behaviour rather than merely inert by convention.
-    pub fn set_hot_params(&mut self, registry: Option<std::sync::Arc<crate::shadow_evolution::ParamRegistry>>) {
+    pub fn set_hot_params(
+        &mut self,
+        registry: Option<std::sync::Arc<crate::shadow_evolution::ParamRegistry>>,
+    ) {
         self.hot_params = registry.clone();
         for s in &mut self.strategies {
             s.strategy.set_hot_params(registry.clone());
@@ -665,7 +712,10 @@ impl Engine {
     /// Strategy names the engine knows about, in registration order (the
     /// builtin `spread_arb` first, then user-layer strategies).
     pub fn supported_strategies(&self) -> Vec<String> {
-        self.strategies.iter().map(|s| s.strategy.name().to_string()).collect()
+        self.strategies
+            .iter()
+            .map(|s| s.strategy.name().to_string())
+            .collect()
     }
     /// Borrow every hosted strategy. Shadow Evolution asks each one which knobs it
     /// declares (E2-c), so the declaration has to be read off the live instances.
@@ -675,7 +725,10 @@ impl Engine {
     /// disable destroy that strategy's evolved parameters and rollback anchor.
     /// A switched-off strategy just never emits the candidates that would use them.
     pub fn strategy_refs(&self) -> Vec<&dyn EngineStrategy> {
-        self.strategies.iter().map(|s| s.strategy.as_ref()).collect()
+        self.strategies
+            .iter()
+            .map(|s| s.strategy.as_ref())
+            .collect()
     }
     /// Enabled strategy names.
     pub fn enabled_strategies(&self) -> Vec<String> {
@@ -715,7 +768,11 @@ impl Engine {
         if self.strategies.iter().any(|s| s.strategy.name() == name) {
             return Err(format!("strategy name already registered: {name}"));
         }
-        let mut hosted = HostedStrategy { strategy, enabled: false, source };
+        let mut hosted = HostedStrategy {
+            strategy,
+            enabled: false,
+            source,
+        };
         // Registered after Shadow Evolution was configured? Forward the handle
         // so a later evolution still reaches this strategy.
         if let Some(h) = &self.hot_params {
@@ -765,15 +822,30 @@ impl Engine {
             max_shares: self.cfg.max_shares,
             strategy_scoped: false,
         };
-        let Some(over) = self.cfg.strategy_sizes.get(strategy).filter(|s| s.overrides_anything())
+        let Some(over) = self
+            .cfg
+            .strategy_sizes
+            .get(strategy)
+            .filter(|s| s.overrides_anything())
         else {
             return globals;
         };
-        let size_usd = over.size_usd.map_or(globals.size_usd, |v| v.min(globals.size_usd));
-        let max_shares = over.max_shares.map_or(globals.max_shares, |v| v.min(globals.max_shares));
-        let min_shares =
-            over.min_shares.map_or(globals.min_shares, |v| v.max(globals.min_shares)).min(max_shares);
-        EffectiveSizing { size_usd, min_shares, max_shares, strategy_scoped: true }
+        let size_usd = over
+            .size_usd
+            .map_or(globals.size_usd, |v| v.min(globals.size_usd));
+        let max_shares = over
+            .max_shares
+            .map_or(globals.max_shares, |v| v.min(globals.max_shares));
+        let min_shares = over
+            .min_shares
+            .map_or(globals.min_shares, |v| v.max(globals.min_shares))
+            .min(max_shares);
+        EffectiveSizing {
+            size_usd,
+            min_shares,
+            max_shares,
+            strategy_scoped: true,
+        }
     }
 }
 
@@ -785,7 +857,10 @@ fn fresh_book(
     now_ms: i64,
     max_stale_ms: i64,
 ) -> Option<OrderbookSnapshot> {
-    let snap = books.get(token_id).filter(|b| !b.is_empty()).map(|b| b.snapshot(token_id))?;
+    let snap = books
+        .get(token_id)
+        .filter(|b| !b.is_empty())
+        .map(|b| b.snapshot(token_id))?;
     let source = books.get(token_id)?;
     if !is_fresh(&source.snapshot(token_id), now_ms, max_stale_ms) {
         return None;
@@ -809,8 +884,17 @@ mod tests {
                 min_round_age_sec: 0,
                 min_time_left_sec: 0,
             },
-            trend: TrendConfig { confirm_sec: 5, ratio: dec!(0.5), min_price: dec!(0.5), broken_price: dec!(0.35), window_floor_ms: 0 },
-            spread_arb: SpreadArbConfig { trend_max_entry_price: dec!(0.45), ..Default::default() },
+            trend: TrendConfig {
+                confirm_sec: 5,
+                ratio: dec!(0.5),
+                min_price: dec!(0.5),
+                broken_price: dec!(0.35),
+                window_floor_ms: 0,
+            },
+            spread_arb: SpreadArbConfig {
+                trend_max_entry_price: dec!(0.45),
+                ..Default::default()
+            },
             trend_follow: TrendFollowConfig::default(),
             mean_reversion: MeanReversionConfig::default(),
             max_orderbook_stale_ms: 8000,
@@ -841,7 +925,10 @@ mod tests {
 
     fn core() -> Core {
         let mut c = Core::new(CoreConfig {
-            risk: RiskConfig { max_order_notional: dec!(5), ..Default::default() },
+            risk: RiskConfig {
+                max_order_notional: dec!(5),
+                ..Default::default()
+            },
             dry_seed_balance: dec!(1000),
             ..Default::default()
         });
@@ -856,17 +943,34 @@ mod tests {
         let mut e = Engine::new(cfg());
         let mut c = core();
         let now = 1_000_000i64;
-        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
 
         // Confirm the UP trend: several books with mid >= 0.5 within the window.
         for i in 0..12 {
             let t = now + i * 1000;
-            e.on_data(DataEvent::Book { token_id: "up".into(), bids: vec![(dec!(0.55), dec!(100))], asks: vec![(dec!(0.57), dec!(100))], now_ms: t });
+            e.on_data(DataEvent::Book {
+                token_id: "up".into(),
+                bids: vec![(dec!(0.55), dec!(100))],
+                asks: vec![(dec!(0.57), dec!(100))],
+                now_ms: t,
+            });
         }
         // Dip: mid 0.44 (bid 0.43) → entry 0.43 ≤ 0.45 → signal.
-        e.on_data(DataEvent::Book { token_id: "up".into(), bids: vec![(dec!(0.43), dec!(100))], asks: vec![(dec!(0.45), dec!(100))], now_ms: now + 12_000 });
+        e.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.43), dec!(100))],
+            asks: vec![(dec!(0.45), dec!(100))],
+            now_ms: now + 12_000,
+        });
         // Spot calm.
-        e.on_data(DataEvent::Spot { asset: "BTC".into(), price: dec!(60000), now_ms: now + 12_000 });
+        e.on_data(DataEvent::Spot {
+            asset: "BTC".into(),
+            price: dec!(60000),
+            now_ms: now + 12_000,
+        });
 
         let orders = e.evaluate(now + 12_000);
         assert_eq!(orders.len(), 1, "expected one spread_arb entry");
@@ -880,9 +984,17 @@ mod tests {
     fn engine_skips_without_confirmed_trend() {
         let mut e = Engine::new(cfg());
         let now = 1_000_000i64;
-        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
         // Only one dip book; no confirm window yet.
-        e.on_data(DataEvent::Book { token_id: "up".into(), bids: vec![(dec!(0.43), dec!(100))], asks: vec![(dec!(0.45), dec!(100))], now_ms: now });
+        e.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.43), dec!(100))],
+            asks: vec![(dec!(0.45), dec!(100))],
+            now_ms: now,
+        });
         assert!(e.evaluate(now).is_empty());
     }
 
@@ -891,26 +1003,63 @@ mod tests {
         let mut e = Engine::new(cfg());
         let mut c = core();
         let now = 1_000_000i64;
-        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
         for i in 0..12 {
-            e.on_data(DataEvent::Book { token_id: "up".into(), bids: vec![(dec!(0.55), dec!(100))], asks: vec![(dec!(0.57), dec!(100))], now_ms: now + i * 1000 });
+            e.on_data(DataEvent::Book {
+                token_id: "up".into(),
+                bids: vec![(dec!(0.55), dec!(100))],
+                asks: vec![(dec!(0.57), dec!(100))],
+                now_ms: now + i * 1000,
+            });
         }
-        e.on_data(DataEvent::Book { token_id: "up".into(), bids: vec![(dec!(0.43), dec!(100))], asks: vec![(dec!(0.45), dec!(100))], now_ms: now + 12_000 });
+        e.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.43), dec!(100))],
+            asks: vec![(dec!(0.45), dec!(100))],
+            now_ms: now + 12_000,
+        });
         // Spot falls hard over the momentum window → UP entry blocked.
-        e.on_data(DataEvent::Spot { asset: "BTC".into(), price: dec!(60000), now_ms: now + 1000 });
-        e.on_data(DataEvent::Spot { asset: "BTC".into(), price: dec!(59000), now_ms: now + 12_000 });
-        assert!(e.evaluate(now + 12_000).is_empty(), "spot moving against should block the entry");
+        e.on_data(DataEvent::Spot {
+            asset: "BTC".into(),
+            price: dec!(60000),
+            now_ms: now + 1000,
+        });
+        e.on_data(DataEvent::Spot {
+            asset: "BTC".into(),
+            price: dec!(59000),
+            now_ms: now + 12_000,
+        });
+        assert!(
+            e.evaluate(now + 12_000).is_empty(),
+            "spot moving against should block the entry"
+        );
     }
 
     #[test]
     fn trend_break_is_reported_for_bid_cancellation() {
         let mut e = Engine::new(cfg());
         let now = 1_000_000i64;
-        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
         for i in 0..12 {
-            e.on_data(DataEvent::Book { token_id: "up".into(), bids: vec![(dec!(0.55), dec!(100))], asks: vec![(dec!(0.57), dec!(100))], now_ms: now + i * 1000 });
+            e.on_data(DataEvent::Book {
+                token_id: "up".into(),
+                bids: vec![(dec!(0.55), dec!(100))],
+                asks: vec![(dec!(0.57), dec!(100))],
+                now_ms: now + i * 1000,
+            });
         }
-        let broken = e.on_data(DataEvent::Book { token_id: "up".into(), bids: vec![(dec!(0.30), dec!(100))], asks: vec![(dec!(0.32), dec!(100))], now_ms: now + 12_000 });
+        let broken = e.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.30), dec!(100))],
+            asks: vec![(dec!(0.32), dec!(100))],
+            now_ms: now + 12_000,
+        });
         assert_eq!(broken.len(), 1);
         assert_eq!(broken[0].0, "up");
     }
@@ -923,15 +1072,32 @@ mod tests {
         cfg.scanner.min_round_age_sec = 10_000; // force the timing gate to fail
         let mut e = Engine::new(cfg);
         let now = 1_000_000i64;
-        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
         for i in 0..12 {
-            e.on_data(DataEvent::Book { token_id: "up".into(), bids: vec![(dec!(0.55), dec!(100))], asks: vec![(dec!(0.57), dec!(100))], now_ms: now + i * 1000 });
+            e.on_data(DataEvent::Book {
+                token_id: "up".into(),
+                bids: vec![(dec!(0.55), dec!(100))],
+                asks: vec![(dec!(0.57), dec!(100))],
+                now_ms: now + i * 1000,
+            });
         }
-        e.on_data(DataEvent::Book { token_id: "up".into(), bids: vec![(dec!(0.43), dec!(100))], asks: vec![(dec!(0.45), dec!(100))], now_ms: now + 12_000 });
+        e.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.43), dec!(100))],
+            asks: vec![(dec!(0.45), dec!(100))],
+            now_ms: now + 12_000,
+        });
 
         let orders = e.evaluate(now + 12_000);
         assert!(orders.is_empty(), "timing gate must block the order");
-        assert_eq!(e.last_blocked().len(), 1, "the blocked dip should be recorded");
+        assert_eq!(
+            e.last_blocked().len(),
+            1,
+            "the blocked dip should be recorded"
+        );
         assert_eq!(e.last_blocked()[0].reason, BlockReason::Timing);
         e.tally_blocked();
         assert_eq!(e.blocked_timing_count(), 1);
@@ -973,8 +1139,10 @@ mod tests {
         c.size_usd = dec!(10);
         c.min_shares = dec!(2);
         c.max_shares = dec!(20);
-        c.strategy_sizes =
-            overrides.iter().map(|(n, s)| ((*n).to_string(), s.clone())).collect();
+        c.strategy_sizes = overrides
+            .iter()
+            .map(|(n, s)| ((*n).to_string(), s.clone()))
+            .collect();
         c
     }
 
@@ -1010,7 +1178,10 @@ mod tests {
         // The 1-share floor is raised to the global floor (2): the global band
         // bounds the strategy from BELOW as well, so a lot can never fall under
         // the venue/risk minimum.
-        assert_eq!((s.size_usd, s.min_shares, s.max_shares), (dec!(1), dec!(2), dec!(2)));
+        assert_eq!(
+            (s.size_usd, s.min_shares, s.max_shares),
+            (dec!(1), dec!(2), dec!(2))
+        );
         assert!(s.strategy_scoped);
         // 1 / 0.45 ≈ 2.2 → rounds to 2, inside [2,2].
         assert_eq!(e.compute_shares(dec!(0.45), "small"), dec!(2));
@@ -1035,9 +1206,21 @@ mod tests {
             },
         )]));
         let s = e.effective_sizing("greedy");
-        assert_eq!(s.size_usd, dec!(10), "notional must be capped at the global budget");
-        assert_eq!(s.max_shares, dec!(20), "share ceiling must clamp to the global max");
-        assert_eq!(s.min_shares, dec!(2), "floor must not drop below the global min");
+        assert_eq!(
+            s.size_usd,
+            dec!(10),
+            "notional must be capped at the global budget"
+        );
+        assert_eq!(
+            s.max_shares,
+            dec!(20),
+            "share ceiling must clamp to the global max"
+        );
+        assert_eq!(
+            s.min_shares,
+            dec!(2),
+            "floor must not drop below the global min"
+        );
         // 100/0.05 would be 2000 shares; the global ceiling still binds.
         assert_eq!(e.compute_shares(dec!(0.05), "greedy"), dec!(20));
     }
@@ -1048,7 +1231,11 @@ mod tests {
         // wins (a floor is never allowed to defeat the global risk cap).
         let e = Engine::new(sizing_cfg(&[(
             "weird",
-            StrategySize { size_usd: None, min_shares: Some(dec!(50)), max_shares: None },
+            StrategySize {
+                size_usd: None,
+                min_shares: Some(dec!(50)),
+                max_shares: None,
+            },
         )]));
         let s = e.effective_sizing("weird");
         assert_eq!((s.min_shares, s.max_shares), (dec!(20), dec!(20)));
@@ -1078,16 +1265,22 @@ mod tests {
         // One cycle, two strategies, one dip each on its OWN asset: every entry
         // carries the strategy's own lot instead of a single global size.
         let mut e = Engine::new(sizing_cfg(&[
-            ("small", StrategySize {
-                size_usd: Some(dec!(1)),
-                min_shares: Some(dec!(1)),
-                max_shares: Some(dec!(1)),
-            }),
-            ("big", StrategySize {
-                size_usd: Some(dec!(10)),
-                min_shares: Some(dec!(20)),
-                max_shares: Some(dec!(20)),
-            }),
+            (
+                "small",
+                StrategySize {
+                    size_usd: Some(dec!(1)),
+                    min_shares: Some(dec!(1)),
+                    max_shares: Some(dec!(1)),
+                },
+            ),
+            (
+                "big",
+                StrategySize {
+                    size_usd: Some(dec!(10)),
+                    min_shares: Some(dec!(20)),
+                    max_shares: Some(dec!(20)),
+                },
+            ),
         ]));
         e.register_user_strategy(
             Box::new(DipBuyer::on_assets("small", dec!(0.45), &["BTC"])),
@@ -1101,7 +1294,10 @@ mod tests {
         .unwrap();
         assert!(e.set_strategy_enabled("small", true));
         assert!(e.set_strategy_enabled("big", true));
-        assert!(e.set_strategy_enabled("spread_arb", false), "isolate the two sized dips");
+        assert!(
+            e.set_strategy_enabled("spread_arb", false),
+            "isolate the two sized dips"
+        );
 
         let now = 1_000_000i64;
         e.on_data(DataEvent::RoundMarkets {
@@ -1118,11 +1314,21 @@ mod tests {
         }
         let orders = e.evaluate(now + 2_000);
         assert_eq!(orders.len(), 2, "{orders:?}");
-        let small = orders.iter().find(|o| o.strategy == "small").expect("small entry");
-        let big = orders.iter().find(|o| o.strategy == "big").expect("big entry");
+        let small = orders
+            .iter()
+            .find(|o| o.strategy == "small")
+            .expect("small entry");
+        let big = orders
+            .iter()
+            .find(|o| o.strategy == "big")
+            .expect("big entry");
         assert_eq!(small.asset, "BTC");
         assert_eq!(big.asset, "ETH");
-        assert_eq!(small.size, dec!(1), "1u / 0.44 rounds to 2, capped by its own 1-share lot");
+        assert_eq!(
+            small.size,
+            dec!(1),
+            "1u / 0.44 rounds to 2, capped by its own 1-share lot"
+        );
         assert_eq!(big.size, dec!(20));
         assert_eq!(small.price, dec!(0.44), "same dip price for both");
         assert_eq!(big.price, dec!(0.44));
@@ -1145,7 +1351,12 @@ mod tests {
     }
     impl DipBuyer {
         fn new(name: &str, buy_below: Decimal) -> Self {
-            Self { name: name.to_string(), buy_below, assets: Vec::new(), gates: GateExemptions::none() }
+            Self {
+                name: name.to_string(),
+                buy_below,
+                assets: Vec::new(),
+                gates: GateExemptions::none(),
+            }
         }
         fn on_assets(name: &str, buy_below: Decimal, assets: &[&str]) -> Self {
             Self {
@@ -1158,7 +1369,12 @@ mod tests {
         /// Same as [`Self::new`] but declaring gate exemptions and restricted to
         /// the given assets (so it does not compete for the builtin's token under
         /// the one-entry-per-token rule).
-        fn exempting(name: &str, buy_below: Decimal, assets: &[&str], gates: GateExemptions) -> Self {
+        fn exempting(
+            name: &str,
+            buy_below: Decimal,
+            assets: &[&str],
+            gates: GateExemptions,
+        ) -> Self {
             Self {
                 name: name.to_string(),
                 buy_below,
@@ -1171,7 +1387,13 @@ mod tests {
         fn name(&self) -> &str {
             &self.name
         }
-        fn on_book(&mut self, _token_id: &str, _snap: &crate::model::OrderbookSnapshot, _now_ms: i64) {}
+        fn on_book(
+            &mut self,
+            _token_id: &str,
+            _snap: &crate::model::OrderbookSnapshot,
+            _now_ms: i64,
+        ) {
+        }
         fn on_round(&mut self, _slot: i64) {}
         fn gate_exemptions(&self) -> GateExemptions {
             self.gates
@@ -1186,7 +1408,9 @@ mod tests {
                     (&market.up_token_id, SignalDirection::Up),
                     (&market.down_token_id, SignalDirection::Down),
                 ] {
-                    let Some(book) = ctx.fresh_book(token_id) else { continue };
+                    let Some(book) = ctx.fresh_book(token_id) else {
+                        continue;
+                    };
                     if book.mid_price <= self.buy_below {
                         out.push(TradeSignal {
                             strategy: self.name.clone(),
@@ -1212,7 +1436,11 @@ mod tests {
         // and `spread_arb` is the incumbent.
         assert_eq!(
             e.supported_strategies(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string(), "mean_reversion".to_string()]
+            vec![
+                "spread_arb".to_string(),
+                "trend_follow".to_string(),
+                "mean_reversion".to_string()
+            ]
         );
         assert_eq!(
             e.enabled_strategies(),
@@ -1220,7 +1448,10 @@ mod tests {
             "the new builtin must not trade until it is explicitly enabled"
         );
         assert_eq!(e.strategy_source("trend_follow"), Some("builtin"));
-        assert!(!e.set_strategy_enabled("nope", true), "unknown name must not toggle");
+        assert!(
+            !e.set_strategy_enabled("nope", true),
+            "unknown name must not toggle"
+        );
         assert!(e.set_strategy_enabled("trend_follow", true));
         assert_eq!(
             e.enabled_strategies(),
@@ -1234,7 +1465,9 @@ mod tests {
         // momentum gate wants, so the chase leg opts out of nothing. (E4-b, the
         // counter-trend leg, is the one that needs `momentum: true`.)
         let e = Engine::new(cfg());
-        let ex = e.strategy_gate_exemptions("trend_follow").expect("registered");
+        let ex = e
+            .strategy_gate_exemptions("trend_follow")
+            .expect("registered");
         assert_eq!(ex, GateExemptions::none());
         assert!(!ex.any());
         // The only declaration under the default registry is the E4-b fade leg.
@@ -1274,12 +1507,18 @@ mod tests {
     fn the_chase_leg_trades_a_breakout_the_dip_buyer_would_not() {
         let mut e = Engine::new(cfg());
         let now = 1_000_000i64;
-        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
         // A RISING up-token: bid 0.50 → 0.62 (mid 0.505 → 0.625, +24%).
         rising_books(&mut e, "up", 12, now);
         let at = now + 12_000;
         // Disabled → nothing, however good the setup looks.
-        assert!(e.evaluate(at).is_empty(), "the chase leg must not trade while disabled");
+        assert!(
+            e.evaluate(at).is_empty(),
+            "the chase leg must not trade while disabled"
+        );
         assert!(e.set_strategy_enabled("trend_follow", true));
         let orders = e.evaluate(at);
         assert_eq!(orders.len(), 1, "{orders:?}");
@@ -1290,11 +1529,22 @@ mod tests {
         // buyer's below-mid resting bid.
         let mid = dec!(0.625);
         assert_eq!(orders[0].price, dec!(0.63), "the lifted offer");
-        assert!(orders[0].price > mid, "{} must be above the mid {mid}", orders[0].price);
-        assert!(orders[0].internal_key.starts_with("trend_follow:BTC:up:"), "{}", orders[0].internal_key);
+        assert!(
+            orders[0].price > mid,
+            "{} must be above the mid {mid}",
+            orders[0].price
+        );
+        assert!(
+            orders[0].internal_key.starts_with("trend_follow:BTC:up:"),
+            "{}",
+            orders[0].internal_key
+        );
         // And it cleared the spot gate without an exemption: with no spot buffer
         // at all the gate is a pass, so a breach here would mean a declaration.
-        assert!(e.last_exemptions().is_empty(), "the chase leg waived nothing");
+        assert!(
+            e.last_exemptions().is_empty(),
+            "the chase leg waived nothing"
+        );
     }
 
     #[test]
@@ -1304,7 +1554,10 @@ mod tests {
         // must be stopped (it declares no exemption) — proving the new strategy
         // is subject to the same gates as the incumbent.
         let mut e = Engine::new(cfg());
-        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: 1_000_000 });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: 1_000_000,
+        });
         assert!(e.set_strategy_enabled("trend_follow", true));
         // Spot falls: the momentum filter will refuse an UP bet.
         for i in 0..10 {
@@ -1318,7 +1571,9 @@ mod tests {
         let orders = e.evaluate(1_000_000 + 12_000);
         assert!(orders.is_empty(), "spot moved against the bet: {orders:?}");
         assert!(
-            e.last_blocked().iter().any(|b| b.strategy == "trend_follow" && b.reason == BlockReason::Momentum),
+            e.last_blocked()
+                .iter()
+                .any(|b| b.strategy == "trend_follow" && b.reason == BlockReason::Momentum),
             "{:?}",
             e.last_blocked()
         );
@@ -1334,7 +1589,10 @@ mod tests {
         let now = 1_000_000i64;
         let mut m = market(1_800_000);
         m.down_token_id = "down".into();
-        e.on_data(DataEvent::RoundMarkets { markets: vec![m.clone()], now_ms: now });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![m.clone()],
+            now_ms: now,
+        });
 
         // "up" climbs (chase), "down" holds then dips (dip buy).
         for i in 0..=12 {
@@ -1361,9 +1619,23 @@ mod tests {
             now_ms: now + 12_000,
         });
         let orders = e.evaluate(now + 12_000);
-        assert_eq!(orders.len(), 2, "one entry per strategy per token: {orders:?}");
-        assert!(orders.iter().any(|o| o.strategy == "trend_follow" && o.token_id == "up"), "{orders:?}");
-        assert!(orders.iter().any(|o| o.strategy == "spread_arb" && o.token_id == "down"), "{orders:?}");
+        assert_eq!(
+            orders.len(),
+            2,
+            "one entry per strategy per token: {orders:?}"
+        );
+        assert!(
+            orders
+                .iter()
+                .any(|o| o.strategy == "trend_follow" && o.token_id == "up"),
+            "{orders:?}"
+        );
+        assert!(
+            orders
+                .iter()
+                .any(|o| o.strategy == "spread_arb" && o.token_id == "down"),
+            "{orders:?}"
+        );
         // Neither strategy was blocked out of existence.
         assert!(e.last_blocked().is_empty(), "{:?}", e.last_blocked());
     }
@@ -1383,15 +1655,25 @@ mod tests {
         let mut e = Engine::new(c);
         assert!(e.set_strategy_enabled("trend_follow", true));
         let now = 1_000_000i64;
-        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
         // A book both want: "up" rising on the cent grid (the chase leg lifts the
         // 0.63 offer) while the mid 0.625 is still inside the dip buyer's raised
         // band (it would rest 0.61, below the mid).
         rising_books(&mut e, "up", 12, now);
         let orders = e.evaluate(now + 12_000);
         assert_eq!(orders.len(), 1, "one entry per token per cycle: {orders:?}");
-        assert_eq!(orders[0].strategy, "spread_arb", "the incumbent holds the tie-break");
-        assert!(orders[0].price < dec!(0.625), "and it rests below the mid: {}", orders[0].price);
+        assert_eq!(
+            orders[0].strategy, "spread_arb",
+            "the incumbent holds the tie-break"
+        );
+        assert!(
+            orders[0].price < dec!(0.625),
+            "and it rests below the mid: {}",
+            orders[0].price
+        );
     }
 
     #[test]
@@ -1413,18 +1695,26 @@ mod tests {
                 "dip_buyer".to_string(),
             ]
         );
-        assert_eq!(e.enabled_strategies(), vec!["spread_arb".to_string()], "starts disabled");
+        assert_eq!(
+            e.enabled_strategies(),
+            vec!["spread_arb".to_string()],
+            "starts disabled"
+        );
         assert_eq!(e.strategy_source("dip_buyer"), Some("test"));
         // Duplicate names are rejected outright.
-        assert!(e
-            .register_user_strategy(
+        assert!(
+            e.register_user_strategy(
                 Box::new(DipBuyer::new("dip_buyer", dec!(0.6))),
                 "test".into()
             )
-            .is_err());
+            .is_err()
+        );
 
         let now = 1_000_000i64;
-        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
         e.on_data(DataEvent::Book {
             token_id: "up".into(),
             bids: vec![(dec!(0.55), dec!(100))],
@@ -1439,7 +1729,11 @@ mod tests {
         assert_eq!(orders.len(), 1, "{orders:?}");
         assert_eq!(orders[0].strategy, "dip_buyer");
         assert_eq!(orders[0].asset, "BTC");
-        assert!(orders[0].internal_key.starts_with("dip_buyer:BTC:"), "{}", orders[0].internal_key);
+        assert!(
+            orders[0].internal_key.starts_with("dip_buyer:BTC:"),
+            "{}",
+            orders[0].internal_key
+        );
     }
 
     #[test]
@@ -1453,20 +1747,48 @@ mod tests {
         assert!(e.set_strategy_enabled("dip_buyer", true));
 
         let now = 1_000_000i64;
-        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
         // Confirm the UP trend over 12 samples (spread_arb needs it).
         for i in 0..12 {
-            e.on_data(DataEvent::Book { token_id: "up".into(), bids: vec![(dec!(0.55), dec!(100))], asks: vec![(dec!(0.57), dec!(100))], now_ms: now + i * 1000 });
+            e.on_data(DataEvent::Book {
+                token_id: "up".into(),
+                bids: vec![(dec!(0.55), dec!(100))],
+                asks: vec![(dec!(0.57), dec!(100))],
+                now_ms: now + i * 1000,
+            });
         }
         // UP dips → spread_arb candidate (and dip_buyer's too, on the same token).
-        e.on_data(DataEvent::Book { token_id: "up".into(), bids: vec![(dec!(0.43), dec!(100))], asks: vec![(dec!(0.45), dec!(100))], now_ms: now + 12_000 });
+        e.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.43), dec!(100))],
+            asks: vec![(dec!(0.45), dec!(100))],
+            now_ms: now + 12_000,
+        });
         // DOWN is cheap → only dip_buyer signals there (no trend confirmation).
-        e.on_data(DataEvent::Book { token_id: "down".into(), bids: vec![(dec!(0.41), dec!(100))], asks: vec![(dec!(0.43), dec!(100))], now_ms: now + 12_000 });
+        e.on_data(DataEvent::Book {
+            token_id: "down".into(),
+            bids: vec![(dec!(0.41), dec!(100))],
+            asks: vec![(dec!(0.43), dec!(100))],
+            now_ms: now + 12_000,
+        });
 
         let orders = e.evaluate(now + 12_000);
         assert_eq!(orders.len(), 2, "one entry per token per cycle: {orders:?}");
-        assert!(orders.iter().any(|o| o.token_id == "up" && o.strategy == "spread_arb"), "{orders:?}");
-        assert!(orders.iter().any(|o| o.token_id == "down" && o.strategy == "dip_buyer"), "{orders:?}");
+        assert!(
+            orders
+                .iter()
+                .any(|o| o.token_id == "up" && o.strategy == "spread_arb"),
+            "{orders:?}"
+        );
+        assert!(
+            orders
+                .iter()
+                .any(|o| o.token_id == "down" && o.strategy == "dip_buyer"),
+            "{orders:?}"
+        );
     }
 
     // ── E2-b per-strategy gate opt-out (#27) ────────────────────────────────
@@ -1505,8 +1827,16 @@ mod tests {
 
     /// Push a spot price that fell over the momentum window (against an UP bet).
     fn spot_falls(e: &mut Engine, asset: &str, from: Decimal, to: Decimal, now: i64) {
-        e.on_data(DataEvent::Spot { asset: asset.into(), price: from, now_ms: now });
-        e.on_data(DataEvent::Spot { asset: asset.into(), price: to, now_ms: now + 2_000 });
+        e.on_data(DataEvent::Spot {
+            asset: asset.into(),
+            price: from,
+            now_ms: now,
+        });
+        e.on_data(DataEvent::Spot {
+            asset: asset.into(),
+            price: to,
+            now_ms: now + 2_000,
+        });
     }
 
     #[test]
@@ -1523,7 +1853,10 @@ mod tests {
                 "window_fade",
                 dec!(0.45),
                 &["ETH"],
-                GateExemptions { timing: true, momentum: false },
+                GateExemptions {
+                    timing: true,
+                    momentum: false,
+                },
             )),
             "test".into(),
         )
@@ -1542,7 +1875,10 @@ mod tests {
         assert_eq!(orders.len(), 1, "{orders:?}");
         assert_eq!(orders[0].strategy, "window_fade");
         assert_eq!(orders[0].asset, "ETH");
-        assert!(e.last_blocked().iter().any(|b| b.strategy == "spread_arb"), "builtin stays gated");
+        assert!(
+            e.last_blocked().iter().any(|b| b.strategy == "spread_arb"),
+            "builtin stays gated"
+        );
         assert!(
             !e.last_blocked().iter().any(|b| b.strategy == "window_fade"),
             "exempted strategy must not appear as blocked"
@@ -1555,7 +1891,10 @@ mod tests {
         assert_eq!(ex[0].gate, "timing");
         assert!(ex[0].detail.contains("Round too young"), "{}", ex[0].detail);
         let line = ex[0].audit_line();
-        assert!(line.contains("本单因策略 window_fade 豁免门禁 timing"), "{line}");
+        assert!(
+            line.contains("本单因策略 window_fade 豁免门禁 timing"),
+            "{line}"
+        );
     }
 
     #[test]
@@ -1578,9 +1917,19 @@ mod tests {
         trend_then_dip(&mut e, "up", now);
         dip_only(&mut e, "eth_up", now + 12_000);
 
-        assert!(e.evaluate(now + 12_000).is_empty(), "undeclared strategy must stay gated");
-        assert!(e.last_exemptions().is_empty(), "nothing may be recorded as exempted");
-        assert!(e.last_blocked().iter().any(|b| b.strategy == "plain"), "{:?}", e.last_blocked());
+        assert!(
+            e.evaluate(now + 12_000).is_empty(),
+            "undeclared strategy must stay gated"
+        );
+        assert!(
+            e.last_exemptions().is_empty(),
+            "nothing may be recorded as exempted"
+        );
+        assert!(
+            e.last_blocked().iter().any(|b| b.strategy == "plain"),
+            "{:?}",
+            e.last_blocked()
+        );
     }
 
     #[test]
@@ -1591,7 +1940,10 @@ mod tests {
                 "fader",
                 dec!(0.45),
                 &["ETH"],
-                GateExemptions { timing: false, momentum: true },
+                GateExemptions {
+                    timing: false,
+                    momentum: true,
+                },
             )),
             "test".into(),
         )
@@ -1619,10 +1971,11 @@ mod tests {
         assert!(ex[0].detail.contains("spot ETH"), "{}", ex[0].detail);
         assert!(ex[0].detail.contains("vs up"), "{}", ex[0].detail);
         // The builtin, declaring nothing, was blocked by the very same filter.
-        assert!(e
-            .last_blocked()
-            .iter()
-            .any(|b| b.strategy == "spread_arb" && b.reason == BlockReason::Momentum));
+        assert!(
+            e.last_blocked()
+                .iter()
+                .any(|b| b.strategy == "spread_arb" && b.reason == BlockReason::Momentum)
+        );
     }
 
     #[test]
@@ -1636,7 +1989,10 @@ mod tests {
                 "fader",
                 dec!(0.45),
                 &["BTC"],
-                GateExemptions { timing: false, momentum: true },
+                GateExemptions {
+                    timing: false,
+                    momentum: true,
+                },
             )),
             "test".into(),
         )
@@ -1661,14 +2017,17 @@ mod tests {
         spot_falls(&mut e, "ETH", dec!(3000), dec!(2950), now);
 
         let orders = e.evaluate(now + 2_000);
-        assert_eq!(orders.len(), 1, "only the declaring strategy may pass: {orders:?}");
+        assert_eq!(
+            orders.len(),
+            1,
+            "only the declaring strategy may pass: {orders:?}"
+        );
         assert_eq!(orders[0].strategy, "fader");
         assert_eq!(orders[0].asset, "BTC");
         assert_eq!(e.last_exemptions().len(), 1);
-        assert!(e
-            .last_blocked()
-            .iter()
-            .any(|b| b.strategy == "gated" && b.asset == "ETH" && b.reason == BlockReason::Momentum));
+        assert!(e.last_blocked().iter().any(|b| b.strategy == "gated"
+            && b.asset == "ETH"
+            && b.reason == BlockReason::Momentum));
     }
 
     #[test]
@@ -1677,7 +2036,12 @@ mod tests {
         // there is no priceable token, so nothing is exempted.
         let mut e = Engine::new(cfg());
         e.register_user_strategy(
-            Box::new(DipBuyer::exempting("all_in", dec!(0.99), &[], GateExemptions::all())),
+            Box::new(DipBuyer::exempting(
+                "all_in",
+                dec!(0.99),
+                &[],
+                GateExemptions::all(),
+            )),
             "test".into(),
         )
         .unwrap();
@@ -1689,8 +2053,14 @@ mod tests {
             asks: vec![(dec!(0.45), dec!(100))],
             now_ms: now,
         });
-        assert!(e.evaluate(now).is_empty(), "no market → no candidates at all");
-        assert!(e.last_exemptions().is_empty(), "a structural precondition is not exemptible");
+        assert!(
+            e.evaluate(now).is_empty(),
+            "no market → no candidates at all"
+        );
+        assert!(
+            e.last_exemptions().is_empty(),
+            "a structural precondition is not exemptible"
+        );
     }
 
     #[test]
@@ -1700,7 +2070,10 @@ mod tests {
         cfg.scanner.min_round_age_sec = 10_000;
         let mut e = Engine::new(cfg);
         let now = 1_000_000i64;
-        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
         trend_then_dip(&mut e, "up", now);
         assert!(e.evaluate(now + 12_000).is_empty());
         assert_eq!(e.last_blocked().len(), 1);
@@ -1722,7 +2095,10 @@ mod tests {
                 "window_fade",
                 dec!(0.45),
                 &["ETH"],
-                GateExemptions { timing: true, momentum: true },
+                GateExemptions {
+                    timing: true,
+                    momentum: true,
+                },
             )),
             "test".into(),
         )
@@ -1759,7 +2135,10 @@ mod tests {
                 "fader",
                 dec!(0.45),
                 &[],
-                GateExemptions { timing: false, momentum: true },
+                GateExemptions {
+                    timing: false,
+                    momentum: true,
+                },
             )),
             "test".into(),
         )
@@ -1767,36 +2146,69 @@ mod tests {
         e.register_user_strategy(Box::new(DipBuyer::new("plain", dec!(0.45))), "test".into())
             .unwrap();
         let declared = e.declared_gate_exemptions();
-        assert_eq!(declared.len(), 2, "silent strategies are omitted: {declared:?}");
-        assert_eq!(declared[0].0, "mean_reversion", "the builtin declares first (hosted first)");
+        assert_eq!(
+            declared.len(),
+            2,
+            "silent strategies are omitted: {declared:?}"
+        );
+        assert_eq!(
+            declared[0].0, "mean_reversion",
+            "the builtin declares first (hosted first)"
+        );
         assert_eq!(declared[0].1.gates(), vec!["momentum"]);
         assert_eq!(declared[1].0, "fader");
         assert_eq!(declared[1].1.gates(), vec!["momentum"]);
-        assert_eq!(e.strategy_gate_exemptions("plain"), Some(GateExemptions::none()));
+        assert_eq!(
+            e.strategy_gate_exemptions("plain"),
+            Some(GateExemptions::none())
+        );
         assert_eq!(e.strategy_gate_exemptions("nobody"), None);
     }
 
     #[test]
     fn the_builtin_declares_no_exemptions() {
         let e = Engine::new(cfg());
-        assert_eq!(e.strategy_gate_exemptions("spread_arb"), Some(GateExemptions::none()));
+        assert_eq!(
+            e.strategy_gate_exemptions("spread_arb"),
+            Some(GateExemptions::none())
+        );
     }
 
     #[test]
     fn disabling_spread_arb_stops_its_entries() {
         let mut e = Engine::new(cfg());
         let now = 1_000_000i64;
-        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
         for i in 0..12 {
-            e.on_data(DataEvent::Book { token_id: "up".into(), bids: vec![(dec!(0.55), dec!(100))], asks: vec![(dec!(0.57), dec!(100))], now_ms: now + i * 1000 });
+            e.on_data(DataEvent::Book {
+                token_id: "up".into(),
+                bids: vec![(dec!(0.55), dec!(100))],
+                asks: vec![(dec!(0.57), dec!(100))],
+                now_ms: now + i * 1000,
+            });
         }
-        e.on_data(DataEvent::Book { token_id: "up".into(), bids: vec![(dec!(0.43), dec!(100))], asks: vec![(dec!(0.45), dec!(100))], now_ms: now + 12_000 });
+        e.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.43), dec!(100))],
+            asks: vec![(dec!(0.45), dec!(100))],
+            now_ms: now + 12_000,
+        });
         assert_eq!(e.evaluate(now + 12_000).len(), 1);
         assert!(e.set_strategy_enabled("spread_arb", false));
         // Same round, no order noted as pending: the empty result must come from
         // the disable, not from suppression.
-        assert!(e.evaluate(now + 12_001).is_empty(), "disabled strategy must not emit");
+        assert!(
+            e.evaluate(now + 12_001).is_empty(),
+            "disabled strategy must not emit"
+        );
         assert!(e.set_strategy_enabled("spread_arb", true));
-        assert_eq!(e.evaluate(now + 12_002).len(), 1, "re-enabling restores entries");
+        assert_eq!(
+            e.evaluate(now + 12_002).len(),
+            1,
+            "re-enabling restores entries"
+        );
     }
 }

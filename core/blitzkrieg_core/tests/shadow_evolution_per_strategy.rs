@@ -46,7 +46,12 @@ struct CapStrategy {
 
 impl CapStrategy {
     fn new(name: &str, asset: &str, cap: Decimal) -> Self {
-        Self { name: name.to_string(), asset: asset.to_string(), cap, hot: None }
+        Self {
+            name: name.to_string(),
+            asset: asset.to_string(),
+            cap,
+            hot: None,
+        }
     }
 
     /// The cap in force: the declared value overlaid with this strategy's OWN
@@ -71,7 +76,12 @@ impl EngineStrategy for CapStrategy {
     }
 
     fn evolvable_knobs(&self) -> Vec<KnobSpec> {
-        vec![KnobSpec::new("cap", self.effective_cap(), dec!(0.05), dec!(0.95))]
+        vec![KnobSpec::new(
+            "cap",
+            self.effective_cap(),
+            dec!(0.05),
+            dec!(0.95),
+        )]
     }
 
     fn shadow_factory(&self) -> Option<Box<dyn ShadowFactory>> {
@@ -87,7 +97,9 @@ impl EngineStrategy for CapStrategy {
         let mut out = Vec::new();
         for market in ctx.markets().iter().filter(|m| m.asset == self.asset) {
             let token = market.up_token_id.clone();
-            let Some(book) = ctx.fresh_book(&token) else { continue };
+            let Some(book) = ctx.fresh_book(&token) else {
+                continue;
+            };
             if book.mid_price > cap || book.mid_price <= Decimal::ZERO {
                 continue;
             }
@@ -164,7 +176,11 @@ fn engine_cfg() -> EngineConfig {
         },
         // Short confirmation window. The builtin's own floor stays 0.55, which
         // the synthetic books never confirm, so it cannot quietly trade here.
-        trend: TrendConfig { confirm_sec: 5, ratio: dec!(0.5), ..Default::default() },
+        trend: TrendConfig {
+            confirm_sec: 5,
+            ratio: dec!(0.5),
+            ..Default::default()
+        },
         spread_arb: SpreadArbConfig::default(),
         size_usd: dec!(2.5),
         min_shares: dec!(10),
@@ -288,7 +304,9 @@ fn drive_cycles(core: &mut Core, token: &str, rounds: usize, t0: i64) -> i64 {
 }
 
 fn cap_of(core: &Core, strategy: &str) -> Option<Decimal> {
-    core.shadow_evolution().params_for(strategy).and_then(|p| p.get("cap"))
+    core.shadow_evolution()
+        .params_for(strategy)
+        .and_then(|p| p.get("cap"))
 }
 
 // ── Acceptance 1: parallel evolution, no cross-talk ─────────────────────────
@@ -314,10 +332,15 @@ fn two_strategies_evolve_in_parallel_without_cross_talk_through_the_core() {
         ],
     );
     let reg = core.shadow_evolution().registry();
-    let c_spread = reg.handle_for("spread_arb").expect("the builtin declares knobs");
+    let c_spread = reg
+        .handle_for("spread_arb")
+        .expect("the builtin declares knobs");
     let c_alpha = reg.handle_for("alpha").expect("alpha declared a knob");
     let c_beta = reg.handle_for("beta").expect("beta declared a knob");
-    assert!(!Arc::ptr_eq(&c_alpha, &c_beta), "alpha and beta own distinct cells");
+    assert!(
+        !Arc::ptr_eq(&c_alpha, &c_beta),
+        "alpha and beta own distinct cells"
+    );
     assert!(
         !Arc::ptr_eq(&c_alpha, &c_spread) && !Arc::ptr_eq(&c_beta, &c_spread),
         "no strategy shares the builtin's cell",
@@ -334,8 +357,16 @@ fn two_strategies_evolve_in_parallel_without_cross_talk_through_the_core() {
 
     core.engine_evaluate(end + 100_000);
 
-    assert_ne!(cap_of(&core, "alpha").unwrap(), alpha_before, "alpha must have evolved");
-    assert_eq!(cap_of(&core, "beta"), Some(beta_before), "beta's parameters must not move");
+    assert_ne!(
+        cap_of(&core, "alpha").unwrap(),
+        alpha_before,
+        "alpha must have evolved"
+    );
+    assert_eq!(
+        cap_of(&core, "beta"),
+        Some(beta_before),
+        "beta's parameters must not move"
+    );
     assert_eq!(
         core.shadow_evolution().params_for("spread_arb"),
         Some(spread_before),
@@ -349,12 +380,21 @@ fn two_strategies_evolve_in_parallel_without_cross_talk_through_the_core() {
     // another strategy's file.
     let alpha_log = dir.join("alpha.jsonl");
     assert!(alpha_log.exists(), "alpha's own audit file");
-    assert!(!dir.join("beta.jsonl").exists(), "beta never evolved, so it has no file");
+    assert!(
+        !dir.join("beta.jsonl").exists(),
+        "beta never evolved, so it has no file"
+    );
     assert!(!dir.join("spread_arb.jsonl").exists());
     let text = std::fs::read_to_string(&alpha_log).unwrap();
     assert!(text.contains("\"strategy\":\"alpha\""), "{text}");
-    assert!(!text.contains("beta"), "alpha's file must not mention beta: {text}");
-    assert!(!text.contains("spread_arb"), "alpha's file must not mention the builtin: {text}");
+    assert!(
+        !text.contains("beta"),
+        "alpha's file must not mention beta: {text}"
+    );
+    assert!(
+        !text.contains("spread_arb"),
+        "alpha's file must not mention the builtin: {text}"
+    );
     assert!(core.shadow_evolution_history(Some("beta"), 10).is_empty());
     assert!(!core.shadow_evolution_history(Some("alpha"), 10).is_empty());
     assert_eq!(
@@ -373,7 +413,11 @@ fn two_strategies_evolve_in_parallel_without_cross_talk_through_the_core() {
         Some(alpha_frozen),
         "alpha must not move on another strategy's tokens",
     );
-    assert_ne!(cap_of(&core, "beta").unwrap(), beta_before, "beta must have evolved now");
+    assert_ne!(
+        cap_of(&core, "beta").unwrap(),
+        beta_before,
+        "beta must have evolved now"
+    );
     assert_eq!(core.shadow_evolution().evolution_count("alpha"), 1);
     assert_eq!(core.shadow_evolution().evolution_count("beta"), 1);
     assert_eq!(core.shadow_evolution().evolution_count("spread_arb"), 0);
@@ -381,7 +425,10 @@ fn two_strategies_evolve_in_parallel_without_cross_talk_through_the_core() {
     let beta_log = dir.join("beta.jsonl");
     let beta_text = std::fs::read_to_string(&beta_log).unwrap();
     assert!(beta_text.contains("\"strategy\":\"beta\""), "{beta_text}");
-    assert!(!beta_text.contains("alpha"), "beta's file must not mention alpha: {beta_text}");
+    assert!(
+        !beta_text.contains("alpha"),
+        "beta's file must not mention alpha: {beta_text}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -397,7 +444,10 @@ fn evolution_off_is_byte_for_byte_the_previous_behaviour() {
     // Nothing registered, no overlay attached, nothing to evaluate.
     assert!(!core.shadow_evolution().is_enabled());
     assert!(core.shadow_evolution().strategy_names().is_empty());
-    assert!(!core.has_hot_params(), "the overlay must be detached, not merely ignored");
+    assert!(
+        !core.has_hot_params(),
+        "the overlay must be detached, not merely ignored"
+    );
     assert_eq!(core.shadow_evolution().variant_count(), 0);
 
     feed_round(&mut core, T0);
@@ -412,14 +462,21 @@ fn evolution_off_is_byte_for_byte_the_previous_behaviour() {
     assert_eq!(core.shadow_evolution().variant_count(), 0);
     assert!(core.shadow_evolution_history(None, 100).is_empty());
     assert!(!core.has_hot_params());
-    assert!(!dir.join("alpha.jsonl").exists(), "an inert engine must create no file");
+    assert!(
+        !dir.join("alpha.jsonl").exists(),
+        "an inert engine must create no file"
+    );
     assert!(!dir.join("beta.jsonl").exists());
     assert!(!dir.join("spread_arb.jsonl").exists());
 
     // Enabling the SAME core afterwards registers the declarations at their
     // in-force values — proving the off path was not secretly maintaining state.
     core.shadow_evolution_enable(end + 600_000);
-    assert_eq!(cap_of(&core, "alpha"), Some(dec!(0.40)), "the live value, not an invented one");
+    assert_eq!(
+        cap_of(&core, "alpha"),
+        Some(dec!(0.40)),
+        "the live value, not an invented one"
+    );
     assert_eq!(cap_of(&core, "beta"), Some(dec!(0.40)));
     assert!(core.has_hot_params(), "enabling attaches the overlay");
     // Attaching is a no-op overlay: it does not itself move a value.
@@ -445,7 +502,8 @@ fn apply_and_rollback_move_exactly_one_strategy() {
     };
 
     // +3%, inside the ±5% gradient lock.
-    core.shadow_evolution_apply(bag("alpha", dec!(0.412)), 1_000).unwrap();
+    core.shadow_evolution_apply(bag("alpha", dec!(0.412)), 1_000)
+        .unwrap();
     assert_eq!(cap_of(&core, "alpha"), Some(dec!(0.412)));
     assert_eq!(cap_of(&core, "beta"), Some(dec!(0.40)), "beta untouched");
 
@@ -463,24 +521,37 @@ fn apply_and_rollback_move_exactly_one_strategy() {
     // explicit error, not a silent no-op another strategy's rollback could be
     // mistaken for.
     assert!(core.shadow_evolution_rollback("beta", 3_000).is_err());
-    assert!(core.shadow_evolution_rollback("not_a_strategy", 4_000).is_err());
+    assert!(
+        core.shadow_evolution_rollback("not_a_strategy", 4_000)
+            .is_err()
+    );
 
     // A multi-strategy bag is refused: apply is per-strategy, so nothing is
     // partially applied.
     let mut both = bag("alpha", dec!(0.41));
     both.set_strategy("beta", StrategyParams::new());
     assert!(core.shadow_evolution_apply(both, 5_000).is_err());
-    assert_eq!(cap_of(&core, "alpha"), Some(dec!(0.40)), "still the rolled-back value");
+    assert_eq!(
+        cap_of(&core, "alpha"),
+        Some(dec!(0.40)),
+        "still the rolled-back value"
+    );
 
     // An out-of-domain proposal is refused before it can reach the strategy.
-    assert!(core.shadow_evolution_apply(bag("alpha", dec!(0.99)), 6_000).is_err());
+    assert!(
+        core.shadow_evolution_apply(bag("alpha", dec!(0.99)), 6_000)
+            .is_err()
+    );
     assert_eq!(cap_of(&core, "alpha"), Some(dec!(0.40)));
 
     // Manual changes are audited, and only in the strategy's own file.
     let recs = core.shadow_evolution_history(Some("alpha"), 10);
     assert_eq!(recs.len(), 2, "apply + rollback: {recs:?}");
     assert!(recs.iter().all(|r| r.strategy == "alpha"));
-    assert!(recs.iter().all(|r| r.manual), "an operator override must leave a trace");
+    assert!(
+        recs.iter().all(|r| r.manual),
+        "an operator override must leave a trace"
+    );
     let text = std::fs::read_to_string(dir.join("alpha.jsonl")).unwrap();
     assert!(!text.contains("\"strategy\":\"beta\""));
     assert!(!dir.join("beta.jsonl").exists());
@@ -511,13 +582,17 @@ fn an_undeclared_strategy_is_reported_not_evolvable() {
     };
     let mut core = Core::new(cfg);
     let mut eng = Engine::new(engine_cfg());
-    eng.register_user_strategy(Box::new(Inert), "test".into()).unwrap();
+    eng.register_user_strategy(Box::new(Inert), "test".into())
+        .unwrap();
     core.enable_engine(eng);
     core.shadow_evolution_enable(0);
 
     let ev = core.shadow_evolution();
     assert!(ev.declared_knobs("inert").is_empty());
-    assert!(ev.params_for("inert").is_none(), "not evolvable is an explicit answer");
+    assert!(
+        ev.params_for("inert").is_none(),
+        "not evolvable is an explicit answer"
+    );
     assert!(ev.status("inert", 0).is_none());
     // The builtin DOES declare knobs, so it is evolvable — the seam is about the
     // declaration, not about a strategy being synthetic or builtin.

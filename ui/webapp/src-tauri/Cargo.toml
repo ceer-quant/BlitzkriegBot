@@ -1,0 +1,14 @@
+[package]
+name = "blitzkrieg-webapp"
+version = "0.1.0"
+edition = "2021"
+description = "Tauri shell for the Blitzkrieg desktop panel. Depends on blitzkrieg-ui-kit's headless AppViewModel; holds NO trading logic and NO GUI deps leak back into ui_kit."
+
+# Tauri deps live ONLY here (E6-a contract: zero GUI deps in blitzkrieg-ui-kit).
+[dependencies]
+blitzkrieg-ui-kit = { path = "../../ui_kit" }
+tauri = { version = "2", features = [] }
+serde_json = "1"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

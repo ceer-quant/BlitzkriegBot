@@ -80,14 +80,20 @@ pub struct FillModel {
 
 impl Default for FillModel {
     fn default() -> Self {
-        Self { taker_slippage_ticks: 0, maker_latency_ms: 0, maker_fill_prob_bps: 10_000 }
+        Self {
+            taker_slippage_ticks: 0,
+            maker_latency_ms: 0,
+            maker_fill_prob_bps: 10_000,
+        }
     }
 }
 
 impl FillModel {
     /// True when the model cannot change any outcome (the default).
     pub fn is_identity(&self) -> bool {
-        self.taker_slippage_ticks == 0 && self.maker_latency_ms <= 0 && self.maker_fill_prob_bps >= 10_000
+        self.taker_slippage_ticks == 0
+            && self.maker_latency_ms <= 0
+            && self.maker_fill_prob_bps >= 10_000
     }
 
     /// Price a taker fill would actually get, given the side.
@@ -178,7 +184,10 @@ mod tests {
         assert!(!FillPolicy::Maker.immediate());
         assert_eq!(FillPolicy::Taker.venue_order_type(), OrderType::Fok);
         assert_eq!(FillPolicy::Maker.post_only(), true);
-        assert_eq!(FillPolicy::MakerThenTaker.venue_order_type(), OrderType::Gtc);
+        assert_eq!(
+            FillPolicy::MakerThenTaker.venue_order_type(),
+            OrderType::Gtc
+        );
         assert!(rests_on_book(FillPolicy::MakerThenTaker));
         assert!(!rests_on_book(FillPolicy::Taker));
     }
@@ -197,39 +206,63 @@ mod tests {
 
     #[test]
     fn slippage_worsens_both_sides_and_clamps_to_the_grid() {
-        let m = FillModel { taker_slippage_ticks: 2, maker_latency_ms: 0, maker_fill_prob_bps: 10_000 };
+        let m = FillModel {
+            taker_slippage_ticks: 2,
+            maker_latency_ms: 0,
+            maker_fill_prob_bps: 10_000,
+        };
         assert_eq!(m.apply_slippage(Side::Buy, dec!(0.42)), dec!(0.44));
         assert_eq!(m.apply_slippage(Side::Sell, dec!(0.42)), dec!(0.40));
         // Clamped: a 5-tick slip cannot push the price off the tradable grid.
-        let wide = FillModel { taker_slippage_ticks: 5, ..Default::default() };
+        let wide = FillModel {
+            taker_slippage_ticks: 5,
+            ..Default::default()
+        };
         assert_eq!(wide.apply_slippage(Side::Buy, dec!(0.99)), dec!(0.99));
         assert_eq!(wide.apply_slippage(Side::Sell, dec!(0.01)), dec!(0.01));
     }
 
     #[test]
     fn latency_delays_maker_eligibility() {
-        let m = FillModel { maker_latency_ms: 250, ..Default::default() };
+        let m = FillModel {
+            maker_latency_ms: 250,
+            ..Default::default()
+        };
         assert_eq!(m.maker_eligible_at_ms(10_000), 10_250);
         assert!(!m.is_identity());
     }
 
     #[test]
     fn fill_probability_is_deterministic_and_bounded() {
-        let never = FillModel { maker_fill_prob_bps: 0, ..Default::default() };
+        let never = FillModel {
+            maker_fill_prob_bps: 0,
+            ..Default::default()
+        };
         assert!(!never.maker_fill_wins("dry_1"));
         assert!(!never.maker_fill_wins("dry_2"));
 
-        let always = FillModel { maker_fill_prob_bps: 10_000, ..Default::default() };
+        let always = FillModel {
+            maker_fill_prob_bps: 10_000,
+            ..Default::default()
+        };
         assert!(always.maker_fill_wins("dry_1"));
 
-        let half = FillModel { maker_fill_prob_bps: 5_000, ..Default::default() };
+        let half = FillModel {
+            maker_fill_prob_bps: 5_000,
+            ..Default::default()
+        };
         // Same order id → same verdict on every call (replays are reproducible).
         let first = half.maker_fill_wins("dry_42");
         for _ in 0..10 {
             assert_eq!(half.maker_fill_wins("dry_42"), first);
         }
         // And the draw is not degenerate: over many ids roughly half win.
-        let wins = (0..400).filter(|i| half.maker_fill_wins(&format!("dry_{i}"))).count();
-        assert!((120..=280).contains(&wins), "expected ~50% wins, got {wins}/400");
+        let wins = (0..400)
+            .filter(|i| half.maker_fill_wins(&format!("dry_{i}")))
+            .count();
+        assert!(
+            (120..=280).contains(&wins),
+            "expected ~50% wins, got {wins}/400"
+        );
     }
 }

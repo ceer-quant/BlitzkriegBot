@@ -41,12 +41,12 @@
 use super::shadow_twin::ShadowFactory;
 use super::{EngineStrategy, GateExemptions, StrategyCtx};
 use crate::model::OrderbookSnapshot;
+use crate::model::SignalDirection;
 use crate::shadow_evolution::{KnobSpec, ParamRegistry, StrategyParams};
 use crate::signal::{PriceBuffer, TradeSignal};
-use crate::model::SignalDirection;
 use arc_swap::ArcSwap;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -458,8 +458,16 @@ impl EngineStrategy for MeanReversionBuiltin {
                         &market.condition_id,
                         &market.up_token_id,
                         &market.down_token_id,
-                        if token == market.up_token_id { Some(book) } else { None },
-                        if token == market.down_token_id { Some(book) } else { None },
+                        if token == market.up_token_id {
+                            Some(book)
+                        } else {
+                            None
+                        },
+                        if token == market.down_token_id {
+                            Some(book)
+                        } else {
+                            None
+                        },
                         &self.tracker,
                         now,
                         &cfg,
@@ -488,7 +496,10 @@ impl EngineStrategy for MeanReversionBuiltin {
     /// strategy's candidates. Timing stays gated. Every honoured waiver is
     /// recorded by the host per candidate order, so the opt-out is auditable.
     fn gate_exemptions(&self) -> GateExemptions {
-        GateExemptions { timing: false, momentum: true }
+        GateExemptions {
+            timing: false,
+            momentum: true,
+        }
     }
 
     fn diagnostics(&self, ctx: &StrategyCtx<'_>) -> Vec<serde_json::Value> {
@@ -498,7 +509,10 @@ impl EngineStrategy for MeanReversionBuiltin {
             .iter()
             .filter(|(_, v)| **v)
             .map(|(t, _)| {
-                let mid = ctx.fresh_book(t).map(|b| b.mid_price).unwrap_or(Decimal::ZERO);
+                let mid = ctx
+                    .fresh_book(t)
+                    .map(|b| b.mid_price)
+                    .unwrap_or(Decimal::ZERO);
                 let drop = self.tracker.drop_pct(t, ctx.now_ms());
                 let entry = mid * eff.entry_factor;
                 let firable = mid > Decimal::ZERO
@@ -529,7 +543,9 @@ impl EngineStrategy for MeanReversionBuiltin {
     fn shadow_factory(&self) -> Option<Box<dyn ShadowFactory>> {
         // Built from the config in force WITHOUT the hot overlay: the overlay is
         // exactly what the factory's parameter argument applies.
-        Some(Box::new(MeanReversionShadowFactory { base: self.cfg.clone() }))
+        Some(Box::new(MeanReversionShadowFactory {
+            base: self.cfg.clone(),
+        }))
     }
 }
 
@@ -552,13 +568,15 @@ impl ShadowFactory for MeanReversionShadowFactory {
     }
 
     fn make(&self, params: &StrategyParams) -> Option<Box<dyn EngineStrategy>> {
-        Some(Box::new(MeanReversionBuiltin::new(apply_knobs(&self.base, params))))
+        Some(Box::new(MeanReversionBuiltin::new(apply_knobs(
+            &self.base, params,
+        ))))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::shadow_twin::{tick_ctx, TwinReplay};
+    use super::super::shadow_twin::{TwinReplay, tick_ctx};
     use super::*;
     use crate::exit_policy::ExitConfig;
     use crate::model::CryptoMarket;
@@ -573,12 +591,7 @@ mod tests {
     }
 
     fn book_d(bid: Decimal, ask: Decimal) -> OrderbookSnapshot {
-        OrderbookSnapshot::from_levels(
-            "t",
-            vec![(bid, dec!(100))],
-            vec![(ask, dec!(100))],
-            0,
-        )
+        OrderbookSnapshot::from_levels("t", vec![(bid, dec!(100))], vec![(ask, dec!(100))], 0)
     }
 
     fn market() -> CryptoMarket {
@@ -599,7 +612,14 @@ mod tests {
 
     /// Drive a FALL from `from` to `to` on `token` in `count` steps spaced 1 s
     /// apart, then return the clock.
-    fn fall(t: &mut FadeTracker, token: &str, from: Decimal, to: Decimal, steps: usize, start: i64) -> i64 {
+    fn fall(
+        t: &mut FadeTracker,
+        token: &str,
+        from: Decimal,
+        to: Decimal,
+        steps: usize,
+        start: i64,
+    ) -> i64 {
         let mut now = start;
         for i in 0..steps {
             let p = from + (to - from) * Decimal::from(i as u32) / Decimal::from(steps as u32 - 1);
@@ -622,7 +642,10 @@ mod tests {
         assert_eq!(drop.value, dec!(10));
         assert_eq!(drop.max, dec!(50));
         // An out-of-domain starting config widens the declared domain.
-        let cfg = MeanReversionConfig { lookback_sec: 900, ..Default::default() };
+        let cfg = MeanReversionConfig {
+            lookback_sec: 900,
+            ..Default::default()
+        };
         let k = mean_reversion_knobs(&cfg);
         let lb = k.iter().find(|s| s.name == "lookback_sec").unwrap();
         assert!(lb.contains(dec!(900)), "{lb:?}");
@@ -684,7 +707,10 @@ mod tests {
         assert!(t.is_in_zone("t"));
         t.on_price("t", dec!(0.30), now + 1_000);
         t.reset_if_new_round(2);
-        assert!(!t.is_in_zone("t"), "a new round starts with no zone history");
+        assert!(
+            !t.is_in_zone("t"),
+            "a new round starts with no zone history"
+        );
         assert_eq!(t.drop_pct("t", now + 2_000), Decimal::ZERO);
         assert!(t.take_broken().is_empty());
     }
@@ -697,10 +723,8 @@ mod tests {
         let now = fall(&mut t, "t", dec!(0.50), dec!(0.30), 5, 10_000);
         // Live book round the mid: bid 0.29, ask 0.31 → entry = round2(0.294) = 0.29.
         let b = book(0.29, 0.31);
-        let sig = evaluate_mean_reversion(
-            "BTC", "c", "t", "t-down", Some(&b), None, &t, now, &cfg,
-        )
-        .expect("a deep crash in the cheap zone must fire");
+        let sig = evaluate_mean_reversion("BTC", "c", "t", "t-down", Some(&b), None, &t, now, &cfg)
+            .expect("a deep crash in the cheap zone must fire");
         assert_eq!(sig.strategy, "mean_reversion");
         assert_eq!(sig.direction, SignalDirection::Up);
         assert_eq!(sig.token_id, "t");
@@ -724,34 +748,67 @@ mod tests {
         // (a) recovered mid (above the cheap cap) — the zone guard refuses even
         // though the tracker still has massive historical state.
         let b = book(0.54, 0.56);
-        assert!(evaluate_mean_reversion(
-            "BTC", "c", "t2", "t2-down", Some(&b), None, &t, now, &cfg
-        ).is_none(), "a mid above the cheap cap must not fire");
+        assert!(
+            evaluate_mean_reversion("BTC", "c", "t2", "t2-down", Some(&b), None, &t, now, &cfg)
+                .is_none(),
+            "a mid above the cheap cap must not fire"
+        );
 
         // (b) an in-zone mid but no real drop history (the marker token 'cheap'
         // had a deep fall; a token never seen falling deep does not pass the
         // drop gate).
         let still_deep = book(0.29, 0.31);
-        assert!(evaluate_mean_reversion(
-            "BTC", "c", "t", "t-down", Some(&still_deep), None, &t, now, &cfg
-        ).is_some(), "sanity: the real crash token fires");
+        assert!(
+            evaluate_mean_reversion(
+                "BTC",
+                "c",
+                "t",
+                "t-down",
+                Some(&still_deep),
+                None,
+                &t,
+                now,
+                &cfg
+            )
+            .is_some(),
+            "sanity: the real crash token fires"
+        );
 
         // (c) wide book refused.
         let wide = book_d(dec!(0.15), dec!(0.40)); // spread ~91%
-        assert!(evaluate_mean_reversion(
-            "BTC", "c", "t", "t-down", Some(&wide), None, &t, now + 1_000, &cfg
-        ).is_none(), "a wide book must not be bought");
+        assert!(
+            evaluate_mean_reversion(
+                "BTC",
+                "c",
+                "t",
+                "t-down",
+                Some(&wide),
+                None,
+                &t,
+                now + 1_000,
+                &cfg
+            )
+            .is_none(),
+            "a wide book must not be bought"
+        );
 
         // (d) degenerate one-sided book refused.
-        let one_sided = OrderbookSnapshot::from_levels(
-            "t",
-            vec![(dec!(0.29), dec!(100))],
-            vec![],
-            0,
+        let one_sided =
+            OrderbookSnapshot::from_levels("t", vec![(dec!(0.29), dec!(100))], vec![], 0);
+        assert!(
+            evaluate_mean_reversion(
+                "BTC",
+                "c",
+                "t",
+                "t-down",
+                Some(&one_sided),
+                None,
+                &t,
+                now + 2_000,
+                &cfg
+            )
+            .is_none()
         );
-        assert!(evaluate_mean_reversion(
-            "BTC", "c", "t", "t-down", Some(&one_sided), None, &t, now + 2_000, &cfg
-        ).is_none());
     }
 
     #[test]
@@ -764,10 +821,8 @@ mod tests {
         // entry_factor would put the bid above the live best bid: clamp DOWN to
         // the bid, still strictly below the mid.
         let b = book(0.32, 0.33); // mid 0.325, entry 0.32 = exactly the bid -> clamp
-        let sig = evaluate_mean_reversion(
-            "BTC", "c", "t", "t-down", Some(&b), None, &t, now, &cfg,
-        )
-        .expect("in-zone, crash-fallen token must fire");
+        let sig = evaluate_mean_reversion("BTC", "c", "t", "t-down", Some(&b), None, &t, now, &cfg)
+            .expect("in-zone, crash-fallen token must fire");
         assert_eq!(sig.price, dec!(0.32), "clamped to the best bid");
         assert!(sig.price < b.mid_price);
 
@@ -780,7 +835,15 @@ mod tests {
         floor_cfg.max_spread_pct = dec!(20);
         let b2 = book(0.065, 0.075); // spread 14.3% — admitted by the widened cap
         let s2 = evaluate_mean_reversion(
-            "BTC", "c", "t", "t-down", Some(&b2), None, &t, now, &floor_cfg,
+            "BTC",
+            "c",
+            "t",
+            "t-down",
+            Some(&b2),
+            None,
+            &t,
+            now,
+            &floor_cfg,
         )
         .expect("floor-safe entry must fire");
         assert_eq!(s2.price, dec!(0.06), "round2-floor entry");
@@ -791,7 +854,10 @@ mod tests {
     fn momentum_gate_is_waived_and_timing_is_not() {
         let s = MeanReversionBuiltin::new(MeanReversionConfig::default());
         let ex = s.gate_exemptions();
-        assert!(ex.momentum, "the fade leg exists to enter against the momentum gate");
+        assert!(
+            ex.momentum,
+            "the fade leg exists to enter against the momentum gate"
+        );
         assert!(!ex.timing, "the round-timing window stays enforced");
         assert_eq!(ex.gates(), vec!["momentum"]);
         assert_eq!(s.name(), "mean_reversion");
@@ -819,7 +885,11 @@ mod tests {
             let b = book_d(p - dec!(0.01), p + dec!(0.01));
             replay.on_tick(&tick_ctx(&[m.clone()], "t", &b, 1, 870, now));
         }
-        assert_eq!(replay.open_positions(), 1, "the twin must fade the crash via its own logic");
+        assert_eq!(
+            replay.open_positions(),
+            1,
+            "the twin must fade the crash via its own logic"
+        );
 
         // Near-certain win: above 0.64 a 0.32 entry runs past the fixed
         // take-profit backstop (+100%) and the shared exit policy banks it —
@@ -831,7 +901,11 @@ mod tests {
         let metrics = Metrics::from_trades(&replay.windowed_trades(1800, now + 1_000));
         assert_eq!(metrics.sample_count, 1);
         assert_eq!(metrics.wins, 1);
-        assert!(metrics.total_pnl > Decimal::ZERO, "expected a profit, got {}", metrics.total_pnl);
+        assert!(
+            metrics.total_pnl > Decimal::ZERO,
+            "expected a profit, got {}",
+            metrics.total_pnl
+        );
     }
 
     #[test]

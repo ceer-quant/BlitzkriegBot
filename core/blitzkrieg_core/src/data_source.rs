@@ -27,7 +27,7 @@
 
 use crate::engine::DataEvent;
 use rust_decimal::Decimal;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -97,21 +97,35 @@ pub fn event_kind(ev: &DataEvent) -> &'static str {
 /// Encode one event as an archive line value (see the module docs for the schema).
 pub fn event_to_json(ev: &DataEvent) -> Value {
     match ev {
-        DataEvent::Book { token_id, bids, asks, now_ms } => json!({
+        DataEvent::Book {
+            token_id,
+            bids,
+            asks,
+            now_ms,
+        } => json!({
             "at": now_ms,
             "k": "book",
             "t": token_id,
             "b": levels_json(bids),
             "a": levels_json(asks),
         }),
-        DataEvent::TopOfBook { token_id, best_bid, best_ask, now_ms } => json!({
+        DataEvent::TopOfBook {
+            token_id,
+            best_bid,
+            best_ask,
+            now_ms,
+        } => json!({
             "at": now_ms,
             "k": "top",
             "t": token_id,
             "bb": best_bid.map(|d| d.to_string()),
             "ba": best_ask.map(|d| d.to_string()),
         }),
-        DataEvent::Spot { asset, price, now_ms } => json!({
+        DataEvent::Spot {
+            asset,
+            price,
+            now_ms,
+        } => json!({
             "at": now_ms,
             "k": "spot",
             "s": asset,
@@ -131,7 +145,10 @@ fn levels_json(levels: &[(Decimal, Decimal)]) -> Value {
         levels
             .iter()
             .map(|(p, s)| {
-                Value::Array(vec![Value::String(p.to_string()), Value::String(s.to_string())])
+                Value::Array(vec![
+                    Value::String(p.to_string()),
+                    Value::String(s.to_string()),
+                ])
             })
             .collect(),
     )
@@ -143,7 +160,10 @@ pub fn event_from_json(v: &Value) -> Result<DataEvent, String> {
         .get("at")
         .and_then(Value::as_i64)
         .ok_or_else(|| "missing/invalid `at`".to_string())?;
-    let kind = v.get("k").and_then(Value::as_str).ok_or_else(|| "missing `k`".to_string())?;
+    let kind = v
+        .get("k")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing `k`".to_string())?;
     match kind {
         "book" => Ok(DataEvent::Book {
             token_id: str_field(v, "t")?,
@@ -173,7 +193,10 @@ pub fn event_from_json(v: &Value) -> Result<DataEvent, String> {
 }
 
 fn str_field(v: &Value, key: &str) -> Result<String, String> {
-    v.get(key).and_then(Value::as_str).map(str::to_string).ok_or_else(|| format!("missing `{key}`"))
+    v.get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("missing `{key}`"))
 }
 
 fn dec_field(v: &Value, key: &str) -> Result<Decimal, String> {
@@ -183,7 +206,9 @@ fn dec_field(v: &Value, key: &str) -> Result<Decimal, String> {
 
 fn dec_value(v: &Value) -> Result<Decimal, String> {
     match v {
-        Value::String(s) => Decimal::from_str_exact(s.trim()).map_err(|e| format!("bad decimal `{s}`: {e}")),
+        Value::String(s) => {
+            Decimal::from_str_exact(s.trim()).map_err(|e| format!("bad decimal `{s}`: {e}"))
+        }
         Value::Number(n) => {
             Decimal::from_str_exact(&n.to_string()).map_err(|e| format!("bad decimal `{n}`: {e}"))
         }
@@ -206,7 +231,9 @@ fn levels(v: Option<&Value>) -> Result<Vec<(Decimal, Decimal)>, String> {
     };
     let mut out = Vec::with_capacity(arr.len());
     for lvl in arr {
-        let pair = lvl.as_array().ok_or_else(|| format!("expected [price,size], got {lvl}"))?;
+        let pair = lvl
+            .as_array()
+            .ok_or_else(|| format!("expected [price,size], got {lvl}"))?;
         if pair.len() != 2 {
             return Err(format!("expected [price,size], got {lvl}"));
         }
@@ -282,7 +309,11 @@ impl EventArchive {
     }
 
     /// Open (append/create) an archive with `rotate_bytes` per segment.
-    pub fn open_with_rotation(path: &Path, max_bytes: u64, rotate_bytes: u64) -> std::io::Result<Self> {
+    pub fn open_with_rotation(
+        path: &Path,
+        max_bytes: u64,
+        rotate_bytes: u64,
+    ) -> std::io::Result<Self> {
         Self::open_full(path, max_bytes, rotate_bytes, 0)
     }
 
@@ -332,7 +363,10 @@ impl EventArchive {
             last_flush_ms: i64::MIN / 2,
         };
         if !owned {
-            archive.stop("locked", "another process is already recording this archive");
+            archive.stop(
+                "locked",
+                "another process is already recording this archive",
+            );
         }
         Ok(archive)
     }
@@ -380,7 +414,11 @@ impl EventArchive {
             return;
         }
         // 3. Reopen the configured path for the next segment.
-        match OpenOptions::new().create(true).append(true).open(&self.path) {
+        match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
             Ok(f) => {
                 if !claim(&f) {
                     // Someone else grabbed the path between the rename and here.
@@ -488,7 +526,9 @@ fn sink_file() -> File {
         .create(true)
         .append(true)
         .open(std::env::temp_dir().join(format!("bk-archive-sink-{}", std::process::id())))
-        .unwrap_or_else(|_| File::create(std::env::temp_dir().join("bk-archive-sink")).expect("temp sink"))
+        .unwrap_or_else(|_| {
+            File::create(std::env::temp_dir().join("bk-archive-sink")).expect("temp sink")
+        })
 }
 
 /// Take an exclusive advisory lock on the archive file. Two cores pointed at one
@@ -513,7 +553,10 @@ fn free_bytes_at(path: &Path) -> Option<u64> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
-        let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
         let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
         // SAFETY: `c` is a valid NUL-terminated path and `st` is only read after
         // statvfs reports success.
@@ -535,7 +578,10 @@ fn free_bytes_at(path: &Path) -> Option<u64> {
 /// `events.jsonl` + venue time 1757851200123 → `events.20250914T140000Z.jsonl`
 /// (UTC). Falls back to a numeric stamp when the time cannot be decoded.
 fn next_segment_path(path: &Path, at_ms: i64) -> PathBuf {
-    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "events".into());
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "events".into());
     let ext = path.extension().map(|s| s.to_string_lossy().to_string());
     let name = match utc_stamp(at_ms) {
         Some(stamp) => format!("{stem}.{stamp}"),
@@ -555,7 +601,10 @@ fn next_segment_path(path: &Path, at_ms: i64) -> PathBuf {
         return candidate;
     }
     for n in 2..10_000u32 {
-        let alt = match (utc_stamp(at_ms), path.extension().map(|s| s.to_string_lossy().to_string())) {
+        let alt = match (
+            utc_stamp(at_ms),
+            path.extension().map(|s| s.to_string_lossy().to_string()),
+        ) {
             (Some(stamp), Some(e)) if !e.is_empty() => format!("{stem}.{stamp}-{n:04}.{e}"),
             (Some(stamp), _) => format!("{stem}.{stamp}-{n:04}"),
             (None, Some(e)) if !e.is_empty() => format!("{stem}.{at_ms}-{n:04}.{e}"),
@@ -608,7 +657,11 @@ impl DataSink for EventArchive {
             }
         };
         let n = line.len() as u64 + 1;
-        if let Err(e) = self.file.write_all(line.as_bytes()).and_then(|_| self.file.write_all(b"\n")) {
+        if let Err(e) = self
+            .file
+            .write_all(line.as_bytes())
+            .and_then(|_| self.file.write_all(b"\n"))
+        {
             let msg = format!("write failed: {e}");
             self.dropped += 1;
             self.stop("io", &msg);
@@ -653,7 +706,11 @@ impl DataSink for EventArchive {
             s.path,
             s.events,
             s.bytes,
-            if s.recording { "" } else { ", recording stopped" }
+            if s.recording {
+                ""
+            } else {
+                ", recording stopped"
+            }
         )
     }
 }
@@ -795,7 +852,10 @@ impl SegmentSource {
     /// its UTC-stamped siblings), in write order. Returns an error when nothing
     /// matched, so a typo in the path is still reported.
     pub fn open_dir(path: &Path) -> Result<Self, String> {
-        let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
         let stem = path
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -806,7 +866,9 @@ impl SegmentSource {
         let entries = std::fs::read_dir(dir)
             .map_err(|e| format!("cannot read archive dir {}: {e}", dir.display()))?;
         for e in entries.flatten() {
-            let Some(name) = e.file_name().to_str().map(str::to_string) else { continue };
+            let Some(name) = e.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
             if !name.ends_with(".jsonl") {
                 continue;
             }
@@ -819,22 +881,42 @@ impl SegmentSource {
             }
         }
         if names.is_empty() {
-            return Err(format!("no archive segments matching {} in {}", path.display(), dir.display()));
+            return Err(format!(
+                "no archive segments matching {} in {}",
+                path.display(),
+                dir.display()
+            ));
         }
         // Order by write time, derived from the name, not by raw bytes: a rotated
         // segment is `stem.<stamp>[-<seq>].jsonl` and the live path is `stem.jsonl`.
         // Raw lexicographic order would put `-0002` before `.jsonl` and the live
         // path in the middle — replay would then mix different instants together.
-        names.sort_by(|a, b| segment_sort_key(&stem, a, live.as_deref()).cmp(&segment_sort_key(&stem, b, live.as_deref())));
+        names.sort_by(|a, b| {
+            segment_sort_key(&stem, a, live.as_deref()).cmp(&segment_sort_key(
+                &stem,
+                b,
+                live.as_deref(),
+            ))
+        });
 
         let mut sources = Vec::with_capacity(names.len());
         for name in &names {
             let p = dir.join(name);
-            sources
-                .push(ReplaySource::open(&p).map_err(|e| format!("cannot open segment {}: {e}", p.display()))?);
+            sources.push(
+                ReplaySource::open(&p)
+                    .map_err(|e| format!("cannot open segment {}: {e}", p.display()))?,
+            );
         }
         let label = format!("{} ({} segment(s))", path.display(), sources.len());
-        Ok(Self { sources, current: 0, events: 0, skipped: 0, out_of_order: 0, last_at_ms: None, label })
+        Ok(Self {
+            sources,
+            current: 0,
+            events: 0,
+            skipped: 0,
+            out_of_order: 0,
+            last_at_ms: None,
+            label,
+        })
     }
 
     pub fn segments(&self) -> usize {
@@ -916,11 +998,17 @@ mod tests {
 
     fn all_events(now: i64) -> Vec<DataEvent> {
         vec![
-            DataEvent::RoundMarkets { markets: vec![market(now)], now_ms: now },
+            DataEvent::RoundMarkets {
+                markets: vec![market(now)],
+                now_ms: now,
+            },
             DataEvent::Book {
                 token_id: "up".into(),
                 // Sizes with many digits: must survive the round trip exactly.
-                bids: vec![(dec!(0.43), dec!(4.444444444444444444)), (dec!(0.42), dec!(100))],
+                bids: vec![
+                    (dec!(0.43), dec!(4.444444444444444444)),
+                    (dec!(0.42), dec!(100)),
+                ],
                 asks: vec![(dec!(0.45), dec!(12.5))],
                 now_ms: now + 1,
             },
@@ -930,31 +1018,69 @@ mod tests {
                 best_ask: None,
                 now_ms: now + 2,
             },
-            DataEvent::Spot { asset: "BTC".into(), price: dec!(62850.123456789), now_ms: now + 3 },
+            DataEvent::Spot {
+                asset: "BTC".into(),
+                price: dec!(62850.123456789),
+                now_ms: now + 3,
+            },
         ]
     }
 
     fn eq(a: &DataEvent, b: &DataEvent) {
         match (a, b) {
             (
-                DataEvent::Book { token_id: t1, bids: b1, asks: a1, now_ms: n1 },
-                DataEvent::Book { token_id: t2, bids: b2, asks: a2, now_ms: n2 },
+                DataEvent::Book {
+                    token_id: t1,
+                    bids: b1,
+                    asks: a1,
+                    now_ms: n1,
+                },
+                DataEvent::Book {
+                    token_id: t2,
+                    bids: b2,
+                    asks: a2,
+                    now_ms: n2,
+                },
             ) => {
                 assert_eq!((t1, b1, a1, n1), (t2, b2, a2, n2));
             }
             (
-                DataEvent::TopOfBook { token_id: t1, best_bid: b1, best_ask: a1, now_ms: n1 },
-                DataEvent::TopOfBook { token_id: t2, best_bid: b2, best_ask: a2, now_ms: n2 },
+                DataEvent::TopOfBook {
+                    token_id: t1,
+                    best_bid: b1,
+                    best_ask: a1,
+                    now_ms: n1,
+                },
+                DataEvent::TopOfBook {
+                    token_id: t2,
+                    best_bid: b2,
+                    best_ask: a2,
+                    now_ms: n2,
+                },
             ) => {
                 assert_eq!((t1, b1, a1, n1), (t2, b2, a2, n2));
             }
             (
-                DataEvent::Spot { asset: s1, price: p1, now_ms: n1 },
-                DataEvent::Spot { asset: s2, price: p2, now_ms: n2 },
+                DataEvent::Spot {
+                    asset: s1,
+                    price: p1,
+                    now_ms: n1,
+                },
+                DataEvent::Spot {
+                    asset: s2,
+                    price: p2,
+                    now_ms: n2,
+                },
             ) => assert_eq!((s1, p1, n1), (s2, p2, n2)),
             (
-                DataEvent::RoundMarkets { markets: m1, now_ms: n1 },
-                DataEvent::RoundMarkets { markets: m2, now_ms: n2 },
+                DataEvent::RoundMarkets {
+                    markets: m1,
+                    now_ms: n1,
+                },
+                DataEvent::RoundMarkets {
+                    markets: m2,
+                    now_ms: n2,
+                },
             ) => assert_eq!((m1, n1), (m2, n2)),
             _ => panic!("kind mismatch: {a:?} vs {b:?}"),
         }
@@ -971,7 +1097,11 @@ mod tests {
 
     #[test]
     fn decimals_survive_round_trip_exactly() {
-        let ev = DataEvent::Spot { asset: "BTC".into(), price: dec!(0.07), now_ms: 1 };
+        let ev = DataEvent::Spot {
+            asset: "BTC".into(),
+            price: dec!(0.07),
+            now_ms: 1,
+        };
         let back = event_from_json(&event_to_json(&ev)).unwrap();
         match back {
             DataEvent::Spot { price, .. } => assert_eq!(price, dec!(0.07)),
@@ -984,7 +1114,9 @@ mod tests {
             now_ms: 1,
         };
         match event_from_json(&event_to_json(&ev)).unwrap() {
-            DataEvent::Book { bids, .. } => assert_eq!(bids, vec![(dec!(0.01), dec!(4.444444444444444444))]),
+            DataEvent::Book { bids, .. } => {
+                assert_eq!(bids, vec![(dec!(0.01), dec!(4.444444444444444444))])
+            }
             other => panic!("wrong kind: {other:?}"),
         }
     }
@@ -1080,13 +1212,21 @@ mod tests {
         let mut a = EventArchive::open_with_rotation(&path, 1_000_000, 500).unwrap();
         for i in 0..total {
             // Distinct venue timestamps so segment names are deterministic.
-            let ev = DataEvent::Spot { asset: "BTC".into(), price: dec!(1), now_ms: 1_757_851_200_000 + i as i64 * 1000 };
+            let ev = DataEvent::Spot {
+                asset: "BTC".into(),
+                price: dec!(1),
+                now_ms: 1_757_851_200_000 + i as i64 * 1000,
+            };
             a.record_at(event_at_ms(&ev), &ev);
         }
         a.flush();
         let st = a.status();
         assert!(st.recording, "rotation must not stop recording");
-        assert!(st.segments >= 2, "expected several segments, got {}", st.segments);
+        assert!(
+            st.segments >= 2,
+            "expected several segments, got {}",
+            st.segments
+        );
         assert_eq!(st.events, total, "session counter spans all segments");
         assert_eq!(st.dropped, 0, "rotation must not drop events");
 
@@ -1098,7 +1238,11 @@ mod tests {
             .filter(|p| p.extension().map(|x| x == "jsonl").unwrap_or(false))
             .collect();
         segments.sort();
-        assert_eq!(segments.len() as u64, st.segments + 1, "segments found: {segments:?}");
+        assert_eq!(
+            segments.len() as u64,
+            st.segments + 1,
+            "segments found: {segments:?}"
+        );
         let mut seen = 0u64;
         for seg in &segments {
             let mut src = ReplaySource::open(seg).unwrap();
@@ -1107,7 +1251,10 @@ mod tests {
             }
             assert_eq!(src.skipped_lines(), 0, "corrupt segment {}", seg.display());
         }
-        assert_eq!(seen, total, "replaying all segments must yield every event exactly once");
+        assert_eq!(
+            seen, total,
+            "replaying all segments must yield every event exactly once"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1122,13 +1269,20 @@ mod tests {
         // A floor larger than any real volume: the first rotation must stop us.
         let mut a = EventArchive::open_full(&path, 0, 200, u64::MAX / 2).unwrap();
         for i in 0..200 {
-            let ev = DataEvent::Spot { asset: "BTC".into(), price: dec!(1), now_ms: 1_757_851_200_000 + i };
+            let ev = DataEvent::Spot {
+                asset: "BTC".into(),
+                price: dec!(1),
+                now_ms: 1_757_851_200_000 + i,
+            };
             a.record_at(event_at_ms(&ev), &ev);
         }
         let st = a.status();
         assert!(!st.recording, "guard must stop recording, not just warn");
         assert_eq!(st.stopped_reason.as_deref(), Some("disk"));
-        assert!(st.dropped > 0, "events after the stop are counted as dropped");
+        assert!(
+            st.dropped > 0,
+            "events after the stop are counted as dropped"
+        );
 
         // Nothing was deleted: every event written before the stop still replays,
         // across the rotated segment and the (now idle) live path.
@@ -1146,7 +1300,10 @@ mod tests {
                 n += 1;
             }
         }
-        assert!(n > 0, "the segments written before the stop are intact: {segments:?}");
+        assert!(
+            n > 0,
+            "the segments written before the stop are intact: {segments:?}"
+        );
         assert!(n <= st.events, "replay cannot exceed what was recorded");
         assert_eq!(n, st.events, "every recorded event is still readable");
 
@@ -1165,7 +1322,11 @@ mod tests {
         let total = 150u64;
         let mut a = EventArchive::open_with_rotation(&path, 0, 400).unwrap();
         for i in 0..total {
-            let ev = DataEvent::Spot { asset: "BTC".into(), price: dec!(1), now_ms: 1_757_851_200_000 + i as i64 };
+            let ev = DataEvent::Spot {
+                asset: "BTC".into(),
+                price: dec!(1),
+                now_ms: 1_757_851_200_000 + i as i64,
+            };
             a.record_at(event_at_ms(&ev), &ev);
         }
         a.flush();
@@ -1177,7 +1338,11 @@ mod tests {
         while let Some(te) = src.next_event() {
             times.push(te.at_ms);
         }
-        assert_eq!(times.len() as u64, total, "every event across every segment is replayed");
+        assert_eq!(
+            times.len() as u64,
+            total,
+            "every event across every segment is replayed"
+        );
         let mut sorted = times.clone();
         sorted.sort();
         assert_eq!(times, sorted, "segments are read in write (time) order");
@@ -1195,10 +1360,21 @@ mod tests {
             let _ = std::fs::remove_file(e.path());
         }
         // Our archive, a rotated sibling, and two files that are NOT ours.
-        std::fs::write(&path, "{\"at\":1,\"k\":\"spot\",\"s\":\"BTC\",\"p\":\"1\"}\n").unwrap();
-        std::fs::write(dir.join("events.20250914T120000Z.jsonl"), "{\"at\":2,\"k\":\"spot\",\"s\":\"BTC\",\"p\":\"2\"}\n")
-            .unwrap();
-        std::fs::write(dir.join("other.jsonl"), "{\"at\":3,\"k\":\"spot\",\"s\":\"BTC\",\"p\":\"3\"}\n").unwrap();
+        std::fs::write(
+            &path,
+            "{\"at\":1,\"k\":\"spot\",\"s\":\"BTC\",\"p\":\"1\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("events.20250914T120000Z.jsonl"),
+            "{\"at\":2,\"k\":\"spot\",\"s\":\"BTC\",\"p\":\"2\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("other.jsonl"),
+            "{\"at\":3,\"k\":\"spot\",\"s\":\"BTC\",\"p\":\"3\"}\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("notes.txt"), "not an archive\n").unwrap();
 
         let mut src = SegmentSource::open_dir(&path).unwrap();
@@ -1209,7 +1385,10 @@ mod tests {
         }
         assert_eq!(n, 2);
 
-        assert!(SegmentSource::open_dir(&dir.join("nope.jsonl")).is_err(), "a typo must not silently replay nothing");
+        assert!(
+            SegmentSource::open_dir(&dir.join("nope.jsonl")).is_err(),
+            "a typo must not silently replay nothing"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1218,10 +1397,16 @@ mod tests {
     fn segment_names_are_utc_stamped() {
         // 2025-09-14T12:00:00Z
         let name = next_segment_path(Path::new("/tmp/events.jsonl"), 1_757_851_200_000);
-        assert_eq!(name.file_name().unwrap().to_string_lossy(), "events.20250914T120000Z.jsonl");
+        assert_eq!(
+            name.file_name().unwrap().to_string_lossy(),
+            "events.20250914T120000Z.jsonl"
+        );
         // A pre-epoch / unset timestamp still yields a usable distinct name.
         let fallback = next_segment_path(Path::new("/tmp/events.jsonl"), 0);
-        assert_ne!(fallback.file_name().unwrap().to_string_lossy(), "events.jsonl");
+        assert_ne!(
+            fallback.file_name().unwrap().to_string_lossy(),
+            "events.jsonl"
+        );
     }
 
     #[test]
@@ -1231,7 +1416,11 @@ mod tests {
         let path = dir.join("events.jsonl");
         let _ = std::fs::remove_file(&path);
 
-        let ev = DataEvent::Spot { asset: "BTC".into(), price: dec!(1), now_ms: 1 };
+        let ev = DataEvent::Spot {
+            asset: "BTC".into(),
+            price: dec!(1),
+            now_ms: 1,
+        };
         let mut a = EventArchive::open(&path, 60).unwrap();
         for _ in 0..50 {
             a.record(&ev);
@@ -1239,7 +1428,10 @@ mod tests {
         let st = a.status();
         assert!(!st.recording, "cap must stop recording");
         assert!(st.events >= 1, "the events written before the cap are kept");
-        assert!(st.dropped > 0, "after the cap, events are dropped (and counted)");
+        assert!(
+            st.dropped > 0,
+            "after the cap, events are dropped (and counted)"
+        );
         // Nothing was deleted: the file still replays.
         let mut src = ReplaySource::open(&path).unwrap();
         let mut n = 0;
@@ -1261,9 +1453,16 @@ mod tests {
         let path = dir.join("events.jsonl");
         let _ = std::fs::remove_file(&path);
 
-        let ev = DataEvent::Spot { asset: "BTC".into(), price: dec!(1), now_ms: 1 };
+        let ev = DataEvent::Spot {
+            asset: "BTC".into(),
+            price: dec!(1),
+            now_ms: 1,
+        };
         let mut first = EventArchive::open(&path, 0).unwrap();
-        assert!(first.status().recording, "the first writer owns the archive");
+        assert!(
+            first.status().recording,
+            "the first writer owns the archive"
+        );
         first.record(&ev);
 
         let mut second = EventArchive::open(&path, 0).unwrap();
@@ -1276,7 +1475,10 @@ mod tests {
         // Dropping the owner releases the lock for the next writer.
         drop(first);
         let third = EventArchive::open(&path, 0).unwrap();
-        assert!(third.status().recording, "the lock is released with the owner");
+        assert!(
+            third.status().recording,
+            "the lock is released with the owner"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

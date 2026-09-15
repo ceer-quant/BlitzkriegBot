@@ -134,7 +134,13 @@ impl<'a> StrategyCtx<'a> {
         now_ms: i64,
         fresh_book: &'a dyn Fn(&str) -> Option<OrderbookSnapshot>,
     ) -> Self {
-        Self { markets, round_slot, time_left_sec, now_ms, fresh_book }
+        Self {
+            markets,
+            round_slot,
+            time_left_sec,
+            now_ms,
+            fresh_book,
+        }
     }
 
     /// Markets of the current round.
@@ -226,7 +232,11 @@ pub trait EngineStrategy: Send + Sync {
     /// Evolution is disabled: with no cell the live config stands alone, so a
     /// core that never runs evolution behaves exactly as it did before the
     /// feature existed (acceptance: "evolution off ⇒ unchanged"). Default: ignore.
-    fn set_hot_params(&mut self, _registry: Option<std::sync::Arc<crate::shadow_evolution::ParamRegistry>>) {}
+    fn set_hot_params(
+        &mut self,
+        _registry: Option<std::sync::Arc<crate::shadow_evolution::ParamRegistry>>,
+    ) {
+    }
 
     /// The knobs this strategy declares evolvable, with their domains
     /// (E2-c / #28). Default = none, i.e. **not evolvable**; the host then

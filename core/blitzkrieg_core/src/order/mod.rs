@@ -32,6 +32,10 @@ mod tests {
         // Market orders carry no price and still validate.
         assert!(intent(OrderKind::Market, None).validate().is_ok());
         // Prediction prices must be within (0,1].
-        assert!(intent(OrderKind::Limit, Some(dec!(1.2))).validate().is_err());
+        assert!(
+            intent(OrderKind::Limit, Some(dec!(1.2)))
+                .validate()
+                .is_err()
+        );
     }
 }

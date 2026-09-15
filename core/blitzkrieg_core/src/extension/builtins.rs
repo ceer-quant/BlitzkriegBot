@@ -51,8 +51,12 @@ impl Extension for BinanceSpotExtension {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        self.enabled_at.store(now, std::sync::atomic::Ordering::SeqCst);
-        ctx.log(&format!("binance_spot extension loaded (strategies: {:?})", ctx.strategy_names()));
+        self.enabled_at
+            .store(now, std::sync::atomic::Ordering::SeqCst);
+        ctx.log(&format!(
+            "binance_spot extension loaded (strategies: {:?})",
+            ctx.strategy_names()
+        ));
         Ok(())
     }
 
@@ -61,7 +65,8 @@ impl Extension for BinanceSpotExtension {
     }
 
     async fn on_event(&self, _event: &Event) -> Result<(), String> {
-        self.events_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.events_seen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 }
