@@ -14,7 +14,7 @@ Required environment variables (minimum):
 - `TELEGRAM_BOT_TOKEN` (if using Telegram)
 
 Optional:
-- `WEBCHAT_TOKEN` (WebChat auth)
+- `PANEL_CHAT_TOKEN` (panel chat auth)
 - `SMTP_*` (email alerts)
 - `MARKET_INDEX_*` (market index tuning)
 
@@ -72,7 +72,7 @@ docker run --rm \
   -p 51888:51888 \
   -e ANTHROPIC_API_KEY=... \
   -e TELEGRAM_BOT_TOKEN=... \
-  -e WEBCHAT_TOKEN=... \
+  -e PANEL_CHAT_TOKEN=... \
   -v blitzkrieg_data:/data \
   blitzkrieg
 ```
