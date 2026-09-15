@@ -48,6 +48,29 @@ pub enum Action {
     RefreshPlugins,
 }
 
+/// How far the self-check has got. Advances as snapshots finally arrive with
+/// the properties each stage needs; failures keep the step red with a hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CheckStage {
+    #[default]
+    /// Nothing seen yet — socket connected flag false so far.
+    Connecting,
+    /// Connected but no book/top/round motion yet.
+    Handshake,
+    /// Connected with feed motion (books or tops seen this session).
+    Ready,
+}
+
+/// One bottom-bar hint a newcomer needs; once consumed, it stops rotating.
+pub const HINTS: [&str; 6] = [
+    "press : to type a command — try `status`",
+    "1-5 switch pages (Overview/Positions/Trades/Plugins)",
+    "? for the full key & command help",
+    "r refresh now · q quit",
+    "start with --manage to enable start/stop commands",
+    "Plugins: ↑/↓ move · Enter toggle (dangerous toggles ask y/n)",
+];
+
 pub struct App {
     pub snap: UiSnapshot,
     pub tab: Tab,
@@ -66,6 +89,19 @@ pub struct App {
     /// Pending confirmation for a dangerous plugin toggle: `Some(text)` shows
     /// the confirm bar; `y` executes, anything else cancels.
     pub pending_confirmation: Option<String>,
+    /// Self-check stage derived from snapshots (E9-f #61).
+    pub check: CheckStage,
+    /// Hints already consumed this session (bottom bar stops rotating them).
+    pub hints_used: [bool; HINTS.len()],
+    /// History of executed commands, oldest first (↑/↓ recall).
+    pub history: Vec<String>,
+    /// `Some(offset)` while recalling history (0 = newest); `None` when idle.
+    pub history_browse: Option<usize>,
+    /// Help overlay is visible (`?` toggles).
+    pub help_visible: bool,
+    /// Non-empty while the core's kill switch is engaged — the body renders a
+    /// full-screen red banner until `risk.resume` clears it.
+    pub kill_banner: Option<String>,
 }
 
 /// Cap the in-panel log so a long soak can't grow it without bound.
@@ -87,6 +123,12 @@ impl App {
             last_update: None,
             plugin_focus: 0,
             pending_confirmation: None,
+            check: CheckStage::default(),
+            hints_used: [false; HINTS.len()],
+            history: Vec::new(),
+            history_browse: None,
+            help_visible: false,
+            kill_banner: None,
         }
     }
 
@@ -103,6 +145,21 @@ impl App {
         self.managed = managed;
         self.pid = pid;
         self.last_update = Some(Instant::now());
+        // Self-check progress: connected → handshake → feed motion.
+        self.check = match self.check {
+            CheckStage::Connecting if self.snap.connected => CheckStage::Handshake,
+            CheckStage::Connecting => CheckStage::Connecting,
+            stage => {
+                let st = self.snap.stats.as_ref();
+                if self.snap.connected
+                    && st.is_some_and(|s| s.books > 0 || s.tops > 0 || s.rounds > 0)
+                {
+                    CheckStage::Ready
+                } else {
+                    stage
+                }
+            }
+        };
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
@@ -127,23 +184,70 @@ impl App {
                     let cmd = self.input.trim().to_string();
                     self.input.clear();
                     self.input_active = false;
+                    self.history_browse = None;
                     if cmd.is_empty() {
                         return Action::None;
                     }
+                    self.hints_used[0] = true; // command bar consumed
+                    self.history.push(cmd.clone());
                     self.log(format!("> {cmd}"));
                     return Action::RunCommand(cmd);
                 }
                 KeyCode::Esc => {
                     self.input_active = false;
                     self.input.clear();
+                    self.history_browse = None;
                     return Action::None;
                 }
                 KeyCode::Backspace => {
                     self.input.pop();
+                    self.history_browse = None;
+                    return Action::None;
+                }
+                KeyCode::Up => {
+                    // Recall: walk backward through executed commands.
+                    if !self.history.is_empty() {
+                        let n = self.history.len();
+                        let off = self.history_browse.unwrap_or(0).min(n - 1);
+                        let off = self.history_browse.replace(off).map(|_| off).unwrap_or(0);
+                        let idx = n - 1 - off;
+                        self.input = self.history[idx].clone();
+                        let next = (off + 1).min(n);
+                        self.history_browse = Some(next);
+                    }
+                    return Action::None;
+                }
+                KeyCode::Down => {
+                    // Forward through history; past the end clears the line.
+                    if let Some(off) = self.history_browse {
+                        let n = self.history.len();
+                        match off.checked_sub(1) {
+                            Some(next_off) => {
+                                self.history_browse = Some(next_off);
+                                let idx = n - 1 - next_off;
+                                self.input = self.history[idx].clone();
+                            }
+                            None => {
+                                self.history_browse = None;
+                                self.input.clear();
+                            }
+                        }
+                    }
+                    return Action::None;
+                }
+                KeyCode::Tab => {
+                    self.input = complete(&self.input);
                     return Action::None;
                 }
                 KeyCode::Char(c) => {
                     self.input.push(c);
+                    self.history_browse = None;
+                    if c == '?' && self.input.trim() == "?" {
+                        // `?` as the first thing typed opens help instead.
+                        self.input.clear();
+                        self.input_active = false;
+                        self.help_visible = true;
+                    }
                     return Action::None;
                 }
                 _ => return Action::None,
@@ -153,9 +257,15 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
+            KeyCode::Char('?') => {
+                self.help_visible = !self.help_visible;
+                self.hints_used[2] = true;
+                Action::None
+            }
             KeyCode::Char(':') | KeyCode::Char('/') => {
                 self.input_active = true;
                 self.input.clear();
+                self.history_browse = None;
                 Action::None
             }
             KeyCode::Char('r') | KeyCode::Char('R') => Action::Refresh,
@@ -202,6 +312,51 @@ impl App {
             _ => Action::None,
         }
     }
+}
+
+/// The commands the bar completes against (longest-prefix, one candidate).
+pub const COMMANDS: [&str; 9] = [
+    "status",
+    "positions",
+    "strategy",
+    "extension",
+    "markets",
+    "help",
+    "start BTC,ETH,SOL,XRP --dry-run",
+    "stop",
+    "risk",
+];
+
+/// Tab-completion: when exactly one known command starts with the current
+/// input, fill it; with several, fill their longest common prefix.
+fn complete(input: &str) -> String {
+    let t = input.trim_start_matches(':').trim();
+    if t.is_empty() {
+        return input.to_string();
+    }
+    let cands: Vec<&str> = COMMANDS
+        .iter()
+        .filter(|c| c.starts_with(t))
+        .copied()
+        .collect();
+    match cands.first() {
+        None => input.to_string(),
+        Some(first) => {
+            let shared = cands.iter().fold(first.to_string(), |acc: String, c| {
+                common_prefix(&acc, c).to_string()
+            });
+            shared
+        }
+    }
+}
+
+fn common_prefix<'a>(a: &'a str, b: &str) -> &'a str {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut i = 0;
+    while i < a.len() && i < b.len() && a[i] == b[i] {
+        i += 1;
+    }
+    std::str::from_utf8(&a[..i]).unwrap_or("")
 }
 
 impl App {
