@@ -101,8 +101,12 @@
 
 盘点发现三个硬阻塞，不解决则「三个策略并发」只是名义上的：
 
-1. **无按策略资金分配**：`size_usd` / `min_shares` / `max_shares` / `max_positions` 全是全局单值
-   （`engine.rs`），三策略共用 `max_positions=2` 会互相饿死。
+1. ~~**无按策略资金分配**：`size_usd` / `min_shares` / `max_shares` / `max_positions` 全是全局单值
+   （`engine.rs`），三策略共用 `max_positions=2` 会互相饿死。~~
+   **已解决（E2-a / #26，2026-09-15）**：`--strategy-limit` 扩展出 per-strategy
+   `size_usd`/`min_shares`/`max_shares` + 原有的 `max_open_positions`/`max_open_notional_usd`；
+   全局值降为**兜底与硬上限**（策略覆盖一律夹回全局风控区间）。
+   `engine.stats.strategies[]` 上报生效定寸与配额占用。全局 `max_positions` 仍为总容量闸门。
 2. **全局门禁会误杀逆向策略**：spot 动量过滤（`engine.rs`）在「现货正逆着持仓走」时拒绝下单——
    而这**正是**逆向策略要入场的情形；`min_round_age` / `min_time_left` 同理。需要按策略 opt-out。
 3. **影子进化只能碰一个策略**：`MutableParams` 全局且被写死成 spread_arb 的四个旋钮，
@@ -113,7 +117,10 @@
 
 ### 3.1 验收
 
-- 三个策略可同时启用，各自独立 sizing 与 `max_positions`，`engine.stats.strategies[]` 分账正确。
+- ~~三个策略可同时启用，各自独立 sizing 与 `max_positions`，`engine.stats.strategies[]` 分账正确。~~
+  **E2-a 已达成（#26）**：`size_usd`/`min_shares`/`max_shares` 与 `max_open_positions` 均可按策略配置，
+  三策略同周期各自定寸、配额互不干扰，`engine.stats.strategies[]` 上报 `sizingSource`/`effective*`/配额占用；
+  全局值仍是兜底与天花板。
 - 逆向策略可显式关闭动量门禁（配置项，默认关 = 行为不变）。
 - 影子进化对**每个**启用策略独立评估、独立审计（`data/evolution/<strategy>.jsonl`），
   应用后热更新只影响该策略。

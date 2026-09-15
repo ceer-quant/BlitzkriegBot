@@ -1419,3 +1419,49 @@ D 批（§40）之后剩余的全部用户可见命名面。**不改业务逻辑
 
 **验证（本批）**：见对应 PR 的 CI（rust-check 在 ubuntu 真构建并驱动 2 个 cdylib；
 node-check / secret-scan 不变）。
+
+## 43. E2-a 按策略资金分配：per-strategy sizing 与配额占用（Issue #26，2026-09-15）
+
+**问题**：`size_usd`/`min_shares`/`max_shares` 是全局单值，`compute_shares` 与策略名无关；
+三个策略共用一套定寸，配合全局 `max_positions` 会互相饿死（谁先注册谁先占额）。
+
+**改动**
+- `service::StrategyLimit` 在 `max_open_positions`/`max_open_notional_usd` 之外新增
+  `size_usd`/`min_shares`/`max_shares`（均 `Option`，`None` = 继承全局）。JSON 面为
+  camelCase，旧配置反序列化逐位兼容（缺失字段 → `None`）。
+- `engine::EngineConfig` 新增 `strategy_sizes: HashMap<String, StrategySize>`，
+  由 `CoreConfig::engine_config()` 从 `strategy_limits` 投影填充 —— live server 与
+  backtester 共用同一映射，回放 parity 不受影响。
+- `Engine::compute_shares(price)` → `compute_shares(price, strategy)`：取该策略的覆盖
+  （无覆盖即全局），再**统一夹到全局风控区间**：名义额 `min(strat, global)`、
+  张数上限 `min(strat, global)`、张数下限 `max(strat, global)`（且下限不超过上限）。
+  即**全局值是兜底与硬上限**，任何策略配置都突破不了全局风控。新增
+  `Engine::effective_sizing(strategy) -> EffectiveSizing` 供审计/上报复用。
+- 全局 `PositionManager::max_positions`（总容量）**未改**：每策略配额解决「互相饿死」，
+  是否抬高默认总容量属运维配置，不在本 issue 内改动默认业务值。
+- `engine.stats.strategies[]` 增加 `maxOpenPositions`/`maxOpenNotionalUsd`（未配置为 null）、
+  `sizingSource`（`"global"`|`"strategy"`）、`effectiveSizeUsd`/`effectiveMinShares`/`effectiveMaxShares`。
+  客户端 `stats()` 类型同步（新增字段可空，旧内核不报错）。
+- CLI `--strategy-limit` 支持两种形态（3 段旧格式逐位保留；6 段 = 追加
+  `size_usd:min_shares:max_shares`）；段数非 3/6 或任一段非法 → 整条丢弃并告警（不半应用）。
+  `HFT_STRATEGY_LIMITS` 透传与 runner 无需改（字符串直传）。
+
+**语义澄清（实现中发现并固化到测试）**
+- 引擎「每 token 每评估周期至多一单，注册顺序先到先得」，因此多策略并发测试必须让策略
+  作用于**不同 asset/token**，否则同 token 候选会在引擎内先被去重，看起来像配额互相影响。
+- 每策略 `max_open_positions` 统计的是**该策略已开仓位**（`position.strategy` 归属），
+  与全局总容量闸门是两条独立判据：被策略配额拒 → `strategyLimitRejected` + 该策略
+  `limitRejected`；被全局容量/风控拒 → `placeRejected` + 该策略 `ordersRejected`。
+
+**测试**
+- `engine.rs`：无覆盖回落全局且 `strategyScoped=false`；覆盖在全局带内生效；
+  覆盖超全局被夹（名义/上限/下限三向）;下限高于全局上限时以上限为准；
+  同一评估内两策略各自定寸（非同 token）。
+- `service.rs`（`strategy_dispatch_tests`）：三策略同周期各自定寸且互不干扰、
+  `sizingSource`/`effective*` 上报正确；`capped` 配额独立（把 `capped` 打满后不影响 `other`）；
+  策略配额只计自身持仓；全局 `max_positions` 仍按住第三个策略（计 `placeRejected` 而非
+  `strategyLimitRejected`）；贪婪覆盖被夹回全局。
+- `main.rs`：3 段/6 段解析、`-` 逐维继承、畸形输入整条丢弃、同名后者覆盖前者。
+- 既有 P-1.1 单策略与默认配置测试断言**未改**，继续通过 → 默认配置行为逐位一致。
+
+**验证（本批）**：见 PR 的 CI（rust-check 全绿；node-check / secret-scan 不变）。

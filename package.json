@@ -20,6 +20,7 @@
     "core:parity": "npm run build && node scripts/core-parity.mjs",
     "core:parity-engines": "npm run build && node scripts/parity-engines.mjs",
     "core:observe": "npm run build && node scripts/dry-observe.mjs",
+    "core:strategy-limit": "node scripts/strategy-limit-check.mjs",
     "test": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/**/*.test.ts",
     "ci": "npm run typecheck && npm run test && npm run build",
     "postinstall": "node -e \"try{const{pipeline,env}=require('@xenova/transformers');env.cacheDir='./.transformers-cache';pipeline('feature-extraction','Xenova/all-MiniLM-L6-v2',{quantized:true}).then(()=>console.log('Embedding model cached')).catch(()=>{})}catch{}\"",

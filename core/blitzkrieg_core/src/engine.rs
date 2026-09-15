@@ -43,6 +43,37 @@ pub struct EngineConfig {
     pub size_usd: Decimal,
     pub min_shares: Decimal,
     pub max_shares: Decimal,
+    /// Per-strategy sizing overrides (E2-a). Absent strategies use the globals;
+    /// a present override is always clamped so it can never exceed the global
+    /// risk values — global is both the fallback and the ceiling.
+    pub strategy_sizes: HashMap<String, StrategySize>,
+}
+
+/// Optional per-strategy sizing knobs (E2-a). Every field is optional; `None`
+/// falls back to the matching global `EngineConfig` value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StrategySize {
+    pub size_usd: Option<Decimal>,
+    pub min_shares: Option<Decimal>,
+    pub max_shares: Option<Decimal>,
+}
+
+impl StrategySize {
+    /// True when at least one sizing dimension overrides the global values (a
+    /// `StrategyLimit` that configures only caps reports false).
+    pub fn overrides_anything(&self) -> bool {
+        self.size_usd.is_some() || self.min_shares.is_some() || self.max_shares.is_some()
+    }
+}
+
+/// The sizing knobs actually in force for one strategy after clamping.
+#[derive(Debug, Clone, Copy)]
+pub struct EffectiveSizing {
+    pub size_usd: Decimal,
+    pub min_shares: Decimal,
+    pub max_shares: Decimal,
+    /// Whether a per-strategy override set any of these values.
+    pub strategy_scoped: bool,
 }
 
 impl Default for EngineConfig {
@@ -57,6 +88,7 @@ impl Default for EngineConfig {
             size_usd: Decimal::new(25, 1),        // 2.5
             min_shares: Decimal::from(10),
             max_shares: Decimal::from(10),
+            strategy_sizes: HashMap::new(),
         }
     }
 }
@@ -371,7 +403,7 @@ impl Engine {
                 continue;
             }
 
-            let size = self.compute_shares(sig.price);
+            let size = self.compute_shares(sig.price, &sig.strategy);
             orders.push(crate::model::OrderRequest {
                 token_id: sig.token_id.clone(),
                 condition_id: sig.condition_id,
@@ -524,12 +556,36 @@ impl Engine {
         std::mem::take(&mut self.strategy_exits)
     }
 
-    fn compute_shares(&self, price: Decimal) -> Decimal {
+    fn compute_shares(&self, price: Decimal, strategy: &str) -> Decimal {
+        let sizing = self.effective_sizing(strategy);
         if price <= Decimal::ZERO {
-            return self.cfg.min_shares;
+            return sizing.min_shares;
         }
-        let raw = (self.cfg.size_usd / price).round();
-        raw.max(self.cfg.min_shares).min(self.cfg.max_shares)
+        let raw = (sizing.size_usd / price).round();
+        raw.max(sizing.min_shares).min(sizing.max_shares)
+    }
+
+    /// The sizing in force for one strategy (E2-a): its own override where
+    /// configured, otherwise the globals — then clamped so a strategy can never
+    /// spend more notional nor hold more shares than the global risk allows.
+    /// `min_shares` is also capped by `max_shares` so the reported band is
+    /// always coherent (the ceiling wins when an override overshoots).
+    pub fn effective_sizing(&self, strategy: &str) -> EffectiveSizing {
+        let globals = EffectiveSizing {
+            size_usd: self.cfg.size_usd,
+            min_shares: self.cfg.min_shares,
+            max_shares: self.cfg.max_shares,
+            strategy_scoped: false,
+        };
+        let Some(over) = self.cfg.strategy_sizes.get(strategy).filter(|s| s.overrides_anything())
+        else {
+            return globals;
+        };
+        let size_usd = over.size_usd.map_or(globals.size_usd, |v| v.min(globals.size_usd));
+        let max_shares = over.max_shares.map_or(globals.max_shares, |v| v.min(globals.max_shares));
+        let min_shares =
+            over.min_shares.map_or(globals.min_shares, |v| v.max(globals.min_shares)).min(max_shares);
+        EffectiveSizing { size_usd, min_shares, max_shares, strategy_scoped: true }
     }
 }
 
@@ -573,6 +629,7 @@ mod tests {
             size_usd: dec!(2.5),
             min_shares: dec!(10),
             max_shares: dec!(10),
+            strategy_sizes: HashMap::new(),
         }
     }
 
@@ -695,9 +752,9 @@ mod tests {
     fn compute_shares_clamps_to_bounds() {
         let e = Engine::new(cfg());
         // 2.5 / 0.25 = 10 shares within [10,10].
-        assert_eq!(e.compute_shares(dec!(0.25)), dec!(10));
+        assert_eq!(e.compute_shares(dec!(0.25), "spread_arb"), dec!(10));
         // Very low price would exceed max → clamped to 10.
-        assert_eq!(e.compute_shares(dec!(0.01)), dec!(10));
+        assert_eq!(e.compute_shares(dec!(0.01), "spread_arb"), dec!(10));
     }
 
     #[test]
@@ -709,14 +766,176 @@ mod tests {
         c.max_shares = dec!(4);
         let e = Engine::new(c);
         // 2.5 / 0.45 ≈ 5.56 → rounds to 6, then clamped down to the 4-share lot.
-        assert_eq!(e.compute_shares(dec!(0.45)), dec!(4));
+        assert_eq!(e.compute_shares(dec!(0.45), "spread_arb"), dec!(4));
         // A wide band lets the nominal size win: 2.5 / 0.25 = 10 within [2,20].
         let mut c2 = cfg();
         c2.min_shares = dec!(2);
         c2.max_shares = dec!(20);
         let e2 = Engine::new(c2);
-        assert_eq!(e2.compute_shares(dec!(0.25)), dec!(10));
-        assert_eq!(e2.compute_shares(dec!(1.25)), dec!(2));
+        assert_eq!(e2.compute_shares(dec!(0.25), "spread_arb"), dec!(10));
+        assert_eq!(e2.compute_shares(dec!(1.25), "spread_arb"), dec!(2));
+    }
+
+    // ── E2-a per-strategy sizing ────────────────────────────────────────────
+
+    fn sizing_cfg(overrides: &[(&str, StrategySize)]) -> EngineConfig {
+        let mut c = cfg();
+        c.size_usd = dec!(10);
+        c.min_shares = dec!(2);
+        c.max_shares = dec!(20);
+        c.strategy_sizes =
+            overrides.iter().map(|(n, s)| ((*n).to_string(), s.clone())).collect();
+        c
+    }
+
+    #[test]
+    fn strategy_sizing_falls_back_to_the_globals_when_absent() {
+        let e = Engine::new(sizing_cfg(&[]));
+        // No entry at all → the global band, and reported as not strategy-scoped.
+        let s = e.effective_sizing("whatever");
+        assert_eq!(s.size_usd, dec!(10));
+        assert_eq!(s.min_shares, dec!(2));
+        assert_eq!(s.max_shares, dec!(20));
+        assert!(!s.strategy_scoped);
+        assert_eq!(e.compute_shares(dec!(0.50), "whatever"), dec!(20)); // 10/0.5=20
+
+        // A caps-only entry (no sizing fields) must behave exactly like absent.
+        let e2 = Engine::new(sizing_cfg(&[("capped", StrategySize::default())]));
+        assert_eq!(e2.effective_sizing("capped").size_usd, dec!(10));
+        assert!(!e2.effective_sizing("capped").strategy_scoped);
+    }
+
+    #[test]
+    fn strategy_sizing_overrides_take_effect_inside_the_global_band() {
+        // Global band here is [2,20] on a 10u budget (see `sizing_cfg`).
+        let e = Engine::new(sizing_cfg(&[(
+            "small",
+            StrategySize {
+                size_usd: Some(dec!(1)),
+                min_shares: Some(dec!(1)),
+                max_shares: Some(dec!(2)),
+            },
+        )]));
+        let s = e.effective_sizing("small");
+        // The 1-share floor is raised to the global floor (2): the global band
+        // bounds the strategy from BELOW as well, so a lot can never fall under
+        // the venue/risk minimum.
+        assert_eq!((s.size_usd, s.min_shares, s.max_shares), (dec!(1), dec!(2), dec!(2)));
+        assert!(s.strategy_scoped);
+        // 1 / 0.45 ≈ 2.2 → rounds to 2, inside [2,2].
+        assert_eq!(e.compute_shares(dec!(0.45), "small"), dec!(2));
+        // 1 / 0.05 = 20 → clamped to the strategy's own 2-share cap.
+        assert_eq!(e.compute_shares(dec!(0.05), "small"), dec!(2));
+        // 1 / 2.00 = 0.5 → rounds to 1, then raised to the global 2-share floor.
+        assert_eq!(e.compute_shares(dec!(2.00), "small"), dec!(2));
+        // The un-configured sibling keeps using the globals in the same engine.
+        assert_eq!(e.compute_shares(dec!(0.50), "other"), dec!(20));
+    }
+
+    #[test]
+    fn strategy_sizing_can_never_exceed_the_global_risk_ceiling() {
+        // An override that asks for MORE than the global band is clamped: more
+        // notional, a higher share cap and a lower floor are all ignored.
+        let e = Engine::new(sizing_cfg(&[(
+            "greedy",
+            StrategySize {
+                size_usd: Some(dec!(100)),
+                min_shares: Some(dec!(0)),
+                max_shares: Some(dec!(999)),
+            },
+        )]));
+        let s = e.effective_sizing("greedy");
+        assert_eq!(s.size_usd, dec!(10), "notional must be capped at the global budget");
+        assert_eq!(s.max_shares, dec!(20), "share ceiling must clamp to the global max");
+        assert_eq!(s.min_shares, dec!(2), "floor must not drop below the global min");
+        // 100/0.05 would be 2000 shares; the global ceiling still binds.
+        assert_eq!(e.compute_shares(dec!(0.05), "greedy"), dec!(20));
+    }
+
+    #[test]
+    fn strategy_floor_above_the_global_ceiling_still_yields_the_ceiling() {
+        // Degenerate config: floor 50 with a global ceiling of 20. The ceiling
+        // wins (a floor is never allowed to defeat the global risk cap).
+        let e = Engine::new(sizing_cfg(&[(
+            "weird",
+            StrategySize { size_usd: None, min_shares: Some(dec!(50)), max_shares: None },
+        )]));
+        let s = e.effective_sizing("weird");
+        assert_eq!((s.min_shares, s.max_shares), (dec!(20), dec!(20)));
+        assert_eq!(e.compute_shares(dec!(0.10), "weird"), dec!(20));
+    }
+
+    /// Per-asset market helper (the shared `market()` only makes BTC).
+    fn market_of(asset: &str, end_ms: i64) -> CryptoMarket {
+        let lower = asset.to_lowercase();
+        CryptoMarket {
+            asset: asset.into(),
+            condition_id: format!("cond_{asset}"),
+            question_id: format!("q_{asset}"),
+            up_token_id: format!("{lower}_up"),
+            down_token_id: format!("{lower}_down"),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: end_ms,
+            round_slot: end_ms / 1000 / 900,
+            neg_risk: true,
+            question: format!("{asset} up or down"),
+        }
+    }
+
+    #[test]
+    fn two_strategies_size_independently_in_one_evaluation() {
+        // One cycle, two strategies, one dip each on its OWN asset: every entry
+        // carries the strategy's own lot instead of a single global size.
+        let mut e = Engine::new(sizing_cfg(&[
+            ("small", StrategySize {
+                size_usd: Some(dec!(1)),
+                min_shares: Some(dec!(1)),
+                max_shares: Some(dec!(1)),
+            }),
+            ("big", StrategySize {
+                size_usd: Some(dec!(10)),
+                min_shares: Some(dec!(20)),
+                max_shares: Some(dec!(20)),
+            }),
+        ]));
+        e.register_user_strategy(
+            Box::new(DipBuyer::on_assets("small", dec!(0.45), &["BTC"])),
+            "test".into(),
+        )
+        .unwrap();
+        e.register_user_strategy(
+            Box::new(DipBuyer::on_assets("big", dec!(0.45), &["ETH"])),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("small", true));
+        assert!(e.set_strategy_enabled("big", true));
+        assert!(e.set_strategy_enabled("spread_arb", false), "isolate the two sized dips");
+
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market_of("BTC", 1_800_000), market_of("ETH", 1_800_000)],
+            now_ms: now,
+        });
+        for asset in ["BTC", "ETH"] {
+            e.on_data(DataEvent::Book {
+                token_id: format!("{}_up", asset.to_lowercase()),
+                bids: vec![(dec!(0.43), dec!(100))],
+                asks: vec![(dec!(0.45), dec!(100))],
+                now_ms: now + 1_000,
+            });
+        }
+        let orders = e.evaluate(now + 2_000);
+        assert_eq!(orders.len(), 2, "{orders:?}");
+        let small = orders.iter().find(|o| o.strategy == "small").expect("small entry");
+        let big = orders.iter().find(|o| o.strategy == "big").expect("big entry");
+        assert_eq!(small.asset, "BTC");
+        assert_eq!(big.asset, "ETH");
+        assert_eq!(small.size, dec!(1), "1u / 0.44 rounds to 2, capped by its own 1-share lot");
+        assert_eq!(big.size, dec!(20));
+        assert_eq!(small.price, dec!(0.44), "same dip price for both");
+        assert_eq!(big.price, dec!(0.44));
     }
 
     // ── P-1.1 strategy dispatch ─────────────────────────────────────────────
@@ -727,6 +946,22 @@ mod tests {
     struct DipBuyer {
         name: String,
         buy_below: Decimal,
+        /// Empty = every market. A non-empty list restricts the strategy to those
+        /// assets, which is how one cycle can host several strategies without
+        /// them competing for the same token.
+        assets: Vec<String>,
+    }
+    impl DipBuyer {
+        fn new(name: &str, buy_below: Decimal) -> Self {
+            Self { name: name.to_string(), buy_below, assets: Vec::new() }
+        }
+        fn on_assets(name: &str, buy_below: Decimal, assets: &[&str]) -> Self {
+            Self {
+                name: name.to_string(),
+                buy_below,
+                assets: assets.iter().map(|a| (*a).to_string()).collect(),
+            }
+        }
     }
     impl EngineStrategy for DipBuyer {
         fn name(&self) -> &str {
@@ -737,6 +972,9 @@ mod tests {
         fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
             let mut out = Vec::new();
             for market in ctx.markets() {
+                if !self.assets.is_empty() && !self.assets.contains(&market.asset) {
+                    continue;
+                }
                 for (token_id, direction) in [
                     (&market.up_token_id, SignalDirection::Up),
                     (&market.down_token_id, SignalDirection::Down),
@@ -772,7 +1010,7 @@ mod tests {
         let mut e = Engine::new(cfg());
         let name = e
             .register_user_strategy(
-                Box::new(DipBuyer { name: "dip_buyer".into(), buy_below: dec!(0.6) }),
+                Box::new(DipBuyer::new("dip_buyer", dec!(0.6))),
                 "test".into(),
             )
             .unwrap();
@@ -783,7 +1021,7 @@ mod tests {
         // Duplicate names are rejected outright.
         assert!(e
             .register_user_strategy(
-                Box::new(DipBuyer { name: "dip_buyer".into(), buy_below: dec!(0.6) }),
+                Box::new(DipBuyer::new("dip_buyer", dec!(0.6))),
                 "test".into()
             )
             .is_err());
@@ -811,7 +1049,7 @@ mod tests {
     fn two_strategies_run_side_by_side_with_separate_tags() {
         let mut e = Engine::new(cfg());
         e.register_user_strategy(
-            Box::new(DipBuyer { name: "dip_buyer".into(), buy_below: dec!(0.45) }),
+            Box::new(DipBuyer::new("dip_buyer", dec!(0.45))),
             "test".into(),
         )
         .unwrap();

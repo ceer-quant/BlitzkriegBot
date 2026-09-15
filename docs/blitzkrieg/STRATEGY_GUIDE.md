@@ -151,14 +151,24 @@ unsafe extern "C" fn evaluate(handle: BkHandle, view: *const BkRoundView) -> *mu
 自驱动引擎遍历**所有已启用**的策略产生候选单，然后统一过共享闸门：
 - 回合时序（`--min-round-age` / `--min-time-left`）与现货动量闸门对所有策略一视同仁；
 - **每个 token 每个评估周期至多一单**（按注册顺序，先到先得），避免多策略抢同一 token；
-- 仓位/名义金额仍受全局风控与 `--max-positions` 约束；
-- 可选的 **per-strategy 限额**（`--strategy-limit <name>:<max_open_positions>:<max_notional_usd>`，
-  可重复；`-` 或空段表示该维度不限）。生产由环境变量 **`HFT_STRATEGY_LIMITS`**（逗号分隔）透传到内核。
-  超限的入场**在下单层之前**被拒，计入
-  `engine.stats.strategyLimitRejected` 与该策略的 `limitRejected`（每次评估尝试计一次，语义同 `placeRejected`）。
-- `engine.stats.strategies[]` 给出每策略的会话账本：`openPositions`/`openNotionalUsd`（实况敞口）、
+- 仓位/名义金额仍受全局风控与 `--max-positions`（全局总容量）约束；
+- 可选的 **per-strategy 限额与定寸**（`--strategy-limit`，可重复；`-` 或空段 = 该维度继承全局值）：
+  - 旧格式（P-1.1，逐位兼容）：`<name>:<max_open_positions>:<max_notional_usd>`
+  - 扩展格式（E2-a）：`<name>:<max_open_positions>:<max_notional_usd>:<size_usd>:<min_shares>:<max_shares>`
+  - 生产由环境变量 **`HFT_STRATEGY_LIMITS`**（逗号分隔）透传到内核。
+- **定寸与配额**：每个策略可自带目标名义额与张数区间（`size_usd`/`min_shares`/`max_shares`），
+  未配置的维度沿用全局 `--size-usd`/`--min-shares`/`--max-shares`。**全局值既是兜底也是硬上限**：
+  策略的覆盖只会被夹到全局风控区间内（名义额不超过全局预算、张数不超过全局 `max_shares`、
+  不低于全局 `min_shares`），任何配置都无法突破全局风控。因此三策略共用同一全局预算时
+  各自按自己的区间定寸，不再互相饿死。
+- 超限的入场**在下单层之前**被拒：配额超限计入 `engine.stats.strategyLimitRejected` 与该策略的
+  `limitRejected`（每次评估尝试计一次，语义同 `placeRejected`）；触到**全局**容量/风控的则计入
+  `placeRejected` 与该策略的 `ordersRejected`（两者可区分是「策略配额」还是「全局闸门」）。
+- `engine.stats.strategies[]` 给出每策略的会话账本与生效配置：`openPositions`/`openNotionalUsd`（实况敞口）、
+  `maxOpenPositions`/`maxOpenNotionalUsd`（配置的配额，null = 未配置）、`sizingSource`
+  （`"global"`|`"strategy"`）与 `effectiveSizeUsd`/`effectiveMinShares`/`effectiveMaxShares`（夹取后的生效定寸）、
   `ordersPlaced`/`ordersRejected`/`limitRejected`（入场上报）、`closedTrades`/`wins`/`losses`/`feesUsd`/`netPnlUsd`
-  （已实现盈亏）。默认无任何限额配置 → 行为与单策略时代一致。
+  （已实现盈亏）。默认无任何限额配置 → 行为与单策略时代逐位一致。
 
 ## 4. 生命周期与开关
 

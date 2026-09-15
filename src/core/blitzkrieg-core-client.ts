@@ -620,10 +620,17 @@ export class BlitzkriegCoreClient extends EventEmitter {
     strategyLimitRejected: number;
     blocked: { timing: number; momentum: number } | null;
     confirmed: string[];
-    /** Per-strategy session ledger + live exposure (P-1.1). */
+    /** Per-strategy session ledger + live exposure (P-1.1) and the quota /
+     *  effective sizing in force (E2-a). Caps and the sizing band are null when
+     *  the strategy inherits the globals; `sizingSource` says which it is. */
     strategies: Array<{
       name: string; enabled: boolean; source: string;
       openPositions: number; openNotionalUsd: number;
+      /** Configured caps; null = uncapped / inherits the global value. */
+      maxOpenPositions: number | null;
+      maxOpenNotionalUsd: number | null;
+      sizingSource: 'global' | 'strategy';
+      effectiveSizeUsd: number; effectiveMinShares: number; effectiveMaxShares: number;
       ordersPlaced: number; ordersRejected: number; limitRejected: number;
       closedTrades: number; wins: number; losses: number;
       feesUsd: number; netPnlUsd: number;
