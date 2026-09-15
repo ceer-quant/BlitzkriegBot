@@ -2,4 +2,6 @@
 
 pub mod event_bus;
 pub mod ipc_client;
+pub mod notifier;
+mod notifier_tests;
 pub mod types;
