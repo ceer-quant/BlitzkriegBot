@@ -296,8 +296,21 @@ async fn main() -> std::io::Result<()> {
                         | CoreEvent::ReconcileReport { .. }
                         | CoreEvent::Ready { .. }
                         | CoreEvent::OrderUpdate { .. } => need_snapshot = true,
-                        // Pure notices go to the log pane.
-                        CoreEvent::RiskAlert { message, .. } => {
+                        // Pure notices go to the log pane. The kill switch is
+                        // loud: the body area becomes a full-screen red banner
+                        // until a resume alert clears it.
+                        CoreEvent::RiskAlert { code, message } => {
+                            let code = code.as_str().unwrap_or("").to_lowercase();
+                            if code.contains("killswitch")
+                                || message.to_lowercase().contains("kill switch")
+                            {
+                                app.kill_banner = Some(message.clone());
+                            } else if code.contains("resume")
+                                || message.to_lowercase().contains("resumed")
+                                || message.to_lowercase().contains("restored")
+                            {
+                                app.kill_banner = None;
+                            }
                             app.log(format!("risk alert: {message}"))
                         }
                         CoreEvent::Error { error } => app.log(format!("core: {error}")),

@@ -1,9 +1,9 @@
 //! ratatui rendering for the panel. Pure functions over `App` — no I/O.
 
-use crate::app::{App, Tab};
+use crate::app::{App, CheckStage, Tab, HINTS};
 use blitzkrieg_ui_kit::UiSnapshot;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
 
 const GREEN: Color = Color::Green;
 const RED: Color = Color::Red;
@@ -48,6 +48,13 @@ pub fn render(f: &mut Frame, app: &App) {
         Tab::Trades => render_trades(f, chunks[2], &app.snap),
         Tab::Plugins => render_plugins(f, chunks[2], app),
     }
+    // Kill switch engaged: the body talks with one voice until resume.
+    if let Some(msg) = &app.kill_banner {
+        render_kill_banner(f, chunks[2], msg);
+    }
+    if app.help_visible {
+        render_help(f, app);
+    }
     render_command_bar(f, chunks[3], app);
     if let Some(text) = &app.pending_confirmation {
         render_confirm(f, chunks[4], text);
@@ -56,6 +63,129 @@ pub fn render(f: &mut Frame, app: &App) {
     // chunk when nothing is pending, so indexing by confirm_h pointed the log
     // into a 0-row rect and hid it entirely.
     render_log(f, chunks[5], app);
+    render_hint_bar(f, f.area(), app);
+}
+
+/// Bottom status line: the self-check stages, then one rotating hint the user
+/// has not consumed yet (`?` help, `:` command, tab keys…).
+fn render_hint_bar(f: &mut Frame, area: Rect, app: &App) {
+    if area.height < 1 {
+        return;
+    }
+    let line = Rect {
+        y: area.bottom().saturating_sub(1),
+        height: 1,
+        ..area
+    };
+    let check = match app.check {
+        CheckStage::Connecting => Span::styled("○ connecting", Style::default().fg(RED)),
+        CheckStage::Handshake => Span::styled(
+            "◐ connected · waiting for market data",
+            Style::default().fg(Color::Yellow),
+        ),
+        CheckStage::Ready => Span::styled("● self-check passed", Style::default().fg(GREEN)),
+    };
+    // Rotate over unconsumed hints; all consumed → quiet. The rotation advances
+    // every 5 s of wall time driven by the snapshot age, good enough for a hint.
+    let elapsed = app.last_update.map(|t| t.elapsed().as_secs()).unwrap_or(0) as usize;
+    let open: Vec<usize> = (0..HINTS.len()).filter(|i| !app.hints_used[*i]).collect();
+    let hint_span = match open.first() {
+        Some(&i) => {
+            let idx = (elapsed / 5) % HINTS.len();
+            if app.hints_used[idx] || i == idx {
+                Span::styled(format!("  💡 {}", HINTS[i]), Style::default().fg(ACCENT))
+            } else {
+                Span::styled(format!("  💡 {}", HINTS[idx]), Style::default().fg(ACCENT))
+            }
+        }
+        None => Span::default(),
+    };
+    f.render_widget(Paragraph::new(Line::from(vec![check, hint_span])), line);
+}
+
+/// Full-screen red notice while the core kill switch is engaged.
+fn render_kill_banner(f: &mut Frame, area: Rect, msg: &str) {
+    let inner = centered_rect(area, 60, 5);
+    f.render_widget(Clear, inner);
+    let p = Paragraph::new(vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "TRADING HALTED — KILL SWITCH ENGAGED",
+            Style::default()
+                .fg(Color::Black)
+                .bg(RED)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(msg.to_string(), Style::default().fg(RED))),
+        Line::from(Span::styled(
+            "risk.resume clears this banner (see Log for the trigger).",
+            Style::default().fg(DIM),
+        )),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Risk")
+            .border_style(Style::default().fg(RED).add_modifier(Modifier::BOLD)),
+    );
+    f.render_widget(p, inner);
+}
+
+fn centered_rect(area: Rect, pct_x: u16, height: u16) -> Rect {
+    let w = area.width * pct_x / 100;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect {
+        x,
+        y,
+        width: w.min(area.width),
+        height: height.min(area.height),
+    }
+}
+
+/// The `?` overlay: every key and command in one screen.
+fn render_help(f: &mut Frame, _app: &App) {
+    let area = f.area();
+    let rect = centered_rect(area, 80, 24);
+    f.render_widget(Clear, rect);
+    let keys = vec![
+        Line::from(Span::styled(
+            "KEYS",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  : /            focus command bar (then type a command, Enter runs it)"),
+        Line::from("  1 2 3 4        pages: Overview / Positions / Trades / Plugins"),
+        Line::from("  Tab            next page"),
+        Line::from("  ↑/↓            Plugins: move selection · Command bar: recall history"),
+        Line::from("  Tab (bar)      complete the command"),
+        Line::from("  Enter /Esc     run / cancel"),
+        Line::from("  r              refresh now"),
+        Line::from("  y / n          confirm or cancel a dangerous toggle"),
+        Line::from("  q or Ctrl-C    quit"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "COMMANDS (in the bar)",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  status                core, balance, feed, trades at a glance"),
+        Line::from("  positions [N]         open positions"),
+        Line::from("  strategy              list strategies (+ on/off when allowed)"),
+        Line::from("  extension             list/toggle extensions"),
+        Line::from("  markets               list market plugins"),
+        Line::from("  start ASSETS ...      start a managed DRY core (needs --manage)"),
+        Line::from("  stop                  stop the managed core (needs --manage)"),
+        Line::from("  help                  what you are reading"),
+    ];
+    f.render_widget(
+        Paragraph::new(keys).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Help — Esc to close")
+                .border_style(Style::default().fg(ACCENT)),
+        ),
+        rect,
+    );
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
