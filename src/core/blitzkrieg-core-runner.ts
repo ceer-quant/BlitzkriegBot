@@ -64,6 +64,9 @@ export interface BlitzkriegRunStatus {
     signals: number;
     blockedTiming: number;
     blockedMomentum: number;
+    /** Entry gates honoured-waived across strategies this session (E2-b). */
+    gateExemptedTiming: number;
+    gateExemptedMomentum: number;
     openPositions: number;
     entries: number;
     fills: number;
@@ -263,6 +266,10 @@ export class BlitzkriegCoreRunner {
         signals: stats?.signals ?? 0,
         blockedTiming: stats?.blocked?.timing ?? 0,
         blockedMomentum: stats?.blocked?.momentum ?? 0,
+        gateExemptedTiming:
+          stats?.strategies?.reduce((n, s) => n + (s.gateExemptedTiming ?? 0), 0) ?? 0,
+        gateExemptedMomentum:
+          stats?.strategies?.reduce((n, s) => n + (s.gateExemptedMomentum ?? 0), 0) ?? 0,
         openPositions: pos.positions.length,
         entries: this.entries,
         fills: this.fills,

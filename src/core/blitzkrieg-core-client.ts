@@ -618,11 +618,20 @@ export class BlitzkriegCoreClient extends EventEmitter {
     books: number; tops: number; spots: number; rounds: number;
     evaluations: number; signals: number; placeRejected: number;
     strategyLimitRejected: number;
-    blocked: { timing: number; momentum: number } | null;
+    /** Entry-gate near-misses. The two counts are global totals; `byStrategy`
+     *  attributes them to the strategy whose candidate was blocked (E2-b), and
+     *  `declaredExemptions` lists the opt-outs in force so a waived gate is
+     *  visible rather than a silent hole. */
+    blocked: {
+      timing: number; momentum: number;
+      byStrategy: Record<string, { timing: number; momentum: number }>;
+      declaredExemptions: Array<{ strategy: string; gates: string[] }>;
+    } | null;
     confirmed: string[];
-    /** Per-strategy session ledger + live exposure (P-1.1) and the quota /
-     *  effective sizing in force (E2-a). Caps and the sizing band are null when
-     *  the strategy inherits the globals; `sizingSource` says which it is. */
+    /** Per-strategy session ledger + live exposure (P-1.1), the quota /
+     *  effective sizing in force (E2-a) and the declared entry-gate exemptions
+     *  with how often each was honoured (E2-b). Caps and the sizing band are
+     *  null when the strategy inherits the globals; `sizingSource` says which. */
     strategies: Array<{
       name: string; enabled: boolean; source: string;
       openPositions: number; openNotionalUsd: number;
@@ -632,6 +641,10 @@ export class BlitzkriegCoreClient extends EventEmitter {
       sizingSource: 'global' | 'strategy';
       effectiveSizeUsd: number; effectiveMinShares: number; effectiveMaxShares: number;
       ordersPlaced: number; ordersRejected: number; limitRejected: number;
+      /** Entry gates this strategy declared unnecessary; [] = fully gated. */
+      gateExemptions: string[];
+      blockedTiming: number; blockedMomentum: number;
+      gateExemptedTiming: number; gateExemptedMomentum: number;
       closedTrades: number; wins: number; losses: number;
       feesUsd: number; netPnlUsd: number;
     }>;

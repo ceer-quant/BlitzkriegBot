@@ -4,7 +4,10 @@
 //! entry gates (one-entry-per-token, round timing, spot momentum, sizing). A
 //! hosted strategy only turns that state into *candidates*: it may never place,
 //! size or risk-check anything itself — the host does, so every strategy is
-//! subject to the same kernel-side gates.
+//! subject to the same kernel-side gates. The two entry-quality gates (round
+//! timing window, spot momentum) are the ONLY ones a strategy may declare an
+//! exemption from ([`GateExemptions`], E2-b / #27); the exemption is explicit,
+//! logged, counted and can never reach the safety boundary.
 //!
 //! There is exactly ONE full-featured contract: [`EngineStrategy`]. The proven
 //! in-tree [`spread_arb::SpreadArbBuiltin`] and an external dylib loaded through
@@ -23,6 +26,75 @@ use crate::model::{CryptoMarket, OrderbookSnapshot};
 use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
 use rust_decimal::Decimal;
 use std::collections::HashSet;
+
+/// A strategy's declaration that it does NOT want one or more of the shared
+/// ENTRY gates applied to its own candidates (E2-b / #27).
+///
+/// The default is all-false: a strategy that says nothing is gated exactly as
+/// before, so adding this seam cannot change any existing behaviour. The gates
+/// are entry *quality heuristics*, not safety boundaries — the risk gate, the
+/// kill switch, the daily-loss cap, the sizing ceiling and the position quotas
+/// are enforced downstream in `Core` and are never reachable from here.
+///
+/// Why it is a declaration on the strategy: a mean-reversion / reverse strategy
+/// wants to enter exactly when the momentum filter rejects (spot moving against
+/// the bet), and another strategy family wants a different round window. The
+/// host records every honoured exemption as an auditable record («本单因策略 X
+/// 豁免门禁 Y») so an opt-out is always visible in logs and in `engine.stats`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GateExemptions {
+    /// Waive the round-timing window (`min_round_age_sec` / `min_time_left_sec`).
+    /// Never waives "no market for this round" — see `TimingBlock::exemptible`.
+    pub timing: bool,
+    /// Waive the spot momentum alignment filter.
+    pub momentum: bool,
+}
+
+impl GateExemptions {
+    /// Nothing waived — the unchanged, fully-gated behaviour.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Waive both entry gates.
+    pub fn all() -> Self {
+        Self {
+            timing: true,
+            momentum: true,
+        }
+    }
+
+    pub fn any(&self) -> bool {
+        self.timing || self.momentum
+    }
+
+    /// Gate names in a stable order, for logs / diagnostics.
+    pub fn gates(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.timing {
+            out.push("timing");
+        }
+        if self.momentum {
+            out.push("momentum");
+        }
+        out
+    }
+
+    /// Parse the JSON form used across the C ABI (`{"timing":..,"momentum":..}`).
+    /// Unknown keys and non-boolean values are ignored, so a malformed
+    /// declaration degrades to "not declared" and never to a wider exemption.
+    pub fn from_json(v: &serde_json::Value) -> Self {
+        let flag = |key: &str| v.get(key).and_then(|b| b.as_bool()).unwrap_or(false);
+        Self {
+            timing: flag("timing"),
+            momentum: flag("momentum"),
+        }
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "timing": self.timing, "momentum": self.momentum })
+    }
+}
 
 /// A strategy's wish to CLOSE an open position. Like an entry candidate it is
 /// only an intent: the host resolves it against a live position, prices it off
@@ -102,8 +174,21 @@ pub trait EngineStrategy: Send + Sync {
 
     /// Entry candidates for this cycle. The host applies the shared gates
     /// (round timing, spot momentum, one-entry-per-token) and sizing afterwards,
-    /// so strategies cannot bypass them.
+    /// so strategies cannot bypass them — except for the entry-quality gates
+    /// this strategy explicitly declares an exemption for via
+    /// [`EngineStrategy::gate_exemptions`], which the host honours and records.
     fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal>;
+
+    /// The shared ENTRY gates this strategy declares it does not need applied to
+    /// its own candidates (E2-b / #27). Default = none, i.e. fully gated.
+    ///
+    /// Read by the host, cached per strategy and recorded; it cannot waive the
+    /// structural precondition ("no market this round") nor anything in the
+    /// safety boundary (risk gate, kill switch, daily-loss cap, sizing ceiling,
+    /// position quotas), all of which are enforced downstream in `Core`.
+    fn gate_exemptions(&self) -> GateExemptions {
+        GateExemptions::none()
+    }
 
     /// Close intents accumulated since the last drain. The host resolves each
     /// token to a live position and routes it through the SAME exit submission

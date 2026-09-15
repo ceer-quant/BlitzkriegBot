@@ -1465,3 +1465,59 @@ node-check / secret-scan 不变）。
 - 既有 P-1.1 单策略与默认配置测试断言**未改**，继续通过 → 默认配置行为逐位一致。
 
 **验证（本批）**：见 PR 的 CI（rust-check 全绿；node-check / secret-scan 不变）。
+
+## 44. E2-b 按策略声明入场闸门豁免：GateExemptions + 可选 C 符号（Issue #27，2026-09-15）
+
+**问题**：`Engine::evaluate` 的两个**全局**入场质量闸门会精准挡掉一类正当策略的入场点——
+`min_round_age_sec=30`/`min_time_left_sec=180` 的时序窗口挡开回合瞬间入场，30 s/0.03% 的
+现货动量闸门挡逆向/均值回归（现货越跌越买 Up）。但闸门是全局的：不能为一个逆向策略单独放宽。
+
+**改动（声明式、默认不变、豁免永不触碰安全边界）**
+- 新增 `strategies::GateExemptions { timing: bool, momentum: bool }`（默认全 false）与
+  `EngineStrategy::gate_exemptions()`（trait 默认返回 none → 不声明的策略含内建行为逐位不变）。
+  `from_json` 对非布尔/未知键一律按 false（降级为「未声明」），JSON 异常绝不 panic。
+- `scanner::can_trade` 的字符串错误重构为结构化 `TimingBlock { NoMarkets, TooYoung,
+  TooCloseToExpiry }`（新增 `can_trade_reason`，`can_trade` 保留为 prose 适配层，旧测试未改）。
+  `TimingBlock::exemptible()` 明确只有两个「窗口」可豁免；**`NoMarkets`（本轮无市场）是结构前提，永不豁免**。
+- `Engine::evaluate` 两处闸门各加一个「只对声明策略生效」的分支：兑现的豁免逐单记录
+  `GateExemptionRecord{strategy,gate,token_id,asset,detail,time_left_sec}`，审计句
+  `本单因策略 X 豁免门禁 Y（…，token=…）`；`momentum_ok` 由 bool 改为 `Result<(),String>`
+  以携带明细；候选照常先算出来（near-miss 遥测不因豁免丢失）。
+- 单 token 单周期去重、`pending_tokens`、`compute_shares`、per-strategy 配额、全局容量/风控
+  **均不在豁免范围**；安全边界（`ImmutableConfig`、`RiskGate`、kill switch、单日亏损上限、资金预扣）
+  位于 `Core::place`/`PositionManager`，入场豁免路径物理上够不到。
+- 按策略归因 + 计数：`BlockedCandidate` 新增首字段 `strategy`；新增 per-strategy
+  `StrategyGateTally`（blocked/exempted × timing/momentum），由 `tally_blocked` 与
+  `take_exemptions`（drain once）折叠；新访问器 `strategy_gate_exemptions`/
+  `declared_gate_exemptions`/`last_exemptions`/`gate_tally`。
+- `service`：每次兑现的豁免以 `tracing::info!(target:"strategy", …)` 打中文审计日志；
+  `engine.stats.blocked` 增 `byStrategy`（拦截归属，全 0 省略）与 `declaredExemptions`
+  （`[{strategy,gates}]`），原有 `timing`/`momentum` 全局总数不变；`strategies[]` 增
+  `gateExemptions`/`blockedTiming`/`blockedMomentum`/`gateExemptedTiming`/`gateExemptedMomentum`。
+- `strategy.load` 回执在**启用前**写明声明：`… (disabled; declares gate exemptions: timing)`
+  （未声明任何豁免则不追加）。
+
+**ABI 不破坏（vtable 冻结规则的首次应用）**
+- 外挂侧新增**独立可选符号** `bk_strategy_gate_exemptions(handle) -> char*`
+  （JSON `{"timing":b,"momentum":b}`，同库 `bk_string_out`/`free_string` 规则），而非 vtable 新字段：
+  内核按值拷贝 vtable，加字段会改 `sizeof` 并迫使 BK_ABI_VERSION=3；按名字解析、缺失即「未声明」，
+  故 `BK_ABI_VERSION=2` 维持，旧库无需重编译。规则全文见 `ABI_V2_DESIGN.md §3.5`。
+- `dog_strategy` 已导出该符号（`{timing:true,momentum:false}`）作为可运行范例；loader 的
+  `LoadedForeign` 带 `gate_exemptions`，加载报告即标注声明。
+
+**Node 侧**
+- `blitzkrieg-core-client.ts` 的 `stats()` 类型补 `blocked.byStrategy`/`declaredExemptions`
+  与每策略五个新字段；`blitzkrieg-core-runner.ts` 聚合 `gateExemptedTiming/Momentum`；
+  `crypto-hft` status 输出增 `exempted timing=.. momentum=..`。
+- 新增真机验收脚本 `scripts/strategy-gate-check.mjs`（npm `core:strategy-gate`）：时序窗口
+  对所有人关闭（`--min-round-age 3600`）时真实 dog cdylib 仍入场、内建仍被挡、豁免被计数、
+  momentum 恒 0、load 回执显式标注。
+
+**测试**：scanner 2（结构化 block + 仅窗口可豁免）；engine 9（豁免生效/未声明仍被挡/
+逆向入场/仅作用于声明者/NoMarkets 不可豁免/blocked 带策略名/计数 drain once/声明可列/
+内建无豁免）；service 5（真机路径：豁免单越过关闭窗口成单、拦截按策略归因、stats 上报、
+风控/kill/容量/无市场四道安全边界均不可豁免、单日亏损帽不被 lifted）；dylib 集成 1
+（声明经 ABI 到引擎并被兑现；内建无豁免；窗口全关时 dog 入场而 spread_arb 留在 blocked）。
+
+**验证（本批）**：`BK_REQUIRE_DYLIB=1 cargo test --workspace --locked` 全绿；
+`npm run typecheck`/`test`/`core:strategy-gate` 通过；其余门禁与默认配置行为见 PR 的 CI。

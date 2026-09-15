@@ -35,6 +35,12 @@
 //! const bk_strategy_vtable* bk_strategy_create(void);
 //! void bk_strategy_free_string(char*);                // frees JSON outputs
 //! ```
+//!
+//! Optional (resolved by name at load; absent = "not declared"):
+//!
+//! ```c
+//! char* bk_strategy_gate_exemptions(void* handle);    // {"timing":b,"momentum":b}
+//! ```
 
 use core::ffi::{c_char, c_void};
 use std::ffi::CString;
@@ -52,6 +58,20 @@ pub const BK_CREATE_SYMBOL: &[u8] = b"bk_strategy_create\0";
 pub const BK_VERSION_SYMBOL: &[u8] = b"bk_strategy_abi_version\0";
 /// Symbol name for the JSON-string deallocator.
 pub const BK_FREE_STRING_SYMBOL: &[u8] = b"bk_strategy_free_string\0";
+/// Symbol name for the OPTIONAL per-strategy gate-exemption declaration
+/// (E2-b / #27): `char* bk_strategy_gate_exemptions(void* handle)` returning
+/// `{"timing":bool,"momentum":bool}`.
+///
+/// Deliberately a separate optional symbol rather than a new vtable field: the
+/// kernel copies `BkStrategyVtable` BY VALUE, so appending a field would change
+/// `sizeof` and make an older library an out-of-bounds read — a breaking change
+/// that would force `BK_ABI_VERSION` to 3. A missing symbol / NULL / malformed
+/// JSON degrades to "nothing declared", exactly like an in-tree strategy relying
+/// on the trait's default, so v2 stays frozen and old libraries keep loading.
+pub const BK_GATE_EXEMPTIONS_SYMBOL: &[u8] = b"bk_strategy_gate_exemptions\0";
+
+/// Signature of the optional [`BK_GATE_EXEMPTIONS_SYMBOL`] entry point.
+pub type BkGateExemptionsFn = unsafe extern "C" fn(handle: BkHandle) -> *mut c_char;
 
 /// One price/size level of the order book. Both are decimal strings.
 #[repr(C)]
@@ -131,7 +151,9 @@ pub type BkHandle = *mut c_void;
 ///
 /// Required: `create`, `destroy`, `on_book`, `on_round`, `evaluate`. Optional
 /// hooks may be NULL — NULL means "this strategy does not use this hook", the
-/// same as an in-tree strategy relying on the trait's default impl.
+/// same as an in-tree strategy relying on the trait's default impl. New
+/// capabilities are added as separate optional SYMBOLS (e.g.
+/// [`BK_GATE_EXEMPTIONS_SYMBOL`]) precisely so this struct never grows.
 ///
 /// Functions returning JSON (`evaluate`, `confirmed_tokens`, `take_breaks`,
 /// `diagnostics`, `knobs`) return a heap string allocated by THIS library (use
