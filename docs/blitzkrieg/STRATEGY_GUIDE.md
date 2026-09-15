@@ -136,25 +136,52 @@ max_positions = 2
 你只填参数，内核套用内建模板。TOML 天然无副作用，最安全。
 
 ### 3.2 Rust 动态库（v2，全功能）
-`user_layer/strategies/dog_strategy.rs` 是最小完整范例（独立 nested workspace，依赖 `blitzkrieg-strategy-api`）：
-```rust
-unsafe extern "C" fn evaluate(handle: BkHandle, view: *const BkRoundView) -> *mut c_char {
-    // 遍历 view.markets 的 up/down token，读 on_book 缓存的盘口状态，
-    // 返回 {"entries":[...], "exits":[...], "breaks":[...]}；JSON 用
-    // bk_string_out 分配，内核用本库 bk_strategy_free_string 归还。
-}
-```
-编译（cdylib 由 cargo 产出，**不是** 直接 `rustc` 单文件）：
+
+#### 3.2.1 推荐上手：模板（E9-a，零 unsafe）
+
+一条命令生成完整可构建的策略 crate（含业务骨架、cargo test 冒烟、README）：
+
 ```bash
-(cd user_layer/strategies && cargo build --release --locked)
-# → user_layer/strategies/target/release/libdog_strategy.{dylib,so,dll}
+npm run strategy:new my_dip_fade
+# → user_layer/strategies/my_dip_fade/{src/lib.rs, Cargo.toml, README.md}
 ```
-加载（`strategy-loading` 自 E7 起**默认开启**；无需另加 feature）：
+
+生成的 `src/lib.rs` 就是你写的**全部**代码——业务开发者只改三个点，全程无
+`unsafe`（vtable、`#[no_mangle]` 导出、JSON 包装由 `export_strategy!` 宏从
+`SafeStrategy` trait 自动生成）：
+
+1. `on_book(update)` — 观察：缓存你以后要用来决策的盘口（mid/深度/obi/价差）；
+2. `evaluate(ctx)` — 决策：产出 `Intents{entries, exits, breaks}`。entry 带
+   LIMIT 价格（内核校验、定仓、提交），exit 不带价格（内核按实时盘口定价），
+   一切照旧过内核风险门禁——策略永远拿不到签名器/socket/凭证；
+3. `on_params` / `evolvable_knobs` — 调参：宿主配置与影子进化的热参数都走
+   这里（返回 false 拒绝整包）；声明 knobs 即被影子进化机制纳入。
+
+改完**一条命令全链验证**（真实内核在环，全部走沙盒 dry core）：
+
+```bash
+npm run strategy:devcheck my_dip_fade
+# 生成→编译→strategy.load→断言注册即禁用→enable→engine.book 假行情→
+# 断言 engine.stats 上 ordersPlaced≥1→断言可演化 knobs 注册→零 panic
 ```
-/crypto-hft ... → IPC: { "method": "strategy.load", "params": { "path": ".../libdog_strategy.dylib" } }
-```
-加载器协商顺序：路径策略 → dlopen → `bk_strategy_abi_version()==2`（v1 直接拒绝）→ vtable/必需钩子校验 → `create()`。
-文件名含 `key/secret/private/credential/.env` 或非 `.so/.dylib/.dll` 一律在 dlopen 之前拒绝。
+
+这个门禁同时实测「从空目录到内核里跑起来 < 5 分钟」的承诺（本机 ~9s）。
+手动进内核后再看效果：`npm run tui` 打开面板，Plugins 页能看到你的策略行
+（禁用态），`: strategy.load <dylib路径>` 加载、↑/↓ 选中回车启用。
+
+模板的三条硬规则也是所有外挂策略的通用规则：**新策略永远默认禁用**（升级
+不改变正在运行的会话在交易什么）；**仓位/价格/风控留在内核**（策略只出意图
+数据）；**没有任何网络/凭证面**（策略 crate 不连接任何东西）。
+
+需要比 `SafeStrategy` 更细的控制（直接布局内存、绕开包装的 JSON 薄层）时，
+`user_layer/strategies/dog_strategy.rs`（327 行 unsafe）是完整范例——它的
+编译/加载/协商流程与模板完全一致，两条路径产出的 dylib 在内核侧不可区分；
+存量手写库不需要任何改动即可继续加载。
+
+加载器协商顺序（两条路径相同）：路径策略 → dlopen →
+`bk_strategy_abi_version()==2`（v1 直接拒绝）→ vtable/必需钩子校验 →
+`create()`。文件名含 `key/secret/private/credential/.env` 或非
+`.so/.dylib/.dll` 一律在 dlopen 之前拒绝。
 
 ### 3.3 内建（内核自带）
 内核自带三个内建策略（`strategies::SpreadArbBuiltin` / `strategies::TrendFollowBuiltin` /

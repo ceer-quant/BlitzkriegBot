@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "Frozen C ABI for user-layer Blitzkrieg strategies (dynamic libraries)."
 
+[dependencies]
+serde_json = "1"
+
 [lib]
 name = "blitzkrieg_strategy_api"
 path = "src/lib.rs"
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib"]
