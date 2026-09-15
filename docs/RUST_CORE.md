@@ -63,7 +63,7 @@ blitzkrieg-core  ── Unix Domain Socket ($TMPDIR/blitzkrieg-core-$USER.sock)
 | `marketdata.rs` | 本地 L2 重建：快照/增量/top-of-book，交叉自愈，陈旧判定 |
 | `signal.rs` | 纯信号：PriceBuffer、TrendTracker（滚动窗口确认/破裂）、`spread_arb` 评估器（mid/bestBid 定价纪律） |
 | `scanner.rs` | 回合/时钟偏移/slug/时间闸；Gamma 字段解析（outcomes/clobTokenIds/outcomePrices） |
-| `strategies/` | 内建策略（宿主化 `EngineStrategy` 实现）：`spread_arb.rs`（抄底腿，默认启用）、`trend_follow.rs`（追涨腿，E4-a，默认禁用，6 个可进化旋钮）、`shadow_twin.rs`（影子孪生工厂契约）、`foreign.rs`（C ABI v2 外挂适配） |
+| `strategies/` | 内建策略（宿主化 `EngineStrategy` 实现）：`spread_arb.rs`（抄底腿，默认启用）、`trend_follow.rs`（追涨腿，E4-a，默认禁用，6 个可进化旋钮）、`mean_reversion.rs`（逆向/fade 腿，E4-b / #31，默认禁用，6 个可进化旋钮，momentum 豁免）、`shadow_twin.rs`（影子孪生工厂契约）、`foreign.rs`（C ABI v2 外挂适配） |
 | `engine.rs` | 自驱引擎：事件（book/top/spot/round）→ 各策略各自确认 → 候选单 → 共享闸门 → 下单；现货动量过滤；趋势破裂撤单；按策略分账 |
 | `feed.rs` | **Rust 原生行情**（P4）：Polymarket 盘口 WS（SDK，含动态重订阅）+ Binance 现货 WS（tokio-tungstenite），自带重连，带内解析 |
 | `shadow.rs` | 影子采样 + 回放：记录持仓价格路径，用**同一份 exit_policy** 回放验证（不会与实盘漂移） |

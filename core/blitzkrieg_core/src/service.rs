@@ -2290,7 +2290,7 @@ mod shadow_evolution_tests {
         assert!(c.engine.as_ref().unwrap().has_hot_params());
         assert_eq!(
             c.shadow_evolution().strategy_names(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string()],
+            vec!["spread_arb".to_string(), "trend_follow".to_string(), "mean_reversion".to_string()],
             "every hosted strategy that declares knobs is evolved; the chase leg \
              starts disabled but its declaration is read off the live instance"
         );
@@ -2372,7 +2372,7 @@ mod shadow_evolution_tests {
         c.shadow_evolution_enable(2000);
         assert_eq!(
             c.shadow_evolution().strategy_names(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string()],
+            vec!["spread_arb".to_string(), "trend_follow".to_string(), "mean_reversion".to_string()],
             "E4-a hosts a second evolvable builtin; both declare knobs"
         );
         assert!(c.engine.as_ref().unwrap().has_hot_params());
@@ -2586,6 +2586,7 @@ mod strategy_dispatch_tests {
                 ..Default::default()
             },
             trend_follow: Default::default(),
+            mean_reversion: Default::default(),
             max_orderbook_stale_ms: 8000,
             momentum_window_sec: 30,
             momentum_tol_pct: dec!(0.03),
@@ -2836,7 +2837,7 @@ mod strategy_dispatch_tests {
         assert_eq!(plain.enabled_strategy_names(), vec!["spread_arb".to_string()]);
         assert_eq!(
             plain.strategy_names(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string()],
+            vec!["spread_arb".to_string(), "trend_follow".to_string(), "mean_reversion".to_string()],
             "both builtins are hosted; only one is on"
         );
 
@@ -2864,7 +2865,7 @@ mod strategy_dispatch_tests {
         assert_eq!(both.enabled_strategy_names(), vec!["spread_arb".to_string()]);
         assert_eq!(
             both.strategy_names(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string()],
+            vec!["spread_arb".to_string(), "trend_follow".to_string(), "mean_reversion".to_string()],
             "an unknown name must not register anything"
         );
     }
@@ -2890,7 +2891,7 @@ mod strategy_dispatch_tests {
         // Registered from the start even though it starts disabled.
         assert_eq!(
             c.shadow_evolution().strategy_names(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string()],
+            vec!["spread_arb".to_string(), "trend_follow".to_string(), "mean_reversion".to_string()],
         );
         assert!(c.shadow_evolution_status_for("trend_follow", 0).is_some());
         // Its declared knobs are the strategy's own, not an invented set.
@@ -3153,8 +3154,12 @@ mod strategy_dispatch_tests {
         assert_eq!(blocked["byStrategy"]["a"]["timing"], 1, "{blocked}");
         assert_eq!(blocked["byStrategy"]["b"]["timing"], 1, "{blocked}");
         assert_eq!(blocked["byStrategy"]["a"]["momentum"], 0, "{blocked}");
-        // Nothing declared, so nothing is listed as exempted.
-        assert_eq!(blocked["declaredExemptions"], serde_json::json!([]));
+        // Only mean_reversion declares an exemption (momentum) among the hosted
+        // builtins; the test strategies declare nothing beyond it.
+        assert_eq!(
+            blocked["declaredExemptions"],
+            serde_json::json!([{ "strategy": "mean_reversion", "gates": ["momentum"] }])
+        );
     }
 
     #[test]
@@ -3172,8 +3177,11 @@ mod strategy_dispatch_tests {
         let declared = c.engine_stats()["blocked"]["declaredExemptions"].clone();
         assert_eq!(
             declared,
-            serde_json::json!([{ "strategy": "fader", "gates": ["timing", "momentum"] }]),
-            "only the declaring strategy is listed"
+            serde_json::json!([
+                { "strategy": "mean_reversion", "gates": ["momentum"] },
+                { "strategy": "fader", "gates": ["timing", "momentum"] }
+            ]),
+            "hosted and user declarations are both listed"
         );
     }
 

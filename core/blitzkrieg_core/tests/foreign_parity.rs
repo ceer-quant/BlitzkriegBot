@@ -58,6 +58,7 @@ fn parity_lib() -> PathBuf {
 
 fn engine_cfg() -> EngineConfig {
     EngineConfig {
+        mean_reversion: blitzkrieg_core::strategies::MeanReversionConfig::default(),
         scanner: ScannerConfig {
             assets: vec!["BTC".into()],
             round_duration_sec: 900,
