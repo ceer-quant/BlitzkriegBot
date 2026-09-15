@@ -40,6 +40,7 @@
 //!
 //! ```c
 //! char* bk_strategy_gate_exemptions(void* handle);    // {"timing":b,"momentum":b}
+//! char* bk_strategy_evolvable_knobs(void* handle);    // {"knobs":[{name,value,min,max}]}
 //! ```
 
 use core::ffi::{c_char, c_void};
@@ -72,6 +73,26 @@ pub const BK_GATE_EXEMPTIONS_SYMBOL: &[u8] = b"bk_strategy_gate_exemptions\0";
 
 /// Signature of the optional [`BK_GATE_EXEMPTIONS_SYMBOL`] entry point.
 pub type BkGateExemptionsFn = unsafe extern "C" fn(handle: BkHandle) -> *mut c_char;
+
+/// Symbol name for the OPTIONAL per-strategy evolvable-knob declaration
+/// (E2-c / #28): `char* bk_strategy_evolvable_knobs(void* handle)` returning
+/// `{"knobs":[{"name":..,"value":..,"min":..,"max":..}, ...]}` with every value a
+/// decimal STRING.
+///
+/// Same ABI-evolution rule as [`BK_GATE_EXEMPTIONS_SYMBOL`] (ABI v2 design §3.5):
+/// the kernel copies `BkStrategyVtable` BY VALUE, so appending a field would
+/// change `sizeof` and break older libraries. An optional symbol costs an old
+/// library nothing and degrades to "declares nothing" = **not evolvable**, which
+/// is also the in-tree trait default. A strategy that declares knobs must also be
+/// able to build a twin of itself (the same parameters applied to its own logic);
+/// otherwise the declaration is inert and no variant is run for it.
+///
+/// Distinct from the vtable's `knobs` slot, which carries a human-facing JSON
+/// Schema fragment and keeps its original meaning.
+pub const BK_EVOLVABLE_KNOBS_SYMBOL: &[u8] = b"bk_strategy_evolvable_knobs\0";
+
+/// Signature of the optional [`BK_EVOLVABLE_KNOBS_SYMBOL`] entry point.
+pub type BkEvolvableKnobsFn = unsafe extern "C" fn(handle: BkHandle) -> *mut c_char;
 
 /// One price/size level of the order book. Both are decimal strings.
 #[repr(C)]

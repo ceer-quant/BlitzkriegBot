@@ -476,28 +476,65 @@ async function executeRust(cmd: string, args: string, parts: string[]): Promise<
       case 'shadow_evolution': {
         if (!runner.isRunning()) return 'Not running.';
         const sub = (parts[1] || 'status').toLowerCase();
+        // Parameters, audit files and rollback anchors are all per strategy
+        // (E2-c), so every mutating sub-command names one strategy explicitly:
+        // `/crypto-hft shadow-evolution rollback <strategy>`.
+        const strategy = parts[2];
         const client = runner.getClient();
         if (!client) return 'Rust core client unavailable.';
+
         if (sub === 'enable') { await client.shadowEvolutionEnable(); return 'Shadow Evolution **enabled** (opt-in).'; }
         if (sub === 'disable') { await client.shadowEvolutionDisable(); return 'Shadow Evolution **disabled**.'; }
+
+        // Resolve the evolvable set once: it is what makes "not evolvable" a
+        // reportable fact rather than a generic failure.
+        const status = await client.shadowEvolutionStatus();
+        const blocks: any[] = status.strategies || [];
+        const evolvable = blocks.map((b) => b.strategy);
+        const needStrategy = (): string | null =>
+          strategy ? null : `Strategy required. Evolvable strategies: ${evolvable.join(', ') || '(none declared)'}`;
+
         if (sub === 'rollback') {
-          try { await client.shadowEvolutionRollback(); return 'Rolled back to previous parameters.'; }
-          catch (e: any) { return `Rollback failed: ${e?.message || e}`; }
+          const err = needStrategy();
+          if (err) return err;
+          if (!evolvable.includes(strategy!)) {
+            return `\`${strategy}\` is not evolvable (declares no knobs), so it has nothing to roll back. Evolvable: ${evolvable.join(', ') || '(none)'}`;
+          }
+          try { await client.shadowEvolutionRollback(strategy!); return `Rolled back **${strategy}** to its previous parameters.`; }
+          catch (e: any) { return `Rollback failed for ${strategy}: ${e?.message || e}`; }
         }
         if (sub === 'history') {
-          const h = await client.shadowEvolutionHistory(20);
-          if (!h.history.length) return 'Shadow Evolution history: (empty)';
-          return ['**Shadow Evolution history:**', ...h.history.map((r: any) =>
-            `- ${new Date(r.timestamp).toISOString().slice(0,19)} ${r.applied ? 'APPLIED' : 'REJECTED'} ${r.reason} conf=${r.confidence} n=${r.sampleCount}${r.rejection ? ' ('+r.rejection+')' : ''}`)].join('\n');
+          // One strategy's own file; no strategy = every audited strategy, but
+          // always labelled so a record cannot be misread as another's.
+          const h = await client.shadowEvolutionHistory(20, strategy);
+          if (!h.history.length) return strategy ? `Shadow Evolution history for ${strategy}: (empty)` : 'Shadow Evolution history: (empty)';
+          return [`**Shadow Evolution history${strategy ? ` — ${strategy}` : ''}:**`, ...h.history.map((r: any) =>
+            `- ${new Date(r.timestamp).toISOString().slice(0,19)} [${r.strategy}] ${r.applied ? 'APPLIED' : 'REJECTED'}${r.rollback ? ' ROLLBACK' : ''}${r.manual ? ' (manual)' : ''} ${r.reason} conf=${r.confidence} n=${r.sampleCount}${r.rejection ? ' ('+r.rejection+')' : ''}`)].join('\n');
         }
-        const st = await client.shadowEvolutionStatus();
-        const p = st.currentParams || {};
-        return [
-          `**Shadow Evolution status: ${st.status}**`,
-          `Variants: ${st.variantCount} | Applied: ${st.evolutionsApplied} | Rejected: ${st.evolutionsRejected} | Since last: ${st.secondsSinceLastEvolution}s`,
-          `Live params: minPrice=${p.trendMinPrice} entryFactor=${p.trendEntryFactor} maxEntry=${p.trendMaxEntryPrice} broken=${p.trendBrokenPrice}`,
-          ...(st.variants || []).map((v: any) => `- ${v.label} n=${v.sampleCount} WR=${(Number(v.winRate)*100).toFixed(0)}% PF=${Number(v.profitFactor).toFixed(2)} pnl=$${Number(v.totalPnlUsd).toFixed(2)}`),
-        ].join('\n');
+
+        // Default: status. Per-strategy blocks, so isolation and each strategy's
+        // own knob values are visible side by side.
+        if (!blocks.length) {
+          return `**Shadow Evolution status: ${status.status}**\nNo strategy declared evolvable knobs, so nothing can evolve (an explicit "not evolvable", not a failure).`;
+        }
+        const lines = [
+          `**Shadow Evolution status: ${status.status}**`,
+          `Variants: ${status.variantCount} | Applied: ${status.evolutionsApplied} | Rejected: ${status.evolutionsRejected} | Since last: ${status.secondsSinceLastEvolution}s`,
+        ];
+        for (const b of blocks) {
+          lines.push(
+            `- **${b.strategy}** [${b.status ?? 'not evolvable'}] applied=${b.evolutionsApplied} rejected=${b.evolutionsRejected} since=${b.secondsSinceLastEvolution}s`,
+          );
+          const knobs = (b.params || {}) as Record<string, string>;
+          const domain = new Map((b.knobs || []).map((k: any) => [k.name, `${k.min}..${k.max}`]));
+          for (const [name, value] of Object.entries(knobs)) {
+            lines.push(`    ${name}=${value}${domain.has(name) ? ` (${domain.get(name)})` : ''}`);
+          }
+        }
+        for (const v of status.variants || []) {
+          lines.push(`- ${v.strategy}/${v.label} n=${v.sampleCount} WR=${(Number(v.winRate)*100).toFixed(0)}% PF=${Number(v.profitFactor).toFixed(2)} pnl=$${Number(v.totalPnlUsd).toFixed(2)}`);
+        }
+        return lines.join('\n');
       }
       case 'help':
       default:

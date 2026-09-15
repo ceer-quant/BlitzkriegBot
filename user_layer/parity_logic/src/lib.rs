@@ -263,7 +263,7 @@ impl ParityStrategy {
             .collect()
     }
 
-    /// Self-declared evolvable knobs (a small JSON Schema fragment).
+    /// Self-declared config surface (a small JSON Schema fragment, human-facing).
     pub fn knobs(&self) -> Value {
         json!({
             "type": "object",
@@ -271,6 +271,19 @@ impl ParityStrategy {
                 "trendMaxEntryPrice": { "type": "string", "description": "dip entry ceiling" },
                 "exitAbove": { "type": "string", "description": "take-profit bid" }
             }
+        })
+    }
+
+    /// The knobs this strategy declares **evolvable** (E2-c / #28): names, the
+    /// values in force, and the hard domain each value may never leave. This is
+    /// the machine-consumed twin of `knobs()` above (which is a human-facing
+    /// schema), and it is what the kernel builds counterfactual variants from.
+    pub fn evolvable_knobs(&self) -> Value {
+        json!({
+            "knobs": [
+                { "name": "trendMaxEntryPrice", "value": self.buy_below, "min": "0.05", "max": "0.90" },
+                { "name": "exitAbove", "value": self.exit_above, "min": "0.05", "max": "0.99" }
+            ]
         })
     }
 }

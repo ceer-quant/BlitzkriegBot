@@ -11,21 +11,89 @@
 //!
 //! All structured outputs cross as heap JSON strings allocated and freed by the
 //! SAME loaded library (its `bk_strategy_free_string`), so allocators never mix.
+//!
+//! E2-c (#28): the adapter is now per-strategy in the evolution chain too.
+//!  - hot parameters are pushed from THIS strategy's own cell in the kernel's
+//!    [`ParamRegistry`](crate::shadow_evolution::ParamRegistry) — a name→value bag
+//!    of the knobs the library itself declared, not spread_arb's four fields;
+//!  - `evolvable_knobs` reads the OPTIONAL `bk_strategy_evolvable_knobs` symbol,
+//!    so a library self-certifies which knobs may evolve and over what domain;
+//!  - `shadow_factory` builds a **twin** by calling the library's `create()`
+//!    again (a second, independent instance from the SAME handle table) and
+//!    pushing it the counterfactual parameters — so a shadow variant runs the
+//!    library's own entry/exit logic, exactly as the in-tree path does.
+//!
+//! Library ownership: the `Library` is held behind an `Arc` (`LoadedLibrary`) and
+//! every instance destroys its own handle in `Drop`, which runs BEFORE the `Arc`
+//! releases the library — so no vtable function pointer can outlive its library.
+//! A twin holds the same `Arc`, so the library stays mapped while any twin lives.
 
+use super::shadow_twin::ShadowFactory;
 use super::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent};
 use crate::model::OrderbookSnapshot;
-use crate::shadow_evolution::MutableParams;
+use crate::shadow_evolution::{KnobDeclaration, KnobSpec, ParamRegistry, StrategyParams};
 use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
 use arc_swap::ArcSwap;
 use blitzkrieg_strategy_api::{
-    BkBookView, BkGateExemptionsFn, BkHandle, BkLevel, BkMarket, BkRound, BkRoundView,
-    BkStrategyVtable,
+    BkBookView, BkEvolvableKnobsFn, BkGateExemptionsFn, BkHandle, BkLevel, BkMarket, BkRound,
+    BkRoundView, BkStrategyVtable,
 };
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char};
 use std::str::FromStr;
 use std::sync::Arc;
+
+/// A dlopen'ed strategy library plus the symbols the kernel resolves once, at
+/// load time. Shared (`Arc`) by every instance the library produces, including
+/// shadow twins.
+pub struct LoadedLibrary {
+    lib: libloading::Library,
+    /// `bk_strategy_create` — returns the library's STATIC vtable pointer. Called
+    /// once per instance (the live strategy and each twin) so every instance gets
+    /// its own opaque handle from the same table.
+    create_sym: unsafe extern "C" fn() -> *const BkStrategyVtable,
+    /// This library's own JSON deallocator (`bk_strategy_free_string`).
+    free_string: Option<unsafe extern "C" fn(*mut c_char)>,
+    // Optional symbols (absent = capability not declared).
+    gate_exemptions_fn: Option<BkGateExemptionsFn>,
+    evolvable_knobs_fn: Option<BkEvolvableKnobsFn>,
+}
+
+impl LoadedLibrary {
+    /// # Safety
+    /// `lib` must have been opened by the caller and must export the mandatory v2
+    /// symbols; the resolved symbols are valid for as long as `lib` is loaded,
+    /// which this struct guarantees by owning it.
+    pub unsafe fn new(
+        lib: libloading::Library,
+        create_sym: unsafe extern "C" fn() -> *const BkStrategyVtable,
+        free_string: Option<unsafe extern "C" fn(*mut c_char)>,
+        gate_exemptions_fn: Option<BkGateExemptionsFn>,
+        evolvable_knobs_fn: Option<BkEvolvableKnobsFn>,
+    ) -> Arc<Self> {
+        Arc::new(Self { lib, create_sym, free_string, gate_exemptions_fn, evolvable_knobs_fn })
+    }
+
+    /// The library's static vtable, copied by value.
+    fn vtable(&self) -> *const BkStrategyVtable {
+        // SAFETY: symbol resolved from this library; the library guarantees a
+        // pointer to static data.
+        unsafe { (self.create_sym)() }
+    }
+
+    /// Path the library was loaded from (diagnostics).
+    pub fn path(&self) -> Option<std::path::PathBuf> {
+        // libloading exposes the path only through its own handle; the load
+        // report carries it, so this is a no-op for observability.
+        None
+    }
+
+    /// Keeps the mapping alive; dropping this drops the `Library` itself.
+    pub fn library(&self) -> &libloading::Library {
+        &self.lib
+    }
+}
 
 /// Keeps every CString backing one `BkBookView` alive for the duration of the
 /// FFI call. The view's pointers borrow from this struct.
@@ -116,12 +184,9 @@ impl BookMarshal {
     }
 }
 
-/// A loaded external v2 strategy. Owns the dlopen handle so the vtable's
-/// function pointers stay valid for its whole lifetime.
+/// A loaded external v2 strategy. Owns its opaque handle; shares the library.
 pub struct ForeignStrategy {
-    // The library must drop AFTER the vtable/handle: field order drops it last
-    // (fields drop top-to-bottom), so declare it first.
-    _lib: libloading::Library,
+    lib: Arc<LoadedLibrary>,
     vtable: BkStrategyVtable,
     handle: BkHandle,
     name: String,
@@ -132,14 +197,22 @@ pub struct ForeignStrategy {
     /// the library does not export it — then the strategy declares nothing and
     /// stays fully gated, exactly like the in-tree default.
     gate_exemptions_fn: Option<BkGateExemptionsFn>,
+    /// Optional v2 symbol `bk_strategy_evolvable_knobs` (E2-c / #28). None when
+    /// the library does not export it — then the strategy is **not evolvable**
+    /// (no variants are built for it), which is the explicit declaration, not an
+    /// error.
+    evolvable_knobs_fn: Option<BkEvolvableKnobsFn>,
+    /// This strategy's own evolvable knobs, resolved once at load (they are a
+    /// property of the library build, not of the runtime state).
+    knobs: Vec<KnobSpec>,
 
     // Outputs accumulated during evaluate(), drained by the host.
     exit_intents: Vec<StrategyExitIntent>,
     breaks: Vec<(String, Decimal)>,
 
-    // Shadow Evolution: latest handle plus the JSON we last pushed, so the
-    // strategy only sees a callback on an actual change (next-tick semantics).
-    hot_params: Option<Arc<ArcSwap<MutableParams>>>,
+    // Shadow Evolution: THIS strategy's cell plus the JSON we last pushed, so the
+    // strategy only sees a callback on an actual change.
+    params: Option<Arc<ArcSwap<StrategyParams>>>,
     last_hot_json: Option<String>,
 
     // token → asset, refreshed from each round's markets so on_book (which only
@@ -150,37 +223,75 @@ pub struct ForeignStrategy {
 impl ForeignStrategy {
     /// # Safety
     /// Caller provides a successfully negotiated v2 library: vtable/handle come
-    /// from this `lib`, the library implements the documented contract (static
+    /// from `lib`, the library implements the documented contract (static
     /// vtable, valid create/destroy, JSON outputs freed by its own
     /// `bk_strategy_free_string`), and it is only ever driven single-threaded
     /// by the kernel's strategy loop.
-    pub unsafe fn from_loaded(
-        lib: libloading::Library,
-        vtable: BkStrategyVtable,
-        handle: BkHandle,
-        name: String,
-        version: String,
-        free_string: Option<unsafe extern "C" fn(*mut c_char)>,
-        gate_exemptions_fn: Option<BkGateExemptionsFn>,
-    ) -> Self {
-        Self {
-            _lib: lib,
+    pub unsafe fn from_loaded(lib: Arc<LoadedLibrary>, name: String, version: String) -> Self {
+        let vtable = unsafe { std::ptr::read(lib.vtable()) };
+        // SAFETY: negotiation in the loader established a v2 library with a
+        // static vtable and a non-null create().
+        let handle: BkHandle = unsafe { vtable.create.unwrap_or_else(|| unreachable!())() };
+        let free_string = lib.free_string;
+        let gate_exemptions_fn = lib.gate_exemptions_fn;
+        let evolvable_knobs_fn = lib.evolvable_knobs_fn;
+        let mut s = Self {
+            lib,
             vtable,
             handle,
             name,
             version,
             free_string,
             gate_exemptions_fn,
+            evolvable_knobs_fn,
+            knobs: Vec::new(),
             exit_intents: Vec::new(),
             breaks: Vec::new(),
-            hot_params: None,
+            params: None,
             last_hot_json: None,
             assets: HashMap::new(),
+        };
+        // Read the declaration once: it is a load-time property, and the load
+        // report must be able to state it (E2-c: "not evolvable" is explicit).
+        s.knobs = s.read_knobs();
+        s
+    }
+
+    /// A second, independent instance from the same library (shadow twin). Same
+    /// code, its own state, its own handle — nothing is shared with the live
+    /// instance except the read-only vtable and the library mapping.
+    pub fn spawn_twin(&self) -> Option<Self> {
+        let vtable = unsafe { std::ptr::read(self.lib.vtable()) };
+        let create = vtable.create?;
+        let handle = unsafe { create() };
+        if handle.is_null() {
+            return None;
         }
+        Some(Self {
+            lib: self.lib.clone(),
+            vtable,
+            handle,
+            name: self.name.clone(),
+            version: self.version.clone(),
+            free_string: self.free_string,
+            gate_exemptions_fn: self.gate_exemptions_fn,
+            evolvable_knobs_fn: self.evolvable_knobs_fn,
+            knobs: self.knobs.clone(),
+            exit_intents: Vec::new(),
+            breaks: Vec::new(),
+            params: None,
+            last_hot_json: None,
+            assets: HashMap::new(),
+        })
     }
 
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    /// The knobs this library declared evolvable at load time.
+    pub fn declared_knobs(&self) -> &[KnobSpec] {
+        &self.knobs
     }
 
     /// Take a JSON heap string returned by the library and copy it into Rust,
@@ -203,13 +314,32 @@ impl ForeignStrategy {
         parsed
     }
 
-    fn push_hot_params_if_changed(&mut self) {
-        let Some(h) = &self.hot_params else { return };
+    /// Read (and validate) the optional knob declaration. Malformed JSON, a null
+    /// return or a missing symbol all mean "declares nothing" — never a panic and
+    /// never a partially trusted declaration (incoherent specs are dropped).
+    fn read_knobs(&self) -> Vec<KnobSpec> {
+        let Some(f) = self.evolvable_knobs_fn else {
+            return Vec::new();
+        };
+        // SAFETY: valid handle; the returned JSON is owned by the library and
+        // freed through the library's own deallocator by take_json.
+        let text = unsafe { self.take_json(f(self.handle)) }.map(|v| v.to_string());
+        match text {
+            Some(t) => KnobDeclaration::parse(&t).knobs,
+            None => Vec::new(),
+        }
+    }
+
+    /// Push a parameter set to the library's `on_hot_params`, deduplicating
+    /// against the last JSON sent. The payload is THIS strategy's own bag of
+    /// knob values (decimal strings), not another strategy's field list.
+    fn push_params_json(&mut self, params: &StrategyParams) {
         let Some(f) = self.vtable.on_hot_params else {
             return;
         };
-        let p = h.load();
-        let json = hot_params_json(&p);
+        let Ok(json) = serde_json::to_string(params) else {
+            return;
+        };
         if self.last_hot_json.as_deref() == Some(json.as_str()) {
             return;
         }
@@ -218,6 +348,19 @@ impl ForeignStrategy {
             unsafe { f(self.handle, cs.as_ptr()) };
         }
         self.last_hot_json = Some(json);
+    }
+
+    fn push_hot_params_if_changed(&mut self) {
+        let Some(cell) = &self.params else { return };
+        let params = (**cell.load()).clone();
+        self.push_params_json(&params);
+    }
+
+    /// Apply a parameter set immediately, bypassing the registry cell. Used to
+    /// seed a shadow twin with its counterfactual values before it is driven.
+    fn apply_params_direct(&mut self, params: &StrategyParams) {
+        self.last_hot_json = None;
+        self.push_params_json(params);
     }
 }
 
@@ -234,9 +377,7 @@ impl EngineStrategy for ForeignStrategy {
     /// E2-b / #27: read the library's OPTIONAL `bk_strategy_gate_exemptions`
     /// symbol. A library that does not export it, returns null, or returns
     /// malformed JSON declares nothing and stays fully gated — the same default
-    /// an in-tree strategy gets from the trait. Cached: the declaration is a
-    /// property of the loaded instance, so it is resolved once (the symbol is
-    /// called on demand but its result never widens between ticks).
+    /// an in-tree strategy gets from the trait.
     fn gate_exemptions(&self) -> GateExemptions {
         let Some(f) = self.gate_exemptions_fn else {
             return GateExemptions::none();
@@ -244,20 +385,32 @@ impl EngineStrategy for ForeignStrategy {
         // SAFETY: valid handle; the returned JSON string is owned by the library
         // and freed through the library's own deallocator by take_json.
         let v = unsafe { self.take_json(f(self.handle)) };
-        v.as_ref()
-            .map(GateExemptions::from_json)
-            .unwrap_or_default()
+        v.as_ref().map(GateExemptions::from_json).unwrap_or_default()
+    }
+
+    /// E2-c / #28: the knobs this library declared evolvable (empty ⇒ not
+    /// evolvable). Resolved once at load; a v2 library without the optional
+    /// symbol is simply not evolvable, with no ABI bump required.
+    fn evolvable_knobs(&self) -> Vec<KnobSpec> {
+        self.knobs.clone()
+    }
+
+    fn shadow_factory(&self) -> Option<Box<dyn ShadowFactory>> {
+        if self.knobs.is_empty() {
+            return None; // explicit "not evolvable"
+        }
+        Some(Box::new(ForeignShadowFactory {
+            lib: self.lib.clone(),
+            name: self.name.clone(),
+            knobs: self.knobs.clone(),
+        }))
     }
 
     fn on_book(&mut self, token_id: &str, snap: &OrderbookSnapshot, now_ms: i64) {
         let Some(f) = self.vtable.on_book else { return };
         // on_book carries only a token; label the view with the asset resolved
         // from the last round's markets (falls back to the token itself).
-        let asset = self
-            .assets
-            .get(token_id)
-            .map(|s| s.as_str())
-            .unwrap_or(token_id);
+        let asset = self.assets.get(token_id).map(|s| s.as_str()).unwrap_or(token_id);
         let Some(m) = BookMarshal::new(token_id, asset, snap) else {
             return;
         };
@@ -287,9 +440,7 @@ impl EngineStrategy for ForeignStrategy {
         if let Some(f) = self.vtable.take_breaks {
             // SAFETY: hook returns a heap JSON array owned by the library.
             if let Some(v) = unsafe { self.take_json(f(self.handle)) } {
-                parse_breaks(&v)
-                    .into_iter()
-                    .for_each(|b| self.breaks.push(b));
+                parse_breaks(&v).into_iter().for_each(|b| self.breaks.push(b));
             }
         }
         std::mem::take(&mut self.breaks)
@@ -301,10 +452,9 @@ impl EngineStrategy for ForeignStrategy {
         };
         // SAFETY: hook returns a heap JSON array owned by the library.
         match unsafe { self.take_json(f(self.handle)) } {
-            Some(serde_json::Value::Array(a)) => a
-                .into_iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect(),
+            Some(serde_json::Value::Array(a)) => {
+                a.into_iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+            }
             _ => HashSet::new(),
         }
     }
@@ -465,10 +615,18 @@ impl EngineStrategy for ForeignStrategy {
         }
     }
 
-    fn set_hot_params(&mut self, handle: Arc<ArcSwap<MutableParams>>) {
-        // Reset the dedup marker so a fresh handle always pushes once.
+    fn set_hot_params(&mut self, registry: Option<Arc<ParamRegistry>>) {
+        // Resolve only OUR cell: a library that declared no knobs has no cell and
+        // therefore receives no hot parameters at all (explicit "not evolvable").
+        // `None` detaches: the library then runs on the config the kernel pushed
+        // through `on_config`, which is the pre-evolution behaviour exactly.
+        let cell = registry.as_ref().and_then(|r| r.handle_for(&self.name));
+        // Reset the dedup marker so a fresh cell always pushes once.
         self.last_hot_json = None;
-        self.hot_params = Some(handle);
+        self.params = cell;
+        // An already-published value is delivered on the next evaluation, not
+        // here: the push is issued from the hot path so it happens at most once
+        // per actual change.
     }
 
     fn on_config(&mut self, trend: &TrendConfig, spread_arb: &SpreadArbConfig) {
@@ -503,9 +661,62 @@ impl EngineStrategy for ForeignStrategy {
 impl Drop for ForeignStrategy {
     fn drop(&mut self) {
         if let Some(destroy) = self.vtable.destroy {
-            // SAFETY: handle came from this library's create().
+            // SAFETY: handle came from this library's create(). Destroying it
+            // here, before the `Arc<LoadedLibrary>` field is released, is what
+            // guarantees the library is still mapped when its code runs.
             unsafe { destroy(self.handle) };
         }
+    }
+}
+
+/// Builds independent twins of a loaded external strategy (E2-c / #28).
+///
+/// A twin is a SECOND instance from the same library (`create()` again), so the
+/// counterfactual runs the library's own logic — the same contract the in-tree
+/// twin path uses. The library stays mapped while any twin lives.
+pub struct ForeignShadowFactory {
+    lib: Arc<LoadedLibrary>,
+    name: String,
+    knobs: Vec<KnobSpec>,
+}
+
+impl ShadowFactory for ForeignShadowFactory {
+    fn strategy(&self) -> String {
+        self.name.clone()
+    }
+
+    fn knobs(&self) -> Vec<KnobSpec> {
+        self.knobs.clone()
+    }
+
+    fn make(&self, params: &StrategyParams) -> Option<Box<dyn EngineStrategy>> {
+        let vtable = unsafe { std::ptr::read(self.lib.vtable()) };
+        let create = vtable.create?;
+        let handle = unsafe { create() };
+        if handle.is_null() {
+            return None;
+        }
+        let mut twin = ForeignStrategy {
+            lib: self.lib.clone(),
+            vtable,
+            handle,
+            name: self.name.clone(),
+            version: String::new(),
+            free_string: self.lib.free_string,
+            gate_exemptions_fn: self.lib.gate_exemptions_fn,
+            evolvable_knobs_fn: self.lib.evolvable_knobs_fn,
+            knobs: self.knobs.clone(),
+            exit_intents: Vec::new(),
+            breaks: Vec::new(),
+            params: None,
+            last_hot_json: None,
+            assets: HashMap::new(),
+        };
+        // Seed the twin with its counterfactual values BEFORE it is driven, so its
+        // very first evaluation already uses them (next-tick semantics would give
+        // the twin one tick at the live parameters).
+        twin.apply_params_direct(params);
+        Some(Box::new(twin))
     }
 }
 
@@ -525,16 +736,4 @@ fn parse_breaks(v: &serde_json::Value) -> Vec<(String, Decimal)> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// Serialize the current MutableParams as camelCase JSON with decimal values as
-/// strings (consistent with the no-float wire rule).
-fn hot_params_json(p: &MutableParams) -> String {
-    serde_json::json!({
-        "trendMinPrice": p.trend_min_price.to_string(),
-        "trendEntryFactor": p.trend_entry_factor.to_string(),
-        "trendMaxEntryPrice": p.trend_max_entry_price.to_string(),
-        "trendBrokenPrice": p.trend_broken_price.to_string(),
-    })
-    .to_string()
 }

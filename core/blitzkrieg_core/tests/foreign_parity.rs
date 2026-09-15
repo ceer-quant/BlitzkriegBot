@@ -16,11 +16,10 @@
 //! `BK_REQUIRE_DYLIB=1` makes a missing cdylib a hard failure instead of a skip.
 #![cfg(feature = "strategy-loading")]
 
-use arc_swap::ArcSwap;
 use blitzkrieg_core::engine::{DataEvent, Engine, EngineConfig};
 use blitzkrieg_core::model::{CryptoMarket, OrderRequest, OrderbookSnapshot, SignalDirection};
 use blitzkrieg_core::scanner::ScannerConfig;
-use blitzkrieg_core::shadow_evolution::MutableParams;
+use blitzkrieg_core::shadow_evolution::{ParamRegistry, StrategyParams};
 use blitzkrieg_core::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
 use blitzkrieg_core::strategies::{EngineStrategy, StrategyCtx, StrategyExitIntent};
 use blitzkrieg_core::strategy_engine::loader::load_foreign;
@@ -99,13 +98,26 @@ fn market(end_ms: i64, slot: i64) -> CryptoMarket {
     }
 }
 
+/// A registry holding the parity strategy's own hot values, exactly as the
+/// evolution manager would publish them (E2-c): addressed by strategy name, so
+/// the in-tree side and the dylib side are fed by the same shape the kernel uses.
+fn hot_registry(cap: Decimal) -> ParamRegistry {
+    let mut p = StrategyParams::new();
+    p.set("trendMaxEntryPrice", cap);
+    p.set("exitAbove", dec!(0.60));
+    let r = ParamRegistry::new();
+    r.publish("parity", p);
+    r
+}
+
 /// In-tree twin of the external parity cdylib: the SAME algorithm crate behind
 /// the SAME full EngineStrategy contract, only the loading differs.
-struct InTreeParity {
-    inner: ParityStrategy,
+struct InTreeParity {    inner: ParityStrategy,
     exits: Vec<StrategyExitIntent>,
     breaks: Vec<(String, Decimal)>,
-    hot: Option<Arc<ArcSwap<MutableParams>>>,
+    /// This strategy's OWN cell in the per-strategy registry (E2-c): a parity
+    /// instance reads only its own namespace, never another strategy's.
+    hot: Option<Arc<arc_swap::ArcSwap<StrategyParams>>>,
     last_hot: Option<String>,
 }
 
@@ -122,15 +134,9 @@ impl InTreeParity {
 
     fn push_hot_if_changed(&mut self) {
         let Some(h) = &self.hot else { return };
-        let p = h.load();
-        // Same camelCase/no-float JSON the kernel hands the dylib (foreign.rs).
-        let json = serde_json::json!({
-            "trendMinPrice": p.trend_min_price.to_string(),
-            "trendEntryFactor": p.trend_entry_factor.to_string(),
-            "trendMaxEntryPrice": p.trend_max_entry_price.to_string(),
-            "trendBrokenPrice": p.trend_broken_price.to_string(),
-        })
-        .to_string();
+        // Same no-float JSON the kernel hands the dylib (foreign.rs): this
+        // strategy's own knob bag, serialized as decimal strings.
+        let json = serde_json::to_string(&**h.load()).unwrap_or_default();
         if self.last_hot.as_deref() == Some(json.as_str()) {
             return;
         }
@@ -227,9 +233,12 @@ impl EngineStrategy for InTreeParity {
         self.inner.diagnostics()
     }
 
-    fn set_hot_params(&mut self, handle: Arc<ArcSwap<MutableParams>>) {
+    fn set_hot_params(&mut self, registry: Option<Arc<ParamRegistry>>) {
         self.last_hot = None;
-        self.hot = Some(handle);
+        // The parity strategy declares `trendMaxEntryPrice` / `exitAbove`, so its
+        // own cell exists; a strategy that declared nothing would get `None`.
+        // `None` detaches the overlay (evolution disabled).
+        self.hot = registry.as_ref().and_then(|r| r.handle_for(self.name()));
     }
 }
 
@@ -389,9 +398,7 @@ fn in_tree_and_dylib_parity_match_signal_for_signal() {
     assert!(in_tree.set_strategy_enabled("spread_arb", false));
     in_tree.register_user_strategy(Box::new(InTreeParity::new()), "in-tree:parity_logic".into()).unwrap();
     assert!(in_tree.set_strategy_enabled("parity", true));
-    let mut hot = MutableParams::default();
-    hot.trend_max_entry_price = dec!(0.50);
-    in_tree.set_hot_params(Arc::new(ArcSwap::from_pointee(hot)));
+    in_tree.set_hot_params(Some(Arc::new(hot_registry(dec!(0.50)))));
     let a = run_replay(&steps, &mut in_tree);
 
     // ── Side B: the external parity_strategy cdylib via C ABI v2 ─────────────
@@ -403,9 +410,7 @@ fn in_tree_and_dylib_parity_match_signal_for_signal() {
         .register_user_strategy(Box::new(loaded.strategy), format!("dylib:{}", path.display()))
         .unwrap();
     assert!(foreign.set_strategy_enabled("parity", true));
-    let mut hot2 = MutableParams::default();
-    hot2.trend_max_entry_price = dec!(0.50);
-    foreign.set_hot_params(Arc::new(ArcSwap::from_pointee(hot2)));
+    foreign.set_hot_params(Some(Arc::new(hot_registry(dec!(0.50)))));
     let b = run_replay(&steps, &mut foreign);
 
     assert_eq!(a.breaks, b.breaks, "trend-break sequence differs");

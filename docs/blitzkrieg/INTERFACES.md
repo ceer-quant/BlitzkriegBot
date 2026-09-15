@@ -91,16 +91,39 @@
 
 ### 2.7 影子进化（Shadow Evolution，opt-in）
 
+自 E2-c（[#28](https://github.com/ceer-quant/BlitzkriegBot/issues/28)）起**参数、评估、审计、回滚
+全部按策略隔离**。因此 `apply`/`rollback` **必须**带 `strategy`；`history` 的 `strategy` 可选
+（不给 = 全部策略）。协议版本号不变，为向后兼容的加项。
+
 | method | params | result |
 |:---|:---|:---|
 | `shadow_evolution.enable` | `{}` | `{ "enabled": true }` |
-| `shadow_evolution.disable` | `{}` | `{ "enabled": false }` |
-| `shadow_evolution.status` | `{}` | `{ version, status, currentParams, variantCount, variants[], evolutionsApplied, evolutionsRejected, secondsSinceLastEvolution }` |
-| `shadow_evolution.history` | `{ limit? }` | `{ version, history: [AuditRecord...] }` |
-| `shadow_evolution.rollback` | `{}` | `{ "rolledBack": true }`（无历史则返回 error） |
+| `shadow_evolution.disable` | `{}` | `{ "enabled": false }`（摘除覆盖层；已应用的值本身不变） |
+| `shadow_evolution.status` | `{}` | `{ version, status, currentParams, variantCount, variants[], evolutionsApplied, evolutionsRejected, secondsSinceLastEvolution, strategies[] }` |
+| `shadow_evolution.history` | `{ limit?, strategy? }` | `{ version, history: [AuditRecord...] }` |
+| `shadow_evolution.apply` | `{ strategy, params }` | `{ "applied": true, "strategy": "…" }` |
+| `shadow_evolution.rollback` | `{ strategy }` | `{ "rolledBack": true, "strategy": "…" }`（无历史则返回 error） |
 
-新增事件：`EVOLUTION_SIGNAL`、`EVOLUTION_APPLIED`、`EVOLUTION_REJECTED`。
-详见 `SHADOW_EVOLUTION.md`。
+`status` 的聚合键（`currentParams`/`variantCount`/…）**语义与形状保持不变**，另加
+`strategies[]` 逐策略明细：
+
+```
+strategies[] = {
+  strategy,                       // 策略名
+  status,                         // 该策略的 EvolutionStatus；null = 未声明可进化旋钮
+  params,                         // 该策略当前参数 { knob: "decimal-string" }；null = 不可进化
+  knobs[],                        // 该策略声明的旋钮 { name, value, min, max }（字符串）
+  evolutionsApplied, evolutionsRejected, secondsSinceLastEvolution
+}
+```
+
+`params === null`（或 `status === null`）就是**「该策略不可进化」的线上表达**——不是错误状态。
+`apply`/`rollback` 传入未声明旋钮的策略、或 `params` 里出现未声明的旋钮 / 越出 `[min,max]` /
+单步超过 `max_gradient`，一律返回 error 且**不改动任何值**（多策略袋子也是全有或全无）。
+
+新增事件：`EVOLUTION_SIGNAL`、`EVOLUTION_APPLIED`、`EVOLUTION_REJECTED`（均带 `strategy`）。
+审计分文件：`data/evolution/<strategy>.jsonl`。
+详见 `SHADOW_EVOLUTION.md`、`STRATEGY_GUIDE.md §3.6`。
 
 ## 3. 调用示例
 
@@ -135,3 +158,4 @@ core.set_strategy_enabled("spread_arb", false);
 | 1.1 | Shadow Evolution（opt-in）：`shadow_evolution.enable/disable/status/history/rollback` + `EVOLUTION_*` 事件 |
 | 1.1 | E2-a：`engine.stats.strategies[]` 增 per-strategy 配额与生效定寸字段（协议加项，向后兼容，版本号不变） |
 | 1.1 | E2-b：`engine.stats.blocked` 增 `byStrategy`/`declaredExemptions`，`strategies[]` 增 `gateExemptions`/blocked/gateExempted 字段；`strategy.load` 回执追加豁免声明。外挂新增可选符号 `bk_strategy_gate_exemptions`（未导出=不声明），vtable 与 `BK_ABI_VERSION=2` 冻结 |
+| 1.1 | E2-c：`shadow_evolution.status` 增 `strategies[]`（每策略 status/params/knobs/计数），`history` 增可选 `strategy`，新增 `shadow_evolution.apply`，`rollback` 改为**必需** `strategy`；热参改为按策略命名空间（`ParamRegistry`），关闭进化时覆盖层**摘除**；审计分文件 `data/evolution/<strategy>.jsonl`。外挂新增可选符号 `bk_strategy_evolvable_knobs`（未导出=不可进化），vtable 与 `BK_ABI_VERSION=2` 仍冻结 |

@@ -155,11 +155,22 @@ typedef struct bk_strategy_vtable {
 ```c
 // E2-b：策略自证它不需要哪些共享入场质量闸门（见 STRATEGY_GUIDE §3.5）
 char* bk_strategy_gate_exemptions(void* handle); // {"timing":bool,"momentum":bool}
+
+// E2-c：策略自证它的可进化旋钮与取值域（见 STRATEGY_GUIDE §3.6）
+char* bk_strategy_evolvable_knobs(void* handle);
+// {"knobs":[{"name":"trendMaxEntryPrice","value":"0.43","min":"0.05","max":"0.90"}]}
 ```
+
+符号常量在 `blitzkrieg-strategy-api`：
+`BK_GATE_EXEMPTIONS_SYMBOL = b"bk_strategy_gate_exemptions\0"`、
+`BK_EVOLVABLE_KNOBS_SYMBOL = b"bk_strategy_evolvable_knobs\0"`。
 
 loader 用 `lib.get::<T>(BK_..._SYMBOL).ok()` 解析：**符号缺失 = 该项未声明**，
 旧库行为与「使用 trait 默认实现」的树内策略逐位一致，`BK_ABI_VERSION` /
-`BK_MIN_ABI_VERSION` 维持 2。约定：
+`BK_MIN_ABI_VERSION` 维持 2。对 `bk_strategy_evolvable_knobs` 而言「缺失」的语义
+格外明确：**缺失即该策略不可进化**——内核不为它建参数单元，对其
+`shadow_evolution.apply`/`rollback` 一律拒绝，加载回执写明
+`not evolvable (no knobs declared)`。约定：
 
 - 可选符号复用 `bk_string_out` / `bk_strategy_free_string` 的 JSON 出参与同库
   释放规则（除非另有说明）。
@@ -189,14 +200,30 @@ OME、UDS、网络句柄。
 
 ## 5. 热参数与「策略自证旋钮」
 
-- `set_hot_params(Arc<ArcSwap<MutableParams>>)` 到达时，foreign 外壳缓存句柄；
-  每次 evaluate 读取当前值，序列化为 camelCase JSON（今天即那 4 个 trend_*
-  字段），与上次下发不同则回调 `on_hot_params`。next-tick 生效、无重启，语义
-  与树内 builtin 对齐。
-- `knobs()` 返回该策略**自证**的可进化字段（JSON Schema 片段）。按策略的参数
-  命名空间/独立评估属 E2-c（#28）；本批只把**过界通道与自证机制**端到端打通，
-  策略从同一份 MutableParams JSON 里读自己认识的字段。E2-c 扩的是内核参数
-  模型，不再改 ABI。
+E2-c（[#28](https://github.com/ceer-quant/BlitzkriegBot/issues/28)）把这一节从「共用一份
+全局 JSON」改成了**按策略隔离**，且**没有改 ABI**：新能力全部落在可选符号上。
+
+- **内核侧**：`EngineStrategy::set_hot_params(Option<Arc<ParamRegistry>>)`。`ParamRegistry`
+  按策略名持有 `Arc<ArcSwap<StrategyParams>>`；`StrategyParams` 是**该策略自己的**
+  `BTreeMap<knob, Decimal>`，不是四个 `trend_*` 字段的全局结构。
+  `None` = **摘除**覆盖层（进化关闭），策略从此读不到任何热参句柄，行为退回 `on_config`
+  下发的配置——这是「关闭进化 ⇒ 与改动前逐位一致」的实现方式。
+- **foreign 外壳**：`set_hot_params` 后用 `registry.handle_for(&self.name)` 只解析
+  **自己那一格**；声明了 0 个旋钮的库拿不到单元（明确「不可进化」）。
+  `push_hot_params_if_changed` 在热路径上读当前值、序列化为 JSON、与上次下发**去重**后
+  调 `on_hot_params`。next-tick 生效、无重启，语义与树内 builtin 一致。
+- **旋钮自证**：可选符号 `bk_strategy_evolvable_knobs` →
+  `{"knobs":[{name,value,min,max}]}`（十进制字符串）。loader 经
+  `KnobDeclaration::parse` 解析，**非法 JSON / 缺字段 / 符号缺失 = 未声明**，永不 panic。
+  `ForeignStrategy::shadow_factory()` 在 `knobs.is_empty()` 时返回 `None`，
+  这正是「不声明 = 不可进化」的落点。
+- **孪生**：`shadow_factory()` 的 foreign 实现调用库的 `create()` **再建一个独立实例**
+  （同一 handle 表之外的第二实例），把反事实参数经 `apply_params_direct` 直接推给它——
+  于是影子变体跑的是**该库自己的**入场/出场逻辑，与树内路径语义等价。
+  `LoadedLibrary` 用 `Arc` 持有，孪生也持有同一 `Arc`，因此只要有孪生存活，库就不会被卸载。
+
+按策略的参数命名空间 / 独立评估 / 独立审计 / 独立回滚均由内核完成；**ABI 仍为 v2**，
+`BK_ABI_VERSION` / `BK_MIN_ABI_VERSION` 不变，已发布的 v2 库无需重编译。
 
 ## 6. 单一注册路径
 

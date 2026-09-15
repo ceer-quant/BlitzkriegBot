@@ -23,8 +23,9 @@
 
 #[cfg(feature = "strategy-loading")]
 use blitzkrieg_strategy_api::{
-    bk_strategy_free_string, BkHandle, BkStrategyVtable, BK_ABI_VERSION, BK_CREATE_SYMBOL,
-    BK_FREE_STRING_SYMBOL, BK_GATE_EXEMPTIONS_SYMBOL, BK_MIN_ABI_VERSION, BK_VERSION_SYMBOL,
+    bk_strategy_free_string, BkStrategyVtable, BK_ABI_VERSION, BK_CREATE_SYMBOL,
+    BK_EVOLVABLE_KNOBS_SYMBOL, BK_FREE_STRING_SYMBOL, BK_GATE_EXEMPTIONS_SYMBOL,
+    BK_MIN_ABI_VERSION, BK_VERSION_SYMBOL,
 };
 use std::path::{Path, PathBuf};
 
@@ -78,6 +79,10 @@ pub struct LoadedForeign {
     /// Shared entry gates this library declared it does not need (E2-b / #27).
     /// Default (nothing declared, or no such symbol) = fully gated.
     pub gate_exemptions: crate::strategies::GateExemptions,
+    /// The knobs this library declared evolvable (E2-c / #28). Empty = **not
+    /// evolvable** (no symbol, or nothing declared), which is an explicit
+    /// declaration and is reported as such at registration.
+    pub evolvable_knobs: Vec<crate::shadow_evolution::KnobSpec>,
 }
 
 /// Load and negotiate a v2 strategy library, returning it boxed as the full
@@ -139,14 +144,25 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
     .ok()
     .map(|s| *s);
 
-    // 3) Factory → vtable.
-    let create_sym = match unsafe {
+    // 2c) OPTIONAL per-strategy evolvable-knob declaration (E2-c / #28). Same rule:
+    // absent symbol = declares nothing = NOT evolvable, so no ABI bump and older
+    // libraries keep loading unchanged.
+    let evolvable_knobs_fn = unsafe {
+        lib.get::<blitzkrieg_strategy_api::BkEvolvableKnobsFn>(BK_EVOLVABLE_KNOBS_SYMBOL)
+    }
+    .ok()
+    .map(|s| *s);
+
+    // 3) Factory → vtable. Take the raw fn pointer out of the symbol so the
+    // library handle can be moved into the shared wrapper below (the `Symbol`
+    // itself borrows the `Library`).
+    let create_fn: unsafe extern "C" fn() -> *const BkStrategyVtable = match unsafe {
         lib.get::<unsafe extern "C" fn() -> *const BkStrategyVtable>(BK_CREATE_SYMBOL)
     } {
-        Ok(s) => s,
+        Ok(s) => *s,
         Err(e) => return fail(format!("missing symbol bk_strategy_create: {e}")),
     };
-    let vt_ptr = unsafe { create_sym() };
+    let vt_ptr = unsafe { create_fn() };
     if vt_ptr.is_null() {
         return fail("bk_strategy_create returned null".into());
     }
@@ -182,25 +198,31 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
     let name = unsafe { cstr_to_string(vtable.name) }.unwrap_or_else(|| "unnamed".into());
     let version = unsafe { cstr_to_string(vtable.version) }.unwrap_or_else(|| "0.0.0".into());
 
-    // 5) Instance.
-    let handle: BkHandle = unsafe { vtable.create.unwrap_or_else(|| unreachable!())() };
-    if handle.is_null() {
-        return fail("strategy create() returned a null handle".into());
-    }
-
+    // 5) The library handle is shared: the live instance and every shadow twin it
+    // spawns hold the same Arc, so the mapping outlives them all.
     // SAFETY: negotiation above established a v2 library with a static vtable,
-    // valid handle and matching allocator; ForeignStrategy drives it single-
-    // threaded and frees the handle in Drop.
-    let strategy = unsafe {
-        crate::strategies::foreign::ForeignStrategy::from_loaded(
-            lib, vtable, handle, name.clone(), version.clone(), Some(free_string),
+    // a matching allocator and the optional symbols resolved from it.
+    let shared = unsafe {
+        crate::strategies::foreign::LoadedLibrary::new(
+            lib,
+            create_fn,
+            Some(free_string),
             gate_exemptions_fn,
+            evolvable_knobs_fn,
         )
     };
-    // Read the OPTIONAL declaration once, here, so the load report can state it
-    // (E2-b / #27: an opt-out must be visible at registration, not only later).
+
+    // SAFETY: as above — the shared library is valid, the vtable is static and the
+    // instance is driven single-threaded and destroys its handle in Drop.
+    let strategy = unsafe {
+        crate::strategies::foreign::ForeignStrategy::from_loaded(shared, name.clone(), version.clone())
+    };
+    // Read the OPTIONAL declarations once, here, so the load report can state
+    // them: an opt-out (E2-b) or "not evolvable" (E2-c) must be visible at
+    // registration, not only inferred later.
     let gate_exemptions = crate::strategies::EngineStrategy::gate_exemptions(&strategy);
-    Ok(LoadedForeign { strategy, name, version, gate_exemptions })
+    let evolvable_knobs = crate::strategies::EngineStrategy::evolvable_knobs(&strategy);
+    Ok(LoadedForeign { strategy, name, version, gate_exemptions, evolvable_knobs })
 }
 
 /// Read a NUL-terminated C string into an owned `String` (None for null).

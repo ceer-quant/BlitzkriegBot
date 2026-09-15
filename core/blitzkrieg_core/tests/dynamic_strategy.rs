@@ -14,7 +14,6 @@
 use blitzkrieg_core::engine::{DataEvent, Engine, EngineConfig};
 use blitzkrieg_core::model::CryptoMarket;
 use blitzkrieg_core::scanner::ScannerConfig;
-use blitzkrieg_core::shadow_evolution::MutableParams;
 use blitzkrieg_core::signal::{SpreadArbConfig, TrendConfig};
 use blitzkrieg_core::strategy_engine::loader::load_foreign;
 use rust_decimal_macros::dec;
@@ -208,14 +207,34 @@ fn hot_params_reach_the_dylib_on_the_next_evaluation() {
     });
     assert!(engine.evaluate(now + 1_000).is_empty());
 
-    // Hot-swap the entry ceiling up to 0.50 → next evaluate must fire.
-    let mut p = MutableParams::default();
-    p.trend_max_entry_price = dec!(0.50);
-    engine.set_hot_params(Arc::new(arc_swap::ArcSwap::from_pointee(p)));
+    // Hot-swap the entry ceiling up to 0.50 → next evaluate must fire. The bag is
+    // addressed by STRATEGY (E2-c) and carries this library's own knob name; the
+    // strategy resolves only its own cell, so nothing leaks across namespaces.
+    let mut p = blitzkrieg_core::shadow_evolution::StrategyParams::new();
+    p.set("trendMaxEntryPrice", dec!(0.50));
+    let registry = blitzkrieg_core::shadow_evolution::ParamRegistry::new();
+    registry.publish("dog_strategy", p);
+    engine.set_hot_params(Some(Arc::new(registry)));
     let orders = engine.evaluate(now + 2_000);
     assert_eq!(orders.len(), 1, "{orders:?}");
     assert_eq!(orders[0].token_id, "down");
     assert_eq!(orders[0].price, dec!(0.48));
+}
+
+#[test]
+fn the_dylib_declares_its_evolvable_knobs_over_the_optional_symbol() {
+    // E2-c (#28): `bk_strategy_evolvable_knobs` is OPTIONAL — its absence means
+    // "not evolvable", explicitly, which is why adding it needs no ABI bump. When
+    // present, the load report carries the knobs AND the domain the kernel
+    // enforces, and `on_hot_params` receives exactly this bag serialized.
+    let path = require_lib();
+    let loaded = load_foreign(&path).unwrap_or_else(|e| panic!("load failed: {e:?}"));
+    let knobs = &loaded.evolvable_knobs;
+    assert_eq!(knobs.len(), 1, "the dog strategy declares exactly one knob");
+    assert_eq!(knobs[0].name, "trendMaxEntryPrice");
+    assert_eq!(knobs[0].value, dec!(0.43));
+    assert!(knobs[0].contains(dec!(0.50)), "the kernel's override must be inside the domain");
+    assert!(!knobs[0].contains(dec!(0.99)), "and an out-of-domain value must be rejectable");
 }
 
 #[test]
