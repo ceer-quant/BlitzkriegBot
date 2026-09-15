@@ -55,8 +55,6 @@ export async function runDoctor(): Promise<CheckResult[]> {
   // 2. Config file exists
   const configPaths = [
     path.join(process.cwd(), '.blitzkrieg.json'),
-    path.join(process.cwd(), '.clodds.json'),
-    path.join(process.cwd(), 'clodds.config.json'),
     resolveConfigPath(),
   ];
 
@@ -465,7 +463,7 @@ export async function runDoctor(): Promise<CheckResult[]> {
   }
 
   // 8. Port availability check
-  const port = config.gateway?.port ?? 18789;
+  const port = config.gateway?.port ?? 51888;
   try {
     const net = await import('net');
     const available = await new Promise<boolean>((resolve) => {

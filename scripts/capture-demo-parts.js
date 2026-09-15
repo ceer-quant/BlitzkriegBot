@@ -55,7 +55,7 @@ async function capturePart() {
   };
 
   try {
-    await page.goto('http://localhost:18789/webchat', { waitUntil: 'load', timeout: 15000 });
+    await page.goto('http://localhost:51888/webchat', { waitUntil: 'load', timeout: 15000 });
     await capture(5);
 
     // Type command

@@ -4,10 +4,10 @@ This document describes the HTTP and WebSocket endpoints exposed by the Blitzkri
 
 ## Base URL
 
-By default the gateway binds to loopback and listens on port 18789.
+By default the gateway binds to loopback and listens on port 51888.
 
 ```
-http://127.0.0.1:18789
+http://127.0.0.1:51888
 ```
 
 ## Authentication and security
@@ -398,7 +398,7 @@ Real-time tick data streaming via WebSocket. Subscribe to specific markets and r
 **Example usage (JavaScript):**
 
 ```javascript
-const ws = new WebSocket('ws://localhost:18789/api/ticks/stream');
+const ws = new WebSocket('ws://localhost:51888/api/ticks/stream');
 
 ws.onopen = () => {
   ws.send(JSON.stringify({
@@ -1481,7 +1481,7 @@ The Compute API allows agents to pay for compute resources with USDC. No API key
 ## Base URL
 
 ```
-http://127.0.0.1:18789
+http://127.0.0.1:51888
 ```
 
 ## Authentication
@@ -2056,7 +2056,7 @@ data: {"type": "done", "response": {"content": "In the realm of code...", "model
 
 **JavaScript example:**
 ```javascript
-const response = await fetch('http://127.0.0.1:18789/v1/stream/llm', {
+const response = await fetch('http://127.0.0.1:51888/v1/stream/llm', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({

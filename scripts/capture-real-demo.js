@@ -11,7 +11,7 @@ const { execSync } = require('child_process');
 
 const ASSETS_DIR = path.join(__dirname, '..', 'assets');
 const FRAMES_DIR = path.join(ASSETS_DIR, 'frames');
-const WEBCHAT_URL = 'http://localhost:18789/webchat?token=skip';
+const WEBCHAT_URL = 'http://localhost:51888/webchat?token=skip';
 
 // Ensure directories
 if (!fs.existsSync(FRAMES_DIR)) fs.mkdirSync(FRAMES_DIR, { recursive: true });

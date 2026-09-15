@@ -16,7 +16,7 @@ if (process.argv.includes('onboard') || process.argv.includes('setup')) {
   process.env.LOG_LEVEL = 'silent';
 }
 
-// Load .env and mirror legacy CLODDS_* names onto BLITZKRIEG_* before first use.
+// Load .env from the state directory before first use.
 import '../utils/brand-bootstrap';
 
 import { Command } from 'commander';
@@ -289,7 +289,7 @@ program
   .option('--port <port>', 'Override gateway port')
   .action(async (options: { host: string; scheme: string; port?: string }) => {
     const config = await loadConfig();
-    const port = options.port ? (Number.parseInt(options.port, 10) || 18789) : (config.gateway?.port ?? 18789);
+    const port = options.port ? (Number.parseInt(options.port, 10) || 51888) : (config.gateway?.port ?? 51888);
     const host = options.host;
     const scheme = options.scheme;
     const portSuffix = port === 80 || port === 443 ? '' : `:${port}`;
@@ -321,7 +321,7 @@ program
     console.log('\nBlitzkrieg Status\n');
 
     // Count paired users per channel
-    const channels = ['telegram', 'discord', 'webchat', 'matrix', 'signal', 'imessage', 'line', 'googlechat'];
+    const channels = ['telegram', 'discord', 'panel', 'matrix', 'signal', 'imessage', 'line', 'googlechat'];
     for (const channel of channels) {
       const users = pairingService.listPairedUsers(channel);
       const pending = pairingService.listPendingRequests(channel);

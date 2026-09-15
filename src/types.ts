@@ -1004,7 +1004,7 @@ export interface Config {
       groups?: Record<string, { requireMention?: boolean }>;
       rateLimit?: RateLimitConfig;
     };
-    webchat?: {
+    panel?: {
       enabled: boolean;
       authToken?: string;
       rateLimit?: RateLimitConfig;

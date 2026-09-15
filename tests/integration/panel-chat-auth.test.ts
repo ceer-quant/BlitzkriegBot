@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { AddressInfo } from 'node:net';
-import { createWebChatChannel } from '../../src/channels/webchat/index';
+import { createPanelChatChannel } from '../../src/channels/panel/index';
 
 function createMessageQueue(ws: WebSocket) {
   const queue: any[] = [];
@@ -52,14 +52,14 @@ function createMessageQueue(ws: WebSocket) {
   return { waitFor };
 }
 
-test('webchat auth and message flow', async () => {
+test('panel chat auth and message flow', async () => {
   const wss = new WebSocketServer({ port: 0, path: '/chat' });
   await new Promise<void>((resolve) => wss.on('listening', () => resolve()));
   const address = wss.address() as AddressInfo;
   const port = address.port;
 
   let received: any = null;
-  const channel = createWebChatChannel(
+  const channel = createPanelChatChannel(
     { enabled: true, authToken: 'secret' },
     {
       onMessage: async (message) => {
@@ -100,7 +100,7 @@ test('webchat auth and message flow', async () => {
       await new Promise((r) => setTimeout(r, 10));
     }
 
-    assert.equal(received.platform, 'webchat');
+    assert.equal(received.platform, 'panel');
     assert.equal(received.userId, 'web-user');
     assert.equal(received.text, 'hello');
   } finally {

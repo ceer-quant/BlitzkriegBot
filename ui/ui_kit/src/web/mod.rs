@@ -409,7 +409,7 @@ impl WebServer {
         }
     }
 
-    /// Serve until the process is stopped. `addr` e.g. `127.0.0.1:18888`.
+    /// Serve until the process is stopped. `addr` e.g. `127.0.0.1:51888`.
     pub fn serve(&self, addr: &str) -> std::io::Result<()> {
         let listener = TcpListener::bind(addr)?;
         let console = self.dispatcher.is_some();

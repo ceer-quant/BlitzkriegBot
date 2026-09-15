@@ -81,7 +81,7 @@ async function listTools(): Promise<McpTool[]> {
 async function callTool(toolName: string, args: Record<string, unknown>): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
   await ensureSkills();
 
-  // blitzkrieg_trading_polymarket (or legacy clodds_*) → trading-polymarket
+  // blitzkrieg_trading_polymarket → trading-polymarket
   const skillName = skillFromToolName(toolName);
   if (!skillName) {
     return {

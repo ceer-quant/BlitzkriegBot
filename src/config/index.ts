@@ -83,7 +83,7 @@ export const CONFIG_PATH = resolveConfigPath();
 export const CREDENTIALS_DIR = resolveCredentialsDir();
 export const LOGS_DIR = resolveLogsDir();
 export const WORKSPACE_DIR = resolveWorkspaceDir();
-export const DEFAULT_GATEWAY_PORT = 18789;
+export const DEFAULT_GATEWAY_PORT = 51888;
 
 // =============================================================================
 // TYPES
@@ -159,7 +159,7 @@ export interface DiscordConfig extends ChannelConfig {
   appId?: string;
 }
 
-export interface WebChatConfig extends ChannelConfig {
+export interface PanelChatConfig extends ChannelConfig {
   authToken?: string;
 }
 
@@ -258,7 +258,7 @@ export interface LineConfig extends ChannelConfig {
 export interface ChannelsConfig {
   telegram?: TelegramConfig;
   discord?: DiscordConfig;
-  webchat?: WebChatConfig;
+  panel?: PanelChatConfig;
   slack?: SlackConfig;
   whatsapp?: WhatsAppConfig;
   teams?: TeamsConfig;
@@ -676,10 +676,10 @@ const ENV_MAPPINGS: Record<string, (cfg: BlitzkriegConfig) => void> = {
     if (!cfg.channels.discord) cfg.channels.discord = {};
     cfg.channels.discord.appId = process.env.DISCORD_APP_ID;
   },
-  WEBCHAT_TOKEN: (cfg) => {
+  PANEL_CHAT_TOKEN: (cfg) => {
     if (!cfg.channels) cfg.channels = {};
-    if (!cfg.channels.webchat) cfg.channels.webchat = {};
-    cfg.channels.webchat.authToken = process.env.WEBCHAT_TOKEN;
+    if (!cfg.channels.panel) cfg.channels.panel = {};
+    cfg.channels.panel.authToken = process.env.PANEL_CHAT_TOKEN;
   },
   POSITIONS_PRICE_UPDATE_INTERVAL_MS: (cfg) => {
     if (!cfg.positions) cfg.positions = {};

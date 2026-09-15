@@ -197,7 +197,7 @@ const HANDLE_MIN_LENGTH = 3;
 const HANDLE_MAX_LENGTH = 20;
 const HANDLE_REGEX = /^[a-z0-9_]+$/;
 const RESERVED_HANDLES = new Set([
-  'admin', 'blitzkrieg', 'clodds', 'system', 'api', 'help', 'support',
+  'admin', 'blitzkrieg', 'system', 'api', 'help', 'support',
   'official', 'verified', 'bot', 'agent', 'null', 'undefined',
   'root', 'mod', 'moderator', 'staff', 'team',
 ]);

@@ -340,7 +340,7 @@ const STREAM_RESPONSE_PLATFORMS = new Set([
   'whatsapp',
   'matrix',
   'teams',
-  'webchat',
+  'panel', // historical 'webchat' rows keep the old label
 ]);
 const MEMORY_EXTRACT_MODEL = process.env.BLITZKRIEG_MEMORY_EXTRACT_MODEL || process.env.BLITZKRIEG_SUMMARY_MODEL || 'claude-3-5-haiku-20241022';
 const KALSHI_API_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
@@ -7696,7 +7696,7 @@ function buildTools(): ToolDefinition[] {
       input_schema: {
         type: 'object',
         properties: {
-          platform: { type: 'string', description: 'Platform (e.g., telegram, slack, discord, webchat)' },
+          platform: { type: 'string', description: 'Platform (e.g., telegram, slack, discord, panel)' },
           chat_id: { type: 'string', description: 'Chat/channel ID' },
           message_id: { type: 'string', description: 'Message ID to edit' },
           text: { type: 'string', description: 'New message text' },
@@ -7711,7 +7711,7 @@ function buildTools(): ToolDefinition[] {
       input_schema: {
         type: 'object',
         properties: {
-          platform: { type: 'string', description: 'Platform (e.g., telegram, slack, discord, webchat)' },
+          platform: { type: 'string', description: 'Platform (e.g., telegram, slack, discord, panel)' },
           chat_id: { type: 'string', description: 'Chat/channel ID' },
           message_id: { type: 'string', description: 'Message ID to delete' },
           account_id: { type: 'string', description: 'Account ID (for multi-account channels)' },

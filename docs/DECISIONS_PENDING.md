@@ -56,7 +56,7 @@
 ## [待决策] D-4 「删除 BlitzkriegBot」的实际范围与时机（关键）
 
 - **背景**：`BlitzkriegBot/` 目录**已不存在**（更早提交 `fc6e93c` 已扁平化）。
-  今天存在的 Node 侧是 **`src/`（584 个 .ts 文件）+ `dist/`**，且**正在运行**（`node dist/index.js`，:18789）。
+  今天存在的 Node 侧是 **`src/`（584 个 .ts 文件）+ `dist/`**，且**正在运行**（`node dist/index.js`，:51888）。
   任务书要求「删除 BlitzkriegBot 目录」，实际等价于删除整个 Node 外壳——远超「删一个遗留目录」。
 - **已完成的替代**：`ui_kit/`（core/web/tui/app）已实现并三前端跑通，可替代**展示层**
   （`ui/hft.html`、`src/tui`）。
@@ -378,7 +378,7 @@
     `https://registry.blitzkrieg.example`；
   - 文档中其余"你的主机"示例统一用 `your-host.example` / `blitzkrieg.example.com`；
   - 网关自身的 API 文档（docs/API.md、docs/openapi.yaml 等）基址改为自托管
-    `http://127.0.0.1:18789`。
+    `http://127.0.0.1:51888`。
 - **AI 倾向**：保持上述占位，直到真实托管服务部署时再换域名；不在代码中预埋
   任何可解析的第三方地址。
 - **需要用户确认**：0.1 是否维持「自托管 + `.example` 占位」口径；若已有计划内

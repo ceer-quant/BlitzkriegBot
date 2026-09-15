@@ -1,39 +1,26 @@
 /**
- * Session share URIs (E1-d).
+ * Session share URIs.
  *
- * `blitzkrieg://session/<id>?key=<hash>` is canonical. The legacy
- * `clodds://` scheme is accepted when resolving an incoming link so shared
- * links issued before the rename keep working for one release.
+ * `blitzkrieg://session/<id>?key=<hash>` is the only scheme.
  */
 
 export const SESSION_URI_SCHEME = 'blitzkrieg://';
-export const LEGACY_SESSION_URI_SCHEME = 'clodds://';
 
 export interface SessionUri {
   sessionId: string;
   key?: string;
-  legacy: boolean;
 }
 
 export function buildSessionUri(sessionId: string, key: string): string {
   return `${SESSION_URI_SCHEME}session/${sessionId}?key=${key}`;
 }
 
-/** Resolve a canonical or legacy session URI; returns null if it is neither. */
+/** Resolve a session URI; returns null unless it carries the canonical scheme. */
 export function parseSessionUri(uri: string): SessionUri | null {
-  let rest: string;
-  let legacy: boolean;
-  if (uri.startsWith(SESSION_URI_SCHEME)) {
-    rest = uri.slice(SESSION_URI_SCHEME.length);
-    legacy = false;
-  } else if (uri.startsWith(LEGACY_SESSION_URI_SCHEME)) {
-    rest = uri.slice(LEGACY_SESSION_URI_SCHEME.length);
-    legacy = true;
-  } else {
-    return null;
-  }
+  if (!uri.startsWith(SESSION_URI_SCHEME)) return null;
 
+  const rest = uri.slice(SESSION_URI_SCHEME.length);
   const match = /^session\/([^?]+)(?:\?key=([\w-]+))?$/.exec(rest);
   if (!match) return null;
-  return { sessionId: match[1], key: match[2], legacy };
+  return { sessionId: match[1], key: match[2] };
 }

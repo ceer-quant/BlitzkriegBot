@@ -5,8 +5,8 @@
  * Entry point - starts the gateway and all services
  */
 
-// Must be the first import: loads .env and mirrors legacy CLODDS_* variables
-// onto their canonical BLITZKRIEG_* names before any other module initialises.
+// Must be the first import: loads .env from the state directory before any
+// other module initialises.
 import './utils/brand-bootstrap';
 
 import { randomBytes } from 'crypto';
@@ -136,10 +136,10 @@ function validateStartupRequirements(): void {
         mkdirSync(stateDir, { recursive: true });
       }
       if (existsSync(envPath)) {
-        // Append only when neither the canonical nor the legacy name is present,
-        // so an existing key is never shadowed by a fresh one.
+        // Append only when not already present, so an existing key is never
+        // shadowed by a fresh one.
         const existing = readFileSync(envPath, 'utf-8');
-        if (!/(BLITZKRIEG|CLODDS)_CREDENTIAL_KEY=/.test(existing)) {
+        if (!/BLITZKRIEG_CREDENTIAL_KEY=/.test(existing)) {
           appendFileSync(envPath, `\nBLITZKRIEG_CREDENTIAL_KEY=${generated}\n`);
         }
       } else {
@@ -155,7 +155,7 @@ function validateStartupRequirements(): void {
   if (!process.env.TELEGRAM_BOT_TOKEN && !process.env.DISCORD_BOT_TOKEN) {
     warnings.push(
       'No messaging channel configured (TELEGRAM_BOT_TOKEN or DISCORD_BOT_TOKEN).\n' +
-      '  WebChat at http://localhost:18789/webchat will still work.'
+      '  Web panel at http://localhost:51888/panel will still work.'
     );
   }
 
@@ -272,7 +272,7 @@ async function main() {
 
     // Final success message
     console.log('\n\x1b[32m\x1b[1m✓ Blitzkrieg is running!\x1b[0m');
-    console.log(`\n  WebChat: \x1b[36mhttp://localhost:${config.gateway.port}/webchat\x1b[0m`);
+    console.log(`\n  Panel: \x1b[36mhttp://localhost:${config.gateway.port}/panel\x1b[0m`);
     if (process.env.TELEGRAM_BOT_TOKEN) {
       console.log('  Telegram: \x1b[32mConnected\x1b[0m');
     }

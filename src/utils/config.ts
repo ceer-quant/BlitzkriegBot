@@ -32,7 +32,7 @@ const CONFIG_FILE = resolveConfigPath();
 
 const DEFAULT_CONFIG: Config = {
   gateway: {
-    port: 18789,
+    port: 51888,
     auth: {},
   },
   agents: {
@@ -55,8 +55,8 @@ const DEFAULT_CONFIG: Config = {
       dmPolicy: 'pairing',
       allowFrom: [],
     },
-    webchat: {
-      enabled: true, // WebChat enabled by default
+    panel: {
+      enabled: true,
     },
     matrix: process.env.MATRIX_ACCESS_TOKEN && process.env.MATRIX_HOMESERVER_URL && process.env.MATRIX_USER_ID
       ? {

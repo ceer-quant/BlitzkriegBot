@@ -3229,7 +3229,7 @@ export function createBittensorCommands(program: Command): void {
         console.log('  Subnets: none configured');
       }
       console.log('\nLive status (requires running gateway):');
-      console.log('  curl localhost:18789/api/bittensor/status\n');
+      console.log('  curl localhost:51888/api/bittensor/status\n');
     });
 
   // ── earnings: query from running gateway ─────────────────────────────────
@@ -3237,9 +3237,9 @@ export function createBittensorCommands(program: Command): void {
     .command('earnings')
     .description('Show TAO earnings (queries running gateway)')
     .option('-p, --period <period>', 'Period: hourly, daily, weekly, monthly, all', 'daily')
-    .option('--port <port>', 'Gateway port', '18789')
+    .option('--port <port>', 'Gateway port', '51888')
     .action(async (options: { period?: string; port?: string }) => {
-      const port = options.port ?? '18789';
+      const port = options.port ?? '51888';
       const period = options.period ?? 'daily';
       try {
         const token = process.env.BLITZKRIEG_TOKEN;
@@ -3271,9 +3271,9 @@ export function createBittensorCommands(program: Command): void {
   bittensor
     .command('miners')
     .description('Show registered miner statuses (queries running gateway)')
-    .option('--port <port>', 'Gateway port', '18789')
+    .option('--port <port>', 'Gateway port', '51888')
     .action(async (options: { port?: string }) => {
-      const port = options.port ?? '18789';
+      const port = options.port ?? '51888';
       try {
         const token = process.env.BLITZKRIEG_TOKEN;
         const headers: Record<string, string> = {};
@@ -3303,9 +3303,9 @@ export function createBittensorCommands(program: Command): void {
   bittensor
     .command('subnets')
     .description('List available Bittensor subnets (queries running gateway)')
-    .option('--port <port>', 'Gateway port', '18789')
+    .option('--port <port>', 'Gateway port', '51888')
     .action(async (options: { port?: string }) => {
-      const port = options.port ?? '18789';
+      const port = options.port ?? '51888';
       try {
         const token = process.env.BLITZKRIEG_TOKEN;
         const headers: Record<string, string> = {};
@@ -3693,7 +3693,7 @@ export function createOnboardCommand(program: Command): void {
     .alias('setup')
     .description('Interactive setup wizard — get running in 60 seconds')
     .option('--api-key <key>', 'Anthropic API key (skip prompt)')
-    .option('--channel <name>', 'Channel to configure (telegram, discord, slack, webchat)')
+    .option('--channel <name>', 'Channel to configure (telegram, discord, slack, panel)')
     .option('--no-start', 'Skip the "start now?" prompt')
     .action(async (options: { apiKey?: string; channel?: string; start?: boolean }) => {
       const { createInterface } = await import('readline');
@@ -3818,7 +3818,7 @@ export function createOnboardCommand(program: Command): void {
       // STEP 2: CHANNEL
       // ═══════════════════════════════════════════════════════════════════
       console.log(`  ${bgCyan(' 2 ')} ${bold('Messaging Channel')}`);
-      console.log(`  ${dim('WebChat is built-in at')} ${cyan('http://localhost:18789/webchat')}`);
+      console.log(`  ${dim('Panel is built-in at')} ${cyan('http://localhost:51888/panel')}`);
       console.log(`  ${dim('Optionally connect a platform:')}`);
       console.log('');
       console.log(`    ${bold('1')}  WebChat only       ${dim('zero config, works immediately')}`);
@@ -3830,7 +3830,7 @@ export function createOnboardCommand(program: Command): void {
       let channelChoice = options.channel || '';
       if (!channelChoice) {
         const choice = await ask(`  ${bold('Choose')} ${dim('[1-4, default 1]:')} `);
-        const map: Record<string, string> = { '1': 'webchat', '2': 'telegram', '3': 'discord', '4': 'slack', '': 'webchat' };
+        const map: Record<string, string> = { '1': 'panel', '2': 'telegram', '3': 'discord', '4': 'slack', '': 'panel' };
         channelChoice = map[choice] || choice.toLowerCase();
       }
       console.log('');
@@ -3953,7 +3953,7 @@ export function createOnboardCommand(program: Command): void {
 
       // Write config
       if (!configObj.gateway) {
-        configObj.gateway = { port: 18789 };
+        configObj.gateway = { port: 51888 };
       }
       writeFileSync(configPath, JSON.stringify(configObj, null, 2));
       console.log(`  ${green('wrote')} ${dim(configPath)}`);
@@ -3981,7 +3981,7 @@ export function createOnboardCommand(program: Command): void {
         return 'localhost';
       };
       const webHost = getHost();
-      console.log(`  ${dim('WebChat:')} ${cyan(`http://${webHost}:18789/webchat`)}`);
+      console.log(`  ${dim('Panel:')} ${cyan(`http://${webHost}:51888/panel`)}`);
 
       if (channelChoice === 'telegram' && envVars.TELEGRAM_BOT_TOKEN) {
         console.log(`  ${dim('Telegram:')} message your bot to start chatting`);
@@ -4018,7 +4018,7 @@ export function createOnboardCommand(program: Command): void {
 
           console.log(`\r  ${green(bold('Blitzkrieg is running'))}                `);
           console.log('');
-          console.log(`  ${cyan(`http://${webHost}:${config.gateway.port}/webchat`)}`);
+          console.log(`  ${cyan(`http://${webHost}:${config.gateway.port}/panel`)}`);
           console.log(`  ${dim('Press Ctrl+C to stop')}`);
           console.log('');
 

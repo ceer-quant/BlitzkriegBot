@@ -124,16 +124,16 @@ All endpoints require authentication (`BLITZKRIEG_TOKEN`).
 
 ```bash
 # Check status
-curl -H "Authorization: Bearer $BLITZKRIEG_TOKEN" localhost:18789/api/bittensor/status
+curl -H "Authorization: Bearer $BLITZKRIEG_TOKEN" localhost:51888/api/bittensor/status
 
 # Get daily earnings
-curl -H "Authorization: Bearer $BLITZKRIEG_TOKEN" localhost:18789/api/bittensor/earnings?period=daily
+curl -H "Authorization: Bearer $BLITZKRIEG_TOKEN" localhost:51888/api/bittensor/earnings?period=daily
 
 # Register on Chutes (SN64)
 curl -X POST -H "Authorization: Bearer $BLITZKRIEG_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"subnetId": 64}' \
-  localhost:18789/api/bittensor/register
+  localhost:51888/api/bittensor/register
 ```
 
 ## AI Agent Tool
