@@ -63,14 +63,14 @@
 | `spot.price` | `{ asset, price }` | `{ ok: true }` |
 | `engine.markets` | `{ markets: [CryptoMarket...] }` | `{ ok: true }` |
 | `engine.round` | `{}` | `{ slot, ageSec, timeLeftSec, markets, canTrade, marketPrices:[{asset,up,down}] }` |
-| `engine.stats` | `{}` | `{ books, tops, spots, rounds, evaluations, signals, placeRejected, strategyLimitRejected, blocked:{timing,momentum}, confirmed:[...], confirmedDetail:[{token,mid,entry,cap,inBand}], strategies:[...]（P-1.1 按策略分账；E2-a 增 `maxOpenPositions`/`maxOpenNotionalUsd`（未配置为 null）、`sizingSource:"global"|"strategy"`、`effectiveSizeUsd`/`effectiveMinShares`/`effectiveMaxShares`）, archive:{ path, events, bytes, dropped, recording, rotateBytes, segmentBytes, segments, freeBytes, stoppedReason:"cap"\|"disk"\|"io"\|"locked"\|null }\|null（P-1.3 归档状态；**内核默认常开**，`--no-event-archive` 关闭 + 分段轮转 + 单写者锁） }`。诊断列表按 token 排序、按调用时刻计算（回测报告内用虚拟钟），因此可复现、可 diff |
+| `engine.stats` | `{}` | `{ books, tops, spots, rounds, evaluations, signals, placeRejected, strategyLimitRejected, blocked:{timing,momentum,byStrategy,declaredExemptions}, confirmed:[...], confirmedDetail:[{token,mid,entry,cap,inBand}], strategies:[...]（P-1.1 按策略分账；E2-a 增 `maxOpenPositions`/`maxOpenNotionalUsd`（未配置为 null）、`sizingSource:"global"|"strategy"`、`effectiveSizeUsd`/`effectiveMinShares`/`effectiveMaxShares`；E2-b 增 `gateExemptions:string[]`（声明豁免的入场闸门，`[]`=全保留）、`blockedTiming`/`blockedMomentum`、`gateExemptedTiming`/`gateExemptedMomentum`）, archive:{ path, events, bytes, dropped, recording, rotateBytes, segmentBytes, segments, freeBytes, stoppedReason:"cap"\|"disk"\|"io"\|"locked"\|null }\|null（P-1.3 归档状态；**内核默认常开**，`--no-event-archive` 关闭 + 分段轮转 + 单写者锁） }`。`blocked.byStrategy` 把每次 timing/momentum 拦截归属到候选单所属策略（`{<name>:{timing,momentum}}`，全 0 省略），`blocked.declaredExemptions` 列出当前生效的全部豁免声明 `[{strategy,gates}]`；原 `timing`/`momentum` 全局总数语义不变。诊断列表按 token 排序、按调用时刻计算（回测报告内用虚拟钟），因此可复现、可 diff |
 
 ### 2.4 策略（P0.5）
 | method | params | result |
 |:---|:---|:---|
 | `strategy.list` | `{}` | `{ "version": "1.1", "strategies": [{ "name", "enabled" }] }` |
 | `strategy.enable` | `{ name, enabled }` | `{ name, enabled, found }` |
-| `strategy.load` | `{ path }` | 成功 `"<name>@<version> registered into the engine dispatch (disabled)"`（注册后默认禁用，需再 `strategy.enable`）；失败返回 `"Rejected { path, reason }"`（路径策略）/ `"Failed { path, reason }"`（dlopen/协商/`create` 失败）。走 **C ABI v2**：`bk_strategy_abi_version()` 必须为 2（无 v1 兼容层）。`strategy-loading` 自 E7 起默认开启 |
+| `strategy.load` | `{ path }` | 成功 `"<name>@<version> registered into the engine dispatch (disabled)"`（注册后默认禁用，需再 `strategy.enable`；E2-b 起若该库导出可选符号 `bk_strategy_gate_exemptions`，回执在启用前显式追加 `; declares gate exemptions: timing[,momentum]`）；失败返回 `"Rejected { path, reason }"`（路径策略）/ `"Failed { path, reason }"`（dlopen/协商/`create` 失败）。走 **C ABI v2**：`bk_strategy_abi_version()` 必须为 2（无 v1 兼容层）；新能力一律以「按名字解析的可选符号」追加、vtable 结构体冻结，故 E2-b 不需要 ABI v3。`strategy-loading` 自 E7 起默认开启 |
 
 ### 2.5 风控
 | method | params | result |
@@ -133,3 +133,5 @@ core.set_strategy_enabled("spread_arb", false);
 | 1.0 | P0–P4：orders/positions/ledger/books/engine/risk 方法；事件 ORDER_UPDATE/FILL/POSITION_CLOSED/RISK_ALERT/RECONCILE_REPORT/ERROR |
 | 1.1 | P0.5：所有消息新增 `version` 字段；新增 `strategy.list/enable/load`、`extension.list`、`extension.enable/disable`；`engine.stats` 增 `blocked` |
 | 1.1 | Shadow Evolution（opt-in）：`shadow_evolution.enable/disable/status/history/rollback` + `EVOLUTION_*` 事件 |
+| 1.1 | E2-a：`engine.stats.strategies[]` 增 per-strategy 配额与生效定寸字段（协议加项，向后兼容，版本号不变） |
+| 1.1 | E2-b：`engine.stats.blocked` 增 `byStrategy`/`declaredExemptions`，`strategies[]` 增 `gateExemptions`/blocked/gateExempted 字段；`strategy.load` 回执追加豁免声明。外挂新增可选符号 `bk_strategy_gate_exemptions`（未导出=不声明），vtable 与 `BK_ABI_VERSION=2` 冻结 |

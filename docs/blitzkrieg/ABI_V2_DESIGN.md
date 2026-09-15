@@ -34,6 +34,7 @@ v2 外壳），不是一套残废接口。
 | 影子进化热参 | ✅ | ❌ | ✅ on_hot_params(JSON) |
 | 自证可进化旋钮 | （E2-c） | ❌ | ✅ knobs() JSON Schema 片段 |
 | 配置变更 on_config | ✅ | ❌ | ✅ on_config(JSON) |
+| 入场闸门自声明豁免（E2-b） | ✅ trait 默认无豁免 | ❌ | ✅ 可选符号 `bk_strategy_gate_exemptions`（§3.5） |
 
 ## 3. ABI v2 二进制契约（crate `blitzkrieg-strategy-api`，版本 2）
 
@@ -127,6 +128,10 @@ typedef struct bk_strategy_vtable {
 空 = `EngineStrategy` 的默认实现（不破坏「全功能接口」，单个策略可不用某个钩子，
 树内策略同理）。
 
+**此结构体自发布起冻结，永远不再追加字段**（按值拷贝，加字段即 `sizeof` 破坏式
+变更，须升 v3）。v2 内的任何新能力都走 §3.5 的独立可选符号——首个实例是 E2-b 的
+`bk_strategy_gate_exemptions`。
+
 ### 3.4 版本协商与拒绝矩阵（硬规则）
 
 - `bk_strategy_abi_version() -> uint32` 对 v2 库为**必填**符号。
@@ -137,6 +142,31 @@ typedef struct bk_strategy_vtable {
   `LoadOutcome::Failed`，信息明确（v1 库：要求用 strategy-api 0.2 重新构建）。
 - v1 无生产消费者（feature 从未默认开启、无外部 dylib），故**不留 v1 兼容
   shim**，干净断裂（见 DECISIONS_PENDING D-15）。
+
+### 3.5 演进规则：vtable 冻结，新能力走「可选符号」（E2-b 确立）
+
+`BkStrategyVtable` 一旦发布即为**冻结布局**，原因是 loader 的内核侧用
+`std::ptr::read(vt_ptr)` 把整个 vtable **按值**拷贝出来：给结构体末尾追加
+字段会改变 `sizeof`，旧库在这一读上越界——那是一次破坏式变更，必须递增
+`BK_ABI_VERSION=3` 并让所有库重编译。
+
+因此 v2 内新增能力的**唯一合法形式**，是一个按名字解析的**独立可选符号**：
+
+```c
+// E2-b：策略自证它不需要哪些共享入场质量闸门（见 STRATEGY_GUIDE §3.5）
+char* bk_strategy_gate_exemptions(void* handle); // {"timing":bool,"momentum":bool}
+```
+
+loader 用 `lib.get::<T>(BK_..._SYMBOL).ok()` 解析：**符号缺失 = 该项未声明**，
+旧库行为与「使用 trait 默认实现」的树内策略逐位一致，`BK_ABI_VERSION` /
+`BK_MIN_ABI_VERSION` 维持 2。约定：
+
+- 可选符号复用 `bk_string_out` / `bk_strategy_free_string` 的 JSON 出参与同库
+  释放规则（除非另有说明）。
+- 解析失败 / JSON 非法 / 取值类型不符，一律**降级为「未声明」**，绝不 panic、
+  绝不按「更宽松」解释。
+- 只有当某个能力无法用「符号缺失即无操作」表达（例如必填输入的布局变化）时，
+  才允许升级 v3；单纯的输出型新能力永远走可选符号。
 
 ## 4. 出场意图如何接进内核（不失控）
 

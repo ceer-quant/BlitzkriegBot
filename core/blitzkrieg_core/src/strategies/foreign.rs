@@ -12,17 +12,18 @@
 //! All structured outputs cross as heap JSON strings allocated and freed by the
 //! SAME loaded library (its `bk_strategy_free_string`), so allocators never mix.
 
-use super::{EngineStrategy, StrategyCtx, StrategyExitIntent};
+use super::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent};
 use crate::model::OrderbookSnapshot;
 use crate::shadow_evolution::MutableParams;
 use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
 use arc_swap::ArcSwap;
 use blitzkrieg_strategy_api::{
-    BkBookView, BkHandle, BkLevel, BkMarket, BkRound, BkRoundView, BkStrategyVtable,
+    BkBookView, BkGateExemptionsFn, BkHandle, BkLevel, BkMarket, BkRound, BkRoundView,
+    BkStrategyVtable,
 };
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{CStr, CString, c_char};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -76,7 +77,12 @@ impl BookMarshal {
     /// must bind the returned vecs and keep them alive across the FFI call.
     fn level_views(&self) -> (Vec<BkLevel>, Vec<BkLevel>) {
         let to = |v: &[(CString, CString)]| {
-            v.iter().map(|(p, sz)| BkLevel { price: p.as_ptr(), size: sz.as_ptr() }).collect()
+            v.iter()
+                .map(|(p, sz)| BkLevel {
+                    price: p.as_ptr(),
+                    size: sz.as_ptr(),
+                })
+                .collect()
         };
         (to(&self.bid_levels), to(&self.ask_levels))
     }
@@ -85,9 +91,17 @@ impl BookMarshal {
         BkBookView {
             symbol: self.symbol.as_ptr(),
             asset: self.asset.as_ptr(),
-            bids: if bids.is_empty() { std::ptr::null() } else { bids.as_ptr() },
+            bids: if bids.is_empty() {
+                std::ptr::null()
+            } else {
+                bids.as_ptr()
+            },
             bid_count: bids.len(),
-            asks: if asks.is_empty() { std::ptr::null() } else { asks.as_ptr() },
+            asks: if asks.is_empty() {
+                std::ptr::null()
+            } else {
+                asks.as_ptr()
+            },
             ask_count: asks.len(),
             best_bid: self.best_bid.as_ptr(),
             best_ask: self.best_ask.as_ptr(),
@@ -114,6 +128,10 @@ pub struct ForeignStrategy {
     version: String,
     /// Deallocator resolved from THIS library for its JSON outputs.
     free_string: Option<unsafe extern "C" fn(*mut c_char)>,
+    /// Optional v2 symbol `bk_strategy_gate_exemptions` (E2-b / #27). None when
+    /// the library does not export it — then the strategy declares nothing and
+    /// stays fully gated, exactly like the in-tree default.
+    gate_exemptions_fn: Option<BkGateExemptionsFn>,
 
     // Outputs accumulated during evaluate(), drained by the host.
     exit_intents: Vec<StrategyExitIntent>,
@@ -143,6 +161,7 @@ impl ForeignStrategy {
         name: String,
         version: String,
         free_string: Option<unsafe extern "C" fn(*mut c_char)>,
+        gate_exemptions_fn: Option<BkGateExemptionsFn>,
     ) -> Self {
         Self {
             _lib: lib,
@@ -151,6 +170,7 @@ impl ForeignStrategy {
             name,
             version,
             free_string,
+            gate_exemptions_fn,
             exit_intents: Vec::new(),
             breaks: Vec::new(),
             hot_params: None,
@@ -172,7 +192,10 @@ impl ForeignStrategy {
         }
         // SAFETY: pointer came from this library's CString::into_raw; copy then
         // free once via the matching allocator.
-        let parsed = unsafe { CStr::from_ptr(p) }.to_str().ok().and_then(|s| serde_json::from_str(s).ok());
+        let parsed = unsafe { CStr::from_ptr(p) }
+            .to_str()
+            .ok()
+            .and_then(|s| serde_json::from_str(s).ok());
         if let Some(f) = self.free_string {
             // SAFETY: same provenance as above.
             unsafe { f(p) };
@@ -182,7 +205,9 @@ impl ForeignStrategy {
 
     fn push_hot_params_if_changed(&mut self) {
         let Some(h) = &self.hot_params else { return };
-        let Some(f) = self.vtable.on_hot_params else { return };
+        let Some(f) = self.vtable.on_hot_params else {
+            return;
+        };
         let p = h.load();
         let json = hot_params_json(&p);
         if self.last_hot_json.as_deref() == Some(json.as_str()) {
@@ -206,12 +231,36 @@ impl EngineStrategy for ForeignStrategy {
         &self.name
     }
 
+    /// E2-b / #27: read the library's OPTIONAL `bk_strategy_gate_exemptions`
+    /// symbol. A library that does not export it, returns null, or returns
+    /// malformed JSON declares nothing and stays fully gated — the same default
+    /// an in-tree strategy gets from the trait. Cached: the declaration is a
+    /// property of the loaded instance, so it is resolved once (the symbol is
+    /// called on demand but its result never widens between ticks).
+    fn gate_exemptions(&self) -> GateExemptions {
+        let Some(f) = self.gate_exemptions_fn else {
+            return GateExemptions::none();
+        };
+        // SAFETY: valid handle; the returned JSON string is owned by the library
+        // and freed through the library's own deallocator by take_json.
+        let v = unsafe { self.take_json(f(self.handle)) };
+        v.as_ref()
+            .map(GateExemptions::from_json)
+            .unwrap_or_default()
+    }
+
     fn on_book(&mut self, token_id: &str, snap: &OrderbookSnapshot, now_ms: i64) {
         let Some(f) = self.vtable.on_book else { return };
         // on_book carries only a token; label the view with the asset resolved
         // from the last round's markets (falls back to the token itself).
-        let asset = self.assets.get(token_id).map(|s| s.as_str()).unwrap_or(token_id);
-        let Some(m) = BookMarshal::new(token_id, asset, snap) else { return };
+        let asset = self
+            .assets
+            .get(token_id)
+            .map(|s| s.as_str())
+            .unwrap_or(token_id);
+        let Some(m) = BookMarshal::new(token_id, asset, snap) else {
+            return;
+        };
         // These raw-pointer arrays borrow from `m`; bind and hold them (along
         // with `m`) across the FFI call so nothing is freed underneath it.
         let (bid_levels, ask_levels) = m.level_views();
@@ -222,7 +271,11 @@ impl EngineStrategy for ForeignStrategy {
 
     fn on_round(&mut self, slot: i64) {
         if let Some(f) = self.vtable.on_round {
-            let round = BkRound { slot, time_left_sec: 0, now_ms: 0 };
+            let round = BkRound {
+                slot,
+                time_left_sec: 0,
+                now_ms: 0,
+            };
             // SAFETY: valid handle + borrowed round for the call.
             unsafe { f(self.handle, &round) };
         }
@@ -234,14 +287,18 @@ impl EngineStrategy for ForeignStrategy {
         if let Some(f) = self.vtable.take_breaks {
             // SAFETY: hook returns a heap JSON array owned by the library.
             if let Some(v) = unsafe { self.take_json(f(self.handle)) } {
-                parse_breaks(&v).into_iter().for_each(|b| self.breaks.push(b));
+                parse_breaks(&v)
+                    .into_iter()
+                    .for_each(|b| self.breaks.push(b));
             }
         }
         std::mem::take(&mut self.breaks)
     }
 
     fn confirmed_tokens(&self) -> HashSet<String> {
-        let Some(f) = self.vtable.confirmed_tokens else { return HashSet::new() };
+        let Some(f) = self.vtable.confirmed_tokens else {
+            return HashSet::new();
+        };
         // SAFETY: hook returns a heap JSON array owned by the library.
         match unsafe { self.take_json(f(self.handle)) } {
             Some(serde_json::Value::Array(a)) => a
@@ -253,7 +310,9 @@ impl EngineStrategy for ForeignStrategy {
     }
 
     fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
-        let Some(evaluate) = self.vtable.evaluate else { return Vec::new() };
+        let Some(evaluate) = self.vtable.evaluate else {
+            return Vec::new();
+        };
         self.push_hot_params_if_changed();
 
         // Refresh token→asset for on_book labelling between evaluations.
@@ -267,7 +326,10 @@ impl EngineStrategy for ForeignStrategy {
             strs: Vec<(CString, CString, CString, CString, CString)>,
             view: Vec<BkMarket>,
         }
-        let mut rows = Rows { strs: Vec::new(), view: Vec::new() };
+        let mut rows = Rows {
+            strs: Vec::new(),
+            view: Vec::new(),
+        };
         for m in ctx.markets() {
             let cs = |s: &str| CString::new(s).unwrap_or_default();
             rows.strs.push((
@@ -301,14 +363,20 @@ impl EngineStrategy for ForeignStrategy {
         };
         let rv = BkRoundView {
             round,
-            markets: if rows.view.is_empty() { std::ptr::null() } else { rows.view.as_ptr() },
+            markets: if rows.view.is_empty() {
+                std::ptr::null()
+            } else {
+                rows.view.as_ptr()
+            },
             market_count: rows.view.len(),
         };
 
         // SAFETY: valid handle and a round view whose backing lives to end of
         // scope; the returned JSON is copied and freed via the library.
         let out = unsafe { evaluate(self.handle, &rv) };
-        let Some(v) = (unsafe { self.take_json(out) }) else { return Vec::new() };
+        let Some(v) = (unsafe { self.take_json(out) }) else {
+            return Vec::new();
+        };
 
         if let Some(serde_json::Value::Array(exits)) = v.get("exits") {
             for e in exits {
@@ -318,7 +386,10 @@ impl EngineStrategy for ForeignStrategy {
                         .and_then(|r| r.as_str())
                         .unwrap_or("strategy")
                         .to_string();
-                    self.exit_intents.push(StrategyExitIntent { token_id: token.to_string(), reason });
+                    self.exit_intents.push(StrategyExitIntent {
+                        token_id: token.to_string(),
+                        reason,
+                    });
                 }
             }
         }
@@ -339,7 +410,9 @@ impl EngineStrategy for ForeignStrategy {
             ) else {
                 continue;
             };
-            let Ok(price) = Decimal::from_str(price_s) else { continue };
+            let Ok(price) = Decimal::from_str(price_s) else {
+                continue;
+            };
             let reason = e
                 .get("reason")
                 .and_then(|r| r.as_str())
@@ -382,7 +455,9 @@ impl EngineStrategy for ForeignStrategy {
     }
 
     fn diagnostics(&self, _ctx: &StrategyCtx<'_>) -> Vec<serde_json::Value> {
-        let Some(f) = self.vtable.diagnostics else { return Vec::new() };
+        let Some(f) = self.vtable.diagnostics else {
+            return Vec::new();
+        };
         // SAFETY: hook returns a heap JSON array owned by the library.
         match unsafe { self.take_json(f(self.handle)) } {
             Some(serde_json::Value::Array(a)) => a,
@@ -397,7 +472,9 @@ impl EngineStrategy for ForeignStrategy {
     }
 
     fn on_config(&mut self, trend: &TrendConfig, spread_arb: &SpreadArbConfig) {
-        let Some(f) = self.vtable.on_config else { return };
+        let Some(f) = self.vtable.on_config else {
+            return;
+        };
         let json = serde_json::json!({
             "trend": {
                 "confirmSec": trend.confirm_sec,

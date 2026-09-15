@@ -250,9 +250,21 @@ unsafe extern "C" fn knobs(_handle: BkHandle) -> *mut c_char {
     )
 }
 
+/// E2-b (#27): the dog strategy hunts dips, which is mean-reversion — it wants
+/// the whole round, so it declares the round-timing WINDOW gate unnecessary for
+/// its entries while still asking for the spot momentum alignment filter (it
+/// only fades a dip it believes is noise, not a real move against it).
+///
+/// This is an OPTIONAL symbol: a v2 library without it stays fully gated, which
+/// is why the declaration needs no ABI bump. The kernel logs every honoured
+/// exemption («本单因策略 dog_strategy 豁免门禁 timing») — this is not a bypass of
+/// any safety boundary.
+unsafe extern "C" fn gate_exemptions(_handle: BkHandle) -> *mut c_char {
+    bk_string_out(serde_json::json!({ "timing": true, "momentum": false }).to_string())
+}
+
 static NAME: &[u8] = b"dog_strategy\0";
 static VERSION: &[u8] = b"0.2.0\0";
-
 static VTABLE: BkStrategyVtable = BkStrategyVtable {
     name: NAME.as_ptr() as *const c_char,
     version: VERSION.as_ptr() as *const c_char,
@@ -279,4 +291,9 @@ pub extern "C" fn bk_strategy_create() -> *const BkStrategyVtable {
 #[unsafe(no_mangle)]
 pub extern "C" fn bk_strategy_abi_version() -> u32 {
     BK_ABI_VERSION
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn bk_strategy_gate_exemptions(handle: BkHandle) -> *mut c_char {
+    unsafe { gate_exemptions(handle) }
 }
