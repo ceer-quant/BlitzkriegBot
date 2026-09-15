@@ -114,7 +114,7 @@ BlitzkriegBot/
 │   ├── index.ts                     # 进程入口：启动 gateway + 各服务
 │   ├── gateway/                      # HTTP + WebSocket 网关（默认端口 51888）
 │   │   ├── index.ts
-│   │   └── server.ts                # /webchat 静态、/api/trading/balance、/chat WS
+│   │   └── server.ts                # /panel 静态、/api/trading/balance、/chat WS
 │   ├── skills/bundled/crypto-hft/
 │   │   ├── index.ts                 # 技能命令实现
 │   │   └── SKILL.md

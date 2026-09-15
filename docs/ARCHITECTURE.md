@@ -112,7 +112,7 @@ src/channels/
 ├── matrix/            # Matrix SDK
 ├── signal/            # signal-cli wrapper
 ├── teams/             # Microsoft Bot Framework
-├── webchat/           # Built-in browser client
+├── panel/             # Built-in browser client
 ├── line/              # LINE Messaging API
 ├── googlechat/        # Google Chat API
 ├── nostr/             # Nostr protocol

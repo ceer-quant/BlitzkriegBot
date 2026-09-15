@@ -259,6 +259,6 @@
     "teams": "Microsoft Teams",
     "matrix": "Matrix",
     "signal": "Signal",
-    "webchat": "WebChat"
+    "panel": "Panel"
   }
 }

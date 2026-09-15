@@ -312,7 +312,7 @@ WebChat is a local browser chat UI at:
 http://127.0.0.1:51888/panel
 ```
 
-If you set `WEBCHAT_TOKEN`, the browser will prompt for it on first load and
+If you set `PANEL_CHAT_TOKEN`, the browser will prompt for it on first load and
 store it in localStorage.
 
 Features:
