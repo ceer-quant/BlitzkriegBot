@@ -199,6 +199,39 @@ try:
     check('core registry: mean_reversion on', rows.get('mean_reversion') is True, str(rows))
     check('core registry: spread_arb off', rows.get('spread_arb') is False, str(rows))
 
+    # ── E9-f (#61): onboarding affordances ────────────────────────────────────
+    # Fresh panel again (the one above already consumed hints / help state).
+    p1 = Panel(SOCK)
+    text = p1.drain(2.0)
+    check('hint bar shows self-check state', any(
+        s in text for s in ('self-check passed', 'connected', 'connecting')), text[-160:])
+    check('first-run hint shown', 'press :' in text)
+
+    # `?` opens the help overlay listing keys and commands.
+    text = p1.send(b'?', settle=1.0)
+    check('help overlay opens on ?', 'Help' in text and 'COMMANDS' in text, text[:80].replace('\n', ' '))
+    check('help lists up/down dual meaning', 'recall' in text.lower() and 'Plugins' in text)
+    p1.clear()
+    text = p1.send(b'\x1b', settle=0.6)
+    check('Esc closes help', 'COMMANDS' not in text, text[-60:])
+
+    # Command bar: Tab completes an unambiguous prefix.
+    p1.send(b':', settle=0.4)
+    p1.clear()
+    text = p1.send(b'pos', settle=0.3)
+    text = p1.send(b'\t', settle=0.6)
+    # ratatui paints spans around the cursor, so the tail may arrive split with
+    # cursor blocks and diff noise in between; project to letters and match.
+    letters = ''.join(re.findall(r'[A-Za-z]', text))
+    check('Tab completes pos→positions', 'positions' in letters, re.sub(r'\s+', ' ', text[-120:]))
+    # Executed commands are recallable with ↑ in a fresh bar.
+    p1.send(b'\r', settle=1.2)
+    p1.send(b':', settle=0.4)
+    p1.clear()
+    text = p1.send(b'\x1b[A', settle=0.7)
+    check('↑ recalls last command', 'positions' in text, re.sub(r'\s+', ' ', text[-120:]))
+    p1.quit()
+
     # Round 2: core stopped — graceful degradation.
     core.terminate()
     time.sleep(0.8)
