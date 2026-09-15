@@ -435,6 +435,10 @@ export class SecretStore {
 
   private async initEncryption(password: string): Promise<void> {
     // Derive key from password
+    // Historical contract, naming deprecated (D-13 / E1-a #21): the salt derives
+    // the key for existing `secrets.enc` / `paired-users.json` ciphertext.
+    // Changing it makes every previously encrypted blob permanently undecryptable,
+    // so it is deliberately kept exactly as first deployed. Never rename here.
     const salt = 'clodds-secrets-v1';
     this.encryptionKey = (await scryptAsync(password, salt, 32)) as Buffer;
   }
