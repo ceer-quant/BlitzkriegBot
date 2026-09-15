@@ -40,7 +40,7 @@ BlitzkriegBot/
 │   ├── strategy_api/      # 用户策略 trait / FFI 稳定表面
 │   └── strategies/        # 示例动态策略（独立的嵌套 workspace，产出 cdylib）
 ├── ui/
-│   ├── ui_kit/            # Rust UI 组件库（bins: ui_kit_tui / ui_kit_web / ui_kit_app）
+│   ├── ui_kit/            # Rust UI 组件库（bins: ui_kit_web / ui_kit_app）
 │   └── ui_kit_panel/     # 面板应用（bin: ui_kit_panel）
 ├── src/                   # Node.js 外壳（网关、UI、核心托管客户端）
 ├── scripts/               # 门禁与运维脚本（cycle-check / core-parity / secret-scan …）
@@ -132,11 +132,10 @@ npm start                   # node dist/index.js，本地网关与 UI
 
 ### 3.4 UI
 
-Rust UI 套件位于 `ui/`：终端 UI（`ui_kit_tui`）、Web（`ui_kit_web`）、
-桌面应用骨架（`ui_kit_app`）与面板（`ui_kit_panel`）。
+Rust UI 套件位于 `ui/`：Web（`ui_kit_web`）、桌面应用骨架（`ui_kit_app`）
+与终端面板（`ui_kit_panel`，ratatui）。
 
 ```bash
-cargo run -p blitzkrieg-ui-kit --bin ui_kit_tui
 cargo run -p blitzkrieg-ui-panel
 ```
 

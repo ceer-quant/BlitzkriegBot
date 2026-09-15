@@ -9,10 +9,6 @@ name = "blitzkrieg_ui_kit"
 path = "src/lib.rs"
 
 [[bin]]
-name = "ui_kit_tui"
-path = "src/bin/tui.rs"
-
-[[bin]]
 name = "ui_kit_web"
 path = "src/bin/web.rs"
 
