@@ -185,7 +185,7 @@
 | 策略 | 方向 | 与主策略的关系 | 状态 |
 | --- | --- | --- | --- |
 | **趋势跟随**（`trend_follow`，[#30](https://github.com/ceer-quant/BlitzkriegBot/issues/30)） | 顺势追（突破/动量确认后入场） | 主策略抄底失效（单边下跌）时它是另一条腿 | ✅ 已实现（内建，默认关闭，6 个可进化旋钮，留出段回放见 [报告](reports/TREND_FOLLOW_HOLDOUT_REPORT.md)） |
-| **逆向/均值回归**（[#31](https://github.com/ceer-quant/BlitzkriegBot/issues/31)） | 逆势接（超跌反弹、假突破回落） | 与趋势策略天然对冲；需关闭动量门禁 | 待实现 |
+| **逆向/均值回归**（`mean_reversion`，[#31](https://github.com/ceer-quant/BlitzkriegBot/issues/31)） | 逆势接（超跌反弹） | 与趋势策略天然对冲；声明 `momentum` 门禁豁免（E2-b 通道首个内建使用者） | ✅ 已实现（内建，默认关闭，6 个可进化旋钮，留出段回放见 [报告](reports/MEAN_REVERSION_HOLDOUT_REPORT.md)；证据等级=留出段） |
 
 要点（**2026-09-14 用户修正后**）：策略一律实现**全功能策略接口**，且**必须能外挂**（dylib）——
 「外挂」与「树内」只是**加载方式**的差别，**不是能力**的差别（E7）。

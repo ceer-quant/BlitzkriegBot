@@ -9,9 +9,10 @@
 //! exemption from ([`GateExemptions`], E2-b / #27); the exemption is explicit,
 //! logged, counted and can never reach the safety boundary.
 //!
-//! There is exactly ONE full-featured contract: [`EngineStrategy`]. The two
-//! in-tree builtins — [`spread_arb::SpreadArbBuiltin`] (the dip buyer) and
-//! [`trend_follow::TrendFollowBuiltin`] (the chase leg, E4-a / #30) — and an
+//! There is exactly ONE full-featured contract: [`EngineStrategy`]. The three
+//! in-tree builtins — [`spread_arb::SpreadArbBuiltin`] (the dip buyer),
+//! [`trend_follow::TrendFollowBuiltin`] (the chase leg, E4-a / #30) and
+//! [`mean_reversion::MeanReversionBuiltin`] (the fade leg, E4-b / #31) — and an
 //! external dylib loaded through C ABI v2 ([`foreign::ForeignStrategy`]) all
 //! implement it. Being external is
 //! only a loading difference — an external strategy sees every book callback,
@@ -22,10 +23,12 @@
 
 #[cfg(feature = "strategy-loading")]
 pub mod foreign;
+pub mod mean_reversion;
 pub mod shadow_twin;
 pub mod spread_arb;
 pub mod trend_follow;
 
+pub use mean_reversion::MeanReversionConfig;
 pub use shadow_twin::{EngineStrategyShadow, ShadowFactory, ShadowTickCtx, ShadowTickResult};
 pub use trend_follow::TrendFollowConfig;
 
