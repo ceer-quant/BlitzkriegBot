@@ -150,7 +150,7 @@ ALCHEMY_API_KEY=
 
 ```bash
 # Server binding
-BLITZKRIEG_PORT=18789
+BLITZKRIEG_PORT=51888
 BLITZKRIEG_HOST=127.0.0.1
 
 # State directory (database, backups)
@@ -284,7 +284,7 @@ docker build -t blitzkrieg .
 **Run:**
 ```bash
 docker run --rm \
-  -p 18789:18789 \
+  -p 51888:51888 \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -e TELEGRAM_BOT_TOKEN=... \
   -e WEBCHAT_TOKEN=... \
@@ -306,7 +306,7 @@ services:
   blitzkrieg:
     build: .
     ports:
-      - "18789:18789"
+      - "51888:51888"
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
@@ -315,7 +315,7 @@ services:
       - blitzkrieg_data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:18789/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:51888/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -510,7 +510,7 @@ cp ~/.blitzkrieg/blitzkrieg.db ~/.blitzkrieg/backups/blitzkrieg-$(date +%Y%m%d).
 
 ```bash
 # HTTP health check
-curl http://localhost:18789/health
+curl http://localhost:51888/health
 # {"status":"ok","timestamp":1706500000000}
 
 # CLI diagnostics
@@ -579,7 +579,7 @@ Configure alert targets in `blitzkrieg.json`:
 
 ```nginx
 upstream blitzkrieg {
-    server 127.0.0.1:18789;
+    server 127.0.0.1:51888;
 }
 
 server {
@@ -607,7 +607,7 @@ server {
 
 ```caddyfile
 blitzkrieg.example.com {
-    reverse_proxy localhost:18789
+    reverse_proxy localhost:51888
 }
 ```
 
@@ -679,7 +679,7 @@ journalctl -u blitzkrieg -f
 blitzkrieg doctor
 
 # Check if port is in use
-lsof -i :18789
+lsof -i :51888
 ```
 
 **Channel not responding:**

@@ -15,7 +15,7 @@ import type { OutgoingMessage } from '../types';
 const PLATFORM_LIMITS: Record<string, number> = {
   telegram: 4096,
   discord: 2000,
-  webchat: 10000, // No real limit, but reasonable
+  panel: 10000, // No real limit, but reasonable
 };
 
 /** Default chunk size if platform unknown */

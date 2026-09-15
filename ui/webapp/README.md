@@ -27,7 +27,7 @@ cargo tauri build                        # 产物: src-tauri/target/release/bund
 ## 网关与鉴权(E6-a)
 桌面 webview 面板的数据后端是已有网关(`ui_kit_web`):
 ```bash
-target/release/ui_kit_web --socket <core.sock> --addr 127.0.0.1:18888 --manage
+target/release/ui_kit_web --socket <core.sock> --addr 127.0.0.1:51888 --manage
 ```
 - 每次启动生成**一次性随机 token**(40 hex),仅打印一次;所有请求必须携带
   (query `?token=` / header `X-Auth-Token` / Basic auth user),否则 401。

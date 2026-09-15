@@ -69,7 +69,7 @@ Run it:
 
 ```
 docker run --rm \
-  -p 18789:18789 \
+  -p 51888:51888 \
   -e ANTHROPIC_API_KEY=... \
   -e TELEGRAM_BOT_TOKEN=... \
   -e WEBCHAT_TOKEN=... \
@@ -124,7 +124,7 @@ systemctl start blitzkrieg
 
 If exposing the gateway publicly, put it behind a reverse proxy (nginx, Caddy,
 Traefik) and terminate TLS there. Keep the gateway on loopback and only forward
-port 18789 from the proxy.
+port 51888 from the proxy.
 
 ## Updates
 

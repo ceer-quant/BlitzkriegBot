@@ -2400,7 +2400,7 @@ export async function initDatabase(): Promise<Database> {
            FROM messages
            GROUP BY session_id
          ) m ON m.session_id = s.id
-         WHERE s.channel = ? AND s.user_id = ?
+         WHERE (s.channel = ? OR s.channel = 'webchat') AND s.user_id = ?
          ORDER BY s.updated_at DESC LIMIT 200`,
         ['webchat', userId]
       );

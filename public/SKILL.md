@@ -15,14 +15,14 @@ trading is intentionally disabled.
 npm install -g blitzkrieg-bot
 blitzkrieg start
 
-# Health check against your own deployment (default port 18789)
-curl http://127.0.0.1:18789/health
+# Health check against your own deployment (default port 51888)
+curl http://127.0.0.1:51888/health
 
 # Built-in web console
-open http://127.0.0.1:18789/webchat/
+open http://127.0.0.1:51888/panel/
 ```
 
-The gateway binds to `gateway.port` in the config file (default `18789`). Do not
+The gateway binds to `gateway.port` in the config file (default `51888`). Do not
 expose it to the public internet without an auth token
 (`BLITZKRIEG_GATEWAY_TOKEN`) and TLS.
 
@@ -38,42 +38,42 @@ Endpoints requiring auth expect the gateway bearer token:
 
 ```bash
 curl -H "Authorization: Bearer $BLITZKRIEG_GATEWAY_TOKEN" \
-  http://127.0.0.1:18789/api/trading/balance
+  http://127.0.0.1:51888/api/trading/balance
 ```
 
 ### Health
 
 ```bash
-curl http://127.0.0.1:18789/health
+curl http://127.0.0.1:51888/health
 ```
 
 ### Account / trading (read-only observations in dry mode)
 
 ```bash
 curl -H "Authorization: Bearer $BLITZKRIEG_GATEWAY_TOKEN" \
-  http://127.0.0.1:18789/api/trading/balance
+  http://127.0.0.1:51888/api/trading/balance
 ```
 
 ### Market data
 
 ```bash
 # Search the market index
-curl 'http://127.0.0.1:18789/market-index/search?q=BTC'
+curl 'http://127.0.0.1:51888/market-index/search?q=BTC'
 
 # Stored ticks / OHLC / order-book history for a market
-curl 'http://127.0.0.1:18789/api/ticks/polymarket/<marketId>'
-curl 'http://127.0.0.1:18789/api/ohlc/polymarket/<marketId>'
-curl 'http://127.0.0.1:18789/api/orderbook-history/polymarket/<marketId>'
+curl 'http://127.0.0.1:51888/api/ticks/polymarket/<marketId>'
+curl 'http://127.0.0.1:51888/api/ohlc/polymarket/<marketId>'
+curl 'http://127.0.0.1:51888/api/orderbook-history/polymarket/<marketId>'
 ```
 
 ### Backtest & performance
 
 ```bash
-curl -X POST http://127.0.0.1:18789/api/backtest \
+curl -X POST http://127.0.0.1:51888/api/backtest \
   -H 'Content-Type: application/json' \
   -d @backtest-params.json
 
-curl http://127.0.0.1:18789/api/performance
+curl http://127.0.0.1:51888/api/performance
 ```
 
 ### Observability
@@ -81,7 +81,7 @@ curl http://127.0.0.1:18789/api/performance
 ```bash
 # Prometheus metrics (auth required)
 curl -H "Authorization: Bearer $BLITZKRIEG_GATEWAY_TOKEN" \
-  http://127.0.0.1:18789/metrics
+  http://127.0.0.1:51888/metrics
 ```
 
 See [docs/API.md](../docs/API.md) and the OpenAPI descriptor in
@@ -92,7 +92,7 @@ See [docs/API.md](../docs/API.md) and the OpenAPI descriptor in
 ## MCP (Model Context Protocol)
 
 Agents can connect over MCP instead of HTTP. Tools are advertised with the
-`blitzkrieg_` prefix (the legacy `clodds_` prefix is accepted inbound for one
+`blitzkrieg_` prefix.
 release):
 
 ```bash
@@ -103,15 +103,12 @@ blitzkrieg mcp remove my-server
 ```
 
 MCP descriptors live in `./.mcp.json`, `./mcp.json`, or
-`~/.config/blitzkrieg/mcp.json` (a legacy `~/.config/clodds/mcp.json` is still
-read for one release).
+`~/.config/blitzkrieg/mcp.json`.
 
----
 
 ## Configuration
 
-All configuration uses `BLITZKRIEG_*` environment variables (the old `CLODDS_*`
-names are accepted as deprecated aliases for one release):
+All configuration uses `BLITZKRIEG_*` environment variables only:
 
 | Variable | Purpose |
 | --- | --- |

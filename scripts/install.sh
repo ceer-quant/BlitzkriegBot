@@ -6,8 +6,7 @@
 
 set -e
 
-# CLODDS_VERSION is accepted as a deprecated alias for one release.
-VERSION="${BLITZKRIEG_VERSION:-${CLODDS_VERSION:-latest}}"
+VERSION="${BLITZKRIEG_VERSION:-latest}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.blitzkrieg}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 
@@ -81,10 +80,6 @@ create_dirs() {
 # Install Blitzkrieg
 install_blitzkrieg() {
   info "Installing Blitzkrieg..."
-
-  if [ -n "$CLODDS_VERSION" ] && [ -z "$BLITZKRIEG_VERSION" ]; then
-    warn "CLODDS_VERSION is deprecated; use BLITZKRIEG_VERSION instead (the old name stops working in the next release)"
-  fi
 
   cd "$INSTALL_DIR"
 

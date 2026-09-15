@@ -677,7 +677,7 @@ mod tests {
         let mut t = FadeTracker::new(cfg.clone());
         // Drift down 0.60 → 0.55 within 120 s ≈ -8.3%: inside the cheap zone at
         // the tail? No — 0.55 > max_price 0.35, never in the zone.
-        let now = fall(&mut t, "t", dec!(0.60), dec!(0.55), 5, 10_000);
+        let _now = fall(&mut t, "t", dec!(0.60), dec!(0.55), 5, 10_000);
         assert!(!t.is_in_zone("t"));
         assert!(t.take_broken().is_empty());
 

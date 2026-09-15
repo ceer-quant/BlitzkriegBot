@@ -13,7 +13,7 @@
  *
  * Configuration (resolved state dir + env vars; brand-bootstrap runs first):
  *
- *   // blitzkrieg.json (or legacy clodds.json)
+ *   // blitzkrieg.json
  *   {
  *     "queue": {
  *       "enabled": true,

@@ -32,8 +32,6 @@ pub use core::types::*;
 
 /// Canonical socket prefix, matching `blitzkrieg-core`'s `SOCKET_PREFIX`.
 pub const SOCKET_PREFIX: &str = "blitzkrieg-core";
-/// Pre-rename prefix, still discovered for one release.
-pub const LEGACY_SOCKET_PREFIX: &str = "clodds-core";
 
 fn socket_path_for(prefix: &str) -> String {
     let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
@@ -46,38 +44,21 @@ pub fn default_socket_path() -> String {
     socket_path_for(SOCKET_PREFIX)
 }
 
-/// The pre-rename socket path. A core started before the rename still owns it, so
-/// callers adopt that core rather than spawn a second one beside it.
-pub fn legacy_socket_path() -> String {
-    socket_path_for(LEGACY_SOCKET_PREFIX)
-}
-
 /// Is something accepting connections on `path` right now?
 pub fn socket_served(path: &str) -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
 }
 
-/// The socket a client should use: canonical, unless a pre-rename core still owns
-/// the legacy name — adopting that core is the point of the window.
-///
-/// Note this is deliberately a *probe*, not a constant: a node shell started
-/// before the rename passes `--socket <legacy path>` explicitly, so the running
-/// core legitimately binds the old name until that shell restarts.
+/// The socket a client should use: the canonical path, provided a live core is
+/// accepting connections on it.
 pub fn resolve_socket_path() -> String {
-    resolve_socket_path_from(default_socket_path(), legacy_socket_path(), socket_served)
+    resolve_socket_path_from(default_socket_path(), socket_served)
 }
 
 /// Precedence rule, split out so it is testable without a live socket on the box.
-fn resolve_socket_path_from(
-    canonical: String,
-    legacy: String,
-    served: impl Fn(&str) -> bool,
-) -> String {
+fn resolve_socket_path_from(canonical: String, served: impl Fn(&str) -> bool) -> String {
     if served(&canonical) {
         return canonical;
-    }
-    if legacy != canonical && served(&legacy) {
-        return legacy;
     }
     canonical
 }
@@ -87,7 +68,7 @@ mod socket_tests {
     use super::*;
 
     #[test]
-    fn canonical_path_uses_the_new_prefix() {
+    fn canonical_path_uses_the_brand() {
         let p = default_socket_path();
         assert!(p.ends_with(".sock"), "{p}");
         assert!(
@@ -97,53 +78,15 @@ mod socket_tests {
         assert!(!p.contains("clodds"), "{p}");
     }
 
-    #[test]
-    fn legacy_path_is_still_derivable_and_distinct() {
-        let l = legacy_socket_path();
-        assert!(l.contains("/clodds-core-"), "{l}");
-        assert_ne!(l, default_socket_path());
-    }
-
-    #[test]
-    fn both_prefixes_agree_on_user_and_dir() {
-        let (a, b) = (default_socket_path(), legacy_socket_path());
-        let strip = |s: &str| {
-            s.rsplit_once('/')
-                .map(|(d, _)| d.to_string())
-                .unwrap_or_default()
-        };
-        assert_eq!(strip(&a), strip(&b));
-        let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
-        assert!(a.ends_with(&format!("blitzkrieg-core-{user}.sock")), "{a}");
-    }
-
     /// Precedence, tested with an injected probe so the result does not depend on
     /// whatever core happens to be running on the build machine.
     #[test]
-    fn resolve_prefers_canonical_when_nothing_is_served() {
-        let (c, l) = (default_socket_path(), legacy_socket_path());
-        let out = resolve_socket_path_from(c.clone(), l, |_| false);
+    fn resolve_returns_canonical_regardless_of_probe() {
+        let c = default_socket_path();
+        let out = resolve_socket_path_from(c.clone(), |_| false);
         assert_eq!(out, c);
-    }
-
-    #[test]
-    fn resolve_keeps_canonical_when_both_are_served() {
-        let (c, l) = (default_socket_path(), legacy_socket_path());
-        let out = resolve_socket_path_from(c.clone(), l, |_| true);
-        assert_eq!(
-            out, c,
-            "a live canonical core wins over a leftover legacy one"
-        );
-    }
-
-    /// The migration case: an old-branded core is up and nothing is on the new
-    /// name, so the client must adopt it rather than spawn a second core.
-    #[test]
-    fn resolve_falls_back_to_legacy_only_when_it_is_the_one_serving() {
-        let (c, l) = (default_socket_path(), legacy_socket_path());
-        let served = l.clone();
-        let out = resolve_socket_path_from(c, l.clone(), move |p| p == served);
-        assert_eq!(out, l);
+        let out = resolve_socket_path_from(c.clone(), |_| true);
+        assert_eq!(out, c);
     }
 
     #[test]

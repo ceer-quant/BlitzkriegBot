@@ -212,21 +212,69 @@ pub fn render_json(s: &UiSnapshot) -> String {
             "asset": p.asset, "direction": p.direction, "entryPrice": p.entry_price,
             "currentPrice": p.current_price, "unrealizedPct": p.unrealized_pct })).collect::<Vec<_>>(),
         "trades": { "count": s.trades.len(), "net": s.net_pnl(), "winRate": s.win_rate() },
+        // E9-g: per-strategy accounting rows for the plugins/strategies page.
+        "strategyStats": s.strategy_stats.iter().map(|r| serde_json::json!({
+            "name": r.name, "enabled": r.enabled, "source": r.source,
+            "ordersPlaced": r.orders_placed, "ordersRejected": r.orders_rejected,
+            "limitRejected": r.limit_rejected,
+            "blockedTiming": r.blocked_timing, "blockedMomentum": r.blocked_momentum,
+            "gateExemptedTiming": r.gate_exempted_timing,
+            "gateExemptedMomentum": r.gate_exempted_momentum,
+            "gateExemptions": r.gate_exemptions,
+            "closedTrades": r.closed_trades, "wins": r.wins, "losses": r.losses,
+            "netPnlUsd": r.net_pnl_usd,
+            "rejectionCauses": r.rejection_causes,
+        })).collect::<Vec<_>>(),
         "lastError": s.last_error,
     })
     .to_string()
 }
 
+
+/// Minimal std-only base64 decoder for basic-auth passwords (the only place
+/// the web layer needs it). Returns raw bytes; callers validate UTF-8.
+fn data_encoding_free_base64(s: &str) -> Vec<u8> {
+    const TBL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for c in s.bytes() {
+        if c == b'=' || c == b'\n' || c == b'\r' {
+            continue;
+        }
+        let Some(v) = TBL.iter().position(|t| *t == c) else {
+            return out;
+        };
+        buf = (buf << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    out
+}
 /// Minimal parsed HTTP request.
 struct HttpRequest {
     method: String,
     target: String,
     body: String,
+    /// Raw header (name, value) pairs, lowercased names.
+    headers: Vec<(String, String)>,
 }
 
 impl HttpRequest {
     fn path(&self) -> &str {
         self.target.split('?').next().unwrap_or(&self.target)
+    }
+    /// Case-insensitive header lookup over the stored lines.
+    fn header(&self, name: &str) -> Option<&str> {
+        // Header case is handled by the caller storing the raw lines; keep the
+        // contract tiny: headers were captured lowercased by read_request.
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
     }
     /// First `cmd` value from the query string, percent-decoded (`+` → space).
     fn query_cmd(&self) -> Option<String> {
@@ -264,6 +312,9 @@ pub struct WebServer {
     trade_limit: usize,
     /// Present only in gateway mode (`--manage`); enables `/api/command`.
     dispatcher: Option<Arc<Mutex<Dispatcher>>>,
+    /// E6-a: per-process one-time token. `None` disables auth (binds to
+    /// loopback only in that case — the caller's contract).
+    auth_token: Option<String>,
 }
 
 impl WebServer {
@@ -273,7 +324,78 @@ impl WebServer {
             snapshot_src: Arc::new(Mutex::new(client)),
             trade_limit,
             dispatcher: None,
+            auth_token: None,
         }
+    }
+
+    /// Generate the one-time session token (40 hex chars) and arm the gate.
+    /// Callers must print it exactly once at boot — it never round-trips
+    /// through config files or logs.
+    pub fn generate_auth_token(&mut self) -> String {
+        // Process entropy via std (no external deps): time + address entropy.
+        let mut seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407)
+            ^ (self as *const _ as *const () as usize as u128);
+        let mut hex = String::with_capacity(40);
+        while hex.len() < 40 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            hex.push_str(&format!("{:08x}", (seed >> 33) as u32));
+        }
+        hex.truncate(40);
+        self.auth_token = Some(hex.clone());
+        hex
+    }
+
+    fn token_from_query(&self, req: &HttpRequest) -> Option<String> {
+        let q = req.target.split_once('?')?.1;
+        for pair in q.split('&') {
+            if let Some(v) = pair.strip_prefix("token=") {
+                return Some(url_decode(v));
+            }
+        }
+        None
+    }
+
+    /// E6-a gate: token (query / X-Auth-Token header / basic-auth user) when
+    /// one is armed; Origin policy — foreign origins 403, loopback allowed.
+    fn authorize(&self, req: &HttpRequest) -> u16 {
+        if !req.path().starts_with("/api/") {
+            return 200; // the HTML panel itself is read-only and harmless
+        }
+        if let Some(expected) = &self.auth_token {
+            let supplied = self
+                .token_from_query(req)
+                .or_else(|| req.header("x-auth-token").map(String::from))
+                .or_else(|| {
+                    req.header("authorization").and_then(|a| {
+                        a.strip_prefix("Basic ").and_then(|b| {
+                            let raw = data_encoding_free_base64(b);
+                            let decoded = std::str::from_utf8(&raw).ok()?;
+                            decoded.split(':').next().map(String::from)
+                        })
+                    })
+                });
+            match supplied {
+                Some(t) if t == expected.as_str() => {}
+                _ => return 401,
+            }
+        }
+        // Origin policy: once present, only loopback (127.x/localhost) hosts pass.
+        if let Some(origin) = req.header("origin") {
+            let host = origin
+                .trim_start_matches("http://")
+                .trim_start_matches("https://");
+            let host_only = host.split(':').next().unwrap_or("");
+            let loopback = host_only == "127.0.0.1" || host_only == "localhost" || host_only.starts_with("127.");
+            if !loopback {
+                return 403;
+            }
+        }
+        200
     }
 
     /// Panel + command API. Lifecycle verbs are gated by the dispatcher's own
@@ -283,10 +405,11 @@ impl WebServer {
             snapshot_src: Arc::new(Mutex::new(client)),
             trade_limit,
             dispatcher: Some(Arc::new(Mutex::new(dispatcher))),
+            auth_token: None,
         }
     }
 
-    /// Serve until the process is stopped. `addr` e.g. `127.0.0.1:18888`.
+    /// Serve until the process is stopped. `addr` e.g. `127.0.0.1:51888`.
     pub fn serve(&self, addr: &str) -> std::io::Result<()> {
         let listener = TcpListener::bind(addr)?;
         let console = self.dispatcher.is_some();
@@ -328,7 +451,48 @@ impl WebServer {
         };
         let target = req.path().to_string();
 
+        // E6-a: auth + origin gate runs BEFORE any route does work.
+        let status_gate = self.authorize(&req);
+        if status_gate != 200 {
+            let reason = if status_gate == 401 { "Unauthorized" } else { "Forbidden" };
+            let head = format!(
+                "HTTP/1.1 {status_gate} {reason}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.flush();
+            return;
+        }
+
         let (status, ctype, body) = match (req.method.as_str(), target.as_str()) {
+            ("GET", "/api/plugins") => {
+                // E9-g: the registry trio the TUI Plugins page shows (strategies
+                // / extensions / market plugins) in one authenticated call.
+                let doc = match self.dispatcher {
+                    Some(ref d) => match d.lock() {
+                        Ok(mut dp) => {
+                            let snap = dp.plugins_snapshot();
+                            serde_json::json!({
+                                "connected": snap.connected,
+                                "strategies": snap.strategies,
+                                "extensions": snap.extensions,
+                                "marketPlugins": snap.market_plugins,
+                                "marketActive": snap.market_active,
+                                "lastError": snap.last_error,
+                            })
+                        }
+                        Err(_) => serde_json::json!({"connected": false,
+                            "lastError": "dispatcher poisoned"}),
+                    },
+                    None => {
+                        // read-only mode: registry via the snapshot client
+                        let mut doc = serde_json::json!({"connected": false});
+                        doc["lastError"] = serde_json::json!(
+                            "plugin registry requires gateway (--manage)");
+                        doc
+                    }
+                };
+                (200, "application/json", doc.to_string())
+            }
             ("GET", "/api/snapshot") => {
                 let snap = self.snapshot();
                 (200, "application/json", render_json(&snap))
@@ -407,6 +571,7 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
     let target = parts.next()?.to_string();
 
     let mut content_length = 0usize;
+    let mut headers: Vec<(String, String)> = Vec::new();
     loop {
         let mut h = String::new();
         if reader.read_line(&mut h).ok()? == 0 {
@@ -418,6 +583,8 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         }
         if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
             content_length = v.trim().parse().unwrap_or(0);
+        } else if let Some((name, value)) = h.split_once(':') {
+            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
         }
     }
     let body = if content_length > 0 {
@@ -439,6 +606,7 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         method,
         target,
         body,
+        headers,
     })
 }
 
@@ -456,6 +624,9 @@ fn body_to_command(body: &str) -> String {
 }
 
 #[cfg(test)]
+mod auth_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -465,6 +636,7 @@ mod tests {
             method: "GET".into(),
             target: "/api/command?cmd=start+BTC,ETH".into(),
             body: String::new(),
+            headers: Vec::new(),
         };
         assert_eq!(r.path(), "/api/command");
         assert_eq!(r.query_cmd().as_deref(), Some("start BTC,ETH"));

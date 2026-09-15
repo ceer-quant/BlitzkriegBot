@@ -126,6 +126,46 @@ pub struct RoundView {
 
 // ── engine.stats ─────────────────────────────────────────────────────────────
 
+/// E9-g: one row of core `engine.stats.strategies[]` — the per-strategy
+/// accounting the WebUI plugins/strategies page renders (counters are
+/// deserialized defensively: older cores may omit any subset).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyStatsRow {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub orders_placed: u64,
+    #[serde(default)]
+    pub orders_rejected: u64,
+    #[serde(default)]
+    pub limit_rejected: u64,
+    #[serde(default)]
+    pub blocked_timing: u64,
+    #[serde(default)]
+    pub blocked_momentum: u64,
+    #[serde(default)]
+    pub gate_exempted_timing: u64,
+    #[serde(default)]
+    pub gate_exempted_momentum: u64,
+    #[serde(default)]
+    pub closed_trades: u64,
+    #[serde(default)]
+    pub wins: u64,
+    #[serde(default)]
+    pub losses: u64,
+    #[serde(default)]
+    pub net_pnl_usd: f64,
+    #[serde(default)]
+    pub rejection_causes: Option<std::collections::BTreeMap<String, u64>>,
+    #[serde(default)]
+    pub gate_exemptions: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct BlockedCounters {
     #[serde(default)]
@@ -155,6 +195,9 @@ pub struct EngineStatsView {
     pub blocked: BlockedCounters,
     #[serde(default)]
     pub confirmed: Vec<String>,
+    /// E9-g: per-strategy accounting rows (older cores omit the key entirely).
+    #[serde(default)]
+    pub strategies: Vec<StrategyStatsRow>,
 }
 
 // ── trades.history ───────────────────────────────────────────────────────────
@@ -355,6 +398,8 @@ pub struct UiSnapshot {
     pub extensions: Vec<ExtensionRow>,
     pub market_plugins: Vec<MarketPluginRow>,
     pub market_active: bool,
+    /// E9-g: per-strategy engine.stats rows (orders/gates/rejection causes).
+    pub strategy_stats: Vec<StrategyStatsRow>,
     pub connected: bool,
     pub last_error: Option<String>,
 }

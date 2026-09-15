@@ -61,9 +61,9 @@ export interface OpenClawMetadata {
 // PARSER
 // =============================================================================
 
-// Canonical first; legacy/ecosystem keys still accepted when reading skills
-// installed before the rename.
-const MANIFEST_KEYS = ['blitzkrieg', 'clodds', 'openclaw', 'clawdbot'] as const;
+// The blitzkrieg key is the brand's own manifest key; the other three are
+// ecosystem interop keys for skills imported from upstream sources.
+const MANIFEST_KEYS = ['blitzkrieg', 'openclaw', 'clawdbot'] as const;
 
 /**
  * Parse YAML frontmatter from a SKILL.md file.
@@ -144,7 +144,7 @@ export function parseFrontmatter(content: string): { frontmatter: ParsedFrontmat
 
 /**
  * Extract OpenClaw-format metadata from the frontmatter metadata field.
- * Checks for keys: clodds, openclaw, clawdbot
+ * Checks for keys: blitzkrieg, openclaw, clawdbot
  */
 export function resolveMetadata(frontmatter: ParsedFrontmatter): OpenClawMetadata | undefined {
   if (!frontmatter.metadata) return undefined;

@@ -112,7 +112,7 @@
 BlitzkriegBot/
 ├── src/
 │   ├── index.ts                     # 进程入口：启动 gateway + 各服务
-│   ├── gateway/                      # HTTP + WebSocket 网关（默认端口 18789）
+│   ├── gateway/                      # HTTP + WebSocket 网关（默认端口 51888）
 │   │   ├── index.ts
 │   │   └── server.ts                # /webchat 静态、/api/trading/balance、/chat WS
 │   ├── skills/bundled/crypto-hft/
@@ -215,7 +215,7 @@ node dist/index.js          # 或 npm start
 
 ```bash
 nohup node dist/index.js > run.log 2>&1 &
-lsof -nP -iTCP:18789 -sTCP:LISTEN      # 确认端口监听
+lsof -nP -iTCP:51888 -sTCP:LISTEN      # 确认端口监听
 ```
 
 重启（改代码后）：
@@ -234,7 +234,7 @@ nohup node dist/index.js > run.log 2>&1 &
 
 ## 7. 控制面板
 
-- 地址：`http://localhost:18789/ui/hft.html`
+- 地址：`http://localhost:51888/ui/hft.html`
 - 面板通过 WebSocket `ws://<host>/chat` 连接，周期性发送：
   - `/crypto-hft status`（统计/回合/持仓/价格）
   - `/crypto-hft positions`（最近成交）

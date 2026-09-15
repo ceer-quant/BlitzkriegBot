@@ -14,7 +14,7 @@
 
 - `/Volumes/Hard Disk/BlitzkriegBot/BlitzkriegBot/` **不存在** —— 更早的迁移（commit `fc6e93c`）已把项目根上移、扁平化，`BlitzkriegBot` 这一层已消失。
 - 今天仍存在的「Node 侧」是 **`src/`（584 个 .ts 文件）+ `dist/`（编译产物）**，即真正在跑的外壳。
-- 当前生产进程正是 `node dist/index.js`（PID 72966，:18789）。
+- 当前生产进程正是 `node dist/index.js`（PID 72966，:51888）。
 
 因此「删除 BlitzkriegBot」的实际含义 = **删除 `src/` 这 584 文件的外壳**。这是一个比任务书设想大得多的动作，且与「禁止删除未经备份的文件、禁止破坏运行」直接冲突 → **不做，记录待决策（D-4）**。
 

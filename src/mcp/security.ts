@@ -6,9 +6,7 @@
  */
 
 import { RateLimiter, detectInjection } from '../security/index.js';
-import { warnLegacyOnce } from '../utils/env.js';
 import type { McpTool } from './index.js';
-import { canonicalizeToolName, isLegacyToolName } from './tool-names.js';
 
 // =============================================================================
 // CONFIG
@@ -48,20 +46,12 @@ export function loadSecurityConfig(): McpSecurityConfig {
   const auditEnabled = process.env.BLITZKRIEG_MCP_AUDIT !== 'false';
   const toolProfile = process.env.BLITZKRIEG_MCP_TOOL_PROFILE || 'full';
 
-  // Normalise entries so legacy `clodds_*` tool names in existing config keep
-  // matching; a deprecation warning is emitted once per legacy entry.
   const parseEntries = (raw: string): Set<string> =>
     new Set(
       raw
         .split(',')
         .map((s) => s.trim())
-        .filter(Boolean)
-        .map((name) => {
-          if (isLegacyToolName(name)) {
-            warnLegacyOnce(name, `legacy MCP tool name "${name}" in config; use "${canonicalizeToolName(name)}"`);
-          }
-          return canonicalizeToolName(name);
-        }),
+        .filter(Boolean),
     );
 
   return {
@@ -77,30 +67,21 @@ export function loadSecurityConfig(): McpSecurityConfig {
 // TOOL ALLOWLISTING
 // =============================================================================
 
-/** Set lookup that matches regardless of which prefix a configured entry was written with. */
-function setHasEither(set: Set<string>, name: string): boolean {
-  if (set.has(name)) return true;
-  const other = name.startsWith('blitzkrieg_')
-    ? 'clodds_' + name.slice('blitzkrieg_'.length)
-    : name.startsWith('clodds_')
-      ? 'blitzkrieg_' + name.slice('clodds_'.length)
-      : null;
-  return other !== null && set.has(other);
+/** Set member lookup. */
+function setHas(set: Set<string>, name: string): boolean {
+  return set.has(name);
 }
 
-/** Check whether a single tool name is allowed by the config (legacy incoming names are canonicalised) */
+/** Check whether a single tool name is allowed by the config. */
 export function isToolAllowed(toolName: string, config: McpSecurityConfig): boolean {
-  if (isLegacyToolName(toolName)) {
-    warnLegacyOnce(toolName, `legacy MCP tool call "${toolName}"; use "${canonicalizeToolName(toolName)}"`);
-  }
-  const name = canonicalizeToolName(toolName);
+  const name = toolName;
 
   // Blocklist always wins
-  if (setHasEither(config.blockedTools, name)) return false;
+  if (setHas(config.blockedTools, name)) return false;
 
   // Explicit allowlist
   if (config.allowedTools.size > 0) {
-    return setHasEither(config.allowedTools, name);
+    return setHas(config.allowedTools, name);
   }
 
   // Profile-based filtering

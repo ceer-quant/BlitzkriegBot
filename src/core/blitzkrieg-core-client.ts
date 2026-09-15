@@ -20,8 +20,8 @@ import { existsSync } from 'fs';
 import { logger } from '../utils/logger.js';
 import {
   defaultSocketPath,
-  resolveSocketPath,
-} from './core-socket.js';import {
+} from './core-socket.js';
+import {
   EventSchema,
   PositionViewSchema,
   RpcErrorSchema,
@@ -196,7 +196,7 @@ export class BlitzkriegCoreClient extends EventEmitter {
     if (this.connected) return;
     this.stopped = false;
     this.restartAttempts = 0; // a manual start always gets a fresh budget
-    this.starting = this.adoptLegacyCoreIfAny().then((adopted) => (adopted ? undefined : this.boot()));
+    this.starting = this.boot();
     try {
       await this.starting;
     } catch (e) {
@@ -209,34 +209,6 @@ export class BlitzkriegCoreClient extends EventEmitter {
     }
   }
 
-  /**
-   * Migration window: if an old-branded core still owns `clodds-core-<user>.sock`,
-   * connect to THAT instead of spawning a rival beside it. Two cores sharing one
-   * cwd would interleave their order/position logs, and the archive's single-writer
-   * lock would make one of them stop recording without anyone noticing.
-   *
-   * Returns true when an existing core was adopted (so no spawn is needed).
-   */
-  private async adoptLegacyCoreIfAny(): Promise<boolean> {
-    if (!this.ownDefaultSocket) return false;
-    const target = await resolveSocketPath();
-    if (target === this.socketPath) return false;
-    logger.warn(
-      { socket: target },
-      'a pre-rename core is serving the legacy socket — adopting it instead of spawning'
-    );
-    const previous = this.socketPath;
-    this.socketPath = target;
-    try {
-      await this.connectExisting(Date.now() + STARTUP_TIMEOUT_MS);
-    } catch (e) {
-      logger.error({ err: e, socket: target }, 'failed to adopt the pre-rename core');
-      this.socketPath = previous;
-      return false;
-    }
-    this.ownsProc = false;
-    return true;
-  }
 
   /** Kill the child we own (if any) and clear the socket, without touching state. */
   private teardownProc() {

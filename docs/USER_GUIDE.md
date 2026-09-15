@@ -20,7 +20,7 @@ npm install && cp .env.example .env
 npm run build && npm start
 ```
 
-The gateway listens on `http://127.0.0.1:18789` by default.
+The gateway listens on `http://127.0.0.1:51888` by default.
 
 ## CLI Commands Reference
 
@@ -309,7 +309,7 @@ blitzkrieg pairing set-owner telegram 123456789 -u "username"
 WebChat is a local browser chat UI at:
 
 ```
-http://127.0.0.1:18789/webchat
+http://127.0.0.1:51888/panel
 ```
 
 If you set `WEBCHAT_TOKEN`, the browser will prompt for it on first load and
@@ -602,7 +602,7 @@ Push notifications for trading events. Configure in `blitzkrieg.json`:
 Access the web-based performance dashboard at:
 
 ```
-http://127.0.0.1:18789/dashboard
+http://127.0.0.1:51888/dashboard
 ```
 
 The dashboard shows:

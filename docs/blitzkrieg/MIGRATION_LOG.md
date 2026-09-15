@@ -785,7 +785,7 @@ code: 1
   正常工作（不再只存在于 DRY 单元验证）。
 - 生产账本 `data/trades/trades.jsonl`：**67 笔 / 45 胜（67% WR）/ 净 −$4.79**
   （出场分布：trailing_stop 43 / stop_loss 19 / take_profit 3 / time_exit 2）。
-- 健康 `http://localhost:18789/health` → 200。
+- 健康 `http://localhost:51888/health` → 200。
 
 ### 仍未闭环
 - **live 启动清算（孤儿扫单）只在 DRY 验证过**：首次真实 live 启动须确认日志出现

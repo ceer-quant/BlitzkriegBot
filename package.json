@@ -4,8 +4,7 @@
   "description": "BlitzkriegBot — high-frequency trading core for prediction markets (Polymarket, Kalshi) with a pluggable full-fidelity strategy interface, shadow evolution, and a TUI/web console.",
   "main": "dist/index.js",
   "bin": {
-    "blitzkrieg": "./dist/cli/index.js",
-    "clodds": "./dist/cli/index.js"
+    "blitzkrieg": "./dist/cli/index.js"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -32,7 +31,6 @@
     "postinstall": "node -e \"try{const{pipeline,env}=require('@xenova/transformers');env.cacheDir='./.transformers-cache';pipeline('feature-extraction','Xenova/all-MiniLM-L6-v2',{quantized:true}).then(()=>console.log('Embedding model cached')).catch(()=>{})}catch{}\"",
     "prepublishOnly": "npm run build",
     "publish:npm": "npm publish --registry https://registry.npmjs.org",
-    "core:socket-migration": "npm run build && node scripts/socket-migration-check.mjs",
     "tui": "bash scripts/tui-demo.sh",
     "tui:manage": "bash scripts/tui-demo.sh --manage",
     "tui:check": "node scripts/tui-demo-check.mjs",

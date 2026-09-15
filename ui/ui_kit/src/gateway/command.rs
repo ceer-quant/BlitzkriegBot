@@ -236,6 +236,11 @@ impl Dispatcher {
             s.market_plugins = m.plugins;
             s.market_active = m.active.is_some();
         }
+        // E9-g: the plugins tab also shows per-strategy counters + rejection
+        // causes (engine.stats), not just the enabled/disabled registry list.
+        if let Ok(st) = self.client.stats() {
+            s.strategy_stats = st.strategies;
+        }
         s
     }
 
