@@ -41,6 +41,44 @@ impl Default for ScannerConfig {
     }
 }
 
+/// Why the tradeable window is closed, as data rather than a prose string.
+///
+/// The distinction matters for E2-b (#27): a strategy may declare an exemption
+/// for the two *window* gates, but NOT for [`TimingBlock::NoMarkets`] — a round
+/// with no discovered market has no priceable token, so nothing can be exempted
+/// into existing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimingBlock {
+    /// No markets discovered for the current round.
+    NoMarkets,
+    /// Round younger than `min_round_age_sec`.
+    TooYoung { age_sec: i64, min_age_sec: i64 },
+    /// Fewer than `min_time_left_sec` seconds remain in the round.
+    TooCloseToExpiry { time_left_sec: i64, min_time_left_sec: i64 },
+}
+
+impl TimingBlock {
+    /// Whether a per-strategy declaration may waive this block. A structural
+    /// precondition (no market at all) is never waivable.
+    pub fn exemptible(&self) -> bool {
+        !matches!(self, TimingBlock::NoMarkets)
+    }
+}
+
+impl std::fmt::Display for TimingBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimingBlock::NoMarkets => write!(f, "No active markets"),
+            TimingBlock::TooYoung { age_sec, min_age_sec } => {
+                write!(f, "Round too young ({age_sec}s < {min_age_sec}s)")
+            }
+            TimingBlock::TooCloseToExpiry { time_left_sec, min_time_left_sec } => {
+                write!(f, "Too close to expiry ({time_left_sec}s < {min_time_left_sec}s)")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RoundState {
     pub slot: i64,
@@ -125,18 +163,28 @@ impl Scanner {
 
     /// Tradeable window: markets present, round old enough, not too close to expiry.
     pub fn can_trade(&self, local_now_ms: i64) -> Result<(), String> {
+        self.can_trade_reason(local_now_ms).map_err(|b| b.to_string())
+    }
+
+    /// The same check as [`Self::can_trade`], as a structured reason so the
+    /// engine can tell a waivable window gate from the structural precondition
+    /// (E2-b / #27).
+    pub fn can_trade_reason(&self, local_now_ms: i64) -> Result<(), TimingBlock> {
         let r = self.round_state(local_now_ms);
         if r.markets.is_empty() {
-            return Err("No active markets".into());
+            return Err(TimingBlock::NoMarkets);
         }
         if r.age_sec < self.cfg.min_round_age_sec {
-            return Err(format!("Round too young ({}s < {}s)", r.age_sec, self.cfg.min_round_age_sec));
+            return Err(TimingBlock::TooYoung {
+                age_sec: r.age_sec,
+                min_age_sec: self.cfg.min_round_age_sec,
+            });
         }
         if r.time_left_sec < self.cfg.min_time_left_sec {
-            return Err(format!(
-                "Too close to expiry ({}s < {}s)",
-                r.time_left_sec, self.cfg.min_time_left_sec
-            ));
+            return Err(TimingBlock::TooCloseToExpiry {
+                time_left_sec: r.time_left_sec,
+                min_time_left_sec: self.cfg.min_time_left_sec,
+            });
         }
         Ok(())
     }
@@ -228,5 +276,56 @@ mod tests {
         assert!(s.can_trade(1_000_000).is_ok());
         // Very close to expiry → blocked.
         assert!(s.can_trade(1_799_900).is_err());
+    }
+
+    #[test]
+    fn the_timing_block_is_structured_and_keeps_the_prose_form() {
+        // E2-b (#27): the engine needs the reason as data (to decide whether a
+        // strategy may waive it) while every existing caller keeps the string.
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            min_round_age_sec: 30,
+            min_time_left_sec: 180,
+            ..Default::default()
+        });
+        assert_eq!(s.can_trade_reason(1_000_000), Err(TimingBlock::NoMarkets));
+        assert_eq!(s.can_trade(1_000_000).unwrap_err(), "No active markets");
+
+        s.set_markets(vec![CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: "c".into(),
+            question_id: "q".into(),
+            up_token_id: "u".into(),
+            down_token_id: "d".into(),
+            up_price: dec!(0.5),
+            down_price: dec!(0.5),
+            expires_at_ms: 1_800_000,
+            round_slot: 1,
+            neg_risk: true,
+            question: "".into(),
+        }]);
+        // Round is 10s old at t=1_000_000 + ... → age 10s < 30s.
+        assert_eq!(
+            s.can_trade_reason(900_000),
+            Err(TimingBlock::TooYoung { age_sec: 0, min_age_sec: 30 })
+        );
+        assert_eq!(
+            s.can_trade_reason(1_799_900),
+            Err(TimingBlock::TooCloseToExpiry { time_left_sec: 0, min_time_left_sec: 180 })
+        );
+        assert!(s.can_trade_reason(1_000_000).is_ok());
+    }
+
+    #[test]
+    fn only_the_window_gates_are_exemptible() {
+        // A per-strategy declaration may waive the window gates; a round with no
+        // market at all is a structural precondition and never waivable.
+        assert!(!TimingBlock::NoMarkets.exemptible());
+        assert!(TimingBlock::TooYoung { age_sec: 0, min_age_sec: 30 }.exemptible());
+        assert!(TimingBlock::TooCloseToExpiry { time_left_sec: 0, min_time_left_sec: 180 }
+            .exemptible());
+        assert!(TimingBlock::TooCloseToExpiry { time_left_sec: 120, min_time_left_sec: 180 }
+            .to_string()
+            .contains("Too close to expiry (120s < 180s)"));
     }
 }

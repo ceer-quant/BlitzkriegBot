@@ -424,7 +424,9 @@ async function executeRust(cmd: string, args: string, parts: string[]): Promise<
             ? `Market data: recording → ${a.path} (${a.events} events, ${mb(a.bytes)} MB, ${a.segments} rotated, segment ${mb(a.segmentBytes)}/${mb(a.rotateBytes)} MB)\n`
             : `Market data: **RECORDING STOPPED** (${a.stoppedReason ?? 'unknown'}) — ${a.events} events, ${a.dropped} dropped; replay data ends here\n`;
         }
-        out += `Blocked (near-miss): timing=${st.stats.blockedTiming} momentum=${st.stats.blockedMomentum} | connected=${st.connected ? 'yes' : 'NO'}\n`;
+        out += `Blocked (near-miss): timing=${st.stats.blockedTiming} momentum=${st.stats.blockedMomentum}`
+          + ` | exempted timing=${st.stats.gateExemptedTiming} momentum=${st.stats.gateExemptedMomentum}`
+          + ` | connected=${st.connected ? 'yes' : 'NO'}\n`;
         if (err) out += `Last error: ${err}\n`;
         if (st.marketPrices.length > 0) {
           out += `\n**Prices:**\n`;

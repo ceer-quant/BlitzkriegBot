@@ -24,7 +24,7 @@
 #[cfg(feature = "strategy-loading")]
 use blitzkrieg_strategy_api::{
     bk_strategy_free_string, BkHandle, BkStrategyVtable, BK_ABI_VERSION, BK_CREATE_SYMBOL,
-    BK_FREE_STRING_SYMBOL, BK_MIN_ABI_VERSION, BK_VERSION_SYMBOL,
+    BK_FREE_STRING_SYMBOL, BK_GATE_EXEMPTIONS_SYMBOL, BK_MIN_ABI_VERSION, BK_VERSION_SYMBOL,
 };
 use std::path::{Path, PathBuf};
 
@@ -75,6 +75,9 @@ pub struct LoadedForeign {
     pub strategy: crate::strategies::foreign::ForeignStrategy,
     pub name: String,
     pub version: String,
+    /// Shared entry gates this library declared it does not need (E2-b / #27).
+    /// Default (nothing declared, or no such symbol) = fully gated.
+    pub gate_exemptions: crate::strategies::GateExemptions,
 }
 
 /// Load and negotiate a v2 strategy library, returning it boxed as the full
@@ -126,6 +129,15 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
     .ok()
     .map(|s| *s)
     .unwrap_or(bk_strategy_free_string as unsafe extern "C" fn(*mut std::ffi::c_char));
+
+    // 2b) OPTIONAL per-strategy gate exemption declaration (E2-b / #27). Absent
+    // symbol = nothing declared = fully gated, which is why adding this
+    // capability needs no ABI bump (the vtable layout is untouched).
+    let gate_exemptions_fn = unsafe {
+        lib.get::<blitzkrieg_strategy_api::BkGateExemptionsFn>(BK_GATE_EXEMPTIONS_SYMBOL)
+    }
+    .ok()
+    .map(|s| *s);
 
     // 3) Factory → vtable.
     let create_sym = match unsafe {
@@ -182,9 +194,13 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
     let strategy = unsafe {
         crate::strategies::foreign::ForeignStrategy::from_loaded(
             lib, vtable, handle, name.clone(), version.clone(), Some(free_string),
+            gate_exemptions_fn,
         )
     };
-    Ok(LoadedForeign { strategy, name, version })
+    // Read the OPTIONAL declaration once, here, so the load report can state it
+    // (E2-b / #27: an opt-out must be visible at registration, not only later).
+    let gate_exemptions = crate::strategies::EngineStrategy::gate_exemptions(&strategy);
+    Ok(LoadedForeign { strategy, name, version, gate_exemptions })
 }
 
 /// Read a NUL-terminated C string into an owned `String` (None for null).

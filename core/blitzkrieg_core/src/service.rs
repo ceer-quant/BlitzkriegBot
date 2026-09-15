@@ -497,11 +497,18 @@ impl Core {
                 Ok(loaded) => {
                     let name = loaded.name.clone();
                     let version = loaded.version.clone();
+                    // E2-b: the load receipt names the gates the library declared
+                    // unnecessary, so an opt-out is visible before it is enabled.
+                    let declared = if loaded.gate_exemptions.any() {
+                        format!("; declares gate exemptions: {}", loaded.gate_exemptions.gates().join(","))
+                    } else {
+                        String::new()
+                    };
                     match engine.register_user_strategy(
                         Box::new(loaded.strategy),
                         format!("dylib:{}", p.display()),
                     ) {
-                        Ok(_) => format!("{name}@{version} registered into the engine dispatch (disabled)"),
+                        Ok(_) => format!("{name}@{version} registered into the engine dispatch (disabled{declared})"),
                         Err(reason) => format!("rejected: {reason}"),
                     }
                 }
@@ -831,6 +838,11 @@ impl Core {
         // submission path as policy exits (handled in run_exit_checks).
         self.strategy_exits.extend(engine.drain_strategy_exits());
         engine.tally_blocked();
+        // E2-b: an honoured gate exemption is always logged (and counted), so an
+        // opt-out is auditable rather than a silent hole in the entry gates.
+        for rec in engine.take_exemptions() {
+            tracing::info!(target: "strategy", "{}", rec.audit_line());
+        }
         self.stats.signals += orders.len() as u64;
         let tokens: Vec<(String, crate::model::OrderRequest)> =
             orders.into_iter().map(|o| (o.token_id.clone(), o)).collect();
@@ -932,6 +944,20 @@ impl Core {
                         strategy_scoped: false,
                     });
                 let limit = self.config.strategy_limits.get(&name);
+                // E2-b: what this strategy DECLARED it does not need, next to how
+                // often a gate actually stopped it and how often an exemption let
+                // a candidate through — so an opt-out is never invisible beside an
+                // un-exempted strategy's rejections.
+                let declared = self
+                    .engine
+                    .as_ref()
+                    .and_then(|e| e.strategy_gate_exemptions(&name))
+                    .unwrap_or_default();
+                let tally = self
+                    .engine
+                    .as_ref()
+                    .map(|e| e.gate_tally(&name))
+                    .unwrap_or_default();
                 serde_json::json!({
                     "name": name,
                     "enabled": enabled.contains(&name),
@@ -947,6 +973,12 @@ impl Core {
                     "effectiveSizeUsd": dec_json(effective.size_usd),
                     "effectiveMinShares": dec_json(effective.min_shares),
                     "effectiveMaxShares": dec_json(effective.max_shares),
+                    // ── E2-b declared gate exemptions + per-strategy gate counts ──
+                    "gateExemptions": declared.gates(),
+                    "blockedTiming": tally.blocked_timing,
+                    "blockedMomentum": tally.blocked_momentum,
+                    "gateExemptedTiming": tally.exempted_timing,
+                    "gateExemptedMomentum": tally.exempted_momentum,
                     "ordersPlaced": acc.placed,
                     "ordersRejected": acc.rejected,
                     "limitRejected": acc.limit_rejected,
@@ -985,9 +1017,34 @@ impl Core {
             .engine
             .as_ref()
             .map(|e| {
+                // Per-strategy attribution (E2-b / #27): the totals stay global,
+                // and `byStrategy` names whose candidates each block belonged to.
+                let mut by_strategy = serde_json::Map::new();
+                for name in self.strategy_names() {
+                    let t = e.gate_tally(&name);
+                    if t.blocked_timing == 0 && t.blocked_momentum == 0 {
+                        continue;
+                    }
+                    by_strategy.insert(
+                        name,
+                        serde_json::json!({
+                            "timing": t.blocked_timing,
+                            "momentum": t.blocked_momentum,
+                        }),
+                    );
+                }
+                let declared: Vec<serde_json::Value> = e
+                    .declared_gate_exemptions()
+                    .into_iter()
+                    .map(|(name, x)| {
+                        serde_json::json!({ "strategy": name, "gates": x.gates() })
+                    })
+                    .collect();
                 serde_json::json!({
                     "timing": e.blocked_timing_count(),
                     "momentum": e.blocked_momentum_count(),
+                    "byStrategy": by_strategy,
+                    "declaredExemptions": declared,
                 })
             })
             .unwrap_or(serde_json::Value::Null);
@@ -2341,6 +2398,8 @@ mod strategy_dispatch_tests {
         name: String,
         buy_below: Decimal,
         assets: Vec<String>,
+        /// Shared entry gates this strategy declares unnecessary (E2-b / #27).
+        gates: crate::strategies::GateExemptions,
     }
     impl crate::strategies::EngineStrategy for TargetDip {
         fn name(&self) -> &str {
@@ -2348,6 +2407,9 @@ mod strategy_dispatch_tests {
         }
         fn on_book(&mut self, _t: &str, _s: &crate::model::OrderbookSnapshot, _n: i64) {}
         fn on_round(&mut self, _slot: i64) {}
+        fn gate_exemptions(&self) -> crate::strategies::GateExemptions {
+            self.gates
+        }
         fn find_candidates(
             &mut self,
             ctx: &crate::strategies::StrategyCtx<'_>,
@@ -2392,12 +2454,49 @@ mod strategy_dispatch_tests {
         dips: &[(&str, &[&str])],
         global_max_positions: usize,
     ) -> Core {
+        core_with_declared_dips(limits, dips, global_max_positions, 0, |_| {
+            crate::strategies::GateExemptions::none()
+        })
+    }
+
+    /// Same as [`core_with_dips`], but each strategy also declares the shared
+    /// entry gates it does not need (E2-b / #27) and the round-timing window is
+    /// set up front — the engine takes its scanner config from
+    /// `CoreConfig::engine_config()` at construction, so a later `config_mut`
+    /// write would not reach it (nor would one reach the `RiskGate`, which
+    /// snapshots `config.risk` the same way).
+    fn core_with_declared_dips(
+        limits: HashMap<String, StrategyLimit>,
+        dips: &[(&str, &[&str])],
+        global_max_positions: usize,
+        min_round_age_sec: i64,
+        gates: impl Fn(&str) -> crate::strategies::GateExemptions,
+    ) -> Core {
+        core_with_declared_dips_and_risk(
+            limits,
+            dips,
+            global_max_positions,
+            min_round_age_sec,
+            RiskConfig { max_order_notional: dec!(100), ..Default::default() },
+            gates,
+        )
+    }
+
+    /// The full form: also chooses the risk config the gate is built from.
+    fn core_with_declared_dips_and_risk(
+        limits: HashMap<String, StrategyLimit>,
+        dips: &[(&str, &[&str])],
+        global_max_positions: usize,
+        min_round_age_sec: i64,
+        risk: RiskConfig,
+        gates: impl Fn(&str) -> crate::strategies::GateExemptions,
+    ) -> Core {
         let mut c = Core::new(CoreConfig {
-            risk: RiskConfig { max_order_notional: dec!(100), ..Default::default() },
+            risk,
             dry_seed_balance: dec!(1000),
             engine_enabled: true,
             round_duration_sec: 900,
-            min_round_age_sec: 0,
+            min_round_age_sec,
             auto_exits_enabled: false,
             assets: vec!["BTC".into(), "ETH".into(), "SOL".into()],
             positions: crate::position::PositionConfig {
@@ -2416,6 +2515,7 @@ mod strategy_dispatch_tests {
                     name: (*name).to_string(),
                     buy_below: dec!(0.45),
                     assets: assets.iter().map(|a| (*a).to_string()).collect(),
+                    gates: gates(name),
                 }),
                 "test".into(),
             )
@@ -2650,6 +2750,173 @@ mod strategy_dispatch_tests {
         assert_eq!(dec_of(&s["effectiveSizeUsd"]), dec!(2.5), "notional clamped to the global budget");
         assert_eq!(dec_of(&s["effectiveMaxShares"]), dec!(10), "share ceiling clamped to the global");
         assert_eq!(dec_of(&s["effectiveMinShares"]), dec!(10), "floor raised to the global min");
+    }
+
+    // ── E2-b: per-strategy gate opt-out (#27) ───────────────────────────────
+
+    /// Shut for every strategy that did not declare the timing window unnecessary.
+    const WINDOW_SHUT: i64 = 10_000;
+
+    #[test]
+    fn a_declared_timing_exemption_places_an_order_the_gate_would_have_blocked() {
+        let mut c = core_with_declared_dips(
+            HashMap::new(),
+            &[("fader", &["BTC"]), ("gated", &["ETH"])],
+            5,
+            WINDOW_SHUT,
+            |name| crate::strategies::GateExemptions { timing: name == "fader", momentum: false },
+        );
+        let now = 1_000_000i64;
+        feed_three_asset_dip(&mut c, now);
+        assert_eq!(
+            c.engine_evaluate(now + 1_000),
+            1,
+            "only the declaring strategy may trade: {:#?}",
+            c.list_orders()
+        );
+        assert_eq!(c.list_orders()[0].strategy, "fader");
+        assert_eq!(c.engine_stats()["blocked"]["timing"], 1, "the sibling stayed gated");
+
+        let stats = c.strategy_stats();
+        let fader = strategy_entry(&stats, "fader");
+        assert_eq!(fader["gateExemptions"], serde_json::json!(["timing"]));
+        assert_eq!(fader["gateExemptedTiming"], 1, "the honoured exemption is counted");
+        assert_eq!(fader["blockedTiming"], 0);
+        let gated = strategy_entry(&stats, "gated");
+        assert_eq!(gated["gateExemptions"], serde_json::json!([]));
+        assert_eq!(gated["blockedTiming"], 1);
+        assert_eq!(gated["gateExemptedTiming"], 0);
+        assert_eq!(gated["ordersPlaced"], 0);
+    }
+
+    #[test]
+    fn blocked_gate_counts_are_attributable_to_a_specific_strategy() {
+        let mut c = core_with_declared_dips(
+            HashMap::new(),
+            &[("a", &["BTC"]), ("b", &["ETH"])],
+            5,
+            WINDOW_SHUT,
+            |_| crate::strategies::GateExemptions::none(),
+        );
+        let now = 1_000_000i64;
+        feed_three_asset_dip(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 1_000), 0, "both are gated");
+
+        let blocked = c.engine_stats()["blocked"].clone();
+        assert_eq!(blocked["timing"], 2, "global total");
+        assert_eq!(blocked["byStrategy"]["a"]["timing"], 1, "{blocked}");
+        assert_eq!(blocked["byStrategy"]["b"]["timing"], 1, "{blocked}");
+        assert_eq!(blocked["byStrategy"]["a"]["momentum"], 0, "{blocked}");
+        // Nothing declared, so nothing is listed as exempted.
+        assert_eq!(blocked["declaredExemptions"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn declared_exemptions_are_reported_in_engine_stats() {
+        let c = core_with_declared_dips(
+            HashMap::new(),
+            &[("fader", &["BTC"]), ("plain", &["ETH"])],
+            5,
+            0,
+            |name| crate::strategies::GateExemptions {
+                timing: name == "fader",
+                momentum: name == "fader",
+            },
+        );
+        let declared = c.engine_stats()["blocked"]["declaredExemptions"].clone();
+        assert_eq!(
+            declared,
+            serde_json::json!([{ "strategy": "fader", "gates": ["timing", "momentum"] }]),
+            "only the declaring strategy is listed"
+        );
+    }
+
+    #[test]
+    fn a_gate_exemption_never_bypasses_a_safety_boundary() {
+        // The strongest form of the acceptance criterion: a strategy that declares
+        // BOTH entry gates unnecessary still cannot get past the global risk gate,
+        // the kill switch or the global capacity ceiling — those live in
+        // `Core::place`, far below the entry gates.
+        // The risk gate snapshots `config.risk` at construction, so the per-order
+        // notional ceiling is set here: 1 USD vs the 0.44 x 10 = 4.40 order.
+        let mut c = core_with_declared_dips_and_risk(
+            HashMap::new(),
+            &[("all_in", &["BTC"])],
+            5,
+            WINDOW_SHUT,
+            RiskConfig { max_order_notional: dec!(1), ..Default::default() },
+            |_| crate::strategies::GateExemptions::all(),
+        );
+        let now = 1_000_000i64;
+        feed_three_asset_dip(&mut c, now);
+
+        assert_eq!(c.engine_evaluate(now + 1_000), 0, "risk gate must still reject");
+        assert_eq!(c.engine_stats()["placeRejected"], 1);
+        assert!(c.list_orders().is_empty());
+        assert!(c.strategy_stats().iter().any(|s| {
+            s["name"] == "all_in" && s["gateExemptions"] == serde_json::json!(["timing", "momentum"])
+        }), "the declaration is still reported even though the order was refused");
+
+        // Kill switch: identical exemption, hard stop wins.
+        c.kill("test".into());
+        assert_eq!(c.engine_evaluate(now + 2_000), 0, "kill switch is not exemptible");
+        assert!(c.positions().open_positions().is_empty());
+
+        // Global capacity ceiling: also outside the entry gates.
+        let mut c2 = core_with_declared_dips(
+            HashMap::new(),
+            &[("all_in", &["BTC"])],
+            0,
+            WINDOW_SHUT,
+            |_| crate::strategies::GateExemptions::all(),
+        );
+        feed_three_asset_dip(&mut c2, now);
+        assert_eq!(c2.engine_evaluate(now + 1_000), 0, "global capacity is not exemptible");
+        assert_eq!(c2.engine_stats()["placeRejected"], 1);
+
+        // And the exemption cannot conjure a market (structural precondition).
+        let mut c3 = core_with_declared_dips(
+            HashMap::new(),
+            &[("all_in", &["BTC"])],
+            5,
+            0,
+            |_| crate::strategies::GateExemptions::all(),
+        );
+        assert_eq!(c3.engine_evaluate(now), 0, "no round markets → nothing to exempt");
+    }
+
+    #[test]
+    fn a_gate_exemption_does_not_lift_the_daily_loss_cap() {
+        // Realise a loss through the ordinary exit path, then confirm the
+        // exempting strategy is refused exactly like any other.
+        let mut c = core_with_declared_dips(
+            HashMap::new(),
+            &[("all_in", &["BTC"])],
+            5,
+            0,
+            |_| crate::strategies::GateExemptions::all(),
+        );
+        c.config_mut().auto_exits_enabled = true;
+        c.config_mut().positions.max_daily_loss_usd = dec!(0.0001);
+        let now = 1_000_000i64;
+        feed_three_asset_dip(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 1_000), 1, "the exemption still lets the entry in");
+        fill(&mut c, "BTC", now + 2_000);
+        assert_eq!(c.positions().open_positions().len(), 1);
+
+        // Crash the book and tick at the force-exit horizon → a realized loss.
+        let token = "btc_up";
+        c.book_snapshot(token, vec![(dec!(0.05), dec!(100))], vec![(dec!(0.06), dec!(100))], now + 3_000);
+        c.tick(1_800_000 - 100_000).unwrap();
+        assert!(c.positions().daily_pnl() < Decimal::ZERO, "expected a realized loss");
+
+        // A fresh dip on the NEXT round: the exempted strategy is refused by the
+        // daily-loss cap, proving the exemption stops at the entry gates.
+        let now2 = 1_800_000i64;
+        feed_three_asset_dip(&mut c, now2);
+        let before = c.list_orders().len();
+        assert_eq!(c.engine_evaluate(now2 + 1_000), 0, "daily loss cap is not exemptible");
+        assert_eq!(c.list_orders().len(), before, "no new order was tracked");
     }
 
     fn market(now: i64) -> CryptoMarket {

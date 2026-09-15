@@ -31,6 +31,9 @@ grep -rE "reqwest|hyper|http" user_layer/strategies/      # 应为空
 uint32_t bk_strategy_abi_version(void);           // 必须 == 2（协商先于读 vtable）
 const BkStrategyVtable* bk_strategy_create(void); // 工厂（必须）
 void bk_strategy_free_string(char* p);            // 释放本库产出的 JSON（同一分配器）
+
+// 可选（按名字解析；未导出 = 不声明任何豁免，见 §3.5）：
+char* bk_strategy_gate_exemptions(void* handle);  // {"timing":bool,"momentum":bool}
 ```
 ```c
 typedef struct { const char* price; const char* size; } BkLevel;
@@ -91,6 +94,7 @@ pub trait EngineStrategy: Send + Sync {
     fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal>;
 
     // 以下均为可选（有默认实现）：
+    fn gate_exemptions(&self) -> GateExemptions;                  // 入场闸门豁免（E2-b，默认全保留，见 §3.5）
     fn take_exit_intents(&mut self) -> Vec<StrategyExitIntent>;   // 平仓意图
     fn take_breaks(&mut self) -> Vec<(String, Decimal)>;          // 趋势破位
     fn confirmed_tokens(&self) -> HashSet<String>;                // 自证
@@ -149,7 +153,8 @@ unsafe extern "C" fn evaluate(handle: BkHandle, view: *const BkRoundView) -> *mu
 
 ### 3.4 多策略并发（P-1.1）
 自驱动引擎遍历**所有已启用**的策略产生候选单，然后统一过共享闸门：
-- 回合时序（`--min-round-age` / `--min-time-left`）与现货动量闸门对所有策略一视同仁；
+- 回合时序（`--min-round-age` / `--min-time-left`）与现货动量闸门默认对所有策略一视同仁；
+  仅当策略**显式声明**时，这两个入场质量闸门才可只对它自己放宽（E2-b，见 §3.5）；
 - **每个 token 每个评估周期至多一单**（按注册顺序，先到先得），避免多策略抢同一 token；
 - 仓位/名义金额仍受全局风控与 `--max-positions`（全局总容量）约束；
 - 可选的 **per-strategy 限额与定寸**（`--strategy-limit`，可重复；`-` 或空段 = 该维度继承全局值）：
@@ -169,6 +174,61 @@ unsafe extern "C" fn evaluate(handle: BkHandle, view: *const BkRoundView) -> *mu
   （`"global"`|`"strategy"`）与 `effectiveSizeUsd`/`effectiveMinShares`/`effectiveMaxShares`（夹取后的生效定寸）、
   `ordersPlaced`/`ordersRejected`/`limitRejected`（入场上报）、`closedTrades`/`wins`/`losses`/`feesUsd`/`netPnlUsd`
   （已实现盈亏）。默认无任何限额配置 → 行为与单策略时代逐位一致。
+
+### 3.5 入场闸门豁免（E2-b / #27）
+
+两个**入场质量闸门**默认对所有策略一视同仁，而它们恰好会挡掉一类正当策略的入场点：
+
+| 闸门 | 默认参数 | 误伤的形态 |
+|:---|:---|:---|
+| 回合时序窗口 `timing` | `min_round_age_sec=30`、`min_time_left_sec=180` | 开回合瞬间均值回归 / 抢前 30 秒 |
+| 现货动量 `momentum` | 30 s 窗口、0.03% 容差 | 逆向 / 均值回归（现货越跌越买 Up） |
+
+策略可以**显式声明**自己不需要这两个闸门中的某一个只作用于**它自己的候选单**。默认是全保留，
+因此不声明的策略（含内建 `spread_arb`）行为逐位不变。
+
+- **Rust（内建/内树）**：覆写 trait 方法
+  ```rust
+  fn gate_exemptions(&self) -> GateExemptions {
+      GateExemptions { timing: true, momentum: false } // 只豁免时序窗口
+  }
+  ```
+- **外挂 C ABI v2**：额外导出一个**可选符号**（不导出 = 不声明任何豁免），返回由本库
+  `bk_string_out` 分配、内核用 `bk_strategy_free_string` 归还的 JSON：
+  ```c
+  char* bk_strategy_gate_exemptions(void* handle); // {"timing":true,"momentum":false}
+  ```
+  `dog_strategy` 已导出该符号（`timing:true`）作为可运行范例。**注意**：它是独立可选符号而**不是**
+  vtable 的新字段——内核按值拷贝 `BkStrategyVtable`，追加字段会改变 `sizeof` 并迫使
+  `BK_ABI_VERSION=3`；按名字解析的可选符号缺省即「未声明」，因此 `BK_ABI_VERSION` 维持 2，
+  旧库无需重编译。JSON 里非布尔值/未知键一律按 `false`（降级为「未声明」）处理。
+
+**可豁免的范围被刻意收窄，安全边界永远不可豁免：**
+- 时序闸门里只有「窗口」（`TooYoung` / `TooCloseToExpiry`）可豁免；**「本轮没有市场」
+  （`NoMarkets`）是结构性前提，永不豁免**。
+- 单 token 单周期一单、挂单去重（`pending_tokens`）、定张数、per-strategy 配额、
+  全局容量与风控区间**都不在豁免范围**。
+- `ImmutableConfig`、`RiskGate`、kill switch、单日亏损上限、资金预扣等安全边界位于
+  `Core::place`/`PositionManager`，与入场闸门路径完全无关，豁免**物理上**够不到它们
+  （回归测试 `a_gate_exemption_never_bypasses_a_safety_boundary` /
+  `a_gate_exemption_does_not_lift_the_daily_loss_cap` 钉住）。
+
+**豁免必须显性且可审计**（不允许静默挖洞）：
+- 每次被兑现的豁免产生一条中文审计日志（`tracing` target `strategy`）：
+  `本单因策略 dog_strategy 豁免门禁 timing（Round too young (12s < 10000s)，token=up）`；
+- `strategy.load` 的回执会在**启用前**写明声明了哪些闸门：
+  `… registered … (disabled; declares gate exemptions: timing)`；
+- `engine.stats.strategies[]` 增加 `gateExemptions`（声明的闸门）、`blockedTiming`/
+  `blockedMomentum`（被挡次数）、`gateExemptedTiming`/`gateExemptedMomentum`（兑现次数）；
+- `engine.stats.blocked` 增加 `byStrategy`（把每次拦截归属到具体策略，键 `timing`/`momentum`）
+  与 `declaredExemptions`（当前在生效的全部豁免声明 `[{strategy, gates}]`），原有的
+  `timing`/`momentum` 全局总数保留不变。
+- 验收（真机 + 真实 dog cdylib）：`node scripts/strategy-gate-check.mjs`
+  （npm 脚本 `core:strategy-gate`）——时序窗口对所有人关闭时，dog_strategy 仍入场、内建仍被挡、
+  豁免被计数且 momentum 恒为 0。
+
+> 运维侧「谁可以批准某策略豁免」的授权层（与策略自声明正交的二次授信）**明确不在 E2-b 范围**，
+> 记为 [DECISIONS_PENDING D-16](../DECISIONS_PENDING.md)。
 
 ## 4. 生命周期与开关
 

@@ -107,8 +107,14 @@
    `size_usd`/`min_shares`/`max_shares` + 原有的 `max_open_positions`/`max_open_notional_usd`；
    全局值降为**兜底与硬上限**（策略覆盖一律夹回全局风控区间）。
    `engine.stats.strategies[]` 上报生效定寸与配额占用。全局 `max_positions` 仍为总容量闸门。
-2. **全局门禁会误杀逆向策略**：spot 动量过滤（`engine.rs`）在「现货正逆着持仓走」时拒绝下单——
-   而这**正是**逆向策略要入场的情形；`min_round_age` / `min_time_left` 同理。需要按策略 opt-out。
+2. ~~**全局门禁会误杀逆向策略**：spot 动量过滤（`engine.rs`）在「现货正逆着持仓走」时拒绝下单——
+   而这**正是**逆向策略要入场的情形；`min_round_age` / `min_time_left` 同理。需要按策略 opt-out。~~
+   **已解决（E2-b / #27，2026-09-14）**：策略通过 `EngineStrategy::gate_exemptions()`（外挂为
+   可选 C 符号 `bk_strategy_gate_exemptions`）**显式声明**豁免 `timing`/`momentum` 入场质量闸门；
+   默认全保留（不声明 = 行为不变）。豁免逐单审计（中文日志 + `engine.stats` 的
+   `blocked.byStrategy`/`declaredExemptions`/`gateExempted*`），且只作用于声明者自己的候选单；
+   安全边界（RiskGate/kill switch/单日亏损帽/全局容量/配额/定寸）物理上不可豁免，
+   `NoMarkets` 结构前提与单 token 去重也不可豁免。
 3. **影子进化只能碰一个策略**：`MutableParams` 全局且被写死成 spread_arb 的四个旋钮，
    `Variant` 硬编码 spread_arb 入场逻辑，`UserStrategyAdapter` 忽略 hot params。
    → 需要「按策略的可变参数集 + 按策略评估 + 按策略审计」。
@@ -121,7 +127,11 @@
   **E2-a 已达成（#26）**：`size_usd`/`min_shares`/`max_shares` 与 `max_open_positions` 均可按策略配置，
   三策略同周期各自定寸、配额互不干扰，`engine.stats.strategies[]` 上报 `sizingSource`/`effective*`/配额占用；
   全局值仍是兜底与天花板。
-- 逆向策略可显式关闭动量门禁（配置项，默认关 = 行为不变）。
+- ~~逆向策略可显式关闭动量门禁（配置项，默认关 = 行为不变）。~~
+  **E2-b 已达成（#27）**：不是运维配置开关，而是**策略随包自声明**（trait 方法 / 外挂可选符号），
+  只对 `timing`/`momentum` 两个入场质量闸门生效、只作用于本策略候选单；默认不声明 = 全门禁；
+  每次兑现均有审计记录（见 `STRATEGY_GUIDE §3.5`、迁移日志 §44）。运维侧的二次授信（谁能批准
+  豁免）与策略自声明正交，明确推后为 DECISIONS_PENDING D-16。
 - 影子进化对**每个**启用策略独立评估、独立审计（`data/evolution/<strategy>.jsonl`），
   应用后热更新只影响该策略。
 - 全部现有门禁保持绿灯；默认配置下行为与改动前**逐位一致**（无策略新增时）。

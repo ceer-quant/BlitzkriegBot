@@ -23,7 +23,7 @@ use crate::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
 use crate::scanner::{Scanner, ScannerConfig};
 use crate::signal::{PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig};
 use crate::strategies::{
-    spread_arb::SpreadArbBuiltin, EngineStrategy, StrategyCtx, StrategyExitIntent,
+    spread_arb::SpreadArbBuiltin, EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent,
 };
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -93,6 +93,18 @@ impl Default for EngineConfig {
     }
 }
 
+/// Per-strategy gate bookkeeping (E2-b / #27): how often a strategy's own
+/// candidates were stopped by a gate, and how often a declared exemption let one
+/// through anyway. Both halves are reported per strategy so an opt-out is
+/// never invisible next to an un-exempted strategy's rejection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StrategyGateTally {
+    pub blocked_timing: u64,
+    pub blocked_momentum: u64,
+    pub exempted_timing: u64,
+    pub exempted_momentum: u64,
+}
+
 /// Why a valid signal did not become an order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockReason {
@@ -105,12 +117,43 @@ pub enum BlockReason {
 /// A signal the evaluator produced that a gate blocked (near-miss telemetry).
 #[derive(Debug, Clone)]
 pub struct BlockedCandidate {
+    /// The strategy whose candidate was blocked — so `blocked.timing` /
+    /// `blocked.momentum` are attributable per strategy (E2-b / #27).
+    pub strategy: String,
     pub token_id: String,
     pub asset: String,
     pub direction: SignalDirection,
     pub price: Decimal,
     pub reason: BlockReason,
     pub time_left_sec: i64,
+}
+
+/// One honoured per-strategy gate exemption (E2-b / #27): the strategy declared
+/// it did not need a shared entry gate and the host let its candidate through.
+/// Recorded so an opt-out is always auditable — the log line is the Chinese
+/// sentence «本单因策略 X 豁免门禁 Y», and the record carries the numeric detail
+/// of what the gate would have said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateExemptionRecord {
+    pub strategy: String,
+    /// "timing" | "momentum".
+    pub gate: &'static str,
+    pub token_id: String,
+    pub asset: String,
+    /// The block the gate would have produced (e.g. `"Too close to expiry
+    /// (120s < 180s)"` or `"spot BTC -1.20% in 30s vs Up (tol 0.03%)"`).
+    pub detail: String,
+    pub time_left_sec: i64,
+}
+
+impl GateExemptionRecord {
+    /// The auditable one-line sentence for logs/diagnostics.
+    pub fn audit_line(&self) -> String {
+        format!(
+            "本单因策略 {} 豁免门禁 {}（{}，token={}）",
+            self.strategy, self.gate, self.detail, self.token_id
+        )
+    }
 }
 
 /// Market-data events the engine consumes (produced by the feed layer or, in
@@ -144,11 +187,16 @@ pub struct Engine {
     pending_tokens: HashSet<String>,
     /// Near-miss signals from the most recent evaluate().
     last_blocked: Vec<BlockedCandidate>,
+    /// Per-strategy gate exemptions HONOURED during the most recent evaluate()
+    /// (E2-b / #27) — the auditable "本单因策略 X 豁免门禁 Y" trail.
+    last_exemptions: Vec<GateExemptionRecord>,
     /// Records blocked signals + their subsequent price path (for offline
     /// evaluation of relaxing the entry gate). Observation-only.
     near_miss: crate::shadow::NearMissRecorder,
     blocked_timing_total: u64,
     blocked_momentum_total: u64,
+    /// Session per-strategy gate counts (blocked vs exempted), E2-b / #27.
+    gate_tally: HashMap<String, StrategyGateTally>,
     /// Optional hot-swap handle for Shadow Evolution. When present, every
     /// evaluate() reads the CURRENT mutable parameters (lock-free) so an
     /// evolution takes effect on the next tick with no restart.
@@ -174,9 +222,11 @@ impl Engine {
             spot: HashMap::new(),
             pending_tokens: HashSet::new(),
             last_blocked: Vec::new(),
+            last_exemptions: Vec::new(),
             near_miss: crate::shadow::NearMissRecorder::new(500, 300_000),
             blocked_timing_total: 0,
             blocked_momentum_total: 0,
+            gate_tally: HashMap::new(),
             hot_params: None,
             strategies,
             strategy_exits: Vec::new(),
@@ -293,14 +343,24 @@ impl Engine {
     }
 
     /// Spot momentum alignment filter: reject when spot is moving against the bet.
-    fn momentum_ok(&self, asset: &str, dir: SignalDirection, now_ms: i64) -> bool {
-        let Some(buf) = self.spot.get(asset) else { return true };
+    /// Returns the reason it rejected, so an exempting strategy's audit record can
+    /// state exactly what was waived.
+    fn momentum_ok(&self, asset: &str, dir: SignalDirection, now_ms: i64) -> Result<(), String> {
+        let Some(buf) = self.spot.get(asset) else { return Ok(()) };
         let move_pct = buf.move_pct(self.cfg.momentum_window_sec, now_ms);
         let against = match dir {
             SignalDirection::Up => move_pct < -self.cfg.momentum_tol_pct,
             SignalDirection::Down => move_pct > self.cfg.momentum_tol_pct,
         };
-        !against
+        if against {
+            return Err(format!(
+                "spot {asset} {move_pct:+.2}% in {}s vs {} (tol {}%)",
+                self.cfg.momentum_window_sec,
+                dir.as_str(),
+                self.cfg.momentum_tol_pct
+            ));
+        }
+        Ok(())
     }
 
     /// Evaluate all enabled strategies against the current round and return the
@@ -309,9 +369,10 @@ impl Engine {
     /// suppressed this round.
     pub fn evaluate(&mut self, now_ms: i64) -> Vec<crate::model::OrderRequest> {
         self.last_blocked.clear();
+        self.last_exemptions.clear();
 
         let round = self.scanner.round_state(now_ms);
-        let tradeable = self.scanner.can_trade(now_ms).is_ok();
+        let timing = self.scanner.can_trade_reason(now_ms).err();
 
         // Candidates are computed regardless of the timing gate so we can record
         // near-misses (a valid dip that the timing gate blocked). This is the data
@@ -350,57 +411,91 @@ impl Engine {
             if !emitted.insert(sig.token_id.clone()) {
                 continue;
             }
-            if !tradeable {
-                let mid = self
-                    .book_snapshot(&sig.token_id)
-                    .map(|b| b.mid_price)
-                    .unwrap_or(Decimal::ZERO);
-                self.near_miss.on_blocked(
-                    &sig.token_id,
-                    &sig.asset,
-                    sig.direction.as_str(),
-                    sig.price,
-                    mid,
-                    crate::shadow::NearMissReason::Timing,
-                    round.time_left_sec,
-                    round.slot,
-                    now_ms,
-                );
-                self.last_blocked.push(BlockedCandidate {
-                    token_id: sig.token_id,
-                    asset: sig.asset,
-                    direction: sig.direction,
-                    price: sig.price,
-                    reason: BlockReason::Timing,
+            if let Some(block) = timing {
+                // E2-b: a strategy may declare the timing WINDOW gates unnecessary
+                // for its own candidates. The structural precondition (no market
+                // this round) is not waivable, and everything downstream in
+                // `Core` (risk gate, kill switch, daily loss, quotas, sizing) is
+                // untouched by this path.
+                let waived = block.exemptible()
+                    && self
+                        .strategy_gate_exemptions(&sig.strategy)
+                        .is_some_and(|e| e.timing);
+                if !waived {
+                    let mid = self
+                        .book_snapshot(&sig.token_id)
+                        .map(|b| b.mid_price)
+                        .unwrap_or(Decimal::ZERO);
+                    self.near_miss.on_blocked(
+                        &sig.token_id,
+                        &sig.asset,
+                        sig.direction.as_str(),
+                        sig.price,
+                        mid,
+                        crate::shadow::NearMissReason::Timing,
+                        round.time_left_sec,
+                        round.slot,
+                        now_ms,
+                    );
+                    self.last_blocked.push(BlockedCandidate {
+                        strategy: sig.strategy,
+                        token_id: sig.token_id,
+                        asset: sig.asset,
+                        direction: sig.direction,
+                        price: sig.price,
+                        reason: BlockReason::Timing,
+                        time_left_sec: round.time_left_sec,
+                    });
+                    continue;
+                }
+                self.last_exemptions.push(GateExemptionRecord {
+                    strategy: sig.strategy.clone(),
+                    gate: "timing",
+                    token_id: sig.token_id.clone(),
+                    asset: sig.asset.clone(),
+                    detail: block.to_string(),
                     time_left_sec: round.time_left_sec,
                 });
-                continue;
             }
-            if !self.momentum_ok(&sig.asset, sig.direction, now_ms) {
-                let mid = self
-                    .book_snapshot(&sig.token_id)
-                    .map(|b| b.mid_price)
-                    .unwrap_or(Decimal::ZERO);
-                self.near_miss.on_blocked(
-                    &sig.token_id,
-                    &sig.asset,
-                    sig.direction.as_str(),
-                    sig.price,
-                    mid,
-                    crate::shadow::NearMissReason::Momentum,
-                    round.time_left_sec,
-                    round.slot,
-                    now_ms,
-                );
-                self.last_blocked.push(BlockedCandidate {
-                    token_id: sig.token_id,
-                    asset: sig.asset,
-                    direction: sig.direction,
-                    price: sig.price,
-                    reason: BlockReason::Momentum,
+            if let Err(detail) = self.momentum_ok(&sig.asset, sig.direction, now_ms) {
+                let waived = self
+                    .strategy_gate_exemptions(&sig.strategy)
+                    .is_some_and(|e| e.momentum);
+                if !waived {
+                    let mid = self
+                        .book_snapshot(&sig.token_id)
+                        .map(|b| b.mid_price)
+                        .unwrap_or(Decimal::ZERO);
+                    self.near_miss.on_blocked(
+                        &sig.token_id,
+                        &sig.asset,
+                        sig.direction.as_str(),
+                        sig.price,
+                        mid,
+                        crate::shadow::NearMissReason::Momentum,
+                        round.time_left_sec,
+                        round.slot,
+                        now_ms,
+                    );
+                    self.last_blocked.push(BlockedCandidate {
+                        strategy: sig.strategy,
+                        token_id: sig.token_id,
+                        asset: sig.asset,
+                        direction: sig.direction,
+                        price: sig.price,
+                        reason: BlockReason::Momentum,
+                        time_left_sec: round.time_left_sec,
+                    });
+                    continue;
+                }
+                self.last_exemptions.push(GateExemptionRecord {
+                    strategy: sig.strategy.clone(),
+                    gate: "momentum",
+                    token_id: sig.token_id.clone(),
+                    asset: sig.asset.clone(),
+                    detail,
                     time_left_sec: round.time_left_sec,
                 });
-                continue;
             }
 
             let size = self.compute_shares(sig.price, &sig.strategy);
@@ -449,12 +544,61 @@ impl Engine {
         self.blocked_momentum_total
     }
 
+    /// The per-strategy gate exemptions registered strategies declared
+    /// (E2-b / #27). None for an unknown strategy.
+    pub fn strategy_gate_exemptions(&self, name: &str) -> Option<GateExemptions> {
+        self.strategies
+            .iter()
+            .find(|s| s.strategy.name() == name)
+            .map(|s| s.strategy.gate_exemptions())
+    }
+
+    /// Every declared exemption, as `(strategy, exemptions)` in registration
+    /// order — the audit view of who opted out of what.
+    pub fn declared_gate_exemptions(&self) -> Vec<(String, GateExemptions)> {
+        self.strategies
+            .iter()
+            .map(|s| (s.strategy.name().to_string(), s.strategy.gate_exemptions()))
+            .filter(|(_, e)| e.any())
+            .collect()
+    }
+
+    /// Gate exemptions honoured on the most recent evaluation, in the order the
+    /// candidates were evaluated. Cleared at the start of every `evaluate`.
+    pub fn last_exemptions(&self) -> &[GateExemptionRecord] {
+        &self.last_exemptions
+    }
+
+    /// Drain the honoured-exemption records (called by the host after evaluate)
+    /// and fold them into the per-strategy tallies.
+    pub fn take_exemptions(&mut self) -> Vec<GateExemptionRecord> {
+        let out = std::mem::take(&mut self.last_exemptions);
+        for r in &out {
+            let t = self.gate_tally.entry(r.strategy.clone()).or_default();
+            match r.gate {
+                "timing" => t.exempted_timing += 1,
+                _ => t.exempted_momentum += 1,
+            }
+        }
+        out
+    }
+
+    /// Blocked / exempted counts for one strategy (E2-b / #27).
+    pub fn gate_tally(&self, name: &str) -> StrategyGateTally {
+        self.gate_tally.get(name).copied().unwrap_or_default()
+    }
+
     /// Accumulate blocked counters (called by the caller after evaluate).
     pub fn tally_blocked(&mut self) {
         for b in &self.last_blocked {
             match b.reason {
                 BlockReason::Timing => self.blocked_timing_total += 1,
                 BlockReason::Momentum => self.blocked_momentum_total += 1,
+            }
+            let t = self.gate_tally.entry(b.strategy.clone()).or_default();
+            match b.reason {
+                BlockReason::Timing => t.blocked_timing += 1,
+                BlockReason::Momentum => t.blocked_momentum += 1,
             }
         }
     }
@@ -950,16 +1094,30 @@ mod tests {
         /// assets, which is how one cycle can host several strategies without
         /// them competing for the same token.
         assets: Vec<String>,
+        /// Shared entry gates this strategy declares it does not need (E2-b).
+        gates: GateExemptions,
     }
     impl DipBuyer {
         fn new(name: &str, buy_below: Decimal) -> Self {
-            Self { name: name.to_string(), buy_below, assets: Vec::new() }
+            Self { name: name.to_string(), buy_below, assets: Vec::new(), gates: GateExemptions::none() }
         }
         fn on_assets(name: &str, buy_below: Decimal, assets: &[&str]) -> Self {
             Self {
                 name: name.to_string(),
                 buy_below,
                 assets: assets.iter().map(|a| (*a).to_string()).collect(),
+                gates: GateExemptions::none(),
+            }
+        }
+        /// Same as [`Self::new`] but declaring gate exemptions and restricted to
+        /// the given assets (so it does not compete for the builtin's token under
+        /// the one-entry-per-token rule).
+        fn exempting(name: &str, buy_below: Decimal, assets: &[&str], gates: GateExemptions) -> Self {
+            Self {
+                name: name.to_string(),
+                buy_below,
+                assets: assets.iter().map(|a| (*a).to_string()).collect(),
+                gates,
             }
         }
     }
@@ -969,6 +1127,9 @@ mod tests {
         }
         fn on_book(&mut self, _token_id: &str, _snap: &crate::model::OrderbookSnapshot, _now_ms: i64) {}
         fn on_round(&mut self, _slot: i64) {}
+        fn gate_exemptions(&self) -> GateExemptions {
+            self.gates
+        }
         fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
             let mut out = Vec::new();
             for market in ctx.markets() {
@@ -1070,6 +1231,317 @@ mod tests {
         assert_eq!(orders.len(), 2, "one entry per token per cycle: {orders:?}");
         assert!(orders.iter().any(|o| o.token_id == "up" && o.strategy == "spread_arb"), "{orders:?}");
         assert!(orders.iter().any(|o| o.token_id == "down" && o.strategy == "dip_buyer"), "{orders:?}");
+    }
+
+    // ── E2-b per-strategy gate opt-out (#27) ────────────────────────────────
+
+    /// Book a trend-confirming run on `token`, then dip it: the setup the
+    /// builtin `spread_arb` needs to produce a candidate.
+    fn trend_then_dip(e: &mut Engine, token: &str, now: i64) {
+        for i in 0..12 {
+            e.on_data(DataEvent::Book {
+                token_id: token.into(),
+                bids: vec![(dec!(0.55), dec!(100))],
+                asks: vec![(dec!(0.57), dec!(100))],
+                now_ms: now + i * 1000,
+            });
+        }
+        e.on_data(DataEvent::Book {
+            token_id: token.into(),
+            bids: vec![(dec!(0.43), dec!(100))],
+            asks: vec![(dec!(0.45), dec!(100))],
+            now_ms: now + 12_000,
+        });
+    }
+
+    /// A single dip book on `token` at `at_ms`, with no trend run — the builtin
+    /// stays idle, so only a strategy that needs no trend confirmation can
+    /// signal here. Book it at the instant you evaluate: a stale book is not
+    /// priceable at all (`fresh_book` returns None).
+    fn dip_only(e: &mut Engine, token: &str, at_ms: i64) {
+        e.on_data(DataEvent::Book {
+            token_id: token.into(),
+            bids: vec![(dec!(0.43), dec!(100))],
+            asks: vec![(dec!(0.45), dec!(100))],
+            now_ms: at_ms,
+        });
+    }
+
+    /// Push a spot price that fell over the momentum window (against an UP bet).
+    fn spot_falls(e: &mut Engine, asset: &str, from: Decimal, to: Decimal, now: i64) {
+        e.on_data(DataEvent::Spot { asset: asset.into(), price: from, now_ms: now });
+        e.on_data(DataEvent::Spot { asset: asset.into(), price: to, now_ms: now + 2_000 });
+    }
+
+    #[test]
+    fn declared_timing_exemption_lets_a_candidate_through_the_window_gate() {
+        // Timing gate forced shut by an absurd min_round_age; a strategy that
+        // declares the timing window unnecessary still enters. The exempting
+        // strategy trades ETH so it does not compete for the builtin's BTC token
+        // (one entry per token per cycle is NOT waivable).
+        let mut cfg = cfg();
+        cfg.scanner.min_round_age_sec = 10_000;
+        let mut e = Engine::new(cfg);
+        e.register_user_strategy(
+            Box::new(DipBuyer::exempting(
+                "window_fade",
+                dec!(0.45),
+                &["ETH"],
+                GateExemptions { timing: true, momentum: false },
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("window_fade", true));
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000), market_of("ETH", 1_800_000)],
+            now_ms: now,
+        });
+        trend_then_dip(&mut e, "up", now);
+        dip_only(&mut e, "eth_up", now + 12_000);
+
+        // The builtin is still gated; the declaring strategy is exempt.
+        let orders = e.evaluate(now + 12_000);
+        assert_eq!(orders.len(), 1, "{orders:?}");
+        assert_eq!(orders[0].strategy, "window_fade");
+        assert_eq!(orders[0].asset, "ETH");
+        assert!(e.last_blocked().iter().any(|b| b.strategy == "spread_arb"), "builtin stays gated");
+        assert!(
+            !e.last_blocked().iter().any(|b| b.strategy == "window_fade"),
+            "exempted strategy must not appear as blocked"
+        );
+        // Auditable: the honoured exemption names the strategy, the gate and the
+        // exact block that was waived.
+        let ex = e.last_exemptions();
+        assert_eq!(ex.len(), 1, "{ex:?}");
+        assert_eq!(ex[0].strategy, "window_fade");
+        assert_eq!(ex[0].gate, "timing");
+        assert!(ex[0].detail.contains("Round too young"), "{}", ex[0].detail);
+        let line = ex[0].audit_line();
+        assert!(line.contains("本单因策略 window_fade 豁免门禁 timing"), "{line}");
+    }
+
+    #[test]
+    fn a_strategy_that_declares_nothing_is_still_gated() {
+        // Identical setup, identical strategy body — only the declaration differs.
+        let mut cfg = cfg();
+        cfg.scanner.min_round_age_sec = 10_000;
+        let mut e = Engine::new(cfg);
+        e.register_user_strategy(
+            Box::new(DipBuyer::on_assets("plain", dec!(0.45), &["ETH"])),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("plain", true));
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000), market_of("ETH", 1_800_000)],
+            now_ms: now,
+        });
+        trend_then_dip(&mut e, "up", now);
+        dip_only(&mut e, "eth_up", now + 12_000);
+
+        assert!(e.evaluate(now + 12_000).is_empty(), "undeclared strategy must stay gated");
+        assert!(e.last_exemptions().is_empty(), "nothing may be recorded as exempted");
+        assert!(e.last_blocked().iter().any(|b| b.strategy == "plain"), "{:?}", e.last_blocked());
+    }
+
+    #[test]
+    fn declared_momentum_exemption_lets_a_mean_reversion_entry_through() {
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(DipBuyer::exempting(
+                "fader",
+                dec!(0.45),
+                &["ETH"],
+                GateExemptions { timing: false, momentum: true },
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("fader", true));
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000), market_of("ETH", 1_800_000)],
+            now_ms: now,
+        });
+        trend_then_dip(&mut e, "up", now);
+        dip_only(&mut e, "eth_up", now + 12_000);
+        // Both spots fall over the momentum window: exactly the case a
+        // mean-reversion entry wants (and the builtin filter rejects).
+        spot_falls(&mut e, "BTC", dec!(60000), dec!(59000), now + 1000);
+        spot_falls(&mut e, "ETH", dec!(3000), dec!(2950), now + 1000);
+
+        let orders = e.evaluate(now + 12_000);
+        assert_eq!(orders.len(), 1, "{orders:?}");
+        assert_eq!(orders[0].strategy, "fader");
+        assert_eq!(orders[0].asset, "ETH");
+        let ex = e.last_exemptions();
+        assert_eq!(ex.len(), 1, "{ex:?}");
+        assert_eq!(ex[0].gate, "momentum");
+        assert!(ex[0].detail.contains("spot ETH"), "{}", ex[0].detail);
+        assert!(ex[0].detail.contains("vs up"), "{}", ex[0].detail);
+        // The builtin, declaring nothing, was blocked by the very same filter.
+        assert!(e
+            .last_blocked()
+            .iter()
+            .any(|b| b.strategy == "spread_arb" && b.reason == BlockReason::Momentum));
+    }
+
+    #[test]
+    fn an_exemption_is_scoped_to_the_declaring_strategy_only() {
+        // Two strategies on different assets in the SAME cycle: only the one that
+        // declared the momentum exemption gets through.
+        let mut e = Engine::new(cfg());
+        assert!(e.set_strategy_enabled("spread_arb", false));
+        e.register_user_strategy(
+            Box::new(DipBuyer::exempting(
+                "fader",
+                dec!(0.45),
+                &["BTC"],
+                GateExemptions { timing: false, momentum: true },
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("fader", true));
+        // A second, undeclared strategy restricted to ETH.
+        e.register_user_strategy(
+            Box::new(DipBuyer::on_assets("gated", dec!(0.45), &["ETH"])),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("gated", true));
+
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000), market_of("ETH", 1_800_000)],
+            now_ms: now,
+        });
+        dip_only(&mut e, "up", now + 2_000);
+        dip_only(&mut e, "eth_up", now + 2_000);
+        spot_falls(&mut e, "BTC", dec!(60000), dec!(59000), now);
+        spot_falls(&mut e, "ETH", dec!(3000), dec!(2950), now);
+
+        let orders = e.evaluate(now + 2_000);
+        assert_eq!(orders.len(), 1, "only the declaring strategy may pass: {orders:?}");
+        assert_eq!(orders[0].strategy, "fader");
+        assert_eq!(orders[0].asset, "BTC");
+        assert_eq!(e.last_exemptions().len(), 1);
+        assert!(e
+            .last_blocked()
+            .iter()
+            .any(|b| b.strategy == "gated" && b.asset == "ETH" && b.reason == BlockReason::Momentum));
+    }
+
+    #[test]
+    fn the_no_market_precondition_is_never_exemptible() {
+        // Declaring every gate must not conjure a market: with no round markets
+        // there is no priceable token, so nothing is exempted.
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(DipBuyer::exempting("all_in", dec!(0.99), &[], GateExemptions::all())),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("all_in", true));
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.43), dec!(100))],
+            asks: vec![(dec!(0.45), dec!(100))],
+            now_ms: now,
+        });
+        assert!(e.evaluate(now).is_empty(), "no market → no candidates at all");
+        assert!(e.last_exemptions().is_empty(), "a structural precondition is not exemptible");
+    }
+
+    #[test]
+    fn blocked_candidates_carry_their_owning_strategy() {
+        // Per-strategy attribution of blocked.timing / blocked.momentum (#27).
+        let mut cfg = cfg();
+        cfg.scanner.min_round_age_sec = 10_000;
+        let mut e = Engine::new(cfg);
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets { markets: vec![market(1_800_000)], now_ms: now });
+        trend_then_dip(&mut e, "up", now);
+        assert!(e.evaluate(now + 12_000).is_empty());
+        assert_eq!(e.last_blocked().len(), 1);
+        assert_eq!(e.last_blocked()[0].strategy, "spread_arb");
+
+        e.tally_blocked();
+        assert_eq!(e.gate_tally("spread_arb").blocked_timing, 1);
+        assert_eq!(e.gate_tally("spread_arb").exempted_timing, 0);
+        assert_eq!(e.gate_tally("nobody"), StrategyGateTally::default());
+    }
+
+    #[test]
+    fn honoured_exemptions_are_counted_per_strategy_and_drained_once() {
+        let mut cfg = cfg();
+        cfg.scanner.min_round_age_sec = 10_000;
+        let mut e = Engine::new(cfg);
+        e.register_user_strategy(
+            Box::new(DipBuyer::exempting(
+                "window_fade",
+                dec!(0.45),
+                &["ETH"],
+                GateExemptions { timing: true, momentum: true },
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("window_fade", true));
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000), market_of("ETH", 1_800_000)],
+            now_ms: now,
+        });
+        trend_then_dip(&mut e, "up", now);
+        dip_only(&mut e, "eth_up", now + 12_000);
+        assert_eq!(e.evaluate(now + 12_000).len(), 1);
+        e.tally_blocked();
+
+        let drained = e.take_exemptions();
+        assert_eq!(drained.len(), 1);
+        assert!(e.take_exemptions().is_empty(), "drained once");
+        let t = e.gate_tally("window_fade");
+        assert_eq!(t.exempted_timing, 1);
+        assert_eq!(t.exempted_momentum, 0);
+        // Counting an exemption never inflates the blocked counters: the builtin
+        // was blocked by the very gate the other strategy declared unnecessary.
+        assert_eq!(e.blocked_timing_count(), 1, "only the builtin was blocked");
+        assert_eq!(e.gate_tally("spread_arb").blocked_timing, 1);
+        assert_eq!(e.gate_tally("window_fade").blocked_timing, 0);
+    }
+
+    #[test]
+    fn declared_exemptions_are_listed_for_audit() {
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(DipBuyer::exempting(
+                "fader",
+                dec!(0.45),
+                &[],
+                GateExemptions { timing: false, momentum: true },
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        e.register_user_strategy(Box::new(DipBuyer::new("plain", dec!(0.45))), "test".into())
+            .unwrap();
+        let declared = e.declared_gate_exemptions();
+        assert_eq!(declared.len(), 1, "silent strategies are omitted: {declared:?}");
+        assert_eq!(declared[0].0, "fader");
+        assert_eq!(declared[0].1.gates(), vec!["momentum"]);
+        assert_eq!(e.strategy_gate_exemptions("plain"), Some(GateExemptions::none()));
+        assert_eq!(e.strategy_gate_exemptions("nobody"), None);
+    }
+
+    #[test]
+    fn the_builtin_declares_no_exemptions() {
+        let e = Engine::new(cfg());
+        assert_eq!(e.strategy_gate_exemptions("spread_arb"), Some(GateExemptions::none()));
     }
 
     #[test]

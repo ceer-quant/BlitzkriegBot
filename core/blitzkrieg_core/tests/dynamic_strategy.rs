@@ -98,6 +98,24 @@ fn market(end_ms: i64) -> CryptoMarket {
     }
 }
 
+/// A second market, so a cycle can host two strategies without them competing
+/// for the same token (one entry per token per cycle is not waivable).
+fn eth_market(end_ms: i64) -> CryptoMarket {
+    CryptoMarket {
+        asset: "ETH".into(),
+        condition_id: "cond_eth".into(),
+        question_id: "q_eth".into(),
+        up_token_id: "eth-up".into(),
+        down_token_id: "eth-down".into(),
+        up_price: dec!(0.6),
+        down_price: dec!(0.4),
+        expires_at_ms: end_ms,
+        round_slot: 2,
+        neg_risk: true,
+        question: "ETH up or down".into(),
+    }
+}
+
 #[test]
 fn loads_and_drives_the_v2_dog_strategy_dylib() {
     let path = require_lib();
@@ -198,6 +216,82 @@ fn hot_params_reach_the_dylib_on_the_next_evaluation() {
     assert_eq!(orders.len(), 1, "{orders:?}");
     assert_eq!(orders[0].token_id, "down");
     assert_eq!(orders[0].price, dec!(0.48));
+}
+
+#[test]
+fn the_dylib_gate_declaration_reaches_the_engine_and_is_honoured() {
+    // E2-b (#27): the OPTIONAL `bk_strategy_gate_exemptions` symbol crosses the
+    // C ABI. The dog strategy declares `timing` — so a round whose timing window
+    // is shut still lets ITS entry through, while the builtin, declaring
+    // nothing, stays blocked. External is only a loading difference.
+    let path = require_lib();
+    let loaded = load_foreign(&path).unwrap_or_else(|e| panic!("load failed: {e:?}"));
+    assert_eq!(
+        loaded.gate_exemptions,
+        blitzkrieg_core::strategies::GateExemptions { timing: true, momentum: false },
+        "the load report must carry the library's declaration"
+    );
+
+    let mut cfg = engine_cfg();
+    // Shut the timing window for every strategy that did not declare it.
+    cfg.scanner.min_round_age_sec = 10_000;
+    let mut engine = Engine::new(cfg);
+    engine
+        .register_user_strategy(Box::new(loaded.strategy), format!("dylib:{}", path.display()))
+        .unwrap();
+    assert!(engine.set_strategy_enabled("dog_strategy", true));
+    assert_eq!(
+        engine.strategy_gate_exemptions("dog_strategy"),
+        Some(blitzkrieg_core::strategies::GateExemptions { timing: true, momentum: false })
+    );
+    assert_eq!(
+        engine.strategy_gate_exemptions("spread_arb"),
+        Some(blitzkrieg_core::strategies::GateExemptions::none()),
+        "the builtin declares nothing"
+    );
+
+    let now = 1_800_000i64;
+    // Two markets: BTC for the builtin, ETH for the dylib. The builtin needs a
+    // confirmed UP trend to have a candidate at all; give it one so its BTC
+    // candidate exists and is then blocked by the very gate the dylib declared
+    // unnecessary. (One entry per token is per-market, and the builtin's blocked
+    // BTC candidate consumes only the BTC slot.)
+    engine.on_data(DataEvent::RoundMarkets {
+        markets: vec![market(1_800_000), eth_market(1_800_000)],
+        now_ms: now,
+    });
+    // Trend-confirm only the BUILTIN's token: `spread_arb` then owns the BTC
+    // slot with a candidate the timing gate blocks, while the dylib's entry must
+    // come through on its own market.
+    for i in 0..12 {
+        engine.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.55), dec!(100))],
+            asks: vec![(dec!(0.57), dec!(100))],
+            now_ms: now + i * 1000,
+        });
+    }
+    // A dip deep enough for the dylib's 0.43 ceiling with >= 50 bid depth.
+    for token in ["up", "eth-up"] {
+        engine.on_data(DataEvent::Book {
+            token_id: token.into(),
+            bids: vec![(dec!(0.41), dec!(60)), (dec!(0.40), dec!(60))],
+            asks: vec![(dec!(0.43), dec!(60)), (dec!(0.44), dec!(60))],
+            now_ms: now + 12_000,
+        });
+    }
+
+    let orders = engine.evaluate(now + 12_000);
+    assert_eq!(orders.len(), 1, "only the declaring strategy may enter: {orders:?}");
+    assert_eq!(orders[0].strategy, "dog_strategy");
+    assert_eq!(orders[0].asset, "ETH", "the builtin's own market stayed gated");
+    assert!(engine.last_blocked().iter().any(|b| b.strategy == "spread_arb"), "builtin stays gated");
+
+    let ex = engine.last_exemptions();
+    assert_eq!(ex.len(), 1, "{ex:?}");
+    assert_eq!(ex[0].strategy, "dog_strategy");
+    assert_eq!(ex[0].gate, "timing");
+    assert!(ex[0].audit_line().contains("本单因策略 dog_strategy 豁免门禁 timing"));
 }
 
 #[test]
