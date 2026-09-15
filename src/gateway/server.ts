@@ -900,6 +900,12 @@ export function createServer(
   });
 
   // ── /panel: the Blitzkrieg panel (ui/ tree; the live gateway view is ui_kit_web) ──
+  // The Vue panel app (WebUI E9) must be built first (ui/webapp/webui -> dist).
+  app.use('/panel/webapp/webui', express.static(join(__dirname, '../../ui/webapp/webui/dist'), {
+    setHeaders: (res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    },
+  }));
   app.use('/panel', express.static(join(__dirname, '../../ui'), {
     setHeaders: (res) => {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
