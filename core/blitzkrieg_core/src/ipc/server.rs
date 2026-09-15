@@ -611,6 +611,31 @@ async fn handle_line(
             }
         }
 
+        method::STRATEGY_UNLOAD => {
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.is_empty() {
+                Err((Failure::INVALID_PARAMS, "name required".into(), None))
+            } else {
+                let outcome = core.lock().await.unload_strategy(name);
+                Ok(serde_json::to_value(outcome).unwrap_or(Value::Null))
+            }
+        }
+
+        method::STRATEGY_RELOAD => {
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if name.is_empty() || path.is_empty() {
+                Err((
+                    Failure::INVALID_PARAMS,
+                    "name and path required".into(),
+                    None,
+                ))
+            } else {
+                let outcome = core.lock().await.reload_strategy(name, path);
+                Ok(serde_json::to_value(outcome).unwrap_or(Value::Null))
+            }
+        }
+
         method::EXTENSION_LIST => {
             let c = core.lock().await;
             let list: Vec<_> = c

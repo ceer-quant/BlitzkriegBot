@@ -148,6 +148,13 @@ pub mod method {
     pub const STRATEGY_ENABLE: &str = "strategy.enable";
     /// Load a user-layer strategy shared library (feature `strategy-loading`).
     pub const STRATEGY_LOAD: &str = "strategy.load";
+    /// Unload a dynamic strategy (drop instance + free the library). Refuses
+    /// in-tree or still-enabled strategies and open positions (E9-b).
+    pub const STRATEGY_UNLOAD: &str = "strategy.unload";
+    /// Atomic swap (E9-b): load the NEW dylib under the SAME registered name,
+    /// dropping the old instance only after the new one parses; enable state
+    /// is preserved. `params: {name, path}`.
+    pub const STRATEGY_RELOAD: &str = "strategy.reload";
     /// Extension lifecycle: list / enable / disable / uninstall.
     pub const EXTENSION_LIST: &str = "extension.list";
     pub const EXTENSION_ENABLE: &str = "extension.enable";
