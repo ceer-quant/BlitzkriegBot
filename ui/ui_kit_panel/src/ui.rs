@@ -25,12 +25,18 @@ fn color_of(v: f64) -> Color {
 }
 
 pub fn render(f: &mut Frame, app: &App) {
+    let confirm_h = if app.pending_confirmation.is_some() {
+        3
+    } else {
+        0
+    };
     let chunks = Layout::vertical([
-        Constraint::Length(3), // header
-        Constraint::Length(3), // tabs
-        Constraint::Min(8),    // body
-        Constraint::Length(3), // command bar
-        Constraint::Length(6), // log
+        Constraint::Length(3),         // header
+        Constraint::Length(3),         // tabs
+        Constraint::Min(8),            // body
+        Constraint::Length(3),         // command bar
+        Constraint::Length(confirm_h), // confirm bar (only when pending)
+        Constraint::Length(6),         // log
     ])
     .split(f.area());
 
@@ -40,9 +46,14 @@ pub fn render(f: &mut Frame, app: &App) {
         Tab::Overview => render_overview(f, chunks[2], &app.snap),
         Tab::Positions => render_positions(f, chunks[2], &app.snap),
         Tab::Trades => render_trades(f, chunks[2], &app.snap),
+        Tab::Plugins => render_plugins(f, chunks[2], app),
     }
     render_command_bar(f, chunks[3], app);
-    render_log(f, chunks[4], app);
+    if let Some(text) = &app.pending_confirmation {
+        render_confirm(f, chunks[4], text);
+    }
+    let log_area = if confirm_h > 0 { chunks[5] } else { chunks[4] };
+    render_log(f, log_area, app);
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
@@ -56,14 +67,20 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     let mode_span = if mode == "live" {
         Span::styled(
             "LIVE",
-            Style::default().fg(Color::Black).bg(RED).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Black)
+                .bg(RED)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled("DRY", Style::default().fg(Color::Black).bg(ACCENT))
     };
     let owner = if app.managed {
         Span::styled(
-            format!("managed pid {}", app.pid.map(|p| p.to_string()).unwrap_or_default()),
+            format!(
+                "managed pid {}",
+                app.pid.map(|p| p.to_string()).unwrap_or_default()
+            ),
             Style::default().fg(ACCENT),
         )
     } else if s.connected {
@@ -82,7 +99,10 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let line1 = Line::from(vec![
-        Span::styled("Blitzkrieg Panel", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Blitzkrieg Panel",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  "),
         mode_span,
         Span::raw("  "),
@@ -107,7 +127,12 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
     let tabs = Tabs::new(Tab::titles())
         .select(app.tab.index())
         .block(Block::default().borders(Borders::ALL).title("View"))
-        .highlight_style(Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(ACCENT)
+                .add_modifier(Modifier::BOLD),
+        );
     f.render_widget(tabs, area);
 }
 
@@ -116,7 +141,11 @@ fn stat(title: &str, big: String, sub: String, big_style: Style) -> Paragraph<'s
         Line::from(Span::styled(big, big_style.add_modifier(Modifier::BOLD))),
         Line::from(Span::styled(sub, Style::default().fg(DIM))),
     ])
-    .block(Block::default().borders(Borders::ALL).title(title.to_string()))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title.to_string()),
+    )
 }
 
 fn render_overview(f: &mut Frame, area: Rect, s: &UiSnapshot) {
@@ -141,7 +170,11 @@ fn render_overview(f: &mut Frame, area: Rect, s: &UiSnapshot) {
             ),
             Style::default().fg(if r.can_trade { GREEN } else { DIM }),
         ),
-        None => ("—".into(), "engine not running".into(), Style::default().fg(DIM)),
+        None => (
+            "—".into(),
+            "engine not running".into(),
+            Style::default().fg(DIM),
+        ),
     };
     f.render_widget(stat("Round", big, sub, style), cards[0]);
 
@@ -153,17 +186,28 @@ fn render_overview(f: &mut Frame, area: Rect, s: &UiSnapshot) {
         ),
         None => ("—".into(), "no balance".into()),
     };
-    f.render_widget(stat("Balance", big, sub, Style::default().fg(ACCENT)), cards[1]);
+    f.render_widget(
+        stat("Balance", big, sub, Style::default().fg(ACCENT)),
+        cards[1],
+    );
 
     // Feed
     let (big, sub) = match &s.stats {
         Some(st) => (
             format!("{} books", st.books),
-            format!("signals {} · rejected {} · confirmed {}", st.signals, st.place_rejected, st.confirmed.len()),
+            format!(
+                "signals {} · rejected {} · confirmed {}",
+                st.signals,
+                st.place_rejected,
+                st.confirmed.len()
+            ),
         ),
         None => ("—".into(), "no feed stats".into()),
     };
-    f.render_widget(stat("Feed", big, sub, Style::default().fg(ACCENT)), cards[2]);
+    f.render_widget(
+        stat("Feed", big, sub, Style::default().fg(ACCENT)),
+        cards[2],
+    );
 
     // Net PnL
     let net = s.net_pnl();
@@ -182,11 +226,17 @@ fn render_overview(f: &mut Frame, area: Rect, s: &UiSnapshot) {
     let mut lines: Vec<Line> = Vec::new();
     if let Some(r) = &s.round {
         if r.market_prices.is_empty() {
-            lines.push(Line::from(Span::styled("(no market prices yet)", Style::default().fg(DIM))));
+            lines.push(Line::from(Span::styled(
+                "(no market prices yet)",
+                Style::default().fg(DIM),
+            )));
         } else {
             for m in &r.market_prices {
                 lines.push(Line::from(vec![
-                    Span::styled(format!("{:<5}", m.asset), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        format!("{:<5}", m.asset),
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled("  UP ", Style::default().fg(DIM)),
                     Span::raw(format!("{:.2}", m.up)),
                     Span::styled("   DOWN ", Style::default().fg(DIM)),
@@ -197,7 +247,10 @@ fn render_overview(f: &mut Frame, area: Rect, s: &UiSnapshot) {
             }
         }
     } else {
-        lines.push(Line::from(Span::styled("(engine not running)", Style::default().fg(DIM))));
+        lines.push(Line::from(Span::styled(
+            "(engine not running)",
+            Style::default().fg(DIM),
+        )));
     }
     if let Some(st) = &s.stats {
         lines.push(Line::from(""));
@@ -237,8 +290,10 @@ fn render_overview(f: &mut Frame, area: Rect, s: &UiSnapshot) {
 }
 
 fn render_positions(f: &mut Frame, area: Rect, s: &UiSnapshot) {
-    let header = Row::new(vec!["Asset", "Dir", "Strategy", "Entry", "Cur", "PnL", "Left"])
-        .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD));
+    let header = Row::new(vec![
+        "Asset", "Dir", "Strategy", "Entry", "Cur", "PnL", "Left",
+    ])
+    .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD));
     let widths = [
         Constraint::Length(7),
         Constraint::Length(5),
@@ -258,7 +313,10 @@ fn render_positions(f: &mut Frame, area: Rect, s: &UiSnapshot) {
                 Cell::from(p.strategy.clone()),
                 Cell::from(format!("{:.2}", p.entry_price)),
                 Cell::from(format!("{:.2}", p.current_price)),
-                Cell::from(Span::styled(signed_pct(p.unrealized_pct), Style::default().fg(color_of(p.unrealized_pct)))),
+                Cell::from(Span::styled(
+                    signed_pct(p.unrealized_pct),
+                    Style::default().fg(color_of(p.unrealized_pct)),
+                )),
                 Cell::from(format!("{}s", p.remaining_sec)),
             ])
         })
@@ -272,8 +330,17 @@ fn render_positions(f: &mut Frame, area: Rect, s: &UiSnapshot) {
 }
 
 fn render_trades(f: &mut Frame, area: Rect, s: &UiSnapshot) {
-    let header = Row::new(vec!["Asset", "Dir", "Strategy", "Entry→Exit", "Net", "Net%", "Hold", "Reason"])
-        .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD));
+    let header = Row::new(vec![
+        "Asset",
+        "Dir",
+        "Strategy",
+        "Entry→Exit",
+        "Net",
+        "Net%",
+        "Hold",
+        "Reason",
+    ])
+    .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD));
     let widths = [
         Constraint::Length(7),
         Constraint::Length(5),
@@ -296,8 +363,14 @@ fn render_trades(f: &mut Frame, area: Rect, s: &UiSnapshot) {
                 Cell::from(t.direction.to_uppercase()),
                 Cell::from(t.strategy.clone()),
                 Cell::from(format!("{:.2}→{:.2}", t.entry_price, t.exit_price)),
-                Cell::from(Span::styled(signed(t.net_pnl_usd, ""), Style::default().fg(color_of(t.net_pnl_usd)))),
-                Cell::from(Span::styled(signed_pct(t.net_pnl_pct), Style::default().fg(color_of(t.net_pnl_pct)))),
+                Cell::from(Span::styled(
+                    signed(t.net_pnl_usd, ""),
+                    Style::default().fg(color_of(t.net_pnl_usd)),
+                )),
+                Cell::from(Span::styled(
+                    signed_pct(t.net_pnl_pct),
+                    Style::default().fg(color_of(t.net_pnl_pct)),
+                )),
                 Cell::from(format!("{}s", t.hold_time_sec)),
                 Cell::from(t.exit_reason.clone()),
             ])
@@ -311,8 +384,211 @@ fn render_trades(f: &mut Frame, area: Rect, s: &UiSnapshot) {
     f.render_widget(table, area);
 }
 
+/// The plugin-manager view (E5-a): strategies / market plugins / extensions in
+/// three columns. Strategies and extensions are toggleable at the cursor row
+/// (`Enter`); market plugins are view-only here (registry-side `enabled` is a
+/// core-market config choice, not a runtime toggle).
+fn render_plugins(f: &mut Frame, area: Rect, app: &App) {
+    if !app.snap.connected {
+        let msg = app
+            .snap
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "core not reachable — plugin registry unavailable".into());
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "○ plugin registry offline",
+                    Style::default().fg(RED),
+                )),
+                Line::from(Span::styled(msg, Style::default().fg(DIM))),
+                Line::from(Span::styled(
+                    "Start the core, then press 4 again to re-read.",
+                    Style::default().fg(DIM),
+                )),
+            ])
+            .block(Block::default().borders(Borders::ALL).title("Plugins"))
+            .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+
+    let cols = Layout::horizontal([
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+    ])
+    .split(area);
+
+    // Cursor is flattened: strategies first, then extensions.
+    let n_strat = app.snap.strategies.len();
+    let n_ext = app.snap.extensions.len();
+    let total = n_strat + n_ext;
+    let focus = if total == 0 {
+        0
+    } else {
+        app.plugin_focus.min(total - 1)
+    };
+
+    // Strategies
+    let mut lines: Vec<Line> = Vec::new();
+    if n_strat == 0 {
+        lines.push(Line::from(Span::styled("(none)", Style::default().fg(DIM))));
+    } else {
+        for (i, s) in app.snap.strategies.iter().enumerate() {
+            let focused = focus < n_strat && focus == i;
+            lines.push(plugin_line(&s.name, s.enabled, focused));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Enter toggle · ↑/↓ move · disabled →",
+        Style::default().fg(DIM),
+    )));
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Strategies"))
+            .wrap(Wrap { trim: false }),
+        cols[0],
+    );
+
+    // Market plugins (view-only)
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("registry active: {}", app.snap.market_active),
+        Style::default().fg(if app.snap.market_active { GREEN } else { DIM }),
+    )));
+    lines.push(Line::from(""));
+    if app.snap.market_plugins.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(no plugins)",
+            Style::default().fg(DIM),
+        )));
+    } else {
+        for p in &app.snap.market_plugins {
+            let color = if p.active {
+                GREEN
+            } else if p.enabled {
+                ACCENT
+            } else {
+                DIM
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if p.active { "▸ " } else { "  " },
+                    Style::default().fg(color),
+                ),
+                Span::styled(
+                    format!("{:<14}", p.name),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!(" {}", p.kind), Style::default().fg(DIM)),
+            ]));
+            let mut caps = String::from("      ");
+            if p.has_data_feed {
+                caps.push_str("feed ");
+            }
+            if p.has_discovery {
+                caps.push_str("discovery ");
+            }
+            if p.has_executor {
+                caps.push_str("executor");
+            }
+            lines.push(Line::from(Span::styled(caps, Style::default().fg(DIM))));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "view-only (market config in core)",
+        Style::default().fg(DIM),
+    )));
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Market Plugins"),
+            )
+            .wrap(Wrap { trim: false }),
+        cols[1],
+    );
+
+    // Extensions
+    let mut lines: Vec<Line> = Vec::new();
+    if n_ext == 0 {
+        lines.push(Line::from(Span::styled("(none)", Style::default().fg(DIM))));
+    } else {
+        for (i, e) in app.snap.extensions.iter().enumerate() {
+            let on = e.state == "enabled";
+            let focused = focus >= n_strat && focus - n_strat == i;
+            lines.push(plugin_line(&e.name, on, focused));
+            if !e.kind.is_empty() && e.kind != e.name {
+                lines.push(Line::from(Span::styled(
+                    format!("    {}", e.kind),
+                    Style::default().fg(DIM),
+                )));
+            }
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Extensions ({})", n_ext)),
+            )
+            .wrap(Wrap { trim: false }),
+        cols[2],
+    );
+}
+
+fn plugin_line(name: &str, on: bool, focused: bool) -> Line<'static> {
+    let mark = if on { "[on ]" } else { "[off]" };
+    let (mark_style, name_style) = if on {
+        (Style::default().fg(GREEN), Style::default())
+    } else {
+        (Style::default().fg(DIM), Style::default().fg(DIM))
+    };
+    let name_style = if focused {
+        name_style.bg(Color::Black).add_modifier(Modifier::BOLD)
+    } else {
+        name_style
+    };
+    let cursor = if focused { "▸ " } else { "  " };
+    Line::from(vec![
+        Span::styled(cursor, Style::default().fg(ACCENT)),
+        Span::styled(format!("{:>5} ", mark), mark_style),
+        Span::styled(name.to_string(), name_style),
+    ])
+}
+
+fn render_confirm(f: &mut Frame, area: Rect, text: &str) {
+    let p = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("⚠ ", Style::default().fg(RED).add_modifier(Modifier::BOLD)),
+            Span::styled(text, Style::default().fg(RED).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(Span::styled(
+            "y = confirm  ·  any other key = cancel  (disabling may strand open positions)",
+            Style::default().fg(DIM),
+        )),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Confirm")
+            .border_style(Style::default().fg(RED)),
+    );
+    f.render_widget(p, area);
+}
+
 fn render_command_bar(f: &mut Frame, area: Rect, app: &App) {
-    let title = if app.input_active { "Command (Enter run · Esc cancel)" } else { "Command" };
+    let title = if app.input_active {
+        "Command (Enter run · Esc cancel)"
+    } else {
+        "Command"
+    };
     let body = if app.input_active {
         Line::from(vec![
             Span::styled(": ", Style::default().fg(ACCENT)),
@@ -341,7 +617,10 @@ fn render_log(f: &mut Frame, area: Rect, app: &App) {
         .map(|l| Line::from(l.clone()))
         .collect();
     let body = if visible.is_empty() {
-        vec![Line::from(Span::styled("(no commands run yet)", Style::default().fg(DIM)))]
+        vec![Line::from(Span::styled(
+            "(no commands run yet)",
+            Style::default().fg(DIM),
+        ))]
     } else {
         visible
     };

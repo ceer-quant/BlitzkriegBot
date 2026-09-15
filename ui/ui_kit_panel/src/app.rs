@@ -9,24 +9,27 @@ pub enum Tab {
     Overview,
     Positions,
     Trades,
+    Plugins,
 }
 
 impl Tab {
     pub fn titles() -> Vec<&'static str> {
-        vec!["1 Overview", "2 Positions", "3 Trades"]
+        vec!["1 Overview", "2 Positions", "3 Trades", "4 Plugins"]
     }
     pub fn index(self) -> usize {
         match self {
             Tab::Overview => 0,
             Tab::Positions => 1,
             Tab::Trades => 2,
+            Tab::Plugins => 3,
         }
     }
     pub fn next(self) -> Self {
         match self {
             Tab::Overview => Tab::Positions,
             Tab::Positions => Tab::Trades,
-            Tab::Trades => Tab::Overview,
+            Tab::Trades => Tab::Plugins,
+            Tab::Plugins => Tab::Overview,
         }
     }
 }
@@ -37,6 +40,12 @@ pub enum Action {
     Quit,
     Refresh,
     RunCommand(String),
+    /// A toggle command was built; the main loop checks
+    /// `App::toggle_needs_confirmation` and either asks or dispatches.
+    ConfirmToggle(String),
+    /// Reload the plugin registry (used on entering the Plugins tab and after
+    /// a toggling action).
+    RefreshPlugins,
 }
 
 pub struct App {
@@ -52,6 +61,11 @@ pub struct App {
     pub should_quit: bool,
     /// When the snapshot shown was last updated (for the "Xs ago" header).
     pub last_update: Option<Instant>,
+    /// Plugin-manager selection: 0=strategies pane column, then row index per pane.
+    pub plugin_focus: usize,
+    /// Pending confirmation for a dangerous plugin toggle: `Some(text)` shows
+    /// the confirm bar; `y` executes, anything else cancels.
+    pub pending_confirmation: Option<String>,
 }
 
 /// Cap the in-panel log so a long soak can't grow it without bound.
@@ -71,6 +85,8 @@ impl App {
             socket,
             should_quit: false,
             last_update: None,
+            plugin_focus: 0,
+            pending_confirmation: None,
         }
     }
 
@@ -90,6 +106,20 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
+        // Pending dangerous-action confirmation intercepts everything but `y`.
+        if let Some(text) = self.pending_confirmation.clone() {
+            self.pending_confirmation = None; // one key resolves it either way
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.log(format!("> {text} (confirmed)"));
+                    return Action::RunCommand(text);
+                }
+                _ => {
+                    self.log("toggle cancelled".to_string());
+                    return Action::None;
+                }
+            }
+        }
         // Command bar owns input while focused.
         if self.input_active {
             match key.code {
@@ -141,11 +171,78 @@ impl App {
                 self.tab = Tab::Trades;
                 Action::None
             }
+            KeyCode::Char('4') => {
+                self.tab = Tab::Plugins;
+                Action::RefreshPlugins
+            }
             KeyCode::Tab => {
+                let was_plugins = self.tab == Tab::Plugins;
                 self.tab = self.tab.next();
+                if self.tab == Tab::Plugins && !was_plugins {
+                    Action::RefreshPlugins
+                } else {
+                    Action::None
+                }
+            }
+            KeyCode::Up if self.tab == Tab::Plugins => {
+                self.plugin_focus = self.plugin_focus.saturating_sub(1);
                 Action::None
             }
+            KeyCode::Down if self.tab == Tab::Plugins => {
+                self.plugin_focus = self.plugin_focus.saturating_add(1);
+                Action::None
+            }
+            KeyCode::Enter if self.tab == Tab::Plugins => match self.plugin_toggle_command() {
+                Some(cmd) => Action::ConfirmToggle(cmd),
+                None => {
+                    self.log("no toggleable row selected (use ↑/↓ in the Plugins tab)".to_string());
+                    Action::None
+                }
+            },
             _ => Action::None,
         }
+    }
+}
+
+impl App {
+    /// Rows in the Plugins tab the cursor can land on: one row per strategy and
+    /// one per extension; market plugins are read-only.
+    pub fn plugin_row_count(&self) -> usize {
+        self.snap.strategies.len() + self.snap.extensions.len()
+    }
+
+    /// The command the cursor currently points at, if any. Toggling an ENABLED
+    /// entry off needs confirmation (it can stop a strategy that is holding an
+    /// open position); enabling is read-safe so it goes straight through.
+    pub fn plugin_toggle_command(&self) -> Option<String> {
+        let rows = self.plugin_row_count();
+        if rows == 0 {
+            return None;
+        }
+        let i = self.plugin_focus.min(rows - 1);
+        if i < self.snap.strategies.len() {
+            let s = &self.snap.strategies[i];
+            Some(format!(
+                "strategy {} {}",
+                s.name,
+                if s.enabled { "off" } else { "on" }
+            ))
+        } else {
+            let e = &self.snap.extensions[i - self.snap.strategies.len()];
+            let enable = e.state != "enabled";
+            if enable {
+                Some(format!("extension {} on", e.name))
+            } else {
+                Some(format!("extension {} off", e.name))
+            }
+        }
+    }
+
+    /// True when the pending command must be confirmed before dispatch.
+    pub fn toggle_needs_confirmation(&self, cmd: &str) -> bool {
+        // Disabling anything (or enabling a strategy) swaps routing: disabling
+        // a strategy may strand an open position; enabling a strategy starts it
+        // placing orders. Only disabling is dangerous here.
+        cmd.contains(" off") || cmd.contains("disable")
     }
 }
