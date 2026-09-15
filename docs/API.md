@@ -13,7 +13,7 @@ http://127.0.0.1:51888
 ## Authentication and security
 
 - HTTP endpoints do not enforce authentication by default. Protect the gateway with network controls or a reverse proxy if you expose it publicly.
-- WebChat supports an optional token. Set `WEBCHAT_TOKEN` and send it in the WebSocket auth message.
+- The panel chat supports an optional token. Set `PANEL_CHAT_TOKEN` and send it in the WebSocket auth message.
 - Webhooks require HMAC signatures by default. See the webhook section below.
 
 ## What is this API for?
@@ -41,11 +41,11 @@ Response:
   "name": "blitzkrieg",
   "version": "0.3.10",
   "description": "AI assistant for prediction markets",
-  "endpoints": { "websocket": "/ws", "webchat": "/chat", "health": "/health" }
+  "endpoints": { "websocket": "/ws", "panel": "/chat", "health": "/health" }
 }
 ```
 
-### GET /webchat
+### GET /panel (static)
 
 Returns a simple HTML client that connects to the WebChat WebSocket endpoint (`/chat`).
 
@@ -420,12 +420,12 @@ ws.onmessage = (event) => {
 };
 ```
 
-### WS /chat (WebChat)
+### WS /chat (Panel chat)
 
-WebChat WebSocket endpoint used by `/webchat`.
+Panel chat WebSocket endpoint used by the panel (`/panel`).
 
 Client messages:
-- `auth`: `{ "type": "auth", "token": "<WEBCHAT_TOKEN>", "userId": "web-123" }`
+- `auth`: `{ "type": "auth", "token": "<PANEL_CHAT_TOKEN>", "userId": "web-123" }`
 - `message`: `{ "type": "message", "text": "hi", "attachments": [] }`
 - `edit`: `{ "type": "edit", "messageId": "<id>", "text": "new text" }`
 - `delete`: `{ "type": "delete", "messageId": "<id>" }`

@@ -227,7 +227,7 @@ await tailscale.funnel({ port: 3000, path: '/webhooks' });
 ```typescript
 // Access bot from phone while away from desk
 await tailscale.serve({ port: 51888 });
-// Open https://your-machine.tailnet.ts.net:51888/webchat on phone
+// Open https://your-machine.tailnet.ts.net:51888/panel on phone
 ```
 
 ---

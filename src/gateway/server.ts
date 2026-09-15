@@ -570,7 +570,7 @@ export function createServer(
         { key: 'DISCORD_APP_ID', label: 'Discord App ID', secret: false, required: false },
         { key: 'SLACK_BOT_TOKEN', label: 'Slack Bot Token', secret: true, required: false, helpUrl: 'https://api.slack.com/apps' },
         { key: 'SLACK_APP_TOKEN', label: 'Slack App Token', secret: true, required: false },
-        { key: 'WEBCHAT_TOKEN', label: 'WebChat Auth Token', secret: true, required: false },
+        { key: 'PANEL_CHAT_TOKEN', label: 'Panel Auth Token', secret: true, required: false },
         { key: 'MATRIX_HOMESERVER_URL', label: 'Matrix Homeserver URL', secret: false, required: false },
         { key: 'MATRIX_ACCESS_TOKEN', label: 'Matrix Access Token', secret: true, required: false },
         { key: 'MATRIX_USER_ID', label: 'Matrix User ID', secret: false, required: false },

@@ -20,7 +20,7 @@ All endpoints are served by your own gateway deployment.
 
 By default, HTTP endpoints do not require authentication. For production deployments:
 
-1. **WebChat Token**: Set `WEBCHAT_TOKEN` environment variable
+1. **Panel Token**: Set `PANEL_CHAT_TOKEN` environment variable
 2. **Webhook Signatures**: HMAC-SHA256 signatures required by default
 3. **Network Controls**: Use a reverse proxy with TLS for public exposure
 
@@ -125,19 +125,19 @@ API info and available endpoints.
   "description": "AI assistant for prediction markets",
   "endpoints": {
     "websocket": "/ws",
-    "webchat": "/chat",
+    "panel": "/chat",
     "health": "/health"
   }
 }
 ```
 
-### GET /webchat
+### GET /panel
 
-Returns the WebChat HTML client that connects to `/chat` WebSocket.
+Serves the panel client (`ui/` tree) that connects to `/chat` WebSocket. Port: **51888**.
 
 ### GET /api/chat/sessions
 
-List webchat sessions for a user.
+List panel chat sessions for a user.
 
 **Query:** `?userId=<string>`
 
@@ -170,7 +170,7 @@ Load a session with its full message history.
 
 ### POST /api/chat/sessions
 
-Create a new webchat session.
+Create a new panel chat session.
 
 **Body:** `{ "userId": "web-123" }`
 
@@ -598,7 +598,7 @@ Development WebSocket endpoint.
 
 ### WS /chat (WebChat)
 
-WebChat WebSocket for the browser client.
+Panel chat WebSocket for the panel client.
 
 **Client Messages:**
 
@@ -606,7 +606,7 @@ WebChat WebSocket for the browser client.
 ```json
 {
   "type": "auth",
-  "token": "<WEBCHAT_TOKEN>",
+  "token": "<PANEL_CHAT_TOKEN>",
   "userId": "web-123"
 }
 ```

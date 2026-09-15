@@ -15,7 +15,7 @@ The setup wizard will:
 3. Write your config to `~/.blitzkrieg/`
 4. Offer to start the gateway immediately
 
-Once running, open **http://localhost:51888/webchat** in your browser.
+Once running, open **http://localhost:51888/panel** in your browser.
 
 ## Try It Out
 
