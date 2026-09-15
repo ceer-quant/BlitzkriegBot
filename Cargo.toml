@@ -11,7 +11,6 @@ members = [
     "user_layer/parity_logic",
     "ui/ui_kit",
     "ui/ui_kit_panel",
-    "ui/webapp/src-tauri",
 ]
 # user_layer/strategies and user_layer/parity_strategy are SEPARATE nested
 # workspaces (each has [workspace]) that build example/test cdylibs —
@@ -19,7 +18,7 @@ members = [
 # strategy author would.
 # rust-executor is a standalone sidecar binary with its own Cargo.lock
 # (Polymarket CLOB subprocess), not part of the core workspace.
-exclude = ["user_layer/strategies", "user_layer/parity_strategy", "rust-executor"]
+exclude = ["user_layer/strategies", "user_layer/parity_strategy", "rust-executor", "ui/webapp/src-tauri"]
 
 [workspace.dependencies]
 rust_decimal = "1"
