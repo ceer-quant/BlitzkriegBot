@@ -42,7 +42,12 @@ fn main() {
     println!("ui_kit web → socket {socket}");
     let cfg = SupervisorConfig::from_env(socket);
     let dispatcher = Dispatcher::new(cfg, manage);
-    let server = WebServer::with_gateway(client, 200, dispatcher);
+    let mut server = WebServer::with_gateway(client, 200, dispatcher);
+    // E6-a: one-time session token — printed ONCE; every /api/* request must
+    // carry it (query, X-Auth-Token, or basic-auth user). The panel itself
+    // stays reachable without it (read-only HTML).
+    let token = server.generate_auth_token();
+    println!("token {token}");
     if let Err(e) = server.serve(&addr) {
         eprintln!("web server error: {e}");
         std::process::exit(1);

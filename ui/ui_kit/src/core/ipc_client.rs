@@ -261,6 +261,9 @@ impl IpcClient {
             .unwrap_or_default();
         s.strategies = self.strategies().map(|r| r.strategies).unwrap_or_default();
         s.extensions = self.extensions().map(|r| r.extensions).unwrap_or_default();
+        // E9-g: per-strategy accounting travels with every snapshot so the
+        // WebUI plugins page renders counters without a second round-trip.
+        s.strategy_stats = s.stats.as_ref().map(|st| st.strategies.clone()).unwrap_or_default();
         if let Ok(m) = self.market_plugins() {
             s.market_plugins = m.plugins;
             s.market_active = m.active.is_some();
