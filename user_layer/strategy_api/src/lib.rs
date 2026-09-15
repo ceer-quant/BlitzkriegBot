@@ -262,3 +262,19 @@ pub unsafe extern "C" fn bk_strategy_free_string(p: *mut c_char) {
     // this library and is freed exactly once.
     drop(unsafe { CString::from_raw(p) });
 }
+
+// ── SafeStrategy ergonomic layer (E9-a / #60) ───────────────────────────────
+// `use blitzkrieg_strategy_api::{SafeStrategy, export_strategy!}` is now the
+// whole template contract for a third-party strategy crate; the raw ABI below
+// stays available for full-control authors (dog_strategy) and for the kernel.
+pub mod safe;
+pub use safe::{
+    BookUpdate, Break, Entry, Exit, Intents, Knob, MarketInfo, ParamBag, RoundContext, RoundInfo,
+    SafeStrategy,
+};
+
+/// Shell helpers the generated `__bk_export` module imports via `$crate::shell`.
+#[doc(hidden)]
+pub mod shell {
+    pub use crate::safe::{cstr, json_out, parse_book, parse_params};
+}

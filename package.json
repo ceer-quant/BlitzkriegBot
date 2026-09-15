@@ -35,7 +35,9 @@
     "core:socket-migration": "npm run build && node scripts/socket-migration-check.mjs",
     "tui": "bash scripts/tui-demo.sh",
     "tui:manage": "bash scripts/tui-demo.sh --manage",
-    "tui:check": "node scripts/tui-demo-check.mjs"
+    "tui:check": "node scripts/tui-demo-check.mjs",
+    "strategy:new": "node scripts/blitzkrieg-new-strategy.mjs",
+    "strategy:devcheck": "node scripts/strategy-devcheck.mjs"
   },
   "keywords": [
     "trading",
