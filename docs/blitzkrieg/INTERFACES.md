@@ -72,9 +72,11 @@
 | `strategy.enable` | `{ name, enabled }` | `{ name, enabled, found }` |
 | `strategy.load` | `{ path }` | 成功 `"<name>@<version> registered into the engine dispatch (disabled)"`（注册后默认禁用，需再 `strategy.enable`；E2-b 起若该库导出可选符号 `bk_strategy_gate_exemptions`，回执在启用前显式追加 `; declares gate exemptions: timing[,momentum]`）；失败返回 `"Rejected { path, reason }"`（路径策略）/ `"Failed { path, reason }"`（dlopen/协商/`create` 失败）。走 **C ABI v2**：`bk_strategy_abi_version()` 必须为 2（无 v1 兼容层）；新能力一律以「按名字解析的可选符号」追加、vtable 结构体冻结，故 E2-b 不需要 ABI v3。`strategy-loading` 自 E7 起默认开启 |
 
-`strategy.list` 自 E4-a 起返回**两个**内建：`spread_arb`（默认 `enabled:true`）与
-`trend_follow`（默认 `enabled:false`）。后者是 E4 的追涨腿，6 个可进化入场旋钮、
-不声明任何门禁豁免。开机态也可由 CLI 决定：`--enable-strategy <name>` / `--disable-strategy <name>`
+`strategy.list` 自 E4-b 起返回**三个**内建：`spread_arb`（默认 `enabled:true`）、
+`trend_follow`（默认 `enabled:false`，E4 的追涨腿，6 个可进化入场旋钮、
+不声明任何门禁豁免）与 `mean_reversion`（默认 `enabled:false`，E4-b / #31 的逆向/fade 腿，
+6 个可进化旋钮，**声明 `momentum` 门禁豁免**——`engine.stats.blocked.declaredExemptions`
+因此常驻一条 `{"strategy":"mean_reversion","gates":["momentum"]}`）。开机态也可由 CLI 决定：`--enable-strategy <name>` / `--disable-strategy <name>`
 （可重复，`--disable-strategy` 优先），走的是与 `strategy.enable` **同一个** `set_strategy_enabled`，
 因此开机选择与运行期切换行为一致；回测/回放复用同一份 `CoreConfig`，同样吃这两个开关。
 未知名只记警告日志并忽略（不会让进程失败）。
@@ -166,3 +168,6 @@ core.set_strategy_enabled("spread_arb", false);
 | 1.1 | E2-a：`engine.stats.strategies[]` 增 per-strategy 配额与生效定寸字段（协议加项，向后兼容，版本号不变） |
 | 1.1 | E2-b：`engine.stats.blocked` 增 `byStrategy`/`declaredExemptions`，`strategies[]` 增 `gateExemptions`/blocked/gateExempted 字段；`strategy.load` 回执追加豁免声明。外挂新增可选符号 `bk_strategy_gate_exemptions`（未导出=不声明），vtable 与 `BK_ABI_VERSION=2` 冻结 |
 | 1.1 | E2-c：`shadow_evolution.status` 增 `strategies[]`（每策略 status/params/knobs/计数），`history` 增可选 `strategy`，新增 `shadow_evolution.apply`，`rollback` 改为**必需** `strategy`；热参改为按策略命名空间（`ParamRegistry`），关闭进化时覆盖层**摘除**；审计分文件 `data/evolution/<strategy>.jsonl`。外挂新增可选符号 `bk_strategy_evolvable_knobs`（未导出=不可进化），vtable 与 `BK_ABI_VERSION=2` 仍冻结 |
+| 1.1 | E7：策略接口全功能化，C ABI v2 全量钩子（含出场意图/多 tick 盘口/热参数/孪生工厂）；`strategy-loading` 默认开启（Issue #38） |
+| 1.1 | E4-a：`Engine::new` 注册第三个内建策略 `trend_follow`（默认关闭）；CLI 增 `--enable-strategy`/`--disable-strategy`，回测/回放同吃（Issue #30） |
+| 1.1 | E4-b：`Engine::new` 注册第四个内建策略 `mean_reversion`（默认关闭，E2-b momentum 豁免的第一个内建使用者——`blocked.declaredExemptions` 常驻 `{"strategy":"mean_reversion","gates":["momentum"]}`）；无任何 RPC schema 变化（Issue #31） |

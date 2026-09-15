@@ -300,13 +300,15 @@ fn two_strategies_evolve_in_parallel_without_cross_talk_through_the_core() {
     let mut core = build_core(&dir, true);
 
     // Every declaring strategy is registered — including the builtins, which are
-    // hosted-but-disabled here (spread_arb off, trend_follow off by default).
-    // That makes the isolation check stricter: four units, one moves.
+    // hosted-but-disabled here (spread_arb on; trend_follow and the E4-b fade
+    // leg off by default). That makes the isolation check stricter: five units,
+    // one moves.
     assert_eq!(
         core.shadow_evolution().strategy_names(),
         vec![
             "spread_arb".to_string(),
             "trend_follow".to_string(),
+            "mean_reversion".to_string(),
             "alpha".to_string(),
             "beta".to_string(),
         ],

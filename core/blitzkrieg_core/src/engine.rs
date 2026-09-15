@@ -23,7 +23,8 @@ use crate::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
 use crate::scanner::{Scanner, ScannerConfig};
 use crate::signal::{PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig};
 use crate::strategies::{
-    spread_arb::SpreadArbBuiltin, trend_follow::TrendFollowBuiltin, EngineStrategy, GateExemptions,
+    mean_reversion::MeanReversionBuiltin, spread_arb::SpreadArbBuiltin,
+    trend_follow::TrendFollowBuiltin, EngineStrategy, GateExemptions, MeanReversionConfig,
     StrategyCtx, StrategyExitIntent, TrendFollowConfig,
 };
 use rust_decimal::Decimal;
@@ -38,6 +39,9 @@ pub struct EngineConfig {
     /// now: `CoreConfig` does not expose them, and the runtime tuning path is
     /// Shadow Evolution's per-strategy hot parameters.
     pub trend_follow: TrendFollowConfig,
+    /// The fade leg's own entry parameters (E4-b / #31). Same story as
+    /// `trend_follow`: compiled defaults, tuned at runtime via Shadow Evolution.
+    pub mean_reversion: MeanReversionConfig,
     /// Max orderbook staleness before we refuse to price off it.
     pub max_orderbook_stale_ms: i64,
     /// Spot momentum window (sec) used by the alignment filter.
@@ -88,6 +92,7 @@ impl Default for EngineConfig {
             trend: TrendConfig::default(),
             spread_arb: SpreadArbConfig::default(),
             trend_follow: TrendFollowConfig::default(),
+            mean_reversion: MeanReversionConfig::default(),
             max_orderbook_stale_ms: 8000,
             momentum_window_sec: 30,
             momentum_tol_pct: Decimal::new(3, 2), // 0.03%
@@ -231,6 +236,14 @@ impl Engine {
             // rule every user-layer strategy already follows.
             HostedStrategy {
                 strategy: Box::new(TrendFollowBuiltin::new(cfg.trend_follow.clone())),
+                enabled: false,
+                source: "builtin".to_string(),
+            },
+            // E4-b / #31: the fade leg is also a builtin that starts DISABLED,
+            // same rule — enabling it is an explicit operator action, and a
+            // kernel upgrade must not change what a running session trades.
+            HostedStrategy {
+                strategy: Box::new(MeanReversionBuiltin::new(cfg.mean_reversion.clone())),
                 enabled: false,
                 source: "builtin".to_string(),
             },
@@ -799,6 +812,7 @@ mod tests {
             trend: TrendConfig { confirm_sec: 5, ratio: dec!(0.5), min_price: dec!(0.5), broken_price: dec!(0.35), window_floor_ms: 0 },
             spread_arb: SpreadArbConfig { trend_max_entry_price: dec!(0.45), ..Default::default() },
             trend_follow: TrendFollowConfig::default(),
+            mean_reversion: MeanReversionConfig::default(),
             max_orderbook_stale_ms: 8000,
             momentum_window_sec: 30,
             momentum_tol_pct: dec!(0.03),
@@ -1198,7 +1212,7 @@ mod tests {
         // and `spread_arb` is the incumbent.
         assert_eq!(
             e.supported_strategies(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string()]
+            vec!["spread_arb".to_string(), "trend_follow".to_string(), "mean_reversion".to_string()]
         );
         assert_eq!(
             e.enabled_strategies(),
@@ -1223,7 +1237,10 @@ mod tests {
         let ex = e.strategy_gate_exemptions("trend_follow").expect("registered");
         assert_eq!(ex, GateExemptions::none());
         assert!(!ex.any());
-        assert!(e.declared_gate_exemptions().is_empty());
+        // The only declaration under the default registry is the E4-b fade leg.
+        let declared = e.declared_gate_exemptions();
+        assert_eq!(declared.len(), 1, "{declared:?}");
+        assert_eq!(declared[0].0, "mean_reversion");
         // It IS evolvable, with a coherent declaration and a twin that builds —
         // a declaration without a factory would be inert.
         let s = e
@@ -1389,7 +1406,12 @@ mod tests {
         assert_eq!(name, "dip_buyer");
         assert_eq!(
             e.supported_strategies(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string(), "dip_buyer".to_string()]
+            vec![
+                "spread_arb".to_string(),
+                "trend_follow".to_string(),
+                "mean_reversion".to_string(),
+                "dip_buyer".to_string(),
+            ]
         );
         assert_eq!(e.enabled_strategies(), vec!["spread_arb".to_string()], "starts disabled");
         assert_eq!(e.strategy_source("dip_buyer"), Some("test"));
@@ -1745,9 +1767,11 @@ mod tests {
         e.register_user_strategy(Box::new(DipBuyer::new("plain", dec!(0.45))), "test".into())
             .unwrap();
         let declared = e.declared_gate_exemptions();
-        assert_eq!(declared.len(), 1, "silent strategies are omitted: {declared:?}");
-        assert_eq!(declared[0].0, "fader");
+        assert_eq!(declared.len(), 2, "silent strategies are omitted: {declared:?}");
+        assert_eq!(declared[0].0, "mean_reversion", "the builtin declares first (hosted first)");
         assert_eq!(declared[0].1.gates(), vec!["momentum"]);
+        assert_eq!(declared[1].0, "fader");
+        assert_eq!(declared[1].1.gates(), vec!["momentum"]);
         assert_eq!(e.strategy_gate_exemptions("plain"), Some(GateExemptions::none()));
         assert_eq!(e.strategy_gate_exemptions("nobody"), None);
     }

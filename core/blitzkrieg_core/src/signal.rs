@@ -90,6 +90,22 @@ impl PriceBuffer {
         }
     }
 
+    /// Highest price in the window (0 when the window has no samples).
+    pub fn highest(&self, window_sec: i64, now_ms: i64) -> Decimal {
+        let mut hi = Decimal::ZERO;
+        for (_, p) in self.in_window(window_sec, now_ms) {
+            if *p > hi {
+                hi = *p;
+            }
+        }
+        hi
+    }
+
+    /// Newest sample (0 when empty) — the same value the last `push` inserted.
+    pub fn latest(&self) -> Decimal {
+        self.prices.first().map(|(_, p)| *p).unwrap_or(Decimal::ZERO)
+    }
+
     /// Count direction reversals (steps >= min_step) in the window.
     pub fn reversals(&self, window_sec: i64, min_step: Decimal, now_ms: i64) -> u32 {
         let w: Vec<&(i64, Decimal)> = self.in_window(window_sec, now_ms).collect();

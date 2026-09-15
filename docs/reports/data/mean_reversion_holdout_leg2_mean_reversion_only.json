@@ -1,0 +1,290 @@
+{
+  "source": "replay /tmp/slice-20260915T041830Z-round2.jsonl (1 segment(s))",
+  "sourceStats": {
+    "events": 1192701,
+    "malformedLines": 0,
+    "outOfOrderEvents": 3776
+  },
+  "tickMs": 50,
+  "tailMs": 0,
+  "startAtMs": 1789444803822,
+  "endAtMs": 1789445705439,
+  "virtualMs": 901617,
+  "fillModel": {
+    "takerSlippageTicks": 0,
+    "makerLatencyMs": 0,
+    "makerFillProbBps": 10000
+  },
+  "entryMakerTimeoutMs": 5000,
+  "orders": {
+    "orders": 13,
+    "filled": 6,
+    "cancelled": 7,
+    "rejected": 0,
+    "failed": 0,
+    "liveAtEnd": 0
+  },
+  "fills": 6,
+  "trades": {
+    "closed": 3,
+    "wins": 0,
+    "losses": 3,
+    "flat": 0,
+    "grossProfitUsd": 0.0,
+    "grossLossUsd": 1.8138855125,
+    "netPnlUsd": -1.8138855125,
+    "avgPnlUsd": -0.6046285041666667,
+    "winRatePct": 0.0,
+    "profitFactor": 0.0,
+    "maxDrawdownUsd": 1.8138855125,
+    "maxDrawdownPct": 0.0,
+    "feesUsd": 0.3138855125
+  },
+  "strategies": [
+    {
+      "blockedMomentum": 0,
+      "blockedTiming": 0,
+      "closedTrades": 0,
+      "effectiveMaxShares": 10.0,
+      "effectiveMinShares": 10.0,
+      "effectiveSizeUsd": 2.5,
+      "enabled": false,
+      "feesUsd": 0.0,
+      "gateExemptedMomentum": 0,
+      "gateExemptedTiming": 0,
+      "gateExemptions": [],
+      "limitRejected": 0,
+      "losses": 0,
+      "maxOpenNotionalUsd": null,
+      "maxOpenPositions": null,
+      "name": "spread_arb",
+      "netPnlUsd": 0.0,
+      "openNotionalUsd": 0.0,
+      "openPositions": 0,
+      "ordersPlaced": 0,
+      "ordersRejected": 0,
+      "sizingSource": "global",
+      "source": "builtin",
+      "wins": 0
+    },
+    {
+      "blockedMomentum": 0,
+      "blockedTiming": 0,
+      "closedTrades": 0,
+      "effectiveMaxShares": 10.0,
+      "effectiveMinShares": 10.0,
+      "effectiveSizeUsd": 2.5,
+      "enabled": false,
+      "feesUsd": 0.0,
+      "gateExemptedMomentum": 0,
+      "gateExemptedTiming": 0,
+      "gateExemptions": [],
+      "limitRejected": 0,
+      "losses": 0,
+      "maxOpenNotionalUsd": null,
+      "maxOpenPositions": null,
+      "name": "trend_follow",
+      "netPnlUsd": 0.0,
+      "openNotionalUsd": 0.0,
+      "openPositions": 0,
+      "ordersPlaced": 0,
+      "ordersRejected": 0,
+      "sizingSource": "global",
+      "source": "builtin",
+      "wins": 0
+    },
+    {
+      "blockedMomentum": 0,
+      "blockedTiming": 12,
+      "closedTrades": 3,
+      "effectiveMaxShares": 10.0,
+      "effectiveMinShares": 10.0,
+      "effectiveSizeUsd": 2.5,
+      "enabled": true,
+      "feesUsd": 0.3138855125,
+      "gateExemptedMomentum": 6,
+      "gateExemptedTiming": 0,
+      "gateExemptions": [
+        "momentum"
+      ],
+      "limitRejected": 0,
+      "losses": 3,
+      "maxOpenNotionalUsd": null,
+      "maxOpenPositions": null,
+      "name": "mean_reversion",
+      "netPnlUsd": -1.8138855125,
+      "openNotionalUsd": 0.0,
+      "openPositions": 0,
+      "ordersPlaced": 7,
+      "ordersRejected": 3,
+      "sizingSource": "global",
+      "source": "builtin",
+      "wins": 0
+    }
+  ],
+  "feed": {
+    "archive": null,
+    "blocked": {
+      "byStrategy": {
+        "mean_reversion": {
+          "momentum": 0,
+          "timing": 12
+        }
+      },
+      "declaredExemptions": [
+        {
+          "gates": [
+            "momentum"
+          ],
+          "strategy": "mean_reversion"
+        }
+      ],
+      "momentum": 0,
+      "timing": 12
+    },
+    "books": 3774,
+    "confirmed": [],
+    "confirmedDetail": [],
+    "evaluations": 18032,
+    "placeRejected": 3,
+    "rounds": 2,
+    "signals": 10,
+    "spots": 54857,
+    "strategies": [
+      {
+        "blockedMomentum": 0,
+        "blockedTiming": 0,
+        "closedTrades": 0,
+        "effectiveMaxShares": 10.0,
+        "effectiveMinShares": 10.0,
+        "effectiveSizeUsd": 2.5,
+        "enabled": false,
+        "feesUsd": 0.0,
+        "gateExemptedMomentum": 0,
+        "gateExemptedTiming": 0,
+        "gateExemptions": [],
+        "limitRejected": 0,
+        "losses": 0,
+        "maxOpenNotionalUsd": null,
+        "maxOpenPositions": null,
+        "name": "spread_arb",
+        "netPnlUsd": 0.0,
+        "openNotionalUsd": 0.0,
+        "openPositions": 0,
+        "ordersPlaced": 0,
+        "ordersRejected": 0,
+        "sizingSource": "global",
+        "source": "builtin",
+        "wins": 0
+      },
+      {
+        "blockedMomentum": 0,
+        "blockedTiming": 0,
+        "closedTrades": 0,
+        "effectiveMaxShares": 10.0,
+        "effectiveMinShares": 10.0,
+        "effectiveSizeUsd": 2.5,
+        "enabled": false,
+        "feesUsd": 0.0,
+        "gateExemptedMomentum": 0,
+        "gateExemptedTiming": 0,
+        "gateExemptions": [],
+        "limitRejected": 0,
+        "losses": 0,
+        "maxOpenNotionalUsd": null,
+        "maxOpenPositions": null,
+        "name": "trend_follow",
+        "netPnlUsd": 0.0,
+        "openNotionalUsd": 0.0,
+        "openPositions": 0,
+        "ordersPlaced": 0,
+        "ordersRejected": 0,
+        "sizingSource": "global",
+        "source": "builtin",
+        "wins": 0
+      },
+      {
+        "blockedMomentum": 0,
+        "blockedTiming": 12,
+        "closedTrades": 3,
+        "effectiveMaxShares": 10.0,
+        "effectiveMinShares": 10.0,
+        "effectiveSizeUsd": 2.5,
+        "enabled": true,
+        "feesUsd": 0.3138855125,
+        "gateExemptedMomentum": 6,
+        "gateExemptedTiming": 0,
+        "gateExemptions": [
+          "momentum"
+        ],
+        "limitRejected": 0,
+        "losses": 3,
+        "maxOpenNotionalUsd": null,
+        "maxOpenPositions": null,
+        "name": "mean_reversion",
+        "netPnlUsd": -1.8138855125,
+        "openNotionalUsd": 0.0,
+        "openPositions": 0,
+        "ordersPlaced": 7,
+        "ordersRejected": 3,
+        "sizingSource": "global",
+        "source": "builtin",
+        "wins": 0
+      }
+    ],
+    "strategyLimitRejected": 0,
+    "tops": 1134068
+  },
+  "blocked": {
+    "byStrategy": {
+      "mean_reversion": {
+        "momentum": 0,
+        "timing": 12
+      }
+    },
+    "declaredExemptions": [
+      {
+        "gates": [
+          "momentum"
+        ],
+        "strategy": "mean_reversion"
+      }
+    ],
+    "momentum": 0,
+    "timing": 12
+  },
+  "openPositions": 0,
+  "openNotionalUsd": 0.0,
+  "riskAlerts": [
+    "RiskRejected: consecutive-loss breaker tripped: 3 losses, halting new entries 300s"
+  ],
+  "errors": [],
+  "tradeLines": [
+    {
+      "id": "hft-1",
+      "asset": "BTC",
+      "direction": "down",
+      "reason": "StopLoss",
+      "netPnlUsd": -0.5099904,
+      "netPnlPct": -15.9372
+    },
+    {
+      "id": "hft-2",
+      "asset": "XRP",
+      "direction": "down",
+      "reason": "StopLoss",
+      "netPnlUsd": -0.8115047125,
+      "netPnlPct": -23.867785661764707
+    },
+    {
+      "id": "hft-3",
+      "asset": "XRP",
+      "direction": "up",
+      "reason": "StopLoss",
+      "netPnlUsd": -0.4923904,
+      "netPnlPct": -17.585371428571428
+    }
+  ],
+  "tradeLinesTruncated": 0,
+  "forcedDry": true
+}

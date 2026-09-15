@@ -1731,3 +1731,52 @@ _实现中途的一处设计修正（留档）_
 - `trend_follow` 在其留出段上为负收益；该证据等级是**留出段**而非"标定语料之外"的样本外
   （两个阈值默认值即由同一批 18 h 语料定标），报告开头已显式声明。
 - 默认 `trend_follow` 关闭即上线：不改变任何在运行会话的交易行为。
+
+## 47. E4-b 逆向/均值回归策略转正：内建 fade 腿 + momentum 门禁豁免（Issue #31，2026-09-15）
+
+**是什么**：第三个内建策略 `mean_reversion`——当便宜侧（mid ≤ 0.35 且 ≥ 0.05）在
+`lookback_sec=120` 内从窗口高点跌掉 ≥ 10%、且价差 ≤ 8% 时，在跌价 token 上挂**低于 mid 的
+resting bid**（`mid × 0.98`，向下夹到 best_bid，绝不抬价，下限 0.05）。入场面宣告
+`GateExemptions { momentum: true, timing: false }`（E2-b 通道），退款单 token/分钟最多一次
+（cooldown 60s）；意外退出沿用共享退出策略（D-2），断点=mid 回升到 max_price 之上
+（mirror 趋势腿的 move-death）。**默认关闭**，`--enable-strategy mean_reversion` 或
+运行期 `strategy.enable` 打开；默认注册序 spread_arb → trend_follow → mean_reversion。
+
+驱动设计的三点实证（语料：同 E4-a 的 round-2 切片，241,311 个 cheap-instant tick）：
+- `min_drop_pct=10`：cheap 时刻回看高点跌幅分布 p25 -49% / p50 -33%，候选数在 8/10/15% 三档间持平；
+- `max_spread_pct=8`：候选价差中位 5.7–6.7%、p75 13.3%，8% 保留约 45–60 个候选；
+- momentum 门禁与 fade 候选冲突 39–50%（UP 33% / DOWN 42%），`momentum_tol_pct=0.03`
+  （百分之一档位，刻意极小）——这正是本腿声明 momentum 豁免的量化理由，也是 E2-b 机制首次被内建使用。
+
+_实现要点（`core/blitzkrieg_core/src/strategies/mean_reversion.rs`，约 950 行）_
+- `FadeTracker` 复用 `PriceBuffer`（本批新增 `PriceBuffer::highest(window, now)` 与 `latest()`
+  两个读头，位于 `signal.rs`）；跌破区间进入 zone，回价出区且记断点。
+- 双边 fresh book 约束、价差/区间/跌幅四重入场条件、`round2(mid×0.98)` 挂单价格纪律。
+- `gate_exemptions()` 返回 momentum-only；其余接口（`evolvable_knobs`、`shadow_factory`、
+  `set_hot_params` 等）按 E7/E2-c 契约全量实现，6 个旋钮 `TREND_FOLLOW_KNOBS` 同款模式
+  （合法域覆盖在 force 值，未声明的热参数键忽略，秒数截断取整）。
+- `Engine::new` 第三个 `HostedStrategy { enabled: false, source: "builtin" }`；
+  `EngineConfig.mean_reversion` 与 `trend_follow` 同故事：编译期默认值的属于自己。
+
+**验证（本批）**
+- `cargo test -p blitzkrieg-core --lib`：**210 项通过，0 失败**；全部集成测试通过
+  （`shadow_evolution_per_strategy` 更新为五单元清单：内置三 + 用户两）。
+- 新增门禁 `scripts/mean-reversion-check.mjs`（`npm run core:mean-reversion`），
+  在真实二进制上验证 6 段：默认关 + 双向开关 + `--enable-strategy` 开机即启；
+  独立分账行且 entry 为**低于 mid 的挂单**（与 trend_follow 抬价吃的镜像对照）；
+  三 built-in 并发各吃各的资产不互饿；**momentum 豁免被真实行使**（spot 逆向时
+  `gateExemptedMomentum>0` 且订单成功落出，timing 从未豁免）；
+  影子进化带 6 个旋钮注册在先、开关不增删 cell。
+- 留出段回放三腿（`docs/reports/data/mean_reversion_holdout_leg{1,2,3}_*.json`）：
+  仅 spread_arb **+0.7463**；仅 mean_reversion **-1.8139**（3 平仓，全 StopLoss）；
+  两者同跑 mean_reversion 数字逐字段不变（spread_arb 归零与 E4-a 同款=全局熔断，D-18 登记）。
+- 报告：[MEAN_REVERSION_HOLDOUT_REPORT.md](../reports/MEAN_REVERSION_HOLDOUT_REPORT.md)。
+
+**已知缺口（登记不隐藏）**
+- 腿 2/3 亏损 -1.814：设计评论里的诚实警告兑现与否要看"回弹先进新高 then
+  trailing 落袋"，这一段里三笔都是止损先到—— fade 腿在本窗口就是亏的，
+  后续交给影子进化调入场参数（`min_drop_pct` / `max_price` / `max_spread_pct` / `cooldown_sec`）。
+- 全局熔断耦合同 E4-a §3.2 款：0.3 里程碑「策略级独立风控」解决。
+- 证据等级：留出段，非标定语料之外样本外，0.5 里程碑补真正的样本外评测。
+- 三个 built-in 现都在同一 `Engine::evaluate` 里按注册序 tie-break，
+  mean_reversion 排在最后（spread_arb 是 incumbent），跑挂单冲突以先注册策略为准。
