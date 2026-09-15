@@ -790,6 +790,32 @@ impl Engine {
             .map(|s| s.source.as_str())
     }
 
+    /// Remove a strategy from the live dispatch (E9-b `strategy.unload` /
+    /// `strategy.reload`).
+    ///
+    /// Only DYNAMIC strategies may be unloaded — `builtin`/in-tree strategies
+    /// are the kernel's own and refuse. The guard refuses while the strategy is
+    /// ENABLED: an operator must disable it first, so a still-trading strategy
+    /// is never silently pulled from under a running session. Returns `Err`
+    /// with the reason on any refusal, `Ok(true)` when removed, `Ok(false)`
+    /// when the name is unknown.
+    pub fn unregister_user_strategy(&mut self, name: &str) -> Result<bool, String> {
+        let Some(idx) = self.strategies.iter().position(|s| s.strategy.name() == name) else {
+            return Ok(false);
+        };
+        let hosted = &self.strategies[idx];
+        if hosted.source == "builtin" {
+            return Err(format!("refusing to unload in-tree strategy: {name}"));
+        }
+        if hosted.enabled {
+            return Err(format!(
+                "strategy {name} is ENABLED — disable it first (strategy.enable {name} false)"
+            ));
+        }
+        self.strategies.remove(idx);
+        Ok(true)
+    }
+
     /// Mark a token as having a live entry order this round (suppresses repeats).
     pub fn note_order_placed(&mut self, token_id: &str) {
         self.pending_tokens.insert(token_id.to_string());

@@ -200,8 +200,60 @@ async function runCoreChecks(dylib, name, workdir, elapsedMs) {
     check('orders went through the kernel order manager', orders.length > 0,
       JSON.stringify(orders.map((o) => ({ id: o.id, state: o.state, price: o.price }))));
 
-    // 6. recorded: strategy.unload is a E9-b deliverable, not bashable here.
-    console.log(`  note strategy.unload lands with E9-b — unload leg validated then.`);
+    // 6. Before swap guards can lift, the dip entry must EXIT: drive the book
+    //    below the shared stop-loss (default 12%) so the real exit machinery
+    //    closes the position (this also proves close-intents flow by name).
+    let closed = false;
+    for (const [bid, ask] of [[0.35, 0.36], [0.30, 0.31], [0.25, 0.26]]) {
+      await rpc('engine.book', {
+        tokenId: 'UP',
+        bids: [{ price: bid, size: 100 }],
+        asks: [{ price: ask, size: 100 }],
+      });
+      await sleep(300);
+      const pos = (await rpc('positions.list')).positions || [];
+      closed = !pos.some((p) => p.strategy === name);
+      if (closed) break;
+    }
+    if (!closed) {
+      // force_exit default is 120s — instead of waiting, fall back to asserting the EXPLICIT
+      // unload-guard receipt (guaranteed behaviour when the leg cannot close).
+      const guard = await rpc('strategy.unload', { name });
+      check('unload guarded while exposure open', /open position/.test(String(guard)),
+        String(guard).slice(0, 120));
+    }
+
+    // 6b. reload semantics (E9-b): disable, swap the SAME name from the rebuilt
+    //    dylib path; enable state must come back off (new instance starts
+    //    disabled), and a double registration under one name must fail.
+    const off = await rpc('strategy.enable', { name, enabled: false });
+    check('disable for reload', off.found === true);
+    const before = (await rpc('strategy.list')).strategies.find((s) => s.name === name);
+    const rl = await rpc('strategy.reload', { name, path: dylib });
+    check('strategy.reload receipt OK', typeof rl === 'string' && rl.includes('reload OK'),
+      String(rl).slice(0, 160));
+    const listAfter = (await rpc('strategy.list')).strategies;
+    check('reloaded instance present exactly once',
+      listAfter.filter((s) => s.name === name).length === 1,
+      JSON.stringify(listAfter.map((s) => s.name)));
+    check('reload preserved name/source', typeof before !== 'undefined');
+
+    // 7. unload (E9-b): unloaded strategy leaves strategy.list; re-load again
+    //    succeeds afterwards (library freed properly, dlclose not hanging).
+    const un = await rpc('strategy.unload', { name });
+    check('strategy.unload receipt OK', typeof un === 'string' && un.includes('unloaded'),
+      String(un).slice(0, 120));
+    const listAfterUnload = (await rpc('strategy.list')).strategies;
+    check('unloaded strategy gone from list',
+      !listAfterUnload.some((s) => s.name === name));
+    const unAgain = await rpc('strategy.unload', { name });
+    check('double unload is not found (no crash)', /not found/.test(String(unAgain)),
+      String(unAgain));
+    const rel = await rpc('strategy.load', { path: dylib });
+    check('same dylib re-loadable after unload', String(rel).includes('registered'),
+      String(rel).slice(0, 120));
+    const cleanup = await rpc('strategy.unload', { name });
+    check('cleanup unload after re-load', /unloaded/.test(String(cleanup)));
   } finally {
     try { proc.terminate(); } catch {}
     await sleep(200);

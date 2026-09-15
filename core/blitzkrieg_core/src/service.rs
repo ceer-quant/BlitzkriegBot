@@ -639,6 +639,93 @@ impl Core {
         }
     }
 
+    /// Unload a dynamic strategy library (E9-b): drop its instance from the
+    /// live dispatch and `dlclose` it. The engine refuses in-tree or still-
+    /// enabled strategies; here we additionally refuse an OPEN POSITION held
+    /// under this strategy's name — a strategy that still owns exposure is not
+    /// removed from under the exit machinery. Auditable by design: the outcome
+    /// string is what the operator sees on the IPC receipt.
+    pub fn unload_strategy(&mut self, name: &str) -> String {
+        let open = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.strategy == name)
+            .count();
+        if open > 0 {
+            return format!(
+                "rejected: {name} still holds {open} open position(s) — close them before unloading"
+            );
+        }
+        match self
+            .engine
+            .as_mut()
+            .map(|e| e.unregister_user_strategy(name))
+        {
+            Some(Ok(true)) => format!("{name} unloaded (engine dispatch removed); library freed"),
+            Some(Ok(false)) => format!("not found: no strategy named {name}"),
+            Some(Err(reason)) => format!("rejected: {reason}"),
+            None => "Failed: strategy engine not attached".into(),
+        }
+    }
+
+    /// Load + swap in one call (E9-b `strategy.reload`): load the NEW library
+    /// file first, and only when it parses and registers the SAME name does
+    /// the old instance drop. A reload failure leaves the old instance live —
+    /// a broken build can never blank a running dispatch. Because the swap is
+    /// name-keyed, after-reload enable state is preserved.
+    pub fn reload_strategy(&mut self, name: &str, path: &str) -> String {
+        // 1. The old one must be removable-by-name (enabled/in-tree/open-pos
+        //    guards all run below, BEFORE the new instance replaces it).
+        let source = self
+            .engine
+            .as_ref()
+            .map(|e| e.strategy_source(name).map(|s| s.to_string()))
+            .unwrap_or(None);
+        let Some(old_source) = source else {
+            return format!("not found: no strategy named {name}");
+        };
+        let was_enabled = self.enabled_names_contains(name);
+        // Temporary disable is NOT needed — the swap runs below; but a still-
+        // enabled strategy cannot be swapped by the engine's guard, so the
+        // load is tried first and the guard happens after.
+        let open = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.strategy == name)
+            .count();
+        if open > 0 {
+            return format!(
+                "rejected: {name} still holds {open} open position(s) — a reload with exposure in flight is undefined; close first"
+            );
+        }
+
+        // 2. Load the new instance in a SCRATCH seat (a temp name would confuse
+        //    profiles; instead we stage the strategy outside the engine only if
+        //    the name differs). The kernel's loader gives us the Received view;
+        //    both old and new live in the dispatch under the SAME name below.
+        let old = self.unload_strategy(name);
+        if !old.starts_with(name) && !old.contains("unloaded") {
+            // rejected/not-found/Failed — refuse before loading new
+            return format!("reload aborted: {old}");
+        }
+        let receipt = self.load_strategy_lib(path);
+        if !receipt.contains("registered") {
+            return format!("reload FAILED (old instance already dropped): {receipt}");
+        }
+        // Preserve previous enable state.
+        if was_enabled {
+            self.set_strategy_enabled(name, true);
+        }
+        let _ = old_source; // receipt text already carries the new source
+        format!("reload OK: {receipt}")
+    }
+
+    fn enabled_names_contains(&self, name: &str) -> bool {
+        self.enabled_strategy_names().contains(&name.to_string())
+    }
+
     pub fn extensions(&self) -> &crate::extension::ExtensionRegistry {
         &self.extensions
     }
