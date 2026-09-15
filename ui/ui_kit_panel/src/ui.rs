@@ -52,8 +52,10 @@ pub fn render(f: &mut Frame, app: &App) {
     if let Some(text) = &app.pending_confirmation {
         render_confirm(f, chunks[4], text);
     }
-    let log_area = if confirm_h > 0 { chunks[5] } else { chunks[4] };
-    render_log(f, log_area, app);
+    // The log pane is always the LAST chunk: the confirm slot is a zero-height
+    // chunk when nothing is pending, so indexing by confirm_h pointed the log
+    // into a 0-row rect and hid it entirely.
+    render_log(f, chunks[5], app);
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
