@@ -312,17 +312,33 @@ fn resolve_event_archive(
     }
 }
 
-/// Parse repeated `--strategy-limit <name>:<max_open_positions>:<max_notional_usd>`
-/// flags ("-" or an empty segment = no cap there). Malformed flags are ignored
-/// with a warning so a typo cannot brick startup.
+/// Parse repeated `--strategy-limit` flags ("-" or an empty segment = inherit
+/// the global value there). Two shapes are accepted, both colon-separated:
+///
+/// * `name:max_open_positions:max_notional_usd` (P-1.1, unchanged)
+/// * `name:max_open_positions:max_notional_usd:size_usd:min_shares:max_shares`
+///   (E2-a: per-strategy sizing, clamped by the global risk band)
+///
+/// Malformed flags are ignored with a warning so a typo cannot brick startup.
 fn parse_strategy_limits(
     args: &[String],
 ) -> std::collections::HashMap<String, blitzkrieg_core::service::StrategyLimit> {
+    /// Parse an optional decimal segment: ""/"-" = None, bad value = Err.
+    fn opt_dec(seg: &str) -> Result<Option<Decimal>, ()> {
+        match seg.trim() {
+            "" | "-" => Ok(None),
+            v => Decimal::from_str(v).map(Some).map_err(|_| ()),
+        }
+    }
+
     let mut out = std::collections::HashMap::new();
     for raw in args {
         let parts: Vec<&str> = raw.split(':').collect();
-        if parts.len() != 3 || parts[0].trim().is_empty() {
-            eprintln!("blitzkrieg-core: ignoring malformed --strategy-limit '{raw}' (want name:max_open:max_notional)");
+        if (parts.len() != 3 && parts.len() != 6) || parts[0].trim().is_empty() {
+            eprintln!(
+                "blitzkrieg-core: ignoring malformed --strategy-limit '{raw}' \
+                 (want name:max_open:max_notional[:size_usd:min_shares:max_shares])"
+            );
             continue;
         }
         let max_open_positions = match parts[1].trim() {
@@ -335,19 +351,44 @@ fn parse_strategy_limits(
                 }
             },
         };
-        let max_open_notional_usd = match parts[2].trim() {
-            "" | "-" => None,
-            v => match Decimal::from_str(v) {
-                Ok(d) => Some(d),
-                Err(_) => {
-                    eprintln!("blitzkrieg-core: ignoring --strategy-limit '{raw}' (bad notional cap)");
-                    continue;
+        let max_open_notional_usd = match opt_dec(parts[2]) {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("blitzkrieg-core: ignoring --strategy-limit '{raw}' (bad notional cap)");
+                continue;
+            }
+        };
+        // E2-a sizing: absent entirely (3-segment form) or inherited per segment.
+        let (size_usd, min_shares, max_shares) = if parts.len() == 6 {
+            let mut vals = [None, None, None];
+            let labels = ["size_usd", "min_shares", "max_shares"];
+            let mut bad = None;
+            for (i, seg) in parts[3..6].iter().enumerate() {
+                match opt_dec(seg) {
+                    Ok(v) => vals[i] = v,
+                    Err(_) => {
+                        bad = Some(labels[i]);
+                        break;
+                    }
                 }
-            },
+            }
+            if let Some(label) = bad {
+                eprintln!("blitzkrieg-core: ignoring --strategy-limit '{raw}' (bad {label})");
+                continue;
+            }
+            (vals[0], vals[1], vals[2])
+        } else {
+            (None, None, None)
         };
         out.insert(
             parts[0].trim().to_string(),
-            blitzkrieg_core::service::StrategyLimit { max_open_positions, max_open_notional_usd },
+            blitzkrieg_core::service::StrategyLimit {
+                max_open_positions,
+                max_open_notional_usd,
+                size_usd,
+                min_shares,
+                max_shares,
+            },
         );
     }
     out
@@ -721,6 +762,73 @@ fn pct(wins: usize, n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
+
+    // ── E2-a: the --strategy-limit grammar ──────────────────────────────────
+
+    fn parse_one(flag: &str) -> Option<blitzkrieg_core::service::StrategyLimit> {
+        parse_strategy_limits(&[flag.to_string()]).into_iter().next().map(|(_, l)| l)
+    }
+
+    #[test]
+    fn three_segment_form_still_parses_as_caps_only() {
+        let l = parse_one("spread_arb:0:-").expect("legacy form must still parse");
+        assert_eq!(l.max_open_positions, Some(0));
+        assert_eq!(l.max_open_notional_usd, None);
+        assert!(l.size_usd.is_none() && l.min_shares.is_none() && l.max_shares.is_none());
+        assert!(!l.sizing().overrides_anything(), "caps-only must not masquerade as a sizing override");
+
+        let l2 = parse_one("dip_buyer:-:12.5").expect("blank cap segment = uncapped");
+        assert_eq!(l2.max_open_positions, None);
+        assert_eq!(l2.max_open_notional_usd, Some(dec!(12.5)));
+    }
+
+    #[test]
+    fn six_segment_form_parses_per_strategy_sizing() {
+        let l = parse_one("dip_buyer:2:20:1.5:4:8").expect("extended form must parse");
+        assert_eq!(l.max_open_positions, Some(2));
+        assert_eq!(l.max_open_notional_usd, Some(dec!(20)));
+        assert_eq!(l.size_usd, Some(dec!(1.5)));
+        assert_eq!(l.min_shares, Some(dec!(4)));
+        assert_eq!(l.max_shares, Some(dec!(8)));
+        assert!(l.sizing().overrides_anything());
+
+        // "-" inherits the global per dimension, independently of the others.
+        let l2 = parse_one("x:-:-:-:3:-").expect("blank sizing segments inherit the globals");
+        assert_eq!(l2.size_usd, None);
+        assert_eq!(l2.min_shares, Some(dec!(3)));
+        assert_eq!(l2.max_shares, None);
+        assert!(l2.sizing().overrides_anything(), "one set dimension is enough");
+    }
+
+    #[test]
+    fn malformed_strategy_limits_are_dropped_not_half_applied() {
+        for bad in [
+            "spread_arb:0",              // too few segments
+            "spread_arb:0:-:1:2:3:4",    // too many
+            ":0:-",                      // no name
+            "spread_arb:x:-",            // bad position cap
+            "spread_arb:0:abc",          // bad notional
+            "spread_arb:0:-:abc:1:2",    // bad size_usd
+            "spread_arb:0:-:1:abc:2",    // bad min_shares
+            "spread_arb:0:-:1:2:abc",    // bad max_shares
+        ] {
+            assert!(parse_one(bad).is_none(), "must be ignored: {bad}");
+        }
+        assert!(parse_strategy_limits(&[]).is_empty());
+    }
+
+    #[test]
+    fn repeated_flags_keep_the_last_entry_per_name() {
+        let m = parse_strategy_limits(&[
+            "a:1:-".to_string(),
+            "b:2:-:1:1:1".to_string(),
+            "a:5:-".to_string(),
+        ]);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m["a"].max_open_positions, Some(5), "last flag wins");
+        assert_eq!(m["b"].min_shares, Some(dec!(1)));
+    }
 
     #[test]
     fn engine_session_records_by_default() {

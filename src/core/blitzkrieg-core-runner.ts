@@ -22,7 +22,9 @@ export interface BlitzkriegRunConfig {
   maxDailyLossUsd: number;
   minRoundAgeSec: number;
   minTimeLeftSec: number;
-  /** Per-strategy entry caps, raw `name:maxOpen:maxNotional` (P-1.1). */
+  /** Per-strategy caps and sizing, raw `name:maxOpen:maxNotional` (P-1.1) or
+   *  `name:maxOpen:maxNotional:sizeUsd:minShares:maxShares` (E2-a). Blank/-/omitted
+   *  sizing segments inherit the global values, which are also a hard ceiling. */
   strategyLimits?: string[];
   /** Market-data archive for post-hoc replay (P-1.3). null/absent = off. */
   eventArchive?: EventArchiveConfig | null;

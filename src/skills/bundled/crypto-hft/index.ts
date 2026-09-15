@@ -342,9 +342,10 @@ async function executeRust(cmd: string, args: string, parts: string[]): Promise<
         // small live balance (e.g. 4.8u → HFT_MAX_SHARES=4) without a rebuild.
         const minShares = parseInt(process.env.HFT_MIN_SHARES || String(DEFAULT_CONFIG.minShares), 10);
         const maxShares = parseInt(process.env.HFT_MAX_SHARES || String(DEFAULT_CONFIG.maxShares), 10);
-        // Optional per-strategy entry caps (P-1.1), comma-separated
-        // `name:maxOpen:maxNotional` (`-`/empty segment = uncapped). Ops-only knob:
-        // unset → no flag → per-strategy behaviour unchanged.
+        // Optional per-strategy caps + sizing (P-1.1/E2-a), comma-separated
+        // `name:maxOpen:maxNotional[:sizeUsd:minShares:maxShares]` (`-`/empty
+        // segment = inherit the global value; sizing is always clamped by the
+        // global risk band). Ops-only knob: unset → no flag → behaviour unchanged.
         const strategyLimits = (process.env.HFT_STRATEGY_LIMITS || '')
           .split(',')
           .map((s) => s.trim())
