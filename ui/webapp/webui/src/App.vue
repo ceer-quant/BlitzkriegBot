@@ -2,14 +2,14 @@
 import { onUnmounted, ref, computed } from 'vue'
 import { useIntervalFn } from '@vueuse/core'
 import { usePanelStore } from './stores/panel'
-import { hasToken } from './api/client'
+import { hasToken, getToken, logout } from './api/client'
 import OverviewPage from './pages/Overview.vue'
 import StrategiesPage from './pages/Strategies.vue'
 import PluginsPage from './pages/Plugins.vue'
+import LoginView from './components/LoginView.vue'
 
 const store = usePanelStore()
-const tokenInput = ref('')
-const authed = ref(hasToken())
+const authed = ref(hasToken() && !!getToken())
 const tab = ref<'overview' | 'strategies' | 'plugins'>('overview')
 
 const pages = { overview: OverviewPage, strategies: StrategiesPage, plugins: PluginsPage } as const
@@ -21,19 +21,12 @@ const tabs = [
   { id: 'plugins', label: '插件' },
 ] as const
 
-function submitToken(): void {
-  store.applyToken(tokenInput.value)
-  // 401 from connect would surface as store.error; success flips the shell.
-  void store.refresh().then(() => {
-    if (!store.error) authed.value = true
-    else if (hasToken()) {
-      // bad token: clear so the prompt stays up with the error visible
-      store.applyToken('')
-    }
-  })
+async function onLogin(): Promise<void> {
+  authed.value = true
+  await store.refresh()
 }
 
-// 15s auto-refresh; tab switch or token submit also triggers a refresh.
+// 15s auto-refresh.
 const { pause: stopPoll } = useIntervalFn(() => { void store.refresh() }, 15_000)
 onUnmounted(() => { stopPoll() })
 
@@ -58,7 +51,10 @@ if (authed.value) void store.refresh()
       </nav>
       <span class="sub" style="margin-left: auto">
         {{ store.connected ? '引擎已连接' : '引擎未连接' }}
-        <template v-if="store.lastUpdated"> · 更新于 {{ new Date(store.lastUpdated).toLocaleTimeString() }}</template>
+        <template v-if="store.lastUpdated">
+          · 更新于 {{ new Date(store.lastUpdated).toLocaleTimeString() }}
+        </template>
+        <button class="logout-btn" title="退出登录" @click="logout">退出</button>
       </span>
     </header>
 
@@ -68,30 +64,24 @@ if (authed.value) void store.refresh()
     </main>
   </template>
 
-  <template v-else>
-    <div class="token-bar glass">
-      <div style="width: 100%">
-        <h1 style="text-align: center; margin-bottom: 6px">接入控制面板</h1>
-        <p class="sub" style="text-align: center; margin: 0 0 16px">
-          运行网关后，把启动时打印的一次性 token 粘贴到下面。
-        </p>
-        <div style="display: flex; gap: 10px">
-          <input
-            v-model="tokenInput"
-            class="token-input"
-            placeholder="40 位十六进制 token"
-            @keyup.enter="submitToken"
-          />
-          <button class="btn gold" @click="submitToken">连 接</button>
-        </div>
-        <p v-if="store.error" class="sub" style="color: var(--bk-red); text-align: center; margin-top: 10px">
-          {{ store.error }}
-        </p>
-      </div>
-    </div>
-  </template>
+  <LoginView v-else @ok="onLogin" />
 </template>
 
 <style>
-.tab { font-family: inherit; }
+.logout-btn {
+  border: none;
+  background: transparent;
+  color: var(--bk-text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  margin-left: 12px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.logout-btn:hover {
+  color: var(--bk-red);
+  background: rgba(229, 72, 77, 0.08);
+}
 </style>

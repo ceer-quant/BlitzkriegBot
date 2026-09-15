@@ -58,7 +58,8 @@ SLACK_BOT_TOKEN=
 SLACK_APP_TOKEN=
 
 # WebChat (built-in browser client)
-PANEL_CHAT_TOKEN=optional-auth-token
+BLITZKRIEG_PANEL_USER=admin
+BLITZKRIEG_PANEL_PASSWORD=change-me-strong
 
 # WhatsApp (requires baileys library)
 # Uses QR code authentication via CLI
@@ -287,7 +288,8 @@ docker run --rm \
   -p 51888:51888 \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -e TELEGRAM_BOT_TOKEN=... \
-  -e PANEL_CHAT_TOKEN=... \
+  -e BLITZKRIEG_PANEL_USER=admin \
+  -e BLITZKRIEG_PANEL_PASSWORD=... \
   -v blitzkrieg_data:/data \
   blitzkrieg
 ```
@@ -310,7 +312,8 @@ services:
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - PANEL_CHAT_TOKEN=${PANEL_CHAT_TOKEN}
+      - BLITZKRIEG_PANEL_USER=${BLITZKRIEG_PANEL_USER}
+      - BLITZKRIEG_PANEL_PASSWORD=${BLITZKRIEG_PANEL_PASSWORD}
     volumes:
       - blitzkrieg_data:/data
     restart: unless-stopped

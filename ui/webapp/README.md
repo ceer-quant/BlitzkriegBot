@@ -29,8 +29,10 @@ cargo tauri build                        # 产物: src-tauri/target/release/bund
 ```bash
 target/release/ui_kit_web --socket <core.sock> --addr 127.0.0.1:51888 --manage
 ```
-- 每次启动生成**一次性随机 token**(40 hex),仅打印一次;所有请求必须携带
-  (query `?token=` / header `X-Auth-Token` / Basic auth user),否则 401。
+- 鉴权走**用户名/密码**:启动前设置 `BLITZKRIEG_PANEL_USER` / `BLITZKRIEG_PANEL_PASSWORD`
+  (两者必须同时非空),面板登录页换取会话 token;后续请求携带
+  (query `?token=` / header `X-Auth-Token` / `Authorization: Bearer` / `bk_session` cookie),否则 401。
+  未设置变量 = 无鉴权,仅限回环部署。
 - CORS 默认拒绝;仅回环 Origin 放行(403)。
 - 面板/命令 verb 与 TUI/web 完全一致(E5 命令面);无交易下单 API。
 
