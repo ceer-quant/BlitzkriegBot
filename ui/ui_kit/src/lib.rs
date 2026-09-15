@@ -108,7 +108,11 @@ mod socket_tests {
     #[test]
     fn both_prefixes_agree_on_user_and_dir() {
         let (a, b) = (default_socket_path(), legacy_socket_path());
-        let strip = |s: &str| s.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+        let strip = |s: &str| {
+            s.rsplit_once('/')
+                .map(|(d, _)| d.to_string())
+                .unwrap_or_default()
+        };
         assert_eq!(strip(&a), strip(&b));
         let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
         assert!(a.ends_with(&format!("blitzkrieg-core-{user}.sock")), "{a}");
@@ -127,7 +131,10 @@ mod socket_tests {
     fn resolve_keeps_canonical_when_both_are_served() {
         let (c, l) = (default_socket_path(), legacy_socket_path());
         let out = resolve_socket_path_from(c.clone(), l, |_| true);
-        assert_eq!(out, c, "a live canonical core wins over a leftover legacy one");
+        assert_eq!(
+            out, c,
+            "a live canonical core wins over a leftover legacy one"
+        );
     }
 
     /// The migration case: an old-branded core is up and nothing is on the new

@@ -88,7 +88,11 @@ impl IpcClient {
 
     /// Send one request and read until its matching response id arrives,
     /// skipping any interleaved notifications.
-    pub fn call(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, IpcError> {
+    pub fn call(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, IpcError> {
         if self.stream.is_none() {
             self.connect()?;
         }
@@ -101,7 +105,8 @@ impl IpcClient {
             "method": method,
             "params": params,
         });
-        let mut line = serde_json::to_string(&req).map_err(|e| IpcError::Protocol(e.to_string()))?;
+        let mut line =
+            serde_json::to_string(&req).map_err(|e| IpcError::Protocol(e.to_string()))?;
         line.push('\n');
 
         {
@@ -119,7 +124,10 @@ impl IpcClient {
                 let reader = self.reader.as_mut().ok_or(IpcError::Timeout)?;
                 match reader.read_line(&mut buf) {
                     Ok(n) => n,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
                         self.disconnect();
                         return Err(IpcError::Timeout);
                     }
@@ -138,18 +146,27 @@ impl IpcClient {
                 Err(_) => continue,
             };
             // Response ids are echoed; a notification has no id or a method.
-            let is_response = v.get("id").map(|i| i == &serde_json::json!(id)).unwrap_or(false);
+            let is_response = v
+                .get("id")
+                .map(|i| i == &serde_json::json!(id))
+                .unwrap_or(false);
             if !is_response {
                 continue;
             }
             if let Some(err) = v.get("error") {
                 let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
-                let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("error").to_string();
+                let message = err
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("error")
+                    .to_string();
                 return Err(IpcError::Rpc { code, message });
             }
             return Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null));
         }
-        Err(IpcError::Protocol("too many interleaved notifications".into()))
+        Err(IpcError::Protocol(
+            "too many interleaved notifications".into(),
+        ))
     }
 
     // ── Typed convenience wrappers (all read-only; the UI issues no orders) ──
@@ -183,6 +200,43 @@ impl IpcClient {
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
 
+    pub fn strategies(&mut self) -> Result<StrategyListView, IpcError> {
+        serde_json::from_value(self.call("strategy.list", serde_json::json!({}))?)
+            .map_err(|e| IpcError::Protocol(e.to_string()))
+    }
+    pub fn extensions(&mut self) -> Result<ExtensionListView, IpcError> {
+        serde_json::from_value(self.call("extension.list", serde_json::json!({}))?)
+            .map_err(|e| IpcError::Protocol(e.to_string()))
+    }
+    pub fn market_plugins(&mut self) -> Result<MarketListView, IpcError> {
+        serde_json::from_value(self.call("market.list", serde_json::json!({}))?)
+            .map_err(|e| IpcError::Protocol(e.to_string()))
+    }
+    pub fn strategy_enable(
+        &mut self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            "strategy.enable",
+            serde_json::json!({ "name": name, "enabled": enabled }),
+        )
+    }
+    pub fn extension_enable(
+        &mut self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            if enabled {
+                "extension.enable"
+            } else {
+                "extension.disable"
+            },
+            serde_json::json!({ "name": name }),
+        )
+    }
+
     /// Assemble one full UI snapshot. Never errors on a single missing call —
     /// the panel should still render whatever the core answered.
     pub fn snapshot(&mut self, trade_limit: usize) -> UiSnapshot {
@@ -201,7 +255,16 @@ impl IpcClient {
         s.stats = self.stats().ok();
         s.positions = self.positions().map(|p| p.positions).unwrap_or_default();
         s.orders = self.orders().map(|o| o.orders).unwrap_or_default();
-        s.trades = self.trades(trade_limit).map(|t| t.trades).unwrap_or_default();
+        s.trades = self
+            .trades(trade_limit)
+            .map(|t| t.trades)
+            .unwrap_or_default();
+        s.strategies = self.strategies().map(|r| r.strategies).unwrap_or_default();
+        s.extensions = self.extensions().map(|r| r.extensions).unwrap_or_default();
+        if let Ok(m) = self.market_plugins() {
+            s.market_plugins = m.plugins;
+            s.market_active = m.active.is_some();
+        }
         s
     }
 }

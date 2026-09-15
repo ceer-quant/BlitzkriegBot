@@ -22,7 +22,10 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
 fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn money(v: f64) -> String {
@@ -83,8 +86,13 @@ pub fn render_html_with(s: &UiSnapshot, console: bool) -> String {
     for t in s.trades.iter().rev().take(25) {
         trade_rows.push_str(&format!(
             "<tr><td>{}</td><td>{}</td><td>{:.2}→{:.2}</td><td class='{}'>{}</td><td>{}</td></tr>",
-            esc(&t.asset), esc(&t.direction.to_uppercase()), t.entry_price, t.exit_price,
-            if t.net_pnl_usd >= 0.0 { "pos" } else { "neg" }, money(t.net_pnl_usd), esc(&t.exit_reason)
+            esc(&t.asset),
+            esc(&t.direction.to_uppercase()),
+            t.entry_price,
+            t.exit_price,
+            if t.net_pnl_usd >= 0.0 { "pos" } else { "neg" },
+            money(t.net_pnl_usd),
+            esc(&t.exit_reason)
         ));
     }
     if trade_rows.is_empty() {
@@ -97,7 +105,14 @@ pub fn render_html_with(s: &UiSnapshot, console: bool) -> String {
         .map(|r| {
             r.market_prices
                 .iter()
-                .map(|m| format!("<span class=pill>{}: ↑{:.2} ↓{:.2}</span>", esc(&m.asset), m.up, m.down))
+                .map(|m| {
+                    format!(
+                        "<span class=pill>{}: ↑{:.2} ↓{:.2}</span>",
+                        esc(&m.asset),
+                        m.up,
+                        m.down
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(" ")
         })
@@ -174,7 +189,11 @@ pre{{white-space:pre-wrap;margin:10px 0 0}}
         trade_rows = trade_rows,
         price_rows = price_rows,
         mode = mode,
-        gateway_note = if console { " · gateway: commands enabled" } else { "" },
+        gateway_note = if console {
+            " · gateway: commands enabled"
+        } else {
+            ""
+        },
         console_html = console_html,
         err = err,
     )
@@ -250,7 +269,11 @@ pub struct WebServer {
 impl WebServer {
     /// Read-only panel (no command API).
     pub fn new(client: IpcClient, trade_limit: usize) -> Self {
-        Self { snapshot_src: Arc::new(Mutex::new(client)), trade_limit, dispatcher: None }
+        Self {
+            snapshot_src: Arc::new(Mutex::new(client)),
+            trade_limit,
+            dispatcher: None,
+        }
     }
 
     /// Panel + command API. Lifecycle verbs are gated by the dispatcher's own
@@ -267,10 +290,18 @@ impl WebServer {
     pub fn serve(&self, addr: &str) -> std::io::Result<()> {
         let listener = TcpListener::bind(addr)?;
         let console = self.dispatcher.is_some();
-        println!("ui_kit web adapter listening on http://{addr}/  (panel) and /api/snapshot (JSON)");
+        println!(
+            "ui_kit web adapter listening on http://{addr}/  (panel) and /api/snapshot (JSON)"
+        );
         if console {
-            println!("  gateway: /api/command (GET ?cmd=… or POST body){}",
-                if self.lifecycle_enabled() { " · lifecycle ENABLED" } else { " · read-only (pass --manage for start/stop)" });
+            println!(
+                "  gateway: /api/command (GET ?cmd=… or POST body){}",
+                if self.lifecycle_enabled() {
+                    " · lifecycle ENABLED"
+                } else {
+                    " · read-only (pass --manage for start/stop)"
+                }
+            );
         }
         for stream in listener.incoming() {
             match stream {
@@ -292,7 +323,9 @@ impl WebServer {
         // A client that connects and stalls must not wedge the accept loop.
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
         let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
-        let Some(req) = read_request(&mut stream) else { return };
+        let Some(req) = read_request(&mut stream) else {
+            return;
+        };
         let target = req.path().to_string();
 
         let (status, ctype, body) = match (req.method.as_str(), target.as_str()) {
@@ -310,13 +343,22 @@ impl WebServer {
             }
             ("GET", _) => {
                 let snap = self.snapshot();
-                (200, "text/html; charset=utf-8", render_html_with(&snap, self.dispatcher.is_some()))
+                (
+                    200,
+                    "text/html; charset=utf-8",
+                    render_html_with(&snap, self.dispatcher.is_some()),
+                )
             }
             _ => (404, "text/plain; charset=utf-8", "not found".to_string()),
         };
 
         if std::env::var("UIKIT_WEB_TRACE").is_ok() {
-            eprintln!("ui_kit web: {} {} -> {} bytes ({status})", req.method, target, body.len());
+            eprintln!(
+                "ui_kit web: {} {} -> {} bytes ({status})",
+                req.method,
+                target,
+                body.len()
+            );
         }
         let reason = if status == 200 { "OK" } else { "Not Found" };
         let head = format!(
@@ -347,7 +389,8 @@ impl WebServer {
             Ok(mut d) => serde_json::to_string(&d.dispatch_line(cmd)).unwrap_or_else(|e| {
                 format!("{{\"ok\":false,\"action\":\"error\",\"message\":\"serialize: {e}\"}}")
             }),
-            Err(_) => "{\"ok\":false,\"action\":\"error\",\"message\":\"dispatcher poisoned\"}".to_string(),
+            Err(_) => "{\"ok\":false,\"action\":\"error\",\"message\":\"dispatcher poisoned\"}"
+                .to_string(),
         }
     }
 }
@@ -392,7 +435,11 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
     } else {
         String::new()
     };
-    Some(HttpRequest { method, target, body })
+    Some(HttpRequest {
+        method,
+        target,
+        body,
+    })
 }
 
 /// POST bodies may be raw command text or `{"cmd":"..."}`.

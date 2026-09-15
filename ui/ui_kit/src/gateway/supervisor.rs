@@ -46,7 +46,9 @@ pub enum SupervisorError {
 impl std::fmt::Display for SupervisorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SupervisorError::BinaryNotFound(p) => write!(f, "blitzkrieg-core binary not found: {}", p.display()),
+            SupervisorError::BinaryNotFound(p) => {
+                write!(f, "blitzkrieg-core binary not found: {}", p.display())
+            }
             SupervisorError::Spawn(e) => write!(f, "failed to spawn blitzkrieg-core: {e}"),
             SupervisorError::NotReady(e) => write!(f, "blitzkrieg-core did not become ready: {e}"),
         }
@@ -84,7 +86,10 @@ impl SupervisorConfig {
     /// `HFT_MAX_SHARES`).
     pub fn from_env(socket_path: String) -> Self {
         let env_num = |k: &str, d: u64| -> u64 {
-            std::env::var(k).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(d)
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(d)
         };
         let assets = std::env::var("HFT_ASSETS")
             .ok()
@@ -93,7 +98,9 @@ impl SupervisorConfig {
             .unwrap_or_else(|| vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()]);
         let max_shares = env_num("HFT_MAX_SHARES", 10);
         let min_shares = env_num("HFT_MIN_SHARES", 10).min(max_shares);
-        let dry = std::env::var("DRY_RUN").map(|v| v != "false").unwrap_or(true);
+        let dry = std::env::var("DRY_RUN")
+            .map(|v| v != "false")
+            .unwrap_or(true);
         // Per-order notional is a SAFETY bound, not the strategy size: size it
         // from the real worst case (max shares × ~0.6) so a legitimate order is
         // never blocked (mirrors the Node runner's rationale).
@@ -105,7 +112,10 @@ impl SupervisorConfig {
             .filter(|s| !s.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(discover_binary);
-        let cwd = std::env::var("UIKIT_CORE_CWD").ok().filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+        let cwd = std::env::var("UIKIT_CORE_CWD")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from);
         let extra_args: Vec<String> = std::env::var("UIKIT_CORE_EXTRA_ARGS")
             .ok()
             .map(|s| s.split_whitespace().map(|a| a.to_string()).collect())
@@ -170,7 +180,11 @@ pub fn discover_binary() -> PathBuf {
         root.join("target/debug/blitzkrieg-core"),
         root.join("core/blitzkrieg_core/target/debug/blitzkrieg-core"),
     ];
-    candidates.iter().find(|p| p.exists()).cloned().unwrap_or_else(|| candidates[0].clone())
+    candidates
+        .iter()
+        .find(|p| p.exists())
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone())
 }
 
 /// Whether a live core is serving `socket_path` right now.
@@ -203,7 +217,11 @@ pub struct Supervisor {
 
 impl Supervisor {
     pub fn new(cfg: SupervisorConfig) -> Self {
-        Self { cfg, child: None, owns: false }
+        Self {
+            cfg,
+            child: None,
+            owns: false,
+        }
     }
 
     pub fn config(&self) -> &SupervisorConfig {
@@ -243,7 +261,9 @@ impl Supervisor {
             return Ok(StartOutcome::Adopted);
         }
         if !self.cfg.binary_path.exists() {
-            return Err(SupervisorError::BinaryNotFound(self.cfg.binary_path.clone()));
+            return Err(SupervisorError::BinaryNotFound(
+                self.cfg.binary_path.clone(),
+            ));
         }
         let mut cmd = Command::new(&self.cfg.binary_path);
         cmd.args(self.cfg.to_args())
@@ -253,7 +273,9 @@ impl Supervisor {
         if let Some(dir) = &self.cfg.cwd {
             cmd.current_dir(dir);
         }
-        let child = cmd.spawn().map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
         let pid = child.id();
         self.child = Some(child);
         self.owns = true;
@@ -261,10 +283,18 @@ impl Supervisor {
         // Readiness handshake: the core binds the socket shortly after spawn.
         let deadline = Instant::now() + STARTUP_DEADLINE;
         while Instant::now() < deadline {
-            if self.child.as_mut().and_then(|c| c.try_wait().ok()).flatten().is_some() {
+            if self
+                .child
+                .as_mut()
+                .and_then(|c| c.try_wait().ok())
+                .flatten()
+                .is_some()
+            {
                 self.child = None;
                 self.owns = false;
-                return Err(SupervisorError::NotReady("process exited during startup".into()));
+                return Err(SupervisorError::NotReady(
+                    "process exited during startup".into(),
+                ));
             }
             if socket_served(&self.cfg.socket_path) {
                 return Ok(StartOutcome::Started { pid });
@@ -273,7 +303,9 @@ impl Supervisor {
         }
         // Timed out — do not leave a half-started core behind.
         self.stop();
-        Err(SupervisorError::NotReady("socket not bound within 15s".into()))
+        Err(SupervisorError::NotReady(
+            "socket not bound within 15s".into(),
+        ))
     }
 
     /// Stop the core **we spawned**. An adopted core is never killed.

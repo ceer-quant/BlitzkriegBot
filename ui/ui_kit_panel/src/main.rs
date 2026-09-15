@@ -29,10 +29,16 @@ use tokio::sync::mpsc::{self};
 /// Messages the main loop reacts to.
 enum Msg {
     Input(Event),
-    Snapshot { snap: UiSnapshot, managed: bool, pid: Option<u32> },
+    Snapshot {
+        snap: UiSnapshot,
+        managed: bool,
+        pid: Option<u32>,
+    },
     CommandDone(String),
     /// Refresh failed to run (join error); surface it in the log.
     RefreshError(String),
+    /// The plugin registry was re-read (after entering the tab or a toggle).
+    PluginsLoaded(UiSnapshot),
 }
 
 struct Args {
@@ -46,7 +52,9 @@ fn parse_args() -> Args {
     let mut socket = blitzkrieg_ui_kit::resolve_socket_path();
     let mut interval_ms = 1000u64;
     // Lifecycle verbs are opt-in, exactly like the web gateway's `--manage`.
-    let mut manage = std::env::var("UIKIT_MANAGE").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let mut manage = std::env::var("UIKIT_MANAGE")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
     let mut tab = Tab::Overview;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -76,7 +84,12 @@ fn parse_args() -> Args {
             other => eprintln!("ignoring unknown arg: {other}"),
         }
     }
-    Args { socket, interval_ms: interval_ms.max(100), manage, tab }
+    Args {
+        socket,
+        interval_ms: interval_ms.max(100),
+        manage,
+        tab,
+    }
 }
 
 const HELP: &str = "\
@@ -182,28 +195,61 @@ async fn main() -> std::io::Result<()> {
                 match app.on_key(key) {
                     Action::Quit => app.should_quit = true,
                     Action::Refresh => { /* the refresher will fire; nothing to do */ }
-                    Action::RunCommand(cmd) => {
+                    Action::RefreshPlugins => {
                         let d = dispatcher.clone();
                         let tx = tx.clone();
                         tokio::spawn(async move {
                             let out = tokio::task::spawn_blocking(move || {
                                 let mut g = match d.lock() {
                                     Ok(g) => g,
-                                    Err(_) => return String::from("dispatcher poisoned"),
+                                    Err(_) => {
+                                        return Some(Err("dispatcher poisoned".to_string()));
+                                    }
                                 };
-                                let o = g.dispatch_line(&cmd);
-                                format!("{} {}", if o.ok { "OK " } else { "ERR" }, o.message)
+                                Some(Ok(g.plugins_snapshot()))
                             })
                             .await
-                            .unwrap_or_else(|e| format!("command failed: {e}"));
-                            let _ = tx.send(Msg::CommandDone(out));
+                            .unwrap_or(None);
+                            match out {
+                                Some(Ok(snap)) => {
+                                    let _ = tx.send(Msg::PluginsLoaded(snap));
+                                }
+                                Some(Err(e)) => {
+                                    let _ = tx.send(Msg::RefreshError(e));
+                                }
+                                None => {}
+                            }
                         });
+                    }
+                    Action::ConfirmToggle(cmd) => {
+                        if app.toggle_needs_confirmation(&cmd) {
+                            app.pending_confirmation = Some(cmd);
+                        } else {
+                            dispatch_command(&dispatcher, &tx, &cmd).await;
+                        }
+                    }
+                    Action::RunCommand(cmd) => {
+                        dispatch_command(&dispatcher, &tx, &cmd).await;
                     }
                     Action::None => {}
                 }
             }
             Msg::Input(_) => {}
             Msg::Snapshot { snap, managed, pid } => app.on_snapshot(snap, managed, pid),
+            Msg::PluginsLoaded(snap) => {
+                let n = snap.strategies.len() + snap.extensions.len();
+                app.snap.strategies = snap.strategies;
+                app.snap.extensions = snap.extensions;
+                app.snap.market_plugins = snap.market_plugins;
+                app.snap.market_active = snap.market_active;
+                app.snap.connected = snap.connected;
+                if let Some(e) = snap.last_error {
+                    app.log(format!("plugin registry error: {e}"));
+                }
+                if app.plugin_focus > 0 && app.plugin_focus >= n.max(1) {
+                    app.plugin_focus = n.saturating_sub(1);
+                }
+            }
             Msg::CommandDone(line) => {
                 for l in line.lines() {
                     app.log(l.to_string());
@@ -221,6 +267,39 @@ async fn main() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Run one command line through the dispatcher in the background and log the
+/// outcome line by line (shared by the two command entry points).
+async fn dispatch_command(
+    dispatcher: &Arc<Mutex<Dispatcher>>,
+    tx: &tokio::sync::mpsc::UnboundedSender<Msg>,
+    cmd: &str,
+) {
+    let d = dispatcher.clone();
+    let tx = tx.clone();
+    let cmd = cmd.to_string();
+    tokio::spawn(async move {
+        let out = tokio::task::spawn_blocking(move || {
+            let mut g = match d.lock() {
+                Ok(g) => g,
+                Err(_) => return vec![String::from("dispatcher poisoned")],
+            };
+            let o = g.dispatch_line(&cmd);
+            vec![format!(
+                "{} {}",
+                if o.ok { "OK " } else { "ERR" },
+                o.message
+            )]
+        })
+        .await
+        .unwrap_or_else(|e| vec![format!("command failed: {e}")]);
+        for line in out {
+            let _ = tx.send(Msg::CommandDone(line));
+        }
+    })
+    .await
+    .ok();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,7 +308,10 @@ mod tests {
     fn key_quit_and_tabs() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut app = App::new("/tmp/x.sock".into(), false);
-        assert!(matches!(app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)), Action::Quit));
+        assert!(matches!(
+            app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Action::Quit
+        ));
         assert_eq!(app.tab, Tab::Overview);
         app.on_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
         assert_eq!(app.tab, Tab::Positions);

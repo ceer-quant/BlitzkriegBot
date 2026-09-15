@@ -17,7 +17,9 @@ use blitzkrieg_ui_kit::{resolve_socket_path, IpcClient};
 fn main() {
     let mut socket = resolve_socket_path();
     let mut addr = "127.0.0.1:18888".to_string();
-    let mut manage = std::env::var("UIKIT_MANAGE").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let mut manage = std::env::var("UIKIT_MANAGE")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {

@@ -9,15 +9,19 @@
 //! f64) but Polymarket-sourced payloads can use strings, so `de_num` accepts
 //! both. The UI only needs display precision, so f64 is appropriate here.
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Accept a JSON number *or* a numeric string → f64.
 pub fn de_num<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
     match v {
-        serde_json::Value::Number(n) => n.as_f64().ok_or_else(|| serde::de::Error::custom("bad number")),
+        serde_json::Value::Number(n) => n
+            .as_f64()
+            .ok_or_else(|| serde::de::Error::custom("bad number")),
         serde_json::Value::String(s) => s.trim().parse::<f64>().map_err(serde::de::Error::custom),
-        other => Err(serde::de::Error::custom(format!("expected number/string, got {other}"))),
+        other => Err(serde::de::Error::custom(format!(
+            "expected number/string, got {other}"
+        ))),
     }
 }
 
@@ -28,7 +32,9 @@ pub fn de_num_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Err
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::Number(n)) => Ok(n.as_f64()),
         Some(serde_json::Value::String(s)) => Ok(s.trim().parse::<f64>().ok()),
-        Some(other) => Err(serde::de::Error::custom(format!("expected number/string, got {other}"))),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "expected number/string, got {other}"
+        ))),
     }
 }
 
@@ -185,6 +191,63 @@ pub struct TradesView {
     pub trades: Vec<TradeView>,
 }
 
+// ── strategy.list / extension.list / market.list (plugin manager) ───────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyRow {
+    pub name: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StrategyListView {
+    pub strategies: Vec<StrategyRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionRow {
+    pub name: String,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExtensionListView {
+    pub extensions: Vec<ExtensionRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketPluginRow {
+    pub name: String,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub has_data_feed: bool,
+    #[serde(default)]
+    pub has_discovery: bool,
+    #[serde(default)]
+    pub has_executor: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketListView {
+    /// Core reports the active plugin NAME as a string (absent when none).
+    #[serde(default)]
+    pub active: Option<String>,
+    #[serde(default)]
+    pub plugins: Vec<MarketPluginRow>,
+}
+
 // ── orders.list ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
@@ -221,8 +284,13 @@ pub struct OrdersView {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CoreEvent {
-    Ready { version: String, mode: String },
-    OrderUpdate { order: OrderView },
+    Ready {
+        version: String,
+        mode: String,
+    },
+    OrderUpdate {
+        order: OrderView,
+    },
     Fill {
         delta: serde_json::Value,
         order: OrderView,
@@ -240,7 +308,10 @@ pub enum CoreEvent {
         #[serde(deserialize_with = "de_num")]
         daily_pnl_usd: f64,
     },
-    RiskAlert { code: serde_json::Value, message: String },
+    RiskAlert {
+        code: serde_json::Value,
+        message: String,
+    },
     #[serde(rename_all = "camelCase")]
     ReconcileReport {
         filled: usize,
@@ -248,10 +319,19 @@ pub enum CoreEvent {
         marked_cancelled: usize,
         ghost_ids: Vec<String>,
     },
-    Error { error: serde_json::Value },
-    EvolutionSignal { signal: serde_json::Value },
-    EvolutionApplied { signal: serde_json::Value },
-    EvolutionRejected { signal: serde_json::Value, reason: String },
+    Error {
+        error: serde_json::Value,
+    },
+    EvolutionSignal {
+        signal: serde_json::Value,
+    },
+    EvolutionApplied {
+        signal: serde_json::Value,
+    },
+    EvolutionRejected {
+        signal: serde_json::Value,
+        reason: String,
+    },
     /// Forward-compatible catch-all so a new core event never breaks the UI.
     #[serde(other)]
     Unknown,
@@ -271,6 +351,10 @@ pub struct UiSnapshot {
     pub positions: Vec<PositionView>,
     pub orders: Vec<OrderView>,
     pub trades: Vec<TradeView>,
+    pub strategies: Vec<StrategyRow>,
+    pub extensions: Vec<ExtensionRow>,
+    pub market_plugins: Vec<MarketPluginRow>,
+    pub market_active: bool,
     pub connected: bool,
     pub last_error: Option<String>,
 }
@@ -291,6 +375,9 @@ impl UiSnapshot {
         }
     }
     pub fn mode(&self) -> &str {
-        self.ready.as_ref().map(|r| r.mode.as_str()).unwrap_or("unknown")
+        self.ready
+            .as_ref()
+            .map(|r| r.mode.as_str())
+            .unwrap_or("unknown")
     }
 }

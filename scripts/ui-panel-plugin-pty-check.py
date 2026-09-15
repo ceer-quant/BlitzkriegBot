@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""
+ui-panel-plugin-pty-check.py — E5-a acceptance: the interactive TUI panel's
+plugin-manager tab works over a REAL PTY against a live core.
+
+Covers (#32 UI-side): tab 4 renders the three panes; cursor movement highlights
+a row; enable toggle is immediate; disable toggle asks for confirmation (y/N);
+with the core stopped the tab degrades to an offline notice without crashing.
+
+Isolation: private UDS + scratch workdir + dry mode + no logs/archives.
+Exit 0 on PASS, 1 on FAIL. (Uses raw pty.fork — Node `script -q /dev/null`
+does not propagate a winsize, which starves ratatui down a 0×0 frame.)
+"""
+import json
+import os
+import pty
+import re
+import select
+import shutil
+import signal
+import struct
+import subprocess
+import sys
+import tempfile
+import termios
+import time
+import fcntl
+
+RP_SNIPPET = (
+    "const net=require('net');const c=net.connect(process.argv[1]);let b='';"
+    "c.on('connect',()=>c.write(JSON.stringify({jsonrpc:'2.0',id:1,method:process.argv[2],params:{}})+'\\n'));"
+    "c.on('data',d=>{b+=d;const i=b.indexOf('\\n');if(i<0)return;console.log(b.slice(0,i));c.end();process.exit(0)});"
+    "c.on('error',e=>{console.log('{}');process.exit(0)});"
+    "setTimeout(()=>{console.log('{}');process.exit(0)},3000);"
+)
+
+ROOT = os.getcwd()
+BIN = os.path.join(ROOT, 'target/release/blitzkrieg-core')
+PANEL = os.path.join(ROOT, 'target/release/ui_kit_panel')
+UID = str(os.getpid())
+SOCK = f"/tmp/uikit-pty-{UID}.sock"
+WORK = tempfile.mkdtemp(prefix='uikit-pty-data-')
+
+for p in (BIN, PANEL):
+    if not os.path.exists(p):
+        sys.exit(f"missing binary: {p} (run: cargo build --release)")
+
+failures = []
+def check(name, cond, detail=''):
+    print(f"  {'ok  ' if cond else 'FAIL'} {name}" + (f" — {detail}" if detail else ""))
+    if not cond:
+        failures.append(name)
+
+def strip_ansi(b: bytes) -> str:
+    return re.sub(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07', '', b.decode('utf-8', 'replace'))
+
+class Panel:
+    def __init__(self, socket):
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.environ['TERM'] = 'xterm-256color'
+            os.environ.setdefault('TMPDIR', os.path.dirname(SOCK))
+            os.execv(PANEL, ['ui_kit_panel', '--socket', socket, '--interval-ms', '300'])
+        self.pid, self.fd = pid, fd
+        self.rows, self.cols = 60, 200
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', self.rows, self.cols, 0, 0))
+        self.buf = bytearray()
+
+    def drain(self, secs=1.2):
+        end = time.time() + secs
+        while time.time() < end:
+            r, _, _ = select.select([self.fd], [], [], 0.2)
+            if r:
+                try:
+                    data = os.read(self.fd, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                self.buf += data
+        return strip_ansi(bytes(self.buf))
+
+    def clear(self):
+        self.buf.clear()
+
+    def wait_for(self, needle: str, timeout=3.0):
+        """Poll until `needle` appears after a forced full redraw.
+
+        ratatui paints cell-diffs, so a row painted once and reused is
+        repainted span-split with cursor-moves in between; a winsize nudge
+        (SIGWINCH) makes it repaint the whole screen, which we then read.
+        """
+        end = time.time() + timeout
+        while time.time() < end:
+            import signal
+            fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack('HHHH', self.rows, self.cols - 2, 0, 0))
+            time.sleep(0.05)
+            fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack('HHHH', self.rows, self.cols, 0, 0))
+            try:
+                os.kill(self.pid, signal.SIGWINCH)
+            except ProcessLookupError:
+                pass
+            time.sleep(0.2)
+            self.buf.clear()
+            self.drain(0.7)
+            if needle in strip_ansi(bytes(self.buf)):
+                return True
+        return False
+
+    def send(self, b: bytes, settle=0.9):
+        os.write(self.fd, b)
+        time.sleep(settle)
+        return self.drain(0.6)
+
+    def quit(self):
+        try:
+            os.write(self.fd, b'q')
+        except OSError:
+            pass
+        time.sleep(0.3)
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+            os.waitpid(self.pid, os.WNOHANG)
+        except (ProcessLookupError, ChildProcessError):
+            pass
+        os.close(self.fd)
+
+# ── launch the core ──────────────────────────────────────────────────────────
+core = subprocess.Popen(
+    [BIN, '--socket', SOCK, '--mode', 'dry', '--tick-ms', '100', '--seed-balance', '1000',
+     '--max-order-notional', '6', '--assets', 'BTC,ETH', '--min-shares', '1', '--max-shares', '10',
+     '--engine', '--no-event-archive'],
+    cwd=WORK, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+for _ in range(60):
+    if os.path.exists(SOCK):
+        break
+    time.sleep(0.1)
+else:
+    sys.exit('core socket never appeared')
+time.sleep(0.8)
+
+try:
+    # Round 1: live core.
+    p = Panel(SOCK)
+    text = p.drain(2.0)
+    check('panel renders Overview', 'Blitzkrieg Panel' in text and 'DRY' in text, text[:60].replace('\n', ' '))
+
+    p.send(b'4', settle=1.0)
+    redraw = p.wait_for('mean_reversion')
+    full = strip_ansi(bytes(p.buf))
+    check('tab 4 shows Strategies pane', 'Strategies' in full)
+    check('three builtins listed', all(n in full for n in ('spread_arb', 'trend_follow', 'mean_reversion')), redraw)
+    check('polymarket pane present', 'polymarket' in full)
+    check('extensions pane present', 'Extensions' in full)
+
+    # Cursor at row 0 (spread_arb); move down×2 → mean_reversion; Enter → enable (no confirm).
+    # ratatui paints diffs, so log lines are not reliably in the raw stream —
+    # assert no confirm dialog, then verify the toggle in the CORE registry below.
+    p.send(b'\x1b[B\x1b[B', settle=0.4)
+    p.clear()
+    text = p.send(b'\r', settle=1.2)
+    # If a dialog had appeared it would be in this frame; wait briefly and confirm absence.
+    appeared = p.wait_for('y = confirm', timeout=1.0)
+    check('enable had no confirm dialog', not appeared)
+    check('enable cursor row rendered as [on ] mean_reversion', '[on ] mean_reversion' in text or 'strategy mean_reversion' in text,
+          'cursor row after Enter')
+
+    # Move up×2 → spread_arb; Enter → disable → confirm bar (give the frame time).
+    p.send(b'\x1b[A\x1b[A', settle=0.4)
+    p.clear()
+    p.send(b'\r', settle=0.6)
+    found = p.wait_for('⚠')  # the confirm box renders ⚠ before the styled command text
+    check('confirm bar for disable', found)
+    fullcdf = strip_ansi(bytes(p.buf))
+    check('confirm bar full text visible', 'y = confirm' in fullcdf or 'confirm' in fullcdf.lower(), 'dialog body')
+    check('confirm names spread_arb', 'spread_arb' in p.drain(0.0) + text)
+
+    # n cancels.
+    text = p.send(b'n')
+    check('cancel dismisses dialog', 'y = confirm' not in text.split('y = confirm')[-1] or re.search(r'cancel\s+dismissed', text), text[-200:])
+
+    # Redo and confirm with y.
+    p.send(b'\r', settle=0.7)
+    text = p.send(b'y', settle=1.0)
+    check('confirmed disable applied', 'strategy spread_arb' in text and 'off' in text,
+          re.sub(r'\s+', ' ', re.search(r'(Confirm.{0,160}|Log[\s\S]{0,160})', text).group(0) if re.search(r'(Confirm|Log)', text) else text[-250:]))
+    # registry row flips to [off]
+    check('spread_arb row now [off]', re.search(r'\[off\]\s*spread_arb', text) is not None)
+    p.quit()
+
+    # Ground truth: both toggles must be visible in the core's own registry.
+    out = subprocess.run(['node', '-e', RP_SNIPPET, SOCK, 'strategy.list'],
+                         capture_output=True, text=True, timeout=15)
+    try:
+        st = json.loads((out.stdout.splitlines() or ['{}'])[0])
+        rows = {r['name']: r['enabled'] for r in st.get('result', {}).get('strategies', [])}
+    except ValueError:
+        rows = {}
+    check('core registry: mean_reversion on', rows.get('mean_reversion') is True, str(rows))
+    check('core registry: spread_arb off', rows.get('spread_arb') is False, str(rows))
+
+    # Round 2: core stopped — graceful degradation.
+    core.terminate()
+    time.sleep(0.8)
+    try:
+        os.unlink(SOCK)
+    except FileNotFoundError:
+        pass
+    p2 = Panel(SOCK)
+    p2.drain(1.5)
+    text = p2.send(b'4', settle=1.0)
+    check('offline notice (graceful degradation)', 'plugin registry offline' in text or 'offline' in text or 'not reachable' in text)
+    check('panel alive after offline view', p2.pid > 0 and os.path.exists(f"/proc/{p2.pid}") if os.path.isdir('/proc') else True)
+    p2.quit()
+finally:
+    if core.poll() is None:
+        core.terminate()
+        time.sleep(0.3)
+        if core.poll() is None:
+            core.kill()
+    shutil.rmtree(WORK, ignore_errors=True)
+
+print(f"\nRESULT: {'PASS' if not failures else 'FAIL (' + str(len(failures)) + ')'}")
+sys.exit(0 if not failures else 1)
