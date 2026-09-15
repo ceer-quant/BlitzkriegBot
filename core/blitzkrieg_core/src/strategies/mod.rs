@@ -20,7 +20,10 @@
 
 #[cfg(feature = "strategy-loading")]
 pub mod foreign;
+pub mod shadow_twin;
 pub mod spread_arb;
+
+pub use shadow_twin::{EngineStrategyShadow, ShadowFactory, ShadowTickCtx, ShadowTickResult};
 
 use crate::model::{CryptoMarket, OrderbookSnapshot};
 use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
@@ -204,11 +207,37 @@ pub trait EngineStrategy: Send + Sync {
         Vec::new()
     }
 
-    /// Shadow-Evolution hot parameters (spread_arb-shaped; default ignores).
-    fn set_hot_params(
-        &mut self,
-        _handle: std::sync::Arc<arc_swap::ArcSwap<crate::shadow_evolution::MutableParams>>,
-    ) {
+    /// Shadow-Evolution hot parameters (E2-c / #28).
+    ///
+    /// The host hands over the **per-strategy registry**; a strategy that
+    /// declares evolvable knobs resolves its OWN cell
+    /// (`registry.handle_for(self.name())`) and reads it lock-free on the hot
+    /// path. A strategy that declares nothing simply ignores the call — which is
+    /// an explicit "not evolvable", not an error.
+    ///
+    /// `None` DETACHES the overlay, which is what the host passes while Shadow
+    /// Evolution is disabled: with no cell the live config stands alone, so a
+    /// core that never runs evolution behaves exactly as it did before the
+    /// feature existed (acceptance: "evolution off ⇒ unchanged"). Default: ignore.
+    fn set_hot_params(&mut self, _registry: Option<std::sync::Arc<crate::shadow_evolution::ParamRegistry>>) {}
+
+    /// The knobs this strategy declares evolvable, with their domains
+    /// (E2-c / #28). Default = none, i.e. **not evolvable**; the host then
+    /// builds no shadow variants for this strategy and reports it as such.
+    ///
+    /// A strategy that returns knobs also needs [`EngineStrategy::shadow_factory`],
+    /// otherwise the declaration is inert (nothing can be replayed).
+    fn evolvable_knobs(&self) -> Vec<crate::shadow_evolution::KnobSpec> {
+        Vec::new()
+    }
+
+    /// How to build a twin of this strategy for the shadow comparison
+    /// (E2-c / #28). The twin is an INDEPENDENT instance running this
+    /// strategy's own logic with a parameter set applied, so a variant is
+    /// evaluated by the strategy itself rather than by a kernel-side copy.
+    /// Default: none (not evolvable).
+    fn shadow_factory(&self) -> Option<Box<dyn ShadowFactory>> {
+        None
     }
 
     /// The spread_arb parameters currently in force (observability for the

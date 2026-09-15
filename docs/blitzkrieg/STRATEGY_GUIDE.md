@@ -34,6 +34,9 @@ void bk_strategy_free_string(char* p);            // 释放本库产出的 JSON�
 
 // 可选（按名字解析；未导出 = 不声明任何豁免，见 §3.5）：
 char* bk_strategy_gate_exemptions(void* handle);  // {"timing":bool,"momentum":bool}
+
+// 可选（按名字解析；未导出 = 明确「不可进化」，见 §3.6）：
+char* bk_strategy_evolvable_knobs(void* handle);  // {"knobs":[{name,value,min,max}]}
 ```
 ```c
 typedef struct { const char* price; const char* size; } BkLevel;
@@ -99,10 +102,16 @@ pub trait EngineStrategy: Send + Sync {
     fn take_breaks(&mut self) -> Vec<(String, Decimal)>;          // 趋势破位
     fn confirmed_tokens(&self) -> HashSet<String>;                // 自证
     fn diagnostics(&self, ctx: &StrategyCtx<'_>) -> Vec<Value>;   // 诊断
-    fn set_hot_params(&mut self, handle: Arc<ArcSwap<MutableParams>>); // 影子进化热参
+    fn evolvable_knobs(&self) -> Vec<KnobSpec>;                   // 自证可进化旋钮 + 取值域（E2-c，默认不声明=不可进化，见 §3.6）
+    fn shadow_factory(&self) -> Option<Box<dyn ShadowFactory>>;   // 造自己的影子孪生（E2-c，默认无）
+    fn set_hot_params(&mut self, registry: Option<Arc<ParamRegistry>>); // 挂/摘本策略的热参覆盖层（E2-c）
     fn on_config(&mut self, trend: &TrendConfig, arb: &SpreadArbConfig); // 配置
 }
 ```
+
+`set_hot_params(None)` 表示**摘除**覆盖层（进化关闭）——此时策略读不到任何热参句柄，
+行为退回 `on_config` 下发的配置，因此「关闭进化 ⇒ 与改动前逐位一致」是可证明的。
+`ParamRegistry` 按策略命名，策略只应读自己那一格（`handle_for(name)`）。
 
 `StrategyCtx` 提供本轮 `markets`、`round_slot/time_left/now`，以及按 token 取**仍新鲜**的盘口 `fresh_book(token)`。
 策略返回的全部是**候选/意图**：内核随后统一执行回合时序、现货动量、单 token 去重、定张数、风控/资金/签名/下单。
@@ -229,6 +238,53 @@ unsafe extern "C" fn evaluate(handle: BkHandle, view: *const BkRoundView) -> *mu
 
 > 运维侧「谁可以批准某策略豁免」的授权层（与策略自声明正交的二次授信）**明确不在 E2-b 范围**，
 > 记为 [DECISIONS_PENDING D-16](../DECISIONS_PENDING.md)。
+
+### 3.6 可进化旋钮的自证（E2-c / #28）
+
+影子进化（[SHADOW_EVOLUTION.md](SHADOW_EVOLUTION.md)）现在**按策略**运行：每个策略声明自己
+**愿意让进化去调**的旋钮及取值域，内核据此为它建一个独立的参数单元、独立评估、独立审计、独立回滚。
+内核**不再硬编码任何策略的入场逻辑**——反事实比较用的影子孪生由策略**自己**造。
+
+声明三件套（都是策略自己的责任）：
+
+1. **可进化旋钮**：名称 + 当前值 + `[min,max]` 取值域（十进制字符串）。
+2. **影子孪生工厂** `ShadowFactory`：给出这组参数时，返回一个与主策略**同代码、同出场策略**、
+   仅旋钮不同的 `EngineStrategy` 实例（用 `ArcSwap` 里那一份值构造，因此比较是真正的反事实）。
+3. **在自己的 evaluate 里读当前值**：从 `set_hot_params` 给到的注册表读**本策略**那一格；
+   覆盖层被摘除时（进化关闭）读不到任何句柄，行为退回 `on_config` 配置。
+
+- **Rust（内建/内树）**：覆写 trait 方法
+  ```rust
+  fn evolvable_knobs(&self) -> Vec<KnobSpec> {
+      vec![KnobSpec::new("trendMaxEntryPrice", dec!(0.43), dec!(0.05), dec!(0.90))]
+  }
+  fn shadow_factory(&self) -> Option<Box<dyn ShadowFactory>> {
+      Some(Box::new(MyFactory))   // make(&StrategyParams) -> Option<Box<dyn EngineStrategy>>
+  }
+  ```
+  内建 `spread_arb` 已实现（4 个 `trend_*` 旋钮）作为可运行范例。
+- **外挂 C ABI v2**：额外导出一个**可选符号**（不导出 = 明确「不可进化」）：
+  ```c
+  char* bk_strategy_evolvable_knobs(void* handle);
+  // {"knobs":[{"name":"trendMaxEntryPrice","value":"0.43","min":"0.05","max":"0.90"}]}
+  ```
+  `dog_strategy` 与 `parity_strategy` 都已导出该符号。与 §3.5 同理，它是**独立可选符号**
+  而非 vtable 新字段（内核按值拷贝 vtable），`BK_ABI_VERSION` 维持 2、旧库无需重编译；
+  JSON 非法/缺字段一律降级为「未声明」（`KnobDeclaration::parse` 永不 panic）。
+
+**「不声明」的语义是明确且可观测的**，不是「暂时没有参数」：
+该策略拿不到参数单元、不出现在 `shadow_evolution.status.strategies[]` 里、
+对其 `apply`/`rollback` 会被明确拒绝并说明原因。`strategy.load` 的回执也会写清：
+`… (disabled; not evolvable (no knobs declared))` 或 `… ; declares evolvable knobs: trendMaxEntryPrice`。
+
+**三层锁对声明同样生效**（域 → 步长 → 风控不可变），声明逃不掉：
+- 取值域是**外层硬边界**，越界直接拒绝——想「渐变地爬出域外」也不行（域检查在步长检查之前）；
+- 单步变化仍受 `max_gradient`（默认 ±5%）限制，需要更大变化只能多轮逼近；
+- 风控参数（硬止损/连亏熔断/日亏上限/单笔名义上限）**不在任何** `StrategyParams` 里，
+  结构上就读不到、写不进。
+
+审计按策略分文件：`data/evolution/<strategy>.jsonl`；`apply`/`rollback` 走 IPC
+且**都要求 `strategy` 参数**。门禁：`npm run core:strategy-evolve`。
 
 ## 4. 生命周期与开关
 

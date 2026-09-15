@@ -12,8 +12,11 @@
 //!    buy at the best ask and mark the token in-position;
 //!  - while in position, request an EXIT once the best bid recovers to
 //!    `take_profit` (a strategy close intent — the kernel still prices/submits);
-//!  - `buy_below` is hot-swappable via the kernel MutableParams field
-//!    `trendMaxEntryPrice` and the initial config.
+//!  - `buy_below` is hot-swappable: the kernel pushes THIS strategy's own knob
+//!    bag (`{"trendMaxEntryPrice":"0.43"}`) into `on_hot_params`, and the same
+//!    knob is what `bk_strategy_evolvable_knobs` declares evolvable (E2-c), so a
+//!    shadow twin can be built from a counterfactual ceiling and compared
+//!    against this strategy's own logic rather than a kernel-side copy of it.
 //!
 //! Build: `(cd user_layer/strategies && cargo build --release)` →
 //! `target/release/libdog_strategy.{dylib,so,dll}`.
@@ -250,6 +253,26 @@ unsafe extern "C" fn knobs(_handle: BkHandle) -> *mut c_char {
     )
 }
 
+/// E2-c (#28): the knobs this strategy declares EVOLVABLE — names, the values in
+/// force, and the hard domain each value may never leave. Distinct from `knobs`
+/// above, which is the human-facing JSON-Schema description of the config
+/// surface; this one is the machine-consumed declaration the kernel uses to
+/// build counterfactual variants and to reject out-of-domain proposals.
+///
+/// An OPTIONAL symbol: a v2 library without it declares nothing and is simply
+/// **not evolvable** (explicitly, per the kernel's log), so adding this needs no
+/// ABI bump. `on_hot_params` receives exactly this bag, serialized.
+unsafe extern "C" fn evolvable_knobs(_handle: BkHandle) -> *mut c_char {
+    bk_string_out(
+        serde_json::json!({
+            "knobs": [
+                { "name": "trendMaxEntryPrice", "value": "0.43", "min": "0.05", "max": "0.90" }
+            ]
+        })
+        .to_string(),
+    )
+}
+
 /// E2-b (#27): the dog strategy hunts dips, which is mean-reversion — it wants
 /// the whole round, so it declares the round-timing WINDOW gate unnecessary for
 /// its entries while still asking for the spot momentum alignment filter (it
@@ -296,4 +319,9 @@ pub extern "C" fn bk_strategy_abi_version() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn bk_strategy_gate_exemptions(handle: BkHandle) -> *mut c_char {
     unsafe { gate_exemptions(handle) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn bk_strategy_evolvable_knobs(handle: BkHandle) -> *mut c_char {
+    unsafe { evolvable_knobs(handle) }
 }

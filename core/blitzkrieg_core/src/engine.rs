@@ -197,10 +197,12 @@ pub struct Engine {
     blocked_momentum_total: u64,
     /// Session per-strategy gate counts (blocked vs exempted), E2-b / #27.
     gate_tally: HashMap<String, StrategyGateTally>,
-    /// Optional hot-swap handle for Shadow Evolution. When present, every
-    /// evaluate() reads the CURRENT mutable parameters (lock-free) so an
-    /// evolution takes effect on the next tick with no restart.
-    hot_params: Option<std::sync::Arc<arc_swap::ArcSwap<crate::shadow_evolution::MutableParams>>>,
+    /// Optional per-strategy hot-parameter registry for Shadow Evolution
+    /// (E2-c / #28). When present, each strategy resolves its OWN cell through it
+    /// and reads that cell lock-free on the hot path, so an evolution takes effect
+    /// on the next tick with no restart — and one strategy's parameters can never
+    /// be read by another.
+    hot_params: Option<std::sync::Arc<crate::shadow_evolution::ParamRegistry>>,
     /// Registered strategies. The builtin `spread_arb` is first; user-layer
     /// strategies are appended (disabled until explicitly enabled).
     strategies: Vec<HostedStrategy>,
@@ -603,15 +605,17 @@ impl Engine {
         }
     }
 
-    /// Attach the Shadow Evolution hot-swap handle. Called once when evolution is
-    /// (re)configured; idempotent. Forwarded to every registered strategy.
-    pub fn set_hot_params(
-        &mut self,
-        handle: std::sync::Arc<arc_swap::ArcSwap<crate::shadow_evolution::MutableParams>>,
-    ) {
-        self.hot_params = Some(handle.clone());
+    /// Attach (or detach) the Shadow Evolution per-strategy parameter registry.
+    /// Called when evolution is (re)configured; idempotent. Forwarded to every
+    /// registered strategy, which resolves its OWN cell from it (E2-c / #28).
+    ///
+    /// `None` DETACHES: strategies fall back to the config pushed via
+    /// `on_config`, which is what makes "evolution disabled" provably identical
+    /// to the pre-feature behaviour rather than merely inert by convention.
+    pub fn set_hot_params(&mut self, registry: Option<std::sync::Arc<crate::shadow_evolution::ParamRegistry>>) {
+        self.hot_params = registry.clone();
         for s in &mut self.strategies {
-            s.strategy.set_hot_params(handle.clone());
+            s.strategy.set_hot_params(registry.clone());
         }
     }
 
@@ -632,6 +636,11 @@ impl Engine {
     /// builtin `spread_arb` first, then user-layer strategies).
     pub fn supported_strategies(&self) -> Vec<String> {
         self.strategies.iter().map(|s| s.strategy.name().to_string()).collect()
+    }
+    /// Borrow every hosted strategy. Shadow Evolution asks each one which knobs it
+    /// declares (E2-c), so the declaration has to be read off the live instances.
+    pub fn strategy_refs(&self) -> Vec<&dyn EngineStrategy> {
+        self.strategies.iter().map(|s| s.strategy.as_ref()).collect()
     }
     /// Enabled strategy names.
     pub fn enabled_strategies(&self) -> Vec<String> {
@@ -675,7 +684,7 @@ impl Engine {
         // Registered after Shadow Evolution was configured? Forward the handle
         // so a later evolution still reaches this strategy.
         if let Some(h) = &self.hot_params {
-            hosted.strategy.set_hot_params(h.clone());
+            hosted.strategy.set_hot_params(Some(h.clone()));
         }
         self.strategies.push(hosted);
         Ok(name)

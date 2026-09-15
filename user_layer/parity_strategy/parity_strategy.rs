@@ -149,6 +149,14 @@ unsafe extern "C" fn knobs(handle: BkHandle) -> *mut c_char {
     bk_string_out(s.knobs().to_string())
 }
 
+/// E2-c (#28): the machine-consumed evolvable-knob declaration. An OPTIONAL
+/// symbol — a v2 library without it is explicitly NOT evolvable, so adding it
+/// needs no ABI bump. `on_hot_params` receives this bag serialized.
+unsafe extern "C" fn evolvable_knobs(handle: BkHandle) -> *mut c_char {
+    let s = unsafe { &*(handle as *const ParityStrategy) };
+    bk_string_out(s.evolvable_knobs().to_string())
+}
+
 static NAME: &[u8] = b"parity\0";
 static VERSION: &[u8] = b"0.1.0\0";
 
@@ -178,4 +186,9 @@ pub extern "C" fn bk_strategy_create() -> *const BkStrategyVtable {
 #[unsafe(no_mangle)]
 pub extern "C" fn bk_strategy_abi_version() -> u32 {
     BK_ABI_VERSION
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn bk_strategy_evolvable_knobs(handle: BkHandle) -> *mut c_char {
+    unsafe { evolvable_knobs(handle) }
 }

@@ -142,12 +142,15 @@ pub mod method {
     pub const EXTENSION_DISABLE: &str = "extension.disable";
     /// Market plugins: list registered market extensions (name/type/capabilities).
     pub const MARKET_LIST: &str = "market.list";
-    /// Shadow Evolution control surface (opt-in feature).
+    /// Shadow Evolution control surface (opt-in feature). Every mutation is
+    /// per-strategy (E2-c): `apply`/`rollback` name ONE strategy, and `status`
+    /// reports each evolved strategy's own block.
     pub const SE_ENABLE: &str = "shadow_evolution.enable";
     pub const SE_DISABLE: &str = "shadow_evolution.disable";
     pub const SE_STATUS: &str = "shadow_evolution.status";
     pub const SE_HISTORY: &str = "shadow_evolution.history";
     pub const SE_ROLLBACK: &str = "shadow_evolution.rollback";
+    pub const SE_APPLY: &str = "shadow_evolution.apply";
     /// Supply the current round's UP/DOWN markets (discovered by Node's scanner
     /// in P3-transition; the Rust scanner takes over in P4).
     pub const ENGINE_MARKETS: &str = "engine.markets";

@@ -115,9 +115,15 @@
    `blocked.byStrategy`/`declaredExemptions`/`gateExempted*`），且只作用于声明者自己的候选单；
    安全边界（RiskGate/kill switch/单日亏损帽/全局容量/配额/定寸）物理上不可豁免，
    `NoMarkets` 结构前提与单 token 去重也不可豁免。
-3. **影子进化只能碰一个策略**：`MutableParams` 全局且被写死成 spread_arb 的四个旋钮，
+3. ~~**影子进化只能碰一个策略**：`MutableParams` 全局且被写死成 spread_arb 的四个旋钮，
    `Variant` 硬编码 spread_arb 入场逻辑，`UserStrategyAdapter` 忽略 hot params。
-   → 需要「按策略的可变参数集 + 按策略评估 + 按策略审计」。
+   → 需要「按策略的可变参数集 + 按策略评估 + 按策略审计」。~~
+   **已解决（E2-c / #28，2026-09-15）**：`MutableParams` 改为 `BTreeMap<strategy, StrategyParams>`；
+   每个策略通过 `evolvable_knobs()`（外挂为可选符号 `bk_strategy_evolvable_knobs`）**自证**可进化旋钮与
+   `[min,max]` 取值域；影子孪生由策略自己的 `ShadowFactory` 提供（内核不再硬编码任何策略的入场逻辑）；
+   评估、审计（`data/evolution/<strategy>.jsonl`）、`apply`/`rollback` 全部按策略独立；
+   关闭进化时热参覆盖层被**摘除**（`set_hot_params(None)`，`Core::has_hot_params()==false`），
+   因此「关闭 = 与改动前逐位一致」可证明。外挂新增可选符号仍属 ABI v2（vtable 未变）。
 
 另需：策略注册表持久化与启用状态（promotion/canary 属 0.3，本阶段只做「可持久化的启用/参数」）。
 
@@ -132,9 +138,18 @@
   只对 `timing`/`momentum` 两个入场质量闸门生效、只作用于本策略候选单；默认不声明 = 全门禁；
   每次兑现均有审计记录（见 `STRATEGY_GUIDE §3.5`、迁移日志 §44）。运维侧的二次授信（谁能批准
   豁免）与策略自声明正交，明确推后为 DECISIONS_PENDING D-16。
-- 影子进化对**每个**启用策略独立评估、独立审计（`data/evolution/<strategy>.jsonl`），
-  应用后热更新只影响该策略。
+- ~~影子进化对**每个**启用策略独立评估、独立审计（`data/evolution/<strategy>.jsonl`），
+  应用后热更新只影响该策略。~~
+  **E2-c 已达成（#28）**：参数集按策略命名（`BTreeMap<strategy, StrategyParams>`），旋钮与取值域由策略
+  **自证**（trait `evolvable_knobs` / 可选符号 `bk_strategy_evolvable_knobs`；**不声明 = 明确不可进化**）；
+  影子孪生由策略的 `ShadowFactory` 提供，评估走该策略自己的「假设成交」逻辑；审计分文件
+  `data/evolution/<strategy>.jsonl`；`apply`/`rollback` 按策略独立（IPC 均要求 `strategy`）；
+  关闭进化时覆盖层**摘除**（`Core::has_hot_params()==false`），行为与改动前逐位一致。
+  验收由测试（`tests/shadow_evolution_per_strategy.rs` 4 项 + 单元测试）+ 门禁
+  `npm run core:strategy-evolve` 双重钉住（见 `SHADOW_EVOLUTION.md §8`、迁移日志 §45）。
 - 全部现有门禁保持绿灯；默认配置下行为与改动前**逐位一致**（无策略新增时）。
+  新增门禁脚本：`npm run core:strategy-evolve`（影子进化按策略化），与既有的
+  `core:strategy-limit`（E2-a）、`core:strategy-gate`（E2-b）并列。
 
 ---
 
@@ -261,6 +276,14 @@ TS 侧已有的 `momentum` / `mean_reversion` 只能作**逻辑参考**，不是
 > `EngineStrategy`；`tests/foreign_parity.rs` 用共享算法 crate `parity_logic` 在两台 Engine 上
 > 逐信号对拍；CI 在 ubuntu 真构建并驱动 `dog_strategy` 与 `parity_strategy` 两个真实 cdylib
 > （`BK_REQUIRE_DYLIB=1`）。E4（#30/#31）按此契约实现即可，不得退回原生-only。
+>
+> **E2-c 补完（2026-09-15，见 MIGRATION_LOG §45 / `STRATEGY_GUIDE.md §3.6`）**：上文范围第 4 条
+> 「外挂策略声明**自己的**可进化旋钮集 → 对齐 E2-c 的按策略 `MutableParams`」已交付。
+> 外挂新增**可选符号** `bk_strategy_evolvable_knobs`（`{"knobs":[{name,value,min,max}]}`，
+> 未导出 = 明确「不可进化」），内建走 trait `evolvable_knobs()`；参数集改为按策略命名空间
+> （`ParamRegistry`，每策略一格 `ArcSwap`），影子孪生由策略自己的 `ShadowFactory` 造。
+> **vtable 未变、`BK_ABI_VERSION` 仍为 2，已发布的 v2 库无需重编译**——这是 §3.5
+> 「vtable 冻结、新能力走可选符号」规则的第二次应用（第一次是 E2-b 的 `bk_strategy_gate_exemptions`）。
 
 ---
 
