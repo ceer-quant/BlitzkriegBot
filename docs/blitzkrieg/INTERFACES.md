@@ -72,6 +72,13 @@
 | `strategy.enable` | `{ name, enabled }` | `{ name, enabled, found }` |
 | `strategy.load` | `{ path }` | 成功 `"<name>@<version> registered into the engine dispatch (disabled)"`（注册后默认禁用，需再 `strategy.enable`；E2-b 起若该库导出可选符号 `bk_strategy_gate_exemptions`，回执在启用前显式追加 `; declares gate exemptions: timing[,momentum]`）；失败返回 `"Rejected { path, reason }"`（路径策略）/ `"Failed { path, reason }"`（dlopen/协商/`create` 失败）。走 **C ABI v2**：`bk_strategy_abi_version()` 必须为 2（无 v1 兼容层）；新能力一律以「按名字解析的可选符号」追加、vtable 结构体冻结，故 E2-b 不需要 ABI v3。`strategy-loading` 自 E7 起默认开启 |
 
+`strategy.list` 自 E4-a 起返回**两个**内建：`spread_arb`（默认 `enabled:true`）与
+`trend_follow`（默认 `enabled:false`）。后者是 E4 的追涨腿，6 个可进化入场旋钮、
+不声明任何门禁豁免。开机态也可由 CLI 决定：`--enable-strategy <name>` / `--disable-strategy <name>`
+（可重复，`--disable-strategy` 优先），走的是与 `strategy.enable` **同一个** `set_strategy_enabled`，
+因此开机选择与运行期切换行为一致；回测/回放复用同一份 `CoreConfig`，同样吃这两个开关。
+未知名只记警告日志并忽略（不会让进程失败）。
+
 ### 2.5 风控
 | method | params | result |
 |:---|:---|:---|

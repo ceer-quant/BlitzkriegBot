@@ -20,6 +20,11 @@
 //!                   [--entry-maker-timeout-ms 5000]
 //!                   [--slippage-ticks 0] [--latency-ms 0] [--fill-prob-bps 10000]
 //!
+//! Strategy selection (repeatable; builtins default to `spread_arb` on and
+//! `trend_follow` off, so a new strategy never changes what a running session
+//! trades until it is named):
+//!                   [--enable-strategy <name>] [--disable-strategy <name>]
+//!
 //! Market-data capture is ON by default for an engine session (`--no-event-archive`
 //! disables it): the events behind a past stop-out only exist if recording was
 //! already running when it happened.
@@ -75,6 +80,13 @@ struct Args {
     /// Per-strategy entry caps: `name:max_open_positions:max_notional_usd`
     /// (repeatable; `-` or empty = no cap on that segment).
     strategy_limits: Vec<String>,
+    /// Strategies to switch ON at startup (repeatable, E4-a). The builtins default
+    /// to `spread_arb` on and `trend_follow` off, so this is how a session opts
+    /// into the chase leg; an unknown name is warned about, never fatal.
+    enable_strategy: Vec<String>,
+    /// Strategies to switch OFF at startup (repeatable). Applied after
+    /// `--enable-strategy`, so an explicit "off" wins.
+    disable_strategy: Vec<String>,
     /// Mirror every market-data event into this JSONL archive (P-1.3).
     /// None = use the always-on default for an engine session (see `--no-event-archive`).
     event_archive: Option<String>,
@@ -136,6 +148,8 @@ fn parse_args() -> Args {
     let mut auto_exits = true;
     let mut max_positions: usize = 2;
     let mut strategy_limits: Vec<String> = Vec::new();
+    let mut enable_strategy: Vec<String> = Vec::new();
+    let mut disable_strategy: Vec<String> = Vec::new();
     let mut engine = false;
     let mut min_round_age: i64 = 30;
     let mut min_time_left: i64 = 180;
@@ -222,6 +236,16 @@ fn parse_args() -> Args {
                     strategy_limits.push(v);
                 }
             }
+            "--enable-strategy" => {
+                if let Some(v) = it.next().filter(|v| !v.trim().is_empty()) {
+                    enable_strategy.push(v);
+                }
+            }
+            "--disable-strategy" => {
+                if let Some(v) = it.next().filter(|v| !v.trim().is_empty()) {
+                    disable_strategy.push(v);
+                }
+            }
             "--assets" => assets_arg = it.next(),
             "--round-sec" => {
                 round_sec = it.next().and_then(|v| v.parse().ok()).unwrap_or(round_sec)
@@ -277,7 +301,7 @@ fn parse_args() -> Args {
             other => eprintln!("ignoring unknown arg: {other}"),
         }
     }
-    Args { socket, mode, tick_ms, seed_balance, max_order_notional, min_shares, max_shares, markets, auto_exits, max_positions, engine, min_round_age, min_time_left, trend_confirm, trend_floor_ms, feed_ws, replay, replay_near_miss, round_sec, near_miss_path, trade_log, no_trade_log, order_log, no_order_log, position_log, no_position_log, market_plugin, discovery, shadow_evolution, assets: assets_arg, se_min_samples, se_cooldown_secs, se_min_obs_secs, strategy_limits, event_archive, no_event_archive, event_archive_max_mb, event_archive_rotate_mb, event_archive_min_free_mb, entry_maker_timeout_ms, backtest, backtest_report, backtest_tick_ms, backtest_tail_ms, slippage_ticks, latency_ms, fill_prob_bps }
+    Args { socket, mode, tick_ms, seed_balance, max_order_notional, min_shares, max_shares, markets, auto_exits, max_positions, engine, min_round_age, min_time_left, trend_confirm, trend_floor_ms, feed_ws, replay, replay_near_miss, round_sec, near_miss_path, trade_log, no_trade_log, order_log, no_order_log, position_log, no_position_log, market_plugin, discovery, shadow_evolution, assets: assets_arg, se_min_samples, se_cooldown_secs, se_min_obs_secs, strategy_limits, enable_strategy, disable_strategy, event_archive, no_event_archive, event_archive_max_mb, event_archive_rotate_mb, event_archive_min_free_mb, entry_maker_timeout_ms, backtest, backtest_report, backtest_tick_ms, backtest_tail_ms, slippage_ticks, latency_ms, fill_prob_bps }
 }
 
 /// Default archive path, relative to the core's working directory (the repo root
@@ -483,6 +507,8 @@ async fn main() -> anyhow::Result<()> {
         risk: RiskConfig { max_order_notional: args.max_order_notional, ..Default::default() },
         dry_seed_balance: args.seed_balance,
         strategy_limits: parse_strategy_limits(&args.strategy_limits),
+        enabled_strategies: args.enable_strategy,
+        disabled_strategies: args.disable_strategy,
         markets: args.markets,
         auto_exits_enabled: args.auto_exits,
         engine_enabled: args.engine,
