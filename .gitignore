@@ -143,3 +143,4 @@ src/api/
 # Rotated/archived runtime logs (cost-opt: bounded logs)
 *.log.gz
 run.log.*
+ui/webapp/src-tauri/Cargo.lock
