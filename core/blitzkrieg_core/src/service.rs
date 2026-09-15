@@ -39,6 +39,16 @@ pub struct CoreConfig {
     pub engine_enabled: bool,
     /// Assets the engine trades and its sizing/round timing (mirrors the TS config).
     pub assets: Vec<String>,
+    /// Strategies to switch ON after the engine is installed, by name (E4-a).
+    /// The builtins start in a fixed state (`spread_arb` on, `trend_follow` off),
+    /// so adding a strategy can never change what an existing session trades;
+    /// this is how an operator opts a session into one. Unknown names are
+    /// reported and ignored, never fatal.
+    pub enabled_strategies: Vec<String>,
+    /// Strategies to switch OFF after the engine is installed, by name. Applied
+    /// after `enabled_strategies`, so the explicit "off" wins if both name the
+    /// same strategy.
+    pub disabled_strategies: Vec<String>,
     pub min_round_age_sec: i64,
     pub size_usd: Decimal,
     pub min_shares: Decimal,
@@ -134,8 +144,23 @@ impl CoreConfig {
 
     /// Install the engine described by this config (the live server's startup
     /// step, reused verbatim by the backtester).
+    ///
+    /// The strategy selection is applied through the same `set_strategy_enabled`
+    /// the IPC method uses, so a session started with `--enable-strategy` and one
+    /// toggled at runtime end up in exactly the same state (including the Shadow
+    /// Evolution re-registration the toggle triggers).
     pub fn install_engine(&self, core: &mut Core) {
         core.enable_engine(crate::engine::Engine::new(self.engine_config()));
+        for name in &self.enabled_strategies {
+            if !core.set_strategy_enabled(name, true) {
+                tracing::warn!(strategy = name, "unknown strategy requested at startup; ignored");
+            }
+        }
+        for name in &self.disabled_strategies {
+            if !core.set_strategy_enabled(name, false) {
+                tracing::warn!(strategy = name, "unknown strategy requested at startup; ignored");
+            }
+        }
     }
 }
 
@@ -204,6 +229,8 @@ impl Default for CoreConfig {
             auto_exits_enabled: true,
             engine_enabled: false,
             assets: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
+            enabled_strategies: Vec::new(),
+            disabled_strategies: Vec::new(),
             min_round_age_sec: 30,
             size_usd: Decimal::new(25, 1), // 2.5
             min_shares: Decimal::from(10),
@@ -482,8 +509,17 @@ impl Core {
     }
     /// Toggle a strategy on the driving engine. Returns false when the engine
     /// is not attached or the name is unknown.
+    ///
+    /// A toggle changes which strategies Shadow Evolution watches (it registers
+    /// around the enabled set), so the manager is rewired immediately: switching a
+    /// strategy on brings its parameters and variants in, switching it off drops
+    /// them. No restart, and nothing is traded by a strategy that is off.
     pub fn set_strategy_enabled(&mut self, name: &str, enabled: bool) -> bool {
-        self.engine.as_mut().map(|e| e.set_strategy_enabled(name, enabled)).unwrap_or(false)
+        let ok = self.engine.as_mut().map(|e| e.set_strategy_enabled(name, enabled)).unwrap_or(false);
+        if ok {
+            self.rewire_hot_params();
+        }
+        ok
     }
     /// Load an external v2 strategy shared library and register it into the
     /// driving engine's live dispatch. It starts DISABLED — an explicit
@@ -624,6 +660,12 @@ impl Core {
     fn rewire_hot_params(&mut self) {
         if let Some(e) = self.engine.as_mut() {
             if self.shadow_evolution.is_enabled() {
+                // The whole host set, enabled or not: a declaration is read off the
+                // live instance (E2-c), and `register_strategies` removes the cell of
+                // anything ABSENT — so filtering by `enabled` here would delete a
+                // switched-off strategy's evolved parameters and rollback anchor,
+                // making a toggle lossy. A disabled strategy simply never emits the
+                // candidates that would consume them.
                 self.shadow_evolution.register_strategies(&e.strategy_refs());
                 e.set_hot_params(Some(self.shadow_evolution.registry()));
             } else {
@@ -2246,7 +2288,12 @@ mod shadow_evolution_tests {
         // Enable → engine gains the hot-swap handle.
         c.shadow_evolution_enable(1000);
         assert!(c.engine.as_ref().unwrap().has_hot_params());
-        assert_eq!(c.shadow_evolution().strategy_names(), vec!["spread_arb".to_string()]);
+        assert_eq!(
+            c.shadow_evolution().strategy_names(),
+            vec!["spread_arb".to_string(), "trend_follow".to_string()],
+            "every hosted strategy that declares knobs is evolved; the chase leg \
+             starts disabled but its declaration is read off the live instance"
+        );
 
         let before = cap(&c);
         // Simulate an applied evolution via the operator override path (+3%).
@@ -2323,7 +2370,11 @@ mod shadow_evolution_tests {
         // Enabling registers the declared names and attaches the overlay; the
         // published values are the declaration, not an invented parameter.
         c.shadow_evolution_enable(2000);
-        assert_eq!(c.shadow_evolution().strategy_names(), vec!["spread_arb".to_string()]);
+        assert_eq!(
+            c.shadow_evolution().strategy_names(),
+            vec!["spread_arb".to_string(), "trend_follow".to_string()],
+            "E4-a hosts a second evolvable builtin; both declare knobs"
+        );
         assert!(c.engine.as_ref().unwrap().has_hot_params());
         assert_eq!(
             c.shadow_evolution().current_params().get("spread_arb", "trend_max_entry_price"),
@@ -2510,6 +2561,7 @@ mod strategy_dispatch_tests {
     use crate::engine::{DataEvent, Engine, EngineConfig};
     use crate::model::CryptoMarket;
     use crate::risk::RiskConfig;
+    use crate::shadow_evolution::{MutableParams, StrategyParams};
     use rust_decimal_macros::dec;
 
     /// Mirrors the production engine knobs closely enough to trade the feed below
@@ -2533,6 +2585,7 @@ mod strategy_dispatch_tests {
                 trend_max_entry_price: dec!(0.45),
                 ..Default::default()
             },
+            trend_follow: Default::default(),
             max_orderbook_stale_ms: 8000,
             momentum_window_sec: 30,
             momentum_tol_pct: dec!(0.03),
@@ -2746,6 +2799,132 @@ mod strategy_dispatch_tests {
 
     fn limits_of(rows: &[(&str, StrategyLimit)]) -> HashMap<String, StrategyLimit> {
         rows.iter().map(|(n, l)| ((*n).to_string(), l.clone())).collect()
+    }
+
+    /// One strategy's override bag for the startup-selection tests, built the way
+    /// the IPC handler builds it (the shadow-evolution test module has its own).
+    fn one_param(strategy: &str, knob: &str, value: Decimal) -> MutableParams {
+        let mut p = StrategyParams::new();
+        p.set(knob, value);
+        let mut m = MutableParams::new();
+        m.set_strategy(strategy, p);
+        m
+    }
+
+    // ── E4-a: startup strategy selection ────────────────────────────────────
+
+    /// Installing an engine with a selection puts the session in exactly the state
+    /// an operator would reach with `strategy.enable`/`strategy.disable`: the
+    /// selection goes through the same toggle (so Shadow Evolution is rewired the
+    /// same way), an unknown name is ignored rather than fatal, and disabling wins
+    /// over enabling when both name the same strategy.
+    #[test]
+    fn startup_selection_matches_a_runtime_toggle() {
+        let install = |cfg: CoreConfig| {
+            let mut c = Core::new(cfg.clone());
+            cfg.install_engine(&mut c);
+            c
+        };
+        let base = CoreConfig {
+            dry_seed_balance: dec!(1000),
+            engine_enabled: true,
+            ..Default::default()
+        };
+
+        // Default: the incumbent trades, the chase leg does not.
+        let plain = install(base.clone());
+        assert_eq!(plain.enabled_strategy_names(), vec!["spread_arb".to_string()]);
+        assert_eq!(
+            plain.strategy_names(),
+            vec!["spread_arb".to_string(), "trend_follow".to_string()],
+            "both builtins are hosted; only one is on"
+        );
+
+        // Opt in by flag: same result as toggling it at runtime.
+        let by_flag = install(CoreConfig {
+            enabled_strategies: vec!["trend_follow".into()],
+            ..base.clone()
+        });
+        let mut by_toggle = install(base.clone());
+        assert!(by_toggle.set_strategy_enabled("trend_follow", true));
+
+        assert_eq!(
+            by_flag.enabled_strategy_names(),
+            vec!["spread_arb".to_string(), "trend_follow".to_string()]
+        );
+        assert_eq!(by_flag.enabled_strategy_names(), by_toggle.enabled_strategy_names());
+
+        // An explicit "off" wins over an "on" for the same name, and a name the
+        // engine does not host is ignored without taking the session down.
+        let both = install(CoreConfig {
+            enabled_strategies: vec!["trend_follow".into(), "dog_strategy".into()],
+            disabled_strategies: vec!["trend_follow".into()],
+            ..base.clone()
+        });
+        assert_eq!(both.enabled_strategy_names(), vec!["spread_arb".to_string()]);
+        assert_eq!(
+            both.strategy_names(),
+            vec!["spread_arb".to_string(), "trend_follow".to_string()],
+            "an unknown name must not register anything"
+        );
+    }
+
+    /// Shadow Evolution sees every evolvable strategy the engine hosts, whether it
+    /// is enabled or not (E2-c): the knob declaration is read off the live
+    /// instance, and `register_strategies` drops the cell of anything it is not
+    /// handed — so keying the set off `enabled` would make a runtime disable throw
+    /// away that strategy's evolved parameters and rollback anchor.
+    ///
+    /// This is the regression guard for exactly that: toggle the chase leg off and
+    /// back on, and the value applied to it must still be in force.
+    #[test]
+    fn evolution_keeps_the_cell_of_a_disabled_strategy_across_a_toggle() {
+        let base = CoreConfig {
+            dry_seed_balance: dec!(1000),
+            engine_enabled: true,
+            ..Default::default()
+        };
+        let mut c = Core::new(base.clone());
+        base.install_engine(&mut c);
+        c.shadow_evolution_enable(0);
+        // Registered from the start even though it starts disabled.
+        assert_eq!(
+            c.shadow_evolution().strategy_names(),
+            vec!["spread_arb".to_string(), "trend_follow".to_string()],
+        );
+        assert!(c.shadow_evolution_status_for("trend_follow", 0).is_some());
+        // Its declared knobs are the strategy's own, not an invented set.
+        let names: Vec<String> = c
+            .shadow_evolution()
+            .declared_knobs("trend_follow")
+            .into_iter()
+            .map(|k| k.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "momentum_window_sec".to_string(),
+                "min_move_pct".to_string(),
+                "min_confirm_price".to_string(),
+                "break_price".to_string(),
+                "max_entry_price".to_string(),
+                "max_spread_pct".to_string(),
+            ]
+        );
+
+        assert!(c.set_strategy_enabled("trend_follow", true));
+        assert!(c.shadow_evolution_apply(one_param("trend_follow", "min_move_pct", dec!(3.1)), 1_200).is_ok());
+        let evolved = c.shadow_evolution().params_for("trend_follow").unwrap().get("min_move_pct");
+        assert_eq!(evolved, Some(dec!(3.1)));
+
+        // Off and on again: same cell, same value — a toggle is not a reset.
+        assert!(c.set_strategy_enabled("trend_follow", false));
+        assert!(c.set_strategy_enabled("trend_follow", true));
+        assert_eq!(
+            c.shadow_evolution().params_for("trend_follow").unwrap().get("min_move_pct"),
+            Some(dec!(3.1)),
+            "a runtime toggle must not discard the strategy's evolved value"
+        );
     }
 
     #[test]

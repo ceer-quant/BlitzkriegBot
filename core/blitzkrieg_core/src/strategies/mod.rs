@@ -9,9 +9,11 @@
 //! exemption from ([`GateExemptions`], E2-b / #27); the exemption is explicit,
 //! logged, counted and can never reach the safety boundary.
 //!
-//! There is exactly ONE full-featured contract: [`EngineStrategy`]. The proven
-//! in-tree [`spread_arb::SpreadArbBuiltin`] and an external dylib loaded through
-//! C ABI v2 ([`foreign::ForeignStrategy`]) both implement it. Being external is
+//! There is exactly ONE full-featured contract: [`EngineStrategy`]. The two
+//! in-tree builtins — [`spread_arb::SpreadArbBuiltin`] (the dip buyer) and
+//! [`trend_follow::TrendFollowBuiltin`] (the chase leg, E4-a / #30) — and an
+//! external dylib loaded through C ABI v2 ([`foreign::ForeignStrategy`]) all
+//! implement it. Being external is
 //! only a loading difference — an external strategy sees every book callback,
 //! the full depth ladder, round/market context, and can express entries, exits,
 //! breaks, confirmation, diagnostics, config and hot parameters. The old
@@ -22,8 +24,10 @@
 pub mod foreign;
 pub mod shadow_twin;
 pub mod spread_arb;
+pub mod trend_follow;
 
 pub use shadow_twin::{EngineStrategyShadow, ShadowFactory, ShadowTickCtx, ShadowTickResult};
+pub use trend_follow::TrendFollowConfig;
 
 use crate::model::{CryptoMarket, OrderbookSnapshot};
 use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};

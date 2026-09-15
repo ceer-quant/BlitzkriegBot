@@ -157,7 +157,33 @@ unsafe extern "C" fn evaluate(handle: BkHandle, view: *const BkRoundView) -> *mu
 文件名含 `key/secret/private/credential/.env` 或非 `.so/.dylib/.dll` 一律在 dlopen 之前拒绝。
 
 ### 3.3 内建（内核自带）
-`spread_arb` 是内建策略（`strategies::SpreadArbBuiltin`，宿主化实现），可用 `strategy.list` / `strategy.enable` 查询与开关。
+内核自带两个内建策略（`strategies::SpreadArbBuiltin` / `strategies::TrendFollowBuiltin`，宿主化实现），
+可用 `strategy.list` / `strategy.enable` 查询与开关。
+
+| 内建 | 默认 | 触发 | 定价 | 出场 |
+|:---|:---|:---|:---|:---|
+| `spread_arb`（抄底腿） | **启用** | 已确认趋势里的回调 | 挂在 mid **之下**的被动买单（`entry < mid`） | 共享出场策略 |
+| `trend_follow`（追涨腿，E4-a / #30） | **禁用** | 本 token 的 mid 在窗口内**上涨** ≥ `min_move_pct` | **抬价吃卖单**（`entry = best_ask > mid`），并受 `max_entry_price` 上限约束 | 共享出场策略 |
+
+两者是**结构互逆**的一对（一个买被低估的一侧、一个买正在被买上去的一侧），因此互为对冲。
+新策略默认**禁用**，这样一次升级不会改变已在运行的会话实际交易什么；要启用有三种等价方式：
+
+```bash
+# 1) 开机即启（可重复；--disable-strategy 优先于 --enable-strategy）
+blitzkrieg-core --engine --enable-strategy trend_follow ...
+# 2) 运行期开关（与内建/外挂策略同一入口，无需重启）
+{ "method": "strategy.enable", "params": { "name": "trend_follow", "enabled": true } }
+# 3) 回测/回放同样吃这两个开关（复用同一份 CoreConfig）
+blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy trend_follow
+```
+
+`trend_follow` 的六个旋钮（`momentum_window_sec` / `min_move_pct` / `min_confirm_price` /
+`break_price` / `max_entry_price` / `max_spread_pct`）都可被影子进化（§3.6）。
+它**不声明任何门禁豁免**：顺势入场天然通过现货动量闸门，需要豁免的是 E4-b 的逆向腿。
+默认值中 `min_move_pct=3.0` 与 `max_spread_pct=3.0` 由 `data/archive/` 实测分布定标
+（详情见 `core/blitzkrieg_core/src/strategies/trend_follow.rs` 的配置文档注释）。
+留出段回放表现与通道验证见 [TREND_FOLLOW_HOLDOUT_REPORT.md](../reports/TREND_FOLLOW_HOLDOUT_REPORT.md)。
+
 加载进自驱动引擎的用户策略**默认禁用**：`strategy.list` 会显示它，但必须 `strategy.enable` 之后才会参与下单。
 
 ### 3.4 多策略并发（P-1.1）
@@ -262,7 +288,7 @@ unsafe extern "C" fn evaluate(handle: BkHandle, view: *const BkRoundView) -> *mu
       Some(Box::new(MyFactory))   // make(&StrategyParams) -> Option<Box<dyn EngineStrategy>>
   }
   ```
-  内建 `spread_arb` 已实现（4 个 `trend_*` 旋钮）作为可运行范例。
+  内建 `spread_arb`（4 个 `trend_*` 旋钮）与 `trend_follow`（6 个入场旋钮）都已实现，作为可运行范例。
 - **外挂 C ABI v2**：额外导出一个**可选符号**（不导出 = 明确「不可进化」）：
   ```c
   char* bk_strategy_evolvable_knobs(void* handle);

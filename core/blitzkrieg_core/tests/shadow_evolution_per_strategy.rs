@@ -299,12 +299,17 @@ fn two_strategies_evolve_in_parallel_without_cross_talk_through_the_core() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut core = build_core(&dir, true);
 
-    // Every declaring strategy is registered — including the builtin, which is
-    // hosted-but-disabled. That makes the isolation check stricter: three units,
-    // one moves.
+    // Every declaring strategy is registered — including the builtins, which are
+    // hosted-but-disabled here (spread_arb off, trend_follow off by default).
+    // That makes the isolation check stricter: four units, one moves.
     assert_eq!(
         core.shadow_evolution().strategy_names(),
-        vec!["spread_arb".to_string(), "alpha".to_string(), "beta".to_string()],
+        vec![
+            "spread_arb".to_string(),
+            "trend_follow".to_string(),
+            "alpha".to_string(),
+            "beta".to_string(),
+        ],
     );
     let reg = core.shadow_evolution().registry();
     let c_spread = reg.handle_for("spread_arb").expect("the builtin declares knobs");

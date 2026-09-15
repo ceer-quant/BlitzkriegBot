@@ -72,6 +72,7 @@ fn engine_cfg() -> EngineConfig {
             window_floor_ms: 0,
         },
         spread_arb: SpreadArbConfig { trend_max_entry_price: dec!(0.45), ..Default::default() },
+        trend_follow: Default::default(),
         max_orderbook_stale_ms: 8000,
         momentum_window_sec: 30,
         momentum_tol_pct: dec!(0.03),
