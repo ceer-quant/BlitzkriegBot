@@ -123,6 +123,11 @@ impl CoreConfig {
             size_usd: self.size_usd,
             min_shares: self.min_shares,
             max_shares: self.max_shares,
+            strategy_sizes: self
+                .strategy_limits
+                .iter()
+                .map(|(name, limit)| (name.clone(), limit.sizing()))
+                .collect(),
             ..Default::default()
         }
     }
@@ -134,7 +139,9 @@ impl CoreConfig {
     }
 }
 
-/// Entry caps for one strategy. Both are optional; `None` = no cap.
+/// Entry caps and sizing for one strategy (E2-a). Every field is optional;
+/// `None` = inherit the global value (no cap / global sizing). A per-strategy
+/// sizing override can only tighten the global risk band, never widen it.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StrategyLimit {
@@ -144,6 +151,27 @@ pub struct StrategyLimit {
     /// entry is rejected when open notional + its own notional would exceed it.
     #[serde(with = "crate::decimal::opt", default)]
     pub max_open_notional_usd: Option<Decimal>,
+    /// Target notional per entry (USD). Clamped to the global `size_usd`.
+    #[serde(with = "crate::decimal::opt", default)]
+    pub size_usd: Option<Decimal>,
+    /// Floor on shares per entry. Raised to the global `min_shares` when lower.
+    #[serde(with = "crate::decimal::opt", default)]
+    pub min_shares: Option<Decimal>,
+    /// Ceiling on shares per entry. Clamped to the global `max_shares`.
+    #[serde(with = "crate::decimal::opt", default)]
+    pub max_shares: Option<Decimal>,
+}
+
+impl StrategyLimit {
+    /// The sizing knobs this limit overrides (`None` across the board when it
+    /// configures only caps — the engine then uses the globals).
+    pub fn sizing(&self) -> crate::engine::StrategySize {
+        crate::engine::StrategySize {
+            size_usd: self.size_usd,
+            min_shares: self.min_shares,
+            max_shares: self.max_shares,
+        }
+    }
 }
 
 /// Overridable Shadow Evolution thresholds (all optional).
@@ -890,12 +918,35 @@ impl Core {
                     .and_then(|e| e.strategy_source(&name))
                     .unwrap_or("")
                     .to_string();
+                // E2-a: the sizing actually in force for this strategy (its own
+                // override clamped by the globals, else the globals) plus the
+                // configured caps, so the report shows both quota and occupancy.
+                let effective = self
+                    .engine
+                    .as_ref()
+                    .map(|e| e.effective_sizing(&name))
+                    .unwrap_or(crate::engine::EffectiveSizing {
+                        size_usd: self.config.size_usd,
+                        min_shares: self.config.min_shares,
+                        max_shares: self.config.max_shares,
+                        strategy_scoped: false,
+                    });
+                let limit = self.config.strategy_limits.get(&name);
                 serde_json::json!({
                     "name": name,
                     "enabled": enabled.contains(&name),
                     "source": source,
                     "openPositions": opens.len(),
                     "openNotionalUsd": dec_json(open_notional),
+                    // ── E2-a quota + effective sizing ──
+                    "maxOpenPositions": limit.and_then(|l| l.max_open_positions),
+                    "maxOpenNotionalUsd": limit
+                        .and_then(|l| l.max_open_notional_usd)
+                        .map(dec_json),
+                    "sizingSource": if effective.strategy_scoped { "strategy" } else { "global" },
+                    "effectiveSizeUsd": dec_json(effective.size_usd),
+                    "effectiveMinShares": dec_json(effective.min_shares),
+                    "effectiveMaxShares": dec_json(effective.max_shares),
                     "ordersPlaced": acc.placed,
                     "ordersRejected": acc.rejected,
                     "limitRejected": acc.limit_rejected,
@@ -2264,6 +2315,7 @@ mod strategy_dispatch_tests {
             size_usd: dec!(2.5),
             min_shares: dec!(10),
             max_shares: dec!(10),
+            strategy_sizes: HashMap::new(),
         }
     }
 
@@ -2279,6 +2331,325 @@ mod strategy_dispatch_tests {
         });
         c.enable_engine(Engine::new(engine_cfg()));
         c
+    }
+
+    // ── E2-a: per-strategy sizing + independent quotas ──────────────────────
+
+    /// A test strategy that dips on an explicit asset list. Declaring the assets
+    /// lets several strategies share one cycle without fighting over a token.
+    struct TargetDip {
+        name: String,
+        buy_below: Decimal,
+        assets: Vec<String>,
+    }
+    impl crate::strategies::EngineStrategy for TargetDip {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn on_book(&mut self, _t: &str, _s: &crate::model::OrderbookSnapshot, _n: i64) {}
+        fn on_round(&mut self, _slot: i64) {}
+        fn find_candidates(
+            &mut self,
+            ctx: &crate::strategies::StrategyCtx<'_>,
+        ) -> Vec<crate::signal::TradeSignal> {
+            let mut out = Vec::new();
+            for market in ctx.markets() {
+                if !self.assets.contains(&market.asset) {
+                    continue;
+                }
+                for (token_id, direction) in [
+                    (&market.up_token_id, crate::model::SignalDirection::Up),
+                    (&market.down_token_id, crate::model::SignalDirection::Down),
+                ] {
+                    let Some(book) = ctx.fresh_book(token_id) else { continue };
+                    if book.mid_price <= self.buy_below {
+                        out.push(crate::signal::TradeSignal {
+                            strategy: self.name.clone(),
+                            asset: market.asset.clone(),
+                            direction,
+                            token_id: token_id.clone(),
+                            condition_id: market.condition_id.clone(),
+                            price: book.mid_price,
+                            reason: "target dip".into(),
+                        });
+                    }
+                }
+            }
+            out
+        }
+    }
+
+    const DIPS: [(&str, &[&str]); 3] = [("small", &["BTC"]), ("mid", &["ETH"]), ("unset", &["SOL"])];
+
+    /// Core with a three-asset engine and the given dip strategies registered
+    /// enabled. `spread_arb` is switched off so only the test strategies emit.
+    ///
+    /// The engine is built through `CoreConfig::engine_config()` — the ONE
+    /// production mapping — so these tests exercise the same per-strategy sizing
+    /// projection the live server and the backtester use.
+    fn core_with_dips(
+        limits: HashMap<String, StrategyLimit>,
+        dips: &[(&str, &[&str])],
+        global_max_positions: usize,
+    ) -> Core {
+        let mut c = Core::new(CoreConfig {
+            risk: RiskConfig { max_order_notional: dec!(100), ..Default::default() },
+            dry_seed_balance: dec!(1000),
+            engine_enabled: true,
+            round_duration_sec: 900,
+            min_round_age_sec: 0,
+            auto_exits_enabled: false,
+            assets: vec!["BTC".into(), "ETH".into(), "SOL".into()],
+            positions: crate::position::PositionConfig {
+                max_positions: global_max_positions,
+                exit: crate::exit_policy::ExitConfig { min_time_left_sec: 0, ..Default::default() },
+                ..Default::default()
+            },
+            strategy_limits: limits,
+            ..Default::default()
+        });
+        let cfg = c.config().engine_config();
+        let mut eng = Engine::new(cfg);
+        for (name, assets) in dips {
+            eng.register_user_strategy(
+                Box::new(TargetDip {
+                    name: (*name).to_string(),
+                    buy_below: dec!(0.45),
+                    assets: assets.iter().map(|a| (*a).to_string()).collect(),
+                }),
+                "test".into(),
+            )
+            .unwrap();
+            assert!(eng.set_strategy_enabled(name, true));
+        }
+        assert!(eng.set_strategy_enabled("spread_arb", false), "isolate the test strategies");
+        c.enable_engine(eng);
+        c
+    }
+
+    fn three_markets(now: i64) -> Vec<CryptoMarket> {
+        let _ = now;
+        ["BTC", "ETH", "SOL"]
+            .iter()
+            .map(|a| CryptoMarket {
+                asset: (*a).into(),
+                condition_id: format!("cond_{a}"),
+                question_id: format!("q_{a}"),
+                up_token_id: format!("{}_up", a.to_lowercase()),
+                down_token_id: format!("{}_down", a.to_lowercase()),
+                up_price: dec!(0.6),
+                down_price: dec!(0.4),
+                expires_at_ms: 1_800_000,
+                round_slot: 1,
+                neg_risk: true,
+                question: format!("{a} up or down"),
+            })
+            .collect()
+    }
+
+    /// Push a 0.44-mid book on the UP token of each given asset. Only the listed
+    /// assets dip, so a cycle can be aimed at one strategy.
+    fn feed_dip_on(c: &mut Core, now: i64, assets: &[&str]) {
+        for asset in assets {
+            let token = format!("{}_up", asset.to_lowercase());
+            c.engine_on_data(
+                DataEvent::Book {
+                    token_id: token,
+                    bids: vec![(dec!(0.43), dec!(100))],
+                    asks: vec![(dec!(0.45), dec!(100))],
+                    now_ms: now,
+                },
+                now,
+            );
+        }
+    }
+
+    /// Round + a 0.44-mid book on every asset's up token. Each strategy that
+    /// targets one of those assets emits one entry priced at 0.44.
+    fn feed_three_asset_dip(c: &mut Core, now: i64) {
+        c.engine_on_data(DataEvent::RoundMarkets { markets: three_markets(now), now_ms: now }, now);
+        feed_dip_on(c, now + 1_000, &["BTC", "ETH", "SOL"]);
+    }
+
+    /// Cross the book so the resting maker bid fills and a position opens.
+    fn fill(c: &mut Core, asset: &str, now: i64) {
+        let token = format!("{}_up", asset.to_lowercase());
+        c.book_snapshot(&token, vec![(dec!(0.42), dec!(100))], vec![(dec!(0.42), dec!(100))], now);
+    }
+
+    fn limits_of(rows: &[(&str, StrategyLimit)]) -> HashMap<String, StrategyLimit> {
+        rows.iter().map(|(n, l)| ((*n).to_string(), l.clone())).collect()
+    }
+
+    #[test]
+    fn three_strategies_size_independently_in_one_cycle() {
+        // Global band is [10,10] at a 2.5u budget; two strategies tighten it and
+        // one inherits it. All three trade the same cycle without interfering.
+        let limits = limits_of(&[
+            ("small", StrategyLimit {
+                size_usd: Some(dec!(1)), min_shares: Some(dec!(2)), max_shares: Some(dec!(2)),
+                ..Default::default()
+            }),
+            ("mid", StrategyLimit {
+                size_usd: Some(dec!(2)), min_shares: Some(dec!(4)), max_shares: Some(dec!(4)),
+                ..Default::default()
+            }),
+        ]);
+        let mut c = core_with_dips(limits, &DIPS, 5);
+        let now = 1_000_000i64;
+        feed_three_asset_dip(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 1_000), 3, "one entry per strategy: {:#?}", c.list_orders());
+
+        let sizes: Vec<(String, Decimal)> =
+            c.list_orders().iter().map(|o| (o.strategy.clone(), o.size)).collect();
+        assert_eq!(
+            sizes.iter().find(|(s, _)| s == "small").map(|(_, v)| *v),
+            Some(dec!(2)),
+            "1u/0.44 → 2 shares inside [2,2]: {sizes:?}"
+        );
+        assert_eq!(
+            sizes.iter().find(|(s, _)| s == "mid").map(|(_, v)| *v),
+            Some(dec!(4)),
+            "2u/0.44 ≈ 5 → clamped to the strategy's 4-share ceiling: {sizes:?}"
+        );
+        assert_eq!(
+            sizes.iter().find(|(s, _)| s == "unset").map(|(_, v)| *v),
+            Some(dec!(10)),
+            "no override must fall back to the global lot: {sizes:?}"
+        );
+
+        let stats = c.strategy_stats();
+        let small = strategy_entry(&stats, "small");
+        assert_eq!(small["sizingSource"], "strategy");
+        assert_eq!(dec_of(&small["effectiveSizeUsd"]), dec!(1));
+        assert_eq!(dec_of(&small["effectiveMinShares"]), dec!(2));
+        assert_eq!(dec_of(&small["effectiveMaxShares"]), dec!(2));
+        let unset = strategy_entry(&stats, "unset");
+        assert_eq!(unset["sizingSource"], "global");
+        assert_eq!(dec_of(&unset["effectiveSizeUsd"]), dec!(2.5));
+        assert_eq!(dec_of(&unset["effectiveMaxShares"]), dec!(10));
+    }
+
+    #[test]
+    fn per_strategy_quota_is_independent_across_strategies() {
+        // `capped` may hold zero positions and targets two assets; `other` has no
+        // cap and targets a third. In one cycle the cap rejects both of `capped`'s
+        // candidates while `other` trades untouched — the quotas are per strategy,
+        // and one strategy being full never starves another.
+        let limits = limits_of(&[(
+            "capped",
+            StrategyLimit {
+                max_open_positions: Some(0),
+                size_usd: Some(dec!(1)), min_shares: Some(dec!(2)), max_shares: Some(dec!(2)),
+                ..Default::default()
+            },
+        )]);
+        let mut c = core_with_dips(limits, &[("capped", &["BTC", "ETH"]), ("other", &["SOL"])], 5);
+        let now = 1_000_000i64;
+        feed_three_asset_dip(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 1_000), 1, "only `other` may place: {:#?}", c.list_orders());
+        assert_eq!(c.engine_stats()["strategyLimitRejected"], 2, "both capped candidates were rejected");
+        assert_eq!(c.list_orders()[0].strategy, "other");
+
+        let stats = c.strategy_stats();
+        let capped = strategy_entry(&stats, "capped");
+        assert_eq!(capped["ordersPlaced"], 0);
+        assert_eq!(capped["limitRejected"], 2, "counted against the capped strategy only");
+        assert_eq!(capped["maxOpenPositions"], 0);
+        assert_eq!(dec_of(&capped["effectiveMaxShares"]), dec!(2), "its own lot is 2 shares");
+        let other = strategy_entry(&stats, "other");
+        assert_eq!(other["ordersPlaced"], 1, "the sibling still trades");
+        assert_eq!(other["limitRejected"], 0);
+        assert_eq!(other["maxOpenPositions"], serde_json::Value::Null, "unset = uncapped");
+        assert_eq!(dec_of(&other["effectiveSizeUsd"]), dec!(2.5), "and inherits the global sizing");
+    }
+
+    #[test]
+    fn a_strategy_cap_counts_only_its_own_open_positions() {
+        // `capped` allows one position and gets exactly one: it takes BTC, fills
+        // it, and is then rejected on ETH — while `other`'s SOL position is
+        // invisible to `capped`'s quota (and vice versa).
+        let limits = limits_of(&[(
+            "capped",
+            StrategyLimit { max_open_positions: Some(1), ..Default::default() },
+        )]);
+        let mut c = core_with_dips(limits, &[("capped", &["BTC", "ETH"]), ("other", &["SOL"])], 5);
+        let now = 1_000_000i64;
+        feed_three_asset_dip(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 1_000), 3, "two capped candidates + one sibling");
+
+        // Fill BTC (capped) and SOL (other): two live positions, one per strategy.
+        fill(&mut c, "BTC", now + 2_000);
+        fill(&mut c, "SOL", now + 2_000);
+        let open = c.positions().open_positions();
+        assert_eq!(open.len(), 2, "{open:#?}");
+        assert_eq!(open.iter().filter(|p| p.strategy == "capped").count(), 1);
+        assert_eq!(open.iter().filter(|p| p.strategy == "other").count(), 1);
+    }
+
+
+    #[test]
+    fn the_global_position_ceiling_still_binds_across_strategies() {
+        // Per-strategy quotas do not lift the global capacity gate. Open two
+        // positions with two strategies, then let a THIRD strategy find a dip:
+        // its entry is rejected by the shared global ceiling, not by its own cap.
+        let mut c = core_with_dips(
+            HashMap::new(),
+            &[("a", &["BTC"]), ("b", &["ETH"]), ("c", &["SOL"])],
+            2,
+        );
+        let now = 1_000_000i64;
+        c.engine_on_data(DataEvent::RoundMarkets { markets: three_markets(now), now_ms: now }, now);
+
+        feed_dip_on(&mut c, now + 1_000, &["BTC"]);
+        assert_eq!(c.engine_evaluate(now + 1_000), 1, "a takes BTC");
+        fill(&mut c, "BTC", now + 2_000);
+        feed_dip_on(&mut c, now + 3_000, &["ETH"]);
+        assert_eq!(c.engine_evaluate(now + 3_000), 1, "b takes ETH");
+        fill(&mut c, "ETH", now + 4_000);
+        assert_eq!(c.positions().open_positions().len(), 2, "global ceiling reached");
+
+        feed_dip_on(&mut c, now + 5_000, &["SOL"]);
+        assert_eq!(c.engine_evaluate(now + 5_000), 0, "the third strategy must be gated out");
+        assert_eq!(c.engine_stats()["placeRejected"], 1, "rejected by the global capacity gate");
+        assert_eq!(c.engine_stats()["strategyLimitRejected"], 0, "and NOT by a per-strategy quota");
+        assert_eq!(c.positions().open_positions().len(), 2);
+
+        let stats = c.strategy_stats();
+        // No strategy configured a quota, so all three report uncapped yet the
+        // global gate still held the line.
+        for name in ["a", "b", "c"] {
+            assert_eq!(strategy_entry(&stats, name)["maxOpenPositions"], serde_json::Value::Null);
+        }
+        assert_eq!(strategy_entry(&stats, "c")["ordersRejected"], 1);
+    }
+
+
+    #[test]
+    fn a_greedy_strategy_override_is_clamped_to_the_global_risk_band() {
+        // sizeUsd 100 / maxShares 999 / minShares 0 all lose to the globals; the
+        // report still marks the strategy as sizing-scoped.
+        let limits = limits_of(&[(
+            "small",
+            StrategyLimit {
+                size_usd: Some(dec!(100)),
+                min_shares: Some(dec!(0)),
+                max_shares: Some(dec!(999)),
+                ..Default::default()
+            },
+        )]);
+        let mut c = core_with_dips(limits, &[("small", &["BTC"])], 5);
+        let now = 1_000_000i64;
+        feed_three_asset_dip(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 1_000), 1);
+        assert_eq!(c.list_orders()[0].size, dec!(10), "global ceiling must win");
+
+        let stats = c.strategy_stats();
+        let s = strategy_entry(&stats, "small");
+        assert_eq!(s["sizingSource"], "strategy");
+        assert_eq!(dec_of(&s["effectiveSizeUsd"]), dec!(2.5), "notional clamped to the global budget");
+        assert_eq!(dec_of(&s["effectiveMaxShares"]), dec!(10), "share ceiling clamped to the global");
+        assert_eq!(dec_of(&s["effectiveMinShares"]), dec!(10), "floor raised to the global min");
     }
 
     fn market(now: i64) -> CryptoMarket {
@@ -2359,7 +2730,7 @@ mod strategy_dispatch_tests {
         let mut limits = HashMap::new();
         limits.insert(
             "spread_arb".to_string(),
-            StrategyLimit { max_open_positions: Some(0), max_open_notional_usd: None },
+            StrategyLimit { max_open_positions: Some(0), ..Default::default() },
         );
         let mut c = core_with_engine(limits);
         let now = 1_000_000i64;
@@ -2380,7 +2751,7 @@ mod strategy_dispatch_tests {
         let mut tight = HashMap::new();
         tight.insert(
             "spread_arb".to_string(),
-            StrategyLimit { max_open_positions: None, max_open_notional_usd: Some(dec!(1)) },
+            StrategyLimit { max_open_notional_usd: Some(dec!(1)), ..Default::default() },
         );
         let mut c = core_with_engine(tight);
         let now = 1_000_000i64;
@@ -2391,7 +2762,7 @@ mod strategy_dispatch_tests {
         let mut loose = HashMap::new();
         loose.insert(
             "spread_arb".to_string(),
-            StrategyLimit { max_open_positions: None, max_open_notional_usd: Some(dec!(10)) },
+            StrategyLimit { max_open_notional_usd: Some(dec!(10)), ..Default::default() },
         );
         let mut c2 = core_with_engine(loose);
         feed_entry_setup(&mut c2, now);
