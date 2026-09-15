@@ -9,7 +9,8 @@
 //!   (`core/blitzkrieg_core/src/ipc/schema.rs`). It never links the core's trading
 //!   types, so the whole kit is replaceable without touching the kernel.
 //! * One shared `core` (types + IPC client + event bus) fan-outs to three
-//!   adapters: `web` (browser), `tui` (terminal), `app` (future Tauri/egui).
+//!   adapters: `web` (browser), `app` (future Tauri/egui) + the ratatui panel
+//!   crate `ui_kit_panel`.
 //!
 //! Module map mirrors the requested layout:
 //!   `core::types`      — DTOs one-to-one with the core's IPC messages
@@ -18,13 +19,11 @@
 //!   `gateway`          — command dispatch (start/stop/status/positions) +
 //!                        core process supervisor (D-4 step ②); no order API
 //!   `web`              — HTML/JSON renderers + a dependency-free HTTP server
-//!   `tui`              — ANSI renderers + a polling run loop
 //!   `app`              — adapter trait + headless stub for the native app
 
 pub mod app;
 pub mod core;
 pub mod gateway;
-pub mod tui;
 pub mod web;
 
 pub use core::event_bus::{EventBus, Subscription};
