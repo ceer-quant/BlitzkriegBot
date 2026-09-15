@@ -22,6 +22,7 @@ use blitzkrieg_ui_kit::gateway::{Dispatcher, SupervisorConfig};
 use blitzkrieg_ui_kit::UiSnapshot;
 use crossterm::event::{Event, KeyEventKind};
 use ratatui::DefaultTerminal;
+use std::io::IsTerminal;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::{self};
@@ -122,6 +123,18 @@ async fn main() -> std::io::Result<()> {
 
     let cfg = SupervisorConfig::from_env(args.socket.clone());
     let dispatcher = Arc::new(Mutex::new(Dispatcher::new(cfg, args.manage)));
+
+    // ratatui::init() panics without a real terminal (raw-mode ioctl fails on a
+    // plain pipe). In headless output (a script piping stdout) the panel is not
+    // usable anyway — fail with guidance instead of a stack trace.
+    if !std::io::stdout().is_terminal() {
+        eprintln!(
+            "ui_kit_panel needs an interactive terminal (stdout is not a TTY). \
+             Quitting — this launcher is safe to rerun under a real terminal, \
+             e.g. directly or via `npm run tui`."
+        );
+        return Ok(());
+    }
 
     // Terminal setup: raw mode + alternate screen; a panic hook restores it.
     let mut terminal: DefaultTerminal = ratatui::init();
