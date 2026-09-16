@@ -22,6 +22,7 @@ import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import EquityCurve from '@/components/charts/EquityCurve.vue'
 import RejectionChart from '@/components/charts/RejectionChart.vue'
+import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const store = usePanelStore()
 
@@ -127,7 +128,7 @@ const unrealized = computed(() =>
       >
         <template #sub>
           <!--
-            The headline above is 本金 ＋ 净利润. State that arithmetic, because
+            The row above is 本金 ＋ 净利润. State that arithmetic, because
             a reader who expects the core's cash number here needs to know which
             figure they are looking at and why the two differ.
           -->
@@ -149,7 +150,9 @@ const unrealized = computed(() =>
               内核现金账 · 本金未上报
             </span>
           </Tooltip>
-          <template v-else>可用 {{ money(recon.available) }} · 预留 {{ money(recon.reserved) }}</template>
+          <template v-else>
+            可用 <RollingNumber :value="money(recon.available)" /> · 预留 <RollingNumber :value="money(recon.reserved)" />
+          </template>
         </template>
 
         <!-- Fees are a cost: shown against gross profit, never inside the balance. -->
@@ -192,23 +195,25 @@ const unrealized = computed(() =>
         :tone="trades.net >= 0 ? 'up' : 'down'"
       >
         <template #sub>
-          扣费净利 {{ signedMoney(trades.net) }} · 费用 {{ money(trades.fees) }}
+          扣费净利 <RollingNumber :value="signedMoney(trades.net)" /> · 费用 <RollingNumber :value="money(trades.fees)" />
         </template>
         <div class="mt-2 flex items-center gap-2">
-          <Badge variant="up"><ArrowUpRight class="size-3" />{{ trades.win }}</Badge>
-          <Badge variant="down"><ArrowDownRight class="size-3" />{{ trades.loss }}</Badge>
-          <span class="text-[11px] text-faint-fg num">胜率 {{ pct(trades.winRate) }}</span>
+          <Badge variant="up"><ArrowUpRight class="size-3" /><RollingNumber :value="trades.win" /></Badge>
+          <Badge variant="down"><ArrowDownRight class="size-3" /><RollingNumber :value="trades.loss" /></Badge>
+          <span class="text-[11px] text-faint-fg num">胜率 <RollingNumber :value="pct(trades.winRate)" /></span>
         </div>
       </StatTile>
 
+      <!-- Words, not figures: DRY / LIVE never rolls, so it stays plain text. -->
       <StatTile
         label="运行模式"
         :value="(snap.mode ?? '—').toUpperCase()"
+        :roll="false"
         :tone="snap.mode === 'dry' ? 'gold' : 'up'"
       >
         <template #sub>
           {{ snap.connected ? '引擎已连接' : '引擎未连接' }}
-          <template v-if="positions.length"> · {{ positions.length }} 持仓</template>
+          <template v-if="positions.length"> · <RollingNumber :value="positions.length" /> 持仓</template>
         </template>
         <div class="mt-2 flex items-center gap-1.5">
           <ShieldCheck class="size-3.5" :style="{ color: snap.mode === 'dry' ? 'var(--primary)' : 'var(--up)' }" />
@@ -225,11 +230,11 @@ const unrealized = computed(() =>
         <CardHeader label="权益曲线">
           <template #title>
             <span class="stat-num text-[15px]" :class="trades.net >= 0 ? 'text-up' : 'text-down'">
-              {{ signedMoney(trades.net) }}
+              <RollingNumber :value="signedMoney(trades.net)" />
             </span>
           </template>
           <template #action>
-            <Badge variant="default" dot>{{ trades.count }} 笔</Badge>
+            <Badge variant="default" dot><RollingNumber :value="trades.count" /> 笔</Badge>
           </template>
         </CardHeader>
         <EquityCurve :rows="tradeRows" :height="196" />
@@ -246,7 +251,7 @@ const unrealized = computed(() =>
                 'text-gold': c.tone === 'gold',
                 'text-down': c.tone === 'down',
               }"
-            >{{ c.value }}</div>
+            ><RollingNumber :value="c.value" /></div>
           </div>
         </div>
         <div
@@ -255,7 +260,7 @@ const unrealized = computed(() =>
         >
           <span class="text-faint-fg">未平仓浮动合计</span>
           <span class="stat-num" :class="unrealized >= 0 ? 'text-up' : 'text-down'">
-            {{ signedMoney(unrealized) }}
+            <RollingNumber :value="signedMoney(unrealized)" />
           </span>
         </div>
       </Card>
@@ -266,7 +271,7 @@ const unrealized = computed(() =>
       <Card>
         <CardHeader label="策略拒单原因分布">
           <template #action>
-            <Badge variant="default">{{ strategyRows.length }} 策略</Badge>
+            <Badge variant="default"><RollingNumber :value="strategyRows.length" /> 策略</Badge>
           </template>
         </CardHeader>
         <RejectionChart :rows="strategyRows" :height="210" />
@@ -275,7 +280,7 @@ const unrealized = computed(() =>
       <Card dense>
         <CardHeader label="当前持仓">
           <template #action>
-            <Badge :variant="positions.length ? 'gold' : 'default'">{{ positions.length }}</Badge>
+            <Badge :variant="positions.length ? 'gold' : 'default'"><RollingNumber :value="positions.length" /></Badge>
           </template>
         </CardHeader>
         <div v-if="positions.length" class="-mx-1 overflow-x-auto">
@@ -303,15 +308,15 @@ const unrealized = computed(() =>
                     {{ p.direction.toUpperCase() }}
                   </Badge>
                 </td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg">{{ Number(p.entryPrice).toFixed(3) }}</td>
-                <td class="px-2 py-2.5 text-right num">{{ Number(p.currentPrice).toFixed(3) }}</td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg">{{ p.shares ?? '—' }}</td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(p.entryPrice).toFixed(3)" /></td>
+                <td class="px-2 py-2.5 text-right num"><RollingNumber :value="Number(p.currentPrice).toFixed(3)" /></td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="p.shares ?? '—'" /></td>
                 <td
                   class="px-2 py-2.5 text-right num font-semibold"
                   :class="p.unrealizedPct >= 0 ? 'text-up' : 'text-down'"
-                >{{ Number(p.unrealizedPct) >= 0 ? '+' : '' }}{{ Number(p.unrealizedPct).toFixed(1) }}%</td>
+                ><RollingNumber :value="`${Number(p.unrealizedPct) >= 0 ? '+' : ''}${Number(p.unrealizedPct).toFixed(1)}%`" /></td>
                 <td class="px-2 py-2.5 text-right num text-faint-fg">
-                  {{ p.remainingSec !== undefined ? duration(p.remainingSec) : '—' }}
+                  <RollingNumber :value="p.remainingSec !== undefined ? duration(p.remainingSec) : '—'" />
                 </td>
               </tr>
             </tbody>

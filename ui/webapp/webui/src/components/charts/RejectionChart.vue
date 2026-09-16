@@ -13,6 +13,7 @@ import type { EChartsOption } from 'echarts'
 import { useChart, palette, tooltipStyle } from '@/lib/chart'
 import { num } from '@/lib/format'
 import type { StrategyStatsRow } from '@/api/client'
+import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const props = withDefaults(
   defineProps<{ rows: StrategyStatsRow[]; height?: number; topN?: number }>(),
@@ -105,7 +106,7 @@ useChart(el, () => option.value)
         thousands of orders.
       -->
       <p v-if="unattributed > 0" class="text-[11.5px] leading-snug text-faint-fg">
-        <span class="num font-semibold text-down">{{ num(unattributed) }}</span> 笔拒单未归因：
+        <span class="num font-semibold text-down"><RollingNumber :value="num(unattributed)" /></span> 笔拒单未归因：
         内核未上报拒单原因（通常是内核版本早于拒单归因功能）。重启内核后即可按原因分类。
       </p>
       <p v-else class="text-[11.5px] text-faint-fg">暂无拒单记录</p>

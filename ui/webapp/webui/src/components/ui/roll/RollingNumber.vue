@@ -115,27 +115,35 @@ watch(
 <template>
   <span :class="cn('roll', props.class)">
     <span class="sr-only">{{ text }}</span>
-    <span aria-hidden="true">
+    <span class="roll-paint" aria-hidden="true">
       <template v-for="(cell, i) in cells" :key="i">
         <span v-if="!cell.stack.length" class="roll-static">{{ cell.ch }}</span>
-        <span v-else class="roll-cell">
-          <!-- Width-defining glyph: one tabular digit. Hidden, but it still lays out. -->
-          <span class="roll-sizer">0</span>
-          <!--
-            Travel is always upward by `stack.length - 1`, which parks the LAST
-            glyph of the stack in the visible row. The direction of the value
-            change only decides which glyphs the stack contains, so the motion
-            stays one consistent way instead of reversing between a countdown and
-            an increment.
-          -->
-          <span
+        <!--
+          The two spans inside the cell are written adjacent, with no whitespace
+          between them. The sizer is in flow, so a stray text node there would
+          count toward the cell's width and break the fixed one-digit column.
+
+          `.roll-sizer` is in-flow, invisible, and one tabular digit wide: it
+          gives the cell a real line box to take a baseline from, and sets the
+          cell's width without depending on which glyph is showing.
+
+          Clipping lives on `.roll-clip` rather than the cell, because
+          `overflow: hidden` on an inline-block forces that box's baseline to its
+          bottom margin edge — on the cell that pulled the digits up off the text
+          baseline by 5.25px at 42px and 1.5px at 11.5px. On this inner layer it
+          costs nothing, since only the cell is a baseline-aligned inline box.
+
+          Travel is always upward by `stack.length - 1`, which parks the LAST
+          glyph of the stack in the visible row. The direction of the value change
+          only decides which glyphs the stack contains, so the motion stays one
+          consistent way instead of reversing between a countdown and an
+          increment.
+        -->
+        <span v-else class="roll-cell"><span class="roll-sizer" aria-hidden="true">0</span><span class="roll-clip"><span
             :key="gen"
             class="roll-strip"
             :style="{ '--roll-to': `${-(cell.stack.length - 1)}em`, animationDuration: `${props.duration}ms` }"
-          >
-            <span v-for="(g, gi) in cell.stack" :key="gi" class="roll-glyph">{{ g }}</span>
-          </span>
-        </span>
+          ><span v-for="(g, gi) in cell.stack" :key="gi" class="roll-glyph">{{ g }}</span></span></span></span>
       </template>
     </span>
   </span>
@@ -158,23 +166,46 @@ watch(
   letter-spacing: 0;
 }
 
-.roll-static,
-.roll-cell {
-  display: inline-block;
-  vertical-align: baseline;
+/*
+ * The digits exist twice: once as selectable text in `.sr-only`, once as glyphs
+ * here. Selecting a number across both copies would paste it doubled, so the
+ * painted copy is kept out of selections — a copy of a row yields the value
+ * exactly once, from the `.sr-only` text.
+ */
+.roll-paint {
+  user-select: none;
 }
 
-/* One tabular digit wide, one line tall, clipping whatever falls outside. */
+/* Punctuation rides the surrounding text directly, so it keeps the normal
+   baseline without any box of its own. */
+.roll-static {
+  display: inline;
+}
+
+/*
+ * One tabular digit wide, one line tall. `overflow` stays VISIBLE here: see
+ * `.roll-clip`. An inline-block with a non-visible overflow takes its baseline
+ * from its bottom margin edge, which would lift every digit off the text
+ * baseline. With a visible overflow and the in-flow sizer above, the cell takes
+ * its baseline from that line box instead — the same baseline the surrounding
+ * text uses — so digits sit exactly where plain text would.
+ */
 .roll-cell {
+  display: inline-block;
   position: relative;
-  overflow: hidden;
   height: 1em;
   line-height: 1em;
 }
 
 .roll-sizer {
-  display: block;
   visibility: hidden;
+}
+
+/* The visible window: one line tall, positioned over the cell's content box. */
+.roll-clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
 }
 
 .roll-strip {

@@ -19,6 +19,7 @@ import StatTile from '@/components/ui/stat/StatTile.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
+import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const fileEl = ref<HTMLInputElement | null>(null)
 const report = ref<BacktestReport | null>(null)
@@ -294,20 +295,20 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
           <p class="mt-2 truncate text-[13px] font-semibold">{{ report.source }}</p>
           <p class="mt-1 text-[11.5px] text-faint-fg num">
             {{ dateTime(report.startAtMs) }} → {{ dateTime(report.endAtMs) }}
-            · 窗口 {{ duration(windowSec) }} · tick {{ report.tickMs }}ms
-            <template v-if="report.tailMs"> · tail {{ report.tailMs }}ms</template>
+            · 窗口 <RollingNumber :value="duration(windowSec)" /> · tick <RollingNumber :value="report.tickMs" />ms
+            <template v-if="report.tailMs"> · tail <RollingNumber :value="report.tailMs" />ms</template>
           </p>
           <p class="mt-1 text-[11px] text-faint-fg num">
-            事件 {{ num(report.sourceStats?.events) }}
-            · 坏行 <span :class="report.sourceStats?.malformedLines ? 'text-down' : ''">{{ num(report.sourceStats?.malformedLines) }}</span>
-            · 乱序 {{ num(report.sourceStats?.outOfOrderEvents) }}
-            · 匹配盘口 {{ num(report.feed?.books) }} / 轮次 {{ num(report.feed?.rounds) }}
+            事件 <RollingNumber :value="num(report.sourceStats?.events)" />
+            · 坏行 <span :class="report.sourceStats?.malformedLines ? 'text-down' : ''"><RollingNumber :value="num(report.sourceStats?.malformedLines)" /></span>
+            · 乱序 <RollingNumber :value="num(report.sourceStats?.outOfOrderEvents)" />
+            · 匹配盘口 <RollingNumber :value="num(report.feed?.books)" /> / 轮次 <RollingNumber :value="num(report.feed?.rounds)" />
           </p>
         </div>
 
         <div class="text-center">
           <div class="stat-num text-[34px] leading-none" :class="positive ? 'text-up' : 'text-down'">
-            {{ signedMoney(netPnl) }}
+            <RollingNumber :value="signedMoney(netPnl)" />
           </div>
           <div class="label-micro mt-1.5">回放净 PnL（扣费）</div>
         </div>
@@ -327,8 +328,8 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
         tone="up"
       >
         <template #sub>
-          <span class="text-down font-semibold">{{ report.trades.losses }}</span> 亏 ·
-          {{ report.trades.flat }} 平 · 共 {{ report.trades.closed }} 笔平仓
+          <span class="text-down font-semibold"><RollingNumber :value="report.trades.losses" /></span> 亏 ·
+          <RollingNumber :value="report.trades.flat" /> 平 · 共 <RollingNumber :value="report.trades.closed" /> 笔平仓
         </template>
       </StatTile>
       <StatTile
@@ -337,14 +338,14 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
         :tone="report.trades.winRatePct >= 50 ? 'up' : 'down'"
       >
         <template #sub>
-          盈亏比 {{ report.trades.profitFactor != null ? num(report.trades.profitFactor) : '—' }} ·
-          均笔 {{ signedMoney(report.trades.avgPnlUsd) }}
+          盈亏比 <RollingNumber :value="report.trades.profitFactor != null ? num(report.trades.profitFactor) : '—'" /> ·
+          均笔 <RollingNumber :value="signedMoney(report.trades.avgPnlUsd)" />
         </template>
       </StatTile>
       <StatTile label="手续费" :value="money(report.trades.feesUsd)">
         <template #sub>
-          毛利 +{{ money(report.trades.grossProfitUsd) }} ·
-          毛亏 {{ money(report.trades.grossLossUsd) }}
+          毛利 +<RollingNumber :value="money(report.trades.grossProfitUsd)" /> ·
+          毛亏 <RollingNumber :value="money(report.trades.grossLossUsd)" />
         </template>
       </StatTile>
       <StatTile
@@ -355,7 +356,7 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
         <template #sub>
           <Tooltip content="回撤金额 ÷ 回撤前的权益峰值。净值基数很小时百分比会被放大，属正常现象。">
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-              占权益峰 {{ pct(report.trades.maxDrawdownPct) }}
+              占权益峰 <RollingNumber :value="pct(report.trades.maxDrawdownPct)" />
             </span>
           </Tooltip>
         </template>
@@ -365,8 +366,8 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
     <div class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
       <StatTile label="订单流水" :value="num(report.orders.orders)">
         <template #sub>
-          成交 {{ report.fills }} · 撤 {{ report.orders.cancelled }} ·
-          拒 {{ report.orders.rejected }} · 失败 {{ report.orders.failed }}
+          成交 <RollingNumber :value="report.fills" /> · 撤 <RollingNumber :value="report.orders.cancelled" /> ·
+          拒 <RollingNumber :value="report.orders.rejected" /> · 失败 <RollingNumber :value="report.orders.failed" />
         </template>
       </StatTile>
       <StatTile
@@ -381,7 +382,7 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
         :value="num(report.openPositions)"
         :tone="report.openPositions ? 'gold' : 'default'"
       >
-        <template #sub>占用名义 {{ money(report.openNotionalUsd) }}</template>
+        <template #sub>占用名义 <RollingNumber :value="money(report.openNotionalUsd)" /></template>
       </StatTile>
       <StatTile
         label="门禁拦截"
@@ -389,7 +390,7 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
         :tone="blockedTotal ? 'gold' : 'default'"
       >
         <template #sub>
-          动量 {{ num(report.blocked?.momentum) }} · 时点 {{ num(report.blocked?.timing) }}
+          动量 <RollingNumber :value="num(report.blocked?.momentum)" /> · 时点 <RollingNumber :value="num(report.blocked?.timing)" />
         </template>
       </StatTile>
     </div>
@@ -437,18 +438,18 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
           <tbody>
             <tr v-for="s in strategyTable" :key="s.name" class="border-t border-line">
               <td class="px-2 py-2.5 font-semibold">{{ s.name }}</td>
-              <td class="px-2 py-2.5 text-right num">{{ num(s.closed) }}</td>
+              <td class="px-2 py-2.5 text-right num"><RollingNumber :value="num(s.closed)" /></td>
               <td class="px-2 py-2.5 text-right num">
-                <span class="text-up">{{ num(s.wins) }}</span>
+                <span class="text-up"><RollingNumber :value="num(s.wins)" /></span>
                 <span class="text-faint-fg"> / </span>
-                <span class="text-down">{{ num(s.losses) }}</span>
+                <span class="text-down"><RollingNumber :value="num(s.losses)" /></span>
               </td>
               <td class="px-2 py-2.5 text-right num text-muted-fg">
-                {{ s.wins + s.losses ? pct((s.wins / (s.wins + s.losses)) * 100) : '—' }}
+                <RollingNumber :value="s.wins + s.losses ? pct((s.wins / (s.wins + s.losses)) * 100) : '—'" />
               </td>
-              <td class="px-2 py-2.5 text-right num text-muted-fg">{{ money(s.fees) }}</td>
+              <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="money(s.fees)" /></td>
               <td class="px-2 py-2.5 text-right num font-semibold" :class="s.net >= 0 ? 'text-up' : 'text-down'">
-                {{ signedMoney(s.net) }}
+                <RollingNumber :value="signedMoney(s.net)" />
               </td>
             </tr>
           </tbody>
@@ -460,7 +461,7 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
     <Card v-if="blockedRows.length || exemptions.length" class="mt-3.5" dense>
       <CardHeader label="门禁拦截归因">
         <template #action>
-          <Badge :variant="blockedTotal ? 'gold' : 'default'">{{ blockedTotal }} 次</Badge>
+          <Badge :variant="blockedTotal ? 'gold' : 'default'"><RollingNumber :value="blockedTotal" /> 次</Badge>
         </template>
       </CardHeader>
       <div v-if="blockedRows.length" class="-mx-2 overflow-x-auto">
@@ -476,9 +477,9 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
           <tbody>
             <tr v-for="b in blockedRows" :key="b.name" class="border-t border-line">
               <td class="px-2 py-2.5 font-semibold">{{ b.name }}</td>
-              <td class="px-2 py-2.5 text-right num" :class="b.momentum ? 'text-primary' : 'text-faint-fg'">{{ num(b.momentum) }}</td>
-              <td class="px-2 py-2.5 text-right num" :class="b.timing ? 'text-primary' : 'text-faint-fg'">{{ num(b.timing) }}</td>
-              <td class="px-2 py-2.5 text-right num font-semibold">{{ num(b.momentum + b.timing) }}</td>
+              <td class="px-2 py-2.5 text-right num" :class="b.momentum ? 'text-primary' : 'text-faint-fg'"><RollingNumber :value="num(b.momentum)" /></td>
+              <td class="px-2 py-2.5 text-right num" :class="b.timing ? 'text-primary' : 'text-faint-fg'"><RollingNumber :value="num(b.timing)" /></td>
+              <td class="px-2 py-2.5 text-right num font-semibold"><RollingNumber :value="num(b.momentum + b.timing)" /></td>
             </tr>
           </tbody>
         </table>
@@ -501,13 +502,13 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
             <span class="inline-flex items-center gap-2 text-[12.5px] text-up">
               <TrendingUp class="size-3.5" />{{ bestTrade.asset }} {{ bestTrade.direction.toUpperCase() }}
             </span>
-            <span class="stat-num text-[15px] text-up">{{ signedMoney(bestTrade.netPnlUsd) }}</span>
+            <span class="stat-num text-[15px] text-up"><RollingNumber :value="signedMoney(bestTrade.netPnlUsd)" /></span>
           </div>
           <div class="flex items-center justify-between rounded-md border border-down/25 bg-down/8 px-3 py-2">
             <span class="inline-flex items-center gap-2 text-[12.5px] text-down">
               <TrendingDown class="size-3.5" />{{ worstTrade.asset }} {{ worstTrade.direction.toUpperCase() }}
             </span>
-            <span class="stat-num text-[15px] text-down">{{ signedMoney(worstTrade.netPnlUsd) }}</span>
+            <span class="stat-num text-[15px] text-down"><RollingNumber :value="signedMoney(worstTrade.netPnlUsd)" /></span>
           </div>
         </div>
         <EmptyState v-else text="本次回放没有平仓交易" compact />
@@ -516,8 +517,8 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
       <Card>
         <CardHeader label="风控告警 / 错误">
           <template #action>
-            <Badge :variant="report.riskAlerts.length ? 'gold' : 'default'">{{ report.riskAlerts.length }}</Badge>
-            <Badge :variant="report.errors.length ? 'down' : 'default'">{{ report.errors.length }}</Badge>
+            <Badge :variant="report.riskAlerts.length ? 'gold' : 'default'"><RollingNumber :value="report.riskAlerts.length" /></Badge>
+            <Badge :variant="report.errors.length ? 'down' : 'default'"><RollingNumber :value="report.errors.length" /></Badge>
           </template>
         </CardHeader>
         <div v-if="report.riskAlerts.length || report.errors.length" class="space-y-2">

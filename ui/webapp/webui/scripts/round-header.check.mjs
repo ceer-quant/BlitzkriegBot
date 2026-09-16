@@ -76,6 +76,67 @@ function rollText(now, before) {
 /** Travel implied by a stack: always upward, parking the last glyph. */
 const travel = (stack) => -(stack.length - 1)
 
+// ── the "missed a number" scanner ─────────────────────────────────────────────
+const TAG = /<(\/?)([A-Za-z][-\w.]*)((?:"[^"]*"|'[^']*'|[^>"'])*?)(\/?)>/g
+const NUMERIC_CLASS = /(?:^|\s)(?:stat-num|num)(?:\s|$)/
+/**
+ * Interpolations that are prose or identifiers rather than figures, and so are
+ * deliberately left static. Anything added here must be justified: a value that
+ * ticks belongs in <RollingNumber>.
+ *
+ * `feed.ageLabel` is the one judgement call — it does carry digits (`行情 3m20s
+ * 前更新`), but it is a sentence whose wording changes with the state, so rolling
+ * it would animate the prose around the number and twitch on every state change.
+ * Timestamps and addresses are identifiers, not readings. `duration()` is
+ * deliberately absent: a countdown does tick and must roll.
+ */
+const TEXT_MARKERS =
+  /^(?:dateTime|shortAddr|identity|stateLabel|marketTypeLabel|backtestLabel)\s*\(|\.(?:ageLabel|asset|direction|name|strategy|source|exitReason|label|description|kind)\b/
+
+/**
+ * Raw `{{ … }}` interpolations sitting directly inside a numeric slot.
+ *
+ * Deliberately a tiny HTML walk rather than a regex over the whole file: the
+ * slot a value sits in is inherited from ancestors, and only a walk can know
+ * that `<td class="num"><span>{{ n }}</span></td>` is a figure while
+ * `<td>{{ p.asset }}</td>` beside it is not.
+ */
+function rawInNumericSlots(src) {
+  // Blank comments in place so their line structure survives while their prose
+  // cannot be mistaken for markup.
+  const clean = src.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, ' '))
+  const found = []
+  const stack = []
+  let cursor = 0
+
+  const flushText = (end) => {
+    const chunk = clean.slice(cursor, end)
+    cursor = end
+    if (!stack.some((f) => f.numeric)) return
+    for (const m of chunk.matchAll(/\{\{([\s\S]*?)\}\}/g)) {
+      const expr = m[1].trim()
+      if (TEXT_MARKERS.test(expr)) continue
+      found.push(expr)
+    }
+  }
+
+  TAG.lastIndex = 0
+  let m
+  while ((m = TAG.exec(clean))) {
+    flushText(m.index)
+    const [, closing, , attrs, selfClose] = m
+    if (closing) {
+      stack.pop()
+    } else if (!selfClose) {
+      const cls = attrs.match(/\bclass="([^"]*)"/)?.[1] ?? ''
+      stack.push({ numeric: NUMERIC_CLASS.test(cls) })
+    }
+    cursor = TAG.lastIndex
+  }
+  flushText(clean.length)
+  return found
+}
+
 console.log('round header — status position and rolling digits')
 
 // ── 1. the jitter ─────────────────────────────────────────────────────────────
@@ -268,6 +329,57 @@ check('the digits are announced once, as the number', () => {
   assert.match(component, /aria-hidden="true"/, 'the glyph strips must be hidden from AT')
 })
 
+check('a copied value is not doubled by the readable twin', () => {
+  // Every digit now exists twice: once as selectable text and once as painted
+  // glyphs. Selecting a row and copying it would otherwise paste the number
+  // twice, so the painted copy has to be excluded from selections.
+  assert.match(component, /\.roll-paint\s*\{[^}]*user-select:\s*none/, 'the painted copy must be unselectable')
+  assert.match(component, /class="roll-paint"\s+aria-hidden="true"/, 'the unselectable copy is the painted one')
+})
+
+// ── 2b. the digits sit on the text baseline ───────────────────────────────────
+check('the rolling cell does not break the text baseline', () => {
+  // CSS 2.1: an `overflow` other than `visible` on an inline-block forces that
+  // box's baseline to its BOTTOM MARGIN EDGE. The cell is baseline-aligned, so
+  // clipping it directly lifted every digit off the text baseline — measured at
+  // −5.25px on the 42px countdown and −1.5px on the 11.5px age counter, which is
+  // the "digits moved up" regression.
+  const cell = component.match(/\.roll-cell\s*\{([^}]*)\}/)
+  assert.ok(cell, '.roll-cell must exist')
+  assert.doesNotMatch(cell[1], /overflow/, 'the cell must keep a visible overflow')
+
+  // Clipping still has to happen somewhere: on an absolutely positioned inner
+  // layer, whose baseline the surrounding text never consults.
+  const clip = component.match(/\.roll-clip\s*\{([^}]*)\}/)
+  assert.ok(clip, '.roll-clip must exist')
+  assert.match(clip[1], /overflow:\s*hidden/, 'clipping belongs on the inner layer')
+  assert.match(clip[1], /position:\s*absolute/, 'the clipping layer must be out of flow')
+
+  // The cell needs an in-flow line box to take a baseline from, and that same box
+  // is what fixes its width. It must not be taken out of flow.
+  const sizer = component.match(/\.roll-sizer\s*\{([^}]*)\}/)
+  assert.ok(sizer, '.roll-sizer must exist')
+  assert.match(sizer[1], /visibility:\s*hidden/, 'the sizer is hidden, not removed')
+  assert.doesNotMatch(sizer[1], /position:\s*absolute/, 'the sizer must stay in flow')
+  assert.match(
+    component,
+    /<span class="roll-sizer"[^>]*>0<\/span><span class="roll-clip"/,
+    'the sizer must be adjacent to the clip layer, with no text node between them',
+  )
+})
+
+check('the gradient is never re-painted by an intermediate element', () => {
+  // `background: inherit` along the strip would make each layer paint the whole
+  // gradient again as a rectangle; only the custom property carries it intact.
+  // Declarations only — the component documents that wrong fix in prose.
+  const declarations = component.replace(/\/\*[\s\S]*?\*\//g, '')
+  assert.doesNotMatch(
+    declarations,
+    /background(-image)?:\s*inherit/,
+    'the gradient must not travel by inheriting the background',
+  )
+})
+
 // ── 3. mobile spacing ─────────────────────────────────────────────────────────
 check('the compact nav clears the sticky header', () => {
   // `top-3` shifts the header 12px below its flow box, so the nav's margin is
@@ -298,6 +410,93 @@ check('the stats row is not a single column up to 1280px', () => {
 
 check('the price grid already pairs up from `sm`', () => {
   assert.match(page, /sm:grid-cols-2 xl:grid-cols-4/, 'the price cards keep their breakpoints')
+})
+
+// ── 4. every panel-wide number rolls ──────────────────────────────────────────
+const pages = [
+  'Overview.vue',
+  'HftPage.vue',
+  'Strategies.vue',
+  'Plugins.vue',
+  'BacktestPage.vue',
+]
+const pageText = Object.fromEntries(pages.map((p) => [p, read('src', 'pages', p)]))
+const statTile = read('src', 'components', 'ui', 'stat', 'StatTile.vue')
+const statRow = read('src', 'components', 'ui', 'stat', 'StatRow.vue')
+
+/** Strip CSS and template comments so prose about a rule cannot trip a rule. */
+const code = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/<!--[\s\S]*?-->/g, '')
+
+check('a number rendered as text is a rolling number', () => {
+  // The whole point of the sweep: a figure that changes under the reader should
+  // arrive by rolling, not by swapping glyphs. This walks each template and looks
+  // for a raw `{{ … }}` sitting directly inside a figure slot (`stat-num` / `num`).
+  // Anything found there is a number that was missed — either wrap it in
+  // <RollingNumber>, or mark it in TEXT_MARKERS below if it is prose, not a figure.
+  for (const [name, src] of Object.entries({
+    ...pageText,
+    'RejectionChart.vue': read('src', 'components', 'charts', 'RejectionChart.vue'),
+  })) {
+    const missed = rawInNumericSlots(src)
+    assert.equal(missed.length, 0, `${name} still interpolates ${JSON.stringify(missed)} into a figure slot`)
+  }
+})
+
+check('the miss detector catches what it claims to', () => {
+  // A scanner that silently matches nothing would pass the check above forever.
+  // These are the shapes it has to catch, plus the prose it must leave alone.
+  const mustCatch = [
+    '<div class="stat-num mt-1 leading-none">{{ tradeStats.count }}</div>',
+    '<div class="stat-num mt-1 leading-none">\n  {{ cumStats.total }}\n</div>',
+    '<td class="px-2 py-2.5 text-right num">{{ num(r.ordersPlaced) }}</td>',
+    '<td class="num"><span class="text-up">{{ num(r.wins) }}</span><span> / </span></td>',
+    '<span class="num text-faint-fg">{{ positions.length }} 持仓</span>',
+    '<div class="stat-num text-[34px]" :class="p ? \'text-up\' : \'text-down\'">\n  {{ signedMoney(netPnl) }}\n</div>',
+  ]
+  for (const s of mustCatch) {
+    assert.ok(rawInNumericSlots(s).length > 0, `the detector missed ${JSON.stringify(s)}`)
+  }
+  const mustPass = [
+    '<div class="stat-num mt-1"><RollingNumber :value="tradeStats.count" /></div>',
+    '<span class="num text-faint-fg">0</span>',
+    '<td class="num">{{ p.asset }}</td>',
+    '<td class="num">{{ dateTime(t.entryTime) }}</td>',
+    '<div class="mt-2 text-[11px] num">{{ shortAddr(walletAddr) }}</div>',
+  ]
+  for (const s of mustPass) {
+    assert.equal(rawInNumericSlots(s).length, 0, `the detector false-positives on ${JSON.stringify(s)}`)
+  }
+})
+
+check('every page that shows figures imports the roller', () => {
+  for (const [name, src] of Object.entries(pageText)) {
+    assert.match(code(src), /import RollingNumber from '@\/components\/ui\/roll\/RollingNumber\.vue'/, `${name} must import RollingNumber`)
+    assert.match(code(src), /<RollingNumber[\s/>]/, `${name} must actually use it`)
+  }
+})
+
+check('the shared stat primitives roll by default', () => {
+  // StatTile/StatRow are used across pages; making the roll opt-in would leave
+  // every tile that was not visited by the sweep silently static.
+  for (const [name, src] of [['StatTile.vue', statTile], ['StatRow.vue', statRow]]) {
+    assert.match(src, /roll:\s*true/, `${name} must default to rolling`)
+    assert.match(code(src), /<RollingNumber v-if="props\.roll"/, `${name} must fall back to the roller`)
+    assert.match(code(src), /<template v-else>/, `${name} must keep a non-rolling path`)
+  }
+})
+
+check('a word, not a figure, is opted out of the roll', () => {
+  // DRY / LIVE are labels. A roller would announce them digit by digit and let
+  // the mode flicker between two strings; they are explicitly excluded instead.
+  assert.match(page, /:roll="false"/, 'HftPage must opt the mode row out')
+  const overview = pageText['Overview.vue']
+  assert.match(overview, /:roll="false"/, 'Overview must opt the mode tile out')
+})
+
+check('the readable twin does not double a copied row', () => {
+  // With nearly every cell rolling, a table row now carries each figure twice in
+  // the DOM. Copying a row must still yield one value per column.
+  assert.match(component, /user-select:\s*none/, 'the painted digits must not be selectable')
 })
 
 console.log(`\nRESULT: ${failures === 0 ? 'PASS' : `FAIL (${failures})`}`)

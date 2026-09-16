@@ -500,15 +500,23 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
             <div class="flex items-center gap-1 text-[10.5px] font-semibold text-up">
               <TrendingUp class="size-3" />UP
             </div>
-            <div class="stat-num mt-1 text-[21px] leading-none text-up">{{ Number(m.up).toFixed(3) }}</div>
-            <div class="mt-0.5 text-[10px] text-faint-fg num">{{ cents(m.up) }}</div>
+            <div class="stat-num mt-1 text-[21px] leading-none text-up">
+              <RollingNumber :value="Number(m.up).toFixed(3)" />
+            </div>
+            <div class="mt-0.5 text-[10px] text-faint-fg num">
+              <RollingNumber :value="cents(m.up)" />
+            </div>
           </div>
           <div class="rounded-md border border-down/25 bg-down/8 px-2.5 py-2">
             <div class="flex items-center gap-1 text-[10.5px] font-semibold text-down">
               <TrendingDown class="size-3" />DOWN
             </div>
-            <div class="stat-num mt-1 text-[21px] leading-none text-down">{{ Number(m.down).toFixed(3) }}</div>
-            <div class="mt-0.5 text-[10px] text-faint-fg num">{{ cents(m.down) }}</div>
+            <div class="stat-num mt-1 text-[21px] leading-none text-down">
+              <RollingNumber :value="Number(m.down).toFixed(3)" />
+            </div>
+            <div class="mt-0.5 text-[10px] text-faint-fg num">
+              <RollingNumber :value="cents(m.down)" />
+            </div>
           </div>
         </div>
       </div>
@@ -530,7 +538,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         <CardHeader label="累计净 PnL">
           <template #title>
             <span class="stat-num text-[16px]" :class="cumStats.net >= 0 ? 'text-up' : 'text-down'">
-              {{ signedMoney(cumStats.net) }}
+              <RollingNumber :value="signedMoney(cumStats.net)" />
             </span>
           </template>
           <template #action>
@@ -539,17 +547,19 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         </CardHeader>
         <EquityCurve :rows="historyRows" :height="128" :show-axis="false" />
         <div class="mt-2 flex items-center gap-4 text-[11px] text-faint-fg">
-          <span>毛利 <span class="num text-fg">{{ signedMoney(cumStats.gross) }}</span></span>
-          <span>费用 <span class="num text-down">{{ money(cumStats.fees) }}</span></span>
+          <span>毛利 <span class="num text-fg"><RollingNumber :value="signedMoney(cumStats.gross)" /></span></span>
+          <span>费用 <span class="num text-down"><RollingNumber :value="money(cumStats.fees)" /></span></span>
         </div>
       </Card>
 
       <Card>
         <CardHeader label="胜率分布" />
-        <div class="stat-num text-[30px] leading-none">{{ pct(cumStats.winRate) }}</div>
+        <div class="stat-num text-[30px] leading-none">
+          <RollingNumber :value="pct(cumStats.winRate)" />
+        </div>
         <div class="mt-1 flex items-center gap-3 text-[11.5px]">
-          <span class="font-semibold text-up">{{ cumStats.wins }} 盈</span>
-          <span class="font-semibold text-down">{{ cumStats.losses }} 亏</span>
+          <span class="font-semibold text-up"><RollingNumber :value="cumStats.wins" /> 盈</span>
+          <span class="font-semibold text-down"><RollingNumber :value="cumStats.losses" /> 亏</span>
         </div>
         <div class="mt-3.5 space-y-1.5">
           <div v-for="b in winBands" :key="b.label" class="flex items-center gap-2">
@@ -563,7 +573,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
                 }"
               />
             </span>
-            <span class="w-7 shrink-0 text-right text-[10.5px] text-muted-fg num">{{ b.count }}</span>
+            <span class="w-7 shrink-0 text-right text-[10.5px] text-muted-fg num"><RollingNumber :value="b.count" /></span>
           </div>
         </div>
       </Card>
@@ -571,15 +581,27 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
       <Card>
         <CardHeader label="交易统计" />
         <div class="grid grid-cols-2 gap-x-4 gap-y-3">
-          <div><div class="label-micro">笔数</div><div class="stat-num mt-1 text-[19px] leading-none">{{ tradeStats.count }}</div></div>
-          <div><div class="label-micro">今日</div><div class="stat-num mt-1 text-[19px] leading-none">{{ tradeStats.today }}</div></div>
-          <div><div class="label-micro">成交额</div><div class="stat-num mt-1 text-[15px] leading-none">{{ money(tradeStats.volume) }}</div></div>
-          <div><div class="label-micro">均笔</div><div class="stat-num mt-1 text-[15px] leading-none">{{ money(tradeStats.avg) }}</div></div>
+          <div>
+            <div class="label-micro">笔数</div>
+            <div class="stat-num mt-1 text-[19px] leading-none"><RollingNumber :value="tradeStats.count" /></div>
+          </div>
+          <div>
+            <div class="label-micro">今日</div>
+            <div class="stat-num mt-1 text-[19px] leading-none"><RollingNumber :value="tradeStats.today" /></div>
+          </div>
+          <div>
+            <div class="label-micro">成交额</div>
+            <div class="stat-num mt-1 text-[15px] leading-none"><RollingNumber :value="money(tradeStats.volume)" /></div>
+          </div>
+          <div>
+            <div class="label-micro">均笔</div>
+            <div class="stat-num mt-1 text-[15px] leading-none"><RollingNumber :value="money(tradeStats.avg)" /></div>
+          </div>
         </div>
         <div class="mt-3.5 flex items-center justify-between border-t border-line pt-2.5 text-[11.5px]">
           <span class="text-faint-fg">今日净利</span>
           <span class="stat-num" :class="tradeStats.todayNet >= 0 ? 'text-up' : 'text-down'">
-            {{ signedMoney(tradeStats.todayNet) }}
+            <RollingNumber :value="signedMoney(tradeStats.todayNet)" />
           </span>
         </div>
       </Card>
@@ -590,7 +612,8 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         <StatRow label="最差单笔" :value="signedPct(cumStats.worst)" tone="down" />
         <StatRow label="持仓浮动" :value="signedPct(positionUnrealized)" :tone="positionUnrealized >= 0 ? 'up' : 'down'" />
         <StatRow label="平均持仓" :value="cumStats.avgHold ? duration(cumStats.avgHold) : '—'" tone="dim" />
-        <StatRow label="运行模式" :value="(snap.mode ?? '—').toUpperCase()" :tone="isDry ? 'gold' : 'up'" />
+        <!-- Words, not figures: DRY / LIVE never rolls, so it stays plain text. -->
+        <StatRow label="运行模式" :value="(snap.mode ?? '—').toUpperCase()" :tone="isDry ? 'gold' : 'up'" :roll="false" />
         <StatRow label="行情轮次" :value="round?.markets ?? '—'" tone="dim" />
         <div class="mt-2.5 border-t border-line pt-2.5">
           <!--
@@ -668,24 +691,24 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         <div class="mb-3.5 grid grid-cols-2 gap-3 rounded-lg border border-line bg-panel-2 p-3 sm:grid-cols-4">
           <div>
             <div class="label-micro">累计订单</div>
-            <div class="stat-num mt-1 text-[22px] leading-none">{{ cumStats.total }}</div>
+            <div class="stat-num mt-1 text-[22px] leading-none"><RollingNumber :value="cumStats.total" /></div>
           </div>
           <div>
             <div class="label-micro">累计利润（扣费）</div>
             <div class="stat-num mt-1 text-[22px] leading-none" :class="cumStats.net >= 0 ? 'text-up' : 'text-down'">
-              {{ signedMoney(cumStats.net) }}
+              <RollingNumber :value="signedMoney(cumStats.net)" />
             </div>
           </div>
           <div>
             <div class="label-micro">累计胜率</div>
-            <div class="stat-num mt-1 text-[22px] leading-none">{{ pct(cumStats.winRate) }}</div>
+            <div class="stat-num mt-1 text-[22px] leading-none"><RollingNumber :value="pct(cumStats.winRate)" /></div>
           </div>
           <div>
             <div class="label-micro">盈利 / 亏损</div>
             <div class="stat-num mt-1 text-[22px] leading-none">
-              <span class="text-up">{{ cumStats.wins }}</span>
+              <span class="text-up"><RollingNumber :value="cumStats.wins" /></span>
               <span class="text-faint-fg"> / </span>
-              <span class="text-down">{{ cumStats.losses }}</span>
+              <span class="text-down"><RollingNumber :value="cumStats.losses" /></span>
             </div>
           </div>
         </div>
@@ -694,10 +717,12 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         </p>
         <div v-if="hasFilters" class="mb-3 flex items-center gap-2 text-[11.5px] text-faint-fg">
           <Filter class="size-3.5" />
-          已筛选 <span class="num text-fg">{{ filteredStats.count }}</span> 笔 ·
-          净利 <span class="stat-num" :class="filteredStats.net >= 0 ? 'text-up' : 'text-down'">{{ signedMoney(filteredStats.net) }}</span>
-          · 盈 <span class="text-up num">{{ filteredStats.wins }}</span>
-          / 亏 <span class="text-down num">{{ filteredStats.losses }}</span>
+          已筛选 <span class="num text-fg"><RollingNumber :value="filteredStats.count" /></span> 笔 ·
+          净利 <span class="stat-num" :class="filteredStats.net >= 0 ? 'text-up' : 'text-down'"><RollingNumber
+            :value="signedMoney(filteredStats.net)"
+          /></span>
+          · 盈 <span class="text-up num"><RollingNumber :value="filteredStats.wins" /></span>
+          / 亏 <span class="text-down num"><RollingNumber :value="filteredStats.losses" /></span>
         </div>
       </template>
 
@@ -728,14 +753,14 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
                   <Badge :variant="p.direction === 'up' ? 'up' : 'down'">{{ p.direction.toUpperCase() }}</Badge>
                 </td>
                 <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ p.strategy ?? '—' }}</td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg">{{ Number(p.entryPrice).toFixed(3) }}</td>
-                <td class="px-2 py-2.5 text-right num">{{ Number(p.currentPrice).toFixed(3) }}</td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg">{{ p.shares ?? '—' }}</td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(p.entryPrice).toFixed(3)" /></td>
+                <td class="px-2 py-2.5 text-right num"><RollingNumber :value="Number(p.currentPrice).toFixed(3)" /></td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="p.shares ?? '—'" /></td>
                 <td class="px-2 py-2.5 text-right num font-semibold" :class="p.unrealizedPct >= 0 ? 'text-up' : 'text-down'">
-                  {{ Number(p.unrealizedPct) >= 0 ? '+' : '' }}{{ Number(p.unrealizedPct).toFixed(2) }}%
+                  <RollingNumber :value="`${Number(p.unrealizedPct) >= 0 ? '+' : ''}${Number(p.unrealizedPct).toFixed(2)}%`" />
                 </td>
                 <td class="px-2 py-2.5 text-right num text-faint-fg">
-                  {{ p.remainingSec !== undefined ? duration(p.remainingSec) : '—' }}
+                  <RollingNumber :value="p.remainingSec !== undefined ? duration(p.remainingSec) : '—'" />
                 </td>
               </tr>
             </tbody>
@@ -784,20 +809,20 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
                   <Badge :variant="t.direction === 'up' ? 'up' : 'down'">{{ t.direction.toUpperCase() }}</Badge>
                 </td>
                 <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ t.strategy ?? '—' }}</td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg">{{ Number(t.entryPrice).toFixed(3) }}</td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg">{{ Number(t.exitPrice).toFixed(3) }}</td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg">{{ t.shares }}</td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(t.entryPrice).toFixed(3)" /></td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(t.exitPrice).toFixed(3)" /></td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="t.shares" /></td>
                 <td class="px-2 py-2.5 text-right num text-down">
-                  {{ t.feesUsd ? money(t.feesUsd, 3) : '—' }}
+                  <RollingNumber :value="t.feesUsd ? money(t.feesUsd, 3) : '—'" />
                 </td>
                 <td class="px-2 py-2.5 text-right num font-semibold" :class="Number(t.netPnlUsd) >= 0 ? 'text-up' : 'text-down'">
-                  {{ signedMoney(t.netPnlUsd, 2) }}
+                  <RollingNumber :value="signedMoney(t.netPnlUsd, 2)" />
                 </td>
                 <td class="px-2 py-2.5 text-right num" :class="Number(t.netPnlPct ?? 0) >= 0 ? 'text-up' : 'text-down'">
-                  {{ signedPct(t.netPnlPct, 2) }}
+                  <RollingNumber :value="signedPct(t.netPnlPct, 2)" />
                 </td>
                 <td class="px-2 py-2.5 text-right num text-faint-fg">
-                  {{ t.holdTimeSec !== undefined ? duration(t.holdTimeSec) : '—' }}
+                  <RollingNumber :value="t.holdTimeSec !== undefined ? duration(t.holdTimeSec) : '—'" />
                 </td>
                 <td class="px-2 py-2.5 text-[11.5px] text-faint-fg num">{{ dateTime(t.entryTime) }}</td>
                 <td class="px-2 py-2.5 text-[11.5px] text-faint-fg num">{{ dateTime(t.exitTime) }}</td>
@@ -816,11 +841,11 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         <div v-if="hasMore" class="mt-3 flex flex-col items-center gap-2">
           <Button variant="outline" size="sm" @click="visibleCount += PAGE">加载更多</Button>
           <span class="text-[10.5px] text-faint-fg num">
-            已显示 {{ visibleRows.length }} / {{ filteredRows.length }}
+            已显示 <RollingNumber :value="visibleRows.length" /> / <RollingNumber :value="filteredRows.length" />
           </span>
         </div>
         <p v-else-if="filteredRows.length > PAGE" class="mt-3 text-center text-[10.5px] text-faint-fg">
-          已加载全部 {{ filteredRows.length }} 笔
+          已加载全部 <RollingNumber :value="filteredRows.length" /> 笔
         </p>
       </div>
     </Card>

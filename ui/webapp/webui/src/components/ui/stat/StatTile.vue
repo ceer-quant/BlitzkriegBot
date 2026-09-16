@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** KPI tile: micro label, big tabular number, optional delta + sparkline slot. */
 import { cn } from '@/lib/utils'
+import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -10,8 +11,12 @@ const props = withDefaults(
     tone?: 'default' | 'up' | 'down' | 'gold'
     icon?: boolean
     class?: string
+    /** Set false to print the value flat — for text that is not a number. */
+    roll?: boolean
+    /** Roll duration in ms. */
+    rollDuration?: number
   }>(),
-  { tone: 'default' },
+  { tone: 'default', roll: true, rollDuration: 420 },
 )
 
 const toneClass = {
@@ -28,8 +33,16 @@ const toneClass = {
       <span class="label-micro">{{ props.label }}</span>
       <slot name="action" />
     </div>
+    <!--
+      The value rolls unless a slot supplies it (a slot can hold arbitrary markup,
+      which cannot be split into digits). `toneClass` stays on this div so a gold
+      tile publishes `--grad-text` for the digits to clip; see RollingNumber.
+    -->
     <div :class="cn('mt-2 stat-num text-[30px] leading-none', toneClass)">
-      <slot name="value">{{ props.value }}</slot>
+      <slot name="value">
+        <RollingNumber v-if="props.roll" :value="props.value" :duration="props.rollDuration" />
+        <template v-else>{{ props.value }}</template>
+      </slot>
     </div>
     <div v-if="props.sub || $slots.sub" class="mt-2 text-[11.5px] text-faint-fg truncate">
       <slot name="sub">{{ props.sub }}</slot>
