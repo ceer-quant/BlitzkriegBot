@@ -52,6 +52,13 @@ const leftText = computed(() => {
 
 const round = computed(() => snap.value?.round ?? null)
 
+// Balance semantics follow the mode (dry = local seed cash, live = venue
+// funds) — same discipline as the Overview balance card.
+const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
+const walletAddr = computed(
+  () => snap.value?.wallet?.funder ?? snap.value?.wallet?.signer ?? null,
+)
+
 // ── market price cards (UP/DOWN + spread cents) ──────────────────────────────
 const prices = computed<MarketPrice[]>(() => round.value?.prices ?? [])
 function spreadCents(m: MarketPrice): string {
@@ -242,6 +249,16 @@ async function sendLifecycle(verb: 'start' | 'stop'): Promise<void> {
         <div class="range-row"><span class="sub">最差单笔</span><span class="num-mono" style="color: var(--bk-red)">{{ tradeStats.worst }}</span></div>
         <div class="range-row"><span class="sub">运行模式</span><span class="num-mono">{{ snap.mode ?? '—' }}</span></div>
         <div class="range-row"><span class="sub">市场轮次</span><span class="num-mono">{{ round?.markets ?? '—' }}</span></div>
+        <div class="range-row">
+          <span class="sub">{{ isDry ? '模拟余额' : '交易所余额' }}</span>
+          <span class="num-mono" :class="isDry ? 'dim' : ''">
+            ${{ (snap.balance?.balance ?? 0).toFixed(2) }}{{ isDry ? '（模拟）' : '' }}
+          </span>
+        </div>
+        <div v-if="!isDry && walletAddr" class="range-row">
+          <span class="sub">钱包</span>
+          <span class="num-mono dim" style="font-size: 11px">{{ walletAddr.slice(0, 6) }}…{{ walletAddr.slice(-4) }}</span>
+        </div>
       </div>
     </div>
 
