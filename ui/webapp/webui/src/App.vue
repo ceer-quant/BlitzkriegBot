@@ -3,11 +3,12 @@
  * Panel shell — top bar (brand + segmented nav + connection telemetry), page
  * outlet, and the global error surface. Dark is the default identity.
  */
-import { computed, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useNow } from '@vueuse/core'
 import { LayoutDashboard, Activity, History, Boxes, Puzzle, Moon, Sun, SunMoon, Bell, BellOff, LogOut, Radio } from 'lucide-vue-next'
 import { usePanelStore } from './stores/panel'
-import { hasToken, getToken, logout } from './api/client'
+import { hasToken, logout, ping } from './api/client'
+import { SESSION_EXPIRED_REASON } from './lib/session'
 import { useTheme } from './lib/theme'
 import { clockTime } from './lib/format'
 import OverviewPage from './pages/Overview.vue'
@@ -34,7 +35,17 @@ const themeTitle = computed(() => {
   const next = theme.value === 'system' ? '浅色' : theme.value === 'light' ? '深色' : '跟随系统'
   return `主题：${now} · 点击切换到${next}`
 })
-const authed = ref(hasToken() && !!getToken())
+/**
+ * Whether to show the panel or the login form.
+ *
+ * A stored token gets the benefit of the doubt on first paint — it is usually
+ * valid, and bouncing through an empty login form on every reload would be
+ * wrong. Trust is provisional: the first 401 clears it (see the watch below),
+ * which is the part the panel used to be missing. `hasToken()` only ever told us
+ * a string existed, so a token from a previous gateway run left the operator
+ * staring at a 网关连接异常 alert with no route back to the form.
+ */
+const authed = ref(hasToken())
 const tab = ref<TabId>('overview')
 
 const pages = {
@@ -58,7 +69,23 @@ const now = useNow({ interval: 1000 })
 const updatedAt = computed(() => (store.lastUpdated ? clockTime(store.lastUpdated) : '—'))
 const modeLabel = computed(() => (store.snapshot?.mode ?? '').toUpperCase())
 
+/**
+ * A refused session drops us back to the login form, carrying the reason so the
+ * operator knows why they are being asked again. The token is already gone —
+ * the store cleared it — so nothing more can be attempted with it.
+ */
+watch(() => store.sessionExpired, (expired) => {
+  if (expired) authed.value = false
+})
+
+/**
+ * Why the login form is showing, when it is not a cold start. See
+ * `lib/session.ts` — the wording lives there so the shell and its check agree.
+ */
+const loginReason = computed(() => (store.sessionExpired ? SESSION_EXPIRED_REASON : ''))
+
 async function onLogin(): Promise<void> {
+  store.acknowledgeSessionReset()
   authed.value = true
   await store.refresh()
 }
@@ -67,7 +94,17 @@ async function onLogin(): Promise<void> {
 const { pause: stopPoll } = useIntervalFn(() => { void store.refresh() }, 15_000)
 onUnmounted(() => { stopPoll() })
 
-if (authed.value) void store.refresh()
+onMounted(() => {
+  if (!authed.value) return
+  // Ask the gateway whether it is even up before spending the token. If it does
+  // not answer, the failure is a connection problem, not a stale session — and
+  // the alert for that is accurate, so the form must not appear.
+  void (async () => {
+    const alive = await ping()
+    if (alive === null) return // unreachable; the alert path is correct
+    await store.refresh() // a 401 here flips `sessionExpired`
+  })()
+})
 </script>
 
 <template>
@@ -148,5 +185,5 @@ if (authed.value) void store.refresh()
     </main>
   </template>
 
-  <LoginView v-else @ok="onLogin" />
+  <LoginView v-else :reason="loginReason" @ok="onLogin" />
 </template>

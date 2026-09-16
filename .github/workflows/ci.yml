@@ -1,9 +1,11 @@
 name: CI
 
 # Runs on every PR and on pushes to the long-lived branches.
-# Three independent gates, matching the repository governance plan:
+# Four independent gates, matching the repository governance plan:
 #   rust-check   — the Rust trading core builds, tests and (advisory) lints.
 #   node-check   — the Node/TS shell typechecks, tests and builds.
+#   panel-check  — the browser panel: Vue checks, then the `ui:webapp` gate
+#                  against a live gateway over a real socket.
 #   secret-scan  — no credential ever enters the tree (dependency-free).
 # A final `notify` job reports the aggregate result to WeChat when configured.
 on:
@@ -83,6 +85,48 @@ jobs:
         continue-on-error: true
         run: npm audit --audit-level=high --omit=dev
 
+  # The browser panel. This is the job that makes the E8-3 acceptance line
+  #   「Vue 构建产物存在 + 快照渲染非空 + token 鉴权双向」
+  # a merge gate rather than a paragraph in a README. It is blocking: a panel that
+  # cannot authenticate, cannot render, or ships a stale bundle is not shippable.
+  #
+  # Everything here is offline. The gate spawns a dry core (local seed balance,
+  # no venue credentials) and a loopback gateway, so it needs no network and
+  # never touches a real exchange.
+  panel-check:
+    name: panel-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      # ui_kit_web + blitzkrieg-core in release: the gate drives the real binaries.
+      - name: Build the gateway and core (release)
+        run: cargo build --release --locked -p blitzkrieg-ui-kit -p blitzkrieg-core
+      - name: Build the panel bundle
+        run: |
+          cd ui/webapp/webui
+          npm ci
+          npm run build
+      # The panel's own regression checks: theme follows the system, balance
+      # accounting, lifecycle gating, refusal attribution, feed liveness, session
+      # recovery. Each pins a defect that shipped and was fixed.
+      - name: Panel checks (theme / balance / lifecycle / rejections / feed / session)
+        run: |
+          cd ui/webapp/webui
+          npm run check
+          npm run check:all
+      # The acceptance gate: auth both directions, CSRF, snapshot non-empty,
+      # served bundle identical to dist/. `--engine` is required for the core to
+      # answer `engine.stats` at all.
+      - name: ui:webapp gate
+        run: npm run ui:webapp
+
   secret-scan:
     name: secret-scan
     runs-on: ubuntu-latest
@@ -101,7 +145,7 @@ jobs:
 
   notify:
     name: notify (wechat)
-    needs: [rust-check, node-check, secret-scan]
+    needs: [rust-check, node-check, panel-check, secret-scan]
     if: always()
     runs-on: ubuntu-latest
     # Secret lifted to job env so the step `if` can test it (secret-context
@@ -113,9 +157,9 @@ jobs:
         # Opt-in: silently skips unless the WECHAT_WEBHOOK secret is configured.
         if: ${{ env.WECHAT_WEBHOOK != '' }}
         env:
-          RESULT: ${{ needs.rust-check.result }}/${{ needs.node-check.result }}/${{ needs.secret-scan.result }}
+          RESULT: ${{ needs.rust-check.result }}/${{ needs.node-check.result }}/${{ needs.panel-check.result }}/${{ needs.secret-scan.result }}
         run: |
           icon="✅"; [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] && icon="❌"
           curl -sS -X POST "$WECHAT_WEBHOOK" \
             -H 'Content-Type: application/json' \
-            -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$icon CI ${{ github.repository }}\\n> 分支: ${{ github.ref_name }}\\n> 触发: ${{ github.event_name }} by ${{ github.actor }}\\n> 结果(rust/node/secret): $RESULT\\n> [查看运行](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})\"}}"
+            -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$icon CI ${{ github.repository }}\\n> 分支: ${{ github.ref_name }}\\n> 触发: ${{ github.event_name }} by ${{ github.actor }}\\n> 结果(rust/node/panel/secret): $RESULT\\n> [查看运行](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})\"}}"

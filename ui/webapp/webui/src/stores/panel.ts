@@ -4,11 +4,12 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import {
-  api, hasToken, getToken,
+  api, clearToken, hasToken,
   type Snapshot, type PluginsDoc, type StrategyStatsRow, type TradeRow,
 } from '../api/client'
 import { dedupeTrades } from '../lib/trades'
 import { feedProgress } from '../lib/feed'
+import { classifyOutcome } from '../lib/session'
 
 export const usePanelStore = defineStore('panel', () => {
   const snapshot = ref<Snapshot | null>(null)
@@ -16,6 +17,18 @@ export const usePanelStore = defineStore('panel', () => {
   const error = ref<string | null>(null)
   const loading = ref(false)
   const lastUpdated = ref<number | null>(null)
+
+  /**
+   * Set when the gateway answered 401: the session is gone — expired, revoked,
+   * or issued by a run that has since restarted (the token lives in server
+   * memory, so a restart invalidates every session).
+   *
+   * Deliberately separate from `error`. A dropped session is not a fault to
+   * report, it is a state to act on: the shell drops back to the login form.
+   * Conflating the two is what used to strand the panel on a 网关连接异常 alert —
+   * an alert describes a problem the operator cannot fix from that screen.
+   */
+  const sessionExpired = ref(false)
 
   /**
    * When the orderbook counters last moved — the panel's only evidence that
@@ -59,6 +72,23 @@ export const usePanelStore = defineStore('panel', () => {
     return []
   })
 
+  /**
+   * Act on one poll's outcome. A 401 discards the token here rather than in the
+   * shell, so no page can act on a session that has already been refused.
+   * `sessionExpired` then drives the login fallback; see `lib/session.ts` for
+   * why a dead session is kept distinct from an unreachable gateway.
+   */
+  function noteOutcome(results: PromiseSettledResult<unknown>[]): void {
+    const verdict = classifyOutcome(results)
+    if (verdict.kind === 'expired') {
+      clearToken()
+      sessionExpired.value = true
+      error.value = null
+      return
+    }
+    error.value = verdict.kind === 'unreachable' ? verdict.message : null
+  }
+
   async function refresh(): Promise<void> {
     if (!hasToken()) return
     loading.value = true
@@ -76,11 +106,7 @@ export const usePanelStore = defineStore('panel', () => {
         }
       }
       if (plug.status === 'fulfilled') plugins.value = plug.value
-      if (plug.status === 'rejected' && plug.reason instanceof Error) {
-        error.value = plug.reason.message
-      } else {
-        error.value = null
-      }
+      noteOutcome([snap, plug])
       lastUpdated.value = Date.now()
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e)
@@ -89,9 +115,14 @@ export const usePanelStore = defineStore('panel', () => {
     }
   }
 
+  /** Called by the shell once the operator has seen the expiry and logged in. */
+  function acknowledgeSessionReset(): void {
+    sessionExpired.value = false
+  }
+
   return {
     snapshot, plugins, error, loading, lastUpdated,
-    connected, strategyRows, tradeRows, feedAt,
-    refresh,
+    connected, strategyRows, tradeRows, feedAt, sessionExpired,
+    refresh, acknowledgeSessionReset,
   }
 })

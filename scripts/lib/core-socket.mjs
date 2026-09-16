@@ -40,3 +40,16 @@ export function socketServed(path, timeoutMs = 500) {
   });
 }
 
+/**
+ * A private per-process socket for isolated harnesses.
+ *
+ * Deliberately NOT shaped like the canonical `<prefix>-<user>.sock`: a harness
+ * must neither be adopted as the real core by `resolveSocketPath`, nor adopt a
+ * running core it did not spawn. Keep `label` short — a UDS path is capped
+ * around 104 bytes, and `TMPDIR` already spends most of that on macOS.
+ */
+export function scratchSocketPath(label, env = process.env) {
+  const dir = env.TMPDIR && env.TMPDIR.length > 0 ? env.TMPDIR : tmpdir();
+  return join(dir.replace(/\/$/, ''), `blitzkrieg-${label}-${process.pid}.sock`);
+}
+

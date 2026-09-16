@@ -148,7 +148,8 @@ mod tests {
         let bus = EventBus::new(8);
         let line = r#"{"jsonrpc":"2.0","method":"core.event","params":{"kind":"RISK_ALERT","code":"Internal","message":"hi"}}"#;
         assert_eq!(bus.ingest_notification(line).as_deref(), Some("core.event"));
-        let mut s = bus.subscribe();
+        // A subscriber that only observes (never drains) must not break ingestion.
+        let s = bus.subscribe();
         // Cursor started after publish, so subscribe first is the realistic order:
         let bus2 = EventBus::new(8);
         let mut s2 = bus2.subscribe();
