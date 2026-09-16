@@ -1,13 +1,18 @@
 <script setup lang="ts">
 /**
- * HFT 行情页 — 复刻 ui/hft.html 的全部核心能力：倒计时、行情卡
+ * 二元预测市场通用组件（模板页）— 源自 ui/hft.html 的 HFT 面板，
+ * 现在是任何二元预测市场策略共用的数据展示模板：倒计时、行情卡
  * (UP/DOWN 价差)、PnL 曲线、胜率分布、交易统计、当前持仓 +
- * 历史订单 tabs、启动/停止。数据全部来自 Rust 端 /api/snapshot
- * (round.prices / tradeRows / strategyStats) — 不依赖 Node 网关。
+ * 历史订单 tabs、启动/停止。页头标注当前行情插件的身份
+ * （二元预测市场/现货市场/合约市场/期货实现）。数据全部来自
+ * Rust 端 /api/snapshot — 不依赖 Node 网关。
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn } from '@vueuse/core'
-import { api, type MarketPrice, type TradeRow } from '../api/client'
+import {
+  api, marketTypeLabel,
+  type MarketPrice, type TradeRow,
+} from '../api/client'
 import { usePanelStore } from '../stores/panel'
 
 const store = usePanelStore()
@@ -17,6 +22,12 @@ const { pause: stopFast } = useIntervalFn(() => { void store.refresh() }, 2_000)
 onUnmounted(() => { stopFast() })
 
 const snap = computed(() => store.snapshot)
+
+// ── market identity (which venue plugin drives this session) ──────────────────
+const marketName = computed(() => snap.value?.marketActiveName ?? null)
+const marketTypeText = computed(() =>
+  marketTypeLabel(snap.value?.marketActiveType ?? null),
+)
 
 // serverLeft/serverAt hold the last server answer; leftSec recomputes on each
 // 500ms tick by locally interpolating the time the snapshot was received.
@@ -156,7 +167,11 @@ async function sendLifecycle(verb: 'start' | 'stop'): Promise<void> {
     <!-- countdown bar -->
     <div class="glass card countdown-bar">
       <div>
-        <div class="card-title">当前轮次 <span class="cd-slot">#{{ round?.slot ?? '—' }}</span></div>
+        <div class="card-title">
+          <span class="mkt-identity">{{ marketTypeText || '市场' }}</span>
+          <span class="sub" style="margin-left: 6px">{{ marketName ?? '未激活插件' }}</span>
+          <span class="cd-slot">#{{ round?.slot ?? '—' }}</span>
+        </div>
         <div class="sub">
           {{ round?.ageSec ?? '—' }}s 已过 ·
           <span class="cd-state" :class="round?.canTrade ? 'on' : 'off'">
@@ -292,7 +307,16 @@ async function sendLifecycle(verb: 'start' | 'stop'): Promise<void> {
   justify-content: space-between;
   gap: 16px;
 }
-.cd-slot { color: var(--bk-text); margin-left: 6px; }
+.mkt-identity {
+  display: inline-block;
+  background: var(--bk-gold-soft);
+  color: var(--bk-gold);
+  font-weight: 700;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+.cd-slot { color: var(--bk-text-dim); margin-left: 8px; font-weight: 600; }
 .cd-state { font-weight: 700; letter-spacing: 0.5px; }
 .cd-state.on { color: var(--bk-green); }
 .cd-state.off { color: var(--bk-gold); }

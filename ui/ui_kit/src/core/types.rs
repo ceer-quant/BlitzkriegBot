@@ -398,6 +398,8 @@ pub struct UiSnapshot {
     pub extensions: Vec<ExtensionRow>,
     pub market_plugins: Vec<MarketPluginRow>,
     pub market_active: bool,
+    /// Name of the active market plugin (identity label for the panel).
+    pub market_active_name: Option<String>,
     /// E9-g: per-strategy engine.stats rows (orders/gates/rejection causes).
     pub strategy_stats: Vec<StrategyStatsRow>,
     pub connected: bool,
