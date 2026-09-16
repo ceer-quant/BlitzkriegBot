@@ -442,6 +442,16 @@ async fn handle_line(
             }))
         }
 
+        // Cumulative closed-trade summary straight from the persisted
+        // `summary.json` (all-time totals, unlike the windowed history rows).
+        method::TRADES_SUMMARY => {
+            let summary = core.lock().await.trade_summary();
+            Ok(serde_json::json!({
+                "version": crate::ipc::schema::PROTOCOL_VERSION,
+                "summary": summary,
+            }))
+        }
+
         method::POSITION_EXIT => {
             let p: PositionExitParams = serde_json::from_value(params.clone())
                 .unwrap_or(PositionExitParams { position_id: None });

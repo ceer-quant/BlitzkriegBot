@@ -42,7 +42,9 @@ fn main() {
     println!("ui_kit web → socket {socket}");
     let cfg = SupervisorConfig::from_env(socket);
     let dispatcher = Dispatcher::new(cfg, manage);
-    let mut server = WebServer::with_gateway(client, 200, dispatcher);
+    // Full trade history: the history tab paginates in the browser, so pass
+    // limit=0 (trades.history drains ALL closed rows, no 200-row cap).
+    let mut server = WebServer::with_gateway(client, 0, dispatcher);
     // E6-a: user/password auth from env. Set BLITZKRIEG_PANEL_USER and
     // BLITZKRIEG_PANEL_PASSWORD to require a panel login; the WebUI login page
     // exchanges them for a session token via POST /api/login. Unset (or

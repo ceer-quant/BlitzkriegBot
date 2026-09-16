@@ -121,6 +121,7 @@ pub mod method {
     pub const POSITION_EXIT: &str = "positions.exit";
     /// Closed-trade history (Node-compatible records) for the UI.
     pub const TRADES_HISTORY: &str = "trades.history";
+    pub const TRADES_SUMMARY: &str = "trades.summary";
     /// Manually trigger a reconciliation sweep with a caller-supplied snapshot
     /// (live venue snapshot is gathered internally in live mode; this method is
     /// mainly for tests/ops).

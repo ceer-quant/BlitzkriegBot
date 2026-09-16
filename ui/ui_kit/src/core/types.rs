@@ -226,6 +226,11 @@ pub struct TradeView {
     pub exit_reason: String,
     #[serde(default)]
     pub hold_time_sec: i64,
+    /// Milliseconds since epoch (deserialized defensively — older cores omit).
+    #[serde(default)]
+    pub entry_time: i64,
+    #[serde(default)]
+    pub exit_time: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -398,6 +403,8 @@ pub struct UiSnapshot {
     pub extensions: Vec<ExtensionRow>,
     pub market_plugins: Vec<MarketPluginRow>,
     pub market_active: bool,
+    /// All-time closed-trade totals (trades.summary; older cores omit).
+    pub trade_summary: Option<serde_json::Value>,
     /// Name of the active market plugin (identity label for the panel).
     pub market_active_name: Option<String>,
     /// E9-g: per-strategy engine.stats rows (orders/gates/rejection causes).
