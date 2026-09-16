@@ -39,6 +39,13 @@ function money(v?: number | null): string {
 
 const round = computed(() => snap.value?.round ?? null)
 const balance = computed(() => snap.value?.balance ?? null)
+
+// Balance semantics follow the run mode: dry cash is the local simulation
+// seed (not real money); live cash is the venue-reported balance. The card
+// must never present one as the other (mirrors ui/hft.html's wallet panel).
+const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
+const balanceTitle = computed(() => (isDry.value ? '模拟余额' : '交易所余额'))
+const walletAddr = computed(() => snap.value?.wallet?.funder ?? snap.value?.wallet?.signer ?? null)
 const positions = computed(() => snap.value?.positions ?? [])
 </script>
 
@@ -46,9 +53,15 @@ const positions = computed(() => snap.value?.positions ?? [])
   <template v-if="snap">
     <div class="grid grid-cols">
       <div class="glass card">
-        <h2 class="card-title">余额</h2>
-        <div class="stat-value">{{ money(balance?.balance) }}</div>
-        <div class="sub">可用 {{ money(balance?.available) }} · 预留 {{ money(balance?.reserved) }}</div>
+        <h2 class="card-title">{{ balanceTitle }}</h2>
+        <div class="stat-value" :class="isDry ? 'gold' : ''">{{ money(balance?.balance) }}</div>
+        <div class="sub">
+          可用 {{ money(balance?.available) }} · 预留 {{ money(balance?.reserved) }}
+          <template v-if="isDry"> · 模拟资金，非真实资产</template>
+        </div>
+        <div v-if="!isDry && walletAddr" class="sub num-mono" style="font-size: 11px">
+          钱包 {{ walletAddr.slice(0, 6) }}…{{ walletAddr.slice(-4) }}
+        </div>
       </div>
       <div class="glass card">
         <h2 class="card-title">当前轮次</h2>

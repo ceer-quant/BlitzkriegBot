@@ -206,6 +206,12 @@ pub fn render_json(s: &UiSnapshot) -> String {
         "mode": s.mode(),
         "balance": s.balance.as_ref().map(|b| serde_json::json!({
             "balance": b.balance, "reserved": b.reserved, "available": b.available })),
+        // Wallet identity for the live-mode balance card (dry cores leave
+        // these null — their cash is the local dry seed, not venue funds).
+        "wallet": {
+            "signer": s.ready.as_ref().and_then(|r| r.signer.clone()),
+            "funder": s.ready.as_ref().and_then(|r| r.funder.clone()),
+        },
         "round": s.round.as_ref().map(|r| serde_json::json!({
             "slot": r.slot, "ageSec": r.age_sec, "timeLeftSec": r.time_left_sec,
             "markets": r.markets, "canTrade": r.can_trade,
