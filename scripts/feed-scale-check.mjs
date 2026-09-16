@@ -2,15 +2,19 @@
 /**
  * scale:feed — E9 规模化压测第 2 项 (#59): 40 连接流式行情推送，丢包率必须为 0。
  *
- * 设计：spawn 一个专用 dry 核心（UDS bus 广播 core.event 给每个 session），
- * 40 条并发 UDS 连接各自建立 session，主线程以 ~10Hz 注入 engine.book
- * （有确定计数 C），每条连接收到的 PositionClosed 无关 — 我们数
- * `core.event` Notification 里的 book 类事件。零丢失判据：
+ * 设计：spawn 一个专用 dry 核心（UDS bus 把 core.event 广播给每个 session），
+ * 40 条并发 UDS 连接各自建立 session，主线程以 ~9Hz 轮流让每条连接提交一笔
+ * 极小的 maker 单（unique internalKey）并立即撤销。每一次被内核接受的提交都会
+ * 向 **全部 40 个 session** 扇出 OrderUpdate，所以零丢失判据是：
  *
  *   - 40 条连接全部存活（无一断开）；
- *   - 每条连接收到的事件数完全等于注入控制数（broadcast 对每 session
- *     建_PUSH, 慢消费者会收到 lagged 错误并断开 —— 不会静默丢）；
- *   - 运行期间 stderr 无 "lagged"/"session error"。
+ *   - 每条连接收到的事件数**完全相同**（broadcast 对每 session 建_PUSH，
+ *     慢消费者会收到 lagged 错误并断开 —— 不会静默丢）；
+ *   - 运行期间无 "lagged"；
+ *   - 事件数 ≥ 被接受的提交数，且中途无任何提交被拒。
+ *
+ * 注意：事件中有意不存在原始 Book 推送，所以这里用真实下单产生的
+ * OrderUpdate/Fill/PositionClosed 作为扇出负载（见下方下单循环的注释）。
  *
  * 默认 90 秒窗口（CI 友好）+ --full 走满 10 分钟（600s）验收口径。
  */
@@ -88,7 +92,7 @@ for (let i = 0; i < clients.length; i++) {
       if (String(msg.error?.message || '').toLowerCase().includes('lagged')) lagged++;
       if (msg.id != null && pendingMaps[i].has(msg.id)) {
         const p = pendingMaps[i].get(msg.id); pendingMaps[i].delete(msg.id);
-        p.resolve();
+        p.resolve(msg);
       }
     }
   });
@@ -99,6 +103,11 @@ const rpc0 = (method, params = {}) => new Promise((res) => {
   const id = `h${Date.now()}${Math.random()}`;
   pendingMaps[0].set(id, { resolve: res });
   clients[0].write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+});
+const rpcOn = (seat, method, params = {}) => new Promise((res) => {
+  const id = `s${seat}_${Math.random()}`;
+  pendingMaps[seat].set(id, { resolve: res });
+  clients[seat].write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
 });
 const rpcAll = (method, params = {}) => Promise.all(clients.map((c, i) => new Promise((res) => {
   const id = `a${i}_${Math.random()}`;
@@ -124,30 +133,44 @@ try { await rpcAll('core.ping'); alive = clients.length; } catch {}
 const durSec = Math.round(RUN_MS / 1000);
 console.log(`streaming ${CONNS} connections × ${durSec}s (unique-key order churn @ ~9Hz)`);
 
-let injected = 0;
 const startAt = Date.now();
 // Each injection: one session places a tiny resting BUY (unique key). Seats
 // rotate so every connection both produces AND consumes bus traffic.
 // Balance 1000, price 0.40, size 1 = $0.40 notional; deduper needs unique
-// keys (key = seq). Cancel every order afterwards so reservation space
-// doesn't run dry mid-run.
+// keys (key = seq). Each order is cancelled right after placement so the
+// reservation is released — see the arithmetic note below.
+//
+// The cancel is what keeps this harness honest over a long --full run. A
+// $1000 dry seed reserves $0.40 per order, so an uncancelled run stops being
+// accepted at exactly 2500 orders (`InsufficientFunds: reserve 0.4 exceeds
+// available 0.0`) while still issuing ~5.4k, and the shortfall then shows up
+// as a mysterious event-count gap rather than as what it is. Cancelling keeps
+// at most CONNS reservations outstanding ($16), and `rejected` below makes
+// any refusal a first-class failure instead of a silent one.
 const ROUND_MS = 110;
 const rounds = Math.floor((RUN_MS - 10_000) / ROUND_MS);
-let placeIdx = 0;
+let placeIdx = 0;      // placements issued
+let accepted = 0;      // placements the core accepted — each fans out to all sessions
+let rejected = 0;      // refusals (dry-fund starvation, risk gates)
+const rejectReasons = new Map();
 async function runStream() {
   for (let r = 0; r < rounds; r++) {
     const seat = r % CONNS;
-    const id = `p${r}`;
-    pendingMaps[seat].set(id, { resolve: () => {} });
-    clients[seat].write(JSON.stringify({
-      jsonrpc: '2.0', id, method: 'orders.place',
-      params: {
-        tokenId: 'SCALETOKEN', conditionId: '0x-scale', side: 'buy',
-        mode: 'maker', price: 0.4, size: 1, internalKey: `scale-${r}`,
-        strategy: 'scale_probe', asset: 'BTC', direction: 'up', roundSlot: 0,
-      },
-    }) + '\n');
+    const msg = await rpcOn(seat, 'orders.place', {
+      tokenId: 'SCALETOKEN', conditionId: '0x-scale', side: 'buy',
+      mode: 'maker', price: 0.4, size: 1, internalKey: `scale-${r}`,
+      strategy: 'scale_probe', asset: 'BTC', direction: 'up', roundSlot: 0,
+    });
     placeIdx++;
+    if (msg?.error) {
+      rejected++;
+      const key = String(msg.error.message || 'unknown').split(':')[0];
+      rejectReasons.set(key, (rejectReasons.get(key) || 0) + 1);
+    } else {
+      accepted++;
+      const orderId = msg?.result?.orderId;
+      if (orderId) await rpcOn(seat, 'orders.cancel', { orderId });
+    }
     // pace to ~9Hz — arrival is request/response not pushed, so leaks from
     // ordering remain safe: track total bus messages instead.
     const next = startAt + (r + 1) * ROUND_MS;
@@ -159,22 +182,26 @@ await runStream();
 await sleep(1_500); // drain in-flight notifications
 
 const counts = [...evCounts];
-const successDocs = []; // count of accepted placements from responses
 const minC = Math.min(...counts), maxC = Math.max(...counts);
 console.log(`\nconnections alive: ${alive}/${CONNS} (broken: ${broken})`);
-console.log(`diamond placements issued: ${placeIdx}`);
+console.log(`placements issued: ${placeIdx} (accepted ${accepted}, refused ${rejected})`);
 console.log(`event pushes per connection: min=${minC} max=${maxC}`);
+if (rejectReasons.size) {
+  console.log('refusal reasons:', [...rejectReasons.entries()].map(([k, v]) => `${k}×${v}`).join(' | '));
+}
 
 check('40 concurrent UDS sessions established', alive === CONNS, `${alive}`);
 check('no connection broke mid-stream', broken === 0, `broken=${broken}`);
 check('no lagged consumer on the broadcast bus', lagged === 0, `lagged=${lagged}`);
 check('every connection received the SAME event push count (zero skew/loss)',
   maxC === minC && minC > 0, `min=${minC} max=${maxC}`);
-check('event count ≥ ~1 push per placement (OrderUpdate fanout)',
-  minC >= placeIdx, `min=${minC} vs placements=${placeIdx}`);
+check('every placement was accepted (no dry-fund/risk starvation mid-run)',
+  rejected === 0, `refused=${rejected}${rejected ? ` (${[...rejectReasons.keys()].join(',')})` : ''}`);
+check('event count ≥ 1 push per accepted placement (OrderUpdate fanout)',
+  minC >= accepted, `min=${minC} vs accepted=${accepted}`);
 // Zero loss on the stream itself: the counters must be identical across all
-// 40 sessions AND ≥ the number of book injections; any bus loss would make a
-// lagged error visible (broadcast channel is not lossless-silent).
+// 40 sessions AND ≥ the number of accepted placements; any bus loss would make
+// a lagged error visible (broadcast channel is not lossless-silent).
 
 try { proc.kill(); } catch {}
 await sleep(120);
