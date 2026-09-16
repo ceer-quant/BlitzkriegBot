@@ -267,6 +267,7 @@ impl IpcClient {
         if let Ok(m) = self.market_plugins() {
             s.market_plugins = m.plugins;
             s.market_active = m.active.is_some();
+            s.market_active_name = m.active;
         }
         s
     }

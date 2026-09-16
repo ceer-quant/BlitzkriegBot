@@ -262,6 +262,14 @@ pub fn render_json(s: &UiSnapshot) -> String {
         "strategies": s.strategies.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),
         "extensions": s.extensions.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),
         "marketPlugins": s.market_plugins.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),
+        // HFT template identity: which market plugin is driving this session
+        // and its market class (prediction/spot/futures/options).
+        "marketActiveName": s.market_active_name,
+        "marketActiveType": s
+            .market_active_name
+            .as_ref()
+            .and_then(|n| s.market_plugins.iter().find(|p| &p.name == n))
+            .map(|p| p.kind.clone()),
         "lastError": s.last_error,
     })
     .to_string()
