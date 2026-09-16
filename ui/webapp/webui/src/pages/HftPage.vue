@@ -29,6 +29,7 @@ import StatRow from '@/components/ui/stat/StatRow.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import EquityCurve from '@/components/charts/EquityCurve.vue'
+import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const store = usePanelStore()
 const { sound, toggleSound } = useTheme()
@@ -349,7 +350,28 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
           </div>
           <div class="mt-1.5 flex items-center gap-2 text-[11.5px] text-faint-fg">
             <Clock class="size-3.5" />
-            <span>{{ round?.ageSec ?? '—' }}s 已过</span>
+            <!--
+              The age lives in a fixed four-digit slot so the status to its right
+              cannot move. Two separate motions used to happen here: proportional
+              figures gave `1111s 已过` and `1000s 已过` widths 7.95px apart at the
+              same character count, and each extra digit added ~14px more, so
+              TRADING/WAITING slid back and forth on every tick. The slot is
+              `tabular-nums` so its `ch` matches the digits it reserves, and
+              overflow grows leftward (text-right) past four digits — up to
+              9999s ≈ 2.8h, beyond any round this market runs.
+            -->
+            <span class="inline-flex items-baseline">
+              <!--
+                `tabular-nums` on the slot itself, not just inside: the `ch` unit
+                is resolved against THIS element's font, so without it the
+                reserved width is the proportional "0" and drifts ~0.04px per
+                place from the tabular cells it is reserving for.
+              -->
+              <span class="inline-block w-[4ch] text-right tabular-nums">
+                <RollingNumber :value="round?.ageSec ?? '—'" :duration="320" />
+              </span>
+              <span class="ml-0.5">s 已过</span>
+            </span>
             <span class="opacity-40">·</span>
             <span :class="round?.canTrade ? 'text-up font-semibold' : 'text-primary'">
               {{ round?.canTrade ? 'TRADING' : 'WAITING' }}
@@ -358,10 +380,17 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         </div>
 
         <div class="mx-auto text-center">
-          <div
-            class="stat-num text-[42px] leading-none tracking-[-0.03em]"
+          <!--
+            320ms roll on a 1s countdown, so the digits settle well before the
+            next tick. `stat-num`'s tracking is dropped deliberately: the digit
+            cells are fixed-width, so tracking cannot apply (see RollingNumber).
+          -->
+          <RollingNumber
+            :value="leftText"
+            :duration="320"
+            class="stat-num text-[42px] leading-none"
             :class="urgent ? 'text-down' : 'grad-gold'"
-          >{{ leftText }}</div>
+          />
           <div class="label-micro mt-1">剩余时间</div>
         </div>
 
@@ -489,7 +518,14 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
     </Card>
 
     <!-- ── stats row ─────────────────────────────────────────────────────── -->
-    <div class="mt-3.5 grid gap-3.5 xl:grid-cols-[1.6fr_1fr_1fr_1fr]">
+    <!--
+      Four stat cards. The 1.6/1/1/1 split only applies once there is room for it
+      (`xl`), but the fallback used to be a single column all the way down — at
+      tablet and small-laptop widths that stacked four full-width cards into a
+      long scroll. `sm:grid-cols-2` puts them 2×2 across that whole range instead,
+      and 累计净 PnL keeps the wider column whenever the split is active.
+    -->
+    <div class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-[1.6fr_1fr_1fr_1fr]">
       <Card>
         <CardHeader label="累计净 PnL">
           <template #title>
