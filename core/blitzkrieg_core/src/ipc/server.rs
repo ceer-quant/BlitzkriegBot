@@ -359,10 +359,18 @@ async fn handle_line(
 
         method::LEDGER_BALANCE => {
             let c = core.lock().await;
+            // The dry seed is only a principal while DRY: a live core's opening
+            // cash is the venue's number, so it reports no principal at all
+            // rather than a config value that never applied.
+            let seed = match c.mode() {
+                Mode::Dry => Some(c.config().dry_seed_balance),
+                Mode::Live => None,
+            };
             Ok(serde_json::to_value(BalanceResult {
                 balance: c.ledger().balance(),
                 reserved: c.ledger().reserved(),
                 available: c.ledger().available(),
+                seed,
             })
             .unwrap_or(Value::Null))
         }
