@@ -6,7 +6,7 @@
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
-import { Play, Square, Bell, BellOff, Search, TrendingUp, TrendingDown, Clock, Filter, Info } from 'lucide-vue-next'
+import { Activity, AlertTriangle, Play, Square, Bell, BellOff, Search, TrendingUp, TrendingDown, Clock, Filter, Info } from 'lucide-vue-next'
 import { api, marketTypeLabel, type MarketPrice, type TradeRow } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { useTheme } from '@/lib/theme'
@@ -15,6 +15,7 @@ import {
 } from '@/lib/format'
 import { balanceView } from '@/lib/balance'
 import { controlState } from '@/lib/lifecycle'
+import { feedStaleness } from '@/lib/feed'
 import {
   playDang, playDing, playOrder, playProfit, playWuwu,
 } from '@/composables/alertSounds'
@@ -102,6 +103,22 @@ const prices = computed<MarketPrice[]>(() => round.value?.prices ?? [])
 function spreadCents(m: MarketPrice): number {
   return Math.max(0, m.up + m.down - 1) * 100
 }
+
+/**
+ * Feed liveness, so a stalled market-data feed cannot masquerade as a quiet market.
+ *
+ * The prices below are whatever the core last received; it keeps serving them
+ * indefinitely. `feedStaleness` watches the orderbook counters (the only signal
+ * that moves *with* the feed — see `lib/feed.ts`) and this page states the outage
+ * instead of quoting stale prices as current.
+ *
+ * `nowMs` is ticked locally rather than read from the snapshot, so the banner
+ * appears on its own a few seconds after the feed dies instead of waiting for the
+ * poll that would have revealed it.
+ */
+const nowMs = ref(Date.now())
+useIntervalFn(() => { nowMs.value = Date.now() }, 2000)
+const feed = computed(() => feedStaleness(store.feedAt, nowMs.value))
 
 // ── cumulative all-time totals (core summary preferred, rows as fallback) ────
 const historyRows = computed<TradeRow[]>(() => store.tradeRows)
@@ -396,6 +413,39 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
     </Card>
 
     <!-- ── market price cards ────────────────────────────────────────────── -->
+    <!--
+      Says the feed stopped. Without this the cards below are indistinguishable
+      from a live market: the core republishes its last book forever and the round
+      countdown keeps running off the local clock. Stated above the prices rather
+      than inside them so it is read before the numbers are.
+    -->
+    <div
+      v-if="feed.stale"
+      class="mt-3.5 flex items-start gap-2 rounded-md border border-down/35 bg-down/8 px-3 py-2.5 text-[12px] leading-snug text-down"
+    >
+      <AlertTriangle class="mt-px size-4 shrink-0" />
+      <div>
+        <span class="font-semibold">{{ feed.label }}</span>
+        <span class="text-down/85">
+          ：下面的报价是内核最后收到的行情，并非当前市场。轮次与倒计时按本地时钟推进，所以看起来仍在跳动；
+          引擎也会因为行情过期而拒绝开仓。请检查行情插件与网络连接。
+        </span>
+      </div>
+    </div>
+
+    <div v-if="prices.length" class="mt-3.5 flex items-center gap-2">
+      <Activity class="size-3.5" :class="feed.stale ? 'text-down' : 'text-faint-fg'" />
+      <span
+        class="text-[11px] num"
+        :class="feed.stale ? 'font-semibold text-down' : 'text-faint-fg'"
+      >{{ feed.ageLabel }}</span>
+      <Tooltip content="行情数据的新鲜度：内核里订单簿计数最后一次增长到现在的时间。轮次与倒计时按本地时钟走，所以它们会继续跳动，不能用来判断行情是否还在到达。">
+        <span class="cursor-help text-[11px] text-faint-fg underline decoration-dotted decoration-line underline-offset-2">
+          数据新鲜度
+        </span>
+      </Tooltip>
+    </div>
+
     <div v-if="prices.length" class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
       <div
         v-for="m in prices"

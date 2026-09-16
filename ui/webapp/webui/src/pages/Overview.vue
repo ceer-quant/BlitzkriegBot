@@ -93,7 +93,10 @@ const counters = computed(() => [
   { label: '评估', value: compact(engine.value.evaluations), tone: 'default' as const },
   { label: '信号', value: compact(engine.value.signals), tone: 'gold' as const },
   {
-    label: '拒单',
+    // `placeRejected`: refusals inside the order path, not the sum of the gate
+    // counters beside it — see `lib/rejections.ts`. Labelled by where it happens
+    // so it is not read as "risk control blocked everything else".
+    label: '下单被拒',
     value: compact(engine.value.placeRejected),
     tone: (engine.value.placeRejected ?? 0) > 0 ? ('down' as const) : ('default' as const),
   },

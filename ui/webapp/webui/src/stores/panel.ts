@@ -8,6 +8,7 @@ import {
   type Snapshot, type PluginsDoc, type StrategyStatsRow, type TradeRow,
 } from '../api/client'
 import { dedupeTrades } from '../lib/trades'
+import { feedProgress } from '../lib/feed'
 
 export const usePanelStore = defineStore('panel', () => {
   const snapshot = ref<Snapshot | null>(null)
@@ -15,6 +16,15 @@ export const usePanelStore = defineStore('panel', () => {
   const error = ref<string | null>(null)
   const loading = ref(false)
   const lastUpdated = ref<number | null>(null)
+
+  /**
+   * When the orderbook counters last moved — the panel's only evidence that
+   * market data is still arriving (see `lib/feed.ts` for why nothing else in the
+   * snapshot can tell us). Tracked here rather than per-page so every page judges
+   * liveness from the same clock, and so it survives navigation.
+   */
+  const feedAt = ref<number | null>(null)
+  let lastProgress = -1
 
   const connected = computed(() => snapshot.value?.connected ?? plugins.value?.connected ?? false)
 
@@ -57,7 +67,14 @@ export const usePanelStore = defineStore('panel', () => {
         api.snapshot(),
         api.plugins(),
       ])
-      if (snap.status === 'fulfilled') snapshot.value = snap.value
+      if (snap.status === 'fulfilled') {
+        snapshot.value = snap.value
+        const progress = feedProgress(snap.value.stats?.books, snap.value.stats?.tops)
+        if (progress !== lastProgress) {
+          lastProgress = progress
+          feedAt.value = Date.now()
+        }
+      }
       if (plug.status === 'fulfilled') plugins.value = plug.value
       if (plug.status === 'rejected' && plug.reason instanceof Error) {
         error.value = plug.reason.message
@@ -74,7 +91,7 @@ export const usePanelStore = defineStore('panel', () => {
 
   return {
     snapshot, plugins, error, loading, lastUpdated,
-    connected, strategyRows, tradeRows,
+    connected, strategyRows, tradeRows, feedAt,
     refresh,
   }
 })

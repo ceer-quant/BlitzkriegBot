@@ -7,7 +7,9 @@
     "check": "vue-tsc --noEmit",
     "check:theme": "node --experimental-strip-types scripts/theme-follow-system.check.mjs",
     "check:balance": "node --experimental-strip-types scripts/balance-accounting.check.mjs",
-    "check:lifecycle": "node --experimental-strip-types scripts/lifecycle-control.check.mjs"
+    "check:lifecycle": "node --experimental-strip-types scripts/lifecycle-control.check.mjs",
+    "check:rejections": "node --experimental-strip-types scripts/refusal-attribution.check.mjs",
+    "check:feed": "node --experimental-strip-types scripts/feed-liveness.check.mjs"
   },
   "license": "ISC",
   "type": "module",
