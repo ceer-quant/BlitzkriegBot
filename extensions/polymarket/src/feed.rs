@@ -102,11 +102,16 @@ pub async fn spawn_feed(
     let (ctl_tx, ctl_rx) = mpsc::channel::<Vec<String>>(16);
 
     // Polymarket orderbook feed (reconnect + dynamic re-subscribe on new rounds).
+    // Resolved here rather than inside the loop so the loop takes its endpoint as a
+    // plain argument and can be exercised against a local server in tests.
+    let ws_url = std::env::var("POLYMARKET_WS_URL")
+        .unwrap_or_else(|_| "wss://ws-subscriptions-clob.polymarket.com".into());
     {
         let ev_tx = ev_tx.clone();
         let tokens = token_ids.clone();
+        let ws_url = ws_url.clone();
         tokio::spawn(async move {
-            poly_orderbook_loop(tokens, ev_tx, ctl_rx).await;
+            poly_orderbook_loop(tokens, ev_tx, ctl_rx, ws_url).await;
         });
     }
 
@@ -226,13 +231,12 @@ async fn poly_orderbook_loop(
     mut tokens: Vec<String>,
     ev_tx: mpsc::Sender<FeedEvent>,
     mut ctl_rx: mpsc::Receiver<Vec<String>>,
+    ws_url: String,
 ) {
     use polymarket_client_sdk_v2::clob::ws::Client as WsClient;
     use polymarket_client_sdk_v2::types::U256;
     use polymarket_client_sdk_v2::ws::config::Config as WsConfig;
 
-    let ws_url = std::env::var("POLYMARKET_WS_URL")
-        .unwrap_or_else(|_| "wss://ws-subscriptions-clob.polymarket.com".into());
     // 0 / unset disables coalescing and forwards every quote (default: the
     // pre-coalescer behaviour).
     let heartbeat_ms = parse_heartbeat(std::env::var("POLYMARKET_TOP_HEARTBEAT_MS").ok().as_deref());
@@ -242,6 +246,33 @@ async fn poly_orderbook_loop(
             .send(FeedEvent::Info(format!("poly top coalescer enabled, heartbeat {heartbeat_ms}ms")))
             .await;
     }
+
+    /// Release the refcounts this feed holds on `ids`.
+    ///
+    /// `subscribe_orderbook` and `subscribe_prices` each take a reference on the
+    /// same asset — the SDK multiplexes both onto one market channel — and it only
+    /// sends the server-side unsubscribe once the count reaches zero. So one
+    /// release call per subscription is required to actually stop the venue.
+    fn release_tokens(client: &WsClient, ids: &[U256]) {
+        if ids.is_empty() {
+            return;
+        }
+        let _ = client.unsubscribe_orderbook(ids);
+        let _ = client.unsubscribe_prices(ids);
+    }
+
+    // One client for the process lifetime. Building a fresh `WsClient` per round
+    // (as this loop used to) leaks the previous socket: the SDK has no `Drop` on
+    // its connection, and its read half stays selectable, so the abandoned task
+    // keeps reading while the venue keeps pushing that round's tokens to a socket
+    // nothing consumes. Every rollover therefore added a subscription that streamed
+    // forever, which is how ~13 GB/day of archived data becomes a wire bill many
+    // times larger as the day goes on.
+    let mut client: Option<WsClient> = None;
+    // Tokens this feed currently holds on `client`. Released as soon as their
+    // replacement is subscribed, so exactly one round is ever live on the wire and
+    // the refcounts cannot drift upward across reconnect attempts.
+    let mut held: Vec<U256> = Vec::new();
 
     loop {
         let ids: Vec<U256> = tokens.iter().filter_map(|t| U256::from_str(t).ok()).collect();
@@ -253,16 +284,19 @@ async fn poly_orderbook_loop(
             }
             continue;
         }
-        let client = match WsClient::new(&ws_url, WsConfig::default()) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = ev_tx.send(FeedEvent::Info(format!("poly ws client: {e}"))).await;
-                if !wait_or_update(&mut tokens, &mut ctl_rx, 5).await {
-                    return;
+        if client.is_none() {
+            match WsClient::new(&ws_url, WsConfig::default()) {
+                Ok(c) => client = Some(c),
+                Err(e) => {
+                    let _ = ev_tx.send(FeedEvent::Info(format!("poly ws client: {e}"))).await;
+                    if !wait_or_update(&mut tokens, &mut ctl_rx, 5).await {
+                        return;
+                    }
+                    continue;
                 }
-                continue;
             }
-        };
+        }
+        let client = client.as_ref().expect("client created above");
         // Polymarket's market channel sends ONE full `book` snapshot on subscribe,
         // then only `price_change` incrementals. The SDK's `subscribe_orderbook`
         // filters those incrementals out (`_ => None`), so relying on it alone left
@@ -272,6 +306,11 @@ async fn poly_orderbook_loop(
         // `price_change` events (each entry has best_bid/best_ask), which we apply
         // as top-of-book updates. Both subscriptions share one MARKET channel and
         // refcount their assets, so this does not disturb the book stream.
+        // Claim the new round before releasing the outgoing one. Subscribing first
+        // keeps the market channel non-empty across the rollover, so the channel is
+        // not torn down and rebuilt (a fresh TLS handshake) every 15 minutes; on the
+        // same-set path after an error it also means no subscribe/unsubscribe pair
+        // goes out at all, since the refcount simply returns to where it started.
         let stream = match client.subscribe_orderbook(ids.clone()) {
             Ok(s) => s,
             Err(e) => {
@@ -285,6 +324,9 @@ async fn poly_orderbook_loop(
         let price_stream = match client.subscribe_prices(ids.clone()) {
             Ok(s) => s,
             Err(e) => {
+                // Undo the reference `subscribe_orderbook` just took. `held` still
+                // describes the round actually live on the wire, so it is untouched.
+                let _ = client.unsubscribe_orderbook(&ids);
                 let _ = ev_tx.send(FeedEvent::Info(format!("poly price subscribe: {e}"))).await;
                 if !wait_or_update(&mut tokens, &mut ctl_rx, 5).await {
                     return;
@@ -294,6 +336,9 @@ async fn poly_orderbook_loop(
         };
         let mut stream = Box::pin(stream);
         let mut price_stream = Box::pin(price_stream);
+        // The new round is live, so the previous one can safely go.
+        release_tokens(client, &held);
+        held = ids.clone();
         let _ = ev_tx
             .send(FeedEvent::Info(format!("poly orderbook+price subscribed {} tokens", ids.len())))
             .await;
@@ -350,7 +395,12 @@ async fn poly_orderbook_loop(
                 },
                 update = ctl_rx.recv() => match update {
                     Some(t) => {
-                        if t.is_empty() { tokens.clear(); return; }
+                        if t.is_empty() {
+                            release_tokens(client, &held);
+                            held.clear();
+                            tokens.clear();
+                            return;
+                        }
                         // Reported per round rollover (~15 min): the only honest way
                         // to see what the coalescer actually withheld. When it is
                         // disabled the counters are structurally zero, so say that
@@ -476,6 +526,110 @@ mod tests {
         Decimal::from_str(s).unwrap()
     }
 
+    /// Stand up a throwaway WebSocket server that records every text frame a
+    /// client sends it, and answer "PING" so the SDK's heartbeat stays happy.
+    /// Returns (url, received-frames handle, shutdown).
+    async fn recording_ws_server() -> (
+        String,
+        Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let seen_srv = Arc::clone(&seen);
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    a = listener.accept() => a,
+                    _ = &mut stop_rx => break,
+                };
+                let Ok((tcp, _)) = accepted else { break };
+                let seen_conn = Arc::clone(&seen_srv);
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else { return };
+                    while let Some(Ok(msg)) = ws.next().await {
+                        match msg {
+                            Message::Text(t) => {
+                                if t == "PING" {
+                                    let _ = ws.send(Message::Text("PONG".into())).await;
+                                    continue;
+                                }
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
+                                    seen_conn.lock().await.push(v);
+                                }
+                            }
+                            Message::Close(_) => break,
+                            _ => {}
+                        }
+                    }
+                });
+            }
+        });
+
+        (format!("ws://{addr}"), seen, stop_tx)
+    }
+
+    /// A rollover must not leave the previous round streaming. The regression this
+    /// guards is a leaked socket: the loop used to build a fresh client per round,
+    /// and the SDK has no `Drop`, so the old connection stayed subscribed forever.
+    /// Here we assert the wire itself — after moving to round B, round A's assets
+    /// must have been unsubscribed, so nothing from A keeps arriving.
+    #[tokio::test]
+    async fn rollover_unsubscribes_the_previous_round_on_the_wire() {
+        let (url, seen, stop) = recording_ws_server().await;
+
+        let a = vec!["111111111111111111111111111111111111111111111111111111111111111111".to_string()];
+        let b = vec!["222222222222222222222222222222222222222222222222222222222222222222".to_string()];
+
+        let (ev_tx, _ev_rx) = mpsc::channel::<FeedEvent>(16);
+        let (ctl_tx, ctl_rx) = mpsc::channel::<Vec<String>>(16);
+        let url_clone = url.clone();
+        let a_for_loop = a.clone();
+        let handle = tokio::spawn(async move {
+            poly_orderbook_loop(a_for_loop, ev_tx, ctl_rx, url_clone).await;
+        });
+
+        // Give the first round time to subscribe, then move to the second round.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        ctl_tx.send(b.clone()).await.expect("send rollover");
+        // The loop backs off 5s after a rollover before it subscribes the next
+        // round, so the window has to clear that sleep plus the reconnect.
+        tokio::time::sleep(Duration::from_millis(7_000)).await;
+
+        let frames = seen.lock().await.clone();
+        handle.abort();
+        let _ = stop.send(());
+
+        let subscribes: Vec<Vec<String>> = frames
+            .iter()
+            .filter(|f| f.get("operation").and_then(|o| o.as_str()) == Some("subscribe"))
+            .filter_map(|f| f.get("assets_ids").and_then(|a| a.as_array()))
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .collect();
+        let unsubscribes: Vec<Vec<String>> = frames
+            .iter()
+            .filter(|f| f.get("operation").and_then(|o| o.as_str()) == Some("unsubscribe"))
+            .filter_map(|f| f.get("assets_ids").and_then(|a| a.as_array()))
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .collect();
+
+        assert!(
+            subscribes.iter().any(|s| s.contains(&b[0])),
+            "the new round must be subscribed; frames={frames:?}"
+        );
+        assert!(
+            unsubscribes.iter().any(|u| u.contains(&a[0])),
+            "the previous round must be released on the wire, otherwise it streams \
+             forever; frames={frames:?}"
+        );
+    }
+
     #[test]
     fn first_quote_is_always_forwarded() {
         let mut c = TopCoalescer::new(1_000);
@@ -516,18 +670,22 @@ mod tests {
         assert!(!c.admit("t1", Some(dec("0.4")), Some(dec("0.5")), 2));
     }
 
-    #[test]
-    fn recommended_heartbeat_keeps_a_wide_margin_before_the_engine_expires_the_book() {
-        // The engine refuses to price a book older than `max_orderbook_stale_ms`
-        // (8 s, engine.rs). Coalescing is only safe while the beacon is far more
-        // frequent than that, or a quiet market would read as a dead feed.
+    /// The engine refuses to price a book older than `max_orderbook_stale_ms`
+    /// (8 s, `engine.rs`). Coalescing is only safe while the beacon is far more
+    /// frequent than that, or a quiet market reads as a dead feed and gets frozen
+    /// out of trading. Checked at compile time, so an edit to either constant that
+    /// breaks the margin fails the build rather than waiting on a test run.
+    const _: () = {
         const ENGINE_MAX_ORDERBOOK_STALE_MS: i64 = 8_000;
-        assert!(TOP_HEARTBEAT_MS_RECOMMENDED > 0, "heartbeat 0 means 'disabled', not a recommendation");
+        assert!(
+            TOP_HEARTBEAT_MS_RECOMMENDED > 0,
+            "heartbeat 0 means 'disabled', not a recommendation"
+        );
         assert!(
             TOP_HEARTBEAT_MS_RECOMMENDED * 4 <= ENGINE_MAX_ORDERBOOK_STALE_MS,
             "recommended heartbeat must leave at least a 4x margin"
         );
-    }
+    };
 
     #[test]
     fn heartbeat_zero_disables_coalescing() {
