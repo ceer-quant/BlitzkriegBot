@@ -100,9 +100,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T
 }
 
+export interface CommandDoc {
+  ok: boolean
+  action?: string
+  message?: string
+  [extra: string]: unknown
+}
+
 export const api = {
   snapshot: () => request<Snapshot>('/snapshot'),
   plugins: () => request<PluginsDoc>('/plugins'),
+  /** Dispatch a gateway command verb (`status`/`start`/`stop`/…). */
+  command: (cmd: string) =>
+    request<CommandDoc>('/command', { method: 'POST', body: cmd }),
+  /** Strategy enable toggle (`strategy.enable` on the core). */
+  setStrategy: (name: string, enabled: boolean) =>
+    request<{ ok: boolean }>(`/command`, {
+      method: 'POST',
+      body: `strategy ${name} ${enabled ? 'on' : 'off'}`,
+    }),
 }
 
 // ── wire types (mirror ui_kit core/types.rs) ───────────────────────────────
@@ -142,13 +158,36 @@ export interface EngineStats {
   strategies?: StrategyStatsRow[]
 }
 
+export interface MarketPrice {
+  asset: string
+  up: number
+  down: number
+}
+
 export interface Position {
   asset: string
   direction: string
   entryPrice: number
   currentPrice: number
   unrealizedPct: number
+  shares?: number
+  strategy?: string
   remainingSec?: number
+}
+
+export interface TradeRow {
+  id: string
+  strategy?: string
+  asset: string
+  direction: string
+  entryPrice: number
+  exitPrice: number
+  shares: number
+  netPnlUsd: number
+  netPnlPct?: number
+  feesUsd?: number
+  exitReason?: string
+  holdTimeSec?: number
 }
 
 export interface TradeSummary {
@@ -162,6 +201,8 @@ export interface Round {
   ageSec: number
   timeLeftSec: number
   canTrade: boolean
+  markets?: number
+  prices?: MarketPrice[]
 }
 
 export interface Snapshot {
@@ -173,6 +214,7 @@ export interface Snapshot {
   round?: Round | null
   positions?: Position[]
   trades?: TradeSummary
+  tradeRows?: TradeRow[]
   strategies?: unknown[]
   extensions?: unknown[]
   marketPlugins?: PluginRow[]

@@ -6,17 +6,19 @@ import { hasToken, getToken, logout } from './api/client'
 import OverviewPage from './pages/Overview.vue'
 import StrategiesPage from './pages/Strategies.vue'
 import PluginsPage from './pages/Plugins.vue'
+import HftPage from './pages/HftPage.vue'
 import LoginView from './components/LoginView.vue'
 
 const store = usePanelStore()
 const authed = ref(hasToken() && !!getToken())
-const tab = ref<'overview' | 'strategies' | 'plugins'>('overview')
+const tab = ref<'overview' | 'hft' | 'strategies' | 'plugins'>('overview')
 
-const pages = { overview: OverviewPage, strategies: StrategiesPage, plugins: PluginsPage } as const
+const pages = { overview: OverviewPage, hft: HftPage, strategies: StrategiesPage, plugins: PluginsPage } as const
 const activePage = computed(() => pages[tab.value])
 
 const tabs = [
   { id: 'overview', label: '总览' },
+  { id: 'hft', label: 'HFT 行情' },
   { id: 'strategies', label: '策略' },
   { id: 'plugins', label: '插件' },
 ] as const
