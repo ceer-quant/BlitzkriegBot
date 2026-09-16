@@ -12,7 +12,7 @@ import { usePanelStore } from '@/stores/panel'
 import {
   num, compact, money, signedMoney, winRatePct, pct, shortAddr, duration,
 } from '@/lib/format'
-import { balanceView, cashGapDetail, cashGapShort } from '@/lib/balance'
+import { balanceView } from '@/lib/balance'
 import StatTile from '@/components/ui/stat/StatTile.vue'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
@@ -61,9 +61,9 @@ const trades = computed(() => {
 })
 
 /**
- * 真实余额 = 本金 ＋ 净利润, with the core's cash ledger as the operative
- * footnote next to it (see `lib/balance.ts` for why the two are different
- * numbers and which one to trust).
+ * 真实余额 = 本金 ＋ 净利润. The core's cash ledger is deliberately not shown
+ * beside it in DRY (see `lib/balance.ts` for why it is a subset of what the
+ * trade log already records).
  *
  * Fees are an expense, so they are shown as a cost charged against gross profit
  * — never folded into the balance, which would make the fee look like it moved
@@ -165,24 +165,11 @@ const unrealized = computed(() =>
         </div>
 
         <!--
-          The core's cash ledger, kept as a separate operative number. Its gap
-          against 本金 ＋ 净利润 is a bookkeeping-basis difference, not a wrong
-          balance — the ledger restarts from the principal each boot while the
-          equity carries all persisted history. The gap is signed, so the
-          direction comes from `cashGapShort` rather than a fixed 「高于」.
+          No cash-ledger footnote in DRY: 本金 ＋ 净利润 above is already the real
+          balance, and the core's ledger is only 本金 ＋ 本次会话净利, so showing
+          both forced a per-page explanation of a difference that carries nothing
+          the trade log does not already record.
         -->
-        <div
-          v-if="recon.equity !== null && isDry"
-          class="mt-2 flex items-start gap-1.5 text-[10.5px] leading-snug text-faint-fg"
-        >
-          <CircleDot class="mt-px size-3 shrink-0 opacity-60" />
-          <Tooltip v-if="recon.gapMaterial" :content="cashGapDetail(recon)">
-            <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-              内核现金账 {{ money(recon.cash) }} · {{ cashGapShort(recon) }}
-            </span>
-          </Tooltip>
-          <span v-else>内核现金账 {{ money(recon.cash) }} · 与真实余额一致</span>
-        </div>
         <div v-if="isDry" class="mt-2 flex items-center gap-1.5 text-[10.5px] text-faint-fg">
           <CircleDot class="size-3" /> 模拟资金，非真实资产
         </div>
