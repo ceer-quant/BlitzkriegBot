@@ -203,12 +203,29 @@ export interface TradeRow {
   feesUsd?: number
   exitReason?: string
   holdTimeSec?: number
+  /** Milliseconds since epoch (older cores omit). */
+  entryTime?: number
+  exitTime?: number
 }
 
 export interface TradeSummary {
   count: number
   net: number
   winRate: number
+}
+
+/** All-time closed-trade totals from the persisted summary (trades.summary). */
+export interface CumulativeTradeSummary {
+  totalTrades?: number
+  wins?: number
+  losses?: number
+  winRate?: number
+  totalGrossPnl?: number
+  totalFees?: number
+  totalNetPnl?: number
+  avgHoldTimeSec?: number
+  best?: number
+  worst?: number
 }
 
 export interface Round {
@@ -230,6 +247,8 @@ export interface Snapshot {
   positions?: Position[]
   trades?: TradeSummary
   tradeRows?: TradeRow[]
+  /** All-time totals (older cores omit → fall back to tradeRows sums). */
+  tradeSummary?: CumulativeTradeSummary | null
   strategies?: unknown[]
   extensions?: unknown[]
   marketPlugins?: PluginRow[]

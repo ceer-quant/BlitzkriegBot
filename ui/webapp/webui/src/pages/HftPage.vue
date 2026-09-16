@@ -143,11 +143,99 @@ const tradeStats = computed(() => {
 const tab = ref<'positions' | 'history'>('positions')
 const positions = computed(() => snap.value?.positions ?? [])
 const historyRows = computed<TradeRow[]>(() => snap.value?.tradeRows ?? [])
+
+// Cumulative all-time totals: prefer the persisted core summary
+// (trades.summary — full history, no window cap); fall back to summing the
+// rows we actually received (older cores window-tradeRows to 200).
+const cumStats = computed(() => {
+  const s = snap.value?.tradeSummary
+  const rows = historyRows.value
+  if (s && (s.totalTrades ?? 0) > 0) {
+    return {
+      total: s.totalTrades ?? rows.length,
+      net: s.totalNetPnl ?? 0,
+      wins: s.wins ?? 0,
+      losses: s.losses ?? 0,
+      winRate: (s.winRate ?? 0) > 1.5 ? s.winRate! : (s.winRate ?? 0) * 100,
+      fromSummary: true,
+    }
+  }
+  const net = rows.reduce((x, t) => x + (Number(t.netPnlUsd) || 0), 0)
+  const wins = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length
+  return {
+    total: rows.length,
+    net,
+    wins,
+    losses: rows.length - wins,
+    winRate: rows.length ? (wins / rows.length) * 100 : 0,
+    fromSummary: false,
+  }
+})
+
+// ── history filters (time / asset / outcome / strategy) ──────────────────────
+const fTime = ref<'all' | 'today' | '7d'>('all')
+const fAsset = ref('all')
+const fOutcome = ref<'all' | 'win' | 'loss'>('all')
+const fStrategy = ref('all')
+const assetOptions = computed(() =>
+  [...new Set(historyRows.value.map((t) => t.asset))].sort(),
+)
+const strategyOptions = computed(() =>
+  [...new Set(historyRows.value.map((t) => t.strategy ?? '—').filter(Boolean))].sort(),
+)
+const filteredRows = computed<TradeRow[]>(() => {
+  let rows = historyRows.value
+  if (fTime.value === 'today') {
+    const d = new Date(); d.setHours(0, 0, 0, 0)
+    rows = rows.filter((t) => (t.exitTime ?? 0) >= d.getTime())
+  } else if (fTime.value === '7d') {
+    const cutoff = Date.now() - 7 * 86_400_000
+    rows = rows.filter((t) => (t.exitTime ?? 0) >= cutoff)
+  }
+  if (fAsset.value !== 'all') rows = rows.filter((t) => t.asset === fAsset.value)
+  if (fStrategy.value !== 'all') rows = rows.filter((t) => (t.strategy ?? '—') === fStrategy.value)
+  if (fOutcome.value === 'win') rows = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0)
+  else if (fOutcome.value === 'loss') rows = rows.filter((t) => (Number(t.netPnlUsd) || 0) <= 0)
+  return rows
+})
+const filteredNet = computed(() =>
+  filteredRows.value.reduce((x, t) => x + (Number(t.netPnlUsd) || 0), 0),
+)
+
+// Waterfall pagination: render a growing window of the filtered rows; an
+// IntersectionObserver on the sentinel loads the next chunk as it scrolls
+// into view (with a fallback 加载更多 button for odd layouts).
+const PAGE = 30
+const visible = ref(PAGE)
+watch([fTime, fAsset, fOutcome, fStrategy, tab], () => { visible.value = PAGE })
+const pageRows = computed(() => filteredRows.value.slice(0, visible.value))
+const sentinel = ref<HTMLElement | null>(null)
+let io: IntersectionObserver | null = null
+function setupSentinel(el: HTMLElement | null): void {
+  io?.disconnect()
+  io = null
+  sentinel.value = el
+  if (!el) return
+  io = new IntersectionObserver((es) => {
+    if (es.some((e) => e.isIntersecting)) visible.value += PAGE
+  }, { rootMargin: '200px' })
+  io.observe(el)
+}
+watch(tab, (t) => {
+  if (t !== 'history') setupSentinel(null)
+}, { flush: 'post' })
+
 function money(v: number): string {
   return `${v >= 0 ? '+' : ''}$${Math.abs(v).toFixed(2)}`
 }
 function moneyCls(v: number): string {
   return v > 0 ? 'pos' : v < 0 ? 'neg' : ''
+}
+function fmtTime(ms?: number): string {
+  if (!ms) return '—'
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 // ── start/stop (dispatcher lifecycle; requires --manage gateway) ─────────────
@@ -266,9 +354,90 @@ async function sendLifecycle(verb: 'start' | 'stop'): Promise<void> {
     <div class="glass card" style="margin-top: 14px">
       <div class="tabstrip">
         <button class="tab" :class="{ active: tab === 'positions' }" @click="tab = 'positions'">当前持仓（{{ positions.length }}）</button>
-        <button class="tab" :class="{ active: tab === 'history' }" @click="tab = 'history'">历史订单（{{ historyRows.length }}）</button>
+        <button class="tab" :class="{ active: tab === 'history' }" @click="tab = 'history'">历史订单（{{ cumStats.total }}）</button>
       </div>
-      <template v-if="tab === 'positions'">
+      <template v-if="tab === 'history'">
+        <!-- cumulative header: all-time order count / net profit -->
+        <div class="cum-row">
+          <div class="cum-item">
+            <div class="stat-name">累计订单</div>
+            <div class="num-mono big-num">{{ cumStats.total }}</div>
+          </div>
+          <div class="cum-item">
+            <div class="stat-name">累计利润</div>
+            <div class="num-mono big-num" :class="cumStats.net >= 0 ? 'pos-text' : 'neg-text'">{{ money(cumStats.net) }}</div>
+          </div>
+          <div class="cum-item">
+            <div class="stat-name">累计胜率</div>
+            <div class="num-mono big-num">{{ cumStats.winRate.toFixed(1) }}%</div>
+          </div>
+          <div class="cum-item">
+            <div class="stat-name">盈利 / 亏损</div>
+            <div class="num-mono big-num">
+              <span style="color: var(--bk-green)">{{ cumStats.wins }}</span>
+              <span class="dim"> / </span>
+              <span style="color: var(--bk-red)">{{ cumStats.losses }}</span>
+            </div>
+          </div>
+        </div>
+        <div v-if="!cumStats.fromSummary" class="sub" style="margin: 0 2px 8px">
+          正在显示最近 {{ historyRows.length }} 笔历史（核心尚未提供全量累计汇总）。
+        </div>
+
+        <!-- filter bar: time / asset / outcome / strategy -->
+        <div class="filter-bar">
+          <select class="f-select" v-model="fTime">
+            <option value="all">全部时间</option>
+            <option value="today">今天</option>
+            <option value="7d">近 7 天</option>
+          </select>
+          <select class="f-select" v-model="fAsset">
+            <option value="all">全部币种</option>
+            <option v-for="a in assetOptions" :key="a" :value="a">{{ a }}</option>
+          </select>
+          <select class="f-select" v-model="fOutcome">
+            <option value="all">全部盈亏</option>
+            <option value="win">仅盈利</option>
+            <option value="loss">仅亏损</option>
+          </select>
+          <select class="f-select" v-model="fStrategy">
+            <option value="all">全部策略</option>
+            <option v-for="s in strategyOptions" :key="s" :value="s">{{ s }}</option>
+          </select>
+          <span class="sub f-count">
+            筛出 {{ filteredRows.length }} 笔 · 小计 <span :class="filteredNet >= 0 ? 'pos-text' : 'neg-text'">{{ money(filteredNet) }}</span>
+          </span>
+        </div>
+
+        <div style="overflow-x: auto">
+          <table v-if="pageRows.length">
+            <thead>
+              <tr><th>资产</th><th>方向</th><th>入场→平仓</th><th>份额</th><th>净 PnL</th><th>收益率</th><th>买入时间</th><th>卖出时间</th><th>持仓</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="t in pageRows" :key="t.id">
+                <td style="font-weight: 600">{{ t.asset }}</td>
+                <td><span class="badge" :class="t.direction === 'up' ? 'on' : 'warn'">{{ t.direction.toUpperCase() }}</span></td>
+                <td class="num-mono">{{ t.entryPrice.toFixed(3) }} → {{ t.exitPrice.toFixed(3) }}</td>
+                <td class="num-mono">{{ t.shares }}</td>
+                <td class="num-mono" :style="{ color: t.netPnlUsd >= 0 ? 'var(--bk-green)' : 'var(--bk-red)' }">{{ money(t.netPnlUsd) }}</td>
+                <td class="num-mono" :style="{ color: (t.netPnlPct ?? 0) >= 0 ? 'var(--bk-green)' : 'var(--bk-red)' }">{{ (t.netPnlPct ?? 0).toFixed(2) }}%</td>
+                <td class="num-mono" style="font-size: 11px" :title="t.strategy || ''">{{ fmtTime(t.entryTime) }}</td>
+                <td class="num-mono" style="font-size: 11px" :title="t.exitReason || ''">{{ fmtTime(t.exitTime) }}</td>
+                <td class="num-mono dim">{{ t.holdTimeSec ?? 0 }}s</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-else class="empty">无符合条件的平仓记录</div>
+        </div>
+        <!-- waterfall sentinel: auto-loads next page when scrolled into view -->
+        <div v-if="tab === 'history' && filteredRows.length > visible" :ref="(el) => setupSentinel(el as HTMLElement | null)" class="sentinel sub">
+          加载中 {{ Math.min(visible, filteredRows.length) }} / {{ filteredRows.length }} …
+          <button class="f-more-btn" @click="visible += 30">加载更多</button>
+        </div>
+        <div v-else-if="tab === 'history' && filteredRows.length" class="sentinel sub">已全部加载 {{ filteredRows.length }} 笔</div>
+      </template>
+      <template v-else>
         <table v-if="positions.length">
           <thead>
             <tr><th>资产</th><th>方向</th><th>入场</th><th>现价</th><th>份额</th><th>浮动</th><th>剩余</th></tr>
@@ -288,29 +457,6 @@ async function sendLifecycle(verb: 'start' | 'stop'): Promise<void> {
           </tbody>
         </table>
         <div v-else class="empty">无持仓</div>
-      </template>
-      <template v-else>
-        <div style="overflow-x: auto">
-          <table v-if="historyRows.length">
-            <thead>
-              <tr><th>资产</th><th>方向</th><th>入场→平仓</th><th>份额</th><th>净 PnL</th><th>收益率</th><th>费用</th><th>原因</th><th>持仓时长</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="t in historyRows" :key="t.id">
-                <td style="font-weight: 600">{{ t.asset }}</td>
-                <td><span class="badge" :class="t.direction === 'up' ? 'on' : 'warn'">{{ t.direction.toUpperCase() }}</span></td>
-                <td class="num-mono">{{ t.entryPrice.toFixed(3) }} → {{ t.exitPrice.toFixed(3) }}</td>
-                <td class="num-mono">{{ t.shares }}</td>
-                <td class="num-mono" :style="{ color: t.netPnlUsd >= 0 ? 'var(--bk-green)' : 'var(--bk-red)' }">{{ money(t.netPnlUsd) }}</td>
-                <td class="num-mono">{{ (t.netPnlPct ?? 0).toFixed(2) }}%</td>
-                <td class="num-mono dim">{{ (t.feesUsd ?? 0).toFixed(2) }}</td>
-                <td class="sub">{{ t.exitReason || '—' }}</td>
-                <td class="num-mono dim">{{ t.holdTimeSec ?? 0 }}s</td>
-              </tr>
-            </tbody>
-          </table>
-          <div v-else class="empty">暂无平仓记录</div>
-        </div>
       </template>
     </div>
   </template>
@@ -410,4 +556,51 @@ async function sendLifecycle(verb: 'start' | 'stop'): Promise<void> {
 .big-num { font-size: 20px; font-weight: 800; }
 .dim { color: var(--bk-text-dim); }
 .tabstrip { display: flex; gap: 8px; margin-bottom: 12px; }
+
+.cum-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--bk-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  margin-bottom: 12px;
+}
+.pos-text { color: var(--bk-green); }
+.neg-text { color: var(--bk-red); }
+
+.filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.f-select {
+  background: var(--bk-glass, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--bk-border);
+  border-radius: 999px;
+  color: inherit;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.f-select option { color: #1a1a1a; }
+.f-count { margin-left: auto; }
+.f-more-btn {
+  border: 1px solid var(--bk-border);
+  background: transparent;
+  color: inherit;
+  border-radius: 999px;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 14px;
+  cursor: pointer;
+}
+.sentinel {
+  text-align: center;
+  padding: 10px 0 2px;
+}
 </style>

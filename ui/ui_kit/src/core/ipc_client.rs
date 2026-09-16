@@ -200,6 +200,12 @@ impl IpcClient {
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
 
+    /// All-time closed-trade totals from the persisted summary (trades.summary).
+    pub fn trade_summary(&mut self) -> Result<serde_json::Value, IpcError> {
+        let v = self.call("trades.summary", serde_json::json!({}))?;
+        Ok(v.get("summary").cloned().unwrap_or(serde_json::Value::Null))
+    }
+
     pub fn strategies(&mut self) -> Result<StrategyListView, IpcError> {
         serde_json::from_value(self.call("strategy.list", serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
@@ -259,6 +265,8 @@ impl IpcClient {
             .trades(trade_limit)
             .map(|t| t.trades)
             .unwrap_or_default();
+        // All-time closed-trade totals (persisted summary; older cores omit).
+        s.trade_summary = self.trade_summary().ok();
         s.strategies = self.strategies().map(|r| r.strategies).unwrap_or_default();
         s.extensions = self.extensions().map(|r| r.extensions).unwrap_or_default();
         // E9-g: per-strategy accounting travels with every snapshot so the

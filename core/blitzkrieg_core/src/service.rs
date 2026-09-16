@@ -774,6 +774,50 @@ impl Core {
         self.extensions.dispatch(event).await;
     }
 
+    /// All-time closed-trade summary for the UI (totalTrades / wins / losses /
+    /// totalNetPnl / …). Prefers the persisted summary tracked by the trade db;
+    /// falls back to totals recomputed over the JSONL (or in-memory history)
+    /// when no db is attached.
+    pub fn trade_summary(&self) -> serde_json::Value {
+        if let Some(db) = self.trade_db.as_ref() {
+            return serde_json::to_value(db.summary()).unwrap_or(serde_json::Value::Null);
+        }
+        // Fallback: aggregate over whatever history we can reach.
+        let empty = Vec::new();
+        let rows = self.recent_trades(0);
+        let rows = if rows.is_empty() { &empty } else { &rows };
+        let mut s = serde_json::json!({
+            "totalTrades": 0u64, "wins": 0u64, "losses": 0u64, "winRate": 0.0,
+            "totalGrossPnl": 0.0, "totalFees": 0.0, "totalNetPnl": 0.0,
+            "avgHoldTimeSec": 0.0, "bestTradePnl": 0.0, "worstTradePnl": 0.0,
+        });
+        let (mut wins, mut losses, mut gross, mut fees, mut net, mut best, mut worst, mut holds) =
+            (0u64, 0u64, 0.0, 0.0, 0.0, f64::NEG_INFINITY, f64::INFINITY, 0.0);
+        for r in rows.iter() {
+            let num = |k: &str| r.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let net_i = num("netPnlUsd");
+            if net_i >= 0.0 { wins += 1 } else { losses += 1 }
+            gross += num("grossPnlUsd");
+            fees += num("feesUsd");
+            net += net_i;
+            best = best.max(net_i);
+            worst = worst.min(net_i);
+            holds += num("holdTimeSec");
+        }
+        let n = (wins + losses) as f64;
+        s["totalTrades"] = serde_json::json!(wins + losses);
+        s["wins"] = serde_json::json!(wins);
+        s["losses"] = serde_json::json!(losses);
+        s["winRate"] = serde_json::json!(if n > 0.0 { wins as f64 * 100.0 / n } else { 0.0 });
+        s["totalGrossPnl"] = serde_json::json!(gross);
+        s["totalFees"] = serde_json::json!(fees);
+        s["totalNetPnl"] = serde_json::json!(net);
+        s["avgHoldTimeSec"] = serde_json::json!(if n > 0.0 { holds / n } else { 0.0 });
+        s["bestTradePnl"] = serde_json::json!(if rows.is_empty() { 0.0 } else { best });
+        s["worstTradePnl"] = serde_json::json!(if rows.is_empty() { 0.0 } else { worst });
+        s
+    }
+
     /// Recent closed trades (for the UI). Reads the persisted log when present,
     /// else falls back to the in-memory closed positions.
     pub fn recent_trades(&self, limit: usize) -> Vec<serde_json::Value> {
