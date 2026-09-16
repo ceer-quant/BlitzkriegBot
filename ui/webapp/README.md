@@ -32,9 +32,11 @@ target/release/ui_kit_web --socket <core.sock> --addr 127.0.0.1:51888 --manage
 设计参照 freqtrade 的 REST API（同类程序中最成熟的先例），四点一致：
 
 1. **除探活端点外一律要求鉴权。** freqtrade 只有 `/ping` 免鉴权，这里只有 `/api/ping`。
-   **网关模式（`--manage`）始终要求会话**；`BLITZKRIEG_PANEL_USER` / `_PASSWORD`
-   两者都未配置时自动生成一次性密码并打印在启动日志里 —— 一个能启动/停止内核的
-   进程不会裸奔。只配置一半视为未配置（猜操作者意图正是面板敞开的成因）。
+   **网关模式（`--manage`）始终要求会话**，且凭据只能来自
+   `BLITZKRIEG_PANEL_USER` / `_PASSWORD`：两者都未配置时网关**拒绝启动**（exit 2），
+   不会自行生成密码 —— 进程自选的密钥操作者既无法轮换也无从审计，把它打印到终端更是
+   让终端而非密钥库成为「谁能停掉内核」的答案。只配置一半同样视为未配置（猜操作者
+   意图正是面板敞开的成因）。
 2. **回环不是信任边界。** 只监听 localhost 挡不住操作者随手打开的网页向 127.0.0.1
    发跨站请求（`<img>` / `<form>` 属 simple request，不触发 CORS 预检）。因此
    `GET /api/command?cmd=stop` 这种跨站形状必须打不到 —— 靠的是会话要求（跨站请求
@@ -57,8 +59,8 @@ target/release/ui_kit_web --socket <core.sock> --addr 127.0.0.1:51888 --manage
 - `npm run ui:webapp` — 门禁（`scripts/webapp-check.mjs`）：Vue 构建产物存在**且与
   `/panel` 实际下发内容一致**、快照渲染非空、鉴权双向 ACCEPT/REJECT、CORS、
   CSRF（跨站 GET 打不到 lifecycle verb）、`/api/ping` 不泄露状态、登出吊销、
-  未配置凭据时一次性密码强制生效、无 GUI 污染。
-- `cargo test -p blitzkrieg-ui-kit --lib web::auth_tests` — 16 项鉴权 / CSRF /
+  未配置凭据时网关拒绝启动、且进程不生成任何密码、无 GUI 污染。
+- `cargo test -p blitzkrieg-ui-kit --lib web::auth_tests` — 42 项鉴权 / CSRF /
   会话生命周期测试。
 
 ## 安全边界

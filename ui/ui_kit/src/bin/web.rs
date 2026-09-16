@@ -45,48 +45,30 @@ fn main() {
     // Full trade history: the history tab paginates in the browser, so pass
     // limit=0 (trades.history drains ALL closed rows, no 200-row cap).
     let mut server = WebServer::with_gateway(client, 0, dispatcher);
-    // E6-a: user/password auth from env. Set BLITZKRIEG_PANEL_USER and
-    // BLITZKRIEG_PANEL_PASSWORD to choose the panel login; the WebUI exchanges
-    // them for a session token via POST /api/login. Leaving them unset no longer
-    // disables auth — gateway mode mints a one-time password below, because this
-    // process can start and stop the trading core.
+    // Panel credentials come from the environment, never from this process. The
+    // WebUI exchanges them for a session token via POST /api/login. Gateway mode
+    // can start and stop the trading core, so a missing pair is a startup error
+    // rather than a prompt to invent one.
     server.set_panel_credentials(
         std::env::var("BLITZKRIEG_PANEL_USER").ok(),
         std::env::var("BLITZKRIEG_PANEL_PASSWORD").ok(),
     );
-    let minted = server.ensure_credentials();
+    if let Err(why) = server.require_credentials() {
+        eprintln!("ui_kit_web: {why}");
+        std::process::exit(2);
+    }
     println!(
         "panel auth: {}",
         if server.auth_required() {
-            "session required on /api/*"
+            if server.credentials_configured() {
+                "session required on /api/* (credentials from env)"
+            } else {
+                "session required on /api/*"
+            }
         } else {
             "off (read-only surface, no command verbs)"
         }
     );
-    if let Some(pass) = &minted {
-        // Printed once to stdout and nowhere else: no logging framework, no file,
-        // no API route echoes it. Whoever can read this terminal already owns the
-        // process, so this disclosure costs nothing the operator has not spent.
-        const W: usize = 55;
-        let rule = |l: &str, r: &str| format!("  {l}{}{r}", "─".repeat(W));
-        let row = |t: &str| format!("  │{:<w$}│", format!(" {t}"), w = W);
-        println!("{}", rule("┌", "┐"));
-        for line in [
-            "",
-            "BLITZKRIEG_PANEL_USER / _PASSWORD were not set,",
-            "so a one-time password was generated for this run:",
-            "",
-            "  user:     admin",
-            &format!("  password: {pass}"),
-            "",
-            "It is valid until this process exits. Set those two",
-            "env vars to use a stable password instead.",
-            "",
-        ] {
-            println!("{}", row(line));
-        }
-        println!("{}", rule("└", "┘"));
-    }
     if let Err(e) = server.serve(&addr) {
         eprintln!("web server error: {e}");
         std::process::exit(1);

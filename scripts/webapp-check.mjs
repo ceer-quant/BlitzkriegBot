@@ -57,6 +57,30 @@ check('artifact ships hashed JS+CSS assets',
   bundles.some((f) => f.endsWith('.js')) && bundles.some((f) => f.endsWith('.css')),
   `${bundles.length} assets`);
 
+// [0b] The liquid-glass blur must survive minification.
+//
+// The CSS shipped `-webkit-backdrop-filter` *after* the standard property; the
+// minifier treats the two as the same declaration, keeps the last one, and the
+// resulting rule had no effect in Chromium — the glass was silently flat, with
+// no error anywhere to notice. Assert the *built* CSS still carries the
+// unprefixed property, per rule.
+{
+  const cssFile = bundles.find((f) => f.endsWith('.css'));
+  const css = cssFile ? readFileSync(join(assetsDir, cssFile), 'utf8') : '';
+  const rule = (sel) => {
+    const i = css.indexOf(sel + '{');
+    return i < 0 ? '' : css.slice(i, css.indexOf('}', i));
+  };
+  for (const sel of ['.glass', '.glass-header']) {
+    const body = rule(sel);
+    check(`${sel} keeps the unprefixed backdrop-filter after minification`,
+      /[^-]backdrop-filter:/.test(body.replace(/-webkit-backdrop-filter:[^;]*;?/g, '')),
+      body.slice(0, 90) || 'rule missing');
+  }
+  check('the header glass is blurred harder than a card (liquid-glass tier)',
+    /blur\(4\dpx\)/.test(rule('.glass-header')), rule('.glass-header').slice(0, 70));
+}
+
 // [1] Tauri crate compiles — its own workspace (standalone like rust-executor,
 //     so Linux CI without the GTK headers never touches it). Check on macOS
 //     where the GTK deps build fine; assert scaffold files on any OS.
@@ -87,8 +111,9 @@ for await (const chunk of gotReady) {
   readyLine += chunk.toString();
   if (/listening on/.test(readyLine)) break;
 }
-check('configured credentials are not replaced by a one-time password',
-  !/one-time password/.test(readyLine));
+check('configured credentials are used as-is (no generated password)',
+  /credentials from env/.test(readyLine) && !/password:\s+[0-9a-f]{32}/.test(readyLine),
+  readyLine.slice(-160));
 
 // Live core for snapshot through the same token gate. `--engine` matters: it is
 // what the supervisor starts a real session with (`--engine --feed-ws`), and
@@ -170,6 +195,38 @@ try {
   check('served /panel is byte-identical to dist/index.html',
     panelBody.trim() === distHtml.trim(), `${panelBody.length} served vs ${distHtml.length} on disk`);
 
+  // ── Brand assets survive the wire ─────────────────────────────────────────
+  //
+  // The panel ships binary PNG icons next to its text assets, and the static
+  // route used to hand the file body through `String::from_utf8_lossy` — which
+  // replaces every non-ASCII byte and so inflated a 3 KB icon to 5.5 KB of
+  // mojibake. Compare bytes, not length: a wrong-but-similar size must fail too.
+  const brand = ['favicon-32.png', 'favicon-16.png', 'apple-touch-icon.png'];
+  for (const name of brand) {
+    const disk = readFileSync(join(DIST, name));
+    const res = await fetch(`http://127.0.0.1:18997/panel/${name}`);
+    const wire = Buffer.from(await res.arrayBuffer());
+    check(`${name} is served byte-identical (${disk.length} B)`,
+      wire.length === disk.length && wire.equals(disk),
+      `status=${res.status} type=${res.headers.get('content-type')} wire=${wire.length}`);
+  }
+  // The hashed logo the Vue bundle imports, whatever hash Vite gave it.
+  const logoName = readdirSync(join(DIST, 'assets')).find((f) => /^logo-.*\.png$/.test(f));
+  if (logoName) {
+    const disk = readFileSync(join(DIST, 'assets', logoName));
+    const res = await fetch(`http://127.0.0.1:18997/panel/assets/${logoName}`);
+    const wire = Buffer.from(await res.arrayBuffer());
+    check(`bundled ${logoName} is served as a real PNG (${disk.length} B)`,
+      wire.equals(disk) && wire.subarray(1, 4).toString() === 'PNG',
+      `status=${res.status} wire=${wire.length} magic=${wire.subarray(1, 4).toString()}`);
+    // And the app actually references it, so the asset is not merely present.
+    const js = readdirSync(join(DIST, 'assets')).find((f) => /^index-.*\.js$/.test(f));
+    check('the bundle references the logo asset',
+      !!js && readFileSync(join(DIST, 'assets', js), 'utf8').includes(logoName), `js=${js}`);
+  } else {
+    check('the bundle emits a hashed logo asset', false, 'no logo-*.png in dist/assets');
+  }
+
   const body = ok.slice(ok.indexOf('\r\n\r\n') + 4);
   let snap = {};
   try { snap = JSON.parse(body); } catch {}
@@ -203,36 +260,49 @@ try {
   check('headless AppViewModel renders offline-safe (ui_kit app adapter)',
     vmCheck?.status === 0, (vmCheck?.stderr ?? '').slice(-140));
 
-  // ── [5] A gateway with no configured credentials must still be locked ─────
+  // ── [5] No configured credentials → refuse to start ───────────────────────
   //
   // The configuration that was exploitable during acceptance: no env vars, so
-  // the old code served `/api/command` openly on loopback.
+  // the old code served `/api/command` openly on loopback. Credentials now come
+  // from the environment only — the process must not invent a password, because
+  // then it, and not the operator's secret store, decides who can stop the core.
   const web2 = spawn(WEB, ['--socket', SOCK, '--addr', '127.0.0.1:18998', '--manage'], {
     cwd: WORK, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, BLITZKRIEG_PANEL_USER: '', BLITZKRIEG_PANEL_PASSWORD: '' },
   });
   try {
     let out = '';
+    let err = '';
+    web2.stderr.on('data', (d) => { err += d.toString(); });
     const it2 = web2.stdout[Symbol.asyncIterator]();
     for await (const chunk of it2) {
       out += chunk.toString();
       if (/listening on/.test(out)) break;
     }
-    const minted = /password:\s+([0-9a-f]{32})/.exec(out)?.[1] ?? '';
-    check('no credentials configured → one-time password minted', minted.length === 32,
-      minted ? '' : out.slice(-200));
-    check('locked panel refuses a sessionless command',
-      status(await httpReq(18998, 'GET', '/api/command?cmd=status')) === 401);
-    check('locked panel refuses a sessionless snapshot',
-      status(await httpReq(18998, 'GET', '/api/snapshot')) === 401);
-    check('the minted password actually works',
-      status(await httpReq(18998, 'POST', '/api/login', {
-        body: JSON.stringify({ user: 'admin', password: minted }),
-      })) === 200);
-    check('a wrong password against the minted panel is refused',
-      status(await httpReq(18998, 'POST', '/api/login', {
-        body: JSON.stringify({ user: 'admin', password: 'x'.repeat(32) }),
-      })) === 401);
+    const exited = await Promise.race([
+      new Promise((res) => web2.on('exit', (code) => res(code))),
+      sleep(3000).then(() => null),
+    ]);
+    const combined = out + err;
+    check('no credentials configured → gateway refuses to start',
+      exited === 2, `exit=${exited} out=${combined.slice(-200)}`);
+    check('the refusal names both env vars it needs',
+      /BLITZKRIEG_PANEL_USER/.test(combined) && /BLITZKRIEG_PANEL_PASSWORD/.test(combined),
+      combined.slice(-200));
+    check('no password is generated by the process',
+      !/password:\s+[0-9a-f]{32}/.test(combined), combined.slice(-200));
+    check('and it never claimed to be listening',
+      !/listening on/.test(out));
+    // Nothing is bound, so nothing can be reached on that port either. A refused
+    // connection yields no bytes at all, so there is no status line to parse —
+    // that absence *is* the pass condition. A live socket would answer 200/401.
+    const deadRaw = await Promise.race([
+      httpReq(18998, 'GET', '/api/snapshot'),
+      sleep(3000).then(() => 'TIMEOUT'),
+    ]);
+    const dead = /^HTTP\/1\.1 \d{3}/.test(deadRaw) ? status(deadRaw) : -1;
+    check('the refused gateway leaves nothing listening on its port',
+      dead === -1, `bye=${JSON.stringify(deadRaw.slice(0, 40))}`);
   } finally {
     try { web2.kill('SIGKILL'); } catch {}
   }

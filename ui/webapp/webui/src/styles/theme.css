@@ -53,6 +53,13 @@
   --info: oklch(0.72 0.13 240);
   --grid-line: oklch(1 0 0 / 0.035);
   --sheen: oklch(1 0 0 / 0.1);
+  /* Header glass. The fill is deliberately thinner than `--panel`: blur only
+     reads as glass while there is transparency left for the content scrolling
+     underneath to show through, and `--panel` is opaque enough to hide it. */
+  --glass-fill: oklch(0.22 0.016 268 / 0.42);
+  --glass-hi: oklch(1 0 0 / 0.1);
+  --glass-edge: oklch(1 0 0 / 0.14);
+  --glass-rim: oklch(0 0 0 / 0.4);
   --shadow-1: 0 1px 2px oklch(0 0 0 / 0.4), 0 8px 24px oklch(0 0 0 / 0.35);
   --shadow-2: 0 2px 6px oklch(0 0 0 / 0.45), 0 18px 48px oklch(0 0 0 / 0.5);
   --glow: 0 0 0 1px oklch(0.78 0.16 68 / 0.28), 0 6px 28px oklch(0.78 0.16 68 / 0.18);
@@ -81,6 +88,10 @@
   --info: oklch(0.6 0.15 240);
   --grid-line: oklch(0.2 0.02 268 / 0.045);
   --sheen: oklch(1 0 0 / 0.7);
+  --glass-fill: oklch(1 0 0 / 0.44);
+  --glass-hi: oklch(1 0 0 / 0.72);
+  --glass-edge: oklch(1 0 0 / 0.8);
+  --glass-rim: oklch(0.2 0.02 268 / 0.07);
   --shadow-1: 0 1px 2px oklch(0.2 0.02 268 / 0.06), 0 10px 30px oklch(0.2 0.02 268 / 0.08);
   --shadow-2: 0 2px 8px oklch(0.2 0.02 268 / 0.08), 0 22px 56px oklch(0.2 0.02 268 / 0.12);
   --glow: 0 0 0 1px oklch(0.66 0.17 58 / 0.3), 0 8px 30px oklch(0.66 0.17 58 / 0.16);
@@ -179,8 +190,8 @@
   .glass {
     position: relative;
     background: var(--panel);
-    backdrop-filter: blur(26px) saturate(150%);
     -webkit-backdrop-filter: blur(26px) saturate(150%);
+    backdrop-filter: blur(26px) saturate(150%);
     border: 1px solid var(--line);
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-1), inset 0 1px 0 var(--sheen);
@@ -199,6 +210,67 @@
       transparent 96%
     );
     opacity: 0.7;
+    pointer-events: none;
+  }
+
+  /* ── header glass ────────────────────────────────────────────────────
+     A heavier refraction than `.glass`, on purpose. The header floats over
+     content that scrolls under it, so letting that content show through,
+     blurred, is the whole point — whereas a card has to keep its own body text
+     crisp. Hence a deeper blur, more saturation (that is what blooms the gold
+     behind it), a fill that is a gradient rather than a flat wash so the top
+     edge catches light, and a rim shadow so the pane reads as a thick slab of
+     glass instead of a rectangle with opacity on it. */
+  .glass-header {
+    position: relative;
+    /* Longhands, not the `background` shorthand: a translucent colour as a
+       comma layer of the shorthand parses inconsistently across engines (one
+       drops the layer, another turns it into `none`), and losing it would leave
+       the pane see-through instead of frosted. */
+    background-color: var(--glass-fill);
+    background-image: linear-gradient(180deg, var(--glass-hi), transparent 46%);
+    -webkit-backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
+    backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
+    border: 1px solid var(--glass-edge);
+    border-radius: calc(var(--radius-lg) + 2px);
+    box-shadow:
+      var(--shadow-2),
+      inset 0 1px 0 var(--sheen),
+      inset 0 -1px 0 var(--glass-rim);
+  }
+
+  /* the gold refraction hairline along the top edge */
+  .glass-header::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent 3%,
+      oklch(0.78 0.16 68 / 0.6) 50%,
+      transparent 97%
+    );
+    opacity: 0.85;
+    pointer-events: none;
+  }
+
+  /* Specular sweep. `z-index: -1` parks it on the glass itself: the element's
+     own backdrop-filter makes it a stacking context, so the highlight lands
+     above the fill and below the header's text, which stays crisp. */
+  .glass-header::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: linear-gradient(
+      104deg,
+      oklch(1 0 0 / 0.08) 0%,
+      transparent 38%,
+      transparent 64%,
+      oklch(1 0 0 / 0.045) 100%
+    );
     pointer-events: none;
   }
 

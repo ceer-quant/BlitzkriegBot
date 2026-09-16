@@ -11,6 +11,7 @@ import { hasToken, logout, ping } from './api/client'
 import { SESSION_EXPIRED_REASON } from './lib/session'
 import { useTheme } from './lib/theme'
 import { clockTime } from './lib/format'
+import brandMark from './assets/logo.png'
 import OverviewPage from './pages/Overview.vue'
 import HftPage from './pages/HftPage.vue'
 import BacktestPage from './pages/BacktestPage.vue'
@@ -110,16 +111,18 @@ onMounted(() => {
 <template>
   <template v-if="authed">
     <header
-      class="glass sticky top-3 z-20 mx-auto flex max-w-[1280px] items-center gap-4 px-4 py-2.5"
+      class="glass-header sticky top-3 z-20 mx-auto flex max-w-[1280px] items-center gap-4 px-4 py-2.5"
       style="width: calc(100% - 32px)"
     >
       <!-- brand -->
       <div class="flex shrink-0 items-center gap-2.5">
-        <span class="relative grid size-8 place-items-center rounded-[10px] btn-gold">
-          <svg class="size-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M13 2 4.5 13.5H11L9.5 22 19 10h-6.5z" />
-          </svg>
-        </span>
+        <img
+          :src="brandMark"
+          alt=""
+          aria-hidden="true"
+          class="size-9 shrink-0 select-none drop-shadow-[0_2px_6px_rgba(0,0,0,0.35)]"
+          draggable="false"
+        >
         <div class="leading-tight">
           <h1 class="text-[15px] font-bold tracking-[-0.01em]">闪电战机器人</h1>
           <p class="label-micro" style="letter-spacing: 0.14em">BLITZKRIEG</p>

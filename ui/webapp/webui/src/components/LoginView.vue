@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /** Login gate — user/password against the gateway, gold identity, glass card. */
 import { ref } from 'vue'
-import { KeyRound, User, LogIn, Zap } from 'lucide-vue-next'
+import { KeyRound, User, LogIn } from 'lucide-vue-next'
 import { login } from '@/api/client'
 import Button from '@/components/ui/button/Button.vue'
 import Input from '@/components/ui/input/Input.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
+import brandMark from '@/assets/logo.png'
 
 const props = defineProps<{
   /**
@@ -41,9 +42,13 @@ async function submit(): Promise<void> {
     <div class="w-full max-w-[392px]">
       <!-- brand -->
       <div class="mb-6 flex flex-col items-center gap-3 text-center">
-        <span class="grid size-12 place-items-center rounded-[14px] btn-gold rise-in">
-          <Zap class="size-6" />
-        </span>
+        <img
+          :src="brandMark"
+          alt=""
+          aria-hidden="true"
+          class="size-14 shrink-0 select-none drop-shadow-[0_6px_18px_rgba(0,0,0,0.4)] rise-in"
+          draggable="false"
+        >
         <div>
           <h1 class="text-[21px] font-bold tracking-[-0.02em]">闪电战机器人</h1>
           <p class="label-micro mt-1" style="letter-spacing: 0.16em">BLITZKRIEG CONTROL PANEL</p>
@@ -97,7 +102,7 @@ async function submit(): Promise<void> {
           <span class="mx-1">/</span>
           <code class="rounded border border-line bg-panel-2 px-1.5 py-px text-[10.5px]">BLITZKRIEG_PANEL_PASSWORD</code>
           <br>
-          <span class="text-faint-fg">未设置时网关会生成一次性密码并打印在启动日志里</span>
+          <span class="text-faint-fg">未设置时网关会拒绝启动，不会自行生成密码</span>
         </p>
       </form>
 
