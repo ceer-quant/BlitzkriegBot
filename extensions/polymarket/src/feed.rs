@@ -1,9 +1,8 @@
 //! Feed layer — Rust-native market data ingestion (P4).
 //!
 //! Two sources, both with reconnect:
-//!   - Polymarket orderbook: the SDK `clob::ws` client streams `BookUpdate`
-//!     snapshots and `PriceChange`/`BestBidAsk` top-of-book updates for the
-//!     subscribed token ids.
+//!   - Polymarket orderbook: REST `POST /books` polling (see [`DEFAULT_POLL_MS`]
+//!     for why this is deliberately *not* the venue's WebSocket market channel).
 //!   - Binance spot: a raw `tokio-tungstenite` connection to the combined
 //!     `@trade` stream, parsed into per-asset spot ticks for the momentum filter.
 //!
@@ -11,59 +10,137 @@
 //! module no longer touches `Core` directly and can move into a market extension
 //! unchanged. Node no longer has to push `books.*` / `spot.price`; those IPC
 //! methods remain for tests and as a manual override.
+//!
+//! The authenticated *user* channel (order and fill events) stays on WebSocket,
+//! in `venue.rs`: it carries only this bot's own orders rather than a whole
+//! market, so it costs almost nothing, and a fill wants to arrive as an event
+//! rather than on a poll boundary.
 
-use blitzkrieg_market_api::{BookUpdate, MarketHost, SpotUpdate, TopOfBookUpdate};
+use blitzkrieg_market_api::{BookUpdate, MarketHost, SpotUpdate};
 use futures_util::StreamExt;
+use polymarket_client_sdk_v2::error::{
+    Error as SdkError, Kind as SdkErrorKind, Status as SdkErrorStatus,
+};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// Heartbeat (ms) used when top-of-book coalescing is enabled, i.e. when
-/// `POLYMARKET_TOP_HEARTBEAT_MS` is set to a positive value. Unset / `0` leaves
-/// the feed forwarding every quote, exactly as before this coalescer existed.
+/// Default interval for polling `POST /books`, in milliseconds.
 ///
-/// The 1 s figure is anchored to the engine's own tolerance,
-/// `max_orderbook_stale_ms` (8 s, `engine.rs`): one beacon per second leaves an
-/// 8× margin before the engine would treat a quiet book as unpricable.
+/// The venue's market *WebSocket* channel has no message-type filter, no
+/// negotiated compression and no per-token throttle. Measured on this bot's own
+/// subscription it costs 33-40 GB/day per socket, and 98.8% of those bytes are
+/// `price_change` frames that repeat a quote already received: a 10-second
+/// sample for one token carried 706 quote-bearing entries with exactly 1
+/// distinct value (88.2 entries/s against 0.12 real changes/s), i.e. 99.9% of
+/// the wire was re-sends. That is what put ~250 GB/day through the VPN.
 ///
-/// Enabling this is NOT behaviour-preserving and is therefore off by default.
-/// The engine's trend ratio (`above / total`, `signal.rs`) and `PriceBuffer::mean`
-/// (`sum / n`) are both weighted by SAMPLE COUNT, so withholding repeated quotes
-/// changes them toward duration weighting. Every real price change still passes
-/// through untouched; only the no-op repeats are collapsed. Validate against a
-/// shadow/backtest comparison before running it live.
-const TOP_HEARTBEAT_MS_RECOMMENDED: i64 = 1_000;
+/// `POST /books` returns full depth for many tokens in a single request and
+/// carries a venue timestamp, measured at 20 KB for all 8 round tokens — about
+/// 1.75 GB/day at this interval against 33-40 GB/day, and it is a *snapshot*
+/// API, so there is no subscription to release and therefore nothing that can
+/// leak on a round rollover. Interval is `POLYMARKET_POLL_MS`.
+const DEFAULT_POLL_MS: u64 = 1_000;
 
-/// Resolve the `POLYMARKET_TOP_HEARTBEAT_MS` setting. `None`, `0`, empty and
-/// unparseable values all mean "disabled" (forward every quote), so a typo can
-/// only ever fall back to the pre-coalescer behaviour, never to a tiny
-/// heartbeat that would starve the engine. The literal `recommended` opts into
-/// [`TOP_HEARTBEAT_MS_RECOMMENDED`] so an operator does not have to remember
-/// the number or risk picking one that outruns the engine's staleness rule.
-fn parse_heartbeat(raw: Option<&str>) -> i64 {
-    match raw.map(str::trim) {
-        Some(v) if v.eq_ignore_ascii_case("recommended") => TOP_HEARTBEAT_MS_RECOMMENDED,
-        Some(v) => v.parse().ok().filter(|ms| *ms > 0).unwrap_or(0),
-        None => 0,
+/// Floor on the poll interval. A typo (or an over-eager setting) otherwise turns
+/// straight back into the bandwidth problem this replaced, so the knob has a
+/// bottom: even at the floor the feed costs ~5x less than the WebSocket did.
+const MIN_POLL_MS: u64 = 250;
+
+/// Ceiling on the poll interval, and the cap for the 429 backoff below.
+const MAX_POLL_MS: u64 = 60_000;
+
+/// Bound on a single poll. A request that never returns would silently stop the
+/// book advancing, which the engine reports only as an unpricable market; a
+/// timeout turns it into a logged event instead.
+const REQUEST_TIMEOUT_MS: u64 = 5_000;
+
+/// The engine's `max_orderbook_stale_ms` (`engine.rs`): it refuses to price a
+/// book it considers older than this. Kept here as a named constant so the
+/// poll-cadence guard and its test state the dependency explicitly rather than
+/// carrying a bare `8000`.
+const ENGINE_MAX_ORDERBOOK_STALE_MS: u64 = 8_000;
+
+/// Latency allowance folded into the staleness warning below. The poll loop
+/// sleeps a full interval *after* each response, so the achieved period is
+/// `interval + request latency`. A cold request was measured at 657 ms (client
+/// build, TLS, first call); warm keep-alive calls are far cheaper. This is the
+/// value the warning assumes, chosen generous so the warning is not purely
+/// theoretical.
+const LATENCY_ALLOWANCE_MS: u64 = 500;
+
+/// Resolve `POLYMARKET_POLL_MS`.
+///
+/// Unset, non-numeric and `0` all fall back to [`DEFAULT_POLL_MS`] rather than to
+/// "no delay", so a malformed value can only ever cost the default cadence, never
+/// become a busy loop against the venue. Values outside the supported band are
+/// clamped into it for the same reason.
+fn parse_poll_ms(raw: Option<&str>) -> u64 {
+    raw.map(str::trim)
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(DEFAULT_POLL_MS)
+        .clamp(MIN_POLL_MS, MAX_POLL_MS)
+}
+
+/// Whether the venue refused the request with HTTP 429.
+///
+/// The SDK folds every non-2xx into one error kind and keeps the status in a
+/// downcastable source, so the rate limit has to be recovered from there rather
+/// than read off the top-level variant.
+fn is_rate_limited(e: &SdkError) -> bool {
+    e.kind() == SdkErrorKind::Status
+        && e.downcast_ref::<SdkErrorStatus>()
+            .is_some_and(|s| s.status_code == 429)
+}
+
+/// Whether a poll interval leaves the engine a priceable book, and why not.
+///
+/// Polling slower than the engine's freshness budget leaves the book unpricable
+/// between polls, which surfaces as "the bot stopped trading" rather than as a
+/// configuration error; this is what lets the feed say which it is. The latency
+/// allowance is included because the loop sleeps *after* each response, so the
+/// achieved period is `interval + latency`, not the interval alone.
+///
+/// Pure so the guard can be tested directly: driving it through `spawn_feed`
+/// would need a full `MarketHost` stub for one log line.
+fn cadence_warning(poll_ms: u64) -> Option<String> {
+    if poll_ms + LATENCY_ALLOWANCE_MS <= ENGINE_MAX_ORDERBOOK_STALE_MS {
+        return None;
     }
+    Some(format!(
+        "poly poll interval {poll_ms}ms (plus up to {LATENCY_ALLOWANCE_MS}ms request latency) \
+         is close to or past the engine's {ENGINE_MAX_ORDERBOOK_STALE_MS}ms orderbook \
+         staleness budget: the engine will have a stale book for part of every poll cycle"
+    ))
 }
 
 /// Market-data event produced by the feed loops, consumed by the pump which
 /// forwards each one onto the [`MarketHost`].
 #[derive(Debug, Clone)]
 pub enum FeedEvent {
-    Book { token_id: String, bids: Vec<(Decimal, Decimal)>, asks: Vec<(Decimal, Decimal)>, now_ms: i64 },
-    TopOfBook { token_id: String, best_bid: Option<Decimal>, best_ask: Option<Decimal>, now_ms: i64 },
-    Spot { asset: String, price: Decimal, now_ms: i64 },
+    Book {
+        token_id: String,
+        bids: Vec<(Decimal, Decimal)>,
+        asks: Vec<(Decimal, Decimal)>,
+        now_ms: i64,
+    },
+    Spot {
+        asset: String,
+        price: Decimal,
+        now_ms: i64,
+    },
     Info(String),
 }
 
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Run all feeds, forwarding every update to the [`MarketHost`]. `token_ids` is
@@ -82,14 +159,31 @@ pub async fn spawn_feed(
         tokio::spawn(async move {
             while let Some(ev) = ev_rx.recv().await {
                 match ev {
-                    FeedEvent::Book { token_id, bids, asks, now_ms } => {
-                        host.on_book(BookUpdate { token_id, bids, asks, ts_ms: now_ms }).await;
+                    FeedEvent::Book {
+                        token_id,
+                        bids,
+                        asks,
+                        now_ms,
+                    } => {
+                        host.on_book(BookUpdate {
+                            token_id,
+                            bids,
+                            asks,
+                            ts_ms: now_ms,
+                        })
+                        .await;
                     }
-                    FeedEvent::TopOfBook { token_id, best_bid, best_ask, now_ms } => {
-                        host.on_top_of_book(TopOfBookUpdate { token_id, best_bid, best_ask, ts_ms: now_ms }).await;
-                    }
-                    FeedEvent::Spot { asset, price, now_ms } => {
-                        host.on_spot(SpotUpdate { asset, price, ts_ms: now_ms }).await;
+                    FeedEvent::Spot {
+                        asset,
+                        price,
+                        now_ms,
+                    } => {
+                        host.on_spot(SpotUpdate {
+                            asset,
+                            price,
+                            ts_ms: now_ms,
+                        })
+                        .await;
                     }
                     FeedEvent::Info(msg) => {
                         tracing::info!(feed = %msg, "feed");
@@ -101,18 +195,29 @@ pub async fn spawn_feed(
 
     let (ctl_tx, ctl_rx) = mpsc::channel::<Vec<String>>(16);
 
-    // Polymarket orderbook feed (reconnect + dynamic re-subscribe on new rounds).
-    // Resolved here rather than inside the loop so the loop takes its endpoint as a
-    // plain argument and can be exercised against a local server in tests.
-    let ws_url = std::env::var("POLYMARKET_WS_URL")
-        .unwrap_or_else(|_| "wss://ws-subscriptions-clob.polymarket.com".into());
+    // Polymarket orderbook feed. Endpoint and cadence are resolved here rather
+    // than inside the loop so the loop takes both as plain arguments and can be
+    // exercised against a local server in tests. `CLOB_API_URL` is the same
+    // variable the venue actor reads, so one setting covers the whole CLOB API.
+    let rest_url =
+        std::env::var("CLOB_API_URL").unwrap_or_else(|_| "https://clob.polymarket.com".into());
+    let poll_ms = parse_poll_ms(std::env::var("POLYMARKET_POLL_MS").ok().as_deref());
     {
         let ev_tx = ev_tx.clone();
         let tokens = token_ids.clone();
-        let ws_url = ws_url.clone();
+        let rest_url = rest_url.clone();
         tokio::spawn(async move {
-            poly_orderbook_loop(tokens, ev_tx, ctl_rx, ws_url).await;
+            poly_rest_loop(tokens, ev_tx, ctl_rx, rest_url, poll_ms).await;
         });
+    }
+
+    let _ = ev_tx
+        .send(FeedEvent::Info(format!(
+            "poly rest feed polling every {poll_ms}ms"
+        )))
+        .await;
+    if let Some(warning) = cadence_warning(poll_ms) {
+        let _ = ev_tx.send(FeedEvent::Info(warning)).await;
     }
 
     // Binance spot feed (reconnect loop).
@@ -124,7 +229,10 @@ pub async fn spawn_feed(
         });
     }
 
-    FeedHandle { tx: ctl_tx, _ev: ev_tx }
+    FeedHandle {
+        tx: ctl_tx,
+        _ev: ev_tx,
+    }
 }
 
 /// Handle for subscribing additional tokens at runtime (new rounds).
@@ -149,299 +257,129 @@ impl blitzkrieg_market_api::SubscriptionControl for FeedHandle {
     }
 }
 
-// ── Polymarket orderbook via the SDK ws client ──────────────────────────────
+// ── Polymarket orderbook via REST polling ───────────────────────────────────
 
-/// Collapses the venue's incremental top-of-book stream before it reaches the
-/// engine.
+/// Poll `POST /books` for the current token set.
 ///
-/// Polymarket emits a `price_change` entry for every book-level edit, and almost
-/// all of them leave the best bid/ask exactly where they were. Measured on a 2.0M
-/// event archive segment: 52,478 real quote moves against 1,737,517 no-ops (97.1%).
-/// Mirroring that flood cost 16 GB/day of archive and a full per-tick strategy pass
-/// per event, for no informational gain.
+/// Replaces the venue's WebSocket market channel; see [`DEFAULT_POLL_MS`] for
+/// the measurements behind that. Two consequences are worth stating because they
+/// are what make the trade acceptable:
 ///
-/// A no-op is not dropped outright, because the engine stamps book freshness from
-/// each event's `now_ms` (`LocalBook::update_top`) and refuses to price anything
-/// older than `max_orderbook_stale_ms`. Pure silence would therefore read as a dead
-/// feed and freeze a genuinely quiet market out of trading. So the rule is:
-///
-/// * a real change is forwarded immediately — never delayed, never coalesced away;
-/// * an unchanged quote is forwarded at most once per `heartbeat_ms`, purely as a
-///   liveness beacon that keeps the book fresh.
-///
-/// Set `heartbeat_ms <= 0` (the default) to disable and forward everything.
-struct TopCoalescer {
-    heartbeat_ms: i64,
-    /// Last forwarded quote per token; `None` means "nothing forwarded yet".
-    last: HashMap<String, (Option<Decimal>, Option<Decimal>)>,
-    /// When the last event for a token was forwarded.
-    sent_at: HashMap<String, i64>,
-    forwarded: u64,
-    suppressed: u64,
-}
-
-impl TopCoalescer {
-    fn new(heartbeat_ms: i64) -> Self {
-        Self {
-            heartbeat_ms,
-            last: HashMap::new(),
-            sent_at: HashMap::new(),
-            forwarded: 0,
-            suppressed: 0,
-        }
-    }
-
-    /// Decide whether this quote should reach the engine. Records the outcome.
-    fn admit(&mut self, token_id: &str, bid: Option<Decimal>, ask: Option<Decimal>, now_ms: i64) -> bool {
-        if self.heartbeat_ms <= 0 {
-            self.forwarded += 1;
-            return true;
-        }
-        let quote = (bid, ask);
-        let changed = self.last.get(token_id) != Some(&quote);
-        let due = match self.sent_at.get(token_id) {
-            Some(t) => now_ms.saturating_sub(*t) >= self.heartbeat_ms,
-            None => true,
-        };
-        if changed || due {
-            self.last.insert(token_id.to_string(), quote);
-            self.sent_at.insert(token_id.to_string(), now_ms);
-            self.forwarded += 1;
-            true
-        } else {
-            self.suppressed += 1;
-            false
-        }
-    }
-
-    /// Forget tokens that are no longer subscribed, so a long capture cannot grow
-    /// this map one dead round at a time.
-    fn retain_tokens(&mut self, tokens: &[String]) {
-        self.last.retain(|t, _| tokens.iter().any(|k| k == t));
-        self.sent_at.retain(|t, _| tokens.iter().any(|k| k == t));
-    }
-
-    /// `(forwarded, suppressed)` totals since construction.
-    fn totals(&self) -> (u64, u64) {
-        (self.forwarded, self.suppressed)
-    }
-}
-
-async fn poly_orderbook_loop(
+/// * **Nothing is retained between rounds.** A REST fetch is stateless, so a
+///   rollover is just a new token set — there is no subscription to release, no
+///   refcount to keep balanced, and no socket that can outlive its round.
+/// * **The engine's cadence assumptions still hold.** Trend confirmation
+///   (`signal.rs`) gates on elapsed time (`spanned_ms >= window_ms * 0.9`) and
+///   scores `above / total` over the samples inside that window. Polling at 1 s
+///   yields a uniformly spaced sample series, so the ratio stays a faithful
+///   time-weighted average of "is the mid above the threshold"; it is not a
+///   sample-count gate that a lower rate could starve.
+async fn poly_rest_loop(
     mut tokens: Vec<String>,
     ev_tx: mpsc::Sender<FeedEvent>,
     mut ctl_rx: mpsc::Receiver<Vec<String>>,
-    ws_url: String,
+    host: String,
+    base_ms: u64,
 ) {
-    use polymarket_client_sdk_v2::clob::ws::Client as WsClient;
+    use polymarket_client_sdk_v2::clob::types::request::OrderBookSummaryRequest;
+    use polymarket_client_sdk_v2::clob::{Client, Config};
     use polymarket_client_sdk_v2::types::U256;
-    use polymarket_client_sdk_v2::ws::config::Config as WsConfig;
 
-    // 0 / unset disables coalescing and forwards every quote (default: the
-    // pre-coalescer behaviour).
-    let heartbeat_ms = parse_heartbeat(std::env::var("POLYMARKET_TOP_HEARTBEAT_MS").ok().as_deref());
-    let mut coalescer = TopCoalescer::new(heartbeat_ms);
-    if heartbeat_ms > 0 {
-        let _ = ev_tx
-            .send(FeedEvent::Info(format!("poly top coalescer enabled, heartbeat {heartbeat_ms}ms")))
-            .await;
-    }
-
-    /// Release the refcounts this feed holds on `ids`.
-    ///
-    /// `subscribe_orderbook` and `subscribe_prices` each take a reference on the
-    /// same asset — the SDK multiplexes both onto one market channel — and it only
-    /// sends the server-side unsubscribe once the count reaches zero. So one
-    /// release call per subscription is required to actually stop the venue.
-    fn release_tokens(client: &WsClient, ids: &[U256]) {
-        if ids.is_empty() {
+    let client = match Client::new(&host, Config::default()) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = ev_tx
+                .send(FeedEvent::Info(format!("poly rest client: {e}")))
+                .await;
             return;
         }
-        let _ = client.unsubscribe_orderbook(ids);
-        let _ = client.unsubscribe_prices(ids);
-    }
+    };
 
-    // One client for the process lifetime. Building a fresh `WsClient` per round
-    // (as this loop used to) leaks the previous socket: the SDK has no `Drop` on
-    // its connection, and its read half stays selectable, so the abandoned task
-    // keeps reading while the venue keeps pushing that round's tokens to a socket
-    // nothing consumes. Every rollover therefore added a subscription that streamed
-    // forever, which is how ~13 GB/day of archived data becomes a wire bill many
-    // times larger as the day goes on.
-    let mut client: Option<WsClient> = None;
-    // Tokens this feed currently holds on `client`. Released as soon as their
-    // replacement is subscribed, so exactly one round is ever live on the wire and
-    // the refcounts cannot drift upward across reconnect attempts.
-    let mut held: Vec<U256> = Vec::new();
-
+    let mut interval_ms = base_ms;
     loop {
-        let ids: Vec<U256> = tokens.iter().filter_map(|t| U256::from_str(t).ok()).collect();
+        // Parse the token set into ids. A set with nothing parseable in it is
+        // treated exactly like an empty one: there is nothing to ask the venue
+        // for, so the only correct move is to wait for a usable set instead of
+        // spinning on requests that cannot be built.
+        let ids: Vec<U256> = tokens
+            .iter()
+            .filter_map(|t| U256::from_str(t).ok())
+            .collect();
         if ids.is_empty() {
-            // No tokens yet: wait for a subscription update (new round).
             match ctl_rx.recv().await {
                 Some(t) => tokens = t,
                 None => return,
             }
             continue;
         }
-        if client.is_none() {
-            match WsClient::new(&ws_url, WsConfig::default()) {
-                Ok(c) => client = Some(c),
-                Err(e) => {
-                    let _ = ev_tx.send(FeedEvent::Info(format!("poly ws client: {e}"))).await;
-                    if !wait_or_update(&mut tokens, &mut ctl_rx, 5).await {
-                        return;
-                    }
-                    continue;
-                }
-            }
-        }
-        let client = client.as_ref().expect("client created above");
-        // Polymarket's market channel sends ONE full `book` snapshot on subscribe,
-        // then only `price_change` incrementals. The SDK's `subscribe_orderbook`
-        // filters those incrementals out (`_ => None`), so relying on it alone left
-        // the local book frozen except on the rare re-snapshot — illiquid tokens
-        // (XRP/SOL) could sit 20-60s stale while BTC updated, which is what made the
-        // panel's price look stuck. `subscribe_prices` carries the same channel's
-        // `price_change` events (each entry has best_bid/best_ask), which we apply
-        // as top-of-book updates. Both subscriptions share one MARKET channel and
-        // refcount their assets, so this does not disturb the book stream.
-        // Claim the new round before releasing the outgoing one. Subscribing first
-        // keeps the market channel non-empty across the rollover, so the channel is
-        // not torn down and rebuilt (a fresh TLS handshake) every 15 minutes; on the
-        // same-set path after an error it also means no subscribe/unsubscribe pair
-        // goes out at all, since the refcount simply returns to where it started.
-        let stream = match client.subscribe_orderbook(ids.clone()) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = ev_tx.send(FeedEvent::Info(format!("poly subscribe: {e}"))).await;
-                if !wait_or_update(&mut tokens, &mut ctl_rx, 5).await {
-                    return;
-                }
-                continue;
-            }
-        };
-        let price_stream = match client.subscribe_prices(ids.clone()) {
-            Ok(s) => s,
-            Err(e) => {
-                // Undo the reference `subscribe_orderbook` just took. `held` still
-                // describes the round actually live on the wire, so it is untouched.
-                let _ = client.unsubscribe_orderbook(&ids);
-                let _ = ev_tx.send(FeedEvent::Info(format!("poly price subscribe: {e}"))).await;
-                if !wait_or_update(&mut tokens, &mut ctl_rx, 5).await {
-                    return;
-                }
-                continue;
-            }
-        };
-        let mut stream = Box::pin(stream);
-        let mut price_stream = Box::pin(price_stream);
-        // The new round is live, so the previous one can safely go.
-        release_tokens(client, &held);
-        held = ids.clone();
-        let _ = ev_tx
-            .send(FeedEvent::Info(format!("poly orderbook+price subscribed {} tokens", ids.len())))
-            .await;
 
-        loop {
-            tokio::select! {
-                item = stream.next() => match item {
-                    Some(Ok(book)) => {
-                        let now = now_ms();
-                        let bids: Vec<(Decimal, Decimal)> = book.bids.iter().map(|l| (l.price, l.size)).collect();
-                        let asks: Vec<(Decimal, Decimal)> = book.asks.iter().map(|l| (l.price, l.size)).collect();
-                        let _ = ev_tx.send(FeedEvent::Book {
+        let requests: Vec<OrderBookSummaryRequest> = ids
+            .iter()
+            .map(|id| OrderBookSummaryRequest::builder().token_id(*id).build())
+            .collect();
+
+        match tokio::time::timeout(
+            Duration::from_millis(REQUEST_TIMEOUT_MS),
+            client.order_books(&requests),
+        )
+        .await
+        {
+            Ok(Ok(books)) => {
+                interval_ms = base_ms; // recovered: back to the configured cadence
+                for book in books {
+                    let bids: Vec<(Decimal, Decimal)> =
+                        book.bids.iter().map(|l| (l.price, l.size)).collect();
+                    let asks: Vec<(Decimal, Decimal)> =
+                        book.asks.iter().map(|l| (l.price, l.size)).collect();
+                    // Stamped with the local clock, not the venue's `timestamp`.
+                    // `fresh_book` compares a book's stamp against the engine's own
+                    // clock, so stamping with the venue's would make this bot's
+                    // ability to price anything depend on the venue's clock being
+                    // aligned with ours. Staleness is already bounded by the poll
+                    // cadence: if a poll fails or hangs, no event is emitted and the
+                    // book correctly ages out on its own.
+                    if ev_tx
+                        .send(FeedEvent::Book {
                             token_id: book.asset_id.to_string(),
                             bids,
                             asks,
-                            now_ms: if book.timestamp > 0 { book.timestamp } else { now },
-                        }).await;
+                            now_ms: now_ms(),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return; // host is gone
                     }
-                    Some(Err(e)) => {
-                        let _ = ev_tx.send(FeedEvent::Info(format!("poly ws error: {e}"))).await;
-                        break; // reconnect
-                    }
-                    None => break,
-                },
-                item = price_stream.next() => match item {
-                    Some(Ok(pc)) => {
-                        let now = now_ms();
-                        // Collect first so we don't hold a borrow across the sends.
-                        let updates: Vec<(String, Option<Decimal>, Option<Decimal>)> = pc
-                            .price_changes
-                            .iter()
-                            .filter(|c| c.best_bid.is_some() || c.best_ask.is_some())
-                            .map(|c| (c.asset_id.to_string(), c.best_bid, c.best_ask))
-                            .collect();
-                        for (token_id, best_bid, best_ask) in updates {
-                            // Drop the no-op majority here rather than downstream, so
-                            // neither the archive nor the strategy pass pays for it.
-                            if !coalescer.admit(&token_id, best_bid, best_ask, now) {
-                                continue;
-                            }
-                            let _ = ev_tx.send(FeedEvent::TopOfBook {
-                                token_id,
-                                best_bid,
-                                best_ask,
-                                now_ms: now,
-                            }).await;
-                        }
-                    }
-                    Some(Err(e)) => {
-                        let _ = ev_tx.send(FeedEvent::Info(format!("poly price ws error: {e}"))).await;
-                        break; // reconnect
-                    }
-                    None => break,
-                },
-                update = ctl_rx.recv() => match update {
-                    Some(t) => {
-                        if t.is_empty() {
-                            release_tokens(client, &held);
-                            held.clear();
-                            tokens.clear();
-                            return;
-                        }
-                        // Reported per round rollover (~15 min): the only honest way
-                        // to see what the coalescer actually withheld. When it is
-                        // disabled the counters are structurally zero, so say that
-                        // rather than print "0.0% withheld" as if it were a result.
-                        let detail = if heartbeat_ms > 0 {
-                            let (forwarded, suppressed) = coalescer.totals();
-                            let total = forwarded + suppressed;
-                            let pct = if total > 0 { suppressed as f64 * 100.0 / total as f64 } else { 0.0 };
-                            format!(", top coalesced {forwarded} forwarded / {suppressed} suppressed ({pct:.1}% withheld)")
-                        } else {
-                            String::from(", top coalescer disabled (POLYMARKET_TOP_HEARTBEAT_MS unset)")
-                        };
-                        let _ = ev_tx.send(FeedEvent::Info(format!(
-                            "poly subscription updated: {} tokens{detail}",
-                            t.len()
-                        ))).await;
-                        coalescer.retain_tokens(&t);
-                        tokens = t;
-                        break; // resubscribe with the new set
-                    }
-                    None => return,
-                },
+                }
+            }
+            Ok(Err(e)) => {
+                let _ = ev_tx
+                    .send(FeedEvent::Info(format!("poly rest poll: {e}")))
+                    .await;
+                if is_rate_limited(&e) {
+                    interval_ms = interval_ms.saturating_mul(2).min(MAX_POLL_MS);
+                }
+            }
+            Err(_) => {
+                let _ = ev_tx
+                    .send(FeedEvent::Info(format!(
+                        "poly rest poll timed out after {REQUEST_TIMEOUT_MS}ms ({} tokens)",
+                        ids.len()
+                    )))
+                    .await;
             }
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-}
 
-/// Sleep up to `secs`, but return early (with updated tokens) if a control
-/// message arrives. Returns false if the control channel closed.
-async fn wait_or_update(
-    tokens: &mut Vec<String>,
-    ctl_rx: &mut mpsc::Receiver<Vec<String>>,
-    secs: u64,
-) -> bool {
-    tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(secs)) => true,
-        update = ctl_rx.recv() => match update {
-            Some(t) => { *tokens = t; true }
-            None => false,
-        },
+        // Wait out the interval, but let a new token set cut the wait short: a
+        // rollover should not sit on the previous round's cadence before its
+        // first fetch.
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {}
+            update = ctl_rx.recv() => match update {
+                Some(t) => tokens = t,
+                None => return,
+            },
+        }
     }
 }
 
@@ -459,7 +397,9 @@ async fn binance_spot_loop(assets: Vec<String>, ev_tx: mpsc::Sender<FeedEvent>) 
     loop {
         match tokio_tungstenite::connect_async(&url).await {
             Ok((ws, _)) => {
-                let _ = ev_tx.send(FeedEvent::Info("binance spot connected".into())).await;
+                let _ = ev_tx
+                    .send(FeedEvent::Info("binance spot connected".into()))
+                    .await;
                 let (_write, mut read) = ws.split();
                 while let Some(next) = read.next().await {
                     match next {
@@ -470,14 +410,20 @@ async fn binance_spot_loop(assets: Vec<String>, ev_tx: mpsc::Sender<FeedEvent>) 
                                     .trim_end_matches("USD")
                                     .to_string();
                                 let _ = ev_tx
-                                    .send(FeedEvent::Spot { asset, price, now_ms: now_ms() })
+                                    .send(FeedEvent::Spot {
+                                        asset,
+                                        price,
+                                        now_ms: now_ms(),
+                                    })
                                     .await;
                             }
                         }
                         Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
                         Ok(Message::Close(_)) => break,
                         Err(e) => {
-                            let _ = ev_tx.send(FeedEvent::Info(format!("binance ws error: {e}"))).await;
+                            let _ = ev_tx
+                                .send(FeedEvent::Info(format!("binance ws error: {e}")))
+                                .await;
                             break;
                         }
                         _ => {}
@@ -485,7 +431,9 @@ async fn binance_spot_loop(assets: Vec<String>, ev_tx: mpsc::Sender<FeedEvent>) 
                 }
             }
             Err(e) => {
-                let _ = ev_tx.send(FeedEvent::Info(format!("binance connect: {e}"))).await;
+                let _ = ev_tx
+                    .send(FeedEvent::Info(format!("binance connect: {e}")))
+                    .await;
             }
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -504,9 +452,32 @@ pub fn parse_binance_trade(text: &str) -> Option<(String, Decimal)> {
     Some((symbol, price))
 }
 
+/// The engine's freshness budget has to stay well clear of the poll interval,
+/// or a perfectly healthy poller reads to the engine as a dead feed. Checked at
+/// compile time so an edit to either constant fails the build instead of waiting
+/// to be noticed as "the bot stopped trading".
+const _: () = {
+    assert!(
+        DEFAULT_POLL_MS * 4 <= ENGINE_MAX_ORDERBOOK_STALE_MS,
+        "the default poll interval must leave at least a 4x margin under the engine's \
+         staleness budget"
+    );
+    assert!(
+        MIN_POLL_MS < DEFAULT_POLL_MS,
+        "the floor must not override the default"
+    );
+    assert!(
+        MAX_POLL_MS > DEFAULT_POLL_MS,
+        "the ceiling must not override the default"
+    );
+    assert!(MIN_POLL_MS > 0, "zero would be a busy loop, not a floor");
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU16, Ordering};
 
     #[test]
     fn parses_binance_trade() {
@@ -526,207 +497,384 @@ mod tests {
         Decimal::from_str(s).unwrap()
     }
 
-    /// Stand up a throwaway WebSocket server that records every text frame a
-    /// client sends it, and answer "PING" so the SDK's heartbeat stays happy.
-    /// Returns (url, received-frames handle, shutdown).
-    async fn recording_ws_server() -> (
-        String,
-        Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
-        tokio::sync::oneshot::Sender<()>,
-    ) {
-        use futures_util::SinkExt;
-        use tokio_tungstenite::tungstenite::Message;
+    /// A venue-shaped token id: 77 decimal digits, as the CLOB and Gamma both
+    /// use.
+    ///
+    /// Deliberately *not* the zero-padded hex form. The SDK parses token ids into
+    /// `U256` and re-serializes them canonically as decimal, so a padded or
+    /// hex-form id would be echoed back in a different form than it was sent —
+    /// which is exactly the class of mismatch that would silently key a book
+    /// under an id the engine never looks up. Real ids already round-trip, and
+    /// this shape keeps that property under test.
+    fn token(n: u8) -> String {
+        let base = "2174263314346390629056905015582624153306727273689761495048815684794993883645";
+        format!("{base}{n}")
+    }
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let seen_srv = Arc::clone(&seen);
-        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    /// Depth as the feed forwards it: the bids and asks for one token.
+    type Depth = (Vec<(Decimal, Decimal)>, Vec<(Decimal, Decimal)>);
 
-        tokio::spawn(async move {
-            loop {
-                let accepted = tokio::select! {
-                    a = listener.accept() => a,
-                    _ = &mut stop_rx => break,
-                };
-                let Ok((tcp, _)) = accepted else { break };
-                let seen_conn = Arc::clone(&seen_srv);
-                tokio::spawn(async move {
-                    let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else { return };
-                    while let Some(Ok(msg)) = ws.next().await {
-                        match msg {
-                            Message::Text(t) => {
-                                if t == "PING" {
-                                    let _ = ws.send(Message::Text("PONG".into())).await;
-                                    continue;
-                                }
-                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
-                                    seen_conn.lock().await.push(v);
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    fn content_length(head: &str) -> usize {
+        head.lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                if !k.eq_ignore_ascii_case("content-length") {
+                    return None;
+                }
+                v.trim().parse().ok()
+            })
+            .unwrap_or(0)
+    }
+
+    /// One `POST /books` response body: an array of book summaries, one per
+    /// requested token, in the wire shape the real CLOB returns.
+    fn books_json(ids: &[String]) -> String {
+        let books: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                    "asset_id": id,
+                    "timestamp": "1700000000000",
+                    "hash": "deadbeef",
+                    "bids": [{"price": "0.40", "size": "10"}],
+                    "asks": [{"price": "0.50", "size": "5"}],
+                    "min_order_size": "5",
+                    "neg_risk": true,
+                    "tick_size": "0.01",
+                    "last_trade_price": "0.45"
+                })
+            })
+            .collect();
+        serde_json::to_string(&books).expect("serialize books")
+    }
+
+    /// A throwaway HTTP/1.1 server that answers `POST /books` and records the
+    /// token ids each request asked for.
+    ///
+    /// Hand-rolled rather than pulling in a test HTTP framework: the contract
+    /// under test is just "POST an array of token ids, get an array of books
+    /// back", and the SDK client takes its host as a parameter, so a small
+    /// responder keeps this test dependency-free.
+    struct FakeClob {
+        url: String,
+        requests: Arc<tokio::sync::Mutex<Vec<Vec<String>>>>,
+        _stop: tokio::sync::oneshot::Sender<()>,
+    }
+
+    impl FakeClob {
+        async fn start(status: u16) -> Self {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            let status = Arc::new(AtomicU16::new(status));
+            let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+            let srv_requests = Arc::clone(&requests);
+            let srv_status = Arc::clone(&status);
+
+            tokio::spawn(async move {
+                loop {
+                    let accepted = tokio::select! {
+                        a = listener.accept() => a,
+                        _ = &mut stop_rx => break,
+                    };
+                    let Ok((mut tcp, _)) = accepted else { break };
+                    let reqs = Arc::clone(&srv_requests);
+                    let status = Arc::clone(&srv_status);
+                    tokio::spawn(async move {
+                        // Headers first, then exactly `Content-Length` body bytes:
+                        // the body follows the headers on the same connection and
+                        // is not guaranteed to arrive in the same read.
+                        let mut buf: Vec<u8> = Vec::new();
+                        let mut tmp = [0u8; 4096];
+                        let body = loop {
+                            if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                                let head = String::from_utf8_lossy(&buf[..pos]).to_string();
+                                let len = content_length(&head);
+                                if buf.len() >= pos + 4 + len {
+                                    break buf[pos + 4..pos + 4 + len].to_vec();
                                 }
                             }
-                            Message::Close(_) => break,
-                            _ => {}
-                        }
-                    }
-                });
+                            match tcp.read(&mut tmp).await {
+                                Ok(0) | Err(_) => break Vec::new(),
+                                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                            }
+                        };
+                        let ids: Vec<String> =
+                            serde_json::from_slice::<Vec<serde_json::Value>>(&body)
+                                .map(|v| {
+                                    v.iter()
+                                        .filter_map(|e| {
+                                            e.get("token_id")
+                                                .and_then(|t| t.as_str())
+                                                .map(str::to_string)
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                        reqs.lock().await.push(ids.clone());
+
+                        let code = status.load(Ordering::SeqCst);
+                        let (reason, payload) = if code == 200 {
+                            ("200 OK", books_json(&ids))
+                        } else {
+                            (
+                                "429 Too Many Requests",
+                                String::from("{\"error\":\"rate limited\"}"),
+                            )
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 {reason}\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                            payload.len()
+                        );
+                        let _ = tcp.write_all(resp.as_bytes()).await;
+                        let _ = tcp.flush().await;
+                    });
+                }
+            });
+
+            Self {
+                url: format!("http://{addr}"),
+                requests,
+                _stop: stop_tx,
             }
-        });
+        }
 
-        (format!("ws://{addr}"), seen, stop_tx)
+        async fn seen(&self) -> Vec<Vec<String>> {
+            self.requests.lock().await.clone()
+        }
+
+        /// Wait until at least `n` requests have arrived, then return all of them.
+        async fn wait_for_requests(&self, n: usize) -> Vec<Vec<String>> {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let seen = self.seen().await;
+                if seen.len() >= n {
+                    return seen;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "only {} poll(s) arrived within 5s, wanted {n}: {seen:?}",
+                    seen.len()
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
     }
 
-    /// A rollover must not leave the previous round streaming. The regression this
-    /// guards is a leaked socket: the loop used to build a fresh client per round,
-    /// and the SDK has no `Drop`, so the old connection stayed subscribed forever.
-    /// Here we assert the wire itself — after moving to round B, round A's assets
-    /// must have been unsubscribed, so nothing from A keeps arriving.
+    /// A poll must deliver a book per subscribed token, with the venue's depth
+    /// intact: the REST response replaces the book wholesale, so dropping levels
+    /// here would silently narrow what every strategy sees.
     #[tokio::test]
-    async fn rollover_unsubscribes_the_previous_round_on_the_wire() {
-        let (url, seen, stop) = recording_ws_server().await;
+    async fn poll_delivers_a_book_for_every_subscribed_token() {
+        let srv = FakeClob::start(200).await;
+        let a = token(1);
+        let b = token(2);
+        let (ev_tx, mut ev_rx) = mpsc::channel::<FeedEvent>(16);
+        let (_ctl_tx, ctl_rx) = mpsc::channel::<Vec<String>>(4);
+        let handle = tokio::spawn(poly_rest_loop(
+            vec![a.clone(), b.clone()],
+            ev_tx,
+            ctl_rx,
+            srv.url.clone(),
+            250,
+        ));
 
-        let a = vec!["111111111111111111111111111111111111111111111111111111111111111111".to_string()];
-        let b = vec!["222222222222222222222222222222222222222222222222222222222222222222".to_string()];
-
-        let (ev_tx, _ev_rx) = mpsc::channel::<FeedEvent>(16);
-        let (ctl_tx, ctl_rx) = mpsc::channel::<Vec<String>>(16);
-        let url_clone = url.clone();
-        let a_for_loop = a.clone();
-        let handle = tokio::spawn(async move {
-            poly_orderbook_loop(a_for_loop, ev_tx, ctl_rx, url_clone).await;
-        });
-
-        // Give the first round time to subscribe, then move to the second round.
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        ctl_tx.send(b.clone()).await.expect("send rollover");
-        // The loop backs off 5s after a rollover before it subscribes the next
-        // round, so the window has to clear that sleep plus the reconnect.
-        tokio::time::sleep(Duration::from_millis(7_000)).await;
-
-        let frames = seen.lock().await.clone();
+        let mut seen: HashMap<String, Depth> = HashMap::new();
+        while seen.len() < 2 {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ev_rx.recv())
+                .await
+                .expect("no book arrived within 5s")
+                .expect("feed closed");
+            if let FeedEvent::Book {
+                token_id,
+                bids,
+                asks,
+                ..
+            } = ev
+            {
+                seen.insert(token_id, (bids, asks));
+            }
+        }
         handle.abort();
-        let _ = stop.send(());
 
-        let subscribes: Vec<Vec<String>> = frames
-            .iter()
-            .filter(|f| f.get("operation").and_then(|o| o.as_str()) == Some("subscribe"))
-            .filter_map(|f| f.get("assets_ids").and_then(|a| a.as_array()))
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-            .collect();
-        let unsubscribes: Vec<Vec<String>> = frames
-            .iter()
-            .filter(|f| f.get("operation").and_then(|o| o.as_str()) == Some("unsubscribe"))
-            .filter_map(|f| f.get("assets_ids").and_then(|a| a.as_array()))
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-            .collect();
+        let (bids, asks) = seen.get(&a).expect("no book for the first token");
+        assert_eq!(bids, &vec![(dec("0.40"), dec("10"))]);
+        assert_eq!(asks, &vec![(dec("0.50"), dec("5"))]);
+        assert!(seen.contains_key(&b), "no book for the second token");
+    }
 
+    /// A round rollover must switch the polled set over, and must not keep asking
+    /// for the expired round's tokens.
+    #[tokio::test]
+    async fn rollover_polls_only_the_new_token_set() {
+        let srv = FakeClob::start(200).await;
+        let a = token(1);
+        let b = token(2);
+        let (ev_tx, _ev_rx) = mpsc::channel::<FeedEvent>(64);
+        let (ctl_tx, ctl_rx) = mpsc::channel::<Vec<String>>(4);
+        let handle = tokio::spawn(poly_rest_loop(
+            vec![a.clone()],
+            ev_tx,
+            ctl_rx,
+            srv.url.clone(),
+            250,
+        ));
+
+        let first = srv.wait_for_requests(1).await;
+        assert_eq!(
+            first[0],
+            vec![a.clone()],
+            "the first poll must use the first token set"
+        );
+
+        ctl_tx.send(vec![b.clone()]).await.expect("send rollover");
+        let after = srv.wait_for_requests(2).await;
+        handle.abort();
+
+        let latest = after.last().expect("at least one later poll");
         assert!(
-            subscribes.iter().any(|s| s.contains(&b[0])),
-            "the new round must be subscribed; frames={frames:?}"
+            latest.contains(&b),
+            "the new round must be polled; polls={after:?}"
         );
         assert!(
-            unsubscribes.iter().any(|u| u.contains(&a[0])),
-            "the previous round must be released on the wire, otherwise it streams \
-             forever; frames={frames:?}"
+            !latest.contains(&a),
+            "the previous round must stop being polled; polls={after:?}"
         );
     }
 
-    #[test]
-    fn first_quote_is_always_forwarded() {
-        let mut c = TopCoalescer::new(1_000);
-        assert!(c.admit("t1", Some(dec("0.4")), Some(dec("0.5")), 0));
-        assert_eq!(c.totals(), (1, 0));
+    /// A token set with nothing parseable in it must not become a request loop.
+    /// `FeedEvent` cannot express "invalid", so the failure mode would otherwise
+    /// be a busy loop against the venue at whatever rate the CPU allows.
+    #[tokio::test]
+    async fn an_unparseable_token_set_waits_instead_of_spinning() {
+        let srv = FakeClob::start(200).await;
+        let (ev_tx, _ev_rx) = mpsc::channel::<FeedEvent>(64);
+        let (_ctl_tx, ctl_rx) = mpsc::channel::<Vec<String>>(4);
+        let handle = tokio::spawn(poly_rest_loop(
+            vec!["not-a-token".to_string()],
+            ev_tx,
+            ctl_rx,
+            srv.url.clone(),
+            250,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let polls = srv.seen().await.len();
+        handle.abort();
+        assert_eq!(
+            polls, 0,
+            "a set with no parseable token id must not be polled at all"
+        );
     }
 
-    #[test]
-    fn repeated_quote_is_withheld_until_heartbeat() {
-        let mut c = TopCoalescer::new(1_000);
-        assert!(c.admit("t1", Some(dec("0.4")), Some(dec("0.5")), 0));
-        // Same quote at +10ms and +999ms: withheld (both inside the heartbeat).
-        assert!(!c.admit("t1", Some(dec("0.4")), Some(dec("0.5")), 10));
-        assert!(!c.admit("t1", Some(dec("0.4")), Some(dec("0.5")), 999));
-        // The beacon is due at the heartbeat boundary, so a quiet market still
-        // refreshes the engine's staleness clock.
-        assert!(c.admit("t1", Some(dec("0.4")), Some(dec("0.5")), 1_000));
-        assert_eq!(c.totals(), (2, 2));
-    }
+    /// A 429 must reduce the call rate rather than retry into the limit.
+    ///
+    /// The venue advertised no rate-limit headers and answered 15 consecutive
+    /// 1/second calls with 200, so this path guards a limit that has not been
+    /// observed rather than one that has.
+    #[tokio::test]
+    async fn a_rate_limited_poll_backs_off() {
+        let srv = FakeClob::start(429).await;
+        let (ev_tx, mut ev_rx) = mpsc::channel::<FeedEvent>(64);
+        let (_ctl_tx, ctl_rx) = mpsc::channel::<Vec<String>>(4);
+        let handle = tokio::spawn(poly_rest_loop(
+            vec![token(1)],
+            ev_tx,
+            ctl_rx,
+            srv.url.clone(),
+            MIN_POLL_MS,
+        ));
 
-    #[test]
-    fn a_real_change_is_never_delayed_by_the_heartbeat() {
-        let mut c = TopCoalescer::new(60_000);
-        assert!(c.admit("t1", Some(dec("0.4")), Some(dec("0.5")), 0));
-        // 1ms later, inside the heartbeat window, but the quote moved: forward now.
-        assert!(c.admit("t1", Some(dec("0.41")), Some(dec("0.5")), 1));
-        assert!(c.admit("t1", Some(dec("0.41")), Some(dec("0.52")), 2));
-        assert!(c.admit("t1", None, Some(dec("0.52")), 3));
-        assert_eq!(c.totals(), (4, 0));
-    }
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let polls = srv.seen().await.len();
+        handle.abort();
 
-    #[test]
-    fn tokens_are_isolated_from_each_other() {
-        let mut c = TopCoalescer::new(1_000);
-        assert!(c.admit("t1", Some(dec("0.4")), Some(dec("0.5")), 0));
-        // A different token's first quote must not be suppressed by t1's history.
-        assert!(c.admit("t2", Some(dec("0.4")), Some(dec("0.5")), 1));
-        assert!(!c.admit("t1", Some(dec("0.4")), Some(dec("0.5")), 2));
-    }
-
-    /// The engine refuses to price a book older than `max_orderbook_stale_ms`
-    /// (8 s, `engine.rs`). Coalescing is only safe while the beacon is far more
-    /// frequent than that, or a quiet market reads as a dead feed and gets frozen
-    /// out of trading. Checked at compile time, so an edit to either constant that
-    /// breaks the margin fails the build rather than waiting on a test run.
-    const _: () = {
-        const ENGINE_MAX_ORDERBOOK_STALE_MS: i64 = 8_000;
+        // Doubling from the 250 ms floor admits the immediate poll plus one more
+        // at ~500 ms; a loop that ignored 429 would have issued ~4 by now.
         assert!(
-            TOP_HEARTBEAT_MS_RECOMMENDED > 0,
-            "heartbeat 0 means 'disabled', not a recommendation"
+            polls <= 2,
+            "429 must reduce the poll rate; {polls} polls in 900ms"
         );
         assert!(
-            TOP_HEARTBEAT_MS_RECOMMENDED * 4 <= ENGINE_MAX_ORDERBOOK_STALE_MS,
-            "recommended heartbeat must leave at least a 4x margin"
+            polls >= 1,
+            "the poller must keep trying rather than give up"
         );
-    };
-
-    #[test]
-    fn heartbeat_zero_disables_coalescing() {
-        let mut c = TopCoalescer::new(0);
-        assert!(c.admit("t1", Some(dec("0.4")), Some(dec("0.5")), 0));
-        assert!(c.admit("t1", Some(dec("0.4")), Some(dec("0.5")), 1));
-        assert!(c.admit("t1", Some(dec("0.4")), Some(dec("0.5")), 2));
-        assert_eq!(c.totals(), (3, 0));
+        assert!(
+            !ev_rx
+                .try_recv()
+                .is_ok_and(|e| matches!(e, FeedEvent::Book { .. })),
+            "a rate-limited response must not produce a book"
+        );
     }
 
     #[test]
-    fn heartbeat_env_defaults_to_disabled() {
-        // Every "I didn't really set this" shape must land on disabled.
-        assert_eq!(parse_heartbeat(None), 0);
-        assert_eq!(parse_heartbeat(Some("")), 0);
-        assert_eq!(parse_heartbeat(Some("  ")), 0);
-        assert_eq!(parse_heartbeat(Some("0")), 0);
-        assert_eq!(parse_heartbeat(Some("-1")), 0);
-        // A typo must never produce a live heartbeat; only a clean number can.
-        assert_eq!(parse_heartbeat(Some("1s")), 0);
-        assert_eq!(parse_heartbeat(Some("1000ms")), 0);
+    fn poll_ms_falls_back_to_the_default() {
+        // Every "I did not really set this" shape must land on the default, so a
+        // typo cannot become a busy loop.
+        assert_eq!(parse_poll_ms(None), DEFAULT_POLL_MS);
+        assert_eq!(parse_poll_ms(Some("")), DEFAULT_POLL_MS);
+        assert_eq!(parse_poll_ms(Some("  ")), DEFAULT_POLL_MS);
+        assert_eq!(parse_poll_ms(Some("0")), DEFAULT_POLL_MS);
+        assert_eq!(parse_poll_ms(Some("-1")), DEFAULT_POLL_MS);
+        assert_eq!(parse_poll_ms(Some("1s")), DEFAULT_POLL_MS);
+        assert_eq!(parse_poll_ms(Some("1000ms")), DEFAULT_POLL_MS);
     }
 
     #[test]
-    fn heartbeat_env_accepts_number_and_recommended_keyword() {
-        assert_eq!(parse_heartbeat(Some("2500")), 2_500);
-        assert_eq!(parse_heartbeat(Some(" 2500 ")), 2_500);
-        assert_eq!(parse_heartbeat(Some("recommended")), TOP_HEARTBEAT_MS_RECOMMENDED);
-        assert_eq!(parse_heartbeat(Some("Recommended")), TOP_HEARTBEAT_MS_RECOMMENDED);
+    fn poll_ms_is_clamped_into_the_supported_band() {
+        assert_eq!(parse_poll_ms(Some("1")), MIN_POLL_MS);
+        assert_eq!(parse_poll_ms(Some("100")), MIN_POLL_MS);
+        assert_eq!(parse_poll_ms(Some(" 2000 ")), 2_000);
+        assert_eq!(parse_poll_ms(Some("9999999")), MAX_POLL_MS);
     }
 
+    /// The default cadence must not trip its own warning: a shipped default that
+    /// logs a warning on every start is a warning nobody reads.
     #[test]
-    fn retain_tokens_forgets_dead_rounds() {
-        let mut c = TopCoalescer::new(1_000);
-        assert!(c.admit("old", Some(dec("0.4")), Some(dec("0.5")), 0));
-        assert!(c.admit("new", Some(dec("0.4")), Some(dec("0.5")), 0));
-        c.retain_tokens(&["new".to_string()]);
-        assert!(!c.last.contains_key("old"));
-        assert!(!c.sent_at.contains_key("old"));
-        assert!(c.last.contains_key("new"));
-        // A reused token id starts clean rather than inheriting stale state.
-        assert!(c.admit("old", Some(dec("0.4")), Some(dec("0.5")), 1));
+    fn the_default_cadence_is_inside_the_engines_staleness_budget() {
+        assert_eq!(cadence_warning(DEFAULT_POLL_MS), None);
+        assert_eq!(cadence_warning(MIN_POLL_MS), None);
+    }
+
+    /// A cadence that would leave the engine unpricable between polls must be
+    /// reported, including one that is only *just* over once latency is added.
+    #[test]
+    fn a_cadence_past_the_staleness_budget_is_reported() {
+        // Exactly at the boundary, with the latency allowance folded in, is
+        // already too slow.
+        let boundary = ENGINE_MAX_ORDERBOOK_STALE_MS - LATENCY_ALLOWANCE_MS;
+        assert_eq!(
+            cadence_warning(boundary),
+            None,
+            "the boundary itself is still fine"
+        );
+        assert!(
+            cadence_warning(boundary + 1).is_some(),
+            "one millisecond past the boundary leaves no fresh book and must warn"
+        );
+        assert!(cadence_warning(ENGINE_MAX_ORDERBOOK_STALE_MS).is_some());
+        assert!(cadence_warning(MAX_POLL_MS).is_some());
+    }
+
+    /// The ceiling has to keep the knob's own bounds honest: a max below the
+    /// default would make the clamp silently rewrite the default. The constants
+    /// themselves are checked in the compile-time block above; this exercises
+    /// the clamp that depends on them.
+    #[test]
+    fn the_poll_band_does_not_rewrite_the_default() {
+        assert_eq!(
+            parse_poll_ms(Some(&DEFAULT_POLL_MS.to_string())),
+            DEFAULT_POLL_MS
+        );
     }
 }
