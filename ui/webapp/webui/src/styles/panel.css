@@ -208,6 +208,8 @@ tr:last-child td { border-bottom: none; }
 
 .token-input {
   flex: 1;
+  width: 100%;
+  box-sizing: border-box;
   border: 1px solid var(--bk-border);
   border-radius: 10px;
   padding: 10px 14px;
