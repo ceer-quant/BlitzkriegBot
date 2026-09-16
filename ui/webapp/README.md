@@ -24,21 +24,42 @@ cargo tauri build                        # 产物: src-tauri/target/release/bund
 ```
 打包仅本地桌面环境执行;不进入常规 CI(Linux 缺 GTK 头文件)。
 
-## 网关与鉴权(E6-a)
-桌面 webview 面板的数据后端是已有网关(`ui_kit_web`):
+## 网关与鉴权（E6-a → 面板鉴权加固）
+桌面 webview 面板的数据后端是已有网关（`ui_kit_web`）：
 ```bash
 target/release/ui_kit_web --socket <core.sock> --addr 127.0.0.1:51888 --manage
 ```
-- 鉴权走**用户名/密码**:启动前设置 `BLITZKRIEG_PANEL_USER` / `BLITZKRIEG_PANEL_PASSWORD`
-  (两者必须同时非空),面板登录页换取会话 token;后续请求携带
-  (query `?token=` / header `X-Auth-Token` / `Authorization: Bearer` / `bk_session` cookie),否则 401。
-  未设置变量 = 无鉴权,仅限回环部署。
-- CORS 默认拒绝;仅回环 Origin 放行(403)。
-- 面板/命令 verb 与 TUI/web 完全一致(E5 命令面);无交易下单 API。
+设计参照 freqtrade 的 REST API（同类程序中最成熟的先例），四点一致：
+
+1. **除探活端点外一律要求鉴权。** freqtrade 只有 `/ping` 免鉴权，这里只有 `/api/ping`。
+   **网关模式（`--manage`）始终要求会话**；`BLITZKRIEG_PANEL_USER` / `_PASSWORD`
+   两者都未配置时自动生成一次性密码并打印在启动日志里 —— 一个能启动/停止内核的
+   进程不会裸奔。只配置一半视为未配置（猜操作者意图正是面板敞开的成因）。
+2. **回环不是信任边界。** 只监听 localhost 挡不住操作者随手打开的网页向 127.0.0.1
+   发跨站请求（`<img>` / `<form>` 属 simple request，不触发 CORS 预检）。因此
+   `GET /api/command?cmd=stop` 这种跨站形状必须打不到 —— 靠的是会话要求（跨站请求
+   无法附带 token），Origin 检查是第二层。
+3. **会话会过期。** 绝对 TTL 12h + 空闲超时 30min，存活集合上限 64（超限淘汰最旧）；
+   `POST /api/logout` 真正吊销 —— 这点无状态 JWT 做不到。
+4. **显式 Origin 白名单。** 非回环来源一律 403；确有需要时用
+   `WebServer::set_allowed_origins` 显式加白（对应 freqtrade 的 `CORS_origins`）。
+
+有意偏离 freqtrade 之处：不引入 JWT / refresh token（单个不透明、可吊销的内存 token
+更简单且支持真登出），凭据只从环境变量读（与既有 `BLITZKRIEG_*` 约定一致）。
+
+登录页换取会话 token，后续请求携带（query `?token=` / header `X-Auth-Token` /
+`Authorization: Bearer` / `bk_session` cookie），否则 401。**会话只存在于内存，
+故网关重启即全体失效** —— 面板会退回登录页并说明原因，不会卡在报错页。
+
+面板/命令 verb 与 TUI/web 完全一致（E5 命令面）；无交易下单 API。
 
 ## 测试
-- `npm run ui:webapp` — 11 项门禁(鉴权/命令/CORS/无 GUI 污染)。
-- `cargo test -p blitzkrieg-ui-kit --lib auth` — 5 项鉴权单元测试。
+- `npm run ui:webapp` — 门禁（`scripts/webapp-check.mjs`）：Vue 构建产物存在**且与
+  `/panel` 实际下发内容一致**、快照渲染非空、鉴权双向 ACCEPT/REJECT、CORS、
+  CSRF（跨站 GET 打不到 lifecycle verb）、`/api/ping` 不泄露状态、登出吊销、
+  未配置凭据时一次性密码强制生效、无 GUI 污染。
+- `cargo test -p blitzkrieg-ui-kit --lib web::auth_tests` — 16 项鉴权 / CSRF /
+  会话生命周期测试。
 
 ## 安全边界
 - 未启用 Live;壳crate 与网关均无任何真实凭证读写;dataflow 只读快照 + E5 无交易命令。

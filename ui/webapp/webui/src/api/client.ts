@@ -32,12 +32,49 @@ export function hasToken(): boolean {
   return token.length > 0
 }
 
+/**
+ * A non-2xx gateway response.
+ *
+ * Written without a TypeScript parameter property (`constructor(readonly
+ * status: …)`) so the class stays loadable under Node's strip-only TypeScript
+ * mode — the panel's `check:*` gates import `src/` directly rather than through
+ * Vite, and parameter properties are syntax that strip-only refuses to
+ * transform. One assignment is a small price for keeping the modules testable
+ * as-is.
+ */
 export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
+  readonly status: number
+
+  constructor(status: number, message: string) {
     super(message)
+    this.status = status
+    this.name = 'ApiError'
+  }
+}
+
+/**
+ * Gateway liveness probe (`GET /api/ping`).
+ *
+ * The one endpoint that answers without a session — deliberately, and with
+ * nothing in the reply but this. Its purpose is to let the panel tell three
+ * situations apart that otherwise look identical:
+ *
+ *   * gateway unreachable → this resolves `null`;
+ *   * gateway alive, session gone → resolves with `authRequired: true`;
+ *   * gateway alive, session valid → the ordinary `/api/*` calls just work.
+ *
+ * Without it, a rejected token and a crashed gateway both surface as "network
+ * error", which is how a stale `localStorage` token used to strand the panel on
+ * an alert with no way back to the login form.
+ */
+export async function ping(): Promise<{ ok: boolean; authRequired: boolean } | null> {
+  try {
+    const res = await fetch('/api/ping', { headers: { Accept: 'application/json' } })
+    if (!res.ok) return null
+    const doc = (await res.json()) as { ok?: boolean; authRequired?: boolean }
+    return { ok: doc.ok ?? false, authRequired: doc.authRequired ?? false }
+  } catch {
+    return null
   }
 }
 

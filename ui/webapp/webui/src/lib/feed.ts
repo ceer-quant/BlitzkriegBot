@@ -22,11 +22,11 @@
  * would be wrong for the panel to present prices as live that the engine has
  * already stopped trusting.
  *
- * The margin is also enormous against the observed live rate. Over the run that
- * fed this panel, `tops` accumulated ~1.3k updates/second while the feed was up;
- * ten seconds of silence is therefore on the order of 10,000 updates that did not
- * arrive, not a quiet market. Book counters advance on any of the four assets'
- * updates, so no plausible lull reaches this threshold.
+ * The margin is generous against both real feeds. Under the earlier WebSocket
+ * transport the book counters advanced thousands of times a second; under the
+ * current REST polling they advance on each poll (1 Hz by default, per
+ * `POLYMARKET_POLL_MS`). Ten seconds of silence is therefore many missed polls
+ * across all four assets — a stall, not a quiet market.
  */
 export const FEED_STALE_MS = 10_000
 
@@ -35,6 +35,10 @@ export const FEED_STALE_MS = 10_000
  *
  * Returns a value that changes whenever a book update has been counted. Both
  * inputs are cumulative and monotonic, so their sum is too.
+ *
+ * `tops` is included for completeness, not because it currently moves: the only
+ * shipping market plugin emits `Book`, so it sits at 0. Summing it costs nothing
+ * and keeps this correct if a plugin starts emitting `TopOfBook`.
  *
  * A round's `slot` is deliberately NOT part of this: it is derived from wall-clock
  * time and so advances every round (15m) with or without a feed, which would reset

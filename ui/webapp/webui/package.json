@@ -9,7 +9,9 @@
     "check:balance": "node --experimental-strip-types scripts/balance-accounting.check.mjs",
     "check:lifecycle": "node --experimental-strip-types scripts/lifecycle-control.check.mjs",
     "check:rejections": "node --experimental-strip-types scripts/refusal-attribution.check.mjs",
-    "check:feed": "node --experimental-strip-types scripts/feed-liveness.check.mjs"
+    "check:feed": "node --experimental-strip-types scripts/feed-liveness.check.mjs",
+    "check:session": "node --experimental-strip-types scripts/session-recovery.check.mjs",
+    "check:all": "npm run check && npm run check:theme && npm run check:balance && npm run check:lifecycle && npm run check:rejections && npm run check:feed && npm run check:session"
   },
   "license": "ISC",
   "type": "module",
