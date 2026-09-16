@@ -65,7 +65,7 @@ blitzkrieg-core  ── Unix Domain Socket ($TMPDIR/blitzkrieg-core-$USER.sock)
 | `scanner.rs` | 回合/时钟偏移/slug/时间闸；Gamma 字段解析（outcomes/clobTokenIds/outcomePrices） |
 | `strategies/` | 内建策略（宿主化 `EngineStrategy` 实现）：`spread_arb.rs`（抄底腿，默认启用）、`trend_follow.rs`（追涨腿，E4-a，默认禁用，6 个可进化旋钮）、`mean_reversion.rs`（逆向/fade 腿，E4-b / #31，默认禁用，6 个可进化旋钮，momentum 豁免）、`shadow_twin.rs`（影子孪生工厂契约）、`foreign.rs`（C ABI v2 外挂适配） |
 | `engine.rs` | 自驱引擎：事件（book/top/spot/round）→ 各策略各自确认 → 候选单 → 共享闸门 → 下单；现货动量过滤；趋势破裂撤单；按策略分账 |
-| `feed.rs` | **Rust 原生行情**（P4）：Polymarket 盘口 WS（SDK，含动态重订阅）+ Binance 现货 WS（tokio-tungstenite），自带重连，带内解析 |
+| `feed.rs` | **Rust 原生行情**（P4）：Polymarket 盘口走 REST `POST /books` 轮询 + Binance 现货 WS（tokio-tungstenite），自带重连，带内解析 |
 | `shadow.rs` | 影子采样 + 回放：记录持仓价格路径，用**同一份 exit_policy** 回放验证（不会与实盘漂移） |
 | `exit_policy.rs` | **纯出场决策**（Rust 移植 TS `exit-policy.ts`）：基于可成交 bid 的 TP/SL/移动止盈/棘轮/保本/停滞/深度/时间/强平，bid 闪崩不触发保护性止损 |
 | `position.rs` | 持仓账本：开/平仓 PnL（含费）、HWM/退出状态、`can_open` 容量与冷却（asset/loss/exit/stoploss）、手动平仓 |
@@ -161,7 +161,8 @@ target/release/blitzkrieg-core --backtest data/archive/events.jsonl \
 - **分段轮转（常开采集的前提）**：`--event-archive-rotate-mb 256` 到量即把当前段改名成 UTC 时间戳兄弟
   文件（`events.jsonl` → `events.20250914T140000Z.jsonl`）并续写新 `events.jsonl`；**只改名、不删除**，
   同秒多次轮转用零填充序号消歧。`--event-archive-min-free-mb 5120` 在每次轮转点检查可用空间，低于阈值
-  即停录（`stoppedReason:"disk"`）——真实 feed 吞吐 **≈11 MB/分钟 ≈16 GB/天**，无限期采集的界是磁盘而
+  即停录（`stoppedReason:"disk"`）——WS 盘口频道时期的真实 feed 吞吐 **≈11 MB/分钟 ≈16 GB/天**（REST 轮询
+  后落盘量远低于此），无限期采集的界是磁盘而
   非文件大小，`--event-archive-max-mb 0`（无会话上限）+ 轮转 + 磁盘护栏才是"常开"的正确组合。
 - **多段重放**：`--backtest events.jsonl` 自动读入该归档**及其全部轮转段**（按名称时间戳排序、live 段在
   后），无需人工拼接；`sourceStats` 跨段汇总。
@@ -194,14 +195,20 @@ target/release/blitzkrieg-core --socket <path> --mode live \
 ### 自驱 + Rust 原生行情（P3/P4）
 
 ```bash
-# Node 只下发参数/回合代币，Rust 自带 WS 取行情并自行决策下单：
+# Node 只下发参数/回合代币，Rust 自带行情源并自行决策下单：
 target/release/blitzkrieg-core --socket <path> --mode dry --engine --feed-ws \
   --min-round-age 30 --min-time-left 180
 ```
 
 - `--engine`：启用自驱引擎（事件→趋势→spread_arb→下单→趋势破裂撤单）。
-- `--feed-ws`：Rust 自带 Binance 现货 WS（构造时/boot 即连）与 Polymarket 盘口 WS
-  （收到 `engine.markets` 后按当前回合代币订阅，回合切换自动重订阅）。缺网时自动重连。
+- `--feed-ws`：启用 Rust 原生行情源——Binance 现货走 WS（构造时/boot 即连），Polymarket 盘口走
+  REST `POST /books` 轮询（收到回合代币后按当前回合代币集批量取盘口，回合切换即换集合）。缺网自动重试/退避。
+  盘口**不用**交易所的 WS 市场频道：该频道无消息类型过滤、无压缩、无按 token 限流，实测单 socket
+  33–40 GB/天，其中 98.8% 是重复报价的 `price_change`（某 token 10 秒内 706 条带价条目只有 1 个不同值）；
+  批量 REST 在默认 1 秒间隔下约 1.75 GB/天，且是快照接口——无需退订，因此也没有会泄漏的订阅。
+  轮询间隔用 `POLYMARKET_POLL_MS` 调整（钳制 250..60000，未设/0/非法值回落到 1000）；
+  超过引擎 8s 盘口新鲜度预算时 core 会打警告。注意存档流量（`--event-archive`）与线上流量是两件事：
+  合并/降频只减少落盘，不减少请求字节。
 - `--round-sec 300|900|...`：回合时长，必须与所交易市场一致（影响 slot 与时间闸；默认 900）。
 - 未开 `--feed-ws` 时，仍可用 IPC `books.*` / `spot.price` / `engine.markets` 手动喂数据
   （测试与运维覆盖用）。
@@ -244,7 +251,7 @@ HFT_CORE=rust node dist/index.js
 ```
 
 切换后 **Rust 内核全权接管**：自己发现回合（Gamma slug 查询，`discovery.rs`）、自己拉行情
-（Binance 现货 + Polymarket 盘口 WS）、自己算信号/风控/下单/持仓/出场。Node 仅：
+（Binance 现货 WS + Polymarket 盘口 REST 轮询）、自己算信号/风控/下单/持仓/出场。Node 仅：
 启动/停止子进程、下发参数（assets/size/dry-run/round-sec）、渲染状态与日志。
 
 - **默认仍是 Node 引擎**：不设 `HFT_CORE` 时行为与以前完全一致——切换不会静默发生，可随时
@@ -310,9 +317,11 @@ target/release/blitzkrieg-core --replay-near-miss data/shadow/near-miss.jsonl
 - **P3（完成）**：行情/信号进 Rust——本地 L2 重建、价格缓冲、趋势跟踪、`spread_arb` 评估器、
   回合扫描/时钟/时间闸，以及**自驱引擎**（事件→趋势→信号→下单→趋势破裂撤单）。Node 只需
   喂 `books.*` / `spot.price` / `engine.markets`；`--engine` 打开后 Rust 在内部 tick 自行评估下单。
-- **P4（完成）**：Rust 自带行情接入——Polymarket 盘口 WS（SDK `ws`，动态重订阅新回合代币）+
-  Binance 现货 WS（tokio-tungstenite，自带重连）；`--feed-ws` 打开后 Node 不再需要推
+- **P4（完成）**：Rust 自带行情接入——Polymarket 盘口 REST `POST /books` 轮询（按回合代币批量取，
+  回合切换即换集合）+ Binance 现货 WS（tokio-tungstenite，自带重连）；`--feed-ws` 打开后 Node 不再需要推
   `books.*`/`spot.price`。影子采样与回放（`shadow.rs`）复用同一份 `exit_policy`，回测不会与实盘漂移。
+  （P4 最初用 SDK 的 WS 市场频道实现；因该频道无过滤/无压缩、实测 33–40 GB/天/socket 且会随回合泄漏
+  socket，已改为 REST 轮询。）
 - **P5（部分完成）**：
   - ✅ 影子落盘（Node 分析脚本兼容的 JSONL）+ `--replay <file>`：Rust 直接对现有影子数据跑
     walk-forward（网格内样本 + 扩展窗口样本外）。已在真实 `data/shadow/positions.jsonl` 上验证。

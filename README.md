@@ -108,7 +108,7 @@ UDS 路径可用 `--socket` 覆盖（默认位于 `$TMPDIR` 下）。
 | 标志 | 含义 |
 | --- | --- |
 | `--engine` | 启用自驱动引擎 |
-| `--feed-ws` | 订阅实时行情 |
+| `--feed-ws` | 启用 Rust 原生行情源：Polymarket 走 REST `POST /books` 轮询，Binance 现货仍为 WS |
 | `--assets` | 交易资产白名单（逗号分隔） |
 | `--round-sec` / `--min-round-age` / `--min-time-left` | 轮盘周期与进场时间门限 |
 | `--trend-confirm-sec` / `--trend-window-floor-ms` | 趋势确认时长 / 窗口下限 |
