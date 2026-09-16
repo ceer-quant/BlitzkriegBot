@@ -225,6 +225,13 @@ pub struct BalanceResult {
     pub reserved: Decimal,
     #[serde(with = "crate::decimal")]
     pub available: Decimal,
+    /// Starting principal in DRY mode (`--seed-balance`), so a UI can show the
+    /// `principal + realized net − reserved` reconciliation rather than merely
+    /// asserting it. `None` in LIVE, where the principal is whatever the venue
+    /// reported at start and is not a number the core fixed itself. Absent on
+    /// older cores, which the reader must treat as "unknown", not zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Serialize)]

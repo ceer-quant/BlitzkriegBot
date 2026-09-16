@@ -107,6 +107,21 @@ try {
   check('command with session → 200', status(st) === 200);
   const bad = await httpGet('/api/command?cmd=status');
   check('command without session → 401', status(bad) === 401);
+
+  // Process-control capabilities for the panel's 启动/停止 buttons. This
+  // harness spawns the core ITSELF and starts the gateway with `--manage`, so
+  // it is the "adopted core" case: the verbs are accepted, but stop cannot act
+  // on a core the gateway did not spawn. The panel gates the buttons on both
+  // flags, so `managed` must reach the wire and must be false here.
+  const body = ok.slice(ok.indexOf('\r\n\r\n') + 4);
+  let snap = {};
+  try { snap = JSON.parse(body); } catch {}
+  check('snapshot carries the gateway block',
+    snap.gateway && typeof snap.gateway === 'object', JSON.stringify(snap.gateway));
+  check('--manage reports lifecycleEnabled',
+    snap.gateway?.lifecycleEnabled === true, JSON.stringify(snap.gateway));
+  check('an adopted core reports managed:false',
+    snap.gateway?.managed === false, JSON.stringify(snap.gateway));
 } finally {
   try { core.kill('SIGKILL'); } catch {}
   try { web.kill('SIGKILL'); } catch {}

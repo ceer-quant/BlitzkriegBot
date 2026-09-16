@@ -113,9 +113,9 @@ export const api = {
   /** Dispatch a gateway command verb (`status`/`start`/`stop`/…). */
   command: (cmd: string) =>
     request<CommandDoc>('/command', { method: 'POST', body: cmd }),
-  /** Strategy enable toggle (`strategy.enable` on the core). */
+  /** Strategy enable toggle (`strategy <name> on|off` on the core). */
   setStrategy: (name: string, enabled: boolean) =>
-    request<{ ok: boolean }>(`/command`, {
+    request<CommandDoc>('/command', {
       method: 'POST',
       body: `strategy ${name} ${enabled ? 'on' : 'off'}`,
     }),
@@ -138,7 +138,8 @@ export interface StrategyStatsRow {
   blockedMomentum: number
   gateExemptedTiming: number
   gateExemptedMomentum: number
-  gateExemptions: number
+  /** Gate names this strategy declared itself exempt from (`[]` when none). */
+  gateExemptions: string[]
   closedTrades: number
   wins: number
   losses: number
@@ -242,7 +243,16 @@ export interface Snapshot {
   mode?: string
   lastError?: string | null
   stats?: EngineStats
-  balance?: { balance: number; reserved: number; available: number } | null
+  balance?: {
+    balance: number
+    reserved: number
+    available: number
+    /**
+     * Starting principal. Present in DRY (the `--seed-balance` value); absent in
+     * LIVE and on older cores — treat missing as "unknown", never as zero.
+     */
+    seed?: number | null
+  } | null
   round?: Round | null
   positions?: Position[]
   trades?: TradeSummary
@@ -256,6 +266,22 @@ export interface Snapshot {
   marketActiveType?: MarketType | null
   /** Venue wallet identity — null in dry mode (local seed cash, not venue funds). */
   wallet?: { signer: string | null; funder: string | null }
+  /**
+   * What the gateway serving this snapshot can do about the core *process*.
+   *
+   * Absent on a read-only adapter (`ui_kit_web` without a dispatcher) and on
+   * older gateways. Absence must be read as "cannot control the lifecycle", so
+   * treat a missing block as disabled rather than falling back to enabled.
+   */
+  gateway?: {
+    /** This gateway accepts `start`/`stop` — it was started with `--manage`. */
+    lifecycleEnabled: boolean
+    /** This gateway spawned the core, so it can also stop it. */
+    managed: boolean
+    /** PID of the core this gateway spawned; null when the core was adopted. */
+    corePid: number | null
+    socket: string
+  } | null
   strategyStats?: StrategyStatsRow[]
 }
 
@@ -267,6 +293,14 @@ export interface PluginRow {
   description?: string
   enabled?: boolean
   status?: string
+  /** market.list: this source is the currently selected one. */
+  active?: boolean
+  /** market.list capability flags — a plugin may implement only some of them. */
+  hasDataFeed?: boolean
+  hasDiscovery?: boolean
+  hasExecutor?: boolean
+  /** extension.list lifecycle state, e.g. "installed". */
+  state?: string
 }
 
 /** Identity badge for a plugin row (binary prediction/spot/futures/options). */
@@ -280,6 +314,7 @@ export interface PluginsDoc {
   strategies: PluginRow[]
   extensions: PluginRow[]
   marketPlugins: PluginRow[]
-  marketActive: string | null
+  /** Boolean flag — the selected source's *name* is on the active market row. */
+  marketActive: boolean
   lastError: string | null
 }

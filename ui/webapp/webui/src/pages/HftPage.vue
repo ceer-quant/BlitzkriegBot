@@ -1,79 +1,79 @@
 <script setup lang="ts">
 /**
- * 二元预测市场通用组件（模板页）— 源自 ui/hft.html 的 HFT 面板，
- * 现在是任何二元预测市场策略共用的数据展示模板：倒计时、行情卡
- * (UP/DOWN 价差)、PnL 曲线、胜率分布、交易统计、当前持仓 +
- * 历史订单 tabs、启动/停止。页头标注当前行情插件的身份
- * （二元预测市场/现货市场/合约市场/期货实现）。数据全部来自
- * Rust 端 /api/snapshot — 不依赖 Node 网关。
+ * 行情面板 — 二元预测市场通用模板页（源自 ui/hft.html）。倒计时条、行情卡、
+ * 权益曲线、胜率分布、交易统计、持仓/历史瀑布流（全量、过滤器、分页），
+ * 以及 hft.html 的提示音（盈/亏/开仓/熔断）。数据全部来自 /api/snapshot。
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { useIntervalFn } from '@vueuse/core'
+import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
+import { Activity, AlertTriangle, Play, Square, Bell, BellOff, Search, TrendingUp, TrendingDown, Clock, Filter, Info } from 'lucide-vue-next'
+import { api, marketTypeLabel, type MarketPrice, type TradeRow } from '@/api/client'
+import { usePanelStore } from '@/stores/panel'
+import { useTheme } from '@/lib/theme'
 import {
-  api, marketTypeLabel,
-  type MarketPrice, type TradeRow,
-} from '../api/client'
-import { usePanelStore } from '../stores/panel'
+  num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration, dateTime,
+} from '@/lib/format'
+import { balanceView } from '@/lib/balance'
+import { controlState } from '@/lib/lifecycle'
+import { feedStaleness } from '@/lib/feed'
+import {
+  playDang, playDing, playOrder, playProfit, playWuwu,
+} from '@/composables/alertSounds'
+import Card from '@/components/ui/card/Card.vue'
+import CardHeader from '@/components/ui/card/CardHeader.vue'
+import Badge from '@/components/ui/badge/Badge.vue'
+import Button from '@/components/ui/button/Button.vue'
+import SegmentedControl from '@/components/ui/segmented/SegmentedControl.vue'
+import StatRow from '@/components/ui/stat/StatRow.vue'
+import EmptyState from '@/components/ui/empty/EmptyState.vue'
+import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
+import EquityCurve from '@/components/charts/EquityCurve.vue'
 
 const store = usePanelStore()
+const { sound, toggleSound } = useTheme()
+const snap = computed(() => store.snapshot)
 
-// Fast tick: 2s snapshot poll, faster than the global 15s, matching HFT pacing.
+// Fast tick: 2s snapshot poll (HFT pacing), faster than the shell's 15s.
 const { pause: stopFast } = useIntervalFn(() => { void store.refresh() }, 2_000)
 onUnmounted(() => { stopFast() })
 
-const snap = computed(() => store.snapshot)
-
-// ── alert sounds — ported from ui/hft.html on every snapshot tick ─────────────
-// win → profit arpeggio, loss → dang, new open position → order blip, breaker
-// in lastError → wuwu siren once, breaker cleared → ding. First snapshot only
-// primes the baselines (no replay storm after reload).
-import {
-  playDang, playDing, playOrder, playProfit, playWuwu, primeAudioOnFirstGesture,
-  soundEnabled, setSoundEnabled,
-} from '../composables/alertSounds'
-primeAudioOnFirstGesture()
-const soundOn = ref(soundEnabled())
-function toggleSound(): void {
-  setSoundEnabled(!soundOn.value)
-  soundOn.value = soundEnabled()
-}
+// ── alert sounds: diff each snapshot against the previous one ────────────────
 let primedWins: number | null = null
 let primedLosses: number | null = null
 let primedPositions: number | null = null
-let wasBreaker = false
+let wasHalted = false
+
 watch(snap, (s) => {
   if (!s) return
-  // wins/losses deltas — same baseline-priming pattern as hft.html
-  const rows = s.tradeRows ?? []
+  // Deduped: the raw rows can carry the same `hft-N` id from an earlier run, and
+  // counting those twice would fire an alert sound for a trade that never closed.
+  const rows = store.tradeRows
   const wins = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length
   const losses = rows.filter((t) => (Number(t.netPnlUsd) || 0) <= 0).length
+  const pos = s.positions?.length ?? 0
+  // first frame only establishes the baseline (no replay storm on reload)
   if (primedWins === null || primedLosses === null || primedPositions === null) {
-    primedWins = wins; primedLosses = losses; primedPositions = s.positions?.length ?? 0
+    primedWins = wins; primedLosses = losses; primedPositions = pos
     return
   }
   if (wins > primedWins) for (let i = 0; i < Math.min(wins - primedWins, 3); i++) playProfit()
   if (losses > primedLosses) for (let i = 0; i < Math.min(losses - primedLosses, 3); i++) playDang()
-  primedWins = wins; primedLosses = losses
-  // new position opened → order blip
-  const pos = s.positions?.length ?? 0
-  if (primedPositions !== null && pos > primedPositions) playOrder()
-  primedPositions = pos
-  // breaker trip / recover signal: service surfaced in lastError
+  if (pos > primedPositions) playOrder()
+  primedWins = wins; primedLosses = losses; primedPositions = pos
+
   const err = s.lastError ?? ''
-  const isBreaker = err.toLowerCase().includes('breaker')
-  if (isBreaker && !wasBreaker) playWuwu()
-  if (!isBreaker && wasBreaker) playDing()
-  wasBreaker = isBreaker
+  const halted = err.toLowerCase().includes('breaker')
+  if (halted && !wasHalted) playWuwu()
+  if (!halted && wasHalted) playDing()
+  wasHalted = halted
 })
 
-// ── market identity (which venue plugin drives this session) ──────────────────
+// ── market identity ─────────────────────────────────────────────────────────
 const marketName = computed(() => snap.value?.marketActiveName ?? null)
-const marketTypeText = computed(() =>
-  marketTypeLabel(snap.value?.marketActiveType ?? null),
-)
+const marketTypeText = computed(() => marketTypeLabel(snap.value?.marketActiveType ?? null))
+const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
 
-// serverLeft/serverAt hold the last server answer; leftSec recomputes on each
-// 500ms tick by locally interpolating the time the snapshot was received.
+// ── countdown: interpolate locally between server answers ────────────────────
 const serverLeft = ref(0)
 const serverAt = ref(0)
 watch(snap, (s) => {
@@ -82,581 +82,732 @@ watch(snap, (s) => {
     serverAt.value = Date.now()
   }
 }, { immediate: true })
-const leftSec = ref(0)
+
 const { pause: stopTick } = useIntervalFn(() => {
-  const elapsed = (Date.now() - serverAt.value) / 1000
-  leftSec.value = Math.max(0, Math.round(serverLeft.value - elapsed))
+  leftSec.value = Math.max(0, Math.round(serverLeft.value - (Date.now() - serverAt.value) / 1000))
 }, 500)
 onUnmounted(() => { stopTick() })
-const leftText = computed(() => {
-  const s = leftSec.value
-  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
-})
+const leftSec = ref(0)
 
 const round = computed(() => snap.value?.round ?? null)
+const leftText = computed(() => mmss(leftSec.value))
+/** Fraction of the round still to run — drives the progress ring/bar. */
+const leftFraction = computed(() => {
+  const total = (round.value?.ageSec ?? 0) + (round.value?.timeLeftSec ?? 0)
+  if (!total) return 0
+  return Math.max(0, Math.min(1, leftSec.value / total))
+})
+const urgent = computed(() => leftSec.value > 0 && leftSec.value <= 60)
 
-// Balance semantics follow the mode (dry = local seed cash, live = venue
-// funds) — same discipline as the Overview balance card.
-const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
-const walletAddr = computed(
-  () => snap.value?.wallet?.funder ?? snap.value?.wallet?.signer ?? null,
-)
-
-// ── market price cards (UP/DOWN + spread cents) ──────────────────────────────
 const prices = computed<MarketPrice[]>(() => round.value?.prices ?? [])
-function spreadCents(m: MarketPrice): string {
-  return `价差 ${(Math.max(0, m.up + m.down - 1) * 100).toFixed(1)}¢`
+function spreadCents(m: MarketPrice): number {
+  return Math.max(0, m.up + m.down - 1) * 100
 }
 
-// ── PnL history series (cumulative net PnL across closed trades) ─────────────
-const pnlSeries = computed<number[]>(() => {
-  const rows = snap.value?.tradeRows ?? []
-  // oldest → newest for a left-to-right line
-  const ordered = [...rows].reverse()
-  let cum = 0
-  const pts = ordered.map((t) => (cum += Number(t.netPnlUsd) || 0))
-  pts.unshift(0)
-  return pts
-})
-const pnlNet = computed(() => {
-  const s = snap.value?.trades
-  return s ? s.net : 0
-})
-const pnlNetClass = computed(() => (pnlNet.value >= 0 ? 'pos' : 'neg'))
+/**
+ * Feed liveness, so a stalled market-data feed cannot masquerade as a quiet market.
+ *
+ * The prices below are whatever the core last received; it keeps serving them
+ * indefinitely. `feedStaleness` watches the orderbook counters (the only signal
+ * that moves *with* the feed — see `lib/feed.ts`) and this page states the outage
+ * instead of quoting stale prices as current.
+ *
+ * `nowMs` is ticked locally rather than read from the snapshot, so the banner
+ * appears on its own a few seconds after the feed dies instead of waiting for the
+ * poll that would have revealed it.
+ */
+const nowMs = ref(Date.now())
+useIntervalFn(() => { nowMs.value = Date.now() }, 2000)
+const feed = computed(() => feedStaleness(store.feedAt, nowMs.value))
 
-const sparkline = computed<string>(() => {
-  const pts = pnlSeries.value
-  if (pts.length < 2) return ''
-  const w = 300
-  const h = 64
-  const max = Math.max(...pts)
-  const min = Math.min(...pts, 0)
-  const range = max - min || 1
-  const pad = 4
-  const path = pts
-    .map((v, i) => {
-      const x = pad + (i / (pts.length - 1)) * (w - pad * 2)
-      const y = pad + (1 - (v - min) / range) * (h - pad * 2)
-      return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
-    })
-    .join(' ')
-  const zeroY = pad + (1 - (0 - min) / range) * (h - pad * 2)
-  const zero = `<line x1="${pad}" y1="${zeroY.toFixed(1)}" x2="${w - pad}" y2="${zeroY.toFixed(1)}" stroke="rgba(255,255,255,0.15)" stroke-dasharray="4 4" stroke-width="1"/>`
-  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${zero}<path d="${path}" fill="none" stroke="${pnlNet.value >= 0 ? 'var(--bk-green)' : 'var(--bk-red)'}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>`
-})
-
-// ── win-rate card with W/L ranges ────────────────────────────────────────────
-const winRows = computed(() => {
-  const rows = snap.value?.tradeRows ?? []
-  const bands = [
-    { label: '≥ $1.00', test: (v: number) => v >= 1 },
-    { label: '$0 – $1', test: (v: number) => v >= 0.01 && v < 1 },
-    { label: '–$1 – $0', test: (v: number) => v <= -0.01 && v > -1 },
-    { label: '≤ –$1.00', test: (v: number) => v <= -1 },
-  ]
-  const c = new Map<string, number>()
-  for (const b of bands) c.set(b.label, rows.filter((t) => b.test(Number(t.netPnlUsd) || 0)).length)
-  const st = snap.value?.trades
-  const wr = st ? (st.winRate > 1.5 ? st.winRate / 100 : st.winRate) * 100 : 0
-  const w = st ? rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length : 0
-  const l = rows.length - w
-  return { wr: wr.toFixed(1), w, l, bands: bands.map((b) => ({ label: b.label, count: c.get(b.label) ?? 0 })) }
-})
-
-// ── trade volume / avg / today card ──────────────────────────────────────────
-const tradeStats = computed(() => {
-  const rows = snap.value?.tradeRows ?? []
-  const today = new Date().toDateString()
-  const todays = rows.filter((t) => today === '')
-  const totalVol = rows.reduce((x, t) => x + (t.entryPrice * t.shares || 0), 0)
-  const avg = rows.length ? totalVol / rows.length : 0
-  // core sends netPnlPct already in percent (e.g. 9.89 = +9.89%)
-  const pctVals = rows.map((t) => t.netPnlPct ?? 0)
-  return {
-    count: rows.length,
-    volume: `$${totalVol.toLocaleString(undefined, { maximumFractionDigits: 2 })}`,
-    avg: `$${avg.toLocaleString(undefined, { maximumFractionDigits: 2 })}`,
-    best: pctVals.length ? `${Math.max(...pctVals).toFixed(2)}%` : '—',
-    worst: pctVals.length ? `${Math.min(...pctVals).toFixed(2)}%` : '—',
-    today: todays.length,
-  }
-})
-
-// ── tabs: 当前持仓 / 历史订单 ────────────────────────────────────────────────
-const tab = ref<'positions' | 'history'>('positions')
-const positions = computed(() => snap.value?.positions ?? [])
-const historyRows = computed<TradeRow[]>(() => snap.value?.tradeRows ?? [])
-
-// Cumulative all-time totals: prefer the persisted core summary
-// (trades.summary — full history, no window cap); fall back to summing the
-// rows we actually received (older cores window-tradeRows to 200).
+// ── cumulative all-time totals (core summary preferred, rows as fallback) ────
+const historyRows = computed<TradeRow[]>(() => store.tradeRows)
 const cumStats = computed(() => {
   const s = snap.value?.tradeSummary
   const rows = historyRows.value
   if (s && (s.totalTrades ?? 0) > 0) {
     return {
       total: s.totalTrades ?? rows.length,
+      gross: s.totalGrossPnl ?? 0,
+      fees: s.totalFees ?? 0,
       net: s.totalNetPnl ?? 0,
       wins: s.wins ?? 0,
       losses: s.losses ?? 0,
-      winRate: (s.winRate ?? 0) > 1.5 ? s.winRate! : (s.winRate ?? 0) * 100,
+      winRate: winRatePct(s.winRate),
+      avgHold: s.avgHoldTimeSec,
+      best: s.best,
+      worst: s.worst,
       fromSummary: true,
     }
   }
   const net = rows.reduce((x, t) => x + (Number(t.netPnlUsd) || 0), 0)
   const wins = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length
+  const pcts = rows.map((t) => Number(t.netPnlPct) || 0)
+  const fees = rows.reduce((x, t) => x + (Number(t.feesUsd) || 0), 0)
   return {
     total: rows.length,
+    // `netPnlUsd` is already after fees, so gross is net plus the fees back —
+    // NOT net itself, which would print the post-cost figure under a pre-cost
+    // label and make the cost invisible.
+    gross: net + fees,
+    fees,
     net,
     wins,
     losses: rows.length - wins,
     winRate: rows.length ? (wins / rows.length) * 100 : 0,
+    avgHold: undefined as number | undefined,
+    best: pcts.length ? Math.max(...pcts) : undefined,
+    worst: pcts.length ? Math.min(...pcts) : undefined,
     fromSummary: false,
   }
 })
 
-// ── history filters (time / asset / outcome / strategy) ──────────────────────
+// ── balance (本金 + 净利 is the real balance; cash is the ledger it commits against)
+const recon = computed(() => balanceView(snap.value?.balance, cumStats.value.net, cumStats.value.fees))
+
+// ── history filters ─────────────────────────────────────────────────────────
 const fTime = ref<'all' | 'today' | '7d'>('all')
 const fAsset = ref('all')
 const fOutcome = ref<'all' | 'win' | 'loss'>('all')
 const fStrategy = ref('all')
-const assetOptions = computed(() =>
-  [...new Set(historyRows.value.map((t) => t.asset))].sort(),
-)
+
+const assetOptions = computed(() => [...new Set(historyRows.value.map((t) => t.asset).filter(Boolean))].sort())
 const strategyOptions = computed(() =>
-  [...new Set(historyRows.value.map((t) => t.strategy ?? '—').filter(Boolean))].sort(),
+  [...new Set(historyRows.value.map((t) => t.strategy ?? '').filter(Boolean))].sort(),
 )
+const hasFilters = computed(
+  () => fTime.value !== 'all' || fAsset.value !== 'all' || fOutcome.value !== 'all' || fStrategy.value !== 'all',
+)
+function resetFilters(): void {
+  fTime.value = 'all'; fAsset.value = 'all'; fOutcome.value = 'all'; fStrategy.value = 'all'
+}
+
 const filteredRows = computed<TradeRow[]>(() => {
-  let rows = historyRows.value
-  if (fTime.value === 'today') {
-    const d = new Date(); d.setHours(0, 0, 0, 0)
-    rows = rows.filter((t) => (t.exitTime ?? 0) >= d.getTime())
-  } else if (fTime.value === '7d') {
-    const cutoff = Date.now() - 7 * 86_400_000
-    rows = rows.filter((t) => (t.exitTime ?? 0) >= cutoff)
-  }
-  if (fAsset.value !== 'all') rows = rows.filter((t) => t.asset === fAsset.value)
-  if (fStrategy.value !== 'all') rows = rows.filter((t) => (t.strategy ?? '—') === fStrategy.value)
-  if (fOutcome.value === 'win') rows = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0)
-  else if (fOutcome.value === 'loss') rows = rows.filter((t) => (Number(t.netPnlUsd) || 0) <= 0)
-  return rows
+  const now = Date.now()
+  const dayStart = new Date(new Date().setHours(0, 0, 0, 0)).getTime()
+  const week = now - 7 * 86_400_000
+  return historyRows.value.filter((t) => {
+    const ts = t.exitTime ?? t.entryTime ?? 0
+    if (fTime.value === 'today' && ts < dayStart) return false
+    if (fTime.value === '7d' && ts < week) return false
+    if (fAsset.value !== 'all' && t.asset !== fAsset.value) return false
+    if (fStrategy.value !== 'all' && (t.strategy ?? '') !== fStrategy.value) return false
+    const pnl = Number(t.netPnlUsd) || 0
+    if (fOutcome.value === 'win' && pnl <= 0) return false
+    if (fOutcome.value === 'loss' && pnl > 0) return false
+    return true
+  })
 })
-const filteredNet = computed(() =>
-  filteredRows.value.reduce((x, t) => x + (Number(t.netPnlUsd) || 0), 0),
-)
 
-// Waterfall pagination: render a growing window of the filtered rows; an
-// IntersectionObserver on the sentinel loads the next chunk as it scrolls
-// into view (with a fallback 加载更多 button for odd layouts).
+const filteredStats = computed(() => {
+  const rows = filteredRows.value
+  const net = rows.reduce((a, t) => a + (Number(t.netPnlUsd) || 0), 0)
+  const wins = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length
+  return { count: rows.length, net, wins, losses: rows.length - wins }
+})
+
+// ── waterfall pagination (30 per page, sentinel auto-loads) ─────────────────
 const PAGE = 30
-const visible = ref(PAGE)
-watch([fTime, fAsset, fOutcome, fStrategy, tab], () => { visible.value = PAGE })
-const pageRows = computed(() => filteredRows.value.slice(0, visible.value))
+const visibleCount = ref(PAGE)
 const sentinel = ref<HTMLElement | null>(null)
-let io: IntersectionObserver | null = null
-function setupSentinel(el: HTMLElement | null): void {
-  io?.disconnect()
-  io = null
-  sentinel.value = el
-  if (!el) return
-  io = new IntersectionObserver((es) => {
-    if (es.some((e) => e.isIntersecting)) visible.value += PAGE
-  }, { rootMargin: '200px' })
-  io.observe(el)
-}
-watch(tab, (t) => {
-  if (t !== 'history') setupSentinel(null)
-}, { flush: 'post' })
+const hasMore = computed(() => visibleCount.value < filteredRows.value.length)
+const visibleRows = computed(() => filteredRows.value.slice(0, visibleCount.value))
 
-function money(v: number): string {
-  return `${v >= 0 ? '+' : ''}$${Math.abs(v).toFixed(2)}`
-}
-function moneyCls(v: number): string {
-  return v > 0 ? 'pos' : v < 0 ? 'neg' : ''
-}
-function fmtTime(ms?: number): string {
-  if (!ms) return '—'
-  const d = new Date(ms)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-}
+watch([filteredRows], () => { visibleCount.value = PAGE })
 
-// ── start/stop (dispatcher lifecycle; requires --manage gateway) ─────────────
-const lifecycle = computed(() => snap.value?.mode != null)
+useIntersectionObserver(sentinel, ([entry]) => {
+  if (entry?.isIntersecting && hasMore.value) visibleCount.value += PAGE
+}, { rootMargin: '200px' })
+
+// ── win-rate band distribution ──────────────────────────────────────────────
+const winBands = computed(() => {
+  const rows = historyRows.value
+  const bands = [
+    { label: '≥ +$1.00', tone: 'up' as const, test: (v: number) => v >= 1 },
+    { label: '$0 – $1', tone: 'up' as const, test: (v: number) => v >= 0.01 && v < 1 },
+    { label: '–$1 – $0', tone: 'down' as const, test: (v: number) => v <= -0.01 && v > -1 },
+    { label: '≤ –$1.00', tone: 'down' as const, test: (v: number) => v <= -1 },
+  ]
+  const counts = bands.map((b) => rows.filter((t) => b.test(Number(t.netPnlUsd) || 0)).length)
+  const max = Math.max(...counts, 1)
+  return bands.map((b, i) => ({ ...b, count: counts[i], frac: counts[i] / max }))
+})
+
+// ── engine control ──────────────────────────────────────────────────────────
 const busy = ref(false)
-const cmdNote = ref<string | null>(null)
-async function sendLifecycle(verb: 'start' | 'stop'): Promise<void> {
+const cmdMsg = ref<string | null>(null)
+
+/**
+ * Whether the engine is up.
+ *
+ * `connected` is the gateway's "core is reachable on the socket" flag, and the
+ * core *is* the engine — 启动 spawns it, 停止 kills it — so reachability is the
+ * running state. It stays accurate on a failed poll too: the web adapter answers
+ * 200 with `connected: false` rather than erroring, so the store never keeps a
+ * stale `true`.
+ */
+const engineUp = computed(() => snap.value?.connected ?? false)
+
+/**
+ * What the two controls can actually do here.
+ *
+ * Reachability alone is not enough to offer a live 停止: a gateway started
+ * without `--manage` refuses both verbs, and even with `--manage` it only stops
+ * a core it spawned itself (`Supervisor::stop` leaves an adopted core running).
+ * `controlState` folds those in so the buttons are disabled with a stated
+ * reason instead of being clickable and failing.
+ */
+const control = computed(() => controlState(snap.value?.gateway, engineUp.value))
+
+/** Tooltip/title explaining why a control is unavailable (empty when usable). */
+const startHint = computed(() => {
+  if (busy.value) return '正在下发命令…'
+  if (control.value.canStart) return '启动引擎'
+  if (engineUp.value) return '引擎运行中，无需重复启动'
+  return control.value.blockedReason ?? '无法启动引擎'
+})
+const stopHint = computed(() => {
+  if (busy.value) return '正在下发命令…'
+  if (control.value.canStop) return '停止引擎'
+  if (!engineUp.value) return '引擎未运行'
+  return control.value.blockedReason ?? '无法停止引擎'
+})
+
+async function send(cmd: 'start' | 'stop'): Promise<void> {
   busy.value = true
-  cmdNote.value = null
+  cmdMsg.value = null
   try {
-    const doc = await api.command(`${verb}`)
-    cmdNote.value = doc.message ?? (doc.ok ? `${verb} 已执行` : '执行失败')
+    const res = await api.command(cmd)
+    cmdMsg.value = res.message ?? `${cmd} 已下发`
+    await store.refresh()
   } catch (e) {
-    cmdNote.value = e instanceof Error ? e.message : String(e)
+    cmdMsg.value = e instanceof Error ? e.message : String(e)
   } finally {
     busy.value = false
-    void store.refresh()
+    setTimeout(() => { cmdMsg.value = null }, 4000)
   }
+}
+
+// ── trade volume / averages ─────────────────────────────────────────────────
+const tradeStats = computed(() => {
+  const rows = historyRows.value
+  const dayStart = new Date(new Date().setHours(0, 0, 0, 0)).getTime()
+  const todays = rows.filter((t) => (t.exitTime ?? 0) >= dayStart)
+  const totalVol = rows.reduce((x, t) => x + (Number(t.entryPrice) * Number(t.shares) || 0), 0)
+  return {
+    count: rows.length,
+    today: todays.length,
+    todayNet: todays.reduce((x, t) => x + (Number(t.netPnlUsd) || 0), 0),
+    volume: totalVol,
+    avg: rows.length ? totalVol / rows.length : 0,
+  }
+})
+
+const tab = ref<'positions' | 'history'>('positions')
+const positions = computed(() => snap.value?.positions ?? [])
+const positionUnrealized = computed(() =>
+  positions.value.reduce((a, p) => a + (Number(p.unrealizedPct) || 0), 0),
+)
+
+function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
+  if (!reason) return 'default'
+  const r = reason.toLowerCase()
+  if (r.includes('take') || r.includes('profit')) return 'up'
+  if (r.includes('stop') || r.includes('loss')) return 'down'
+  return 'gold'
 }
 </script>
 
 <template>
   <template v-if="snap">
-    <!-- countdown bar -->
-    <div class="glass card countdown-bar">
+    <!-- ── round bar ─────────────────────────────────────────────────────── -->
+    <Card class="rise-in relative overflow-hidden">
+      <!-- time-remaining hairline across the card top -->
+      <div
+        class="absolute inset-x-0 top-0 h-[2px] origin-left transition-[width,background] duration-500"
+        :style="{
+          width: `${leftFraction * 100}%`,
+          background: urgent
+            ? 'linear-gradient(90deg, var(--down), oklch(0.72 0.18 40))'
+            : 'linear-gradient(90deg, var(--primary), var(--primary-hi))',
+        }"
+      />
+      <div class="flex flex-wrap items-center gap-x-5 gap-y-3">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <Badge variant="gold">{{ marketTypeText || '市场' }}</Badge>
+            <span class="truncate text-[13px] font-semibold">{{ marketName ?? '未激活插件' }}</span>
+            <span class="label-micro">#{{ round?.slot ?? '—' }}</span>
+          </div>
+          <div class="mt-1.5 flex items-center gap-2 text-[11.5px] text-faint-fg">
+            <Clock class="size-3.5" />
+            <span>{{ round?.ageSec ?? '—' }}s 已过</span>
+            <span class="opacity-40">·</span>
+            <span :class="round?.canTrade ? 'text-up font-semibold' : 'text-primary'">
+              {{ round?.canTrade ? 'TRADING' : 'WAITING' }}
+            </span>
+          </div>
+        </div>
+
+        <div class="mx-auto text-center">
+          <div
+            class="stat-num text-[42px] leading-none tracking-[-0.03em]"
+            :class="urgent ? 'text-down' : 'grad-gold'"
+          >{{ leftText }}</div>
+          <div class="label-micro mt-1">剩余时间</div>
+        </div>
+
+        <div class="ml-auto flex items-center gap-2">
+          <Tooltip :content="sound ? '关闭提示音' : '开启提示音'">
+            <Button variant="ghost" size="icon" @click="toggleSound">
+              <Bell v-if="sound" /><BellOff v-else class="opacity-60" />
+            </Button>
+          </Tooltip>
+          <!--
+            Exactly one of these carries the next move. While the engine runs
+            that is 停止, so it takes the solid deep fill and 启动 goes pale and
+            inert; when the engine is down the pair swaps.
+
+            Enabled state comes from `control`, not from reachability alone: the
+            gateway may refuse the verbs outright (`--manage` absent) or be
+            unable to stop an adopted core. A control that cannot act is disabled
+            with the reason in its `title`, so hovering explains the refusal
+            rather than leaving the user to discover it by clicking.
+          -->
+          <Button
+            :variant="control.canStart ? 'up' : 'idle'"
+            :disabled="busy || !control.canStart"
+            :title="startHint"
+            @click="send('start')"
+          >
+            <Play class="size-3.5" />启动
+          </Button>
+          <Button
+            :variant="control.canStop ? 'danger-solid' : 'idle'"
+            :disabled="busy || !control.canStop"
+            :title="stopHint"
+            @click="send('stop')"
+          >
+            <Square class="size-3.5" />停止
+          </Button>
+        </div>
+      </div>
+
+      <!--
+        An inert pair with no explanation is the bug being fixed here, so when
+        neither control can act, say which of the two reasons applies.
+      -->
+      <div
+        v-if="!control.usable && control.blockedReason"
+        class="mt-3 flex items-start gap-2 rounded-md border border-line bg-panel-2 px-3 py-2 text-[11.5px] leading-snug text-muted-fg"
+      >
+        <Info class="mt-px size-3.5 shrink-0 text-faint-fg" />
+        <span>{{ control.blockedReason }}</span>
+      </div>
+
+      <Transition name="fade">
+        <div v-if="cmdMsg" class="mt-3 rounded-md border border-line bg-panel-2 px-3 py-2 text-[12px] text-muted-fg">
+          {{ cmdMsg }}
+        </div>
+      </Transition>
+    </Card>
+
+    <!-- ── market price cards ────────────────────────────────────────────── -->
+    <!--
+      Says the feed stopped. Without this the cards below are indistinguishable
+      from a live market: the core republishes its last book forever and the round
+      countdown keeps running off the local clock. Stated above the prices rather
+      than inside them so it is read before the numbers are.
+    -->
+    <div
+      v-if="feed.stale"
+      class="mt-3.5 flex items-start gap-2 rounded-md border border-down/35 bg-down/8 px-3 py-2.5 text-[12px] leading-snug text-down"
+    >
+      <AlertTriangle class="mt-px size-4 shrink-0" />
       <div>
-        <div class="card-title">
-          <span class="mkt-identity">{{ marketTypeText || '市场' }}</span>
-          <span class="sub" style="margin-left: 6px">{{ marketName ?? '未激活插件' }}</span>
-          <span class="cd-slot">#{{ round?.slot ?? '—' }}</span>
-          <button class="sound-toggle glass" :class="{ off: !soundOn }" title="提示音开关" @click="toggleSound">
-            {{ soundOn ? '🔔' : '🔕' }}
-          </button>
-        </div>
-        <div class="sub">
-          {{ round?.ageSec ?? '—' }}s 已过 ·
-          <span class="cd-state" :class="round?.canTrade ? 'on' : 'off'">
-            {{ round?.canTrade ? 'TRADING' : 'WAITING' }}
-          </span>
-        </div>
-      </div>
-      <div class="cd-timer" :class="{ dim: !round }">{{ leftText }}</div>
-      <div class="btn-group">
-        <button class="life-btn start" :disabled="busy" @click="sendLifecycle('start')">启动</button>
-        <button class="life-btn stop" :disabled="busy" @click="sendLifecycle('stop')">停止</button>
-      </div>
-    </div>
-    <div v-if="cmdNote" class="sub" style="margin: 6px 2px">命令结果：{{ cmdNote }}</div>
-
-    <!-- market price cards -->
-    <div class="prices-grid" v-if="prices.length">
-      <div v-for="m in prices" :key="m.asset" class="glass card price-card">
-        <div class="pa-asset">{{ m.asset }}</div>
-        <div class="pa-row">
-          <div class="pa-col">
-            <div class="pa-label">UP</div>
-            <div class="pa-price up">{{ m.up.toFixed(3) }}</div>
-          </div>
-          <div class="pa-col">
-            <div class="pa-label">DOWN</div>
-            <div class="pa-price down">{{ m.down.toFixed(3) }}</div>
-          </div>
-        </div>
-        <div class="pa-spread">{{ spreadCents(m) }}</div>
-      </div>
-    </div>
-    <div v-else class="glass card" style="margin: 14px 0">
-      <div class="card-title">行情</div>
-      <div class="empty">暂无行情数据（等待报价插件）</div>
-    </div>
-
-    <!-- stats row -->
-    <div class="stats-row">
-      <div class="glass card">
-        <h2 class="card-title">累计净 PnL</h2>
-        <div class="pnl-big" :class="pnlNetClass">{{ money(pnlNet) }}</div>
-        <div class="spark" v-html="sparkline" />
-      </div>
-      <div class="glass card">
-        <h2 class="card-title">胜率分布</h2>
-        <div class="pnl-big" style="font-size: 30px">{{ winRows.wr }}%</div>
-        <div class="range-row">
-          <span class="sub" style="font-weight: 700; color: var(--bk-green)">盈利 {{ winRows.w }}</span>
-          <span class="sub" style="font-weight: 700; color: var(--bk-red)">亏损 {{ winRows.l }}</span>
-        </div>
-        <div v-for="b in winRows.bands" :key="b.label" class="range-row">
-          <span class="sub">{{ b.label }}</span><span class="num-mono">{{ b.count }}</span>
-        </div>
-      </div>
-      <div class="glass card">
-        <h2 class="card-title">交易统计</h2>
-        <div class="grid grid-stats">
-          <div><div class="stat-name">笔数</div><div class="num-mono big-num">{{ tradeStats.count }}</div></div>
-          <div><div class="stat-name">今日</div><div class="num-mono big-num">{{ tradeStats.today }}</div></div>
-          <div><div class="stat-name">成交额</div><div class="num-mono big-num">{{ tradeStats.volume }}</div></div>
-          <div><div class="stat-name">均笔</div><div class="num-mono big-num">{{ tradeStats.avg }}</div></div>
-        </div>
-      </div>
-      <div class="glass card">
-        <h2 class="card-title">今日表现</h2>
-        <div class="range-row"><span class="sub">最佳单笔</span><span class="num-mono" style="color: var(--bk-green)">{{ tradeStats.best }}</span></div>
-        <div class="range-row"><span class="sub">最差单笔</span><span class="num-mono" style="color: var(--bk-red)">{{ tradeStats.worst }}</span></div>
-        <div class="range-row"><span class="sub">运行模式</span><span class="num-mono">{{ snap.mode ?? '—' }}</span></div>
-        <div class="range-row"><span class="sub">市场轮次</span><span class="num-mono">{{ round?.markets ?? '—' }}</span></div>
-        <div class="range-row">
-          <span class="sub">{{ isDry ? '模拟余额' : '交易所余额' }}</span>
-          <span class="num-mono" :class="isDry ? 'dim' : ''">
-            ${{ (snap.balance?.balance ?? 0).toFixed(2) }}{{ isDry ? '（模拟）' : '' }}
-          </span>
-        </div>
-        <div v-if="isDry" class="range-row">
-          <span class="sub" style="font-size: 10px">余额 = 本金 + 扣费净利 − 未平仓占用</span>
-        </div>
-        <div v-if="!isDry && walletAddr" class="range-row">
-          <span class="sub">钱包</span>
-          <span class="num-mono dim" style="font-size: 11px">{{ walletAddr.slice(0, 6) }}…{{ walletAddr.slice(-4) }}</span>
-        </div>
+        <span class="font-semibold">{{ feed.label }}</span>
+        <span class="text-down/85">
+          ：下面的报价是内核最后收到的行情，并非当前市场。轮次与倒计时按本地时钟推进，所以看起来仍在跳动；
+          引擎也会因为行情过期而拒绝开仓。请检查行情插件与网络连接。
+        </span>
       </div>
     </div>
 
-    <!-- positions / history tabs -->
-    <div class="glass card" style="margin-top: 14px">
-      <div class="tabstrip">
-        <button class="tab" :class="{ active: tab === 'positions' }" @click="tab = 'positions'">当前持仓（{{ positions.length }}）</button>
-        <button class="tab" :class="{ active: tab === 'history' }" @click="tab = 'history'">历史订单（{{ cumStats.total }}）</button>
-      </div>
-      <template v-if="tab === 'history'">
-        <!-- cumulative header: all-time order count / net profit -->
-        <div class="cum-row">
-          <div class="cum-item">
-            <div class="stat-name">累计订单</div>
-            <div class="num-mono big-num">{{ cumStats.total }}</div>
-          </div>
-          <div class="cum-item">
-            <div class="stat-name">累计利润<span class="dim" style="font-size:10px">（扣费）</span></div>
-            <div class="num-mono big-num" :class="cumStats.net >= 0 ? 'pos-text' : 'neg-text'">{{ money(cumStats.net) }}</div>
-          </div>
-          <div class="cum-item">
-            <div class="stat-name">累计胜率</div>
-            <div class="num-mono big-num">{{ cumStats.winRate.toFixed(1) }}%</div>
-          </div>
-          <div class="cum-item">
-            <div class="stat-name">盈利 / 亏损</div>
-            <div class="num-mono big-num">
-              <span style="color: var(--bk-green)">{{ cumStats.wins }}</span>
-              <span class="dim"> / </span>
-              <span style="color: var(--bk-red)">{{ cumStats.losses }}</span>
+    <div v-if="prices.length" class="mt-3.5 flex items-center gap-2">
+      <Activity class="size-3.5" :class="feed.stale ? 'text-down' : 'text-faint-fg'" />
+      <span
+        class="text-[11px] num"
+        :class="feed.stale ? 'font-semibold text-down' : 'text-faint-fg'"
+      >{{ feed.ageLabel }}</span>
+      <Tooltip content="行情数据的新鲜度：内核里订单簿计数最后一次增长到现在的时间。轮次与倒计时按本地时钟走，所以它们会继续跳动，不能用来判断行情是否还在到达。">
+        <span class="cursor-help text-[11px] text-faint-fg underline decoration-dotted decoration-line underline-offset-2">
+          数据新鲜度
+        </span>
+      </Tooltip>
+    </div>
+
+    <div v-if="prices.length" class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
+      <div
+        v-for="m in prices"
+        :key="m.asset"
+        class="glass card-pad transition-transform duration-200 hover:-translate-y-0.5"
+      >
+        <div class="flex items-center justify-between">
+          <span class="text-[13px] font-bold tracking-wide">{{ m.asset }}</span>
+          <Badge :variant="spreadCents(m) <= 1 ? 'up' : 'gold'">
+            {{ spreadCents(m).toFixed(1) }}¢
+          </Badge>
+        </div>
+        <div class="mt-3 grid grid-cols-2 gap-3">
+          <div class="rounded-md border border-up/25 bg-up/8 px-2.5 py-2">
+            <div class="flex items-center gap-1 text-[10.5px] font-semibold text-up">
+              <TrendingUp class="size-3" />UP
             </div>
+            <div class="stat-num mt-1 text-[21px] leading-none text-up">{{ Number(m.up).toFixed(3) }}</div>
+            <div class="mt-0.5 text-[10px] text-faint-fg num">{{ cents(m.up) }}</div>
+          </div>
+          <div class="rounded-md border border-down/25 bg-down/8 px-2.5 py-2">
+            <div class="flex items-center gap-1 text-[10.5px] font-semibold text-down">
+              <TrendingDown class="size-3" />DOWN
+            </div>
+            <div class="stat-num mt-1 text-[21px] leading-none text-down">{{ Number(m.down).toFixed(3) }}</div>
+            <div class="mt-0.5 text-[10px] text-faint-fg num">{{ cents(m.down) }}</div>
           </div>
         </div>
-        <div v-if="!cumStats.fromSummary" class="sub" style="margin: 0 2px 8px">
-          正在显示最近 {{ historyRows.length }} 笔历史（核心尚未提供全量累计汇总）。
-        </div>
+      </div>
+    </div>
+    <Card v-else class="mt-3.5">
+      <EmptyState text="暂无行情数据（等待报价插件）" compact />
+    </Card>
 
-        <!-- filter bar: time / asset / outcome / strategy -->
-        <div class="filter-bar">
-          <select class="f-select" v-model="fTime">
+    <!-- ── stats row ─────────────────────────────────────────────────────── -->
+    <div class="mt-3.5 grid gap-3.5 xl:grid-cols-[1.6fr_1fr_1fr_1fr]">
+      <Card>
+        <CardHeader label="累计净 PnL">
+          <template #title>
+            <span class="stat-num text-[16px]" :class="cumStats.net >= 0 ? 'text-up' : 'text-down'">
+              {{ signedMoney(cumStats.net) }}
+            </span>
+          </template>
+          <template #action>
+            <Badge variant="default">扣费口径</Badge>
+          </template>
+        </CardHeader>
+        <EquityCurve :rows="historyRows" :height="128" :show-axis="false" />
+        <div class="mt-2 flex items-center gap-4 text-[11px] text-faint-fg">
+          <span>毛利 <span class="num text-fg">{{ signedMoney(cumStats.gross) }}</span></span>
+          <span>费用 <span class="num text-down">{{ money(cumStats.fees) }}</span></span>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader label="胜率分布" />
+        <div class="stat-num text-[30px] leading-none">{{ pct(cumStats.winRate) }}</div>
+        <div class="mt-1 flex items-center gap-3 text-[11.5px]">
+          <span class="font-semibold text-up">{{ cumStats.wins }} 盈</span>
+          <span class="font-semibold text-down">{{ cumStats.losses }} 亏</span>
+        </div>
+        <div class="mt-3.5 space-y-1.5">
+          <div v-for="b in winBands" :key="b.label" class="flex items-center gap-2">
+            <span class="w-[52px] shrink-0 text-[10.5px] text-faint-fg">{{ b.label }}</span>
+            <span class="h-1.5 flex-1 overflow-hidden rounded-full bg-panel-2">
+              <span
+                class="block h-full rounded-full transition-[width] duration-500"
+                :style="{
+                  width: `${b.frac * 100}%`,
+                  background: b.tone === 'up' ? 'var(--up)' : 'var(--down)',
+                }"
+              />
+            </span>
+            <span class="w-7 shrink-0 text-right text-[10.5px] text-muted-fg num">{{ b.count }}</span>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader label="交易统计" />
+        <div class="grid grid-cols-2 gap-x-4 gap-y-3">
+          <div><div class="label-micro">笔数</div><div class="stat-num mt-1 text-[19px] leading-none">{{ tradeStats.count }}</div></div>
+          <div><div class="label-micro">今日</div><div class="stat-num mt-1 text-[19px] leading-none">{{ tradeStats.today }}</div></div>
+          <div><div class="label-micro">成交额</div><div class="stat-num mt-1 text-[15px] leading-none">{{ money(tradeStats.volume) }}</div></div>
+          <div><div class="label-micro">均笔</div><div class="stat-num mt-1 text-[15px] leading-none">{{ money(tradeStats.avg) }}</div></div>
+        </div>
+        <div class="mt-3.5 flex items-center justify-between border-t border-line pt-2.5 text-[11.5px]">
+          <span class="text-faint-fg">今日净利</span>
+          <span class="stat-num" :class="tradeStats.todayNet >= 0 ? 'text-up' : 'text-down'">
+            {{ signedMoney(tradeStats.todayNet) }}
+          </span>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader label="今日表现" />
+        <StatRow label="最佳单笔" :value="signedPct(cumStats.best)" tone="up" />
+        <StatRow label="最差单笔" :value="signedPct(cumStats.worst)" tone="down" />
+        <StatRow label="持仓浮动" :value="signedPct(positionUnrealized)" :tone="positionUnrealized >= 0 ? 'up' : 'down'" />
+        <StatRow label="平均持仓" :value="cumStats.avgHold ? duration(cumStats.avgHold) : '—'" tone="dim" />
+        <StatRow label="运行模式" :value="(snap.mode ?? '—').toUpperCase()" :tone="isDry ? 'gold' : 'up'" />
+        <StatRow label="行情轮次" :value="round?.markets ?? '—'" tone="dim" />
+        <div class="mt-2.5 border-t border-line pt-2.5">
+          <!--
+            Headline is 本金 ＋ 净利润 (the real balance). The core's cash ledger
+            is a second row underneath, because the engine sizes orders against
+            cash even when cash has not had the fees taken out of it.
+          -->
+          <StatRow
+            :label="isDry ? (recon.equity !== null ? '真实余额' : '内核现金账') : (recon.equity !== null ? '账户权益' : '交易所余额')"
+            :value="recon.equity !== null ? money(recon.equity) : money(recon.cash)"
+            :tone="isDry ? 'gold' : 'default'"
+          />
+          <p v-if="recon.equity !== null" class="mt-1 text-[10px] leading-snug text-faint-fg">
+            本金 {{ money(recon.seed) }} ＋ 已实现净利 {{ signedMoney(recon.net) }}
+            <Tooltip :content="`真实余额 = 本金 ${money(recon.seed)} ＋ 扣费后净利 ${signedMoney(recon.net)}。手续费是成本：毛利 ${money(recon.gross)} − 手续费 ${money(recon.fees)} = 净利。手续费不改变本金，因此不并入余额。`">
+              <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
+                手续费支出 {{ money(recon.fees) }}
+              </span>
+            </Tooltip>
+          </p>
+          <!--
+            No principal on the wire: either LIVE, or a core older than the field
+            that reports it. Show the cash ledger and say the principal is
+            missing instead of printing an equation the panel cannot verify.
+          -->
+          <p v-else-if="isDry" class="mt-1 text-[10px] leading-snug text-faint-fg">
+            <Tooltip content="内核未上报本金，无法计算「本金 ＋ 净利」的真实余额，此处显示内核现金账。本金由内核按 --seed-balance 持有；当前运行中的内核早于该字段，重启内核后即可显示真实余额。">
+              <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
+                内核现金账 · 本金未上报
+              </span>
+            </Tooltip>
+          </p>
+          <!-- The ledger the engine actually commits against, when it differs. -->
+          <p v-if="recon.equity !== null && isDry" class="mt-1 text-[10px] leading-snug text-faint-fg">
+            <Tooltip
+              v-if="recon.gapMaterial"
+              :content="`内核现金账 ${money(recon.cash)} 高于真实余额 ${money(recon.equity)}，差额 ${signedMoney(recon.cashGap)}：该口径把成交额计入现金、却未把手续费从现金中扣除，差额≈未入账手续费 ${money(recon.fees)}。引擎下单能力以现金账为准，真实余额以本金＋净利为准。`"
+            >
+              <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
+                内核现金账 {{ money(recon.cash) }} · 高于真实余额 {{ signedMoney(recon.cashGap) }}
+              </span>
+            </Tooltip>
+            <span v-else>内核现金账 {{ money(recon.cash) }}</span>
+          </p>
+        </div>
+      </Card>
+    </div>
+
+    <!-- ── positions / history ──────────────────────────────────────────── -->
+    <Card class="mt-3.5" dense>
+      <div class="mb-3.5 flex flex-wrap items-center gap-3">
+        <SegmentedControl
+          v-model="tab"
+          :segments="[
+            { id: 'positions', label: '当前持仓', badge: positions.length },
+            { id: 'history', label: '历史订单', badge: cumStats.total },
+          ]"
+          size="sm"
+        />
+        <div v-if="tab === 'history'" class="ml-auto flex flex-wrap items-center gap-2">
+          <select v-model="fTime" class="filter-select">
             <option value="all">全部时间</option>
-            <option value="today">今天</option>
+            <option value="today">今日</option>
             <option value="7d">近 7 天</option>
           </select>
-          <select class="f-select" v-model="fAsset">
+          <select v-model="fAsset" class="filter-select">
             <option value="all">全部币种</option>
             <option v-for="a in assetOptions" :key="a" :value="a">{{ a }}</option>
           </select>
-          <select class="f-select" v-model="fOutcome">
+          <select v-model="fOutcome" class="filter-select">
             <option value="all">全部盈亏</option>
             <option value="win">仅盈利</option>
             <option value="loss">仅亏损</option>
           </select>
-          <select class="f-select" v-model="fStrategy">
+          <select v-model="fStrategy" class="filter-select">
             <option value="all">全部策略</option>
             <option v-for="s in strategyOptions" :key="s" :value="s">{{ s }}</option>
           </select>
-          <span class="sub f-count">
-            筛出 {{ filteredRows.length }} 笔 · 小计 <span :class="filteredNet >= 0 ? 'pos-text' : 'neg-text'">{{ money(filteredNet) }}</span>
-          </span>
+          <Button v-if="hasFilters" variant="ghost" size="sm" @click="resetFilters">
+            <Search class="size-3.5" />重置
+          </Button>
         </div>
+      </div>
 
-        <div style="overflow-x: auto">
-          <table v-if="pageRows.length">
+      <!-- cumulative header + filtered subtotal -->
+      <template v-if="tab === 'history'">
+        <div class="mb-3.5 grid grid-cols-2 gap-3 rounded-lg border border-line bg-panel-2 p-3 sm:grid-cols-4">
+          <div>
+            <div class="label-micro">累计订单</div>
+            <div class="stat-num mt-1 text-[22px] leading-none">{{ cumStats.total }}</div>
+          </div>
+          <div>
+            <div class="label-micro">累计利润（扣费）</div>
+            <div class="stat-num mt-1 text-[22px] leading-none" :class="cumStats.net >= 0 ? 'text-up' : 'text-down'">
+              {{ signedMoney(cumStats.net) }}
+            </div>
+          </div>
+          <div>
+            <div class="label-micro">累计胜率</div>
+            <div class="stat-num mt-1 text-[22px] leading-none">{{ pct(cumStats.winRate) }}</div>
+          </div>
+          <div>
+            <div class="label-micro">盈利 / 亏损</div>
+            <div class="stat-num mt-1 text-[22px] leading-none">
+              <span class="text-up">{{ cumStats.wins }}</span>
+              <span class="text-faint-fg"> / </span>
+              <span class="text-down">{{ cumStats.losses }}</span>
+            </div>
+          </div>
+        </div>
+        <p v-if="!cumStats.fromSummary" class="mb-3 text-[10.5px] text-faint-fg">
+          累计值由已加载的行汇总（旧内核未提供全史 summary）。
+        </p>
+        <div v-if="hasFilters" class="mb-3 flex items-center gap-2 text-[11.5px] text-faint-fg">
+          <Filter class="size-3.5" />
+          已筛选 <span class="num text-fg">{{ filteredStats.count }}</span> 笔 ·
+          净利 <span class="stat-num" :class="filteredStats.net >= 0 ? 'text-up' : 'text-down'">{{ signedMoney(filteredStats.net) }}</span>
+          · 盈 <span class="text-up num">{{ filteredStats.wins }}</span>
+          / 亏 <span class="text-down num">{{ filteredStats.losses }}</span>
+        </div>
+      </template>
+
+      <!-- positions -->
+      <div v-if="tab === 'positions'">
+        <div v-if="positions.length" class="overflow-x-auto">
+          <table class="w-full text-[13px]">
             <thead>
-              <tr><th>资产</th><th>方向</th><th>入场→平仓</th><th>份额</th><th>净 PnL</th><th>收益率</th><th>买入时间</th><th>卖出时间</th><th>持仓</th></tr>
+              <tr class="text-left">
+                <th class="label-micro px-2 pb-2">资产</th>
+                <th class="label-micro px-2 pb-2">方向</th>
+                <th class="label-micro px-2 pb-2">策略</th>
+                <th class="label-micro px-2 pb-2 text-right">入场</th>
+                <th class="label-micro px-2 pb-2 text-right">现价</th>
+                <th class="label-micro px-2 pb-2 text-right">份额</th>
+                <th class="label-micro px-2 pb-2 text-right">浮动</th>
+                <th class="label-micro px-2 pb-2 text-right">剩余</th>
+              </tr>
             </thead>
             <tbody>
-              <tr v-for="t in pageRows" :key="t.id">
-                <td style="font-weight: 600">{{ t.asset }}</td>
-                <td><span class="badge" :class="t.direction === 'up' ? 'on' : 'warn'">{{ t.direction.toUpperCase() }}</span></td>
-                <td class="num-mono">{{ t.entryPrice.toFixed(3) }} → {{ t.exitPrice.toFixed(3) }}</td>
-                <td class="num-mono">{{ t.shares }}</td>
-                <td class="num-mono" :style="{ color: t.netPnlUsd >= 0 ? 'var(--bk-green)' : 'var(--bk-red)' }">{{ money(t.netPnlUsd) }}</td>
-                <td class="num-mono" :style="{ color: (t.netPnlPct ?? 0) >= 0 ? 'var(--bk-green)' : 'var(--bk-red)' }">{{ (t.netPnlPct ?? 0).toFixed(2) }}%</td>
-                <td class="num-mono" style="font-size: 11px" :title="t.strategy || ''">{{ fmtTime(t.entryTime) }}</td>
-                <td class="num-mono" style="font-size: 11px" :title="t.exitReason || ''">{{ fmtTime(t.exitTime) }}</td>
-                <td class="num-mono dim">{{ t.holdTimeSec ?? 0 }}s</td>
+              <tr
+                v-for="(p, i) in positions"
+                :key="`${p.asset}-${i}`"
+                class="border-t border-line transition-colors hover:bg-panel-2"
+              >
+                <td class="px-2 py-2.5 font-semibold">{{ p.asset }}</td>
+                <td class="px-2 py-2.5">
+                  <Badge :variant="p.direction === 'up' ? 'up' : 'down'">{{ p.direction.toUpperCase() }}</Badge>
+                </td>
+                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ p.strategy ?? '—' }}</td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg">{{ Number(p.entryPrice).toFixed(3) }}</td>
+                <td class="px-2 py-2.5 text-right num">{{ Number(p.currentPrice).toFixed(3) }}</td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg">{{ p.shares ?? '—' }}</td>
+                <td class="px-2 py-2.5 text-right num font-semibold" :class="p.unrealizedPct >= 0 ? 'text-up' : 'text-down'">
+                  {{ Number(p.unrealizedPct) >= 0 ? '+' : '' }}{{ Number(p.unrealizedPct).toFixed(2) }}%
+                </td>
+                <td class="px-2 py-2.5 text-right num text-faint-fg">
+                  {{ p.remainingSec !== undefined ? duration(p.remainingSec) : '—' }}
+                </td>
               </tr>
             </tbody>
           </table>
-          <div v-else class="empty">无符合条件的平仓记录</div>
         </div>
-        <!-- waterfall sentinel: auto-loads next page when scrolled into view -->
-        <div v-if="tab === 'history' && filteredRows.length > visible" :ref="(el) => setupSentinel(el as HTMLElement | null)" class="sentinel sub">
-          加载中 {{ Math.min(visible, filteredRows.length) }} / {{ filteredRows.length }} …
-          <button class="f-more-btn" @click="visible += 30">加载更多</button>
+        <EmptyState v-else text="无持仓" compact />
+      </div>
+
+      <!-- history waterfall -->
+      <div v-else>
+        <div v-if="visibleRows.length" class="overflow-x-auto">
+          <table class="w-full text-[13px]">
+            <thead>
+              <tr class="text-left">
+                <th class="label-micro px-2 pb-2">资产</th>
+                <th class="label-micro px-2 pb-2">方向</th>
+                <th class="label-micro px-2 pb-2">策略</th>
+                <th class="label-micro px-2 pb-2 text-right">入场</th>
+                <th class="label-micro px-2 pb-2 text-right">出场</th>
+                <th class="label-micro px-2 pb-2 text-right">份额</th>
+                <th class="label-micro px-2 pb-2 text-right">费用</th>
+                <th class="label-micro px-2 pb-2 text-right">净利</th>
+                <th class="label-micro px-2 pb-2 text-right">收益率</th>
+                <th class="label-micro px-2 pb-2 text-right">持仓时长</th>
+                <th class="label-micro px-2 pb-2">买入时间</th>
+                <th class="label-micro px-2 pb-2">卖出时间</th>
+                <th class="label-micro px-2 pb-2">原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="t in visibleRows"
+                :key="t.id"
+                class="border-t border-line transition-colors hover:bg-panel-2"
+              >
+                <td class="px-2 py-2.5 font-semibold">{{ t.asset }}</td>
+                <td class="px-2 py-2.5">
+                  <Badge :variant="t.direction === 'up' ? 'up' : 'down'">{{ t.direction.toUpperCase() }}</Badge>
+                </td>
+                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ t.strategy ?? '—' }}</td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg">{{ Number(t.entryPrice).toFixed(3) }}</td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg">{{ Number(t.exitPrice).toFixed(3) }}</td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg">{{ t.shares }}</td>
+                <td class="px-2 py-2.5 text-right num text-down">
+                  {{ t.feesUsd ? money(t.feesUsd, 3) : '—' }}
+                </td>
+                <td class="px-2 py-2.5 text-right num font-semibold" :class="Number(t.netPnlUsd) >= 0 ? 'text-up' : 'text-down'">
+                  {{ signedMoney(t.netPnlUsd, 2) }}
+                </td>
+                <td class="px-2 py-2.5 text-right num" :class="Number(t.netPnlPct ?? 0) >= 0 ? 'text-up' : 'text-down'">
+                  {{ signedPct(t.netPnlPct, 2) }}
+                </td>
+                <td class="px-2 py-2.5 text-right num text-faint-fg">
+                  {{ t.holdTimeSec !== undefined ? duration(t.holdTimeSec) : '—' }}
+                </td>
+                <td class="px-2 py-2.5 text-[11.5px] text-faint-fg num">{{ dateTime(t.entryTime) }}</td>
+                <td class="px-2 py-2.5 text-[11.5px] text-faint-fg num">{{ dateTime(t.exitTime) }}</td>
+                <td class="px-2 py-2.5">
+                  <Badge v-if="t.exitReason" :variant="exitReasonTone(t.exitReason)">{{ t.exitReason }}</Badge>
+                  <span v-else class="text-faint-fg">—</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-        <div v-else-if="tab === 'history' && filteredRows.length" class="sentinel sub">已全部加载 {{ filteredRows.length }} 笔</div>
-      </template>
-      <template v-else>
-        <table v-if="positions.length">
-          <thead>
-            <tr><th>资产</th><th>方向</th><th>入场</th><th>现价</th><th>份额</th><th>浮动</th><th>剩余</th></tr>
-          </thead>
-          <tbody>
-            <tr v-for="(p, i) in positions" :key="`${p.asset}-${i}`">
-              <td style="font-weight: 600">{{ p.asset }}</td>
-              <td><span class="badge" :class="p.direction === 'up' ? 'on' : 'warn'">{{ p.direction.toUpperCase() }}</span></td>
-              <td class="num-mono">{{ p.entryPrice.toFixed(3) }}</td>
-              <td class="num-mono">{{ p.currentPrice.toFixed(3) }}</td>
-              <td class="num-mono">{{ p.shares ?? '—' }}</td>
-              <td :class="moneyCls(p.unrealizedPct)" class="num-mono" :style="{ color: p.unrealizedPct >= 0 ? 'var(--bk-green)' : 'var(--bk-red)' }">
-                {{ p.unrealizedPct >= 0 ? '+' : '' }}{{ p.unrealizedPct.toFixed(1) }}%
-              </td>
-              <td class="num-mono">{{ p.remainingSec ?? '—' }}s</td>
-            </tr>
-          </tbody>
-        </table>
-        <div v-else class="empty">无持仓</div>
-      </template>
-    </div>
+        <EmptyState v-else text="无匹配订单" compact />
+
+        <!-- waterfall sentinel + fallback button -->
+        <div ref="sentinel" class="h-px" />
+        <div v-if="hasMore" class="mt-3 flex flex-col items-center gap-2">
+          <Button variant="outline" size="sm" @click="visibleCount += PAGE">加载更多</Button>
+          <span class="text-[10.5px] text-faint-fg num">
+            已显示 {{ visibleRows.length }} / {{ filteredRows.length }}
+          </span>
+        </div>
+        <p v-else-if="filteredRows.length > PAGE" class="mt-3 text-center text-[10.5px] text-faint-fg">
+          已加载全部 {{ filteredRows.length }} 笔
+        </p>
+      </div>
+    </Card>
   </template>
-  <div v-else class="glass card empty">{{ store.loading ? '加载中…' : '暂无快照数据' }}</div>
+
+  <Card v-else class="rise-in">
+    <EmptyState :loading="store.loading" text="暂无快照数据" />
+  </Card>
 </template>
 
 <style scoped>
-.countdown-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-.mkt-identity {
-  display: inline-block;
-  background: var(--bk-gold-soft);
-  color: var(--bk-gold);
-  font-weight: 700;
-  font-size: 12px;
-  padding: 3px 10px;
-  border-radius: 999px;
-}
-.cd-slot { color: var(--bk-text-dim); margin-left: 8px; font-weight: 600; }
-.sound-toggle {
-  margin-left: auto; padding: 4px 10px; border: none; border-radius: 999px;
-  cursor: pointer; font-size: 14px; line-height: 1.2;
-  background: rgba(255, 200, 87, 0.08); transition: background 0.15s;
-}
-.sound-toggle:hover { background: rgba(255, 200, 87, 0.18); }
-.sound-toggle.off { opacity: 0.45; filter: grayscale(0.8); }
-.cd-state { font-weight: 700; letter-spacing: 0.5px; }
-.cd-state.on { color: var(--bk-green); }
-.cd-state.off { color: var(--bk-gold); }
-.cd-timer {
-  font-size: 36px;
-  font-weight: 800;
-  color: var(--bk-text);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 2px;
-}
-.cd-timer.dim { color: var(--bk-text-dim); }
-.btn-group { display: flex; gap: 10px; }
-.life-btn {
-  border: none;
-  border-radius: 10px;
-  padding: 10px 22px;
-  font-weight: 700;
-  font-size: 13px;
-  cursor: pointer;
-  color: inherit;
+.filter-select {
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--fg);
+  font-size: 11.5px;
   font-family: inherit;
-  transition: all 0.15s;
+  padding: 0 8px;
+  outline: none;
+  transition: border-color 0.15s;
 }
-.life-btn.start { background: var(--bk-green); color: #04240f; }
-.life-btn.start:hover { filter: brightness(1.1); }
-.life-btn.stop { background: var(--bk-red); color: #fff; }
-.life-btn.stop:hover { filter: brightness(1.1); }
-.life-btn:disabled { opacity: 0.5; pointer-events: none; }
+.filter-select:hover { border-color: var(--line-strong); }
+.filter-select:focus { border-color: oklch(0.78 0.16 68 / 0.55); }
+.filter-select option { background: var(--panel-solid); color: var(--fg); }
 
-.prices-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 14px;
-  margin-top: 14px;
-}
-.price-card { text-align: center; padding: 16px; }
-.pa-asset { font-weight: 700; margin-bottom: 10px; }
-.pa-row { display: flex; justify-content: space-around; }
-.pa-label { font-size: 10px; text-transform: uppercase; color: var(--bk-text-dim); letter-spacing: 0.5px; }
-.pa-price { font-size: 22px; font-weight: 800; margin-top: 2px; font-variant-numeric: tabular-nums; }
-.pa-price.up { color: var(--bk-green); }
-.pa-price.down { color: var(--bk-red); }
-.pa-spread {
-  font-size: 11px;
-  color: var(--bk-text-dim);
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--bk-border);
-}
-
-.stats-row {
-  display: grid;
-  grid-template-columns: 1.5fr 1fr 1fr 1fr;
-  gap: 18px;
-  margin-top: 14px;
-}
-@media (max-width: 960px) {
-  .stats-row { grid-template-columns: 1fr; }
-}
-.pnl-big { font-size: 34px; font-weight: 800; letter-spacing: -1px; }
-.pnl-big.pos { color: var(--bk-green); }
-.pnl-big.neg { color: var(--bk-red); }
-.spark { height: 64px; margin-top: 12px; }
-.spark :deep(svg) { width: 100%; height: 100%; display: block; }
-.range-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 5px 0;
-  font-size: 12px;
-  border-bottom: 1px solid var(--bk-border);
-}
-.range-row:last-child { border-bottom: none; }
-.big-num { font-size: 20px; font-weight: 800; }
-.dim { color: var(--bk-text-dim); }
-.tabstrip { display: flex; gap: 8px; margin-bottom: 12px; }
-
-.cum-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 14px;
-  padding: 10px 12px;
-  border: 1px solid var(--bk-border);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
-  margin-bottom: 12px;
-}
-.pos-text { color: var(--bk-green); }
-.neg-text { color: var(--bk-red); }
-
-.filter-bar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-.f-select {
-  background: var(--bk-glass, rgba(255, 255, 255, 0.06));
-  border: 1px solid var(--bk-border);
-  border-radius: 999px;
-  color: inherit;
-  font-family: inherit;
-  font-size: 12px;
-  padding: 6px 12px;
-  cursor: pointer;
-}
-.f-select option { color: #1a1a1a; }
-.f-count { margin-left: auto; }
-.f-more-btn {
-  border: 1px solid var(--bk-border);
-  background: transparent;
-  color: inherit;
-  border-radius: 999px;
-  font-family: inherit;
-  font-size: 12px;
-  padding: 4px 14px;
-  cursor: pointer;
-}
-.sentinel {
-  text-align: center;
-  padding: 10px 0 2px;
-}
+.fade-enter-active, .fade-leave-active { transition: opacity 0.25s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>
