@@ -235,6 +235,8 @@ export interface Snapshot {
   marketPlugins?: PluginRow[]
   marketActiveName?: string | null
   marketActiveType?: MarketType | null
+  /** Venue wallet identity — null in dry mode (local seed cash, not venue funds). */
+  wallet?: { signer: string | null; funder: string | null }
   strategyStats?: StrategyStatsRow[]
 }
 
