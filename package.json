@@ -35,7 +35,9 @@
     "tui:manage": "bash scripts/tui-demo.sh --manage",
     "tui:check": "node scripts/tui-demo-check.mjs",
     "strategy:new": "node scripts/blitzkrieg-new-strategy.mjs",
-    "strategy:devcheck": "node scripts/strategy-devcheck.mjs"
+    "strategy:devcheck": "node scripts/strategy-devcheck.mjs",
+    "scale:plugins": "node scripts/scale-plugins-check.mjs",
+    "scale:feed": "node scripts/feed-scale-check.mjs"
   },
   "keywords": [
     "trading",

@@ -31,21 +31,47 @@ body {
 
 body {
   min-height: 100vh;
-  /* subtle gold-orange aurora behind the glass */
+  /* subtle gold-orange aurora behind the glass + faint tech grid */
   background-image:
-    radial-gradient(1200px 600px at 85% -10%, rgba(240, 140, 0, 0.1), transparent 60%),
-    radial-gradient(900px 500px at 0% 110%, rgba(240, 140, 0, 0.05), transparent 55%);
+    radial-gradient(1200px 600px at 85% -10%, rgba(240, 140, 0, 0.14), transparent 60%),
+    radial-gradient(900px 500px at 0% 110%, rgba(240, 140, 0, 0.07), transparent 55%),
+    linear-gradient(rgba(20, 20, 30, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(20, 20, 30, 0.025) 1px, transparent 1px);
+  background-size: auto, auto, 36px 36px, 36px 36px;
   background-attachment: fixed;
 }
 
-/* liquid-glass card */
+/* liquid-glass card with a topglass sheen */
 .glass {
+  position: relative;
   background: var(--bk-surface);
   backdrop-filter: blur(22px) saturate(1.4);
   -webkit-backdrop-filter: blur(22px) saturate(1.4);
   border: 1px solid var(--bk-border);
   border-radius: var(--bk-radius);
-  box-shadow: var(--bk-shadow);
+  box-shadow:
+    var(--bk-shadow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  overflow: hidden;
+}
+
+.glass::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(240, 140, 0, 0.35), transparent);
+  pointer-events: none;
+}
+
+@keyframes bk-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+.card,
+.error-banner {
+  animation: bk-rise 0.35s cubic-bezier(0.2, 0.7, 0.3, 1) both;
 }
 
 .card {
@@ -90,6 +116,12 @@ h1 {
   border-radius: 50%;
   background: var(--bk-gold);
   box-shadow: 0 0 12px rgba(240, 140, 0, 0.6);
+  animation: bk-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes bk-pulse {
+  0%, 100% { box-shadow: 0 0 10px rgba(240, 140, 0, 0.5); }
+  50% { box-shadow: 0 0 20px rgba(240, 140, 0, 0.85); }
 }
 
 .dot-ok { background: var(--bk-green); box-shadow: 0 0 12px rgba(48, 164, 108, 0.6); }
@@ -117,9 +149,10 @@ h1 {
 
 .tab:hover { color: var(--bk-text); background: rgba(20, 20, 30, 0.05); }
 .tab.active {
-  background: var(--bk-text);
+  background: linear-gradient(135deg, var(--bk-gold), #ff9d2e);
   color: #fff;
   font-weight: 600;
+  box-shadow: 0 2px 12px rgba(240, 140, 0, 0.35);
 }
 
 .page {
@@ -237,7 +270,10 @@ tr:last-child td { border-bottom: none; }
 
 .btn:hover { opacity: 0.9; }
 .btn:active { transform: scale(0.98); }
-.btn.gold { background: var(--bk-gold); }
+.btn.gold {
+  background: linear-gradient(135deg, var(--bk-gold), #ff9d2e);
+  box-shadow: 0 2px 14px rgba(240, 140, 0, 0.35);
+}
 
 .error-banner {
   background: rgba(229, 72, 77, 0.1);
@@ -257,3 +293,20 @@ tr:last-child td { border-bottom: none; }
 }
 
 .num-mono { font-variant-numeric: tabular-nums; }
+
+/* gold accent for numbers, keeps tabular alignment */
+.num-gold { color: var(--bk-gold); font-variant-numeric: tabular-nums; }
+
+/* hover lift on interactive cards */
+.card {
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 36px rgba(20, 20, 30, 0.12), 0 0 0 1px rgba(240, 140, 0, 0.18);
+}
+@media (prefers-reduced-motion: reduce) {
+  .card, .error-banner { animation: none; }
+  .card:hover { transform: none; }
+  .brand-dot { animation: none; }
+}
