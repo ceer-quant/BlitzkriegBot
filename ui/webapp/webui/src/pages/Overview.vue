@@ -86,9 +86,18 @@ const round = computed(() => snap.value?.round ?? null)
 const positions = computed(() => snap.value?.positions ?? [])
 const engine = computed(() => snap.value?.stats ?? {})
 
+/**
+ * Feed counters, all cumulative since core boot.
+ *
+ * `tops` is deliberately absent. The wire format and the `market_api` ABI both
+ * offer a `TopOfBook` event, but the only shipping market plugin (Polymarket,
+ * `extensions/polymarket/src/feed.rs`) calls `on_book` / `on_spot` and never
+ * `on_top_of_book` — so the counter is structurally 0, and a tile that always
+ * reads 0 invites the question it cannot answer. It stays in the snapshot for
+ * plugins that do emit it.
+ */
 const counters = computed(() => [
   { label: '订单簿', value: compact(engine.value.books), tone: 'default' as const },
-  { label: 'Top 快照', value: compact(engine.value.tops), tone: 'default' as const },
   { label: '轮次', value: num(engine.value.rounds), tone: 'default' as const },
   { label: '评估', value: compact(engine.value.evaluations), tone: 'default' as const },
   { label: '信号', value: compact(engine.value.signals), tone: 'gold' as const },

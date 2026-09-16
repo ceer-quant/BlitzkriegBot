@@ -60,6 +60,20 @@ const c = new BlitzkriegCoreClient({
 const fills = [];
 c.on('fill', (e) => fills.push(e));
 
+/**
+ * Taker fee in USD for one fill: `fee_per_share = 0.125*(p*(1-p))^2`
+ * (Polymarket's published schedule, mirrored by
+ * `core/blitzkrieg_core/src/exit_policy.rs::taker_fee_pct`).
+ *
+ * Maker fills are free, and the core charges taker fills on entry and exit
+ * alike (`service.rs::apply_delta_effects`), so the cash ledger sits on the
+ * same net-realized basis as the per-trade `netPnlUsd` views. Deriving the
+ * expected balance from this formula rather than hard-coding a number is what
+ * keeps these assertions honest when the fee model or the fill sequence moves:
+ * a bare `94` silently described the pre-#75 ledger that did not charge fees.
+ */
+const takerFeeUsd = (price, shares) => 0.125 * (price * (1 - price)) ** 2 * shares;
+
 try {
   await c.start();
   await c.ping();
@@ -79,7 +93,12 @@ try {
   // 3. Maker rests, fills when ask crosses; reserve held meanwhile.
   const maker = await c.placeOrder(order('maker', 'mk1', 0.4, 5, 'k2', 'ETH', { direction: 'down' }));
   check('maker starts LIVE', maker.status === 'LIVE', JSON.stringify(maker));
-  check('reservation held while resting', (await c.balance()).available === 96, 'available wrong');
+  // Spent so far: the taker fill's 0.4*5 = 2 notional plus its taker fee, and
+  // the resting maker's 0.4*5 = 2 reservation.
+  const balResting = await c.balance();
+  const expectedAvailable = 100 - 2 - takerFeeUsd(0.4, 5) - 2;
+  check('reservation held while resting', balResting.available === expectedAvailable,
+    `available ${balResting.available} != ${expectedAvailable}`);
   await c.bookSnapshot('mk1', [], [[0.45, 100]]);
   await new Promise((r) => setTimeout(r, 60));
   check('maker still LIVE above the bid', (await c.listOrders()).orders.find((o) => o.internalKey === 'k2').status === 'LIVE');
@@ -101,10 +120,14 @@ try {
   const escalated = (await c.listOrders()).orders.some((o) => o.internalKey.endsWith(':escalated') && o.status === 'FILLED');
   check('maker_then_taker escalated to a filled taker', escalated);
 
-  // Ledger final: taker 2 + crossed maker 2 + escalated taker 2 = 6 spent;
-  // cancelled order released its reservation. Balance 100-6 = 94.
+  // Ledger final: taker 2 + crossed maker 2 + escalated taker 2 = 6 of notional,
+  // and the cancelled order released its reservation. Two of the three fills are
+  // taker fills and carry a fee; the crossed one is a *maker* fill and is free.
+  // Balance 100 - 6 - 2*takerFeeUsd(0.4, 5) = 93.928.
   const bal = await c.balance();
-  check('final balance reflects 3 fills (94)', bal.balance === 94 && bal.reserved === 0, JSON.stringify(bal));
+  const expectedFinal = 100 - 6 - 2 * takerFeeUsd(0.4, 5);
+  check('final balance reflects 3 fills, net of taker fees', bal.balance === expectedFinal && bal.reserved === 0,
+    `${JSON.stringify(bal)} != ${expectedFinal}`);
 
   // FILL events: taker + crossed maker + escalated taker = 3.
   check('three authoritative FILL events', fills.length === 3, `got ${fills.length}`);

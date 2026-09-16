@@ -7,6 +7,13 @@ import Button from '@/components/ui/button/Button.vue'
 import Input from '@/components/ui/input/Input.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 
+const props = defineProps<{
+  /**
+   * Why this form is on screen, when it is not a cold start — e.g. a session
+   * that expired. Empty string means "first visit", which needs no explanation.
+   */
+  reason?: string
+}>()
 const emit = defineEmits<{ (e: 'ok'): void }>()
 
 const user = ref('')
@@ -44,6 +51,9 @@ async function submit(): Promise<void> {
       </div>
 
       <form class="glass card-pad rise-in" @submit.prevent="submit">
+        <div v-if="props.reason" class="mb-3.5">
+          <AlertBanner title="需要重新登录">{{ props.reason }}</AlertBanner>
+        </div>
         <div class="space-y-3.5">
           <label class="block">
             <span class="label-micro mb-1.5 block">用户名</span>
@@ -86,6 +96,8 @@ async function submit(): Promise<void> {
           <code class="rounded border border-line bg-panel-2 px-1.5 py-px text-[10.5px]">BLITZKRIEG_PANEL_USER</code>
           <span class="mx-1">/</span>
           <code class="rounded border border-line bg-panel-2 px-1.5 py-px text-[10.5px]">BLITZKRIEG_PANEL_PASSWORD</code>
+          <br>
+          <span class="text-faint-fg">未设置时网关会生成一次性密码并打印在启动日志里</span>
         </p>
       </form>
 

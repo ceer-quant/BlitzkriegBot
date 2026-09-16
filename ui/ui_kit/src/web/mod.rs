@@ -473,19 +473,147 @@ fn url_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+// ── Panel auth ───────────────────────────────────────────────────────────────
+//
+// The shape follows freqtrade's REST API — the mature peer for exactly this kind
+// of program (a single-operator trading bot with a browser panel):
+//
+//   * **Auth is required, not optional.** freqtrade documents that every endpoint
+//     except `/ping` "returns sensitive info and requires authentication". The
+//     same reasoning applies with more force here: this server can start and stop
+//     the trading core, so gateway mode always demands a session and mints a
+//     one-time password when none was configured, instead of serving an open
+//     command surface.
+//   * **Loopback is not a trust boundary.** "Only reachable from localhost" does
+//     not stop a page the operator happens to visit from issuing cross-site
+//     requests to 127.0.0.1 — a cross-site `<img>`/`<form>` is a *simple* request
+//     and gets no CORS preflight, so `<img src="…/api/command?cmd=stop">` used to
+//     reach a lifecycle verb. The session requirement is what closes that; the
+//     origin gate is the second layer.
+//   * **Sessions expire.** freqtrade pairs a 15-minute access token with a
+//     refresh token; a panel session here carries an absolute TTL plus an idle
+//     timeout, and the live set is capped.
+//
+// Deliberate divergences: no JWT and no separate refresh endpoint (a single
+// opaque, revocable, in-memory token is simpler and supports real logout, which
+// a stateless JWT cannot), and credentials stay in the environment rather than a
+// config file (`BLITZKRIEG_*` already owns that surface).
+
+/// Absolute session lifetime.
+const SESSION_TTL_MS: u64 = 12 * 60 * 60 * 1_000;
+/// Idle timeout, enforced inside the absolute lifetime.
+const SESSION_IDLE_MS: u64 = 30 * 60 * 1_000;
+/// Live-session cap; the oldest is evicted past it.
+const MAX_SESSIONS: usize = 64;
+
+fn auth_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// One issued session. `seen_ms` refreshes on use, which is what makes idleness
+/// measurable rather than merely "issued long ago".
+#[derive(Debug, Clone, Copy)]
+struct Session {
+    issued_ms: u64,
+    seen_ms: u64,
+}
+
+/// `n` bytes of OS entropy as lowercase hex.
+///
+/// Used for both session tokens and the one-time startup password. These are
+/// bearer credentials for process control, so they must come from the OS rather
+/// than a timestamp/PID mix — anything predictable is forgeable by an attacker
+/// who can guess when the process started.
+fn random_hex(n_bytes: usize) -> String {
+    use std::io::Read;
+    let mut bytes = vec![0u8; n_bytes];
+    let ok = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .is_ok();
+    if !ok {
+        // No /dev/urandom (very unlikely on unix): still produce a value, so the
+        // panel stays LOCKED rather than silently open. Weak entropy is the
+        // lesser failure against an unlocked command surface.
+        let mut seed = auth_now_ms()
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407)
+            ^ (std::process::id() as u64) << 32;
+        for b in bytes.iter_mut() {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *b = (seed >> 24) as u8;
+        }
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Is this `Origin`/`Referer` value the local machine?
+///
+/// Accepts any loopback spelling (`127.x.y.z`, `localhost`, `[::1]`) with or
+/// without a scheme, port, path or `user@` prefix. Anything else is foreign.
+fn is_loopback_origin(value: &str) -> bool {
+    let v = value.trim().to_ascii_lowercase();
+    let rest = v
+        .strip_prefix("http://")
+        .or_else(|| v.strip_prefix("https://"))
+        .unwrap_or(&v);
+    let authority = rest.split('/').next().unwrap_or("");
+    // `user@host` — the credentials are irrelevant, the host is not.
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("") // [::1]:51888 → ::1
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    if host == "localhost" || host == "::1" {
+        return true;
+    }
+    // Must be a literal `127.a.b.c` — *parsed*, not prefix-matched. A bare
+    // `starts_with("127.")` also accepts `127.0.0.1.evil.example`, which is a
+    // hostname the attacker controls.
+    let octets: Vec<&str> = host.split('.').collect();
+    octets.len() == 4
+        && octets[0] == "127"
+        && octets[1..]
+            .iter()
+            .all(|o| !o.is_empty() && o.len() <= 3 && o.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Session token from an `Authorization` header: `Bearer <token>`, or the user
+/// half of a `Basic` pair (the form the E6-a panel shipped with).
+fn bearer_or_basic(value: &str) -> Option<String> {
+    if let Some(t) = value.strip_prefix("Bearer ") {
+        return Some(t.to_string());
+    }
+    let b = value.strip_prefix("Basic ")?;
+    let raw = data_encoding_free_base64(b);
+    std::str::from_utf8(&raw)
+        .ok()
+        .and_then(|d| d.split(':').next().map(String::from))
+}
+
 /// A trivial, dependency-free HTTP server that always renders a fresh snapshot.
 pub struct WebServer {
     snapshot_src: Arc<Mutex<IpcClient>>,
     trade_limit: usize,
     /// Present only in gateway mode (`--manage`); enables `/api/command`.
     dispatcher: Option<Arc<Mutex<Dispatcher>>>,
-    /// E6-a panel credentials from `BLITZKRIEG_PANEL_USER` /
-    /// `BLITZKRIEG_PANEL_PASSWORD`. Unset disables auth (loopback-only
-    /// deployment contract).
+    /// Panel credentials (`BLITZKRIEG_PANEL_USER` / `…_PASSWORD`). Gateway mode
+    /// mints a one-time password when these are absent — a server that can stop
+    /// the core never runs without one.
     panel_user: Option<String>,
     panel_password: Option<String>,
-    /// Session tokens issued by a successful `POST /api/login`.
-    sessions: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// The minted one-time password, kept so the binary can print it exactly
+    /// once at startup. Cleared when an explicit pair replaces it.
+    generated_password: Option<String>,
+    /// Whether `/api/*` demands a valid session. Armed by gateway mode.
+    auth_required: bool,
+    /// Non-loopback origins explicitly trusted (operator opt-in).
+    allowed_origins: Vec<String>,
+    /// Sessions issued by `POST /api/login`, keyed by token.
+    sessions: Arc<Mutex<std::collections::BTreeMap<String, Session>>>,
 }
 
 impl WebServer {
@@ -497,8 +625,36 @@ impl WebServer {
             dispatcher: None,
             panel_user: None,
             panel_password: None,
-            sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            generated_password: None,
+            // No lifecycle verbs on this surface, so auth stays opt-in here.
+            // Gateway mode (below) arms it unconditionally.
+            auth_required: false,
+            allowed_origins: Vec::new(),
+            sessions: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
         }
+    }
+
+    /// Guarantee the panel has credentials: keep a configured pair, otherwise
+    /// mint a one-time password and return it so the caller prints it once.
+    pub fn ensure_credentials(&mut self) -> Option<String> {
+        if self.panel_user.is_some() && self.panel_password.is_some() {
+            return None;
+        }
+        let password = random_hex(16);
+        self.panel_user = Some("admin".to_string());
+        self.panel_password = Some(password.clone());
+        self.generated_password = Some(password.clone());
+        Some(password)
+    }
+
+    /// The one-time password minted at startup, if the panel is using one.
+    pub fn generated_password(&self) -> Option<&str> {
+        self.generated_password.as_deref()
+    }
+
+    /// True when the panel requires a session on `/api/*`.
+    pub fn auth_required(&self) -> bool {
+        self.auth_required
     }
 
     fn token_from_query(&self, req: &HttpRequest) -> Option<String> {
@@ -512,54 +668,117 @@ impl WebServer {
     }
 
     /// Arm user/password auth from env (`BLITZKRIEG_PANEL_USER` +
-    /// `BLITZKRIEG_PANEL_PASSWORD`). Both must be non-empty; empty/unset
-    /// disables auth (loopback-only deployment contract).
+    /// `BLITZKRIEG_PANEL_PASSWORD`).
+    ///
+    /// A half-configured pair is treated as "nothing configured" rather than as a
+    /// password-less panel: guessing which half the operator meant is how a panel
+    /// ends up open. Callers in gateway mode then mint a one-time password via
+    /// [`Self::ensure_credentials`].
     pub fn set_panel_credentials(&mut self, user: Option<String>, password: Option<String>) {
-        self.panel_user = user.filter(|u| !u.trim().is_empty());
-        self.panel_password = password.filter(|p| !p.trim().is_empty());
-        if self.panel_user.is_none() || self.panel_password.is_none() {
-            // Half-configured is a config error — refuse the whole pair so a
-            // password-less panel never ships.
+        let user = user.filter(|u| !u.trim().is_empty());
+        let password = password.filter(|p| !p.trim().is_empty());
+        if user.is_none() || password.is_none() {
             self.panel_user = None;
             self.panel_password = None;
+            return;
         }
+        self.panel_user = user;
+        self.panel_password = password;
+        // An explicit pair supersedes any minted one-time password.
+        self.generated_password = None;
+    }
+
+    /// Extra origins accepted beyond loopback — the `CORS_origins` analogue in
+    /// freqtrade's config. Operators who deliberately front the panel with a
+    /// hostname list it here; everything else is refused.
+    pub fn set_allowed_origins(&mut self, origins: Vec<String>) {
+        self.allowed_origins = origins
+            .into_iter()
+            .map(|o| o.trim().trim_end_matches('/').to_ascii_lowercase())
+            .filter(|o| !o.is_empty())
+            .collect();
+    }
+
+    /// Is this request's origin trustworthy?
+    ///
+    /// Only one thing is decisive here: **foreign evidence**, in `Origin` or
+    /// `Referer`. Either header naming a non-loopback host means a browser
+    /// attached it on behalf of another site, and no legitimate panel flow
+    /// produces that, so it is refused.
+    ///
+    /// Absence of both headers is *not* evidence of attack. It is the normal
+    /// shape of curl, of the gate scripts, and of the panel's own same-origin
+    /// fetches. Refusing it would buy nothing against a browser — a cross-origin
+    /// `POST` always carries `Origin` (or the opaque `null`, which is not
+    /// loopback and so is refused above) — while breaking every non-browser
+    /// client, which would then have to forge a header that only exists to
+    /// describe browsers.
+    ///
+    /// What actually protects the state-changing surface is the *session*
+    /// requirement in [`Self::authorize`], not this check. The vector to worry
+    /// about is a cross-site `GET` — `<img src="…/api/command?cmd=stop">` — which
+    /// sends no `Origin` at all and no cookie a hostile page can read; it is
+    /// stopped because there is no way to attach a session token to it, and
+    /// gateway mode always demands one. This gate is the second layer.
+    fn origin_allowed(&self, req: &HttpRequest) -> bool {
+        let Some(evidence) = req.header("origin").or_else(|| req.header("referer")) else {
+            return true;
+        };
+        // A `Referer` is a full URL; only its origin is compared, which
+        // `is_loopback_origin` handles by ignoring scheme, port and path.
+        let candidate = evidence.trim().trim_end_matches('/').to_ascii_lowercase();
+        if is_loopback_origin(&candidate) {
+            return true;
+        }
+        self.allowed_origins
+            .iter()
+            .any(|a| candidate == *a || candidate.starts_with(&format!("{a}/")))
     }
 
     /// Issue a session token for valid panel credentials.
     fn login(&self, user: &str, password: &str) -> Option<String> {
         let (expected_user, expected_pass) =
             (self.panel_user.as_deref()?, self.panel_password.as_deref()?);
-        // Constant-ish time compare to blunt trivial timing probes.
-        if !same_time_eq(user.as_bytes(), expected_user.as_bytes())
-            || !same_time_eq(password.as_bytes(), expected_pass.as_bytes())
-        {
+        // Constant-time compare to blunt trivial timing probes. Both halves are
+        // always evaluated so a wrong user and a wrong password look alike.
+        let user_ok = same_time_eq(user.as_bytes(), expected_user.as_bytes());
+        let pass_ok = same_time_eq(password.as_bytes(), expected_pass.as_bytes());
+        if !(user_ok && pass_ok) {
             return None;
         }
-        // Session token: time + address entropy via std only.
-        let mut seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407)
-            ^ (std::process::id() as u128) << 32
-            ^ (&password as *const _ as *const () as usize as u128);
-        let mut hex = String::with_capacity(40);
-        while hex.len() < 40 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            hex.push_str(&format!("{:08x}", (seed >> 33) as u32));
-        }
-        hex.truncate(40);
+        let now = auth_now_ms();
+        let token = random_hex(20); // 40 hex chars, 160 bits of OS entropy
         if let Ok(mut s) = self.sessions.lock() {
-            s.insert(hex.clone());
+            Self::evict_expired(&mut s, now);
+            if s.len() >= MAX_SESSIONS {
+                // Oldest-first eviction keeps a runaway login loop from growing
+                // the map without bound.
+                if let Some(oldest) = s.iter().min_by_key(|(_, v)| v.seen_ms).map(|(k, _)| k.clone()) {
+                    s.remove(&oldest);
+                }
+            }
+            s.insert(token.clone(), Session { issued_ms: now, seen_ms: now });
         }
-        Some(hex)
+        Some(token)
     }
 
+    fn evict_expired(sessions: &mut std::collections::BTreeMap<String, Session>, now: u64) {
+        sessions.retain(|_, s| {
+            now.saturating_sub(s.issued_ms) < SESSION_TTL_MS && now.saturating_sub(s.seen_ms) < SESSION_IDLE_MS
+        });
+    }
+
+    /// Does this token name a live session? Expired ones are dropped on sight.
     fn session_valid(&self, token: &str) -> bool {
-        match self.sessions.lock() {
-            Ok(s) => s.contains(token),
-            Err(_) => false,
+        let now = auth_now_ms();
+        let Ok(mut s) = self.sessions.lock() else { return false };
+        Self::evict_expired(&mut s, now);
+        match s.get_mut(token) {
+            Some(entry) => {
+                entry.seen_ms = now;
+                true
+            }
+            None => false,
         }
     }
 
@@ -568,6 +787,11 @@ impl WebServer {
         if let Ok(mut s) = self.sessions.lock() {
             s.remove(token);
         }
+    }
+
+    /// Number of live sessions (tests + introspection).
+    pub fn session_count(&self) -> usize {
+        self.sessions.lock().map(|s| s.len()).unwrap_or(0)
     }
 
     fn token_from_cookies(&self, req: &HttpRequest) -> Option<String> {
@@ -581,53 +805,73 @@ impl WebServer {
         None
     }
 
-    /// E6-a gate: user/password login issues a session; every /api/* call then
-    /// carries the session (query / X-Auth-Token / Bearer / bk_session cookie).
-    /// Origin policy — foreign origins 403, loopback allowed.
+    /// Every form this API accepts a session token in.
+    fn session_token(&self, req: &HttpRequest) -> Option<String> {
+        self.token_from_query(req)
+            .or_else(|| self.token_from_cookies(req))
+            .or_else(|| req.header("x-auth-token").map(String::from))
+            .or_else(|| req.header("authorization").and_then(bearer_or_basic))
+    }
+
+    /// Gate in front of every route. Returns 200, 401 or 403.
+    ///
+    /// Two independent layers, in this order:
+    ///
+    /// 1. **Origin.** A browser's request carries `Origin` (or a `Referer`);
+    ///    foreign evidence means another site is driving this request, so it is
+    ///    refused — even for a caller that somehow holds a valid session. See
+    ///    [`Self::origin_allowed`] for why *absent* evidence is not treated as
+    ///    hostile.
+    /// 2. **Session.** Required on every `/api/*` route as soon as a session can
+    ///    exist (gateway mode, or credentials configured). This is the layer that
+    ///    actually stops cross-site request forgery, because an HTML `<img>` or
+    ///    `<form>` can issue a request but cannot attach a token — which is why
+    ///    gateway mode demands one whether or not a password was configured.
     fn authorize(&self, req: &HttpRequest) -> u16 {
-        if req.path() == "/api/login" {
-            return 200; // the login endpoint itself must be reachable
+        // 1. Origin / CSRF gate — every route, every method, armed or not.
+        if !self.origin_allowed(req) {
+            return 403;
+        }
+
+        // 2. Session gate. `/api/login` and `/api/ping` are the two routes that
+        //    must work without one: the first is how a session is obtained, the
+        //    second is how a client tells "gateway down" apart from "session
+        //    stale" — without it, a dead token is indistinguishable from an
+        //    unreachable gateway, which is what left the panel stuck.
+        if req.path() == "/api/login" || req.path() == "/api/ping" {
+            return 200;
         }
         if !req.path().starts_with("/api/") {
-            return 200; // the panel itself is served to unauthenticated clients
+            return 200; // the panel bundle itself is public; the UI gates the view
         }
-        if self.panel_user.is_some() {
-            let supplied = self
-                .token_from_query(req)
-                .or_else(|| self.token_from_cookies(req))
-                .or_else(|| req.header("x-auth-token").map(String::from))
-                .or_else(|| {
-                    req.header("authorization").and_then(|a| {
-                        a.strip_prefix("Bearer ")
-                            .map(String::from)
-                            .or_else(|| {
-                                // Legacy basic-auth user form still accepted.
-                                a.strip_prefix("Basic ").and_then(|b| {
-                                    let raw = data_encoding_free_base64(b);
-                                    std::str::from_utf8(&raw)
-                                        .ok()
-                                        .and_then(|d| d.split(':').next().map(String::from))
-                                })
-                            })
-                    })
-                });
-            match supplied {
-                Some(t) if self.session_valid(&t) => {}
-                _ => return 401,
-            }
+        // Read-only mode with no credentials has nothing to protect: no command
+        // route exists and lifecycle verbs are absent (`Dispatcher` is `None`).
+        // The moment either a credential pair or gateway mode is present, a
+        // session is mandatory.
+        if !self.auth_required && self.panel_user.is_none() {
+            return 200;
         }
-        // Origin policy: once present, only loopback (127.x/localhost) hosts pass.
-        if let Some(origin) = req.header("origin") {
-            let host = origin
-                .trim_start_matches("http://")
-                .trim_start_matches("https://");
-            let host_only = host.split(':').next().unwrap_or("");
-            let loopback = host_only == "127.0.0.1" || host_only == "localhost" || host_only.starts_with("127.");
-            if !loopback {
-                return 403;
-            }
+        match self.session_token(req) {
+            Some(t) if self.session_valid(&t) => 200,
+            _ => 401,
         }
-        200
+    }
+
+    /// Liveness probe — the freqtrade `/ping` analogue, and the reason the panel
+    /// can no longer get stuck.
+    ///
+    /// Deliberately unauthenticated, and deliberately *narrow*: it reveals only
+    /// whether this process is alive and whether a session would be required. It
+    /// carries no snapshot, no balance, no position. The panel uses it to tell
+    /// "gateway unreachable" (no reply) apart from "my token is stale" (reply
+    /// says auth is required, so a rotating token is worth spending).
+    fn ping_doc(&self) -> String {
+        serde_json::json!({
+            "ok": true,
+            "service": "blitzkrieg-panel",
+            "authRequired": self.auth_required || self.panel_user.is_some(),
+        })
+        .to_string()
     }
 
     /// Panel + command API. Lifecycle verbs are gated by the dispatcher's own
@@ -639,7 +883,12 @@ impl WebServer {
             dispatcher: Some(Arc::new(Mutex::new(dispatcher))),
             panel_user: None,
             panel_password: None,
-            sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            generated_password: None,
+            // This surface can start and stop the trading process, so it is never
+            // exposed without a session.
+            auth_required: true,
+            allowed_origins: Vec::new(),
+            sessions: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
         }
     }
 
@@ -710,6 +959,10 @@ impl WebServer {
         }
 
         let (status, ctype, body) = match (req.method.as_str(), target.as_str()) {
+            ("GET", "/api/ping") | ("HEAD", "/api/ping") => {
+                // Unauthenticated by design; see `ping_doc`.
+                (200, "application/json", self.ping_doc())
+            }
             ("GET", "/api/plugins") => {
                 // E9-g: the registry trio the TUI Plugins page shows (strategies
                 // / extensions / market plugins) in one authenticated call.

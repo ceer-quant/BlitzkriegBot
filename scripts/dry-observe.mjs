@@ -3,9 +3,9 @@
  * Real-round DRY observation for the Rust self-driving engine.
  *
  * Purpose: the last pre-cutover gate — watch the Rust core trade a LIVE round
- * end-to-end (real tokens, real orderbooks via Rust-native WS) in DRY mode, and
- * confirm it behaves: discovers the round, ingests books/spot, decides, and only
- * ever places simulated orders.
+ * end-to-end (real tokens, real orderbooks through the Rust-native feed) in DRY
+ * mode, and confirm it behaves: discovers the round, ingests books/spot,
+ * decides, and only ever places simulated orders.
  *
  * Flow:
  *   1. discover the current round's UP/DOWN tokens from Gamma (slug-based)
@@ -176,6 +176,8 @@ async function main() {
     '--max-order-notional', '5',
     '--seed-balance', '1000',
   ];
+  // `--feed-ws` still names the Rust-native market-data path; its Polymarket
+  // half is REST `POST /books` polling (Binance spot stays on WS).
   if (USE_FEED_WS) extraArgs.push('--feed-ws');
 
   client = new BlitzkriegCoreClient({
