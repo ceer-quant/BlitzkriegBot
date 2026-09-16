@@ -158,6 +158,21 @@ export interface EngineStats {
   strategies?: StrategyStatsRow[]
 }
 
+/** Market plugin classes — binary prediction market / spot / futures / options. */
+export type MarketType = 'prediction' | 'spot' | 'futures' | 'options'
+
+export const MARKET_TYPE_LABELS: Record<MarketType, string> = {
+  prediction: '二元预测市场',
+  spot: '现货市场',
+  futures: '合约市场',
+  options: '期货实现',
+}
+
+export function marketTypeLabel(t?: string | null): string {
+  if (!t) return ''
+  return MARKET_TYPE_LABELS[t as MarketType] ?? t
+}
+
 export interface MarketPrice {
   asset: string
   up: number
@@ -218,15 +233,25 @@ export interface Snapshot {
   strategies?: unknown[]
   extensions?: unknown[]
   marketPlugins?: PluginRow[]
+  marketActiveName?: string | null
+  marketActiveType?: MarketType | null
   strategyStats?: StrategyStatsRow[]
 }
 
 export interface PluginRow {
   name: string
   kind?: string
+  /** market.list calls the identity field `type` (camelCase wire). */
+  type?: string
   description?: string
   enabled?: boolean
   status?: string
+}
+
+/** Identity badge for a plugin row (binary prediction/spot/futures/options). */
+export function pluginKindLabel(row: PluginRow): string {
+  const kval = row.type ?? row.kind
+  return marketTypeLabel(kval) || kval || '—'
 }
 
 export interface PluginsDoc {

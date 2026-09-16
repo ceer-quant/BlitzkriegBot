@@ -235,6 +235,7 @@ impl Dispatcher {
         if let Ok(m) = self.client.market_plugins() {
             s.market_plugins = m.plugins;
             s.market_active = m.active.is_some();
+            s.market_active_name = m.active;
         }
         // E9-g: the plugins tab also shows per-strategy counters + rejection
         // causes (engine.stats), not just the enabled/disabled registry list.

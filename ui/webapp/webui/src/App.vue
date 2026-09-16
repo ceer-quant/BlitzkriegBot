@@ -18,7 +18,7 @@ const activePage = computed(() => pages[tab.value])
 
 const tabs = [
   { id: 'overview', label: '总览' },
-  { id: 'hft', label: 'HFT 行情' },
+  { id: 'hft', label: '行情面板' },
   { id: 'strategies', label: '策略' },
   { id: 'plugins', label: '插件' },
 ] as const
