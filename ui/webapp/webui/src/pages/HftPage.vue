@@ -343,6 +343,9 @@ async function sendLifecycle(verb: 'start' | 'stop'): Promise<void> {
             ${{ (snap.balance?.balance ?? 0).toFixed(2) }}{{ isDry ? '（模拟）' : '' }}
           </span>
         </div>
+        <div v-if="isDry" class="range-row">
+          <span class="sub" style="font-size: 10px">余额 = 本金 + 扣费净利 − 未平仓占用</span>
+        </div>
         <div v-if="!isDry && walletAddr" class="range-row">
           <span class="sub">钱包</span>
           <span class="num-mono dim" style="font-size: 11px">{{ walletAddr.slice(0, 6) }}…{{ walletAddr.slice(-4) }}</span>
@@ -364,7 +367,7 @@ async function sendLifecycle(verb: 'start' | 'stop'): Promise<void> {
             <div class="num-mono big-num">{{ cumStats.total }}</div>
           </div>
           <div class="cum-item">
-            <div class="stat-name">累计利润</div>
+            <div class="stat-name">累计利润<span class="dim" style="font-size:10px">（扣费）</span></div>
             <div class="num-mono big-num" :class="cumStats.net >= 0 ? 'pos-text' : 'neg-text'">{{ money(cumStats.net) }}</div>
           </div>
           <div class="cum-item">
