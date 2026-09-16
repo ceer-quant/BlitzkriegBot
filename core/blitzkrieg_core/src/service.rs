@@ -1599,9 +1599,33 @@ impl Core {
     /// point shared by dry fills, live user-WS fills and reconciliation gaps.
     fn apply_delta_effects(&mut self, d: FillDelta, now_ms: i64) {
         let px = d.price;
-        match d.side {
-            Side::Buy => self.ledger.settle_buy_fill(&d.order_id, px * d.delta),
-            Side::Sell => self.ledger.settle_sell_fill(px * d.delta),
+        // Cash fees mirror the trade ledger exactly: taker_fee_pct(price) on
+        // the fill notional, zero for maker fills, charged on BOTH sides
+        // (entry + exit). Charging here keeps the cash balance on the same
+        // net-realized basis as closed-trade netPnlUsd — otherwise the balance
+        // sits above the PnL views by the accumulated fee total. Fee applies
+        // to the incremental delta (not the cumulative), so partial fills
+        // charge exactly once per share; rollbacks (delta < 0) charge nothing.
+        if d.delta > Decimal::ZERO {
+            let notional = px * d.delta;
+            let fee_pct = match d.mode {
+                FillPolicy::Maker => Decimal::ZERO,
+                _ => crate::exit_policy::taker_fee_pct(px),
+            };
+            let fee_usd = (fee_pct / Decimal::ONE_HUNDRED) * notional;
+            match d.side {
+                Side::Buy => {
+                    self.ledger.settle_buy_fill(&d.order_id, notional);
+                    self.ledger.charge_fee(fee_usd);
+                }
+                Side::Sell => self.ledger.settle_sell_fill(notional, fee_usd),
+            }
+        } else {
+            // Rollback/correction: revert the cash with no fee.
+            match d.side {
+                Side::Buy => self.ledger.settle_sell_fill(-px * d.delta, Decimal::ZERO),
+                Side::Sell => self.ledger.settle_buy_fill(&d.order_id, -px * d.delta),
+            }
         }
         self.project_fill_delta(&d, now_ms);
         self.emit_fill(d);
@@ -2983,8 +3007,9 @@ mod tests {
             .unwrap();
         assert_eq!(st, OrderStatus::Filled);
         assert_eq!(c.ome().get(&id).unwrap().filled_size, dec!(5));
-        // 10 - 0.4*5 = 8; reservation fully consumed.
-        assert_eq!(c.ledger().balance(), dec!(8));
+        // 10 - 0.4*5 = 8, minus the taker entry fee (1.8% of 2 = 0.036);
+        // reservation fully consumed.
+        assert_eq!(c.ledger().balance(), Decimal::new(7964, 3));
         assert_eq!(c.ledger().reserved(), dec!(0));
     }
 
@@ -3034,7 +3059,7 @@ mod tests {
             .collect();
         assert_eq!(filled.len(), 1);
         assert_eq!(filled[0].filled_size, dec!(5));
-        assert_eq!(c.ledger().balance(), dec!(8));
+        assert_eq!(c.ledger().balance(), Decimal::new(7964, 3));
     }
 
     #[test]

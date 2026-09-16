@@ -92,9 +92,17 @@ impl Ledger {
         self.balance = (self.balance - cost).max(Decimal::ZERO);
     }
 
-    /// Settle a SELL fill: add proceeds.
-    pub fn settle_sell_fill(&mut self, proceeds: Decimal) {
-        self.balance += proceeds;
+    /// Settle a SELL fill: add proceeds, minus the venue trading fee charged
+    /// on the way out. Without the fee the cash ledger credits the full
+    /// notional and the cash view drifts above the realized-net view the trade
+    /// records use.
+    pub fn settle_sell_fill(&mut self, proceeds: Decimal, fee_usd: Decimal) {
+        self.balance = (self.balance + proceeds - fee_usd).max(Decimal::ZERO);
+    }
+
+    /// Charge an entry-side cash fee (buy fills pay it on top of the cost).
+    pub fn charge_fee(&mut self, fee_usd: Decimal) {
+        self.balance = (self.balance - fee_usd).max(Decimal::ZERO);
     }
 }
 
@@ -144,7 +152,19 @@ mod tests {
         l.settle_buy_fill("o1", dec!(4));
         assert_eq!(l.balance(), dec!(6));
         assert_eq!(l.reserved(), dec!(0));
-        l.settle_sell_fill(dec!(7));
+        l.settle_sell_fill(dec!(7), Decimal::ZERO);
         assert_eq!(l.balance(), dec!(13));
+    }
+
+    #[test]
+    fn fees_leave_the_cash_ledger() {
+        let mut l = Ledger::new();
+        l.set_balance(dec!(10));
+        // Sell 10 notional with 1 fee: 10 + 10 − 1 = 19 cash.
+        l.settle_sell_fill(dec!(10), dec!(1));
+        assert_eq!(l.balance(), dec!(19));
+        // Entry fee also comes out of cash.
+        l.charge_fee(dec!(2));
+        assert_eq!(l.balance(), dec!(17));
     }
 }
