@@ -13,7 +13,7 @@ import { useTheme } from '@/lib/theme'
 import {
   num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration, dateTime,
 } from '@/lib/format'
-import { balanceView, cashGapDetail, cashGapShort } from '@/lib/balance'
+import { balanceView } from '@/lib/balance'
 import { controlState } from '@/lib/lifecycle'
 import { feedStaleness } from '@/lib/feed'
 import {
@@ -550,9 +550,9 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         <StatRow label="行情轮次" :value="round?.markets ?? '—'" tone="dim" />
         <div class="mt-2.5 border-t border-line pt-2.5">
           <!--
-            Headline is 本金 ＋ 净利润 (the real balance). The core's cash ledger
-            is a second row underneath, because the engine sizes orders against
-            cash even when cash has not had the fees taken out of it.
+            Headline is 本金 ＋ 净利润 (the real balance). No cash-ledger row
+            underneath in DRY: the core's ledger is 本金 ＋ 本次会话净利, a strict
+            subset of what the history tab below already shows.
           -->
           <StatRow
             :label="isDry ? (recon.equity !== null ? '真实余额' : '内核现金账') : (recon.equity !== null ? '账户权益' : '交易所余额')"
@@ -578,16 +578,6 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
                 内核现金账 · 本金未上报
               </span>
             </Tooltip>
-          </p>
-          <!-- The ledger the engine actually commits against, when it differs.
-               The gap is signed, so the direction comes from `cashGapShort`. -->
-          <p v-if="recon.equity !== null && isDry" class="mt-1 text-[10px] leading-snug text-faint-fg">
-            <Tooltip v-if="recon.gapMaterial" :content="cashGapDetail(recon)">
-              <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-                内核现金账 {{ money(recon.cash) }} · {{ cashGapShort(recon) }}
-              </span>
-            </Tooltip>
-            <span v-else>内核现金账 {{ money(recon.cash) }}</span>
           </p>
         </div>
       </Card>
