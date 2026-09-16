@@ -13,7 +13,7 @@ import { useTheme } from '@/lib/theme'
 import {
   num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration, dateTime,
 } from '@/lib/format'
-import { balanceView } from '@/lib/balance'
+import { balanceView, cashGapDetail, cashGapShort } from '@/lib/balance'
 import { controlState } from '@/lib/lifecycle'
 import { feedStaleness } from '@/lib/feed'
 import {
@@ -579,14 +579,12 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
               </span>
             </Tooltip>
           </p>
-          <!-- The ledger the engine actually commits against, when it differs. -->
+          <!-- The ledger the engine actually commits against, when it differs.
+               The gap is signed, so the direction comes from `cashGapShort`. -->
           <p v-if="recon.equity !== null && isDry" class="mt-1 text-[10px] leading-snug text-faint-fg">
-            <Tooltip
-              v-if="recon.gapMaterial"
-              :content="`内核现金账 ${money(recon.cash)} 高于真实余额 ${money(recon.equity)}，差额 ${signedMoney(recon.cashGap)}：该口径把成交额计入现金、却未把手续费从现金中扣除，差额≈未入账手续费 ${money(recon.fees)}。引擎下单能力以现金账为准，真实余额以本金＋净利为准。`"
-            >
+            <Tooltip v-if="recon.gapMaterial" :content="cashGapDetail(recon)">
               <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-                内核现金账 {{ money(recon.cash) }} · 高于真实余额 {{ signedMoney(recon.cashGap) }}
+                内核现金账 {{ money(recon.cash) }} · {{ cashGapShort(recon) }}
               </span>
             </Tooltip>
             <span v-else>内核现金账 {{ money(recon.cash) }}</span>
