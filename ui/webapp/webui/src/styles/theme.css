@@ -1,0 +1,321 @@
+@import 'tailwindcss';
+
+/* dark is the default identity (terminal); `.light` on <html> switches themes */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-mono: 'SF Mono', 'JetBrains Mono', ui-monospace, 'Menlo', monospace;
+
+  /* ── gold-orange brand ramp ───────────────────────────────────────────── */
+  --color-gold-50: oklch(0.97 0.03 80);
+  --color-gold-200: oklch(0.92 0.08 78);
+  --color-gold-400: oklch(0.84 0.13 72);
+  --color-gold-500: oklch(0.78 0.16 68);
+  --color-gold-600: oklch(0.7 0.17 62);
+  --color-gold-700: oklch(0.6 0.16 55);
+
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+
+  /* micro-interaction curve — restrained, Apple-ish */
+  --ease-out-soft: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.5, 1);
+}
+
+/* ── semantic tokens: dark (default) ───────────────────────────────────── */
+:root,
+.dark {
+  --bg: oklch(0.145 0.014 268);
+  --bg-deep: oklch(0.115 0.014 268);
+  --fg: oklch(0.97 0.004 268);
+  --muted-fg: oklch(0.68 0.018 268);
+  --faint-fg: oklch(0.52 0.016 268);
+  --panel: oklch(0.2 0.016 268 / 0.72);
+  --panel-solid: oklch(0.2 0.016 268);
+  --panel-2: oklch(0.24 0.016 268 / 0.6);
+  --line: oklch(1 0 0 / 0.09);
+  --line-strong: oklch(1 0 0 / 0.16);
+  --primary: oklch(0.78 0.16 68);
+  --primary-hi: oklch(0.86 0.14 74);
+  --primary-ink: oklch(0.2 0.05 60);
+  --up: oklch(0.79 0.17 158);
+  --down: oklch(0.68 0.2 22);
+  --info: oklch(0.72 0.13 240);
+  --grid-line: oklch(1 0 0 / 0.035);
+  --sheen: oklch(1 0 0 / 0.1);
+  --shadow-1: 0 1px 2px oklch(0 0 0 / 0.4), 0 8px 24px oklch(0 0 0 / 0.35);
+  --shadow-2: 0 2px 6px oklch(0 0 0 / 0.45), 0 18px 48px oklch(0 0 0 / 0.5);
+  --glow: 0 0 0 1px oklch(0.78 0.16 68 / 0.28), 0 6px 28px oklch(0.78 0.16 68 / 0.18);
+}
+
+/* ── semantic tokens: light ────────────────────────────────────────────── */
+.light {
+  --bg: oklch(0.975 0.004 268);
+  --bg-deep: oklch(0.945 0.006 268);
+  --fg: oklch(0.21 0.02 268);
+  --muted-fg: oklch(0.52 0.02 268);
+  --faint-fg: oklch(0.64 0.018 268);
+  --panel: oklch(1 0 0 / 0.72);
+  --panel-solid: oklch(1 0 0);
+  --panel-2: oklch(1 0 0 / 0.55);
+  --line: oklch(0.2 0.02 268 / 0.1);
+  --line-strong: oklch(0.2 0.02 268 / 0.18);
+  --primary: oklch(0.66 0.17 58);
+  --primary-hi: oklch(0.74 0.16 64);
+  --primary-ink: oklch(0.99 0.01 80);
+  --up: oklch(0.62 0.16 158);
+  --down: oklch(0.58 0.2 22);
+  --info: oklch(0.6 0.15 240);
+  --grid-line: oklch(0.2 0.02 268 / 0.045);
+  --sheen: oklch(1 0 0 / 0.7);
+  --shadow-1: 0 1px 2px oklch(0.2 0.02 268 / 0.06), 0 10px 30px oklch(0.2 0.02 268 / 0.08);
+  --shadow-2: 0 2px 8px oklch(0.2 0.02 268 / 0.08), 0 22px 56px oklch(0.2 0.02 268 / 0.12);
+  --glow: 0 0 0 1px oklch(0.66 0.17 58 / 0.3), 0 8px 30px oklch(0.66 0.17 58 / 0.16);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-deep: var(--bg-deep);
+  --color-fg: var(--fg);
+  --color-muted-fg: var(--muted-fg);
+  --color-faint-fg: var(--faint-fg);
+  --color-panel: var(--panel);
+  --color-panel-solid: var(--panel-solid);
+  --color-panel-2: var(--panel-2);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-primary: var(--primary);
+  --color-primary-hi: var(--primary-hi);
+  --color-primary-ink: var(--primary-ink);
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-info: var(--info);
+}
+
+@layer base {
+  * {
+    border-color: var(--line);
+  }
+
+  html {
+    color-scheme: dark;
+  }
+  html.light {
+    color-scheme: light;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+    background-color: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* aurora + fine measurement grid: the "instrument" backdrop */
+    background-image:
+      radial-gradient(1100px 620px at 88% -12%, oklch(0.78 0.16 68 / 0.14), transparent 62%),
+      radial-gradient(820px 520px at -8% 108%, oklch(0.78 0.16 68 / 0.08), transparent 58%),
+      radial-gradient(700px 400px at 50% 120%, oklch(0.72 0.13 240 / 0.06), transparent 60%),
+      linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: auto, auto, auto, 44px 44px, 44px 44px;
+    background-attachment: fixed;
+  }
+
+  /* numbers always align in columns */
+  .num,
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1, 'zero' 1;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--line-strong);
+    border-radius: 99px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: oklch(0.78 0.16 68 / 0.5);
+    background-clip: content-box;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+}
+
+@layer components {
+  /* ── liquid glass, three tiers ──────────────────────────────────────── */
+  .glass {
+    position: relative;
+    background: var(--panel);
+    backdrop-filter: blur(26px) saturate(150%);
+    -webkit-backdrop-filter: blur(26px) saturate(150%);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-1), inset 0 1px 0 var(--sheen);
+  }
+
+  /* the gold refraction hairline along the top edge */
+  .glass::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent 4%,
+      oklch(0.78 0.16 68 / 0.55) 50%,
+      transparent 96%
+    );
+    opacity: 0.7;
+    pointer-events: none;
+  }
+
+  .glass-solid {
+    background: var(--panel-solid);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-1);
+  }
+
+  /* high-density pages (tables, audit) drop the blur for legibility */
+  .glass-dense {
+    background: var(--panel-solid);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-1);
+  }
+  .glass-dense::before {
+    display: none;
+  }
+
+  .card-pad {
+    padding: 18px 20px;
+  }
+
+  /* uppercase instrument label */
+  .label-micro {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--faint-fg);
+  }
+
+  .stat-num {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  .text-up {
+    color: var(--up);
+  }
+  .text-down {
+    color: var(--down);
+  }
+  .text-gold {
+    color: var(--primary);
+  }
+
+  /* gold gradient text for hero numbers */
+  .grad-gold {
+    background: linear-gradient(120deg, var(--primary-hi), var(--primary) 55%, oklch(0.6 0.16 55));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .btn-gold {
+    background: linear-gradient(135deg, var(--primary-hi), var(--primary) 60%, oklch(0.66 0.17 58));
+    color: var(--primary-ink);
+    box-shadow: 0 1px 0 oklch(1 0 0 / 0.25) inset, 0 6px 20px oklch(0.78 0.16 68 / 0.28);
+  }
+  .btn-gold:hover {
+    filter: brightness(1.07);
+  }
+
+  /* live pulse for the connection dot */
+  .pulse-dot {
+    position: relative;
+  }
+  .pulse-dot::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 99px;
+    background: inherit;
+    opacity: 0.45;
+    animation: pulse-ring 2.4s var(--ease-out-soft) infinite;
+  }
+
+  @keyframes pulse-ring {
+    0% {
+      transform: scale(0.7);
+      opacity: 0.5;
+    }
+    70% {
+      transform: scale(1.9);
+      opacity: 0;
+    }
+    100% {
+      transform: scale(1.9);
+      opacity: 0;
+    }
+  }
+
+  @keyframes rise-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .rise-in {
+    animation: rise-in 0.42s var(--ease-out-soft) both;
+  }
+
+  @keyframes sweep {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(220%);
+    }
+  }
+
+  /* a slow light sweep across a loading/skeleton surface */
+  .sweep::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, var(--sheen), transparent);
+    animation: sweep 2.2s linear infinite;
+  }
+}

@@ -113,9 +113,9 @@ export const api = {
   /** Dispatch a gateway command verb (`status`/`start`/`stop`/…). */
   command: (cmd: string) =>
     request<CommandDoc>('/command', { method: 'POST', body: cmd }),
-  /** Strategy enable toggle (`strategy.enable` on the core). */
+  /** Strategy enable toggle (`strategy <name> on|off` on the core). */
   setStrategy: (name: string, enabled: boolean) =>
-    request<{ ok: boolean }>(`/command`, {
+    request<CommandDoc>('/command', {
       method: 'POST',
       body: `strategy ${name} ${enabled ? 'on' : 'off'}`,
     }),
@@ -138,7 +138,8 @@ export interface StrategyStatsRow {
   blockedMomentum: number
   gateExemptedTiming: number
   gateExemptedMomentum: number
-  gateExemptions: number
+  /** Gate names this strategy declared itself exempt from (`[]` when none). */
+  gateExemptions: string[]
   closedTrades: number
   wins: number
   losses: number
@@ -267,6 +268,14 @@ export interface PluginRow {
   description?: string
   enabled?: boolean
   status?: string
+  /** market.list: this source is the currently selected one. */
+  active?: boolean
+  /** market.list capability flags — a plugin may implement only some of them. */
+  hasDataFeed?: boolean
+  hasDiscovery?: boolean
+  hasExecutor?: boolean
+  /** extension.list lifecycle state, e.g. "installed". */
+  state?: string
 }
 
 /** Identity badge for a plugin row (binary prediction/spot/futures/options). */
@@ -280,6 +289,7 @@ export interface PluginsDoc {
   strategies: PluginRow[]
   extensions: PluginRow[]
   marketPlugins: PluginRow[]
-  marketActive: string | null
+  /** Boolean flag — the selected source's *name* is on the active market row. */
+  marketActive: boolean
   lastError: string | null
 }

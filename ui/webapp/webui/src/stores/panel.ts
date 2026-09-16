@@ -31,7 +31,7 @@ export const usePanelStore = defineStore('panel', () => {
         source: s.kind ?? 'builtin',
         ordersPlaced: 0, ordersRejected: 0, limitRejected: 0,
         blockedTiming: 0, blockedMomentum: 0,
-        gateExemptedTiming: 0, gateExemptedMomentum: 0, gateExemptions: 0,
+        gateExemptedTiming: 0, gateExemptedMomentum: 0, gateExemptions: [],
         closedTrades: 0, wins: 0, losses: 0, netPnlUsd: 0,
         rejectionCauses: null,
       }))
