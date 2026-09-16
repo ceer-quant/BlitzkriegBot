@@ -23,6 +23,49 @@ onUnmounted(() => { stopFast() })
 
 const snap = computed(() => store.snapshot)
 
+// ── alert sounds — ported from ui/hft.html on every snapshot tick ─────────────
+// win → profit arpeggio, loss → dang, new open position → order blip, breaker
+// in lastError → wuwu siren once, breaker cleared → ding. First snapshot only
+// primes the baselines (no replay storm after reload).
+import {
+  playDang, playDing, playOrder, playProfit, playWuwu, primeAudioOnFirstGesture,
+  soundEnabled, setSoundEnabled,
+} from '../composables/alertSounds'
+primeAudioOnFirstGesture()
+const soundOn = ref(soundEnabled())
+function toggleSound(): void {
+  setSoundEnabled(!soundOn.value)
+  soundOn.value = soundEnabled()
+}
+let primedWins: number | null = null
+let primedLosses: number | null = null
+let primedPositions: number | null = null
+let wasBreaker = false
+watch(snap, (s) => {
+  if (!s) return
+  // wins/losses deltas — same baseline-priming pattern as hft.html
+  const rows = s.tradeRows ?? []
+  const wins = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length
+  const losses = rows.filter((t) => (Number(t.netPnlUsd) || 0) <= 0).length
+  if (primedWins === null || primedLosses === null || primedPositions === null) {
+    primedWins = wins; primedLosses = losses; primedPositions = s.positions?.length ?? 0
+    return
+  }
+  if (wins > primedWins) for (let i = 0; i < Math.min(wins - primedWins, 3); i++) playProfit()
+  if (losses > primedLosses) for (let i = 0; i < Math.min(losses - primedLosses, 3); i++) playDang()
+  primedWins = wins; primedLosses = losses
+  // new position opened → order blip
+  const pos = s.positions?.length ?? 0
+  if (primedPositions !== null && pos > primedPositions) playOrder()
+  primedPositions = pos
+  // breaker trip / recover signal: service surfaced in lastError
+  const err = s.lastError ?? ''
+  const isBreaker = err.toLowerCase().includes('breaker')
+  if (isBreaker && !wasBreaker) playWuwu()
+  if (!isBreaker && wasBreaker) playDing()
+  wasBreaker = isBreaker
+})
+
 // ── market identity (which venue plugin drives this session) ──────────────────
 const marketName = computed(() => snap.value?.marketActiveName ?? null)
 const marketTypeText = computed(() =>
@@ -266,6 +309,9 @@ async function sendLifecycle(verb: 'start' | 'stop'): Promise<void> {
           <span class="mkt-identity">{{ marketTypeText || '市场' }}</span>
           <span class="sub" style="margin-left: 6px">{{ marketName ?? '未激活插件' }}</span>
           <span class="cd-slot">#{{ round?.slot ?? '—' }}</span>
+          <button class="sound-toggle glass" :class="{ off: !soundOn }" title="提示音开关" @click="toggleSound">
+            {{ soundOn ? '🔔' : '🔕' }}
+          </button>
         </div>
         <div class="sub">
           {{ round?.ageSec ?? '—' }}s 已过 ·
@@ -483,6 +529,13 @@ async function sendLifecycle(verb: 'start' | 'stop'): Promise<void> {
   border-radius: 999px;
 }
 .cd-slot { color: var(--bk-text-dim); margin-left: 8px; font-weight: 600; }
+.sound-toggle {
+  margin-left: auto; padding: 4px 10px; border: none; border-radius: 999px;
+  cursor: pointer; font-size: 14px; line-height: 1.2;
+  background: rgba(255, 200, 87, 0.08); transition: background 0.15s;
+}
+.sound-toggle:hover { background: rgba(255, 200, 87, 0.18); }
+.sound-toggle.off { opacity: 0.45; filter: grayscale(0.8); }
 .cd-state { font-weight: 700; letter-spacing: 0.5px; }
 .cd-state.on { color: var(--bk-green); }
 .cd-state.off { color: var(--bk-gold); }
