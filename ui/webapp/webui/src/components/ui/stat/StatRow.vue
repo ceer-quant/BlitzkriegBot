@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** Static label/value row — the workhorse of every stat panel. */
 import { cn } from '@/lib/utils'
+import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -10,8 +11,10 @@ const props = withDefaults(
     mono?: boolean
     hint?: string
     class?: string
+    /** Set false to print the value flat — for text that is not a number. */
+    roll?: boolean
   }>(),
-  { tone: 'default', mono: true },
+  { tone: 'default', mono: true, roll: true },
 )
 
 const toneClass = {
@@ -28,7 +31,11 @@ const toneClass = {
     <span class="text-[12px] text-muted-fg shrink-0">{{ props.label }}</span>
     <span class="flex items-baseline gap-1.5 min-w-0">
       <span :class="cn('text-[13px] font-semibold truncate', toneClass, props.mono && 'num')">
-        <slot>{{ props.value }}</slot>
+        <!-- A slot can hold arbitrary markup, which cannot be split into digits. -->
+        <slot>
+          <RollingNumber v-if="props.roll" :value="props.value ?? '—'" />
+          <template v-else>{{ props.value }}</template>
+        </slot>
       </span>
       <span v-if="props.hint" class="text-[10.5px] text-faint-fg shrink-0">{{ props.hint }}</span>
     </span>

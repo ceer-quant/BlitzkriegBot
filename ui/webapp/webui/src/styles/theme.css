@@ -321,9 +321,19 @@
     color: var(--primary);
   }
 
-  /* gold gradient text for hero numbers */
+  /*
+   * Gold gradient text for hero numbers.
+   *
+   * The gradient is also published as `--grad-text` because `background-clip:
+   * text` clips only the element's own text: anything that renders the characters
+   * in a descendant box (RollingNumber's animated digit strips) gets the
+   * `color: transparent` but none of the paint, and vanishes. A custom property
+   * is inherited through that subtree, so the descendant can clip the gradient
+   * itself; see `components/ui/roll/RollingNumber.vue`.
+   */
   .grad-gold {
-    background: linear-gradient(120deg, var(--primary-hi), var(--primary) 55%, oklch(0.6 0.16 55));
+    --grad-text: linear-gradient(120deg, var(--primary-hi), var(--primary) 55%, oklch(0.6 0.16 55));
+    background: var(--grad-text);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
