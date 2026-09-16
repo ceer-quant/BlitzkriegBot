@@ -314,7 +314,9 @@ http://127.0.0.1:51888/panel
 
 Authentication is by user/password: set `BLITZKRIEG_PANEL_USER` and
 `BLITZKRIEG_PANEL_PASSWORD` before starting `ui_kit_web`; the panel shows a
-login page and issues a session token stored in localStorage.
+login page and issues a session token stored in localStorage. Both are required
+— a gateway (`--manage`) that finds either one missing exits with status 2 and
+serves nothing, rather than starting up and generating a password of its own.
 
 Features:
 - **Unlimited message history** — messages stored in a dedicated database table, not capped

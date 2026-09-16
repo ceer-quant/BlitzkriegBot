@@ -418,7 +418,7 @@ fn vue_panel_dir() -> Option<std::path::PathBuf> {
 
 /// Serve a static asset from the Vue panel dir; `/panel/` or `/panel` (no
 /// trailing file) resolves to `index.html`. System path traversal is blocked.
-fn serve_vue_panel_asset(path: &str) -> Option<(String, &'static str)> {
+fn serve_vue_panel_asset(path: &str) -> Option<(Vec<u8>, &'static str)> {
     let rel = path.strip_prefix("/panel/")?;
     if rel.split('/').any(|seg| seg == ".." || seg.is_empty()) {
         return None;
@@ -426,11 +426,11 @@ fn serve_vue_panel_asset(path: &str) -> Option<(String, &'static str)> {
     serve_vue_panel_file(&std::path::PathBuf::from(rel))
 }
 
-fn serve_vue_panel() -> Option<(String, &'static str)> {
+fn serve_vue_panel() -> Option<(Vec<u8>, &'static str)> {
     serve_vue_panel_file(&std::path::PathBuf::from("index.html"))
 }
 
-fn serve_vue_panel_file(rel: &std::path::Path) -> Option<(String, &'static str)> {
+fn serve_vue_panel_file(rel: &std::path::Path) -> Option<(Vec<u8>, &'static str)> {
     let dir = vue_panel_dir()?;
     let full = dir.join(rel).canonicalize().ok()?;
     // Canonical path must stay inside the panel dir.
@@ -449,10 +449,10 @@ fn serve_vue_panel_file(rel: &std::path::Path) -> Option<(String, &'static str)>
         Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
     };
-    Some((
-        String::from_utf8_lossy(&body).into_owned(),
-        ctype,
-    ))
+    // Served as raw bytes: the panel ships PNG icons alongside its text assets,
+    // and a lossy UTF-8 round-trip would mangle every byte outside ASCII (and
+    // skew the Content-Length with the replacement characters it inserts).
+    Some((body, ctype))
 }
 
 fn url_decode(s: &str) -> String {
@@ -481,9 +481,10 @@ fn url_decode(s: &str) -> String {
 //   * **Auth is required, not optional.** freqtrade documents that every endpoint
 //     except `/ping` "returns sensitive info and requires authentication". The
 //     same reasoning applies with more force here: this server can start and stop
-//     the trading core, so gateway mode always demands a session and mints a
-//     one-time password when none was configured, instead of serving an open
-//     command surface.
+//     the trading core, so gateway mode always demands a session and refuses to
+//     start without credentials from the environment, rather than serving an open
+//     command surface — and rather than inventing a password of its own, which
+//     the operator could neither rotate nor audit.
 //   * **Loopback is not a trust boundary.** "Only reachable from localhost" does
 //     not stop a page the operator happens to visit from issuing cross-site
 //     requests to 127.0.0.1 — a cross-site `<img>`/`<form>` is a *simple* request
@@ -523,10 +524,11 @@ struct Session {
 
 /// `n` bytes of OS entropy as lowercase hex.
 ///
-/// Used for both session tokens and the one-time startup password. These are
-/// bearer credentials for process control, so they must come from the OS rather
-/// than a timestamp/PID mix — anything predictable is forgeable by an attacker
-/// who can guess when the process started.
+/// Used for session tokens. These are bearer credentials for process control, so
+/// they must come from the OS rather than a timestamp/PID mix — anything
+/// predictable is forgeable by an attacker who can guess when the process
+/// started. (Panel *passwords* are not generated here at all; they come from the
+/// environment. See [`WebServer::require_credentials`].)
 fn random_hex(n_bytes: usize) -> String {
     use std::io::Read;
     let mut bytes = vec![0u8; n_bytes];
@@ -600,14 +602,11 @@ pub struct WebServer {
     trade_limit: usize,
     /// Present only in gateway mode (`--manage`); enables `/api/command`.
     dispatcher: Option<Arc<Mutex<Dispatcher>>>,
-    /// Panel credentials (`BLITZKRIEG_PANEL_USER` / `…_PASSWORD`). Gateway mode
-    /// mints a one-time password when these are absent — a server that can stop
-    /// the core never runs without one.
+    /// Panel credentials (`BLITZKRIEG_PANEL_USER` / `…_PASSWORD`), read from the
+    /// environment. Gateway mode refuses to start without a complete pair (see
+    /// [`Self::require_credentials`]) — it never invents one.
     panel_user: Option<String>,
     panel_password: Option<String>,
-    /// The minted one-time password, kept so the binary can print it exactly
-    /// once at startup. Cleared when an explicit pair replaces it.
-    generated_password: Option<String>,
     /// Whether `/api/*` demands a valid session. Armed by gateway mode.
     auth_required: bool,
     /// Non-loopback origins explicitly trusted (operator opt-in).
@@ -625,7 +624,6 @@ impl WebServer {
             dispatcher: None,
             panel_user: None,
             panel_password: None,
-            generated_password: None,
             // No lifecycle verbs on this surface, so auth stays opt-in here.
             // Gateway mode (below) arms it unconditionally.
             auth_required: false,
@@ -634,22 +632,35 @@ impl WebServer {
         }
     }
 
-    /// Guarantee the panel has credentials: keep a configured pair, otherwise
-    /// mint a one-time password and return it so the caller prints it once.
-    pub fn ensure_credentials(&mut self) -> Option<String> {
-        if self.panel_user.is_some() && self.panel_password.is_some() {
-            return None;
+    /// Guarantee the panel has credentials before it serves anything.
+    ///
+    /// Credentials come from the environment and *only* from the environment.
+    /// There is deliberately no minted/generated fallback: a password the panel
+    /// invents for itself is one the operator did not choose and cannot manage
+    /// (no rotation, no secret store, no audit story), and having the process
+    /// print it to a terminal makes the terminal — not the credential store —
+    /// the source of truth for who can stop the trading core.
+    ///
+    /// Returns the reason the panel must not start, when it must not.
+    pub fn require_credentials(&self) -> Result<(), String> {
+        if !self.auth_required {
+            return Ok(()); // read-only surface, no command verbs
         }
-        let password = random_hex(16);
-        self.panel_user = Some("admin".to_string());
-        self.panel_password = Some(password.clone());
-        self.generated_password = Some(password.clone());
-        Some(password)
+        if self.panel_user.is_some() && self.panel_password.is_some() {
+            return Ok(());
+        }
+        Err(
+            "gateway mode requires panel credentials, but BLITZKRIEG_PANEL_USER and \
+             BLITZKRIEG_PANEL_PASSWORD are not both set. A half-configured pair counts as \
+             unconfigured, on purpose: guessing which half was meant is how a panel ends up \
+             open. Export both and restart."
+                .to_string(),
+        )
     }
 
-    /// The one-time password minted at startup, if the panel is using one.
-    pub fn generated_password(&self) -> Option<&str> {
-        self.generated_password.as_deref()
+    /// True when a usable user/password pair is configured.
+    pub fn credentials_configured(&self) -> bool {
+        self.panel_user.is_some() && self.panel_password.is_some()
     }
 
     /// True when the panel requires a session on `/api/*`.
@@ -672,8 +683,9 @@ impl WebServer {
     ///
     /// A half-configured pair is treated as "nothing configured" rather than as a
     /// password-less panel: guessing which half the operator meant is how a panel
-    /// ends up open. Callers in gateway mode then mint a one-time password via
-    /// [`Self::ensure_credentials`].
+    /// ends up open. Gateway mode then refuses to start, via
+    /// [`Self::require_credentials`], rather than substituting a password of its
+    /// own choosing.
     pub fn set_panel_credentials(&mut self, user: Option<String>, password: Option<String>) {
         let user = user.filter(|u| !u.trim().is_empty());
         let password = password.filter(|p| !p.trim().is_empty());
@@ -684,8 +696,6 @@ impl WebServer {
         }
         self.panel_user = user;
         self.panel_password = password;
-        // An explicit pair supersedes any minted one-time password.
-        self.generated_password = None;
     }
 
     /// Extra origins accepted beyond loopback — the `CORS_origins` analogue in
@@ -883,7 +893,6 @@ impl WebServer {
             dispatcher: Some(Arc::new(Mutex::new(dispatcher))),
             panel_user: None,
             panel_password: None,
-            generated_password: None,
             // This surface can start and stop the trading process, so it is never
             // exposed without a session.
             auth_required: true,
@@ -958,10 +967,11 @@ impl WebServer {
             return;
         }
 
-        let (status, ctype, body) = match (req.method.as_str(), target.as_str()) {
+        let (status, ctype, body): (u16, &'static str, Vec<u8>) =
+            match (req.method.as_str(), target.as_str()) {
             ("GET", "/api/ping") | ("HEAD", "/api/ping") => {
                 // Unauthenticated by design; see `ping_doc`.
-                (200, "application/json", self.ping_doc())
+                (200, "application/json", self.ping_doc().into_bytes())
             }
             ("GET", "/api/plugins") => {
                 // E9-g: the registry trio the TUI Plugins page shows (strategies
@@ -990,12 +1000,16 @@ impl WebServer {
                         doc
                     }
                 };
-                (200, "application/json", doc.to_string())
+                (200, "application/json", doc.to_string().into_bytes())
             }
             ("GET", "/api/snapshot") => {
                 let snap = self.snapshot();
                 let lifecycle = self.lifecycle_view();
-                (200, "application/json", render_json(&snap, lifecycle.as_ref()))
+                (
+                    200,
+                    "application/json",
+                    render_json(&snap, lifecycle.as_ref()).into_bytes(),
+                )
             }
             ("GET", "/api/command") | ("POST", "/api/command") => {
                 let cmd = if req.method == "POST" {
@@ -1003,7 +1017,7 @@ impl WebServer {
                 } else {
                     req.query_cmd().unwrap_or_default()
                 };
-                (200, "application/json", self.run_command(&cmd))
+                (200, "application/json", self.run_command(&cmd).into_bytes())
             }
             ("POST", "/api/login") => {
                 // body: {"user":"…","password":"…"} → {"ok":true,"token":…,
@@ -1027,7 +1041,7 @@ impl WebServer {
                 (
                     status,
                     "application/json; charset=utf-8",
-                    serde_json::to_string(&doc).unwrap_or_default(),
+                    serde_json::to_string(&doc).unwrap_or_default().into_bytes(),
                 )
             }
             ("GET", "/api/logout") | ("POST", "/api/logout") => {
@@ -1038,7 +1052,7 @@ impl WebServer {
                     .or_else(|| req.header("x-auth-token").map(String::from))
                     .unwrap_or_default();
                 self.logout(&token);
-                (200, "application/json", "{\"ok\":true}".to_string())
+                (200, "application/json", b"{\"ok\":true}".to_vec())
             }
             ("GET", "/") | ("GET", "/panel") | ("GET", "/panel/") => {
                 // /panel is the canonical entry: the E9-g Vue app when built
@@ -1057,7 +1071,7 @@ impl WebServer {
                         (
                             200,
                             "text/html; charset=utf-8",
-                            render_html_with(&snap, self.dispatcher.is_some()),
+                            render_html_with(&snap, self.dispatcher.is_some()).into_bytes(),
                         )
                     }
                 }
@@ -1066,7 +1080,7 @@ impl WebServer {
                 // Vue app assets (`/panel/assets/*.js|css`, favicon, …).
                 match serve_vue_panel_asset(path) {
                     Some((body, ctype)) => (200, ctype, body),
-                    None => (404, "text/plain; charset=utf-8", "not found".to_string()),
+                    None => (404, "text/plain; charset=utf-8", b"not found".to_vec()),
                 }
             }
             ("GET", _) => {
@@ -1074,10 +1088,10 @@ impl WebServer {
                 (
                     200,
                     "text/html; charset=utf-8",
-                    render_html_with(&snap, self.dispatcher.is_some()),
+                    render_html_with(&snap, self.dispatcher.is_some()).into_bytes(),
                 )
             }
-            _ => (404, "text/plain; charset=utf-8", "not found".to_string()),
+            _ => (404, "text/plain; charset=utf-8", b"not found".to_vec()),
         };
 
         if std::env::var("UIKIT_WEB_TRACE").is_ok() {
@@ -1094,7 +1108,7 @@ impl WebServer {
             body.len()
         );
         let _ = stream.write_all(head.as_bytes());
-        let _ = stream.write_all(body.as_bytes());
+        let _ = stream.write_all(&body);
         let _ = stream.flush();
     }
 

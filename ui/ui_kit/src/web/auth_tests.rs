@@ -5,8 +5,8 @@
 //! * **Read-only mode** (`WebServer::new`) — no command route, no lifecycle
 //!   verbs. Auth is opt-in via credentials; the origin gate is unconditional.
 //! * **Gateway mode** (`WebServer::with_gateway`) — the surface can start and
-//!   stop the trading core, so a session is mandatory whether or not credentials
-//!   were configured.
+//!   stop the trading core, so a session is mandatory, and credentials are
+//!   required from the environment (the process never invents a password).
 //!
 //! Plus the CSRF regression from the acceptance run: a state-changing request
 //! that carries *no* `Origin` header must not be treated as a trusted local
@@ -160,8 +160,8 @@ fn no_auth_configured_passes_loopback() {
 fn half_configured_credentials_do_not_arm_a_passwordless_panel() {
     // Only one half set must not silently arm a panel that anyone can open. The
     // pair is refused wholesale, leaving the read-only surface unauthenticated —
-    // and gateway mode, which *must* have a password, mints one instead (see
-    // `gateway_mode_requires_a_session_even_without_credentials`).
+    // and gateway mode, which must have a password, refuses to start instead of
+    // choosing one (see `gateway_mode_refuses_to_start_without_env_credentials`).
     let probe = TcpListener::bind("127.0.0.1:0").expect("probe bind");
     let addr = probe.local_addr().expect("addr");
     drop(probe);
@@ -275,8 +275,8 @@ fn session_accepts_bearer_form() {
 
 #[test]
 fn cross_site_get_cannot_reach_a_lifecycle_verb() {
-    // Gateway mode with no env credentials: the configuration that was reachable.
-    let addr = start_with(None, true);
+    // Gateway mode, armed exactly as the binary arms it (env credentials).
+    let addr = start_with(Some(("ops", "s3cret")), true);
     for uri in [
         "/api/command?cmd=stop",
         "/api/command?cmd=start",
@@ -340,9 +340,12 @@ fn ping_is_reachable_without_a_session_and_discloses_nothing() {
 }
 
 #[test]
-fn gateway_mode_requires_a_session_even_without_credentials() {
-    // The important half of the fix: an operator who forgets to set the env vars
-    // must get a *locked* panel, not an open command surface.
+fn a_credential_less_gateway_still_locks_everything_but_ping() {
+    // Defence in depth. `ui_kit_web` calls `require_credentials` and exits, so a
+    // credential-less gateway is unreachable through the binary — but the server
+    // must not depend on the binary having done that. Even constructed directly,
+    // it refuses every read and every command rather than exposing a lifecycle
+    // verb to whatever reaches the port.
     let addr = start_with(None, true);
     assert_eq!(
         request(addr, "GET /api/snapshot HTTP/1.1\r\n\r\n"),
@@ -365,40 +368,50 @@ fn gateway_mode_requires_a_session_even_without_credentials() {
 }
 
 #[test]
-fn minted_credentials_lock_the_panel_and_are_usable() {
-    // `ensure_credentials` is what the binary calls in gateway mode: with no env
-    // credentials it must mint a password rather than leave the panel open.
+fn gateway_mode_refuses_to_start_without_env_credentials() {
+    // Credentials come from the environment only. Gateway mode must refuse to
+    // serve rather than invent a password: a process-chosen secret is one the
+    // operator cannot manage, and printing it makes the terminal the source of
+    // truth for who can stop the core.
     let probe = TcpListener::bind("127.0.0.1:0").expect("probe bind");
     let addr = probe.local_addr().expect("addr");
     drop(probe);
-    let sock = std::env::temp_dir().join("uikit-auth-mint.sock");
+    let sock = std::env::temp_dir().join("uikit-auth-env-only.sock");
     let sock = sock.to_string_lossy().to_string();
     let mut server = WebServer::with_gateway(
-        IpcClient::new(sock.clone()),
+        IpcClient::new(sock),
         10,
-        Dispatcher::new(SupervisorConfig::from_env(sock), false),
+        Dispatcher::new(SupervisorConfig::from_env(String::new()), false),
     );
-    let minted = server.ensure_credentials().expect("must mint a password");
-    assert_eq!(minted.len(), 32, "16 random bytes, hex-encoded");
-    assert!(
-        minted.chars().all(|c| c.is_ascii_hexdigit()),
-        "minted password must be hex, got {minted}"
-    );
-    assert_eq!(server.generated_password(), Some(minted.as_str()));
     assert!(server.auth_required(), "gateway mode always requires a session");
+    assert!(!server.credentials_configured());
 
-    // An explicit pair supersedes the minted one — and the minted one dies with
-    // it, so a password printed to a scrollback buffer cannot outlive the run.
+    let why = server
+        .require_credentials()
+        .expect_err("gateway mode with no env credentials must not start");
+    assert!(
+        why.contains("BLITZKRIEG_PANEL_USER") && why.contains("BLITZKRIEG_PANEL_PASSWORD"),
+        "the refusal must name the variables to set, got: {why}"
+    );
+    // There is no password of the process's own making to log in with.
+    assert!(server.login("admin", "admin").is_none());
+    assert!(server.login("admin", "").is_none());
+
+    // A half-configured pair is still unconfigured — guessing which half was
+    // meant is how a panel ends up open.
+    server.set_panel_credentials(Some("ops".to_string()), None);
+    assert!(server.require_credentials().is_err(), "user without password");
+    server.set_panel_credentials(None, Some("pw".to_string()));
+    assert!(server.require_credentials().is_err(), "password without user");
+    server.set_panel_credentials(Some("  ".to_string()), Some("pw".to_string()));
+    assert!(server.require_credentials().is_err(), "blank user is unset");
+
+    // A complete pair starts, and the session it issues works.
     server.set_panel_credentials(Some("ops".to_string()), Some("chosen-pw".to_string()));
-    assert_eq!(server.generated_password(), None);
-    assert!(
-        server.login("ops", "chosen-pw").is_some(),
-        "explicit credentials work"
-    );
-    assert!(
-        server.login("ops", &minted).is_none(),
-        "the superseded one-time password must not log in"
-    );
+    assert!(server.credentials_configured());
+    server.require_credentials().expect("a complete pair starts");
+    assert!(server.login("ops", "chosen-pw").is_some());
+    assert!(server.login("ops", "wrong").is_none());
 
     thread::spawn(move || {
         let _ = server.serve(&addr.to_string());
@@ -411,7 +424,12 @@ fn minted_credentials_lock_the_panel_and_are_usable() {
             &format!("GET /api/snapshot HTTP/1.1\r\nX-Auth-Token: {token}\r\n\r\n")
         ),
         200,
-        "session from the re-armed server passes"
+        "session from the env-armed server passes"
+    );
+    assert_eq!(
+        request(addr, "GET /api/snapshot HTTP/1.1\r\n\r\n"),
+        401,
+        "and the same server still refuses a sessionless read"
     );
 }
 
