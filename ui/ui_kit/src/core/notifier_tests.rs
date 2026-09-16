@@ -180,8 +180,10 @@ fn reader_delivers_a_line_split_across_a_read_timeout() {
 /// draining every byte written here.
 #[test]
 fn reader_stops_reading_an_overlong_line_without_a_newline() {
-    let sock =
-        std::env::temp_dir().join(format!("uikit-notifier-overlong-{}.sock", std::process::id()));
+    let sock = std::env::temp_dir().join(format!(
+        "uikit-notifier-overlong-{}.sock",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock).expect("bind");
     let bus = EventBus::new(8);
