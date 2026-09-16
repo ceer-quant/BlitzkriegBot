@@ -12,7 +12,8 @@
     "check:feed": "node --experimental-strip-types scripts/feed-liveness.check.mjs",
     "check:session": "node --experimental-strip-types scripts/session-recovery.check.mjs",
     "check:history": "node --experimental-strip-types scripts/history-tab.check.mjs",
-    "check:all": "npm run check && npm run check:theme && npm run check:balance && npm run check:lifecycle && npm run check:rejections && npm run check:feed && npm run check:session && npm run check:history"
+    "check:round": "node --experimental-strip-types scripts/round-header.check.mjs",
+    "check:all": "npm run check && npm run check:theme && npm run check:balance && npm run check:lifecycle && npm run check:rejections && npm run check:feed && npm run check:session && npm run check:history && npm run check:round"
   },
   "license": "ISC",
   "type": "module",

@@ -169,18 +169,25 @@ onMounted(() => {
     </header>
 
     <!-- compact nav for narrow viewports -->
-    <nav class="mx-auto mt-4 flex max-w-[1280px] justify-center px-4 md:hidden">
+    <nav class="mx-auto mt-6 flex max-w-[1280px] justify-center px-4 md:hidden">
       <SegmentedControl v-model="tab" :segments="segments" size="sm" />
     </nav>
 
     <!--
       The header floats (sticky top-3) and casts a shadow, so the content needs
       real clearance beneath it rather than the token-thin 14px it used to sit
-      at. `pt-10` (40px) clears the sticky header's own 12px offset plus its
-      shadow on desktop; the compact nav sits in the same flow on narrow
-      screens, so it takes the smaller `pt-6` there.
+      at.
+
+      Two gaps, measured on the rendered panel rather than guessed. The nav sits
+      directly under the sticky header, and because `top-3` shifts the header
+      12px below its flow position, its `mt-4` was a visible 4px — the nav pills
+      read as part of the header. `mt-6` restores a real 12px. And on narrow
+      screens the compact nav is in the same flow between header and content, so
+      the gap that matters there is nav→card: `pt-8` gives 32px of clearance
+      instead of 24px. From `md` the nav moves inside the header and `pt-10`
+      (40px) clears the sticky offset plus the shadow.
     -->
-    <main class="mx-auto max-w-[1280px] px-4 pt-6 pb-20 md:pt-10">
+    <main class="mx-auto max-w-[1280px] px-4 pt-8 pb-20 md:pt-10">
       <div v-if="store.error" class="mb-3.5">
         <AlertBanner title="网关连接异常">{{ store.error }}</AlertBanner>
       </div>

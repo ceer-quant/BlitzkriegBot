@@ -18,6 +18,7 @@ import StatTile from '@/components/ui/stat/StatTile.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
+import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const store = usePanelStore()
 const rows = computed<StrategyStatsRow[]>(() => store.strategyRows)
@@ -79,7 +80,7 @@ function toggleExpand(name: string): void {
     <!-- fleet KPIs -->
     <div class="grid gap-3.5 sm:grid-cols-2 xl:grid-cols-5">
       <StatTile label="策略规模" :value="String(totals.enabled)" tone="gold">
-        <template #sub>共 {{ totals.count }} 个已注册</template>
+        <template #sub>共 <RollingNumber :value="totals.count" /> 个已注册</template>
       </StatTile>
       <!--
         「拒单」是两族互不包含的计数,不可相加,也不可互相解释。旧文案把
@@ -91,8 +92,8 @@ function toggleExpand(name: string): void {
         <template #sub>
           <Tooltip :content="REFUSAL_NOTE">
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-              <span class="text-down font-semibold">{{ num(totals.refusal.rejected) }}</span> 笔被拒 · 拒绝率
-              {{ pct(totals.refusal.refuseRate) }}
+              <span class="text-down font-semibold"><RollingNumber :value="num(totals.refusal.rejected)" /></span> 笔被拒 · 拒绝率
+              <RollingNumber :value="pct(totals.refusal.refuseRate)" />
             </span>
           </Tooltip>
         </template>
@@ -101,14 +102,14 @@ function toggleExpand(name: string): void {
         <template #sub>
           <Tooltip :content="REFUSAL_NOTE">
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-              时机 {{ num(totals.refusal.timing) }} · 动量 {{ num(totals.refusal.momentum) }} · 限额
-              {{ num(totals.refusal.limitRejected) }}
+              时机 <RollingNumber :value="num(totals.refusal.timing)" /> · 动量 <RollingNumber :value="num(totals.refusal.momentum)" /> · 限额
+              <RollingNumber :value="num(totals.refusal.limitRejected)" />
             </span>
           </Tooltip>
         </template>
       </StatTile>
       <StatTile label="平仓 / 胜率" :value="num(totals.closed)" :tone="totals.winRate >= 50 ? 'up' : 'down'">
-        <template #sub>{{ totals.wins }} 盈 / {{ totals.losses }} 亏 · 胜率 {{ pct(totals.winRate) }}</template>
+        <template #sub><RollingNumber :value="totals.wins" /> 盈 / <RollingNumber :value="totals.losses" /> 亏 · 胜率 <RollingNumber :value="pct(totals.winRate)" /></template>
       </StatTile>
       <StatTile
         label="净 PnL（扣费）"
@@ -128,7 +129,7 @@ function toggleExpand(name: string): void {
     <Card class="mt-3.5" dense>
       <CardHeader label="策略表现">
         <template #action>
-          <Badge variant="gold" dot>{{ rows.length }} 行</Badge>
+          <Badge variant="gold" dot><RollingNumber :value="rows.length" /> 行</Badge>
         </template>
       </CardHeader>
 
@@ -187,41 +188,41 @@ function toggleExpand(name: string): void {
                   />
                 </td>
                 <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ r.source }}</td>
-                <td class="px-2 py-2.5 text-right num">{{ num(r.ordersPlaced) }}</td>
+                <td class="px-2 py-2.5 text-right num"><RollingNumber :value="num(r.ordersPlaced)" /></td>
                 <td
                   class="px-2 py-2.5 text-right num"
                   :class="r.ordersRejected ? 'font-semibold text-down' : 'text-faint-fg'"
-                >{{ num(r.ordersRejected) }}</td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg">{{ num(r.limitRejected) }}</td>
+                ><RollingNumber :value="num(r.ordersRejected)" /></td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="num(r.limitRejected)" /></td>
                 <td
                   class="px-2 py-2.5 text-right num"
                   :class="r.blockedTiming ? 'font-semibold text-primary' : 'text-faint-fg'"
-                >{{ num(r.blockedTiming) }}</td>
+                ><RollingNumber :value="num(r.blockedTiming)" /></td>
                 <td
                   class="px-2 py-2.5 text-right num"
                   :class="r.blockedMomentum ? 'font-semibold text-primary' : 'text-faint-fg'"
-                >{{ num(r.blockedMomentum) }}</td>
+                ><RollingNumber :value="num(r.blockedMomentum)" /></td>
                 <td class="px-2 py-2.5 text-right">
                   <Tooltip
                     v-if="r.gateExemptions?.length"
                     :content="`声明豁免：${r.gateExemptions.join(' / ')}`"
                   >
                     <span class="num inline-flex items-center gap-1 font-semibold text-info">
-                      <ShieldOff class="size-3" />{{ r.gateExemptions.length }}
+                      <ShieldOff class="size-3" /><RollingNumber :value="r.gateExemptions.length" />
                     </span>
                   </Tooltip>
                   <span v-else class="num text-faint-fg">0</span>
                 </td>
-                <td class="px-2 py-2.5 text-right num">{{ num(r.closedTrades) }}</td>
+                <td class="px-2 py-2.5 text-right num"><RollingNumber :value="num(r.closedTrades)" /></td>
                 <td class="px-2 py-2.5 text-right num whitespace-nowrap">
-                  <span class="text-up">{{ num(r.wins) }}</span>
+                  <span class="text-up"><RollingNumber :value="num(r.wins)" /></span>
                   <span class="text-faint-fg"> / </span>
-                  <span class="text-down">{{ num(r.losses) }}</span>
+                  <span class="text-down"><RollingNumber :value="num(r.losses)" /></span>
                 </td>
                 <td
                   class="px-2 py-2.5 text-right num font-semibold"
                   :class="Number(r.netPnlUsd) >= 0 ? 'text-up' : 'text-down'"
-                >{{ signedMoney(r.netPnlUsd) }}</td>
+                ><RollingNumber :value="signedMoney(r.netPnlUsd)" /></td>
                 <td class="px-2 py-2.5 text-right">
                   <Button
                     v-if="profile(r).causes.length"
@@ -231,7 +232,7 @@ function toggleExpand(name: string): void {
                     @click="toggleExpand(r.name)"
                   >
                     <AlertTriangle class="size-3.5 text-primary" />
-                    <span class="num">{{ profile(r).causes.length }}</span>
+                    <span class="num"><RollingNumber :value="profile(r).causes.length" /></span>
                     <ChevronDown
                       class="size-3 transition-transform"
                       :class="expanded === r.name && 'rotate-180'"
@@ -248,7 +249,7 @@ function toggleExpand(name: string): void {
                     content="该策略确实有下单被拒，但内核未上报拒单原因。通常是内核版本早于拒单归因（rejectionCauses）功能——重启内核后即可看到分类。"
                   >
                     <span class="num cursor-help text-[11.5px] text-faint-fg">
-                      {{ num(profile(r).rejected) }} 未归因
+                      <RollingNumber :value="num(profile(r).rejected)" /> 未归因
                     </span>
                   </Tooltip>
                   <ShieldCheck v-else class="ml-auto size-4 text-up/45" />
@@ -264,7 +265,7 @@ function toggleExpand(name: string): void {
                       class="inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/12 px-2.5 py-1 text-[11.5px] text-primary"
                     >
                       {{ p.name }}
-                      <span class="num font-bold">×{{ p.n }}</span>
+                      <span class="num font-bold">×<RollingNumber :value="p.n" /></span>
                     </span>
                   </div>
                   <!--

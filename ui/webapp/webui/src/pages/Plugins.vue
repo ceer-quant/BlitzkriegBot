@@ -13,6 +13,7 @@ import Badge from '@/components/ui/badge/Badge.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import SegmentedControl from '@/components/ui/segmented/SegmentedControl.vue'
+import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const store = usePanelStore()
 
@@ -100,7 +101,7 @@ const segments = computed(() => [
           <component :is="KIND_META[k].icon" class="size-4 text-primary/70" />
         </div>
         <div class="stat-num mt-2 text-[30px] leading-none">
-          {{ totals[k === 'strategy' ? 'strategies' : k === 'extension' ? 'extensions' : 'markets'] }}
+          <RollingNumber :value="totals[k === 'strategy' ? 'strategies' : k === 'extension' ? 'extensions' : 'markets']" />
         </div>
         <div class="mt-2 text-[11.5px] text-faint-fg">
           <template v-if="k === 'market'">
@@ -109,7 +110,7 @@ const segments = computed(() => [
             <span v-else>未选择</span>
           </template>
           <template v-else-if="k === 'strategy'">
-            其中 <span class="font-semibold text-up num">{{ totals.enabledStrategies }}</span> 个已启用
+            其中 <span class="font-semibold text-up num"><RollingNumber :value="totals.enabledStrategies" /></span> 个已启用
           </template>
           <template v-else>核心注册的扩展能力</template>
         </div>
@@ -124,8 +125,9 @@ const segments = computed(() => [
     <Card v-for="s in visible" :key="s.key" class="mt-3.5" dense>
       <CardHeader :label="KIND_META[s.key].label">
         <template #action>
+          <!-- `s.active` is the active plugin's NAME, not a count: plain text. -->
           <Badge v-if="s.active" variant="gold" dot>活跃 {{ s.active }}</Badge>
-          <Badge variant="default">{{ s.rows.length }}</Badge>
+          <Badge variant="default"><RollingNumber :value="s.rows.length" /></Badge>
         </template>
       </CardHeader>
       <div class="-mx-2 overflow-x-auto">
