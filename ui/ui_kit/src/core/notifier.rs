@@ -14,10 +14,16 @@
 
 use crate::core::event_bus::EventBus;
 use crate::core::types::CoreEvent;
-use std::io::{BufRead, BufReader};
+use std::io::Read;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+/// Upper bound on a single notification line. The core writes one compact
+/// JSON-RPC object per line, so this is orders of magnitude above any real
+/// event; it exists only so a peer streaming without newlines cannot grow the
+/// reader's line buffer without bound.
+const MAX_LINE_BYTES: usize = 1 << 20;
 
 /// Sell one reader thread as a daemon. Returns an `Arc<AtomicBool>` flag that
 /// flips false when the thread is asked to stop (`stop()`).
@@ -95,34 +101,74 @@ impl NotificationReader {
     /// Block reading notification lines until EOF, a hard error, or the stop
     /// flag. A short read timeout keeps the loop interruptible — a silent
     /// (but connected) core must not trap the thread forever.
+    ///
+    /// Bytes are assembled here rather than via `read_line` because a timeout
+    /// can land in the middle of a record: `read_line` hands back the partial
+    /// prefix on the error path, so the next attempt would have to either
+    /// resume from it or lose it, and it offers no way to cap how far it grows
+    /// while it waits for a delimiter. Reading fixed-size chunks keeps a
+    /// half-received record intact across a timeout and puts the size limit
+    /// somewhere it can actually be enforced.
     fn read_until_closed(&self) -> Result<(), String> {
-        let stream = UnixStream::connect(&self.socket_path).map_err(|e| e.to_string())?;
+        let mut stream = UnixStream::connect(&self.socket_path).map_err(|e| e.to_string())?;
         stream
             .set_read_timeout(Some(std::time::Duration::from_millis(
                 self.retry_ms.max(200),
             )))
             .map_err(|e| e.to_string())?;
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
+        let mut pending: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 8 * 1024];
         loop {
             if !self.running.load(Ordering::SeqCst) {
                 return Ok(());
             }
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => return Ok(()), // EOF: core went away
-                Ok(_) if line.trim().is_empty() => continue,
-                Ok(_) => {
-                    self.bus.ingest_notification(line.trim_end());
+            match stream.read(&mut chunk) {
+                Ok(0) => {
+                    // EOF: core went away. Flush a trailing record that was
+                    // never newline-terminated rather than discarding it.
+                    self.publish_line(&mut pending);
+                    return Ok(());
+                }
+                Ok(n) => {
+                    let mut start = 0;
+                    for (i, &b) in chunk[..n].iter().enumerate() {
+                        if b == b'\n' {
+                            pending.extend_from_slice(&chunk[start..i]);
+                            self.publish_line(&mut pending);
+                            start = i + 1;
+                        }
+                    }
+                    pending.extend_from_slice(&chunk[start..n]);
+                    if pending.len() > MAX_LINE_BYTES {
+                        return Err(format!(
+                            "notification line exceeded {MAX_LINE_BYTES} bytes without a newline"
+                        ));
+                    }
                 }
                 Err(e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
-                    continue; // just the stop-flag checkpoint
+                    // Just the stop-flag checkpoint: a record split across the
+                    // timeout keeps its first half in `pending`, which the
+                    // read arm above has already size-checked.
+                    continue;
                 }
                 Err(e) => return Err(e.to_string()),
             }
         }
+    }
+
+    /// Publish one complete line and reset the accumulator. A non-UTF-8
+    /// record is dropped rather than killing the stream, so one malformed line
+    /// cannot blind the UI to everything that follows it.
+    fn publish_line(&self, pending: &mut Vec<u8>) {
+        if let Ok(text) = std::str::from_utf8(pending) {
+            let text = text.trim();
+            if !text.is_empty() {
+                self.bus.ingest_notification(text);
+            }
+        }
+        pending.clear();
     }
 }
