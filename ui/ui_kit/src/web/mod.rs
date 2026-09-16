@@ -207,11 +207,26 @@ pub fn render_json(s: &UiSnapshot) -> String {
         "balance": s.balance.as_ref().map(|b| serde_json::json!({
             "balance": b.balance, "reserved": b.reserved, "available": b.available })),
         "round": s.round.as_ref().map(|r| serde_json::json!({
-            "slot": r.slot, "ageSec": r.age_sec, "timeLeftSec": r.time_left_sec, "canTrade": r.can_trade })),
+            "slot": r.slot, "ageSec": r.age_sec, "timeLeftSec": r.time_left_sec,
+            "markets": r.markets, "canTrade": r.can_trade,
+            // HFT panel needs the live UP/DOWN quotes per asset.
+            "prices": r.market_prices.iter().map(|m| serde_json::json!({
+                "asset": m.asset, "up": m.up, "down": m.down })).collect::<Vec<_>>() })),
         "positions": s.positions.iter().map(|p| serde_json::json!({
             "asset": p.asset, "direction": p.direction, "entryPrice": p.entry_price,
-            "currentPrice": p.current_price, "unrealizedPct": p.unrealized_pct })).collect::<Vec<_>>(),
+            "currentPrice": p.current_price, "unrealizedPct": p.unrealized_pct,
+            "strategy": p.strategy, "shares": p.shares,
+            "remainingSec": p.remaining_sec })).collect::<Vec<_>>(),
         "trades": { "count": s.trades.len(), "net": s.net_pnl(), "winRate": s.win_rate() },
+        // Full closed-trade rows for the history tab (snapshot already capped
+        // by the trade_limit the bin passes to IpcClient::snapshot).
+        "tradeRows": s.trades.iter().map(|t| serde_json::json!({
+            "id": t.id, "strategy": t.strategy, "asset": t.asset,
+            "direction": t.direction, "entryPrice": t.entry_price,
+            "exitPrice": t.exit_price, "shares": t.shares,
+            "netPnlUsd": t.net_pnl_usd, "netPnlPct": t.net_pnl_pct,
+            "feesUsd": t.fees_usd, "exitReason": t.exit_reason,
+            "holdTimeSec": t.hold_time_sec })).collect::<Vec<_>>(),
         // E9-g: per-strategy accounting rows for the plugins/strategies page.
         "strategyStats": s.strategy_stats.iter().map(|r| serde_json::json!({
             "name": r.name, "enabled": r.enabled, "source": r.source,
