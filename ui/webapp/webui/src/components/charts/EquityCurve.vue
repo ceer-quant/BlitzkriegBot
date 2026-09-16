@@ -16,11 +16,21 @@ const props = withDefaults(
 
 const el = ref<HTMLDivElement | null>(null)
 
-/** Cumulative series (oldest → newest) with a 0 origin point. */
+/**
+ * Cumulative series (oldest → newest) with a 0 origin point.
+ *
+ * The rows arrive chronological — `trades.history` returns the append-only
+ * trade log in file order, and `dedupeTrades` preserves that order (see
+ * `lib/trades.ts`). So the series is accumulated as given; reversing here would
+ * plot the run backwards.
+ *
+ * This is not cosmetic: on the live 275-trade log the mirrored curve deviated
+ * from the real one by up to $28.17 mid-run, drawing a rising run as a falling
+ * one while the endpoint (= the total) still matched the header above it.
+ */
 const series = computed<number[]>(() => {
-  const ordered = [...props.rows].reverse()
   let cum = 0
-  const pts = ordered.map((t) => (cum += Number(t.netPnlUsd) || 0))
+  const pts = props.rows.map((t) => (cum += Number(t.netPnlUsd) || 0))
   return [0, ...pts]
 })
 

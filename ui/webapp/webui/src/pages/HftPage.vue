@@ -14,6 +14,7 @@ import {
   num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration, dateTime,
 } from '@/lib/format'
 import { balanceView } from '@/lib/balance'
+import { newestFirst, tradeIdentity } from '@/lib/trades'
 import { controlState } from '@/lib/lifecycle'
 import { feedStaleness } from '@/lib/feed'
 import {
@@ -186,7 +187,7 @@ const filteredRows = computed<TradeRow[]>(() => {
   const now = Date.now()
   const dayStart = new Date(new Date().setHours(0, 0, 0, 0)).getTime()
   const week = now - 7 * 86_400_000
-  return historyRows.value.filter((t) => {
+  const kept = historyRows.value.filter((t) => {
     const ts = t.exitTime ?? t.entryTime ?? 0
     if (fTime.value === 'today' && ts < dayStart) return false
     if (fTime.value === '7d' && ts < week) return false
@@ -197,6 +198,8 @@ const filteredRows = computed<TradeRow[]>(() => {
     if (fOutcome.value === 'loss' && pnl > 0) return false
     return true
   })
+  // Newest first for display; the totals below are order-independent.
+  return newestFirst(kept)
 })
 
 const filteredStats = computed(() => {
@@ -213,7 +216,12 @@ const sentinel = ref<HTMLElement | null>(null)
 const hasMore = computed(() => visibleCount.value < filteredRows.value.length)
 const visibleRows = computed(() => filteredRows.value.slice(0, visibleCount.value))
 
-watch([filteredRows], () => { visibleCount.value = PAGE })
+// Rewind to the first page when the FILTER changes — never when the data does.
+// Watching `filteredRows` looked equivalent but is not: it is derived from the
+// snapshot, and the 2s poll hands it a fresh array identity every tick, so the
+// watcher fired on every poll and sent the operator's page count back to 30
+// seconds after they clicked 加载更多.
+watch([fTime, fAsset, fOutcome, fStrategy], () => { visibleCount.value = PAGE })
 
 useIntersectionObserver(sentinel, ([entry]) => {
   if (entry?.isIntersecting && hasMore.value) visibleCount.value += PAGE
@@ -722,9 +730,17 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
               </tr>
             </thead>
             <tbody>
+              <!--
+                Keyed on the trade's identity, never on `t.id`: the id is a
+                per-boot counter (`hft-1` …) and the log is append-only, so the
+                first page of 30 rows carried only 14 distinct ids. Duplicate
+                keys break Vue's patch algorithm — it reuses the wrong nodes, so
+                the table showed rows from the pre-filter list and left stale
+                rows behind on 重置.
+              -->
               <tr
                 v-for="t in visibleRows"
-                :key="t.id"
+                :key="tradeIdentity(t)"
                 class="border-t border-line transition-colors hover:bg-panel-2"
               >
                 <td class="px-2 py-2.5 font-semibold">{{ t.asset }}</td>

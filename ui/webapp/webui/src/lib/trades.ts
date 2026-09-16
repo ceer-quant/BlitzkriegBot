@@ -44,3 +44,26 @@ export function dedupeTrades<T extends { id: string }>(rows: readonly T[]): T[] 
   for (const r of rows) byTrade.set(tradeIdentity(r), r)
   return [...byTrade.values()]
 }
+
+/** When a trade closed, falling back to when it opened (a row always has one). */
+function closeStamp(r: { exitTime?: number; entryTime?: number }): number {
+  return Number(r.exitTime ?? r.entryTime ?? 0) || 0
+}
+
+/**
+ * Newest close first — the display ORDER for the history table.
+ *
+ * The rows arrive in trade-log order, and that log is append-only, so it reads
+ * oldest first. On the live log that put 9/14 trades in the first page of 275
+ * and left the newest trade nine pages down, which made the table look stale
+ * beside the summary printed directly above it. Newest-first is also the
+ * direction the waterfall should grow: scrolling down loads older trades.
+ *
+ * Display-only. The equity curve reads the unsorted list, which has to stay
+ * chronological, so never sort `tradeRows` itself.
+ */
+export function newestFirst<T extends { exitTime?: number; entryTime?: number }>(
+  rows: readonly T[],
+): T[] {
+  return [...rows].sort((a, b) => closeStamp(b) - closeStamp(a))
+}
