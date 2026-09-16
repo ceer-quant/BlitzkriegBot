@@ -79,7 +79,7 @@ const positions = computed(() => snap.value?.positions ?? [])
         <template v-if="snap.trades">
           <div class="stat-value">{{ snap.trades.count }}</div>
           <div class="sub">
-            净 PnL {{ money(snap.trades.net) }} · 胜率 {{ fmtWinRate(snap.trades.winRate) }}
+            扣费净利 {{ money(snap.trades.net) }} · 胜率 {{ fmtWinRate(snap.trades.winRate) }}
           </div>
         </template>
         <template v-else>
