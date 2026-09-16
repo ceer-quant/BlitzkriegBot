@@ -7,29 +7,54 @@ use crate::core::notifier::NotificationReader;
 use crate::core::types::CoreEvent;
 use std::io::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const ALERT: &str = r#"{"jsonrpc":"2.0","method":"core.event","params":{"kind":"RISK_ALERT","code":"KILL_SWITCH_ACTIVE","message":"kill-A"}}"#;
 
-/// Accept connections until one reads its ALERT back: the reader's probe
-/// connections are write-less and vanish (broken pipe); the session that
-/// `read_until_closed` opened is the one that consumes the line.
-fn serve_once(listener: &UnixListener) {
-    loop {
-        let mut s: UnixStream = listener.accept().expect("accept").0;
-        match s
-            .write_all(ALERT.as_bytes())
-            .and_then(|_| s.write_all(b"\n"))
-            .and_then(|_| s.flush())
-        {
-            Ok(()) => {
-                s.shutdown(std::net::Shutdown::Both).ok();
-                return;
+/// Serve `core.event` ALERTs until the returned flag is cleared, closing every
+/// session it held each round to force a reconnect.
+///
+/// The real core writes notifications to *every* open session and never
+/// depends on which one reads them. A helper that instead accepts one
+/// connection and assumes it is the reader's live session has to guess:
+/// `run()` also opens short-lived probe connections, and an ALERT written into
+/// one of those is discarded, so the reader can lose an event through no fault
+/// of its own. Writing to every accepted connection removes the guess.
+///
+/// Closing the held sessions at the end of each round is what exercises the
+/// reconnect path: the reader must observe EOF and come back.
+fn serve_alert_rounds(
+    listener: UnixListener,
+    connections: Arc<AtomicUsize>,
+    serving: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        listener.set_nonblocking(true).ok();
+        while serving.load(Ordering::SeqCst) {
+            let mut held: Vec<UnixStream> = Vec::new();
+            let round_end = Instant::now() + Duration::from_millis(250);
+            while serving.load(Ordering::SeqCst) && Instant::now() < round_end {
+                match listener.accept() {
+                    Ok((mut s, _)) => {
+                        connections.fetch_add(1, Ordering::SeqCst);
+                        let _ = s
+                            .write_all(ALERT.as_bytes())
+                            .and_then(|_| s.write_all(b"\n"))
+                            .and_then(|_| s.flush());
+                        held.push(s);
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
             }
-            Err(_) => continue, // was a probe connection; keep accepting
+            drop(held); // closes the sessions: reader sees EOF, then reconnects
+            std::thread::sleep(Duration::from_millis(20));
         }
-    }
+    })
 }
 
 /// Poll for a RiskAlert("kill-A") on `sub` — created BEFORE the reader's life
@@ -86,19 +111,106 @@ fn reader_reconnects_and_redelivers() {
     let stop = reader.stop_handle();
     let handle = std::thread::spawn(move || reader.run());
 
-    // Life 1: connect, receive ALERT, server closes.
-    serve_once(&listener);
-    let got1 = poll_alert(&mut sub, &bus, Instant::now() + Duration::from_secs(3));
-    assert!(got1, "life-1 ALERT never reached the bus");
+    let connections = Arc::new(AtomicUsize::new(0));
+    let serving = Arc::new(AtomicBool::new(true));
+    let server = serve_alert_rounds(listener, connections.clone(), serving.clone());
 
-    // Life 2: the reader must reconnect after the close and deliver again.
-    serve_once(&listener);
-    let got2 = poll_alert(&mut sub, &bus, Instant::now() + Duration::from_secs(3));
+    // Life 1: the reader connects and ingests an ALERT.
+    let got1 = poll_alert(&mut sub, &bus, Instant::now() + Duration::from_secs(5));
+    // Life 2: the server closed the session, so a second ALERT can only arrive
+    // if the reader noticed EOF and reconnected.
+    let got2 = poll_alert(&mut sub, &bus, Instant::now() + Duration::from_secs(5));
+
+    stop.store(false, Ordering::SeqCst);
+    serving.store(false, Ordering::SeqCst);
+    let _ = handle.join();
+    let _ = server.join();
+    let _ = std::fs::remove_file(&sock);
+
+    assert!(got1, "life-1 ALERT never reached the bus");
+    assert!(got2, "life-2 redelivery failed — reconnect broken");
+    assert!(
+        connections.load(Ordering::SeqCst) >= 2,
+        "reader never reconnected after the session closed"
+    );
+}
+
+/// A line whose halves are separated by more than the read timeout must still
+/// be delivered.
+///
+/// The reader uses a short read timeout so a silent core cannot trap its
+/// thread. A record split across that boundary has to carry its first half
+/// forward to the next read; dropping the partial buffer instead loses half a
+/// record and leaves the trailing half to arrive as a blank line.
+#[test]
+fn reader_delivers_a_line_split_across_a_read_timeout() {
+    let sock =
+        std::env::temp_dir().join(format!("uikit-notifier-split-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let listener = UnixListener::bind(&sock).expect("bind");
+    let bus = EventBus::new(8);
+    let mut sub = bus.subscribe();
+    // retry_ms 50 => 200 ms read timeout, so a 700 ms gap is a timeout landing
+    // squarely inside the line.
+    let reader = NotificationReader::new(sock.to_string_lossy().to_string(), bus.clone(), 50);
+    let stop = reader.stop_handle();
+    let handle = std::thread::spawn(move || reader.run());
+
+    let mut s: UnixStream = listener.accept().expect("accept").0;
+    s.write_all(ALERT.as_bytes()).expect("write first half");
+    s.flush().ok();
+    std::thread::sleep(Duration::from_millis(700));
+    s.write_all(b"\n").expect("write second half");
+    s.flush().ok();
+
+    let got = poll_alert(&mut sub, &bus, Instant::now() + Duration::from_secs(3));
     stop.store(false, Ordering::SeqCst);
     let _ = handle.join();
     drop(listener);
     let _ = std::fs::remove_file(&sock);
-    assert!(got2, "life-2 redelivery failed — reconnect broken");
+    assert!(got, "a line split across a read timeout was dropped");
+}
+
+/// A peer that never sends a newline must not grow the line buffer without
+/// bound: the reader has to give up and drop the connection instead of
+/// accumulating forever.
+///
+/// The observable is write failure — a reader that enforced the bound stops
+/// consuming and closes, while one that buffered without limit would keep
+/// draining every byte written here.
+#[test]
+fn reader_stops_reading_an_overlong_line_without_a_newline() {
+    let sock =
+        std::env::temp_dir().join(format!("uikit-notifier-overlong-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let listener = UnixListener::bind(&sock).expect("bind");
+    let bus = EventBus::new(8);
+    let reader = NotificationReader::new(sock.to_string_lossy().to_string(), bus.clone(), 50);
+    let stop = reader.stop_handle();
+    let handle = std::thread::spawn(move || reader.run());
+
+    let mut s: UnixStream = listener.accept().expect("accept").0;
+    let chunk = vec![b'x'; 64 * 1024];
+    let mut sent = 0usize;
+    let mut refused = false;
+    // No newline anywhere: only the size bound can stop this.
+    while sent < 8 * 1024 * 1024 {
+        if s.write_all(&chunk).is_err() {
+            refused = true; // reader gave up and closed, which is the point
+            break;
+        }
+        sent += chunk.len();
+    }
+    s.flush().ok();
+
+    stop.store(false, Ordering::SeqCst);
+    let _ = handle.join();
+    drop(listener);
+    let _ = std::fs::remove_file(&sock);
+    assert!(
+        refused,
+        "reader kept consuming a newline-less stream past the bound (sent {sent} bytes)"
+    );
 }
 
 #[test]
