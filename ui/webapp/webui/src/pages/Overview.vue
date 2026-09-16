@@ -12,7 +12,7 @@ import { usePanelStore } from '@/stores/panel'
 import {
   num, compact, money, signedMoney, winRatePct, pct, shortAddr, duration,
 } from '@/lib/format'
-import { balanceView } from '@/lib/balance'
+import { balanceView, cashGapDetail, cashGapShort } from '@/lib/balance'
 import StatTile from '@/components/ui/stat/StatTile.vue'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
@@ -165,22 +165,20 @@ const unrealized = computed(() =>
         </div>
 
         <!--
-          The core's cash ledger, kept as a separate operative number. When it
-          sits above 本金 ＋ 净利润 the running core has not charged its fees to
-          cash, so the gap is described as the kernel's cash basis — not as the
-          balance being wrong.
+          The core's cash ledger, kept as a separate operative number. Its gap
+          against 本金 ＋ 净利润 is a bookkeeping-basis difference, not a wrong
+          balance — the ledger restarts from the principal each boot while the
+          equity carries all persisted history. The gap is signed, so the
+          direction comes from `cashGapShort` rather than a fixed 「高于」.
         -->
         <div
           v-if="recon.equity !== null && isDry"
           class="mt-2 flex items-start gap-1.5 text-[10.5px] leading-snug text-faint-fg"
         >
           <CircleDot class="mt-px size-3 shrink-0 opacity-60" />
-          <Tooltip
-            v-if="recon.gapMaterial"
-            :content="`内核现金账 ${money(recon.cash)} 高于「本金 ＋ 净利」${money(recon.equity)}，差额 ${signedMoney(recon.cashGap)}。该口径把成交额计入现金、却未把手续费从现金中扣除，所以现金偏多；差额≈未入账的手续费 ${money(recon.fees)}。引擎下单能力看的是现金账，真实余额看的是本金＋净利。`"
-          >
+          <Tooltip v-if="recon.gapMaterial" :content="cashGapDetail(recon)">
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-              内核现金账 {{ money(recon.cash) }} · 高于真实余额 {{ signedMoney(recon.cashGap) }}
+              内核现金账 {{ money(recon.cash) }} · {{ cashGapShort(recon) }}
             </span>
           </Tooltip>
           <span v-else>内核现金账 {{ money(recon.cash) }} · 与真实余额一致</span>
