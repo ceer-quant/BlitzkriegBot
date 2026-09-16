@@ -5,8 +5,9 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import {
   api, hasToken, getToken,
-  type Snapshot, type PluginsDoc, type StrategyStatsRow,
+  type Snapshot, type PluginsDoc, type StrategyStatsRow, type TradeRow,
 } from '../api/client'
+import { dedupeTrades } from '../lib/trades'
 
 export const usePanelStore = defineStore('panel', () => {
   const snapshot = ref<Snapshot | null>(null)
@@ -16,6 +17,15 @@ export const usePanelStore = defineStore('panel', () => {
   const lastUpdated = ref<number | null>(null)
 
   const connected = computed(() => snapshot.value?.connected ?? plugins.value?.connected ?? false)
+
+  /**
+   * Closed-trade rows with cross-run id collisions collapsed. `hft-N` restarts
+   * at 1 on every core boot while the trade log is append-only, so a long-lived
+   * log holds several rows per id; summing the raw list over-counts trades and
+   * skews net PnL and win rate against the kernel's own counters. Every page
+   * reads rows through here so they all report the same totals.
+   */
+  const tradeRows = computed<TradeRow[]>(() => dedupeTrades(snapshot.value?.tradeRows ?? []))
 
   // Prefer engine snapshot strategyStats (richer); fall back to /api/plugins.
   const strategyRows = computed<StrategyStatsRow[]>(() => {
@@ -64,7 +74,7 @@ export const usePanelStore = defineStore('panel', () => {
 
   return {
     snapshot, plugins, error, loading, lastUpdated,
-    connected, strategyRows,
+    connected, strategyRows, tradeRows,
     refresh,
   }
 })

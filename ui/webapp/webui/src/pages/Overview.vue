@@ -6,18 +6,20 @@
  */
 import { computed } from 'vue'
 import {
-  CircleDot, ShieldCheck, ArrowUpRight, ArrowDownRight,
+  CircleDot, ShieldCheck, ArrowUpRight, ArrowDownRight, TriangleAlert,
 } from 'lucide-vue-next'
 import { usePanelStore } from '@/stores/panel'
 import {
   num, compact, money, signedMoney, winRatePct, pct, shortAddr, duration,
 } from '@/lib/format'
+import { reconcileBalance } from '@/lib/balance'
 import StatTile from '@/components/ui/stat/StatTile.vue'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
+import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import EquityCurve from '@/components/charts/EquityCurve.vue'
 import RejectionChart from '@/components/charts/RejectionChart.vue'
 
@@ -33,7 +35,7 @@ const balance = computed(() => snap.value?.balance ?? null)
 const walletAddr = computed(() => snap.value?.wallet?.funder ?? snap.value?.wallet?.signer ?? null)
 
 // ── trades ─────────────────────────────────────────────────────────────────
-const tradeRows = computed(() => snap.value?.tradeRows ?? [])
+const tradeRows = computed(() => store.tradeRows)
 const summary = computed(() => snap.value?.tradeSummary ?? null)
 const trades = computed(() => {
   const s = summary.value
@@ -58,6 +60,14 @@ const trades = computed(() => {
     loss: rows.length - win,
   }
 })
+
+/**
+ * 模拟余额 vs 本金 + 净利润. The core's own summary spans every run its trade log
+ * has ever seen, while the cash balance only reflects the current process, so
+ * the two are not automatically equal. Show the arithmetic and the residual
+ * rather than implying an identity that may not hold.
+ */
+const recon = computed(() => reconcileBalance(balance.value, trades.value.net))
 
 const round = computed(() => snap.value?.round ?? null)
 const positions = computed(() => snap.value?.positions ?? [])
@@ -91,8 +101,31 @@ const unrealized = computed(() =>
         :tone="isDry ? 'gold' : 'default'"
       >
         <template #sub>
-          可用 {{ money(balance?.available) }} · 预留 {{ money(balance?.reserved) }}
+          <Tooltip v-if="recon.seed !== null" :content="`余额口径：本金 ${money(recon.seed)} ＋ 已实现净利 ${signedMoney(recon.net)} − 未平仓占用 ${money(recon.reserved)}`">
+            <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
+              本金 {{ money(recon.seed) }} ＋ 净利 {{ signedMoney(recon.net) }}
+            </span>
+          </Tooltip>
+          <!--
+            No principal on the wire (LIVE, or a core older than the field): say
+            that the ledger cannot be reconciled here rather than assert a cause
+            we cannot verify, or print an equation we cannot check.
+          -->
+          <Tooltip v-else-if="isDry" content="余额是内核的现金账：本金随每笔成交与手续费增减，再减去挂单占用。要显示“本金 ＋ 净利”的对账结果，内核必须上报本金；当前运行中的内核未上报本金，因此这里只标注口径、不虚构等式。重启内核后即可显示完整对账。">
+            <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
+              现金账 · 本金未上报
+            </span>
+          </Tooltip>
+          <template v-else>可用 {{ money(balance?.available) }} · 预留 {{ money(balance?.reserved) }}</template>
         </template>
+        <div v-if="recon.drifted" class="mt-2 flex items-start gap-1.5 text-[10.5px] leading-snug text-faint-fg">
+          <TriangleAlert class="mt-px size-3 shrink-0" style="color: var(--primary)" />
+          <Tooltip :content="`按“本金 + 净利”推算应为 ${money((recon.seed ?? 0) + recon.net + recon.reserved)}，实际余额 ${money(recon.balance)}，差额 ${signedMoney(recon.residual)}。盈亏记录与现金流水口径不一致时会出现差额（例如运行中的内核早于费用入账修复，或记录的成交笔数跨越了多个进程），这是内核数据口径问题，不是界面算错。`">
+            <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
+              对账差 {{ signedMoney(recon.residual) }}
+            </span>
+          </Tooltip>
+        </div>
         <div v-if="isDry" class="mt-2 flex items-center gap-1.5 text-[10.5px] text-faint-fg">
           <CircleDot class="size-3" /> 模拟资金，非真实资产
         </div>

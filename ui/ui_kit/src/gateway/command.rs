@@ -560,7 +560,10 @@ fn status_json(disp: &Dispatcher, s: &UiSnapshot) -> serde_json::Value {
             "markets": r.markets, "canTrade": r.can_trade,
         })),
         "balance": s.balance.as_ref().map(|b| serde_json::json!({
-            "balance": b.balance, "reserved": b.reserved, "available": b.available })),
+            "balance": b.balance, "reserved": b.reserved, "available": b.available,
+            // Starting principal (dry only), so the text UI can show the same
+            // `principal + realized net` reconciliation the panel does.
+            "seed": b.seed })),
         "stats": s.stats.as_ref().map(|st| serde_json::json!({
             "books": st.books, "spots": st.spots, "signals": st.signals,
             "confirmed": st.confirmed.len(), "placeRejected": st.place_rejected,

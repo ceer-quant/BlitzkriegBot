@@ -62,6 +62,9 @@ pub struct BalanceView {
     pub reserved: f64,
     #[serde(deserialize_with = "de_num")]
     pub available: f64,
+    /// Starting principal in DRY mode; `None` in LIVE or against an older core.
+    #[serde(default, deserialize_with = "de_num_opt")]
+    pub seed: Option<f64>,
 }
 
 // ── positions.list ───────────────────────────────────────────────────────────

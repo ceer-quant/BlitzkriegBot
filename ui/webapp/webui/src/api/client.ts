@@ -243,7 +243,16 @@ export interface Snapshot {
   mode?: string
   lastError?: string | null
   stats?: EngineStats
-  balance?: { balance: number; reserved: number; available: number } | null
+  balance?: {
+    balance: number
+    reserved: number
+    available: number
+    /**
+     * Starting principal. Present in DRY (the `--seed-balance` value); absent in
+     * LIVE and on older cores — treat missing as "unknown", never as zero.
+     */
+    seed?: number | null
+  } | null
   round?: Round | null
   positions?: Position[]
   trades?: TradeSummary

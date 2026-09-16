@@ -5,7 +5,7 @@
  */
 import { computed, onUnmounted, ref } from 'vue'
 import { useIntervalFn, useNow } from '@vueuse/core'
-import { LayoutDashboard, Activity, History, Boxes, Puzzle, Moon, Sun, Bell, BellOff, LogOut, Radio } from 'lucide-vue-next'
+import { LayoutDashboard, Activity, History, Boxes, Puzzle, Moon, Sun, SunMoon, Bell, BellOff, LogOut, Radio } from 'lucide-vue-next'
 import { usePanelStore } from './stores/panel'
 import { hasToken, getToken, logout } from './api/client'
 import { useTheme } from './lib/theme'
@@ -23,7 +23,17 @@ import AlertBanner from './components/ui/alert/AlertBanner.vue'
 type TabId = 'overview' | 'hft' | 'backtest' | 'strategies' | 'plugins'
 
 const store = usePanelStore()
-const { isDark, sound, toggleTheme, toggleSound } = useTheme()
+const { theme, isDark, cycleTheme, sound, toggleSound } = useTheme()
+
+/**
+ * One button, three states — the accessible name has to say which one is next,
+ * and what is on screen right now, since the icon alone cannot.
+ */
+const themeTitle = computed(() => {
+  const now = theme.value === 'system' ? `跟随系统（当前${isDark.value ? '深色' : '浅色'}）` : isDark.value ? '深色' : '浅色'
+  const next = theme.value === 'system' ? '浅色' : theme.value === 'light' ? '深色' : '跟随系统'
+  return `主题：${now} · 点击切换到${next}`
+})
 const authed = ref(hasToken() && !!getToken())
 const tab = ref<TabId>('overview')
 
@@ -107,8 +117,9 @@ if (authed.value) void store.refresh()
           <Bell v-if="sound" />
           <BellOff v-else class="opacity-60" />
         </Button>
-        <Button variant="ghost" size="icon-sm" :title="isDark ? '切换浅色主题' : '切换深色主题'" @click="toggleTheme">
-          <Sun v-if="isDark" />
+        <Button variant="ghost" size="icon-sm" :title="themeTitle" @click="cycleTheme">
+          <SunMoon v-if="theme === 'system'" />
+          <Sun v-else-if="isDark" />
           <Moon v-else />
         </Button>
         <Button variant="ghost" size="icon-sm" title="退出登录" @click="logout">
@@ -118,11 +129,18 @@ if (authed.value) void store.refresh()
     </header>
 
     <!-- compact nav for narrow viewports -->
-    <nav class="mx-auto mt-3 flex max-w-[1280px] justify-center px-4 md:hidden">
+    <nav class="mx-auto mt-4 flex max-w-[1280px] justify-center px-4 md:hidden">
       <SegmentedControl v-model="tab" :segments="segments" size="sm" />
     </nav>
 
-    <main class="mx-auto max-w-[1280px] px-4 pt-3.5 pb-20">
+    <!--
+      The header floats (sticky top-3) and casts a shadow, so the content needs
+      real clearance beneath it rather than the token-thin 14px it used to sit
+      at. `pt-10` (40px) clears the sticky header's own 12px offset plus its
+      shadow on desktop; the compact nav sits in the same flow on narrow
+      screens, so it takes the smaller `pt-6` there.
+    -->
+    <main class="mx-auto max-w-[1280px] px-4 pt-6 pb-20 md:pt-10">
       <div v-if="store.error" class="mb-3.5">
         <AlertBanner title="网关连接异常">{{ store.error }}</AlertBanner>
       </div>

@@ -13,6 +13,7 @@ import { useTheme } from '@/lib/theme'
 import {
   num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration, dateTime,
 } from '@/lib/format'
+import { reconcileBalance } from '@/lib/balance'
 import {
   playDang, playDing, playOrder, playProfit, playWuwu,
 } from '@/composables/alertSounds'
@@ -42,7 +43,9 @@ let wasHalted = false
 
 watch(snap, (s) => {
   if (!s) return
-  const rows = s.tradeRows ?? []
+  // Deduped: the raw rows can carry the same `hft-N` id from an earlier run, and
+  // counting those twice would fire an alert sound for a trade that never closed.
+  const rows = store.tradeRows
   const wins = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length
   const losses = rows.filter((t) => (Number(t.netPnlUsd) || 0) <= 0).length
   const pos = s.positions?.length ?? 0
@@ -100,7 +103,7 @@ function spreadCents(m: MarketPrice): number {
 }
 
 // ── cumulative all-time totals (core summary preferred, rows as fallback) ────
-const historyRows = computed<TradeRow[]>(() => snap.value?.tradeRows ?? [])
+const historyRows = computed<TradeRow[]>(() => store.tradeRows)
 const cumStats = computed(() => {
   const s = snap.value?.tradeSummary
   const rows = historyRows.value
@@ -136,6 +139,9 @@ const cumStats = computed(() => {
     fromSummary: false,
   }
 })
+
+// ── balance reconciliation (本金 + 净利 vs the core's cash ledger) ────────────
+const recon = computed(() => reconcileBalance(snap.value?.balance, cumStats.value.net))
 
 // ── history filters ─────────────────────────────────────────────────────────
 const fTime = ref<'all' | 'today' | '7d'>('all')
@@ -423,8 +429,25 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
             :value="money(snap.balance?.balance)"
             :tone="isDry ? 'gold' : 'default'"
           />
-          <p v-if="isDry" class="mt-1 text-[10px] leading-snug text-faint-fg">
-            余额 = 本金 + 扣费净利 − 未平仓占用
+          <p v-if="recon.seed !== null" class="mt-1 text-[10px] leading-snug text-faint-fg">
+            本金 {{ money(recon.seed) }} ＋ 已实现净利 {{ signedMoney(recon.net) }} − 未平仓占用 {{ money(recon.reserved) }}
+            <Tooltip :content="`余额是内核的现金账：本金随每笔成交与手续费增减，再减去挂单占用。净利来自已平仓记录。两者口径一致时应当吻合；出现差额说明内核的现金流水与盈亏记录不同源（例如进程早于费用入账修复启动，或记录跨越多个进程）。差额 ${signedMoney(recon.residual)}。`">
+              <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2" :class="recon.drifted ? 'text-down' : 'text-up'">
+                {{ recon.drifted ? `对账差 ${signedMoney(recon.residual)}` : '已对账' }}
+              </span>
+            </Tooltip>
+          </p>
+          <!--
+            No principal on the wire: either LIVE, or a core older than the field
+            that reports it. Say why the two numbers need not add up instead of
+            printing an equation the panel cannot verify.
+          -->
+          <p v-else-if="isDry" class="mt-1 text-[10px] leading-snug text-faint-fg">
+            <Tooltip content="余额是内核的现金账：本金随每笔成交与手续费增减，再减去挂单占用。要显示对账结果，内核必须上报本金；当前运行中的内核未上报本金，因此这里只标注口径、不虚构等式。重启内核后即可显示完整对账。">
+              <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
+                本进程现金账 · 本金未上报
+              </span>
+            </Tooltip>
           </p>
         </div>
       </Card>

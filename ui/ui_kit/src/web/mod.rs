@@ -205,7 +205,10 @@ pub fn render_json(s: &UiSnapshot) -> String {
         "connected": s.connected,
         "mode": s.mode(),
         "balance": s.balance.as_ref().map(|b| serde_json::json!({
-            "balance": b.balance, "reserved": b.reserved, "available": b.available })),
+            "balance": b.balance, "reserved": b.reserved, "available": b.available,
+            // Starting principal (dry only) so the panel can show the
+            // `principal + realized net` reconciliation instead of asserting it.
+            "seed": b.seed })),
         // Wallet identity for the live-mode balance card (dry cores leave
         // these null — their cash is the local dry seed, not venue funds).
         "wallet": {

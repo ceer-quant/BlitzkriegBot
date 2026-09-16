@@ -4396,6 +4396,87 @@ mod strategy_dispatch_tests {
             "closed position leaves no exposure"
         );
     }
+
+    /// KNOWN DRIFT (ignored — the fix is an accounting change, not a test fix).
+    ///
+    /// The cash ledger is supposed to equal `seed + Σ netPnlUsd` once nothing is
+    /// reserved and no position is open — that identity is what #75 was written
+    /// to establish. On a `MakerThenTaker` entry that escalates and then exits as
+    /// a maker, it does NOT hold, because the two sides disagree about what kind
+    /// of fill happened:
+    ///
+    /// 1. ENTRY — the position records `was_maker_entry = true` (it filled at the
+    ///    resting bid), so its entry fee is 0. `apply_delta_effects` sees the
+    ///    escalated fill's `mode = MakerThenTaker` and charges the taker fee.
+    ///    Cash lands BELOW the record by the entry fee.
+    /// 2. EXIT — the closing delta covers 9.99 of 10 shares although the record
+    ///    closes the full 10, so cash receives 0.01 × exit_price less proceeds
+    ///    than the record's gross assumes.
+    /// 3. EXIT — the record derives `was_maker_exit = false` and charges a taker
+    ///    exit fee, while the delta's `mode = Maker` charges none. Cash lands
+    ///    ABOVE the record by the exit fee.
+    ///
+    /// Net effect measured on the fixture below: `balance = 1005.11540748750`
+    /// against `seed + net = 1005.19717968750` — cash short by 0.0817722.
+    ///
+    /// Left ignored on purpose: reconciling the two bases changes how real money
+    /// is accounted, so it needs an explicit decision rather than a drive-by fix.
+    /// Un-ignore this to see the live delta after any accounting change.
+    #[test]
+    #[ignore = "known cash-vs-trade accounting drift; see the doc comment"]
+    fn dry_balance_is_seed_plus_realized_net() {
+        const SEED: Decimal = dec!(1000);
+        let mut c = core_with_engine(HashMap::new());
+        let now = 1_000_000i64;
+        feed_entry_setup(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 12_000), 1);
+        // Fill the resting bid, then mark up so the profit target closes it.
+        c.book_snapshot(
+            "up",
+            vec![(dec!(0.42), dec!(100))],
+            vec![(dec!(0.42), dec!(100))],
+            now + 13_000,
+        );
+        c.book_snapshot(
+            "up",
+            vec![(dec!(0.95), dec!(100))],
+            vec![(dec!(0.97), dec!(100))],
+            now + 14_000,
+        );
+        c.tick(now + 14_200).unwrap();
+        assert_eq!(c.positions().open_positions().len(), 0);
+        assert_eq!(c.ledger().reserved(), Decimal::ZERO);
+
+        let net: Decimal = c
+            .positions()
+            .closed_positions()
+            .iter()
+            .map(|p| p.net_pnl_usd)
+            .sum();
+        assert!(
+            net > Decimal::ZERO,
+            "the fixture is meant to close at a profit, got {net}"
+        );
+        let parts: Vec<String> = c
+            .positions()
+            .closed_positions()
+            .iter()
+            .map(|p| {
+                let ef = (p.entry_fee_pct / Decimal::ONE_HUNDRED) * p.entry_price * p.shares;
+                let xf = (p.exit_fee_pct / Decimal::ONE_HUNDRED) * p.exit_price * p.shares;
+                format!(
+                    "id={} entry={} exit={} shares={} mkEntry={} mkExit={} entryFee={} exitFee={} gross={} net={}",
+                    p.id, p.entry_price, p.exit_price, p.shares, p.was_maker_entry,
+                    p.was_maker_exit, ef, xf, p.pnl_usd, p.net_pnl_usd
+                )
+            })
+            .collect();
+        assert_eq!(
+            c.ledger().balance(),
+            SEED + net,
+            "cash must equal principal + realized net once nothing is open; closed={parts:?}"
+        );
+    }
 }
 
 /// P-1.2: the dry matcher honours the configured [`crate::sim::FillModel`]. The
