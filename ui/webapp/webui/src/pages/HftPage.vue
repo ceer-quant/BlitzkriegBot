@@ -214,6 +214,18 @@ const winBands = computed(() => {
 // ── engine control ──────────────────────────────────────────────────────────
 const busy = ref(false)
 const cmdMsg = ref<string | null>(null)
+
+/**
+ * Whether the engine is up and therefore stoppable.
+ *
+ * `connected` is the gateway's "core is reachable on the socket" flag, and the
+ * core *is* the engine — 启动 spawns it, 停止 kills it — so reachability is the
+ * running state. It stays accurate on a failed poll too: the web adapter answers
+ * 200 with `connected: false` rather than erroring, so the store never keeps a
+ * stale `true`.
+ */
+const engineUp = computed(() => snap.value?.connected ?? false)
+
 async function send(cmd: 'start' | 'stop'): Promise<void> {
   busy.value = true
   cmdMsg.value = null
@@ -304,10 +316,27 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
               <Bell v-if="sound" /><BellOff v-else class="opacity-60" />
             </Button>
           </Tooltip>
-          <Button variant="up" :disabled="busy" @click="send('start')">
+          <!--
+            Exactly one of these carries the next move. While the engine runs
+            that is 停止, so it takes the solid deep fill and 启动 goes pale and
+            inert; when the engine is down the pair swaps. A control with nothing
+            to do is disabled rather than merely dimmed, so it cannot be clicked
+            into a command that would fail or do nothing.
+          -->
+          <Button
+            :variant="engineUp ? 'idle' : 'up'"
+            :disabled="busy || engineUp"
+            :title="engineUp ? '引擎运行中，无需重复启动' : '启动引擎'"
+            @click="send('start')"
+          >
             <Play class="size-3.5" />启动
           </Button>
-          <Button variant="danger" :disabled="busy" @click="send('stop')">
+          <Button
+            :variant="engineUp ? 'danger-solid' : 'idle'"
+            :disabled="busy || !engineUp"
+            :title="engineUp ? '停止引擎' : '引擎未运行'"
+            @click="send('stop')"
+          >
             <Square class="size-3.5" />停止
           </Button>
         </div>

@@ -45,6 +45,11 @@
   --primary-ink: oklch(0.2 0.05 60);
   --up: oklch(0.79 0.17 158);
   --down: oklch(0.68 0.2 22);
+  /* Deep fills for buttons that carry the destructive action. `--down` is tuned
+     for text on a dark panel, so it is too light to sit *under* white text;
+     this pair is the fill and its ink. */
+  --down-solid: oklch(0.55 0.19 25);
+  --down-ink: oklch(0.99 0.005 25);
   --info: oklch(0.72 0.13 240);
   --grid-line: oklch(1 0 0 / 0.035);
   --sheen: oklch(1 0 0 / 0.1);
@@ -70,6 +75,9 @@
   --primary-ink: oklch(0.99 0.01 80);
   --up: oklch(0.62 0.16 158);
   --down: oklch(0.58 0.2 22);
+  /* Light-theme counterpart: deep enough that white ink clears AA on it. */
+  --down-solid: oklch(0.5 0.19 25);
+  --down-ink: oklch(0.99 0.005 25);
   --info: oklch(0.6 0.15 240);
   --grid-line: oklch(0.2 0.02 268 / 0.045);
   --sheen: oklch(1 0 0 / 0.7);
@@ -94,6 +102,7 @@
   --color-primary-ink: var(--primary-ink);
   --color-up: var(--up);
   --color-down: var(--down);
+  --color-down-solid: var(--down-solid);
   --color-info: var(--info);
 }
 
@@ -255,6 +264,17 @@
   }
   .btn-gold:hover {
     filter: brightness(1.07);
+  }
+
+  /* Solid destructive fill — the mirror of .btn-gold, for the stop control.
+     A flat token fill rather than a gradient, so it reads as the one committed
+     action instead of competing with the gold identity. */
+  .btn-down-solid {
+    background: var(--down-solid);
+    color: var(--down-ink);
+  }
+  .btn-down-solid:hover {
+    filter: brightness(1.1);
   }
 
   /* live pulse for the connection dot */
