@@ -6,14 +6,15 @@
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
-import { Play, Square, Bell, BellOff, Search, TrendingUp, TrendingDown, Clock, Filter } from 'lucide-vue-next'
+import { Play, Square, Bell, BellOff, Search, TrendingUp, TrendingDown, Clock, Filter, Info } from 'lucide-vue-next'
 import { api, marketTypeLabel, type MarketPrice, type TradeRow } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { useTheme } from '@/lib/theme'
 import {
   num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration, dateTime,
 } from '@/lib/format'
-import { reconcileBalance } from '@/lib/balance'
+import { balanceView } from '@/lib/balance'
+import { controlState } from '@/lib/lifecycle'
 import {
   playDang, playDing, playOrder, playProfit, playWuwu,
 } from '@/composables/alertSounds'
@@ -125,10 +126,14 @@ const cumStats = computed(() => {
   const net = rows.reduce((x, t) => x + (Number(t.netPnlUsd) || 0), 0)
   const wins = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length
   const pcts = rows.map((t) => Number(t.netPnlPct) || 0)
+  const fees = rows.reduce((x, t) => x + (Number(t.feesUsd) || 0), 0)
   return {
     total: rows.length,
-    gross: net,
-    fees: rows.reduce((x, t) => x + (Number(t.feesUsd) || 0), 0),
+    // `netPnlUsd` is already after fees, so gross is net plus the fees back —
+    // NOT net itself, which would print the post-cost figure under a pre-cost
+    // label and make the cost invisible.
+    gross: net + fees,
+    fees,
     net,
     wins,
     losses: rows.length - wins,
@@ -140,8 +145,8 @@ const cumStats = computed(() => {
   }
 })
 
-// ── balance reconciliation (本金 + 净利 vs the core's cash ledger) ────────────
-const recon = computed(() => reconcileBalance(snap.value?.balance, cumStats.value.net))
+// ── balance (本金 + 净利 is the real balance; cash is the ledger it commits against)
+const recon = computed(() => balanceView(snap.value?.balance, cumStats.value.net, cumStats.value.fees))
 
 // ── history filters ─────────────────────────────────────────────────────────
 const fTime = ref<'all' | 'today' | '7d'>('all')
@@ -216,7 +221,7 @@ const busy = ref(false)
 const cmdMsg = ref<string | null>(null)
 
 /**
- * Whether the engine is up and therefore stoppable.
+ * Whether the engine is up.
  *
  * `connected` is the gateway's "core is reachable on the socket" flag, and the
  * core *is* the engine — 启动 spawns it, 停止 kills it — so reachability is the
@@ -225,6 +230,31 @@ const cmdMsg = ref<string | null>(null)
  * stale `true`.
  */
 const engineUp = computed(() => snap.value?.connected ?? false)
+
+/**
+ * What the two controls can actually do here.
+ *
+ * Reachability alone is not enough to offer a live 停止: a gateway started
+ * without `--manage` refuses both verbs, and even with `--manage` it only stops
+ * a core it spawned itself (`Supervisor::stop` leaves an adopted core running).
+ * `controlState` folds those in so the buttons are disabled with a stated
+ * reason instead of being clickable and failing.
+ */
+const control = computed(() => controlState(snap.value?.gateway, engineUp.value))
+
+/** Tooltip/title explaining why a control is unavailable (empty when usable). */
+const startHint = computed(() => {
+  if (busy.value) return '正在下发命令…'
+  if (control.value.canStart) return '启动引擎'
+  if (engineUp.value) return '引擎运行中，无需重复启动'
+  return control.value.blockedReason ?? '无法启动引擎'
+})
+const stopHint = computed(() => {
+  if (busy.value) return '正在下发命令…'
+  if (control.value.canStop) return '停止引擎'
+  if (!engineUp.value) return '引擎未运行'
+  return control.value.blockedReason ?? '无法停止引擎'
+})
 
 async function send(cmd: 'start' | 'stop'): Promise<void> {
   busy.value = true
@@ -319,27 +349,43 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
           <!--
             Exactly one of these carries the next move. While the engine runs
             that is 停止, so it takes the solid deep fill and 启动 goes pale and
-            inert; when the engine is down the pair swaps. A control with nothing
-            to do is disabled rather than merely dimmed, so it cannot be clicked
-            into a command that would fail or do nothing.
+            inert; when the engine is down the pair swaps.
+
+            Enabled state comes from `control`, not from reachability alone: the
+            gateway may refuse the verbs outright (`--manage` absent) or be
+            unable to stop an adopted core. A control that cannot act is disabled
+            with the reason in its `title`, so hovering explains the refusal
+            rather than leaving the user to discover it by clicking.
           -->
           <Button
-            :variant="engineUp ? 'idle' : 'up'"
-            :disabled="busy || engineUp"
-            :title="engineUp ? '引擎运行中，无需重复启动' : '启动引擎'"
+            :variant="control.canStart ? 'up' : 'idle'"
+            :disabled="busy || !control.canStart"
+            :title="startHint"
             @click="send('start')"
           >
             <Play class="size-3.5" />启动
           </Button>
           <Button
-            :variant="engineUp ? 'danger-solid' : 'idle'"
-            :disabled="busy || !engineUp"
-            :title="engineUp ? '停止引擎' : '引擎未运行'"
+            :variant="control.canStop ? 'danger-solid' : 'idle'"
+            :disabled="busy || !control.canStop"
+            :title="stopHint"
             @click="send('stop')"
           >
             <Square class="size-3.5" />停止
           </Button>
         </div>
+      </div>
+
+      <!--
+        An inert pair with no explanation is the bug being fixed here, so when
+        neither control can act, say which of the two reasons applies.
+      -->
+      <div
+        v-if="!control.usable && control.blockedReason"
+        class="mt-3 flex items-start gap-2 rounded-md border border-line bg-panel-2 px-3 py-2 text-[11.5px] leading-snug text-muted-fg"
+      >
+        <Info class="mt-px size-3.5 shrink-0 text-faint-fg" />
+        <span>{{ control.blockedReason }}</span>
       </div>
 
       <Transition name="fade">
@@ -453,30 +499,47 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         <StatRow label="运行模式" :value="(snap.mode ?? '—').toUpperCase()" :tone="isDry ? 'gold' : 'up'" />
         <StatRow label="行情轮次" :value="round?.markets ?? '—'" tone="dim" />
         <div class="mt-2.5 border-t border-line pt-2.5">
+          <!--
+            Headline is 本金 ＋ 净利润 (the real balance). The core's cash ledger
+            is a second row underneath, because the engine sizes orders against
+            cash even when cash has not had the fees taken out of it.
+          -->
           <StatRow
-            :label="isDry ? '模拟余额' : '交易所余额'"
-            :value="money(snap.balance?.balance)"
+            :label="isDry ? (recon.equity !== null ? '真实余额' : '内核现金账') : (recon.equity !== null ? '账户权益' : '交易所余额')"
+            :value="recon.equity !== null ? money(recon.equity) : money(recon.cash)"
             :tone="isDry ? 'gold' : 'default'"
           />
-          <p v-if="recon.seed !== null" class="mt-1 text-[10px] leading-snug text-faint-fg">
-            本金 {{ money(recon.seed) }} ＋ 已实现净利 {{ signedMoney(recon.net) }} − 未平仓占用 {{ money(recon.reserved) }}
-            <Tooltip :content="`余额是内核的现金账：本金随每笔成交与手续费增减，再减去挂单占用。净利来自已平仓记录。两者口径一致时应当吻合；出现差额说明内核的现金流水与盈亏记录不同源（例如进程早于费用入账修复启动，或记录跨越多个进程）。差额 ${signedMoney(recon.residual)}。`">
-              <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2" :class="recon.drifted ? 'text-down' : 'text-up'">
-                {{ recon.drifted ? `对账差 ${signedMoney(recon.residual)}` : '已对账' }}
+          <p v-if="recon.equity !== null" class="mt-1 text-[10px] leading-snug text-faint-fg">
+            本金 {{ money(recon.seed) }} ＋ 已实现净利 {{ signedMoney(recon.net) }}
+            <Tooltip :content="`真实余额 = 本金 ${money(recon.seed)} ＋ 扣费后净利 ${signedMoney(recon.net)}。手续费是成本：毛利 ${money(recon.gross)} − 手续费 ${money(recon.fees)} = 净利。手续费不改变本金，因此不并入余额。`">
+              <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
+                手续费支出 {{ money(recon.fees) }}
               </span>
             </Tooltip>
           </p>
           <!--
             No principal on the wire: either LIVE, or a core older than the field
-            that reports it. Say why the two numbers need not add up instead of
-            printing an equation the panel cannot verify.
+            that reports it. Show the cash ledger and say the principal is
+            missing instead of printing an equation the panel cannot verify.
           -->
           <p v-else-if="isDry" class="mt-1 text-[10px] leading-snug text-faint-fg">
-            <Tooltip content="余额是内核的现金账：本金随每笔成交与手续费增减，再减去挂单占用。要显示对账结果，内核必须上报本金；当前运行中的内核未上报本金，因此这里只标注口径、不虚构等式。重启内核后即可显示完整对账。">
+            <Tooltip content="内核未上报本金，无法计算「本金 ＋ 净利」的真实余额，此处显示内核现金账。本金由内核按 --seed-balance 持有；当前运行中的内核早于该字段，重启内核后即可显示真实余额。">
               <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-                本进程现金账 · 本金未上报
+                内核现金账 · 本金未上报
               </span>
             </Tooltip>
+          </p>
+          <!-- The ledger the engine actually commits against, when it differs. -->
+          <p v-if="recon.equity !== null && isDry" class="mt-1 text-[10px] leading-snug text-faint-fg">
+            <Tooltip
+              v-if="recon.gapMaterial"
+              :content="`内核现金账 ${money(recon.cash)} 高于真实余额 ${money(recon.equity)}，差额 ${signedMoney(recon.cashGap)}：该口径把成交额计入现金、却未把手续费从现金中扣除，差额≈未入账手续费 ${money(recon.fees)}。引擎下单能力以现金账为准，真实余额以本金＋净利为准。`"
+            >
+              <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
+                内核现金账 {{ money(recon.cash) }} · 高于真实余额 {{ signedMoney(recon.cashGap) }}
+              </span>
+            </Tooltip>
+            <span v-else>内核现金账 {{ money(recon.cash) }}</span>
           </p>
         </div>
       </Card>

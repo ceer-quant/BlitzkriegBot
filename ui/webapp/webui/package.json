@@ -6,7 +6,8 @@
     "build": "vite build",
     "check": "vue-tsc --noEmit",
     "check:theme": "node --experimental-strip-types scripts/theme-follow-system.check.mjs",
-    "check:balance": "node --experimental-strip-types scripts/balance-accounting.check.mjs"
+    "check:balance": "node --experimental-strip-types scripts/balance-accounting.check.mjs",
+    "check:lifecycle": "node --experimental-strip-types scripts/lifecycle-control.check.mjs"
   },
   "license": "ISC",
   "type": "module",

@@ -266,6 +266,22 @@ export interface Snapshot {
   marketActiveType?: MarketType | null
   /** Venue wallet identity — null in dry mode (local seed cash, not venue funds). */
   wallet?: { signer: string | null; funder: string | null }
+  /**
+   * What the gateway serving this snapshot can do about the core *process*.
+   *
+   * Absent on a read-only adapter (`ui_kit_web` without a dispatcher) and on
+   * older gateways. Absence must be read as "cannot control the lifecycle", so
+   * treat a missing block as disabled rather than falling back to enabled.
+   */
+  gateway?: {
+    /** This gateway accepts `start`/`stop` — it was started with `--manage`. */
+    lifecycleEnabled: boolean
+    /** This gateway spawned the core, so it can also stop it. */
+    managed: boolean
+    /** PID of the core this gateway spawned; null when the core was adopted. */
+    corePid: number | null
+    socket: string
+  } | null
   strategyStats?: StrategyStatsRow[]
 }
 

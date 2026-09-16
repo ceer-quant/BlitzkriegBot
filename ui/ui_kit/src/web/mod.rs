@@ -199,9 +199,38 @@ pre{{white-space:pre-wrap;margin:10px 0 0}}
     )
 }
 
+/// What this gateway can actually do about the core *process*, as opposed to
+/// what it can read from it.
+///
+/// The panel offers 启动/停止, and both are refused in two independent
+/// situations: the gateway was started without `--manage` (the verbs are
+/// disabled outright), or a core is already running that this gateway did not
+/// spawn, in which case [`crate::gateway::Supervisor::stop`] deliberately leaves
+/// it alone. Reporting the state lets the panel mark those controls unusable and
+/// say why, instead of offering a click whose only outcome is an error.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LifecycleView {
+    /// `--manage` (or `UIKIT_MANAGE=1`): the gateway accepts `start`/`stop`.
+    pub enabled: bool,
+    /// This gateway spawned the core, so it can also stop it. False means the
+    /// core was adopted — a running process owned by somebody else.
+    pub managed: bool,
+    /// PID of the core this gateway spawned; null when adopted.
+    pub pid: Option<u32>,
+    /// Socket both the reads and the lifecycle verbs act on.
+    pub socket: String,
+}
+
 /// Render the snapshot as a stable JSON document (for programmatic consumers).
-pub fn render_json(s: &UiSnapshot) -> String {
-    serde_json::json!({
+///
+/// `lifecycle` is the gateway's own process-control state. It is separate from
+/// the snapshot because it describes *this* gateway, not the core; a read-only
+/// deployment (no dispatcher) passes `None` and the panel then knows it cannot
+/// drive the lifecycle either. The `gateway` key is then OMITTED rather than set
+/// to null, so a consumer cannot mistake "no gateway here" for "a gateway that
+/// reports nothing".
+pub fn render_json(s: &UiSnapshot, lifecycle: Option<&LifecycleView>) -> String {
+    let mut doc = serde_json::json!({
         "connected": s.connected,
         "mode": s.mode(),
         "balance": s.balance.as_ref().map(|b| serde_json::json!({
@@ -284,8 +313,21 @@ pub fn render_json(s: &UiSnapshot) -> String {
             .and_then(|n| s.market_plugins.iter().find(|p| &p.name == n))
             .map(|p| p.kind.clone()),
         "lastError": s.last_error,
-    })
-    .to_string()
+    });
+
+    // Process-control capabilities, inserted only when this server has a
+    // dispatcher. `managed` is the load-bearing one for 停止: an adopted core
+    // cannot be stopped from here even with `--manage`, so the panel must not
+    // present a live stop button for it.
+    if let Some(l) = lifecycle {
+        doc["gateway"] = serde_json::json!({
+            "lifecycleEnabled": l.enabled,
+            "managed": l.managed,
+            "corePid": l.pid,
+            "socket": l.socket,
+        });
+    }
+    doc.to_string()
 }
 
 
@@ -634,6 +676,18 @@ impl WebServer {
             .unwrap_or(false)
     }
 
+    /// Process-control state for the panel. `None` when this server has no
+    /// dispatcher at all (pure read-only adapter).
+    fn lifecycle_view(&self) -> Option<LifecycleView> {
+        let d = self.dispatcher.as_ref()?.lock().ok()?;
+        Some(LifecycleView {
+            enabled: d.lifecycle_enabled(),
+            managed: d.managed(),
+            pid: d.pid(),
+            socket: d.socket_path().to_string(),
+        })
+    }
+
     fn handle(&self, mut stream: TcpStream) {
         // A client that connects and stalls must not wedge the accept loop.
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
@@ -687,7 +741,8 @@ impl WebServer {
             }
             ("GET", "/api/snapshot") => {
                 let snap = self.snapshot();
-                (200, "application/json", render_json(&snap))
+                let lifecycle = self.lifecycle_view();
+                (200, "application/json", render_json(&snap, lifecycle.as_ref()))
             }
             ("GET", "/api/command") | ("POST", "/api/command") => {
                 let cmd = if req.method == "POST" {
@@ -933,5 +988,55 @@ mod tests {
         assert!(render_html(&snap).contains("Blitzkrieg UI Kit"));
         assert!(!render_html(&snap).contains("Command console"));
         assert!(render_html_with(&snap, true).contains("Command console"));
+    }
+
+    /// The panel's 启动/停止 buttons are gated on this block, so absent
+    /// information must read as "cannot", never as "can".
+    #[test]
+    fn render_json_reports_gateway_capabilities() {
+        let snap = UiSnapshot::default();
+        // No dispatcher (read-only adapter): no `gateway` block at all, so a
+        // consumer that defaults a missing block to `false` stays safe.
+        let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, None)).unwrap();
+        assert!(doc.get("gateway").is_none());
+
+        // Adopted core with `--manage`: the verbs are accepted, but stop cannot
+        // act on a core this gateway did not spawn. The two flags must be
+        // reported independently or the panel cannot tell them apart.
+        let adopted = LifecycleView {
+            enabled: true,
+            managed: false,
+            pid: None,
+            socket: "/tmp/x.sock".into(),
+        };
+        let doc: serde_json::Value =
+            serde_json::from_str(&render_json(&snap, Some(&adopted))).unwrap();
+        assert_eq!(doc["gateway"]["lifecycleEnabled"], serde_json::json!(true));
+        assert_eq!(doc["gateway"]["managed"], serde_json::json!(false));
+        assert_eq!(doc["gateway"]["corePid"], serde_json::Value::Null);
+        assert_eq!(doc["gateway"]["socket"], serde_json::json!("/tmp/x.sock"));
+
+        // Spawned core: both true, and the PID is on the wire.
+        let owned = LifecycleView {
+            enabled: true,
+            managed: true,
+            pid: Some(4242),
+            socket: "/tmp/x.sock".into(),
+        };
+        let doc: serde_json::Value =
+            serde_json::from_str(&render_json(&snap, Some(&owned))).unwrap();
+        assert_eq!(doc["gateway"]["managed"], serde_json::json!(true));
+        assert_eq!(doc["gateway"]["corePid"], serde_json::json!(4242));
+
+        // Read-only gateway: `enabled` false even though a dispatcher exists.
+        let readonly = LifecycleView {
+            enabled: false,
+            managed: false,
+            pid: None,
+            socket: "/tmp/x.sock".into(),
+        };
+        let doc: serde_json::Value =
+            serde_json::from_str(&render_json(&snap, Some(&readonly))).unwrap();
+        assert_eq!(doc["gateway"]["lifecycleEnabled"], serde_json::json!(false));
     }
 }

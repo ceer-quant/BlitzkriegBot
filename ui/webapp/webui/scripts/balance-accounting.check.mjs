@@ -3,12 +3,18 @@
  * `src/lib/trades.ts`).
  *
  * These two modules are what turned "模拟余额 1070 with 净利润 40" from a
- * contradiction into an explained number, so the properties that make it
- * explained are pinned here:
+ * contradiction into an explained number, and then (rewritten) into the right
+ * question being asked in the first place. The properties pinned here:
  *
- *   - the reconciliation residual is `cash − reserved − seed − net`;
- *   - an unknown principal yields NO residual, so a core that does not report
- *     its seed is never accused of drift against a principal of zero;
+ *   - the headline balance is 本金 ＋ 净利润, so a fee can never move the
+ *     principal — it is an expense already deducted from net profit;
+ *   - fees are reported as a cost, and gross profit is `net + fees` — the figure
+ *     the cost is charged against;
+ *   - the core's cash ledger is kept as a separate, operative number, and any gap
+ *     between it and 本金 ＋ 净利润 is labelled as the kernel's cash basis rather
+ *     than as a contradiction in the balance;
+ *   - an unknown principal yields NO equity and NO gap, so a core that does not
+ *     report its seed is never accused of drifting against a principal of zero;
  *   - closed-trade rows collapse by id, because `hft-N` restarts every boot
  *     against an append-only log and summing it raw inflates both the trade
  *     count and the net PnL.
@@ -28,63 +34,94 @@ const check = (label, fn) => {
   }
 }
 
-const { reconcileBalance } = await import('../src/lib/balance.ts')
+const { balanceView } = await import('../src/lib/balance.ts')
 const { dedupeTrades } = await import('../src/lib/trades.ts')
 
 const balance = (over) => ({ balance: 0, reserved: 0, available: 0, seed: null, ...over })
 
-console.log('balance reconciliation')
+console.log('balance basis — 本金 ＋ 净利润')
 
-check('books that agree reconcile to zero', () => {
-  const r = reconcileBalance(balance({ balance: 1039.44, available: 1039.44, seed: 1000 }), 39.44)
-  assert.equal(r.seed, 1000)
-  assert.equal(Number(r.residual.toFixed(6)), 0)
-  assert.equal(r.drifted, false)
+check('the headline is 本金 ＋ 净利润, not the core cash ledger', () => {
+  // The case that started this: cash 1073.29, principal 1000, net 39.44. The
+  // balance shown is 1039.44; cash is a separate number, not the balance.
+  const v = balanceView(balance({ balance: 1073.29, available: 1073.29, seed: 1000 }), 39.44, 34.96)
+  assert.equal(Number(v.equity.toFixed(2)), 1039.44)
+  assert.equal(v.cash, 1073.29)
+  assert.notEqual(v.equity, v.cash, 'an unexplained cash surplus is not the balance')
+})
+
+check('a fee is an expense: it reduces net profit, never the principal', () => {
+  // Same trade with and without fees. The principal is untouched; the net profit
+  // absorbs the cost; gross is the pre-cost figure fees are charged against.
+  const withFees = balanceView(balance({ balance: 1039.44, available: 1039.44, seed: 1000 }), 39.44, 34.96)
+  assert.equal(withFees.seed, 1000, 'fees do not move the principal')
+  assert.equal(Number(withFees.gross.toFixed(2)), 74.40, 'gross = net + fees')
+  assert.equal(Number(withFees.net.toFixed(2)), 39.44, 'net is already after fees')
+  assert.ok(withFees.gross > withFees.net, 'the expense is deducted from gross, not added')
+})
+
+check('equity reconciles exactly when the core charges fees to cash', () => {
+  // A core whose Ledger deducts the fees lands cash on the equity; then the gap
+  // is zero and nothing is flagged.
+  const v = balanceView(balance({ balance: 1039.44, available: 1039.44, seed: 1000 }), 39.44, 34.96)
+  assert.equal(Number(v.cashGap.toFixed(6)), 0)
+  assert.equal(v.gapMaterial, false)
 })
 
 check('reserved cash is not counted as profit', () => {
-  // 1039.44 cash with 10.56 tied up in resting buys is 1028.88 of free cash;
-  // the residual must look past the reservation to the principal.
-  const r = reconcileBalance(balance({ balance: 1050, reserved: 10.56, available: 1039.44, seed: 1000 }), 39.44)
-  assert.equal(Number(r.residual.toFixed(6)), 0)
-  assert.equal(r.drifted, false)
+  // 1050 cash with 10.56 tied up in resting buys is 1039.44 of free cash. The
+  // gap must look past the reservation.
+  const v = balanceView(balance({ balance: 1050, reserved: 10.56, available: 1039.44, seed: 1000 }), 39.44, 0)
+  assert.equal(Number(v.cashGap.toFixed(6)), 0)
+  assert.equal(v.gapMaterial, false)
 })
 
-check('an unknown principal reports no residual rather than a fabricated one', () => {
-  // LIVE, or a core older than the `seed` field. Treating the missing principal
-  // as 0 would report the entire balance as drift.
-  const r = reconcileBalance(balance({ balance: 1073.29, available: 1073.29, seed: null }), 39.44)
-  assert.equal(r.seed, null)
-  assert.equal(r.residual, null)
-  assert.equal(r.drifted, false, 'absence of evidence is not drift')
+check('cash above equity is reported as a kernel cash-basis gap', () => {
+  // The live dry books measured on 2026-09-16: seed 1000, cash 1073.29,
+  // realized net 39.438323, fees 34.961677. The gap is the taker fee the running
+  // core never charged to cash (34.96) less the per-share rounding shortfall
+  // (1.11). Crucially the headline stays 1039.44 — the gap does NOT inflate it.
+  const net = 39.438323
+  const fees = 34.961677
+  const v = balanceView(balance({ balance: 1073.2887, available: 1073.2887, seed: 1000 }), net, fees)
+  assert.equal(Number(v.equity.toFixed(2)), 1039.44)
+  assert.equal(Number(v.cashGap.toFixed(2)), 33.85)
+  assert.equal(v.gapMaterial, true)
+  assert.equal(Number((fees - 1.11).toFixed(2)), 33.85, 'gap is the uncharged fee less the shortfall')
+})
+
+check('an unknown principal yields no equity and no gap, not a fabricated one', () => {
+  // LIVE, or a core older than the `seed` field (the core running here started
+  // before it). Treating the missing principal as 0 would report the entire
+  // balance as a gap.
+  const v = balanceView(balance({ balance: 1073.29, available: 1073.29, seed: null }), 39.44, 34.96)
+  assert.equal(v.seed, null)
+  assert.equal(v.equity, null)
+  assert.equal(v.cashGap, null)
+  assert.equal(v.gapMaterial, false, 'absence of evidence is not a gap')
+  // The cash ledger and the cost are still known and still reported.
+  assert.equal(v.cash, 1073.29)
+  assert.equal(Number(v.gross.toFixed(2)), 74.40)
 })
 
 check('a missing balance object degrades to zeros, not NaN', () => {
-  const r = reconcileBalance(undefined, 0)
-  assert.deepEqual([r.balance, r.reserved, r.available], [0, 0, 0])
-  assert.equal(r.residual, null)
+  const v = balanceView(undefined, 0, 0)
+  assert.deepEqual([v.cash, v.reserved, v.available], [0, 0, 0])
+  assert.equal(v.equity, null)
+  assert.equal(v.cashGap, null)
+  assert.ok(Number.isFinite(v.gross), 'gross must stay a number')
 })
 
-check('a real cash-vs-record divergence is surfaced with its sign', () => {
-  // The live dry books measured on 2026-09-16: seed 1000, cash 1073.29,
-  // realized net 39.438323. The gap is the taker fee the running core never
-  // charged to cash (34.96) less the per-share rounding shortfall (1.11).
-  const net = 39.438323
-  const r = reconcileBalance(balance({ balance: 1073.29, available: 1073.29, seed: 1000 }), net)
-  assert.equal(Number(r.residual.toFixed(2)), 33.85)
-  assert.equal(r.drifted, true)
-  assert.equal(Number((34.96 - 1.11).toFixed(2)), 33.85, 'residual is the uncharged fee less the shortfall')
+check('sub-cent gaps are rounding, not a basis difference', () => {
+  const v = balanceView(balance({ balance: 1039.442, available: 1039.442, seed: 1000 }), 39.44, 0)
+  assert.equal(v.gapMaterial, false)
 })
 
-check('sub-cent residuals are rounding, not drift', () => {
-  const r = reconcileBalance(balance({ balance: 1039.442, available: 1039.442, seed: 1000 }), 39.44)
-  assert.equal(r.drifted, false)
-})
-
-check('a loss side residual keeps its sign', () => {
-  const r = reconcileBalance(balance({ balance: 900, available: 900, seed: 1000 }), -50)
-  assert.equal(Number(r.residual.toFixed(6)), -50)
-  assert.equal(r.drifted, true)
+check('a loss keeps its sign through equity and gap', () => {
+  const v = balanceView(balance({ balance: 900, available: 900, seed: 1000 }), -50, 0)
+  assert.equal(Number(v.equity.toFixed(6)), 950)
+  assert.equal(Number(v.cashGap.toFixed(6)), -50)
+  assert.equal(v.gapMaterial, true)
 })
 
 console.log('\nclosed-trade dedupe')
