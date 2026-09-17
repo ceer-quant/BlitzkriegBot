@@ -287,6 +287,10 @@ pub struct ReconcileTrade {
     pub price: Decimal,
     #[serde(default)]
     pub ts_ms: i64,
+    /// The venue's own maker/taker report for this trade, when Node knows it.
+    /// Absent means "fall back to the order's fill policy".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -344,6 +348,26 @@ pub struct PositionView {
     pub entered_at_ms: i64,
     pub expires_at_ms: i64,
     pub remaining_sec: i64,
+    /// The ACTUAL cash flows accrued on this position so far (E17). Exposed so an
+    /// external monitor can verify the accounting identity at any instant, not
+    /// only once the position is closed:
+    ///
+    /// ```text
+    ///   balance == seed + Σ_closed net
+    ///                    − Σ_open (cost_usd + entry_fee_usd)
+    ///                    + Σ_open (proceeds_usd − exit_fee_usd)
+    /// ```
+    ///
+    /// A partially-exited position has both sides non-zero, which is exactly the
+    /// case a flat-only check cannot see.
+    #[serde(with = "crate::decimal")]
+    pub cost_usd: Decimal,
+    #[serde(with = "crate::decimal")]
+    pub entry_fee_usd: Decimal,
+    #[serde(with = "crate::decimal")]
+    pub proceeds_usd: Decimal,
+    #[serde(with = "crate::decimal")]
+    pub exit_fee_usd: Decimal,
 }
 
 #[derive(Debug, Clone, Deserialize)]

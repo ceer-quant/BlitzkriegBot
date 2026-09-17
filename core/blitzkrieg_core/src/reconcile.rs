@@ -28,6 +28,10 @@ pub struct VenueTrade {
     pub price: rust_decimal::Decimal,
     pub ts_ms: i64,
     pub tx_hash: Option<String>,
+    /// The venue's maker/taker report for this trade, when it has one. A gap
+    /// fill synthesized from it must charge the fee the venue actually charged,
+    /// so the role travels with the trade rather than being re-guessed (E17).
+    pub maker: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -106,6 +110,8 @@ pub fn reconcile(ome: &mut Ome, snap: &VenueSnapshot) -> CoreResult<ReconcileRep
             status: FillStatus::Confirmed,
             ts_ms: last.ts_ms,
             tx_hash: last.tx_hash.clone(),
+            // Carry the venue's role through the synthesized gap fill.
+            maker: last.maker,
         };
         if let Some(delta) = ome.apply_fill(fill, snap.now_ms)? {
             report.actions.push(ReconcileAction::FilledGap {
@@ -210,6 +216,7 @@ mod tests {
                 price: dec!(0.4),
                 ts_ms: 2,
                 tx_hash: None,
+                maker: Some(true),
             }],
             now_ms: 3,
         };

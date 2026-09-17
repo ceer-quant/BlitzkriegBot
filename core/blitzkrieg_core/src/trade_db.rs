@@ -212,7 +212,7 @@ pub fn read_recent(path: &Path, limit: usize) -> Vec<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ExitReason, SignalDirection};
+    use crate::model::{ExitReason, OrderRole, SignalDirection};
     use crate::position::ClosedPosition;
 
     fn closed() -> ClosedPosition {
@@ -241,6 +241,9 @@ mod tests {
             exit_reason: ExitReason::TakeProfit,
             entered_at_ms: 1000,
             exited_at_ms: 65000,
+            entry_role: OrderRole::Maker,
+            exit_role: OrderRole::Taker,
+            dust_shares: Decimal::ZERO,
         }
     }
 

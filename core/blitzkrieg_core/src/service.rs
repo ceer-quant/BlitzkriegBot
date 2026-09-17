@@ -1530,6 +1530,12 @@ impl Core {
                 entered_at_ms: p.entered_at_ms,
                 expires_at_ms: p.expires_at_ms,
                 remaining_sec: (p.expires_at_ms - now_ms) / 1000,
+                // Cash actually moved on this position, so an external monitor
+                // can check the ledger identity without waiting for a flat book.
+                cost_usd: p.cost_usd,
+                entry_fee_usd: p.flows.entry_fee_usd,
+                proceeds_usd: p.flows.proceeds_usd,
+                exit_fee_usd: p.flows.exit_fee_usd,
             })
             .collect()
     }
@@ -1597,22 +1603,27 @@ impl Core {
 
     /// Ledger + position projection for a canonical fill delta. Single choke
     /// point shared by dry fills, live user-WS fills and reconciliation gaps.
+    ///
+    /// E17: the fee follows the fill's RESOLVED role (`d.role`), and the cash
+    /// movement and the position accrual are computed from ONE fee value, so the
+    /// ledger and the trade record cannot disagree about what was paid.
     fn apply_delta_effects(&mut self, d: FillDelta, now_ms: i64) {
         let px = d.price;
-        // Cash fees mirror the trade ledger exactly: taker_fee_pct(price) on
-        // the fill notional, zero for maker fills, charged on BOTH sides
-        // (entry + exit). Charging here keeps the cash balance on the same
-        // net-realized basis as closed-trade netPnlUsd — otherwise the balance
-        // sits above the PnL views by the accumulated fee total. Fee applies
-        // to the incremental delta (not the cumulative), so partial fills
-        // charge exactly once per share; rollbacks (delta < 0) charge nothing.
+        // A maker fill pays no fee; a taker fill pays taker_fee_pct(price) on the
+        // fill's own notional. `d.role` is what the fill actually did — the old
+        // `match d.mode` read the REQUESTED policy, which charged a
+        // MakerThenTaker order the taker fee while its position record said maker.
+        // Fee applies to the incremental delta (not the cumulative), so partial
+        // fills charge exactly once per share; rollbacks (delta <= 0) charge none.
+        let mut fee_usd = Decimal::ZERO;
         if d.delta > Decimal::ZERO {
             let notional = px * d.delta;
-            let fee_pct = match d.mode {
-                FillPolicy::Maker => Decimal::ZERO,
-                _ => crate::exit_policy::taker_fee_pct(px),
+            let fee_pct = if d.role.is_maker() {
+                Decimal::ZERO
+            } else {
+                crate::exit_policy::taker_fee_pct(px)
             };
-            let fee_usd = (fee_pct / Decimal::ONE_HUNDRED) * notional;
+            fee_usd = (fee_pct / Decimal::ONE_HUNDRED) * notional;
             match d.side {
                 Side::Buy => {
                     self.ledger.settle_buy_fill(&d.order_id, notional);
@@ -1627,59 +1638,67 @@ impl Core {
                 Side::Sell => self.ledger.settle_buy_fill(&d.order_id, -px * d.delta),
             }
         }
-        self.project_fill_delta(&d, now_ms);
+        self.project_fill_delta(&d, fee_usd, now_ms);
         self.emit_fill(d);
     }
 
     /// Keep the position book in sync with fills: BUY opens/averages-in, SELL
     /// reduces/closes. One position per token, so token_id identifies it.
-    fn project_fill_delta(&mut self, d: &FillDelta, now_ms: i64) {
+    ///
+    /// `fee_usd` is the cash fee the ledger just charged for this same delta, so
+    /// the position's cost basis is the money actually spent (E17-d).
+    fn project_fill_delta(&mut self, d: &FillDelta, fee_usd: Decimal, now_ms: i64) {
+        let px = d.price;
         let token = &d.token_id;
         match d.side {
             Side::Buy => {
-                if let Some(pos) = self
+                let existing = self
                     .positions
                     .open_positions()
                     .iter()
                     .find(|p| &p.token_id == token)
-                {
-                    let id = pos.id.clone();
-                    let (old_shares, old_entry) = (pos.shares, pos.entry_price);
-                    let add = d.delta;
-                    let new_shares = old_shares + add;
-                    if new_shares > Decimal::ZERO {
-                        let new_entry = ((old_entry * old_shares) + (d.price * add)) / new_shares;
-                        // Mutate through the manager API (kept minimal: adjust
-                        // via close-with-avg is not applicable, so re-open path).
-                        self.positions.adjust_open(&id, new_entry, new_shares);
-                        self.persist_positions();
+                    .map(|p| p.id.clone());
+                let id = match existing {
+                    Some(id) => id,
+                    None => {
+                        let direction = parse_direction(&d.direction);
+                        // A round slot N covers [N*dur, (N+1)*dur): the market
+                        // expires at the END of the slot. (Using N*dur would place
+                        // expiry in the past and force-exit immediately.)
+                        let expires_at_ms = if d.round_slot > 0 {
+                            (d.round_slot + 1) * self.config.round_duration_sec * 1000
+                        } else {
+                            now_ms + self.config.round_duration_sec * 1000
+                        };
+                        let p = OpenParams {
+                            strategy: d.strategy.clone(),
+                            asset: d.asset.clone(),
+                            direction,
+                            token_id: d.token_id.clone(),
+                            condition_id: d.condition_id.clone(),
+                            entry_price: d.price,
+                            expires_at_ms,
+                            was_maker: d.role.is_maker(),
+                            target_exit_price: None,
+                        };
+                        self.positions.open(p, now_ms).id
                     }
-                } else {
-                    let direction = parse_direction(&d.direction);
-                    // A round slot N covers [N*dur, (N+1)*dur): the market expires
-                    // at the END of the slot. (Using N*dur would place expiry in the
-                    // past and force-exit the position immediately.)
-                    let expires_at_ms = if d.round_slot > 0 {
-                        (d.round_slot + 1) * self.config.round_duration_sec * 1000
-                    } else {
-                        now_ms + self.config.round_duration_sec * 1000
-                    };
-                    let p = OpenParams {
-                        strategy: d.strategy.clone(),
-                        asset: d.asset.clone(),
-                        direction,
-                        token_id: d.token_id.clone(),
-                        condition_id: d.condition_id.clone(),
-                        entry_price: d.price,
-                        shares: d.delta,
-                        expires_at_ms,
-                        was_maker: d.mode == FillPolicy::Maker
-                            || d.mode == FillPolicy::MakerThenTaker,
-                        target_exit_price: None,
-                    };
-                    self.positions.open(p, now_ms);
-                    self.persist_positions();
-                }
+                };
+                // Accrue the basis, the fee and the role from the actual fill.
+                // `d.delta` is SIGNED: a FAILED rollback reverses the accrual by
+                // the same amounts the ledger just refunded, so a rolled-back
+                // entry leaves neither cash nor shares behind.
+                self.positions.apply_entry_fill(
+                    &id,
+                    d.delta,
+                    px,
+                    fee_usd,
+                    d.role,
+                );
+                // A fully rolled-back entry has no shares and no basis: drop the
+                // shell so it cannot block `can_open` or render as an empty row.
+                self.positions.drop_if_empty(&id);
+                self.persist_positions();
             }
             Side::Sell => {
                 let found = self
@@ -1687,28 +1706,74 @@ impl Core {
                     .open_positions()
                     .iter()
                     .find(|p| &p.token_id == token)
-                    .map(|p| (p.id.clone(), p.shares, p.entry_price));
-                if let Some((id, shares, entry)) = found {
-                    let remaining = shares - d.delta;
-                    if remaining <= Decimal::new(1, 2) {
-                        // Fully closed: use the recorded exit reason when this
-                        // SELL was produced by the exit engine, else Manual.
-                        let reason = self
-                            .exit_reasons
-                            .remove(token)
-                            .unwrap_or(ExitReason::Manual);
-                        if let Some(closed) =
-                            self.positions.close(&id, d.price, reason, false, now_ms)
-                        {
-                            self.persist_positions();
-                            self.on_position_closed(&closed, now_ms);
+                    .map(|p| p.id.clone());
+                match found {
+                    Some(id) => {
+                        // Accrue the exit first, so the close reads final flows.
+                        let left = self
+                            .positions
+                            .apply_exit_fill(&id, d.delta, px, fee_usd, d.role);
+                        // A reversal that is already accounted for on a CLOSED
+                        // trade has nothing open to accrue onto; the cash is
+                        // refunded but the realized record stands. Say so — a
+                        // silent drop here would be exactly the drift E17 exists
+                        // to remove.
+                        if d.delta < Decimal::ZERO && left.is_none() {
+                            self.emit(Event::Error {
+                                error: CoreError::new(
+                                    CoreErrorCode::Internal,
+                                    format!(
+                                        "exit rollback {} for token {token} has no open position to reverse",
+                                        d.order_id
+                                    ),
+                                ),
+                            });
+                            return;
                         }
-                    } else {
-                        let new_cost = entry * remaining;
-                        self.positions.adjust_open(&id, entry, remaining);
-                        self.persist_positions();
-                        let _ = new_cost;
+                        match left {
+                            // Sub-grid remainder: nothing sellable is left, so the
+                            // position is done — it must close, or it would sit on
+                            // the books forever with an untradeable stub of shares.
+                            Some(left)
+                                if left <= Decimal::ZERO || crate::position::floor_to_grid(left)
+                                    == Decimal::ZERO =>
+                            {
+                                let reason = self
+                                    .exit_reasons
+                                    .remove(token)
+                                    .unwrap_or(ExitReason::Manual);
+                                let was_maker = d.role.is_maker();
+                                if let Some(closed) = self.positions.close(
+                                    &id,
+                                    px,
+                                    reason,
+                                    was_maker,
+                                    now_ms,
+                                ) {
+                                    self.persist_positions();
+                                    self.on_position_closed(&closed, now_ms);
+                                }
+                            }
+                            Some(_) => {
+                                self.persist_positions();
+                            }
+                            None => {}
+                        }
                     }
+                    None if d.delta < Decimal::ZERO => {
+                        // No position at all for the token: the reversal cannot be
+                        // applied. Never swallow it.
+                        self.emit(Event::Error {
+                            error: CoreError::new(
+                                CoreErrorCode::Internal,
+                                format!(
+                                    "exit rollback {} for token {token} has no open position to reverse",
+                                    d.order_id
+                                ),
+                            ),
+                        });
+                    }
+                    None => {}
                 }
             }
         }
@@ -1923,11 +1988,38 @@ impl Core {
         maker_timeout_ms: i64,
         now_ms: i64,
     ) -> CoreResult<(OrderId, OrderStatus)> {
+        self.place_inner(req, maker_timeout_ms, now_ms, true)
+    }
+
+    /// Submit a leg that COMPLETES an already-open position rather than starting
+    /// a new one — the maker→taker escalation of the same entry.
+    ///
+    /// The entry gates (`can_open`, breaker) exist to stop a SECOND position on
+    /// an asset. When the maker leg filled only partially, the position already
+    /// exists, so `can_open` rejects the escalated remainder with "Already in
+    /// {asset}" and the leg is silently dropped: the venue-driven partial fill
+    /// stays half-filled forever. A LIVE-only defect — dry maker fills are always
+    /// full fills. The risk gate still applies to the escalated notional.
+    fn place_escalated(
+        &mut self,
+        req: OrderRequest,
+        now_ms: i64,
+    ) -> CoreResult<(OrderId, OrderStatus)> {
+        self.place_inner(req, 0, now_ms, false)
+    }
+
+    fn place_inner(
+        &mut self,
+        req: OrderRequest,
+        maker_timeout_ms: i64,
+        now_ms: i64,
+        entry_gates: bool,
+    ) -> CoreResult<(OrderId, OrderStatus)> {
         self.risk.check(&req)?;
 
         // Entry gates apply to opening BUY orders only; exits (SELL) are never
         // blocked by capacity, breaker or cooldowns.
-        if req.side == Side::Buy {
+        if entry_gates && req.side == Side::Buy {
             if self.breaker.is_halted(now_ms) {
                 return Err(CoreError::new(
                     CoreErrorCode::RiskRejected,
@@ -1989,7 +2081,7 @@ impl Core {
                             .config
                             .fill_model
                             .apply_slippage(order.side, order.price);
-                        self.authoritative_fill(id, order.size, fill_price, now_ms)?;
+                        self.authoritative_fill(id, order.size, fill_price, false, now_ms)?;
                     }
                     FillPolicy::Maker | FillPolicy::MakerThenTaker => {
                         if order.mode == FillPolicy::MakerThenTaker {
@@ -2014,11 +2106,18 @@ impl Core {
     }
 
     /// Apply one authoritative (cumulative) fill and its ledger effect.
+    ///
+    /// `maker` is the role this execution actually had, which the dry matcher
+    /// knows exactly: it either crossed a resting bid (`false`) or rested and was
+    /// hit (`true`). Stating it keeps DRY and LIVE on the same authority — the
+    /// execution itself — instead of DRY inferring from policy and LIVE reading
+    /// the venue.
     fn authoritative_fill(
         &mut self,
         id: &str,
         cumulative: Decimal,
         price: Decimal,
+        maker: bool,
         now_ms: i64,
     ) -> CoreResult<()> {
         let (token, side) = match self.ome.get(id) {
@@ -2035,6 +2134,7 @@ impl Core {
             status: FillStatus::Confirmed,
             ts_ms: now_ms,
             tx_hash: None,
+            maker: Some(maker),
         };
         if let Some(d) = self.ome.apply_fill(fill, now_ms)? {
             self.apply_delta_effects(d, now_ms);
@@ -2070,7 +2170,7 @@ impl Core {
             return;
         }
         // Dry maker fills are full fills at the resting limit (Node parity).
-        if let Err(e) = self.authoritative_fill(id, order.size, order.price, now_ms) {
+        if let Err(e) = self.authoritative_fill(id, order.size, order.price, true, now_ms) {
             self.emit(Event::Error { error: e });
         }
     }
@@ -2287,7 +2387,7 @@ impl Core {
                 direction,
                 round_slot: slot,
             };
-            self.place(req, 0, now_ms)?;
+            self.place_escalated(req, now_ms)?;
         }
         Ok(())
     }
@@ -4386,9 +4486,29 @@ mod strategy_dispatch_tests {
             dec_of(&s["netPnlUsd"]) > Decimal::ZERO,
             "expected positive realized PnL"
         );
-        assert!(
-            dec_of(&s["feesUsd"]) > Decimal::ZERO,
-            "taker exit pays a fee"
+        // E17: the entry rests on the book and is hit (maker), and the profit
+        // target rests at the bid and is hit (maker), so this fixture pays NO
+        // fee. Before the fix the entry was charged the taker rate while the
+        // record claimed maker — that phantom fee is what made "fees > 0" pass,
+        // and it is exactly the drift E17 removed. Pin the equality that
+        // actually matters: the fee total IS the record's, and the PnL IS cash.
+        let rec = &c.positions().closed_positions()[0];
+        let rec_fees = (rec.entry_fee_pct / Decimal::ONE_HUNDRED) * rec.entry_price * rec.shares
+            + (rec.exit_fee_pct / Decimal::ONE_HUNDRED) * rec.exit_price * rec.shares;
+        assert_eq!(
+            rec_fees,
+            Decimal::ZERO,
+            "both legs rested on the book, so nothing was charged"
+        );
+        assert_eq!(
+            dec_of(&s["feesUsd"]),
+            rec_fees,
+            "the ledger's fee total must equal the trade record's, not exceed it"
+        );
+        assert_eq!(
+            dec_of(&s["netPnlUsd"]),
+            rec.net_pnl_usd,
+            "strategy PnL must be the cash the ledger moved"
         );
         assert_eq!(
             dec_of(&s["openNotionalUsd"]),
@@ -4397,33 +4517,31 @@ mod strategy_dispatch_tests {
         );
     }
 
-    /// KNOWN DRIFT (ignored — the fix is an accounting change, not a test fix).
+    /// The cash ledger must equal `seed + Σ netPnlUsd` once nothing is reserved
+    /// and no position is open — the identity #75 set out to establish, and the
+    /// E17 acceptance criterion.
     ///
-    /// The cash ledger is supposed to equal `seed + Σ netPnlUsd` once nothing is
-    /// reserved and no position is open — that identity is what #75 was written
-    /// to establish. On a `MakerThenTaker` entry that escalates and then exits as
-    /// a maker, it does NOT hold, because the two sides disagree about what kind
-    /// of fill happened:
+    /// How this fixture used to fail (drift 0.0817722), for the record. A
+    /// `MakerThenTaker` entry rests at the bid, gets hit, and its profit target
+    /// exits as a maker; three places disagreed about what kind of fill happened:
     ///
-    /// 1. ENTRY — the position records `was_maker_entry = true` (it filled at the
-    ///    resting bid), so its entry fee is 0. `apply_delta_effects` sees the
-    ///    escalated fill's `mode = MakerThenTaker` and charges the taker fee.
-    ///    Cash lands BELOW the record by the entry fee.
-    /// 2. EXIT — the closing delta covers 9.99 of 10 shares although the record
-    ///    closes the full 10, so cash receives 0.01 × exit_price less proceeds
-    ///    than the record's gross assumes.
-    /// 3. EXIT — the record derives `was_maker_exit = false` and charges a taker
-    ///    exit fee, while the delta's `mode = Maker` charges none. Cash lands
-    ///    ABOVE the record by the exit fee.
+    /// 1. ENTRY — the position recorded `was_maker_entry = true` and a 0 entry
+    ///    fee, while `apply_delta_effects` read the escalated order's
+    ///    `mode = MakerThenTaker` and charged the TAKER fee. Cash sat BELOW the
+    ///    record by that fee.
+    /// 2. EXIT — the closing delta covered 9.99 of the 10 shares (the old flat
+    ///    0.01 share buffer), so cash received 0.01 × exit_price less proceeds
+    ///    than the record's gross assumed.
+    /// 3. EXIT — the record re-derived `was_maker_exit = false` and charged a
+    ///    taker exit fee, while the delta's `mode = Maker` charged none. Cash sat
+    ///    ABOVE the record by that fee.
     ///
-    /// Net effect measured on the fixture below: `balance = 1005.11540748750`
-    /// against `seed + net = 1005.19717968750` — cash short by 0.0817722.
-    ///
-    /// Left ignored on purpose: reconciling the two bases changes how real money
-    /// is accounted, so it needs an explicit decision rather than a drive-by fix.
-    /// Un-ignore this to see the live delta after any accounting change.
+    /// The E17 fix removes the disagreement rather than the symptom: the fee now
+    /// follows `FillDelta.role` (resolved from the fill), the position accrues the
+    /// fee the ledger actually charged, the flat share buffer is gone (exits floor
+    /// to the 0.01 share grid), and a sub-grid remainder is written off inside
+    /// `net`. See `MIGRATION_LOG.md`.
     #[test]
-    #[ignore = "known cash-vs-trade accounting drift; see the doc comment"]
     fn dry_balance_is_seed_plus_realized_net() {
         const SEED: Decimal = dec!(1000);
         let mut c = core_with_engine(HashMap::new());
@@ -4622,5 +4740,573 @@ mod fill_model_tests {
         );
         assert!(c.ome().get(&id).unwrap().status.is_live());
         assert_eq!(c.ome().get(&id).unwrap().filled_size, Decimal::ZERO);
+    }
+}
+
+/// ── E17: accounting precision ────────────────────────────────────────────────
+///
+/// The invariant under test is the version plan's core E17 acceptance criterion:
+/// with nothing reserved and no position open,
+///
+/// ```text
+///     ledger.balance() == seed + Σ closed.net_pnl_usd
+/// ```
+///
+/// Every scenario is driven through the REAL fill path (dry matcher, live
+/// user-WS ingest, or a reconciliation gap — all three meet at
+/// `apply_delta_effects`), so what is asserted is the production arithmetic and
+/// not a reimplementation of it in the test.
+///
+/// The matrix covers the maker/taker × partial-fill combinations the plan names
+/// (1/10, 5/10, 9.99/10, 10/10) on BOTH legs, plus the escalation path that used
+/// to produce the 0.0817722 drift. Enabled by the `account-precision` feature,
+/// which is on by default so a plain `cargo test` covers it too.
+#[cfg(all(test, feature = "account-precision"))]
+mod account_precision_tests {
+    use super::*;
+    use crate::model::OrderRole;
+    use rust_decimal_macros::dec;
+
+    const SEED: Decimal = dec!(1000);
+
+    fn core() -> Core {
+        let mut c = Core::new(CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: SEED,
+            // Keep the fixture's arithmetic to the position, not the scheduler.
+            auto_exits_enabled: false,
+            ..Default::default()
+        });
+        c.set_balance(SEED);
+        c
+    }
+
+    fn req(side: Side, mode: FillPolicy, price: Decimal, size: Decimal, key: &str) -> OrderRequest {
+        OrderRequest {
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            side,
+            mode,
+            price,
+            size,
+            internal_key: key.into(),
+            strategy: "acc".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 1,
+        }
+    }
+
+    fn fill(order_id: &str, trade: &str, side: Side, price: Decimal, size: Decimal) -> Fill {
+        Fill {
+            order_id: order_id.into(),
+            trade_id: Some(trade.into()),
+            token_id: "tok".into(),
+            side,
+            price,
+            size,
+            status: FillStatus::Confirmed,
+            ts_ms: 0,
+            tx_hash: None,
+            // The harness reports no role, so the OME falls back to the order's
+            // fill policy — correct here, because these fills are the ones the
+            // policy would produce. A test that needs the VENUE to overrule the
+            // policy uses `fill_as` below.
+            maker: None,
+        }
+    }
+
+    /// A fill carrying the venue's OWN maker/taker report, which outranks the
+    /// order's fill policy (E17-b).
+    fn fill_as(
+        order_id: &str,
+        trade: &str,
+        side: Side,
+        price: Decimal,
+        size: Decimal,
+        maker: bool,
+    ) -> Fill {
+        Fill {
+            maker: Some(maker),
+            ..fill(order_id, trade, side, price, size)
+        }
+    }
+
+    /// Σ net PnL over the closed book.
+    fn realized(c: &Core) -> Decimal {
+        c.positions()
+            .closed_positions()
+            .iter()
+            .map(|p| p.net_pnl_usd)
+            .sum()
+    }
+
+    /// The E17 identity, asserted with the offending numbers in the message so a
+    /// regression is diagnosable from CI output alone.
+    fn assert_reconciled(c: &Core, scenario: &str) {
+        assert_eq!(
+            c.positions().open_positions().len(),
+            0,
+            "[{scenario}] the scenario must end flat"
+        );
+        let net = realized(c);
+        let detail: Vec<String> = c
+            .positions()
+            .closed_positions()
+            .iter()
+            .map(|p| {
+                format!(
+                    "{} entry={} exit={} shares={} basis={} entryFee={} exitFee={} entryRole={:?} exitRole={:?} dust={} gross={} net={}",
+                    p.id, p.entry_price, p.exit_price, p.shares, p.cost_usd,
+                    p.entry_fee_pct, p.exit_fee_pct, p.entry_role, p.exit_role,
+                    p.dust_shares, p.pnl_usd, p.net_pnl_usd
+                )
+            })
+            .collect();
+        assert_eq!(
+            c.ledger().balance(),
+            SEED + net,
+            "[{scenario}] balance must equal seed + realized net; closed={detail:?}"
+        );
+    }
+
+    /// A BUY that only partly filled still holds the UNFILLED remainder's
+    /// reservation until the order is cancelled — a real (pre-existing) property
+    /// of the ledger, since the remainder is still committed on the book. The
+    /// E17 identity is about cash, so the harness releases the remainder the way
+    /// the venue would (cancel what will never fill) before asserting.
+    fn cancel_open_buys(c: &mut Core, now_ms: i64) {
+        let residual: Vec<String> = c
+            .ome()
+            .live_orders()
+            .into_iter()
+            .filter(|o| o.side == Side::Buy && o.filled_size < o.size)
+            .map(|o| o.order_id.clone())
+            .collect();
+        for id in residual {
+            c.cancel(&id, now_ms).unwrap();
+        }
+    }
+
+    /// A round trip at an explicit fill shape, driven the way the VENUE drives it:
+    /// the order is registered pending (no dry auto-fill) and the fills arrive as
+    /// cumulative reports. The entry delivers `entry_partial` of the requested
+    /// size; the exit is then sized to what was actually held and delivers
+    /// `exit_partial` of that, with any remainder closed by a second exit fill —
+    /// so the position ends flat however the venue rations the fills.
+    fn dry_round_trip(
+        entry_mode: FillPolicy,
+        entry_price: Decimal,
+        entry_partial: Decimal,
+        exit_mode: FillPolicy,
+        exit_price: Decimal,
+        exit_partial: Decimal,
+        size: Decimal,
+    ) -> Core {
+        let mut c = core();
+        let (id, _) = c
+            .place_pending(req(Side::Buy, entry_mode, entry_price, size, "entry"), 1)
+            .unwrap();
+        c.confirm_live(&id, 1).unwrap();
+        c.ingest_fill(fill(&id, "e1", Side::Buy, entry_price, entry_partial), 2)
+            .unwrap();
+
+        let held = c.positions().open_positions()[0].shares;
+        assert_eq!(
+            held, entry_partial,
+            "the venue's partial decides the size, not the request"
+        );
+        // The unfilled part of the entry will never fill; let it go so only cash
+        // and the position are compared.
+        cancel_open_buys(&mut c, 3);
+
+        let (sid, _) = c
+            .place_pending(req(Side::Sell, exit_mode, exit_price, held, "exit"), 4)
+            .unwrap();
+        c.confirm_live(&sid, 4).unwrap();
+        c.ingest_fill(fill(&sid, "x1", Side::Sell, exit_price, exit_partial), 5)
+            .unwrap();
+        // Any shares the first exit did not cover are closed by a second fill.
+        let left: Decimal = c
+            .positions()
+            .open_positions()
+            .iter()
+            .map(|p| p.shares)
+            .sum();
+        if left > Decimal::ZERO {
+            let (rid, _) = c
+                .place_pending(req(Side::Sell, exit_mode, exit_price, left, "exit-2"), 6)
+                .unwrap();
+            c.confirm_live(&rid, 6).unwrap();
+            c.ingest_fill(fill(&rid, "x2", Side::Sell, exit_price, left), 7)
+                .unwrap();
+        }
+        cancel_open_buys(&mut c, 8);
+        c
+    }
+
+    /// The plan's named partials on both legs, across all four fill policies.
+    #[test]
+    fn every_maker_taker_partial_shape_reconciles() {
+        let shapes: [(&str, Decimal); 4] = [
+            ("1/10", dec!(1)),
+            ("5/10", dec!(5)),
+            ("9.99/10", dec!(9.99)),
+            ("10/10", dec!(10)),
+        ];
+        let mut checked = 0usize;
+        for (entry_label, entry_partial) in shapes {
+            for (exit_label, exit_partial) in shapes {
+                // An exit can never exceed what the entry actually delivered.
+                if exit_partial > entry_partial {
+                    continue;
+                }
+                for em in [FillPolicy::Maker, FillPolicy::Taker] {
+                    for xm in [FillPolicy::Maker, FillPolicy::Taker] {
+                        let c = dry_round_trip(
+                            em,
+                            dec!(0.43),
+                            entry_partial,
+                            xm,
+                            dec!(0.95),
+                            exit_partial,
+                            dec!(10),
+                        );
+                        assert_reconciled(
+                            &c,
+                            &format!("entry {entry_label} {em:?} / exit {exit_label} {xm:?}"),
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 40, "the whole named matrix must run");
+    }
+
+    /// The VENUE's report outranks the order's fill policy (E17-b). A
+    /// `MakerThenTaker` order can end up filling as a pure maker (it rested and
+    /// was hit before the timer) or as a pure taker (it escalated); the policy
+    /// says nothing about which happened, so the report must win and the fee must
+    /// follow it — in both directions, so this cannot pass by always picking one.
+    #[test]
+    fn the_venue_role_report_outranks_the_orders_policy() {
+        // A MakerThenTaker order that the venue says CROSSED → taker fee.
+        let mut crossed = core();
+        let (id, _) = crossed
+            .place_pending(
+                req(Side::Buy, FillPolicy::MakerThenTaker, dec!(0.70), dec!(10), "c"),
+                1,
+            )
+            .unwrap();
+        crossed.confirm_live(&id, 1).unwrap();
+        crossed
+            .ingest_fill(
+                fill_as(&id, "c1", Side::Buy, dec!(0.70), dec!(10), false),
+                2,
+            )
+            .unwrap();
+        let pos = crossed.positions().open_positions()[0].clone();
+        assert_eq!(pos.entry_role, OrderRole::Taker, "the report said taker");
+        assert!(
+            pos.flows.entry_fee_usd > Decimal::ZERO,
+            "a crossing fill pays the taker fee even though the policy rested first"
+        );
+
+        // A plain Maker order the venue says CROSSED → also a taker fee. Under
+        // policy-only resolution this silently paid nothing.
+        let mut surprised = core();
+        let (id2, _) = surprised
+            .place_pending(req(Side::Buy, FillPolicy::Maker, dec!(0.70), dec!(10), "s"), 1)
+            .unwrap();
+        surprised.confirm_live(&id2, 1).unwrap();
+        surprised
+            .ingest_fill(
+                fill_as(&id2, "s1", Side::Buy, dec!(0.70), dec!(10), false),
+                2,
+            )
+            .unwrap();
+        let pos2 = surprised.positions().open_positions()[0].clone();
+        assert_eq!(pos2.entry_role, OrderRole::Taker);
+        assert_eq!(
+            pos2.flows.entry_fee_usd,
+            (crate::exit_policy::taker_fee_pct(dec!(0.70)) / Decimal::ONE_HUNDRED) * dec!(7)
+        );
+
+        // The reverse: a TAKER order the venue says RESTED → no fee. (Rebates are
+        // not modelled, but a maker fill is genuinely free.)
+        let mut rested = core();
+        let (id3, _) = rested
+            .place_pending(req(Side::Buy, FillPolicy::Taker, dec!(0.70), dec!(10), "r"), 1)
+            .unwrap();
+        rested.confirm_live(&id3, 1).unwrap();
+        rested
+            .ingest_fill(fill_as(&id3, "r1", Side::Buy, dec!(0.70), dec!(10), true), 2)
+            .unwrap();
+        let pos3 = rested.positions().open_positions()[0].clone();
+        assert_eq!(pos3.entry_role, OrderRole::Maker, "the report said maker");
+        assert_eq!(
+            pos3.flows.entry_fee_usd,
+            Decimal::ZERO,
+            "a resting fill is charged nothing"
+        );
+    }
+
+    /// The exact fixture from the plan's background section: a `MakerThenTaker`
+    /// entry that rests at the bid, is hit, and exits at a profit. This is the
+    /// case that measured a 0.0817722 gap before E17.
+    #[test]
+    fn maker_then_taker_entry_and_profit_exit_reconcile() {
+        let mut c = core();
+        let (id, _) = c
+            .place(
+                req(
+                    Side::Buy,
+                    FillPolicy::MakerThenTaker,
+                    dec!(0.43),
+                    dec!(10),
+                    "entry",
+                ),
+                0,
+                1,
+            )
+            .unwrap();
+        // The resting bid is hit in full → a MAKER entry fill (no fee).
+        c.ingest_fill(fill(&id, "mtt-1", Side::Buy, dec!(0.43), dec!(10)), 2)
+            .unwrap();
+        let pos = c.positions().open_positions()[0].clone();
+        assert_eq!(pos.entry_role, OrderRole::Maker, "rested, so maker");
+        assert_eq!(
+            pos.flows.entry_fee_usd,
+            Decimal::ZERO,
+            "a maker entry pays no fee"
+        );
+
+        // Profit target exits as a maker.
+        let (sid, _) = c
+            .place(
+                req(Side::Sell, FillPolicy::Maker, dec!(0.95), dec!(10), "exit"),
+                0,
+                3,
+            )
+            .unwrap();
+        c.ingest_fill(fill(&sid, "mtt-2", Side::Sell, dec!(0.95), dec!(10)), 4)
+            .unwrap();
+
+        assert_reconciled(&c, "MakerThenTaker hit → maker profit exit");
+        let closed = &c.positions().closed_positions()[0];
+        // 10 shares × (0.95 − 0.43) = 5.20, with no fees on either leg.
+        assert_eq!(closed.pnl_usd, dec!(5.20));
+        assert_eq!(closed.net_pnl_usd, dec!(5.20));
+        assert_eq!(closed.entry_role, OrderRole::Maker);
+        assert_eq!(closed.exit_role, OrderRole::Maker);
+        assert_eq!(closed.dust_shares, Decimal::ZERO);
+    }
+
+    /// Mixed roles across legs of ONE position: a maker leg that partially fills,
+    /// then the escalated taker leg that completes the entry. This drives the REAL
+    /// escalation (maker timeout → cancel → cross the remainder) rather than
+    /// hand-placing the second order, so it also pins that a partially filled
+    /// maker leg still escalates instead of being rejected as a duplicate entry.
+    /// The fee must follow each leg's own role, not the original request — the
+    /// core of the E17 defect.
+    #[test]
+    fn a_mixed_role_position_charges_each_leg_by_what_it_did() {
+        let mut c = core();
+        let (id, _) = c
+            .place(
+                req(Side::Buy, FillPolicy::MakerThenTaker, dec!(0.43), dec!(10), "entry"),
+                1_000,
+                1,
+            )
+            .unwrap();
+        assert!(c.ome().get(&id).unwrap().status.is_live(), "it must rest");
+
+        // Maker leg: 4 of 10 shares are hit at the resting bid.
+        c.ingest_fill(fill(&id, "leg-1", Side::Buy, dec!(0.43), dec!(4)), 2)
+            .unwrap();
+        let half = c.positions().open_positions()[0].clone();
+        assert_eq!(half.shares, dec!(4));
+        assert_eq!(half.entry_role, OrderRole::Maker);
+        assert_eq!(
+            half.flows.entry_fee_usd,
+            Decimal::ZERO,
+            "the maker leg pays no fee"
+        );
+
+        // The maker window elapses: the kernel cancels the rest of the resting
+        // order and crosses the remaining 6 shares as a TAKER.
+        c.tick(1_002).unwrap();
+        let pos = c.positions().open_positions()[0].clone();
+        assert_eq!(pos.shares, dec!(10), "both legs accrue onto one position");
+        assert_eq!(
+            pos.entry_role,
+            OrderRole::MakerThenTaker,
+            "the position records that both kinds of fill happened"
+        );
+        // Basis is the real money spent: 4×0.43 rested, 6×0.43 crossed.
+        assert_eq!(pos.cost_usd, dec!(10) * dec!(0.43));
+        // The fee covers the TAKER leg only — not all 10 shares at the taker rate.
+        let expected_fee =
+            (crate::exit_policy::taker_fee_pct(dec!(0.43)) / Decimal::ONE_HUNDRED)
+                * dec!(0.43)
+                * dec!(6);
+        assert_eq!(pos.flows.entry_fee_usd, expected_fee);
+        assert!(expected_fee > Decimal::ZERO);
+
+        // Exit in full as a taker at a profit.
+        let (sid, _) = c
+            .place(req(Side::Sell, FillPolicy::Taker, dec!(0.95), dec!(10), "exit"), 0, 5)
+            .unwrap();
+        assert_eq!(c.ome().get(&sid).unwrap().status, OrderStatus::Filled);
+        assert_reconciled(&c, "mixed maker/taker entry, taker exit");
+
+        let closed = &c.positions().closed_positions()[0];
+        assert_eq!(closed.entry_role, OrderRole::MakerThenTaker);
+        assert_eq!(closed.exit_role, OrderRole::Taker);
+        assert_eq!(closed.shares, dec!(10));
+        // Gross 10×(0.95−0.43) = 5.20, minus the taker legs' fees.
+        let exit_fee =
+            (crate::exit_policy::taker_fee_pct(dec!(0.95)) / Decimal::ONE_HUNDRED) * dec!(9.5);
+        assert_eq!(closed.net_pnl_usd, dec!(5.20) - expected_fee - exit_fee);
+    }
+
+    /// Dry and LIVE must produce a bit-identical ledger. In DRY the core
+    /// synthesises the fills; in LIVE the venue adapter reports them. Both meet
+    /// at `apply_delta_effects`, so identical inputs must yield identical money.
+    /// This is the `account:parity` gate expressed as a unit test.
+    #[test]
+    fn dry_and_live_ledgers_agree_bit_for_bit() {
+        for (em, xm) in [
+            (FillPolicy::Maker, FillPolicy::Taker),
+            (FillPolicy::Taker, FillPolicy::Maker),
+            (FillPolicy::Maker, FillPolicy::Maker),
+            (FillPolicy::MakerThenTaker, FillPolicy::Taker),
+        ] {
+            // DRY: submit at a crossing book so the core fills it itself.
+            let mut dry = core();
+            dry.book_snapshot(
+                "tok",
+                vec![(dec!(0.43), dec!(100))],
+                vec![(dec!(0.43), dec!(100))],
+                1,
+            );
+            let (did, _) = dry
+                .place(req(Side::Buy, em, dec!(0.43), dec!(10), "entry"), 0, 1)
+                .unwrap();
+            if dry.ome().get(&did).unwrap().filled_size < dec!(10) {
+                // It rested without crossing; drive the same fill the venue would.
+                dry.ingest_fill(fill(&did, "d1", Side::Buy, dec!(0.43), dec!(10)), 2)
+                    .unwrap();
+            }
+            let (dxid, _) = dry
+                .place(req(Side::Sell, xm, dec!(0.95), dec!(10), "exit"), 0, 3)
+                .unwrap();
+            if dry.ome().get(&dxid).unwrap().filled_size < dec!(10) {
+                dry.ingest_fill(fill(&dxid, "d2", Side::Sell, dec!(0.95), dec!(10)), 4)
+                    .unwrap();
+            }
+
+            // LIVE: register pending, venue acks, then the same fills stream in.
+            let mut live = core();
+            let (lid, _) = live
+                .place_pending(req(Side::Buy, em, dec!(0.43), dec!(10), "entry"), 1)
+                .unwrap();
+            live.confirm_live(&lid, 1).unwrap();
+            live.ingest_fill(fill(&lid, "l1", Side::Buy, dec!(0.43), dec!(10)), 2)
+                .unwrap();
+            let (lxid, _) = live
+                .place_pending(req(Side::Sell, xm, dec!(0.95), dec!(10), "exit"), 3)
+                .unwrap();
+            live.confirm_live(&lxid, 3).unwrap();
+            live.ingest_fill(fill(&lxid, "l2", Side::Sell, dec!(0.95), dec!(10)), 4)
+                .unwrap();
+
+            assert_eq!(
+                dry.ledger().balance(),
+                live.ledger().balance(),
+                "[{em:?}→{xm:?}] dry and live cash must be bit-identical"
+            );
+            assert_eq!(
+                realized(&dry),
+                realized(&live),
+                "[{em:?}→{xm:?}] dry and live realized PnL must be bit-identical"
+            );
+            assert_reconciled(&dry, &format!("dry parity {em:?}→{xm:?}"));
+            assert_reconciled(&live, &format!("live parity {em:?}→{xm:?}"));
+        }
+    }
+
+    /// A rollback (`FAILED`) must not leave phantom cash, a phantom fee, or a
+    /// phantom position behind.
+    #[test]
+    fn a_rolled_back_fill_leaves_the_ledger_clean() {
+        let mut c = core();
+        // Rest the order so the venue, not the matcher, reports the fills — the
+        // rollback must target the SAME trade the provisional fill created.
+        let (id, _) = c
+            .place_pending(req(Side::Buy, FillPolicy::Maker, dec!(0.43), dec!(10), "entry"), 1)
+            .unwrap();
+        c.confirm_live(&id, 1).unwrap();
+        c.ingest_fill(fill(&id, "r1", Side::Buy, dec!(0.43), dec!(10)), 2)
+            .unwrap();
+        let provisioned = c.ledger().balance();
+        assert!(provisioned < SEED, "the provisional fill moved cash");
+
+        // The venue reports that same trade as FAILED: it is fully rolled back.
+        c.ingest_fill(
+            Fill {
+                status: FillStatus::Failed,
+                ..fill(&id, "r1", Side::Buy, dec!(0.43), dec!(10))
+            },
+            3,
+        )
+        .unwrap();
+        c.tick(4).unwrap();
+
+        let net = realized(&c);
+        assert_eq!(
+            c.ledger().balance(),
+            SEED + net,
+            "a rolled-back trade must not move cash"
+        );
+        let held: Decimal = c
+            .positions()
+            .open_positions()
+            .iter()
+            .map(|p| p.shares)
+            .sum();
+        assert_eq!(held, Decimal::ZERO, "nothing may be held after a rollback");
+        assert_eq!(net, Decimal::ZERO, "a rollback realizes no PnL");
+    }
+
+    /// Reconciliation-gap fills (the third producer of deltas) reconcile too:
+    /// the venue reports a partial the core never saw, and the position is sized
+    /// from what was actually confirmed, not from what was requested.
+    #[test]
+    fn reconciliation_gap_fills_reconcile() {
+        let mut c = core();
+        // The order goes out and the venue ack'd it; the fill arrives only later
+        // and only in part — the classic reconciliation gap.
+        let (id, _) = c
+            .place_pending(req(Side::Buy, FillPolicy::Taker, dec!(0.62), dec!(10), "entry"), 1)
+            .unwrap();
+        c.confirm_live(&id, 1).unwrap();
+        c.ingest_fill(fill(&id, "gap-1", Side::Buy, dec!(0.62), dec!(4)), 2)
+            .unwrap();
+        let held = c.positions().open_positions()[0].shares;
+        assert_eq!(held, dec!(4), "only what the venue confirmed");
+        cancel_open_buys(&mut c, 3);
+
+        // Close the whole holding as a taker at a loss.
+        let (sid, _) = c
+            .place(req(Side::Sell, FillPolicy::Taker, dec!(0.40), held, "exit"), 0, 4)
+            .unwrap();
+        assert_eq!(c.ome().get(&sid).unwrap().status, OrderStatus::Filled);
+        assert_reconciled(&c, "reconciliation gap partial entry");
+        assert!(realized(&c) < Decimal::ZERO, "bought 0.62, sold 0.40");
     }
 }

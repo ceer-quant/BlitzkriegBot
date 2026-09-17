@@ -276,6 +276,10 @@ async fn sdk_snapshot(
             price: t.price,
             ts_ms: t.match_time.timestamp_millis(),
             tx_hash: None,
+            // Indexed by the venue's taker order id, so this record IS the taker
+            // execution. Maker executions come through the user channel, where
+            // their `maker_orders[]` entry is tagged maker.
+            maker: Some(false),
         })
         .collect();
     Ok((open_ids, trades))
@@ -356,6 +360,8 @@ fn trade_fills(t: &TradeMessage) -> Vec<MarketFill> {
             status,
             ts_ms: ts,
             tx_hash: tx.clone(),
+            // We crossed: our order is the one the venue names as the taker.
+            maker: Some(false),
         });
     }
     for m in &t.maker_orders {
@@ -369,6 +375,8 @@ fn trade_fills(t: &TradeMessage) -> Vec<MarketFill> {
             status,
             ts_ms: ts,
             tx_hash: tx.clone(),
+            // We rested and were hit, so no taker fee was charged.
+            maker: Some(true),
         });
     }
     fills

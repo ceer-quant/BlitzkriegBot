@@ -26,6 +26,71 @@ pub enum Mode {
     Live,
 }
 
+/// The role an order actually played, RESOLVED FROM ITS FILLS rather than
+/// assumed from the requested policy (E17).
+///
+/// The distinction decides money: a maker fill pays no fee, a taker fill does.
+/// Deriving the fee basis from the *request* let a `MakerThenTaker` order be
+/// charged as a taker while its trade record claimed maker, and the cash ledger
+/// drifted away from `seed + Σ netPnl`.
+///
+/// State machine, one instance per order, advanced by [`OrderRole::after_fill`]:
+///
+/// ```text
+///                  fill(Maker)                    fill(Taker)
+///   Pending ───────────────────────► Maker ─────────────────────► MakerThenTaker
+///      │                               ▲                                  │
+///      │ fill(Taker)                   │ fill(Maker)                      │ fill(any)
+///      ▼                               │                                  ▼
+///    Taker ────────────────────────────┘                            MakerThenTaker
+/// ```
+///
+/// `Pending` and `MakerThenTaker` describe an ORDER. A single FILL is always
+/// either `Maker` or `Taker` — that is what [`OrderRole::is_maker`] decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderRole {
+    /// Submitted, no fill yet: the role is not knowable in advance.
+    #[default]
+    Pending,
+    /// Rested on the book and was hit — post-only, so it never crossed.
+    Maker,
+    /// Crossed the spread.
+    Taker,
+    /// Rested first and crossed later: this order's fills are mixed.
+    MakerThenTaker,
+}
+
+impl OrderRole {
+    /// Whether a fill with this role pays no taker fee. Meaningful for a single
+    /// fill (`Maker`/`Taker`); `Pending` is treated as "not maker", i.e. the
+    /// conservative side that charges a fee.
+    pub fn is_maker(self) -> bool {
+        matches!(self, Self::Maker)
+    }
+
+    /// Fold one fill's role into the order-level role.
+    pub fn after_fill(self, fill: OrderRole) -> OrderRole {
+        match (self, fill) {
+            (Self::Pending, r) => r,
+            (Self::Maker, Self::Taker) | (Self::Taker, Self::Maker) => Self::MakerThenTaker,
+            (Self::MakerThenTaker, _) => Self::MakerThenTaker,
+            (r, _) => r,
+        }
+    }
+
+    /// The role a fill of an order with this filling behaviour must have had: a
+    /// post-only order can only ever be hit as maker, and a `MakerThenTaker`
+    /// order rests first — its taker leg is submitted as its own `Taker` order
+    /// on escalation — so it fills as maker too. Only a `Taker` order crosses.
+    pub fn from_fill_policy(mode: FillPolicy) -> Self {
+        match mode {
+            FillPolicy::Taker => Self::Taker,
+            FillPolicy::Maker | FillPolicy::MakerThenTaker => Self::Maker,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderRequest {
@@ -62,6 +127,12 @@ pub struct Fill {
     /// Exchange-reported timestamp (ms).
     pub ts_ms: i64,
     pub tx_hash: Option<String>,
+    /// The venue's own maker/taker report for this execution (E17-b). When
+    /// present it is the AUTHORITY for the fee and for the position's role; when
+    /// absent (dry matcher, reconciliation synthesis) the OME falls back to the
+    /// order's fill policy. Never inferred from the cumulative size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker: Option<bool>,
 }
 
 /// A core-side tracked order. Mirrors the Node TrackedOrder but is authoritative.
@@ -77,6 +148,10 @@ pub struct TrackedOrder {
     pub condition_id: String,
     pub side: Side,
     pub mode: FillPolicy,
+    /// Role this order has actually played, resolved from its fills (E17). Starts
+    /// `Pending`; persisted so the audit trail survives a restart.
+    #[serde(default)]
+    pub role: OrderRole,
     #[serde(with = "decimal")]
     pub price: Decimal,
     #[serde(with = "decimal")]

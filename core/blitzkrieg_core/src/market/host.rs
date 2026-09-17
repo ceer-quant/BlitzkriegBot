@@ -107,6 +107,8 @@ fn fill_from_api(f: &api::MarketFill) -> m::Fill {
         status: f.status,
         ts_ms: f.ts_ms,
         tx_hash: f.tx_hash.clone(),
+        // The venue's own maker/taker report rides straight through to the OME.
+        maker: f.maker,
     }
 }
 
@@ -125,6 +127,8 @@ fn snapshot_from_api(s: &api::ReconcileSnapshot) -> crate::reconcile::VenueSnaps
                 price: t.price,
                 ts_ms: t.ts_ms,
                 tx_hash: t.tx_hash.clone(),
+                // The venue's role report rides through to the gap-fill synthesis.
+                maker: t.maker,
             })
             .collect(),
         now_ms: s.now_ms,
