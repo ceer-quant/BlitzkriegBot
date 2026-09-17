@@ -95,7 +95,6 @@ function fmt(ts) { return new Date(ts).toISOString().replace('T', ' ').slice(0, 
 
 async function cycle(i, state) {
   const ts = Date.now();
-  const nodePids = pgrep('node dist/index.js');
   const corePids = pgrep('blitzkrieg-core');
   const ping = await rpc('core.ping');
   const stats = await rpc('engine.stats');
@@ -107,10 +106,8 @@ async function cycle(i, state) {
   const rec = {
     cycle: i,
     ts,
-    nodeAlive: nodePids.length > 0,
     coreAlive: corePids.length > 0,
     pingOk: Boolean(ping.result?.pong),
-    nodeRssMb: nodePids[0] ? Math.round(rssKb(nodePids[0]) / 1024) : 0,
     coreRssMb: corePids[0] ? Math.round(rssKb(corePids[0]) / 1024) : 0,
     round: round.result ? { slot: round.result.slot, timeLeftSec: round.result.timeLeftSec, markets: round.result.markets, canTrade: round.result.canTrade } : null,
     stats: stats.result ? {
@@ -129,7 +126,7 @@ async function cycle(i, state) {
   };
 
   // Anomaly detection.
-  if (!rec.nodeAlive) rec.anomalies.push('node_process_down');
+  if (!rec.coreAlive) rec.anomalies.push('core_process_down');
   if (!rec.coreAlive) rec.anomalies.push('core_process_down');
   if (!rec.pingOk) rec.anomalies.push('ipc_ping_failed');
   if (errs.count > 0) rec.anomalies.push(`errors:+${errs.count}`);
@@ -150,10 +147,10 @@ async function cycle(i, state) {
   ensureDir();
   appendFileSync(join(SOAK_DIR, 'soak.jsonl'), JSON.stringify(rec) + '\n');
   const tag = rec.anomalies.length ? `⚠ ${rec.anomalies.join(',')}` : 'ok';
-  const line = `[${fmt(ts)}] #${String(i).padStart(3)} node=${rec.nodeAlive ? 'up' : 'DOWN'} core=${rec.coreAlive ? 'up' : 'DOWN'} ` +
+  const line = `[${fmt(ts)}] #${String(i).padStart(3)} core=${rec.coreAlive ? 'up' : 'DOWN'} ` +
     `ping=${rec.pingOk ? 'ok' : 'FAIL'} slot=${rec.round?.slot ?? '-'} tLeft=${rec.round?.timeLeftSec ?? '-'} mkt=${rec.round?.markets ?? '-'} ` +
     `books=${rec.stats?.books ?? '-'} spots=${rec.stats?.spots ?? '-'} rx=${rec.stats?.evaluations ?? '-'} sig=${rec.stats?.signals ?? '-'} ` +
-    `ord=${rec.orders ?? '-'}(live ${rec.liveOrders ?? '-'}) pos=${rec.positions ?? '-'} rss=${rec.nodeRssMb}/${rec.coreRssMb}MB err+${rec.newErrors} ${tag}`;
+    `ord=${rec.orders ?? '-'}(live ${rec.liveOrders ?? '-'}) pos=${rec.positions ?? '-'} rss=${rec.coreRssMb}MB err+${rec.newErrors} ${tag}`;
   appendFileSync(join(SOAK_DIR, 'soak.log'), line + '\n');
   console.log(line);
   return rec;

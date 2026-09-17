@@ -27,10 +27,8 @@ note() { [ "$QUIET" -eq 1 ] || echo "$@"; }
 
 # ── 1. processes ────────────────────────────────────────────────────────────
 core_n=$(pgrep -f "target/release/blitzkrieg-core" 2>/dev/null | wc -l | tr -d ' ')
-node_n=$(pgrep -f "node dist/index.js" 2>/dev/null | wc -l | tr -d ' ')
 soak_n=$(pgrep -f "soak-monitor" 2>/dev/null | wc -l | tr -d ' ')
 
-[ "$node_n" -ge 1 ] || problems+=("node shell not running")
 [ "$soak_n" -ge 1 ] || problems+=("soak-monitor not running")
 if [ "$core_n" -eq 0 ]; then
   problems+=("blitzkrieg-core not running")
@@ -114,9 +112,9 @@ fi
 round_disp=${round_sec:-?}
 arch_disp=${arch_note:-?}
 if [ ${#problems[@]} -eq 0 ]; then
-  echo "OK  core=${core_n} node=${node_n} soak=${soak_n} round=${round_disp} trades=${trades_n} archive=${arch_disp} health=healthy"
+  echo "OK  core=${core_n} soak=${soak_n} round=${round_disp} trades=${trades_n} archive=${arch_disp} health=healthy"
   exit 0
 fi
-echo "ANOMALY  core=${core_n} node=${node_n} soak=${soak_n} round=${round_disp} trades=${trades_n} archive=${arch_disp}"
+echo "ANOMALY  core=${core_n} soak=${soak_n} round=${round_disp} trades=${trades_n} archive=${arch_disp}"
 for p in "${problems[@]}"; do echo "  - $p"; done
 exit 1
