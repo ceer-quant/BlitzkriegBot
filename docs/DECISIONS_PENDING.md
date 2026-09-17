@@ -523,3 +523,51 @@
   且窗口缩短只加速 dip 样本淘汰，不会更早确认。**F1「下调确认窗不能改善胜率」判据达成，维持 60 s 基线。**
 - #29 校准至此全线收口：F1（本节）/X2（D-19 正文，挂起）/F4（E3-c 证伪）均**不落地**，
   E3 保持「基线出场策略 + E1 单入场」；唯一开放项 X3（二次触顶即出）移交 0.2 的 shadow-evolution 对照域。
+
+---
+
+## [待决策] D-20 `panic = "abort"` 与影子变体的崩溃隔离不可兼得（E10-d 发现）
+
+- **背景**：E10-d 要求给 release 档位加 `strip = true` + `lto = "fat"` + `panic = "abort"` 三项体积优化。
+  `strip` 与 `lto` 已落地（见 `blitzkrieg/MIGRATION_LOG.md` §49），**`panic = "abort"` 没有**，
+  且不是「还没做」，而是经核查后**判断它不该做**。
+- **实证（`catch_unwind` 是承重结构，不是防御性冗余）**：已有**两层**捕获，且实测确认了两层各自的作用：
+  - **内层**（真正防用户策略的那一层）`strategies/shadow_twin.rs:277`：
+    `pub fn catch(twin, ctx) -> ShadowTickResult { catch_unwind(AssertUnwindSafe(|| twin.on_tick(ctx))).unwrap_or_default() }`，
+    被 `TwinReplay::on_tick` 在 `shadow_twin.rs:227` 与 `:239` 调用（出场判定与入场判定各一次）。
+    **用户策略自己的 panic（如 `find_candidates` 里 panic）就在这一层被吞掉**，返回默认结果。
+  - **外层** `shadow_evolution/mod.rs:327`：对每个变体 `catch_unwind(|| v.on_tick(&ctx))`，
+    失败则 `v.crashed = true` + `tracing::warn!("shadow variant panicked — quarantined")`。
+    但因为它包住的 `v.on_tick` 内部**已经**有内层 `catch`，所以这一层实际上只兜
+    **出场/回放机制**（`update_exit_state` / `decide_exit` / 持仓簿记）的 panic，
+    **兜不到用户策略的 panic**。
+  - `shadow_evolution/mod.rs:17` 的设计意图：「every variant tick runs under `catch_unwind`;
+    a panicking variant … cannot take down the live engine」——**意图成立，但承重的是内层**。
+  - 两层都用 `catch_unwind`，所以 `panic = "abort"` 会把**两层一起废掉**：一次 panic 直接 abort 整个进程。
+- **冲突的本质**：影子变体是**用户自己写的外挂策略**（dylib，E7/E2-c 起支持），
+  是进程内最可能 panic 的代码。abort 语义下，一个第三方实例的 panic 会**中断整个交易内核**：
+  连接断开、未平仓位无人接管、只能靠重启恢复。这与已确立的「策略崩溃不影响主线」直接冲突。
+- **代价对比**：保留 unwind 的代价是 **0** —— `panic = "unwind"` 本就是默认值，
+  在 `Cargo.toml` 里写明只是因为「release 档位三件套」是常见的照抄模板，不写会被后人加回去。
+- **`strip` 的同类判断（已按实证选择，供对照）**：`strip = true` 会**连符号表一起去掉**，
+  使 release 下的 panic backtrace **完全为空**（已用最小复现验证：`strip=true` 只打印一行
+  `stack backtrace:`；`strip="debuginfo"` 能打印出 `std::panicking::begin_panic` 与调用帧）。
+  实测体积代价 +1.49 MB（8.07 → 9.56 MB，+18%）。交易内核里「能说出是哪一帧 panic」比 1.49 MB 值钱，
+  故取 `strip = "debuginfo"`。
+- **顺带发现（与本决策相邻，已登记为 KI-23，不在此处修）**：由于内层 `catch` 用
+  `unwrap_or_default()` 吞掉错误、`crashed` 只在**外层**被置位，**一个持续 panic 的用户策略
+  永远不会被隔离**——它每个 tick 都 panic 一次、被吞一次，无限重复。于是：
+  - `shadow_twin.rs:273-275` 的注释「the caller quarantines it on the panic」**与实现不符**
+    （唯一的调用方 `TwinReplay::on_tick` 只是丢弃错误）；
+  - 影响是**性能与可观测性**（每 tick 一次 panic/unwind 开销 + 无任何告警），**不是**正确性——
+    引擎确实不会倒，这一点已被新增单测 `a_panicking_variant_cannot_take_down_the_engine` 与
+    `a_twins_own_panic_is_absorbed_and_never_sets_the_crashed_flag` 双向钉住。
+- **选项 A**：维持 `panic = "unwind"`（**现状，已落地**）——保留变体崩溃隔离与可读 backtrace。
+- **选项 B**：接受 `panic = "abort"`——换少量体积，代价是第三方策略 panic 会终止内核且 backtrace 不可读。
+  若选此，**必须先**为外挂策略调用边界建立进程外隔离（子进程沙箱），或明确放弃上述安全属性。
+- **选项 C**：不全局设 `panic`，仅在极限体积的打包场景用 `RUSTFLAGS="-C panic=abort"` 临时覆盖，
+  日常构建保持 unwind。
+- **AI 倾向**：**A**。不倾向 B：它用「运行时可靠性」换「打包体积」，
+  而 strip+lto 后 9.56 MB 距 E10-d 的 50 MB 上限有 **5 倍余量**，没有为体积牺牲隔离的必要。
+- **需要用户确认的点**：是否同意**放弃 E10-d 原始要求里的 `panic = "abort"`** 这一项？
+  若不同意，是否接受「第三方策略 panic 可能终止内核」的行为变化，或需先做子进程沙箱？

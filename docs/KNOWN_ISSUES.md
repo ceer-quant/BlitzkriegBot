@@ -334,6 +334,55 @@ CI 中这两项都是 **advisory**（`continue-on-error: true`，见 `ci.yml:53,
 配套还有 `:304` 对三个 TODO 的说明文字，不是遗留债。
 （历史上曾有多处，均已清掉；这项记录在此，是为了让接手人知道「只有一处、且是故意的」。）
 
+### KI-23 · 持续 panic 的影子变体不会被隔离：`crashed` 置位在外层，短路在内层
+
+| 字段 | 内容 |
+| --- | --- |
+| **严重度** | 🟡 中（**性能 / 可观测性**，非正确性） |
+| **状态** | 开放（E10-d 过程中发现，2026-09-17） |
+
+**现象**：一个**每个 tick 都 panic** 的用户策略变体，会**永远不被标记为 `crashed`**，
+于是每个 tick 都 panic 一次、被吞一次，无限重复。引擎不会倒，但也没有任何告警。
+
+**证据（`HEAD` @ `4e93d6e`）**：代码里有两层 `catch_unwind`，但置位标志的那层在**外面**：
+
+- **内层**（吞掉用户策略 panic 的那层）`strategies/shadow_twin.rs:277`：
+  `catch_unwind(…).unwrap_or_default()`，调用点是 `TwinReplay::on_tick` 的
+  `shadow_twin.rs:227`（出场判定）与 `:239`（入场判定）。
+  用户策略（如 `find_candidates`）的 panic 在这里就被转换成默认返回值，**错误被丢弃**。
+- **外层**（置位 `crashed` 的那层）`shadow_evolution/mod.rs:327`：
+  `catch_unwind(|| v.on_tick(&ctx))` → 失败则 `v.crashed = true` + `tracing::warn!`。
+  但它包的 `v.on_tick` 内部**已经**有内层 `catch`，所以这层实际只兜出场/回放机制
+  （`update_exit_state` / `decide_exit` / 持仓簿记）的 panic。
+
+**因此**：外层那条 `tracing::warn!("shadow variant panicked — quarantined")` 对
+**用户策略自身的 panic 永不触发**；`crashed` 对这类变体永不置位。
+
+**与文档/注释不符**：`shadow_twin.rs:273-275` 的注释写
+「the caller quarantines it on the panic」，但唯一的调用方 `TwinReplay::on_tick`
+只是 `unwrap_or_default()` 丢弃错误，**没有任何隔离**。照该注释理解这个系统会判断错。
+
+**影响面**：
+
+- **不是正确性**：引擎不会崩，live 路径不受影响——这一点已由新增单测
+  `a_panicking_variant_cannot_take_down_the_engine` 与
+  `a_twins_own_panic_is_absorbed_and_never_sets_the_crashed_flag`
+  （`shadow_evolution/mod.rs`）双向钉住。
+- **是性能与可观测性**：每 tick 一次 panic/unwind（unwind 比正常返回贵得多），
+  且**静默**——运维看不到任何日志，只会觉得影子进化「有点慢」。变体是用户外挂的，
+  上线坏策略是现实场景。
+
+**为什么登记而不在这里修**：修法有多种（把内层 `catch` 的错误上抛给 `TwinReplay`、
+或在 `Variant` 记录连续 panic 次数并自行熔断），都会改动影子进化的内部契约，
+属于独立变更，不该夹在 E10-d 的构建配置 PR 里（会淹没真实 diff）。
+AI 倾向：**让内层把 panic 事实回报给 `Variant`**（例如 `ShadowTickResult` 增
+`panicked: bool`），由 `Variant` 累计并置 `crashed`——这样「隔离」的实现在**一层**里，注释也不再骗人。
+
+**与 D-20 的关系**：这条是 D-20 的**前提证据**——`panic = "abort"` 会同时废掉这两层
+（内层的吞掉与外层的隔离都不再成立，一次 panic 直接 abort）。
+因此 D-20 选「维持 `panic = "unwind"`」时，**不能**以「反正有隔离」为理由——
+隔离对用户策略其实没生效，真正保住引擎的是**内层那条 `unwrap_or_default()`**。
+
 ---
 
 ## 5. 🔵 平台与外部限制（查过、确认无解，非缺陷）
@@ -454,6 +503,7 @@ Issue / PR / 标签 / 合并等全部操作**走 curl + GitHub REST API**。
 | KI-19 | CI cancel-in-progress 会造成假绿灯 | 🔵 | 已知限制 |
 | KI-20 | 31 本地 / 44 远端分支、14 未推标签 | 🟡 | 开放 |
 | KI-22 | 3 个 Dependabot PR 长期开放 | 🔵 | 开放 |
+| KI-23 | 持续 panic 的影子变体不被隔离（`crashed` 在内外层错位） | 🟡 | 开放 |
 
 ---
 

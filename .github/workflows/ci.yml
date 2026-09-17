@@ -2,7 +2,8 @@ name: CI
 
 # Runs on every PR and on pushes to the long-lived branches.
 # Four independent gates, matching the repository governance plan:
-#   rust-check   — the Rust trading core builds, tests and (advisory) lints.
+#   rust-check   — the Rust trading core builds, tests, lints (advisory) and
+#                  holds the release binary / tracked-tree size budget (E10-d).
 #   node-check   — the Node/TS shell typechecks, tests and builds.
 #   panel-check  — the browser panel: Vue checks, then the `ui:webapp` gate
 #                  against a live gateway over a real socket.
@@ -42,6 +43,17 @@ jobs:
           (cd user_layer/parity_strategy && cargo build --release --locked)
       - name: Build (release)
         run: cargo build --release --workspace --locked
+      # Size budget (E10-d), BLOCKING. The [profile.release] settings in the root
+      # Cargo.toml are the only thing holding the binaries at ~10 MB, and a plain
+      # `cargo build` reports nothing when a dependency silently triples them.
+      # Also caps the tracked tree (what a clone pulls) at 100 MB, so a large
+      # binary cannot be committed by accident.
+      # Needs node; only standard-library modules are used, so no `npm ci`.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Binary & repo size budget
+        run: node scripts/binary-size-check.mjs --verbose
       # BK_REQUIRE_DYLIB=1 turns the dylib-driven tests from skip into hard
       # failure if the artifacts above are missing or fail negotiation.
       - name: Test

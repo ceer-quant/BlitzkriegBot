@@ -1910,3 +1910,160 @@ E17 的两道验收门禁此前都**不可能真正工作**，它们的绿灯是
   不是**成交率基准正确性**。两者不可互相替代。
 - 证据等级：单元/集成 + 真二进制 parity，**非**长时间实盘观测。
 - 本地扫描结论未完整（`scanner_enobufs`），**不得**据此宣称项目已通过安全审计。
+
+---
+
+## 49. E10 环境与交付物收敛：release 档位、体积预算门禁、仓库熵核查（2026-09-17）
+
+**背景**：E10 要求交付物 ≤ 500 MB、项目本体 ≤ 100 MB、单平台二进制 ≤ 50 MB，并做
+「`cargo clean` / node_modules 清理 / 重写 git 历史剔除大文件 / 加固 .gitignore / release 档位优化」
+五件事。**先测量再动手**的结果是：其中三件**不需要做**（已达标或纯属浪费），
+真正缺的是**没人守住**——所以本批的产出是「一个档位 + 一道门禁 + 一份熵核查记录」。
+
+### 49.1 实测基线（动任何东西之前）
+
+| 对象 | 实测 | 对应目标 | 结论 |
+| --- | --- | --- | --- |
+| **项目本体**（`git ls-files` 全部 blob 的存储字节） | **15.46 MB** / 1100 文件 | ≤ 100 MB | ✅ 仅用 15.5% |
+| 最大单个**已跟踪**文件 | 0.80 MB（`package-lock.json`） | — | ✅ 无大文件 |
+| `.git` 对象库 | **38 MB** | — | ✅ 历史里也没有大文件 |
+| `blitzkrieg-core`（release） | 13.06 MB | ≤ 50 MB | ✅ 距上限 3.8 倍 |
+| 四个二进制合计 | 17.36 MB | — | ✅ |
+| `target/` | 16 GB | （交付物 ≤ 500 MB） | ⚠️ 机器生成、已 gitignore |
+| └ 其中**嵌套的独立 workspace** `target/` | `ui/webapp/src-tauri` 1.1 GB、`core/blitzkrieg_core` 977 MB、`rust-executor` 644 MB、`user_layer/*` 各 22 MB ≈ **2.77 GB** | — | ⚠️ 根 `cargo clean` **清不掉**它们 |
+| `data/` | 17 GB（其中 `data/archive` **16 GB**） | — | 🔴 **真实历史行情归档，不得删** |
+| `node_modules/` | 1.6 GB | — | 可再生 |
+
+### 49.2 据此对 E10 五项要求的逐项裁决（**三项判定不做，附理由**）
+
+- **E10-a `cargo clean` / node_modules 清理 —— 不做（不可再生的是数据，可再生的没必要）**。
+  `node_modules/`、`dist/` 可再生，`target/` 可再生但重建一次 release 全量约 **92 s**；
+  真正的体积是 `data/archive` 的 **16 GB 行情归档**（P-1.3 生产常开归档的产物），
+  它是**证据数据**，删掉等于丢失回放能力——**禁止删除**。
+  注意 `cargo clean` 只清根 workspace（**已实测**：`cargo clean --dry-run -v` 列出的路径**全部**
+   在 `<root>/target/` 之下，工作区元数据也确认 `target_directory` = `<root>/target`），
+   那 **2.77 GB 嵌套 `target/`** 需要逐个清
+  （`core/blitzkrieg_core`、`rust-executor`、`ui/webapp/src-tauri`、`user_layer/{strategies,parity_strategy}`）。
+  **结论：磁盘占用是本地打扫问题，不是交付物问题**——交付物走 git，见下条。
+- **E10-b 重写 git 历史剔除大文件 —— 明确不做**。
+  实测 `.git` 仅 **38 MB**、最大已跟踪文件 **0.80 MB**，**历史里根本没有大文件可剔**。
+  而重写历史要付真实代价：全部 SHA 变更（`MIGRATION_LOG` §1–§49 里所有 commit 引用、
+  Issue/PR 交叉引用全部失效）、必须 force-push、且在跑的实例与既有克隆全部脱钩。
+  **零收益、高代价、破坏可追溯性**，故不做。若将来真出现大文件，正解是
+  `git filter-repo` + 一次性的力推窗口，而不是现在预防性地重建历史。
+- **E10-c 加固 `.gitignore` / `.gitattributes` —— 核查后判定已达标，未改动**。
+  逐项验证（`git check-ignore -q`）：
+  `target/`、`core/blitzkrieg_core/target`、`rust-executor/target`、`ui/webapp/src-tauri/target`、
+  `user_layer/*/target`、`data/`、`node_modules/`、`dist/`、`run.log`、`.mimosa/`、`ui/hft.html`
+  **全部 IGNORED**；`git ls-files --others --exclude-standard` 只剩 **1 个**文件
+  （本批新增的 `scripts/binary-size-check.mjs` 自身）。
+  `.gitattributes` 已把 `*.dylib`/`*.so`/`*.db`/`*.sqlite` 等声明为 `binary`、
+  把 `Cargo.lock`/`package-lock.json` 声明为 `-diff linguist-generated`。
+  **没有可加固的缺口**，据此**不改**（避免为「看起来做了事」而制造无意义 diff）。
+- **E10-d release 档位优化 —— 做了，但砍掉其中一项，理由见 49.3**。
+- **E10-e CI 体积检查 —— 做了，且是阻塞级**（此前**完全没有人守**这个数）。
+
+### 49.3 release 档位：`strip="debuginfo"` + `lto="fat"` + `codegen-units=1`，并**显式拒绝** `panic="abort"`
+
+Cargo.toml 此前**没有任何 `[profile.release]`**，即走 cargo 默认
+（`opt-level=3`、`codegen-units=16`、无 LTO、不去符号）。
+
+| 二进制 | 改前 | 改后 | 变化 |
+| --- | --- | --- | --- |
+| `blitzkrieg-core` | 13.06 MB | **9.56 MB** | **−26.8%** |
+| `ui_kit_panel` | 2.31 MB | 1.59 MB | −31.2% |
+| `ui_kit_web` | 1.15 MB | 0.86 MB | −25.2% |
+| `ui_kit_app` | 0.84 MB | 0.65 MB | −22.6% |
+| **合计** | 17.36 MB | **12.66 MB** | **−27.1%** |
+
+代价：release 全量构建 **91.7 s**（`lto="fat"` + `codegen-units=1` 让链接变慢）。
+收益是**运行时**的：LTO + 单 CGU 同时改善吞吐（E14 的性能基线会量化）。
+
+**`strip` 取 `"debuginfo"` 而不是 `true`（实证驱动，非风格偏好）**。
+`strip = true` 等于 `strip = "symbols"`，会**连符号表一起去掉**。用最小复现实测：
+
+| 档位 | 体积 | panic backtrace |
+| --- | --- | --- |
+| `strip = "debuginfo"`（采纳） | 9.56 MB | `0: std::panicking::begin_panic::<&str>` / `1: m::main` |
+| `strip = true` | 8.07 MB | **只有一行 `stack backtrace:`，帧全部丢失** |
+
+即：省 1.49 MB（−15.6%）换「release 下 panic 说不出是哪一帧」。
+交易内核里定位一次线上 panic 的价值远大于 1.49 MB，且 9.56 MB 距 50 MB 上限有 5 倍余量。
+**故取 `debuginfo`。**
+
+**`panic = "abort"` 明确不采纳（登记 D-20）**。它是常见的体积杠杆，但会**废掉策略崩溃隔离**：
+影子进化对变体有两层 `catch_unwind`——内层 `strategies/shadow_twin.rs:277` 吞掉孪生自身的 panic
+（调用点 `:227`/`:239`），外层 `shadow_evolution/mod.rs:327` 置 `crashed` 并告警。
+`panic = "abort"` 使 `catch_unwind` 无法捕获，**一次 panic 直接 abort 整个内核**。
+而变体是**用户外挂的 dylib 策略**（E7/E2-c），正是最可能 panic 的代码——
+abort 下「一个坏策略干掉整个交易会话、未平仓位无人接管」。
+由于 strip+lto 已把体积压到目标的 19%，**没有为体积牺牲隔离的必要**。
+Cargo.toml 里把 `panic = "unwind"` **显式写出**并附原因，因为「release 档位三件套」
+是常见的照抄模板，不写明会被后人加回去。
+
+### 49.4 顺手发现并钉住：隔离的真相不在注册表上（新增 2 个单测 + KI-23）
+
+为给 D-20 提供实证，写了两个新单测（`shadow_evolution/mod.rs`）：
+
+- `a_panicking_variant_cannot_take_down_the_engine`——一个**每个 tick 都 panic** 的变体
+  与一个健康策略并排跑两轮 tick：`on_tick` 不 panic 逃逸、健康变体不被连坐、`evaluate` 仍可跑。
+  **这条是 D-20 的地基**：`panic = "abort"` 会让它变成进程终止。
+- `a_twins_own_panic_is_absorbed_and_never_sets_the_crashed_flag`——钉住一个**与注释不符**的事实。
+
+**发现（登记为 KI-23）**：置位 `crashed` 的外层在**外面**，真正吞掉用户策略 panic 的内层在**里面**，
+于是**一个持续 panic 的用户策略永远不会被隔离**——每个 tick panic 一次、被吞一次，无限重复，
+且**静默**（外层那条 `"shadow variant panicked — quarantined"` 告警永不触发）。
+`shadow_twin.rs:273-275` 的注释「the caller quarantines it on the panic」与实际实现不符
+（唯一调用方只是 `unwrap_or_default()` 丢弃错误）。
+影响是**性能与可观测性**（每 tick 一次 panic/unwind 开销 + 无告警），**不是正确性**——引擎确实不倒，
+这一点已被上面两个单测双向钉住。修法（让内层把 panic 事实回报给 `Variant`）会改动影子进化内部契约，
+属独立变更，**不夹在本批构建配置 PR 里**。
+
+### 49.5 新增门禁 `scripts/binary-size-check.mjs`（`npm run size:check` / `size:report`）
+
+守两个**构建会静默回归**的数：
+
+- **单二进制 ≤ 50 MB**（每个 release 二进制）；
+- **项目本体 ≤ 100 MB**——用 `git ls-files -s` + `git cat-file --batch-check` 求
+  **已跟踪 blob 的真实存储字节**，即「一次 clone 拉多少」。**故意不用 `du` 工作树**：
+  工作树里合法地躺着多 GB 的 gitignore 产物（`target/` 16 GB、`data/` 17 GB），
+  用它当指标会让门禁在任何构建过的机器上必然失败。
+
+第三个目标（交付物 ≤ 500 MB）**只报告不设卡**：那是打包问题，
+`target/`/`data/` 是机器生成且已 ignore，对它们设卡等于为本地磁盘状态惩罚 CI。
+
+**为什么必须存在**：`[profile.release]` 是二进制停在 ~10 MB 的**唯一**原因，
+而 `cargo build` 对一个依赖把二进制撑大三倍**不给任何信号**。
+
+**门禁有效性已验证（不能失败的门禁不算门禁）**：
+
+| 场景 | 结果 |
+| --- | --- |
+| 正常 | 4 个二进制 + 本体全部 ok，**exit 0** |
+| `BK_BINARY_BUDGET_MB=1` | 3 个二进制 FAIL，逐个报超出量，**exit 1** |
+| `BK_BODY_BUDGET_MB=1` | 本体 FAIL，**exit 1** |
+| 无 release 构建 | 提示先 `cargo build --release`，**exit 2** |
+| **浅克隆（模拟 CI `checkout@v6` 默认 `fetch-depth: 1`）** | 测得 **15.46 MB / 1100 文件**，与完整克隆**完全一致** |
+
+最后一行是本批特意验证的：门禁依赖 `git cat-file`，若在浅克隆下取不到 blob 就会在 CI 上假失败。
+
+**接入 CI**：`ci.yml` 的 `rust-check` 里新增阻塞步骤（放在 `Build (release)` 之后、`Test` 之前，
+让体积回归**先于**几分钟的测试暴露）。该步骤只需要 Node 标准库，故不跑 `npm ci`，
+只 `actions/setup-node@v6`。CI 头部注释同步更新。
+
+**验证（本批）**
+- `BK_REQUIRE_DYLIB=1 cargo test --workspace --locked`：**311 项通过，0 失败**
+  （E17 后为 309，本批 +2）。
+- `cargo build --release --workspace --locked`：成功，91.7 s。
+- `node scripts/binary-size-check.mjs`：全部达标，exit 0；三个异常路径 exit 1/1/2 已验证。
+- 浅克隆下门禁读数与完整克隆一致。
+
+**已知缺口（登记不隐藏）**
+- **交付物 ≤ 500 MB 没有实测**：本地工作树 33+ GB 主要来自 `data/archive`（16 GB，**证据数据，
+  禁止删除**）与可再生的 `target/`。该目标的达成方式应是「打包时只取 git 跟踪内容 + 构建产物」，
+  属 E10-e 的打包脚本范畴，**本批未做**。
+- **嵌套 workspace 的 `target/` 不随根 `cargo clean` 清理**（合计约 2.75 GB）：
+  已在此记录位置清单，未做自动化清理脚本。
+- **`lto="fat"` + `codegen-units=1` 对运行时性能的收益未量化**——本批只测了体积与构建时间，
+  吞吐/延迟基线属 E14（`criterion` + P99 −20%）。
+- 本地扫描结论未完整（`scanner_enobufs`），**不得**据此宣称项目已通过安全审计。
