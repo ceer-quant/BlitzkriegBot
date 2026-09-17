@@ -459,6 +459,71 @@ Issue / PR / 标签 / 合并等全部操作**走 curl + GitHub REST API**。
 
 ---
 
+### KI-24 · 行情归档 `data/archive` 已丢失，且 `data/` 整体无备份
+
+| 字段 | 内容 |
+| --- | --- |
+| **严重度** | 🔴 阻断（对 E13/E15/E16 而言） |
+| **状态** | 开放（数据不可恢复，缺备份机制） |
+
+**证据**：`engine.stats` 在被删后仍报告 `archive: {path: "data/archive/events.jsonl",
+bytes: 617304842, events: 4943987, segments: 2, rotateBytes: 268435456}`——这是被删归档
+事故前规模的权威读数，取自仍在运行的核心进程（PID 16697）。
+
+**发生了什么**：2026-09-17，`scripts/package-release.mjs`（E10-e 新增）的 `--out`
+防呆校验写成「满足 X 才拒绝」，而 `resolve('.')` 末尾无分隔符使该条件不成立，
+于是 `--out .` 被当作「项目外路径」放行，`rmSync('.')` 删空了整个工作树。
+完整复盘见 `MIGRATION_LOG` §50 与工作树外的 `bk-recovery-20260917/INCIDENT_REPORT.md`。
+
+**影响面**：`data/archive` 是 E13（影子演化晋升）与 E15（HFT 策略重构）**唯一的数据基础**，
+两条史诗都要求 30 天影子数据；E16 同属「需长时间 DryRun」一类。归档清零意味着
+**这三条史诗的数据前提不再成立**，须先重新积累观测。`data/trades/trades.jsonl`、
+`data/soak/`、`data/orders/`、`data/positions/` 的**逐笔明细**同样丢失（341 笔历史仅剩
+汇总数字：净 +$57.25837678749994、胜率 52.49%）。
+
+**已恢复**：1101 个跟踪文件（从 GitHub 远端，`git status` 干净、`cargo build` 通过）、
+46 个分支与完整历史、上述汇总数字与 216 条挂单记录（经 UDS 从运行中的核心抢救）。
+`data/archive` 的部分历史存于
+`/Volumes/Hard Disk/backup1-blitzkrieg-archive-20260915/events-old-20260914.tar`（5.3 GB）。
+
+**未解决的部分**：`data/` 既不在 git 里，也没有 Time Machine（`tmutil destinationinfo`
+显示**未配置**）、没有 APFS 快照。**单点故障即永久丢失**——这才是本条以 🔴 登记的原因，
+而不只是「丢了一个目录」。备份机制属未决策项（见 `INCIDENT_REPORT.md` §6）。
+
+#### KI-24-a · 排查陷阱：面板显示的数字**不能**用来判断数据是否还在
+
+面板上「历史订单 343 笔 / 累计净利 +$57.16 / 胜率 52.5%」这些数字**全部来自仍在运行的
+核心进程的内存状态**，不是从磁盘逐笔读出来的。事故后实测对照：
+
+| 来源 | 记录数 |
+|---|---|
+| 运行中的核心（`trades.summary` 经 UDS） | **343** |
+| 面板显示 | **343**（吻合） |
+| 磁盘 `data/trades/trades.jsonl` | **3** |
+| 磁盘 `data/trades/summary.json` | 仅汇总数字（336 B） |
+
+所以「面板上数字还对」**不等于**「数据没丢」。真正的后果是：
+**一旦这个核心进程重启，333 笔的逐笔明细（入场/出场价、费用、持仓时长）将只剩
+`summary.json` 里那些汇总额**。需要逐笔明细时必须先确认核心没有重启过。
+
+#### KI-24-b · 排查陷阱：`/panel` 空白或「变成 ui kit」
+
+`ui/` 树里同时存在**两套 UI**，各有各的下发路径：
+
+| UI | 产物 | 由谁下发 |
+|---|---|---|
+| Vue 面板（主力） | `ui/webapp/webui/dist` | Node 网关的 `/panel` 静态路由 |
+| UI Kit 的 HTML 面板 | `ui_kit_web` 二进制（自带 HTML） | 自己监听 `--addr`（如 51888） |
+
+`ui/webapp/webui/dist` 是**构建产物、从未入库**，随工作树一起被删。删掉后 `/panel`
+没有前端可下发，而 `ui_kit_web` 仍在照常服务——**看起来就像「面板被换成了 ui kit」**，
+实际只是缺一次 `npm run build`。源码 61 个跟踪文件完好，已重建并通过 `npm run ui:webapp`。
+
+**下次遇到同类现象，先查 `ui/webapp/webui/dist` 是否存在，不要先去怀疑路由被改。**
+
+
+---
+
 ## 7. 有意保留项（**不要当 bug 修**）
 
 这些看起来像遗留，但**已经用户明确裁决保留**。改它们等于破坏历史契约。
@@ -504,6 +569,7 @@ Issue / PR / 标签 / 合并等全部操作**走 curl + GitHub REST API**。
 | KI-20 | 31 本地 / 44 远端分支、14 未推标签 | 🟡 | 开放 |
 | KI-22 | 3 个 Dependabot PR 长期开放 | 🔵 | 开放 |
 | KI-23 | 持续 panic 的影子变体不被隔离（`crashed` 在内外层错位） | 🟡 | 开放 |
+| KI-24 | **行情归档 `data/archive` 已丢失（617 MB / 4.94M 事件），且 `data/` 全无备份** | 🔴 | 开放 |
 
 ---
 

@@ -1,13 +1,17 @@
 name: CI
 
 # Runs on every PR and on pushes to the long-lived branches.
-# Four independent gates, matching the repository governance plan:
-#   rust-check   — the Rust trading core builds, tests, lints (advisory) and
-#                  holds the release binary / tracked-tree size budget (E10-d).
-#   node-check   — the Node/TS shell typechecks, tests and builds.
-#   panel-check  — the browser panel: Vue checks, then the `ui:webapp` gate
-#                  against a live gateway over a real socket.
-#   secret-scan  — no credential ever enters the tree (dependency-free).
+# Five independent gates, matching the repository governance plan:
+#   rust-check     — the Rust trading core builds, tests, lints (advisory) and
+#                    holds the release binary / tracked-tree size budget (E10-d).
+#   node-check     — the Node/TS shell typechecks, tests and builds.
+#   panel-check    — the browser panel: Vue checks, then the `ui:webapp` gate
+#                    against a live gateway over a real socket.
+#   release-bundle — assembles the actual deliverable and holds it under 500 MB
+#                    (E10-e). The deliverable is the *union* of what the three jobs
+#                    above build piecemeal, so only a job building the union can
+#                    measure it.
+#   secret-scan    — no credential ever enters the tree (dependency-free).
 # A final `notify` job reports the aggregate result to WeChat when configured.
 on:
   push:
@@ -140,6 +144,51 @@ jobs:
       - name: ui:webapp gate
         run: npm run ui:webapp
 
+  # E10-e: the third size target — the *deliverable* ≤ 500 MB — is the one that
+  # cannot be read off the working tree. A developer checkout legitimately holds
+  # tens of GB of gitignored scratch (target/, data/archive, node_modules/), so
+  # "how big is what we hand someone" is only answerable by assembling it.
+  #
+  # NOTE on the script's --out handling: it deletes the destination before packing
+  # (so a re-run is clean rather than a merge of two runs), and that deletion once
+  # destroyed a working tree — see MIGRATION_LOG §50 / KI-24. The destination guard
+  # is an allow-list with a default of REFUSAL, and the CI invocation deliberately
+  # passes no --out at all, so it lands in a mktemp dir and touches nothing of ours.
+  # Do not add --out here without re-reading that section.
+  release-bundle:
+    name: release-bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Install
+        run: npm ci
+      - name: Build the core and the UI binaries (release)
+        run: cargo build --release --workspace --locked
+      - name: Build the strategy cdylibs (standalone workspaces)
+        run: |
+          (cd user_layer/strategies && cargo build --release --locked)
+          (cd user_layer/parity_strategy && cargo build --release --locked)
+      - name: Build the shell
+        run: npm run build
+      - name: Build the panel bundle
+        run: |
+          cd ui/webapp/webui
+          npm ci
+          npm run build
+      # BLOCKING. Measures a clean-checkout bundle: on a dev machine the bundle also
+      # picks up artefacts a runner does not have (every workspace cdylib, the
+      # debug-instrumented .so variants), which is why the number here runs a little
+      # under the local one.
+      - name: Deliverable ≤ 500 MB
+        run: node scripts/package-release.mjs
+
   secret-scan:
     name: secret-scan
     runs-on: ubuntu-latest
@@ -158,7 +207,7 @@ jobs:
 
   notify:
     name: notify (wechat)
-    needs: [rust-check, node-check, panel-check, secret-scan]
+    needs: [rust-check, node-check, panel-check, release-bundle, secret-scan]
     if: always()
     runs-on: ubuntu-latest
     # Secret lifted to job env so the step `if` can test it (secret-context
