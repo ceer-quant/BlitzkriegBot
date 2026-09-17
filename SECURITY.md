@@ -88,5 +88,4 @@ your own risk, especially with live funds.
 
 Security-relevant design decisions are documented in
 [docs/rust-core/ARCHITECTURE.md](./docs/rust-core/ARCHITECTURE.md)
-(process boundaries, risk enforcement) and
-[docs/VPS_SECURITY.md](./docs/VPS_SECURITY.md) (deployment hardening).
+(process boundaries, risk enforcement).

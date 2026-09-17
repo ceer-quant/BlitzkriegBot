@@ -228,7 +228,6 @@ cd ui/webapp/webui && npm run check:all
 | [docs/rust-core/EXTENSION_GUIDE.md](./docs/rust-core/EXTENSION_GUIDE.md) | 如何新增一个市场扩展 |
 | [docs/rust-core/ABI_V2_DESIGN.md](./docs/rust-core/ABI_V2_DESIGN.md) | 策略 C ABI v2 设计（vtable 已冻结，新能力走可选符号） |
 | [docs/rust-core/SHADOW_EVOLUTION.md](./docs/rust-core/SHADOW_EVOLUTION.md) | 影子进化（按策略参数 / 孪生 / 审计 / apply·rollback） |
-| [docs/VPS_SECURITY.md](./docs/VPS_SECURITY.md) | 生产服务器加固清单 |
 | [CHANGELOG.md](./CHANGELOG.md) | 变更史 |
 
 内部开发文档（门禁矩阵、决策记录、迁移日志、GitHub 治理规范等）在 `dev-docs/`，
