@@ -16,9 +16,7 @@ members = [
 # workspaces (each has [workspace]) that build example/test cdylibs —
 # intentionally excluded so they carry their own Cargo.lock like a real external
 # strategy author would.
-# rust-executor is a standalone sidecar binary with its own Cargo.lock
-# (Polymarket CLOB subprocess), not part of the core workspace.
-exclude = ["user_layer/strategies", "user_layer/parity_strategy", "rust-executor", "ui/webapp/src-tauri"]
+exclude = ["user_layer/strategies", "user_layer/parity_strategy", "ui/webapp/src-tauri"]
 
 # ── Release profile (E10-d) ──────────────────────────────────────────────────
 # Size/performance hardening for shipped binaries. Measured, not guessed: see
