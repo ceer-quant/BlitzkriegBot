@@ -16,6 +16,8 @@
     "typecheck": "tsc --noEmit",
     "core:build": "cargo build --release --manifest-path core/blitzkrieg_core/Cargo.toml",
     "core:test": "cargo test --lib --manifest-path core/blitzkrieg_core/Cargo.toml",
+    "core:shutdown-check": "node scripts/shutdown-cleanliness-check.mjs",
+    "core:parent-monitor-check": "node scripts/parent-monitor-check.mjs",
     "core:parity": "npm run build && node scripts/core-parity.mjs",
     "core:parity-engines": "npm run build && node scripts/parity-engines.mjs",
     "account:test": "cargo test --manifest-path core/blitzkrieg_core/Cargo.toml --lib --features account-precision account_precision",
