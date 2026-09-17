@@ -281,7 +281,7 @@ cd ui/webapp/webui && npm run check:all
 | [docs/AI_WORKFLOW.md](./docs/AI_WORKFLOW.md) | 角色、硬约束、分支与门禁规范（人机协作红线） |
 | [docs/DECISIONS_PENDING.md](./docs/DECISIONS_PENDING.md) | 待决策事项与**用户裁决**（D-1…D-19） |
 | [docs/ROADMAP_V0_1.md](./docs/ROADMAP_V0_1.md) | 0.1 里程碑 E1–E7 的验收与进度 |
-| [docs/blitzkrieg/MIGRATION_LOG.md](./docs/blitzkrieg/MIGRATION_LOG.md) | **权威变更史**（§1–§47）：已修复缺陷的来龙去脉 |
+| [docs/blitzkrieg/MIGRATION_LOG.md](./docs/blitzkrieg/MIGRATION_LOG.md) | **权威变更史**（§1–§48）：已修复缺陷的来龙去脉 |
 | [docs/reports/](./docs/reports/) | 专题报告（回放/留出段证据、治理报告等） |
 
 

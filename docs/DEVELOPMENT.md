@@ -444,7 +444,7 @@ npm run strategy:devcheck
 
 | 文档 | 说明 |
 | --- | --- |
-| [`blitzkrieg/MIGRATION_LOG.md`](blitzkrieg/MIGRATION_LOG.md) | **权威变更史**（§1–§47），迁移与每个里程碑的落地记录 |
+| [`blitzkrieg/MIGRATION_LOG.md`](blitzkrieg/MIGRATION_LOG.md) | **权威变更史**（§1–§48），迁移与每个里程碑的落地记录 |
 | [`reports/`](reports/) | 交付报告（治理 / UI Kit / 出参优化 / 留出段回放 / 影子进化 A/B） |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | 品牌迁移前的旧变更记录 |
 
