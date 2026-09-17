@@ -14,7 +14,7 @@ The wizard sets up your API key, picks a channel, and starts the gateway.
 
 **From source (alternative):**
 ```bash
-git clone https://github.com/alsk1992/BlitzkriegBot.git && cd BlitzkriegBot
+git clone https://github.com/ceer-quant/BlitzkriegBot.git && cd BlitzkriegBot
 npm install && cp .env.example .env
 # Add ANTHROPIC_API_KEY to .env
 npm run build && npm start

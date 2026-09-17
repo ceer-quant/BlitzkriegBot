@@ -36,7 +36,7 @@ blitzkrieg creds test   # Check credentials are working
 If you prefer to build from source:
 
 ```bash
-git clone https://github.com/alsk1992/BlitzkriegBot.git
+git clone https://github.com/ceer-quant/BlitzkriegBot.git
 cd BlitzkriegBot
 npm install
 cp .env.example .env
@@ -78,4 +78,4 @@ blitzkrieg doctor                  # Full diagnostics
 blitzkrieg creds test polymarket   # Test specific credentials
 ```
 
-Report issues: https://github.com/alsk1992/BlitzkriegBot/issues
+Report issues: https://github.com/ceer-quant/BlitzkriegBot/issues
