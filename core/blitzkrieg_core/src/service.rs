@@ -1066,7 +1066,7 @@ impl Core {
         // reads (`run_exit_checks`). Without this, a Rust-native feed (--feed-ws)
         // left Core.books empty, so open positions never re-valued and NO
         // non-forced exit (TP/trailing/SL) could ever fire.
-        match &ev {
+        let mirrored_token = match &ev {
             crate::engine::DataEvent::Book {
                 token_id,
                 bids,
@@ -1080,6 +1080,7 @@ impl Core {
                         asks: asks.clone(),
                     },
                 );
+                Some(token_id.clone())
             }
             crate::engine::DataEvent::TopOfBook {
                 token_id,
@@ -1104,9 +1105,31 @@ impl Core {
                 if !bids.is_empty() || !asks.is_empty() {
                     self.books
                         .insert(token_id.clone(), crate::sim::Book { bids, asks });
+                    Some(token_id.clone())
+                } else {
+                    None
                 }
             }
-            _ => {}
+            _ => None,
+        };
+
+        // KI-1: the market path must also settle resting maker orders the way
+        // `book_snapshot` does — a crossing feed event is exactly when a
+        // dry maker fill would happen at the venue, and skipping it made every
+        // dry entry escalate to taker (a systematically more expensive economy).
+        if let Some(token) = mirrored_token {
+            if self.config.mode.settles_locally() {
+                let ids: Vec<String> = self
+                    .ome
+                    .live_orders()
+                    .into_iter()
+                    .filter(|o| o.token_id == token && rests_on_book(o.mode))
+                    .map(|o| o.order_id.clone())
+                    .collect();
+                for id in ids {
+                    self.try_maker_fill(&id, now_ms);
+                }
+            }
         }
 
         // Shadow Evolution observation. D-3 fidelity: the shadow is fed AFTER the
@@ -2153,6 +2176,12 @@ impl Core {
         if let Some(d) = self.ome.apply_fill(fill, now_ms)? {
             self.apply_delta_effects(d, now_ms);
         }
+        // Event-stream completeness: a fill applied HERE is outside `place`, so
+        // `place`'s trailing `emit_order` cannot cover it. Without this final
+        // update the order log / backtester only ever saw the resting LIVE state
+        // (the Fill event alone carries no terminal status), so a cross-filled
+        // maker read as still-open to every event consumer.
+        self.emit_order(id);
         Ok(())
     }
 
@@ -2818,6 +2847,162 @@ mod books_mirror_tests {
             "exit must be above entry (was frozen before fix)"
         );
         assert!(closed.net_pnl_usd > Decimal::ZERO);
+    }
+
+    /// KI-1 regression: a resting maker order must fill when the MARKET path
+    /// (`engine_on_data`) delivers a crossing book — not only when a
+    /// `books.snapshot` RPC arrives. Before the fix the feed path only mirrored
+    /// the book, so every dry entry sat until its maker→taker escalation and
+    /// dry's fill/fee economy was systematically taker-side.
+    #[test]
+    fn engine_feed_cross_fills_resting_maker() {
+        let cfg = CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(1000),
+            round_duration_sec: 900,
+            ..Default::default()
+        };
+        let mut c = Core::new(cfg);
+        let now = 1_000_000_000i64;
+        let slot = now / 1000 / 900;
+        let end = (slot + 1) * 900 * 1000;
+
+        // Register the round the way the feed does, then seed the book.
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![crate::model::CryptoMarket {
+                    asset: "BTC".into(),
+                    condition_id: "c".into(),
+                    question_id: "q".into(),
+                    up_token_id: "tok".into(),
+                    down_token_id: "d".into(),
+                    up_price: dec!(0.6),
+                    down_price: dec!(0.4),
+                    expires_at_ms: end,
+                    round_slot: slot,
+                    neg_risk: true,
+                    question: "?".into(),
+                }],
+                now_ms: now,
+            },
+            now,
+        );
+        c.engine_on_data(
+            crate::engine::DataEvent::Book {
+                token_id: "tok".into(),
+                bids: vec![(dec!(0.43), dec!(100))],
+                asks: vec![(dec!(0.45), dec!(100))],
+                now_ms: now,
+            },
+            now,
+        );
+
+        // Rest a maker BUY at 0.43 via the normal entry path.
+        let req = crate::model::OrderRequest {
+            token_id: "tok".into(),
+            condition_id: "c".into(),
+            side: crate::model::Side::Buy,
+            mode: crate::model::FillPolicy::Maker,
+            price: dec!(0.43),
+            size: dec!(10),
+            internal_key: "k".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: slot,
+        };
+        let id = c.place(req, 0, now).unwrap().0;
+        assert_eq!(
+            c.ome.get(&id).map(|o| o.status),
+            Some(crate::model::OrderStatus::Live),
+            "maker rests while the book is above its limit"
+        );
+
+        // A feed book whose ask crosses the resting bid: the MAKER path must
+        // fill it at the resting limit (maker role — no taker fee).
+        c.engine_on_data(
+            crate::engine::DataEvent::Book {
+                token_id: "tok".into(),
+                bids: vec![(dec!(0.41), dec!(100))],
+                asks: vec![(dec!(0.42), dec!(100))],
+                now_ms: now + 500,
+            },
+            now + 500,
+        );
+        let order = c.ome.get(&id).expect("order present");
+        assert_eq!(order.status, crate::model::OrderStatus::Filled);
+        assert_eq!(order.filled_size, dec!(10));
+        assert_eq!(
+            order.avg_fill_price,
+            Some(dec!(0.43)),
+            "fills at the resting limit, not the crossing ask"
+        );
+        // Maker fills are free (E17): the ledger holds only the notional.
+        let bal = c.ledger().balance();
+        assert!(
+            bal < dec!(1000) && bal > dec!(957),
+            "reserved notional 4.30 spent, no taker fee charged (got {bal:?})"
+        );
+    }
+
+    /// The complementary invariant: in the default fill model a NON-crossing
+    /// feed book must NOT fill the resting maker (no phantom fills).
+    #[test]
+    fn engine_feed_does_not_fill_maker_without_cross() {
+        let cfg = CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(1000),
+            round_duration_sec: 900,
+            ..Default::default()
+        };
+        let mut c = Core::new(cfg);
+        let now = 1_000_000_000i64;
+        c.engine_on_data(
+            crate::engine::DataEvent::Book {
+                token_id: "tok".into(),
+                bids: vec![(dec!(0.43), dec!(100))],
+                asks: vec![(dec!(0.45), dec!(100))],
+                now_ms: now,
+            },
+            now,
+        );
+        let req = crate::model::OrderRequest {
+            token_id: "tok".into(),
+            condition_id: "c".into(),
+            side: crate::model::Side::Buy,
+            mode: crate::model::FillPolicy::Maker,
+            price: dec!(0.43),
+            size: dec!(10),
+            internal_key: "k".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: now / 1000 / 900,
+        };
+        let id = c.place(req, 0, now).unwrap().0;
+        // Ask 0.44 > limit 0.43: still resting after many feed ticks.
+        for i in 1..5 {
+            c.engine_on_data(
+                crate::engine::DataEvent::Book {
+                    token_id: "tok".into(),
+                    bids: vec![(dec!(0.43), dec!(100))],
+                    asks: vec![(dec!(0.44), dec!(100))],
+                    now_ms: now + i * 100,
+                },
+                now + i * 100,
+            );
+        }
+        assert_eq!(
+            c.ome.get(&id).map(|o| o.status),
+            Some(crate::model::OrderStatus::Live),
+            "non-crossing feed must not fill"
+        );
     }
 }
 

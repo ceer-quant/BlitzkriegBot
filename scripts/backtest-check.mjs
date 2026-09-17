@@ -125,8 +125,8 @@ async function main() {
   for (let i = 0; i < 14; i++) { await rpc(M.BOOK, book(0.57, 0.58)); await sleep(300); }
   await rpc(M.BOOK, book(0.43, 0.44));               // dip -> resting bid 0.43
   await sleep(400);
-  await rpc(M.BOOK, book(0.41, 0.42));               // crosses the resting bid; the
-  await sleep(900);                                  // engine feed does NOT cross-fill
+  await rpc(M.BOOK, book(0.41, 0.42));               // crosses the resting bid -> the
+  await sleep(900);                                  // feed path cross-fills it (KI-1)
   for (const [b, a] of [[0.60, 0.62], [0.80, 0.82], [0.95, 0.97]]) {
     await rpc(M.BOOK, book(b, a));                   // rally -> exit rules take profit
     await sleep(400);
@@ -178,7 +178,13 @@ async function main() {
   check('order counts match',
     rep.orders.orders === liveOrders.length && rep.orders.filled === liveFilled && rep.orders.cancelled === liveCancelled,
     `replay=${rep.orders.orders} (${rep.orders.filled} filled, ${rep.orders.cancelled} cancelled) live=${liveOrders.length} (${liveFilled} filled, ${liveCancelled} cancelled)`);
-  check('maker entry escalated rather than crossing', liveCancelled === 1, `cancelled=${liveCancelled}`);
+  // KI-1: the entry BUY must be cross-filled by the feed path at its resting
+  // maker limit — not escalated to taker (the old dry behaviour) and not left
+  // LIVE. The second FILLED order is the exit SELL.
+  const entryBuy = liveOrders.find((o) => o.side === 'buy' && o.tokenId === 'UP');
+  check('entry maker order CROSS-FILLED by the feed path (KI-1)',
+    entryBuy && entryBuy.status === 'FILLED',
+    entryBuy ? `entry status=${entryBuy.status} price=${entryBuy.price}` : 'no entry BUY order');
   check('net PnL matches', Math.abs(Number(rep.trades.netPnlUsd) - livePnl) < 1e-9,
     `replay=${money(rep.trades.netPnlUsd)} live=${money(livePnl)}`);
   check('open positions match', rep.openPositions === livePos.length, `replay=${rep.openPositions} live=${livePos.length}`);
