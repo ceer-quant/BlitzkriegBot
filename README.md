@@ -173,7 +173,7 @@ cargo run -p blitzkrieg-ui-panel
 
 ## 5. 开发与门禁
 
-提交前**必须**在仓库根跑完全部门禁（CI 中同样执行）：
+提交前**必须**在仓库根跑完全部门禁：
 
 ```bash
 # Rust
@@ -192,6 +192,12 @@ node scripts/cycle-check.mjs
 bash scripts/secret-scan.sh
 ```
 
+面板前端（`ui/webapp/webui/`）另有一套 bare-Node 检查：
+
+```bash
+cd ui/webapp/webui && npm run check:all
+```
+
 其他常用校验脚本：
 
 - `npm run core:parity` —— Node 与 Rust 核心行为一致性比对。
@@ -199,18 +205,32 @@ bash scripts/secret-scan.sh
 - `cargo build --release --workspace` 后 `ui/` 网关可发现根 `target/` 下的核心。
 
 > **禁止**在未通过上述验证时提交到 `main`；`cargo fmt`/`clippy` 与 `npm audit`
-> 当前在 CI 中为**建议性**（历史债，见 `docs/DECISIONS_PENDING.md` D-6 / D-9），
+> 当前在 CI 中为**建议性**（历史债，见 `docs/KNOWN_ISSUES.md` KI-13 / KI-14），
 > 不阻塞但每次运行都会报告。
+>
+> ⚠️ **CI 只覆盖上面的一部分。** 仓库里还有 **22 个可运行的验证门禁**（13 个有 npm 别名，
+> 如 `core:strategy-*`、`core:trend-follow`、`core:mean-reversion`、`strategy:devcheck`、
+> `scale:plugins`、`scale:feed`、`ui:plugin-*`、`tui:check`；另 9 个只能直接 `node scripts/…` 跑，
+> 如 `cycle-check.mjs`、`order-recovery-check.mjs`、`backtest-check.mjs`）
+> **没有接进 CI，必须人工在本地跑**。这正是 [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md)
+> KI-9 记录的当前最大回归保护缺口；完整门禁矩阵见
+> [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md) §3。
 
 ---
 
 ## 6. 分支模型与协作
 
-- 长期分支：`main`（受保护意图，仅经 PR 合入）、`develop`（集成分支）。
-- 短期分支：`feature/*`、`fix/*`、`chore/*`、`release/*`。
+- 长期分支：`main`（发布分支，按约定仅经 PR 合入）、`develop`（集成分支）。
+- 短期分支：`feat/*`、`fix/*`、`chore/*`、`release/*`（历史上亦用 `feature/*`，等价）。
 - 所有合入走 Pull Request + 全绿检查；Issue/PR 模板与标签体系已内置。
-- 协作红线、Definition of Done、提交与证据规范见
-  [`docs/AI_WORKFLOW.md`](./docs/AI_WORKFLOW.md) 与 [`CONTRIBUTING.md`](./CONTRIBUTING.md)。
+- **远端名为 `ceer`**（`origin` 已移除）；`gh` CLI 未安装，Issue/PR 操作走 curl + REST API。
+- 完整流程（分支 → 提交 → PR → CI → squash 合并 → 清分支）见
+  [`docs/GITHUB_GOVERNANCE.md`](./docs/GITHUB_GOVERNANCE.md)。
+
+> ⚠️ **分支保护实际上没有服务端强制。** 本仓库为 private + GitHub Free，
+> 对分支保护/规则集的 API 调用返回 `403 Upgrade to GitHub Pro`，原生 Secret Scanning /
+> Push Protection 亦不可用。「仅经 PR 合入」**目前只是流程约定**——见
+> [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md) KI-17。
 
 ### 不可逾越的安全红线
 
@@ -218,10 +238,26 @@ bash scripts/secret-scan.sh
 - 禁止修改真实凭证、私钥、API Key；机密一律走环境变量 / secret，绝不入库。
 - 禁止删除未经备份的文件；禁止在未验证时提交主分支；禁止「顺手」改动业务逻辑。
 - 发现漏洞请走 [`SECURITY.md`](./SECURITY.md) 的私下披露流程，勿在公开 Issue 粘贴机密。
+- **不得声称本项目已通过安全审计**（原因见 [`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md)）。
 
 ---
 
 ## 7. 文档
+
+### 7.1 先读这五份（权威）
+
+| 文档 | 内容 |
+| --- | --- |
+| [HANDOFF.md](./HANDOFF.md) | **项目交接入口**：当前状态、阅读序、跑起来、待办 |
+| [docs/FEATURES.md](./docs/FEATURES.md) | **功能文档与完成度**（证据等级：实盘验证 / 离线验证 / 仅测试覆盖 / 未验证 / 部分 / 规划） |
+| [docs/KNOWN_ISSUES.md](./docs/KNOWN_ISSUES.md) | **已知但未修复的问题**：严重度、证据（文件:行）、影响面、处理顺序 |
+| [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | **开发规范**：目录职责、门禁矩阵、不可触碰的边界、工具链陷阱 |
+| [docs/GITHUB_GOVERNANCE.md](./docs/GITHUB_GOVERNANCE.md) | **GitHub 使用规范与身份信息**：分支、提交、Issue/PR、合并流程、REST 配方 |
+
+> 这五份是**当前权威**。`docs/` 下的其余文档多为迁移前产物，冲突时以上述五份为准
+> （完整文档地图与分级见 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) §11）。
+
+### 7.2 架构与指南
 
 | 文档 | 内容 |
 | --- | --- |
@@ -229,13 +265,25 @@ bash scripts/secret-scan.sh
 | [docs/blitzkrieg/ARCHITECTURE.md](./docs/blitzkrieg/ARCHITECTURE.md) | 分层架构与扩展体系 |
 | [docs/blitzkrieg/STRATEGY_GUIDE.md](./docs/blitzkrieg/STRATEGY_GUIDE.md) | 如何编写与加载策略 |
 | [docs/blitzkrieg/EXTENSION_GUIDE.md](./docs/blitzkrieg/EXTENSION_GUIDE.md) | 如何新增一个市场扩展 |
+| [docs/blitzkrieg/ABI_V2_DESIGN.md](./docs/blitzkrieg/ABI_V2_DESIGN.md) | 策略 C ABI v2 设计（vtable 已冻结，新能力走可选符号） |
+| [docs/blitzkrieg/SHADOW_EVOLUTION.md](./docs/blitzkrieg/SHADOW_EVOLUTION.md) | 影子进化（按策略参数 / 孪生 / 审计 / apply·rollback） |
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | 系统总体设计与数据流 |
 | [docs/QUICK_START.md](./docs/QUICK_START.md) | 更完整的上手指南 |
 | [docs/TRADING.md](./docs/TRADING.md) | 交易执行、机器人与风控 |
 | [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) | 环境变量、容器与部署 |
 | [docs/ROADMAP_INSTITUTIONAL.md](./docs/ROADMAP_INSTITUTIONAL.md) | 机构化路线图 |
-| [docs/DECISIONS_PENDING.md](./docs/DECISIONS_PENDING.md) | 待决策事项（技术债 / 平台限制 / 取舍） |
-| [docs/AI_WORKFLOW.md](./docs/AI_WORKFLOW.md) | 角色、硬约束、分支与门禁规范 |
+
+### 7.3 流程、决策与历史
+
+| 文档 | 内容 |
+| --- | --- |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | 贡献流程入口 |
+| [docs/AI_WORKFLOW.md](./docs/AI_WORKFLOW.md) | 角色、硬约束、分支与门禁规范（人机协作红线） |
+| [docs/DECISIONS_PENDING.md](./docs/DECISIONS_PENDING.md) | 待决策事项与**用户裁决**（D-1…D-19） |
+| [docs/ROADMAP_V0_1.md](./docs/ROADMAP_V0_1.md) | 0.1 里程碑 E1–E7 的验收与进度 |
+| [docs/blitzkrieg/MIGRATION_LOG.md](./docs/blitzkrieg/MIGRATION_LOG.md) | **权威变更史**（§1–§47）：已修复缺陷的来龙去脉 |
+| [docs/reports/](./docs/reports/) | 专题报告（回放/留出段证据、治理报告等） |
+
 
 ---
 

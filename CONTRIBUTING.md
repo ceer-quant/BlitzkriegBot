@@ -5,16 +5,35 @@ Thanks for your interest in contributing! This is a **private** repository (`cee
 > ## 🤖 AI 协作与仓库规范
 >
 > 本仓库以 **cyborg 模式** 维护：人类定目标/决策，AI 代理负责分析、实现、验证与写证据。
-> 完整规范见 **[`docs/AI_WORKFLOW.md`](docs/AI_WORKFLOW.md)**，其中包含**硬约束**
+>
+> **动工前先读这四份**：
+>
+> | 文档 | 读它是为了知道 |
+> | --- | --- |
+> | [`HANDOFF.md`](HANDOFF.md) | 交接入口：当前状态、阅读序、怎么跑起来 |
+> | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | **开发规范**：目录职责、门禁矩阵、不可触碰的边界、工具链陷阱 |
+> | [`docs/GITHUB_GOVERNANCE.md`](docs/GITHUB_GOVERNANCE.md) | **GitHub 使用规范与身份信息**：分支、提交、Issue/PR、合并流程、REST 配方 |
+> | [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) | **已知未修问题**：别重复踩坑，也别把「有意保留」当 bug 修 |
+>
+> 完整红线见 **[`docs/AI_WORKFLOW.md`](docs/AI_WORKFLOW.md)**，其中包含**硬约束**
 > （禁止启用 Live 交易、禁止改动凭证、禁止删除未备份文件、禁止未验证直推主分支、
 > 禁止顺手优化无关逻辑）。以下为速查：
 >
-> - **作者署名**：唯一 Git 作者为 `ceer_quant`；**禁止任何 AI 署名**（不加 `Co-authored-by:` / `Generated with` 等 trailer）。
-> - **分支**：`main`（发布）、`develop`（集成）、`feature/*`、`fix/*`、`chore/*`、`release/*`。
->   AI 只能推功能分支，受保护分支需 PR + 评审 + 门禁全绿。
-> - **提交门禁**：`cargo build --release`、`cargo test`、`npm run typecheck`、
->   DryRun `node scripts/cycle-check.mjs`、`bash scripts/secret-scan.sh`，且 CI
->   （`rust-check` / `node-check` / `secret-scan`）全绿。
+> - **作者署名**：唯一 Git 作者为 `ceer_quant <ceer_quant@users.noreply.github.com>`；
+>   **禁止任何 AI 署名**（不加 `Co-authored-by:` / `Generated with` 等 trailer）。
+> - **远端**：名称为 **`ceer`**（不是 `origin`，`origin` 已按裁决移除）。`gh` CLI **未安装**，
+>   Issue/PR 操作走 **curl + GitHub REST API**。
+> - **分支**：`main`（发布）、`develop`（集成）、`feat/*`、`fix/*`、`chore/*`、`release/*`。
+>   AI 只能推功能分支。
+>   ⚠️ **但请注意**：本仓库为 private + GitHub Free，**服务端分支保护实际不可用**
+>   （API 返回 `403 Upgrade to GitHub Pro`）——「受保护分支需 PR」目前**只是流程约定**，
+>   详见 [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) KI-17。
+> - **提交门禁**：`cargo build --release --workspace --locked`、`cargo test --workspace --locked`、
+>   `npm run typecheck`、`npm test`、`npm run build`、DryRun `node scripts/cycle-check.mjs`、
+>   `bash scripts/secret-scan.sh`，且 CI（`rust-check` / `node-check` / `panel-check` /
+>   `secret-scan`）全绿。完整门禁矩阵（含**尚未接入 CI** 的 22 个专项门禁）见
+>   [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) §3。
+> - **不要用 Bash 写 Rust 源码**（本机 Mimosa hook 会拦），用编辑器/Write 工具。
 > - **Issue / PR**：先开 Issue（模板见 `.github/ISSUE_TEMPLATE/`），PR 须逐条勾选安全约束。
 > - **不确定的分歧** 写入 [`docs/DECISIONS_PENDING.md`](docs/DECISIONS_PENDING.md)，不在 PR 中悬置。
 
@@ -49,6 +68,11 @@ npm run build
 ```
 
 ## Project Structure
+
+> ⚠️ **下面是 Node 外壳（`src/`）的内部结构，不是全仓库结构。**
+> 交易核心在 **Rust** 侧（`core/blitzkrieg_core`），市场扩展在 `extensions/`，
+> 策略接口在 `user_layer/`，前端在 `ui/`。**改交易逻辑请去 Rust 侧，不要改这里。**
+> 完整目录职责表见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) §2。
 
 ```
 src/
