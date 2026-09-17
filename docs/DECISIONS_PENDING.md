@@ -790,3 +790,49 @@ CloddsBot 时期提交后，`main` 文件数从 1105 掉到 577，**丢失 `LICE
 3. 是否接受「先 C 后 B」的顺序，还是只做其中一件？
 4. **提示**：`data/archive` 是 16 GB 真实历史行情归档，**不在**本次讨论
    范围内，禁止删除。
+
+---
+
+## [已决策] D-24（更新 2026-09-17）：CloddsBot 遗留代码 —— B 升级为「一锅端」，已执行
+
+用户裁定（原话）：
+
+1. 「B 全删除 我们以后也没有skills功能 不再规划中」
+2. 「整个MCP server我们都不需要 全部删除一锅端」
+3. 「全部可以一锅端……新版代码都已经交易部分100%rust了……我们不再需要任何，
+   注意是任何cloddsbot遗留代码了，我们的vue前端是纯ui，也就是我们的node和
+   业务逻辑是毫无关系和依赖的」
+
+**执行前提验证（全部证实）**：
+
+- 51888 面板 = ui_kit_web（Rust）监听，/api/snapshot、/api/command、/api/plugins、
+  /api/login、Vue 静态托管全部在 ui/ui_kit/src/web/mod.rs（Rust）实现。
+- 交易 = blitzkrieg-core（Rust）+ extensions/polymarket（Rust 插件），由
+  ui_kit_web supervisor 直接拉起，不经任何 Node 进程。
+- 运行中的进程普查：无任何 Node 业务进程在跑。
+- 遗留 Node gateway 的 /api/snapshot 等面板端点在 Node 侧根本不存在——
+  那 20 个 gateway route 文件、agents、channels、feeds、x402、ACP、skills、
+  MCP 全部是零进程消费的死宇宙。
+
+**执行结果**（3 个提交，均在 feat/e12-readonly-egress）：
+
+- `ecdeb888` purge(legacy)：759 文件，-322,272 行。src 从 423 文件减到
+  5 文件（core IPC 薄层 ×4 + logger），tests 22→2（core-socket、
+  core-shutdown），package.json 从 ~40 scripts/60 依赖减到 29 scripts/4
+  运行时依赖（pino、pino-pretty、ws、zod），bin 字段移除。
+- `d277cd00` chore：删 5 个描述已删功能的 docs、5 张旧 UI 截图、
+  .npmignore/.npmrc（npm 发布已弃）、lockfile 重建（node_modules 46MB）。
+- `cd2e0cb1` license：版权行改为 BlitzkriegBot contributors (ceer-quant)。
+  前提：与上游快照逐字节相同的文件从 528 清到 0 个实现文件（残余 7 个中
+  LICENSE 本身、logo.png、dependabot.yml、tsconfig.json、VPS_SECURITY.md
+  为非代码/非实现资产，logger.ts 与 test-setup.ts 是 24 行以内的基础
+  设施且为当前保留层唯一实现）。
+
+**门禁全绿**：tsc 0、node 测试 11/11、build、secret-scan、cargo test
+232/232、shutdown-cleanliness / parent-monitor / readonly-egress 三个
+验收脚本 PASS。account-drift-check 因无运行中 core 而跳过（需先起 core，
+非代码问题）。
+
+**留存的非代码相似文件**（供后续审计）：LICENSE、assets/logo.png、
+.github/dependabot.yml、tsconfig.json、docs/VPS_SECURITY.md、
+src/utils/logger.ts、tests/helpers/test-setup.ts。
