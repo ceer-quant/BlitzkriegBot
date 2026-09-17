@@ -17,6 +17,6 @@ apps
 *.jpg
 workspace
 .blitzkrieg
-.clodds
+.zcode
 .vercel
 .vscode

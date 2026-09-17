@@ -75,7 +75,7 @@ mod socket_tests {
             p.contains("/blitzkrieg-core-"),
             "canonical path must carry the new brand: {p}"
         );
-        assert!(!p.contains("clodds"), "{p}");
+        assert!(!p.contains("legacy-socket-name"), "{p}");
     }
 
     /// Precedence, tested with an injected probe so the result does not depend on
