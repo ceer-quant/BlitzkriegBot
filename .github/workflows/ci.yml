@@ -152,6 +152,14 @@ jobs:
       # TMPDIR, the second via BZK_CORE_ISOLATION — and the parent-monitor gate
       # scopes its cleanup to the core IT spawned (an unscoped kill once destroyed
       # a live core; see MIGRATION_LOG §51-a).
+      #
+      # The parent-monitor gate drives the COMPILED shell under plain `node`,
+      # matching `npm start` (`node dist/index.js`). It deliberately refuses to
+      # run without `dist/` rather than falling back to `tsx`: the tsx wrapper
+      # outlives SIGTERM, so the driver would never die and the result would say
+      # nothing about the real signal path (MIGRATION_LOG §51-e). Hence the build.
+      - name: Build the shell
+        run: npm ci && npm run build
       - name: Core shutdown cleanliness gate
         run: npm run core:shutdown-check
       - name: Core parent-monitor gate
