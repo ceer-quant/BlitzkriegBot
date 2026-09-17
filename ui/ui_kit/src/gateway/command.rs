@@ -22,7 +22,9 @@
 
 use crate::core::ipc_client::IpcClient;
 use crate::core::types::UiSnapshot;
-use crate::gateway::supervisor::{StartOutcome, StopOutcome, Supervisor, SupervisorConfig};
+use crate::gateway::supervisor::{
+    RestartPolicy, StartOutcome, StopOutcome, Supervisor, SupervisorConfig,
+};
 use serde::Serialize;
 
 /// A parsed command.
@@ -181,8 +183,17 @@ pub struct Dispatcher {
 impl Dispatcher {
     pub fn new(cfg: SupervisorConfig, lifecycle_enabled: bool) -> Self {
         let client = IpcClient::new(cfg.socket_path.clone());
+        let mut sup = Supervisor::new(cfg);
+        // A gateway that may start the core is also the one that answers for it
+        // being gone: `--manage` is the operator saying "you own this process",
+        // so it gets the keep-alive policy and the panel refresh becomes the
+        // heartbeat that notices a crash (E12-c). A read-only gateway keeps the
+        // default (off) and only ever adopts.
+        if lifecycle_enabled {
+            sup.set_restart_policy(RestartPolicy::keep_alive());
+        }
         Self {
-            sup: Supervisor::new(cfg),
+            sup,
             client,
             lifecycle_enabled,
         }
@@ -221,7 +232,11 @@ impl Dispatcher {
             ));
             return s;
         }
-        s.connected = true;
+        // Same rule as `IpcClient::snapshot`: a cached handle is not evidence.
+        // `connect()` returns Ok for a socket whose core has since been killed,
+        // and reporting that as connected would put an empty plugin registry on
+        // screen as if the core had answered with nothing (E12-c).
+        s.connected = self.client.ready().is_ok();
         s.strategies = self
             .client
             .strategies()
@@ -272,6 +287,30 @@ impl Dispatcher {
     /// PID of the core this dispatcher spawned, if any.
     pub fn pid(&self) -> Option<u32> {
         self.sup.pid()
+    }
+
+    /// Observe the core and apply the restart policy (E12-c). The UI calls this
+    /// on its refresh tick so a core that died is noticed, reported and — when a
+    /// policy says so — replaced. Returns the crash report when one happened.
+    pub fn pump(&mut self) -> Option<crate::gateway::supervisor::ExitReport> {
+        self.sup.pump()
+    }
+
+    /// Up-or-down plus why, for the panel's process-control view.
+    pub fn health(&self) -> crate::gateway::supervisor::CoreHealth {
+        self.sup.health()
+    }
+
+    /// Enable crash replacement for a core this dispatcher owns.
+    pub fn set_restart_policy(&mut self, policy: RestartPolicy) {
+        self.sup.set_restart_policy(policy);
+    }
+
+    /// Whether a crashed core will be replaced instead of only reported. The
+    /// panel shows this so an operator is never left assuming a dead core will
+    /// come back on its own.
+    pub fn restart_policy(&self) -> RestartPolicy {
+        self.sup.restart_policy()
     }
 
     pub fn dispatch(&mut self, cmd: Command, raw: &str) -> CommandOutcome {
@@ -546,13 +585,30 @@ crypto-hft commands (UI Kit gateway):
 
 fn status_json(disp: &Dispatcher, s: &UiSnapshot) -> serde_json::Value {
     let round = s.round.as_ref();
+    let health = disp.health();
     serde_json::json!({
         "connection": {
             "connected": s.connected,
             "socket": disp.socket_path(),
-            "managed": disp.sup.owns(),
-            "pid": disp.sup.pid(),
+            "managed": health.managed,
+            "pid": health.pid,
             "lifecycleEnabled": disp.lifecycle_enabled,
+            // E12-c: crash-recovery state. `restarts` counts replacements of cores
+            // this dispatcher owned; `lastExit` says how the last one ended
+            // (`kind` is "crash" or "clean"), so a panel can distinguish "it died"
+            // from "we stopped it" without guessing from a missing pid.
+            "restarts": health.restarts,
+            "restartGivenUp": health.restart_given_up,
+            "lastExit": health.last_exit.as_ref().map(|e| serde_json::json!({
+                "pid": e.pid,
+                "kind": match e.kind {
+                    crate::gateway::supervisor::ExitKind::Clean => "clean",
+                    crate::gateway::supervisor::ExitKind::Crashed => "crash",
+                },
+                "code": e.code,
+                "signal": e.signal,
+                "description": e.describe(),
+            })),
         },
         "mode": s.mode(),
         "round": round.map(|r| serde_json::json!({
@@ -751,5 +807,25 @@ mod tests {
         assert!(!out.ok);
         assert_eq!(out.action, "error");
         assert!(out.message.contains("--manage"));
+    }
+
+    #[test]
+    fn only_the_gateway_that_may_start_the_core_may_replace_it() {
+        // E12-c: the pairing matters. A read-only gateway only ever adopts, so a
+        // keep-alive policy there would be dead code that reads like a safety
+        // net; and a lifecycle gateway with no policy would report a crash and
+        // then leave the operator staring at a dead core it was entitled to fix.
+        let cfg = SupervisorConfig::from_env("/tmp/none-such.sock".into());
+        let readonly = Dispatcher::new(cfg.clone(), false);
+        assert!(
+            !readonly.restart_policy().enabled,
+            "a read-only gateway must not hold a restart policy"
+        );
+
+        let managing = Dispatcher::new(cfg, true);
+        assert!(
+            managing.restart_policy().enabled,
+            "--manage must imply crash replacement, or E12(c) is report-only"
+        );
     }
 }

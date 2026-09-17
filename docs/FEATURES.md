@@ -16,7 +16,7 @@
 > 最关键的阅读提示：**整条 Live（真实下单）链路属于 ⚠️ 未验证**——全程 DRY。
 > 详见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) §1。
 >
-> 最后核对：2026-09-18（KI-1/KI-7/KI-10/KI-11/KI-23 已关闭）。
+> 最后核对：2026-09-18（KI-1/KI-7/KI-10/KI-11/KI-23 已关闭；E12-c 崩溃上报已修，§60）。
 
 ---
 
@@ -210,6 +210,7 @@ ECharts + Pinia + VueUse。设计基调：Apple 风格、金橙主调、liquid g
 | 纯展示层 + 网关命令通道（core / web / tui / app 四层，**无交易逻辑**） | ✅ |
 | **零 GUI 依赖**（不许引 tauri） | ✅ 有断言（`ui:webapp`） |
 | 命令通道：`Supervisor`（spawn/stop/**adopt**，绝不重复起核）+ `Dispatcher` | ✅ `scripts/ui-kit-gateway-check.mjs` PASS |
+| 崩溃上报与替换：区分「崩溃 / 主动停止」、有限预算（5 次）指数退避、面板显示崩溃横幅 | ✅ E12-c / #94，`scripts/gateway-crash-recovery-check.mjs` PASS（16 项） |
 | **无任何下单 API** | ✅ 设计约束 |
 | 事件推送（`EventBus` 取代纯轮询，保留轮询兜底） | ✅ E5-b / #33 |
 
@@ -325,7 +326,7 @@ Tauri 打包进 webui 与 `desktop_snapshot` / `desktop_command` 全链路未验
 | 3 | **E6 Tauri 端到端未验** | 桌面形态不可交付 | §3.4 |
 | 4 | **性能基准未做** | 无法证明「低延迟」 | §5 |
 | 5 | **E9-g / E9-h 未完成** | 面板与 TUI 能力不对等 | §3.3 |
-| 6 | **E12 一体化启动未完成** | 无 `blitzkrieg`/`core`/`tui --attach` 子命令 | KNOWN_ISSUES KI-25 |
+| 6 | **E12 一体化启动未完成** | 无 `blitzkrieg`/`core`/`tui --attach` 子命令（5 条验收中仅剩此条；崩溃上报已修，§60） | KNOWN_ISSUES KI-25 |
 | 7 | **fmt/clippy 债未清** | 独立专项 PR，勿夹进功能变更 | KNOWN_ISSUES KI-13 |
 
 ---

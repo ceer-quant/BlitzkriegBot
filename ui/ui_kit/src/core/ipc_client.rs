@@ -245,16 +245,34 @@ impl IpcClient {
 
     /// Assemble one full UI snapshot. Never errors on a single missing call —
     /// the panel should still render whatever the core answered.
+    ///
+    /// `connected` means "a core ANSWERED", not "we have a socket object". The
+    /// distinction is load-bearing for crash reporting (E12-c): `connect()`
+    /// short-circuits when a handle already exists, so after the core is killed
+    /// the cached handle is still `Some` and a snapshot built on it would report
+    /// a dead core as up — the panel would show a healthy engine for the poll
+    /// after a crash, which is the exact failure the acceptance line is about.
+    /// So the first call is what proves liveness, and `core.ready` is the one
+    /// that says nothing is there.
     pub fn snapshot(&mut self, trade_limit: usize) -> UiSnapshot {
         let mut s = UiSnapshot::default();
         if let Err(e) = self.connect() {
             s.last_error = Some(e.to_string());
             return s;
         }
-        s.connected = true;
         match self.ready() {
-            Ok(v) => s.ready = Some(v),
-            Err(e) => s.last_error = Some(e.to_string()),
+            Ok(v) => {
+                s.ready = Some(v);
+                s.connected = true;
+            }
+            Err(e) => {
+                // The handle outlived the core it points at. Report unreachable
+                // and stop here: every later call would fail the same way, and
+                // empty arrays on a `connected: true` snapshot are what a panel
+                // draws as "the engine is running with no positions".
+                s.last_error = Some(e.to_string());
+                return s;
+            }
         }
         s.balance = self.balance().ok();
         s.round = self.round().ok();

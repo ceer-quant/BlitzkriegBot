@@ -145,6 +145,19 @@ jobs:
       # then "failed to restart" would be indistinguishable from a planned stop.
       - name: Core crash-recovery gate
         run: node scripts/crash-recovery-check.mjs
+      # The same acceptance line, asked of the UI instead of the socket. The gate
+      # above drives the crash itself, so it measures the core's crash-safety and
+      # says nothing about the supervisor — while "内核崩溃后 UI 能恢复/报告" is a
+      # claim about what the panel is told. This one starts the core THROUGH the
+      # `--manage` gateway, SIGKILLs it, and requires the UI to be able to tell a
+      # crash from a stop (`lastExit.kind`), to see a DIFFERENT pid serving
+      # afterwards, to keep the crash visible after the restart repaired it, and
+      # to report a deliberate stop as clean WITHOUT respawning it. Until this
+      # gate existed, `Supervisor::reap` could swallow a crash unnoticed: it
+      # cleared the child handle and kept no record, so the panel went on
+      # reporting a process that was already gone.
+      - name: Gateway crash-reporting gate (E12-c through the UI)
+        run: node scripts/gateway-crash-recovery-check.mjs
       # Order/ledger semantics over the real wire (the compiled TS client this
       # used to depend on was removed with the Node layer; the bare-Node client
       # speaks the same newline-framed JSON-RPC 2.0).

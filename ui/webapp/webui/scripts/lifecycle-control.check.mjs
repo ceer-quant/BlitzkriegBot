@@ -27,9 +27,10 @@ const check = (label, fn) => {
   }
 }
 
-const { controlState } = await import('../src/lib/lifecycle.ts')
+const { controlState, exitNotice } = await import('../src/lib/lifecycle.ts')
 
 const gw = (over) => ({ lifecycleEnabled: false, managed: false, corePid: null, socket: '/tmp/x.sock', ...over })
+const crash = { pid: 111, kind: 'crash', code: null, signal: 9, description: 'core pid 111 CRASHED (killed by signal 9)' }
 
 console.log('lifecycle control gating')
 
@@ -102,6 +103,64 @@ check('canStop and canStart are never both true', () => {
       }
     }
   }
+})
+
+// ── E12-c: the crash notice ─────────────────────────────────────────────────
+//
+// The gap this covers: a core that crashed used to leave no trace on the panel.
+// `Supervisor::reap` cleared the child and kept no record, so the page showed a
+// missing pid and the operator had to guess whether that meant a crash, a stop,
+// or a gateway that had never started anything. The Rust side now classifies the
+// exit; these cases pin the *display* rules that decide when it is said out loud.
+
+console.log('\nexit notices (E12-c)')
+
+check('a gateway that never reported an exit says nothing', () => {
+  // Absence is the normal case for a healthy gateway and for one older than the
+  // field. Inventing a notice from it would put a permanent alarm on every panel.
+  assert.equal(exitNotice(undefined, true), null)
+  assert.equal(exitNotice(gw({ lastExit: null }), true), null)
+})
+
+check('a crash is reported while the core is down', () => {
+  const n = exitNotice(gw({ managed: true, lastExit: crash }), false)
+  assert.ok(n, 'a crash with no core running is the case the operator must see')
+  assert.equal(n.kind, 'crash')
+  assert.equal(n.description, crash.description)
+})
+
+check('a crash is still reported after the restart brought the core back', () => {
+  // The subtle one. A successful auto-restart makes the core answer again, and
+  // dropping the notice here is how a core that crashes every few minutes looks
+  // perfectly healthy — the panel would only ever show the current, running
+  // state. The notice must survive, with the restart count, so a flapping core
+  // is a visible pattern instead of a silent one.
+  const n = exitNotice(gw({ managed: true, restarts: 3, lastExit: crash }), true)
+  assert.ok(n, 'a crash that was repaired is still a crash')
+  assert.equal(n.restarts, 3, 'the operator needs the count to judge flapping')
+  assert.equal(n.givenUp, false)
+})
+
+check('a spent restart budget is flagged, not hidden behind "crashed"', () => {
+  const n = exitNotice(gw({ managed: true, restarts: 5, restartGivenUp: true, lastExit: crash }), false)
+  assert.equal(n.givenUp, true, '"will not come back" is a different action from "crashed"')
+})
+
+check('a clean stop is only mentioned while the core is down', () => {
+  const stopped = { pid: 7, kind: 'clean', code: 0, signal: null, description: 'core pid 7 stopped (exit code 0)' }
+  const down = exitNotice(gw({ managed: true, lastExit: stopped }), false)
+  assert.equal(down?.kind, 'clean', 'a deliberate stop is worth stating once')
+  // Once a core is up again the stop is history; keeping it would read as a
+  // current fault on a panel whose whole job is to show the present.
+  assert.equal(exitNotice(gw({ managed: true, lastExit: stopped }), true), null)
+})
+
+check('a missing restarts count reads as zero, never as NaN', () => {
+  // Older gateway: `lastExit` present, counters absent. The panel must render,
+  // so the fallback has to be a number rather than undefined.
+  const n = exitNotice(gw({ managed: true, lastExit: crash }), false)
+  assert.equal(n.restarts, 0)
+  assert.equal(n.givenUp, false)
 })
 
 console.log(`\nRESULT: ${failures === 0 ? 'PASS' : `FAIL (${failures})`}`)

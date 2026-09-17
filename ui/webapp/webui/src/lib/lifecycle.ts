@@ -68,3 +68,43 @@ export function controlState(
 
   return { enabled, canStop, canStart, blockedReason, usable: canStop || canStart }
 }
+
+/** What the panel should say about the last core this gateway owned. */
+export interface ExitNotice {
+  /** "crash" | "clean" — the gateway's classification, not a guess from the pid. */
+  kind: 'crash' | 'clean'
+  /** Operator-readable description, straight from the gateway. */
+  description: string
+  /** Replacements already made; 0 means the crash was reported only. */
+  restarts: number
+  /** The restart budget is spent — the core will not come back on its own. */
+  givenUp: boolean
+}
+
+/**
+ * The last exit as a notice to show the operator, or `null` when there is
+ * nothing worth saying.
+ *
+ * Two rules, and both exist because the alternative is a panel that lies:
+ *
+ *   1. A **clean** exit is only worth a notice while the core is down. Once it
+ *      is up again the operator acted (or a restart happened) and a stale
+ *      "stopped" line would read as a current problem.
+ *   2. A **crash** is worth saying even after a restart succeeded: silently
+ *      recovering from a crash is how a flapping core looks healthy. The
+ *      notice changes wording rather than disappearing — `restarts > 0` and the
+ *      core answering means it recovered, and `givenUp` means it did not.
+ */
+export function exitNotice(
+  gateway: LifecycleBlock | null | undefined,
+  connected: boolean,
+): ExitNotice | null {
+  const exit = gateway?.lastExit
+  if (!exit) return null
+
+  const restarts = gateway?.restarts ?? 0
+  const givenUp = gateway?.restartGivenUp === true
+  if (exit.kind === 'clean' && connected) return null
+
+  return { kind: exit.kind, description: exit.description, restarts, givenUp }
+}

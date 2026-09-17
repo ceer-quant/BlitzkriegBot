@@ -2,6 +2,8 @@
 
 pub mod event_bus;
 pub mod ipc_client;
+#[cfg(test)]
+mod ipc_client_tests;
 pub mod notifier;
 #[cfg(test)]
 mod notifier_tests;

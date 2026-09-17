@@ -219,6 +219,42 @@ pub struct LifecycleView {
     pub pid: Option<u32>,
     /// Socket both the reads and the lifecycle verbs act on.
     pub socket: String,
+    /// How many times a core this gateway owned has been replaced after a crash.
+    pub restarts: u32,
+    /// The restart budget is spent; the core is down and will stay down.
+    pub restart_given_up: bool,
+    /// Why the last owned core stopped — `kind` separates a crash from a stop we
+    /// asked for, so the panel can say which happened instead of inferring it
+    /// from a missing pid.
+    pub last_exit: Option<LifecycleExit>,
+}
+
+/// A core exit, flattened for the panel.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LifecycleExit {
+    pub pid: u32,
+    /// "crash" | "clean".
+    pub kind: &'static str,
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+    /// One-line, operator-readable form (kept so the panel need not reword it).
+    pub description: String,
+}
+
+impl From<&crate::gateway::supervisor::ExitReport> for LifecycleExit {
+    fn from(e: &crate::gateway::supervisor::ExitReport) -> Self {
+        use crate::gateway::supervisor::ExitKind;
+        Self {
+            pid: e.pid,
+            kind: match e.kind {
+                ExitKind::Clean => "clean",
+                ExitKind::Crashed => "crash",
+            },
+            code: e.code,
+            signal: e.signal,
+            description: e.describe(),
+        }
+    }
 }
 
 /// Render the snapshot as a stable JSON document (for programmatic consumers).
@@ -325,6 +361,12 @@ pub fn render_json(s: &UiSnapshot, lifecycle: Option<&LifecycleView>) -> String 
             "managed": l.managed,
             "corePid": l.pid,
             "socket": l.socket,
+            // E12-c crash-recovery state. `lastExit.kind` is the load-bearing
+            // field: without it the panel cannot tell "it crashed" from "we
+            // stopped it", and both look like a missing pid.
+            "restarts": l.restarts,
+            "restartGivenUp": l.restart_given_up,
+            "lastExit": l.last_exit,
         });
     }
     doc.to_string()
@@ -936,13 +978,24 @@ impl WebServer {
 
     /// Process-control state for the panel. `None` when this server has no
     /// dispatcher at all (pure read-only adapter).
+    ///
+    /// Calling this also *observes* the core (E12-c): a panel refresh is the
+    /// natural heartbeat, and without one a crashed core would keep being
+    /// reported as running because nothing ever asked. With the default restart
+    /// policy off this only records the crash; a gateway that enabled a policy
+    /// gets a replacement as a side effect of being looked at.
     fn lifecycle_view(&self) -> Option<LifecycleView> {
-        let d = self.dispatcher.as_ref()?.lock().ok()?;
+        let mut d = self.dispatcher.as_ref()?.lock().ok()?;
+        d.pump();
+        let health = d.health();
         Some(LifecycleView {
             enabled: d.lifecycle_enabled(),
-            managed: d.managed(),
-            pid: d.pid(),
+            managed: health.managed,
+            pid: health.pid,
             socket: d.socket_path().to_string(),
+            restarts: health.restarts,
+            restart_given_up: health.restart_given_up,
+            last_exit: health.last_exit.as_ref().map(LifecycleExit::from),
         })
     }
 
@@ -1275,6 +1328,9 @@ mod tests {
             managed: false,
             pid: None,
             socket: "/tmp/x.sock".into(),
+            restarts: 0,
+            restart_given_up: false,
+            last_exit: None,
         };
         let doc: serde_json::Value =
             serde_json::from_str(&render_json(&snap, Some(&adopted))).unwrap();
@@ -1289,11 +1345,32 @@ mod tests {
             managed: true,
             pid: Some(4242),
             socket: "/tmp/x.sock".into(),
+            restarts: 2,
+            restart_given_up: false,
+            last_exit: Some(LifecycleExit {
+                pid: 111,
+                kind: "crash",
+                code: None,
+                signal: Some(9),
+                description: "core pid 111 CRASHED (killed by signal 9)".into(),
+            }),
         };
         let doc: serde_json::Value =
             serde_json::from_str(&render_json(&snap, Some(&owned))).unwrap();
         assert_eq!(doc["gateway"]["managed"], serde_json::json!(true));
         assert_eq!(doc["gateway"]["corePid"], serde_json::json!(4242));
+        // E12-c: the crash must reach the panel as structured fact, not as a
+        // missing pid the UI has to interpret.
+        assert_eq!(doc["gateway"]["restarts"], serde_json::json!(2));
+        assert_eq!(
+            doc["gateway"]["lastExit"]["kind"],
+            serde_json::json!("crash")
+        );
+        assert_eq!(doc["gateway"]["lastExit"]["signal"], serde_json::json!(9));
+        assert!(doc["gateway"]["lastExit"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("CRASHED"));
 
         // Read-only gateway: `enabled` false even though a dispatcher exists.
         let readonly = LifecycleView {
@@ -1301,6 +1378,9 @@ mod tests {
             managed: false,
             pid: None,
             socket: "/tmp/x.sock".into(),
+            restarts: 0,
+            restart_given_up: false,
+            last_exit: None,
         };
         let doc: serde_json::Value =
             serde_json::from_str(&render_json(&snap, Some(&readonly))).unwrap();

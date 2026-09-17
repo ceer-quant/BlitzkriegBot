@@ -15,7 +15,7 @@ import {
 } from '@/lib/format'
 import { balanceView } from '@/lib/balance'
 import { newestFirst, tradeIdentity } from '@/lib/trades'
-import { controlState } from '@/lib/lifecycle'
+import { controlState, exitNotice } from '@/lib/lifecycle'
 import { feedStaleness } from '@/lib/feed'
 import {
   playDang, playDing, playOrder, playProfit, playWuwu,
@@ -268,6 +268,28 @@ const engineUp = computed(() => snap.value?.connected ?? false)
  */
 const control = computed(() => controlState(snap.value?.gateway, engineUp.value))
 
+/**
+ * The last core exit, when the operator needs to know about it (E12-c).
+ *
+ * A crashed core used to be invisible: the gateway cleared its handle and the
+ * panel went on showing whatever the socket said, so a core that died and was
+ * replaced looked identical to one that never died. The sentence below is the
+ * gateway's own classification (`kind`), not something this page infers.
+ */
+const exit = computed(() => exitNotice(snap.value?.gateway, engineUp.value))
+const exitText = computed(() => {
+  const e = exit.value
+  if (!e) return ''
+  if (e.kind === 'clean') return `内核已停止：${e.description}`
+  if (e.givenUp) {
+    return `内核崩溃且已放弃重启（${e.description}）。请检查日志后手动启动。`
+  }
+  if (engineUp.value && e.restarts > 0) {
+    return `内核曾崩溃（${e.description}），已自动重启 ${e.restarts} 次，当前运行中。`
+  }
+  return `内核崩溃：${e.description}`
+})
+
 /** Tooltip/title explaining why a control is unavailable (empty when usable). */
 const startHint = computed(() => {
   if (busy.value) return '正在下发命令…'
@@ -440,6 +462,25 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
       >
         <Info class="mt-px size-3.5 shrink-0 text-faint-fg" />
         <span>{{ control.blockedReason }}</span>
+      </div>
+
+      <!--
+        A crash is stated in the panel rather than left to be inferred from a
+        启动 button that suddenly looks clickable. It outlives the restart that
+        fixed it (the wording changes), because a core that silently came back
+        is a core that crashed, and the operator is the one who decides whether
+        that is a fluke or a pattern.
+      -->
+      <div
+        v-if="exit"
+        class="mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-[11.5px] leading-snug"
+        :class="exit.kind === 'crash'
+          ? 'border-down/35 bg-down/8 text-down'
+          : 'border-line bg-panel-2 text-muted-fg'"
+      >
+        <AlertTriangle v-if="exit.kind === 'crash'" class="mt-px size-3.5 shrink-0" />
+        <Info v-else class="mt-px size-3.5 shrink-0 text-faint-fg" />
+        <span>{{ exitText }}</span>
       </div>
 
       <Transition name="fade">

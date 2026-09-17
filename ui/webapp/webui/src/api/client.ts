@@ -318,6 +318,26 @@ export interface Snapshot {
     /** PID of the core this gateway spawned; null when the core was adopted. */
     corePid: number | null
     socket: string
+    /**
+     * How many times this gateway has replaced its own core after a crash
+     * (E12-c). Absent on a gateway that predates crash reporting.
+     */
+    restarts?: number
+    /** The restart budget is spent: the core is down and will stay down. */
+    restartGivenUp?: boolean
+    /**
+     * Why the last core this gateway owned stopped. `kind` separates a crash
+     * from a stop the operator asked for, so the panel can say which happened
+     * instead of inferring it from a missing pid.
+     */
+    lastExit?: {
+      pid: number
+      kind: 'crash' | 'clean'
+      code: number | null
+      signal: number | null
+      /** Operator-readable one-liner from the core's own classification. */
+      description: string
+    } | null
   } | null
   strategyStats?: StrategyStatsRow[]
 }

@@ -7,6 +7,21 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ### Added
 
+- **The panel reports and recovers from a kernel crash (E12-c / #94).** A core
+  started by an `--manage` gateway is now supervised for liveness, not just
+  spawned: the gateway notices it died, says **how** (`lastExit.kind` separates
+  a crash from a stop the operator asked for, with the signal named), replaces
+  it under a finite budget (5 attempts, 250 ms exponential backoff capped at
+  8 s), and keeps a count on the wire so a core that silently came back is
+  still visible as one that crashed. A stop the operator asked for is reported
+  as clean and never triggers a replacement. The panel shows the crash as a
+  banner that survives the restart that repaired it, and says "gave up" when
+  the budget is spent. Read-only gateways keep the previous behaviour (adopt
+  only, report nothing they did not see). Also fixed two defects this work
+  uncovered: `Supervisor::reap` discarded a crashed child's exit status (so the
+  UI kept reporting a process that was gone), and `connected` was derived from
+  a cached socket handle rather than from a core actually answering — so for
+  one poll after a crash the panel showed a running engine with no positions.
 - **The kernel reads TOML configuration (KI-11 / D-1).**
   `user_layer/configs/default.toml` and its sibling `shadow_evolution.toml`
   are now parsed at startup instead of being inert documentation. Precedence,
