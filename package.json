@@ -21,6 +21,8 @@
     "account:test": "cargo test --manifest-path core/blitzkrieg_core/Cargo.toml --lib --features account-precision account_precision",
     "account:parity": "npm run core:build && npm run build && node scripts/account-parity.mjs",
     "account:drift-check": "node scripts/account-drift-check.mjs",
+    "size:check": "node scripts/binary-size-check.mjs",
+    "size:report": "node scripts/binary-size-check.mjs --verbose",
     "core:observe": "npm run build && node scripts/dry-observe.mjs",
     "core:strategy-limit": "node scripts/strategy-limit-check.mjs",
     "core:strategy-gate": "node scripts/strategy-gate-check.mjs",
