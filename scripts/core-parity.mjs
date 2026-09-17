@@ -171,7 +171,10 @@ try {
   let positionClosed = null;
   pc.onEvent = (e) => { if (e.kind === 'POSITION_CLOSED') positionClosed = e; };
   await rpc.bookSnapshot(pc, 'pos1', [[0.99, 100]], [[1.0, 100]]);
-  await sleep(250);
+  // The exit fires on the core's own tick loop, not on the book push — poll
+  // briefly instead of trusting one fixed wait (a loaded runner stretches it).
+  const closedDeadline = Date.now() + 5000;
+  while (Date.now() < closedDeadline && positionClosed === null) await sleep(100);
   check('profit exit closes the position', (await rpc.positions(pc)).positions.length === 0);
   check('POSITION_CLOSED event carries realised PnL', positionClosed !== null && positionClosed.netPnlUsd > 0, JSON.stringify(positionClosed));
 
@@ -187,8 +190,12 @@ try {
 }
 
 // ── P3: self-driving engine (the harness feeds data, Rust decides and trades) ─
+// `--no-discovery`: without it the polymarket discovery loop boots with the core
+// and, wherever the venue is reachable (CI), its gamma query wins the race and
+// re-registers the round with REAL token ids — the synthetic 'up'/'down' books
+// then price nothing and no entry can ever be placed (this exact failure).
 const ENG_SOCK = scratchSocketPath('parity-eng');
-const ec = makeCore(ENG_SOCK, ['--engine', '--no-event-archive', '--min-round-age', '0', '--min-time-left', '0', '--trend-confirm-sec', '0', '--trend-window-floor-ms', '0']);
+const ec = makeCore(ENG_SOCK, ['--engine', '--no-discovery', '--no-event-archive', '--min-round-age', '0', '--min-time-left', '0', '--trend-confirm-sec', '0', '--trend-window-floor-ms', '0']);
 
 try {
   await ec.start();

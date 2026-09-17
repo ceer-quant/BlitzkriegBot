@@ -57,7 +57,9 @@ let names = [];
 const temp = mkdtempSync(join(tmpdir(), 'blitzkrieg-scale-tpl-'));
 
 const tBuild0 = Date.now();
-execFileSync('/bin/zsh', ['-c',
+// bash, not zsh: the ubuntu CI runner has no zsh (spawnSync ENOENT used to
+// kill the whole E9 step there); bash exists on both macOS and ubuntu.
+execFileSync('/bin/bash', ['-c',
   `cd "${ROOT}" && node scripts/blitzkrieg-new-strategy.mjs scale_probe >/dev/null && ` +
   `cd "${join(ROOT, 'user_layer', 'strategies', 'scale_probe')}" && cargo build --release -q`],
   { timeout: 600000 });
@@ -74,10 +76,12 @@ if (!FAST) {
   const SRC = join(ROOT, 'user_layer', 'strategies', 'scale_probe');
   for (let i = 2; i <= 50; i++) {
     const dst = `${SRC}_v${i}`;
-    execFileSync('/bin/zsh', ['-c',
+    // bash + GNU/BSD-portable sed -i: BSD (macOS) needs the `''` arg, GNU
+    // (ubuntu) rejects it — so pass the suffix through a first file arg instead.
+    execFileSync('/bin/bash', ['-c',
       `rm -rf "${dst}" && cp -R "${SRC}" "${dst}" && ` +
-      `/usr/bin/sed -i '' 's/"scale_probe"/"scale_probe_v${i}"/g; s/scale_probe/scale_probe_v${i}/g; s/ScaleProbe/ScaleProbeV${i}/g; s/Scale Probe/Scale Probe V${i}/g' ` +
-      `"${join(dst, 'Cargo.toml')}" "${join(dst, 'src', 'lib.rs')}" 2>/dev/null || true && ` +
+      `sed -i.bak 's/"scale_probe"/"scale_probe_v${i}"/g; s/scale_probe/scale_probe_v${i}/g; s/ScaleProbe/ScaleProbeV${i}/g; s/Scale Probe/Scale Probe V${i}/g' ` +
+      `"${join(dst, 'Cargo.toml')}" "${join(dst, 'src', 'lib.rs')}" && rm -f "${join(dst, 'Cargo.toml.bak')}" "${join(dst, 'src', 'lib.rs.bak')}" && ` +
       `cd "${dst}" && cargo build --release -q`], { timeout: 300000 });
     names.push(`scale_probe_v${i}`);
   }
