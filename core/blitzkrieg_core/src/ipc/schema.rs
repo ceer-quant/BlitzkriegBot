@@ -354,12 +354,22 @@ pub struct PositionView {
     ///
     /// ```text
     ///   balance == seed + Σ_closed net
-    ///                    − Σ_open (cost_usd + entry_fee_usd)
+    ///                    − Σ_open (entry_cost_usd + entry_fee_usd)
     ///                    + Σ_open (proceeds_usd − exit_fee_usd)
     /// ```
     ///
+    /// Note the identity uses `entry_cost_usd` (TOTAL paid on the way in), NOT
+    /// `cost_usd`: `cost_usd` is the basis of the shares STILL HELD, so a partial
+    /// exit releases part of it and would otherwise be double-counted against the
+    /// `proceeds_usd` that already returned it.
+    ///
     /// A partially-exited position has both sides non-zero, which is exactly the
     /// case a flat-only check cannot see.
+    #[serde(with = "crate::decimal")]
+    pub entry_cost_usd: Decimal,
+    /// Basis of the shares STILL HELD — a position-book figure, not a cash one.
+    /// It shrinks on every partial exit (the released basis comes back inside
+    /// `proceeds_usd`), so it must not be summed into the cash identity above.
     #[serde(with = "crate::decimal")]
     pub cost_usd: Decimal,
     #[serde(with = "crate::decimal")]

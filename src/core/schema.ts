@@ -96,6 +96,9 @@ export const PositionViewSchema = z.object({
   remainingSec: z.number(),
   // Cash actually moved on this position so far (E17). Lets a monitor check the
   // ledger identity mid-flight, not only when the book happens to be flat.
+  // `entryCostUsd` is the TOTAL paid on the way in; `costUsd` is the basis of the
+  // shares still held, so only the former belongs in the cash identity.
+  entryCostUsd: z.number(),
   costUsd: z.number(),
   entryFeeUsd: z.number(),
   proceedsUsd: z.number(),

@@ -1532,6 +1532,10 @@ impl Core {
                 remaining_sec: (p.expires_at_ms - now_ms) / 1000,
                 // Cash actually moved on this position, so an external monitor
                 // can check the ledger identity without waiting for a flat book.
+                // `entry_cost_usd` is the TOTAL entry notional (what left the
+                // ledger); `cost_usd` is only the basis still held, so it is the
+                // former the identity must sum.
+                entry_cost_usd: p.flows.entry_cost_usd,
                 cost_usd: p.cost_usd,
                 entry_fee_usd: p.flows.entry_fee_usd,
                 proceeds_usd: p.flows.proceeds_usd,
@@ -5308,5 +5312,80 @@ mod account_precision_tests {
         assert_eq!(c.ome().get(&sid).unwrap().status, OrderStatus::Filled);
         assert_reconciled(&c, "reconciliation gap partial entry");
         assert!(realized(&c) < Decimal::ZERO, "bought 0.62, sold 0.40");
+    }
+
+    /// The E17 identity asserted MID-FLIGHT on a half-exited position — the case
+    /// the flat-book form cannot see.
+    ///
+    /// The view exposes two different entry figures and only one of them is cash:
+    /// `flows.entry_cost_usd` is the TOTAL notional paid in, while `cost_usd` is
+    /// the basis of the shares STILL HELD. A partial exit moves basis out of
+    /// `cost_usd` and returns it inside `proceeds_usd`, so an identity that sums
+    /// `cost_usd` counts that release twice and reports a phantom drift exactly
+    /// equal to the released basis. Both facts are pinned here, because the
+    /// distinction is invisible until a position is partly exited — which is why
+    /// an external monitor summing `cost_usd` (as the first draft of
+    /// `account-drift-check.mjs` did) reports drift on a correct ledger.
+    #[test]
+    fn the_identity_holds_mid_flight_and_entry_cost_is_not_the_held_basis() {
+        let mut c = core();
+        let (id, _) = c
+            .place(req(Side::Buy, FillPolicy::Taker, dec!(0.43), dec!(10), "in"), 0, 1)
+            .unwrap();
+        c.ingest_fill(
+            fill_as(&id, "mf-1", Side::Buy, dec!(0.43), dec!(10), false),
+            2,
+        )
+        .unwrap();
+
+        // Sell 4 of the 10 — the position stays open with both cash legs non-zero.
+        let (sid, _) = c
+            .place(req(Side::Sell, FillPolicy::Taker, dec!(0.60), dec!(4), "out"), 0, 3)
+            .unwrap();
+        c.ingest_fill(
+            fill_as(&sid, "mf-2", Side::Sell, dec!(0.60), dec!(4), false),
+            4,
+        )
+        .unwrap();
+
+        let p = c.positions().open_positions()[0].clone();
+        assert_eq!(p.shares, dec!(6), "4 of 10 sold, so 6 remain");
+        assert!(p.flows.proceeds_usd > Decimal::ZERO, "cash came back in");
+        assert_eq!(
+            p.flows.entry_cost_usd,
+            dec!(4.30),
+            "the TOTAL paid in never shrinks with a partial exit"
+        );
+        assert_eq!(
+            p.cost_usd,
+            dec!(2.58),
+            "the held basis does shrink: 4.30 − (4.30/10 × 4)"
+        );
+        assert!(
+            p.flows.entry_cost_usd > p.cost_usd,
+            "this is exactly why the identity may not use the held basis"
+        );
+
+        let cash_in = p.flows.entry_cost_usd + p.flows.entry_fee_usd;
+        let cash_back = p.flows.proceeds_usd - p.flows.exit_fee_usd;
+        let realized: Decimal = c
+            .positions()
+            .closed_positions()
+            .iter()
+            .map(|p| p.net_pnl_usd)
+            .sum();
+        assert_eq!(
+            c.ledger().balance(),
+            SEED + realized - cash_in + cash_back,
+            "the identity must hold mid-flight, not only once flat"
+        );
+        // ...and the held-basis form must NOT hold, or this test would be pinning
+        // nothing. It overstates cash by the released basis, to the last digit.
+        let wrong = SEED + realized - (p.cost_usd + p.flows.entry_fee_usd) + cash_back;
+        assert_eq!(
+            wrong - c.ledger().balance(),
+            dec!(1.72),
+            "summing the held basis double-counts the 4-share release"
+        );
     }
 }
