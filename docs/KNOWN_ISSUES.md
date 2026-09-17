@@ -634,41 +634,63 @@ lifecycle 开启会置 `auth_required`，进而**要求面板凭据**
 
 ---
 
-### KI-26 · CI 的「无 runner」失败与聚合结论污染
+### KI-26 · CI 已停止执行：GitHub 账号计费问题，不是代码失败
 
-**症状**：job 在 2 秒内「完成」并判 failure，但 `steps: []`、`runner_name: ""`、
-`runner_id: 0`——**没有任何 runner 接过它**。重跑（`rerun-failed-jobs`）返回 201
-但同样拿不到 runner。
+**根因（已确证，不是推测）**：每个 job 的 check-run 都带一条 annotation，原文：
 
-**两次实测的对照**（同一 workflow，相邻时间）：
+> The job was not started because recent account payments have failed or your
+> spending limit needs to be increased. Please check the 'Billing & plans'
+> section in your settings
 
-| commit | 结果 |
-|---|---|
-| `709afb9` 06:40 | 6 个 job **全部拿到 runner 并成功**（含 `notify`） |
-| `c4890a4` 06:52 | 5 个真实 job **全部拿到 runner 并成功**；仅 `notify` 拿不到 runner → failure |
-| `5670e4e` 07:25 | **全部 job** 都拿不到 runner → 整轮 failure |
+**即 GitHub 侧拒绝为 jobs 分配 runner**，与仓库代码无关。
+（取法见下方「判读方法」第 3 条——`steps: []` 时 annotation 是唯一的证据来源，
+job 日志为 `BlobNotFound`，因为根本没有日志被写出来。）
 
-**这一点最危险**：`notify` job 有 `if: always()` + `needs: [...]`，
-它一旦拿不到 runner，**run 的聚合结论就变成 failure**，
-于是 `gh` / REST 读到的「CI 失败」与「代码没通过测试」无法区分。
-本次我因此在 `c4890a4` 上误判过一次（以为合并把 main 弄红了，
-实际是 5 个真实 job 全绿）。**判读 CI 必须下钻到 job 级**
-（`/actions/runs/<id>/jobs` 看 `steps` 与 `runner_name`），
-不能只看 run 的 `conclusion`。
+**症状**：job 在约 2 秒内判 failure，但 `steps: []`、`runner_name: ""`、
+`runner_id: 0`——**没有任何 runner 接过它**。重跑同样如此。
 
-**判读方法（已固化为做法）**：
-- `steps: []` + `runner: (none)` ⇒ **基础设施问题**，重跑；不要改代码；
-- 有 `steps` 且有失败步骤 ⇒ **代码问题**，看日志；
-- run 级 failure 但所有真实 job success ⇒ 只可能是 `notify`，
-  它不该影响「代码是否通过」的结论。
+**实测时间线**（同一 workflow，同一天）：
 
-**影响面**：本轮 `5670e4e`（PR #103）的真实 job **从未被执行过**，
-所以该 PR 的 CI 结论**目前是空的，不是绿的也不是红的**。
-在拿到一次真实执行前，**不得**依 CI 结论合并。
+| commit | 时间 | 结果 |
+|---|---|---|
+| `709afb9` | 06:40 | 6 个 job **全部拿到 runner 并成功**（含 `notify`） |
+| `c4890a4` | 06:52 | 5 个真实 job **全部拿到 runner 并成功**；仅 `notify` 无 runner |
+| `5670e4e` | 07:25 | **全部 job** 无 runner |
+| `7a66689` | 07:45 | **全部 job** 无 runner（已确认是计费 annotation） |
 
-**未采取的动作**：没有改动 `notify` 的 `if`/`needs` 语义（那是判断口径的改动，
-属业务决策）；没有删除该 job。**建议**（待用户确认）：给 `notify` 加
-`continue-on-error: true`，或把它移出 `needs` 链，使基础设施抖动不再伪装成代码失败。
+即 06:40→07:45 之间可用额度耗尽，此后 CI **整体不可用**。
+
+**为什么危险**：`notify` job 有 `if: always()` + `needs: [...]`，
+它一旦拿不到 runner，**run 的聚合结论就是 failure**，
+于是 REST/`gh` 读到的「CI 失败」与「代码没通过测试」**无法区分**。
+本次已因此在 `c4890a4` 上误判过一次（以为合并把 main 弄红了，
+实际 5 个真实 job 全绿）。**这会在无人值守时把「额度用完」误读成「代码坏了」。**
+
+**判读方法（已固化为做法，顺序不可颠倒）**：
+1. **先看 run 的 `conclusion`，但不要信它**——它只说明至少一个 job 没成功；
+2. **下钻 job 级**（`/actions/runs/<id>/jobs`）看 `steps` 与 `runner_name`；
+3. `steps: []` + `runner: (none)` ⇒ **不是代码问题**，
+   此时**必须读 check-run 的 annotations**（`/check-runs/<id>/annotations`）
+   拿确切原因——这是这种情况下**唯一**可用的证据（job 日志不存在）。
+   若 annotation 提到 billing/spending limit ⇒ **CI 已停摆，重跑无用**；
+4. 有 `steps` 且有失败步骤 ⇒ 才是代码问题，去看日志。
+
+**影响面**：
+- `7a66689`（PR #103）的真实 job **从未被执行过**，其 CI 结论**是空的**，
+  既非绿亦非红。**不得**依 CI 结论合并，也不得说成「CI 通过」。
+- 在该账号额度恢复前，**任何** PR 都无法获得 CI 覆盖；
+  门禁的回归保护暂时只能靠**本地逐条重放**（`MIGRATION_LOG` §52-e）。
+- **本地重放是被迫的降级手段，不等于 CI 门禁存在**，这一点不得含糊过去。
+
+**未采取的动作（都是有意的）**：
+- **没有**改动 `notify` 的 `if`/`needs` 语义——那是判断口径的改动，属业务决策；
+- **没有**删除该 job；
+- **没有**为了让 CI「变绿」而改任何代码——billing 不是代码缺陷，
+  改代码既不能修复它，还会污染 diff。
+
+**需要用户处理（非我可代办）**：GitHub 账号的 Billing & plans
+（补付欠款或提高 spending limit）。这属于账号资金事项，**不自行触碰**。
+额度恢复后，PR #103 需要**重新跑一次真实 CI** 再决定合并。
 
 ---
 
