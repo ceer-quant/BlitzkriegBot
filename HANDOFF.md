@@ -3,8 +3,8 @@
 > **这份文件是接手的第一入口。** 按 §2 的阅读序读下去，即可在不依赖任何聊天历史的情况下
 > 建立完整的项目认知。
 >
-> **最后核对：2026-09-17，`main` @ `4c4b351`。** 若 `git log` 顶部已不是这个 hash，
-> 请以仓库现状为准，并在读完 §3 后更新本节。
+> **最后核对：2026-09-17，`main` @ `4e93d6e`**（v0.2 的 E17 已落地，见 §3.1）。
+> 若 `git log` 顶部已不是这个 hash，请以仓库现状为准，并在读完 §3 后更新本节。
 
 ---
 
@@ -46,7 +46,7 @@ Polymarket 加密二元 UP/DOWN 市场的自动化交易系统。严格分层：
 | 5 | [`docs/GITHUB_GOVERNANCE.md`](./docs/GITHUB_GOVERNANCE.md) | **身份、分支、提交、Issue/PR、合并流程**（含 REST API 配方） |
 | 6 | [`docs/AI_WORKFLOW.md`](./docs/AI_WORKFLOW.md) | 人机协作红线与已授权的长期规则（§2 硬约束、§2.1 第 8/9 条授权） |
 | 7 | [`docs/DECISIONS_PENDING.md`](./docs/DECISIONS_PENDING.md) | **需人类拍板的分歧**：背景 / 选项 / 倾向 / **用户裁决**（D-1…D-19） |
-| 8 | [`docs/blitzkrieg/MIGRATION_LOG.md`](./docs/blitzkrieg/MIGRATION_LOG.md) | **已修复缺陷的变更史**（§1–§47，1782 行）。查「这行为什么长这样」时读它 |
+| 8 | [`docs/blitzkrieg/MIGRATION_LOG.md`](./docs/blitzkrieg/MIGRATION_LOG.md) | **已修复缺陷的变更史**（§1–§48，1912 行）。查「这行为什么长这样」时读它 |
 | 9 | [`docs/ROADMAP_V0_1.md`](./docs/ROADMAP_V0_1.md) | 0.1 里程碑 E1–E7 的验收与进度（**0.1 已完成**） |
 
 **按角色**：
@@ -72,8 +72,14 @@ Polymarket 加密二元 UP/DOWN 市场的自动化交易系统。严格分层：
 | **v0.1 底座（E1–E7）** | ✅ **已完成**；GitHub Milestone *v0.1* 已关闭（22 个 Issue） |
 | **E8（#57）Web 前端重构** | 🚧 进行中：Vue 3 + shadcn-vue 面板已上线运行；图表层与插件面对等性未全完成 |
 | **E9（#59）产品化补完** | 🚧 进行中：E9-a/b/c/d 大部分已交付；**E9-h 延期 0.3**；**E9-d 的示例改写未达成**（KI-7） |
+| **v0.2 RC-Hardening（E10–E17）** | 🚧 **已开工**。**E17 账户精度已落地**（`fe9c871` 实现 + `4e93d6e`/PR #89 补门禁，变更史 §48）；**E10–E16 尚未开始** |
 
-**开放的 Issue 只有 #57 与 #59 —— 都不要关。** 另有 3 个 Dependabot PR 长期开放（#1/#2/#3）。
+**E17 的验收状态（诚实版，勿当成已关闭）**：`MakerThenTaker` 角色判定与现金流记账已修透，
+夹具欠账 `0.0817722` → **0**，`account:parity` 69/69、dry↔live 逐位一致。
+但**「72h DryRun 无漂移」这一项未达标**（只做了单次抽样冒烟），
+且 **E17 没有修 KI-1**（dry 仍不跑穿越撮合）——那仍是一道 🔴 阻断级测量基准问题。
+
+**开放的 Issue 只有 #57 与 #59 —— 都不要关。** 另有 3 个长期开放的 Dependabot PR（#1/#2/#3）。
 
 ### 3.2 正在运行的实例（⚠️ **不要杀**）
 
@@ -243,7 +249,7 @@ Push Protection」，与实测（GitHub Free 私有仓不可用）不符。改�
 
 ## 8. 已修复缺陷速查（14 项；查「为什么这样写」用）
 
-完整变更史在 [`docs/blitzkrieg/MIGRATION_LOG.md`](./docs/blitzkrieg/MIGRATION_LOG.md)（§1–§47）。
+完整变更史在 [`docs/blitzkrieg/MIGRATION_LOG.md`](./docs/blitzkrieg/MIGRATION_LOG.md)（§1–§48）。
 
 | # | 问题 | 章节 |
 | --- | --- | --- |
