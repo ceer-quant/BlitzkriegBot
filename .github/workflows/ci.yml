@@ -49,7 +49,7 @@ jobs:
       # Also caps the tracked tree (what a clone pulls) at 100 MB, so a large
       # binary cannot be committed by accident.
       # Needs node; only standard-library modules are used, so no `npm ci`.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Binary & repo size budget
@@ -73,7 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -114,7 +114,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       # ui_kit_web + blitzkrieg-core in release: the gate drives the real binaries.
