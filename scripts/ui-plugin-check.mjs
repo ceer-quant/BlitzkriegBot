@@ -40,12 +40,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function cmd(text) {
   const url = `${BASE}/api/command?cmd=${encodeURIComponent(text)}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: TOKEN ? { 'X-Auth-Token': TOKEN } : {} });
   return res.json();
 }
 
 let gateway = null;
 let failures = 0;
+let TOKEN = '';
 function check(name, cond, detail = '') {
   const tag = cond ? 'ok  ' : 'FAIL';
   if (!cond) failures++;
@@ -71,11 +72,32 @@ try {
   // [0] graceful degradation: all plugin verbs error cleanly with NO core.
   gateway = spawn(WEB, ['--socket', SOCK, '--addr', `127.0.0.1:${PORT}`, '--manage'], {
     cwd: ROOT,
-    env: { ...process.env, UIKIT_CORE_BIN: BIN, UIKIT_CORE_CWD: WORK, DRY_RUN: 'true' },
+    env: {
+      ...process.env,
+      UIKIT_CORE_BIN: BIN,
+      UIKIT_CORE_CWD: WORK,
+      DRY_RUN: 'true',
+      // Gateway mode requires an explicit credential pair since #83.
+      BLITZKRIEG_PANEL_USER: 'gate-admin',
+      BLITZKRIEG_PANEL_PASSWORD: 'gate-pass-9f3a',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   gateway.stderr.on('data', (d) => process.stdout.write(`   [gw:err] ${d}`));
-  await waitFor('gateway HTTP', async () => (await fetch(`${BASE}/api/snapshot`)).ok);
+  // Since #83, /api/* requires a session — the probe gets 401 until we log in.
+  // "Any HTTP response" is the listening signal, not `.ok`.
+  await waitFor('gateway HTTP', async () => {
+    const r = await fetch(`${BASE}/api/snapshot`);
+    return r.status > 0 ? r : null;
+  });
+  const loginRes = await fetch(`${BASE}/api/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ user: 'gate-admin', password: 'gate-pass-9f3a' }),
+  });
+  const loginBody = await loginRes.text();
+  TOKEN = /"token":"([0-9a-f]{40})"/.exec(loginBody)?.[1] ?? '';
+  check('login issues a 40-hex token', TOKEN.length === 40, loginBody.slice(0, 120));
 
   const off = await cmd('strategies');
   check('strategies without core = clean error', off.ok === false && /not reachable/.test(off.message), off.message);

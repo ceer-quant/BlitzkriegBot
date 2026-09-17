@@ -36,12 +36,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function cmd(text) {
   const url = `${BASE}/api/command?cmd=${encodeURIComponent(text)}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: TOKEN ? { 'X-Auth-Token': TOKEN } : {} });
   return res.json();
 }
 
 let gateway = null;
 let failures = 0;
+let TOKEN = '';
 function check(name, cond, detail = '') {
   const tag = cond ? 'ok  ' : 'FAIL';
   if (!cond) failures++;
@@ -73,6 +74,8 @@ try {
       UIKIT_CORE_CWD: WORK,
       UIKIT_CORE_EXTRA_ARGS: '--engine --no-event-archive --feed-ws --no-trade-log --no-order-log --no-position-log',
       HFT_ASSETS: 'BTC,ETH',
+      BLITZKRIEG_PANEL_USER: 'gate-admin',
+      BLITZKRIEG_PANEL_PASSWORD: 'gate-pass-9f3a',
       DRY_RUN: 'true',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -82,7 +85,22 @@ try {
   gateway.stderr.on('data', (d) => process.stdout.write(`   [gw:err] ${d}`));
 
   // [0] gateway listening, core NOT started → status must report not-reachable.
-  await waitFor('gateway HTTP', async () => (await fetch(`${BASE}/api/snapshot`)).ok);
+  // Since #83, /api/* requires a session, so the probe gets 401 before any
+  // login — "any HTTP response" is the listening signal, not `.ok`.
+  await waitFor('gateway HTTP', async () => {
+    const r = await fetch(`${BASE}/api/snapshot`);
+    return r.status > 0 ? r : null;
+  });
+  // Login with the env credentials and carry the 40-hex token on every
+  // subsequent command (webapp-check pins the same auth contract).
+  const loginRes = await fetch(`${BASE}/api/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ user: 'gate-admin', password: 'gate-pass-9f3a' }),
+  });
+  const loginBody = await loginRes.text();
+  TOKEN = /"token":"([0-9a-f]{40})"/.exec(loginBody)?.[1] ?? '';
+  check('login issues a 40-hex token', TOKEN.length === 40, loginBody.slice(0, 120));
   const before = await cmd('status');
   check('status before start = error (core down)', before.ok === false, before.action);
 

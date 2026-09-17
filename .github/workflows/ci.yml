@@ -1,21 +1,23 @@
 name: CI
 
 # Runs on every PR and on pushes to the long-lived branches.
-# Four independent gates, matching the repository governance plan:
+# Five independent gates, matching the repository governance plan:
 #   rust-check     — the Rust trading core builds, tests, lints (advisory) and
 #                    holds the release binary / tracked-tree size budget (E10-d).
 #   panel-check    — the browser panel: Vue checks, then the `ui:webapp` gate
 #                    against a live gateway over a real socket, plus the
-#                    lifecycle / read-only / crash-recovery acceptance gates.
+#                    lifecycle / read-only / crash-recovery acceptance gates
+#                    and the order/ledger parity gates.
+#   core-gates     — the specialized acceptance gates (E2/E4/E5/E9/P-1...),
+#                    promoted from manual-only to CI (KI-9).
 #   release-bundle — assembles the actual deliverable and holds it under 500 MB
-#                    (E10-e). The deliverable is the *union* of what the two jobs
+#                    (E10-e). The deliverable is the *union* of what the jobs
 #                    above build piecemeal, so only a job building the union can
 #                    measure it.
 #   secret-scan    — no credential ever enters the tree (dependency-free).
-# The Node/TS verification layer was removed (production is 100% Rust); the
-# gates that used to drive a compiled TS client now use scripts/lib/core-client.mjs
-# (bare Node stdlib) and run inside panel-check. A final `notify` job reports the
-# aggregate result to WeChat when configured.
+# The Node/TS verification layer was removed (production is 100% Rust); all gate
+# drivers are bare-Node stdlib scripts under scripts/. A final `notify` job
+# reports the aggregate result to WeChat when configured.
 on:
   push:
     branches: [main, develop]
@@ -151,6 +153,72 @@ jobs:
       - name: Account parity gate (dry/live ledgers bit-identical)
         run: node scripts/account-parity.mjs
 
+  # KI-9: the specialized acceptance gates, promoted from "run them locally and
+  # remember" to CI. Each pins a milestone acceptance (E2/E4/E5/E9/P-1) on the
+  # REAL release binaries, each on its own isolated socket/scratch dir — none
+  # touch the production socket or data/. What each gate pins is documented in
+  # its header comment; the matrix lives in dev-docs/DEVELOPMENT.md §3.
+  core-gates:
+    name: core-gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Build the core and UI binaries (release)
+        run: cargo build --release --workspace --locked
+      # strategy-gate / strategy-evolution / trend-follow drive the REAL dog
+      # cdylib, which lives in its own nested workspace.
+      - name: Build the strategy cdylibs (standalone workspaces)
+        run: |
+          (cd user_layer/strategies && cargo build --release --locked)
+          (cd user_layer/parity_strategy && cargo build --release --locked)
+      # E1: the full DryRun order chain, and the event-driven backtester
+      # (capture from a live core → offline replay → bit-identical result).
+      - name: Order-chain & backtest gates
+        run: |
+          node scripts/cycle-check.mjs
+          node scripts/backtest-check.mjs
+          node scripts/order-recovery-check.mjs
+          node scripts/position-recovery-check.mjs
+      # E2: strategy-scoped sizing, gate exemptions (real dog cdylib), and
+      # per-strategy shadow evolution.
+      - name: Strategy-scoped gates (E2)
+        run: |
+          node scripts/strategy-limit-check.mjs
+          node scripts/strategy-gate-check.mjs
+          node scripts/strategy-evolution-check.mjs
+      # E4: both builtin legs are first-class strategies, not code-path variants.
+      - name: Strategy leg gates (E4)
+        run: |
+          node scripts/trend-follow-check.mjs
+          node scripts/mean-reversion-check.mjs
+      # E5: the panel consumes core events through the EventBus; the UI Kit
+      # gateway command surface and plugin toggles work end-to-end.
+      - name: UI Kit gates (E5)
+        run: |
+          node scripts/ui-eventbus-check.mjs
+          node scripts/ui-kit-gateway-check.mjs
+          node scripts/ui-plugin-check.mjs
+      # E9: strategy developer chain (template → build → load → enable → signal)
+      # and the scale gates (registry read latency, 40-connection feed fanout).
+      - name: E9 strategy-dev & scale gates
+        run: |
+          node scripts/strategy-devcheck.mjs
+          node scripts/scale-plugins-check.mjs
+          node scripts/feed-scale-check.mjs
+      # Assorted one-off invariants kept cheap.
+      - name: Assorted gates (plugin selection / trade-log flag / TUI demo)
+        run: |
+          node scripts/market-plugin-check.mjs
+          node scripts/trade-log-flag-check.mjs
+          node scripts/tui-demo-check.mjs
+
   # E10-e: the third size target — the *deliverable* ≤ 500 MB — is the one that
   # cannot be read off the working tree. A developer checkout legitimately holds
   # tens of GB of gitignored scratch (target/, data/archive, node_modules/), so
@@ -210,7 +278,7 @@ jobs:
 
   notify:
     name: notify (wechat)
-    needs: [rust-check, panel-check, release-bundle, secret-scan]
+    needs: [rust-check, panel-check, core-gates, release-bundle, secret-scan]
     if: always()
     runs-on: ubuntu-latest
     # Secret lifted to job env so the step `if` can test it (secret-context
@@ -222,7 +290,7 @@ jobs:
         # Opt-in: silently skips unless the WECHAT_WEBHOOK secret is configured.
         if: ${{ env.WECHAT_WEBHOOK != '' }}
         env:
-          RESULT: ${{ needs.rust-check.result }}/${{ needs.panel-check.result }}/${{ needs.secret-scan.result }}
+          RESULT: ${{ needs.rust-check.result }}/${{ needs.panel-check.result }}/${{ needs.core-gates.result }}/${{ needs.secret-scan.result }}
         run: |
           icon="✅"; [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] && icon="❌"
           curl -sS -X POST "$WECHAT_WEBHOOK" \
