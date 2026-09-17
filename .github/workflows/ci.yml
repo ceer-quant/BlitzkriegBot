@@ -171,6 +171,16 @@ jobs:
       # started, nothing reached a venue, and orders still settle locally.
       - name: Core read-only egress gate
         run: npm run core:readonly-check
+      # E12-c: "内核崩溃后 UI 能恢复/报告". The client has carried auto-restart and
+      # adopt logic for a long time with nothing ever killing a core to test it, so
+      # this gate SIGKILLs a live core and requires that (a) the in-flight request
+      # settles rather than hanging, (b) a replacement core serves the same socket
+      # under a DIFFERENT pid, (c) it accepts and settles a real order — i.e. it is
+      # usable, not merely alive, and (d) the crash is distinguishable from a clean
+      # exit. SIGKILL is deliberate: SIGTERM would let the core exit gracefully and
+      # then "failed to restart" would be indistinguishable from a planned stop.
+      - name: Core crash-recovery gate
+        run: npm run core:crash-recovery-check
 
   # E10-e: the third size target — the *deliverable* ≤ 500 MB — is the one that
   # cannot be read off the working tree. A developer checkout legitimately holds
