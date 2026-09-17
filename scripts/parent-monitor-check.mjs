@@ -60,7 +60,7 @@ function corePids() {
 // parent's SIGTERM is what ends it.
 //
 // It loads the COMPILED runner (`dist/`) and runs under plain `node`, matching
-// production (`npm start` → `node dist/index.js`). Two traps this avoids:
+// the `core:parent-monitor-check` npm gate. Two traps this avoids:
 //
 //   1. A `.ts` driver run through the `tsx` wrapper leaves the wrapper alive
 //      after SIGTERM, so the driver never dies and the exit guard never fires —
