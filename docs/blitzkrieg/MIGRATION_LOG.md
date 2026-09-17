@@ -1780,3 +1780,133 @@ _实现要点（`core/blitzkrieg_core/src/strategies/mean_reversion.rs`，约 95
 - 证据等级：留出段，非标定语料之外样本外，0.5 里程碑补真正的样本外评测。
 - 三个 built-in 现都在同一 `Engine::evaluate` 里按注册序 tie-break，
   mean_reversion 排在最后（spread_arb 是 incumbent），跑挂单冲突以先注册策略为准。
+
+---
+
+## 48. E17 账户精度：maker/taker 按实际成交判定 + 现金流记账（2026-09-17）
+
+**问题**：`MakerThenTaker` 订单的角色判定与现金记账两处都在漂移，实测欠账 **0.0817722**。
+拆开来是三个各自独立的缺陷，都能单独把账本推歪：
+
+1. **按「请求的成交策略」而非「实际成交角色」收手续费**。入场按 taker 计费，
+   持仓记录却写 maker（费用 0）——同一笔成交，账本和成交记录对「付了多少」给出两个答案。
+2. **出场增量只覆盖 9.99/10 股**。0.01 股挂在 0.01 的最小网格外，既不在 `proceeds` 里、
+   也不在持仓里，凭空消失；每个周期漏一点。
+3. **出场费按 taker 记、增量却按 maker 算**。费与基数来自两个不同的角色判断。
+
+**裁决**：走 **path C**——本版一次修透，不做「先记着、下版再说」。
+
+**改动**
+
+_角色由实际成交判定（`OrderRole` 状态机）_
+- `model.rs`：新增 `OrderRole { Pending, Maker, Taker, MakerThenTaker }`。
+  `after_fill(r)` 按「先 Maker 后 Taker（或反向）即 `MakerThenTaker`，一旦混合就永久混合」复合；
+  `from_fill_policy(mode)` 只作**兜底**（`Taker→Taker`，`Maker|MakerThenTaker→Maker`）。
+  `is_maker()` 是唯一的费率判据。`TrackedOrder` 增 `role`。
+- `market_api/src/types.rs`：`MarketFill` 增 `maker: Option<bool>`；`ipc/schema.rs` 的
+  `ReconcileTrade` 同样增 `maker`。venue **自己知道**这一位（Polymarket 把
+  `taker_order_id` 与 `maker_orders[]` 分开报），所以绝不能在下游按「我们请求的策略」反推。
+  `None` = 数据源答不了（dry 撮合、对账补单），此时才回落到订单自己的 fill policy。
+- `ome.rs`：`record_delta(…, reported_maker: Option<bool>)` 三档解析
+  `Some(true)→Maker` / `Some(false)→Taker` / `None→from_fill_policy(order.mode)`，
+  仅在 `effective > 0` 时复合进 `order.role`（回滚不改变角色）。
+- `service.rs::apply_delta_effects`：费率改读 `d.role.is_maker()`。这是 dry 成交、
+  live 用户 WS 成交、对账补单三条生产者**共用的唯一咽喉**，此处一次修正三路齐修。
+
+_现金流记账（`CashFlows`）_
+- `position.rs`：`CashFlows { entry_cost_usd, entry_fee_usd, proceeds_usd, exit_fee_usd,
+  opened_shares, sold_shares }`，`apply_entry_fill`/`apply_exit_fill` 逐笔累加**实际现金流**，
+  而不是事后从均价反推。`entry_fee_pct = pct_of(entry_fee_usd, entry_cost_usd)`。
+- `close()` 的全部数字来自累计现金流：`gross = proceeds − entry_cost`，
+  `net = gross − entry_fee − exit_fee`。于是 `net_pnl_usd` **就是**账本为这笔持仓移动过的现金。
+- **次网格余数不再泄漏**：卖不掉的余量按出场价冲销、作为取整成本计入 `net`，
+  并在成交记录上以 `dust_shares` **显式可见**，而不是塞进一个 fudge 数里。
+  直平仓（无对应出场成交）与次网格余数都按调用方刚下的那张单的角色在此处计费。
+- 网格常量收敛为 `share_grid() = 0.01` + `floor_to_grid()`。
+
+_对外可观测_
+- `ipc/schema.rs`：`PositionView` 增 `cost_usd` / `entry_fee_usd` / `proceeds_usd` / `exit_fee_usd`。
+  目的是让外部监视器在**任意时刻**核对恒等式，而不必等到账面恰好清空：
+
+  ```text
+    balance == seed + Σ_closed net
+                     − Σ_open (cost_usd + entry_fee_usd)
+                     + Σ_open (proceeds_usd − exit_fee_usd)
+  ```
+
+  半平仓的持仓两侧同时非零，正是「只在清仓时对账」看不见的情形。
+- `ClosedPosition` 增 `entry_role` / `exit_role` / `dust_shares`；`src/core/schema.ts`
+  与 `blitzkrieg-core-client.ts` 同步。
+
+**测试（真实 Core 端到端，`account_precision_tests` 8 项）**
+- `every_maker_taker_partial_shape_reconciles`——入场/出场各 4 档份额
+  （1/10、5/10、**9.99/10**、10/10）× 双边 4 种角色组合，**跑满 40 种**，逐一断言账本自洽。
+  9.99 那一档正是原来漏 0.01 股的形状。
+- `the_venue_role_report_outranks_the_orders_policy`——**双向**验证，避免「永远选一边」蒙过：
+  `MakerThenTaker` 被 venue 报成穿越 → 收 taker 费且记录为 Taker；
+  `Maker` 策略被报成穿越 → 同样收 taker 费（旧的只看策略时会静默不收）；
+  `Taker` 策略被报成挂单成交 → 记录为 Maker 且**分文不收**（返佣未建模，但挂单成交确实免费）。
+- `maker_then_taker_entry_and_profit_exit_reconcile`——计划背景里那个夹具本身：
+  `0.43` 挂单被吃 → Maker 入场零费，`0.95` Maker 出场，
+  断言 `pnl == net_pnl == 5.20` 且**旧的 0.0817722 缺口为 0**。
+- `a_mixed_role_position_charges_each_leg_by_what_it_did`——同一持仓双腿角色不同，
+  费用必须**逐腿**跟随各自角色，而不是跟随最初那张委托。
+- `dry_and_live_ledgers_agree_bit_for_bit`——dry 撮合与 live 确认走同一条咽喉。
+- `a_rolled_back_fill_leaves_the_ledger_clean`、`reconciliation_gap_fills_reconcile`
+  （对账补单只按 venue 确认的数量建仓）、
+  `the_identity_holds_mid_flight_and_entry_cost_is_not_the_held_basis`（半平仓时恒等式成立，
+  且证明「用持有基差代入」会重复计一次释放基差）。
+- `account-precision` **默认开启**（`default = ["polymarket", "strategy-loading",
+  "account-precision"]`）——门禁不会悄悄停跑，普通 `cargo test` 也覆盖。
+
+**门禁（新增）**
+- `npm run account:test`：`cargo test --lib --features account-precision account_precision`。
+- `npm run account:parity`（`scripts/account-parity.mjs`）：在**真 release 二进制**上跑
+  dry 与 live 两条同构链路，逐位比对，并复跑背景里那个夹具。**69 条断言**，
+  终判 `account:parity — dry and live ledgers are bit-identical.`，`dry`/`live` 两侧残差均 `0.00e+0`。
+- `npm run account:drift-check`（`scripts/account-drift-check.mjs`）：连**在跑的** core socket，
+  按上面的中途恒等式核对真实账本，输出 `balance` / `expected` / `residual` / `open`。
+
+**验证（合并后 main @ 4e93d6e 实测）**
+- `BK_REQUIRE_DYLIB=1 cargo test --workspace --locked`：**309 项通过，0 失败，1 忽略**
+  （blitzkrieg_core lib **226** / 主程序 10 / dynamic_strategy 6 / foreign_parity 1 /
+  shadow_evolution_per_strategy 4 / blitzkrieg_strategy_api 1 / ui_kit 42 /
+  ui_kit_panel 2 / parity_logic 4 / polymarket_extension 13；doc-tests 0）。
+- `npm run account:test`：**8/8**。`npm run account:parity`：**69/69** 断言，dry↔live 逐位一致。
+- `npm test`：**168 项通过，0 失败**（34 套）。`npx tsc --noEmit` 干净。
+
+**本批同时修好的两个门禁自身缺陷（PR #89）**
+E17 的两道验收门禁此前都**不可能真正工作**，它们的绿灯是假的：
+1. `scripts/lib/core-socket.mjs` **缺 `resolveSocketPath` 导出**（该符号自 `4951e5a` 起只存在于
+   TS 侧），`account-drift-check` / `soak-monitor` / `feed-live-probe` / `price-compare`
+   四个脚本全部在**导入阶段**就 `SyntaxError`。
+2. **drift 恒等式重复计基差**：原式累加 `costUsd`，但 `costUsd` 是「仍持有份额」的基差，
+   部分平仓时随释放而缩小，而 `proceedsUsd` **已经**把释放的那部分基差还回现金——
+   再累加一次即重复计数。半仓实测残差 `−1.7200000000`，恰是 `4.30/10×4` 的释放基差。
+   该门禁此前会对**正确**的账本报出幻影漂移。修法：`PositionView` 暴露
+   `entry_cost_usd`（**总投入现金**，不随部分平仓缩小），恒等式改用它；
+   `cost_usd` = 仍持有份额的基差，文档里明确「不得累加进上面的恒等式」。
+3. 附带：对**早于 E17 的 core** 快速失败并给出可执行提示（exit 2）——
+   这类进程的成交记录没有 `entryRole`、持仓没有 `entryCostUsd`，其账本无法按新恒等式核对，
+   静默算出的残差没有意义。
+
+**已知缺口（登记不隐藏）**
+- **72h DryRun 漂移观测尚未完成**，目前只做了单次抽样冒烟（半平仓持仓 `residual=0`，exit 0）。
+  「72h 无漂移」这条验收项**未达标**，需在真实常驻实例上累计。
+- 生产常驻实例（PID 16697，09-17 00:32 启动）**早于 E17 二进制**（10:44 构建），
+  其当前 drift 读数无意义——drift 门禁现在会直接 exit 2 拒绝，而不是给一个假数字。
+- `docs/KNOWN_ISSUES.md` 的 KI-1（dry 行情路径不跑穿越撮合：挂单永不成交，入场全部升级为 taker）
+  **仍未修复，且本批没有触碰它**。复核 `HEAD`：`try_maker_fill` 的调用点依然只有
+  `place_after_submit`（`service.rs:2100`，下单那一刻自检）与 `book_snapshot`
+  （`service.rs:2297`，显式请求盘口快照时）两处；行情主路径 `engine_on_data`
+  （`service.rs:1046`）仍只把盘口镜像进 `self.books`，**从不调用 `try_maker_fill`**。
+  它与本批是**互补关系而非同一件事**：E17 修的是「**费用该按什么角色算**」，
+  KI-1 是「**dry 的挂单到底会不会成交**」。KI-1 未修时 dry 入场确实真是 taker，
+  E17 对此**如实计费**（不再出现「账本按 taker 收、记录写 maker 0」的自相矛盾），
+  但**没有**把成交率基准拉回实况——「dry 的经济模型比实况更贵」这一结论仍然成立，
+  基于 dry 回放做的参数取舍（止损宽度、移动止盈下限、入场时点）**仍需在 KI-1 修复后复核**。
+  E17 修好的是 KI-1 修复的**前置条件**（角色一旦真实，费用自动跟随），不是 KI-1 本身。
+- 同理，本批的 69 条 parity 断言证明的是**记账正确性**（dry 与 live 逐位一致），
+  不是**成交率基准正确性**。两者不可互相替代。
+- 证据等级：单元/集成 + 真二进制 parity，**非**长时间实盘观测。
+- 本地扫描结论未完整（`scanner_enobufs`），**不得**据此宣称项目已通过安全审计。
