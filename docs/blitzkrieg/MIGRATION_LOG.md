@@ -2405,7 +2405,21 @@ read-only 核心连这次尝试都没有。这个差异就是结构性保证本�
 
 `5670e4e`（PR #103）推送后，**全部 job 在 2 秒内失败**：`steps: []`、
 `runner_name: ""`、`runner_id: 0`——没有任何 runner 被分配，**代码一行都没跑**。
-重跑两次（attempt 2、3）同样拿不到 runner，属持续性的基础设施故障，非代码缺陷。
+重跑两次（attempt 2、3）同样如此。
+
+**根因（已确证，不是推测）**：最初只凭 `steps: []` 判为「持续性基础设施抖动」。
+推 `7a66689` 后重新触发，现象不变，于是**换了一条取证路径**——
+`steps: []` 时 job 日志是 `BlobNotFound`（根本没写出日志），
+但 **check-run 的 annotation 有原文**：
+
+> The job was not started because recent account payments have failed or your
+> spending limit needs to be increased. Please check the 'Billing & plans'
+> section in your settings
+
+即 **GitHub 账号计费问题导致 CI 整体停摆**，与代码无关，**重跑无用**。
+这是一次方法论纠错：症状相同（`steps: []`），
+但「基础设施抖动 → 重跑」与「额度耗尽 → 重跑无用」是两种处置，
+区分它们**只能靠 annotation**。已把取证顺序写进 KI-26。
 
 处置：
 
@@ -2420,12 +2434,15 @@ read-only 核心连这次尝试都没有。这个差异就是结构性保证本�
    | `node-check` | `tsc --noEmit`；`npm test` | exit 0；172 passed / 0 failed |
    | `panel-check` | `cargo build --release --locked`→`npm run check`→`check:all`→`ui:webapp`→`core:shutdown-check`→`core:parent-monitor-check`→`core:readonly-check` | 全 PASS |
 
-   本地全绿只能作为**旁证**记录，不能替代 CI。
-3. **不要为了修一个没有 runner 的 CI 去改代码**——那不是代码缺陷。
-   重跑是可逆的（无害）；把结论建立在空 CI 上不是（有害）。
+   本地全绿只能作为**旁证**记录，不能替代 CI；这是**被迫的降级**，
+   不等于门禁仍然存在。
+3. **不要为了修一个没有 runner 的 CI 去改代码**——billing 不是代码缺陷，
+   改代码既修不了它，还会污染 diff。
 4. 顺带纠正一次误读：`c4890a4` 的 5 个真实 job **全部通过**，
    只有 `notify (wechat)` 没拿到 runner，却污染了整个 run 的聚合结论。
    **在相信 run 的红绿之前，先看 job 级 `steps` 是否为空。**
-   已作为 KI-26 记入 `KNOWN_ISSUES.md`（含建议：给 `notify` 加
-   `continue-on-error: true` 或把它移出 `needs` 链，待用户确认）。
+   已作为 KI-26 记入 `KNOWN_ISSUES.md`。
+   **注意**：修复方向**不是**给 `notify` 加 `continue-on-error`——
+   那只让一个真实的失败静音；billing 恢复后这种改动会掩盖真正的通知故障。
+   先解决账号额度。
 
