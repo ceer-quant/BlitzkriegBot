@@ -12,7 +12,12 @@
 import { z } from 'zod';
 
 export const SideSchema = z.enum(['buy', 'sell']);
-export const ModeSchema = z.enum(['dry', 'live']);
+// Mirrors `Mode` in blitzkrieg-core/src/model.rs. `readonly` must be listed: the
+// core's READY event carries the settled mode, and a core booted with
+// `--readonly` would otherwise be rejected by this schema as an unknown shape —
+// the shell would fail to attach to exactly the instance an operator asked to be
+// safe (E12-e).
+export const ModeSchema = z.enum(['dry', 'live', 'readonly']);
 export const OrderStatusSchema = z.enum([
   'PENDING',
   'LIVE',
