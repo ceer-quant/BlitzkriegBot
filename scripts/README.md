@@ -1,45 +1,67 @@
 # Blitzkrieg Scripts
 
-Build, deployment, and utility scripts.
+Gates, observability, and packaging utilities. **All `.mjs` scripts are
+zero-dependency bare Node (stdlib only) — no `npm install` needed at the repo
+root.** The production runtime is 100% Rust; Node here only drives temporary,
+isolated cores for verification.
 
-## Scripts
-
-### Installation
-- `install.sh` - One-liner installation script
-- `setup.sh` - Post-install setup wizard
-
-### Building
-- `build.sh` - Build all packages
-- `build-desktop.sh` - Build desktop app
-- `build-mobile.sh` - Build mobile apps
-
-### Development
-- `dev.sh` - Start development environment
-- `test.sh` - Run all tests
-- `lint.sh` - Run linters
-
-### Deployment
-- `deploy.sh` - Deploy to production
-- `docker-build.sh` - Build Docker image
-- `release.sh` - Create new release
-
-### Utilities
-- `db-migrate.sh` - Run database migrations
-- `db-backup.sh` - Backup database
-- `logs.sh` - View logs
-
-## Usage
+Most gates spawn a temporary `blitzkrieg-core` (isolated socket via `TMPDIR` or
+`BZK_CORE_ISOLATION`) and talk JSON-RPC over UDS through
+[`lib/core-client.mjs`](lib/core-client.mjs). Build the core first:
 
 ```bash
-# Install
-curl -fsSL https://raw.githubusercontent.com/ceer-quant/BlitzkriegBot/main/scripts/install.sh | bash
-
-# Development
-./scripts/dev.sh
-
-# Build
-./scripts/build.sh
-
-# Test
-./scripts/test.sh
+cargo build --release --workspace --locked
 ```
+
+## lib/
+
+- `lib/core-client.mjs` — zero-dependency UDS JSON-RPC client + process
+  supervisor (`CoreClient`): spawn/boot/retry, request/timeout, events,
+  clean stop (cancels resting orders) and `killNow()` (exit guard).
+- `lib/core-socket.mjs` — socket path helpers (TMPDIR-prefixed, per-user).
+
+## Acceptance gates
+
+| Script | What it pins |
+| --- | --- |
+| `cycle-check.mjs` | DryRun full order chain: confirm → place → fill → position → revalue → exit |
+| `core-parity.mjs` | Order/ledger semantics parity, 22 assertions (taker, maker, risk, kill switch, events) |
+| `account-parity.mjs` | dry/live twin-core ledger bit-for-bit comparison |
+| `core-adopt-check.mjs` | Duplicate client adopt semantics, no restart storm |
+| `shutdown-cleanliness-check.mjs` | Stop means the core is gone and resting orders settled |
+| `parent-monitor-check.mjs` | No orphaned core after the driver exits |
+| `readonly-egress-check.mjs` | `--readonly` is structural: live mode + credentials still cannot trade |
+| `crash-recovery-check.mjs` | SIGKILL a live core → in-flight settles, replacement serves the socket |
+| `webapp-check.mjs` | Panel: bundle served, auth both ways, CSRF, snapshot non-empty |
+| `backtest-check.mjs` | Event-driven backtest: archive → offline replay → bit-identical |
+| `order-recovery-check.mjs` / `position-recovery-check.mjs` | Crash recovery for orders / positions |
+| `strategy-gate-check.mjs` / `strategy-limit-check.mjs` / `strategy-evolution-check.mjs` | Strategy-scoped gating / funding / shadow evolution |
+| `trend-follow-check.mjs` / `mean-reversion-check.mjs` | Built-in strategy legs |
+| `scale-plugins-check.mjs` / `feed-scale-check.mjs` | Registry read latency / feed loss rate at scale |
+| `ui-eventbus-check.mjs` / `ui-kit-gateway-check.mjs` / `ui-plugin-check.mjs` | UI event push / gateway command surface |
+| `trade-log-flag-check.mjs` / `market-plugin-check.mjs` | `--no-trade-log` isolation / plugin selection |
+
+## Observability / ops
+
+- `dry-observe.mjs` — attach to a running dry core and print round/order/position ticks.
+- `soak-health.sh` / `soak-health-loop.sh` / `soak-monitor.mjs` — long-run health monitoring.
+- `analyze-signals.mjs` / `analyze-strategy.mjs` — offline signal/strategy analysis.
+- `feed-live-probe.mjs` / `poly-ws-endurance.mjs` / `poly-wire-measure.mjs` — Polymarket feed probes.
+- `price-compare.mjs` / `reconcile-exits.mjs` / `sweep-exits.mjs` / `final-exit-opt.mjs` — pricing and exit sweeps.
+- `account-drift-check.mjs` — live panel/account drift diagnosis.
+- `blitzkrieg-new-strategy.mjs` — scaffold a new cdylib strategy under `user_layer/strategies/`.
+
+## Packaging / CI helpers
+
+- `package-release.mjs` — assemble the distributable bundle (≤ 500 MB) with a
+  destination allow-list guard; `binary-size-check.mjs` — per-binary and
+  tracked-tree budgets.
+- `secret-scan.sh` — zero-dependency secret scan (`--all` includes untracked
+  docs; `--history` scans full git history). Reports locations, never values.
+
+## Conventions
+
+- Gate scripts print `RESULT: PASS|FAIL` and exit `0`/`1`.
+- Gates never touch the production socket (see the `BZK_CORE_ISOLATION` /
+  `TMPDIR` isolation comments inside each script).
+- No string interpolation into `execSync`; use `execFileSync` with argument arrays.

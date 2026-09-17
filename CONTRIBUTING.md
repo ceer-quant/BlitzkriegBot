@@ -4,9 +4,9 @@ Thanks for your interest in contributing! (`ceer-quant/BlitzkriegBot`, MIT).
 
 ## Architecture first
 
-This is a **Rust-core** project: all money, order, risk and state-consistency
-logic lives in Rust. Node is only a thin IPC verification client used by the
-local acceptance gates.
+This is a **Rust-only** project: all money, order, risk and state-consistency
+logic lives in Rust. Node.js appears only in zero-dependency gate scripts
+(bare Node stdlib) and is not part of the production runtime.
 
 | Directory | What it is |
 | --- | --- |
@@ -15,7 +15,7 @@ local acceptance gates.
 | `extensions/polymarket/` | Official Polymarket plugin (CLOB, WS feed, Gamma discovery) |
 | `user_layer/strategy_api/` | User strategy trait / FFI stable surface (cdylib hot-loading) |
 | `ui/` | Rust UI kit: `ui_kit_web` (panel server, port 51888), `ui_kit_panel` (terminal), Vue webapp |
-| `src/` | Node IPC verification layer only (not part of the production runtime) |
+| `scripts/lib/` | Zero-dependency bare-Node IPC client used by the local acceptance gates |
 
 Key architecture constraints — do not violate them:
 
@@ -34,14 +34,12 @@ Key architecture constraints — do not violate them:
 cargo build --release --workspace --locked
 cargo test --workspace --locked
 
-# Node verification layer
-npm install
-npm run typecheck
-npm test
-npm run build
-
 # DryRun order-chain end-to-end (spawns an isolated temporary core)
 node scripts/cycle-check.mjs
+
+# Core behavior / ledger parity gates (spawns dry+live twin cores)
+node scripts/core-parity.mjs
+node scripts/account-parity.mjs
 
 # Zero-dependency secret scan
 bash scripts/secret-scan.sh
@@ -81,7 +79,7 @@ and loaded at runtime. See
 ## Code Style
 
 - Rust: `cargo fmt` / `clippy` clean; match the surrounding idiom.
-- TypeScript (verification layer): strict mode, `async/await`, small functions.
+- Gate scripts (`scripts/*.mjs`): bare Node stdlib only — no npm dependencies.
 
 ## Security Guidelines
 

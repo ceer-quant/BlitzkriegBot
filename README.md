@@ -1,12 +1,12 @@
 # BlitzkriegBot
 
-> 开源量化交易系统 —— **Rust 交易核心 + Rust 面板 + 可插拔市场扩展**。
-> 所有涉及资金、订单、风控与状态一致性的逻辑都在 Rust 侧；Node 只保留
-> 一个极薄的 IPC 验证客户端，供本地验收门禁驱动核心。
+> 开源量化交易系统 —— **纯 Rust 交易核心 + Rust 面板 + 可插拔市场扩展**。
+> 所有涉及资金、订单、风控与状态一致性的逻辑都在 Rust 侧；Node.js 仅在
+> 本地验收门禁中作为驱动脚本使用（零依赖，仅标准库），不参与生产运行。
 
 - **仓库**：`ceer-quant/BlitzkriegBot`（开源，MIT）
 - **默认运行模式**：`dry`（DryRun 模拟）。**Live 交易默认关闭且受硬约束保护，不得在未授权下开启。**
-- **工具链**：Rust（edition 2024）+ Node.js `>= 22`（仅验收脚本）
+- **工具链**：Rust（edition 2024）；Node.js `>= 22` 仅用于运行门禁与打包脚本（零 npm 依赖）
 
 ---
 
@@ -25,7 +25,8 @@ BlitzkriegBot 是一个面向**轮盘型预测市场（当前为 Polymarket 加�
   拉起 / 停止核心并托管其生命周期。
 
 核心与面板之间通过本机 **Unix Domain Socket + 换行分帧的 JSON-RPC 2.0** 通信，
-契约唯一来源是 Rust 的 serde 结构体，Node 验收层用 zod 镜像校验。
+契约唯一来源是 Rust 的 serde 结构体；门禁驱动端 `scripts/lib/core-client.mjs`
+为零依赖 bare-Node 客户端，只做传输，不做二次校验。
 
 ---
 
@@ -45,8 +46,7 @@ BlitzkriegBot/
 │   ├── ui_kit/            # Rust UI 套件（bin: ui_kit_web —— 面板 HTTP 服务器）
 │   ├── ui_kit_panel/      # 终端面板应用（bin: ui_kit_panel）
 │   └── webapp/            # Vue 前端源码（webui/）与构建产物
-├── src/                   # Node IPC 验证薄层（core:* / account:* 门禁的驱动端）
-├── scripts/               # 门禁与运维脚本（cycle-check / core-parity / secret-scan …）
+├── scripts/               # 门禁与运维脚本（cycle-check / core-parity / secret-scan …；lib/ 为零依赖 IPC 驱动客户端）
 ├── docs/                  # 可公开文档（Rust 体系）
 ├── dev-docs/              # 内部开发文档（不入库，不上 GitHub）
 └── Cargo.toml             # 工作区根（共享 target/，产物固定在根 target/）
@@ -160,8 +160,8 @@ cargo build --release -p blitzkrieg-ui-kit
 市场抽象契约见 `core/market_api`：`DataFeed`、`MarketDiscovery`、`OrderExecutor`、
 `MarketPlugin`、`MarketHost` 等 trait；新增交易所 = 写一个扩展 crate 并用 feature 注册，核心不改一行。
 
-Node 侧的 `src/core/`（IPC client + zod schema + 进程 runner）**不参与生产运行**：
-它只被本地验收门禁用来以编程方式驱动一个临时核心做端到端校验。
+验收门禁的驱动端是 `scripts/lib/core-client.mjs`（零依赖 bare-Node IPC 客户端），
+**不参与生产运行**：它只被本地验收门禁用来以编程方式驱动一个临时核心做端到端校验。
 
 ---
 
@@ -174,13 +174,12 @@ Node 侧的 `src/core/`（IPC client + zod schema + 进程 runner）**不参与�
 cargo build --release --workspace --locked
 cargo test --workspace --locked            # 核心 + 各 crate 单测
 
-# Node / TS（验收层）
-npm run typecheck
-npm test
-npm run build
-
 # DryRun 订单链端到端：挂单 → 成交 → 持仓 → 重估（自起临时 core，隔离 socket）
 node scripts/cycle-check.mjs
+
+# 核心行为 / 账目一致性对拍（自起临时 core，dry+live 双核对拍）
+node scripts/core-parity.mjs
+node scripts/account-parity.mjs
 
 # 零依赖密钥扫描（工作树；--history 扫全历史）
 bash scripts/secret-scan.sh
@@ -192,11 +191,11 @@ bash scripts/secret-scan.sh
 cd ui/webapp/webui && npm run check:all
 ```
 
-其他常用校验别名（完整清单见 `package.json` scripts）：
+其他常用门禁脚本（`node scripts/<name>.mjs` 直跑，无 npm 别名）：
 
-- `npm run core:parity` / `npm run account:parity` —— Node 驱动核心做行为与账目一致性比对。
-- `npm run core:observe` —— DryRun 观察。
-- `npm run core:shutdown-check` / `core:parent-monitor-check` / `core:readonly-check` —— 生命周期与只读出口验收。
+- `scripts/core-adopt-check.mjs` —— 多客户端竞争与 adopt 语义。
+- `scripts/dry-observe.mjs` —— DryRun 观察。
+- `scripts/core-shutdown-check.mjs` / `parent-monitor-check.mjs` / `readonly-egress-check.mjs` / `crash-recovery-check.mjs` —— 生命周期、只读出口与崩溃恢复验收。
 
 > **禁止**在未通过上述验证时提交到 `main`；完整门禁矩阵见 `dev-docs/DEVELOPMENT.md`（内部）。
 

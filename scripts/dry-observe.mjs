@@ -26,7 +26,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
 import { mkdtempSync } from 'fs';
-import { BlitzkriegCoreClient } from '../dist/core/blitzkrieg-core-client.js';
+import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -180,7 +180,7 @@ async function main() {
   // half is REST `POST /books` polling (Binance spot stays on WS).
   if (USE_FEED_WS) extraArgs.push('--feed-ws');
 
-  client = new BlitzkriegCoreClient({
+  client = new CoreClient({
     binaryPath: BIN,
     socketPath: sock,
     mode: 'dry', // forced
@@ -193,14 +193,14 @@ async function main() {
     extraArgs,
   });
 
-  client.on('event', onEvent);
+  client.onEvent = onEvent;
   await client.start();
 
   let markets = await discoverRound(roundSec);
   if (markets.length === 0) {
     console.log('no live markets right now for the current round yet; waiting for the next boundary…');
   } else {
-    await client.setMarkets(markets);
+    await rpc.setMarkets(client, markets);
     console.log(`${ts()} | fed round: ${markets.map((m) => `${m.asset}(${((m.expiresAtMs - Date.now()) / 1000) | 0}s)`).join(' ')}`);
   }
 
@@ -234,7 +234,7 @@ async function tick(roundSec, markets) {
     lastSlot = slot;
     const fresh = await discoverRound(roundSec);
     if (fresh.length > 0) {
-      await client.setMarkets(fresh);
+      await rpc.setMarkets(client, fresh);
       markets.length = 0;
       markets.push(...fresh);
       console.log(`${ts()} | new round slot=${slot}: ${fresh.map((m) => m.asset).join(',')} fed`);
@@ -244,9 +244,9 @@ async function tick(roundSec, markets) {
   }
 
   const [round, orderList, pos, stats] = await Promise.all([
-    client.round().catch(() => null),
-    client.listOrders().catch(() => ({ orders: [] })),
-    client.positions().catch(() => ({ positions: [] })),
+    rpc.round(client).catch(() => null),
+    rpc.listOrders(client).catch(() => ({ orders: [] })),
+    rpc.positions(client).catch(() => ({ positions: [] })),
     client.request('engine.stats').catch(() => null),
   ]);
 

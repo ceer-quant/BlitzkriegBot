@@ -6,19 +6,18 @@
  * CI run (per-binary, and the tracked tree). This one covers the third target —
  * the *deliverable* — which cannot be measured from the working tree at all: a
  * developer's checkout legitimately holds tens of GB of gitignored scratch
- * (target/, data/, node_modules/), so "how big is what we hand someone" is only
+ * (target/, data/), so "how big is what we hand someone" is only
  * answerable by actually assembling it.
  *
  * The exclusion list is the real specification:
  *
  *   - release binaries + strategy cdylibs   (the product)
  *   - the built web panel                   (needed to serve the UI)
- *   - configs, docs, and the runtime shell  (needed to run and to operate)
+ *   - configs and docs                        (needed to run and to operate)
  *
  * NOT included, and each for a reason that matters:
  *   - `data/`        real trade history and the market archive — user state, never
  *                    redistributed (and .gitignore'd: it is not ours to ship)
- *   - `node_modules/` reinstallable via `npm ci` from the committed lockfile
  *   - `target/`      intermediate objects; only the linked artifacts ship
  *   - `.git/`, `.mimosa/`, editor/OS noise
  *
@@ -164,11 +163,10 @@ add('webui/dist', join(ROOT, 'ui', 'webapp', 'webui', 'dist'), join(BUNDLE, 'web
 // ── 3. Configs ───────────────────────────────────────────────────────────────
 add('configs', join(ROOT, 'user_layer', 'configs'), join(BUNDLE, 'configs'));
 
-// ── 4. Runtime shell (compiled Node, no node_modules) ────────────────────────
-add('shell/dist', join(ROOT, 'dist'), join(BUNDLE, 'shell', 'dist'));
-for (const f of ['package.json', 'package-lock.json']) {
-  add(`shell/${f}`, join(ROOT, f), join(BUNDLE, 'shell', f));
-}
+// ── 4. Gate driver client (bare Node stdlib, no node_modules) ────────────────
+// The Node verification layer was removed; production is 100% Rust. The client
+// ships so the acceptance gates in this bundle's source tree still run.
+add('scripts/lib', join(ROOT, 'scripts', 'lib'), join(BUNDLE, 'scripts', 'lib'));
 
 // ── 5. Docs needed to operate it ─────────────────────────────────────────────
 // HANDOFF.md is deliberately absent: it is operator-local and untracked, so it
@@ -195,10 +193,9 @@ writeFileSync(
       missing_from_this_bundle: absent.map((a) => ({ path: a.label, expected_at: a.from })),
       not_included: {
         'data/': 'real trade history and market archive — user state, never redistributed',
-        'node_modules/': 'reinstall with `npm ci` from the committed lockfile',
         'target/': 'intermediate build objects; only the linked artifacts are bundled',
       },
-      runtime_requirements: ['Node.js >= 22', 'npm ci before running the shell'],
+      runtime_requirements: ['Node.js >= 22 (gate drivers only; runtime is 100% Rust)'],
     },
     null,
     2,

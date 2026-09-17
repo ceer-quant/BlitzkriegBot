@@ -1,7 +1,7 @@
-# Dependencies
+# Dependencies (root Node layer removed; Vue panel installs its own)
 node_modules/
 
-# Build output
+# Build output (Vue panel bundle lives in ui/webapp/webui/dist, also ignored)
 dist/
 
 # Environment

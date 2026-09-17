@@ -40,7 +40,7 @@ const check = (name, ok, detail = '') => {
 };
 
 if (!existsSync(CORE)) {
-  console.error(`missing core binary: ${CORE} (npm run core:build)`);
+  console.error(`missing core binary: ${CORE} (cargo build --release --workspace --locked)`);
   process.exit(2);
 }
 

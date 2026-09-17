@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 BIN=./target/release/blitzkrieg-core
 PANEL=./target/release/ui_kit_panel
-[ -x "$BIN" ] || { npm run core:build; }
+[ -x "$BIN" ] || cargo build --release --workspace --locked
 [ -x "$PANEL" ] || cargo build --release --manifest-path ui/ui_kit_panel/Cargo.toml
 SOCK="${TMPDIR:-/tmp}/blitzkrieg-tui-demo-$$-$RANDOM.sock"
 rm -f "$SOCK"

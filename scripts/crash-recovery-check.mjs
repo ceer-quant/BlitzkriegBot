@@ -161,7 +161,7 @@ function check(name, ok, detail) {
 
 // --- preflight: refuse to run meaningfully without the real binary -----------
 if (!existsSync(BIN)) {
-  console.error(`refusing to run: ${BIN} not found — build it with \`npm run core:build\``);
+  console.error(`refusing to run: ${BIN} not found — build it with \`cargo build --release --workspace --locked\``);
   process.exit(2);
 }
 // Guard the hard constraint: this gate kills processes, so make certain none of

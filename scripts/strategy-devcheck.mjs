@@ -49,7 +49,7 @@ function shell(cmd, opts = {}) {
 }
 
 if (!existsSync(CORE)) {
-  console.error(`missing core binary: ${CORE} (npm run core:build)`); process.exit(2);
+  console.error(`missing core binary: ${CORE} (cargo build --release --workspace --locked)`); process.exit(2);
 }
 
 const temp = mkdtempSync(join(tmpdir(), 'blitzkrieg-devcheck-'));

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * Rust core P0 parity acceptance — drives the compiled core over UDS via the
- * real Node BlitzkriegCoreClient (the exact path production will use) and asserts the
- * dry-mode order/fill/ledger semantics the Node engine previously owned:
+ * bare-Node client (scripts/lib/core-client.mjs) and asserts the dry-mode
+ * order/fill/ledger semantics:
  *
  *  - taker fills immediately and spends price*size
  *  - maker rests until the book crosses, then fills at its limit
@@ -17,7 +17,7 @@
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { mkdtempSync } from 'fs';
-import { BlitzkriegCoreClient } from '../dist/core/blitzkrieg-core-client.js';
+import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
 
 const SOCK = scratchSocketPath('parity');
@@ -41,9 +41,9 @@ function order(mode, tokenId, price, size, key, asset = 'BTC', extra = {}) {
   };
 }
 
-const c = new BlitzkriegCoreClient({
+const makeCore = (socketPath, extraArgs = []) => new CoreClient({
   binaryPath: BIN,
-  socketPath: SOCK,
+  socketPath,
   mode: 'dry',
   seedBalance: 100,
   maxOrderNotional: 5,
@@ -51,14 +51,15 @@ const c = new BlitzkriegCoreClient({
   autoRestart: false,
   // Order-layer assertions must not be perturbed by the position/exit engine.
   cwd: WORKDIR,
-    noTradeLog: true,  // these harnesses assert via events/positions, never the persisted ledger
-    noOrderLog: true,  // and must not restore a prior harness's resting orders
-    noPositionLog: true,  // nor its open positions (keeps co-located cores independent)
-  extraArgs: ['--no-auto-exits', '--max-positions', '99'],
+  noTradeLog: true,     // these harnesses assert via events/positions, never the persisted ledger
+  noOrderLog: true,     // and must not restore a prior harness's resting orders
+  noPositionLog: true,  // nor its open positions (keeps co-located cores independent)
+  extraArgs,
 });
 
 const fills = [];
-c.on('fill', (e) => fills.push(e));
+const c = makeCore(SOCK, ['--no-auto-exits', '--max-positions', '99']);
+c.onEvent = (e) => { if (e.kind === 'FILL') fills.push(e); };
 
 /**
  * Taker fee in USD for one fill: `fee_per_share = 0.125*(p*(1-p))^2`
@@ -74,57 +75,59 @@ c.on('fill', (e) => fills.push(e));
  */
 const takerFeeUsd = (price, shares) => 0.125 * (price * (1 - price)) ** 2 * shares;
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 try {
   await c.start();
-  await c.ping();
-  const ready = await c.ready();
+  await rpc.ping(c);
+  const ready = await rpc.ready(c);
   check('ready handshake reports dry core', ready.mode === 'dry' && /^\d+\.\d+\.\d+$/.test(ready.version), JSON.stringify(ready));
 
   // 1. Taker fills immediately, spends 0.4*5=2.
-  const taker = await c.placeOrder(order('taker', 'tk1', 0.4, 5, 'k1'));
+  const taker = await rpc.placeOrder(c, order('taker', 'tk1', 0.4, 5, 'k1'));
   check('taker immediate FILLED', taker.status === 'FILLED', JSON.stringify(taker));
 
   // 2. Risk cap: 0.4*100=40 > 5 → structured rejection.
   let coreCode;
-  try { await c.placeOrder(order('taker', 'tkX', 0.4, 100, 'kX')); }
+  try { await rpc.placeOrder(c, order('taker', 'tkX', 0.4, 100, 'kX')); }
   catch (e) { coreCode = e.coreCode; }
   check('risk cap rejects with RISK_REJECTED', coreCode === 'RISK_REJECTED', `got ${coreCode}`);
 
   // 3. Maker rests, fills when ask crosses; reserve held meanwhile.
-  const maker = await c.placeOrder(order('maker', 'mk1', 0.4, 5, 'k2', 'ETH', { direction: 'down' }));
+  const maker = await rpc.placeOrder(c, order('maker', 'mk1', 0.4, 5, 'k2', 'ETH', { direction: 'down' }));
   check('maker starts LIVE', maker.status === 'LIVE', JSON.stringify(maker));
   // Spent so far: the taker fill's 0.4*5 = 2 notional plus its taker fee, and
   // the resting maker's 0.4*5 = 2 reservation.
-  const balResting = await c.balance();
+  const balResting = await rpc.balance(c);
   const expectedAvailable = 100 - 2 - takerFeeUsd(0.4, 5) - 2;
   check('reservation held while resting', balResting.available === expectedAvailable,
     `available ${balResting.available} != ${expectedAvailable}`);
-  await c.bookSnapshot('mk1', [], [[0.45, 100]]);
-  await new Promise((r) => setTimeout(r, 60));
-  check('maker still LIVE above the bid', (await c.listOrders()).orders.find((o) => o.internalKey === 'k2').status === 'LIVE');
-  await c.bookSnapshot('mk1', [], [[0.40, 100]]);
-  await new Promise((r) => setTimeout(r, 80));
-  check('maker FILLED on cross', (await c.listOrders()).orders.find((o) => o.internalKey === 'k2').status === 'FILLED');
+  await rpc.bookSnapshot(c, 'mk1', [], [[0.45, 100]]);
+  await sleep(60);
+  check('maker still LIVE above the bid', (await rpc.listOrders(c)).orders.find((o) => o.internalKey === 'k2').status === 'LIVE');
+  await rpc.bookSnapshot(c, 'mk1', [], [[0.40, 100]]);
+  await sleep(80);
+  check('maker FILLED on cross', (await rpc.listOrders(c)).orders.find((o) => o.internalKey === 'k2').status === 'FILLED');
 
   // 4. Cancel releases reservation.
-  const resting = await c.placeOrder(order('maker', 'cx1', 0.3, 5, 'k3', 'SOL'));
-  await c.cancelOrder(resting.orderId);
-  const afterCancel = await c.listOrders();
+  const resting = await rpc.placeOrder(c, order('maker', 'cx1', 0.3, 5, 'k3', 'SOL'));
+  await rpc.cancelOrder(c, resting.orderId);
+  const afterCancel = await rpc.listOrders(c);
   check('cancelled status', afterCancel.orders.find((o) => o.internalKey === 'k3').status === 'CANCELLED');
 
   // 5. maker_then_taker escalates after timeout.
-  const mtt = await c.placeOrder({ ...order('maker_then_taker', 'mt1', 0.4, 5, 'k4', 'XRP'), makerTimeoutMs: 100 });
+  const mtt = await rpc.placeOrder(c, { ...order('maker_then_taker', 'mt1', 0.4, 5, 'k4', 'XRP'), makerTimeoutMs: 100 });
   check('maker_then_taker rests LIVE', mtt.status === 'LIVE');
-  await c.bookSnapshot('mt1', [], [[0.5, 100]]); // never crosses
-  await new Promise((r) => setTimeout(r, 260));
-  const escalated = (await c.listOrders()).orders.some((o) => o.internalKey.endsWith(':escalated') && o.status === 'FILLED');
+  await rpc.bookSnapshot(c, 'mt1', [], [[0.5, 100]]); // never crosses
+  await sleep(260);
+  const escalated = (await rpc.listOrders(c)).orders.some((o) => o.internalKey.endsWith(':escalated') && o.status === 'FILLED');
   check('maker_then_taker escalated to a filled taker', escalated);
 
   // Ledger final: taker 2 + crossed maker 2 + escalated taker 2 = 6 of notional,
   // and the cancelled order released its reservation. Two of the three fills are
   // taker fills and carry a fee; the crossed one is a *maker* fill and is free.
   // Balance 100 - 6 - 2*takerFeeUsd(0.4, 5) = 93.928.
-  const bal = await c.balance();
+  const bal = await rpc.balance(c);
   const expectedFinal = 100 - 6 - 2 * takerFeeUsd(0.4, 5);
   check('final balance reflects 3 fills, net of taker fees', bal.balance === expectedFinal && bal.reserved === 0,
     `${JSON.stringify(bal)} != ${expectedFinal}`);
@@ -136,16 +139,16 @@ try {
   // 6. Reconcile method is exposed and is a no-op for a snapshot that mentions
   //    no local order (the venue-id-driven repair itself is covered by Rust
   //    unit tests, since dry orders carry no venue id).
-  const rec = await c.reconcile({ openOrderIds: [], trades: [] });
+  const rec = await rpc.reconcile(c, { openOrderIds: [], trades: [] });
   check('reconcile returns a typed report with no actions', rec.filled === 0 && rec.markedFilled === 0 && rec.ghostIds.length === 0, JSON.stringify(rec));
 
   // 7. Kill switch blocks new orders immediately.
-  await c.kill('parity test');
+  await rpc.kill(c, 'parity test');
   let killedCode;
-  try { await c.placeOrder(order('taker', 'tkK', 0.4, 5, 'kK')); }
+  try { await rpc.placeOrder(c, order('taker', 'tkK', 0.4, 5, 'kK')); }
   catch (e) { killedCode = e.coreCode; }
   check('kill switch blocks placement', killedCode === 'KILL_SWITCH_ACTIVE', `got ${killedCode}`);
-  await c.resume();
+  await rpc.resume(c);
 } catch (e) {
   failures++;
   console.log('  FAIL harness error', e?.stack || e);
@@ -155,38 +158,26 @@ try {
 
 // ── Position/exit layer (auto-exits ON) on a separate core instance ──────────
 const POS_SOCK = scratchSocketPath('parity-pos');
-const pc = new BlitzkriegCoreClient({
-  binaryPath: BIN,
-  socketPath: POS_SOCK,
-  mode: 'dry',
-  seedBalance: 100,
-  maxOrderNotional: 5,
-  tickMs: 20,
-  autoRestart: false,
-  cwd: WORKDIR,
-    noTradeLog: true,  // these harnesses assert via events/positions, never the persisted ledger
-    noOrderLog: true,  // and must not restore a prior harness's resting orders
-    noPositionLog: true,  // nor its open positions (keeps co-located cores independent)
-});
+const pc = makeCore(POS_SOCK);
 
 try {
   await pc.start();
   // 8. A BUY fill opens a position that a profitable book closes on tick.
-  const opened = await pc.placeOrder(order('taker', 'pos1', 0.4, 5, 'kp1', 'ADA'));
+  const opened = await rpc.placeOrder(pc, order('taker', 'pos1', 0.4, 5, 'kp1', 'ADA'));
   check('buy fills and opens a position', opened.status === 'FILLED');
-  const posList = await pc.positions();
+  const posList = await rpc.positions(pc);
   check('positions.list shows the open position', posList.positions.length === 1 && posList.positions[0].asset === 'ADA', JSON.stringify(posList.positions));
 
   let positionClosed = null;
-  pc.on('event', (e) => { if (e.kind === 'POSITION_CLOSED') positionClosed = e; });
-  await pc.bookSnapshot('pos1', [[0.99, 100]], [[1.0, 100]]);
-  await new Promise((r) => setTimeout(r, 250));
-  check('profit exit closes the position', (await pc.positions()).positions.length === 0);
+  pc.onEvent = (e) => { if (e.kind === 'POSITION_CLOSED') positionClosed = e; };
+  await rpc.bookSnapshot(pc, 'pos1', [[0.99, 100]], [[1.0, 100]]);
+  await sleep(250);
+  check('profit exit closes the position', (await rpc.positions(pc)).positions.length === 0);
   check('POSITION_CLOSED event carries realised PnL', positionClosed !== null && positionClosed.netPnlUsd > 0, JSON.stringify(positionClosed));
 
   // 9. Manual flatten via positions.exit.
-  await pc.placeOrder(order('taker', 'pos2', 0.4, 5, 'kp2', 'DOT'));
-  const flat = await pc.exitPositions();
+  await rpc.placeOrder(pc, order('taker', 'pos2', 0.4, 5, 'kp2', 'DOT'));
+  const flat = await rpc.exitPositions(pc);
   check('manual flatten closes open positions', flat.closed === 1, JSON.stringify(flat));
 } catch (e) {
   failures++;
@@ -195,22 +186,9 @@ try {
   await pc.stop();
 }
 
-// ── P3: self-driving engine (Node feeds data, Rust decides and trades) ────────
+// ── P3: self-driving engine (the harness feeds data, Rust decides and trades) ─
 const ENG_SOCK = scratchSocketPath('parity-eng');
-const ec = new BlitzkriegCoreClient({
-  binaryPath: BIN,
-  socketPath: ENG_SOCK,
-  mode: 'dry',
-  seedBalance: 1000,
-  maxOrderNotional: 5,
-  tickMs: 20,
-  autoRestart: false,
-  cwd: WORKDIR,
-    noTradeLog: true,  // these harnesses assert via events/positions, never the persisted ledger
-    noOrderLog: true,  // and must not restore a prior harness's resting orders
-    noPositionLog: true,  // nor its open positions (keeps co-located cores independent)
-  extraArgs: ['--engine', '--no-event-archive', '--min-round-age', '0', '--min-time-left', '0', '--trend-confirm-sec', '0', '--trend-window-floor-ms', '0'],
-});
+const ec = makeCore(ENG_SOCK, ['--engine', '--no-event-archive', '--min-round-age', '0', '--min-time-left', '0', '--trend-confirm-sec', '0', '--trend-window-floor-ms', '0']);
 
 try {
   await ec.start();
@@ -223,20 +201,20 @@ try {
     upPrice: 0.6, downPrice: 0.4,
     expiresAtMs: endMs, roundSlot: slot, negRisk: true, question: 'BTC up?',
   };
-  await ec.setMarkets([market]);
+  await rpc.setMarkets(ec, [market]);
 
   // Confirm the UP trend with a >=10s window of mid >= 0.5, then dip to 0.44.
   for (let i = 0; i < 12; i++) {
-    await ec.bookSnapshot('up', [[0.55, 100]], [[0.57, 100]]);
-    await new Promise((r) => setTimeout(r, 12));
+    await rpc.bookSnapshot(ec, 'up', [[0.55, 100]], [[0.57, 100]]);
+    await sleep(12);
   }
-  await ec.spotPrice('BTC', 60000);
-  await ec.bookSnapshot('up', [[0.43, 100]], [[0.45, 100]]);
-  await ec.spotPrice('BTC', 60000);
+  await rpc.spotPrice(ec, 'BTC', 60000);
+  await rpc.bookSnapshot(ec, 'up', [[0.43, 100]], [[0.45, 100]]);
+  await rpc.spotPrice(ec, 'BTC', 60000);
 
   // The engine evaluates on its own tick; wait for it to place + fill.
-  await new Promise((r) => setTimeout(r, 400));
-  const orders = (await ec.listOrders()).orders;
+  await sleep(400);
+  const orders = (await rpc.listOrders(ec)).orders;
   const entry = orders.find((o) => o.strategy === 'spread_arb');
   check('engine placed an entry from fed data', entry !== undefined, JSON.stringify(orders.map((o) => o.status)));
   check('engine entry is trend-confirmed maker_then_taker', entry !== undefined && entry.side === 'buy' && entry.mode === 'maker_then_taker');

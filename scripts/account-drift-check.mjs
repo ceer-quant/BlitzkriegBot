@@ -215,7 +215,7 @@ async function main() {
       await rpc(sock, 'core.ping');
     } catch (e) {
       console.error(`  FAIL no core answering on that socket (${e.message}).`);
-      console.error('  Start one first:  blitzkrieg core --mode dry   (or npm run tui)');
+      console.error('  Start one first:  blitzkrieg core --mode dry   (or the TUI panel: ui_kit_panel)');
       process.exit(2);
     }
   }

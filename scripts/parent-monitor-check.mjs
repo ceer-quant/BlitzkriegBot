@@ -39,8 +39,8 @@ if (existsSync(PROD_SOCK)) {
 // Isolate the spawned core: TMPDIR moves the socket, cwd moves the data files.
 const SOCK = join(WORK, 'core.sock');
 
-// The driver must live INSIDE the project so Node can resolve `tsx` and the
-// project's own module graph; `target/` is gitignored and already scratch space.
+// The driver must live INSIDE the project so Node can resolve the project's
+// own module graph; `target/` is gitignored and already scratch space.
 const DRIVER_DIR = join(process.cwd(), 'target', 'parent-monitor');
 mkdirSync(DRIVER_DIR, { recursive: true });
 
@@ -59,38 +59,59 @@ function corePids() {
 // A driver that starts the core the same way the shell does, then idles so the
 // parent's SIGTERM is what ends it.
 //
-// It loads the COMPILED runner (`dist/`) and runs under plain `node`, matching
-// the `core:parent-monitor-check` npm gate. Two traps this avoids:
+// The driver is a generated `.mjs` file that imports the bare-Node client
+// (scripts/lib/core-client.mjs) and runs under plain `node`. Two traps this
+// avoids:
 //
-//   1. A `.ts` driver run through the `tsx` wrapper leaves the wrapper alive
-//      after SIGTERM, so the driver never dies and the exit guard never fires —
-//      the FAIL/PASS says nothing about the real signal path. Plain node has no
-//      wrapper, so the signal reaches the process that owns the guards.
+//   1. A wrapper process that outlives SIGTERM keeps the driver alive after the
+//      parent is told to die, so the exit guard never fires — the FAIL/PASS
+//      says nothing about the real signal path. Plain node has no wrapper, so
+//      the signal reaches the process that owns the guards.
 //   2. An absolute import path baked into the generated file points at the
 //      developer's checkout and fails with ERR_MODULE_NOT_FOUND elsewhere (CI
 //      caught exactly that). The specifier is therefore relative.
-const DIST_RUNNER = join(process.cwd(), 'dist', 'core', 'blitzkrieg-core-runner.js');
-if (!existsSync(DIST_RUNNER)) {
-  console.error(`refusing to run: ${DIST_RUNNER} not found.`);
-  console.error('  build the shell first: npm run build');
+const CLIENT = join(process.cwd(), 'scripts', 'lib', 'core-client.mjs');
+if (!existsSync(CLIENT)) {
+  console.error(`refusing to run: ${CLIENT} not found.`);
   process.exit(2);
 }
 
 const DRIVER = join(DRIVER_DIR, 'driver.mjs');
-const REL = relative(DRIVER_DIR, DIST_RUNNER).replace(/\\/g, '/');
+const REL = relative(DRIVER_DIR, CLIENT).replace(/\\/g, '/');
 const IMPORT_SPEC = REL.startsWith('.') ? REL : './' + REL;
 writeFileSync(
   DRIVER,
   `
-import { getBlitzkriegCoreRunner } from ${JSON.stringify(IMPORT_SPEC)};
+import { CoreClient } from ${JSON.stringify(IMPORT_SPEC)};
+import { join } from 'node:path';
 
 async function main() {
-  const runner = getBlitzkriegCoreRunner();
-  await runner.start({
-    assets: ['BTC'], roundSec: 900, dryRun: true, sizeUsd: 5,
-    minShares: 1, maxShares: 1, maxPositions: 1, maxDailyLossUsd: 10,
-    minRoundAgeSec: 0, minTimeLeftSec: 0, eventArchive: null,
+  const client = new CoreClient({
+    mode: 'dry',
+    seedBalance: 1000,
+    maxOrderNotional: 6,
+    tickMs: 50,
+    autoRestart: true,
+    // The old shell's exit guard: a core this process spawned must not
+    // outlive it. SIGKILL because handlers cannot await.
+    ...(process.env.BZK_CORE_ISOLATION
+      ? {
+          cwd: process.env.BZK_CORE_ISOLATION,
+          socketPath: join(process.env.BZK_CORE_ISOLATION, 'core.sock'),
+          noOrderLog: true,
+          noPositionLog: true,
+        }
+      : {}),
+    extraArgs: [
+      '--engine', '--no-event-archive',
+      '--assets', 'BTC', '--round-sec', '900',
+      '--min-round-age', '0', '--min-time-left', '0',
+      '--max-positions', '1', '--min-shares', '1', '--max-shares', '1',
+    ],
   });
+  const guard = () => client.killNow();
+  for (const sig of ['SIGINT', 'SIGTERM', 'exit']) process.on(sig, guard);
+  await client.start();
   console.log('DRIVER_READY');
   setInterval(() => {}, 1000);
 }
@@ -99,8 +120,8 @@ main().catch((e) => { console.error('DRIVER_FAILED', e); process.exit(1); });
 `,
 );
 
-// Run under plain `node`, matching production. No tsx wrapper: it would outlive
-// SIGTERM, keep the driver alive, and make the result meaningless.
+// Run under plain `node`, matching production. No wrapper process: one that
+// outlives SIGTERM would keep the driver alive and make the result meaningless.
 const child = spawn(process.execPath, [DRIVER], {
   cwd: process.cwd(),
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -128,8 +149,8 @@ if (!ready) {
 const before = corePids();
 
 // Identify OUR core by its isolated socket path — an exact, unique marker for
-// this run. Ancestry is NOT usable here: `tsx` runs the driver in a subprocess,
-// so the core's ppid is the tsx child rather than the wrapper we spawned. The
+// this run. Ancestry is NOT usable as a general contract: a wrapper process
+// would make the core's ppid a child rather than the driver we spawned. The
 // socket path is both unique and impossible to collide with a production core
 // (which lives under TMPDIR, never under our scratch dir).
 const socketMarker = join(WORK, 'core.sock');

@@ -1,18 +1,21 @@
 name: CI
 
 # Runs on every PR and on pushes to the long-lived branches.
-# Five independent gates, matching the repository governance plan:
+# Four independent gates, matching the repository governance plan:
 #   rust-check     — the Rust trading core builds, tests, lints (advisory) and
 #                    holds the release binary / tracked-tree size budget (E10-d).
-#   node-check     — the Node/TS shell typechecks, tests and builds.
 #   panel-check    — the browser panel: Vue checks, then the `ui:webapp` gate
-#                    against a live gateway over a real socket.
+#                    against a live gateway over a real socket, plus the
+#                    lifecycle / read-only / crash-recovery acceptance gates.
 #   release-bundle — assembles the actual deliverable and holds it under 500 MB
-#                    (E10-e). The deliverable is the *union* of what the three jobs
+#                    (E10-e). The deliverable is the *union* of what the two jobs
 #                    above build piecemeal, so only a job building the union can
 #                    measure it.
 #   secret-scan    — no credential ever enters the tree (dependency-free).
-# A final `notify` job reports the aggregate result to WeChat when configured.
+# The Node/TS verification layer was removed (production is 100% Rust); the
+# gates that used to drive a compiled TS client now use scripts/lib/core-client.mjs
+# (bare Node stdlib) and run inside panel-check. A final `notify` job reports the
+# aggregate result to WeChat when configured.
 on:
   push:
     branches: [main, develop]
@@ -72,43 +75,6 @@ jobs:
         continue-on-error: true
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  node-check:
-    name: node-check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install
-        run: npm ci
-      - name: Typecheck
-        run: npm run typecheck
-      - name: Test
-        run: npm test
-      - name: Build
-        run: npm run build
-      # ADVISORY (non-blocking): the legacy Node shell carries 86 pre-existing
-      # production advisories (2 critical / 49 high), all transitive in exchange
-      # & messaging SDK chains (protobufjs via @grpc/grpc-js→@drift-labs/sdk,
-      # @whiskeysockets/baileys, ethers/viem/binance/bybit-api ws). The only
-      # fixes are `npm audit fix --force` BREAKING major bumps to trading SDKs,
-      # which is out of scope for a governance change ("禁止顺手优化业务逻辑").
-      # Kept running so the debt is reported on every CI run; remediation is
-      # tracked in docs/DECISIONS_PENDING.md D-9.
-      - name: Dependency audit (production, high+) — advisory
-        continue-on-error: true
-        run: npm audit --audit-level=high --omit=dev
-
-  # The browser panel. This is the job that makes the E8-3 acceptance line
-  #   「Vue 构建产物存在 + 快照渲染非空 + token 鉴权双向」
-  # a merge gate rather than a paragraph in a README. It is blocking: a panel that
-  # cannot authenticate, cannot render, or ships a stale bundle is not shippable.
-  #
-  # Everything here is offline. The gate spawns a dry core (local seed balance,
-  # no venue credentials) and a loopback gateway, so it needs no network and
-  # never touches a real exchange.
   panel-check:
     name: panel-check
     runs-on: ubuntu-latest
@@ -142,7 +108,7 @@ jobs:
       # served bundle identical to dist/. `--engine` is required for the core to
       # answer `engine.stats` at all.
       - name: ui:webapp gate
-        run: npm run ui:webapp
+        run: node scripts/webapp-check.mjs
       # E12: shutdown must mean "the core is gone". Both gates need the release
       # binary built above. The first asserts resting orders are settled and the
       # process is reaped before stop() resolves; the second asserts a core
@@ -153,24 +119,20 @@ jobs:
       # scopes its cleanup to the core IT spawned (an unscoped kill once destroyed
       # a live core; see MIGRATION_LOG §51-a).
       #
-      # The parent-monitor gate drives the COMPILED shell under plain `node`,
-      # matching `npm start` (`node dist/index.js`). It deliberately refuses to
-      # run without `dist/` rather than falling back to `tsx`: the tsx wrapper
-      # outlives SIGTERM, so the driver would never die and the result would say
-      # nothing about the real signal path (MIGRATION_LOG §51-e). Hence the build.
-      - name: Build the shell
-        run: npm ci && npm run build
+      # The parent-monitor gate drives a generated .mjs under plain `node` with
+      # the bare-Node client (scripts/lib/core-client.mjs): the driver must own
+      # the core and die with it, so no wrapper may outlive SIGTERM.
       - name: Core shutdown cleanliness gate
-        run: npm run core:shutdown-check
+        run: node scripts/shutdown-cleanliness-check.mjs
       - name: Core parent-monitor gate
-        run: npm run core:parent-monitor-check
+        run: node scripts/parent-monitor-check.mjs
       # E12-e: `--readonly` must be structural, not conventional. The gate boots a
       # core with `--mode live` AND live-shaped credentials in its environment, so
       # a per-RPC guard that forgot one entry point would trade; it then asserts
       # over IPC that the mode stayed read-only, the venue executor was never
       # started, nothing reached a venue, and orders still settle locally.
       - name: Core read-only egress gate
-        run: npm run core:readonly-check
+        run: node scripts/readonly-egress-check.mjs
       # E12-c: "内核崩溃后 UI 能恢复/报告". The client has carried auto-restart and
       # adopt logic for a long time with nothing ever killing a core to test it, so
       # this gate SIGKILLs a live core and requires that (a) the in-flight request
@@ -180,7 +142,14 @@ jobs:
       # exit. SIGKILL is deliberate: SIGTERM would let the core exit gracefully and
       # then "failed to restart" would be indistinguishable from a planned stop.
       - name: Core crash-recovery gate
-        run: npm run core:crash-recovery-check
+        run: node scripts/crash-recovery-check.mjs
+      # Order/ledger semantics over the real wire (the compiled TS client this
+      # used to depend on was removed with the Node layer; the bare-Node client
+      # speaks the same newline-framed JSON-RPC 2.0).
+      - name: Core order/ledger parity gate
+        run: node scripts/core-parity.mjs
+      - name: Account parity gate (dry/live ledgers bit-identical)
+        run: node scripts/account-parity.mjs
 
   # E10-e: the third size target — the *deliverable* ≤ 500 MB — is the one that
   # cannot be read off the working tree. A developer checkout legitimately holds
@@ -205,16 +174,12 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-      - name: Install
-        run: npm ci
       - name: Build the core and the UI binaries (release)
         run: cargo build --release --workspace --locked
       - name: Build the strategy cdylibs (standalone workspaces)
         run: |
           (cd user_layer/strategies && cargo build --release --locked)
           (cd user_layer/parity_strategy && cargo build --release --locked)
-      - name: Build the shell
-        run: npm run build
       - name: Build the panel bundle
         run: |
           cd ui/webapp/webui
@@ -245,7 +210,7 @@ jobs:
 
   notify:
     name: notify (wechat)
-    needs: [rust-check, node-check, panel-check, release-bundle, secret-scan]
+    needs: [rust-check, panel-check, release-bundle, secret-scan]
     if: always()
     runs-on: ubuntu-latest
     # Secret lifted to job env so the step `if` can test it (secret-context
@@ -257,9 +222,9 @@ jobs:
         # Opt-in: silently skips unless the WECHAT_WEBHOOK secret is configured.
         if: ${{ env.WECHAT_WEBHOOK != '' }}
         env:
-          RESULT: ${{ needs.rust-check.result }}/${{ needs.node-check.result }}/${{ needs.panel-check.result }}/${{ needs.secret-scan.result }}
+          RESULT: ${{ needs.rust-check.result }}/${{ needs.panel-check.result }}/${{ needs.secret-scan.result }}
         run: |
           icon="✅"; [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] && icon="❌"
           curl -sS -X POST "$WECHAT_WEBHOOK" \
             -H 'Content-Type: application/json' \
-            -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$icon CI ${{ github.repository }}\\n> 分支: ${{ github.ref_name }}\\n> 触发: ${{ github.event_name }} by ${{ github.actor }}\\n> 结果(rust/node/panel/secret): $RESULT\\n> [查看运行](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})\"}}"
+            -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$icon CI ${{ github.repository }}\\n> 分支: ${{ github.ref_name }}\\n> 触发: ${{ github.event_name }} by ${{ github.actor }}\\n> 结果(rust/panel/secret): $RESULT\\n> [查看运行](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})\"}}"

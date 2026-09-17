@@ -38,7 +38,7 @@
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { mkdtempSync, existsSync } from 'fs';
-import { BlitzkriegCoreClient } from '../dist/core/blitzkrieg-core-client.js';
+import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
@@ -48,7 +48,7 @@ const EXIT_PX = 0.95;
 const SIZE = 10;
 
 if (!existsSync(BIN)) {
-  console.error(`missing binary: ${BIN} (npm run core:build)`);
+  console.error(`missing binary: ${BIN} (cargo build --release --workspace)`);
   process.exit(2);
 }
 
@@ -72,7 +72,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** A core in an isolated scratch dir, with nothing persisted or restored. */
 function makeCore(label) {
-  return new BlitzkriegCoreClient({
+  return new CoreClient({
     binaryPath: BIN,
     socketPath: scratchSocketPath(label),
     mode: 'dry',
@@ -105,8 +105,8 @@ async function until(fn, ms = 2000) {
 
 /** Everything we compare, read from one core over the wire. */
 async function snapshot(c) {
-  const bal = await c.balance();
-  const trades = (await c.tradesHistory(50)).trades.map((t) => ({
+  const bal = await rpc.balance(c);
+  const trades = (await rpc.tradesHistory(c, 50)).trades.map((t) => ({
     asset: t.asset,
     netPnlUsd: t.netPnlUsd,
     feesUsd: t.feesUsd,
@@ -148,26 +148,26 @@ async function dryRoundTrip(c, asset, token, entryRole, exitRole) {
   const exitPrice = EXIT_PX;
 
   if (entryRole === 'taker') {
-    await c.placeOrder(order('buy', 'taker', token, entryPrice, SIZE, `e-${token}`, asset));
+    await rpc.placeOrder(c, order('buy', 'taker', token, entryPrice, SIZE, `e-${token}`, asset));
   } else {
     // Rest far from the book, then let the book cross it.
-    await c.placeOrder(order('buy', 'maker', token, entryPrice, SIZE, `e-${token}`, asset));
-    await c.bookSnapshot(token, [[entryPrice - 0.05, 500]], [[entryPrice + 0.05, 500]]);
+    await rpc.placeOrder(c, order('buy', 'maker', token, entryPrice, SIZE, `e-${token}`, asset));
+    await rpc.bookSnapshot(c, token, [[entryPrice - 0.05, 500]], [[entryPrice + 0.05, 500]]);
     await sleep(40);
-    await c.bookSnapshot(token, [], [[entryPrice, 500]]);
-    const ok = await until(async () => (await c.positions()).positions.length > 0);
+    await rpc.bookSnapshot(c, token, [], [[entryPrice, 500]]);
+    const ok = await until(async () => (await rpc.positions(c)).positions.length > 0);
     if (!ok) throw new Error(`dry ${asset}: maker entry never filled`);
   }
 
   if (exitRole === 'taker') {
-    await c.placeOrder(order('sell', 'taker', token, exitPrice, SIZE, `x-${token}`, asset));
+    await rpc.placeOrder(c, order('sell', 'taker', token, exitPrice, SIZE, `x-${token}`, asset));
   } else {
-    await c.placeOrder(order('sell', 'maker', token, exitPrice, SIZE, `x-${token}`, asset));
-    await c.bookSnapshot(token, [[exitPrice - 0.05, 500]], [[exitPrice + 0.05, 500]]);
+    await rpc.placeOrder(c, order('sell', 'maker', token, exitPrice, SIZE, `x-${token}`, asset));
+    await rpc.bookSnapshot(c, token, [[exitPrice - 0.05, 500]], [[exitPrice + 0.05, 500]]);
     await sleep(40);
-    await c.bookSnapshot(token, [[exitPrice, 500]], []);
+    await rpc.bookSnapshot(c, token, [[exitPrice, 500]], []);
   }
-  await until(async () => (await c.positions()).positions.length === 0);
+  await until(async () => (await rpc.positions(c)).positions.length === 0);
 }
 
 /**
@@ -181,8 +181,8 @@ async function liveRoundTrip(c, asset, token, entryRole, exitRole) {
 
   // The order is submitted with a policy that may well CONTRADICT the venue's
   // report — deliberately, so this also proves the report outranks the policy.
-  const entry = await c.placeOrder(order('buy', 'maker', token, entryPrice, SIZE, `e-${token}`, asset));
-  await c.reconcile({
+  const entry = await rpc.placeOrder(c, order('buy', 'maker', token, entryPrice, SIZE, `e-${token}`, asset));
+  await rpc.reconcile(c, {
     openOrderIds: [entry.orderId],
     trades: [{
       venueOrderId: entry.orderId,
@@ -195,11 +195,11 @@ async function liveRoundTrip(c, asset, token, entryRole, exitRole) {
       maker: entryRole === 'maker',
     }],
   });
-  const opened = await until(async () => (await c.positions()).positions.length > 0);
+  const opened = await until(async () => (await rpc.positions(c)).positions.length > 0);
   if (!opened) throw new Error(`live ${asset}: entry gap fill never applied`);
 
-  const exit = await c.placeOrder(order('sell', 'maker', token, exitPrice, SIZE, `x-${token}`, asset));
-  await c.reconcile({
+  const exit = await rpc.placeOrder(c, order('sell', 'maker', token, exitPrice, SIZE, `x-${token}`, asset));
+  await rpc.reconcile(c, {
     openOrderIds: [exit.orderId],
     trades: [{
       venueOrderId: exit.orderId,
@@ -212,7 +212,7 @@ async function liveRoundTrip(c, asset, token, entryRole, exitRole) {
       maker: exitRole === 'maker',
     }],
   });
-  await until(async () => (await c.positions()).positions.length === 0);
+  await until(async () => (await rpc.positions(c)).positions.length === 0);
 }
 
 // ── The matrix: every entry-role x exit-role combination ─────────────────────
@@ -321,11 +321,11 @@ try {
     try {
       await c.start();
       const token = 'tok-mtt';
-      const entry = await c.placeOrder({
+      const entry = await rpc.placeOrder(c, {
         ...order('buy', 'maker_then_taker', token, ENTRY_PX, SIZE, 'e-mtt', 'LINK'),
         makerTimeoutMs: 60_000,
       });
-      await c.reconcile({
+      await rpc.reconcile(c, {
         openOrderIds: [entry.orderId],
         trades: [{
           venueOrderId: entry.orderId, tradeId: 'v-mtt-e', tokenId: token,
@@ -333,11 +333,12 @@ try {
           maker: true, // it rested at the bid and was hit
         }],
       });
-      await until(async () => (await c.positions()).positions.length > 0);
-      const exit = await c.placeOrder(
+      await until(async () => (await rpc.positions(c)).positions.length > 0);
+      const exit = await rpc.placeOrder(
+        c,
         order('sell', 'maker', token, EXIT_PX, SIZE, 'x-mtt', 'LINK'),
       );
-      await c.reconcile({
+      await rpc.reconcile(c, {
         openOrderIds: [exit.orderId],
         trades: [{
           venueOrderId: exit.orderId, tradeId: 'v-mtt-x', tokenId: token,
@@ -345,7 +346,7 @@ try {
           maker: true,
         }],
       });
-      await until(async () => (await c.positions()).positions.length === 0);
+      await until(async () => (await rpc.positions(c)).positions.length === 0);
 
       const s = await snapshot(c);
       const gross = (EXIT_PX - ENTRY_PX) * SIZE;

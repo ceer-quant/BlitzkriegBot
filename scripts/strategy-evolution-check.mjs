@@ -41,7 +41,7 @@ const DYLIB = join(
 const ROUND_SEC = 3600;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-if (!existsSync(BIN)) { console.error(`missing binary: ${BIN} (npm run core:build)`); process.exit(2); }
+if (!existsSync(BIN)) { console.error(`missing binary: ${BIN} (cargo build --release --workspace --locked)`); process.exit(2); }
 if (!existsSync(DYLIB)) { console.error(`missing strategy library: ${DYLIB} ((cd user_layer/strategies && cargo build --release))`); process.exit(2); }
 
 async function run() {
