@@ -12,7 +12,7 @@
 
 任务书 Step 4 要求「删除 BlitzkriegBot 目录」。**核查结果**：
 
-- `/Volumes/Hard Disk/BlitzkriegBot/BlitzkriegBot/` **不存在** —— 更早的迁移（commit `fc6e93c`）已把项目根上移、扁平化，`BlitzkriegBot` 这一层已消失。
+- `REPO_ROOT/BlitzkriegBot/` **不存在** —— 更早的迁移（commit `fc6e93c`）已把项目根上移、扁平化，`BlitzkriegBot` 这一层已消失。
 - 今天仍存在的「Node 侧」是 **`src/`（584 个 .ts 文件）+ `dist/`（编译产物）**，即真正在跑的外壳。
 - 当前生产进程正是 `node dist/index.js`（PID 72966，:51888）。
 

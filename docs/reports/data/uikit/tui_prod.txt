@@ -1,4 +1,4 @@
-ui_kit TUI → socket /var/folders/_9/gsqw2xvd78ld2prrd6pngb980000gn/T/clodds-core-fancer.sock
+ui_kit TUI → socket $TMPDIR/clodds-core-USER.sock
 [2J[H[1m[36mBlitzkrieg UI Kit — TUI[0m
 [2mmode=dry · connected=true · source=UDS JSON-RPC (read-only)[0m
 

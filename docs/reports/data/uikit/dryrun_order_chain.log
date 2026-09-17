@@ -1,7 +1,7 @@
 blitzkrieg-core: self-driving engine enabled
-blitzkrieg-core listening on /var/folders/_9/gsqw2xvd78ld2prrd6pngb980000gn/T/blitzkrieg-cycle-97877.sock mode=Dry version=0.1.0
-binary: /Volumes/Hard Disk/BlitzkriegBot/target/release/blitzkrieg-core
-core ready (--socket /var/folders/_9/gsqw2xvd78ld2prrd6pngb980000gn/T/blitzkrieg-cycle-97877.sock --mode dry --tick-ms 50 --seed-balance 1000 --max-order-notional 6 --engine --no-discovery --no-trade-log --round-sec 3600 --min-round-age 0 --min-time-left 0 --max-positions 2 --trend-confirm-sec 3 --trend-window-floor-ms 1000)
+blitzkrieg-core listening on $TMPDIR/blitzkrieg-cycle-97877.sock mode=Dry version=0.1.0
+binary: REPO_ROOT/target/release/blitzkrieg-core
+core ready (--socket $TMPDIR/blitzkrieg-cycle-97877.sock --mode dry --tick-ms 50 --seed-balance 1000 --max-order-notional 6 --engine --no-discovery --no-trade-log --round-sec 3600 --min-round-age 0 --min-time-left 0 --max-positions 2 --trend-confirm-sec 3 --trend-window-floor-ms 1000)
 
 [1] round fed  slot=497042 expires in 3322s
 [2] trend confirm  books=14 confirmed=1 -> CONFIRMED

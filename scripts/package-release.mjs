@@ -171,7 +171,11 @@ for (const f of ['package.json', 'package-lock.json']) {
 }
 
 // ── 5. Docs needed to operate it ─────────────────────────────────────────────
-for (const f of ['README.md', 'HANDOFF.md']) add(f, join(ROOT, f), join(BUNDLE, f));
+// HANDOFF.md is deliberately absent: it is operator-local and untracked, so it
+// may not exist in a clean checkout. `add()` records missing files rather than
+// throwing, so listing it here would silently ship a bundle without the entry
+// point it promises.
+for (const f of ['README.md']) add(f, join(ROOT, f), join(BUNDLE, f));
 add('docs', join(ROOT, 'docs'), join(BUNDLE, 'docs'));
 
 // ── Manifest ─────────────────────────────────────────────────────────────────

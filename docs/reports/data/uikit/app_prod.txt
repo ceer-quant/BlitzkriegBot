@@ -1,4 +1,4 @@
-ui_kit app (headless view model) → socket /var/folders/_9/gsqw2xvd78ld2prrd6pngb980000gn/T/clodds-core-fancer.sock
+ui_kit app (headless view model) → socket $TMPDIR/clodds-core-USER.sock
 [2J[H┌─ Blitzkrieg UI Kit — App (headless) ─────────────
 │ DRY · connected · round #1988168 626s left
 │ balance $1004.68 · open 0 · trades 69 · WR 68% · net -1.98

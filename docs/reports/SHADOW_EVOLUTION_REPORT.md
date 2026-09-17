@@ -170,7 +170,7 @@ safety_lock_probe: REJECTED by Lock 1: gradient too large for trend_max_entry_pr
 ## 5. 复现方式
 
 ```bash
-cd "/Volumes/Hard Disk/BlitzkriegBot"
+cd "REPO_ROOT"
 cargo run --release -p blitzkrieg-core --example shadow_evolution_ab -- docs/reports/data
 # 调试（可选）：AB_DEBUG=1 / AB_PROBE=1 打印变体参数与逐点样本数
 ```
