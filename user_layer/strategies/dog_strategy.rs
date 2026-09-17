@@ -1,327 +1,53 @@
-//! Example external strategy — "疯狗策略" (dog strategy), C ABI **v2**.
-//!
-//! A real shared-library strategy implementing the full-featured
-//! `blitzkrieg_strategy_api` ABI: it receives every book with the full depth
-//! ladder and derived metrics, round/market context, config and hot parameters;
-//! it returns entries, exit intents, confirmation and diagnostics. It cannot
-//! touch credentials, the venue, the order manager or the network — it links
-//! none of them, and every intent still passes the kernel's gates.
-//!
-//! Rule (toy, deterministic):
-//!  - on a FRESH deep book (bid depth >= `min_depth`) with mid <= `buy_below`,
-//!    buy at the best ask and mark the token in-position;
-//!  - while in position, request an EXIT once the best bid recovers to
-//!    `take_profit` (a strategy close intent — the kernel still prices/submits);
-//!  - `buy_below` is hot-swappable: the kernel pushes THIS strategy's own knob
-//!    bag (`{"trendMaxEntryPrice":"0.43"}`) into `on_hot_params`, and the same
-//!    knob is what `bk_strategy_evolvable_knobs` declares evolvable (E2-c), so a
-//!    shadow twin can be built from a counterfactual ceiling and compared
-//!    against this strategy's own logic rather than a kernel-side copy of it.
-//!
-//! Build: `(cd user_layer/strategies && cargo build --release)` →
-//! `target/release/libdog_strategy.{dylib,so,dll}`.
+//! KI-7 / E9 (#59): the "dog" dip strategy rewritten on the [`SafeStrategy`]
+//! template — zero `unsafe` in this file; `export_strategy!` generates the
+//! entire C ABI v2 surface (vtable, `#[no_mangle]` exports, string plumbing).
+//! Rule: on a deep book (bid depth ≥ 50), buy when mid ≤ `trendMaxEntryPrice`
+//! (default 0.43, evolvable 0.05..0.90) at the best ask («dog_dip»); while in
+//! position, exit once the best bid recovers to 0.60 («dog_tp»). Entries carry
+//! no size and exits no price — the kernel sizes, prices and risk-gates
+//! everything; the only entry gate waived is `timing` (audited, not a bypass).
 
-use blitzkrieg_strategy_api::{
-    bk_string_out, BkBookView, BkHandle, BkLevel, BkRound, BkRoundView, BkStrategyVtable,
-    BK_ABI_VERSION, BK_MIN_ABI_VERSION,
-};
-use core::ffi::c_char;
-use std::ffi::CStr;
+use blitzkrieg_strategy_api::{export_strategy, BookUpdate, Entry, Exit, Intents, Knob, ParamBag, RoundContext, RoundInfo, SafeStrategy};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Clone)]
-struct BookState {
-    mid: f64,
-    best_bid: f64,
-    best_ask: f64,
-    bid_depth: f64,
-    bid_levels: usize,
-    ask_levels: usize,
-}
+struct Dog { buy_below: f64, books: HashMap<String, BookUpdate>, holding: HashSet<String> }
+impl Default for Dog { fn default() -> Self { Self { buy_below: 0.43, books: Default::default(), holding: Default::default() } } }
 
-struct DogStrategy {
-    /// Dip entry ceiling (mid <= this to buy).
-    buy_below: f64,
-    /// Exit when best bid recovers to this.
-    take_profit: f64,
-    /// Minimum total bid depth required to trust the dip.
-    min_depth: f64,
-    books: HashMap<String, BookState>,
-    /// Tokens currently in-position (entry fired, exit pending).
-    holding: HashSet<String>,
-    /// Pending exit intents drained by the kernel each evaluate.
-    exits: Vec<(String, String)>,
-}
-
-impl DogStrategy {
-    fn new() -> Self {
-        Self {
-            buy_below: 0.43,
-            take_profit: 0.60,
-            min_depth: 50.0,
-            books: HashMap::new(),
-            holding: HashSet::new(),
-            exits: Vec::new(),
-        }
+impl SafeStrategy for Dog {
+    fn name(&self) -> &str { "dog_strategy" }
+    fn version(&self) -> &str { "0.2.0" }
+    fn on_book(&mut self, u: &BookUpdate) {
+        if u.mid.is_some() && u.best_bid.is_some() && u.best_ask.is_some() && u.bid_depth.is_some() { self.books.insert(u.symbol.clone(), u.clone()); }
     }
-}
-
-unsafe fn cstr(p: *const c_char) -> Option<String> {
-    if p.is_null() {
-        return None;
-    }
-    unsafe { CStr::from_ptr(p) }.to_str().ok().map(|s| s.to_string())
-}
-unsafe fn num(p: *const c_char) -> Option<f64> {
-    unsafe { cstr(p) }.and_then(|s| s.parse().ok())
-}
-unsafe fn count_levels(base: *const BkLevel, n: usize) -> usize {
-    if base.is_null() || n == 0 {
-        return 0;
-    }
-    unsafe { std::slice::from_raw_parts(base, n) }.len()
-}
-
-// ── vtable functions ────────────────────────────────────────────────────────
-
-unsafe extern "C" fn create() -> BkHandle {
-    Box::into_raw(Box::new(DogStrategy::new())) as BkHandle
-}
-
-unsafe extern "C" fn destroy(handle: BkHandle) {
-    if !handle.is_null() {
-        drop(unsafe { Box::from_raw(handle as *mut DogStrategy) });
-    }
-}
-
-unsafe extern "C" fn on_book(handle: BkHandle, view: *const BkBookView) {
-    if handle.is_null() || view.is_null() {
-        return;
-    }
-    let s = unsafe { &mut *(handle as *mut DogStrategy) };
-    let v = unsafe { &*view };
-    let (Some(symbol), Some(mid), Some(best_bid), Some(best_ask), Some(bid_depth)) = (
-        unsafe { cstr(v.symbol) },
-        unsafe { num(v.mid) },
-        unsafe { num(v.best_bid) },
-        unsafe { num(v.best_ask) },
-        unsafe { num(v.bid_depth) },
-    ) else {
-        return;
-    };
-    s.books.insert(
-        symbol,
-        BookState {
-            mid,
-            best_bid,
-            best_ask,
-            bid_depth,
-            bid_levels: unsafe { count_levels(v.bids, v.bid_count) },
-            ask_levels: unsafe { count_levels(v.asks, v.ask_count) },
-        },
-    );
-}
-
-unsafe extern "C" fn on_round(_handle: BkHandle, _round: *const BkRound) {
-    let s = unsafe { &mut *(_handle as *mut DogStrategy) };
-    // A new round clears transient in-position state (positions are still owned
-    // by the kernel; this is just the strategy's local bookkeeping).
-    s.holding.clear();
-    s.exits.clear();
-}
-
-unsafe extern "C" fn evaluate(handle: BkHandle, view: *const BkRoundView) -> *mut c_char {
-    if handle.is_null() || view.is_null() {
-        return core::ptr::null_mut();
-    }
-    let s = unsafe { &mut *(handle as *mut DogStrategy) };
-    let rv = unsafe { &*view };
-
-    let mut entries = Vec::new();
-    if !rv.markets.is_null() && rv.market_count > 0 {
-        let markets = unsafe { std::slice::from_raw_parts(rv.markets, rv.market_count) };
-        for m in markets {
-            let tokens = [unsafe { cstr(m.up_token) }, unsafe { cstr(m.down_token) }];
-            for token in tokens.into_iter().flatten() {
-                let Some(b) = s.books.get(&token) else { continue };
-                if s.holding.contains(&token) {
-                    // Manage the open: exit on recovery.
-                    if b.best_bid >= s.take_profit {
-                        s.exits.push((token.clone(), "dog_tp".into()));
-                        s.holding.remove(&token);
-                    }
-                } else if b.mid <= s.buy_below
-                    && b.bid_depth >= s.min_depth
-                    && b.bid_levels >= 1
-                    && b.ask_levels >= 1
-                {
-                    entries.push(serde_json::json!({
-                        "token": token,
-                        "price": format!("{}", b.best_ask),
-                        "reason": "dog_dip",
-                    }));
-                    s.holding.insert(token);
-                }
+    fn on_round(&mut self, _r: RoundInfo) { self.holding.clear(); }
+    fn evaluate(&mut self, ctx: &RoundContext) -> Intents {
+        let mut it = Intents::none();
+        for m in &ctx.markets { for t in [&m.up_token, &m.down_token] {
+            let Some(b) = self.books.get(t) else { continue };
+            if self.holding.contains(t) {
+                if b.best_bid.is_some_and(|v| v >= 0.60) { it.exits.push(Exit { token: t.clone(), reason: "dog_tp".into() }); self.holding.remove(t); }
+            } else if b.mid.is_some_and(|v| v <= self.buy_below) && b.bid_depth.is_some_and(|v| v >= 50.0) && b.bid_levels >= 1 && b.ask_levels >= 1 {
+                it.entries.push(Entry { token: t.clone(), price: b.best_ask.unwrap(), reason: "dog_dip".into() });
+                self.holding.insert(t.clone());
             }
-        }
+        } }
+        it
     }
-
-    let exits: Vec<_> = s
-        .exits
-        .drain(..)
-        .map(|(token, reason)| serde_json::json!({ "token": token, "reason": reason }))
-        .collect();
-
-    bk_string_out(
-        serde_json::json!({ "entries": entries, "exits": exits, "breaks": [] }).to_string(),
-    )
-}
-
-unsafe extern "C" fn confirmed_tokens(handle: BkHandle) -> *mut c_char {
-    if handle.is_null() {
-        return bk_string_out("[]".into());
+    fn confirmed_tokens(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.books.iter().filter(|(_, b)| b.bid_levels >= 2 && b.ask_levels >= 2).map(|(t, _)| t.clone()).collect();
+        v.sort(); v
     }
-    let s = unsafe { &*(handle as *const DogStrategy) };
-    let mut v: Vec<String> = s
-        .books
-        .iter()
-        .filter(|(_, b)| b.bid_levels >= 2 && b.ask_levels >= 2)
-        .map(|(t, _)| t.clone())
-        .collect();
-    v.sort();
-    bk_string_out(serde_json::to_string(&v).unwrap_or_else(|_| "[]".into()))
-}
-
-unsafe extern "C" fn diagnostics(handle: BkHandle) -> *mut c_char {
-    if handle.is_null() {
-        return bk_string_out("[]".into());
+    fn diagnostics(&self) -> Vec<serde_json::Value> {
+        let mut ks: Vec<&String> = self.books.keys().collect(); ks.sort();
+        ks.iter().map(|t| { let b = &self.books[*t]; serde_json::json!({"symbol": t, "mid": b.mid, "bestBid": b.best_bid, "bestAsk": b.best_ask, "bidDepth": b.bid_depth, "holding": self.holding.contains(*t)}) }).collect()
     }
-    let s = unsafe { &*(handle as *const DogStrategy) };
-    let mut tokens: Vec<&String> = s.books.keys().collect();
-    tokens.sort();
-    let out: Vec<_> = tokens
-        .iter()
-        .map(|t| {
-            let b = &s.books[*t];
-            serde_json::json!({
-                "symbol": t,
-                "mid": b.mid,
-                "bestBid": b.best_bid,
-                "bestAsk": b.best_ask,
-                "bidDepth": b.bid_depth,
-                "holding": s.holding.contains(*t),
-            })
-        })
-        .collect();
-    bk_string_out(serde_json::to_string(&out).unwrap_or_else(|_| "[]".into()))
-}
-
-unsafe extern "C" fn on_config(handle: BkHandle, json: *const c_char) -> i32 {
-    let Some(j) = (unsafe { cstr(json) }) else { return 1 };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&j) else { return 1 };
-    let s = unsafe { &mut *(handle as *mut DogStrategy) };
-    if let Some(x) = v.pointer("/spreadArb/trendMaxEntryPrice").and_then(|x| x.as_str()) {
-        if let Ok(f) = x.parse::<f64>() {
-            s.buy_below = f;
-        }
+    // Both the kernel config package (nested under "spreadArb") and the hot bag
+    // (the strategy's own knob cell, top-level) resolve to the same knob.
+    fn on_params(&mut self, p: &ParamBag) -> bool {
+        let raw = p.get_str("trendMaxEntryPrice").map(str::to_string).or_else(|| p.get_str("spreadArb").and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()).and_then(|v| v.get("trendMaxEntryPrice").and_then(|x| x.as_str()).map(str::to_string)));
+        match raw.and_then(|x| x.parse::<f64>().ok()) { Some(v) => { self.buy_below = v; true } None => false }
     }
-    0
+    fn evolvable_knobs(&self) -> Vec<Knob> { vec![Knob { name: "trendMaxEntryPrice".into(), value: "0.43".into(), min: "0.05".into(), max: "0.90".into() }] }
+    fn gate_exemptions(&self) -> &'static [&'static str] { &["timing"] }
 }
-
-unsafe extern "C" fn on_hot_params(handle: BkHandle, json: *const c_char) -> i32 {
-    let Some(j) = (unsafe { cstr(json) }) else { return 1 };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&j) else { return 1 };
-    let s = unsafe { &mut *(handle as *mut DogStrategy) };
-    if let Some(x) = v.get("trendMaxEntryPrice").and_then(|x| x.as_str()) {
-        if let Ok(f) = x.parse::<f64>() {
-            s.buy_below = f;
-            return 0;
-        }
-    }
-    1
-}
-
-unsafe extern "C" fn knobs(_handle: BkHandle) -> *mut c_char {
-    bk_string_out(
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "trendMaxEntryPrice": { "type": "string", "description": "dip entry ceiling" }
-            }
-        })
-        .to_string(),
-    )
-}
-
-/// E2-c (#28): the knobs this strategy declares EVOLVABLE — names, the values in
-/// force, and the hard domain each value may never leave. Distinct from `knobs`
-/// above, which is the human-facing JSON-Schema description of the config
-/// surface; this one is the machine-consumed declaration the kernel uses to
-/// build counterfactual variants and to reject out-of-domain proposals.
-///
-/// An OPTIONAL symbol: a v2 library without it declares nothing and is simply
-/// **not evolvable** (explicitly, per the kernel's log), so adding this needs no
-/// ABI bump. `on_hot_params` receives exactly this bag, serialized.
-unsafe extern "C" fn evolvable_knobs(_handle: BkHandle) -> *mut c_char {
-    bk_string_out(
-        serde_json::json!({
-            "knobs": [
-                { "name": "trendMaxEntryPrice", "value": "0.43", "min": "0.05", "max": "0.90" }
-            ]
-        })
-        .to_string(),
-    )
-}
-
-/// E2-b (#27): the dog strategy hunts dips, which is mean-reversion — it wants
-/// the whole round, so it declares the round-timing WINDOW gate unnecessary for
-/// its entries while still asking for the spot momentum alignment filter (it
-/// only fades a dip it believes is noise, not a real move against it).
-///
-/// This is an OPTIONAL symbol: a v2 library without it stays fully gated, which
-/// is why the declaration needs no ABI bump. The kernel logs every honoured
-/// exemption («本单因策略 dog_strategy 豁免门禁 timing») — this is not a bypass of
-/// any safety boundary.
-unsafe extern "C" fn gate_exemptions(_handle: BkHandle) -> *mut c_char {
-    bk_string_out(serde_json::json!({ "timing": true, "momentum": false }).to_string())
-}
-
-static NAME: &[u8] = b"dog_strategy\0";
-static VERSION: &[u8] = b"0.2.0\0";
-static VTABLE: BkStrategyVtable = BkStrategyVtable {
-    name: NAME.as_ptr() as *const c_char,
-    version: VERSION.as_ptr() as *const c_char,
-    abi_version: BK_ABI_VERSION,
-    min_abi: BK_MIN_ABI_VERSION,
-    create: Some(create),
-    destroy: Some(destroy),
-    on_book: Some(on_book),
-    on_round: Some(on_round),
-    evaluate: Some(evaluate),
-    confirmed_tokens: Some(confirmed_tokens),
-    take_breaks: None,
-    diagnostics: Some(diagnostics),
-    on_config: Some(on_config),
-    on_hot_params: Some(on_hot_params),
-    knobs: Some(knobs),
-};
-
-#[unsafe(no_mangle)]
-pub extern "C" fn bk_strategy_create() -> *const BkStrategyVtable {
-    &VTABLE
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn bk_strategy_abi_version() -> u32 {
-    BK_ABI_VERSION
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn bk_strategy_gate_exemptions(handle: BkHandle) -> *mut c_char {
-    unsafe { gate_exemptions(handle) }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn bk_strategy_evolvable_knobs(handle: BkHandle) -> *mut c_char {
-    unsafe { evolvable_knobs(handle) }
-}
+export_strategy!(crate::Dog);
