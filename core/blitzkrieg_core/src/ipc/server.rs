@@ -52,7 +52,16 @@ pub async fn run(
             "blitzkrieg-core: restored {recovered_pos} open position(s) from the position log"
         );
     }
-    if config.mode == Mode::Dry {
+    // Seed the simulated principal in every mode that settles locally.
+    //
+    // This site is why `Mode` is an enum and not a `readonly: bool`: as an `==`
+    // comparison against `Dry` it was invisible to the compiler, so ReadOnly
+    // silently started with a zero balance, reported a seed it did not have
+    // (`BalanceResult::seed` was updated separately), and rejected every entry
+    // with INSUFFICIENT_FUNDS. Behaviourally that made read-only look like a
+    // broken dry mode rather than a promise — the local-settlement guarantee was
+    // in place, the ledger it settles into was not.
+    if config.mode.settles_locally() {
         core.set_balance(config.dry_seed_balance);
     }
     if config.engine_enabled {
@@ -107,7 +116,15 @@ pub async fn run(
     // Live mode: start the market's order executor (CLOB bridge: submits orders,
     // ingests user-WS fills, periodic REST reconciliation). The executor reads
     // credentials from the environment and stays inert when they are absent.
-    if config.mode == Mode::Live {
+    //
+    // This block IS the structural guarantee (E12-e). Dry never places a real
+    // order because the egress object is never constructed — there is no
+    // `LiveVenue`, no actor loop, and no consumer of `take_pending_orders`, so a
+    // pending order simply accumulates in the OME. `--readonly` is therefore not
+    // a second guard bolted on top: it refuses entry to this same block, which is
+    // why `may_trade()` is the single predicate rather than a chain of conditions
+    // each future edit could widen back open.
+    if config.mode.may_trade() {
         if let Some(exec) = active.executor() {
             let cfg = blitzkrieg_market_api::ExecutorConfig {
                 markets: config.markets.clone(),
@@ -117,6 +134,11 @@ pub async fn run(
                 Err(e) => eprintln!("blitzkrieg-core: live executor failed to start: {e}"),
             }
         }
+    } else if config.mode.readonly() {
+        eprintln!(
+            "blitzkrieg-core: READ-ONLY — venue order egress is not constructed; \
+             this process cannot place an order"
+        );
     }
 
     // Refuse to start if another core is already listening: the socket is a
@@ -365,6 +387,9 @@ async fn handle_line(
             let seed = match c.mode() {
                 Mode::Dry => Some(c.config().dry_seed_balance),
                 Mode::Live => None,
+                // ReadOnly never reaches a venue, so like Dry its cash is the
+                // seed — reporting none would misdescribe a funded simulation.
+                Mode::ReadOnly => Some(c.config().dry_seed_balance),
             };
             Ok(serde_json::to_value(BalanceResult {
                 balance: c.ledger().balance(),

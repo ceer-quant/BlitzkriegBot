@@ -388,9 +388,11 @@ impl Core {
             }
         });
         let mut ledger = Ledger::new();
-        // DRY mode has no venue to reconcile against; seed the local cash so the
-        // reserve/overspend gate is meaningful for embedders that don't seed it.
-        if config.mode == Mode::Dry {
+        // A locally-settling mode has no venue to reconcile against; seed the
+        // local cash so the reserve/overspend gate is meaningful for embedders
+        // that don't seed it. Uses the predicate, not `== Dry`: the equality form
+        // is invisible to the compiler and left ReadOnly funding at zero.
+        if config.mode.settles_locally() {
             ledger.set_balance(config.dry_seed_balance);
         }
         Self {
@@ -1928,10 +1930,14 @@ impl Core {
     }
 
     fn new_order_id(&mut self) -> String {
-        let prefix = if self.config.mode == Mode::Dry {
-            "dry"
-        } else {
-            "live"
+        // "live" is reserved for orders that can actually reach a venue. A
+        // read-only order is not live — stamping it `live_` would put a
+        // misleading label on the one field an operator reads to decide what is
+        // real, so it is named for what it is.
+        let prefix = match self.config.mode {
+            Mode::Live => "live",
+            Mode::ReadOnly => "readonly",
+            Mode::Dry => "dry",
         };
         let id = format!("{prefix}_{}", self.next_id);
         self.next_id += 1;
@@ -2074,7 +2080,11 @@ impl Core {
             })?;
 
         match self.config.mode {
-            Mode::Dry => {
+            // Dry and ReadOnly share the settle path: neither has a venue that
+            // can report a fill, so waiting would leave the order Pending
+            // forever and the ledger would never move. What separates them is
+            // egress, not accounting — see `Mode::readonly`.
+            Mode::Dry | Mode::ReadOnly => {
                 self.ome.mark_live(id, now_ms)?;
                 match order.mode {
                     FillPolicy::Taker => {

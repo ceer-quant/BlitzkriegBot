@@ -164,6 +164,13 @@ jobs:
         run: npm run core:shutdown-check
       - name: Core parent-monitor gate
         run: npm run core:parent-monitor-check
+      # E12-e: `--readonly` must be structural, not conventional. The gate boots a
+      # core with `--mode live` AND live-shaped credentials in its environment, so
+      # a per-RPC guard that forgot one entry point would trade; it then asserts
+      # over IPC that the mode stayed read-only, the venue executor was never
+      # started, nothing reached a venue, and orders still settle locally.
+      - name: Core read-only egress gate
+        run: npm run core:readonly-check
 
   # E10-e: the third size target — the *deliverable* ≤ 500 MB — is the one that
   # cannot be read off the working tree. A developer checkout legitimately holds

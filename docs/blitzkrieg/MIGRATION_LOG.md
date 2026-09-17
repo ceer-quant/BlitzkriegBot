@@ -2321,4 +2321,81 @@ stop() 解析时进程已回收且 socket 已释放；替代核心可立即接�
 2. 破坏范围必须**按身份定界**（血缘、路径白名单），不能按「存在即匹配」；
 3. 定界正确性用**诱饵**验证——放一个「必须不被影响」的对象在旁边；
 4. **装上了不等于生效**：涉及竞态的生命周期钩子，必须在真实信号路径下
-   观察最终状态（进程表/端口/socket），而不是只看监听器是否挂上。
+   观察最终状态（进程表/端口/socket），而不是只看监听器是否挂上；
+5. **等值判断是穷尽性的后门**：把一个概念做成枚举/变体、指望编译器逐个提醒之后，
+   `==` / `!=` 会静默绕过它（§52-b：编译一次通过就是信号）。改完必须 `grep`
+   等值判断收尾。
+6. **门禁要用对照实验证明它不是恒真**：一个「通过了」的检查，
+   必须能在**去掉被测条件后失败**（§52-c：去掉 `--readonly` 后核心确实去尝试出网）。
+
+---
+
+## §52 E12-e：`--readonly` 的「结构性」落在哪里（#94）
+
+### 52-a 为什么是第三个 `Mode` 变体，而不是一个 `readonly: bool`
+
+#94 的 (e) 要求 read-only 在**结构上**不可能下单，「不是约定」——
+即不能靠在每个 RPC 入口写 `if readonly { return Err }`。
+`bool` 标志的性质正是「每个读它的地方都是自愿的」：**漏读一处就失败为放开**。
+
+实测既有的 dry 模式：它之所以十年不出真单，**不是**因为哪里挡住了，
+而是因为 live 执行器**根本没被构造**（`ipc/server.rs:110` 的
+`if config.mode == Mode::Live`）。没有 `LiveVenue`、没有 actor 循环、
+没有 `take_pending_orders` 的消费者，订单只是在 OME 里累积为 `Pending`。
+全仓真正出网的调用只有一处（`extensions/polymarket/src/venue.rs:231`），
+唯一调用方是 `live.rs:89`——**构造就是闸门**。
+
+所以取第三个变体 `Mode::ReadOnly`：`match` 上的每个分支都会变成编译错误，
+逼人逐个重新判断。这不是风格选择，是**用编译器替代记忆**。
+
+### 52-b 顺带发现的既有缺陷：`== Mode::Dry` 是编译器看不见的
+
+加完变体后编译**一次通过**，这本身就是信号——说明还有地方用
+`== Mode::Dry` / `!= Mode::Dry` 这种等值判断绕过了穷尽性检查。
+`grep` 出 3 处，其中 2 处是真缺陷：
+
+| 位置 | 原写法 | 后果 |
+| --- | --- | --- |
+| `ipc/server.rs:55` | `if config.mode == Mode::Dry` 才 `set_balance(seed)` | ReadOnly 账本从 **0** 起步，任何入场都被 `INSUFFICIENT_FUNDS` 拒掉 |
+| `service.rs:393` | 同上（`Core::new` 内的另一个播种点） | 同上，嵌入方也拿不到 seed |
+| `service.rs:1931` | `prefix = if mode == Dry {"dry"} else {"live"}` | ReadOnly 的订单被盖章 **`live_`**——把「可能真出网」的标签贴在最不该贴的地方 |
+
+第一处是门禁**实测**抓到的（`orders placed: 0` → `INSUFFICIENT_FUNDS:
+reserve 3.0 exceeds available 0`），不是审查发现的。值得注意的是它同时暴露了
+一个自相矛盾的状态：`ledger.balance` 报告「有 seed」，而账本当真是 0——
+`BalanceResult::seed` 那个 `match` 我改了，播种点这个 `==` 我没改，
+两个地方对同一个 `Mode` 给出不同答案。
+
+**教训（第 5 条，与本节的落点直接相关）**：把穷尽性交给编译器之后，
+**等值判断就是绕过它的后门**。改成变体后必须 grep `== Mode::` / `!= Mode::`
+收尾，否则「编译器会提醒我」只对 `match` 成立。
+
+### 52-c 门禁：对抗式，而不是检查代码里有没有 read-only
+
+`scripts/readonly-egress-check.mjs` 故意把条件设成最恶劣：
+启动核心时**同时**给 `--mode live` 和**格式合法**的 live 凭证
+（`POLYMARKET_PRIVATE_KEY` / `POLYMARKET_FUNDER_ADDRESS`）。
+若 read-only 只是约定，这个核心会真去下单。随后从**运行中的进程**读取事实：
+
+1. banner 宣布 READ-ONLY；
+2. `live order executor started` **从未出现**；
+3. `core.ready` 报的 mode 是 `readonly`（抓优先级 bug）；
+4. 没有任何订单带 venue id（出网必留痕）；
+5. 订单日志里没有 venue-bound 行；
+6. **且**本地仍能结算——read-only 不是「拒绝一切」，否则作为观察实例毫无用处。
+
+**对照实验（证明门禁非恒真）**：同一份参数去掉 `--readonly` 后跑一遍，
+核心报 `live` 并且**真的去尝试**启动执行器——
+`live executor failed to start: … error sending request for url (http://127.0.0.1:1/time)`。
+read-only 核心连这次尝试都没有。这个差异就是结构性保证本身，而门禁能测到它。
+
+另外补了 4 项单测（`model::mode_tests`）钉住三个谓词与线上拼写：
+`readonly()` 只对 `ReadOnly` 为真（`Dry` 是模拟，不作出承诺）、
+`may_trade()` 只对 `Live` 为真、`settles_locally()` 对两个非交易模式为真。
+
+### 52-d 与账本语义的关系（未改账本）
+
+`ReadOnly` 的结算路径与 `Dry` **共用同一段代码**，不是新写一套：
+无 venue → 没有 fill 可等 → 本地合成成交。
+账本语义未被修改，只是多了一个入口模式；`--mode live` 的行为逐字未变
+（对照实验即是证据）。决策记录见 `DECISIONS_PENDING.md` D-21。

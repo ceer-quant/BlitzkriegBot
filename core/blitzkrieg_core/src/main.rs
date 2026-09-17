@@ -6,6 +6,7 @@
 //!
 //! Usage:
 //!   blitzkrieg-core --socket <path> [--mode dry|live] [--tick-ms 50]
+//!                   [--readonly]
 //!                   [--seed-balance 10000] [--max-order-notional 100]
 //!                   [--min-shares 10] [--max-shares 10]
 //!                   [--market-plugin <name>]
@@ -19,6 +20,12 @@
 //!                   [--event-archive-min-free-mb 5120]
 //!                   [--entry-maker-timeout-ms 5000]
 //!                   [--slippage-ticks 0] [--latency-ms 0] [--fill-prob-bps 10000]
+//!
+//! `--readonly` is a promise, not a convention: the venue order egress is never
+//! constructed, so no code path in this process can send an order. It outranks
+//! `--mode live` / `DRY_RUN=false` (giving both is not an error — the read-only
+//! promise simply wins) and settles orders like dry, since a ledger waiting on a
+//! venue that was never started would never move.
 //!
 //! Strategy selection (repeatable; builtins default to `spread_arb` on and
 //! `trend_follow` off, so a new strategy never changes what a running session
@@ -46,6 +53,11 @@ use std::str::FromStr;
 struct Args {
     socket: String,
     mode: Mode,
+    /// `--readonly`: refuse order egress entirely. Recorded separately from
+    /// `mode` because the flag is parsed before the mode precedence is settled —
+    /// and it must win over `--mode live` / `DRY_RUN=false`, not be overwritten
+    /// by whichever of those was read last.
+    readonly: bool,
     tick_ms: u64,
     seed_balance: Decimal,
     max_order_notional: Decimal,
@@ -137,6 +149,7 @@ fn default_socket() -> String {
 fn parse_args() -> Args {
     let mut socket = default_socket();
     let mut mode = Mode::Dry;
+    let mut readonly = false;
     let mut tick_ms = 50u64;
     let mut seed_balance = Decimal::from(10_000);
     let mut max_order_notional = Decimal::from(100);
@@ -197,6 +210,7 @@ fn parse_args() -> Args {
                     _ => Mode::Dry,
                 }
             }
+            "--readonly" => readonly = true,
             "--tick-ms" => tick_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(tick_ms),
             "--seed-balance" => {
                 seed_balance = it
@@ -341,6 +355,7 @@ fn parse_args() -> Args {
     Args {
         socket,
         mode,
+        readonly,
         tick_ms,
         seed_balance,
         max_order_notional,
@@ -532,6 +547,21 @@ async fn main() -> anyhow::Result<()> {
         Mode::Live
     } else {
         Mode::Dry
+    };
+
+    // `--readonly` is decided LAST and unconditionally, so nothing above can
+    // outrank it. Deciding it in the same chain would make the promise depend on
+    // clause order — exactly the kind of thing that reads correct and is not.
+    let mode = if args.readonly {
+        if mode == Mode::Live {
+            eprintln!(
+                "blitzkrieg-core: --readonly given with a live mode request; \
+                 refusing egress (orders will settle locally, no venue is started)"
+            );
+        }
+        Mode::ReadOnly
+    } else {
+        mode
     };
 
     // When the self-driving engine is on, record near-misses to disk by default

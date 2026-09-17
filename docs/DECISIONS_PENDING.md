@@ -571,3 +571,52 @@
   而 strip+lto 后 9.56 MB 距 E10-d 的 50 MB 上限有 **5 倍余量**，没有为体积牺牲隔离的必要。
 - **需要用户确认的点**：是否同意**放弃 E10-d 原始要求里的 `panic = "abort"`** 这一项？
   若不同意，是否接受「第三方策略 panic 可能终止内核」的行为变化，或需先做子进程沙箱？
+
+---
+
+## [待决策] D-21 `--readonly` 的「结构性禁止下单」落在哪一层（E12-e / #94 发现）
+
+- **背景**：#94 验收项 (e) 要求 `--readonly` 使下单在**结构上**不可能，而不是「约定上」不可能。
+  原话是「不是约定」（not conventional）——即不能靠「每个 RPC 入口写一个
+  `if readonly { return Err }`」这种**可以被漏写**的守卫。
+- **实测的既有结构**（`core/blitzkrieg_core/src/ipc/server.rs:110`）：
+
+  ```rust
+  if config.mode == Mode::Live {
+      if let Some(exec) = active.executor() {
+          match exec.start(host.clone(), cfg).await { ... }
+      }
+  }
+  ```
+
+  **dry 模式的「不下真单」正是靠这个结构实现的**：live 执行器根本不启动，
+  没有 `LiveVenue`、没有 actor 循环、没有 `take_pending_orders` 的消费者，
+  订单只是在 OME 里累积为 `Pending`。这里没有 `DryVenue`/`PaperVenue` 类型，
+  也没有 trait object 互换——dry 是「不构造那个东西」，不是「构造了再拦住」。
+- **下单路径的唯一收口**（全仓 5 条来源，`orders.place` RPC / engine 入场 /
+  自动止盈止损 / 手动平仓 / maker→taker 升级）：
+  全部收敛到 `Core::place_inner`（`core/blitzkrieg_core/src/service.rs:2015`）。
+  真正出网的那一次调用全仓只有一处：`extensions/polymarket/src/venue.rs:231`
+  （`build_sign_and_post`），唯一调用方 `extensions/polymarket/src/live.rs:89`。
+- **选项 A**：**`--readonly` 拒绝启动 live 执行器**，与 `Mode::Dry` 走同一条结构路径。
+  在 `ipc/server.rs` 的启动条件上加入口守卫（`mode == Live && !readonly`），
+  并在 `CoreConfig` 上落一个 `readonly` 位，使 `place_inner` 在**不是 dry** 的情况下
+  仍拒绝真实下单意图（保证「readonly 下没有任何订单能被送出去」有第二道独立证据）。
+- **选项 B**：`--readonly` 只在 IPC 边界拦截（每个 method 加 `if readonly`）。
+  **不推荐**：这是 #94 明确排除的「约定」式做法，且引擎自动下单不经过 RPC 入口，
+  漏写一处就是真单。
+- **选项 C**：引入 `ReadOnlyVenue` 作为 `OrderExecutor` 的替身实现。
+  **不推荐**：`OrderExecutor` 没有下单方法（只有 `name()`/`start()`），
+  真单发生在插件内部的 `LiveVenue`，替身实现拦不住 `spawn_if_configured`。
+  要做只能在插件层加分支，等于把结构性保证下放给**第三方插件**——最弱的落点。
+- **AI 倾向**：**A**。理由：它复用了本项目**已经在生产里验证过**的机制
+  （live 执行器不启动 = dry 模式十年不出真单的原因），而不是新造一个平行机制；
+  同时把 `readonly` 与 `mode` 明确分开——`readonly` 是**授权**（不许出网），
+  `mode` 是**账本语义**（dry 模拟成交 / live 等 venue 回报）。readonly 下即使请求
+  live，账本仍按 dry 结算，因为根本没有 venue 可以回报。
+- **需要用户确认的点**：
+  1. 是否同意「`--readonly` 与 `--mode live` 同时给出时，**不报错、readonly 生效**
+     （即降级为 dry 结算 + 永不启动执行器）」，而不是拒绝启动？倾向不拒绝：
+     拒绝会让「拉一个只读观察实例去看生产线」这个用法无法用一个命令行表达。
+  2. 是否同意 `--readonly` **不影响**已落地的 dry 模式行为（dry 本就出不了网，
+     两个开关叠加不改变任何语义，只多一层显式声明）？

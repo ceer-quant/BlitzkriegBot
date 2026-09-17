@@ -24,6 +24,46 @@ pub enum Mode {
     Dry,
     /// Real orders via the CLOB.
     Live,
+    /// Observation only: the venue's order egress is never constructed.
+    ///
+    /// This is a THIRD variant rather than a `readonly: bool` flag beside `mode`
+    /// for one reason: a flag is opt-in at every site that reads it, and a site
+    /// that forgets to read it fails open — it places the real order. A variant
+    /// makes every `match` on `Mode` a compile error until it is revisited, so
+    /// the guarantee cannot be lost by omission (E12-e / #94).
+    ///
+    /// Behaviourally read-only settles like [`Mode::Dry`] — because with no venue
+    /// there is nothing to report a fill, so a live ledger would be a fiction —
+    /// while the *intent* stays visible: `readonly()` answers false for `Dry`
+    /// (a simulation, not a promise) and true here.
+    ReadOnly,
+}
+
+impl Mode {
+    /// Whether this mode is a promise never to send an order to a venue.
+    ///
+    /// Deliberately NOT `mode != Mode::Live`: `Dry` is a simulation, and a
+    /// simulation that quietly becomes live is a different thing from an operator
+    /// asking for a hard guarantee. Only `ReadOnly` promises.
+    pub fn readonly(self) -> bool {
+        matches!(self, Mode::ReadOnly)
+    }
+
+    /// Whether the venue order executor may be started at all.
+    ///
+    /// The single predicate every egress site must consult. `Live` is the only
+    /// yes: `Dry` has no credentials story and `ReadOnly` exists to refuse.
+    pub fn may_trade(self) -> bool {
+        matches!(self, Mode::Live)
+    }
+
+    /// Whether orders settle as simulated fills rather than waiting on a venue.
+    ///
+    /// True for both non-trading modes: read-only cannot wait for a venue that
+    /// was never started, so it settles the same way a simulation does.
+    pub fn settles_locally(self) -> bool {
+        !matches!(self, Mode::Live)
+    }
 }
 
 /// The role an order actually played, RESOLVED FROM ITS FILLS rather than
@@ -306,5 +346,49 @@ impl OrderbookSnapshot {
             mid_price,
             timestamp,
         }
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::Mode;
+
+    /// The whole point of the third variant: `readonly()` must answer for the
+    /// promise, not for "is it dry". A `mode != Live` implementation would pass a
+    /// read-only test and also claim a simulation had promised something it never
+    /// did — so Dry is asserted false here, not just ReadOnly true.
+    #[test]
+    fn readonly_is_a_promise_dry_does_not_make() {
+        assert!(Mode::ReadOnly.readonly());
+        assert!(!Mode::Dry.readonly());
+        assert!(!Mode::Live.readonly());
+    }
+
+    /// Egress admission. This predicate is what guards construction of the venue
+    /// executor, so a regression that widened it would reopen real trading.
+    #[test]
+    fn only_live_may_reach_a_venue() {
+        assert!(Mode::Live.may_trade());
+        assert!(!Mode::Dry.may_trade());
+        assert!(!Mode::ReadOnly.may_trade());
+    }
+
+    /// ReadOnly settles locally: with no venue constructed, nothing would ever
+    /// report a fill, so a ledger that waited would simply never move.
+    #[test]
+    fn everything_but_live_settles_locally() {
+        assert!(Mode::Dry.settles_locally());
+        assert!(Mode::ReadOnly.settles_locally());
+        assert!(!Mode::Live.settles_locally());
+    }
+
+    /// The IPC contract carries mode as a lowercase string; a UI gating on
+    /// "readonly" needs the exact wire spelling.
+    #[test]
+    fn wire_spelling_is_stable() {
+        let s = |m: Mode| serde_json::to_string(&m).unwrap();
+        assert_eq!(s(Mode::Dry), "\"dry\"");
+        assert_eq!(s(Mode::Live), "\"live\"");
+        assert_eq!(s(Mode::ReadOnly), "\"readonly\"");
     }
 }
