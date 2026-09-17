@@ -257,7 +257,7 @@ The `onboard` wizard handles API key setup, channel selection, and config genera
 
 ```bash
 # Clone repository
-git clone https://github.com/alsk1992/BlitzkriegBot.git
+git clone https://github.com/ceer-quant/BlitzkriegBot.git
 cd BlitzkriegBot
 
 # Install dependencies
@@ -726,6 +726,5 @@ node --inspect dist/index.js
 
 ### Support
 
-- GitHub Issues: https://github.com/alsk1992/BlitzkriegBot/issues
 - Repository: https://github.com/ceer-quant/BlitzkriegBot
 - Issues: https://github.com/ceer-quant/BlitzkriegBot/issues

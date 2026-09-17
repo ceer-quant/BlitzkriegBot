@@ -46,7 +46,7 @@ The `onboard` wizard handles API key setup, channel selection, and config genera
 ### 2) Node.js (from source)
 
 ```
-git clone https://github.com/alsk1992/BlitzkriegBot.git && cd BlitzkriegBot
+git clone https://github.com/ceer-quant/BlitzkriegBot.git && cd BlitzkriegBot
 npm ci
 npm run build
 node dist/index.js
