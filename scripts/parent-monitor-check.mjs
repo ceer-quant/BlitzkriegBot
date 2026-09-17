@@ -16,7 +16,7 @@
  */
 import { spawn, execSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, unlinkSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -59,15 +59,20 @@ function corePids() {
 // A driver that starts the core the same way the shell does, then idles so the
 // parent's SIGTERM is what ends it. Written to a file so it imports the real
 // runner rather than reimplementing the call.
+//
+// The import MUST be relative: an absolute path baked in here points at the
+// developer's checkout and fails with ERR_MODULE_NOT_FOUND on any other machine
+// (CI caught exactly that).
 const DRIVER = join(DRIVER_DIR, 'driver.ts');
+const REL = relative(DRIVER_DIR, join(process.cwd(), 'src/core/blitzkrieg-core-runner.ts'))
+  .replace(/\\/g, '/');
+const IMPORT_SPEC = REL.startsWith('.') ? REL : './' + REL;
 // No top-level await: the file lives outside `src/` so it is treated as CJS and
 // esbuild rejects TLA there. The IIFE keeps the same shape and stays portable.
 writeFileSync(
   DRIVER,
   `
-import { getBlitzkriegCoreRunner } from ${JSON.stringify(
-    join(process.cwd(), 'src/core/blitzkrieg-core-runner.ts'),
-  )};
+import { getBlitzkriegCoreRunner } from ${JSON.stringify(IMPORT_SPEC)};
 
 async function main() {
   const runner = getBlitzkriegCoreRunner();
