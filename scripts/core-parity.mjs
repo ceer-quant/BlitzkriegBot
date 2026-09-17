@@ -212,10 +212,23 @@ try {
   await rpc.bookSnapshot(ec, 'up', [[0.43, 100]], [[0.45, 100]]);
   await rpc.spotPrice(ec, 'BTC', 60000);
 
-  // The engine evaluates on its own tick; wait for it to place + fill.
-  await sleep(400);
-  const orders = (await rpc.listOrders(ec)).orders;
-  const entry = orders.find((o) => o.strategy === 'spread_arb');
+  // The engine evaluates on its own tick (an interval task, not the book
+  // push), so poll for the entry instead of assuming one fixed wait is enough
+  // — a loaded runner can stretch the first evaluate well past 400 ms.
+  let orders = [];
+  let entry;
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    orders = (await rpc.listOrders(ec)).orders;
+    entry = orders.find((o) => o.strategy === 'spread_arb');
+    if (entry) break;
+    await sleep(200);
+  }
+  if (!entry) {
+    // Diagnose rather than just fail: show WHY nothing was placed.
+    const stats = await ec.request('engine.stats', {}, 5000).catch((e) => ({ error: e }));
+    console.log('  diag engine.stats:', JSON.stringify(stats).slice(0, 600));
+  }
   check('engine placed an entry from fed data', entry !== undefined, JSON.stringify(orders.map((o) => o.status)));
   check('engine entry is trend-confirmed maker_then_taker', entry !== undefined && entry.side === 'buy' && entry.mode === 'maker_then_taker');
 } catch (e) {

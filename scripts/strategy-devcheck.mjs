@@ -45,7 +45,9 @@ const check = (name, ok, detail = '') => {
 };
 
 function shell(cmd, opts = {}) {
-  return execFileSync('/bin/zsh', ['-c', cmd], { encoding: 'utf8', timeout: 300000, ...opts });
+  // bash, not zsh: this gate must run unchanged on the ubuntu CI runner,
+  // which has no zsh (the ENOENT used to fail the whole E9 step there).
+  return execFileSync('/bin/bash', ['-c', cmd], { encoding: 'utf8', timeout: 300000, ...opts });
 }
 
 if (!existsSync(CORE)) {
