@@ -81,9 +81,10 @@ check('artifact ships hashed JS+CSS assets',
     /blur\(4\dpx\)/.test(rule('.glass-header')), rule('.glass-header').slice(0, 70));
 }
 
-// [1] Tauri crate compiles — its own workspace (standalone like rust-executor,
-//     so Linux CI without the GTK headers never touches it). Check on macOS
-//     where the GTK deps build fine; assert scaffold files on any OS.
+// [1] Tauri crate compiles — its own nested workspace (excluded from the root
+//     Cargo workspace), so Linux CI without the GTK headers never touches it.
+//     Check on macOS where the GTK deps build fine; assert scaffold files on
+//     any OS.
 const TAURI_DIR = join(ROOT, 'ui/webapp/src-tauri');
 if (process.platform === 'darwin') {
   const tauriCheck = spawnSync('cargo', ['check'], { cwd: TAURI_DIR, encoding: 'utf8' });
