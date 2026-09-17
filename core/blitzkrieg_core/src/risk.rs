@@ -321,7 +321,10 @@ mod tests {
         assert!(!bs.record("spread_arb", dec!(-1), 2_000));
         assert_eq!(bs.consecutive_losses("spread_arb"), 1);
 
-        assert_eq!(bs.maybe_resume_all(300_100), vec!["trend_follow".to_string()]);
+        assert_eq!(
+            bs.maybe_resume_all(300_100),
+            vec!["trend_follow".to_string()]
+        );
         assert!(!bs.is_halted("trend_follow", 300_100));
         assert!(bs.halted(300_100).is_empty());
         // A second pass resumes nothing (the halt is already cleared).

@@ -800,7 +800,11 @@ impl Engine {
     /// with the reason on any refusal, `Ok(true)` when removed, `Ok(false)`
     /// when the name is unknown.
     pub fn unregister_user_strategy(&mut self, name: &str) -> Result<bool, String> {
-        let Some(idx) = self.strategies.iter().position(|s| s.strategy.name() == name) else {
+        let Some(idx) = self
+            .strategies
+            .iter()
+            .position(|s| s.strategy.name() == name)
+        else {
             return Ok(false);
         };
         let hosted = &self.strategies[idx];

@@ -332,8 +332,7 @@ impl PositionManager {
         let pos = self.open.iter_mut().find(|p| p.id == position_id)?;
         let signed_cost = price * shares;
         pos.flows.opened_shares = (pos.flows.opened_shares + shares).max(Decimal::ZERO);
-        pos.flows.entry_cost_usd =
-            (pos.flows.entry_cost_usd + signed_cost).max(Decimal::ZERO);
+        pos.flows.entry_cost_usd = (pos.flows.entry_cost_usd + signed_cost).max(Decimal::ZERO);
         pos.flows.entry_fee_usd = (pos.flows.entry_fee_usd + fee_usd).max(Decimal::ZERO);
         // Basis and share count move together, so `cost_usd / shares` is always
         // the average paid for the shares still held.
@@ -543,13 +542,11 @@ impl PositionManager {
 
         // The caller's flag is the role of the ORDER it just placed; fold it in so
         // the record reflects every exit fill, including earlier partials.
-        pos.exit_role = pos
-            .exit_role
-            .after_fill(if was_maker {
-                OrderRole::Maker
-            } else {
-                OrderRole::Taker
-            });
+        pos.exit_role = pos.exit_role.after_fill(if was_maker {
+            OrderRole::Maker
+        } else {
+            OrderRole::Taker
+        });
 
         let opened = pos.flows.opened_shares;
         let sold = pos.flows.sold_shares.min(opened);
@@ -764,7 +761,12 @@ mod tests {
 
     /// Open a position AND accrue its entry fill — the two steps production
     /// always performs together (service: `open` then `apply_entry_fill`).
-    fn enter(pm: &mut PositionManager, p: OpenParams, role: OrderRole, now_ms: i64) -> OpenPosition {
+    fn enter(
+        pm: &mut PositionManager,
+        p: OpenParams,
+        role: OrderRole,
+        now_ms: i64,
+    ) -> OpenPosition {
         let shares = dec!(10);
         let price = p.entry_price;
         let pos = pm.open(p, now_ms);
@@ -928,7 +930,10 @@ mod precision_tests {
         for (entry_fills, exit_fills) in [
             (vec![(dec!(1), dec!(0.40))], vec![(dec!(1), dec!(0.60))]),
             (vec![(dec!(5), dec!(0.40))], vec![(dec!(5), dec!(0.60))]),
-            (vec![(dec!(9.99), dec!(0.40))], vec![(dec!(9.99), dec!(0.60))]),
+            (
+                vec![(dec!(9.99), dec!(0.40))],
+                vec![(dec!(9.99), dec!(0.60))],
+            ),
             (vec![(dec!(10), dec!(0.40))], vec![(dec!(10), dec!(0.60))]),
             // Ladders: several fills per leg, mixed prices.
             (
@@ -988,18 +993,32 @@ mod precision_tests {
             }
 
             let closed = pm
-                .close(&pos.id, exit_fills.last().unwrap().1, ExitReason::Manual, false, 10)
+                .close(
+                    &pos.id,
+                    exit_fills.last().unwrap().1,
+                    ExitReason::Manual,
+                    false,
+                    10,
+                )
                 .unwrap();
 
             assert_eq!(closed.shares, opened, "shares = what was opened");
             assert_eq!(closed.cost_usd, entry_cost, "basis comes from the ledger");
-            assert_eq!(closed.pnl_usd, proceeds - entry_cost, "gross = Δcash before fees");
+            assert_eq!(
+                closed.pnl_usd,
+                proceeds - entry_cost,
+                "gross = Δcash before fees"
+            );
             assert_eq!(
                 closed.net_pnl_usd,
                 proceeds - entry_cost - entry_fee - exit_fee,
                 "net must be the ledger's own arithmetic (entry={entry_fills:?} exit={exit_fills:?})"
             );
-            assert_eq!(closed.dust_shares, Decimal::ZERO, "fully sold leaves no dust");
+            assert_eq!(
+                closed.dust_shares,
+                Decimal::ZERO,
+                "fully sold leaves no dust"
+            );
             assert_eq!(
                 closed.was_maker_entry,
                 entry_fee == Decimal::ZERO,
@@ -1015,17 +1034,32 @@ mod precision_tests {
     fn sub_grid_dust_is_written_off_not_left_open() {
         let mut pm = PositionManager::new(PositionConfig::default());
         let pos = open_at(&mut pm, dec!(0.40));
-        pm.apply_entry_fill(&pos.id, dec!(10), dec!(0.40), Decimal::ZERO, OrderRole::Maker)
-            .unwrap();
+        pm.apply_entry_fill(
+            &pos.id,
+            dec!(10),
+            dec!(0.40),
+            Decimal::ZERO,
+            OrderRole::Maker,
+        )
+        .unwrap();
         // Sell everything sellable (10.00) but claim only 9.999 filled.
-        pm.apply_exit_fill(&pos.id, dec!(9.999), dec!(0.60), Decimal::ZERO, OrderRole::Maker)
-            .unwrap();
+        pm.apply_exit_fill(
+            &pos.id,
+            dec!(9.999),
+            dec!(0.60),
+            Decimal::ZERO,
+            OrderRole::Maker,
+        )
+        .unwrap();
         let closed = pm
             .close(&pos.id, dec!(0.60), ExitReason::Manual, true, 10)
             .unwrap();
         assert_eq!(closed.dust_shares, dec!(0.001));
         // The dust is priced at the exit, so gross covers all 10 shares.
-        assert_eq!(closed.pnl_usd, dec!(0.60) * dec!(10) - dec!(0.40) * dec!(10));
+        assert_eq!(
+            closed.pnl_usd,
+            dec!(0.60) * dec!(10) - dec!(0.40) * dec!(10)
+        );
         assert_eq!(closed.net_pnl_usd, closed.pnl_usd);
     }
 
@@ -1035,13 +1069,25 @@ mod precision_tests {
     fn sell_shares_sends_the_whole_exact_grid_position() {
         let mut pm = PositionManager::new(PositionConfig::default());
         let pos = open_at(&mut pm, dec!(0.40));
-        pm.apply_entry_fill(&pos.id, dec!(10), dec!(0.40), Decimal::ZERO, OrderRole::Maker)
-            .unwrap();
+        pm.apply_entry_fill(
+            &pos.id,
+            dec!(10),
+            dec!(0.40),
+            Decimal::ZERO,
+            OrderRole::Maker,
+        )
+        .unwrap();
         assert_eq!(pm.sell_shares(&pos.id), Some(dec!(10)));
 
         // Off-grid holdings floor down — never oversell.
-        pm.apply_entry_fill(&pos.id, dec!(0.005), dec!(0.40), Decimal::ZERO, OrderRole::Maker)
-            .unwrap();
+        pm.apply_entry_fill(
+            &pos.id,
+            dec!(0.005),
+            dec!(0.40),
+            Decimal::ZERO,
+            OrderRole::Maker,
+        )
+        .unwrap();
         assert_eq!(pm.sell_shares(&pos.id), Some(dec!(10)));
         assert!(pm.sell_shares(&pos.id).unwrap() <= pm.open_positions()[0].shares);
     }
@@ -1052,13 +1098,9 @@ mod precision_tests {
     fn legacy_snapshot_flows_are_repaired() {
         let mut pm = PositionManager::new(PositionConfig::default());
         let pos = open_at(&mut pm, dec!(0.40));
-        let mut legacy = pm.apply_entry_fill(
-            &pos.id,
-            dec!(10),
-            dec!(0.40),
-            dec!(0.01),
-            OrderRole::Taker,
-        ).unwrap();
+        let mut legacy = pm
+            .apply_entry_fill(&pos.id, dec!(10), dec!(0.40), dec!(0.01), OrderRole::Taker)
+            .unwrap();
         // Simulate a snapshot serialised by the previous version: flows absent,
         // only the old cost_usd/entry_fee_pct/entry_price fields populated.
         legacy.flows = CashFlows::default();

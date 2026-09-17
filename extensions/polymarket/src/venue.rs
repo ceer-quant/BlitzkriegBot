@@ -8,24 +8,29 @@
 //! Credentials are read here from the process environment; Node never supplies
 //! them. The venue maps SDK types onto the market-api boundary types.
 
-use blitzkrieg_market_api::{
-    CoreError, CoreErrorCode, CoreResult, FillPolicy, MarketFill, PendingOrder, Side, VenueTradeInfo,
-};
+use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
 use anyhow::Context as _;
+use blitzkrieg_market_api::{
+    CoreError, CoreErrorCode, CoreResult, FillPolicy, MarketFill, PendingOrder, Side,
+    VenueTradeInfo,
+};
 use futures::StreamExt;
 use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::auth::{Credentials, Kind, Normal};
-use alloy::signers::Signer as _;
 use polymarket_client_sdk_v2::clob::types::request::{
     BalanceAllowanceRequest, OrdersRequest, TradesRequest,
 };
-use polymarket_client_sdk_v2::clob::types::{AssetType, OrderType as SdkOrderType, Side as SdkSide, SignatureType};
-use polymarket_client_sdk_v2::clob::ws::types::response::{TradeMessage, TradeMessageStatus, WsMessage};
+use polymarket_client_sdk_v2::clob::types::{
+    AssetType, OrderType as SdkOrderType, Side as SdkSide, SignatureType,
+};
 use polymarket_client_sdk_v2::clob::ws::Client as WsClient;
-use polymarket_client_sdk_v2::ws::config::Config as WsConfig;
+use polymarket_client_sdk_v2::clob::ws::types::response::{
+    TradeMessage, TradeMessageStatus, WsMessage,
+};
 use polymarket_client_sdk_v2::clob::{Client, Config};
-use polymarket_client_sdk_v2::types::{Address, Decimal as SdkDecimal, U256, B256};
+use polymarket_client_sdk_v2::types::{Address, B256, Decimal as SdkDecimal, U256};
+use polymarket_client_sdk_v2::ws::config::Config as WsConfig;
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use tokio::sync::{mpsc, oneshot};
@@ -36,11 +41,21 @@ const DEFAULT_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com";
 
 #[derive(Debug)]
 pub enum VenueCmd {
-    Place { order: PendingOrder, reply: oneshot::Sender<CoreResult<VenuePlace>> },
-    Cancel { venue_order_id: String, reply: oneshot::Sender<CoreResult<()>> },
-    Balance { reply: oneshot::Sender<CoreResult<Decimal>> },
+    Place {
+        order: PendingOrder,
+        reply: oneshot::Sender<CoreResult<VenuePlace>>,
+    },
+    Cancel {
+        venue_order_id: String,
+        reply: oneshot::Sender<CoreResult<()>>,
+    },
+    Balance {
+        reply: oneshot::Sender<CoreResult<Decimal>>,
+    },
     /// Open order ids + recent trades for the reconciliation sweep.
-    Snapshot { reply: oneshot::Sender<CoreResult<(Vec<String>, Vec<VenueTradeInfo>)>> },
+    Snapshot {
+        reply: oneshot::Sender<CoreResult<(Vec<String>, Vec<VenueTradeInfo>)>>,
+    },
 }
 
 /// Result of posting an order to the venue.
@@ -73,7 +88,10 @@ impl LiveVenue {
     pub async fn cancel(&self, venue_order_id: String) -> CoreResult<()> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(VenueCmd::Cancel { venue_order_id, reply: tx })
+            .send(VenueCmd::Cancel {
+                venue_order_id,
+                reply: tx,
+            })
             .await
             .map_err(|_| CoreError::new(CoreErrorCode::Internal, "venue actor stopped"))?;
         rx.await
@@ -107,9 +125,13 @@ pub enum VenueEvent {
     /// Authoritative fill for one of our orders (per-execution, OME dedups).
     Fill(MarketFill),
     /// Venue confirmed an order is resting (PLACEMENT/UPDATE).
-    OrderLive { venue_order_id: String },
+    OrderLive {
+        venue_order_id: String,
+    },
     /// Venue reports the order cancelled/resting-size reduced.
-    OrderCancelled { venue_order_id: String },
+    OrderCancelled {
+        venue_order_id: String,
+    },
     /// Human-readable reconcile hint (currently informational only).
     ReconcileReport(String),
     Fatal(String),
@@ -127,7 +149,8 @@ pub async fn spawn_from_env(
         .context("POLYMARKET_PRIVATE_KEY required for live mode")?;
     let funder_str =
         std::env::var("POLYMARKET_FUNDER_ADDRESS").context("POLYMARKET_FUNDER_ADDRESS required")?;
-    let url = std::env::var("CLOB_API_URL").unwrap_or_else(|_| "https://clob.polymarket.com".into());
+    let url =
+        std::env::var("CLOB_API_URL").unwrap_or_else(|_| "https://clob.polymarket.com".into());
     let ws_url = std::env::var("POLYMARKET_WS_URL").unwrap_or_else(|_| DEFAULT_WS_URL.into());
 
     let funder = Address::from_str(&funder_str)?;
@@ -137,7 +160,9 @@ pub async fn spawn_from_env(
     let client_unauth = Client::new(&url, Config::builder().use_server_time(true).build())?;
     // L2 credentials for the user WebSocket, derived from the private key here
     // so Node never needs API keys at all.
-    let ws_credentials: Credentials = client_unauth.create_or_derive_api_key(&signer, None).await?;
+    let ws_credentials: Credentials = client_unauth
+        .create_or_derive_api_key(&signer, None)
+        .await?;
     let client = client_unauth
         .authentication_builder(&signer)
         .funder(funder)
@@ -146,10 +171,24 @@ pub async fn spawn_from_env(
         .await?;
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<VenueCmd>(64);
-    let handle = LiveVenue { tx: cmd_tx, signer: signer_address.to_string(), funder: funder_str.clone() };
+    let handle = LiveVenue {
+        tx: cmd_tx,
+        signer: signer_address.to_string(),
+        funder: funder_str.clone(),
+    };
 
     tokio::spawn(async move {
-        actor_loop(client, signer, funder, ws_url, markets, ws_credentials, cmd_rx, events).await;
+        actor_loop(
+            client,
+            signer,
+            funder,
+            ws_url,
+            markets,
+            ws_credentials,
+            cmd_rx,
+            events,
+        )
+        .await;
     });
 
     Ok(handle)
@@ -167,7 +206,8 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
 ) {
     // User-WS stream (best effort: skip when no markets are provided).
     if !markets.is_empty() {
-        if let Err(e) = start_user_ws(funder, ws_url, markets, ws_credentials, events.clone()).await {
+        if let Err(e) = start_user_ws(funder, ws_url, markets, ws_credentials, events.clone()).await
+        {
             let _ = events
                 .send(VenueEvent::Fatal(format!("user ws setup failed: {e}")))
                 .await;
@@ -180,7 +220,10 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
                 let res = sdk_place(&client, &signer, &order).await;
                 let _ = reply.send(res);
             }
-            VenueCmd::Cancel { venue_order_id, reply } => {
+            VenueCmd::Cancel {
+                venue_order_id,
+                reply,
+            } => {
                 let res = client
                     .cancel_order(&venue_order_id)
                     .await
@@ -233,16 +276,22 @@ async fn sdk_place<S: alloy::signers::Signer + Sync>(
         .map_err(|e| map_sdk_err(&e.to_string()))?;
 
     if !resp.success {
-        return Err(CoreError::new(CoreErrorCode::VenueError, "venue rejected order")
-            .with_raw(resp.error_msg.unwrap_or_default()));
+        return Err(
+            CoreError::new(CoreErrorCode::VenueError, "venue rejected order")
+                .with_raw(resp.error_msg.unwrap_or_default()),
+        );
     }
-    Ok(VenuePlace { venue_order_id: resp.order_id, success: resp.success, status: format!("{:?}", resp.status) })
+    Ok(VenuePlace {
+        venue_order_id: resp.order_id,
+        success: resp.success,
+        status: format!("{:?}", resp.status),
+    })
 }
 
-async fn sdk_balance(
-    client: &Client<Authenticated<Normal>>,
-) -> CoreResult<Decimal> {
-    let req = BalanceAllowanceRequest::builder().asset_type(AssetType::Collateral).build();
+async fn sdk_balance(client: &Client<Authenticated<Normal>>) -> CoreResult<Decimal> {
+    let req = BalanceAllowanceRequest::builder()
+        .asset_type(AssetType::Collateral)
+        .build();
     let bal = client
         .balance_allowance(req)
         .await
@@ -328,7 +377,9 @@ async fn start_user_ws(
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    let _ = events.send(VenueEvent::Fatal(format!("user ws error: {e}"))).await;
+                    let _ = events
+                        .send(VenueEvent::Fatal(format!("user ws error: {e}")))
+                        .await;
                     break;
                 }
             }
@@ -392,7 +443,10 @@ fn map_side(s: SdkSide) -> Side {
 /// Map venue/SDK error text to a structured code without losing the raw text.
 pub fn map_sdk_err(raw: &str) -> CoreError {
     let lower = raw.to_lowercase();
-    let code = if lower.contains("insufficient") || lower.contains("allowance") || lower.contains("balance") {
+    let code = if lower.contains("insufficient")
+        || lower.contains("allowance")
+        || lower.contains("balance")
+    {
         CoreErrorCode::InsufficientFunds
     } else if lower.contains("tick") {
         CoreErrorCode::InvalidTickSize

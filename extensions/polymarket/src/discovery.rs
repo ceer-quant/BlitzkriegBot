@@ -8,16 +8,19 @@
 //! With this running, Node is out of the market-data path entirely: the core
 //! finds its own markets, pulls its own books/spot, decides and trades.
 
-use blitzkrieg_market_api::{MarketDescriptor, MarketHost};
 use crate::gamma::{duration_label, slug_for};
-use polymarket_client_sdk_v2::gamma::types::request::MarketsRequest;
+use blitzkrieg_market_api::{MarketDescriptor, MarketHost};
 use polymarket_client_sdk_v2::gamma::Client as GammaClient;
+use polymarket_client_sdk_v2::gamma::types::request::MarketsRequest;
 use std::sync::Arc;
 use std::time::Duration;
 
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Spawn the discovery loop. `assets` are e.g. ["BTC","ETH"]; `round_sec` is the
@@ -37,7 +40,9 @@ pub fn spawn(
             }
         };
         if duration_label(round_sec).is_none() {
-            eprintln!("polymarket-extension: unsupported round duration {round_sec}s; discovery disabled");
+            eprintln!(
+                "polymarket-extension: unsupported round duration {round_sec}s; discovery disabled"
+            );
             return;
         }
 
@@ -53,7 +58,9 @@ pub fn spawn(
 
             let mut markets: Vec<MarketDescriptor> = Vec::new();
             for asset in &assets {
-                let Some(slug) = slug_for(asset, round_sec, now / 1000) else { continue };
+                let Some(slug) = slug_for(asset, round_sec, now / 1000) else {
+                    continue;
+                };
                 let req = MarketsRequest::builder().slug(vec![slug.clone()]).build();
                 let found = match client.markets(&req).await {
                     Ok(m) => m,
@@ -62,11 +69,15 @@ pub fn spawn(
                         continue;
                     }
                 };
-                let Some(m) = found.into_iter().next() else { continue };
+                let Some(m) = found.into_iter().next() else {
+                    continue;
+                };
                 if m.closed.unwrap_or(false) || !m.active.unwrap_or(false) {
                     continue;
                 }
-                let Some(condition_id) = m.condition_id.map(|c| c.to_string()) else { continue };
+                let Some(condition_id) = m.condition_id.map(|c| c.to_string()) else {
+                    continue;
+                };
                 let outcomes = m.outcomes.clone().unwrap_or_default();
                 let tokens = m.clob_token_ids.clone().unwrap_or_default();
                 let prices = m.outcome_prices.clone().unwrap_or_default();
@@ -81,7 +92,9 @@ pub fn spawn(
                     let o = o.to_lowercase();
                     o == "down" || o == "no"
                 });
-                let (Some(ui), Some(di)) = (up_idx, down_idx) else { continue };
+                let (Some(ui), Some(di)) = (up_idx, down_idx) else {
+                    continue;
+                };
 
                 let end_ms = m.end_date.map(|d| d.timestamp_millis()).unwrap_or(0);
                 if end_ms <= now {
@@ -93,8 +106,14 @@ pub fn spawn(
                     question_id: m.question_id.map(|q| q.to_string()).unwrap_or_default(),
                     up_token_id: tokens[ui].to_string(),
                     down_token_id: tokens[di].to_string(),
-                    up_price: prices.get(ui).copied().unwrap_or_else(|| rust_decimal::Decimal::new(5, 1)),
-                    down_price: prices.get(di).copied().unwrap_or_else(|| rust_decimal::Decimal::new(5, 1)),
+                    up_price: prices
+                        .get(ui)
+                        .copied()
+                        .unwrap_or_else(|| rust_decimal::Decimal::new(5, 1)),
+                    down_price: prices
+                        .get(di)
+                        .copied()
+                        .unwrap_or_else(|| rust_decimal::Decimal::new(5, 1)),
                     expires_at_ms: end_ms,
                     round_slot: end_ms / 1000 / round_sec,
                     neg_risk: m.neg_risk.unwrap_or(true),
@@ -108,12 +127,18 @@ pub fn spawn(
             last_slot = slot;
 
             let count = markets.len();
-            let label_summary = markets.iter().map(|m| m.asset.clone()).collect::<Vec<_>>().join(",");
+            let label_summary = markets
+                .iter()
+                .map(|m| m.asset.clone())
+                .collect::<Vec<_>>()
+                .join(",");
 
             // Registers the round with the engine AND subscribes its tokens on the
             // running data feed (both inside the host).
             host.on_round_markets(markets).await;
-            eprintln!("polymarket-extension: discovered round slot={slot} ({count} markets: {label_summary})");
+            eprintln!(
+                "polymarket-extension: discovered round slot={slot} ({count} markets: {label_summary})"
+            );
         }
     })
 }

@@ -24,7 +24,12 @@ pub fn duration_label(round_duration_sec: i64) -> Option<&'static str> {
 pub fn slug_for(asset: &str, round_duration_sec: i64, now_sec: i64) -> Option<String> {
     let label = duration_label(round_duration_sec)?;
     let slot_start = (now_sec / round_duration_sec) * round_duration_sec;
-    Some(format!("{}-updown-{}-{}", asset.to_lowercase(), label, slot_start))
+    Some(format!(
+        "{}-updown-{}-{}",
+        asset.to_lowercase(),
+        label,
+        slot_start
+    ))
 }
 
 /// Parse the JSON-string-encoded fields Gamma returns (`outcomes`, `clobTokenIds`,
@@ -51,11 +56,20 @@ pub fn parse_market_tokens(
     let price_at = |i: usize| -> Decimal {
         prices
             .get(i)
-            .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| v.as_f64().map(|f| f.to_string())))
+            .and_then(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| v.as_f64().map(|f| f.to_string()))
+            })
             .and_then(|s| Decimal::from_str_exact(&s).ok())
             .unwrap_or_else(|| Decimal::new(5, 1))
     };
-    Some((tokens[up].clone(), tokens[down].clone(), price_at(up), price_at(down)))
+    Some((
+        tokens[up].clone(),
+        tokens[down].clone(),
+        price_at(up),
+        price_at(down),
+    ))
 }
 
 /// Raw Gamma fields for one market, as returned by the API.
@@ -72,7 +86,10 @@ pub struct GammaMarketInput {
 }
 
 /// Build a market descriptor from raw Gamma fields.
-pub fn market_from_gamma(input: GammaMarketInput, round_duration_sec: i64) -> Option<MarketDescriptor> {
+pub fn market_from_gamma(
+    input: GammaMarketInput,
+    round_duration_sec: i64,
+) -> Option<MarketDescriptor> {
     let (up_token, down_token, up_price, down_price) = parse_market_tokens(
         &input.outcomes,
         &input.clob_token_ids,
@@ -114,7 +131,12 @@ mod tests {
 
     #[test]
     fn parse_tokens_finds_up_down() {
-        let r = parse_market_tokens("[\"Up\",\"Down\"]", "[\"111\",\"222\"]", "[\"0.42\",\"0.58\"]").unwrap();
+        let r = parse_market_tokens(
+            "[\"Up\",\"Down\"]",
+            "[\"111\",\"222\"]",
+            "[\"0.42\",\"0.58\"]",
+        )
+        .unwrap();
         assert_eq!(r.0, "111");
         assert_eq!(r.1, "222");
         assert_eq!(r.2, dec!(0.42));

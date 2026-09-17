@@ -62,7 +62,8 @@ impl DataFeed for PolymarketDataFeed {
         Box::pin(async move {
             // `spawn_feed` returns a handle immediately and drives the loops on
             // background tasks; register it so the host can re-subscribe tokens.
-            let handle = crate::feed::spawn_feed(host.clone(), initial_tokens, config.spot_assets).await;
+            let handle =
+                crate::feed::spawn_feed(host.clone(), initial_tokens, config.spot_assets).await;
             host.install_subscription_control(Arc::new(handle)).await;
             Ok(())
         })
@@ -86,7 +87,12 @@ impl MarketDiscovery for PolymarketDiscovery {
         config: DiscoveryConfig,
     ) -> BoxFuture<'a, CoreResult<()>> {
         Box::pin(async move {
-            crate::discovery::spawn(host, config.assets, config.round_duration_sec, config.poll_sec);
+            crate::discovery::spawn(
+                host,
+                config.assets,
+                config.round_duration_sec,
+                config.poll_sec,
+            );
             Ok(())
         })
     }

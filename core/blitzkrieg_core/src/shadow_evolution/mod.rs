@@ -1149,11 +1149,7 @@ mod tests {
             .find(|u| u.strategy == "alpha")
             .expect("the healthy strategy keeps its unit");
         assert!(
-            good_unit
-                .set
-                .variants
-                .iter()
-                .all(|v| !v.crashed),
+            good_unit.set.variants.iter().all(|v| !v.crashed),
             "the healthy variant must not be collateral damage"
         );
 

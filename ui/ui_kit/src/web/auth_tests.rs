@@ -87,7 +87,11 @@ fn request_body(addr: SocketAddr, raw: &str) -> (u16, String) {
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let body = out.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("").to_string();
+    let body = out
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b)
+        .unwrap_or("")
+        .to_string();
     (status, body)
 }
 
@@ -124,7 +128,10 @@ fn login_then_session_passes_via_header_query_and_cookie() {
         "session header passes"
     );
     assert_eq!(
-        request(addr, &format!("GET /api/snapshot?token={token} HTTP/1.1\r\n\r\n")),
+        request(
+            addr,
+            &format!("GET /api/snapshot?token={token} HTTP/1.1\r\n\r\n")
+        ),
         200,
         "session query passes"
     );
@@ -214,7 +221,9 @@ fn cross_origin_refused_and_loopback_origin_ok() {
     assert_eq!(
         request(
             addr,
-            &format!("GET /api/snapshot?token={token} HTTP/1.1\r\nOrigin: http://127.0.0.1\r\n\r\n")
+            &format!(
+                "GET /api/snapshot?token={token} HTTP/1.1\r\nOrigin: http://127.0.0.1\r\n\r\n"
+            )
         ),
         200,
         "loopback origin passes"
@@ -331,7 +340,13 @@ fn ping_is_reachable_without_a_session_and_discloses_nothing() {
     assert_eq!(doc["ok"], serde_json::json!(true));
     assert_eq!(doc["authRequired"], serde_json::json!(true));
     // The probe must not become a snapshot backdoor.
-    for leaked in ["balance", "positions", "trades", "strategyStats", "available"] {
+    for leaked in [
+        "balance",
+        "positions",
+        "trades",
+        "strategyStats",
+        "available",
+    ] {
         assert!(
             !body.contains(leaked),
             "/ping must not leak `{leaked}`: {body}"
@@ -383,7 +398,10 @@ fn gateway_mode_refuses_to_start_without_env_credentials() {
         10,
         Dispatcher::new(SupervisorConfig::from_env(String::new()), false),
     );
-    assert!(server.auth_required(), "gateway mode always requires a session");
+    assert!(
+        server.auth_required(),
+        "gateway mode always requires a session"
+    );
     assert!(!server.credentials_configured());
 
     let why = server
@@ -400,16 +418,24 @@ fn gateway_mode_refuses_to_start_without_env_credentials() {
     // A half-configured pair is still unconfigured — guessing which half was
     // meant is how a panel ends up open.
     server.set_panel_credentials(Some("ops".to_string()), None);
-    assert!(server.require_credentials().is_err(), "user without password");
+    assert!(
+        server.require_credentials().is_err(),
+        "user without password"
+    );
     server.set_panel_credentials(None, Some("pw".to_string()));
-    assert!(server.require_credentials().is_err(), "password without user");
+    assert!(
+        server.require_credentials().is_err(),
+        "password without user"
+    );
     server.set_panel_credentials(Some("  ".to_string()), Some("pw".to_string()));
     assert!(server.require_credentials().is_err(), "blank user is unset");
 
     // A complete pair starts, and the session it issues works.
     server.set_panel_credentials(Some("ops".to_string()), Some("chosen-pw".to_string()));
     assert!(server.credentials_configured());
-    server.require_credentials().expect("a complete pair starts");
+    server
+        .require_credentials()
+        .expect("a complete pair starts");
     assert!(server.login("ops", "chosen-pw").is_some());
     assert!(server.login("ops", "wrong").is_none());
 
@@ -444,7 +470,9 @@ fn session_tokens_are_unpredictable_and_distinct() {
     unique.sort();
     unique.dedup();
     assert_eq!(unique.len(), probes.len(), "tokens must not repeat");
-    assert!(probes.iter().all(|t| t.len() == 40 && t.chars().all(|c| c.is_ascii_hexdigit())));
+    assert!(probes
+        .iter()
+        .all(|t| t.len() == 40 && t.chars().all(|c| c.is_ascii_hexdigit())));
 }
 
 #[test]
@@ -492,7 +520,10 @@ fn logout_revokes_the_session() {
         200
     );
     assert_eq!(
-        request(addr, &format!("POST /api/logout?token={token} HTTP/1.1\r\nContent-Length: 0\r\n\r\n")),
+        request(
+            addr,
+            &format!("POST /api/logout?token={token} HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+        ),
         200,
         "logout is accepted"
     );
@@ -598,10 +629,10 @@ fn origin_matching_accepts_only_loopback_spellings() {
     }
     for bad in [
         "http://evil.example",
-        "http://127.0.0.1.evil.example",   // suffix attack on a prefix check
-        "http://localhost.evil.example",   // ditto for the hostname branch
+        "http://127.0.0.1.evil.example", // suffix attack on a prefix check
+        "http://localhost.evil.example", // ditto for the hostname branch
         "http://evil.example/#http://127.0.0.1",
-        "https://127.0.0.1@evil.example",  // userinfo trick
+        "https://127.0.0.1@evil.example", // userinfo trick
         "http://notlocalhost",
         "null",
     ] {

@@ -8,7 +8,7 @@
 //! If credentials are absent it stays inert, so a live binary without keys still
 //! serves the socket.
 
-use crate::venue::{spawn_from_env, VenueEvent};
+use crate::venue::{VenueEvent, spawn_from_env};
 use blitzkrieg_market_api::{CoreError, CoreErrorCode, MarketHost, ReconcileSnapshot};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +16,10 @@ use tokio::sync::mpsc;
 
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Spawn the live bridge if credentials are present. `markets` are condition ids
@@ -28,7 +31,9 @@ pub async fn spawn_if_configured(
     if std::env::var("POLYMARKET_PRIVATE_KEY").is_err()
         || std::env::var("POLYMARKET_FUNDER_ADDRESS").is_err()
     {
-        eprintln!("polymarket-extension: live mode but POLYMARKET_* credentials absent — venue bridge disabled");
+        eprintln!(
+            "polymarket-extension: live mode but POLYMARKET_* credentials absent — venue bridge disabled"
+        );
         return Ok(None);
     }
 
@@ -40,7 +45,9 @@ pub async fn spawn_if_configured(
     match venue.balance().await {
         Ok(b) => {
             host.seed_balance(b).await;
-            eprintln!("polymarket-extension: live bridge ready signer={signer} funder={funder} balance={b}");
+            eprintln!(
+                "polymarket-extension: live bridge ready signer={signer} funder={funder} balance={b}"
+            );
         }
         Err(e) => eprintln!("polymarket-extension: live balance fetch failed: {e}"),
     }
@@ -66,15 +73,23 @@ pub async fn spawn_if_configured(
                     }
                     Err(e) => {
                         eprintln!("polymarket-extension: failed to cancel orphan {id}: {e}");
-                        host.report_error(CoreError::new(CoreErrorCode::VenueError, format!("orphan cancel failed for {id}: {e}"))).await;
+                        host.report_error(CoreError::new(
+                            CoreErrorCode::VenueError,
+                            format!("orphan cancel failed for {id}: {e}"),
+                        ))
+                        .await;
                     }
                 }
             }
             if cancelled > 0 {
-                eprintln!("polymarket-extension: startup sweep cancelled {cancelled} orphan order(s)");
+                eprintln!(
+                    "polymarket-extension: startup sweep cancelled {cancelled} orphan order(s)"
+                );
             }
         }
-        Err(e) => eprintln!("polymarket-extension: startup orphan sweep skipped (snapshot failed: {e})"),
+        Err(e) => {
+            eprintln!("polymarket-extension: startup orphan sweep skipped (snapshot failed: {e})")
+        }
     }
 
     let handle = tokio::spawn(async move {
@@ -87,7 +102,10 @@ pub async fn spawn_if_configured(
             for order in host.take_pending_orders().await {
                 let core_order_id = order.core_order_id.clone();
                 match venue.place(order).await {
-                    Ok(p) => host.on_order_accepted(&core_order_id, &p.venue_order_id).await,
+                    Ok(p) => {
+                        host.on_order_accepted(&core_order_id, &p.venue_order_id)
+                            .await
+                    }
                     Err(e) => {
                         host.on_order_rejected(&core_order_id).await;
                         host.report_error(e).await;
@@ -99,12 +117,17 @@ pub async fn spawn_if_configured(
             while let Ok(ev) = evt_rx.try_recv() {
                 match ev {
                     VenueEvent::Fill(fill) => host.on_fill(fill).await,
-                    VenueEvent::OrderLive { venue_order_id } => host.on_order_live(&venue_order_id).await,
-                    VenueEvent::OrderCancelled { venue_order_id } => host.on_order_cancelled(&venue_order_id).await,
+                    VenueEvent::OrderLive { venue_order_id } => {
+                        host.on_order_live(&venue_order_id).await
+                    }
+                    VenueEvent::OrderCancelled { venue_order_id } => {
+                        host.on_order_cancelled(&venue_order_id).await
+                    }
                     VenueEvent::ReconcileReport(_) => {}
                     VenueEvent::Fatal(msg) => {
                         eprintln!("polymarket-extension: venue fatal: {msg}");
-                        host.report_error(CoreError::new(CoreErrorCode::VenueError, msg)).await;
+                        host.report_error(CoreError::new(CoreErrorCode::VenueError, msg))
+                            .await;
                     }
                 }
             }
@@ -115,7 +138,12 @@ pub async fn spawn_if_configured(
                 since_reconcile = 0;
                 match venue.snapshot().await {
                     Ok((open_order_ids, trades)) => {
-                        host.on_reconcile(ReconcileSnapshot { open_order_ids, trades, now_ms: now_ms() }).await;
+                        host.on_reconcile(ReconcileSnapshot {
+                            open_order_ids,
+                            trades,
+                            now_ms: now_ms(),
+                        })
+                        .await;
                     }
                     Err(e) => {
                         host.report_error(e).await;

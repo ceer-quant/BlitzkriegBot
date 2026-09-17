@@ -837,12 +837,24 @@ impl Core {
             "totalGrossPnl": 0.0, "totalFees": 0.0, "totalNetPnl": 0.0,
             "avgHoldTimeSec": 0.0, "bestTradePnl": 0.0, "worstTradePnl": 0.0,
         });
-        let (mut wins, mut losses, mut gross, mut fees, mut net, mut best, mut worst, mut holds) =
-            (0u64, 0u64, 0.0, 0.0, 0.0, f64::NEG_INFINITY, f64::INFINITY, 0.0);
+        let (mut wins, mut losses, mut gross, mut fees, mut net, mut best, mut worst, mut holds) = (
+            0u64,
+            0u64,
+            0.0,
+            0.0,
+            0.0,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            0.0,
+        );
         for r in rows.iter() {
             let num = |k: &str| r.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
             let net_i = num("netPnlUsd");
-            if net_i >= 0.0 { wins += 1 } else { losses += 1 }
+            if net_i >= 0.0 {
+                wins += 1
+            } else {
+                losses += 1
+            }
             gross += num("grossPnlUsd");
             fees += num("feesUsd");
             net += net_i;
@@ -854,7 +866,11 @@ impl Core {
         s["totalTrades"] = serde_json::json!(wins + losses);
         s["wins"] = serde_json::json!(wins);
         s["losses"] = serde_json::json!(losses);
-        s["winRate"] = serde_json::json!(if n > 0.0 { wins as f64 * 100.0 / n } else { 0.0 });
+        s["winRate"] = serde_json::json!(if n > 0.0 {
+            wins as f64 * 100.0 / n
+        } else {
+            0.0
+        });
         s["totalGrossPnl"] = serde_json::json!(gross);
         s["totalFees"] = serde_json::json!(fees);
         s["totalNetPnl"] = serde_json::json!(net);
@@ -1761,13 +1777,8 @@ impl Core {
                 // `d.delta` is SIGNED: a FAILED rollback reverses the accrual by
                 // the same amounts the ledger just refunded, so a rolled-back
                 // entry leaves neither cash nor shares behind.
-                self.positions.apply_entry_fill(
-                    &id,
-                    d.delta,
-                    px,
-                    fee_usd,
-                    d.role,
-                );
+                self.positions
+                    .apply_entry_fill(&id, d.delta, px, fee_usd, d.role);
                 // A fully rolled-back entry has no shares and no basis: drop the
                 // shell so it cannot block `can_open` or render as an empty row.
                 self.positions.drop_if_empty(&id);
@@ -1808,21 +1819,17 @@ impl Core {
                             // position is done — it must close, or it would sit on
                             // the books forever with an untradeable stub of shares.
                             Some(left)
-                                if left <= Decimal::ZERO || crate::position::floor_to_grid(left)
-                                    == Decimal::ZERO =>
+                                if left <= Decimal::ZERO
+                                    || crate::position::floor_to_grid(left) == Decimal::ZERO =>
                             {
                                 let reason = self
                                     .exit_reasons
                                     .remove(token)
                                     .unwrap_or(ExitReason::Manual);
                                 let was_maker = d.role.is_maker();
-                                if let Some(closed) = self.positions.close(
-                                    &id,
-                                    px,
-                                    reason,
-                                    was_maker,
-                                    now_ms,
-                                ) {
+                                if let Some(closed) =
+                                    self.positions.close(&id, px, reason, was_maker, now_ms)
+                                {
                                     self.persist_positions();
                                     self.on_position_closed(&closed, now_ms);
                                 }
@@ -5324,7 +5331,13 @@ mod account_precision_tests {
         let mut crossed = core();
         let (id, _) = crossed
             .place_pending(
-                req(Side::Buy, FillPolicy::MakerThenTaker, dec!(0.70), dec!(10), "c"),
+                req(
+                    Side::Buy,
+                    FillPolicy::MakerThenTaker,
+                    dec!(0.70),
+                    dec!(10),
+                    "c",
+                ),
                 1,
             )
             .unwrap();
@@ -5346,7 +5359,10 @@ mod account_precision_tests {
         // policy-only resolution this silently paid nothing.
         let mut surprised = core();
         let (id2, _) = surprised
-            .place_pending(req(Side::Buy, FillPolicy::Maker, dec!(0.70), dec!(10), "s"), 1)
+            .place_pending(
+                req(Side::Buy, FillPolicy::Maker, dec!(0.70), dec!(10), "s"),
+                1,
+            )
             .unwrap();
         surprised.confirm_live(&id2, 1).unwrap();
         surprised
@@ -5366,11 +5382,17 @@ mod account_precision_tests {
         // not modelled, but a maker fill is genuinely free.)
         let mut rested = core();
         let (id3, _) = rested
-            .place_pending(req(Side::Buy, FillPolicy::Taker, dec!(0.70), dec!(10), "r"), 1)
+            .place_pending(
+                req(Side::Buy, FillPolicy::Taker, dec!(0.70), dec!(10), "r"),
+                1,
+            )
             .unwrap();
         rested.confirm_live(&id3, 1).unwrap();
         rested
-            .ingest_fill(fill_as(&id3, "r1", Side::Buy, dec!(0.70), dec!(10), true), 2)
+            .ingest_fill(
+                fill_as(&id3, "r1", Side::Buy, dec!(0.70), dec!(10), true),
+                2,
+            )
             .unwrap();
         let pos3 = rested.positions().open_positions()[0].clone();
         assert_eq!(pos3.entry_role, OrderRole::Maker, "the report said maker");
@@ -5444,7 +5466,13 @@ mod account_precision_tests {
         let mut c = core();
         let (id, _) = c
             .place(
-                req(Side::Buy, FillPolicy::MakerThenTaker, dec!(0.43), dec!(10), "entry"),
+                req(
+                    Side::Buy,
+                    FillPolicy::MakerThenTaker,
+                    dec!(0.43),
+                    dec!(10),
+                    "entry",
+                ),
                 1_000,
                 1,
             )
@@ -5476,16 +5504,19 @@ mod account_precision_tests {
         // Basis is the real money spent: 4×0.43 rested, 6×0.43 crossed.
         assert_eq!(pos.cost_usd, dec!(10) * dec!(0.43));
         // The fee covers the TAKER leg only — not all 10 shares at the taker rate.
-        let expected_fee =
-            (crate::exit_policy::taker_fee_pct(dec!(0.43)) / Decimal::ONE_HUNDRED)
-                * dec!(0.43)
-                * dec!(6);
+        let expected_fee = (crate::exit_policy::taker_fee_pct(dec!(0.43)) / Decimal::ONE_HUNDRED)
+            * dec!(0.43)
+            * dec!(6);
         assert_eq!(pos.flows.entry_fee_usd, expected_fee);
         assert!(expected_fee > Decimal::ZERO);
 
         // Exit in full as a taker at a profit.
         let (sid, _) = c
-            .place(req(Side::Sell, FillPolicy::Taker, dec!(0.95), dec!(10), "exit"), 0, 5)
+            .place(
+                req(Side::Sell, FillPolicy::Taker, dec!(0.95), dec!(10), "exit"),
+                0,
+                5,
+            )
             .unwrap();
         assert_eq!(c.ome().get(&sid).unwrap().status, OrderStatus::Filled);
         assert_reconciled(&c, "mixed maker/taker entry, taker exit");
@@ -5574,7 +5605,10 @@ mod account_precision_tests {
         // Rest the order so the venue, not the matcher, reports the fills — the
         // rollback must target the SAME trade the provisional fill created.
         let (id, _) = c
-            .place_pending(req(Side::Buy, FillPolicy::Maker, dec!(0.43), dec!(10), "entry"), 1)
+            .place_pending(
+                req(Side::Buy, FillPolicy::Maker, dec!(0.43), dec!(10), "entry"),
+                1,
+            )
             .unwrap();
         c.confirm_live(&id, 1).unwrap();
         c.ingest_fill(fill(&id, "r1", Side::Buy, dec!(0.43), dec!(10)), 2)
@@ -5618,7 +5652,10 @@ mod account_precision_tests {
         // The order goes out and the venue ack'd it; the fill arrives only later
         // and only in part — the classic reconciliation gap.
         let (id, _) = c
-            .place_pending(req(Side::Buy, FillPolicy::Taker, dec!(0.62), dec!(10), "entry"), 1)
+            .place_pending(
+                req(Side::Buy, FillPolicy::Taker, dec!(0.62), dec!(10), "entry"),
+                1,
+            )
             .unwrap();
         c.confirm_live(&id, 1).unwrap();
         c.ingest_fill(fill(&id, "gap-1", Side::Buy, dec!(0.62), dec!(4)), 2)
@@ -5629,7 +5666,11 @@ mod account_precision_tests {
 
         // Close the whole holding as a taker at a loss.
         let (sid, _) = c
-            .place(req(Side::Sell, FillPolicy::Taker, dec!(0.40), held, "exit"), 0, 4)
+            .place(
+                req(Side::Sell, FillPolicy::Taker, dec!(0.40), held, "exit"),
+                0,
+                4,
+            )
             .unwrap();
         assert_eq!(c.ome().get(&sid).unwrap().status, OrderStatus::Filled);
         assert_reconciled(&c, "reconciliation gap partial entry");
@@ -5652,7 +5693,11 @@ mod account_precision_tests {
     fn the_identity_holds_mid_flight_and_entry_cost_is_not_the_held_basis() {
         let mut c = core();
         let (id, _) = c
-            .place(req(Side::Buy, FillPolicy::Taker, dec!(0.43), dec!(10), "in"), 0, 1)
+            .place(
+                req(Side::Buy, FillPolicy::Taker, dec!(0.43), dec!(10), "in"),
+                0,
+                1,
+            )
             .unwrap();
         c.ingest_fill(
             fill_as(&id, "mf-1", Side::Buy, dec!(0.43), dec!(10), false),
@@ -5662,7 +5707,11 @@ mod account_precision_tests {
 
         // Sell 4 of the 10 — the position stays open with both cash legs non-zero.
         let (sid, _) = c
-            .place(req(Side::Sell, FillPolicy::Taker, dec!(0.60), dec!(4), "out"), 0, 3)
+            .place(
+                req(Side::Sell, FillPolicy::Taker, dec!(0.60), dec!(4), "out"),
+                0,
+                3,
+            )
             .unwrap();
         c.ingest_fill(
             fill_as(&sid, "mf-2", Side::Sell, dec!(0.60), dec!(4), false),

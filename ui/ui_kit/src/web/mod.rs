@@ -372,7 +372,6 @@ pub fn render_json(s: &UiSnapshot, lifecycle: Option<&LifecycleView>) -> String 
     doc.to_string()
 }
 
-
 /// Minimal std-only base64 decoder for basic-auth passwords (the only place
 /// the web layer needs it). Returns raw bytes; callers validate UTF-8.
 fn data_encoding_free_base64(s: &str) -> Vec<u8> {
@@ -455,7 +454,9 @@ fn vue_panel_dir() -> Option<std::path::PathBuf> {
         .join("../webapp/webui/dist/index.html")
         .canonicalize()
         .ok()?;
-    dir.is_file().then(|| dir.parent().map(std::path::Path::to_path_buf)).flatten()
+    dir.is_file()
+        .then(|| dir.parent().map(std::path::Path::to_path_buf))
+        .flatten()
 }
 
 /// Serve a static asset from the Vue panel dir; `/panel/` or `/panel` (no
@@ -586,7 +587,9 @@ fn random_hex(n_bytes: usize) -> String {
             .wrapping_add(1442695040888963407)
             ^ (std::process::id() as u64) << 32;
         for b in bytes.iter_mut() {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *b = (seed >> 24) as u8;
         }
     }
@@ -805,25 +808,38 @@ impl WebServer {
             if s.len() >= MAX_SESSIONS {
                 // Oldest-first eviction keeps a runaway login loop from growing
                 // the map without bound.
-                if let Some(oldest) = s.iter().min_by_key(|(_, v)| v.seen_ms).map(|(k, _)| k.clone()) {
+                if let Some(oldest) = s
+                    .iter()
+                    .min_by_key(|(_, v)| v.seen_ms)
+                    .map(|(k, _)| k.clone())
+                {
                     s.remove(&oldest);
                 }
             }
-            s.insert(token.clone(), Session { issued_ms: now, seen_ms: now });
+            s.insert(
+                token.clone(),
+                Session {
+                    issued_ms: now,
+                    seen_ms: now,
+                },
+            );
         }
         Some(token)
     }
 
     fn evict_expired(sessions: &mut std::collections::BTreeMap<String, Session>, now: u64) {
         sessions.retain(|_, s| {
-            now.saturating_sub(s.issued_ms) < SESSION_TTL_MS && now.saturating_sub(s.seen_ms) < SESSION_IDLE_MS
+            now.saturating_sub(s.issued_ms) < SESSION_TTL_MS
+                && now.saturating_sub(s.seen_ms) < SESSION_IDLE_MS
         });
     }
 
     /// Does this token name a live session? Expired ones are dropped on sight.
     fn session_valid(&self, token: &str) -> bool {
         let now = auth_now_ms();
-        let Ok(mut s) = self.sessions.lock() else { return false };
+        let Ok(mut s) = self.sessions.lock() else {
+            return false;
+        };
         Self::evict_expired(&mut s, now);
         match s.get_mut(token) {
             Some(entry) => {
@@ -1011,7 +1027,11 @@ impl WebServer {
         // E6-a: auth + origin gate runs BEFORE any route does work.
         let status_gate = self.authorize(&req);
         if status_gate != 200 {
-            let reason = if status_gate == 401 { "Unauthorized" } else { "Forbidden" };
+            let reason = if status_gate == 401 {
+                "Unauthorized"
+            } else {
+                "Forbidden"
+            };
             let head = format!(
                 "HTTP/1.1 {status_gate} {reason}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
             );
@@ -1020,8 +1040,10 @@ impl WebServer {
             return;
         }
 
-        let (status, ctype, body): (u16, &'static str, Vec<u8>) =
-            match (req.method.as_str(), target.as_str()) {
+        let (status, ctype, body): (u16, &'static str, Vec<u8>) = match (
+            req.method.as_str(),
+            target.as_str(),
+        ) {
             ("GET", "/api/ping") | ("HEAD", "/api/ping") => {
                 // Unauthenticated by design; see `ping_doc`.
                 (200, "application/json", self.ping_doc().into_bytes())
@@ -1048,8 +1070,8 @@ impl WebServer {
                     None => {
                         // read-only mode: registry via the snapshot client
                         let mut doc = serde_json::json!({"connected": false});
-                        doc["lastError"] = serde_json::json!(
-                            "plugin registry requires gateway (--manage)");
+                        doc["lastError"] =
+                            serde_json::json!("plugin registry requires gateway (--manage)");
                         doc
                     }
                 };
@@ -1090,7 +1112,11 @@ impl WebServer {
                         "ok": false, "error": "请求格式错误（需要 JSON {user, password}）",
                     }),
                 };
-                let status = if doc["ok"] == serde_json::json!(true) { 200 } else { 401 };
+                let status = if doc["ok"] == serde_json::json!(true) {
+                    200
+                } else {
+                    401
+                };
                 (
                     status,
                     "application/json; charset=utf-8",

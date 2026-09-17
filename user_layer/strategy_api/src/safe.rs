@@ -626,7 +626,12 @@ impl SafeStrategy for Doubler {
         vec![serde_json::json!({ "books_seen": self.mids.len() })]
     }
     fn evolvable_knobs(&self) -> Vec<Knob> {
-        vec![Knob { name: "bias".into(), value: "1.0".into(), min: "0.1".into(), max: "2.0".into() }]
+        vec![Knob {
+            name: "bias".into(),
+            value: "1.0".into(),
+            min: "0.1".into(),
+            max: "2.0".into(),
+        }]
     }
     fn gate_exemptions(&self) -> &'static [&'static str] {
         &["timing"]
@@ -648,7 +653,10 @@ mod tests {
         assert!(!vtp.is_null(), "create returned null");
         let vt = unsafe { &*vtp };
         assert_eq!(vt.abi_version, crate::BK_ABI_VERSION);
-        assert_eq!(super::__bk_export::bk_strategy_abi_version(), crate::BK_ABI_VERSION);
+        assert_eq!(
+            super::__bk_export::bk_strategy_abi_version(),
+            crate::BK_ABI_VERSION
+        );
 
         // 2. instance lifecycle.
         let handle = unsafe { (vt.create.expect("create"))() };
@@ -661,7 +669,10 @@ mod tests {
         let ba = CString::new("0.51").unwrap();
         let depth = CString::new("100").unwrap();
         let zero = CString::new("0").unwrap();
-        let lvl = BkLevel { price: bb.as_ptr(), size: depth.as_ptr() };
+        let lvl = BkLevel {
+            price: bb.as_ptr(),
+            size: depth.as_ptr(),
+        };
         let view = crate::BkBookView {
             symbol: sym.as_ptr(),
             asset: c"BTC".as_ptr(),
@@ -692,7 +703,11 @@ mod tests {
             slot: 0,
             neg_risk: 1,
         };
-        let round = crate::BkRound { slot: 0, time_left_sec: 60, now_ms: 0 };
+        let round = crate::BkRound {
+            slot: 0,
+            time_left_sec: 60,
+            now_ms: 0,
+        };
         let rv = BkRoundView {
             round,
             markets: &market,
@@ -700,7 +715,9 @@ mod tests {
         };
         let out_raw = unsafe { (vt.evaluate.expect("evaluate hook"))(handle, &rv) };
         assert!(!out_raw.is_null(), "evaluate returned null");
-        let out = unsafe { CStr::from_ptr(out_raw) }.to_string_lossy().into_owned();
+        let out = unsafe { CStr::from_ptr(out_raw) }
+            .to_string_lossy()
+            .into_owned();
         unsafe { crate::bk_strategy_free_string(out_raw) };
         let v: serde_json::Value = serde_json::from_str(&out).expect("envelope json");
         let entries = v["entries"].as_array().expect("entries array");
@@ -711,7 +728,9 @@ mod tests {
 
         // 5. optional hooks emit the declared shapes.
         let conf = super::__bk_export::bk_strategy_gate_exemptions(handle);
-        let conf_s = unsafe { CStr::from_ptr(conf) }.to_string_lossy().into_owned();
+        let conf_s = unsafe { CStr::from_ptr(conf) }
+            .to_string_lossy()
+            .into_owned();
         unsafe { crate::bk_strategy_free_string(conf) };
         let conf_v: serde_json::Value = serde_json::from_str(&conf_s).expect("exemptions json");
         assert_eq!(conf_v["timing"], serde_json::json!(true), "{conf_s}");
@@ -719,7 +738,9 @@ mod tests {
 
         // 6. diagnostics round-trip.
         let d_raw = unsafe { (vt.diagnostics.expect("diagnostics"))(handle) };
-        let d = unsafe { CStr::from_ptr(d_raw) }.to_string_lossy().into_owned();
+        let d = unsafe { CStr::from_ptr(d_raw) }
+            .to_string_lossy()
+            .into_owned();
         unsafe { crate::bk_strategy_free_string(d_raw) };
         assert!(d.contains("books_seen"), "{d}");
 
