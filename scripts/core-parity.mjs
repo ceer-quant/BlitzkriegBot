@@ -35,9 +35,16 @@ function check(name, cond, detail = '') {
 }
 
 function order(mode, tokenId, price, size, key, asset = 'BTC', extra = {}) {
+  // roundSlot must describe a LIVE round: the position engine derives
+  // expires_at_ms = (slot+1)*roundSec*1000, so the old fixed `1` was an expiry
+  // in the deep past and any core tick between place and assertion force-exited
+  // the position (the CI-only "positions.list []" failure). Derive the slot the
+  // same way the backtest gate does.
+  const liveSlot = Math.floor((Date.now() + 900_000) / 1000 / 900);
   return {
     tokenId, conditionId: 'cond', side: 'buy', mode, price, size,
-    internalKey: key, strategy: 'spread_arb', asset, direction: 'up', roundSlot: 1, ...extra,
+    internalKey: key, strategy: 'spread_arb', asset, direction: 'up',
+    roundSlot: liveSlot, ...extra,
   };
 }
 
