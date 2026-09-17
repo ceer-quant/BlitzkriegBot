@@ -23,6 +23,24 @@ export function defaultSocketPath(env = process.env) {
   return socketPathFor(SOCKET_PREFIX, env);
 }
 
+/**
+ * The socket a client should use. Mirrors `resolveSocketPath` in
+ * `src/core/core-socket.ts` — the two must stay in step, because the scripts
+ * that import it (soak-monitor, account-drift-check, feed-live-probe,
+ * price-compare) all attach to a core that the Node shell may have spawned.
+ *
+ * The probe is deliberately not a fallback: it only decides whether the
+ * canonical path is LIVE, so a monitor can report "no core answering" instead of
+ * silently inventing a second path and watching an empty socket. The path
+ * returned is always canonical, which is the whole point of the four-language
+ * naming contract documented above.
+ */
+export async function resolveSocketPath(env = process.env) {
+  const canonical = defaultSocketPath(env);
+  if (await socketServed(canonical, 300)) return canonical;
+  return canonical;
+}
+
 /** Is something accepting connections on this path right now? */
 export function socketServed(path, timeoutMs = 500) {
   return new Promise((resolve) => {

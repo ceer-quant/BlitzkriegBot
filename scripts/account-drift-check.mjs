@@ -9,13 +9,18 @@
  *
  *     balance == seed
  *              + Σ_closed netPnlUsd                 (realized, per trade record)
- *              − Σ_open (costUsd + entryFeeUsd)      (cash already spent)
+ *              − Σ_open (entryCostUsd + entryFeeUsd) (cash already spent)
  *              + Σ_open (proceedsUsd − exitFeeUsd)   (cash already received)
  *
  * That form holds at EVERY instant, including mid-position and half-exited —
  * which is what makes it a real 72h guarantee rather than a check that can only
  * run when the book happens to be flat. It is the same identity the Rust gate
  * asserts; here it is asserted against a live session.
+ *
+ * `entryCostUsd` (total paid on the way in) is deliberate: `costUsd` is the basis
+ * of the shares STILL HELD, so on a partial exit it drops by the released basis —
+ * which `proceedsUsd` has already returned. Summing `costUsd` instead would
+ * double-count that release and report a phantom drift equal to it.
  *
  * Two further checks ride along, because they are the ways the identity could be
  * satisfied while the books are still wrong:
@@ -109,8 +114,27 @@ async function audit(sock) {
   const trades = tradesRes.trades || [];
   const positions = posRes.positions || [];
 
+  // A core older than E17 does not expose the per-position cash flows, and its
+  // trade records predate the resolved role. Summing `undefined` would produce
+  // NaN and a "drift" nobody can act on, so say what is actually wrong instead.
+  // Both fields are checked because either can be absent on its own: an idle
+  // pre-E17 core has no open positions, and a freshly-restarted one has no trades.
+  const stale = positions.some((p) => p.entryCostUsd === undefined)
+    || trades.some((t) => t.entryRole === undefined || t.netPnlUsd === undefined);
+  if (stale) {
+    const e = new Error(
+      'the core on this socket predates E17 (positions lack entryCostUsd / trades lack ' +
+      'entryRole) — restart it with a current build before auditing; its pre-E17 ledger ' +
+      'cannot be checked against the post-E17 identity'
+    );
+    // Fatal, not a poll failure: retrying cannot fix a stale binary, and a 72h
+    // loop that logs the same unfixable error every interval is just noise.
+    e.fatal = true;
+    throw e;
+  }
+
   const realized = trades.reduce((s, t) => s + t.netPnlUsd, 0);
-  const spent = positions.reduce((s, p) => s + p.costUsd + p.entryFeeUsd, 0);
+  const spent = positions.reduce((s, p) => s + p.entryCostUsd + p.entryFeeUsd, 0);
   const received = positions.reduce((s, p) => s + p.proceedsUsd - p.exitFeeUsd, 0);
   // A live core reports no seed (its cash is the venue's); then the identity is
   // against the opening balance implied by the first observation instead.
@@ -219,6 +243,10 @@ async function main() {
         );
       }
     } catch (e) {
+      if (e?.fatal) {
+        console.error(`  FAIL ${e.message}`);
+        process.exit(2);
+      }
       polls++;
       failures++;
       line = { ts: Date.now(), ok: false, problems: [`poll error: ${e.message}`] };
