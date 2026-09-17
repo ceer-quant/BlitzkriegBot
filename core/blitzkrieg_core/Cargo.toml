@@ -16,7 +16,7 @@ path = "src/lib.rs"
 # The core itself is market-agnostic and has NO market SDK dependency. A market
 # is supplied by an extension crate, linked in via a feature (see below). The
 # default ships with the official Polymarket extension.
-default = ["polymarket", "strategy-loading"]
+default = ["polymarket", "strategy-loading", "account-precision"]
 # Link the official Polymarket market extension as the operative market.
 polymarket = ["dep:polymarket-extension"]
 # Dynamic user-layer strategy loading (shared libraries). On by default since
@@ -24,6 +24,11 @@ polymarket = ["dep:polymarket-extension"]
 # in-tree strategy, and CI builds/drives a real cdylib. Exclude with
 # `--no-default-features --features polymarket`.
 strategy-loading = ["dep:libloading"]
+# E17 accounting-precision gate. Enables the exhaustive maker/taker × partial-fill
+# matrix and the dry/live ledger-parity harness (`cargo test --features
+# account-precision`, one of the plan's gates). On by default so a plain
+# `cargo test` exercises it too — the gate cannot silently stop running.
+account-precision = []
 
 [dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }

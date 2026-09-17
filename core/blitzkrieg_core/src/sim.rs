@@ -163,6 +163,7 @@ mod tests {
             updated_at_ms: 1,
             venue_order_id: None,
             escalate_at_ms: None,
+            role: OrderRole::Pending,
         }
     }
 

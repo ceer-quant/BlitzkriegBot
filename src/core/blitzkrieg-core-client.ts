@@ -527,6 +527,10 @@ export class BlitzkriegCoreClient extends EventEmitter {
       size: number;
       price: number;
       tsMs?: number;
+      /** The venue's own maker/taker report for this trade. When supplied it
+       *  overrides the order's fill policy, which is what makes a live ledger
+       *  follow the venue rather than our intent (E17). */
+      maker?: boolean | null;
     }>;
   }): Promise<{ filled: number; markedFilled: number; markedCancelled: number; ghostIds: string[] }> {
     return this.request('orders.reconcile', {

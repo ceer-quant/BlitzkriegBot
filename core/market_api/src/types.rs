@@ -371,6 +371,15 @@ pub struct MarketFill {
     pub status: FillStatus,
     pub ts_ms: i64,
     pub tx_hash: Option<String>,
+    /// The venue's OWN report of which side of the book this execution landed
+    /// on: `Some(true)` when we rested and were hit (maker), `Some(false)` when
+    /// we crossed (taker). A venue knows this exactly — Polymarket reports the
+    /// trade's `taker_order_id` separately from its `maker_orders[]` — so it must
+    /// not be re-derived downstream from the policy we *asked* for. `None` when
+    /// the source cannot say (dry matcher, reconciliation), which lets the core
+    /// fall back to the order's own fill policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker: Option<bool>,
 }
 
 /// A single venue trade used for reconciliation (per-trade size, not cumulative).
@@ -387,6 +396,11 @@ pub struct VenueTradeInfo {
     pub price: Decimal,
     pub ts_ms: i64,
     pub tx_hash: Option<String>,
+    /// Whether this trade rested on our side of the book (maker) rather than
+    /// crossing (taker). Same authority as `MarketFill::maker`; a gap fill
+    /// synthesised from it must charge the fee the venue actually did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker: Option<bool>,
 }
 
 /// Authoritative venue snapshot for the periodic reconciliation sweep.

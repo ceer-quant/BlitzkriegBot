@@ -97,10 +97,17 @@ mod tests {
             cost_usd: dec!(4.3),
             was_maker_entry: true,
             entry_fee_pct: rust_decimal::Decimal::ZERO,
+            entry_role: crate::model::OrderRole::Maker,
+            exit_role: crate::model::OrderRole::Pending,
             target_exit_price: None,
             entered_at_ms: 1000,
             expires_at_ms: 900_000,
             state: ExitState::new(dec!(0.43), 1000),
+            flows: crate::position::CashFlows {
+                entry_cost_usd: dec!(4.3),
+                opened_shares: shares,
+                ..Default::default()
+            },
         }
     }
 

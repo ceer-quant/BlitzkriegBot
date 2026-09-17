@@ -393,6 +393,7 @@ async fn handle_line(
                                 price: t.price,
                                 ts_ms: t.ts_ms,
                                 tx_hash: None,
+                                maker: t.maker,
                             })
                             .collect(),
                         now_ms: now_ms(),

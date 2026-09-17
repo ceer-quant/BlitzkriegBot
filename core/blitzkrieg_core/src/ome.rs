@@ -31,6 +31,10 @@ pub struct FillDelta {
     pub condition_id: String,
     pub round_slot: i64,
     pub mode: FillPolicy,
+    /// Role THIS fill actually played (Maker or Taker) — the single basis for
+    /// every fee decision downstream (E17). `mode` is what was requested; this is
+    /// what happened.
+    pub role: OrderRole,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +161,7 @@ impl Ome {
             updated_at_ms: p.submitted_at_ms,
             venue_order_id: None,
             escalate_at_ms: None,
+            role: OrderRole::Pending,
         };
         self.by_internal
             .insert(r.internal_key.clone(), p.order_id.clone());
@@ -277,7 +282,8 @@ impl Ome {
                 Some(a) if a.applied > Decimal::ZERO => a.clone(),
                 _ => return Ok(None),
             };
-            let delta = self.record_delta(&order_id, -prev.applied, prev.price, now_ms)?;
+            let delta =
+                self.record_delta(&order_id, -prev.applied, prev.price, now_ms, fill.maker)?;
             self.applied.insert(
                 trade_key,
                 AppliedFill {
@@ -307,7 +313,7 @@ impl Ome {
             return Ok(None);
         }
 
-        let delta = self.record_delta(&order_id, delta_raw, fill.price, now_ms)?;
+        let delta = self.record_delta(&order_id, delta_raw, fill.price, now_ms, fill.maker)?;
         self.applied.insert(
             trade_key.clone(),
             AppliedFill {
@@ -324,12 +330,19 @@ impl Ome {
     }
 
     /// Apply a signed size delta to an order, capping cumulative at order size.
+    ///
+    /// `reported_maker` is the venue's own maker/taker report for this execution
+    /// when it has one (E17-b). It is preferred over the order's fill policy,
+    /// because the policy is only what we ASKED for: a `MakerThenTaker` order
+    /// becomes a taker when it escalates, and a policy cannot describe a fill
+    /// that already happened. `None` falls back to the policy.
     fn record_delta(
         &mut self,
         id: &str,
         signed_delta: Decimal,
         price: Decimal,
         now_ms: i64,
+        reported_maker: Option<bool>,
     ) -> CoreResult<Option<FillDelta>> {
         let order = self.orders.get_mut(id).ok_or_else(|| {
             CoreError::new(CoreErrorCode::UnknownOrder, format!("unknown order: {id}"))
@@ -367,6 +380,18 @@ impl Ome {
             order.status
         };
 
+        // Resolve the role from what this fill actually did, then fold it into
+        // the order's history (E17-b). The venue's report wins when it made one;
+        // otherwise the order's own policy is the only evidence available.
+        let role = match reported_maker {
+            Some(true) => OrderRole::Maker,
+            Some(false) => OrderRole::Taker,
+            None => OrderRole::from_fill_policy(order.mode),
+        };
+        if effective > Decimal::ZERO {
+            order.role = order.role.after_fill(role);
+        }
+
         Ok(Some(FillDelta {
             order_id: id.to_string(),
             token_id: order.token_id.clone(),
@@ -380,6 +405,7 @@ impl Ome {
             condition_id: order.condition_id.clone(),
             round_slot: order.round_slot,
             mode: order.mode,
+            role,
         }))
     }
 
@@ -453,6 +479,8 @@ mod tests {
             status,
             ts_ms: 1000,
             tx_hash: None,
+            // No venue report: the order's own fill policy decides the role.
+            maker: None,
         }
     }
 

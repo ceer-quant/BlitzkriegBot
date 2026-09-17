@@ -94,6 +94,12 @@ export const PositionViewSchema = z.object({
   enteredAtMs: z.number(),
   expiresAtMs: z.number(),
   remainingSec: z.number(),
+  // Cash actually moved on this position so far (E17). Lets a monitor check the
+  // ledger identity mid-flight, not only when the book happens to be flat.
+  costUsd: z.number(),
+  entryFeeUsd: z.number(),
+  proceedsUsd: z.number(),
+  exitFeeUsd: z.number(),
 });
 export type PositionViewWire = z.infer<typeof PositionViewSchema>;
 

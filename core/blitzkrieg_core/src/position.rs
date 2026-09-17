@@ -8,14 +8,54 @@
 use crate::exit_policy::{
     ExitConfig, ExitState, ExitTickInput, decide_exit, executable_bid, pnl_pct, update_exit_state,
 };
-use crate::model::{ExitReason, OrderbookSnapshot, Side, SignalDirection};
+use crate::model::{ExitReason, OrderRole, OrderbookSnapshot, Side, SignalDirection};
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-/// Per-unit taker fee percentage (Polymarket formula).
-fn taker_fee_pct(price: Decimal) -> Decimal {
-    crate::exit_policy::taker_fee_pct(price)
+/// Venue share-size grid on the binary markets: 1 tick = 0.01 shares. An exit is
+/// floored to it so a SELL can never oversell the position.
+fn share_grid() -> Decimal {
+    Decimal::new(1, 2)
+}
+
+/// Largest grid multiple that is <= `v`.
+pub(crate) fn floor_to_grid(v: Decimal) -> Decimal {
+    let grid = share_grid();
+    (v / grid).floor() * grid
+}
+
+/// A fee rate over a notional, as a percentage (0 when there is no notional).
+fn pct_of(fee: Decimal, notional: Decimal) -> Decimal {
+    if notional > Decimal::ZERO {
+        (fee / notional) * Decimal::ONE_HUNDRED
+    } else {
+        Decimal::ZERO
+    }
+}
+
+/// The ACTUAL cash flows accrued on one position over its life.
+///
+/// This is the accounting spine of E17: `gross = proceeds − entry_cost` and
+/// `net = gross − entry_fee − exit_fee` are computed from amounts the ledger
+/// really charged, never re-derived from a fee rate and a price. That makes
+/// `balance == seed + Σ net_pnl_usd` an identity rather than a coincidence, so
+/// it cannot drift on partial fills, mixed maker/taker roles or unsellable dust.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CashFlows {
+    /// Σ notional paid on the entry fills.
+    pub entry_cost_usd: Decimal,
+    /// Σ cash fee the ledger charged on the entry fills.
+    pub entry_fee_usd: Decimal,
+    /// Σ notional received on the exit fills.
+    pub proceeds_usd: Decimal,
+    /// Σ cash fee the ledger charged on the exit fills.
+    pub exit_fee_usd: Decimal,
+    /// Σ shares bought (the closed trade's size).
+    pub opened_shares: Decimal,
+    /// Σ shares sold across all exit fills.
+    pub sold_shares: Decimal,
 }
 
 #[derive(Debug, Clone)]
@@ -27,8 +67,6 @@ pub struct PositionConfig {
     pub exit_cooldown_sec: i64,
     pub asset_cooldown_sec: i64,
     pub loss_cooldown_sec: i64,
-    /// Shares withheld from a sell to avoid rounding oversell.
-    pub exit_share_buffer: Decimal,
 }
 
 impl Default for PositionConfig {
@@ -41,7 +79,6 @@ impl Default for PositionConfig {
             exit_cooldown_sec: 60,
             asset_cooldown_sec: 90,
             loss_cooldown_sec: 180,
-            exit_share_buffer: Decimal::new(1, 2), // 0.01
         }
     }
 }
@@ -58,14 +95,30 @@ pub struct OpenPosition {
     pub entry_price: Decimal,
     pub current_price: Decimal,
     pub prev_price: Decimal,
+    /// Shares still held.
     pub shares: Decimal,
+    /// Cost basis still held (entry notionals of the shares above).
     pub cost_usd: Decimal,
+    /// True when no taker fee was paid on the way in.
     pub was_maker_entry: bool,
+    /// Entry fee as a percentage of the entry basis — a VIEW of
+    /// [`CashFlows::entry_fee_usd`], kept for the trade-record/panel contract.
     pub entry_fee_pct: Decimal,
+    /// Role the ENTRY fills actually played (E17 audit trail). Mixed maker/taker
+    /// entries resolve to `MakerThenTaker`.
+    #[serde(default)]
+    pub entry_role: OrderRole,
+    /// Role the EXIT fills have played so far.
+    #[serde(default)]
+    pub exit_role: OrderRole,
     pub target_exit_price: Option<Decimal>,
     pub entered_at_ms: i64,
     pub expires_at_ms: i64,
     pub state: ExitState,
+    /// Actual cash flows since the position opened. Snapshots written before E17
+    /// carry the serde default (all zero) and are repaired by [`OpenPosition::flows`].
+    #[serde(default)]
+    pub flows: CashFlows,
 }
 
 impl OpenPosition {
@@ -74,6 +127,23 @@ impl OpenPosition {
     }
     pub fn low_pnl_pct(&self) -> Decimal {
         self.state.low_pnl_pct
+    }
+
+    /// The position's cash flows, repaired for a snapshot persisted before E17
+    /// recorded them: the pre-E17 fields (`cost_usd`, `entry_fee_pct`) describe
+    /// the same money, so they seed the totals and the next save converges.
+    pub fn flows(&self) -> CashFlows {
+        if self.flows.opened_shares > Decimal::ZERO || self.flows.entry_cost_usd > Decimal::ZERO {
+            return self.flows.clone();
+        }
+        CashFlows {
+            entry_cost_usd: self.cost_usd,
+            entry_fee_usd: (self.entry_fee_pct / Decimal::ONE_HUNDRED)
+                * self.entry_price
+                * self.shares,
+            opened_shares: self.shares,
+            ..Default::default()
+        }
     }
 }
 
@@ -85,14 +155,21 @@ pub struct ClosedPosition {
     pub direction: SignalDirection,
     pub token_id: String,
     pub condition_id: String,
+    /// Weighted-average entry price (= basis / shares) — unchanged semantics.
     pub entry_price: Decimal,
+    /// Volume-weighted average price of the exit fills. Before E17 this was the
+    /// price of the single closing fill; on a partial ladder it is now the mean.
     pub exit_price: Decimal,
+    /// Shares opened (what the fee/PnL maths is denominated in).
     pub shares: Decimal,
+    /// Entry basis in USD, straight from the ledger (not re-derived).
     pub cost_usd: Decimal,
     pub was_maker_entry: bool,
     pub was_maker_exit: bool,
     pub entry_fee_pct: Decimal,
     pub exit_fee_pct: Decimal,
+    /// Gross PnL in USD: proceeds − basis. Σ over closed trades equals the
+    /// ledger's realized cash movement by construction.
     pub pnl_usd: Decimal,
     pub pnl_pct: Decimal,
     pub net_pnl_usd: Decimal,
@@ -103,6 +180,12 @@ pub struct ClosedPosition {
     pub exit_reason: ExitReason,
     pub entered_at_ms: i64,
     pub exited_at_ms: i64,
+    /// Roles the two legs actually played (E17 audit trail).
+    pub entry_role: OrderRole,
+    pub exit_role: OrderRole,
+    /// Unsold shares written off at close (below the 0.01 share grid, or beyond
+    /// the held size). Non-zero only in that corner; see [`PositionManager::close`].
+    pub dust_shares: Decimal,
 }
 
 pub struct OpenParams {
@@ -111,9 +194,12 @@ pub struct OpenParams {
     pub direction: SignalDirection,
     pub token_id: String,
     pub condition_id: String,
+    /// The order's limit price; the position's actual entry price is the basis
+    /// per share once its fills land (see [`PositionManager::apply_entry_fill`]).
     pub entry_price: Decimal,
-    pub shares: Decimal,
     pub expires_at_ms: i64,
+    /// Role the entry order was REQUESTED as; informational at open time (the
+    /// fee comes from the fill's own role in [`PositionManager::apply_entry_fill`]).
     pub was_maker: bool,
     pub target_exit_price: Option<Decimal>,
 }
@@ -195,10 +281,12 @@ impl PositionManager {
     pub fn open(&mut self, p: OpenParams, now_ms: i64) -> OpenPosition {
         let id = format!("hft-{}", self.next_id);
         self.next_id += 1;
-        let entry_fee_pct = if p.was_maker {
-            Decimal::ZERO
+        // The requested role only seeds the view; the fee and the role are fixed
+        // by the actual entry fill(s) in `apply_entry_fill` (E17-b).
+        let entry_role = if p.was_maker {
+            OrderRole::Maker
         } else {
-            taker_fee_pct(p.entry_price)
+            OrderRole::Taker
         };
         let pos = OpenPosition {
             id,
@@ -210,17 +298,124 @@ impl PositionManager {
             entry_price: p.entry_price,
             current_price: p.entry_price,
             prev_price: p.entry_price,
-            shares: p.shares,
-            cost_usd: p.entry_price * p.shares,
+            shares: Decimal::ZERO,
+            cost_usd: Decimal::ZERO,
             was_maker_entry: p.was_maker,
-            entry_fee_pct,
+            entry_fee_pct: Decimal::ZERO,
+            entry_role,
+            exit_role: OrderRole::Pending,
             target_exit_price: p.target_exit_price,
             entered_at_ms: now_ms,
             expires_at_ms: p.expires_at_ms,
             state: ExitState::new(p.entry_price, now_ms),
+            flows: CashFlows::default(),
         };
         self.open.push(pos.clone());
         pos
+    }
+
+    /// Accrue one ENTRY fill: basis, fee, shares and the resolved role — all from
+    /// the amounts the ledger actually moved. Returns the new position snapshot.
+    ///
+    /// `shares`/`fee_usd` may be NEGATIVE (a `FAILED` rollback of an earlier
+    /// fill): the accrual then reverses by the same amounts, so the position ends
+    /// where it started instead of keeping phantom shares the cash ledger has
+    /// already refunded.
+    pub fn apply_entry_fill(
+        &mut self,
+        position_id: &str,
+        shares: Decimal,
+        price: Decimal,
+        fee_usd: Decimal,
+        role: OrderRole,
+    ) -> Option<OpenPosition> {
+        let pos = self.open.iter_mut().find(|p| p.id == position_id)?;
+        let signed_cost = price * shares;
+        pos.flows.opened_shares = (pos.flows.opened_shares + shares).max(Decimal::ZERO);
+        pos.flows.entry_cost_usd =
+            (pos.flows.entry_cost_usd + signed_cost).max(Decimal::ZERO);
+        pos.flows.entry_fee_usd = (pos.flows.entry_fee_usd + fee_usd).max(Decimal::ZERO);
+        // Basis and share count move together, so `cost_usd / shares` is always
+        // the average paid for the shares still held.
+        pos.shares = (pos.shares + shares).max(Decimal::ZERO);
+        pos.cost_usd = (pos.cost_usd + signed_cost).max(Decimal::ZERO);
+        if pos.shares == Decimal::ZERO {
+            pos.cost_usd = Decimal::ZERO;
+        }
+        if shares > Decimal::ZERO {
+            // A reversal is not a fill, so it neither picks a role nor re-anchors
+            // the exit state.
+            pos.entry_role = pos.entry_role.after_fill(role);
+        }
+        Self::refresh_view(pos);
+        // Averaging into an existing position moves the basis, so the exit state
+        // must follow — otherwise HWM/trails stay anchored to a stale entry.
+        if shares > Decimal::ZERO {
+            pos.state = ExitState::new(pos.entry_price, pos.entered_at_ms);
+        }
+        Some(pos.clone())
+    }
+
+    /// Accrue one EXIT fill (a partial close). Returns the position's new share
+    /// count, or None if the position is unknown. A negative `shares` reverses an
+    /// earlier exit fill (rolled back by the venue) and returns its basis.
+    pub fn apply_exit_fill(
+        &mut self,
+        position_id: &str,
+        shares: Decimal,
+        price: Decimal,
+        fee_usd: Decimal,
+        role: OrderRole,
+    ) -> Option<Decimal> {
+        let pos = self.open.iter_mut().find(|p| p.id == position_id)?;
+        pos.flows.sold_shares = (pos.flows.sold_shares + shares).max(Decimal::ZERO);
+        pos.flows.proceeds_usd = (pos.flows.proceeds_usd + price * shares).max(Decimal::ZERO);
+        pos.flows.exit_fee_usd = (pos.flows.exit_fee_usd + fee_usd).max(Decimal::ZERO);
+        if shares > Decimal::ZERO {
+            pos.exit_role = pos.exit_role.after_fill(role);
+        }
+        // Basis leaves at the position's own average, so what remains stays
+        // proportional to the shares still held (no drift on a partial ladder).
+        // A reversal adds it back at that same average.
+        let per_share = if pos.shares > Decimal::ZERO {
+            pos.cost_usd / pos.shares
+        } else {
+            Decimal::ZERO
+        };
+        let released = (per_share * shares).min(pos.cost_usd);
+        pos.shares = (pos.shares - shares).max(Decimal::ZERO);
+        pos.cost_usd = (pos.cost_usd - released).max(Decimal::ZERO);
+        if pos.shares == Decimal::ZERO {
+            pos.cost_usd = Decimal::ZERO;
+        }
+        Some(pos.shares)
+    }
+
+    /// Drop an open position that never really existed (a fully rolled-back
+    /// entry leaves zero shares and zero basis; it must not block `can_open` or
+    /// show up as an empty row on the panel). Returns true when one was dropped.
+    pub fn drop_if_empty(&mut self, position_id: &str) -> bool {
+        let idx = self.open.iter().position(|p| {
+            p.id == position_id && p.shares <= Decimal::ZERO && p.cost_usd == Decimal::ZERO
+        });
+        match idx {
+            Some(i) => {
+                self.open.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Fold the accrued flows back into the display/audit fields of an open
+    /// position: the fee rate is a VIEW of the fee actually charged, and the
+    /// entry price is the basis per share still held.
+    fn refresh_view(pos: &mut OpenPosition) {
+        pos.entry_fee_pct = pct_of(pos.flows.entry_fee_usd, pos.flows.entry_cost_usd);
+        pos.was_maker_entry = pos.flows.entry_fee_usd == Decimal::ZERO;
+        if pos.shares > Decimal::ZERO {
+            pos.entry_price = pos.cost_usd / pos.shares;
+        }
     }
 
     /// Update a position's exit state from a fresh book.
@@ -320,6 +515,20 @@ impl PositionManager {
     }
 
     /// Close a position, computing gross/net PnL and setting cooldowns.
+    ///
+    /// Everything here is derived from the ACCRUED cash flows (E17-d), so
+    /// `net_pnl_usd` is exactly the cash the ledger moved for this position:
+    ///
+    /// ```text
+    ///   gross = proceeds        − entry_cost
+    ///   net   = gross − entry_fee − exit_fee
+    /// ```
+    ///
+    /// An unsold remainder that cannot be placed on the venue's 0.01 share grid
+    /// is written off at the exit price and charged to `net` as a rounding cost.
+    /// That keeps the invariant true in the corner case instead of leaking a
+    /// little cash every cycle, and it is visible on the record as `dust_shares`
+    /// rather than hidden in a fudge.
     pub fn close(
         &mut self,
         position_id: &str,
@@ -329,24 +538,50 @@ impl PositionManager {
         now_ms: i64,
     ) -> Option<ClosedPosition> {
         let idx = self.open.iter().position(|p| p.id == position_id)?;
-        let pos = self.open.remove(idx);
+        let mut pos = self.open.remove(idx);
+        pos.flows = pos.flows();
 
-        let exit_fee_pct = if was_maker {
+        // The caller's flag is the role of the ORDER it just placed; fold it in so
+        // the record reflects every exit fill, including earlier partials.
+        pos.exit_role = pos
+            .exit_role
+            .after_fill(if was_maker {
+                OrderRole::Maker
+            } else {
+                OrderRole::Taker
+            });
+
+        let opened = pos.flows.opened_shares;
+        let sold = pos.flows.sold_shares.min(opened);
+        let dust = (opened - sold).max(Decimal::ZERO);
+        let dust_notional = exit_price * dust;
+        let exit_notional = pos.flows.proceeds_usd + dust_notional;
+
+        // Shares with no exit fill of their own (a direct close, or the sub-grid
+        // remainder) are priced here, so they must carry a fee here too — at the
+        // role of the order the caller just placed.
+        let dust_fee = if was_maker {
             Decimal::ZERO
         } else {
-            taker_fee_pct(exit_price)
+            (crate::exit_policy::taker_fee_pct(exit_price) / Decimal::ONE_HUNDRED) * dust_notional
         };
-        let pnl_pct_val = pnl_pct(exit_price, pos.entry_price);
-        let gross = (exit_price - pos.entry_price) * pos.shares;
-        let entry_fee_usd =
-            (pos.entry_fee_pct / Decimal::ONE_HUNDRED) * pos.entry_price * pos.shares;
-        let exit_fee_usd = (exit_fee_pct / Decimal::ONE_HUNDRED) * exit_price * pos.shares;
+
+        let cost = pos.flows.entry_cost_usd;
+        let entry_fee_usd = pos.flows.entry_fee_usd;
+        let exit_fee_usd = pos.flows.exit_fee_usd + dust_fee;
+        let gross = exit_notional - cost;
         let net = gross - entry_fee_usd - exit_fee_usd;
-        let net_pct = if pos.cost_usd > Decimal::ZERO {
-            (net / pos.cost_usd) * Decimal::ONE_HUNDRED
+        let net_pct = if cost > Decimal::ZERO {
+            (net / cost) * Decimal::ONE_HUNDRED
         } else {
             Decimal::ZERO
         };
+        let avg_exit = if sold > Decimal::ZERO {
+            pos.flows.proceeds_usd / sold
+        } else {
+            exit_price
+        };
+        let exit_fee_pct = pct_of(exit_fee_usd, exit_notional);
         let hold_time_sec = (now_ms - pos.entered_at_ms) / 1000;
 
         self.daily_pnl += net;
@@ -368,15 +603,15 @@ impl PositionManager {
             token_id: pos.token_id,
             condition_id: pos.condition_id,
             entry_price: pos.entry_price,
-            exit_price,
-            shares: pos.shares,
-            cost_usd: pos.cost_usd,
-            was_maker_entry: pos.was_maker_entry,
-            was_maker_exit: was_maker,
-            entry_fee_pct: pos.entry_fee_pct,
+            exit_price: avg_exit,
+            shares: opened,
+            cost_usd: cost,
+            was_maker_entry: entry_fee_usd == Decimal::ZERO,
+            was_maker_exit: exit_fee_usd == Decimal::ZERO,
+            entry_fee_pct: pct_of(entry_fee_usd, cost),
             exit_fee_pct,
             pnl_usd: gross,
-            pnl_pct: pnl_pct_val,
+            pnl_pct: pnl_pct(avg_exit, pos.entry_price),
             net_pnl_usd: net,
             net_pnl_pct: net_pct,
             high_pnl_pct: pos.state.high_pnl_pct,
@@ -385,6 +620,9 @@ impl PositionManager {
             exit_reason: reason,
             entered_at_ms: pos.entered_at_ms,
             exited_at_ms: now_ms,
+            entry_role: pos.entry_role,
+            exit_role: pos.exit_role,
+            dust_shares: dust,
         };
         self.closed.push(closed.clone());
         if self.closed.len() > 5000 {
@@ -394,19 +632,28 @@ impl PositionManager {
         Some(closed)
     }
 
-    /// Compute the sell size for a position (shares minus rounding buffer).
+    /// Sell size for a full exit: exactly the shares held, floored to the venue's
+    /// 0.01 share grid so the order can never oversell (E17-d).
+    ///
+    /// Before E17 this subtracted a flat 0.01 buffer, which left that buffer
+    /// unsold on an exact-grid position — permanent dust, and cash that could
+    /// never be reconciled. Flooring to the grid gives the same oversell
+    /// protection with no remainder: a position of 10 sells 10, not 9.99.
     pub fn sell_shares(&self, position_id: &str) -> Option<Decimal> {
         let pos = self.open.iter().find(|p| p.id == position_id)?;
-        let raw = pos.shares - self.config.exit_share_buffer;
-        if raw <= Decimal::ZERO {
+        let grid = floor_to_grid(pos.shares);
+        if grid <= Decimal::ZERO {
             return None;
         }
-        // floor to 2dp
-        Some((raw * Decimal::ONE_HUNDRED).floor() / Decimal::ONE_HUNDRED)
+        Some(grid)
     }
 
-    /// Adjust an open position's entry price and share count (averaging in a BUY
-    /// or reducing on a partial SELL). No-op if the position is unknown.
+    /// Adjust an open position's entry price and share count for an external
+    /// reconciliation that did not arrive as a fill (no-op if unknown).
+    ///
+    /// Deliberately does NOT touch [`CashFlows`]: an adjustment is not cash, and
+    /// letting it rewrite the fee basis is exactly the class of divergence E17
+    /// closed. Real fills go through `apply_entry_fill` / `apply_exit_fill`.
     pub fn adjust_open(&mut self, position_id: &str, entry_price: Decimal, shares: Decimal) {
         if let Some(pos) = self.open.iter_mut().find(|p| p.id == position_id) {
             pos.entry_price = entry_price;
@@ -509,25 +756,52 @@ mod tests {
             token_id: format!("tok_{asset}"),
             condition_id: "cond".into(),
             entry_price: entry,
-            shares: dec!(10),
             expires_at_ms: 900_000,
             was_maker: true,
             target_exit_price: None,
         }
     }
 
+    /// Open a position AND accrue its entry fill — the two steps production
+    /// always performs together (service: `open` then `apply_entry_fill`).
+    fn enter(pm: &mut PositionManager, p: OpenParams, role: OrderRole, now_ms: i64) -> OpenPosition {
+        let shares = dec!(10);
+        let price = p.entry_price;
+        let pos = pm.open(p, now_ms);
+        let fee = if role.is_maker() {
+            Decimal::ZERO
+        } else {
+            (crate::exit_policy::taker_fee_pct(price) / Decimal::ONE_HUNDRED) * price * shares
+        };
+        pm.apply_entry_fill(&pos.id, shares, price, fee, role)
+            .unwrap()
+    }
+
     #[test]
     fn open_and_close_pnl_is_net_of_fees() {
         let mut pm = PositionManager::new(PositionConfig::default());
-        let p = pm.open(params("BTC", SignalDirection::Up, dec!(0.4)), 0);
+        // Maker entry (no fee), taker exit at 0.6 → gross 2.0 minus the exit fee.
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
         assert_eq!(p.shares, dec!(10));
-        // Sell at 0.6 as taker → gross 2.0 minus taker exit fee.
+        assert_eq!(p.cost_usd, dec!(4));
+        assert_eq!(p.entry_fee_pct, Decimal::ZERO);
         let c = pm
             .close(&p.id, dec!(0.6), ExitReason::TakeProfit, false, 1000)
             .unwrap();
         assert!(c.net_pnl_usd < dec!(2.0));
         assert!(c.net_pnl_usd > dec!(1.9)); // fee is small around 0.6
+        assert_eq!(c.was_maker_entry, true);
+        assert_eq!(c.was_maker_exit, false);
         assert_eq!(pm.daily_pnl(), c.net_pnl_usd);
+        // Net is the ledger's own arithmetic: proceeds − basis − both fees.
+        let entry_fee = (c.entry_fee_pct / Decimal::ONE_HUNDRED) * c.entry_price * c.shares;
+        let exit_fee = (c.exit_fee_pct / Decimal::ONE_HUNDRED) * c.exit_price * c.shares;
+        assert_eq!(c.net_pnl_usd, c.pnl_usd - entry_fee - exit_fee);
     }
 
     #[test]
@@ -538,7 +812,12 @@ mod tests {
         cfg.loss_cooldown_sec = 0;
         cfg.exit_cooldown_sec = 0;
         let mut pm = PositionManager::new(cfg);
-        pm.open(params("BTC", SignalDirection::Up, dec!(0.4)), 0);
+        enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
         assert!(
             pm.can_open(Some("BTC"), Some(SignalDirection::Up), 1000)
                 .is_err()
@@ -547,7 +826,12 @@ mod tests {
             pm.can_open(Some("ETH"), Some(SignalDirection::Up), 1000)
                 .is_ok()
         );
-        pm.open(params("ETH", SignalDirection::Up, dec!(0.4)), 1000);
+        enter(
+            &mut pm,
+            params("ETH", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            1000,
+        );
         assert!(
             pm.can_open(Some("SOL"), Some(SignalDirection::Up), 1000)
                 .is_err()
@@ -560,7 +844,12 @@ mod tests {
         cfg.asset_cooldown_sec = 90;
         cfg.loss_cooldown_sec = 180;
         let mut pm = PositionManager::new(cfg);
-        let p = pm.open(params("BTC", SignalDirection::Up, dec!(0.4)), 0);
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
         pm.close(&p.id, dec!(0.3), ExitReason::StopLoss, false, 10_000)
             .unwrap();
         // Immediately after a loss, re-entry is blocked by asset/loss cooldown.
@@ -583,7 +872,12 @@ mod tests {
         cfg.loss_cooldown_sec = 0;
         cfg.stop_loss_cooldown_sec = 0;
         let mut pm = PositionManager::new(cfg);
-        let p = pm.open(params("BTC", SignalDirection::Up, dec!(0.4)), 0);
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
         pm.close(&p.id, dec!(0.05), ExitReason::StopLoss, false, 1000)
             .unwrap();
         assert!(pm.daily_pnl() < dec!(-1));
@@ -591,5 +885,190 @@ mod tests {
             pm.can_open(Some("ETH"), Some(SignalDirection::Up), 2000)
                 .is_err()
         );
+    }
+}
+
+/// E17 accounting contract: whatever mix of maker/taker roles and partial fills
+/// a position goes through, its `net_pnl_usd` is EXACTLY the cash the ledger
+/// moved for it — `(proceeds − basis) − entry_fee − exit_fee`. The full
+/// end-to-end equality (`balance == seed + Σ netPnl`) is asserted on the real
+/// ledger in `service::account_precision_tests`; these pin the arithmetic.
+#[cfg(test)]
+mod precision_tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn taker_fee(price: Decimal, shares: Decimal) -> Decimal {
+        (crate::exit_policy::taker_fee_pct(price) / Decimal::ONE_HUNDRED) * price * shares
+    }
+
+    /// Open an empty position shell. Size and basis come from the venue's fills
+    /// (`apply_entry_fill`), never from the request, so there is nothing to pass.
+    fn open_at(pm: &mut PositionManager, price: Decimal) -> OpenPosition {
+        pm.open(
+            OpenParams {
+                strategy: "s".into(),
+                asset: "BTC".into(),
+                direction: SignalDirection::Up,
+                token_id: "tok".into(),
+                condition_id: "cond".into(),
+                entry_price: price,
+                expires_at_ms: 1_000_000,
+                was_maker: false,
+                target_exit_price: None,
+            },
+            0,
+        )
+    }
+
+    /// The four partial-fill shapes the plan calls out, each with the fee the
+    /// ledger would have charged, asserting the position's net matches the cash.
+    #[test]
+    fn partial_entry_and_exit_flows_reconcile_exactly() {
+        for (entry_fills, exit_fills) in [
+            (vec![(dec!(1), dec!(0.40))], vec![(dec!(1), dec!(0.60))]),
+            (vec![(dec!(5), dec!(0.40))], vec![(dec!(5), dec!(0.60))]),
+            (vec![(dec!(9.99), dec!(0.40))], vec![(dec!(9.99), dec!(0.60))]),
+            (vec![(dec!(10), dec!(0.40))], vec![(dec!(10), dec!(0.60))]),
+            // Ladders: several fills per leg, mixed prices.
+            (
+                vec![(dec!(4), dec!(0.40)), (dec!(6), dec!(0.42))],
+                vec![(dec!(3), dec!(0.55)), (dec!(7), dec!(0.60))],
+            ),
+            // Mixed roles: maker in, part maker / part taker out.
+            (
+                vec![(dec!(10), dec!(0.43))],
+                vec![(dec!(4), dec!(0.70)), (dec!(6), dec!(0.95))],
+            ),
+        ] {
+            let mut pm = PositionManager::new(PositionConfig::default());
+            let pos = open_at(&mut pm, entry_fills[0].1);
+
+            let mut entry_cost = Decimal::ZERO;
+            let mut entry_fee = Decimal::ZERO;
+            let mut opened = Decimal::ZERO;
+            for (shares, price) in &entry_fills {
+                // Alternate role: index 0 taker, later maker — exercises the fold.
+                let role = if opened == Decimal::ZERO {
+                    OrderRole::Taker
+                } else {
+                    OrderRole::Maker
+                };
+                let fee = if role.is_maker() {
+                    Decimal::ZERO
+                } else {
+                    taker_fee(*price, *shares)
+                };
+                pm.apply_entry_fill(&pos.id, *shares, *price, fee, role)
+                    .unwrap();
+                entry_cost += price * shares;
+                entry_fee += fee;
+                opened += shares;
+            }
+
+            let mut proceeds = Decimal::ZERO;
+            let mut exit_fee = Decimal::ZERO;
+            let mut sold = Decimal::ZERO;
+            for (i, (shares, price)) in exit_fills.iter().enumerate() {
+                let role = if i % 2 == 0 {
+                    OrderRole::Taker
+                } else {
+                    OrderRole::Maker
+                };
+                let fee = if role.is_maker() {
+                    Decimal::ZERO
+                } else {
+                    taker_fee(*price, *shares)
+                };
+                pm.apply_exit_fill(&pos.id, *shares, *price, fee, role)
+                    .unwrap();
+                proceeds += price * shares;
+                exit_fee += fee;
+                sold += shares;
+            }
+
+            let closed = pm
+                .close(&pos.id, exit_fills.last().unwrap().1, ExitReason::Manual, false, 10)
+                .unwrap();
+
+            assert_eq!(closed.shares, opened, "shares = what was opened");
+            assert_eq!(closed.cost_usd, entry_cost, "basis comes from the ledger");
+            assert_eq!(closed.pnl_usd, proceeds - entry_cost, "gross = Δcash before fees");
+            assert_eq!(
+                closed.net_pnl_usd,
+                proceeds - entry_cost - entry_fee - exit_fee,
+                "net must be the ledger's own arithmetic (entry={entry_fills:?} exit={exit_fills:?})"
+            );
+            assert_eq!(closed.dust_shares, Decimal::ZERO, "fully sold leaves no dust");
+            assert_eq!(
+                closed.was_maker_entry,
+                entry_fee == Decimal::ZERO,
+                "maker flag mirrors the fee actually paid"
+            );
+            assert_eq!(closed.was_maker_exit, exit_fee == Decimal::ZERO);
+        }
+    }
+
+    /// A sub-grid remainder (0.001 of a share) is written off at the exit price
+    /// and charged to net, so cash and the record still agree.
+    #[test]
+    fn sub_grid_dust_is_written_off_not_left_open() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        let pos = open_at(&mut pm, dec!(0.40));
+        pm.apply_entry_fill(&pos.id, dec!(10), dec!(0.40), Decimal::ZERO, OrderRole::Maker)
+            .unwrap();
+        // Sell everything sellable (10.00) but claim only 9.999 filled.
+        pm.apply_exit_fill(&pos.id, dec!(9.999), dec!(0.60), Decimal::ZERO, OrderRole::Maker)
+            .unwrap();
+        let closed = pm
+            .close(&pos.id, dec!(0.60), ExitReason::Manual, true, 10)
+            .unwrap();
+        assert_eq!(closed.dust_shares, dec!(0.001));
+        // The dust is priced at the exit, so gross covers all 10 shares.
+        assert_eq!(closed.pnl_usd, dec!(0.60) * dec!(10) - dec!(0.40) * dec!(10));
+        assert_eq!(closed.net_pnl_usd, closed.pnl_usd);
+    }
+
+    /// An exact-grid position sells in full: the old 0.01 flat buffer is gone, so
+    /// a 10-share position no longer leaves 0.01 shares stranded forever.
+    #[test]
+    fn sell_shares_sends_the_whole_exact_grid_position() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        let pos = open_at(&mut pm, dec!(0.40));
+        pm.apply_entry_fill(&pos.id, dec!(10), dec!(0.40), Decimal::ZERO, OrderRole::Maker)
+            .unwrap();
+        assert_eq!(pm.sell_shares(&pos.id), Some(dec!(10)));
+
+        // Off-grid holdings floor down — never oversell.
+        pm.apply_entry_fill(&pos.id, dec!(0.005), dec!(0.40), Decimal::ZERO, OrderRole::Maker)
+            .unwrap();
+        assert_eq!(pm.sell_shares(&pos.id), Some(dec!(10)));
+        assert!(pm.sell_shares(&pos.id).unwrap() <= pm.open_positions()[0].shares);
+    }
+
+    /// A pre-E17 snapshot has no recorded flows; they are repaired from the old
+    /// fields so a restart mid-flight cannot lose the basis.
+    #[test]
+    fn legacy_snapshot_flows_are_repaired() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        let pos = open_at(&mut pm, dec!(0.40));
+        let mut legacy = pm.apply_entry_fill(
+            &pos.id,
+            dec!(10),
+            dec!(0.40),
+            dec!(0.01),
+            OrderRole::Taker,
+        ).unwrap();
+        // Simulate a snapshot serialised by the previous version: flows absent,
+        // only the old cost_usd/entry_fee_pct/entry_price fields populated.
+        legacy.flows = CashFlows::default();
+        legacy.cost_usd = dec!(4.0);
+        legacy.shares = dec!(10);
+        legacy.entry_price = dec!(0.40);
+        legacy.entry_fee_pct = taker_fee(dec!(0.40), dec!(10)) / dec!(4.0) * dec!(100);
+        let repaired = legacy.flows();
+        assert_eq!(repaired.opened_shares, dec!(10));
+        assert_eq!(repaired.entry_cost_usd, dec!(4.0));
+        assert!(repaired.entry_fee_usd > Decimal::ZERO);
     }
 }
