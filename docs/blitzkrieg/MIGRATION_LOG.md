@@ -2187,3 +2187,104 @@ if (isRoot || !(underTmp || underTarget)) { /* 拒绝 */ }
 这正是这个清单存在的理由**。
 
 计账自洽性已验证：`MANIFEST.json` 逐项之和 + manifest 自身大小 == 磁盘实测总字节。
+
+---
+
+## 51. E12 关停契约与父进程监护（含本人造成的第二次事故）
+
+### 51-a 事故：新门禁的清理循环误杀了生产核心
+
+写 E12 的 `parent-monitor-check.mjs` 时，我把「泄漏判定」写成
+**「快照前后都存在的 blitzkrieg-core 即泄漏」**，并在同一批 pid 上执行
+清理 `SIGKILL`。当时进程表里有两个**与本门禁无关**的核心：
+
+| pid | 身份 | 结果 |
+|---|---|---|
+| 16697 | 面板 `--manage`（pid 90747）托管的生产核心 | **被误杀**，成为 `Z` 僵尸 |
+| 9887 | 早前 drift 测试遗留的孤儿（ppid=1） | 被误杀 |
+
+根因是**判定范围**而非判定标准：`before`／`after` 快照取的是
+**全部** `blitzkrieg-core` 进程，而不是**本次运行创建的**那一个。清理循环
+因此把「所有存活核心」当成了自己的产物。
+
+**这是本人独立造成的，不是既有缺陷。** 与 §50 的 `--out` 事故同类：
+两次都是**破坏性动作的前置条件判断错误**，且都在写「测试/工具代码」时发生——
+工具代码被默认为「无害」，但一个会 `kill` 或 `rm` 的工具与生产代码等价。
+
+**已修**：门禁改为按**进程血缘**定界——只认 `ppid === 被 spawn 的 shell pid`
+的核心；无关核心显式计数并忽略。用诱饵核心验证：门禁运行期间诱饵存活，
+且门禁只对自己创建的核心报 FAIL/PASS。
+
+**损失**：pid 16697 的**内存态交易明细**（面板显示的 346 笔、净 +$51.60 等）
+随进程消失。磁盘 `data/trades/summary.json` 仍保有汇总
+（totalTrades 346、wins 180、losses 166、netPnl 51.60266713749995），
+`data/orders/orders.jsonl` 20 行、`data/trades/trades.jsonl` 6 行。
+这是 KI-24-a 的直接后果：**面板数字是内存态，进程一死就只剩磁盘上那点东西**。
+
+**未修**：面板 pid 90747 仍在（HTTP 200），但其子进程槽位是僵尸。
+按硬约束「不得擅自杀 PID 90747 / 16697」，**未做任何重启或清理动作**，
+交由用户决定。
+
+### 51-b 实测：核心退出只要 2 ms（推翻了此前的担忧）
+
+空载 SIGTERM 后核心 **2 ms** 内退出并 unlink socket。所以「fire-and-forget
+会留下很长竞态窗口」在**正常情况**下并不成立。但竞态**确实存在且可复现**：
+`stop()` 返回的同一时刻 `exitCode === null`，第二个核心可在同一 socket、
+同一 order log 上启动成功。契约缺陷是真的，只是窗口通常极短。
+
+### 51-c 修复一：`stop()` 必须等到核心真正退出
+
+`src/core/blitzkrieg-core-client.ts` 的 `stop()` 原先发完 SIGTERM 立即返回。
+现在按固定次序执行，**次序本身是语义的一部分**：
+
+1. 置 `stopped`，阻断重启调度与重试；
+2. **在通道还活着时**先 `orders.cancel_all` 结清挂单——「退出时不残留挂单」
+   必须在 socket 关闭**之前**完成；
+3. 关闭 socket；
+4. SIGTERM → 等待退出（5s）→ 超时升级 SIGKILL（2s）→ 仍未退出则**抛错**。
+
+第 2 步尽力而为：卡死的核心不得阻塞关停，持久化 order log 保证下次启动
+restore-and-sweep。被 adopt 的核心永不发信号。
+
+### 51-d 修复二：核心生命周期绑定到拥有它的进程
+
+`src/index.ts` 的退出处理器原先只调 `gateway.stop()`（**仅关 HTTP 服务**），
+**完全不触及 Rust 核心**；核心由 `/crypto-hft` 技能以懒加载单例启动。
+更严重的是：`blitzkrieg-core-runner.ts` 与 crypto-hft 技能里
+**完全没有信号处理**（`grep SIGINT|SIGTERM|process.on` 无命中）——
+任何非 CLI 入口（REPL、脚本、测试）退出时，核心都会被孤儿化。
+
+新增：
+- `BlitzkriegCoreClient.killNow()` —— 同步 SIGKILL，供信号处理器与
+  `process.on('exit')` 使用（这两者无法 await）。
+- `BlitzkriegCoreRunner` 在 spawn 成功后装 `SIGINT`/`SIGTERM`/`exit` 守卫，
+  干净停止时移除。
+- `src/index.ts` 两条退出路径都先 `stopCoreIfRunning()` 再 `process.exit`。
+- `BZK_CORE_ISOLATION` —— 门禁隔离钩子，同时重定向 socket 与 data 路径，
+  避免测试写进生产账本。
+
+### 51-e 验证
+
+`tests/unit/core-shutdown.test.ts`（4 项，spawn 真实 release 二进制）：
+stop() 解析时进程已回收且 socket 已释放；替代核心可立即接管同一 socket；
+忽略 SIGTERM 的进程被 SIGKILL；被 adopt 的核心保持存活。
+
+**falsification**：把 `stop()` 临时还原为旧的 fire-and-forget 后 **3/4 失败**，
+报错为 `core (pid N) must be reaped when stop() resolves` —— 证明测试真的
+钉住了缺陷，而非恒真。
+
+`scripts/parent-monitor-check.mjs`：spawn 真实 shell → SIGTERM → 查进程表。
+修复前 **FAIL**（自己创建的核心 `ppid` 从 shell 变成 1，即被孤儿化）；
+修复后 **PASS**。两次运行诱饵核心均存活，证明定界正确。
+
+既有 172 项测试全绿。生产数据指纹：`data/trades/trades.jsonl` 未变。
+
+### 51-f 教训（与 §50 合并记账）
+
+两次破坏性事故都源于**同一个模式**：写一个「辅助/测试」脚本时，
+破坏性动作的前置条件判断过宽，且**没有先验证拒绝分支**。
+
+已确立的做法：
+1. 任何会删除或杀进程的脚本，**先跑拒绝分支**，确认它拒绝的是该拒绝的东西；
+2. 破坏范围必须**按身份定界**（血缘、路径白名单），不能按「存在即匹配」；
+3. 定界正确性用**诱饵**验证——放一个「必须不被影响」的对象在旁边。
