@@ -216,6 +216,13 @@ pub struct ShadowEvolutionTuning {
     pub min_observation_secs: Option<i64>,
     pub cooldown_secs: Option<i64>,
     pub variant_count: Option<usize>,
+    /// Rolling metrics window (seconds). Settable from the config file, which
+    /// expresses it in minutes (`evaluation_window_minutes`).
+    pub evaluation_window_secs: Option<i64>,
+    /// Per-evolution step ceiling (Lock 1). `main` clamps this to the built-in
+    /// ceiling before it gets here — a config file may tighten the gradient lock
+    /// but nothing may widen it.
+    pub max_gradient: Option<Decimal>,
     /// Directory for the per-strategy audit files (`<dir>/<strategy>.jsonl`).
     /// Defaults to `data/evolution`; a harness points it at a scratch directory
     /// so an experiment never writes into the operator's real audit history.
@@ -348,6 +355,14 @@ impl Core {
                 if let Some(v) = t.variant_count {
                     c.variant_count = v;
                 }
+                if let Some(v) = t.evaluation_window_secs {
+                    c.evaluation_window_secs = v;
+                }
+                if let Some(v) = t.max_gradient {
+                    // Belt and braces: the caller clamps too, but this is the one
+                    // place the lock could be widened, so it re-checks.
+                    c.max_gradient = v.min(crate::config::MAX_GRADIENT_CEILING);
+                }
                 if let Some(v) = &t.audit_dir {
                     c.audit_dir = v.clone();
                 }
@@ -410,12 +425,39 @@ impl Core {
             engine: None,
             feed: None,
             extensions: {
+                use crate::extension::Extension;
                 let mut reg = crate::extension::ExtensionRegistry::new();
                 // Built-in example extension (installed, not enabled by default).
-                reg.install(
-                    Box::new(crate::extension::builtins::BinanceSpotExtension::new()),
-                    None,
-                );
+                // Its config file is read and checked against the registered
+                // extension (KI-11): the file is no longer inert, and a config
+                // that has drifted from the code is reported at startup.
+                let ext = crate::extension::builtins::BinanceSpotExtension::new();
+                let path =
+                    crate::extension::config_path_for(crate::extension::EXTENSIONS_DIR, ext.name());
+                let cfg = crate::config::ExtensionConfig::load(&path);
+                for w in &cfg.warnings {
+                    tracing::warn!(extension = ext.name(), "extension config: {w}");
+                }
+                for k in &cfg.unknown_keys {
+                    tracing::warn!(
+                        extension = ext.name(),
+                        key = k,
+                        "extension config key not understood (ignored)"
+                    );
+                }
+                for d in &cfg.declared_only {
+                    tracing::info!(
+                        extension = ext.name(),
+                        key = %d.key,
+                        reason = d.reason,
+                        "extension config declares a setting the kernel does not act on"
+                    );
+                }
+                let kind = format!("{:?}", ext.extension_type()).to_lowercase();
+                for problem in cfg.check_against(ext.name(), ext.version(), &kind) {
+                    tracing::warn!(extension = ext.name(), "extension config: {problem}");
+                }
+                reg.install(Box::new(ext), cfg.path);
                 reg
             },
             shadow_evolution: ShadowEvolution::new(shadow_cfg, &[]),

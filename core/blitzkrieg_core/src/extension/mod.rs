@@ -18,6 +18,23 @@ pub mod builtins;
 use crate::ipc::schema::Event;
 use std::collections::HashMap;
 
+/// Where extension directories live, relative to the core's working directory
+/// (the repo root for the production shell). Same convention as `data/`.
+pub const EXTENSIONS_DIR: &str = "extensions";
+
+/// An extension's config path: `extensions/<name>/config.toml`.
+///
+/// The name is used verbatim because it is a registry-unique identifier; a
+/// separator is nonetheless mapped to `_` so a name can never escape the
+/// extensions directory.
+pub fn config_path_for(dir: &str, name: &str) -> std::path::PathBuf {
+    let safe: String = name
+        .chars()
+        .map(|c| if c == '/' || c == '\\' { '_' } else { c })
+        .collect();
+    std::path::Path::new(dir).join(safe).join("config.toml")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionType {

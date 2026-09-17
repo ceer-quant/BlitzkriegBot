@@ -212,6 +212,10 @@ fn build_core(dir: &std::path::Path, se_enabled: bool) -> Core {
             min_observation_secs: Some(0),
             cooldown_secs: Some(0),
             variant_count: Some(3),
+            // Left at the crate default: this harness pins the sample/observation
+            // thresholds, not the metrics window or the gradient lock.
+            evaluation_window_secs: None,
+            max_gradient: None,
             audit_dir: Some(dir.to_string_lossy().into_owned()),
         }),
         ..Default::default()

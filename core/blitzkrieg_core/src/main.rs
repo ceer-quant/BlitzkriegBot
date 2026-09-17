@@ -85,10 +85,21 @@ struct Args {
     market_plugin: Option<String>,
     discovery: bool,
     shadow_evolution: bool,
-    assets: Option<String>,
+    /// Resolved asset list (CLI `--assets` > `BK_ASSETS` > `[engine].assets` >
+    /// the built-in list).
+    assets: Vec<String>,
     se_min_samples: Option<u32>,
     se_cooldown_secs: Option<i64>,
     se_min_obs_secs: Option<i64>,
+    /// Shadow-evolution metrics window (secs), resolved through the same chain.
+    se_eval_window_secs: Option<i64>,
+    /// Per-evolution step ceiling (Lock 1), resolved through the same chain and
+    /// clamped to the built-in ceiling — a file may tighten it, never widen it.
+    se_max_gradient: Option<Decimal>,
+    se_variant_count: Option<usize>,
+    se_audit_dir: Option<String>,
+    se_min_win_rate: Option<Decimal>,
+    se_min_profit_factor: Option<Decimal>,
     /// Per-strategy entry caps: `name:max_open_positions:max_notional_usd`
     /// (repeatable; `-` or empty = no cap on that segment).
     strategy_limits: Vec<String>,
@@ -131,6 +142,10 @@ struct Args {
     latency_ms: i64,
     /// Fill model: maker fill probability (bps of 10000); None = untouched.
     fill_prob_bps: Option<u32>,
+    /// One line per file-settable setting, `key=value (source)`, for the startup
+    /// report. Only settings resolved from above the compiled default appear, so
+    /// "where did this number come from" is answerable from the log alone.
+    config_report: Vec<String>,
 }
 
 /// Canonical socket name.
@@ -146,7 +161,101 @@ fn default_socket() -> String {
     socket_path_for(SOCKET_PREFIX)
 }
 
-fn parse_args() -> Args {
+/// Where the config file comes from, settled BEFORE argument parsing (the file
+/// has to be loaded to resolve the arguments against it).
+enum ConfigChoice {
+    /// No file: every setting comes from CLI/env/default.
+    Off,
+    Path(String),
+}
+
+/// The environment layer of the precedence chain, wrapped in a struct so a test
+/// can supply its own map. Mutating the process environment to test precedence
+/// would be global state that parallel tests race on.
+#[derive(Debug, Clone, Default)]
+struct EnvVars {
+    vars: std::collections::HashMap<String, String>,
+}
+
+impl EnvVars {
+    /// Every `BK_*` variable in the process environment. Only the kernel's own
+    /// namespace is copied: `HFT_*` belongs to the UI shell and `DRY_RUN` is
+    /// read at its own call site (its meaning predates this layer).
+    fn from_process() -> Self {
+        let mut vars = std::collections::HashMap::new();
+        for (k, v) in std::env::vars() {
+            if k.starts_with("BK_") {
+                vars.insert(k, v);
+            }
+        }
+        Self { vars }
+    }
+
+    fn text(&self, key: &str) -> Option<String> {
+        self.vars.get(key).cloned()
+    }
+
+    fn num<T: FromStr>(&self, key: &str) -> Option<T> {
+        self.text(key).and_then(|v| v.trim().parse::<T>().ok())
+    }
+}
+
+/// Pre-scan `argv` for `--config <path>` / `--config=<path>` / `--no-config`.
+///
+/// Two passes over `argv` are unavoidable — the file must be read before the
+/// flags it competes with can be resolved — so this is kept deliberately dumb:
+/// it looks for exactly those three spellings and hands everything else to the
+/// real parser.
+fn prescan_config(argv: &[String]) -> Option<ConfigChoice> {
+    let mut it = argv.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--config" => {
+                return Some(match it.next() {
+                    Some(p) if !p.trim().is_empty() => ConfigChoice::Path(p.clone()),
+                    _ => ConfigChoice::Off,
+                });
+            }
+            "--no-config" => return Some(ConfigChoice::Off),
+            other => {
+                if let Some(v) = other.strip_prefix("--config=") {
+                    return Some(if v.trim().is_empty() {
+                        ConfigChoice::Off
+                    } else {
+                        ConfigChoice::Path(v.to_string())
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the config file: `--config` wins over `BK_CONFIG`, which wins over the
+/// repo's shipped default. `BK_CONFIG=none` (like `--no-config`) turns the file
+/// off entirely, which is what a harness wants when it must not inherit an
+/// operator's edits.
+fn config_choice(argv: &[String], env: &EnvVars) -> ConfigChoice {
+    if let Some(c) = prescan_config(argv) {
+        return c;
+    }
+    match env.text("BK_CONFIG") {
+        Some(v) if v.trim() == "none" => ConfigChoice::Off,
+        Some(v) if !v.trim().is_empty() => ConfigChoice::Path(v.trim().to_string()),
+        _ => ConfigChoice::Path(blitzkrieg_core::config::DEFAULT_CONFIG_PATH.to_string()),
+    }
+}
+
+/// Split a comma-separated asset list ("BTC,ETH") the one way, wherever it came
+/// from.
+fn split_assets(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|a| a.trim().to_uppercase())
+        .filter(|a| !a.is_empty())
+        .collect()
+}
+
+fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: &EnvVars) -> Args {
     let mut socket = default_socket();
     let mut mode = Mode::Dry;
     let mut readonly = false;
@@ -162,14 +271,17 @@ fn parse_args() -> Args {
     let mut enable_strategy: Vec<String> = Vec::new();
     let mut disable_strategy: Vec<String> = Vec::new();
     let mut engine = false;
-    let mut min_round_age: i64 = 30;
-    let mut min_time_left: i64 = 180;
+    // File-settable settings are collected as Option so the precedence chain can
+    // resolve them at the end; a concrete default would erase the "was this flag
+    // given?" question that TOML-vs-CLI depends on.
+    let mut min_round_age: Option<i64> = None;
+    let mut min_time_left: Option<i64> = None;
     let mut trend_confirm: i64 = 60;
     let mut trend_floor_ms: i64 = 10_000;
     let mut feed_ws = false;
     let mut replay: Option<String> = None;
     let mut replay_near_miss: Option<String> = None;
-    let mut round_sec: i64 = 900;
+    let mut round_sec: Option<i64> = None;
     let mut near_miss_path: Option<String> = None;
     let mut trade_log: Option<String> = None;
     let mut no_trade_log = false;
@@ -179,7 +291,7 @@ fn parse_args() -> Args {
     let mut no_position_log = false;
     let mut market_plugin: Option<String> = None;
     let mut discovery = true;
-    let mut shadow_evolution = false;
+    let mut shadow_evolution_flag = false;
     let mut se_min_samples: Option<u32> = None;
     let mut se_cooldown_secs: Option<i64> = None;
     let mut se_min_obs_secs: Option<i64> = None;
@@ -200,7 +312,7 @@ fn parse_args() -> Args {
     let mut latency_ms: i64 = 0;
     let mut fill_prob_bps: Option<u32> = None;
 
-    let mut it = std::env::args().skip(1);
+    let mut it = argv.iter().cloned();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--socket" => socket = it.next().unwrap_or(socket),
@@ -250,7 +362,7 @@ fn parse_args() -> Args {
             "--no-position-log" => no_position_log = true,
             "--market-plugin" => market_plugin = it.next(),
             "--no-discovery" => discovery = false,
-            "--shadow-evolution" => shadow_evolution = true,
+            "--shadow-evolution" => shadow_evolution_flag = true,
             "--se-min-samples" => se_min_samples = it.next().and_then(|v| v.parse().ok()),
             "--se-cooldown-secs" => se_cooldown_secs = it.next().and_then(|v| v.parse().ok()),
             "--se-min-obs-secs" => se_min_obs_secs = it.next().and_then(|v| v.parse().ok()),
@@ -270,20 +382,12 @@ fn parse_args() -> Args {
                 }
             }
             "--assets" => assets_arg = it.next(),
-            "--round-sec" => {
-                round_sec = it.next().and_then(|v| v.parse().ok()).unwrap_or(round_sec)
-            }
+            "--round-sec" => round_sec = it.next().and_then(|v| v.parse().ok()).or(round_sec),
             "--min-round-age" => {
-                min_round_age = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(min_round_age)
+                min_round_age = it.next().and_then(|v| v.parse().ok()).or(min_round_age)
             }
             "--min-time-left" => {
-                min_time_left = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(min_time_left)
+                min_time_left = it.next().and_then(|v| v.parse().ok()).or(min_time_left)
             }
             "--trend-confirm-sec" => {
                 trend_confirm = it
@@ -349,9 +453,185 @@ fn parse_args() -> Args {
                 latency_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(latency_ms)
             }
             "--fill-prob-bps" => fill_prob_bps = it.next().and_then(|v| v.parse().ok()),
-            other => eprintln!("ignoring unknown arg: {other}"),
+            // Consumed by the pre-scan; named here so they are not reported as
+            // unknown flags.
+            "--config" => {
+                it.next();
+            }
+            "--no-config" => {}
+            other if other.starts_with("--config=") => {}
+            other => eprintln!("ignoring unknown argument: {other}"),
         }
     }
+
+    // ── Resolve the file-settable settings: CLI > env > TOML > default ──────
+    use blitzkrieg_core::config::{Sourced, pick};
+    let mut report: Vec<String> = Vec::new();
+
+    macro_rules! resolve {
+        ($label:literal, $cli:expr, $env:literal, $toml:expr, $default:expr) => {{
+            let s: Sourced<_> = pick($cli, env.num($env), $toml, $default);
+            if s.is_explicit() {
+                report.push(format!("{}={} ({})", $label, s.value, s.source.as_str()));
+            }
+            s.value
+        }};
+    }
+    // Same, for values that are not Display (the asset list).
+    macro_rules! resolve_shown {
+        ($label:literal, $cli:expr, $env:expr, $toml:expr, $default:expr) => {{
+            let s = pick($cli, $env, $toml, $default);
+            if s.is_explicit() {
+                report.push(format!("{}={:?} ({})", $label, s.value, s.source.as_str()));
+            }
+            s.value
+        }};
+    }
+    // For settings whose "not given" state is itself `None`. The override has to
+    // be wrapped one level so `pick` can tell "a layer supplied None" from
+    // "no layer spoke" — resolving those two is the whole job of this layer.
+    macro_rules! resolve_opt {
+        ($label:literal, $cli:expr, $env:expr, $toml:expr) => {{
+            let s = pick($cli.map(Some), $env.map(Some), $toml.map(Some), None);
+            if s.is_explicit() {
+                let shown = s
+                    .value
+                    .as_ref()
+                    .map(|v| format!("{v:?}"))
+                    .unwrap_or_else(|| "none".to_string());
+                report.push(format!("{}={} ({})", $label, shown, s.source.as_str()));
+            }
+            s.value
+        }};
+    }
+
+    let round_sec = resolve!(
+        "engine.round_sec",
+        round_sec,
+        "BK_ROUND_SEC",
+        file.round_sec,
+        DEFAULT_ROUND_SEC
+    );
+    let min_round_age = resolve!(
+        "engine.min_round_age_sec",
+        min_round_age,
+        "BK_MIN_ROUND_AGE_SEC",
+        file.min_round_age_sec,
+        DEFAULT_MIN_ROUND_AGE_SEC
+    );
+    let min_time_left = resolve!(
+        "engine.min_time_left_sec",
+        min_time_left,
+        "BK_MIN_TIME_LEFT_SEC",
+        file.min_time_left_sec,
+        DEFAULT_MIN_TIME_LEFT_SEC
+    );
+    let assets: Vec<String> = resolve_shown!(
+        "engine.assets",
+        assets_arg.as_deref().map(split_assets),
+        env.text("BK_ASSETS").map(|v| split_assets(&v)),
+        file.assets.clone(),
+        DEFAULT_ASSETS
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // Shadow Evolution. The file speaks in MINUTES for the two windows; the
+    // kernel speaks in seconds, so the conversion happens exactly here and
+    // nowhere else.
+    let se_eval_window_secs = resolve_opt!(
+        "shadow_evolution.evaluation_window_secs",
+        env.num::<i64>("BK_SE_EVAL_WINDOW_SECS"),
+        None::<i64>,
+        file.shadow.evaluation_window_minutes.map(|m| m * 60)
+    );
+    let se_min_obs_secs = resolve_opt!(
+        "shadow_evolution.min_observation_secs",
+        se_min_obs_secs,
+        None::<i64>,
+        file.shadow.min_observation_minutes.map(|m| m * 60)
+    );
+    let se_cooldown_secs = resolve_opt!(
+        "shadow_evolution.cooldown_secs",
+        se_cooldown_secs,
+        env.num::<i64>("BK_SE_COOLDOWN_SECS"),
+        file.shadow.cooldown_minutes.map(|m| m * 60)
+    );
+    let se_min_samples = resolve_opt!(
+        "shadow_evolution.min_sample_count",
+        se_min_samples,
+        env.num::<u32>("BK_SE_MIN_SAMPLES"),
+        file.shadow.min_sample_count
+    );
+    let se_variant_count = resolve_opt!(
+        "shadow_evolution.variant_count",
+        None::<usize>,
+        env.num::<usize>("BK_SE_VARIANT_COUNT"),
+        file.shadow.variant_count
+    );
+    let se_audit_dir = resolve_opt!(
+        "shadow_evolution.audit_dir",
+        None::<String>,
+        env.text("BK_SE_AUDIT_DIR"),
+        file.shadow.audit_dir.clone()
+    );
+    let se_min_win_rate = resolve_opt!(
+        "shadow_evolution.min_win_rate_improvement",
+        None::<Decimal>,
+        env.num::<Decimal>("BK_SE_MIN_WIN_RATE"),
+        file.shadow.min_win_rate_improvement
+    );
+    let se_min_profit_factor = resolve_opt!(
+        "shadow_evolution.min_profit_factor_improvement",
+        None::<Decimal>,
+        env.num::<Decimal>("BK_SE_MIN_PROFIT_FACTOR"),
+        file.shadow.min_profit_factor_improvement
+    );
+    // Lock 1 is a safety lock, not a tuning surface: a file may tighten the
+    // per-step gradient, never widen it. A value above the ceiling is refused
+    // outright rather than clamped — silently ignoring a request to loosen a
+    // safety lock is the kind of thing an operator must be told about.
+    let se_max_gradient = match pick(
+        None::<Decimal>,
+        env.num::<Decimal>("BK_SE_MAX_GRADIENT"),
+        file.shadow.max_gradient,
+        blitzkrieg_core::config::MAX_GRADIENT_CEILING,
+    ) {
+        s if !s.is_explicit() => None,
+        s if s.value <= blitzkrieg_core::config::MAX_GRADIENT_CEILING
+            && s.value > Decimal::ZERO =>
+        {
+            report.push(format!(
+                "shadow_evolution.max_gradient={} ({})",
+                s.value,
+                s.source.as_str()
+            ));
+            Some(s.value)
+        }
+        s => {
+            eprintln!(
+                "blitzkrieg-core: ignoring max_gradient {}: must be > 0 and <= {} \
+                 (Lock 1 is not widenable)",
+                s.value,
+                blitzkrieg_core::config::MAX_GRADIENT_CEILING
+            );
+            None
+        }
+    };
+
+    // A file that names strategies to enable is the declarative equivalent of
+    // repeating --enable-strategy; CLI flags add to it (they do not replace it,
+    // because "turn this one on too" is the only sensible reading of both).
+    if let Some(active) = &file.active_strategies {
+        for name in active {
+            if !enable_strategy.iter().any(|n| n == name) {
+                enable_strategy.push(name.clone());
+            }
+        }
+        report.push(format!("strategy.active={active:?} (toml)"));
+    }
+
     Args {
         socket,
         mode,
@@ -382,11 +662,24 @@ fn parse_args() -> Args {
         no_position_log,
         market_plugin,
         discovery,
-        shadow_evolution,
-        assets: assets_arg,
+        shadow_evolution: shadow_evolution_flag
+            || pick(
+                None::<bool>,
+                env.num::<bool>("BK_SHADOW_EVOLUTION"),
+                file.shadow.enabled,
+                false,
+            )
+            .value,
+        assets,
         se_min_samples,
         se_cooldown_secs,
         se_min_obs_secs,
+        se_eval_window_secs,
+        se_max_gradient,
+        se_variant_count,
+        se_audit_dir,
+        se_min_win_rate,
+        se_min_profit_factor,
         strategy_limits,
         enable_strategy,
         disable_strategy,
@@ -403,8 +696,17 @@ fn parse_args() -> Args {
         slippage_ticks,
         latency_ms,
         fill_prob_bps,
+        config_report: report,
     }
 }
+
+/// Defaults for the file-settable settings. Named constants because each one now
+/// has three potential suppliers (CLI, env, file) and a bare literal at the
+/// bottom of a four-deep chain is unreadable.
+const DEFAULT_ROUND_SEC: i64 = 900;
+const DEFAULT_MIN_ROUND_AGE_SEC: i64 = 30;
+const DEFAULT_MIN_TIME_LEFT_SEC: i64 = 180;
+const DEFAULT_ASSETS: [&str; 4] = ["BTC", "ETH", "SOL", "XRP"];
 
 /// Default archive path, relative to the core's working directory (the repo root
 /// for the production shell).
@@ -535,7 +837,36 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(false)
         .init();
 
-    let args = parse_args();
+    // Configuration is loaded BEFORE the arguments, because the arguments are
+    // resolved against it (CLI > env > TOML > default).
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let env = EnvVars::from_process();
+    let choice = config_choice(&argv, &env);
+    let file = match &choice {
+        ConfigChoice::Off => blitzkrieg_core::config::FileConfig::default(),
+        ConfigChoice::Path(p) => {
+            blitzkrieg_core::config::FileConfig::load(Some(std::path::Path::new(p)))
+        }
+    };
+    for w in &file.warnings {
+        eprintln!("blitzkrieg-core: config warning: {w}");
+    }
+    // An unknown key is the exact failure mode this layer exists to prevent
+    // (KI-11), so it is loud — but never fatal.
+    for k in &file.unknown_keys {
+        eprintln!("blitzkrieg-core: config key not understood (ignored): {k}");
+    }
+
+    let args = parse_args(&file, &argv, &env);
+
+    // Say where the non-default settings came from. A declarative config layer is
+    // only auditable if the effective value and its origin are both observable.
+    if let Some(p) = &file.path {
+        eprintln!("blitzkrieg-core: config file {}", p.display());
+    }
+    for line in &args.config_report {
+        eprintln!("blitzkrieg-core: config {line}");
+    }
 
     // DRY_RUN env honours the existing convention when --mode is not explicit.
     let mode = if std::env::args().any(|a| a == "--mode") {
@@ -609,13 +940,6 @@ async fn main() -> anyhow::Result<()> {
         )
     };
 
-    let assets_override: Option<Vec<String>> = args.assets.as_ref().map(|s| {
-        s.split(',')
-            .map(|a| a.trim().to_uppercase())
-            .filter(|a| !a.is_empty())
-            .collect()
-    });
-
     // Per-order share sizing. Both default to 10 (fixed lot) when neither flag is
     // given. Clamp min<=max so a stray flag order cannot invert the range.
     let (min_shares, max_shares) = {
@@ -675,18 +999,28 @@ async fn main() -> anyhow::Result<()> {
         shadow_evolution_tuning: if args.se_min_samples.is_some()
             || args.se_cooldown_secs.is_some()
             || args.se_min_obs_secs.is_some()
+            || args.se_eval_window_secs.is_some()
+            || args.se_max_gradient.is_some()
+            || args.se_variant_count.is_some()
+            || args.se_audit_dir.is_some()
+            || args.se_min_win_rate.is_some()
+            || args.se_min_profit_factor.is_some()
         {
             Some(blitzkrieg_core::service::ShadowEvolutionTuning {
                 min_sample_count: args.se_min_samples,
                 cooldown_secs: args.se_cooldown_secs,
                 min_observation_secs: args.se_min_obs_secs,
-                ..Default::default()
+                evaluation_window_secs: args.se_eval_window_secs,
+                max_gradient: args.se_max_gradient,
+                variant_count: args.se_variant_count,
+                min_win_rate_improvement: args.se_min_win_rate,
+                min_profit_factor_improvement: args.se_min_profit_factor,
+                audit_dir: args.se_audit_dir.clone(),
             })
         } else {
             None
         },
-        assets: assets_override
-            .unwrap_or_else(|| vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()]),
+        assets: args.assets.clone(),
         min_round_age_sec: args.min_round_age,
         trend_confirm_sec: args.trend_confirm,
         trend_window_floor_ms: args.trend_floor_ms,
@@ -1163,5 +1497,290 @@ mod tests {
             Some(100),
         );
         assert_eq!((path, max, rotate, min_free), (None, 0, 0, 0));
+    }
+
+    // ── KI-11: the file-config source and its precedence ────────────────────
+
+    /// Parse an argv with no config file and no env overrides in play.
+    fn args_from(flags: &[&str]) -> Args {
+        let argv: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
+        parse_args(
+            &blitzkrieg_core::config::FileConfig::default(),
+            &argv,
+            &EnvVars::default(),
+        )
+    }
+
+    /// An env layer built from literal pairs, so the env tier of the precedence
+    /// chain is testable without touching the process environment.
+    fn env_of(pairs: &[(&str, &str)]) -> EnvVars {
+        EnvVars {
+            vars: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    /// Write `text` to a scratch `default.toml` and load it the way the kernel
+    /// does (the loader consults the file system, so a temp file is the honest
+    /// way to exercise it).
+    fn file_with(text: &str) -> blitzkrieg_core::config::FileConfig {
+        let dir = std::env::temp_dir().join(format!(
+            "bk-main-cfg-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("default.toml");
+        std::fs::write(&path, text).unwrap();
+        let cfg = blitzkrieg_core::config::FileConfig::load(Some(&path));
+        std::fs::remove_dir_all(&dir).ok();
+        cfg
+    }
+
+    #[test]
+    fn defaults_hold_without_a_file_or_flags() {
+        let a = args_from(&[]);
+        assert_eq!(a.round_sec, 900);
+        assert_eq!(a.min_round_age, 30);
+        assert_eq!(a.min_time_left, 180);
+        assert_eq!(a.assets, vec!["BTC", "ETH", "SOL", "XRP"]);
+        assert!(
+            a.config_report.is_empty(),
+            "nothing is explicit, so nothing is reported: {:?}",
+            a.config_report
+        );
+    }
+
+    #[test]
+    fn the_file_supplies_a_value_when_no_flag_does() {
+        let file = file_with(
+            r#"
+            [engine]
+            assets = ["DOGE"]
+            round_sec = 300
+            min_round_age_sec = 5
+            min_time_left_sec = 7
+            "#,
+        );
+        let a = parse_args(&file, &[], &EnvVars::default());
+        assert_eq!(a.round_sec, 300);
+        assert_eq!(a.min_round_age, 5);
+        assert_eq!(a.min_time_left, 7);
+        assert_eq!(a.assets, vec!["DOGE"]);
+        // Each resolved value names its origin, so the log can answer "why 300?".
+        assert!(
+            a.config_report
+                .iter()
+                .any(|l| l == "engine.round_sec=300 (toml)")
+        );
+        assert!(
+            a.config_report
+                .iter()
+                .any(|l| l == "engine.min_time_left_sec=7 (toml)")
+        );
+    }
+
+    #[test]
+    fn a_flag_beats_the_file() {
+        let file = file_with(
+            r#"
+            [engine]
+            round_sec = 300
+            min_time_left_sec = 7
+            "#,
+        );
+        let a = parse_args(
+            &file,
+            &["--round-sec".into(), "60".into()],
+            &EnvVars::default(),
+        );
+        assert_eq!(a.round_sec, 60, "CLI outranks TOML");
+        assert_eq!(
+            a.min_time_left, 7,
+            "and the untouched key still comes from TOML"
+        );
+        assert!(
+            a.config_report
+                .iter()
+                .any(|l| l == "engine.round_sec=60 (cli)")
+        );
+    }
+
+    #[test]
+    fn the_file_can_turn_shadow_evolution_on_and_the_flag_is_a_no_op() {
+        // The documented way to enable the feature: edit the file. Before KI-11
+        // this had no effect at all.
+        let file = file_with(
+            r#"
+            [shadow_evolution]
+            enabled = true
+            min_sample_count = 12
+            cooldown_minutes = 2
+            evaluation_window_minutes = 5
+            min_observation_minutes = 1
+            variant_count = 4
+            audit_dir = "data/evo-scratch"
+            "#,
+        );
+        let a = parse_args(&file, &[], &EnvVars::default());
+        assert!(a.shadow_evolution);
+        assert_eq!(a.se_min_samples, Some(12));
+        // Minutes in the file, seconds in the kernel.
+        assert_eq!(a.se_cooldown_secs, Some(120));
+        assert_eq!(a.se_eval_window_secs, Some(300));
+        assert_eq!(a.se_min_obs_secs, Some(60));
+        assert_eq!(a.se_variant_count, Some(4));
+        assert_eq!(a.se_audit_dir.as_deref(), Some("data/evo-scratch"));
+    }
+
+    #[test]
+    fn active_strategies_in_the_file_are_enabled_and_flags_add_to_them() {
+        let file = file_with(
+            r#"
+            [strategy]
+            active = ["spread_arb", "trend_follow"]
+            "#,
+        );
+        let a = parse_args(
+            &file,
+            &["--enable-strategy".into(), "dog_strategy".into()],
+            &EnvVars::default(),
+        );
+        assert_eq!(
+            a.enable_strategy,
+            vec!["dog_strategy", "spread_arb", "trend_follow"]
+        );
+    }
+
+    #[test]
+    fn a_gradient_above_lock_1_is_refused_not_silently_applied() {
+        let file = file_with(
+            r#"
+            [shadow_evolution]
+            max_gradient = 0.25
+            "#,
+        );
+        let a = parse_args(&file, &[], &EnvVars::default());
+        assert_eq!(
+            a.se_max_gradient, None,
+            "a request to widen a safety lock must not take effect"
+        );
+
+        // Tightening it is allowed.
+        let file = file_with(
+            r#"
+            [shadow_evolution]
+            max_gradient = 0.01
+            "#,
+        );
+        let a = parse_args(&file, &[], &EnvVars::default());
+        assert_eq!(a.se_max_gradient, Some(dec!(0.01)));
+    }
+
+    #[test]
+    fn a_broken_file_does_not_stop_startup() {
+        // The parse_args half: a FileConfig that failed to load is all-defaults,
+        // and the kernel still comes up on CLI + built-in values.
+        let a = args_from(&["--round-sec", "120"]);
+        assert_eq!(a.round_sec, 120);
+        assert_eq!(a.assets, vec!["BTC", "ETH", "SOL", "XRP"]);
+    }
+
+    #[test]
+    fn prescan_finds_the_config_flag_in_every_documented_spelling() {
+        let v = |s: &[&str]| -> Vec<String> { s.iter().map(|x| x.to_string()).collect() };
+        match prescan_config(&v(&["--config", "a.toml"])) {
+            Some(ConfigChoice::Path(p)) => assert_eq!(p, "a.toml"),
+            _ => panic!("--config <path> must parse"),
+        }
+        match prescan_config(&v(&["--config=b.toml"])) {
+            Some(ConfigChoice::Path(p)) => assert_eq!(p, "b.toml"),
+            _ => panic!("--config=<path> must parse"),
+        }
+        assert!(matches!(
+            prescan_config(&v(&["--no-config"])),
+            Some(ConfigChoice::Off)
+        ));
+        // Bare `--config` with nothing usable after it means "no file", not "the
+        // next flag is my filename".
+        assert!(matches!(
+            prescan_config(&v(&["--config="])),
+            Some(ConfigChoice::Off)
+        ));
+        assert!(matches!(
+            prescan_config(&v(&["--config", ""])),
+            Some(ConfigChoice::Off)
+        ));
+        assert!(prescan_config(&v(&["--engine"])).is_none());
+    }
+
+    #[test]
+    fn the_env_layer_sits_between_the_flag_and_the_file() {
+        let file = file_with(
+            r#"
+            [engine]
+            round_sec = 300
+            min_time_left_sec = 7
+            "#,
+        );
+        let env = env_of(&[("BK_ROUND_SEC", "600"), ("BK_MIN_TIME_LEFT_SEC", "9")]);
+
+        // CLI > env.
+        let a = parse_args(&file, &["--round-sec".into(), "60".into()], &env);
+        assert_eq!(a.round_sec, 60);
+        assert!(
+            a.config_report
+                .iter()
+                .any(|l| l == "engine.round_sec=60 (cli)")
+        );
+        // env > TOML.
+        assert_eq!(
+            a.min_time_left, 9,
+            "the env var outranks the file for a key no flag named"
+        );
+        assert!(
+            a.config_report
+                .iter()
+                .any(|l| l == "engine.min_time_left_sec=9 (env)")
+        );
+    }
+
+    #[test]
+    fn the_env_layer_alone_can_supply_a_value() {
+        let env = env_of(&[
+            ("BK_MIN_ROUND_AGE_SEC", "3"),
+            ("BK_ASSETS", "btc, eth"),
+            ("BK_SHADOW_EVOLUTION", "true"),
+            ("BK_SE_COOLDOWN_SECS", "45"),
+        ]);
+        let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &[], &env);
+        assert_eq!(a.min_round_age, 3);
+        // Asset lists are normalised wherever they come from.
+        assert_eq!(a.assets, vec!["BTC", "ETH"]);
+        assert!(a.shadow_evolution);
+        assert_eq!(a.se_cooldown_secs, Some(45));
+    }
+
+    #[test]
+    fn bk_config_none_turns_the_file_off() {
+        let env = env_of(&[("BK_CONFIG", "none")]);
+        assert!(matches!(config_choice(&[], &env), ConfigChoice::Off));
+        // Without the variable the shipped default is used.
+        assert!(matches!(
+            config_choice(&[], &EnvVars::default()),
+            ConfigChoice::Path(p) if p == blitzkrieg_core::config::DEFAULT_CONFIG_PATH
+        ));
+    }
+
+    #[test]
+    fn a_config_path_that_does_not_exist_is_a_silent_no_op() {
+        let file = blitzkrieg_core::config::FileConfig::load(Some(std::path::Path::new(
+            "/nonexistent/bk.toml",
+        )));
+        let a = parse_args(&file, &[], &EnvVars::default());
+        assert_eq!(a.round_sec, 900);
+        assert!(a.config_report.is_empty());
     }
 }

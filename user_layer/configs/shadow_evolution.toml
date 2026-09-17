@@ -1,9 +1,18 @@
 # Shadow Evolution — opt-in adaptive parameter tuning (DISABLED by default).
 #
-# NOTE: this file is currently READ-ONLY DOCUMENTATION. No code path parses it
-# (see docs/DECISIONS_PENDING.md D-1). The authoritative sources today are the
-# kernel CLI flags and `ShadowEvolutionConfig::default()`. Editing a value here
-# will NOT change runtime behaviour.
+# THIS FILE IS READ BY THE KERNEL (KI-11 / D-1). Editing a value here changes
+# runtime behaviour; before that fix the file was inert documentation and
+# `enabled = true` did nothing. It is read as the sibling of
+# `user_layer/configs/default.toml` (so `--config <dir>/default.toml` also picks
+# this file up on the side).
+#
+# Precedence, highest first:
+#
+#     command-line flag  >  BK_* environment variable  >  this file  >  built-in default
+#
+# Note the units: the two windows below are written in MINUTES here, while the
+# kernel works in seconds. That conversion happens at load and is reported in the
+# startup log.
 #
 # When enabled, the kernel runs parallel VIRTUAL twins of each live strategy on
 # the same tick stream (zero real cost) and, when one is significantly better
@@ -19,12 +28,16 @@
 #   Lock 0 domain   : a value outside the strategy's declared [min,max] is
 #                     rejected before the gradient lock is even consulted.
 #   Lock 1 gradient : each mutable knob may move at most +/-5% per evolution.
+#                     `max_gradient` below may TIGHTEN this and can never widen
+#                     it: a larger value is refused with a warning and the
+#                     built-in ceiling stays in force.
 #   Lock 2 immutable: hard stop / loss breaker / daily loss / order notional are
 #                     NOT part of any swappable parameter set and can never evolve.
 #
 # Enable at runtime with IPC `shadow_evolution.enable` (or start with the
-# kernel flag `--shadow-evolution`). Per-strategy IPC: `shadow_evolution.apply`
-# and `shadow_evolution.rollback` both REQUIRE a `strategy` argument.
+# kernel flag `--shadow-evolution`, or set `enabled = true` here). Per-strategy
+# IPC: `shadow_evolution.apply` and `shadow_evolution.rollback` both REQUIRE a
+# `strategy` argument.
 
 [shadow_evolution]
 enabled = false                      # default OFF (opt-in)
@@ -34,7 +47,7 @@ min_win_rate_improvement = 0.05      # variant WR must beat live by +5pp
 min_profit_factor_improvement = 0.10 # variant PF must beat live by +10%
 min_observation_minutes = 5          # variant must exist >=5 min
 cooldown_minutes = 10                # min gap between applied evolutions
-max_gradient = 0.05                  # +/-5% per step (Lock 1)
+max_gradient = 0.05                  # +/-5% per step (Lock 1; tightenable only)
 variant_count = 3                    # shadow variants (>=2)
 
 # Audit DIRECTORY, not a file: the file name is derived from the strategy name,

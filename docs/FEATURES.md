@@ -16,7 +16,7 @@
 > 最关键的阅读提示：**整条 Live（真实下单）链路属于 ⚠️ 未验证**——全程 DRY。
 > 详见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) §1。
 >
-> 最后核对：2026-09-17（`main` = `4c4b351`）。
+> 最后核对：2026-09-18（KI-1/KI-7/KI-10/KI-11/KI-23 已关闭）。
 
 ---
 
@@ -43,7 +43,8 @@ BlitzkriegBot 是一个面向 **Polymarket 加密二元（UP/DOWN）预测市场
 | **资金账本（Ledger）**：可用/冻结、费用计支出、本金＋净利润口径 | ✅ 已实盘验证（dry） | 面板余额卡与真实余额对账；`MIGRATION_LOG §7`（费用记账统一） |
 | **持仓管理**：开仓 / 实时重估 / 部分平仓 / 移动止盈 | ✅ 已实盘验证（dry） | 面板持仓表实时价格与盈亏；`cycle-check.mjs` 全链路 |
 | **风控引擎（RiskGate）**：单笔名义额、持仓数、单 token 去重、`NoMarkets` 结构前提 | ✅ 已实盘验证（dry） | 实况中确实拒绝过超限订单（日志 `--max-positions 2` 拒单） |
-| **连亏熔断（LossBreaker）** | ✅ 已实现（测试覆盖） | **⚠️ 注意：当前是全局单实例**，跨策略耦合，见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) §3.1 / D-18 |
+| **连亏熔断（LossBreaker）** | ✅ 已验证（离线） | **按策略分片**（KI-10 / D-18 A，`c06c4ba9`）：任一腿连亏不再冻结全核；日亏上限与 kill switch 仍为全局 |
+| **配置文件（TOML）** | ✅ 已验证（离线） | `config.rs` 13 个单测（KI-11 / §59）：`user_layer/configs/*.toml` 真实生效，优先级 CLI > `BK_*` env > TOML > 代码默认，每个值带来源溯源 |
 | **kill switch**（`risk.kill` / `risk.resume`） | ✅ 已实现（测试覆盖） | IPC 命令面；TUI 有醒目红条提醒 |
 | **出场策略（ExitConfig）**：止损 12% / 移动止盈 arm 15% 回吐下限 8% / 时间兜底 | ✅ 已实盘验证（dry） | `docs/reports/HFT_OPTIMIZATION_REPORT.md`；冻结留出段 walk-forward |
 | **行情接入（`--feed-ws`）**：Polymarket 走 REST 轮询，Binance 现货走 WS | ✅ 已实盘验证（dry） | 实况行情跳动；`MIGRATION_LOG §57`（REST 轮询替代 WS 通道，流量降 95%） |
@@ -148,6 +149,10 @@ B 组净盈亏 +12.66、胜率 +6.6pt、回撤不变，参数单调收敛一步�
 `DataFeed` · `MarketDiscovery` · `OrderExecutor` · `MarketPlugin` · `MarketHost`。
 新增交易所 = 写一个 crate + 用 Cargo feature 注册，**内核不改一行**。
 指南：[`blitzkrieg/EXTENSION_GUIDE.md`](blitzkrieg/EXTENSION_GUIDE.md)。
+
+**扩展配置**（`extensions/<name>/config.toml`）：`[meta]` 已被内核读取并与已链接的
+扩展做漂移校验（KI-11 / §59）；`[market]`/`[risk]`/`[dependencies]` 被识别但
+**无适配器读取**，启动时明确报告为 `declared_only`。**无热加载**。
 
 ---
 
@@ -316,13 +321,12 @@ Tauri 打包进 webui 与 `desktop_snapshot` / `desktop_command` 全链路未验
 | # | 缺口 | 影响 | 详见 |
 | --- | --- | --- | --- |
 | 1 | **Live 链路从未验证** | 所有「能赚钱」的结论都建立在 dry 之上 | [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) §1 |
-| 2 | **dry 不跑穿越撮合 → 入场恒计 taker 费** | 入场费 1.7% 被系统性多算，dry 低估 maker 入场收益 | §2 / D-11 |
-| 3 | **连亏熔断全局共享** | 多策略并跑的样本外结果不可归因 | §3.1 / D-18 |
-| 4 | **影子进化实况从未开启** | 进化的真实收益只有离线 A/B 证据 | §3.2 |
-| 5 | **E6 Tauri 端到端未验** | 桌面形态不可交付 | §3.4 |
-| 6 | **性能基准未做** | 无法证明「低延迟」 | §5 |
-| 7 | **Node 外壳 584 个 .ts 未迁移** | 体量与攻击面 | §4 / D-4 |
-| 8 | **E9-g / E9-h 未完成** | 面板与 TUI 能力不对等 | §3.3 |
+| 2 | **影子进化实况从未开启** | 进化的真实收益只有离线 A/B 证据 | §3.2 |
+| 3 | **E6 Tauri 端到端未验** | 桌面形态不可交付 | §3.4 |
+| 4 | **性能基准未做** | 无法证明「低延迟」 | §5 |
+| 5 | **E9-g / E9-h 未完成** | 面板与 TUI 能力不对等 | §3.3 |
+| 6 | **E12 一体化启动未完成** | 无 `blitzkrieg`/`core`/`tui --attach` 子命令 | KNOWN_ISSUES KI-25 |
+| 7 | **fmt/clippy 债未清** | 独立专项 PR，勿夹进功能变更 | KNOWN_ISSUES KI-13 |
 
 ---
 

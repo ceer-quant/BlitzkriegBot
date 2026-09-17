@@ -14,8 +14,13 @@ A market is linked in by a Cargo feature and selected at runtime with
 `--market-plugin <name>`. It must depend on `blitzkrieg-market-api` only — **never
 on `blitzkrieg-core`** (that would form a dependency cycle).
 
-> Note: `config.toml` files under `extensions/` are **documentation only** — the
-> kernel does not parse them. Assembly is by Cargo feature; selection is by CLI.
+> `config.toml` under `extensions/<name>/` **is read** (KI-11). The kernel parses
+> `[meta]` at startup and checks it against the linked extension — a name/version/
+> type drift is reported. `[market]`, `[risk]` and `[dependencies]` are recognised
+> but have no adapter: they are reported as declared-but-inert rather than acted on
+> (market wiring is by Cargo feature + `--market-plugin`, risk limits come from
+> `RiskConfig`, dependencies resolve at build time). Assembly is still by Cargo
+> feature; selection is still by CLI. There is no hot reload.
 
 See `docs/blitzkrieg/EXTENSION_GUIDE.md` for the full contract (it lives under
 `docs/blitzkrieg/`, not `docs/`).

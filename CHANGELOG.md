@@ -3,6 +3,35 @@
 All notable changes to BlitzkriegBot are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
+## [Unreleased]
+
+### Added
+
+- **The kernel reads TOML configuration (KI-11 / D-1).**
+  `user_layer/configs/default.toml` and its sibling `shadow_evolution.toml`
+  are now parsed at startup instead of being inert documentation. Precedence,
+  highest first: command-line flag → `BK_*` environment variable → file →
+  compiled-in default. Every value above the default is logged at startup as
+  `key=value (source)`, so a running process can be asked where a setting came
+  from. `--config <path>` / `--config=<path>` / `--no-config` (or
+  `BK_CONFIG=<path>` / `BK_CONFIG=none`) choose the file. A missing file is not
+  an error, a malformed one only warns, and **an unrecognised key is reported
+  individually** rather than silently ignored. `extensions/<name>/config.toml`
+  is read for `[meta]` and checked against the linked extension for drift;
+  `[market]`/`[risk]`/`[dependencies]` are reported as declared-but-inert
+  because no adapter consumes them. There is no hot reload.
+
+### Changed
+
+- `user_layer/configs/default.toml` pins `round_sec = 900`. The file previously
+  said `300` while the compiled default, the supervisor's `HFT_ROUND_SEC` and
+  `scripts/soak-health.sh` all said 900; with the file now live, `300` would
+  have been a silent behaviour change to 5-minute rounds. See
+  `DECISIONS_PENDING.md` D-26.
+- The consecutive-loss breaker is sharded per strategy (KI-10 / D-18 option A).
+  One leg's losing streak no longer freezes entries for the whole core; the
+  daily loss cap and kill switch stay global by design.
+
 ## [0.2.0] - 2026-09-17
 
 ### Removed

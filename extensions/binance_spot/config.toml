@@ -1,5 +1,9 @@
 # Extension config for the binance_spot market extension (structural shell).
-# Each extension has its own config, hot-reloadable, with version + deps.
+#
+# Read at kernel startup (KI-11): [meta] is parsed and checked against the linked
+# extension, so name/version/extension_type drift is reported. [dependencies],
+# [market] and [risk] are recognised but have no adapter yet — they are reported
+# as declared-but-inert rather than acted on. No hot reload: restart to apply.
 
 [meta]
 name = "binance_spot"

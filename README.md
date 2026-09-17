@@ -116,6 +116,18 @@ UDS 路径可用 `--socket` 覆盖（默认位于 `$TMPDIR` 下）。
 | `--shadow-evolution` | 启用影子进化（相关参数 `--se-min-samples` 等） |
 | `--replay` / `--replay-near-miss` | 回放行情 / 近失样本 |
 | `--market-plugin` | 指定运行时市场插件 |
+| `--config <path>` / `--no-config` | 指定/关闭配置文件（默认读 `user_layer/configs/default.toml`） |
+
+#### 配置文件
+
+`user_layer/configs/default.toml`（含同目录的 `shadow_evolution.toml`）**会被内核读取**。
+生效优先级为 **命令行 > `BK_*` 环境变量 > 配置文件 > 代码默认值**，启动时会为每个
+非默认值打印一行 `key=value (source)`，说明该值从哪一层来。因此上面示例里的
+`--round-sec 900` 依然压过文件里的同名键。
+
+关闭文件用 `--no-config` 或 `BK_CONFIG=none`；换一份用 `--config <path>` 或
+`BK_CONFIG=<path>`。文件缺失不是错误（默认值生效）；文件写坏只告警不致命；
+**文件里出现内核不认识的键会逐个告警**——不会静默忽略。
 
 ### 3.3 运行面板（Web UI）
 

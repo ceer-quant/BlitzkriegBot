@@ -1,11 +1,33 @@
 # User-layer runtime configuration. Parameters only; no credentials here.
 # Credentials are read by the kernel process from its own environment.
+#
+# THIS FILE IS READ BY THE KERNEL (KI-11 / D-1). Editing a value here changes
+# runtime behaviour. Precedence, highest first:
+#
+#     command-line flag  >  BK_* environment variable  >  this file  >  built-in default
+#
+# So `--round-sec 60` still beats `round_sec` below, and an unset key here falls
+# back to the value compiled into the binary. The kernel logs every setting it
+# resolved from above the default, naming its source, at startup.
+#
+# Turn the file off entirely with `--no-config` or `BK_CONFIG=none`; point at a
+# different one with `--config <path>` or `BK_CONFIG=<path>`. The sibling
+# `shadow_evolution.toml` in this directory is read with this file.
 
 [engine]
 assets = ["BTC", "ETH", "SOL", "XRP"]
-round_sec = 300              # 5m markets
+# 900 = 15m rounds. Do NOT lower this to 300 (5m) as a "tuning" change: the
+# tradeable window is [min_round_age_sec, round_sec - min_time_left_sec] and the
+# timing gates are absolute seconds, so 5m shrinks the post-confirmation wait for
+# a retrace from ~660s to ~30s. Measured: switching to 5m took the engine from
+# ~3 trades/hour to zero signals (see MIGRATION_LOG §12), and `soak-health.sh`
+# alarms on any running core whose argv says 300.
+round_sec = 900
 min_round_age_sec = 30
 min_time_left_sec = 180
 
 [strategy]
-active = ["spread_arb"]      # strategy names to enable in the kernel engine
+# Strategies switched ON at startup, by name (equivalent to repeating
+# --enable-strategy). Builtins default to `spread_arb` on and `trend_follow`
+# off; an unknown name is warned about, never fatal.
+active = ["spread_arb"]

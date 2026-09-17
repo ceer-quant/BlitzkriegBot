@@ -144,8 +144,10 @@ per-strategy 限额/分账。策略标签贯穿订单（`OrderRequest.strategy`�
 `Extension` 是"观察者/钩子"，**刻意不给交易能力**；`MarketPlugin` 才是"市场接入点"。
 新增一个市场 = 实现 `MarketPlugin` 并加一个 Cargo feature；新增一个审计钩子 = 实现 `Extension`。
 
-> 注意：`extensions/<name>/config.toml` 目前**仅作文档**，内核不解析（见 `EXTENSION_GUIDE.md §5`）。
-> 装配走 Cargo feature，选择走 `--market-plugin <name>`。
+> `extensions/<name>/config.toml` 的 `[meta]` **已被内核读取并与已链接扩展校验**
+> （KI-11，见 `EXTENSION_GUIDE.md §5`）；`[market]`/`[risk]`/`[dependencies]`
+> 被识别但**无适配器读取**，启动时明确报告为「已声明未生效」。
+> 装配仍走 Cargo feature，选择仍走 `--market-plugin <name>`，无热加载。
 
 ## 6. 通用化边界（不做的事）
 

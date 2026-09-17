@@ -92,7 +92,10 @@ E2-c 修复：`strategy.load` 载入的新库会**立即**拿到参数单元（`
 
 ## 5. 配置
 
-`user_layer/configs/shadow_evolution.toml`（默认 `enabled = false`）：
+`user_layer/configs/shadow_evolution.toml`（默认 `enabled = false`）。
+**该文件已被内核读取**（KI-11 / `MIGRATION_LOG` §59）；优先级
+**CLI > `BK_*` env > 本文件 > 代码默认**，启动时会打印每个非默认值的来源。
+文件里的窗口/观察/冷却用**分钟**，内核内部用秒，换算在加载处做一次。
 
 ```toml
 [shadow_evolution]
@@ -103,7 +106,7 @@ min_win_rate_improvement = 0.05
 min_profit_factor_improvement = 0.10
 min_observation_minutes = 5
 cooldown_minutes = 10
-max_gradient = 0.05                   # +/-5% per step (Lock 1)
+max_gradient = 0.05                   # +/-5% per step (Lock 1) — 只能收紧，不能放宽
 variant_count = 3                     # shadow variants (>=2)
 audit_dir = "data/evolution"          # per-strategy: data/evolution/<strategy>.jsonl
 ```
@@ -114,6 +117,8 @@ audit_dir = "data/evolution"          # per-strategy: data/evolution/<strategy>.
 
 内核启动开关：`--shadow-evolution`（默认关）；测试/运维可覆盖阈值：
 `--se-min-samples N`、`--se-cooldown-secs N`、`--se-min-obs-secs N`。
+`max_gradient` 超过内置上限 `0.05`（Lock 1）会被**拒绝并告警**，不是 clamp——
+放宽安全锁的请求必须让操作员看见。
 
 ## 6. IPC
 

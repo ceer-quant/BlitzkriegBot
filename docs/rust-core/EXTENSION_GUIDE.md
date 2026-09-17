@@ -98,9 +98,13 @@ discovered → installed → enabled → (running) → disabled → uninstalled
 
 ## 5. 配置
 
-> **状态：尚未实现。** 下列 `config.toml` 目前**仅作文档/占位**，内核**不解析**（无 toml 依赖）。
-> 现状：装配走 Cargo feature，运行期选择走 `--market-plugin <name>`；扩展不读配置文件。
-> 若将来要做配置驱动的加载（热加载/版本校验/依赖声明），再按此格式实现。
+> **状态：`[meta]` 已生效（KI-11 / `MIGRATION_LOG` §59）。**
+> 内核启动时读取 `extensions/<name>/config.toml` 的 `[meta]`，并与已链接的扩展做
+> 漂移校验（`name` / `version` / `extension_type` 任一不符都会报告）。
+> `[market]` / `[risk]` / `[dependencies]` 会被**识别但不生效**，各自带原因打印为
+> `declared_only`：市场装配走 Cargo feature + `--market-plugin`、风控限额的来源是
+> `RiskConfig`（第二个来源会与它静默矛盾）、依赖在构建期由 Cargo 解析。
+> 文件缺失不是错误；**无热加载**——改配置需重启内核。
 
 每个扩展一个目录 `extensions/<name>/config.toml`：
 
@@ -125,7 +129,9 @@ max_position_size = 1.0
 max_daily_loss = 500.0
 ```
 
-（规划中）配置需支持：热加载、版本校验、依赖声明。
+（规划中）配置需支持：热加载、依赖声明。
+**已实现**：`[meta]` 解析 + 与代码的漂移校验（KI-11/§59）。
+`[market]`/`[risk]`/`[dependencies]` 目前是 `declared_only`——见本节开头的说明。
 
 ## 6. IPC
 
@@ -153,5 +159,7 @@ max_daily_loss = 500.0
 - [x] `Extension` trait 定义完成，注册表可装配与生命周期切换
 - [x] 扩展/插件崩溃不影响内核（`on_load` 失败 → Failed，`on_event` 出错 → warn）
 - [x] 插件无法访问私钥/OME/socket（只能经 `MarketHost`）
-- [ ] 配置驱动加载（`config.toml` 解析、热加载、版本校验）——**未实现**
+- [x] 配置读取与版本校验（`config.toml` 的 `[meta]` 解析 + 与代码漂移校验）——**已实现**（KI-11/§59）
+- [ ] 配置**热加载**（不重启即生效）——**未实现**；改配置需重启内核
+- [ ] `[market]`/`[risk]`/`[dependencies]` 段被适配器消费——**未实现**（当前明确报告为 `declared_only`）
 - [ ] 运行期 dylib 热加载（P0.7 C-ABI）——**暂缓**
