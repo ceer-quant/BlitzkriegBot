@@ -10,6 +10,7 @@
 
 import { BlitzkriegCoreClient, type BlitzkriegCoreOptions } from './blitzkrieg-core-client.js';
 import { logger } from '../utils/logger.js';
+import { join } from 'path';
 
 export interface BlitzkriegRunConfig {
   assets: string[];
@@ -109,6 +110,40 @@ export class BlitzkriegCoreRunner {
   private losses = 0;
   private dailyPnl = 0;
   private lastError: string | null = null;
+  /** Exit guard installed while we own a core; removed when it stops cleanly. */
+  private exitGuards: Array<[NodeJS.Signals | 'exit', () => void]> = [];
+
+  /**
+   * Tie the core's lifetime to THIS process.
+   *
+   * Without this, any entry point that is not the CLI (`/crypto-hft` inside a
+   * REPL session, a script, a test) leaves the core running when the process
+   * dies: the core is a separate OS process, so it survives its parent and keeps
+   * its resting orders and its claim on the socket. That is the "zombie child /
+   * ghost order" failure this guard exists to prevent.
+   *
+   * SIGKILL is deliberately used here rather than a graceful stop: signal
+   * handlers run synchronously and cannot await, and the core's durable order log
+   * means the next boot restores and sweeps anything still live. The graceful
+   * path remains `stop()`, which callers should prefer when they can await.
+   */
+  private installExitGuards(): void {
+    if (this.exitGuards.length > 0) return;
+    const killCore = () => {
+      try { this.client?.killNow(); } catch { /* best effort */ }
+    };
+    const onExit = () => killCore();
+    // Covers the CLI's normal signals; `exit` covers a plain process exit.
+    for (const sig of ['SIGINT', 'SIGTERM', 'exit'] as const) {
+      process.on(sig, onExit);
+      this.exitGuards.push([sig, onExit]);
+    }
+  }
+
+  private removeExitGuards(): void {
+    for (const [sig, fn] of this.exitGuards) process.removeListener(sig, fn);
+    this.exitGuards = [];
+  }
 
   isRunning(): boolean {
     return this.client !== null;
@@ -150,6 +185,19 @@ export class BlitzkriegCoreRunner {
 
     const opts: BlitzkriegCoreOptions = {
       mode: cfg.dryRun ? 'dry' : 'live',
+      // Isolation hook for harnesses. The core defaults to repo-root `data/…`
+      // relative paths and the canonical socket, so a test that spawns through
+      // this runner would otherwise write into the PRODUCTION ledger while a real
+      // core is live. `BZK_CORE_ISOLATION` redirects cwd, socket and trade log.
+      ...(process.env.BZK_CORE_ISOLATION
+        ? {
+            cwd: process.env.BZK_CORE_ISOLATION,
+            socketPath: join(process.env.BZK_CORE_ISOLATION, 'core.sock'),
+            tradeLogPath: join(process.env.BZK_CORE_ISOLATION, 'trades.jsonl'),
+            noOrderLog: true,
+            noPositionLog: true,
+          }
+        : {}),
       seedBalance: Math.max(1000, cfg.maxDailyLossUsd * 5),
       // The per-order notional cap is a SAFETY bound, not the strategy's nominal
       // size: orders are priced at (shares * price) with shares clamped to
@@ -203,6 +251,9 @@ export class BlitzkriegCoreRunner {
       throw e;
     }
     this.client = client;
+    // From here we own a live OS process: tie it to this process's lifetime so a
+    // crash or an unhandled exit cannot orphan it.
+    this.installExitGuards();
     logger.info({ mode: opts.mode, assets: cfg.assets }, 'Rust core engine started');
     // The core discovers rounds for these assets itself; nothing else to push.
     await client.ready().catch(() => null);
@@ -216,6 +267,8 @@ export class BlitzkriegCoreRunner {
     if (!this.client) return;
     try { await this.client.stop(); } catch { /* best effort */ }
     this.client = null;
+    // The core is gone, so the guards have nothing left to protect.
+    this.removeExitGuards();
     logger.info('Rust core engine stopped');
   }
 

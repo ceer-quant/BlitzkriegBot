@@ -727,19 +727,124 @@ export class BlitzkriegCoreClient extends EventEmitter {
     return this.request('shadow_evolution.apply', { strategy, params });
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Stop the core and WAIT until it is actually gone.
+   *
+   * The previous implementation fired SIGTERM and returned, which made shutdown
+   * unobservable: the caller could not tell whether the process was still
+   * holding the socket, still inside a tick, or still managing resting orders.
+   * Anything sequenced after `stop()` — starting a replacement core, deleting
+   * scratch dirs, releasing a singleton lock — raced it.
+   *
+   * The order of operations is deliberate:
+   *   1. mark stopped, so no restart is scheduled and no caller retries;
+   *   2. settle resting orders while the channel is still up — the "no ghost
+   *      orders" step, which must happen BEFORE the socket closes;
+   *   3. close the socket;
+   *   4. SIGTERM, await exit, escalate to SIGKILL if the core does not go.
+   *
+   * An adopted core is never signalled: it belongs to another owner, so we only
+   * close our channel to it.
+   */
+  async stop(options: { cancelRestingOrders?: boolean } = {}): Promise<void> {
+    const { cancelRestingOrders = true } = options;
     this.stopped = true;
     if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null; }
+
+    // (2) Settle resting orders while we still have a live channel. Best effort
+    // by design: a core that is already wedged must not block shutdown, and the
+    // durable order log means the next boot restores-and-sweeps anything we
+    // failed to cancel here.
+    if (cancelRestingOrders && this.connected && this.ownsProc) {
+      try {
+        const res = await this.cancelAllOrders();
+        const n = res?.cancelled ?? 0;
+        if (n > 0) logger.info({ cancelled: n }, 'cancelled resting orders before shutdown');
+      } catch (err) {
+        logger.warn({ err }, 'could not cancel resting orders before shutdown');
+      }
+    }
+
     this.failAllPending(new BlitzkriegCoreError('blitzkrieg-core stopped'));
     if (this.activeSocket) { try { this.activeSocket.end(); } catch { /* noop */ } this.activeSocket = null; }
     if (this.socket) { try { this.socket.end(); } catch { /* noop */ } this.socket = null; }
-    // Only kill a process we actually spawned; an adopted core belongs to another
-    // owner and must be left running.
-    if (this.proc && this.ownsProc) {
-      try { this.proc.kill('SIGTERM'); } catch { /* noop */ }
-    }
+
+    // (4) Only kill a process we actually spawned; an adopted core belongs to
+    // another owner and must be left running.
+    const proc = this.proc;
+    const owned = this.ownsProc;
     this.proc = null;
     this.ownsProc = false;
+    if (!proc || !owned) return;
+
+    await BlitzkriegCoreClient.terminate(proc);
+  }
+
+  /**
+   * Synchronously kill the core we own, without waiting or restarting.
+   *
+   * This exists for signal handlers and `process.on('exit')`, which cannot await.
+   * SIGKILL is the only honest choice there: SIGTERM would be delivered to a core
+   * that the dying parent can no longer observe, so there is no way to escalate.
+   * Durability is not lost — the core's order log is written per state change, so
+   * the next boot restores and sweeps any order still live.
+   *
+   * Marking `stopped` FIRST is essential, not incidental: without it the exit
+   * handler races the auto-restart loop, which sees the killed process as a crash
+   * and spawns a replacement before the process can die. The core is then alive
+   * again under a dying parent — the exact orphan this method exists to prevent.
+   */
+  killNow(): void {
+    this.stopped = true;
+    if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null; }
+    const proc = this.proc;
+    if (!proc || !this.ownsProc) return;
+    this.proc = null;
+    this.ownsProc = false;
+    try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+
+  /**
+   * Terminate `proc` and resolve only once it has really exited.
+   *
+   * SIGTERM first so the core can flush near-misses and unlink its socket. A
+   * core stuck inside a tick can exceed the grace period, so escalate to
+   * SIGKILL: a half-shut-down core is worse than a hard-killed one, because it
+   * keeps a claim on the socket and may still act on the book.
+   */
+  private static async terminate(
+    proc: ChildProcess,
+    graceMs = 5000,
+    killMs = 2000,
+  ): Promise<void> {
+    if (proc.exitCode !== null || proc.signalCode !== null) return;
+
+    const awaitExit = (ms: number) =>
+      new Promise<boolean>((resolve) => {
+        const onDone = () => { clearTimeout(timer); resolve(true); };
+        const timer = setTimeout(() => {
+          proc.removeListener('exit', onDone);
+          proc.removeListener('close', onDone);
+          resolve(false);
+        }, ms);
+        // 'exit' can fire before stdio drains; 'close' is the safer edge. Take
+        // whichever comes first and let the timeout bound the wait.
+        proc.once('exit', onDone);
+        proc.once('close', onDone);
+      });
+
+    try { proc.kill('SIGTERM'); } catch { /* already gone */ }
+    if (await awaitExit(graceMs)) return;
+
+    logger.warn({ pid: proc.pid, graceMs }, 'blitzkrieg-core ignored SIGTERM; escalating to SIGKILL');
+    try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+    if (!(await awaitExit(killMs))) {
+      // Unreapable child. Surfacing this is the point: the caller must not
+      // believe shutdown succeeded while a process still holds resources.
+      throw new BlitzkriegCoreError(
+        `blitzkrieg-core (pid ${proc.pid}) did not exit after SIGKILL`,
+      );
+    }
   }
 
   isConnected(): boolean {

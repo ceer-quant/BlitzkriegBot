@@ -18,6 +18,32 @@ import { createGateway } from './gateway/index';
 import { loadConfig } from './utils/config';
 import { logger } from './utils/logger';
 import { installHttpClient, configureHttpClient } from './utils/http';
+import { getBlitzkriegCoreRunner } from './core/blitzkrieg-core-runner';
+
+/**
+ * Stop the Rust core if this process started one.
+ *
+ * `gateway.stop()` only closes the HTTP server; the core is a separate process
+ * with its own ledger, order book and venue submissions. Leaving it running
+ * when the shell exits orphans every resting order — the exact failure the
+ * shutdown sequence exists to prevent. The runner is a lazy singleton, so it is
+ * usually `undefined` and this is a no-op on the common path.
+ *
+ * Never throws: a failure to stop the core must not block the shell's exit, and
+ * `stop()` already escalates to SIGKILL internally. A core that still refuses to
+ * die is logged loudly rather than silently swallowed — the operator needs to
+ * know a process is still holding the socket.
+ */
+async function stopCoreIfRunning(): Promise<void> {
+  try {
+    const runner = getBlitzkriegCoreRunner();
+    if (!runner.isRunning()) return;
+    logger.info('Stopping blitzkrieg-core before exit');
+    await runner.stop();
+  } catch (err) {
+    logger.error({ err }, 'failed to stop blitzkrieg-core cleanly');
+  }
+}
 
 // =============================================================================
 // STARTUP PROGRESS INDICATOR
@@ -299,6 +325,9 @@ async function main() {
       } catch (e) {
         logger.error({ err: e }, 'Error during shutdown');
       }
+      // Order matters: cancel + reap the core BEFORE process.exit, otherwise the
+      // core keeps its resting orders and its claim on the socket.
+      await stopCoreIfRunning();
       console.log('\x1b[32mGoodbye!\x1b[0m\n');
       process.exit(0);
     };
@@ -339,6 +368,7 @@ async function main() {
       } catch (e) {
         logger.error({ err: e }, 'Error during shutdown');
       }
+      await stopCoreIfRunning();
       process.exit(0);
     };
 
