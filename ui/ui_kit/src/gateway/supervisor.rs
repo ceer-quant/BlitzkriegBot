@@ -57,7 +57,7 @@ impl std::fmt::Display for SupervisorError {
 impl std::error::Error for SupervisorError {}
 
 /// Everything needed to spawn a core. Defaults mirror the production arguments
-/// assembled by `src/core/blitzkrieg-core-runner.ts` (see `HANDOFF.md` §3).
+/// assembled by `src/core/blitzkrieg-core-runner.ts`.
 #[derive(Debug, Clone)]
 pub struct SupervisorConfig {
     pub binary_path: PathBuf,

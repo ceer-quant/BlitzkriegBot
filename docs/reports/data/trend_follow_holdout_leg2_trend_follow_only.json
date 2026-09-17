@@ -1,5 +1,5 @@
 {
-  "source": "replay /Volumes/Hard Disk/BlitzkriegBot/data/e4a-evidence/slice-20260915T041830Z-round2.jsonl (1 segment(s))",
+  "source": "replay REPO_ROOT/data/e4a-evidence/slice-20260915T041830Z-round2.jsonl (1 segment(s))",
   "sourceStats": {
     "events": 1192701,
     "malformedLines": 0,

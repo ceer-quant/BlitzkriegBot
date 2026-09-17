@@ -550,7 +550,7 @@ core-parity 22 ok；parity-engines PARITY OK；cycle-check PASS；market-plugin-
 - `node=up core=up ping=ok`
 - `books`/`spots` 计数持续增长（feed 活性）
 - `err+0`（无新增 ERROR）
-- 单核心（`pgrep -f clodds-core-fancer.sock` = 1）
+- 单核心（`pgrep -f clodds-core-USER.sock` = 1）
 
 ### 待对比的经营指标
 1. **成交频率 vs Node 基准**：Node 历史约 0.75 笔/回合、3 笔/小时，56% 回合零成交。
@@ -578,7 +578,7 @@ node -e "const fs=require('fs');const r=fs.readFileSync('data/trades/trades.json
 ### 根因链
 日志里每个崩溃都带：
 ```
-Error: another blitzkrieg-core is already listening on .../clodds-core-fancer.sock
+Error: another blitzkrieg-core is already listening on .../clodds-core-USER.sock
 code: 1
 ```
 即 **§16.3 加的 socket 单实例守护**（本该是好事）与 Node 客户端的自动重启逻辑相互作用，
@@ -768,7 +768,7 @@ code: 1
 ## 30. 迁移后清理 + 订单落盘线上确认（新根目录）
 
 ### 背景
-`fc6e93c` 把项目根从 `/Volumes/Hard Disk/BlitzkriegBot/CloddsBot` 上移一层。迁移留下两处
+`fc6e93c` 把项目根从 `REPO_ROOT/CloddsBot` 上移一层。迁移留下两处
 残留，且 §29 的订单库"首次下单才生成"尚未在真实运行中确认。
 
 ### 清理动作
@@ -2124,7 +2124,7 @@ if (insideProject && rel.split(sep)[0] !== 'target') { /* 拒绝 */ }
 - `.env`（仓库内，含面板凭据）：未提交，随树删除。
 
 `data/archive` 的**部分**历史此前已有独立备份且**未被触及**：
-`/Volumes/Hard Disk/backup1-blitzkrieg-archive-20260915/events-old-20260914.tar`
+`ARCHIVE_VOLUME/backup1-blitzkrieg-archive-20260915/events-old-20260914.tar`
 （5.3 GB，2026-09-14 当天 21 个轮转段）。
 
 已实测排除的恢复途径：Time Machine（**未配置**）、APFS 快照（`No snapshots for disk3s5`）、
@@ -2148,7 +2148,7 @@ if (isRoot || !(underTmp || underTarget)) { /* 拒绝 */ }
 这样缺构建产物时报错不会先付掉一个目录的代价。
 
 **拒绝分支已逐一验证**（`--out` 取 `.` / `./` / `src` / `scripts` / `..` /
-`/Volumes/Hard Disk` / 项目根绝对路径 / `docs` / `core`，全部 exit 2 且仓库 1101 文件不变）。
+`EXTERNAL_VOLUME` / 项目根绝对路径 / `docs` / `core`，全部 exit 2 且仓库 1101 文件不变）。
 
 ### 50-e 教训（写下来是因为它会再犯）
 

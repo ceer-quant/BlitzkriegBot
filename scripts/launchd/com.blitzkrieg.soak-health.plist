@@ -15,8 +15,9 @@
     launchctl unload -w ~/Library/LaunchAgents/com.blitzkrieg.soak-health.plist
     rm ~/Library/LaunchAgents/com.blitzkrieg.soak-health.plist
 
-  NOTE: the repo path contains a space. It is split into separate <string>
-  array elements so launchd never needs quoting.
+  NOTE: the repo path used to contain a space, so it is split into separate
+  <string> array elements to keep launchd from needing quotes. Replace
+  REPO_ROOT below with your checkout's absolute path before installing.
 -->
 <plist version="1.0">
 <dict>
@@ -24,18 +25,18 @@
   <string>com.blitzkrieg.soak-health</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Volumes/Hard Disk/BlitzkriegBot/scripts/soak-health.sh</string>
+    <string>REPO_ROOT/scripts/soak-health.sh</string>
     <string>--quiet</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Volumes/Hard Disk/BlitzkriegBot</string>
+  <string>REPO_ROOT</string>
   <key>StartInterval</key>
   <integer>1800</integer>
   <key>RunAtLoad</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/Volumes/Hard Disk/BlitzkriegBot/data/soak/health.out</string>
+  <string>REPO_ROOT/data/soak/health.out</string>
   <key>StandardErrorPath</key>
-  <string>/Volumes/Hard Disk/BlitzkriegBot/data/soak/health.err</string>
+  <string>REPO_ROOT/data/soak/health.err</string>
 </dict>
 </plist>

@@ -57,7 +57,7 @@ ZCode 定时任务已从 `0 */2 * * *`（12 次/天）改为 `0 0,2,4,6,8,12,18,
 
 ### 3.4 `scripts/launchd/com.blitzkrieg.soak-health.plist` — OS 级调度（本机不可用，见下）
 launchd 每 30 分钟跑零 token 脚本的配置。**本机实测不可用**：仓库在外置卷
-`/Volumes/Hard Disk`，launchd 加载即 `Load failed: 5: Input/output error` / 退出码 78
+`EXTERNAL_VOLUME`，launchd 加载即 `Load failed: 5: Input/output error` / 退出码 78
 （exec 前失败，无输出），属 macOS 对 launchd 访问外置卷的限制。**已卸载，未留残留**。
 plist 保留在仓库，供仓库位于内置卷、或已授予调度器完全磁盘访问的环境使用。
 
@@ -85,7 +85,7 @@ plist 保留在仓库，供仓库位于内置卷、或已授予调度器完全�
 ## 6. 复现/验证
 
 ```bash
-cd "/Volumes/Hard Disk/BlitzkriegBot"
+cd "REPO_ROOT"
 ./scripts/soak-health.sh                 # 零 token，OK/ANOMALY + 退出码
 ./scripts/soak-health.sh --quiet
 ./scripts/offpeak.sh                     # 当前是否闲时 + 退出码

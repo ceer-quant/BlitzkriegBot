@@ -484,7 +484,7 @@ bytes: 617304842, events: 4943987, segments: 2, rotateBytes: 268435456}`——�
 **已恢复**：1101 个跟踪文件（从 GitHub 远端，`git status` 干净、`cargo build` 通过）、
 46 个分支与完整历史、上述汇总数字与 216 条挂单记录（经 UDS 从运行中的核心抢救）。
 `data/archive` 的部分历史存于
-`/Volumes/Hard Disk/backup1-blitzkrieg-archive-20260915/events-old-20260914.tar`（5.3 GB）。
+`ARCHIVE_VOLUME/backup1-blitzkrieg-archive-20260915/events-old-20260914.tar`（5.3 GB）。
 
 **未解决的部分**：`data/` 既不在 git 里，也没有 Time Machine（`tmutil destinationinfo`
 显示**未配置**）、没有 APFS 快照。**单点故障即永久丢失**——这才是本条以 🔴 登记的原因，

@@ -144,3 +144,16 @@ src/api/
 *.log.gz
 run.log.*
 ui/webapp/src-tauri/Cargo.lock
+
+# ---------------------------------------------------------------------------
+# Operator-local state — kept on disk, never versioned
+# ---------------------------------------------------------------------------
+# Agent/tooling session state (plans, continue files). Machine-generated, and it
+# accumulates local process ids and absolute paths as work proceeds.
+.zcode/
+
+# Internal handoff note. It is the operator's own entry point, so it stays on
+# disk and is deliberately NOT versioned: it carries local process ids, the
+# operator's machine-specific paths, and a running account of unfinished work.
+# Everything a contributor needs belongs in README.md / docs/, which ARE tracked.
+HANDOFF.md
