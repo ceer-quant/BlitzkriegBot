@@ -23,6 +23,8 @@
     "account:drift-check": "node scripts/account-drift-check.mjs",
     "size:check": "node scripts/binary-size-check.mjs",
     "size:report": "node scripts/binary-size-check.mjs --verbose",
+    "package:check": "node scripts/package-release.mjs",
+    "package:release": "node scripts/package-release.mjs --keep --out target/release-bundle",
     "core:observe": "npm run build && node scripts/dry-observe.mjs",
     "core:strategy-limit": "node scripts/strategy-limit-check.mjs",
     "core:strategy-gate": "node scripts/strategy-gate-check.mjs",

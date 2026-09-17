@@ -2067,3 +2067,123 @@ Cargo.toml 里把 `panic = "unwind"` **显式写出**并附原因，因为「rel
 - **`lto="fat"` + `codegen-units=1` 对运行时性能的收益未量化**——本批只测了体积与构建时间，
   吞吐/延迟基线属 E14（`criterion` + P99 −20%）。
 - 本地扫描结论未完整（`scanner_enobufs`），**不得**据此宣称项目已通过安全审计。
+- **交付物 ≤ 500 MB 已在 §50-c 补测**（36.59 MB / 7.3%），§50 同时记录了达成它时发生的
+  工作树误删事故。
+
+---
+
+## 50. 事故记录：`package-release.mjs` 的 `--out` 校验漏洞删除了整个工作树（2026-09-17）
+
+> **这是本仓库第一次因自动化脚本自身的缺陷造成的 P0 数据事故，也是唯一一次。**
+> 事后记录写在这里（而不是藏起来）的理由很直接：这个脚本的防呆校验被写反了方向，
+> 而下一个来改它的人必须知道**为什么那段校验长成现在这样**。
+> 完整复盘见 `bk-recovery-20260917/INCIDENT_REPORT.md`（在工作树之外，随事故保留）。
+
+### 50-a 发生了什么
+
+E10-e 的交付物打包脚本 `scripts/package-release.mjs` 需要在打包前清空目标目录（保证
+重复运行得到干净结果）。我给它加了「只允许写到项目内 `target/` 下」的防呆校验，
+但在**校验尚未定稿**时就用 `--out .` 试跑，于是校验被绕过、`rmSync('.')` 清空了工作树。
+
+校验写错的地方：
+
+```js
+// 错误写法：缺省是「放行」
+const insideProject = resolve(OUT).startsWith(resolve(ROOT) + sep);
+if (insideProject && rel.split(sep)[0] !== 'target') { /* 拒绝 */ }
+```
+
+`resolve('.')` 的结果**末尾没有分隔符**，于是 `startsWith(ROOT + sep)` 为 `false`，
+`insideProject` 为 `false`，整个 `if` 被跳过——脚本把「项目根目录本身」当成了
+「项目外、可以随便删」。
+
+**两个错误叠加才致命**：校验把项目根误判为项目外；而删除动作没有第二次确认。
+任何一个不成立都不会出事。
+
+### 50-b 恢复结果
+
+| 内容 | 方式 | 结果 |
+|---|---|---|
+| 1101 个跟踪文件 | 从 GitHub 远端克隆 → `git checkout -- .` | ✅ `git status` 干净 |
+| 46 个分支 + 完整历史 | 克隆保留 `.git`（pack 15.81 MiB） | ✅ HEAD `408e132` |
+| 恢复出的源码可否构建 | `cargo build --release -p blitzkrieg-core --locked` | ✅ 1m50s 成功 |
+| 341 笔交易的汇总数字 | 从仍在运行的核心（PID 16697，**未被终止**）经 UDS 抢救 | ✅ 存于 `bk-recovery-20260917/` |
+| 被删归档的规模 | 同上，读 `engine.stats` 的 `archive` 字段 | ✅ 617,304,842 B / 4,943,987 事件 / 2 段 |
+
+恢复出的跟踪体 15.49 MB / 1101 文件，与 E10 门禁在 CI 上测得的数字**完全一致**，
+可作为完整性的交叉验证。远端为私有仓库但可匿名读取（当时 API 的 403 是速率限制，
+不是权限），恢复不依赖任何凭证。
+
+### 50-c 确认丢失、且无备份
+
+- **`data/archive/` 事件归档：617 MB / 4,943,987 事件**。这是 E13（影子演化晋升）与
+  E15（HFT 策略重构）**唯一的数据基础**，两条史诗均要求「30 天影子数据」。
+  E16 同属「需长时间 DryRun」一类，一并受影响。
+- `data/trades/trades.jsonl`、`data/soak/`、`data/orders/`、`data/positions/` 的**逐笔明细**：
+  已被运行中的核心重建为空壳（当前 `trades.jsonl` 仅 702 B）；341 笔历史只剩汇总数字。
+- `.env`（仓库内，含面板凭据）：未提交，随树删除。
+
+`data/archive` 的**部分**历史此前已有独立备份且**未被触及**：
+`/Volumes/Hard Disk/backup1-blitzkrieg-archive-20260915/events-old-20260914.tar`
+（5.3 GB，2026-09-14 当天 21 个轮转段）。
+
+已实测排除的恢复途径：Time Machine（**未配置**）、APFS 快照（`No snapshots for disk3s5`）、
+回收站（空）、跨进程读 fd（macOS 无 procfs，`/dev/fd/N` 对自身进程外一律 `EBADF`）、
+全盘搜索 `events.jsonl`/`trades.jsonl`（无其他副本）。
+
+### 50-d 整改：校验改成白名单式，缺省拒绝
+
+`scripts/package-release.mjs` 的 `--out` 校验已重写，**并且必须保持这个方向**：
+
+```js
+const isRoot = OUT === ROOT;                    // 根目录单独、显式地判
+const underTmp = OUT === resolve(tmpdir()) || OUT.startsWith(resolve(tmpdir()) + sep);
+const underTarget = OUT.startsWith(join(ROOT, 'target') + sep);
+if (isRoot || !(underTmp || underTarget)) { /* 拒绝 */ }
+```
+
+这与旧写法的区别是**缺省值**：旧写法缺省放行（危险侧），新写法缺省拒绝（安全侧）。
+新增写死的白名单只有两处——`tmpdir()` 下的临时目录、`ROOT/target/` 之下。
+另外，「release 二进制是否存在」的前置检查被提前到**删除目标目录之前**，
+这样缺构建产物时报错不会先付掉一个目录的代价。
+
+**拒绝分支已逐一验证**（`--out` 取 `.` / `./` / `src` / `scripts` / `..` /
+`/Volumes/Hard Disk` / 项目根绝对路径 / `docs` / `core`，全部 exit 2 且仓库 1101 文件不变）。
+
+### 50-e 教训（写下来是因为它会再犯）
+
+1. **破坏性参数的验证，必须先验「拒绝」分支。** 本次事故的直接原因就是在拒绝分支
+   尚未验证时，先跑了会命中的真实路径。**先证拒，再证准。**
+2. **安全校验的缺省值必须是拒绝侧。** 写成「满足 X 才拒绝」的校验，漏掉 X 的一种
+   形态就等于放行；写成「满足 Y 才放行」的校验，漏掉 Y 的一种形态才等于拒绝。
+3. **删除前先看目标。** 脚本无条件 `rmSync` 用户传入的路径，却没看那路径里是什么。
+   当时的 `--out .` 指向一个有 1101 个跟踪文件、一个真实 `.env`、16 GB 归档的目录。
+
+### 50-f 本条目的状态
+
+- 校验漏洞：**已修**（50-d）。
+- 数据损失：**`data/archive` 617 MB 永久丢失**，部分历史存于上述 tar 备份。
+- 对 v0.2 的影响：**E13/E15/E16 的数据前提被破坏**，排期影响属范围变更，
+  需人类拍板（见 `INCIDENT_REPORT.md` §6），本文件不代为决定。
+- 上一批 §49 遗留的「交付物 ≤ 500 MB 没有实测」：**本批已补测**，见 50-g。
+
+### 50-g E10-e 交付物实测（补上 §49 的遗留缺口）
+
+打包脚本读数为 **36.59 MB / 500 MB 预算（7.3%）**，组成：
+
+| 项 | 大小 |
+|---|---|
+| `shell/dist`（编译后的 Node 外壳） | 18.31 MB |
+| `bin/blitzkrieg-core` | 9.56 MB |
+| `bin/ui_kit_panel` | 1.59 MB |
+| `webui/dist`（面板产物） | 1.57 MB |
+| `docs` | 1.05 MB |
+| `bin/ui_kit_web` / `lib/*.dylib` ×4 / `bin/ui_kit_app` | 0.37–0.86 MB each |
+| `shell/package-lock.json` | 0.80 MB |
+
+排除项**是规格本身**：`data/`（用户交易状态与行情归档，不随交付物分发）、
+`node_modules/`（可由 lockfile 重装）、`target/`（中间产物）。
+脚本会列出「本次未打包、因环境未执行构建」的项——**空壳包看起来自然低于预算，
+这正是这个清单存在的理由**。
+
+计账自洽性已验证：`MANIFEST.json` 逐项之和 + manifest 自身大小 == 磁盘实测总字节。
