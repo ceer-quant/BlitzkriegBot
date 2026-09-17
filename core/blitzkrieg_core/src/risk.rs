@@ -8,6 +8,7 @@
 
 use crate::model::{CoreError, CoreErrorCode, CoreResult, OrderRequest, Side};
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct RiskConfig {
@@ -85,6 +86,89 @@ impl LossBreaker {
     }
     pub fn halted_until_ms(&self) -> i64 {
         self.halted_until_ms
+    }
+}
+
+/// Consecutive-loss breakers, ONE PER STRATEGY (KI-10 / D-18 option A).
+///
+/// A losing streak in one leg freezes only THAT leg's entries, so a
+/// multi-strategy run stays attributable — with a single global breaker, any
+/// strategy's streak silently vetoed every other strategy's candidates and the
+/// out-of-sample numbers could not be read per strategy (see
+/// `reports/TREND_FOLLOW_HOLDOUT_REPORT.md` §3.2).
+///
+/// The split is deliberately limited to the consecutive-loss breaker: the daily
+/// loss cap and the kill switch stay GLOBAL, because they are account-level
+/// constraints rather than per-strategy heuristics.
+#[derive(Debug)]
+pub struct LossBreakers {
+    max_consecutive_losses: u32,
+    cooldown_sec: i64,
+    per_strategy: HashMap<String, LossBreaker>,
+}
+
+impl LossBreakers {
+    pub fn new(max_consecutive_losses: u32, cooldown_sec: i64) -> Self {
+        Self {
+            max_consecutive_losses,
+            cooldown_sec,
+            per_strategy: HashMap::new(),
+        }
+    }
+
+    /// Record a closed trade for `strategy`. Returns true when THIS strategy's
+    /// breaker just tripped (its own cooldown starts now).
+    pub fn record(&mut self, strategy: &str, net_pnl: Decimal, now_ms: i64) -> bool {
+        let b = self
+            .per_strategy
+            .entry(strategy.to_string())
+            .or_insert_with(|| LossBreaker::new(self.max_consecutive_losses, self.cooldown_sec));
+        b.record(net_pnl, now_ms)
+    }
+
+    /// Is `strategy` currently halted? An unknown strategy is never halted —
+    /// a breaker only exists once that leg has recorded a close.
+    pub fn is_halted(&self, strategy: &str, now_ms: i64) -> bool {
+        self.per_strategy
+            .get(strategy)
+            .is_some_and(|b| b.is_halted(now_ms))
+    }
+
+    pub fn halted_until_ms(&self, strategy: &str) -> i64 {
+        self.per_strategy
+            .get(strategy)
+            .map_or(0, |b| b.halted_until_ms())
+    }
+
+    pub fn consecutive_losses(&self, strategy: &str) -> u32 {
+        self.per_strategy
+            .get(strategy)
+            .map_or(0, |b| b.consecutive_losses())
+    }
+
+    /// Clear the halts whose cooldown elapsed; returns the strategies that just
+    /// resumed, so the caller can log/report one resume per strategy.
+    pub fn maybe_resume_all(&mut self, now_ms: i64) -> Vec<String> {
+        let mut resumed = Vec::new();
+        for (name, b) in self.per_strategy.iter_mut() {
+            if b.maybe_resume(now_ms) {
+                resumed.push(name.clone());
+            }
+        }
+        resumed.sort();
+        resumed
+    }
+
+    /// Strategies with an active halt at `now_ms` (observability/tests).
+    pub fn halted(&self, now_ms: i64) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .per_strategy
+            .iter()
+            .filter(|(_, b)| b.is_halted(now_ms))
+            .map(|(name, _)| name.clone())
+            .collect();
+        v.sort();
+        v
     }
 }
 
@@ -212,5 +296,35 @@ mod tests {
         assert!(b.maybe_resume(300_100));
         assert!(!b.is_halted(300_100));
         assert_eq!(b.consecutive_losses(), 0);
+    }
+
+    /// KI-10 / D-18 option A: one leg's losing streak must freeze only that leg.
+    #[test]
+    fn a_per_strategy_breaker_does_not_freeze_other_strategies() {
+        let mut bs = LossBreakers::new(3, 300);
+        // Two losses are below the threshold; the third trips.
+        assert!(!bs.record("trend_follow", dec!(-1), 0));
+        assert!(!bs.record("trend_follow", dec!(-1), 1));
+        assert!(bs.record("trend_follow", dec!(-1), 2));
+        assert!(bs.is_halted("trend_follow", 1_000));
+        assert!(
+            !bs.is_halted("spread_arb", 1_000),
+            "an unrelated strategy must stay free to enter"
+        );
+        assert!(!bs.is_halted("never_seen", 1_000));
+        assert_eq!(bs.halted(1_000), vec!["trend_follow".to_string()]);
+
+        // A win on the halted leg clears the streak but not the cooldown.
+        assert!(!bs.record("trend_follow", dec!(5), 2_000));
+        assert!(bs.is_halted("trend_follow", 2_000));
+        // Other legs keep recording normally while the halt is active.
+        assert!(!bs.record("spread_arb", dec!(-1), 2_000));
+        assert_eq!(bs.consecutive_losses("spread_arb"), 1);
+
+        assert_eq!(bs.maybe_resume_all(300_100), vec!["trend_follow".to_string()]);
+        assert!(!bs.is_halted("trend_follow", 300_100));
+        assert!(bs.halted(300_100).is_empty());
+        // A second pass resumes nothing (the halt is already cleared).
+        assert!(bs.maybe_resume_all(400_000).is_empty());
     }
 }

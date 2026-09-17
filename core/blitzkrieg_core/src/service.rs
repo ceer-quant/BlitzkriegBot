@@ -7,7 +7,7 @@ use crate::ledger::Ledger;
 use crate::model::*;
 use crate::ome::{FillDelta, Ome, SubmitParams};
 use crate::position::{OpenParams, PositionConfig, PositionManager};
-use crate::risk::{LossBreaker, RiskConfig, RiskGate};
+use crate::risk::{LossBreakers, RiskConfig, RiskGate};
 use crate::shadow_evolution::{
     EvolutionOutcome, EvolutionStatus, MutableParams, ShadowEvolution, ShadowEvolutionConfig,
 };
@@ -271,7 +271,9 @@ pub struct Core {
     ome: Ome,
     ledger: Ledger,
     risk: RiskGate,
-    breaker: LossBreaker,
+    /// Per-strategy consecutive-loss breakers (KI-10 / D-18 A). The daily loss
+    /// cap and kill switch stay global — see [`LossBreakers`].
+    breaker: LossBreakers,
     positions: PositionManager,
     books: HashMap<TokenId, Book>,
     /// Exit reason chosen for an in-flight closing SELL, keyed by token id, so a
@@ -356,7 +358,7 @@ impl Core {
             c.exit_cfg = config.positions.exit.clone();
             c
         };
-        let breaker = LossBreaker::new(config.max_consecutive_losses, config.breaker_cooldown_sec);
+        let breaker = LossBreakers::new(config.max_consecutive_losses, config.breaker_cooldown_sec);
         let positions = PositionManager::new(config.positions.clone());
         // Optional market-data archive (P-1.3). A failure to open only disables
         // recording — trading must never be blocked by an archive path problem.
@@ -1835,7 +1837,12 @@ impl Core {
             acc.fees_usd += entry_fee + exit_fee;
             acc.net_pnl_usd += closed.net_pnl_usd;
         }
-        let tripped = self.breaker.record(closed.net_pnl_usd, now_ms);
+        // KI-10 / D-18 A: the streak is attributed to the position's own
+        // strategy, so only that leg freezes. `PositionClosed` already carries
+        // the strategy name, so no new data is needed for attribution.
+        let tripped = self
+            .breaker
+            .record(&closed.strategy, closed.net_pnl_usd, now_ms);
         self.emit(Event::PositionClosed {
             id: closed.id.clone(),
             asset: closed.asset.clone(),
@@ -1849,8 +1856,9 @@ impl Core {
             self.emit(Event::RiskAlert {
                 code: CoreErrorCode::RiskRejected,
                 message: format!(
-                    "consecutive-loss breaker tripped: {} losses, halting new entries {}s",
-                    self.breaker.consecutive_losses(),
+                    "consecutive-loss breaker tripped for strategy {}: {} losses, halting its new entries {}s",
+                    closed.strategy,
+                    self.breaker.consecutive_losses(&closed.strategy),
                     self.config.breaker_cooldown_sec
                 ),
             });
@@ -2053,10 +2061,16 @@ impl Core {
         // Entry gates apply to opening BUY orders only; exits (SELL) are never
         // blocked by capacity, breaker or cooldowns.
         if entry_gates && req.side == Side::Buy {
-            if self.breaker.is_halted(now_ms) {
+            // KI-10: only the ORDER'S OWN strategy's streak can block it — a
+            // losing leg no longer vetoes every other strategy's entries.
+            if self.breaker.is_halted(&req.strategy, now_ms) {
                 return Err(CoreError::new(
                     CoreErrorCode::RiskRejected,
-                    format!("breaker active until {}", self.breaker.halted_until_ms()),
+                    format!(
+                        "breaker active until {} for strategy {}",
+                        self.breaker.halted_until_ms(&req.strategy),
+                        req.strategy
+                    ),
                 ));
             }
             let direction = parse_direction(&req.direction);
@@ -2352,11 +2366,14 @@ impl Core {
             self.apply_delta_effects(d, now_ms);
         }
 
-        // Resume entries when the breaker cooldown elapses.
-        if self.breaker.maybe_resume(now_ms) {
+        // Resume entries when a per-strategy breaker cooldown elapses (KI-10):
+        // each strategy resumes independently and is reported by name.
+        for strategy in self.breaker.maybe_resume_all(now_ms) {
             self.emit(Event::RiskAlert {
                 code: CoreErrorCode::RiskRejected,
-                message: "breaker cooldown elapsed — resuming new entries".into(),
+                message: format!(
+                    "breaker cooldown elapsed — resuming new entries for strategy {strategy}"
+                ),
             });
         }
 
@@ -3493,6 +3510,74 @@ mod tests {
             "got {}",
             e.message
         );
+    }
+
+    /// KI-10 / D-18 option A end-to-end: three losing closes in ONE strategy must
+    /// freeze only that strategy. The old global breaker vetoed every other leg's
+    /// entries (TREND_FOLLOW_HOLDOUT_REPORT §3.2: `ordersRejected=655`).
+    #[test]
+    fn a_losing_streak_freezes_only_its_own_strategy() {
+        let mut c = dry_core(dec!(100));
+        let mut pc = c.config.positions.clone();
+        pc.max_positions = 4;
+        pc.max_daily_loss_usd = dec!(1_000); // isolate the consecutive-loss breaker
+        pc.stop_loss_cooldown_sec = 0;
+        pc.exit_cooldown_sec = 0;
+        pc.asset_cooldown_sec = 0;
+        pc.loss_cooldown_sec = 0;
+        c.positions.set_config(pc);
+
+        let buy = |strategy: &str, asset: &str, token: &str| OrderRequest {
+            token_id: token.into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode: FillPolicy::Taker,
+            price: dec!(0.40),
+            size: dec!(5),
+            internal_key: format!("{strategy}:{asset}"),
+            strategy: strategy.into(),
+            asset: asset.into(),
+            direction: "up".into(),
+            round_slot: 1,
+        };
+        let lose_once = |c: &mut Core, asset: &str, token: &str| {
+            c.place(buy("dog", asset, token), 0, 0).unwrap();
+            c.book_snapshot(
+                token,
+                vec![(dec!(0.30), dec!(100))],
+                vec![(dec!(0.31), dec!(100))],
+                1,
+            );
+            c.tick(1_800_000 - 100).unwrap();
+        };
+        // Three distinct assets, so per-asset cooldowns cannot mask the breaker.
+        for asset in ["A1", "A2", "A3"] {
+            lose_once(&mut c, asset, &format!("tok-{asset}"));
+        }
+        assert_eq!(c.breaker.consecutive_losses("dog"), 3);
+        assert!(
+            c.breaker.is_halted("dog", 1_800_000),
+            "the losing strategy's own breaker must trip"
+        );
+        assert!(
+            !c.breaker.is_halted("trend_follow", 1_800_000),
+            "an unrelated strategy must NOT be frozen by another leg's streak"
+        );
+
+        // The frozen leg is refused, and the refusal names it (the panel's
+        // `risk:breaker` attribution matches on "breaker active until").
+        let e = c
+            .place(buy("dog", "A4", "tok-A4"), 0, 1_800_000)
+            .unwrap_err();
+        assert_eq!(e.code, CoreErrorCode::RiskRejected);
+        assert!(
+            e.message.contains("breaker active until") && e.message.contains("dog"),
+            "got {}",
+            e.message
+        );
+        // A DIFFERENT strategy enters normally through the same core.
+        c.place(buy("trend_follow", "B1", "tok-B1"), 0, 1_800_000)
+            .unwrap();
     }
 }
 
