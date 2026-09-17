@@ -1052,4 +1052,132 @@ mod tests {
         let m = ShadowEvolution::new(cfg, &refs);
         assert_eq!(m.cfg.exit_cfg.stop_loss_pct, dec!(12));
     }
+
+    /// A twin whose strategy code panics on every decision — the archetype of a
+    /// buggy user-authored variant (E7 lets users ship these as dylibs).
+    struct PanickingTwin {
+        name: String,
+    }
+
+    impl EngineStrategy for PanickingTwin {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _now: i64) {}
+        fn on_round(&mut self, _slot: i64) {}
+        fn find_candidates(&mut self, _ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
+            panic!("user-authored twin exploded");
+        }
+    }
+
+    struct PanicFactory {
+        name: String,
+    }
+
+    impl ShadowFactory for PanicFactory {
+        fn strategy(&self) -> String {
+            self.name.clone()
+        }
+        fn knobs(&self) -> Vec<KnobSpec> {
+            vec![KnobSpec::new("cap", dec!(0.40), dec!(0.05), dec!(0.95))]
+        }
+        fn make(&self, _params: &StrategyParams) -> Option<Box<dyn EngineStrategy>> {
+            Some(Box::new(PanickingTwin {
+                name: self.name.clone(),
+            }))
+        }
+    }
+
+    struct PanicStrategy {
+        name: String,
+    }
+
+    impl EngineStrategy for PanicStrategy {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _now: i64) {}
+        fn on_round(&mut self, _slot: i64) {}
+        fn evolvable_knobs(&self) -> Vec<KnobSpec> {
+            vec![KnobSpec::new("cap", dec!(0.40), dec!(0.05), dec!(0.95))]
+        }
+        fn shadow_factory(&self) -> Option<Box<dyn ShadowFactory>> {
+            Some(Box::new(PanicFactory {
+                name: self.name.clone(),
+            }))
+        }
+        fn find_candidates(&mut self, _ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
+            Vec::new()
+        }
+    }
+
+    /// E10-d's `panic = "abort"` decision (D-20) rests on this guarantee, so it
+    /// must be pinned rather than assumed: a variant that panics on every tick
+    /// must NOT unwind into the caller of `on_tick`, and the healthy variants
+    /// alongside it must keep receiving ticks.
+    ///
+    /// This is load-bearing precisely because variants are user-authored dylibs.
+    #[test]
+    fn a_panicking_variant_cannot_take_down_the_engine() {
+        let boom = PanicStrategy {
+            name: "boom".into(),
+        };
+        let (good, _) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&boom, &good];
+        let mut m = ShadowEvolution::new(fast_cfg(true, "panic"), &refs);
+        m.on_round(&[market()], &[], 1_000);
+
+        // A tick that makes every twin want to enter (mid 0.395 under any cap).
+        // If the panic escaped, this call itself would abort the test.
+        m.on_tick("t", &book(0.39, 0.40), 1_000);
+        // And a second tick, so a "quarantine" that only works once is caught.
+        m.on_tick("t", &book(0.39, 0.40), 2_000);
+
+        // The healthy strategy's twins must still have been fed: the panic is
+        // isolated, not a reason to skip the rest of the loop.
+        let good_unit = m
+            .units
+            .iter()
+            .find(|u| u.strategy == "alpha")
+            .expect("the healthy strategy keeps its unit");
+        assert!(
+            good_unit
+                .set
+                .variants
+                .iter()
+                .all(|v| !v.crashed),
+            "the healthy variant must not be collateral damage"
+        );
+
+        // The evaluation pass must also survive reading a twin that panicked.
+        let _ = m.evaluate(3_000);
+    }
+
+    /// The panic is absorbed inside `shadow_twin::catch`, which returns a default
+    /// result — so the twin's own panic does NOT set the `crashed` quarantine flag.
+    ///
+    /// That is worth pinning explicitly because the doc comment on
+    /// `shadow_twin::catch` claims "the caller quarantines it on the panic", while
+    /// its only callers (`TwinReplay::on_tick`) absorb the panic with
+    /// `unwrap_or_default()` and discard the error. `crashed` is therefore only
+    /// reachable from a panic OUTSIDE the catch (i.e. the exit/replay machinery).
+    /// Reading it as "bad strategies get quarantined" would be wrong.
+    #[test]
+    fn a_twins_own_panic_is_absorbed_and_never_sets_the_crashed_flag() {
+        let boom = PanicStrategy {
+            name: "boom".into(),
+        };
+        let refs: Vec<&dyn EngineStrategy> = vec![&boom];
+        let mut m = ShadowEvolution::new(fast_cfg(true, "absorb"), &refs);
+        m.on_round(&[market()], &[], 1_000);
+        m.on_tick("t", &book(0.39, 0.40), 1_000);
+
+        let unit = &m.units[0];
+        assert!(
+            unit.set.variants.iter().all(|v| !v.crashed),
+            "the twin's panic is swallowed by shadow_twin::catch, so the outer \
+             `crashed` flag never latches — the engine survives, but a permanently \
+             panicking variant keeps being ticked forever"
+        );
+    }
 }

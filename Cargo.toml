@@ -20,6 +20,32 @@ members = [
 # (Polymarket CLOB subprocess), not part of the core workspace.
 exclude = ["user_layer/strategies", "user_layer/parity_strategy", "rust-executor", "ui/webapp/src-tauri"]
 
+# ── Release profile (E10-d) ──────────────────────────────────────────────────
+# Size/performance hardening for shipped binaries. Measured, not guessed: see
+# docs/blitzkrieg/MIGRATION_LOG.md §49 for the before/after numbers.
+[profile.release]
+opt-level = 3
+# Whole-program LTO + a single codegen unit: the two settings that actually
+# matter for both throughput and size, at the cost of a slower link.
+lto = "fat"
+codegen-units = 1
+# Keeps the symbol table but drops DWARF debug info. Deliberately NOT `true`:
+# `strip = true` (== strip=symbols) removes symbols too, so a release-mode panic
+# backtrace comes out EMPTY — verified on a minimal repro, not assumed. Measured
+# cost of keeping symbols: 9.56 MB vs 8.07 MB (+1.49 MB, +18%) on the core
+# binary. On a trading core, being able to name the panicking frame is worth it.
+strip = "debuginfo"
+# EXPLICITLY NOT `panic = "abort"`, despite it being the usual size lever.
+# A panicking user-authored strategy variant must not take down the live engine,
+# and that guarantee is implemented with `catch_unwind` — which `panic = "abort"`
+# makes unable to catch. Two layers exist (strategies/shadow_twin.rs:277 swallows
+# the twin's own panic; shadow_evolution/mod.rs:327 quarantines a panicking
+# variant), and abort would void BOTH: one panic would terminate the core
+# mid-session with open positions orphaned. The size win is not worth it —
+# strip+lto already puts us 5x under the 50 MB target. See DECISIONS_PENDING
+# D-20. Stated explicitly so nobody re-adds it by reflex.
+panic = "unwind"
+
 [workspace.dependencies]
 rust_decimal = "1"
 rust_decimal_macros = "1"
