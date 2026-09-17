@@ -1,202 +1,102 @@
 # Contributing to BlitzkriegBot
 
-Thanks for your interest in contributing! This is a **private** repository (`ceer-quant/BlitzkriegBot`).
+Thanks for your interest in contributing! (`ceer-quant/BlitzkriegBot`, MIT).
 
-> ## 🤖 AI 协作与仓库规范
->
-> 本仓库以 **cyborg 模式** 维护：人类定目标/决策，AI 代理负责分析、实现、验证与写证据。
->
-> **动工前先读这四份**：
->
-> | 文档 | 读它是为了知道 |
-> | --- | --- |
-> | [`HANDOFF.md`](HANDOFF.md) | 交接入口：当前状态、阅读序、怎么跑起来 |
-> | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | **开发规范**：目录职责、门禁矩阵、不可触碰的边界、工具链陷阱 |
-> | [`docs/GITHUB_GOVERNANCE.md`](docs/GITHUB_GOVERNANCE.md) | **GitHub 使用规范与身份信息**：分支、提交、Issue/PR、合并流程、REST 配方 |
-> | [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) | **已知未修问题**：别重复踩坑，也别把「有意保留」当 bug 修 |
->
-> 完整红线见 **[`docs/AI_WORKFLOW.md`](docs/AI_WORKFLOW.md)**，其中包含**硬约束**
-> （禁止启用 Live 交易、禁止改动凭证、禁止删除未备份文件、禁止未验证直推主分支、
-> 禁止顺手优化无关逻辑）。以下为速查：
->
-> - **作者署名**：唯一 Git 作者为 `ceer_quant <ceer_quant@users.noreply.github.com>`；
->   **禁止任何 AI 署名**（不加 `Co-authored-by:` / `Generated with` 等 trailer）。
-> - **远端**：名称为 **`ceer`**（不是 `origin`，`origin` 已按裁决移除）。`gh` CLI **未安装**，
->   Issue/PR 操作走 **curl + GitHub REST API**。
-> - **分支**：`main`（发布）、`develop`（集成）、`feat/*`、`fix/*`、`chore/*`、`release/*`。
->   AI 只能推功能分支。
->   ⚠️ **但请注意**：本仓库为 private + GitHub Free，**服务端分支保护实际不可用**
->   （API 返回 `403 Upgrade to GitHub Pro`）——「受保护分支需 PR」目前**只是流程约定**，
->   详见 [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) KI-17。
-> - **提交门禁**：`cargo build --release --workspace --locked`、`cargo test --workspace --locked`、
->   `npm run typecheck`、`npm test`、`npm run build`、DryRun `node scripts/cycle-check.mjs`、
->   `bash scripts/secret-scan.sh`，且 CI（`rust-check` / `node-check` / `panel-check` /
->   `secret-scan`）全绿。完整门禁矩阵（含**尚未接入 CI** 的 22 个专项门禁）见
->   [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) §3。
-> - **不要用 Bash 写 Rust 源码**（本机 Mimosa hook 会拦），用编辑器/Write 工具。
-> - **Issue / PR**：先开 Issue（模板见 `.github/ISSUE_TEMPLATE/`），PR 须逐条勾选安全约束。
-> - **不确定的分歧** 写入 [`docs/DECISIONS_PENDING.md`](docs/DECISIONS_PENDING.md)，不在 PR 中悬置。
+## Architecture first
 
-## Getting Started
+This is a **Rust-core** project: all money, order, risk and state-consistency
+logic lives in Rust. Node is only a thin IPC verification client used by the
+local acceptance gates.
 
-1. Fork the repository
-2. Clone your fork:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/BlitzkriegBot
-   cd BlitzkriegBot
-   ```
-3. Install dependencies:
-   ```bash
-   npm install
-   ```
-4. Create a branch:
-   ```bash
-   git checkout -b feature/my-feature
-   ```
+| Directory | What it is |
+| --- | --- |
+| `core/blitzkrieg_core/` | Market-agnostic trading engine (OME, orders, positions, risk, ledger, reconciliation) |
+| `core/market_api/` | Extension contract crate: `DataFeed` / `Discovery` / `Executor` / `MarketPlugin` traits + DTOs |
+| `extensions/polymarket/` | Official Polymarket plugin (CLOB, WS feed, Gamma discovery) |
+| `user_layer/strategy_api/` | User strategy trait / FFI stable surface (cdylib hot-loading) |
+| `ui/` | Rust UI kit: `ui_kit_web` (panel server, port 51888), `ui_kit_panel` (terminal), Vue webapp |
+| `src/` | Node IPC verification layer only (not part of the production runtime) |
+
+Key architecture constraints — do not violate them:
+
+1. **Zero market code in the core** — `core/blitzkrieg_core` must not depend on
+   any exchange SDK; venues are wired through `core/market_api` contracts.
+2. **Extensions must not depend on the core** — otherwise Cargo loops. They
+   depend only on `core/market_api`.
+3. **Risk hard limits are not strategy-exemptible**, and the strategy ABI
+   vtable is frozen (`BK_ABI_VERSION = 2`; new capabilities go through
+   optional symbols only).
 
 ## Development
 
 ```bash
-# Run in dev mode (hot reload)
-npm run dev
+# Rust core
+cargo build --release --workspace --locked
+cargo test --workspace --locked
 
-# Type check
+# Node verification layer
+npm install
 npm run typecheck
-
-# Build
+npm test
 npm run build
+
+# DryRun order-chain end-to-end (spawns an isolated temporary core)
+node scripts/cycle-check.mjs
+
+# Zero-dependency secret scan
+bash scripts/secret-scan.sh
 ```
 
-## Project Structure
+The panel frontend (`ui/webapp/webui/`) has its own checks:
 
-> ⚠️ **下面是 Node 外壳（`src/`）的内部结构，不是全仓库结构。**
-> 交易核心在 **Rust** 侧（`core/blitzkrieg_core`），市场扩展在 `extensions/`，
-> 策略接口在 `user_layer/`，前端在 `ui/`。**改交易逻辑请去 Rust 侧，不要改这里。**
-> 完整目录职责表见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) §2。
-
-```
-src/
-├── index.ts           # Entry point
-├── types.ts           # TypeScript types
-├── gateway/           # WebSocket server
-├── channels/          # Telegram, Discord adapters
-├── feeds/             # Market data (Polymarket, Kalshi, etc.)
-├── agents/            # Claude AI integration
-├── skills/            # Agent skills (SKILL.md)
-├── sessions/          # Per-user state
-├── cron/              # Scheduled tasks
-├── db/                # SQLite persistence
-└── cli/               # CLI commands
+```bash
+cd ui/webapp/webui && npm run check:all
 ```
 
-## Adding a New Market Feed
+## Adding a Market Extension
 
-1. Create `src/feeds/your-platform/index.ts`
-2. Implement the feed interface:
-   ```typescript
-   export interface YourPlatformFeed extends EventEmitter {
-     start(): Promise<void>;
-     stop(): void;
-     searchMarkets(query: string): Promise<Market[]>;
-     getMarket(id: string): Promise<Market | null>;
-   }
-   ```
-3. Register in `src/feeds/index.ts`
-4. Add to types in `src/types.ts`
+1. Create a new crate under `extensions/your-venue/`.
+2. Depend on `core/market_api` (never on `blitzkrieg-core` itself).
+3. Implement `DataFeed`, `MarketDiscovery`, `OrderExecutor`, and pack them
+   into a `MarketPlugin`.
+4. Register via a Cargo feature in the root workspace. See
+   [docs/rust-core/EXTENSION_GUIDE.md](docs/rust-core/EXTENSION_GUIDE.md).
+   The core does not change.
 
-## Adding a New Channel
+## Writing a Strategy
 
-1. Create `src/channels/your-channel/index.ts`
-2. Implement message handling and sending
-3. Register in `src/channels/index.ts`
-
-## Adding a New Skill
-
-### CLI Skill Handler (required)
-
-1. Create `src/skills/bundled/your-skill/index.ts` with a default export:
-   ```typescript
-   export default {
-     name: 'your-skill',
-     description: 'What this skill does',
-     commands: ['/your-skill'],
-     // Optional: declare env vars needed before handler runs
-     requires: { env: ['API_KEY'] },
-     handle: async (args: string): Promise<string> => {
-       // ...
-     },
-   };
-   ```
-2. Add the directory name to `SKILL_MANIFEST` in `src/skills/executor.ts` (alphabetical order)
-3. Add the skill name to `COMMAND_CATEGORIES` in `src/commands/registry.ts` with its category (e.g. `'your-skill': 'Tools'`)
-4. Run `npm run typecheck` to verify
-
-Skills are lazy-loaded via `await import()` on first use. Each skill loads in its own try/catch, so a missing dependency only disables that one skill. If `requires.env` is set, the executor checks those vars before calling the handler and returns a clear message if any are missing.
-
-### Agent Context (optional)
-
-To also give the AI agent context about your skill, create `src/skills/bundled/your-skill/SKILL.md` with YAML frontmatter:
-```yaml
----
-name: your-skill
-description: "What this skill does"
----
-
-# Your Skill
-
-Instructions for the AI...
-```
+Built-in strategies live in `core/blitzkrieg_core/src/strategies/`.
+External strategies are cdylibs built against `user_layer/strategy_api`
+and loaded at runtime. See
+[docs/rust-core/STRATEGY_GUIDE.md](docs/rust-core/STRATEGY_GUIDE.md) and
+[docs/rust-core/ABI_V2_DESIGN.md](docs/rust-core/ABI_V2_DESIGN.md).
 
 ## Pull Request Guidelines
 
-1. Keep changes focused and atomic
-2. Update types when needed
-3. Add comments for complex logic
-4. Test manually before submitting
-5. Describe what changed and why
+1. Run the full gate set above before submitting.
+2. Keep changes focused and atomic.
+3. Describe what changed and why; attach gate output where relevant.
+4. Live-trading changes are **not** accepted from outside contributors.
 
 ## Code Style
 
-- Use TypeScript strict mode
-- Prefer `async/await` over callbacks
-- Use descriptive variable names
-- Keep functions small and focused
+- Rust: `cargo fmt` / `clippy` clean; match the surrounding idiom.
+- TypeScript (verification layer): strict mode, `async/await`, small functions.
 
 ## Security Guidelines
 
-When contributing code that involves command execution:
+1. Never commit credentials, private keys or API keys — secrets go through
+   environment variables (see `.env.example`).
+2. Report vulnerabilities via GitHub Security Advisories, not public issues.
+3. Run `bash scripts/secret-scan.sh` before submitting.
 
-1. **Never use string interpolation** with `execSync()`:
-   ```typescript
-   // BAD - vulnerable to command injection
-   execSync(`which ${cmd}`);
-
-   // GOOD - safe with array arguments
-   execFileSync('which', [cmd]);
-   ```
-
-2. **Use `execFileSync` with array arguments** for all shell commands
-3. **Validate and sanitize** user-provided paths and inputs
-4. **Report vulnerabilities** via GitHub Security Advisories, not public issues
-5. **Run security checks** before submitting:
-   ```bash
-   npm audit
-   npm run typecheck
-   ```
-
-See [docs/SECURITY_AUDIT.md](./docs/SECURITY_AUDIT.md) for our security practices.
+> Note: no third-party security audit has been performed on this project.
 
 ## Reporting Issues
 
-Please include:
-- Node.js version
-- Steps to reproduce
-- Expected vs actual behavior
-- Error messages/logs
-
-## Questions?
-
-Open an issue at https://github.com/ceer-quant/BlitzkriegBot/issues with strategy ideas, bug reports, or feature requests.
+Open an issue at https://github.com/ceer-quant/BlitzkriegBot/issues with
+Rust version, steps to reproduce, expected vs actual behavior, and error
+messages/logs.
 
 ## License
 

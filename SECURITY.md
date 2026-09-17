@@ -4,31 +4,25 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+| 0.2.x   | :white_check_mark: |
 
 ## Reporting a Vulnerability
 
 **Please do NOT report security vulnerabilities through public GitHub issues.**
 
-Instead, please report them via one of these methods:
+Instead, please report them via GitHub Security Advisories:
 
-1. **GitHub Security Advisories** (Preferred)
-   - Go to the [Security tab](https://github.com/ceer-quant/BlitzkriegBot/security/advisories)
-   - Click "Report a vulnerability"
-   - Fill out the form with details
-
-2. **Email**
-   - Send details to the repository owner
-   - Include "SECURITY" in the subject line
+1. Go to the [Security tab](https://github.com/ceer-quant/BlitzkriegBot/security/advisories)
+2. Click "Report a vulnerability"
+3. Fill out the form with details
 
 ### What to Include
 
-- Type of issue (e.g., command injection, credential exposure, etc.)
-- Full paths of source file(s) related to the issue
+- Type of issue (e.g., command injection, credential exposure, order-state corruption)
 - Location of the affected source code (tag/branch/commit or direct URL)
 - Step-by-step instructions to reproduce the issue
 - Proof-of-concept or exploit code (if possible)
-- Impact of the issue
+- Impact assessment, especially for any path that could touch real funds
 
 ### Response Timeline
 
@@ -44,102 +38,55 @@ Instead, please report them via one of these methods:
 
 ### Credential Safety
 
-1. **Never commit credentials** - Use environment variables
-2. **Use `.env` files** - Keep them in `.gitignore`
-3. **Rotate API keys** - Regularly rotate trading platform keys
-4. **Limit permissions** - Use read-only keys when possible
+1. **Never commit credentials** — secrets go through environment variables
+   (see `.env.example` for the expected shape)
+2. **Keep `.env` in `.gitignore`** — it holds live keys and wallet material
+   and must never leave your machine
+3. **Rotate API keys** regularly and use separate wallets for trading bots
+4. **Never enable live trading unless you fully understand the consequences** —
+   the default run mode is `dry`
 
 ### Deployment
 
-1. **Keep dependencies updated** - Run `npm audit` regularly
-2. **Use HTTPS** - Never expose HTTP endpoints publicly
-3. **Enable rate limiting** - Protect against abuse
-4. **Review logs** - Monitor for suspicious activity
+1. **Keep Rust dependencies updated** — review `Cargo.lock` changes in PRs,
+   run `cargo audit` where available
+2. **Use HTTPS** — never expose the panel HTTP server (port 51888) beyond
+   localhost or an authenticated tunnel
+3. **Run the secret scan** — `bash scripts/secret-scan.sh` (zero-dependency)
+4. **Review logs** — monitor for unexpected order or position activity
 
 ### Trading Safety
 
-1. **Start with dry-run mode** - Test before live trading
-2. **Set loss limits** - Configure circuit breakers
-3. **Use separate wallets** - Don't use primary wallets for bots
-4. **Monitor positions** - Set up alerts for large trades
-
-### Agent Identity Verification (ERC-8004)
-
-Blitzkrieg supports [ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) for on-chain agent identity verification. This prevents impersonation attacks where malicious actors claim to be trusted traders.
-
-**Why it matters:** On January 29, 2026, an agent named "samaltman" attempted to hijack bots via prompt injection. Anyone can claim to be anyone without verification.
-
-**Recommended settings for copy trading:**
-
-```typescript
-{
-  requireVerifiedIdentity: true,  // Only copy verified traders
-  minReputationScore: 50,         // Minimum reputation score
-  identityNetwork: 'base'         // Mainnet (live Jan 29, 2026)
-}
-```
-
-**Live networks:** Ethereum, Base, Optimism, Arbitrum, Polygon (19,000+ agents registered)
-
-See `/verify` command and `src/identity/erc8004.ts` for implementation.
+1. **Start with dry-run mode** — validate the full order chain before any
+   live deployment
+2. **Set loss limits** — the engine enforces hard risk limits that strategies
+   cannot override
+3. **Use separate wallets** — dedicated funds only, never your primary wallet
+4. **Monitor positions** — set up alerts for large or unexpected trades
 
 ## Known Security Considerations
 
-### npm Dependencies
+### Process Architecture
 
-All npm vulnerabilities have been fixed using npm overrides:
-- **bigint-buffer** → @vekexasia/bigint-buffer2 (secure fork)
-- **elliptic** → Replaced with @noble/secp256k1 (modern, audited)
-- **axios** → Forced to ^1.7.4
-- **undici** → Forced to ^6.23.0
-- **nanoid** → Forced to ^3.3.8
-- **@cosmjs/**** → Forced to ^0.38.1 (uses @noble/curves)
+- The trading engine (`blitzkrieg-core`) and the panel server (`ui_kit_web`)
+  communicate over a Unix-domain socket with newline-framed JSON-RPC 2.0.
+  The panel has **no** direct market or wallet access; all order flow goes
+  through the engine.
+- Market extensions (`extensions/*`) are compiled plugins depending only on
+  the `core/market_api` contract crate — they are not hot-swappable without
+  a rebuild.
+- External strategies are cdylibs loaded via a **frozen ABI**
+  (`BK_ABI_VERSION = 2`). Risk hard limits are enforced in the engine and
+  cannot be exempted by any strategy.
 
-Run `npm audit` to verify: **0 vulnerabilities**
+### No Third-Party Audit
 
-### Sandbox & Dynamic Code Execution
+No third-party security audit has been performed on this project. Use it at
+your own risk, especially with live funds.
 
-The following features are **disabled by default** for security:
+## Further Reading
 
-| Feature | Environment Variable | Default |
-|---------|---------------------|---------|
-| JavaScript sandbox | `ALLOW_UNSAFE_SANDBOX` | `false` |
-| Canvas JS eval | `CANVAS_ALLOW_JS_EVAL` | `false` |
-
-Only enable these if you understand the risks. For untrusted code execution, use Docker containers or `isolated-vm`.
-
-### MCP Server Security
-
-When exposing Blitzkrieg as an MCP tool server, use these controls to restrict access:
-
-| Feature | Environment Variable | Default |
-|---------|---------------------|---------|
-| Tool blocklist | `BLITZKRIEG_MCP_BLOCKED_TOOLS` | _(none)_ |
-| Tool allowlist | `BLITZKRIEG_MCP_ALLOWED_TOOLS` | _(all)_ |
-| Tool profile | `BLITZKRIEG_MCP_TOOL_PROFILE` | `full` |
-| Rate limit | `BLITZKRIEG_MCP_RATE_LIMIT` | `60` calls/min |
-| Audit logging | `BLITZKRIEG_MCP_AUDIT` | `true` |
-
-Tool profiles provide predefined access levels:
-- **`read-only`** — feeds, markets, analytics, portfolio, watchlist, search
-- **`trading`** — read-only + trading, execution, order skills
-- **`full`** — all tools (default)
-
-All string arguments are scanned for injection patterns (SQL, command, XSS, path traversal) before execution.
-
-### Rate Limiting & HTTPS
-
-Production deployments should enable:
-
-```bash
-# IP-based rate limiting (requests per minute)
-BLITZKRIEG_IP_RATE_LIMIT=100
-
-# HTTPS enforcement
-BLITZKRIEG_FORCE_HTTPS=true
-BLITZKRIEG_HSTS_ENABLED=true
-```
-
-## Security Audit
-
-See [docs/SECURITY_AUDIT.md](./docs/SECURITY_AUDIT.md) for the full security audit report.
+Security-relevant design decisions are documented in
+[docs/rust-core/ARCHITECTURE.md](./docs/rust-core/ARCHITECTURE.md)
+(process boundaries, risk enforcement) and
+[docs/VPS_SECURITY.md](./docs/VPS_SECURITY.md) (deployment hardening).

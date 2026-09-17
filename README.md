@@ -1,10 +1,10 @@
 # BlitzkriegBot
 
-> 私有量化交易系统 —— **Rust 交易核心 + Rust 面板 + 可插拔市场扩展**。
+> 开源量化交易系统 —— **Rust 交易核心 + Rust 面板 + 可插拔市场扩展**。
 > 所有涉及资金、订单、风控与状态一致性的逻辑都在 Rust 侧；Node 只保留
 > 一个极薄的 IPC 验证客户端，供本地验收门禁驱动核心。
 
-- **仓库**：`ceer-quant/BlitzkriegBot`（**private**）
+- **仓库**：`ceer-quant/BlitzkriegBot`（开源，MIT）
 - **默认运行模式**：`dry`（DryRun 模拟）。**Live 交易默认关闭且受硬约束保护，不得在未授权下开启。**
 - **工具链**：Rust（edition 2024）+ Node.js `>= 22`（仅验收脚本）
 
@@ -222,7 +222,6 @@ cd ui/webapp/webui && npm run check:all
 
 | 文档 | 内容 |
 | --- | --- |
-| [HANDOFF.md](./HANDOFF.md) | **项目交接入口**：当前状态、阅读序、跑起来、待办 |
 | [docs/FEATURES.md](./docs/FEATURES.md) | **功能清单与完成度**（证据分级：实盘验证 / 离线验证 / 仅测试覆盖 / 未验证 / 规划） |
 | [docs/rust-core/ARCHITECTURE.md](./docs/rust-core/ARCHITECTURE.md) | Rust 分层架构与扩展体系 |
 | [docs/rust-core/STRATEGY_GUIDE.md](./docs/rust-core/STRATEGY_GUIDE.md) | 如何编写与加载策略 |
