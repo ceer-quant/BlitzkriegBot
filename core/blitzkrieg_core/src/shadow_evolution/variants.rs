@@ -140,8 +140,11 @@ impl Variant {
         self.replay.on_round(markets, seeds, now_ms);
     }
 
-    pub fn on_tick(&mut self, ctx: &ShadowTickCtx<'_>) {
-        self.replay.on_tick(ctx);
+    /// Advance one tick. Returns whether the twin's OWN code panicked (KI-23) —
+    /// the panic is absorbed inside the replay, but the caller must latch
+    /// `crashed` so a permanently panicking variant stops being re-ticked.
+    pub fn on_tick(&mut self, ctx: &ShadowTickCtx<'_>) -> bool {
+        self.replay.on_tick(ctx)
     }
 
     pub fn open_positions(&self) -> usize {

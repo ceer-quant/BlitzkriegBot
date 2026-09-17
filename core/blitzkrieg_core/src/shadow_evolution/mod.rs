@@ -324,8 +324,16 @@ impl ShadowEvolution {
                     continue;
                 }
                 // Crash isolation: a panicking variant is quarantined, not fatal.
-                let res = catch_unwind(AssertUnwindSafe(|| v.on_tick(&ctx)));
-                if res.is_err() {
+                // Two panic surfaces feed the same latch (KI-23): the twin's own
+                // code, reported as `true` through the absorbed inner catch, and
+                // the replay/exit machinery, still caught by this outer unwind.
+                // Absorbing it here without latching would re-tick a permanently
+                // panicking twin every tick, silently.
+                let panicked = match catch_unwind(AssertUnwindSafe(|| v.on_tick(&ctx))) {
+                    Ok(reported) => reported,
+                    Err(_) => true,
+                };
+                if panicked {
                     v.crashed = true;
                     tracing::warn!(
                         strategy = %u.strategy,
@@ -1153,31 +1161,34 @@ mod tests {
         let _ = m.evaluate(3_000);
     }
 
-    /// The panic is absorbed inside `shadow_twin::catch`, which returns a default
-    /// result — so the twin's own panic does NOT set the `crashed` quarantine flag.
-    ///
-    /// That is worth pinning explicitly because the doc comment on
-    /// `shadow_twin::catch` claims "the caller quarantines it on the panic", while
-    /// its only callers (`TwinReplay::on_tick`) absorb the panic with
-    /// `unwrap_or_default()` and discard the error. `crashed` is therefore only
-    /// reachable from a panic OUTSIDE the catch (i.e. the exit/replay machinery).
-    /// Reading it as "bad strategies get quarantined" would be wrong.
+    /// KI-23: the twin's own panic is ABSORBED (nothing propagates), but it must
+    /// LATCH `crashed` — a permanently panicking variant is quarantined on its
+    /// first panicking tick instead of being re-ticked (and unwinding) forever,
+    /// silently. The panic still does not take the engine down, and the second
+    /// tick must skip the quarantined variant entirely (no further unwind).
     #[test]
-    fn a_twins_own_panic_is_absorbed_and_never_sets_the_crashed_flag() {
+    fn a_permanently_panicking_twin_is_quarantined_on_its_first_panic() {
         let boom = PanicStrategy {
             name: "boom".into(),
         };
         let refs: Vec<&dyn EngineStrategy> = vec![&boom];
-        let mut m = ShadowEvolution::new(fast_cfg(true, "absorb"), &refs);
+        let mut m = ShadowEvolution::new(fast_cfg(true, "quarantine"), &refs);
         m.on_round(&[market()], &[], 1_000);
-        m.on_tick("t", &book(0.39, 0.40), 1_000);
 
-        let unit = &m.units[0];
+        // First tick: every variant of "boom" panics inside its own code — the
+        // panic is absorbed (this call must not unwind) and `crashed` latches.
+        m.on_tick("t", &book(0.39, 0.40), 1_000);
         assert!(
-            unit.set.variants.iter().all(|v| !v.crashed),
-            "the twin's panic is swallowed by shadow_twin::catch, so the outer \
-             `crashed` flag never latches — the engine survives, but a permanently \
-             panicking variant keeps being ticked forever"
+            m.units[0].set.variants.iter().all(|v| v.crashed),
+            "a permanently panicking twin must latch `crashed` on its first panic"
         );
+
+        // Second tick: the quarantined variants are skipped — if the flag were
+        // not consulted, this would unwind again (and the absorb would hide it,
+        // but the skip is what stops the per-tick unwind cost).
+        m.on_tick("t", &book(0.39, 0.40), 2_000);
+
+        // The evaluation pass must also survive reading a twin that panicked.
+        let _ = m.evaluate(3_000);
     }
 }

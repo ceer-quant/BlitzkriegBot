@@ -198,7 +198,12 @@ impl TwinReplay {
 
     /// Feed one tick through the twin's own logic, then manage the virtual
     /// position with the shared exit policy (D-2: the SAME policy live runs).
-    pub fn on_tick(&mut self, ctx: &ShadowTickCtx<'_>) {
+    /// Returns whether the TWIN'S OWN code panicked (KI-23): the panic is
+    /// absorbed here — nothing propagates — but the caller sees it, so a
+    /// permanently panicking twin can be quarantined instead of re-ticked
+    /// forever. The exit-policy path keeps `?`-free defaulting to `false`:
+    /// the shared policy is kernel code, still covered by the outer catch.
+    pub fn on_tick(&mut self, ctx: &ShadowTickCtx<'_>) -> bool {
         let token = ctx.token_id;
 
         if let Some(pos) = self.open.get_mut(token) {
@@ -224,7 +229,11 @@ impl TwinReplay {
             .is_some();
             // Ask the twin itself as well: a strategy-owned close is the
             // strategy's own decision, so it is honoured alongside the policy.
-            let twin_exit = !catch(&mut self.twin, ctx).exit_reasons.is_empty();
+            let (twin_res, twin_panicked) = catch(&mut self.twin, ctx);
+            let twin_exit = !twin_res.exit_reasons.is_empty();
+            if twin_panicked {
+                return true;
+            }
             if policy_exit || twin_exit {
                 let exit_price = executable_bid(Some(ctx.book));
                 let (entry, shares) = (pos.entry_price, pos.shares);
@@ -233,10 +242,11 @@ impl TwinReplay {
                 self.trades.push_back((ctx.now_ms, gross - fee));
                 self.open.remove(token);
             }
-            return;
+            return false;
         }
 
-        if let Some(entry) = catch(&mut self.twin, ctx).entry {
+        let (res, panicked) = catch(&mut self.twin, ctx);
+        if let Some(entry) = res.entry {
             self.open.insert(
                 token.to_string(),
                 TwinPosition {
@@ -247,6 +257,7 @@ impl TwinReplay {
                 },
             );
         }
+        panicked
     }
 
     /// Drop closed trades older than the window and return a snapshot of the
@@ -270,11 +281,17 @@ impl TwinReplay {
     }
 }
 
-/// Run one tick through the twin under `catch_unwind`. A panicking twin returns
-/// an empty result; the caller quarantines it on the panic, and nothing ever
-/// propagates into the live strategy path.
-pub fn catch(twin: &mut EngineStrategyShadow, ctx: &ShadowTickCtx<'_>) -> ShadowTickResult {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| twin.on_tick(ctx))).unwrap_or_default()
+/// Run one tick through the twin under `catch_unwind`. A panicking twin yields
+/// `(default result, true)`: the panic is ABSORBED here — nothing ever
+/// propagates into the live strategy path — but the boolean surfaces it so the
+/// caller (`TwinReplay::on_tick`) can report it and the evolution loop can
+/// quarantine a permanently panicking twin (KI-23) instead of re-ticking it
+/// forever, silently.
+pub fn catch(twin: &mut EngineStrategyShadow, ctx: &ShadowTickCtx<'_>) -> (ShadowTickResult, bool) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| twin.on_tick(ctx))) {
+        Ok(res) => (res, false),
+        Err(_) => (ShadowTickResult::default(), true),
+    }
 }
 
 /// Assemble the read-only tick view a twin is served (no credentials, no
