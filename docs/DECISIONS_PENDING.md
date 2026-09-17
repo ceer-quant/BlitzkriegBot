@@ -620,3 +620,47 @@
      拒绝会让「拉一个只读观察实例去看生产线」这个用法无法用一个命令行表达。
   2. 是否同意 `--readonly` **不影响**已落地的 dry 模式行为（dry 本就出不了网，
      两个开关叠加不改变任何语义，只多一层显式声明）？
+
+---
+
+## [待决策] D-22 `lifecycle:on` 翻为默认值会让面板鉴权凭据变为必需（E12-a / #94 发现）
+
+- **背景**：#94 的 (a) 要求「`lifecycle:on` 为默认」。实测现状是**相反的**：
+  `ui_kit_web`、`ui_kit_panel`（TUI）都用 `--manage` 显式开启，
+  默认值是 **off**（`ui/ui_kit/src/bin/web.rs:20`、`ui/ui_kit_panel/src/main.rs:58`），
+  且代码里**不存在** `lifecycle:on` 这个标识（只在 `docs/KNOWN_ISSUES.md` KI-25
+  作为「缺失项」被引用）。
+- **实测的耦合**（这是关键，也是不能自行拍板的原因）：
+  lifecycle **开启**会置 `auth_required`，而 `WebServer::require_credentials()`
+  （`ui/ui_kit/src/web/mod.rs:645`）在该位为真时要求
+  `BLITZKRIEG_PANEL_USER` + `BLITZKRIEG_PANEL_PASSWORD` **同时存在**，
+  否则 `std::process::exit(2)`。注释写明这是**故意**的：
+  「A half-configured pair counts as unconfigured, on purpose:
+  guessing which half was meant is how a panel ends up open.」
+- **本 checkout 的实际状态（已实测）**：
+  - 仓库里**没有 `.env`**，只有 `.env.example`（9320 字节，键名里**没有**
+    `BLITZKRIEG_PANEL_USER` / `BLITZKRIEG_PANEL_PASSWORD`）；
+  - 但**正在运行的**生产面板（pid 90747，`--manage`）**确实要求鉴权**：
+    `GET /` → **302**（登录跳转）、`GET /api/snapshot` → **401**。
+  - 结论：运行实例的凭据来自**它的启动环境**，不在本 checkout 里。
+- **因此**：把 `lifecycle:on` 翻为默认，对运行实例无影响，但会让
+  `npm run tui`、`docs/DEVELOPMENT.md:163`、`HANDOFF.md:90` 里那些
+  **不带凭据的启动方式直接 exit 2**。
+- **选项 A**：翻默认为 on，**同时**把凭据要求降级为「未配置时面板停在只读模式并
+  打印警告，而不是 exit 2」。保留默认 on 的便利，代价是「lifecycle 默认开但
+  实际未生效」——需要面板明确显示该状态，否则是「看起来开了其实没有」。
+- **选项 B**：翻默认为 on，凭据要求**不变**（缺则 exit 2）。
+  与「默认可用」冲突：全新 checkout 里 `npm run tui` 会直接失败。
+- **选项 C**：默认值**保持 off**，改由新 dispatcher 的 `blitzkrieg`（一体化）子命令
+  默认 on，`tui`/`web`/`core` 子命令保持显式。即「一体化启动默认托管，单独起 UI
+  默认不托管」——语义上更贴 #94 的「一条命令同时起内核与 UI」。
+- **AI 倾向**：**C**。理由：`lifecycle` 开 = 「我负责内核的生死」，这是**一体化启动
+  这个动作的属性**，不是 UI 的属性。把默认 on 绑在 UI 启动方式上，会让「我只想看
+  一眼面板」也自动获得杀内核的能力，与既有的 adopt-不-kill 克制设计相悖。
+  同时 C 不触碰凭据要求，不制造「默认开但静默未生效」的第三种状态。
+- **需要用户确认的点**：
+  1. 选 C 还是 A？若选 A，是否同意「未配置凭据 → 只读降级 + 显著提示」取代 exit 2？
+  2. 无论选哪个，`BLITZKRIEG_PANEL_USER` / `BLITZKRIEG_PANEL_PASSWORD` 是否需要补进
+     `.env.example`（当前**没有**，新接手的人无从知道要设这两个变量）？
+  3. 本 checkout 无 `.env`：是否要我生成一份 `.env`（不含真实机密，仅面板凭据）？
+     **未授权前不生成**——凭据属真实机密范畴，且硬约束禁改凭证。

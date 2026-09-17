@@ -2327,6 +2327,7 @@ stop() 解析时进程已回收且 socket 已释放；替代核心可立即接�
    等值判断收尾。
 6. **门禁要用对照实验证明它不是恒真**：一个「通过了」的检查，
    必须能在**去掉被测条件后失败**（§52-c：去掉 `--readonly` 后核心确实去尝试出网）。
+7. **CI 不能执行时，本地重放 ≠ CI 已通过**（§52-e）。
 
 ---
 
@@ -2399,3 +2400,32 @@ read-only 核心连这次尝试都没有。这个差异就是结构性保证本�
 无 venue → 没有 fill 可等 → 本地合成成交。
 账本语义未被修改，只是多了一个入口模式；`--mode live` 的行为逐字未变
 （对照实验即是证据）。决策记录见 `DECISIONS_PENDING.md` D-21。
+
+### 52-e CI 未能执行时的处置（KI-26）
+
+`5670e4e`（PR #103）推送后，**全部 job 在 2 秒内失败**：`steps: []`、
+`runner_name: ""`、`runner_id: 0`——没有任何 runner 被分配，**代码一行都没跑**。
+重跑两次（attempt 2、3）同样拿不到 runner，属持续性的基础设施故障，非代码缺陷。
+
+处置：
+
+1. **结论必须如实标注为「空」，不能说成绿**。在真实执行发生前，PR #103 的
+   CI 结论既不是绿的也不是红的，**不得依它合并**。
+2. 本地重放**逐条对齐 CI 步骤**，不是跑一个自认为等价的子集。按
+   `.github/workflows/ci.yml` 的 job 顺序全量重放：
+
+   | job | 步骤 | 本地结果 |
+   |---|---|---|
+   | `rust-check` | `cargo test --workspace --locked` | 232 passed / 0 failed |
+   | `node-check` | `tsc --noEmit`；`npm test` | exit 0；172 passed / 0 failed |
+   | `panel-check` | `cargo build --release --locked`→`npm run check`→`check:all`→`ui:webapp`→`core:shutdown-check`→`core:parent-monitor-check`→`core:readonly-check` | 全 PASS |
+
+   本地全绿只能作为**旁证**记录，不能替代 CI。
+3. **不要为了修一个没有 runner 的 CI 去改代码**——那不是代码缺陷。
+   重跑是可逆的（无害）；把结论建立在空 CI 上不是（有害）。
+4. 顺带纠正一次误读：`c4890a4` 的 5 个真实 job **全部通过**，
+   只有 `notify (wechat)` 没拿到 runner，却污染了整个 run 的聚合结论。
+   **在相信 run 的红绿之前，先看 job 级 `steps` 是否为空。**
+   已作为 KI-26 记入 `KNOWN_ISSUES.md`（含建议：给 `notify` 加
+   `continue-on-error: true` 或把它移出 `needs` 链，待用户确认）。
+
