@@ -122,7 +122,9 @@ assets/frames/
 PLAN.md
 TODO.md
 IMPLEMENTATION_AUDIT.md
-CLAWDBOT_ARCHITECTURE.md
+
+# Internal dev docs (never published)
+dev-docs/
 
 # MCP config (user-specific)
 .mcp.json

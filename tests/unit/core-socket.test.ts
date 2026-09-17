@@ -23,7 +23,7 @@ describe('core socket naming', () => {
   it('canonical name carries the brand only', () => {
     const p = defaultSocketPath(env);
     assert.equal(p, '/var/tmp/probe/blitzkrieg-core-tester.sock');
-    assert.ok(!p.includes('clodds'), `path must not carry the old brand: ${p}`);
+    assert.ok(!p.includes('legacy-socket-name'), `path must not carry a legacy name: ${p}`);
   });
 
   it('falls back to the OS temp dir when TMPDIR is empty or missing', () => {
