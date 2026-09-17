@@ -781,15 +781,22 @@ export class BlitzkriegCoreClient extends EventEmitter {
   }
 
   /**
-   * Synchronously kill the core we own, without waiting.
+   * Synchronously kill the core we own, without waiting or restarting.
    *
    * This exists for signal handlers and `process.on('exit')`, which cannot await.
    * SIGKILL is the only honest choice there: SIGTERM would be delivered to a core
    * that the dying parent can no longer observe, so there is no way to escalate.
    * Durability is not lost — the core's order log is written per state change, so
    * the next boot restores and sweeps any order still live.
+   *
+   * Marking `stopped` FIRST is essential, not incidental: without it the exit
+   * handler races the auto-restart loop, which sees the killed process as a crash
+   * and spawns a replacement before the process can die. The core is then alive
+   * again under a dying parent — the exact orphan this method exists to prevent.
    */
   killNow(): void {
+    this.stopped = true;
+    if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null; }
     const proc = this.proc;
     if (!proc || !this.ownsProc) return;
     this.proc = null;

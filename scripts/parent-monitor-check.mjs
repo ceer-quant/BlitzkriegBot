@@ -44,7 +44,7 @@ const SOCK = join(WORK, 'core.sock');
 const DRIVER_DIR = join(process.cwd(), 'target', 'parent-monitor');
 mkdirSync(DRIVER_DIR, { recursive: true });
 
-/** Every live `blitzkrieg-core` process, as {pid, ppid}. */
+/** Every live `blitzkrieg-core` process, as {pid, ppid, cmd}. */
 function corePids() {
   return execSync('ps -Ao pid=,ppid=,command=', { encoding: 'utf8' })
     .split('\n')
@@ -52,23 +52,33 @@ function corePids() {
     .filter((l) => /target\/release\/blitzkrieg-core/.test(l))
     .map((l) => {
       const [pid, ppid] = l.split(/\s+/);
-      return { pid: Number(pid), ppid: Number(ppid) };
+      return { pid: Number(pid), ppid: Number(ppid), cmd: l };
     });
 }
 
 // A driver that starts the core the same way the shell does, then idles so the
-// parent's SIGTERM is what ends it. Written to a file so it imports the real
-// runner rather than reimplementing the call.
+// parent's SIGTERM is what ends it.
 //
-// The import MUST be relative: an absolute path baked in here points at the
-// developer's checkout and fails with ERR_MODULE_NOT_FOUND on any other machine
-// (CI caught exactly that).
-const DRIVER = join(DRIVER_DIR, 'driver.ts');
-const REL = relative(DRIVER_DIR, join(process.cwd(), 'src/core/blitzkrieg-core-runner.ts'))
-  .replace(/\\/g, '/');
+// It loads the COMPILED runner (`dist/`) and runs under plain `node`, matching
+// production (`npm start` → `node dist/index.js`). Two traps this avoids:
+//
+//   1. A `.ts` driver run through the `tsx` wrapper leaves the wrapper alive
+//      after SIGTERM, so the driver never dies and the exit guard never fires —
+//      the FAIL/PASS says nothing about the real signal path. Plain node has no
+//      wrapper, so the signal reaches the process that owns the guards.
+//   2. An absolute import path baked into the generated file points at the
+//      developer's checkout and fails with ERR_MODULE_NOT_FOUND elsewhere (CI
+//      caught exactly that). The specifier is therefore relative.
+const DIST_RUNNER = join(process.cwd(), 'dist', 'core', 'blitzkrieg-core-runner.js');
+if (!existsSync(DIST_RUNNER)) {
+  console.error(`refusing to run: ${DIST_RUNNER} not found.`);
+  console.error('  build the shell first: npm run build');
+  process.exit(2);
+}
+
+const DRIVER = join(DRIVER_DIR, 'driver.mjs');
+const REL = relative(DRIVER_DIR, DIST_RUNNER).replace(/\\/g, '/');
 const IMPORT_SPEC = REL.startsWith('.') ? REL : './' + REL;
-// No top-level await: the file lives outside `src/` so it is treated as CJS and
-// esbuild rejects TLA there. The IIFE keeps the same shape and stays portable.
 writeFileSync(
   DRIVER,
   `
@@ -89,11 +99,9 @@ main().catch((e) => { console.error('DRIVER_FAILED', e); process.exit(1); });
 `,
 );
 
-// Match the project's own TS entry convention (`node --import tsx <file>.ts`).
-// `cwd` stays at the repo root so `tsx` resolves; isolation comes from the
-// runner's BZK_CORE_ISOLATION hook, which redirects the socket AND the data log
-// paths away from the production ledger.
-const child = spawn(process.execPath, ['--import', 'tsx', DRIVER], {
+// Run under plain `node`, matching production. No tsx wrapper: it would outlive
+// SIGTERM, keep the driver alive, and make the result meaningless.
+const child = spawn(process.execPath, [DRIVER], {
   cwd: process.cwd(),
   stdio: ['ignore', 'pipe', 'pipe'],
   env: { ...process.env, BZK_CORE_ISOLATION: WORK },
@@ -119,35 +127,64 @@ if (!ready) {
 
 const before = corePids();
 
-// Our core is the one descended from the shell we spawned. Matching on ancestry
-// (not on "some core survived") is what keeps this gate from ever touching an
-// unrelated live core — the operator's panel-managed instance is in the process
-// table for the whole run, and killing it would destroy an unreconstructable
-// ledger.
-const oursBefore = before.filter((p) => p.ppid === child.pid);
+// Identify OUR core by its isolated socket path — an exact, unique marker for
+// this run. Ancestry is NOT usable here: `tsx` runs the driver in a subprocess,
+// so the core's ppid is the tsx child rather than the wrapper we spawned. The
+// socket path is both unique and impossible to collide with a production core
+// (which lives under TMPDIR, never under our scratch dir).
+const socketMarker = join(WORK, 'core.sock');
+const oursBefore = before.filter((p) => p.cmd.includes(socketMarker));
 console.log('before exit: blitzkrieg-core processes =', before.length);
-console.log('  ours (descended from shell pid ' + child.pid + ') =', oursBefore.length);
+console.log(`  ours (socket under ${WORK}) =`, oursBefore.length);
 for (const p of oursBefore) console.log(`  pid=${p.pid} ppid=${p.ppid}`);
 const otherCount = before.length - oursBefore.length;
 if (otherCount > 0) console.log(`  (${otherCount} unrelated core(s) in the table — ignored)`);
+
+if (oursBefore.length === 0) {
+  console.log('\nthe driver reported READY but no core is using our isolated socket;');
+  console.log('cannot attribute a core to this run, so the gate fails closed.');
+  try { child.kill('SIGKILL'); } catch {}
+  process.exit(1);
+}
 
 // Signal the shell exactly as a user's Ctrl-C would.
 child.kill('SIGTERM');
 for (let i = 0; i < 60 && child.exitCode === null; i++) await sleep(250);
 console.log('shell exited: code =', child.exitCode, '| signal =', child.signalCode);
 
-// Give an asynchronous shutdown a moment to finish reaping.
-await sleep(1000);
+// Wait for the shell to be reaped, then give an asynchronous shutdown a moment
+// to finish. Sampling too early produced a FALSE PASS once: the process table
+// was read while the tree was still winding down, so nothing looked like a leak.
+for (let i = 0; i < 40; i++) {
+  if (child.exitCode !== null || child.signalCode !== null) break;
+  await sleep(100);
+}
+await sleep(1500);
+
+/** Is `pid` still a live (non-zombie) process? */
+function isAlive(pid) {
+  try { process.kill(pid, 0); } catch { return false; }
+  try {
+    const st = execSync(`ps -p ${pid} -o stat=`, { encoding: 'utf8' }).trim();
+    return st.length > 0 && !st.startsWith('Z');
+  } catch { return false; }
+}
 
 const after = corePids();
-// A leak is one of OUR pids still present. An orphan reparents to pid 1, so
-// match on identity, not on ppid.
-const survivors = after.filter((p) => oursBefore.some((b) => b.pid === p.pid));
+// A leak is one of OUR pids still present. Match on pid identity, not on ppid:
+// an orphan is reparented to pid 1, which is precisely the failure being caught.
+// A zombie is NOT a leak here — the core did exit; the shell simply has not
+// reaped it yet — so require a live process.
+const survivors = after.filter(
+  (p) => oursBefore.some((b) => b.pid === p.pid) && isAlive(p.pid),
+);
 console.log('after exit : surviving core processes (ours) =', survivors.length);
 for (const p of survivors) console.log(`  LEAKED pid=${p.pid} ppid=${p.ppid}`);
 
-// Clean up ONLY what this gate spawned.
+// Clean up ONLY what this gate spawned — that is, pids we saw on our own socket.
+// Never touch a pid we did not observe there: it may be the operator's live core.
 for (const p of survivors) { try { process.kill(p.pid, 'SIGKILL'); } catch {} }
+try { child.kill('SIGKILL'); } catch {}
 try { unlinkSync(SOCK); } catch {}
 
 const ok = oursBefore.length >= 1 && survivors.length === 0;
@@ -157,4 +194,17 @@ console.log(
       ? 'the core died with its parent (no zombie)'
       : 'the core outlived its parent and is now orphaned'),
 );
+
+// A core that is gone by name can still be gone in the ONE way that matters —
+// left holding the socket, i.e. replaced by a restart. Re-check by name and
+// report any core still on our socket, resolving it to a pid so a leak cannot be
+// reported as clean. This is a second, independent read of the same rule.
+const reread = corePids().filter((p) => p.cmd.includes(socketMarker) && isAlive(p.pid));
+if (reread.length > 0) {
+  console.log('re-check: a core is STILL using our isolated socket after the tree exited:');
+  for (const p of reread) console.log(`  pid=${p.pid} ppid=${p.ppid} — restart or leak`);
+  for (const p of reread) { try { process.kill(p.pid, 'SIGKILL'); } catch {} }
+  process.exit(1);
+}
+
 process.exit(ok ? 0 : 1);
