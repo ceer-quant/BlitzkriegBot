@@ -590,32 +590,85 @@ E12 开发期间，一次门禁脚本的清理循环误杀了面板托管的生�
 | KI-22 | 3 个 Dependabot PR 长期开放 | 🔵 | 开放 |
 | KI-23 | 持续 panic 的影子变体不被隔离（`crashed` 在内外层错位） | 🟡 | 开放 |
 | KI-24 | **行情归档 `data/archive` 已丢失（617 MB / 4.94M 事件），且 `data/` 全无备份** | 🔴 | 开放 |
-| KI-25 | E12 一体化启动未完成：无 `blitzkrieg`/`core`/`tui --attach` 子命令、无 `lifecycle:on`、无 `--readonly` 结构性禁下单 | 🟠 | 进行中 |
+| KI-25 | E12 一体化启动未完成：无 `blitzkrieg`/`core`/`tui --attach` 子命令、无 `lifecycle:on`；`--readonly` 已完成 | 🟠 | 进行中 |
+| KI-26 | **CI 出现「无 runner」型失败：job 0 步、`runner: (none)`，且 run 聚合结论被 `notify` 污染** | 🔴 | 开放 |
 
 ---
 
 ### KI-25 · E12 一体化启动只完成了关停侧
 
-E12 的验收有 5 条，本次只关闭了其中 2 条：
+E12 的验收有 5 条，当前已关闭 3 条：
 
 | 验收项 | 状态 | 证据 |
 |---|---|---|
-| 一条命令同时起 core + UI | ❌ 未做 | CLI 仍无 `core`/`tui --attach` 子命令 |
-| 父进程退出不留僵尸子进程 | ✅ **已修** | `MIGRATION_LOG` §51-d/51-e，`parent-monitor-check.mjs` PASS |
+| 一条命令同时起 core + UI | ❌ 未做 | CLI 仍无 `core`/`tui --attach` 子命令（见下方 D-22 的阻塞） |
+| 父进程退出不留僵尸子进程 | ✅ **已修** | `MIGRATION_LOG` §51-d/51-e，`parent-monitor-check.mjs` PASS，PR #102 |
 | 核心崩溃后 UI 恢复/上报 | ⚠️ 部分 | 客户端有 autoRestart + adopt 逻辑，**未做端到端验证** |
-| 退出时不残留挂单 | ✅ **已修** | §51-c，`shutdown-cleanliness-check.mjs` PASS |
-| `--readonly` 下不可能下单（结构性） | ❌ 未做 | 尚无此标志 |
+| 退出时不残留挂单 | ✅ **已修** | §51-c，`shutdown-cleanliness-check.mjs` PASS，PR #102 |
+| `--readonly` 下不可能下单（结构性） | ✅ **已修** | §52，`readonly-egress-check.mjs` PASS（含对照实验），PR #103 |
 
-**`--readonly` 的「结构性」是关键**：要求不是「判定为只读然后拒绝下单」，而是
-**下单路径在只读模式下根本不存在**。可行的做法是在 core 的 OME 构造处注入一个
-永远拒绝提交的 venue bridge，而不是在每个 RPC 入口加 `if readonly { reject }`
-——后者是约定，漏一处就是漏洞。
+**`--readonly` 的落点（与本节原判断不同，实测后修正）**：本节原先建议
+「在 core 的 OME 构造处注入一个永远拒绝提交的 venue bridge」。
+实测后**没有**采用这个做法：OME 是纯状态机、**不持有 venue 句柄**
+（`ome.rs` 模块文档即写明无 I/O），真单发生在**独立 crate**
+`extensions/polymarket/src/venue.rs:231`，唯一调用方 `live.rs:89`。
+向 OME 注入 bridge 等于把结构性保证下放到**第三方插件**——最弱的落点。
+实际采用的是：`Mode::ReadOnly` 变体，**拒绝构造 live 执行器**
+（`ipc/server.rs` 的 `may_trade()` 闸门），复用 dry 模式「不出真单」
+的既有机制（它不出真单的原因是**那个对象根本没被构造**）。
+详见 `MIGRATION_LOG` §52。
 
 **当前可用性缺陷**：核心目前只由 `/crypto-hft` 技能以懒加载单例启动，
 CLI 没有独立的 `core` 子命令，所以「先起核心、再挂 UI」仍需走 REPL 技能路径。
 
-**遗留的进程状态**：面板 pid 90747 仍在服务（HTTP 200），但 pid 16697 的
+**遗留的进程状态**：面板 pid 90747 仍在服务（`/` → 302 登录跳转，
+`/api/snapshot` → 401，即**该实例确实要求鉴权**），但 pid 16697 的
 槽位是 `Z` 僵尸。按硬约束未做重启/清理，**留待用户决定**。
+
+**进度受阻于 D-22**：#94 的 (a) 要求「`lifecycle:on` 为默认」，但实测
+lifecycle 开启会置 `auth_required`，进而**要求面板凭据**
+（`ui/ui_kit/src/web/mod.rs:645`，缺则 `exit(2)`）；而本 checkout
+**没有 `.env`**（只有 `.env.example`，且其中**没有**这两个键名）。
+翻默认值会让 `npm run tui` 与 `docs/DEVELOPMENT.md:163` 的启动方式直接失败。
+三条路线与倾向记于 `DECISIONS_PENDING.md` **D-22**，待用户裁决。
+
+---
+
+### KI-26 · CI 的「无 runner」失败与聚合结论污染
+
+**症状**：job 在 2 秒内「完成」并判 failure，但 `steps: []`、`runner_name: ""`、
+`runner_id: 0`——**没有任何 runner 接过它**。重跑（`rerun-failed-jobs`）返回 201
+但同样拿不到 runner。
+
+**两次实测的对照**（同一 workflow，相邻时间）：
+
+| commit | 结果 |
+|---|---|
+| `709afb9` 06:40 | 6 个 job **全部拿到 runner 并成功**（含 `notify`） |
+| `c4890a4` 06:52 | 5 个真实 job **全部拿到 runner 并成功**；仅 `notify` 拿不到 runner → failure |
+| `5670e4e` 07:25 | **全部 job** 都拿不到 runner → 整轮 failure |
+
+**这一点最危险**：`notify` job 有 `if: always()` + `needs: [...]`，
+它一旦拿不到 runner，**run 的聚合结论就变成 failure**，
+于是 `gh` / REST 读到的「CI 失败」与「代码没通过测试」无法区分。
+本次我因此在 `c4890a4` 上误判过一次（以为合并把 main 弄红了，
+实际是 5 个真实 job 全绿）。**判读 CI 必须下钻到 job 级**
+（`/actions/runs/<id>/jobs` 看 `steps` 与 `runner_name`），
+不能只看 run 的 `conclusion`。
+
+**判读方法（已固化为做法）**：
+- `steps: []` + `runner: (none)` ⇒ **基础设施问题**，重跑；不要改代码；
+- 有 `steps` 且有失败步骤 ⇒ **代码问题**，看日志；
+- run 级 failure 但所有真实 job success ⇒ 只可能是 `notify`，
+  它不该影响「代码是否通过」的结论。
+
+**影响面**：本轮 `5670e4e`（PR #103）的真实 job **从未被执行过**，
+所以该 PR 的 CI 结论**目前是空的，不是绿的也不是红的**。
+在拿到一次真实执行前，**不得**依 CI 结论合并。
+
+**未采取的动作**：没有改动 `notify` 的 `if`/`needs` 语义（那是判断口径的改动，
+属业务决策）；没有删除该 job。**建议**（待用户确认）：给 `notify` 加
+`continue-on-error: true`，或把它移出 `needs` 链，使基础设施抖动不再伪装成代码失败。
 
 ---
 
