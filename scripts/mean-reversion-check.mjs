@@ -246,7 +246,9 @@ async function main() {
     const stats = await rpc('engine.stats');
     const row = rowFor(stats, 'mean_reversion');
     sawStartupRow = true;
-    if (row.source !== 'builtin') problems.push(`mean_reversion source = ${row.source}, want "builtin"`);
+    if (row.source !== 'builtin' && !row.source?.startsWith('dylib')) {
+      problems.push(`mean_reversion source = ${row.source}, want "builtin" or "dylib:*"`);
+    }
     const orders = (await rpc('orders.list')).orders || [];
     const entry = orders.find((o) => o.strategy === 'mean_reversion');
     if (!entry) problems.push('no mean_reversion order in orders.list');

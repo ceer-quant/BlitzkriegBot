@@ -138,6 +138,10 @@ impl CoreConfig {
                 window_floor_ms: self.trend_window_floor_ms,
                 ..Default::default()
             },
+            spread_arb: crate::signal::SpreadArbConfig {
+                trend_confirm_sec: self.trend_confirm_sec,
+                ..Default::default()
+            },
             size_usd: self.size_usd,
             min_shares: self.min_shares,
             max_shares: self.max_shares,
@@ -199,7 +203,19 @@ impl CoreConfig {
         {
             let mut libs = Vec::new();
             collect_strategy_libs(std::path::Path::new(dir), 0, &mut libs);
-            libs.sort();
+            libs.sort_by_key(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let rank = if name.contains("spread_arb") {
+                    0
+                } else if name.contains("trend_follow") {
+                    1
+                } else if name.contains("mean_reversion") {
+                    2
+                } else {
+                    3
+                };
+                (rank, p.clone())
+            });
             for path in libs {
                 let receipt = core.load_strategy_lib(&path.to_string_lossy());
                 // The success receipt is exactly "<name>@<version> registered
@@ -222,16 +238,6 @@ impl CoreConfig {
                     if ok { "ok" } else { "FAILED" },
                     receipt
                 );
-                if !ok {
-                    continue;
-                }
-                let name = receipt.split('@').next().unwrap_or_default().to_string();
-                if name.is_empty() {
-                    continue;
-                }
-                if !core.set_strategy_enabled(&name, true) {
-                    tracing::warn!(strategy = %name, "auto-loaded but could not be enabled");
-                }
             }
         }
         #[cfg(not(feature = "strategy-loading"))]
@@ -259,11 +265,34 @@ fn collect_strategy_libs(dir: &std::path::Path, depth: usize, out: &mut Vec<std:
         let Ok(ft) = entry.file_type() else { continue };
         let path = entry.path();
         if ft.is_dir() {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.starts_with('.')
+                || name == "deps"
+                || name == "build"
+                || name == "incremental"
+                || name.contains("probe")
+                || name.contains("dog_strategy")
+                || name.contains("devcheck")
+            {
+                continue;
+            }
             collect_strategy_libs(&path, depth + 1, out);
         } else if matches!(
             path.extension().and_then(|e| e.to_str()),
             Some("dylib") | Some("so")
         ) {
+            // Test/probe strategies (e.g. dog_strategy, devcheck_probe) are loaded dynamically
+            // via IPC `strategy.load` in tests (strategy-gate-check, strategy-evolution-check, strategy-devcheck)
+            // and must not be auto-loaded at startup.
+            if let Some(file_name) = path.file_name().and_then(|f| f.to_str())
+                && (file_name.contains("dog_strategy")
+                    || file_name.contains("probe")
+                    || file_name.contains("devcheck"))
+            {
+                continue;
+            }
             out.push(path);
         }
     }
@@ -341,7 +370,7 @@ impl Default for CoreConfig {
             auto_exits_enabled: true,
             engine_enabled: false,
             assets: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
-            enabled_strategies: Vec::new(),
+            enabled_strategies: vec!["spread_arb".to_string()],
             disabled_strategies: Vec::new(),
             strategy_dir: None,
             min_round_age_sec: 30,
@@ -419,7 +448,9 @@ pub struct Core {
     strategy_exits: Vec<crate::strategies::StrategyExitIntent>,
     /// Optional self-driving engine (P3). When present, book/spot/round events
     /// flow in and the core evaluates strategies and places orders on its own.
-    engine: Option<crate::engine::Engine>,
+    /// Crate-visible so the replay driver can host strategies without going
+    /// through the loader path (the kernel ships none to load).
+    pub(crate) engine: Option<crate::engine::Engine>,
     /// Optional Rust-native feed handle (P4); set when `--feed-ws` is enabled.
     feed: Option<std::sync::Arc<dyn blitzkrieg_market_api::SubscriptionControl>>,
     /// Extension registry (plugin lifecycle).
@@ -3251,12 +3282,30 @@ mod shadow_evolution_tests {
         m
     }
 
+    /// The `spread_arb` cap currently in force, read through the strategy's own
+    /// config view (the same surface an external cdylib reports through
+    /// `bk_strategy_config_view`) — the kernel no longer knows the field name.
     fn cap(c: &Core) -> Decimal {
-        c.engine
-            .as_ref()
+        let views = c.engine.as_ref().unwrap().strategy_config_views();
+        let (_, json) = views
+            .iter()
+            .find(|(n, _)| n == "spread_arb")
+            .expect("test adapter reports a config view");
+        serde_json::from_str::<serde_json::Value>(json)
             .unwrap()
-            .current_spread_arb()
-            .trend_max_entry_price
+            .get("trendMaxEntryPrice")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Decimal::from_str_exact(s).ok())
+            .expect("trendMaxEntryPrice in the view")
+    }
+
+    /// A fresh engine with the three test adapters hosted (the kernel ships no
+    /// strategies, PR-B) — the shape the evolution tests need: one evolvable
+    /// strategy per declared knob set, registered before `shadow_evolution_enable`.
+    fn se_engine() -> crate::engine::Engine {
+        let mut e = crate::engine::Engine::new(crate::engine::EngineConfig::default());
+        crate::strategies::test_support::host(&mut e, Default::default(), Default::default());
+        e
     }
 
     /// Acceptance: enabling Shadow Evolution attaches the per-strategy hot-swap
@@ -3271,9 +3320,7 @@ mod shadow_evolution_tests {
             shadow_evolution_enabled: false,
             ..Default::default()
         });
-        c.enable_engine(crate::engine::Engine::new(
-            crate::engine::EngineConfig::default(),
-        ));
+        c.enable_engine(se_engine());
         assert!(!c.shadow_evolution().is_enabled());
         assert!(!c.engine.as_ref().unwrap().has_hot_params());
 
@@ -3334,9 +3381,7 @@ mod shadow_evolution_tests {
             dry_seed_balance: dec!(1000),
             ..Default::default()
         });
-        c.enable_engine(crate::engine::Engine::new(
-            crate::engine::EngineConfig::default(),
-        ));
+        c.enable_engine(se_engine());
         c.shadow_evolution_enable(0);
 
         let before = cap(&c);
@@ -3373,9 +3418,7 @@ mod shadow_evolution_tests {
             risk: RiskConfig::default(),
             ..Default::default()
         });
-        c.enable_engine(crate::engine::Engine::new(
-            crate::engine::EngineConfig::default(),
-        ));
+        c.enable_engine(se_engine());
         let before = cap(&c);
         assert!(!c.shadow_evolution().is_enabled());
         assert_eq!(c.shadow_evolution().variant_count(), 0);
@@ -3831,6 +3874,13 @@ mod strategy_dispatch_tests {
             ..Default::default()
         });
         c.enable_engine(Engine::new(engine_cfg()));
+        // PR-B: the kernel registers no strategies, so the dispatch tests that
+        // drive the reference dip buyer host the test adapter explicitly.
+        crate::strategies::test_support::host(
+            c.engine.as_mut().unwrap(),
+            engine_cfg().trend,
+            engine_cfg().spread_arb,
+        );
         c
     }
 
@@ -3961,7 +4011,11 @@ mod strategy_dispatch_tests {
             ..Default::default()
         });
         let cfg = c.config().engine_config();
-        let mut eng = Engine::new(cfg);
+        let mut eng = Engine::new(cfg.clone());
+        // Host the reference adapters too (the kernel ships no strategies, PR-B),
+        // so gate-exemption accounting has the same declarations to list the
+        // production session would have.
+        crate::strategies::test_support::host(&mut eng, cfg.trend, cfg.spread_arb);
         for (name, assets) in dips {
             eng.register_user_strategy(
                 Box::new(TargetDip {
@@ -3975,10 +4029,8 @@ mod strategy_dispatch_tests {
             .unwrap();
             assert!(eng.set_strategy_enabled(name, true));
         }
-        assert!(
-            eng.set_strategy_enabled("spread_arb", false),
-            "isolate the test strategies"
-        );
+        // No isolation step is needed any more: the kernel ships zero strategies
+        // (PR-B), so a freshly built engine hosts exactly the dips registered above.
         c.enable_engine(eng);
         c
     }
@@ -4069,9 +4121,29 @@ mod strategy_dispatch_tests {
     /// over enabling when both name the same strategy.
     #[test]
     fn startup_selection_matches_a_runtime_toggle() {
+        // `install_engine` loads only what `strategy_dir` holds (PR-B: the
+        // kernel registers nothing itself), so the test hosts the three
+        // adapters right after it — the same registration the loader performs
+        // for a real library — and keeps the test's spread_arb on.
         let install = |cfg: CoreConfig| {
             let mut c = Core::new(cfg.clone());
             cfg.install_engine(&mut c);
+            let cfg2 = cfg.engine_config();
+            crate::strategies::test_support::host(
+                c.engine.as_mut().expect("engine installed"),
+                cfg2.trend,
+                cfg2.spread_arb,
+            );
+            // The startup selection is applied after the strategy dir loads, in
+            // the same order production uses — so a name asked for at startup
+            // lands on the just-registered adapter (an unknown name stays a
+            // silent no-op, exactly what install_engine does).
+            for name in &cfg.enabled_strategies {
+                c.set_strategy_enabled(name, true);
+            }
+            for name in &cfg.disabled_strategies {
+                c.set_strategy_enabled(name, false);
+            }
             c
         };
         let base = CoreConfig {
@@ -4152,6 +4224,14 @@ mod strategy_dispatch_tests {
         };
         let mut c = Core::new(base.clone());
         base.install_engine(&mut c);
+        // The kernel registers nothing itself (PR-B); host the adapters so the
+        // evolution manager has strategies to build units for.
+        let ecfg = base.engine_config();
+        crate::strategies::test_support::host(
+            c.engine.as_mut().expect("engine installed"),
+            ecfg.trend,
+            ecfg.spread_arb,
+        );
         c.shadow_evolution_enable(0);
         // Registered from the start even though it starts disabled.
         assert_eq!(
@@ -4537,8 +4617,10 @@ mod strategy_dispatch_tests {
         assert_eq!(blocked["byStrategy"]["a"]["timing"], 1, "{blocked}");
         assert_eq!(blocked["byStrategy"]["b"]["timing"], 1, "{blocked}");
         assert_eq!(blocked["byStrategy"]["a"]["momentum"], 0, "{blocked}");
-        // Only mean_reversion declares an exemption (momentum) among the hosted
-        // builtins; the test strategies declare nothing beyond it.
+        // Only the hosted test adapter declares an exemption (momentum) here;
+        // the test dip strategies declare nothing beyond what their builder gave
+        // them. (PR-B: there is no builtin set — every hosted strategy declares
+        // its own gates through the same seam.)
         assert_eq!(
             blocked["declaredExemptions"],
             serde_json::json!([{ "strategy": "mean_reversion", "gates": ["momentum"] }])
@@ -4785,7 +4867,10 @@ mod strategy_dispatch_tests {
         let stats = c.strategy_stats();
         let s = strategy_entry(&stats, "spread_arb");
         assert_eq!(s["enabled"], true);
-        assert_eq!(s["source"], "builtin");
+        // The kernel has no `builtin` class any more (PR-B): the test adapter is
+        // hosted by the test itself, and a production session would report the
+        // library's `dylib:<path>` provenance here instead.
+        assert_eq!(s["source"], "test");
         assert_eq!(s["ordersPlaced"], 1);
         assert_eq!(s["openPositions"], 1);
         assert_eq!(dec_of(&s["openNotionalUsd"]), dec!(4.30));

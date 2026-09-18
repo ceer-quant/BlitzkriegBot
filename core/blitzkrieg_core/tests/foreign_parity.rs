@@ -63,7 +63,7 @@ fn parity_lib() -> PathBuf {
 
 fn engine_cfg() -> EngineConfig {
     EngineConfig {
-        mean_reversion: blitzkrieg_core::strategies::MeanReversionConfig::default(),
+        mean_reversion: blitzkrieg_core::signal::MeanReversionConfig::default(),
         scanner: ScannerConfig {
             assets: vec!["BTC".into()],
             round_duration_sec: 900,
@@ -448,7 +448,6 @@ fn in_tree_and_dylib_parity_match_signal_for_signal() {
 
     // ── Side A: in-tree EngineStrategy over parity_logic ─────────────────────
     let mut in_tree = Engine::new(engine_cfg());
-    assert!(in_tree.set_strategy_enabled("spread_arb", false));
     in_tree
         .register_user_strategy(Box::new(InTreeParity::new()), "in-tree:parity_logic".into())
         .unwrap();
@@ -461,7 +460,6 @@ fn in_tree_and_dylib_parity_match_signal_for_signal() {
         load_foreign(&path).unwrap_or_else(|e| panic!("load {} failed: {e:?}", path.display()));
     assert_eq!(loaded.name, "parity");
     let mut foreign = Engine::new(engine_cfg());
-    assert!(foreign.set_strategy_enabled("spread_arb", false));
     foreign
         .register_user_strategy(
             Box::new(loaded.strategy),

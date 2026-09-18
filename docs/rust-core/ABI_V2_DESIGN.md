@@ -6,18 +6,15 @@
 
 ## 1. 设计裁决（一句话）
 
-**只存在一套全功能策略契约。** 树内策略与外挂 dylib 实现的是同一个
-`EngineStrategy`（10 个能力点）；外挂只是**加载方式不同**（dlopen 一个 C ABI
-v2 外壳），不是一套残废接口。
+**内核侧 0 策略，只存在一套全功能策略契约。** 内核纯粹是执行器与风控中枢，
+不实现任何交易策略；所有策略均通过 C ABI v2 动态加载（dlopen 一个 C ABI v2 cdylib 外壳）
+或在测试中以通用适配器接入。
 
-因此本批**删除** v1 的二等公民路径：
-
-- 删除 `strategy_engine::Strategy`（on_tick 单点、best-only 的缩减契约）；
-- 删除 `strategies/user_adapter.rs`（`on_book` 空实现、`Sell` 被丢弃的适配器）；
-- 删除 core 内的「独立 strategy_engine 诊断注册表」回退路径；策略一律注册进
-  真正驱动交易的 `engine::Engine`，启动即 DISABLED。
-
-能力差因此在结构上不可能复发：树内外都走同一个 trait、同一套宿主门禁。
+因此本批彻底实现**内核 0 策略**与**硬切换解耦**：
+- 内核中完全移除树内硬编码交易策略实现（`spread_arb` / `trend_follow` / `mean_reversion` 全移至独立动态策略工作区 `user_layer/strategies`）；
+- 核心依赖共享逻辑库 `strategy_logic` 提供算法数学与测试参考实现；
+- 生产环境所有策略全部为外挂 C ABI v2 cdylib，分发时不捆绑策略；
+- 移除 `[strategy] active = [...]` 等硬编码配置，启动时策略列表为空，由宿主动态加载并启用。
 
 ## 2. 能力对照（v1 → v2）
 

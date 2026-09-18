@@ -300,17 +300,18 @@ mod tests {
     use crate::shadow_evolution::knobs::KnobSpec;
     use crate::signal::{SpreadArbConfig, TrendConfig};
     use crate::strategies::shadow_twin::tick_ctx;
-    use crate::strategies::spread_arb::{SpreadArbBuiltin, spread_arb_knobs};
+    use crate::strategies::test_support::TestSpreadArbFactory;
     use rust_decimal::prelude::FromPrimitive;
 
     fn specs() -> Vec<KnobSpec> {
-        spread_arb_knobs(&SpreadArbConfig::default())
+        strategy_logic::spread_arb_knobs(&SpreadArbConfig::default())
     }
 
     fn factory() -> Box<dyn ShadowFactory> {
-        SpreadArbBuiltin::new(TrendConfig::default(), SpreadArbConfig::default())
-            .shadow_factory()
-            .unwrap()
+        Box::new(TestSpreadArbFactory {
+            base: SpreadArbConfig::default(),
+            trend: TrendConfig::default(),
+        })
     }
 
     fn book(bid: f64, ask: f64) -> OrderbookSnapshot {

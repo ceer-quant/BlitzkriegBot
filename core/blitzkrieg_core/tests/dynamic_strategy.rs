@@ -29,13 +29,14 @@ fn dylib_dir() -> PathBuf {
         .join("release")
 }
 
-fn lib_path() -> Option<PathBuf> {
+fn lib_path_named(base_name: &str) -> Option<PathBuf> {
     let base = dylib_dir();
-    for name in [
-        "libdog_strategy.dylib",
-        "libdog_strategy.so",
-        "dog_strategy.dll",
-    ] {
+    for ext in ["dylib", "so", "dll"] {
+        let name = if ext == "dll" {
+            format!("{base_name}.dll")
+        } else {
+            format!("lib{base_name}.{ext}")
+        };
         let p = base.join(name);
         if p.exists() {
             return Some(p);
@@ -44,13 +45,18 @@ fn lib_path() -> Option<PathBuf> {
     None
 }
 
-/// Skip (or, under BK_REQUIRE_DYLIB=1, hard-fail) when the cdylib was not built.
-fn require_lib() -> PathBuf {
-    match lib_path() {
+#[allow(dead_code)]
+fn lib_path() -> Option<PathBuf> {
+    lib_path_named("dog_strategy")
+}
+
+fn require_named_lib(base_name: &str) -> PathBuf {
+    match lib_path_named(base_name) {
         Some(p) => p,
         None => {
             let msg =
-                "build the v2 dylib first: (cd user_layer/strategies && cargo build --release)";
+                "build the v2 dylibs first: (cd user_layer/strategies && cargo build --release)"
+                    .to_string();
             if std::env::var_os("BK_REQUIRE_DYLIB").is_some() {
                 panic!("{msg} (looked in {})", dylib_dir().display());
             }
@@ -60,9 +66,14 @@ fn require_lib() -> PathBuf {
     }
 }
 
+/// Skip (or, under BK_REQUIRE_DYLIB=1, hard-fail) when the cdylib was not built.
+fn require_lib() -> PathBuf {
+    require_named_lib("dog_strategy")
+}
+
 fn engine_cfg() -> EngineConfig {
     EngineConfig {
-        mean_reversion: blitzkrieg_core::strategies::MeanReversionConfig::default(),
+        mean_reversion: blitzkrieg_core::signal::MeanReversionConfig::default(),
         scanner: ScannerConfig {
             assets: vec!["BTC".into()],
             round_duration_sec: 900,
@@ -133,8 +144,6 @@ fn loads_and_drives_the_v2_dog_strategy_dylib() {
     assert_eq!(loaded.version, "0.2.0");
 
     let mut engine = Engine::new(engine_cfg());
-    // The builtin must not fire in this replay: no 12-sample UP trend.
-    assert!(engine.set_strategy_enabled("spread_arb", false));
     engine
         .register_user_strategy(
             Box::new(loaded.strategy),
@@ -217,7 +226,6 @@ fn hot_params_reach_the_dylib_on_the_next_evaluation() {
     let path = require_lib();
     let loaded = load_foreign(&path).unwrap_or_else(|e| panic!("load failed: {e:?}"));
     let mut engine = Engine::new(engine_cfg());
-    assert!(engine.set_strategy_enabled("spread_arb", false));
     engine
         .register_user_strategy(Box::new(loaded.strategy), "dylib:hot".into())
         .unwrap();
@@ -287,7 +295,6 @@ fn the_dylib_sees_the_same_round_clock_as_an_in_tree_strategy() {
     let path = require_lib();
     let loaded = load_foreign(&path).unwrap_or_else(|e| panic!("load failed: {e:?}"));
     let mut engine = Engine::new(engine_cfg());
-    assert!(engine.set_strategy_enabled("spread_arb", false));
     engine
         .register_user_strategy(
             Box::new(loaded.strategy),
@@ -372,7 +379,6 @@ fn the_dylib_sees_only_priceable_books_in_its_eval_ctx() {
     let path = require_lib();
     let loaded = load_foreign(&path).unwrap_or_else(|e| panic!("load failed: {e:?}"));
     let mut engine = Engine::new(engine_cfg());
-    assert!(engine.set_strategy_enabled("spread_arb", false));
     engine
         .register_user_strategy(
             Box::new(loaded.strategy),
@@ -417,7 +423,6 @@ fn the_dylib_reports_its_config_view_over_the_optional_symbol() {
     let path = require_lib();
     let loaded = load_foreign(&path).unwrap_or_else(|e| panic!("load failed: {e:?}"));
     let mut engine = Engine::new(engine_cfg());
-    assert!(engine.set_strategy_enabled("spread_arb", false));
     engine
         .register_user_strategy(
             Box::new(loaded.strategy),
@@ -434,12 +439,54 @@ fn the_dylib_reports_its_config_view_over_the_optional_symbol() {
     );
 }
 
+/// A minimal in-tree strategy that declares NOTHING (no gate exemption), so the
+/// gate test has a "fully gated" counterpart to the dylib's `timing` declaration.
+/// The kernel ships no strategy itself (PR-B), so the counterpart is defined
+/// here, in the test. It fires on the token it is handed (DOWN side of the
+/// ETH market, which the dip-buying dylib ignores), so its candidate is a
+/// pure probe of the shared timing gate.
+struct PlainDip {
+    token: &'static str,
+    asset: &'static str,
+}
+
+impl blitzkrieg_core::strategies::EngineStrategy for PlainDip {
+    fn name(&self) -> &str {
+        "plain_dip"
+    }
+    fn on_book(
+        &mut self,
+        _token_id: &str,
+        _snap: &blitzkrieg_core::model::OrderbookSnapshot,
+        _now_ms: i64,
+    ) {
+    }
+    fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
+    fn find_candidates(
+        &mut self,
+        ctx: &blitzkrieg_core::strategies::StrategyCtx<'_>,
+    ) -> Vec<blitzkrieg_core::signal::TradeSignal> {
+        let Some(book) = ctx.fresh_book(self.token) else {
+            return Vec::new();
+        };
+        vec![blitzkrieg_core::signal::TradeSignal {
+            strategy: self.name().to_string(),
+            asset: self.asset.to_string(),
+            direction: blitzkrieg_core::model::SignalDirection::Down,
+            token_id: self.token.to_string(),
+            condition_id: "cond".into(),
+            price: book.best_bid,
+            reason: "plain probe".into(),
+        }]
+    }
+}
+
 #[test]
 fn the_dylib_gate_declaration_reaches_the_engine_and_is_honoured() {
     // E2-b (#27): the OPTIONAL `bk_strategy_gate_exemptions` symbol crosses the
     // C ABI. The dog strategy declares `timing` — so a round whose timing window
-    // is shut still lets ITS entry through, while the builtin, declaring
-    // nothing, stays blocked. External is only a loading difference.
+    // is shut still lets ITS entry through, while a strategy that declares
+    // nothing stays blocked. External is only a loading difference.
     let path = require_lib();
     let loaded = load_foreign(&path).unwrap_or_else(|e| panic!("load failed: {e:?}"));
     assert_eq!(
@@ -461,7 +508,19 @@ fn the_dylib_gate_declaration_reaches_the_engine_and_is_honoured() {
             format!("dylib:{}", path.display()),
         )
         .unwrap();
+    // The non-declaring counterpart trades the OTHER token (eth-down, which
+    // the dip buyer ignores at mid 0.55).
+    engine
+        .register_user_strategy(
+            Box::new(PlainDip {
+                token: "eth-down",
+                asset: "ETH",
+            }),
+            "test".into(),
+        )
+        .unwrap();
     assert!(engine.set_strategy_enabled("dog_strategy", true));
+    assert!(engine.set_strategy_enabled("plain_dip", true));
     assert_eq!(
         engine.strategy_gate_exemptions("dog_strategy"),
         Some(blitzkrieg_core::strategies::GateExemptions {
@@ -470,70 +529,74 @@ fn the_dylib_gate_declaration_reaches_the_engine_and_is_honoured() {
         })
     );
     assert_eq!(
-        engine.strategy_gate_exemptions("spread_arb"),
+        engine.strategy_gate_exemptions("plain_dip"),
         Some(blitzkrieg_core::strategies::GateExemptions::none()),
-        "the builtin declares nothing"
+        "a strategy that declares nothing is fully gated"
     );
 
     let now = 1_800_000i64;
-    // Two markets: BTC for the builtin, ETH for the dylib. The builtin needs a
-    // confirmed UP trend to have a candidate at all; give it one so its BTC
-    // candidate exists and is then blocked by the very gate the dylib declared
-    // unnecessary. (One entry per token is per-market, and the builtin's blocked
-    // BTC candidate consumes only the BTC slot.)
+    // Two markets: BTC for the plain strategy, ETH for the dylib.
     engine.on_data(DataEvent::RoundMarkets {
         markets: vec![market(1_800_000), eth_market(1_800_000)],
         now_ms: now,
     });
-    // Trend-confirm only the BUILTIN's token: `spread_arb` then owns the BTC
-    // slot with a candidate the timing gate blocks, while the dylib's entry must
-    // come through on its own market.
-    for i in 0..12 {
-        engine.on_data(DataEvent::Book {
-            token_id: "up".into(),
-            bids: vec![(dec!(0.55), dec!(100))],
-            asks: vec![(dec!(0.57), dec!(100))],
-            now_ms: now + i * 1000,
-        });
-    }
-    // A dip deep enough for the dylib's 0.43 ceiling with >= 50 bid depth.
+    // A dip deep enough for both ceilings with >= 50 bid depth.
     for token in ["up", "eth-up"] {
         engine.on_data(DataEvent::Book {
             token_id: token.into(),
             bids: vec![(dec!(0.41), dec!(60)), (dec!(0.40), dec!(60))],
             asks: vec![(dec!(0.43), dec!(60)), (dec!(0.44), dec!(60))],
-            now_ms: now + 12_000,
+            now_ms: now + 11_000,
         });
     }
+    // eth-down at mid 0.55 (above the dylib's 0.43 buy ceiling, so dog ignores
+    // it; plain_dip emits a candidate that the shut timing gate blocks).
+    engine.on_data(DataEvent::Book {
+        token_id: "eth-down".into(),
+        bids: vec![(dec!(0.54), dec!(60))],
+        asks: vec![(dec!(0.56), dec!(60))],
+        now_ms: now + 11_000,
+    });
 
     let orders = engine.evaluate(now + 12_000);
+    // The declaring dylib enters on BOTH markets (it is asset-agnostic and
+    // exempt from the shut timing window); the non-declaring strategy gets no
+    // order through anywhere.
     assert_eq!(
         orders.len(),
-        1,
+        2,
         "only the declaring strategy may enter: {orders:?}"
     );
-    assert_eq!(orders[0].strategy, "dog_strategy");
+    assert!(
+        orders.iter().all(|o| o.strategy == "dog_strategy"),
+        "only the declaring strategy may enter: {orders:?}"
+    );
     assert_eq!(
-        orders[0].asset, "ETH",
-        "the builtin's own market stayed gated"
+        orders[0].asset, "BTC",
+        "the dylib's BTC entry went through the shut window under its declaration"
+    );
+    assert_eq!(
+        orders[1].asset, "ETH",
+        "the dylib's ETH entry went through the shut window under its declaration"
     );
     assert!(
         engine
             .last_blocked()
             .iter()
-            .any(|b| b.strategy == "spread_arb"),
-        "builtin stays gated"
+            .any(|b| b.strategy == "plain_dip"),
+        "the non-declaring strategy stays gated"
     );
 
     let ex = engine.last_exemptions();
-    assert_eq!(ex.len(), 1, "{ex:?}");
-    assert_eq!(ex[0].strategy, "dog_strategy");
-    assert_eq!(ex[0].gate, "timing");
+    assert_eq!(ex.len(), 2, "{ex:?}");
     assert!(
-        ex[0]
-            .audit_line()
-            .contains("本单因策略 dog_strategy 豁免门禁 timing")
+        ex.iter()
+            .all(|e| e.strategy == "dog_strategy" && e.gate == "timing")
     );
+    assert!(ex.iter().any(|e| {
+        e.audit_line()
+            .contains("本单因策略 dog_strategy 豁免门禁 timing")
+    }));
 }
 
 #[test]
@@ -601,5 +664,298 @@ fn a_library_without_the_version_symbol_fails_negotiation() {
     assert!(
         msg.contains("abi_version") || msg.contains("v1"),
         "unexpected: {msg}"
+    );
+}
+
+// ── Bit-equivalence parity: 3 shipped cdylibs vs Test Adapters ──────────────
+
+#[test]
+fn parity_spread_arb_cdylib_matches_adapter() {
+    let path = require_named_lib("spread_arb_strategy");
+    let loaded = load_foreign(&path).expect("load spread_arb_strategy");
+    assert_eq!(loaded.name, "spread_arb");
+    assert_eq!(
+        loaded.gate_exemptions,
+        blitzkrieg_core::strategies::GateExemptions::none()
+    );
+
+    let trend = TrendConfig {
+        confirm_sec: 5,
+        ratio: dec!(0.5),
+        min_price: dec!(0.5),
+        broken_price: dec!(0.35),
+        window_floor_ms: 0,
+    };
+    let spread = SpreadArbConfig {
+        trend_min_price: dec!(0.50),
+        trend_confirm_sec: 5,
+        trend_broken_price: dec!(0.35),
+        trend_entry_price: dec!(0.45),
+        trend_entry_factor: dec!(0.9),
+        trend_max_entry_price: dec!(0.45),
+    };
+
+    let mut cfg = engine_cfg();
+    cfg.trend = trend.clone();
+    cfg.spread_arb = spread.clone();
+
+    let mut engine_adapter = Engine::new(cfg.clone());
+    engine_adapter
+        .register_user_strategy(
+            Box::new(
+                blitzkrieg_core::strategies::test_support::TestSpreadArb::new(
+                    trend.clone(),
+                    spread.clone(),
+                ),
+            ),
+            "test:adapter".into(),
+        )
+        .unwrap();
+    assert!(engine_adapter.set_strategy_enabled("spread_arb", true));
+
+    let mut engine_dylib = Engine::new(cfg);
+    engine_dylib
+        .register_user_strategy(Box::new(loaded.strategy), "dylib:spread_arb".into())
+        .unwrap();
+    assert!(engine_dylib.set_strategy_enabled("spread_arb", true));
+
+    let now = 1_800_000i64;
+    for eng in [&mut engine_adapter, &mut engine_dylib] {
+        eng.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
+        // Confirm UP trend: 12 ticks of mid >= 0.50
+        for i in 0..12 {
+            eng.on_data(DataEvent::Book {
+                token_id: "up".into(),
+                bids: vec![(dec!(0.55), dec!(100))],
+                asks: vec![(dec!(0.57), dec!(100))],
+                now_ms: now + i * 1_000,
+            });
+        }
+    }
+
+    assert_eq!(
+        engine_adapter.confirmed_tokens(),
+        engine_dylib.confirmed_tokens()
+    );
+    assert_eq!(
+        engine_adapter.confirmed_diagnostics(now + 12_000),
+        engine_dylib.confirmed_diagnostics(now + 12_000)
+    );
+
+    // Dip to 0.42: triggers entry for both
+    for eng in [&mut engine_adapter, &mut engine_dylib] {
+        eng.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.41), dec!(100))],
+            asks: vec![(dec!(0.43), dec!(100))],
+            now_ms: now + 13_000,
+        });
+    }
+    let orders_a = engine_adapter.evaluate(now + 13_000);
+    let orders_d = engine_dylib.evaluate(now + 13_000);
+    assert_eq!(orders_a.len(), 1);
+    assert_eq!(orders_d.len(), 1);
+    assert_eq!(orders_a[0].token_id, orders_d[0].token_id);
+    assert_eq!(orders_a[0].price, orders_d[0].price);
+    assert_eq!(orders_a[0].direction, orders_d[0].direction);
+    assert_eq!(orders_a[0].strategy, orders_d[0].strategy);
+
+    // Break: mid drops to 0.30 (< 0.35 broken_price)
+    for eng in [&mut engine_adapter, &mut engine_dylib] {
+        let breaks = eng.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.28), dec!(100))],
+            asks: vec![(dec!(0.30), dec!(100))],
+            now_ms: now + 14_000,
+        });
+        assert_eq!(breaks.len(), 1);
+        assert_eq!(breaks[0].0, "up");
+    }
+
+    // Config view parity
+    assert_eq!(
+        engine_adapter.strategy_config_views(),
+        engine_dylib.strategy_config_views()
+    );
+}
+
+#[test]
+fn parity_trend_follow_cdylib_matches_adapter() {
+    let path = require_named_lib("trend_follow_strategy");
+    let loaded = load_foreign(&path).expect("load trend_follow_strategy");
+    assert_eq!(loaded.name, "trend_follow");
+    assert_eq!(
+        loaded.gate_exemptions,
+        blitzkrieg_core::strategies::GateExemptions::none()
+    );
+
+    let cfg = strategy_logic::TrendFollowConfig::default();
+
+    let mut engine_adapter = Engine::new(engine_cfg());
+    engine_adapter
+        .register_user_strategy(
+            Box::new(blitzkrieg_core::strategies::test_support::TestTrendFollow::new(cfg.clone())),
+            "test:adapter".into(),
+        )
+        .unwrap();
+    assert!(engine_adapter.set_strategy_enabled("trend_follow", true));
+
+    let mut engine_dylib = Engine::new(engine_cfg());
+    engine_dylib
+        .register_user_strategy(Box::new(loaded.strategy), "dylib:trend_follow".into())
+        .unwrap();
+    assert!(engine_dylib.set_strategy_enabled("trend_follow", true));
+
+    let now = 1_800_000i64;
+    for eng in [&mut engine_adapter, &mut engine_dylib] {
+        eng.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
+        // Initial price: 0.56 (spread 0.01: 0.56 / 0.57, spread_pct ~1.77% <= 3.0%)
+        eng.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.56), dec!(100))],
+            asks: vec![(dec!(0.57), dec!(100))],
+            now_ms: now,
+        });
+        // Move up to 0.60 / 0.61 over 10s: mid goes from 0.565 to 0.605 (> min_move_pct 3.0%, >= min_confirm_price 0.55)
+        eng.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.60), dec!(100))],
+            asks: vec![(dec!(0.61), dec!(100))],
+            now_ms: now + 10_000,
+        });
+    }
+
+    assert_eq!(
+        engine_adapter.confirmed_tokens(),
+        engine_dylib.confirmed_tokens()
+    );
+    assert_eq!(
+        engine_adapter.confirmed_diagnostics(now + 10_000),
+        engine_dylib.confirmed_diagnostics(now + 10_000)
+    );
+
+    let orders_a = engine_adapter.evaluate(now + 10_000);
+    let orders_d = engine_dylib.evaluate(now + 10_000);
+    assert_eq!(orders_a.len(), 1);
+    assert_eq!(orders_d.len(), 1);
+    assert_eq!(orders_a[0].token_id, orders_d[0].token_id);
+    assert_eq!(orders_a[0].price, orders_d[0].price);
+    assert_eq!(orders_a[0].direction, orders_d[0].direction);
+    assert_eq!(orders_a[0].strategy, orders_d[0].strategy);
+
+    // Break: mid drops to 0.40 (< 0.45 break_price)
+    for eng in [&mut engine_adapter, &mut engine_dylib] {
+        let breaks = eng.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.39), dec!(100))],
+            asks: vec![(dec!(0.41), dec!(100))],
+            now_ms: now + 14_000,
+        });
+        assert_eq!(breaks.len(), 1);
+        assert_eq!(breaks[0].0, "up");
+    }
+
+    // Config view parity
+    assert_eq!(
+        engine_adapter.strategy_config_views(),
+        engine_dylib.strategy_config_views()
+    );
+}
+
+#[test]
+fn parity_mean_reversion_cdylib_matches_adapter() {
+    let path = require_named_lib("mean_reversion_strategy");
+    let loaded = load_foreign(&path).expect("load mean_reversion_strategy");
+    assert_eq!(loaded.name, "mean_reversion");
+    assert_eq!(
+        loaded.gate_exemptions,
+        blitzkrieg_core::strategies::GateExemptions {
+            timing: false,
+            momentum: true,
+        }
+    );
+
+    let cfg = strategy_logic::MeanReversionConfig::default();
+
+    let mut engine_adapter = Engine::new(engine_cfg());
+    engine_adapter
+        .register_user_strategy(
+            Box::new(
+                blitzkrieg_core::strategies::test_support::TestMeanReversion::new(cfg.clone()),
+            ),
+            "test:adapter".into(),
+        )
+        .unwrap();
+    assert!(engine_adapter.set_strategy_enabled("mean_reversion", true));
+
+    let mut engine_dylib = Engine::new(engine_cfg());
+    engine_dylib
+        .register_user_strategy(Box::new(loaded.strategy), "dylib:mean_reversion".into())
+        .unwrap();
+    assert!(engine_dylib.set_strategy_enabled("mean_reversion", true));
+
+    let now = 1_800_000i64;
+    for eng in [&mut engine_adapter, &mut engine_dylib] {
+        eng.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
+        // High point: 0.50 (spread 0.02: 0.49 / 0.51, spread_pct 4% <= 8%)
+        eng.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.49), dec!(100))],
+            asks: vec![(dec!(0.51), dec!(100))],
+            now_ms: now,
+        });
+        // Crash to 0.30: drop is (0.30 - 0.50)/0.50 = -40% <= -10%, and mid 0.30 <= max_price 0.35
+        // spread 0.02: 0.29 / 0.31, spread_pct 6.67% <= 8%
+        eng.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.29), dec!(100))],
+            asks: vec![(dec!(0.31), dec!(100))],
+            now_ms: now + 5_000,
+        });
+    }
+
+    assert_eq!(
+        engine_adapter.confirmed_tokens(),
+        engine_dylib.confirmed_tokens()
+    );
+    assert_eq!(
+        engine_adapter.confirmed_diagnostics(now + 5_000),
+        engine_dylib.confirmed_diagnostics(now + 5_000)
+    );
+
+    let orders_a = engine_adapter.evaluate(now + 5_000);
+    let orders_d = engine_dylib.evaluate(now + 5_000);
+    assert_eq!(orders_a.len(), 1);
+    assert_eq!(orders_d.len(), 1);
+    assert_eq!(orders_a[0].token_id, orders_d[0].token_id);
+    assert_eq!(orders_a[0].price, orders_d[0].price);
+    assert_eq!(orders_a[0].direction, orders_d[0].direction);
+    assert_eq!(orders_a[0].strategy, orders_d[0].strategy);
+
+    // Premise break: price recovers back above cheap zone (> max_price 0.35)
+    for eng in [&mut engine_adapter, &mut engine_dylib] {
+        let breaks = eng.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.39), dec!(100))],
+            asks: vec![(dec!(0.41), dec!(100))],
+            now_ms: now + 10_000,
+        });
+        assert_eq!(breaks.len(), 1);
+        assert_eq!(breaks[0].0, "up");
+    }
+
+    // Config view parity
+    assert_eq!(
+        engine_adapter.strategy_config_views(),
+        engine_dylib.strategy_config_views()
     );
 }

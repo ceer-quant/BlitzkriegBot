@@ -168,6 +168,24 @@ fn default_socket() -> String {
     socket_path_for(SOCKET_PREFIX)
 }
 
+fn default_strategy_dir() -> Option<String> {
+    let local = std::path::Path::new("user_layer/strategies");
+    if local.is_dir() {
+        return Some("user_layer/strategies".to_string());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cur = exe.parent();
+        while let Some(dir) = cur {
+            let candidate = dir.join("user_layer/strategies");
+            if candidate.is_dir() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+            cur = dir.parent();
+        }
+    }
+    Some("user_layer/strategies".to_string())
+}
+
 /// Where the config file comes from, settled BEFORE argument parsing (the file
 /// has to be loaded to resolve the arguments against it).
 enum ConfigChoice {
@@ -631,18 +649,6 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         }
     };
 
-    // A file that names strategies to enable is the declarative equivalent of
-    // repeating --enable-strategy; CLI flags add to it (they do not replace it,
-    // because "turn this one on too" is the only sensible reading of both).
-    if let Some(active) = &file.active_strategies {
-        for name in active {
-            if !enable_strategy.iter().any(|n| n == name) {
-                enable_strategy.push(name.clone());
-            }
-        }
-        report.push(format!("strategy.active={active:?} (toml)"));
-    }
-
     Args {
         socket,
         mode,
@@ -699,7 +705,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         } else {
             strategy_dir
                 .or_else(|| env.text("BK_STRATEGY_DIR"))
-                .or_else(|| Some("user_layer/strategies".to_string()))
+                .or_else(default_strategy_dir)
         },
         event_archive,
         no_event_archive,
@@ -992,6 +998,13 @@ async fn main() -> anyhow::Result<()> {
         args.event_archive_min_free_mb,
     );
 
+    let mut enabled_strategies = vec!["spread_arb".to_string()];
+    for s in args.enable_strategy {
+        if !enabled_strategies.contains(&s) {
+            enabled_strategies.push(s);
+        }
+    }
+
     let config = CoreConfig {
         mode,
         default_maker_timeout_ms: 5000,
@@ -1001,7 +1014,7 @@ async fn main() -> anyhow::Result<()> {
         },
         dry_seed_balance: args.seed_balance,
         strategy_limits: parse_strategy_limits(&args.strategy_limits),
-        enabled_strategies: args.enable_strategy,
+        enabled_strategies,
         disabled_strategies: args.disable_strategy,
         strategy_dir: args.strategy_dir,
         markets: args.markets,
@@ -1657,22 +1670,43 @@ mod tests {
     }
 
     #[test]
-    fn active_strategies_in_the_file_are_enabled_and_flags_add_to_them() {
+    fn a_strategy_section_is_reported_as_dead_config_not_silently_ignored() {
+        // PR-B removed `[strategy] active`: strategies are never named in kernel
+        // config any more (they are auto-loaded from strategy_dir and enabled on
+        // load). An old file must not silently look like it did something.
         let file = file_with(
             r#"
             [strategy]
             active = ["spread_arb", "trend_follow"]
             "#,
         );
+        assert!(
+            file.unknown_keys.iter().any(|k| k == "strategy"),
+            "the dead section must be reported: {:?}",
+            file.unknown_keys
+        );
+        let a = parse_args(&file, &[], &EnvVars::default());
+        assert!(
+            a.enable_strategy.is_empty(),
+            "the kernel must not invent an enable list from the file: {:?}",
+            a.enable_strategy
+        );
+    }
+
+    #[test]
+    fn strategy_selection_comes_from_cli_flags_only() {
         let a = parse_args(
-            &file,
-            &["--enable-strategy".into(), "dog_strategy".into()],
+            &blitzkrieg_core::config::FileConfig::default(),
+            &[
+                "--enable-strategy".into(),
+                "dog_strategy".into(),
+                "--disable-strategy".into(),
+                "spread_arb".into(),
+            ],
             &EnvVars::default(),
         );
-        assert_eq!(
-            a.enable_strategy,
-            vec!["dog_strategy", "spread_arb", "trend_follow"]
-        );
+        assert_eq!(a.enable_strategy, vec!["dog_strategy"]);
+        assert_eq!(a.disable_strategy, vec!["spread_arb"]);
     }
 
     #[test]

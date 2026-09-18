@@ -9,28 +9,27 @@
 //! exemption from ([`GateExemptions`], E2-b / #27); the exemption is explicit,
 //! logged, counted and can never reach the safety boundary.
 //!
-//! There is exactly ONE full-featured contract: [`EngineStrategy`]. The three
-//! in-tree builtins — [`spread_arb::SpreadArbBuiltin`] (the dip buyer),
-//! [`trend_follow::TrendFollowBuiltin`] (the chase leg, E4-a / #30) and
-//! [`mean_reversion::MeanReversionBuiltin`] (the fade leg, E4-b / #31) — and an
-//! external dylib loaded through C ABI v2 ([`foreign::ForeignStrategy`]) all
-//! implement it. Being external is
+//! There is exactly ONE full-featured contract: [`EngineStrategy`]. The kernel
+//! ships ZERO implementations of it (PR-B hard switch): every strategy — the
+//! shipped example cdylibs included — arrives through the C ABI v2 dlopen path
+//! ([`foreign::ForeignStrategy`]). Being external is
 //! only a loading difference — an external strategy sees every book callback,
 //! the full depth ladder, round/market context, and can express entries, exits,
 //! breaks, confirmation, diagnostics, config and hot parameters. The old
 //! best-only reduced trait/adapter (which dropped `Sell` and no-op'd `on_book`)
-//! was removed in E7 (#38) so the capability gap cannot reopen.
+//! was removed in E7 (#38) so the capability gap cannot reopen, and the in-tree
+//! builtin wrappers were deleted in PR-B so there is no privileged code path: an
+//! external strategy really is first-class, and nothing about strategy identity
+//! is hardcoded in the kernel.
 
 #[cfg(feature = "strategy-loading")]
 pub mod foreign;
-pub mod mean_reversion;
 pub mod shadow_twin;
-pub mod spread_arb;
-pub mod trend_follow;
+// Test-only hosted adapters (enabled for tests or when dev-support is needed).
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
-pub use mean_reversion::MeanReversionConfig;
 pub use shadow_twin::{EngineStrategyShadow, ShadowFactory, ShadowTickCtx, ShadowTickResult};
-pub use trend_follow::TrendFollowConfig;
 
 use crate::model::{CryptoMarket, OrderbookSnapshot};
 use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
@@ -260,16 +259,11 @@ pub trait EngineStrategy: Send + Sync {
         None
     }
 
-    /// The spread_arb parameters currently in force (observability for the
-    /// builtin; other strategies return None).
-    fn spread_arb_view(&self) -> Option<SpreadArbConfig> {
-        None
-    }
-
     /// The config currently in force, as a JSON string (observability). Any
-    /// strategy — in-tree or external — may report one; a foreign library does
-    /// so through its OPTIONAL `bk_strategy_config_view` symbol, an in-tree
-    /// strategy by overriding this. `None` = "nothing declared", never an error.
+    /// strategy may report one; a foreign library does so through its OPTIONAL
+    /// `bk_strategy_config_view` symbol. `None` = "nothing declared", never an
+    /// error. This is the ONLY config-observability surface — the kernel keeps
+    /// no knowledge of any strategy's parameter names.
     fn config_view_json(&self) -> Option<String> {
         None
     }

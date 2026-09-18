@@ -122,9 +122,6 @@ pub struct FileConfig {
     pub round_sec: Option<i64>,
     pub min_round_age_sec: Option<i64>,
     pub min_time_left_sec: Option<i64>,
-    // ── [strategy] ──────────────────────────────────────────────────────────
-    /// Strategies to switch ON at startup (`active = [...]`).
-    pub active_strategies: Option<Vec<String>>,
     // ── [shadow_evolution] ──────────────────────────────────────────────────
     pub shadow: ShadowFile,
     pub warnings: Vec<String>,
@@ -201,7 +198,7 @@ impl FileConfig {
             };
             // A renamed or invented section is the classic silent typo, so it is
             // reported once (its keys are not enumerated individually).
-            if !matches!(section.as_str(), "engine" | "strategy" | "shadow_evolution") {
+            if !matches!(section.as_str(), "engine" | "shadow_evolution") {
                 self.unknown_keys.push(section.clone());
                 continue;
             }
@@ -217,9 +214,6 @@ impl FileConfig {
                     }
                     ("engine", "min_time_left_sec") => {
                         got(&mut self.min_time_left_sec, int(v), &full, w)
-                    }
-                    ("strategy", "active") => {
-                        got(&mut self.active_strategies, str_array(v), &full, w)
                     }
                     ("shadow_evolution", "enabled") => {
                         got(&mut self.shadow.enabled, bool_(v), &full, w)
@@ -626,9 +620,6 @@ mod tests {
             min_round_age_sec = 12
             min_time_left_sec = 34
 
-            [strategy]
-            active = ["spread_arb", "trend_follow"]
-
             [shadow_evolution]
             enabled = true
             evaluation_window_minutes = 7
@@ -651,10 +642,6 @@ mod tests {
         assert_eq!(cfg.round_sec, Some(300));
         assert_eq!(cfg.min_round_age_sec, Some(12));
         assert_eq!(cfg.min_time_left_sec, Some(34));
-        assert_eq!(
-            cfg.active_strategies.as_deref(),
-            Some(&["spread_arb".to_string(), "trend_follow".to_string()][..])
-        );
         let s = &cfg.shadow;
         assert_eq!(s.enabled, Some(true));
         assert_eq!(s.evaluation_window_minutes, Some(7));
@@ -695,12 +682,6 @@ mod tests {
         assert_eq!(cfg.round_sec, Some(900));
         assert_eq!(cfg.min_round_age_sec, Some(30));
         assert_eq!(cfg.min_time_left_sec, Some(180));
-        // dog_strategy is user-layer (auto-loaded from strategy_dir at startup);
-        // naming it here additionally enables it when the dylib is present.
-        assert_eq!(
-            cfg.active_strategies.as_deref(),
-            Some(&["spread_arb".to_string(), "dog_strategy".to_string()][..])
-        );
         // Loaded from the sibling file, not invented.
         let s = &cfg.shadow;
         assert_eq!(s.enabled, Some(false));

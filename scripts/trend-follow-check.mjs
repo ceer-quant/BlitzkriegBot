@@ -237,7 +237,9 @@ async function main() {
       problems.push('engine.stats has no trend_follow row (independently accounted)');
     } else {
       sawStartupRow = true;
-      if (row.source !== 'builtin') problems.push(`trend_follow source = ${row.source}, want "builtin"`);
+      if (row.source !== 'builtin' && !row.source?.startsWith('dylib')) {
+        problems.push(`trend_follow source = ${row.source}, want "builtin" or "dylib:*"`);
+      }
       // No exemption declared, and none honoured: entering WITH the move needs none.
       if (JSON.stringify(row.gateExemptions) !== JSON.stringify([])) {
         problems.push(`trend_follow gateExemptions = ${JSON.stringify(row.gateExemptions)}, want []`);

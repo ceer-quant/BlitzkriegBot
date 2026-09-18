@@ -721,15 +721,8 @@ impl PositionManager {
     }
 }
 
-// Convenience: SignalDirection string used for cooldown keys and logs.
-impl SignalDirection {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SignalDirection::Up => "up",
-            SignalDirection::Down => "down",
-        }
-    }
-}
+// SignalDirection::as_str lives on the shared type (strategy_logic::model) —
+// cooldown keys and logs read it from there.
 
 // Keep Side referenced (used by callers wiring exits to orders).
 #[allow(dead_code)]

@@ -1,0 +1,12 @@
+[package]
+name = "strategy-logic"
+version = "0.2.0"
+edition = "2024"
+description = "Deterministic strategy primitives shared by the kernel and every external strategy: price buffers, trackers, entry evaluators, knob declarations"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+rust_decimal = "1"
+rust_decimal_macros = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

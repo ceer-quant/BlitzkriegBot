@@ -194,6 +194,11 @@ pub trait SafeStrategy: Send + 'static {
     /// Produce this cycle's intents. REQUIRED.
     fn evaluate(&mut self, ctx: &RoundContext) -> Intents;
 
+    /// Drained breaks (tokens whose premise broke, e.g. trend broken on tick). Default: none.
+    fn take_breaks(&mut self) -> Vec<Break> {
+        Vec::new()
+    }
+
     /// Tokens currently considered entry-eligible. Default: none.
     fn confirmed_tokens(&self) -> Vec<String> {
         Vec::new()
@@ -223,6 +228,15 @@ pub trait SafeStrategy: Send + 'static {
     /// logs every honoured exemption.
     fn gate_exemptions(&self) -> &'static [&'static str] {
         &[]
+    }
+
+    /// The strategy's config currently in force, as a JSON object (OPTIONAL
+    /// `bk_strategy_config_view` symbol; `None` = "nothing declared", the
+    /// default). The kernel surfaces it beside the in-tree strategies'
+    /// config views so an operator sees what EVERY strategy is actually
+    /// running.
+    fn config_view(&self) -> Option<serde_json::Value> {
+        None
     }
 }
 
@@ -521,10 +535,22 @@ macro_rules! export_strategy {
                 )
             }
             unsafe extern "C" fn take_breaks(handle: BkHandle) -> *mut c_char {
-                // Break intents flow through the evaluate envelope; this
-                // optional kernel poll is not used by the shell.
-                let _ = handle;
-                json_out("[]".into())
+                if handle.is_null() {
+                    return json_out("[]".into());
+                }
+                let s = unsafe { &mut *(handle as *mut Shell) };
+                let breaks: Vec<_> = s
+                    .inner
+                    .take_breaks()
+                    .into_iter()
+                    .map(|b| {
+                        serde_json::json!({
+                            "token": b.token,
+                            "broken_price": b.broken_price,
+                        })
+                    })
+                    .collect();
+                json_out(serde_json::to_string(&breaks).unwrap_or_else(|_| "[]".into()))
             }
             unsafe extern "C" fn diagnostics(handle: BkHandle) -> *mut c_char {
                 if handle.is_null() {
@@ -549,11 +575,17 @@ macro_rules! export_strategy {
                 s.bind_eval_ctx(ctx);
             }
             /// OPTIONAL symbol `bk_strategy_config_view`: reports the config
-            /// currently in force. The safe layer has no config model of its
-            /// own (the strategy owns `on_params`), so without cooperation the
-            /// honest answer is "nothing declared" (null = omitted upstream).
-            extern "C" fn config_view(_handle: BkHandle) -> *mut c_char {
-                core::ptr::null_mut()
+            /// currently in force via the strategy's `config_view` hook.
+            /// `None`/null = "nothing declared" (omitted upstream).
+            extern "C" fn config_view(handle: BkHandle) -> *mut c_char {
+                if handle.is_null() {
+                    return core::ptr::null_mut();
+                }
+                let s = unsafe { &*(handle as *const Shell) };
+                match s.inner.config_view() {
+                    Some(v) => json_out(v.to_string()),
+                    None => core::ptr::null_mut(),
+                }
             }
             unsafe extern "C" fn on_config(handle: BkHandle, json: *const c_char) -> i32 {
                 let Some(j) = (unsafe { cstr(json) }) else { return 1 };
