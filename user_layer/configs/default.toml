@@ -30,4 +30,7 @@ min_time_left_sec = 180
 # Strategies switched ON at startup, by name (equivalent to repeating
 # --enable-strategy). Builtins default to `spread_arb` on and `trend_follow`
 # off; an unknown name is warned about, never fatal.
-active = ["spread_arb"]
+# `dog_strategy` is user-layer and auto-loads from the strategy dir
+# (user_layer/strategies, scanned recursively for *.dylib/*.so at startup), so
+# naming it here only matters when the built dylib is present.
+active = ["spread_arb", "dog_strategy"]

@@ -110,6 +110,13 @@ struct Args {
     /// Strategies to switch OFF at startup (repeatable). Applied after
     /// `--enable-strategy`, so an explicit "off" wins.
     disable_strategy: Vec<String>,
+    /// Directory scanned at startup for user-layer strategy libraries
+    /// (`*.dylib`/`*.so`): every library found is loaded and enabled, so
+    /// dropping a file in the folder is the whole install. `none`/empty = off.
+    /// Default `user_layer/strategies` under the repo; overridden by
+    /// `BK_STRATEGY_DIR` (a file-config key would be dead weight: this belongs
+    /// to "where is the checkout", not to strategy parameters).
+    strategy_dir: Option<String>,
     /// Mirror every market-data event into this JSONL archive (P-1.3).
     /// None = use the always-on default for an engine session (see `--no-event-archive`).
     event_archive: Option<String>,
@@ -270,6 +277,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut strategy_limits: Vec<String> = Vec::new();
     let mut enable_strategy: Vec<String> = Vec::new();
     let mut disable_strategy: Vec<String> = Vec::new();
+    let mut strategy_dir: Option<String> = None;
+    let mut no_strategy_dir = false;
     let mut engine = false;
     // File-settable settings are collected as Option so the precedence chain can
     // resolve them at the end; a concrete default would erase the "was this flag
@@ -381,6 +390,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     disable_strategy.push(v);
                 }
             }
+            "--strategy-dir" => strategy_dir = it.next().filter(|v| !v.trim().is_empty()),
+            "--no-strategy-dir" => no_strategy_dir = true,
             "--assets" => assets_arg = it.next(),
             "--round-sec" => round_sec = it.next().and_then(|v| v.parse().ok()).or(round_sec),
             "--min-round-age" => {
@@ -683,6 +694,13 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         strategy_limits,
         enable_strategy,
         disable_strategy,
+        strategy_dir: if no_strategy_dir {
+            None
+        } else {
+            strategy_dir
+                .or_else(|| env.text("BK_STRATEGY_DIR"))
+                .or_else(|| Some("user_layer/strategies".to_string()))
+        },
         event_archive,
         no_event_archive,
         event_archive_max_mb,
@@ -985,6 +1003,7 @@ async fn main() -> anyhow::Result<()> {
         strategy_limits: parse_strategy_limits(&args.strategy_limits),
         enabled_strategies: args.enable_strategy,
         disabled_strategies: args.disable_strategy,
+        strategy_dir: args.strategy_dir,
         markets: args.markets,
         auto_exits_enabled: args.auto_exits,
         engine_enabled: args.engine,

@@ -695,9 +695,11 @@ mod tests {
         assert_eq!(cfg.round_sec, Some(900));
         assert_eq!(cfg.min_round_age_sec, Some(30));
         assert_eq!(cfg.min_time_left_sec, Some(180));
+        // dog_strategy is user-layer (auto-loaded from strategy_dir at startup);
+        // naming it here additionally enables it when the dylib is present.
         assert_eq!(
             cfg.active_strategies.as_deref(),
-            Some(&["spread_arb".to_string()][..])
+            Some(&["spread_arb".to_string(), "dog_strategy".to_string()][..])
         );
         // Loaded from the sibling file, not invented.
         let s = &cfg.shadow;
