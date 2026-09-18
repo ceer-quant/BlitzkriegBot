@@ -35,9 +35,12 @@ while [ $# -gt 0 ]; do
 done
 [ "$INTERVAL" -ge 30 ] 2>/dev/null || INTERVAL=30
 
-LOG=data/soak/health.log
-ALERT=data/soak/HEALTH_ALERT
-mkdir -p data/soak
+# Same seam the health check reads, so a fixture (or an operator with a
+# non-default deployment) can move the whole trio together.
+SOAK_DIR="${BK_SOAK_DIR:-data/soak}"
+LOG="$SOAK_DIR/health.log"
+ALERT="$SOAK_DIR/HEALTH_ALERT"
+mkdir -p "$SOAK_DIR"
 
 # Bound a log so it can never grow into the hundreds of MB (a huge log is a token
 # hazard: any full read re-sent on every later turn). KI-30: this used to shell
