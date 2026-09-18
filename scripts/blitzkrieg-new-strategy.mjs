@@ -45,25 +45,27 @@ const lib = `//! Blitzkrieg strategy "${name}" — generated E9-a template (C AB
 //!      the declaration that lets shadow evolution vary your own logic.
 
 use blitzkrieg_strategy_api::{
-    export_strategy, BookUpdate, Entry, Intents, Knob, MarketInfo, ParamBag, RoundContext,
+    dec, export_strategy, BookUpdate, Entry, Intents, Knob, MarketInfo, ParamBag, RoundContext,
     RoundInfo, SafeStrategy,
 };
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
 /// Entry intents use LIMIT prices; the kernel validates against the live
 /// book, sizes, reserves and submits — a strategy never sees a signer or
 /// socket, and everything still passes the kernel's risk gates.
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
-    buy_below: f64,   // enter when mid <= this
-    min_depth: f64,   // bid depth needed to trust the dip
-    max_buys: usize,  // per-evaluate cap, keeps the template boring
+    buy_below: Decimal,   // enter when mid <= this
+    min_depth: Decimal,   // bid depth needed to trust the dip
+    max_buys: usize,      // per-evaluate cap, keeps the template boring
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            buy_below: 0.40,
-            min_depth: 50.0,
+            buy_below: dec!(0.40),
+            min_depth: dec!(50),
             max_buys: 1,
         }
     }
@@ -122,9 +124,10 @@ impl SafeStrategy for ${camel}Strategy {
                     return intents;
                 }
                 let Some(book) = self.books.get(token) else { continue };
-                let (Some(mid), Some(bid_depth)) =
-                    (book.mid, book.bid_depth)
-                else {
+                // Numbers arrive as the ABI's decimal STRINGS; \`dec()\` parses
+                // them EXACTLY (rust_decimal) — never convert through f64, or
+                // a resting price can drift by a tick.
+                let (Some(mid), Some(bid_depth)) = (dec(&book.mid), dec(&book.bid_depth)) else {
                     continue;
                 };
                 // THE TEMPLATE RULE — replace with your own logic. Everything
@@ -133,7 +136,10 @@ impl SafeStrategy for ${camel}Strategy {
                 if mid <= self.cfg.buy_below && bid_depth >= self.cfg.min_depth {
                     intents.entries.push(Entry {
                         token: token.clone(),
-                        price: book.best_ask.unwrap_or(mid),
+                        price: book
+                            .best_ask
+                            .clone()
+                            .unwrap_or_else(|| mid.to_string()),
                         reason: "${name}_dip".into(),
                     });
                     buys += 1;
@@ -151,15 +157,15 @@ impl SafeStrategy for ${camel}Strategy {
     /// proposals both arrive here, same path.
     fn on_params(&mut self, p: &ParamBag) -> bool {
         let mut ok = true;
-        if let Some(v) = p.get_f64("buy_below") {
-            if (0.05..=0.90).contains(&v) {
+        if let Some(v) = p.get_dec("buy_below") {
+            if (dec!(0.05)..=dec!(0.90)).contains(&v) {
                 self.cfg.buy_below = v;
             } else {
                 ok = false;
             }
         }
-        if let Some(v) = p.get_f64("min_depth") {
-            if (0.0..=1.0e9).contains(&v) {
+        if let Some(v) = p.get_dec("min_depth") {
+            if (Decimal::ZERO..=Decimal::from(1_000_000_000)).contains(&v) {
                 self.cfg.min_depth = v;
             } else {
                 ok = false;
@@ -174,13 +180,13 @@ impl SafeStrategy for ${camel}Strategy {
         vec![
             Knob {
                 name: "buy_below".into(),
-                value: format!("{}", self.cfg.buy_below),
+                value: self.cfg.buy_below.to_string(),
                 min: "0.05".into(),
                 max: "0.90".into(),
             },
             Knob {
                 name: "min_depth".into(),
-                value: format!("{}", self.cfg.min_depth),
+                value: self.cfg.min_depth.to_string(),
                 min: "0".into(),
                 max: "1000000".into(),
             },
@@ -193,7 +199,7 @@ impl SafeStrategy for ${camel}Strategy {
     fn confirmed_tokens(&self) -> Vec<String> {
         self.books
             .iter()
-            .filter(|(_, b)| b.obi.map(|o| o > 0.0).unwrap_or(false)
+            .filter(|(_, b)| dec(&b.obi).is_some_and(|o| o > Decimal::ZERO)
                 && b.bid_levels >= 2 && b.ask_levels >= 2)
             .map(|(t, _)| t.clone())
             .collect()
@@ -203,7 +209,7 @@ impl SafeStrategy for ${camel}Strategy {
     fn diagnostics(&self) -> Vec<serde_json::Value> {
         vec![
             serde_json::json!({
-                "config": { "buy_below": self.cfg.buy_below, "min_depth": self.cfg.min_depth },
+                "config": { "buy_below": self.cfg.buy_below.to_string(), "min_depth": self.cfg.min_depth.to_string() },
                 "tokens_seen": self.books.len(),
             })
         ]
@@ -223,20 +229,20 @@ mod tests {
     #[test]
     fn buys_the_dip() {
         let mut s = ${camel}Strategy {
-            cfg: Config { buy_below: 0.40, min_depth: 50.0, max_buys: 1 },
+            cfg: Config { buy_below: dec!(0.40), min_depth: dec!(50), max_buys: 1 },
             books: Default::default(),
         };
         s.on_book(&BookUpdate {
             symbol: "UP".into(),
             asset: "BTC".into(),
-            best_bid: Some(0.38),
-            best_ask: Some(0.39),
-            mid: Some(0.39),
-            bid_depth: Some(100.0),
-            ask_depth: Some(90.0),
-            obi: Some(0.1),
-            spread: Some(0.01),
-            spread_pct: Some(2.5),
+            best_bid: Some("0.38".into()),
+            best_ask: Some("0.39".into()),
+            mid: Some("0.39".into()),
+            bid_depth: Some("100".into()),
+            ask_depth: Some("90".into()),
+            obi: Some("0.1".into()),
+            spread: Some("0.01".into()),
+            spread_pct: Some("2.5".into()),
             timestamp_ms: 1,
             bid_levels: 3,
             ask_levels: 3,
@@ -248,9 +254,9 @@ mod tests {
         let out = s.evaluate(&ctx);
         assert_eq!(out.entries.len(), 1, "{out:?}");
         assert_eq!(out.entries[0].token, "UP");
-        assert_eq!(out.entries[0].price, 0.39);
+        assert_eq!(out.entries[0].price, "0.39");
         // Shallow depth -> no trade.
-        s.books.get_mut("UP").unwrap().bid_depth = Some(10.0);
+        s.books.get_mut("UP").unwrap().bid_depth = Some("10".into());
         assert!(s.evaluate(&ctx).entries.is_empty());
     }
 }
@@ -273,6 +279,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 blitzkrieg-strategy-api = { path = "../../strategy_api" }
+rust_decimal = "1"
+rust_decimal_macros = "1"
 serde_json = "1"
 
 [workspace]
