@@ -207,7 +207,7 @@ evolutionsApplied, evolutionsRejected, secondsSinceLastEvolution }`。
 | 孪生重放的是同一份出场策略 | `ExitConfig` 取自 `config.positions.exit` | 单测 `the_exit_policy_replayed_is_the_configured_one` |
 | 孪生崩溃不影响主策略 | `catch_unwind` + `crashed` 标记（`mod.rs` 逐孪生 tick）| **机制在位但无专门回归测试**（旧版那条测试随 `hot_swap.rs` 一并删除）——见 §10 已知缺口 |
 
-本地门禁：`npm run core:strategy-evolve`（真 release 二进制 + 真 dog cdylib + 私有 socket +
+本地门禁：`node scripts/strategy-evolution-check.mjs`（真 release 二进制 + 真 dog cdylib + 私有 socket +
 临时工作目录，断言声明可见、逐策略隔离、域/步长拒绝、分文件审计、回滚、关闭态不变）。
 
 ## 10. 已知缺口（登记不隐藏）

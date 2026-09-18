@@ -136,18 +136,22 @@ strategies[] = {
 
 ## 3. 调用示例
 
-### TypeScript（Node IPC client）
-```ts
-import { BlitzkriegCoreClient } from './core/blitzkrieg-core-client.js';
-const c = new BlitzkriegCoreClient({ mode: 'dry' });
-await c.start();
-await c.placeOrder({ tokenId: '123', conditionId: '0x..', side: 'buy', mode: 'taker',
-  price: 0.42, size: 10, internalKey: 'k1', strategy: 'spread_arb', asset: 'BTC',
-  direction: 'up', roundSlot: 1 });
-console.log(await c.stats());
+### Node（门禁脚本内的裸 Node 客户端）
+```js
+import { CoreClient } from '../../scripts/lib/core-client.mjs';
+const c = new CoreClient({ bin: './target/release/blitzkrieg-core' });
+await c.boot();
+await c.request('order.place', { tokenId: '123', conditionId: '0x..', side: 'buy',
+  mode: 'taker', price: 0.42, size: 10, internalKey: 'k1', strategy: 'spread_arb',
+  asset: 'BTC', direction: 'up', roundSlot: 1 });
+console.log(await c.request('engine.stats'));
 console.log(await c.request('strategy.list'));
 await c.stop();
 ```
+
+> 旧 TypeScript 客户端 `src/core/blitzkrieg-core-client.ts` 已随 Node 源码层删除
+> （`62b16c88`）。现在唯一的 Node 侧实现是 `scripts/lib/core-client.mjs`
+> ——零依赖、仅供门禁驱动临时内核使用，不是产品组成部分。
 
 ### Rust（内核内 / 测试）
 ```rust

@@ -14,7 +14,7 @@ body:
         - "shadow-evolution"
         - "market extension"
         - "ui-kit / panel"
-        - "node shell / gateway"
+        - "gateway / webapp"
         - "ci / tooling / docs"
     validations:
       required: true

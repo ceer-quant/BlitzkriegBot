@@ -7,7 +7,9 @@
 - `ui/webapp/src-tauri/` — Tauri v2 壳 crate(`blitzkrieg-webapp`):
   - `src/main.rs`: 两条 invoke 命令 —— `desktop_snapshot`(经 headless `AppViewModel` 读快照)、`desktop_command`(E5 命令面 dispatcher,lifecycle 关闭)。
   - `tauri.conf.json`: 窗口/打包配置,`frontendDist` 指向静态面板页。
-- `ui/webapp/webui/index.html`: 面板前端(纯静态)。
+- `ui/webapp/webui/` — 面板前端（Vue 3 + Vite SPA）。注意 `tauri.conf.json` 的
+  `frontendDist` 目前指向 `../webui` 而非构建产物 `dist/`，打包链路尚未验收（见
+  `docs/FEATURES.md` §9.1 E8）。
 - **零 GUI 依赖契约**: `blitzkrieg-ui-kit` 不含任何 Tauri;`blitzkrieg-ui-kit` 的门禁 `scripts/webapp-check.mjs` 有此断言。
 
 ## 开发
@@ -56,7 +58,7 @@ target/release/ui_kit_web --socket <core.sock> --addr 127.0.0.1:51888 --manage
 面板/命令 verb 与 TUI/web 完全一致（E5 命令面）；无交易下单 API。
 
 ## 测试
-- `npm run ui:webapp` — 门禁（`scripts/webapp-check.mjs`）：Vue 构建产物存在**且与
+- `node scripts/webapp-check.mjs` — 门禁：Vue 构建产物存在**且与
   `/panel` 实际下发内容一致**、快照渲染非空、鉴权双向 ACCEPT/REJECT、CORS、
   CSRF（跨站 GET 打不到 lifecycle verb）、`/api/ping` 不泄露状态、登出吊销、
   未配置凭据时网关拒绝启动、且进程不生成任何密码、无 GUI 污染。

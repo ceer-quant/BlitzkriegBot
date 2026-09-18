@@ -142,7 +142,7 @@ max_positions = 2
 一条命令生成完整可构建的策略 crate（含业务骨架、cargo test 冒烟、README）：
 
 ```bash
-npm run strategy:new my_dip_fade
+node scripts/blitzkrieg-new-strategy.mjs my_dip_fade
 # → user_layer/strategies/my_dip_fade/{src/lib.rs, Cargo.toml, README.md}
 ```
 
@@ -160,13 +160,13 @@ npm run strategy:new my_dip_fade
 改完**一条命令全链验证**（真实内核在环，全部走沙盒 dry core）：
 
 ```bash
-npm run strategy:devcheck my_dip_fade
+node scripts/strategy-devcheck.mjs my_dip_fade
 # 生成→编译→strategy.load→断言注册即禁用→enable→engine.book 假行情→
 # 断言 engine.stats 上 ordersPlaced≥1→断言可演化 knobs 注册→零 panic
 ```
 
 这个门禁同时实测「从空目录到内核里跑起来 < 5 分钟」的承诺（本机 ~9s）。
-手动进内核后再看效果：`npm run tui` 打开面板，Plugins 页能看到你的策略行
+手动进内核后再看效果：`bash scripts/tui-demo.sh` 打开面板，Plugins 页能看到你的策略行
 （禁用态），`: strategy.load <dylib路径>` 加载、↑/↓ 选中回车启用。
 
 模板的三条硬规则也是所有外挂策略的通用规则：**新策略永远默认禁用**（升级
@@ -347,7 +347,7 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy mean_rever
   结构上就读不到、写不进。
 
 审计按策略分文件：`data/evolution/<strategy>.jsonl`；`apply`/`rollback` 走 IPC
-且**都要求 `strategy` 参数**。门禁：`npm run core:strategy-evolve`。
+且**都要求 `strategy` 参数**。门禁：`node scripts/strategy-evolution-check.mjs`。
 
 ## 4. 生命周期与开关
 

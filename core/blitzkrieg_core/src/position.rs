@@ -1,8 +1,8 @@
 //! Position manager — open positions, PnL, exit checks, cooldowns, capacity.
 //!
-//! Rust port of `src/strategies/crypto-hft/positions.ts`. Decision logic is
-//! delegated to the pure `exit_policy` module so offline replay and both
-//! runtimes share one implementation; this module owns the stateful parts:
+//! Rust port of `src/strategies/crypto-hft/positions.ts` (deleted with the Node
+//! source layer, `62b16c88`). Decision logic is delegated to the pure
+//! `exit_policy` module; this module owns the stateful parts:
 //! the open/closed books, daily PnL, and per-asset/direction cooldowns.
 
 use crate::exit_policy::{

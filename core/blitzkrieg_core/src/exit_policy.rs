@@ -1,8 +1,10 @@
 //! Exit policy — pure, replayable exit decisions (Rust port of
-//! `src/strategies/crypto-hft/exit-policy.ts`).
+//! `src/strategies/crypto-hft/exit-policy.ts`, deleted with the Node source
+//! layer in `62b16c88`).
 //!
-//! Single source of truth for exit logic in the core, mirrored byte-for-byte by
-//! the TS policy so offline replay and both runtimes agree. Triggers and the
+//! Single source of truth for exit logic. The TS original this was ported from
+//! no longer exists, so the "mirror" is gone and this is the only
+//! implementation — offline replay goes through the core. Triggers and the
 //! high-water mark are valued on the EXECUTABLE bid (what a long can be sold
 //! for), never the mid: a token can show mid 0.82 while the bid is 0.59.
 //!

@@ -1,9 +1,10 @@
 //! Decimal (money/price/size) wire helpers.
 //!
-//! Prices/sizes cross the plugin boundary as JSON numbers (Node) or strings
-//! (Polymarket/Rust). Monetary arithmetic uses `rust_decimal::Decimal`; the
-//! boundary decodes both forms via these serde functions. Mirrors the core's
-//! `src/decimal.rs` so DTOs serialize identically on both sides.
+//! Prices/sizes cross the plugin boundary as JSON numbers or strings.
+//! Monetary arithmetic uses `rust_decimal::Decimal`; the
+//! boundary decodes both forms via these serde functions. Mirrors
+//! `blitzkrieg_core`'s own `decimal.rs` so DTOs serialize identically on both
+//! sides.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serializer};

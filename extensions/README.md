@@ -22,5 +22,4 @@ on `blitzkrieg-core`** (that would form a dependency cycle).
 > `RiskConfig`, dependencies resolve at build time). Assembly is still by Cargo
 > feature; selection is still by CLI. There is no hot reload.
 
-See `docs/blitzkrieg/EXTENSION_GUIDE.md` for the full contract (it lives under
-`docs/blitzkrieg/`, not `docs/`).
+See `docs/rust-core/EXTENSION_GUIDE.md` for the full contract.

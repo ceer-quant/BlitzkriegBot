@@ -1,8 +1,10 @@
 /**
- * Core UDS path resolution for scripts (mirror of `src/core/core-socket.ts`).
+ * Core UDS path resolution for scripts — the Node-side implementation of the
+ * socket-naming contract (its TS predecessor `src/core/core-socket.ts` went with
+ * the Node source layer, `62b16c88`).
  *
- * The socket name is a four-language contract: the Rust core, `blitzkrieg_ui_kit`,
- * `blitzkrieg_ui_panel`, and the Node shell must all derive the same path. A
+ * The socket name is a cross-language contract: the Rust core, `blitzkrieg_ui_kit`
+ * and `blitzkrieg_ui_panel` must all derive the same path as these scripts. A
  * mismatch means a "helpful" client spawns a second core beside a healthy one.
  */
 import net from 'net';
@@ -24,16 +26,16 @@ export function defaultSocketPath(env = process.env) {
 }
 
 /**
- * The socket a client should use. Mirrors `resolveSocketPath` in
- * `src/core/core-socket.ts` — the two must stay in step, because the scripts
- * that import it (soak-monitor, account-drift-check, feed-live-probe,
- * price-compare) all attach to a core that the Node shell may have spawned.
+ * The socket a client should use. (Equivalent to `resolveSocketPath` in the
+ * now-deleted `src/core/core-socket.ts`.) The scripts that import it
+ * (soak-monitor, account-drift-check, feed-live-probe, price-compare) all attach
+ * to a core that the panel supervisor spawned.
  *
  * The probe is deliberately not a fallback: it only decides whether the
  * canonical path is LIVE, so a monitor can report "no core answering" instead of
  * silently inventing a second path and watching an empty socket. The path
- * returned is always canonical, which is the whole point of the four-language
- * naming contract documented above.
+ * returned is always canonical, which is the whole point of the naming contract
+ * documented above.
  */
 export async function resolveSocketPath(env = process.env) {
   const canonical = defaultSocketPath(env);

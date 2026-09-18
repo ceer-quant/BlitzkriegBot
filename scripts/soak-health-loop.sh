@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # soak-health-loop.sh — run the zero-token health check on a timer, forever.
 #
-# This is the FREE replacement for the LLM-driven periodic health check: it costs
+# This is the FREE replacement for an LLM-driven periodic health check: it costs
 # no API tokens, runs 24/7, and needs no OS scheduler (launchd/cron cannot access
-# this repo's external volume — see docs/COST_OPTIMIZATION.md). Run it detached:
+# this repo's external volume). Run it detached:
 #
 #   nohup scripts/soak-health-loop.sh --interval-sec 1800 \
 #       >> data/soak/health-loop.out 2>&1 &

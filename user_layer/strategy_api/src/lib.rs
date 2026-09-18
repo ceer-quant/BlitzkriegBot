@@ -50,7 +50,7 @@ use std::ffi::CString;
 pub const BK_ABI_VERSION: u32 = 2;
 
 /// Minimum ABI a v2 kernel can drive (v2 is a clean break; no v1 shim — see
-/// docs/DECISIONS_PENDING.md D-15).
+/// dev-docs/DECISIONS_PENDING.md D-15).
 pub const BK_MIN_ABI_VERSION: u32 = 2;
 
 /// Symbol name for the factory function.

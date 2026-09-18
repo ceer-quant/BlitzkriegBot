@@ -2,12 +2,14 @@
 /**
  * E12 parent-monitor gate — "父进程退出后不留僵尸子进程".
  *
- * The shell (`src/index.ts`) used to exit via `process.exit(0)` after closing
- * only the HTTP server. The Rust core is a separate process, so it survived the
- * shell's death holding the socket and its resting orders.
+ * The deleted Node shell (`src/index.ts`, gone with the source layer in
+ * `62b16c88`) used to exit via `process.exit(0)` after closing only the HTTP
+ * server. The Rust core is a separate process, so it survived the shell's death
+ * holding the socket and its resting orders.
  *
  * This gate exercises the REAL exit path rather than a simulation: it starts the
- * core through the same runner the shell uses, inside a child process, then
+ * core through the bare-Node `CoreClient` (`scripts/lib/core-client.mjs`, the
+ * runner that replaced the shell's), inside a child process, then
  * SIGTERMs the child and inspects the process table. It asserts on the observable
  * outcome (no surviving core) rather than on any internal call, so it stays
  * honest if the shutdown internals are refactored.
@@ -92,8 +94,9 @@ async function main() {
     maxOrderNotional: 6,
     tickMs: 50,
     autoRestart: true,
-    // The old shell's exit guard: a core this process spawned must not
-    // outlive it. SIGKILL because handlers cannot await.
+    // The CoreClient's exit guard (carried over from the old shell): a core
+    // this process spawned must not outlive it. SIGKILL because handlers
+    // cannot await.
     ...(process.env.BZK_CORE_ISOLATION
       ? {
           cwd: process.env.BZK_CORE_ISOLATION,

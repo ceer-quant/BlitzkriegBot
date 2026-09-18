@@ -46,7 +46,7 @@ BlitzkriegBot 是一个面向 **Polymarket 加密二元（UP/DOWN）预测市场
 | **连亏熔断（LossBreaker）** | ✅ 已验证（离线） | **按策略分片**（KI-10 / D-18 A，`c06c4ba9`）：任一腿连亏不再冻结全核；日亏上限与 kill switch 仍为全局 |
 | **配置文件（TOML）** | ✅ 已验证（离线） | `config.rs` 13 个单测（KI-11 / §59）：`user_layer/configs/*.toml` 真实生效，优先级 CLI > `BK_*` env > TOML > 代码默认，每个值带来源溯源 |
 | **kill switch**（`risk.kill` / `risk.resume`） | ✅ 已实现（测试覆盖） | IPC 命令面；TUI 有醒目红条提醒 |
-| **出场策略（ExitConfig）**：止损 12% / 移动止盈 arm 15% 回吐下限 8% / 时间兜底 | ✅ 已实盘验证（dry） | `docs/reports/HFT_OPTIMIZATION_REPORT.md`；冻结留出段 walk-forward |
+| **出场策略（ExitConfig）**：止损 12% / 移动止盈 arm 15% 回吐下限 8% / 时间兜底 | ✅ 已实盘验证（dry） | `dev-docs/reports/HFT_OPTIMIZATION_REPORT.md`（内部）；冻结留出段 walk-forward |
 | **行情接入（`--feed-ws`）**：Polymarket 走 REST 轮询，Binance 现货走 WS | ✅ 已实盘验证（dry） | 实况行情跳动；`MIGRATION_LOG §57`（REST 轮询替代 WS 通道，流量降 95%） |
 | **轮盘发现（Gamma）** | ✅ 已实盘验证（dry） | 面板轮次头部实时刷新 |
 | **崩溃恢复：订单**（孤儿订单防护） | ✅ 已验证（离线） | `scripts/order-recovery-check.mjs`；启动孤儿清算（`startup sweep cancelled N orphan order(s)`） |
@@ -105,12 +105,12 @@ market.list
 
 | 功能 | 状态 | 证据 |
 | --- | --- | --- |
-| 按策略资金分配（sizing / `max_positions` / 配额） | ✅ 已验证（离线） | `npm run core:strategy-limit`（E2-a / #26） |
-| 按策略门禁豁免（`GateExemptions` + 可选符号） | ✅ 已验证（离线） | `npm run core:strategy-gate`（E2-b / #27） |
-| 影子进化按策略化（参数/孪生/审计/回滚四维隔离） | ✅ 已验证（离线） | `npm run core:strategy-evolve`（E2-c / #28） |
+| 按策略资金分配（sizing / `max_positions` / 配额） | ✅ 已验证（离线） | `node scripts/strategy-limit-check.mjs`（E2-a / #26） |
+| 按策略门禁豁免（`GateExemptions` + 可选符号） | ✅ 已验证（离线） | `node scripts/strategy-gate-check.mjs`（E2-b / #27） |
+| 影子进化按策略化（参数/孪生/审计/回滚四维隔离） | ✅ 已验证（离线） | `node scripts/strategy-evolution-check.mjs`（E2-c / #28） |
 | 策略生命周期：`strategy.load` / `unload` / `reload`（木马式原子交换，带审计） | ✅ 已验证（离线） | E9-b / #64；PR #64 |
-| 一键脚手架（零 unsafe 的 `SafeStrategy`） | ✅ 已验证（离线） | `npm run strategy:new`；E9-a / #60 |
-| 开发者全链路门禁（模板→构建→load→enable→信号→旋钮→孪生） | ✅ 已验证（离线） | `npm run strategy:devcheck`；PR #63 |
+| 一键脚手架（零 unsafe 的 `SafeStrategy`） | ✅ 已验证（离线） | `node scripts/blitzkrieg-new-strategy.mjs`；E9-a / #60 |
+| 开发者全链路门禁（模板→构建→load→enable→信号→旋钮→孪生） | ✅ 已验证（离线） | `node scripts/strategy-devcheck.mjs`；PR #63 |
 | 拒绝原因分布（策略侧自助排障） | ✅ 已验证（离线） | `engine.stats.strategies[].rejectionCauses`；E9-c / #65 |
 | 启动期策略选择（`--enable-strategy` / `--disable-strategy`） | ✅ 已验证（离线） | E4-a；与 IPC `strategy.enable` 同一入口 |
 
@@ -201,7 +201,7 @@ ECharts + Pinia + VueUse。设计基调：Apple 风格、金橙主调、liquid g
 | 失败命令带原因 + 建议动作；`risk.kill` 全屏红条 | ✅ 已验证 |
 | 内核生命周期管理（`--manage`） | ✅ 已验证 |
 
-一键启动：`npm run tui` / `npm run tui:manage`；门禁 `npm run tui:check`。
+一键启动：`bash scripts/tui-demo.sh` / `bash scripts/tui-demo.sh --manage`；门禁 `node scripts/tui-demo-check.mjs`。
 
 ### 5.3 UI Kit（`ui/ui_kit`）
 
@@ -214,16 +214,18 @@ ECharts + Pinia + VueUse。设计基调：Apple 风格、金橙主调、liquid g
 | **无任何下单 API** | ✅ 设计约束 |
 | 事件推送（`EventBus` 取代纯轮询，保留轮询兜底） | ✅ E5-b / #33 |
 
-### 5.4 Node 外壳（`src/`）
+### 5.4 Node 层（**已删除**，见 §4 / D-24）
 
-**定位已变更**：Node 部分**不再参与交易决策**，仅为 UI / 展示层 / 命令编排。
+**此处不再有 Node 应用外壳。** 0.2 期间旧 Node 交易域与随后残留的源码层
+（`src/`、`tests/`、`package.json`、`tsconfig.json`）已整体删除（`81dd253e`、
+`62b16c88`）。生产栈 100% 是 Rust：`blitzkrieg-core` 引擎与 Polymarket 扩展由
+`ui_kit_web` 拉起并监管，后者同时服务 Vue 面板及其 API。
 
-| 功能 | 状态 |
-| --- | --- |
-| HTTP/WS 网关（`127.0.0.1:51888`）、`/panel` 静态服务 | ✅ 已实盘验证 |
-| 内核托管客户端（`autoRestart`，自动拉起 `target/release/blitzkrieg-core`） | ✅ 已实盘验证 |
-| 人类可读日志渲染 | ✅ 已实盘验证 |
-| `src/` 中仍保留大量与交易无关的旧模块（agents / channels / skills / feeds 等，**584 个 .ts**） | 🚧 见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) §4（D-4 分阶段迁移） |
+Node **仅**作为验收门禁的驱动存在（`scripts/*.mjs`，**零依赖、只用 stdlib**，
+根目录无需 `npm install`）。这些脚本会拉起临时隔离的内核并通过 UDS JSON-RPC 与其
+通信——它们是「验证工具」，不是产品的一部分。详见
+[`../scripts/README.md`](../scripts/README.md)。
+
 
 ---
 
@@ -280,11 +282,13 @@ GitHub Milestone **v0.1 #1 已关闭**（22 个 Issue 全关）。
 
 ### 9.1 #57 — E8 Web 前端重构
 
-shadcn-vue + ECharts + Pinia + VueUse 重建 Web 前端，替换 `ui/hft.html` 单文件面板。
+shadcn-vue + ECharts + Pinia + VueUse 重建 Web 前端，替换旧的 `ui/hft.html` 单文件面板
+（该文件已随 0.2 的遗留清理删除，见 §4）。
 子任务 E8-a（骨架）/ b（快照驾驶舱）/ c（图表层）/ d（指令面 & 打包）。
 
 **实际进度**：主体已落地（Vue 面板 5 页 + ECharts + 主题 token + liquid glass），
-但作为 Epic **未正式收口**——hft.html 的信息面对照清单未逐项验收，
+但作为 Epic **未正式收口**——旧 hft.html 的信息面对照清单（该文件现已不存在，
+只能对照 git 历史）未逐项验收，
 Tauri 打包进 webui 与 `desktop_snapshot` / `desktop_command` 全链路未验。
 
 ### 9.2 #59 — E9 产品化补完
@@ -312,8 +316,8 @@ Tauri 打包进 webui 与 `desktop_snapshot` / `desktop_command` 全链路未验
 
 | 门禁 | 目标 | 状态 |
 | --- | --- | --- |
-| `npm run scale:plugins` | 50 策略 × 100 插件注册表读取 < 100ms | ✅ 已有门禁 |
-| `npm run scale:feed` | 40 连接 10 分钟行情推送丢包率 0 | ✅ 已有门禁 |
+| `node scripts/scale-plugins-check.mjs` | 50 策略 × 100 插件注册表读取 < 100ms | ✅ 已有门禁 |
+| `node scripts/feed-scale-check.mjs` | 40 连接 10 分钟行情推送丢包率 0 | ✅ 已有门禁 |
 
 ---
 
@@ -331,4 +335,4 @@ Tauri 打包进 webui 与 `desktop_snapshot` / `desktop_command` 全链路未验
 
 ---
 
-_维护者：ceer_quant · 相关：[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) · [`DECISIONS_PENDING.md`](DECISIONS_PENDING.md) · [`ROADMAP_V0_1.md`](ROADMAP_V0_1.md)_
+_维护者：ceer_quant · 相关（内部，`dev-docs/` 不公开）：`dev-docs/KNOWN_ISSUES.md` · `dev-docs/DECISIONS_PENDING.md` · `dev-docs/ROADMAP_V0_1.md`_

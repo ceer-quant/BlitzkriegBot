@@ -3,6 +3,6 @@ contact_links:
   - name: 🔒 Report a security vulnerability
     url: https://github.com/ceer-quant/BlitzkriegBot/security/advisories/new
     about: Do NOT open a public issue for security problems — use a private advisory.
-  - name: 📖 Architecture & AI workflow
-    url: https://github.com/ceer-quant/BlitzkriegBot/blob/main/docs/AI_WORKFLOW.md
-    about: How humans and AI agents collaborate in this repository.
+  - name: 📖 Architecture guide
+    url: https://github.com/ceer-quant/BlitzkriegBot/blob/main/docs/rust-core/ARCHITECTURE.md
+    about: Crate layout, the UDS JSON-RPC contract, and where trading logic lives.

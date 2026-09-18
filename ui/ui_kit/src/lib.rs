@@ -1,6 +1,6 @@
 //! Blitzkrieg UI Kit — a pure presentation layer over the Rust trading core.
 //!
-//! Design contract (see `docs/reports/UI_KIT_MIGRATION_REPORT.md`):
+//! Design contract (see `dev-docs/reports/UI_KIT_MIGRATION_REPORT.md`, internal):
 //!
 //! * The UI Kit **only renders data and subscribes to events**. It holds NO
 //!   trading logic, no risk rules, no order decisions. All of that lives in
