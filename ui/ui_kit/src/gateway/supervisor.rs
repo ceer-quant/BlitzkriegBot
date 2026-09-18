@@ -296,17 +296,25 @@ impl SupervisorConfig {
 /// Find the workspace-built core binary, mirroring Node's candidate list.
 pub fn discover_binary() -> PathBuf {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let candidates = [
+    let mut candidates = vec![
         root.join("target/release/blitzkrieg-core"),
         root.join("core/blitzkrieg_core/target/release/blitzkrieg-core"),
         root.join("target/debug/blitzkrieg-core"),
         root.join("core/blitzkrieg_core/target/debug/blitzkrieg-core"),
     ];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("blitzkrieg-core"));
+            if let Some(grandparent) = parent.parent() {
+                candidates.push(grandparent.join("release/blitzkrieg-core"));
+                candidates.push(grandparent.join("debug/blitzkrieg-core"));
+            }
+        }
+    }
     candidates
-        .iter()
+        .into_iter()
         .find(|p| p.exists())
-        .cloned()
-        .unwrap_or_else(|| candidates[0].clone())
+        .unwrap_or_else(|| root.join("target/release/blitzkrieg-core"))
 }
 
 /// Whether a live core is serving `socket_path` right now.

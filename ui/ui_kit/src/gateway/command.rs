@@ -303,6 +303,21 @@ impl Dispatcher {
         self.sup.health()
     }
 
+    /// Stop the core if owned by this dispatcher's supervisor.
+    pub fn stop(&mut self) -> StopOutcome {
+        self.sup.stop()
+    }
+
+    /// Access the underlying supervisor.
+    pub fn supervisor(&self) -> &Supervisor {
+        &self.sup
+    }
+
+    /// Mutably access the underlying supervisor.
+    pub fn supervisor_mut(&mut self) -> &mut Supervisor {
+        &mut self.sup
+    }
+
     /// Enable crash replacement for a core this dispatcher owns.
     pub fn set_restart_policy(&mut self, policy: RestartPolicy) {
         self.sup.set_restart_policy(policy);
