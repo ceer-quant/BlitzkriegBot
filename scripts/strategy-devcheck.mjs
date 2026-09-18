@@ -19,7 +19,8 @@
  * Everything is sandboxed: scratch workdir, private socket, dry mode, no
  * network. Exit 0 on PASS.
  */
-import { spawn, execFileSync } from 'child_process';
+// Guarded spawn: an interrupted gate must not leave its core holding the socket.
+import { spawn, execFileSync } from './lib/child-guard.mjs';
 import net from 'net';
 import { join, resolve, dirname } from 'path';
 import { tmpdir } from 'os';

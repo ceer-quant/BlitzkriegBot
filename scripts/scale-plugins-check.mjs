@@ -19,7 +19,8 @@
  * 50×100 的量压在 engine.stats（含全部策略行序列化）+ market.list +
  * strategy.list + extension.list 的 100 轮上。
  */
-import { spawn, execFileSync } from 'child_process';
+// Guarded spawn: an interrupted gate must not leave its core holding the socket.
+import { spawn, execFileSync } from './lib/child-guard.mjs';
 import net from 'net';
 import { join, resolve, dirname } from 'path';
 import { tmpdir } from 'os';

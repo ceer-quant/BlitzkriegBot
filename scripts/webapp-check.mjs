@@ -21,7 +21,9 @@
  *
  * Exit 0 on PASS, 1 on FAIL.
  */
-import { spawnSync, spawn } from 'child_process';
+// Guarded spawn: this gate starts both a gateway and a core directly, so an
+// interrupted run used to leave them behind with PPID=1.
+import { spawnSync, spawn } from './lib/child-guard.mjs';
 import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';

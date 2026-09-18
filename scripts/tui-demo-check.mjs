@@ -2,7 +2,9 @@
 // Gate for scripts/tui-demo.sh. Headless mode: without a TTY the panel exits
 // immediately, which exercises the cleanup path — the check asserts that the
 // launcher announced the core and that the socket is gone after exit.
-import { spawn } from 'node:child_process';
+// Guarded spawn: `tui-demo.sh` backgrounds a core, so an interrupted gate would
+// otherwise orphan that core — the shell holding its pid and socket path is gone.
+import { spawn } from './lib/child-guard.mjs';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

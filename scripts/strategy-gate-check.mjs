@@ -17,7 +17,8 @@
  * Usage: node scripts/strategy-gate-check.mjs
  *   (needs target/release/blitzkrieg-core and the dog cdylib built)
  */
-import { spawn } from 'child_process';
+// Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
+import { spawn } from './lib/child-guard.mjs';
 import net from 'net';
 import { join } from 'path';
 import { tmpdir } from 'os';

@@ -16,7 +16,14 @@
  *
  * Run: node scripts/parent-monitor-check.mjs
  */
-import { spawn, execSync } from 'node:child_process';
+// Guarded spawn. The gate deliberately SIGTERMs the driver itself (below) to
+// exercise the driver's own exit guard, and that signal must reach only the
+// driver — which it still does, because the guard signals a single pid here, not
+// the group. What the guard adds is the case the gate cannot cover with its own
+// assertions: if THIS process dies unexpectedly (throw, interrupt, CI timeout),
+// the driver and the core it started are reaped instead of orphaned, which is the
+// very failure the gate exists to detect and must not itself produce.
+import { spawn, execSync } from './lib/child-guard.mjs';
 import { mkdtempSync, mkdirSync, unlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';

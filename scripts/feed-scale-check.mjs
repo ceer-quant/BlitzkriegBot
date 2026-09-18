@@ -18,7 +18,8 @@
  *
  * 默认 90 秒窗口（CI 友好）+ --full 走满 10 分钟（600s）验收口径。
  */
-import { spawn } from 'child_process';
+// Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
+import { spawn } from './lib/child-guard.mjs';
 import net from 'net';
 import { join, resolve, dirname } from 'path';
 import { tmpdir } from 'os';

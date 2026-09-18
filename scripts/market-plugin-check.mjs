@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /** Verify --market-plugin selection + market.list active flag. */
-import { spawn } from 'child_process';
+// Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
+import { spawn } from './lib/child-guard.mjs';
 import { mkdtempSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';

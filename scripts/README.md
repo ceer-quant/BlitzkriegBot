@@ -19,6 +19,14 @@ cargo build --release --workspace --locked
   supervisor (`CoreClient`): spawn/boot/retry, request/timeout, events,
   clean stop (cancels resting orders) and `killNow()` (exit guard).
 - `lib/core-socket.mjs` — socket path helpers (TMPDIR-prefixed, per-user).
+- `lib/child-guard.mjs` — guarded `spawn` for gate drivers. Drop-in replacement
+  for `child_process.spawn` that reaps the spawned process *tree* (SIGTERM first
+  for a clean shutdown, then SIGKILL) when the gate exits, throws, or is
+  signalled. Gates that start a core directly — rather than through `CoreClient`,
+  which owns its own exit guard — must import `spawn` from here: an interrupted
+  gate otherwise leaves a core running with PPID=1, holding its socket. That is
+  not hypothetical: on 2026-09-19 the process table held a 33-hour orphan from an
+  interrupted run. See `child-guard-check.mjs` for the pinned behaviour.
 
 ## Acceptance gates
 
@@ -30,6 +38,7 @@ cargo build --release --workspace --locked
 | `core-adopt-check.mjs` | Duplicate client adopt semantics, no restart storm |
 | `shutdown-cleanliness-check.mjs` | Stop means the core is gone and resting orders settled |
 | `parent-monitor-check.mjs` | No orphaned core after the driver exits |
+| `child-guard-check.mjs` | A child spawned through `lib/child-guard.mjs` cannot outlive its spawner — on normal exit, error, or signal; grandchildren included, and only after a chance to shut down cleanly |
 | `readonly-egress-check.mjs` | `--readonly` is structural: live mode + credentials still cannot trade |
 | `unified-launcher-check.mjs` | Single binary `blitzkrieg`: `run` starts both parts, subcommands dispatch, `--readonly` holds |
 | `data-backup-check.mjs` | `data/` backup refuses dangerous destinations, self-verifies, prunes only its own dirs |
