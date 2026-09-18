@@ -89,6 +89,12 @@ jobs:
         with:
           node-version: 22
       # ui_kit_web + blitzkrieg-core in release: the gate drives the real binaries.
+      # The parity gates in this job run a real core with --engine, which loads
+      # external cdylibs from user_layer/strategies.
+      - name: Build external strategy cdylibs (standalone workspaces)
+        run: |
+          (cd user_layer/strategies && cargo build --release --locked)
+          (cd user_layer/parity_strategy && cargo build --release --locked)
       - name: Build the gateway and core (release)
         run: cargo build --release --locked -p blitzkrieg-ui-kit -p blitzkrieg-core
       - name: Build the panel bundle
