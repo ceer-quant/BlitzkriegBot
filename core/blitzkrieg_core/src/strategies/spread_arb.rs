@@ -151,7 +151,7 @@ impl EngineStrategy for SpreadArbBuiltin {
         self.trend.on_price(token_id, snap.mid_price, now_ms);
     }
 
-    fn on_round(&mut self, slot: i64) {
+    fn on_round(&mut self, slot: i64, _time_left_sec: i64, _now_ms: i64) {
         self.trend.reset_if_new_round(slot);
     }
 

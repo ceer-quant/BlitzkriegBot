@@ -150,12 +150,23 @@ node scripts/blitzkrieg-new-strategy.mjs my_dip_fade
 `unsafe`（vtable、`#[no_mangle]` 导出、JSON 包装由 `export_strategy!` 宏从
 `SafeStrategy` trait 自动生成）：
 
-1. `on_book(update)` — 观察：缓存你以后要用来决策的盘口（mid/深度/obi/价差）；
+1. `on_book(update)` — 观察：缓存你以后要用来决策的盘口（mid/深度/obi/价差）。
+   数值以**十进制字符串**给出，用 `dec()` 精确解析——模板里没有 f64 价格路径，
+   与内核逐位一致；
 2. `evaluate(ctx)` — 决策：产出 `Intents{entries, exits, breaks}`。entry 带
    LIMIT 价格（内核校验、定仓、提交），exit 不带价格（内核按实时盘口定价），
    一切照旧过内核风险门禁——策略永远拿不到签名器/socket/凭证；
 3. `on_params` / `evolvable_knobs` — 调参：宿主配置与影子进化的热参数都走
    这里（返回 false 拒绝整包）；声明 knobs 即被影子进化机制纳入。
+
+两个**可选**钩子对齐树内能力（缺失 = 未声明，不影响加载）：
+
+- `on_eval_books(&[FreshBook])` — 在每次 evaluate/diagnostics 之前收到宿主装订
+  的「轮次视图 + 仅可定价盘口」，`fresh` 标志与树内 `StrategyCtx::fresh_book`
+  同一裁决（非空且未过期；过期/缺失不可区分）。用它做入场前的新鲜度门；
+- 覆写 `config_view`（导出 `bk_strategy_config_view` 符号）— 返回任意 JSON 描述
+  「当前生效配置」（热参叠加后的实际值），宿主经 `strategy_config_views()`
+  展示。树内 `spread_arb_view` 的泛化，外挂与内建能力对等。
 
 改完**一条命令全链验证**（真实内核在环，全部走沙盒 dry core）：
 
@@ -174,9 +185,10 @@ node scripts/strategy-devcheck.mjs my_dip_fade
 数据）；**没有任何网络/凭证面**（策略 crate 不连接任何东西）。
 
 需要比 `SafeStrategy` 更细的控制（直接布局内存、绕开包装的 JSON 薄层）时，
-`user_layer/strategies/dog_strategy.rs`（327 行 unsafe）是完整范例——它的
-编译/加载/协商流程与模板完全一致，两条路径产出的 dylib 在内核侧不可区分；
-存量手写库不需要任何改动即可继续加载。
+`user_layer/strategies/dog_strategy.rs`（`SafeStrategy` 模板 + 手写 ABI 两条路径
+皆有实例）与 `user_layer/parity_strategy/parity_strategy.rs`（纯手写 raw ABI v2）
+是完整范例——编译/加载/协商流程与模板完全一致，两条路径产出的 dylib 在内核侧
+不可区分；存量手写库不需要任何改动即可继续加载（新可选符号缺失 = 未声明）。
 
 加载器协商顺序（两条路径相同）：路径策略 → dlopen →
 `bk_strategy_abi_version()==2`（v1 直接拒绝）→ vtable/必需钩子校验 →

@@ -294,6 +294,16 @@ impl ParityStrategy {
             ]
         })
     }
+
+    /// The config currently in force (E-parity / `bk_strategy_config_view`):
+    /// base parameters overlaid with any hot values actually applied. This is
+    /// the machine-readable answer to "what is this strategy running RIGHT NOW".
+    pub fn config_view(&self) -> Value {
+        json!({
+            "trendMaxEntryPrice": self.buy_below,
+            "exitAbove": self.exit_above,
+        })
+    }
 }
 
 #[cfg(test)]

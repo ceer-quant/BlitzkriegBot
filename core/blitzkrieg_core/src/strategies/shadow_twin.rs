@@ -90,7 +90,15 @@ impl EngineStrategyShadow {
         now_ms: i64,
     ) {
         let slot = markets.first().map(|m| m.round_slot).unwrap_or(0);
-        self.inner.on_round(slot);
+        // The twin's caller knows only the host clock at the replay tick; the
+        // engine's `RoundMarkets` transition carries the true seconds-left, so
+        // derive the same number from the round's expiry when it is available
+        // and pass 0 otherwise (mirrors a round with no known end).
+        let time_left_sec = markets
+            .first()
+            .map(|m| ((m.expires_at_ms - now_ms) / 1000).max(0))
+            .unwrap_or(0);
+        self.inner.on_round(slot, time_left_sec, now_ms);
         for (token_id, snap) in seeds {
             self.inner.on_book(token_id, snap, now_ms);
         }

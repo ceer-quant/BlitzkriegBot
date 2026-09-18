@@ -389,7 +389,7 @@ impl EngineStrategy for TrendFollowBuiltin {
         self.tracker.on_price(token_id, snap.mid_price, now_ms);
     }
 
-    fn on_round(&mut self, slot: i64) {
+    fn on_round(&mut self, slot: i64, _time_left_sec: i64, _now_ms: i64) {
         self.tracker.reset_if_new_round(slot);
     }
 

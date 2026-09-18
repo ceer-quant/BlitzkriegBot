@@ -190,7 +190,7 @@ impl EngineStrategy for InTreeParity {
             .observe(token_id, snapshot_to_pbook(token_id, snap));
     }
 
-    fn on_round(&mut self, slot: i64) {
+    fn on_round(&mut self, slot: i64, _time_left_sec: i64, _now_ms: i64) {
         self.inner.reset_round(slot);
     }
 
@@ -264,6 +264,12 @@ impl EngineStrategy for InTreeParity {
         // own cell exists; a strategy that declared nothing would get `None`.
         // `None` detaches the overlay (evolution disabled).
         self.hot = registry.as_ref().and_then(|r| r.handle_for(self.name()));
+    }
+
+    /// The config currently in force (E-parity): the in-tree side reports the
+    /// same JSON the cdylib's `bk_strategy_config_view` symbol serializes.
+    fn config_view_json(&self) -> Option<String> {
+        Some(self.inner.config_view().to_string())
     }
 }
 
@@ -514,5 +520,28 @@ fn in_tree_and_dylib_parity_match_signal_for_signal() {
         a.cycles
             .iter()
             .any(|c| c.confirmed == vec!["up".to_string()])
+    );
+
+    // Config-in-force parity (E-parity, `bk_strategy_config_view`): the dylib's
+    // OPTIONAL symbol and the in-tree twin must report the SAME config — base
+    // values overlaid with the hot parameters actually applied above.
+    let expected = serde_json::json!({"trendMaxEntryPrice": "0.50", "exitAbove": "0.60"});
+    let view_of = |views: &[(String, String)], name: &str| {
+        serde_json::from_str::<serde_json::Value>(
+            views
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v)
+                .unwrap_or_else(|| panic!("{name} reports no config view")),
+        )
+        .expect("config view is valid JSON")
+    };
+    assert_eq!(
+        view_of(&in_tree.strategy_config_views(), "parity"),
+        expected
+    );
+    assert_eq!(
+        view_of(&foreign.strategy_config_views(), "parity"),
+        expected
     );
 }

@@ -10,8 +10,8 @@
 //! Build: `(cd user_layer/parity_strategy && cargo build --release)`.
 
 use blitzkrieg_strategy_api::{
-    bk_string_out, BkBookView, BkHandle, BkLevel, BkMarket, BkRound, BkRoundView,
-    BkStrategyVtable, BK_ABI_VERSION,
+    BK_ABI_VERSION, BkBookView, BkHandle, BkLevel, BkMarket, BkRound, BkRoundView,
+    BkStrategyVtable, bk_string_out,
 };
 use core::ffi::c_char;
 use parity_logic::{PBook, PLevel, PMarket, ParityStrategy};
@@ -21,7 +21,10 @@ unsafe fn cstr(p: *const c_char) -> Option<String> {
     if p.is_null() {
         return None;
     }
-    unsafe { CStr::from_ptr(p) }.to_str().ok().map(|s| s.to_string())
+    unsafe { CStr::from_ptr(p) }
+        .to_str()
+        .ok()
+        .map(|s| s.to_string())
 }
 
 unsafe fn levels(base: *const BkLevel, count: usize) -> Vec<PLevel> {
@@ -33,7 +36,10 @@ unsafe fn levels(base: *const BkLevel, count: usize) -> Vec<PLevel> {
     slice
         .iter()
         .filter_map(|l| {
-            Some(PLevel { price: unsafe { cstr(l.price) }?, size: unsafe { cstr(l.size) }? })
+            Some(PLevel {
+                price: unsafe { cstr(l.price) }?,
+                size: unsafe { cstr(l.size) }?,
+            })
         })
         .collect()
 }
@@ -135,7 +141,11 @@ unsafe extern "C" fn on_config(_handle: BkHandle, _json: *const c_char) -> i32 {
 }
 
 unsafe extern "C" fn on_hot_params(handle: BkHandle, json: *const c_char) -> i32 {
-    let Some(s) = (if handle.is_null() { None } else { Some(unsafe { &mut *(handle as *mut ParityStrategy) }) }) else {
+    let Some(s) = (if handle.is_null() {
+        None
+    } else {
+        Some(unsafe { &mut *(handle as *mut ParityStrategy) })
+    }) else {
         return 1;
     };
     match unsafe { cstr(json) } {
@@ -155,6 +165,16 @@ unsafe extern "C" fn knobs(handle: BkHandle) -> *mut c_char {
 unsafe extern "C" fn evolvable_knobs(handle: BkHandle) -> *mut c_char {
     let s = unsafe { &*(handle as *const ParityStrategy) };
     bk_string_out(s.evolvable_knobs().to_string())
+}
+
+/// E-parity: the config currently in force, as JSON (OPTIONAL
+/// `bk_strategy_config_view` symbol; null = "nothing declared").
+extern "C" fn config_view(handle: BkHandle) -> *mut c_char {
+    if handle.is_null() {
+        return core::ptr::null_mut();
+    }
+    let s = unsafe { &*(handle as *const ParityStrategy) };
+    bk_string_out(s.config_view().to_string())
 }
 
 static NAME: &[u8] = b"parity\0";
@@ -191,4 +211,9 @@ pub extern "C" fn bk_strategy_abi_version() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn bk_strategy_evolvable_knobs(handle: BkHandle) -> *mut c_char {
     unsafe { evolvable_knobs(handle) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn bk_strategy_config_view(handle: BkHandle) -> *mut c_char {
+    config_view(handle)
 }

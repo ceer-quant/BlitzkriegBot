@@ -69,7 +69,7 @@ impl EngineStrategy for CapStrategy {
         &self.name
     }
     fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _now: i64) {}
-    fn on_round(&mut self, _slot: i64) {}
+    fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
 
     fn set_hot_params(&mut self, registry: Option<Arc<ParamRegistry>>) {
         self.hot = registry.as_ref().and_then(|r| r.handle_for(self.name()));
@@ -147,7 +147,7 @@ impl EngineStrategy for Inert {
         "inert"
     }
     fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _now: i64) {}
-    fn on_round(&mut self, _slot: i64) {}
+    fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
     fn find_candidates(&mut self, _ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
         Vec::new()
     }

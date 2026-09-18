@@ -35,8 +35,8 @@ use crate::shadow_evolution::{KnobDeclaration, KnobSpec, ParamRegistry, Strategy
 use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
 use arc_swap::ArcSwap;
 use blitzkrieg_strategy_api::{
-    BkBookView, BkEvolvableKnobsFn, BkGateExemptionsFn, BkHandle, BkLevel, BkMarket, BkRound,
-    BkRoundView, BkStrategyVtable,
+    BkBookView, BkEvalCtx, BkEvolvableKnobsFn, BkGateExemptionsFn, BkHandle, BkLevel, BkMarket,
+    BkRound, BkRoundView, BkStrategyVtable, BkTokenBook,
 };
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -58,6 +58,13 @@ pub struct LoadedLibrary {
     // Optional symbols (absent = capability not declared).
     gate_exemptions_fn: Option<BkGateExemptionsFn>,
     evolvable_knobs_fn: Option<BkEvolvableKnobsFn>,
+    /// OPTIONAL `bk_strategy_bind_eval_ctx` (E-parity): the fresh-book gate.
+    /// None = the library does not use the context (an older library) and
+    /// keeps the plain v2 contract unchanged.
+    bind_eval_ctx_fn: Option<blitzkrieg_strategy_api::BkBindEvalCtxFn>,
+    /// OPTIONAL `bk_strategy_config_view` (E-parity): the config currently in
+    /// force, as the strategy reports it. None = "declares nothing".
+    config_view_fn: Option<blitzkrieg_strategy_api::BkConfigViewFn>,
 }
 
 impl LoadedLibrary {
@@ -65,12 +72,15 @@ impl LoadedLibrary {
     /// `lib` must have been opened by the caller and must export the mandatory v2
     /// symbols; the resolved symbols are valid for as long as `lib` is loaded,
     /// which this struct guarantees by owning it.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn new(
         lib: libloading::Library,
         create_sym: unsafe extern "C" fn() -> *const BkStrategyVtable,
         free_string: Option<unsafe extern "C" fn(*mut c_char)>,
         gate_exemptions_fn: Option<BkGateExemptionsFn>,
         evolvable_knobs_fn: Option<BkEvolvableKnobsFn>,
+        bind_eval_ctx_fn: Option<blitzkrieg_strategy_api::BkBindEvalCtxFn>,
+        config_view_fn: Option<blitzkrieg_strategy_api::BkConfigViewFn>,
     ) -> Arc<Self> {
         Arc::new(Self {
             lib,
@@ -78,6 +88,8 @@ impl LoadedLibrary {
             free_string,
             gate_exemptions_fn,
             evolvable_knobs_fn,
+            bind_eval_ctx_fn,
+            config_view_fn,
         })
     }
 
@@ -190,6 +202,93 @@ impl BookMarshal {
     }
 }
 
+/// Backing storage for one evaluation context: the round tokens' priceable
+/// books marshalled to the ABI form, kept alive across the FFI call. The
+/// `BkEvalCtx` handed to the library borrows from here.
+struct EvalCtxMarshal {
+    /// Token id per row (the BkTokenBook.token pointer borrows from these).
+    tokens: Vec<CString>,
+    books: Vec<BookMarshal>,
+}
+
+/// The (ctx, rows, views) triple `build` hands out: `ctx` borrows from `rows`
+/// and `views`, and all three must outlive the FFI call they were built for.
+type BoundCtx = (
+    BkEvalCtx,
+    Vec<BkTokenBook>,
+    Vec<(Vec<BkLevel>, Vec<BkLevel>)>,
+);
+
+impl EvalCtxMarshal {
+    /// Marshal the context exactly as an in-tree strategy would see it. The
+    /// in-tree `StrategyCtx::fresh_book` returns Some(snapshot) for a priceable
+    /// book and None for a stale/missing one — with no way to tell those two
+    /// apart — so the bound context carries exactly the priceable rows
+    /// (`fresh = 1`); a token with no row is "not priceable now", identical to
+    /// what `fresh_book(..) == None` means on the trait side.
+    fn new(
+        markets: &[crate::model::CryptoMarket],
+        fresh_book: &dyn Fn(&str) -> Option<OrderbookSnapshot>,
+        now_ms: i64,
+    ) -> Self {
+        let mut tokens = Vec::new();
+        let mut books = Vec::new();
+        for m in markets {
+            for token in [&m.up_token_id, &m.down_token_id] {
+                let Some(snap) = fresh_book(token) else {
+                    continue;
+                };
+                let Some(marshal) = BookMarshal::new(token, &m.asset, &snap) else {
+                    continue;
+                };
+                tokens.push(CString::new(token.as_str()).unwrap_or_default());
+                books.push(marshal);
+            }
+        }
+        let _ = now_ms;
+        Self { tokens, books }
+    }
+
+    /// Build the borrowed `BkEvalCtx` + the arrays it points into. The caller
+    /// must keep the returned (ctx, rows, views) tuple alive across the FFI
+    /// call — `ctx`'s pointers borrow from `rows` and `views`.
+    fn build(&self, round: BkRound, markets: *const BkMarket, market_count: usize) -> BoundCtx {
+        let views: Vec<(Vec<BkLevel>, Vec<BkLevel>)> = self
+            .books
+            .iter()
+            .map(|b| {
+                let (bids, asks) = b.level_views();
+                (bids, asks)
+            })
+            .collect();
+        let rows: Vec<BkTokenBook> = self
+            .tokens
+            .iter()
+            .zip(self.books.iter())
+            .zip(views.iter())
+            .map(|((token, b), (bids, asks))| BkTokenBook {
+                token: token.as_ptr(),
+                book: b.view(bids, asks, round.now_ms),
+                fresh: 1,
+            })
+            .collect();
+        let ctx = BkEvalCtx {
+            view: BkRoundView {
+                round,
+                markets,
+                market_count,
+            },
+            books: if rows.is_empty() {
+                std::ptr::null()
+            } else {
+                rows.as_ptr()
+            },
+            book_count: rows.len(),
+        };
+        (ctx, rows, views)
+    }
+}
+
 /// A loaded external v2 strategy. Owns its opaque handle; shares the library.
 pub struct ForeignStrategy {
     lib: Arc<LoadedLibrary>,
@@ -211,6 +310,10 @@ pub struct ForeignStrategy {
     /// This strategy's own evolvable knobs, resolved once at load (they are a
     /// property of the library build, not of the runtime state).
     knobs: Vec<KnobSpec>,
+    /// OPTIONAL binder symbol (copied from the shared library record).
+    bind_eval_ctx_fn: Option<blitzkrieg_strategy_api::BkBindEvalCtxFn>,
+    /// OPTIONAL config-view symbol (copied from the shared library record).
+    config_view_fn: Option<blitzkrieg_strategy_api::BkConfigViewFn>,
 
     // Outputs accumulated during evaluate(), drained by the host.
     exit_intents: Vec<StrategyExitIntent>,
@@ -241,6 +344,8 @@ impl ForeignStrategy {
         let free_string = lib.free_string;
         let gate_exemptions_fn = lib.gate_exemptions_fn;
         let evolvable_knobs_fn = lib.evolvable_knobs_fn;
+        let bind_eval_ctx_fn = lib.bind_eval_ctx_fn;
+        let config_view_fn = lib.config_view_fn;
         let mut s = Self {
             lib,
             vtable,
@@ -251,6 +356,8 @@ impl ForeignStrategy {
             gate_exemptions_fn,
             evolvable_knobs_fn,
             knobs: Vec::new(),
+            bind_eval_ctx_fn,
+            config_view_fn,
             exit_intents: Vec::new(),
             breaks: Vec::new(),
             params: None,
@@ -283,6 +390,8 @@ impl ForeignStrategy {
             gate_exemptions_fn: self.gate_exemptions_fn,
             evolvable_knobs_fn: self.evolvable_knobs_fn,
             knobs: self.knobs.clone(),
+            bind_eval_ctx_fn: self.bind_eval_ctx_fn,
+            config_view_fn: self.config_view_fn,
             exit_intents: Vec::new(),
             breaks: Vec::new(),
             params: None,
@@ -318,6 +427,37 @@ impl ForeignStrategy {
             unsafe { f(p) };
         }
         parsed
+    }
+
+    /// Take a heap string returned by the library and copy it into Rust as-is,
+    /// freeing it through the library's own deallocator. None on null/UTF-8
+    /// error (a malformed output is treated as "empty", never a crash).
+    unsafe fn take_raw_string(&self, p: *mut c_char) -> Option<String> {
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: pointer came from this library's CString::into_raw; copy then
+        // free once via the matching allocator.
+        let s = unsafe { CStr::from_ptr(p) }
+            .to_str()
+            .ok()
+            .map(str::to_string);
+        if let Some(f) = self.free_string {
+            // SAFETY: same provenance as above.
+            unsafe { f(p) };
+        }
+        s
+    }
+
+    /// E-parity: the config currently in force, reported through the library's
+    /// OPTIONAL `bk_strategy_config_view` symbol. Missing symbol, null return
+    /// or malformed UTF-8 all mean "declares nothing" — the same default an
+    /// in-tree strategy gets from the trait default.
+    pub fn read_config_view(&self) -> Option<String> {
+        let f = self.config_view_fn?;
+        // SAFETY: valid handle; the returned string is owned by the library and
+        // freed through its own deallocator by take_raw_string.
+        unsafe { self.take_raw_string(f(self.handle)) }
     }
 
     /// Read (and validate) the optional knob declaration. Malformed JSON, a null
@@ -368,6 +508,35 @@ impl ForeignStrategy {
         self.last_hot_json = None;
         self.push_params_json(params);
     }
+
+    /// Bind the evaluation context (round view + priceable books) to the
+    /// library for the duration of ONE hook call, if the library opted in via
+    /// the OPTIONAL `bk_strategy_bind_eval_ctx` symbol. The returned rows/views
+    /// own everything the context points at; the caller must keep them alive
+    /// until after the FFI call and then invoke [`Self::unbind_ctx`].
+    fn bind_ctx(
+        &self,
+        marshal: &EvalCtxMarshal,
+        round: BkRound,
+        markets: *const BkMarket,
+        market_count: usize,
+    ) -> Option<BoundCtx> {
+        let f = self.bind_eval_ctx_fn?;
+        let (ctx, rows, views) = marshal.build(round, markets, market_count);
+        // SAFETY: valid handle; `ctx` borrows `rows`/`views`, which the caller
+        // keeps alive until the matching unbind.
+        unsafe { f(self.handle, &ctx) };
+        Some((ctx, rows, views))
+    }
+
+    /// Unbind whatever context is bound (harmless when the library has no
+    /// binder or nothing is bound).
+    fn unbind_ctx(&self) {
+        if let Some(f) = self.bind_eval_ctx_fn {
+            // SAFETY: valid handle; null only ends the borrow window.
+            unsafe { f(self.handle, std::ptr::null()) };
+        }
+    }
 }
 
 // SAFETY: the loaded instance is driven only by the kernel's single strategy
@@ -414,6 +583,12 @@ impl EngineStrategy for ForeignStrategy {
         }))
     }
 
+    /// E-parity: the library's own config-in-force view, via the OPTIONAL
+    /// `bk_strategy_config_view` symbol ("nothing declared" when absent).
+    fn config_view_json(&self) -> Option<String> {
+        self.read_config_view()
+    }
+
     fn on_book(&mut self, token_id: &str, snap: &OrderbookSnapshot, now_ms: i64) {
         let Some(f) = self.vtable.on_book else { return };
         // on_book carries only a token; label the view with the asset resolved
@@ -434,12 +609,15 @@ impl EngineStrategy for ForeignStrategy {
         unsafe { f(self.handle, &view) };
     }
 
-    fn on_round(&mut self, slot: i64) {
+    fn on_round(&mut self, slot: i64, time_left_sec: i64, now_ms: i64) {
         if let Some(f) = self.vtable.on_round {
+            // E-parity: the round's real timing, not zeros. The trait contract
+            // promises the same context an in-tree strategy sees; the seconds
+            // remaining and the host clock are part of that.
             let round = BkRound {
                 slot,
-                time_left_sec: 0,
-                now_ms: 0,
+                time_left_sec,
+                now_ms,
             };
             // SAFETY: valid handle + borrowed round for the call.
             unsafe { f(self.handle, &round) };
@@ -536,9 +714,18 @@ impl EngineStrategy for ForeignStrategy {
             market_count: rows.view.len(),
         };
 
+        // E-parity: bind the evaluation context (round view + the PRICEABLE
+        // books, i.e. exactly what `ctx.fresh_book` would answer) for the
+        // duration of this evaluate call. The marshal owns every CString the
+        // context points at and outlives the FFI call below.
+        let eval_marshal = EvalCtxMarshal::new(ctx.markets(), &ctx.fresh_book, ctx.now_ms());
+        let bound = self.bind_ctx(&eval_marshal, round, rv.markets, rv.market_count);
+
         // SAFETY: valid handle and a round view whose backing lives to end of
         // scope; the returned JSON is copied and freed via the library.
         let out = unsafe { evaluate(self.handle, &rv) };
+        self.unbind_ctx();
+        drop(bound);
         let Some(v) = (unsafe { self.take_json(out) }) else {
             return Vec::new();
         };
@@ -619,12 +806,58 @@ impl EngineStrategy for ForeignStrategy {
         std::mem::take(&mut self.exit_intents)
     }
 
-    fn diagnostics(&self, _ctx: &StrategyCtx<'_>) -> Vec<serde_json::Value> {
+    fn diagnostics(&self, ctx: &StrategyCtx<'_>) -> Vec<serde_json::Value> {
         let Some(f) = self.vtable.diagnostics else {
             return Vec::new();
         };
-        // SAFETY: hook returns a heap JSON array owned by the library.
-        match unsafe { self.take_json(f(self.handle)) } {
+        // E-parity: the diagnostics hook sees the same bound context its
+        // evaluate sees, so a diagnostic can report freshness-gated values
+        // exactly like an in-tree strategy's `diagnostics(&ctx)` does.
+        let round = BkRound {
+            slot: ctx.round_slot(),
+            time_left_sec: ctx.time_left_sec(),
+            now_ms: ctx.now_ms(),
+        };
+        // Backing for the market rows, mirroring find_candidates.
+        let mut strs: Vec<(CString, CString, CString, CString, CString)> = Vec::new();
+        for m in ctx.markets() {
+            let cs = |s: &str| CString::new(s).unwrap_or_default();
+            strs.push((
+                cs(&m.asset),
+                cs(&m.condition_id),
+                cs(&m.question_id),
+                cs(&m.up_token_id),
+                cs(&m.down_token_id),
+            ));
+        }
+        let view: Vec<BkMarket> = strs
+            .iter()
+            .zip(ctx.markets().iter())
+            .map(|(s, m)| BkMarket {
+                asset: s.0.as_ptr(),
+                condition_id: s.1.as_ptr(),
+                question_id: s.2.as_ptr(),
+                up_token: s.3.as_ptr(),
+                down_token: s.4.as_ptr(),
+                expires_at_ms: m.expires_at_ms,
+                slot: m.round_slot,
+                neg_risk: if m.neg_risk { 1 } else { 0 },
+            })
+            .collect();
+        let markets_ptr = if view.is_empty() {
+            std::ptr::null()
+        } else {
+            view.as_ptr()
+        };
+        let eval_marshal = EvalCtxMarshal::new(ctx.markets(), &ctx.fresh_book, ctx.now_ms());
+        let bound = self.bind_ctx(&eval_marshal, round, markets_ptr, view.len());
+        // SAFETY: hook returns a heap JSON array owned by the library; the
+        // bound context (if any) borrows from `eval_marshal`/`bound`, which
+        // outlive this call.
+        let parsed = unsafe { self.take_json(f(self.handle)) };
+        self.unbind_ctx();
+        drop(bound);
+        match parsed {
             Some(serde_json::Value::Array(a)) => a,
             _ => Vec::new(),
         }
@@ -721,6 +954,8 @@ impl ShadowFactory for ForeignShadowFactory {
             gate_exemptions_fn: self.lib.gate_exemptions_fn,
             evolvable_knobs_fn: self.lib.evolvable_knobs_fn,
             knobs: self.knobs.clone(),
+            bind_eval_ctx_fn: self.lib.bind_eval_ctx_fn,
+            config_view_fn: self.lib.config_view_fn,
             exit_intents: Vec::new(),
             breaks: Vec::new(),
             params: None,

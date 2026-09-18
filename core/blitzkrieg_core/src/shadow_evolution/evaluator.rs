@@ -170,7 +170,7 @@ mod tests {
             "cap"
         }
         fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _now: i64) {}
-        fn on_round(&mut self, _slot: i64) {}
+        fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
         fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
             let market = &ctx.markets()[0];
             let token = market.up_token_id.clone();

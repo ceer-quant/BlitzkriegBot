@@ -173,8 +173,11 @@ pub trait EngineStrategy: Send + Sync {
     /// Observe a book / top-of-book update (own trend/price state).
     fn on_book(&mut self, token_id: &str, snap: &OrderbookSnapshot, now_ms: i64);
 
-    /// A new round started (per-round state reset).
-    fn on_round(&mut self, slot: i64);
+    /// A new round started (per-round state reset). Carries the round's real
+    /// timing — the slot, seconds remaining, and the host clock at the
+    /// transition — so a strategy never has to infer a round change from a
+    /// book tick or run on a zeroed clock.
+    fn on_round(&mut self, slot: i64, time_left_sec: i64, now_ms: i64);
 
     /// Tokens whose setup broke since the last call; the host cancels their
     /// resting entry bids. Drains: each break is returned exactly once.
@@ -260,6 +263,14 @@ pub trait EngineStrategy: Send + Sync {
     /// The spread_arb parameters currently in force (observability for the
     /// builtin; other strategies return None).
     fn spread_arb_view(&self) -> Option<SpreadArbConfig> {
+        None
+    }
+
+    /// The config currently in force, as a JSON string (observability). Any
+    /// strategy — in-tree or external — may report one; a foreign library does
+    /// so through its OPTIONAL `bk_strategy_config_view` symbol, an in-tree
+    /// strategy by overriding this. `None` = "nothing declared", never an error.
+    fn config_view_json(&self) -> Option<String> {
         None
     }
 
