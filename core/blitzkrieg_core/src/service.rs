@@ -51,6 +51,12 @@ pub struct CoreConfig {
     /// after `enabled_strategies`, so the explicit "off" wins if both name the
     /// same strategy.
     pub disabled_strategies: Vec<String>,
+    /// Directory scanned at startup for user-layer strategy libraries
+    /// (`*.dylib`/`*.so`): every library found is dlopen'd and enabled, so
+    /// dropping a file into the folder is the whole installation procedure.
+    /// `None` = no directory (auto-load off). Load failures are reported and
+    /// skipped, never fatal — a broken file must not brick the kernel.
+    pub strategy_dir: Option<String>,
     pub min_round_age_sec: i64,
     pub size_usd: Decimal,
     pub min_shares: Decimal,
@@ -153,6 +159,7 @@ impl CoreConfig {
     /// Evolution re-registration the toggle triggers).
     pub fn install_engine(&self, core: &mut Core) {
         core.enable_engine(crate::engine::Engine::new(self.engine_config()));
+        self.load_strategy_dir(core);
         for name in &self.enabled_strategies {
             if !core.set_strategy_enabled(name, true) {
                 tracing::warn!(
@@ -168,6 +175,96 @@ impl CoreConfig {
                     "unknown strategy requested at startup; ignored"
                 );
             }
+        }
+    }
+
+    /// Auto-load every strategy library under `strategy_dir` and enable it.
+    ///
+    /// This is the "drop a strategy in the folder and it works" path: the tree
+    /// is walked (bounded depth) so both a bare `libfoo.dylib` and a
+    /// `cargo build --release` product under `target/release/` are found, each
+    /// library goes through the same policy-checked dlopen the IPC
+    /// `strategy.load` uses, and a load that fails is reported and skipped —
+    /// one broken file never blocks the rest or the kernel itself. Duplicate
+    /// copies of the same strategy (debug + release) are skipped after the
+    /// first registration: the engine refuses a second instance of a live name.
+    /// Runs BEFORE `enabled_strategies` so a config that names a just-loaded
+    /// library enables it in the same pass.
+    fn load_strategy_dir(&self, core: &mut Core) {
+        #[cfg(feature = "strategy-loading")]
+        let Some(dir) = &self.strategy_dir else {
+            return;
+        };
+        #[cfg(feature = "strategy-loading")]
+        {
+            let mut libs = Vec::new();
+            collect_strategy_libs(std::path::Path::new(dir), 0, &mut libs);
+            libs.sort();
+            for path in libs {
+                let receipt = core.load_strategy_lib(&path.to_string_lossy());
+                // The success receipt is exactly "<name>@<version> registered
+                // into the engine dispatch…"; a duplicate registration is
+                // REJECTED with a message that itself contains the word
+                // "registered", so the match must be on the full success shape.
+                // A duplicate is benign — debug and release builds of the same
+                // crate both land in the tree — so it is reported as skipped,
+                // not failed, and the first copy (sorted order) wins.
+                if receipt.contains("already registered") {
+                    eprintln!(
+                        "blitzkrieg-core: strategy auto-load skipped (duplicate): {}",
+                        path.display()
+                    );
+                    continue;
+                }
+                let ok = receipt.contains("registered into the engine dispatch");
+                eprintln!(
+                    "blitzkrieg-core: strategy auto-load {}: {}",
+                    if ok { "ok" } else { "FAILED" },
+                    receipt
+                );
+                if !ok {
+                    continue;
+                }
+                let name = receipt.split('@').next().unwrap_or_default().to_string();
+                if name.is_empty() {
+                    continue;
+                }
+                if !core.set_strategy_enabled(&name, true) {
+                    tracing::warn!(strategy = %name, "auto-loaded but could not be enabled");
+                }
+            }
+        }
+        #[cfg(not(feature = "strategy-loading"))]
+        {
+            let _ = core;
+        }
+    }
+}
+
+/// Depth-bounded walk gathering `*.dylib`/`*.so` files under `dir`.
+///
+/// Bounded because `strategy_dir` may point at a crate checkout whose `target/`
+/// tree is enormous; 6 levels comfortably covers `target/<profile>/deps/` while
+/// never descending into the dependency graph's own build dirs. Symlinks are
+/// not followed (a loop must not hang startup); unreadable subtrees are skipped.
+fn collect_strategy_libs(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+    const MAX_DEPTH: usize = 6;
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        let path = entry.path();
+        if ft.is_dir() {
+            collect_strategy_libs(&path, depth + 1, out);
+        } else if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("dylib") | Some("so")
+        ) {
+            out.push(path);
         }
     }
 }
@@ -246,6 +343,7 @@ impl Default for CoreConfig {
             assets: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
             enabled_strategies: Vec::new(),
             disabled_strategies: Vec::new(),
+            strategy_dir: None,
             min_round_age_sec: 30,
             size_usd: Decimal::new(25, 1), // 2.5
             min_shares: Decimal::from(10),
@@ -3344,6 +3442,41 @@ mod tests {
     use super::*;
     use crate::risk::RiskConfig;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn strategy_lib_collector_finds_dylibs_and_skips_other_files() {
+        let dir = std::env::temp_dir().join(format!("bk-scan-test-{}", std::process::id()));
+        let nested = dir.join("target/release");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(dir.join("liba.dylib"), b"").unwrap();
+        std::fs::write(nested.join("libb.so"), b"").unwrap();
+        std::fs::write(dir.join("readme.txt"), b"").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), b"").unwrap();
+        let mut out = Vec::new();
+        collect_strategy_libs(&dir, 0, &mut out);
+        let mut names: Vec<String> = out
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["liba.dylib", "libb.so"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn strategy_lib_collector_respects_depth_bound() {
+        let dir = std::env::temp_dir().join(format!("bk-deep-test-{}", std::process::id()));
+        let mut deep = dir.clone();
+        for i in 0..8 {
+            deep = deep.join(format!("l{i}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("toodeep.dylib"), b"").unwrap();
+        let mut out = Vec::new();
+        collect_strategy_libs(&dir, 0, &mut out);
+        assert!(out.is_empty(), "beyond MAX_DEPTH must not be collected");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn dry_core(balance: Decimal) -> Core {
         let mut c = Core::new(CoreConfig {
