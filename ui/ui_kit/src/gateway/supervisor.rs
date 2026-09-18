@@ -1,14 +1,14 @@
-//! Core process supervisor — the UI Kit's counterpart to Node's
-//! `BlitzkriegCoreClient` *lifecycle* half only.
+//! Core process supervisor — the Rust replacement for the lifecycle half of the
+//! deleted Node client (`BlitzkriegCoreClient`, gone with the source layer in
+//! 62b16c88).
 //!
 //! It does exactly three things: spawn `blitzkrieg-core` with parameters,
 //! stop it, or **adopt** a core that is already serving the socket. It holds no
-//! trading logic — every decision stays inside the Rust core. This is what lets
+//! trading logic — every decision stays inside the Rust core. This is what let
 //! the Node shell be removed (D-4, step ②) without losing the `/crypto-hft
-//! start|stop` control channel.
+//! start|stop` control channel; the shell itself is now gone too.
 //!
-//! Safety rules carried over from the Node client (see
-//! `src/core/blitzkrieg-core-client.ts`):
+//! Safety rules carried over from that Node client:
 //!   * **Adopt, never double-spawn.** If the socket is already served we connect
 //!     to that core instead of spawning a second one (which would abort with
 //!     "already listening"). An adopted core is *not ours* — `stop()` will not
@@ -176,8 +176,9 @@ impl std::fmt::Display for SupervisorError {
 }
 impl std::error::Error for SupervisorError {}
 
-/// Everything needed to spawn a core. Defaults mirror the production arguments
-/// assembled by `src/core/blitzkrieg-core-runner.ts`.
+/// Everything needed to spawn a core. Defaults mirror the arguments the deleted
+/// Node runner (`src/core/blitzkrieg-core-runner.ts`, gone with the source layer
+/// in `62b16c88`) used to assemble for production.
 #[derive(Debug, Clone)]
 pub struct SupervisorConfig {
     pub binary_path: PathBuf,
@@ -202,8 +203,9 @@ pub struct SupervisorConfig {
 
 impl SupervisorConfig {
     /// Production-shaped defaults, overridable by the environment exactly like
-    /// the Node command path (`HFT_ASSETS`, `HFT_ROUND_SEC`, `HFT_MIN_SHARES`,
-    /// `HFT_MAX_SHARES`).
+    /// the `HFT_*` variables the Node command path used (`HFT_ASSETS`,
+    /// `HFT_ROUND_SEC`, `HFT_MIN_SHARES`, `HFT_MAX_SHARES`) — those variable
+    /// names survive the runner's deletion and are read here directly.
     pub fn from_env(socket_path: String) -> Self {
         let env_num = |k: &str, d: u64| -> u64 {
             std::env::var(k)

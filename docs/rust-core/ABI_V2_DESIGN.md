@@ -251,8 +251,8 @@ E2-c（[#28](https://github.com/ceer-quant/BlitzkriegBot/issues/28)）把这一�
   回放，逐周期比对：入场 `OrderRequest`（token/price/strategy/direction/
   internal_key/size）、出场意图（token/reason）、confirmed 集合、diagnostics
   规范化 JSON。任何一项不一致即失败。
-- `tests/dynamic_strategy.rs` 重写为 v2：加载 → 全深度 on_book → evaluate
-  entries/exits → confirmed/diagnostics → 热参 → v1 协商拒绝。
+- `core/blitzkrieg_core/tests/dynamic_strategy.rs` 重写为 v2：加载 → 全深度 on_book
+  → evaluate entries/exits → confirmed/diagnostics → 热参 → v1 协商拒绝。
 
 ## 8. 构建与 CI（验收第四条）
 

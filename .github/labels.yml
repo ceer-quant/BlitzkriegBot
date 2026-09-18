@@ -87,7 +87,7 @@
   description: "UI Kit / 面板"
 - name: "module/gateway"
   color: "b39ddb"
-  description: "网关 / Node 外壳"
+  description: "网关 / 桌面壳（webapp）"
 - name: "module/ci"
   color: "c9b1ff"
   description: "CI / 工具链 / 仓库治理"

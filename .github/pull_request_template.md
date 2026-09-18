@@ -18,7 +18,7 @@
 - [ ] shadow-evolution
 - [ ] market extension
 - [ ] ui-kit / panel
-- [ ] node shell / gateway
+- [ ] gateway / webapp
 - [ ] ci / tooling / docs
 
 ---
@@ -26,7 +26,7 @@
 ## 🚦 门禁（必须全绿）
 - [ ] `cargo build --release` 通过
 - [ ] `cargo test` 通过
-- [ ] `npm run typecheck` 通过
+- [ ] `cd ui/webapp/webui && npm run check`（Vue/TS 类型检查）通过
 - [ ] 涉及下单链的改动已跑 DryRun / `node scripts/cycle-check.mjs`
 
 ## 🔐 安全与约束（逐条确认）
@@ -35,7 +35,7 @@
 - [ ] **未删除任何未经备份的文件**
 - [ ] **未"顺手优化"与本次目标无关的业务逻辑**
 - [ ] `bash scripts/secret-scan.sh` 通过
-- [ ] 不确定的分歧已写入 `docs/DECISIONS_PENDING.md`（而非在 PR 中悬置）
+- [ ] 不确定的分歧已写入 `dev-docs/DECISIONS_PENDING.md`（而非在 PR 中悬置）
 
 ## 🧪 证据
 <!-- 贴上关键测试输出、A/B 数字、日志片段。证据文件请提交到 docs/reports/data/ 并在此引用。 -->

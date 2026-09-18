@@ -9,8 +9,9 @@
  * Rust-native feed (`--feed-ws`) uses and the path `--backtest` replays. The
  * older `books.snapshot` bridge is deliberately NOT used: it additionally runs
  * the DRY maker-fill simulation, so a capture through it would fill a crossing
- * maker entry that the production feed leaves resting (docs/DECISIONS_PENDING.md
- * D-11). Same driver on both sides is what makes the comparison meaningful.
+ * maker entry that the production feed leaves resting
+ * (dev-docs/DECISIONS_PENDING.md D-11). Same driver on both sides is what makes
+ * the comparison meaningful.
  *
  * Deterministic and isolated: the core runs on a private socket in a scratch
  * working directory, so it can never touch production data files or the live

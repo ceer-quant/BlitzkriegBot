@@ -1,8 +1,9 @@
 //! Market data — local L2 orderbook reconstruction.
 //!
 //! Rust port of the book-building responsibilities in
-//! `src/strategies/crypto-hft/orderbook.ts` (buildOrderbookSnapshot) plus a
-//! delta-capable local book (the TS `local-orderbook.ts` which was never wired).
+//! `src/strategies/crypto-hft/orderbook.ts` (buildOrderbookSnapshot; both the TS
+//! file and its `local-orderbook.ts`, which was never wired, are gone with the
+//! Node source layer, `62b16c88`) plus a delta-capable local book.
 //!
 //! The Polymarket market channel delivers either a full `book` snapshot or a
 //! `price_change` / `best_bid_ask` top-of-book update; this book accepts both and

@@ -1,6 +1,7 @@
 //! Engine — orchestrates market data → strategies → signals → orders → exits.
 //!
-//! Rust port of the evaluate loop in `src/strategies/crypto-hft/index.ts`.
+//! Rust port of the evaluate loop in `src/strategies/crypto-hft/index.ts`
+//! (the TS tree is gone with the Node source layer, `62b16c88`).
 //! The engine owns the shared market state and gates:
 //!   - per-token local L2 books and per-asset Binance spot buffers
 //!   - the round scanner (timing gates + token discovery)

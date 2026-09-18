@@ -19,7 +19,7 @@
 #
 # Requirements: gh (GitHub CLI) authenticated with repo/admin scope.
 #
-# PLATFORM NOTE (verified 2026-09-14, docs/DECISIONS_PENDING.md D-8):
+# PLATFORM NOTE (verified 2026-09-14, dev-docs/DECISIONS_PENDING.md D-8):
 #   ceer-quant is on GitHub FREE. On a PRIVATE repo steps 3 (Secret Scanning /
 #   Push Protection) and 4 (branch protection) return 403 "Upgrade to GitHub
 #   Pro" / 422 "not available". The script keeps them so a future Pro/Team org
@@ -89,7 +89,7 @@ else
   if gh repo view "$FULL" >/dev/null 2>&1; then
     echo "  repo already exists — skipping create"
   else
-    run gh repo create "$FULL" --private --description "Private HFT trading core (Rust) + Node shell"
+    run gh repo create "$FULL" --private --description "Private HFT trading core + panel (100% Rust)"
   fi
 
   section "2. add remote 'ceer' and push branches (never origin)"

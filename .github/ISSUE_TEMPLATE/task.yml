@@ -14,7 +14,7 @@ body:
         - "shadow-evolution"
         - "market extension"
         - "ui-kit / panel"
-        - "node shell / gateway"
+        - "gateway / webapp"
         - "ci / tooling / docs"
     validations:
       required: true
@@ -32,7 +32,7 @@ body:
       value: |
         - [ ] cargo build --release
         - [ ] cargo test
-        - [ ] npm run typecheck
+        - [ ] cd ui/webapp/webui && npm run check
         - [ ] DryRun / cycle-check（如涉及下单链）
     validations:
       required: true
@@ -41,5 +41,5 @@ body:
     attributes:
       label: 执行方式
       options:
-        - label: 由 AI 托管执行（需遵守 docs/AI_WORKFLOW.md 的硬约束）
+        - label: 由 AI 托管执行（需遵守 dev-docs/AI_WORKFLOW.md 的硬约束）
           required: false

@@ -19,7 +19,7 @@ body:
         - "shadow-evolution"
         - "market extension (polymarket 等)"
         - "ui-kit / panel"
-        - "node shell / gateway"
+        - "gateway / webapp"
         - "ci / tooling / docs"
     validations:
       required: true

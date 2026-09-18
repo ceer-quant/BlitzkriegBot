@@ -1,7 +1,9 @@
 //! Command dispatch — the UI Kit's replacement for the Node `/crypto-hft`
-//! command surface (`src/skills/bundled/crypto-hft/index.ts`).
+//! command surface (`src/skills/bundled/crypto-hft/index.ts`, deleted with the
+//! rest of the source layer in `62b16c88`).
 //!
-//! Supported verbs (identical in meaning to the Node skill's Rust-core path):
+//! Supported verbs (identical in meaning to the Node skill's Rust-core path,
+//! which this module now owns outright):
 //!
 //!   start [ASSETS] [--size N] [--dry-run]   spawn/adopt the core, start trading
 //!   stop                                     stop the core we spawned

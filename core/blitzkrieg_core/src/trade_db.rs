@@ -1,7 +1,9 @@
 //! Trade database — persists closed trades in the SAME JSONL format the Node
 //! side used (`data/trades/trades.jsonl` plus `summary.json`), so the existing
 //! web panel and offline analysis scripts keep working after the core took over
-//! trading. Field names and units mirror `src/strategies/crypto-hft/trade-db.ts`.
+//! trading. Field names and units mirror `src/strategies/crypto-hft/trade-db.ts`,
+//! now deleted with the Node source layer (`62b16c88`) — the format is the
+//! contract that outlives it.
 
 use crate::position::ClosedPosition;
 use rust_decimal::Decimal;

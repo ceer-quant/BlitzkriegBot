@@ -179,8 +179,11 @@ Blitzkrieg_core/          # Rust 内核（零市场代码）
 │   └── （既有 P0–P5 模块）
 extensions/polymarket/    # 官方 Polymarket 市场插件（独立 crate：rlib+cdylib）
 ├── src/ venue.rs live.rs feed.rs discovery.rs gamma.rs plugin.rs
-ui/                       # 用户层 UI（hft.html 等）
-user_layer/               # 用户层策略逻辑与配置
-src/                      # Node 侧编排 + IPC client（无 UI 渲染、无交易逻辑）
-docs/blitzkrieg/          # 本文档集
+ui/                       # Rust 呈现层，分三个 crate：
+├── ui_kit/               #   纯展示层 + 网关（ui_kit_web 服务面板与 /api）；无交易逻辑
+├── ui_kit_panel/         #   终端面板（TUI）
+└── webapp/               #   Tauri 桌面壳（独立 workspace）+ webui/（Vue 3 + Vite 前端源码）
+user_layer/               # 用户层策略逻辑（strategy_api / parity_* / strategies）与配置
+scripts/                  # 门禁与运维脚本（裸 Node，零 npm 依赖）
+docs/rust-core/           # 本文档集
 ```

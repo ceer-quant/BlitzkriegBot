@@ -1,6 +1,7 @@
 //! Signal engine — price buffers, trend confirmation and strategy evaluators.
 //!
-//! Rust port of `src/strategies/crypto-hft/{strategies,trend-tracker}.ts` for the
+//! Rust port of `src/strategies/crypto-hft/{strategies,trend-tracker}.ts` (both
+//! gone with the Node source layer, `62b16c88`) for the
 //! live strategy (`spread_arb`) plus the rolling primitives it needs. Pure and
 //! deterministic given an injected clock, so it is fully unit-testable and runs
 //! identically inside the core for dry and live.

@@ -131,7 +131,7 @@ async fn main() -> std::io::Result<()> {
         eprintln!(
             "ui_kit_panel needs an interactive terminal (stdout is not a TTY). \
              Quitting — this launcher is safe to rerun under a real terminal, \
-             e.g. directly or via `npm run tui`."
+             e.g. directly or via `bash scripts/tui-demo.sh`."
         );
         return Ok(());
     }

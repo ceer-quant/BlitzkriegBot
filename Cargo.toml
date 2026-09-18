@@ -20,7 +20,7 @@ exclude = ["user_layer/strategies", "user_layer/parity_strategy", "ui/webapp/src
 
 # ── Release profile (E10-d) ──────────────────────────────────────────────────
 # Size/performance hardening for shipped binaries. Measured, not guessed: see
-# docs/blitzkrieg/MIGRATION_LOG.md §49 for the before/after numbers.
+# dev-docs/blitzkrieg/MIGRATION_LOG.md §49 (internal) for the before/after numbers.
 [profile.release]
 opt-level = 3
 # Whole-program LTO + a single codegen unit: the two settings that actually

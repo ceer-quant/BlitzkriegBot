@@ -1,49 +1,20 @@
 # Assets
 
-This directory contains visual assets for the README and documentation.
+Repository-level visual assets.
 
-## Required Files
+## `logo.png`
 
-### Demo GIF
-- `demo.gif` - Main demo showing Blitzkrieg in action (recommended: 800x500px, <5MB)
+The source brand mark, retained from the pre-takeover tree (recorded in
+`DECISIONS_PENDING.md` D-24 as a non-code file kept for provenance/audit — it is
+not derived from any deleted Blitzkrieg source).
 
-### Screenshots (in `/screenshots`)
-- `telegram.png` - Telegram chat interface
-- `webchat.png` - WebChat browser interface
-- `arbitrage.png` - Arbitrage scanner output
-- `portfolio.png` - Portfolio dashboard
+**Not the file the panel serves.** The running UI Kit web panel bundles its logo
+from `ui/webapp/webui/src/assets/logo.png` (Vite hashes it into
+`dist/assets/logo-<hash>.png`; `scripts/webapp-check.mjs` asserts the served
+bytes match). If you change the panel's brand mark, change that file.
 
-## Creating Screenshots
-
-### Telegram
-1. Open Telegram chat with the bot
-2. Run `/opportunity scan` or `/portfolio`
-3. Screenshot the conversation
-
-### WebChat
-1. Visit `http://localhost:18789/webchat`
-2. Run a few commands
-3. Screenshot the interface
-
-### Arbitrage
-1. Run `/opportunity scan` with results
-2. Or `/opportunity combinatorial`
-3. Screenshot showing opportunities found
-
-### Portfolio
-1. Run `/portfolio` with positions
-2. Screenshot showing P&L
-
-## Creating Demo GIF
-
-Recommended tools:
-- macOS: Kap, Gifox
-- Windows: ScreenToGif
-- Linux: Peek
-
-Record:
-1. Start fresh conversation
-2. `/markets trump` - show search
-3. `/opportunity scan` - show arbitrage
-4. `/portfolio` - show positions
-5. Keep under 30 seconds
+The previous version of this README described `demo.gif` plus Telegram / WebChat
+/ arbitrage / portfolio screenshots. Those belonged to the retired Node product
+(the gateway on port 18789, the messaging channels) and were never committed, so
+the directories they named do not exist. Removed rather than left as a checklist
+for a product that is gone.

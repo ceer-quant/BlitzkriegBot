@@ -609,8 +609,10 @@ fn path_json(samples: &[Sample], base: Decimal) -> serde_json::Value {
 }
 
 impl ShadowRecord {
-    /// Serialize in the shape `scripts/analyze-shadow.mjs` understands, so the
-    /// Rust recorder feeds the same offline tooling the Node recorder did.
+    /// Serialize in the shape `scripts/analyze-signals.mjs` understands (the
+    /// reader is named for the file it consumes, `data/signals/signals.jsonl`),
+    /// so the Rust recorder keeps feeding the same offline tooling the Node
+    /// recorder did.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "id": format!("rust-{}", self.entered_at_ms),

@@ -207,7 +207,7 @@ cd ui/webapp/webui && npm run check:all
 
 - `scripts/core-adopt-check.mjs` —— 多客户端竞争与 adopt 语义。
 - `scripts/dry-observe.mjs` —— DryRun 观察。
-- `scripts/core-shutdown-check.mjs` / `parent-monitor-check.mjs` / `readonly-egress-check.mjs` / `crash-recovery-check.mjs` —— 生命周期、只读出口与崩溃恢复验收。
+- `scripts/shutdown-cleanliness-check.mjs` / `parent-monitor-check.mjs` / `readonly-egress-check.mjs` / `crash-recovery-check.mjs` —— 生命周期、只读出口与崩溃恢复验收。
 
 > **禁止**在未通过上述验证时提交到 `main`；完整门禁矩阵见 `dev-docs/DEVELOPMENT.md`（内部）。
 
