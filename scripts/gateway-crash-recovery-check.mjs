@@ -41,7 +41,10 @@
  *
  * Run: node scripts/gateway-crash-recovery-check.mjs
  */
-import { spawn, spawnSync } from 'child_process';
+// Guarded spawn (`scripts/lib/child-guard.mjs`): a gate interrupted between
+// booting the gateway and its own teardown must not leave the gateway and its
+// owned core behind with PPID=1. That leak was real on 2026-09-19.
+import { spawn, spawnSync } from './lib/child-guard.mjs';
 import { mkdtempSync, existsSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';

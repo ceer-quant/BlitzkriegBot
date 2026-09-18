@@ -6,7 +6,8 @@
  * killed, and a fresh core (same order-log path) must RESTORE it — so the bot
  * still knows the order exists instead of leaving it orphaned at the venue.
  */
-import { spawn } from 'child_process';
+// Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
+import { spawn } from './lib/child-guard.mjs';
 import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';

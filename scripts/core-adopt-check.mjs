@@ -10,7 +10,13 @@
  * Reproduces the 2026-09-14 incident: duplicate-core rejection + auto-restart
  * with no backoff/cap caused ~1300 spawns/minute and "not connected" status.
  */
-import { spawn, execSync } from 'child_process';
+import { execSync } from 'child_process';
+// Guarded spawn: the owner core below is spawned directly (not through
+// CoreClient, which owns its own exit guard), so without this a failure or an
+// interrupt between here and the explicit `owner.kill()` would leave a core with
+// PPID=1 — holding its socket and engine loop. That really happened: a 33-hour
+// orphan on `adopt-48644.sock` was found in the table on 2026-09-19.
+import { spawn } from './lib/child-guard.mjs';
 import { mkdtempSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';

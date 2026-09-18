@@ -14,7 +14,8 @@
  *
  * Exit 0 on PASS, 1 on FAIL.
  */
-import { spawn } from 'child_process';
+// Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
+import { spawn } from './lib/child-guard.mjs';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';

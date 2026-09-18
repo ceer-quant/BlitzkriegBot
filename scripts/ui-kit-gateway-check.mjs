@@ -11,7 +11,9 @@
  *
  * Exit 0 on PASS, 1 on FAIL.
  */
-import { spawn } from 'child_process';
+// Guarded spawn: an interrupted gate must not leave the gateway (and the core
+// it owns) behind with PPID=1.
+import { spawn, reapAllChildren } from './lib/child-guard.mjs';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -40,7 +42,6 @@ async function cmd(text) {
   return res.json();
 }
 
-let gateway = null;
 let failures = 0;
 let TOKEN = '';
 function check(name, cond, detail = '') {
@@ -66,7 +67,7 @@ try {
   console.log(`   socket: ${SOCK}`);
   console.log(`   workdir: ${WORK}`);
 
-  gateway = spawn(WEB, ['--socket', SOCK, '--addr', `127.0.0.1:${PORT}`, '--manage'], {
+  const gateway = spawn(WEB, ['--socket', SOCK, '--addr', `127.0.0.1:${PORT}`, '--manage'], {
     cwd: ROOT,
     env: {
       ...process.env,
@@ -153,8 +154,10 @@ try {
   console.error(`\nRESULT: FAIL — ${e.message}`);
   process.exitCode = 1;
 } finally {
-  try { gateway?.kill('SIGKILL'); } catch { /* noop */ }
+  // A `start`-ed core is the gateway's CHILD, not ours, so killing the gateway
+  // alone would leave the core running on the private socket. The guard reaps the
+  // gateway's whole process group: SIGTERM first, so the core unlinks its socket
+  // instead of being cut down mid-write, then SIGKILL for anything left.
+  reapAllChildren();
   try { rmSync(WORK, { recursive: true, force: true }); } catch { /* noop */ }
-  // Ensure no orphan core bound to the private socket.
-  try { process.kill(0, 0); } catch { /* noop */ }
 }

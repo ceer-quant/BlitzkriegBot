@@ -13,7 +13,12 @@
  * Run: node scripts/unified-launcher-check.mjs
  */
 
-import { spawn, execSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
+// Guarded spawn: `blitzkrieg run` starts a core as its own child, so a failure or
+// an interrupt between here and the launcher's SIGTERM leaves the launcher AND a
+// core behind. The guard reaps the launcher's whole process group, which includes
+// that core, and does it with SIGTERM first so the core still unlinks its socket.
+import { spawn, reapAllChildren } from './lib/child-guard.mjs';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -30,17 +35,9 @@ const READONLY_SOCK = join(WORK, 'readonly.sock');
 const PORT1 = 52000 + Math.floor(Math.random() * 2000);
 const PORT2 = 54000 + Math.floor(Math.random() * 2000);
 
-const activeChildren = [];
-function track(c) {
-  activeChildren.push(c);
-  return c;
-}
 function cleanupAll() {
-  for (const c of activeChildren) {
-    try { c.kill('SIGKILL'); } catch {}
-  }
+  reapAllChildren();
 }
-process.on('exit', cleanupAll);
 
 function assert(ok, msg) {
   if (!ok) {
@@ -134,27 +131,25 @@ async function main() {
   // ── 2. Unified Launch (core + UI in one command) ───────────────────────────
   console.log('');
   console.log('[2] Unified launch (blitzkrieg run / default)');
-  const child = track(
-    spawn(
-      BIN,
-      [
-        'run',
-        '--socket', SOCK,
-        '--mode', 'dry',
-        '--tick-ms', '50',
-        '--addr', `127.0.0.1:${PORT1}`,
-        '--engine',
-        '--no-event-archive',
-        '--no-trade-log',
-        '--no-order-log',
-        '--no-position-log',
-      ],
-      {
-        cwd: WORK,
-        env: { ...process.env, TMPDIR: WORK },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }
-    )
+  const child = spawn(
+    BIN,
+    [
+      'run',
+      '--socket', SOCK,
+      '--mode', 'dry',
+      '--tick-ms', '50',
+      '--addr', `127.0.0.1:${PORT1}`,
+      '--engine',
+      '--no-event-archive',
+      '--no-trade-log',
+      '--no-order-log',
+      '--no-position-log',
+    ],
+    {
+      cwd: WORK,
+      env: { ...process.env, TMPDIR: WORK },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
   );
   child.stderr.on('data', (d) => {
     if (process.env.DEBUG) process.stderr.write(d);
@@ -208,26 +203,24 @@ async function main() {
   // ── 4. Unified Readonly Mode ──────────────────────────────────────────────
   console.log('');
   console.log('[4] Unified launcher --readonly flag structural check');
-  const roChild = track(
-    spawn(
-      BIN,
-      [
-        'run',
-        '--socket', READONLY_SOCK,
-        '--readonly',
-        '--tick-ms', '50',
-        '--addr', `127.0.0.1:${PORT2}`,
-        '--no-event-archive',
-        '--no-trade-log',
-        '--no-order-log',
-        '--no-position-log',
-      ],
-      {
-        cwd: WORK,
-        env: { ...process.env, TMPDIR: WORK },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }
-    )
+  const roChild = spawn(
+    BIN,
+    [
+      'run',
+      '--socket', READONLY_SOCK,
+      '--readonly',
+      '--tick-ms', '50',
+      '--addr', `127.0.0.1:${PORT2}`,
+      '--no-event-archive',
+      '--no-trade-log',
+      '--no-order-log',
+      '--no-position-log',
+    ],
+    {
+      cwd: WORK,
+      env: { ...process.env, TMPDIR: WORK },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
   );
 
   let roReady = false;

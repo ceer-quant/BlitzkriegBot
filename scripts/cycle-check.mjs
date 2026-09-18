@@ -9,7 +9,8 @@
  * whole cycle takes seconds. Usage: node scripts/cycle-check.mjs
  */
 
-import { spawn } from 'child_process';
+// Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
+import { spawn } from './lib/child-guard.mjs';
 import net from 'net';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
