@@ -56,21 +56,43 @@ esac
 TRADES=data/trades/trades.jsonl
 if [ -f "$TRADES" ]; then
   trades_n=$(wc -l < "$TRADES" | tr -d ' ')
-  # holdTimeSec=0 paired with exitReason=force_exit == the old "秒平" bug.
-  bad_pair=$(grep -c '"holdTimeSec":0' "$TRADES" 2>/dev/null || true)
-  force0=$(python3 - "$TRADES" <<'PY' 2>/dev/null || echo 0
+  # A zero-hold force_exit has TWO distinct causes, and they need different fixes:
+  #   (a) the old "秒平" bug — the position was force-exited the instant it opened
+  #       even though the round had plenty of time left;
+  #   (b) a timing-EXEMPT strategy (dog_strategy declares `gate_exemptions =
+  #       ["timing"]`, E2-b/D-16) entering inside the force-exit window, where the
+  #       exit policy fires on the very next tick by design. The entry is legal but
+  #       the round has too little life left to ever reach its target.
+  # Reporting (b) as (a) sends the reader chasing the wrong bug, so classify by the
+  # round clock: timeLeft <= force_exit_sec means the entry itself was late.
+  zero_hold=$(python3 - "$TRADES" <<'PY' 2>/dev/null || echo "0 0 0"
 import json,sys
-n=0
+ROUND,FORCE=900,120
+late=sudden=0
 for l in open(sys.argv[1]):
     l=l.strip()
     if not l: continue
     try: r=json.loads(l)
     except: continue
-    if r.get("holdTimeSec")==0 and r.get("exitReason")=="force_exit": n+=1
-print(n)
+    if r.get("holdTimeSec")!=0 or r.get("exitReason")!="force_exit": continue
+    et=r.get("entryTime")
+    if not et: continue
+    tl=ROUND-(et/1000.0-(int(et/1000.0)//ROUND)*ROUND)
+    if tl<=FORCE: late+=1
+    else: sudden+=1
+print(late+sudden, late, sudden)
 PY
 )
-  [ "${force0:-0}" -gt 0 ] && problems+=("holdTimeSec=0 & force_exit = $force0 (seconds-flatten bug)")
+  zero_n=${zero_hold%% *}
+  rest=${zero_hold#* }
+  late_n=${rest%% *}
+  sudden_n=${rest##* }
+  if [ "${sudden_n:-0}" -gt 0 ]; then
+    problems+=("holdTimeSec=0 & force_exit = $sudden_n with time left (seconds-flatten bug)")
+  fi
+  if [ "${late_n:-0}" -gt 0 ]; then
+    problems+=("$late_n entry(ies) opened inside the force-exit window (timing-exempt strategy; legal but the round was already over)")
+  fi
 else
   trades_n=0
   problems+=("no trade ledger at $TRADES")
