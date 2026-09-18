@@ -180,12 +180,8 @@ async fn main() -> std::io::Result<()> {
             raw_args.remove(0);
             run_unified(raw_args).await
         }
-        Some(other) if other.starts_with('-') => {
-            run_unified(raw_args).await
-        }
-        None => {
-            run_unified(Vec::new()).await
-        }
+        Some(other) if other.starts_with('-') => run_unified(raw_args).await,
+        None => run_unified(Vec::new()).await,
         Some(unknown) => {
             eprintln!("blitzkrieg: unknown subcommand '{unknown}'");
             eprintln!("See 'blitzkrieg --help' for available commands.");
@@ -220,12 +216,10 @@ async fn run_core_subcommand(raw_args: Vec<String>) -> std::io::Result<()> {
     let mut sigterm = signal(SignalKind::terminate())?;
     tokio::select! {
         _ = sigint.recv() => {
-            eprintln!("
-blitzkrieg: stopping core on SIGINT...");
+            eprintln!("blitzkrieg: stopping core on SIGINT...");
         }
         _ = sigterm.recv() => {
-            eprintln!("
-blitzkrieg: stopping core on SIGTERM...");
+            eprintln!("blitzkrieg: stopping core on SIGTERM...");
         }
     }
     supervisor.stop();
@@ -267,9 +261,7 @@ fn run_web_subcommand(args: Vec<String>) -> std::io::Result<()> {
             }
             "--manage" => manage = true,
             "--help" | "-h" => {
-                println!(
-                    "blitzkrieg web [--socket <path>] [--addr <127.0.0.1:51888>] [--manage]"
-                );
+                println!("blitzkrieg web [--socket <path>] [--addr <127.0.0.1:51888>] [--manage]");
                 return Ok(());
             }
             other => eprintln!("ignoring unknown arg: {other}"),
@@ -327,12 +319,10 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
         let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM listener");
         tokio::select! {
             _ = sigint.recv() => {
-                eprintln!("
-blitzkrieg: caught SIGINT, shutting down core cleanly...");
+                eprintln!("blitzkrieg: caught SIGINT, shutting down core cleanly...");
             }
             _ = sigterm.recv() => {
-                eprintln!("
-blitzkrieg: caught SIGTERM, shutting down core cleanly...");
+                eprintln!("blitzkrieg: caught SIGTERM, shutting down core cleanly...");
             }
         }
         if let Ok(mut g) = d_signal.lock() {
@@ -369,9 +359,9 @@ blitzkrieg: caught SIGTERM, shutting down core cleanly...");
         } else {
             if lifecycle_enabled {
                 println!(
-                    "blitzkrieg: note: BLITZKRIEG_PANEL_USER / BLITZKRIEG_PANEL_PASSWORD not set.
-\
-                     Web panel running in read-only mode. Set credentials to enable web command verbs."
+                    "blitzkrieg: note: BLITZKRIEG_PANEL_USER / BLITZKRIEG_PANEL_PASSWORD are \
+                     not set — the web panel runs in read-only mode. Set both to enable the \
+                     web command verbs."
                 );
             }
             WebServer::new(client, 0)
