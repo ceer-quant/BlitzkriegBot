@@ -649,7 +649,7 @@ mod tests {
             &self.name
         }
         fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _now: i64) {}
-        fn on_round(&mut self, _slot: i64) {}
+        fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
         fn evolvable_knobs(&self) -> Vec<KnobSpec> {
             vec![KnobSpec::new("cap", self.cap, dec!(0.05), dec!(0.95))]
         }
@@ -688,7 +688,7 @@ mod tests {
             "inert"
         }
         fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _now: i64) {}
-        fn on_round(&mut self, _slot: i64) {}
+        fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
         fn find_candidates(&mut self, _ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
             Vec::new()
         }
@@ -1097,7 +1097,7 @@ mod tests {
             &self.name
         }
         fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _now: i64) {}
-        fn on_round(&mut self, _slot: i64) {}
+        fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
         fn find_candidates(&mut self, _ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
             panic!("user-authored twin exploded");
         }
@@ -1130,7 +1130,7 @@ mod tests {
             &self.name
         }
         fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _now: i64) {}
-        fn on_round(&mut self, _slot: i64) {}
+        fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
         fn evolvable_knobs(&self) -> Vec<KnobSpec> {
             vec![KnobSpec::new("cap", dec!(0.40), dec!(0.05), dec!(0.95))]
         }

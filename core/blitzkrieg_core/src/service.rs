@@ -3850,7 +3850,7 @@ mod strategy_dispatch_tests {
             &self.name
         }
         fn on_book(&mut self, _t: &str, _s: &crate::model::OrderbookSnapshot, _n: i64) {}
-        fn on_round(&mut self, _slot: i64) {}
+        fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
         fn gate_exemptions(&self) -> crate::strategies::GateExemptions {
             self.gates
         }

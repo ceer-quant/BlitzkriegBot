@@ -1119,6 +1119,7 @@ dependencies = [
 name = "blitzkrieg-strategy-api"
 version = "0.1.0"
 dependencies = [
+ "rust_decimal",
  "serde_json",
 ]
 

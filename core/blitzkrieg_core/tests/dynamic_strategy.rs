@@ -274,6 +274,79 @@ fn the_dylib_declares_its_evolvable_knobs_over_the_optional_symbol() {
 }
 
 #[test]
+fn the_dylib_sees_only_priceable_books_in_its_eval_ctx() {
+    // E7 (#38): the OPTIONAL `bk_strategy_bind_eval_ctx` symbol gives a foreign
+    // library the SAME freshness gate an in-tree strategy gets from
+    // `StrategyCtx::fresh_book`. The kernel binds round view + PRICEABLE books
+    // (non-empty, within the staleness budget) around evaluate and diagnostics;
+    // a token without a bound row is "not priceable now", with stale and
+    // missing indistinguishable — exactly the trait-side semantics.
+    let path = require_lib();
+    let loaded = load_foreign(&path).unwrap_or_else(|e| panic!("load failed: {e:?}"));
+    let mut engine = Engine::new(engine_cfg());
+    assert!(engine.set_strategy_enabled("spread_arb", false));
+    engine
+        .register_user_strategy(
+            Box::new(loaded.strategy),
+            format!("dylib:{}", path.display()),
+        )
+        .unwrap();
+    assert!(engine.set_strategy_enabled("dog_strategy", true));
+
+    let now = 1_800_000i64;
+    engine.on_data(DataEvent::RoundMarkets {
+        markets: vec![market(1_800_000)],
+        now_ms: now,
+    });
+
+    // The dog strategy gates entries on book data gathered via on_book and
+    // still sees the round context; the binder must therefore leave its
+    // decisions unchanged (parity = no behavioural difference), and a STALE
+    // book must disappear from the bound context like an in-tree fresh_book
+    // would drop it.
+    engine.on_data(DataEvent::Book {
+        token_id: "up".into(),
+        bids: vec![(dec!(0.41), dec!(60)), (dec!(0.40), dec!(60))],
+        asks: vec![(dec!(0.43), dec!(60)), (dec!(0.44), dec!(60))],
+        now_ms: now + 1_000,
+    });
+    let orders = engine.evaluate(now + 2_000);
+    assert_eq!(
+        orders.len(),
+        1,
+        "fresh book: entry fires as before {orders:?}"
+    );
+    assert_eq!(orders[0].price, dec!(0.43));
+}
+
+#[test]
+fn the_dylib_reports_its_config_view_over_the_optional_symbol() {
+    // E-parity: the OPTIONAL `bk_strategy_config_view` symbol lets ANY library
+    // report the config currently in force — the generalization of the in-tree
+    // `spread_arb_view`. The dog library declares no config view (null =
+    // "nothing declared"); the parity library does, and its report must track
+    // a hot parameter actually applied.
+    let path = require_lib();
+    let loaded = load_foreign(&path).unwrap_or_else(|e| panic!("load failed: {e:?}"));
+    let mut engine = Engine::new(engine_cfg());
+    assert!(engine.set_strategy_enabled("spread_arb", false));
+    engine
+        .register_user_strategy(
+            Box::new(loaded.strategy),
+            format!("dylib:{}", path.display()),
+        )
+        .unwrap();
+    assert!(engine.set_strategy_enabled("dog_strategy", true));
+
+    // The dog library exports no config view: the engine reports nothing.
+    assert!(
+        engine.strategy_config_views().is_empty(),
+        "{:?}",
+        engine.strategy_config_views()
+    );
+}
+
+#[test]
 fn the_dylib_gate_declaration_reaches_the_engine_and_is_honoured() {
     // E2-b (#27): the OPTIONAL `bk_strategy_gate_exemptions` symbol crosses the
     // C ABI. The dog strategy declares `timing` — so a round whose timing window

@@ -23,9 +23,9 @@
 
 #[cfg(feature = "strategy-loading")]
 use blitzkrieg_strategy_api::{
-    BK_ABI_VERSION, BK_CREATE_SYMBOL, BK_EVOLVABLE_KNOBS_SYMBOL, BK_FREE_STRING_SYMBOL,
-    BK_GATE_EXEMPTIONS_SYMBOL, BK_MIN_ABI_VERSION, BK_VERSION_SYMBOL, BkStrategyVtable,
-    bk_strategy_free_string,
+    BK_ABI_VERSION, BK_BIND_EVAL_CTX_SYMBOL, BK_CONFIG_VIEW_SYMBOL, BK_CREATE_SYMBOL,
+    BK_EVOLVABLE_KNOBS_SYMBOL, BK_FREE_STRING_SYMBOL, BK_GATE_EXEMPTIONS_SYMBOL,
+    BK_MIN_ABI_VERSION, BK_VERSION_SYMBOL, BkStrategyVtable, bk_strategy_free_string,
 };
 use std::path::{Path, PathBuf};
 
@@ -231,6 +231,19 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
         return fail(missing_hooks.join("; "));
     }
 
+    // 4b) OPTIONAL fresh-book binder (E-parity). Absent = the library keeps the
+    // plain v2 contract and prices off its own `on_book` stream only.
+    let bind_eval_ctx_fn =
+        unsafe { lib.get::<blitzkrieg_strategy_api::BkBindEvalCtxFn>(BK_BIND_EVAL_CTX_SYMBOL) }
+            .ok()
+            .map(|s| *s);
+    // 4c) OPTIONAL effective-config reporter (E-parity). Absent = the strategy
+    // declares no config view; observability omits the field.
+    let config_view_fn =
+        unsafe { lib.get::<blitzkrieg_strategy_api::BkConfigViewFn>(BK_CONFIG_VIEW_SYMBOL) }
+            .ok()
+            .map(|s| *s);
+
     let name = unsafe { cstr_to_string(vtable.name) }.unwrap_or_else(|| "unnamed".into());
     let version = unsafe { cstr_to_string(vtable.version) }.unwrap_or_else(|| "0.0.0".into());
 
@@ -245,6 +258,8 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
             Some(free_string),
             gate_exemptions_fn,
             evolvable_knobs_fn,
+            bind_eval_ctx_fn,
+            config_view_fn,
         )
     };
 

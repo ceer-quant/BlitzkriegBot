@@ -31,20 +31,30 @@ use std::ffi::{CStr, CString};
 
 pub use crate::{BK_ABI_VERSION, BK_MIN_ABI_VERSION, BkHandle};
 
-/// One book/top-of-book update, numbers already parsed from the ABI decimal
-/// strings. Side-level counts reflect how many ladder rows the host delivered.
+/// Parse one decimal-string field into an exact [`rust_decimal::Decimal`].
+/// This is the ONLY numeric path the safe layer offers: no `f64` conversion
+/// exists anywhere in the template, so a strategy built on it prices bit-exactly
+/// like the kernel does (`0.55 * 0.98 = 0.5390`, not `0.53899999…`).
+pub fn dec(field: &Option<String>) -> Option<rust_decimal::Decimal> {
+    rust_decimal::Decimal::from_str_exact(field.as_deref()?.trim()).ok()
+}
+
+/// One book/top-of-book update, numbers kept as the ABI's decimal
+/// STRINGS (`None` = field absent). Parse with [`dec`] or `rust_decimal`
+/// directly — never via `f64`, or a resting price can drift by a tick.
+/// Side-level counts reflect how many ladder rows the host delivered.
 #[derive(Debug, Clone, Default)]
 pub struct BookUpdate {
     pub symbol: String,
     pub asset: String,
-    pub best_bid: Option<f64>,
-    pub best_ask: Option<f64>,
-    pub mid: Option<f64>,
-    pub bid_depth: Option<f64>,
-    pub ask_depth: Option<f64>,
-    pub obi: Option<f64>,
-    pub spread: Option<f64>,
-    pub spread_pct: Option<f64>,
+    pub best_bid: Option<String>,
+    pub best_ask: Option<String>,
+    pub mid: Option<String>,
+    pub bid_depth: Option<String>,
+    pub ask_depth: Option<String>,
+    pub obi: Option<String>,
+    pub spread: Option<String>,
+    pub spread_pct: Option<String>,
     pub timestamp_ms: i64,
     pub bid_levels: usize,
     pub ask_levels: usize,
@@ -78,12 +88,22 @@ pub struct RoundContext {
     pub markets: Vec<MarketInfo>,
 }
 
-/// An entry intent. `price` is a LIMIT price; the kernel validates against the
-/// live book, sizes the order and owns submission.
+/// One round token's book as delivered in the evaluation context, with the
+/// host's freshness verdict. `fresh` carries the SAME gate an in-tree strategy
+/// gets from `StrategyCtx::fresh_book`: the book is non-empty and younger than
+/// the configured max staleness, i.e. safe to price off.
+#[derive(Debug, Clone)]
+pub struct FreshBook {
+    pub book: BookUpdate,
+    pub fresh: bool,
+}
+
+/// An entry intent. `price` is a LIMIT price as an exact decimal string; the
+/// kernel validates against the live book, sizes the order and owns submission.
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub token: String,
-    pub price: f64,
+    pub price: String,
     pub reason: String,
 }
 
@@ -94,11 +114,12 @@ pub struct Exit {
     pub reason: String,
 }
 
-/// A trend break (the kernel cancels the token's resting bids).
+/// A trend break (the kernel cancels the token's resting bids). `broken_price`
+/// is an exact decimal string.
 #[derive(Debug, Clone)]
 pub struct Break {
     pub token: String,
-    pub broken_price: f64,
+    pub broken_price: String,
 }
 
 /// The intents one `evaluate` call produces. Default = nothing.
@@ -127,11 +148,17 @@ pub struct Knob {
 }
 
 /// Host config / shadow-evolution hot params, values kept as the ABI's decimal
-/// strings. Helper accessors coerce to f64 on demand.
+/// strings. Helper accessors coerce to exact decimals on demand; `get_f64`
+/// exists only for display-style knobs and must NOT be used for prices.
 #[derive(Debug, Clone, Default)]
 pub struct ParamBag(pub HashMap<String, String>);
 
 impl ParamBag {
+    /// Exact decimal value of a knob (prices/sizes/factors: use this).
+    pub fn get_dec(&self, key: &str) -> Option<rust_decimal::Decimal> {
+        rust_decimal::Decimal::from_str_exact(self.0.get(key)?.trim()).ok()
+    }
+    /// Lossy f64 view. Display and sanity checks only — never price arithmetic.
     pub fn get_f64(&self, key: &str) -> Option<f64> {
         self.0.get(key)?.parse().ok()
     }
@@ -153,6 +180,13 @@ pub trait SafeStrategy: Send + 'static {
 
     /// Called on EVERY book/top-of-book update.
     fn on_book(&mut self, update: &BookUpdate);
+
+    /// Called immediately before every `evaluate` (and every diagnostics
+    /// collection) with each round token's book and the host's freshness
+    /// verdict — the data form of the in-tree `StrategyCtx::fresh_book` gate.
+    /// Price entries ONLY off books whose `fresh` is true, exactly like an
+    /// in-tree strategy does. Default: no-op (books from `on_book` still work).
+    fn on_eval_books(&mut self, _books: &[FreshBook]) {}
 
     /// Called when a round starts. Default: no-op.
     fn on_round(&mut self, _round: RoundInfo) {}
@@ -206,10 +240,17 @@ pub unsafe fn cstr(p: *const c_char) -> Option<String> {
         .ok()
         .map(|s| s.to_string())
 }
+
 /// # Safety
-/// Same contract as [`cstr`]: `p` is a borrowed NUL-terminated decimal string.
-pub unsafe fn num(p: *const c_char) -> Option<f64> {
-    unsafe { cstr(p) }.and_then(|s| s.parse().ok())
+/// `p` must point at a valid NUL-terminated string (or be null), borrowed for
+/// the call — the ABI's read-only borrow rule.
+///
+/// A borrowed decimal field kept as its STRING — no numeric conversion at the
+/// boundary. The strategy parses with [`dec`]/`rust_decimal` when it needs a
+/// number.
+pub unsafe fn field(p: *const c_char) -> Option<String> {
+    // SAFETY: caller guarantees the borrowed-NUL contract above.
+    unsafe { cstr(p) }
 }
 
 pub fn json_bytes_to_out_unused(v: &serde_json::Value) -> *mut c_char {
@@ -246,14 +287,14 @@ pub fn parse_book(view: &crate::BkBookView) -> BookUpdate {
         BookUpdate {
             symbol: cstr(view.symbol).unwrap_or_default(),
             asset: cstr(view.asset).unwrap_or_default(),
-            best_bid: num(view.best_bid),
-            best_ask: num(view.best_ask),
-            mid: num(view.mid),
-            bid_depth: num(view.bid_depth),
-            ask_depth: num(view.ask_depth),
-            obi: num(view.obi),
-            spread: num(view.spread),
-            spread_pct: num(view.spread_pct),
+            best_bid: field(view.best_bid),
+            best_ask: field(view.best_ask),
+            mid: field(view.mid),
+            bid_depth: field(view.bid_depth),
+            ask_depth: field(view.ask_depth),
+            obi: field(view.obi),
+            spread: field(view.spread),
+            spread_pct: field(view.spread_pct),
             timestamp_ms: view.timestamp_ms,
             bid_levels: if view.bids.is_null() {
                 0
@@ -267,6 +308,37 @@ pub fn parse_book(view: &crate::BkBookView) -> BookUpdate {
             },
         }
     }
+}
+
+/// Parse the OPTIONAL bound evaluation context into the safe layer's
+/// `(token, FreshBook)` rows. Empty when the kernel did not bind a context (an
+/// older kernel, or a library without the binder symbol).
+///
+/// # Safety
+/// `ctx` must be a valid borrowed `BkEvalCtx` (or null), live for the call.
+pub unsafe fn parse_eval_ctx(ctx: *const crate::BkEvalCtx) -> Vec<(String, FreshBook)> {
+    if ctx.is_null() {
+        return Vec::new();
+    }
+    let c = unsafe { &*ctx };
+    if c.books.is_null() || c.book_count == 0 {
+        return Vec::new();
+    }
+    // SAFETY: host guarantees `book_count` BkTokenBook entries live for the
+    // borrow window.
+    unsafe { std::slice::from_raw_parts(c.books, c.book_count) }
+        .iter()
+        .filter_map(|tb| {
+            let token = unsafe { cstr(tb.token) }?;
+            Some((
+                token,
+                FreshBook {
+                    book: parse_book(&tb.book),
+                    fresh: tb.fresh != 0,
+                },
+            ))
+        })
+        .collect()
 }
 
 /// Expose a [`SafeStrategy`] as a full Blitzkrieg C ABI v2 dylib.
@@ -297,10 +369,10 @@ macro_rules! export_strategy {
         #[allow(non_snake_case)]
         mod __bk_export {
             type Strategy = $type;
-            use $crate::shell::{cstr, json_out, parse_book, parse_params};
+            use $crate::shell::{cstr, json_out, parse_book, parse_eval_ctx, parse_params};
             use $crate::{
-                BkBookView, BkHandle, BkRoundView, BkStrategyVtable, SafeStrategy, BK_ABI_VERSION,
-                BK_MIN_ABI_VERSION,
+                BkBookView, BkEvalCtx, BkHandle, BkRoundView, BkStrategyVtable, FreshBook,
+                SafeStrategy, BK_ABI_VERSION, BK_MIN_ABI_VERSION,
             };
             use core::ffi::c_char;
             use std::collections::HashMap;
@@ -308,13 +380,39 @@ macro_rules! export_strategy {
             struct Shell {
                 inner: Strategy,
                 books: HashMap<String, $crate::BookUpdate>,
+                /// The evaluation-context rows bound by the host for the CURRENT
+                /// call, kept owned so the strategy can read them for the whole
+                /// hook invocation (the raw context is only borrowed for the
+                /// bind call itself).
+                eval_books: Vec<(String, FreshBook)>,
             }
             impl Shell {
                 fn new() -> Self {
                     Self {
                         inner: <Strategy as ::std::default::Default>::default(),
                         books: HashMap::new(),
+                        eval_books: Vec::new(),
                     }
+                }
+                /// Refresh the freshness rows for this call from the borrowed
+                /// context, then hand a copy to the strategy. Empty when no
+                /// context was bound (kernel predates the binder symbol).
+                /// Unbinding (null) only ends the borrow window: the rows the
+                /// strategy already received stay its own — an empty push on
+                /// unbind would erase state the strategy never asked to drop.
+                fn bind_eval_ctx(&mut self, ctx: *const BkEvalCtx) {
+                    if ctx.is_null() {
+                        self.eval_books.clear();
+                        return;
+                    }
+                    // SAFETY: the host's borrowed context is valid for this call.
+                    self.eval_books = unsafe { parse_eval_ctx(ctx) };
+                    let rows: Vec<$crate::FreshBook> = self
+                        .eval_books
+                        .iter()
+                        .map(|(_, b)| b.clone())
+                        .collect();
+                    self.inner.on_eval_books(&rows);
                 }
             }
             unsafe impl Send for Shell {}
@@ -385,7 +483,7 @@ macro_rules! export_strategy {
                     .map(|e| {
                         serde_json::json!({
                             "token": e.token,
-                            "price": format!("{}", e.price),
+                            "price": e.price,
                             "reason": e.reason,
                         })
                     })
@@ -401,7 +499,7 @@ macro_rules! export_strategy {
                     .map(|b| {
                         serde_json::json!({
                             "token": b.token,
-                            "broken_price": format!("{}", b.broken_price),
+                            "broken_price": b.broken_price,
                         })
                     })
                     .collect();
@@ -437,6 +535,25 @@ macro_rules! export_strategy {
                     serde_json::to_string(&s.inner.diagnostics())
                         .unwrap_or_else(|_| "[]".into()),
                 )
+            }
+            /// OPTIONAL symbol `bk_strategy_bind_eval_ctx` (E-parity): the host
+            /// binds the borrowed context before `evaluate`/`diagnostics` and
+            /// unbinds (null) after. The shell converts it to owned rows once —
+            /// inside the strategy's borrow window — and hands them to
+            /// [`SafeStrategy::on_eval_books`].
+            unsafe extern "C" fn bind_eval_ctx(handle: BkHandle, ctx: *const BkEvalCtx) {
+                if handle.is_null() {
+                    return;
+                }
+                let s = unsafe { &mut *(handle as *mut Shell) };
+                s.bind_eval_ctx(ctx);
+            }
+            /// OPTIONAL symbol `bk_strategy_config_view`: reports the config
+            /// currently in force. The safe layer has no config model of its
+            /// own (the strategy owns `on_params`), so without cooperation the
+            /// honest answer is "nothing declared" (null = omitted upstream).
+            extern "C" fn config_view(_handle: BkHandle) -> *mut c_char {
+                core::ptr::null_mut()
             }
             unsafe extern "C" fn on_config(handle: BkHandle, json: *const c_char) -> i32 {
                 let Some(j) = (unsafe { cstr(json) }) else { return 1 };
@@ -576,6 +693,17 @@ macro_rules! export_strategy {
             pub extern "C" fn bk_strategy_evolvable_knobs(handle: BkHandle) -> *mut c_char {
                 unsafe { evolvable_knobs(handle) }
             }
+            #[unsafe(no_mangle)]
+            pub extern "C" fn bk_strategy_bind_eval_ctx(handle: BkHandle, ctx: *const BkEvalCtx) {
+                unsafe { bind_eval_ctx(handle, ctx) }
+            }
+            #[unsafe(no_mangle)]
+            pub extern "C" fn bk_strategy_config_view(handle: BkHandle) -> *mut c_char {
+                // config_view is a plain (safe) hook; the wrapper must not be
+                // marked unsafe or the exported symbol's contract looks scarier
+                // than it is.
+                config_view(handle)
+            }
         }
     };
 }
@@ -589,7 +717,10 @@ macro_rules! export_strategy {
 #[cfg(test)]
 #[derive(Default)]
 struct Doubler {
-    mids: Vec<(String, f64)>,
+    mids: Vec<(String, String)>,
+    /// Freshness rows from the last bound evaluation context.
+    last_fresh: usize,
+    last_fresh_count: usize,
 }
 #[cfg(test)]
 impl SafeStrategy for Doubler {
@@ -600,9 +731,13 @@ impl SafeStrategy for Doubler {
         "0.2.0"
     }
     fn on_book(&mut self, u: &BookUpdate) {
-        if let Some(m) = u.mid {
+        if let Some(m) = u.mid.clone() {
             self.mids.push((u.symbol.clone(), m));
         }
+    }
+    fn on_eval_books(&mut self, books: &[FreshBook]) {
+        self.last_fresh_count = books.len();
+        self.last_fresh = books.iter().filter(|b| b.fresh).count();
     }
     fn evaluate(&mut self, ctx: &RoundContext) -> Intents {
         let mut out = Intents::none();
@@ -611,7 +746,7 @@ impl SafeStrategy for Doubler {
                 if let Some((_, mid)) = self.mids.iter().find(|(s, _)| s == token) {
                     out.entries.push(Entry {
                         token: token.clone(),
-                        price: *mid,
+                        price: mid.clone(),
                         reason: "doubler_mid".into(),
                     });
                 }
@@ -623,7 +758,9 @@ impl SafeStrategy for Doubler {
         self.mids.iter().map(|(s, _)| s.clone()).collect()
     }
     fn diagnostics(&self) -> Vec<serde_json::Value> {
-        vec![serde_json::json!({ "books_seen": self.mids.len() })]
+        vec![
+            serde_json::json!({ "books_seen": self.mids.len(), "bound": self.last_fresh_count, "bound_fresh": self.last_fresh }),
+        ]
     }
     fn evolvable_knobs(&self) -> Vec<Knob> {
         vec![Knob {
@@ -713,6 +850,48 @@ mod tests {
             markets: &market,
             market_count: 1,
         };
+        // 4a. bind an evaluation context: one fresh book + one stale book.
+        let book2 = crate::BkBookView {
+            symbol: sym.as_ptr(),
+            asset: c"BTC".as_ptr(),
+            bids: &lvl,
+            bid_count: 1,
+            asks: &lvl,
+            ask_count: 1,
+            best_bid: bb.as_ptr(),
+            best_ask: ba.as_ptr(),
+            mid: mid.as_ptr(),
+            bid_depth: depth.as_ptr(),
+            ask_depth: depth.as_ptr(),
+            obi: zero.as_ptr(),
+            spread: zero.as_ptr(),
+            spread_pct: zero.as_ptr(),
+            timestamp_ms: 8,
+        };
+        let tbooks = [
+            crate::BkTokenBook {
+                token: sym.as_ptr(),
+                book: book2,
+                fresh: 1,
+            },
+            crate::BkTokenBook {
+                token: c"DOWN".as_ptr(),
+                book: book2,
+                fresh: 0,
+            },
+        ];
+        // A second view value for the context (BkRoundView is not Copy).
+        let rv_for_ctx = BkRoundView {
+            round,
+            markets: &market,
+            market_count: 1,
+        };
+        let ectx = crate::BkEvalCtx {
+            view: rv_for_ctx,
+            books: tbooks.as_ptr(),
+            book_count: 2,
+        };
+        super::__bk_export::bk_strategy_bind_eval_ctx(handle, &ectx);
         let out_raw = unsafe { (vt.evaluate.expect("evaluate hook"))(handle, &rv) };
         assert!(!out_raw.is_null(), "evaluate returned null");
         let out = unsafe { CStr::from_ptr(out_raw) }
@@ -725,6 +904,8 @@ mod tests {
         assert_eq!(entries[0]["token"], "UP");
         assert_eq!(entries[0]["price"], "0.5");
         assert_eq!(entries[0]["reason"], "doubler_mid");
+        // 4b. unbind (null) must be accepted and clear the borrow window.
+        super::__bk_export::bk_strategy_bind_eval_ctx(handle, std::ptr::null());
 
         // 5. optional hooks emit the declared shapes.
         let conf = super::__bk_export::bk_strategy_gate_exemptions(handle);
@@ -736,13 +917,17 @@ mod tests {
         assert_eq!(conf_v["timing"], serde_json::json!(true), "{conf_s}");
         assert_eq!(conf_v["momentum"], serde_json::json!(false), "{conf_s}");
 
-        // 6. diagnostics round-trip.
+        // 6. diagnostics round-trip, including the bound evaluation rows.
         let d_raw = unsafe { (vt.diagnostics.expect("diagnostics"))(handle) };
         let d = unsafe { CStr::from_ptr(d_raw) }
             .to_string_lossy()
             .into_owned();
         unsafe { crate::bk_strategy_free_string(d_raw) };
         assert!(d.contains("books_seen"), "{d}");
+        // The context bound in 4a reached the strategy: 2 rows, 1 fresh.
+        let dv: serde_json::Value = serde_json::from_str(&d).expect("diagnostics json");
+        assert_eq!(dv[0]["bound"], 2, "{d}");
+        assert_eq!(dv[0]["bound_fresh"], 1, "{d}");
 
         // 7. destroy must not leak/crash.
         unsafe { (vt.destroy.expect("destroy"))(handle) };

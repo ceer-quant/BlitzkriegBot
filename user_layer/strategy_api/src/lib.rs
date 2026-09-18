@@ -41,6 +41,8 @@
 //! ```c
 //! char* bk_strategy_gate_exemptions(void* handle);    // {"timing":b,"momentum":b}
 //! char* bk_strategy_evolvable_knobs(void* handle);    // {"knobs":[{name,value,min,max}]}
+//! void  bk_strategy_bind_eval_ctx(void* h, const BkEvalCtx*);  // fresh-book gate
+//! char* bk_strategy_config_view(void* handle);        // config in force, JSON
 //! ```
 
 use core::ffi::{c_char, c_void};
@@ -94,6 +96,41 @@ pub const BK_EVOLVABLE_KNOBS_SYMBOL: &[u8] = b"bk_strategy_evolvable_knobs\0";
 /// Signature of the optional [`BK_EVOLVABLE_KNOBS_SYMBOL`] entry point.
 pub type BkEvolvableKnobsFn = unsafe extern "C" fn(handle: BkHandle) -> *mut c_char;
 
+/// Symbol name for the OPTIONAL evaluation-context binder:
+/// `void bk_strategy_bind_eval_ctx(void* handle, const BkEvalCtx* ctx)`.
+///
+/// E-parity: the ONE capability an in-tree strategy has that raw ABI v2 lacked —
+/// the host's fresh-book gate. An in-tree strategy prices only off
+/// `StrategyCtx::fresh_book(token)`, which yields nothing for a book too stale
+/// to price off; an external strategy previously received every book with no way
+/// to apply the same rule. The binder closes that gap the same way the optional
+/// exemption/knob symbols do — a separate symbol, the vtable untouched, an old
+/// library simply never bound to a context.
+///
+/// The kernel calls `bind(ctx)` immediately before `evaluate` (and before
+/// `diagnostics`), then `bind(null)` after the call returns. The context (and
+/// every pointer inside it) is BORROWED and valid ONLY inside that window — a
+/// strategy that wants the books later must copy what it needs.
+pub const BK_BIND_EVAL_CTX_SYMBOL: &[u8] = b"bk_strategy_bind_eval_ctx\0";
+
+/// Signature of the optional [`BK_BIND_EVAL_CTX_SYMBOL`] entry point. `ctx` is
+/// null to end the borrow window (unbind).
+pub type BkBindEvalCtxFn = unsafe extern "C" fn(handle: BkHandle, ctx: *const BkEvalCtx);
+
+/// Symbol name for the OPTIONAL effective-config reporter:
+/// `char* bk_strategy_config_view(void* handle)` returning arbitrary JSON
+/// describing the config currently in force (defaults + accepted hot
+/// parameters), for observability surfaces such as `engine.stats`.
+///
+/// This is the general form of what the in-tree `spread_arb` exposed through its
+/// `spread_arb_view()` hook: what a strategy is ACTUALLY running with, reported
+/// by the strategy itself. Absent symbol / null / malformed JSON = "declares
+/// nothing" and the field is omitted.
+pub const BK_CONFIG_VIEW_SYMBOL: &[u8] = b"bk_strategy_config_view\0";
+
+/// Signature of the optional [`BK_CONFIG_VIEW_SYMBOL`] entry point.
+pub type BkConfigViewFn = unsafe extern "C" fn(handle: BkHandle) -> *mut c_char;
+
 /// One price/size level of the order book. Both are decimal strings.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -108,6 +145,7 @@ pub struct BkLevel {
 /// `OrderbookSnapshot::from_levels` path the kernel and in-tree strategies use,
 /// so an external strategy observes identical numbers.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct BkBookView {
     /// Token/contract identifier (borrowed).
     pub symbol: *const c_char,
@@ -161,6 +199,36 @@ pub struct BkRoundView {
     pub round: BkRound,
     pub markets: *const BkMarket,
     pub market_count: usize,
+}
+
+/// One round token's book as bound through [`BkEvalCtx`], with the host's
+/// freshness verdict. `fresh != 0` means the snapshot passed the SAME
+/// staleness rule the kernel applies to in-tree strategies
+/// (non-empty book, younger than the configured max staleness): pricing off a
+/// non-fresh book is a stale-price bug the host gate exists to prevent.
+#[repr(C)]
+pub struct BkTokenBook {
+    /// Token the view belongs to (borrowed, NUL-terminated).
+    pub token: *const c_char,
+    pub book: BkBookView,
+    /// 1 = fresh enough to price off. Never anything else in this version.
+    pub fresh: u8,
+}
+
+/// The OPTIONAL evaluation context an in-tree strategy receives as
+/// `StrategyCtx`, bound through [`BK_BIND_EVAL_CTX_SYMBOL`]. Borrowed: valid
+/// only between `bind(ctx)` and the host's `bind(null)`.
+///
+/// `view` is the same round view `evaluate` already receives; `books` carries
+/// exactly the PRICEABLE books of the round (`fresh = 1`), the data form of
+/// `StrategyCtx::fresh_book` returning `Some`. A token with NO row here is
+/// "not priceable right now" — a stale or missing book — and pricing an entry
+/// off it is a bug the in-tree gate exists to prevent; a strategy must not.
+#[repr(C)]
+pub struct BkEvalCtx {
+    pub view: BkRoundView,
+    pub books: *const BkTokenBook,
+    pub book_count: usize,
 }
 
 /// Opaque per-instance state owned by the strategy.
@@ -269,12 +337,12 @@ pub unsafe extern "C" fn bk_strategy_free_string(p: *mut c_char) {
 // stays available for full-control authors (dog_strategy) and for the kernel.
 pub mod safe;
 pub use safe::{
-    BookUpdate, Break, Entry, Exit, Intents, Knob, MarketInfo, ParamBag, RoundContext, RoundInfo,
-    SafeStrategy,
+    BookUpdate, Break, Entry, Exit, FreshBook, Intents, Knob, MarketInfo, ParamBag, RoundContext,
+    RoundInfo, SafeStrategy, dec,
 };
 
 /// Shell helpers the generated `__bk_export` module imports via `$crate::shell`.
 #[doc(hidden)]
 pub mod shell {
-    pub use crate::safe::{cstr, json_out, parse_book, parse_params};
+    pub use crate::safe::{cstr, field, json_out, parse_book, parse_eval_ctx, parse_params};
 }

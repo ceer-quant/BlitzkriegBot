@@ -35,6 +35,10 @@ v2 外壳），不是一套残废接口。
 | 自证可进化旋钮 | （E2-c） | ❌ | ✅ knobs() JSON Schema 片段 |
 | 配置变更 on_config | ✅ | ❌ | ✅ on_config(JSON) |
 | 入场闸门自声明豁免（E2-b） | ✅ trait 默认无豁免 | ❌ | ✅ 可选符号 `bk_strategy_gate_exemptions`（§3.5） |
+| 新鲜盘口门（E-parity） | ✅ `StrategyCtx::fresh_book` | ❌ | ✅ 可选符号 `bk_strategy_bind_eval_ctx`（§3.6） |
+| 评估期真实计时 | ✅ `ctx.time_left_sec`/`now_ms` | ❌ 曾填 0 | ✅ `BkRound` 原生携带 |
+| 诊断带评估上下文 | ✅ `diagnostics(&ctx)` | ❌ | ✅ 诊断调用前绑定同一 eval ctx（§3.6） |
+| 配置生效视图 | ✅ `spread_arb_view` | ❌ | ✅ 可选符号 `bk_strategy_config_view`（§3.6） |
 
 ## 3. ABI v2 二进制契约（crate `blitzkrieg-strategy-api`，版本 2）
 
@@ -59,7 +63,6 @@ typedef struct {
 } bk_book_view_t;
 
 typedef struct { int64_t slot; int64_t time_left_sec; int64_t now_ms; } bk_round_t;
-
 typedef struct {
   const char* asset; const char* condition_id; const char* question_id;
   const char* up_token; const char* down_token;
@@ -70,6 +73,18 @@ typedef struct {
   bk_round_t round;
   const bk_market_t* markets; size_t market_count;
 } bk_round_view_t;
+
+// E-parity（§3.6）：评估期借出的「新鲜盘口」上下文。
+typedef struct {
+  const char* token;      // 该行盘口所属 token
+  bk_book_view_t book;    // 完整档位视图
+  uint8_t fresh;          // 恒为 1（宿主只装订可定价的行）
+} bk_token_book_t;
+
+typedef struct {
+  bk_round_view_t view;
+  const bk_token_book_t* books; size_t book_count;
+} bk_eval_ctx_t;
 ```
 
 档位的排序、深度、OBI、spread 全部由**宿主**用 `OrderbookSnapshot::from_levels`
@@ -159,11 +174,19 @@ char* bk_strategy_gate_exemptions(void* handle); // {"timing":bool,"momentum":bo
 // E2-c：策略自证它的可进化旋钮与取值域（见 STRATEGY_GUIDE §3.6）
 char* bk_strategy_evolvable_knobs(void* handle);
 // {"knobs":[{"name":"trendMaxEntryPrice","value":"0.43","min":"0.05","max":"0.90"}]}
+
+// E-parity（§3.6）：评估期借出「轮次视图 + 可定价盘口」，语义=树内 fresh_book
+void bk_strategy_bind_eval_ctx(void* handle, const bk_eval_ctx_t* ctx); // ctx=NULL=解除装订
+
+// E-parity（§3.6）：策略自证「当前生效配置」（树内 spread_arb_view 的泛化）
+char* bk_strategy_config_view(void* handle);
 ```
 
 符号常量在 `blitzkrieg-strategy-api`：
 `BK_GATE_EXEMPTIONS_SYMBOL = b"bk_strategy_gate_exemptions\0"`、
-`BK_EVOLVABLE_KNOBS_SYMBOL = b"bk_strategy_evolvable_knobs\0"`。
+`BK_EVOLVABLE_KNOBS_SYMBOL = b"bk_strategy_evolvable_knobs\0"`、
+`BK_BIND_EVAL_CTX_SYMBOL = b"bk_strategy_bind_eval_ctx\0"`、
+`BK_CONFIG_VIEW_SYMBOL = b"bk_strategy_config_view\0"`。
 
 loader 用 `lib.get::<T>(BK_..._SYMBOL).ok()` 解析：**符号缺失 = 该项未声明**，
 旧库行为与「使用 trait 默认实现」的树内策略逐位一致，`BK_ABI_VERSION` /
@@ -178,6 +201,36 @@ loader 用 `lib.get::<T>(BK_..._SYMBOL).ok()` 解析：**符号缺失 = 该项�
   绝不按「更宽松」解释。
 - 只有当某个能力无法用「符号缺失即无操作」表达（例如必填输入的布局变化）时，
   才允许升级 v3；单纯的输出型新能力永远走可选符号。
+
+### 3.6 E-parity：评估上下文装订与配置生效视图（issue #38 E7 收尾）
+
+E7 的承诺是「外挂只是换一种加载方式，而不是换一套能力」。落到代码上还剩三项
+能力差异，全部以 v2 可选符号补齐，`BK_ABI_VERSION` / `BK_MIN_ABI_VERSION` 仍为 2：
+
+**① 新鲜盘口门** — 树内策略经 `StrategyCtx::fresh_book(token)` 拿到的盘口带
+宿主的新鲜度裁决（非空且未超 `max_orderbook_stale_ms` 预算才算可定价；过期与
+缺失不可区分，一律 `None`）。外挂策略通过导出
+`void bk_strategy_bind_eval_ctx(void* handle, const bk_eval_ctx_t* ctx)` 获得同一
+裁决：宿主在**每次** `evaluate` 与 diagnostics 调用**之前**，装订一个借用的
+`bk_eval_ctx_t`（轮次视图 + **仅可定价**的盘口行，行内 `fresh` 恒为 1），调用
+结束后装订 `NULL` 关闭借用窗口——上下文只在当次回调内有效，策略不得保存指针。
+某 token 没有对应行 = 「此刻不可定价」，与树内 `fresh_book(..) == None` 逐位同义。
+安全模板（`safe.rs`）把它接成 `on_eval_books(&[FreshBook])` 钩子，作者无需碰 ABI。
+
+**② 评估期真实计时** — `on_round`/evaluate 的 `BkRound` 本就携带
+`time_left_sec` / `now_ms`；内核曾向 foreign 策略填 0（已修复）：引擎现在用
+`scanner.round_state(now_ms).time_left_sec` 计算真实剩余秒数，树内与外挂看到
+完全相同的时钟。
+
+**③ 配置生效视图** — 树内 builtin 可覆写 `spread_arb_view`（in-force 配置的
+只读视图）。外挂策略通过导出 `char* bk_strategy_config_view(void* handle)`
+返回任意 JSON（热参叠加后的实际生效值）。缺失符号 / NULL / 非法 UTF-8 = 未声明，
+`engine.strategy_config_views()` 不列该策略；首个真实载体是 parity 库，其
+in-tree 孪生与 dylib 的视图在 `foreign_parity` 中被要求完全相等。
+
+诊断同理：foreign 库的 diagnostics 钩子被调用前，宿主装订与 evaluate 完全相同的
+评估上下文——一个诊断因此可以像树内 `diagnostics(&ctx)` 一样报告新鲜度裁决后
+的值。
 
 ## 4. 出场意图如何接进内核（不失控）
 

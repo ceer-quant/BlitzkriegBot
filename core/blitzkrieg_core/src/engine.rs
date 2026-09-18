@@ -383,8 +383,11 @@ impl Engine {
             }
             DataEvent::RoundMarkets { markets, now_ms } => {
                 let slot = markets.first().map(|m| m.round_slot).unwrap_or(0);
+                // Real round timing for the transition: how much of the round
+                // was left at this instant, straight from the scanner.
+                let time_left_sec = self.scanner.round_state(now_ms).time_left_sec;
                 for s in &mut self.strategies {
-                    s.strategy.on_round(slot);
+                    s.strategy.on_round(slot, time_left_sec, now_ms);
                 }
                 self.pending_tokens.clear();
                 self.scanner.set_markets(markets);
@@ -708,6 +711,22 @@ impl Engine {
             .iter()
             .find_map(|s| s.strategy.spread_arb_view())
             .unwrap_or_default()
+    }
+
+    /// Per-strategy config-in-force views as (name, JSON string) for every
+    /// strategy that reports one (observability). An external library reports
+    /// through its OPTIONAL `bk_strategy_config_view` symbol, an in-tree
+    /// strategy by overriding the trait method; strategies that declare nothing
+    /// are simply absent.
+    pub fn strategy_config_views(&self) -> Vec<(String, String)> {
+        self.strategies
+            .iter()
+            .filter_map(|s| {
+                s.strategy
+                    .config_view_json()
+                    .map(|v| (s.strategy.name().to_string(), v))
+            })
+            .collect()
     }
 
     /// Strategy names the engine knows about, in registration order (the
@@ -1424,7 +1443,7 @@ mod tests {
             _now_ms: i64,
         ) {
         }
-        fn on_round(&mut self, _slot: i64) {}
+        fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
         fn gate_exemptions(&self) -> GateExemptions {
             self.gates
         }
