@@ -237,6 +237,15 @@ jobs:
           node scripts/market-plugin-check.mjs
           node scripts/trade-log-flag-check.mjs
           node scripts/tui-demo-check.mjs
+      # KI-24: the `data/` backup mechanism, which did not exist when a
+      # destructive-path bug emptied the working tree on 2026-09-17. The gate
+      # leads with the REFUSAL branches (backing up into the repo, a recursive
+      # source/dest nest, a symlinked destination) because that incident happened
+      # precisely because the destructive path was exercised before the guard was
+      # verified. It runs entirely on a throwaway fixture and never reads the real
+      # data/. Blitzkrieg-core is only needed to have been built above, not here.
+      - name: data-backup safety gate (KI-24)
+        run: node scripts/data-backup-check.mjs
 
   # E10-e: the third size target — the *deliverable* ≤ 500 MB — is the one that
   # cannot be read off the working tree. A developer checkout legitimately holds

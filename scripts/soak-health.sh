@@ -20,7 +20,9 @@ QUIET=0
 # Resolve repo root from this script's location (works from any cwd).
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
-[ -f package.json ] || { echo "ANOMALY: not in BlitzkriegBot root ($ROOT)"; exit 2; }
+# Markers that survive the Node-layer removal: `package.json` was deleted with
+# it, so guarding on that (as this line once did) refuses to run in its own tree.
+[ -f Cargo.toml ] && [ -d .git ] || { echo "ANOMALY: not in BlitzkriegBot root ($ROOT)"; exit 2; }
 
 problems=()
 note() { [ "$QUIET" -eq 1 ] || echo "$@"; }
