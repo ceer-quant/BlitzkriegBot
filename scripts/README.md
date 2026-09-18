@@ -31,6 +31,8 @@ cargo build --release --workspace --locked
 | `shutdown-cleanliness-check.mjs` | Stop means the core is gone and resting orders settled |
 | `parent-monitor-check.mjs` | No orphaned core after the driver exits |
 | `readonly-egress-check.mjs` | `--readonly` is structural: live mode + credentials still cannot trade |
+| `unified-launcher-check.mjs` | Single binary `blitzkrieg`: `run` starts both parts, subcommands dispatch, `--readonly` holds |
+| `data-backup-check.mjs` | `data/` backup refuses dangerous destinations, self-verifies, prunes only its own dirs |
 | `crash-recovery-check.mjs` | SIGKILL a live core → in-flight settles, replacement serves the socket |
 | `webapp-check.mjs` | Panel: bundle served, auth both ways, CSRF, snapshot non-empty |
 | `backtest-check.mjs` | Event-driven backtest: archive → offline replay → bit-identical |
@@ -50,6 +52,26 @@ cargo build --release --workspace --locked
 - `price-compare.mjs` / `reconcile-exits.mjs` / `sweep-exits.mjs` / `final-exit-opt.mjs` — pricing and exit sweeps.
 - `account-drift-check.mjs` — live panel/account drift diagnosis.
 - `blitzkrieg-new-strategy.mjs` — scaffold a new cdylib strategy under `user_layer/strategies/`.
+
+## Data safety
+
+- `data-backup.sh --dest <dir> [--keep N] [--exclude-archive] [--dry-run]` —
+  verified, external backup of `data/`. `--dest` is mandatory and validated: a
+  destination inside the repository is refused, because a copy that dies with the
+  repo is not a backup. Each backup carries a `MANIFEST.sha256` of the source (so
+  "the backup is good" is checkable), a `data.tar.gz`, and a `BACKUP.json`
+  recording the repo revision. Pruning matches only strict
+  `blitzkrieg-data-<UTCSTAMP>` names and skips rather than deletes anything that
+  fails a guard (symlink, foreign name, not directly under `--dest`).
+  `--verify <dir>` re-hashes the archive and every manifest entry against it.
+  `--exclude-archive` drops `data/archive` (95%+ of the bytes) for a fast, light
+  backup; the manifest is narrowed to match, so a light backup still verifies.
+  It is the mechanism KI-24 found missing after the 2026-09-17 incident.
+- `data-backup-check.mjs` — the safety gate for the above. Leads with the refusal
+  branches (missing/nonexistent/symlinked `--dest`, repo-internal dest, recursive
+  nest) before ever exercising a real backup, since the incident happened because
+  the destructive path was tested before the guard was. Runs on a throwaway
+  fixture; the real `data/` is never read or written.
 
 ## Packaging / CI helpers
 
