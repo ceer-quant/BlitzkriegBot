@@ -7,10 +7,40 @@
 # scheduler (launchd/cron) so monitoring runs 24/7 for free; only escalate to an
 # agent when it exits non-zero.
 #
+# The whole value of this script is that its exit code can be trusted, so every
+# check below is written to be *able to fail*. KI-30: five of them could not —
+# a probe of a route that never existed (permanently red), scans of a file that
+# no longer exists (silently skipped, forever green), and a process check against
+# a sampler with a bounded lifetime. An alarm that is always on and a check that
+# can never fire are the same defect: no signal. The gate
+# `scripts/soak-health-check.mjs` injects each failure instead of only walking
+# the happy path.
+#
 # Usage:  scripts/soak-health.sh [--quiet]
 # Exit:   0 = healthy, 1 = anomaly (details on stdout), 2 = not in repo root
 #
-# Read-only: it never restarts or kills anything.
+# Read-only: it never restarts or kills anything, and never writes anything.
+#
+# Overridable seams. Every one exists so the gate can drive the failure branches
+# with fixtures; each defaults to the real deployment.
+#   BK_CORE_PGREP       pgrep pattern for the core process
+#                       (default: target/release/blitzkrieg-core)
+#   BK_SOCKET           core UDS path; derived from the running core's own argv
+#                       when unset (the argv is authoritative — no second copy of
+#                       the socket-naming contract lives here)
+#   BK_PANEL_URL        panel base URL (default: http://127.0.0.1:51888)
+#   BK_SOAK_DIR         soak sample directory (default: data/soak)
+#   BK_SOAK_STALE_SEC   sampling staleness bound (default: 1800 = 3x the
+#                       monitor's 600s default interval)
+#   BK_ARCH_DIR         market-data archive dir (default: data/archive)
+#   BK_TRADES           trade ledger (default: data/trades/trades.jsonl)
+#   BK_RUN_LOG          log to scan for panics / archive-stop. UNSET means "not
+#                       configured" and is reported as such: the path is a
+#                       deployment choice, because the core's stdout is
+#                       /dev/null and its stderr is inherited, so only the
+#                       operator's redirect knows where the log is. Scanning a
+#                       hardcoded path that nothing writes is a check that can
+#                       never fire.
 
 set -uo pipefail
 
@@ -24,36 +54,111 @@ cd "$ROOT" || exit 2
 # it, so guarding on that (as this line once did) refuses to run in its own tree.
 [ -f Cargo.toml ] && [ -d .git ] || { echo "ANOMALY: not in BlitzkriegBot root ($ROOT)"; exit 2; }
 
+CORE_PGREP=${BK_CORE_PGREP:-target/release/blitzkrieg-core}
+PANEL_URL=${BK_PANEL_URL:-http://127.0.0.1:51888}
+SOAK_DIR=${BK_SOAK_DIR:-data/soak}
+SOAK_STALE_SEC=${BK_SOAK_STALE_SEC:-1800}
+RUN_LOG=${BK_RUN_LOG:-}
+
 problems=()
 note() { [ "$QUIET" -eq 1 ] || echo "$@"; }
 
 # ── 1. processes ────────────────────────────────────────────────────────────
-core_n=$(pgrep -f "target/release/blitzkrieg-core" 2>/dev/null | wc -l | tr -d ' ')
-soak_n=$(pgrep -f "soak-monitor" 2>/dev/null | wc -l | tr -d ' ')
-
-[ "$soak_n" -ge 1 ] || problems+=("soak-monitor not running")
-if [ "$core_n" -eq 0 ]; then
-  problems+=("blitzkrieg-core not running")
-elif [ "$core_n" -gt 1 ]; then
-  problems+=("$core_n blitzkrieg-core instances (expected 1)")
+core_pids=$(pgrep -f "$CORE_PGREP" 2>/dev/null | tr '\n' ' ')
+core_pids=${core_pids% }
+if [ -z "$core_pids" ]; then
+  core_n=0
+elif [ "${core_pids#* }" = "$core_pids" ]; then
+  core_n=1
+else
+  core_n=$(printf '%s\n' $core_pids | wc -l | tr -d ' ')
 fi
+core_pid=${core_pids%% *}
+
+[ "$core_n" -ge 1 ] || problems+=("core not running (pgrep '$CORE_PGREP')")
+[ "$core_n" -le 1 ] || problems+=("$core_n core instances (expected 1)")
 
 # round-sec must stay 900 (300 = 5m regression = alarm)
-core_pid=$(pgrep -f "target/release/blitzkrieg-core" 2>/dev/null | head -1)
+core_sock=""
+round_sec=""
 if [ -n "$core_pid" ]; then
-  round_sec=$(ps -o command= -p "$core_pid" 2>/dev/null | tr ' ' '\n' | grep -A1 '^--round-sec$' | tail -1)
+  core_argv=$(ps -o command= -p "$core_pid" 2>/dev/null)
+  round_sec=$(printf '%s\n' "$core_argv" | tr ' ' '\n' | grep -A1 '^--round-sec$' | tail -1)
   [ "$round_sec" = "900" ] || problems+=("round-sec=${round_sec:-?} (expected 900)")
+  core_sock=${BK_SOCKET:-$(printf '%s\n' "$core_argv" | tr ' ' '\n' | grep -A1 '^--socket$' | tail -1)}
 fi
 
-# ── 2. health endpoint ──────────────────────────────────────────────────────
-health=$(curl -s -m 5 http://127.0.0.1:51888/health 2>/dev/null)
-case "$health" in
-  *'"status":"healthy"'*|*'"status": "healthy"'*) : ;;
-  *) problems+=("health not healthy (${health:0:60})") ;;
+# ── 2. panel liveness ───────────────────────────────────────────────────────
+# The panel's own unauthenticated probe. `/health` was never a route: an
+# unmatched path falls through to the HTML panel with a **200**, so a substring
+# probe against it could never succeed — which is why this check was
+# permanently red from the day it was written. Requiring the panel's JSON shape
+# also rejects that catch-all page explicitly, rather than trusting a substring
+# that a 200-but-HTML body could accidentally carry.
+panel_note="bad-body"
+panel_code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$PANEL_URL/api/ping" 2>/dev/null || echo 000)
+panel_body=$(curl -s -m 5 "$PANEL_URL/api/ping" 2>/dev/null)
+case "$panel_body" in
+  *'"service"'*'"blitzkrieg-panel"'*|*'"blitzkrieg-panel"'*'"service"'*)
+    case "$panel_body" in
+      *'"ok":true'*|*'"ok": true'*) panel_note="ok" ;;
+      *) panel_note="not-ok"; problems+=("panel /api/ping reports not ok (${panel_body:0:80})") ;;
+    esac ;;
+  '<'*)
+    panel_note="html-fallback"
+    problems+=("panel served its HTML fallback for /api/ping (HTTP $panel_code): the panel JSON route is gone") ;;
+  *)
+    panel_note="bad-body"
+    problems+=("panel /api/ping did not return the panel's JSON (HTTP $panel_code): ${panel_body:0:80}") ;;
 esac
 
-# ── 3. trade ledger (bounded: never cat the whole file) ─────────────────────
-TRADES=data/trades/trades.jsonl
+# ── 3. core liveness over UDS (unauthenticated) ─────────────────────────────
+# `core.ping` answers whether or not the panel has auth enabled, and unlike the
+# process check it also catches a core that is alive but wedged.
+core_ping_note="skip"
+if [ "$core_n" -ge 1 ]; then
+  core_ping_note="skip(no-socket)"
+fi
+if [ -n "$core_sock" ]; then
+  raw_ping=$(python3 - "$core_sock" <<'PY' 2>/dev/null || echo "fail"
+import json, socket, sys
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(3)
+    s.connect(sys.argv[1])
+    s.sendall((json.dumps({"jsonrpc": "2.0", "id": 1, "method": "core.ping", "params": {}}) + "\n").encode())
+    buf = b""
+    while True:
+        d = s.recv(65536)
+        if not d:
+            break
+        buf += d
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            if not line.strip():
+                continue
+            try:
+                m = json.loads(line)
+            except Exception:
+                continue
+            if m.get("id") == 1:
+                print("ok" if (m.get("result") or {}).get("pong") else "not-ok")
+                sys.exit(0)
+    print("fail")
+except Exception:
+    print("fail")
+PY
+)
+  if [ "$raw_ping" = "ok" ]; then
+    core_ping_note="ok"
+  else
+    core_ping_note="fail"
+    problems+=("core not answering core.ping over UDS (${core_sock}): $raw_ping")
+  fi
+fi
+
+# ── 4. trade ledger (bounded: never cat the whole file) ─────────────────────
+TRADES=${BK_TRADES:-data/trades/trades.jsonl}
 if [ -f "$TRADES" ]; then
   trades_n=$(wc -l < "$TRADES" | tr -d ' ')
   # A zero-hold force_exit has TWO distinct causes, and they need different fixes:
@@ -83,10 +188,12 @@ for l in open(sys.argv[1]):
 print(late+sudden, late, sudden)
 PY
 )
-  zero_n=${zero_hold%% *}
-  rest=${zero_hold#* }
-  late_n=${rest%% *}
-  sudden_n=${rest##* }
+  # Split "total late sudden" into fields. bash's suffix/prefix idioms are
+  # asymmetric (`%% *` but `##* `) and a transposed space is not a syntax error:
+  # it silently yields the whole string, `[ "$x" -gt 0 ]` then errors and takes
+  # the false branch, and the anomaly it guards can never be reported. `read`
+  # makes the split explicit and cannot be transposed.
+  read -r zero_n late_n sudden_n <<<"$zero_hold"
   if [ "${sudden_n:-0}" -gt 0 ]; then
     problems+=("holdTimeSec=0 & force_exit = $sudden_n with time left (seconds-flatten bug)")
   fi
@@ -98,18 +205,77 @@ else
   problems+=("no trade ledger at $TRADES")
 fi
 
-# ── 4. crash / anomaly scan in the log tail (BOUNDED) ───────────────────────
-# Only the last ~200KB, so a 70MB+ run.log never enters a context window.
-if [ -f run.log ]; then
-  scan=$(tail -c 200000 run.log 2>/dev/null | grep -icE "panic|crash|not connected|orphan|startup sweep cancelled" || true)
-  [ "${scan:-0}" -gt 0 ] && problems+=("run.log tail has $scan crash/orphan hits")
+# ── 5. soak sampling freshness ──────────────────────────────────────────────
+# "Is the soak being sampled?" — not "is a process named soak-monitor alive".
+# The sampler has a BOUNDED lifetime (`soak-monitor.mjs --hours 12`, then exit
+# 0), so grepping for its name reports a designed, healthy end-of-run as an
+# outage while missing the opposite failure (process alive, sampling wedged).
+# The newest sample's own timestamp answers the real question, and can only be
+# recent if sampling is actually happening.
+SAMPLE="$SOAK_DIR/soak.jsonl"
+soak_note="none"
+if [ -f "$SAMPLE" ]; then
+  sample_age=$(python3 - "$SAMPLE" <<'PY' 2>/dev/null || echo ""
+import json, sys, time
+last = None
+for l in open(sys.argv[1], errors="replace"):
+    l = l.strip()
+    if not l:
+        continue
+    try:
+        r = json.loads(l)
+    except Exception:
+        continue
+    if isinstance(r.get("ts"), (int, float)):
+        last = r["ts"]
+print(int(time.time() - last / 1000.0) if last else "")
+PY
+)
+  # Fall back to mtime when no record carries a usable ts, so a malformed sample
+  # file is still judged on when it was last touched rather than passing as fresh.
+  # python3 rather than `stat`: `stat -f%m` is BSD-only and GNU's `-f` means
+  # "filesystem", so a two-form shell fallback is a portability landmine this
+  # gate has to run on (Ubuntu CI). python3 is already a dependency above.
+  if [ -z "$sample_age" ]; then
+    mt_s=$(python3 -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$SAMPLE" 2>/dev/null || echo "$(date +%s)")
+    sample_age=$(( $(date +%s) - mt_s ))
+  fi
+  soak_note="ok(${sample_age}s)"
+  if [ "$sample_age" -gt "$SOAK_STALE_SEC" ]; then
+    soak_note="stale(${sample_age}s)"
+    problems+=("soak sampling stale (${sample_age}s > ${SOAK_STALE_SEC}s since last sample: $SAMPLE)")
+  fi
+else
+  problems+=("no soak samples at $SAMPLE (nothing is sampling the soak)")
 fi
 
-# ── 5. market-data archive freshness (P-1.3) ────────────────────────────────
+# ── 6. crash / anomaly scan (BOUNDED; only when a log is configured) ────────
+# The scan reads a *configured* path, never a hardcoded one. A hardcoded
+# `run.log` was the Node layer's artefact: after the purge nothing wrote it, so
+# this whole section silently vanished while still looking present. Unset is
+# reported in the summary line (and as a note) instead of being skipped in
+# silence, and "configured but missing" is an anomaly rather than a pass.
+log_note="off"
+if [ -n "$RUN_LOG" ]; then
+  if [ -f "$RUN_LOG" ]; then
+    log_note="ok"
+    scan=$(tail -c 200000 "$RUN_LOG" 2>/dev/null | grep -icE "panic|crash|not connected|orphan|startup sweep cancelled" || true)
+    [ "${scan:-0}" -gt 0 ] && problems+=("$RUN_LOG tail has $scan crash/orphan hits")
+    tail -c 200000 "$RUN_LOG" 2>/dev/null | grep -q "event archive stopped recording" \
+      && problems+=("market-data archive stopped recording (see $RUN_LOG)")
+  else
+    log_note="missing"
+    problems+=("BK_RUN_LOG=$RUN_LOG does not exist (configured but not being written?)")
+  fi
+else
+  note "note: BK_RUN_LOG unset — crash/archive-stop scan skipped (the log path is a deployment choice; see scripts/README.md)"
+fi
+
+# ── 7. market-data archive freshness (P-1.3) ────────────────────────────────
 # Capture is on by default and only useful if it is actually recording: a stopped
 # archive (cap/disk) or a stale one means a future "why did this trade lose?" is
 # unanswerable. Cheap check: how long since the newest segment was written.
-ARCH_DIR=data/archive
+ARCH_DIR=${BK_ARCH_DIR:-data/archive}
 arch_note="off"
 if [ -d "$ARCH_DIR" ]; then
   newest=$(ls -t "$ARCH_DIR"/*.jsonl 2>/dev/null | head -1)
@@ -118,7 +284,7 @@ if [ -d "$ARCH_DIR" ]; then
     problems+=("market-data archive dir exists but holds no segments")
   else
     now_s=$(date +%s)
-    mt_s=$(stat -f%m "$newest" 2>/dev/null || stat -c%Y "$newest" 2>/dev/null || echo "$now_s")
+    mt_s=$(python3 -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$newest" 2>/dev/null || echo "$now_s")
     age=$((now_s - mt_s))
     arch_note="ok(${age}s)"
     # The core flushes the BufWriter once a second while events arrive, and a live
@@ -128,17 +294,18 @@ if [ -d "$ARCH_DIR" ]; then
       problems+=("market-data archive stale (${age}s since last write: $newest)")
     fi
   fi
-  tail -c 200000 run.log 2>/dev/null | grep -q "event archive stopped recording" \
-    && problems+=("market-data archive stopped recording (see run.log)")
 fi
 
-# ── 6. report ───────────────────────────────────────────────────────────────
-round_disp=${round_sec:-?}
-arch_disp=${arch_note:-?}
+# ── 8. report ───────────────────────────────────────────────────────────────
+# Every sub-status goes in the summary line, because under --quiet (how the loop
+# runs it) the summary and the problems are the ONLY things that reach
+# data/soak/health.log. A sub-status that lives only in a `note` is invisible
+# exactly where it is needed.
+status="core=${core_n} round=${round_sec:-?} panel=${panel_note} core-ping=${core_ping_note} soak=${soak_note} trades=${trades_n} archive=${arch_note:-?} log=${log_note}"
 if [ ${#problems[@]} -eq 0 ]; then
-  echo "OK  core=${core_n} soak=${soak_n} round=${round_disp} trades=${trades_n} archive=${arch_disp} health=healthy"
+  echo "OK  $status"
   exit 0
 fi
-echo "ANOMALY  core=${core_n} soak=${soak_n} round=${round_disp} trades=${trades_n} archive=${arch_disp}"
+echo "ANOMALY  $status"
 for p in "${problems[@]}"; do echo "  - $p"; done
 exit 1
