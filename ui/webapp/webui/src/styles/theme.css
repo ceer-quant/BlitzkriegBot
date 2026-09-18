@@ -124,6 +124,14 @@
 
   html {
     color-scheme: dark;
+    /*
+     * Reserve the vertical scrollbar gutter even when the page fits, so
+     * content that appears in place (e.g. expanding a strategy's refusal
+     * breakdown) does not suddenly introduce the scrollbar, narrow the
+     * viewport by its width, and reflow the whole page — the KPI cards used
+     * to visibly jump sideways on every expand/collapse.
+     */
+    scrollbar-gutter: stable;
   }
   html.light {
     color-scheme: light;

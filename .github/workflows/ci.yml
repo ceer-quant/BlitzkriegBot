@@ -98,9 +98,10 @@ jobs:
           npm run build
       # The panel's own regression checks: theme follows the system, balance
       # accounting, lifecycle gating, refusal attribution, feed liveness, session
-      # recovery, history-tab order/keys/pagination, round-header digit rolling.
+      # recovery, history-tab order/keys/pagination, round-header digit rolling,
+      # strategies expand/collapse reflow.
       # Each pins a defect that shipped and was fixed.
-      - name: Panel checks (theme / balance / lifecycle / rejections / feed / session / history / round)
+      - name: Panel checks (theme / balance / lifecycle / rejections / feed / session / history / round / expand)
         run: |
           cd ui/webapp/webui
           npm run check

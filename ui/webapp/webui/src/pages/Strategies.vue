@@ -134,7 +134,33 @@ function toggleExpand(name: string): void {
       </CardHeader>
 
       <div class="-mx-2 overflow-x-auto">
-        <table class="w-full min-w-[1080px] text-[13px]">
+        <!--
+          `table-fixed` + explicit colgroup, not automatic layout. Under auto
+          layout the browser derives column widths from cell content, so the
+          expanded detail row (`<td colspan="13">` holding the cause pills and
+          the long 计数口径 paragraph) made the numeric columns want more width:
+          expanding a row slid 「来源」 left by ~12px and 「下单被拒」 right by
+          ~34px, so the header row visibly jolted sideways. Pinning the columns
+          removes that coupling — the detail row can no longer influence the
+          layout, and the widths below are the ones auto layout was already
+          producing, so nothing else moves.
+        -->
+        <table class="w-full min-w-[1080px] table-fixed text-[13px]">
+          <colgroup>
+            <col class="w-[11.71%]" />
+            <col class="w-[4.81%]" />
+            <col class="w-[35.28%]" />
+            <col class="w-[3.47%]" />
+            <col class="w-[5.5%]" />
+            <col class="w-[4.49%]" />
+            <col class="w-[4.49%]" />
+            <col class="w-[4.82%]" />
+            <col class="w-[3.61%]" />
+            <col class="w-[3.47%]" />
+            <col class="w-[4.54%]" />
+            <col class="w-[5.58%]" />
+            <col class="w-[8.24%]" />
+          </colgroup>
           <thead>
             <tr class="text-left">
               <th class="label-micro px-2 pb-2.5">策略</th>
@@ -172,12 +198,12 @@ function toggleExpand(name: string): void {
             <template v-for="r in rows" :key="r.name">
               <tr class="border-t border-line transition-colors hover:bg-panel-2">
                 <td class="px-2 py-2.5 font-semibold">
-                  <span class="inline-flex items-center gap-2">
+                  <span class="inline-flex min-w-0 items-center gap-2">
                     <span
                       class="size-1.5 shrink-0 rounded-full"
                       :style="{ background: r.enabled ? 'var(--up)' : 'var(--faint-fg)' }"
                     />
-                    {{ r.name }}
+                    <span class="truncate" :title="r.name">{{ r.name }}</span>
                   </span>
                 </td>
                 <td class="px-2 py-2.5">
