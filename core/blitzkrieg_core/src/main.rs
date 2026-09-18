@@ -1132,10 +1132,10 @@ fn run_backtest(
             if let Some(p) = report_path {
                 match serde_json::to_string_pretty(&report) {
                     Ok(json) => {
-                        if let Some(dir) = std::path::Path::new(p).parent() {
-                            if !dir.as_os_str().is_empty() {
-                                let _ = std::fs::create_dir_all(dir);
-                            }
+                        if let Some(dir) = std::path::Path::new(p).parent()
+                            && !dir.as_os_str().is_empty()
+                        {
+                            let _ = std::fs::create_dir_all(dir);
                         }
                         match std::fs::write(p, format!("{json}\n")) {
                             Ok(()) => println!("backtest report: {p}"),
@@ -1169,7 +1169,7 @@ fn run_replay(path: &std::path::Path) {
             println!("shadow replay: {}", path.display());
             println!("\nIn-sample grid (optimistic):");
             let mut rows = r.in_sample.clone();
-            rows.sort_by(|a, b| b.1.cmp(&a.1));
+            rows.sort_by_key(|r| std::cmp::Reverse(r.1));
             for (name, pnl) in &rows {
                 println!("  {:<20} {:>8.2}", name, pnl);
             }
@@ -1309,9 +1309,11 @@ fn run_replay_near_miss(path: &std::path::Path) {
     // Apples-to-apples: relaxing the entry gate is meaningless unless the EXIT
     // time gate is relaxed too (a signal blocked at tLeft < min_time_left would
     // otherwise be time-exited instantly). Compare both.
-    let mut relaxed = ExitConfig::default();
-    relaxed.min_time_left_sec = 0;
-    relaxed.force_exit_sec = 0;
+    let relaxed = ExitConfig {
+        min_time_left_sec: 0,
+        force_exit_sec: 0,
+        ..Default::default()
+    };
     let s_relaxed = evaluate_near_misses(&recs, &relaxed);
 
     println!("near-miss replay: {}", path.display());
@@ -1357,7 +1359,7 @@ fn run_replay_near_miss(path: &std::path::Path) {
 }
 
 fn pct(wins: usize, n: usize) -> usize {
-    if n > 0 { (wins * 100) / n } else { 0 }
+    (wins * 100).checked_div(n).unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -46,6 +46,16 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 - The consecutive-loss breaker is sharded per strategy (KI-10 / D-18 option A).
   One leg's losing streak no longer freezes entries for the whole core; the
   daily loss cap and kill switch stay global by design.
+- **The tree is rustfmt- and clippy-clean, and CI enforces both (KI-13).** The
+  format and lint gates in `rust-check` were advisory because of a pre-existing
+  backlog; it is now cleared (103 formatting hunks, 121 clippy sites) and both
+  steps block. Every file was reformatted with stock `cargo fmt --all`, and the
+  lint fixes are behaviour-preserving rewrites — nested `if`s folded into
+  edition-2024 let-chains, `&[x.clone()]` to `std::slice::from_ref`, and
+  `Default::default()` shuffles into struct literals. Seven sites are narrow,
+  commented allows where the fix would have changed a public API (`too_many_
+  arguments` on existing strategy/venue entry points, `large_enum_variant` on
+  `ReconcileAction`). Contributors now get a red build for a new warning.
 
 ## [0.2.0] - 2026-09-17
 

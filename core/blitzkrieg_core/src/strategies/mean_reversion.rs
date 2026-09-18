@@ -158,17 +158,17 @@ pub fn apply_knobs(base: &MeanReversionConfig, params: &StrategyParams) -> MeanR
             // Whole-number-of-seconds knobs truncate, so a fractional proposal
             // can never produce a non-integral window or a negative cooldown.
             "lookback_sec" => {
-                if let Some(secs) = v.trunc().to_i64() {
-                    if secs > 0 {
-                        cfg.lookback_sec = secs;
-                    }
+                if let Some(secs) = v.trunc().to_i64()
+                    && secs > 0
+                {
+                    cfg.lookback_sec = secs;
                 }
             }
             "cooldown_sec" => {
-                if let Some(secs) = v.trunc().to_i64() {
-                    if secs >= 0 {
-                        cfg.cooldown_sec = secs;
-                    }
+                if let Some(secs) = v.trunc().to_i64()
+                    && secs >= 0
+                {
+                    cfg.cooldown_sec = secs;
                 }
             }
             "min_drop_pct" => cfg.min_drop_pct = v,
@@ -276,10 +276,10 @@ impl FadeTracker {
     /// Cooldown check and record for one token's candidate fire.
     pub fn try_fire(&mut self, token_id: &str, now_ms: i64) -> bool {
         let last = self.last_fire.get(token_id).copied();
-        if let Some(t) = last {
-            if now_ms - t < self.cfg.cooldown_sec * 1000 {
-                return false;
-            }
+        if let Some(t) = last
+            && now_ms - t < self.cfg.cooldown_sec * 1000
+        {
+            return false;
         }
         self.last_fire.insert(token_id.to_string(), now_ms);
         true
@@ -302,6 +302,7 @@ impl FadeTracker {
 /// own lookback high. Pricing mirrors `evaluate_spread_arb`: a resting bid below
 /// the mid (`mid * entry_factor`, clamped to `[0.05, 0.90]` and the tick grid),
 /// never above the live best bid and strictly below the mid.
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_mean_reversion(
     asset: &str,
     condition_id: &str,
@@ -452,8 +453,8 @@ impl EngineStrategy for MeanReversionBuiltin {
                 if !self.tracker.try_fire(&token, now) {
                     continue;
                 }
-                if let Some(book) = book {
-                    if let Some(sig) = evaluate_mean_reversion(
+                if let Some(book) = book
+                    && let Some(sig) = evaluate_mean_reversion(
                         &market.asset,
                         &market.condition_id,
                         &market.up_token_id,
@@ -471,10 +472,10 @@ impl EngineStrategy for MeanReversionBuiltin {
                         &self.tracker,
                         now,
                         &cfg,
-                    ) {
-                        self.pending_fire.insert(sig.token_id.clone());
-                        out.push(sig);
-                    }
+                    )
+                {
+                    self.pending_fire.insert(sig.token_id.clone());
+                    out.push(sig);
                 }
             }
         }
@@ -830,9 +831,11 @@ mod tests {
         // 0.05 floor: mid 0.07 * 0.80 = 0.056 → round2 0.06, still above the
         // floor and strictly below the mid. The spread cap is widened so the
         // book's own width is not what the assert turns on.
-        let mut floor_cfg = MeanReversionConfig::default();
-        floor_cfg.entry_factor = dec!(0.80);
-        floor_cfg.max_spread_pct = dec!(20);
+        let floor_cfg = MeanReversionConfig {
+            entry_factor: dec!(0.80),
+            max_spread_pct: dec!(20),
+            ..Default::default()
+        };
         let b2 = book(0.065, 0.075); // spread 14.3% — admitted by the widened cap
         let s2 = evaluate_mean_reversion(
             "BTC",
@@ -873,7 +876,7 @@ mod tests {
         let mut replay = TwinReplay::new(twin, &ExitConfig::default());
 
         let m = market();
-        replay.on_round(&[m.clone()], &[], 0);
+        replay.on_round(std::slice::from_ref(&m), &[], 0);
         // Crash 0.60 → 0.30 in ~10 s; the twin's own tracker sees it.
         let mut now = 0;
         let steps = 12;
@@ -883,7 +886,7 @@ mod tests {
             now += 1_000;
             let p = from + (to - from) * Decimal::from(i) / Decimal::from(steps - 1);
             let b = book_d(p - dec!(0.01), p + dec!(0.01));
-            replay.on_tick(&tick_ctx(&[m.clone()], "t", &b, 1, 870, now));
+            replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &b, 1, 870, now));
         }
         assert_eq!(
             replay.open_positions(),
@@ -896,7 +899,7 @@ mod tests {
         // the same shape the dip buyer's twin test uses.
         now += 20_000;
         let up = book(0.95, 0.97);
-        replay.on_tick(&tick_ctx(&[m.clone()], "t", &up, 1, 840, now));
+        replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &up, 1, 840, now));
         assert_eq!(replay.open_positions(), 0, "the recovery must be exited");
         let metrics = Metrics::from_trades(&replay.windowed_trades(1800, now + 1_000));
         assert_eq!(metrics.sample_count, 1);
@@ -924,7 +927,7 @@ mod tests {
             params.set("max_price", cap);
             let twin = factory.make(&params).unwrap();
             let mut replay = TwinReplay::new(twin, &ExitConfig::default());
-            replay.on_round(&[m.clone()], &[], 0);
+            replay.on_round(std::slice::from_ref(&m), &[], 0);
             let mut now = 0;
             for i in 0..8 {
                 now += 1_000;
@@ -933,7 +936,7 @@ mod tests {
                 // position mid-ramp (this test isolates the cheap-cap knob).
                 let mid = dec!(0.45) - dec!(0.135) * Decimal::from(i) / Decimal::from(7);
                 let b = book_d(mid - dec!(0.005), mid + dec!(0.005));
-                replay.on_tick(&tick_ctx(&[m.clone()], "t", &b, 1, 870, now));
+                replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &b, 1, 870, now));
             }
             replay.open_positions()
         };

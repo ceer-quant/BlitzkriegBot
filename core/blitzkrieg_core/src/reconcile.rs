@@ -44,6 +44,12 @@ pub struct VenueSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+// `FilledGap` carries a whole `FillDelta` (~232 bytes) while the other variants
+// carry only an order id, so the enum is as large as its largest variant. Boxing
+// the delta would shrink every action at the cost of a heap allocation and an
+// indirection on every match arm of a type with three variants — and this enum
+// is constructed once per reconcile gap, not in a hot loop. Not worth it.
+#[allow(clippy::large_enum_variant)]
 pub enum ReconcileAction {
     /// A fill missing from the local OME was applied (WS gap repaired).
     FilledGap {

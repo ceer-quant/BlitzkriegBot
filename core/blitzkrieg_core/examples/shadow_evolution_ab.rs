@@ -233,7 +233,7 @@ struct ManagerExp {
 /// cap-tightened variant genuinely beats the baseline:
 ///   * "winner" tokens offer a dip at mid 0.44 (entry 0.42, under cap) then rally;
 ///   * "cap" tokens offer a dip at mid 0.47 clamped to the 0.45 cap, then collapse.
-/// The baseline takes both; a variant whose cap is 3% lower skips the cap losers.
+///     The baseline takes both; a variant whose cap is 3% lower skips the cap losers.
 fn run_manager_experiment() -> ManagerExp {
     use blitzkrieg_core::exit_policy::ExitConfig;
     use blitzkrieg_core::model::OrderbookSnapshot;
@@ -806,16 +806,16 @@ fn model_self_check() {
             continue;
         };
         let mut replay = TwinReplay::new(twin, &ExitConfig::default());
-        replay.on_round(&[m.clone()], &[], 0);
+        replay.on_round(std::slice::from_ref(&m), &[], 0);
         let mut now = 0i64;
         for _ in 0..70 {
             now += 1_000;
             let b = book(dec!(0.60), dec!(0.62));
-            replay.on_tick(&tick_ctx(&[m.clone()], "T", &b, 1, 880, now));
+            replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "T", &b, 1, 880, now));
         }
         now += 1_000;
         let dip = book(dec!(0.45), dec!(0.49)); // mid 0.47 → entry clamps to 0.45
-        replay.on_tick(&tick_ctx(&[m.clone()], "T", &dip, 1, 870, now));
+        replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "T", &dip, 1, 870, now));
         eprintln!(
             "[probe] {label}: cap={cap} open={}",
             replay.open_positions()

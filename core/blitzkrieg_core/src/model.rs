@@ -313,8 +313,8 @@ impl OrderbookSnapshot {
         mut asks: Vec<(Decimal, Decimal)>,
         timestamp: i64,
     ) -> Self {
-        bids.sort_by(|a, b| b.0.cmp(&a.0));
-        asks.sort_by(|a, b| a.0.cmp(&b.0));
+        bids.sort_by_key(|b| std::cmp::Reverse(b.0));
+        asks.sort_by_key(|a| a.0);
         let bid_depth: Decimal = bids.iter().map(|(_, s)| *s).sum();
         let ask_depth: Decimal = asks.iter().map(|(_, s)| *s).sum();
         let total = bid_depth + ask_depth;

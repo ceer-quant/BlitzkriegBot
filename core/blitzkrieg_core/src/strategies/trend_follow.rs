@@ -147,10 +147,10 @@ pub fn apply_knobs(base: &TrendFollowConfig, params: &StrategyParams) -> TrendFo
             // as a decimal like every other knob; truncate so a fractional
             // proposal can never produce a non-integral window.
             "momentum_window_sec" => {
-                if let Some(secs) = v.trunc().to_i64() {
-                    if secs > 0 {
-                        cfg.momentum_window_sec = secs;
-                    }
+                if let Some(secs) = v.trunc().to_i64()
+                    && secs > 0
+                {
+                    cfg.momentum_window_sec = secs;
                 }
             }
             "min_move_pct" => cfg.min_move_pct = v,
@@ -276,6 +276,7 @@ impl MomentumTracker {
 /// The pricing rule is the structural inverse of `evaluate_spread_arb`'s: this
 /// one requires `entry > mid` (pay up) where that one requires `entry < mid`
 /// (wait for a dip).
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_trend_follow(
     asset: &str,
     condition_id: &str,
@@ -745,7 +746,7 @@ mod tests {
             params.set("max_entry_price", cap);
             let twin = factory.make(&params).unwrap();
             let mut replay = TwinReplay::new(twin, &ExitConfig::default());
-            replay.on_round(&[m.clone()], &[], 0);
+            replay.on_round(std::slice::from_ref(&m), &[], 0);
             let mut now = 0;
             // Flat at 0.50 (below the confirmation floor, so nothing is armed),
             // then ONE jump to a 0.86 offer: the breakout is confirmed and priced
@@ -753,11 +754,11 @@ mod tests {
             for _ in 0..3 {
                 now += 1_000;
                 let flat = book(0.49, 0.50);
-                replay.on_tick(&tick_ctx(&[m.clone()], "t", &flat, 1, 880, now));
+                replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &flat, 1, 880, now));
             }
             now += 1_000;
             let jump = book_d(dec!(0.85), dec!(0.86));
-            replay.on_tick(&tick_ctx(&[m.clone()], "t", &jump, 1, 880, now));
+            replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &jump, 1, 880, now));
             replay.closed_trades() + replay.open_positions()
         };
         assert_eq!(
@@ -778,13 +779,13 @@ mod tests {
         let mut replay = TwinReplay::new(twin, &ExitConfig::default());
 
         let m = market();
-        replay.on_round(&[m.clone()], &[], 0);
+        replay.on_round(std::slice::from_ref(&m), &[], 0);
         // Flat start: nothing to chase.
         let mut now = 0;
         for _ in 0..3 {
             now += 1_000;
             let flat = book(0.50, 0.51);
-            replay.on_tick(&tick_ctx(&[m.clone()], "t", &flat, 1, 880, now));
+            replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &flat, 1, 880, now));
         }
         assert_eq!(replay.open_positions(), 0, "a flat book is not a breakout");
 
@@ -795,7 +796,7 @@ mod tests {
             now += 1_000;
             let mid = dec!(0.50) + (dec!(0.12) * Decimal::from(i as u32) / dec!(5));
             let b = book_d(mid - dec!(0.005), mid + dec!(0.005));
-            replay.on_tick(&tick_ctx(&[m.clone()], "t", &b, 1, 880, now));
+            replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &b, 1, 880, now));
         }
         assert_eq!(
             replay.open_positions(),
@@ -808,7 +809,7 @@ mod tests {
         // take-profit, so the trailing stop is the mechanism that must pay here.
         now += 1_000;
         let up = book(0.88, 0.90);
-        replay.on_tick(&tick_ctx(&[m.clone()], "t", &up, 1, 870, now));
+        replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &up, 1, 870, now));
         assert_eq!(
             replay.open_positions(),
             1,
@@ -818,7 +819,7 @@ mod tests {
         // Give back a third of the move → the trailing stop takes the profit.
         now += 1_000;
         let back = book(0.70, 0.72);
-        replay.on_tick(&tick_ctx(&[m.clone()], "t", &back, 1, 860, now));
+        replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &back, 1, 860, now));
         assert_eq!(replay.open_positions(), 0);
         let metrics = Metrics::from_trades(&replay.windowed_trades(1800, now));
         assert_eq!(metrics.sample_count, 1);
@@ -846,14 +847,14 @@ mod tests {
             params.set("min_move_pct", need);
             let twin = factory.make(&params).unwrap();
             let mut replay = TwinReplay::new(twin, &ExitConfig::default());
-            replay.on_round(&[m.clone()], &[], 0);
+            replay.on_round(std::slice::from_ref(&m), &[], 0);
             let mut now = 0;
             // +4.2% over the window (0.60 → 0.625), already above the 0.55 floor.
             for i in 0..5 {
                 let mid = dec!(0.60) + (dec!(0.025) * Decimal::from(i as u32) / dec!(4));
                 now += 1_000;
                 let b = book_d(mid - dec!(0.005), mid + dec!(0.005));
-                replay.on_tick(&tick_ctx(&[m.clone()], "t", &b, 1, 880, now));
+                replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &b, 1, 880, now));
             }
             replay.closed_trades() + replay.open_positions()
         };

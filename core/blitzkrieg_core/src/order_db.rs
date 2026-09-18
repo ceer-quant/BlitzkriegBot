@@ -37,14 +37,13 @@ impl OrderDb {
         if let Some(dir) = self.jsonl_path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        if let Ok(line) = serde_json::to_string(order) {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
+        if let Ok(line) = serde_json::to_string(order)
+            && let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&self.jsonl_path)
-            {
-                let _ = writeln!(f, "{line}");
-            }
+        {
+            let _ = writeln!(f, "{line}");
         }
     }
 

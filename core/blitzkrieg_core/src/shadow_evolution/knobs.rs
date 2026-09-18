@@ -166,10 +166,10 @@ impl StrategyParams {
         specs: &[KnobSpec],
     ) -> Option<(String, Decimal, Decimal, Decimal)> {
         for k in specs {
-            if let Some(v) = self.values.get(&k.name) {
-                if !k.contains(*v) {
-                    return Some((k.name.clone(), *v, k.min, k.max));
-                }
+            if let Some(v) = self.values.get(&k.name)
+                && !k.contains(*v)
+            {
+                return Some((k.name.clone(), *v, k.min, k.max));
             }
         }
         None

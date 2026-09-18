@@ -177,11 +177,11 @@ impl ParityStrategy {
         let Ok(v) = serde_json::from_str::<Value>(json) else {
             return false;
         };
-        if let Some(s) = v.get("trendMaxEntryPrice").and_then(|x| x.as_str()) {
-            if fp(s).is_some() {
-                self.buy_below = s.to_string();
-                return true;
-            }
+        if let Some(s) = v.get("trendMaxEntryPrice").and_then(|x| x.as_str())
+            && fp(s).is_some()
+        {
+            self.buy_below = s.to_string();
+            return true;
         }
         false
     }

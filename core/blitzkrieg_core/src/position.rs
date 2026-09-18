@@ -436,11 +436,9 @@ impl PositionManager {
     ) {
         update_exit_state(&mut pos.state, pos.entry_price, book, now_ms, cfg);
         let val = executable_bid(book);
-        if val > Decimal::ZERO {
-            if pos.current_price != val {
-                pos.prev_price = pos.current_price;
-                pos.current_price = val;
-            }
+        if val > Decimal::ZERO && pos.current_price != val {
+            pos.prev_price = pos.current_price;
+            pos.current_price = val;
         }
     }
 
@@ -480,16 +478,17 @@ impl PositionManager {
             let hold_sec = (now_ms - pos.entered_at_ms) / 1000;
 
             // Fixed-target strategies (e.g. sharp_reversal).
-            if let Some(t) = pos.target_exit_price {
-                if exit_price >= t && hold_sec >= self.config.exit.exit_grace_sec {
-                    out.push(ExitRequest {
-                        position_id: pos.id.clone(),
-                        reason: ExitReason::TakeProfit,
-                        exit_price: t,
-                        use_maker: true,
-                    });
-                    continue;
-                }
+            if let Some(t) = pos.target_exit_price
+                && exit_price >= t
+                && hold_sec >= self.config.exit.exit_grace_sec
+            {
+                out.push(ExitRequest {
+                    position_id: pos.id.clone(),
+                    reason: ExitReason::TakeProfit,
+                    exit_price: t,
+                    use_maker: true,
+                });
+                continue;
             }
 
             if let Some(d) = decide_exit(ExitTickInput {
@@ -685,41 +684,37 @@ impl PositionManager {
                 + 1;
             return Err(format!("SL cooldown: {left}s"));
         }
-        if let Some(asset) = asset {
-            if self.open.iter().any(|p| p.asset == asset) {
-                return Err(format!("Already in {asset}"));
-            }
+        if let Some(asset) = asset
+            && self.open.iter().any(|p| p.asset == asset)
+        {
+            return Err(format!("Already in {asset}"));
         }
         if let (Some(asset), Some(direction)) = (asset, direction) {
             let key = cooldown_key(asset, direction);
-            if let Some(&last) = self.exit_cooldowns.get(&key) {
-                if now_ms - last < self.config.exit_cooldown_sec * 1000 {
-                    let left = (self.config.exit_cooldown_sec * 1000 - (now_ms - last)) / 1000 + 1;
-                    return Err(format!(
-                        "Exit cooldown {asset} {}: {left}s",
-                        direction.as_str()
-                    ));
-                }
+            if let Some(&last) = self.exit_cooldowns.get(&key)
+                && now_ms - last < self.config.exit_cooldown_sec * 1000
+            {
+                let left = (self.config.exit_cooldown_sec * 1000 - (now_ms - last)) / 1000 + 1;
+                return Err(format!(
+                    "Exit cooldown {asset} {}: {left}s",
+                    direction.as_str()
+                ));
             }
         }
         if let Some(asset) = asset {
-            if self.config.loss_cooldown_sec > 0 {
-                if let Some(&last) = self.asset_last_loss_at.get(asset) {
-                    if now_ms - last < self.config.loss_cooldown_sec * 1000 {
-                        let left =
-                            (self.config.loss_cooldown_sec * 1000 - (now_ms - last)) / 1000 + 1;
-                        return Err(format!("Loss cooldown {asset}: {left}s"));
-                    }
-                }
+            if self.config.loss_cooldown_sec > 0
+                && let Some(&last) = self.asset_last_loss_at.get(asset)
+                && now_ms - last < self.config.loss_cooldown_sec * 1000
+            {
+                let left = (self.config.loss_cooldown_sec * 1000 - (now_ms - last)) / 1000 + 1;
+                return Err(format!("Loss cooldown {asset}: {left}s"));
             }
-            if self.config.asset_cooldown_sec > 0 {
-                if let Some(&last) = self.asset_last_exit_at.get(asset) {
-                    if now_ms - last < self.config.asset_cooldown_sec * 1000 {
-                        let left =
-                            (self.config.asset_cooldown_sec * 1000 - (now_ms - last)) / 1000 + 1;
-                        return Err(format!("Asset cooldown {asset}: {left}s"));
-                    }
-                }
+            if self.config.asset_cooldown_sec > 0
+                && let Some(&last) = self.asset_last_exit_at.get(asset)
+                && now_ms - last < self.config.asset_cooldown_sec * 1000
+            {
+                let left = (self.config.asset_cooldown_sec * 1000 - (now_ms - last)) / 1000 + 1;
+                return Err(format!("Asset cooldown {asset}: {left}s"));
             }
         }
         Ok(())
@@ -797,8 +792,8 @@ mod tests {
             .unwrap();
         assert!(c.net_pnl_usd < dec!(2.0));
         assert!(c.net_pnl_usd > dec!(1.9)); // fee is small around 0.6
-        assert_eq!(c.was_maker_entry, true);
-        assert_eq!(c.was_maker_exit, false);
+        assert!(c.was_maker_entry);
+        assert!(!c.was_maker_exit);
         assert_eq!(pm.daily_pnl(), c.net_pnl_usd);
         // Net is the ledger's own arithmetic: proceeds − basis − both fees.
         let entry_fee = (c.entry_fee_pct / Decimal::ONE_HUNDRED) * c.entry_price * c.shares;
@@ -808,11 +803,13 @@ mod tests {
 
     #[test]
     fn capacity_and_same_asset_are_blocked() {
-        let mut cfg = PositionConfig::default();
-        cfg.max_positions = 2;
-        cfg.asset_cooldown_sec = 0;
-        cfg.loss_cooldown_sec = 0;
-        cfg.exit_cooldown_sec = 0;
+        let cfg = PositionConfig {
+            max_positions: 2,
+            asset_cooldown_sec: 0,
+            loss_cooldown_sec: 0,
+            exit_cooldown_sec: 0,
+            ..Default::default()
+        };
         let mut pm = PositionManager::new(cfg);
         enter(
             &mut pm,
@@ -842,9 +839,11 @@ mod tests {
 
     #[test]
     fn loss_sets_asset_cooldown() {
-        let mut cfg = PositionConfig::default();
-        cfg.asset_cooldown_sec = 90;
-        cfg.loss_cooldown_sec = 180;
+        let cfg = PositionConfig {
+            asset_cooldown_sec: 90,
+            loss_cooldown_sec: 180,
+            ..Default::default()
+        };
         let mut pm = PositionManager::new(cfg);
         let p = enter(
             &mut pm,
@@ -868,11 +867,13 @@ mod tests {
 
     #[test]
     fn daily_loss_limit_blocks_new_positions() {
-        let mut cfg = PositionConfig::default();
-        cfg.max_daily_loss_usd = dec!(1);
-        cfg.asset_cooldown_sec = 0;
-        cfg.loss_cooldown_sec = 0;
-        cfg.stop_loss_cooldown_sec = 0;
+        let cfg = PositionConfig {
+            max_daily_loss_usd: dec!(1),
+            asset_cooldown_sec: 0,
+            loss_cooldown_sec: 0,
+            stop_loss_cooldown_sec: 0,
+            ..Default::default()
+        };
         let mut pm = PositionManager::new(cfg);
         let p = enter(
             &mut pm,

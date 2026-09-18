@@ -329,10 +329,10 @@ impl EventArchive {
         rotate_bytes: u64,
         min_free_bytes: u64,
     ) -> std::io::Result<Self> {
-        if let Some(dir) = path.parent() {
-            if !dir.as_os_str().is_empty() {
-                std::fs::create_dir_all(dir)?;
-            }
+        if let Some(dir) = path.parent()
+            && !dir.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(dir)?;
         }
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -802,10 +802,10 @@ impl DataSource for ReplaySource {
                 }
             };
             let at_ms = event_at_ms(&event);
-            if let Some(prev) = self.last_at_ms {
-                if at_ms < prev {
-                    self.out_of_order += 1;
-                }
+            if let Some(prev) = self.last_at_ms
+                && at_ms < prev
+            {
+                self.out_of_order += 1;
             }
             self.last_at_ms = Some(at_ms.max(self.last_at_ms.unwrap_or(at_ms)));
             self.events += 1;
@@ -933,10 +933,10 @@ impl DataSource for SegmentSource {
                 // a boundary that goes backwards is still reported like any other
                 // out-of-order arrival.
                 let at_ms = te.at_ms;
-                if let Some(prev) = self.last_at_ms {
-                    if at_ms < prev {
-                        self.out_of_order += 1;
-                    }
+                if let Some(prev) = self.last_at_ms
+                    && at_ms < prev
+                {
+                    self.out_of_order += 1;
                 }
                 self.last_at_ms = Some(at_ms.max(self.last_at_ms.unwrap_or(at_ms)));
                 self.events += 1;

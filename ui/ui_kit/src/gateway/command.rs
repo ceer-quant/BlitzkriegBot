@@ -484,9 +484,9 @@ impl Dispatcher {
                 );
                 for r in &snap.market_plugins {
                     let caps = [
-                        r.has_data_feed.then(|| "feed"),
-                        r.has_discovery.then(|| "discovery"),
-                        r.has_executor.then(|| "executor"),
+                        r.has_data_feed.then_some("feed"),
+                        r.has_discovery.then_some("discovery"),
+                        r.has_executor.then_some("executor"),
                     ]
                     .into_iter()
                     .flatten()

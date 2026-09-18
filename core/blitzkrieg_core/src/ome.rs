@@ -214,10 +214,10 @@ impl Ome {
     /// Find a live order by venue id, token and side (fallback for user-WS
     /// trade events that only carry taker/maker order ids + token).
     pub fn live_by_venue(&self, venue_id: &str, token: &str, side: Side) -> Option<&TrackedOrder> {
-        if let Some(o) = self.by_venue_or_id(venue_id) {
-            if o.status.is_live() {
-                return Some(o);
-            }
+        if let Some(o) = self.by_venue_or_id(venue_id)
+            && o.status.is_live()
+        {
+            return Some(o);
         }
         self.live_for(token, side)
             .into_iter()
@@ -321,10 +321,10 @@ impl Ome {
                 price: fill.price,
             },
         );
-        if self.applied.len() > 5000 {
-            if let Some(oldest) = self.applied.keys().next().cloned() {
-                self.applied.remove(&oldest);
-            }
+        if self.applied.len() > 5000
+            && let Some(oldest) = self.applied.keys().next().cloned()
+        {
+            self.applied.remove(&oldest);
         }
         Ok(delta)
     }

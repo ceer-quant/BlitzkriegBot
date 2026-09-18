@@ -59,6 +59,14 @@ async function session(tag, extraArgs, body) {
     // Scratch dir only: never restore, or leave behind, a real position/order.
     '--no-order-log', '--no-position-log',
     '--round-sec', String(ROUND_SEC),
+    // Round-window gates off. The core derives time_left from the WALL clock
+    // (the declared expiresAtMs is not plumbed to the scanner), so with a
+    // 3600s round this check fails for the three minutes before every hour:
+    // entries are refused with "Too close to expiry" and the assertions below
+    // collapse into "placed NO entry". Pinning the round boundary is not what
+    // this gate is about — the fade entry and its pricing are — so open the
+    // window the way every other engine gate does.
+    '--min-round-age', '0', '--min-time-left', '0',
     ...extraArgs,
   ];
   const proc = spawn(BIN, args, { stdio: ['ignore', 'ignore', 'pipe'], cwd: workdir });

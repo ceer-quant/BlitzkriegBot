@@ -64,6 +64,7 @@ impl ShadowRecorder {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn on_open(
         &mut self,
         position_id: &str,
@@ -131,19 +132,18 @@ impl ShadowRecorder {
 
     /// Record an opposite-side sample explicitly.
     pub fn on_opposite(&mut self, position_id: &str, book: &OrderbookSnapshot, now_ms: i64) {
-        if let Some(t) = self.tracked.get_mut(position_id) {
-            if now_ms >= t.rec.entered_at_ms
-                && now_ms <= t.window_end_ms
-                && now_ms - t.last_opp_at >= self.sample_min_interval_ms
-            {
-                t.last_opp_at = now_ms;
-                t.rec.opposite.push(Sample {
-                    t_ms: now_ms - t.rec.entered_at_ms,
-                    price: book.mid_price,
-                    bid: Some(book.best_bid),
-                    ask: Some(book.best_ask),
-                });
-            }
+        if let Some(t) = self.tracked.get_mut(position_id)
+            && now_ms >= t.rec.entered_at_ms
+            && now_ms <= t.window_end_ms
+            && now_ms - t.last_opp_at >= self.sample_min_interval_ms
+        {
+            t.last_opp_at = now_ms;
+            t.rec.opposite.push(Sample {
+                t_ms: now_ms - t.rec.entered_at_ms,
+                price: book.mid_price,
+                bid: Some(book.best_bid),
+                ask: Some(book.best_ask),
+            });
         }
     }
 
@@ -229,6 +229,7 @@ impl NearMissRecorder {
 
     /// Begin tracking a blocked candidate. Dedup: one record per token at a time
     /// (a token that stays blocked across ticks should not spawn N records).
+    #[allow(clippy::too_many_arguments)]
     pub fn on_blocked(
         &mut self,
         token_id: &str,

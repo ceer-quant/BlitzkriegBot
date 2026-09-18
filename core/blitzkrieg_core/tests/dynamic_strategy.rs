@@ -404,8 +404,7 @@ fn a_library_without_the_version_symbol_fails_negotiation() {
         ("/usr/lib/libSystem.B.dylib", false),
         ("/usr/lib/libSystem.dylib", false),
     ];
-    let Some((src, needs_copy)) = candidates.into_iter().find(|(c, _)| Path::new(c).exists())
-    else {
+    let Some((src, needs_copy)) = candidates.iter().find(|(c, _)| Path::new(c).exists()) else {
         eprintln!("skipping: no non-strategy shared library on this host");
         return;
     };

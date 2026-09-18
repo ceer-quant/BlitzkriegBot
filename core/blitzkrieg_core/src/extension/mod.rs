@@ -154,10 +154,10 @@ impl ExtensionRegistry {
     /// bad extension cannot break the kernel or its peers.
     pub async fn dispatch(&self, event: &Event) {
         for e in self.entries.values() {
-            if e.state == ExtensionState::Enabled {
-                if let Err(err) = e.extension.on_event(event).await {
-                    tracing::warn!(extension = e.extension.name(), error = %err, "extension on_event failed");
-                }
+            if e.state == ExtensionState::Enabled
+                && let Err(err) = e.extension.on_event(event).await
+            {
+                tracing::warn!(extension = e.extension.name(), error = %err, "extension on_event failed");
             }
         }
     }

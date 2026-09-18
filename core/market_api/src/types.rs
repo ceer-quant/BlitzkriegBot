@@ -261,15 +261,14 @@ impl OrderIntent {
                 "limit/stop/post-only orders require a price",
             ));
         }
-        if let Some(p) = self.price {
-            if p <= Decimal::ZERO || p > Decimal::ONE {
-                if self.market == MarketType::Prediction {
-                    return Err(CoreError::new(
-                        CoreErrorCode::InvalidParams,
-                        "prediction price must be in (0,1]",
-                    ));
-                }
-            }
+        if let Some(p) = self.price
+            && (p <= Decimal::ZERO || p > Decimal::ONE)
+            && self.market == MarketType::Prediction
+        {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "prediction price must be in (0,1]",
+            ));
         }
         Ok(())
     }

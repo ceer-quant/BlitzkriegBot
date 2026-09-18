@@ -329,10 +329,7 @@ impl ShadowEvolution {
                 // the replay/exit machinery, still caught by this outer unwind.
                 // Absorbing it here without latching would re-tick a permanently
                 // panicking twin every tick, silently.
-                let panicked = match catch_unwind(AssertUnwindSafe(|| v.on_tick(&ctx))) {
-                    Ok(reported) => reported,
-                    Err(_) => true,
-                };
+                let panicked = catch_unwind(AssertUnwindSafe(|| v.on_tick(&ctx))).unwrap_or(true);
                 if panicked {
                     v.crashed = true;
                     tracing::warn!(
@@ -767,23 +764,51 @@ mod tests {
             now += 1_000;
             let dip = book(0.39, 0.40); // mid 0.395
             for v in m.units[i].set.variants.iter_mut() {
-                v.on_tick(&tick_ctx(&[round.clone()], "t", &dip, 1, 880, now));
+                v.on_tick(&tick_ctx(
+                    std::slice::from_ref(&round),
+                    "t",
+                    &dip,
+                    1,
+                    880,
+                    now,
+                ));
             }
             now += 1_000;
             let crash = book(0.20, 0.21); // mid 0.205 → well past the 12% stop
             for v in m.units[i].set.variants.iter_mut() {
-                v.on_tick(&tick_ctx(&[round.clone()], "t", &crash, 1, 880, now));
+                v.on_tick(&tick_ctx(
+                    std::slice::from_ref(&round),
+                    "t",
+                    &crash,
+                    1,
+                    880,
+                    now,
+                ));
             }
             // A winner only a LOOSENED cap reaches: mid 0.405 > the 0.40 baseline.
             now += 1_000;
             let shallow = book(0.40, 0.41);
             for v in m.units[i].set.variants.iter_mut() {
-                v.on_tick(&tick_ctx(&[round.clone()], "t", &shallow, 1, 880, now));
+                v.on_tick(&tick_ctx(
+                    std::slice::from_ref(&round),
+                    "t",
+                    &shallow,
+                    1,
+                    880,
+                    now,
+                ));
             }
             now += 1_000;
             let up = book(0.95, 0.97);
             for v in m.units[i].set.variants.iter_mut() {
-                v.on_tick(&tick_ctx(&[round.clone()], "t", &up, 1, 880, now));
+                v.on_tick(&tick_ctx(
+                    std::slice::from_ref(&round),
+                    "t",
+                    &up,
+                    1,
+                    880,
+                    now,
+                ));
             }
         }
     }

@@ -126,10 +126,10 @@ impl PriceBuffer {
                 continue;
             }
             let dir = diff > Decimal::ZERO;
-            if let Some(prev) = last_dir {
-                if dir != prev {
-                    count += 1;
-                }
+            if let Some(prev) = last_dir
+                && dir != prev
+            {
+                count += 1;
             }
             last_dir = Some(dir);
         }
@@ -335,6 +335,7 @@ pub struct TradeSignal {
 ///  - requires a FRESH two-sided book (mid > 0)
 ///  - bid = factor * mid (or fixed), never above the live best bid, strictly
 ///    below mid, and capped at trend_max_entry_price
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_spread_arb(
     asset: &str,
     condition_id: &str,
@@ -448,8 +449,10 @@ mod tests {
 
     #[test]
     fn spread_arb_requires_fresh_book_and_respects_caps() {
-        let mut cfg = SpreadArbConfig::default();
-        cfg.trend_max_entry_price = dec!(0.45);
+        let cfg = SpreadArbConfig {
+            trend_max_entry_price: dec!(0.45),
+            ..Default::default()
+        };
         let mut confirmed = std::collections::HashSet::new();
         confirmed.insert("up".to_string());
 

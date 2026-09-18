@@ -2,8 +2,8 @@ name: CI
 
 # Runs on every PR and on pushes to the long-lived branches.
 # Five independent gates, matching the repository governance plan:
-#   rust-check     — the Rust trading core builds, tests, lints (advisory) and
-#                    holds the release binary / tracked-tree size budget (E10-d).
+#   rust-check     — the Rust trading core builds, tests, lints and holds the
+#                    release binary / tracked-tree size budget (E10-d).
 #   panel-check    — the browser panel: Vue checks, then the `ui:webapp` gate
 #                    against a live gateway over a real socket, plus the
 #                    lifecycle / read-only / crash-recovery acceptance gates
@@ -67,15 +67,14 @@ jobs:
       # failure if the artifacts above are missing or fail negotiation.
       - name: Test
         run: BK_REQUIRE_DYLIB=1 cargo test --workspace --locked
-      # Style gates are ADVISORY for now: the pre-existing tree is not
-      # fmt/clippy-clean (see docs/DECISIONS_PENDING.md D-6). They surface debt
-      # without blocking a governance PR on an unrelated 57-file reformat.
-      - name: rustfmt (advisory)
-        continue-on-error: true
+      # Style gates are BLOCKING as of KI-13: the tree is fmt- and clippy-clean
+      # (the debt that made these advisory is paid off in the two commits that
+      # closed KI-13). Keep them blocking — a new warning should fail a PR, which
+      # is the whole point of clearing the backlog.
+      - name: rustfmt
         run: cargo fmt --all -- --check
-      - name: clippy (advisory)
-        continue-on-error: true
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   panel-check:
     name: panel-check

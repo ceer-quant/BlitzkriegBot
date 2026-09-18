@@ -273,6 +273,36 @@ impl Default for CoreConfig {
     }
 }
 
+/// One position selected by `Core::flatten`, in the order its destructuring
+/// loop consumes: id, token, condition, shares, strategy, asset, direction,
+/// current price.
+type FlattenTarget = (
+    String,
+    String,
+    String,
+    Decimal,
+    String,
+    String,
+    String,
+    Decimal,
+);
+
+/// One due `maker_then_taker` order selected by `Core::tick`, in the order its
+/// destructuring loop consumes: id, price, remaining, side, token, condition,
+/// strategy, asset, direction, round slot.
+type EscalationTarget = (
+    String,
+    Decimal,
+    Decimal,
+    Side,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+);
+
 pub struct Core {
     config: CoreConfig,
     ome: Ome,
@@ -334,8 +364,10 @@ impl Core {
             .as_ref()
             .map(crate::position_db::PositionDb::new);
         let shadow_cfg = {
-            let mut c = ShadowEvolutionConfig::default();
-            c.enabled = config.shadow_evolution_enabled;
+            let mut c = ShadowEvolutionConfig {
+                enabled: config.shadow_evolution_enabled,
+                ..Default::default()
+            };
             if let Some(t) = &config.shadow_evolution_tuning {
                 if let Some(v) = t.min_sample_count {
                     c.min_sample_count = v;
@@ -631,7 +663,7 @@ impl Core {
                 return "Failed: strategy engine not attached (load libraries after engine init)"
                     .into();
             };
-            return match load_foreign(p) {
+            match load_foreign(p) {
                 Ok(loaded) => {
                     let name = loaded.name.clone();
                     let version = loaded.version.clone();
@@ -676,7 +708,7 @@ impl Core {
                     }
                 }
                 Err(outcome) => format!("{outcome:?}"),
-            };
+            }
         }
         #[cfg(not(feature = "strategy-loading"))]
         {
@@ -1096,10 +1128,10 @@ impl Core {
     /// Subscribe the round's tokens on the running orderbook feed (P4).
     /// No-op when feeds are disabled.
     pub async fn subscribe_feed_tokens(&self, tokens: Vec<String>) {
-        if let Some(feed) = &self.feed {
-            if !tokens.is_empty() {
-                feed.set_tokens(tokens);
-            }
+        if let Some(feed) = &self.feed
+            && !tokens.is_empty()
+        {
+            feed.set_tokens(tokens);
         }
     }
 
@@ -1150,15 +1182,15 @@ impl Core {
             } => {
                 let mut bids = Vec::new();
                 let mut asks = Vec::new();
-                if let Some(b) = best_bid {
-                    if *b > Decimal::ZERO {
-                        bids.push((*b, Decimal::ONE));
-                    }
+                if let Some(b) = best_bid
+                    && *b > Decimal::ZERO
+                {
+                    bids.push((*b, Decimal::ONE));
                 }
-                if let Some(a) = best_ask {
-                    if *a > Decimal::ZERO {
-                        asks.push((*a, Decimal::ONE));
-                    }
+                if let Some(a) = best_ask
+                    && *a > Decimal::ZERO
+                {
+                    asks.push((*a, Decimal::ONE));
                 }
                 // Only overwrite when we actually have a side (don't clobber a
                 // full book with an empty top-of-book update).
@@ -1177,18 +1209,18 @@ impl Core {
         // `book_snapshot` does — a crossing feed event is exactly when a
         // dry maker fill would happen at the venue, and skipping it made every
         // dry entry escalate to taker (a systematically more expensive economy).
-        if let Some(token) = mirrored_token {
-            if self.config.mode.settles_locally() {
-                let ids: Vec<String> = self
-                    .ome
-                    .live_orders()
-                    .into_iter()
-                    .filter(|o| o.token_id == token && rests_on_book(o.mode))
-                    .map(|o| o.order_id.clone())
-                    .collect();
-                for id in ids {
-                    self.try_maker_fill(&id, now_ms);
-                }
+        if let Some(token) = mirrored_token
+            && self.config.mode.settles_locally()
+        {
+            let ids: Vec<String> = self
+                .ome
+                .live_orders()
+                .into_iter()
+                .filter(|o| o.token_id == token && rests_on_book(o.mode))
+                .map(|o| o.order_id.clone())
+                .collect();
+            for id in ids {
+                self.try_maker_fill(&id, now_ms);
             }
         }
 
@@ -1307,24 +1339,24 @@ impl Core {
         let mut placed = 0;
         for (token, req) in tokens {
             let name = req.strategy.clone();
-            if let Some(limit) = self.config.strategy_limits.get(&name).cloned() {
-                if let Err(reason) = self.strategy_limit_ok(&req, &limit) {
-                    // E9-c: the reason existed before but was discarded — bucket
-                    // it so operator tooling can answer "why did this strategy
-                    // stop placing?".
-                    let bucket = if reason.contains("position cap") {
-                        "limit.positionCap"
-                    } else if reason.contains("notional cap") {
-                        "limit.notionalCap"
-                    } else {
-                        "limit.other"
-                    };
-                    self.stats.strategy_limit_rejected += 1;
-                    let acc = self.strategy_accounting.entry(name).or_default();
-                    acc.limit_rejected += 1;
-                    *acc.rejection_causes.entry(bucket.into()).or_default() += 1;
-                    continue;
-                }
+            if let Some(limit) = self.config.strategy_limits.get(&name).cloned()
+                && let Err(reason) = self.strategy_limit_ok(&req, &limit)
+            {
+                // E9-c: the reason existed before but was discarded — bucket
+                // it so operator tooling can answer "why did this strategy
+                // stop placing?".
+                let bucket = if reason.contains("position cap") {
+                    "limit.positionCap"
+                } else if reason.contains("notional cap") {
+                    "limit.notionalCap"
+                } else {
+                    "limit.other"
+                };
+                self.stats.strategy_limit_rejected += 1;
+                let acc = self.strategy_accounting.entry(name).or_default();
+                acc.limit_rejected += 1;
+                *acc.rejection_causes.entry(bucket.into()).or_default() += 1;
+                continue;
             }
             match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
                 Ok((_id, _)) => {
@@ -1365,15 +1397,15 @@ impl Core {
             .iter()
             .filter(|p| p.strategy == req.strategy)
             .collect();
-        if let Some(max_pos) = limit.max_open_positions {
-            if open.len() >= max_pos {
-                return Err(format!(
-                    "strategy {} at position cap ({}/{})",
-                    req.strategy,
-                    open.len(),
-                    max_pos
-                ));
-            }
+        if let Some(max_pos) = limit.max_open_positions
+            && open.len() >= max_pos
+        {
+            return Err(format!(
+                "strategy {} at position cap ({}/{})",
+                req.strategy,
+                open.len(),
+                max_pos
+            ));
         }
         if let Some(max_notional) = limit.max_open_notional_usd {
             let used: Decimal = open.iter().map(|p| p.cost_usd).sum();
@@ -2040,12 +2072,11 @@ impl Core {
                 .as_mut()
                 .map(|e| e.flush_near_misses())
                 .unwrap_or_default();
-            if !recs.is_empty() {
-                if let Err(e) =
+            if !recs.is_empty()
+                && let Err(e) =
                     crate::shadow::persist_near_misses(std::path::Path::new(&path), &recs)
-                {
-                    tracing::warn!(error = %e, path = %path, "near-miss flush failed");
-                }
+            {
+                tracing::warn!(error = %e, path = %path, "near-miss flush failed");
             }
         }
     }
@@ -2313,16 +2344,7 @@ impl Core {
     /// many were closed. Exits are SELL orders; in dry mode they cross at the
     /// latest book bid, in live mode the venue bridge submits them.
     pub fn flatten(&mut self, position_id: Option<&str>, now_ms: i64) -> CoreResult<usize> {
-        let targets: Vec<(
-            String,
-            String,
-            String,
-            Decimal,
-            String,
-            String,
-            String,
-            Decimal,
-        )> = self
+        let targets: Vec<FlattenTarget> = self
             .positions
             .open_positions()
             .iter()
@@ -2433,12 +2455,11 @@ impl Core {
                 .as_mut()
                 .map(|e| e.take_near_misses(now_ms))
                 .unwrap_or_default();
-            if !recs.is_empty() {
-                if let Err(e) =
+            if !recs.is_empty()
+                && let Err(e) =
                     crate::shadow::persist_near_misses(std::path::Path::new(&path), &recs)
-                {
-                    tracing::warn!(error = %e, path = %path, "near-miss persist failed");
-                }
+            {
+                tracing::warn!(error = %e, path = %path, "near-miss persist failed");
             }
         }
 
@@ -2446,18 +2467,7 @@ impl Core {
         self.run_exit_checks(now_ms)?;
 
         // Escalate due maker_then_taker orders: cancel maker, cross as taker.
-        let due: Vec<(
-            String,
-            Decimal,
-            Decimal,
-            Side,
-            String,
-            String,
-            String,
-            String,
-            String,
-            i64,
-        )> = self
+        let due: Vec<EscalationTarget> = self
             .ome
             .live_orders()
             .into_iter()
@@ -2758,7 +2768,8 @@ fn classify_rejection(err: &crate::model::CoreError) -> String {
             _ => "other".to_string(),
         }
     };
-    let bucket = if msg.contains("breaker active until") {
+
+    if msg.contains("breaker active until") {
         "risk:breaker".to_string()
     } else if msg.starts_with("Max positions")
         || msg.starts_with("Already in")
@@ -2784,8 +2795,7 @@ fn classify_rejection(err: &crate::model::CoreError) -> String {
         "risk.priceBand".to_string()
     } else {
         format!("{}.{}", code_label(err.code), "other")
-    };
-    bucket
+    }
 }
 
 /// Compact round info for the UI.

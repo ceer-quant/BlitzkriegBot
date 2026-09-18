@@ -264,7 +264,7 @@ pub fn build_variants(
     for i in 1..count {
         let m = sweep as usize + i - 1;
         let spec = mutable[(m / 2) % n];
-        let factor = if m % 2 == 0 {
+        let factor = if m.is_multiple_of(2) {
             Decimal::ONE + VARIANT_STEP
         } else {
             Decimal::ONE - VARIANT_STEP
@@ -463,25 +463,25 @@ mod tests {
             0,
         );
         let m = market();
-        set.on_round(&[m.clone()], &[], 0);
+        set.on_round(std::slice::from_ref(&m), &[], 0);
         // Confirm the trend, dip in, run up, exit — for every variant.
         let mut now = 0i64;
         for _ in 0..70 {
             now += 1_000;
             for v in set.variants.iter_mut() {
                 let b = book(0.60, 0.62);
-                v.on_tick(&tick_ctx(&[m.clone()], "t", &b, 1, 880, now));
+                v.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &b, 1, 880, now));
             }
         }
         now += 1_000;
         for v in set.variants.iter_mut() {
             let b = book(0.43, 0.45);
-            v.on_tick(&tick_ctx(&[m.clone()], "t", &b, 1, 870, now));
+            v.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &b, 1, 870, now));
         }
         now += 1_000;
         for v in set.variants.iter_mut() {
             let b = book(0.95, 0.97);
-            v.on_tick(&tick_ctx(&[m.clone()], "t", &b, 1, 860, now));
+            v.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &b, 1, 860, now));
         }
         let bm = set.baseline_metrics(1800, now);
         assert_eq!(bm.sample_count, 1, "the baseline traded once");

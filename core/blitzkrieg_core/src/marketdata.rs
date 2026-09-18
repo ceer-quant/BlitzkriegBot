@@ -68,26 +68,26 @@ impl LocalBook {
         now_ms: i64,
     ) {
         let nominal = Decimal::new(1, 0);
-        if let Some(b) = best_bid {
-            if b > Decimal::ZERO {
-                // Drop crossed/over levels so best_bid really is the best.
-                self.asks.retain(|p, _| *p > b);
-                self.bids.insert(b, nominal);
-                // Remove any bids above the new best (shouldn't happen, but be safe).
-                let above: Vec<Decimal> = self.bids.keys().filter(|p| **p > b).copied().collect();
-                for p in above {
-                    self.bids.remove(&p);
-                }
+        if let Some(b) = best_bid
+            && b > Decimal::ZERO
+        {
+            // Drop crossed/over levels so best_bid really is the best.
+            self.asks.retain(|p, _| *p > b);
+            self.bids.insert(b, nominal);
+            // Remove any bids above the new best (shouldn't happen, but be safe).
+            let above: Vec<Decimal> = self.bids.keys().filter(|p| **p > b).copied().collect();
+            for p in above {
+                self.bids.remove(&p);
             }
         }
-        if let Some(a) = best_ask {
-            if a > Decimal::ZERO {
-                self.bids.retain(|p, _| *p < a);
-                self.asks.insert(a, nominal);
-                let below: Vec<Decimal> = self.asks.keys().filter(|p| **p < a).copied().collect();
-                for p in below {
-                    self.asks.remove(&p);
-                }
+        if let Some(a) = best_ask
+            && a > Decimal::ZERO
+        {
+            self.bids.retain(|p, _| *p < a);
+            self.asks.insert(a, nominal);
+            let below: Vec<Decimal> = self.asks.keys().filter(|p| **p < a).copied().collect();
+            for p in below {
+                self.asks.remove(&p);
             }
         }
         self.timestamp = now_ms;

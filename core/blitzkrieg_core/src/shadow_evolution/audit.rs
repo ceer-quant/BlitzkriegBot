@@ -67,9 +67,11 @@ impl AuditLog {
 
     /// Unused-path constructor kept for tests that want an explicit directory.
     pub fn in_dir(dir: impl AsRef<Path>) -> Self {
-        let mut cfg = ShadowEvolutionConfig::default();
-        cfg.audit_dir = dir.as_ref().to_string_lossy().into_owned();
-        cfg.enabled = true;
+        let cfg = ShadowEvolutionConfig {
+            audit_dir: dir.as_ref().to_string_lossy().into_owned(),
+            enabled: true,
+            ..Default::default()
+        };
         Self::new(&cfg)
     }
 
@@ -275,16 +277,17 @@ mod tests {
     }
 
     fn tmp_cfg(tag: &str) -> ShadowEvolutionConfig {
-        let mut cfg = ShadowEvolutionConfig::default();
         // An audit log only writes while enabled (D7), which is what makes an
         // inert engine leave no files behind; these tests are about the writing
         // path, so they opt in.
-        cfg.enabled = true;
-        cfg.audit_dir = std::env::temp_dir()
-            .join(format!("bkevo-{}-{tag}", std::process::id()))
-            .to_string_lossy()
-            .into_owned();
-        cfg
+        ShadowEvolutionConfig {
+            enabled: true,
+            audit_dir: std::env::temp_dir()
+                .join(format!("bkevo-{}-{tag}", std::process::id()))
+                .to_string_lossy()
+                .into_owned(),
+            ..Default::default()
+        }
     }
 
     #[test]

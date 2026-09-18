@@ -472,20 +472,20 @@ pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
         }
     }
 
-    if let Some(book) = book {
-        if state.initial_depth > Decimal::ZERO {
-            let current_depth = book.bid_depth + book.ask_depth;
-            let depth_change = ((current_depth - state.initial_depth) / state.initial_depth)
-                * Decimal::ONE_HUNDRED;
-            if depth_change <= -cfg.depth_collapse_threshold_pct
-                && bid < state.high_water_mark
-                && pct >= dec!(2)
-            {
-                return Some(ExitDecision {
-                    reason: ExitReason::DepthCollapse,
-                    use_maker: false,
-                });
-            }
+    if let Some(book) = book
+        && state.initial_depth > Decimal::ZERO
+    {
+        let current_depth = book.bid_depth + book.ask_depth;
+        let depth_change =
+            ((current_depth - state.initial_depth) / state.initial_depth) * Decimal::ONE_HUNDRED;
+        if depth_change <= -cfg.depth_collapse_threshold_pct
+            && bid < state.high_water_mark
+            && pct >= dec!(2)
+        {
+            return Some(ExitDecision {
+                reason: ExitReason::DepthCollapse,
+                use_maker: false,
+            });
         }
     }
 
@@ -604,8 +604,10 @@ mod tests {
         assert!(!d.use_maker);
 
         // An explicit wide stop (the old 50%) still holds through -30%.
-        let mut wide = ExitConfig::default();
-        wide.stop_loss_pct = dec!(50);
+        let wide = ExitConfig {
+            stop_loss_pct: dec!(50),
+            ..Default::default()
+        };
         assert!(
             decide_exit(ExitTickInput {
                 entry_price: dec!(0.4),

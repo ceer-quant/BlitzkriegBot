@@ -184,7 +184,7 @@ mod tests {
         assert!(FillPolicy::Taker.immediate());
         assert!(!FillPolicy::Maker.immediate());
         assert_eq!(FillPolicy::Taker.venue_order_type(), OrderType::Fok);
-        assert_eq!(FillPolicy::Maker.post_only(), true);
+        assert!(FillPolicy::Maker.post_only());
         assert_eq!(
             FillPolicy::MakerThenTaker.venue_order_type(),
             OrderType::Gtc

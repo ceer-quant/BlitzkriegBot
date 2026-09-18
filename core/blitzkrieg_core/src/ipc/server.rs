@@ -82,35 +82,34 @@ pub async fn run(
     // P4: Rust-native feeds. Start Binance spot now (symbols known at boot); the
     // orderbook subscriptions are added when `engine.markets` arrives (from Node)
     // or from Rust-native round discovery below.
-    if config.feed_ws_enabled {
-        if let Some(feed) = active.data_feed() {
-            let cfg = blitzkrieg_market_api::DataFeedConfig {
-                spot_assets: config.binance_assets.clone(),
-                ws_url: None,
-            };
-            if let Err(e) = feed.start(host.clone(), cfg, Vec::new()).await {
-                eprintln!("blitzkrieg-core: data feed start failed: {e}");
-            }
-            eprintln!(
-                "blitzkrieg-core: rust-native feeds enabled (binance spot; poly on first round)"
-            );
+    if config.feed_ws_enabled
+        && let Some(feed) = active.data_feed()
+    {
+        let cfg = blitzkrieg_market_api::DataFeedConfig {
+            spot_assets: config.binance_assets.clone(),
+            ws_url: None,
+        };
+        if let Err(e) = feed.start(host.clone(), cfg, Vec::new()).await {
+            eprintln!("blitzkrieg-core: data feed start failed: {e}");
         }
+        eprintln!("blitzkrieg-core: rust-native feeds enabled (binance spot; poly on first round)");
     }
 
     // P5: Rust-native round discovery — the plugin finds its own markets and feeds
     // the engine + orderbook subscriptions, so Node is out of the data path.
-    if config.engine_enabled && config.discovery_enabled {
-        if let Some(disc) = active.discovery() {
-            let cfg = blitzkrieg_market_api::DiscoveryConfig {
-                assets: config.assets.clone(),
-                round_duration_sec: config.round_duration_sec,
-                poll_sec: 5,
-            };
-            if let Err(e) = disc.start(host.clone(), cfg).await {
-                eprintln!("blitzkrieg-core: discovery start failed: {e}");
-            }
-            eprintln!("blitzkrieg-core: rust-native round discovery enabled");
+    if config.engine_enabled
+        && config.discovery_enabled
+        && let Some(disc) = active.discovery()
+    {
+        let cfg = blitzkrieg_market_api::DiscoveryConfig {
+            assets: config.assets.clone(),
+            round_duration_sec: config.round_duration_sec,
+            poll_sec: 5,
+        };
+        if let Err(e) = disc.start(host.clone(), cfg).await {
+            eprintln!("blitzkrieg-core: discovery start failed: {e}");
         }
+        eprintln!("blitzkrieg-core: rust-native round discovery enabled");
     }
 
     // Live mode: start the market's order executor (CLOB bridge: submits orders,
@@ -145,12 +144,12 @@ pub async fn run(
     // shared singleton. Without this probe a second process would unlink the
     // live socket and bind its own, silently orphaning a healthy core (or
     // failing with EADDRINUSE under a concurrent-start race).
-    if std::path::Path::new(&socket_path).exists() {
-        if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
-            anyhow::bail!("another blitzkrieg-core is already listening on {socket_path}");
-        }
-        // Stale socket from a crashed process: safe to remove.
+    if std::path::Path::new(&socket_path).exists()
+        && std::os::unix::net::UnixStream::connect(&socket_path).is_ok()
+    {
+        anyhow::bail!("another blitzkrieg-core is already listening on {socket_path}");
     }
+    // Stale socket from a crashed process: safe to remove.
     let _ = std::fs::remove_file(&socket_path);
     if let Some(parent) = std::path::Path::new(&socket_path).parent() {
         std::fs::create_dir_all(parent).ok();
@@ -254,10 +253,10 @@ fn spawn_session(
                 loop {
                     match events.recv().await {
                         Ok(ev) => {
-                            if let Ok(json) = serde_json::to_string(&Notification::new(ev)) {
-                                if out_tx.send(format!("{json}\n")).is_err() {
-                                    break;
-                                }
+                            if let Ok(json) = serde_json::to_string(&Notification::new(ev))
+                                && out_tx.send(format!("{json}\n")).is_err()
+                            {
+                                break;
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -567,15 +566,15 @@ async fn handle_line(
                 async move {
                     let now = now_ms();
                     let mut c = core.lock().await;
-                    if let Some(b) = p.best_bid {
-                        if let Some(a) = p.best_ask {
-                            c.book_snapshot(
-                                &p.token_id,
-                                vec![(b, Decimal::ONE)],
-                                vec![(a, Decimal::ONE)],
-                                now,
-                            );
-                        }
+                    if let Some(b) = p.best_bid
+                        && let Some(a) = p.best_ask
+                    {
+                        c.book_snapshot(
+                            &p.token_id,
+                            vec![(b, Decimal::ONE)],
+                            vec![(a, Decimal::ONE)],
+                            now,
+                        );
                     }
                     if c.has_engine() {
                         c.engine_on_data(

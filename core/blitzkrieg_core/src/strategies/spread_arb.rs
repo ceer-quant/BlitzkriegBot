@@ -312,7 +312,7 @@ mod tests {
         for _ in 0..count {
             now += 1_000;
             let b = book(0.60, 0.62);
-            replay.on_tick(&tick_ctx(&[m.clone()], "t", &b, 1, 880, now));
+            replay.on_tick(&tick_ctx(std::slice::from_ref(m), "t", &b, 1, 880, now));
         }
         now
     }
@@ -362,7 +362,7 @@ mod tests {
         let mut replay = TwinReplay::new(twin, &ExitConfig::default());
 
         let m = market();
-        replay.on_round(&[m.clone()], &[], 0);
+        replay.on_round(std::slice::from_ref(&m), &[], 0);
         let mut now = confirm(&mut replay, &m, 0, 70);
         assert_eq!(
             replay.open_positions(),
@@ -373,7 +373,7 @@ mod tests {
         // Dip while confirmed → the strategy's own entry fires.
         now += 1_000;
         let dip = book(0.43, 0.45);
-        replay.on_tick(&tick_ctx(&[m.clone()], "t", &dip, 1, 870, now));
+        replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &dip, 1, 870, now));
         assert_eq!(
             replay.open_positions(),
             1,
@@ -383,7 +383,7 @@ mod tests {
         // Run-up → the shared exit policy takes profit.
         now += 1_000;
         let up = book(0.95, 0.97);
-        replay.on_tick(&tick_ctx(&[m.clone()], "t", &up, 1, 860, now));
+        replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &up, 1, 860, now));
         assert_eq!(replay.open_positions(), 0);
         let metrics = Metrics::from_trades(&replay.windowed_trades(1800, now));
         assert_eq!(metrics.sample_count, 1);
@@ -413,9 +413,16 @@ mod tests {
             params.set("trend_max_entry_price", cap);
             let twin = factory.make(&params).unwrap();
             let mut replay = TwinReplay::new(twin, &ExitConfig::default());
-            replay.on_round(&[m.clone()], &[], 0);
+            replay.on_round(std::slice::from_ref(&m), &[], 0);
             let now = confirm(&mut replay, &m, 0, 70);
-            replay.on_tick(&tick_ctx(&[m.clone()], "t", &dip, 1, 870, now + 1_000));
+            replay.on_tick(&tick_ctx(
+                std::slice::from_ref(&m),
+                "t",
+                &dip,
+                1,
+                870,
+                now + 1_000,
+            ));
             replay.open_positions()
         };
         assert_eq!(run(dec!(0.45)), 1, "mid*factor≈0.43 is inside a 0.45 cap");

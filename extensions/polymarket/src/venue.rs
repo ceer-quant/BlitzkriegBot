@@ -194,6 +194,7 @@ pub async fn spawn_from_env(
     Ok(handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
     client: Client<Authenticated<Normal>>,
     signer: S,
@@ -205,13 +206,12 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
     events: mpsc::Sender<VenueEvent>,
 ) {
     // User-WS stream (best effort: skip when no markets are provided).
-    if !markets.is_empty() {
-        if let Err(e) = start_user_ws(funder, ws_url, markets, ws_credentials, events.clone()).await
-        {
-            let _ = events
-                .send(VenueEvent::Fatal(format!("user ws setup failed: {e}")))
-                .await;
-        }
+    if !markets.is_empty()
+        && let Err(e) = start_user_ws(funder, ws_url, markets, ws_credentials, events.clone()).await
+    {
+        let _ = events
+            .send(VenueEvent::Fatal(format!("user ws setup failed: {e}")))
+            .await;
     }
 
     while let Some(cmd) = cmd_rx.recv().await {

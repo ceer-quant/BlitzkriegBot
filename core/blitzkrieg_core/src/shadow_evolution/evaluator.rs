@@ -259,9 +259,23 @@ mod tests {
         let mut now = t0;
         for _ in 0..times {
             now += 1_000;
-            v.on_tick(&tick_ctx(&[m.clone()], "t", &book(0.40, 0.41), 1, 880, now)); // mid 0.405
+            v.on_tick(&tick_ctx(
+                std::slice::from_ref(m),
+                "t",
+                &book(0.40, 0.41),
+                1,
+                880,
+                now,
+            )); // mid 0.405
             now += 1_000;
-            v.on_tick(&tick_ctx(&[m.clone()], "t", &book(0.95, 0.97), 1, 880, now)); // exit
+            v.on_tick(&tick_ctx(
+                std::slice::from_ref(m),
+                "t",
+                &book(0.95, 0.97),
+                1,
+                880,
+                now,
+            )); // exit
         }
     }
 
@@ -277,15 +291,29 @@ mod tests {
         // not admit the tick, the variant's does.
         let m = market();
         let mut vs = set_for(2);
-        vs.on_round(&[m.clone()], &[], 0);
+        vs.on_round(std::slice::from_ref(&m), &[], 0);
         let tick = book(0.40, 0.41);
-        vs.variants[0].on_tick(&tick_ctx(&[m.clone()], "t", &tick, 1, 880, 1_000));
+        vs.variants[0].on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &tick,
+            1,
+            880,
+            1_000,
+        ));
         assert_eq!(
             vs.variants[0].open_positions(),
             0,
             "cap 0.40 must not buy a 0.405 mid"
         );
-        vs.variants[1].on_tick(&tick_ctx(&[m.clone()], "t", &tick, 1, 880, 1_000));
+        vs.variants[1].on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &tick,
+            1,
+            880,
+            1_000,
+        ));
         assert_eq!(
             vs.variants[1].open_positions(),
             1,
@@ -297,7 +325,7 @@ mod tests {
     fn emits_a_strategy_tagged_signal_when_a_variant_clearly_wins() {
         let m = market();
         let mut vs = set_for(2);
-        vs.on_round(&[m.clone()], &[], 0);
+        vs.on_round(std::slice::from_ref(&m), &[], 0);
         drive_wins(&mut vs.variants[1], &m, 10_000, 2);
 
         // Baseline reference: 50% win rate (one win, one loss).
@@ -342,7 +370,7 @@ mod tests {
     fn cooldown_suppresses_signals_per_strategy() {
         let m = market();
         let mut vs = set_for(2);
-        vs.on_round(&[m.clone()], &[], 0);
+        vs.on_round(std::slice::from_ref(&m), &[], 0);
         drive_wins(&mut vs.variants[1], &m, 10_000, 2);
         let mut c = cfg();
         c.cooldown_secs = 600;
@@ -375,14 +403,28 @@ mod tests {
     fn a_losing_variant_never_qualifies() {
         let m = market();
         let mut vs = set_for(2);
-        vs.on_round(&[m.clone()], &[], 0);
+        vs.on_round(std::slice::from_ref(&m), &[], 0);
         // Same trade, but exit at a loss instead of a gain.
         let mut now = 10_000;
         for _ in 0..2 {
             now += 1_000;
-            vs.variants[1].on_tick(&tick_ctx(&[m.clone()], "t", &book(0.40, 0.41), 1, 880, now));
+            vs.variants[1].on_tick(&tick_ctx(
+                std::slice::from_ref(&m),
+                "t",
+                &book(0.40, 0.41),
+                1,
+                880,
+                now,
+            ));
             now += 1_000;
-            vs.variants[1].on_tick(&tick_ctx(&[m.clone()], "t", &book(0.10, 0.12), 1, 880, now));
+            vs.variants[1].on_tick(&tick_ctx(
+                std::slice::from_ref(&m),
+                "t",
+                &book(0.10, 0.12),
+                1,
+                880,
+                now,
+            ));
         }
         let baseline = Metrics {
             sample_count: 2,
