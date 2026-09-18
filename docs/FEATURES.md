@@ -214,6 +214,17 @@ ECharts + Pinia + VueUse。设计基调：Apple 风格、金橙主调、liquid g
 | **无任何下单 API** | ✅ 设计约束 |
 | 事件推送（`EventBus` 取代纯轮询，保留轮询兜底） | ✅ E5-b / #33 |
 
+### 5.3.1 单二进制分发与一体化启动（`blitzkrieg`，E12 / #94）
+
+| 契约 | 状态 | 证据 |
+| --- | --- | --- |
+| **单二进制多命令分发**（`blitzkrieg [core|tui|web|run|--help]`） | ✅ 已验证 | `scripts/unified-launcher-check.mjs` |
+| **一体化默认托管**（`blitzkrieg run` 一键同时起内核与 UI，默认 `lifecycle: on`） | ✅ 已验证 | PPID 严格归属 launcher，孤儿守护 |
+| **终端显式接管**（`blitzkrieg tui --attach`） | ✅ 已验证 | 仅监视现有内核，绝不杀死非本进程拉起的内核 |
+| **父进程监控与零僵尸**（`SIGINT`/`SIGTERM` 级联清理，`Supervisor::stop()`） | ✅ 已验证 | SIGTERM 优雅退出后无僵尸进程、socket 自动解绑 |
+| **结构性只读模式**（`--readonly` 穿透至内核） | ✅ 已验证 | 不构造出网桥梁，`mode: "readonly"` |
+| **发布包体积预算**（≤ 50MB 单二进制，≤ 500MB 发布包） | ✅ 已验证 | `blitzkrieg` 1.81 MB (3.6%)，发布包 20.40 MB (4.1%) |
+
 ### 5.4 Node 层（**已删除**，见 §4 / D-24）
 
 **此处不再有 Node 应用外壳。** 0.2 期间旧 Node 交易域与随后残留的源码层
@@ -330,7 +341,7 @@ Tauri 打包进 webui 与 `desktop_snapshot` / `desktop_command` 全链路未验
 | 3 | **E6 Tauri 端到端未验** | 桌面形态不可交付 | §3.4 |
 | 4 | **性能基准未做** | 无法证明「低延迟」 | §5 |
 | 5 | **E9-g / E9-h 未完成** | 面板与 TUI 能力不对等 | §3.3 |
-| 6 | **E12 一体化启动未完成** | 无 `blitzkrieg`/`core`/`tui --attach` 子命令（5 条验收中仅剩此条；崩溃上报已修，§60） | KNOWN_ISSUES KI-25 |
+| 6 | ~~**E12 一体化启动**~~ | ✅ 已完成（#94，单二进制 `blitzkrieg` 多命令、默认生命周期管理、零僵尸退出） | §5.3.1 |
 | 7 | **fmt/clippy 债未清** | 独立专项 PR，勿夹进功能变更 | KNOWN_ISSUES KI-13 |
 
 ---

@@ -40,7 +40,7 @@ const BODY_BUDGET = Number(process.env.BK_BODY_BUDGET_MB ?? 100) * MB;
 /** Release binaries that ship. Missing ones are skipped: not every platform
  *  builds the Tauri/UI crates, and this gate must not invent a failure for a
  *  target the machine legitimately did not build. */
-const BINARIES = ['blitzkrieg-core', 'ui_kit_web', 'ui_kit_panel', 'ui_kit_app'];
+const BINARIES = ['blitzkrieg-core', 'ui_kit_web', 'ui_kit_panel', 'ui_kit_app', 'blitzkrieg'];
 
 function fmt(bytes) {
   return `${(bytes / MB).toFixed(2)} MB`;

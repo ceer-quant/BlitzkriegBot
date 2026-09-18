@@ -78,7 +78,7 @@ if (outIdx >= 0 && !argv[outIdx + 1]) {
 /** Release binaries that must exist — a bundle without the core is not a bundle. */
 const REQUIRED_BINARIES = ['blitzkrieg-core'];
 /** Built but optional: the UI crates are not built on every platform. */
-const OPTIONAL_BINARIES = ['ui_kit_web', 'ui_kit_panel', 'ui_kit_app'];
+const OPTIONAL_BINARIES = ['ui_kit_web', 'ui_kit_panel', 'ui_kit_app', 'blitzkrieg'];
 /** Nested workspaces that build strategy cdylibs. */
 const CDYLIB_DIRS = ['user_layer/strategies', 'user_layer/parity_strategy'];
 
