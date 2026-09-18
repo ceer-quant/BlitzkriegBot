@@ -222,8 +222,8 @@ fn build_core(dir: &std::path::Path, se_enabled: bool) -> Core {
     };
     let mut core = Core::new(cfg);
     let mut eng = Engine::new(engine_cfg());
-    // The builtin must not compete for the synthetic books.
-    assert!(eng.set_strategy_enabled("spread_arb", false));
+    // The kernel registers no strategies (PR-B); the two synthetic test
+    // strategies are registered directly.
     eng.register_user_strategy(
         Box::new(CapStrategy::new("alpha", "BTC", dec!(0.40))),
         "test".into(),
@@ -321,33 +321,17 @@ fn two_strategies_evolve_in_parallel_without_cross_talk_through_the_core() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut core = build_core(&dir, true);
 
-    // Every declaring strategy is registered — including the builtins, which are
-    // hosted-but-disabled here (spread_arb on; trend_follow and the E4-b fade
-    // leg off by default). That makes the isolation check stricter: five units,
-    // one moves.
+    // Every declaring strategy is registered (PR-B: zero kernel builtins; alpha & beta).
     assert_eq!(
         core.shadow_evolution().strategy_names(),
-        vec![
-            "spread_arb".to_string(),
-            "trend_follow".to_string(),
-            "mean_reversion".to_string(),
-            "alpha".to_string(),
-            "beta".to_string(),
-        ],
+        vec!["alpha".to_string(), "beta".to_string(),],
     );
     let reg = core.shadow_evolution().registry();
-    let c_spread = reg
-        .handle_for("spread_arb")
-        .expect("the builtin declares knobs");
     let c_alpha = reg.handle_for("alpha").expect("alpha declared a knob");
     let c_beta = reg.handle_for("beta").expect("beta declared a knob");
     assert!(
         !Arc::ptr_eq(&c_alpha, &c_beta),
         "alpha and beta own distinct cells"
-    );
-    assert!(
-        !Arc::ptr_eq(&c_alpha, &c_spread) && !Arc::ptr_eq(&c_beta, &c_spread),
-        "no strategy shares the builtin's cell",
     );
 
     feed_round(&mut core, T0);
@@ -357,7 +341,6 @@ fn two_strategies_evolve_in_parallel_without_cross_talk_through_the_core() {
 
     let alpha_before = cap_of(&core, "alpha").unwrap();
     let beta_before = cap_of(&core, "beta").unwrap();
-    let spread_before = core.shadow_evolution().params_for("spread_arb").unwrap();
 
     core.engine_evaluate(end + 100_000);
 
@@ -371,14 +354,8 @@ fn two_strategies_evolve_in_parallel_without_cross_talk_through_the_core() {
         Some(beta_before),
         "beta's parameters must not move"
     );
-    assert_eq!(
-        core.shadow_evolution().params_for("spread_arb"),
-        Some(spread_before),
-        "the builtin's parameters must not move",
-    );
     assert_eq!(core.shadow_evolution().evolution_count("alpha"), 1);
     assert_eq!(core.shadow_evolution().evolution_count("beta"), 0);
-    assert_eq!(core.shadow_evolution().evolution_count("spread_arb"), 0);
 
     // Audit: alpha's own file exists and names only alpha. No write may create
     // another strategy's file.
@@ -388,16 +365,11 @@ fn two_strategies_evolve_in_parallel_without_cross_talk_through_the_core() {
         !dir.join("beta.jsonl").exists(),
         "beta never evolved, so it has no file"
     );
-    assert!(!dir.join("spread_arb.jsonl").exists());
     let text = std::fs::read_to_string(&alpha_log).unwrap();
-    assert!(text.contains("\"strategy\":\"alpha\""), "{text}");
+    assert!(text.contains(r#""strategy":"alpha""#), "{text}");
     assert!(
         !text.contains("beta"),
         "alpha's file must not mention beta: {text}"
-    );
-    assert!(
-        !text.contains("spread_arb"),
-        "alpha's file must not mention the builtin: {text}"
     );
     assert!(core.shadow_evolution_history(Some("beta"), 10).is_empty());
     assert!(!core.shadow_evolution_history(Some("alpha"), 10).is_empty());
@@ -424,7 +396,6 @@ fn two_strategies_evolve_in_parallel_without_cross_talk_through_the_core() {
     );
     assert_eq!(core.shadow_evolution().evolution_count("alpha"), 1);
     assert_eq!(core.shadow_evolution().evolution_count("beta"), 1);
-    assert_eq!(core.shadow_evolution().evolution_count("spread_arb"), 0);
 
     let beta_log = dir.join("beta.jsonl");
     let beta_text = std::fs::read_to_string(&beta_log).unwrap();
@@ -586,6 +557,14 @@ fn an_undeclared_strategy_is_reported_not_evolvable() {
     };
     let mut core = Core::new(cfg);
     let mut eng = Engine::new(engine_cfg());
+    // Host a synthetic evolvable strategy alongside Inert, so the test sees an
+    // evolvable strategy and an inert one side-by-side (PR-B: the kernel
+    // registers nothing; every hosted strategy enters through the same seam).
+    eng.register_user_strategy(
+        Box::new(CapStrategy::new("evolvable", "BTC", dec!(0.40))),
+        "test".into(),
+    )
+    .unwrap();
     eng.register_user_strategy(Box::new(Inert), "test".into())
         .unwrap();
     core.enable_engine(eng);
@@ -598,13 +577,13 @@ fn an_undeclared_strategy_is_reported_not_evolvable() {
         "not evolvable is an explicit answer"
     );
     assert!(ev.status("inert", 0).is_none());
-    // The builtin DOES declare knobs, so it is evolvable — the seam is about the
-    // declaration, not about a strategy being synthetic or builtin.
-    assert!(!ev.declared_knobs("spread_arb").is_empty());
-    assert!(ev.params_for("spread_arb").is_some());
+    // An evolvable strategy DOES declare knobs — the seam is about the
+    // declaration, not about a privileged kernel code path.
+    assert!(!ev.declared_knobs("evolvable").is_empty());
+    assert!(ev.params_for("evolvable").is_some());
     // Its knobs carry coherent domains — what the evaluator and the gradient
     // lock check a proposal against.
-    for k in ev.declared_knobs("spread_arb") {
+    for k in ev.declared_knobs("evolvable") {
         assert!(k.is_coherent(), "{} declares an incoherent domain", k.name);
     }
 

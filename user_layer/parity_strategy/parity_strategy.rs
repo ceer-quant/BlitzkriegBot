@@ -209,11 +209,13 @@ pub extern "C" fn bk_strategy_abi_version() -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn bk_strategy_evolvable_knobs(handle: BkHandle) -> *mut c_char {
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn bk_strategy_evolvable_knobs(handle: BkHandle) -> *mut c_char {
     unsafe { evolvable_knobs(handle) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn bk_strategy_config_view(handle: BkHandle) -> *mut c_char {
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn bk_strategy_config_view(handle: BkHandle) -> *mut c_char {
     config_view(handle)
 }

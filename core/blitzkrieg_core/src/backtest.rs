@@ -385,6 +385,26 @@ impl EventBacktester {
         &self.core
     }
 
+    /// Mutable access to the replayed core (host a strategy, toggle one, seed
+    /// state) before `run`.
+    pub fn core_mut(&mut self) -> &mut Core {
+        &mut self.core
+    }
+
+    /// Host an additional strategy into the replay's engine.
+    ///
+    /// The kernel ships no strategies (PR-B): `install_engine` loads whatever
+    /// the configured `strategy_dir` holds and registers nothing else, so a
+    /// programmatic replay that wants a specific strategy hands one over here —
+    /// the same `EngineStrategy` contract a loaded library implements. Call it
+    /// after construction and before `run`; like every registration the strategy
+    /// starts DISABLED, so enable it by name on the core's engine.
+    pub fn host_strategy(&mut self, strategy: Box<dyn crate::strategies::EngineStrategy>) {
+        if let Some(engine) = self.core.engine.as_mut() {
+            let _ = engine.register_user_strategy(strategy, "replay-hosted".into());
+        }
+    }
+
     /// Advance the virtual clock one maintenance step: the live loop's
     /// `tick` + `engine_evaluate`, in that order.
     fn step(&mut self, now_ms: i64) {
@@ -769,6 +789,23 @@ mod tests {
                 tail_ms,
             },
             src,
+        );
+        // PR-B: the kernel registers no strategies, so a replay that drives the
+        // reference dip buyer hosts the test adapter and enables it, exactly as
+        // the production path enables a loaded library.
+        b.host_strategy(Box::new(
+            crate::strategies::test_support::TestSpreadArb::new(
+                crate::signal::TrendConfig {
+                    confirm_sec: 5,
+                    window_floor_ms: 0,
+                    ..Default::default()
+                },
+                Default::default(),
+            ),
+        ));
+        assert!(
+            b.core_mut().set_strategy_enabled("spread_arb", true),
+            "the hosted adapter registers under its reference name"
         );
         b.run().expect("replay runs")
     }

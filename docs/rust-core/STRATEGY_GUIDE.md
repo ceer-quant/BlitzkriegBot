@@ -195,26 +195,31 @@ node scripts/strategy-devcheck.mjs my_dip_fade
 `create()`。文件名含 `key/secret/private/credential/.env` 或非
 `.so/.dylib/.dll` 一律在 dlopen 之前拒绝。
 
-### 3.3 内建（内核自带）
-内核自带三个内建策略（`strategies::SpreadArbBuiltin` / `strategies::TrendFollowBuiltin` /
-`strategies::MeanReversionBuiltin`，宿主化实现），可用 `strategy.list` / `strategy.enable` 查询与开关。
+### 3.3 策略实现与分发（0 内核耦合）
+内核自带 **0 个交易策略**（内核侧 0 策略，彻底解耦）。所有生产策略均通过 C ABI v2 共享库（`.dylib` / `.so` / `.dll`）在运行时加载：
+- `user_layer/strategies/dog` → `libdog_strategy`
+- `user_layer/strategies/spread_arb` → `libspread_arb_strategy`
+- `user_layer/strategies/trend_follow` → `libtrend_follow_strategy`
+- `user_layer/strategies/mean_reversion` → `libmean_reversion_strategy`
 
-| 内建 | 默认 | 触发 | 定价 | 出场 |
+每个策略库均为独立 cdylib，通过 `user_layer/strategies` 独立工作区编译。算法逻辑与核心内核解耦，所有策略都通过 `strategy.load` / `load_strategy_dir` 挂载，并用 `strategy.list` / `strategy.enable` 进行查询与开关。
+
+| 策略 | 默认 | 触发 | 定价 | 出场 |
 |:---|:---|:---|:---|:---|
-| `spread_arb`（抄底腿） | **启用** | 已确认趋势里的回调 | 挂在 mid **之下**的被动买单（`entry < mid`） | 共享出场策略 |
-| `trend_follow`（追涨腿，E4-a / #30） | **禁用** | 本 token 的 mid 在窗口内**上涨** ≥ `min_move_pct` | **抬价吃卖单**（`entry = best_ask > mid`），并受 `max_entry_price` 上限约束 | 共享出场策略 |
-| `mean_reversion`（逆向/fade 腿，E4-b / #31） | **禁用** | 便宜侧（mid ≤ `max_price`=0.35 且 ≥ 0.05）从 120s 高点跌 ≥ `min_drop_pct`=10%、价差 ≤ `max_spread_pct`=8% | **低于 mid 的挂单**（`entry = round2(mid×0.98)`，向下夹到 best_bid，下限 0.05），token/分钟至多一次 | 共享出场策略 |
+| `spread_arb`（抄底腿） | 初始未启用 | 已确认趋势里的回调 | 挂在 mid **之下**的被动买单（`entry < mid`） | 共享出场策略 |
+| `trend_follow`（追涨腿，E4-a / #30） | 初始未启用 | 本 token 的 mid 在窗口内**上涨** ≥ `min_move_pct` | **抬价吃卖单**（`entry = best_ask > mid`），并受 `max_entry_price` 上限约束 | 共享出场策略 |
+| `mean_reversion`（逆向/fade 腿，E4-b / #31） | 初始未启用 | 便宜侧（mid ≤ `max_price`=0.35 且 ≥ 0.05）从 120s 高点跌 ≥ `min_drop_pct`=10%、价差 ≤ `max_spread_pct`=8% | **低于 mid 的挂单**（`entry = round2(mid×0.98)`，向下夹到 best_bid，下限 0.05），token/分钟至多一次 | 共享出场策略 |
 
 `spread_arb`/`trend_follow` 是**结构互逆**的一对（一个买被低估的一侧、一个买正在被买上去的一侧），
 因此互为对冲；`mean_reversion` 是第三种形态——买**正在被砸 down** 的便宜侧，
-赌盘口回弹被 trailing 抓住。它是**唯一声明门禁豁免的内建**：反向入场天然与现货动量闸门冲突
+赌盘口回弹被 trailing 抓住。它是**唯一声明门禁豁免的策略**：反向入场天然与现货动量闸门冲突
 （实测 39–50% 的 fade 候选会被拦），因此宣告 `momentum` 豁免（E2-b 通道），timing 豁免不声明。
 新策略默认**禁用**，这样一次升级不会改变已在运行的会话实际交易什么；要启用有三种等价方式：
 
 ```bash
 # 1) 开机即启（可重复；--disable-strategy 优先于 --enable-strategy）
 blitzkrieg-core --engine --enable-strategy mean_reversion ...
-# 2) 运行期开关（与内建/外挂策略同一入口，无需重启）
+# 2) 运行期开关（无需重启）
 { "method": "strategy.enable", "params": { "name": "mean_reversion", "enabled": true } }
 # 3) 回测/回放同样吃这两个开关（复用同一份 CoreConfig）
 blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy mean_reversion
@@ -224,7 +229,7 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy mean_rever
 `break_price` / `max_entry_price` / `max_spread_pct`）都可被影子进化（§3.6）。
 它**不声明任何门禁豁免**：顺势入场天然通过现货动量闸门，需要豁免的是 E4-b 的逆向腿。
 默认值中 `min_move_pct=3.0` 与 `max_spread_pct=3.0` 由 `data/archive/` 实测分布定标
-（详情见 `core/blitzkrieg_core/src/strategies/trend_follow.rs` 的配置文档注释）。
+（详情见 `user_layer/strategies/trend_follow/` 的配置说明与源码）。
 留出段回放表现与通道验证见 [TREND_FOLLOW_HOLDOUT_REPORT.md](../reports/TREND_FOLLOW_HOLDOUT_REPORT.md)。
 
 `mean_reversion` 的六个旋钮（`lookback_sec` / `min_drop_pct` / `max_price` / `entry_factor` /

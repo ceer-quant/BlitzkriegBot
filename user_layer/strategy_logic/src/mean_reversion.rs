@@ -1,12 +1,12 @@
-//! The built-in `mean_reversion` strategy (E4-b / #31): the *fade* leg.
+//! `mean_reversion` (the fade leg) — config, fade tracker and evaluator.
+//! The kernel wrapper and every external cdylib run THIS code.
 //!
-//! Where [`super::spread_arb`] buys a dip inside a CONFIRMED trend (it must wait
-//! out the [`crate::signal::TrendTracker`] window) and [`super::trend_follow`]
-//! chases a rising mid, this strategy buys a freshly CRASHED side — a token
-//! whose mid has fallen a large fraction off the high of its own recent history
-//! and now sits in the cheap zone. It is the counter-trend leg of the E4 hedge:
-//! its candidate windows are exactly the ones the other two legs have nothing
-//! in (no confirmed trend, price going the wrong way to chase).
+//! Where `spread_arb` buys a dip inside a CONFIRMED trend (it must wait out the
+//! trend window) and `trend_follow` chases a rising mid, this strategy buys a
+//! freshly CRASHED side — a token whose mid has fallen a large fraction off the
+//! high of its own recent history and now sits in the cheap zone. It is the
+//! counter-trend leg of the E4 hedge: its candidate windows are exactly the
+//! ones the other two legs have nothing in.
 //!
 //! | | `spread_arb` | `trend_follow` | `mean_reversion` |
 //! | --- | --- | --- | --- |
@@ -15,41 +15,17 @@
 //! | pricing | `entry < mid` | `entry = best_ask > mid` | `entry < mid` |
 //! | entry gate pass | natural | natural | **momentum exempted** (E2-b) |
 //!
-//! All state comes from the token's own book history (a [`PriceBuffer`] fed in
-//! `on_book`), never from the scanner's cached prices — the pricing discipline
-//! at the top of `signal.rs`.
-//!
-//! Exits are NOT this strategy's business (shared exit policy, D-2, like the
-//! other two builtins). Its one entry-side control is `take_breaks`: the
-//! oversold premise is gone once the mid recovers above `max_price`, so the
-//! kernel cancels that token's resting entry bid — the mirror of
-//! `trend_follow`'s move-death break.
-//!
-//! It declares **the momentum gate exemption** (`gate_exemptions().timing` stays
-//! false): the shared spot filter rejects an entry when spot moves against the
-//! bet, and a crash on the bet's own asset moves spot against it by
-//! construction. Measured on the held-out slice, the gate would refuse 39–50%
-//! of this leg's candidates depending on calibration — refusing them is what
-//! kills a counter-trend strategy, so the exemption is this strategy's reason
-//! for existing (E2-b / #27). Every honoured exemption is recorded per order
-//! (`gateExemptedMomentum` / `declaredExemptions`), so nothing enters silently.
-//!
-//! E2-c (#28) applies unchanged: six tunables declared with names, values and
-//! domains ([`MEAN_REVERSION_KNOBS`]), and a twin built from any parameter set
-//! ([`MeanReversionShadowFactory`]).
+//! All state comes from the token's own book history (a [`PriceBuffer`] fed by
+//! the host's book ticks), never from the scanner's cached prices.
 
-use super::shadow_twin::ShadowFactory;
-use super::{EngineStrategy, GateExemptions, StrategyCtx};
-use crate::model::OrderbookSnapshot;
-use crate::model::SignalDirection;
-use crate::shadow_evolution::{KnobSpec, ParamRegistry, StrategyParams};
-use crate::signal::{PriceBuffer, TradeSignal};
-use arc_swap::ArcSwap;
+use crate::knobs::declare_knobs;
+use crate::model::{OrderbookSnapshot, SignalDirection};
+use crate::params::{KnobSpec, StrategyParams};
+use crate::signal::{PriceBuffer, TradeSignal, round2};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 /// Entry-side parameters for the fade leg. Every field is a declared knob.
 ///
@@ -108,7 +84,7 @@ impl Default for MeanReversionConfig {
 
 /// The knobs `mean_reversion` declares evolvable, as `(name, default, min, max)`.
 ///
-/// The domain is a HARD outer bound (`guard::validate_domain` rejects anything
+/// The domain is a HARD outer bound (the kernel's domain guard rejects anything
 /// outside it before the ±gradient lock is consulted). `entry_factor`'s ceiling
 /// is 1.00 exclusive in spirit: the discipline requires a bid STRICTLY below the
 /// mid, so a proposal of exactly 1.00 produces entries that every mid comparison
@@ -138,16 +114,7 @@ fn knob_value(cfg: &MeanReversionConfig, name: &str) -> Decimal {
 
 /// This strategy's knob declaration derived from the config in force.
 pub fn mean_reversion_knobs(cfg: &MeanReversionConfig) -> Vec<KnobSpec> {
-    MEAN_REVERSION_KNOBS
-        .iter()
-        .map(|(name, _default, min, max)| {
-            let v = knob_value(cfg, name);
-            // A config that starts outside the default domain widens it, exactly
-            // like the other two builtins: the declaration must fit the strategy
-            // as it runs, not as it was compiled.
-            KnobSpec::new(*name, v, (*min).min(v), (*max).max(v))
-        })
-        .collect()
+    declare_knobs(MEAN_REVERSION_KNOBS, |name| knob_value(cfg, name))
 }
 
 /// Overlay a parameter set on a base config. Undeclared names are ignored.
@@ -290,6 +257,16 @@ impl FadeTracker {
         *self.in_zone.get(token_id).unwrap_or(&false)
     }
 
+    /// Tokens currently inside the cheap zone (host diagnostics read this; the
+    /// entry evaluator gates on `is_in_zone` itself).
+    pub fn zone_tokens(&self) -> HashSet<String> {
+        self.in_zone
+            .iter()
+            .filter(|(_, v)| **v)
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
     /// Drain tokens whose oversold premise just vanished.
     pub fn take_broken(&mut self) -> Vec<(String, Decimal)> {
         std::mem::take(&mut self.broken)
@@ -368,220 +345,9 @@ pub fn evaluate_mean_reversion(
     None
 }
 
-fn round2(v: Decimal) -> Decimal {
-    (v * Decimal::ONE_HUNDRED).round() / Decimal::ONE_HUNDRED
-}
-
-pub struct MeanReversionBuiltin {
-    cfg: MeanReversionConfig,
-    tracker: FadeTracker,
-    /// This strategy's OWN cell in the host's per-strategy parameter registry
-    /// (E2-c). None = evolution inactive, so the base config stands alone.
-    hot_params: Option<Arc<ArcSwap<StrategyParams>>>,
-    /// Whether the current cycle produced a candidate fire. Consumed by
-    /// `find_candidates` after `evaluate` gates it; the cooldown is recorded
-    /// ONLY for candidates the host actually saw (not for ones its own
-    /// structural checks rejected).
-    pending_fire: HashSet<String>,
-}
-
-impl MeanReversionBuiltin {
-    pub fn new(cfg: MeanReversionConfig) -> Self {
-        Self {
-            tracker: FadeTracker::new(cfg.clone()),
-            cfg,
-            hot_params: None,
-            pending_fire: HashSet::new(),
-        }
-    }
-
-    /// The config currently in force: base overlaid with the hot-swapped
-    /// per-strategy parameters when Shadow Evolution is active.
-    fn effective_cfg(&self) -> MeanReversionConfig {
-        match &self.hot_params {
-            Some(h) => apply_knobs(&self.cfg, &h.load()),
-            None => self.cfg.clone(),
-        }
-    }
-
-    /// Push the in-force config into this instance's OWN tracker. Applied
-    /// unconditionally including after `set_hot_params(None)` (detach must
-    /// restore the base config), same as `TrendFollowBuiltin::sync_tracker_cfg`.
-    fn sync_tracker_cfg(&mut self) {
-        let cfg = self.effective_cfg();
-        self.tracker.set_config(cfg);
-    }
-}
-
-impl EngineStrategy for MeanReversionBuiltin {
-    fn name(&self) -> &str {
-        "mean_reversion"
-    }
-
-    fn on_book(&mut self, token_id: &str, snap: &OrderbookSnapshot, now_ms: i64) {
-        self.sync_tracker_cfg();
-        self.tracker.on_price(token_id, snap.mid_price, now_ms);
-    }
-
-    fn on_round(&mut self, slot: i64, _time_left_sec: i64, _now_ms: i64) {
-        self.tracker.reset_if_new_round(slot);
-        self.pending_fire.clear();
-    }
-
-    fn take_breaks(&mut self) -> Vec<(String, Decimal)> {
-        self.tracker.take_broken()
-    }
-
-    fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
-        self.pending_fire.clear();
-        let cfg = self.effective_cfg();
-        let now = ctx.now_ms();
-        let mut out = Vec::new();
-        for market in ctx.markets() {
-            let up_book = ctx.fresh_book(&market.up_token_id);
-            let down_book = ctx.fresh_book(&market.down_token_id);
-            for (token, book) in [
-                (market.up_token_id.clone(), up_book.as_ref()),
-                (market.down_token_id.clone(), down_book.as_ref()),
-            ] {
-                if book.is_none() {
-                    continue;
-                }
-                if !self.tracker.is_in_zone(&token) {
-                    continue;
-                }
-                if !self.tracker.try_fire(&token, now) {
-                    continue;
-                }
-                if let Some(book) = book
-                    && let Some(sig) = evaluate_mean_reversion(
-                        &market.asset,
-                        &market.condition_id,
-                        &market.up_token_id,
-                        &market.down_token_id,
-                        if token == market.up_token_id {
-                            Some(book)
-                        } else {
-                            None
-                        },
-                        if token == market.down_token_id {
-                            Some(book)
-                        } else {
-                            None
-                        },
-                        &self.tracker,
-                        now,
-                        &cfg,
-                    )
-                {
-                    self.pending_fire.insert(sig.token_id.clone());
-                    out.push(sig);
-                }
-            }
-        }
-        out
-    }
-
-    /// The cheap-zone tokens this strategy is watching; entry-eligible only
-    /// after they also pass the drop / spread / cooldown checks via live books.
-    fn confirmed_tokens(&self) -> HashSet<String> {
-        self.tracker
-            .in_zone
-            .iter()
-            .filter(|(_, v)| **v)
-            .map(|(k, _)| k.clone())
-            .collect()
-    }
-
-    /// E4-b / #31: the shared entry-quality momentum gate is waived for THIS
-    /// strategy's candidates. Timing stays gated. Every honoured waiver is
-    /// recorded by the host per candidate order, so the opt-out is auditable.
-    fn gate_exemptions(&self) -> GateExemptions {
-        GateExemptions {
-            timing: false,
-            momentum: true,
-        }
-    }
-
-    fn diagnostics(&self, ctx: &StrategyCtx<'_>) -> Vec<serde_json::Value> {
-        let eff = self.effective_cfg();
-        self.tracker
-            .in_zone
-            .iter()
-            .filter(|(_, v)| **v)
-            .map(|(t, _)| {
-                let mid = ctx
-                    .fresh_book(t)
-                    .map(|b| b.mid_price)
-                    .unwrap_or(Decimal::ZERO);
-                let drop = self.tracker.drop_pct(t, ctx.now_ms());
-                let entry = mid * eff.entry_factor;
-                let firable = mid > Decimal::ZERO
-                    && mid <= eff.max_price
-                    && drop <= -eff.min_drop_pct
-                    && entry < mid;
-                serde_json::json!({
-                    "token": t,
-                    "mid": mid,
-                    "dropPct": drop,
-                    "entry": entry,
-                    "cap": eff.max_price,
-                    "firable": firable,
-                })
-            })
-            .collect()
-    }
-
-    fn set_hot_params(&mut self, registry: Option<Arc<ParamRegistry>>) {
-        // Resolve only OUR cell; None (evolution disabled) DETACHES the overlay.
-        self.hot_params = registry.as_ref().and_then(|r| r.handle_for(self.name()));
-    }
-
-    fn evolvable_knobs(&self) -> Vec<KnobSpec> {
-        mean_reversion_knobs(&self.effective_cfg())
-    }
-
-    fn shadow_factory(&self) -> Option<Box<dyn ShadowFactory>> {
-        // Built from the config in force WITHOUT the hot overlay: the overlay is
-        // exactly what the factory's parameter argument applies.
-        Some(Box::new(MeanReversionShadowFactory {
-            base: self.cfg.clone(),
-        }))
-    }
-}
-
-/// Builds independent `mean_reversion` twins for the shadow engine.
-///
-/// A twin owns its OWN [`FadeTracker`], so `min_drop_pct`/`max_price`/
-/// `lookback_sec` genuinely change what the twin fades — a counterfactual, not
-/// a relabelled baseline.
-pub struct MeanReversionShadowFactory {
-    base: MeanReversionConfig,
-}
-
-impl ShadowFactory for MeanReversionShadowFactory {
-    fn strategy(&self) -> String {
-        "mean_reversion".to_string()
-    }
-
-    fn knobs(&self) -> Vec<KnobSpec> {
-        mean_reversion_knobs(&self.base)
-    }
-
-    fn make(&self, params: &StrategyParams) -> Option<Box<dyn EngineStrategy>> {
-        Some(Box::new(MeanReversionBuiltin::new(apply_knobs(
-            &self.base, params,
-        ))))
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::shadow_twin::{TwinReplay, tick_ctx};
     use super::*;
-    use crate::exit_policy::ExitConfig;
-    use crate::model::CryptoMarket;
-    use crate::shadow_evolution::variants::Metrics;
     use rust_decimal::prelude::FromPrimitive;
 
     fn book(bid: f64, ask: f64) -> OrderbookSnapshot {
@@ -593,22 +359,6 @@ mod tests {
 
     fn book_d(bid: Decimal, ask: Decimal) -> OrderbookSnapshot {
         OrderbookSnapshot::from_levels("t", vec![(bid, dec!(100))], vec![(ask, dec!(100))], 0)
-    }
-
-    fn market() -> CryptoMarket {
-        CryptoMarket {
-            asset: "BTC".into(),
-            condition_id: "c".into(),
-            question_id: "q".into(),
-            up_token_id: "t".into(),
-            down_token_id: "t-down".into(),
-            up_price: dec!(0.5),
-            down_price: dec!(0.5),
-            expires_at_ms: 900_000,
-            round_slot: 1,
-            neg_risk: false,
-            question: "?".into(),
-        }
     }
 
     /// Drive a FALL from `from` to `to` on `token` in `count` steps spaced 1 s
@@ -854,93 +604,37 @@ mod tests {
     }
 
     #[test]
-    fn momentum_gate_is_waived_and_timing_is_not() {
-        let s = MeanReversionBuiltin::new(MeanReversionConfig::default());
-        let ex = s.gate_exemptions();
-        assert!(
-            ex.momentum,
-            "the fade leg exists to enter against the momentum gate"
-        );
-        assert!(!ex.timing, "the round-timing window stays enforced");
-        assert_eq!(ex.gates(), vec!["momentum"]);
-        assert_eq!(s.name(), "mean_reversion");
+    fn a_fresh_token_without_history_has_no_drop() {
+        let mut t = FadeTracker::new(MeanReversionConfig::default());
+        assert_eq!(t.drop_pct("t", 1_000), Decimal::ZERO);
+        assert!(!t.is_in_zone("t"));
+        assert!(t.take_broken().is_empty());
     }
 
     #[test]
-    fn a_twin_runs_the_strategys_own_logic_and_exits_on_the_shared_policy() {
-        let strat = MeanReversionBuiltin::new(MeanReversionConfig::default());
-        let factory = strat.shadow_factory().expect("mean_reversion is evolvable");
-        assert_eq!(factory.strategy(), "mean_reversion");
-        let params = StrategyParams::from_knobs(&factory.knobs());
-        let twin = factory.make(&params).expect("twin builds");
-        let mut replay = TwinReplay::new(twin, &ExitConfig::default());
-
-        let m = market();
-        replay.on_round(std::slice::from_ref(&m), &[], 0);
-        // Crash 0.60 → 0.30 in ~10 s; the twin's own tracker sees it.
-        let mut now = 0;
-        let steps = 12;
-        let to = dec!(0.30);
-        let from = dec!(0.60);
-        for i in 0..steps {
-            now += 1_000;
-            let p = from + (to - from) * Decimal::from(i) / Decimal::from(steps - 1);
-            let b = book_d(p - dec!(0.01), p + dec!(0.01));
-            replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &b, 1, 870, now));
-        }
-        assert_eq!(
-            replay.open_positions(),
-            1,
-            "the twin must fade the crash via its own logic"
-        );
-
-        // Near-certain win: above 0.64 a 0.32 entry runs past the fixed
-        // take-profit backstop (+100%) and the shared exit policy banks it —
-        // the same shape the dip buyer's twin test uses.
-        now += 20_000;
-        let up = book(0.95, 0.97);
-        replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &up, 1, 840, now));
-        assert_eq!(replay.open_positions(), 0, "the recovery must be exited");
-        let metrics = Metrics::from_trades(&replay.windowed_trades(1800, now + 1_000));
-        assert_eq!(metrics.sample_count, 1);
-        assert_eq!(metrics.wins, 1);
-        assert!(
-            metrics.total_pnl > Decimal::ZERO,
-            "expected a profit, got {}",
-            metrics.total_pnl
-        );
-    }
-
-    #[test]
-    fn a_twin_with_a_tighter_cheap_cap_skips_the_same_crash() {
-        // The counterfactual that makes evolution meaningful: same tick stream,
-        // one knob moved, a different decision — both through the strategy's
-        // own code path.
-        let m = market();
-        let run = |cap: Decimal| -> usize {
-            let strat = MeanReversionBuiltin::new(MeanReversionConfig {
-                max_price: cap,
-                ..Default::default()
-            });
-            let factory = strat.shadow_factory().unwrap();
-            let mut params = StrategyParams::from_knobs(&factory.knobs());
-            params.set("max_price", cap);
-            let twin = factory.make(&params).unwrap();
-            let mut replay = TwinReplay::new(twin, &ExitConfig::default());
-            replay.on_round(std::slice::from_ref(&m), &[], 0);
-            let mut now = 0;
-            for i in 0..8 {
-                now += 1_000;
-                // 0.45 → 0.315: a -30% fade whose final leg stays shallow
-                // enough that the shared stop policy does not kill the young
-                // position mid-ramp (this test isolates the cheap-cap knob).
-                let mid = dec!(0.45) - dec!(0.135) * Decimal::from(i) / Decimal::from(7);
-                let b = book_d(mid - dec!(0.005), mid + dec!(0.005));
-                replay.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &b, 1, 870, now));
-            }
-            replay.open_positions()
+    fn the_cooldown_admits_one_fire_per_window() {
+        let cfg = MeanReversionConfig {
+            cooldown_sec: 60,
+            ..Default::default()
         };
-        assert_eq!(run(dec!(0.35)), 1, "the crash lands in a 0.35 cheap zone");
-        assert_eq!(run(dec!(0.20)), 0, "the same crash sits above a 0.20 cap");
+        let mut t = FadeTracker::new(cfg);
+        assert!(t.try_fire("t", 1_000), "the first fire is free");
+        assert!(
+            !t.try_fire("t", 30_000),
+            "inside the cooldown the fire is refused"
+        );
+        assert!(
+            t.try_fire("t", 61_000),
+            "after the cooldown a fire is admitted"
+        );
+        // A token that left and re-entered the zone forgets its cooldown, but
+        // the 61s fire itself started a new window — 2s later is still inside.
+        t.on_price("t", dec!(0.60), 62_000);
+        t.on_price("t", dec!(0.30), 63_000);
+        assert!(
+            !t.try_fire("t", 63_000),
+            "the 61s fire restarted the window"
+        );
+        assert!(t.try_fire("t", 121_000), "and that window expires normally");
     }
 }

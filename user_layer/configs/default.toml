@@ -26,11 +26,10 @@ round_sec = 900
 min_round_age_sec = 30
 min_time_left_sec = 180
 
-[strategy]
-# Strategies switched ON at startup, by name (equivalent to repeating
-# --enable-strategy). Builtins default to `spread_arb` on and `trend_follow`
-# off; an unknown name is warned about, never fatal.
-# `dog_strategy` is user-layer and auto-loads from the strategy dir
-# (user_layer/strategies, scanned recursively for *.dylib/*.so at startup), so
-# naming it here only matters when the built dylib is present.
-active = ["spread_arb", "dog_strategy"]
+# ── Strategies are NOT configured here ───────────────────────────────────────
+# PR-B removed `[strategy]`. The kernel ships ZERO strategies: every strategy
+# comes from a cdylib under the strategy dir (default `user_layer/strategies`,
+# scanned recursively for *.dylib/*.so at startup), and each loaded library is
+# enabled automatically. A missing strategy dir is normal and never an error.
+# Opt a loaded strategy out with `--disable-strategy <name>` (or
+# `BK_DISABLE_STRATEGY`). There is no per-strategy on/off list in this file.

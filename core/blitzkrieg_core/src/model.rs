@@ -14,6 +14,10 @@ pub use blitzkrieg_market_api::{
     CoreError, CoreErrorCode, CoreResult, FillPolicy, FillStatus, OrderId, OrderStatus, OrderType,
     Side, TokenId, TradeId,
 };
+// Shared strategy-layer data shapes (single source of truth = strategy_logic,
+// PR-B): the orderbook snapshot and signal direction the shared evaluators
+// accept. Re-exported so the kernel's import paths stay stable.
+pub use strategy_logic::model::{OrderbookSnapshot, SignalDirection};
 
 /// Runtime mode. Core-owned (the market contract does not have a notion of dry
 /// vs live; each plugin implements both).
@@ -225,14 +229,9 @@ pub enum EventKind {
 }
 
 // ── Exit reasons & orderbook ─────────────────────────────────────────────────
-
-/// Which side of a binary market a position/signal is on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SignalDirection {
-    Up,
-    Down,
-}
+// `SignalDirection` and `OrderbookSnapshot` are re-exported from
+// `strategy_logic::model` at the top of this file (PR-B): one definition shared
+// with the external-strategy logic crate.
 
 /// Why a position was closed. Mirrors the TS `ExitReason` union.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,79 +273,6 @@ pub struct CryptoMarket {
     pub round_slot: i64,
     pub neg_risk: bool,
     pub question: String,
-}
-
-/// A snapshot of the top-of-book plus derived depth/obi metrics. Mirrors the TS
-/// `OrderbookSnapshot`. Carried on the tick/decide path; the book itself is
-/// rebuilt by the market-data layer.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OrderbookSnapshot {
-    pub token_id: TokenId,
-    pub bids: Vec<(Decimal, Decimal)>,
-    pub asks: Vec<(Decimal, Decimal)>,
-    #[serde(with = "decimal")]
-    pub bid_depth: Decimal,
-    #[serde(with = "decimal")]
-    pub ask_depth: Decimal,
-    #[serde(with = "decimal")]
-    pub obi: Decimal,
-    #[serde(with = "decimal")]
-    pub spread: Decimal,
-    #[serde(with = "decimal")]
-    pub spread_pct: Decimal,
-    #[serde(with = "decimal")]
-    pub best_bid: Decimal,
-    #[serde(with = "decimal")]
-    pub best_ask: Decimal,
-    #[serde(with = "decimal")]
-    pub mid_price: Decimal,
-    pub timestamp: i64,
-}
-
-impl OrderbookSnapshot {
-    /// Build from sorted level vectors, computing depth/obi/spread like the TS
-    /// `buildOrderbookSnapshot`.
-    pub fn from_levels(
-        token_id: impl Into<TokenId>,
-        mut bids: Vec<(Decimal, Decimal)>,
-        mut asks: Vec<(Decimal, Decimal)>,
-        timestamp: i64,
-    ) -> Self {
-        bids.sort_by_key(|b| std::cmp::Reverse(b.0));
-        asks.sort_by_key(|a| a.0);
-        let bid_depth: Decimal = bids.iter().map(|(_, s)| *s).sum();
-        let ask_depth: Decimal = asks.iter().map(|(_, s)| *s).sum();
-        let total = bid_depth + ask_depth;
-        let obi = if total > Decimal::ZERO {
-            (bid_depth - ask_depth) / total
-        } else {
-            Decimal::ZERO
-        };
-        let best_bid = bids.first().map(|(p, _)| *p).unwrap_or(Decimal::ZERO);
-        let best_ask = asks.first().map(|(p, _)| *p).unwrap_or(Decimal::ONE);
-        let spread = best_ask - best_bid;
-        let mid_price = (best_bid + best_ask) / Decimal::TWO;
-        let spread_pct = if mid_price > Decimal::ZERO {
-            (spread / mid_price) * Decimal::ONE_HUNDRED
-        } else {
-            Decimal::ZERO
-        };
-        Self {
-            token_id: token_id.into(),
-            bids,
-            asks,
-            bid_depth,
-            ask_depth,
-            obi,
-            spread,
-            spread_pct,
-            best_bid,
-            best_ask,
-            mid_price,
-            timestamp,
-        }
-    }
 }
 
 #[cfg(test)]

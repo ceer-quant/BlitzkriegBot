@@ -18,8 +18,8 @@ BlitzkriegBot 是一个面向**轮盘型预测市场（当前为 Polymarket 加�
 - **Rust 核心**：确定性的撮合 / 下单 / 持仓 / 风控 / 对账状态机，单二进制，内存安全，无市场 SDK 依赖。
 - **市场扩展**：核心市场无关；具体交易所通过扩展 crate 实现，并以 Cargo feature 挂接。官方默认扩展为
   **Polymarket**（CLOB 下单、WS 行情、Gamma 轮盘发现）。
-- **策略层**：核心内置已验证策略，并支持通过 `user_layer/strategy_api` 的 trait ABI 在运行时
-  加载用户动态库（cdylib，feature `strategy-loading`），热插拔而无需改核心。
+- **策略层**：核心侧 0 策略（无硬编码内建策略），所有交易策略完全通过 `user_layer/strategy_api` 的 C ABI v2 规范在运行时
+  动态加载（cdylib，feature `strategy-loading`），热插拔且分发时不捆绑任何策略。
 - **Rust 面板**：`ui_kit_web` 监听 `127.0.0.1:51888`，托管 Vue 前端（`ui/webapp/webui/`）并直接
   提供 `/api/snapshot`、`/api/command`、`/api/plugins`、`/api/login`；`--manage` 模式下可
   拉起 / 停止核心并托管其生命周期。

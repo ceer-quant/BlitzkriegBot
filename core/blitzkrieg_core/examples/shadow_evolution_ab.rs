@@ -51,8 +51,36 @@ use std::path::PathBuf;
 const STEP_MS: i64 = 4_000; // 4s per scripted tick
 const ROUND_SEC: i64 = 86_400; // ~1 day: far longer than the run so time-based exits never fire
 const N_ASSETS: usize = 70;
-/// The strategy under evolution in this harness (the builtin's own name).
+/// The strategy under evolution, loaded from its own cdylib through the SAME
+/// C ABI v2 dlopen path a third-party strategy uses. The kernel ships no
+/// strategy and knows this name only as a string the harness passes in.
 const STRATEGY: &str = "spread_arb";
+
+/// Locate the shipped `spread_arb` cdylib. Release first (what CI builds), then
+/// debug. Overridable with `BK_SPREAD_ARB_LIB` for an out-of-tree build.
+fn spread_arb_lib() -> PathBuf {
+    if let Some(p) = std::env::var_os("BK_SPREAD_ARB_LIB") {
+        return PathBuf::from(p);
+    }
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("user_layer")
+        .join("strategies")
+        .join("target");
+    for profile in ["release", "debug"] {
+        for name in [
+            "libspread_arb_strategy.dylib",
+            "libspread_arb_strategy.so",
+            "spread_arb_strategy.dll",
+        ] {
+            let p = base.join(profile).join(name);
+            if p.exists() {
+                return p;
+            }
+        }
+    }
+    base.join("release").join("libspread_arb_strategy.dylib")
+}
 
 fn up_token(i: usize) -> String {
     format!("A{i:02}_UP")
@@ -142,6 +170,17 @@ fn build_core(se_enabled: bool) -> Core {
         ..Default::default()
     });
     core.enable_engine(eng);
+    // PR-B: the kernel registers nothing, so the strategy under test enters the
+    // way every strategy does — dlopen a C ABI v2 library. Build it first:
+    //   (cd user_layer/strategies && cargo build --release)
+    let lib = spread_arb_lib();
+    let receipt = core.load_strategy_lib(&lib.to_string_lossy());
+    assert!(
+        receipt.contains("registered into the engine dispatch"),
+        "loading {} failed: {receipt}",
+        lib.display()
+    );
+    assert!(core.set_strategy_enabled(STRATEGY, true));
     if se_enabled {
         core.shadow_evolution_enable(0);
     }
@@ -240,7 +279,6 @@ fn run_manager_experiment() -> ManagerExp {
     use blitzkrieg_core::shadow_evolution::ShadowEvolution;
     use blitzkrieg_core::shadow_evolution::config::{ImmutableConfig, ShadowEvolutionConfig};
     use blitzkrieg_core::strategies::EngineStrategy;
-    use blitzkrieg_core::strategies::spread_arb::SpreadArbBuiltin;
 
     let cfg = ShadowEvolutionConfig {
         enabled: true,
@@ -263,7 +301,11 @@ fn run_manager_experiment() -> ManagerExp {
     };
     // The manager builds one unit per EVOLVABLE strategy, and a strategy is the
     // only thing that can declare its own knobs — so it needs a live instance.
-    let strat = SpreadArbBuiltin::new(TrendConfig::default(), SpreadArbConfig::default());
+    // PR-B: that instance comes from the shipped cdylib, exactly as it would in
+    // production; the kernel has no builtin to hand it here.
+    let loaded = blitzkrieg_core::strategy_engine::loader::load_foreign(&spread_arb_lib())
+        .unwrap_or_else(|e| panic!("load spread_arb cdylib failed: {e:?}"));
+    let strat = loaded.strategy;
     let mut se = ShadowEvolution::new(cfg, &[&strat as &dyn EngineStrategy]);
     se.enable(0);
 
@@ -780,7 +822,6 @@ fn model_self_check() {
     use blitzkrieg_core::exit_policy::ExitConfig;
     use blitzkrieg_core::strategies::EngineStrategy;
     use blitzkrieg_core::strategies::shadow_twin::{TwinReplay, tick_ctx};
-    use blitzkrieg_core::strategies::spread_arb::SpreadArbBuiltin;
 
     let m = CryptoMarket {
         asset: "T".into(),
@@ -795,7 +836,9 @@ fn model_self_check() {
         neg_risk: false,
         question: "?".into(),
     };
-    let strat = SpreadArbBuiltin::new(TrendConfig::default(), SpreadArbConfig::default());
+    let loaded = blitzkrieg_core::strategy_engine::loader::load_foreign(&spread_arb_lib())
+        .unwrap_or_else(|e| panic!("load spread_arb cdylib failed: {e:?}"));
+    let strat = loaded.strategy;
     let factory = strat
         .shadow_factory()
         .expect("spread_arb declares itself evolvable");

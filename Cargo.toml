@@ -8,6 +8,7 @@ members = [
     "core/blitzkrieg_core",
     "extensions/polymarket",
     "user_layer/strategy_api",
+    "user_layer/strategy_logic",
     "user_layer/parity_logic",
     "ui/ui_kit",
     "ui/ui_kit_panel",

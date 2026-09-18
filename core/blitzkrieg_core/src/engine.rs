@@ -11,9 +11,10 @@
 //! Strategies are hosted behind [`crate::strategies::EngineStrategy`] (P-1.1):
 //! each turns the host state into entry *candidates*, tagged with its own name;
 //! the engine applies the shared gates and emits `OrderRequest`s whose
-//! `strategy` field carries the emitting strategy. The builtin `spread_arb` is
-//! registered first; user-layer strategies (frozen C ABI) are appended
-//! disabled and must be explicitly enabled.
+//! `strategy` field carries the emitting strategy. The kernel ships ZERO
+//! strategies (PR-B): the registry starts EMPTY and every strategy — the shipped
+//! examples included — enters through the C ABI v2 dlopen path
+//! (`Core::load_strategy_lib`), so nothing about strategy identity is baked in.
 //!
 //! It is driven by `DataEvent`s (book / spot / round) and, on each evaluation,
 //! asks the `Core` to place orders. Everything here is deterministic given the
@@ -22,12 +23,10 @@
 use crate::marketdata::{LocalBook, is_fresh};
 use crate::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
 use crate::scanner::{Scanner, ScannerConfig};
-use crate::signal::{PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig};
-use crate::strategies::{
-    EngineStrategy, GateExemptions, MeanReversionConfig, StrategyCtx, StrategyExitIntent,
-    TrendFollowConfig, mean_reversion::MeanReversionBuiltin, spread_arb::SpreadArbBuiltin,
-    trend_follow::TrendFollowBuiltin,
+use crate::signal::{
+    MeanReversionConfig, PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig, TrendFollowConfig,
 };
+use crate::strategies::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 
@@ -38,7 +37,9 @@ pub struct EngineConfig {
     pub spread_arb: SpreadArbConfig,
     /// The chase leg's own entry parameters (E4-a / #30). Compiled defaults for
     /// now: `CoreConfig` does not expose them, and the runtime tuning path is
-    /// Shadow Evolution's per-strategy hot parameters.
+    /// Shadow Evolution's per-strategy hot parameters. Hosted external
+    /// strategies receive this through `on_config`; the kernel itself runs no
+    /// strategy.
     pub trend_follow: TrendFollowConfig,
     /// The fade leg's own entry parameters (E4-b / #31). Same story as
     /// `trend_follow`: compiled defaults, tuned at runtime via Shadow Evolution.
@@ -232,8 +233,9 @@ pub struct Engine {
     /// on the next tick with no restart — and one strategy's parameters can never
     /// be read by another.
     hot_params: Option<std::sync::Arc<crate::shadow_evolution::ParamRegistry>>,
-    /// Registered strategies. The builtin `spread_arb` is first; user-layer
-    /// strategies are appended (disabled until explicitly enabled).
+    /// Registered strategies (PR-B: starts EMPTY — the kernel ships none). Every
+    /// strategy arrives through `register_user_strategy`, whether it was built
+    /// in-tree in a test or dlopened from a cdylib.
     strategies: Vec<HostedStrategy>,
     /// Strategy close intents gathered during the latest evaluate(), drained by
     /// the host (`Core`) into its shared exit-submission path.
@@ -242,33 +244,9 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(cfg: EngineConfig) -> Self {
-        let strategies = vec![
-            HostedStrategy {
-                strategy: Box::new(SpreadArbBuiltin::new(
-                    cfg.trend.clone(),
-                    cfg.spread_arb.clone(),
-                )),
-                enabled: true,
-                source: "builtin".to_string(),
-            },
-            // E4-a / #30: the chase leg is a builtin but starts DISABLED, so
-            // adding it cannot change what an existing session trades. Enabling
-            // it is an explicit operator action (`strategy.enable`), the same
-            // rule every user-layer strategy already follows.
-            HostedStrategy {
-                strategy: Box::new(TrendFollowBuiltin::new(cfg.trend_follow.clone())),
-                enabled: false,
-                source: "builtin".to_string(),
-            },
-            // E4-b / #31: the fade leg is also a builtin that starts DISABLED,
-            // same rule — enabling it is an explicit operator action, and a
-            // kernel upgrade must not change what a running session trades.
-            HostedStrategy {
-                strategy: Box::new(MeanReversionBuiltin::new(cfg.mean_reversion.clone())),
-                enabled: false,
-                source: "builtin".to_string(),
-            },
-        ];
+        // ZERO strategies: the kernel has no builtins (PR-B). Anything that
+        // trades is registered by the host through the C ABI v2 loader.
+        let strategies = Vec::new();
         Self {
             scanner: Scanner::new(cfg.scanner.clone()),
             books: HashMap::new(),
@@ -704,20 +682,11 @@ impl Engine {
         self.hot_params.is_some()
     }
 
-    /// The spread_arb parameters currently in force (base overlaid with any
-    /// hot-swapped mutable params). Read-only view for tests/observability.
-    pub fn current_spread_arb(&self) -> SpreadArbConfig {
-        self.strategies
-            .iter()
-            .find_map(|s| s.strategy.spread_arb_view())
-            .unwrap_or_default()
-    }
-
     /// Per-strategy config-in-force views as (name, JSON string) for every
     /// strategy that reports one (observability). An external library reports
-    /// through its OPTIONAL `bk_strategy_config_view` symbol, an in-tree
-    /// strategy by overriding the trait method; strategies that declare nothing
-    /// are simply absent.
+    /// through its OPTIONAL `bk_strategy_config_view` symbol; strategies that
+    /// declare nothing are simply absent. The kernel keeps no knowledge of any
+    /// strategy's parameter names.
     pub fn strategy_config_views(&self) -> Vec<(String, String)> {
         self.strategies
             .iter()
@@ -729,8 +698,8 @@ impl Engine {
             .collect()
     }
 
-    /// Strategy names the engine knows about, in registration order (the
-    /// builtin `spread_arb` first, then user-layer strategies).
+    /// Strategy names the engine knows about, in registration order (PR-B: the
+    /// kernel ships none, so this is exactly what the loader registered).
     pub fn supported_strategies(&self) -> Vec<String> {
         self.strategies
             .iter()
@@ -774,11 +743,11 @@ impl Engine {
 
     /// Register a strategy into the live dispatch.
     ///
-    /// The strategy implements the SAME full [`EngineStrategy`] contract whether
-    /// it is in-tree or an external v2 dylib — external is only a loading
-    /// difference. It starts DISABLED: an explicit enable is required before it
-    /// can place orders. Returns the registered name, or an error when the name
-    /// is taken.
+    /// This is the ONLY way a strategy enters the engine. The kernel ships none
+    /// (PR-B): external v2 dylibs come through the C ABI v2 loader, which calls
+    /// this. It starts DISABLED: an explicit enable is required before it can
+    /// place orders. Returns the registered name, or an error when the name is
+    /// taken.
     pub fn register_user_strategy(
         &mut self,
         strategy: Box<dyn EngineStrategy>,
@@ -793,6 +762,10 @@ impl Engine {
             enabled: false,
             source,
         };
+        // Hand the host config to the newly registered strategy.
+        hosted
+            .strategy
+            .on_config(&self.cfg.trend, &self.cfg.spread_arb);
         // Registered after Shadow Evolution was configured? Forward the handle
         // so a later evolution still reaches this strategy.
         if let Some(h) = &self.hot_params {
@@ -802,7 +775,9 @@ impl Engine {
         Ok(name)
     }
 
-    /// Where a registered strategy came from (`builtin`, `dylib:<path>`, ...).
+    /// Where a registered strategy came from (`dylib:<path>`, `test`, ...) —
+    /// free-form provenance the loader supplies. The kernel itself has no
+    /// `builtin` class any more.
     pub fn strategy_source(&self, name: &str) -> Option<&str> {
         self.strategies
             .iter()
@@ -813,12 +788,12 @@ impl Engine {
     /// Remove a strategy from the live dispatch (E9-b `strategy.unload` /
     /// `strategy.reload`).
     ///
-    /// Only DYNAMIC strategies may be unloaded — `builtin`/in-tree strategies
-    /// are the kernel's own and refuse. The guard refuses while the strategy is
-    /// ENABLED: an operator must disable it first, so a still-trading strategy
-    /// is never silently pulled from under a running session. Returns `Err`
-    /// with the reason on any refusal, `Ok(true)` when removed, `Ok(false)`
-    /// when the name is unknown.
+    /// A registered strategy is DYNAMIC by construction — the kernel ships
+    /// none — so every registered name is removable. The guard refuses while the
+    /// strategy is ENABLED: an operator must disable it first, so a
+    /// still-trading strategy is never silently pulled from under a running
+    /// session. Returns `Err` with the reason on any refusal, `Ok(true)` when
+    /// removed, `Ok(false)` when the name is unknown.
     pub fn unregister_user_strategy(&mut self, name: &str) -> Result<bool, String> {
         let Some(idx) = self
             .strategies
@@ -827,11 +802,7 @@ impl Engine {
         else {
             return Ok(false);
         };
-        let hosted = &self.strategies[idx];
-        if hosted.source == "builtin" {
-            return Err(format!("refusing to unload in-tree strategy: {name}"));
-        }
-        if hosted.enabled {
+        if self.strategies[idx].enabled {
             return Err(format!(
                 "strategy {name} is ENABLED — disable it first (strategy.enable {name} false)"
             ));
@@ -987,9 +958,23 @@ mod tests {
         c
     }
 
+    /// An engine with the three TEST-ONLY adapters hosted (`spread_arb` enabled,
+    /// the other two registered-but-off) — the dispatch shape the deleted
+    /// builtins had, so these tests keep exercising candidate dispatch, gates
+    /// and hot parameters. The kernel itself ships no strategy (PR-B).
+    fn engine() -> Engine {
+        engine_from(cfg())
+    }
+
+    fn engine_from(cfg: EngineConfig) -> Engine {
+        let mut e = Engine::new(cfg.clone());
+        crate::strategies::test_support::host(&mut e, cfg.trend, cfg.spread_arb);
+        e
+    }
+
     #[test]
     fn engine_places_a_trend_confirmed_dip_buy() {
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         let mut c = core();
         let now = 1_000_000i64;
         e.on_data(DataEvent::RoundMarkets {
@@ -1031,7 +1016,7 @@ mod tests {
 
     #[test]
     fn engine_skips_without_confirmed_trend() {
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         let now = 1_000_000i64;
         e.on_data(DataEvent::RoundMarkets {
             markets: vec![market(1_800_000)],
@@ -1049,7 +1034,7 @@ mod tests {
 
     #[test]
     fn engine_blocks_entry_when_spot_moves_against() {
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         let _c = core();
         let now = 1_000_000i64;
         e.on_data(DataEvent::RoundMarkets {
@@ -1089,7 +1074,7 @@ mod tests {
 
     #[test]
     fn trend_break_is_reported_for_bid_cancellation() {
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         let now = 1_000_000i64;
         e.on_data(DataEvent::RoundMarkets {
             markets: vec![market(1_800_000)],
@@ -1119,7 +1104,7 @@ mod tests {
         // counted (this is the near-miss telemetry the shadow log lacks).
         let mut cfg = cfg();
         cfg.scanner.min_round_age_sec = 10_000; // force the timing gate to fail
-        let mut e = Engine::new(cfg);
+        let mut e = engine_from(cfg);
         let now = 1_000_000i64;
         e.on_data(DataEvent::RoundMarkets {
             markets: vec![market(1_800_000)],
@@ -1155,7 +1140,7 @@ mod tests {
 
     #[test]
     fn compute_shares_clamps_to_bounds() {
-        let e = Engine::new(cfg());
+        let e = engine();
         // 2.5 / 0.25 = 10 shares within [10,10].
         assert_eq!(e.compute_shares(dec!(0.25), "spread_arb"), dec!(10));
         // Very low price would exceed max → clamped to 10.
@@ -1169,14 +1154,14 @@ mod tests {
         c.size_usd = dec!(2.5);
         c.min_shares = dec!(4);
         c.max_shares = dec!(4);
-        let e = Engine::new(c);
+        let e = engine_from(c);
         // 2.5 / 0.45 ≈ 5.56 → rounds to 6, then clamped down to the 4-share lot.
         assert_eq!(e.compute_shares(dec!(0.45), "spread_arb"), dec!(4));
         // A wide band lets the nominal size win: 2.5 / 0.25 = 10 within [2,20].
         let mut c2 = cfg();
         c2.min_shares = dec!(2);
         c2.max_shares = dec!(20);
-        let e2 = Engine::new(c2);
+        let e2 = engine_from(c2);
         assert_eq!(e2.compute_shares(dec!(0.25), "spread_arb"), dec!(10));
         assert_eq!(e2.compute_shares(dec!(1.25), "spread_arb"), dec!(2));
     }
@@ -1197,7 +1182,7 @@ mod tests {
 
     #[test]
     fn strategy_sizing_falls_back_to_the_globals_when_absent() {
-        let e = Engine::new(sizing_cfg(&[]));
+        let e = engine_from(sizing_cfg(&[]));
         // No entry at all → the global band, and reported as not strategy-scoped.
         let s = e.effective_sizing("whatever");
         assert_eq!(s.size_usd, dec!(10));
@@ -1207,7 +1192,7 @@ mod tests {
         assert_eq!(e.compute_shares(dec!(0.50), "whatever"), dec!(20)); // 10/0.5=20
 
         // A caps-only entry (no sizing fields) must behave exactly like absent.
-        let e2 = Engine::new(sizing_cfg(&[("capped", StrategySize::default())]));
+        let e2 = engine_from(sizing_cfg(&[("capped", StrategySize::default())]));
         assert_eq!(e2.effective_sizing("capped").size_usd, dec!(10));
         assert!(!e2.effective_sizing("capped").strategy_scoped);
     }
@@ -1215,7 +1200,7 @@ mod tests {
     #[test]
     fn strategy_sizing_overrides_take_effect_inside_the_global_band() {
         // Global band here is [2,20] on a 10u budget (see `sizing_cfg`).
-        let e = Engine::new(sizing_cfg(&[(
+        let e = engine_from(sizing_cfg(&[(
             "small",
             StrategySize {
                 size_usd: Some(dec!(1)),
@@ -1246,7 +1231,7 @@ mod tests {
     fn strategy_sizing_can_never_exceed_the_global_risk_ceiling() {
         // An override that asks for MORE than the global band is clamped: more
         // notional, a higher share cap and a lower floor are all ignored.
-        let e = Engine::new(sizing_cfg(&[(
+        let e = engine_from(sizing_cfg(&[(
             "greedy",
             StrategySize {
                 size_usd: Some(dec!(100)),
@@ -1278,7 +1263,7 @@ mod tests {
     fn strategy_floor_above_the_global_ceiling_still_yields_the_ceiling() {
         // Degenerate config: floor 50 with a global ceiling of 20. The ceiling
         // wins (a floor is never allowed to defeat the global risk cap).
-        let e = Engine::new(sizing_cfg(&[(
+        let e = engine_from(sizing_cfg(&[(
             "weird",
             StrategySize {
                 size_usd: None,
@@ -1313,7 +1298,7 @@ mod tests {
     fn two_strategies_size_independently_in_one_evaluation() {
         // One cycle, two strategies, one dip each on its OWN asset: every entry
         // carries the strategy's own lot instead of a single global size.
-        let mut e = Engine::new(sizing_cfg(&[
+        let mut e = engine_from(sizing_cfg(&[
             (
                 "small",
                 StrategySize {
@@ -1478,11 +1463,23 @@ mod tests {
     }
 
     #[test]
-    fn registry_starts_with_both_builtins_the_chase_leg_disabled() {
-        let mut e = Engine::new(cfg());
-        // Registration order matters: it is the tie-break when two strategies
-        // want the same token in the same cycle (one entry per token per cycle),
-        // and `spread_arb` is the incumbent.
+    fn a_fresh_engine_registers_nothing_and_only_the_host_can_add_strategies() {
+        // PR-B hard switch: the kernel ships ZERO strategies, so a bare
+        // `Engine::new` must come up empty. This is the assertion that keeps a
+        // privileged in-tree code path from creeping back in.
+        let bare = Engine::new(cfg());
+        assert!(
+            bare.supported_strategies().is_empty(),
+            "the kernel must not register any strategy: {:?}",
+            bare.supported_strategies()
+        );
+        assert!(bare.enabled_strategies().is_empty());
+        assert_eq!(bare.strategy_source("spread_arb"), None);
+
+        // The test host then registers three adapters in a defined order: it is
+        // the tie-break when two strategies want the same token in the same
+        // cycle (one entry per token per cycle), and `spread_arb` is first.
+        let mut e = engine();
         assert_eq!(
             e.supported_strategies(),
             vec![
@@ -1494,9 +1491,9 @@ mod tests {
         assert_eq!(
             e.enabled_strategies(),
             vec!["spread_arb".to_string()],
-            "the new builtin must not trade until it is explicitly enabled"
+            "the host enables the first adapter explicitly; the rest stay off"
         );
-        assert_eq!(e.strategy_source("trend_follow"), Some("builtin"));
+        assert_eq!(e.strategy_source("trend_follow"), Some("test"));
         assert!(
             !e.set_strategy_enabled("nope", true),
             "unknown name must not toggle"
@@ -1513,7 +1510,7 @@ mod tests {
         // E4-a / #30: entering WITH the move is exactly what the shared spot
         // momentum gate wants, so the chase leg opts out of nothing. (E4-b, the
         // counter-trend leg, is the one that needs `momentum: true`.)
-        let e = Engine::new(cfg());
+        let e = engine();
         let ex = e
             .strategy_gate_exemptions("trend_follow")
             .expect("registered");
@@ -1554,7 +1551,7 @@ mod tests {
 
     #[test]
     fn the_chase_leg_trades_a_breakout_the_dip_buyer_would_not() {
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         let now = 1_000_000i64;
         e.on_data(DataEvent::RoundMarkets {
             markets: vec![market(1_800_000)],
@@ -1602,7 +1599,7 @@ mod tests {
         // entry is WITH the token's move, but when spot opposes it the candidate
         // must be stopped (it declares no exemption) — proving the new strategy
         // is subject to the same gates as the incumbent.
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         e.on_data(DataEvent::RoundMarkets {
             markets: vec![market(1_800_000)],
             now_ms: 1_000_000,
@@ -1633,7 +1630,7 @@ mod tests {
         // Both strategies enabled, both presented with the setups they want on
         // DIFFERENT tokens: each gets its own entry in the same cycle, each
         // tagged with its own name, and neither is dropped.
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         assert!(e.set_strategy_enabled("trend_follow", true));
         let now = 1_000_000i64;
         let mut m = market(1_800_000);
@@ -1701,7 +1698,7 @@ mod tests {
         // which is exactly the configuration where the tie-break has to be decided.
         let mut c = cfg();
         c.spread_arb.trend_max_entry_price = dec!(0.70);
-        let mut e = Engine::new(c);
+        let mut e = engine_from(c);
         assert!(e.set_strategy_enabled("trend_follow", true));
         let now = 1_000_000i64;
         e.on_data(DataEvent::RoundMarkets {
@@ -1727,7 +1724,7 @@ mod tests {
 
     #[test]
     fn user_strategy_registers_disabled_and_is_tagged_once_enabled() {
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         let name = e
             .register_user_strategy(
                 Box::new(DipBuyer::new("dip_buyer", dec!(0.6))),
@@ -1787,7 +1784,7 @@ mod tests {
 
     #[test]
     fn two_strategies_run_side_by_side_with_separate_tags() {
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         e.register_user_strategy(
             Box::new(DipBuyer::new("dip_buyer", dec!(0.45))),
             "test".into(),
@@ -1896,7 +1893,7 @@ mod tests {
         // (one entry per token per cycle is NOT waivable).
         let mut cfg = cfg();
         cfg.scanner.min_round_age_sec = 10_000;
-        let mut e = Engine::new(cfg);
+        let mut e = engine_from(cfg);
         e.register_user_strategy(
             Box::new(DipBuyer::exempting(
                 "window_fade",
@@ -1951,7 +1948,7 @@ mod tests {
         // Identical setup, identical strategy body — only the declaration differs.
         let mut cfg = cfg();
         cfg.scanner.min_round_age_sec = 10_000;
-        let mut e = Engine::new(cfg);
+        let mut e = engine_from(cfg);
         e.register_user_strategy(
             Box::new(DipBuyer::on_assets("plain", dec!(0.45), &["ETH"])),
             "test".into(),
@@ -1983,7 +1980,7 @@ mod tests {
 
     #[test]
     fn declared_momentum_exemption_lets_a_mean_reversion_entry_through() {
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         e.register_user_strategy(
             Box::new(DipBuyer::exempting(
                 "fader",
@@ -2031,7 +2028,7 @@ mod tests {
     fn an_exemption_is_scoped_to_the_declaring_strategy_only() {
         // Two strategies on different assets in the SAME cycle: only the one that
         // declared the momentum exemption gets through.
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         assert!(e.set_strategy_enabled("spread_arb", false));
         e.register_user_strategy(
             Box::new(DipBuyer::exempting(
@@ -2083,7 +2080,7 @@ mod tests {
     fn the_no_market_precondition_is_never_exemptible() {
         // Declaring every gate must not conjure a market: with no round markets
         // there is no priceable token, so nothing is exempted.
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         e.register_user_strategy(
             Box::new(DipBuyer::exempting(
                 "all_in",
@@ -2117,7 +2114,7 @@ mod tests {
         // Per-strategy attribution of blocked.timing / blocked.momentum (#27).
         let mut cfg = cfg();
         cfg.scanner.min_round_age_sec = 10_000;
-        let mut e = Engine::new(cfg);
+        let mut e = engine_from(cfg);
         let now = 1_000_000i64;
         e.on_data(DataEvent::RoundMarkets {
             markets: vec![market(1_800_000)],
@@ -2138,7 +2135,7 @@ mod tests {
     fn honoured_exemptions_are_counted_per_strategy_and_drained_once() {
         let mut cfg = cfg();
         cfg.scanner.min_round_age_sec = 10_000;
-        let mut e = Engine::new(cfg);
+        let mut e = engine_from(cfg);
         e.register_user_strategy(
             Box::new(DipBuyer::exempting(
                 "window_fade",
@@ -2178,7 +2175,7 @@ mod tests {
 
     #[test]
     fn declared_exemptions_are_listed_for_audit() {
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         e.register_user_strategy(
             Box::new(DipBuyer::exempting(
                 "fader",
@@ -2216,7 +2213,7 @@ mod tests {
 
     #[test]
     fn the_builtin_declares_no_exemptions() {
-        let e = Engine::new(cfg());
+        let e = engine();
         assert_eq!(
             e.strategy_gate_exemptions("spread_arb"),
             Some(GateExemptions::none())
@@ -2225,7 +2222,7 @@ mod tests {
 
     #[test]
     fn disabling_spread_arb_stops_its_entries() {
-        let mut e = Engine::new(cfg());
+        let mut e = engine();
         let now = 1_000_000i64;
         e.on_data(DataEvent::RoundMarkets {
             markets: vec![market(1_800_000)],
