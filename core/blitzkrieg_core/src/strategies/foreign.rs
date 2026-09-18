@@ -537,6 +537,35 @@ impl ForeignStrategy {
             unsafe { f(self.handle, std::ptr::null()) };
         }
     }
+
+    /// Bind the context, run `call` (the FFI evaluate/diagnostics hook), and
+    /// guarantee the unbind (bind null) happens on EVERY path — including a
+    /// panic. The `BkEvalCtx` the library sees borrows from host-owned storage
+    /// that is freed when the guard drops; leaving it bound across that free
+    /// would be a use-after-free waiting for the next hook call. A panicking
+    /// hook is caught, the guard dropped (unbind first, rows/views after), and
+    /// the panic RESUMED, so kernel-level panic semantics are exactly what they
+    /// were before the binder existed. (A library built with the plain "C"
+    /// unwind convention aborts inside its own frame before this can catch —
+    /// this guard is the belt to that suspenders, covering host-side marshalling
+    /// panics and C-unwind libraries.)
+    fn call_with_bound_ctx<T>(
+        &self,
+        marshal: &EvalCtxMarshal,
+        round: BkRound,
+        markets: *const BkMarket,
+        market_count: usize,
+        call: impl FnOnce() -> T,
+    ) -> T {
+        let bound = self.bind_ctx(marshal, round, markets, market_count);
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call));
+        self.unbind_ctx();
+        drop(bound);
+        match out {
+            Ok(v) => v,
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    }
 }
 
 // SAFETY: the loaded instance is driven only by the kernel's single strategy
@@ -717,15 +746,19 @@ impl EngineStrategy for ForeignStrategy {
         // E-parity: bind the evaluation context (round view + the PRICEABLE
         // books, i.e. exactly what `ctx.fresh_book` would answer) for the
         // duration of this evaluate call. The marshal owns every CString the
-        // context points at and outlives the FFI call below.
+        // context points at and outlives the FFI call below; the unbind runs on
+        // every path, panic included (see call_with_bound_ctx).
         let eval_marshal = EvalCtxMarshal::new(ctx.markets(), &ctx.fresh_book, ctx.now_ms());
-        let bound = self.bind_ctx(&eval_marshal, round, rv.markets, rv.market_count);
 
         // SAFETY: valid handle and a round view whose backing lives to end of
         // scope; the returned JSON is copied and freed via the library.
-        let out = unsafe { evaluate(self.handle, &rv) };
-        self.unbind_ctx();
-        drop(bound);
+        let out = self.call_with_bound_ctx(
+            &eval_marshal,
+            round,
+            rv.markets,
+            rv.market_count,
+            || unsafe { evaluate(self.handle, &rv) },
+        );
         let Some(v) = (unsafe { self.take_json(out) }) else {
             return Vec::new();
         };
@@ -850,13 +883,14 @@ impl EngineStrategy for ForeignStrategy {
             view.as_ptr()
         };
         let eval_marshal = EvalCtxMarshal::new(ctx.markets(), &ctx.fresh_book, ctx.now_ms());
-        let bound = self.bind_ctx(&eval_marshal, round, markets_ptr, view.len());
         // SAFETY: hook returns a heap JSON array owned by the library; the
         // bound context (if any) borrows from `eval_marshal`/`bound`, which
-        // outlive this call.
-        let parsed = unsafe { self.take_json(f(self.handle)) };
-        self.unbind_ctx();
-        drop(bound);
+        // outlive the call (unbind runs on every path, panic included).
+        let raw =
+            self.call_with_bound_ctx(&eval_marshal, round, markets_ptr, view.len(), || unsafe {
+                f(self.handle)
+            });
+        let parsed = unsafe { self.take_json(raw) };
         match parsed {
             Some(serde_json::Value::Array(a)) => a,
             _ => Vec::new(),

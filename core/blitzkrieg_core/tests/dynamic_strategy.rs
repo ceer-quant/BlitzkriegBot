@@ -251,6 +251,94 @@ fn hot_params_reach_the_dylib_on_the_next_evaluation() {
     assert_eq!(orders[0].price, dec!(0.48));
 }
 
+/// An in-tree strategy that records the round timing exactly as the trait
+/// delivers it, for the foreign/in-tree clock-parity assertion.
+struct ClockRecorder {
+    last: std::sync::Arc<std::sync::Mutex<Option<(i64, i64, i64)>>>,
+}
+impl blitzkrieg_core::strategies::EngineStrategy for ClockRecorder {
+    fn name(&self) -> &str {
+        "clock_recorder"
+    }
+    fn on_book(
+        &mut self,
+        _token_id: &str,
+        _snap: &blitzkrieg_core::model::OrderbookSnapshot,
+        _now_ms: i64,
+    ) {
+    }
+    fn find_candidates(
+        &mut self,
+        _ctx: &blitzkrieg_core::strategies::StrategyCtx<'_>,
+    ) -> Vec<blitzkrieg_core::signal::TradeSignal> {
+        Vec::new()
+    }
+    fn on_round(&mut self, slot: i64, time_left_sec: i64, now_ms: i64) {
+        *self.last.lock().unwrap() = Some((slot, time_left_sec, now_ms));
+    }
+}
+
+#[test]
+fn the_dylib_sees_the_same_round_clock_as_an_in_tree_strategy() {
+    // E-parity, verifiable not aspirational: on ONE engine, the foreign dylib's
+    // on_round timing (reported back through its diagnostics) and an in-tree
+    // strategy's on_round timing must be EQUAL bit for bit — same slot, same
+    // time_left_sec, same now_ms. Both must equal the scanner's computation.
+    let path = require_lib();
+    let loaded = load_foreign(&path).unwrap_or_else(|e| panic!("load failed: {e:?}"));
+    let mut engine = Engine::new(engine_cfg());
+    assert!(engine.set_strategy_enabled("spread_arb", false));
+    engine
+        .register_user_strategy(
+            Box::new(loaded.strategy),
+            format!("dylib:{}", path.display()),
+        )
+        .unwrap();
+    let in_tree_clock = std::sync::Arc::new(std::sync::Mutex::new(None));
+    engine
+        .register_user_strategy(
+            Box::new(ClockRecorder {
+                last: std::sync::Arc::clone(&in_tree_clock),
+            }),
+            "in-tree:clock".into(),
+        )
+        .unwrap();
+    assert!(engine.set_strategy_enabled("dog_strategy", true));
+    assert!(engine.set_strategy_enabled("clock_recorder", true));
+
+    // An expiry that leaves a real, non-zero time budget: the scanner computes
+    // time_left_sec from the round state, not zeros.
+    let now = 1_795_000i64;
+    engine.on_data(DataEvent::RoundMarkets {
+        markets: vec![market(1_800_000)],
+        now_ms: now,
+    });
+
+    let diag = engine.confirmed_diagnostics(now);
+    let foreign_clock = diag
+        .iter()
+        .find_map(|d| d.get("roundClock"))
+        .unwrap_or_else(|| panic!("dylib must report its round clock: {diag:?}"));
+    let (slot, time_left, now_seen) = (
+        foreign_clock.get("slot").and_then(|v| v.as_i64()),
+        foreign_clock.get("timeLeftSec").and_then(|v| v.as_i64()),
+        foreign_clock.get("nowMs").and_then(|v| v.as_i64()),
+    );
+    assert_eq!(slot, Some(2), "{foreign_clock}");
+    assert_eq!(now_seen, Some(now), "{foreign_clock}");
+    assert_eq!(
+        time_left,
+        Some(5),
+        "the dylib must see the scanner's REAL time budget, not zeros: {foreign_clock}"
+    );
+    // The in-tree recorder's on_round clock must match the dylib's EXACTLY.
+    assert_eq!(
+        *in_tree_clock.lock().unwrap(),
+        Some((slot.unwrap(), time_left.unwrap(), now_seen.unwrap())),
+        "in-tree and dylib round clocks must be bit-identical"
+    );
+}
+
 #[test]
 fn the_dylib_declares_its_evolvable_knobs_over_the_optional_symbol() {
     // E2-c (#28): `bk_strategy_evolvable_knobs` is OPTIONAL — its absence means

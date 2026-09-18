@@ -24,6 +24,10 @@ struct Dog {
     buy_below: Decimal,
     books: HashMap<String, BookUpdate>,
     holding: HashSet<String>,
+    /// The round timing as THIS dylib saw it, reported in diagnostics —
+    /// the dynamic_strategy parity test asserts it equals, bit for bit, what
+    /// an in-tree strategy observed on the same engine.
+    last_round: Option<(i64, i64, i64)>,
 }
 impl Default for Dog {
     fn default() -> Self {
@@ -31,6 +35,7 @@ impl Default for Dog {
             buy_below: dec!(0.43),
             books: Default::default(),
             holding: Default::default(),
+            last_round: None,
         }
     }
 }
@@ -48,7 +53,8 @@ impl SafeStrategy for Dog {
             self.books.insert(u.symbol.clone(), u.clone());
         }
     }
-    fn on_round(&mut self, _r: RoundInfo) {
+    fn on_round(&mut self, r: RoundInfo) {
+        self.last_round = Some((r.slot, r.time_left_sec, r.now_ms));
         self.holding.clear();
     }
     fn evaluate(&mut self, ctx: &RoundContext) -> Intents {
@@ -97,7 +103,17 @@ impl SafeStrategy for Dog {
     fn diagnostics(&self) -> Vec<serde_json::Value> {
         let mut ks: Vec<&String> = self.books.keys().collect();
         ks.sort();
-        ks.iter().map(|t| { let b = &self.books[*t]; serde_json::json!({"symbol": t, "mid": b.mid, "bestBid": b.best_bid, "bestAsk": b.best_ask, "bidDepth": b.bid_depth, "holding": self.holding.contains(*t)}) }).collect()
+        let mut out: Vec<serde_json::Value> = ks
+            .iter()
+            .map(|t| {
+                let b = &self.books[*t];
+                serde_json::json!({"symbol": t, "mid": b.mid, "bestBid": b.best_bid, "bestAsk": b.best_ask, "bidDepth": b.bid_depth, "holding": self.holding.contains(*t)})
+            })
+            .collect();
+        if let Some((slot, time_left, now_ms)) = self.last_round {
+            out.push(serde_json::json!({"roundClock": {"slot": slot, "timeLeftSec": time_left, "nowMs": now_ms}}));
+        }
+        out
     }
     // Both the kernel config package (nested under "spreadArb") and the hot bag
     // (the strategy's own knob cell, top-level) resolve to the same knob.

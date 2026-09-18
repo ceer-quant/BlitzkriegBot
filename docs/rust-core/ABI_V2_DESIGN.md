@@ -217,6 +217,12 @@ E7 的承诺是「外挂只是换一种加载方式，而不是换一套能力�
 某 token 没有对应行 = 「此刻不可定价」，与树内 `fresh_book(..) == None` 逐位同义。
 安全模板（`safe.rs`）把它接成 `on_eval_books(&[FreshBook])` 钩子，作者无需碰 ABI。
 
+**措辞必须严格**：`fresh=1` 是**入场条件，不是标记**。装订进来的每一行盘口
+都**一定是新鲜的**（宿主只装订可定价行），策略看到 `fresh=1` 之外不会有别的
+取值；「这一行过期了吗」对外挂策略**不构成问题**——过期与缺失同样表现为
+「没有这一行」。树内策略同样无法区分过期与缺失（`fresh_book` 返回 `None`
+不带原因），因此两侧语义逐位一致，不存在信息差。
+
 **② 评估期真实计时** — `on_round`/evaluate 的 `BkRound` 本就携带
 `time_left_sec` / `now_ms`；内核曾向 foreign 策略填 0（已修复）：引擎现在用
 `scanner.round_state(now_ms).time_left_sec` 计算真实剩余秒数，树内与外挂看到
@@ -231,6 +237,15 @@ in-tree 孪生与 dylib 的视图在 `foreign_parity` 中被要求完全相等�
 诊断同理：foreign 库的 diagnostics 钩子被调用前，宿主装订与 evaluate 完全相同的
 评估上下文——一个诊断因此可以像树内 `diagnostics(&ctx)` 一样报告新鲜度裁决后
 的值。
+
+**生命周期与 panic 安全**：`bk_eval_ctx_t` 及其全部指针**只在单次回调内有效**
+（借用的宿主存储，回调返回即可能失效），外挂策略**不得保存任何引用/指针**——
+持有即 use-after-free，这是 ABI 借用规则的硬性条款。宿主侧以
+`call_with_bound_ctx` 保证「装订 → 调用 → 解绑（bind NULL）」在**所有**路径上
+成对发生：钩子 panic 时先解绑、释放行存储，再恢复 panic 传播（内核的 panic
+语义与装订机制出现之前完全一致）。这是兜底层：按标准 `"C"` unwind 约定编译的
+库在自己的帧内即中止，该防护覆盖的是宿主侧 marshal panic 与 `extern "C-unwind"`
+类库。
 
 ## 4. 出场意图如何接进内核（不失控）
 
