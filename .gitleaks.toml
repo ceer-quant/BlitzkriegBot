@@ -19,7 +19,6 @@ paths = [
   '''^tests/''',
   '''\.md$''',
   '''^assets/''',
-  '''^public/''',
   '''package-lock\.json$''',
   '''Cargo\.lock$''',
   '''^scripts/secret-scan\.(sh|patterns)$''',

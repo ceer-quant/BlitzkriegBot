@@ -39,7 +39,6 @@ EXCLUDES=(
   ':!package-lock.json'
   ':!**/Cargo.lock'
   ':!assets/**'
-  ':!public/**'
   ':!node_modules/**'
   ':!scripts/secret-scan.sh'
   ':!scripts/secret-scan.patterns'
