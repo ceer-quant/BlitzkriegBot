@@ -230,6 +230,24 @@ pub trait SafeStrategy: Send + 'static {
         &[]
     }
 
+    /// D-31: the lower bound (seconds) on `time_left_sec` at which the
+    /// `"timing"` exemption stops being honoured. `None` = the kernel default
+    /// (the scanner's `min_time_left_sec`), i.e. keep respecting the global
+    /// time-left window.
+    ///
+    /// This exists because a `timing`-exempt strategy could otherwise enter
+    /// inside the force-exit window, where the exit policy fires on the next
+    /// tick: a legal entry with no round left to reach a target, hence a
+    /// zero-hold exit that is noise rather than a strategy judgement.
+    ///
+    /// The value REPLACES the scanner's `min_time_left_sec` for this strategy,
+    /// so it only ever narrows the exemption relative to letting `timing` waive
+    /// the time-left gate outright. It is inert unless `gate_exemptions()` also
+    /// lists `"timing"`, and a negative value is clamped to zero by the kernel.
+    fn timing_min_time_left_sec(&self) -> Option<i64> {
+        None
+    }
+
     /// The strategy's config currently in force, as a JSON object (OPTIONAL
     /// `bk_strategy_config_view` symbol; `None` = "nothing declared", the
     /// default). The kernel surfaces it beside the in-tree strategies'
@@ -637,19 +655,23 @@ macro_rules! export_strategy {
                 json_out(serde_json::json!({ "knobs": kn }).to_string())
             }
             unsafe extern "C" fn gate_exemptions(handle: BkHandle) -> *mut c_char {
-                let gates: Vec<&str> = if handle.is_null() {
-                    Vec::new()
+                let (gates, floor) = if handle.is_null() {
+                    (Vec::new(), None)
                 } else {
                     let s = unsafe { &*(handle as *const Shell) };
-                    s.inner.gate_exemptions().to_vec()
+                    (s.inner.gate_exemptions().to_vec(), s.inner.timing_min_time_left_sec())
                 };
-                json_out(
-                    serde_json::json!({
-                        "timing": gates.contains(&"timing"),
-                        "momentum": gates.contains(&"momentum"),
-                    })
-                    .to_string(),
-                )
+                let mut v = serde_json::json!({
+                    "timing": gates.contains(&"timing"),
+                    "momentum": gates.contains(&"momentum"),
+                });
+                // D-31: written only when declared, so a library that predates
+                // the field keeps emitting byte-identical JSON and the kernel
+                // falls back to its own default floor.
+                if let Some(n) = floor {
+                    v["timing_min_time_left_sec"] = serde_json::json!(n);
+                }
+                json_out(v.to_string())
             }
 
             // The vtable's name must be what `SafeStrategy::name` declares:
@@ -948,6 +970,13 @@ mod tests {
         let conf_v: serde_json::Value = serde_json::from_str(&conf_s).expect("exemptions json");
         assert_eq!(conf_v["timing"], serde_json::json!(true), "{conf_s}");
         assert_eq!(conf_v["momentum"], serde_json::json!(false), "{conf_s}");
+        // D-31: Doubler declares no floor, so the key must be ABSENT — not null,
+        // not 0. A library that omits it gets the kernel's stricter default, and
+        // every strategy shipped before D-31 emits exactly this shape.
+        assert!(
+            conf_v.get("timing_min_time_left_sec").is_none(),
+            "an undeclared floor must not be emitted: {conf_s}"
+        );
 
         // 6. diagnostics round-trip, including the bound evaluation rows.
         let d_raw = unsafe { (vt.diagnostics.expect("diagnostics"))(handle) };

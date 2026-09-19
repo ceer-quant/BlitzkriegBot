@@ -493,7 +493,11 @@ fn the_dylib_gate_declaration_reaches_the_engine_and_is_honoured() {
         loaded.gate_exemptions,
         blitzkrieg_core::strategies::GateExemptions {
             timing: true,
-            momentum: false
+            momentum: false,
+            // D-31: the dog declares a 180s time-left floor with its `timing`
+            // exemption, and that number must cross the C ABI intact — this is
+            // the assertion that proves the optional JSON field is wired.
+            timing_min_time_left_sec: Some(180),
         },
         "the load report must carry the library's declaration"
     );
@@ -525,7 +529,8 @@ fn the_dylib_gate_declaration_reaches_the_engine_and_is_honoured() {
         engine.strategy_gate_exemptions("dog_strategy"),
         Some(blitzkrieg_core::strategies::GateExemptions {
             timing: true,
-            momentum: false
+            momentum: false,
+            timing_min_time_left_sec: Some(180),
         })
     );
     assert_eq!(
@@ -878,6 +883,10 @@ fn parity_mean_reversion_cdylib_matches_adapter() {
         blitzkrieg_core::strategies::GateExemptions {
             timing: false,
             momentum: true,
+            // D-31: mean_reversion declares no time-left floor. It must cross the
+            // ABI as `None` (the kernel then applies its own default), which is
+            // also the shape every pre-D-31 library produces.
+            timing_min_time_left_sec: None,
         }
     );
 

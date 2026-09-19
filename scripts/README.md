@@ -47,7 +47,7 @@ cargo build --release --workspace --locked
 | `webapp-check.mjs` | Panel: bundle served, auth both ways, CSRF, snapshot non-empty |
 | `backtest-check.mjs` | Event-driven backtest: archive → offline replay → bit-identical |
 | `order-recovery-check.mjs` / `position-recovery-check.mjs` | Crash recovery for orders / positions |
-| `strategy-gate-check.mjs` / `strategy-limit-check.mjs` / `strategy-evolution-check.mjs` | Strategy-scoped gating / funding / shadow evolution |
+| `strategy-gate-check.mjs` / `strategy-limit-check.mjs` / `strategy-evolution-check.mjs` | Strategy-scoped gating / funding / shadow evolution. The gate check runs two cores: one where the timing window is shut by round AGE (the D-31 exemption must still waive it) and one where it is shut by remaining TIME (it must not — the dog declares a 180s floor) |
 | `trend-follow-check.mjs` / `mean-reversion-check.mjs` | Strategy legs, driven through the external cdylibs (the kernel ships no builtins) |
 | `scale-plugins-check.mjs` / `feed-scale-check.mjs` | Registry read latency / feed loss rate at scale |
 | `ui-eventbus-check.mjs` / `ui-kit-gateway-check.mjs` / `ui-plugin-check.mjs` | UI event push / gateway command surface |

@@ -65,6 +65,21 @@ const totals = computed(() => {
 
 const profile = (r: StrategyStatsRow) => refusalProfile(r)
 
+/**
+ * The tooltip must say how FAR an opt-out reaches (D-31). Two strategies both
+ * showing 「时机」 can behave completely differently: one stops at the kernel's
+ * window, the other enters right up to the last second. Without the floor the
+ * badge would report them identically.
+ */
+function exemptionTooltip(r: StrategyStatsRow): string {
+  const gates = r.gateExemptions.join(' / ')
+  const named =
+    r.gateExemptions.includes('timing') && r.gateExemptionTimingFloorSec != null
+      ? `，其中时机闸门仅在剩余 ≥${r.gateExemptionTimingFloorSec}s 时豁免`
+      : ''
+  return `声明豁免：${gates}${named}`
+}
+
 function causePills(r: StrategyStatsRow): { name: string; n: number }[] {
   return refusalProfile(r).causes
 }
@@ -231,7 +246,7 @@ function toggleExpand(name: string): void {
                 <td class="px-2 py-2.5 text-right">
                   <Tooltip
                     v-if="r.gateExemptions?.length"
-                    :content="`声明豁免：${r.gateExemptions.join(' / ')}`"
+                    :content="exemptionTooltip(r)"
                   >
                     <span class="num inline-flex items-center gap-1 font-semibold text-info">
                       <ShieldOff class="size-3" /><RollingNumber :value="r.gateExemptions.length" />

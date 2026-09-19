@@ -87,6 +87,9 @@ check('registry rows carry honest zero counters, not fabricated ones', () => {
     assert.equal(r[k], 0, `${k} must be zero`)
   }
   assert.deepEqual(r.gateExemptions, [])
+  // D-31: a registry row has no declaration, so its timing floor is `null`, not
+  // `0` — the panel must not claim a bounded opt-out where none was declared.
+  assert.equal(r.gateExemptionTimingFloorSec, null)
   assert.equal(r.rejectionCauses, null)
 })
 

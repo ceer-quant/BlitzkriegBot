@@ -5,7 +5,8 @@
 //! (default 0.43, evolvable 0.05..0.90) at the best ask («dog_dip»); while in
 //! position, exit once the best bid recovers to 0.60 («dog_tp»). Entries carry
 //! no size and exits no price — the kernel sizes, prices and risk-gates
-//! everything; the only entry gate waived is `timing` (audited, not a bypass).
+//! everything; the only entry gate waived is `timing` (audited, not a bypass),
+//! and only down to `TIMING_MIN_TIME_LEFT_SEC` (D-31).
 //! All prices are the ABI's decimal strings compared via [`rust_decimal`]
 //! (`dec()`), never through `f64` — bit-exact with the kernel.
 
@@ -19,6 +20,14 @@ use std::collections::{HashMap, HashSet};
 
 const TAKE_PROFIT: Decimal = dec!(0.60);
 const MIN_BID_DEPTH: Decimal = dec!(50);
+/// D-31: below this many seconds left in the round the `timing` exemption is
+/// NOT honoured, so `dog_dip` no longer enters inside the kernel's own
+/// time-left window. The dip's edge needs a round with life left to reach
+/// [`TAKE_PROFIT`]; an entry with less than that window is a guaranteed
+/// zero-hold exit (the exit policy fires on the next tick), which is noise in
+/// the ledger, not a strategy judgement. Measured in the dry ledger: two
+/// zero-hold dog entries at 57.5s and 172.8s left, both below this bound.
+const TIMING_MIN_TIME_LEFT_SEC: i64 = 180;
 
 struct Dog {
     buy_below: Decimal,
@@ -146,6 +155,9 @@ impl SafeStrategy for Dog {
     }
     fn gate_exemptions(&self) -> &'static [&'static str] {
         &["timing"]
+    }
+    fn timing_min_time_left_sec(&self) -> Option<i64> {
+        Some(TIMING_MIN_TIME_LEFT_SEC)
     }
 }
 export_strategy!(crate::Dog);

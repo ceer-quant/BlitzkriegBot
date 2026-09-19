@@ -39,7 +39,7 @@
 //! Optional (resolved by name at load; absent = "not declared"):
 //!
 //! ```c
-//! char* bk_strategy_gate_exemptions(void* handle);    // {"timing":b,"momentum":b}
+//! char* bk_strategy_gate_exemptions(void* handle);    // {"timing":b,"momentum":b[, "timing_min_time_left_sec":n]}
 //! char* bk_strategy_evolvable_knobs(void* handle);    // {"knobs":[{name,value,min,max}]}
 //! void  bk_strategy_bind_eval_ctx(void* h, const BkEvalCtx*);  // fresh-book gate
 //! char* bk_strategy_config_view(void* handle);        // config in force, JSON
@@ -63,7 +63,9 @@ pub const BK_VERSION_SYMBOL: &[u8] = b"bk_strategy_abi_version\0";
 pub const BK_FREE_STRING_SYMBOL: &[u8] = b"bk_strategy_free_string\0";
 /// Symbol name for the OPTIONAL per-strategy gate-exemption declaration
 /// (E2-b / #27): `char* bk_strategy_gate_exemptions(void* handle)` returning
-/// `{"timing":bool,"momentum":bool}`.
+/// `{"timing":bool,"momentum":bool}` — plus, since D-31, an optional
+/// `"timing_min_time_left_sec":int` lower bound below which the `timing`
+/// exemption is NOT honoured.
 ///
 /// Deliberately a separate optional symbol rather than a new vtable field: the
 /// kernel copies `BkStrategyVtable` BY VALUE, so appending a field would change
@@ -71,6 +73,9 @@ pub const BK_FREE_STRING_SYMBOL: &[u8] = b"bk_strategy_free_string\0";
 /// that would force `BK_ABI_VERSION` to 3. A missing symbol / NULL / malformed
 /// JSON degrades to "nothing declared", exactly like an in-tree strategy relying
 /// on the trait's default, so v2 stays frozen and old libraries keep loading.
+/// The already-optional JSON payload is what lets D-31 add a numeric field with
+/// no ABI bump: a library that predates it simply omits the key, and the kernel
+/// uses its own (stricter) default floor.
 pub const BK_GATE_EXEMPTIONS_SYMBOL: &[u8] = b"bk_strategy_gate_exemptions\0";
 
 /// Signature of the optional [`BK_GATE_EXEMPTIONS_SYMBOL`] entry point.

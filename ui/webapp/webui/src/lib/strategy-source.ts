@@ -59,6 +59,7 @@ export function registryStrategyRows(rows: readonly PluginRow[]): StrategyStatsR
     gateExemptedTiming: 0,
     gateExemptedMomentum: 0,
     gateExemptions: [],
+    gateExemptionTimingFloorSec: null,
     closedTrades: 0,
     wins: 0,
     losses: 0,

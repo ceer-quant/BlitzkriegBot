@@ -38,6 +38,24 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ### Changed
 
+- **A `timing` gate exemption can no longer reach into the closing window of a
+  round (D-31).** The exemption used to waive the round-timing window outright,
+  which included "too close to expiry" — so an exempt strategy could enter with
+  seconds left and the exit policy would flatten it on the very next tick by
+  design. Those trades were correctly priced but had no round left to reach a
+  target, so they were guaranteed zero-hold exits: noise in the dry ledger that
+  dragged the win rate down without reflecting a strategy misjudgement. A
+  strategy may now declare a `time_left_sec` floor (`timing_min_time_left_sec`,
+  defaulting to the scanner's `min_time_left_sec`), and the exemption is honoured
+  only at or above it. "Round too young" still waives as before, because its
+  `time_left_sec` is large. `dog_strategy` declares 180 s; `mean_reversion`, which
+  only waives the momentum gate, is unaffected. The value crosses the C ABI
+  through the **existing** optional `bk_strategy_gate_exemptions` JSON — a
+  library that omits the key gets the kernel's stricter default — so
+  `BK_ABI_VERSION` stays 2 and no shipped library needs recompiling.
+  **`engine.stats` numbers are not comparable across this change**: a candidate
+  that used to become a trade in the closing window is now counted under
+  `blocked.timing` instead. See `docs/rust-core/STRATEGY_GUIDE.md` §3.5.1.
 - `user_layer/configs/default.toml` pins `round_sec = 900`. The file previously
   said `300` while the compiled default, the supervisor's `HFT_ROUND_SEC` and
   `scripts/soak-health.sh` all said 900; with the file now live, `300` would
