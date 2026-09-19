@@ -31,7 +31,16 @@
  *      since a status that only appears in a non-quiet `note` is invisible in
  *      `data/soak/health.log` — the file that is actually read.
  *
+ * The gate also has to EXIT. Its first version verified all of the above, printed
+ * `RESULT: PASS`, and then never terminated: a fixture server opened by a later
+ * control was never closed, so a listener held the event loop open forever. No
+ * step in CI was bounded, so the run sat there for ~40 minutes looking like a
+ * slow gate. Every fixture server is now owned by a registry and closed at
+ * teardown, and `BK_GATE_WATCHDOG_MS` (default 5 min) converts any future wedge
+ * into a fast failure that names the handles still listening.
+ *
  * Run: node scripts/soak-health-check.mjs
+ *      BK_GATE_WATCHDOG_MS=2500 node scripts/soak-health-check.mjs   # prove it fires
  */
 import { spawn } from './lib/child-guard.mjs';
 import { execFileSync } from 'node:child_process';
@@ -58,7 +67,37 @@ const HEALTH = join(ROOT, 'scripts', 'soak-health.sh');
 const WORK = mkdtempSync(join(tmpdir(), 'soak-health-check-'));
 const noop = () => {};
 
+/**
+ * Every fixture server this gate opens, so teardown closes them from a registry
+ * instead of from hand-held variables. The hand-held version was wrong: the
+ * wedged-core control replaces the live socket server with a new one, and the
+ * replacement's handle was never kept, so its listener kept the event loop alive
+ * after the final `RESULT: PASS` had already been printed. The gate verified
+ * everything correctly and then never exited — CI sat on the step for 40 minutes.
+ */
+const liveServers = new Set();
+
 let failures = 0;
+
+/**
+ * A gate that can hang is a gate that cannot fail on time. Nothing bounded the
+ * CI step, so the hang above cost 40 minutes of wall clock and looked like a
+ * slow gate rather than a broken one. The watchdog turns any future hang — the
+ * usual cause being a dropped fixture-server handle — into a fast, named
+ * failure, and it names the handles so the cause needs no re-diagnosis.
+ */
+const WATCHDOG_MS = Number(process.env.BK_GATE_WATCHDOG_MS ?? 300000);
+const watchdog = setTimeout(() => {
+  console.error(`  FAIL gate did not exit within ${WATCHDOG_MS / 1000}s — a fixture server is still listening:`);
+  for (const srv of liveServers) {
+    console.error(`         ${srv.constructor?.name} ${JSON.stringify(srv.address?.())}`);
+  }
+  if (liveServers.size === 0) console.error('         (no tracked server — some other handle is held)');
+  console.error('RESULT: FAIL — gate wedged (the assertions above may all have passed)');
+  process.exit(1);
+}, WATCHDOG_MS);
+watchdog.unref?.();
+
 function ok(msg) {
   console.log(`  ok   ${msg}`);
 }
@@ -140,7 +179,11 @@ function startCoreSock(path, { answer = true } = {}) {
       });
       sock.on('error', noop);
     });
-    srv.listen(path, () => res(srv));
+    srv.on('close', () => liveServers.delete(srv));
+    srv.listen(path, () => {
+      liveServers.add(srv);
+      res(srv);
+    });
   });
 }
 
@@ -169,7 +212,11 @@ function startPanel(kind) {
       r.writeHead(200, { 'content-type': 'application/json' });
       r.end(JSON.stringify({ authRequired: true, ok: true, service: 'blitzkrieg-panel' }));
     });
-    srv.listen(0, '127.0.0.1', () => res(srv));
+    srv.on('close', () => liveServers.delete(srv));
+    srv.listen(0, '127.0.0.1', () => {
+      liveServers.add(srv);
+      res(srv);
+    });
   });
 }
 const panelUrl = (srv) => `http://127.0.0.1:${srv.address().port}`;
@@ -316,6 +363,9 @@ console.log('3. negative controls — each guard fires');
   assert(has(r, 'core-ping=fail'), 'wedged core reports core-ping=fail in the summary');
   wedged.close();
   rmSync(SOCK_OK, { force: true });
+  // The answering core comes back for the checks below. Its handle is
+  // deliberately not held in a variable: `liveServers` owns every fixture server,
+  // so teardown cannot miss this replacement the way the old hand-held list did.
   await startCoreSock(SOCK_OK);
 }
 {
@@ -439,8 +489,24 @@ console.log('4. the loop reads only --quiet output, so every sub-status must be 
 }
 
 // ── teardown ────────────────────────────────────────────────────────────────
-await new Promise((res) => coreSock.close(res));
-await new Promise((res) => panel.close(res));
+// Close every fixture server the registry knows about, including any opened by a
+// later control that replaced an earlier one on the same socket path. Closing
+// only the first handle is what let this gate hang after printing its PASS.
+//
+// `close()` alone is not enough: it waits for existing connections to end, and
+// the wedged-core fixture exists precisely to accept a connection and never
+// answer, so its server would never emit 'close'. Force-drop the connections,
+// then bound the wait so a fixture that still refuses to die is a fast, named
+// failure instead of a CI step that eats an hour.
+clearTimeout(watchdog);
+for (const srv of [...liveServers]) {
+  srv.closeAllConnections?.();
+  await Promise.race([
+    new Promise((res) => srv.close(() => res())),
+    new Promise((res) => setTimeout(res, 2000)),
+  ]);
+  liveServers.delete(srv);
+}
 if (core1 && core1.exitCode === null) core1.kill('SIGKILL');
 rmSync(WORK, { recursive: true, force: true });
 

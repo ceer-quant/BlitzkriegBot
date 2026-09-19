@@ -42,13 +42,13 @@ cargo build --release --workspace --locked
 | `readonly-egress-check.mjs` | `--readonly` is structural: live mode + credentials still cannot trade |
 | `unified-launcher-check.mjs` | Single binary `blitzkrieg`: `run` starts both parts, subcommands dispatch, `--readonly` holds |
 | `data-backup-check.mjs` | `data/` backup refuses dangerous destinations, self-verifies, prunes only its own dirs |
-| `soak-health-check.mjs` | The ops health check can actually fail: every guard is inject-tested (down/wedged core, panel HTML fallback, stale sampling, panic log, both zero-hold causes) *and* a healthy fixture must exit 0 |
+| `soak-health-check.mjs` | The ops health check can actually fail: every guard is inject-tested (down/wedged core, panel HTML fallback, stale sampling, panic log, both zero-hold causes) *and* a healthy fixture must exit 0. Bounded by its own watchdog (`BK_GATE_WATCHDOG_MS`) — it must also *exit* |
 | `crash-recovery-check.mjs` | SIGKILL a live core → in-flight settles, replacement serves the socket |
 | `webapp-check.mjs` | Panel: bundle served, auth both ways, CSRF, snapshot non-empty |
 | `backtest-check.mjs` | Event-driven backtest: archive → offline replay → bit-identical |
 | `order-recovery-check.mjs` / `position-recovery-check.mjs` | Crash recovery for orders / positions |
 | `strategy-gate-check.mjs` / `strategy-limit-check.mjs` / `strategy-evolution-check.mjs` | Strategy-scoped gating / funding / shadow evolution |
-| `trend-follow-check.mjs` / `mean-reversion-check.mjs` | Built-in strategy legs |
+| `trend-follow-check.mjs` / `mean-reversion-check.mjs` | Strategy legs, driven through the external cdylibs (the kernel ships no builtins) |
 | `scale-plugins-check.mjs` / `feed-scale-check.mjs` | Registry read latency / feed loss rate at scale |
 | `ui-eventbus-check.mjs` / `ui-kit-gateway-check.mjs` / `ui-plugin-check.mjs` | UI event push / gateway command surface |
 | `trade-log-flag-check.mjs` / `market-plugin-check.mjs` | `--no-trade-log` isolation / plugin selection |
