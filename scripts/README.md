@@ -70,9 +70,10 @@ cargo build --release --workspace --locked
     `core.ping` over the socket taken from the core's own argv, so "alive but wedged"
     is caught too. `BK_SOCKET` overrides the path.
   - sampling freshness — `BK_SOAK_DIR` (default `data/soak`), judged by the newest
-    `soak.jsonl` record's timestamp, not by a process name: `soak-monitor.mjs` has a
-    bounded lifetime (`--hours 12`) and exiting is its normal end, whereas a stalled
-    sampler is invisible to `pgrep`. `BK_SOAK_STALE_SEC` (default 1800).
+    `soak.jsonl` record's timestamp, not by a process name: `soak-monitor.mjs` can
+    have a bounded lifetime (`--hours 12`) and exiting is then its normal end,
+    whereas a stalled sampler is invisible to `pgrep`. `BK_SOAK_STALE_SEC` (default
+    1800).
   - crash/archive-stop scan — `BK_RUN_LOG`. **Unset means unconfigured, and is
     reported as `log=off`**, because where the log lands is a deployment choice (the
     core's stdout is `/dev/null` and its stderr is inherited). Set it to scan; a
@@ -87,6 +88,18 @@ cargo build --release --workspace --locked
   `soak-health-loop.sh` additionally bounds its own `health.log` and `$BK_RUN_LOG`
   (`BK_LOG_MAX_BYTES`, default 20 MiB) by gzip + in-place truncate, leaving a log
   untouched if gzip fails. It no longer calls the deleted `rotate-run-log.sh`.
+- `soak-resident.sh` — start/stop/status for the resident soak pair (D-30).
+  `soak-monitor.mjs --forever` samples continuously instead of for a 12h window,
+  and this wrapper is its explicit stop switch; `start` refuses to stack a second
+  sampler (two samplers would double every figure in `soak.jsonl`). Deployment
+  config (notably `BK_RUN_LOG`) is read from `$BK_SOAK_DIR/resident.env` as a
+  fallback, with an explicit env value or `--run-log` winning over it.
+  **It does not survive a reboot**, and that is a TCC limit, not an oversight:
+  this repo is on an external volume and macOS denies a launchd-spawned process
+  both read and exec access to it (measured: `read-volume: DENIED`,
+  `exec-script: DENIED (exit=126)`). Boot persistence would need the user to grant
+  Full Disk Access — a security-posture change, so it is left as a decision (D-33).
+  `soak-monitor-check.mjs` gates both lifetimes and the stop switch.
 - `analyze-signals.mjs` / `analyze-strategy.mjs` — offline signal/strategy analysis.
 - `feed-live-probe.mjs` / `poly-ws-endurance.mjs` / `poly-wire-measure.mjs` — Polymarket feed probes.
 - `price-compare.mjs` / `reconcile-exits.mjs` / `sweep-exits.mjs` / `final-exit-opt.mjs` — pricing and exit sweeps.
