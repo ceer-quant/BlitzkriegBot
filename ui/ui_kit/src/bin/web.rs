@@ -21,6 +21,15 @@ fn main() {
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
     let mut args = std::env::args().skip(1);
+    // Origins accepted beyond loopback and same-origin: --allowed-origin
+    // (repeatable) plus BLITZKRIEG_ALLOWED_ORIGINS (comma-separated) — the
+    // reverse-proxy / server-deployment opt-in.
+    let mut allowed_origins: Vec<String> = std::env::var("BLITZKRIEG_ALLOWED_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--socket" => {
@@ -34,6 +43,14 @@ fn main() {
                 }
             }
             "--manage" => manage = true,
+            "--allowed-origin" => {
+                if let Some(s) = args.next() {
+                    let s = s.trim().trim_end_matches('/').to_string();
+                    if !s.is_empty() {
+                        allowed_origins.push(s);
+                    }
+                }
+            }
             other => eprintln!("ignoring unknown arg: {other}"),
         }
     }
@@ -45,6 +62,7 @@ fn main() {
     // Full trade history: the history tab paginates in the browser, so pass
     // limit=0 (trades.history drains ALL closed rows, no 200-row cap).
     let mut server = WebServer::with_gateway(client, 0, dispatcher);
+    server.set_allowed_origins(allowed_origins);
     // Panel credentials come from the environment, never from this process. The
     // WebUI exchanges them for a session token via POST /api/login. Gateway mode
     // can start and stop the trading core, so a missing pair is a startup error

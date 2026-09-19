@@ -639,3 +639,125 @@ fn origin_matching_accepts_only_loopback_spellings() {
         assert!(!is_loopback_origin(bad), "{bad} must be refused");
     }
 }
+
+#[test]
+fn same_origin_on_a_public_ip_is_allowed_the_server_deployment_case() {
+    // The server deployment: the panel binds 0.0.0.0 and a browser visits it
+    // via the machine's real address. The browser attaches
+    // `Referer: http://<that-address>:51888/…` and `Host: <that-address>:51888`
+    // — a same-origin pair that must pass the gate WITHOUT any allowlist
+    // entry, or every non-loopback deployment 403s its own panel.
+    let addr = start(Some(("admin", "s3cret")));
+    let token = login(addr, "admin", "s3cret");
+    // The raw request names a NON-loopback Host on purpose: the server must
+    // judge same-origin against the Host the request declares, not against
+    // the interface it happens to be bound to.
+    assert_eq!(
+        request(
+            addr,
+            &format!(
+                "GET /api/snapshot?token={token} HTTP/1.1\r\n\
+                 Host: 203.0.113.7:51888\r\n\
+                 Referer: http://203.0.113.7:51888/panel/\r\n\r\n"
+            )
+        ),
+        200,
+        "same-origin (Referer authority == Host header) must pass on a public IP"
+    );
+    // Origin instead of Referer — the shape a same-origin fetch produces.
+    assert_eq!(
+        request(
+            addr,
+            &format!(
+                "GET /api/snapshot?token={token} HTTP/1.1\r\n\
+                 Host: 203.0.113.7:51888\r\n\
+                 Origin: http://203.0.113.7:51888\r\n\r\n"
+            )
+        ),
+        200,
+        "same-origin Origin header must pass too"
+    );
+    // Port matters: a DIFFERENT port on the same machine is a different origin.
+    assert_eq!(
+        request(
+            addr,
+            &format!(
+                "GET /api/snapshot?token={token} HTTP/1.1\r\n\
+                 Host: 203.0.113.7:51888\r\n\
+                 Referer: http://203.0.113.7:9999/panel/\r\n\r\n"
+            )
+        ),
+        403,
+        "same host on another port is a different origin and must 403"
+    );
+    // The loosening must not weaken the cross-origin rule: a hostile page's
+    // origin cannot match the Host header of a request to OUR server.
+    assert_eq!(
+        request(
+            addr,
+            &format!(
+                "GET /api/snapshot?token={token} HTTP/1.1\r\n\
+                 Host: 203.0.113.7:51888\r\n\
+                 Origin: http://evil.example\r\n\r\n"
+            )
+        ),
+        403,
+        "cross-origin stays refused even with a Host header present"
+    );
+}
+
+#[test]
+fn origin_authority_normalizes_scheme_case_and_default_ports() {
+    use crate::web::origin_authority;
+    let (h, p) = origin_authority("HTTP://Panel.Example.COM").expect("authority");
+    assert_eq!((h.as_str(), p.as_str()), ("panel.example.com", "80"));
+    let (h, p) = origin_authority("https://panel.example.com:51888/panel/").expect("authority");
+    assert_eq!((h.as_str(), p.as_str()), ("panel.example.com", "51888"));
+    let (h, p) = origin_authority("https://[2001:db8::1]:51888").expect("authority");
+    assert_eq!((h.as_str(), p.as_str()), ("[2001:db8::1]", "51888"));
+    assert!(origin_authority("http://").is_none(), "no authority at all");
+    // user@host — credentials in the URL are ignored, the host is not.
+    assert_eq!(
+        origin_authority("http://user@host.example/path").expect("authority"),
+        ("host.example".to_string(), "80".to_string())
+    );
+}
+
+#[test]
+fn allowlisted_origin_is_accepted_without_being_same_origin() {
+    // The reverse-proxy shape: the operator fronts the panel with a hostname
+    // the proxy rewrites, so the visible origin never equals the Host the
+    // server sees. `--allowed-origin` (BLITZKRIEG_ALLOWED_ORIGINS) lists it.
+    let client = IpcClient::new("/nonexistent-panel-allowlist.sock");
+    let mut server = WebServer::with_gateway(
+        client,
+        0,
+        Dispatcher::new(
+            SupervisorConfig::from_env("/nonexistent-panel-allowlist.sock".into()),
+            true,
+        ),
+    );
+    server.set_allowed_origins(vec!["http://panel.example.com".to_string()]);
+
+    let req = |origin: &str| crate::web::HttpRequest {
+        method: "GET".into(),
+        target: "/api/snapshot".into(),
+        body: String::new(),
+        headers: vec![
+            ("host".into(), "internal.host:51888".into()),
+            ("origin".into(), origin.into()),
+        ],
+    };
+    assert!(
+        server.origin_allowed(&req("http://panel.example.com")),
+        "the allowlisted origin passes"
+    );
+    assert!(
+        server.origin_allowed(&req("http://panel.example.com/panel/")),
+        "a path under an allowlisted origin passes"
+    );
+    assert!(
+        !server.origin_allowed(&req("http://other.example")),
+        "any other foreign origin stays refused"
+    );
+}

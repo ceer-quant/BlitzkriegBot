@@ -109,6 +109,13 @@ nohup blitzkrieg run >> /tmp/blitzkrieg-run.log 2>&1 &   # 后台常驻
 - 面板凭据 `BLITZKRIEG_PANEL_USER` / `BLITZKRIEG_PANEL_PASSWORD` **两者都设置**时，网页
   命令动词可用；缺省时面板为纯查看（启动时打印提示）。
 - `--readonly`：结构性只读——内核不构造出网桥梁，从根上禁止下单（不是逐入口拦截）。
+- **服务器部署（局域网/远程访问）**：`.env` 里加一行 `BLITZKRIEG_PANEL_ADDR=0.0.0.0:51888`
+  （或启动时 `--addr 0.0.0.0:51888`）即监听所有网卡。浏览器从 `http://<服务器IP>:51888`
+  打开面板即可全功能使用——**同源请求天然放行**（Referer 的地址与请求 Host 一致），
+  无需任何白名单；跨站来源一律 403。仅当面板被反向代理改写域名时才需要
+  `--allowed-origin <url>`（可重复）或 `BLITZKRIEG_ALLOWED_ORIGINS`（逗号分隔）。
+  登录凭据（`.env` 的 `BLITZKRIEG_PANEL_USER/PASSWORD`）在任何地址上都是必需的；
+  请勿将面板暴露到不受信任的公网。
 - 子命令面：`blitzkrieg [run|core|tui|web|stop|--help]`；`tui --attach` 仅监视现有核心，
   绝不杀死非本进程拉起的内核。
 - 一次只跑一套栈：旧栈还占着 51888 / 默认 socket 时再 `run`，端口会绑不上；

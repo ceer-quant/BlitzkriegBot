@@ -39,7 +39,11 @@ FLAGS (for blitzkrieg / blitzkrieg run / core):
   --tick-ms <N>         Engine tick interval in ms (default: 50)
   --seed-balance <N>    Initial seed balance (default: 1000)
   --max-order-notional <N> Maximum notional per order
-  --addr <ip:port>      Web panel listen address (default: 127.0.0.1:51888)
+  --addr <ip:port>      Web panel listen address (default: 127.0.0.1:51888;
+                        BLITZKRIEG_PANEL_ADDR overrides, e.g. 0.0.0.0:51888)
+  --allowed-origin <url> Extra panel origin to accept beyond loopback and
+                        same-origin (repeatable; BLITZKRIEG_ALLOWED_ORIGINS is
+                        a comma-separated alternative)
   --tui                 Launch interactive TUI instead of web panel
   --web                 Launch web panel (default)
   --no-lifecycle        Disable core process supervision (adopt-only)
@@ -61,6 +65,22 @@ struct ParsedCli {
     no_lifecycle: bool,
     attach: bool,
     extra_flags: Vec<String>,
+    /// Extra origins the web panel accepts beyond loopback and same-origin
+    /// (reverse proxies that rewrite the hostname). `--allowed-origin`,
+    /// repeatable, plus `BLITZKRIEG_ALLOWED_ORIGINS` (comma-separated).
+    allowed_origins: Vec<String>,
+}
+
+/// Origins from the environment: `BLITZKRIEG_ALLOWED_ORIGINS`, comma-separated.
+/// The `.env` self-load means a server deployment can put this next to its
+/// credentials and forget about it.
+fn env_allowed_origins() -> Vec<String> {
+    std::env::var("BLITZKRIEG_ALLOWED_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn parse_cli_options(args: impl IntoIterator<Item = String>) -> ParsedCli {
@@ -84,6 +104,14 @@ fn parse_cli_options(args: impl IntoIterator<Item = String>) -> ParsedCli {
                 }
             }
             "--readonly" => cli.readonly = true,
+            "--allowed-origin" => {
+                if let Some(s) = iter.next() {
+                    let s = s.trim().trim_end_matches('/').to_string();
+                    if !s.is_empty() {
+                        cli.allowed_origins.push(s);
+                    }
+                }
+            }
             "--assets" => {
                 if let Some(list) = iter.next() {
                     cli.assets = Some(
@@ -271,6 +299,7 @@ fn run_web_subcommand(args: Vec<String>) -> std::io::Result<()> {
         .unwrap_or(false);
 
     let mut iter = args.into_iter();
+    let mut allowed_origins = env_allowed_origins();
     while let Some(a) = iter.next() {
         match a.as_str() {
             "--socket" => {
@@ -284,8 +313,16 @@ fn run_web_subcommand(args: Vec<String>) -> std::io::Result<()> {
                 }
             }
             "--manage" => manage = true,
+            "--allowed-origin" => {
+                if let Some(s) = iter.next() {
+                    let s = s.trim().trim_end_matches('/').to_string();
+                    if !s.is_empty() {
+                        allowed_origins.push(s);
+                    }
+                }
+            }
             "--help" | "-h" => {
-                println!("blitzkrieg web [--socket <path>] [--addr <127.0.0.1:51888>] [--manage]");
+                println!("blitzkrieg web [--socket <path>] [--addr <127.0.0.1:51888>] [--manage] [--allowed-origin <url>]");
                 return Ok(());
             }
             other => eprintln!("ignoring unknown arg: {other}"),
@@ -300,6 +337,7 @@ fn run_web_subcommand(args: Vec<String>) -> std::io::Result<()> {
         std::env::var("BLITZKRIEG_PANEL_USER").ok(),
         std::env::var("BLITZKRIEG_PANEL_PASSWORD").ok(),
     );
+    server.set_allowed_origins(allowed_origins);
     if let Err(why) = server.require_credentials() {
         eprintln!("blitzkrieg web: {why}");
         std::process::exit(2);
@@ -346,7 +384,21 @@ fn run_stop_subcommand(args: Vec<String>) -> std::io::Result<()> {
 async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
     let cli = parse_cli_options(args);
     let socket = cli.socket.clone().unwrap_or_else(resolve_socket_path);
-    let addr = cli.addr.clone().unwrap_or_else(|| "127.0.0.1:51888".into());
+    // Listen address precedence: --addr > BLITZKRIEG_PANEL_ADDR (put it in .env
+    // once on a server and `blitzkrieg run` needs no flag) > loopback default.
+    // The default stays LOOPBACK on purpose: the panel can start and stop the
+    // trading core, so exposing an interface is an explicit operator choice.
+    let addr = cli
+        .addr
+        .clone()
+        .or_else(|| std::env::var("BLITZKRIEG_PANEL_ADDR").ok())
+        .filter(|a| !a.trim().is_empty())
+        .unwrap_or_else(|| "127.0.0.1:51888".into());
+    let allowed_origins = {
+        let mut o = env_allowed_origins();
+        o.extend(cli.allowed_origins.iter().cloned());
+        o
+    };
 
     let lifecycle_enabled = !cli.no_lifecycle && !cli.attach;
     let cfg = build_supervisor_config(&cli, socket.clone());
@@ -423,6 +475,7 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
             // this very process spawned.
             let mut s = WebServer::with_shared_gateway(client, 0, dispatcher.clone());
             s.set_panel_credentials(user, pass);
+            s.set_allowed_origins(allowed_origins);
             s
         } else {
             if lifecycle_enabled {
@@ -432,7 +485,12 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
                      web command verbs."
                 );
             }
-            WebServer::new(client, 0)
+            let mut s = WebServer::new(client, 0);
+            // Even the read-only surface is behind the origin gate; a server
+            // deployment that serves it on a LAN address needs the same-origin
+            // and allowlist rules to know about that address.
+            s.set_allowed_origins(allowed_origins);
+            s
         };
 
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();

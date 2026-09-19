@@ -482,12 +482,99 @@ async function main() {
   await Promise.race([envChildClosed, sleep(10_000).then(() => 'TIMEOUT')]);
   rmSync(join(WORK, '.env'));
 
-  // ── 9. No family process may survive the whole gate ────────────────────────
+  // ── 9. Origin gate: same-origin passes, cross-origin is refused ────────────
+  // The server-deployment semantics: a browser on the machine's real address
+  // sends Referer/Origin == its Host, and that must pass WITHOUT allowlist
+  // config, while a foreign origin stays 403. Driven over RAW sockets because
+  // the interesting variable is the Host header itself (fetch forbids setting
+  // it). The status ladder: origin-refused = 403 BEFORE auth; same-origin but
+  // no session = 401 (the origin passed, auth did the rest). A `web` server
+  // answers the statuses without needing a core.
+  console.log('');
+  console.log('[9] origin gate: same-origin allowed, cross-origin refused, allowlist honored');
+  const rawGet = (port, hostHeader, extra) =>
+    new Promise((resolve) => {
+      const c = net.connect(port, '127.0.0.1');
+      let buf = '';
+      c.on('connect', () => {
+        c.write(
+          `GET /api/snapshot HTTP/1.1\r\nHost: ${hostHeader}\r\nConnection: close\r\n${extra || ''}\r\n`
+        );
+      });
+      c.on('data', (d) => { buf += d.toString(); });
+      c.on('close', () => resolve(Number((buf.match(/^HTTP\/1\.[01] (\d{3})/) || [])[1]) || 0));
+      c.on('error', () => resolve(0));
+    });
+  const waitHttp = async (port) => {
+    for (let i = 0; i < 60; i++) {
+      await sleep(100);
+      const up = await new Promise((res) => {
+        const c = net.connect(port, '127.0.0.1');
+        c.on('connect', () => { c.end(); res(true); });
+        c.on('error', () => res(false));
+      });
+      if (up) return true;
+    }
+    return false;
+  };
+  const spawnWeb = (port, extraArgs) => {
+    const child = spawn(
+      BIN,
+      ['web', '--socket', join(WORK, 'origin.sock'), '--addr', `127.0.0.1:${port}`,
+       '--manage', ...extraArgs],
+      {
+        cwd: WORK, stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, BLITZKRIEG_PANEL_USER: 'gate_user', BLITZKRIEG_PANEL_PASSWORD: 'gate_pass' },
+      }
+    );
+    return { child, closed: new Promise((resolve) => child.on('close', resolve)) };
+  };
+
+  // 9a. Same-origin / cross-origin with NO allowlist configured.
+  const PORT6 = 63000 + Math.floor(Math.random() * 2000);
+  const plain = spawnWeb(PORT6, []);
+  assert(await waitHttp(PORT6), `web server serves on ${PORT6}`);
+  assert(
+    (await rawGet(PORT6, '192.168.0.153:51888', 'Origin: http://evil.example\r\n')) === 403,
+    'a foreign Origin is refused'
+  );
+  const sameStatus = await rawGet(
+    PORT6, '192.168.0.153:51888', 'Referer: http://192.168.0.153:51888/panel/\r\n'
+  );
+  assert(
+    sameStatus !== 403,
+    `same-origin (Referer authority == Host) passes the gate (${sameStatus}; 401 = origin passed, auth next)`
+  );
+  assert(
+    (await rawGet(PORT6, '192.168.0.153:51888', 'Referer: http://192.168.0.153:9999/panel/\r\n')) === 403,
+    'same host on another port stays refused'
+  );
+  plain.child.kill('SIGTERM');
+  await Promise.race([plain.closed, sleep(5_000).then(() => 'TIMEOUT')]);
+
+  // 9b. The allowlist wiring (--allowed-origin / BLITZKRIEG_ALLOWED_ORIGINS):
+  // a proxy-fronted origin that is neither same-origin nor loopback passes
+  // when listed and is refused when not.
+  const PORT7 = 65000 + Math.floor(Math.random() * 2000);
+  const listed = spawnWeb(PORT7, ['--allowed-origin', 'http://panel.example.com']);
+  assert(await waitHttp(PORT7), `web server serves on ${PORT7}`);
+  assert(
+    (await rawGet(PORT7, 'internal.host:51888', 'Origin: http://panel.example.com\r\n')) !== 403,
+    'the allowlisted origin passes'
+  );
+  assert(
+    (await rawGet(PORT7, 'internal.host:51888', 'Origin: http://other.example\r\n')) === 403,
+    'an unlisted origin stays refused'
+  );
+  listed.child.kill('SIGTERM');
+  await Promise.race([listed.closed, sleep(5_000).then(() => 'TIMEOUT')]);
+
+  // ── 10. No family process may survive the whole gate ───────────────────────
   // Every core and launcher this gate started must be gone — this is what turns
   // a stack that outlived its owner (the readonly orphan shape) into a caught
   // failure instead of a mystery process on the operator's machine.
   console.log('');
-  console.log('[9] nothing the gate started is left behind');
+  console.log('[10] nothing the gate started is left behind');
   const leftover = execSync('ps -ww -axo pid=,ppid=,command=', { encoding: 'utf8' })
     .split('\n')
     .filter((l) => l.includes(WORK) && (l.includes('blitzkrieg-core') || l.includes('blitzkrieg run') || l.includes('blitzkrieg web')));
