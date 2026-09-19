@@ -183,6 +183,14 @@ impl IpcClient {
         serde_json::from_value(self.call("engine.round", serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
+
+    /// E8-c 盘口深度: per-asset L2 depth (`engine.books`). Older cores refuse
+    /// the unknown method — callers must degrade to an empty view, never fail
+    /// the whole snapshot.
+    pub fn books(&mut self) -> Result<Vec<AssetBooksView>, IpcError> {
+        serde_json::from_value(self.call("engine.books", serde_json::json!({}))?)
+            .map_err(|e| IpcError::Protocol(e.to_string()))
+    }
     pub fn stats(&mut self) -> Result<EngineStatsView, IpcError> {
         serde_json::from_value(self.call("engine.stats", serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
@@ -294,6 +302,10 @@ impl IpcClient {
             .as_ref()
             .map(|st| st.strategies.clone())
             .unwrap_or_default();
+        // E8-c 盘口深度: per-asset L2 depth. Older cores refuse the method and
+        // the snapshot keeps its shape — an empty vec means "no depth data",
+        // never "the core said there is no book".
+        s.books = self.books().unwrap_or_default();
         if let Ok(m) = self.market_plugins() {
             s.market_plugins = m.plugins;
             s.market_active = m.active.is_some();

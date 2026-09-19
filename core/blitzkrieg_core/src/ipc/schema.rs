@@ -141,6 +141,10 @@ pub mod method {
     pub const SPOT_PRICE: &str = "spot.price";
     /// Current round state (slot / timing / market count).
     pub const ENGINE_ROUND: &str = "engine.round";
+    /// Read-only depth view: the round's assets with each side's live L2 levels,
+    /// best prices, OBI and spread — what the WebUI's 盘口深度 chart renders.
+    /// Same books the engine trades on; purely observational, no side effects.
+    pub const ENGINE_BOOKS: &str = "engine.books";
     /// Diagnostic snapshot: feed counters + confirmed trend tokens.
     pub const ENGINE_STATS: &str = "engine.stats";
     /// List strategies registered in the kernel's strategy engine.

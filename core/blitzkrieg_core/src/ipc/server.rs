@@ -900,6 +900,14 @@ async fn handle_line(
             Ok(serde_json::to_value(view).unwrap_or(Value::Null))
         }
 
+        // Read-only depth view for the UI's 盘口深度 chart (E8-c). Bounded on
+        // both axes: one entry per round asset, 15 levels per token side — the
+        // ladder the chart draws, not the whole book.
+        method::ENGINE_BOOKS => {
+            let view = core.lock().await.books_view(15);
+            Ok(serde_json::to_value(view).unwrap_or(Value::Null))
+        }
+
         method::ENGINE_MARKETS => {
             typed(params, |p: EngineMarketsParams| {
                 let core = core.clone();

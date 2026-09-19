@@ -5,7 +5,7 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useNow } from '@vueuse/core'
-import { LayoutDashboard, Activity, History, Boxes, Puzzle, Moon, Sun, SunMoon, Bell, BellOff, LogOut, Radio } from 'lucide-vue-next'
+import { LayoutDashboard, Activity, History, Boxes, Puzzle, Settings, Moon, Sun, SunMoon, Bell, BellOff, LogOut, Radio } from 'lucide-vue-next'
 import { usePanelStore } from './stores/panel'
 import { hasToken, logout, ping } from './api/client'
 import { SESSION_EXPIRED_REASON } from './lib/session'
@@ -17,12 +17,13 @@ import HftPage from './pages/HftPage.vue'
 import BacktestPage from './pages/BacktestPage.vue'
 import StrategiesPage from './pages/Strategies.vue'
 import PluginsPage from './pages/Plugins.vue'
+import SettingsPage from './pages/SettingsPage.vue'
 import LoginView from './components/LoginView.vue'
 import SegmentedControl from './components/ui/segmented/SegmentedControl.vue'
 import Button from './components/ui/button/Button.vue'
 import AlertBanner from './components/ui/alert/AlertBanner.vue'
 
-type TabId = 'overview' | 'hft' | 'backtest' | 'strategies' | 'plugins'
+type TabId = 'overview' | 'hft' | 'backtest' | 'strategies' | 'plugins' | 'settings'
 
 const store = usePanelStore()
 const { theme, isDark, cycleTheme, sound, toggleSound } = useTheme()
@@ -55,6 +56,7 @@ const pages = {
   backtest: BacktestPage,
   strategies: StrategiesPage,
   plugins: PluginsPage,
+  settings: SettingsPage,
 } as const
 const activePage = computed(() => pages[tab.value])
 
@@ -64,6 +66,7 @@ const segments = [
   { id: 'backtest', label: '回放复盘', icon: History },
   { id: 'strategies', label: '策略', icon: Boxes },
   { id: 'plugins', label: '插件', icon: Puzzle },
+  { id: 'settings', label: '设置', icon: Settings },
 ]
 
 const now = useNow({ interval: 1000 })

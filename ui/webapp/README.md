@@ -5,26 +5,44 @@
 
 ## 布局
 - `ui/webapp/src-tauri/` — Tauri v2 壳 crate(`blitzkrieg-webapp`):
-  - `src/main.rs`: 两条 invoke 命令 —— `desktop_snapshot`(经 headless `AppViewModel` 读快照)、`desktop_command`(E5 命令面 dispatcher,lifecycle 关闭)。
-  - `tauri.conf.json`: 窗口/打包配置,`frontendDist` 指向静态面板页。
-- `ui/webapp/webui/` — 面板前端（Vue 3 + Vite SPA）。注意 `tauri.conf.json` 的
-  `frontendDist` 目前指向 `../webui` 而非构建产物 `dist/`，打包链路尚未验收（见
-  `docs/FEATURES.md` §9.1 E8）。
+  - `src/lib.rs`(逻辑全部在此,bin 只是入口): 应用启动 —— 内嵌一个**只读**
+    `ui_kit` `WebServer`(`WebServer::new`,无 dispatcher,无 /api/command)绑在
+    自选回环空闲端口上,窗口在运行时指向 `http://127.0.0.1:<port>/panel/`。
+    早期版本窗口 url 是 `index.html`(tauri:// 协议),面板里所有
+    `fetch('/api/…')` 没有同源服务端可发,整页空白 —— 内嵌服务器正是为恢复
+    面板赖以工作的浏览器契约。`BLITZKRIEG_PANEL_URL` 环境变量可把窗口指到
+    别处(如 Vite dev server)。另有两个 invoke 命令:
+    `desktop_snapshot`(经 headless `AppViewModel` 读快照)、
+    `desktop_command`(E5 命令面 dispatcher,lifecycle 关闭)。
+  - `tests/chain.rs`: 桌面链路验收 —— 自起一个 dry 内核,直接以普通函数
+    调用两条命令体,断言 `desktop_snapshot` 出合法 AppView JSON 且
+    `connected:true`、`desktop_command("status")` 出 `action:"status"` 且
+    `ok:true`;未设 `BLITZKRIEG_CORE_BIN` 时自动跳过。
+  - `tauri.conf.json`: 打包配置。`frontendDist` 指向构建产物 `../webui/dist`
+    (E8-d 起固定);窗口列表为空 —— 端口运行时才确定,窗口由 `run()` 创建。
+- `ui/webapp/webui/` — 面板前端（Vue 3 + Vite SPA）。
 - **零 GUI 依赖契约**: `blitzkrieg-ui-kit` 不含任何 Tauri;`blitzkrieg-ui-kit` 的门禁 `scripts/webapp-check.mjs` 有此断言。
 
 ## 开发
 ```bash
 cd ui/webapp
 cargo install tauri-cli --version "^2"   # 一次性
-cargo tauri dev                          # 开发窗口(macOS 已验: cdecl cargo check 通过)
+# 面板热更新开发:先起网关(51888),Vite dev server 会把 /api 代理过去
+cd webui && npm run dev &                # http://127.0.0.1:51889/panel/
+cd ../src-tauri
+BLITZKRIEG_PANEL_URL=http://127.0.0.1:51889/panel/ cargo tauri dev
 ```
 
 ## 打包
 ```bash
-cd ui/webapp
-cargo tauri build                        # 产物: src-tauri/target/release/bundle/
+cd ui/webapp/webui && npm run build       # 先产出 dist/
+cd ../src-tauri
+cargo tauri build                         # 产物: src-tauri/target/release/bundle/
 ```
-打包仅本地桌面环境执行;不进入常规 CI(Linux 缺 GTK 头文件)。
+打包仅本地桌面环境执行;不进入常规 CI(Linux 缺 GTK 头文件)。壳内的 WebServer
+按 `resolve_socket_path()`(`BLITZKRIEG_SOCKET` 或默认路径)连接内核;它**只读**
+—— 不带 dispatcher,无法 start/stop,进程退出也不收走任何内核(浏览器标签页
+规则)。
 
 ## 网关与鉴权（E6-a → 面板鉴权加固）
 桌面 webview 面板的数据后端是已有网关（`ui_kit_web`）：
@@ -61,9 +79,16 @@ target/release/ui_kit_web --socket <core.sock> --addr 127.0.0.1:51888 --manage
 - `node scripts/webapp-check.mjs` — 门禁：Vue 构建产物存在**且与
   `/panel` 实际下发内容一致**、快照渲染非空、鉴权双向 ACCEPT/REJECT、CORS、
   CSRF（跨站 GET 打不到 lifecycle verb）、`/api/ping` 不泄露状态、登出吊销、
-  未配置凭据时网关拒绝启动、且进程不生成任何密码、无 GUI 污染。
+  未配置凭据时网关拒绝启动、且进程不生成任何密码、无 GUI 污染；macOS 上另跑
+  `cargo test --test chain`（桌面命令面对真内核全链路）。
 - `cargo test -p blitzkrieg-ui-kit --lib web::auth_tests` — 42 项鉴权 / CSRF /
   会话生命周期测试。
+- `cd src-tauri && BLITZKRIEG_CORE_BIN=<core 二进制> cargo test --test chain` —
+  桌面命令面（`desktop_snapshot` / `desktop_command`）对真 dry 内核的端到端
+  链路；不设环境变量则跳过。
 
 ## 安全边界
 - 未启用 Live;壳crate 与网关均无任何真实凭证读写;dataflow 只读快照 + E5 无交易命令。
+- 桌面壳内嵌的服务器**无 dispatcher、无 /api/command、无凭据**——它是与
+  「无网关只读适配」同级的表面;网关模式(`--manage`)及其强制凭据语义属于
+  `ui_kit_web`,不因桌面打包而放松。

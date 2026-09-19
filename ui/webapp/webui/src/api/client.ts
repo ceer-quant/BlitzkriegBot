@@ -8,6 +8,15 @@
  */
 
 const LS_KEY = 'blitzkrieg-panel-token'
+/** When the current session token was issued (login click), for the 设置 page. */
+export const LOGIN_AT_KEY = 'blitzkrieg-panel-login-at'
+
+/** When the current session was issued, or null when unknown/pre-restart. */
+export function loginAt(): number | null {
+  const raw = localStorage.getItem(LOGIN_AT_KEY)
+  const n = raw ? Number(raw) : 0
+  return Number.isFinite(n) && n > 0 ? n : null
+}
 
 let token = (() => {
   const q = new URLSearchParams(window.location.search).get('token')
@@ -104,6 +113,7 @@ export async function login(user: string, password: string): Promise<void> {
   const doc = (await res.json()) as { ok: boolean; token?: string; error?: string }
   if (!doc.ok || !doc.token) throw new ApiError(res.status, doc.error ?? '登录失败')
   setToken(doc.token)
+  localStorage.setItem(LOGIN_AT_KEY, String(Date.now()))
 }
 
 export async function logout(): Promise<void> {
@@ -113,6 +123,7 @@ export async function logout(): Promise<void> {
     /* network errors during logout are non-fatal */
   }
   clearToken()
+  localStorage.removeItem(LOGIN_AT_KEY)
   window.location.reload()
 }
 
@@ -223,6 +234,36 @@ export interface MarketPrice {
   down: number
 }
 
+/** One price level of the live book (`engine.books`, E8-c 盘口深度). */
+export interface BookLevel {
+  price: number
+  size: number
+}
+
+/**
+ * One token's live book. Metric fields stay `null` until the feed has delivered
+ * a book for the token — null means "no data", never a real quote.
+ */
+export interface BookSide {
+  /** Best-first: bids descending by price, asks ascending. */
+  bids: BookLevel[]
+  asks: BookLevel[]
+  bestBid: number | null
+  bestAsk: number | null
+  midPrice: number | null
+  /** Order-book imbalance (bid − ask)/(bid + ask). */
+  obi: number | null
+  spread: number | null
+  spreadPct: number | null
+}
+
+/** Per-asset L2 depth for the 盘口深度 chart. Older cores omit the field. */
+export interface AssetBook {
+  asset: string
+  up: BookSide
+  down: BookSide
+}
+
 export interface Position {
   asset: string
   direction: string
@@ -298,6 +339,8 @@ export interface Snapshot {
   } | null
   round?: Round | null
   positions?: Position[]
+  /** E8-c 盘口深度: per-asset L2 depth (older cores omit → undefined). */
+  books?: AssetBook[]
   trades?: TradeSummary
   tradeRows?: TradeRow[]
   /** All-time totals (older cores omit → fall back to tradeRows sums). */

@@ -1797,6 +1797,66 @@ impl Core {
         })
     }
 
+    /// Read-only depth view for the UI (`engine.books`, E8-c 盘口深度).
+    ///
+    /// Reads `Core.books` — the mirror that every ingest path updates (Node
+    /// `books.snapshot` bridge and the Rust-native feed alike), and the same
+    /// store the exit path values open positions from — so the view can never
+    /// contradict what trading actually saw. Levels and metrics come from
+    /// `OrderbookSnapshot::from_levels`, the same builder the strategy layer
+    /// consumes. Purely observational: no locks beyond the core's own, no side
+    /// effects. An absent round or an unknown token simply yields nothing.
+    pub fn books_view(&self, max_levels: usize) -> Vec<AssetBooksView> {
+        let Some(engine) = self.engine.as_ref() else {
+            return Vec::new();
+        };
+        let now = now_ms();
+        engine
+            .scanner()
+            .round_state(now)
+            .markets
+            .iter()
+            .map(|m| AssetBooksView {
+                asset: m.asset.clone(),
+                up: Self::book_side_view(&self.books, &m.up_token_id, max_levels),
+                down: Self::book_side_view(&self.books, &m.down_token_id, max_levels),
+            })
+            .collect()
+    }
+
+    fn book_side_view(
+        books: &HashMap<TokenId, Book>,
+        token_id: &str,
+        max_levels: usize,
+    ) -> BookSideView {
+        let Some(b) = books.get(token_id) else {
+            return BookSideView::empty();
+        };
+        if b.bids.is_empty() && b.asks.is_empty() {
+            return BookSideView::empty();
+        }
+        let s = OrderbookSnapshot::from_levels(
+            token_id.to_string(),
+            b.bids.clone(),
+            b.asks.clone(),
+            now_ms(),
+        );
+        let level = |(p, q): &(Decimal, Decimal)| BookLevelView {
+            price: *p,
+            size: *q,
+        };
+        BookSideView {
+            bids: s.bids.iter().take(max_levels).map(level).collect(),
+            asks: s.asks.iter().take(max_levels).map(level).collect(),
+            best_bid: Some(s.best_bid).filter(|p| *p > Decimal::ZERO),
+            best_ask: Some(s.best_ask).filter(|p| *p < Decimal::ONE),
+            mid_price: Some(s.mid_price).filter(|p| *p > Decimal::ZERO),
+            obi: Some(s.obi),
+            spread: Some(s.spread),
+            spread_pct: Some(s.spread_pct),
+        }
+    }
+
     /// Open positions enriched for the UI (unrealised PnL uses the current price
     /// we track; the book tick updates it on every check).
     pub fn position_views(&self, now_ms: i64) -> Vec<crate::ipc::schema::PositionView> {
@@ -2990,6 +3050,56 @@ pub struct MarketPriceView {
     pub asset: String,
     pub up: Decimal,
     pub down: Decimal,
+}
+
+/// 盘口深度 view (E8-c): one round asset with both token books, as the UI depth
+/// chart renders them. Levels are best-first and capped per side by the caller.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetBooksView {
+    pub asset: String,
+    pub up: BookSideView,
+    pub down: BookSideView,
+}
+
+/// One token's live book. Every metric is `null` when no book has arrived for
+/// the token — never a zero stand-in, which the panel must not read as a real
+/// quote (from_levels' empty-book sentinels stay internal to the strategy
+/// layer, they are not observables).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookSideView {
+    pub bids: Vec<BookLevelView>,
+    pub asks: Vec<BookLevelView>,
+    pub best_bid: Option<Decimal>,
+    pub best_ask: Option<Decimal>,
+    pub mid_price: Option<Decimal>,
+    /// Order-book imbalance (bid_depth − ask_depth) / (bid_depth + ask_depth).
+    pub obi: Option<Decimal>,
+    pub spread: Option<Decimal>,
+    pub spread_pct: Option<Decimal>,
+}
+
+impl BookSideView {
+    fn empty() -> Self {
+        Self {
+            bids: Vec::new(),
+            asks: Vec::new(),
+            best_bid: None,
+            best_ask: None,
+            mid_price: None,
+            obi: None,
+            spread: None,
+            spread_pct: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookLevelView {
+    pub price: Decimal,
+    pub size: Decimal,
 }
 
 #[cfg(test)]
