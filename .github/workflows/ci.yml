@@ -273,6 +273,18 @@ jobs:
       - name: soak-health gate (KI-30)
         timeout-minutes: 5
         run: node scripts/soak-health-check.mjs
+      # D-30 gave the sampler a `--forever` mode. That is a change to a property
+      # the health check reasons about: KI-30 rejected a process-name probe
+      # *because* the sampler had a bounded lifetime, and a resident sampler
+      # removes that specific reason while adding its own hazards. This gate pins
+      # both lifetimes down — the resident mode must be asked for (a typo'd
+      # horizon must not silently become a monitor that samples nothing and exits
+      # 0), the stop switch must be prompt and must say so in the log, and the
+      # bounded default must stay unchanged. Fixtures only; the real data/ and the
+      # real core are never touched.
+      - name: soak-monitor lifetime gate (D-30)
+        timeout-minutes: 5
+        run: node scripts/soak-monitor-check.mjs
 
   # E10-e: the third size target — the *deliverable* ≤ 500 MB — is the one that
   # cannot be read off the working tree. A developer checkout legitimately holds

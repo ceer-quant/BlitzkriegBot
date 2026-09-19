@@ -1,13 +1,27 @@
 #!/usr/bin/env node
 /**
- * 12h DRY-RUN soak monitor.
+ * DRY-RUN soak monitor.
  *
  * Polls the running Blitzkrieg core over its UDS socket (JSON-RPC, no spawn) and
  * appends one JSON line per cycle to data/soak/soak.jsonl, plus a human summary
  * to data/soak/soak.log. Flags anomalies (core down, ping failure, stuck round,
  * frozen feed, new errors) so a long unattended run is auditable afterwards.
  *
+ * Two lifetime modes, and the difference matters to the health check:
+ *
+ *   * BOUNDED (default) — `--hours 12` then exit 0. This is a soak monitor for
+ *     one soak; exiting is its designed end, not a failure. `soak-health.sh`
+ *     judges sampling by the newest sample's timestamp rather than by `pgrep`
+ *     for exactly this reason: a bounded run that has ended looks exactly like a
+ *     crashed sampler to a process check.
+ *   * RESIDENT (`--forever`, D-30) — for a long-running deployment, where a
+ *     12h window turned "is sampling happening?" into an unanswerable question
+ *     with a moving deadline. SIGTERM (or SIGINT) is the stop switch; the
+ *     process then reports that it was stopped rather than that the soak
+ *     completed, so the two endings stay distinguishable in the log.
+ *
  * Usage:  node scripts/soak-monitor.mjs [--hours 12] [--interval-sec 600]
+ *         node scripts/soak-monitor.mjs --forever [--interval-sec 600]
  */
 
 import net from 'net';
@@ -19,7 +33,10 @@ import { resolveSocketPath } from './lib/core-socket.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
-const SOAK_DIR = join(ROOT, 'data', 'soak');
+// Same seam name as soak-health.sh, so a harness (or an operator with a
+// non-default deployment) can move the soak triplet together instead of having
+// one of the three write into the real data/ directory.
+const SOAK_DIR = process.env.BK_SOAK_DIR ? resolve(ROOT, process.env.BK_SOAK_DIR) : join(ROOT, 'data', 'soak');
 // The core writes its stdout to /dev/null and inherits stderr, so where its log
 // lands is a *deployment* choice, not a repo fact. Default to run.log for
 // backward compatibility with the redirects that still use it, but let the
@@ -33,6 +50,20 @@ const argv = process.argv.slice(2);
 const opt = (n, d) => { const i = argv.indexOf(n); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 const HOURS = parseFloat(opt('--hours', '12'));
 const INTERVAL_SEC = parseInt(opt('--interval-sec', '600'), 10);
+// Resident mode must be ASKED for. A typo'd `--hours abc` parses to NaN, and
+// `Math.round(NaN)` would make the cycle loop run zero times: a monitor that
+// samples nothing and exits 0, which is precisely the KI-30 defect (a check that
+// can never fire) wearing a scheduler's clothes. So an unparseable/negative
+// horizon is a loud argument error, never a silent mode switch.
+const FOREVER = argv.includes('--forever');
+if (!FOREVER && !(HOURS > 0)) {
+  console.error(`invalid --hours ${JSON.stringify(opt('--hours', ''))}: use a positive number of hours, or --forever`);
+  process.exit(2);
+}
+if (!(INTERVAL_SEC > 0)) {
+  console.error(`invalid --interval-sec ${JSON.stringify(opt('--interval-sec', ''))}: use a positive number of seconds`);
+  process.exit(2);
+}
 
 const SOCK = await resolveSocketPath();
 
@@ -185,24 +216,52 @@ async function cycle(i, state) {
 }
 
 (async () => {
-  const cycles = Math.max(1, Math.round((HOURS * 3600) / INTERVAL_SEC));
+  // Bounded by default. `Math.max(1, …)` is what guarantees a finite run even for
+  // `--hours 0`, so the resident mode has to be an explicit, separate decision —
+  // a monitor that silently became immortal would make the health check's
+  // sampling judgement depend on a process name again (KI-30).
+  const cycles = FOREVER ? Infinity : Math.max(1, Math.round((HOURS * 3600) / INTERVAL_SEC));
+
+  // Stop switch (D-30). Without this a resident sampler could only be stopped by
+  // SIGKILL, which loses the final line and leaves soak.log unable to say why it
+  // ended. `stopping` is also read by the sleep below so a TERM is honoured
+  // within a second instead of after the current 600s interval.
+  let stopping = false;
+  let stopSignal = null;
+  const onStop = (sig) => { stopping = true; stopSignal = sig; };
+  process.on('SIGTERM', () => onStop('SIGTERM'));
+  process.on('SIGINT', () => onStop('SIGINT'));
+
   ensureDir();
-  console.log(`soak monitor: ${HOURS}h, every ${INTERVAL_SEC}s → ${cycles} cycles`);
+  console.log(`soak monitor: ${FOREVER ? 'resident (--forever)' : `${HOURS}h`}, every ${INTERVAL_SEC}s` +
+    (FOREVER ? ' — stop with SIGTERM/SIGINT' : ` → ${cycles} cycles`));
   console.log(`socket: ${SOCK}`);
   console.log(`logs:   data/soak/soak.{jsonl,log}`);
   const state = {};
   let worst = { anomalies: 0 };
-  for (let i = 1; i <= cycles; i++) {
+  let ran = 0;
+  for (let i = 1; i <= cycles && !stopping; i++) {
     try {
       const rec = await cycle(i, state);
+      ran = i;
       if (rec.anomalies.length > worst.anomalies) worst = rec;
     } catch (e) {
       appendFileSync(join(SOAK_DIR, 'soak.log'), `[${fmt(Date.now())}] #${i} monitor error: ${e?.message || e}\n`);
     }
-    if (i < cycles) await new Promise((r) => setTimeout(r, INTERVAL_SEC * 1000));
+    if (i < cycles && !stopping) {
+      // 1s slices: a TERM during the interval must not have to wait out the
+      // whole interval. `stopSignal` is what distinguishes "stopped on purpose"
+      // from "finished the soak" in the closing line.
+      let slept = 0;
+      while (slept < INTERVAL_SEC && !stopping) {
+        await new Promise((r) => setTimeout(r, 1000));
+        slept += 1;
+      }
+    }
   }
-  // Final summary.
-  const summary = `\n=== SOAK COMPLETE (${HOURS}h) ===\nworst cycle anomalies: ${worst.anomalies} ${worst.anomalies ? JSON.stringify(worst) : ''}\n`;
+  const summary = stopping
+    ? `\n=== SOAK STOPPED (${stopSignal}) after cycle ${ran} ===\nworst cycle anomalies: ${worst.anomalies} ${worst.anomalies ? JSON.stringify(worst) : ''}\n`
+    : `\n=== SOAK COMPLETE (${HOURS}h) ===\nworst cycle anomalies: ${worst.anomalies} ${worst.anomalies ? JSON.stringify(worst) : ''}\n`;
   appendFileSync(join(SOAK_DIR, 'soak.log'), summary);
   console.log(summary);
   process.exit(0);
