@@ -35,9 +35,12 @@ fn now() -> i64 {
     NOW
 }
 
+/// One book side: `depth` levels of `(price, size)`.
+type BookSide = Vec<(Decimal, Decimal)>;
+
 /// A book with `DEPTH` levels per side around the given mid, size 100,
 /// spread 2 ticks (best bid = mid-0.01, best ask = mid+0.01).
-fn book(mid: Decimal, depth: usize) -> (Vec<(Decimal, Decimal)>, Vec<(Decimal, Decimal)>) {
+fn book(mid: Decimal, depth: usize) -> (BookSide, BookSide) {
     let tick = dec!(0.01);
     let bids = (0..depth)
         .map(|i| (mid - tick * Decimal::from((i + 1) as u64), dec!(100)))

@@ -467,19 +467,37 @@ fn same_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// First candidate whose canonical target is an existing `index.html` file;
+/// returns its parent dir.
+fn resolve_panel_dir(candidates: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    for c in candidates {
+        if let Ok(dir) = c.canonicalize() {
+            if dir.is_file() {
+                return dir.parent().map(std::path::Path::to_path_buf);
+            }
+        }
+    }
+    None
+}
+
 /// Repo-rooted path to the built Vue panel's `index.html`/assets. Relative to
-/// the ui_kit crate so it holds for both `cargo run` and a repo checkout.
+/// the ui_kit crate so it holds for both `cargo run` and a repo checkout. A
+/// binary built in one checkout and run from another (the `blitzkrieg`
+/// launcher staged into `<repo>/target/release`) has a dead manifest path, so
+/// also try two levels up from the executable — that repo shape puts the
+/// panel at `<repo>/ui/webapp/webui/dist`.
 fn vue_panel_dir() -> Option<std::path::PathBuf> {
-    // CARGO_MANIFEST_DIR is <repo>/ui/ui_kit; the built Vue app lives at
-    // <repo>/ui/webapp/webui/dist.
+    // CARGO_MANIFEST_DIR is <build>/ui/ui_kit; the built Vue app lives at
+    // <build>/ui/webapp/webui/dist.
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let dir = std::path::Path::new(manifest)
-        .join("../webapp/webui/dist/index.html")
-        .canonicalize()
-        .ok()?;
-    dir.is_file()
-        .then(|| dir.parent().map(std::path::Path::to_path_buf))
-        .flatten()
+    let mut candidates =
+        vec![std::path::Path::new(manifest).join("../webapp/webui/dist/index.html")];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("../../ui/webapp/webui/dist/index.html"));
+        }
+    }
+    resolve_panel_dir(&candidates)
 }
 
 /// Serve a static asset from the Vue panel dir; `/panel/` or `/panel` (no
@@ -1434,6 +1452,31 @@ mod tests {
     fn body_json_or_raw() {
         assert_eq!(body_to_command("{\"cmd\":\"status\"}"), "status");
         assert_eq!(body_to_command("  stop  "), "stop");
+    }
+
+    #[test]
+    fn resolve_panel_dir_picks_first_existing_index_html() {
+        let base = std::env::temp_dir().join(format!("bk-panel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let a = base.join("a/dist/index.html");
+        let b = base.join("b/dist/index.html");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+        std::fs::write(&a, b"<html></html>").unwrap();
+        std::fs::write(&b, b"<html></html>").unwrap();
+        let missing = base.join("none/dist/index.html");
+        // resolve_panel_dir canonicalizes, so expectations canonicalize too
+        // (on macOS /tmp is a symlink to /private/tmp).
+        assert_eq!(
+            resolve_panel_dir(&[a.clone(), b.clone()]),
+            Some(a.canonicalize().unwrap().parent().unwrap().to_path_buf())
+        );
+        assert_eq!(
+            resolve_panel_dir(&[missing.clone(), b.clone()]),
+            Some(b.canonicalize().unwrap().parent().unwrap().to_path_buf())
+        );
+        assert_eq!(resolve_panel_dir(&[missing]), None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
