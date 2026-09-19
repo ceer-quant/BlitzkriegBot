@@ -144,8 +144,19 @@ function writeArchive(ageSec) {
 function writeTrades(rows) {
   writeFileSync(TRADES, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
 }
-/** A round-clock entryTime whose remaining time is `leftSec`. */
-const entryWithLeft = (leftSec) => 900 * 1000 * 1000 + (900 - leftSec) * 1000;
+const ROUND_MS = 900 * 1000;
+/**
+ * A round-clock entryTime whose remaining time is `leftSec`, `ageMs` ago.
+ *
+ * Anchored to the current round rather than to a 1970 constant: the scan that
+ * reads this ledger counts only records inside the lookback window, so a fixed
+ * epoch anchor would sit ~56 years in the past and every fixture would be
+ * filtered out — the assertions below would then pass by never firing. The
+ * anchor is round-aligned so subtracting whole rounds (for the age tests) leaves
+ * `leftSec` exact instead of drifting with the wall clock.
+ */
+const entryAtLeft = (leftSec, ageMs = 0) => Math.floor(Date.now() / ROUND_MS) * ROUND_MS - ageMs + (900 - leftSec) * 1000;
+const entryWithLeft = (leftSec) => entryAtLeft(leftSec);
 
 // ── fixture servers ─────────────────────────────────────────────────────────
 /** A unix-socket JSON-RPC server that answers core.ping; `answer:false` wedges. */
@@ -238,6 +249,7 @@ const BASE_ENV = {
   BK_RUN_LOG: LOG_OK,
   BK_ARCH_DIR: ARCH_DIR,
   BK_TRADES: TRADES,
+  BK_TRADES_LOOKBACK_SEC: '86400',
 };
 
 /**
@@ -445,6 +457,27 @@ console.log('3. negative controls — each guard fires');
   r = await runHealth(healthEnv);
   assert(has(r, '= 1 with time left'), 'the flattened count is 1 of 2 (per-cause counts, not a lump sum)');
   assert(has(r, '1 entry(ies) opened inside the force-exit window'), 'the late count is 1 of 2');
+
+  // The lookback bound must work in BOTH directions. A cumulative count over an
+  // append-only ledger can only ever grow, so one old record would hold
+  // HEALTH_ALERT on forever and the loop could never report recovery — the
+  // always-on-alarm half of the KI-30 defect. But a bound that simply discards
+  // the data would be the other half: a fresh occurrence must still light up.
+  writeTrades([
+    { holdTimeSec: 0, exitReason: 'force_exit', entryTime: entryAtLeft(30, 2 * 86400 * 1000) },
+    { holdTimeSec: 0, exitReason: 'force_exit', entryTime: entryAtLeft(600, 2 * 86400 * 1000) },
+  ]);
+  r = await runHealth(healthEnv);
+  assert(!has(r, 'force-exit window'), 'a late entry older than the lookback does NOT alarm (the alarm can clear)');
+  assert(!has(r, 'seconds-flatten bug'), 'an old seconds-flatten record does NOT alarm either');
+  assert(r.code === 0, `only stale records → exits 0${r.code !== 0 ? ` (got ${r.code})` : ''}`);
+
+  writeTrades([
+    { holdTimeSec: 0, exitReason: 'force_exit', entryTime: entryAtLeft(30, 2 * 86400 * 1000) },
+    { holdTimeSec: 0, exitReason: 'force_exit', entryTime: entryAtLeft(30) },
+  ]);
+  r = await runHealth(healthEnv);
+  assert(has(r, '1 entry(ies) opened inside the force-exit window'), 'a FRESH late entry still alarms, next to a stale one');
 
   writeTrades([]);
 }
