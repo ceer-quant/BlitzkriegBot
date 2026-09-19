@@ -412,15 +412,16 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
         res
     } else {
         let client = IpcClient::new(socket.clone());
-        let d_web = Dispatcher::new(
-            dispatcher.lock().unwrap().supervisor().config().clone(),
-            lifecycle_enabled,
-        );
         let user = std::env::var("BLITZKRIEG_PANEL_USER").ok();
         let pass = std::env::var("BLITZKRIEG_PANEL_PASSWORD").ok();
 
         let server = if user.is_some() && pass.is_some() {
-            let mut s = WebServer::with_gateway(client, 0, d_web);
+            // Share the dispatcher that OWNS the core — not a fresh one. The
+            // panel's 停止 button and the "内核由其他进程启动" notice both read
+            // `managed = supervisor.owns()` from THIS dispatcher; a second
+            // dispatcher would own nothing and the panel would disown a core
+            // this very process spawned.
+            let mut s = WebServer::with_shared_gateway(client, 0, dispatcher.clone());
             s.set_panel_credentials(user, pass);
             s
         } else {

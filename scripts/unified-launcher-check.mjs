@@ -98,6 +98,30 @@ function rpc(sock, method, params = {}) {
   });
 }
 
+/**
+ * Log into the panel on `port` (gateway mode arms sessions on /api/*) and
+ * fetch the authenticated snapshot's `gateway` block. Returns null when the
+ * panel is unreachable or auth fails — callers assert on the difference.
+ */
+async function gatewaySnapshot(port, user, password) {
+  try {
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ user, password }),
+    });
+    if (!login.ok) return null;
+    const { token } = await login.json();
+    const res = await fetch(`http://127.0.0.1:${port}/api/snapshot`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
 function findChildren(parentPid) {
   const LF = String.fromCharCode(10);
   try {
@@ -371,9 +395,25 @@ async function main() {
     BIN,
     ['run', '--socket', ADOPT_SOCK, '--tick-ms', '50', '--addr', `127.0.0.1:${PORT4}`,
      '--no-event-archive', '--no-trade-log', '--no-order-log', '--no-position-log'],
-    { cwd: WORK, env: { ...process.env, TMPDIR: WORK }, stdio: ['ignore', 'pipe', 'pipe'] }
+    {
+      cwd: WORK, stdio: ['ignore', 'pipe', 'pipe'],
+      // Credentials so the gateway block is ON THE WIRE: an adopted core must
+      // be reported as `managed: false` — the panel then honestly says 停止 is
+      // unavailable instead of offering a button that would be a lie.
+      env: {
+        ...process.env, TMPDIR: WORK,
+        BLITZKRIEG_PANEL_USER: 'gate_user', BLITZKRIEG_PANEL_PASSWORD: 'gate_pass',
+      },
+    }
   );
   await sleep(500); // give the launcher a moment to boot and adopt
+  const adoptSnap = await gatewaySnapshot(PORT4, 'gate_user', 'gate_pass');
+  assert(adoptSnap !== null, 'adopting launcher serves an authenticated snapshot');
+  assert(adoptSnap?.gateway?.lifecycleEnabled === true, 'lifecycle verbs are enabled for the adopting launcher');
+  assert(
+    adoptSnap?.gateway?.managed === false,
+    `an ADOPTED core is honestly reported as not managed: ${JSON.stringify(adoptSnap?.gateway)}`
+  );
   const adoptLauncherClosed = new Promise((resolve) => adoptLauncher.on('close', (code) => resolve(code)));
   const adoptOut = execFileSync(BIN, ['stop', '--socket', ADOPT_SOCK, '--timeout', '10'], { encoding: 'utf8' });
   assert(adoptOut.includes('owner pid'), `stop names the adopting launcher: ${adoptOut.split('\n').find((l) => l.includes('owner'))}`);
@@ -425,6 +465,16 @@ async function main() {
   assert(
     !envStdout.includes('read-only mode'),
     'credentials from .env alone put the panel into managed (non-read-only) mode'
+  );
+  // THE managed-ownership assertion (the bug this gate exists for): the core
+  // this launcher spawned must be reported as MANAGED on the wire, so the
+  // panel's 停止 button is live and no "started by another process" notice
+  // can appear. The web server and the signal task share one dispatcher.
+  const envSnap = await gatewaySnapshot(PORT5, 'gate_user', 'gate_pass');
+  assert(envSnap?.gateway?.lifecycleEnabled === true, 'lifecycle verbs are enabled on the wire');
+  assert(
+    envSnap?.gateway?.managed === true,
+    `a core SPAWNED by this launcher is reported as managed: ${JSON.stringify(envSnap?.gateway)}`
   );
   // The file must not leak into the log: a count, never a value.
   assert(!envStdout.includes('gate_pass'), 'the .env values are never printed');
