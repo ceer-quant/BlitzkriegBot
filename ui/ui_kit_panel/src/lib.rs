@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod input;
+pub mod stop_stack;
 pub mod ui;
 
 pub use app::{Action, App, Tab};

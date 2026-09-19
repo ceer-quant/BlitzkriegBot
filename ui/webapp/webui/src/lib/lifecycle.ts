@@ -63,7 +63,7 @@ export function controlState(
   const canStop = connected && managed
   const canStart = !connected
   const blockedReason = connected && !managed
-    ? '内核由其他进程启动，本网关只接管读取、不会停止它；如需在此停止，请改由网关启动内核。'
+    ? '内核由其他进程启动，本网关只接管读取、不会停止它；如需在此停止，请改由网关启动内核，或在终端运行 `blitzkrieg stop` 一并收掉整套栈。'
     : null
 
   return { enabled, canStop, canStart, blockedReason, usable: canStop || canStart }

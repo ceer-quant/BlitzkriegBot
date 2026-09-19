@@ -97,20 +97,24 @@ nohup target/release/blitzkrieg run >> /tmp/blitzkrieg-run.log 2>&1 &
 ```
 
 ```bash
-# 停止后台实例：对监听面板端口的进程发 SIGTERM（不要 kill -9）
-kill $(lsof -ti :51888)
+# 停止整套栈（面板 + 内核，含孤儿内核；重复执行无害）
+target/release/blitzkrieg stop
 ```
 
 要点：
 
+- **`stop` 按 socket 范围工作**：只触碰挂在目标 socket 上的 blitzkrieg 家族进程——先
+  SIGTERM 拥有者（由它级联收掉自己拉起的内核），再收孤儿内核；启动 stop 的 shell/
+  包装器永远不会被碰。被接管的内核（面板只读的那种状态）也能由它一并停掉。
 - **默认 dry 模式**，默认参数与 §3.3 的手写命令行一致（回合 900s、`--engine --feed-ws`、
   持仓/名义额上限等）；`HFT_*` 环境变量可覆盖（见 §8）。
 - 面板凭据 `BLITZKRIEG_PANEL_USER` / `BLITZKRIEG_PANEL_PASSWORD` **两者都设置**时，网页
   命令动词可用；缺省时面板为纯查看（启动时打印提示）。
 - `--readonly`：结构性只读——内核不构造出网桥梁，从根上禁止下单（不是逐入口拦截）。
-- 子命令面：`blitzkrieg [run|core|tui|web|--help]`；`tui --attach` 仅监视现有核心，
+- 子命令面：`blitzkrieg [run|core|tui|web|stop|--help]`；`tui --attach` 仅监视现有核心，
   绝不杀死非本进程拉起的内核。
-- 一次只跑一套栈：旧栈还占着 51888 / 默认 socket 时再 `run`，端口会绑不上。
+- 一次只跑一套栈：旧栈还占着 51888 / 默认 socket 时再 `run`，端口会绑不上；
+  此时先 `blitzkrieg stop` 再起。
 
 ### 3.2 构建 Rust 核心
 

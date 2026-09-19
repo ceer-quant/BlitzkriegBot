@@ -13,7 +13,7 @@
  * Run: node scripts/unified-launcher-check.mjs
  */
 
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 // Guarded spawn: `blitzkrieg run` starts a core as its own child, so a failure or
 // an interrupt between here and the launcher's SIGTERM leaves the launcher AND a
 // core behind. The guard reaps the launcher's whole process group, which includes
@@ -32,8 +32,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'unified-launcher-'));
 const SOCK = join(WORK, 'unified.sock');
 const READONLY_SOCK = join(WORK, 'readonly.sock');
+const STOP_SOCK = join(WORK, 'stop.sock');
+const ORPHAN_SOCK = join(WORK, 'orphan.sock');
+const ADOPT_SOCK = join(WORK, 'adopt.sock');
 const PORT1 = 52000 + Math.floor(Math.random() * 2000);
 const PORT2 = 54000 + Math.floor(Math.random() * 2000);
+const PORT3 = 56000 + Math.floor(Math.random() * 2000);
+const PORT4 = 58000 + Math.floor(Math.random() * 2000);
 
 function cleanupAll() {
   reapAllChildren();
@@ -239,6 +244,133 @@ async function main() {
   roChild.kill('SIGTERM');
   await new Promise((resolve) => roChild.on('close', resolve));
   await sleep(100);
+
+  // ── 5. `blitzkrieg stop` stops the unified stack ───────────────────────────
+  // The operator's switch: SIGTERM the launcher (which cascades to the core it
+  // spawned), then nothing is left attached to the socket — and the second
+  // stop is a no-op.
+  console.log('');
+  console.log('[5] blitzkrieg stop stops the unified stack, idempotently');
+  const stopChild = spawn(
+    BIN,
+    [
+      'run',
+      '--socket', STOP_SOCK,
+      '--mode', 'dry',
+      '--tick-ms', '50',
+      '--addr', `127.0.0.1:${PORT3}`,
+      '--engine',
+      '--no-event-archive',
+      '--no-trade-log',
+      '--no-order-log',
+      '--no-position-log',
+    ],
+    { cwd: WORK, env: { ...process.env, TMPDIR: WORK }, stdio: ['ignore', 'pipe', 'pipe'] }
+  );
+  let stopStackReady = false;
+  for (let i = 0; i < 40 && !stopStackReady; i++) {
+    await sleep(100);
+    if (existsSync(STOP_SOCK)) stopStackReady = (await rpc(STOP_SOCK, 'core.ping')) !== null;
+  }
+  assert(stopStackReady, `stack ready on ${STOP_SOCK} before stop`);
+  // Attach the close listener BEFORE stop runs: `close` fires once, and a
+  // listener attached after an already-dead child would wait forever.
+  const stopChildClosed = new Promise((resolve) => stopChild.on('close', (code) => resolve(code)));
+
+  // execFileSync, NOT execSync: a `sh -c` wrapper would itself carry the
+  // binary name and socket path in its command line. `stop` excludes its own
+  // ancestor chain, but the gate should not depend on that courtesy.
+  const stopOut = execFileSync(BIN, ['stop', '--socket', STOP_SOCK, '--timeout', '10'], { encoding: 'utf8' });
+  assert(stopOut.includes('owner pid'), `stop names the owner it signalled: ${stopOut.split('\n')[1]}`);
+  const stopClosed = await Promise.race([stopChildClosed, sleep(10_000).then(() => 'TIMEOUT')]);
+  assert(stopClosed === 0 || stopClosed === null, `launcher exited when stopped (${stopClosed})`);
+  assert(!existsSync(STOP_SOCK), 'socket file removed after stop');
+  const stopSecond = execFileSync(BIN, ['stop', '--socket', STOP_SOCK, '--timeout', '5'], { encoding: 'utf8' });
+  assert(stopSecond.includes('nothing to stop'), 'a second stop is a no-op');
+
+  // ── 6. `blitzkrieg stop` stops an orphan core and leaves strangers alone ───
+  // The incident shape, part 1: a core whose parent is this gate driver (not a
+  // blitzkrieg process). Stop must signal the CORE, never the parent, and say so.
+  console.log('');
+  console.log('[6] blitzkrieg stop stops an orphan core without touching its stranger parent');
+  const orphan = spawn(
+    CORE_BIN,
+    ['--socket', ORPHAN_SOCK, '--mode', 'dry', '--tick-ms', '50',
+     '--no-event-archive', '--no-trade-log', '--no-order-log', '--no-position-log'],
+    { cwd: WORK, stdio: ['ignore', 'ignore', 'pipe'] }
+  );
+  // Listener FIRST: stop may reap this child while the gate is between steps,
+  // and a close listener attached after that event would wait forever.
+  const orphanClosed = new Promise((resolve) => orphan.on('close', resolve));
+  let orphanReady = false;
+  for (let i = 0; i < 40 && !orphanReady; i++) {
+    await sleep(100);
+    if (existsSync(ORPHAN_SOCK)) orphanReady = (await rpc(ORPHAN_SOCK, 'core.ping')) !== null;
+  }
+  assert(orphanReady, `standalone core ready on ${ORPHAN_SOCK}`);
+  const orphanOut = execFileSync(BIN, ['stop', '--socket', ORPHAN_SOCK, '--timeout', '10'], { encoding: 'utf8' });
+  assert(orphanOut.includes('core pid'), `stop names the core it signalled: ${orphanOut.split('\n')[1]}`);
+  assert(
+    orphanOut.includes('not a blitzkrieg process; left untouched'),
+    'stop reports that the stranger parent was left alone'
+  );
+  await sleep(200);
+  const orphanGone = (await rpc(ORPHAN_SOCK, 'core.ping')) === null;
+  assert(orphanGone, 'orphan core stopped');
+  assert(!existsSync(ORPHAN_SOCK), 'orphan socket file removed');
+  assert(!orphan.killed, 'the gate driver itself was never signalled');
+  await Promise.race([orphanClosed, sleep(5_000).then(() => 'TIMEOUT')]);
+
+  // ── 7. `blitzkrieg stop` stops an ADOPTING launcher plus the orphan core ───
+  // The incident shape, part 2 (what the operator actually hit): a standalone
+  // core is adopted by a `blitzkrieg run` — the panel reads but cannot stop it.
+  // One `stop` must take down BOTH the launcher and the core, and still leave
+  // the stranger parent alone.
+  console.log('');
+  console.log('[7] blitzkrieg stop stops an adopting launcher AND the adopted core');
+  const adoptCore = spawn(
+    CORE_BIN,
+    ['--socket', ADOPT_SOCK, '--mode', 'dry', '--tick-ms', '50',
+     '--no-event-archive', '--no-trade-log', '--no-order-log', '--no-position-log'],
+    { cwd: WORK, stdio: ['ignore', 'ignore', 'pipe'] }
+  );
+  // Listener first, for the same reason as in [6]: stop reaps this child.
+  const adoptCoreClosed = new Promise((resolve) => adoptCore.on('close', resolve));
+  let adoptCoreReady = false;
+  for (let i = 0; i < 40 && !adoptCoreReady; i++) {
+    await sleep(100);
+    if (existsSync(ADOPT_SOCK)) adoptCoreReady = (await rpc(ADOPT_SOCK, 'core.ping')) !== null;
+  }
+  assert(adoptCoreReady, `standalone core ready on ${ADOPT_SOCK}`);
+  const adoptLauncher = spawn(
+    BIN,
+    ['run', '--socket', ADOPT_SOCK, '--tick-ms', '50', '--addr', `127.0.0.1:${PORT4}`,
+     '--no-event-archive', '--no-trade-log', '--no-order-log', '--no-position-log'],
+    { cwd: WORK, env: { ...process.env, TMPDIR: WORK }, stdio: ['ignore', 'pipe', 'pipe'] }
+  );
+  await sleep(500); // give the launcher a moment to boot and adopt
+  const adoptLauncherClosed = new Promise((resolve) => adoptLauncher.on('close', (code) => resolve(code)));
+  const adoptOut = execFileSync(BIN, ['stop', '--socket', ADOPT_SOCK, '--timeout', '10'], { encoding: 'utf8' });
+  assert(adoptOut.includes('owner pid'), `stop names the adopting launcher: ${adoptOut.split('\n').find((l) => l.includes('owner'))}`);
+  assert(adoptOut.includes('core pid'), `stop names the adopted core: ${adoptOut.split('\n').find((l) => l.includes('core'))}`);
+  const adoptClosed = await Promise.race([adoptLauncherClosed, sleep(10_000).then(() => 'TIMEOUT')]);
+  assert(adoptClosed === 0 || adoptClosed === null, `adopting launcher exited (${adoptClosed})`);
+  await sleep(200);
+  assert((await rpc(ADOPT_SOCK, 'core.ping')) === null, 'adopted core stopped');
+  assert(!existsSync(ADOPT_SOCK), 'adopted-stack socket file removed');
+  assert(!adoptCore.killed, 'the gate driver still was never signalled');
+  await Promise.race([adoptCoreClosed, sleep(5_000).then(() => 'TIMEOUT')]);
+
+  // ── 8. No family process may survive the whole gate ────────────────────────
+  // Every core and launcher this gate started must be gone — this is what turns
+  // a stack that outlived its owner (the readonly orphan shape) into a caught
+  // failure instead of a mystery process on the operator's machine.
+  console.log('');
+  console.log('[8] nothing the gate started is left behind');
+  const leftover = execSync('ps -ww -axo pid=,ppid=,command=', { encoding: 'utf8' })
+    .split('\n')
+    .filter((l) => l.includes(WORK) && (l.includes('blitzkrieg-core') || l.includes('blitzkrieg run') || l.includes('blitzkrieg web')));
+  assert(leftover.length === 0, `no family process left in ${WORK}: ${leftover.join(' | ')}`);
 
   // Clean up scratch dir
   try { rmSync(WORK, { recursive: true, force: true }); } catch {}
