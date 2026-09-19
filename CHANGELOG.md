@@ -52,6 +52,20 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ### Changed
 
+- **The kernel starts with ZERO strategies enabled, and the operator's toggles
+  persist across restarts.** `blitzkrieg-core` hardcoded `spread_arb` as the
+  default-enabled strategy — a pre-PR-B leftover that coupled the kernel to one
+  strategy and made every fresh boot trade it whether the operator wanted it or
+  not. A fresh boot now registers everything the strategy dir holds and
+  enables none of it. What starts enabled is the persisted intent:
+  `data/strategy-state.json` is rewritten on every `strategy.enable`/`disable`
+  (panel, TUI, CLI toggle) and replayed at the next boot; `--enable-strategy`
+  adds on top of it and `--disable-strategy` wins over both. `--strategy-state
+  <path>` moves the file, `--no-strategy-state` turns persistence off (the
+  backtester runs without it). The file is atomic (tmp + rename), sorted and
+  deduplicated, and a missing or malformed one degrades to "nothing enabled" —
+  a fresh checkout boots clean and the first panel toggle builds the set.
+
 - **`spread_arb` ships a tuned entry discount: win rate 45% → 74% at a better
   payoff ratio.** The resting bid now sits at `0.88 × mid` instead of
   `0.98 × mid` (`trend_entry_factor`, the strategy's own declared knob — the

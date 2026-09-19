@@ -43,6 +43,7 @@ const REPORT = join(WORKDIR, 'report.json');
 // same strategy config sees the same events, so only the data source differs.
 const KNOBS = [
   '--engine',
+  '--enable-strategy', 'spread_arb',
   '--no-discovery',
   '--no-trade-log',
   '--no-order-log',

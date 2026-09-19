@@ -42,21 +42,29 @@ pub struct CoreConfig {
     /// Assets the engine trades and its sizing/round timing (mirrors the TS config).
     pub assets: Vec<String>,
     /// Strategies to switch ON after the engine is installed, by name (E4-a).
-    /// The builtins start in a fixed state (`spread_arb` on, `trend_follow` off),
-    /// so adding a strategy can never change what an existing session trades;
-    /// this is how an operator opts a session into one. Unknown names are
-    /// reported and ignored, never fatal.
+    /// The kernel ships ZERO enabled strategies — what starts enabled is the
+    /// operator's persisted intent (`strategy_state_path`) plus explicit
+    /// `--enable-strategy` flags, so adding a strategy can never change what an
+    /// existing session trades. Unknown names are reported and ignored, never
+    /// fatal.
     pub enabled_strategies: Vec<String>,
     /// Strategies to switch OFF after the engine is installed, by name. Applied
     /// after `enabled_strategies`, so the explicit "off" wins if both name the
     /// same strategy.
     pub disabled_strategies: Vec<String>,
     /// Directory scanned at startup for user-layer strategy libraries
-    /// (`*.dylib`/`*.so`): every library found is dlopen'd and enabled, so
-    /// dropping a file into the folder is the whole installation procedure.
-    /// `None` = no directory (auto-load off). Load failures are reported and
-    /// skipped, never fatal — a broken file must not brick the kernel.
+    /// (`*.dylib`/`*.so`): every library found is dlopen'd and REGISTERED —
+    /// registration never enables; what trades is decided solely by
+    /// `enabled_strategies` (persisted intent + CLI flags). `None` = no
+    /// directory (auto-load off). Load failures are reported and skipped,
+    /// never fatal — a broken file must not brick the kernel.
     pub strategy_dir: Option<String>,
+    /// Where the effective enabled-set is recorded so runtime toggles and boot
+    /// flags survive a restart (`data/strategy-state.json` in production; see
+    /// [`crate::strategy_state`]). `None` disables persistence — the backtester
+    /// and most in-process tests run with `None`, and a toggle then changes
+    /// nothing on disk.
+    pub strategy_state_path: Option<String>,
     pub min_round_age_sec: i64,
     pub size_usd: Decimal,
     pub min_shares: Decimal,
@@ -160,7 +168,10 @@ impl CoreConfig {
     /// The strategy selection is applied through the same `set_strategy_enabled`
     /// the IPC method uses, so a session started with `--enable-strategy` and one
     /// toggled at runtime end up in exactly the same state (including the Shadow
-    /// Evolution re-registration the toggle triggers).
+    /// Evolution re-registration the toggle triggers). Afterwards the effective
+    /// enabled-set is persisted (when `strategy_state_path` is configured) so
+    /// the next boot replays it — the boot lists and the runtime toggles write
+    /// the same file, and the last explicit intent wins.
     pub fn install_engine(&self, core: &mut Core) {
         core.enable_engine(crate::engine::Engine::new(self.engine_config()));
         self.load_strategy_dir(core);
@@ -179,6 +190,9 @@ impl CoreConfig {
                     "unknown strategy requested at startup; ignored"
                 );
             }
+        }
+        if let Some(path) = &self.strategy_state_path {
+            crate::strategy_state::save(std::path::Path::new(path), &core.enabled_strategy_names());
         }
     }
 
@@ -370,9 +384,10 @@ impl Default for CoreConfig {
             auto_exits_enabled: true,
             engine_enabled: false,
             assets: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
-            enabled_strategies: vec!["spread_arb".to_string()],
+            enabled_strategies: Vec::new(),
             disabled_strategies: Vec::new(),
             strategy_dir: None,
+            strategy_state_path: None,
             min_round_age_sec: 30,
             size_usd: Decimal::new(25, 1), // 2.5
             min_shares: Decimal::from(10),
@@ -775,6 +790,14 @@ impl Core {
             .unwrap_or(false);
         if ok {
             self.rewire_hot_params();
+            // Record the operator's intent: the next boot replays this set.
+            // `None` (backtests, most tests) writes nothing.
+            if let Some(path) = &self.config.strategy_state_path {
+                crate::strategy_state::save(
+                    std::path::Path::new(path),
+                    &self.enabled_strategy_names(),
+                );
+            }
         }
         ok
     }
@@ -4144,12 +4167,12 @@ mod strategy_dispatch_tests {
         // `install_engine` loads only what `strategy_dir` holds (PR-B: the
         // kernel registers nothing itself), so the test hosts the three
         // adapters right after it — the same registration the loader performs
-        // for a real library — and keeps the test's spread_arb on.
+        // for a real library. Nothing is enabled unless the config says so.
         let install = |cfg: CoreConfig| {
             let mut c = Core::new(cfg.clone());
             cfg.install_engine(&mut c);
             let cfg2 = cfg.engine_config();
-            crate::strategies::test_support::host(
+            crate::strategies::test_support::host_disabled(
                 c.engine.as_mut().expect("engine installed"),
                 cfg2.trend,
                 cfg2.spread_arb,
@@ -4172,11 +4195,13 @@ mod strategy_dispatch_tests {
             ..Default::default()
         };
 
-        // Default: the incumbent trades, the chase leg does not.
+        // Default: ZERO strategies enabled (the kernel couples to none). The
+        // hosted adapters all register, all disabled.
         let plain = install(base.clone());
-        assert_eq!(
-            plain.enabled_strategy_names(),
-            vec!["spread_arb".to_string()]
+        assert!(
+            plain.enabled_strategy_names().is_empty(),
+            "a fresh boot must enable nothing: {:?}",
+            plain.enabled_strategy_names()
         );
         assert_eq!(
             plain.strategy_names(),
@@ -4185,7 +4210,7 @@ mod strategy_dispatch_tests {
                 "trend_follow".to_string(),
                 "mean_reversion".to_string()
             ],
-            "both builtins are hosted; only one is on"
+            "registered but disabled"
         );
 
         // Opt in by flag: same result as toggling it at runtime.
@@ -4198,7 +4223,7 @@ mod strategy_dispatch_tests {
 
         assert_eq!(
             by_flag.enabled_strategy_names(),
-            vec!["spread_arb".to_string(), "trend_follow".to_string()]
+            vec!["trend_follow".to_string()]
         );
         assert_eq!(
             by_flag.enabled_strategy_names(),
@@ -4212,9 +4237,10 @@ mod strategy_dispatch_tests {
             disabled_strategies: vec!["trend_follow".into()],
             ..base.clone()
         });
-        assert_eq!(
-            both.enabled_strategy_names(),
-            vec!["spread_arb".to_string()]
+        assert!(
+            both.enabled_strategy_names().is_empty(),
+            "enable then disable the same name nets to off: {:?}",
+            both.enabled_strategy_names()
         );
         assert_eq!(
             both.strategy_names(),
@@ -4225,6 +4251,106 @@ mod strategy_dispatch_tests {
             ],
             "an unknown name must not register anything"
         );
+    }
+
+    /// The enabled-set is recorded on every toggle and on boot, and a fresh
+    /// install with the same state path replays it — that is the whole
+    /// "enable it once, it comes back after a restart" contract.
+    #[test]
+    fn strategy_enablement_persists_to_the_state_file() {
+        let dir =
+            std::env::temp_dir().join(format!("bk-strategy-state-svc-{}", std::process::id()));
+        let state = dir.join("strategy-state.json");
+        let _ = std::fs::remove_file(&state);
+
+        let cfg = CoreConfig {
+            dry_seed_balance: dec!(1000),
+            engine_enabled: true,
+            strategy_state_path: Some(state.to_string_lossy().into()),
+            ..Default::default()
+        };
+        let install = || {
+            let mut c = Core::new(cfg.clone());
+            cfg.install_engine(&mut c);
+            let cfg2 = cfg.engine_config();
+            crate::strategies::test_support::host_disabled(
+                c.engine.as_mut().expect("engine installed"),
+                cfg2.trend,
+                cfg2.spread_arb,
+            );
+            c
+        };
+
+        // Boot with an empty set: install_engine records that empty set — and
+        // the file now exists with nothing enabled.
+        let mut c = install();
+        assert!(c.enabled_strategy_names().is_empty());
+        assert_eq!(
+            crate::strategy_state::load(&state),
+            Vec::<String>::new(),
+            "boot reconciles the file to the effective set"
+        );
+
+        // The operator enables two strategies; both land in the file.
+        assert!(c.set_strategy_enabled("spread_arb", true));
+        assert!(c.set_strategy_enabled("trend_follow", true));
+        assert_eq!(
+            crate::strategy_state::load(&state),
+            vec!["spread_arb".to_string(), "trend_follow".to_string()]
+        );
+
+        // Disabling records the off just the same.
+        assert!(c.set_strategy_enabled("spread_arb", false));
+        assert_eq!(
+            crate::strategy_state::load(&state),
+            vec!["trend_follow".to_string()]
+        );
+
+        // A brand-new install with the same state path replays the intent: the
+        // boot list is read from the file (exactly what main.rs does), and the
+        // selection applies after the strategy dir "loads" — the same order
+        // production uses.
+        let mut replay_cfg = cfg.clone();
+        replay_cfg.enabled_strategies = crate::strategy_state::load(&state);
+        let mut rebooted = Core::new(replay_cfg.clone());
+        replay_cfg.install_engine(&mut rebooted);
+        let rcfg = replay_cfg.engine_config();
+        crate::strategies::test_support::host_disabled(
+            rebooted.engine.as_mut().expect("engine installed"),
+            rcfg.trend,
+            rcfg.spread_arb,
+        );
+        for name in &replay_cfg.enabled_strategies {
+            rebooted.set_strategy_enabled(name, true);
+        }
+        assert_eq!(
+            rebooted.enabled_strategy_names(),
+            vec!["trend_follow".to_string()],
+            "the persisted intent survives the restart"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No `strategy_state_path` (backtests, most tests) — a toggle works but
+    /// writes nothing anywhere.
+    #[test]
+    fn toggles_without_a_state_path_persist_nothing() {
+        let cfg = CoreConfig {
+            dry_seed_balance: dec!(1000),
+            engine_enabled: true,
+            ..Default::default()
+        };
+        let mut c = Core::new(cfg.clone());
+        cfg.install_engine(&mut c);
+        let cfg2 = cfg.engine_config();
+        crate::strategies::test_support::host_disabled(
+            c.engine.as_mut().expect("engine installed"),
+            cfg2.trend,
+            cfg2.spread_arb,
+        );
+        assert!(c.set_strategy_enabled("trend_follow", true));
+        assert_eq!(c.enabled_strategy_names(), vec!["trend_follow".to_string()]);
     }
 
     /// Shadow Evolution sees every evolvable strategy the engine hosts, whether it

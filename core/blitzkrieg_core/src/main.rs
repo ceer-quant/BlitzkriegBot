@@ -103,13 +103,18 @@ struct Args {
     /// Per-strategy entry caps: `name:max_open_positions:max_notional_usd`
     /// (repeatable; `-` or empty = no cap on that segment).
     strategy_limits: Vec<String>,
-    /// Strategies to switch ON at startup (repeatable, E4-a). The builtins default
-    /// to `spread_arb` on and `trend_follow` off, so this is how a session opts
-    /// into the chase leg; an unknown name is warned about, never fatal.
+    /// Strategies to switch ON at startup (repeatable, E4-a). The kernel ships
+    /// ZERO enabled strategies — what starts enabled is the operator's persisted
+    /// intent (`--strategy-state` file, replayed and rewritten) plus these flags;
+    /// an unknown name is warned about, never fatal.
     enable_strategy: Vec<String>,
     /// Strategies to switch OFF at startup (repeatable). Applied after
     /// `--enable-strategy`, so an explicit "off" wins.
     disable_strategy: Vec<String>,
+    /// Where the effective enabled-set is recorded so toggles and boot flags
+    /// survive a restart. Default `data/strategy-state.json`; `none`/empty = no
+    /// persistence (a backtest or a hermetic harness wants this).
+    strategy_state: Option<String>,
     /// Directory scanned at startup for user-layer strategy libraries
     /// (`*.dylib`/`*.so`): every library found is loaded and enabled, so
     /// dropping a file in the folder is the whole install. `none`/empty = off.
@@ -295,6 +300,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut strategy_limits: Vec<String> = Vec::new();
     let mut enable_strategy: Vec<String> = Vec::new();
     let mut disable_strategy: Vec<String> = Vec::new();
+    let mut strategy_state: Option<String> = None;
+    let mut no_strategy_state = false;
     let mut strategy_dir: Option<String> = None;
     let mut no_strategy_dir = false;
     let mut engine = false;
@@ -408,6 +415,10 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     disable_strategy.push(v);
                 }
             }
+            "--strategy-state" => {
+                strategy_state = it.next().filter(|v| !v.trim().is_empty());
+            }
+            "--no-strategy-state" => no_strategy_state = true,
             "--strategy-dir" => strategy_dir = it.next().filter(|v| !v.trim().is_empty()),
             "--no-strategy-dir" => no_strategy_dir = true,
             "--assets" => assets_arg = it.next(),
@@ -700,6 +711,11 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         strategy_limits,
         enable_strategy,
         disable_strategy,
+        strategy_state: if no_strategy_state {
+            None
+        } else {
+            Some(strategy_state.unwrap_or_else(|| "data/strategy-state.json".to_string()))
+        },
         strategy_dir: if no_strategy_dir {
             None
         } else {
@@ -998,7 +1014,17 @@ async fn main() -> anyhow::Result<()> {
         args.event_archive_min_free_mb,
     );
 
-    let mut enabled_strategies = vec!["spread_arb".to_string()];
+    // What starts enabled is the OPERATOR'S intent, never a hardcoded name:
+    // the persisted set (runtime toggles + earlier boot flags) first, then the
+    // explicit CLI adds on top. `--disable-strategy` still wins over both — it
+    // is applied after them in `install_engine`. A fresh checkout (no state
+    // file) boots with ZERO strategies enabled; the panel's toggles then build
+    // the set and it persists from the first change on.
+    let mut enabled_strategies = args
+        .strategy_state
+        .as_deref()
+        .map(|p| blitzkrieg_core::strategy_state::load(std::path::Path::new(p)))
+        .unwrap_or_default();
     for s in args.enable_strategy {
         if !enabled_strategies.contains(&s) {
             enabled_strategies.push(s);
@@ -1016,6 +1042,7 @@ async fn main() -> anyhow::Result<()> {
         strategy_limits: parse_strategy_limits(&args.strategy_limits),
         enabled_strategies,
         disabled_strategies: args.disable_strategy,
+        strategy_state_path: args.strategy_state,
         strategy_dir: args.strategy_dir,
         markets: args.markets,
         auto_exits_enabled: args.auto_exits,

@@ -123,7 +123,9 @@ try {
   for (const want of ['spread_arb', 'trend_follow', 'mean_reversion']) {
     check(`strategy listed: ${want}`, names.includes(want), names.join(','));
   }
-  check('default enable state preserved (only spread_arb on)', rows.filter((r) => r.enabled).map((r) => r.name).join(',') === 'spread_arb');
+  // Zero-default (the kernel couples to no strategy): a fresh boot lists every
+  // registered strategy DISABLED; what trades is purely the operator's choice.
+  check('fresh boot enables nothing', rows.filter((r) => r.enabled).map((r) => r.name).join(',') === '');
 
   // [3] runtime toggle round-trip: mean_reversion on → on → off → off.
   const t1 = await cmd('strategy mean_reversion on');
@@ -134,7 +136,7 @@ try {
   check('strategy toggle off ok', t2.ok === true, t2.message);
   const st3 = await cmd('strategies');
   check('mean_reversion off again', st3.data.strategies.find((r) => r.name === 'mean_reversion')?.enabled === false);
-  check('spread_arb untouched', st3.data.strategies.find((r) => r.name === 'spread_arb')?.enabled === true);
+  check('no strategy left enabled by the toggle', st3.data.strategies.every((r) => r.enabled === false));
 
   // [4] malformed / unknown are clean errors.
   const bad1 = await cmd('strategy no_such on');

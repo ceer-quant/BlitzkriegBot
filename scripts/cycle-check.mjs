@@ -37,6 +37,7 @@ const args = [
   '--socket', SOCK, '--mode', 'dry', '--tick-ms', '50',
   '--seed-balance', '1000', '--max-order-notional', '6',
   '--engine', '--no-discovery',
+  '--enable-strategy', 'spread_arb',
   '--no-event-archive',
   '--no-trade-log',
   '--round-sec', String(ROUND_SEC),
