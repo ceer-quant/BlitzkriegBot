@@ -78,7 +78,12 @@ cargo build --release --workspace --locked
     core's stdout is `/dev/null` and its stderr is inherited). Set it to scan; a
     configured-but-missing path is an anomaly.
   - archive freshness — `BK_ARCH_DIR` (default `data/archive`); trade ledger —
-    `BK_TRADES` (default `data/trades/trades.jsonl`).
+    `BK_TRADES` (default `data/trades/trades.jsonl`). The two ledger-derived
+    counts (seconds-flatten bug, inside-the-force-exit-window entries) are bounded
+    to `BK_TRADES_LOOKBACK_SEC` (default 86400 = 24h): `trades.jsonl` is
+    append-only, so an unbounded count would make the alarm light up forever after
+    a single historical occurrence — a check that can never clear is the same
+    defect as one that can never fire (KI-30).
   `soak-health-loop.sh` additionally bounds its own `health.log` and `$BK_RUN_LOG`
   (`BK_LOG_MAX_BYTES`, default 20 MiB) by gzip + in-place truncate, leaving a log
   untouched if gzip fails. It no longer calls the deleted `rotate-run-log.sh`.

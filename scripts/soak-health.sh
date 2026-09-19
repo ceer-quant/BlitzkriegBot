@@ -34,6 +34,21 @@
 #                       monitor's 600s default interval)
 #   BK_ARCH_DIR         market-data archive dir (default: data/archive)
 #   BK_TRADES           trade ledger (default: data/trades/trades.jsonl)
+#   BK_TRADES_LOOKBACK_SEC
+#                       only trade records newer than this many seconds are
+#                       counted (default 86400 = 24h). The ledger is append-only
+#                       and never rewritten, so counting it from the beginning of
+#                       time makes every figure monotonically non-decreasing: a
+#                       single old record pins HEALTH_ALERT on forever and the
+#                       loop can never report recovery. Bounding by age is what
+#                       makes the alarm able to CLEAR — while still lighting up
+#                       again the moment a new occurrence lands. (KI-30 family:
+#                       a guard that can only ever fire is as useless as one that
+#                       can never fire.)
+#                       Trade-off: an operator who wants a whole-soak view can
+#                       raise this above the soak length, but must then accept the
+#                       alarm staying lit for the rest of the soak. The default
+#                       trades that away so that a healthy system reports healthy.
 #   BK_RUN_LOG          log to scan for panics / archive-stop. UNSET means "not
 #                       configured" and is reported as such: the path is a
 #                       deployment choice, because the core's stdout is
@@ -58,6 +73,7 @@ CORE_PGREP=${BK_CORE_PGREP:-target/release/blitzkrieg-core}
 PANEL_URL=${BK_PANEL_URL:-http://127.0.0.1:51888}
 SOAK_DIR=${BK_SOAK_DIR:-data/soak}
 SOAK_STALE_SEC=${BK_SOAK_STALE_SEC:-1800}
+TRADES_LOOKBACK_SEC=${BK_TRADES_LOOKBACK_SEC:-86400}
 RUN_LOG=${BK_RUN_LOG:-}
 
 problems=()
@@ -170,9 +186,17 @@ if [ -f "$TRADES" ]; then
   #       the round has too little life left to ever reach its target.
   # Reporting (b) as (a) sends the reader chasing the wrong bug, so classify by the
   # round clock: timeLeft <= force_exit_sec means the entry itself was late.
-  zero_hold=$(python3 - "$TRADES" <<'PY' 2>/dev/null || echo "0 0 0"
-import json,sys
+  #
+  # Both counts are bounded to the lookback window. The ledger is append-only, so
+  # an unbounded count is monotonically non-decreasing: one record from days ago
+  # keeps this anomaly (and therefore HEALTH_ALERT) lit forever, and the loop can
+  # never report recovery no matter how healthy the system becomes. Age is the
+  # right bound because the question each tick asks is "is anything wrong NOW",
+  # not "was anything ever wrong".
+  zero_hold=$(python3 - "$TRADES" "$TRADES_LOOKBACK_SEC" <<'PY' 2>/dev/null || echo "0 0 0"
+import json,sys,time
 ROUND,FORCE=900,120
+cutoff=(time.time()-float(sys.argv[2]))*1000.0
 late=sudden=0
 for l in open(sys.argv[1]):
     l=l.strip()
@@ -182,6 +206,7 @@ for l in open(sys.argv[1]):
     if r.get("holdTimeSec")!=0 or r.get("exitReason")!="force_exit": continue
     et=r.get("entryTime")
     if not et: continue
+    if et < cutoff: continue
     tl=ROUND-(et/1000.0-(int(et/1000.0)//ROUND)*ROUND)
     if tl<=FORCE: late+=1
     else: sudden+=1
