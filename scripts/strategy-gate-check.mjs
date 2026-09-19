@@ -114,14 +114,17 @@ async function run() {
     if (!enabled.found) problems.push('dog_strategy not found after load');
 
     // A round that is brand new (age 0) and a deep dip the dog trades (mid 0.42
-    // <= its 0.43 ceiling, bid depth 100 >= its 50 minimum).
+    // <= its 0.43 ceiling, bid depth 100 >= its 50 minimum). The market's
+    // DECLARED expiry is 30 minutes out — the kernel's time_left follows the
+    // venue declaration (not the wall-clock slot grid), so the dog's D-31 floor
+    // (180s) is deterministically satisfied no matter when this gate runs.
     const now = Date.now();
     const slot = Math.floor(now / 1000 / ROUND_SEC);
     await rpc('engine.markets', {
       markets: [{
         asset: 'BTC', conditionId: '0xc', questionId: '0xq',
         upTokenId: 'UP', downTokenId: 'DOWN', upPrice: 0.5, downPrice: 0.5,
-        expiresAtMs: (slot + 1) * ROUND_SEC * 1000, roundSlot: slot,
+        expiresAtMs: now + 30 * 60 * 1000, roundSlot: slot,
         negRisk: true, question: 'BTC up/down',
       }],
     });

@@ -52,6 +52,14 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ### Changed
 
+- **The plugins page no longer lists strategies (E11 / D-32).** The strategy
+  page is the single entry point for strategies — source, toggles, per-strategy
+  ledger — so the plugins page keeps only what it is actually about: extension
+  and market plugins. The identity strip drops the strategy card and its
+  enabled-count KPI; `/api/plugins` still carries the strategies array (the
+  strategy page's registry fallback uses it), it is just not rendered here.
+  The TUI is out of scope for this change.
+
 - **The kernel starts with ZERO strategies enabled, and the operator's toggles
   persist across restarts.** `blitzkrieg-core` hardcoded `spread_arb` as the
   default-enabled strategy — a pre-PR-B leftover that coupled the kernel to one
