@@ -7,8 +7,9 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
 import { Activity, AlertTriangle, Play, Square, Bell, BellOff, Search, TrendingUp, TrendingDown, Clock, Filter, Info } from 'lucide-vue-next'
-import { api, marketTypeLabel, type MarketPrice, type TradeRow } from '@/api/client'
+import { api, marketTypeLabel, type MarketPrice, type TradeRow, type AssetBook, type BookSide, type BookLevel } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
+import { useSettingsStore } from '@/stores/settings'
 import { useTheme } from '@/lib/theme'
 import {
   num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration, dateTime,
@@ -29,14 +30,19 @@ import StatRow from '@/components/ui/stat/StatRow.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import EquityCurve from '@/components/charts/EquityCurve.vue'
+import BookDepth from '@/components/charts/BookDepth.vue'
 import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const store = usePanelStore()
+const settings = useSettingsStore()
 const { sound, toggleSound } = useTheme()
 const snap = computed(() => store.snapshot)
 
 // Fast tick: 2s snapshot poll (HFT pacing), faster than the shell's 15s.
-const { pause: stopFast } = useIntervalFn(() => { void store.refresh() }, 2_000)
+// Pacing is a persisted preference (E8-d 设置); off turns this tab watch-only.
+const { pause: stopFast } = useIntervalFn(() => {
+  if (settings.fastPoll) void store.refresh()
+}, 2_000)
 onUnmounted(() => { stopFast() })
 
 // ── alert sounds: diff each snapshot against the previous one ────────────────
@@ -105,6 +111,46 @@ const prices = computed<MarketPrice[]>(() => round.value?.prices ?? [])
 function spreadCents(m: MarketPrice): number {
   return Math.max(0, m.up + m.down - 1) * 100
 }
+
+// ── 盘口深度 (E8-c, engine.books) ───────────────────────────────────────────
+const books = computed<AssetBook[]>(() => snap.value?.books ?? [])
+/**
+ * Whether THIS core serves depth at all: the field is absent on cores older
+ * than the engine.books verb, and that must read differently from "the feed
+ * hasn't delivered a book yet" — otherwise an old core's panel shows an
+ * eternally loading chart instead of a stated capability boundary.
+ */
+const hasDepthData = computed(() => snap.value?.books !== undefined)
+
+const depthAsset = ref('')
+watch(books, (b) => {
+  if (!b.length) return
+  if (!b.some((x) => x.asset === depthAsset.value)) depthAsset.value = b[0].asset
+}, { immediate: true })
+
+/** UP or DOWN token of the selected asset — the two halves of the round. */
+const depthToken = ref<'up' | 'down'>('up')
+
+const activeBook = computed(() => books.value.find((b) => b.asset === depthAsset.value) ?? null)
+const activeSide = computed<BookSide | null>(() => {
+  const b = activeBook.value
+  if (!b) return null
+  return depthToken.value === 'up' ? b.up : b.down
+})
+
+const depthMetrics = computed(() => {
+  const s = activeSide.value
+  if (!s) return null
+  const sum = (xs: BookLevel[]) => xs.reduce((a, l) => a + (Number(l.size) || 0), 0)
+  return {
+    bestBid: s.bestBid,
+    bestAsk: s.bestAsk,
+    spread: s.spread,
+    obi: s.obi,
+    bidDepth: sum(s.bids),
+    askDepth: sum(s.asks),
+  }
+})
 
 /**
  * Feed liveness, so a stalled market-data feed cannot masquerade as a quiet market.
@@ -564,6 +610,48 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
     </div>
     <Card v-else class="mt-3.5">
       <EmptyState text="暂无行情数据（等待报价插件）" compact />
+    </Card>
+
+    <!-- ── 盘口深度 (E8-c) ──────────────────────────────────────────────── -->
+    <Card v-if="books.length" class="mt-3.5">
+      <CardHeader label="盘口深度">
+        <template #action>
+          <div class="flex items-center gap-2">
+            <select v-model="depthAsset" class="filter-select">
+              <option v-for="b in books" :key="b.asset" :value="b.asset">{{ b.asset }}</option>
+            </select>
+            <SegmentedControl
+              v-model="depthToken"
+              :segments="[
+                { id: 'up', label: 'UP' },
+                { id: 'down', label: 'DOWN' },
+              ]"
+              size="sm"
+            />
+          </div>
+        </template>
+      </CardHeader>
+      <!--
+        The touch metrics first: a depth ladder is read from the spread and the
+        imbalance before any level is looked at. Null means the feed has not
+        delivered this token's book yet — never a zero quote.
+      -->
+      <div
+        v-if="depthMetrics && activeSide"
+        class="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[11.5px]"
+      >
+        <span>买一 <span class="num text-up"><RollingNumber :value="depthMetrics.bestBid != null ? cents(depthMetrics.bestBid) : '—'" /></span></span>
+        <span>卖一 <span class="num text-down"><RollingNumber :value="depthMetrics.bestAsk != null ? cents(depthMetrics.bestAsk) : '—'" /></span></span>
+        <span>点差 <span class="num"><RollingNumber :value="depthMetrics.spread != null ? cents(depthMetrics.spread) : '—'" /></span></span>
+        <span>盘口失衡 OBI <span class="num" :class="(depthMetrics.obi ?? 0) >= 0 ? 'text-up' : 'text-down'"><RollingNumber :value="depthMetrics.obi != null ? signedPct(depthMetrics.obi * 100, 1) : '—'" /></span></span>
+        <span class="text-faint-fg">累计买深 <span class="num text-fg"><RollingNumber :value="depthMetrics.bidDepth.toFixed(1)" /></span> · 卖深 <span class="num text-fg"><RollingNumber :value="depthMetrics.askDepth.toFixed(1)" /></span> 份</span>
+      </div>
+      <div class="mt-2">
+        <BookDepth :side="activeSide" :height="168" />
+      </div>
+    </Card>
+    <Card v-else-if="!hasDepthData" class="mt-3.5">
+      <EmptyState text="盘口深度：当前内核未提供 engine.books（旧版本内核，重启到新内核后可见）" compact />
     </Card>
 
     <!-- ── stats row ─────────────────────────────────────────────────────── -->

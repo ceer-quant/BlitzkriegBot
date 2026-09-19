@@ -127,6 +127,52 @@ pub struct RoundView {
     pub market_prices: Vec<MarketPriceView>,
 }
 
+// ── engine.books ─────────────────────────────────────────────────────────────
+
+/// E8-c 盘口深度: one round asset with both token books, as the depth chart
+/// renders them. Mirrors the core's `AssetBooksView`; older cores never answer
+/// `engine.books`, so a missing reply degrades to an empty vec, not an error.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetBooksView {
+    #[serde(default)]
+    pub asset: String,
+    #[serde(default)]
+    pub up: BookSideView,
+    #[serde(default)]
+    pub down: BookSideView,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookSideView {
+    #[serde(default)]
+    pub bids: Vec<BookLevelView>,
+    #[serde(default)]
+    pub asks: Vec<BookLevelView>,
+    #[serde(default, deserialize_with = "de_num_opt")]
+    pub best_bid: Option<f64>,
+    #[serde(default, deserialize_with = "de_num_opt")]
+    pub best_ask: Option<f64>,
+    #[serde(default, deserialize_with = "de_num_opt")]
+    pub mid_price: Option<f64>,
+    #[serde(default, deserialize_with = "de_num_opt")]
+    pub obi: Option<f64>,
+    #[serde(default, deserialize_with = "de_num_opt")]
+    pub spread: Option<f64>,
+    #[serde(default, deserialize_with = "de_num_opt")]
+    pub spread_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookLevelView {
+    #[serde(default, deserialize_with = "de_num")]
+    pub price: f64,
+    #[serde(default, deserialize_with = "de_num")]
+    pub size: f64,
+}
+
 // ── engine.stats ─────────────────────────────────────────────────────────────
 
 /// E9-g: one row of core `engine.stats.strategies[]` — the per-strategy
@@ -412,6 +458,8 @@ pub struct UiSnapshot {
     pub market_active_name: Option<String>,
     /// E9-g: per-strategy engine.stats rows (orders/gates/rejection causes).
     pub strategy_stats: Vec<StrategyStatsRow>,
+    /// E8-c 盘口深度: per-asset L2 depth (older cores omit → empty).
+    pub books: Vec<AssetBooksView>,
     pub connected: bool,
     pub last_error: Option<String>,
 }

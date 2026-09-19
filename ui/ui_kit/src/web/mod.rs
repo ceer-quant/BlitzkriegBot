@@ -340,6 +340,13 @@ pub fn render_json(s: &UiSnapshot, lifecycle: Option<&LifecycleView>) -> String 
         "strategies": s.strategies.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),
         "extensions": s.extensions.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),
         "marketPlugins": s.market_plugins.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),
+        // E8-c 盘口深度: per-asset L2 depth for the HFT panel. Older cores omit
+        // the verb → empty array, which the panel reads as "no depth data".
+        "books": s.books.iter().map(|a| serde_json::json!({
+            "asset": a.asset,
+            "up": book_side_json(&a.up),
+            "down": book_side_json(&a.down),
+        })).collect::<Vec<_>>(),
         // HFT template identity: which market plugin is driving this session
         // and its market class (prediction/spot/futures/options).
         "marketActiveName": s.market_active_name,
@@ -370,6 +377,22 @@ pub fn render_json(s: &UiSnapshot, lifecycle: Option<&LifecycleView>) -> String 
         });
     }
     doc.to_string()
+}
+
+/// One token's book side for the JSON snapshot (E8-c). `None` metrics pass
+/// through as JSON null so the panel cannot mistake them for real quotes.
+fn book_side_json(side: &crate::core::types::BookSideView) -> serde_json::Value {
+    let level = |l: &crate::core::types::BookLevelView| serde_json::json!({ "price": l.price, "size": l.size });
+    serde_json::json!({
+        "bids": side.bids.iter().map(&level).collect::<Vec<_>>(),
+        "asks": side.asks.iter().map(&level).collect::<Vec<_>>(),
+        "bestBid": side.best_bid,
+        "bestAsk": side.best_ask,
+        "midPrice": side.mid_price,
+        "obi": side.obi,
+        "spread": side.spread,
+        "spreadPct": side.spread_pct,
+    })
 }
 
 /// Minimal std-only base64 decoder for basic-auth passwords (the only place

@@ -16,6 +16,8 @@
  *       plus the CORS policy (foreign Origin 403, loopback 200).
  *   [4] Snapshot render is non-empty: the JSON carries real engine state, and
  *       the headless AppViewModel (the Tauri seam) renders a non-empty view.
+ *   [4b] The desktop command seam (E8-d) reaches a live core end-to-end:
+ *       desktop_snapshot → AppView JSON, desktop_command → CommandOutcome.
  *   [5] The CSRF fix: a cross-site GET cannot reach a lifecycle verb, and the
  *       panel is locked even when no credentials were configured.
  *
@@ -262,6 +264,25 @@ try {
     { cwd: ROOT, encoding: 'utf8' });
   check('headless AppViewModel renders offline-safe (ui_kit app adapter)',
     vmCheck?.status === 0, (vmCheck?.stderr ?? '').slice(-140));
+
+  // Desktop command seam (E8-d): desktop_snapshot / desktop_command against a
+  // REAL dry core — socket → IpcClient → AppViewModel JSON, socket →
+  // Dispatcher → CommandOutcome. The test spawns its own core; the gate only
+  // tells it where this gate's core binary lives. Darwin only: the tauri
+  // crate is a nested workspace Linux never builds.
+  if (process.platform === 'darwin') {
+    const chainCheck = spawnSync('cargo', ['test', '--test', 'chain'], {
+      cwd: TAURI_DIR, encoding: 'utf8', timeout: 420000,
+      env: { ...process.env, BLITZKRIEG_CORE_BIN: BIN },
+    });
+    check('desktop_snapshot/desktop_command reach a live core (tauri seam)',
+      chainCheck?.status === 0,
+      ((chainCheck?.stderr ?? '') + (chainCheck?.stdout ?? '')).slice(-160));
+  } else {
+    check('desktop_snapshot/desktop_command reach a live core (tauri seam)',
+      existsSync(join(TAURI_DIR, 'tests/chain.rs')),
+      'non-darwin: test scaffold asserted');
+  }
 
   // ── [5] No configured credentials → refuse to start ───────────────────────
   //

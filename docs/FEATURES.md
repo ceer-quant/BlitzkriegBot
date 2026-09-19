@@ -188,7 +188,7 @@ ECharts + Pinia + VueUse。设计基调：Apple 风格、金橙主调、liquid g
 | 引擎启停控制 | ✅ 已验证 | `check:lifecycle` |
 | 告警音效 | ✅ 已验证 | `composables/alertSounds.ts` |
 | **策略/插件管理入口的完全对等（E9-g）** | 🚧 部分 | 面板已有 Plugins 页；Epic #59 要求与 TUI Plugins 页**完全对等**（列表/启停/审计/热参查看） |
-| **Tauri 桌面打包的端到端验收** | 🚧 部分 | 壳 crate 编译通过（`ui:webapp` 有断言）；`desktop_snapshot` / `desktop_command` 全链路**未验** |
+| **Tauri 桌面打包的端到端验收** | ✅ 已验证 | 壳窗口指向内嵌只读 WebServer 的 `/panel/`；`desktop_snapshot` / `desktop_command` 对真 dry 内核全链路绿（`ui:webapp` 的 `cargo test --test chain`，测试自带内核） |
 
 ### 5.2 TUI（`ui/ui_kit_panel`，ratatui + crossterm）
 
@@ -301,7 +301,8 @@ shadcn-vue + ECharts + Pinia + VueUse 重建 Web 前端，替换旧的 `ui/hft.h
 **实际进度**：主体已落地（Vue 面板 5 页 + ECharts + 主题 token + liquid glass），
 但作为 Epic **未正式收口**——旧 hft.html 的信息面对照清单（该文件现已不存在，
 只能对照 git 历史）未逐项验收，
-Tauri 打包进 webui 与 `desktop_snapshot` / `desktop_command` 全链路未验。
+Tauri 打包（`frontendDist` 指 `dist/`，窗口运行时指向内嵌只读服务器的 `/panel/`）与
+`desktop_snapshot` / `desktop_command` 全链路已验（`ui:webapp` 门禁 `cargo test --test chain`）。
 
 ### 9.2 #59 — E9 产品化补完
 
