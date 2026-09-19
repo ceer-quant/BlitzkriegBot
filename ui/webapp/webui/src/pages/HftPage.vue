@@ -7,7 +7,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
 import { Activity, AlertTriangle, Play, Square, Bell, BellOff, Search, X, TrendingUp, TrendingDown, Clock, Filter, Info } from 'lucide-vue-next'
-import { api, marketTypeLabel, type MarketPrice, type TradeRow, type AssetBook, type BookSide, type BookLevel } from '@/api/client'
+import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type BookSide, type BookLevel } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
 import { useTheme } from '@/lib/theme'
@@ -362,6 +362,26 @@ async function send(cmd: 'start' | 'stop'): Promise<void> {
   } finally {
     busy.value = false
     setTimeout(() => { cmdMsg.value = null }, 4000)
+  }
+}
+
+async function forceClose(position: Position): Promise<void> {
+  if (!control.value.canStop || busy.value) return
+  const confirmed = window.confirm(
+    `确认强行平仓？\n\n${position.asset} ${position.direction.toUpperCase()} · ${Number(position.shares).toFixed(3)} 份\n当前价 ${Number(position.currentPrice).toFixed(3)}\n\n该操作会以人工退出原因记录，实盘将等待成交回报。`,
+  )
+  if (!confirmed) return
+  busy.value = true
+  cmdMsg.value = null
+  try {
+    const res = await api.flatten(position.id)
+    cmdMsg.value = res.message ?? `已请求平仓 ${position.asset}`
+    await store.refresh()
+  } catch (e) {
+    cmdMsg.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    busy.value = false
+    setTimeout(() => { cmdMsg.value = null }, 5000)
   }
 }
 
@@ -869,12 +889,13 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
                 <th class="label-micro px-2 pb-2 text-right">份额</th>
                 <th class="label-micro px-2 pb-2 text-right">浮动</th>
                 <th class="label-micro px-2 pb-2 text-right">剩余</th>
+                <th class="label-micro px-2 pb-2 text-right">操作</th>
               </tr>
             </thead>
             <tbody>
               <tr
-                v-for="(p, i) in positions"
-                :key="`${p.asset}-${i}`"
+                v-for="p in positions"
+                :key="p.id"
                 class="border-t border-line transition-colors hover:bg-panel-2"
               >
                 <td class="px-2 py-2.5 font-semibold">{{ p.asset }}</td>
@@ -890,6 +911,17 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
                 </td>
                 <td class="px-2 py-2.5 text-right num text-faint-fg">
                   <RollingNumber :value="p.remainingSec !== undefined ? duration(p.remainingSec) : '—'" />
+                </td>
+                <td class="px-2 py-2.5 text-right">
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    :disabled="busy || !control.canStop"
+                    :title="busy ? '正在下发命令…' : control.canStop ? '人工强行平仓' : (control.blockedReason ?? '当前网关不允许人工操作')"
+                    @click="forceClose(p)"
+                  >
+                    强平
+                  </Button>
                 </td>
               </tr>
             </tbody>

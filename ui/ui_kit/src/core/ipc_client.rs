@@ -236,6 +236,13 @@ impl IpcClient {
             serde_json::json!({ "name": name, "enabled": enabled }),
         )
     }
+    pub fn position_exit(&mut self, position_id: &str) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            "positions.exit",
+            serde_json::json!({ "positionId": position_id }),
+        )
+    }
+
     pub fn extension_enable(
         &mut self,
         name: &str,

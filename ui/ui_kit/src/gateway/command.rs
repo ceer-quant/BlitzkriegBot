@@ -13,14 +13,13 @@
 //!   strategy NAME on|off                     enable/disable one strategy
 //!   extensions                               list extensions (name + state)
 //!   extension NAME on|off                    enable/disable one extension
+//!   flatten POSITION_ID                       manually force-close one position
 //!   markets                                  list market plugins
 //!   help
 //!
-//! NO order-placing verb exists here. `stop`/`start` act on the *process*, not on
-//! orders; `status`/`positions`/`strategies`/`extensions`/`markets` are reads.
-//! Only `strategy NAME on|off` / `extension NAME on|off` mutate core runtime
-//! state, and the interactive TUI asks for confirmation before sending them
-//! when a target is currently ENABLED. All trading decisions stay in the core.
+//! No entry-order verb exists here. `stop`/`start` act on the process, while
+//! `flatten` is the explicit human-supervision exit path and delegates to the
+//! core's existing `positions.exit` RPC. All trading decisions stay in the core.
 
 use crate::core::ipc_client::IpcClient;
 use crate::core::types::UiSnapshot;
@@ -51,6 +50,9 @@ pub enum Command {
     ExtensionSet {
         name: String,
         enabled: bool,
+    },
+    Flatten {
+        position_id: String,
     },
     Markets,
     Help,
@@ -120,6 +122,14 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
             })
         }
         "extensions" => Ok(Command::Extensions),
+        "flatten" | "close" => {
+            if parts.len() != 2 || parts[1].is_empty() {
+                return Err("usage: flatten <position_id>".into());
+            }
+            Ok(Command::Flatten {
+                position_id: parts[1].to_string(),
+            })
+        }
         "extension" => {
             let name = parts.get(1).copied().unwrap_or("").to_string();
             let on = parts.get(2).copied();
@@ -350,6 +360,7 @@ impl Dispatcher {
             Command::ExtensionSet { name, enabled } => {
                 self.cmd_plugin_set(raw, PluginKind::Extension, &name, enabled)
             }
+            Command::Flatten { position_id } => self.cmd_flatten(raw, &position_id),
             Command::Help => CommandOutcome::ok(raw, "help", HELP)
                 .with_data(serde_json::json!({ "usage": HELP })),
         }
@@ -433,6 +444,27 @@ impl Dispatcher {
                 "not_owned",
                 "no core spawned by this gateway; an adopted core is left running",
             ),
+        }
+    }
+
+    fn cmd_flatten(&mut self, raw: &str, position_id: &str) -> CommandOutcome {
+        if !self.lifecycle_enabled {
+            return CommandOutcome::err(
+                raw,
+                "manual flatten disabled; start the gateway with --manage to enable operator controls",
+            );
+        }
+        match self.client.position_exit(position_id) {
+            Ok(data) => {
+                let closed = data.get("closed").and_then(|v| v.as_u64()).unwrap_or(0);
+                CommandOutcome::ok(
+                    raw,
+                    "flattened",
+                    format!("manual flatten requested for {position_id} (closed={closed})"),
+                )
+                .with_data(data)
+            }
+            Err(e) => CommandOutcome::err(raw, e.to_string()),
         }
     }
 
@@ -597,6 +629,7 @@ crypto-hft commands (UI Kit gateway):
   strategy <name> on|off                   enable/disable one strategy
   extensions                               list extensions and state
   extension <name> on|off                  enable/disable one extension
+  flatten <position_id>                    force-close one open position
   markets                                  list market plugins
   help";
 
@@ -770,6 +803,24 @@ mod tests {
         );
         assert_eq!(parse_command("STATUS").unwrap(), Command::Status);
         assert_eq!(parse_command("stop").unwrap(), Command::Stop);
+    }
+
+    #[test]
+    fn parses_manual_flatten_with_stable_position_id() {
+        assert_eq!(
+            parse_command("flatten pos-123").unwrap(),
+            Command::Flatten {
+                position_id: "pos-123".into()
+            }
+        );
+        assert_eq!(
+            parse_command("close pos-123").unwrap(),
+            Command::Flatten {
+                position_id: "pos-123".into()
+            }
+        );
+        assert!(parse_command("flatten").is_err());
+        assert!(parse_command("flatten pos-1 extra").is_err());
     }
 
     #[test]

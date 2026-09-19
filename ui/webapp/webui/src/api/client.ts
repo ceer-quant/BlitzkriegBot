@@ -167,6 +167,9 @@ export const api = {
       method: 'POST',
       body: `strategy ${name} ${enabled ? 'on' : 'off'}`,
     }),
+  /** Manual operator flatten for one stable position id. */
+  flatten: (positionId: string) =>
+    request<CommandDoc>('/command', { method: 'POST', body: `flatten ${positionId}` }),
 }
 
 // ── wire types (mirror ui_kit core/types.rs) ───────────────────────────────
@@ -265,6 +268,7 @@ export interface AssetBook {
 }
 
 export interface Position {
+  id: string
   asset: string
   direction: string
   entryPrice: number
