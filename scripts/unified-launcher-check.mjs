@@ -555,7 +555,7 @@ async function main() {
   // 9b. The allowlist wiring (--allowed-origin / BLITZKRIEG_ALLOWED_ORIGINS):
   // a proxy-fronted origin that is neither same-origin nor loopback passes
   // when listed and is refused when not.
-  const PORT7 = 65000 + Math.floor(Math.random() * 2000);
+  const PORT7 = 51000 + Math.floor(Math.random() * 1000);
   const listed = spawnWeb(PORT7, ['--allowed-origin', 'http://panel.example.com']);
   assert(await waitHttp(PORT7), `web server serves on ${PORT7}`);
   assert(

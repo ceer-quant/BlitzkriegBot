@@ -202,7 +202,7 @@ try {
 // re-registers the round with REAL token ids — the synthetic 'up'/'down' books
 // then price nothing and no entry can ever be placed (this exact failure).
 const ENG_SOCK = scratchSocketPath('parity-eng');
-const ec = makeCore(ENG_SOCK, ['--engine', '--no-discovery', '--no-event-archive', '--min-round-age', '0', '--min-time-left', '0', '--trend-confirm-sec', '0', '--trend-window-floor-ms', '0']);
+const ec = makeCore(ENG_SOCK, ['--engine', '--enable-strategy', 'spread_arb', '--no-discovery', '--no-event-archive', '--min-round-age', '0', '--min-time-left', '0', '--trend-confirm-sec', '0', '--trend-window-floor-ms', '0']);
 
 try {
   await ec.start();

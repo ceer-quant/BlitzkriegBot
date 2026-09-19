@@ -30,7 +30,7 @@ function rpc(sock, method, params = {}) {
 async function boot(sock) {
   try { unlinkSync(sock); } catch {}
   const p = spawn(BIN, ['--socket', sock, '--mode', 'dry', '--tick-ms', '50', '--seed-balance', '1000',
-    '--max-order-notional', '6', '--order-log', ORDER_LOG, '--trade-log', join(WORK, 'trades.jsonl'),
+    '--max-order-notional', '6', '--enable-strategy', 'spread_arb', '--order-log', ORDER_LOG, '--trade-log', join(WORK, 'trades.jsonl'),
     '--no-discovery', '--no-auto-exits'], { stdio: 'ignore', cwd: WORK });
   for (let i = 0; i < 80 && !existsSync(sock); i++) await sleep(50);
   await sleep(300);

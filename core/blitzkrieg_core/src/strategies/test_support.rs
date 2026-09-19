@@ -550,6 +550,27 @@ pub fn host(
     trend: TrendConfig,
     spread_arb: SpreadArbConfig,
 ) {
+    host_all(engine, trend, spread_arb);
+    assert!(engine.set_strategy_enabled("spread_arb", true));
+}
+
+/// Host all three adapters with every one DISABLED — the zero-default shape a
+/// fresh boot has, because the kernel enables nothing by itself. Tests that
+/// want a specific strategy trading opt in explicitly (the same way an
+/// operator does), which keeps this helper honest about the default.
+pub fn host_disabled(
+    engine: &mut super::super::engine::Engine,
+    trend: TrendConfig,
+    spread_arb: SpreadArbConfig,
+) {
+    host_all(engine, trend, spread_arb);
+}
+
+fn host_all(
+    engine: &mut super::super::engine::Engine,
+    trend: TrendConfig,
+    spread_arb: SpreadArbConfig,
+) {
     engine
         .register_user_strategy(
             Box::new(TestSpreadArb::new(trend, spread_arb)),
@@ -568,5 +589,4 @@ pub fn host(
             "test".into(),
         )
         .expect("fresh engine");
-    assert!(engine.set_strategy_enabled("spread_arb", true));
 }

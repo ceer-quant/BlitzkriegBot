@@ -22,7 +22,7 @@ import { spawn } from './lib/child-guard.mjs';
 import net from 'net';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { existsSync, unlinkSync, mkdtempSync } from 'fs';
+import { existsSync, unlinkSync, mkdtempSync, rmSync } from 'fs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const DYLIB = join(
@@ -291,8 +291,74 @@ async function runFloorPhase() {
   return problems;
 }
 
+/**
+ * Zero-default + persistence phase: a fresh boot enables NOTHING (the kernel
+ * couples to no strategy), an operator's enable is recorded to the state file,
+ * and the NEXT boot replays it — the whole "enable it once" contract, driven
+ * through the real strategy dir (all four shipped cdylibs auto-load disabled)
+ * and a state file in a scratch dir.
+ */
+async function runPersistencePhase() {
+  const sock = join(tmpdir(), `blitzkrieg-persist-${Math.random().toString(36).slice(2)}.sock`);
+  const workdir = mkdtempSync(join(tmpdir(), 'blitzkrieg-persist-'));
+  const statePath = join(workdir, 'strategy-state.json');
+  try { unlinkSync(sock); } catch {}
+  const problems = [];
+
+  const boot = async () => {
+    const { proc, rpc } = await bootCore(sock, workdir, [
+      '--socket', sock, '--mode', 'dry', '--tick-ms', '50',
+      '--engine', '--no-discovery', '--no-event-archive', '--no-trade-log',
+      '--no-order-log', '--no-position-log',
+      // The whole shipped strategy dir: every cdylib registers, none enables.
+      '--strategy-dir', join(process.cwd(), 'user_layer', 'strategies', 'target', 'release'),
+      '--strategy-state', statePath,
+    ]);
+    return { proc, rpc };
+  };
+  const enabled = async (rpc, name) => {
+    const s = await rpc('engine.stats');
+    const row = (s.strategies || []).find((x) => x.name === name);
+    return row ? row.enabled === true : null;
+  };
+
+  try {
+    // 1. Fresh boot: everything registered, NOTHING enabled.
+    let { proc, rpc } = await boot();
+    if (!(await enabled(rpc, 'trend_follow') === false)) {
+      problems.push('a fresh boot must start with trend_follow disabled');
+    }
+    if (!(await enabled(rpc, 'spread_arb') === false)) {
+      problems.push('a fresh boot must start with spread_arb disabled');
+    }
+
+    // 2. The operator enables trend_follow; the file records it immediately.
+    const en = await rpc('strategy.enable', { name: 'trend_follow', enabled: true });
+    if (en?.found !== true) problems.push(`strategy.enable failed: ${JSON.stringify(en)}`);
+    if (!(await enabled(rpc, 'trend_follow') === true)) problems.push('enable did not take effect');
+    proc.kill('SIGTERM');
+    await sleep(500);
+
+    // 3. Reboot on the same state file: trend_follow comes back enabled, everything
+    //    else stays off — no RPC needed.
+    ({ proc, rpc } = await boot());
+    if (!(await enabled(rpc, 'trend_follow') === true)) {
+      problems.push('the persisted enable did not survive the restart');
+    }
+    if (!(await enabled(rpc, 'spread_arb') === false)) {
+      problems.push('an unpersisted strategy must stay disabled after restart');
+    }
+    proc.kill('SIGTERM');
+  } catch (e) {
+    problems.push(`error: ${e.message}`);
+  } finally {
+    try { rmSync(workdir, { recursive: true, force: true }); } catch {}
+  }
+  return problems;
+}
+
 console.log('per-strategy gate opt-out on the real binary + cdylib (E2-b / #27, D-31 floor)\n');
-const problems = [...(await run()), ...(await runFloorPhase())];
+const problems = [...(await run()), ...(await runFloorPhase()), ...(await runPersistencePhase())];
 if (problems.length) {
   for (const p of problems) console.log(`  FAIL ${p}`);
   console.log(`\nstrategy-gate: ${problems.length} problem(s)`);

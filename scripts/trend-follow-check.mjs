@@ -186,22 +186,23 @@ async function main() {
   // ── 1. Default registration + independent start/stop ───────────────────────
   await session('default', [], async ({ rpc }) => {
     const list = await rpc('strategy.list');
-    if (!isOn(list, 'spread_arb')) problems.push('spread_arb must be enabled by default');
-    if (isOn(list, 'trend_follow') !== false) {
-      problems.push(`trend_follow must start DISABLED (got ${JSON.stringify(isOn(list, 'trend_follow'))})`);
+    // Zero-default: the kernel couples to no strategy — a fresh boot enables
+    // nothing, whatever the strategy dir holds.
+    for (const s of ['spread_arb', 'trend_follow', 'mean_reversion']) {
+      if (isOn(list, s)) problems.push(`${s} must start DISABLED on a fresh boot`);
     }
-    // Runtime toggle: on, then off again — the incumbent never moves with it.
+    // Runtime toggle: on, then off again — nothing else moves with it.
     const on = await rpc('strategy.enable', { name: 'trend_follow', enabled: true });
     if (!on.found) problems.push('strategy.enable did not find trend_follow');
     let l = await rpc('strategy.list');
-    if (!isOn(l, 'trend_follow') || !isOn(l, 'spread_arb')) {
-      problems.push('enabling the chase leg must not disturb the incumbent');
+    if (!isOn(l, 'trend_follow') || isOn(l, 'spread_arb') || isOn(l, 'mean_reversion')) {
+      problems.push('enabling the chase leg must not enable any other strategy');
     }
     const off = await rpc('strategy.enable', { name: 'trend_follow', enabled: false });
     if (!off.found) problems.push('strategy.enable did not find trend_follow on the way off');
     l = await rpc('strategy.list');
-    if (isOn(l, 'trend_follow') !== false || !isOn(l, 'spread_arb')) {
-      problems.push('disabling the chase leg must leave the incumbent enabled');
+    if (isOn(l, 'trend_follow') !== false || isOn(l, 'spread_arb') || isOn(l, 'mean_reversion')) {
+      problems.push('disabling the chase leg must leave everything else untouched');
     }
     const junk = await rpc('strategy.enable', { name: 'dog_strategy', enabled: true });
     if (junk.found) problems.push('an unhosted strategy name must not report found');
@@ -214,7 +215,7 @@ async function main() {
     if (!isOn(list, 'trend_follow')) {
       problems.push('--enable-strategy trend_follow did not switch it on at startup');
     }
-    if (!isOn(list, 'spread_arb')) problems.push('--enable-strategy trend_follow must not disable the incumbent');
+    if (isOn(list, 'spread_arb')) problems.push('--enable-strategy trend_follow must not also enable spread_arb');
 
     // ── 3+4. It chases the breakout and does not starve the dip buyer ────────
     const now = Date.now();
@@ -266,7 +267,7 @@ async function main() {
   if (!sawStartupRow) problems.push('never observed a trend_follow accounting row');
 
   // ── 4. Neither starves the other: two assets, two setups, both enter ───────
-  await session('concurrent', ['--enable-strategy', 'trend_follow'], async ({ rpc, stderr }) => {
+  await session('concurrent', ['--enable-strategy', 'trend_follow', '--enable-strategy', 'spread_arb'], async ({ rpc, stderr }) => {
     const now = Date.now();
     // Two ASSETS, not two sides of one market: the risk layer allows at most one
     // open position per asset, so a same-asset pair would prove nothing about

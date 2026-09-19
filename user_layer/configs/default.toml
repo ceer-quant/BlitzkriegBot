@@ -27,9 +27,11 @@ min_round_age_sec = 30
 min_time_left_sec = 180
 
 # ── Strategies are NOT configured here ───────────────────────────────────────
-# PR-B removed `[strategy]`. The kernel ships ZERO strategies: every strategy
-# comes from a cdylib under the strategy dir (default `user_layer/strategies`,
-# scanned recursively for *.dylib/*.so at startup), and each loaded library is
-# enabled automatically. A missing strategy dir is normal and never an error.
-# Opt a loaded strategy out with `--disable-strategy <name>` (or
-# `BK_DISABLE_STRATEGY`). There is no per-strategy on/off list in this file.
+# PR-B removed `[strategy]`. The kernel ships ZERO strategies and enables
+# NONE of them by default: every strategy comes from a cdylib under the
+# strategy dir (default `user_layer/strategies`, scanned recursively for
+# *.dylib/*.so at startup) and starts DISABLED. What starts enabled is the
+# operator's persisted intent — `data/strategy-state.json`, rewritten on every
+# panel/CLI toggle and replayed at the next boot — plus explicit
+# `--enable-strategy <name>` / `--disable-strategy <name>` flags (an explicit
+# off wins). A missing strategy dir or state file is normal, never an error.

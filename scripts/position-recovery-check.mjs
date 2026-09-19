@@ -57,7 +57,7 @@ async function boot(path, extra = []) {
   try { unlinkSync(path); } catch {}
   const p = spawn(BIN, ['--socket', path, '--mode', 'dry', '--tick-ms', '50', '--seed-balance', '1000',
     '--max-order-notional', '6', '--position-log', POS_LOG, '--no-trade-log', '--no-order-log',
-    '--engine', '--no-event-archive', '--no-discovery', '--no-auto-exits', '--round-sec', '3600',
+    '--engine', '--enable-strategy', 'spread_arb', '--no-event-archive', '--no-discovery', '--no-auto-exits', '--round-sec', '3600',
     '--min-round-age', '0', '--min-time-left', '0',
     '--trend-confirm-sec', '3', '--trend-window-floor-ms', '1000', ...extra],
     { stdio: 'ignore', cwd: WORK });

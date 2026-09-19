@@ -186,25 +186,23 @@ async function main() {
   // ── 1. Default registration + independent start/stop ───────────────────────
   await session('default', [], async ({ rpc }) => {
     const list = await rpc('strategy.list');
-    if (!isOn(list, 'spread_arb')) problems.push('spread_arb must be enabled by default');
-    if (isOn(list, 'trend_follow') !== false) {
-      problems.push(`trend_follow must start DISABLED (got ${JSON.stringify(isOn(list, 'trend_follow'))})`);
-    }
-    if (isOn(list, 'mean_reversion') !== false) {
-      problems.push(`mean_reversion must start DISABLED (got ${JSON.stringify(isOn(list, 'mean_reversion'))})`);
+    // Zero-default: the kernel couples to no strategy — a fresh boot enables
+    // nothing, whatever the strategy dir holds.
+    for (const s of ['spread_arb', 'trend_follow', 'mean_reversion']) {
+      if (isOn(list, s)) problems.push(`${s} must start DISABLED on a fresh boot`);
     }
     // Runtime toggle: on, then off again — nothing else moves with it.
     const on = await rpc('strategy.enable', { name: 'mean_reversion', enabled: true });
     if (!on.found) problems.push('strategy.enable did not find mean_reversion');
     let l = await rpc('strategy.list');
-    if (!isOn(l, 'mean_reversion') || !isOn(l, 'spread_arb') || isOn(l, 'trend_follow') !== false) {
-      problems.push(`enabling the fade leg must not disturb the others: ${JSON.stringify(l)}`);
+    if (!isOn(l, 'mean_reversion') || isOn(l, 'spread_arb') || isOn(l, 'trend_follow') !== false) {
+      problems.push(`enabling the fade leg must not enable any other strategy: ${JSON.stringify(l)}`);
     }
     const off = await rpc('strategy.enable', { name: 'mean_reversion', enabled: false });
     if (!off.found) problems.push('strategy.enable did not find mean_reversion on the way off');
     l = await rpc('strategy.list');
-    if (isOn(l, 'mean_reversion') !== false || !isOn(l, 'spread_arb')) {
-      problems.push('disabling the fade leg must leave the incumbent enabled');
+    if (isOn(l, 'mean_reversion') !== false || isOn(l, 'spread_arb')) {
+      problems.push('disabling the fade leg must leave everything else untouched');
     }
     const junk = await rpc('strategy.enable', { name: 'dog_strategy', enabled: true });
     if (junk.found) problems.push('an unhosted strategy name must not report found');
@@ -217,7 +215,7 @@ async function main() {
     if (!isOn(list, 'mean_reversion')) {
       problems.push('--enable-strategy mean_reversion did not switch it on at startup');
     }
-    if (!isOn(list, 'spread_arb')) problems.push('--enable-strategy mean_reversion must not disable the incumbent');
+    if (isOn(list, 'spread_arb')) problems.push('--enable-strategy mean_reversion must not also enable spread_arb');
     if (isOn(list, 'trend_follow') !== false) {
       problems.push('--enable-strategy mean_reversion must not enable trend_follow');
     }
@@ -269,7 +267,8 @@ async function main() {
     // The dip buyer confirms over a rolling window: shorten it (and drop the
     // floor) so the check stays fast without weakening what it asserts.
     ['--trend-confirm-sec', '10', '--trend-window-floor-ms', '0',
-     '--enable-strategy', 'mean_reversion', '--enable-strategy', 'trend_follow'],
+     '--enable-strategy', 'mean_reversion', '--enable-strategy', 'trend_follow',
+     '--enable-strategy', 'spread_arb'],
     async ({ rpc, stderr }) => {
     const now = Date.now();
     // Three ASSETS again: the risk layer allows at most one open position per

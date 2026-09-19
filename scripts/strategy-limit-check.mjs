@@ -39,7 +39,7 @@ async function probe(limitFlag) {
   const args = [
     '--socket', sock, '--mode', 'dry', '--tick-ms', '50',
     '--seed-balance', '1000', '--max-order-notional', '50',
-    '--engine', '--no-discovery', '--no-event-archive', '--no-trade-log',
+    '--engine', '--enable-strategy', 'spread_arb', '--no-discovery', '--no-event-archive', '--no-trade-log',
     '--round-sec', String(ROUND_SEC), '--min-round-age', '0', '--min-time-left', '0',
     '--trend-confirm-sec', '3', '--trend-window-floor-ms', '1000',
     // The global band every override is measured against. The global notional

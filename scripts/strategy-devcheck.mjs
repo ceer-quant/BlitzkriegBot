@@ -144,7 +144,10 @@ async function runCoreChecks(dylib, name, workdir, elapsedMs) {
     const row = list.find((s) => s.name === name);
     check('strategy.list shows the template', !!row, JSON.stringify(list.map((s) => s.name)));
     check('new strategy registered DISABLED', row && row.enabled === false, JSON.stringify(row));
-    check('built-in strategies untouched', list.some((s) => s.name === 'spread_arb' && s.enabled === true));
+    // Loading a new library must not disturb anything else: the other
+    // registered strategies keep their state (all DISABLED on a fresh boot —
+    // the kernel enables nothing by itself).
+    check('existing strategies untouched (still disabled)', list.some((s) => s.name === 'spread_arb' && s.enabled === false));
 
     // 4. enable + drive books; the strategy must place an order via the same
     //    engine path as builtins (dry mode maker-fill confirms quickly).
