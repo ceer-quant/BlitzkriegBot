@@ -89,12 +89,18 @@ bash scripts/install-blitzkrieg-shim.sh
 之后**从任何目录**：
 
 ```bash
-blitzkrieg run     # 一键启动：内核 + Web 面板 + 崩溃自愈（Ctrl-C 即停机）
-blitzkrieg stop    # 一键停止：面板 + 内核一起收（重复执行无害）
-nohup blitzkrieg run >> /tmp/blitzkrieg-run.log 2>&1 &   # 后台常驻
+blitzkrieg run              # 一键启动：内核 + Web 面板 + 崩溃自愈
+blitzkrieg run --tui        # 一键启动：内核 + TUI，不启动 Web
+blitzkrieg run -tui         # 上面的容错短别名
+blitzkrieg run --web        # 显式选择 Web 面板
+blitzkrieg tui              # 直接显示 TUI（默认允许管理核心）
+blitzkrieg tui --attach     # 只连接已有核心，不启动/停止核心
+blitzkrieg web              # 只启动 Web 网关，不自动启动核心
+blitzkrieg stop             # 一键停止：面板 + 内核一起收（重复执行无害）
+nohup blitzkrieg run >> /tmp/blitzkrieg-run.log 2>&1 &   # Web 后台常驻
 ```
 
-浏览器打开 `http://127.0.0.1:51888`。就这两条。
+默认 Web 面板地址为 `http://127.0.0.1:51888`；`run --tui` 只占用终端，不监听 Web 端口。
 
 要点：
 
@@ -116,8 +122,12 @@ nohup blitzkrieg run >> /tmp/blitzkrieg-run.log 2>&1 &   # 后台常驻
   `--allowed-origin <url>`（可重复）或 `BLITZKRIEG_ALLOWED_ORIGINS`（逗号分隔）。
   登录凭据（`.env` 的 `BLITZKRIEG_PANEL_USER/PASSWORD`）在任何地址上都是必需的；
   请勿将面板暴露到不受信任的公网。
-- 子命令面：`blitzkrieg [run|core|tui|web|stop|--help]`；`tui --attach` 仅监视现有核心，
-  绝不杀死非本进程拉起的内核。
+- 子命令面：`blitzkrieg [run|core|tui|web|stop|--help]`；`run --tui` / `run -tui` 只打开
+  TUI，不启动 Web；`tui --attach` 仅监视现有核心，绝不杀死非本进程拉起的内核。
+- `run` / `core` 直接吃引擎旋钮：`--round-sec`、`--min-round-age`、`--min-time-left`、
+  `--max-positions`、`--min-shares`、`--max-shares` 优先于 `HFT_*` 环境变量。参数写错
+  （`--tui` 与 `--web` 同给、`--manage` 搭配 `--attach`、未知 flag）会直接报错退出，
+  绝不静默吞掉后按默认值起栈。
 - 一次只跑一套栈：旧栈还占着 51888 / 默认 socket 时再 `run`，端口会绑不上；
   此时先 `blitzkrieg stop` 再起。
 - shim 会在仓库移动后失效（路径烧死在生成物里）：重新跑一次安装脚本即可。

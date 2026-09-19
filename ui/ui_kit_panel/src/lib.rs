@@ -36,6 +36,8 @@ pub enum Msg {
     PluginsLoaded(UiSnapshot),
     /// A decoded core-event batch arrived on the EventBus.
     Events(Vec<blitzkrieg_ui_kit::core::types::CoreEvent>),
+    /// The process received an external termination signal.
+    Shutdown,
 }
 
 #[derive(Debug, Clone)]
@@ -124,7 +126,13 @@ COMMANDS (in the command bar):
 pub async fn run_panel(args: PanelArgs) -> std::io::Result<()> {
     let cfg = SupervisorConfig::from_env(args.socket.clone());
     let dispatcher = Arc::new(Mutex::new(Dispatcher::new(cfg, args.manage)));
+    run_panel_with_dispatcher(args, dispatcher).await
+}
 
+pub async fn run_panel_with_dispatcher(
+    args: PanelArgs,
+    dispatcher: Arc<Mutex<Dispatcher>>,
+) -> std::io::Result<()> {
     // ratatui::init() panics without a real terminal (raw-mode ioctl fails on a
     // plain pipe). In headless output (a script piping stdout) the panel is not
     // usable anyway — fail with guidance instead of a stack trace.
@@ -185,6 +193,30 @@ pub async fn run_panel(args: PanelArgs) -> std::io::Result<()> {
     {
         let tx = tx.clone();
         std::thread::spawn(move || input::read_loop(tx, Msg::Input));
+    }
+    {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigint = signal(SignalKind::interrupt()).ok();
+            let mut sigterm = signal(SignalKind::terminate()).ok();
+            match (&mut sigint, &mut sigterm) {
+                (Some(int), Some(term)) => {
+                    tokio::select! {
+                        _ = int.recv() => {}
+                        _ = term.recv() => {}
+                    }
+                }
+                (Some(int), None) => {
+                    let _ = int.recv().await;
+                }
+                (None, Some(term)) => {
+                    let _ = term.recv().await;
+                }
+                (None, None) => return,
+            }
+            let _ = tx.send(Msg::Shutdown);
+        });
     }
 
     // Background refresher: read the core snapshot off the async runtime.
@@ -364,6 +396,7 @@ pub async fn run_panel(args: PanelArgs) -> std::io::Result<()> {
                 }
             }
             Msg::RefreshError(e) => app.log(format!("refresh error: {e}")),
+            Msg::Shutdown => app.should_quit = true,
         }
 
         if app.should_quit {

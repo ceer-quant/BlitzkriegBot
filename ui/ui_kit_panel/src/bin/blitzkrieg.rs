@@ -12,7 +12,9 @@
 use blitzkrieg_ui_kit::gateway::{Dispatcher, StartOutcome, Supervisor, SupervisorConfig};
 use blitzkrieg_ui_kit::web::WebServer;
 use blitzkrieg_ui_kit::{resolve_socket_path, IpcClient};
-use blitzkrieg_ui_panel::{parse_args_from, run_panel, stop_stack, PanelArgs, Tab};
+use blitzkrieg_ui_panel::{
+    parse_args_from, run_panel, run_panel_with_dispatcher, stop_stack, PanelArgs, Tab,
+};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,7 +26,8 @@ USAGE:
   blitzkrieg <SUBCOMMAND> [FLAGS]
 
 SUBCOMMANDS:
-  run            Start trading core and UI together (default if no subcommand given)
+  run            Start trading core and UI together (default if no subcommand given);
+                 choose the UI with --tui / --web (default: web)
   core           Run the trading core standalone
   tui [--attach] Run interactive terminal panel (attach to existing core or manage)
   web            Run web gateway / browser panel
@@ -39,16 +42,30 @@ FLAGS (for blitzkrieg / blitzkrieg run / core):
   --tick-ms <N>         Engine tick interval in ms (default: 50)
   --seed-balance <N>    Initial seed balance (default: 1000)
   --max-order-notional <N> Maximum notional per order
+  --round-sec <N>       Round duration in seconds (default 900; beats HFT_ROUND_SEC)
+  --min-round-age <N>   Minimum round age before entering (default 30)
+  --min-time-left <N>   Minimum seconds left in a round to enter (default 180)
+  --max-positions <N>   Concurrent position cap (default 2)
+  --min-shares <N>      Minimum order size in shares (default 10)
+  --max-shares <N>      Maximum order size in shares (default 10)
+  --engine --feed-ws    Engine passthrough flags (repeatable, already default)
   --addr <ip:port>      Web panel listen address (default: 127.0.0.1:51888;
                         BLITZKRIEG_PANEL_ADDR overrides, e.g. 0.0.0.0:51888)
   --allowed-origin <url> Extra panel origin to accept beyond loopback and
                         same-origin (repeatable; BLITZKRIEG_ALLOWED_ORIGINS is
                         a comma-separated alternative)
-  --tui                 Launch interactive TUI instead of web panel
+  --tui, -tui           Launch interactive TUI instead of web panel
   --web                 Launch web panel (default)
+  --interval-ms <N>     TUI snapshot refresh interval (default 1000)
+  --manage              Own the core (default for run/core); conflicts with --attach
   --no-lifecycle        Disable core process supervision (adopt-only)
   --attach              Attach to existing core without starting a new one
   --help, -h            Show help
+
+Part launches:
+  blitzkrieg run --tui    core + TUI, no web listener
+  blitzkrieg web          gateway only, core not auto-started
+  blitzkrieg tui --attach watch an already-running core, never start or stop it
 ";
 
 #[derive(Default)]
@@ -61,7 +78,19 @@ struct ParsedCli {
     tick_ms: Option<u64>,
     seed_balance: Option<String>,
     max_order_notional: Option<String>,
+    /// Engine tuning knobs the supervisor already carries as structured
+    /// fields (`HFT_ROUND_SEC` etc. remain the env path; the CLI beats env).
+    round_sec: Option<u64>,
+    min_round_age: Option<u64>,
+    min_time_left: Option<u64>,
+    max_positions: Option<u64>,
+    min_shares: Option<u64>,
+    max_shares: Option<u64>,
     use_tui: bool,
+    interval_ms: u64,
+    /// Explicit "own the core" marker. `run` and `core` own by default, so
+    /// this only matters as a conflict check against `--attach`.
+    manage: bool,
     no_lifecycle: bool,
     attach: bool,
     extra_flags: Vec<String>,
@@ -83,8 +112,19 @@ fn env_allowed_origins() -> Vec<String> {
         .collect()
 }
 
-fn parse_cli_options(args: impl IntoIterator<Item = String>) -> ParsedCli {
-    let mut cli = ParsedCli::default();
+/// Parse the shared flag surface of `blitzkrieg` / `blitzkrieg run` /
+/// `blitzkrieg core`. Errors are strings printed verbatim to stderr with a
+/// help hint, then exit code 2 — never a silent swallow: a typo'd flag must
+/// not quietly start a trading stack the operator did not ask for.
+fn parse_cli_options(args: impl IntoIterator<Item = String>) -> Result<ParsedCli, String> {
+    let mut cli = ParsedCli {
+        interval_ms: 1000,
+        ..ParsedCli::default()
+    };
+    // Panel mode explicitly requested so far, if any: Some(true) = TUI,
+    // Some(false) = web. Two different explicit choices conflict instead of
+    // the previous last-one-wins.
+    let mut ui_mode: Option<bool> = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -127,6 +167,11 @@ fn parse_cli_options(args: impl IntoIterator<Item = String>) -> ParsedCli {
                     cli.tick_ms = Some(v);
                 }
             }
+            "--interval-ms" => {
+                if let Some(v) = iter.next().and_then(|v| v.parse::<u64>().ok()) {
+                    cli.interval_ms = v.max(100);
+                }
+            }
             "--seed-balance" => {
                 if let Some(s) = iter.next() {
                     cli.seed_balance = Some(s);
@@ -137,8 +182,51 @@ fn parse_cli_options(args: impl IntoIterator<Item = String>) -> ParsedCli {
                     cli.max_order_notional = Some(s);
                 }
             }
-            "--tui" => cli.use_tui = true,
-            "--web" => cli.use_tui = false,
+            "--round-sec" => {
+                if let Some(v) = iter.next().and_then(|v| v.parse::<u64>().ok()) {
+                    cli.round_sec = Some(v);
+                }
+            }
+            "--min-round-age" => {
+                if let Some(v) = iter.next().and_then(|v| v.parse::<u64>().ok()) {
+                    cli.min_round_age = Some(v);
+                }
+            }
+            "--min-time-left" => {
+                if let Some(v) = iter.next().and_then(|v| v.parse::<u64>().ok()) {
+                    cli.min_time_left = Some(v);
+                }
+            }
+            "--max-positions" => {
+                if let Some(v) = iter.next().and_then(|v| v.parse::<u64>().ok()) {
+                    cli.max_positions = Some(v);
+                }
+            }
+            "--min-shares" => {
+                if let Some(v) = iter.next().and_then(|v| v.parse::<u64>().ok()) {
+                    cli.min_shares = Some(v);
+                }
+            }
+            "--max-shares" => {
+                if let Some(v) = iter.next().and_then(|v| v.parse::<u64>().ok()) {
+                    cli.max_shares = Some(v);
+                }
+            }
+            "--tui" | "-tui" => {
+                if ui_mode == Some(false) {
+                    return Err("--tui and --web are mutually exclusive".into());
+                }
+                ui_mode = Some(true);
+                cli.use_tui = true;
+            }
+            "--web" => {
+                if ui_mode == Some(true) {
+                    return Err("--tui and --web are mutually exclusive".into());
+                }
+                ui_mode = Some(false);
+                cli.use_tui = false;
+            }
+            "--manage" => cli.manage = true,
             "--no-lifecycle" => cli.no_lifecycle = true,
             "--attach" => {
                 cli.attach = true;
@@ -150,10 +238,30 @@ fn parse_cli_options(args: impl IntoIterator<Item = String>) -> ParsedCli {
             "--no-trade-log" => cli.extra_flags.push("--no-trade-log".to_string()),
             "--no-order-log" => cli.extra_flags.push("--no-order-log".to_string()),
             "--no-position-log" => cli.extra_flags.push("--no-position-log".to_string()),
-            _ => {}
+            other => return Err(format!("unknown argument '{other}'")),
         }
     }
-    cli
+    if cli.manage && (cli.attach || cli.no_lifecycle) {
+        return Err(
+            "--manage cannot be combined with --attach / --no-lifecycle: \
+                    owning the core and adopting one are mutually exclusive"
+                .into(),
+        );
+    }
+    Ok(cli)
+}
+
+/// Parse or die: print the message verbatim with the help hint and exit 2 —
+/// the same contract as the unknown-subcommand path in `tokio_main`.
+fn parse_cli_or_exit(args: Vec<String>) -> ParsedCli {
+    match parse_cli_options(args) {
+        Ok(cli) => cli,
+        Err(msg) => {
+            eprintln!("blitzkrieg: {msg}");
+            eprintln!("See 'blitzkrieg --help' for available flags.");
+            std::process::exit(2);
+        }
+    }
 }
 
 fn build_supervisor_config(cli: &ParsedCli, fallback_socket: String) -> SupervisorConfig {
@@ -176,6 +284,25 @@ fn build_supervisor_config(cli: &ParsedCli, fallback_socket: String) -> Supervis
     }
     if let Some(ref mon) = cli.max_order_notional {
         cfg.max_order_notional = mon.clone();
+    }
+    // CLI knobs beat the HFT_* environment values `from_env` already filled in.
+    if let Some(v) = cli.round_sec {
+        cfg.round_sec = v;
+    }
+    if let Some(v) = cli.min_round_age {
+        cfg.min_round_age = v;
+    }
+    if let Some(v) = cli.min_time_left {
+        cfg.min_time_left = v;
+    }
+    if let Some(v) = cli.max_positions {
+        cfg.max_positions = v;
+    }
+    if let Some(v) = cli.min_shares {
+        cfg.min_shares = v;
+    }
+    if let Some(v) = cli.max_shares {
+        cfg.max_shares = v;
     }
     for flag in &cli.extra_flags {
         if !cfg.extra_args.contains(flag) {
@@ -237,7 +364,7 @@ async fn tokio_main() -> std::io::Result<()> {
 
 /// Run core standalone under process supervision.
 async fn run_core_subcommand(raw_args: Vec<String>) -> std::io::Result<()> {
-    let cli = parse_cli_options(raw_args);
+    let cli = parse_cli_or_exit(raw_args);
     let socket = cli.socket.clone().unwrap_or_else(resolve_socket_path);
     let cfg = build_supervisor_config(&cli, socket.clone());
 
@@ -403,7 +530,7 @@ fn run_stop_subcommand(args: Vec<String>) -> std::io::Result<()> {
 
 /// Unified launcher: starts the core and the UI together in a single command.
 async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
-    let cli = parse_cli_options(args);
+    let cli = parse_cli_or_exit(args);
     let socket = cli.socket.clone().unwrap_or_else(resolve_socket_path);
     // Listen address precedence: --addr > BLITZKRIEG_PANEL_ADDR (put it in .env
     // once on a server and `blitzkrieg run` needs no flag) > loopback default.
@@ -434,24 +561,26 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
     // Registered first, a signal that early routes through Dispatcher::stop(),
     // which kills a core the supervisor owns and exits cleanly — and if the
     // signal lands before any core exists, stop() is simply NotOwned.
-    let d_signal = dispatcher.clone();
-    tokio::spawn(async move {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT listener");
-        let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM listener");
-        tokio::select! {
-            _ = sigint.recv() => {
-                eprintln!("blitzkrieg: caught SIGINT, shutting down core cleanly...");
+    if !cli.use_tui {
+        let d_signal = dispatcher.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT listener");
+            let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM listener");
+            tokio::select! {
+                _ = sigint.recv() => {
+                    eprintln!("blitzkrieg: caught SIGINT, shutting down core cleanly...");
+                }
+                _ = sigterm.recv() => {
+                    eprintln!("blitzkrieg: caught SIGTERM, shutting down core cleanly...");
+                }
             }
-            _ = sigterm.recv() => {
-                eprintln!("blitzkrieg: caught SIGTERM, shutting down core cleanly...");
+            if let Ok(mut g) = d_signal.lock() {
+                g.stop();
             }
-        }
-        if let Ok(mut g) = d_signal.lock() {
-            g.stop();
-        }
-        std::process::exit(0);
-    });
+            std::process::exit(0);
+        });
+    }
 
     if lifecycle_enabled {
         let mut d = dispatcher.lock().unwrap();
@@ -474,11 +603,11 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
     if cli.use_tui {
         let panel_args = PanelArgs {
             socket,
-            interval_ms: 1000,
+            interval_ms: cli.interval_ms,
             manage: lifecycle_enabled,
             tab: Tab::Overview,
         };
-        let res = run_panel(panel_args).await;
+        let res = run_panel_with_dispatcher(panel_args, dispatcher.clone()).await;
         if let Ok(mut g) = dispatcher.lock() {
             g.stop();
         }
@@ -528,5 +657,98 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
             g.stop();
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<ParsedCli, String> {
+        parse_cli_options(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn default_is_web_with_lifecycle() {
+        let cli = parse(&[]).expect("default parses");
+        assert!(!cli.use_tui);
+        assert_eq!(cli.interval_ms, 1000);
+        assert!(!cli.no_lifecycle && !cli.attach && !cli.manage);
+    }
+
+    #[test]
+    fn tui_short_and_long_alias_match() {
+        for flag in ["--tui", "-tui"] {
+            let cli = parse(&[flag]).unwrap_or_else(|e| panic!("{flag}: {e}"));
+            assert!(cli.use_tui, "{flag} must select the TUI");
+            // Still owns the core by default.
+            assert!(!cli.no_lifecycle && !cli.attach);
+        }
+    }
+
+    #[test]
+    fn explicit_web_matches_default() {
+        let cli = parse(&["--web"]).expect("web parses");
+        assert!(!cli.use_tui);
+    }
+
+    #[test]
+    fn tui_and_web_conflict_either_order() {
+        assert!(parse(&["--tui", "--web"]).is_err());
+        assert!(parse(&["--web", "--tui"]).is_err());
+        assert!(parse(&["-tui", "--web"]).is_err());
+        // Repeating the same choice is harmless.
+        assert!(parse(&["--tui", "-tui"]).is_ok());
+        assert!(parse(&["--web", "--web"]).is_ok());
+    }
+
+    #[test]
+    fn attach_implies_no_lifecycle() {
+        let cli = parse(&["--attach"]).expect("attach parses");
+        assert!(cli.attach && cli.no_lifecycle);
+    }
+
+    #[test]
+    fn manage_conflicts_with_adopt_only_flags() {
+        assert!(parse(&["--manage"]).is_ok());
+        assert!(parse(&["--manage", "--attach"]).is_err());
+        assert!(parse(&["--manage", "--no-lifecycle"]).is_err());
+        assert!(parse(&["--attach", "--no-lifecycle"]).is_ok());
+    }
+
+    #[test]
+    fn unknown_argument_is_rejected() {
+        assert!(parse(&["--tui-ms"]).is_err());
+        assert!(parse(&["--roundsec", "600"]).is_err());
+        assert!(parse(&["--managed"]).is_err());
+    }
+
+    #[test]
+    fn engine_knobs_parse_into_structured_fields() {
+        let cli = parse(&[
+            "--round-sec",
+            "600",
+            "--max-positions",
+            "3",
+            "--min-shares",
+            "5",
+        ])
+        .expect("knobs parse");
+        assert_eq!(cli.round_sec, Some(600));
+        assert_eq!(cli.max_positions, Some(3));
+        assert_eq!(cli.min_shares, Some(5));
+        assert_eq!(cli.min_time_left, None);
+    }
+
+    #[test]
+    fn interval_ms_is_clamped_to_100() {
+        let cli = parse(&["--interval-ms", "50"]).expect("interval parses");
+        assert_eq!(cli.interval_ms, 100);
+    }
+
+    #[test]
+    fn assets_are_uppercased_and_trimmed() {
+        let cli = parse(&["--assets", " btc , eth ,,"]).expect("assets parse");
+        assert_eq!(cli.assets, Some(vec!["BTC".into(), "ETH".into()]));
     }
 }

@@ -220,6 +220,7 @@ ECharts + Pinia + VueUse。设计基调：Apple 风格、金橙主调、liquid g
 | 契约 | 状态 | 证据 |
 | --- | --- | --- |
 | **单二进制多命令分发**（`blitzkrieg [core|tui|web|run|--help]`） | ✅ 已验证 | `scripts/unified-launcher-check.mjs` |
+| **部分启动模式**（`run` 默认 Web、`run --tui`/`-tui` 仅 TUI、`tui --attach` 只连接） | ✅ 已实现 | 统一启动器参数与共享 Dispatcher |
 | **一体化默认托管**（`blitzkrieg run` 一键同时起内核与 UI，默认 `lifecycle: on`） | ✅ 已验证 | PPID 严格归属 launcher，孤儿守护 |
 | **终端显式接管**（`blitzkrieg tui --attach`） | ✅ 已验证 | 仅监视现有内核，绝不杀死非本进程拉起的内核 |
 | **父进程监控与零僵尸**（`SIGINT`/`SIGTERM` 级联清理，`Supervisor::stop()`） | ✅ 已验证 | SIGTERM 优雅退出后无僵尸进程、socket 自动解绑 |
