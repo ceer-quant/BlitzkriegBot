@@ -22,7 +22,8 @@ BlitzkriegBot 是一个面向**轮盘型预测市场（当前为 Polymarket 加�
   动态加载（cdylib，feature `strategy-loading`），热插拔且分发时不捆绑任何策略。
 - **Rust 面板**：`ui_kit_web` 监听 `127.0.0.1:51888`，托管 Vue 前端（`ui/webapp/webui/`）并直接
   提供 `/api/snapshot`、`/api/command`、`/api/plugins`、`/api/login`；`--manage` 模式下可
-  拉起 / 停止核心并托管其生命周期。
+  拉起 / 停止核心并托管其生命周期。单二进制启动器 **`blitzkrieg`**（E12）把
+  「核心 + 面板 + 生命周期托管」合成一条命令（见 §3.1）。
 
 核心与面板之间通过本机 **Unix Domain Socket + 换行分帧的 JSON-RPC 2.0** 通信，
 契约唯一来源是 Rust 的 serde 结构体；门禁驱动端 `scripts/lib/core-client.mjs`
@@ -44,7 +45,7 @@ BlitzkriegBot/
 │   └── strategies/        # 示例动态策略（独立的嵌套 workspace，产出 cdylib）
 ├── ui/
 │   ├── ui_kit/            # Rust UI 套件（bin: ui_kit_web —— 面板 HTTP 服务器）
-│   ├── ui_kit_panel/      # 终端面板应用（bin: ui_kit_panel）
+│   ├── ui_kit_panel/      # 终端面板（bin: ui_kit_panel）+ 单二进制启动器（bin: blitzkrieg）
 │   └── webapp/            # Vue 前端源码（webui/）与构建产物
 ├── scripts/               # 门禁与运维脚本（cycle-check / core-parity / secret-scan …；lib/ 为零依赖 IPC 驱动客户端）
 ├── docs/                  # 可公开文档（Rust 体系）
@@ -76,17 +77,52 @@ BlitzkriegBot/
 
 ## 3. 快速开始
 
-### 3.1 构建 Rust 核心
+### 3.1 一键启动与停止（推荐：`blitzkrieg run`）
+
+`target/release/blitzkrieg` 是单二进制启动器（E12）：一条命令同时拉起**受监督的核心**与
+**Web 面板**，默认 `lifecycle: on`——核心是它的子进程，崩溃时按有限预算（5 次、指数退避）
+自动重建；`SIGINT`/`SIGTERM` 触发优雅停机、收割子进程并解绑 socket。
+
+```bash
+cd BlitzkriegBot
+
+# 面板凭据等从环境读入（.env 已 gitignore；.env.example 是字段清单）
+set -a; source .env; set +a
+
+# 前台运行（Ctrl-C 即停机）
+target/release/blitzkrieg run
+
+# 或后台运行
+nohup target/release/blitzkrieg run >> /tmp/blitzkrieg-run.log 2>&1 &
+```
+
+```bash
+# 停止后台实例：对监听面板端口的进程发 SIGTERM（不要 kill -9）
+kill $(lsof -ti :51888)
+```
+
+要点：
+
+- **默认 dry 模式**，默认参数与 §3.3 的手写命令行一致（回合 900s、`--engine --feed-ws`、
+  持仓/名义额上限等）；`HFT_*` 环境变量可覆盖（见 §8）。
+- 面板凭据 `BLITZKRIEG_PANEL_USER` / `BLITZKRIEG_PANEL_PASSWORD` **两者都设置**时，网页
+  命令动词可用；缺省时面板为纯查看（启动时打印提示）。
+- `--readonly`：结构性只读——内核不构造出网桥梁，从根上禁止下单（不是逐入口拦截）。
+- 子命令面：`blitzkrieg [run|core|tui|web|--help]`；`tui --attach` 仅监视现有核心，
+  绝不杀死非本进程拉起的内核。
+- 一次只跑一套栈：旧栈还占着 51888 / 默认 socket 时再 `run`，端口会绑不上。
+
+### 3.2 构建 Rust 核心
 
 ```bash
 # 工作区全量构建（默认带 polymarket feature）
 cargo build --release --workspace --locked
 
 # 产物
-ls target/release/blitzkrieg-core
+ls target/release/blitzkrieg-core target/release/blitzkrieg
 ```
 
-### 3.2 直接以 DryRun 跑核心
+### 3.3 直接以 DryRun 跑核心
 
 ```bash
 ./target/release/blitzkrieg-core \
@@ -129,7 +165,7 @@ UDS 路径可用 `--socket` 覆盖（默认位于 `$TMPDIR` 下）。
 `BK_CONFIG=<path>`。文件缺失不是错误（默认值生效）；文件写坏只告警不致命；
 **文件里出现内核不认识的键会逐个告警**——不会静默忽略。
 
-### 3.3 运行面板（Web UI）
+### 3.4 运行面板（Web UI）
 
 ```bash
 cargo build --release -p blitzkrieg-ui-kit
@@ -139,8 +175,9 @@ cargo build --release -p blitzkrieg-ui-kit
 浏览器打开 `http://127.0.0.1:51888/panel`。`--manage`（或环境变量
 `UIKIT_MANAGE=1`）允许面板拉起 / 停止核心；面板凭据来自环境变量
 `BLITZKRIEG_PANEL_USER` / `BLITZKRIEG_PANEL_PASSWORD`，登录换会话 token。
+（等价的分体式启动也可以用 `blitzkrieg core` + `blitzkrieg web --manage`。）
 
-终端面板（可选）：`cargo run -p blitzkrieg-ui-panel`。
+终端面板（可选）：`target/release/blitzkrieg tui`（或 `cargo run -p blitzkrieg-ui-panel`）。
 
 ---
 
@@ -168,6 +205,10 @@ cargo build --release -p blitzkrieg-ui-kit
 - **面板 → 核心**：`{jsonrpc:"2.0",id,method,params}`
 - **核心 → 面板（响应）**：`{jsonrpc:"2.0",id,result|error}`
 - **核心 → 面板（事件）**：`{jsonrpc:"2.0",method:"core.event",params:{kind,...}}`
+
+图中「spawn + 生命周期托管」既可以是 `blitzkrieg run` 的一体化托管（launcher 为父进程，
+崩溃自动重建，见 §3.1），也可以是 `ui_kit_web --manage` / `blitzkrieg web --manage` 的
+分体式托管；两者共用同一套 `Supervisor`，且都遵守「只收自己拉起的内核」的克制语义。
 
 市场抽象契约见 `core/market_api`：`DataFeed`、`MarketDiscovery`、`OrderExecutor`、
 `MarketPlugin`、`MarketHost` 等 trait；新增交易所 = 写一个扩展 crate 并用 feature 注册，核心不改一行。
@@ -208,6 +249,9 @@ cd ui/webapp/webui && npm run check:all
 - `scripts/core-adopt-check.mjs` —— 多客户端竞争与 adopt 语义。
 - `scripts/dry-observe.mjs` —— DryRun 观察。
 - `scripts/shutdown-cleanliness-check.mjs` / `parent-monitor-check.mjs` / `readonly-egress-check.mjs` / `crash-recovery-check.mjs` —— 生命周期、只读出口与崩溃恢复验收。
+- `scripts/unified-launcher-check.mjs` —— 单二进制 `blitzkrieg` 一体化启动验收（子命令 / 托管 / 优雅退出 / `--readonly` 穿透）。
+- `scripts/strategy-gate-check.mjs` —— 策略门禁豁免（声明兑现 + D-31 剩余时间下限双向断言）。
+- `scripts/soak-health.sh` —— 长跑健康巡检（面板/核心/采样/账本异常一行判定；常驻配对见 `scripts/README.md`）。
 
 > **禁止**在未通过上述验证时提交到 `main`；完整门禁矩阵见 `dev-docs/DEVELOPMENT.md`（内部）。
 
@@ -238,6 +282,7 @@ cd ui/webapp/webui && npm run check:all
 | [docs/rust-core/STRATEGY_GUIDE.md](./docs/rust-core/STRATEGY_GUIDE.md) | 如何编写与加载策略 |
 | [docs/rust-core/EXTENSION_GUIDE.md](./docs/rust-core/EXTENSION_GUIDE.md) | 如何新增一个市场扩展 |
 | [docs/rust-core/ABI_V2_DESIGN.md](./docs/rust-core/ABI_V2_DESIGN.md) | 策略 C ABI v2 设计（vtable 已冻结，新能力走可选符号） |
+| [docs/rust-core/INTERFACES.md](./docs/rust-core/INTERFACES.md) | UDS JSON-RPC 2.0 方法/事件契约与版本变更记录 |
 | [docs/rust-core/SHADOW_EVOLUTION.md](./docs/rust-core/SHADOW_EVOLUTION.md) | 影子进化（按策略参数 / 孪生 / 审计 / apply·rollback） |
 | [CHANGELOG.md](./CHANGELOG.md) | 变更史 |
 
@@ -248,7 +293,10 @@ cd ui/webapp/webui && npm run check:all
 
 ## 8. 配置
 
-- 核心配置以 **CLI 参数 + 代码默认值**为准（TOML 当前不被核心读取）。
+- 核心配置会被**实际读取**（KI-11 / D-1）：`user_layer/configs/default.toml`（含同目录的
+  `shadow_evolution.toml`）在启动时解析，优先级 **CLI 参数 > `BK_*` 环境变量 > 配置文件 >
+  代码默认值**；每个非默认值打印 `key=value (source)`，未识别的键逐个告警。细节见 §3.3
+  的「配置文件」小节。
 - 面板与第三方凭证通过环境变量提供，参考 [`.env.example`](./.env.example)；
   真实 `.env` 已被忽略，**切勿**提交私钥 / API Key。
 - 数据目录、日志（trade/order/position）与 SQLite 库的落盘位置见 `blitzkrieg-core --help`。
