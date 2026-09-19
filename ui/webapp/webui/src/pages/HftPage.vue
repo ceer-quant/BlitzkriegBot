@@ -6,7 +6,7 @@
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
-import { Activity, AlertTriangle, Play, Square, Bell, BellOff, Search, TrendingUp, TrendingDown, Clock, Filter, Info } from 'lucide-vue-next'
+import { Activity, AlertTriangle, Play, Square, Bell, BellOff, Search, X, TrendingUp, TrendingDown, Clock, Filter, Info } from 'lucide-vue-next'
 import { api, marketTypeLabel, type MarketPrice, type TradeRow, type AssetBook, type BookSide, type BookLevel } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
@@ -810,7 +810,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
             <option v-for="s in strategyOptions" :key="s" :value="s">{{ s }}</option>
           </select>
           <Button v-if="hasFilters" variant="ghost" size="sm" @click="resetFilters">
-            <Search class="size-3.5" />重置
+            <X class="size-3.5" />重置
           </Button>
         </div>
       </div>
@@ -858,7 +858,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
       <!-- positions -->
       <div v-if="tab === 'positions'">
         <div v-if="positions.length" class="overflow-x-auto">
-          <table class="w-full text-[13px]">
+          <table class="w-full min-w-[640px] text-[13px]">
             <thead>
               <tr class="text-left">
                 <th class="label-micro px-2 pb-2">资产</th>
@@ -901,7 +901,10 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
       <!-- history waterfall -->
       <div v-else>
         <div v-if="visibleRows.length" class="overflow-x-auto">
-          <table class="w-full text-[13px]">
+          <!-- 13 列在手机上不可压成一列一个字符：min-width 让表格保持
+               可读列宽、在容器内横向滚动（与 Plugins 页表格同一模式），
+               否则 min-content 按"每列一个折行点"计算，数字会竖排。 -->
+          <table class="w-full min-w-[1100px] text-[13px]">
             <thead>
               <tr class="text-left">
                 <th class="label-micro px-2 pb-2">资产</th>
