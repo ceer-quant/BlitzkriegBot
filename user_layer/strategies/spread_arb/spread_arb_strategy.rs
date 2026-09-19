@@ -29,7 +29,7 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use strategy_logic::{
     OrderbookSnapshot, SpreadArbConfig, TrendConfig, TrendTracker, evaluate_spread_arb,
-    spread_arb_apply_knobs, spread_arb_knobs,
+    spread_arb_apply_knobs, spread_arb_knobs, spread_arb_tracker_gates,
 };
 
 struct SpreadArb {
@@ -136,6 +136,27 @@ impl SafeStrategy for SpreadArb {
                 &confirmed,
                 &self.cfg,
             ) {
+                // The tracker-side HFT entry gates (turn filter, dip-depth
+                // guard) live in the shared logic crate next to the book-only
+                // evaluator; the library only feeds them the mid history the
+                // tracker holds and the clock of this evaluation cycle. A
+                // withheld entry is simply not emitted this cycle — the next
+                // 50 ms cycle re-evaluates, so a dip that turns later still
+                // enters, at the same price discipline.
+                let mid = self
+                    .eval_books
+                    .get(&sig.token_id)
+                    .map(|b| b.mid_price)
+                    .unwrap_or(Decimal::ZERO);
+                if !spread_arb_tracker_gates(
+                    &self.trend,
+                    &sig.token_id,
+                    mid,
+                    ctx.round.now_ms,
+                    &self.cfg,
+                ) {
+                    continue;
+                }
                 it.entries.push(Entry {
                     token: sig.token_id.clone(),
                     price: sig.price.to_string(),
@@ -312,6 +333,11 @@ fn config_view_json(cfg: &SpreadArbConfig) -> serde_json::Value {
         "trendEntryPrice": cfg.trend_entry_price.to_string(),
         "trendEntryFactor": cfg.trend_entry_factor.to_string(),
         "trendMaxEntryPrice": cfg.trend_max_entry_price.to_string(),
+        "entryMinObi": cfg.entry_min_obi.to_string(),
+        "entryMaxSpreadPct": cfg.entry_max_spread_pct.to_string(),
+        "entryDipMaxPct": cfg.entry_dip_max_pct.to_string(),
+        "entryBounceMinPct": cfg.entry_bounce_min_pct.to_string(),
+        "entryBounceWindowSec": cfg.entry_bounce_window_sec,
     })
 }
 

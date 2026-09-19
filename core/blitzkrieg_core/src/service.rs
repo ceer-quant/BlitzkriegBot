@@ -4923,10 +4923,12 @@ mod strategy_dispatch_tests {
         assert_eq!(c.engine_stats()["strategyLimitRejected"], 0);
 
         // Fill the resting maker entry so exposure is live, then read the ledger.
+        // The tuned 0.88 discount rests the entry bid at round2(0.44*0.88)
+        // = 0.39, so the crossing ask is 0.39 (was 0.42 under the 0.98 factor).
         c.book_snapshot(
             "up",
-            vec![(dec!(0.42), dec!(100))],
-            vec![(dec!(0.42), dec!(100))],
+            vec![(dec!(0.38), dec!(100))],
+            vec![(dec!(0.39), dec!(100))],
             now + 13_000,
         );
         let stats = c.strategy_stats();
@@ -4938,7 +4940,7 @@ mod strategy_dispatch_tests {
         assert_eq!(s["source"], "test");
         assert_eq!(s["ordersPlaced"], 1);
         assert_eq!(s["openPositions"], 1);
-        assert_eq!(dec_of(&s["openNotionalUsd"]), dec!(4.30));
+        assert_eq!(dec_of(&s["openNotionalUsd"]), dec!(3.90));
     }
 
     #[test]
@@ -5079,10 +5081,12 @@ mod strategy_dispatch_tests {
 
         // Fill the resting bid (ask 0.42 crosses the 0.43 bid), then push a
         // +100%-ish book so the exit engine closes the position at a profit.
+        // The tuned 0.88 discount rests the entry bid at round2(0.44*0.88)
+        // = 0.39, so the crossing ask is 0.39 (was 0.42 under the 0.98 factor).
         c.book_snapshot(
             "up",
-            vec![(dec!(0.42), dec!(100))],
-            vec![(dec!(0.42), dec!(100))],
+            vec![(dec!(0.38), dec!(100))],
+            vec![(dec!(0.39), dec!(100))],
             now + 13_000,
         );
         assert_eq!(
@@ -5175,10 +5179,12 @@ mod strategy_dispatch_tests {
         feed_entry_setup(&mut c, now);
         assert_eq!(c.engine_evaluate(now + 12_000), 1);
         // Fill the resting bid, then mark up so the profit target closes it.
+        // The tuned 0.88 discount rests the entry bid at round2(0.44*0.88)
+        // = 0.39, so the crossing ask is 0.39 (was 0.42 under the 0.98 factor).
         c.book_snapshot(
             "up",
-            vec![(dec!(0.42), dec!(100))],
-            vec![(dec!(0.42), dec!(100))],
+            vec![(dec!(0.38), dec!(100))],
+            vec![(dec!(0.39), dec!(100))],
             now + 13_000,
         );
         c.book_snapshot(

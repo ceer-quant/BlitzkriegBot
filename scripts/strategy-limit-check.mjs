@@ -89,7 +89,8 @@ async function probe(limitFlag) {
         negRisk: true, question: 'BTC up/down',
       }],
     });
-    // Confirmed UP trend, then a dip to mid 0.435 → entry 0.43 ≤ 0.45.
+    // Confirmed UP trend, then a dip to mid 0.435 → the strategy rests its bid
+    // at its own discount; only the order's presence and size are asserted.
     const book = (b, a) => ({ tokenId: 'UP', bids: [{ price: b, size: 100 }], asks: [{ price: a, size: 100 }] });
     for (let i = 0; i < 14; i++) { await rpc('books.snapshot', book(0.57, 0.58)); await sleep(300); }
     await rpc('books.snapshot', book(0.43, 0.44));

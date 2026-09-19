@@ -146,7 +146,7 @@ impl EngineStrategy for TestSpreadArb {
 
     fn config_view_json(&self) -> Option<String> {
         // Same shape the shipped `spread_arb_strategy` cdylib reports through
-        // its `bk_strategy_config_view` symbol.
+        // its `bk_strategy_config_view` symbol, HFT entry filters included.
         let cfg = self.effective_cfg();
         Some(
             serde_json::json!({
@@ -156,6 +156,11 @@ impl EngineStrategy for TestSpreadArb {
                 "trendEntryPrice": cfg.trend_entry_price.to_string(),
                 "trendEntryFactor": cfg.trend_entry_factor.to_string(),
                 "trendMaxEntryPrice": cfg.trend_max_entry_price.to_string(),
+                "entryMinObi": cfg.entry_min_obi.to_string(),
+                "entryMaxSpreadPct": cfg.entry_max_spread_pct.to_string(),
+                "entryDipMaxPct": cfg.entry_dip_max_pct.to_string(),
+                "entryBounceMinPct": cfg.entry_bounce_min_pct.to_string(),
+                "entryBounceWindowSec": cfg.entry_bounce_window_sec,
             })
             .to_string(),
         )

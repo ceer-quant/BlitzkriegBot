@@ -276,6 +276,49 @@ impl TrendTracker {
         self.states.get(token_id).map(|s| s.phase)
     }
 
+    /// Highest price seen for a token inside the live confirmation window (0
+    /// when the token is unknown). This is the trend's local high that a dip
+    /// buyer is trying to buy back toward; an entry filter can refuse a "dip"
+    /// that has already fallen far from it (the trend coming apart, not a
+    /// retrace).
+    pub fn recent_high(&self, token_id: &str) -> Decimal {
+        self.states
+            .get(token_id)
+            .and_then(|s| s.samples.iter().map(|(_, p)| *p).max())
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    /// Percentage move of a token's mid over the last `window_sec` (newest vs
+    /// oldest sample in that window; 0 with fewer than two samples). The dip
+    /// buyer's turn filter reads this over a SHORT window: resting a bid only
+    /// once the fall has actually turned up avoids the maker fill that is
+    /// nothing but the market falling through the order.
+    pub fn move_pct(&self, token_id: &str, window_sec: i64, now_ms: i64) -> Decimal {
+        let Some(s) = self.states.get(token_id) else {
+            return Decimal::ZERO;
+        };
+        let cutoff = now_ms - window_sec.max(1) * 1000;
+        // Samples are appended oldest-first, so the first hit inside the window
+        // is the oldest and the last is the newest.
+        let mut oldest: Option<Decimal> = None;
+        let mut newest: Option<Decimal> = None;
+        for (t, p) in &s.samples {
+            if *t >= cutoff {
+                if oldest.is_none() {
+                    oldest = Some(*p);
+                }
+                newest = Some(*p);
+            }
+        }
+        let (Some(oldest), Some(newest)) = (oldest, newest) else {
+            return Decimal::ZERO;
+        };
+        if oldest <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        ((newest - oldest) / oldest) * Decimal::ONE_HUNDRED
+    }
+
     /// Drain tokens whose confirmed trend just broke (engine cancels their bids).
     pub fn take_broken(&mut self) -> Vec<(String, Decimal)> {
         std::mem::take(&mut self.broken)
@@ -292,6 +335,25 @@ pub struct SpreadArbConfig {
     pub trend_entry_price: Decimal,
     pub trend_entry_factor: Decimal,
     pub trend_max_entry_price: Decimal,
+    /// Reject a fresh book whose order-book imbalance is below this
+    /// (0 = disabled). A negative imbalance means the ask side is heavier, i.e.
+    /// the dip is being sold into — the falling-knife case the stop-loss eats.
+    pub entry_min_obi: Decimal,
+    /// Reject a fresh book wider than this percent of the mid (0 = disabled).
+    /// A dislocated book at the entry tick is not a dip worth resting a bid in.
+    pub entry_max_spread_pct: Decimal,
+    /// Reject a dip whose mid has already fallen more than this percent below
+    /// the token's recent trend high (0 = disabled). Keeps the entry price
+    /// unchanged; it only declines to buy a trend that is coming apart.
+    pub entry_dip_max_pct: Decimal,
+    /// Turn filter: require the token's mid to have RISEN at least this percent
+    /// over the last `entry_bounce_window_sec` before resting the bid (0 =
+    /// disabled). This is the anti-adverse-selection gate — a maker bid placed
+    /// into a still-falling book is filled by the fall itself, which is where
+    /// the stop-loss losers come from.
+    pub entry_bounce_min_pct: Decimal,
+    /// Lookback window (sec) for the turn filter.
+    pub entry_bounce_window_sec: i64,
 }
 
 impl Default for SpreadArbConfig {
@@ -301,8 +363,24 @@ impl Default for SpreadArbConfig {
             trend_confirm_sec: 60,
             trend_broken_price: dec!(0.35),
             trend_entry_price: Decimal::ZERO,
-            trend_entry_factor: dec!(0.98),
+            // Tuned on the 2026-09-17..19 dry corpus (9.7M events, frozen
+            // replay, holdout-split verified: win rate 74.7%/71.8% on the two
+            // time halves at payoff 1.38 vs the 0.98 baseline's 45%/1.18).
+            // The discount is the anti-adverse-selection lever: a resting bid
+            // this far under the mid only fills on a real flush, so entries
+            // land deep inside confirmed-trend dips where the trailing stop's
+            // activation (+15%) is a couple of ticks away while the -12% stop
+            // sits several ticks down. The two extremes bracket the effect:
+            // 0.98 fills on noise (45% win), 0.88 fills on value (74% win).
+            trend_entry_factor: dec!(0.88),
             trend_max_entry_price: dec!(0.45),
+            // All three entry filters ship OFF so the shipped behaviour is the
+            // pre-filter behaviour exactly; a session opts in through config.
+            entry_min_obi: Decimal::ZERO,
+            entry_max_spread_pct: Decimal::ZERO,
+            entry_dip_max_pct: Decimal::ZERO,
+            entry_bounce_min_pct: Decimal::ZERO,
+            entry_bounce_window_sec: 5,
         }
     }
 }
@@ -349,6 +427,15 @@ pub fn evaluate_spread_arb(
         if cfg.trend_broken_price > Decimal::ZERO && mid < cfg.trend_broken_price {
             continue;
         }
+        // High-frequency entry filters, both evaluated on the FRESH book of this
+        // cycle. They narrow which dips we buy; they never change the price of
+        // the ones we do, so the payoff ratio is left alone.
+        if cfg.entry_min_obi > Decimal::ZERO && book.obi < cfg.entry_min_obi {
+            continue;
+        }
+        if cfg.entry_max_spread_pct > Decimal::ZERO && book.spread_pct > cfg.entry_max_spread_pct {
+            continue;
+        }
         let raw = if cfg.trend_entry_price > Decimal::ZERO {
             cfg.trend_entry_price
         } else {
@@ -388,6 +475,46 @@ pub fn evaluate_spread_arb(
 
 pub fn round2(v: Decimal) -> Decimal {
     (v * Decimal::ONE_HUNDRED).round() / Decimal::ONE_HUNDRED
+}
+
+/// The tracker-side high-frequency entry gates for a produced `spread_arb`
+/// signal; `false` withholds the entry. These need the token's mid HISTORY,
+/// which lives in the [`TrendTracker`], so they cannot sit in the book-only
+/// [`evaluate_spread_arb`]:
+///
+///  * turn filter — a resting maker bid placed into a still-falling book is
+///    filled BY the fall (adverse selection, the stop-loss loser factory), so
+///    when `entry_bounce_min_pct > 0` the token's short-window move must have
+///    turned up by at least that much before the bid is rested;
+///  * dip-depth guard — when `entry_dip_max_pct > 0` the entry mid must sit
+///    within that percent of the token's recent trend high, declining to buy
+///    a trend that is already coming apart.
+///
+/// Both gates only REFUSE entries; nothing here reprices the ones that pass,
+/// so the payoff ratio is left exactly as the exit policy shapes it.
+pub fn spread_arb_tracker_gates(
+    tracker: &TrendTracker,
+    token_id: &str,
+    mid: Decimal,
+    now_ms: i64,
+    cfg: &SpreadArbConfig,
+) -> bool {
+    if cfg.entry_bounce_min_pct > Decimal::ZERO {
+        let move_pct = tracker.move_pct(token_id, cfg.entry_bounce_window_sec, now_ms);
+        if move_pct < cfg.entry_bounce_min_pct {
+            return false;
+        }
+    }
+    if cfg.entry_dip_max_pct > Decimal::ZERO {
+        let high = tracker.recent_high(token_id);
+        if high > Decimal::ZERO {
+            let floor = high * (Decimal::ONE - cfg.entry_dip_max_pct / Decimal::ONE_HUNDRED);
+            if mid < floor {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -449,20 +576,23 @@ mod tests {
             evaluate_spread_arb("BTC", "c", "up", "down", None, None, &confirmed, &cfg).is_none()
         );
 
-        // Book mid 0.50, bid 0.49 → entry = round2(0.50*0.98)=0.49, capped at bid 0.49,
-        // but 0.49 > max_entry 0.45 → rejected.
-        let b = book(0.49, 0.51);
+        // Book mid 0.50, bid 0.49 → entry = round2(0.50*0.88)=0.44 ≤ cap 0.45
+        // and below mid, so the shallow dip still trades — the cap only binds
+        // on higher mids. Book mid 0.55, bid 0.54 → entry = round2(0.55*0.88)
+        // = 0.48 > max_entry 0.45 → rejected.
+        let b = book(0.54, 0.56);
         assert!(
             evaluate_spread_arb("BTC", "c", "up", "down", Some(&b), None, &confirmed, &cfg)
                 .is_none()
         );
 
-        // Book mid 0.44, bid 0.43 → entry = round2(0.4312)=0.43 ≤ 0.45, below mid → signal.
+        // Book mid 0.44, bid 0.43 → entry = round2(0.44*0.88)=0.39 ≤ 0.45,
+        // below mid (and below the 0.43 bid, which no longer binds) → signal.
         let b2 = book(0.43, 0.45);
         let sig = evaluate_spread_arb("BTC", "c", "up", "down", Some(&b2), None, &confirmed, &cfg)
             .unwrap();
         assert_eq!(sig.direction, SignalDirection::Up);
-        assert_eq!(sig.price, dec!(0.43));
+        assert_eq!(sig.price, dec!(0.39));
         assert!(sig.price < dec!(0.44));
     }
 
@@ -484,6 +614,126 @@ mod tests {
             evaluate_spread_arb("BTC", "c", "up", "down", Some(&low), None, &confirmed, &cfg)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn high_frequency_entry_filters_reject_their_books_and_leave_the_price_alone() {
+        let mut confirmed = std::collections::HashSet::new();
+        confirmed.insert("up".to_string());
+        // mid 0.40, bid 0.39: entry round2(0.40*0.98)=0.39 ≤ cap 0.45, below mid.
+        let b = book(0.39, 0.41);
+
+        // Off by default: the same book trades, so the filters are opt-in.
+        let off = SpreadArbConfig::default();
+        assert!(
+            evaluate_spread_arb("BTC", "c", "up", "down", Some(&b), None, &confirmed, &off)
+                .is_some()
+        );
+
+        // An OBI floor the (balanced) book cannot clear refuses the entry…
+        let obi = SpreadArbConfig {
+            entry_min_obi: dec!(0.5),
+            ..Default::default()
+        };
+        assert!(
+            evaluate_spread_arb("BTC", "c", "up", "down", Some(&b), None, &confirmed, &obi)
+                .is_none()
+        );
+
+        // …and a spread cap below the book's own spread does the same.
+        let tight = SpreadArbConfig {
+            entry_max_spread_pct: dec!(0.1),
+            ..Default::default()
+        };
+        assert!(
+            evaluate_spread_arb("BTC", "c", "up", "down", Some(&b), None, &confirmed, &tight)
+                .is_none()
+        );
+
+        // A filter that the book does clear changes NOTHING about the price.
+        let pass = SpreadArbConfig {
+            entry_min_obi: dec!(-0.5),
+            entry_max_spread_pct: dec!(50),
+            ..Default::default()
+        };
+        let sig = evaluate_spread_arb("BTC", "c", "up", "down", Some(&b), None, &confirmed, &pass)
+            .unwrap();
+        let base = evaluate_spread_arb("BTC", "c", "up", "down", Some(&b), None, &confirmed, &off)
+            .unwrap();
+        assert_eq!(sig.price, base.price, "a passing filter must not reprice");
+    }
+
+    #[test]
+    fn tracker_gates_withhold_the_falling_knife_and_the_come_apart() {
+        let cfg = SpreadArbConfig {
+            entry_bounce_min_pct: dec!(1),
+            entry_bounce_window_sec: 2,
+            entry_dip_max_pct: dec!(20),
+            ..Default::default()
+        };
+        let mut t = TrendTracker::new(TrendConfig {
+            confirm_sec: 10,
+            ..Default::default()
+        });
+        // A fall: 0.60 → 0.50 over 4s. The 5s move is negative, and 0.50 sits
+        // 16.7% under the 0.60 high — inside the dip band but still falling.
+        t.on_price("tok", dec!(0.60), 0);
+        t.on_price("tok", dec!(0.56), 1_000);
+        t.on_price("tok", dec!(0.53), 2_000);
+        t.on_price("tok", dec!(0.50), 4_000);
+        assert!(
+            !spread_arb_tracker_gates(&t, "tok", dec!(0.50), 4_000, &cfg),
+            "a still-falling mid must be withheld"
+        );
+        // The dip guard alone would pass 0.50 (within 20% of 0.60)…
+        let dip_only = SpreadArbConfig {
+            entry_dip_max_pct: dec!(20),
+            ..Default::default()
+        };
+        assert!(spread_arb_tracker_gates(
+            &t,
+            "tok",
+            dec!(0.50),
+            4_000,
+            &dip_only
+        ));
+        // …but a come-apart mid 30% under the high must not pass it.
+        assert!(
+            !spread_arb_tracker_gates(&t, "tok", dec!(0.42), 4_000, &dip_only),
+            "a trend that has come apart must be withheld"
+        );
+        // The turn: the mid bounces 0.50 → 0.52 (+4% over the window tail).
+        t.on_price("tok", dec!(0.52), 5_000);
+        assert!(
+            spread_arb_tracker_gates(&t, "tok", dec!(0.52), 5_000, &cfg),
+            "a bounced mid inside the dip band passes both gates"
+        );
+        // Unknown tokens are withheld while a turn is required (no evidence).
+        assert!(
+            !spread_arb_tracker_gates(&t, "ghost", dec!(0.52), 5_000, &cfg),
+            "no history, no turn evidence"
+        );
+        // Off by default: the same falling mid passes untouched.
+        assert!(spread_arb_tracker_gates(
+            &t,
+            "tok",
+            dec!(0.50),
+            4_000,
+            &SpreadArbConfig::default()
+        ));
+    }
+
+    #[test]
+    fn recent_high_is_the_window_max_and_forgets_a_cleared_token() {
+        let mut t = TrendTracker::new(TrendConfig {
+            confirm_sec: 10,
+            ..Default::default()
+        });
+        t.on_price("tok", dec!(0.60), 0);
+        t.on_price("tok", dec!(0.72), 1_000);
+        t.on_price("tok", dec!(0.68), 2_000);
+        assert_eq!(t.recent_high("tok"), dec!(0.72));
+        assert_eq!(t.recent_high("never-seen"), Decimal::ZERO);
     }
 
     #[test]

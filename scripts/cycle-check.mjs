@@ -110,7 +110,8 @@ async function main() {
   const confirmed = st.confirmed || [];
   console.log(`[2] trend confirm  books=${st.books} confirmed=${confirmed.length} -> ${confirmed.length ? 'CONFIRMED' : 'NOT CONFIRMED'}`);
 
-  // [3] Dip to mid 0.435 -> entry = round2(0.435*0.98)=0.43 <= 0.45 -> resting bid.
+  // [3] Dip to mid 0.435 -> the strategy rests a bid at its own discount
+  // (round2(0.435 * trend_entry_factor)) — the gate reads it, not hardcodes it.
   await rpc(M.BOOK, book(0.43, 0.44));
   await sleep(400);
   let orders = (await rpc(M.ORDERS)).orders;
@@ -118,8 +119,12 @@ async function main() {
   for (const o of orders.filter(o => o.status === 'LIVE'))
     console.log(`      bid ${fmt(o.price)} x ${o.size} (${o.side}, ${o.mode ?? 'maker_then_taker'})`);
 
-  // [4] Cross the resting bid: best ask 0.42 <= 0.43 -> maker fill.
-  await rpc(M.BOOK, book(0.41, 0.42));
+  // [4] Cross whatever resting bid the strategy actually placed — the gate owns
+  // the order CHAIN, not the pricing default, so a discount change touches
+  // nothing here.
+  const resting = orders.filter(o => o.status === 'LIVE')[0];
+  const restBid = Number(resting?.price ?? 0);
+  await rpc(M.BOOK, book(Math.max(restBid - 0.01, 0.01), restBid));
   await sleep(500);
   let pos = (await rpc(M.POS)).positions;
   console.log(`[4] book crossed -> open positions: ${pos.length}`);

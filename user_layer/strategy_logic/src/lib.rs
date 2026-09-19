@@ -34,7 +34,7 @@ pub use model::{OrderbookSnapshot, SignalDirection, TokenId};
 pub use params::{KnobDeclaration, MutableParams, StrategyParams};
 pub use signal::{
     PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig, TrendPhase, TrendTracker,
-    evaluate_spread_arb, round2,
+    evaluate_spread_arb, round2, spread_arb_tracker_gates,
 };
 pub use spread_arb::{SPREAD_ARB_KNOBS, apply_knobs as spread_arb_apply_knobs, spread_arb_knobs};
 pub use trend_follow::{
