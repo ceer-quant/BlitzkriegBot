@@ -959,6 +959,35 @@ impl WebServer {
         }
     }
 
+    /// Like [`Self::with_gateway`], but the caller KEEPS a handle to the same
+    /// dispatcher.
+    ///
+    /// This is the form `blitzkrieg run` must use: the supervisor that spawned
+    /// the core lives in that shared dispatcher, and `managed` on the wire is
+    /// `supervisor.owns()`. Handing the web server a second, freshly built
+    /// dispatcher would make it report `managed: false` for a core its own
+    /// process spawned — the panel would then claim the core "was started by
+    /// another process" and refuse 停止, even though SIGTERM handling and the
+    /// core were both ours. One core, one owning dispatcher, two handles.
+    pub fn with_shared_gateway(
+        client: IpcClient,
+        trade_limit: usize,
+        dispatcher: std::sync::Arc<std::sync::Mutex<Dispatcher>>,
+    ) -> Self {
+        Self {
+            snapshot_src: Arc::new(Mutex::new(client)),
+            trade_limit,
+            dispatcher: Some(dispatcher),
+            panel_user: None,
+            panel_password: None,
+            // This surface can start and stop the trading process, so it is never
+            // exposed without a session.
+            auth_required: true,
+            allowed_origins: Vec::new(),
+            sessions: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+        }
+    }
+
     /// Serve until the process is stopped. `addr` e.g. `127.0.0.1:51888`.
     pub fn serve(&self, addr: &str) -> std::io::Result<()> {
         let listener = TcpListener::bind(addr)?;
