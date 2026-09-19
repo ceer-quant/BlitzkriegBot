@@ -347,6 +347,13 @@ export interface PluginRow {
   kind?: string
   /** market.list calls the identity field `type` (camelCase wire). */
   type?: string
+  /**
+   * Provenance, when the source carries it (`engine.stats` rows do:
+   * `"dylib:<path>"`). `strategy.list` / `/api/plugins` does NOT, so a strategy
+   * row from there has no `source` — report that as unknown rather than guessing
+   * (see `lib/strategy-source.ts`).
+   */
+  source?: string
   description?: string
   enabled?: boolean
   status?: string

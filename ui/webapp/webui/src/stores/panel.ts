@@ -8,6 +8,7 @@ import {
   type Snapshot, type PluginsDoc, type StrategyStatsRow, type TradeRow,
 } from '../api/client'
 import { dedupeTrades } from '../lib/trades'
+import { registryStrategyRows } from '../lib/strategy-source'
 import { feedProgress } from '../lib/feed'
 import { classifyOutcome } from '../lib/session'
 
@@ -58,16 +59,12 @@ export const usePanelStore = defineStore('panel', () => {
     if (fromStats && fromStats.length) return fromStats
     const plug = plugins.value?.strategies
     if (plug) {
-      return plug.map((s) => ({
-        name: s.name,
-        enabled: s.enabled ?? false,
-        source: s.kind ?? 'builtin',
-        ordersPlaced: 0, ordersRejected: 0, limitRejected: 0,
-        blockedTiming: 0, blockedMomentum: 0,
-        gateExemptedTiming: 0, gateExemptedMomentum: 0, gateExemptions: [],
-        closedTrades: 0, wins: 0, losses: 0, netPnlUsd: 0,
-        rejectionCauses: null,
-      }))
+      // Registry-only rows: no counters and no provenance. `strategySource`
+      // reports the source as unknown rather than defaulting to `builtin` —
+      // `kind` is a market class, not provenance, and since PR-B the kernel
+      // ships zero builtins, so that default mislabelled every external
+      // strategy as in-tree. See `lib/strategy-source.ts`.
+      return registryStrategyRows(plug)
     }
     return []
   })
