@@ -14,7 +14,8 @@
     "check:history": "node --experimental-strip-types scripts/history-tab.check.mjs",
     "check:round": "node --experimental-strip-types scripts/round-header.check.mjs",
     "check:expand": "node --experimental-strip-types scripts/expand-reflow.check.mjs",
-    "check:all": "npm run check && npm run check:theme && npm run check:balance && npm run check:lifecycle && npm run check:rejections && npm run check:feed && npm run check:session && npm run check:history && npm run check:round && npm run check:expand"
+    "check:source": "node --experimental-strip-types scripts/strategy-source.check.mjs",
+    "check:all": "npm run check && npm run check:theme && npm run check:balance && npm run check:lifecycle && npm run check:rejections && npm run check:feed && npm run check:session && npm run check:history && npm run check:round && npm run check:expand && npm run check:source"
   },
   "license": "ISC",
   "type": "module",
