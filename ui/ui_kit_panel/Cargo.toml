@@ -21,3 +21,4 @@ blitzkrieg-ui-kit = { path = "../ui_kit" }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "signal"] }
+libc = { workspace = true }

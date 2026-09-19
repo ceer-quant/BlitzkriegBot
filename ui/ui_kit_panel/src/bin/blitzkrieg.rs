@@ -6,13 +6,15 @@
 //!   blitzkrieg core [FLAGS]  Run the trading core directly
 //!   blitzkrieg tui [--attach] Run interactive terminal panel
 //!   blitzkrieg web [FLAGS]   Run the web gateway / browser panel
+//!   blitzkrieg stop [FLAGS]  Stop the stack attached to one socket
 //!   blitzkrieg help          Show help
 
 use blitzkrieg_ui_kit::gateway::{Dispatcher, StartOutcome, Supervisor, SupervisorConfig};
 use blitzkrieg_ui_kit::web::WebServer;
 use blitzkrieg_ui_kit::{resolve_socket_path, IpcClient};
-use blitzkrieg_ui_panel::{parse_args_from, run_panel, PanelArgs, Tab};
+use blitzkrieg_ui_panel::{parse_args_from, run_panel, stop_stack, PanelArgs, Tab};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const HELP_TEXT: &str = "\
 blitzkrieg — Unified quant trading engine & UI launcher
@@ -26,6 +28,7 @@ SUBCOMMANDS:
   core           Run the trading core standalone
   tui [--attach] Run interactive terminal panel (attach to existing core or manage)
   web            Run web gateway / browser panel
+  stop           Stop the stack (UI + core) on one socket; also an orphaned core
   help           Show this help message
 
 FLAGS (for blitzkrieg / blitzkrieg run / core):
@@ -176,6 +179,10 @@ async fn main() -> std::io::Result<()> {
             raw_args.remove(0);
             run_web_subcommand(raw_args)
         }
+        Some("stop") => {
+            raw_args.remove(0);
+            run_stop_subcommand(raw_args)
+        }
         Some("run") => {
             raw_args.remove(0);
             run_unified(raw_args).await
@@ -196,6 +203,16 @@ async fn run_core_subcommand(raw_args: Vec<String>) -> std::io::Result<()> {
     let socket = cli.socket.clone().unwrap_or_else(resolve_socket_path);
     let cfg = build_supervisor_config(&cli, socket.clone());
 
+    // Signal listeners are registered BEFORE the core is spawned: between the
+    // spawn and a late registration there is a window where SIGTERM would take
+    // the default action — instant death, with the freshly spawned core left
+    // orphaned, still serving its socket (the exact shape the orphaned readonly
+    // cores in unified-launcher-check exposed). With the streams registered
+    // first, a signal that early is caught and routed through supervisor.stop().
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+
     let mut supervisor = Supervisor::new(cfg);
     match supervisor.start() {
         Ok(StartOutcome::Started { pid }) => {
@@ -211,9 +228,6 @@ async fn run_core_subcommand(raw_args: Vec<String>) -> std::io::Result<()> {
     }
 
     // Keep core running until SIGINT or SIGTERM is caught.
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut sigint = signal(SignalKind::interrupt())?;
-    let mut sigterm = signal(SignalKind::terminate())?;
     tokio::select! {
         _ = sigint.recv() => {
             eprintln!("blitzkrieg: stopping core on SIGINT...");
@@ -283,6 +297,41 @@ fn run_web_subcommand(args: Vec<String>) -> std::io::Result<()> {
     server.serve(&addr)
 }
 
+/// `blitzkrieg stop [--socket <path>] [--timeout <sec>]` — stop the stack on
+/// one socket. The heavy lifting (scanning, ownership, escalation, stale-socket
+/// cleanup) lives in [`stop_stack::run`] so it can be unit-tested; this wrapper
+/// only parses the two flags and maps the exit code.
+fn run_stop_subcommand(args: Vec<String>) -> std::io::Result<()> {
+    let mut socket = resolve_socket_path();
+    let mut grace = Duration::from_secs(5);
+    let mut iter = args.into_iter();
+    while let Some(a) = iter.next() {
+        match a.as_str() {
+            "--socket" => {
+                if let Some(s) = iter.next() {
+                    socket = s;
+                }
+            }
+            "--timeout" => {
+                if let Some(v) = iter.next().and_then(|v| v.parse::<u64>().ok()) {
+                    grace = Duration::from_secs(v.max(1));
+                }
+            }
+            "--help" | "-h" => {
+                println!("blitzkrieg stop [--socket <path>] [--timeout <sec>]");
+                return Ok(());
+            }
+            other => eprintln!("ignoring unknown arg: {other}"),
+        }
+    }
+    let code = stop_stack::run(&socket, grace);
+    if code == 0 {
+        Ok(())
+    } else {
+        std::process::exit(code)
+    }
+}
+
 /// Unified launcher: starts the core and the UI together in a single command.
 async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
     let cli = parse_cli_options(args);
@@ -294,24 +343,14 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
 
     let dispatcher = Arc::new(Mutex::new(Dispatcher::new(cfg, lifecycle_enabled)));
 
-    if lifecycle_enabled {
-        let mut d = dispatcher.lock().unwrap();
-        match d.supervisor_mut().start() {
-            Ok(StartOutcome::Started { pid }) => {
-                println!("blitzkrieg: core spawned (PID {pid}) on {socket}");
-            }
-            Ok(StartOutcome::Adopted) => {
-                println!("blitzkrieg: adopted existing core on {socket}");
-            }
-            Err(e) => {
-                eprintln!("blitzkrieg: failed to start core: {e}");
-                std::process::exit(1);
-            }
-        }
-    } else {
-        println!("blitzkrieg: lifecycle disabled (attach/monitor mode on {socket})");
-    }
-
+    // The signal task is registered BEFORE the core is spawned. Between the
+    // spawn and a late registration there is a window where SIGTERM/SIGINT
+    // would take the default action — instant launcher death, with the freshly
+    // spawned core left orphaned and still serving its socket. (The orphaned
+    // readonly cores unified-launcher-check kept finding were exactly this.)
+    // Registered first, a signal that early routes through Dispatcher::stop(),
+    // which kills a core the supervisor owns and exits cleanly — and if the
+    // signal lands before any core exists, stop() is simply NotOwned.
     let d_signal = dispatcher.clone();
     tokio::spawn(async move {
         use tokio::signal::unix::{signal, SignalKind};
@@ -330,6 +369,24 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
         }
         std::process::exit(0);
     });
+
+    if lifecycle_enabled {
+        let mut d = dispatcher.lock().unwrap();
+        match d.supervisor_mut().start() {
+            Ok(StartOutcome::Started { pid }) => {
+                println!("blitzkrieg: core spawned (PID {pid}) on {socket}");
+            }
+            Ok(StartOutcome::Adopted) => {
+                println!("blitzkrieg: adopted existing core on {socket}");
+            }
+            Err(e) => {
+                eprintln!("blitzkrieg: failed to start core: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        println!("blitzkrieg: lifecycle disabled (attach/monitor mode on {socket})");
+    }
 
     if cli.use_tui {
         let panel_args = PanelArgs {
