@@ -1,10 +1,11 @@
 <script setup lang="ts">
 /**
- * 插件 — 策略/扩展/行情三类插件的注册表视图（E9-g 插件治理页）：
- * 身份徽标、状态、活跃行情源，以及每个策略的启用开关与实时计数。
+ * 插件 — 扩展/行情两类插件的注册表视图（E9-g 插件治理页；E11/D-32：策略不再
+ * 作为插件在此显示——策略页是策略的唯一入口，插件页只回答「核心挂了哪些外部
+ * 能力」）。身份徽标、状态、活跃行情源。
  */
 import { computed, ref } from 'vue'
-import { Boxes, Puzzle, Radio, Plug, AlertTriangle } from 'lucide-vue-next'
+import { Puzzle, Radio, Plug, AlertTriangle } from 'lucide-vue-next'
 import { usePanelStore } from '@/stores/panel'
 import { marketTypeLabel, type PluginRow } from '@/api/client'
 import Card from '@/components/ui/card/Card.vue'
@@ -18,7 +19,6 @@ import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 const store = usePanelStore()
 
 const KIND_META = {
-  strategy: { label: '策略插件', icon: Boxes },
   extension: { label: '扩展插件', icon: Puzzle },
   market: { label: '行情插件', icon: Radio },
 } as const
@@ -28,7 +28,6 @@ const sections = computed(() => {
   const p = store.plugins
   if (!p) return []
   return [
-    { key: 'strategy' as Kind, rows: p.strategies, active: null as string | null },
     { key: 'extension' as Kind, rows: p.extensions, active: null },
     { key: 'market' as Kind, rows: p.marketPlugins, active: activeMarketName.value },
   ].filter((s) => s.rows.length > 0)
@@ -75,10 +74,8 @@ function caps(r: PluginRow): { label: string; on: boolean }[] {
 const totals = computed(() => {
   const p = store.plugins
   return {
-    strategies: p?.strategies.length ?? 0,
-    extensions: p?.extensions.length ?? 0,
-    markets: p?.marketPlugins.length ?? 0,
-    enabledStrategies: p?.strategies.filter((r) => r.enabled !== false).length ?? 0,
+    extension: p?.extensions.length ?? 0,
+    market: p?.marketPlugins.length ?? 0,
   }
 })
 
@@ -94,23 +91,20 @@ const segments = computed(() => [
 <template>
   <div v-if="store.plugins" class="rise-in">
     <!-- identity strip -->
-    <div class="grid gap-3.5 sm:grid-cols-3">
-      <div v-for="k in (['strategy', 'extension', 'market'] as Kind[])" :key="k" class="glass card-pad">
+    <div class="grid gap-3.5 sm:grid-cols-2">
+      <div v-for="k in (['extension', 'market'] as Kind[])" :key="k" class="glass card-pad">
         <div class="flex items-center justify-between">
           <span class="label-micro">{{ KIND_META[k].label }}</span>
           <component :is="KIND_META[k].icon" class="size-4 text-primary/70" />
         </div>
         <div class="stat-num mt-2 text-[30px] leading-none">
-          <RollingNumber :value="totals[k === 'strategy' ? 'strategies' : k === 'extension' ? 'extensions' : 'markets']" />
+          <RollingNumber :value="totals[k]" />
         </div>
         <div class="mt-2 text-[11.5px] text-faint-fg">
           <template v-if="k === 'market'">
             活跃源：
             <span v-if="activeMarketName" class="font-semibold text-primary">{{ activeMarketName }}</span>
             <span v-else>未选择</span>
-          </template>
-          <template v-else-if="k === 'strategy'">
-            其中 <span class="font-semibold text-up num"><RollingNumber :value="totals.enabledStrategies" /></span> 个已启用
           </template>
           <template v-else>核心注册的扩展能力</template>
         </div>

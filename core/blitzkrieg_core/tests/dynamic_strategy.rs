@@ -159,7 +159,7 @@ fn loads_and_drives_the_v2_dog_strategy_dylib() {
 
     let now = 1_800_000i64;
     engine.on_data(DataEvent::RoundMarkets {
-        markets: vec![market(1_800_000)],
+        markets: vec![market(2_700_000)],
         now_ms: now,
     });
 
@@ -233,7 +233,7 @@ fn hot_params_reach_the_dylib_on_the_next_evaluation() {
 
     let now = 1_800_000i64;
     engine.on_data(DataEvent::RoundMarkets {
-        markets: vec![market(1_800_000)],
+        markets: vec![market(2_700_000)],
         now_ms: now,
     });
     // mid 0.47 > default ceiling 0.43 → no entry.
@@ -314,10 +314,11 @@ fn the_dylib_sees_the_same_round_clock_as_an_in_tree_strategy() {
     assert!(engine.set_strategy_enabled("clock_recorder", true));
 
     // An expiry that leaves a real, non-zero time budget: the scanner computes
-    // time_left_sec from the round state, not zeros.
+    // time_left_sec from the round state — now driven by the venue's DECLARED
+    // end (2_700_000) — not zeros, and not the host's wall-clock grid either.
     let now = 1_795_000i64;
     engine.on_data(DataEvent::RoundMarkets {
-        markets: vec![market(1_800_000)],
+        markets: vec![market(2_700_000)],
         now_ms: now,
     });
 
@@ -335,8 +336,8 @@ fn the_dylib_sees_the_same_round_clock_as_an_in_tree_strategy() {
     assert_eq!(now_seen, Some(now), "{foreign_clock}");
     assert_eq!(
         time_left,
-        Some(5),
-        "the dylib must see the scanner's REAL time budget, not zeros: {foreign_clock}"
+        Some(905),
+        "the dylib must see the scanner's REAL time budget — the DECLARED expiry (2_700_000 − 1_795_000 = 905s), not the slot grid: {foreign_clock}"
     );
     // The in-tree recorder's on_round clock must match the dylib's EXACTLY.
     assert_eq!(
@@ -389,7 +390,7 @@ fn the_dylib_sees_only_priceable_books_in_its_eval_ctx() {
 
     let now = 1_800_000i64;
     engine.on_data(DataEvent::RoundMarkets {
-        markets: vec![market(1_800_000)],
+        markets: vec![market(2_700_000)],
         now_ms: now,
     });
 
@@ -542,7 +543,7 @@ fn the_dylib_gate_declaration_reaches_the_engine_and_is_honoured() {
     let now = 1_800_000i64;
     // Two markets: BTC for the plain strategy, ETH for the dylib.
     engine.on_data(DataEvent::RoundMarkets {
-        markets: vec![market(1_800_000), eth_market(1_800_000)],
+        markets: vec![market(2_700_000), eth_market(2_700_000)],
         now_ms: now,
     });
     // A dip deep enough for both ceilings with >= 50 bid depth.
@@ -728,7 +729,7 @@ fn parity_spread_arb_cdylib_matches_adapter() {
     let now = 1_800_000i64;
     for eng in [&mut engine_adapter, &mut engine_dylib] {
         eng.on_data(DataEvent::RoundMarkets {
-            markets: vec![market(1_800_000)],
+            markets: vec![market(2_700_000)],
             now_ms: now,
         });
         // Confirm UP trend: 12 ticks of mid >= 0.50
@@ -818,7 +819,7 @@ fn parity_trend_follow_cdylib_matches_adapter() {
     let now = 1_800_000i64;
     for eng in [&mut engine_adapter, &mut engine_dylib] {
         eng.on_data(DataEvent::RoundMarkets {
-            markets: vec![market(1_800_000)],
+            markets: vec![market(2_700_000)],
             now_ms: now,
         });
         // Initial price: 0.56 (spread 0.01: 0.56 / 0.57, spread_pct ~1.77% <= 3.0%)
@@ -913,7 +914,7 @@ fn parity_mean_reversion_cdylib_matches_adapter() {
     let now = 1_800_000i64;
     for eng in [&mut engine_adapter, &mut engine_dylib] {
         eng.on_data(DataEvent::RoundMarkets {
-            markets: vec![market(1_800_000)],
+            markets: vec![market(2_700_000)],
             now_ms: now,
         });
         // High point: 0.50 (spread 0.02: 0.49 / 0.51, spread_pct 4% <= 8%)

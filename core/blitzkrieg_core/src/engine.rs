@@ -360,6 +360,16 @@ impl Engine {
                 return Vec::new();
             }
             DataEvent::RoundMarkets { markets, now_ms } => {
+                // The venue's own round declaration beats the local slot grid:
+                // `expires_at_ms` is the exchange's actual round end, and
+                // `time_left_sec` (the exit policy's and the D-31 floor's
+                // clock) must track it, not the host's wall clock. Without
+                // this, a misaligned or shifted venue schedule silently
+                // drifts every timing decision. `observe_end_time` ignores
+                // non-positive declarations and derives the clock offset.
+                if let Some(m) = markets.first() {
+                    self.scanner.observe_end_time(m.expires_at_ms, now_ms);
+                }
                 let slot = markets.first().map(|m| m.round_slot).unwrap_or(0);
                 // Real round timing for the transition: how much of the round
                 // was left at this instant, straight from the scanner.
@@ -1990,6 +2000,26 @@ mod tests {
             e.last_blocked().iter().any(|b| b.strategy == "plain"),
             "{:?}",
             e.last_blocked()
+        );
+    }
+
+    #[test]
+    fn round_markets_declared_expiry_beats_the_wall_clock_grid() {
+        // The venue's declared round end (expires_at_ms) must drive
+        // `time_left_sec` — not the host's wall-clock slot grid. Here the grid
+        // would put the round end at 1_800_000 (800s left at 1_010_000), while
+        // the venue declares 1_900_000 (890s left). Without the wiring the
+        // D-31 floor flaked on wall-clock position (the strategy-gate-check
+        // CI failure); with it the clock follows the venue declaration.
+        let mut e = engine();
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market_of("BTC", 1_900_000)],
+            now_ms: 1_000_000,
+        });
+        assert_eq!(
+            e.scanner().round_state(1_010_000).time_left_sec,
+            890,
+            "the declared expiry, not the slot grid, is authoritative"
         );
     }
 
