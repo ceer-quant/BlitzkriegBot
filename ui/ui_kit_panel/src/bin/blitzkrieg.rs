@@ -157,8 +157,18 @@ fn build_supervisor_config(cli: &ParsedCli, fallback_socket: String) -> Supervis
     cfg
 }
 
+/// `.env` self-load happens here, BEFORE tokio starts: environment variables
+/// are process-global and must be settled before any other thread can read
+/// them. The launcher therefore needs no `set -a; source .env` ceremony —
+/// see `blitzkrieg_ui_panel::env_file` for the precedence rule (the exported
+/// environment always wins over the file) and the secrets line.
+fn main() -> std::io::Result<()> {
+    blitzkrieg_ui_panel::env_file::load_cwd_env();
+    tokio_main()
+}
+
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn tokio_main() -> std::io::Result<()> {
     let mut raw_args: Vec<String> = std::env::args().skip(1).collect();
     let first = raw_args.first().map(|s| s.as_str());
 

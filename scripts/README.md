@@ -40,7 +40,7 @@ cargo build --release --workspace --locked
 | `parent-monitor-check.mjs` | No orphaned core after the driver exits |
 | `child-guard-check.mjs` | A child spawned through `lib/child-guard.mjs` cannot outlive its spawner — on normal exit, error, or signal; grandchildren included, and only after a chance to shut down cleanly |
 | `readonly-egress-check.mjs` | `--readonly` is structural: live mode + credentials still cannot trade |
-| `unified-launcher-check.mjs` | Single binary `blitzkrieg`: `run` starts both parts, subcommands dispatch, `--readonly` holds |
+| `unified-launcher-check.mjs` | Single binary `blitzkrieg`: `run` starts both parts, subcommands dispatch, `--readonly` holds, `stop` reaps the stack (unified / orphan / adopted shapes), `.env` self-load supplies credentials, zero leftovers |
 | `data-backup-check.mjs` | `data/` backup refuses dangerous destinations, self-verifies, prunes only its own dirs |
 | `soak-health-check.mjs` | The ops health check can actually fail: every guard is inject-tested (down/wedged core, panel HTML fallback, stale sampling, panic log, both zero-hold causes) *and* a healthy fixture must exit 0. Bounded by its own watchdog (`BK_GATE_WATCHDOG_MS`) — it must also *exit* |
 | `crash-recovery-check.mjs` | SIGKILL a live core → in-flight settles, replacement serves the socket |
@@ -55,6 +55,12 @@ cargo build --release --workspace --locked
 
 ## Observability / ops
 
+- `install-blitzkrieg-shim.sh` — one-time install of a `blitzkrieg` command into
+  a PATH directory (`~/.local/bin` → `/opt/homebrew/bin` → `/usr/local/bin`,
+  first on PATH wins; `BLITZKRIEG_SHIM_DIR` overrides). The shim cd's to the
+  checkout it was generated from and execs the freshly built binary there, so
+  it can never go stale and core/strategy/data resolution keeps working from
+  any directory. It overwrites only its own earlier output.
 - `dry-observe.mjs` — attach to a running dry core and print round/order/position ticks.
 - `soak-health.sh` / `soak-health-loop.sh` / `soak-monitor.mjs` — long-run health monitoring.
   `soak-health.sh` exits 0 (healthy) / 1 (anomaly) / 2 (not a repo root) and prints

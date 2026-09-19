@@ -6,6 +6,7 @@
 //! gateway — it never places orders.
 
 pub mod app;
+pub mod env_file;
 pub mod input;
 pub mod stop_stack;
 pub mod ui;
