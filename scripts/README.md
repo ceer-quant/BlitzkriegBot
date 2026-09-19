@@ -42,12 +42,13 @@ cargo build --release --workspace --locked
 | `readonly-egress-check.mjs` | `--readonly` is structural: live mode + credentials still cannot trade |
 | `unified-launcher-check.mjs` | Single binary `blitzkrieg`: `run` starts both parts, subcommands dispatch, `--readonly` holds |
 | `data-backup-check.mjs` | `data/` backup refuses dangerous destinations, self-verifies, prunes only its own dirs |
+| `soak-health-check.mjs` | The ops health check can actually fail: every guard is inject-tested (down/wedged core, panel HTML fallback, stale sampling, panic log, both zero-hold causes) *and* a healthy fixture must exit 0. Bounded by its own watchdog (`BK_GATE_WATCHDOG_MS`) — it must also *exit* |
 | `crash-recovery-check.mjs` | SIGKILL a live core → in-flight settles, replacement serves the socket |
 | `webapp-check.mjs` | Panel: bundle served, auth both ways, CSRF, snapshot non-empty |
 | `backtest-check.mjs` | Event-driven backtest: archive → offline replay → bit-identical |
 | `order-recovery-check.mjs` / `position-recovery-check.mjs` | Crash recovery for orders / positions |
 | `strategy-gate-check.mjs` / `strategy-limit-check.mjs` / `strategy-evolution-check.mjs` | Strategy-scoped gating / funding / shadow evolution |
-| `trend-follow-check.mjs` / `mean-reversion-check.mjs` | Built-in strategy legs |
+| `trend-follow-check.mjs` / `mean-reversion-check.mjs` | Strategy legs, driven through the external cdylibs (the kernel ships no builtins) |
 | `scale-plugins-check.mjs` / `feed-scale-check.mjs` | Registry read latency / feed loss rate at scale |
 | `ui-eventbus-check.mjs` / `ui-kit-gateway-check.mjs` / `ui-plugin-check.mjs` | UI event push / gateway command surface |
 | `trade-log-flag-check.mjs` / `market-plugin-check.mjs` | `--no-trade-log` isolation / plugin selection |
@@ -56,6 +57,31 @@ cargo build --release --workspace --locked
 
 - `dry-observe.mjs` — attach to a running dry core and print round/order/position ticks.
 - `soak-health.sh` / `soak-health-loop.sh` / `soak-monitor.mjs` — long-run health monitoring.
+  `soak-health.sh` exits 0 (healthy) / 1 (anomaly) / 2 (not a repo root) and prints
+  every sub-status in one line, because that line is all the loop logs:
+  `core= round= panel= core-ping= soak= trades= archive= log=`. Anomalies come after
+  it. Checks and their seams (each has a real default; they exist so
+  `soak-health-check.mjs` can inject failures):
+  - panel liveness — `BK_PANEL_URL` (default `http://127.0.0.1:51888`), via the
+    panel's unauthenticated `/api/ping`. Note there is **no `/health` route**:
+    unknown paths return 200 + the HTML panel, so a substring probe on one can
+    never match (that was KI-30).
+  - core liveness — `BK_CORE_PGREP` (default `target/release/blitzkrieg-core`) plus a
+    `core.ping` over the socket taken from the core's own argv, so "alive but wedged"
+    is caught too. `BK_SOCKET` overrides the path.
+  - sampling freshness — `BK_SOAK_DIR` (default `data/soak`), judged by the newest
+    `soak.jsonl` record's timestamp, not by a process name: `soak-monitor.mjs` has a
+    bounded lifetime (`--hours 12`) and exiting is its normal end, whereas a stalled
+    sampler is invisible to `pgrep`. `BK_SOAK_STALE_SEC` (default 1800).
+  - crash/archive-stop scan — `BK_RUN_LOG`. **Unset means unconfigured, and is
+    reported as `log=off`**, because where the log lands is a deployment choice (the
+    core's stdout is `/dev/null` and its stderr is inherited). Set it to scan; a
+    configured-but-missing path is an anomaly.
+  - archive freshness — `BK_ARCH_DIR` (default `data/archive`); trade ledger —
+    `BK_TRADES` (default `data/trades/trades.jsonl`).
+  `soak-health-loop.sh` additionally bounds its own `health.log` and `$BK_RUN_LOG`
+  (`BK_LOG_MAX_BYTES`, default 20 MiB) by gzip + in-place truncate, leaving a log
+  untouched if gzip fails. It no longer calls the deleted `rotate-run-log.sh`.
 - `analyze-signals.mjs` / `analyze-strategy.mjs` — offline signal/strategy analysis.
 - `feed-live-probe.mjs` / `poly-ws-endurance.mjs` / `poly-wire-measure.mjs` — Polymarket feed probes.
 - `price-compare.mjs` / `reconcile-exits.mjs` / `sweep-exits.mjs` / `final-exit-opt.mjs` — pricing and exit sweeps.

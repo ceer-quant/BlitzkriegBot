@@ -256,6 +256,23 @@ jobs:
       # are unambiguous. `parent-monitor-check.mjs` covers the real core.
       - name: Child-guard gate
         run: node scripts/child-guard-check.mjs
+      # KI-30: the ops-inspection layer is itself a set of guards, and five of
+      # them could not fail — a probe of a route that never existed, two scans of
+      # a file nobody writes, and a process check against a sampler with a bounded
+      # lifetime. An always-on alarm and a never-firing check are the same defect:
+      # no signal. This gate INJECTS each failure (plus the healthy case, so a
+      # script that always reports ANOMALY cannot pass) instead of walking the
+      # happy path. It runs on throwaway fixtures via the script's BK_* seams and
+      # never reads or signals the real deployment.
+      #
+      # The step is bounded because the gate's first version hung after printing
+      # its PASS (an unclosed fixture listener held the event loop open) and CI sat
+      # on this step for ~40 minutes with nothing to show for it. The gate now has
+      # its own watchdog; this is the second, independent bound so a wedge can
+      # never again be mistaken for a slow gate.
+      - name: soak-health gate (KI-30)
+        timeout-minutes: 5
+        run: node scripts/soak-health-check.mjs
 
   # E10-e: the third size target — the *deliverable* ≤ 500 MB — is the one that
   # cannot be read off the working tree. A developer checkout legitimately holds

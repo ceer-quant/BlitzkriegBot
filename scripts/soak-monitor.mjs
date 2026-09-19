@@ -12,7 +12,7 @@
 
 import net from 'net';
 import { readFileSync, appendFileSync, existsSync, mkdirSync, statSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { resolveSocketPath } from './lib/core-socket.mjs';
@@ -20,7 +20,14 @@ import { resolveSocketPath } from './lib/core-socket.mjs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const SOAK_DIR = join(ROOT, 'data', 'soak');
-const RUN_LOG = join(ROOT, 'run.log');
+// The core writes its stdout to /dev/null and inherits stderr, so where its log
+// lands is a *deployment* choice, not a repo fact. Default to run.log for
+// backward compatibility with the redirects that still use it, but let the
+// operator point at the real file (`BK_RUN_LOG`, same variable soak-health.sh
+// reads) and treat "no log to scan" as an explicit state rather than as zero
+// errors — KI-30: this file used to count errors in a log that no longer
+// existed and report `err+0`, a check that could never fire.
+const RUN_LOG = process.env.BK_RUN_LOG ? resolve(ROOT, process.env.BK_RUN_LOG) : join(ROOT, 'run.log');
 
 const argv = process.argv.slice(2);
 const opt = (n, d) => { const i = argv.indexOf(n); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
@@ -74,9 +81,19 @@ function rpc(method, params = {}, timeoutMs = 3000) {
 
 // Track run.log read offset to count NEW errors per cycle.
 let logOffset = 0;
-try { logOffset = statSync(RUN_LOG).size; } catch {}
+let logScanned = false;
+try {
+  logOffset = statSync(RUN_LOG).size;
+  logScanned = true;
+} catch {
+  logScanned = false; // no log at RUN_LOG: reported, never silently zero
+}
 
-/** Count new ERROR-ish lines in run.log since last cycle (ignoring known noise). */
+/**
+ * Count new ERROR-ish lines in the configured log since last cycle (ignoring
+ * known noise). Returns `scanned` so callers can tell "no errors found" apart
+ * from "there was nothing to scan" — the distinction KI-30 was missing.
+ */
 function newErrors() {
   let text = '';
   try {
@@ -85,10 +102,15 @@ function newErrors() {
     const fd = readFileSync(RUN_LOG);
     text = fd.slice(logOffset).toString();
     logOffset = size;
-  } catch { return { count: 0, samples: [] }; }
+    logScanned = true;
+  } catch {
+    // Keep the previous `logScanned` value: a log that was there a cycle ago and
+    // is gone now is a transition worth surfacing, not a silent reset to clean.
+    return { count: 0, samples: [], scanned: logScanned };
+  }
   const IGNORE = /Manifold|PredictIt|Solana|wallet credentials|errorRate|errorPct/i;
   const lines = text.split('\n').filter((l) => /ERROR|\bpanic\b|ALERT/.test(l) && !IGNORE.test(l));
-  return { count: lines.length, samples: lines.slice(0, 3).map((l) => l.slice(0, 160)) };
+  return { count: lines.length, samples: lines.slice(0, 3).map((l) => l.slice(0, 160)), scanned: true };
 }
 
 function fmt(ts) { return new Date(ts).toISOString().replace('T', ' ').slice(0, 19); }
@@ -122,14 +144,19 @@ async function cycle(i, state) {
     positions: pos.result ? pos.result.positions.length : null,
     newErrors: errs.count,
     errorSamples: errs.samples,
+    logScanned: errs.scanned,
     anomalies: [],
   };
 
   // Anomaly detection.
   if (!rec.coreAlive) rec.anomalies.push('core_process_down');
-  if (!rec.coreAlive) rec.anomalies.push('core_process_down');
   if (!rec.pingOk) rec.anomalies.push('ipc_ping_failed');
-  if (errs.count > 0) rec.anomalies.push(`errors:+${errs.count}`);
+  if (rec.newErrors > 0) rec.anomalies.push(`errors:+${rec.newErrors}`);
+  // A log that was never scanned (no path configured, or the path is gone) is
+  // NOT evidence of zero errors. Reporting it as `err+0` is a false negative of
+  // the same kind as KI-30's hardcoded `run.log` scans: the check looks present
+  // and can never fire. Say so instead.
+  if (!rec.logScanned) rec.anomalies.push('log_not_scanned');
   // Stuck round: slot unchanged for > 2 cycles.
   if (state.lastSlot != null && rec.round && rec.round.slot === state.lastSlot) {
     state.sameSlot = (state.sameSlot || 0) + 1;
@@ -150,7 +177,8 @@ async function cycle(i, state) {
   const line = `[${fmt(ts)}] #${String(i).padStart(3)} core=${rec.coreAlive ? 'up' : 'DOWN'} ` +
     `ping=${rec.pingOk ? 'ok' : 'FAIL'} slot=${rec.round?.slot ?? '-'} tLeft=${rec.round?.timeLeftSec ?? '-'} mkt=${rec.round?.markets ?? '-'} ` +
     `books=${rec.stats?.books ?? '-'} spots=${rec.stats?.spots ?? '-'} rx=${rec.stats?.evaluations ?? '-'} sig=${rec.stats?.signals ?? '-'} ` +
-    `ord=${rec.orders ?? '-'}(live ${rec.liveOrders ?? '-'}) pos=${rec.positions ?? '-'} rss=${rec.coreRssMb}MB err+${rec.newErrors} ${tag}`;
+    `ord=${rec.orders ?? '-'}(live ${rec.liveOrders ?? '-'}) pos=${rec.positions ?? '-'} rss=${rec.coreRssMb}MB ` +
+    `err+${rec.logScanned ? rec.newErrors : 'n/a'} ${tag}`;
   appendFileSync(join(SOAK_DIR, 'soak.log'), line + '\n');
   console.log(line);
   return rec;
