@@ -57,6 +57,32 @@ pub struct GateExemptions {
     pub timing: bool,
     /// Waive the spot momentum alignment filter.
     pub momentum: bool,
+    /// OPTIONAL lower bound (seconds) on `time_left_sec` for the `timing`
+    /// exemption (D-31). `None` = use the kernel default
+    /// (`scanner.min_time_left_sec`), which is the "I still respect the global
+    /// time-left window" reading.
+    ///
+    /// Why a bound exists at all: without one, a `timing`-exempt strategy may
+    /// enter inside the force-exit window, where the exit policy fires on the
+    /// very next tick by design. The entry is *legal* but the round has no life
+    /// left to reach a target, so the trade is a guaranteed zero-hold exit — it
+    /// drags the win rate down without being a strategy misjudgement, i.e. it
+    /// puts noise rather than information into the dry ledger.
+    ///
+    /// Semantics, stated exactly: while `timing` is exempt, this value REPLACES
+    /// the scanner's `min_time_left_sec` for that strategy's candidates. So it
+    /// lets the exemption keep waiving "round too young" (where `time_left_sec`
+    /// is LARGE and a lower bound never conflicts) without also waiving "too
+    /// close to expiry".
+    ///
+    /// How far it can move the gate, honestly: before D-31 `timing: true` waived
+    /// the time-left gate entirely, so anything this field does is a NARROWING of
+    /// that exemption — it can never widen behaviour past what already shipped.
+    /// (An explicitly declared bound may of course sit below the scanner's global
+    /// value; that is the per-strategy declaration doing its job, and every
+    /// honoured exemption is audited downstream.) A negative value is clamped to
+    /// zero, the one direction that must never be honoured.
+    pub timing_min_time_left_sec: Option<i64>,
 }
 
 impl GateExemptions {
@@ -70,11 +96,24 @@ impl GateExemptions {
         Self {
             timing: true,
             momentum: true,
+            timing_min_time_left_sec: None,
         }
     }
 
     pub fn any(&self) -> bool {
         self.timing || self.momentum
+    }
+
+    /// The `time_left_sec` floor in force for this strategy: its own declared
+    /// value, else the kernel's `default_min` (the scanner's
+    /// `min_time_left_sec`). A declared value is clamped to `>= 0`: a negative
+    /// floor would restore the unbounded pre-D-31 waiver, the one direction this
+    /// field must never move.
+    pub fn timing_floor_sec(&self, default_min: i64) -> i64 {
+        match self.timing_min_time_left_sec {
+            Some(n) => n.max(0),
+            None => default_min.max(0),
+        }
     }
 
     /// Gate names in a stable order, for logs / diagnostics.
@@ -89,19 +128,30 @@ impl GateExemptions {
         out
     }
 
-    /// Parse the JSON form used across the C ABI (`{"timing":..,"momentum":..}`).
+    /// Parse the JSON form used across the C ABI
+    /// (`{"timing":..,"momentum":..,"timing_min_time_left_sec":..}`).
     /// Unknown keys and non-boolean values are ignored, so a malformed
     /// declaration degrades to "not declared" and never to a wider exemption.
+    ///
+    /// A library that predates D-31 returns only the two booleans: the missing
+    /// key yields `None`, which means "use the kernel default" — the stricter
+    /// reading, not the looser one. That is why this field could be added to the
+    /// existing optional symbol without a `BK_ABI_VERSION` bump.
     pub fn from_json(v: &serde_json::Value) -> Self {
         let flag = |key: &str| v.get(key).and_then(|b| b.as_bool()).unwrap_or(false);
         Self {
             timing: flag("timing"),
             momentum: flag("momentum"),
+            timing_min_time_left_sec: v.get("timing_min_time_left_sec").and_then(|n| n.as_i64()),
         }
     }
 
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "timing": self.timing, "momentum": self.momentum })
+        let mut v = serde_json::json!({ "timing": self.timing, "momentum": self.momentum });
+        if let Some(n) = self.timing_min_time_left_sec {
+            v["timing_min_time_left_sec"] = serde_json::json!(n);
+        }
+        v
     }
 }
 

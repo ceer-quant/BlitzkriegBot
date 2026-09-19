@@ -177,6 +177,12 @@ export interface StrategyStatsRow {
   gateExemptedMomentum: number
   /** Gate names this strategy declared itself exempt from (`[]` when none). */
   gateExemptions: string[]
+  /**
+   * The `time_left_sec` floor on the `timing` exemption (D-31), or `null` when
+   * the strategy left it to the kernel's `min_time_left_sec`. `null` is not the
+   * same as `0`: it means "this opt-out still stops at the global window".
+   */
+  gateExemptionTimingFloorSec?: number | null
   closedTrades: number
   wins: number
   losses: number

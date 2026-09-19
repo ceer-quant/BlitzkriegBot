@@ -475,10 +475,24 @@ impl Engine {
                 // this round) is not waivable, and everything downstream in
                 // `Core` (risk gate, kill switch, daily loss, quotas, sizing) is
                 // untouched by this path.
+                //
+                // D-31: the exemption is honoured only while `time_left_sec` is at
+                // or above the strategy's declared floor (default: the scanner's
+                // own `min_time_left_sec`). Before this, an exempt strategy could
+                // enter inside the force-exit window, where the exit policy fires
+                // on the very next tick — a correctly-priced but guaranteed
+                // zero-hold exit that only put noise into the ledger. A "too young"
+                // round has a large `time_left_sec`, so it stays waived; the block
+                // this actually stops is "too close to expiry", which by definition
+                // sits below the floor.
                 let waived = block.exemptible()
                     && self
                         .strategy_gate_exemptions(&sig.strategy)
-                        .is_some_and(|e| e.timing);
+                        .is_some_and(|e| {
+                            e.timing
+                                && round.time_left_sec
+                                    >= e.timing_floor_sec(self.cfg.scanner.min_time_left_sec)
+                        });
                 if !waived {
                     let mid = self
                         .book_snapshot(&sig.token_id)
@@ -1902,6 +1916,7 @@ mod tests {
                 GateExemptions {
                     timing: true,
                     momentum: false,
+                    timing_min_time_left_sec: None,
                 },
             )),
             "test".into(),
@@ -1979,6 +1994,213 @@ mod tests {
     }
 
     #[test]
+    fn d31_declared_floor_stops_the_timing_exemption_waiving_the_time_left_gate() {
+        // D-31: `timing: true` used to waive the time-left gate outright, so an
+        // exempt strategy could enter with the round nearly over — where the exit
+        // policy fires on the next tick and the trade is a guaranteed zero-hold.
+        // A declared floor excludes exactly that window. The GLOBAL gate is the
+        // ordinary 180s (that is what actually produces the block); the two
+        // strategies differ ONLY in the floor they declare, which is the point.
+        let mut late_cfg = cfg();
+        late_cfg.scanner.min_round_age_sec = 0;
+        late_cfg.scanner.min_time_left_sec = 180;
+        let mut e = engine_from(late_cfg);
+        // ETH: declares a 180s floor → must NOT be waived at 172s left.
+        e.register_user_strategy(
+            Box::new(DipBuyer::exempting(
+                "floored",
+                dec!(0.45),
+                &["ETH"],
+                GateExemptions {
+                    timing: true,
+                    momentum: false,
+                    timing_min_time_left_sec: Some(180),
+                },
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        // SOL: declares the SAME `timing` exemption but a lower floor, so its
+        // opt-out still reaches into the last 100s. Keeping both in one cycle is
+        // the point: the declared floor, and only it, separates them.
+        e.register_user_strategy(
+            Box::new(DipBuyer::exempting(
+                "lowfloor",
+                dec!(0.45),
+                &["SOL"],
+                GateExemptions {
+                    timing: true,
+                    momentum: false,
+                    timing_min_time_left_sec: Some(100),
+                },
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("floored", true));
+        assert!(e.set_strategy_enabled("lowfloor", true));
+        // XRP: declares `timing` with NO floor. That must mean "use the kernel's
+        // 180s", not "no floor at all" — i.e. it is blocked exactly like `floored`.
+        // This is the backwards-compatibility guarantee a pre-D-31 library relies
+        // on when it emits only the two booleans.
+        e.register_user_strategy(
+            Box::new(DipBuyer::exempting(
+                "intestate",
+                dec!(0.45),
+                &["XRP"],
+                GateExemptions {
+                    timing: true,
+                    momentum: false,
+                    timing_min_time_left_sec: None,
+                },
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("intestate", true));
+
+        // Round expires at 1_800_000 → exactly 172s left at `at`.
+        let at = 1_800_000 - 172_000;
+        let now = at - 12_000;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![
+                market(1_800_000),
+                market_of("ETH", 1_800_000),
+                market_of("SOL", 1_800_000),
+                market_of("XRP", 1_800_000),
+            ],
+            now_ms: now,
+        });
+        dip_only(&mut e, "eth_up", at);
+        dip_only(&mut e, "sol_up", at);
+        dip_only(&mut e, "xrp_up", at);
+
+        let orders = e.evaluate(at);
+        assert_eq!(
+            e.scanner().round_state(at).time_left_sec,
+            172,
+            "fixture drift"
+        );
+        assert_eq!(orders.len(), 1, "{orders:?}");
+        assert_eq!(
+            orders[0].strategy, "lowfloor",
+            "only the lower declared floor may still enter this late"
+        );
+        assert!(
+            e.last_exemptions().iter().all(|x| x.strategy == "lowfloor"),
+            "only the lower declared floor may be recorded as exempted: {:?}",
+            e.last_exemptions()
+        );
+        assert!(
+            e.last_blocked()
+                .iter()
+                .any(|b| b.strategy == "floored" && b.reason == BlockReason::Timing),
+            "the floored strategy must be timing-blocked: {:?}",
+            e.last_blocked()
+        );
+        assert!(
+            e.last_blocked()
+                .iter()
+                .any(|b| b.strategy == "intestate" && b.reason == BlockReason::Timing),
+            "an undeclared floor means the kernel's, not none: {:?}",
+            e.last_blocked()
+        );
+        assert!(
+            e.last_exemptions().iter().all(|x| x.strategy != "floored"),
+            "nothing may be recorded as exempted for the floored strategy"
+        );
+
+        // The floor narrows the exemption; below it, nothing about the young-round
+        // case changed. Re-run the same strategy against a "too young" block: its
+        // `time_left_sec` is large, so the 180s floor never conflicts.
+        let mut young_cfg = cfg();
+        young_cfg.scanner.min_round_age_sec = 10_000;
+        young_cfg.scanner.min_time_left_sec = 180;
+        let mut e = engine_from(young_cfg);
+        e.register_user_strategy(
+            Box::new(DipBuyer::exempting(
+                "floored",
+                dec!(0.45),
+                &["ETH"],
+                GateExemptions {
+                    timing: true,
+                    momentum: false,
+                    timing_min_time_left_sec: Some(180),
+                },
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("floored", true));
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000), market_of("ETH", 1_800_000)],
+            now_ms: now,
+        });
+        dip_only(&mut e, "eth_up", now + 12_000);
+        let orders = e.evaluate(now + 12_000);
+        assert_eq!(orders.len(), 1, "too-young must stay waivable: {orders:?}");
+        assert_eq!(orders[0].strategy, "floored");
+        let ex = e.last_exemptions();
+        assert_eq!(ex.len(), 1, "{ex:?}");
+        assert!(
+            ex[0].detail.contains("Round too young"),
+            "the honoured exemption is the young-round one: {}",
+            ex[0].detail
+        );
+    }
+
+    #[test]
+    fn d31_floor_is_read_through_the_abi_json_and_clamped_at_zero() {
+        // The floor crosses the ABI as an optional JSON key, so it must survive a
+        // round trip, degrade to the kernel default when absent, and clamp a
+        // negative declaration (which would restore the unbounded waiver).
+        let declared = serde_json::json!({
+            "timing": true,
+            "momentum": false,
+            "timing_min_time_left_sec": 180,
+        });
+        let g = GateExemptions::from_json(&declared);
+        assert!(g.timing && !g.momentum);
+        assert_eq!(g.timing_min_time_left_sec, Some(180));
+        assert_eq!(g.timing_floor_sec(0), 180);
+        assert_eq!(g.to_json(), declared, "the declaration round-trips");
+
+        // A pre-D-31 library emits only the two booleans: the missing key must
+        // mean "use the kernel default", never "no floor".
+        let legacy = GateExemptions::from_json(&serde_json::json!({
+            "timing": true,
+            "momentum": false,
+        }));
+        assert_eq!(legacy.timing_min_time_left_sec, None);
+        assert_eq!(legacy.timing_floor_sec(180), 180);
+        assert_eq!(
+            legacy.to_json(),
+            serde_json::json!({ "timing": true, "momentum": false }),
+            "an undeclared floor must not be written back"
+        );
+
+        // Malformed / negative declarations degrade inward, never outward.
+        let bad = GateExemptions::from_json(&serde_json::json!({
+            "timing": true,
+            "timing_min_time_left_sec": "180",
+        }));
+        assert_eq!(
+            bad.timing_min_time_left_sec, None,
+            "a string is not a floor"
+        );
+        assert_eq!(
+            GateExemptions::from_json(&serde_json::json!({
+                "timing": true,
+                "timing_min_time_left_sec": -60,
+            }))
+            .timing_floor_sec(0),
+            0,
+            "a negative floor clamps to zero"
+        );
+    }
+
+    #[test]
     fn declared_momentum_exemption_lets_a_mean_reversion_entry_through() {
         let mut e = engine();
         e.register_user_strategy(
@@ -1989,6 +2211,7 @@ mod tests {
                 GateExemptions {
                     timing: false,
                     momentum: true,
+                    timing_min_time_left_sec: None,
                 },
             )),
             "test".into(),
@@ -2038,6 +2261,7 @@ mod tests {
                 GateExemptions {
                     timing: false,
                     momentum: true,
+                    timing_min_time_left_sec: None,
                 },
             )),
             "test".into(),
@@ -2144,6 +2368,7 @@ mod tests {
                 GateExemptions {
                     timing: true,
                     momentum: true,
+                    timing_min_time_left_sec: None,
                 },
             )),
             "test".into(),
@@ -2184,6 +2409,7 @@ mod tests {
                 GateExemptions {
                     timing: false,
                     momentum: true,
+                    timing_min_time_left_sec: None,
                 },
             )),
             "test".into(),

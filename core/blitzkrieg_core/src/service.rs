@@ -798,9 +798,16 @@ impl Core {
                     let version = loaded.version.clone();
                     // E2-b: the load receipt names the gates the library declared
                     // unnecessary, so an opt-out is visible before it is enabled.
+                    // D-31: if the declaration carries a `time_left_sec` floor,
+                    // state it — the receipt is the operator's only pre-enable
+                    // view of how far the opt-out actually reaches.
                     let declared = if loaded.gate_exemptions.any() {
+                        let floor = match loaded.gate_exemptions.timing_min_time_left_sec {
+                            Some(n) => format!(" (timing floor {n}s)"),
+                            None => String::new(),
+                        };
                         format!(
-                            "; declares gate exemptions: {}",
+                            "; declares gate exemptions: {}{floor}",
                             loaded.gate_exemptions.gates().join(",")
                         )
                     } else {
@@ -1619,6 +1626,10 @@ impl Core {
                     "effectiveMaxShares": dec_json(effective.max_shares),
                     // ── E2-b declared gate exemptions + per-strategy gate counts ──
                     "gateExemptions": declared.gates(),
+                    // D-31: the declared `time_left_sec` floor, or null when the
+                    // strategy left it to the kernel. Null is meaningful here —
+                    // it says "this opt-out still stops at the global window".
+                    "gateExemptionTimingFloorSec": declared.timing_min_time_left_sec,
                     "blockedTiming": tally.blocked_timing,
                     "blockedMomentum": tally.blocked_momentum,
                     "gateExemptedTiming": tally.exempted_timing,
@@ -1686,7 +1697,16 @@ impl Core {
                 let declared: Vec<serde_json::Value> = e
                     .declared_gate_exemptions()
                     .into_iter()
-                    .map(|(name, x)| serde_json::json!({ "strategy": name, "gates": x.gates() }))
+                    .map(|(name, x)| {
+                        // D-31: name the remaining-time floor beside the gates, so
+                        // "which opt-outs reach into the closing window" is
+                        // answerable from the stats snapshot alone.
+                        let mut v = serde_json::json!({ "strategy": name, "gates": x.gates() });
+                        if let Some(n) = x.timing_min_time_left_sec {
+                            v["timingFloorSec"] = serde_json::json!(n);
+                        }
+                        v
+                    })
                     .collect();
                 serde_json::json!({
                     "timing": e.blocked_timing_count(),
@@ -4567,6 +4587,7 @@ mod strategy_dispatch_tests {
             |name| crate::strategies::GateExemptions {
                 timing: name == "fader",
                 momentum: false,
+                timing_min_time_left_sec: None,
             },
         );
         let now = 1_000_000i64;
@@ -4637,6 +4658,7 @@ mod strategy_dispatch_tests {
             |name| crate::strategies::GateExemptions {
                 timing: name == "fader",
                 momentum: name == "fader",
+                timing_min_time_left_sec: None,
             },
         );
         let declared = c.engine_stats()["blocked"]["declaredExemptions"].clone();
@@ -4648,6 +4670,49 @@ mod strategy_dispatch_tests {
             ]),
             "hosted and user declarations are both listed"
         );
+    }
+
+    #[test]
+    fn a_declared_timing_floor_is_reported_beside_the_gates() {
+        // D-31: the floor is the difference between "this opt-out reaches into the
+        // closing window" and "it stops at the global window", so it has to be
+        // visible from the stats snapshot alone. `fader` declares a floor;
+        // `plain` does not, and a strategy that declares nothing must NOT grow a
+        // key it never asked for.
+        let c = core_with_declared_dips(
+            HashMap::new(),
+            &[("fader", &["BTC"]), ("plain", &["ETH"])],
+            5,
+            0,
+            |name| crate::strategies::GateExemptions {
+                timing: name == "fader",
+                momentum: name == "fader",
+                timing_min_time_left_sec: (name == "fader").then_some(180),
+            },
+        );
+        let stats = c.engine_stats();
+        assert_eq!(
+            stats["blocked"]["declaredExemptions"],
+            serde_json::json!([
+                { "strategy": "mean_reversion", "gates": ["momentum"] },
+                { "strategy": "fader", "gates": ["timing", "momentum"], "timingFloorSec": 180 }
+            ]),
+            "a declared floor is named; an undeclared one adds nothing"
+        );
+
+        let by_name = |n: &str| -> serde_json::Value {
+            stats["strategies"]
+                .as_array()
+                .expect("strategies array")
+                .iter()
+                .find(|s| s["name"] == n)
+                .unwrap_or_else(|| panic!("no stats row for {n}"))["gateExemptionTimingFloorSec"]
+                .clone()
+        };
+        assert_eq!(by_name("fader"), serde_json::json!(180));
+        // `null`, not absent and not 0: "this strategy left the floor to the kernel"
+        // must be distinguishable from "it declared a floor of zero".
+        assert_eq!(by_name("plain"), serde_json::Value::Null);
     }
 
     #[test]

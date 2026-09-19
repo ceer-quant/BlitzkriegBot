@@ -458,6 +458,7 @@ impl EngineStrategy for TestMeanReversion {
         GateExemptions {
             timing: false,
             momentum: true,
+            timing_min_time_left_sec: None,
         }
     }
 

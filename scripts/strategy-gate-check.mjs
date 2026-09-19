@@ -38,22 +38,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 if (!existsSync(BIN)) { console.error(`missing binary: ${BIN} (cargo build --release --workspace --locked)`); process.exit(2); }
 if (!existsSync(DYLIB)) { console.error(`missing strategy library: ${DYLIB} ((cd user_layer/strategies && cargo build --release))`); process.exit(2); }
 
-async function run() {
-  const tag = `${process.pid}-${Math.random().toString(36).slice(2)}`;
-  const sock = join(tmpdir(), `blitzkrieg-e2b-${tag}.sock`);
-  const workdir = mkdtempSync(join(tmpdir(), 'blitzkrieg-e2b-'));
-  try { unlinkSync(sock); } catch {}
-
-  const args = [
-    '--socket', sock, '--mode', 'dry', '--tick-ms', '50',
-    '--seed-balance', '1000', '--max-order-notional', '50',
-    '--engine', '--no-discovery', '--no-event-archive', '--no-trade-log',
-    // Scratch dir only: never restore, or leave behind, a real position/order.
-    '--no-order-log', '--no-position-log',
-    '--round-sec', String(ROUND_SEC),
-    // Timing window deliberately SHUT for everyone: a 1-hour-old round minimum.
-    '--min-round-age', '3600', '--min-time-left', '0',
-  ];
+/**
+ * Spawn a dry core on `sock` in `workdir`, wait for the socket, connect, and
+ * return `{ proc, rpc, stderr }`. `stderr` is a THUNK, not a snapshot: the phase
+ * that spawns the core checks it after driving the core, and a captured string
+ * would be frozen at connect time. Shared by both phases so the second one
+ * cannot drift from the first in how it boots or tears down.
+ */
+async function bootCore(sock, workdir, args) {
   const proc = spawn(BIN, args, { stdio: ['ignore', 'ignore', 'pipe'], cwd: workdir });
   let stderr = '';
   proc.stderr.on('data', (d) => { stderr += d.toString(); });
@@ -64,7 +56,8 @@ async function run() {
     const id = ++seq; pending.set(id, { resolve: res, reject: rej });
     sockc.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
   });
-  const connect = () => new Promise((res, rej) => {
+  for (let i = 0; i < 120; i++) { if (existsSync(sock)) break; await sleep(50); }
+  await new Promise((res, rej) => {
     sockc = net.connect(sock, () => res());
     sockc.on('error', rej);
     sockc.on('data', (d) => {
@@ -80,12 +73,31 @@ async function run() {
       }
     });
   });
+  await rpc('core.ready');
+  return { proc, rpc, stderr: () => stderr };
+}
 
+async function run() {
+  const tag = `${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const sock = join(tmpdir(), `blitzkrieg-e2b-${tag}.sock`);
+  const workdir = mkdtempSync(join(tmpdir(), 'blitzkrieg-e2b-'));
+  try { unlinkSync(sock); } catch {}
+
+  const args = [
+    '--socket', sock, '--mode', 'dry', '--tick-ms', '50',
+    '--seed-balance', '1000', '--max-order-notional', '50',
+    '--engine', '--no-discovery', '--no-event-archive', '--no-trade-log',
+    // Scratch dir only: never restore, or leave behind, a real position/order.
+    '--no-order-log', '--no-position-log',
+    '--round-sec', String(ROUND_SEC),
+    // Timing window deliberately SHUT for everyone: a 1-hour-old round minimum.
+    // `--min-time-left 0` keeps this a TooYoung-only block, which is exactly the
+    // branch D-31 must leave waivable — the floor phase below covers the other one.
+    '--min-round-age', '3600', '--min-time-left', '0',
+  ];
+  const { proc, rpc, stderr: stderrNow } = await bootCore(sock, workdir, args);
   const problems = [];
   try {
-    for (let i = 0; i < 120; i++) { if (existsSync(sock)) break; await sleep(50); }
-    await connect();
-    await rpc('core.ready');
 
     // 1. The declaration is explicit and visible at load, before enabling.
     const receipt = await rpc('strategy.load', { path: DYLIB });
@@ -155,13 +167,22 @@ async function run() {
     if (JSON.stringify(arb?.gateExemptions ?? null) !== JSON.stringify([])) {
       problems.push(`spread_arb gateExemptions = ${JSON.stringify(arb?.gateExemptions)}, want []`);
     }
+    // D-31: the floor the dog declares must be visible on the wire too. Without
+    // this, an operator cannot tell a bounded opt-out from an unbounded one.
+    if (dog?.gateExemptionTimingFloorSec !== 180) {
+      problems.push(`dog gateExemptionTimingFloorSec = ${JSON.stringify(dog?.gateExemptionTimingFloorSec)}, want 180`);
+    }
     const declared = stats.blocked?.declaredExemptions ?? [];
     if (!declared.some((d) => d.strategy === 'dog_strategy' && JSON.stringify(d.gates) === JSON.stringify(['timing']))) {
       problems.push(`blocked.declaredExemptions lacks the dog/timing row: ${JSON.stringify(declared)}`);
     }
+    if (!declared.some((d) => d.strategy === 'dog_strategy' && d.timingFloorSec === 180)) {
+      problems.push(`blocked.declaredExemptions lacks the dog's timingFloorSec=180: ${JSON.stringify(declared)}`);
+    }
     if (declared.some((d) => d.strategy === 'spread_arb')) {
       problems.push('the builtin must never appear in declaredExemptions');
     }
+    const stderr = stderrNow();
     if (stderr.includes('ERROR') || stderr.includes('panicked')) {
       problems.push(`core stderr looked unhealthy: ${stderr.slice(-300)}`);
     }
@@ -174,12 +195,109 @@ async function run() {
   return problems;
 }
 
-console.log('per-strategy gate opt-out on the real binary + cdylib (E2-b / #27)\n');
-const problems = await run();
+/**
+ * D-31 phase: the declared floor must actually STOP an opt-out at the closing
+ * window. Phase 1 proves the exemption still reaches a "too young" block (where
+ * `time_left_sec` is large); this proves the other half — that a shut *time-left*
+ * gate is now respected by the very strategy that waives the timing window.
+ *
+ * The scanner derives `time_left_sec` from wall-clock round slots, so the test
+ * cannot simply "set" it. Instead the round is made SHORT (60 s) and the global
+ * time-left gate is set well above a whole round (400 s): every instant is then
+ * inside the closing window, deterministically. The dog's own floor is 180 s, so
+ * its opt-out must not reach in — while phase 1 shows it still reaches a
+ * too-young block. The block must be a *timing* block, not merely "no order"
+ * (which would also pass if the strategy had simply found nothing to do).
+ */
+async function runFloorPhase() {
+  const tag = `${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const sock = join(tmpdir(), `blitzkrieg-d31-${tag}.sock`);
+  const workdir = mkdtempSync(join(tmpdir(), 'blitzkrieg-d31-'));
+  try { unlinkSync(sock); } catch {}
+
+  const FLOOR_ROUND_SEC = 60;
+  const args = [
+    '--socket', sock, '--mode', 'dry', '--tick-ms', '50',
+    '--seed-balance', '1000', '--max-order-notional', '50',
+    '--engine', '--no-discovery', '--no-event-archive', '--no-trade-log',
+    '--no-order-log', '--no-position-log',
+    '--round-sec', String(FLOOR_ROUND_SEC),
+    // Round age is fine; the shutting gate is the TIME-LEFT one, the exact
+    // branch D-31 narrows. 400 > a whole 60 s round ⇒ it is shut at every instant.
+    '--min-round-age', '0', '--min-time-left', '400',
+  ];
+  const { proc, rpc, stderr } = await bootCore(sock, workdir, args);
+  const problems = [];
+  try {
+    const receipt = await rpc('strategy.load', { path: DYLIB });
+    // The floor travels in the load receipt, so it is known before the strategy
+    // is ever enabled.
+    if (typeof receipt !== 'string' || !receipt.includes('timing floor 180s')) {
+      problems.push(`load receipt does not name the declared floor: ${JSON.stringify(receipt)}`);
+    }
+    await rpc('strategy.enable', { name: 'dog_strategy', enabled: true });
+
+    const now = Date.now();
+    const slot = Math.floor(now / 1000 / FLOOR_ROUND_SEC);
+    await rpc('engine.markets', {
+      markets: [{
+        asset: 'BTC', conditionId: '0xc', questionId: '0xq',
+        upTokenId: 'UP', downTokenId: 'DOWN', upPrice: 0.5, downPrice: 0.5,
+        expiresAtMs: (slot + 1) * FLOOR_ROUND_SEC * 1000, roundSlot: slot,
+        negRisk: true, question: 'BTC up/down',
+      }],
+    });
+    await rpc('books.snapshot', {
+      tokenId: 'UP',
+      bids: [{ price: 0.41, size: 100 }],
+      asks: [{ price: 0.43, size: 100 }],
+    });
+    // The engine evaluates on its own tick; give it several ticks and require
+    // that the dog was timing-blocked (so "no order" cannot pass by inaction).
+    let dog = null;
+    for (let i = 0; i < 60; i++) {
+      await sleep(50);
+      const s = await rpc('engine.stats');
+      dog = (s.strategies || []).find((x) => x.name === 'dog_strategy');
+      if ((s.blocked?.byStrategy?.dog_strategy?.timing ?? 0) >= 1) break;
+    }
+
+    const stats = await rpc('engine.stats');
+    const dogRow = (stats.strategies || []).find((s) => s.name === 'dog_strategy');
+    if (!dogRow) problems.push('engine.stats has no dog_strategy row');
+    if ((dogRow?.gateExemptedTiming ?? 0) !== 0) {
+      problems.push(`dog gateExemptedTiming = ${dogRow.gateExemptedTiming}, want 0 inside its own floor`);
+    }
+    if ((dogRow?.ordersPlaced ?? 0) !== 0) {
+      problems.push(`dog placed ${dogRow.ordersPlaced} order(s) inside its declared floor`);
+    }
+    const live = ((await rpc('orders.list')).orders || []).filter((o) => o.strategy === 'dog_strategy');
+    if (live.length) problems.push(`dog has ${live.length} live order(s) inside its declared floor`);
+    // The block must be attributable to TIMING, not to the strategy simply finding
+    // nothing to do.
+    if (!(stats.blocked?.byStrategy?.dog_strategy?.timing >= 1)) {
+      problems.push(`dog was not timing-blocked: ${JSON.stringify(stats.blocked?.byStrategy?.dog_strategy)}`);
+    }
+    const stderrText = stderr();
+    if (stderrText.includes('ERROR') || stderrText.includes('panicked')) {
+      problems.push(`core stderr looked unhealthy: ${stderrText.slice(-300)}`);
+    }
+  } catch (e) {
+    problems.push(`error: ${e.message}`);
+  } finally {
+    proc.kill('SIGKILL');
+    try { unlinkSync(sock); } catch {}
+  }
+  return problems;
+}
+
+console.log('per-strategy gate opt-out on the real binary + cdylib (E2-b / #27, D-31 floor)\n');
+const problems = [...(await run()), ...(await runFloorPhase())];
 if (problems.length) {
   for (const p of problems) console.log(`  FAIL ${p}`);
   console.log(`\nstrategy-gate: ${problems.length} problem(s)`);
   process.exit(1);
 }
 console.log('  ok   load receipt declares timing; dog enters a shut window; builtin stays gated; exemption counted, momentum untouched');
+console.log('  ok   D-31 floor: the load receipt names 180s; in a closing window the same opt-out is timing-blocked, nothing exempted');
 console.log('\nstrategy-gate: pass');

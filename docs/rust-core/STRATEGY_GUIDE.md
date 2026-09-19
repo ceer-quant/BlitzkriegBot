@@ -279,18 +279,46 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy mean_rever
 - **Rust（内建/内树）**：覆写 trait 方法
   ```rust
   fn gate_exemptions(&self) -> GateExemptions {
-      GateExemptions { timing: true, momentum: false } // 只豁免时序窗口
+      // 只豁免时序窗口，且只豁免到「剩余 ≥180s」为止
+      GateExemptions { timing: true, momentum: false, timing_min_time_left_sec: Some(180) }
   }
   ```
 - **外挂 C ABI v2**：额外导出一个**可选符号**（不导出 = 不声明任何豁免），返回由本库
   `bk_string_out` 分配、内核用 `bk_strategy_free_string` 归还的 JSON：
   ```c
-  char* bk_strategy_gate_exemptions(void* handle); // {"timing":true,"momentum":false}
+  char* bk_strategy_gate_exemptions(void* handle);
+  // {"timing":true,"momentum":false,"timing_min_time_left_sec":180}
   ```
-  `dog_strategy` 已导出该符号（`timing:true`）作为可运行范例。**注意**：它是独立可选符号而**不是**
+  `dog_strategy` 已导出该符号（`timing:true` + 下限 180）作为可运行范例。**注意**：它是独立可选符号而**不是**
   vtable 的新字段——内核按值拷贝 `BkStrategyVtable`，追加字段会改变 `sizeof` 并迫使
   `BK_ABI_VERSION=3`；按名字解析的可选符号缺省即「未声明」，因此 `BK_ABI_VERSION` 维持 2，
   旧库无需重编译。JSON 里非布尔值/未知键一律按 `false`（降级为「未声明」）处理。
+
+#### 3.5.1 `timing` 豁免的剩余时间下限（D-31）
+
+`timing` 豁免最初会**整段**waive 时序窗口，包括「离到期太近」（`TooCloseToExpiry`）。后果是：
+一个豁免策略可以在轮次只剩几十秒时入场，而**出场策略会在下一个 tick 按设计强平**
+（`force_exit_sec` 默认 120）。这笔单子定价没错，但**轮次已经没有生命去够到目标价**，
+必然变成一笔零持仓出场——它不是策略判断失误，是把噪声写进了 dry 账本，拉低胜率却不携带信息。
+
+因此策略可以为自己的 `timing` 豁免**声明一个 `time_left_sec` 下限**：
+
+- `timing_min_time_left_sec = Some(n)`：该策略的候选单在 `time_left_sec >= n` 时才兑现豁免。
+  **它替换**（而不是叠加）内核的 `min_time_left_sec`。
+- `timing_min_time_left_sec = None`（含**所有 D-31 之前的库**）：沿用内核的
+  `scanner.min_time_left_sec`。缺键、`null`、字符串、负数都降级到此值；负数还会被 clamp 到 0。
+- 只影响「**离到期太近**」这一支：「轮次太年轻」（`TooYoung`）时 `time_left_sec` 很大，
+  下限天然不冲突，仍然照旧豁免。相对 D-31 之前的行为，它**只能收窄、不可能放开**。
+- 该字段同样走**已存在的可选 JSON 符号**（不是新的 vtable 字段），因此 `BK_ABI_VERSION` 仍为 2；
+  旧库不写这个键即可，内核自动用更严的默认值。
+
+> **统计口径说明（重要）**：本项改变的是**入场时机**，因此 `engine.stats` 里的
+> `gateExemptedTiming`（豁免兑现次数）、`blocked.timing`（时序拦截次数）以及由它们衍生的
+> 胜率 / 零持仓比例，在 D-31 前后**不可直接比较**：同一批「本该在收尾窗口入场」的候选单，
+> 之前会计入成交、现在会计入 `blocked.timing`。跨这一天的 dry 账本做同比时，请以
+> `engine.stats` 里 `byStrategy` 的分策略数字为准，并把「收尾窗口被挡掉多少」单列出来看，
+> 而不是把两段的胜率直接相减。历史 `trades.jsonl` 里的零持仓记录是**改前**的既成事实，
+> 不会被回填或剔除。
 
 **可豁免的范围被刻意收窄，安全边界永远不可豁免：**
 - 时序闸门里只有「窗口」（`TooYoung` / `TooCloseToExpiry`）可豁免；**「本轮没有市场」
