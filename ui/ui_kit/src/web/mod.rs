@@ -628,6 +628,56 @@ fn is_loopback_origin(value: &str) -> bool {
             .all(|o| !o.is_empty() && o.len() <= 3 && o.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// `(host, port)` of a URL-ish origin, the port default-filled by scheme
+/// (`http` → 80, `https` → 443) so `http://host` equals `Host: host:80`.
+/// Returns `None` when there is no authority at all. Hostnames are
+/// lowercased — DNS names are case-insensitive.
+fn origin_authority(candidate: &str) -> Option<(String, String)> {
+    let lower = candidate.trim().to_ascii_lowercase();
+    let (scheme, rest) = match lower.split_once("://") {
+        Some((s, r)) => (s, r),
+        None => ("http", lower.as_str()),
+    };
+    let authority = rest.split('/').next()?;
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    if authority.is_empty() {
+        return None;
+    }
+    let default_port = if scheme == "https" { "443" } else { "80" };
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let end = bracketed.find(']')?;
+        let host = format!("[{}]", &bracketed[..end]);
+        let port = bracketed[end + 1..]
+            .strip_prefix(':')
+            .filter(|p| !p.is_empty())
+            .unwrap_or(default_port);
+        return Some((host, port.to_string()));
+    }
+    match authority.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+            Some((h.to_string(), p.to_string()))
+        }
+        _ => Some((authority.to_string(), default_port.to_string())),
+    }
+}
+
+/// Same-origin: the `Origin`/`Referer` authority equals the request's own
+/// `Host` header. This is the server-deployment branch of
+/// [`WebServer::origin_allowed`] — see its docs for why a hostile page cannot
+/// produce this pair.
+fn is_same_origin(req: &HttpRequest, candidate: &str) -> bool {
+    let Some(host) = req.header("host") else {
+        return false;
+    };
+    let Some(referer) = origin_authority(candidate) else {
+        return false;
+    };
+    let Some(ours) = origin_authority(&format!("http://{host}")) else {
+        return false;
+    };
+    referer == ours
+}
+
 /// Session token from an `Authorization` header: `Bearer <token>`, or the user
 /// half of a `Basic` pair (the form the E6-a panel shipped with).
 fn bearer_or_basic(value: &str) -> Option<String> {
@@ -756,25 +806,28 @@ impl WebServer {
 
     /// Is this request's origin trustworthy?
     ///
-    /// Only one thing is decisive here: **foreign evidence**, in `Origin` or
-    /// `Referer`. Either header naming a non-loopback host means a browser
-    /// attached it on behalf of another site, and no legitimate panel flow
-    /// produces that, so it is refused.
+    /// Three things pass, in order of strength:
     ///
-    /// Absence of both headers is *not* evidence of attack. It is the normal
-    /// shape of curl, of the gate scripts, and of the panel's own same-origin
-    /// fetches. Refusing it would buy nothing against a browser — a cross-origin
-    /// `POST` always carries `Origin` (or the opaque `null`, which is not
-    /// loopback and so is refused above) — while breaking every non-browser
-    /// client, which would then have to forge a header that only exists to
-    /// describe browsers.
+    /// 1. **No evidence** — no `Origin`, no `Referer`. The normal shape of
+    ///    curl, of the gate scripts, and of non-browser clients. Refusing it
+    ///    would buy nothing against a browser (a cross-origin `POST` always
+    ///    carries `Origin`, or the opaque `null`, which none of the passing
+    ///    branches accept) while breaking every CLI client.
+    /// 2. **Loopback origins** — the panel on the operator's own machine.
+    /// 3. **Same origin** — the evidence's authority equals the request's own
+    ///    `Host` header. This is what makes the SERVER deployment work with
+    ///    zero configuration: a browser pointed at `http://<server-ip>:51888`
+    ///    attaches exactly that authority, and a same-origin request is not
+    ///    cross-site by definition. A hostile page cannot forge the pair —
+    ///    the browser fills `Host` with the server it is actually talking to,
+    ///    so an attacker's page at `evil.example` produces
+    ///    `Origin: evil.example` + `Host: <ours>`, which does not match.
     ///
-    /// What actually protects the state-changing surface is the *session*
-    /// requirement in [`Self::authorize`], not this check. The vector to worry
-    /// about is a cross-site `GET` — `<img src="…/api/command?cmd=stop">` — which
-    /// sends no `Origin` at all and no cookie a hostile page can read; it is
-    /// stopped because there is no way to attach a session token to it, and
-    /// gateway mode always demands one. This gate is the second layer.
+    /// Anything else must be listed in `allowed_origins` (reverse proxies that
+    /// rewrite the hostname). What actually protects the state-changing
+    /// surface is the *session* requirement in [`Self::authorize`]; this gate
+    /// is the second layer, and the cross-site `GET` vector (`<img src>` with
+    /// no `Origin`, no readable cookie) is stopped by the session demand.
     fn origin_allowed(&self, req: &HttpRequest) -> bool {
         let Some(evidence) = req.header("origin").or_else(|| req.header("referer")) else {
             return true;
@@ -783,6 +836,9 @@ impl WebServer {
         // `is_loopback_origin` handles by ignoring scheme, port and path.
         let candidate = evidence.trim().trim_end_matches('/').to_ascii_lowercase();
         if is_loopback_origin(&candidate) {
+            return true;
+        }
+        if is_same_origin(req, &candidate) {
             return true;
         }
         self.allowed_origins
