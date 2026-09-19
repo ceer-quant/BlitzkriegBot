@@ -164,6 +164,8 @@ jobs:
       # reporting a process that was already gone.
       - name: Gateway crash-reporting gate (E12-c through the UI)
         run: node scripts/gateway-crash-recovery-check.mjs
+      - name: Gateway signal shutdown gate
+        run: node scripts/gateway-signal-stop-check.mjs
       # Order/ledger semantics over the real wire (the compiled TS client this
       # used to depend on was removed with the Node layer; the bare-Node client
       # speaks the same newline-framed JSON-RPC 2.0).

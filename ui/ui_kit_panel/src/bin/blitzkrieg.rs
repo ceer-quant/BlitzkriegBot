@@ -215,7 +215,7 @@ async fn tokio_main() -> std::io::Result<()> {
         }
         Some("web") => {
             raw_args.remove(0);
-            run_web_subcommand(raw_args)
+            run_web_subcommand(raw_args).await
         }
         Some("stop") => {
             raw_args.remove(0);
@@ -291,7 +291,7 @@ async fn run_tui_subcommand(args: Vec<String>) -> std::io::Result<()> {
 }
 
 /// Run the web gateway subcommand (`blitzkrieg web [...]`).
-fn run_web_subcommand(args: Vec<String>) -> std::io::Result<()> {
+async fn run_web_subcommand(args: Vec<String>) -> std::io::Result<()> {
     let mut socket = resolve_socket_path();
     let mut addr = "127.0.0.1:51888".to_string();
     let mut manage = std::env::var("UIKIT_MANAGE")
@@ -331,8 +331,8 @@ fn run_web_subcommand(args: Vec<String>) -> std::io::Result<()> {
 
     let client = IpcClient::new(socket.clone());
     let cfg = SupervisorConfig::from_env(socket);
-    let dispatcher = Dispatcher::new(cfg, manage);
-    let mut server = WebServer::with_gateway(client, 0, dispatcher);
+    let dispatcher = Arc::new(Mutex::new(Dispatcher::new(cfg, manage)));
+    let mut server = WebServer::with_shared_gateway(client, 0, dispatcher.clone());
     server.set_panel_credentials(
         std::env::var("BLITZKRIEG_PANEL_USER").ok(),
         std::env::var("BLITZKRIEG_PANEL_PASSWORD").ok(),
@@ -342,7 +342,28 @@ fn run_web_subcommand(args: Vec<String>) -> std::io::Result<()> {
         eprintln!("blitzkrieg web: {why}");
         std::process::exit(2);
     }
-    server.serve(&addr)
+    let signal_dispatcher = dispatcher.clone();
+    let server_task = tokio::task::spawn_blocking(move || server.serve(&addr));
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = server_task => {
+            match result {
+                Ok(result) => result,
+                Err(e) => Err(std::io::Error::other(format!("web server task failed: {e}"))),
+            }
+        }
+        _ = sigint.recv() => {
+            eprintln!("blitzkrieg web: stopping managed core on SIGINT...");
+            if let Ok(mut d) = signal_dispatcher.lock() { d.stop(); }
+            std::process::exit(0);
+        }
+        _ = sigterm.recv() => {
+            eprintln!("blitzkrieg web: stopping managed core on SIGTERM...");
+            if let Ok(mut d) = signal_dispatcher.lock() { d.stop(); }
+            std::process::exit(0);
+        }
+    }
 }
 
 /// `blitzkrieg stop [--socket <path>] [--timeout <sec>]` — stop the stack on

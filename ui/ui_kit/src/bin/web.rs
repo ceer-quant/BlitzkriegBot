@@ -13,8 +13,10 @@
 use blitzkrieg_ui_kit::gateway::{Dispatcher, SupervisorConfig};
 use blitzkrieg_ui_kit::web::WebServer;
 use blitzkrieg_ui_kit::{resolve_socket_path, IpcClient};
+use std::sync::{Arc, Mutex};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let mut socket = resolve_socket_path();
     let mut addr = "127.0.0.1:51888".to_string();
     let mut manage = std::env::var("UIKIT_MANAGE")
@@ -58,10 +60,10 @@ fn main() {
     let client = IpcClient::new(socket.clone());
     println!("ui_kit web → socket {socket}");
     let cfg = SupervisorConfig::from_env(socket);
-    let dispatcher = Dispatcher::new(cfg, manage);
+    let dispatcher = Arc::new(Mutex::new(Dispatcher::new(cfg, manage)));
     // Full trade history: the history tab paginates in the browser, so pass
     // limit=0 (trades.history drains ALL closed rows, no 200-row cap).
-    let mut server = WebServer::with_gateway(client, 0, dispatcher);
+    let mut server = WebServer::with_shared_gateway(client, 0, dispatcher.clone());
     server.set_allowed_origins(allowed_origins);
     // Panel credentials come from the environment, never from this process. The
     // WebUI exchanges them for a session token via POST /api/login. Gateway mode
@@ -87,8 +89,29 @@ fn main() {
             "off (read-only surface, no command verbs)"
         }
     );
-    if let Err(e) = server.serve(&addr) {
-        eprintln!("web server error: {e}");
-        std::process::exit(1);
+
+    let signal_dispatcher = dispatcher.clone();
+    let server_task = tokio::task::spawn_blocking(move || server.serve(&addr));
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .expect("SIGINT listener");
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("SIGTERM listener");
+    tokio::select! {
+        result = server_task => {
+            if let Ok(Err(e)) = result {
+                eprintln!("web server error: {e}");
+                std::process::exit(1);
+            }
+        }
+        _ = sigint.recv() => {
+            eprintln!("ui_kit_web: stopping managed core on SIGINT...");
+            if let Ok(mut d) = signal_dispatcher.lock() { d.stop(); }
+            std::process::exit(0);
+        }
+        _ = sigterm.recv() => {
+            eprintln!("ui_kit_web: stopping managed core on SIGTERM...");
+            if let Ok(mut d) = signal_dispatcher.lock() { d.stop(); }
+            std::process::exit(0);
+        }
     }
 }

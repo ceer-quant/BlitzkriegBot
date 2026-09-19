@@ -258,7 +258,7 @@ cd ui/webapp/webui && npm run check:all
 
 - `scripts/core-adopt-check.mjs` —— 多客户端竞争与 adopt 语义。
 - `scripts/dry-observe.mjs` —— DryRun 观察。
-- `scripts/shutdown-cleanliness-check.mjs` / `parent-monitor-check.mjs` / `readonly-egress-check.mjs` / `crash-recovery-check.mjs` —— 生命周期、只读出口与崩溃恢复验收。
+- `scripts/shutdown-cleanliness-check.mjs` / `parent-monitor-check.mjs` / `readonly-egress-check.mjs` / `crash-recovery-check.mjs` / `gateway-signal-stop-check.mjs` —— 生命周期、只读出口、崩溃恢复与网关信号收尾验收。
 - `scripts/unified-launcher-check.mjs` —— 单二进制 `blitzkrieg` 一体化启动验收（子命令 / 托管 / 优雅退出 / `--readonly` 穿透）。
 - `scripts/strategy-gate-check.mjs` —— 策略门禁豁免（声明兑现 + D-31 剩余时间下限双向断言）。
 - `scripts/soak-health.sh` —— 长跑健康巡检（面板/核心/采样/账本异常一行判定；常驻配对见 `scripts/README.md`）。
