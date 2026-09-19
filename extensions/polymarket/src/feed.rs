@@ -135,7 +135,9 @@ pub enum FeedEvent {
     Info(String),
 }
 
-fn now_ms() -> i64 {
+/// Shared wall clock for the extension's feed-side modules (discovery/live
+/// reuse this one instead of keeping their own copies).
+pub(crate) fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

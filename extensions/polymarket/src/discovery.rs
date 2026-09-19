@@ -8,20 +8,13 @@
 //! With this running, Node is out of the market-data path entirely: the core
 //! finds its own markets, pulls its own books/spot, decides and trades.
 
+use crate::feed::now_ms;
 use crate::gamma::{duration_label, slug_for};
 use blitzkrieg_market_api::{MarketDescriptor, MarketHost};
 use polymarket_client_sdk_v2::gamma::Client as GammaClient;
 use polymarket_client_sdk_v2::gamma::types::request::MarketsRequest;
 use std::sync::Arc;
 use std::time::Duration;
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
 
 /// Spawn the discovery loop. `assets` are e.g. ["BTC","ETH"]; `round_sec` is the
 /// round length (300 = 5m). Returns immediately.

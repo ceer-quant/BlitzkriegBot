@@ -8,19 +8,12 @@
 //! If credentials are absent it stays inert, so a live binary without keys still
 //! serves the socket.
 
+use crate::feed::now_ms;
 use crate::venue::{VenueEvent, spawn_from_env};
 use blitzkrieg_market_api::{CoreError, CoreErrorCode, MarketHost, ReconcileSnapshot};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
 
 /// Spawn the live bridge if credentials are present. `markets` are condition ids
 /// to subscribe on the user channel (empty = REST-only reconciliation).

@@ -100,6 +100,18 @@ pub struct RoundState {
     pub markets: Vec<CryptoMarket>,
 }
 
+/// [`RoundState`] without the owned markets snapshot — the slot/window clock
+/// alone. Hot-path callers (engine evaluation, timing gates) read only these
+/// fields; the copy this variant avoids is a heap allocation per market per
+/// call (E14).
+#[derive(Debug, Clone, Copy)]
+pub struct RoundTiming {
+    pub slot: i64,
+    pub expires_at_ms: i64,
+    pub age_sec: i64,
+    pub time_left_sec: i64,
+}
+
 pub struct Scanner {
     cfg: ScannerConfig,
     markets: Vec<CryptoMarket>,
@@ -155,25 +167,35 @@ impl Scanner {
         (slot + 1) * self.cfg.round_duration_sec * 1000
     }
 
-    pub fn round_state(&self, local_now_ms: i64) -> RoundState {
+    /// The round clock without a markets copy: slot, expiry and the two window
+    /// gates. This is the shape the evaluation hot path consumes — it walks the
+    /// scanner's live market list by reference, so cloning the owned snapshot
+    /// per call (two heap-allocated strings per market, twice per evaluate)
+    /// is pure waste there. `round_state` remains for callers that want the
+    /// owned markets snapshot.
+    pub fn round_timing(&self, local_now_ms: i64) -> RoundTiming {
         let slot = self.current_slot(local_now_ms);
-        if self.actual_end_time_ms > 0 {
-            let time_left = ((self.actual_end_time_ms - local_now_ms) / 1000).max(0);
-            return RoundState {
-                slot,
-                expires_at_ms: self.actual_end_time_ms,
-                age_sec: self.cfg.round_duration_sec - time_left,
-                time_left_sec: time_left,
-                markets: self.markets.clone(),
-            };
-        }
-        let expires = self.slot_expiry_ms(slot);
+        let expires = if self.actual_end_time_ms > 0 {
+            self.actual_end_time_ms
+        } else {
+            self.slot_expiry_ms(slot)
+        };
         let time_left = ((expires - local_now_ms) / 1000).max(0);
-        RoundState {
+        RoundTiming {
             slot,
             expires_at_ms: expires,
             age_sec: self.cfg.round_duration_sec - time_left,
             time_left_sec: time_left,
+        }
+    }
+
+    pub fn round_state(&self, local_now_ms: i64) -> RoundState {
+        let t = self.round_timing(local_now_ms);
+        RoundState {
+            slot: t.slot,
+            expires_at_ms: t.expires_at_ms,
+            age_sec: t.age_sec,
+            time_left_sec: t.time_left_sec,
             markets: self.markets.clone(),
         }
     }
@@ -188,19 +210,19 @@ impl Scanner {
     /// engine can tell a waivable window gate from the structural precondition
     /// (E2-b / #27).
     pub fn can_trade_reason(&self, local_now_ms: i64) -> Result<(), TimingBlock> {
-        let r = self.round_state(local_now_ms);
-        if r.markets.is_empty() {
+        let t = self.round_timing(local_now_ms);
+        if self.markets.is_empty() {
             return Err(TimingBlock::NoMarkets);
         }
-        if r.age_sec < self.cfg.min_round_age_sec {
+        if t.age_sec < self.cfg.min_round_age_sec {
             return Err(TimingBlock::TooYoung {
-                age_sec: r.age_sec,
+                age_sec: t.age_sec,
                 min_age_sec: self.cfg.min_round_age_sec,
             });
         }
-        if r.time_left_sec < self.cfg.min_time_left_sec {
+        if t.time_left_sec < self.cfg.min_time_left_sec {
             return Err(TimingBlock::TooCloseToExpiry {
-                time_left_sec: r.time_left_sec,
+                time_left_sec: t.time_left_sec,
                 min_time_left_sec: self.cfg.min_time_left_sec,
             });
         }

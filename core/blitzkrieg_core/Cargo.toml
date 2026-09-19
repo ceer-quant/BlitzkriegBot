@@ -81,6 +81,9 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "
 # E14 hot-path micro-benchmarks (benches/hot_path.rs). Dev-only: the shipped
 # library never links criterion.
 criterion = "0.5"
+# E14 memory accounting: allocation totals/peak for the hot path, exercised
+# only from the dev harness (tests/dhat_profile.rs) — never shipped.
+dhat = "0.3"
 
 [[bench]]
 name = "hot_path"

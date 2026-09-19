@@ -346,7 +346,11 @@ async fn tokio_main() -> std::io::Result<()> {
         }
         Some("stop") => {
             raw_args.remove(0);
-            run_stop_subcommand(raw_args)
+            // stop_stack::run waits out the grace synchronously — blocking
+            // pool so the runtime stays free (E14).
+            tokio::task::spawn_blocking(move || run_stop_subcommand(raw_args))
+                .await
+                .map_err(|e| std::io::Error::other(format!("stop task failed: {e}")))?
         }
         Some("run") => {
             raw_args.remove(0);
@@ -378,8 +382,18 @@ async fn run_core_subcommand(raw_args: Vec<String>) -> std::io::Result<()> {
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
 
-    let mut supervisor = Supervisor::new(cfg);
-    match supervisor.start() {
+    let supervisor = Supervisor::new(cfg);
+    // The readiness handshake polls the socket for up to 15s — run it on the
+    // blocking pool so the signal streams registered above keep being served
+    // while it waits (E14: no blocking calls on the async workers).
+    let (mut supervisor, started) = tokio::task::spawn_blocking(move || {
+        let mut sup = supervisor;
+        let started = sup.start();
+        (sup, started)
+    })
+    .await
+    .map_err(|e| std::io::Error::other(format!("core start task failed: {e}")))?;
+    match started {
         Ok(StartOutcome::Started { pid }) => {
             println!("blitzkrieg: core started (PID {pid}) on {socket}");
         }
@@ -401,7 +415,11 @@ async fn run_core_subcommand(raw_args: Vec<String>) -> std::io::Result<()> {
             eprintln!("blitzkrieg: stopping core on SIGTERM...");
         }
     }
-    supervisor.stop();
+    // stop() waits out the TERM grace (≤5s) synchronously; same blocking-pool
+    // rule. `stop` clears `owns`, so the later Drop is a no-op.
+    tokio::task::spawn_blocking(move || supervisor.stop())
+        .await
+        .map_err(|e| std::io::Error::other(format!("core stop task failed: {e}")))?;
     Ok(())
 }
 
@@ -469,7 +487,10 @@ async fn run_web_subcommand(args: Vec<String>) -> std::io::Result<()> {
         eprintln!("blitzkrieg web: {why}");
         std::process::exit(2);
     }
-    let signal_dispatcher = dispatcher.clone();
+    // Two owned clones so either signal branch can move its own into the
+    // blocking task (E14).
+    let signal_dispatcher_int = dispatcher.clone();
+    let signal_dispatcher_term = dispatcher.clone();
     let server_task = tokio::task::spawn_blocking(move || server.serve(&addr));
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -482,12 +503,17 @@ async fn run_web_subcommand(args: Vec<String>) -> std::io::Result<()> {
         }
         _ = sigint.recv() => {
             eprintln!("blitzkrieg web: stopping managed core on SIGINT...");
-            if let Ok(mut d) = signal_dispatcher.lock() { d.stop(); }
+            // stop() waits out the TERM grace synchronously — blocking pool (E14).
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(mut d) = signal_dispatcher_int.lock() { d.stop(); }
+            }).await;
             std::process::exit(0);
         }
         _ = sigterm.recv() => {
             eprintln!("blitzkrieg web: stopping managed core on SIGTERM...");
-            if let Ok(mut d) = signal_dispatcher.lock() { d.stop(); }
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(mut d) = signal_dispatcher_term.lock() { d.stop(); }
+            }).await;
             std::process::exit(0);
         }
     }
@@ -575,16 +601,30 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
                     eprintln!("blitzkrieg: caught SIGTERM, shutting down core cleanly...");
                 }
             }
-            if let Ok(mut g) = d_signal.lock() {
-                g.stop();
-            }
+            // stop() holds the lock and waits out the TERM grace (≤5s) — run
+            // it on the blocking pool, then exit (E14).
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(mut g) = d_signal.lock() {
+                    g.stop();
+                }
+            })
+            .await;
             std::process::exit(0);
         });
     }
 
     if lifecycle_enabled {
-        let mut d = dispatcher.lock().unwrap();
-        match d.supervisor_mut().start() {
+        // start() polls the readiness handshake for up to 15s while holding
+        // the dispatcher lock — blocking-pool, so the signal task stays
+        // serviced (E14).
+        let d_spawn = dispatcher.clone();
+        let started = tokio::task::spawn_blocking(move || {
+            let mut g = d_spawn.lock().unwrap();
+            g.supervisor_mut().start()
+        })
+        .await
+        .map_err(|e| std::io::Error::other(format!("core start task failed: {e}")))?;
+        match started {
             Ok(StartOutcome::Started { pid }) => {
                 println!("blitzkrieg: core spawned (PID {pid}) on {socket}");
             }
@@ -608,9 +648,14 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
             tab: Tab::Overview,
         };
         let res = run_panel_with_dispatcher(panel_args, dispatcher.clone()).await;
-        if let Ok(mut g) = dispatcher.lock() {
-            g.stop();
-        }
+        // stop() waits out the TERM grace synchronously — blocking pool (E14).
+        let d_stop = dispatcher.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(mut g) = d_stop.lock() {
+                g.stop();
+            }
+        })
+        .await;
         res
     } else {
         let client = IpcClient::new(socket.clone());
@@ -653,9 +698,14 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
         });
 
         let _ = tokio::task::spawn_blocking(move || stop_rx.recv()).await;
-        if let Ok(mut g) = dispatcher.lock() {
-            g.stop();
-        }
+        // stop() waits out the TERM grace synchronously — blocking pool (E14).
+        let d_stop = dispatcher.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(mut g) = d_stop.lock() {
+                g.stop();
+            }
+        })
+        .await;
         Ok(())
     }
 }

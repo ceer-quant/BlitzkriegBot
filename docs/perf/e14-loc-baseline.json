@@ -2,7 +2,7 @@
   "rows": [
     {
       "crate": "core/blitzkrieg_core",
-      "lines": 29156,
+      "lines": 29233,
       "files": 50
     },
     {
@@ -12,7 +12,7 @@
     },
     {
       "crate": "extensions/polymarket",
-      "lines": 1932,
+      "lines": 1944,
       "files": 7
     },
     {
@@ -22,7 +22,7 @@
     },
     {
       "crate": "user_layer/strategy_logic",
-      "lines": 2751,
+      "lines": 2731,
       "files": 9
     },
     {
@@ -32,15 +32,15 @@
     },
     {
       "crate": "ui/ui_kit",
-      "lines": 6083,
+      "lines": 6168,
       "files": 16
     },
     {
       "crate": "ui/ui_kit_panel",
-      "lines": 3198,
+      "lines": 3147,
       "files": 8
     }
   ],
-  "total": 45523,
+  "total": 45626,
   "totalFiles": 97
 }

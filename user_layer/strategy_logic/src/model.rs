@@ -65,6 +65,19 @@ impl OrderbookSnapshot {
     ) -> Self {
         bids.sort_by_key(|b| std::cmp::Reverse(b.0));
         asks.sort_by_key(|a| a.0);
+        Self::from_sorted_levels(token_id, bids, asks, timestamp)
+    }
+
+    /// The same construction for input the caller guarantees is already sorted:
+    /// `bids` best-first (descending price), `asks` best-first (ascending).
+    /// The BTreeMap-backed local book always produces levels in that order, so
+    /// its hot per-event snapshot path skips the redundant O(n log n) sort.
+    pub fn from_sorted_levels(
+        token_id: impl Into<TokenId>,
+        bids: Vec<(Decimal, Decimal)>,
+        asks: Vec<(Decimal, Decimal)>,
+        timestamp: i64,
+    ) -> Self {
         let bid_depth: Decimal = bids.iter().map(|(_, s)| *s).sum();
         let ask_depth: Decimal = asks.iter().map(|(_, s)| *s).sum();
         let total = bid_depth + ask_depth;

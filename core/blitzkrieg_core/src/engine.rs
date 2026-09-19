@@ -20,7 +20,7 @@
 //! asks the `Core` to place orders. Everything here is deterministic given the
 //! events and an injected clock, so it is unit-testable without network.
 
-use crate::marketdata::{LocalBook, is_fresh};
+use crate::marketdata::LocalBook;
 use crate::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
 use crate::scanner::{Scanner, ScannerConfig};
 use crate::signal::{
@@ -293,7 +293,7 @@ impl Engine {
     /// Diagnostics: for each confirmed token, its current mid and whether it
     /// currently satisfies the entry band (per strategy).
     pub fn confirmed_diagnostics(&self, now_ms: i64) -> Vec<serde_json::Value> {
-        let round = self.scanner.round_state(now_ms);
+        let round = self.scanner.round_timing(now_ms);
         let fresh =
             |token: &str| fresh_book(&self.books, token, now_ms, self.cfg.max_orderbook_stale_ms);
         let ctx = StrategyCtx::new(
@@ -326,7 +326,13 @@ impl Engine {
                 asks,
                 now_ms,
             } => {
-                let b = self.books.entry(token_id.clone()).or_default();
+                // The book for an in-flight token almost always exists already
+                // (markets arrive before their books); a get_mut hit avoids the
+                // owned-key String that `entry` would allocate per event.
+                let b = match self.books.get_mut(&token_id) {
+                    Some(b) => b,
+                    None => self.books.entry(token_id.clone()).or_default(),
+                };
                 b.apply_snapshot(&bids, &asks, now_ms);
                 let snap = b.snapshot(&token_id);
                 for s in &mut self.strategies {
@@ -373,7 +379,7 @@ impl Engine {
                 let slot = markets.first().map(|m| m.round_slot).unwrap_or(0);
                 // Real round timing for the transition: how much of the round
                 // was left at this instant, straight from the scanner.
-                let time_left_sec = self.scanner.round_state(now_ms).time_left_sec;
+                let time_left_sec = self.scanner.round_timing(now_ms).time_left_sec;
                 for s in &mut self.strategies {
                     s.strategy.on_round(slot, time_left_sec, now_ms);
                 }
@@ -439,7 +445,7 @@ impl Engine {
         self.last_blocked.clear();
         self.last_exemptions.clear();
 
-        let round = self.scanner.round_state(now_ms);
+        let round = self.scanner.round_timing(now_ms);
         let timing = self.scanner.can_trade_reason(now_ms).err();
 
         // Candidates are computed regardless of the timing gate so we can record
@@ -896,21 +902,19 @@ impl Engine {
 
 /// Book snapshot for pricing, but only while it is fresh enough. Mirrors the
 /// engine's historical freshness rule (non-empty book + `max_orderbook_stale_ms`).
+/// The freshness check runs off `LocalBook`'s own timestamp, so a stale book
+/// never pays for a snapshot allocation at all.
 fn fresh_book(
     books: &HashMap<String, LocalBook>,
     token_id: &str,
     now_ms: i64,
     max_stale_ms: i64,
 ) -> Option<OrderbookSnapshot> {
-    let snap = books
-        .get(token_id)
-        .filter(|b| !b.is_empty())
-        .map(|b| b.snapshot(token_id))?;
-    let source = books.get(token_id)?;
-    if !is_fresh(&source.snapshot(token_id), now_ms, max_stale_ms) {
+    let b = books.get(token_id)?;
+    if b.is_empty() || now_ms - b.timestamp() > max_stale_ms {
         return None;
     }
-    Some(snap)
+    Some(b.snapshot(token_id))
 }
 
 #[cfg(test)]

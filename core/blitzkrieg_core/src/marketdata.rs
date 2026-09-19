@@ -27,24 +27,18 @@ impl LocalBook {
     }
 
     /// Replace the book with a full snapshot from the market channel.
+    ///
+    /// Levels are diffed into the existing maps instead of clear()+rebuild, so
+    /// the B-tree nodes are reused and repeated full snapshots don't churn
+    /// node allocations.
     pub fn apply_snapshot(
         &mut self,
         bids: &[(Decimal, Decimal)],
         asks: &[(Decimal, Decimal)],
         now_ms: i64,
     ) {
-        self.bids.clear();
-        self.asks.clear();
-        for (p, s) in bids {
-            if *s > Decimal::ZERO {
-                self.bids.insert(*p, *s);
-            }
-        }
-        for (p, s) in asks {
-            if *s > Decimal::ZERO {
-                self.asks.insert(*p, *s);
-            }
-        }
+        replace_levels(&mut self.bids, bids);
+        replace_levels(&mut self.asks, asks);
         self.timestamp = now_ms;
     }
 
@@ -76,20 +70,14 @@ impl LocalBook {
             self.asks.retain(|p, _| *p > b);
             self.bids.insert(b, nominal);
             // Remove any bids above the new best (shouldn't happen, but be safe).
-            let above: Vec<Decimal> = self.bids.keys().filter(|p| **p > b).copied().collect();
-            for p in above {
-                self.bids.remove(&p);
-            }
+            self.bids.retain(|p, _| *p <= b);
         }
         if let Some(a) = best_ask
             && a > Decimal::ZERO
         {
             self.bids.retain(|p, _| *p < a);
             self.asks.insert(a, nominal);
-            let below: Vec<Decimal> = self.asks.keys().filter(|p| **p < a).copied().collect();
-            for p in below {
-                self.asks.remove(&p);
-            }
+            self.asks.retain(|p, _| *p >= a);
         }
         self.timestamp = now_ms;
     }
@@ -106,10 +94,13 @@ impl LocalBook {
     }
 
     /// Build the immutable snapshot the strategy/exit layers consume.
+    ///
+    /// BTreeMap iteration is already best-first on both sides, so the snapshot
+    /// skips `from_levels`' defensive sort (`from_sorted_levels`).
     pub fn snapshot(&self, token_id: &str) -> OrderbookSnapshot {
         let bids: Vec<(Decimal, Decimal)> = self.bids.iter().rev().map(|(p, s)| (*p, *s)).collect();
         let asks: Vec<(Decimal, Decimal)> = self.asks.iter().map(|(p, s)| (*p, *s)).collect();
-        OrderbookSnapshot::from_levels(token_id.to_string(), bids, asks, self.timestamp)
+        OrderbookSnapshot::from_sorted_levels(token_id.to_string(), bids, asks, self.timestamp)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -128,6 +119,25 @@ fn apply_levels(side: &mut BTreeMap<Decimal, Decimal>, levels: &[(Decimal, Decim
         } else {
             side.insert(*p, *s);
         }
+    }
+}
+
+/// Diff a full snapshot into an existing side: upsert incoming levels, then
+/// drop levels absent from the snapshot (zero-size levels are simply never
+/// upserted, so they fall out here). The O(existing × incoming) retain scan
+/// only runs when some level actually went stale; a snapshot whose price set
+/// is already fully known (the common tick) is a pure in-place upsert with no
+/// scan and no node churn.
+fn replace_levels(side: &mut BTreeMap<Decimal, Decimal>, levels: &[(Decimal, Decimal)]) {
+    let mut valid = 0usize;
+    for (p, s) in levels {
+        if *s > Decimal::ZERO {
+            side.insert(*p, *s);
+            valid += 1;
+        }
+    }
+    if side.len() != valid {
+        side.retain(|p, _| levels.iter().any(|(np, ns)| np == p && *ns > Decimal::ZERO));
     }
 }
 
@@ -192,5 +202,21 @@ mod tests {
         let s = b.snapshot("t");
         assert!(is_fresh(&s, 5000, 8000));
         assert!(!is_fresh(&s, 20_000, 8000));
+    }
+
+    #[test]
+    fn snapshot_drops_zero_size_and_stale_levels() {
+        let mut b = LocalBook::new();
+        b.apply_snapshot(&[(dec!(0.40), dec!(100))], &[(dec!(0.42), dec!(100))], 0);
+        // Second snapshot: the old bid goes to size 0, a new ask appears.
+        b.apply_snapshot(
+            &[(dec!(0.40), dec!(0)), (dec!(0.41), dec!(5))],
+            &[(dec!(0.43), dec!(3))],
+            1,
+        );
+        let s = b.snapshot("t");
+        // 0.40 must not survive just because its zero-size entry names it.
+        assert!(s.bids.iter().all(|(p, _)| *p == dec!(0.41)));
+        assert!(s.asks.iter().all(|(p, _)| *p == dec!(0.43)));
     }
 }

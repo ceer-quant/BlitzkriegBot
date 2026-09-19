@@ -4,20 +4,13 @@
 //! a thin, logic-free forward onto the corresponding `Core` method, so the
 //! plugin boundary carries no trading behaviour of its own.
 
+use crate::ipc::server::now_ms;
 use crate::model as m;
 use crate::service::Core;
 use blitzkrieg_market_api as api;
 use blitzkrieg_market_api::{BoxFuture, MarketHost};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
 
 // ── DTO ↔ core-model conversions ─────────────────────────────────────────────
 

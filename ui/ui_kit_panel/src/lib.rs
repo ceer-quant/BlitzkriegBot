@@ -226,13 +226,9 @@ pub async fn run_panel_with_dispatcher(
         let interval = Duration::from_millis(args.interval_ms);
         tokio::spawn(async move {
             loop {
-                let d = d.clone();
-                match tokio::task::spawn_blocking(move || {
-                    let mut g = match d.lock() {
-                        Ok(g) => g,
-                        Err(_) => return None,
-                    };
-                    Some((g.snapshot(), g.managed(), g.pid()))
+                match tokio::task::spawn_blocking({
+                    let d = d.clone();
+                    move || fetch_snapshot_once(d)
                 })
                 .await
                 {
@@ -361,16 +357,11 @@ pub async fn run_panel_with_dispatcher(
                     let d = dispatcher.clone();
                     let tx = tx.clone();
                     tokio::spawn(async move {
-                        let out = tokio::task::spawn_blocking(move || {
-                            let mut g = match d.lock() {
-                                Ok(g) => g,
-                                Err(_) => return None,
-                            };
-                            Some((g.snapshot(), g.managed(), g.pid()))
-                        })
-                        .await
-                        .unwrap_or(None);
-                        if let Some((snap, managed, pid)) = out {
+                        if let Some((snap, managed, pid)) =
+                            tokio::task::spawn_blocking(|| fetch_snapshot_once(d))
+                                .await
+                                .unwrap_or(None)
+                        {
                             let _ = tx.send(Msg::Snapshot { snap, managed, pid });
                         }
                     });
@@ -406,6 +397,16 @@ pub async fn run_panel_with_dispatcher(
 
     ratatui::restore();
     Ok(())
+}
+
+/// One blocking snapshot fetch off the shared dispatcher. `None` = the lock
+/// is poisoned and the snapshot stream should stop (the poll loop treats it
+/// as fatal; event-driven refreshes just skip the beat).
+fn fetch_snapshot_once(
+    dispatcher: Arc<Mutex<Dispatcher>>,
+) -> Option<(UiSnapshot, bool, Option<u32>)> {
+    let mut g = dispatcher.lock().ok()?;
+    Some((g.snapshot(), g.managed(), g.pid()))
 }
 
 async fn dispatch_command(

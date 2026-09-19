@@ -16,9 +16,9 @@ use blitzkrieg_core::engine::{DataEvent, Engine, EngineConfig};
 use blitzkrieg_core::model::{CryptoMarket, OrderRequest, Side};
 use blitzkrieg_core::risk::RiskConfig;
 use blitzkrieg_core::service::{Core, CoreConfig};
-use blitzkrieg_core::strategies::test_support::TestSpreadArb;
 use blitzkrieg_core::signal::TrendConfig;
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use blitzkrieg_core::strategies::test_support::TestSpreadArb;
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -65,7 +65,10 @@ fn bench_core() -> Core {
     let mut engine = Engine::new(EngineConfig::default());
     engine
         .register_user_strategy(
-            Box::new(TestSpreadArb::new(TrendConfig::default(), Default::default())),
+            Box::new(TestSpreadArb::new(
+                TrendConfig::default(),
+                Default::default(),
+            )),
             "bench".into(),
         )
         .expect("bench strategy registers");
@@ -169,36 +172,32 @@ fn feed_books(c: &mut Core) {
 fn bench_book_apply(c: &mut Criterion) {
     let mut g = c.benchmark_group("hot_path.book_apply");
     for depth in [5usize, 20] {
-        g.bench_with_input(
-            BenchmarkId::new("depth", depth),
-            &depth,
-            |b, &depth| {
-                let mut c = bench_core();
-                b.iter_batched(
-                    || {
-                        let n = now();
-                        TOKENS
-                            .iter()
-                            .map(|t| {
-                                let (bids, asks) = book(dec!(0.45), depth);
-                                DataEvent::Book {
-                                    token_id: t.to_string(),
-                                    bids,
-                                    asks,
-                                    now_ms: n,
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                    },
-                    |events| {
-                        for ev in events {
-                            c.engine_on_data(ev, now());
-                        }
-                    },
-                    BatchSize::SmallInput,
-                );
-            },
-        );
+        g.bench_with_input(BenchmarkId::new("depth", depth), &depth, |b, &depth| {
+            let mut c = bench_core();
+            b.iter_batched(
+                || {
+                    let n = now();
+                    TOKENS
+                        .iter()
+                        .map(|t| {
+                            let (bids, asks) = book(dec!(0.45), depth);
+                            DataEvent::Book {
+                                token_id: t.to_string(),
+                                bids,
+                                asks,
+                                now_ms: n,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                },
+                |events| {
+                    for ev in events {
+                        c.engine_on_data(ev, now());
+                    }
+                },
+                BatchSize::SmallInput,
+            );
+        });
     }
     g.finish();
 }

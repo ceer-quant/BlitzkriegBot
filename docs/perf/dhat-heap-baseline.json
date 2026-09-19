@@ -1,0 +1,3773 @@
+{
+"dhatFileVersion": 2,
+"mode": "rust-heap",
+"verb": "Allocated",
+"bklt": true,
+"bkacc": false,
+"tu": "µs",
+"Mtu": "s",
+"tuth": 10,
+"cmd": "/Volumes/Hard Disk/BlitzkriegBot/target/release/deps/dhat_profile-fcdc49c8639969a9",
+"pid": 4451,
+"tg": 428838,
+"te": 428857,
+"pps": [
+{
+"tb": 172,
+"tbk": 1,
+"tl": 22343,
+"mb": 172,
+"mbk": 1,
+"gb": 172,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+2,
+3,
+4,
+5
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 6,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+6,
+7,
+8,
+9,
+5
+]
+},
+{
+"tb": 40,
+"tbk": 4,
+"tl": 151,
+"mb": 40,
+"mbk": 4,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+10,
+11
+]
+},
+{
+"tb": 96,
+"tbk": 1,
+"tl": 428253,
+"mb": 96,
+"mbk": 1,
+"gb": 96,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+12
+]
+},
+{
+"tb": 6,
+"tbk": 1,
+"tl": 1028,
+"mb": 6,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+13,
+14,
+5
+]
+},
+{
+"tb": 2403,
+"tbk": 2,
+"tl": 198,
+"mb": 1602,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+17,
+18,
+19,
+9,
+5
+]
+},
+{
+"tb": 40,
+"tbk": 4,
+"tl": 1712373,
+"mb": 40,
+"mbk": 4,
+"gb": 40,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+20
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 71,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+21,
+19,
+9,
+5
+]
+},
+{
+"tb": 204,
+"tbk": 1,
+"tl": 22284,
+"mb": 204,
+"mbk": 1,
+"gb": 204,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+22,
+23,
+5
+]
+},
+{
+"tb": 15,
+"tbk": 1,
+"tl": 772,
+"mb": 15,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+24,
+25,
+26,
+9,
+5
+]
+},
+{
+"tb": 40,
+"tbk": 4,
+"tl": 111,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+27,
+28,
+29
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 0,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+30,
+31,
+32,
+33,
+34,
+35,
+5
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 1018,
+"mb": 3,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+36,
+14,
+5
+]
+},
+{
+"tb": 12,
+"tbk": 1,
+"tl": 428313,
+"mb": 12,
+"mbk": 1,
+"gb": 12,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+37,
+38
+]
+},
+{
+"tb": 2560,
+"tbk": 4,
+"tl": 142,
+"mb": 640,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+39,
+28,
+29
+]
+},
+{
+"tb": 6,
+"tbk": 1,
+"tl": 31,
+"mb": 6,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+13,
+7,
+40,
+5
+]
+},
+{
+"tb": 35,
+"tbk": 1,
+"tl": 2,
+"mb": 35,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+41,
+38
+]
+},
+{
+"tb": 800,
+"tbk": 1,
+"tl": 428174,
+"mb": 800,
+"mbk": 1,
+"gb": 800,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+42
+]
+},
+{
+"tb": 27,
+"tbk": 2,
+"tl": 84,
+"mb": 19,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+30,
+31,
+32,
+33,
+34,
+43,
+9,
+5
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 22054,
+"mb": 5,
+"mbk": 1,
+"gb": 5,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+44,
+45,
+19,
+9,
+5
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 19,
+"mb": 3,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+36,
+7,
+40,
+5
+]
+},
+{
+"tb": 40000,
+"tbk": 4000,
+"tl": 6989,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+27,
+28,
+46
+]
+},
+{
+"tb": 2,
+"tbk": 1,
+"tl": 0,
+"mb": 2,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+47,
+19,
+9,
+5
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 23,
+"mb": 5,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+48,
+9,
+5
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 787,
+"mb": 3,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+49,
+25,
+26,
+9,
+5
+]
+},
+{
+"tb": 2560,
+"tbk": 4,
+"tl": 736,
+"mb": 640,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+50,
+51
+]
+},
+{
+"tb": 120,
+"tbk": 8,
+"tl": 1712420,
+"mb": 80,
+"mbk": 4,
+"gb": 80,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+52,
+53
+]
+},
+{
+"tb": 40,
+"tbk": 4,
+"tl": 685,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+54
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 0,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+55,
+56,
+57,
+58,
+59,
+60,
+19
+]
+},
+{
+"tb": 6,
+"tbk": 1,
+"tl": 37,
+"mb": 6,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+13,
+61,
+19,
+9,
+5
+]
+},
+{
+"tb": 15,
+"tbk": 1,
+"tl": 0,
+"mb": 15,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+62,
+61,
+19,
+9,
+5
+]
+},
+{
+"tb": 16,
+"tbk": 1,
+"tl": 428320,
+"mb": 16,
+"mbk": 1,
+"gb": 16,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+63,
+38
+]
+},
+{
+"tb": 128000,
+"tbk": 200,
+"tl": 1230,
+"mb": 640,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+64,
+65,
+66
+]
+},
+{
+"tb": 6,
+"tbk": 1,
+"tl": 125,
+"mb": 6,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+67
+]
+},
+{
+"tb": 565,
+"tbk": 2,
+"tl": 53,
+"mb": 512,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+68,
+69
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 65,
+"mb": 3,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+70,
+19,
+9,
+5
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 70,
+"mb": 5,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+71,
+26,
+9,
+5
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 64,
+"mb": 5,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+72,
+5
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 428197,
+"mb": 5,
+"mbk": 1,
+"gb": 5,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+73
+]
+},
+{
+"tb": 4,
+"tbk": 4,
+"tl": 1712325,
+"mb": 4,
+"mbk": 4,
+"gb": 4,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+74
+]
+},
+{
+"tb": 1856,
+"tbk": 4,
+"tl": 2262,
+"mb": 1856,
+"mbk": 4,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+75,
+76,
+29
+]
+},
+{
+"tb": 1472000,
+"tbk": 4000,
+"tl": 1589048,
+"mb": 1472,
+"mbk": 4,
+"gb": 1472,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+77,
+76,
+46
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 22278,
+"mb": 5,
+"mbk": 1,
+"gb": 5,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+78,
+5
+]
+},
+{
+"tb": 192,
+"tbk": 1,
+"tl": 428185,
+"mb": 192,
+"mbk": 1,
+"gb": 192,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+79,
+80
+]
+},
+{
+"tb": 15,
+"tbk": 1,
+"tl": 0,
+"mb": 15,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+62,
+7,
+8,
+9,
+5
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 6,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+6,
+7,
+40,
+5
+]
+},
+{
+"tb": 40,
+"tbk": 4,
+"tl": 12,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+81,
+29
+]
+},
+{
+"tb": 24,
+"tbk": 2,
+"tl": 8,
+"mb": 16,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+82,
+38
+]
+},
+{
+"tb": 40,
+"tbk": 4,
+"tl": 1709733,
+"mb": 40,
+"mbk": 4,
+"gb": 40,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+83,
+84,
+29
+]
+},
+{
+"tb": 2560000,
+"tbk": 4000,
+"tl": 1708438,
+"mb": 3200,
+"mbk": 5,
+"gb": 2560,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+85,
+46
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 0,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+55,
+56,
+57,
+86,
+87,
+88,
+8
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 801,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+89,
+25,
+26,
+9,
+5
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 0,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+55,
+56,
+57,
+58,
+59,
+88,
+8
+]
+},
+{
+"tb": 64,
+"tbk": 8,
+"tl": 1712394,
+"mb": 48,
+"mbk": 4,
+"gb": 48,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+52,
+90
+]
+},
+{
+"tb": 2944000,
+"tbk": 8000,
+"tl": 3080922,
+"mb": 2944,
+"mbk": 8,
+"gb": 2944,
+"gbk": 8,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+91,
+76,
+46
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 37,
+"mb": 5,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+92,
+7,
+40,
+5
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 0,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+55,
+56,
+57,
+58,
+59,
+88,
+40
+]
+},
+{
+"tb": 24,
+"tbk": 1,
+"tl": 428651,
+"mb": 24,
+"mbk": 1,
+"gb": 24,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+93
+]
+},
+{
+"tb": 128000,
+"tbk": 200,
+"tl": 116,
+"mb": 640,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+94,
+65,
+66
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 22322,
+"mb": 10,
+"mbk": 1,
+"gb": 10,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+95,
+5
+]
+},
+{
+"tb": 128000,
+"tbk": 200,
+"tl": 1236,
+"mb": 640,
+"mbk": 1,
+"gb": 640,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+64,
+96,
+66
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 428684,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+97
+]
+},
+{
+"tb": 14,
+"tbk": 1,
+"tl": 428396,
+"mb": 14,
+"mbk": 1,
+"gb": 14,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+98,
+38
+]
+},
+{
+"tb": 192,
+"tbk": 1,
+"tl": 64,
+"mb": 192,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+99,
+11
+]
+},
+{
+"tb": 14,
+"tbk": 1,
+"tl": 428298,
+"mb": 14,
+"mbk": 1,
+"gb": 14,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+100,
+38
+]
+},
+{
+"tb": 2560,
+"tbk": 4,
+"tl": 2593,
+"mb": 2560,
+"mbk": 4,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+85,
+29
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 132,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+101
+]
+},
+{
+"tb": 1324,
+"tbk": 1,
+"tl": 22273,
+"mb": 1324,
+"mbk": 1,
+"gb": 1324,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+102,
+103,
+5
+]
+},
+{
+"tb": 2560000,
+"tbk": 4000,
+"tl": 364535,
+"mb": 640,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+104,
+105
+]
+},
+{
+"tb": 6,
+"tbk": 1,
+"tl": 22299,
+"mb": 6,
+"mbk": 1,
+"gb": 6,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+106,
+5
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 428656,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+107
+]
+},
+{
+"tb": 2,
+"tbk": 1,
+"tl": 0,
+"mb": 2,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+108,
+5
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 1008,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+6,
+14,
+5
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 0,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+55,
+56,
+57,
+109,
+110,
+60,
+19
+]
+},
+{
+"tb": 2,
+"tbk": 1,
+"tl": 15,
+"mb": 2,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+111,
+61,
+19,
+9,
+5
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 0,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+55,
+56,
+57,
+112,
+113,
+88,
+8
+]
+},
+{
+"tb": 2,
+"tbk": 1,
+"tl": 12,
+"mb": 2,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+111,
+7,
+8,
+9,
+5
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 244,
+"mb": 5,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+114,
+5
+]
+},
+{
+"tb": 15,
+"tbk": 1,
+"tl": 0,
+"mb": 15,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+62,
+7,
+40,
+5
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 25,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+115,
+7,
+8,
+9,
+5
+]
+},
+{
+"tb": 700,
+"tbk": 2,
+"tl": 427676,
+"mb": 700,
+"mbk": 2,
+"gb": 464,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+116,
+117,
+84,
+29
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 428661,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+118
+]
+},
+{
+"tb": 24,
+"tbk": 1,
+"tl": 428628,
+"mb": 24,
+"mbk": 1,
+"gb": 24,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+119,
+38
+]
+},
+{
+"tb": 12,
+"tbk": 4,
+"tl": 1712841,
+"mb": 12,
+"mbk": 4,
+"gb": 12,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+120
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 8,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+6,
+61,
+19,
+9,
+5
+]
+},
+{
+"tb": 2000,
+"tbk": 200,
+"tl": 2372,
+"mb": 10,
+"mbk": 1,
+"gb": 10,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+121,
+96,
+66
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 22032,
+"mb": 10,
+"mbk": 1,
+"gb": 10,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+122,
+45,
+19,
+9,
+5
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 428667,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+123
+]
+},
+{
+"tb": 77,
+"tbk": 3,
+"tl": 428619,
+"mb": 44,
+"mbk": 1,
+"gb": 44,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+124,
+125,
+38
+]
+},
+{
+"tb": 120,
+"tbk": 8,
+"tl": 1712348,
+"mb": 80,
+"mbk": 4,
+"gb": 80,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+52,
+126
+]
+},
+{
+"tb": 1920,
+"tbk": 4,
+"tl": 10,
+"mb": 1024,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+127,
+18,
+19,
+9,
+5
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 77,
+"mb": 5,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+128,
+129,
+26,
+9,
+5
+]
+},
+{
+"tb": 2,
+"tbk": 1,
+"tl": 779,
+"mb": 2,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+130,
+25,
+26,
+9,
+5
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 14,
+"mb": 3,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+131,
+132,
+19,
+9,
+5
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 22047,
+"mb": 10,
+"mbk": 1,
+"gb": 10,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+133,
+45,
+19,
+9,
+5
+]
+},
+{
+"tb": 96,
+"tbk": 1,
+"tl": 428225,
+"mb": 96,
+"mbk": 1,
+"gb": 96,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+134
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 22,
+"mb": 3,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+36,
+61,
+19,
+9,
+5
+]
+},
+{
+"tb": 896,
+"tbk": 3,
+"tl": 30,
+"mb": 512,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+135,
+88,
+8,
+9,
+5
+]
+},
+{
+"tb": 8000,
+"tbk": 800,
+"tl": 53972,
+"mb": 40,
+"mbk": 4,
+"gb": 40,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+136,
+66
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 428230,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+137
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 7,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+138
+]
+},
+{
+"tb": 19,
+"tbk": 1,
+"tl": 22132,
+"mb": 19,
+"mbk": 1,
+"gb": 19,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+139,
+26,
+9,
+5
+]
+},
+{
+"tb": 512000,
+"tbk": 800,
+"tl": 50130,
+"mb": 2560,
+"mbk": 4,
+"gb": 2560,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+140,
+66
+]
+},
+{
+"tb": 30,
+"tbk": 1,
+"tl": 428641,
+"mb": 30,
+"mbk": 1,
+"gb": 30,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+141
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 809,
+"mb": 5,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+142,
+25,
+26,
+9,
+5
+]
+},
+{
+"tb": 236,
+"tbk": 1,
+"tl": 22122,
+"mb": 236,
+"mbk": 1,
+"gb": 236,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+143,
+144,
+145,
+26,
+9,
+5
+]
+},
+{
+"tb": 896,
+"tbk": 3,
+"tl": 245,
+"mb": 512,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+135,
+60,
+19,
+9,
+5
+]
+},
+{
+"tb": 24,
+"tbk": 1,
+"tl": 428646,
+"mb": 24,
+"mbk": 1,
+"gb": 24,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+146
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 19,
+"mb": 3,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+36,
+7,
+8,
+9,
+5
+]
+},
+{
+"tb": 118400,
+"tbk": 200,
+"tl": 18919,
+"mb": 592,
+"mbk": 1,
+"gb": 592,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+147,
+66
+]
+},
+{
+"tb": 70,
+"tbk": 3,
+"tl": 8,
+"mb": 40,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+124,
+148,
+38
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 428237,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+149
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 336,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+52,
+150,
+19,
+9,
+5
+]
+},
+{
+"tb": 2,
+"tbk": 1,
+"tl": 1013,
+"mb": 2,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+111,
+14,
+5
+]
+},
+{
+"tb": 6,
+"tbk": 1,
+"tl": 23,
+"mb": 6,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+151,
+152,
+38
+]
+},
+{
+"tb": 988,
+"tbk": 2,
+"tl": 427833,
+"mb": 988,
+"mbk": 2,
+"gb": 656,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+153,
+154,
+155,
+29
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 7,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+122,
+132,
+19,
+9,
+5
+]
+},
+{
+"tb": 15,
+"tbk": 1,
+"tl": 128,
+"mb": 15,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+156
+]
+},
+{
+"tb": 15,
+"tbk": 1,
+"tl": 1003,
+"mb": 15,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+62,
+14,
+5
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 794,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+157,
+25,
+26,
+9,
+5
+]
+},
+{
+"tb": 15,
+"tbk": 1,
+"tl": 22025,
+"mb": 15,
+"mbk": 1,
+"gb": 15,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+158,
+45,
+19,
+9,
+5
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 428242,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+159
+]
+},
+{
+"tb": 376,
+"tbk": 1,
+"tl": 428202,
+"mb": 376,
+"mbk": 1,
+"gb": 376,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+160
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 1023,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+115,
+14,
+5
+]
+},
+{
+"tb": 1952,
+"tbk": 1,
+"tl": 22017,
+"mb": 1952,
+"mbk": 1,
+"gb": 1952,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+161,
+162,
+19,
+9,
+5
+]
+},
+{
+"tb": 1856000,
+"tbk": 4000,
+"tl": 1635848,
+"mb": 1856,
+"mbk": 4,
+"gb": 1856,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+75,
+163,
+46
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 0,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+55,
+56,
+57,
+109,
+110,
+88,
+8
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 0,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+55,
+56,
+57,
+109,
+110,
+88,
+40
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 28,
+"mb": 5,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+44,
+132,
+19,
+9,
+5
+]
+},
+{
+"tb": 2000,
+"tbk": 200,
+"tl": 2357,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+121,
+65,
+66
+]
+},
+{
+"tb": 12,
+"tbk": 4,
+"tl": 1712446,
+"mb": 12,
+"mbk": 4,
+"gb": 12,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+164,
+165
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 428247,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+166
+]
+},
+{
+"tb": 1472,
+"tbk": 4,
+"tl": 2455,
+"mb": 1472,
+"mbk": 4,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+77,
+163,
+29
+]
+},
+{
+"tb": 2560000,
+"tbk": 4000,
+"tl": 30246,
+"mb": 640,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+39,
+28,
+46
+]
+},
+{
+"tb": 1856,
+"tbk": 4,
+"tl": 2391,
+"mb": 1856,
+"mbk": 4,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+75,
+163,
+29
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 22308,
+"mb": 10,
+"mbk": 1,
+"gb": 10,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+167,
+5
+]
+},
+{
+"tb": 300,
+"tbk": 1,
+"tl": 428304,
+"mb": 300,
+"mbk": 1,
+"gb": 300,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+168,
+169,
+38
+]
+},
+{
+"tb": 15,
+"tbk": 1,
+"tl": 22303,
+"mb": 15,
+"mbk": 1,
+"gb": 15,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+170,
+5
+]
+},
+{
+"tb": 2944,
+"tbk": 8,
+"tl": 4525,
+"mb": 2944,
+"mbk": 8,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+91,
+76,
+29
+]
+},
+{
+"tb": 2,
+"tbk": 1,
+"tl": 22313,
+"mb": 2,
+"mbk": 1,
+"gb": 2,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+171,
+5
+]
+},
+{
+"tb": 2944000,
+"tbk": 8000,
+"tl": 3270989,
+"mb": 2944,
+"mbk": 8,
+"gb": 2944,
+"gbk": 8,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+91,
+163,
+46
+]
+},
+{
+"tb": 1472000,
+"tbk": 4000,
+"tl": 1683463,
+"mb": 1472,
+"mbk": 4,
+"gb": 1472,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+77,
+163,
+46
+]
+},
+{
+"tb": 2560,
+"tbk": 4,
+"tl": 709,
+"mb": 640,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+104,
+51
+]
+},
+{
+"tb": 2560000,
+"tbk": 4000,
+"tl": 1727588,
+"mb": 3200,
+"mbk": 5,
+"gb": 2560,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+172,
+46
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 0,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+55,
+56,
+57,
+86,
+87,
+60,
+19
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 0,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+55,
+56,
+57,
+112,
+113,
+88,
+40
+]
+},
+{
+"tb": 15,
+"tbk": 1,
+"tl": 0,
+"mb": 15,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+158,
+132,
+19,
+9,
+5
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 428690,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+173
+]
+},
+{
+"tb": 2,
+"tbk": 1,
+"tl": 113,
+"mb": 2,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+174
+]
+},
+{
+"tb": 56,
+"tbk": 1,
+"tl": 428290,
+"mb": 56,
+"mbk": 1,
+"gb": 56,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+175,
+38
+]
+},
+{
+"tb": 40000,
+"tbk": 4000,
+"tl": 39296,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+176,
+46
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 22332,
+"mb": 5,
+"mbk": 1,
+"gb": 5,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+177,
+5
+]
+},
+{
+"tb": 2560000,
+"tbk": 4000,
+"tl": 384598,
+"mb": 640,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+50,
+105
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 22040,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+131,
+45,
+19,
+9,
+5
+]
+},
+{
+"tb": 69,
+"tbk": 2,
+"tl": 54,
+"mb": 46,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+124,
+178,
+38
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 1252,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+30,
+31,
+32,
+33,
+34,
+179,
+5
+]
+},
+{
+"tb": 2944,
+"tbk": 8,
+"tl": 4779,
+"mb": 2944,
+"mbk": 8,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+91,
+163,
+29
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 428697,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+180
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 117,
+"mb": 3,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+181
+]
+},
+{
+"tb": 64,
+"tbk": 1,
+"tl": 428779,
+"mb": 64,
+"mbk": 1,
+"gb": 64,
+"gbk": 1,
+"eb": 64,
+"ebk": 1,
+"fs": [
+1,
+182,
+183,
+184,
+185
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 22318,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+186,
+5
+]
+},
+{
+"tb": 1472,
+"tbk": 4,
+"tl": 2327,
+"mb": 1472,
+"mbk": 4,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+77,
+76,
+29
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 8,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+30,
+31,
+32,
+33,
+34,
+187,
+38
+]
+},
+{
+"tb": 24,
+"tbk": 1,
+"tl": 428410,
+"mb": 24,
+"mbk": 1,
+"gb": 24,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+188,
+38
+]
+},
+{
+"tb": 314,
+"tbk": 1,
+"tl": 160,
+"mb": 314,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+30,
+189,
+190,
+38
+]
+},
+{
+"tb": 60,
+"tbk": 4,
+"tl": 125,
+"mb": 60,
+"mbk": 4,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+191,
+11
+]
+},
+{
+"tb": 96,
+"tbk": 1,
+"tl": 428709,
+"mb": 96,
+"mbk": 1,
+"gb": 96,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+192
+]
+},
+{
+"tb": 40,
+"tbk": 4,
+"tl": 1710302,
+"mb": 40,
+"mbk": 4,
+"gb": 40,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+176,
+29
+]
+},
+{
+"tb": 2560,
+"tbk": 4,
+"tl": 2618,
+"mb": 2560,
+"mbk": 4,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+172,
+29
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 428703,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+193
+]
+},
+{
+"tb": 40,
+"tbk": 4,
+"tl": 1710179,
+"mb": 40,
+"mbk": 4,
+"gb": 40,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+194,
+29
+]
+},
+{
+"tb": 196224,
+"tbk": 36,
+"tl": 850230,
+"mb": 98304,
+"mbk": 4,
+"gb": 98304,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+195,
+196,
+197,
+84,
+29
+]
+},
+{
+"tb": 1856000,
+"tbk": 4000,
+"tl": 1541103,
+"mb": 1856,
+"mbk": 4,
+"gb": 1856,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+75,
+76,
+46
+]
+},
+{
+"tb": 96,
+"tbk": 1,
+"tl": 428678,
+"mb": 96,
+"mbk": 1,
+"gb": 96,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+198
+]
+},
+{
+"tb": 40000,
+"tbk": 4000,
+"tl": 132,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+81,
+46
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 121,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+199
+]
+},
+{
+"tb": 499,
+"tbk": 5,
+"tl": 428726,
+"mb": 268,
+"mbk": 1,
+"gb": 268,
+"gbk": 1,
+"eb": 268,
+"ebk": 1,
+"fs": [
+1,
+200,
+201,
+202,
+203,
+204,
+184,
+185
+]
+},
+{
+"tb": 3,
+"tbk": 1,
+"tl": 428672,
+"mb": 3,
+"mbk": 1,
+"gb": 3,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+205
+]
+},
+{
+"tb": 2560,
+"tbk": 4,
+"tl": 172,
+"mb": 640,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+206,
+28,
+29
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 22291,
+"mb": 5,
+"mbk": 1,
+"gb": 5,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+207,
+5
+]
+},
+{
+"tb": 19,
+"tbk": 1,
+"tl": 61,
+"mb": 19,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+208,
+26,
+9,
+5
+]
+},
+{
+"tb": 892,
+"tbk": 2,
+"tl": 427865,
+"mb": 892,
+"mbk": 2,
+"gb": 592,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+209,
+210,
+211,
+29
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 58,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+212,
+19,
+9,
+5
+]
+},
+{
+"tb": 15,
+"tbk": 1,
+"tl": 52,
+"mb": 15,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+213,
+19,
+9,
+5
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 99,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+214,
+9,
+5
+]
+},
+{
+"tb": 30,
+"tbk": 1,
+"tl": 428403,
+"mb": 30,
+"mbk": 1,
+"gb": 30,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+215,
+38
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 44,
+"mb": 5,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+92,
+61,
+19,
+9,
+5
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 30,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+115,
+61,
+19,
+9,
+5
+]
+},
+{
+"tb": 6,
+"tbk": 1,
+"tl": 32,
+"mb": 6,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+13,
+7,
+8,
+9,
+5
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 39,
+"mb": 5,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+92,
+7,
+8,
+9,
+5
+]
+},
+{
+"tb": 896,
+"tbk": 3,
+"tl": 30,
+"mb": 512,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+135,
+88,
+40,
+5
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 0,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+55,
+56,
+57,
+112,
+113,
+60,
+19
+]
+},
+{
+"tb": 8,
+"tbk": 1,
+"tl": 0,
+"mb": 8,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+15,
+16,
+55,
+56,
+57,
+86,
+87,
+88,
+40
+]
+},
+{
+"tb": 40000,
+"tbk": 4000,
+"tl": 348407,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+216
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 25,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+115,
+7,
+40,
+5
+]
+},
+{
+"tb": 2,
+"tbk": 1,
+"tl": 12,
+"mb": 2,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+111,
+7,
+40,
+5
+]
+},
+{
+"tb": 10,
+"tbk": 1,
+"tl": 21,
+"mb": 10,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+133,
+132,
+19,
+9,
+5
+]
+},
+{
+"tb": 128000,
+"tbk": 200,
+"tl": 118,
+"mb": 640,
+"mbk": 1,
+"gb": 640,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+94,
+96,
+66
+]
+},
+{
+"tb": 2560000,
+"tbk": 4000,
+"tl": 53123,
+"mb": 640,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+206,
+28,
+46
+]
+},
+{
+"tb": 6,
+"tbk": 1,
+"tl": 22327,
+"mb": 6,
+"mbk": 1,
+"gb": 6,
+"gbk": 1,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+217,
+5
+]
+},
+{
+"tb": 512000,
+"tbk": 800,
+"tl": 46266,
+"mb": 2560,
+"mbk": 4,
+"gb": 2560,
+"gbk": 4,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+218,
+66
+]
+},
+{
+"tb": 5,
+"tbk": 1,
+"tl": 1033,
+"mb": 5,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+92,
+14,
+5
+]
+},
+{
+"tb": 6400,
+"tbk": 200,
+"tl": 12,
+"mb": 32,
+"mbk": 1,
+"gb": 0,
+"gbk": 0,
+"eb": 0,
+"ebk": 0,
+"fs": [
+1,
+219,
+220,
+66
+]
+}
+],
+"ftbl": [
+"[root]",
+"0x102a240fc: <dhat::Alloc as core::alloc::global::GlobalAlloc>::alloc (???:0:0)",
+"0x102aae3c0: <hashbrown::raw::RawTable<(alloc::string::String, rust_decimal::decimal::Decimal)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, rust_decimal::decimal::Decimal, std::hash::random::RandomState>::{closure#0}> (???:0:0)",
+"0x1029c30ec: <hashbrown::map::HashMap<alloc::string::String, rust_decimal::decimal::Decimal, std::hash::random::RandomState>>::insert (???:0:0)",
+"0x1029f73e4: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x10298fa80: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029dea64: <blitzkrieg_core::model::TrackedOrder as core::clone::Clone>::clone (???:0:0)",
+"0x1029de8d8: <blitzkrieg_core::service::Core>::emit_order (???:0:0)",
+"0x1029e9ea8: <blitzkrieg_core::service::Core>::authoritative_fill (???:0:0)",
+"0x1029f70c4: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x1029eafc4: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x10298ee6c: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x10298e0fc: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029de9a0: <blitzkrieg_core::model::TrackedOrder as core::clone::Clone>::clone (???:0:0)",
+"0x1029f6fb8: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x102ab2e30: <alloc::raw_vec::RawVecInner>::finish_grow (???:0:0)",
+"0x102ab2d80: <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global> (???:0:0)",
+"0x1029bdb24: <blitzkrieg_core::position_db::PositionDb>::save (???:0:0)",
+"0x1029e2018: <blitzkrieg_core::service::Core>::apply_delta_effects (???:0:0)",
+"0x1029e9e9c: <blitzkrieg_core::service::Core>::authoritative_fill (???:0:0)",
+"0x10298ecf0: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029e0008: <blitzkrieg_core::service::Core>::apply_delta_effects (???:0:0)",
+"0x102ab4434: <hashbrown::raw::RawTable<(alloc::string::String, alloc::string::String)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, alloc::string::String, std::hash::random::RandomState>::{closure#0}> (???:0:0)",
+"0x1029f7400: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x1029c1194: <blitzkrieg_core::ome::Ome>::record_delta (???:0:0)",
+"0x1029bf67c: <blitzkrieg_core::ome::Ome>::apply_fill (???:0:0)",
+"0x1029e9dd0: <blitzkrieg_core::service::Core>::authoritative_fill (???:0:0)",
+"0x1029b4b24: <blitzkrieg_core::marketdata::LocalBook>::snapshot (???:0:0)",
+"0x1029eb3e0: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x10298f2bc: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x102aaacb8: <alloc::raw_vec::RawVecInner>::finish_grow (???:0:0)",
+"0x102aaac28: <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global> (???:0:0)",
+"0x10299296c: <alloc::string::String as core::fmt::Write>::write_str (???:0:0)",
+"0x102a0e814: core::fmt::write (???:0:0)",
+"0x10299285c: alloc::fmt::format::format_inner (???:0:0)",
+"0x1029f5d40: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x1029dea0c: <blitzkrieg_core::model::TrackedOrder as core::clone::Clone>::clone (???:0:0)",
+"0x102a00cfc: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x10298e0f0: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029b49f0: <blitzkrieg_core::marketdata::LocalBook>::snapshot (???:0:0)",
+"0x1029f72bc: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x1029ff964: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x10298eba0: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029e9d68: <blitzkrieg_core::service::Core>::authoritative_fill (???:0:0)",
+"0x1029dc9f0: <blitzkrieg_core::position::OpenPosition as core::clone::Clone>::clone (???:0:0)",
+"0x1029e026c: <blitzkrieg_core::service::Core>::apply_delta_effects (???:0:0)",
+"0x10298f878: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029dfe68: <blitzkrieg_core::service::Core>::apply_delta_effects (???:0:0)",
+"0x1029e9cec: <blitzkrieg_core::service::Core>::authoritative_fill (???:0:0)",
+"0x1029c1138: <blitzkrieg_core::ome::Ome>::record_delta (???:0:0)",
+"0x10298b3f0: dhat_profile::book (???:0:0)",
+"0x10298f22c: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x102992828: alloc::fmt::format::format_inner (???:0:0)",
+"0x10298eca4: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x10298f264: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029b76ac: <alloc::string::String as core::fmt::Write>::write_str.497 (???:0:0)",
+"0x102a2c9e8: <rust_decimal::decimal::Decimal as core::fmt::Display>::fmt (???:0:0)",
+"0x1029cf038: blitzkrieg_core::decimal::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>> (???:0:0)",
+"0x1029ce660: <serde_json::ser::Compound<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter> as serde_core::ser::SerializeStruct>::serialize_field::<<blitzkrieg_core::model::TrackedOrder as serde_core::ser::Serialize>::serialize::__SerializeWith> (???:0:0)",
+"0x1029cddb8: <blitzkrieg_core::order_db::OrderDb>::append (???:0:0)",
+"0x1029e20d4: <blitzkrieg_core::service::Core>::apply_delta_effects (???:0:0)",
+"0x1029e2164: <blitzkrieg_core::service::Core>::apply_delta_effects (???:0:0)",
+"0x1029dea90: <blitzkrieg_core::model::TrackedOrder as core::clone::Clone>::clone (???:0:0)",
+"0x102a00ce0: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x102a09d50: <blitzkrieg_core::service::Core>::run_exit_checks::{closure#0} (???:0:0)",
+"0x102a06464: <blitzkrieg_core::service::Core>::tick (???:0:0)",
+"0x10298fbd8: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x10298f94c: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x102a413e8: std::env::current_dir (???:0:0)",
+"0x10298dac4: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029e003c: <blitzkrieg_core::service::Core>::apply_delta_effects (???:0:0)",
+"0x1029beb38: <blitzkrieg_core::ome::Ome>::apply_fill (???:0:0)",
+"0x1029f6318: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x10298e654: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x10298ed54: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029b38bc: <alloc::collections::btree::map::BTreeMap<rust_decimal::decimal::Decimal, rust_decimal::decimal::Decimal>>::insert (???:0:0)",
+"0x1029eb3c4: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x1029b3464: <alloc::collections::btree::map::BTreeMap<rust_decimal::decimal::Decimal, rust_decimal::decimal::Decimal>>::insert (???:0:0)",
+"0x1029f6d7c: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x102ab3580: <alloc::raw_vec::RawVec<blitzkrieg_core::engine::HostedStrategy>>::grow_one (???:0:0)",
+"0x10298e8ac: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029ea4e4: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x1029ff854: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x102a0a808: <blitzkrieg_core::strategies::test_support::TestSpreadArb as blitzkrieg_core::strategies::EngineStrategy>::on_book (???:0:0)",
+"0x1029eb418: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x1029ea44c: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x1029ce780: <serde_json::ser::Compound<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter> as serde_core::ser::SerializeStruct>::serialize_field::<<blitzkrieg_core::model::TrackedOrder as serde_core::ser::Serialize>::serialize::__SerializeWith> (???:0:0)",
+"0x1029cddcc: <blitzkrieg_core::order_db::OrderDb>::append (???:0:0)",
+"0x1029de8c8: <blitzkrieg_core::service::Core>::emit_order (???:0:0)",
+"0x1029c10d4: <blitzkrieg_core::ome::Ome>::record_delta (???:0:0)",
+"0x10298ecc4: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029b3574: <alloc::collections::btree::map::BTreeMap<rust_decimal::decimal::Decimal, rust_decimal::decimal::Decimal>>::insert (???:0:0)",
+"0x1029de970: <blitzkrieg_core::model::TrackedOrder as core::clone::Clone>::clone (???:0:0)",
+"0x10298dd18: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x102a09d8c: <blitzkrieg_core::service::Core>::run_exit_checks::{closure#0} (???:0:0)",
+"0x1029f6940: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x102a06584: <blitzkrieg_core::service::Core>::tick (???:0:0)",
+"0x10298dbe0: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029fee94: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x1029eaf68: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x102a010c0: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x10298f8f4: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x102ab047c: <hashbrown::raw::RawTable<(alloc::string::String, blitzkrieg_core::model::TrackedOrder)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, blitzkrieg_core::model::TrackedOrder, std::hash::random::RandomState>::{closure#0}> (???:0:0)",
+"0x1029f7410: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x10298b8e8: dhat_profile::book (???:0:0)",
+"0x10298f7cc: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029f6bbc: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x10298dcc8: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029f59e8: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x1029ce9cc: <serde_json::ser::Compound<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter> as serde_core::ser::SerializeStruct>::serialize_field::<<blitzkrieg_core::model::TrackedOrder as serde_core::ser::Serialize>::serialize::__SerializeWith> (???:0:0)",
+"0x1029cddf4: <blitzkrieg_core::order_db::OrderDb>::append (???:0:0)",
+"0x1029dea38: <blitzkrieg_core::model::TrackedOrder as core::clone::Clone>::clone (???:0:0)",
+"0x1029ce8a0: <serde_json::ser::Compound<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter> as serde_core::ser::SerializeStruct>::serialize_field::<<blitzkrieg_core::model::TrackedOrder as serde_core::ser::Serialize>::serialize::__SerializeWith> (???:0:0)",
+"0x1029cdde0: <blitzkrieg_core::order_db::OrderDb>::append (???:0:0)",
+"0x1029f72ec: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x1029de9d4: <blitzkrieg_core::model::TrackedOrder as core::clone::Clone>::clone (???:0:0)",
+"0x102abb830: <hashbrown::raw::RawTable<(alloc::string::String, strategy_logic::signal::TrendEntry)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, strategy_logic::signal::TrendEntry, std::hash::random::RandomState>::{closure#0}> (???:0:0)",
+"0x102a0afc8: <blitzkrieg_core::strategies::test_support::TestSpreadArb as blitzkrieg_core::strategies::EngineStrategy>::on_book (???:0:0)",
+"0x10298dca4: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029fd18c: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x10298e3b8: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x102a09d14: <blitzkrieg_core::service::Core>::run_exit_checks::{closure#0} (???:0:0)",
+"0x1029dca84: <blitzkrieg_core::position::OpenPosition as core::clone::Clone>::clone (???:0:0)",
+"0x10298dc80: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x102a47c08: <std::path::Path>::_join (???:0:0)",
+"0x1029fd254: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x10298ed40: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029bd444: <blitzkrieg_core::position_db::PositionDb>::save (???:0:0)",
+"0x1029bfebc: <blitzkrieg_core::ome::Ome>::resolve (???:0:0)",
+"0x1029beb08: <blitzkrieg_core::ome::Ome>::apply_fill (???:0:0)",
+"0x1029c1168: <blitzkrieg_core::ome::Ome>::record_delta (???:0:0)",
+"0x1029dca50: <blitzkrieg_core::position::OpenPosition as core::clone::Clone>::clone (???:0:0)",
+"0x1029e1e58: <blitzkrieg_core::service::Core>::apply_delta_effects (???:0:0)",
+"0x1029dca20: <blitzkrieg_core::position::OpenPosition as core::clone::Clone>::clone (???:0:0)",
+"0x10298e368: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029cda4c: <blitzkrieg_core::order_db::OrderDb>::append (???:0:0)",
+"0x102a06324: <blitzkrieg_core::service::Core>::tick (???:0:0)",
+"0x10298e17c: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x10298e67c: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029bf780: <blitzkrieg_core::ome::Ome>::apply_fill (???:0:0)",
+"0x102a0635c: <blitzkrieg_core::service::Core>::tick (???:0:0)",
+"0x10298dd70: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029c10a0: <blitzkrieg_core::ome::Ome>::record_delta (???:0:0)",
+"0x102aaee10: <hashbrown::raw::RawTable<(alloc::string::String, blitzkrieg_core::ome::AppliedFill)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, blitzkrieg_core::ome::AppliedFill, std::hash::random::RandomState>::{closure#0}> (???:0:0)",
+"0x1029c16c0: <hashbrown::map::HashMap<alloc::string::String, blitzkrieg_core::ome::AppliedFill, std::hash::random::RandomState>>::insert (???:0:0)",
+"0x1029bf870: <blitzkrieg_core::ome::Ome>::apply_fill (???:0:0)",
+"0x10298dd44: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x102a06170: <blitzkrieg_core::service::Core>::tick (???:0:0)",
+"0x1029ff90c: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x10298e158: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029e013c: <blitzkrieg_core::service::Core>::apply_delta_effects (???:0:0)",
+"0x1029911c8: <str>::to_lowercase (???:0:0)",
+"0x102a0091c: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x102aae8d4: <hashbrown::raw::RawTable<(alloc::string::String, blitzkrieg_core::marketdata::LocalBook)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, blitzkrieg_core::marketdata::LocalBook, std::hash::random::RandomState>::{closure#0}> (???:0:0)",
+"0x1029dde18: <hashbrown::map::HashMap<alloc::string::String, blitzkrieg_core::marketdata::LocalBook, std::hash::random::RandomState>>::rustc_entry (???:0:0)",
+"0x1029eb1ec: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x10298f920: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029c1108: <blitzkrieg_core::ome::Ome>::record_delta (???:0:0)",
+"0x1029dcab4: <blitzkrieg_core::position::OpenPosition as core::clone::Clone>::clone (???:0:0)",
+"0x10298e134: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x10298e634: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x102ab2f9c: <alloc::raw_vec::RawVec<blitzkrieg_core::position::OpenPosition>>::grow_one (???:0:0)",
+"0x1029e0288: <blitzkrieg_core::service::Core>::apply_delta_effects (???:0:0)",
+"0x1029eb35c: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x102991edc: <str>::to_uppercase (???:0:0)",
+"0x10298ec90: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x10298e110: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029f69c4: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x102ab1ad4: <hashbrown::raw::RawTable<(alloc::string::String, blitzkrieg_core::extension::RegisteredExtension)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, blitzkrieg_core::extension::RegisteredExtension, std::hash::random::RandomState>::{closure#0}> (???:0:0)",
+"0x102a0169c: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x1029f69f0: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x1029f6998: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x1029ea418: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x10298dbbc: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x10298f9bc: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x102a01130: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x1029ea324: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x1029f68e0: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x1029ff93c: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x1029f62ec: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x10298db98: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x10298f998: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x102ab7534: <std::sys::sync::once_box::OnceBox<std::sys::pal::unix::sync::mutex::Mutex>>::initialize::<<std::sys::sync::mutex::pthread::Mutex>::get::{closure#0}> (???:0:0)",
+"0x102a61c64: std::io::stdio::print_to_buffer_if_capture_used (???:0:0)",
+"0x102a62124: std::io::stdio::_print (???:0:0)",
+"0x10298dae0: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029f696c: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x102a00904: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x1029fedf8: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x102a63000: std::fs::read_to_string::inner (???:0:0)",
+"0x1029fd2b0: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x1029eb000: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x10298db60: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x10298db74: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029eac9c: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x102abc9b8: <alloc::raw_vec::RawVecInner>::finish_grow (???:0:0)",
+"0x102abc920: <alloc::raw_vec::RawVec<(i64, rust_decimal::decimal::Decimal)>>::grow_one (???:0:0)",
+"0x102a0aaa0: <blitzkrieg_core::strategies::test_support::TestSpreadArb as blitzkrieg_core::strategies::EngineStrategy>::on_book (???:0:0)",
+"0x10298dc48: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x10298f974: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x102ab74b0: <alloc::raw_vec::RawVecInner>::finish_grow (???:0:0)",
+"0x102ab7400: <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global> (???:0:0)",
+"0x102a3fce8: <std::io::default_write_fmt::Adapter<alloc::vec::Vec<u8>> as core::fmt::Write>::write_str (???:0:0)",
+"0x102a0e844: core::fmt::write (???:0:0)",
+"0x102a61bc0: std::io::stdio::print_to_buffer_if_capture_used (???:0:0)",
+"0x10298dc5c: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029b488c: <blitzkrieg_core::marketdata::LocalBook>::snapshot (???:0:0)",
+"0x1029f6be0: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x1029beb8c: <blitzkrieg_core::ome::Ome>::apply_fill (???:0:0)",
+"0x102aaf374: <hashbrown::raw::RawTable<(alloc::string::String, blitzkrieg_core::sim::Book)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, blitzkrieg_core::sim::Book, std::hash::random::RandomState>::{closure#0}> (???:0:0)",
+"0x1029e95bc: <hashbrown::map::HashMap<alloc::string::String, blitzkrieg_core::sim::Book, std::hash::random::RandomState>>::insert (???:0:0)",
+"0x1029ea4a0: <blitzkrieg_core::service::Core>::engine_on_data (???:0:0)",
+"0x1029e0074: <blitzkrieg_core::service::Core>::apply_delta_effects (???:0:0)",
+"0x1029e00a8: <blitzkrieg_core::service::Core>::apply_delta_effects (???:0:0)",
+"0x1029e9c94: <blitzkrieg_core::service::Core>::authoritative_fill (???:0:0)",
+"0x1029fee38: <blitzkrieg_core::service::Core>::new (???:0:0)",
+"0x10298f80c: <dhat_profile::hot_path_allocation_profile::{closure#0} as core::ops::function::FnOnce<()>>::call_once (???:0:0)",
+"0x1029f690c: <blitzkrieg_core::service::Core>::place_inner (???:0:0)",
+"0x102a063c0: <blitzkrieg_core::service::Core>::tick (???:0:0)",
+"0x1029c1a70: <blitzkrieg_core::ome::Ome>::all (???:0:0)",
+"0x102a07e2c: <blitzkrieg_core::service::Core>::tick (???:0:0)"
+]
+}
