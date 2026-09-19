@@ -77,32 +77,30 @@ BlitzkriegBot/
 
 ## 3. 快速开始
 
-### 3.1 一键启动与停止（推荐：`blitzkrieg run`）
+### 3.1 启动与停止（`blitzkrieg run` / `blitzkrieg stop`）
 
-`target/release/blitzkrieg` 是单二进制启动器（E12）：一条命令同时拉起**受监督的核心**与
-**Web 面板**，默认 `lifecycle: on`——核心是它的子进程，崩溃时按有限预算（5 次、指数退避）
-自动重建；`SIGINT`/`SIGTERM` 触发优雅停机、收割子进程并解绑 socket。
+一次性安装（生成一个指向本仓库最新构建的 `blitzkrieg` 命令）：
 
 ```bash
-cd BlitzkriegBot
-
-# 面板凭据等从环境读入（.env 已 gitignore；.env.example 是字段清单）
-set -a; source .env; set +a
-
-# 前台运行（Ctrl-C 即停机）
-target/release/blitzkrieg run
-
-# 或后台运行
-nohup target/release/blitzkrieg run >> /tmp/blitzkrieg-run.log 2>&1 &
+cargo build --release --workspace --locked
+bash scripts/install-blitzkrieg-shim.sh
 ```
+
+之后**从任何目录**：
 
 ```bash
-# 停止整套栈（面板 + 内核，含孤儿内核；重复执行无害）
-target/release/blitzkrieg stop
+blitzkrieg run     # 一键启动：内核 + Web 面板 + 崩溃自愈（Ctrl-C 即停机）
+blitzkrieg stop    # 一键停止：面板 + 内核一起收（重复执行无害）
+nohup blitzkrieg run >> /tmp/blitzkrieg-run.log 2>&1 &   # 后台常驻
 ```
+
+浏览器打开 `http://127.0.0.1:51888`。就这两条。
 
 要点：
 
+- **`.env` 自动加载**：面板凭据、`HFT_*` 旋钮从当前目录的 `.env` 读入，无需
+  `source`。已导出的环境变量永远优先于文件；文件值绝不打印。`.env` 已
+  gitignore，字段清单见 `.env.example`。
 - **`stop` 按 socket 范围工作**：只触碰挂在目标 socket 上的 blitzkrieg 家族进程——先
   SIGTERM 拥有者（由它级联收掉自己拉起的内核），再收孤儿内核；启动 stop 的 shell/
   包装器永远不会被碰。被接管的内核（面板只读的那种状态）也能由它一并停掉。
@@ -115,6 +113,7 @@ target/release/blitzkrieg stop
   绝不杀死非本进程拉起的内核。
 - 一次只跑一套栈：旧栈还占着 51888 / 默认 socket 时再 `run`，端口会绑不上；
   此时先 `blitzkrieg stop` 再起。
+- shim 会在仓库移动后失效（路径烧死在生成物里）：重新跑一次安装脚本即可。
 
 ### 3.2 构建 Rust 核心
 

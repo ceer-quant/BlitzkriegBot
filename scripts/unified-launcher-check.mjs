@@ -19,7 +19,7 @@ import { execSync, execFileSync } from 'node:child_process';
 // core behind. The guard reaps the launcher's whole process group, which includes
 // that core, and does it with SIGTERM first so the core still unlinks its socket.
 import { spawn, reapAllChildren } from './lib/child-guard.mjs';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import net from 'node:net';
@@ -35,10 +35,12 @@ const READONLY_SOCK = join(WORK, 'readonly.sock');
 const STOP_SOCK = join(WORK, 'stop.sock');
 const ORPHAN_SOCK = join(WORK, 'orphan.sock');
 const ADOPT_SOCK = join(WORK, 'adopt.sock');
+const ENV_SOCK = join(WORK, 'env.sock');
 const PORT1 = 52000 + Math.floor(Math.random() * 2000);
 const PORT2 = 54000 + Math.floor(Math.random() * 2000);
 const PORT3 = 56000 + Math.floor(Math.random() * 2000);
 const PORT4 = 58000 + Math.floor(Math.random() * 2000);
+const PORT5 = 61000 + Math.floor(Math.random() * 2000);
 
 function cleanupAll() {
   reapAllChildren();
@@ -136,6 +138,14 @@ async function main() {
   // ── 2. Unified Launch (core + UI in one command) ───────────────────────────
   console.log('');
   console.log('[2] Unified launch (blitzkrieg run / default)');
+
+  // The gate shell may carry panel credentials; strip them so the launcher's
+  // stdout assertions below are deterministic (no .env exists in WORK yet, so
+  // the read-only note MUST appear here).
+  const credlessEnv = { ...process.env, TMPDIR: WORK };
+  delete credlessEnv.BLITZKRIEG_PANEL_USER;
+  delete credlessEnv.BLITZKRIEG_PANEL_PASSWORD;
+
   const child = spawn(
     BIN,
     [
@@ -152,10 +162,12 @@ async function main() {
     ],
     {
       cwd: WORK,
-      env: { ...process.env, TMPDIR: WORK },
+      env: credlessEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     }
   );
+  let phase2Stdout = '';
+  child.stdout.on('data', (d) => { phase2Stdout += d.toString(); });
   child.stderr.on('data', (d) => {
     if (process.env.DEBUG) process.stderr.write(d);
   });
@@ -176,6 +188,19 @@ async function main() {
     }
   }
   assert(connected, `unified launcher started core and serves socket on ${SOCK}`);
+  // The note prints after the core is up; without credentials (env stripped
+  // and no .env in WORK yet) the panel must be announced as read-only. The
+  // socket can answer BEFORE the launcher reaches the print, so poll briefly
+  // instead of asserting a snapshot.
+  let noteSeen = false;
+  for (let i = 0; i < 30 && !noteSeen; i++) {
+    await sleep(100);
+    noteSeen = phase2Stdout.includes('read-only mode');
+  }
+  assert(
+    noteSeen,
+    'without credentials (env or .env) the launcher says the panel is read-only'
+  );
 
   // Verify process table: core is child of launcher
   const children = findChildren(launcherPid);
@@ -361,12 +386,58 @@ async function main() {
   assert(!adoptCore.killed, 'the gate driver still was never signalled');
   await Promise.race([adoptCoreClosed, sleep(5_000).then(() => 'TIMEOUT')]);
 
-  // ── 8. No family process may survive the whole gate ────────────────────────
+  // ── 8. `.env` self-load: the launcher reads <cwd>/.env itself ─────────────
+  // The start recipe used to demand `set -a; source .env`. Now the launcher
+  // loads the file before tokio starts (env wins over file, always). Proof:
+  // with credentials present ONLY in a .env file, the read-only note disappears.
+  console.log('');
+  console.log('[8] .env self-load provides panel credentials without sourcing');
+  writeFileSync(join(WORK, '.env'), 'BLITZKRIEG_PANEL_USER=gate_user\nBLITZKRIEG_PANEL_PASSWORD=gate_pass\n');
+  const envChild = spawn(
+    BIN,
+    [
+      'run',
+      '--socket', ENV_SOCK,
+      '--mode', 'dry',
+      '--tick-ms', '50',
+      '--addr', `127.0.0.1:${PORT5}`,
+      '--no-event-archive',
+      '--no-trade-log',
+      '--no-order-log',
+      '--no-position-log',
+    ],
+    {
+      cwd: WORK,
+      env: credlessEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  );
+  let envStdout = '';
+  envChild.stdout.on('data', (d) => { envStdout += d.toString(); });
+  const envChildClosed = new Promise((resolve) => envChild.on('close', (code) => resolve(code)));
+  let envReady = false;
+  for (let i = 0; i < 40 && !envReady; i++) {
+    await sleep(100);
+    if (existsSync(ENV_SOCK)) envReady = (await rpc(ENV_SOCK, 'core.ping')) !== null;
+  }
+  assert(envReady, `stack ready on ${ENV_SOCK}`);
+  await sleep(200);
+  assert(
+    !envStdout.includes('read-only mode'),
+    'credentials from .env alone put the panel into managed (non-read-only) mode'
+  );
+  // The file must not leak into the log: a count, never a value.
+  assert(!envStdout.includes('gate_pass'), 'the .env values are never printed');
+  envChild.kill('SIGTERM');
+  await Promise.race([envChildClosed, sleep(10_000).then(() => 'TIMEOUT')]);
+  rmSync(join(WORK, '.env'));
+
+  // ── 9. No family process may survive the whole gate ────────────────────────
   // Every core and launcher this gate started must be gone — this is what turns
   // a stack that outlived its owner (the readonly orphan shape) into a caught
   // failure instead of a mystery process on the operator's machine.
   console.log('');
-  console.log('[8] nothing the gate started is left behind');
+  console.log('[9] nothing the gate started is left behind');
   const leftover = execSync('ps -ww -axo pid=,ppid=,command=', { encoding: 'utf8' })
     .split('\n')
     .filter((l) => l.includes(WORK) && (l.includes('blitzkrieg-core') || l.includes('blitzkrieg run') || l.includes('blitzkrieg web')));
