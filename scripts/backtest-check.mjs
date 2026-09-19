@@ -125,9 +125,13 @@ async function main() {
     negRisk: true, question: 'BTC up/down',
   }] });
   for (let i = 0; i < 14; i++) { await rpc(M.BOOK, book(0.57, 0.58)); await sleep(300); }
-  await rpc(M.BOOK, book(0.43, 0.44));               // dip -> resting bid 0.43
+  await rpc(M.BOOK, book(0.43, 0.44));               // dip -> the strategy rests a bid at its own discount
   await sleep(400);
-  await rpc(M.BOOK, book(0.41, 0.42));               // crosses the resting bid -> the
+  // Cross whatever bid was actually rested (read, not hardcoded — the gate
+  // owns the order chain, not the strategy's pricing default).
+  const resting = ((await rpc(M.ORDERS)).orders || []).find((o) => o.status === 'LIVE');
+  const restPrice = Number(resting?.price ?? 0.38);
+  await rpc(M.BOOK, book(restPrice - 0.01, restPrice)); // crosses the resting bid -> the
   await sleep(900);                                  // feed path cross-fills it (KI-1)
   for (const [b, a] of [[0.60, 0.62], [0.80, 0.82], [0.95, 0.97]]) {
     await rpc(M.BOOK, book(b, a));                   // rally -> exit rules take profit

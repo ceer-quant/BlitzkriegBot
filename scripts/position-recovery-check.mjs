@@ -65,7 +65,7 @@ async function boot(path, extra = []) {
   await sleep(300);
   return p;
 }
-const MARKET = 'engine.markets', BOOK = 'books.snapshot', POS = 'positions.list';
+const MARKET = 'engine.markets', BOOK = 'books.snapshot', POS = 'positions.list', ORDERS = 'orders.list';
 const book = (bid, ask) => ({ tokenId: 'UP', bids: [{ price: bid, size: 100 }], asks: [{ price: ask, size: 100 }] });
 
 async function openPosition(path) {
@@ -76,8 +76,13 @@ async function openPosition(path) {
     upTokenId: 'UP', downTokenId: 'DOWN', upPrice: 0.5, downPrice: 0.5,
     expiresAtMs: (slot + 1) * ROUND * 1000, roundSlot: slot, negRisk: true, question: 'BTC up/down' }] });
   for (let i = 0; i < 14; i++) { await rpc(BOOK, book(0.57, 0.58)); await sleep(300); }
-  await rpc(BOOK, book(0.43, 0.44)); await sleep(400);   // dip → resting bid
-  await rpc(BOOK, book(0.41, 0.42)); await sleep(600);   // cross → maker fill → position
+  await rpc(BOOK, book(0.43, 0.44)); await sleep(400);   // dip → a resting bid (price belongs to the strategy)
+  // Cross whatever bid the strategy actually rests: the gate owns the order
+  // CHAIN, not the pricing default, so it reads the price instead of
+  // hardcoding one — a discount change then touches nothing here.
+  const resting = ((await rpc(ORDERS)).orders || []).find((o) => o.status === 'LIVE');
+  const restPrice = Number(resting?.price ?? 0);
+  await rpc(BOOK, book(restPrice - 0.01, restPrice)); await sleep(600);   // cross → maker fill → position
 }
 
 // 1) Boot and open a position.

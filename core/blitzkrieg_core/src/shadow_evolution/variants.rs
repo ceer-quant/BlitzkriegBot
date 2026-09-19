@@ -369,13 +369,17 @@ mod tests {
 
     #[test]
     fn the_sweep_visits_every_knob_and_both_directions() {
-        let base = StrategyParams::from_knobs(&specs());
+        let specs = specs();
+        let base = StrategyParams::from_knobs(&specs);
         let f = factory();
         let mut moved: Vec<(String, bool)> = Vec::new(); // (knob, moved up?)
-        for sweep in 0..8u64 {
+        // Two sweeps per knob (one per direction), so the coverage assertion
+        // below holds no matter how many knobs the strategy declares.
+        let sweeps = 2 * specs.len() as u64;
+        for sweep in 0..sweeps {
             let set = build_variants(
                 "s",
-                &specs(),
+                &specs,
                 &base,
                 f.as_ref(),
                 3,
@@ -393,7 +397,7 @@ mod tests {
                 }
             }
         }
-        for spec in specs() {
+        for spec in specs {
             let hits: Vec<bool> = moved
                 .iter()
                 .filter(|(n, _)| *n == spec.name)

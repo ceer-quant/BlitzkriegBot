@@ -7,6 +7,20 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ### Added
 
+- **`blitzkrieg stop` — the operator's single switch for a stack on one socket.**
+  `run` had no counterpart: stopping meant hand-collecting pids, and a stack
+  could outlive its owner (an orphaned core still serving its socket; a
+  launcher that adopted it can read but, by the adopt-only restraint, never
+  stop it). `stop [--socket <path>] [--timeout <sec>]` scans the process table
+  once, decides purely on that table, and signals through `libc::kill` — no
+  subprocess, no shell, no string ever crosses a process boundary. It touches
+  only blitzkrieg-family processes attached to the named socket, signals
+  owners first (they cascade to their own children), then any core still
+  alive, never signals the ancestor chain that invoked it or any other
+  stranger (reported as "left untouched" instead), treats a zombie as dead,
+  escalates to SIGKILL only after the grace period, and removes a stale socket
+  file once nothing serves it. A second stop is a no-op.
+
 - **The panel reports and recovers from a kernel crash (E12-c / #94).** A core
   started by an `--manage` gateway is now supervised for liveness, not just
   spawned: the gateway notices it died, says **how** (`lastExit.kind` separates
@@ -37,6 +51,31 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   because no adapter consumes them. There is no hot reload.
 
 ### Changed
+
+- **`spread_arb` ships a tuned entry discount: win rate 45% → 74% at a better
+  payoff ratio.** The resting bid now sits at `0.88 × mid` instead of
+  `0.98 × mid` (`trend_entry_factor`, the strategy's own declared knob — the
+  kernel pushes no new keys and grows no flags). The mechanism is anti-adverse
+  selection, not a tighter filter: at 0.98 the bid is filled by any downtick
+  through it, so entries happened on noise and lost 55% of the time; at 0.88
+  the fill requires a real flush, so entries land deep inside confirmed-trend
+  dips where the trailing stop's +15% arm is a couple of ticks up and the −12%
+  stop several ticks down. Evidence: deterministic replay of the frozen
+  2026-09-17..19 archive (9.68M events, spread_arb alone, identity fill model)
+  gives 235 closed / 73.62% win / payoff 1.38 / PF 3.86 / net +$126.19 vs the
+  0.98 baseline's 149 / 44.97% / 1.18 / 0.96 / −$2.36 on the same corpus, with
+  a time-split holdout (first three vs last two segments) at 74.67% / 71.76% —
+  both halves clear the target with the payoff ratio above, not below, the
+  baseline. The discount grid is monotone (0.90 → 70.3%/1.22, 0.85 →
+  82.3%/1.80, 0.80 → 93.7%/1.91); 0.88 ships as the value that clears the goal
+  with margin while staying off the declared 0.80 domain floor. Also in this
+  change: four high-frequency entry filters (min OBI, max spread, max fade from
+  the trend high, min short-window bounce) added to the shared strategy-logic
+  evaluator and tracker (`spread_arb_tracker_gates`), defaulting OFF and
+  settable through the standard `on_params` hot bag — deliberately NOT declared
+  evolvable, because the evolution guard requires strictly positive knob values
+  and these ship at 0. The kernel's per-strategy config and CLI stay untouched;
+  fixture books in three ledger-identity tests now cross the 0.88 resting bid.
 
 - **A `timing` gate exemption can no longer reach into the closing window of a
   round (D-31).** The exemption used to waive the round-timing window outright,

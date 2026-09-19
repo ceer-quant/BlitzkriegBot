@@ -698,6 +698,7 @@ fn parity_spread_arb_cdylib_matches_adapter() {
         trend_entry_price: dec!(0.45),
         trend_entry_factor: dec!(0.9),
         trend_max_entry_price: dec!(0.45),
+        ..Default::default()
     };
 
     let mut cfg = engine_cfg();
