@@ -1,0 +1,46 @@
+{
+  "rows": [
+    {
+      "crate": "core/blitzkrieg_core",
+      "lines": 29233,
+      "files": 50
+    },
+    {
+      "crate": "core/market_api",
+      "lines": 666,
+      "files": 4
+    },
+    {
+      "crate": "extensions/polymarket",
+      "lines": 1944,
+      "files": 7
+    },
+    {
+      "crate": "user_layer/strategy_api",
+      "lines": 1349,
+      "files": 2
+    },
+    {
+      "crate": "user_layer/strategy_logic",
+      "lines": 2731,
+      "files": 9
+    },
+    {
+      "crate": "user_layer/parity_logic",
+      "lines": 388,
+      "files": 1
+    },
+    {
+      "crate": "ui/ui_kit",
+      "lines": 6168,
+      "files": 16
+    },
+    {
+      "crate": "ui/ui_kit_panel",
+      "lines": 3147,
+      "files": 8
+    }
+  ],
+  "total": 45626,
+  "totalFiles": 97
+}

@@ -15,7 +15,7 @@ use blitzkrieg_market_api::{
     CoreError, CoreErrorCode, CoreResult, FillPolicy, MarketFill, PendingOrder, Side,
     VenueTradeInfo,
 };
-use futures::StreamExt;
+use futures_util::StreamExt;
 use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::auth::{Credentials, Kind, Normal};
 use polymarket_client_sdk_v2::clob::types::request::{

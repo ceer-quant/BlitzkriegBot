@@ -1,0 +1,53 @@
+    Finished `bench` profile [optimized] target(s) in 0.74s
+     Running benches/hot_path.rs (target/release/deps/hot_path-73b9254197ed196a)
+Gnuplot not found, using plotters backend
+Benchmarking hot_path.book_apply/depth/5
+Benchmarking hot_path.book_apply/depth/5: Warming up for 3.0000 s
+Benchmarking hot_path.book_apply/depth/5: Collecting 100 samples in estimated 5.6205 s (45k iterations)
+Benchmarking hot_path.book_apply/depth/5: Analyzing
+hot_path.book_apply/depth/5
+                        time:   [5.3750 µs 5.5880 µs 5.7682 µs]
+Benchmarking hot_path.book_apply/depth/20
+Benchmarking hot_path.book_apply/depth/20: Warming up for 3.0000 s
+Benchmarking hot_path.book_apply/depth/20: Collecting 100 samples in estimated 5.6002 s (45k iterations)
+Benchmarking hot_path.book_apply/depth/20: Analyzing
+hot_path.book_apply/depth/20
+                        time:   [8.6620 µs 8.8834 µs 9.0696 µs]
+
+Benchmarking hot_path.evaluate/tokens/1
+Benchmarking hot_path.evaluate/tokens/1: Warming up for 3.0000 s
+Benchmarking hot_path.evaluate/tokens/1: Collecting 100 samples in estimated 5.0003 s (23M iterations)
+Benchmarking hot_path.evaluate/tokens/1: Analyzing
+hot_path.evaluate/tokens/1
+                        time:   [215.27 ns 218.82 ns 222.93 ns]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking hot_path.evaluate/tokens/4
+Benchmarking hot_path.evaluate/tokens/4: Warming up for 3.0000 s
+Benchmarking hot_path.evaluate/tokens/4: Collecting 100 samples in estimated 5.0015 s (6.3M iterations)
+Benchmarking hot_path.evaluate/tokens/4: Analyzing
+hot_path.evaluate/tokens/4
+                        time:   [779.30 ns 788.40 ns 798.17 ns]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking hot_path.engine_on_data/4tok
+Benchmarking hot_path.engine_on_data/4tok: Warming up for 3.0000 s
+Benchmarking hot_path.engine_on_data/4tok: Collecting 100 samples in estimated 5.5190 s (45k iterations)
+Benchmarking hot_path.engine_on_data/4tok: Analyzing
+hot_path.engine_on_data/4tok
+                        time:   [9.3769 µs 9.8770 µs 10.525 µs]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
+
+Benchmarking hot_path.tick/1pos
+Benchmarking hot_path.tick/1pos: Warming up for 3.0000 s
+Benchmarking hot_path.tick/1pos: Collecting 100 samples in estimated 5.0038 s (4.5M iterations)
+Benchmarking hot_path.tick/1pos: Analyzing
+hot_path.tick/1pos      time:   [1.1260 µs 1.1415 µs 1.1615 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+

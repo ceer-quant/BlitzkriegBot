@@ -18,15 +18,11 @@ crate-type = ["rlib", "cdylib"]
 blitzkrieg-market-api = { path = "../../core/market_api" }
 polymarket-client-sdk-v2 = { package = "polymarket_client_sdk_v2", git = "https://github.com/Polymarket/rs-clob-client-v2.git", rev = "561830b9ee502c6e67cce314f0e53a80b8885b09", features = ["clob", "ws", "data", "gamma"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }
-async-trait = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = "0.1"
-futures = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 alloy = { version = "1.6.3", default-features = false, features = ["signer-local"] }
