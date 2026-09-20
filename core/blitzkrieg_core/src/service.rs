@@ -7285,7 +7285,11 @@ mod audit_fix_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        std::env::temp_dir().join(format!("bk-audit-{tag}-{nanos}.jsonl"))
+        // TradeDb keeps summary.json beside the log, so each fixture needs its
+        // own DIRECTORY — a bare file in the shared temp root would make every
+        // test load (and persist onto) the same summary.json.
+        let dir = std::env::temp_dir().join(format!("bk-audit-{tag}-{nanos}"));
+        dir.join("trades.jsonl")
     }
 
     fn req(side: Side, mode: FillPolicy, price: Decimal, size: Decimal, key: &str) -> OrderRequest {
