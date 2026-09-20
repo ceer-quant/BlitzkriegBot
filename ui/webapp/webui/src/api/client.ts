@@ -170,6 +170,21 @@ export const api = {
   /** Manual operator flatten for one stable position id. */
   flatten: (positionId: string) =>
     request<CommandDoc>('/command', { method: 'POST', body: `flatten ${positionId}` }),
+  /** E13: decide one evolution proposal (accept hot-swaps, reject/defer don't). */
+  decideEvolution: (id: string, decision: 'accept' | 'reject' | 'defer') =>
+    request<CommandDoc>('/command', {
+      method: 'POST',
+      body: `decide ${id} ${decision}`,
+    }),
+  /** E13: the unattended-evolution switch (`auto-evolve on|off`). */
+  setAutoEvolve: (on: boolean) =>
+    request<CommandDoc>('/command', {
+      method: 'POST',
+      body: `auto-evolve ${on ? 'on' : 'off'}`,
+    }),
+  /** E13: undo the last accepted promotion of one strategy (一键回滚). */
+  rollbackStrategy: (strategy: string) =>
+    request<CommandDoc>('/command', { method: 'POST', body: `rollback ${strategy}` }),
 }
 
 /**
@@ -411,6 +426,12 @@ export interface Snapshot {
     } | null
   } | null
   strategyStats?: StrategyStatsRow[]
+  /**
+   * E13 evolution block — pending proposals + the switch/cycle clock. Absent on
+   * older gateways (treat as "no proposal workflow"); never present with a
+   * partial status: the gateway always writes both keys together.
+   */
+  evolution?: EvolutionDoc | null
 }
 
 export interface PluginRow {
@@ -452,4 +473,52 @@ export interface PluginsDoc {
   /** Boolean flag — the selected source's *name* is on the active market row. */
   marketActive: boolean
   lastError: string | null
+}
+
+// ── E13 evolution (mirror web/mod.rs's `evolution` block) ────────────────────
+
+/** One side of a proposal's 对比表. Decimals cross as numbers here. */
+export interface EvolutionMetricsRow {
+  closed?: number
+  wins?: number
+  winRate?: number
+  payoff?: number
+  profitFactor?: number
+  netPnlUsd?: number
+}
+
+export type EvolutionState =
+  | 'proposed' | 'deferred' | 'accepted' | 'rejected' | 'expired' | 'superseded'
+
+/** One evolution proposal row, folded by the gateway for rendering. */
+export interface EvolutionProposalRow {
+  id: string
+  strategy: string
+  state: EvolutionState | string
+  /** Why the evaluator held it: higher_win_rate / better_profit_factor / combined_improvement. */
+  reason: string
+  confidence: number
+  sampleCount: number
+  dims: string[]
+  /** Ordered `[name, from, to]` triples (string decimals). */
+  knobMoves: [string, string, string][]
+  baseline: EvolutionMetricsRow
+  variant: EvolutionMetricsRow
+  createdAtMs: number
+  expiresAtMs: number
+  decidedBy: 'user' | 'auto' | null
+  decidedAtMs: number | null
+  cycleSeq: number
+}
+
+export interface EvolutionStatusRow {
+  autoEvolve: boolean
+  lastCycleMs: number
+  nextCycleAtMs: number | null
+  pendingProposals: number
+}
+
+export interface EvolutionDoc {
+  proposals: EvolutionProposalRow[]
+  status: EvolutionStatusRow | null
 }

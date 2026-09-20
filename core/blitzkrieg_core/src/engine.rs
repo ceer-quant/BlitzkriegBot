@@ -67,13 +67,20 @@ pub struct StrategySize {
     pub size_usd: Option<Decimal>,
     pub min_shares: Option<Decimal>,
     pub max_shares: Option<Decimal>,
+    /// Relative allocation weight (E16/#98): scales this leg's per-entry
+    /// notional (own override or global × weight). A weight can only shrink
+    /// the budget — anything above 1 is clamped back to the global cap.
+    pub size_weight: Option<Decimal>,
 }
 
 impl StrategySize {
     /// True when at least one sizing dimension overrides the global values (a
     /// `StrategyLimit` that configures only caps reports false).
     pub fn overrides_anything(&self) -> bool {
-        self.size_usd.is_some() || self.min_shares.is_some() || self.max_shares.is_some()
+        self.size_usd.is_some()
+            || self.min_shares.is_some()
+            || self.max_shares.is_some()
+            || self.size_weight.is_some()
     }
 }
 
@@ -85,6 +92,8 @@ pub struct EffectiveSizing {
     pub max_shares: Decimal,
     /// Whether a per-strategy override set any of these values.
     pub strategy_scoped: bool,
+    /// The weight in force (`None` = unweighted).
+    pub size_weight: Option<Decimal>,
 }
 
 impl Default for EngineConfig {
@@ -854,6 +863,12 @@ impl Engine {
 
     fn compute_shares(&self, price: Decimal, strategy: &str) -> Decimal {
         let sizing = self.effective_sizing(strategy);
+        // A zero budget zeroes the leg outright (an explicit weight-0 off
+        // switch): the share floor exists to protect a real entry, not to
+        // resurrect a disabled one.
+        if sizing.size_usd <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
         if price <= Decimal::ZERO {
             return sizing.min_shares;
         }
@@ -872,6 +887,7 @@ impl Engine {
             min_shares: self.cfg.min_shares,
             max_shares: self.cfg.max_shares,
             strategy_scoped: false,
+            size_weight: None,
         };
         let Some(over) = self
             .cfg
@@ -881,9 +897,15 @@ impl Engine {
         else {
             return globals;
         };
-        let size_usd = over
+        let mut size_usd = over
             .size_usd
             .map_or(globals.size_usd, |v| v.min(globals.size_usd));
+        if let Some(w) = over.size_weight {
+            // Weight re-weights this leg's share of the per-entry budget; it
+            // never widens the global cap, and a non-positive weight zeroes
+            // the leg out entirely (an explicit off switch).
+            size_usd = (size_usd * w).max(Decimal::ZERO).min(globals.size_usd);
+        }
         let max_shares = over
             .max_shares
             .map_or(globals.max_shares, |v| v.min(globals.max_shares));
@@ -896,6 +918,7 @@ impl Engine {
             min_shares,
             max_shares,
             strategy_scoped: true,
+            size_weight: over.size_weight,
         }
     }
 }
@@ -1234,6 +1257,7 @@ mod tests {
                 size_usd: Some(dec!(1)),
                 min_shares: Some(dec!(1)),
                 max_shares: Some(dec!(2)),
+                size_weight: None,
             },
         )]));
         let s = e.effective_sizing("small");
@@ -1255,6 +1279,49 @@ mod tests {
         assert_eq!(e.compute_shares(dec!(0.50), "other"), dec!(20));
     }
 
+    /// E16/#98 weighted allocation: a weight re-weights the leg's share of the
+    /// per-entry budget and can never widen the global cap; a non-positive
+    /// weight zeroes the leg out.
+    #[test]
+    fn strategy_size_weight_reweights_but_never_widens() {
+        let e = engine_from(sizing_cfg(&[
+            (
+                "half",
+                StrategySize {
+                    size_weight: Some(dec!(0.5)),
+                    ..Default::default()
+                },
+            ),
+            (
+                "greedy",
+                StrategySize {
+                    size_weight: Some(dec!(4)),
+                    ..Default::default()
+                },
+            ),
+            (
+                "off",
+                StrategySize {
+                    size_weight: Some(Decimal::ZERO),
+                    ..Default::default()
+                },
+            ),
+        ]));
+        // half: 10 × 0.5 = 5 → 5/0.5 = 10 shares (global band [2,20]).
+        let h = e.effective_sizing("half");
+        assert_eq!(h.size_usd, dec!(5));
+        assert_eq!(h.size_weight, Some(dec!(0.5)));
+        assert!(h.strategy_scoped);
+        assert_eq!(e.compute_shares(dec!(0.50), "half"), dec!(10));
+        // greedy: 10 × 4 clamps back to the global 10 — the weight cannot
+        // widen the budget.
+        let g = e.effective_sizing("greedy");
+        assert_eq!(g.size_usd, dec!(10));
+        // off: weight 0 → no budget at all.
+        assert_eq!(e.effective_sizing("off").size_usd, Decimal::ZERO);
+        assert_eq!(e.compute_shares(dec!(0.50), "off"), dec!(0));
+    }
+
     #[test]
     fn strategy_sizing_can_never_exceed_the_global_risk_ceiling() {
         // An override that asks for MORE than the global band is clamped: more
@@ -1265,6 +1332,7 @@ mod tests {
                 size_usd: Some(dec!(100)),
                 min_shares: Some(dec!(0)),
                 max_shares: Some(dec!(999)),
+                size_weight: None,
             },
         )]));
         let s = e.effective_sizing("greedy");
@@ -1297,6 +1365,7 @@ mod tests {
                 size_usd: None,
                 min_shares: Some(dec!(50)),
                 max_shares: None,
+                size_weight: None,
             },
         )]));
         let s = e.effective_sizing("weird");
@@ -1333,6 +1402,7 @@ mod tests {
                     size_usd: Some(dec!(1)),
                     min_shares: Some(dec!(1)),
                     max_shares: Some(dec!(1)),
+                    size_weight: None,
                 },
             ),
             (
@@ -1341,6 +1411,7 @@ mod tests {
                     size_usd: Some(dec!(10)),
                     min_shares: Some(dec!(20)),
                     max_shares: Some(dec!(20)),
+                    size_weight: None,
                 },
             ),
         ]));

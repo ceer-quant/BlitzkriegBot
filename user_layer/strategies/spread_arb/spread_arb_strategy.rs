@@ -287,6 +287,32 @@ impl SafeStrategy for SpreadArb {
             {
                 cfg.trend_max_entry_price = d;
             }
+            if let Some(s) = v.get("entryMinObi").and_then(|x| x.as_str())
+                && let Ok(d) = Decimal::from_str_exact(s)
+            {
+                cfg.entry_min_obi = d;
+            }
+            if let Some(s) = v.get("entryMaxSpreadPct").and_then(|x| x.as_str())
+                && let Ok(d) = Decimal::from_str_exact(s)
+            {
+                cfg.entry_max_spread_pct = d;
+            }
+            if let Some(s) = v.get("entryDipMaxPct").and_then(|x| x.as_str())
+                && let Ok(d) = Decimal::from_str_exact(s)
+            {
+                cfg.entry_dip_max_pct = d;
+            }
+            if let Some(s) = v.get("entryBounceMinPct").and_then(|x| x.as_str())
+                && let Ok(d) = Decimal::from_str_exact(s)
+            {
+                cfg.entry_bounce_min_pct = d;
+            }
+            if let Some(w) = v
+                .get("entryBounceWindowSec")
+                .and_then(|x| x.as_i64().or_else(|| x.as_str()?.parse().ok()))
+            {
+                cfg.entry_bounce_window_sec = w;
+            }
         }
         // Hot bag (top-level snake_case knob names).
         let mut bag = strategy_logic::StrategyParams::new();

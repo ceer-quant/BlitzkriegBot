@@ -12,7 +12,16 @@
 //!   └─ ParamRegistry                       (strategy → Arc<ArcSwap<StrategyParams>>)
 //!   └─ Unit { strategy, specs, set, cell, last_evolution_ms, evolution_count, previous }
 //!        └─ VariantSet { baseline twin + N directed single-knob twins }
+//!   └─ ProposalStore                       (E13: held proposals + promotions + runtime state)
 //! ```
+//!
+//! E13 (#95) promotion workflow: by default a qualifying variant becomes an
+//! **EvolutionProposal** (full side-by-side comparison, persisted to
+//! `proposals.jsonl`) that the operator accepts / rejects / defers over IPC;
+//! the `auto_evolve` switch restores unattended application, and every
+//! adoption — auto or accepted — is written to `promotions.jsonl` so the
+//! one-click rollback survives a restart. Every 72h (configurable) a DEEP
+//! round re-anchors each unit with compound multi-knob variants.
 //!
 //! Isolation: every variant tick runs under `catch_unwind`; a panicking variant
 //! is marked crashed and excluded, and NEVER propagates into the main strategy
@@ -21,11 +30,28 @@
 //! A strategy that declares no knobs is **not evolvable** and gets no unit at
 //! all — an explicit declaration (D6), not a silent no-op.
 
+/// The knob names a proposal would move — the E13 comparison's dimension list.
+fn moved_dims(from: &StrategyParams, to: &StrategyParams) -> Vec<String> {
+    to.iter()
+        .filter(|(n, v)| from.get(n) != Some(*v))
+        .map(|(n, _)| n.to_string())
+        .collect()
+}
+
+/// Wrap ONE strategy's parameters in the aggregate type the signal/audit
+/// surfaces carry (same shape as the evaluator's `params_for`).
+fn wrap_params(strategy: &str, params: StrategyParams) -> MutableParams {
+    let mut m = MutableParams::new();
+    m.set_strategy(strategy, params);
+    m
+}
+
 pub mod audit;
 pub mod config;
 pub mod evaluator;
 pub mod guard;
 pub mod knobs;
+pub mod proposal;
 pub mod registry;
 pub mod signal;
 pub mod variants;
@@ -34,6 +60,7 @@ pub use config::{
     EvolutionStatus, ImmutableConfig, KnobDeclaration, KnobSpec, MutableParams,
     ShadowEvolutionConfig, StrategyParams, VariantView,
 };
+pub use proposal::{DecidedBy, EvolutionProposal, ProposalState, TradeMetrics};
 pub use registry::ParamRegistry;
 pub use signal::{EvolutionReason, EvolveSignal};
 
@@ -44,12 +71,16 @@ use audit::AuditLog;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use variants::{VariantSet, build_variants};
+use variants::{VariantSet, build_deep_variants, build_variants};
 
 /// Result of one evaluation/action, mapped to events by the caller.
+#[derive(Debug)]
 pub enum EvolutionOutcome {
     Signal(EvolveSignal),
     Applied(EvolveSignal),
+    /// E13: a qualifying variant was HELD as a proposal for a human decision
+    /// (the manual mode — `auto_evolve` off).
+    Proposed(EvolutionProposal),
     Rejected {
         signal: EvolveSignal,
         reason: String,
@@ -59,6 +90,32 @@ pub enum EvolutionOutcome {
         from: MutableParams,
         to: MutableParams,
     },
+}
+
+/// What the operator decided about one proposal (E13 / #95).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Accept,
+    Reject,
+    Defer,
+}
+
+/// Result of one operator decision, mapped to events by the caller.
+#[derive(Debug)]
+pub enum DecisionResult {
+    Accepted { proposal: EvolutionProposal },
+    Rejected { proposal: EvolutionProposal },
+    Deferred { proposal: EvolutionProposal },
+}
+
+/// One DEEP evolution round (E13): the variant sets were re-anchored with
+/// compound multi-knob mutants.
+#[derive(Debug, Clone)]
+pub struct EvolutionCycleEvent {
+    pub cycle_seq: u64,
+    pub dims: usize,
+    pub strategies: Vec<String>,
+    pub at_ms: i64,
 }
 
 /// One strategy's evolution state. Every field is private to that strategy.
@@ -96,6 +153,24 @@ impl Unit {
             self.evolution_count,
         );
     }
+
+    /// E13: build a DEEP round's variant set — compound mutants moving up to
+    /// `deep_dims` knobs at once, so a cycle can explore knob combinations the
+    /// single-knob rotation never visits. Same sweep argument, same locks.
+    fn scaffold_deep(&mut self, cfg: &ShadowEvolutionConfig, now_ms: i64) {
+        self.set = build_deep_variants(
+            &self.strategy,
+            &self.specs,
+            &self.cell.load(),
+            self.factory.as_ref(),
+            cfg.variant_count.max(2),
+            cfg.max_gradient,
+            &cfg.exit_cfg,
+            now_ms,
+            self.evolution_count,
+            cfg.deep_dims,
+        );
+    }
 }
 
 pub struct ShadowEvolution {
@@ -110,6 +185,14 @@ pub struct ShadowEvolution {
     /// same way). Replaced on every round; empty outside a round.
     round_markets: Vec<CryptoMarket>,
     audit: AuditLog,
+    /// E13: held proposals, promotion history and the runtime state file,
+    /// all under the audit directory.
+    proposal_store: proposal::ProposalStore,
+    /// E13: the unattended switch (the auto-evolve checkbox in the UIs).
+    auto_evolve: bool,
+    /// E13: wall-clock ms of the last DEEP round (0 = clock not started).
+    last_cycle_ms: i64,
+    cycle_seq: u64,
 }
 
 impl ShadowEvolution {
@@ -123,6 +206,12 @@ impl ShadowEvolution {
     pub fn new(cfg: ShadowEvolutionConfig, strategies: &[&dyn EngineStrategy]) -> Self {
         let enabled = cfg.enabled;
         let audit = AuditLog::new(&cfg);
+        // E13: the runtime state (auto-evolve switch + deep-round clock) is
+        // persisted under the audit dir and WINS over the config file — it is
+        // what the UIs' checkbox flips, so a restart must not undo it.
+        let store = proposal::ProposalStore::new(&cfg.audit_dir);
+        let (persisted_auto, last_cycle_ms, cycle_seq) =
+            store.load_state().unwrap_or((cfg.auto_evolve, 0, 0));
         let mut me = Self {
             enabled,
             cfg,
@@ -131,7 +220,12 @@ impl ShadowEvolution {
             token_expiry: HashMap::new(),
             round_markets: Vec::new(),
             audit,
+            auto_evolve: persisted_auto,
+            last_cycle_ms,
+            cycle_seq,
+            proposal_store: store,
         };
+        me.proposal_store.load();
         me.register_strategies(strategies);
         me
     }
@@ -349,6 +443,12 @@ impl ShadowEvolution {
         if !self.enabled {
             return Vec::new();
         }
+        // E13: undecided proposals past their TTL expire here, so the pending
+        // list never shows a stale decision opportunity.
+        let expired = self.proposal_store.expire_stale(now_ms);
+        if expired > 0 {
+            tracing::info!(count = expired, "shadow evolution proposals expired");
+        }
         let mut out = Vec::new();
         for i in 0..self.units.len() {
             if let Some(o) = self.evaluate_unit(i, now_ms) {
@@ -364,30 +464,34 @@ impl ShadowEvolution {
         let outcome;
         let mut rejection: Option<(EvolveSignal, String)> = None;
         let mut applied: Option<EvolveSignal> = None;
+        let mut held: Option<EvolutionProposal> = None;
         {
             let u = &mut self.units[i];
-            let signal = {
-                let baseline = u.set.baseline_metrics(cfg.evaluation_window_secs, now_ms);
-                evaluator::evaluate(
+            // Baseline metrics are computed here and hoisted so a HELD proposal
+            // can carry the same comparison block the auto path is judged on.
+            let baseline;
+            let (signal, variant_index) = {
+                baseline = u.set.baseline_metrics(cfg.evaluation_window_secs, now_ms);
+                let sel = evaluator::evaluate(
                     &cfg,
                     &u.strategy,
                     &mut u.set,
                     &baseline,
                     now_ms,
                     u.last_evolution_ms,
-                )?
-                .signal
+                )?;
+                (sel.signal, sel.variant_index)
             };
             // Safety locks. Lock 0 (declaration) and Lock 1 (domain) are checked
             // against THIS strategy's own declaration; Lock 2 (gradient) against
             // the parameters in force; Lock 3 against the immutable laws.
             let old: StrategyParams = (**u.cell.load()).clone();
-            let Some(proposal) = signal.to_params.for_strategy(&u.strategy).cloned() else {
+            let Some(new_params) = signal.to_params.for_strategy(&u.strategy).cloned() else {
                 return None; // a signal that does not name this strategy is dropped
             };
-            let checked = guard::validate_declared(&proposal, &u.specs)
-                .and_then(|_| guard::validate_domain(&proposal, &u.specs))
-                .and_then(|_| guard::validate_gradient(&old, &proposal, cfg.max_gradient))
+            let checked = guard::validate_declared(&new_params, &u.specs)
+                .and_then(|_| guard::validate_domain(&new_params, &u.specs))
+                .and_then(|_| guard::validate_gradient(&old, &new_params, cfg.max_gradient))
                 .and_then(|_| guard::validate_immutable(&cfg.risk));
 
             match checked {
@@ -398,14 +502,52 @@ impl ShadowEvolution {
                     u.last_evolution_ms = now_ms;
                     rejection = Some((signal, e.to_string()));
                 }
-                Ok(()) => {
-                    // Admissible: publish atomically and re-anchor THIS strategy.
-                    u.previous = Some(old);
-                    u.cell.store(Arc::new(proposal));
+                Ok(()) if cfg.auto_evolve => {
+                    // Unattended mode (E13): publish atomically and re-anchor
+                    // THIS strategy, exactly as before the proposal workflow.
+                    u.previous = Some(old.clone());
+                    u.cell.store(Arc::new(new_params.clone()));
                     u.last_evolution_ms = now_ms;
                     u.evolution_count += 1;
                     u.scaffold(&cfg, now_ms);
+                    // The adoption is durable: a rollback must be able to undo
+                    // it after a restart, so the promotion log gets the record.
+                    self.proposal_store.record_promotion(
+                        &signal.signal_id,
+                        &u.strategy,
+                        &old,
+                        &new_params,
+                        DecidedBy::Auto,
+                        now_ms,
+                    );
                     applied = Some(signal);
+                }
+                Ok(()) => {
+                    // Manual mode (E13): HOLD. The cell does not move and the
+                    // twin keeps running; the operator decides over IPC. The
+                    // variant's metrics were just measured for the guard pass —
+                    // reuse them as the proposal's comparison block.
+                    let variant_metrics =
+                        u.set.variants[variant_index].metrics(cfg.evaluation_window_secs, now_ms);
+                    let dims = moved_dims(&old, &new_params);
+                    held = Some(EvolutionProposal {
+                        id: format!("prop-{now_ms}-{}", u.strategy),
+                        strategy: u.strategy.clone(),
+                        dims,
+                        from_params: old,
+                        to_params: new_params,
+                        baseline: proposal::TradeMetrics::from_window(&baseline),
+                        variant: proposal::TradeMetrics::from_window(&variant_metrics),
+                        reason: signal.reason,
+                        confidence: signal.confidence,
+                        sample_count: signal.sample_count,
+                        created_at_ms: now_ms,
+                        expires_at_ms: now_ms + cfg.proposal_ttl_secs * 1000,
+                        state: proposal::ProposalState::Proposed,
+                        decided_by: None,
+                        decided_at_ms: None,
+                        cycle_seq: self.cycle_seq,
+                    });
                 }
             }
         }
@@ -420,6 +562,27 @@ impl ShadowEvolution {
         } else if let Some(signal) = applied {
             self.audit.record_applied(&signal);
             outcome = Some(EvolutionOutcome::Applied(signal));
+        } else if let Some(proposal) = held {
+            // One pending proposal per strategy: a fresher qualifying signal
+            // replaces a pending one with different targets (the older
+            // comparison is stale), and an identical re-proposal is a no-op.
+            let existing = self.proposal_store.pending_for(&proposal.strategy).cloned();
+            match existing {
+                Some(prev) if prev.to_params == proposal.to_params => {
+                    outcome = None; // already held, nothing new to show
+                }
+                Some(mut prev) => {
+                    prev.state = proposal::ProposalState::Superseded;
+                    prev.decided_at_ms = Some(now_ms);
+                    self.proposal_store.put(prev);
+                    self.proposal_store.put(proposal.clone());
+                    outcome = Some(EvolutionOutcome::Proposed(proposal));
+                }
+                None => {
+                    self.proposal_store.put(proposal.clone());
+                    outcome = Some(EvolutionOutcome::Proposed(proposal));
+                }
+            }
         } else {
             outcome = None;
         }
@@ -480,30 +643,266 @@ impl ShadowEvolution {
     /// Roll back ONE strategy to the parameters in force before its last change.
     /// A strategy that never changed anything is an explicit error, never a
     /// silent no-op that another strategy's rollback could be mistaken for.
+    ///
+    /// E13: when the in-memory anchor is gone (a restart dropped `previous`)
+    /// the promotion log takes over — the last un-rolled-back promotion for
+    /// this strategy is restored, so the one-click rollback survives a
+    /// restart. The restore re-checks the declaration/domain/immutable locks
+    /// but NOT the gradient: it restores a value that was already in force
+    /// once, which is not a step in an unbounded direction.
     pub fn rollback(&mut self, strategy: &str, now_ms: i64) -> Result<EvolutionOutcome, String> {
+        let cfg = self.cfg.clone();
         let u = self
             .units
             .iter_mut()
             .find(|u| u.strategy == strategy)
             .ok_or_else(|| format!("strategy {strategy} is not evolvable"))?;
-        let Some(prev) = u.previous.clone() else {
-            return Err(format!(
-                "strategy {strategy} has no previous parameters to roll back to"
-            ));
+        let restore = match u.previous.clone() {
+            Some(prev) => prev,
+            None => {
+                let cfg_restored = self
+                    .proposal_store
+                    .last_active_promotion(strategy)
+                    .ok_or_else(|| {
+                        format!("strategy {strategy} has no previous parameters to roll back to")
+                    })?;
+                guard::validate_declared(&cfg_restored.from_params, &u.specs)
+                    .map_err(|e| e.to_string())?;
+                guard::validate_domain(&cfg_restored.from_params, &u.specs)
+                    .map_err(|e| e.to_string())?;
+                guard::validate_immutable(&cfg.risk).map_err(|e| e.to_string())?;
+                cfg_restored.from_params
+            }
         };
         let from: StrategyParams = (**u.cell.load()).clone();
-        u.cell.store(Arc::new(prev.clone()));
+        u.cell.store(Arc::new(restore.clone()));
         u.previous = Some(from.clone());
         u.last_evolution_ms = now_ms;
+        // E13: the rollback must also clear the cross-restart restore target —
+        // otherwise a second rollback after a restart would re-apply exactly
+        // what the operator just undid.
+        let undone = self
+            .proposal_store
+            .last_active_promotion(strategy)
+            .map(|r| r.proposal_id)
+            .unwrap_or_else(|| "memory".into());
+        self.proposal_store
+            .record_rollback(&undone, strategy, &from, &restore, now_ms);
         let (mut fm, mut tm) = (MutableParams::new(), MutableParams::new());
         fm.set_strategy(strategy, from);
-        tm.set_strategy(strategy, prev);
+        tm.set_strategy(strategy, restore);
         self.audit.record_rollback(strategy, now_ms, &fm, &tm);
         Ok(EvolutionOutcome::RolledBack {
             strategy: strategy.to_string(),
             from: fm,
             to: tm,
         })
+    }
+
+    // ── E13 (#95): the promotion workflow ────────────────────────────────────
+
+    /// The operator's verdict on ONE held proposal. The acceptance re-runs the
+    /// FULL guard chain against the parameters in force at decision time — a
+    /// proposal is an observation, never a bypass of the locks.
+    pub fn decide(
+        &mut self,
+        id: &str,
+        decision: Decision,
+        now_ms: i64,
+    ) -> Result<DecisionResult, String> {
+        let cfg = self.cfg.clone();
+        let mut proposal = self
+            .proposal_store
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("proposal {id} is unknown"))?;
+        if !proposal.is_decidable() {
+            return Err(format!(
+                "proposal {id} is already {} — a decided proposal cannot be re-decided",
+                proposal.state
+            ));
+        }
+        match decision {
+            Decision::Accept => {
+                let u = self
+                    .units
+                    .iter_mut()
+                    .find(|u| u.strategy == proposal.strategy)
+                    .ok_or_else(|| {
+                        format!("strategy {} is no longer evolvable", proposal.strategy)
+                    })?;
+                let old: StrategyParams = (**u.cell.load()).clone();
+                let checked = guard::validate_declared(&proposal.to_params, &u.specs)
+                    .and_then(|_| guard::validate_domain(&proposal.to_params, &u.specs))
+                    .and_then(|_| {
+                        guard::validate_gradient(&old, &proposal.to_params, cfg.max_gradient)
+                    })
+                    .and_then(|_| guard::validate_immutable(&cfg.risk));
+                if let Err(e) = checked {
+                    // The world moved while the proposal was held (the strategy
+                    // evolved again, or the operator edited knobs): the stale
+                    // proposal is refused explicitly and closed out.
+                    proposal.state = ProposalState::Rejected;
+                    proposal.decided_by = Some(DecidedBy::User);
+                    proposal.decided_at_ms = Some(now_ms);
+                    self.proposal_store.put(proposal.clone());
+                    return Err(format!("proposal {id} no longer passes the guards: {e}"));
+                }
+                u.previous = Some(old);
+                u.cell.store(Arc::new(proposal.to_params.clone()));
+                u.last_evolution_ms = now_ms;
+                u.evolution_count += 1;
+                u.scaffold(&cfg, now_ms);
+                proposal.state = ProposalState::Accepted;
+                proposal.decided_by = Some(DecidedBy::User);
+                proposal.decided_at_ms = Some(now_ms);
+                let from_params = proposal.from_params.clone();
+                let to_params = proposal.to_params.clone();
+                let strategy = proposal.strategy.clone();
+                let signal = EvolveSignal::new(
+                    proposal.id.clone(),
+                    now_ms,
+                    strategy.clone(),
+                    wrap_params(&strategy, from_params.clone()),
+                    wrap_params(&strategy, to_params.clone()),
+                    proposal.reason,
+                    proposal.confidence,
+                    proposal.sample_count,
+                    proposal.variant.win_rate - proposal.baseline.win_rate,
+                    "proposal".into(),
+                );
+                self.audit.record_applied(&signal);
+                self.proposal_store.put(proposal.clone());
+                self.proposal_store.record_promotion(
+                    id,
+                    &strategy,
+                    &from_params,
+                    &to_params,
+                    DecidedBy::User,
+                    now_ms,
+                );
+                Ok(DecisionResult::Accepted { proposal })
+            }
+            Decision::Reject => {
+                proposal.state = ProposalState::Rejected;
+                proposal.decided_by = Some(DecidedBy::User);
+                proposal.decided_at_ms = Some(now_ms);
+                self.audit.record_rejection(
+                    &EvolveSignal::new(
+                        proposal.id.clone(),
+                        now_ms,
+                        proposal.strategy.clone(),
+                        wrap_params(&proposal.strategy, proposal.from_params.clone()),
+                        wrap_params(&proposal.strategy, proposal.to_params.clone()),
+                        proposal.reason,
+                        proposal.confidence,
+                        proposal.sample_count,
+                        proposal.variant.win_rate - proposal.baseline.win_rate,
+                        "proposal".into(),
+                    ),
+                    "rejected by operator".into(),
+                    "n/a",
+                    "n/a",
+                );
+                self.proposal_store.put(proposal.clone());
+                Ok(DecisionResult::Rejected { proposal })
+            }
+            Decision::Defer => {
+                proposal.state = ProposalState::Deferred;
+                proposal.decided_at_ms = Some(now_ms);
+                self.proposal_store.put(proposal.clone());
+                Ok(DecisionResult::Deferred { proposal })
+            }
+        }
+    }
+
+    /// Pending (still decidable) proposals, newest first.
+    pub fn pending_proposals(&self) -> Vec<EvolutionProposal> {
+        self.proposal_store.pending()
+    }
+
+    /// Every known proposal's latest state, newest first (IPC surface).
+    pub fn all_proposals(&self, limit: usize) -> Vec<EvolutionProposal> {
+        self.proposal_store.latest(limit)
+    }
+
+    pub fn pending_proposal_count(&self) -> usize {
+        self.proposal_store.pending_count()
+    }
+
+    /// The unattended switch (the UIs' auto-evolve checkbox). Persisted, so a
+    /// restart keeps the last chosen mode.
+    pub fn set_auto_evolve(&mut self, on: bool) {
+        if self.auto_evolve == on {
+            return;
+        }
+        self.auto_evolve = on;
+        self.cfg.auto_evolve = on;
+        tracing::info!(auto_evolve = on, "shadow evolution auto-evolve switched");
+        self.persist_state();
+    }
+
+    pub fn auto_evolve(&self) -> bool {
+        self.auto_evolve
+    }
+
+    /// `(last_cycle_ms, cycle_seq)` for the status surface.
+    pub fn cycle_info(&self) -> (i64, u64) {
+        (self.last_cycle_ms, self.cycle_seq)
+    }
+
+    /// When the next DEEP round fires (`None` before the first observation
+    /// starts the clock, or while disabled).
+    pub fn next_cycle_at_ms(&self, now_ms: i64) -> Option<i64> {
+        if !self.enabled {
+            return None;
+        }
+        if self.last_cycle_ms == 0 {
+            return None;
+        }
+        Some(self.last_cycle_ms + self.cfg.evolution_cycle_secs * 1000).filter(|t| *t > now_ms)
+    }
+
+    fn persist_state(&self) {
+        self.proposal_store
+            .save_state(self.auto_evolve, self.last_cycle_ms, self.cycle_seq);
+    }
+
+    /// E13: the 72h DEEP round. First call only starts the clock (a restart
+    /// must not fire a round immediately if the persisted clock says
+    /// otherwise); every round re-anchors every unit's variant set with
+    /// compound multi-knob mutants, so a cycle explores knob COMBINATIONS
+    /// between the single-knob re-anchors.
+    pub fn maybe_evolution_cycle(&mut self, now_ms: i64) -> Option<EvolutionCycleEvent> {
+        if !self.enabled {
+            return None;
+        }
+        if self.last_cycle_ms == 0 {
+            self.last_cycle_ms = now_ms;
+            self.persist_state();
+            return None;
+        }
+        if now_ms - self.last_cycle_ms < self.cfg.evolution_cycle_secs * 1000 {
+            return None;
+        }
+        for i in 0..self.units.len() {
+            self.units[i].scaffold_deep(&self.cfg, now_ms);
+        }
+        self.last_cycle_ms = now_ms;
+        self.cycle_seq += 1;
+        self.persist_state();
+        let event = EvolutionCycleEvent {
+            cycle_seq: self.cycle_seq,
+            dims: self.cfg.deep_dims,
+            strategies: self.strategy_names(),
+            at_ms: now_ms,
+        };
+        tracing::info!(
+            cycle = event.cycle_seq,
+            dims = event.dims,
+            "deep evolution round re-anchored variant sets"
+        );
+        Some(event)
     }
 
     /// Status of one strategy. `None` = this strategy is **not evolvable** (it
@@ -869,9 +1268,13 @@ mod tests {
     fn two_strategies_evolve_in_parallel_without_cross_talk() {
         let (a, b) = strategies();
         let refs: Vec<&dyn EngineStrategy> = vec![&a, &b];
-        let mut m = ShadowEvolution::new(fast_cfg(false, "parallel"), &refs);
-        let dir = std::path::PathBuf::from(&m.cfg.audit_dir);
+        // The pre-proposal (unattended) semantics: a qualifying variant applies
+        // directly, which is what this acceptance was written against.
+        let mut cfg = fast_cfg(false, "parallel");
+        cfg.auto_evolve = true;
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
         let _ = std::fs::remove_dir_all(&dir);
+        let mut m = ShadowEvolution::new(cfg, &refs);
         m.enable(0);
         m.on_round(&[market()], &[], 0);
 
@@ -1211,5 +1614,225 @@ mod tests {
 
         // The evaluation pass must also survive reading a twin that panicked.
         let _ = m.evaluate(3_000);
+    }
+
+    // ── E13 (#95): the proposal workflow ─────────────────────────────────────
+
+    /// MANUAL mode: a qualifying signal does NOT move the cell — it becomes a
+    /// pending proposal the operator decides over IPC, and the twin comparison
+    /// block carries the same figures the auto path was judged on.
+    #[test]
+    fn manual_mode_holds_a_proposal_instead_of_applying() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let mut cfg = fast_cfg(false, "hold");
+        cfg.auto_evolve = false;
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = ShadowEvolution::new(cfg, &refs);
+        m.enable(0);
+        m.on_round(&[market()], &[], 0);
+        drive_wins(&mut m, "alpha", 2, 10_000);
+
+        let cap_before = m.registry().get("alpha", "cap").unwrap();
+        let outcomes = m.evaluate(100_000);
+        assert_eq!(outcomes.len(), 1);
+        let proposal = match &outcomes[0] {
+            EvolutionOutcome::Proposed(p) => p,
+            other => panic!("expected a held proposal, got {other:?}"),
+        };
+        assert_eq!(proposal.strategy, "alpha");
+        assert_eq!(proposal.state, ProposalState::Proposed);
+        assert_eq!(proposal.baseline.closed, 2, "comparison block populated");
+        assert_eq!(proposal.variant.closed, 2);
+        assert!(
+            proposal.variant.win_rate > proposal.baseline.win_rate,
+            "the comparison must show WHY the variant qualifies"
+        );
+        assert!(
+            proposal.expires_at_ms > 100_000,
+            "the TTL is set from creation"
+        );
+        // The cell did not move, and the proposal is on disk.
+        assert_eq!(m.registry().get("alpha", "cap").unwrap(), cap_before);
+        assert_eq!(m.pending_proposal_count(), 1);
+
+        // An identical re-proposal is a no-op (the operator still has exactly
+        // one pending decision for this strategy).
+        drive_wins(&mut m, "alpha", 2, 200_000);
+        let outcomes2 = m.evaluate(300_000);
+        let proposed_again: Vec<_> = outcomes2
+            .iter()
+            .filter(|o| matches!(o, EvolutionOutcome::Proposed(_)))
+            .collect();
+        assert!(
+            proposed_again.is_empty(),
+            "an identical re-proposal is a no-op"
+        );
+        assert_eq!(m.pending_proposal_count(), 1);
+    }
+
+    /// REJECT closes the proposal without touching anything; the same variant
+    /// may not re-propose over a decided one silently (the twin keeps its own
+    /// cooldown via the shared re-anchor).
+    #[test]
+    fn rejecting_a_proposal_closes_it_and_moves_nothing() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let cfg = fast_cfg(false, "reject");
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = ShadowEvolution::new(cfg, &refs);
+        m.enable(0);
+        m.on_round(&[market()], &[], 0);
+        drive_wins(&mut m, "alpha", 2, 10_000);
+        let outcomes = m.evaluate(100_000);
+        let proposal = match &outcomes[0] {
+            EvolutionOutcome::Proposed(p) => p.clone(),
+            other => panic!("expected a held proposal, got {other:?}"),
+        };
+
+        let cap_before = m.registry().get("alpha", "cap").unwrap();
+        let result = m
+            .decide(&proposal.id, Decision::Reject, 200_000)
+            .expect("rejection is a legal decision");
+        match result {
+            DecisionResult::Rejected { proposal: p } => {
+                assert_eq!(p.state, ProposalState::Rejected);
+                assert_eq!(p.decided_by, Some(DecidedBy::User));
+            }
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+        assert_eq!(m.registry().get("alpha", "cap").unwrap(), cap_before);
+        assert_eq!(m.pending_proposal_count(), 0);
+        // A decided proposal cannot be re-decided.
+        assert!(
+            m.decide(&proposal.id, Decision::Accept, 300_000).is_err(),
+            "a decided proposal is closed"
+        );
+    }
+
+    /// ACCEPT runs the FULL guard chain against the parameters in force at
+    /// decision time, then hot-swaps, re-anchors, audits and logs a promotion.
+    #[test]
+    fn accepting_a_proposal_hot_swaps_and_logs_a_durable_promotion() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let cfg = fast_cfg(false, "accept");
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = ShadowEvolution::new(cfg, &refs);
+        m.enable(0);
+        m.on_round(&[market()], &[], 0);
+        drive_wins(&mut m, "alpha", 2, 10_000);
+        let outcomes = m.evaluate(100_000);
+        let proposal = match &outcomes[0] {
+            EvolutionOutcome::Proposed(p) => p.clone(),
+            other => panic!("expected a held proposal, got {other:?}"),
+        };
+
+        let result = m
+            .decide(&proposal.id, Decision::Accept, 200_000)
+            .expect("acceptance must pass the guards");
+        let accepted = match result {
+            DecisionResult::Accepted { proposal: p } => p,
+            other => panic!("expected acceptance, got {other:?}"),
+        };
+        assert_eq!(accepted.state, ProposalState::Accepted);
+        assert_ne!(
+            m.registry().get("alpha", "cap").unwrap(),
+            dec!(0.40),
+            "the cell moved"
+        );
+        assert_eq!(m.evolution_count("alpha"), 1);
+
+        // The promotion is durable and is the restore target for a rollback —
+        // including across a restart (a fresh manager reads the same dir).
+        let mut m2 = ShadowEvolution::new(fast_cfg(false, "accept"), &refs);
+        let rollback = m2
+            .rollback("alpha", 400_000)
+            .expect("cross-restart rollback must find the promotion");
+        match rollback {
+            EvolutionOutcome::RolledBack { strategy, .. } => {
+                assert_eq!(strategy, "alpha");
+            }
+            other => panic!("expected a rollback, got {other:?}"),
+        }
+        assert_eq!(
+            m2.registry().get("alpha", "cap").unwrap(),
+            dec!(0.40),
+            "restored to the pre-promotion parameters"
+        );
+    }
+
+    /// The auto-evolve switch is persisted: a restart keeps the last chosen
+    /// mode, whichever way it was flipped.
+    #[test]
+    fn the_auto_evolve_switch_survives_a_restart() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let cfg = fast_cfg(false, "autoswitch");
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = ShadowEvolution::new(cfg, &refs);
+        assert!(!m.auto_evolve(), "file default is manual");
+        m.set_auto_evolve(true);
+
+        let m2 = ShadowEvolution::new(fast_cfg(false, "autoswitch"), &refs);
+        assert!(m2.auto_evolve(), "the persisted switch wins over the file");
+    }
+
+    /// The 72h DEEP clock: the first observation starts it, the interval
+    /// suppresses early firings, and the round itself re-anchors every unit's
+    /// variant set with COMPOUND mutants (deep-*).
+    #[test]
+    fn the_deep_cycle_fires_only_after_the_full_interval() {
+        let (a, b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a, &b];
+        let mut cfg = fast_cfg(false, "cycle");
+        cfg.evolution_cycle_secs = 100;
+        cfg.deep_dims = 2;
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = ShadowEvolution::new(cfg, &refs);
+        m.enable(0);
+        m.on_round(&[market()], &[], 0);
+        m.on_tick("t", &book(0.43, 0.45), 1_000);
+
+        // First call starts the clock: no round, and nothing is scheduled yet
+        // (the next-fire time is only known once the clock is running).
+        assert!(m.maybe_evolution_cycle(2_000).is_none());
+        assert!(m.next_cycle_at_ms(2_000).is_some());
+        assert!(
+            m.variant_views(2_000)
+                .iter()
+                .all(|v| !v.label.starts_with("deep-")),
+            "no deep round before the interval"
+        );
+
+        // Inside the interval: nothing fires.
+        assert!(m.maybe_evolution_cycle(50_000).is_none());
+
+        // At the interval boundary (clock started at t=2_000 + 100s): the round
+        // fires and re-anchors BOTH strategies with deep-*.
+        let event = m
+            .maybe_evolution_cycle(102_000)
+            .expect("the round fires at the boundary");
+        assert_eq!(event.cycle_seq, 1);
+        assert_eq!(event.dims, 2);
+        assert_eq!(event.strategies.len(), 2);
+        let names: Vec<_> = m
+            .variant_views(100_001)
+            .into_iter()
+            .filter(|v| !v.is_baseline)
+            .map(|v| v.label)
+            .collect();
+        assert!(
+            names.iter().all(|l| l.starts_with("deep-")),
+            "the sets are re-anchored with compound mutants: {names:?}"
+        );
+        // A second call inside the NEW interval does not fire again.
+        assert!(m.maybe_evolution_cycle(150_000).is_none());
+        assert_eq!(m.cycle_info().1, 1);
     }
 }

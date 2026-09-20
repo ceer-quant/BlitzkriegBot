@@ -20,6 +20,7 @@
 
 pub mod decimal;
 pub mod knobs;
+pub mod market_regime;
 pub mod mean_reversion;
 pub mod model;
 pub mod params;
@@ -27,6 +28,10 @@ pub mod signal;
 pub mod spread_arb;
 pub mod trend_follow;
 
+pub use market_regime::{
+    MarketRegime, MarketRegimeConfig, PRICE_TICK, Regime, classify_window, regime_from_stats,
+    window_stats,
+};
 pub use mean_reversion::{
     FadeTracker, MeanReversionConfig, evaluate_mean_reversion, mean_reversion_knobs,
 };

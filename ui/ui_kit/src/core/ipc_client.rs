@@ -226,6 +226,59 @@ impl IpcClient {
         serde_json::from_value(self.call("market.list", serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
+
+    // ── Shadow Evolution (E13): the proposal workflow ────────────────────────
+
+    /// Full shadow-evolution status block (`shadow_evolution.status`). Older
+    /// cores answer too — the E13 keys just stay absent, so the view
+    /// deserialises with defaults.
+    pub fn evolution_status(&mut self) -> Result<EvolutionStatusView, IpcError> {
+        serde_json::from_value(self.call("shadow_evolution.status", serde_json::json!({}))?)
+            .map_err(|e| IpcError::Protocol(e.to_string()))
+    }
+
+    /// Every known proposal's latest state, newest first.
+    pub fn evolution_proposals(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<EvolutionProposalView>, IpcError> {
+        let v = self.call(
+            "shadow_evolution.proposals",
+            serde_json::json!({ "limit": limit }),
+        )?;
+        let view: EvolutionProposalsView =
+            serde_json::from_value(v).map_err(|e| IpcError::Protocol(e.to_string()))?;
+        Ok(view.proposals)
+    }
+
+    /// The operator's verdict on one proposal (`accept` / `reject` / `defer`).
+    pub fn evolution_decide(
+        &mut self,
+        id: &str,
+        decision: &str,
+    ) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            "shadow_evolution.decide",
+            serde_json::json!({ "id": id, "decision": decision }),
+        )
+    }
+
+    /// The auto-evolve checkbox (persisted across restarts).
+    pub fn evolution_set_auto(&mut self, on: bool) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            "shadow_evolution.set_auto",
+            serde_json::json!({ "enabled": on }),
+        )
+    }
+
+    /// Roll ONE strategy back to the parameters in force before its last change.
+    pub fn evolution_rollback(&mut self, strategy: &str) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            "shadow_evolution.rollback",
+            serde_json::json!({ "strategy": strategy }),
+        )
+    }
+
     pub fn strategy_enable(
         &mut self,
         name: &str,
@@ -318,6 +371,11 @@ impl IpcClient {
             s.market_active = m.active.is_some();
             s.market_active_name = m.active;
         }
+        // E13: the proposal workflow. Older cores refuse the methods and the
+        // snapshot keeps its shape — empty pending list means "nothing held",
+        // never an error.
+        s.evolution_proposals = self.evolution_proposals(50).unwrap_or_default();
+        s.evolution_status = self.evolution_status().ok();
         s
     }
 }

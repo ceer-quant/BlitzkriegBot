@@ -2,15 +2,26 @@
 
 use super::knobs::MutableParams;
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Why the evaluator proposed an evolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvolutionReason {
     HigherWinRate,
     BetterProfitFactor,
     CombinedImprovement,
+}
+
+impl EvolutionReason {
+    /// Human-readable label for the UIs.
+    pub fn label(&self) -> &'static str {
+        match self {
+            EvolutionReason::HigherWinRate => "win rate",
+            EvolutionReason::BetterProfitFactor => "profit factor",
+            EvolutionReason::CombinedImprovement => "win rate + profit factor",
+        }
+    }
 }
 
 /// A proposal to switch ONE strategy's parameters to a variant's.

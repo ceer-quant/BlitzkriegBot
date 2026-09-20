@@ -294,6 +294,100 @@ pub fn build_variants(
     out
 }
 
+/// Build a DEEP round's variant set (E13 / #95): baseline plus `count-1`
+/// COMPOUND variants, each moving up to `dims` declared knobs at once. This is
+/// the dimension the single-knob rotation cannot reach: real strategies are
+/// shaped by knob COMBINATIONS, and a winner made of two independent +3%
+/// steps applied one per epoch would take two epochs and two gates to confirm
+/// the pair.
+///
+/// The knob set for variant `i` is a rotation window: knobs
+/// `(sweep + i - 1 + t) % n` for `t in 0..dims`, with each knob's direction
+/// taken from `(sweep + i - 1 + t) % 2` — the same pairing argument as
+/// [`build_variants`], so successive sweeps visit every knob in both
+/// directions, now in combination instead of in isolation. A knob that appears
+/// twice in one window (few knobs, wide dims) is stepped once; a strategy with
+/// fewer knobs than `dims` (or `dims <= 1`) collapses to the single-knob move.
+///
+/// Every step still goes through `clamped_step`, so a compound mutant obeys
+/// the same ±gradient lock and domain clamp a single-knob variant does.
+#[allow(clippy::too_many_arguments)]
+pub fn build_deep_variants(
+    strategy: &str,
+    specs: &[KnobSpec],
+    base: &StrategyParams,
+    factory: &dyn ShadowFactory,
+    count: usize,
+    max_gradient: Decimal,
+    exit_cfg: &ExitConfig,
+    now_ms: i64,
+    sweep: u64,
+    dims: usize,
+) -> VariantSet {
+    let mut out = VariantSet::empty(strategy);
+    let mutable: Vec<&KnobSpec> = specs.iter().filter(|k| k.min < k.max).collect();
+    if mutable.is_empty() {
+        return out;
+    }
+    let Some(baseline) = Variant::new(
+        "baseline".into(),
+        "live(baseline)".into(),
+        base.clone(),
+        true,
+        now_ms,
+        factory,
+        exit_cfg,
+    ) else {
+        return out;
+    };
+    out.variants.push(baseline);
+
+    let n = mutable.len();
+    let dims = if n > 1 { dims.min(n) } else { 1 };
+    for i in 1..count {
+        let mut want = base.clone();
+        let mut moved: Vec<(String, Decimal)> = Vec::new();
+        for t in 0..dims {
+            let m = sweep as usize + i - 1 + t;
+            let spec = mutable[m % n];
+            if moved.iter().any(|(nm, _)| *nm == spec.name) {
+                continue; // the window wrapped onto a knob it already stepped
+            }
+            let factor = if m.is_multiple_of(2) {
+                Decimal::ONE + VARIANT_STEP
+            } else {
+                Decimal::ONE - VARIANT_STEP
+            };
+            let current = base.get(&spec.name).unwrap_or(spec.value);
+            let stepped = current * factor;
+            want.set(&spec.name, stepped);
+            moved.push((spec.name.clone(), stepped / current.max(Decimal::new(1, 6))));
+        }
+        if moved.is_empty() {
+            continue;
+        }
+        let params = super::guard::clamped_step(base, &want, max_gradient, specs);
+        let label_parts: String = moved
+            .iter()
+            .map(|(nm, f)| format!("{nm} x{f:.2}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let Some(v) = Variant::new(
+            format!("deep-{i}"),
+            format!("deep-{i}({label_parts})"),
+            params,
+            false,
+            now_ms,
+            factory,
+            exit_cfg,
+        ) else {
+            continue;
+        };
+        out.variants.push(v);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

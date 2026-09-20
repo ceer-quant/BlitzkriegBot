@@ -109,6 +109,10 @@ cooldown_minutes = 10
 max_gradient = 0.05                   # +/-5% per step (Lock 1) — 只能收紧，不能放宽
 variant_count = 3                     # shadow variants (>=2)
 audit_dir = "data/evolution"          # per-strategy: data/evolution/<strategy>.jsonl
+auto_evolve = false                   # true = 提案直接采纳，不再等人工拍板（无托管）
+evolution_cycle_minutes = 4320        # 72h 深度进化轮（复合变异）
+deep_dims = 2                         # 深度轮同时动的旋钮数
+proposal_ttl_minutes = 10080          # 提案 7 天未决自动过期
 ```
 
 `audit_dir` 是**目录**而非文件：文件名由策略名派生
@@ -146,6 +150,50 @@ evolutionsApplied, evolutionsRejected, secondsSinceLastEvolution }`。
 | `EVOLUTION_REJECTED` | 提议被安全锁拒绝（含 reason） |
 
 面板/命令：`/crypto-hft shadow-evolution [enable|disable|status|history [strategy]|apply <strategy> <knob=value>…|rollback <strategy>]`
+
+### 6.b 提案工作流（E13 / #95）
+
+影子评估器发现更优变异后不再直接改参数，而是先产出一个 **EvolutionProposal**
+（含基线/变异两侧的六指标对比、理由、置信度、样本数、7 天 TTL）。谁拍板由
+`auto_evolve` 决定；该开关的运行时值持久化在 `data/evolution/state.json`，
+**重启不丢**（持久态优先于文件配置）。
+
+- **人工模式（默认）**：提案挂到待决区（每策略最多一个在挂——同参数重复提案是
+  no-op，目标不同则旧提案标记 superseded）。三端 UI（webui「进化」页 / TUI
+  第 5 页签 / 命令动词）都能 `decide <id> accept|reject|defer`；accept 在
+  **决策时刻重跑全套安全锁**（域 → 渐变 → 不可变），通过才热切换并落账。
+- **自动模式（`auto_evolve = true`）**：提案直接采纳并记 promotions——无托管运行。
+- **72 小时深度进化**（`evolution_cycle_minutes`，默认 4320）：到点重建变异集，
+  复合变异一次动 `deep_dims` 个旋钮（±3%，扫动窗口轮换），重新评估一轮。
+- **一键回滚**：优先内存里的 previous；跨重启用 `promotions.jsonl` 的
+  last-active-promotion（回滚记录会**清空**恢复目标——单层语义，再回滚报错）。
+  回滚跳过渐变锁（恢复的是历史合法值），但域/不可变锁仍然生效。
+
+IPC 增量：
+
+| 方法 | 参数 | 说明 |
+|:---|:---|:---|
+| `shadow_evolution.proposals` | `{ limit? }` | 提案列表（待决在前） |
+| `shadow_evolution.decide` | `{ id, decision }` | accept / reject / defer（accept 重跑全部锁） |
+| `shadow_evolution.set_auto` | `{ enabled }` | 自动/人工开关（持久化，重启保留） |
+
+`status` 增量键：`autoEvolve`、`lastCycleMs`、`nextCycleAtMs`、`pendingProposals`。
+
+事件增量：`EVOLUTION_PROPOSED`（提案待决，UI 提示去审）、`EVOLUTION_CYCLE`
+（深度进化轮完成，含轮次/维数/覆盖策略）。
+
+文件增量（在 `audit_dir` 下）：
+
+| 文件 | 内容 |
+|:---|:---|
+| `proposals.jsonl` | 提案全档（按 id 折叠，含状态机变迁），上限 500 行 |
+| `promotions.jsonl` | 采纳/回滚账本（跨重启回滚的依据） |
+| `state.json` | 自动开关 + 周期钟（原子写） |
+
+CLI：`--se-auto-evolve on|off`、`--se-cycle-secs N`、`--se-ttl-secs N`、
+`--se-deep-dims N`；env：`BK_SE_AUTO_EVOLVE` / `BK_SE_CYCLE_SECS` /
+`BK_SE_TTL_SECS` / `BK_SE_DEEP_DIMS`。面板命令动词：`proposals [N]`、
+`decide <id> accept|reject|defer`、`auto-evolve on|off`、`rollback <strategy>`。
 
 ## 7. 审计（按策略分文件）
 

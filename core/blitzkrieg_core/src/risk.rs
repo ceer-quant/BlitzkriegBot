@@ -13,6 +13,10 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct RiskConfig {
     pub max_order_notional: Decimal,
+    /// Portfolio-level cap on TOTAL open notional across all strategies
+    /// (E16/#98). 0 = disabled (the shipped default); per-strategy caps are
+    /// partitioned by `StrategyLimit.max_open_notional_usd`.
+    pub max_open_notional_usd: Decimal,
     pub min_price: Decimal,
     pub max_price: Decimal,
 }
@@ -22,6 +26,8 @@ impl Default for RiskConfig {
         Self {
             // Mirrors the Node HFT defaults ($2.5/order, prices within the band).
             max_order_notional: Decimal::from(100),
+            // Off by default: a shipped-behaviour change would need data.
+            max_open_notional_usd: Decimal::ZERO,
             min_price: Decimal::ZERO,
             max_price: Decimal::ONE,
         }
@@ -194,6 +200,11 @@ impl RiskGate {
     }
     pub fn set_config(&mut self, c: RiskConfig) {
         self.config = c;
+    }
+
+    /// The live risk config (runtime updates land here, not in `CoreConfig`).
+    pub fn config(&self) -> &RiskConfig {
+        &self.config
     }
 
     pub fn config_mut(&mut self) -> &mut RiskConfig {

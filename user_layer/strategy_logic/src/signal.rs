@@ -327,7 +327,7 @@ impl TrendTracker {
 
 // ── spread_arb evaluator ────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpreadArbConfig {
     pub trend_min_price: Decimal,
     pub trend_confirm_sec: i64,
