@@ -90,7 +90,9 @@ try {
   const ready = await rpc.ready(c);
   check('ready handshake reports dry core', ready.mode === 'dry' && /^\d+\.\d+\.\d+$/.test(ready.version), JSON.stringify(ready));
 
-  // 1. Taker fills immediately, spends 0.4*5=2.
+  // 1. Taker fills immediately, spends 0.4*5=2. A live FOK needs resting
+  //    depth at or inside its limit, so the fixture mirrors an ask first.
+  await rpc.bookSnapshot(c, 'tk1', [], [[0.40, 100]]);
   const taker = await rpc.placeOrder(c, order('taker', 'tk1', 0.4, 5, 'k1'));
   check('taker immediate FILLED', taker.status === 'FILLED', JSON.stringify(taker));
 
@@ -125,17 +127,19 @@ try {
   // 5. maker_then_taker escalates after timeout.
   const mtt = await rpc.placeOrder(c, { ...order('maker_then_taker', 'mt1', 0.4, 5, 'k4', 'XRP'), makerTimeoutMs: 100 });
   check('maker_then_taker rests LIVE', mtt.status === 'LIVE');
-  await rpc.bookSnapshot(c, 'mt1', [], [[0.5, 100]]); // never crosses
+  await rpc.bookSnapshot(c, 'mt1', [], [[0.5, 100]]); // no depth inside 0.40
   await sleep(260);
   const escalated = (await rpc.listOrders(c)).orders.some((o) => o.internalKey.endsWith(':escalated') && o.status === 'FILLED');
   check('maker_then_taker escalated to a filled taker', escalated);
 
-  // Ledger final: taker 2 + crossed maker 2 + escalated taker 2 = 6 of notional,
-  // and the cancelled order released its reservation. Two of the three fills are
-  // taker fills and carry a fee; the crossed one is a *maker* fill and is free.
-  // Balance 100 - 6 - 2*takerFeeUsd(0.4, 5) = 93.928.
+  // Ledger final: taker 2 + crossed maker 2 + escalated taker 2.5 = 6.5 of
+  // notional, and the cancelled order released its reservation. The escalated
+  // leg takes the ask the book is actually offering (0.50), not the maker's
+  // rejected passive limit — a live FOK reprices; the two taker legs carry a
+  // fee at their own prices, the crossed one is a *maker* fill and is free.
+  // Balance 100 - 6.5 - takerFeeUsd(0.4, 5) - takerFeeUsd(0.5, 5) = 93.4249375.
   const bal = await rpc.balance(c);
-  const expectedFinal = 100 - 6 - 2 * takerFeeUsd(0.4, 5);
+  const expectedFinal = 100 - 6.5 - takerFeeUsd(0.4, 5) - takerFeeUsd(0.5, 5);
   check('final balance reflects 3 fills, net of taker fees', bal.balance === expectedFinal && bal.reserved === 0,
     `${JSON.stringify(bal)} != ${expectedFinal}`);
 
@@ -170,6 +174,8 @@ const pc = makeCore(POS_SOCK);
 try {
   await pc.start();
   // 8. A BUY fill opens a position that a profitable book closes on tick.
+  //    The FOK entry needs depth: mirror an ask at the entry price first.
+  await rpc.bookSnapshot(pc, 'pos1', [], [[0.40, 100]]);
   const opened = await rpc.placeOrder(pc, order('taker', 'pos1', 0.4, 5, 'kp1', 'ADA'));
   check('buy fills and opens a position', opened.status === 'FILLED');
   const posList = await rpc.positions(pc);
@@ -186,6 +192,7 @@ try {
   check('POSITION_CLOSED event carries realised PnL', positionClosed !== null && positionClosed.netPnlUsd > 0, JSON.stringify(positionClosed));
 
   // 9. Manual flatten via positions.exit.
+  await rpc.bookSnapshot(pc, 'pos2', [], [[0.40, 100]]);
   await rpc.placeOrder(pc, order('taker', 'pos2', 0.4, 5, 'kp2', 'DOT'));
   const flat = await rpc.exitPositions(pc);
   check('manual flatten closes open positions', flat.closed === 1, JSON.stringify(flat));

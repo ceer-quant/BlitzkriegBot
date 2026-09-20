@@ -15,7 +15,6 @@
 
 use crate::model::*;
 use crate::ome::{FillDelta, Ome};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VenueTrade {
@@ -85,54 +84,39 @@ pub fn reconcile(ome: &mut Ome, snap: &VenueSnapshot) -> CoreResult<ReconcileRep
     let open: std::collections::HashSet<&str> =
         snap.open_order_ids.iter().map(String::as_str).collect();
 
-    // 1) Repair missed fills. Aggregate per order so a cumulative Fill reflects
-    //    everything the venue saw, then push through the idempotent ledger.
-    let mut by_order: HashMap<String, (rust_decimal::Decimal, rust_decimal::Decimal, &VenueTrade)> =
-        HashMap::new();
+    // 1) Repair missed fills. Each venue trade row is its own idempotent unit
+    //    (keyed by the venue's trade id, shared with the user-WS channel), so
+    //    applying per row — never summing an order's cumulative total into one
+    //    fresh-keyed fill — means a fill the WS already booked is a no-op here
+    //    and a missing one is booked exactly once, at its own price.
     for t in &snap.trades {
-        let entry = by_order
-            .entry(t.venue_order_id.clone())
-            .or_insert_with(|| (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO, t));
-        entry.0 += t.size;
-        // volume-weighted price accumulator (numerator)
-        entry.1 += t.price * t.size;
-    }
-
-    for (venue_id, (total_size, price_num, last)) in by_order {
-        let Some(order) = ome.by_venue_or_id(&venue_id).cloned() else {
+        let Some(order) = ome.by_venue_or_id(&t.venue_order_id).cloned() else {
             // Not one of our orders (manual close on the venue): hand it to
             // the caller for position-book reconciliation.
-            for t in snap.trades.iter().filter(|t| t.venue_order_id == venue_id) {
-                report.unknown_fills.push(t.clone());
-            }
+            report.unknown_fills.push(t.clone());
             continue;
         };
-        let core_id = order.order_id.clone();
-        // Only repair if the venue reports more filled size than the OME knows.
-        if total_size <= order.filled_size {
-            continue;
-        }
-        let avg_price = if total_size > rust_decimal::Decimal::ZERO {
-            price_num / total_size
+        let trade_id = if t.trade_id.is_empty() {
+            t.tx_hash.clone()
         } else {
-            last.price
+            Some(t.trade_id.clone())
         };
         let fill = Fill {
-            order_id: core_id.clone(),
-            trade_id: Some(format!("recon:{}:{}", core_id, snap.now_ms)),
+            order_id: order.order_id.clone(),
+            trade_id,
             token_id: order.token_id.clone(),
             side: order.side,
-            price: avg_price,
-            size: total_size, // cumulative
+            price: t.price,
+            size: t.size, // per-trade executed size, NOT cumulative
             status: FillStatus::Confirmed,
-            ts_ms: last.ts_ms,
-            tx_hash: last.tx_hash.clone(),
-            // Carry the venue's role through the synthesized gap fill.
-            maker: last.maker,
+            ts_ms: t.ts_ms,
+            tx_hash: t.tx_hash.clone(),
+            // Carry the venue's role through the gap fill.
+            maker: t.maker,
         };
         if let Some(delta) = ome.apply_fill(fill, snap.now_ms)? {
             report.actions.push(ReconcileAction::FilledGap {
-                core_order_id: core_id.clone(),
+                core_order_id: order.order_id.clone(),
                 delta,
             });
         }
@@ -247,6 +231,82 @@ mod tests {
         );
         assert_eq!(ome.get("c1").unwrap().status, OrderStatus::Filled);
         assert_eq!(ome.get("c1").unwrap().filled_size, dec!(10));
+    }
+
+    #[test]
+    fn repairs_only_the_missing_increment_of_a_partially_known_fill() {
+        let mut ome = Ome::new();
+        live_order(&mut ome, "k1", "c1", "v1", 1);
+        // The user-WS stream already booked trade t1: 4 of the order's 10
+        // shares are locally known. A SELL, so the wrong increment would
+        // settle phantom sale proceeds into the ledger.
+        ome.apply_fill(
+            Fill {
+                order_id: "c1".into(),
+                trade_id: Some("t1".into()),
+                token_id: "tok".into(),
+                side: Side::Sell,
+                price: dec!(0.5),
+                size: dec!(4),
+                status: FillStatus::Confirmed,
+                ts_ms: 2,
+                tx_hash: None,
+                maker: Some(true),
+            },
+            2,
+        )
+        .unwrap();
+        // The REST sweep reports t1 (4) plus t2 (2): the order's cumulative
+        // filled size is 6 — the missing increment is 2, not 6.
+        let snap = VenueSnapshot {
+            open_order_ids: vec!["v1".into()],
+            trades: vec![
+                VenueTrade {
+                    venue_order_id: "v1".into(),
+                    trade_id: "t1".into(),
+                    token_id: "tok".into(),
+                    side: Side::Sell,
+                    size: dec!(4),
+                    price: dec!(0.5),
+                    ts_ms: 2,
+                    tx_hash: None,
+                    maker: Some(true),
+                },
+                VenueTrade {
+                    venue_order_id: "v1".into(),
+                    trade_id: "t2".into(),
+                    token_id: "tok".into(),
+                    side: Side::Sell,
+                    size: dec!(2),
+                    price: dec!(0.5),
+                    ts_ms: 3,
+                    tx_hash: None,
+                    maker: Some(false),
+                },
+            ],
+            now_ms: 5,
+        };
+        let report = reconcile(&mut ome, &snap).unwrap();
+        // Exactly one gap action, carrying exactly the missing increment.
+        let gaps: Vec<&ReconcileAction> = report
+            .actions
+            .iter()
+            .filter(|a| matches!(a, ReconcileAction::FilledGap { .. }))
+            .collect();
+        assert_eq!(gaps.len(), 1);
+        if let ReconcileAction::FilledGap { delta, .. } = gaps[0] {
+            assert_eq!(delta.delta, dec!(2));
+        }
+        assert_eq!(ome.get("c1").unwrap().filled_size, dec!(6));
+        // A second identical sweep stays stable (no re-application).
+        let again = reconcile(&mut ome, &snap).unwrap();
+        assert!(
+            again
+                .actions
+                .iter()
+                .all(|a| !matches!(a, ReconcileAction::FilledGap { .. }))
+        );
+        assert_eq!(ome.get("c1").unwrap().filled_size, dec!(6));
     }
 
     #[test]

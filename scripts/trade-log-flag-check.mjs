@@ -28,6 +28,8 @@ async function runCore(extra, sock, tag) {
   for (let i = 0; i < 60; i++) { if (existsSync(sock)) break; await sleep(50); }
   await sleep(300);
   // Open a position, then close it at a profit so a closed trade is recorded.
+  // The FOK buy needs resting depth: mirror an ask at the entry price first.
+  await rpc(sock, 'books.snapshot', { tokenId: 'tok', bids: [], asks: [{ price: 0.4, size: 100 }] });
   await rpc(sock, 'orders.place', { tokenId: 'tok', conditionId: 'c', side: 'buy', mode: 'taker', price: 0.4, size: 5, internalKey: 'k', strategy: 't', asset: 'BTC', direction: 'up', roundSlot: 1 });
   await rpc(sock, 'books.snapshot', { tokenId: 'tok', bids: [{ price: 0.95, size: 100 }], asks: [{ price: 0.99, size: 100 }] });
   await sleep(600);

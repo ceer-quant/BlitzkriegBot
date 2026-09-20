@@ -739,13 +739,16 @@ mod tests {
                 now_ms: t,
             },
         });
-        let t = now + 14_000;
+        // The take-profit book arrives AFTER the escalation deadline: the
+        // escalated taker leg fills against the 12 s book's 0.45 ask (the
+        // honest FOK price), and the +100% bid then fires the exit policy.
+        let t = now + 19_000;
         evs.push(TimedEvent {
             at_ms: t,
             event: DataEvent::Book {
                 token_id: "up".into(),
-                bids: vec![(dec!(0.95), dec!(100))],
-                asks: vec![(dec!(0.97), dec!(100))],
+                bids: vec![(dec!(0.99), dec!(100))],
+                asks: vec![(dec!(1.0), dec!(100))],
                 now_ms: t,
             },
         });
