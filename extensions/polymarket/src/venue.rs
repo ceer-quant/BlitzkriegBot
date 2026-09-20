@@ -20,10 +20,10 @@ use blitzkrieg_market_api::{
 use futures_util::StreamExt;
 use hmac::{Hmac, Mac as _};
 use polymarket_client_sdk_v2::auth::state::Authenticated;
-use polymarket_client_sdk_v2::auth::{Credentials, ExposeSecret, Kind, Normal};
+use polymarket_client_sdk_v2::auth::{ApiKey, Credentials, ExposeSecret, Kind, Normal};
 use polymarket_client_sdk_v2::clob::types::request::BalanceAllowanceRequest;
 use polymarket_client_sdk_v2::clob::types::{
-    AssetType, OrderType as SdkOrderType, Side as SdkSide, SignatureType,
+    AssetType, OrderType as SdkOrderType, Side as SdkSide, SignatureType, TraderSide,
 };
 use polymarket_client_sdk_v2::clob::ws::Client as WsClient;
 use polymarket_client_sdk_v2::clob::ws::types::response::{
@@ -320,6 +320,10 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
     mut cmd_rx: mpsc::Receiver<VenueCmd>,
     events: mpsc::Sender<VenueEvent>,
 ) {
+    // The owner identity the F2 fill filters compare venue `owner` fields
+    // against. The REST trade rows carry the funder as a checksummed address;
+    // compare case-insensitively so either case matches.
+    let funder_checksum = funder.to_checksum(None);
     // User-WS stream (best effort: skip when no markets are provided).
     if !markets.is_empty()
         && let Err(e) = start_user_ws(funder, ws_url, ws_credentials.clone(), events.clone()).await
@@ -355,8 +359,14 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
                 let _ = reply.send(res);
             }
             VenueCmd::Snapshot { reply } => {
-                let res =
-                    sdk_snapshot(&sweep_http, &host_url, &ws_credentials, &signer_checksum).await;
+                let res = sdk_snapshot(
+                    &sweep_http,
+                    &host_url,
+                    &ws_credentials,
+                    &signer_checksum,
+                    &funder_checksum,
+                )
+                .await;
                 if let Ok((open, trades)) = &res {
                     let maker = trades.iter().filter(|t| t.maker == Some(true)).count();
                     let key = (open.len(), trades.len(), maker);
@@ -541,6 +551,7 @@ async fn sdk_snapshot(
     host_url: &str,
     creds: &Credentials,
     signer_checksum: &str,
+    funder_checksum: &str,
 ) -> CoreResult<(Vec<String>, Vec<VenueTradeInfo>)> {
     let open = l2_get_json(http, host_url, creds, signer_checksum, "/data/orders").await?;
     let open_ids: Vec<String> = as_slice(open.get("data"))
@@ -574,11 +585,28 @@ async fn sdk_snapshot(
         let ts_ms = ts_ms.saturating_mul(1000);
         let trade_id = str_field(t, "id").unwrap_or_default().to_string();
 
-        if let (Some(taker_id), Some(size), Some(price)) = (
-            str_field(t, "taker_order_id"),
-            dec_field(t, "size"),
-            dec_field(t, "price"),
-        ) {
+        // F2: every leg must PROVE it belongs to this account before it may
+        // reach the fill ledger. The authenticated /data/trades response still
+        // contains trades we only participated in as makers — with the FULL
+        // trade attached (the taker leg and every maker leg, each carrying its
+        // `owner`). Booking the taker leg or a stranger's maker leg books the
+        // counterparty's flow: the audit's counterexample turns one 10-share
+        // position into 100 shares of phantom sale proceeds.
+        // The taker leg is ours when the row's owner field names our funder
+        // (`owner`/`trade_owner`), or when the venue's `trader_side` says we
+        // were the taker. An unprovable leg is DROPPED, not queued as an
+        // unknown fill.
+        let taker_ours = str_field(t, "owner").is_some_and(|o| o.eq_ignore_ascii_case(funder_checksum))
+            || str_field(t, "trade_owner")
+                .is_some_and(|o| o.eq_ignore_ascii_case(funder_checksum))
+            || str_field(t, "trader_side").is_some_and(|s| s.eq_ignore_ascii_case("TAKER"));
+        if taker_ours
+            && let (Some(taker_id), Some(size), Some(price)) = (
+                str_field(t, "taker_order_id"),
+                dec_field(t, "size"),
+                dec_field(t, "price"),
+            )
+        {
             trades.push(VenueTradeInfo {
                 venue_order_id: taker_id.to_string(),
                 trade_id: trade_id.clone(),
@@ -592,6 +620,11 @@ async fn sdk_snapshot(
             });
         }
         for m in as_slice(t.get("maker_orders")) {
+            // A maker leg is ours only when ITS owner names our funder; the
+            // trade-level owner is the taker's and says nothing about the leg.
+            if !str_field(m, "owner").is_some_and(|o| o.eq_ignore_ascii_case(funder_checksum)) {
+                continue;
+            }
             let Some(order_id) = str_field(m, "order_id") else {
                 continue;
             };
@@ -742,6 +775,10 @@ async fn start_user_ws(
     ws_credentials: Credentials,
     events: mpsc::Sender<VenueEvent>,
 ) -> anyhow::Result<()> {
+    // F2: the owner identity the trade-leg filter compares `owner` fields
+    // against. The user stream is scoped to this account, but each trade
+    // message still carries the WHOLE trade — every leg must prove itself.
+    let our_key: ApiKey = ws_credentials.key();
     let ws = WsClient::new(&ws_url, WsConfig::default())?.authenticate(ws_credentials, funder)?;
     // Subscribe to the account-wide user stream (empty market filter = all
     // user events). Rounds roll every few minutes and each is a NEW market
@@ -754,7 +791,7 @@ async fn start_user_ws(
         while let Some(item) = stream.next().await {
             match item {
                 Ok(WsMessage::Trade(t)) => {
-                    for fill in trade_fills(&t) {
+                    for fill in trade_fills(&t, &our_key) {
                         if events.send(VenueEvent::Fill(fill)).await.is_err() {
                             break;
                         }
@@ -786,7 +823,17 @@ async fn start_user_ws(
 
 /// Map a user trade message onto per-order fills. Our orders may appear as the
 /// taker (`taker_order_id`) or as makers (`maker_orders[]`).
-fn trade_fills(t: &TradeMessage) -> Vec<MarketFill> {
+///
+/// F2: the message arrives on OUR authenticated user stream, but the venue
+/// sends the WHOLE trade — the taker leg and every maker leg, each owned by
+/// whoever placed that order. Booking a stranger's leg books the
+/// counterparty's flow against our account (the audit's counterexample turns
+/// a 10-share buy into 100 shares of phantom sell proceeds), so every leg
+/// must prove its owner: maker legs carry their own `owner` API key; the
+/// taker leg is ours when `trader_side`/`trade_owner` says so, or — since the
+/// stream only ever carries trades this account participates in — when none
+/// of the maker legs is. Legs that cannot prove ownership are DROPPED.
+fn trade_fills(t: &TradeMessage, our_key: &ApiKey) -> Vec<MarketFill> {
     let status = match t.status {
         TradeMessageStatus::Confirmed => blitzkrieg_market_api::FillStatus::Confirmed,
         TradeMessageStatus::Failed => blitzkrieg_market_api::FillStatus::Failed,
@@ -796,7 +843,24 @@ fn trade_fills(t: &TradeMessage) -> Vec<MarketFill> {
     let tx = t.transaction_hash.as_ref().map(|h| format!("{h}"));
     let mut fills = Vec::new();
 
-    if let Some(taker_id) = &t.taker_order_id {
+    let maker_ours: Vec<bool> = t
+        .maker_orders
+        .iter()
+        .map(|m| m.owner == *our_key)
+        .collect();
+    let any_maker_ours = maker_ours.iter().any(|&ours| ours);
+    let taker_ours = match t.trader_side {
+        Some(TraderSide::Taker) => true,
+        Some(TraderSide::Maker) => false,
+        _ => t
+            .trade_owner
+            .map(|o| o == *our_key)
+            .unwrap_or(!any_maker_ours),
+    };
+
+    if taker_ours
+        && let Some(taker_id) = &t.taker_order_id
+    {
         fills.push(MarketFill {
             order_id: taker_id.clone(),
             trade_id: Some(t.id.clone()),
@@ -811,7 +875,10 @@ fn trade_fills(t: &TradeMessage) -> Vec<MarketFill> {
             maker: Some(false),
         });
     }
-    for m in &t.maker_orders {
+    for (ours, m) in maker_ours.into_iter().zip(&t.maker_orders) {
+        if !ours {
+            continue;
+        }
         fills.push(MarketFill {
             order_id: m.order_id.clone(),
             trade_id: Some(format!("{}:{}", t.id, m.order_id)),

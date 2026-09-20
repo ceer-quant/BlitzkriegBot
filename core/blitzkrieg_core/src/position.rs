@@ -658,6 +658,35 @@ impl PositionManager {
         }
     }
 
+    /// F4: undo one `close()`. The venue reported the closing fill FAILED, so
+    /// the position was never sold: put the pre-close row back (shares, basis,
+    /// accrued flows, exit state — exactly as it stood), hand back the daily
+    /// PnL the close added, and drop the closed record from the in-memory book
+    /// so `balance == seed + Σ closed.net_pnl` holds again.
+    ///
+    /// The close-time cooldowns (`exit_cooldowns`, `asset_last_*`) are left
+    /// alone on purpose: they only delay actions conservatively, and the
+    /// pre-close values they overwrote are gone — trying to fake them would
+    /// just move the drift.
+    ///
+    /// Returns false (and changes nothing) if the position id is already open,
+    /// so a repeated unwind cannot duplicate the row.
+    pub fn restore_closed(&mut self, pre_close: OpenPosition, closed: &ClosedPosition) -> bool {
+        if self.open.iter().any(|p| p.id == pre_close.id) {
+            return false;
+        }
+        self.daily_pnl -= closed.net_pnl_usd;
+        if let Some(i) = self
+            .closed
+            .iter()
+            .rposition(|c| c.id == closed.id && c.exited_at_ms == closed.exited_at_ms)
+        {
+            self.closed.remove(i);
+        }
+        self.open.push(pre_close);
+        true
+    }
+
     /// Capacity + cooldown gate (mirrors TS `canOpen`).
     pub fn can_open(
         &self,
