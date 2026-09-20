@@ -29,7 +29,7 @@ use polymarket_client_sdk_v2::clob::ws::types::response::{
     TradeMessage, TradeMessageStatus, WsMessage,
 };
 use polymarket_client_sdk_v2::clob::{Client, Config};
-use polymarket_client_sdk_v2::types::{Address, B256, Decimal as SdkDecimal, U256};
+use polymarket_client_sdk_v2::types::{Address, Decimal as SdkDecimal, U256};
 use polymarket_client_sdk_v2::ws::config::Config as WsConfig;
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -207,7 +207,7 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
 ) {
     // User-WS stream (best effort: skip when no markets are provided).
     if !markets.is_empty()
-        && let Err(e) = start_user_ws(funder, ws_url, markets, ws_credentials, events.clone()).await
+        && let Err(e) = start_user_ws(funder, ws_url, ws_credentials, events.clone()).await
     {
         let _ = events
             .send(VenueEvent::Fatal(format!("user ws setup failed: {e}")))
@@ -324,24 +324,43 @@ async fn sdk_snapshot(
         .trades(&TradesRequest::builder().build(), None)
         .await
         .map_err(|e| map_sdk_err(&e.to_string()))?;
-    let trades = page
-        .data
-        .into_iter()
-        .map(|t| VenueTradeInfo {
+    let mut trades = Vec::new();
+    for t in page.data {
+        // Indexed by the venue's taker order id, so this record IS the taker
+        // execution.
+        trades.push(VenueTradeInfo {
             venue_order_id: t.taker_order_id.clone(),
-            trade_id: t.id,
+            trade_id: t.id.clone(),
             token_id: format!("{}", t.asset_id),
             side: map_side(t.side),
             size: t.size,
             price: t.price,
             ts_ms: t.match_time.timestamp_millis(),
             tx_hash: None,
-            // Indexed by the venue's taker order id, so this record IS the taker
-            // execution. Maker executions come through the user channel, where
-            // their `maker_orders[]` entry is tagged maker.
             maker: Some(false),
-        })
-        .collect();
+        });
+        // When one of our resting orders was hit, the trade record names the
+        // TAKER's order id — indexed only by that, the sweep would never match
+        // our order and every maker fill would be lost (this REST sweep is the
+        // only periodic safety net for user-WS gaps). Emit one record per
+        // maker order too; the host drops ids it does not track.
+        for m in &t.maker_orders {
+            if m.matched_amount <= rust_decimal::Decimal::ZERO {
+                continue;
+            }
+            trades.push(VenueTradeInfo {
+                venue_order_id: m.order_id.clone(),
+                trade_id: format!("{}:{}", t.id, m.order_id),
+                token_id: format!("{}", m.asset_id),
+                side: map_side(m.side),
+                size: m.matched_amount,
+                price: m.price,
+                ts_ms: t.match_time.timestamp_millis(),
+                tx_hash: None,
+                maker: Some(true),
+            });
+        }
+    }
     Ok((open_ids, trades))
 }
 
@@ -351,19 +370,16 @@ async fn sdk_snapshot(
 async fn start_user_ws(
     funder: Address,
     ws_url: String,
-    markets: Vec<String>,
     ws_credentials: Credentials,
     events: mpsc::Sender<VenueEvent>,
 ) -> anyhow::Result<()> {
     let ws = WsClient::new(&ws_url, WsConfig::default())?.authenticate(ws_credentials, funder)?;
-    let condition_ids: Vec<B256> = markets
-        .iter()
-        .filter_map(|m| B256::from_str(m).ok())
-        .collect();
-    if condition_ids.is_empty() {
-        anyhow::bail!("no valid market condition ids for user ws");
-    }
-    let stream = ws.subscribe_user_events(condition_ids)?;
+    // Subscribe to the account-wide user stream (empty market filter = all
+    // user events). Rounds roll every few minutes and each is a NEW market
+    // with fresh condition ids, so a subscription fixed at startup would
+    // never see fills for later rounds. Order/trade matching, dedup and
+    // unknown-order buffering live on the OME side.
+    let stream = ws.subscribe_user_events(Vec::new())?;
     tokio::spawn(async move {
         let mut stream = Box::pin(stream);
         while let Some(item) = stream.next().await {
