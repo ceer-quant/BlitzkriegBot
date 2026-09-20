@@ -11,11 +11,11 @@
 use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
 use anyhow::Context as _;
-use base64::engine::general_purpose::URL_SAFE;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE;
 use blitzkrieg_market_api::{
-    CoreError, CoreErrorCode, CoreResult, FillPolicy, MarketFill, PendingOrder, Side,
-    VenueTradeInfo,
+    CoreError, CoreErrorCode, CoreResult, FillPolicy, MarketFill, PendingOrder, SelfCheckItem,
+    SelfCheckReport, Side, VenueTradeInfo,
 };
 use futures_util::StreamExt;
 use hmac::{Hmac, Mac as _};
@@ -75,7 +75,10 @@ fn validate_venue_host(raw: &str) -> anyhow::Result<String> {
         || host.ends_with(".local")
         || host.ends_with(".internal")
         || host.ends_with(".internal.invalid");
-    anyhow::ensure!(!reserved_name, "CLOB_API_URL points at a reserved host: {host}");
+    anyhow::ensure!(
+        !reserved_name,
+        "CLOB_API_URL points at a reserved host: {host}"
+    );
 
     if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
         let o = ip.octets();
@@ -130,6 +133,11 @@ pub enum VenueCmd {
     /// Open order ids + recent trades for the reconciliation sweep.
     Snapshot {
         reply: oneshot::Sender<CoreResult<(Vec<String>, Vec<VenueTradeInfo>)>>,
+    },
+    /// Exercise the venue paths trading actually needs (authenticated balance +
+    /// L2-signed sweep GET) and report capability.
+    SelfCheck {
+        reply: oneshot::Sender<CoreResult<SelfCheckReport>>,
     },
 }
 
@@ -187,6 +195,16 @@ impl LiveVenue {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(VenueCmd::Snapshot { reply: tx })
+            .await
+            .map_err(|_| CoreError::new(CoreErrorCode::Internal, "venue actor stopped"))?;
+        rx.await
+            .map_err(|_| CoreError::new(CoreErrorCode::Internal, "venue actor dropped reply"))?
+    }
+
+    pub async fn self_check(&self) -> CoreResult<SelfCheckReport> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(VenueCmd::SelfCheck { reply: tx })
             .await
             .map_err(|_| CoreError::new(CoreErrorCode::Internal, "venue actor stopped"))?;
         rx.await
@@ -337,18 +355,10 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
                 let _ = reply.send(res);
             }
             VenueCmd::Snapshot { reply } => {
-                let res = sdk_snapshot(
-                    &sweep_http,
-                    &host_url,
-                    &ws_credentials,
-                    &signer_checksum,
-                )
-                .await;
+                let res =
+                    sdk_snapshot(&sweep_http, &host_url, &ws_credentials, &signer_checksum).await;
                 if let Ok((open, trades)) = &res {
-                    let maker = trades
-                        .iter()
-                        .filter(|t| t.maker == Some(true))
-                        .count();
+                    let maker = trades.iter().filter(|t| t.maker == Some(true)).count();
                     let key = (open.len(), trades.len(), maker);
                     if last_sweep != Some(key) {
                         eprintln!(
@@ -358,6 +368,17 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
                         last_sweep = Some(key);
                     }
                 }
+                let _ = reply.send(res);
+            }
+            VenueCmd::SelfCheck { reply } => {
+                let res = self_check_probe(
+                    &client,
+                    &sweep_http,
+                    &host_url,
+                    &ws_credentials,
+                    &signer_checksum,
+                )
+                .await;
                 let _ = reply.send(res);
             }
         }
@@ -409,6 +430,81 @@ async fn sdk_place<S: alloy::signers::Signer + Sync>(
     })
 }
 
+/// Trading-capability self-check: exercise the venue paths trading actually
+/// needs, in order, and report each as a probe item. Deliberately READ-ONLY —
+/// no order is ever placed, cancelled or modified by this probe:
+///   1. `balance_allowance` (authenticated SDK POST) — proves the L2
+///      credentials, the authenticated client and venue reachability, i.e.
+///      everything a live POST shares before it can even be signed.
+///   2. L2-signed `GET /data/orders` (the sweep transport) — proves the
+///      reconciliation channel works; auth failure here means the sweep
+///      safety net is blind.
+///
+/// A probe failure is `ok=false` and the host freezes trading on it.
+async fn self_check_probe(
+    client: &Client<Authenticated<Normal>>,
+    http: &reqwest::Client,
+    host_url: &str,
+    creds: &Credentials,
+    signer_checksum: &str,
+) -> CoreResult<SelfCheckReport> {
+    let ts = now_epoch_ms();
+    let mut items: Vec<SelfCheckItem> = Vec::new();
+
+    match sdk_balance(client).await {
+        Ok(b) => items.push(SelfCheckItem {
+            name: "balance".into(),
+            ok: true,
+            detail: format!("venue free balance {b}"),
+        }),
+        Err(e) => {
+            let raw = e.raw.clone().unwrap_or_default();
+            items.push(SelfCheckItem {
+                name: "balance".into(),
+                ok: false,
+                detail: format!("{:?}: {} {raw}", e.code, e.message),
+            });
+        }
+    }
+
+    match l2_get_json(http, host_url, creds, signer_checksum, "/data/orders").await {
+        Ok(v) => {
+            let n = v
+                .get("data")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            items.push(SelfCheckItem {
+                name: "sweep".into(),
+                ok: true,
+                detail: format!("/data/orders ok, {n} open order(s)"),
+            });
+        }
+        Err(e) => {
+            let raw = e.raw.clone().unwrap_or_default();
+            items.push(SelfCheckItem {
+                name: "sweep".into(),
+                ok: false,
+                detail: format!("{:?}: {} {raw}", e.code, e.message),
+            });
+        }
+    }
+
+    let ok = items.iter().all(|i| i.ok);
+    Ok(SelfCheckReport {
+        ok,
+        ts_ms: ts,
+        items,
+    })
+}
+
+pub fn now_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 async fn sdk_balance(client: &Client<Authenticated<Normal>>) -> CoreResult<Decimal> {
     let req = BalanceAllowanceRequest::builder()
         .asset_type(AssetType::Collateral)
@@ -451,7 +547,9 @@ async fn sdk_snapshot(
         .iter()
         .filter_map(|o| {
             let id = str_field(o, "id")?;
-            let live = str_field(o, "status").unwrap_or("LIVE").eq_ignore_ascii_case("LIVE");
+            let live = str_field(o, "status")
+                .unwrap_or("LIVE")
+                .eq_ignore_ascii_case("LIVE");
             live.then(|| id.to_string())
         })
         .collect();
@@ -494,12 +592,18 @@ async fn sdk_snapshot(
             });
         }
         for m in as_slice(t.get("maker_orders")) {
-            let Some(order_id) = str_field(m, "order_id") else { continue };
-            let Some(matched) = dec_field(m, "matched_amount") else { continue };
+            let Some(order_id) = str_field(m, "order_id") else {
+                continue;
+            };
+            let Some(matched) = dec_field(m, "matched_amount") else {
+                continue;
+            };
             if matched <= Decimal::ZERO {
                 continue;
             }
-            let Some(price) = dec_field(m, "price") else { continue };
+            let Some(price) = dec_field(m, "price") else {
+                continue;
+            };
             trades.push(VenueTradeInfo {
                 venue_order_id: order_id.to_string(),
                 trade_id: format!("{trade_id}:{order_id}"),
@@ -550,14 +654,27 @@ async fn l2_get_json(
     let sig = URL_SAFE.encode(mac.finalize().into_bytes());
 
     let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("POLY_ADDRESS", signer_checksum.parse().expect("POLY_ADDRESS"));
-    headers.insert("POLY_API_KEY", creds.key().to_string().parse().expect("POLY_API_KEY"));
+    headers.insert(
+        "POLY_ADDRESS",
+        signer_checksum.parse().expect("POLY_ADDRESS"),
+    );
+    headers.insert(
+        "POLY_API_KEY",
+        creds.key().to_string().parse().expect("POLY_API_KEY"),
+    );
     headers.insert(
         "POLY_PASSPHRASE",
-        creds.passphrase().expose_secret().parse().expect("POLY_PASSPHRASE"),
+        creds
+            .passphrase()
+            .expose_secret()
+            .parse()
+            .expect("POLY_PASSPHRASE"),
     );
     headers.insert("POLY_SIGNATURE", sig.parse().expect("POLY_SIGNATURE"));
-    headers.insert("POLY_TIMESTAMP", ts.to_string().parse().expect("POLY_TIMESTAMP"));
+    headers.insert(
+        "POLY_TIMESTAMP",
+        ts.to_string().parse().expect("POLY_TIMESTAMP"),
+    );
 
     let resp = http
         .get(format!("{host_url}{path}"))
@@ -566,10 +683,9 @@ async fn l2_get_json(
         .await
         .map_err(|e| CoreError::new(CoreErrorCode::VenueError, format!("sweep {path}: {e}")))?;
     let status = resp.status();
-    let body = resp
-        .bytes()
-        .await
-        .map_err(|e| CoreError::new(CoreErrorCode::VenueError, format!("sweep {path} body: {e}")))?;
+    let body = resp.bytes().await.map_err(|e| {
+        CoreError::new(CoreErrorCode::VenueError, format!("sweep {path} body: {e}"))
+    })?;
     if !status.is_success() {
         let text = String::from_utf8_lossy(&body);
         let head = &text[..text.len().min(300)];
@@ -578,11 +694,15 @@ async fn l2_get_json(
             format!("sweep {path} -> status {status}: {head}"),
         ));
     }
-    serde_json::from_slice(&body)
-        .map_err(|e| CoreError::new(CoreErrorCode::VenueError, format!("sweep {path} decode: {e}")))
+    serde_json::from_slice(&body).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::VenueError,
+            format!("sweep {path} decode: {e}"),
+        )
+    })
 }
 
-fn as_slice<'a>(v: Option<&'a serde_json::Value>) -> &'a [serde_json::Value] {
+fn as_slice(v: Option<&serde_json::Value>) -> &[serde_json::Value] {
     v.and_then(serde_json::Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[])

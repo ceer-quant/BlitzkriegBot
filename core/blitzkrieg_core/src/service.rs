@@ -547,6 +547,21 @@ pub struct Core {
     /// Per-strategy order/trade accounting (P-1.1). Session-scoped: reset on
     /// restart, like `stats`; the durable per-trade record is the trade log.
     strategy_accounting: HashMap<String, StrategyAccounting>,
+    /// Venue-rejection cooldowns keyed by placement intent (`internal_key`):
+    /// after the venue refuses an order, retries of the SAME intent back off
+    /// exponentially and stop after a cap — a stuck exit once burned 380+
+    /// rejections hammering a venue that kept refusing at full tick rate.
+    place_cooldowns: HashMap<String, RejectCooldown>,
+    /// Consecutive LIVE venue rejections (a successful placement resets).
+    /// Reaching the threshold trips the freeze (kill switch).
+    consecutive_venue_rejects: u32,
+    /// Last venue/self-check failure surfaced to the panel, session-scoped.
+    last_venue_error: Option<(i64, String)>,
+    /// Newest external (unknown-order) fill timestamp already folded into the
+    /// position book; persisted next to the position log.
+    recon_watermark_ms: i64,
+    /// Newest trading-capability self-check report (panel visibility).
+    last_self_check: Option<blitzkrieg_market_api::SelfCheckReport>,
     next_id: u64,
     tx: Option<mpsc::UnboundedSender<Event>>,
 }
@@ -713,6 +728,11 @@ impl Core {
             stats: CoreStats::default(),
             event_archive,
             strategy_accounting: HashMap::new(),
+            place_cooldowns: HashMap::new(),
+            consecutive_venue_rejects: 0,
+            last_venue_error: None,
+            recon_watermark_ms: 0,
+            last_self_check: None,
             next_id: 1,
             tx: None,
         }
@@ -763,6 +783,9 @@ impl Core {
         let Some(db) = self.position_db.as_ref() else {
             return 0;
         };
+        // The watermark outlives the position set: a flat book must still
+        // remember which external fills were already accounted for.
+        self.recon_watermark_ms = db.load_watermark();
         let loaded = db.load();
         if loaded.is_empty() {
             return 0;
@@ -1911,6 +1934,29 @@ impl Core {
             "signals": self.stats.signals,
             "placeRejected": self.stats.place_rejected,
             "strategyLimitRejected": self.stats.strategy_limit_rejected,
+            "venueRejected": self.stats.venue_rejected,
+            "lastVenueError": match &self.last_venue_error {
+                Some((ts, message)) => serde_json::json!({ "tsMs": ts, "message": message }),
+                None => serde_json::Value::Null,
+            },
+            "selfCheck": match &self.last_self_check {
+                Some(r) => serde_json::json!({
+                    "ok": r.ok,
+                    "tsMs": r.ts_ms,
+                    "items": r.items.iter().map(|i| serde_json::json!({
+                        "name": i.name, "ok": i.ok, "detail": i.detail,
+                    })).collect::<Vec<_>>(),
+                }),
+                None => serde_json::Value::Null,
+            },
+            "tradingFrozen": if self.risk.is_killed() {
+                serde_json::json!({
+                    "active": true,
+                    "reason": self.risk.kill_reason().unwrap_or("kill switch active"),
+                })
+            } else {
+                serde_json::json!({ "active": false })
+            },
             "blocked": blocked,
             "confirmed": confirmed,
             "confirmedDetail": confirmed_detail,
@@ -2087,24 +2133,175 @@ impl Core {
 
     /// Venue acknowledged the order (resting live). Optionally map to its venue id.
     pub fn confirm_live(&mut self, id: &str, now_ms: i64) -> CoreResult<()> {
-        if self.ome.get(id).is_some() {
+        if let Some(o) = self.ome.get(id).cloned() {
             self.ome.mark_live(id, now_ms)?;
             // Release reservation only on fill/cancel; keep it while resting.
             self.emit_order(id);
+            // The venue just accepted an order from us: capability proven for
+            // this instant, so the failure streak and this intent's cooldown
+            // both end here.
+            self.consecutive_venue_rejects = 0;
+            self.place_cooldowns.remove(&o.internal_key);
         }
         Ok(())
     }
 
     /// Venue rejected/killed an order before acceptance: release any reservation.
     pub fn reject_live(&mut self, id: &str, now_ms: i64) -> CoreResult<()> {
+        self.reject_live_result(id, None, now_ms)
+    }
+
+    /// Same as [`Core::reject_live`], carrying the venue's own failure text so
+    /// cooldowns, per-strategy accounting and the freeze decision all classify
+    /// against the REAL reason instead of a bare "rejected".
+    pub fn reject_live_result(
+        &mut self,
+        id: &str,
+        err: Option<crate::model::CoreError>,
+        now_ms: i64,
+    ) -> CoreResult<()> {
         if let Some(o) = self.ome.get(id).cloned() {
             if o.side == Side::Buy {
                 self.ledger.release(id);
             }
             self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
             self.emit_order(id);
+            let e = err.unwrap_or_else(|| {
+                crate::model::CoreError::new(
+                    blitzkrieg_market_api::CoreErrorCode::VenueError,
+                    "venue rejected order",
+                )
+            });
+            self.note_venue_rejection(&o.internal_key, o.strategy.clone(), &e, now_ms);
         }
         Ok(())
+    }
+
+    /// Book a venue rejection: per-strategy accounting (`ordersRejected` /
+    /// `rejectionCauses`), the intent's retry cooldown with exponential
+    /// backoff, the panel-visible last error, and — once the consecutive
+    /// streak hits [`FREEZE_ON_REJECTS`] — the trading freeze itself.
+    fn note_venue_rejection(
+        &mut self,
+        internal_key: &str,
+        strategy: String,
+        err: &crate::model::CoreError,
+        now_ms: i64,
+    ) {
+        self.stats.venue_rejected += 1;
+        self.consecutive_venue_rejects = self.consecutive_venue_rejects.saturating_add(1);
+        self.last_venue_error = Some((now_ms, format!("{:?}: {}", err.code, err.message)));
+        {
+            let acc = self.strategy_accounting.entry(strategy).or_default();
+            acc.rejected += 1;
+            *acc.rejection_causes
+                .entry(format!("venue.{:?}", err.code))
+                .or_default() += 1;
+        }
+        let (attempts, _next_ok) = {
+            let cd = self
+                .place_cooldowns
+                .entry(internal_key.to_string())
+                .or_default();
+            cd.attempts = cd.attempts.saturating_add(1);
+            cd.last_error = err.message.clone();
+            cd.next_ok_ms = now_ms + reject_backoff_ms(cd.attempts);
+            (cd.attempts, cd.next_ok_ms)
+        };
+        tracing::info!(
+            "venue rejected order: key={internal_key} attempts={} next_retry_in={}ms reason={}",
+            attempts,
+            reject_backoff_ms(attempts),
+            err.message
+        );
+        if self.consecutive_venue_rejects >= FREEZE_ON_REJECTS {
+            self.freeze_trading(
+                format!(
+                    "{} consecutive venue rejections; last: {}",
+                    self.consecutive_venue_rejects, err.message
+                ),
+                now_ms,
+            );
+        } else if attempts >= MAX_PLACE_ATTEMPTS {
+            // One intent keeps bouncing: stop retrying it entirely so a stuck
+            // exit cannot grind the venue forever, and say so loudly ONCE.
+            let first_time = {
+                let cd = self
+                    .place_cooldowns
+                    .get_mut(internal_key)
+                    .expect("cooldown entry just written");
+                let first = !cd.alerted;
+                cd.alerted = true;
+                first
+            };
+            if first_time {
+                self.emit(Event::RiskAlert {
+                    code: blitzkrieg_market_api::CoreErrorCode::VenueError,
+                    message: format!(
+                        "placement intent {internal_key} abandoned after {} venue rejections: {}",
+                        attempts, err.message
+                    ),
+                });
+            }
+        }
+    }
+
+    /// Whether an intent is currently blocked from (re)placement: `Some` while
+    /// its cooldown is running or its attempt cap is spent. Callers skip
+    /// silently — the rejection was already accounted for when it happened.
+    fn placement_blocked(&self, internal_key: &str, now_ms: i64) -> bool {
+        self.place_cooldowns
+            .get(internal_key)
+            .is_some_and(|c| now_ms < c.next_ok_ms || c.attempts >= MAX_PLACE_ATTEMPTS)
+    }
+
+    /// Freeze trading (kill switch) with a reason the panel can show. A
+    /// restart or an explicit `risk.resume` clears it; the startup self-check
+    /// re-probes either way. The caller owns `last_venue_error` — a rejection
+    /// already wrote the RAW venue error there, and the panel shows the freeze
+    /// reason from `tradingFrozen`.
+    fn freeze_trading(&mut self, reason: String, now_ms: i64) {
+        if self.risk.is_killed() {
+            return; // already frozen — do not re-alarm on every rejection
+        }
+        let _ = now_ms;
+        self.risk.kill(reason.clone());
+        self.emit(Event::RiskAlert {
+            code: blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
+            message: format!("trading frozen: {reason}"),
+        });
+        self.emit_error(crate::model::CoreError::new(
+            blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
+            reason,
+        ));
+    }
+
+    /// Trading-capability self-check result from the live venue bridge. A
+    /// failed report freezes trading — the probe exercised the venue paths a
+    /// live order shares (authenticated balance, reconciliation sweep), so
+    /// failing them means order egress cannot work either.
+    pub fn on_self_check(&mut self, report: blitzkrieg_market_api::SelfCheckReport) {
+        let ok = report.ok;
+        let ts = report.ts_ms;
+        for item in &report.items {
+            eprintln!(
+                "core: self-check {}: {} ({})",
+                item.name,
+                if item.ok { "ok" } else { "FAIL" },
+                item.detail
+            );
+        }
+        self.last_self_check = Some(report);
+        if !ok {
+            self.last_venue_error = Some((
+                ts,
+                "trading self-check failed (venue unreachable or credentials rejected)".to_string(),
+            ));
+            self.freeze_trading(
+                "trading self-check failed (venue unreachable or credentials rejected)".to_string(),
+                ts,
+            );
+        }
     }
 
     /// Apply an authoritative venue/user-WS fill (cumulative size) through the
@@ -2387,7 +2584,14 @@ impl Core {
         }) {
             self.apply_delta_effects(gap, snap.now_ms);
         }
-        if !report.actions.is_empty() || !report.suspect_ghost_ids.is_empty() {
+        // Trades on orders the OME never issued (manual closes made directly
+        // on the venue): fold them into the position book so the position
+        // cannot haunt the exit rules forever.
+        self.apply_external_fills(&report.unknown_fills, snap.now_ms);
+        if !report.actions.is_empty()
+            || !report.suspect_ghost_ids.is_empty()
+            || !report.unknown_fills.is_empty()
+        {
             self.emit(Event::ReconcileReport {
                 filled: report
                     .actions
@@ -2410,6 +2614,95 @@ impl Core {
             });
         }
         Ok(report)
+    }
+
+    /// Fold external fills (venue trades on orders the OME does not track) into
+    /// the position book. Only SELLs are applied: a manual close reduces the
+    /// matching position by token id, settling the ledger for the cash that
+    /// actually moved, and closes the position outright when it empties.
+    /// Manual BUYS are skipped — cash truth comes from the periodic
+    /// `venue_free_balance` realign, and inventing an unmanaged position here
+    /// would fight the engine. Dedup is a persisted watermark: only fills
+    /// strictly newer than the last applied one count, so a restart cannot
+    /// re-apply what the sweep still reports.
+    fn apply_external_fills(&mut self, fills: &[crate::reconcile::VenueTrade], now_ms: i64) {
+        if fills.is_empty() {
+            return;
+        }
+        let fresh: Vec<&crate::reconcile::VenueTrade> = fills
+            .iter()
+            .filter(|t| t.ts_ms > self.recon_watermark_ms)
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+        let mut applied = 0usize;
+        for t in &fresh {
+            if t.side != Side::Sell {
+                continue;
+            }
+            let Some(position_id) = self
+                .positions
+                .open_positions()
+                .iter()
+                .find(|p| p.token_id == t.token_id)
+                .map(|p| p.id.clone())
+            else {
+                continue;
+            };
+            let notional = t.price * t.size;
+            let fee_usd = if t.maker == Some(true) {
+                Decimal::ZERO
+            } else {
+                (crate::exit_policy::taker_fee_pct(t.price) / Decimal::ONE_HUNDRED) * notional
+            };
+            self.ledger.settle_sell_fill(notional, fee_usd);
+            let role = if t.maker == Some(true) {
+                crate::model::OrderRole::Maker
+            } else {
+                crate::model::OrderRole::Taker
+            };
+            let remaining = self
+                .positions
+                .apply_exit_fill(&position_id, t.size, t.price, fee_usd, role)
+                .unwrap_or(Decimal::ZERO);
+            if remaining == Decimal::ZERO {
+                self.positions.close(
+                    &position_id,
+                    t.price,
+                    ExitReason::Manual,
+                    t.maker == Some(true),
+                    now_ms,
+                );
+            }
+            self.persist_positions();
+            applied += 1;
+            tracing::info!(
+                token = %t.token_id,
+                size = %t.size,
+                price = %t.price,
+                remaining = %remaining,
+                "external close reconciled (manual venue sell folded into the position book)"
+            );
+        }
+        // Buy-side external fills and sells with no matching position are
+        // expected noise; one line per sweep keeps the log honest.
+        let unmatched = fresh.iter().filter(|t| t.side == Side::Sell).count() - applied;
+        let buys = fresh.iter().filter(|t| t.side != Side::Sell).count();
+        if unmatched > 0 || buys > 0 {
+            eprintln!(
+                "core: external fills not matched to a position: sells={unmatched} buys={buys} (buys are reconciled via venue cash realign)"
+            );
+        }
+        let new_mark = fresh
+            .iter()
+            .map(|t| t.ts_ms)
+            .max()
+            .unwrap_or(self.recon_watermark_ms);
+        self.recon_watermark_ms = self.recon_watermark_ms.max(new_mark);
+        if let Some(db) = self.position_db.as_ref() {
+            db.save_watermark(self.recon_watermark_ms);
+        }
     }
 
     fn emit(&self, ev: Event) {
@@ -2531,6 +2824,23 @@ impl Core {
         now_ms: i64,
         entry_gates: bool,
     ) -> CoreResult<(OrderId, OrderStatus)> {
+        // An intent the venue just refused waits out its backoff locally —
+        // re-POSTing at full tick rate is exactly the rejection storm this
+        // guards against. Manual attempts are only paused while the backoff
+        // window is running (≤ 30s), never permanently abandoned.
+        if let Some(cd) = self.place_cooldowns.get(&req.internal_key)
+            && now_ms < cd.next_ok_ms
+        {
+            return Err(crate::model::CoreError::new(
+                blitzkrieg_market_api::CoreErrorCode::RiskRejected,
+                format!(
+                    "intent {} in rejection cooldown ({}ms left): {}",
+                    req.internal_key,
+                    cd.next_ok_ms - now_ms,
+                    cd.last_error
+                ),
+            ));
+        }
         self.risk.check(&req)?;
 
         // Entry gates apply to opening BUY orders only; exits (SELL) are never
@@ -3040,6 +3350,13 @@ impl Core {
             if already_live {
                 continue;
             }
+            // The venue already refused this exit a moment ago: let the
+            // backoff run instead of re-POSTing every tick (the 380+-rejection
+            // storm this guards against). Silent skip — the rejection was
+            // already accounted for when it happened.
+            if self.placement_blocked(&job.internal_key, now_ms) {
+                continue;
+            }
             let Some(size) = self.positions.sell_shares(&job.position_id) else {
                 continue;
             };
@@ -3119,6 +3436,38 @@ struct CoreStats {
     place_rejected: u64,
     /// Entries rejected by a configured per-strategy cap (P-1.1).
     strategy_limit_rejected: u64,
+    /// Orders the LIVE venue refused (place path), session-scoped.
+    venue_rejected: u64,
+}
+
+/// Backoff bookkeeping for one placement intent. Backoff is exponential from
+/// [`REJECT_BACKOFF_BASE_MS`], capped at [`REJECT_BACKOFF_MAX_MS`]; after
+/// [`MAX_PLACE_ATTEMPTS`] consecutive venue refusals the intent is no longer
+/// retried at all, and if the refusals are consecutive engine-wide the trading
+/// freeze trips (see `note_venue_rejection`).
+#[derive(Debug, Default, Clone)]
+struct RejectCooldown {
+    attempts: u32,
+    next_ok_ms: i64,
+    last_error: String,
+    /// The "abandoned after N rejections" alert for this intent was emitted.
+    alerted: bool,
+}
+
+/// Base spacing between retries of a venue-rejected intent.
+const REJECT_BACKOFF_BASE_MS: i64 = 2_000;
+/// Retry spacing ceiling.
+const REJECT_BACKOFF_MAX_MS: i64 = 30_000;
+/// Attempts of ONE intent after which it stops being retried until a
+/// successful placement or a restart clears the cooldown.
+const MAX_PLACE_ATTEMPTS: u32 = 8;
+/// Consecutive venue refusals that freeze trading (kill switch).
+const FREEZE_ON_REJECTS: u32 = 5;
+fn reject_backoff_ms(attempts: u32) -> i64 {
+    // 2s, 4s, 8s, 16s, 30s, 30s… — quick escape for a transient refusal,
+    // bounded patience for a persistent one.
+    let ms = REJECT_BACKOFF_BASE_MS.saturating_mul(1 << (attempts.saturating_sub(1)).min(4));
+    ms.min(REJECT_BACKOFF_MAX_MS)
 }
 
 /// Session-scoped per-strategy aggregates (P-1.1 accounting).
@@ -3178,6 +3527,11 @@ fn classify_rejection(err: &crate::model::CoreError) -> String {
         "positions.lossCooldown".to_string()
     } else if msg.contains("position cap") || msg.contains("notional cap") {
         "limit.cap".to_string()
+    } else if msg.contains("in rejection cooldown") {
+        // A local backoff pause after a venue refusal — the placement was
+        // NOT re-attempted at all, which is a different bucket from a
+        // genuine refusal (and must not inflate it).
+        "venue.cooldown".to_string()
     } else if msg.starts_with("notional") && msg.contains("exceeds per-order cap") {
         "risk.perOrderCap".to_string()
     } else if msg.contains("outside") && msg.contains("price band") {
@@ -6509,5 +6863,231 @@ mod account_precision_tests {
             dec!(1.72),
             "summing the held basis double-counts the 4-share release"
         );
+    }
+}
+
+#[cfg(test)]
+mod trading_capability_tests {
+    use super::*;
+    use crate::risk::RiskConfig;
+    use rust_decimal_macros::dec;
+
+    fn core() -> Core {
+        Core::new(CoreConfig {
+            mode: Mode::Dry,
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(1000),
+            auto_exits_enabled: false,
+            ..Default::default()
+        })
+    }
+
+    fn pending_req(key: &str, strategy: &str) -> OrderRequest {
+        OrderRequest {
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode: FillPolicy::Taker,
+            price: dec!(0.4),
+            size: dec!(10),
+            internal_key: key.into(),
+            strategy: strategy.into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 1,
+        }
+    }
+
+    fn venue_err() -> crate::model::CoreError {
+        crate::model::CoreError::new(
+            blitzkrieg_market_api::CoreErrorCode::NotAuthenticated,
+            "auth failed",
+        )
+        .with_raw("401 unauthorized")
+    }
+
+    /// After the venue refuses an order, a retry of the SAME intent must wait
+    /// out its backoff locally instead of re-POSTing at full tick rate (the
+    /// 380+-rejection storm this regression pins). A DIFFERENT intent is
+    /// unaffected, and the intent opens again once its backoff expires.
+    #[test]
+    fn venue_rejection_pauses_only_that_intent() {
+        let mut c = core();
+        let (id, _) = c.place_pending(pending_req("k1", "s1"), 1_000).unwrap();
+        c.reject_live_result(&id, Some(venue_err()), 1_100).unwrap();
+
+        // Same intent, immediately after: locally paused, with the real reason.
+        // Goes through place() (the placement gate), not just the adapter path.
+        let e = c.place(pending_req("k1", "s1"), 0, 1_200).unwrap_err();
+        assert_eq!(e.code, blitzkrieg_market_api::CoreErrorCode::RiskRejected);
+        assert!(e.message.contains("rejection cooldown"));
+
+        // A different intent is free to go.
+        c.place_pending(pending_req("k2", "s1"), 1_200).unwrap();
+
+        // Backoff expiry re-opens the intent (dry settles it → position opens).
+        c.place(pending_req("k1", "s1"), 0, 1_100 + 2_000).unwrap();
+        assert_eq!(c.positions().open_positions().len(), 1);
+    }
+
+    /// Consecutive venue refusals freeze trading: the risk gate goes
+    /// kill-switch, the panel sees a reason, and further placement is refused
+    /// with KillSwitchActive. One rejection short of the threshold must NOT
+    /// freeze.
+    #[test]
+    fn consecutive_venue_rejections_freeze_trading() {
+        let mut c = core();
+        for i in 0..4 {
+            let (id, _) = c
+                .place_pending(pending_req(&format!("k{i}"), "s1"), i * 1_000 + 1)
+                .unwrap();
+            c.reject_live_result(&id, Some(venue_err()), i * 1_000 + 100)
+                .unwrap();
+        }
+        assert!(
+            !c.is_killed(),
+            "4 consecutive rejections must not freeze yet"
+        );
+        let (id, _) = c.place_pending(pending_req("k4", "s1"), 5_000).unwrap();
+        c.reject_live_result(&id, Some(venue_err()), 5_100).unwrap();
+        assert!(c.is_killed(), "the 5th consecutive rejection must freeze");
+        let stats = c.engine_stats();
+        assert_eq!(stats["venueRejected"], 5);
+        assert_eq!(stats["tradingFrozen"]["active"], true);
+        assert!(
+            stats["tradingFrozen"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("consecutive venue rejections")
+        );
+        assert!(
+            stats["lastVenueError"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("NotAuthenticated"),
+            "the panel must show the RAW venue error, not the freeze message"
+        );
+        let e = c.place_pending(pending_req("k9", "s1"), 6_000).unwrap_err();
+        assert_eq!(
+            e.code,
+            blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
+        );
+    }
+
+    /// A failed capability self-check freezes trading, and the report stays
+    /// visible in the diagnostics; a passing report does not.
+    #[test]
+    fn failed_self_check_freezes_trading() {
+        let mut c = core();
+        c.on_self_check(blitzkrieg_market_api::SelfCheckReport {
+            ok: false,
+            ts_ms: 1_000,
+            items: vec![blitzkrieg_market_api::SelfCheckItem {
+                name: "balance".into(),
+                ok: false,
+                detail: "401 unauthorized".into(),
+            }],
+        });
+        assert!(c.is_killed());
+        let stats = c.engine_stats();
+        assert_eq!(stats["selfCheck"]["ok"], false);
+        assert_eq!(stats["tradingFrozen"]["active"], true);
+
+        // An explicit resume clears the freeze (operator decision).
+        c.risk.resume();
+        assert!(!c.is_killed());
+    }
+
+    /// A venue sell on an order the OME never issued (a manual close made
+    /// directly on the venue) must fold into the position book: the position
+    /// disappears with a Manual close and the ledger receives the proceeds —
+    /// instead of haunting the exit rules forever.
+    #[test]
+    fn manual_venue_close_reconciles_the_position() {
+        let mut c = core();
+        c.place(buy_taker(dec!(0.4), dec!(10)), 0, 1_000).unwrap();
+        assert_eq!(c.positions().open_positions().len(), 1);
+        let cost = c.positions().open_positions()[0].cost_usd;
+        let seed = dec!(1000);
+
+        let snap = crate::reconcile::VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![crate::reconcile::VenueTrade {
+                venue_order_id: "manual-1".into(),
+                trade_id: "t1".into(),
+                token_id: "tok".into(),
+                side: Side::Sell,
+                size: dec!(10),
+                price: dec!(0.6),
+                ts_ms: 2_000,
+                tx_hash: None,
+                maker: Some(false),
+            }],
+            now_ms: 3_000,
+        };
+        c.reconcile(snap).unwrap();
+
+        assert!(
+            c.positions().open_positions().is_empty(),
+            "the manually closed position must vanish from the book"
+        );
+        let closed = &c.positions().closed_positions()[0];
+        assert_eq!(closed.exit_reason, ExitReason::Manual);
+        assert_eq!(closed.shares, dec!(10));
+        // Cash identity: seed - entry (cost + taker fee) + exit proceeds - exit fee.
+        let entry_fee = (crate::exit_policy::taker_fee_pct(dec!(0.4)) / dec!(100)) * dec!(4);
+        let fee = (crate::exit_policy::taker_fee_pct(dec!(0.6)) / dec!(100)) * dec!(6);
+        assert_eq!(
+            c.ledger().balance(),
+            seed - cost - entry_fee + dec!(6) - fee,
+            "the ledger must reflect the cash the manual close actually moved"
+        );
+        assert_eq!(c.recon_watermark_ms, 2_000);
+
+        // Idempotent: replaying the same sweep must not double-count.
+        let snap2 = crate::reconcile::VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![crate::reconcile::VenueTrade {
+                venue_order_id: "manual-1".into(),
+                trade_id: "t1".into(),
+                token_id: "tok".into(),
+                side: Side::Sell,
+                size: dec!(10),
+                price: dec!(0.6),
+                ts_ms: 2_000,
+                tx_hash: None,
+                maker: Some(false),
+            }],
+            now_ms: 4_000,
+        };
+        c.reconcile(snap2).unwrap();
+        assert_eq!(
+            c.positions().closed_positions().len(),
+            1,
+            "no duplicate close on a replayed sweep"
+        );
+        assert_eq!(
+            c.ledger().balance(),
+            seed - cost - entry_fee + dec!(6) - fee
+        );
+    }
+
+    fn buy_taker(price: Decimal, size: Decimal) -> OrderRequest {
+        OrderRequest {
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode: FillPolicy::Taker,
+            price,
+            size,
+            internal_key: "k1".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 1,
+        }
     }
 }

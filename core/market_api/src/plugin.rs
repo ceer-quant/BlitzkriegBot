@@ -40,11 +40,18 @@ pub trait MarketHost: Send + Sync {
     /// Orders accepted locally with no venue id yet.
     fn take_pending_orders(&self) -> BoxFuture<'_, Vec<PendingOrder>>;
     fn on_order_accepted(&self, core_order_id: &str, venue_order_id: &str) -> BoxFuture<'_, ()>;
-    fn on_order_rejected(&self, core_order_id: &str) -> BoxFuture<'_, ()>;
+    /// The venue refused a locally-accepted order. `error` carries the venue's
+    /// own failure text when the POST returned one, so the core can classify
+    /// it (cooldowns, panel visibility, consecutive-failure freeze).
+    fn on_order_rejected(&self, core_order_id: &str, error: Option<CoreError>)
+    -> BoxFuture<'_, ()>;
     fn on_fill(&self, fill: MarketFill) -> BoxFuture<'_, ()>;
     fn on_order_live(&self, venue_order_id: &str) -> BoxFuture<'_, ()>;
     fn on_order_cancelled(&self, venue_order_id: &str) -> BoxFuture<'_, ()>;
     fn on_reconcile(&self, snapshot: ReconcileSnapshot) -> BoxFuture<'_, ()>;
+    /// Report of a trading-capability self-check run by the executor. A failed
+    /// report freezes trading (kill switch) — the core decides once, here.
+    fn on_self_check(&self, report: SelfCheckReport) -> BoxFuture<'_, ()>;
     /// Seed the core's cash ledger from the venue's reported balance at startup.
     fn seed_balance(&self, balance: rust_decimal::Decimal) -> BoxFuture<'_, ()>;
     /// Periodic venue-cash sync: the venue's FREE collateral view. The core
