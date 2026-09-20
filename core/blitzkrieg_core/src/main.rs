@@ -1414,8 +1414,8 @@ fn run_regime_eval(
             }
             Err(e) => eprintln!("regime-eval: report json failed: {e}"),
         }
-        let md_path = if p.ends_with(".json") {
-            format!("{}.md", &p[..p.len() - 5])
+        let md_path = if let Some(base) = p.strip_suffix(".json") {
+            format!("{base}.md")
         } else {
             format!("{p}.md")
         };

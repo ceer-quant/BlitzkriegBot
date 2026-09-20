@@ -243,15 +243,14 @@ impl ProposalStore {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(line) = serde_json::to_string(value) {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
+        if let Ok(line) = serde_json::to_string(value)
+            && let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)
-            {
-                use std::io::Write as _;
-                let _ = writeln!(f, "{line}");
-            }
+        {
+            use std::io::Write as _;
+            let _ = writeln!(f, "{line}");
         }
     }
 
@@ -290,7 +289,7 @@ impl ProposalStore {
             .filter(|p| p.is_decidable())
             .cloned()
             .collect();
-        out.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+        out.sort_by_key(|a| std::cmp::Reverse(a.created_at_ms));
         out
     }
 
@@ -302,7 +301,7 @@ impl ProposalStore {
             .filter_map(|id| self.records.get(id))
             .cloned()
             .collect();
-        out.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+        out.sort_by_key(|a| std::cmp::Reverse(a.created_at_ms));
         out.truncate(limit);
         out
     }
