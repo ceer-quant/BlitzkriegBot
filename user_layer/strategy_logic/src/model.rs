@@ -87,9 +87,28 @@ impl OrderbookSnapshot {
             Decimal::ZERO
         };
         let best_bid = bids.first().map(|(p, _)| *p).unwrap_or(Decimal::ZERO);
+        // The ONE sentinel when no asks quote is pre-existing API semantics
+        // (entry-side consumers treat "nothing for sale" as maximally
+        // expensive); do not change it here — only the MID gains side-awareness.
         let best_ask = asks.first().map(|(p, _)| *p).unwrap_or(Decimal::ONE);
-        let spread = best_ask - best_bid;
-        let mid_price = (best_bid + best_ask) / Decimal::TWO;
+        // F6: the mid is only meaningful when BOTH sides quote. With no bids the
+        // old `(0 + ask)/2` arithmetic manufactured a phantom price (ask 0.90 →
+        // "mid" 0.45) that downstream consumers could mistake for a sellable
+        // level; a one-sided book must not present a tradeable mid at all.
+        let both_sides_quote = !bids.is_empty()
+            && !asks.is_empty()
+            && best_bid > Decimal::ZERO
+            && best_ask > Decimal::ZERO;
+        let mid_price = if both_sides_quote {
+            (best_bid + best_ask) / Decimal::TWO
+        } else {
+            Decimal::ZERO
+        };
+        let spread = if both_sides_quote {
+            best_ask - best_bid
+        } else {
+            Decimal::ZERO
+        };
         let spread_pct = if mid_price > Decimal::ZERO {
             (spread / mid_price) * Decimal::ONE_HUNDRED
         } else {
