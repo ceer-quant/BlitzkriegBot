@@ -32,6 +32,7 @@ pub mod order_db;
 pub mod position;
 pub mod position_db;
 pub mod reconcile;
+pub mod regime_eval;
 pub mod risk;
 pub mod risk_context;
 pub mod scanner;

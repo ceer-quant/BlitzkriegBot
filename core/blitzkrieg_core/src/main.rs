@@ -166,6 +166,25 @@ struct Args {
     backtest_tick_ms: i64,
     /// Keep the replay clock running this long after the last event (ms).
     backtest_tail_ms: i64,
+    /// MarketRegime evaluation over an archive (E16 / #98): label windows and
+    /// score the online state machine against the offline labels.
+    regime_eval: Option<String>,
+    /// Where to write the regime report (<path>.json + .md; None = stdout).
+    regime_report: Option<String>,
+    /// Evaluate exactly this token instead of the most-active defaults.
+    regime_token: Option<String>,
+    /// How many of the most active tokens to evaluate (default 3).
+    regime_max_tokens: usize,
+    /// Regime window in seconds — the label rule and the machine share it.
+    regime_window_sec: i64,
+    /// Trend bar: |net move| ≥ this many ticks with the efficiency ≥ the bar.
+    regime_min_trend_ticks: Decimal,
+    /// Trend efficiency bar (|net| / path).
+    regime_min_efficiency: Decimal,
+    /// Volatile bar: mean |per-step move| ≥ this many ticks.
+    regime_volatile_mad_ticks: Decimal,
+    /// Confirmation hysteresis before the machine switches state.
+    regime_confirmations: u32,
     /// Fill model: taker slippage in ticks (0.01).
     slippage_ticks: u32,
     /// Fill model: maker latency (ms).
@@ -371,6 +390,15 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut backtest_report: Option<String> = None;
     let mut backtest_tick_ms: i64 = 50;
     let mut backtest_tail_ms: i64 = 0;
+    let mut regime_eval: Option<String> = None;
+    let mut regime_report: Option<String> = None;
+    let mut regime_token: Option<String> = None;
+    let mut regime_max_tokens: usize = 3;
+    let mut regime_window_sec: i64 = 300;
+    let mut regime_min_trend_ticks = Decimal::new(3, 0);
+    let mut regime_min_efficiency = Decimal::new(5, 1);
+    let mut regime_volatile_mad_ticks = Decimal::new(15, 1);
+    let mut regime_confirmations: u32 = 2;
     let mut slippage_ticks: u32 = 0;
     let mut latency_ms: i64 = 0;
     let mut fill_prob_bps: Option<u32> = None;
@@ -503,6 +531,45 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             }
             "--spread-arb-bounce-window-sec" => {
                 spread_arb_bounce_window_sec = it.next().and_then(|v| v.parse().ok())
+            }
+            "--regime-eval" => regime_eval = it.next(),
+            "--regime-report" => regime_report = it.next(),
+            "--regime-token" => regime_token = it.next(),
+            "--regime-max-tokens" => {
+                regime_max_tokens = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(regime_max_tokens)
+            }
+            "--regime-window-sec" => {
+                regime_window_sec = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(regime_window_sec)
+            }
+            "--regime-min-trend-ticks" => {
+                regime_min_trend_ticks = it
+                    .next()
+                    .and_then(|v| Decimal::from_str(&v).ok())
+                    .unwrap_or(regime_min_trend_ticks)
+            }
+            "--regime-min-efficiency" => {
+                regime_min_efficiency = it
+                    .next()
+                    .and_then(|v| Decimal::from_str(&v).ok())
+                    .unwrap_or(regime_min_efficiency)
+            }
+            "--regime-volatile-mad-ticks" => {
+                regime_volatile_mad_ticks = it
+                    .next()
+                    .and_then(|v| Decimal::from_str(&v).ok())
+                    .unwrap_or(regime_volatile_mad_ticks)
+            }
+            "--regime-confirmations" => {
+                regime_confirmations = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(regime_confirmations)
             }
             "--max-positions" => {
                 max_positions = it
@@ -837,6 +904,15 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         backtest_report,
         backtest_tick_ms,
         backtest_tail_ms,
+        regime_eval,
+        regime_report,
+        regime_token,
+        regime_max_tokens,
+        regime_window_sec,
+        regime_min_trend_ticks,
+        regime_min_efficiency,
+        regime_volatile_mad_ticks,
+        regime_confirmations,
         slippage_ticks,
         latency_ms,
         fill_prob_bps,
@@ -1249,6 +1325,28 @@ async fn main() -> anyhow::Result<()> {
         run_replay_near_miss(std::path::Path::new(path));
         return Ok(());
     }
+    if let Some(path) = &args.regime_eval {
+        // Offline MarketRegime evaluation: independent of the engine — it
+        // needs no mode, no feeds and never trades.
+        run_regime_eval(
+            path,
+            args.regime_report.as_deref(),
+            blitzkrieg_core::regime_eval::RegimeEvalArgs {
+                token: args.regime_token.clone(),
+                max_tokens: args.regime_max_tokens,
+                config: strategy_logic::MarketRegimeConfig {
+                    window_ms: args.regime_window_sec * 1_000,
+                    trend_net_ticks: args.regime_min_trend_ticks,
+                    trend_min_efficiency: args.regime_min_efficiency,
+                    volatile_mad_ticks: args.regime_volatile_mad_ticks,
+                    confirmations: args.regime_confirmations,
+                    ..strategy_logic::MarketRegimeConfig::default()
+                },
+            },
+        );
+        return Ok(());
+    }
+
     if let Some(path) = &args.backtest {
         // Offline replay: never re-record into (or read from) the file being
         // replayed — an appended-to-archive would feed the source its own tail.
@@ -1276,6 +1374,55 @@ async fn main() -> anyhow::Result<()> {
     server::run(args.socket.clone(), config, args.tick_ms, rx).await?;
     eprintln!("blitzkrieg-core stopped");
     Ok(())
+}
+
+/// Offline MarketRegime evaluation (E16 / #98): label the archive's windows
+/// with the offline rule and score the online state machine against those
+/// labels. Builds no Core, never trades, never writes to the archive.
+fn run_regime_eval(
+    archive: &str,
+    report_path: Option<&str>,
+    args: blitzkrieg_core::regime_eval::RegimeEvalArgs,
+) {
+    use blitzkrieg_core::regime_eval::{render_markdown, run_eval};
+    eprintln!("blitzkrieg-core: regime eval over {archive}");
+    let report = match run_eval(std::path::Path::new(archive), &args) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("regime-eval: {e}");
+            std::process::exit(2);
+        }
+    };
+    let verdict = &report["accuracy"];
+    eprintln!(
+        "blitzkrieg-core: regime eval — windows {}, agree {}, accuracy {:.2}% (pass ≥80: {})",
+        verdict["windows"],
+        verdict["agree"],
+        verdict["accuracyPct"].as_f64().unwrap_or(0.0),
+        verdict["pass80"].as_bool().unwrap_or(false),
+    );
+    if let Some(p) = report_path {
+        if let Some(dir) = std::path::Path::new(p).parent()
+            && !dir.as_os_str().is_empty()
+        {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        match serde_json::to_string_pretty(&report) {
+            Ok(json) => {
+                let _ = std::fs::write(p, json + "\n");
+            }
+            Err(e) => eprintln!("regime-eval: report json failed: {e}"),
+        }
+        let md_path = if p.ends_with(".json") {
+            format!("{}.md", &p[..p.len() - 5])
+        } else {
+            format!("{p}.md")
+        };
+        let _ = std::fs::write(&md_path, render_markdown(&report));
+        eprintln!("blitzkrieg-core: regime report {p} (+ .md)");
+    } else if let Ok(json) = serde_json::to_string_pretty(&report) {
+        println!("{json}");
+    }
 }
 
 /// Offline event-driven backtest (P-1.2): replay a market-data archive through

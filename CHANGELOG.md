@@ -41,7 +41,13 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   独立连亏熔断（KI-10/D-18 option A）与日实损上限为既有能力，未动；
   新增 `scripts/dryrun-report.mjs` 从交易总账产出 7 天 DryRun 周报
   （按策略账本 + 逐 UTC 日趋势 + 组合合计 + 窗内熔断/进化事件），并如实
-  标注 KI-1 dry 经济性前提。仅 DryRun——实盘属 0.3。
+  标注 KI-1 dry 经济性前提。**MarketRegime 状态机**落地为 strategy_logic
+  共享参考实现（range/trendUp/trendDown/volatile，tick 口径规则，环形窗 +
+  确认滞回，库类型不动 C ABI v2）与 `--regime-eval` 离线评测模式：100 个
+  最活跃 token × 300 s 非重叠窗为标注集，离线规则标注 vs 在线状态机窗末
+  状态的首轮实测 = **300 窗准确率 97.33%（≥80 验收 PASS**，trend 类
+  recall 85.7%、volatile 100%），口径与数据边界记录于
+  `docs/MARKET_REGIME.md`。仅 DryRun——实盘属 0.3。
 
 - **Shadow Evolution grows a proposal workflow (E13 / #95).** A winning shadow
   variant no longer silently swaps live parameters: the evaluator now produces
