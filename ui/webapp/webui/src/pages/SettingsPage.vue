@@ -16,7 +16,8 @@ import {
   Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion,
   TerminalSquare, Play, Square, LogOut, Info, Server,
 } from 'lucide-vue-next'
-import { api, getToken, loginAt, logout, ping, type CommandDoc } from '@/api/client'
+import { api, getToken, loginAt, logout, ping, probeSession, type CommandDoc } from '@/api/client'
+import { adjudicateSession } from '@/lib/session'
 import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
 import { useTheme, type ThemeMode } from '@/lib/theme'
@@ -35,15 +36,18 @@ const store = usePanelStore()
 const settings = useSettingsStore()
 const { theme, setTheme, sound, setSoundEnabled } = useTheme()
 
-// ── session state: the one probe that answers without a session ─────────────
+// ── session state: reachability from ping, the token's fate from a real call ─
 type SessionState = 'checking' | 'valid' | 'expired' | 'unreachable'
 const sessionState = ref<SessionState>('checking')
 
 async function checkSession(): Promise<void> {
   sessionState.value = 'checking'
-  const p = await ping()
-  sessionState.value =
-    p === null ? 'unreachable' : p.authRequired ? 'expired' : 'valid'
+  // `ping` answers reachability only — it is deliberately sessionless, so its
+  // `authRequired` flag describes the GATEWAY, never our token. Mapping that
+  // flag to "expired" made this badge claim 会话已过期 forever on any gateway
+  // that requires login (re-logging in could not change it: the probe never
+  // looked at the token). The token's verdict comes from an authenticated call.
+  sessionState.value = await adjudicateSession(await ping(), probeSession)
 }
 onMounted(checkSession)
 

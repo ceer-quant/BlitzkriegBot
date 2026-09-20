@@ -68,7 +68,7 @@ globalThis.fetch = async (url, init = {}) => {
 }
 
 const client = await import('../src/api/client.ts')
-const { classifyOutcome, SESSION_EXPIRED_REASON } = await import('../src/lib/session.ts')
+const { adjudicateSession, classifyOutcome, SESSION_EXPIRED_REASON } = await import('../src/lib/session.ts')
 const LS_KEY = 'blitzkrieg-panel-token'
 
 console.log('client — token storage')
@@ -155,6 +155,75 @@ await check('ping carries no session, so a dead token cannot block it', async ()
   assert.equal(calls.length, 1)
   assert.equal(calls[0].url, '/api/ping')
   assert.equal(calls[0].headers['X-Auth-Token'], undefined, 'ping must not depend on a session')
+})
+
+console.log('probeSession — the token is adjudicated by an authenticated call')
+
+await check('probeSession returns valid on a 200 snapshot', async () => {
+  client.setToken('good-token')
+  calls = []
+  scripted = [{ status: 200, body: {} }]
+  assert.equal(await client.probeSession(), 'valid')
+  assert.equal(calls[0].url, '/api/snapshot')
+  assert.equal(
+    calls[0].headers['X-Auth-Token'],
+    'good-token',
+    'the probe carries the token — that is the whole point',
+  )
+})
+
+await check('probeSession returns expired on 401', async () => {
+  client.setToken('dead-token')
+  scripted = [{ status: 401, body: {} }]
+  assert.equal(await client.probeSession(), 'expired')
+})
+
+await check('probeSession returns unreachable on a transport failure', async () => {
+  scripted = [new Error('ECONNREFUSED')]
+  assert.equal(await client.probeSession(), 'unreachable')
+})
+
+console.log('adjudicateSession — the 设置 badge mapping')
+
+await check(
+  'an authRequired ping does NOT mean the session expired — the probe decides',
+  async () => {
+    // The defect this pins: every credentialed gateway reports
+    // authRequired:true forever, valid session or not; mapping that flag to
+    // "expired" made the badge lie and made re-logging in useless.
+    let probes = 0
+    const probe = async () => {
+      probes++
+      return 'valid'
+    }
+    assert.equal(
+      await adjudicateSession({ ok: true, authRequired: true }, probe),
+      'valid',
+      'the token works — the badge must say so even though the gateway is locked',
+    )
+    assert.equal(probes, 1, 'the verdict must come from the authenticated probe')
+  },
+)
+
+await check('a dead gateway is unreachable without spending the probe', async () => {
+  let probes = 0
+  const probe = async () => {
+    probes++
+    return 'valid'
+  }
+  assert.equal(await adjudicateSession(null, probe), 'unreachable')
+  assert.equal(probes, 0, 'no authenticated call can succeed against a dead gateway')
+})
+
+await check('the probe verdict passes through unchanged', async () => {
+  assert.equal(
+    await adjudicateSession({ ok: true, authRequired: true }, async () => 'expired'),
+    'expired',
+  )
+  assert.equal(
+    await adjudicateSession({ ok: true, authRequired: false }, async () => 'unreachable'),
+    'unreachable',
+  )
 })
 
 console.log('classification — the rule the shell acts on')
