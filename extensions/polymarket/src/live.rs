@@ -15,8 +15,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// Spawn the live bridge if credentials are present. `markets` are condition ids
-/// to subscribe on the user channel (empty = REST-only reconciliation).
+/// Spawn the live bridge if credentials are present. `markets` only gates the
+/// spawn (live with no markets = REST-only reconciliation); the user-WS
+/// subscribes to the account-wide user stream so fills for later rounds are
+/// never missed.
 pub async fn spawn_if_configured(
     host: Arc<dyn MarketHost>,
     markets: Vec<String>,
@@ -141,6 +143,14 @@ pub async fn spawn_if_configured(
                     Err(e) => {
                         host.report_error(e).await;
                     }
+                }
+                // Cash truth: the ledger runs on fill deltas, so a fill the
+                // bot misses also leaves the balance silently stale. Re-align
+                // against the venue's free cash every sweep (the host gates
+                // the correction on its own reserved amount).
+                match venue.balance().await {
+                    Ok(free) => host.venue_free_balance(free).await,
+                    Err(e) => host.report_error(e).await,
                 }
             }
         }

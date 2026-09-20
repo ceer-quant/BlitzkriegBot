@@ -313,6 +313,34 @@ impl MarketHost for CoreHost {
         })
     }
 
+    fn venue_free_balance(&self, free: rust_decimal::Decimal) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let mut c = self.core.lock().await;
+            let ledger = c.ledger();
+            let (balance, reserved) = (ledger.balance(), ledger.reserved());
+            if reserved == rust_decimal::Decimal::ZERO {
+                // No resting commitments, so the venue's free cash IS our total
+                // cash in either reporting convention. A fill the bot missed
+                // shows up here as cash that left with no fill event — this is
+                // the drift killer for exactly that failure.
+                if balance != free {
+                    c.set_balance(free);
+                    eprintln!("core: venue cash reconcile: ledger {balance} -> venue free {free}");
+                }
+            } else {
+                let expected_free = balance - reserved;
+                if (expected_free - free).abs() > rust_decimal::Decimal::new(2, 2) {
+                    // With resting orders the venue may or may not net their
+                    // commitments out of the reported balance; auto-correcting
+                    // here could double-count. Surface it instead.
+                    eprintln!(
+                        "core: venue cash drift: ledger={balance} reserved={reserved} venue free={free} (resting orders; not auto-corrected)"
+                    );
+                }
+            }
+        })
+    }
+
     fn known_venue_order_ids(&self) -> BoxFuture<'_, Vec<String>> {
         Box::pin(async move {
             self.core

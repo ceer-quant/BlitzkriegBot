@@ -47,6 +47,10 @@ pub trait MarketHost: Send + Sync {
     fn on_reconcile(&self, snapshot: ReconcileSnapshot) -> BoxFuture<'_, ()>;
     /// Seed the core's cash ledger from the venue's reported balance at startup.
     fn seed_balance(&self, balance: rust_decimal::Decimal) -> BoxFuture<'_, ()>;
+    /// Periodic venue-cash sync: the venue's FREE collateral view. The core
+    /// decides how to fold it in (with its own reserved amount) so resting-order
+    /// commitments are never double-counted.
+    fn venue_free_balance(&self, free: rust_decimal::Decimal) -> BoxFuture<'_, ()>;
     /// Venue order ids the core believes are resting. The executor's startup
     /// sweep cancels any venue-open id NOT in this set (orphans left by a crash
     /// or a previous process).
