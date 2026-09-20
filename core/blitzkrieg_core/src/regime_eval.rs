@@ -191,18 +191,25 @@ pub fn run_eval(archive: &Path, args: &RegimeEvalArgs) -> Result<Value, String> 
     } else {
         0.0
     };
-    let by_label_json = json!(by_label
-        .into_iter()
-        .map(|(label, [n, a])| (
-            label,
-            json!({
-                "windows": n,
-                "agree": a,
-                "recallPct": if n > 0 { (a as f64 / n as f64) * 100.0 } else { 0.0 },
-            })
-        ))
-        .collect::<HashMap<String, Value>>());
-    window_rows.sort_by_key(|r| (r["token"].as_str().unwrap_or("").to_string(), r["fromMs"].as_i64().unwrap_or(0)));
+    let by_label_json = json!(
+        by_label
+            .into_iter()
+            .map(|(label, [n, a])| (
+                label,
+                json!({
+                    "windows": n,
+                    "agree": a,
+                    "recallPct": if n > 0 { (a as f64 / n as f64) * 100.0 } else { 0.0 },
+                })
+            ))
+            .collect::<HashMap<String, Value>>()
+    );
+    window_rows.sort_by_key(|r| {
+        (
+            r["token"].as_str().unwrap_or("").to_string(),
+            r["fromMs"].as_i64().unwrap_or(0),
+        )
+    });
 
     let mut token_summaries = Vec::new();
     for token in &targets {
@@ -290,7 +297,9 @@ pub fn render_markdown(report: &Value) -> String {
         acc["accuracyPct"].as_f64().unwrap_or(0.0),
         acc["pass80"].as_bool().unwrap_or(false),
     ));
-    md.push_str("## Evaluated tokens\n\n| token | samples | windows | accuracy % |\n|---|---|---|---|\n");
+    md.push_str(
+        "## Evaluated tokens\n\n| token | samples | windows | accuracy % |\n|---|---|---|---|\n",
+    );
     if let Some(rows) = report["evaluated"].as_array() {
         for r in rows {
             md.push_str(&format!(

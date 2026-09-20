@@ -181,7 +181,9 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
             if !matches!(on, Some("on") | Some("off")) || parts.len() != 2 {
                 return Err("usage: auto-evolve on|off".into());
             }
-            Ok(Command::EvolutionAuto { on: on == Some("on") })
+            Ok(Command::EvolutionAuto {
+                on: on == Some("on"),
+            })
         }
         "rollback" => {
             let strategy = parts.get(1).copied().unwrap_or("").to_string();
@@ -414,9 +416,7 @@ impl Dispatcher {
                 self.cmd_evolution_decide(raw, &id, &decision)
             }
             Command::EvolutionAuto { on } => self.cmd_evolution_auto(raw, on),
-            Command::EvolutionRollback { strategy } => {
-                self.cmd_evolution_rollback(raw, &strategy)
-            }
+            Command::EvolutionRollback { strategy } => self.cmd_evolution_rollback(raw, &strategy),
             Command::Help => CommandOutcome::ok(raw, "help", HELP)
                 .with_data(serde_json::json!({ "usage": HELP })),
         }
@@ -438,10 +438,7 @@ impl Dispatcher {
         for p in &pending {
             msg.push_str(&format!(
                 "  [{}] {} · {} · {}\n",
-                p.state,
-                p.id,
-                p.strategy,
-                p.reason
+                p.state, p.id, p.strategy, p.reason
             ));
         }
         if pending.is_empty() {
@@ -455,12 +452,8 @@ impl Dispatcher {
     /// RPC error here is a REAL refusal (world moved / decided already).
     fn cmd_evolution_decide(&mut self, raw: &str, id: &str, decision: &str) -> CommandOutcome {
         match self.client.evolution_decide(id, decision) {
-            Ok(v) => CommandOutcome::ok(
-                raw,
-                "decide",
-                format!("{decision} recorded for {id}"),
-            )
-            .with_data(v),
+            Ok(v) => CommandOutcome::ok(raw, "decide", format!("{decision} recorded for {id}"))
+                .with_data(v),
             Err(e) => CommandOutcome::err(raw, e.to_string()),
         }
     }

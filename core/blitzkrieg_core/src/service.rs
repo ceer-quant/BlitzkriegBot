@@ -1627,7 +1627,9 @@ impl Core {
                 self.stats.strategy_limit_rejected += 1;
                 let acc = self.strategy_accounting.entry(name.clone()).or_default();
                 acc.limit_rejected += 1;
-                *acc.rejection_causes.entry("limit.portfolioNotionalCap".into()).or_default() += 1;
+                *acc.rejection_causes
+                    .entry("limit.portfolioNotionalCap".into())
+                    .or_default() += 1;
                 tracing::info!(target: "strategy", "entry rejected: strategy={name} cause=limit.portfolioNotionalCap reason={reason}");
                 continue;
             }
@@ -1679,10 +1681,7 @@ impl Core {
     /// Portfolio-level exposure cap (E16/#98): the sum of open notional across
     /// ALL strategies plus the incoming entry stays under
     /// `risk.max_open_notional_usd` (0 = disabled).
-    fn portfolio_limit_ok(
-        &self,
-        req: &crate::model::OrderRequest,
-    ) -> Result<(), String> {
+    fn portfolio_limit_ok(&self, req: &crate::model::OrderRequest) -> Result<(), String> {
         // Read the LIVE risk config: a runtime update (risk_config_mut /
         // IPC) lands in the gate, not in the static CoreConfig.
         let cap = self.risk.config().max_open_notional_usd;

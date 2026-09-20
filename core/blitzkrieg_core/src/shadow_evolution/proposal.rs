@@ -165,7 +165,10 @@ impl EvolutionProposal {
     /// A human decision is legal on Proposed and Deferred only — everything
     /// else is terminal and must say so.
     pub fn is_decidable(&self) -> bool {
-        matches!(self.state, ProposalState::Proposed | ProposalState::Deferred)
+        matches!(
+            self.state,
+            ProposalState::Proposed | ProposalState::Deferred
+        )
     }
 }
 
@@ -400,7 +403,9 @@ impl ProposalStore {
         let text = std::fs::read_to_string(self.state_path()).ok()?;
         let v: serde_json::Value = serde_json::from_str(&text).ok()?;
         Some((
-            v.get("autoEvolve").and_then(|x| x.as_bool()).unwrap_or(false),
+            v.get("autoEvolve")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
             v.get("lastCycleMs").and_then(|x| x.as_i64()).unwrap_or(0),
             v.get("cycleSeq").and_then(|x| x.as_u64()).unwrap_or(0),
         ))
@@ -430,7 +435,12 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
 
-    fn metrics(closed: u32, wins: u32, gp: rust_decimal::Decimal, gl: rust_decimal::Decimal) -> Metrics {
+    fn metrics(
+        closed: u32,
+        wins: u32,
+        gp: rust_decimal::Decimal,
+        gl: rust_decimal::Decimal,
+    ) -> Metrics {
         Metrics {
             sample_count: closed,
             wins,
@@ -466,10 +476,7 @@ mod tests {
     }
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "bkprop-{}-{tag}",
-            std::process::id()
-        ));
+        let d = std::env::temp_dir().join(format!("bkprop-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

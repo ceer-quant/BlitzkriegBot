@@ -114,7 +114,10 @@ pub struct WindowStats {
 
 /// The offline labelling rule over a full window of `(at_ms, mid)` samples.
 /// This is the single definition of "what label does this window get".
-pub fn classify_window(samples: &[(i64, Decimal)], config: &MarketRegimeConfig) -> (Regime, WindowStats) {
+pub fn classify_window(
+    samples: &[(i64, Decimal)],
+    config: &MarketRegimeConfig,
+) -> (Regime, WindowStats) {
     let stats = window_stats(samples);
     (regime_from_stats(&stats, config), stats)
 }
@@ -160,8 +163,7 @@ pub fn window_stats(samples: &[(i64, Decimal)]) -> WindowStats {
 pub fn regime_from_stats(s: &WindowStats, config: &MarketRegimeConfig) -> Regime {
     if s.net_ticks >= config.trend_net_ticks && s.efficiency >= config.trend_min_efficiency {
         Regime::TrendUp
-    } else if s.net_ticks <= -config.trend_net_ticks
-        && s.efficiency <= -config.trend_min_efficiency
+    } else if s.net_ticks <= -config.trend_net_ticks && s.efficiency <= -config.trend_min_efficiency
     {
         Regime::TrendDown
     } else if s.mad_ticks >= config.volatile_mad_ticks {

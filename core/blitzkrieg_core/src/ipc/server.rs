@@ -947,7 +947,11 @@ async fn handle_line(
             }
         },
         method::SE_SET_AUTO => match params.get("enabled").and_then(|v| v.as_bool()) {
-            None => Err((Failure::INVALID_PARAMS, "enabled (bool) required".into(), None)),
+            None => Err((
+                Failure::INVALID_PARAMS,
+                "enabled (bool) required".into(),
+                None,
+            )),
             Some(on) => {
                 let auto = core.lock().await.shadow_evolution_set_auto(on);
                 Ok(serde_json::json!({ "autoEvolve": auto }))

@@ -103,15 +103,9 @@ pub enum Decision {
 /// Result of one operator decision, mapped to events by the caller.
 #[derive(Debug)]
 pub enum DecisionResult {
-    Accepted {
-        proposal: EvolutionProposal,
-    },
-    Rejected {
-        proposal: EvolutionProposal,
-    },
-    Deferred {
-        proposal: EvolutionProposal,
-    },
+    Accepted { proposal: EvolutionProposal },
+    Rejected { proposal: EvolutionProposal },
+    Deferred { proposal: EvolutionProposal },
 }
 
 /// One DEEP evolution round (E13): the variant sets were re-anchored with
@@ -216,9 +210,8 @@ impl ShadowEvolution {
         // persisted under the audit dir and WINS over the config file — it is
         // what the UIs' checkbox flips, so a restart must not undo it.
         let store = proposal::ProposalStore::new(&cfg.audit_dir);
-        let (persisted_auto, last_cycle_ms, cycle_seq) = store
-            .load_state()
-            .unwrap_or((cfg.auto_evolve, 0, 0));
+        let (persisted_auto, last_cycle_ms, cycle_seq) =
+            store.load_state().unwrap_or((cfg.auto_evolve, 0, 0));
         let mut me = Self {
             enabled,
             cfg,
@@ -534,8 +527,8 @@ impl ShadowEvolution {
                     // twin keeps running; the operator decides over IPC. The
                     // variant's metrics were just measured for the guard pass —
                     // reuse them as the proposal's comparison block.
-                    let variant_metrics = u.set.variants[variant_index]
-                        .metrics(cfg.evaluation_window_secs, now_ms);
+                    let variant_metrics =
+                        u.set.variants[variant_index].metrics(cfg.evaluation_window_secs, now_ms);
                     let dims = moved_dims(&old, &new_params);
                     held = Some(EvolutionProposal {
                         id: format!("prop-{now_ms}-{}", u.strategy),
@@ -671,9 +664,7 @@ impl ShadowEvolution {
                     .proposal_store
                     .last_active_promotion(strategy)
                     .ok_or_else(|| {
-                        format!(
-                            "strategy {strategy} has no previous parameters to roll back to"
-                        )
+                        format!("strategy {strategy} has no previous parameters to roll back to")
                     })?;
                 guard::validate_declared(&cfg_restored.from_params, &u.specs)
                     .map_err(|e| e.to_string())?;
@@ -755,9 +746,7 @@ impl ShadowEvolution {
                     proposal.decided_by = Some(DecidedBy::User);
                     proposal.decided_at_ms = Some(now_ms);
                     self.proposal_store.put(proposal.clone());
-                    return Err(format!(
-                        "proposal {id} no longer passes the guards: {e}"
-                    ));
+                    return Err(format!("proposal {id} no longer passes the guards: {e}"));
                 }
                 u.previous = Some(old);
                 u.cell.store(Arc::new(proposal.to_params.clone()));
@@ -871,8 +860,7 @@ impl ShadowEvolution {
         if self.last_cycle_ms == 0 {
             return None;
         }
-        Some(self.last_cycle_ms + self.cfg.evolution_cycle_secs * 1000)
-            .filter(|t| *t > now_ms)
+        Some(self.last_cycle_ms + self.cfg.evolution_cycle_secs * 1000).filter(|t| *t > now_ms)
     }
 
     fn persist_state(&self) {

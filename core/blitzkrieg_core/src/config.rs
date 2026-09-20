@@ -264,12 +264,7 @@ impl FileConfig {
                         got(&mut self.shadow.auto_evolve, bool_(v), &full, w)
                     }
                     ("shadow_evolution", "evolution_cycle_minutes") => {
-                        got(
-                            &mut self.shadow.evolution_cycle_minutes,
-                            int(v),
-                            &full,
-                            w,
-                        )
+                        got(&mut self.shadow.evolution_cycle_minutes, int(v), &full, w)
                     }
                     ("shadow_evolution", "proposal_ttl_minutes") => {
                         got(&mut self.shadow.proposal_ttl_minutes, int(v), &full, w)

@@ -1,7 +1,7 @@
 //! Panel application state — pure data + key handling. Rendering is in `ui.rs`.
 
-use blitzkrieg_ui_kit::UiSnapshot;
 use blitzkrieg_ui_kit::core::types::EvolutionProposalView;
+use blitzkrieg_ui_kit::UiSnapshot;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::Instant;
 

@@ -904,9 +904,7 @@ impl Engine {
             // Weight re-weights this leg's share of the per-entry budget; it
             // never widens the global cap, and a non-positive weight zeroes
             // the leg out entirely (an explicit off switch).
-            size_usd = (size_usd * w)
-                .max(Decimal::ZERO)
-                .min(globals.size_usd);
+            size_usd = (size_usd * w).max(Decimal::ZERO).min(globals.size_usd);
         }
         let max_shares = over
             .max_shares
@@ -1259,8 +1257,8 @@ mod tests {
                 size_usd: Some(dec!(1)),
                 min_shares: Some(dec!(1)),
                 max_shares: Some(dec!(2)),
-            size_weight: None,
-                },
+                size_weight: None,
+            },
         )]));
         let s = e.effective_sizing("small");
         // The 1-share floor is raised to the global floor (2): the global band
@@ -1334,8 +1332,8 @@ mod tests {
                 size_usd: Some(dec!(100)),
                 min_shares: Some(dec!(0)),
                 max_shares: Some(dec!(999)),
-            size_weight: None,
-                },
+                size_weight: None,
+            },
         )]));
         let s = e.effective_sizing("greedy");
         assert_eq!(
@@ -1367,8 +1365,8 @@ mod tests {
                 size_usd: None,
                 min_shares: Some(dec!(50)),
                 max_shares: None,
-            size_weight: None,
-                },
+                size_weight: None,
+            },
         )]));
         let s = e.effective_sizing("weird");
         assert_eq!((s.min_shares, s.max_shares), (dec!(20), dec!(20)));
@@ -1404,8 +1402,8 @@ mod tests {
                     size_usd: Some(dec!(1)),
                     min_shares: Some(dec!(1)),
                     max_shares: Some(dec!(1)),
-                size_weight: None,
-                    },
+                    size_weight: None,
+                },
             ),
             (
                 "big",
@@ -1413,8 +1411,8 @@ mod tests {
                     size_usd: Some(dec!(10)),
                     min_shares: Some(dec!(20)),
                     max_shares: Some(dec!(20)),
-                size_weight: None,
-                    },
+                    size_weight: None,
+                },
             ),
         ]));
         e.register_user_strategy(

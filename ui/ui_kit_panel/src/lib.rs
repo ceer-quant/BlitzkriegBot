@@ -355,10 +355,7 @@ pub async fn run_panel_with_dispatcher(
                             app.log(format!("evolution: {signal}"))
                         }
                         CoreEvent::EvolutionProposed { proposal } => {
-                            let id = proposal
-                                .get("id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
+                            let id = proposal.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                             let st = proposal
                                 .get("strategy")
                                 .and_then(|v| v.as_str())

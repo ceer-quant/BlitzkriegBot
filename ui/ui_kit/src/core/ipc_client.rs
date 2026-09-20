@@ -238,7 +238,10 @@ impl IpcClient {
     }
 
     /// Every known proposal's latest state, newest first.
-    pub fn evolution_proposals(&mut self, limit: usize) -> Result<Vec<EvolutionProposalView>, IpcError> {
+    pub fn evolution_proposals(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<EvolutionProposalView>, IpcError> {
         let v = self.call(
             "shadow_evolution.proposals",
             serde_json::json!({ "limit": limit }),

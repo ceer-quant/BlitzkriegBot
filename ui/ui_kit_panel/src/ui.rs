@@ -1,8 +1,8 @@
 //! ratatui rendering for the panel. Pure functions over `App` — no I/O.
 
 use crate::app::{App, CheckStage, Tab, HINTS};
-use blitzkrieg_ui_kit::UiSnapshot;
 use blitzkrieg_ui_kit::core::types::EvolutionProposalView;
+use blitzkrieg_ui_kit::UiSnapshot;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
 
@@ -159,7 +159,9 @@ fn render_help(f: &mut Frame, _app: &App) {
         Line::from("  : /            focus command bar (then type a command, Enter runs it)"),
         Line::from("  1-5            pages: Overview / Positions / Trades / Plugins / Evolution"),
         Line::from("  Tab            next page"),
-        Line::from("  ↑/↓            Plugins/Evolution: move selection · Command bar: recall history"),
+        Line::from(
+            "  ↑/↓            Plugins/Evolution: move selection · Command bar: recall history",
+        ),
         Line::from("  Tab (bar)      complete the command"),
         Line::from("  Enter /Esc     run / cancel"),
         Line::from("  r              refresh now"),
@@ -810,7 +812,10 @@ fn render_evo_status(f: &mut Frame, area: Rect, app: &App, now: i64) {
                     format!("{mark} "),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(text, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    text,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("   e toggle", Style::default().fg(DIM)),
             ]));
             let last = if s.last_cycle_ms > 0 {
@@ -879,9 +884,7 @@ fn render_evo_pending(f: &mut Frame, area: Rect, app: &App, now: i64) {
             Span::styled(cursor, Style::default().fg(ACCENT)),
             Span::styled(
                 short_id(&p.id),
-                Style::default()
-                    .fg(ACCENT)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(" {} · ", p.strategy)),
             Span::styled(
@@ -966,7 +969,10 @@ fn push_comparison(lines: &mut Vec<Line<'static>>, p: &EvolutionProposalView) {
             "win rate",
             pct(p.baseline.win_rate),
             pct(p.variant.win_rate),
-            format!("{:+.1}pp", (p.variant.win_rate - p.baseline.win_rate) * 100.0),
+            format!(
+                "{:+.1}pp",
+                (p.variant.win_rate - p.baseline.win_rate) * 100.0
+            ),
             Some(p.variant.win_rate > p.baseline.win_rate),
         ),
         (
@@ -1053,8 +1059,11 @@ fn render_evo_recent(f: &mut Frame, area: Rect, app: &App, now: i64) {
         ]));
     }
     f.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title("Recent Decisions")),
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Recent Decisions"),
+        ),
         area,
     );
 }

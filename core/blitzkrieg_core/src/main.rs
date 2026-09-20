@@ -989,7 +989,8 @@ fn parse_strategy_limits(
     let mut out = std::collections::HashMap::new();
     for raw in args {
         let parts: Vec<&str> = raw.split(':').collect();
-        if (parts.len() != 3 && parts.len() != 6 && parts.len() != 7) || parts[0].trim().is_empty() {
+        if (parts.len() != 3 && parts.len() != 6 && parts.len() != 7) || parts[0].trim().is_empty()
+        {
             eprintln!(
                 "blitzkrieg-core: ignoring malformed --strategy-limit '{raw}' \
                  (want name:max_open:max_notional[:size_usd:min_shares:max_shares[:weight]])"
@@ -1769,14 +1770,14 @@ mod tests {
     #[test]
     fn malformed_strategy_limits_are_dropped_not_half_applied() {
         for bad in [
-            "spread_arb:0",           // too few segments
+            "spread_arb:0",               // too few segments
             "spread_arb:0:-:1:2:3:4:5:6", // too many
-            ":0:-",                   // no name
-            "spread_arb:x:-",         // bad position cap
-            "spread_arb:0:abc",       // bad notional
-            "spread_arb:0:-:abc:1:2", // bad size_usd
-            "spread_arb:0:-:1:abc:2", // bad min_shares
-            "spread_arb:0:-:1:2:abc", // bad max_shares
+            ":0:-",                       // no name
+            "spread_arb:x:-",             // bad position cap
+            "spread_arb:0:abc",           // bad notional
+            "spread_arb:0:-:abc:1:2",     // bad size_usd
+            "spread_arb:0:-:1:abc:2",     // bad min_shares
+            "spread_arb:0:-:1:2:abc",     // bad max_shares
         ] {
             assert!(parse_one(bad).is_none(), "must be ignored: {bad}");
         }

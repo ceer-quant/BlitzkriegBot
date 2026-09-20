@@ -476,8 +476,12 @@ impl EvolutionProposalView {
         keys.sort();
         keys.into_iter()
             .filter_map(|k| {
-                let f = from.get(k).map(|v| v.to_string().trim_matches('"').to_string());
-                let t = to.get(k).map(|v| v.to_string().trim_matches('"').to_string());
+                let f = from
+                    .get(k)
+                    .map(|v| v.to_string().trim_matches('"').to_string());
+                let t = to
+                    .get(k)
+                    .map(|v| v.to_string().trim_matches('"').to_string());
                 if f == t {
                     return None; // unchanged knobs are not part of the proposal
                 }

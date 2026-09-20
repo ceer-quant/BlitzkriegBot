@@ -141,10 +141,7 @@ impl AppViewModel {
                     .get("strategy")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let id = proposal
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
+                let id = proposal.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                 format!("evolution proposed: {strategy} holds {id} for review")
             }
             CoreEvent::EvolutionCycle {
