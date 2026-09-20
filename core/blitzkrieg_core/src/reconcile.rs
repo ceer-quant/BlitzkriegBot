@@ -17,7 +17,7 @@ use crate::model::*;
 use crate::ome::{FillDelta, Ome};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VenueTrade {
     pub venue_order_id: String,
     pub trade_id: String,
@@ -68,6 +68,12 @@ pub struct ReconcileReport {
     /// Local-live orders with no venue presence and no completing fill; a real
     /// ghost that may warrant a cancel if the venue snapshot is trustworthy.
     pub suspect_ghost_ids: Vec<OrderId>,
+    /// Trades the venue executed on orders the OME has never heard of — a
+    /// manual close the operator made directly on the venue. The OME cannot
+    /// apply these (no order to fill), so the caller folds them into the
+    /// position book by token id; otherwise the position is a ghost the exit
+    /// rules keep managing forever.
+    pub unknown_fills: Vec<VenueTrade>,
 }
 
 /// Reconcile the OME against an authoritative snapshot.
@@ -94,6 +100,11 @@ pub fn reconcile(ome: &mut Ome, snap: &VenueSnapshot) -> CoreResult<ReconcileRep
 
     for (venue_id, (total_size, price_num, last)) in by_order {
         let Some(order) = ome.by_venue_or_id(&venue_id).cloned() else {
+            // Not one of our orders (manual close on the venue): hand it to
+            // the caller for position-book reconciliation.
+            for t in snap.trades.iter().filter(|t| t.venue_order_id == venue_id) {
+                report.unknown_fills.push(t.clone());
+            }
             continue;
         };
         let core_id = order.order_id.clone();
@@ -287,5 +298,55 @@ mod tests {
         let report = reconcile(&mut ome, &snap).unwrap();
         assert!(report.actions.is_empty());
         assert_eq!(ome.get("dry1").unwrap().status, OrderStatus::Live);
+    }
+
+    /// A venue trade on an order the OME never issued (a manual close made
+    /// directly on the venue) must surface as an unknown fill for the caller
+    /// to fold into the position book — not be silently dropped, which left
+    /// ghost positions the exit rules kept managing forever.
+    #[test]
+    fn manual_close_trade_surfaces_as_unknown_fill() {
+        let mut ome = Ome::new();
+        live_order(&mut ome, "k1", "c1", "v1", 1);
+        let snap = VenueSnapshot {
+            open_order_ids: vec!["v1".into()],
+            trades: vec![
+                // Ours: known venue id → OME gap-fill path.
+                VenueTrade {
+                    venue_order_id: "v1".into(),
+                    trade_id: "t1".into(),
+                    token_id: "tok".into(),
+                    side: Side::Sell,
+                    size: dec!(2),
+                    price: dec!(0.5),
+                    ts_ms: 10,
+                    tx_hash: None,
+                    maker: Some(false),
+                },
+                // Manual: an id the OME has never heard of.
+                VenueTrade {
+                    venue_order_id: "manual-1".into(),
+                    trade_id: "t2".into(),
+                    token_id: "tok".into(),
+                    side: Side::Sell,
+                    size: dec!(10),
+                    price: dec!(0.6),
+                    ts_ms: 20,
+                    tx_hash: None,
+                    maker: Some(false),
+                },
+            ],
+            now_ms: 30,
+        };
+        let report = reconcile(&mut ome, &snap).unwrap();
+        assert_eq!(
+            report.unknown_fills.len(),
+            1,
+            "exactly the manual trade is unknown"
+        );
+        assert_eq!(report.unknown_fills[0].venue_order_id, "manual-1");
+        assert_eq!(report.unknown_fills[0].size, dec!(10));
+        // The known order got its gap fill; the OME is untouched by the manual one.
+        assert_eq!(ome.get("c1").unwrap().filled_size, dec!(2));
     }
 }

@@ -17,13 +17,17 @@ use std::path::{Path, PathBuf};
 /// A position snapshot file bound to a path.
 pub struct PositionDb {
     path: PathBuf,
+    /// Side file holding the reconciliation watermark (the newest external
+    /// fill already folded into the position book). Kept out of the JSONL so
+    /// the typed position file stays pure.
+    recon_path: PathBuf,
 }
 
 impl PositionDb {
     pub fn new(path: impl AsRef<Path>) -> Self {
-        Self {
-            path: path.as_ref().to_path_buf(),
-        }
+        let path = path.as_ref().to_path_buf();
+        let recon_path = path.with_extension("recon");
+        Self { path, recon_path }
     }
 
     pub fn path(&self) -> &Path {
@@ -44,6 +48,25 @@ impl PositionDb {
             }
         }
         let _ = std::fs::write(&self.path, buf);
+    }
+
+    /// Persist the newest external (unknown-order) fill timestamp already
+    /// applied to the position book. Without this, a restart would re-apply
+    /// every manual close the sweep still reports. Best effort.
+    pub fn save_watermark(&self, ms: i64) {
+        if let Some(dir) = self.recon_path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&self.recon_path, ms.to_string());
+    }
+
+    /// Load the reconciliation watermark. Missing file = 0 (apply everything
+    /// the sweep reports; on a fresh book that is nothing anyway).
+    pub fn load_watermark(&self) -> i64 {
+        std::fs::read_to_string(&self.recon_path)
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+            .unwrap_or(0)
     }
 
     /// Load the persisted open positions. Missing file = none. Unparseable lines
@@ -129,6 +152,10 @@ mod tests {
         let after = db.load();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].id, "hft-2");
+
+        // Watermark round-trips in its side file.
+        db.save_watermark(123_456);
+        assert_eq!(db.load_watermark(), 123_456);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

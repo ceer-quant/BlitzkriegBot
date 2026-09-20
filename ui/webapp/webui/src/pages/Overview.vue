@@ -29,6 +29,16 @@ const store = usePanelStore()
 const snap = computed(() => store.snapshot)
 const strategyRows = computed(() => store.strategyRows)
 
+// ── trading capability (freeze / venue errors / self-check) ─────────────────
+const stats = computed(() => snap.value?.stats ?? null)
+const tradingFrozen = computed(() =>
+  stats.value?.tradingFrozen?.active ? (stats.value.tradingFrozen ?? null) : null,
+)
+const lastVenueError = computed(() =>
+  !tradingFrozen.value && stats.value?.lastVenueError ? stats.value.lastVenueError : null,
+)
+const selfCheck = computed(() => stats.value?.selfCheck ?? null)
+
 // ── balance (principal + net profit is the real balance in both modes) ──────
 const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
 const balance = computed(() => snap.value?.balance ?? null)
@@ -332,6 +342,21 @@ const unrealized = computed(() =>
         title="引擎最近错误"
         hint="完整日志在网关控制台；同一错误反复出现时，可先在策略页停用相关策略再排查。"
       >{{ snap.lastError }}</AlertBanner>
+    </div>
+    <div v-if="tradingFrozen" class="mt-3.5">
+      <AlertBanner tone="error" title="交易已冻结（kill switch）">
+        {{ tradingFrozen.reason || '交易已被冻结' }}
+      </AlertBanner>
+    </div>
+    <div v-else-if="lastVenueError" class="mt-3.5">
+      <AlertBanner tone="warn" title="最近交易错误（venue）">{{ lastVenueError.message }}</AlertBanner>
+    </div>
+    <div v-if="selfCheck && !selfCheck.ok" class="mt-3.5">
+      <AlertBanner tone="error" title="交易能力自检未通过">
+        <span v-for="item in selfCheck.items.filter((i) => !i.ok)" :key="item.name" class="block">
+          {{ item.name }}：{{ item.detail }}
+        </span>
+      </AlertBanner>
     </div>
   </template>
 

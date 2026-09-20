@@ -246,11 +246,16 @@ impl MarketHost for CoreHost {
         })
     }
 
-    fn on_order_rejected(&self, core_order_id: &str) -> BoxFuture<'_, ()> {
+    fn on_order_rejected(
+        &self,
+        core_order_id: &str,
+        error: Option<api::CoreError>,
+    ) -> BoxFuture<'_, ()> {
         let core_id = core_order_id.to_string();
         Box::pin(async move {
+            let err = error.map(|e| error_from_api(&e));
             let mut c = self.core.lock().await;
-            if let Err(e) = c.reject_live(&core_id, now_ms()) {
+            if let Err(e) = c.reject_live_result(&core_id, err, now_ms()) {
                 c.emit_error(e);
             }
         })
@@ -292,27 +297,23 @@ impl MarketHost for CoreHost {
     fn on_reconcile(&self, snapshot: api::ReconcileSnapshot) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             let mut c = self.core.lock().await;
-            // Only reconcile trades for orders we track (matches the live bridge).
+            // Trades for KNOWN orders go through the OME reconcile; trades for
+            // orders the core never issued (manual closes on the venue) ride
+            // through as well — the core folds them into the position book by
+            // token id instead of dropping them (the ghost-position bug).
             let snap = snapshot_from_api(&snapshot);
-            let venue_trade_count = snap.trades.len();
-            let mut tracked: Vec<crate::reconcile::VenueTrade> = Vec::new();
-            for t in snap.trades {
-                if c.core_id_for_venue(&t.venue_order_id).is_some() {
-                    tracked.push(t);
-                }
-            }
+            let tracked = snap
+                .trades
+                .iter()
+                .filter(|t| c.core_id_for_venue(&t.venue_order_id).is_some())
+                .count();
             eprintln!(
-                "core: reconcile: trades={} tracked={} ghosts_open={}",
-                venue_trade_count,
-                tracked.len(),
-                snapshot.open_order_ids.len()
+                "core: reconcile: trades={} tracked={} untracked/manual={}",
+                snap.trades.len(),
+                tracked,
+                snap.trades.len() - tracked
             );
-            let vs = crate::reconcile::VenueSnapshot {
-                open_order_ids: snap.open_order_ids,
-                trades: tracked,
-                now_ms: snapshot.now_ms,
-            };
-            match c.reconcile(vs) {
+            match c.reconcile(snap) {
                 Ok(report) => {
                     for a in &report.actions {
                         eprintln!("core: reconcile action: {a:?}");
@@ -323,6 +324,12 @@ impl MarketHost for CoreHost {
                 }
                 Err(e) => c.emit_error(e),
             }
+        })
+    }
+
+    fn on_self_check(&self, report: api::SelfCheckReport) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.core.lock().await.on_self_check(report);
         })
     }
 

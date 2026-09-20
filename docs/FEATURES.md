@@ -143,7 +143,7 @@ B 组净盈亏 +12.66、胜率 +6.6pt、回撤不变，参数单调收敛一步�
 
 | 扩展 | 提供 | 状态 |
 | --- | --- | --- |
-| `extensions/polymarket/` | CLOB 下单、行情（REST `POST /books` 轮询）、Gamma 轮盘发现、Poly1271 签名 | ✅ 已实盘验证（dry）**（下单为 dry 撮合）**；Live 下单 ⚠️ 未验证 |
+| `extensions/polymarket/` | CLOB 下单、行情（REST `POST /books` 轮询）、Gamma 轮盘发现、Poly1271 签名 | ✅ 实盘已验证：下单/撤单全生命周期（2026-09-20 真实落所）+ 5s 余额对账；成交（fill）捕获已修复（maker 成交上报 + 全量 user-WS 订阅），待下一笔真实成交复验 |
 | `extensions/binance_spot/` | 现货行情（供趋势腿的动量过滤使用） | ✅ 已实盘验证（dry） |
 
 **扩展契约**（`core/market_api`，**内核零市场代码**）：

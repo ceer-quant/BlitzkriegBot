@@ -411,6 +411,26 @@ pub struct ReconcileSnapshot {
     pub now_ms: i64,
 }
 
+/// One probe of the venue's trading capability (trading self-check).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelfCheckItem {
+    pub name: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+/// Result of exercising the venue paths trading actually needs: authenticated
+/// balance (L2 credentials + auth) and the reconciliation sweep endpoint. The
+/// host freezes trading on a failed report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelfCheckReport {
+    pub ok: bool,
+    pub ts_ms: i64,
+    pub items: Vec<SelfCheckItem>,
+}
+
 // ── Plugin configuration ─────────────────────────────────────────────────────
 
 /// Data-feed parameters (orderbook subscription + optional spot stream).

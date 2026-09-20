@@ -245,6 +245,18 @@ export interface EngineStats {
   evaluations?: number
   signals?: number
   placeRejected?: number
+  /** Orders the live venue refused (session-scoped). Older cores omit. */
+  venueRejected?: number
+  /** The last venue/self-check failure, with its wall-clock ts. Older cores omit. */
+  lastVenueError?: { tsMs: number; message: string } | null
+  /** Newest trading-capability self-check report. Older cores omit. */
+  selfCheck?: {
+    ok: boolean
+    tsMs: number
+    items: { name: string; ok: boolean; detail: string }[]
+  } | null
+  /** Trading freeze (kill switch) state. Older cores omit. */
+  tradingFrozen?: { active: boolean; reason?: string } | null
   confirmed?: string[]
   strategies?: StrategyStatsRow[]
 }

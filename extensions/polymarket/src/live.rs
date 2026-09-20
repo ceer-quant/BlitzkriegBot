@@ -9,11 +9,15 @@
 //! serves the socket.
 
 use crate::feed::now_ms;
-use crate::venue::{VenueEvent, spawn_from_env};
+use crate::venue::{VenueEvent, now_epoch_ms, spawn_from_env};
 use blitzkrieg_market_api::{CoreError, CoreErrorCode, MarketHost, ReconcileSnapshot};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// Minimum spacing between failure-triggered capability probes, so a
+/// persistently broken venue cannot turn the probe itself into a storm.
+const PROBE_COOLDOWN_MS: i64 = 60_000;
 
 /// Spawn the live bridge if credentials are present. `markets` only gates the
 /// spawn (live with no markets = REST-only reconciliation); the user-WS
@@ -45,6 +49,19 @@ pub async fn spawn_if_configured(
             );
         }
         Err(e) => eprintln!("polymarket-extension: live balance fetch failed: {e}"),
+    }
+
+    // Startup capability self-check: if the venue paths trading needs are
+    // broken (bad credentials, geoblock, venue down) the host freezes trading
+    // BEFORE any order can go out — the same freeze an in-run probe triggers.
+    match venue.self_check().await {
+        Ok(report) => {
+            if !report.ok {
+                eprintln!("polymarket-extension: startup self-check FAILED");
+            }
+            host.on_self_check(report).await;
+        }
+        Err(e) => eprintln!("polymarket-extension: startup self-check failed to run: {e}"),
     }
 
     // Startup orphan sweep: any order the venue still holds that the core does
@@ -91,20 +108,38 @@ pub async fn spawn_if_configured(
     let handle = tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         let mut since_reconcile = 0u32;
+        let mut place_failures: u32 = 0;
+        let mut next_probe_ok_ms: i64 = 0;
         loop {
             tick.tick().await;
 
-            // 1) Submit locally-accepted orders not yet on the venue.
+            // 1) Submit locally-accepted orders not yet on the venue. A venue
+            // rejection rides to the host WITH its error text (cooldowns,
+            // panel visibility, consecutive-failure freeze all key off it).
             for order in host.take_pending_orders().await {
                 let core_order_id = order.core_order_id.clone();
                 match venue.place(order).await {
                     Ok(p) => {
+                        place_failures = 0;
                         host.on_order_accepted(&core_order_id, &p.venue_order_id)
                             .await
                     }
                     Err(e) => {
-                        host.on_order_rejected(&core_order_id).await;
+                        place_failures = place_failures.saturating_add(1);
+                        host.on_order_rejected(&core_order_id, Some(e.clone()))
+                            .await;
                         host.report_error(e).await;
+                        // A streak of venue rejections is the trading-error
+                        // signal the capability self-check exists for: probe
+                        // the venue directly (rate-limited) so the freeze
+                        // decision rests on fresh evidence, not inference.
+                        if place_failures >= 3 && now_epoch_ms() >= next_probe_ok_ms {
+                            next_probe_ok_ms = now_epoch_ms() + PROBE_COOLDOWN_MS;
+                            match venue.self_check().await {
+                                Ok(report) => host.on_self_check(report).await,
+                                Err(e) => host.report_error(e).await,
+                            }
+                        }
                     }
                 }
             }

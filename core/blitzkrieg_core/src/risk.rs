@@ -198,6 +198,10 @@ impl RiskGate {
     pub fn is_killed(&self) -> bool {
         self.killed
     }
+    /// Why trading is frozen, when it is.
+    pub fn kill_reason(&self) -> Option<&str> {
+        self.kill_reason.as_deref()
+    }
     pub fn set_config(&mut self, c: RiskConfig) {
         self.config = c;
     }
