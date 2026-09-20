@@ -15,8 +15,15 @@
 #       to touch anything that is not a real directory directly under `--dest`.
 #     * `--dest` is mandatory and validated: a backup inside the repository is
 #       refused, because a copy that dies with the repository is not a backup.
-#     * Every backup carries a SHA-256 manifest of the source, so "the backup is
-#       good" is a checkable claim rather than a feeling.
+#     * Every backup carries a SHA-256 manifest of what was CAPTURED, so "the
+#       backup is good" is a checkable claim rather than a feeling.
+#     * The manifest is computed FROM the archive, not from the tree. The
+#       capture core appends to `data/archive/events.jsonl` continuously; a
+#       manifest hashed from the live tree before tar would describe a version
+#       of the file that never existed, and every verify of a live system would
+#       fail on exactly the file that matters most (hit for real on the first
+#       scheduled-era backup, 2026-09-20). Coverage — nothing in the tree was
+#       missed — is asserted at creation time instead.
 #
 # Usage:
 #   scripts/data-backup.sh --dest <dir> [--keep N] [--exclude-archive] [--dry-run]
@@ -241,45 +248,81 @@ echo "  dest   : $TARGET"
 
 mkdir -p "$TARGET" || fail "cannot create $TARGET"
 
-# ── manifest (computed from the SOURCE, before archiving) ───────────────────
-# Recorded first so a corrupt archive can never masquerade as a good backup:
-# the hashes describe what was supposed to be captured.
-#
-# The manifest must describe the SAME tree the archive will hold. Hashing the
-# whole source and then excluding a subtree from the tar produces a backup that
-# disagrees with itself: `--verify` would report every excluded file as missing.
-# So the exclusion is applied to the file list too, not just to tar.
+# ── archive first; the manifest then describes the ARCHIVE ──────────────────
+# The capture core appends to `data/archive/events.jsonl` continuously. If the
+# manifest were hashed from the live tree before tar (the original design), it
+# would describe a version of that file that never existed, and every verify on
+# a live system would fail on exactly the file that matters most. So: tar
+# first, then hash what the archive actually holds. What could instead be LOST
+# — a source file that never made it into the tar — is checked at creation
+# time (coverage assertion below), while failing is still possible.
 MAN="$TARGET/MANIFEST.sha256"
-FILES_LIST="$(mktemp)"
-trap 'rm -f "$FILES_LIST"' EXIT
+FILES_LIST="$(mktemp)"   # files present in the SOURCE tree, tar-relative
+TAR_LIST="$(mktemp)"     # files actually held by the ARCHIVE, tar-relative
+TMP="$(mktemp -d)"
+trap 'rm -f "$FILES_LIST" "$TAR_LIST"; [ -n "$TMP" ] && rm -rf "$TMP"' EXIT
 
 if [ "$EXCLUDE_ARCHIVE" -eq 1 ]; then
-  find "$DATA_ABS" -path "$DATA_ABS/archive" -prune -o -type f -print \
-    | LC_ALL=C sort > "$FILES_LIST"
+  find "$DATA_ABS" -path "$DATA_ABS/archive" -prune -o -type f -print
 else
-  find "$DATA_ABS" -type f -print | LC_ALL=C sort > "$FILES_LIST"
-fi
-N_FILES=0
-N_BYTES=0
-while IFS= read -r f; do
+  find "$DATA_ABS" -type f -print
+fi | LC_ALL=C sort | while IFS= read -r f; do
   [ -n "$f" ] || continue
-  rel="${f#"$SRC_PARENT"/}"
-  h="$(sha256_file "$f")" || fail "cannot hash $rel"
-  printf '%s  %s\n' "$h" "$rel" >> "$MAN"
-  N_FILES=$((N_FILES + 1))
-  sz="$(file_bytes "$f")"
-  N_BYTES=$((N_BYTES + sz))
-done < "$FILES_LIST"
+  printf '%s/%s\n' "$SRC_BASE" "${f#"$DATA_ABS/"}"
+done > "$FILES_LIST"
 
-echo "  files  : $N_FILES ($N_BYTES bytes)"
-
-# ── archive ─────────────────────────────────────────────────────────────────
 if ! tar "${TAR_ARGS[@]}" "$TARGET/data.tar.gz" "${EXCLUDES[@]+"${EXCLUDES[@]}"}" -C "$SRC_PARENT" "$SRC_BASE"; then
   fail "tar failed; a partial backup is left at $TARGET (do not treat it as valid)"
 fi
 ARC_SHA="$(sha256_file "$TARGET/data.tar.gz")" || fail "cannot hash archive"
 ARC_BYTES="$(file_bytes "$TARGET/data.tar.gz")"
+
+tar -xzf "$TARGET/data.tar.gz" -C "$TMP" \
+  || fail "archive was written but does not extract; a partial backup is left at $TARGET (do not treat it as valid)"
+# List the EXTRACTED tree: the manifest must describe exactly what a restorer
+# will get, byte for byte, and this list is also what gets hashed below.
+(cd "$TMP" && find . -type f -print) | LC_ALL=C sort | sed 's|^\./||' > "$TAR_LIST"
+
+# ── coverage assertion (creation-time, the live-tree counterpart) ───────────
+# A source file absent from the archive means the tree changed mid-capture in
+# a way the backup did not capture. `data/archive/events*` is exempt: the live
+# core appends to and rotates those segments while the tar runs, which is
+# tolerated drift (the archive simply holds an earlier prefix of the stream).
+# Anything else missing is a real gap — fail so the backup is never a
+# self-consistent but incomplete artifact.
+MISSING="$(comm -23 "$FILES_LIST" "$TAR_LIST")"
+if [ -n "$MISSING" ]; then
+  UNCOVERED="$(printf '%s\n' "$MISSING" | while IFS= read -r m; do
+    case "$m" in
+      "$SRC_BASE"/archive/events*)
+        if [ "$EXCLUDE_ARCHIVE" -eq 1 ]; then
+          printf '%s\n' "$m"
+        else
+          echo "  note  live-capture drift, tolerated: $m" >&2
+        fi ;;
+      *) printf '%s\n' "$m" ;;
+    esac
+  done)"
+  if [ -n "$UNCOVERED" ]; then
+    fail "source files missing from the archive (tree changed during capture; re-run the backup):
+$UNCOVERED"
+  fi
+fi
+
+# ── manifest (hashed from the extracted archive) ────────────────────────────
+N_FILES=0
+N_BYTES=0
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  h="$(sha256_file "$TMP/$rel")" || fail "cannot hash $rel"
+  printf '%s  %s\n' "$h" "$rel" >> "$MAN"
+  N_FILES=$((N_FILES + 1))
+  sz="$(file_bytes "$TMP/$rel")"
+  N_BYTES=$((N_BYTES + sz))
+done < "$TAR_LIST"
+
 printf '# archive-sha256 %s\n' "$ARC_SHA" >> "$MAN"
+echo "  files  : $N_FILES ($N_BYTES bytes)"
 echo "  archive: $ARC_BYTES bytes  sha256 ${ARC_SHA:0:16}…"
 
 # A backup records what produced it, so a restore can name the revision.

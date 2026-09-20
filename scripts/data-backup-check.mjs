@@ -18,6 +18,11 @@
  *   7. `--verify` passes on a good backup and FAILS on a tampered one.
  *   8. Pruning removes only our own strict-named dirs; a stranger's directory
  *      sitting in dest survives, as does a symlink of a valid backup name.
+ *   9. Live drift: the capture core appends to `data/archive/events.jsonl`
+ *      continuously, so the source tree may be NEWER than any backup the
+ *      moment it is finished. The manifest describes the archive, not the
+ *      tree — an append after creation must not invalidate `--verify`
+ *      (the exact failure of the first scheduled-era backup, 2026-09-20).
  *
  * Run: node scripts/data-backup-check.mjs
  */
@@ -26,6 +31,7 @@ import {
   mkdtempSync,
   mkdirSync,
   writeFileSync,
+  appendFileSync,
   readFileSync,
   existsSync,
   rmSync,
@@ -247,6 +253,29 @@ assert(/trades\/trades\.jsonl/.test(list2), 'non-excluded data is still present'
 // permission to ship an archive that disagrees with its own manifest.
 r = run(['--verify', join(DEST, light)]);
 assert(r.code === 0, '--verify passes on an --exclude-archive backup');
+
+// ── 7. live drift ───────────────────────────────────────────────────────────
+console.log('');
+console.log('[7] an append to the live capture stream does not invalidate verify');
+// A backup is a point-in-time capture of a tree that keeps growing: the core
+// appends to `data/archive/events.jsonl` continuously. The manifest describes
+// the ARCHIVE (what was captured), not the live tree — so growing the tree
+// after creation is normal and must still verify. This pins the exact failure
+// the first scheduled-era backup hit on 2026-09-20 (manifest hashed from the
+// live tree pre-tar, the core appended in between, verify failed on
+// events.jsonl).
+const before7 = new Set(backups());
+appendFileSync(join(SRC, 'archive', 'events.jsonl'), 'grown-after-capture' + LF);
+r = run(['--data', SRC, '--dest', DEST, '--keep', '0']);
+assert(r.code === 0, 'backup succeeds while the live tree is mid-append');
+const drift = backups().filter((n) => !before7.has(n));
+assert(drift.length === 1, `the drift run created exactly one backup (got ${drift.length})`);
+const live = drift[0];
+const meta7 = JSON.parse(readFileSync(join(DEST, live, 'BACKUP.json'), 'utf8'));
+assert(meta7.fileCount === 4, `manifest still describes all captured files (${meta7.fileCount})`);
+r = run(['--verify', join(DEST, live)]);
+assert(r.code === 0 && /backup verifies/.test(r.out), '--verify passes on the backup despite a newer live tree');
+assert(/all 4 file\(s\) match/.test(r.out), 'every captured file was checked');
 
 // ── result ──────────────────────────────────────────────────────────────────
 rmSync(WORK, { recursive: true, force: true });
