@@ -2,13 +2,17 @@
  * E11 — the「TUI/WebUI 对等清单逐项核对」验收, executable.
  *
  * The two faces must cover the same operational surface, but they are NOT
- * clones: the TUI is a four-tab cockpit driven by one command bar, while the
- * WebUI adds richer pages (策略账本, 回放复盘, 设置). This check parses BOTH
- * sources — the Rust tab enum and its renderers, the Vue nav segments — and
- * asserts every TUI face has a live WebUI home with the matching content, then
- * pins the deliberate surplus on the WebUI side with its off-panel equivalent
- * (CLI verb or TUI command), so the list stays honest instead of silently
- * rotting.
+ * clones: the TUI is a tab cockpit driven by one command bar (four tabs today,
+ * five once the Evolution tab lands with #154), while the WebUI adds richer
+ * pages (进化, 策略账本, 回放复盘, 设置). This check parses BOTH sources — the
+ * Rust tab enum and its renderers, the Vue nav segments — and asserts every
+ * TUI face has a live WebUI home with the matching content, then pins the
+ * deliberate surplus on the WebUI side with its off-panel equivalent (CLI verb
+ * or TUI command), so the list stays honest instead of silently rotting.
+ *
+ * Both known layouts are accepted (four-tab pre-E13, five-tab with Evolution)
+ * so the parity gate can gate the transition itself instead of flickering
+ * between base and PR merge previews; an UNKNOWN tab set still fails loudly.
  *
  *   cd ui/webapp/webui && npm run check:parity
  */
@@ -42,16 +46,30 @@ const enumBody =
   [...app.matchAll(/^pub enum Tab \{([\s\S]*?)^\}/gm)][0]?.[1] ?? ''
 const tuiVariants = [...enumBody.matchAll(/^\s{4}([A-Z]\w+),$/gm)].map((m) => m[1])
 
-check('TUI exposes exactly four tabs (Overview/Positions/Trades/Plugins)', () => {
-  assert.deepEqual(tuiVariants, ['Overview', 'Positions', 'Trades', 'Plugins'])
+/** Known TUI layouts: the four-tab cockpit, and the five-tab one once the
+ * Evolution face lands with the E13 trio (#154). Both are accepted so the
+ * parity gate can gate the transition itself; an unknown tab set still fails. */
+const TUI_TAB_SETS = [
+  ['Overview', 'Positions', 'Trades', 'Plugins'],
+  ['Overview', 'Positions', 'Trades', 'Plugins', 'Evolution'],
+]
+check('TUI tabs are a known layout (4-tab, or 5-tab with Evolution)', () => {
+  assert.ok(
+    TUI_TAB_SETS.some((s) => s.join(',') === tuiVariants.join(',')),
+    `unknown TUI tab set: ${tuiVariants.join('/')} — extend TUI_TAB_SETS deliberately`,
+  )
 })
 
 /** WebUI nav ids, read out of the segments array. */
 const webuiIds = [...shell.matchAll(/id: '(\w+)', label: /g)].map((m) => m[1])
-check('WebUI nav has the six known tabs', () => {
-  assert.deepEqual(
-    webuiIds,
-    ['overview', 'hft', 'backtest', 'strategies', 'plugins', 'settings'],
+const WEBUI_TAB_SETS = [
+  ['overview', 'hft', 'backtest', 'strategies', 'plugins', 'settings'],
+  ['overview', 'hft', 'backtest', 'strategies', 'evolution', 'plugins', 'settings'],
+]
+check('WebUI nav is a known tab set (six, or seven with evolution)', () => {
+  assert.ok(
+    WEBUI_TAB_SETS.some((s) => s.join(',') === webuiIds.join(',')),
+    `unknown WebUI tab set: ${webuiIds.join('/')} — extend WEBUI_TAB_SETS deliberately`,
   )
 })
 
@@ -64,6 +82,12 @@ const TUI_TO_WEBUI = [
   ['Trades', ['hft'], 'HftPage.vue', '成交'],
   ['Plugins', ['plugins'], 'Plugins.vue', '行情插件'],
 ]
+// The Evolution face ships with the E13 trio (#154); its pairing is asserted
+// only once the TUI actually carries the tab, so both sides of the transition
+// stay gated instead of one side waiting on the other.
+if (tuiVariants.includes('Evolution')) {
+  TUI_TO_WEBUI.push(['Evolution', ['evolution'], 'EvolutionPage.vue', '拍板'])
+}
 for (const [tab, targets, pageFile, marker] of TUI_TO_WEBUI) {
   check(`TUI ${tab} → WebUI ${targets.join(' + ')}（${marker} 在页上）`, () => {
     for (const t of targets) assert.ok(webuiIds.includes(t), `WebUI has no '${t}' tab`)
