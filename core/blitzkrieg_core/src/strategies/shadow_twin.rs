@@ -16,8 +16,7 @@
 
 use super::{EngineStrategy, StrategyCtx};
 use crate::exit_policy::{
-    ExitConfig, ExitState, ExitTickInput, decide_exit, executable_bid, taker_fee_pct,
-    update_exit_state,
+    ExitConfig, ExitState, ExitTickInput, decide_exit, taker_fee_pct, update_exit_state,
 };
 use crate::model::{CryptoMarket, OrderbookSnapshot};
 use crate::shadow_evolution::{KnobSpec, StrategyParams};
@@ -148,6 +147,11 @@ impl EngineStrategyShadow {
     }
 }
 
+/// The fixed virtual position size of a twin. The live host owns sizing; a
+/// shadow can never reach it, so the replay carries this constant — but the
+/// fillability checks below still require the book to actually cover it.
+const TWIN_SHARES: Decimal = dec!(10);
+
 /// A virtual position opened by a twin, priced by the shared exit policy.
 #[derive(Debug, Clone)]
 struct TwinPosition {
@@ -155,6 +159,43 @@ struct TwinPosition {
     shares: Decimal,
     expires_at_ms: i64,
     state: ExitState,
+}
+
+/// F7 — entry fillability: how much the counterparty (offer) side is actually
+/// willing to trade at prices **not worse than** the entry limit. A resting
+/// buy at `limit` only fills against asks priced at or below it, so an entry
+/// signal whose quote no seller honours must not become a position.
+fn fillable_ask_size(book: &OrderbookSnapshot, limit: Decimal) -> Decimal {
+    book.asks
+        .iter()
+        .filter(|(p, _)| *p <= limit)
+        .map(|(_, s)| *s)
+        .sum()
+}
+
+/// F7 — exit fillability: the price a long of `shares` can actually SELL at
+/// right now, as the volume-weighted sweep of the bid ladder. `None` when
+/// there is no bid at all, or the ladder cannot cover the size: a mid or a
+/// reference price is never an executable exit (the +0.421937 phantom the
+/// audit caught came exactly from that fallback).
+fn executable_bid_for_size(book: &OrderbookSnapshot, shares: Decimal) -> Option<Decimal> {
+    if book.best_bid <= Decimal::ZERO {
+        return None;
+    }
+    let mut remaining = shares;
+    let mut notional = Decimal::ZERO;
+    for (p, s) in &book.bids {
+        let take = (*s).min(remaining);
+        notional += *p * take;
+        remaining -= take;
+        if remaining <= Decimal::ZERO {
+            break;
+        }
+    }
+    if remaining > Decimal::ZERO || shares <= Decimal::ZERO {
+        return None;
+    }
+    Some(notional / shares)
 }
 
 /// One virtual variant: a strategy twin driven tick-by-tick with the shared exit
@@ -166,6 +207,11 @@ pub struct TwinReplay {
     open: HashMap<String, TwinPosition>,
     /// (exit_ms, net_pnl) of closed virtual trades, oldest first.
     trades: VecDeque<(i64, Decimal)>,
+    /// Last KNOWN-executable bid per token (F7): the only price a position
+    /// forced out at a round boundary may settle at. A token whose book never
+    /// showed a deep-enough bid has none, and its settlement falls back to a
+    /// full principal loss instead of an invented price.
+    last_bids: HashMap<String, Decimal>,
 }
 
 impl TwinReplay {
@@ -175,6 +221,7 @@ impl TwinReplay {
             exit_cfg: exit_cfg.clone(),
             open: HashMap::new(),
             trades: VecDeque::new(),
+            last_bids: HashMap::new(),
         }
     }
 
@@ -187,9 +234,17 @@ impl TwinReplay {
     }
 
     /// A new round: reset the twin's state, re-seed it with the round's current
-    /// mids (exactly what the live engine does), and drop virtual positions
-    /// whose market has left the round (live would have force-exited them).
-    /// Closed trades survive so metrics accumulate across round boundaries (D-3).
+    /// mids (exactly what the live engine does), and settle the virtual
+    /// positions whose market has left the round (live would have force-exited
+    /// them). Closed trades survive so metrics accumulate across round
+    /// boundaries (D-3).
+    ///
+    /// F7: settling is mandatory — a dropped position is never silently
+    /// deleted. With a last-known executable bid it books the exit at that bid
+    /// (same accounting as any other exit); with none, the position's price
+    /// can no longer be sold at any known level, so the FULL entry cost is
+    /// booked as an unrealized-principal loss. Either way the trade stays in
+    /// the statistics instead of vanishing with its loss.
     pub fn on_round(
         &mut self,
         markets: &[CryptoMarket],
@@ -201,7 +256,31 @@ impl TwinReplay {
             .iter()
             .flat_map(|m| [m.up_token_id.as_str(), m.down_token_id.as_str()])
             .collect();
+        let dropped: Vec<(String, TwinPosition)> = self
+            .open
+            .iter()
+            .filter(|(t, _)| !valid.contains(t.as_str()))
+            .map(|(t, p)| (t.clone(), p.clone()))
+            .collect();
+        for (token, pos) in dropped {
+            let pnl = match self.last_bids.get(&token).copied() {
+                Some(bid) if bid > Decimal::ZERO => {
+                    let gross = (bid - pos.entry_price) * pos.shares;
+                    let fee = taker_fee_pct(bid) / Decimal::ONE_HUNDRED * bid * pos.shares;
+                    gross - fee
+                }
+                _ => {
+                    // 未结算-本金损失: no executable bid was ever seen, so the
+                    // entry cost is gone in full.
+                    -(pos.entry_price * pos.shares)
+                }
+            };
+            self.trades.push_back((now_ms, pnl));
+            self.last_bids.remove(&token);
+        }
         self.open.retain(|t, _| valid.contains(t.as_str()));
+        self.last_bids
+            .retain(|t, _| valid.contains(t.as_str()) || self.open.contains_key(t));
     }
 
     /// Feed one tick through the twin's own logic, then manage the virtual
@@ -213,6 +292,13 @@ impl TwinReplay {
     /// the shared policy is kernel code, still covered by the outer catch.
     pub fn on_tick(&mut self, ctx: &ShadowTickCtx<'_>) -> bool {
         let token = ctx.token_id;
+
+        // F7: remember this token's last KNOWN-executable bid while it ticks,
+        // so a position the round boundary takes away can settle at a real
+        // price (see `on_round`) instead of an invented one.
+        if let Some(bid) = executable_bid_for_size(ctx.book, TWIN_SHARES) {
+            self.last_bids.insert(token.to_string(), bid);
+        }
 
         if let Some(pos) = self.open.get_mut(token) {
             update_exit_state(
@@ -243,27 +329,41 @@ impl TwinReplay {
                 return true;
             }
             if policy_exit || twin_exit {
-                let exit_price = executable_bid(Some(ctx.book));
-                let (entry, shares) = (pos.entry_price, pos.shares);
-                let gross = (exit_price - entry) * shares;
-                let fee = taker_fee_pct(exit_price) / Decimal::ONE_HUNDRED * exit_price * shares;
-                self.trades.push_back((ctx.now_ms, gross - fee));
-                self.open.remove(token);
+                // F7: an exit must FILL — against a bid that exists and is at
+                // least as deep as the position. No bid (or a thin one) means
+                // the close cannot happen this tick: the position stays open
+                // and is settled at a later tick or at the round boundary,
+                // never priced off a mid or a reference value.
+                if let Some(exit_price) = executable_bid_for_size(ctx.book, pos.shares) {
+                    let (entry, shares) = (pos.entry_price, pos.shares);
+                    let gross = (exit_price - entry) * shares;
+                    let fee =
+                        taker_fee_pct(exit_price) / Decimal::ONE_HUNDRED * exit_price * shares;
+                    self.trades.push_back((ctx.now_ms, gross - fee));
+                    self.open.remove(token);
+                }
             }
             return false;
         }
 
         let (res, panicked) = catch(&mut self.twin, ctx);
         if let Some(entry) = res.entry {
-            self.open.insert(
-                token.to_string(),
-                TwinPosition {
-                    entry_price: entry,
-                    shares: dec!(10),
-                    expires_at_ms: ctx.now_ms + ctx.time_left_sec.max(0) * 1000,
-                    state: ExitState::new(entry, ctx.now_ms),
-                },
-            );
+            // F7: no instantaneous free fill. The twin's entry is a resting
+            // bid; it only opens a position when the counterparty (offer) side
+            // actually covers the full size at prices not worse than that
+            // limit. Otherwise this tick brings no entry — a later tick whose
+            // book does cover it may.
+            if fillable_ask_size(ctx.book, entry) >= TWIN_SHARES {
+                self.open.insert(
+                    token.to_string(),
+                    TwinPosition {
+                        entry_price: entry,
+                        shares: TWIN_SHARES,
+                        expires_at_ms: ctx.now_ms + ctx.time_left_sec.max(0) * 1000,
+                        state: ExitState::new(entry, ctx.now_ms),
+                    },
+                );
+            }
         }
         panicked
     }
@@ -319,5 +419,328 @@ pub fn tick_ctx<'a>(
         round_slot,
         time_left_sec,
         now_ms,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::SignalDirection;
+    use crate::signal::TradeSignal;
+    use crate::strategies::StrategyExitIntent;
+    use rust_decimal::prelude::FromPrimitive;
+
+    /// A test-only twin: emits a fixed entry price (and, when asked, a close
+    /// intent) on every tick, so a test can pin the exact quote and let the
+    /// replay's own fillability check decide whether a position may exist.
+    struct StubStrategy {
+        token: String,
+        entry: Option<Decimal>,
+        exit: bool,
+    }
+
+    impl EngineStrategy for StubStrategy {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _now: i64) {}
+        fn on_round(&mut self, _slot: i64, _tl: i64, _now: i64) {}
+        fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
+            let Some(price) = self.entry else {
+                return Vec::new();
+            };
+            let market = &ctx.markets()[0];
+            vec![TradeSignal {
+                strategy: "stub".into(),
+                asset: market.asset.clone(),
+                direction: SignalDirection::Up,
+                token_id: self.token.clone(),
+                condition_id: market.condition_id.clone(),
+                price,
+                reason: "stub".into(),
+            }]
+        }
+        fn take_exit_intents(&mut self) -> Vec<StrategyExitIntent> {
+            if self.exit {
+                vec![StrategyExitIntent {
+                    token_id: self.token.clone(),
+                    reason: "stub-close".into(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    fn market(up: &str, down: &str) -> CryptoMarket {
+        CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: "c".into(),
+            question_id: "q".into(),
+            up_token_id: up.into(),
+            down_token_id: down.into(),
+            up_price: dec!(0.5),
+            down_price: dec!(0.5),
+            expires_at_ms: 900_000,
+            round_slot: 1,
+            neg_risk: false,
+            question: "?".into(),
+        }
+    }
+
+    fn book(bids: &[(f64, i64)], asks: &[(f64, i64)]) -> OrderbookSnapshot {
+        OrderbookSnapshot::from_levels(
+            "t",
+            bids.iter()
+                .map(|(p, s)| (Decimal::from_f64(*p).unwrap(), Decimal::from(*s)))
+                .collect(),
+            asks.iter()
+                .map(|(p, s)| (Decimal::from_f64(*p).unwrap(), Decimal::from(*s)))
+                .collect(),
+            0,
+        )
+    }
+
+    /// The audit's scenario: bid/ask = 0.49/0.51 with a 0.44 entry signal.
+    /// No ask at or below 0.44 exists, so the bid could never trade — the old
+    /// replay booked +0.421937 off exactly such a book.
+    #[test]
+    fn an_entry_needs_offer_depth_at_or_below_the_limit() {
+        let m = market("t", "t-d");
+        let mut rp = TwinReplay::new(
+            Box::new(StubStrategy {
+                token: "t".into(),
+                entry: Some(dec!(0.44)),
+                exit: false,
+            }),
+            &ExitConfig::default(),
+        );
+
+        // 0.49/0.51: the offer never reaches the 0.44 limit → no entry.
+        rp.on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &book(&[(0.49, 100)], &[(0.51, 1000)]),
+            1,
+            880,
+            1_000,
+        ));
+        assert_eq!(rp.open_positions(), 0, "no offer at the limit, no position");
+
+        // An offer AT the limit but thinner than the position → still no fill.
+        rp.on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &book(&[(0.49, 100)], &[(0.44, 5)]),
+            1,
+            880,
+            2_000,
+        ));
+        assert_eq!(rp.open_positions(), 0, "5 offered shares cannot fill 10");
+
+        // Full size at/below the limit → the resting bid fills.
+        rp.on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &book(&[(0.49, 100)], &[(0.44, 10)]),
+            1,
+            880,
+            3_000,
+        ));
+        assert_eq!(rp.open_positions(), 1, "10 offered at the limit fill 10");
+    }
+
+    /// Depth across levels counts too: 6 at 0.43 + 4 at 0.44 covers 10 shares
+    /// at prices not worse than a 0.44 limit; moving one level out of the band
+    /// leaves only 6.
+    #[test]
+    fn fillable_depth_accumulates_only_within_the_limit() {
+        let m = market("t", "t-d");
+        let mut rp = TwinReplay::new(
+            Box::new(StubStrategy {
+                token: "t".to_string(),
+                entry: Some(dec!(0.44)),
+                exit: false,
+            }),
+            &ExitConfig::default(),
+        );
+
+        rp.on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &book(&[(0.49, 100)], &[(0.44, 4), (0.43, 6)]),
+            1,
+            880,
+            1_000,
+        ));
+        assert_eq!(rp.open_positions(), 1, "4 + 6 = 10 shares at <= 0.44 fill");
+
+        let mut rp2 = TwinReplay::new(
+            Box::new(StubStrategy {
+                token: "t".to_string(),
+                entry: Some(dec!(0.44)),
+                exit: false,
+            }),
+            &ExitConfig::default(),
+        );
+        rp2.on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &book(&[(0.49, 100)], &[(0.44, 4), (0.45, 6)]),
+            1,
+            880,
+            1_000,
+        ));
+        assert_eq!(rp2.open_positions(), 0, "the 0.45 level is worse than the limit");
+    }
+
+    /// An exit only books against a REAL bid deep enough for the position. A
+    /// close decided without one stays open (and settles at the round
+    /// boundary) rather than being priced off a mid.
+    #[test]
+    fn an_exit_only_fills_against_a_deep_enough_bid() {
+        let m = market("t", "t-d");
+        let mut rp = TwinReplay::new(
+            Box::new(StubStrategy {
+                token: "t".to_string(),
+                entry: Some(dec!(0.44)),
+                exit: true,
+            }),
+            &ExitConfig::default(),
+        );
+        rp.on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &book(&[(0.49, 100)], &[(0.44, 10)]),
+            1,
+            880,
+            1_000,
+        ));
+        assert_eq!(rp.open_positions(), 1);
+
+        // Close intent + no bid at all: the old code sold into the mid.
+        rp.on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &book(&[], &[(0.51, 1000)]),
+            1,
+            880,
+            2_000,
+        ));
+        assert_eq!(rp.open_positions(), 1, "no bid, no exit");
+        assert_eq!(rp.closed_trades(), 0, "nothing booked off a bidless book");
+
+        // A bid thinner than the position cannot absorb it either.
+        rp.on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &book(&[(0.49, 5)], &[(0.51, 1000)]),
+            1,
+            880,
+            3_000,
+        ));
+        assert_eq!(rp.open_positions(), 1, "5 bid shares cannot absorb 10");
+        assert_eq!(rp.closed_trades(), 0);
+
+        // A full-size bid books the exit at that bid.
+        rp.on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &book(&[(0.49, 100)], &[(0.51, 1000)]),
+            1,
+            880,
+            4_000,
+        ));
+        assert_eq!(rp.open_positions(), 0);
+        assert_eq!(rp.closed_trades(), 1);
+        let trades = rp.windowed_trades(10_000, 5_000);
+        let expected_fee =
+            taker_fee_pct(dec!(0.49)) / Decimal::ONE_HUNDRED * dec!(0.49) * TWIN_SHARES;
+        assert_eq!(
+            trades[0].1,
+            (dec!(0.49) - dec!(0.44)) * TWIN_SHARES - expected_fee,
+            "exit fills at the bid, not at a mid"
+        );
+    }
+
+    /// A position whose market leaves the round is SETTLED, never deleted:
+    /// at the last known executable bid when there is one.
+    #[test]
+    fn a_round_dropped_position_settles_at_its_last_known_bid() {
+        let m = market("t", "t-d");
+        let mut rp = TwinReplay::new(
+            Box::new(StubStrategy {
+                token: "t".to_string(),
+                entry: Some(dec!(0.44)),
+                exit: false,
+            }),
+            &ExitConfig::default(),
+        );
+        rp.on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &book(&[(0.49, 100)], &[(0.44, 10)]),
+            1,
+            880,
+            1_000,
+        ));
+        // Keep the position open (no exit intent; -9% is far from the 12% stop)
+        // while the book prints a fresh executable bid.
+        rp.on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &book(&[(0.40, 100)], &[(0.42, 100)]),
+            1,
+            870,
+            2_000,
+        ));
+        assert_eq!(rp.open_positions(), 1);
+
+        // New round without the token: settle at the last known bid (0.40).
+        let next = market("u", "d");
+        rp.on_round(std::slice::from_ref(&next), &[], 5_000);
+        assert_eq!(rp.open_positions(), 0);
+        assert_eq!(rp.closed_trades(), 1);
+        let trades = rp.windowed_trades(10_000, 6_000);
+        let expected_fee =
+            taker_fee_pct(dec!(0.40)) / Decimal::ONE_HUNDRED * dec!(0.40) * TWIN_SHARES;
+        assert_eq!(
+            trades[0].1,
+            (dec!(0.40) - dec!(0.44)) * TWIN_SHARES - expected_fee,
+            "the dropped position books its exit at the last executable bid"
+        );
+    }
+
+    /// Without ANY known executable bid the settlement must not invent a
+    /// price: the full entry cost is booked as an unrealized-principal loss
+    /// and stays in the statistics.
+    #[test]
+    fn a_round_dropped_position_without_a_bid_books_a_full_principal_loss() {
+        let m = market("t", "t-d");
+        let mut rp = TwinReplay::new(
+            Box::new(StubStrategy {
+                token: "t".to_string(),
+                entry: Some(dec!(0.44)),
+                exit: false,
+            }),
+            &ExitConfig::default(),
+        );
+        // Enter against a bidless book: the offer side is what fills the bid.
+        rp.on_tick(&tick_ctx(
+            std::slice::from_ref(&m),
+            "t",
+            &book(&[], &[(0.44, 10)]),
+            1,
+            880,
+            1_000,
+        ));
+        assert_eq!(rp.open_positions(), 1);
+        // No tick ever showed a bid → no settlement price exists.
+        let next = market("u", "d");
+        rp.on_round(std::slice::from_ref(&next), &[], 5_000);
+        assert_eq!(rp.open_positions(), 0);
+        assert_eq!(rp.closed_trades(), 1, "the loss is recorded, not dropped");
+        let trades = rp.windowed_trades(10_000, 6_000);
+        assert_eq!(trades[0].1, dec!(-4.4), "full entry cost booked as a loss");
     }
 }

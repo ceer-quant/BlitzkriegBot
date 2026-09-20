@@ -574,7 +574,11 @@ mod tests {
         }
         now += 1_000;
         for v in set.variants.iter_mut() {
-            let b = book(0.43, 0.45);
+            // F7 fillability: the twin's resting bid only fills when the OFFER
+            // side reaches its price. Entry = 0.88 * mid = 0.33 on this book
+            // (0.43/0.33), and the ask at 0.33 covers the 10-share size — the
+            // old book (0.43/0.45) could never have filled that bid.
+            let b = book(0.43, 0.33);
             v.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &b, 1, 870, now));
         }
         now += 1_000;
