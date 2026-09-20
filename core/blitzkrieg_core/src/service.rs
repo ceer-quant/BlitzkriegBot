@@ -4574,7 +4574,7 @@ mod tests {
         let mut c = dry_core(dec!(10));
         // Best ask 0.50 is outside a 0.40 buy limit — a live FOK dies.
         c.book_snapshot("tok", vec![], vec![(dec!(0.50), dec!(100))], 1);
-        let (id, st) = c
+        let (_id, st) = c
             .place(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1)
             .unwrap();
         assert_eq!(st, OrderStatus::Rejected);
@@ -4589,7 +4589,7 @@ mod tests {
         // Ask 0.40 crosses, but only 3 shares rest — an all-or-nothing FOK
         // cannot take 5, so the whole order is rejected.
         c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(3))], 1);
-        let (id, st) = c
+        let (_id, st) = c
             .place(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1)
             .unwrap();
         assert_eq!(st, OrderStatus::Rejected);
