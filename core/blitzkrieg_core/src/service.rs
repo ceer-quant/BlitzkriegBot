@@ -7374,7 +7374,8 @@ mod audit_fix_tests {
         let mut c = core();
 
         // (a) no position: the SELL matches nothing and must change nothing.
-        c.reconcile(external_sell(dec!(100), dec!(0.40), 1_000)).unwrap();
+        c.reconcile(external_sell(dec!(100), dec!(0.40), 1_000))
+            .unwrap();
         assert_eq!(c.positions().open_positions().len(), 0);
         assert_eq!(c.positions().closed_positions().len(), 0);
         assert_eq!(c.ledger().balance(), SEED, "no position, no booking");
@@ -7388,7 +7389,8 @@ mod audit_fix_tests {
         let bal_after_entry = c.ledger().balance();
 
         // The counterparty's 100-share sell: clamped to the 10 shares we hold.
-        c.reconcile(external_sell(dec!(100), dec!(0.40), 6_000)).unwrap();
+        c.reconcile(external_sell(dec!(100), dec!(0.40), 6_000))
+            .unwrap();
 
         let closed = &c.positions().closed_positions();
         assert_eq!(closed.len(), 1, "the held shares were sold off");
@@ -7425,11 +7427,21 @@ mod audit_fix_tests {
 
         open_maker_position(&mut c, dec!(0.40), dec!(10), 1_000);
         let (sid, _) = c
-            .place_pending(req(Side::Sell, FillPolicy::Maker, dec!(0.80), dec!(10), "exit"), 2_000)
+            .place_pending(
+                req(Side::Sell, FillPolicy::Maker, dec!(0.80), dec!(10), "exit"),
+                2_000,
+            )
             .unwrap();
         c.confirm_live(&sid, 2_000).unwrap();
         c.ingest_fill(
-            fill(&sid, "x1", Side::Sell, dec!(0.80), dec!(10), FillStatus::Confirmed),
+            fill(
+                &sid,
+                "x1",
+                Side::Sell,
+                dec!(0.80),
+                dec!(10),
+                FillStatus::Confirmed,
+            ),
             3_000,
         )
         .unwrap();
@@ -7451,7 +7463,14 @@ mod audit_fix_tests {
 
         // FAILED arrives for the same trade → the rollback must unwind it all.
         c.ingest_fill(
-            fill(&sid, "x1", Side::Sell, dec!(0.80), dec!(10), FillStatus::Failed),
+            fill(
+                &sid,
+                "x1",
+                Side::Sell,
+                dec!(0.80),
+                dec!(10),
+                FillStatus::Failed,
+            ),
             4_000,
         )
         .unwrap();
@@ -7485,7 +7504,10 @@ mod audit_fix_tests {
         assert_eq!(c.trade_db.as_ref().unwrap().summary().total_trades, 0);
         assert_eq!(c.trade_db.as_ref().unwrap().summary().total_net_pnl, 0.0);
         assert!(
-            std::fs::read_to_string(&log).unwrap_or_default().trim().is_empty(),
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .trim()
+                .is_empty(),
             "the retracted trade must not remain in the JSONL"
         );
 
@@ -7515,7 +7537,8 @@ mod audit_fix_tests {
         assert_eq!(c.ledger().balance(), SEED - dec!(6));
 
         // Operator sells flat on the venue at 0.40: a −2 realized LOSS.
-        c.reconcile(external_sell(dec!(10), dec!(0.40), 6_000)).unwrap();
+        c.reconcile(external_sell(dec!(10), dec!(0.40), 6_000))
+            .unwrap();
 
         let closed = &c.positions().closed_positions();
         assert_eq!(closed.len(), 1);

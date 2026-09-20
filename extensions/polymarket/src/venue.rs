@@ -596,9 +596,9 @@ async fn sdk_snapshot(
         // (`owner`/`trade_owner`), or when the venue's `trader_side` says we
         // were the taker. An unprovable leg is DROPPED, not queued as an
         // unknown fill.
-        let taker_ours = str_field(t, "owner").is_some_and(|o| o.eq_ignore_ascii_case(funder_checksum))
-            || str_field(t, "trade_owner")
-                .is_some_and(|o| o.eq_ignore_ascii_case(funder_checksum))
+        let taker_ours = str_field(t, "owner")
+            .is_some_and(|o| o.eq_ignore_ascii_case(funder_checksum))
+            || str_field(t, "trade_owner").is_some_and(|o| o.eq_ignore_ascii_case(funder_checksum))
             || str_field(t, "trader_side").is_some_and(|s| s.eq_ignore_ascii_case("TAKER"));
         if taker_ours
             && let (Some(taker_id), Some(size), Some(price)) = (
@@ -843,11 +843,7 @@ fn trade_fills(t: &TradeMessage, our_key: &ApiKey) -> Vec<MarketFill> {
     let tx = t.transaction_hash.as_ref().map(|h| format!("{h}"));
     let mut fills = Vec::new();
 
-    let maker_ours: Vec<bool> = t
-        .maker_orders
-        .iter()
-        .map(|m| m.owner == *our_key)
-        .collect();
+    let maker_ours: Vec<bool> = t.maker_orders.iter().map(|m| m.owner == *our_key).collect();
     let any_maker_ours = maker_ours.iter().any(|&ours| ours);
     let taker_ours = match t.trader_side {
         Some(TraderSide::Taker) => true,
@@ -858,9 +854,7 @@ fn trade_fills(t: &TradeMessage, our_key: &ApiKey) -> Vec<MarketFill> {
             .unwrap_or(!any_maker_ours),
     };
 
-    if taker_ours
-        && let Some(taker_id) = &t.taker_order_id
-    {
+    if taker_ours && let Some(taker_id) = &t.taker_order_id {
         fills.push(MarketFill {
             order_id: taker_id.clone(),
             trade_id: Some(t.id.clone()),
