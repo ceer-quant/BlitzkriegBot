@@ -3,6 +3,7 @@
 //! is fully unit-testable; the async UDS layer and live venue sit on top.
 
 use crate::ipc::schema::Event;
+use crate::ipc::server::now_ms;
 use crate::ledger::Ledger;
 use crate::model::*;
 use crate::ome::{FillDelta, Ome, SubmitParams};
@@ -2923,9 +2924,11 @@ impl Core {
         }
         // Always re-value open positions from the latest books so the dashboard's
         // unrealized PnL / HWM move even when automated exits are disabled.
-        let books = self.books.clone();
+        // Read the live books through a shared immutable borrow instead of
+        // cloning the whole map per tick: the valuate/check_exits closure only
+        // needs the few tokens behind open positions, not every mirrored book.
         let book_fn = |token: &str| {
-            books.get(token).map(|b| {
+            self.books.get(token).map(|b| {
                 crate::model::OrderbookSnapshot::from_levels(
                     token.to_string(),
                     b.bids.clone(),
@@ -3095,14 +3098,6 @@ impl crate::extension::ExtensionContext for CoreExtensionContext {
     fn log(&self, message: &str) {
         tracing::info!(target: "extension", "{message}");
     }
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// Decimal → JSON number for the diagnostics payloads, matching the `crate::decimal`

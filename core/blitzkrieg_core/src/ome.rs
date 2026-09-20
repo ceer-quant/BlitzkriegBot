@@ -105,16 +105,22 @@ impl Ome {
         v
     }
     pub fn live_orders(&self) -> Vec<&TrackedOrder> {
-        self.all()
-            .into_iter()
+        let mut v: Vec<_> = self
+            .orders
+            .values()
             .filter(|o| o.status.is_live())
-            .collect()
+            .collect();
+        v.sort_by_key(|o| o.submitted_at_ms);
+        v
     }
     pub fn live_for(&self, token_id: &str, side: Side) -> Vec<&TrackedOrder> {
-        self.live_orders()
-            .into_iter()
-            .filter(|o| o.token_id == token_id && o.side == side)
-            .collect()
+        let mut v: Vec<_> = self
+            .orders
+            .values()
+            .filter(|o| o.status.is_live() && o.token_id == token_id && o.side == side)
+            .collect();
+        v.sort_by_key(|o| o.submitted_at_ms);
+        v
     }
 
     /// True while an order with this internal key is not terminal (dedup guard).

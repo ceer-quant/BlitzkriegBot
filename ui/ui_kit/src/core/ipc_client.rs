@@ -35,6 +35,35 @@ impl From<std::io::Error> for IpcError {
     }
 }
 
+/// The IPC method names this client speaks, one place instead of bare string
+/// literals scattered through the wrappers. Mirrors the wire constants in the
+/// core's `ipc::schema::method` — the UI Kit deliberately does not link the
+/// core crate (design contract), so the match is textual and exercised by the
+/// snapshot path on every panel poll.
+pub(crate) mod method {
+    pub const CORE_READY: &str = "core.ready";
+    pub const LEDGER_BALANCE: &str = "ledger.balance";
+    pub const ENGINE_ROUND: &str = "engine.round";
+    pub const ENGINE_BOOKS: &str = "engine.books";
+    pub const ENGINE_STATS: &str = "engine.stats";
+    pub const POSITIONS_LIST: &str = "positions.list";
+    pub const ORDERS_LIST: &str = "orders.list";
+    pub const TRADES_HISTORY: &str = "trades.history";
+    pub const TRADES_SUMMARY: &str = "trades.summary";
+    pub const STRATEGY_LIST: &str = "strategy.list";
+    pub const STRATEGY_ENABLE: &str = "strategy.enable";
+    pub const EXTENSION_LIST: &str = "extension.list";
+    pub const EXTENSION_ENABLE: &str = "extension.enable";
+    pub const EXTENSION_DISABLE: &str = "extension.disable";
+    pub const MARKET_LIST: &str = "market.list";
+    pub const POSITIONS_EXIT: &str = "positions.exit";
+    pub const SHADOW_EVOLUTION_STATUS: &str = "shadow_evolution.status";
+    pub const SHADOW_EVOLUTION_PROPOSALS: &str = "shadow_evolution.proposals";
+    pub const SHADOW_EVOLUTION_DECIDE: &str = "shadow_evolution.decide";
+    pub const SHADOW_EVOLUTION_SET_AUTO: &str = "shadow_evolution.set_auto";
+    pub const SHADOW_EVOLUTION_ROLLBACK: &str = "shadow_evolution.rollback";
+}
+
 pub struct IpcClient {
     socket_path: String,
     stream: Option<UnixStream>,
@@ -172,15 +201,15 @@ impl IpcClient {
     // ── Typed convenience wrappers (all read-only; the UI issues no orders) ──
 
     pub fn ready(&mut self) -> Result<ReadyView, IpcError> {
-        serde_json::from_value(self.call("core.ready", serde_json::json!({}))?)
+        serde_json::from_value(self.call(method::CORE_READY, serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
     pub fn balance(&mut self) -> Result<BalanceView, IpcError> {
-        serde_json::from_value(self.call("ledger.balance", serde_json::json!({}))?)
+        serde_json::from_value(self.call(method::LEDGER_BALANCE, serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
     pub fn round(&mut self) -> Result<RoundView, IpcError> {
-        serde_json::from_value(self.call("engine.round", serde_json::json!({}))?)
+        serde_json::from_value(self.call(method::ENGINE_ROUND, serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
 
@@ -188,42 +217,45 @@ impl IpcClient {
     /// the unknown method — callers must degrade to an empty view, never fail
     /// the whole snapshot.
     pub fn books(&mut self) -> Result<Vec<AssetBooksView>, IpcError> {
-        serde_json::from_value(self.call("engine.books", serde_json::json!({}))?)
+        serde_json::from_value(self.call(method::ENGINE_BOOKS, serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
     pub fn stats(&mut self) -> Result<EngineStatsView, IpcError> {
-        serde_json::from_value(self.call("engine.stats", serde_json::json!({}))?)
+        serde_json::from_value(self.call(method::ENGINE_STATS, serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
     pub fn positions(&mut self) -> Result<PositionsView, IpcError> {
-        serde_json::from_value(self.call("positions.list", serde_json::json!({}))?)
+        serde_json::from_value(self.call(method::POSITIONS_LIST, serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
     pub fn orders(&mut self) -> Result<OrdersView, IpcError> {
-        serde_json::from_value(self.call("orders.list", serde_json::json!({}))?)
+        serde_json::from_value(self.call(method::ORDERS_LIST, serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
     pub fn trades(&mut self, limit: usize) -> Result<TradesView, IpcError> {
-        serde_json::from_value(self.call("trades.history", serde_json::json!({ "limit": limit }))?)
-            .map_err(|e| IpcError::Protocol(e.to_string()))
+        serde_json::from_value(self.call(
+            method::TRADES_HISTORY,
+            serde_json::json!({ "limit": limit }),
+        )?)
+        .map_err(|e| IpcError::Protocol(e.to_string()))
     }
 
     /// All-time closed-trade totals from the persisted summary (trades.summary).
     pub fn trade_summary(&mut self) -> Result<serde_json::Value, IpcError> {
-        let v = self.call("trades.summary", serde_json::json!({}))?;
+        let v = self.call(method::TRADES_SUMMARY, serde_json::json!({}))?;
         Ok(v.get("summary").cloned().unwrap_or(serde_json::Value::Null))
     }
 
     pub fn strategies(&mut self) -> Result<StrategyListView, IpcError> {
-        serde_json::from_value(self.call("strategy.list", serde_json::json!({}))?)
+        serde_json::from_value(self.call(method::STRATEGY_LIST, serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
     pub fn extensions(&mut self) -> Result<ExtensionListView, IpcError> {
-        serde_json::from_value(self.call("extension.list", serde_json::json!({}))?)
+        serde_json::from_value(self.call(method::EXTENSION_LIST, serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
     pub fn market_plugins(&mut self) -> Result<MarketListView, IpcError> {
-        serde_json::from_value(self.call("market.list", serde_json::json!({}))?)
+        serde_json::from_value(self.call(method::MARKET_LIST, serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
 
@@ -233,7 +265,7 @@ impl IpcClient {
     /// cores answer too — the E13 keys just stay absent, so the view
     /// deserialises with defaults.
     pub fn evolution_status(&mut self) -> Result<EvolutionStatusView, IpcError> {
-        serde_json::from_value(self.call("shadow_evolution.status", serde_json::json!({}))?)
+        serde_json::from_value(self.call(method::SHADOW_EVOLUTION_STATUS, serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
     }
 
@@ -243,7 +275,7 @@ impl IpcClient {
         limit: usize,
     ) -> Result<Vec<EvolutionProposalView>, IpcError> {
         let v = self.call(
-            "shadow_evolution.proposals",
+            method::SHADOW_EVOLUTION_PROPOSALS,
             serde_json::json!({ "limit": limit }),
         )?;
         let view: EvolutionProposalsView =
@@ -258,7 +290,7 @@ impl IpcClient {
         decision: &str,
     ) -> Result<serde_json::Value, IpcError> {
         self.call(
-            "shadow_evolution.decide",
+            method::SHADOW_EVOLUTION_DECIDE,
             serde_json::json!({ "id": id, "decision": decision }),
         )
     }
@@ -266,7 +298,7 @@ impl IpcClient {
     /// The auto-evolve checkbox (persisted across restarts).
     pub fn evolution_set_auto(&mut self, on: bool) -> Result<serde_json::Value, IpcError> {
         self.call(
-            "shadow_evolution.set_auto",
+            method::SHADOW_EVOLUTION_SET_AUTO,
             serde_json::json!({ "enabled": on }),
         )
     }
@@ -274,7 +306,7 @@ impl IpcClient {
     /// Roll ONE strategy back to the parameters in force before its last change.
     pub fn evolution_rollback(&mut self, strategy: &str) -> Result<serde_json::Value, IpcError> {
         self.call(
-            "shadow_evolution.rollback",
+            method::SHADOW_EVOLUTION_ROLLBACK,
             serde_json::json!({ "strategy": strategy }),
         )
     }
@@ -285,13 +317,13 @@ impl IpcClient {
         enabled: bool,
     ) -> Result<serde_json::Value, IpcError> {
         self.call(
-            "strategy.enable",
+            method::STRATEGY_ENABLE,
             serde_json::json!({ "name": name, "enabled": enabled }),
         )
     }
     pub fn position_exit(&mut self, position_id: &str) -> Result<serde_json::Value, IpcError> {
         self.call(
-            "positions.exit",
+            method::POSITIONS_EXIT,
             serde_json::json!({ "positionId": position_id }),
         )
     }
@@ -303,9 +335,9 @@ impl IpcClient {
     ) -> Result<serde_json::Value, IpcError> {
         self.call(
             if enabled {
-                "extension.enable"
+                method::EXTENSION_ENABLE
             } else {
-                "extension.disable"
+                method::EXTENSION_DISABLE
             },
             serde_json::json!({ "name": name }),
         )
