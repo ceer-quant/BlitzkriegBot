@@ -35,6 +35,11 @@ pub struct FillDelta {
     /// every fee decision downstream (E17). `mode` is what was requested; this is
     /// what happened.
     pub role: OrderRole,
+    /// OME fill-ledger key of the trade that produced this delta (`trade_id`,
+    /// falling back to tx hash / a synthetic key). A FAILED rollback carries the
+    /// SAME key as the provisional fill it reverses, so the service can pair a
+    /// rollback with the close bookkeeping that fill already drove (F4).
+    pub trade_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -288,8 +293,11 @@ impl Ome {
                 Some(a) if a.applied > Decimal::ZERO => a.clone(),
                 _ => return Ok(None),
             };
-            let delta =
+            let mut delta =
                 self.record_delta(&order_id, -prev.applied, prev.price, now_ms, fill.maker)?;
+            if let Some(d) = delta.as_mut() {
+                d.trade_id = trade_key.clone();
+            }
             self.applied.insert(
                 trade_key,
                 AppliedFill {
@@ -319,7 +327,10 @@ impl Ome {
             return Ok(None);
         }
 
-        let delta = self.record_delta(&order_id, delta_raw, fill.price, now_ms, fill.maker)?;
+        let mut delta = self.record_delta(&order_id, delta_raw, fill.price, now_ms, fill.maker)?;
+        if let Some(d) = delta.as_mut() {
+            d.trade_id = trade_key.clone();
+        }
         self.applied.insert(
             trade_key.clone(),
             AppliedFill {
@@ -412,6 +423,9 @@ impl Ome {
             round_slot: order.round_slot,
             mode: order.mode,
             role,
+            // The caller (apply_fill) stamps the producing trade's ledger key
+            // right after this returns — record_delta has no trade identity.
+            trade_id: String::new(),
         }))
     }
 
