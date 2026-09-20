@@ -311,6 +311,10 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
             .await;
     }
 
+    // Sweep log discipline: a 5s loop must not flood the run log — print the
+    // sweep summary only when the counts actually change (failures always
+    // print via the periodic loop in live.rs).
+    let mut last_sweep: Option<(usize, usize, usize)> = None;
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             VenueCmd::Place { order, reply } => {
@@ -340,6 +344,20 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
                     &signer_checksum,
                 )
                 .await;
+                if let Ok((open, trades)) = &res {
+                    let maker = trades
+                        .iter()
+                        .filter(|t| t.maker == Some(true))
+                        .count();
+                    let key = (open.len(), trades.len(), maker);
+                    if last_sweep != Some(key) {
+                        eprintln!(
+                            "polymarket-extension: sweep: open={} trades={} maker_entries={}",
+                            key.0, key.1, key.2
+                        );
+                        last_sweep = Some(key);
+                    }
+                }
                 let _ = reply.send(res);
             }
         }
@@ -440,8 +458,6 @@ async fn sdk_snapshot(
 
     let page = l2_get_json(http, host_url, creds, signer_checksum, "/data/trades").await?;
     let mut trades = Vec::new();
-    let mut maker_entries = 0usize;
-    let mut skipped = 0usize;
     for t in as_slice(page.get("data")) {
         if str_field(t, "status").is_some_and(|s| s.eq_ignore_ascii_case("FAILED")) {
             continue;
@@ -450,13 +466,13 @@ async fn sdk_snapshot(
         // Derived rather than trusted from the REST per-maker side field —
         // the WS path (`trade_fills`) has no per-maker side at all and uses
         // the same derivation, so both channels agree on semantics.
-        let Some(side) = side_field(t) else { skipped += 1; continue };
+        let Some(side) = side_field(t) else { continue };
         let ts_ms = match t.get("match_time") {
             Some(serde_json::Value::String(s)) => s.trim().parse::<i64>().ok(),
             Some(serde_json::Value::Number(n)) => n.as_i64(),
             _ => None,
         };
-        let Some(ts_ms) = ts_ms else { skipped += 1; continue };
+        let Some(ts_ms) = ts_ms else { continue };
         let ts_ms = ts_ms.saturating_mul(1000);
         let trade_id = str_field(t, "id").unwrap_or_default().to_string();
 
@@ -479,18 +495,11 @@ async fn sdk_snapshot(
         }
         for m in as_slice(t.get("maker_orders")) {
             let Some(order_id) = str_field(m, "order_id") else { continue };
-            let Some(matched) = dec_field(m, "matched_amount") else {
-                skipped += 1;
-                continue;
-            };
+            let Some(matched) = dec_field(m, "matched_amount") else { continue };
             if matched <= Decimal::ZERO {
                 continue;
             }
-            let Some(price) = dec_field(m, "price") else {
-                skipped += 1;
-                continue;
-            };
-            maker_entries += 1;
+            let Some(price) = dec_field(m, "price") else { continue };
             trades.push(VenueTradeInfo {
                 venue_order_id: order_id.to_string(),
                 trade_id: format!("{trade_id}:{order_id}"),
@@ -504,13 +513,6 @@ async fn sdk_snapshot(
             });
         }
     }
-    eprintln!(
-        "polymarket-extension: sweep: open={} trades={} maker_entries={} skipped={}",
-        open_ids.len(),
-        trades.len(),
-        maker_entries,
-        skipped
-    );
     Ok((open_ids, trades))
 }
 
