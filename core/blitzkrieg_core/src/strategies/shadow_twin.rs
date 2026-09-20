@@ -591,7 +591,11 @@ mod tests {
             880,
             1_000,
         ));
-        assert_eq!(rp2.open_positions(), 0, "the 0.45 level is worse than the limit");
+        assert_eq!(
+            rp2.open_positions(),
+            0,
+            "the 0.45 level is worse than the limit"
+        );
     }
 
     /// An exit only books against a REAL bid deep enough for the position. A
