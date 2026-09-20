@@ -493,18 +493,18 @@ type FlattenTarget = (
 );
 
 /// One due `maker_then_taker` order selected by `Core::tick`, in the order its
-/// destructuring loop consumes: id, price, remaining, side, token, condition,
-/// strategy, asset, direction, round slot.
+/// destructuring loop consumes: id, side, remaining, token, condition,
+/// strategy, asset, direction, round slot, maker timeout.
 type EscalationTarget = (
     String,
-    Decimal,
-    Decimal,
     Side,
+    Decimal,
     String,
     String,
     String,
     String,
     String,
+    i64,
     i64,
 );
 
@@ -2213,24 +2213,39 @@ impl Core {
             if o.mode == FillPolicy::MakerThenTaker
                 && e.code == blitzkrieg_market_api::CoreErrorCode::WouldCross
             {
-                let req = OrderRequest {
-                    token_id: o.token_id.clone(),
-                    condition_id: o.condition_id.clone(),
-                    side: o.side,
-                    mode: FillPolicy::Taker,
-                    price: o.price,
-                    size: o.size,
-                    internal_key: format!("{id}:escalated"),
-                    strategy: o.strategy.clone(),
-                    asset: o.asset.clone(),
-                    direction: o.direction.clone(),
-                    round_slot: o.round_slot,
+                // Same contract as the timer escalation: cross at the price
+                // the CURRENT book actually offers, not the rejected passive
+                // limit. If no crossing depth exists even at the grid's
+                // extreme, there is nothing to escalate to — the intent goes
+                // to the normal rejection accounting (backoff/freeze) and a
+                // later tick re-enters if the signal persists.
+                let cap = if o.side == Side::Buy {
+                    Decimal::new(99, 2)
+                } else {
+                    Decimal::new(1, 2)
                 };
-                match self.place_escalated(req, now_ms) {
-                    Ok(_) => {
-                        return Ok(());
+                if let Some((_, worst)) =
+                    self.marketable_walk(o.side, &o.token_id, o.size, cap)
+                {
+                    let req = OrderRequest {
+                        token_id: o.token_id.clone(),
+                        condition_id: o.condition_id.clone(),
+                        side: o.side,
+                        mode: FillPolicy::Taker,
+                        price: worst,
+                        size: o.size,
+                        internal_key: format!("{id}:escalated"),
+                        strategy: o.strategy.clone(),
+                        asset: o.asset.clone(),
+                        direction: o.direction.clone(),
+                        round_slot: o.round_slot,
+                    };
+                    match self.place_escalated(req, now_ms) {
+                        Ok(_) => {
+                            return Ok(());
+                        }
+                        Err(e2) => self.emit_error(e2),
                     }
-                    Err(e2) => self.emit_error(e2),
                 }
             }
             self.note_venue_rejection(&o.internal_key, o.strategy.clone(), &e, now_ms);
@@ -2988,6 +3003,21 @@ impl Core {
         Ok((id, status))
     }
 
+    /// The price a taker leg must state to guarantee a full fill of `size` on
+    /// `token`, walked off the mirrored book (best levels first, no worse
+    /// than `limit`), plus the volume-weighted price the walk would fill at.
+    /// `None` when the book cannot cover the size within `limit` — exactly
+    /// what a live FOK would be killed for.
+    fn marketable_walk(
+        &self,
+        side: Side,
+        token: &str,
+        size: Decimal,
+        limit: Decimal,
+    ) -> Option<(Decimal, Decimal)> {
+        self.books.get(token)?.walk_marketable(side, limit, size)
+    }
+
     fn place_after_submit(
         &mut self,
         id: &str,
@@ -3008,14 +3038,37 @@ impl Core {
                 self.ome.mark_live(id, now_ms)?;
                 match order.mode {
                     FillPolicy::Taker => {
-                        // Cross immediately and fully at the buffered limit,
-                        // worsened by the fill model's taker slippage (identity by
-                        // default, so the live/dry path is unchanged).
-                        let fill_price = self
-                            .config
-                            .fill_model
-                            .apply_slippage(order.side, order.price);
-                        self.authoritative_fill(id, order.size, fill_price, false, now_ms)?;
+                        // Fill like a live FOK: walk the opposing side's resting
+                        // levels, best first, no worse than the order's own
+                        // limit, and fill at the volume-weighted price. A book
+                        // that does not cross or cannot cover the size is what
+                        // the venue would kill the order for — reject with the
+                        // same economics instead of inventing a fill at a price
+                        // nobody was offering. The walk prices the VISIBLE
+                        // book; the fill model's slippage dial prices the
+                        // impact of our own size beyond it (identity by
+                        // default → unchanged economics).
+                        let book = self
+                            .books
+                            .get(&order.token_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        match book.walk_marketable(order.side, order.price, order.size) {
+                            Some((vwap, _)) => {
+                                let fill_price = self
+                                    .config
+                                    .fill_model
+                                    .apply_slippage(order.side, vwap);
+                                self.authoritative_fill(id, order.size, fill_price, false, now_ms)?
+                            }
+                            None => {
+                                if order.side == Side::Buy {
+                                    self.ledger.release(id);
+                                }
+                                self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
+                                self.emit_order(id);
+                            }
+                        }
                     }
                     FillPolicy::Maker | FillPolicy::MakerThenTaker => {
                         if order.mode == FillPolicy::MakerThenTaker {
@@ -3220,7 +3273,7 @@ impl Core {
             })
             .collect();
         let mut closed = 0usize;
-        for (id, token, condition, shares, strategy, asset, direction, current) in targets {
+        for (id, token, condition, shares, strategy, asset, direction, _current) in targets {
             // Already have a live sell for this token? skip.
             if self
                 .ome
@@ -3230,11 +3283,17 @@ impl Core {
             {
                 continue;
             }
-            let price = if current > Decimal::ZERO {
-                current
-            } else {
-                Decimal::new(1, 2)
-            };
+            // Price the exit off the CURRENT book, not the stale valuation:
+            // `current_price` is a mid ≈ what the shares are worth, not what
+            // a resting bid is offering, so an FOK there never crosses live.
+            // The walk names the worst bid level that covers the size. With
+            // no bids at all nothing can fill — the request falls back to the
+            // grid floor and the settle/venue rejects it honestly.
+            let price = self
+                .marketable_walk(Side::Sell, &token, shares, Decimal::new(1, 2))
+                .map(|(_, worst)| worst)
+                .filter(|p| *p > Decimal::ZERO)
+                .unwrap_or(Decimal::new(1, 2));
             self.exit_reasons.insert(token.clone(), ExitReason::Manual);
             let order = OrderRequest {
                 token_id: token,
@@ -3332,30 +3391,48 @@ impl Core {
             .map(|o| {
                 (
                     o.order_id.clone(),
-                    o.price,
-                    o.size - o.filled_size,
                     o.side,
+                    o.size - o.filled_size,
                     o.token_id.clone(),
                     o.condition_id.clone(),
                     o.strategy.clone(),
                     o.asset.clone(),
                     o.direction.clone(),
                     o.round_slot,
+                    // The maker's own timeout, rebuilt from when it was
+                    // armed: a re-armed clock waits the same interval again.
+                    o.escalate_at_ms.unwrap_or(now_ms) - o.submitted_at_ms,
                 )
             })
             .collect();
-        for (id, price, remaining, side, token, condition, strategy, asset, direction, slot) in due
+        for (id, side, remaining, token, condition, strategy, asset, direction, slot, timeout) in
+            due
         {
-            self.cancel(&id, now_ms)?;
             if remaining <= Decimal::ZERO {
                 continue;
             }
+            // Reprice the taker leg from the CURRENT book before touching the
+            // maker: the resting limit is a passive price — a live FOK stated
+            // there would be killed, so escalating to it just moves the
+            // failure. If the book cannot cover the remaining size even at
+            // the extreme of the grid, leave the maker resting and re-arm the
+            // clock: no venue traffic, the entry intent stays alive.
+            let cap = if side == Side::Buy {
+                Decimal::new(99, 2)
+            } else {
+                Decimal::new(1, 2)
+            };
+            let Some((_, worst)) = self.marketable_walk(side, &token, remaining, cap) else {
+                self.ome.set_escalation(&id, now_ms + timeout)?;
+                continue;
+            };
+            self.cancel(&id, now_ms)?;
             let req = OrderRequest {
                 token_id: token,
                 condition_id: condition,
                 side,
                 mode: FillPolicy::Taker,
-                price,
+                price: worst,
                 size: remaining,
                 internal_key: format!("{id}:escalated"),
                 strategy,
@@ -3909,12 +3986,14 @@ mod books_mirror_tests {
         );
         // Open a position directly, then feed a profitable book via engine_on_data
         // and tick: the exit path must now see the higher price and exit.
+        // A FOK taker fills against the resting ASK (0.45), so the limit must
+        // reach the touch.
         let req = crate::model::OrderRequest {
             token_id: "tok".into(),
             condition_id: "c".into(),
             side: crate::model::Side::Buy,
             mode: crate::model::FillPolicy::Taker,
-            price: dec!(0.43),
+            price: dec!(0.45),
             size: dec!(10),
             internal_key: "k".into(),
             strategy: "spread_arb".into(),
@@ -4148,6 +4227,9 @@ mod round_expiry_tests {
             direction: "up".into(),
             round_slot: slot,
         };
+        // Ask 0.40 crosses the buy limit with enough depth: an honest FOK
+        // fills at the walked price, opening the position under test.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(500))], now_ms);
         c.place(req, 0, now_ms).unwrap();
         let pos = &c.positions().open_positions()[0];
         let expected_end = (slot + 1) * duration * 1000;
@@ -4481,6 +4563,9 @@ mod tests {
     #[test]
     fn taker_fills_immediately_and_spends() {
         let mut c = dry_core(dec!(10));
+        // A live FOK fills only against resting depth at or inside its limit:
+        // mirror an ask the order can actually take.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
         let (id, st) = c
             .place(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1)
             .unwrap();
@@ -4490,6 +4575,35 @@ mod tests {
         // reservation fully consumed.
         assert_eq!(c.ledger().balance(), Decimal::new(7964, 3));
         assert_eq!(c.ledger().reserved(), dec!(0));
+    }
+
+    #[test]
+    fn taker_not_crossing_the_book_is_rejected() {
+        let mut c = dry_core(dec!(10));
+        // Best ask 0.50 is outside a 0.40 buy limit — a live FOK dies.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.50), dec!(100))], 1);
+        let (id, st) = c
+            .place(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1)
+            .unwrap();
+        assert_eq!(st, OrderStatus::Rejected);
+        assert_eq!(c.ledger().balance(), dec!(10));
+        assert_eq!(c.ledger().reserved(), dec!(0));
+        assert!(c.positions().open_positions().is_empty());
+    }
+
+    #[test]
+    fn taker_insufficient_depth_is_rejected() {
+        let mut c = dry_core(dec!(10));
+        // Ask 0.40 crosses, but only 3 shares rest — an all-or-nothing FOK
+        // cannot take 5, so the whole order is rejected.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(3))], 1);
+        let (id, st) = c
+            .place(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1)
+            .unwrap();
+        assert_eq!(st, OrderStatus::Rejected);
+        assert_eq!(c.ledger().balance(), dec!(10));
+        assert_eq!(c.ledger().reserved(), dec!(0));
+        assert!(c.positions().open_positions().is_empty());
     }
 
     #[test]
@@ -4526,10 +4640,12 @@ mod tests {
         // Book never crosses within the maker window.
         c.book_snapshot("tok", vec![], vec![(dec!(0.50), dec!(100))], 2);
         assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Live);
-        // At timeout: maker cancelled, taker order crosses immediately.
+        // At timeout: maker cancelled, taker order crosses immediately — at
+        // the price the book is actually offering (0.50), not the rejected
+        // passive limit.
         c.tick(1002).unwrap();
         assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Cancelled);
-        // A new escalated taker order exists and is filled.
+        // A new escalated taker order exists and is filled at the ask.
         let filled: Vec<_> = c
             .ome()
             .all()
@@ -4538,7 +4654,51 @@ mod tests {
             .collect();
         assert_eq!(filled.len(), 1);
         assert_eq!(filled[0].filled_size, dec!(5));
-        assert_eq!(c.ledger().balance(), Decimal::new(7964, 3));
+        assert_eq!(filled[0].price, dec!(0.50));
+        assert_eq!(filled[0].avg_fill_price, Some(dec!(0.50)));
+        // 10 - 0.5*5 = 7.5, minus the taker entry fee
+        // (0.125 × (0.5·0.5)² × 5 = 0.0390625 — the E17 schedule, price-dependent).
+        assert_eq!(c.ledger().balance(), dec!(7.4609375));
+    }
+
+    #[test]
+    fn escalation_without_crossing_depth_rearms_and_keeps_maker() {
+        let mut c = dry_core(dec!(10));
+        let (id, st) = c
+            .place(
+                order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(5), "k1"),
+                1000,
+                1,
+            )
+            .unwrap();
+        assert_eq!(st, OrderStatus::Live);
+        // No asks rest at all at the deadline: a taker leg has nothing to
+        // cross into, so the maker stays and the clock re-arms.
+        c.tick(1002).unwrap();
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Live);
+        // Re-armed one maker timeout later (1001 − 1 = 1000 from now).
+        assert_eq!(c.ome().get(&id).unwrap().escalate_at_ms, Some(2002));
+        // No escalated order was spawned on the empty book.
+        assert_eq!(
+            c.ome()
+                .all()
+                .into_iter()
+                .filter(|o| o.internal_key.ends_with(":escalated"))
+                .count(),
+            0
+        );
+        // Once the book does cross, the next due tick escalates and fills
+        // at the ask.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.50), dec!(100))], 2003);
+        c.tick(2003).unwrap();
+        let filled: Vec<_> = c
+            .ome()
+            .all()
+            .into_iter()
+            .filter(|o| o.status == OrderStatus::Filled)
+            .collect();
+        assert_eq!(filled.len(), 1);
+        assert_eq!(filled[0].avg_fill_price, Some(dec!(0.50)));
     }
 
     #[test]
@@ -4765,7 +4925,9 @@ mod tests {
     #[test]
     fn buy_fill_opens_position_and_exit_closes_it() {
         let mut c = dry_core(dec!(100));
-        // Taker BUY 0.40 x 5 fills → position opened.
+        // Taker BUY 0.40 x 5 fills → position opened. A FOK taker needs
+        // resting ask depth to fill.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 0);
         let (id, st) = c
             .place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k1"), 0, 1)
             .unwrap();
@@ -4800,6 +4962,8 @@ mod tests {
     fn forced_exit_closes_at_a_loss() {
         let mut c = dry_core(dec!(100));
         // Buy at 0.40 (round_slot 1 → expires at the END of slot 1 = 1_800_000ms).
+        // A FOK taker needs resting ask depth to fill.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 0);
         c.place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k1"), 0, 0)
             .unwrap();
         assert_eq!(c.positions().open_positions().len(), 1);
@@ -4835,6 +4999,8 @@ mod tests {
         pc.stop_loss_cooldown_sec = 0;
         pc.exit_cooldown_sec = 0;
         c.positions.set_config(pc);
+        // A FOK taker entry needs resting ask depth to fill.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 0);
         c.place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k1"), 0, 0)
             .unwrap();
         c.book_snapshot(
@@ -4889,6 +5055,8 @@ mod tests {
             round_slot: 1,
         };
         let lose_once = |c: &mut Core, asset: &str, token: &str| {
+            // The entry is a FOK taker: it needs resting ask depth to fill.
+            c.book_snapshot(token, vec![], vec![(dec!(0.40), dec!(100))], 0);
             c.place(buy("dog", asset, token), 0, 0).unwrap();
             c.book_snapshot(
                 token,
@@ -6525,6 +6693,9 @@ mod fill_model_tests {
             taker_slippage_ticks: 2,
             ..FillModel::default()
         });
+        // Ask rests AT the buy limit: the walk prices 0.40, and the slippage
+        // dial prices the impact of our own 10 shares on top of it.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(500))], 900);
         let (id, st) = c
             .place(buy(FillPolicy::Taker, dec!(0.40), dec!(10)), 0, 1_000)
             .unwrap();
@@ -7017,7 +7188,10 @@ mod account_precision_tests {
         );
 
         // The maker window elapses: the kernel cancels the rest of the resting
-        // order and crosses the remaining 6 shares as a TAKER.
+        // order and crosses the remaining 6 shares as a TAKER. The ask rests
+        // ABOVE the resting bid (the matcher stays quiet) and deep enough
+        // for the honest FOK walk to cover all 6 shares.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.45), dec!(500))], 1_001);
         c.tick(1_002).unwrap();
         let pos = c.positions().open_positions()[0].clone();
         assert_eq!(pos.shares, dec!(10), "both legs accrue onto one position");
@@ -7026,16 +7200,18 @@ mod account_precision_tests {
             OrderRole::MakerThenTaker,
             "the position records that both kinds of fill happened"
         );
-        // Basis is the real money spent: 4×0.43 rested, 6×0.43 crossed.
-        assert_eq!(pos.cost_usd, dec!(10) * dec!(0.43));
+        // Basis is the real money spent: 4×0.43 rested, 6×0.45 crossed at the
+        // book's ask (the escalated leg pays the walk price, not the maker's).
+        assert_eq!(pos.cost_usd, dec!(4) * dec!(0.43) + dec!(6) * dec!(0.45));
         // The fee covers the TAKER leg only — not all 10 shares at the taker rate.
-        let expected_fee = (crate::exit_policy::taker_fee_pct(dec!(0.43)) / Decimal::ONE_HUNDRED)
-            * dec!(0.43)
+        let expected_fee = (crate::exit_policy::taker_fee_pct(dec!(0.45)) / Decimal::ONE_HUNDRED)
+            * dec!(0.45)
             * dec!(6);
         assert_eq!(pos.flows.entry_fee_usd, expected_fee);
         assert!(expected_fee > Decimal::ZERO);
 
         // Exit in full as a taker at a profit.
+        c.book_snapshot("tok", vec![(dec!(0.95), dec!(500))], vec![], 4);
         let (sid, _) = c
             .place(
                 req(Side::Sell, FillPolicy::Taker, dec!(0.95), dec!(10), "exit"),
@@ -7050,10 +7226,14 @@ mod account_precision_tests {
         assert_eq!(closed.entry_role, OrderRole::MakerThenTaker);
         assert_eq!(closed.exit_role, OrderRole::Taker);
         assert_eq!(closed.shares, dec!(10));
-        // Gross 10×(0.95−0.43) = 5.20, minus the taker legs' fees.
+        // Gross = proceeds − real basis: 9.5 − (4×0.43 + 6×0.45), minus the
+        // taker legs' fees (the escalated entry leg and the exit).
         let exit_fee =
             (crate::exit_policy::taker_fee_pct(dec!(0.95)) / Decimal::ONE_HUNDRED) * dec!(9.5);
-        assert_eq!(closed.net_pnl_usd, dec!(5.20) - expected_fee - exit_fee);
+        assert_eq!(
+            closed.net_pnl_usd,
+            dec!(9.5) - (dec!(4) * dec!(0.43) + dec!(6) * dec!(0.45)) - expected_fee - exit_fee
+        );
     }
 
     /// Dry and LIVE must produce a bit-identical ledger. In DRY the core
@@ -7189,7 +7369,9 @@ mod account_precision_tests {
         assert_eq!(held, dec!(4), "only what the venue confirmed");
         cancel_open_buys(&mut c, 3);
 
-        // Close the whole holding as a taker at a loss.
+        // Close the whole holding as a taker at a loss. The 0.40 bid is deep
+        // enough for the honest FOK exit to fill at the walked price.
+        c.book_snapshot("tok", vec![(dec!(0.40), dec!(500))], vec![], 3);
         let (sid, _) = c
             .place(
                 req(Side::Sell, FillPolicy::Taker, dec!(0.40), held, "exit"),
@@ -7349,6 +7531,8 @@ mod trading_capability_tests {
         c.place_pending(pending_req("k2", "s1"), 1_200).unwrap();
 
         // Backoff expiry re-opens the intent (dry settles it → position opens).
+        // The ask rests AT the 0.4 buy limit, deep enough for the honest FOK.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.4), dec!(500))], 3_000);
         c.place(pending_req("k1", "s1"), 0, 1_100 + 2_000).unwrap();
         assert_eq!(c.positions().open_positions().len(), 1);
     }
@@ -7428,6 +7612,8 @@ mod trading_capability_tests {
     #[test]
     fn manual_venue_close_reconciles_the_position() {
         let mut c = core();
+        // Ask at the buy limit, deep enough for the honest FOK entry to fill.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.4), dec!(500))], 900);
         c.place(buy_taker(dec!(0.4), dec!(10)), 0, 1_000).unwrap();
         assert_eq!(c.positions().open_positions().len(), 1);
         let cost = c.positions().open_positions()[0].cost_usd;

@@ -1,7 +1,10 @@
 //! Dry-mode fill simulation, ported from the Node engine's dry semantics so a
 //! DRY run exercises the exact same OME/ledger/risk code path as LIVE.
 //!
-//!  - Taker fills immediately and fully at its buffered limit price
+//!  - Taker fills like a live FOK: it walks the opposing side's resting levels
+//!    (best first, no worse than its limit) and fills at the volume-weighted
+//!    price; if that side cannot cover the full size, the order is rejected —
+//!    all-or-nothing, the same way the venue would kill it
 //!  - Maker rests post-only and fills only when the live book crosses the limit
 //!    (BUY when best ask <= limit, SELL when best bid >= limit)
 //!  - MakerThenTaker rests as maker and is escalated by the service tick after
@@ -39,6 +42,63 @@ impl Book {
             Side::Buy => self.best_ask().map(|a| a <= order.price).unwrap_or(false),
             Side::Sell => self.best_bid().map(|b| b >= order.price).unwrap_or(false),
         }
+    }
+
+    /// Walk the book as a taker would: consume resting levels, best price
+    /// first, while they are no worse than `limit`, until `size` is covered.
+    ///
+    /// Returns the volume-weighted average fill price and the worst level
+    /// touched (the price a live limit request must state to guarantee this
+    /// walk), or `None` when the crossing side cannot cover `size` within
+    /// `limit` — a live FOK would be killed, so the dry path rejects too.
+    pub fn walk_marketable(
+        &self,
+        side: Side,
+        limit: Decimal,
+        size: Decimal,
+    ) -> Option<(Decimal, Decimal)> {
+        if size <= Decimal::ZERO {
+            return None;
+        }
+        let mut levels = match side {
+            Side::Buy => self.asks.clone(),
+            Side::Sell => self.bids.clone(),
+        };
+        levels.sort();
+        // Best first, per side: the best ask is the LOWEST ask, the best bid
+        // is the HIGHEST bid. Ascending sort only serves the ask side; the bid
+        // side must walk down from the top or a deep-but-worse level hides the
+        // better ones behind an early `break`.
+        if side == Side::Sell {
+            levels.reverse();
+        }
+        let crosses = |p: Decimal| match side {
+            Side::Buy => p <= limit,
+            Side::Sell => p >= limit,
+        };
+        let mut remaining = size;
+        let mut notional = Decimal::ZERO;
+        for (price, level_size) in levels.iter() {
+            if !crosses(*price) {
+                break; // sorted best-first: nothing further out can cross
+            }
+            let take = (*level_size).min(remaining);
+            notional += *price * take;
+            remaining -= take;
+            if remaining <= Decimal::ZERO {
+                break;
+            }
+        }
+        if remaining > Decimal::ZERO {
+            return None;
+        }
+        let vwap = notional / size;
+        let worst = levels
+            .iter()
+            .filter(|(p, s)| crosses(*p) && *s > Decimal::ZERO)
+            .map(|(p, _)| *p)
+            .reduce(|a, b| if side == Side::Buy { a.max(b) } else { a.min(b) });
+        Some((vwap, worst?))
     }
 }
 
@@ -178,6 +238,33 @@ mod tests {
         assert!(!book.crosses(&order(Side::Buy, dec!(0.44), FillPolicy::Maker)));
         assert!(book.crosses(&order(Side::Sell, dec!(0.39), FillPolicy::Maker)));
         assert!(!book.crosses(&order(Side::Sell, dec!(0.40), FillPolicy::Maker)));
+    }
+
+    #[test]
+    fn walk_consumes_levels_best_first_on_both_sides() {
+        // Multi-level books: the walk must start at the BEST level of each
+        // side (lowest ask / highest bid). A bid-side walk that started at the
+        // WORST bid would break early on a below-limit level and reject an
+        // order a live FOK would happily fill.
+        let book = Book {
+            bids: vec![(dec!(0.30), dec!(100)), (dec!(0.95), dec!(8))],
+            asks: vec![(dec!(0.70), dec!(100)), (dec!(0.35), dec!(4))],
+        };
+        // SELL walks bids from the top: 8 @ 0.95, then 2 @ 0.30.
+        let (vwap, worst) = book
+            .walk_marketable(Side::Sell, dec!(0.30), dec!(10))
+            .expect("deep-enough bids fill the FOK");
+        assert_eq!(vwap, (dec!(8) * dec!(0.95) + dec!(2) * dec!(0.30)) / dec!(10));
+        assert_eq!(worst, dec!(0.30));
+        // The 0.95 level alone cannot cover 10 shares — the walk stays None
+        // even though a live FOK at that limit would only have touched it.
+        assert!(book.walk_marketable(Side::Sell, dec!(0.95), dec!(10)).is_none());
+        // BUY side walks asks from the bottom: 4 @ 0.35, then 6 @ 0.70.
+        let (vwap3, worst3) = book
+            .walk_marketable(Side::Buy, dec!(0.70), dec!(10))
+            .expect("deep-enough asks fill the FOK");
+        assert_eq!(vwap3, (dec!(4) * dec!(0.35) + dec!(6) * dec!(0.70)) / dec!(10));
+        assert_eq!(worst3, dec!(0.70));
     }
 
     #[test]
