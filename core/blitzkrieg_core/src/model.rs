@@ -215,6 +215,11 @@ pub struct TrackedOrder {
     /// Pending simulated maker→taker escalation deadline (ms), dry mode only.
     #[serde(default)]
     pub escalate_at_ms: Option<i64>,
+    /// Maker→taker escalation window the order was submitted with. The LIVE
+    /// path cannot arm the clock at submit (the venue acks asynchronously), so
+    /// `confirm_live` starts it from this value once the venue accepts.
+    #[serde(default)]
+    pub maker_timeout_ms: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

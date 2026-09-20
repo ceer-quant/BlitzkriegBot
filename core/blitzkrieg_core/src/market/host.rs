@@ -236,6 +236,13 @@ impl MarketHost for CoreHost {
         })
     }
 
+    fn take_pending_cancels(&self) -> BoxFuture<'_, Vec<String>> {
+        Box::pin(async move {
+            let mut c = self.core.lock().await;
+            c.take_pending_venue_cancels()
+        })
+    }
+
     fn on_order_accepted(&self, core_order_id: &str, venue_order_id: &str) -> BoxFuture<'_, ()> {
         let (core_id, venue_id) = (core_order_id.to_string(), venue_order_id.to_string());
         Box::pin(async move {
@@ -324,6 +331,14 @@ impl MarketHost for CoreHost {
                 }
                 Err(e) => c.emit_error(e),
             }
+        })
+    }
+
+    fn on_reconcile_failed(&self, error: api::CoreError) -> BoxFuture<'_, ()> {
+        let e = error_from_api(&error);
+        Box::pin(async move {
+            let mut c = self.core.lock().await;
+            c.on_reconcile_failed(e, now_ms());
         })
     }
 

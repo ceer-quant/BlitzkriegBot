@@ -19,6 +19,16 @@ use tokio::sync::mpsc;
 /// persistently broken venue cannot turn the probe itself into a storm.
 const PROBE_COOLDOWN_MS: i64 = 60_000;
 
+/// A venue order the bridge itself placed is protected from the periodic
+/// orphan sweep for this long: the core's `known_venue_order_ids` may lag a
+/// freshly accepted order by one bridge turn, and sweeping our own resting
+/// entry would fight the engine.
+const ORPHAN_GRACE_MS: i64 = 20_000;
+
+/// Consecutive reconciliation sweeps that may fail before the bridge reports
+/// the sweep channel itself as broken: the host freezes trading on it (E31-b).
+const SWEEP_FAILURE_FREEZE: u32 = 3;
+
 /// Spawn the live bridge if credentials are present. `markets` only gates the
 /// spawn (live with no markets = REST-only reconciliation); the user-WS
 /// subscribes to the account-wide user stream so fills for later rounds are
@@ -109,7 +119,10 @@ pub async fn spawn_if_configured(
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         let mut since_reconcile = 0u32;
         let mut place_failures: u32 = 0;
+        let mut sweep_failures: u32 = 0;
         let mut next_probe_ok_ms: i64 = 0;
+        // Venue ids the bridge placed recently (orphan-sweep grace window).
+        let mut recent_placements: Vec<(String, i64)> = Vec::new();
         loop {
             tick.tick().await;
 
@@ -121,6 +134,7 @@ pub async fn spawn_if_configured(
                 match venue.place(order).await {
                     Ok(p) => {
                         place_failures = 0;
+                        recent_placements.push((p.venue_order_id.clone(), now_epoch_ms()));
                         host.on_order_accepted(&core_order_id, &p.venue_order_id)
                             .await
                     }
@@ -140,6 +154,19 @@ pub async fn spawn_if_configured(
                                 Err(e) => host.report_error(e).await,
                             }
                         }
+                    }
+                }
+            }
+
+            // 1b) Forward every core-side retire as a REAL venue cancel. The
+            // core already flipped the order to Cancelled locally; a cancel
+            // that never reaches the venue leaves a resting orphan.
+            for id in host.take_pending_cancels().await {
+                match venue.cancel(id.clone()).await {
+                    Ok(()) => host.note_orphan_cancelled(&id).await,
+                    Err(e) => {
+                        eprintln!("polymarket-extension: venue cancel failed for {id}: {e}");
+                        host.report_error(e).await;
                     }
                 }
             }
@@ -169,6 +196,39 @@ pub async fn spawn_if_configured(
                 since_reconcile = 0;
                 match venue.snapshot().await {
                     Ok((open_order_ids, trades)) => {
+                        sweep_failures = 0;
+                        // Orphan sweep: a venue-open id the core has never
+                        // heard of (a POST the venue accepted but the bridge
+                        // timed out on, or a resting order the core retired
+                        // while the venue-side cancel failed) gets cancelled
+                        // here — every sweep, not just at startup.
+                        let known: std::collections::HashSet<String> =
+                            host.known_venue_order_ids().await.into_iter().collect();
+                        let now = now_epoch_ms();
+                        recent_placements.retain(|(_, at)| now - *at < ORPHAN_GRACE_MS);
+                        for id in open_order_ids.clone() {
+                            if known.contains(&id)
+                                || recent_placements.iter().any(|(rid, _)| *rid == id)
+                            {
+                                continue; // ours and tracked / just placed
+                            }
+                            match venue.cancel(id.clone()).await {
+                                Ok(()) => {
+                                    eprintln!("polymarket-extension: cancelled orphan order {id}");
+                                    host.note_orphan_cancelled(&id).await;
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "polymarket-extension: failed to cancel orphan {id}: {e}"
+                                    );
+                                    host.report_error(CoreError::new(
+                                        CoreErrorCode::VenueError,
+                                        format!("orphan cancel failed for {id}: {e}"),
+                                    ))
+                                    .await;
+                                }
+                            }
+                        }
                         host.on_reconcile(ReconcileSnapshot {
                             open_order_ids,
                             trades,
@@ -178,9 +238,16 @@ pub async fn spawn_if_configured(
                     }
                     // Always loud on failure — a silent sweep is exactly the
                     // blind-safety-net failure mode this loop exists to catch.
+                    // Three in a row means the sweep channel itself is broken:
+                    // the host freezes trading on it (E31-b).
                     Err(e) => {
-                        eprintln!("polymarket-extension: sweep failed: {e}");
-                        host.report_error(e).await;
+                        sweep_failures = sweep_failures.saturating_add(1);
+                        eprintln!("polymarket-extension: sweep failed ({sweep_failures}): {e}");
+                        if sweep_failures >= SWEEP_FAILURE_FREEZE {
+                            host.on_reconcile_failed(e.clone()).await;
+                        } else {
+                            host.report_error(e).await;
+                        }
                     }
                 }
                 // Cash truth: the ledger runs on fill deltas, so a fill the

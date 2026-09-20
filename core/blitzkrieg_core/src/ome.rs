@@ -54,6 +54,8 @@ pub struct SubmitParams {
     pub order_id: OrderId,
     pub request: OrderRequest,
     pub submitted_at_ms: i64,
+    /// Maker→taker escalation window (ms); 0 = no escalation.
+    pub maker_timeout_ms: i64,
 }
 
 pub struct Ome {
@@ -167,6 +169,7 @@ impl Ome {
             updated_at_ms: p.submitted_at_ms,
             venue_order_id: None,
             escalate_at_ms: None,
+            maker_timeout_ms: p.maker_timeout_ms,
             role: OrderRole::Pending,
         };
         self.by_internal
@@ -497,6 +500,7 @@ mod tests {
             order_id: "o1".into(),
             request: req("k1", dec!(10)),
             submitted_at_ms: 1,
+            maker_timeout_ms: 0,
         })
         .unwrap();
         ome.mark_live("o1", 2).unwrap();
@@ -545,6 +549,7 @@ mod tests {
             order_id: "o1".into(),
             request: req("k1", dec!(10)),
             submitted_at_ms: 1,
+            maker_timeout_ms: 0,
         })
         .unwrap();
         // MATCHED provisional +5
@@ -584,6 +589,7 @@ mod tests {
             order_id: "o1".into(),
             request: req("k1", dec!(10)),
             submitted_at_ms: 3,
+            maker_timeout_ms: 0,
         })
         .unwrap();
         let drained = ome.drain_pending(4).unwrap();
@@ -599,13 +605,15 @@ mod tests {
             order_id: "o1".into(),
             request: req("k1", dec!(10)),
             submitted_at_ms: 1,
+            maker_timeout_ms: 0,
         })
         .unwrap();
         assert!(
             ome.submit(SubmitParams {
                 order_id: "o2".into(),
                 request: req("k1", dec!(10)),
-                submitted_at_ms: 2
+                submitted_at_ms: 2,
+                maker_timeout_ms: 0,
             })
             .is_err()
         );
@@ -615,7 +623,8 @@ mod tests {
             ome.submit(SubmitParams {
                 order_id: "o3".into(),
                 request: req("k1", dec!(10)),
-                submitted_at_ms: 4
+                submitted_at_ms: 4,
+                maker_timeout_ms: 0,
             })
             .is_ok()
         );

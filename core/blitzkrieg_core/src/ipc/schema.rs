@@ -113,6 +113,10 @@ pub mod method {
     pub const ORDER_PLACE: &str = "orders.place";
     pub const ORDER_CANCEL: &str = "orders.cancel";
     pub const ORDER_CANCEL_ALL: &str = "orders.cancel_all";
+    /// E31-c: cancel the resting remainder of a partially filled order.
+    pub const ORDER_CANCEL_REMAINING: &str = "orders.cancel_remaining";
+    /// E31-c: sell only the shares already filled behind an order.
+    pub const ORDER_CLOSE_FILLED: &str = "orders.close_filled";
     pub const ORDER_LIST: &str = "orders.list";
     pub const LEDGER_BALANCE: &str = "ledger.balance";
     /// List open positions (enriched with current price / unrealised PnL).
@@ -225,6 +229,29 @@ pub struct CancelAllParams {
 #[derive(Debug, Clone, Serialize)]
 pub struct CancelAllResult {
     pub cancelled: usize,
+}
+
+/// E31-c: retire the resting remainder of a partially filled order. Same body
+/// as a plain cancel — the distinct method exists so a strategy's DECISION
+/// ("cancel what is left, keep my filled shares") is visible in ops traces.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelRemainingParams {
+    pub order_id: OrderId,
+}
+
+/// E31-c: flatten only the shares the fills have already accrued behind an
+/// order, leaving its resting remainder alone. The kernel prices, sizes,
+/// risk-checks and submits the SELL; the strategy only names the position.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseFilledParams {
+    pub order_id: OrderId,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct CloseFilledResult {
+    /// Number of positions the flatten submitted (0 or 1).
+    pub closed: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]

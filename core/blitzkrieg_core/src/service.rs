@@ -21,6 +21,10 @@ use tokio::sync::mpsc;
 pub struct CoreConfig {
     pub mode: Mode,
     pub default_maker_timeout_ms: i64,
+    /// Ticks a taker exit's limit is set below the executable bid so the FOK
+    /// stays marketable in thin books (the venue still fills at the bid or
+    /// better). 0 = price exactly at the executable bid.
+    pub exit_taker_slip_ticks: i64,
     pub risk: RiskConfig,
     /// Starting simulated cash balance in DRY mode.
     pub dry_seed_balance: Decimal,
@@ -426,6 +430,7 @@ impl Default for CoreConfig {
         Self {
             mode: Mode::Dry,
             default_maker_timeout_ms: 5000,
+            exit_taker_slip_ticks: 2,
             risk: RiskConfig::default(),
             dry_seed_balance: Decimal::from(10_000),
             markets: Vec::new(),
@@ -552,9 +557,19 @@ pub struct Core {
     /// exponentially and stop after a cap — a stuck exit once burned 380+
     /// rejections hammering a venue that kept refusing at full tick rate.
     place_cooldowns: HashMap<String, RejectCooldown>,
+    /// Venue cancels the core has already committed to locally (order marked
+    /// Cancelled by a regime pull, round cleanup, escalation or explicit
+    /// cancel) while the venue may still hold the order resting. The live
+    /// bridge drains this and issues the actual venue cancels — retiring an
+    /// order locally without telling the venue leaves a resting orphan.
+    pending_venue_cancels: Vec<String>,
     /// Consecutive LIVE venue rejections (a successful placement resets).
     /// Reaching the threshold trips the freeze (kill switch).
     consecutive_venue_rejects: u32,
+    /// Consecutive failed reconciliation sweeps (a successful sweep resets).
+    /// Reaching the threshold freezes trading — a blind safety net is the
+    /// failure mode that lets ghosts and orphans accumulate (E31-b).
+    consecutive_sweep_failures: u32,
     /// Last venue/self-check failure surfaced to the panel, session-scoped.
     last_venue_error: Option<(i64, String)>,
     /// Newest external (unknown-order) fill timestamp already folded into the
@@ -729,7 +744,9 @@ impl Core {
             event_archive,
             strategy_accounting: HashMap::new(),
             place_cooldowns: HashMap::new(),
+            pending_venue_cancels: Vec::new(),
             consecutive_venue_rejects: 0,
+            consecutive_sweep_failures: 0,
             last_venue_error: None,
             recon_watermark_ms: 0,
             last_self_check: None,
@@ -824,7 +841,7 @@ impl Core {
     pub fn note_orphan_cancelled(&self, venue_order_id: &str) {
         self.emit(Event::RiskAlert {
             code: CoreErrorCode::Internal,
-            message: format!("cancelled orphan venue order {venue_order_id} (not in local ledger)"),
+            message: format!("cancelled resting venue order {venue_order_id}"),
         });
     }
     pub fn mode(&self) -> Mode {
@@ -2126,6 +2143,9 @@ impl Core {
             order_id: id.clone(),
             request: req,
             submitted_at_ms: now_ms,
+            // The pre-submit path cannot know the entry's escalation window;
+            // `confirm_live` falls back to the default clock when it arms.
+            maker_timeout_ms: 0,
         })?;
         self.emit_order(&id);
         Ok((id, OrderStatus::Pending))
@@ -2142,6 +2162,18 @@ impl Core {
             // both end here.
             self.consecutive_venue_rejects = 0;
             self.place_cooldowns.remove(&o.internal_key);
+            // A `maker_then_taker` order rests as GTC; the escalation clock
+            // starts on the venue's acceptance (the submit path cannot arm it
+            // in LIVE — the ack arrives asynchronously). Without this the
+            // maker leg rests forever and the taker fallback never fires.
+            if o.mode == FillPolicy::MakerThenTaker && o.escalate_at_ms.is_none() {
+                let timeout = if o.maker_timeout_ms > 0 {
+                    o.maker_timeout_ms
+                } else {
+                    self.config.default_maker_timeout_ms
+                };
+                self.ome.set_escalation(id, now_ms + timeout)?;
+            }
         }
         Ok(())
     }
@@ -2172,6 +2204,35 @@ impl Core {
                     "venue rejected order",
                 )
             });
+            // A `maker_then_taker` entry whose maker leg cannot even REST
+            // (post-only would cross the book) never gets a turn to escalate
+            // by timer — the venue refused the resting order itself. The
+            // mode's contract is to cross instead: place the taker leg now.
+            // Other failure classes (balance, auth, venue down) would fail as
+            // takers too, so they keep the normal backoff/retry path.
+            if o.mode == FillPolicy::MakerThenTaker
+                && e.code == blitzkrieg_market_api::CoreErrorCode::WouldCross
+            {
+                let req = OrderRequest {
+                    token_id: o.token_id.clone(),
+                    condition_id: o.condition_id.clone(),
+                    side: o.side,
+                    mode: FillPolicy::Taker,
+                    price: o.price,
+                    size: o.size,
+                    internal_key: format!("{id}:escalated"),
+                    strategy: o.strategy.clone(),
+                    asset: o.asset.clone(),
+                    direction: o.direction.clone(),
+                    round_slot: o.round_slot,
+                };
+                match self.place_escalated(req, now_ms) {
+                    Ok(_) => {
+                        return Ok(());
+                    }
+                    Err(e2) => self.emit_error(e2),
+                }
+            }
             self.note_venue_rejection(&o.internal_key, o.strategy.clone(), &e, now_ms);
         }
         Ok(())
@@ -2223,24 +2284,33 @@ impl Core {
                 now_ms,
             );
         } else if attempts >= MAX_PLACE_ATTEMPTS {
-            // One intent keeps bouncing: stop retrying it entirely so a stuck
-            // exit cannot grind the venue forever, and say so loudly ONCE.
-            let first_time = {
+            // One intent keeps bouncing. Entries stop here; closing intents
+            // keep retrying past the cap (unhedged exposure may not be
+            // abandoned), but both deserve ONE loud panel alert.
+            let (first_time, close) = {
                 let cd = self
                     .place_cooldowns
                     .get_mut(internal_key)
                     .expect("cooldown entry just written");
                 let first = !cd.alerted;
                 cd.alerted = true;
-                first
+                (first, is_close_intent(internal_key))
             };
             if first_time {
+                let status = if close {
+                    format!(
+                        "still retrying (close intent, backoff only) after {attempts} venue rejections: {}",
+                        err.message
+                    )
+                } else {
+                    format!(
+                        "abandoned after {attempts} venue rejections: {}",
+                        err.message
+                    )
+                };
                 self.emit(Event::RiskAlert {
                     code: blitzkrieg_market_api::CoreErrorCode::VenueError,
-                    message: format!(
-                        "placement intent {internal_key} abandoned after {} venue rejections: {}",
-                        attempts, err.message
-                    ),
+                    message: format!("placement intent {internal_key} {status}"),
                 });
             }
         }
@@ -2250,9 +2320,10 @@ impl Core {
     /// its cooldown is running or its attempt cap is spent. Callers skip
     /// silently — the rejection was already accounted for when it happened.
     fn placement_blocked(&self, internal_key: &str, now_ms: i64) -> bool {
-        self.place_cooldowns
-            .get(internal_key)
-            .is_some_and(|c| now_ms < c.next_ok_ms || c.attempts >= MAX_PLACE_ATTEMPTS)
+        self.place_cooldowns.get(internal_key).is_some_and(|c| {
+            now_ms < c.next_ok_ms
+                || (c.attempts >= MAX_PLACE_ATTEMPTS && !is_close_intent(internal_key))
+        })
     }
 
     /// Freeze trading (kill switch) with a reason the panel can show. A
@@ -2300,6 +2371,29 @@ impl Core {
             self.freeze_trading(
                 "trading self-check failed (venue unreachable or credentials rejected)".to_string(),
                 ts,
+            );
+        }
+    }
+
+    /// E31-b: the executor's reconciliation sweep failed three times in a row.
+    /// The sweep is the safety net that repairs missed fills, retires ghosts
+    /// and cancels orphans; a blind sweep lets the book drift silently, so
+    /// trading freezes until the operator or a restart re-probes the channel.
+    pub fn on_reconcile_failed(&mut self, err: crate::model::CoreError, now_ms: i64) {
+        self.consecutive_sweep_failures = self.consecutive_sweep_failures.saturating_add(1);
+        let streak = self.consecutive_sweep_failures;
+        self.last_venue_error = Some((
+            now_ms,
+            format!("reconciliation sweep failed ({streak}): {}", err.message),
+        ));
+        eprintln!("core: reconciliation sweep failed {streak} times in a row: {err:?}");
+        if streak >= SWEEP_FAILURE_FREEZE {
+            self.freeze_trading(
+                format!(
+                    "reconciliation sweep failed {streak} times in a row: {}",
+                    err.message
+                ),
+                now_ms,
             );
         }
     }
@@ -2577,6 +2671,9 @@ impl Core {
         snap: crate::reconcile::VenueSnapshot,
     ) -> CoreResult<crate::reconcile::ReconcileReport> {
         let report = crate::reconcile::reconcile(&mut self.ome, &snap)?;
+        // The sweep channel just proved itself alive — a failed-sweep streak
+        // only counts failures in a row (E31-b).
+        self.consecutive_sweep_failures = 0;
         // Ledger + position effects for any gap fills the OME just applied.
         for gap in report.actions.iter().filter_map(|a| match a {
             crate::reconcile::ReconcileAction::FilledGap { delta, .. } => Some(delta.clone()),
@@ -2878,6 +2975,7 @@ impl Core {
             order_id: id.clone(),
             request: req,
             submitted_at_ms: now_ms,
+            maker_timeout_ms,
         })?;
         self.place_after_submit(&id, maker_timeout_ms, now_ms)?;
 
@@ -3023,12 +3121,66 @@ impl Core {
             .get(id)
             .cloned()
             .ok_or_else(|| CoreError::new(CoreErrorCode::UnknownOrder, id))?;
+        let was_live = order.status.is_live();
         if order.side == Side::Buy {
             self.ledger.release(id);
         }
         self.ome.mark_terminal(id, OrderStatus::Cancelled, now_ms)?;
+        // The venue may still hold the order resting: hand its id to the live
+        // bridge for a real cancel. Nothing to cancel when the venue never
+        // acknowledged the order (no id — the venue never heard of it).
+        if was_live && let Some(vid) = order.venue_order_id {
+            self.queue_venue_cancel(vid);
+        }
         self.emit_order(id);
         Ok(())
+    }
+
+    /// Enqueue one venue cancel (deduped, bounded so a pathological loop
+    /// cannot grow it without bound). The live bridge drains it every tick.
+    fn queue_venue_cancel(&mut self, venue_order_id: String) {
+        if !self.pending_venue_cancels.contains(&venue_order_id) {
+            self.pending_venue_cancels.push(venue_order_id);
+            if self.pending_venue_cancels.len() > 256 {
+                self.pending_venue_cancels.remove(0);
+            }
+        }
+    }
+
+    /// Drain the venue-cancel queue: once. The bridge must forward each id as
+    /// a real `DELETE /order` — see [`Self::cancel`].
+    pub fn take_pending_venue_cancels(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_venue_cancels)
+    }
+
+    /// E31-c: retire the RESTING remainder of a partially filled order while
+    /// keeping the already-filled part in the position book. The strategy
+    /// decides WHEN; the kernel guarantees the venue-side cancel rides along.
+    pub fn cancel_remaining(&mut self, order_id: &str, now_ms: i64) -> CoreResult<()> {
+        self.cancel(order_id, now_ms)
+    }
+
+    /// E31-c: flatten the position behind an order — sell every share the
+    /// fills have accrued so far, at that position's latest valuation.
+    pub fn close_filled(&mut self, order_id: &str, now_ms: i64) -> CoreResult<usize> {
+        let token = self
+            .ome
+            .get(order_id)
+            .map(|o| o.token_id.clone())
+            .ok_or_else(|| CoreError::new(CoreErrorCode::UnknownOrder, order_id.to_string()))?;
+        let position = self
+            .positions
+            .open_positions()
+            .iter()
+            .find(|p| p.token_id == token)
+            .map(|p| p.id.clone())
+            .ok_or_else(|| {
+                CoreError::new(
+                    CoreErrorCode::UnknownOrder,
+                    format!("no open position behind order {order_id}"),
+                )
+            })?;
+        self.flatten(Some(&position), now_ms)
     }
 
     pub fn cancel_all(&mut self, token_id: Option<&str>, now_ms: i64) -> CoreResult<usize> {
@@ -3340,8 +3492,55 @@ impl Core {
             });
         }
 
+        // E31-b residual backstop: a working exit can be outgrown by its
+        // position (a late entry fill lands while the sell is resting), and
+        // once the sell completes the residual has NO working sell and the
+        // exit policy may stay silent (e.g. the profit target already passed).
+        // Any position with a sell that filled after the position opened and
+        // no live sell now gets an explicit re-close of the remainder.
+        if self.config.auto_exits_enabled {
+            for pos in self.positions.open_positions().to_vec() {
+                if !has_job.insert(pos.id.clone()) {
+                    continue;
+                }
+                let has_live_sell = self
+                    .ome
+                    .live_for(&pos.token_id, Side::Sell)
+                    .into_iter()
+                    .any(|o| o.status.is_live());
+                if has_live_sell {
+                    continue;
+                }
+                let closed_here = self.ome.all().iter().any(|o| {
+                    o.side == Side::Sell
+                        && o.token_id == pos.token_id
+                        && o.status == OrderStatus::Filled
+                        && o.updated_at_ms >= pos.entered_at_ms
+                });
+                if !closed_here {
+                    continue;
+                }
+                let price = if pos.current_price > Decimal::ZERO {
+                    pos.current_price
+                } else {
+                    Decimal::new(1, 2)
+                };
+                jobs.push(ExitJob {
+                    position_id: pos.id.clone(),
+                    token: pos.token_id.clone(),
+                    condition_id: pos.condition_id.clone(),
+                    price,
+                    reason: ExitReason::ForceExit,
+                    use_maker: false,
+                    internal_key: format!("exit-residual:{}", pos.token_id),
+                    strategy: pos.strategy.clone(),
+                    asset: pos.asset.clone(),
+                    direction: pos.direction.as_str().to_string(),
+                });
+            }
+        }
+
         for job in jobs {
-            // Skip if a sell order for this position is already live.
             let already_live = self
                 .ome
                 .live_for(&job.token, Side::Sell)
@@ -3365,12 +3564,22 @@ impl Core {
             } else {
                 FillPolicy::Taker
             };
+            // A FOK sell must fill in FULL at or above its limit; priced at
+            // the touch it dies on the first thin tick (thin books race the
+            // quote). Selling LOWER only widens the marketable range — the
+            // venue still fills at the bid or better, so the slip is a floor
+            // for where we agree to sell, not a price we pay.
+            let price = if mode == FillPolicy::Taker {
+                marketable_exit_price(job.price, self.config.exit_taker_slip_ticks)
+            } else {
+                job.price
+            };
             let order = OrderRequest {
                 token_id: job.token.clone(),
                 condition_id: job.condition_id,
                 side: Side::Sell,
                 mode,
-                price: job.price,
+                price,
                 size,
                 internal_key: job.internal_key,
                 strategy: job.strategy,
@@ -3393,6 +3602,17 @@ fn parse_direction(s: &str) -> SignalDirection {
         "down" => SignalDirection::Down,
         _ => SignalDirection::Up,
     }
+}
+
+/// Price a taker EXIT to actually fill: the limit nudged a few ticks below
+/// the executable bid, floored at the venue minimum. Polymarket prices run in
+/// 0.01 ticks, so a tick is 0.01.
+fn marketable_exit_price(executable_bid: Decimal, slip_ticks: i64) -> Decimal {
+    if executable_bid <= Decimal::ZERO {
+        return executable_bid;
+    }
+    let slipped = executable_bid - Decimal::new(slip_ticks.max(0), 2);
+    slipped.max(Decimal::new(1, 2))
 }
 
 /// The narrowed surface handed to an extension when it is enabled. It carries
@@ -3459,10 +3679,25 @@ const REJECT_BACKOFF_BASE_MS: i64 = 2_000;
 /// Retry spacing ceiling.
 const REJECT_BACKOFF_MAX_MS: i64 = 30_000;
 /// Attempts of ONE intent after which it stops being retried until a
-/// successful placement or a restart clears the cooldown.
+/// successful placement or a restart clears the cooldown. A closing intent is
+/// exempt from the cap (its backoff still applies): the position it closes is
+/// unhedged exposure, and walking away leaves naked residual on the venue —
+/// the "position never closes" failure class.
 const MAX_PLACE_ATTEMPTS: u32 = 8;
 /// Consecutive venue refusals that freeze trading (kill switch).
 const FREEZE_ON_REJECTS: u32 = 5;
+/// Consecutive failed reconciliation sweeps that freeze trading (E31-b): a
+/// blind sweep is the failure mode that lets ghosts and orphans accumulate.
+const SWEEP_FAILURE_FREEZE: u32 = 3;
+
+/// A placement intent that CLOSES exposure (an automated exit, a strategy
+/// close, a flatten or a residual backstop) rather than opening one.
+fn is_close_intent(internal_key: &str) -> bool {
+    internal_key.starts_with("exit:")
+        || internal_key.starts_with("exit-strategy:")
+        || internal_key.starts_with("flatten:")
+        || internal_key.starts_with("exit-residual:")
+}
 fn reject_backoff_ms(attempts: u32) -> i64 {
     // 2s, 4s, 8s, 16s, 30s, 30s… — quick escape for a transient refusal,
     // bounded patience for a persistent one.
@@ -4316,6 +4551,191 @@ mod tests {
         c.cancel(&id, 2).unwrap();
         assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Cancelled);
         assert_eq!(c.ledger().available(), dec!(10));
+    }
+
+    fn live_core(balance: Decimal) -> Core {
+        let mut c = Core::new(CoreConfig {
+            mode: Mode::Live,
+            risk: RiskConfig {
+                max_order_notional: dec!(3),
+                ..Default::default()
+            },
+            dry_seed_balance: Decimal::from(10_000),
+            ..Default::default()
+        });
+        c.set_balance(balance);
+        c
+    }
+
+    fn fill(order_id: &str, size: Decimal, price: Decimal, maker: Option<bool>) -> Fill {
+        Fill {
+            order_id: order_id.into(),
+            trade_id: Some("t1".into()),
+            token_id: "tok".into(),
+            side: Side::Buy,
+            price,
+            size,
+            status: FillStatus::Confirmed,
+            ts_ms: 10,
+            tx_hash: None,
+            maker,
+        }
+    }
+
+    #[test]
+    fn cancel_of_a_venue_bound_order_queues_a_real_venue_cancel() {
+        let mut c = live_core(dec!(10));
+        // E31-a: the venue has not acked yet (no id) — nothing to forward.
+        let (id, st) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1)
+            .unwrap();
+        assert_eq!(st, OrderStatus::Pending);
+        c.cancel(&id, 2).unwrap();
+        assert!(c.take_pending_venue_cancels().is_empty());
+
+        // The venue accepts: id bound, order live, ledger still reserved.
+        let (id, _) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k2"), 0, 3)
+            .unwrap();
+        c.bind_venue(&id, "0xv1".into(), 4).unwrap();
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Live);
+
+        c.cancel(&id, 5).unwrap();
+        // A local-only retire would leave the venue resting: the id rides the
+        // cancel queue for the live bridge to DELETE for real.
+        assert_eq!(c.take_pending_venue_cancels(), vec!["0xv1".to_string()]);
+        assert!(c.take_pending_venue_cancels().is_empty());
+    }
+
+    #[test]
+    fn confirm_live_arms_escalation_from_the_bound_maker_timeout() {
+        let mut c = live_core(dec!(10));
+        let (id, _) = c
+            .place(
+                order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(5), "k1"),
+                5_000,
+                1,
+            )
+            .unwrap();
+        assert!(c.ome().get(&id).unwrap().escalate_at_ms.is_none());
+        c.confirm_live(&id, 100).unwrap();
+        assert_eq!(c.ome().get(&id).unwrap().escalate_at_ms, Some(5_100));
+
+        // Zero timeout falls back to the configured default window.
+        let (id2, _) = c
+            .place(
+                order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(5), "k3"),
+                0,
+                2,
+            )
+            .unwrap();
+        c.confirm_live(&id2, 200).unwrap();
+        assert_eq!(
+            c.ome().get(&id2).unwrap().escalate_at_ms,
+            Some(200 + c.config.default_maker_timeout_ms)
+        );
+    }
+
+    #[test]
+    fn cancel_remaining_keeps_filled_shares_and_retires_the_remainder() {
+        let mut c = live_core(dec!(10));
+        let (id, _) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1)
+            .unwrap();
+        c.bind_venue(&id, "0xv1".into(), 2).unwrap();
+        // Partial fill: 2 of 5.
+        c.ingest_fill(fill(&id, dec!(2), dec!(0.40), None), 3)
+            .unwrap();
+        let o = c.ome().get(&id).unwrap();
+        assert_eq!(o.status, OrderStatus::PartiallyFilled);
+        assert_eq!(o.filled_size, dec!(2));
+
+        c.cancel_remaining(&id, 4).unwrap();
+        let o = c.ome().get(&id).unwrap();
+        assert_eq!(o.status, OrderStatus::Cancelled);
+        // The filled part is NOT refunded — it is real inventory now.
+        assert_eq!(c.positions().open_positions().len(), 1);
+        // And the venue-side delete rides the queue.
+        assert_eq!(c.take_pending_venue_cancels(), vec!["0xv1".to_string()]);
+    }
+
+    #[test]
+    fn close_filled_flattens_only_the_shares_behind_the_order() {
+        let mut c = dry_core(dec!(10));
+        // Maker BUY 5 rests; a partial fill accrues 2 real shares.
+        let (id, _) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1)
+            .unwrap();
+        c.ingest_fill(fill(&id, dec!(2), dec!(0.40), None), 3)
+            .unwrap();
+        let o = c.ome().get(&id).unwrap();
+        assert_eq!(o.status, OrderStatus::PartiallyFilled);
+
+        // Unknown orders / positions without inventory are errors, not panics.
+        assert_eq!(
+            c.close_filled("nope", 4).unwrap_err().code,
+            CoreErrorCode::UnknownOrder
+        );
+
+        // A bid exists → the flatten SELL crosses and closes the position.
+        c.book_snapshot(
+            "tok",
+            vec![(dec!(0.44), dec!(100))],
+            vec![(dec!(0.50), dec!(100))],
+            4,
+        );
+        assert_eq!(c.close_filled(&id, 5).unwrap(), 1);
+        assert!(c.positions().open_positions().is_empty());
+    }
+
+    #[test]
+    fn three_consecutive_sweep_failures_freeze_trading() {
+        let mut c = live_core(dec!(10));
+        let err = crate::model::CoreError::new(
+            blitzkrieg_market_api::CoreErrorCode::VenueError,
+            "venue down",
+        );
+        c.on_reconcile_failed(err.clone(), 1);
+        c.on_reconcile_failed(err.clone(), 2);
+        assert!(
+            !c.risk.is_killed(),
+            "one or two failures are noise, not a freeze"
+        );
+        c.on_reconcile_failed(err, 3);
+        assert!(c.risk.is_killed());
+        let e = c
+            .place(order(FillPolicy::Taker, dec!(0.4), dec!(1), "k1"), 0, 4)
+            .unwrap_err();
+        assert_eq!(e.code, CoreErrorCode::KillSwitchActive);
+    }
+
+    #[test]
+    fn a_successful_sweep_resets_the_failure_streak() {
+        let mut c = live_core(dec!(10));
+        let err = crate::model::CoreError::new(
+            blitzkrieg_market_api::CoreErrorCode::VenueError,
+            "venue down",
+        );
+        c.on_reconcile_failed(err.clone(), 1);
+        c.on_reconcile_failed(err, 2);
+        // A sweep that RUNS (empty snapshot is fine) proves the channel alive.
+        let snap = crate::reconcile::VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![],
+            now_ms: 3,
+        };
+        c.reconcile(snap).unwrap();
+        c.on_reconcile_failed(
+            crate::model::CoreError::new(
+                blitzkrieg_market_api::CoreErrorCode::VenueError,
+                "venue down again",
+            ),
+            4,
+        );
+        assert!(
+            !c.risk.is_killed(),
+            "streak must count CONSECUTIVE failures only"
+        );
     }
 
     #[test]

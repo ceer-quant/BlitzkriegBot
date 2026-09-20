@@ -378,6 +378,30 @@ async fn handle_line(
             Ok(serde_json::json!({ "orders": orders }))
         }
 
+        method::ORDER_CANCEL_REMAINING => {
+            typed(params, |p: CancelRemainingParams| {
+                let core = core.clone();
+                async move {
+                    core.lock().await.cancel_remaining(&p.order_id, now_ms())?;
+                    Ok::<_, CoreError>(serde_json::json!({ "success": true }))
+                }
+            })
+            .await
+        }
+
+        method::ORDER_CLOSE_FILLED => {
+            typed(params, |p: CloseFilledParams| {
+                let core = core.clone();
+                async move {
+                    let closed = core.lock().await.close_filled(&p.order_id, now_ms())?;
+                    Ok::<_, CoreError>(
+                        serde_json::to_value(CloseFilledResult { closed }).unwrap_or(Value::Null),
+                    )
+                }
+            })
+            .await
+        }
+
         method::LEDGER_BALANCE => {
             let c = core.lock().await;
             // The dry seed is only a principal while DRY: a live core's opening

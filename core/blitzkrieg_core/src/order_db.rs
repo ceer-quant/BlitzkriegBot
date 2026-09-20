@@ -122,6 +122,7 @@ mod tests {
             updated_at_ms: 1,
             venue_order_id: Some("0xabc".into()),
             escalate_at_ms: None,
+            maker_timeout_ms: 0,
             role: OrderRole::Maker,
         }
     }

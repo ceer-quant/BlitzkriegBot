@@ -39,6 +39,12 @@ pub trait MarketHost: Send + Sync {
     // ── Execution egress ────────────────────────────────────────────────────
     /// Orders accepted locally with no venue id yet.
     fn take_pending_orders(&self) -> BoxFuture<'_, Vec<PendingOrder>>;
+    /// Venue order ids the core has retired locally (regime pull, round
+    /// cleanup, escalation, explicit cancel) but the venue may still hold
+    /// resting. The executor must forward each as a real venue cancel — a
+    /// local-only retire that never reaches the venue is exactly how resting
+    /// orphans are born.
+    fn take_pending_cancels(&self) -> BoxFuture<'_, Vec<String>>;
     fn on_order_accepted(&self, core_order_id: &str, venue_order_id: &str) -> BoxFuture<'_, ()>;
     /// The venue refused a locally-accepted order. `error` carries the venue's
     /// own failure text when the POST returned one, so the core can classify
@@ -49,6 +55,11 @@ pub trait MarketHost: Send + Sync {
     fn on_order_live(&self, venue_order_id: &str) -> BoxFuture<'_, ()>;
     fn on_order_cancelled(&self, venue_order_id: &str) -> BoxFuture<'_, ()>;
     fn on_reconcile(&self, snapshot: ReconcileSnapshot) -> BoxFuture<'_, ()>;
+    /// The executor's periodic reconciliation sweep failed three times in a
+    /// row: the safety net is blind (auth, venue down or a dead sweep
+    /// transport). The core freezes trading on this — unreconciled drift is
+    /// how ghost positions and orphans accumulate (E31-b).
+    fn on_reconcile_failed(&self, error: CoreError) -> BoxFuture<'_, ()>;
     /// Report of a trading-capability self-check run by the executor. A failed
     /// report freezes trading (kill switch) — the core decides once, here.
     fn on_self_check(&self, report: SelfCheckReport) -> BoxFuture<'_, ()>;

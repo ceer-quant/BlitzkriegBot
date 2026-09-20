@@ -211,6 +211,7 @@ mod tests {
             order_id: core_id.into(),
             request: req(key, dec!(10)),
             submitted_at_ms: now,
+            maker_timeout_ms: 0,
         })
         .unwrap();
         ome.bind_venue(core_id, venue_id.into(), now).unwrap();
@@ -287,6 +288,7 @@ mod tests {
             order_id: "dry1".into(),
             request: req("k9", dec!(10)),
             submitted_at_ms: 1,
+            maker_timeout_ms: 0,
         })
         .unwrap();
         ome.mark_live("dry1", 1).unwrap();
