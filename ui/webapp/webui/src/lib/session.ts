@@ -70,7 +70,33 @@ export function classifyOutcome(
 /**
  * Text for the login form when it appeared because a session died, rather than
  * because this is a first visit. Naming the likely cause matters: a gateway
- * restart is the common one and is invisible from the operator's side.
+ * restart is the common cause and is invisible from the operator's side.
  */
 export const SESSION_EXPIRED_REASON =
   '会话已失效（过期、被登出，或网关重启过）。请重新登录。'
+
+/**
+ * The 设置 badge's session adjudication.
+ *
+ * `ping()` is deliberately sessionless (see `client.ts`): its `authRequired`
+ * flag describes the GATEWAY, never our token — a gateway that requires login
+ * reports `authRequired: true` even while the session is perfectly fine.
+ * Mapping that flag to "expired" is what made the badge claim 会话已过期
+ * forever on any credentialed gateway; re-logging in could never change it,
+ * because the probe never looked at the token.
+ *
+ * So reachability (a null ping) and the token's fate are two different
+ * questions, and only the second one needs credentials: `probe` is an
+ * authenticated call through the client whose `200`/`401` is the token's
+ * actual verdict. A newer gateway could report a session state on `ping`
+ * itself, but the probe stays the single arbiter — one code path that is
+ * correct against any gateway generation, with no field trusted to speak for
+ * the token except a real 200/401.
+ */
+export async function adjudicateSession(
+  ping: { ok: boolean; authRequired: boolean; session?: string } | null,
+  probe: () => Promise<'valid' | 'expired' | 'unreachable'>,
+): Promise<'valid' | 'expired' | 'unreachable'> {
+  if (ping === null) return 'unreachable'
+  return probe()
+}
