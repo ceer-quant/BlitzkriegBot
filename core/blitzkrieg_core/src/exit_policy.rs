@@ -803,10 +803,7 @@ mod tests {
             taker_fee_pct(dec!(0.50))
         );
         assert_eq!(FeeModel::LegacyQuadratic.fee_pct(dec!(0)), Decimal::ZERO);
-        assert_eq!(
-            FeeModel::LegacyQuadratic.fee_pct(dec!(-1)),
-            Decimal::ZERO
-        );
+        assert_eq!(FeeModel::LegacyQuadratic.fee_pct(dec!(-1)), Decimal::ZERO);
     }
 
     #[test]
@@ -844,7 +841,13 @@ mod tests {
         };
         let legacy = round_trip(FeeModel::LegacyQuadratic);
         let crypto = round_trip(FeeModel::PolymarketCrypto);
-        assert!(legacy > Decimal::ZERO, "legacy round trip was profitable: {legacy}");
-        assert!(crypto < Decimal::ZERO, "crypto round trip must lose: {crypto}");
+        assert!(
+            legacy > Decimal::ZERO,
+            "legacy round trip was profitable: {legacy}"
+        );
+        assert!(
+            crypto < Decimal::ZERO,
+            "crypto round trip must lose: {crypto}"
+        );
     }
 }

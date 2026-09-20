@@ -803,12 +803,7 @@ mod tests {
     fn one_sided_book(ask: Decimal, ts: i64) -> OrderbookSnapshot {
         // F6 regression fixture: NO bids at all, only an ask. The old mid
         // arithmetic turned this into a phantom sellable price of ask/2.
-        OrderbookSnapshot::from_levels(
-            "tok_BTC".to_string(),
-            vec![],
-            vec![(ask, dec!(100))],
-            ts,
-        )
+        OrderbookSnapshot::from_levels("tok_BTC".to_string(), vec![], vec![(ask, dec!(100))], ts)
     }
 
     fn two_sided_book(bid: Decimal, ask: Decimal, ts: i64) -> OrderbookSnapshot {
@@ -861,7 +856,11 @@ mod tests {
             now,
         );
         assert_eq!(reqs.len(), 1);
-        assert_eq!(reqs[0].exit_price, dec!(0.50), "exit prices off the live bid");
+        assert_eq!(
+            reqs[0].exit_price,
+            dec!(0.50),
+            "exit prices off the live bid"
+        );
     }
 
     /// F6: a stale bid is not a buyer standing here now — an expired book must
@@ -936,10 +935,8 @@ mod tests {
             );
             // Sell 9.90 of 10 shares (sub-grid remainder stays) as a taker; the
             // partial's own fee is identical in both runs and cancels out.
-            let exit_fee = (
-                crate::exit_policy::FeeModel::LegacyQuadratic.fee_pct(dec!(0.6))
-                    / Decimal::ONE_HUNDRED
-            )
+            let exit_fee = (crate::exit_policy::FeeModel::LegacyQuadratic.fee_pct(dec!(0.6))
+                / Decimal::ONE_HUNDRED)
                 * dec!(0.6)
                 * dec!(9.9);
             pm.apply_exit_fill(&p.id, dec!(9.9), dec!(0.6), exit_fee, OrderRole::Taker)
@@ -954,11 +951,16 @@ mod tests {
         // crypto dust: 2.8% * (0.60 * 0.1) = 0.00168
         let legacy = dust_fee(crate::exit_policy::FeeModel::LegacyQuadratic);
         let crypto = dust_fee(crate::exit_policy::FeeModel::PolymarketCrypto);
-        assert_eq!(legacy - crypto, dec!(0.00096), "net = gross − fees, per model");
+        assert_eq!(
+            legacy - crypto,
+            dec!(0.00096),
+            "net = gross − fees, per model"
+        );
     }
 
     #[test]
-    fn open_and_close_pnl_is_net_of_fees() {        let mut pm = PositionManager::new(PositionConfig::default());
+    fn open_and_close_pnl_is_net_of_fees() {
+        let mut pm = PositionManager::new(PositionConfig::default());
         // Maker entry (no fee), taker exit at 0.6 → gross 2.0 minus the exit fee.
         let p = enter(
             &mut pm,
