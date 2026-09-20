@@ -80,6 +80,21 @@ pub struct ShadowEvolutionConfig {
     pub exit_cfg: ExitConfig,
     /// Cap on strategies tracked simultaneously (bounded memory / audit fan-out).
     pub max_strategies: usize,
+    /// E13 (#95): when false (the default) a qualifying variant becomes a
+    /// held **EvolutionProposal** the operator accepts/rejects/defers; when
+    /// true the evaluator applies it itself (the unattended mode, still under
+    /// every guard). Toggleable at runtime via `shadow_evolution.set_auto`.
+    pub auto_evolve: bool,
+    /// Seconds between DEEP evolution rounds (default 72h): each round
+    /// re-anchors every unit's variant set with compound multi-knob mutants,
+    /// exploring combinations the single-knob rotation never visits.
+    pub evolution_cycle_secs: i64,
+    /// How long an undecided proposal stays decidable (default 7 days — the
+    /// DryRun verification window). Past it the proposal expires.
+    pub proposal_ttl_secs: i64,
+    /// How many knobs one DEEP-cycle variant moves simultaneously (>= 1).
+    /// 1 collapses the deep round back to the directed single-knob sweep.
+    pub deep_dims: usize,
 }
 
 impl Default for ShadowEvolutionConfig {
@@ -98,6 +113,10 @@ impl Default for ShadowEvolutionConfig {
             risk: ImmutableConfig::default(),
             exit_cfg: ExitConfig::default(),
             max_strategies: 16,
+            auto_evolve: false,
+            evolution_cycle_secs: 72 * 3600,
+            proposal_ttl_secs: 7 * 24 * 3600,
+            deep_dims: 2,
         }
     }
 }

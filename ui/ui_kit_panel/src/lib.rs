@@ -82,6 +82,8 @@ pub fn parse_args_from(args: impl IntoIterator<Item = String>) -> PanelArgs {
                 tab = match iter.next().as_deref() {
                     Some("2") | Some("positions") => Tab::Positions,
                     Some("3") | Some("trades") => Tab::Trades,
+                    Some("4") | Some("plugins") => Tab::Plugins,
+                    Some("5") | Some("evolution") => Tab::Evolution,
                     _ => Tab::Overview,
                 }
             }
@@ -104,22 +106,26 @@ pub const HELP: &str = "\
 ui_kit_panel — Blitzkrieg interactive TUI panel (ratatui + crossterm + tokio)
 
 USAGE:
-  ui_kit_panel [--socket <path>] [--interval-ms N] [--manage] [--attach] [--tab 1|2|3]
+  ui_kit_panel [--socket <path>] [--interval-ms N] [--manage] [--attach] [--tab 1|2|3|4|5]
 
 FLAGS:
   --socket       Core UDS socket (default: $TMPDIR/blitzkrieg-core-$USER.sock)
   --interval-ms  Snapshot refresh interval (default 1000)
   --manage       Enable lifecycle commands (start/stop). Off by default.
   --attach       Attach to an existing core in monitor mode (disables lifecycle)
-  --tab          Initial view: 1 Overview (default), 2 Positions, 3 Trades
+  --tab          Initial view: 1 Overview (default), 2 Positions, 3 Trades, 4 Plugins, 5 Evolution
 
 KEYS:
   q / Ctrl-C  quit          :  focus command bar
-  1 2 3 / Tab switch view   r  refresh now
+  1-5 / Tab   switch view   r  refresh now
+  ↑/↓         move selection (Plugins / Evolution)
+  a x d       Evolution: accept / reject / defer the selected proposal
+  e u         Evolution: toggle auto-evolve / rollback selected strategy
   Enter       run command   Esc cancel command
 
 COMMANDS (in the command bar):
-  status | positions [N] | help
+  status | positions [N] | proposals [N] | decide <id> accept|reject|defer
+  auto-evolve on|off | rollback <strategy> | help
   start [ASSETS] [--size N] [--dry-run] | stop   (requires --manage)
 ";
 
@@ -348,6 +354,28 @@ pub async fn run_panel_with_dispatcher(
                         | CoreEvent::EvolutionRejected { signal, .. } => {
                             app.log(format!("evolution: {signal}"))
                         }
+                        CoreEvent::EvolutionProposed { proposal } => {
+                            let id = proposal
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?");
+                            let st = proposal
+                                .get("strategy")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?");
+                            app.log(format!(
+                                "evolution: proposed {id} for {st} — page 5 to review"
+                            ));
+                        }
+                        CoreEvent::EvolutionCycle {
+                            cycle_seq,
+                            dims,
+                            strategies,
+                            ..
+                        } => app.log(format!(
+                            "evolution: deep cycle #{cycle_seq} ({dims}-knob) over {} strategies",
+                            strategies.len()
+                        )),
                         CoreEvent::Unknown => {}
                     }
                 }
@@ -477,5 +505,74 @@ mod tests {
     fn attach_disables_lifecycle() {
         let args = parse_args_from(["--attach".to_string()]);
         assert!(!args.manage);
+    }
+
+    #[test]
+    fn evolution_tab_switches_and_decides() {
+        use blitzkrieg_ui_kit::core::types::EvolutionProposalView;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let mut app = App::new("/tmp/x.sock".into(), false);
+
+        // '5' enters the evolution tab; up/down move the cursor harmlessly.
+        app.on_key(key('5'));
+        assert_eq!(app.tab, Tab::Evolution);
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.evo_focus, 1);
+
+        // No pending proposal → a/x/d/u say so and change nothing.
+        assert!(matches!(app.on_key(key('a')), Action::None));
+        assert!(app.logs.last().is_some_and(|l| l.contains("no pending")));
+
+        // One pending proposal: accept routes through the confirm bar, reject
+        // and defer run straight away, and auto-evolve flips off → on.
+        app.evo_focus = 0;
+        app.snap.evolution_proposals = vec![EvolutionProposalView {
+            id: "prop-42".into(),
+            strategy: "mean_reversion".into(),
+            state: "proposed".into(),
+            ..Default::default()
+        }];
+        assert!(matches!(
+            app.on_key(key('a')),
+            Action::ConfirmToggle(c) if c == "decide prop-42 accept"
+        ));
+        assert!(matches!(
+            app.on_key(key('x')),
+            Action::RunCommand(c) if c == "decide prop-42 reject"
+        ));
+        assert!(matches!(
+            app.on_key(key('d')),
+            Action::RunCommand(c) if c == "decide prop-42 defer"
+        ));
+        assert!(matches!(
+            app.on_key(key('e')),
+            Action::RunCommand(c) if c == "auto-evolve on"
+        ));
+        assert!(matches!(
+            app.on_key(key('u')),
+            Action::ConfirmToggle(c) if c == "rollback mean_reversion"
+        ));
+
+        // The confirm predicate agrees: accept and rollback need y/n, reject does not.
+        assert!(app.toggle_needs_confirmation("decide prop-42 accept"));
+        assert!(app.toggle_needs_confirmation("rollback mean_reversion"));
+        assert!(!app.toggle_needs_confirmation("decide prop-42 reject"));
+
+        // Tab cycles through all five pages: from Evolution one press wraps
+        // back to Overview, four more come the long way round to Evolution.
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.tab, Tab::Overview);
+        for _ in 0..4 {
+            app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        assert_eq!(app.tab, Tab::Evolution);
+
+        // --tab 5 starts directly on the evolution page.
+        assert_eq!(
+            parse_args_from(["--tab".into(), "5".into()]).tab,
+            Tab::Evolution
+        );
     }
 }

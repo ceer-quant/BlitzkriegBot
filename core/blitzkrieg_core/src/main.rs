@@ -100,6 +100,11 @@ struct Args {
     se_audit_dir: Option<String>,
     se_min_win_rate: Option<Decimal>,
     se_min_profit_factor: Option<Decimal>,
+    /// E13 proposal workflow (all resolved through the same chain).
+    se_auto_evolve: Option<bool>,
+    se_cycle_secs: Option<i64>,
+    se_ttl_secs: Option<i64>,
+    se_deep_dims: Option<usize>,
     /// Per-strategy entry caps: `name:max_open_positions:max_notional_usd`
     /// (repeatable; `-` or empty = no cap on that segment).
     strategy_limits: Vec<String>,
@@ -329,6 +334,10 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut se_min_samples: Option<u32> = None;
     let mut se_cooldown_secs: Option<i64> = None;
     let mut se_min_obs_secs: Option<i64> = None;
+    let mut se_auto_evolve: Option<bool> = None;
+    let mut se_cycle_secs: Option<i64> = None;
+    let mut se_ttl_secs: Option<i64> = None;
+    let mut se_deep_dims: Option<usize> = None;
     let mut assets_arg: Option<String> = None;
     let mut event_archive: Option<String> = None;
     // Tuning is tracked as Option so the always-on default can supply its own
@@ -400,6 +409,16 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--se-min-samples" => se_min_samples = it.next().and_then(|v| v.parse().ok()),
             "--se-cooldown-secs" => se_cooldown_secs = it.next().and_then(|v| v.parse().ok()),
             "--se-min-obs-secs" => se_min_obs_secs = it.next().and_then(|v| v.parse().ok()),
+            "--se-auto-evolve" => {
+                se_auto_evolve = it.next().and_then(|v| match v.as_str() {
+                    "true" | "1" | "on" => Some(true),
+                    "false" | "0" | "off" => Some(false),
+                    _ => None,
+                })
+            }
+            "--se-cycle-secs" => se_cycle_secs = it.next().and_then(|v| v.parse().ok()),
+            "--se-ttl-secs" => se_ttl_secs = it.next().and_then(|v| v.parse().ok()),
+            "--se-deep-dims" => se_deep_dims = it.next().and_then(|v| v.parse().ok()),
             "--strategy-limit" => {
                 if let Some(v) = it.next() {
                     strategy_limits.push(v);
@@ -659,6 +678,36 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             None
         }
     };
+    // E13 proposal workflow. The file speaks in MINUTES for the two clocks
+    // (same convention as the other windows); the kernel speaks in seconds.
+    let se_auto_evolve = resolve_opt!(
+        "shadow_evolution.auto_evolve",
+        se_auto_evolve,
+        env.text("BK_SE_AUTO_EVOLVE").and_then(|v| match v.trim() {
+            "true" | "1" | "on" | "yes" => Some(true),
+            "false" | "0" | "off" | "no" => Some(false),
+            _ => None,
+        }),
+        file.shadow.auto_evolve
+    );
+    let se_cycle_secs = resolve_opt!(
+        "shadow_evolution.evolution_cycle_secs",
+        se_cycle_secs,
+        env.num::<i64>("BK_SE_CYCLE_SECS"),
+        file.shadow.evolution_cycle_minutes.map(|m| m * 60)
+    );
+    let se_ttl_secs = resolve_opt!(
+        "shadow_evolution.proposal_ttl_secs",
+        se_ttl_secs,
+        env.num::<i64>("BK_SE_TTL_SECS"),
+        file.shadow.proposal_ttl_minutes.map(|m| m * 60)
+    );
+    let se_deep_dims = resolve_opt!(
+        "shadow_evolution.deep_dims",
+        se_deep_dims,
+        env.num::<usize>("BK_SE_DEEP_DIMS"),
+        file.shadow.deep_dims
+    );
 
     Args {
         socket,
@@ -708,6 +757,10 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         se_audit_dir,
         se_min_win_rate,
         se_min_profit_factor,
+        se_auto_evolve,
+        se_cycle_secs,
+        se_ttl_secs,
+        se_deep_dims,
         strategy_limits,
         enable_strategy,
         disable_strategy,
@@ -1064,6 +1117,10 @@ async fn main() -> anyhow::Result<()> {
             || args.se_audit_dir.is_some()
             || args.se_min_win_rate.is_some()
             || args.se_min_profit_factor.is_some()
+            || args.se_auto_evolve.is_some()
+            || args.se_cycle_secs.is_some()
+            || args.se_ttl_secs.is_some()
+            || args.se_deep_dims.is_some()
         {
             Some(blitzkrieg_core::service::ShadowEvolutionTuning {
                 min_sample_count: args.se_min_samples,
@@ -1075,6 +1132,10 @@ async fn main() -> anyhow::Result<()> {
                 min_win_rate_improvement: args.se_min_win_rate,
                 min_profit_factor_improvement: args.se_min_profit_factor,
                 audit_dir: args.se_audit_dir.clone(),
+                auto_evolve: args.se_auto_evolve,
+                evolution_cycle_secs: args.se_cycle_secs,
+                proposal_ttl_secs: args.se_ttl_secs,
+                deep_dims: args.se_deep_dims,
             })
         } else {
             None

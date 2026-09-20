@@ -367,6 +367,17 @@ pub struct ShadowEvolutionTuning {
     /// Defaults to `data/evolution`; a harness points it at a scratch directory
     /// so an experiment never writes into the operator's real audit history.
     pub audit_dir: Option<String>,
+    /// E13 (#95): start in the unattended mode (`auto_evolve`). The switch is
+    /// also runtime-toggleable and its LAST runtime state is persisted, so this
+    /// only seeds the very first boot.
+    pub auto_evolve: Option<bool>,
+    /// Seconds between DEEP evolution rounds (the config file expresses this
+    /// in minutes; `main` converts).
+    pub evolution_cycle_secs: Option<i64>,
+    /// Seconds an undecided proposal stays decidable (default 7 days).
+    pub proposal_ttl_secs: Option<i64>,
+    /// Knobs one DEEP-cycle variant moves simultaneously (>= 1).
+    pub deep_dims: Option<usize>,
 }
 
 impl Default for CoreConfig {
@@ -541,6 +552,18 @@ impl Core {
                 }
                 if let Some(v) = &t.audit_dir {
                     c.audit_dir = v.clone();
+                }
+                if let Some(v) = t.auto_evolve {
+                    c.auto_evolve = v;
+                }
+                if let Some(v) = t.evolution_cycle_secs {
+                    c.evolution_cycle_secs = v;
+                }
+                if let Some(v) = t.proposal_ttl_secs {
+                    c.proposal_ttl_secs = v;
+                }
+                if let Some(v) = t.deep_dims {
+                    c.deep_dims = v.max(1);
                 }
             }
             // D-2: variant exits must replay the SAME policy the live position
@@ -1189,6 +1212,50 @@ impl Core {
         self.shadow_evolution.history(strategy, limit)
     }
 
+    /// E13: every known proposal's latest state, newest first (IPC surface).
+    pub fn shadow_evolution_proposals(
+        &self,
+        limit: usize,
+    ) -> Vec<crate::shadow_evolution::EvolutionProposal> {
+        self.shadow_evolution.all_proposals(limit)
+    }
+
+    /// E13: the operator's verdict on one held proposal. String is the IPC-side
+    /// verb ("accept"/"reject"/"defer"); anything else is refused loudly.
+    pub fn shadow_evolution_decide(
+        &mut self,
+        id: &str,
+        decision: &str,
+        now_ms: i64,
+    ) -> Result<crate::shadow_evolution::DecisionResult, String> {
+        let decision = match decision {
+            "accept" | "accepted" => crate::shadow_evolution::Decision::Accept,
+            "reject" | "rejected" => crate::shadow_evolution::Decision::Reject,
+            "defer" | "deferred" => crate::shadow_evolution::Decision::Defer,
+            other => return Err(format!("unknown decision '{other}' (accept|reject|defer)")),
+        };
+        self.shadow_evolution.decide(id, decision, now_ms)
+    }
+
+    /// E13: the auto-evolve switch (the UIs' checkbox). Persisted across restarts.
+    pub fn shadow_evolution_set_auto(&mut self, on: bool) -> bool {
+        self.shadow_evolution.set_auto_evolve(on);
+        self.shadow_evolution.auto_evolve()
+    }
+
+    /// E13: the 72h deep-evolution clock. Fires a compound-mutation round when
+    /// the interval has elapsed; the returned event, if any, is emitted.
+    pub fn shadow_evolution_maybe_cycle(&mut self, now_ms: i64) {
+        if let Some(ev) = self.shadow_evolution.maybe_evolution_cycle(now_ms) {
+            self.emit(Event::EvolutionCycle {
+                cycle_seq: ev.cycle_seq,
+                dims: ev.dims,
+                strategies: ev.strategies,
+                at_ms: ev.at_ms,
+            });
+        }
+    }
+
     /// Feed the evolution engine a round's markets plus the opening book seeds the
     /// live engine is about to replay, so every twin's confirmation clock starts on
     /// the same tick as the live strategy's.
@@ -1227,6 +1294,9 @@ impl Core {
         match outcome {
             EvolutionOutcome::Signal(sig) => self.emit(Event::EvolutionSignal { signal: sig }),
             EvolutionOutcome::Applied(sig) => self.emit(Event::EvolutionApplied { signal: sig }),
+            EvolutionOutcome::Proposed(proposal) => {
+                self.emit(Event::EvolutionProposed { proposal })
+            }
             EvolutionOutcome::Rejected { signal, reason } => {
                 self.emit(Event::EvolutionRejected { signal, reason })
             }
@@ -1479,6 +1549,10 @@ impl Core {
         // Shadow Evolution: evaluate FIRST so any applied hot-swap is in force
         // for this very cycle's order decision (next-tick semantics, no restart).
         self.shadow_evolution_evaluate(now_ms);
+        // E13: the 72h DEEP round rides the same cadence, so a long-running
+        // process re-anchors its variant sets (compound mutants) without an
+        // operator. The check itself is one comparison per cycle.
+        self.shadow_evolution_maybe_cycle(now_ms);
         let engine = self.engine.as_mut().expect("engine present");
         let orders = engine.evaluate(now_ms);
         // Close intents produced by strategies this cycle join the SAME exit

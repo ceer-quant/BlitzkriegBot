@@ -58,3 +58,23 @@ variant_count = 3                    # shadow variants (>=2)
 # The pre-E2-c single global file `data/evolution/evolution.jsonl` is superseded
 # and is no longer written by any code path.
 audit_dir = "data/evolution"
+
+# E13 proposal workflow (#95). When `auto_evolve = false` (the default), a
+# qualifying variant does NOT move the live parameters: it becomes a held
+# PROPOSAL — a full baseline-vs-variant comparison (closed trades, win rate,
+# payoff, profit factor, net PnL) that the operator accepts / rejects / defers
+# from the WebUI or TUI (IPC `shadow_evolution.proposals` / `.decide`).
+# `auto_evolve = true` is the unattended mode: the evaluator applies the
+# improvement itself, still under every guard above.
+auto_evolve = false
+
+# The DEEP evolution clock, in minutes (72h = 4320): every round re-anchors
+# each strategy's variant set with COMPOUND mutants that move `deep_dims`
+# knobs at once, exploring knob combinations the single-knob rotation never
+# visits. A restart keeps the running clock (persisted in state.json).
+evolution_cycle_minutes = 4320       # 72h between deep rounds
+deep_dims = 2                        # knobs moved simultaneously per deep variant
+
+# How long an undecided proposal stays decidable, in minutes (7 days = 10080 —
+# the DryRun verification window). Past it the proposal expires on its own.
+proposal_ttl_minutes = 10080

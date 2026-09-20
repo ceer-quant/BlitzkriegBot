@@ -358,6 +358,24 @@ pub fn render_json(s: &UiSnapshot, lifecycle: Option<&LifecycleView>) -> String 
         "lastError": s.last_error,
     });
 
+    // E13: the evolution proposal workflow. The raw proposal rows carry the
+    // full 对比 block (baseline vs variant metrics + knob moves); `autoEvolve`
+    // is the checkbox state the panel toggles via /api/command.
+    doc["evolution"] = serde_json::json!({
+        "proposals": s.evolution_proposals.iter()
+            .map(|p| serde_json::json!({
+                "id": p.id, "strategy": p.strategy, "state": p.state,
+                "reason": p.reason, "confidence": p.confidence,
+                "sampleCount": p.sample_count,
+                "dims": p.dims, "knobMoves": p.knob_moves(),
+                "baseline": p.baseline, "variant": p.variant,
+                "createdAtMs": p.created_at_ms, "expiresAtMs": p.expires_at_ms,
+                "decidedBy": p.decided_by, "decidedAtMs": p.decided_at_ms,
+                "cycleSeq": p.cycle_seq,
+            })).collect::<Vec<_>>(),
+        "status": s.evolution_status,
+    });
+
     // Process-control capabilities, inserted only when this server has a
     // dispatcher. `managed` is the load-bearing one for 停止: an adopted core
     // cannot be stopped from here even with `--manage`, so the panel must not

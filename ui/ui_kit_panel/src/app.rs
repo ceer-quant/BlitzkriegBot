@@ -1,6 +1,7 @@
 //! Panel application state — pure data + key handling. Rendering is in `ui.rs`.
 
 use blitzkrieg_ui_kit::UiSnapshot;
+use blitzkrieg_ui_kit::core::types::EvolutionProposalView;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::Instant;
 
@@ -10,11 +11,18 @@ pub enum Tab {
     Positions,
     Trades,
     Plugins,
+    Evolution,
 }
 
 impl Tab {
     pub fn titles() -> Vec<&'static str> {
-        vec!["1 Overview", "2 Positions", "3 Trades", "4 Plugins"]
+        vec![
+            "1 Overview",
+            "2 Positions",
+            "3 Trades",
+            "4 Plugins",
+            "5 Evolution",
+        ]
     }
     pub fn index(self) -> usize {
         match self {
@@ -22,6 +30,7 @@ impl Tab {
             Tab::Positions => 1,
             Tab::Trades => 2,
             Tab::Plugins => 3,
+            Tab::Evolution => 4,
         }
     }
     pub fn next(self) -> Self {
@@ -29,7 +38,8 @@ impl Tab {
             Tab::Overview => Tab::Positions,
             Tab::Positions => Tab::Trades,
             Tab::Trades => Tab::Plugins,
-            Tab::Plugins => Tab::Overview,
+            Tab::Plugins => Tab::Evolution,
+            Tab::Evolution => Tab::Overview,
         }
     }
 }
@@ -64,7 +74,7 @@ pub enum CheckStage {
 /// One bottom-bar hint a newcomer needs; once consumed, it stops rotating.
 pub const HINTS: [&str; 6] = [
     "press : to type a command — try `status`",
-    "1-5 switch pages (Overview/Positions/Trades/Plugins)",
+    "1-5 switch pages (Overview/Positions/Trades/Plugins/Evolution)",
     "? for the full key & command help",
     "r refresh now · q quit",
     "start with --manage to enable start/stop commands",
@@ -86,6 +96,9 @@ pub struct App {
     pub last_update: Option<Instant>,
     /// Plugin-manager selection: 0=strategies pane column, then row index per pane.
     pub plugin_focus: usize,
+    /// Evolution-tab selection: index into the pending-proposal list (the same
+    /// order `ui.rs` renders, so cursor and screen agree).
+    pub evo_focus: usize,
     /// Pending confirmation for a dangerous plugin toggle: `Some(text)` shows
     /// the confirm bar; `y` executes, anything else cancels.
     pub pending_confirmation: Option<String>,
@@ -122,6 +135,7 @@ impl App {
             should_quit: false,
             last_update: None,
             plugin_focus: 0,
+            evo_focus: 0,
             pending_confirmation: None,
             check: CheckStage::default(),
             hints_used: [false; HINTS.len()],
@@ -285,6 +299,10 @@ impl App {
                 self.tab = Tab::Plugins;
                 Action::RefreshPlugins
             }
+            KeyCode::Char('5') => {
+                self.tab = Tab::Evolution;
+                Action::None // the 1 s poller re-fetches proposals with the snapshot
+            }
             KeyCode::Tab => {
                 let was_plugins = self.tab == Tab::Plugins;
                 self.tab = self.tab.next();
@@ -309,13 +327,26 @@ impl App {
                     Action::None
                 }
             },
+            KeyCode::Up if self.tab == Tab::Evolution => {
+                self.evo_focus = self.evo_focus.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down if self.tab == Tab::Evolution => {
+                self.evo_focus = self.evo_focus.saturating_add(1);
+                Action::None
+            }
+            KeyCode::Char('a') if self.tab == Tab::Evolution => self.evo_decide("accept"),
+            KeyCode::Char('x') if self.tab == Tab::Evolution => self.evo_decide("reject"),
+            KeyCode::Char('d') if self.tab == Tab::Evolution => self.evo_decide("defer"),
+            KeyCode::Char('e') if self.tab == Tab::Evolution => self.evo_toggle_auto(),
+            KeyCode::Char('u') if self.tab == Tab::Evolution => self.evo_rollback(),
             _ => Action::None,
         }
     }
 }
 
 /// The commands the bar completes against (longest-prefix, one candidate).
-pub const COMMANDS: [&str; 9] = [
+pub const COMMANDS: [&str; 13] = [
     "status",
     "positions",
     "strategy",
@@ -325,6 +356,10 @@ pub const COMMANDS: [&str; 9] = [
     "start BTC,ETH,SOL,XRP --dry-run",
     "stop",
     "risk",
+    "proposals",
+    "decide",
+    "auto-evolve",
+    "rollback",
 ];
 
 /// Tab-completion: when exactly one known command starts with the current
@@ -393,11 +428,83 @@ impl App {
         }
     }
 
+    /// Pending proposals in display order (the cursor indexes into this list;
+    /// `ui.rs` renders the same list, so cursor and screen stay in step).
+    pub fn evo_pending(&self) -> Vec<&EvolutionProposalView> {
+        self.snap
+            .evolution_proposals
+            .iter()
+            .filter(|p| p.is_pending())
+            .collect()
+    }
+
+    /// The pending proposal under the cursor, if the list is not empty.
+    fn evo_selected(&self) -> Option<&EvolutionProposalView> {
+        let pending = self.evo_pending();
+        if pending.is_empty() {
+            return None;
+        }
+        let i = self.evo_focus.min(pending.len() - 1);
+        Some(pending[i])
+    }
+
+    /// accept / reject / defer the proposal under the cursor. Accepting
+    /// hot-swaps live strategy parameters — routed through the confirm bar
+    /// (same bar as a dangerous plugin toggle); reject/defer move nothing and
+    /// go straight through.
+    fn evo_decide(&mut self, decision: &str) -> Action {
+        let Some(p) = self.evo_selected() else {
+            self.log("no pending evolution proposal to decide (nothing waiting)".to_string());
+            return Action::None;
+        };
+        let cmd = format!("decide {} {}", p.id, decision);
+        if decision == "accept" {
+            Action::ConfirmToggle(cmd)
+        } else {
+            self.log(format!("> {cmd}"));
+            Action::RunCommand(cmd)
+        }
+    }
+
+    /// Rollback the last accepted promotion for the strategy the cursor points
+    /// at (undo restores the previous params live). Dangerous — confirm first.
+    fn evo_rollback(&mut self) -> Action {
+        let Some(p) = self.evo_selected() else {
+            self.log(
+                "rollback needs a selection: point ↑/↓ at a pending proposal to name a strategy"
+                    .to_string(),
+            );
+            return Action::None;
+        };
+        let strategy = p.strategy.clone();
+        if strategy.is_empty() {
+            self.log("that proposal carries no strategy name — cannot roll back".to_string());
+            return Action::None;
+        }
+        Action::ConfirmToggle(format!("rollback {strategy}"))
+    }
+
+    /// Flip the auto-evolve switch from the status the last snapshot carried.
+    fn evo_toggle_auto(&mut self) -> Action {
+        let on = self
+            .snap
+            .evolution_status
+            .as_ref()
+            .map(|s| s.auto_evolve)
+            .unwrap_or(false);
+        let cmd = format!("auto-evolve {}", if on { "off" } else { "on" });
+        self.log(format!("> {cmd}"));
+        Action::RunCommand(cmd)
+    }
+
     /// True when the pending command must be confirmed before dispatch.
     pub fn toggle_needs_confirmation(&self, cmd: &str) -> bool {
-        // Disabling anything (or enabling a strategy) swaps routing: disabling
-        // a strategy may strand an open position; enabling a strategy starts it
-        // placing orders. Only disabling is dangerous here.
-        cmd.contains(" off") || cmd.contains("disable")
+        // Disabling anything swaps routing (may strand an open position);
+        // accepting an evolution proposal swaps live strategy parameters;
+        // rollback reverts them. Those three are the dangerous verbs here.
+        cmd.contains(" off")
+            || cmd.contains("disable")
+            || cmd.contains(" accept")
+            || cmd.starts_with("rollback ")
     }
 }

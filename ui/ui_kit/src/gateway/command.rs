@@ -56,6 +56,23 @@ pub enum Command {
     },
     Markets,
     Help,
+    /// E13: every known evolution proposal's latest state.
+    EvolutionProposals {
+        limit: usize,
+    },
+    /// E13: the operator's verdict on one held proposal.
+    EvolutionDecide {
+        id: String,
+        decision: String,
+    },
+    /// E13: the auto-evolve switch (persisted across restarts).
+    EvolutionAuto {
+        on: bool,
+    },
+    /// E13: roll ONE strategy back to its pre-change parameters.
+    EvolutionRollback {
+        strategy: String,
+    },
 }
 
 /// Parse one command line. Unknown verbs yield `Err(message)` (never a panic).
@@ -142,6 +159,37 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
             })
         }
         "markets" => Ok(Command::Markets),
+        "proposals" | "evo" => Ok(Command::EvolutionProposals {
+            limit: parts
+                .get(1)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(20),
+        }),
+        "decide" => {
+            let id = parts.get(1).copied().unwrap_or("").to_string();
+            let decision = parts
+                .get(2)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            if id.is_empty() || !matches!(decision.as_str(), "accept" | "reject" | "defer") {
+                return Err("usage: decide <proposal_id> accept|reject|defer".into());
+            }
+            Ok(Command::EvolutionDecide { id, decision })
+        }
+        "auto-evolve" | "autoevolve" => {
+            let on = parts.get(1).copied();
+            if !matches!(on, Some("on") | Some("off")) || parts.len() != 2 {
+                return Err("usage: auto-evolve on|off".into());
+            }
+            Ok(Command::EvolutionAuto { on: on == Some("on") })
+        }
+        "rollback" => {
+            let strategy = parts.get(1).copied().unwrap_or("").to_string();
+            if strategy.is_empty() {
+                return Err("usage: rollback <strategy>".into());
+            }
+            Ok(Command::EvolutionRollback { strategy })
+        }
         "help" | "?" => Ok(Command::Help),
         other => Err(format!("unknown command: {other}")),
     }
@@ -361,8 +409,89 @@ impl Dispatcher {
                 self.cmd_plugin_set(raw, PluginKind::Extension, &name, enabled)
             }
             Command::Flatten { position_id } => self.cmd_flatten(raw, &position_id),
+            Command::EvolutionProposals { limit } => self.cmd_evolution_proposals(raw, limit),
+            Command::EvolutionDecide { id, decision } => {
+                self.cmd_evolution_decide(raw, &id, &decision)
+            }
+            Command::EvolutionAuto { on } => self.cmd_evolution_auto(raw, on),
+            Command::EvolutionRollback { strategy } => {
+                self.cmd_evolution_rollback(raw, &strategy)
+            }
             Command::Help => CommandOutcome::ok(raw, "help", HELP)
                 .with_data(serde_json::json!({ "usage": HELP })),
+        }
+    }
+
+    /// E13: the proposal list — pending ones first, then the recent history.
+    fn cmd_evolution_proposals(&mut self, raw: &str, limit: usize) -> CommandOutcome {
+        let proposals = match self.client.evolution_proposals(limit) {
+            Ok(p) => p,
+            Err(e) => return CommandOutcome::err(raw, e.to_string()),
+        };
+        let pending: Vec<&crate::core::types::EvolutionProposalView> =
+            proposals.iter().filter(|p| p.is_pending()).collect();
+        let mut msg = format!(
+            "Evolution proposals ({} pending / {} total):\n",
+            pending.len(),
+            proposals.len()
+        );
+        for p in &pending {
+            msg.push_str(&format!(
+                "  [{}] {} · {} · {}\n",
+                p.state,
+                p.id,
+                p.strategy,
+                p.reason
+            ));
+        }
+        if pending.is_empty() {
+            msg.push_str("  (nothing held — no decision waiting)\n");
+        }
+        CommandOutcome::ok(raw, "proposals", msg.trim_end().to_string())
+            .with_data(serde_json::json!({ "proposals": serde_json::to_value(&proposals).unwrap_or_default() }))
+    }
+
+    /// E13: one operator verdict. The core re-runs the full guard chain, so an
+    /// RPC error here is a REAL refusal (world moved / decided already).
+    fn cmd_evolution_decide(&mut self, raw: &str, id: &str, decision: &str) -> CommandOutcome {
+        match self.client.evolution_decide(id, decision) {
+            Ok(v) => CommandOutcome::ok(
+                raw,
+                "decide",
+                format!("{decision} recorded for {id}"),
+            )
+            .with_data(v),
+            Err(e) => CommandOutcome::err(raw, e.to_string()),
+        }
+    }
+
+    /// E13: flip the auto-evolve switch.
+    fn cmd_evolution_auto(&mut self, raw: &str, on: bool) -> CommandOutcome {
+        match self.client.evolution_set_auto(on) {
+            Ok(v) => CommandOutcome::ok(
+                raw,
+                "auto-evolve",
+                if on {
+                    "auto-evolve ON — the engine now applies qualifying variants itself"
+                } else {
+                    "auto-evolve OFF — proposals wait for a decision"
+                },
+            )
+            .with_data(v),
+            Err(e) => CommandOutcome::err(raw, e.to_string()),
+        }
+    }
+
+    /// E13: one strategy's one-click rollback.
+    fn cmd_evolution_rollback(&mut self, raw: &str, strategy: &str) -> CommandOutcome {
+        match self.client.evolution_rollback(strategy) {
+            Ok(v) => CommandOutcome::ok(
+                raw,
+                "rollback",
+                format!("{strategy} rolled back to its previous parameters"),
+            )
+            .with_data(v),
+            Err(e) => CommandOutcome::err(raw, e.to_string()),
         }
     }
 
@@ -631,6 +760,10 @@ crypto-hft commands (UI Kit gateway):
   extension <name> on|off                  enable/disable one extension
   flatten <position_id>                    force-close one open position
   markets                                  list market plugins
+  proposals [N]                            evolution proposals (pending first)
+  decide <id> accept|reject|defer          vote on one evolution proposal
+  auto-evolve on|off                       unattended mode switch (persisted)
+  rollback <strategy>                      undo one strategy's last evolution
   help";
 
 fn status_json(disp: &Dispatcher, s: &UiSnapshot) -> serde_json::Value {

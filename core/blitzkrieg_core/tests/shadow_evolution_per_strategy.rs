@@ -217,6 +217,13 @@ fn build_core(dir: &std::path::Path, se_enabled: bool) -> Core {
             evaluation_window_secs: None,
             max_gradient: None,
             audit_dir: Some(dir.to_string_lossy().into_owned()),
+            // This harness pins the pre-proposal (auto-apply) semantics, so the
+            // switch is forced on explicitly — the manual/hold-proposal path is
+            // covered by the manager's own unit tests.
+            auto_evolve: Some(true),
+            evolution_cycle_secs: None,
+            proposal_ttl_secs: None,
+            deep_dims: None,
         }),
         ..Default::default()
     };

@@ -175,6 +175,12 @@ pub mod method {
     pub const SE_HISTORY: &str = "shadow_evolution.history";
     pub const SE_ROLLBACK: &str = "shadow_evolution.rollback";
     pub const SE_APPLY: &str = "shadow_evolution.apply";
+    /// E13 proposal workflow: every known proposal's latest state (the UIs'
+    /// 对比表), the operator's verdict on one proposal, and the auto-evolve
+    /// switch (`params.enabled: bool`, persisted across restarts).
+    pub const SE_PROPOSALS: &str = "shadow_evolution.proposals";
+    pub const SE_DECIDE: &str = "shadow_evolution.decide";
+    pub const SE_SET_AUTO: &str = "shadow_evolution.set_auto";
     /// Supply the current round's UP/DOWN markets (discovered by Node's scanner
     /// in P3-transition; the Rust scanner takes over in P4).
     pub const ENGINE_MARKETS: &str = "engine.markets";
@@ -458,6 +464,21 @@ pub enum Event {
     EvolutionRejected {
         signal: crate::shadow_evolution::EvolveSignal,
         reason: String,
+    },
+    /// E13: a qualifying variant was HELD as a proposal — the operator decides
+    /// (`shadow_evolution.decide`); nothing moved in the hot path.
+    EvolutionProposed {
+        proposal: crate::shadow_evolution::EvolutionProposal,
+    },
+    /// E13: the 72h DEEP evolution round fired — every strategy's variant set
+    /// was re-anchored with compound multi-knob mutants.
+    EvolutionCycle {
+        #[serde(rename = "cycleSeq")]
+        cycle_seq: u64,
+        dims: usize,
+        strategies: Vec<String>,
+        #[serde(rename = "atMs")]
+        at_ms: i64,
     },
 }
 

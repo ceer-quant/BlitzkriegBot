@@ -2,6 +2,7 @@
 
 use crate::app::{App, CheckStage, Tab, HINTS};
 use blitzkrieg_ui_kit::UiSnapshot;
+use blitzkrieg_ui_kit::core::types::EvolutionProposalView;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
 
@@ -47,6 +48,7 @@ pub fn render(f: &mut Frame, app: &App) {
         Tab::Positions => render_positions(f, chunks[2], &app.snap),
         Tab::Trades => render_trades(f, chunks[2], &app.snap),
         Tab::Plugins => render_plugins(f, chunks[2], app),
+        Tab::Evolution => render_evolution(f, chunks[2], app),
     }
     // Kill switch engaged: the body talks with one voice until resume.
     if let Some(msg) = &app.kill_banner {
@@ -147,7 +149,7 @@ fn centered_rect(area: Rect, pct_x: u16, height: u16) -> Rect {
 /// The `?` overlay: every key and command in one screen.
 fn render_help(f: &mut Frame, _app: &App) {
     let area = f.area();
-    let rect = centered_rect(area, 80, 24);
+    let rect = centered_rect(area, 80, 28);
     f.render_widget(Clear, rect);
     let keys = vec![
         Line::from(Span::styled(
@@ -155,13 +157,15 @@ fn render_help(f: &mut Frame, _app: &App) {
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         )),
         Line::from("  : /            focus command bar (then type a command, Enter runs it)"),
-        Line::from("  1 2 3 4        pages: Overview / Positions / Trades / Plugins"),
+        Line::from("  1-5            pages: Overview / Positions / Trades / Plugins / Evolution"),
         Line::from("  Tab            next page"),
-        Line::from("  ↑/↓            Plugins: move selection · Command bar: recall history"),
+        Line::from("  ↑/↓            Plugins/Evolution: move selection · Command bar: recall history"),
         Line::from("  Tab (bar)      complete the command"),
         Line::from("  Enter /Esc     run / cancel"),
         Line::from("  r              refresh now"),
-        Line::from("  y / n          confirm or cancel a dangerous toggle"),
+        Line::from("  y / n          confirm or cancel a dangerous action"),
+        Line::from("  a / x / d      Evolution: accept / reject / defer the selected proposal"),
+        Line::from("  e / u          Evolution: toggle auto-evolve / rollback selected strategy"),
         Line::from("  q or Ctrl-C    quit"),
         Line::from(""),
         Line::from(Span::styled(
@@ -173,6 +177,10 @@ fn render_help(f: &mut Frame, _app: &App) {
         Line::from("  strategy              list strategies (+ on/off when allowed)"),
         Line::from("  extension             list/toggle extensions"),
         Line::from("  markets               list market plugins"),
+        Line::from("  proposals [N]         evolution proposals (pending first)"),
+        Line::from("  decide <id> a|r|d     accept / reject / defer an evolution proposal"),
+        Line::from("  auto-evolve on|off    unattended evolution switch"),
+        Line::from("  rollback <strategy>   undo the last accepted promotion"),
         Line::from("  start ASSETS ...      start a managed DRY core (needs --manage)"),
         Line::from("  stop                  stop the managed core (needs --manage)"),
         Line::from("  help                  what you are reading"),
@@ -693,6 +701,362 @@ fn plugin_line(name: &str, on: bool, focused: bool) -> Line<'static> {
         Span::styled(format!("{:>5} ", mark), mark_style),
         Span::styled(name.to_string(), name_style),
     ])
+}
+
+// ── Evolution tab (E13 #95) ──────────────────────────────────────────────────
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Compact human duration ("45s" / "3h" / "2d5h") between two epoch-ms stamps.
+fn human_secs(secs: i64) -> String {
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let m = secs / 60;
+    if m < 60 {
+        return format!("{m}m");
+    }
+    let h = m / 60;
+    if h < 48 {
+        return format!("{h}h{}m", m % 60);
+    }
+    format!("{}d{}h", h / 24, h % 24)
+}
+fn ago(ms: i64, now: i64) -> String {
+    human_secs((now - ms).max(0) / 1000)
+}
+fn ttl_text(expires_at_ms: i64, now: i64) -> String {
+    let left = expires_at_ms - now;
+    if left <= 0 {
+        "expired".into()
+    } else {
+        format!("{} left", human_secs(left / 1000))
+    }
+}
+fn short_id(id: &str) -> String {
+    let s: String = id.chars().take(16).collect();
+    if id.chars().count() > 16 {
+        format!("{s}…")
+    } else {
+        s
+    }
+}
+
+/// The evolution view: the auto-evolve switch and cycle clock on top, pending
+/// proposals (each with its baseline-vs-variant 对比表) in the middle, recent
+/// decisions at the bottom. The keys drive the same gateway verbs the command
+/// bar accepts (`decide` / `auto-evolve` / `rollback`) — one shared backend.
+fn render_evolution(f: &mut Frame, area: Rect, app: &App) {
+    if !app.snap.connected {
+        let msg = app
+            .snap
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "core not reachable — evolution state unavailable".into());
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "○ evolution offline",
+                    Style::default().fg(RED),
+                )),
+                Line::from(Span::styled(msg, Style::default().fg(DIM))),
+                Line::from(Span::styled(
+                    "Start the core, then press 5 again to re-read.",
+                    Style::default().fg(DIM),
+                )),
+            ])
+            .block(Block::default().borders(Borders::ALL).title("Evolution"))
+            .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    let now = now_ms();
+    let rows = Layout::vertical([
+        Constraint::Length(4), // switch + cycle clock
+        Constraint::Min(6),    // pending list (+ focused comparison)
+        Constraint::Length(8), // recent decisions
+    ])
+    .split(area);
+    render_evo_status(f, rows[0], app, now);
+    render_evo_pending(f, rows[1], app, now);
+    render_evo_recent(f, rows[2], app, now);
+}
+
+fn render_evo_status(f: &mut Frame, area: Rect, app: &App, now: i64) {
+    let mut lines: Vec<Line> = Vec::new();
+    match &app.snap.evolution_status {
+        Some(s) => {
+            let (mark, text, color) = if s.auto_evolve {
+                (
+                    "●",
+                    "auto-evolve ON — variants apply unattended (rollback still one key away)",
+                    GREEN,
+                )
+            } else {
+                (
+                    "○",
+                    "auto-evolve OFF — every proposal waits for you",
+                    ACCENT,
+                )
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{mark} "),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(text, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled("   e toggle", Style::default().fg(DIM)),
+            ]));
+            let last = if s.last_cycle_ms > 0 {
+                format!("{} ago", ago(s.last_cycle_ms, now))
+            } else {
+                "never".into()
+            };
+            let next = match s.next_cycle_at_ms {
+                Some(t) if t > now => format!("in {}", ago(t, now)),
+                Some(_) => "due now".into(),
+                None => "—".into(),
+            };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "deep cycle 72h · last {last} · next {next} · pending {}",
+                    s.pending_proposals
+                ),
+                Style::default().fg(DIM),
+            )));
+        }
+        None => lines.push(Line::from(Span::styled(
+            "evolution status unknown (older core without the proposal workflow?)",
+            Style::default().fg(DIM),
+        ))),
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Switch"))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn evo_state_color(state: &str) -> Color {
+    match state {
+        "proposed" => ACCENT,
+        "deferred" => Color::Yellow,
+        "accepted" => GREEN,
+        "rejected" => RED,
+        _ => DIM,
+    }
+}
+
+/// The pending-proposal pane. Every entry shows its knob moves and why the
+/// evaluator held it; the focused one gets the full 对比表 (baseline vs
+/// variant metrics side by side).
+fn render_evo_pending(f: &mut Frame, area: Rect, app: &App, now: i64) {
+    let pending = app.evo_pending();
+    let mut lines: Vec<Line> = Vec::new();
+    if pending.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(no pending proposals — when a variant beats the incumbent on the live window, it waits here)",
+            Style::default().fg(DIM),
+        )));
+    }
+    let focus = if pending.is_empty() {
+        0
+    } else {
+        app.evo_focus.min(pending.len() - 1)
+    };
+    for (i, p) in pending.iter().enumerate() {
+        let focused = i == focus;
+        let color = evo_state_color(&p.state);
+        let cursor = if focused { "▸ " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(cursor, Style::default().fg(ACCENT)),
+            Span::styled(
+                short_id(&p.id),
+                Style::default()
+                    .fg(ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(" {} · ", p.strategy)),
+            Span::styled(
+                p.state.clone(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    " · expires {} · cycle #{}",
+                    ttl_text(p.expires_at_ms, now),
+                    p.cycle_seq
+                ),
+                Style::default().fg(DIM),
+            ),
+        ]));
+        let moves = p.knob_moves();
+        if moves.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "    knobs: —",
+                Style::default().fg(DIM),
+            )));
+        } else {
+            let txt = moves
+                .iter()
+                .map(|(n, f, t)| format!("{n} {f}→{t}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(Line::from(vec![
+                Span::styled("    knobs: ", Style::default().fg(DIM)),
+                Span::raw(txt),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            Span::styled("    why ", Style::default().fg(DIM)),
+            Span::styled(p.reason.clone(), Style::default().fg(color)),
+            Span::styled(
+                format!(
+                    " · confidence {:.2} · samples {}",
+                    p.confidence, p.sample_count
+                ),
+                Style::default().fg(DIM),
+            ),
+        ]));
+        if focused {
+            push_comparison(&mut lines, p);
+        }
+        lines.push(Line::from(Span::raw("")));
+    }
+    lines.push(Line::from(Span::styled(
+        "a accept (asks y/n) · x reject · d defer · e auto-evolve · u rollback selected strategy · ↑/↓ select",
+        Style::default().fg(DIM),
+    )));
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Pending Proposals ({})", pending.len())),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// Full baseline-vs-variant table for the focused proposal — the 对比 the
+/// operator reads before accepting: every metric side by side, delta colored
+/// by whether it favors the variant.
+fn push_comparison(lines: &mut Vec<Line<'static>>, p: &EvolutionProposalView) {
+    lines.push(Line::from(Span::styled(
+        "    ── baseline → variant ──",
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+    )));
+    let rows: Vec<(&str, String, String, String, Option<bool>)> = vec![
+        (
+            "trades",
+            format!("{}", p.baseline.closed),
+            format!("{}", p.variant.closed),
+            String::new(),
+            None,
+        ),
+        (
+            "win rate",
+            pct(p.baseline.win_rate),
+            pct(p.variant.win_rate),
+            format!("{:+.1}pp", (p.variant.win_rate - p.baseline.win_rate) * 100.0),
+            Some(p.variant.win_rate > p.baseline.win_rate),
+        ),
+        (
+            "profit factor",
+            f2(p.baseline.profit_factor),
+            f2(p.variant.profit_factor),
+            format!("{:+.2}", p.variant.profit_factor - p.baseline.profit_factor),
+            Some(p.variant.profit_factor > p.baseline.profit_factor),
+        ),
+        (
+            "payoff",
+            f2(p.baseline.payoff),
+            f2(p.variant.payoff),
+            format!("{:+.2}", p.variant.payoff - p.baseline.payoff),
+            Some(p.variant.payoff > p.baseline.payoff),
+        ),
+        (
+            "net",
+            signed(p.baseline.net_pnl_usd, ""),
+            signed(p.variant.net_pnl_usd, ""),
+            signed(p.variant.net_pnl_usd - p.baseline.net_pnl_usd, ""),
+            Some(p.variant.net_pnl_usd > p.baseline.net_pnl_usd),
+        ),
+    ];
+    for (name, base, var, delta, better) in rows {
+        let delta_style = match better {
+            Some(true) => Style::default().fg(GREEN),
+            Some(false) => Style::default().fg(RED),
+            None => Style::default().fg(DIM),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("      {name:<14}"), Style::default().fg(DIM)),
+            Span::raw(format!("{base:>10}")),
+            Span::styled(" → ", Style::default().fg(DIM)),
+            Span::styled(
+                format!("{var:<10}"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(delta, delta_style),
+        ]));
+    }
+}
+
+fn pct(v: f64) -> String {
+    format!("{:.1}%", v * 100.0)
+}
+fn f2(v: f64) -> String {
+    format!("{v:.2}")
+}
+
+/// The decided tail (newest first), so an operator can see what already
+/// happened without paging through history.
+fn render_evo_recent(f: &mut Frame, area: Rect, app: &App, now: i64) {
+    let mut decided: Vec<&EvolutionProposalView> = app
+        .snap
+        .evolution_proposals
+        .iter()
+        .filter(|p| !p.is_pending())
+        .collect();
+    decided.reverse(); // store order is oldest-first
+    decided.truncate(6);
+    let mut lines: Vec<Line> = Vec::new();
+    if decided.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(no decided proposals yet)",
+            Style::default().fg(DIM),
+        )));
+    }
+    for p in decided {
+        let color = evo_state_color(&p.state);
+        let by = p.decided_by.as_deref().unwrap_or("—");
+        let when = p
+            .decided_at_ms
+            .map(|t| ago(t, now))
+            .unwrap_or_else(|| "—".into());
+        lines.push(Line::from(vec![
+            Span::styled(short_id(&p.id), Style::default().fg(DIM)),
+            Span::styled(format!(" {} · ", p.strategy), Style::default().fg(DIM)),
+            Span::styled(
+                p.state.clone(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" by {by} · {when} ago"), Style::default().fg(DIM)),
+        ]));
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Recent Decisions")),
+        area,
+    );
 }
 
 fn render_confirm(f: &mut Frame, area: Rect, text: &str) {

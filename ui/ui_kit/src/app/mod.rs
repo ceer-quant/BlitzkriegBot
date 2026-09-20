@@ -136,6 +136,20 @@ impl AppViewModel {
             CoreEvent::EvolutionSignal { .. } => "evolution signal".into(),
             CoreEvent::EvolutionApplied { .. } => "evolution applied".into(),
             CoreEvent::EvolutionRejected { reason, .. } => format!("evolution rejected: {reason}"),
+            CoreEvent::EvolutionProposed { proposal } => {
+                let strategy = proposal
+                    .get("strategy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let id = proposal
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                format!("evolution proposed: {strategy} holds {id} for review")
+            }
+            CoreEvent::EvolutionCycle {
+                cycle_seq, dims, ..
+            } => format!("evolution cycle #{cycle_seq} ({dims}-knob deep round)"),
             CoreEvent::Ready { version, mode } => format!("core ready v{version} ({mode})"),
             CoreEvent::Unknown => "event".into(),
         }

@@ -830,6 +830,12 @@ async fn handle_line(
                 "evolutionsRejected": rejected,
                 "secondsSinceLastEvolution": since,
                 "strategies": strategies,
+                // E13: the unattended switch + the 72h deep clock, so a UI can
+                // render the checkbox and the next-round time from one call.
+                "autoEvolve": c.shadow_evolution().auto_evolve(),
+                "lastCycleMs": c.shadow_evolution().cycle_info().0,
+                "nextCycleAtMs": c.shadow_evolution().next_cycle_at_ms(now),
+                "pendingProposals": c.shadow_evolution().pending_proposal_count(),
             }))
         }
         method::SE_HISTORY => {
@@ -892,6 +898,59 @@ async fn handle_line(
                         }
                     }
                 }
+            }
+        },
+
+        // E13 proposal workflow. `proposals` is read-only (the UIs' 对比表);
+        // `decide` carries the operator's verdict on ONE held proposal; `set_auto`
+        // flips the unattended mode (persisted — a restart keeps the chosen mode).
+        method::SE_PROPOSALS => {
+            let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+            let proposals = core.lock().await.shadow_evolution_proposals(limit);
+            Ok(serde_json::json!({
+                "version": crate::ipc::schema::PROTOCOL_VERSION,
+                "proposals": proposals,
+            }))
+        }
+        method::SE_DECIDE => match (
+            params
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty()),
+            params
+                .get("decision")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty()),
+        ) {
+            (None, _) => Err((Failure::INVALID_PARAMS, "id required".into(), None)),
+            (_, None) => Err((
+                Failure::INVALID_PARAMS,
+                "decision required (accept|reject|defer)".into(),
+                None,
+            )),
+            (Some(id), Some(decision)) => {
+                let now = now_ms();
+                match core.lock().await.shadow_evolution_decide(id, decision, now) {
+                    Ok(result) => Ok(match result {
+                        crate::shadow_evolution::DecisionResult::Accepted { proposal } => {
+                            serde_json::json!({ "decision": "accepted", "proposal": proposal })
+                        }
+                        crate::shadow_evolution::DecisionResult::Rejected { proposal } => {
+                            serde_json::json!({ "decision": "rejected", "proposal": proposal })
+                        }
+                        crate::shadow_evolution::DecisionResult::Deferred { proposal } => {
+                            serde_json::json!({ "decision": "deferred", "proposal": proposal })
+                        }
+                    }),
+                    Err(e) => Err((Failure::APPLICATION, e, None)),
+                }
+            }
+        },
+        method::SE_SET_AUTO => match params.get("enabled").and_then(|v| v.as_bool()) {
+            None => Err((Failure::INVALID_PARAMS, "enabled (bool) required".into(), None)),
+            Some(on) => {
+                let auto = core.lock().await.shadow_evolution_set_auto(on);
+                Ok(serde_json::json!({ "autoEvolve": auto }))
             }
         },
 

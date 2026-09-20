@@ -7,6 +7,27 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ### Added
 
+- **Shadow Evolution grows a proposal workflow (E13 / #95).** A winning shadow
+  variant no longer silently swaps live parameters: the evaluator now produces
+  an **EvolutionProposal** — full baseline-vs-variant 对比 (trades, win rate,
+  payoff, profit factor, net PnL), the knob moves, reason, confidence, sample
+  count and a 7-day TTL — and the operator decides. Human mode (default) holds
+  one pending proposal per strategy in a durable JSONL store and exposes
+  accept / reject / defer from all three frontends (a new 进化 page in the
+  webui, a fifth Evolution tab in the TUI, and gateway verbs `proposals` /
+  `decide <id> accept|reject|defer` / `auto-evolve on|off` /
+  `rollback <strategy>`); accepting re-runs the **entire guard chain** (domain
+  → gradient → immutable) at decision time before the hot swap. Auto mode
+  (`auto_evolve`) applies directly — unattended operation — and every adoption
+  is logged to `data/evolution/promotions.jsonl`, which is also the
+  cross-restart rollback anchor (one level; a rollback clears the restore
+  target and skips only the gradient lock). A 72-hour deep-evolution clock
+  (`evolution_cycle_minutes`, compound mutants moving `deep_dims` knobs ±3%
+  with a rotating sweep window) re-anchors the variant sets on schedule. The
+  switch and clock persist in `data/evolution/state.json`, so 勾选自动进化
+  survives a restart, and the persisted runtime state wins over the file
+  config.
+
 - **`blitzkrieg stop` — the operator's single switch for a stack on one socket.**
   `run` had no counterpart: stopping meant hand-collecting pids, and a stack
   could outlive its owner (an orphaned core still serving its socket; a

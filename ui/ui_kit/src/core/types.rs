@@ -376,6 +376,141 @@ pub struct OrdersView {
     pub orders: Vec<OrderView>,
 }
 
+// ── shadow_evolution.proposals (E13) ────────────────────────────────────────
+
+/// One side of a proposal's comparison block. Decimals cross as strings on the
+/// wire, so `de_num` handles both forms.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradeMetricsView {
+    #[serde(default)]
+    pub closed: u32,
+    #[serde(default)]
+    pub wins: u32,
+    #[serde(default, deserialize_with = "de_num")]
+    pub win_rate: f64,
+    #[serde(default, deserialize_with = "de_num")]
+    pub payoff: f64,
+    #[serde(default, deserialize_with = "de_num")]
+    pub profit_factor: f64,
+    #[serde(default, deserialize_with = "de_num")]
+    pub net_pnl_usd: f64,
+    #[serde(default, deserialize_with = "de_num")]
+    pub gross_profit_usd: f64,
+    #[serde(default, deserialize_with = "de_num")]
+    pub gross_loss_usd: f64,
+}
+
+/// One evolvable knob's proposed move: `from → to` (string decimals).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct KnobMove {
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub to: String,
+}
+
+/// One held/historical evolution proposal, one-to-one with the core's
+/// `EvolutionProposal` wire form. `from_params`/`to_params` are knob-bags
+/// (string decimals), folded into an ordered knob-move list for rendering.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvolutionProposalView {
+    pub id: String,
+    #[serde(default)]
+    pub strategy: String,
+    #[serde(default)]
+    pub dims: Vec<String>,
+    #[serde(default)]
+    pub from_params: serde_json::Value,
+    #[serde(default)]
+    pub to_params: serde_json::Value,
+    #[serde(default)]
+    pub baseline: TradeMetricsView,
+    #[serde(default)]
+    pub variant: TradeMetricsView,
+    /// Why the evaluator held it ("higher_win_rate" / "better_profit_factor" /
+    /// "combined_improvement" — snake_case on the wire).
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default, deserialize_with = "de_num")]
+    pub confidence: f64,
+    #[serde(default)]
+    pub sample_count: u32,
+    #[serde(default)]
+    pub created_at_ms: i64,
+    #[serde(default)]
+    pub expires_at_ms: i64,
+    /// proposed | deferred | accepted | rejected | expired | superseded
+    #[serde(default)]
+    pub state: String,
+    /// user | auto (`null` while still pending).
+    #[serde(default)]
+    pub decided_by: Option<String>,
+    #[serde(default)]
+    pub decided_at_ms: Option<i64>,
+    #[serde(default)]
+    pub cycle_seq: u64,
+}
+
+impl EvolutionProposalView {
+    /// Is this proposal still awaiting a decision?
+    pub fn is_pending(&self) -> bool {
+        self.state == "proposed" || self.state == "deferred"
+    }
+
+    /// Ordered knob moves (`[(name, from, to)]`) folded from the raw bags, for
+    /// the 对比表's parameter column.
+    pub fn knob_moves(&self) -> Vec<(String, String, String)> {
+        let (serde_json::Value::Object(from), serde_json::Value::Object(to)) =
+            (&self.from_params, &self.to_params)
+        else {
+            return Vec::new();
+        };
+        let mut keys: Vec<&String> = from.keys().collect();
+        for k in to.keys() {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        keys.sort();
+        keys.into_iter()
+            .filter_map(|k| {
+                let f = from.get(k).map(|v| v.to_string().trim_matches('"').to_string());
+                let t = to.get(k).map(|v| v.to_string().trim_matches('"').to_string());
+                if f == t {
+                    return None; // unchanged knobs are not part of the proposal
+                }
+                Some((
+                    k.clone(),
+                    f.unwrap_or_else(|| "—".into()),
+                    t.unwrap_or_else(|| "—".into()),
+                ))
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct EvolutionProposalsView {
+    #[serde(default)]
+    pub proposals: Vec<EvolutionProposalView>,
+}
+
+/// The shadow-evolution control block the UIs need (from `shadow_evolution.status`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvolutionStatusView {
+    #[serde(default)]
+    pub auto_evolve: bool,
+    #[serde(default)]
+    pub last_cycle_ms: i64,
+    #[serde(default)]
+    pub next_cycle_at_ms: Option<i64>,
+    #[serde(default)]
+    pub pending_proposals: usize,
+}
+
 // ── core.event notifications (kind-tagged) ───────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
@@ -429,6 +564,18 @@ pub enum CoreEvent {
         signal: serde_json::Value,
         reason: String,
     },
+    /// E13: a variant was held as a proposal — the operator decides.
+    EvolutionProposed {
+        proposal: serde_json::Value,
+    },
+    /// E13: the 72h deep round fired.
+    #[serde(rename_all = "camelCase")]
+    EvolutionCycle {
+        cycle_seq: u64,
+        dims: usize,
+        strategies: Vec<String>,
+        at_ms: i64,
+    },
     /// Forward-compatible catch-all so a new core event never breaks the UI.
     #[serde(other)]
     Unknown,
@@ -460,6 +607,11 @@ pub struct UiSnapshot {
     pub strategy_stats: Vec<StrategyStatsRow>,
     /// E8-c 盘口深度: per-asset L2 depth (older cores omit → empty).
     pub books: Vec<AssetBooksView>,
+    /// E13: every known proposal's latest state, newest first (older cores
+    /// refuse the method → empty).
+    pub evolution_proposals: Vec<EvolutionProposalView>,
+    /// E13: the shadow-evolution control block (`None` = older core).
+    pub evolution_status: Option<EvolutionStatusView>,
     pub connected: bool,
     pub last_error: Option<String>,
 }

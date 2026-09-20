@@ -103,6 +103,15 @@ pub struct ShadowFile {
     pub max_gradient: Option<Decimal>,
     pub variant_count: Option<usize>,
     pub audit_dir: Option<String>,
+    /// E13: start in the unattended mode (a qualifying variant applies itself,
+    /// still under every guard). Defaults to false — the operator decides.
+    pub auto_evolve: Option<bool>,
+    /// Minutes between DEEP evolution rounds (the file's unit; 72h = 4320).
+    pub evolution_cycle_minutes: Option<i64>,
+    /// Minutes an undecided proposal stays decidable (7 days = 10080).
+    pub proposal_ttl_minutes: Option<i64>,
+    /// Knobs one DEEP-cycle variant moves simultaneously (>= 1).
+    pub deep_dims: Option<usize>,
 }
 
 /// Lock 1's built-in ceiling (±5% per evolution step). A config file may lower
@@ -250,6 +259,23 @@ impl FileConfig {
                     }
                     ("shadow_evolution", "audit_dir") => {
                         got(&mut self.shadow.audit_dir, string(v), &full, w)
+                    }
+                    ("shadow_evolution", "auto_evolve") => {
+                        got(&mut self.shadow.auto_evolve, bool_(v), &full, w)
+                    }
+                    ("shadow_evolution", "evolution_cycle_minutes") => {
+                        got(
+                            &mut self.shadow.evolution_cycle_minutes,
+                            int(v),
+                            &full,
+                            w,
+                        )
+                    }
+                    ("shadow_evolution", "proposal_ttl_minutes") => {
+                        got(&mut self.shadow.proposal_ttl_minutes, int(v), &full, w)
+                    }
+                    ("shadow_evolution", "deep_dims") => {
+                        got(&mut self.shadow.deep_dims, uint(v), &full, w)
                     }
                     _ => self.unknown_keys.push(full),
                 }
@@ -631,6 +657,10 @@ mod tests {
             max_gradient = 0.01
             variant_count = 5
             audit_dir = "data/evolution"
+            auto_evolve = false
+            evolution_cycle_minutes = 4320
+            proposal_ttl_minutes = 10080
+            deep_dims = 2
             "#,
         );
         assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
@@ -654,6 +684,10 @@ mod tests {
         assert_eq!(s.max_gradient, Some(dec!(0.01)));
         assert_eq!(s.variant_count, Some(5));
         assert_eq!(s.audit_dir.as_deref(), Some("data/evolution"));
+        assert_eq!(s.auto_evolve, Some(false));
+        assert_eq!(s.evolution_cycle_minutes, Some(4320));
+        assert_eq!(s.proposal_ttl_minutes, Some(10080));
+        assert_eq!(s.deep_dims, Some(2));
     }
 
     #[test]
