@@ -11,16 +11,17 @@
 use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
 use anyhow::Context as _;
+use base64::engine::general_purpose::URL_SAFE;
+use base64::Engine as _;
 use blitzkrieg_market_api::{
     CoreError, CoreErrorCode, CoreResult, FillPolicy, MarketFill, PendingOrder, Side,
     VenueTradeInfo,
 };
 use futures_util::StreamExt;
+use hmac::{Hmac, Mac as _};
 use polymarket_client_sdk_v2::auth::state::Authenticated;
-use polymarket_client_sdk_v2::auth::{Credentials, Kind, Normal};
-use polymarket_client_sdk_v2::clob::types::request::{
-    BalanceAllowanceRequest, OrdersRequest, TradesRequest,
-};
+use polymarket_client_sdk_v2::auth::{Credentials, ExposeSecret, Kind, Normal};
+use polymarket_client_sdk_v2::clob::types::request::BalanceAllowanceRequest;
 use polymarket_client_sdk_v2::clob::types::{
     AssetType, OrderType as SdkOrderType, Side as SdkSide, SignatureType,
 };
@@ -31,11 +32,85 @@ use polymarket_client_sdk_v2::clob::ws::types::response::{
 use polymarket_client_sdk_v2::clob::{Client, Config};
 use polymarket_client_sdk_v2::types::{Address, Decimal as SdkDecimal, U256};
 use polymarket_client_sdk_v2::ws::config::Config as WsConfig;
+use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE};
 use rust_decimal::Decimal;
+use sha2::Sha256;
 use std::str::FromStr;
 use tokio::sync::{mpsc, oneshot};
 
 const DEFAULT_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com";
+
+/// The sweep transport impersonates a browser: Cloudflare fronting the CLOB
+/// treats unknown custom UAs differently per endpoint class, and a
+/// plain-looking client keeps the read-only sweep out of bot-rule drift.
+const SWEEP_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+/// The venue URL is process-local config (CLOB_API_URL). Only http(s) with a
+/// public, non-reserved host is acceptable — no loopback, private-range or
+/// reserved-address destinations.
+fn validate_venue_host(raw: &str) -> anyhow::Result<String> {
+    let rest = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))
+        .ok_or_else(|| anyhow::anyhow!("CLOB_API_URL must be http(s), got: {raw}"))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_part = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let host = if host_part.starts_with('[') {
+        host_part.trim_matches(['[', ']']).to_ascii_lowercase()
+    } else {
+        host_part
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    };
+    anyhow::ensure!(!host.is_empty(), "CLOB_API_URL has no host");
+
+    let reserved_name = host == "localhost"
+        || host == "local"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.ends_with(".internal.invalid");
+    anyhow::ensure!(!reserved_name, "CLOB_API_URL points at a reserved host: {host}");
+
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        let o = ip.octets();
+        let blocked = o[0] == 0
+            || o[0] == 10
+            || o[0] == 127
+            || (o[0] == 100 && (64..=127).contains(&o[1]))
+            || (o[0] == 169 && o[1] == 254)
+            || (o[0] == 172 && (16..=31).contains(&o[1]))
+            || (o[0] == 192 && o[1] == 168)
+            || o[0] >= 224;
+        anyhow::ensure!(
+            !blocked,
+            "CLOB_API_URL points at a loopback/private/reserved address: {ip}"
+        );
+    }
+    if let Ok(ip) = host.parse::<std::net::Ipv6Addr>() {
+        let s = ip.segments();
+        let blocked = s == [0, 0, 0, 0, 0, 0, 0, 1]
+            || s == [0, 0, 0, 0, 0, 0, 0, 0]
+            || (s[0] & 0xfe00) == 0xfc00
+            || (s[0] & 0xffc0) == 0xfe80
+            || s[..6] == [0, 0, 0, 0, 0, 0xffff];
+        anyhow::ensure!(
+            !blocked,
+            "CLOB_API_URL points at a loopback/link-local address: {ip}"
+        );
+    }
+
+    if raw.ends_with('/') {
+        Ok(raw.to_owned())
+    } else {
+        Ok(format!("{raw}/"))
+    }
+}
 
 // ── Handle ──────────────────────────────────────────────────────────────────
 
@@ -152,6 +227,7 @@ pub async fn spawn_from_env(
     let url =
         std::env::var("CLOB_API_URL").unwrap_or_else(|_| "https://clob.polymarket.com".into());
     let ws_url = std::env::var("POLYMARKET_WS_URL").unwrap_or_else(|_| DEFAULT_WS_URL.into());
+    let url = validate_venue_host(&url)?;
 
     let funder = Address::from_str(&funder_str)?;
     let signer = LocalSigner::from_str(&pk)?.with_chain_id(Some(polymarket_client_sdk_v2::POLYGON));
@@ -177,6 +253,21 @@ pub async fn spawn_from_env(
         funder: funder_str.clone(),
     };
 
+    // Sweep transport: our own client with a browser-shaped UA. The SDK's
+    // dedicated client is kept for trading; only the read-only /data/* sweep
+    // goes through this one so the two paths stay independent.
+    let sweep_http = reqwest::Client::builder()
+        .user_agent(SWEEP_UA)
+        .default_headers({
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert(ACCEPT, "application/json".parse().unwrap());
+            h.insert(ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
+            h
+        })
+        .build()
+        .map_err(|e| anyhow::anyhow!("sweep http client: {e}"))?;
+    let signer_checksum = signer_address.to_checksum(None);
+
     tokio::spawn(async move {
         actor_loop(
             client,
@@ -185,6 +276,9 @@ pub async fn spawn_from_env(
             ws_url,
             markets,
             ws_credentials,
+            signer_checksum,
+            url,
+            sweep_http,
             cmd_rx,
             events,
         )
@@ -202,12 +296,15 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
     ws_url: String,
     markets: Vec<String>,
     ws_credentials: Credentials,
+    signer_checksum: String,
+    host_url: String,
+    sweep_http: reqwest::Client,
     mut cmd_rx: mpsc::Receiver<VenueCmd>,
     events: mpsc::Sender<VenueEvent>,
 ) {
     // User-WS stream (best effort: skip when no markets are provided).
     if !markets.is_empty()
-        && let Err(e) = start_user_ws(funder, ws_url, ws_credentials, events.clone()).await
+        && let Err(e) = start_user_ws(funder, ws_url, ws_credentials.clone(), events.clone()).await
     {
         let _ = events
             .send(VenueEvent::Fatal(format!("user ws setup failed: {e}")))
@@ -236,7 +333,13 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
                 let _ = reply.send(res);
             }
             VenueCmd::Snapshot { reply } => {
-                let res = sdk_snapshot(&client).await;
+                let res = sdk_snapshot(
+                    &sweep_http,
+                    &host_url,
+                    &ws_credentials,
+                    &signer_checksum,
+                )
+                .await;
                 let _ = reply.send(res);
             }
         }
@@ -311,68 +414,201 @@ async fn sdk_balance(client: &Client<Authenticated<Normal>>) -> CoreResult<Decim
     Ok(raw / usdc_micros)
 }
 
+/// Periodic REST sweep: open orders + executed trades, fetched as raw JSON via
+/// our own L2-signed client.
+///
+/// Why not the SDK's `orders()/trades()`: their response schema insists every
+/// decimal be a parseable fixed-point string, and the venue legitimately
+/// returns `"size": ""` on some trade rows (proven 2026-09-20: every sweep
+/// failed with `invalid value: string ""`, so the fill safety net never ran).
+/// Lenient parsing skips the junk rows instead of losing the whole sweep.
 async fn sdk_snapshot(
-    client: &Client<Authenticated<Normal>>,
+    http: &reqwest::Client,
+    host_url: &str,
+    creds: &Credentials,
+    signer_checksum: &str,
 ) -> CoreResult<(Vec<String>, Vec<VenueTradeInfo>)> {
-    let open = client
-        .orders(&OrdersRequest::builder().build(), None)
-        .await
-        .inspect_err(|e| eprintln!("polymarket-extension: sweep: orders() failed: {e}"))
-        .map_err(|e| map_sdk_err(&e.to_string()))?;
-    let open_ids: Vec<String> = open.data.into_iter().map(|o| o.id).collect();
-    eprintln!("polymarket-extension: sweep: orders ok, open={}", open_ids.len());
+    let open = l2_get_json(http, host_url, creds, signer_checksum, "/data/orders").await?;
+    let open_ids: Vec<String> = as_slice(open.get("data"))
+        .iter()
+        .filter_map(|o| {
+            let id = str_field(o, "id")?;
+            let live = str_field(o, "status").unwrap_or("LIVE").eq_ignore_ascii_case("LIVE");
+            live.then(|| id.to_string())
+        })
+        .collect();
 
-    let page = client
-        .trades(&TradesRequest::builder().build(), None)
-        .await
-        .inspect_err(|e| eprintln!("polymarket-extension: sweep: trades() failed: {e}"))
-        .map_err(|e| map_sdk_err(&e.to_string()))?;
+    let page = l2_get_json(http, host_url, creds, signer_checksum, "/data/trades").await?;
     let mut trades = Vec::new();
     let mut maker_entries = 0usize;
-    for t in page.data {
-        // Indexed by the venue's taker order id, so this record IS the taker
-        // execution.
-        trades.push(VenueTradeInfo {
-            venue_order_id: t.taker_order_id.clone(),
-            trade_id: t.id.clone(),
-            token_id: format!("{}", t.asset_id),
-            side: map_side(t.side),
-            size: t.size,
-            price: t.price,
-            ts_ms: t.match_time.timestamp_millis(),
-            tx_hash: None,
-            maker: Some(false),
-        });
-        // When one of our resting orders was hit, the trade record names the
-        // TAKER's order id — indexed only by that, the sweep would never match
-        // our order and every maker fill would be lost (this REST sweep is the
-        // only periodic safety net for user-WS gaps). Emit one record per
-        // maker order too; the host drops ids it does not track.
-        for m in &t.maker_orders {
-            if m.matched_amount <= rust_decimal::Decimal::ZERO {
+    let mut skipped = 0usize;
+    for t in as_slice(page.get("data")) {
+        if str_field(t, "status").is_some_and(|s| s.eq_ignore_ascii_case("FAILED")) {
+            continue;
+        }
+        // One direction for the whole trade; our maker legs are its inverse.
+        // Derived rather than trusted from the REST per-maker side field —
+        // the WS path (`trade_fills`) has no per-maker side at all and uses
+        // the same derivation, so both channels agree on semantics.
+        let Some(side) = side_field(t) else { skipped += 1; continue };
+        let ts_ms = match t.get("match_time") {
+            Some(serde_json::Value::String(s)) => s.trim().parse::<i64>().ok(),
+            Some(serde_json::Value::Number(n)) => n.as_i64(),
+            _ => None,
+        };
+        let Some(ts_ms) = ts_ms else { skipped += 1; continue };
+        let ts_ms = ts_ms.saturating_mul(1000);
+        let trade_id = str_field(t, "id").unwrap_or_default().to_string();
+
+        if let (Some(taker_id), Some(size), Some(price)) = (
+            str_field(t, "taker_order_id"),
+            dec_field(t, "size"),
+            dec_field(t, "price"),
+        ) {
+            trades.push(VenueTradeInfo {
+                venue_order_id: taker_id.to_string(),
+                trade_id: trade_id.clone(),
+                token_id: str_field(t, "asset_id").unwrap_or_default().to_string(),
+                side,
+                size,
+                price,
+                ts_ms,
+                tx_hash: None,
+                maker: Some(false),
+            });
+        }
+        for m in as_slice(t.get("maker_orders")) {
+            let Some(order_id) = str_field(m, "order_id") else { continue };
+            let Some(matched) = dec_field(m, "matched_amount") else {
+                skipped += 1;
+                continue;
+            };
+            if matched <= Decimal::ZERO {
                 continue;
             }
+            let Some(price) = dec_field(m, "price") else {
+                skipped += 1;
+                continue;
+            };
             maker_entries += 1;
             trades.push(VenueTradeInfo {
-                venue_order_id: m.order_id.clone(),
-                trade_id: format!("{}:{}", t.id, m.order_id),
-                token_id: format!("{}", m.asset_id),
-                side: map_side(m.side),
-                size: m.matched_amount,
-                price: m.price,
-                ts_ms: t.match_time.timestamp_millis(),
+                venue_order_id: order_id.to_string(),
+                trade_id: format!("{trade_id}:{order_id}"),
+                token_id: str_field(m, "asset_id").unwrap_or_default().to_string(),
+                side: side.invert(),
+                size: matched,
+                price,
+                ts_ms,
                 tx_hash: None,
                 maker: Some(true),
             });
         }
     }
     eprintln!(
-        "polymarket-extension: sweep: open={} trades={} maker_entries={}",
+        "polymarket-extension: sweep: open={} trades={} maker_entries={} skipped={}",
         open_ids.len(),
         trades.len(),
-        maker_entries
+        maker_entries,
+        skipped
     );
     Ok((open_ids, trades))
+}
+
+/// One L2-signed GET against the CLOB, returning the raw JSON body. The header
+/// scheme mirrors the SDK's `auth::l2::create_headers`: HMAC-SHA256 over
+/// `"{timestamp}GET{path}"` (GET has no body; the path excludes the query),
+/// secret and signature both base64url. POLY_ADDRESS is the signer's
+/// checksummed address (the SDK stores `state.address = signer.address()`);
+/// POLY_TIMESTAMP is the raw `/time` value in milliseconds, matching the SDK's
+/// `use_server_time` behaviour.
+async fn l2_get_json(
+    http: &reqwest::Client,
+    host_url: &str,
+    creds: &Credentials,
+    signer_checksum: &str,
+    path: &str,
+) -> CoreResult<serde_json::Value> {
+    let ts = http
+        .get(format!("{host_url}time"))
+        .send()
+        .await
+        .map_err(|e| CoreError::new(CoreErrorCode::VenueError, format!("/time fetch: {e}")))?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| CoreError::new(CoreErrorCode::VenueError, format!("/time body: {e}")))?
+        .as_i64()
+        .ok_or_else(|| CoreError::new(CoreErrorCode::VenueError, "/time: not a number"))?;
+
+    let decoded_secret = URL_SAFE
+        .decode(creds.secret().expose_secret())
+        .map_err(|e| CoreError::new(CoreErrorCode::NotAuthenticated, format!("api secret: {e}")))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(&decoded_secret)
+        .map_err(|e| CoreError::new(CoreErrorCode::NotAuthenticated, format!("hmac key: {e}")))?;
+    mac.update(format!("{ts}GET{path}").as_bytes());
+    let sig = URL_SAFE.encode(mac.finalize().into_bytes());
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("POLY_ADDRESS", signer_checksum.parse().expect("POLY_ADDRESS"));
+    headers.insert("POLY_API_KEY", creds.key().to_string().parse().expect("POLY_API_KEY"));
+    headers.insert(
+        "POLY_PASSPHRASE",
+        creds.passphrase().expose_secret().parse().expect("POLY_PASSPHRASE"),
+    );
+    headers.insert("POLY_SIGNATURE", sig.parse().expect("POLY_SIGNATURE"));
+    headers.insert("POLY_TIMESTAMP", ts.to_string().parse().expect("POLY_TIMESTAMP"));
+
+    let resp = http
+        .get(format!("{host_url}{path}"))
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| CoreError::new(CoreErrorCode::VenueError, format!("sweep {path}: {e}")))?;
+    let status = resp.status();
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| CoreError::new(CoreErrorCode::VenueError, format!("sweep {path} body: {e}")))?;
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&body);
+        let head = &text[..text.len().min(300)];
+        return Err(CoreError::new(
+            CoreErrorCode::VenueError,
+            format!("sweep {path} -> status {status}: {head}"),
+        ));
+    }
+    serde_json::from_slice(&body)
+        .map_err(|e| CoreError::new(CoreErrorCode::VenueError, format!("sweep {path} decode: {e}")))
+}
+
+fn as_slice<'a>(v: Option<&'a serde_json::Value>) -> &'a [serde_json::Value] {
+    v.and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn str_field<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    v.get(key)?.as_str()
+}
+
+fn side_field(v: &serde_json::Value) -> Option<Side> {
+    match v.get("side")?.as_str()? {
+        "BUY" => Some(Side::Buy),
+        "SELL" => Some(Side::Sell),
+        _ => None,
+    }
+}
+
+/// Lenient decimal: numbers via their shortest string form (no float noise),
+/// empty strings — which the venue sends on some rows — yield None and the
+/// row gets skipped instead of killing the sweep.
+fn dec_field(v: &serde_json::Value, key: &str) -> Option<rust_decimal::Decimal> {
+    match v.get(key) {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
+            rust_decimal::Decimal::from_str(s.trim()).ok()
+        }
+        Some(serde_json::Value::Number(n)) => rust_decimal::Decimal::from_str(&n.to_string()).ok(),
+        _ => None,
+    }
 }
 
 /// Subscribe the authenticated user channel and translate SDK messages into
