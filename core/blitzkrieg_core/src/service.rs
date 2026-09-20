@@ -2224,9 +2224,7 @@ impl Core {
                 } else {
                     Decimal::new(1, 2)
                 };
-                if let Some((_, worst)) =
-                    self.marketable_walk(o.side, &o.token_id, o.size, cap)
-                {
+                if let Some((_, worst)) = self.marketable_walk(o.side, &o.token_id, o.size, cap) {
                     let req = OrderRequest {
                         token_id: o.token_id.clone(),
                         condition_id: o.condition_id.clone(),
@@ -3048,17 +3046,11 @@ impl Core {
                         // book; the fill model's slippage dial prices the
                         // impact of our own size beyond it (identity by
                         // default → unchanged economics).
-                        let book = self
-                            .books
-                            .get(&order.token_id)
-                            .cloned()
-                            .unwrap_or_default();
+                        let book = self.books.get(&order.token_id).cloned().unwrap_or_default();
                         match book.walk_marketable(order.side, order.price, order.size) {
                             Some((vwap, _)) => {
-                                let fill_price = self
-                                    .config
-                                    .fill_model
-                                    .apply_slippage(order.side, vwap);
+                                let fill_price =
+                                    self.config.fill_model.apply_slippage(order.side, vwap);
                                 self.authoritative_fill(id, order.size, fill_price, false, now_ms)?
                             }
                             None => {

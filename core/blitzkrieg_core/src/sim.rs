@@ -97,7 +97,13 @@ impl Book {
             .iter()
             .filter(|(p, s)| crosses(*p) && *s > Decimal::ZERO)
             .map(|(p, _)| *p)
-            .reduce(|a, b| if side == Side::Buy { a.max(b) } else { a.min(b) });
+            .reduce(|a, b| {
+                if side == Side::Buy {
+                    a.max(b)
+                } else {
+                    a.min(b)
+                }
+            });
         Some((vwap, worst?))
     }
 }
@@ -254,16 +260,25 @@ mod tests {
         let (vwap, worst) = book
             .walk_marketable(Side::Sell, dec!(0.30), dec!(10))
             .expect("deep-enough bids fill the FOK");
-        assert_eq!(vwap, (dec!(8) * dec!(0.95) + dec!(2) * dec!(0.30)) / dec!(10));
+        assert_eq!(
+            vwap,
+            (dec!(8) * dec!(0.95) + dec!(2) * dec!(0.30)) / dec!(10)
+        );
         assert_eq!(worst, dec!(0.30));
         // The 0.95 level alone cannot cover 10 shares — the walk stays None
         // even though a live FOK at that limit would only have touched it.
-        assert!(book.walk_marketable(Side::Sell, dec!(0.95), dec!(10)).is_none());
+        assert!(
+            book.walk_marketable(Side::Sell, dec!(0.95), dec!(10))
+                .is_none()
+        );
         // BUY side walks asks from the bottom: 4 @ 0.35, then 6 @ 0.70.
         let (vwap3, worst3) = book
             .walk_marketable(Side::Buy, dec!(0.70), dec!(10))
             .expect("deep-enough asks fill the FOK");
-        assert_eq!(vwap3, (dec!(4) * dec!(0.35) + dec!(6) * dec!(0.70)) / dec!(10));
+        assert_eq!(
+            vwap3,
+            (dec!(4) * dec!(0.35) + dec!(6) * dec!(0.70)) / dec!(10)
+        );
         assert_eq!(worst3, dec!(0.70));
     }
 

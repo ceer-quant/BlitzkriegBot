@@ -300,10 +300,12 @@ mod tests {
         assert_eq!(ome.get("c1").unwrap().filled_size, dec!(6));
         // A second identical sweep stays stable (no re-application).
         let again = reconcile(&mut ome, &snap).unwrap();
-        assert!(again
-            .actions
-            .iter()
-            .all(|a| !matches!(a, ReconcileAction::FilledGap { .. })));
+        assert!(
+            again
+                .actions
+                .iter()
+                .all(|a| !matches!(a, ReconcileAction::FilledGap { .. }))
+        );
         assert_eq!(ome.get("c1").unwrap().filled_size, dec!(6));
     }
 
