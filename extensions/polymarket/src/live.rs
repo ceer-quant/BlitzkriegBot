@@ -141,7 +141,10 @@ pub async fn spawn_if_configured(
                         })
                         .await;
                     }
+                    // Always loud on failure — a silent sweep is exactly the
+                    // blind-safety-net failure mode this loop exists to catch.
                     Err(e) => {
+                        eprintln!("polymarket-extension: sweep failed: {e}");
                         host.report_error(e).await;
                     }
                 }
