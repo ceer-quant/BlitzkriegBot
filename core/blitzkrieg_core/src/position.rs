@@ -6,7 +6,8 @@
 //! the open/closed books, daily PnL, and per-asset/direction cooldowns.
 
 use crate::exit_policy::{
-    ExitConfig, ExitState, ExitTickInput, decide_exit, executable_bid, pnl_pct, update_exit_state,
+    ExitConfig, ExitState, ExitTickInput, decide_exit, executable_bid, pnl_pct, reference_price,
+    update_exit_state,
 };
 use crate::model::{ExitReason, OrderRole, OrderbookSnapshot, Side, SignalDirection};
 
@@ -114,6 +115,12 @@ pub struct OpenPosition {
     pub target_exit_price: Option<Decimal>,
     pub entered_at_ms: i64,
     pub expires_at_ms: i64,
+    /// F6: when the exit path last received a book for this token (ms epoch).
+    /// A forced exit may consult it to refuse pricing off a stale quote; it is
+    /// `0` until the first book arrives (serde default keeps old snapshots
+    /// loading as "no book seen since restart").
+    #[serde(default)]
+    pub last_book_ts: i64,
     pub state: ExitState,
     /// Actual cash flows since the position opened. Snapshots written before E17
     /// carry the serde default (all zero) and are repaired by [`OpenPosition::flows`].
@@ -307,6 +314,7 @@ impl PositionManager {
             target_exit_price: p.target_exit_price,
             entered_at_ms: now_ms,
             expires_at_ms: p.expires_at_ms,
+            last_book_ts: 0,
             state: ExitState::new(p.entry_price, now_ms),
             flows: CashFlows::default(),
         };
@@ -428,6 +436,11 @@ impl PositionManager {
     /// Update a single position's exit state AND its `current_price` from a book.
     /// This is what makes the UI's unrealized PnL move; it must run independently
     /// of whether automated exits are enabled.
+    ///
+    /// F6: `current_price` is a REFERENCE valuation (bid, else two-sided mid,
+    /// else the stale value) — the dashboard may keep showing it. It is never
+    /// again a substitute for an executable quote: exit decisions and SELL fills
+    /// price off `executable_bid`, which is zero when no bid quotes.
     fn valuate_one(
         pos: &mut OpenPosition,
         book: Option<&OrderbookSnapshot>,
@@ -435,10 +448,19 @@ impl PositionManager {
         cfg: &ExitConfig,
     ) {
         update_exit_state(&mut pos.state, pos.entry_price, book, now_ms, cfg);
-        let val = executable_bid(book);
+        let val = reference_price(book, pos.current_price);
         if val > Decimal::ZERO && pos.current_price != val {
             pos.prev_price = pos.current_price;
             pos.current_price = val;
+        }
+        // Track the freshness of the last book the valuation actually saw: the
+        // SNAPSHOT's own receive time when the caller supplies one (backtest /
+        // replay), else `now`. The exit path uses this to refuse pricing a SELL
+        // off a stale quote. NOTE: the live service rebuilds cached snapshots
+        // with `timestamp = now_ms`, which always looks fresh — preserving the
+        // real receive time through that cache is a service-layer follow-up.
+        if let Some(b) = book {
+            pos.last_book_ts = if b.timestamp > 0 { b.timestamp } else { now_ms };
         }
     }
 
@@ -466,14 +488,24 @@ impl PositionManager {
         for pos in self.open.iter_mut() {
             let book = books(&pos.token_id);
             Self::valuate_one(pos, book.as_ref(), now_ms, &cfg);
+            // F6: the exit price is an EXECUTABLE bid or nothing. The old code
+            // fell back to `pos.current_price` — a stale reference that could
+            // be an arbitrary number of seconds old, or a one-sided-book
+            // phantom — and let forced exits book profit no buyer was offering.
+            // No bid ⇒ no exit request this tick; the position stays open until
+            // either a bid appears or expiry settles it.
             let exit_price = executable_bid(book.as_ref());
-            let exit_price = if exit_price > Decimal::ZERO {
-                exit_price
-            } else if pos.current_price > Decimal::ZERO {
-                pos.current_price
-            } else {
+            if exit_price <= Decimal::ZERO {
                 continue;
-            };
+            }
+            // A book older than the staleness budget is not a quote either: a
+            // bid captured minutes ago is not a buyer standing here now.
+            if let Some(b) = book.as_ref()
+                && b.timestamp > 0
+                && now_ms - b.timestamp > cfg.max_book_age_sec * 1000
+            {
+                continue;
+            }
             let time_left_sec = (pos.expires_at_ms - now_ms) / 1000;
             let hold_sec = (now_ms - pos.entered_at_ms) / 1000;
 
@@ -555,11 +587,12 @@ impl PositionManager {
 
         // Shares with no exit fill of their own (a direct close, or the sub-grid
         // remainder) are priced here, so they must carry a fee here too — at the
-        // role of the order the caller just placed.
+        // role of the order the caller just placed. F8: the fee follows the
+        // configured fee model, not a hard-wired curve.
         let dust_fee = if was_maker {
             Decimal::ZERO
         } else {
-            (crate::exit_policy::taker_fee_pct(exit_price) / Decimal::ONE_HUNDRED) * dust_notional
+            (self.config.exit.fee_model.fee_pct(exit_price) / Decimal::ONE_HUNDRED) * dust_notional
         };
 
         let cost = pos.flows.entry_cost_usd;
@@ -765,6 +798,164 @@ mod tests {
         };
         pm.apply_entry_fill(&pos.id, shares, price, fee, role)
             .unwrap()
+    }
+
+    fn one_sided_book(ask: Decimal, ts: i64) -> OrderbookSnapshot {
+        // F6 regression fixture: NO bids at all, only an ask. The old mid
+        // arithmetic turned this into a phantom sellable price of ask/2.
+        OrderbookSnapshot::from_levels("tok_BTC".to_string(), vec![], vec![(ask, dec!(100))], ts)
+    }
+
+    fn two_sided_book(bid: Decimal, ask: Decimal, ts: i64) -> OrderbookSnapshot {
+        OrderbookSnapshot::from_levels(
+            "tok_BTC".to_string(),
+            vec![(bid, dec!(100))],
+            vec![(ask, dec!(100))],
+            ts,
+        )
+    }
+
+    /// F6: with no buyer in the book, no exit request may be produced at all —
+    /// not from the mid, not from the stale `current_price`. Deadline pressure
+    /// (force-exit territory) included.
+    #[test]
+    fn no_bid_mint_no_exit_request_even_at_deadline() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
+        // 10 s before expiry: a live bid would fire ForceExit immediately.
+        let now = p.expires_at_ms - 10_000;
+        let reqs = pm.check_exits(
+            &|token| {
+                if token == "tok_BTC" {
+                    Some(one_sided_book(dec!(0.90), now))
+                } else {
+                    None
+                }
+            },
+            now,
+        );
+        assert!(
+            reqs.is_empty(),
+            "no bid ⇒ no sellable quote ⇒ no exit request"
+        );
+
+        // Sanity: the same tick WITH a real bid still exits (gate works both ways).
+        let reqs = pm.check_exits(
+            &|token| {
+                if token == "tok_BTC" {
+                    Some(two_sided_book(dec!(0.50), dec!(0.52), now))
+                } else {
+                    None
+                }
+            },
+            now,
+        );
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            reqs[0].exit_price,
+            dec!(0.50),
+            "exit prices off the live bid"
+        );
+    }
+
+    /// F6: a stale bid is not a buyer standing here now — an expired book must
+    /// not price a forced exit at an old price.
+    #[test]
+    fn stale_book_does_not_price_a_forced_exit() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
+        let now = p.expires_at_ms - 10_000;
+        // Bid 0.60 captured 2 minutes ago (budget: default 60 s).
+        let stale = now - 120_000;
+        let reqs = pm.check_exits(
+            &|token| {
+                if token == "tok_BTC" {
+                    Some(two_sided_book(dec!(0.60), dec!(0.62), stale))
+                } else {
+                    None
+                }
+            },
+            now,
+        );
+        assert!(reqs.is_empty(), "stale book must not price an exit");
+        assert_eq!(pos_book_ts(&pm, &p.id), stale, "last book seen is recorded");
+
+        // The same bid, received NOW, is executable again.
+        let reqs = pm.check_exits(
+            &|token| {
+                if token == "tok_BTC" {
+                    Some(two_sided_book(dec!(0.60), dec!(0.62), now))
+                } else {
+                    None
+                }
+            },
+            now,
+        );
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].exit_price, dec!(0.60));
+    }
+
+    fn pos_book_ts(pm: &PositionManager, id: &str) -> i64 {
+        pm.open_positions()
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.last_book_ts)
+            .unwrap_or(0)
+    }
+
+    /// F8: the configured fee model drives the close-path (dust) fee. 0.1
+    /// unsold share written off at 0.60 taker: legacy 1.2% of price vs official
+    /// crypto 0.07*(1-0.6)*100% = 2.8% of price → dust fee differs by
+    /// 1.6% * (0.60 * 0.1) = $0.00096.
+    #[test]
+    fn close_dust_fee_follows_the_fee_model() {
+        let dust_fee = |model: crate::exit_policy::FeeModel| -> Decimal {
+            let mut pm = PositionManager::new(PositionConfig {
+                exit: crate::exit_policy::ExitConfig {
+                    fee_model: model,
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            let p = enter(
+                &mut pm,
+                params("BTC", SignalDirection::Up, dec!(0.4)),
+                OrderRole::Maker,
+                0,
+            );
+            // Sell 9.90 of 10 shares (sub-grid remainder stays) as a taker; the
+            // partial's own fee is identical in both runs and cancels out.
+            let exit_fee = (crate::exit_policy::FeeModel::LegacyQuadratic.fee_pct(dec!(0.6))
+                / Decimal::ONE_HUNDRED)
+                * dec!(0.6)
+                * dec!(9.9);
+            pm.apply_exit_fill(&p.id, dec!(9.9), dec!(0.6), exit_fee, OrderRole::Taker)
+                .unwrap();
+            let closed = pm
+                .close(&p.id, dec!(0.60), ExitReason::Manual, false, 1000)
+                .unwrap();
+            closed.net_pnl_usd
+        };
+        // The only difference between the two runs is the dust fee schedule.
+        // legacy dust: 1.2% * (0.60 * 0.1) = 0.00072
+        // crypto dust: 2.8% * (0.60 * 0.1) = 0.00168
+        let legacy = dust_fee(crate::exit_policy::FeeModel::LegacyQuadratic);
+        let crypto = dust_fee(crate::exit_policy::FeeModel::PolymarketCrypto);
+        assert_eq!(
+            legacy - crypto,
+            dec!(0.00096),
+            "net = gross − fees, per model"
+        );
     }
 
     #[test]

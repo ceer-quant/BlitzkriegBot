@@ -2334,7 +2334,8 @@ impl Core {
             let fee_pct = if d.role.is_maker() {
                 Decimal::ZERO
             } else {
-                crate::exit_policy::taker_fee_pct(px)
+                // F8: fees follow the configured fee model (ExitConfig.fee_model).
+                self.config.positions.exit.fee_model.fee_pct(px)
             };
             fee_usd = (fee_pct / Decimal::ONE_HUNDRED) * notional;
             match d.side {
@@ -2654,7 +2655,9 @@ impl Core {
             let fee_usd = if t.maker == Some(true) {
                 Decimal::ZERO
             } else {
-                (crate::exit_policy::taker_fee_pct(t.price) / Decimal::ONE_HUNDRED) * notional
+                // F8: fees follow the configured fee model (ExitConfig.fee_model).
+                (self.config.positions.exit.fee_model.fee_pct(t.price) / Decimal::ONE_HUNDRED)
+                    * notional
             };
             self.ledger.settle_sell_fill(notional, fee_usd);
             let role = if t.maker == Some(true) {
