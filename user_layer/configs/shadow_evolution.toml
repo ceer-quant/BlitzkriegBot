@@ -40,7 +40,7 @@
 # `strategy` argument.
 
 [shadow_evolution]
-enabled = false                      # default OFF (opt-in)
+enabled = true                       # E13 acceptance window opened 2026-09-20 (PR #154 merged); 30-day shadow corpus, auto_evolve stays manual
 evaluation_window_minutes = 30       # rolling metrics window
 min_sample_count = 30                # >=30 virtual trades before judging
 min_win_rate_improvement = 0.05      # variant WR must beat live by +5pp

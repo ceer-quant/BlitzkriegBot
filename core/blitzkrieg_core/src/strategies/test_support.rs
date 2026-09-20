@@ -17,7 +17,7 @@ use super::shadow_twin::ShadowFactory;
 use super::{EngineStrategy, GateExemptions, StrategyCtx};
 use crate::model::OrderbookSnapshot;
 use crate::shadow_evolution::{KnobSpec, ParamRegistry, StrategyParams};
-use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
+use crate::signal::{MeanReversionConfig, SpreadArbConfig, TradeSignal, TrendConfig};
 use arc_swap::ArcSwap;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
@@ -173,7 +173,12 @@ impl EngineStrategy for TestSpreadArb {
         }))
     }
 
-    fn on_config(&mut self, trend: &TrendConfig, spread_arb: &SpreadArbConfig) {
+    fn on_config(
+        &mut self,
+        trend: &TrendConfig,
+        spread_arb: &SpreadArbConfig,
+        _mean_reversion: &MeanReversionConfig,
+    ) {
         self.cfg = spread_arb.clone();
         self.trend_cfg = trend.clone();
         self.trend.set_config(trend.clone());
@@ -510,9 +515,23 @@ impl EngineStrategy for TestMeanReversion {
                 "entryFactor": cfg.entry_factor.to_string(),
                 "maxSpreadPct": cfg.max_spread_pct.to_string(),
                 "cooldownSec": cfg.cooldown_sec,
+                "entryMinObi": cfg.entry_min_obi.to_string(),
+                "entryBounceMinPct": cfg.entry_bounce_min_pct.to_string(),
+                "entryBounceWindowSec": cfg.entry_bounce_window_sec,
+                "entryDropMaxPct": cfg.entry_drop_max_pct.to_string(),
             })
             .to_string(),
         )
+    }
+
+    fn on_config(
+        &mut self,
+        _trend: &crate::signal::TrendConfig,
+        _spread_arb: &crate::signal::SpreadArbConfig,
+        mean_reversion: &crate::signal::MeanReversionConfig,
+    ) {
+        self.cfg = mean_reversion.clone();
+        self.sync_tracker_cfg();
     }
 
     fn shadow_factory(&self) -> Option<Box<dyn ShadowFactory>> {

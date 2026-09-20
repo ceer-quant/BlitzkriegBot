@@ -84,6 +84,21 @@ pub struct CoreConfig {
     pub spread_arb_entry_bounce_min_pct: Option<Decimal>,
     /// Turn-filter lookback window (sec); `None` = default 5.
     pub spread_arb_entry_bounce_window_sec: Option<i64>,
+    /// mean_reversion knobs (same chain as the spread_arb ones): `None` keeps
+    /// the shipped default in [`crate::signal::MeanReversionConfig`]; a value
+    /// overrides it in `engine_config`, so a sweep varies the fade leg purely
+    /// through config.
+    pub mean_rev_lookback_sec: Option<i64>,
+    pub mean_rev_min_drop_pct: Option<Decimal>,
+    pub mean_rev_max_price: Option<Decimal>,
+    pub mean_rev_entry_factor: Option<Decimal>,
+    pub mean_rev_max_spread_pct: Option<Decimal>,
+    pub mean_rev_cooldown_sec: Option<i64>,
+    pub mean_rev_entry_min_obi: Option<Decimal>,
+    pub mean_rev_entry_bounce_min_pct: Option<Decimal>,
+    /// Turn-filter lookback window (sec); `None` = default 5.
+    pub mean_rev_entry_bounce_window_sec: Option<i64>,
+    pub mean_rev_entry_drop_max_pct: Option<Decimal>,
     /// Start Rust-native WS feeds (P4): Polymarket orderbook + Binance spot.
     /// When enabled Node no longer has to push `books.*` / `spot.price`.
     pub feed_ws_enabled: bool,
@@ -181,6 +196,40 @@ impl CoreConfig {
                     sa.entry_bounce_window_sec = v;
                 }
                 sa
+            },
+            mean_reversion: {
+                let mut mr = crate::signal::MeanReversionConfig::default();
+                if let Some(v) = self.mean_rev_lookback_sec {
+                    mr.lookback_sec = v;
+                }
+                if let Some(v) = self.mean_rev_min_drop_pct {
+                    mr.min_drop_pct = v;
+                }
+                if let Some(v) = self.mean_rev_max_price {
+                    mr.max_price = v;
+                }
+                if let Some(v) = self.mean_rev_entry_factor {
+                    mr.entry_factor = v;
+                }
+                if let Some(v) = self.mean_rev_max_spread_pct {
+                    mr.max_spread_pct = v;
+                }
+                if let Some(v) = self.mean_rev_cooldown_sec {
+                    mr.cooldown_sec = v;
+                }
+                if let Some(v) = self.mean_rev_entry_min_obi {
+                    mr.entry_min_obi = v;
+                }
+                if let Some(v) = self.mean_rev_entry_bounce_min_pct {
+                    mr.entry_bounce_min_pct = v;
+                }
+                if let Some(v) = self.mean_rev_entry_bounce_window_sec {
+                    mr.entry_bounce_window_sec = v;
+                }
+                if let Some(v) = self.mean_rev_entry_drop_max_pct {
+                    mr.entry_drop_max_pct = v;
+                }
+                mr
             },
             size_usd: self.size_usd,
             min_shares: self.min_shares,
@@ -451,6 +500,16 @@ impl Default for CoreConfig {
             spread_arb_entry_dip_max_pct: None,
             spread_arb_entry_bounce_min_pct: None,
             spread_arb_entry_bounce_window_sec: None,
+            mean_rev_lookback_sec: None,
+            mean_rev_min_drop_pct: None,
+            mean_rev_max_price: None,
+            mean_rev_entry_factor: None,
+            mean_rev_max_spread_pct: None,
+            mean_rev_cooldown_sec: None,
+            mean_rev_entry_min_obi: None,
+            mean_rev_entry_bounce_min_pct: None,
+            mean_rev_entry_bounce_window_sec: None,
+            mean_rev_entry_drop_max_pct: None,
             feed_ws_enabled: false,
             market_plugin: None,
             binance_assets: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],

@@ -711,9 +711,12 @@ mod tests {
         assert_eq!(cfg.round_sec, Some(900));
         assert_eq!(cfg.min_round_age_sec, Some(30));
         assert_eq!(cfg.min_time_left_sec, Some(180));
-        // Loaded from the sibling file, not invented.
+        // Loaded from the sibling file, not invented. enabled=true is the E13
+        // acceptance window opened 2026-09-20 (PR #154 merged): the shadow
+        // corpus accumulates toward the 30-day premise; auto_evolve stays
+        // manual, so nothing evolves without sign-off.
         let s = &cfg.shadow;
-        assert_eq!(s.enabled, Some(false));
+        assert_eq!(s.enabled, Some(true));
         assert_eq!(s.evaluation_window_minutes, Some(30));
         assert_eq!(s.min_sample_count, Some(30));
         assert_eq!(s.min_win_rate_improvement, Some(dec!(0.05)));

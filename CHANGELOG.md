@@ -199,6 +199,50 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   arguments` on existing strategy/venue entry points, `large_enum_variant` on
   `ReconcileAction`). Contributors now get a red build for a new warning.
 
+- **`mean_reversion` is rebuilt the same way as `spread_arb`: two adopted
+  defaults take the fade leg from WR 32% / PF 0.68 to WR 82% / PF 4.68
+  (E17).** Same method, same discipline as the E15 tune: knob changes through
+  the standard chain, a frozen full-archive walk-forward sweep, and the
+  ≥2-metrics A/B gate. The adopted diff against the shipped build is exactly
+  two values: `mean_reversion.entry_factor 0.98 → 0.80`
+  (rest 20% under the already-crashed mid — the fill must be a capitulation
+  wick handing the bid a price the crash's close never offered; the entry
+  pricing rule itself is untouched) and the engine-level
+  `exit.min_trail_pct 8 → 5` (exits belong to the kernel, so the new floor
+  affects every strategy and was therefore re-verified in the two-leg
+  production shape). Evidence, deterministic replay of the frozen
+  2026-09-19..20 archive (3,593,457 events, 0.75 days, mean_reversion alone,
+  identity fill model): 213 closed / 81.69% win / payoff 1.049 / PF 4.68 /
+  net +$66.00 / max drawdown $3.37 vs the shipped anchor's 174 / 31.61% /
+  1.476 / 0.68 / −$21.19 / $26.25. A/B verdict **PASS — 4 metrics better**
+  (win rate, PF, net, max drawdown), 2 worse and reported as such: payoff
+  1.48 → 1.05 and fees +$7.21 — the "count for quality" price of buying
+  deeper. The loss anatomy that drove it: at the shipped settings the
+  StopLoss leg was 79 of 196 closed trades and 100% of the losses (−$43.17)
+  — the adopted config cuts it to 29 losing stops (−$16.43). Two-leg
+  production shape with pure defaults replays to +$113.90 net
+  (spread_arb 119 closed / 74.8% / +$57.68; mean_reversion 154 / 85.7% /
+  +$56.22) vs +$18.20 for the shipped-everything shape. Plumbing added
+  alongside, defaults byte-for-byte unless used: `meanRev` now rides the
+  kernel's `on_config` package to dylibs (nested block, overlay order
+  kernel → hot bag), ten `--mean-rev-*` CLI flags and the matching
+  `CoreConfig` fields (a sweep varies the fade leg purely through config),
+  four engine-level `--exit-{take-profit,stop-loss,trailing-min-high,
+  min-trail}-pct` flags on `main.rs`, and `walk-forward-sweep.mjs` grows
+  `--strategy <leg>` isolation and a `--strategy-dir <dir>` private dylib
+  pin (a parallel session rebuilding `user_layer/strategies` from another
+  branch silently replaces the shared cdylibs — round-2 measured shipped
+  defaults for half its grid before the pin). Axes measured inert and
+  honestly dropped: the OBI floor never fires on crash books (byte-identical
+  across 0/−0.3/−0.5 — opposite direction from spread_arb's useful gate) and
+  min_drop_pct 10 vs 15 selects the same population; earlier trail arming
+  (`trailing_min_high_pct` 15 → 8/10) was measured and rejected — it converts
+  late-arming winners into small losers. Sweep products in
+  `data/evolution/sweeps/e17-mean-rev/{a,b,round2,c,round3,round4,ab-final}`.
+  Honest boundaries carried over from E15: the frozen corpus covers 0.75
+  days, so this validates the METHOD, not the 30-day premise (the E13 shadow
+  window is now open to accumulate it); KI-1 dry economics caveat stands.
+
 ## [0.2.0] - 2026-09-17
 
 ### Removed

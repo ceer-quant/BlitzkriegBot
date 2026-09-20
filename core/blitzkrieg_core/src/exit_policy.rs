@@ -77,10 +77,13 @@ impl Default for ExitConfig {
             stop_min_pct: dec!(10),
             trailing_enabled: true,
             trailing_min_high_pct: dec!(15),
-            // Node uses 10. A canonical sweep shows 8 locks profit slightly sooner
-            // and raises net at essentially unchanged PF; 6 gains only ~$0.5 more
-            // (within noise) at a bigger deviation from Node, so 8 is the pick.
-            min_trail_pct: dec!(8),
+            // Node uses 10; the shipped 8 came from the canonical exit sweep.
+            // The E17 exit ladder re-picks it on the full archive: a 5% floor
+            // sells the first pullback higher, banking the post-crash bounce
+            // instead of round-tripping it (fade leg +$29.54 vs +$20.23 at
+            // equal entry settings) and lifts the trend leg too (two-leg net
+            // +$37.25 -> +$57.68) — an 8%+ floor let winners give too much back.
+            min_trail_pct: dec!(5),
             proportional_trail_enabled: true,
             proportional_trail_pct: dec!(15),
             proportional_trail_min_pct: dec!(15),

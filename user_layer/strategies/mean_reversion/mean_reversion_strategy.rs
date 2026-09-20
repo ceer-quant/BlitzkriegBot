@@ -22,10 +22,10 @@
 //! the bet, and a crash on the bet's own asset moves spot against it by
 //! construction. Every honoured exemption is recorded per order by the kernel.
 //!
-//! The kernel's `on_config` package (`{"trend":…, "spreadArb":…}`) contains no
-//! `mean_reversion` fields, so this strategy's config arrives only through the
+//! The kernel's `on_config` package (`{"trend":…, "spreadArb":…, "meanRev":…}`)
+//! overlays this strategy's config through the nested `meanRev` block; the
 //! shadow-evolution hot bag (its own snake_case knob names as decimal strings)
-//! — `on_params` accepts exactly that.
+//! overlays on top — `on_params` accepts both.
 
 use blitzkrieg_strategy_api::{
     BookUpdate, Break, Entry, FreshBook, Intents, Knob, ParamBag, RoundContext, RoundInfo,
@@ -89,6 +89,44 @@ impl MeanReversion {
     }
 
     fn apply_bag(&mut self, p: &ParamBag) {
+        // The kernel config package arrives as {"trend":…, "spreadArb":…,
+        // "meanRev":…}; the nested meanRev block is the host config in force.
+        if let Some(j) = p.get_str("meanRev")
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(j)
+        {
+            let mut pkg = StrategyParams::new();
+            let key_of = |camel: &str| -> Option<&'static str> {
+                Some(match camel {
+                    "lookbackSec" => "lookback_sec",
+                    "minDropPct" => "min_drop_pct",
+                    "maxPrice" => "max_price",
+                    "entryFactor" => "entry_factor",
+                    "maxSpreadPct" => "max_spread_pct",
+                    "cooldownSec" => "cooldown_sec",
+                    "entryMinObi" => "entry_min_obi",
+                    "entryBounceMinPct" => "entry_bounce_min_pct",
+                    "entryBounceWindowSec" => "entry_bounce_window_sec",
+                    "entryDropMaxPct" => "entry_drop_max_pct",
+                    _ => return None,
+                })
+            };
+            if let Some(obj) = v.as_object() {
+                for (k, value) in obj {
+                    let Some(name) = key_of(k) else { continue };
+                    // Exact decimals ride as strings; integers as numbers.
+                    if let Some(s) = value.as_str()
+                        && let Ok(d) = Decimal::from_str_exact(s)
+                    {
+                        pkg.set(name, d);
+                    } else if let Some(i) = value.as_i64() {
+                        pkg.set(name, Decimal::from(i));
+                    }
+                }
+            }
+            let cfg = mean_reversion_apply_knobs(&self.cfg, &pkg);
+            self.tracker.set_config(cfg.clone());
+            self.cfg = cfg;
+        }
         let mut bag = StrategyParams::new();
         for name in p.0.keys() {
             if let Some(d) = p.get_dec(name) {
@@ -106,7 +144,7 @@ impl SafeStrategy for MeanReversion {
         "mean_reversion"
     }
     fn version(&self) -> &str {
-        "0.2.0"
+        "0.3.0"
     }
 
     fn on_book(&mut self, u: &BookUpdate) {
@@ -270,6 +308,10 @@ fn config_view_json(cfg: &MeanReversionConfig) -> serde_json::Value {
         "entryFactor": cfg.entry_factor.to_string(),
         "maxSpreadPct": cfg.max_spread_pct.to_string(),
         "cooldownSec": cfg.cooldown_sec,
+        "entryMinObi": cfg.entry_min_obi.to_string(),
+        "entryBounceMinPct": cfg.entry_bounce_min_pct.to_string(),
+        "entryBounceWindowSec": cfg.entry_bounce_window_sec,
+        "entryDropMaxPct": cfg.entry_drop_max_pct.to_string(),
     })
 }
 

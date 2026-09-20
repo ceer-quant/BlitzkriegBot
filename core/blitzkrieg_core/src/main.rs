@@ -42,7 +42,14 @@
 //!                   [strategy knobs: --trend-confirm-sec --spread-arb-entry-factor
 //!                    --spread-arb-min-obi --spread-arb-max-spread-pct
 //!                    --spread-arb-dip-max-pct --spread-arb-bounce-min-pct
-//!                    --spread-arb-bounce-window-sec]
+//!                    --spread-arb-bounce-window-sec
+//!                    --mean-rev-lookback-sec --mean-rev-min-drop-pct
+//!                    --mean-rev-max-price --mean-rev-entry-factor
+//!                    --mean-rev-max-spread-pct --mean-rev-cooldown-sec
+//!                    --mean-rev-min-obi --mean-rev-bounce-min-pct
+//!                    --mean-rev-bounce-window-sec --mean-rev-drop-max-pct
+//!                    --exit-take-profit-pct --exit-stop-loss-pct
+//!                    --exit-trailing-min-high-pct --exit-min-trail-pct]
 //!   The knobs flow through CoreConfig → engine_config, the same mapping the
 //!   live server uses, so a sweep is a pure CLI variation with no rebuild (E15).
 //!
@@ -84,6 +91,22 @@ struct Args {
     spread_arb_dip_max_pct: Option<Decimal>,
     spread_arb_bounce_min_pct: Option<Decimal>,
     spread_arb_bounce_window_sec: Option<i64>,
+    mean_rev_lookback_sec: Option<i64>,
+    mean_rev_min_drop_pct: Option<Decimal>,
+    mean_rev_max_price: Option<Decimal>,
+    mean_rev_entry_factor: Option<Decimal>,
+    mean_rev_max_spread_pct: Option<Decimal>,
+    mean_rev_cooldown_sec: Option<i64>,
+    mean_rev_min_obi: Option<Decimal>,
+    mean_rev_bounce_min_pct: Option<Decimal>,
+    mean_rev_bounce_window_sec: Option<i64>,
+    mean_rev_drop_max_pct: Option<Decimal>,
+    // Exit-policy overrides (engine-level — exits belong to the kernel, not to
+    // any strategy dylib). Defaults leave the shipped ExitConfig byte-for-byte.
+    exit_take_profit_pct: Option<Decimal>,
+    exit_stop_loss_pct: Option<Decimal>,
+    exit_trailing_min_high_pct: Option<Decimal>,
+    exit_min_trail_pct: Option<Decimal>,
     feed_ws: bool,
     replay: Option<String>,
     replay_near_miss: Option<String>,
@@ -356,6 +379,20 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut spread_arb_dip_max_pct: Option<Decimal> = None;
     let mut spread_arb_bounce_min_pct: Option<Decimal> = None;
     let mut spread_arb_bounce_window_sec: Option<i64> = None;
+    let mut mean_rev_lookback_sec: Option<i64> = None;
+    let mut mean_rev_min_drop_pct: Option<Decimal> = None;
+    let mut mean_rev_max_price: Option<Decimal> = None;
+    let mut mean_rev_entry_factor: Option<Decimal> = None;
+    let mut mean_rev_max_spread_pct: Option<Decimal> = None;
+    let mut mean_rev_cooldown_sec: Option<i64> = None;
+    let mut mean_rev_min_obi: Option<Decimal> = None;
+    let mut mean_rev_bounce_min_pct: Option<Decimal> = None;
+    let mut mean_rev_bounce_window_sec: Option<i64> = None;
+    let mut mean_rev_drop_max_pct: Option<Decimal> = None;
+    let mut exit_take_profit_pct: Option<Decimal> = None;
+    let mut exit_stop_loss_pct: Option<Decimal> = None;
+    let mut exit_trailing_min_high_pct: Option<Decimal> = None;
+    let mut exit_min_trail_pct: Option<Decimal> = None;
     let mut feed_ws = false;
     let mut replay: Option<String> = None;
     let mut replay_near_miss: Option<String> = None;
@@ -531,6 +568,48 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             }
             "--spread-arb-bounce-window-sec" => {
                 spread_arb_bounce_window_sec = it.next().and_then(|v| v.parse().ok())
+            }
+            "--mean-rev-lookback-sec" => {
+                mean_rev_lookback_sec = it.next().and_then(|v| v.parse().ok())
+            }
+            "--mean-rev-min-drop-pct" => {
+                mean_rev_min_drop_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--mean-rev-max-price" => {
+                mean_rev_max_price = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--mean-rev-entry-factor" => {
+                mean_rev_entry_factor = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--mean-rev-max-spread-pct" => {
+                mean_rev_max_spread_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--mean-rev-cooldown-sec" => {
+                mean_rev_cooldown_sec = it.next().and_then(|v| v.parse().ok())
+            }
+            "--mean-rev-min-obi" => {
+                mean_rev_min_obi = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--mean-rev-bounce-min-pct" => {
+                mean_rev_bounce_min_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--mean-rev-bounce-window-sec" => {
+                mean_rev_bounce_window_sec = it.next().and_then(|v| v.parse().ok())
+            }
+            "--mean-rev-drop-max-pct" => {
+                mean_rev_drop_max_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--exit-take-profit-pct" => {
+                exit_take_profit_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--exit-stop-loss-pct" => {
+                exit_stop_loss_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--exit-trailing-min-high-pct" => {
+                exit_trailing_min_high_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--exit-min-trail-pct" => {
+                exit_min_trail_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
             }
             "--regime-eval" => regime_eval = it.next(),
             "--regime-report" => regime_report = it.next(),
@@ -844,6 +923,20 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         spread_arb_dip_max_pct,
         spread_arb_bounce_min_pct,
         spread_arb_bounce_window_sec,
+        mean_rev_lookback_sec,
+        mean_rev_min_drop_pct,
+        mean_rev_max_price,
+        mean_rev_entry_factor,
+        mean_rev_max_spread_pct,
+        mean_rev_cooldown_sec,
+        mean_rev_min_obi,
+        mean_rev_bounce_min_pct,
+        mean_rev_bounce_window_sec,
+        mean_rev_drop_max_pct,
+        exit_take_profit_pct,
+        exit_stop_loss_pct,
+        exit_trailing_min_high_pct,
+        exit_min_trail_pct,
         feed_ws,
         replay,
         replay_near_miss,
@@ -1294,14 +1387,37 @@ async fn main() -> anyhow::Result<()> {
         spread_arb_entry_dip_max_pct: args.spread_arb_dip_max_pct,
         spread_arb_entry_bounce_min_pct: args.spread_arb_bounce_min_pct,
         spread_arb_entry_bounce_window_sec: args.spread_arb_bounce_window_sec,
+        mean_rev_lookback_sec: args.mean_rev_lookback_sec,
+        mean_rev_min_drop_pct: args.mean_rev_min_drop_pct,
+        mean_rev_max_price: args.mean_rev_max_price,
+        mean_rev_entry_factor: args.mean_rev_entry_factor,
+        mean_rev_max_spread_pct: args.mean_rev_max_spread_pct,
+        mean_rev_cooldown_sec: args.mean_rev_cooldown_sec,
+        mean_rev_entry_min_obi: args.mean_rev_min_obi,
+        mean_rev_entry_bounce_min_pct: args.mean_rev_bounce_min_pct,
+        mean_rev_entry_bounce_window_sec: args.mean_rev_bounce_window_sec,
+        mean_rev_entry_drop_max_pct: args.mean_rev_drop_max_pct,
         feed_ws_enabled: args.feed_ws,
         market_plugin: args.market_plugin,
         round_duration_sec: args.round_sec,
         positions: PositionConfig {
             max_positions: args.max_positions,
-            exit: blitzkrieg_core::exit_policy::ExitConfig {
-                min_time_left_sec: args.min_time_left,
-                ..Default::default()
+            exit: {
+                let mut exit = blitzkrieg_core::exit_policy::ExitConfig::default();
+                exit.min_time_left_sec = args.min_time_left;
+                if let Some(v) = args.exit_take_profit_pct {
+                    exit.take_profit_pct = v;
+                }
+                if let Some(v) = args.exit_stop_loss_pct {
+                    exit.stop_loss_pct = v;
+                }
+                if let Some(v) = args.exit_trailing_min_high_pct {
+                    exit.trailing_min_high_pct = v;
+                }
+                if let Some(v) = args.exit_min_trail_pct {
+                    exit.min_trail_pct = v;
+                }
+                exit
             },
             ..Default::default()
         },

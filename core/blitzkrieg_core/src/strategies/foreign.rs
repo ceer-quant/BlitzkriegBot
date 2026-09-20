@@ -32,7 +32,7 @@ use super::shadow_twin::ShadowFactory;
 use super::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent};
 use crate::model::OrderbookSnapshot;
 use crate::shadow_evolution::{KnobDeclaration, KnobSpec, ParamRegistry, StrategyParams};
-use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
+use crate::signal::{MeanReversionConfig, SpreadArbConfig, TradeSignal, TrendConfig};
 use arc_swap::ArcSwap;
 use blitzkrieg_strategy_api::{
     BkBookView, BkEvalCtx, BkEvolvableKnobsFn, BkGateExemptionsFn, BkHandle, BkLevel, BkMarket,
@@ -911,7 +911,12 @@ impl EngineStrategy for ForeignStrategy {
         // per actual change.
     }
 
-    fn on_config(&mut self, trend: &TrendConfig, spread_arb: &SpreadArbConfig) {
+    fn on_config(
+        &mut self,
+        trend: &TrendConfig,
+        spread_arb: &SpreadArbConfig,
+        mean_reversion: &MeanReversionConfig,
+    ) {
         let Some(f) = self.vtable.on_config else {
             return;
         };
@@ -935,6 +940,18 @@ impl EngineStrategy for ForeignStrategy {
                 "entryDipMaxPct": spread_arb.entry_dip_max_pct.to_string(),
                 "entryBounceMinPct": spread_arb.entry_bounce_min_pct.to_string(),
                 "entryBounceWindowSec": spread_arb.entry_bounce_window_sec,
+            },
+            "meanRev": {
+                "lookbackSec": mean_reversion.lookback_sec,
+                "minDropPct": mean_reversion.min_drop_pct.to_string(),
+                "maxPrice": mean_reversion.max_price.to_string(),
+                "entryFactor": mean_reversion.entry_factor.to_string(),
+                "maxSpreadPct": mean_reversion.max_spread_pct.to_string(),
+                "cooldownSec": mean_reversion.cooldown_sec,
+                "entryMinObi": mean_reversion.entry_min_obi.to_string(),
+                "entryBounceMinPct": mean_reversion.entry_bounce_min_pct.to_string(),
+                "entryBounceWindowSec": mean_reversion.entry_bounce_window_sec,
+                "entryDropMaxPct": mean_reversion.entry_drop_max_pct.to_string(),
             }
         });
         if let Ok(cs) = CString::new(json.to_string()) {

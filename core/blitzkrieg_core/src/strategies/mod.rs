@@ -32,7 +32,7 @@ pub mod test_support;
 pub use shadow_twin::{EngineStrategyShadow, ShadowFactory, ShadowTickCtx, ShadowTickResult};
 
 use crate::model::{CryptoMarket, OrderbookSnapshot};
-use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
+use crate::signal::{MeanReversionConfig, SpreadArbConfig, TradeSignal, TrendConfig};
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 
@@ -318,6 +318,12 @@ pub trait EngineStrategy: Send + Sync {
         None
     }
 
-    /// The host config changed (trend / spread_arb knobs).
-    fn on_config(&mut self, _trend: &TrendConfig, _spread_arb: &SpreadArbConfig) {}
+    /// The host config changed (trend / spread_arb / mean_reversion knobs).
+    fn on_config(
+        &mut self,
+        _trend: &TrendConfig,
+        _spread_arb: &SpreadArbConfig,
+        _mean_reversion: &MeanReversionConfig,
+    ) {
+    }
 }

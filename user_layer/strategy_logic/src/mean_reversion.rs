@@ -47,8 +47,14 @@ use std::collections::{HashMap, HashSet};
 /// The remaining defaults are structural:
 ///  * `max_price = 0.35` follows the TS reference (`cheapThreshold`), and the
 ///    payoff floor `0.05` makes an entry at least 5:1 on the payoff.
-///  * `entry_factor = 0.98` is shared with `spread_arb` (one resting-bid
-///    discipline across the dip family).
+///  * `entry_factor = 0.80` — rest 20% under the already-crashed mid. The
+///    shipped 0.98 sat far too close to the falling knife: the full-archive
+///    A/B (E17, 213 closed trades) measures the deeper rest at WR 81.7% / PF
+///    4.68 / max drawdown $3.37 vs the 0.98 anchor's 31.4% / 0.66 with the
+///    stop-loss eating every losing leg. A fade entry only wins when the
+///    capitulation wick fills the bid at a price the crash's close never
+///    offered; the pricing rule itself is untouched, so the payoff ratio is
+///    still entry-determined.
 ///  * `lookback_sec = 120` is the drop's memory window; 60 s fired ~9% less
 ///    with no change in entry quality on the slice.
 ///  * `cooldown_sec = 60` — one candidate per token per minute, so a token
@@ -67,6 +73,21 @@ pub struct MeanReversionConfig {
     pub max_spread_pct: Decimal,
     /// At most one candidate per token per this many seconds.
     pub cooldown_sec: i64,
+    /// Reject a fresh book whose order-book imbalance is below this (0 =
+    /// disabled). An ask-heavy book at the entry tick is the falling knife the
+    /// stop-loss eats — the same gate `spread_arb` ships (E15).
+    pub entry_min_obi: Decimal,
+    /// Turn filter: require the token's mid to have RISEN at least this
+    /// percent over the last `entry_bounce_window_sec` before resting the bid
+    /// (0 = disabled). A maker bid placed into a still-falling book is filled
+    /// BY the fall — the anti-adverse-selection gate.
+    pub entry_bounce_min_pct: Decimal,
+    /// Lookback window (sec) for the turn filter.
+    pub entry_bounce_window_sec: i64,
+    /// Death-spiral cap: reject a crash deeper than this percent below the
+    /// lookback high (0 = disabled). A fall beyond this is usually the market
+    /// correctly pricing the side to zero, not an overshoot to fade.
+    pub entry_drop_max_pct: Decimal,
 }
 
 impl Default for MeanReversionConfig {
@@ -75,9 +96,13 @@ impl Default for MeanReversionConfig {
             lookback_sec: 120,
             min_drop_pct: dec!(10),
             max_price: dec!(0.35),
-            entry_factor: dec!(0.98),
+            entry_factor: dec!(0.80),
             max_spread_pct: dec!(8),
             cooldown_sec: 60,
+            entry_min_obi: Decimal::ZERO,
+            entry_bounce_min_pct: Decimal::ZERO,
+            entry_bounce_window_sec: 5,
+            entry_drop_max_pct: Decimal::ZERO,
         }
     }
 }
@@ -95,7 +120,7 @@ pub const MEAN_REVERSION_KNOBS: [(&str, Decimal, Decimal, Decimal); 6] = [
     ("lookback_sec", dec!(120), dec!(10), dec!(600)),
     ("min_drop_pct", dec!(10), dec!(1.0), dec!(50.0)),
     ("max_price", dec!(0.35), dec!(0.10), dec!(0.60)),
-    ("entry_factor", dec!(0.98), dec!(0.80), dec!(1.00)),
+    ("entry_factor", dec!(0.80), dec!(0.80), dec!(1.00)),
     ("max_spread_pct", dec!(8), dec!(0.10), dec!(25.0)),
     ("cooldown_sec", dec!(60), dec!(0), dec!(600)),
 ];
@@ -108,6 +133,10 @@ fn knob_value(cfg: &MeanReversionConfig, name: &str) -> Decimal {
         "entry_factor" => cfg.entry_factor,
         "max_spread_pct" => cfg.max_spread_pct,
         "cooldown_sec" => Decimal::from(cfg.cooldown_sec),
+        "entry_min_obi" => cfg.entry_min_obi,
+        "entry_bounce_min_pct" => cfg.entry_bounce_min_pct,
+        "entry_bounce_window_sec" => Decimal::from(cfg.entry_bounce_window_sec),
+        "entry_drop_max_pct" => cfg.entry_drop_max_pct,
         _ => Decimal::ZERO,
     }
 }
@@ -142,6 +171,16 @@ pub fn apply_knobs(base: &MeanReversionConfig, params: &StrategyParams) -> MeanR
             "max_price" => cfg.max_price = v,
             "entry_factor" => cfg.entry_factor = v,
             "max_spread_pct" => cfg.max_spread_pct = v,
+            "entry_min_obi" => cfg.entry_min_obi = v,
+            "entry_bounce_min_pct" => cfg.entry_bounce_min_pct = v,
+            "entry_bounce_window_sec" => {
+                if let Some(secs) = v.trunc().to_i64()
+                    && secs > 0
+                {
+                    cfg.entry_bounce_window_sec = secs;
+                }
+            }
+            "entry_drop_max_pct" => cfg.entry_drop_max_pct = v,
             _ => {}
         }
     }
@@ -240,6 +279,16 @@ impl FadeTracker {
             .unwrap_or(Decimal::ZERO)
     }
 
+    /// Short-window move (%) of one token's mid — newest vs oldest sample in
+    /// the window, the same measure the trend side's turn filter uses. Zero
+    /// when there is not enough history.
+    pub fn bounce_pct(&self, token_id: &str, window_sec: i64, now_ms: i64) -> Decimal {
+        self.buffers
+            .get(token_id)
+            .map(|b| b.move_pct(window_sec, now_ms))
+            .unwrap_or(Decimal::ZERO)
+    }
+
     /// Cooldown check and record for one token's candidate fire.
     pub fn try_fire(&mut self, token_id: &str, now_ms: i64) -> bool {
         let last = self.last_fire.get(token_id).copied();
@@ -306,6 +355,14 @@ pub fn evaluate_mean_reversion(
         if cfg.max_spread_pct > Decimal::ZERO && book.spread_pct > cfg.max_spread_pct {
             continue;
         }
+        // High-frequency entry filters, evaluated on the FRESH book of this
+        // cycle and the tracker's own mid history. They narrow which crashes
+        // we buy; they never change the price of the ones we do, so the
+        // payoff ratio is left alone. Defaults are 0 = disabled and reproduce
+        // the shipped behaviour byte for byte.
+        if cfg.entry_min_obi > Decimal::ZERO && book.obi < cfg.entry_min_obi {
+            continue;
+        }
         let mid = book.mid_price;
         // The cheap-zone premise is enforced on the LIVE book mid (the tracker
         // only triggers the break); a stale zone flag must not trade an already
@@ -316,6 +373,17 @@ pub fn evaluate_mean_reversion(
         // Drop from the lookback high, measured on the tracker's own buffer.
         let drop = tracker.drop_pct(token, now_ms);
         if cfg.min_drop_pct > Decimal::ZERO && drop > -cfg.min_drop_pct {
+            continue;
+        }
+        // Turn filter: the fall must have turned before the bid is rested.
+        if cfg.entry_bounce_min_pct > Decimal::ZERO {
+            let bounce = tracker.bounce_pct(token, cfg.entry_bounce_window_sec, now_ms);
+            if bounce < cfg.entry_bounce_min_pct {
+                continue;
+            }
+        }
+        // Death-spiral cap: a fall deeper than this is not an overshoot.
+        if cfg.entry_drop_max_pct > Decimal::ZERO && drop < -cfg.entry_drop_max_pct {
             continue;
         }
         let mut entry = (mid * cfg.entry_factor).max(dec!(0.05)).min(dec!(0.9));
@@ -410,11 +478,22 @@ mod tests {
         p.set("max_price", dec!(0.30));
         p.set("lookback_sec", dec!(45.7));
         p.set("cooldown_sec", dec!(30.9));
+        p.set("entry_min_obi", dec!(0.4));
+        p.set("entry_bounce_min_pct", dec!(3));
+        p.set("entry_bounce_window_sec", dec!(7.9));
+        p.set("entry_drop_max_pct", dec!(45));
         p.set("hard_stop_loss_pct", dec!(0)); // not ours
         let out = apply_knobs(&base, &p);
         assert_eq!(out.max_price, dec!(0.30));
         assert_eq!(out.lookback_sec, 45, "a fractional lookback truncates");
         assert_eq!(out.cooldown_sec, 30);
+        assert_eq!(out.entry_min_obi, dec!(0.4));
+        assert_eq!(out.entry_bounce_min_pct, dec!(3));
+        assert_eq!(
+            out.entry_bounce_window_sec, 7,
+            "a fractional window truncates"
+        );
+        assert_eq!(out.entry_drop_max_pct, dec!(45));
         assert_eq!(out.min_drop_pct, base.min_drop_pct);
         // A non-positive lookback can never be written through the overlay.
         let mut bad = StrategyParams::new();
@@ -479,7 +558,7 @@ mod tests {
         assert_eq!(sig.strategy, "mean_reversion");
         assert_eq!(sig.direction, SignalDirection::Up);
         assert_eq!(sig.token_id, "t");
-        assert_eq!(sig.price, dec!(0.29), "resting bid = round2(mid*0.98)");
+        assert_eq!(sig.price, dec!(0.24), "resting bid = round2(mid*0.80)");
         assert!(sig.price < b.mid_price, "strictly below the mid");
         // .. and its reason mentions the drop.
         assert!(sig.reason.contains("resting bid"), "{}", sig.reason);
@@ -564,7 +643,12 @@ mod tests {
 
     #[test]
     fn the_entry_never_exceeds_the_bid_or_the_ceiling() {
-        let cfg = MeanReversionConfig::default();
+        // The bid-clamp case is pinned at the pre-E17 0.98: what this asserts
+        // is the clamp rule, not the adopted entry default.
+        let cfg = MeanReversionConfig {
+            entry_factor: dec!(0.98),
+            ..Default::default()
+        };
         let mut t = FadeTracker::new(cfg.clone());
         let _ = fall(&mut t, "t", dec!(0.50), dec!(0.30), 5, 10_000);
         let now = 10_000 + 5 * 1_000;
@@ -636,5 +720,122 @@ mod tests {
             "the 61s fire restarted the window"
         );
         assert!(t.try_fire("t", 121_000), "and that window expires normally");
+    }
+
+    #[test]
+    fn an_ask_heavy_book_is_refused_when_the_obi_floor_is_on() {
+        let cfg = MeanReversionConfig {
+            entry_min_obi: dec!(0.3),
+            ..Default::default()
+        };
+        let mut t = FadeTracker::new(cfg.clone());
+        let now = fall(&mut t, "t", dec!(0.50), dec!(0.30), 5, 10_000);
+        assert!(t.is_in_zone("t"));
+
+        // Equal top-of-book depth ⇒ obi 0: below the 0.3 floor with the gate
+        // on, admitted with it off.
+        let b = book(0.29, 0.31);
+        assert!(
+            evaluate_mean_reversion("BTC", "c", "t", "t-down", Some(&b), None, &t, now, &cfg)
+                .is_none(),
+            "a book under the OBI floor must not fire"
+        );
+        let off = MeanReversionConfig {
+            entry_min_obi: Decimal::ZERO,
+            ..Default::default()
+        };
+        assert!(
+            evaluate_mean_reversion("BTC", "c", "t", "t-down", Some(&b), None, &t, now, &off)
+                .is_some(),
+            "the gate off keeps the shipped behaviour"
+        );
+
+        // A bid-supported book clears the floor: bid depth 400 vs ask 100.
+        let supported = OrderbookSnapshot::from_levels(
+            "t",
+            vec![(dec!(0.29), dec!(400))],
+            vec![(dec!(0.31), dec!(100))],
+            0,
+        );
+        assert!(
+            evaluate_mean_reversion(
+                "BTC",
+                "c",
+                "t",
+                "t-down",
+                Some(&supported),
+                None,
+                &t,
+                now,
+                &cfg
+            )
+            .is_some(),
+            "a book above the OBI floor fires"
+        );
+    }
+
+    #[test]
+    fn a_still_falling_book_is_refused_until_the_fall_turns() {
+        // A short turn window keeps the falling tail inside the measurement,
+        // so the still-falling mid reads negative and the gate refuses.
+        let on = MeanReversionConfig {
+            entry_bounce_min_pct: dec!(2),
+            entry_bounce_window_sec: 2,
+            ..Default::default()
+        };
+        let mut t = FadeTracker::new(on.clone());
+        let now = fall(&mut t, "t", dec!(0.50), dec!(0.30), 5, 10_000);
+        let b = book(0.29, 0.31);
+        assert!(
+            evaluate_mean_reversion("BTC", "c", "t", "t-down", Some(&b), None, &t, now, &on)
+                .is_none(),
+            "a mid still falling must not be bought into"
+        );
+        let off = MeanReversionConfig {
+            entry_bounce_min_pct: Decimal::ZERO,
+            ..Default::default()
+        };
+        assert!(
+            evaluate_mean_reversion("BTC", "c", "t", "t-down", Some(&b), None, &t, now, &off)
+                .is_some(),
+            "the gate off keeps the shipped behaviour"
+        );
+
+        // Once the fall turns up past the threshold the SAME live book fires
+        // at the SAME price discipline — the bid waited for the turn.
+        t.on_price("t", dec!(0.29), now + 1_000);
+        t.on_price("t", dec!(0.31), now + 2_000);
+        t.on_price("t", dec!(0.33), now + 3_000);
+        let turned = now + 3_000;
+        assert!(
+            evaluate_mean_reversion("BTC", "c", "t", "t-down", Some(&b), None, &t, turned, &on)
+                .is_some(),
+            "a turned-up mid fires"
+        );
+    }
+
+    #[test]
+    fn a_death_spiral_drop_is_refused_when_the_cap_is_on() {
+        let on = MeanReversionConfig {
+            entry_drop_max_pct: dec!(30),
+            ..Default::default()
+        };
+        let mut t = FadeTracker::new(on.clone());
+        let now = fall(&mut t, "t", dec!(0.50), dec!(0.30), 5, 10_000); // -40%
+        let b = book(0.29, 0.31);
+        assert!(
+            evaluate_mean_reversion("BTC", "c", "t", "t-down", Some(&b), None, &t, now, &on)
+                .is_none(),
+            "a fall deeper than the cap must not be faded"
+        );
+        let loose = MeanReversionConfig {
+            entry_drop_max_pct: dec!(50),
+            ..Default::default()
+        };
+        assert!(
+            evaluate_mean_reversion("BTC", "c", "t", "t-down", Some(&b), None, &t, now, &loose)
+                .is_some(),
+            "a fall inside the cap fires as usual"
+        );
     }
 }

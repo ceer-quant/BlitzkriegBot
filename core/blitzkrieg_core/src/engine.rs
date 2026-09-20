@@ -284,7 +284,8 @@ impl Engine {
     pub fn set_config(&mut self, cfg: EngineConfig) {
         self.scanner.set_config(cfg.scanner.clone());
         for s in &mut self.strategies {
-            s.strategy.on_config(&cfg.trend, &cfg.spread_arb);
+            s.strategy
+                .on_config(&cfg.trend, &cfg.spread_arb, &cfg.mean_reversion);
         }
         self.cfg = cfg;
     }
@@ -802,9 +803,11 @@ impl Engine {
             source,
         };
         // Hand the host config to the newly registered strategy.
-        hosted
-            .strategy
-            .on_config(&self.cfg.trend, &self.cfg.spread_arb);
+        hosted.strategy.on_config(
+            &self.cfg.trend,
+            &self.cfg.spread_arb,
+            &self.cfg.mean_reversion,
+        );
         // Registered after Shadow Evolution was configured? Forward the handle
         // so a later evolution still reaches this strategy.
         if let Some(h) = &self.hot_params {

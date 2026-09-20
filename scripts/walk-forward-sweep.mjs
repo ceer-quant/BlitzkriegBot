@@ -34,6 +34,11 @@
  *     --archive 'data/archive/*.jsonl' --folds 5 \
  *     --param trend_entry_factor=0.98,0.88 \
  *     --out data/evolution/sweeps/20260920
+ *   node scripts/walk-forward-sweep.mjs \
+ *     --archive 'data/evolution/sweeps/e15-20260920/ab/full.jsonl' \
+ *     --strategy mean_reversion --folds 4 \
+ *     --param mr_entry_bounce_min_pct=0,2,5 \
+ *     --out data/evolution/sweeps/e17-mean-rev
  */
 
 import { spawn } from './lib/child-guard.mjs';
@@ -56,20 +61,25 @@ const PARAM_FLAGS = {
   entry_bounce_min_pct: '--spread-arb-bounce-min-pct',
   entry_bounce_window_sec: '--spread-arb-bounce-window-sec',
   trend_confirm_sec: '--trend-confirm-sec',
+  lookback_sec: '--mean-rev-lookback-sec',
+  min_drop_pct: '--mean-rev-min-drop-pct',
+  max_price: '--mean-rev-max-price',
+  entry_factor: '--mean-rev-entry-factor',
+  max_spread_pct: '--mean-rev-max-spread-pct',
+  cooldown_sec: '--mean-rev-cooldown-sec',
+  mr_entry_min_obi: '--mean-rev-min-obi',
+  mr_entry_bounce_min_pct: '--mean-rev-bounce-min-pct',
+  mr_entry_bounce_window_sec: '--mean-rev-bounce-window-sec',
+  mr_entry_drop_max_pct: '--mean-rev-drop-max-pct',
+  // Exit-policy knobs are engine-level (kernel-owned); they are still pure CLI
+  // variations. In an isolated leg sweep they only touch that leg's trades —
+  // in the two-leg production shape they affect EVERY strategy, so an adopted
+  // exit default must be re-verified on the two-leg shape before shipping.
+  exit_take_profit_pct: '--exit-take-profit-pct',
+  exit_stop_loss_pct: '--exit-stop-loss-pct',
+  exit_trailing_min_high_pct: '--exit-trailing-min-high-pct',
+  exit_min_trail_pct: '--exit-min-trail-pct',
 };
-
-// Ops knobs shared by every run: spread_arb alone, no discovery, no logs, the
-// same documented seed the backtest gate uses (scripts/backtest-check.mjs).
-const OPS_KNOBS = [
-  '--engine',
-  '--enable-strategy', 'spread_arb',
-  '--no-discovery',
-  '--no-trade-log',
-  '--no-order-log',
-  '--no-position-log',
-  '--seed-balance', '1000',
-  '--max-order-notional', '6',
-];
 
 // ── args ────────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -78,6 +88,23 @@ const flag = (name) => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 const archivesArg = flag('--archive');
+// Which leg this sweep drives. Default 'spread_arb' reproduces the E15
+// invocation byte for byte; another leg adds the --disable-strategy flags that
+// isolate it from the shipped enabled set.
+const strategy = flag('--strategy') ?? 'spread_arb';
+const strategyKnobs = ['--engine', '--enable-strategy', strategy];
+if (strategy !== 'spread_arb') strategyKnobs.push('--disable-strategy', 'spread_arb');
+// Pin the strategy dylibs to a PRIVATE copy (--strategy-dir <dir>): a parallel
+// session rebuilding user_layer/strategies from a different branch silently
+// replaces the shared target/release cdylibs — round-2 measured shipped
+// defaults for half its grid because the loaded dylib was pre-E17. A private
+// copy makes a sweep immune to that.
+const strategyDir = flag('--strategy-dir')
+  // Absolutize: the backtest children run with cwd=outDir, so a relative
+  // --strategy-dir silently resolves to nothing (no strategies loaded, zero
+  // trades, instant "success").
+  ? resolve(flag('--strategy-dir'))
+  : undefined;
 const foldsN = Number(flag('--folds') ?? 4);
 const selectMetric = flag('--select') ?? 'netPnlUsd';
 const tickMs = flag('--backtest-tick-ms') ?? '50';
@@ -99,6 +126,19 @@ if (!archivesArg) {
 if (!Number.isInteger(foldsN) || foldsN < 1 || foldsN > 24) { console.error('--folds must be an integer in 1..24'); process.exit(2); }
 const SELECTABLE = new Set(['netPnlUsd', 'winRatePct', 'profitFactor', 'payoff', 'closed']);
 if (!SELECTABLE.has(selectMetric)) { console.error(`--select must be one of ${[...SELECTABLE].join('|')}`); process.exit(2); }
+
+// Ops knobs shared by every run: one leg, no discovery, no logs, the same
+// documented seed the backtest gate uses (scripts/backtest-check.mjs).
+const OPS_KNOBS = [
+  ...strategyKnobs,
+  ...(strategyDir ? ['--strategy-dir', strategyDir] : []),
+  '--no-discovery',
+  '--no-trade-log',
+  '--no-order-log',
+  '--no-position-log',
+  '--seed-balance', '1000',
+  '--max-order-notional', '6',
+];
 
 // Expand archive globs (shell-free: the pattern may arrive quoted).
 const archivePatterns = archivesArg.split(',').map((s) => s.trim()).filter(Boolean);
