@@ -296,8 +296,19 @@ async fn sdk_balance(client: &Client<Authenticated<Normal>>) -> CoreResult<Decim
         .balance_allowance(req)
         .await
         .map_err(|e| map_sdk_err(&e.to_string()))?;
-    Decimal::from_str(&format!("{}", bal.balance))
-        .map_err(|e| CoreError::new(CoreErrorCode::VenueError, format!("balance parse: {e}")))
+    // The CLOB reports collateral in USDC base units (6 decimals); the ledger
+    // runs in plain dollars, so scale exactly once at this boundary.
+    let usdc_micros = Decimal::new(1_000_000, 0);
+    let raw = bal.balance;
+    if raw != raw.trunc() {
+        // A fractional balance would mean the API stopped reporting base
+        // units — refuse to guess the scale rather than misstate the ledger.
+        return Err(CoreError::new(
+            CoreErrorCode::VenueError,
+            format!("balance not in USDC base units: {raw}"),
+        ));
+    }
+    Ok(raw / usdc_micros)
 }
 
 async fn sdk_snapshot(
