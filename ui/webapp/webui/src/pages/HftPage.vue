@@ -629,7 +629,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
       </div>
     </div>
     <Card v-else class="mt-3.5">
-      <EmptyState text="暂无行情数据（等待报价插件）" compact />
+      <EmptyState text="暂无行情数据（等待报价插件）" hint="到「插件」页确认行情源已选定并激活。" compact />
     </Card>
 
     <!-- ── 盘口深度 (E8-c) ──────────────────────────────────────────────── -->
@@ -671,7 +671,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
       </div>
     </Card>
     <Card v-else-if="!hasDepthData" class="mt-3.5">
-      <EmptyState text="盘口深度：当前内核未提供 engine.books（旧版本内核，重启到新内核后可见）" compact />
+      <EmptyState text="盘口深度暂不可用" hint="当前内核未提供 engine.books——重启到新内核后自动出现。" compact />
     </Card>
 
     <!-- ── stats row ─────────────────────────────────────────────────────── -->
@@ -927,7 +927,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
             </tbody>
           </table>
         </div>
-        <EmptyState v-else text="无持仓" compact />
+        <EmptyState v-else text="无持仓" hint="启用策略后，成交平仓即出现在这里。" compact />
       </div>
 
       <!-- history waterfall -->
@@ -998,7 +998,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
             </tbody>
           </table>
         </div>
-        <EmptyState v-else text="无匹配订单" compact />
+        <EmptyState v-else text="无匹配订单" hint="清空搜索或筛选后仍为空，说明该窗口尚无成交。" compact />
 
         <!-- waterfall sentinel + fallback button -->
         <div ref="sentinel" class="h-px" />
@@ -1016,7 +1016,11 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
   </template>
 
   <Card v-else class="rise-in">
-    <EmptyState :loading="store.loading" text="暂无快照数据" />
+    <EmptyState
+      :loading="store.loading"
+      text="暂无快照数据"
+      hint="网关在线时会自动拉取；持续为空请确认 blitzkrieg-core 已启动。"
+    />
   </Card>
 </template>
 

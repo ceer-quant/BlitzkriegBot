@@ -15,7 +15,11 @@
     "check:round": "node --experimental-strip-types scripts/round-header.check.mjs",
     "check:expand": "node --experimental-strip-types scripts/expand-reflow.check.mjs",
     "check:source": "node --experimental-strip-types scripts/strategy-source.check.mjs",
-    "check:all": "npm run check && npm run check:theme && npm run check:balance && npm run check:lifecycle && npm run check:rejections && npm run check:feed && npm run check:session && npm run check:history && npm run check:round && npm run check:expand && npm run check:source"
+    "check:design": "node --experimental-strip-types scripts/design-language.check.mjs",
+    "check:first-run": "node --experimental-strip-types scripts/first-run.check.mjs",
+    "check:separation": "node --experimental-strip-types scripts/page-separation.check.mjs",
+    "check:parity": "node --experimental-strip-types scripts/tui-parity.check.mjs",
+    "check:all": "npm run check && npm run check:theme && npm run check:balance && npm run check:lifecycle && npm run check:rejections && npm run check:feed && npm run check:session && npm run check:history && npm run check:round && npm run check:expand && npm run check:source && npm run check:design && npm run check:first-run && npm run check:separation && npm run check:parity"
   },
   "license": "ISC",
   "type": "module",

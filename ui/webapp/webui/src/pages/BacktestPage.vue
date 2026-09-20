@@ -416,7 +416,7 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
       <Card>
         <CardHeader label="分策略归因" />
         <div v-if="strategyAgg.length" ref="stratEl" class="h-[220px] w-full" />
-        <EmptyState v-else text="报告未携带分策略数据（--engine 未挂载策略）" compact />
+        <EmptyState v-else text="报告未携带分策略数据" hint="用 --engine 重跑回放并挂载策略，即可看到分策略表现。" compact />
       </Card>
     </div>
 
@@ -511,7 +511,7 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
             <span class="stat-num text-[15px] text-down"><RollingNumber :value="signedMoney(worstTrade.netPnlUsd)" /></span>
           </div>
         </div>
-        <EmptyState v-else text="本次回放没有平仓交易" compact />
+        <EmptyState v-else text="本次回放没有平仓交易" hint="换更活跃的语料或放宽入场阈值后重跑。" compact />
       </Card>
 
       <Card>
@@ -529,7 +529,7 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
             <span class="inline-flex items-start gap-1.5"><AlertTriangle class="mt-px size-3.5" />{{ er }}</span>
           </AlertBanner>
         </div>
-        <EmptyState v-else text="回放全程未触发风控告警或错误" compact />
+        <EmptyState v-else text="回放全程未触发风控告警或错误" hint="风控零拦截，无需处理。" compact />
       </Card>
     </div>
   </div>
@@ -553,7 +553,13 @@ const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 100
         <Upload class="size-3.5" />加载回测报告 JSON
       </Button>
       <div v-if="loadErr" class="w-full max-w-[560px]">
-        <AlertBanner tone="error" title="加载失败" dismissible @dismiss="loadErr = null">{{ loadErr }}</AlertBanner>
+        <AlertBanner
+          tone="error"
+          title="加载失败"
+          hint="确认文件存在且为 --backtest-report 产物，然后重新加载。"
+          dismissible
+          @dismiss="loadErr = null"
+        >{{ loadErr }}</AlertBanner>
       </div>
     </div>
   </Card>

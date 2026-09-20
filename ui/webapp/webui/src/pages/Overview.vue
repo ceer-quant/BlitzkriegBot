@@ -322,16 +322,24 @@ const unrealized = computed(() =>
             </tbody>
           </table>
         </div>
-        <EmptyState v-else text="无持仓" compact />
+        <EmptyState v-else text="无持仓" hint="启用策略后，成交平仓即出现在这里。" compact />
       </Card>
     </div>
 
     <div v-if="snap.lastError" class="mt-3.5">
-      <AlertBanner tone="warn" title="引擎最近错误">{{ snap.lastError }}</AlertBanner>
+      <AlertBanner
+        tone="warn"
+        title="引擎最近错误"
+        hint="完整日志在网关控制台；同一错误反复出现时，可先在策略页停用相关策略再排查。"
+      >{{ snap.lastError }}</AlertBanner>
     </div>
   </template>
 
   <Card v-else class="mt-3.5">
-    <EmptyState :loading="store.loading" text="暂无快照数据" />
+    <EmptyState
+      :loading="store.loading"
+      text="暂无快照数据"
+      hint="网关在线时会自动拉取；持续为空请确认 blitzkrieg-core 已启动。"
+    />
   </Card>
 </template>

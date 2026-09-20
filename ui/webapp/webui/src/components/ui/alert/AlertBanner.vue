@@ -2,7 +2,7 @@
 import { cn } from '@/lib/utils'
 
 const props = withDefaults(
-  defineProps<{ tone?: 'error' | 'warn' | 'info'; title?: string; class?: string; dismissible?: boolean }>(),
+  defineProps<{ tone?: 'error' | 'warn' | 'info'; title?: string; hint?: string; class?: string; dismissible?: boolean }>(),
   { tone: 'error' },
 )
 const emit = defineEmits<{ dismiss: [] }>()
@@ -25,6 +25,14 @@ const tones = {
     <div class="min-w-0 flex-1">
       <p v-if="props.title" class="font-semibold">{{ props.title }}</p>
       <p class="break-words opacity-90"><slot /></p>
+      <!--
+        E11: an error must be actionable, not a shrug — `hint` names the move
+        (check the process, wait out the restart, reload the file), and it
+        renders as its own line so it cannot be read as part of the raw message.
+      -->
+      <p v-if="props.hint" class="mt-1 break-words text-[11.5px] opacity-75">
+        <span class="font-semibold">下一步</span> · {{ props.hint }}
+      </p>
     </div>
     <button
       v-if="props.dismissible"

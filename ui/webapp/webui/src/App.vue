@@ -19,6 +19,7 @@ import StrategiesPage from './pages/Strategies.vue'
 import PluginsPage from './pages/Plugins.vue'
 import SettingsPage from './pages/SettingsPage.vue'
 import LoginView from './components/LoginView.vue'
+import OnboardingTour from './components/OnboardingTour.vue'
 import SegmentedControl from './components/ui/segmented/SegmentedControl.vue'
 import Button from './components/ui/button/Button.vue'
 import AlertBanner from './components/ui/alert/AlertBanner.vue'
@@ -92,6 +93,11 @@ async function onLogin(): Promise<void> {
   store.acknowledgeSessionReset()
   authed.value = true
   await store.refresh()
+}
+
+/** The 首次引导 card asks to be taken to the page where its step gets done. */
+function goOnboard(target: 'plugins' | 'strategies'): void {
+  tab.value = target
 }
 
 // 15s auto-refresh; pages that need faster pacing run their own tick.
@@ -192,10 +198,15 @@ onMounted(() => {
     -->
     <main class="mx-auto max-w-[1280px] px-4 pt-8 pb-20 md:pt-10">
       <div v-if="store.error" class="mb-3.5">
-        <AlertBanner title="网关连接异常">{{ store.error }}</AlertBanner>
+        <AlertBanner
+          title="网关连接异常"
+          hint="检查网关进程与端口；网关恢复后本面板会自动重连，无需刷新页面。"
+        >{{ store.error }}</AlertBanner>
       </div>
       <component :is="activePage" />
     </main>
+
+    <OnboardingTour @navigate="goOnboard" />
   </template>
 
   <LoginView v-else :reason="loginReason" @ok="onLogin" />
