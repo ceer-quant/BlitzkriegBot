@@ -173,11 +173,18 @@ const segments = computed(() => [
     </Card>
 
     <div v-if="store.plugins.lastError" class="mt-3.5">
-      <AlertBanner tone="error" title="插件注册表读取失败">{{ store.plugins.lastError }}</AlertBanner>
+      <AlertBanner
+        tone="error"
+        title="插件注册表读取失败"
+        hint="通常是核心正在重启，稍候自动刷新；持续出现时检查 blitzkrieg-core 进程。"
+      >{{ store.plugins.lastError }}</AlertBanner>
     </div>
 
     <Card v-if="!sections.length" class="mt-3.5">
-      <EmptyState text="没有已注册的插件" />
+      <EmptyState
+        text="没有已注册的插件"
+        hint="启动核心并加载插件目录后，扩展与行情插件会自动注册到这里。"
+      />
     </Card>
 
     <div v-if="!store.connected" class="mt-3.5">
@@ -191,6 +198,10 @@ const segments = computed(() => [
   </div>
 
   <Card v-else class="rise-in">
-    <EmptyState :loading="store.loading" text="暂无插件数据" />
+    <EmptyState
+      :loading="store.loading"
+      text="暂无插件数据"
+      hint="网关在线时会自动拉取；持续为空请确认 blitzkrieg-core 已启动。"
+    />
   </Card>
 </template>

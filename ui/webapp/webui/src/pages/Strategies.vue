@@ -136,7 +136,13 @@ function toggleExpand(name: string): void {
     </div>
 
     <div v-if="flash" class="mt-3.5">
-      <AlertBanner :tone="flash.ok ? 'info' : 'error'" :title="flash.name" dismissible @dismiss="flash = null">
+      <AlertBanner
+        :tone="flash.ok ? 'info' : 'error'"
+        :title="flash.name"
+        :hint="flash.ok ? undefined : '若持续失败，确认网关在线后重试。'"
+        dismissible
+        @dismiss="flash = null"
+      >
         {{ flash.msg }}
       </AlertBanner>
     </div>
@@ -329,6 +335,10 @@ function toggleExpand(name: string): void {
   </div>
 
   <Card v-else class="rise-in">
-    <EmptyState :loading="store.loading" text="暂无策略数据" />
+    <EmptyState
+      :loading="store.loading"
+      text="暂无策略数据"
+      hint="注册策略后自动出现；新策略可用 blitzkrieg-new-strategy 脚手架生成。"
+    />
   </Card>
 </template>
