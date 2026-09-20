@@ -148,6 +148,10 @@ async function dryRoundTrip(c, asset, token, entryRole, exitRole) {
   const exitPrice = EXIT_PX;
 
   if (entryRole === 'taker') {
+    // The honest FOK fills at the WALKED ask, so the ask must rest at the
+    // entry price — the walk VWAP then equals the fixture fill price and
+    // both cores book the identical money.
+    await rpc.bookSnapshot(c, token, [], [[entryPrice, 500]]);
     await rpc.placeOrder(c, order('buy', 'taker', token, entryPrice, SIZE, `e-${token}`, asset));
   } else {
     // Rest far from the book, then let the book cross it.
@@ -160,6 +164,9 @@ async function dryRoundTrip(c, asset, token, entryRole, exitRole) {
   }
 
   if (exitRole === 'taker') {
+    // Symmetric: the FOK sell walks the resting bids, so the bid must sit
+    // at the exit price.
+    await rpc.bookSnapshot(c, token, [[exitPrice, 500]], []);
     await rpc.placeOrder(c, order('sell', 'taker', token, exitPrice, SIZE, `x-${token}`, asset));
   } else {
     await rpc.placeOrder(c, order('sell', 'maker', token, exitPrice, SIZE, `x-${token}`, asset));
