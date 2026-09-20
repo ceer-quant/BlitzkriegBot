@@ -82,9 +82,10 @@ pub async fn spawn_if_configured(
                 );
             }
         }
-        Err(e) => {
-            eprintln!("polymarket-extension: startup orphan sweep skipped (snapshot failed: {e})")
-        }
+        Err(e) => eprintln!(
+            "polymarket-extension: startup orphan sweep skipped (snapshot failed: {e}; raw={:?})",
+            e.raw
+        ),
     }
 
     let handle = tokio::spawn(async move {

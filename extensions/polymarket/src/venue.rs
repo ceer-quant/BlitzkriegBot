@@ -317,12 +317,15 @@ async fn sdk_snapshot(
     let open = client
         .orders(&OrdersRequest::builder().build(), None)
         .await
+        .inspect_err(|e| eprintln!("polymarket-extension: sweep: orders() failed: {e}"))
         .map_err(|e| map_sdk_err(&e.to_string()))?;
     let open_ids: Vec<String> = open.data.into_iter().map(|o| o.id).collect();
+    eprintln!("polymarket-extension: sweep: orders ok, open={}", open_ids.len());
 
     let page = client
         .trades(&TradesRequest::builder().build(), None)
         .await
+        .inspect_err(|e| eprintln!("polymarket-extension: sweep: trades() failed: {e}"))
         .map_err(|e| map_sdk_err(&e.to_string()))?;
     let mut trades = Vec::new();
     let mut maker_entries = 0usize;
