@@ -31,7 +31,9 @@ const TICKS: usize = 200;
 
 const NOW: i64 = 1_700_000_160_000;
 
+/// One book side: `depth` levels of `(price, size)`.
 type BookSide = Vec<(Decimal, Decimal)>;
+
 fn book(mid: Decimal, depth: usize) -> (BookSide, BookSide) {
     let tick = dec!(0.01);
     let bids = (0..depth)

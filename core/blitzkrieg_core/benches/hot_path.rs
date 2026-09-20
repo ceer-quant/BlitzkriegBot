@@ -35,6 +35,7 @@ fn now() -> i64 {
     NOW
 }
 
+/// One book side: `depth` levels of `(price, size)`.
 type BookSide = Vec<(Decimal, Decimal)>;
 
 /// A book with `DEPTH` levels per side around the given mid, size 100,
