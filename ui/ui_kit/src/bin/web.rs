@@ -9,109 +9,15 @@
 //! `--manage` enables the lifecycle verbs (`start`/`stop`); without it the
 //! command API is read-only (`status`/`positions`/`help`). The panel is always
 //! read-only. No order-placing API exists on any path.
-
-use blitzkrieg_ui_kit::gateway::{Dispatcher, SupervisorConfig};
-use blitzkrieg_ui_kit::web::WebServer;
-use blitzkrieg_ui_kit::{resolve_socket_path, IpcClient};
-use std::sync::{Arc, Mutex};
+//!
+//! All plumbing (args, credentials, origins, signal shutdown) lives in
+//! [`blitzkrieg_ui_kit::web::gateway_run`], shared with `blitzkrieg web`.
 
 #[tokio::main]
 async fn main() {
-    let mut socket = resolve_socket_path();
-    let mut addr = "127.0.0.1:51888".to_string();
-    let mut manage = std::env::var("UIKIT_MANAGE")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false);
-    let mut args = std::env::args().skip(1);
-    // Origins accepted beyond loopback and same-origin: --allowed-origin
-    // (repeatable) plus BLITZKRIEG_ALLOWED_ORIGINS (comma-separated) — the
-    // reverse-proxy / server-deployment opt-in.
-    let mut allowed_origins: Vec<String> = std::env::var("BLITZKRIEG_ALLOWED_ORIGINS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "--socket" => {
-                if let Some(s) = args.next() {
-                    socket = s;
-                }
-            }
-            "--addr" => {
-                if let Some(s) = args.next() {
-                    addr = s;
-                }
-            }
-            "--manage" => manage = true,
-            "--allowed-origin" => {
-                if let Some(s) = args.next() {
-                    let s = s.trim().trim_end_matches('/').to_string();
-                    if !s.is_empty() {
-                        allowed_origins.push(s);
-                    }
-                }
-            }
-            other => eprintln!("ignoring unknown arg: {other}"),
-        }
-    }
-
-    let client = IpcClient::new(socket.clone());
-    println!("ui_kit web → socket {socket}");
-    let cfg = SupervisorConfig::from_env(socket);
-    let dispatcher = Arc::new(Mutex::new(Dispatcher::new(cfg, manage)));
-    // Full trade history: the history tab paginates in the browser, so pass
-    // limit=0 (trades.history drains ALL closed rows, no 200-row cap).
-    let mut server = WebServer::with_shared_gateway(client, 0, dispatcher.clone());
-    server.set_allowed_origins(allowed_origins);
-    // Panel credentials come from the environment, never from this process. The
-    // WebUI exchanges them for a session token via POST /api/login. Gateway mode
-    // can start and stop the trading core, so a missing pair is a startup error
-    // rather than a prompt to invent one.
-    server.set_panel_credentials(
-        std::env::var("BLITZKRIEG_PANEL_USER").ok(),
-        std::env::var("BLITZKRIEG_PANEL_PASSWORD").ok(),
-    );
-    if let Err(why) = server.require_credentials() {
-        eprintln!("ui_kit_web: {why}");
-        std::process::exit(2);
-    }
-    println!(
-        "panel auth: {}",
-        if server.auth_required() {
-            if server.credentials_configured() {
-                "session required on /api/* (credentials from env)"
-            } else {
-                "session required on /api/*"
-            }
-        } else {
-            "off (read-only surface, no command verbs)"
-        }
-    );
-
-    let signal_dispatcher = dispatcher.clone();
-    let server_task = tokio::task::spawn_blocking(move || server.serve(&addr));
-    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        .expect("SIGINT listener");
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("SIGTERM listener");
-    tokio::select! {
-        result = server_task => {
-            if let Ok(Err(e)) = result {
-                eprintln!("web server error: {e}");
-                std::process::exit(1);
-            }
-        }
-        _ = sigint.recv() => {
-            eprintln!("ui_kit_web: stopping managed core on SIGINT...");
-            if let Ok(mut d) = signal_dispatcher.lock() { d.stop(); }
-            std::process::exit(0);
-        }
-        _ = sigterm.recv() => {
-            eprintln!("ui_kit_web: stopping managed core on SIGTERM...");
-            if let Ok(mut d) = signal_dispatcher.lock() { d.stop(); }
-            std::process::exit(0);
-        }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Err(e) = blitzkrieg_ui_kit::web::run_web_gateway(args, "ui_kit_web").await {
+        eprintln!("web server error: {e}");
+        std::process::exit(1);
     }
 }

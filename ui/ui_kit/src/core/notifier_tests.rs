@@ -235,7 +235,10 @@ fn reader_ignores_non_core_event_lines_and_stops() {
         s.flush().ok();
         s.shutdown(std::net::Shutdown::Both).ok();
     }
-    let got_err = poll_error(&mut sub, &bus, Instant::now() + Duration::from_secs(2));
+    // 10s, not 2s: the reader thread must survive a loaded test runner
+    // (workspace runs compile siblings in parallel; a starved reader once
+    // missed the 2s budget even though ingestion itself is instant).
+    let got_err = poll_error(&mut sub, &bus, Instant::now() + Duration::from_secs(10));
     stop.store(false, Ordering::SeqCst);
     let _ = handle.join(); // proves run() exits on stop instead of hanging
     drop(listener);
