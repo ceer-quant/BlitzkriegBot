@@ -258,6 +258,10 @@ impl MarketHost for CoreHost {
 
     fn on_fill(&self, fill: api::MarketFill) -> BoxFuture<'_, ()> {
         Box::pin(async move {
+            eprintln!(
+                "core: ws fill: order={} size={} price={} maker={:?}",
+                fill.order_id, fill.size, fill.price, fill.maker
+            );
             let mut c = self.core.lock().await;
             if let Err(e) = c.ingest_fill(fill_from_api(&fill), now_ms()) {
                 c.emit_error(e);
@@ -290,19 +294,34 @@ impl MarketHost for CoreHost {
             let mut c = self.core.lock().await;
             // Only reconcile trades for orders we track (matches the live bridge).
             let snap = snapshot_from_api(&snapshot);
+            let venue_trade_count = snap.trades.len();
             let mut tracked: Vec<crate::reconcile::VenueTrade> = Vec::new();
             for t in snap.trades {
                 if c.core_id_for_venue(&t.venue_order_id).is_some() {
                     tracked.push(t);
                 }
             }
+            eprintln!(
+                "core: reconcile: trades={} tracked={} ghosts_open={}",
+                venue_trade_count,
+                tracked.len(),
+                snapshot.open_order_ids.len()
+            );
             let vs = crate::reconcile::VenueSnapshot {
                 open_order_ids: snap.open_order_ids,
                 trades: tracked,
                 now_ms: snapshot.now_ms,
             };
-            if let Err(e) = c.reconcile(vs) {
-                c.emit_error(e);
+            match c.reconcile(vs) {
+                Ok(report) => {
+                    for a in &report.actions {
+                        eprintln!("core: reconcile action: {a:?}");
+                    }
+                    if !report.suspect_ghost_ids.is_empty() {
+                        eprintln!("core: reconcile ghosts: {:?}", report.suspect_ghost_ids);
+                    }
+                }
+                Err(e) => c.emit_error(e),
             }
         })
     }
