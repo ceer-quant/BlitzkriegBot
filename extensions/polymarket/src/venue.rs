@@ -318,13 +318,14 @@ async fn sdk_snapshot(
         .orders(&OrdersRequest::builder().build(), None)
         .await
         .map_err(|e| map_sdk_err(&e.to_string()))?;
-    let open_ids = open.data.into_iter().map(|o| o.id).collect();
+    let open_ids: Vec<String> = open.data.into_iter().map(|o| o.id).collect();
 
     let page = client
         .trades(&TradesRequest::builder().build(), None)
         .await
         .map_err(|e| map_sdk_err(&e.to_string()))?;
     let mut trades = Vec::new();
+    let mut maker_entries = 0usize;
     for t in page.data {
         // Indexed by the venue's taker order id, so this record IS the taker
         // execution.
@@ -348,6 +349,7 @@ async fn sdk_snapshot(
             if m.matched_amount <= rust_decimal::Decimal::ZERO {
                 continue;
             }
+            maker_entries += 1;
             trades.push(VenueTradeInfo {
                 venue_order_id: m.order_id.clone(),
                 trade_id: format!("{}:{}", t.id, m.order_id),
@@ -361,6 +363,12 @@ async fn sdk_snapshot(
             });
         }
     }
+    eprintln!(
+        "polymarket-extension: sweep: open={} trades={} maker_entries={}",
+        open_ids.len(),
+        trades.len(),
+        maker_entries
+    );
     Ok((open_ids, trades))
 }
 
