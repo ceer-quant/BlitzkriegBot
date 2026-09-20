@@ -39,6 +39,12 @@
 //! Backtest (offline; forces dry mode, starts no feeds and writes no logs):
 //!   blitzkrieg-core --backtest <archive.jsonl> [--backtest-report <path>]
 //!                   [--backtest-tick-ms 50] [--backtest-tail-ms 0] [model flags]
+//!                   [strategy knobs: --trend-confirm-sec --spread-arb-entry-factor
+//!                    --spread-arb-min-obi --spread-arb-max-spread-pct
+//!                    --spread-arb-dip-max-pct --spread-arb-bounce-min-pct
+//!                    --spread-arb-bounce-window-sec]
+//!   The knobs flow through CoreConfig → engine_config, the same mapping the
+//!   live server uses, so a sweep is a pure CLI variation with no rebuild (E15).
 //!
 //! Env (live): POLYMARKET_PRIVATE_KEY, POLYMARKET_FUNDER_ADDRESS, CLOB_API_URL.
 
@@ -61,6 +67,7 @@ struct Args {
     tick_ms: u64,
     seed_balance: Decimal,
     max_order_notional: Decimal,
+    max_open_notional: Decimal,
     min_shares: Option<Decimal>,
     max_shares: Option<Decimal>,
     markets: Vec<String>,
@@ -71,6 +78,12 @@ struct Args {
     min_time_left: i64,
     trend_confirm: i64,
     trend_floor_ms: i64,
+    spread_arb_entry_factor: Option<Decimal>,
+    spread_arb_min_obi: Option<Decimal>,
+    spread_arb_max_spread_pct: Option<Decimal>,
+    spread_arb_dip_max_pct: Option<Decimal>,
+    spread_arb_bounce_min_pct: Option<Decimal>,
+    spread_arb_bounce_window_sec: Option<i64>,
     feed_ws: bool,
     replay: Option<String>,
     replay_near_miss: Option<String>,
@@ -297,6 +310,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut tick_ms = 50u64;
     let mut seed_balance = Decimal::from(10_000);
     let mut max_order_notional = Decimal::from(100);
+    let mut max_open_notional = Decimal::ZERO;
     let mut min_shares: Option<Decimal> = None;
     let mut max_shares: Option<Decimal> = None;
     let mut markets: Vec<String> = Vec::new();
@@ -317,6 +331,12 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut min_time_left: Option<i64> = None;
     let mut trend_confirm: i64 = 60;
     let mut trend_floor_ms: i64 = 10_000;
+    let mut spread_arb_entry_factor: Option<Decimal> = None;
+    let mut spread_arb_min_obi: Option<Decimal> = None;
+    let mut spread_arb_max_spread_pct: Option<Decimal> = None;
+    let mut spread_arb_dip_max_pct: Option<Decimal> = None;
+    let mut spread_arb_bounce_min_pct: Option<Decimal> = None;
+    let mut spread_arb_bounce_window_sec: Option<i64> = None;
     let mut feed_ws = false;
     let mut replay: Option<String> = None;
     let mut replay_near_miss: Option<String> = None;
@@ -378,6 +398,12 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     .next()
                     .and_then(|v| Decimal::from_str(&v).ok())
                     .unwrap_or(max_order_notional)
+            }
+            "--max-open-notional-usd" => {
+                max_open_notional = it
+                    .next()
+                    .and_then(|v| Decimal::from_str(&v).ok())
+                    .unwrap_or(max_open_notional)
             }
             "--min-shares" => {
                 min_shares = it
@@ -459,6 +485,24 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     .next()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(trend_floor_ms)
+            }
+            "--spread-arb-entry-factor" => {
+                spread_arb_entry_factor = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--spread-arb-min-obi" => {
+                spread_arb_min_obi = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--spread-arb-max-spread-pct" => {
+                spread_arb_max_spread_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--spread-arb-dip-max-pct" => {
+                spread_arb_dip_max_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--spread-arb-bounce-min-pct" => {
+                spread_arb_bounce_min_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
+            }
+            "--spread-arb-bounce-window-sec" => {
+                spread_arb_bounce_window_sec = it.next().and_then(|v| v.parse().ok())
             }
             "--max-positions" => {
                 max_positions = it
@@ -716,6 +760,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         tick_ms,
         seed_balance,
         max_order_notional,
+        max_open_notional,
         min_shares,
         max_shares,
         markets,
@@ -726,6 +771,12 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         min_time_left,
         trend_confirm,
         trend_floor_ms,
+        spread_arb_entry_factor,
+        spread_arb_min_obi,
+        spread_arb_max_spread_pct,
+        spread_arb_dip_max_pct,
+        spread_arb_bounce_min_pct,
+        spread_arb_bounce_window_sec,
         feed_ws,
         replay,
         replay_near_miss,
@@ -839,11 +890,13 @@ fn resolve_event_archive(
 }
 
 /// Parse repeated `--strategy-limit` flags ("-" or an empty segment = inherit
-/// the global value there). Two shapes are accepted, both colon-separated:
+/// the global value there). Three shapes are accepted, all colon-separated:
 ///
 /// * `name:max_open_positions:max_notional_usd` (P-1.1, unchanged)
 /// * `name:max_open_positions:max_notional_usd:size_usd:min_shares:max_shares`
 ///   (E2-a: per-strategy sizing, clamped by the global risk band)
+/// * …`:weight` (E16/#98: 7-segment form; the leg's allocation weight, "-"/""
+///   = unweighted)
 ///
 /// Malformed flags are ignored with a warning so a typo cannot brick startup.
 fn parse_strategy_limits(
@@ -860,10 +913,10 @@ fn parse_strategy_limits(
     let mut out = std::collections::HashMap::new();
     for raw in args {
         let parts: Vec<&str> = raw.split(':').collect();
-        if (parts.len() != 3 && parts.len() != 6) || parts[0].trim().is_empty() {
+        if (parts.len() != 3 && parts.len() != 6 && parts.len() != 7) || parts[0].trim().is_empty() {
             eprintln!(
                 "blitzkrieg-core: ignoring malformed --strategy-limit '{raw}' \
-                 (want name:max_open:max_notional[:size_usd:min_shares:max_shares])"
+                 (want name:max_open:max_notional[:size_usd:min_shares:max_shares[:weight]])"
             );
             continue;
         }
@@ -887,7 +940,7 @@ fn parse_strategy_limits(
             }
         };
         // E2-a sizing: absent entirely (3-segment form) or inherited per segment.
-        let (size_usd, min_shares, max_shares) = if parts.len() == 6 {
+        let (size_usd, min_shares, max_shares) = if parts.len() >= 6 {
             let mut vals = [None, None, None];
             let labels = ["size_usd", "min_shares", "max_shares"];
             let mut bad = None;
@@ -908,6 +961,18 @@ fn parse_strategy_limits(
         } else {
             (None, None, None)
         };
+        // E16/#98 allocation weight: 7-segment form only.
+        let size_weight = if parts.len() == 7 {
+            match opt_dec(parts[6]) {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("blitzkrieg-core: ignoring --strategy-limit '{raw}' (bad weight)");
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         out.insert(
             parts[0].trim().to_string(),
             blitzkrieg_core::service::StrategyLimit {
@@ -916,6 +981,7 @@ fn parse_strategy_limits(
                 size_usd,
                 min_shares,
                 max_shares,
+                size_weight,
             },
         );
     }
@@ -1089,6 +1155,7 @@ async fn main() -> anyhow::Result<()> {
         default_maker_timeout_ms: 5000,
         risk: RiskConfig {
             max_order_notional: args.max_order_notional,
+            max_open_notional_usd: args.max_open_notional,
             ..Default::default()
         },
         dry_seed_balance: args.seed_balance,
@@ -1144,6 +1211,12 @@ async fn main() -> anyhow::Result<()> {
         min_round_age_sec: args.min_round_age,
         trend_confirm_sec: args.trend_confirm,
         trend_window_floor_ms: args.trend_floor_ms,
+        spread_arb_trend_entry_factor: args.spread_arb_entry_factor,
+        spread_arb_entry_min_obi: args.spread_arb_min_obi,
+        spread_arb_entry_max_spread_pct: args.spread_arb_max_spread_pct,
+        spread_arb_entry_dip_max_pct: args.spread_arb_dip_max_pct,
+        spread_arb_entry_bounce_min_pct: args.spread_arb_bounce_min_pct,
+        spread_arb_entry_bounce_window_sec: args.spread_arb_bounce_window_sec,
         feed_ws_enabled: args.feed_ws,
         market_plugin: args.market_plugin,
         round_duration_sec: args.round_sec,
@@ -1534,10 +1607,23 @@ mod tests {
     }
 
     #[test]
+    fn seven_segment_form_parses_allocation_weight() {
+        // E16/#98: the 7th segment is the leg's allocation weight.
+        let l = parse_one("spread_arb:2:20:1.5:4:8:0.5").expect("weight form must parse");
+        assert_eq!(l.size_weight, Some(dec!(0.5)));
+        assert!(l.sizing().overrides_anything());
+        // "-" = unweighted; an absent 7th segment is the 6-segment form.
+        let l2 = parse_one("spread_arb:2:20:1.5:4:8:-").expect("blank weight = unweighted");
+        assert_eq!(l2.size_weight, None);
+        // Bad weight drops the whole flag.
+        assert!(parse_one("spread_arb:0:-:1:2:3:x").is_none());
+    }
+
+    #[test]
     fn malformed_strategy_limits_are_dropped_not_half_applied() {
         for bad in [
             "spread_arb:0",           // too few segments
-            "spread_arb:0:-:1:2:3:4", // too many
+            "spread_arb:0:-:1:2:3:4:5:6", // too many
             ":0:-",                   // no name
             "spread_arb:x:-",         // bad position cap
             "spread_arb:0:abc",       // bad notional

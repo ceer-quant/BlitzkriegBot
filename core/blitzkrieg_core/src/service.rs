@@ -73,6 +73,17 @@ pub struct CoreConfig {
     /// and ops can shorten the confirmation window without touching code.
     pub trend_confirm_sec: i64,
     pub trend_window_floor_ms: i64,
+    /// spread_arb entry knobs (E15): `None` keeps the shipped default in
+    /// [`crate::signal::SpreadArbConfig`]; a value overrides it in
+    /// `engine_config` — the one mapping that drives both the live server and
+    /// the backtester, so a sweep varies candidates purely through config.
+    pub spread_arb_trend_entry_factor: Option<Decimal>,
+    pub spread_arb_entry_min_obi: Option<Decimal>,
+    pub spread_arb_entry_max_spread_pct: Option<Decimal>,
+    pub spread_arb_entry_dip_max_pct: Option<Decimal>,
+    pub spread_arb_entry_bounce_min_pct: Option<Decimal>,
+    /// Turn-filter lookback window (sec); `None` = default 5.
+    pub spread_arb_entry_bounce_window_sec: Option<i64>,
     /// Start Rust-native WS feeds (P4): Polymarket orderbook + Binance spot.
     /// When enabled Node no longer has to push `books.*` / `spot.price`.
     pub feed_ws_enabled: bool,
@@ -146,9 +157,30 @@ impl CoreConfig {
                 window_floor_ms: self.trend_window_floor_ms,
                 ..Default::default()
             },
-            spread_arb: crate::signal::SpreadArbConfig {
-                trend_confirm_sec: self.trend_confirm_sec,
-                ..Default::default()
+            spread_arb: {
+                let mut sa = crate::signal::SpreadArbConfig {
+                    trend_confirm_sec: self.trend_confirm_sec,
+                    ..Default::default()
+                };
+                if let Some(v) = self.spread_arb_trend_entry_factor {
+                    sa.trend_entry_factor = v;
+                }
+                if let Some(v) = self.spread_arb_entry_min_obi {
+                    sa.entry_min_obi = v;
+                }
+                if let Some(v) = self.spread_arb_entry_max_spread_pct {
+                    sa.entry_max_spread_pct = v;
+                }
+                if let Some(v) = self.spread_arb_entry_dip_max_pct {
+                    sa.entry_dip_max_pct = v;
+                }
+                if let Some(v) = self.spread_arb_entry_bounce_min_pct {
+                    sa.entry_bounce_min_pct = v;
+                }
+                if let Some(v) = self.spread_arb_entry_bounce_window_sec {
+                    sa.entry_bounce_window_sec = v;
+                }
+                sa
             },
             size_usd: self.size_usd,
             min_shares: self.min_shares,
@@ -333,6 +365,13 @@ pub struct StrategyLimit {
     /// Ceiling on shares per entry. Clamped to the global `max_shares`.
     #[serde(with = "crate::decimal::opt", default)]
     pub max_shares: Option<Decimal>,
+    /// Relative allocation weight (E16/#98): the three legs (spread_arb /
+    /// trend_follow / mean_reversion) get weighted shares of the per-entry
+    /// budget instead of identical ones. Scales the leg's own size override
+    /// or the global `size_usd`; a weight can only shrink the budget, and a
+    /// non-positive weight disables the leg's entries entirely.
+    #[serde(with = "crate::decimal::opt", default)]
+    pub size_weight: Option<Decimal>,
 }
 
 impl StrategyLimit {
@@ -343,6 +382,7 @@ impl StrategyLimit {
             size_usd: self.size_usd,
             min_shares: self.min_shares,
             max_shares: self.max_shares,
+            size_weight: self.size_weight,
         }
     }
 }
@@ -405,6 +445,12 @@ impl Default for CoreConfig {
             max_shares: Decimal::from(10),
             trend_confirm_sec: 60,
             trend_window_floor_ms: 10_000,
+            spread_arb_trend_entry_factor: None,
+            spread_arb_entry_min_obi: None,
+            spread_arb_entry_max_spread_pct: None,
+            spread_arb_entry_dip_max_pct: None,
+            spread_arb_entry_bounce_min_pct: None,
+            spread_arb_entry_bounce_window_sec: None,
             feed_ws_enabled: false,
             market_plugin: None,
             binance_assets: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
@@ -1572,6 +1618,19 @@ impl Core {
         let mut placed = 0;
         for (token, req) in tokens {
             let name = req.strategy.clone();
+            // E16/#98 portfolio-level exposure cap (0 = off): the account's
+            // total open commitment across ALL strategies is bounded too —
+            // per-strategy caps partition it, but their sum needs its own
+            // ceiling. The check ADDS a constraint; the RiskGate hard bounds
+            // (kill switch, price band, per-order cap) are untouched.
+            if let Err(reason) = self.portfolio_limit_ok(&req) {
+                self.stats.strategy_limit_rejected += 1;
+                let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                acc.limit_rejected += 1;
+                *acc.rejection_causes.entry("limit.portfolioNotionalCap".into()).or_default() += 1;
+                tracing::info!(target: "strategy", "entry rejected: strategy={name} cause=limit.portfolioNotionalCap reason={reason}");
+                continue;
+            }
             if let Some(limit) = self.config.strategy_limits.get(&name).cloned()
                 && let Err(reason) = self.strategy_limit_ok(&req, &limit)
             {
@@ -1615,6 +1674,34 @@ impl Core {
             }
         }
         placed
+    }
+
+    /// Portfolio-level exposure cap (E16/#98): the sum of open notional across
+    /// ALL strategies plus the incoming entry stays under
+    /// `risk.max_open_notional_usd` (0 = disabled).
+    fn portfolio_limit_ok(
+        &self,
+        req: &crate::model::OrderRequest,
+    ) -> Result<(), String> {
+        // Read the LIVE risk config: a runtime update (risk_config_mut /
+        // IPC) lands in the gate, not in the static CoreConfig.
+        let cap = self.risk.config().max_open_notional_usd;
+        if cap <= Decimal::ZERO {
+            return Ok(());
+        }
+        let used: Decimal = self
+            .positions
+            .open_positions()
+            .iter()
+            .map(|p| p.cost_usd)
+            .sum();
+        let incoming = req.price * req.size;
+        if used + incoming > cap {
+            return Err(format!(
+                "portfolio notional cap ({used}+{incoming} > {cap})"
+            ));
+        }
+        Ok(())
     }
 
     /// Check a configured per-strategy entry cap against the strategy's current
@@ -1690,6 +1777,7 @@ impl Core {
                         min_shares: self.config.min_shares,
                         max_shares: self.config.max_shares,
                         strategy_scoped: false,
+                        size_weight: None,
                     });
                 let limit = self.config.strategy_limits.get(&name);
                 // E2-b: what this strategy DECLARED it does not need, next to how
@@ -1721,6 +1809,7 @@ impl Core {
                     "effectiveSizeUsd": dec_json(effective.size_usd),
                     "effectiveMinShares": dec_json(effective.min_shares),
                     "effectiveMaxShares": dec_json(effective.max_shares),
+                    "sizeWeight": effective.size_weight.map(dec_json),
                     // ── E2-b declared gate exemptions + per-strategy gate counts ──
                     "gateExemptions": declared.gates(),
                     // D-31: the declared `time_left_sec` floor, or null when the
@@ -3748,6 +3837,35 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn spread_arb_entry_overrides_flow_through_engine_config() {
+        // Defaults must stay byte-for-byte the shipped configuration: None
+        // overrides leave every SpreadArbConfig field at its crate default.
+        let default_cfg = CoreConfig::default().engine_config().spread_arb;
+        assert_eq!(default_cfg, crate::signal::SpreadArbConfig::default());
+        // An override flows through the one mapping that drives live and
+        // backtest alike (E15: a sweep is a pure config variation).
+        let cfg = CoreConfig {
+            trend_confirm_sec: 90,
+            spread_arb_trend_entry_factor: Some(dec!(0.8)),
+            spread_arb_entry_min_obi: Some(dec!(-0.1)),
+            spread_arb_entry_max_spread_pct: Some(dec!(2.5)),
+            spread_arb_entry_dip_max_pct: Some(dec!(6)),
+            spread_arb_entry_bounce_min_pct: Some(dec!(0.4)),
+            spread_arb_entry_bounce_window_sec: Some(7),
+            ..Default::default()
+        }
+        .engine_config()
+        .spread_arb;
+        assert_eq!(cfg.trend_confirm_sec, 90);
+        assert_eq!(cfg.trend_entry_factor, dec!(0.8));
+        assert_eq!(cfg.entry_min_obi, dec!(-0.1));
+        assert_eq!(cfg.entry_max_spread_pct, dec!(2.5));
+        assert_eq!(cfg.entry_dip_max_pct, dec!(6));
+        assert_eq!(cfg.entry_bounce_min_pct, dec!(0.4));
+        assert_eq!(cfg.entry_bounce_window_sec, 7);
+    }
+
     fn dry_core(balance: Decimal) -> Core {
         let mut c = Core::new(CoreConfig {
             risk: RiskConfig {
@@ -5374,6 +5492,36 @@ mod strategy_dispatch_tests {
             1,
             "cap above the entry notional must not block"
         );
+        assert_eq!(c2.engine_stats()["strategyLimitRejected"], 0);
+    }
+
+    /// E16/#98: the portfolio-level open-notional cap bounds the TOTAL open
+    /// commitment across all strategies (0 = off = shipped behaviour).
+    #[test]
+    fn portfolio_notional_cap_bounds_total_open_exposure() {
+        // Entry notional is 0.43 * 10 = 4.30: a 2.00 portfolio cap rejects it
+        // even though no per-strategy limit is configured at all.
+        let mut c = core_with_engine(HashMap::new());
+        c.risk_config_mut().max_open_notional_usd = dec!(2);
+        let now = 1_000_000i64;
+        feed_entry_setup(&mut c, now);
+        assert_eq!(
+            c.engine_evaluate(now + 12_000),
+            0,
+            "a 4.30 entry breaches a 2.00 portfolio cap"
+        );
+        assert_eq!(c.engine_stats()["strategyLimitRejected"], 1);
+        let stats = c.strategy_stats();
+        let s = strategy_entry(&stats, "spread_arb");
+        assert_eq!(
+            s["rejectionCauses"]["limit.portfolioNotionalCap"], 1,
+            "the portfolio cap must be bucketed so tooling can answer why: {s}"
+        );
+
+        // 0 = off: the same entry goes through untouched.
+        let mut c2 = core_with_engine(HashMap::new());
+        feed_entry_setup(&mut c2, now);
+        assert_eq!(c2.engine_evaluate(now + 12_000), 1);
         assert_eq!(c2.engine_stats()["strategyLimitRejected"], 0);
     }
 

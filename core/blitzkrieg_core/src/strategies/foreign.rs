@@ -930,6 +930,11 @@ impl EngineStrategy for ForeignStrategy {
                 "trendEntryPrice": spread_arb.trend_entry_price.to_string(),
                 "trendEntryFactor": spread_arb.trend_entry_factor.to_string(),
                 "trendMaxEntryPrice": spread_arb.trend_max_entry_price.to_string(),
+                "entryMinObi": spread_arb.entry_min_obi.to_string(),
+                "entryMaxSpreadPct": spread_arb.entry_max_spread_pct.to_string(),
+                "entryDipMaxPct": spread_arb.entry_dip_max_pct.to_string(),
+                "entryBounceMinPct": spread_arb.entry_bounce_min_pct.to_string(),
+                "entryBounceWindowSec": spread_arb.entry_bounce_window_sec,
             }
         });
         if let Ok(cs) = CString::new(json.to_string()) {

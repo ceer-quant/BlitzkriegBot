@@ -7,6 +7,42 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ### Added
 
+- **The strategy-evolution toolkit (E15 / #97): walk-forward sweep, shadow
+  export, A/B verdict.** `scripts/walk-forward-sweep.mjs` splits a frozen event
+  archive into equal-event-count folds and replays every candidate × fold
+  through the production backtester — candidates are pure config variations
+  over the newly CLI-exposed spread_arb entry knobs
+  (`--spread-arb-entry-factor`, `--spread-arb-min-obi`,
+  `--spread-arb-max-spread-pct`, `--spread-arb-dip-max-pct`,
+  `--spread-arb-bounce-min-pct`, `--spread-arb-bounce-window-sec`; defaults
+  leave the shipped configuration byte-for-byte, pinned by
+  `spread_arb_entry_overrides_flow_through_engine_config`) — then picks on
+  fold i and validates on fold i+1 (rolling walk-forward) with the full
+  fold×candidate matrix, resume-safe, into `walk-forward.{json,md}`.
+  `scripts/shadow-export.mjs` writes a coverage manifest (per-file first/last
+  timestamps, event counts, content sha256, per-UTC-day histogram) whose
+  verdict line states the 30-day premise honestly — the first run measured the
+  frozen corpus at **0.75 days**, so the premise is NOT met and the report says
+  so. `scripts/strategy-ab-compare.mjs` verdicts two backtest reports with the
+  ≥ `--min-better` (default 2) metrics-better acceptance rule and gateable exit
+  codes. Methodology and the honest data-boundary record:
+  `docs/STRATEGY_EVOLUTION.md`. The dylib receives the new spreadArb keys
+  through `on_config`/`on_params` unchanged.
+
+- **DryRun portfolio layer (E16 / #98, DryRun-only).** 三策略加权资金分配与
+  组合级风控落地：`--strategy-limit` 新增第 7 段 `weight`（`策略:权重` 或
+  `-` 表示不加权），权重只缩不放——某腿的每笔入场名义 = 自身覆盖或全局
+  `size_usd × weight`，钳制在全局上限内；权重 0 = 关闭该腿（份额地板不会
+  复活零预算腿，`strategy_size_weight_reweights_but_never_widens`）。
+  组合级新增账户开放名义上限 `--max-open-notional-usd`（0 = 关闭）：全部
+  持仓成本 + 新入场超过上限即拒绝并计入 `limit.portfolioNotionalCap`
+  分桶，读取的是 RiskGate 的**运行时配置**（热更新后仍生效）；
+  `portfolio_notional_cap_bounds_total_open_exposure`。逐策略独立账本、
+  独立连亏熔断（KI-10/D-18 option A）与日实损上限为既有能力，未动；
+  新增 `scripts/dryrun-report.mjs` 从交易总账产出 7 天 DryRun 周报
+  （按策略账本 + 逐 UTC 日趋势 + 组合合计 + 窗内熔断/进化事件），并如实
+  标注 KI-1 dry 经济性前提。仅 DryRun——实盘属 0.3。
+
 - **Shadow Evolution grows a proposal workflow (E13 / #95).** A winning shadow
   variant no longer silently swaps live parameters: the evaluator now produces
   an **EvolutionProposal** — full baseline-vs-variant 对比 (trades, win rate,

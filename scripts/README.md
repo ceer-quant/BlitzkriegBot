@@ -107,6 +107,22 @@ cargo build --release --workspace --locked
   Full Disk Access — a security-posture change, so it is left as a decision (D-33).
   `soak-monitor-check.mjs` gates both lifetimes and the stop switch.
 - `analyze-signals.mjs` / `analyze-strategy.mjs` — offline signal/strategy analysis.
+- `walk-forward-sweep.mjs` / `shadow-export.mjs` / `strategy-ab-compare.mjs` — the
+  strategy-evolution toolkit (E15 / #97). The sweep splits a frozen event archive
+  into equal-event-count folds and replays every candidate × fold through the
+  production backtester — candidates vary the `--spread-arb-*` strategy knobs
+  (standard `CoreConfig → engine_config` chain, no side door) — then picks the
+  winner on fold i and validates it on fold i+1 (rolling walk-forward; full
+  fold×candidate matrix in the report, resume-safe). The exporter writes a
+  coverage manifest (first/last ts, event counts, content sha256, per-UTC-day
+  histogram) that states the 30-day premise honestly. The A/B tool verdicts two
+  backtest reports with the ≥ `--min-better` (default 2) metrics-better rule and
+  gateable exit codes. Methodology + first run: `docs/STRATEGY_EVOLUTION.md`.
+- `dryrun-report.mjs` — the E16 / #98 7-day DryRun report: per-strategy ledger
+  (独立账本), per-UTC-day trend and portfolio totals read from the append-only
+  trade ledger, plus breaker/evolution audit events in-window. Read-only over
+  `data/trades/trades.jsonl`; `--days N` (default 7) or `--from/--to` pin the
+  window.
 - `feed-live-probe.mjs` / `poly-ws-endurance.mjs` / `poly-wire-measure.mjs` — Polymarket feed probes.
 - `price-compare.mjs` / `reconcile-exits.mjs` / `sweep-exits.mjs` / `final-exit-opt.mjs` — pricing and exit sweeps.
 - `account-drift-check.mjs` — live panel/account drift diagnosis.
