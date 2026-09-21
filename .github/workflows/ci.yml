@@ -67,6 +67,30 @@ jobs:
       # failure if the artifacts above are missing or fail negotiation.
       - name: Test
         run: BK_REQUIRE_DYLIB=1 cargo test --workspace --locked
+      # The dhat allocation profile (E14 §8) is written under target/ — scratch,
+      # not a tracked baseline (#206) — so its NUMBERS only reach a reader
+      # through stdout, which a passing `cargo test` swallows. This step is the
+      # log transport, and it reuses the artifacts the Test step just built.
+      - name: dhat allocation summary (E14, log-only)
+        run: cargo test -p blitzkrieg-core --locked --test dhat_profile -- --nocapture
+      # E14 memory GATE (#206). RSS is the system-level view of allocation
+      # growth; the archived baseline's platform is macOS, so the ratio rule is
+      # NOT comparable on this runner — the script says so instead of skipping
+      # silently. The runner therefore supplies its own same-platform baseline:
+      # run 1 measures, run 2 must stay within --max-ratio of it, and both are
+      # bounded by the absolute ceiling. Two 15s profiles, measured locally at
+      # ~15.5s each (docs/perf/E14.md §10); the release binary this needs was
+      # built above, which is why the gate lives in this job and not its own.
+      - name: E14 memory gate — verdict self-test
+        run: node scripts/e14-memory-baseline.mjs --self-test
+      - name: E14 memory gate — measure (run 1, baseline for run 2)
+        run: node scripts/e14-memory-baseline.mjs --seconds 15 --out target/perf/e14-mem-ci-run1.json
+      - name: E14 memory gate — run 2 gated against run 1
+        run: |
+          node scripts/e14-memory-baseline.mjs --seconds 15 \
+            --max-peak-rss-mb 96 \
+            --baseline target/perf/e14-mem-ci-run1.json --max-ratio 1.15 \
+            --out target/perf/e14-mem-ci-run2.json
       # Style gates are BLOCKING as of KI-13: the tree is fmt- and clippy-clean
       # (the debt that made these advisory is paid off in the two commits that
       # closed KI-13). Keep them blocking — a new warning should fail a PR, which
