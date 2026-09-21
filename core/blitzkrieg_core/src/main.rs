@@ -571,6 +571,15 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut dry_redeem_fail: u32 = 0;
     let mut dry_redeem_manual = false;
 
+    // #228: the explicit opt-out from "an unknown argument stops the boot". Read
+    // as a pre-scan rather than as an arm below, because argv order must not
+    // decide whether `--allow-unknown-args` applies to an argument that comes
+    // BEFORE it — an escape hatch whose validity depends on where it was written
+    // is a trap, not an escape hatch.
+    let allow_unknown = argv
+        .iter()
+        .any(|a| a == blitzkrieg_core::cli::ALLOW_UNKNOWN_ARGS);
+
     let mut it = argv.iter().cloned();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -885,7 +894,26 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             }
             "--no-config" => {}
             other if other.starts_with("--config=") => {}
-            other => eprintln!("ignoring unknown argument: {other}"),
+            // Read by the pre-scan above, for the same reason (`argv` order must
+            // not change what it means) and named here for the same reason.
+            blitzkrieg_core::cli::ALLOW_UNKNOWN_ARGS => {}
+            // #228: the fallback REFUSES. It used to print
+            // `ignoring unknown argument: <flag>` and start the core anyway,
+            // which turned a misspelled `--readonly` into a write-mode boot and a
+            // misspelled `--max-order-notional` into the shipped cap — a silent
+            // downgrade of exactly the flags that exist to bound what this
+            // process may do. The refusal is decided by `cli::classify_unknown_arg`
+            // (unit-tested, with the "did you mean" spelling and, for a safety
+            // flag, what leaving it out would have meant); this arm only prints
+            // and exits. `--allow-unknown-args` opts out, and never for a
+            // near-miss of a safety flag.
+            other => match blitzkrieg_core::cli::classify_unknown_arg(other, allow_unknown) {
+                blitzkrieg_core::cli::UnknownArg::Reject(msg) => {
+                    eprintln!("{msg}");
+                    std::process::exit(2);
+                }
+                blitzkrieg_core::cli::UnknownArg::Ignore(msg) => eprintln!("{msg}"),
+            },
         }
     }
 
@@ -1549,6 +1577,18 @@ async fn main() -> anyhow::Result<()> {
     // checking instead of trusting whatever is on disk (#172).
     if argv.iter().any(|a| a == "--version" || a == "-V") {
         println!("{}", blitzkrieg_core::ipc::build_info::version_string());
+        return Ok(());
+    }
+
+    // #228: `--help` is answered here, beside `--version` and for the same
+    // reason — it must work with no config file, no socket, no data/ and no git,
+    // and it must NEVER boot a core. It reads the accepted set out of
+    // `blitzkrieg_core::cli::FLAGS`, the same table the parser's fallback arm
+    // consults, so the list an operator checks a spelling against is the list the
+    // parser enforces (a test in that module pins the two together). `--version`
+    // is checked first, so a command with both keeps the pre-#228 answer.
+    if argv.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{}", blitzkrieg_core::cli::help_text());
         return Ok(());
     }
 

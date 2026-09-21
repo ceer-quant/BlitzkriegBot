@@ -245,6 +245,23 @@ jobs:
         run: |
           (cd user_layer/strategies && cargo build --release --locked)
           (cd user_layer/parity_strategy && cargo build --release --locked)
+      # #228: what the binary does with an argument it does not recognise. The
+      # fallback arm of `parse_args` printed `ignoring unknown argument: <token>`
+      # and started the core ANYWAY, so a misspelled `--readonly` was a WRITE-mode
+      # boot, a misspelled `--max-order-notional` was the shipped cap, and `--help`
+      # did not exist at all — a flag misspelling is how a safety knob gets dropped
+      # in silence. This gate drives the release binary built above and asserts:
+      # --help/-h exit 0 and list every flag the parser accepts (both directions,
+      # read out of main.rs); --version/-V exit 0 with `<semver>+g<sha>` and no
+      # boot; an unknown argument exits 2, names itself and suggests the closest
+      # legal spelling; a near-miss of a safety flag (`--read-only`, `--redonly`,
+      # `--max-notinal`) is refused with the flag meant AND with what leaving it out
+      # would have meant; and NOTHING is written — the scratch directory holding the
+      # `--trade-log`/`--order-log`/`--position-log` paths must still be empty, the
+      # #199 write latch held against an argument the process refused. Runs first
+      # among the gates because every other gate's arguments go through this parser.
+      - name: Core argument handling gate (#228)
+        run: node scripts/core-args-check.mjs
       # E1: the full DryRun order chain, and the event-driven backtester
       # (capture from a live core → offline replay → bit-identical result).
       - name: Order-chain & backtest gates
