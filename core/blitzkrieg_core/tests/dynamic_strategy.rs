@@ -615,50 +615,50 @@ fn policy_rejects_bad_paths() {
 
 #[test]
 fn a_library_without_the_version_symbol_fails_negotiation() {
-    // A real shared object that is NOT a strategy: libc exports plenty but never
-    // bk_strategy_abi_version, so after dlopen it is rejected as v1/pre-v2
-    // rather than misread. The on-disk name is `libc.so.6`, which the path
-    // policy would reject on extension; copy it to a `.so` temp path so the test
-    // actually exercises the VERSION negotiation step. Best-effort: skip on
-    // hosts without such a file (e.g. macOS, whose system libs are not plain .so).
     // A real shared object that is NOT a strategy: it exports plenty but never
     // bk_strategy_abi_version, so after dlopen it is rejected as v1/pre-v2
-    // rather than misread. On Linux the on-disk name is `libc.so.6`, which the
-    // extension policy would reject, so it is copied to a `.so` temp path; on
-    // macOS libSystem is already a `.dylib` and passes the policy as-is.
-    let candidates: &[(&str, bool)] = &[
-        ("/usr/lib/x86_64-linux-gnu/libc.so.6", true),
-        ("/usr/lib/libc.so.6", true),
-        ("/lib/x86_64-linux-gnu/libc.so.6", true),
-        ("/usr/lib/aarch64-linux-gnu/libc.so.6", true),
-        ("/usr/lib/libSystem.B.dylib", false),
-        ("/usr/lib/libSystem.dylib", false),
+    // rather than misread.
+    //
+    // The on-disk name (`libc.so.6`) fails the extension rule and `/usr/lib` is
+    // outside every approved strategy root, so the file is copied to a `.so`
+    // name — but the copy has to land INSIDE an approved root: the path policy
+    // refuses shared directories such as `/tmp` before dlopen is even reached
+    // (pinned by the loader's own unit tests). This test is about the step
+    // after that gate, version negotiation, so the scratch copy must pass the
+    // gate first. Best-effort: skip on hosts without such a file.
+    let candidates: &[&str] = &[
+        "/usr/lib/x86_64-linux-gnu/libc.so.6",
+        "/usr/lib/libc.so.6",
+        "/lib/x86_64-linux-gnu/libc.so.6",
+        "/usr/lib/aarch64-linux-gnu/libc.so.6",
+        "/usr/lib/libSystem.B.dylib",
+        "/usr/lib/libSystem.dylib",
     ];
-    let Some((src, needs_copy)) = candidates.iter().find(|(c, _)| Path::new(c).exists()) else {
+    let Some(src) = candidates.iter().find(|c| Path::new(c).exists()) else {
         eprintln!("skipping: no non-strategy shared library on this host");
         return;
     };
-    let tmp;
-    let target = if *needs_copy {
-        tmp = std::env::temp_dir().join(format!(
-            "bk_non_strategy_{}_{}.so",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        std::fs::copy(src, &tmp).expect("copy system lib to temp .so");
-        tmp.as_path()
-    } else {
-        Path::new(src)
-    };
+    // `user_layer/strategies/target/` — under the approved root, git-ignored,
+    // and not a directory cargo writes artifacts into.
+    let scratch = dylib_dir()
+        .parent()
+        .expect(".../strategies/target")
+        .join("policy-scratch");
+    std::fs::create_dir_all(&scratch).expect("create the policy scratch dir");
+    let tmp = scratch.join(format!(
+        "bk_non_strategy_{}_{}.so",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::copy(src, &tmp).expect("copy system lib into the approved scratch dir");
+    let target = tmp.as_path();
 
     use blitzkrieg_core::strategy_engine::loader::LoadOutcome;
     let result = load_foreign(target);
-    if *needs_copy {
-        let _ = std::fs::remove_file(target);
-    }
+    let _ = std::fs::remove_file(target);
     let msg = match result {
         Err(LoadOutcome::Failed { reason, .. }) => reason,
         Err(LoadOutcome::Rejected { reason, .. }) => {
