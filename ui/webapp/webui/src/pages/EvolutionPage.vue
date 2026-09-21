@@ -8,7 +8,9 @@
  * 页面的三个问题必须各有明确答案，否则这个页面就是不可读的：
  *   1. 进化到底跑没跑   → 顶部「进化周期」卡（内核上报的上轮时间 / 下轮时刻）
  *   2. 采纳到底生效没   → 决策后回读快照里的 state 才算数，并在顶部横幅报出
- *   3. 现在跑的是哪一版 → 「当前生效参数」卡（最近一次被采纳的变异 + 谁改的 + 何时）
+ *   3. 现在跑的是哪一版 → 「已采纳的变异」卡（改了什么 / 谁改的 / 何时）。
+ *      注意快照只暴露采纳记录、不暴露运行中的参数值，所以这张卡是凭据而非
+ *      实时读数 —— 卡内脚注必须写明这一点，别把「记录」说成「现在生效」。
  */
 import { computed, ref } from 'vue'
 import { FlaskConical, RotateCcw, Clock } from 'lucide-vue-next'
@@ -118,7 +120,7 @@ async function decide(p: EvolutionProposalRow, decision: 'accept' | 'reject' | '
   const who = after.decidedBy === 'auto' ? '自动进化' : after.decidedBy === 'user' ? '人工' : '未上报'
   const when = after.decidedAtMs ? `，${dateTime(after.decidedAtMs)}` : ''
   showFlash('info', {
-    accept: `已采纳并生效：${p.strategy} 现在跑的是这组变异参数（${who}决定${when}）。参数移动见上方「当前生效参数」。`,
+    accept: `已采纳并生效：${p.strategy} 现在跑的是这组变异参数（${who}决定${when}）。参数移动见上方「已采纳的变异」。`,
     reject: `已拒绝：${p.strategy} 保持现行参数（${who}决定${when}）。`,
     defer: `已延后：${p.id} 留在待决区，7 天内仍可处理。`,
   }[decision])
@@ -127,7 +129,7 @@ async function decide(p: EvolutionProposalRow, decision: 'accept' | 'reject' | '
 async function rollback(strategy: string): Promise<void> {
   if (!window.confirm(`把 ${strategy} 回滚到上一次采纳前的参数？（只撤销最近一次，更早的可在审计文件中追溯）`)) return
   await act(`rollback-${strategy}`, () => api.rollbackStrategy(strategy))
-  showFlash('info', `已发出回滚：${strategy} 恢复到上一组参数。若「当前生效参数」未随之变化，说明内核未接受该回滚。`)
+  showFlash('info', `已发出回滚：${strategy} 恢复到上一组参数。若「已采纳的变异」未随之变化，说明内核未接受该回滚。`)
 }
 
 /* ── 展示辅助 ──────────────────────────────────────────────────────────── */
@@ -287,9 +289,9 @@ const cycleAgo = (ms: number): string => {
 
     <!-- 现在生效的是什么 —— 回答「当前策略是哪一版、谁改的、何时改的」 -->
     <Card class="mt-3.5" dense>
-      <CardHeader label="当前生效参数（最近一次被采纳的变异）">
+      <CardHeader label="已采纳的变异（最近一次，改了什么 / 谁改的 / 何时）">
         <template #action>
-          <Badge :variant="liveRows.length ? 'gold' : 'outline'">{{ liveRows.length }} 个策略已变异</Badge>
+          <Badge :variant="liveRows.length ? 'gold' : 'outline'">{{ liveRows.length }} 个策略有采纳记录</Badge>
         </template>
       </CardHeader>
 
@@ -322,8 +324,8 @@ const cycleAgo = (ms: number): string => {
               <thead>
                 <tr class="text-left text-faint-fg">
                   <th class="label-micro pb-1">参数</th>
-                  <th class="label-micro pb-1">变异前</th>
-                  <th class="label-micro pb-1">现在生效</th>
+                  <th class="label-micro pb-1">采纳前</th>
+                  <th class="label-micro pb-1">采纳后</th>
                 </tr>
               </thead>
               <tbody>
@@ -360,8 +362,10 @@ const cycleAgo = (ms: number): string => {
 
       <p class="mt-2.5 text-[11px] leading-snug text-faint-fg">
         数据来源：采纳记录（与 <span class="num">data/evolution/promotions.jsonl</span> 同源）。
-        内核暂未通过快照直读运行中的参数值，所以这里给出的是「改了哪几项、从什么改到什么、谁改的、何时改的」，
-        而不是内存里参数的实时读数。
+        它是对「采纳发生过、改了什么、谁改的、何时」的凭据，
+        <span class="font-semibold">不是运行中参数的实时读数</span> —— 快照不暴露运行中的参数值，
+        而且内核重启后目前不会重新应用采纳记录，参数会回到策略声明默认值（跟踪在
+        <span class="num">#245</span>）。
       </p>
     </Card>
 
