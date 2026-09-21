@@ -54,7 +54,7 @@
 import { CoreClient, rpc } from './lib/core-client.mjs';
 import { checkCoreProvenance, coreBinaryPath } from './lib/core-provenance.mjs';
 import { requireFreshStrategyDylibs } from './lib/strategy-dylib-freshness.mjs';
-import { mkdtempSync, readFileSync, existsSync } from 'fs';
+import { mkdtempSync, readFileSync, existsSync, statSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -92,6 +92,23 @@ function check(name, cond, detail = '') {
 }
 const num = (v) => (v == null ? null : Number(v));
 const round = (n) => Number(Number(n).toFixed(6));
+
+/**
+ * Wait until the captured stderr matches `re`, or `ms` elapse — then return
+ * whatever was captured. The core writes its boot banner to stderr before it
+ * announces READY over the socket, but those are different channels and the
+ * reader can lag, so a single read at READY is a race: it is what made the
+ * `socketMode` check red on one run and green on the next. Returning the buffer
+ * on timeout (rather than throwing) keeps the failure message useful.
+ */
+async function waitForStderr(ctx, re, ms = 3000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const captured = ctx.stderr();
+    if (re.test(captured) || Date.now() >= deadline) return captured;
+    await sleep(50);
+  }
+}
 
 /**
  * Boot one dry core, hand its context to `body`, always tear down.
@@ -216,11 +233,21 @@ await session('happy', [], async (ctx) => {
   const ready = await rpc.ready(core);
   check('the core runs in dry mode (no venue is reachable from this process)',
     ready.mode === 'dry', `mode=${ready.mode}`);
-  const banner = ctx.stderr();
-  check('no venue order executor was started, even with live credentials in the environment',
-    !/live order executor started/.test(banner), banner.slice(-200));
+  // The boot banner goes to stderr while READY arrives over the socket: two
+  // channels, so the captured buffer can still be empty when READY lands. Poll
+  // for it instead of reading once — a single read here made this check flaky
+  // (seen red on a run whose only difference was a rebuilt kernel).
+  const banner = await waitForStderr(ctx, /socketMode=/);
+  check('the boot banner reached the captured stderr (the checks below are not vacuous)',
+    /socketMode=/.test(banner), banner.slice(-200) || '(stderr is empty)');
+  // The banner is the process's own claim; the mode on the node is the fact. Both
+  // are asserted, and both against the literal 0600 rather than against a constant
+  // that could drift with the thing it polices.
   check('the socket is owner-only, as the boot banner reports it',
     /socketMode=0600/.test(banner), banner.match(/socketMode=\S+/)?.[0] ?? 'no socketMode in banner');
+  const nodeMode = statSync(core.socketPath).mode & 0o777;
+  check('the socket node on disk is owner-only',
+    nodeMode === 0o600, `mode=${nodeMode.toString(8).padStart(4, '0')} on ${core.socketPath}`);
 
   const { pos, cashAfterEntry } = await enterWinningPosition(core);
   if (!pos) {
@@ -272,6 +299,16 @@ await session('happy', [], async (ctx) => {
     lines.map((l) => l.kind).join(','));
   check('the durable order log holds no venue-bound order',
     journal(ctx.orderLog).every((r) => !r.venue_order_id));
+
+  // (1) The egress check belongs HERE, at the end of a session the core has spent
+  // ~20 s running, not at boot: `!/live order executor started/` read from a
+  // possibly-empty buffer is vacuously true, which is the failure mode this gate
+  // exists to catch elsewhere. The banner check above proves the buffer is
+  // populated, so the absence below is a real absence.
+  const finalStderr = ctx.stderr();
+  check('no venue order executor was started, even with live credentials in the environment',
+    /socketMode=/.test(finalStderr) && !/live order executor started/.test(finalStderr),
+    finalStderr.slice(-200));
 
   // (3) Idempotency: watch for longer than the first retry backoff (5 s). If the
   // confirmed claim were not removed from the book, the dry auto-redemption would
