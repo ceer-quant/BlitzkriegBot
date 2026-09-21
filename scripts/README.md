@@ -90,7 +90,10 @@ cargo build --release --workspace --locked
 - `upgrade-propagate-test.sh` — `sh scripts/upgrade-propagate-test.sh`, exit 0 =
   pass: stages into two throwaway trees, asserts the drift report, installs,
   catches a half-written install, rolls back (including a hand-edited config the
-  upgrade replaced) and prunes the rollback sets.
+  upgrade replaced) and prunes the rollback sets. Runs in CI (`ops-gates`, macOS),
+  so a break in the propagation path fails with a named assertion instead of
+  shipping an upgrade that leaves the previous build's configs and strategies in
+  place.
 - `dry-observe.mjs` — attach to a running dry core and print round/order/position ticks.
 - `soak-health.sh` / `soak-health-loop.sh` / `soak-monitor.mjs` — long-run health monitoring.
   `soak-health.sh` exits 0 (healthy) / 1 (anomaly) / 2 (not a repo root) and prints
