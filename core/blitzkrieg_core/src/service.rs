@@ -798,9 +798,20 @@ pub struct LastError {
 impl LastError {
     /// How the LEGACY `engine.stats.lastVenueError` key renders this record.
     ///
-    /// Byte-for-byte what that key carried before #180 (`{:?}` on the code, a
-    /// colon, the message), so the shipped panel banner — and any consumer that
-    /// matched on the old string — is unaffected by the slot growing a code.
+    /// The shipped panel (`ui/webapp/webui/src/pages/Overview.vue`) renders this
+    /// string as free text, and that is the compatibility this method owes: the
+    /// shape `{ tsMs, message }` and the "last error, newest wins" instant are
+    /// unchanged, so the banner keeps working without a frontend change.
+    ///
+    /// It is NOT byte-identical to the pre-#180 strings on every path, and the
+    /// earlier claim that it was is wrong. The venue-reject path is identical
+    /// (`{:?}` on the code, a colon, the message). The self-check and reconcile
+    /// paths carried NO code prefix before #180 — they were bare prose
+    /// (`"trading self-check failed: …"`, `"reconciliation sweep failed (n): …"`)
+    /// — and now gain one, because one slot with one writer cannot render two
+    /// shapes. Nothing shipped parses those two strings: the panel shows them as
+    /// text, and the only test that reads the key asserts `contains`, not
+    /// equality. `lastError` above is the structured form to migrate to.
     pub fn legacy_message(&self) -> String {
         format!("{:?}: {}", self.code, self.message)
     }
