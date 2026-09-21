@@ -616,26 +616,30 @@ pub fn charged_fee_per_share(price: Decimal) -> Decimal {
 /// `true` while the fee moved 44%. Reading the pin makes that flip report
 /// `false`, which is what the field was introduced to mean.
 ///
-/// Both sides are evaluated through the same expression, so the comparison is
-/// EXACT: an equal `(rate, exponent)` is bit-identical, and any difference that
-/// survives Decimal's 28 significant digits is a real parameter change. A
-/// schedule whose name this repository cannot describe is reported as NOT
+/// The pin is held against the schedule's PARAMETERS, not against the number one
+/// sampled price happens to produce. `fee_quote` samples a single price (0.5
+/// unless the caller asks otherwise) and two different `(rate, exponent)` pairs
+/// can cross there: `0.03125*(p(1-p))^1` prices the pinned legacy curve's
+/// `0.0078125` per share at p=0.5 and a different fee at every other price, so a
+/// value-only comparison at the sampled point reports a wrong configuration as a
+/// match (see `fee_quote_tests::model_matches_rejects_a_curve_that_only_coincides_at_the_sampled_price`).
+/// Because both sides of that comparison run the same expression, it cannot see
+/// a change to the expression itself either — what it can see is exactly the
+/// parameters, which is what the pin describes. Drift in the arithmetic is
+/// covered where the arithmetic lives (`exit_policy`'s own pricing tests) and by
+/// the cross-language gate below, which recomputes the fee independently.
+/// A schedule whose name this repository cannot describe is reported as NOT
 /// matching, rather than as a green "nothing to check".
 ///
 /// This is the in-process half. The authoritative, cross-language fee self-check
 /// is `scripts/core-parity.mjs::assertPinnedFeeModel`, which holds this kernel's
 /// `core.feeQuote` against the pinned table in `scripts/lib/fee-model.mjs` — the
 /// two pins must be changed together, in the same change as the schedule.
-fn schedule_reproduces_pin(schedule: crate::exit_policy::FeeSchedule, price: Decimal) -> bool {
+fn schedule_reproduces_pin(schedule: crate::exit_policy::FeeSchedule) -> bool {
     let Some((rate, exponent)) = crate::exit_policy::pinned_fee_parameters(schedule.name) else {
         return false;
     };
-    let pinned = crate::exit_policy::FeeSchedule {
-        rate,
-        exponent,
-        ..schedule
-    };
-    charged_per_share(schedule, price) == charged_per_share(pinned, price)
+    schedule.rate == rate && schedule.exponent == exponent
 }
 
 /// Read-only quote of the fee schedule (#182). `price` defaults to the widest
@@ -654,7 +658,7 @@ fn fee_quote_at(
 ) -> crate::ipc::schema::FeeQuoteResult {
     let price = price.unwrap_or_else(|| dec!(0.5));
     let charged = charged_per_share(schedule, price);
-    let model_matches = schedule_reproduces_pin(schedule, price);
+    let model_matches = schedule_reproduces_pin(schedule);
     crate::ipc::schema::FeeQuoteResult {
         model: schedule.name.to_string(),
         rate: schedule.rate,
@@ -10400,6 +10404,47 @@ mod fee_quote_tests {
         assert_eq!(quote.fee_per_share, dec!(0.004375));
         assert_eq!(quote.fee_pct_of_price, dec!(0.875));
         assert_eq!(quote.model, "legacy_quadratic");
+    }
+
+    /// #234, item 1 — a curve that only COINCIDES with the pinned one at the
+    /// sampled price is still not the pinned curve. `fee_quote` samples ONE price
+    /// (0.5 unless the caller asks otherwise), and different `(rate, exponent)`
+    /// pairs cross there: `0.03125*(p(1-p))^1` prices the pinned legacy curve's
+    /// `0.0078125` per share at p=0.5 and a different fee at every other price,
+    /// so a comparison made only at the sampled number reports a wrong
+    /// configuration as a match.
+    #[test]
+    fn model_matches_rejects_a_curve_that_only_coincides_at_the_sampled_price() {
+        let pinned = legacy_quadratic_schedule();
+        let crossed = FeeSchedule {
+            rate: dec!(0.03125),
+            exponent: 1,
+            ..pinned
+        };
+        // The coincidence, stated as the arithmetic it is: the same number at
+        // 0.5, a different one an eighth of a price away. Without both halves the
+        // test would also pass on two curves that never cross at all.
+        assert_eq!(
+            charged_per_share(crossed, dec!(0.5)),
+            charged_per_share(pinned, dec!(0.5)),
+            "the two curves must actually cross at the sampled price"
+        );
+        assert_ne!(
+            crossed.fee_per_share(dec!(0.375)),
+            pinned.fee_per_share(dec!(0.375)),
+            "…and must diverge elsewhere, or they are the same curve"
+        );
+
+        // It claims the pinned name while charging a different curve.
+        assert_eq!(crossed.name, "legacy_quadratic");
+        for p in [dec!(0.1), dec!(0.375), dec!(0.5), dec!(0.75), dec!(0.9)] {
+            assert!(
+                !fee_quote_at(crossed, Some(p)).model_matches,
+                "a configuration that is not the pinned one must be refused at p={p}"
+            );
+        }
+        // …and the refusal did not turn into "nothing ever matches".
+        assert!(fee_quote_at(pinned, Some(dec!(0.5))).model_matches);
     }
 
     /// The exponent is a parameter of the pin too, and a schedule this repository
