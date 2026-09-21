@@ -1144,6 +1144,13 @@ async fn handle_line(
                 "lastCycleMs": c.shadow_evolution().cycle_info().0,
                 "nextCycleAtMs": c.shadow_evolution().next_cycle_at_ms(now),
                 "pendingProposals": c.shadow_evolution().pending_proposal_count(),
+                // #249: the ENGINE switch is a different thing from the auto
+                // switch, and without it on the wire a UI cannot tell "nothing
+                // qualified yet" from "nothing is even running" — the confusion
+                // that made an auto-evolve label look like a lie.
+                "enabled": c.shadow_evolution().is_enabled(),
+                "cycleSeq": c.shadow_evolution().cycle_info().1,
+                "cycleSecs": c.shadow_evolution().cycle_secs(),
             }))
         }
         method::SE_HISTORY => {

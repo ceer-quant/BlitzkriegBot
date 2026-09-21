@@ -61,6 +61,8 @@ pub(crate) mod method {
     pub const SHADOW_EVOLUTION_PROPOSALS: &str = "shadow_evolution.proposals";
     pub const SHADOW_EVOLUTION_DECIDE: &str = "shadow_evolution.decide";
     pub const SHADOW_EVOLUTION_SET_AUTO: &str = "shadow_evolution.set_auto";
+    pub const SHADOW_EVOLUTION_ENABLE: &str = "shadow_evolution.enable";
+    pub const SHADOW_EVOLUTION_DISABLE: &str = "shadow_evolution.disable";
     pub const SHADOW_EVOLUTION_ROLLBACK: &str = "shadow_evolution.rollback";
 }
 
@@ -301,6 +303,18 @@ impl IpcClient {
             method::SHADOW_EVOLUTION_SET_AUTO,
             serde_json::json!({ "enabled": on }),
         )
+    }
+
+    /// The engine switch: start or stop the evaluator itself (persisted across
+    /// restarts). Separate from the auto switch — this one decides whether
+    /// anything evolves at all (#249).
+    pub fn evolution_set_enabled(&mut self, on: bool) -> Result<serde_json::Value, IpcError> {
+        let method = if on {
+            method::SHADOW_EVOLUTION_ENABLE
+        } else {
+            method::SHADOW_EVOLUTION_DISABLE
+        };
+        self.call(method, serde_json::json!({}))
     }
 
     /// Roll ONE strategy back to the parameters in force before its last change.

@@ -182,6 +182,12 @@ export const api = {
       method: 'POST',
       body: `auto-evolve ${on ? 'on' : 'off'}`,
     }),
+  /** #249: the evolution ENGINE switch (`evolve on|off`) — whether anything evolves. */
+  setEvolve: (on: boolean) =>
+    request<CommandDoc>('/command', {
+      method: 'POST',
+      body: `evolve ${on ? 'on' : 'off'}`,
+    }),
   /** E13: undo the last accepted promotion of one strategy (一键回滚). */
   rollbackStrategy: (strategy: string) =>
     request<CommandDoc>('/command', { method: 'POST', body: `rollback ${strategy}` }),
@@ -554,10 +560,16 @@ export interface EvolutionProposalRow {
 }
 
 export interface EvolutionStatusRow {
+  /** The engine switch: false means nothing is evaluated at all (#249). */
+  enabled: boolean
   autoEvolve: boolean
   lastCycleMs: number
   nextCycleAtMs: number | null
   pendingProposals: number
+  /** Completed deep rounds; 0 = the first round has not fired yet. */
+  cycleSeq: number
+  /** Configured seconds between deep rounds (reported, never assumed). */
+  cycleSecs: number
 }
 
 export interface EvolutionDoc {

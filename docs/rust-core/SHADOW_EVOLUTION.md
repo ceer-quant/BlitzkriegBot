@@ -1,7 +1,8 @@
 # 影子进化（Shadow Evolution）
 
 > 模块：`core/blitzkrieg_core/src/shadow_evolution/`
-> 默认状态：**关闭（opt-in）**——用户显式开启后才生效
+> 默认状态：**出厂文件里是开启的**（`enabled = true` + `auto_evolve = true`，见 §5）；
+> 运行期开关持久化在 `state.json`，面板/`evolve on|off` 随时可关，关掉即完全惰性
 > 一句话：**让每个策略各自在实盘运行中，通过影子孪生的反事实推演发现更优参数，
 > 并毫秒级无停机热切到新参数；彼此互不串扰。**
 
@@ -92,14 +93,28 @@ E2-c 修复：`strategy.load` 载入的新库会**立即**拿到参数单元（`
 
 ## 5. 配置
 
-`user_layer/configs/shadow_evolution.toml`（默认 `enabled = false`）。
-**该文件已被内核读取**（KI-11 / `MIGRATION_LOG` §59）；优先级
+`user_layer/configs/shadow_evolution.toml`（出厂 `enabled = true`，`auto_evolve = true`）。
+**该文件已被内核读取**（KI-11 / `MIGRATION_LOG` §59）；启动值优先级
 **CLI > `BK_*` env > 本文件 > 代码默认**，启动时会打印每个非默认值的来源。
 文件里的窗口/观察/冷却用**分钟**，内核内部用秒，换算在加载处做一次。
 
+**两个开关，两个问题（#249）**，它们的**运行期值**持久化在
+`<audit_dir>/state.json`，**并且优先于上面的启动值**（含 CLI/env）：
+
+| 开关 | 问题 | 关掉它 | 打开它 |
+|:---|:---|:---|:---|
+| `enabled` | 评估器**在跑吗**？（有孪生、会排深度轮、能产提案） | 不评估、不采纳、不排深度轮——待决队列原地冻结（TTL 仍会到期） | 影子变异体开始评估 |
+| `auto_evolve` | 够格的变异**谁落盘**？ | 挂成提案等人拍板 | 内核自行采纳，并把此前积压的待决队列一并结清 |
+
+规则只有一句：**运行时开关是操作员最近一次表态，所以它赢。** 面板/命令动词
+（`evolve on`、`auto-evolve on|off`）写的就是它。代价要写明白——运维想用改文件
+当「急停」时，文件不再生效；这种情况启动日志会 **WARN** 报出（文件说关、运行期
+说开），出路是面板开关或删掉 `<audit_dir>/state.json`。反向（文件说开、运行期
+说关）只记 INFO，因为那是操作员自己关的。
+
 ```toml
 [shadow_evolution]
-enabled = false
+enabled = true                        # 评估器运行（运行期开关会持久化并覆盖本行）
 evaluation_window_minutes = 30
 min_sample_count = 30
 min_win_rate_improvement = 0.05
@@ -109,7 +124,7 @@ cooldown_minutes = 10
 max_gradient = 0.05                   # +/-5% per step (Lock 1) — 只能收紧，不能放宽
 variant_count = 3                     # shadow variants (>=2)
 audit_dir = "data/evolution"          # per-strategy: data/evolution/<strategy>.jsonl
-auto_evolve = false                   # true = 提案直接采纳，不再等人工拍板（无托管）
+auto_evolve = true                    # true = 内核自行采纳，并排空积压的待决队列
 evolution_cycle_minutes = 4320        # 72h 深度进化轮（复合变异）
 deep_dims = 2                         # 深度轮同时动的旋钮数
 proposal_ttl_minutes = 10080          # 提案 7 天未决自动过期
@@ -119,7 +134,8 @@ proposal_ttl_minutes = 10080          # 提案 7 天未决自动过期
 （`audit_path_for(strategy)`，非字母数字/`_`/`-`/`.` 的字符替换为 `_`），
 于是审计天然按策略分文件，不需要任何配置就能做到隔离。
 
-内核启动开关：`--shadow-evolution`（默认关）；测试/运维可覆盖阈值：
+内核启动开关：`--shadow-evolution`（把评估器**打开**；出厂文件本身就开，所以这个
+旗标只在文件被改成关时才有用）；测试/运维可覆盖阈值：
 `--se-min-samples N`、`--se-cooldown-secs N`、`--se-min-obs-secs N`。
 `max_gradient` 超过内置上限 `0.05`（Lock 1）会被**拒绝并告警**，不是 clamp——
 放宽安全锁的请求必须让操作员看见。
@@ -155,14 +171,22 @@ evolutionsApplied, evolutionsRejected, secondsSinceLastEvolution }`。
 
 影子评估器发现更优变异后不再直接改参数，而是先产出一个 **EvolutionProposal**
 （含基线/变异两侧的六指标对比、理由、置信度、样本数、7 天 TTL）。谁拍板由
-`auto_evolve` 决定；该开关的运行时值持久化在 `data/evolution/state.json`，
-**重启不丢**（持久态优先于文件配置）。
+`auto_evolve` 决定；两个开关（`enabled` / `auto_evolve`）的运行时值都持久化在
+`data/evolution/state.json`，**重启不丢**（持久态优先于文件配置，见 §5）。
 
-- **人工模式（默认）**：提案挂到待决区（每策略最多一个在挂——同参数重复提案是
+- **人工模式（`auto_evolve = false`）**：提案挂到待决区（每策略最多一个在挂——同参数重复提案是
   no-op，目标不同则旧提案标记 superseded）。三端 UI（webui「进化」页 / TUI
   第 5 页签 / 命令动词）都能 `decide <id> accept|reject|defer`；accept 在
   **决策时刻重跑全套安全锁**（域 → 渐变 → 不可变），通过才热切换并落账。
 - **自动模式（`auto_evolve = true`）**：提案直接采纳并记 promotions——无托管运行。
+  并且**每一轮评估先结清积压**：上一段人工模式留下的待决提案会在这一轮以
+  `decidedBy = auto` 走**同一条** `decide` 路径（同样的锁、同样的审计、同样的
+  promotions 记录）被采纳——「自动」模式下不存在等人拍板的提案。若某条提案的前提
+  已经变了（期间策略又进化过、或操作员手改过旋钮），重跑锁会失败，它被**记成
+  拒绝并写明原因**，绝不静默丢弃、也绝不留在无人可决的模式里。
+  开关本身**不**应用参数：是开关之后的那一轮评估来应用。
+- **引擎开关是总闸**：`enabled = false` 时既不评估也不采纳（待决队列原地冻结，
+  TTL 照常到期）；想「停下来」就关它，而不是只关自动。
 - **72 小时深度进化**（`evolution_cycle_minutes`，默认 4320）：到点重建变异集，
   复合变异一次动 `deep_dims` 个旋钮（±3%，扫动窗口轮换），重新评估一轮。
 - **一键回滚**：优先内存里的 previous；跨重启用 `promotions.jsonl` 的
@@ -185,8 +209,12 @@ IPC 增量：
 | `shadow_evolution.proposals` | `{ limit? }` | 提案列表（待决在前） |
 | `shadow_evolution.decide` | `{ id, decision }` | accept / reject / defer（accept 重跑全部锁） |
 | `shadow_evolution.set_auto` | `{ enabled }` | 自动/人工开关（持久化，重启保留） |
+| `shadow_evolution.enable` / `.disable` | `{}` | 引擎总闸（同样持久化，重启保留；关闭时不评估也不采纳） |
 
-`status` 增量键：`autoEvolve`、`lastCycleMs`、`nextCycleAtMs`、`pendingProposals`。
+`status` 增量键：`autoEvolve`、`enabled`、`lastCycleMs`、`nextCycleAtMs`、
+`cycleSeq`、`cycleSecs`、`pendingProposals`。（`enabled` 与 `autoEvolve` 是**两个**
+开关：前者是「在不在跑」，后者是「谁落盘」——面板必须分开显示，否则就会出现
+「自动进化：开」挂在一台什么都没评估的内核上。）
 
 事件增量：`EVOLUTION_PROPOSED`（提案待决，UI 提示去审）、`EVOLUTION_CYCLE`
 （深度进化轮完成，含轮次/维数/覆盖策略）。
@@ -197,12 +225,12 @@ IPC 增量：
 |:---|:---|
 | `proposals.jsonl` | 提案全档（按 id 折叠，含状态机变迁），上限 500 行 |
 | `promotions.jsonl` | 采纳/回滚账本（跨重启回滚的依据） |
-| `state.json` | 自动开关 + 周期钟（原子写） |
+| `state.json` | 两个开关（`enabled` / `autoEvolve`）+ 周期钟（原子写） |
 
 CLI：`--se-auto-evolve on|off`、`--se-cycle-secs N`、`--se-ttl-secs N`、
 `--se-deep-dims N`；env：`BK_SE_AUTO_EVOLVE` / `BK_SE_CYCLE_SECS` /
 `BK_SE_TTL_SECS` / `BK_SE_DEEP_DIMS`。面板命令动词：`proposals [N]`、
-`decide <id> accept|reject|defer`、`auto-evolve on|off`、`rollback <strategy>`。
+`decide <id> accept|reject|defer`、`auto-evolve on|off`、`evolve on|off`、`rollback <strategy>`。
 
 ## 7. 审计（按策略分文件）
 
@@ -241,7 +269,7 @@ CLI：`--se-auto-evolve on|off`、`--se-cycle-secs N`、`--se-ttl-secs N`、
 
 | 验收项 | 实现 | 验证 |
 |:---|:---|:---|
-| 默认关闭，关闭时完全惰性 | `enabled=false`；无注册、无文件 | 单测 `disabled_by_default_is_inert`、`observation_alone_never_moves_parameters` |
+| 关闭时完全惰性（开关不再隐式） | `enabled=false` 或 `auto_evolve=false` 时无注册、无文件 | 单测 `disabled_by_default_is_fully_inert`、`observation_alone_never_moves_parameters`、`the_engine_switch_survives_a_restart` |
 | 参数模型按策略命名 | `MutableParams` = `BTreeMap<strategy, StrategyParams>` | `knobs.rs` 单测 + 集成 `apply_and_rollback_move_exactly_one_strategy` |
 | 每策略自证旋钮与取值域 | `evolvable_knobs()` / 可选符号 | 单测 `enable_scaffolds_every_strategy_and_publishes_its_own_cell`；门禁 `core:strategy-evolve` 断言 `declares evolvable knobs: trendMaxEntryPrice` |
 | 未声明 = 不可进化 | 无符号 → 无单元 | 单测 `a_strategy_that_declares_nothing_gets_no_unit`；集成 `an_undeclared_strategy_is_reported_not_evolvable` |
@@ -275,8 +303,12 @@ CLI：`--se-auto-evolve on|off`、`--se-cycle-secs N`、`--se-ttl-secs N`、
    该孪生被永久跳过」。机制没有被移除，只是缺一条测试。
 2. **`data/evolution/evolution.jsonl`（旧的全局文件，0 字节）保留不删**（D-17）。
    新代码不读也不写它；没有代码路径会再向它追加。是否物理删除需用户裁决。
-3. 生产**仍未开启**影子进化（`enabled=false`）。E2-c 的验收在测试与门禁里完成，
-   不是在生产里开跑；「影子进化转正」属 v0.2。
+3. **生产开关状态**（2026-09-21 实测）：线上内核在 #249 合并并重新部署前仍以
+   `enabled=false` 运行——`shadow_evolution.status` 自报 `status: "disabled"`、
+   `variantCount: 0`、`strategies: []`，而 `data/evolution/state.json` 里只有旧二进制
+   写的 `{"autoEvolve":true,...}`（没有 `enabled` 键）。这正是「自动模式却没有自动」
+   的现场：开关记着、什么都没跑、还挂着 1 张 7 天后过期的待决提案。部署后出厂值即
+   `enabled = true` + `auto_evolve = true`，运行期开关以 `<audit_dir>/state.json` 为准。
 
 ## 11. 设计哲学
 

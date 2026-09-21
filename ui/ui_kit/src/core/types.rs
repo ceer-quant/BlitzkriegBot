@@ -626,6 +626,12 @@ pub struct EvolutionProposalsView {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvolutionStatusView {
+    /// The ENGINE switch: whether the evaluator runs at all (twins exist, a deep
+    /// round is scheduled). Separate from `auto_evolve`, which only says whether
+    /// a qualifying change is applied or held for a human (#249) — a UI showing
+    /// the second without the first cannot explain a silently idle engine.
+    #[serde(default)]
+    pub enabled: bool,
     #[serde(default)]
     pub auto_evolve: bool,
     #[serde(default)]
@@ -634,6 +640,14 @@ pub struct EvolutionStatusView {
     pub next_cycle_at_ms: Option<i64>,
     #[serde(default)]
     pub pending_proposals: usize,
+    /// Deep rounds completed since the engine's counter began (0 = the first
+    /// round has not fired yet; its clock may already be running).
+    #[serde(default)]
+    pub cycle_seq: u64,
+    /// Configured seconds between deep rounds — sent rather than assumed, so a
+    /// UI cannot print "72 hours" over a different setting.
+    #[serde(default)]
+    pub cycle_secs: i64,
 }
 
 // ── core.event notifications (kind-tagged) ───────────────────────────────────

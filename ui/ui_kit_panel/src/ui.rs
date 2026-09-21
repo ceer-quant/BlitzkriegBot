@@ -168,6 +168,9 @@ fn render_help(f: &mut Frame, _app: &App) {
         Line::from("  y / n          confirm or cancel a dangerous action"),
         Line::from("  a / x / d      Evolution: accept / reject / defer the selected proposal"),
         Line::from("  e / u          Evolution: toggle auto-evolve / rollback selected strategy"),
+        Line::from(
+            "  m              Evolution: toggle the engine itself (nothing evolves while off)",
+        ),
         Line::from("  q or Ctrl-C    quit"),
         Line::from(""),
         Line::from(Span::styled(
@@ -182,6 +185,7 @@ fn render_help(f: &mut Frame, _app: &App) {
         Line::from("  proposals [N]         evolution proposals (pending first)"),
         Line::from("  decide <id> a|r|d     accept / reject / defer an evolution proposal"),
         Line::from("  auto-evolve on|off    unattended evolution switch"),
+        Line::from("  evolve on|off         the engine switch (no evolution runs while off)"),
         Line::from("  rollback <strategy>   undo the last accepted promotion"),
         Line::from("  start ASSETS ...      start a managed DRY core (needs --manage)"),
         Line::from("  stop                  stop the managed core (needs --manage)"),
@@ -732,6 +736,19 @@ fn human_secs(secs: i64) -> String {
 fn ago(ms: i64, now: i64) -> String {
     human_secs((now - ms).max(0) / 1000)
 }
+
+/// The configured deep-round period, read off the status rather than assumed: a
+/// hard-coded "72h" is wrong the moment the config file says otherwise, and it
+/// was what the panel used to print over any setting (#249).
+fn cycle_period(cycle_secs: i64) -> String {
+    if cycle_secs <= 0 {
+        "unreported".into()
+    } else if cycle_secs < 3600 {
+        human_secs(cycle_secs)
+    } else {
+        format!("{}h", cycle_secs / 3600)
+    }
+}
 fn ttl_text(expires_at_ms: i64, now: i64) -> String {
     let left = expires_at_ms - now;
     if left <= 0 {
@@ -794,16 +811,25 @@ fn render_evo_status(f: &mut Frame, area: Rect, app: &App, now: i64) {
     let mut lines: Vec<Line> = Vec::new();
     match &app.snap.evolution_status {
         Some(s) => {
-            let (mark, text, color) = if s.auto_evolve {
+            // Two switches, two questions (#249): whether anything is evaluated at
+            // all, and who applies what qualifies. Printing only the second is how
+            // this line used to promise "unattended" over an engine doing nothing.
+            let (mark, text, color) = if !s.enabled {
+                (
+                    "○",
+                    "engine OFF — nothing is evaluated, held or applied",
+                    RED,
+                )
+            } else if s.auto_evolve {
                 (
                     "●",
-                    "auto-evolve ON — variants apply unattended (rollback still one key away)",
+                    "engine ON · auto-evolve ON — variants apply unattended",
                     GREEN,
                 )
             } else {
                 (
                     "○",
-                    "auto-evolve OFF — every proposal waits for you",
+                    "engine ON · auto-evolve OFF — every proposal waits for you",
                     ACCENT,
                 )
             };
@@ -816,7 +842,17 @@ fn render_evo_status(f: &mut Frame, area: Rect, app: &App, now: i64) {
                     text,
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("   e toggle", Style::default().fg(DIM)),
+                // Recorded but inert is the one state worth spelling out: the
+                // auto switch is on while the engine sleeps, which is exactly the
+                // combination that made the panel look like a lie.
+                Span::styled(
+                    if s.enabled || !s.auto_evolve {
+                        "   m engine · e auto"
+                    } else {
+                        "   (auto-evolve ON is recorded but inert)   m engine · e auto"
+                    },
+                    Style::default().fg(DIM),
+                ),
             ]));
             let last = if s.last_cycle_ms > 0 {
                 format!("{} ago", ago(s.last_cycle_ms, now))
@@ -830,8 +866,10 @@ fn render_evo_status(f: &mut Frame, area: Rect, app: &App, now: i64) {
             };
             lines.push(Line::from(Span::styled(
                 format!(
-                    "deep cycle 72h · last {last} · next {next} · pending {}",
-                    s.pending_proposals
+                    "pending {} · deep cycle {} · round {} · last {last} · next {next}",
+                    s.pending_proposals,
+                    cycle_period(s.cycle_secs),
+                    s.cycle_seq,
                 ),
                 Style::default().fg(DIM),
             )));
@@ -934,7 +972,7 @@ fn render_evo_pending(f: &mut Frame, area: Rect, app: &App, now: i64) {
         lines.push(Line::from(Span::raw("")));
     }
     lines.push(Line::from(Span::styled(
-        "a accept (asks y/n) · x reject · d defer · e auto-evolve · u rollback selected strategy · ↑/↓ select",
+        "a accept (asks y/n) · x reject · d defer · m engine · e auto-evolve · u rollback selected strategy · ↑/↓ select",
         Style::default().fg(DIM),
     )));
     f.render_widget(

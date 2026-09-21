@@ -69,6 +69,11 @@ pub enum Command {
     EvolutionAuto {
         on: bool,
     },
+    /// #249: the engine switch — whether the evaluator runs at all (persisted).
+    /// Distinct from `EvolutionAuto`, which only decides who applies a change.
+    EvolutionEngine {
+        on: bool,
+    },
     /// E13: roll ONE strategy back to its pre-change parameters.
     EvolutionRollback {
         strategy: String,
@@ -182,6 +187,15 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                 return Err("usage: auto-evolve on|off".into());
             }
             Ok(Command::EvolutionAuto {
+                on: on == Some("on"),
+            })
+        }
+        "evolve" => {
+            let on = parts.get(1).copied();
+            if !matches!(on, Some("on") | Some("off")) || parts.len() != 2 {
+                return Err("usage: evolve on|off".into());
+            }
+            Ok(Command::EvolutionEngine {
                 on: on == Some("on"),
             })
         }
@@ -416,6 +430,7 @@ impl Dispatcher {
                 self.cmd_evolution_decide(raw, &id, &decision)
             }
             Command::EvolutionAuto { on } => self.cmd_evolution_auto(raw, on),
+            Command::EvolutionEngine { on } => self.cmd_evolution_engine(raw, on),
             Command::EvolutionRollback { strategy } => self.cmd_evolution_rollback(raw, &strategy),
             Command::Help => CommandOutcome::ok(raw, "help", HELP)
                 .with_data(serde_json::json!({ "usage": HELP })),
@@ -468,6 +483,24 @@ impl Dispatcher {
                     "auto-evolve ON — the engine now applies qualifying variants itself"
                 } else {
                     "auto-evolve OFF — proposals wait for a decision"
+                },
+            )
+            .with_data(v),
+            Err(e) => CommandOutcome::err(raw, e.to_string()),
+        }
+    }
+
+    /// #249: the engine switch. Turning it ON is what makes anything evolve at
+    /// all; the auto switch only decides who applies what qualifies.
+    fn cmd_evolution_engine(&mut self, raw: &str, on: bool) -> CommandOutcome {
+        match self.client.evolution_set_enabled(on) {
+            Ok(v) => CommandOutcome::ok(
+                raw,
+                "evolve",
+                if on {
+                    "evolution engine ON — evaluating, and its twin sets are built"
+                } else {
+                    "evolution engine OFF — nothing is evaluated, held or applied"
                 },
             )
             .with_data(v),
@@ -756,6 +789,7 @@ crypto-hft commands (UI Kit gateway):
   proposals [N]                            evolution proposals (pending first)
   decide <id> accept|reject|defer          vote on one evolution proposal
   auto-evolve on|off                       unattended mode switch (persisted)
+  evolve on|off                            evolution engine switch (persisted)
   rollback <strategy>                      undo one strategy's last evolution
   help";
 

@@ -1980,10 +1980,14 @@ impl Core {
     }
 
     /// Run one evolution evaluation and map outcomes to kernel events.
+    ///
+    /// Called every tick regardless of the engine switch, because the pass is not
+    /// only "evaluate": it also expires undecided proposals past their TTL, which
+    /// is bookkeeping the operator's "7 天未决自动过期" is a promise about. The
+    /// switch itself is the manager's own gate (#249) — one place, so a disabled
+    /// engine can neither evaluate nor adopt, and cannot silently stop ageing the
+    /// queue it left behind either.
     pub fn shadow_evolution_evaluate(&mut self, now_ms: i64) {
-        if !self.shadow_evolution.is_enabled() {
-            return;
-        }
         for outcome in self.shadow_evolution.evaluate(now_ms) {
             self.emit_shadow_outcome(outcome);
         }
@@ -6685,6 +6689,29 @@ mod shadow_evolution_tests {
     use crate::shadow_evolution::{MutableParams, StrategyParams};
     use rust_decimal_macros::dec;
 
+    /// A private evolution audit dir for one test, returned as the tuning block
+    /// that points the manager at it.
+    ///
+    /// The runtime switches live in `<audit_dir>/state.json` and WIN over the
+    /// config (#249), so a test that left them on the default `data/evolution`
+    /// would hand its switches to the next test to run — and inherit whatever
+    /// that one wrote. Each caller gets its own directory and its own switches,
+    /// and removes it at the end.
+    pub(super) fn scratch(tag: &str) -> (Option<ShadowEvolutionTuning>, String) {
+        let dir = std::env::temp_dir()
+            .join(format!("bkse-{}-{tag}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+        (
+            Some(ShadowEvolutionTuning {
+                audit_dir: Some(dir.clone()),
+                ..Default::default()
+            }),
+            dir,
+        )
+    }
+
     /// One strategy's override bag, built the way the IPC handler builds it.
     fn bag(strategy: &str, knob: &str, value: Decimal) -> MutableParams {
         let mut p = StrategyParams::new();
@@ -6726,10 +6753,12 @@ mod shadow_evolution_tests {
     /// and rollback restores the prior set for that strategy only.
     #[test]
     fn hot_swap_reaches_the_engine_and_rolls_back() {
+        let (tuning, dir) = scratch("hotswap");
         let mut c = Core::new(CoreConfig {
             risk: RiskConfig::default(),
             dry_seed_balance: dec!(1000),
             shadow_evolution_enabled: false,
+            shadow_evolution_tuning: tuning,
             ..Default::default()
         });
         c.enable_engine(se_engine());
@@ -6782,6 +6811,7 @@ mod shadow_evolution_tests {
         assert!(recs[0].manual);
         assert!(recs.iter().all(|r| r.strategy == "spread_arb"));
         assert!(c.shadow_evolution_history(Some("nope"), 10).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Apply names exactly one strategy: a multi-strategy bag is refused rather
@@ -6789,8 +6819,10 @@ mod shadow_evolution_tests {
     /// no-op that another strategy's change could be mistaken for).
     #[test]
     fn apply_and_rollback_are_per_strategy() {
+        let (tuning, dir) = scratch("per-strategy");
         let mut c = Core::new(CoreConfig {
             dry_seed_balance: dec!(1000),
+            shadow_evolution_tuning: tuning,
             ..Default::default()
         });
         c.enable_engine(se_engine());
@@ -6822,12 +6854,15 @@ mod shadow_evolution_tests {
                 .is_err()
         );
         assert_eq!(cap(&c), before);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn disabled_by_default_is_fully_inert() {
+        let (tuning, dir) = scratch("inert");
         let mut c = Core::new(CoreConfig {
             risk: RiskConfig::default(),
+            shadow_evolution_tuning: tuning,
             ..Default::default()
         });
         c.enable_engine(se_engine());
@@ -6889,6 +6924,7 @@ mod shadow_evolution_tests {
             before,
             "disabling restores the base config exactly"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -7647,6 +7683,7 @@ mod strategy_dispatch_tests {
     use crate::engine::{DataEvent, Engine, EngineConfig};
     use crate::model::CryptoMarket;
     use crate::risk::RiskConfig;
+    use crate::service::shadow_evolution_tests::scratch;
     use crate::shadow_evolution::{MutableParams, StrategyParams};
     use rust_decimal_macros::dec;
 
@@ -8144,9 +8181,11 @@ mod strategy_dispatch_tests {
     /// back on, and the value applied to it must still be in force.
     #[test]
     fn evolution_keeps_the_cell_of_a_disabled_strategy_across_a_toggle() {
+        let (tuning, dir) = scratch("toggle-cell");
         let base = CoreConfig {
             dry_seed_balance: dec!(1000),
             engine_enabled: true,
+            shadow_evolution_tuning: tuning,
             ..Default::default()
         };
         let mut c = Core::new(base.clone());
@@ -8212,6 +8251,7 @@ mod strategy_dispatch_tests {
             Some(dec!(3.1)),
             "a runtime toggle must not discard the strategy's evolved value"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

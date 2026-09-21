@@ -454,26 +454,35 @@ impl ProposalStore {
         hit
     }
 
-    /// Load the runtime evolution state (auto-evolve switch + cycle clock).
-    pub fn load_state(&self) -> Option<(bool, i64, u64)> {
+    /// Load the runtime evolution state (the two switches + the cycle clock).
+    ///
+    /// Every field is optional ON READ: a file written by an older kernel has no
+    /// `enabled` key, and an absent key must mean "the config file decides" —
+    /// never a silent `false` that switches an engine off on restart. `None`
+    /// (no file at all) means the same for every field.
+    pub fn load_state(&self) -> Option<PersistedState> {
         let text = std::fs::read_to_string(self.state_path()).ok()?;
         let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-        Some((
-            v.get("autoEvolve")
-                .and_then(|x| x.as_bool())
-                .unwrap_or(false),
-            v.get("lastCycleMs").and_then(|x| x.as_i64()).unwrap_or(0),
-            v.get("cycleSeq").and_then(|x| x.as_u64()).unwrap_or(0),
-        ))
+        Some(PersistedState {
+            enabled: v.get("enabled").and_then(|x| x.as_bool()),
+            auto_evolve: v.get("autoEvolve").and_then(|x| x.as_bool()),
+            last_cycle_ms: v.get("lastCycleMs").and_then(|x| x.as_i64()).unwrap_or(0),
+            cycle_seq: v.get("cycleSeq").and_then(|x| x.as_u64()).unwrap_or(0),
+        })
     }
 
-    /// Persist the runtime evolution state (best-effort).
-    pub fn save_state(&self, auto_evolve: bool, last_cycle_ms: i64, cycle_seq: u64) {
-        let body = serde_json::json!({
-            "autoEvolve": auto_evolve,
-            "lastCycleMs": last_cycle_ms,
-            "cycleSeq": cycle_seq,
+    /// Persist the runtime evolution state (best-effort, atomic replace).
+    pub fn save_state(&self, state: PersistedState) {
+        let mut body = serde_json::json!({
+            "lastCycleMs": state.last_cycle_ms,
+            "cycleSeq": state.cycle_seq,
         });
+        if let Some(on) = state.enabled {
+            body["enabled"] = serde_json::Value::Bool(on);
+        }
+        if let Some(on) = state.auto_evolve {
+            body["autoEvolve"] = serde_json::Value::Bool(on);
+        }
         if let Some(parent) = self.state_path().parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -484,6 +493,21 @@ impl ProposalStore {
             }
         }
     }
+}
+
+/// The runtime evolution state as it lives on disk (`state.json`).
+///
+/// Read back with every field optional so a file an older kernel wrote keeps
+/// meaning what it meant: the keys it has win, the keys it lacks hand the
+/// decision back to the config file (#249).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PersistedState {
+    /// The engine switch. `None` = the key was absent.
+    pub enabled: Option<bool>,
+    /// The unattended switch. `None` = the key was absent.
+    pub auto_evolve: Option<bool>,
+    pub last_cycle_ms: i64,
+    pub cycle_seq: u64,
 }
 
 #[cfg(test)]
@@ -638,16 +662,43 @@ mod tests {
     fn the_runtime_state_round_trips_through_disk() {
         let dir = tmp_dir("state");
         let store = ProposalStore::new(&dir);
-        store.save_state(true, 1234, 7);
-        let (auto, last, seq) = store.load_state().unwrap();
-        assert!(auto);
-        assert_eq!(last, 1234);
-        assert_eq!(seq, 7);
+        store.save_state(PersistedState {
+            enabled: Some(true),
+            auto_evolve: Some(true),
+            last_cycle_ms: 1234,
+            cycle_seq: 7,
+        });
+        let st = store.load_state().unwrap();
+        assert_eq!(st.enabled, Some(true));
+        assert_eq!(st.auto_evolve, Some(true));
+        assert_eq!(st.last_cycle_ms, 1234);
+        assert_eq!(st.cycle_seq, 7);
         // A directory with no state file reads as the defaults.
         let empty = ProposalStore::new(tmp_dir("state-missing"));
         assert!(empty.load_state().is_none());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(tmp_dir("state-missing"));
+    }
+
+    /// #249: a file written before the engine switch existed must not read as
+    /// "the engine is off" — an absent key means the config file decides, which
+    /// is how an upgrade keeps an engine the operator had switched on.
+    #[test]
+    fn a_state_file_without_the_engine_key_leaves_it_undecided() {
+        let dir = tmp_dir("state-legacy");
+        let store = ProposalStore::new(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            store.state_path(),
+            r#"{"autoEvolve":true,"lastCycleMs":99,"cycleSeq":3}"#,
+        )
+        .unwrap();
+        let st = store.load_state().unwrap();
+        assert_eq!(st.enabled, None, "an absent key is not a `false`");
+        assert_eq!(st.auto_evolve, Some(true));
+        assert_eq!(st.last_cycle_ms, 99);
+        assert_eq!(st.cycle_seq, 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// #243: a load must never write. The earlier build folded through `put`,
