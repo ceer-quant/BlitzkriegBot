@@ -22,6 +22,7 @@
 //!                   [--entry-maker-timeout-ms 5000]
 //!                   [--max-orderbook-stale-ms 8000]
 //!                   [--slippage-ticks 0] [--latency-ms 0] [--fill-prob-bps 10000]
+//!                   [--maker-depth-share-bps 10000]
 //!                   [--dry-redeem-fail 0] [--dry-redeem-manual]
 //!
 //! `--max-orderbook-stale-ms <ms>` (env `BK_MAX_ORDERBOOK_STALE_MS`) is how old
@@ -267,6 +268,9 @@ struct Args {
     latency_ms: i64,
     /// Fill model: maker fill probability (bps of 10000); None = untouched.
     fill_prob_bps: Option<u32>,
+    /// Fill model: share of the crossing depth a resting maker takes, in bps of
+    /// 10000 (queue position); None = untouched.
+    maker_depth_share_bps: Option<u32>,
     /// Dry-mode test hook: the first N simulated redemption attempts of each
     /// claim fail before one lands (0 = every attempt lands).
     dry_redeem_fail: u32,
@@ -545,6 +549,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut slippage_ticks: u32 = 0;
     let mut latency_ms: i64 = 0;
     let mut fill_prob_bps: Option<u32> = None;
+    let mut maker_depth_share_bps: Option<u32> = None;
     // #205: the orderbook freshness budget, tracked as Option so CLI > env >
     // default resolution can tell "the operator spoke" from "nobody did".
     let mut max_orderbook_stale_ms: Option<i64> = None;
@@ -832,6 +837,9 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                 latency_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(latency_ms)
             }
             "--fill-prob-bps" => fill_prob_bps = it.next().and_then(|v| v.parse().ok()),
+            "--maker-depth-share-bps" => {
+                maker_depth_share_bps = it.next().and_then(|v| v.parse().ok())
+            }
             // Dry-mode test hooks (#175 gate). Both are inert unless a mode that
             // simulates the redemption is running, so a live deployment can pass
             // them and see no change at all.
@@ -1302,6 +1310,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         slippage_ticks,
         latency_ms,
         fill_prob_bps,
+        maker_depth_share_bps,
         dry_redeem_fail,
         dry_redeem_manual,
         config_report: report,
@@ -1783,6 +1792,7 @@ async fn main() -> anyhow::Result<()> {
             taker_slippage_ticks: args.slippage_ticks,
             maker_latency_ms: args.latency_ms,
             maker_fill_prob_bps: args.fill_prob_bps.unwrap_or(10_000),
+            maker_depth_share_bps: args.maker_depth_share_bps.unwrap_or(10_000),
         },
         event_archive_path,
         event_archive_max_mb,

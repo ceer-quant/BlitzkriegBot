@@ -7,12 +7,16 @@
 
 use crate::core::types::CoreEvent;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// A bounded, cloneable, multi-subscriber event ring.
 #[derive(Clone)]
 pub struct EventBus {
     inner: Arc<Mutex<Inner>>,
+    /// Signalled on every publish, so `wait_for` is woken BY the publisher
+    /// rather than by a poll interval it would have to guess at.
+    signal: Arc<Condvar>,
 }
 
 struct Inner {
@@ -42,18 +46,25 @@ impl EventBus {
                 events: VecDeque::new(),
                 cap: cap.max(1),
             })),
+            signal: Arc::new(Condvar::new()),
         }
     }
 
     /// Publish a decoded event; returns its sequence number.
     pub fn publish(&self, ev: CoreEvent) -> u64 {
-        let mut g = self.inner.lock().unwrap();
-        g.seq += 1;
-        let seq = g.seq;
-        g.events.push_back((seq, ev));
-        while g.events.len() > g.cap {
-            g.events.pop_front();
-        }
+        let seq = {
+            let mut g = self.inner.lock().unwrap();
+            g.seq += 1;
+            let seq = g.seq;
+            g.events.push_back((seq, ev));
+            while g.events.len() > g.cap {
+                g.events.pop_front();
+            }
+            seq
+        };
+        // Notify AFTER releasing the lock: a waiter woken while this call still
+        // held it would go straight back to sleep on the mutex.
+        self.signal.notify_all();
         seq
     }
 
@@ -71,21 +82,45 @@ impl EventBus {
     /// All events newer than `sub.cursor`, advancing it. Events older than the
     /// ring have been evicted; the cursor is then fast-forwarded to the oldest.
     pub fn drain_new(&self, sub: &mut Subscription) -> Vec<CoreEvent> {
-        let g = self.inner.lock().unwrap();
-        let oldest = g.events.front().map(|(s, _)| *s).unwrap_or(g.seq + 1);
-        if sub.cursor + 1 < oldest {
-            sub.cursor = oldest.saturating_sub(1);
+        collect_new(&mut self.inner.lock().unwrap(), sub, |_| true)
+    }
+
+    /// Block until an event newer than `sub.cursor` satisfies `pred`, and return
+    /// it. Woken by the publisher (`publish` signals the condvar), so the caller
+    /// costs nothing while the bus is quiet and returns the instant the awaited
+    /// event lands — no poll interval to tune, no wall-clock budget for the
+    /// caller to get wrong.
+    ///
+    /// `timeout` is a HANG PROBE, not a latency budget: it bounds how long we
+    /// are willing to wait for a publisher that never comes. It cannot cut a
+    /// live wait short, because the scan runs AGAIN after a timed-out wait, so
+    /// an event published as the deadline expires is still returned.
+    ///
+    /// Consumed like `drain_new`: the cursor advances past the whole batch
+    /// (matching or not), so a caller that needs the other events must drain
+    /// first. Returns the first match in sequence order, or `None` on timeout.
+    pub fn wait_for<F>(
+        &self,
+        sub: &mut Subscription,
+        timeout: Duration,
+        pred: F,
+    ) -> Option<CoreEvent>
+    where
+        F: Fn(&CoreEvent) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.inner.lock().unwrap();
+        loop {
+            if let Some(ev) = collect_new(&mut guard, sub, &pred).into_iter().next() {
+                return Some(ev);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            // Spurious wakeups are harmless: the loop re-scans and re-decides.
+            guard = self.signal.wait_timeout(guard, deadline - now).unwrap().0;
         }
-        let out: Vec<CoreEvent> = g
-            .events
-            .iter()
-            .filter(|(s, _)| *s > sub.cursor)
-            .map(|(_, e)| e.clone())
-            .collect();
-        if let Some((s, _)) = g.events.back() {
-            sub.cursor = *s;
-        }
-        out
     }
 
     /// Decode a raw `core.event` notification line (`{jsonrpc,method,params}`)
@@ -103,6 +138,30 @@ impl EventBus {
         }
         Some(method)
     }
+}
+
+/// Events newer than `sub.cursor` that `pred` accepts, advancing the cursor to
+/// the batch head. ONE implementation behind `drain_new` and `wait_for`, so the
+/// two can never disagree about what "new" means or how far the cursor moves.
+fn collect_new(
+    g: &mut Inner,
+    sub: &mut Subscription,
+    pred: impl Fn(&CoreEvent) -> bool,
+) -> Vec<CoreEvent> {
+    let oldest = g.events.front().map(|(s, _)| *s).unwrap_or(g.seq + 1);
+    if sub.cursor + 1 < oldest {
+        sub.cursor = oldest.saturating_sub(1);
+    }
+    let out: Vec<CoreEvent> = g
+        .events
+        .iter()
+        .filter(|(s, e)| *s > sub.cursor && pred(e))
+        .map(|(_, e)| e.clone())
+        .collect();
+    if let Some((s, _)) = g.events.back() {
+        sub.cursor = *s;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -158,5 +217,85 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert!(matches!(got[0], CoreEvent::RiskAlert { .. }));
         let _ = (s, bus);
+    }
+
+    /// The point of `wait_for`: the caller is released by the PUBLISH, so the
+    /// wait ends as soon as the event lands rather than when a poll wakes up.
+    /// The 10 s cap is a hang probe (a wait that ignored the signal and sat out
+    /// its 60 s timeout would trip it) — it is not a latency budget.
+    #[test]
+    fn wait_for_is_released_by_the_publish_not_by_its_timeout() {
+        let bus = EventBus::new(8);
+        let mut sub = bus.subscribe();
+        let publisher = {
+            let bus = bus.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                bus.publish(risk_alert("late"));
+            })
+        };
+
+        let started = Instant::now();
+        let got = bus.wait_for(
+            &mut sub,
+            Duration::from_secs(60),
+            |ev| matches!(ev, CoreEvent::RiskAlert { message, .. } if message == "late"),
+        );
+        let waited = started.elapsed();
+        publisher.join().unwrap();
+
+        assert!(got.is_some(), "the published event was never returned");
+        assert!(
+            waited < Duration::from_secs(10),
+            "wait_for sat on its timeout instead of waking on the publish ({waited:?})"
+        );
+    }
+
+    /// A wait with no publisher must still END (the caller's hang probe), and
+    /// must say so with `None` rather than an empty event.
+    #[test]
+    fn wait_for_times_out_with_none_when_nothing_matches() {
+        let bus = EventBus::new(8);
+        let mut sub = bus.subscribe();
+        bus.publish(risk_alert("not-the-one"));
+
+        let started = Instant::now();
+        let got = bus.wait_for(
+            &mut sub,
+            Duration::from_millis(100),
+            |ev| matches!(ev, CoreEvent::RiskAlert { message, .. } if message == "absent"),
+        );
+        assert!(got.is_none(), "no matching event was published");
+        // Monotonic clock, and the deadline is measured from before the call,
+        // so this direction can only be violated by a wait that ignored it.
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(bus.seq() == 1);
+    }
+
+    /// `wait_for` consumes what it looked at, exactly like `drain_new`: the
+    /// match is returned once, non-matching events in the same batch are
+    /// consumed with it, and a second wait sees only later publishes.
+    #[test]
+    fn wait_for_consumes_the_batch_like_drain_new() {
+        let bus = EventBus::new(8);
+        let mut sub = bus.subscribe();
+        bus.publish(risk_alert("first"));
+        bus.publish(risk_alert("wanted"));
+
+        let got = bus.wait_for(
+            &mut sub,
+            Duration::from_secs(1),
+            |ev| matches!(ev, CoreEvent::RiskAlert { message, .. } if message == "wanted"),
+        );
+        assert!(got.is_some(), "the matching event must be returned");
+        assert!(
+            bus.drain_new(&mut sub).is_empty(),
+            "the returned event (and its batch) must not be seen twice"
+        );
+        assert!(
+            bus.wait_for(&mut sub, Duration::from_millis(50), |_| true)
+                .is_none(),
+            "a later wait must see only events published after the first one"
+        );
     }
 }

@@ -7,11 +7,11 @@
 
 use crate::position::ClosedPosition;
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// One closed trade, wire-compatible with the Node `TradeRecord`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TradeRecord {
     pub id: String,
@@ -164,6 +164,14 @@ impl TradeDb {
                 let _ = writeln!(f, "{line}");
             }
         }
+        self.fold_summary(rec);
+        self.summary.last_updated = now_ms;
+        self.persist_summary();
+    }
+
+    /// Fold one record into the running summary (record/retract share the
+    /// arithmetic so a retract is the exact inverse of its record).
+    fn fold_summary(&mut self, rec: &TradeRecord) {
         let net = f64_of(rec.net_pnl_usd);
         self.summary.total_trades += 1;
         if net >= 0.0 {
@@ -184,10 +192,59 @@ impl TradeDb {
             ((self.summary.avg_hold_time_sec * (n - 1.0)) + rec.hold_time_sec as f64) / n;
         self.summary.best_trade_pnl = self.summary.best_trade_pnl.max(net);
         self.summary.worst_trade_pnl = self.summary.worst_trade_pnl.min(net);
-        self.summary.last_updated = now_ms;
+    }
+
+    fn persist_summary(&self) {
         if let Ok(text) = serde_json::to_string_pretty(&self.summary) {
             let _ = std::fs::write(&self.summary_path, text);
         }
+    }
+
+    /// F4: withdraw a recorded trade whose venue execution later FAILED. The
+    /// JSONL is append-only for history, so the retraction REWRITES the file
+    /// without the offending line and rebuilds the summary from the remaining
+    /// records — a trade that never happened must not live in the books, not
+    /// even as a compensating entry the win-rate maths would still count.
+    ///
+    /// Matches the record by (id, exit_time, net_pnl_usd): id alone can repeat
+    /// across restarts, and the retraction must not eat a different close.
+    /// No-op when no matching line exists (never recorded, already retracted).
+    pub fn retract(&mut self, rec: &TradeRecord, now_ms: i64) {
+        let Ok(text) = std::fs::read_to_string(&self.jsonl_path) else {
+            return;
+        };
+        let mut remaining: Vec<TradeRecord> = text
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let Some(pos) = remaining.iter().position(|r| {
+            r.id == rec.id && r.exit_time == rec.exit_time && r.net_pnl_usd == rec.net_pnl_usd
+        }) else {
+            return;
+        };
+        remaining.remove(pos);
+        let Ok(body) = remaining
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .map(|lines| lines.join("\n"))
+        else {
+            return;
+        };
+        let mut out = body;
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        if std::fs::write(&self.jsonl_path, out).is_err() {
+            return;
+        }
+        // Rebuild the summary from what is actually on file now.
+        self.summary = TradeSummary::default();
+        for r in &remaining {
+            self.fold_summary(r);
+        }
+        self.summary.last_updated = now_ms;
+        self.persist_summary();
     }
 
     pub fn summary(&self) -> &TradeSummary {
