@@ -4313,17 +4313,18 @@ impl Core {
         self.emit_risk_alert(CoreErrorCode::RiskRejected, message);
     }
 
-    /// Report every protective stop the wick guard withheld (P0 #177): the
+    /// Report every exit withheld from becoming an order (P0 #177, F6): the
     /// audit trail must show "should have triggered" instead of a silent hold.
     fn emit_suppressed_stops(&mut self) {
         for ev in self.positions.drain_suppressed_stops() {
             tracing::warn!(
                 position = %ev.position_id,
                 token = %ev.token_id,
+                cause = ?ev.cause,
                 bid = %ev.bid,
                 mid = %ev.mid,
                 stop_pct = %ev.stop_pct,
-                "protective stop suppressed by the wick guard (mid did not confirm)"
+                "protective stop suppressed"
             );
             self.emit_risk_alert(CoreErrorCode::RiskRejected, ev.message());
         }

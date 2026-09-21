@@ -6,8 +6,8 @@
 //! the open/closed books, daily PnL, and per-asset/direction cooldowns.
 
 use crate::exit_policy::{
-    ExitConfig, ExitState, ExitTickInput, decide_exit_verdict, executable_bid, pnl_pct,
-    reference_price, update_exit_state,
+    ExitConfig, ExitState, ExitTickInput, decide_exit_verdict, effective_stop_pct, executable_bid,
+    pnl_pct, reference_price, update_exit_state,
 };
 use crate::model::{ExitReason, OrderRole, OrderbookSnapshot, Side, SignalDirection};
 
@@ -190,16 +190,41 @@ pub struct DailyTrip {
     pub at_ms: i64,
 }
 
-/// One protective stop the wick guard withheld — "should have triggered" made
-/// visible to review and to the panel (P0 #177).
+/// Why a protective stop that wanted to fire did not become an exit order.
+///
+/// Both causes mean the same thing to the operator — "I should have stopped out
+/// and did not" — but they need different fixes, so they are told apart rather
+/// than flattened into one alert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopSuppressionCause {
+    /// The wick guard: the raw bid breached the stop but the mid did not
+    /// confirm, so the breach looked like a wick rather than a move (#177).
+    WickGuard,
+    /// F6: the exit rule fired, but no bid was both live and fresh enough to
+    /// price a SELL against. Sending an order priced off a number no buyer was
+    /// showing is the thing the F6 gate forbids — so the position is held, and
+    /// the held exit is reported here instead of vanishing.
+    NoExecutableQuote,
+}
+
+/// One exit the F6 gate withheld from becoming an order — "should have
+/// triggered" made visible to review and to the panel (P0 #177, F6).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SuppressedStopEvent {
+    pub cause: StopSuppressionCause,
     pub position_id: String,
     pub token_id: String,
     pub strategy: String,
     pub asset: String,
     pub entry_price: Decimal,
+    /// The bid that was rejected as a price: zero when the book showed no bid
+    /// at all, the stale level when it showed one past the staleness budget.
+    /// For [`StopSuppressionCause::WickGuard`] it is the raw bid that breached
+    /// the stop.
     pub bid: Decimal,
+    /// For [`StopSuppressionCause::WickGuard`]: the mid that failed to confirm.
+    /// For [`StopSuppressionCause::NoExecutableQuote`]: the last known price the
+    /// stop actually judged on, since no bid was available to report.
     pub mid: Decimal,
     pub pnl_pct_at_bid: Decimal,
     pub pnl_pct_at_mid: Decimal,
@@ -211,18 +236,42 @@ impl SuppressedStopEvent {
     /// The audit-trail line: what the raw bid would have done, what the mid
     /// said instead, and the stop that was therefore not taken.
     pub fn message(&self) -> String {
-        format!(
-            "stop SUPPRESSED (wick guard): {} {} entry {} bid {} (-{}%) mid {} ({}%) stop {}% — \
-             raw bid breached the stop, mid did not confirm",
-            self.position_id,
-            self.asset,
-            self.entry_price,
-            self.bid,
-            self.pnl_pct_at_bid.abs(),
-            self.mid,
-            self.pnl_pct_at_mid,
-            self.stop_pct
-        )
+        match self.cause {
+            StopSuppressionCause::WickGuard => format!(
+                "stop SUPPRESSED (wick guard): {} {} entry {} bid {} (-{}%) mid {} ({}%) stop {}% — \
+                 raw bid breached the stop, mid did not confirm",
+                self.position_id,
+                self.asset,
+                self.entry_price,
+                self.bid,
+                self.pnl_pct_at_bid.abs(),
+                self.mid,
+                self.pnl_pct_at_mid,
+                self.stop_pct
+            ),
+            StopSuppressionCause::NoExecutableQuote if self.bid > Decimal::ZERO => format!(
+                "stop SUPPRESSED (stale quote): {} {} entry {} bid {} ({}%) stop {}% — the exit \
+                 rule fired, but the book was past its staleness budget, so that bid could not \
+                 price a SELL; the position is held until a fresh quote appears or expiry settles it",
+                self.position_id,
+                self.asset,
+                self.entry_price,
+                self.bid,
+                self.pnl_pct_at_bid,
+                self.stop_pct
+            ),
+            StopSuppressionCause::NoExecutableQuote => format!(
+                "stop SUPPRESSED (no executable bid): {} {} entry {} last {} ({}%) stop {}% — the \
+                 exit rule fired, but the book showed no bid at all, so no order was sent; the \
+                 position is held until a buyer appears or expiry settles it",
+                self.position_id,
+                self.asset,
+                self.entry_price,
+                self.mid,
+                self.pnl_pct_at_mid,
+                self.stop_pct
+            ),
+        }
     }
 }
 
@@ -865,25 +914,28 @@ impl PositionManager {
             // fell back to `pos.current_price` — a stale reference that could
             // be an arbitrary number of seconds old, or a one-sided-book
             // phantom — and let forced exits book profit no buyer was offering.
-            // No bid ⇒ no exit request this tick; the position stays open until
-            // either a bid appears or expiry settles it.
-            let exit_price = executable_bid(book.as_ref());
-            if exit_price <= Decimal::ZERO {
-                continue;
-            }
             // A book older than the staleness budget is not a quote either: a
             // bid captured minutes ago is not a buyer standing here now.
-            if let Some(b) = book.as_ref()
-                && b.timestamp > 0
-                && now_ms - b.timestamp > cfg.max_book_age_sec * 1000
-            {
-                continue;
-            }
+            //
+            // This gate prices the ORDER, and only the order. It must not skip
+            // the DECISION: `decide_exit_verdict` already draws the same line
+            // (a mandatory or profit-side exit needs a live bid; the protective
+            // stop may read a fresh last-known price), and short-circuiting
+            // here made a breached stop indistinguishable from a quiet market —
+            // no order AND no report. So the verdict runs either way, and a
+            // decision that cannot be priced becomes a held-stop report below.
+            let exit_price = executable_bid(book.as_ref());
+            let book_fresh = match book.as_ref() {
+                Some(b) => b.timestamp <= 0 || now_ms - b.timestamp <= cfg.max_book_age_sec * 1000,
+                None => true,
+            };
+            let priceable = exit_price > Decimal::ZERO && book_fresh;
             let time_left_sec = (pos.expires_at_ms - now_ms) / 1000;
             let hold_sec = (now_ms - pos.entered_at_ms) / 1000;
 
             // Fixed-target strategies (e.g. sharp_reversal).
             if let Some(t) = pos.target_exit_price
+                && priceable
                 && exit_price >= t
                 && hold_sec >= self.config.exit.exit_grace_sec
             {
@@ -911,6 +963,7 @@ impl PositionManager {
             });
             if let Some(s) = verdict.suppressed_stop {
                 withheld.push(SuppressedStopEvent {
+                    cause: StopSuppressionCause::WickGuard,
                     position_id: pos.id.clone(),
                     token_id: pos.token_id.clone(),
                     strategy: pos.strategy.clone(),
@@ -925,12 +978,36 @@ impl PositionManager {
                 });
             }
             if let Some(d) = verdict.decision {
-                out.push(ExitRequest {
-                    position_id: pos.id.clone(),
-                    reason: d.reason,
-                    exit_price,
-                    use_maker: d.use_maker,
-                });
+                if priceable {
+                    out.push(ExitRequest {
+                        position_id: pos.id.clone(),
+                        reason: d.reason,
+                        exit_price,
+                        use_maker: d.use_maker,
+                    });
+                } else {
+                    // The rule fired but there is no buyer to sell to at any
+                    // price we can name — hold, and report the held exit so it
+                    // reaches review instead of dying in memory.
+                    withheld.push(SuppressedStopEvent {
+                        cause: StopSuppressionCause::NoExecutableQuote,
+                        position_id: pos.id.clone(),
+                        token_id: pos.token_id.clone(),
+                        strategy: pos.strategy.clone(),
+                        asset: pos.asset.clone(),
+                        entry_price: pos.entry_price,
+                        bid: exit_price,
+                        mid: pos.current_price,
+                        pnl_pct_at_bid: if exit_price > Decimal::ZERO {
+                            pnl_pct(exit_price, pos.entry_price)
+                        } else {
+                            Decimal::ZERO
+                        },
+                        pnl_pct_at_mid: pnl_pct(pos.current_price, pos.entry_price),
+                        stop_pct: effective_stop_pct(cfg.stop_loss_pct, time_left_sec, &cfg),
+                        now_ms,
+                    });
+                }
             }
         }
         for ev in withheld {
