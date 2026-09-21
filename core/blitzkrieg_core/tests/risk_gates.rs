@@ -25,7 +25,9 @@ use blitzkrieg_core::model::{
     CoreErrorCode, ExitReason, FillPolicy, OrderRequest, OrderRole, OrderStatus, OrderbookSnapshot,
     Side, SignalDirection,
 };
-use blitzkrieg_core::position::{OpenParams, PositionConfig, PositionManager, utc_day_index};
+use blitzkrieg_core::position::{
+    OpenParams, PositionConfig, PositionManager, StopSuppressionCause, utc_day_index,
+};
 use blitzkrieg_core::risk::RiskConfig;
 use blitzkrieg_core::service::{Core, CoreConfig};
 use rust_decimal::Decimal;
@@ -277,18 +279,32 @@ fn position(
 
 #[test]
 fn the_stop_survives_a_dead_quote_a_missing_book_and_a_collapsed_mid() {
-    // (a) No bid at all (the book was swept): the mid is the only price left.
+    // (a) No bid at all (the book was swept). A one-sided book now has no mid
+    // either — `from_levels` zeroes it, because `(0 + ask)/2` is an arithmetic
+    // artifact, not a level anyone will lift. So there is no buyer to sell to
+    // AND no trustworthy price to judge the stop on. F6's answer, and the
+    // resolution of #179: hold. Minting a SELL out of the phantom mid is what
+    // made the old code "book profit no buyer was offering".
+    //
+    // The visibility cost of this (a swept book leaves the stop unjudgeable,
+    // because `stop_reference` only consults a mid that `from_levels` now
+    // zeroes) is tracked as #225 — it is an alerting gap, not a money gap: the
+    // position could not have been sold at any price either way.
     let mut pm = PositionManager::new(PositionConfig::default());
     position(&mut pm, "tok", dec!(0.40), dec!(10), NOW);
     let reqs = pm.check_exits(
         &|_| Some(book(vec![], vec![(dec!(0.15), dec!(1000))], NOW + 5_000)),
         NOW + 5_000,
     );
-    assert_eq!(reqs.len(), 1, "a bid-less falling mid must fire the stop");
-    assert_eq!(reqs[0].reason, ExitReason::StopLoss);
-    assert!(!reqs[0].use_maker, "a mandatory exit is never maker-only");
+    assert!(
+        reqs.is_empty(),
+        "a bid-less book must never mint a SELL out of the mid or the ask"
+    );
 
-    // (b) No book at all, but a FRESH last valid price: the stop still fires.
+    // (b) No book at all, but a FRESH last valid price: the stop's judgement
+    // stands — the position is underwater and the rule says get out — but a
+    // price is not a bid, so the judgement still cannot become an order. No
+    // order, AND no silence: the held exit is reported.
     let mut pm = PositionManager::new(PositionConfig::default());
     let id = position(&mut pm, "tok", dec!(0.40), dec!(10), NOW);
     pm.tick(
@@ -301,8 +317,34 @@ fn the_stop_survives_a_dead_quote_a_missing_book_and_a_collapsed_mid() {
         NOW + 3_000,
     );
     let reqs = pm.check_exits(&|_| None, NOW + 4_000);
-    assert_eq!(reqs.len(), 1, "a fresh last price must fire the stop");
-    assert_eq!(reqs[0].reason, ExitReason::StopLoss);
+    assert!(
+        reqs.is_empty(),
+        "a missing book must not mint a SELL either"
+    );
+    let events = pm.drain_suppressed_stops();
+    assert_eq!(
+        events.len(),
+        1,
+        "the held stop must be reported, not swallowed"
+    );
+    assert_eq!(events[0].cause, StopSuppressionCause::NoExecutableQuote);
+    assert_eq!(events[0].bid, Decimal::ZERO, "there was no bid to report");
+    assert_eq!(
+        events[0].mid,
+        dec!(0.15),
+        "the last known price is what the stop judged on"
+    );
+    assert_eq!(events[0].pnl_pct_at_mid, dec!(-62.5));
+    assert!(events[0].message().contains("no executable bid"));
+    assert_eq!(
+        pm.suppressed_stop_count(),
+        1,
+        "the panel counter moves for a held stop too"
+    );
+    assert!(
+        pm.drain_suppressed_stops().is_empty(),
+        "a drain must be a drain"
+    );
 
     // (b') …but the same price, aged past the freshness bound, must not: a
     // stale quote cannot speak for the market.
