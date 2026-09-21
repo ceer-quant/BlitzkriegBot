@@ -1395,27 +1395,79 @@ mod tests {
         drop(ours);
     }
 
-    /// The socket node must end up owner-only. `bind` creates it `0777 & !umask`
-    /// (often 0755), which is exactly what the audit found.
+    /// The socket node must end up owner-only, whatever mode it started from.
+    ///
+    /// Every assertion here is written against the LITERAL `0o600` (and the
+    /// bit-level forms `applied & 0o077 == 0` / `applied & 0o700 == 0o600`),
+    /// never against `SOCKET_MODE`. Asserting `applied == SOCKET_MODE` makes the
+    /// test self-referential: it moves with the very constant it exists to
+    /// police, so widening `SOCKET_MODE` to `0o666` — precisely the exposure
+    /// #187 fixed — would leave it green. Verified by mutation: with
+    /// `SOCKET_MODE = 0o666` the old form passed and this form fails.
+    ///
+    /// The starting modes are set explicitly rather than inherited from the
+    /// umask, so "already narrow stays narrow" and "loose is narrowed" are both
+    /// exercised on every machine instead of only where `bind` happens to land
+    /// on a loose mode.
     #[test]
-    fn restrict_socket_narrows_a_loose_mode_to_0600() {
+    fn restrict_socket_leaves_the_node_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("bk-ipc-sock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("probe.sock");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
+
+        for before in [0o600, 0o666, 0o777] {
+            let path = dir.join(format!("probe-{before:o}.sock"));
+            let _listener = rt.block_on(async { UnixListener::bind(&path).expect("bind") });
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(before))
+                .expect("seed mode");
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                before,
+                "precondition: the node starts at {before:04o}"
+            );
+
+            let applied = restrict_socket(path.to_str().unwrap()).expect("chmod");
+            assert_eq!(
+                applied, 0o600,
+                "socket must be owner-only after starting at {before:04o}"
+            );
+            assert_eq!(
+                applied & 0o077,
+                0,
+                "no group/other bit may survive {before:04o}: got {applied:04o}"
+            );
+            assert_eq!(
+                applied & 0o700,
+                0o600,
+                "the owner keeps read+write and gains nothing: got {applied:04o}"
+            );
+            // The reported mode must be the mode on disk — a helper that chmod'ed
+            // nothing but returned 0600 would satisfy the checks above.
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "the mode on disk must match the mode reported for {before:04o}"
+            );
+        }
+
+        // And the mode `bind` itself produces, which is umask-dependent (0755 on
+        // a default umask, 0700 under a hardened one). The property that must
+        // hold either way is the one asserted — no group/other bit survives —
+        // rather than a specific starting mode, so this cannot turn into a
+        // precondition that silently skips the check.
+        let path = dir.join("probe-bound.sock");
         let _listener = rt.block_on(async { UnixListener::bind(&path).expect("bind") });
         let created = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert!(
-            created & 0o077 != 0 || created == SOCKET_MODE,
-            "precondition: bind creates a non-owner-only mode (got {created:04o})"
-        );
         let applied = restrict_socket(path.to_str().unwrap()).expect("chmod");
-        assert_eq!(applied, SOCKET_MODE, "socket must be owner-only after bind");
+        assert_eq!(
+            applied, 0o600,
+            "socket must be owner-only after bind (bind created {created:04o})"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
