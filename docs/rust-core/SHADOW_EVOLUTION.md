@@ -169,6 +169,15 @@ evolutionsApplied, evolutionsRejected, secondsSinceLastEvolution }`。
   last-active-promotion（回滚记录会**清空**恢复目标——单层语义，再回滚报错）。
   回滚跳过渐变锁（恢复的是历史合法值），但域/不可变锁仍然生效。
 
+- **产物进加载路径需人工审批（#188）**：影子进化只改**参数**（进程内热切换，
+  受锁 0/一/二约束），它自己不生成策略库。若某条外部流水线（脚本、CI、手工构建）
+  把重建的 cdylib 放到 `data/`、`shadow_evolution/` 或任何含 `shadow*`/`evolution*`
+  组件的目录下，加载侧按**机器生成产物**处理：这些路径**不因位于策略根内而被信任**，
+  必须由人工把 `sha256 <路径>` 写进审批清单（默认
+  `user_layer/strategies/approved.manifest`，或 `BLITZKRIEG_STRATEGY_MANIFEST`
+  指定的文件）且磁盘摘要匹配，才允许 dlopen；摘要变化即拒绝并要求重新评审。
+  一句话：**进化可以提案，只有人能批准上线。**
+
 IPC 增量：
 
 | 方法 | 参数 | 说明 |
