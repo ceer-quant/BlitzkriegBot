@@ -52,6 +52,7 @@ cargo build --release --workspace --locked
 | `scale-plugins-check.mjs` / `feed-scale-check.mjs` | Registry read latency / feed loss rate at scale |
 | `ui-eventbus-check.mjs` / `ui-kit-gateway-check.mjs` / `ui-plugin-check.mjs` | UI event push / gateway command surface |
 | `trade-log-flag-check.mjs` / `market-plugin-check.mjs` | `--no-trade-log` isolation / plugin selection |
+| `core-args-check.mjs` | #228: an argument the build does not recognise **stops the boot** (exit 2, named, with the closest legal spelling suggested); a safety near-miss (`--read-only`, `--redonly`, `--max-notinal`) is refused with the flag meant *and* what leaving it out would have meant; `--help`/`-h` exit 0 and list exactly the flags the parser accepts; `--version`/`-V` exit 0 with no boot; and a refused argument writes **no** ledger file. `--allow-unknown-args` is the explicit opt-out for a benign unknown argument and never covers a safety near-miss |
 
 ## Observability / ops
 
