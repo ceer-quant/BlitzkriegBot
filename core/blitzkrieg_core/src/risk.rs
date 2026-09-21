@@ -2,13 +2,32 @@
 //!
 //! Full daily-loss / consecutive-loss / cooldown risk lands in P1/P2 with
 //! positions. P0 enforces the invariants no order must ever bypass:
-//!  - global kill switch
+//!  - global kill switch — an ENTRY freeze: closing intents always pass
 //!  - per-order notional cap
 //!  - (the ledger independently prevents overspending)
 
 use crate::model::{CoreError, CoreErrorCode, CoreResult, OrderRequest, Side};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+
+/// The internal-key prefixes that name a CLOSING intent: an automated exit, a
+/// strategy close, a manual flatten or the residual backstop. This is the ONE
+/// definition — the placement path (`service::is_close_intent`) delegates here,
+/// because the risk gate and the retry policy must agree on what "closing"
+/// means or one of them re-locks the escape hatch the other opened (P0 #174).
+pub fn is_close_intent(internal_key: &str) -> bool {
+    internal_key.starts_with("exit:")
+        || internal_key.starts_with("exit-strategy:")
+        || internal_key.starts_with("flatten:")
+        || internal_key.starts_with("exit-residual:")
+}
+
+/// True when this request only REDUCES exposure. The kernel cannot see the
+/// book from here, so a SELL is only trusted as a close when its intent key
+/// says so; anything else stays subject to the entry freeze.
+fn closes_exposure(req: &OrderRequest) -> bool {
+    req.side == Side::Sell && is_close_intent(&req.internal_key)
+}
 
 #[derive(Debug, Clone)]
 pub struct RiskConfig {
@@ -216,7 +235,15 @@ impl RiskGate {
     }
 
     pub fn check(&self, req: &OrderRequest) -> CoreResult<()> {
-        if self.killed {
+        // The kill switch freezes NEW exposure, never the way OUT of it. A kill
+        // is raised exactly when the book is most dangerous (venue refusals,
+        // failed self-check, blind sweeps), so vetoing the closing SELL would
+        // stretch the stop-limited risk into a total one: the escape hatch has
+        // to stay open by construction (P0 #174). A genuine global stop of
+        // trading is a process-level action (`service` stop path), not an order
+        // rejection — subtracting the ability to close is not what "stopped"
+        // means here.
+        if self.killed && !closes_exposure(req) {
             return Err(CoreError::new(
                 CoreErrorCode::KillSwitchActive,
                 self.kill_reason
@@ -278,6 +305,13 @@ mod tests {
         }
     }
 
+    fn req_with_key(side: Side, key: &str) -> OrderRequest {
+        OrderRequest {
+            internal_key: key.into(),
+            ..req(side, dec!(0.5), dec!(4))
+        }
+    }
+
     #[test]
     fn gates_notional_and_kill() {
         let mut g = RiskGate::new(RiskConfig {
@@ -296,6 +330,57 @@ mod tests {
         );
         g.resume();
         g.check(&req(Side::Buy, dec!(0.5), dec!(1))).unwrap();
+    }
+
+    /// P0 #174: the kill switch freezes entries, never the exit. A kill is
+    /// raised exactly when the book is most dangerous, so a blocked closing
+    /// SELL turns the stop-limited risk into a total one.
+    #[test]
+    fn kill_switch_freezes_entries_but_never_exits() {
+        let mut g = RiskGate::new(RiskConfig {
+            max_order_notional: dec!(3),
+            ..Default::default()
+        });
+        g.kill("self-check failed");
+        let buy = req(Side::Buy, dec!(0.5), dec!(1));
+        assert_eq!(
+            g.check(&buy).unwrap_err().code,
+            CoreErrorCode::KillSwitchActive,
+            "entries stay frozen"
+        );
+        // Every closing-intent prefix the placement path produces must pass.
+        for key in [
+            "exit:tok:StopLoss",
+            "exit-strategy:tok:close",
+            "flatten:hft-3",
+            "exit-residual:tok",
+        ] {
+            g.check(&req_with_key(Side::Sell, key))
+                .unwrap_or_else(|e| panic!("{key} must pass the kill gate: {e}"));
+        }
+        // A SELL that does NOT name a close intent is not assumed to reduce
+        // exposure, so it stays frozen with the entries.
+        assert_eq!(
+            g.check(&req_with_key(Side::Sell, "spread_arb:BTC"))
+                .unwrap_err()
+                .code,
+            CoreErrorCode::KillSwitchActive
+        );
+        // The exemption is from the KILL gate only: the other invariants still
+        // apply to a closing SELL (size must be positive, price in band).
+        assert_eq!(
+            g.check(&OrderRequest {
+                internal_key: "flatten:hft-1".into(),
+                size: Decimal::ZERO,
+                ..req(Side::Sell, dec!(0.5), dec!(1))
+            })
+            .unwrap_err()
+            .code,
+            CoreErrorCode::RiskRejected
+        );
+        // ...and resuming restores entries.
+        g.resume();
+        g.check(&buy).unwrap();
     }
 
     #[test]

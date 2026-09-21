@@ -2265,6 +2265,20 @@ impl Core {
             // In-kernel accounting audit (issue #189): the latest verdict, so the
             // panel shows what the kernel itself concluded about the books.
             "accountingAudit": self.accounting_audit_view(),
+            // #173: the day's realized-loss budget as the panel reads it —
+            // visible even when healthy, so "is the breaker armed, and against
+            // what cap?" is answerable without grepping the startup log.
+            "dailyLoss": {
+                "dayIndex": self.positions.daily_state().day_index,
+                "realizedPnlUsd": self.positions.daily_pnl(),
+                "limitUsd": self.positions.effective_daily_loss_limit(),
+                "openingEquityUsd": self.positions.daily_state().opening_equity_usd,
+                "tripped": self.positions.daily_loss_tripped(),
+                "trippedAtMs": self.positions.daily_state().tripped_at_ms,
+                // #177: protective stops the wick guard withheld — "should have
+                // triggered" is a number on the panel, not a silent no-op.
+                "suppressedStops": self.positions.suppressed_stop_count(),
+            },
             "blocked": blocked,
             "confirmed": confirmed,
             "confirmedDetail": confirmed_detail,
@@ -2550,6 +2564,10 @@ impl Core {
                         mode: FillPolicy::Taker,
                         price: worst,
                         size: o.size,
+                        // Only the engine's ENTRY order is `maker_then_taker`
+                        // (exits are Maker or Taker), so this escalated leg is
+                        // always new exposure and rightly stays subject to the
+                        // kill switch — it is not a close intent (P0 #174).
                         internal_key: format!("{id}:escalated"),
                         strategy: o.strategy.clone(),
                         asset: o.asset.clone(),
@@ -3309,6 +3327,10 @@ impl Core {
                 ),
             });
         }
+        // #173: the daily budget freezes entries the moment its cap is reached —
+        // reported here (not only on the next tick) so the freeze and the loss
+        // land in the same audit window.
+        self.emit_daily_trip();
     }
 
     /// Map a venue order id to a core order (for user-WS events). Returns the
@@ -3569,6 +3591,88 @@ impl Core {
     /// Broadcast a risk alert.
     pub fn emit_risk_alert(&self, code: CoreErrorCode, message: String) {
         self.emit(Event::RiskAlert { code, message });
+    }
+
+    /// Roll the daily-loss budget when the UTC day changes (P0 #173).
+    ///
+    /// The budget's base is the account's CASH EQUITY — the ledger's
+    /// venue-reconciled balance (host `seed_balance`/`venue_free_balance` keep
+    /// it honest in live, `dry_seed_balance` in dry). Only the kernel can read
+    /// it: the percentage cap is relative to the day's opening equity, so a
+    /// fixed dollar default stops being meaningless on a small book. Called
+    /// once per tick, before the exit checks, so a position closed right after
+    /// the boundary is already counted in the new day.
+    fn roll_daily_budget(&mut self, now_ms: i64) {
+        // `balance` is already gross of local reservations — adding `reserved`
+        // here would double-count resting BUY commitments.
+        let equity = self.ledger.balance();
+        if let Some(roll) = self.positions.roll_daily(now_ms, equity) {
+            let message = match roll.previous_day_index {
+                Some(prev) => format!(
+                    "daily loss budget: UTC day {prev} closed at ${} realized{} — day {} opens with equity ${}, cap ${}",
+                    roll.previous_realized_pnl_usd,
+                    if roll.previous_tripped {
+                        " (TRIPPED: entries were frozen)"
+                    } else {
+                        ""
+                    },
+                    roll.day_index,
+                    roll.opening_equity_usd,
+                    roll.limit_usd
+                ),
+                None => format!(
+                    "daily loss budget: UTC day {} opens with equity ${}, cap ${} (realized loss resets at the UTC day boundary)",
+                    roll.day_index, roll.opening_equity_usd, roll.limit_usd
+                ),
+            };
+            if roll.previous_tripped {
+                tracing::warn!(day = roll.day_index, "{}", message);
+            } else {
+                tracing::info!(day = roll.day_index, "{}", message);
+            }
+            self.emit_risk_alert(CoreErrorCode::RiskRejected, message);
+        }
+    }
+
+    /// Announce a tripped daily-loss breaker exactly once per process (see
+    /// `DailyLossState::tripped_reported`). Consumed here AND at the losing
+    /// close, so the freeze is visible at the moment it happens and again after
+    /// a restart restored an already-breached budget.
+    fn emit_daily_trip(&mut self) {
+        let Some(t) = self.positions.take_daily_trip() else {
+            return;
+        };
+        let message = format!(
+            "DAILY LOSS LIMIT REACHED: realized ${} against a ${} cap ({}% of the day's opening equity ${}) — new entries are frozen until the next UTC day (positions still exit normally)",
+            t.realized_pnl_usd,
+            t.limit_usd,
+            self.config.positions.max_daily_loss_equity_pct,
+            t.opening_equity_usd
+        );
+        tracing::warn!(
+            day = t.day_index,
+            realized = %t.realized_pnl_usd,
+            limit = %t.limit_usd,
+            "{}",
+            message
+        );
+        self.emit_risk_alert(CoreErrorCode::RiskRejected, message);
+    }
+
+    /// Report every protective stop the wick guard withheld (P0 #177): the
+    /// audit trail must show "should have triggered" instead of a silent hold.
+    fn emit_suppressed_stops(&mut self) {
+        for ev in self.positions.drain_suppressed_stops() {
+            tracing::warn!(
+                position = %ev.position_id,
+                token = %ev.token_id,
+                bid = %ev.bid,
+                mid = %ev.mid,
+                stop_pct = %ev.stop_pct,
+                "protective stop suppressed by the wick guard (mid did not confirm)"
+            );
+            self.emit_risk_alert(CoreErrorCode::RiskRejected, ev.message());
+        }
     }
 
     // ── Orders ─────────────────────────────────────────────────────────────
@@ -4058,8 +4162,19 @@ impl Core {
             }
         }
 
+        // #173: roll the daily-loss budget at the UTC day boundary BEFORE the
+        // exit checks, so a close that lands on the new day is counted in it
+        // — and report the state that gates entries: the roll itself (audit
+        // trail), a restored/just-tripped breaker, and #177's withheld stops.
+        self.roll_daily_budget(now_ms);
+        self.emit_daily_trip();
+
         // Evaluate exits for every open position and place a closing SELL.
         self.run_exit_checks(now_ms)?;
+
+        // #177: a protective stop the wick guard withheld is an event, not a
+        // silent no-op — review must be able to see "should have triggered".
+        self.emit_suppressed_stops();
 
         // Escalate due maker_then_taker orders: cancel maker, cross as taker.
         let due: Vec<EscalationTarget> = self
@@ -4462,11 +4577,12 @@ fn f64_to_decimal(v: f64) -> Decimal {
 
 /// A placement intent that CLOSES exposure (an automated exit, a strategy
 /// close, a flatten or a residual backstop) rather than opening one.
+///
+/// The predicate itself lives in [`crate::risk`]: the risk gate has to grant a
+/// closing intent the same exemption the retry policy does, and two copies of
+/// "what counts as closing" is how the escape hatch gets locked again (P0 #174).
 fn is_close_intent(internal_key: &str) -> bool {
-    internal_key.starts_with("exit:")
-        || internal_key.starts_with("exit-strategy:")
-        || internal_key.starts_with("flatten:")
-        || internal_key.starts_with("exit-residual:")
+    crate::risk::is_close_intent(internal_key)
 }
 fn reject_backoff_ms(attempts: u32) -> i64 {
     // 2s, 4s, 8s, 16s, 30s, 30s… — quick escape for a transient refusal,

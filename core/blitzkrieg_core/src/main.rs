@@ -73,6 +73,18 @@ struct Args {
     markets: Vec<String>,
     auto_exits: bool,
     max_positions: usize,
+    /// #173 — the daily-loss breaker's budget. `daily_loss_usd` is the absolute
+    /// cap (0 = none) and `daily_loss_pct` the cap as a percentage of the day's
+    /// opening cash equity (0 = off). The EFFECTIVE cap is the tighter of the
+    /// two, and it is echoed at startup whether or not anything configured it:
+    /// "the breaker was armed, against what?" must be answerable from the boot
+    /// log of a run that set no flags (that silence was half of P0-2).
+    daily_loss_usd: Decimal,
+    daily_loss_pct: Decimal,
+    /// The startup echo lines for the daily-loss budget, printed unconditionally
+    /// (kept out of `config_report`, which lists only settings moved away from
+    /// their compiled default).
+    daily_loss_echo: Vec<String>,
     engine: bool,
     min_round_age: i64,
     min_time_left: i64,
@@ -335,6 +347,10 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut markets: Vec<String> = Vec::new();
     let mut auto_exits = true;
     let mut max_positions: usize = 2;
+    // #173: the daily-loss budget, tracked as Option so CLI > env > default
+    // resolution can tell "the operator spoke" from "nobody did".
+    let mut max_daily_loss: Option<Decimal> = None;
+    let mut max_daily_loss_pct: Option<Decimal> = None;
     let mut strategy_limits: Vec<String> = Vec::new();
     let mut enable_strategy: Vec<String> = Vec::new();
     let mut disable_strategy: Vec<String> = Vec::new();
@@ -576,6 +592,20 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     .next()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(max_positions)
+            }
+            // #173: absolute USD cap for the day's realized loss (0 = none).
+            "--max-daily-loss" => {
+                max_daily_loss = it
+                    .next()
+                    .and_then(|v| Decimal::from_str(&v).ok())
+                    .or(max_daily_loss)
+            }
+            // #173: cap as a percentage of the day's opening cash equity.
+            "--max-daily-loss-pct" => {
+                max_daily_loss_pct = it
+                    .next()
+                    .and_then(|v| Decimal::from_str(&v).ok())
+                    .or(max_daily_loss_pct)
             }
             "--market" => {
                 if let Some(m) = it.next() {
@@ -820,6 +850,53 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         file.shadow.deep_dims
     );
 
+    // ── #173: the daily-loss breaker's budget ───────────────────────────────
+    // Resolved CLI > env > compiled default, then echoed unconditionally below.
+    // The default is RELATIVE (`max_daily_loss_equity_pct`), because an absolute
+    // default cannot be meaningful on every account size: the old hard-coded
+    // 200 USD silently disabled the breaker on a 4.8 USDC live book (P0-2).
+    let daily_loss_defaults = PositionConfig::default();
+    let daily_loss_usd = pick(
+        max_daily_loss,
+        env.num::<Decimal>("BK_MAX_DAILY_LOSS"),
+        None,
+        daily_loss_defaults.max_daily_loss_usd,
+    );
+    let daily_loss_pct = pick(
+        max_daily_loss_pct,
+        env.num::<Decimal>("BK_MAX_DAILY_LOSS_PCT"),
+        None,
+        daily_loss_defaults.max_daily_loss_equity_pct,
+    );
+    if daily_loss_usd.is_explicit() {
+        report.push(format!(
+            "positions.max_daily_loss_usd={} ({})",
+            daily_loss_usd.value,
+            daily_loss_usd.source.as_str()
+        ));
+    }
+    if daily_loss_pct.is_explicit() {
+        report.push(format!(
+            "positions.max_daily_loss_equity_pct={} ({})",
+            daily_loss_pct.value,
+            daily_loss_pct.source.as_str()
+        ));
+    }
+    let mut daily_loss_echo = vec![format!(
+        "daily loss breaker: absolute cap ${} ({}), relative cap {}% of the day's opening cash equity ({}); the TIGHTER applies, 0 = off",
+        daily_loss_usd.value,
+        daily_loss_usd.source.as_str(),
+        daily_loss_pct.value,
+        daily_loss_pct.source.as_str()
+    )];
+    if daily_loss_usd.value <= Decimal::ZERO && daily_loss_pct.value <= Decimal::ZERO {
+        daily_loss_echo.push(
+            "daily loss breaker: DISABLED (both caps are 0) — pass --max-daily-loss <usd> or \
+             --max-daily-loss-pct <pct> to arm it"
+                .to_string(),
+        );
+    }
+
     Args {
         socket,
         mode,
@@ -833,6 +910,9 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         markets,
         auto_exits,
         max_positions,
+        daily_loss_usd: daily_loss_usd.value,
+        daily_loss_pct: daily_loss_pct.value,
+        daily_loss_echo,
         engine,
         min_round_age,
         min_time_left,
@@ -1065,6 +1145,19 @@ fn parse_strategy_limits(
     out
 }
 
+/// #173: where the day's realized-loss budget is persisted. A sibling of the
+/// position log, derived the same way the `.recon` watermark is
+/// (`path.with_extension(..)`), so `data/positions/positions.jsonl` gets
+/// `data/positions/positions.daily-loss.json` beside it: the two files describe
+/// the same book and belong in the same place (both under the git-ignored
+/// `data/`).
+fn daily_loss_path_for(position_log: &str) -> String {
+    std::path::Path::new(position_log)
+        .with_extension("daily-loss.json")
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -1102,6 +1195,12 @@ async fn main() -> anyhow::Result<()> {
     }
     for line in &args.config_report {
         eprintln!("blitzkrieg-core: config {line}");
+    }
+    // #173: the daily-loss breaker's effective budget, echoed whether or not any
+    // layer configured it — a run that set nothing must still say what protects
+    // it (the old default was silently uncapped for a small book).
+    for line in &args.daily_loss_echo {
+        eprintln!("blitzkrieg-core: {line}");
     }
 
     // DRY_RUN env honours the existing convention when --mode is not explicit.
@@ -1227,6 +1326,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // #173: the daily-loss budget's durable side file follows the position log
+    // (the struct literal below consumes `position_log_path`).
+    let daily_pnl_path = position_log_path.as_deref().map(daily_loss_path_for);
+
     let config = CoreConfig {
         mode,
         default_maker_timeout_ms: 5000,
@@ -1299,6 +1402,13 @@ async fn main() -> anyhow::Result<()> {
         round_duration_sec: args.round_sec,
         positions: PositionConfig {
             max_positions: args.max_positions,
+            // #173: the budget comes from the CLI/env, and its durable side file
+            // is derived from the position log (the same convention as the
+            // `.recon` watermark beside it) so a restart resumes the SAME day's
+            // realized loss instead of laundering it.
+            max_daily_loss_usd: args.daily_loss_usd,
+            max_daily_loss_equity_pct: args.daily_loss_pct,
+            daily_pnl_path: daily_pnl_path.clone(),
             exit: blitzkrieg_core::exit_policy::ExitConfig {
                 min_time_left_sec: args.min_time_left,
                 ..Default::default()
@@ -1906,6 +2016,96 @@ mod tests {
             a.config_report.is_empty(),
             "nothing is explicit, so nothing is reported: {:?}",
             a.config_report
+        );
+    }
+
+    // ── #173: the daily-loss breaker's CLI/env surface ─────────────────────
+
+    /// The compiled default is RELATIVE: an absolute default is meaningless
+    /// across account sizes (the old 200 USD was no protection at all on a
+    /// 4.8 USDC book), so the percentage carries the default protection.
+    #[test]
+    fn the_daily_loss_budget_defaults_to_a_relative_cap_and_is_always_echoed() {
+        let a = args_from(&[]);
+        assert_eq!(
+            a.daily_loss_usd,
+            Decimal::ZERO,
+            "no absolute cap by default"
+        );
+        assert_eq!(a.daily_loss_pct, dec!(20));
+        assert!(
+            a.config_report.is_empty(),
+            "the echo is not part of config_report: {:?}",
+            a.config_report
+        );
+        let echo = a.daily_loss_echo.join("\n");
+        assert!(echo.contains("relative cap 20%"), "{echo}");
+        assert!(echo.contains("default"), "{echo}");
+    }
+
+    #[test]
+    fn a_max_daily_loss_flag_overrides_the_budget_and_is_reported() {
+        let a = args_from(&["--max-daily-loss", "5"]);
+        assert_eq!(a.daily_loss_usd, dec!(5));
+        assert!(
+            a.config_report
+                .iter()
+                .any(|l| l == "positions.max_daily_loss_usd=5 (cli)"),
+            "{:?}",
+            a.config_report
+        );
+        // The echo reports the effective configuration whether or not it moved.
+        assert!(
+            a.daily_loss_echo
+                .join("\n")
+                .contains("absolute cap $5 (cli)")
+        );
+    }
+
+    #[test]
+    fn the_daily_loss_budget_is_settable_from_the_environment() {
+        let args = ["--no-config".to_string()];
+        let env = env_of(&[
+            ("BK_MAX_DAILY_LOSS", "3.5"),
+            ("BK_MAX_DAILY_LOSS_PCT", "10"),
+        ]);
+        let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &args, &env);
+        assert_eq!(a.daily_loss_usd, dec!(3.5));
+        assert_eq!(a.daily_loss_pct, dec!(10));
+        assert!(
+            a.config_report
+                .iter()
+                .any(|l| l == "positions.max_daily_loss_usd=3.5 (env)"),
+            "{:?}",
+            a.config_report
+        );
+        // CLI outranks env, like every other setting in the chain.
+        let a = parse_args(
+            &blitzkrieg_core::config::FileConfig::default(),
+            &["--max-daily-loss".into(), "9".into()],
+            &env,
+        );
+        assert_eq!(a.daily_loss_usd, dec!(9));
+    }
+
+    /// 0/0 is the one configuration that protects nothing, so it says so out loud.
+    #[test]
+    fn a_disabled_daily_loss_budget_is_announced() {
+        let a = args_from(&["--max-daily-loss", "0", "--max-daily-loss-pct", "0"]);
+        assert!(a.daily_loss_echo.join("\n").contains("DISABLED"));
+    }
+
+    /// The budget's side file is a sibling of the position log, the way the
+    /// `.recon` watermark is: same directory, derived name.
+    #[test]
+    fn the_daily_loss_file_follows_the_position_log() {
+        assert_eq!(
+            daily_loss_path_for("data/positions/positions.jsonl"),
+            "data/positions/positions.daily-loss.json"
+        );
+        assert_eq!(
+            daily_loss_path_for("/tmp/x/pos.jsonl"),
+            "/tmp/x/pos.daily-loss.json"
         );
     }
 
