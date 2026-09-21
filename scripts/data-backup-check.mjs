@@ -26,7 +26,8 @@
  *      (the exact failure of the first scheduled-era backup, 2026-09-20).
  *   8. `--status` (issue #217): empty/absent/stale/unreadable tiers and a failed
  *      scheduler each exit 1 with a token naming the cause, a fresh pair of
- *      artifacts exits 0, and a MANUAL run's record is never scheduler evidence.
+ *      artifacts exits 0, a MANUAL run's record is never scheduler evidence, and
+ *      a missing mtime interpreter is REFUSED (exit 2) instead of answered wrongly.
  *   9. The attempt record format shared by the launchd launcher, the resident
  *      loop and the CLI (one writer, one format, best-effort by contract).
  *  10. The checkout guard accepts a linked worktree (`.git` is a FILE, #231).
@@ -330,11 +331,12 @@ function statusFixture() {
   mkdirSync(state, { recursive: true });
   return { w, backups, logs, state };
 }
-function status(f, extra = []) {
+function status(f, extra = [], env = {}) {
   return run(['--status', ...extra], {
     BK_BACKUP_DIR: f.backups,
     BK_BACKUP_LOG_DIR: f.logs,
     BK_BACKUP_STATUS_DIR: f.state,
+    ...env,
   });
 }
 function makeArtifact(f, tier, ageHours = 0) {
@@ -453,6 +455,16 @@ assert(rs.code === 1 && /light=ok\(0h\)\/sched=FAILED\(.*exit 2: destination mis
 f = statusFixture();
 rs = status(f, ['--stale-hours', 'soon']);
 assert(rs.code === 2, 'a bad --stale-hours is refused (exit 2)');
+
+// (k) no mtime interpreter → REFUSE. The failure mode is not a crash: an
+// unreadable mtime falls back to "now", i.e. a stale backup reported as 0h old —
+// a freshness check answering "fresh" because it cannot read a clock.
+f = statusFixture();
+makeArtifact(f, 'light', 999);   // deliberately stale
+rs = status(f, ['--quiet'], { BK_PYTHON: join(f.backups, 'no-such-python') });
+assert(rs.code === 2, 'a missing BK_PYTHON is refused rather than answered wrongly');
+assert(/needs .* to read file mtimes/.test(rs.out), 'the refusal says what is missing and why it matters');
+assert(!/light=ok\(/.test(rs.out), 'the 999h-old backup is NOT reported as fresh in that case');
 
 // ── 9. the attempt record (shared by every actor) ───────────────────────────
 console.log('');

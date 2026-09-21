@@ -65,6 +65,9 @@
 #                              (default $HOME/Library/Logs)
 #   BK_BACKUP_STALE_HOURS      light tolerance (default 26 = daily 04:00 + 2h slack)
 #   BK_BACKUP_FULL_STALE_HOURS full tolerance (default 192 = weekly + 1 day slack)
+#   BK_PYTHON                  interpreter used to read file mtimes (default python3).
+#                              A seam so the gates can inject its absence: without it
+#                              --status REFUSES (exit 2) rather than mis-report ages.
 
 set -uo pipefail
 
@@ -302,10 +305,15 @@ newest_backup_dir() {
 
 # mtime as epoch seconds. python3 rather than `stat`: `stat -f%m` is BSD-only and
 # GNU's `-f` means "filesystem", so a two-form fallback is a portability landmine
-# (this script also runs on Ubuntu CI). Falls back to the shell's own clock read
-# so a missing python3 degrades to "age unknown" rather than a crash.
+# (this script also runs on Ubuntu CI).
+#
+# The interpreter is a seam (`BK_PYTHON`) and its ABSENCE is fatal in --status
+# (checked there): the failure mode of "no python3" is not a crash, it is an
+# unreadable mtime falling back to `date +%s` — i.e. a week-old backup reported as
+# 0h old, which is precisely the silent false-green this mode exists to remove.
+# Better to refuse to answer than to answer wrongly.
 path_epoch() {
-  python3 -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$1" 2>/dev/null \
+  "${BK_PYTHON:-python3}" -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$1" 2>/dev/null \
     || printf '%s' "$(date +%s)"
 }
 
@@ -467,6 +475,12 @@ tier_verdict() {
 if [ "$STATUS_MODE" -eq 1 ]; then
   case "$STALE_LIGHT_H" in ''|*[!0-9]*) die "--stale-hours must be a non-negative integer" ;; esac
   case "$STALE_FULL_H"  in ''|*[!0-9]*) die "--full-stale-hours must be a non-negative integer" ;; esac
+  # Ages come from file mtimes (see path_epoch). Without the interpreter the
+  # fallback would silently report every artifact as 0h old — a stale-backup
+  # check that answers "fresh" when it cannot read a clock is worse than no check,
+  # so this refuses instead. (`command -v` also accepts an absolute BK_PYTHON.)
+  command -v "${BK_PYTHON:-python3}" >/dev/null 2>&1 \
+    || die "--status needs ${BK_PYTHON:-python3} to read file mtimes (BK_PYTHON overrides; without it a stale backup would be reported fresh)"
 
   tier_verdict light "$BACKUP_ROOT/light" "$STALE_LIGHT_H"
   tier_verdict full  "$BACKUP_ROOT/full"  "$STALE_FULL_H"
