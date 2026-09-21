@@ -150,6 +150,16 @@ pub struct CoreConfig {
     /// MiB free (0 = no guard). Checked once per rotation, so it costs nothing on
     /// the hot path.
     pub event_archive_min_free_mb: u64,
+    /// How old an orderbook may be before the engine refuses to price off it,
+    /// in milliseconds (issue #205). `0` = the check is OFF (any age accepted).
+    ///
+    /// This is the knob that decides how long after the feed goes quiet the bot
+    /// stops trading, so it is an operator setting rather than a compiled
+    /// constant: CLI `--max-orderbook-stale-ms` / `BK_MAX_ORDERBOOK_STALE_MS`,
+    /// validated at startup and echoed in the boot log. The default is
+    /// [`crate::engine::DEFAULT_MAX_ORDERBOOK_STALE_MS`] — the value every
+    /// deployment has always run with, so an unconfigured kernel is unchanged.
+    pub max_orderbook_stale_ms: i64,
     /// How often the in-kernel accounting audit runs, in seconds (issue #189).
     /// 0 disables it. Default 30: the acceptance criterion is "drift is alerted,
     /// persisted and blocks new entries within 30s of appearing".
@@ -219,6 +229,9 @@ impl CoreConfig {
             min_shares: self.min_shares,
             max_shares: self.max_shares,
             size_pct: self.size_pct,
+            // #205: the runtime freshness budget. It flows through this one
+            // mapping, so a live server and a backtest replay see the same value.
+            max_orderbook_stale_ms: self.max_orderbook_stale_ms,
             strategy_sizes: self
                 .strategy_limits
                 .iter()
@@ -510,6 +523,8 @@ impl Default for CoreConfig {
             event_archive_max_mb: 512,
             event_archive_rotate_mb: 0,
             event_archive_min_free_mb: 0,
+            // #205: the shipped freshness budget, unchanged.
+            max_orderbook_stale_ms: crate::engine::DEFAULT_MAX_ORDERBOOK_STALE_MS,
             audit_interval_sec: 30,
             audit_log_path: None,
             applied_log_path: None,
@@ -2445,6 +2460,12 @@ impl Core {
                 // triggered" is a number on the panel, not a silent no-op.
                 "suppressedStops": self.positions.suppressed_stop_count(),
             },
+            // #205: how stale a book may be before the engine stops pricing off
+            // it — the value that actually gates entries, read off the engine
+            // that applies it (a backtest can configure its own). "How long
+            // after the feed goes quiet does the bot stop trading?" is a runtime
+            // question and must be answerable from the panel.
+            "orderbookFreshness": self.orderbook_freshness_view(),
             // P0 #202: what ONE order can commit on THIS account. The ceiling is
             // read off the kernel's own knobs — no ticket can hold more than
             // `max_shares` (every leg is clamped to it) or pay over `max_price`
@@ -3740,6 +3761,25 @@ impl Core {
             "orphaned": orphaned,
             "evictedTotal": self.exit_reasons_evicted,
             "sweptTotal": self.exit_reasons_swept,
+        })
+    }
+
+    /// The orderbook freshness budget as the panel reads it (issue #205). The
+    /// engine's own value wins when an engine is installed (a backtest or a
+    /// replay configures its own); without one the configured value is reported,
+    /// which is what the next `install_engine` will apply.
+    fn orderbook_freshness_view(&self) -> serde_json::Value {
+        let max_stale_ms = self
+            .engine
+            .as_ref()
+            .map(|e| e.max_orderbook_stale_ms())
+            .unwrap_or(self.config.max_orderbook_stale_ms);
+        serde_json::json!({
+            "maxStaleMs": max_stale_ms,
+            // `maxStaleMs: 0` is not "a zero budget" (which would refuse every
+            // book the instant it is stamped): it is the explicit "freshness
+            // check OFF". Named here so the panel never renders the two alike.
+            "checkEnabled": max_stale_ms > 0,
         })
     }
 
@@ -10139,10 +10179,9 @@ mod exit_reason_table_tests {
     use crate::position::OpenParams;
     use rust_decimal_macros::dec;
 
-    /// Dry core, seed 1000, automated exits OFF: the fixture drives every close
-    /// explicitly so the path under test is the only one that runs.
-    fn core() -> Core {
-        let mut c = Core::new(CoreConfig {
+    /// The fixture's config, exposed so a test can vary exactly one field.
+    fn cfg() -> CoreConfig {
+        CoreConfig {
             mode: Mode::Dry,
             risk: RiskConfig {
                 max_order_notional: dec!(100),
@@ -10151,7 +10190,13 @@ mod exit_reason_table_tests {
             dry_seed_balance: dec!(1000),
             auto_exits_enabled: false,
             ..Default::default()
-        });
+        }
+    }
+
+    /// Dry core, seed 1000, automated exits OFF: the fixture drives every close
+    /// explicitly so the path under test is the only one that runs.
+    fn core() -> Core {
+        let mut c = Core::new(cfg());
         c.set_balance(dec!(1000));
         c
     }
@@ -10363,5 +10408,37 @@ mod exit_reason_table_tests {
         );
         assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(0));
         assert_eq!(c.exit_reasons_view()["sweptTotal"], serde_json::json!(1));
+    }
+
+    /// Issue #205 requirement 4: the orderbook-staleness budget in force is
+    /// readable from `engine.stats`, so a panel or a harness never has to parse
+    /// the boot log. Built through `install_engine` — the production
+    /// `CoreConfig -> EngineConfig` mapping — so this covers the whole chain and
+    /// reports the value the engine *enforces*, not just the field that was set.
+    #[test]
+    fn engine_stats_reports_the_orderbook_freshness_budget() {
+        let view = |budget_ms: i64| -> serde_json::Value {
+            let mut c = Core::new(CoreConfig {
+                max_orderbook_stale_ms: budget_ms,
+                ..cfg()
+            });
+            let engine_cfg = c.config().engine_config();
+            c.enable_engine(crate::engine::Engine::new(engine_cfg));
+            c.engine_stats_at(1_000)["orderbookFreshness"].clone()
+        };
+
+        let widened = view(25_000);
+        assert_eq!(widened["maxStaleMs"], serde_json::json!(25_000));
+        assert_eq!(widened["checkEnabled"], serde_json::json!(true));
+        // The shipped default is the historic hardcoded value: #205 made the knob
+        // configurable without moving it.
+        let shipped = view(crate::engine::DEFAULT_MAX_ORDERBOOK_STALE_MS);
+        assert_eq!(shipped["maxStaleMs"], serde_json::json!(8_000));
+        assert_eq!(shipped["checkEnabled"], serde_json::json!(true));
+        // 0 = the operator switched the gate off. Reported as such rather than as
+        // a "0ms budget", which would read as "refuse everything".
+        let off = view(0);
+        assert_eq!(off["maxStaleMs"], serde_json::json!(0));
+        assert_eq!(off["checkEnabled"], serde_json::json!(false));
     }
 }

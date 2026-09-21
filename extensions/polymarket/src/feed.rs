@@ -57,11 +57,23 @@ const MAX_POLL_MS: u64 = 60_000;
 /// timeout turns it into a logged event instead.
 const REQUEST_TIMEOUT_MS: u64 = 5_000;
 
-/// The engine's `max_orderbook_stale_ms` (`engine.rs`): it refuses to price a
-/// book it considers older than this. Kept here as a named constant so the
-/// poll-cadence guard and its test state the dependency explicitly rather than
-/// carrying a bare `8000`.
+/// The engine's *compiled default* `max_orderbook_stale_ms` (`engine.rs`,
+/// `DEFAULT_MAX_ORDERBOOK_STALE_MS`): it refuses to price a book it considers
+/// older than this. Kept here as a named constant so the poll-cadence guard and
+/// its test state the dependency explicitly rather than carrying a bare `8000`.
+///
+/// The kernel's budget is configurable (`--max-orderbook-stale-ms` /
+/// `BK_MAX_ORDERBOOK_STALE_MS`, issue #205) and this crate must not depend on
+/// `blitzkrieg-core`, so the warning below resolves the operator's value from the
+/// same environment variable and falls back to this constant — the value the
+/// kernel itself uses when the variable is unset. Only the fallback and the
+/// compile-time cadence assert are frozen at build time.
 const ENGINE_MAX_ORDERBOOK_STALE_MS: u64 = 8_000;
+
+/// Upper bound the kernel accepts for the budget (`MAX_ORDERBOOK_STALE_MS_CEILING`
+/// in `engine.rs`). A larger value aborts the kernel at startup, so it cannot be
+/// the budget in force and is treated here as unset.
+const MAX_ORDERBOOK_STALE_MS_CEILING: i64 = 600_000;
 
 /// Latency allowance folded into the staleness warning below. The poll loop
 /// sleeps a full interval *after* each response, so the achieved period is
@@ -96,6 +108,35 @@ fn is_rate_limited(e: &SdkError) -> bool {
             .is_some_and(|s| s.status_code == 429)
 }
 
+/// The engine's freshness budget in force, resolved from
+/// `BK_MAX_ORDERBOOK_STALE_MS`, or `None` when there is no budget to warn about.
+///
+/// The kernel validates the same variable loudly (a non-numeric, negative or
+/// over-ceiling value aborts startup with exit 2, and `0` turns the freshness
+/// check OFF); this reader only has to agree with what the kernel does *not*
+/// reject, because the two run in one process:
+///
+/// - unset / empty / unparseable / out of band -> the compiled default, which is
+///   the kernel's own fallback (the rejected cases cannot be running);
+/// - `0` -> `None`: the freshness check is disabled, so a slow poll cannot leave
+///   the engine with an unpricable book and there is nothing to warn about;
+/// - positive -> that many milliseconds.
+fn parse_stale_budget(raw: Option<&str>) -> Option<u64> {
+    match raw.map(str::trim) {
+        None | Some("") => Some(ENGINE_MAX_ORDERBOOK_STALE_MS),
+        Some(v) => match v.parse::<i64>() {
+            Ok(0) => None,
+            Ok(ms) if ms > 0 && ms <= MAX_ORDERBOOK_STALE_MS_CEILING => Some(ms as u64),
+            _ => Some(ENGINE_MAX_ORDERBOOK_STALE_MS),
+        },
+    }
+}
+
+/// The budget currently in force, read from the environment once per call site.
+fn effective_stale_budget_ms() -> Option<u64> {
+    parse_stale_budget(std::env::var("BK_MAX_ORDERBOOK_STALE_MS").ok().as_deref())
+}
+
 /// Whether a poll interval leaves the engine a priceable book, and why not.
 ///
 /// Polling slower than the engine's freshness budget leaves the book unpricable
@@ -105,16 +146,25 @@ fn is_rate_limited(e: &SdkError) -> bool {
 /// achieved period is `interval + latency`, not the interval alone.
 ///
 /// Pure so the guard can be tested directly: driving it through `spawn_feed`
-/// would need a full `MarketHost` stub for one log line.
-fn cadence_warning(poll_ms: u64) -> Option<String> {
-    if poll_ms + LATENCY_ALLOWANCE_MS <= ENGINE_MAX_ORDERBOOK_STALE_MS {
+/// would need a full `MarketHost` stub for one log line. `budget_ms` is `None`
+/// when the kernel's freshness check is off (`--max-orderbook-stale-ms 0`), in
+/// which case no cadence can starve it.
+fn cadence_warning_with(poll_ms: u64, budget_ms: Option<u64>) -> Option<String> {
+    let budget = budget_ms?;
+    if poll_ms + LATENCY_ALLOWANCE_MS <= budget {
         return None;
     }
     Some(format!(
         "poly poll interval {poll_ms}ms (plus up to {LATENCY_ALLOWANCE_MS}ms request latency) \
-         is close to or past the engine's {ENGINE_MAX_ORDERBOOK_STALE_MS}ms orderbook \
+         is close to or past the engine's {budget}ms orderbook \
          staleness budget: the engine will have a stale book for part of every poll cycle"
     ))
+}
+
+/// [`cadence_warning_with`] against the budget the kernel is actually running
+/// with (`BK_MAX_ORDERBOOK_STALE_MS`, else the compiled default).
+fn cadence_warning(poll_ms: u64) -> Option<String> {
+    cadence_warning_with(poll_ms, effective_stale_budget_ms())
 }
 
 /// Market-data event produced by the feed loops, consumed by the pump which
@@ -458,6 +508,11 @@ pub fn parse_binance_trade(text: &str) -> Option<(String, Decimal)> {
 /// or a perfectly healthy poller reads to the engine as a dead feed. Checked at
 /// compile time so an edit to either constant fails the build instead of waiting
 /// to be noticed as "the bot stopped trading".
+///
+/// This pins the *shipped defaults* only: an operator who lowers
+/// `--max-orderbook-stale-ms` below the poll interval can still starve the engine
+/// (by design — that is their stated intent), and [`cadence_warning`] says so at
+/// startup rather than letting the build forbid it.
 const _: () = {
     assert!(
         DEFAULT_POLL_MS * 4 <= ENGINE_MAX_ORDERBOOK_STALE_MS,
@@ -844,28 +899,88 @@ mod tests {
     /// logs a warning on every start is a warning nobody reads.
     #[test]
     fn the_default_cadence_is_inside_the_engines_staleness_budget() {
-        assert_eq!(cadence_warning(DEFAULT_POLL_MS), None);
-        assert_eq!(cadence_warning(MIN_POLL_MS), None);
+        let budget = Some(ENGINE_MAX_ORDERBOOK_STALE_MS);
+        assert_eq!(cadence_warning_with(DEFAULT_POLL_MS, budget), None);
+        assert_eq!(cadence_warning_with(MIN_POLL_MS, budget), None);
     }
 
     /// A cadence that would leave the engine unpricable between polls must be
     /// reported, including one that is only *just* over once latency is added.
     #[test]
     fn a_cadence_past_the_staleness_budget_is_reported() {
+        let budget = ENGINE_MAX_ORDERBOOK_STALE_MS;
         // Exactly at the boundary, with the latency allowance folded in, is
         // already too slow.
-        let boundary = ENGINE_MAX_ORDERBOOK_STALE_MS - LATENCY_ALLOWANCE_MS;
+        let boundary = budget - LATENCY_ALLOWANCE_MS;
         assert_eq!(
-            cadence_warning(boundary),
+            cadence_warning_with(boundary, Some(budget)),
             None,
             "the boundary itself is still fine"
         );
         assert!(
-            cadence_warning(boundary + 1).is_some(),
+            cadence_warning_with(boundary + 1, Some(budget)).is_some(),
             "one millisecond past the boundary leaves no fresh book and must warn"
         );
-        assert!(cadence_warning(ENGINE_MAX_ORDERBOOK_STALE_MS).is_some());
-        assert!(cadence_warning(MAX_POLL_MS).is_some());
+        assert!(cadence_warning_with(budget, Some(budget)).is_some());
+        assert!(cadence_warning_with(MAX_POLL_MS, Some(budget)).is_some());
+    }
+
+    /// Issue #205: the warning has to track the budget in force, not the compiled
+    /// one. The same poll interval is fine under a widened budget and must warn
+    /// under a tightened one — otherwise the operator who tightens the knob gets
+    /// the "bot stopped trading" mystery the guard exists to explain.
+    #[test]
+    fn the_cadence_warning_tracks_the_configured_budget() {
+        let poll = DEFAULT_POLL_MS;
+        assert_eq!(
+            cadence_warning_with(poll, Some(ENGINE_MAX_ORDERBOOK_STALE_MS)),
+            None
+        );
+        assert_eq!(cadence_warning_with(poll, Some(60_000)), None);
+        let tight = poll + LATENCY_ALLOWANCE_MS - 1;
+        assert!(
+            cadence_warning_with(poll, Some(tight)).is_some(),
+            "a budget the poll cycle cannot meet must warn"
+        );
+        // `--max-orderbook-stale-ms 0` disables the check: no budget, nothing to
+        // starve, so no warning even at the slowest cadence.
+        assert_eq!(cadence_warning_with(MAX_POLL_MS, None), None);
+    }
+
+    /// `parse_stale_budget` has to agree with what the kernel lets through: the
+    /// values it rejects at startup (exit 2) can never be the budget in force, so
+    /// they fall back to the compiled default, and `0` means "check off".
+    #[test]
+    fn the_stale_budget_reader_agrees_with_the_kernel() {
+        assert_eq!(
+            parse_stale_budget(None),
+            Some(ENGINE_MAX_ORDERBOOK_STALE_MS)
+        );
+        assert_eq!(
+            parse_stale_budget(Some("")),
+            Some(ENGINE_MAX_ORDERBOOK_STALE_MS)
+        );
+        assert_eq!(
+            parse_stale_budget(Some("  ")),
+            Some(ENGINE_MAX_ORDERBOOK_STALE_MS)
+        );
+        assert_eq!(parse_stale_budget(Some("1000")), Some(1_000));
+        assert_eq!(parse_stale_budget(Some(" 15000 ")), Some(15_000));
+        assert_eq!(parse_stale_budget(Some("0")), None);
+        // Rejected by the kernel, so never the value in force.
+        assert_eq!(
+            parse_stale_budget(Some("-1")),
+            Some(ENGINE_MAX_ORDERBOOK_STALE_MS)
+        );
+        assert_eq!(
+            parse_stale_budget(Some("8s")),
+            Some(ENGINE_MAX_ORDERBOOK_STALE_MS)
+        );
+        assert_eq!(
+            parse_stale_budget(Some("600001")),
+            Some(ENGINE_MAX_ORDERBOOK_STALE_MS)
+        );
+        assert_eq!(parse_stale_budget(Some("600000")), Some(600_000));
     }
 
     /// The ceiling has to keep the knob's own bounds honest: a max below the

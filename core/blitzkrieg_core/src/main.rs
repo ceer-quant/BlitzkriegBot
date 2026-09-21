@@ -19,7 +19,16 @@
 //!                   [--event-archive-rotate-mb 256]
 //!                   [--event-archive-min-free-mb 5120]
 //!                   [--entry-maker-timeout-ms 5000]
+//!                   [--max-orderbook-stale-ms 8000]
 //!                   [--slippage-ticks 0] [--latency-ms 0] [--fill-prob-bps 10000]
+//!
+//! `--max-orderbook-stale-ms <ms>` (env `BK_MAX_ORDERBOOK_STALE_MS`) is how old
+//! an orderbook may be before the engine refuses to price off it — the knob that
+//! decides how long after the feed goes quiet the bot stops taking entries.
+//! Default 8000 (the value every deployment has always run with). `0` disables
+//! the check entirely (any book age is accepted); a negative value, a
+//! non-numeric value or anything past the 600000 ms ceiling is a startup error
+//! (exit 2), never a silent fallback. Closing intents are never blocked by it.
 //!
 //! `--readonly` is a promise, not a convention: the venue order egress is never
 //! constructed, so no code path in this process can send an order. It outranks
@@ -188,6 +197,15 @@ struct Args {
     event_archive_min_free_mb: Option<u64>,
     /// Maker→taker escalation deadline for engine entries (ms).
     entry_maker_timeout_ms: i64,
+    /// #205 — how old an orderbook may be before the engine refuses to price off
+    /// it (ms). 0 = the freshness check is OFF (any age accepted). This is the
+    /// value in force after CLI/env resolution and validation; the compiled
+    /// default is `engine::DEFAULT_MAX_ORDERBOOK_STALE_MS`.
+    max_orderbook_stale_ms: i64,
+    /// The startup echo for the freshness budget, printed unconditionally: the
+    /// answer to "how long after the feed goes quiet does this bot stop
+    /// trading?" must not depend on someone having thought to configure it.
+    orderbook_stale_echo: Vec<String>,
     /// Offline replay of an archive through the same core (P-1.2).
     backtest: Option<String>,
     /// Where to write the backtest report as JSON (None = stdout only).
@@ -378,6 +396,33 @@ fn parse_backtest_knob(spec: &str) -> Result<(String, String, Decimal), String> 
     Ok((strategy.to_string(), knob.to_string(), value))
 }
 
+/// Why `--max-orderbook-stale-ms` / `BK_MAX_ORDERBOOK_STALE_MS` cannot be used as
+/// given, or `None` when it can (#205).
+///
+/// Pure so the rule is unit-testable while the caller keeps the loud failure
+/// (stderr + exit 2): a budget that silently falls back to the compiled default
+/// is the exact failure mode this knob exists to remove. `0` is legal and means
+/// "freshness check OFF" — a supported setting, not an invalid one — so it is
+/// deliberately not rejected.
+fn stale_budget_rejection(ms: i64) -> Option<String> {
+    if ms < 0 {
+        return Some(format!(
+            "a negative value ({ms} ms): pass 0 to disable the check, or a positive number of \
+             milliseconds (compiled default {})",
+            blitzkrieg_core::engine::DEFAULT_MAX_ORDERBOOK_STALE_MS
+        ));
+    }
+    if ms > blitzkrieg_core::engine::MAX_ORDERBOOK_STALE_MS_CEILING {
+        return Some(format!(
+            "{} ms, past the {} ms ceiling — this is almost certainly a typo; pass 0 to disable \
+             the check entirely",
+            ms,
+            blitzkrieg_core::engine::MAX_ORDERBOOK_STALE_MS_CEILING
+        ));
+    }
+    None
+}
+
 fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: &EnvVars) -> Args {
     let mut socket = default_socket();
     let mut mode = Mode::Dry;
@@ -469,6 +514,9 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut slippage_ticks: u32 = 0;
     let mut latency_ms: i64 = 0;
     let mut fill_prob_bps: Option<u32> = None;
+    // #205: the orderbook freshness budget, tracked as Option so CLI > env >
+    // default resolution can tell "the operator spoke" from "nobody did".
+    let mut max_orderbook_stale_ms: Option<i64> = None;
 
     let mut it = argv.iter().cloned();
     while let Some(a) = it.next() {
@@ -694,6 +742,22 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     .next()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(entry_maker_timeout_ms)
+            }
+            // #205: how stale an orderbook may be before the engine refuses to
+            // price off it. Parsed strictly — a value the engine cannot honour is
+            // a startup error, never a silent fallback: an operator who believes
+            // they set a budget must not be running a different one.
+            "--max-orderbook-stale-ms" => {
+                let raw = it.next().unwrap_or_default();
+                match raw.trim().parse::<i64>() {
+                    Ok(v) => max_orderbook_stale_ms = Some(v),
+                    Err(_) => {
+                        eprintln!(
+                            "blitzkrieg-core: --max-orderbook-stale-ms '{raw}': want a whole number of milliseconds (0 disables the freshness check)"
+                        );
+                        std::process::exit(2);
+                    }
+                }
             }
             "--backtest" => backtest = it.next(),
             "--backtest-report" => backtest_report = it.next(),
@@ -1043,6 +1107,48 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         );
     }
 
+    // ── #205: the orderbook freshness budget ────────────────────────────────
+    // How long after the feed goes quiet the engine stops pricing off its books.
+    // A runtime setting because it is a venue/ops property, not a code property:
+    // a slow poller or a venue that batches updates needs a wider budget, and a
+    // deployment tightening it must not need a rebuild to be obeyed.
+    let stale = pick(
+        max_orderbook_stale_ms,
+        env.num::<i64>("BK_MAX_ORDERBOOK_STALE_MS"),
+        None,
+        blitzkrieg_core::engine::DEFAULT_MAX_ORDERBOOK_STALE_MS,
+    );
+    // Invalid values fail the boot loudly instead of falling back: a silently
+    // substituted budget is the failure this knob exists to remove.
+    if let Some(why) = stale_budget_rejection(stale.value) {
+        eprintln!(
+            "blitzkrieg-core: {} gives the orderbook freshness budget {why}",
+            stale.source.as_str()
+        );
+        std::process::exit(2);
+    }
+    if stale.is_explicit() {
+        report.push(format!(
+            "engine.max_orderbook_stale_ms={} ({})",
+            stale.value,
+            stale.source.as_str()
+        ));
+    }
+    let orderbook_stale_echo = vec![if stale.value > 0 {
+        format!(
+            "orderbook freshness: the engine refuses to price off a book older than {} ms ({}); past that it \
+             stops taking entries until the feed catches up (closing intents are never blocked by this)",
+            stale.value,
+            stale.source.as_str()
+        )
+    } else {
+        format!(
+            "orderbook freshness: CHECK DISABLED ({}; any book age is accepted) — the engine keeps pricing off \
+             the last book it saw however old it is. Pass --max-orderbook-stale-ms <ms> to arm it",
+            stale.source.as_str()
+        )
+    }];
+
     Args {
         socket,
         mode,
@@ -1056,6 +1162,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         size_pct: size_pct.value,
         max_order_notional_pct: notional_pct.value,
         sizing_echo,
+        max_orderbook_stale_ms: stale.value,
+        orderbook_stale_echo,
         markets,
         auto_exits,
         max_positions,
@@ -1385,6 +1493,12 @@ async fn main() -> anyhow::Result<()> {
     for line in &args.sizing_echo {
         eprintln!("blitzkrieg-core: {line}");
     }
+    // #205: the freshness budget in force, printed unconditionally for the same
+    // reason: "how long after the feed goes quiet does this bot stop trading?"
+    // must be answerable from the boot log of a run that set no flags.
+    for line in &args.orderbook_stale_echo {
+        eprintln!("blitzkrieg-core: {line}");
+    }
 
     // Which code this process is (#179). On stderr and deliberately NOT through
     // `tracing`: the shipped default log filter is ERROR (#184), so a provenance
@@ -1533,6 +1647,8 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         },
         dry_seed_balance: args.seed_balance,
+        // #205: the validated freshness budget (0 = check off).
+        max_orderbook_stale_ms: args.max_orderbook_stale_ms,
         strategy_limits: parse_strategy_limits(&args.strategy_limits),
         enabled_strategies,
         disabled_strategies: args.disable_strategy,
@@ -2673,5 +2789,114 @@ mod tests {
         let a = parse_args(&file, &[], &EnvVars::default());
         assert_eq!(a.round_sec, 900);
         assert!(a.config_report.is_empty());
+    }
+
+    // ── #205: the orderbook freshness budget is a runtime knob ──────────────
+
+    /// The default must be the value the kernel has always hardcoded: making the
+    /// knob configurable must not move it.
+    #[test]
+    fn the_orderbook_staleness_default_is_the_historic_eight_seconds() {
+        let a = args_from(&[]);
+        assert_eq!(a.max_orderbook_stale_ms, 8_000);
+        assert_eq!(
+            a.max_orderbook_stale_ms,
+            blitzkrieg_core::engine::DEFAULT_MAX_ORDERBOOK_STALE_MS
+        );
+        assert!(
+            a.config_report.is_empty(),
+            "an unset knob is not a configured value: {:?}",
+            a.config_report
+        );
+        assert!(
+            a.orderbook_stale_echo.join(" ").contains("8000 ms"),
+            "the boot line must state the effective budget: {:?}",
+            a.orderbook_stale_echo
+        );
+        assert!(a.orderbook_stale_echo.join(" ").contains("default"));
+    }
+
+    /// CLI and env both reach it, CLI wins, and the boot line names the tier that
+    /// supplied the value — the same shape as `--size-pct` / `BK_SIZE_PCT`.
+    #[test]
+    fn the_orderbook_staleness_budget_is_configurable_from_cli_and_env() {
+        let a = args_from(&["--max-orderbook-stale-ms", "12000"]);
+        assert_eq!(a.max_orderbook_stale_ms, 12_000);
+        assert!(
+            a.config_report
+                .iter()
+                .any(|l| l == "engine.max_orderbook_stale_ms=12000 (cli)"),
+            "{:?}",
+            a.config_report
+        );
+        assert!(a.orderbook_stale_echo.join(" ").contains("12000 ms (cli)"));
+
+        let env = env_of(&[("BK_MAX_ORDERBOOK_STALE_MS", "15000")]);
+        let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &[], &env);
+        assert_eq!(a.max_orderbook_stale_ms, 15_000);
+        assert!(
+            a.config_report
+                .iter()
+                .any(|l| l == "engine.max_orderbook_stale_ms=15000 (env)"),
+            "{:?}",
+            a.config_report
+        );
+        // CLI outranks env, like every other setting in the chain.
+        let a = parse_args(
+            &blitzkrieg_core::config::FileConfig::default(),
+            &["--max-orderbook-stale-ms".into(), "9000".into()],
+            &env,
+        );
+        assert_eq!(a.max_orderbook_stale_ms, 9_000);
+    }
+
+    /// `0` is the supported OFF switch and must be announced as such rather than
+    /// rendered as "a 0 ms budget" (which would read as "refuse everything").
+    #[test]
+    fn a_disabled_orderbook_staleness_check_is_announced() {
+        let a = args_from(&["--max-orderbook-stale-ms", "0"]);
+        assert_eq!(a.max_orderbook_stale_ms, 0);
+        let echo = a.orderbook_stale_echo.join(" ");
+        assert!(echo.contains("CHECK DISABLED"), "{echo}");
+        assert!(echo.contains("cli"), "the tier is named: {echo}");
+        assert!(
+            stale_budget_rejection(0).is_none(),
+            "0 is legal, not invalid"
+        );
+    }
+
+    /// Invalid values are rejected by a rule the boot path enforces with exit 2;
+    /// this pins the rule itself (the exit is exercised end-to-end from the
+    /// shell). A negative budget has no meaning, and anything past the ceiling is
+    /// a unit mistake (`8` for 8 seconds, `8_000_000` for 8000 ms).
+    #[test]
+    fn an_out_of_band_orderbook_staleness_budget_is_rejected() {
+        for bad in [-1i64, -8_000, 600_001, 8_000_000] {
+            assert!(
+                stale_budget_rejection(bad).is_some(),
+                "{bad} must be rejected"
+            );
+        }
+        for ok in [0i64, 1, 8_000, 60_000, 600_000] {
+            assert!(
+                stale_budget_rejection(ok).is_none(),
+                "{ok} must be accepted"
+            );
+        }
+        let why = stale_budget_rejection(-5).unwrap();
+        assert!(why.contains("0"), "the fix is named: {why}");
+        let why = stale_budget_rejection(600_001).unwrap();
+        assert!(why.contains("600000"), "the ceiling is named: {why}");
+    }
+
+    /// A value that is not a number at all fails the boot the same way, rather
+    /// than being silently dropped: the flag parser rejects it outright.
+    #[test]
+    fn a_non_numeric_orderbook_staleness_budget_is_rejected_at_parse() {
+        // `parse_args` exits the process on a bad value, so this asserts the
+        // parse rule through the helper the arm uses.
+        assert!("8s".trim().parse::<i64>().is_err());
+        assert!("".trim().parse::<i64>().is_err());
+        assert!(" 8000 ".trim().parse::<i64>().is_ok());
     }
 }
