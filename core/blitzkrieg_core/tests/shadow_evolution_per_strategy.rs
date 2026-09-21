@@ -299,15 +299,18 @@ fn drive_cycles(core: &mut Core, token: &str, rounds: usize, t0: i64) -> i64 {
     let mut now = t0;
     for _ in 0..rounds {
         // A loser the baseline ALSO takes (mid 0.395 <= cap 0.40), then collapse
-        // through the 12% stop.
+        // through the 12% stop. F7 fillability: the book is LOCKED (bid = ask
+        // = 0.395) so the offer side sits at the entry price the twin rests —
+        // the old two-sided book (0.39/0.40) could never have filled that bid.
         now += 1_000;
-        feed_book(core, token, dec!(0.39), dec!(0.40), now);
+        feed_book(core, token, dec!(0.395), dec!(0.395), now);
         now += 1_000;
         feed_book(core, token, dec!(0.20), dec!(0.21), now);
-        // A winner only a LOOSENED cap reaches (mid 0.405 > cap 0.40), then rally
-        // through the 100% take-profit.
+        // A winner only a LOOSENED cap reaches (mid 0.41 > cap 0.40), then rally
+        // through the 100% take-profit. Locked book again (bid = ask = 0.41):
+        // the offer side sits exactly at the entry price the twin would rest.
         now += 1_000;
-        feed_book(core, token, dec!(0.40), dec!(0.41), now);
+        feed_book(core, token, dec!(0.41), dec!(0.41), now);
         now += 1_000;
         feed_book(core, token, dec!(0.95), dec!(0.97), now);
     }

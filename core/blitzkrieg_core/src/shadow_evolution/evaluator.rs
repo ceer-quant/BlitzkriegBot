@@ -230,7 +230,7 @@ mod tests {
     }
 
     /// Baseline cap 0.40; sweep 0 makes variant-1 cap 0.40 * 1.03 = 0.412. A tick
-    /// at mid 0.405 therefore splits the two: only the loosened variant enters.
+    /// at mid 0.41 therefore splits the two: only the loosened variant enters.
     fn set_for(count: usize) -> VariantSet {
         let f: Box<dyn ShadowFactory> = Box::new(CapFactory);
         let mut base = StrategyParams::new();
@@ -249,7 +249,9 @@ mod tests {
     }
 
     /// Enter at a mid only the loosened variant admits, then exit rich: a
-    /// guaranteed winner per repetition.
+    /// guaranteed winner per repetition. F7 fillability: the book is locked
+    /// (bid = ask = 0.41) so the offer side sits at the entry price itself —
+    /// a mid the twin cannot rest a bid under would never fill.
     fn drive_wins(
         v: &mut super::super::variants::Variant,
         m: &CryptoMarket,
@@ -262,11 +264,11 @@ mod tests {
             v.on_tick(&tick_ctx(
                 std::slice::from_ref(m),
                 "t",
-                &book(0.40, 0.41),
+                &book(0.41, 0.41),
                 1,
                 880,
                 now,
-            )); // mid 0.405
+            )); // mid 0.41 — above the 0.40 baseline cap, under the 0.412 variant
             now += 1_000;
             v.on_tick(&tick_ctx(
                 std::slice::from_ref(m),
@@ -292,7 +294,10 @@ mod tests {
         let m = market();
         let mut vs = set_for(2);
         vs.on_round(std::slice::from_ref(&m), &[], 0);
-        let tick = book(0.40, 0.41);
+        // F7 fillability: the book is locked (bid = ask = 0.41), so the offer
+        // side sits exactly at the entry price the twin would rest — the old
+        // two-sided book (0.40/0.41) could never have filled that bid.
+        let tick = book(0.41, 0.41);
         vs.variants[0].on_tick(&tick_ctx(
             std::slice::from_ref(&m),
             "t",
@@ -304,7 +309,7 @@ mod tests {
         assert_eq!(
             vs.variants[0].open_positions(),
             0,
-            "cap 0.40 must not buy a 0.405 mid"
+            "cap 0.40 must not buy a 0.41 mid"
         );
         vs.variants[1].on_tick(&tick_ctx(
             std::slice::from_ref(&m),
@@ -411,7 +416,9 @@ mod tests {
             vs.variants[1].on_tick(&tick_ctx(
                 std::slice::from_ref(&m),
                 "t",
-                &book(0.40, 0.41),
+                // Locked book: the offer side sits at the entry price the
+                // twin rests (F7 fillability).
+                &book(0.41, 0.41),
                 1,
                 880,
                 now,

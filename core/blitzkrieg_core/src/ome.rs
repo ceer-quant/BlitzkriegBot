@@ -80,6 +80,11 @@ pub struct FillDelta {
     /// notional strands the difference as a reservation the order can never
     /// spend back (issue #181).
     pub limit_price: Decimal,
+    /// OME fill-ledger key of the trade that produced this delta (`trade_id`,
+    /// falling back to tx hash / a synthetic key). A FAILED rollback carries the
+    /// SAME key as the provisional fill it reverses, so the service can pair a
+    /// rollback with the close bookkeeping that fill already drove (F4).
+    pub trade_id: String,
 }
 
 /// A fill that arrived for an order whose lifecycle had already ended, or one the
@@ -626,8 +631,14 @@ impl Ome {
                 Some(a) if a.applied > Decimal::ZERO => a.clone(),
                 _ => return Ok(FillOutcome::default()),
             };
-            let (delta, late) =
+            let (mut delta, late) =
                 self.record_delta(&order_id, -prev.applied, prev.price, now_ms, fill.maker)?;
+            // F4: the rollback delta carries the key of the provisional fill it
+            // reverses, so the caller can pair the reversal with the close
+            // bookkeeping that fill already drove.
+            if let Some(d) = delta.as_mut() {
+                d.trade_id = trade_key.clone();
+            }
             self.remember(trade_key.clone(), &order_id, Decimal::ZERO, prev.price);
             return Ok(FillOutcome {
                 delta,
@@ -654,8 +665,13 @@ impl Ome {
             return Ok(FillOutcome::default());
         }
 
-        let (delta, late) =
+        let (mut delta, late) =
             self.record_delta(&order_id, delta_raw, fill.price, now_ms, fill.maker)?;
+        // F4: stamp the producing trade's ledger key on the delta so the caller
+        // can pair it with the trade it came from.
+        if let Some(d) = delta.as_mut() {
+            d.trade_id = trade_key.clone();
+        }
         self.remember(trade_key.clone(), &order_id, reported, fill.price);
         Ok(FillOutcome {
             delta,
@@ -787,6 +803,9 @@ impl Ome {
             mode: order.mode,
             role,
             limit_price: order.price,
+            // The caller (apply_fill) stamps the producing trade's ledger key
+            // right after this returns — record_delta has no trade identity.
+            trade_id: String::new(),
         };
         debug_assert!(status_after == order.status);
         Ok((Some(delta), late))
