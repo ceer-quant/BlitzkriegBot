@@ -477,8 +477,14 @@ pub fn reference_price(book: Option<&OrderbookSnapshot>, fallback: Decimal) -> D
 pub enum StopRefSource {
     /// A live best bid that is not a dislocated wick.
     Bid,
-    /// The mid: either the book had no bid at all, or the bid was a wick.
+    /// The mid, when the bid existed but was a dislocated wick: the mid is the
+    /// price the guard judges on to decide whether the move is real.
     Mid,
+    /// The best ask of a book with NO bid (#225): the buy side was swept, so
+    /// the only real level left is what the market is offering to sell at. A
+    /// long's value cannot exceed it, which is what makes it usable as an upper
+    /// bound for the JUDGEMENT — it never prices a fill (see `executable_bid`).
+    Ask,
     /// The last known price, when no book (or no usable price in it) is left.
     LastKnown,
 }
@@ -514,19 +520,31 @@ pub struct SuppressedStop {
 pub struct ExitVerdict {
     pub decision: Option<ExitDecision>,
     pub suppressed_stop: Option<SuppressedStop>,
+    /// The price the protective stop judged on this tick, with its provenance.
+    /// `None` only when the tick returned before the stop was reached (a force
+    /// exit on a live bid, a grace period, a dead entry price) — after that
+    /// point it is always resolved, because a stop that judged on something
+    /// must be able to say so.
+    ///
+    /// `check_exits` reports it when the fired exit cannot be priced into an
+    /// order, so the operator sees WHICH price said "get out" instead of the
+    /// position's stale valuation (#225).
+    pub stop_reference: Option<StopReference>,
 }
 
 impl ExitVerdict {
-    fn exit(reason: ExitReason, use_maker: bool) -> Self {
+    fn exit(reason: ExitReason, use_maker: bool, judged: Option<StopReference>) -> Self {
         Self {
             decision: Some(ExitDecision { reason, use_maker }),
             suppressed_stop: None,
+            stop_reference: judged,
         }
     }
     fn hold() -> Self {
         Self {
             decision: None,
             suppressed_stop: None,
+            stop_reference: None,
         }
     }
 }
@@ -550,7 +568,17 @@ fn last_known_price(
     (age_ms <= cfg.max_last_price_age_sec.max(1) * 1_000).then_some(price)
 }
 
-/// Resolve the price a PROTECTIVE stop is judged on (P0 #177).
+/// The best ask a book actually carries, or `None` when it has no sell side.
+///
+/// `OrderbookSnapshot::best_ask` is `1` when the ask side is EMPTY — a
+/// pre-existing entry-side sentinel ("nothing for sale" read as maximally
+/// expensive, see `strategy_logic::model`), not a quote. The sentinel must be
+/// read as "no ask", never as "someone is offering a dollar".
+fn best_live_ask(book: &OrderbookSnapshot) -> Option<Decimal> {
+    (!book.asks.is_empty() && book.best_ask > Decimal::ZERO).then_some(book.best_ask)
+}
+
+/// Resolve the price a PROTECTIVE stop is judged on (P0 #177, #225).
 ///
 /// The wick guard exists so a dislocated bid cannot TRIGGER a market exit — it
 /// is not a reason to abandon the stop, and the one moment it must never win is
@@ -559,10 +587,21 @@ fn last_known_price(
 ///   2. a live bid that IS a wick → judge on the mid: if the mid breached the
 ///      stop too the move is real and the stop fires; if the mid held, the
 ///      trigger the raw bid would have produced is reported as suppressed;
-///   3. no bid at all but a mid → judge on the mid (it is already the price
-///      `executable_bid` values the position at, so nothing can veto a stop on
-///      top of it);
+///   3. no bid at all but a live ASK → judge on `min(last known price, ask)`
+///      (#225). The buy side was swept, so the only real level left is what the
+///      market is offering to sell at; a long's value cannot exceed it, and a
+///      remembered price that is ABOVE it is a price nobody is standing behind;
 ///   4. no usable price in the book → the last known price, if still fresh.
+///
+/// There is deliberately NO step that judges on a mid with no bid. F6 removed
+/// the one-sided mid (`from_levels` zeroes it — `(0 + ask)/2` is arithmetic, not
+/// a level anyone will lift), so that branch could never run on a real book;
+/// leaving it in place is what made a swept book look like a quiet one (#225).
+///
+/// Nothing here can price an ORDER: a book with no bid has `executable_bid` 0
+/// regardless of what this returns, so a trigger resolved through step 3 can
+/// only ever become a reported held stop (#179's split — the gate prices the
+/// order, not the decision).
 fn stop_reference(
     book: Option<&OrderbookSnapshot>,
     fallback: Option<Decimal>,
@@ -571,10 +610,6 @@ fn stop_reference(
     cfg: &ExitConfig,
 ) -> Option<StopReference> {
     if let Some(b) = book {
-        // A book with NO levels at all carries no price information: its
-        // `mid_price` is the builder's placeholder (0 and 1 → 0.5), not a
-        // quote, and letting it veto the stop is the very hole this fixes.
-        let has_levels = !b.bids.is_empty() || !b.asks.is_empty();
         if b.best_bid > Decimal::ZERO {
             if b.mid_price > Decimal::ZERO {
                 let wick = (b.mid_price - b.best_bid) / b.mid_price;
@@ -592,10 +627,17 @@ fn stop_reference(
                 suppressed_bid: None,
             });
         }
-        if has_levels && b.mid_price > Decimal::ZERO {
+        if let Some(ask) = best_live_ask(b) {
+            // `min` keeps the direction conservative: the ask may only ever fire
+            // a stop the remembered price would have fired on its own, never
+            // hold one back. A fresh last known price BELOW the ask — a book
+            // that fell apart while a stale ask still hangs above it — stays
+            // the judgement, exactly as before.
+            let price =
+                last_known_price(fallback, state, now_ms, cfg).map_or(ask, |known| known.min(ask));
             return Some(StopReference {
-                price: b.mid_price,
-                source: StopRefSource::Mid,
+                price,
+                source: StopRefSource::Ask,
                 suppressed_bid: None,
             });
         }
@@ -620,13 +662,9 @@ enum StopVerdict {
 fn stop_verdict(
     entry_price: Decimal,
     stop_pct: Decimal,
-    book: Option<&OrderbookSnapshot>,
-    fallback: Option<Decimal>,
-    state: &ExitState,
-    now_ms: i64,
-    cfg: &ExitConfig,
+    reference: Option<StopReference>,
 ) -> StopVerdict {
-    let Some(reference) = stop_reference(book, fallback, state, now_ms, cfg) else {
+    let Some(reference) = reference else {
         return StopVerdict::Nothing;
     };
     let pct = pnl_pct(reference.price, entry_price);
@@ -781,12 +819,16 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
         if !live {
             return ExitVerdict::hold();
         }
-        return ExitVerdict::exit(ExitReason::ForceExit, false);
+        return ExitVerdict::exit(ExitReason::ForceExit, false, None);
     }
 
     // The stop needs SOME price to judge on, and may fall back to the last
-    // known one; every other rule additionally requires a live quote.
-    if !live && stop_reference(book, fallback_price, state, now_ms, cfg).is_none() {
+    // known one; every other rule additionally requires a live quote. Resolve
+    // it ONCE: the stop is the one rule that must keep working when the quote
+    // is gone (#177), and `check_exits` has to report WHICH price judged when
+    // the fired exit cannot be priced into an order (#225).
+    let stop_ref = stop_reference(book, fallback_price, state, now_ms, cfg);
+    if !live && stop_ref.is_none() {
         return ExitVerdict::hold();
     }
     let pct = if live {
@@ -802,18 +844,14 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
             && cfg.take_profit_pct < dec!(9999)
             && pct >= cfg.take_profit_pct
         {
-            return ExitVerdict::exit(ExitReason::TakeProfit, cfg.maker_first_exit_enabled);
+            return ExitVerdict::exit(ExitReason::TakeProfit, cfg.maker_first_exit_enabled, None);
         }
         match stop_verdict(
             entry_price,
             effective_stop_pct(cfg.stop_loss_pct, time_left_sec, cfg),
-            book,
-            fallback_price,
-            state,
-            now_ms,
-            cfg,
+            stop_ref,
         ) {
-            StopVerdict::Fire => return ExitVerdict::exit(ExitReason::StopLoss, false),
+            StopVerdict::Fire => return ExitVerdict::exit(ExitReason::StopLoss, false, stop_ref),
             StopVerdict::Suppressed(s) => suppressed = Some(s),
             StopVerdict::Nothing => {}
         }
@@ -822,15 +860,16 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
             let time_trail = get_time_trail_pct(time_left_sec);
             let trail = cfg.min_trail_pct.max(profit_trail.min(time_trail));
             if state.high_pnl_pct - pct >= trail {
-                return ExitVerdict::exit(ExitReason::TrailingStop, false);
+                return ExitVerdict::exit(ExitReason::TrailingStop, false, None);
             }
         }
         if live && time_left_sec <= cfg.min_time_left_sec {
-            return ExitVerdict::exit(ExitReason::TimeExit, false);
+            return ExitVerdict::exit(ExitReason::TimeExit, false, None);
         }
         return ExitVerdict {
             decision: None,
             suppressed_stop: suppressed,
+            stop_reference: stop_ref,
         };
     }
 
@@ -840,7 +879,7 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
     }
 
     if live && pct >= cfg.take_profit_pct {
-        return ExitVerdict::exit(ExitReason::TakeProfit, cfg.maker_first_exit_enabled);
+        return ExitVerdict::exit(ExitReason::TakeProfit, cfg.maker_first_exit_enabled, None);
     }
 
     let base_stop = if cfg.tight_stop_enabled {
@@ -851,29 +890,29 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
     match stop_verdict(
         entry_price,
         effective_stop_pct(base_stop, time_left_sec, cfg),
-        book,
-        fallback_price,
-        state,
-        now_ms,
-        cfg,
+        stop_ref,
     ) {
-        StopVerdict::Fire => return ExitVerdict::exit(ExitReason::StopLoss, false),
+        StopVerdict::Fire => return ExitVerdict::exit(ExitReason::StopLoss, false, stop_ref),
         StopVerdict::Suppressed(s) => suppressed = Some(s),
         StopVerdict::Nothing => {}
     }
 
     if live {
+        // None of these is the protective stop — they are the profit-side rules,
+        // which already require a live bid to fire. They carry no stop reference
+        // forward: a report about one of them is about the bid, and
+        // `check_exits` already reports `exit_price` for that.
         if cfg.ratchet_enabled {
             let confirmed_high_pct = pnl_pct(state.confirmed_high, entry_price);
             if pct <= get_ratchet_floor(confirmed_high_pct) {
-                return ExitVerdict::exit(ExitReason::RatchetFloor, false);
+                return ExitVerdict::exit(ExitReason::RatchetFloor, false, None);
             }
         }
 
         if state.high_pnl_pct >= Decimal::from(BREAKEVEN_LOCK_TRIGGER_PCT) {
             let lock_floor = dec!(0.5).max(taker_fee_pct(bid) + dec!(0.2));
             if pct <= lock_floor {
-                return ExitVerdict::exit(ExitReason::BreakevenLock, false);
+                return ExitVerdict::exit(ExitReason::BreakevenLock, false, None);
             }
         }
 
@@ -882,7 +921,7 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
             let time_trail = get_time_trail_pct(time_left_sec);
             let trail = cfg.min_trail_pct.max(profit_trail.min(time_trail));
             if state.high_pnl_pct - pct >= trail {
-                return ExitVerdict::exit(ExitReason::TrailingStop, false);
+                return ExitVerdict::exit(ExitReason::TrailingStop, false, None);
             }
         }
 
@@ -896,32 +935,33 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
                 && bid < state.high_water_mark
                 && pct >= dec!(2)
             {
-                return ExitVerdict::exit(ExitReason::DepthCollapse, false);
+                return ExitVerdict::exit(ExitReason::DepthCollapse, false, None);
             }
         }
 
         if pct >= cfg.stale_profit_pct {
             let stale_sec = (now_ms - state.bid_unchanged_since) / 1000;
             if stale_sec >= cfg.stale_profit_bid_unchanged_sec {
-                return ExitVerdict::exit(ExitReason::StaleProfit, true);
+                return ExitVerdict::exit(ExitReason::StaleProfit, true, None);
             }
         }
 
         if pct >= cfg.stagnant_profit_pct && pct < cfg.take_profit_pct {
             let stagnant_sec = (now_ms - state.last_progress_at) / 1000;
             if stagnant_sec >= cfg.stagnant_duration_sec {
-                return ExitVerdict::exit(ExitReason::StagnantProfit, true);
+                return ExitVerdict::exit(ExitReason::StagnantProfit, true, None);
             }
         }
 
         if time_left_sec <= cfg.min_time_left_sec {
-            return ExitVerdict::exit(ExitReason::TimeExit, cfg.maker_exits_for_tp_only);
+            return ExitVerdict::exit(ExitReason::TimeExit, cfg.maker_exits_for_tp_only, None);
         }
     }
 
     ExitVerdict {
         decision: None,
         suppressed_stop: suppressed,
+        stop_reference: stop_ref,
     }
 }
 
@@ -1370,6 +1410,114 @@ mod tests {
         let one_sided = one_sided_book(dec!(0.90));
         assert_eq!(reference_price(Some(&one_sided), dec!(9)), dec!(9));
         assert_eq!(reference_price(None, dec!(9)), dec!(9));
+    }
+
+    // ── #225: a bid-less book must not leave the stop with no price ──────────
+
+    /// Build a book the way the kernel does, so the placeholder/sentinel prices
+    /// an empty side gets are part of what is under test.
+    fn shaped(bids: Vec<(Decimal, Decimal)>, asks: Vec<(Decimal, Decimal)>) -> OrderbookSnapshot {
+        OrderbookSnapshot::from_levels("tok", bids, asks, 1_000)
+    }
+
+    /// The stop's judgement for a book, with a last known price of 0.40 taken a
+    /// second ago (fresh for the default 30s bound).
+    fn judged(book: &OrderbookSnapshot, fallback: Decimal) -> StopReference {
+        stop_reference(
+            Some(book),
+            Some(fallback),
+            &ExitState::new(dec!(0.40), 1_000),
+            1_000,
+            &ExitConfig::default(),
+        )
+        .expect("every book here leaves the stop something to judge on")
+    }
+
+    #[test]
+    fn a_bidless_book_judges_the_stop_on_its_ask_and_prices_nothing() {
+        let b = shaped(vec![], vec![(dec!(0.15), dec!(1000))]);
+        assert_eq!(b.mid_price, Decimal::ZERO, "F6: no bid ⇒ no mid");
+
+        let r = judged(&b, dec!(0.40));
+        assert_eq!(r.price, dec!(0.15), "the ask is the only real level left");
+        assert_eq!(r.source, StopRefSource::Ask);
+        assert_eq!(r.suppressed_bid, None);
+        // …and the judgement still cannot become an order: the F6 gate is
+        // untouched, so all it can produce is a REPORTED held stop (#179).
+        assert_eq!(executable_bid(Some(&b)), Decimal::ZERO);
+    }
+
+    #[test]
+    fn an_ask_above_the_last_known_price_never_loosens_or_tightens_the_stop() {
+        let b = shaped(vec![], vec![(dec!(0.90), dec!(1000))]);
+        // The buy side was swept but the market did not fall: the remembered
+        // price stays the judgement. `min` is what guarantees this branch can
+        // only ever FIRE a stop the old code fired, never hide one.
+        assert_eq!(judged(&b, dec!(0.40)).price, dec!(0.40));
+        // …and an ask ABOVE a last known price that itself collapsed does not
+        // raise the judgement back up.
+        assert_eq!(judged(&b, dec!(0.10)).price, dec!(0.10));
+    }
+
+    #[test]
+    fn a_book_with_no_levels_at_all_carries_no_price_information() {
+        let b = shaped(vec![], vec![]);
+        // The empty ask side's `1` is an entry-side sentinel (pre-existing API,
+        // see `strategy_logic::model`), not a dollar of demand — reading it as a
+        // quote would judge every stop against a price nobody offered.
+        assert_eq!(b.best_ask, Decimal::ONE);
+        assert_eq!(b.mid_price, Decimal::ZERO);
+
+        let r = judged(&b, dec!(0.40));
+        assert_eq!(r.price, dec!(0.40), "only the last known price is left");
+        assert_eq!(r.source, StopRefSource::LastKnown);
+    }
+
+    #[test]
+    fn a_mid_without_a_bid_is_never_the_judgement() {
+        // A hand-built or legacy snapshot can still carry the phantom
+        // `(0 + ask)/2` mid that F6 killed. `from_levels` no longer produces it,
+        // so the branch that read it is gone — and it must not come back
+        // through a snapshot that was not built by the kernel.
+        let mut b = shaped(vec![], vec![]);
+        b.mid_price = dec!(0.15);
+
+        let r = judged(&b, dec!(0.40));
+        assert_eq!(r.source, StopRefSource::LastKnown);
+        assert_eq!(r.price, dec!(0.40));
+    }
+
+    #[test]
+    fn a_stale_last_price_leaves_the_live_ask_as_the_only_witness() {
+        // The remembered price is past its freshness bound, so it drops out —
+        // but the ask is a live level in front of us, and there is no reason to
+        // fall silent while one exists (#225).
+        let b =
+            OrderbookSnapshot::from_levels("tok", vec![], vec![(dec!(0.15), dec!(1000))], 32_000);
+        let r = stop_reference(
+            Some(&b),
+            Some(dec!(0.40)),
+            &ExitState::new(dec!(0.40), 1_000), // last quote 31s ago
+            32_000,
+            &ExitConfig::default(),
+        )
+        .expect("a live ask is a price");
+        assert_eq!(r.price, dec!(0.15));
+        assert_eq!(r.source, StopRefSource::Ask);
+
+        // With no ask either there is nothing at all, and the stop is silent.
+        let dark = OrderbookSnapshot::from_levels("tok", vec![], vec![], 32_000);
+        assert!(
+            stop_reference(
+                Some(&dark),
+                Some(dec!(0.40)),
+                &ExitState::new(dec!(0.40), 1_000),
+                32_000,
+                &ExitConfig::default(),
+            )
+            .is_none(),
+            "no bid, no ask and a stale memory is the one case with no witness"
+        );
     }
 
     // ── F8: fee schedules ────────────────────────────────────────────────────

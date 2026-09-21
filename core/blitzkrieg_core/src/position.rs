@@ -6,8 +6,8 @@
 //! the open/closed books, daily PnL, and per-asset/direction cooldowns.
 
 use crate::exit_policy::{
-    ExitConfig, ExitState, ExitTickInput, decide_exit_verdict, effective_stop_pct, executable_bid,
-    pnl_pct, reference_price, update_exit_state,
+    ExitConfig, ExitState, ExitTickInput, ExitVerdict, decide_exit_verdict, effective_stop_pct,
+    executable_bid, pnl_pct, reference_price, update_exit_state,
 };
 use crate::model::{ExitReason, OrderRole, OrderbookSnapshot, Side, SignalDirection};
 
@@ -274,8 +274,10 @@ pub struct SuppressedStopEvent {
     /// the stop.
     pub bid: Decimal,
     /// For [`StopSuppressionCause::WickGuard`]: the mid that failed to confirm.
-    /// For [`StopSuppressionCause::NoExecutableQuote`]: the last known price the
-    /// stop actually judged on, since no bid was available to report.
+    /// For [`StopSuppressionCause::NoExecutableQuote`]: the price the exit was
+    /// actually JUDGED on — the protective stop's own reference when the stop
+    /// is what fired (the ask-side price of a bid-less book, #225), otherwise
+    /// the position's last valuation, since no bid was available to report.
     pub mid: Decimal,
     pub pnl_pct_at_bid: Decimal,
     pub pnl_pct_at_mid: Decimal,
@@ -312,7 +314,7 @@ impl SuppressedStopEvent {
                 self.stop_pct
             ),
             StopSuppressionCause::NoExecutableQuote => format!(
-                "stop SUPPRESSED (no executable bid): {} {} entry {} last {} ({}%) stop {}% — the \
+                "stop SUPPRESSED (no executable bid): {} {} entry {} judged {} ({}%) stop {}% — the \
                  exit rule fired, but the book showed no bid at all, so no order was sent; the \
                  position is held until a buyer appears or expiry settles it",
                 self.position_id,
@@ -1123,7 +1125,11 @@ impl PositionManager {
             // The verdict carries back a protective stop the wick guard
             // withheld, so "should have triggered" is reportable rather than
             // silent (P0 #177).
-            let verdict = decide_exit_verdict(ExitTickInput {
+            let ExitVerdict {
+                decision,
+                suppressed_stop,
+                stop_reference,
+            } = decide_exit_verdict(ExitTickInput {
                 entry_price: pos.entry_price,
                 book: book.as_ref(),
                 fallback_price: Some(pos.current_price),
@@ -1133,7 +1139,7 @@ impl PositionManager {
                 now_ms,
                 cfg: &cfg,
             });
-            if let Some(s) = verdict.suppressed_stop {
+            if let Some(s) = suppressed_stop {
                 withheld.push(SuppressedStopEvent {
                     cause: StopSuppressionCause::WickGuard,
                     position_id: pos.id.clone(),
@@ -1149,7 +1155,7 @@ impl PositionManager {
                     now_ms,
                 });
             }
-            if let Some(d) = verdict.decision {
+            if let Some(d) = decision {
                 if priceable {
                     out.push(ExitRequest {
                         position_id: pos.id.clone(),
@@ -1161,6 +1167,13 @@ impl PositionManager {
                     // The rule fired but there is no buyer to sell to at any
                     // price we can name — hold, and report the held exit so it
                     // reaches review instead of dying in memory.
+                    //
+                    // What it judged ON is the stop's own reference whenever
+                    // there is one (#225): a bid-less book whose ask collapsed
+                    // can only be judged on that ask, and `current_price` never
+                    // moved off the entry there — reporting it would have said
+                    // "flat" about the one case this report exists for.
+                    let judged = stop_reference.map_or(pos.current_price, |r| r.price);
                     withheld.push(SuppressedStopEvent {
                         cause: StopSuppressionCause::NoExecutableQuote,
                         position_id: pos.id.clone(),
@@ -1169,13 +1182,13 @@ impl PositionManager {
                         asset: pos.asset.clone(),
                         entry_price: pos.entry_price,
                         bid: exit_price,
-                        mid: pos.current_price,
+                        mid: judged,
                         pnl_pct_at_bid: if exit_price > Decimal::ZERO {
                             pnl_pct(exit_price, pos.entry_price)
                         } else {
                             Decimal::ZERO
                         },
-                        pnl_pct_at_mid: pnl_pct(pos.current_price, pos.entry_price),
+                        pnl_pct_at_mid: pnl_pct(judged, pos.entry_price),
                         stop_pct: effective_stop_pct(cfg.stop_loss_pct, time_left_sec, &cfg),
                         now_ms,
                     });
