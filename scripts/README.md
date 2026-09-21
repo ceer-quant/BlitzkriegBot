@@ -122,7 +122,10 @@ cargo build --release --workspace --locked
   (独立账本), per-UTC-day trend and portfolio totals read from the append-only
   trade ledger, plus breaker/evolution audit events in-window. Read-only over
   `data/trades/trades.jsonl`; `--days N` (default 7) or `--from/--to` pin the
-  window.
+  window. It also folds the order log (`--orders data/orders/orders.jsonl`) into
+  the #183 fill metrics — fill rate, partial-fill rate and the filled-size ratio
+  — because the trade ledger only knows CLOSED positions, not how their entries
+  filled; `--json` prints that manifest to stdout for a script.
 - `feed-live-probe.mjs` / `poly-ws-endurance.mjs` / `poly-wire-measure.mjs` — Polymarket feed probes.
 - `price-compare.mjs` / `reconcile-exits.mjs` / `sweep-exits.mjs` / `final-exit-opt.mjs` — pricing and exit sweeps.
 - `account-drift-check.mjs` — live panel/account drift diagnosis.

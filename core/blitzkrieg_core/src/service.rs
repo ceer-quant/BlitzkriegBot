@@ -4316,7 +4316,13 @@ impl Core {
                             Some((vwap, _)) => {
                                 let fill_price =
                                     self.config.fill_model.apply_slippage(order.side, vwap);
-                                self.authoritative_fill(id, order.size, fill_price, false, now_ms)?
+                                // A FOK is all-or-nothing by construction, so it
+                                // is one execution of the whole size — the trade
+                                // id stays the one this path has always used.
+                                let trade_id = format!("{id}:{now_ms}");
+                                self.authoritative_fill(
+                                    id, &trade_id, order.size, fill_price, false, now_ms,
+                                )?
                             }
                             None => {
                                 if order.side == Side::Buy {
@@ -4356,9 +4362,17 @@ impl Core {
     /// hit (`true`). Stating it keeps DRY and LIVE on the same authority — the
     /// execution itself — instead of DRY inferring from policy and LIVE reading
     /// the venue.
+    ///
+    /// `trade_id` is the execution's own identity, and `cumulative` is the size
+    /// this identity has now reported — NOT an increment. Two executions of one
+    /// order must therefore carry two different ids (a partial fill followed by
+    /// a further partial fill is two trades), which is exactly how a venue
+    /// reports them; re-reporting the same id is a revision of what was already
+    /// booked, not a second trade (issue #178).
     fn authoritative_fill(
         &mut self,
         id: &str,
+        trade_id: &str,
         cumulative: Decimal,
         price: Decimal,
         maker: bool,
@@ -4370,7 +4384,7 @@ impl Core {
         };
         let fill = Fill {
             order_id: id.into(),
-            trade_id: Some(format!("{id}:{now_ms}")),
+            trade_id: Some(trade_id.to_string()),
             token_id: token,
             side,
             price,
@@ -4393,6 +4407,14 @@ impl Core {
     }
 
     /// Fill a resting maker order if the latest book crosses its limit.
+    ///
+    /// The fill is bounded by the crossing side's DEPTH, not by the order's own
+    /// size (issue #183): a maker trades only against the volume that actually
+    /// reaches its limit, so an order bigger than the book leaves the rest
+    /// resting — partially filled — instead of pretending the whole size
+    /// traded. The depth reading is the taker walk's own
+    /// ([`crate::sim::Book::marketable_depth`]), so dry cannot hold two
+    /// different ideas of how much is available.
     fn try_maker_fill(&mut self, id: &str, now_ms: i64) {
         let Some(order) = self.ome.get(id).cloned() else {
             return;
@@ -4400,14 +4422,13 @@ impl Core {
         if !order.status.is_live() || order.filled_size >= order.size {
             return;
         }
-        let crosses = self
-            .books
-            .get(&order.token_id)
-            .map(|b| b.crosses(&order))
-            .unwrap_or(false);
-        if !crosses {
+        let Some(book) = self.books.get(&order.token_id) else {
+            return;
+        };
+        if !book.crosses(&order) {
             return;
         }
+        let depth = book.marketable_depth(order.side, order.price);
         // Fill model (P-1.2), identity by default so this path is unchanged:
         //  - latency: the order cannot be hit before the venue could have it;
         //  - fill probability: a crossing does not guarantee a fill (queue
@@ -4419,8 +4440,17 @@ impl Core {
         if !model.maker_fill_wins(&order.order_id) {
             return;
         }
-        // Dry maker fills are full fills at the resting limit (Node parity).
-        if let Err(e) = self.authoritative_fill(id, order.size, order.price, true, now_ms) {
+        let remaining = (order.size - order.filled_size).max(Decimal::ZERO);
+        let chunk = model.maker_fill_size(&order.order_id, remaining, depth);
+        if chunk <= Decimal::ZERO {
+            // The crossing side offers nothing to take: the order keeps resting.
+            return;
+        }
+        // A maker still fills at its own resting limit (Node parity); only the
+        // SIZE is bounded by the book. Each chunk is its own trade identity, so
+        // a later chunk books on top of this one instead of revising it.
+        let trade_id = format!("{id}:{now_ms}:{}", order.filled_size + chunk);
+        if let Err(e) = self.authoritative_fill(id, &trade_id, chunk, order.price, true, now_ms) {
             self.emit(Event::Error { error: e });
         }
     }
@@ -8724,6 +8754,181 @@ mod fill_model_tests {
         );
         assert!(c.ome().get(&id).unwrap().status.is_live());
         assert_eq!(c.ome().get(&id).unwrap().filled_size, Decimal::ZERO);
+    }
+
+    // ── #183 · a dry maker fills at most what the book offers ──────────────
+    //
+    // Before this, a crossing maker filled its WHOLE size at once, so a dry run
+    // could never reproduce the partial fills live hits on day one and every
+    // backtest read as a 100% fill rate.
+
+    /// ACCEPTANCE (#183): a maker only trades the crossing depth, and the three
+    /// records of that fact — order, position and ledger — agree.
+    #[test]
+    fn crossing_depth_limits_the_maker_fill_and_the_books_agree() {
+        let mut c = core_with(FillModel::default());
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        // Only 4 shares rest at the crossing ask. That is the whole of what a
+        // maker can trade on this book.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(4))], 1_100);
+
+        let o = c.ome().get(&id).unwrap();
+        assert_eq!(o.filled_size, dec!(4), "depth, not order size: {o:?}");
+        assert_eq!(o.status, OrderStatus::PartiallyFilled);
+        assert_eq!(c.ome().remaining(&id), dec!(6), "the rest is still working");
+        // What the fill cost is what the ledger moved: 4 × 0.40.
+        assert_eq!(
+            c.ledger().balance(),
+            dec!(1000) - dec!(1.6),
+            "cash follows the fill, not the order"
+        );
+        assert_eq!(
+            c.ledger().reserved(),
+            dec!(2.4),
+            "0.40 × 6 unfilled shares stay committed while the order rests"
+        );
+        assert_eq!(c.ledger().available(), c.ledger().balance() - dec!(2.4));
+        assert!(c.ledger().is_balanced());
+        // The position holds the shares that actually traded.
+        let pos = &c.positions().open_positions()[0];
+        assert_eq!(pos.shares, dec!(4), "position = filled size");
+        assert_eq!(pos.entry_price, dec!(0.40));
+        assert_eq!(pos.cost_usd, dec!(1.6), "basis = cash actually spent");
+        let audit = c.run_accounting_audit(1_200);
+        assert!(audit.ok, "{}", audit.note);
+    }
+
+    /// ACCEPTANCE (#183): the remainder of a partially filled maker is a real,
+    /// cancellable order — the entry that live leaves half-open must be
+    /// closable in dry too.
+    #[test]
+    fn a_partially_filled_maker_keeps_its_remainder_cancellable() {
+        let mut c = core_with(FillModel::default());
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(4))], 1_100);
+
+        c.cancel(&id, 1_200).unwrap();
+
+        let o = c.ome().get(&id).unwrap();
+        assert_eq!(o.status, OrderStatus::Cancelled);
+        assert_eq!(o.filled_size, dec!(4), "cancelling never unwinds a fill");
+        assert_eq!(c.ledger().reserved(), Decimal::ZERO, "2.4 released");
+        assert_eq!(
+            c.ledger().available(),
+            c.ledger().balance(),
+            "stranded cash is unusable cash"
+        );
+        assert!(c.ledger().is_balanced());
+        // The filled half stays a position worth exactly what was paid.
+        let pos = &c.positions().open_positions()[0];
+        assert_eq!(pos.shares, dec!(4));
+        assert_eq!(pos.cost_usd, dec!(1.6));
+        assert_eq!(c.ledger().balance(), dec!(1000) - dec!(1.6));
+        let audit = c.run_accounting_audit(1_300);
+        assert!(audit.ok, "{}", audit.note);
+    }
+
+    /// ACCEPTANCE (#183): successive books keep filling the order up to each
+    /// book's depth until it is whole — a partial fill is not a terminal state.
+    #[test]
+    fn partial_maker_fills_accumulate_until_the_order_is_whole() {
+        let mut c = core_with(FillModel::default());
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(4))], 1_100);
+        assert_eq!(c.ome().get(&id).unwrap().filled_size, dec!(4));
+        // A shallower book a moment later adds only what it offers.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.39), dec!(3))], 1_200);
+        assert_eq!(c.ome().get(&id).unwrap().filled_size, dec!(7));
+        assert_eq!(
+            c.ome().get(&id).unwrap().status,
+            OrderStatus::PartiallyFilled
+        );
+        // The third book covers the remaining 3: the order ends whole.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(10))], 1_300);
+
+        let o = c.ome().get(&id).unwrap();
+        assert_eq!(o.filled_size, dec!(10));
+        assert_eq!(o.status, OrderStatus::Filled);
+        assert_eq!(c.ome().remaining(&id), Decimal::ZERO);
+        assert_eq!(c.ledger().reserved(), Decimal::ZERO);
+        assert_eq!(c.ledger().balance(), dec!(1000) - dec!(4));
+        // Every chunk was a maker fill at the resting limit, so the average is
+        // the quote itself and no taker fee was ever charged.
+        assert_eq!(o.avg_fill_price, Some(dec!(0.40)));
+        assert_eq!(c.positions().open_positions()[0].shares, dec!(10));
+        let audit = c.run_accounting_audit(1_400);
+        assert!(audit.ok, "{}", audit.note);
+    }
+
+    /// Two chunks inside the SAME millisecond are two executions, not one
+    /// revised report: each carries its own trade identity, so the second books
+    /// on top of the first instead of being swallowed as a downward revision.
+    #[test]
+    fn two_partial_chunks_in_one_millisecond_both_book() {
+        let mut c = core_with(FillModel::default());
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(3))], 1_100);
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(4))], 1_100);
+
+        assert_eq!(
+            c.ome().get(&id).unwrap().filled_size,
+            dec!(7),
+            "3 + 4 in the same millisecond: the second chunk is a second trade"
+        );
+        assert_eq!(c.ledger().balance(), dec!(1000) - dec!(2.8));
+        assert!(c.ledger().is_balanced());
+    }
+
+    /// A crossing book whose levels are empty offers nothing to take: the order
+    /// stays whole and resting rather than filling against zero volume.
+    #[test]
+    fn a_crossing_book_with_no_volume_leaves_the_maker_resting() {
+        let mut c = core_with(FillModel::default());
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), Decimal::ZERO)], 1_100);
+
+        let o = c.ome().get(&id).unwrap();
+        assert!(o.status.is_live(), "no volume traded: {o:?}");
+        assert_eq!(o.filled_size, Decimal::ZERO);
+        assert!(c.positions().open_positions().is_empty());
+        assert_eq!(c.ledger().reserved(), dec!(4), "still committed");
+    }
+
+    /// The queue-share dial scales a maker fill below the depth as well, so a
+    /// backtest can price being behind the queue. Identity is its ceiling.
+    #[test]
+    fn depth_share_dial_scales_the_maker_fill() {
+        let mut c = core_with(FillModel {
+            maker_depth_share_bps: 5_000,
+            ..FillModel::default()
+        });
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        // Deep book: the dial, not the depth, is the binding constraint.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1_100);
+
+        let filled = c.ome().get(&id).unwrap().filled_size;
+        assert!(
+            filled > Decimal::ZERO && filled <= dec!(5),
+            "a 50% queue share of a 10-share order: {filled}"
+        );
+        assert_eq!(c.positions().open_positions()[0].shares, filled);
+        assert_eq!(c.ledger().balance(), dec!(1000) - filled * dec!(0.40));
+        assert!(c.ledger().is_balanced());
+        let audit = c.run_accounting_audit(1_200);
+        assert!(audit.ok, "{}", audit.note);
     }
 }
 

@@ -167,6 +167,35 @@ pub struct OrderCounts {
     pub live_at_end: u64,
 }
 
+/// How much of what we asked for actually traded (issue #183).
+///
+/// A dry run used to fill every crossing maker whole, so these numbers could
+/// only ever read 100% and a backtest could not tell a book deep enough for the
+/// strategy from one that would have left the entry half-open. They are now a
+/// property of the run rather than an assumption.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FillStats {
+    /// Orders observed at least once, in any status.
+    pub orders: u64,
+    /// Orders whose last observed state was fully filled.
+    pub filled_orders: u64,
+    /// Orders that traded but never reached their size — the partial fills.
+    pub partial_orders: u64,
+    /// Orders that never traded a single share (cancelled, rejected, expired…).
+    pub unfilled_orders: u64,
+    /// Share of orders that traded at all. `0` when no order was placed.
+    #[serde(with = "crate::decimal")]
+    pub fill_rate_pct: Decimal,
+    /// Share of orders left PARTIALLY filled — the dry run's exposure to the
+    /// live-bug-② shape (#183).
+    #[serde(with = "crate::decimal")]
+    pub partial_rate_pct: Decimal,
+    /// Filled size over requested size across every order: the volume view.
+    #[serde(with = "crate::decimal")]
+    pub size_fill_ratio_pct: Decimal,
+}
+
 /// The replay result. Serializable so a run can be filed next to the archive.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,6 +210,10 @@ pub struct BacktestReport {
     pub fill_model: FillModel,
     pub entry_maker_timeout_ms: i64,
     pub orders: OrderCounts,
+    /// Fill rate / partial-fill rate (#183): what actually traded, order by
+    /// order, so a dry acceptance run reports its own optimism instead of
+    /// hiding it behind a 100% assumption.
+    pub fill_stats: FillStats,
     pub fills: u64,
     pub trades: TradeStats,
     /// Per-strategy accounting (`engine.stats.strategies[]`), verbatim.
@@ -235,6 +268,15 @@ impl BacktestReport {
             self.orders.live_at_end
         ));
         s.push_str(&format!("  fills            : {}\n", self.fills));
+        let f = &self.fill_stats;
+        s.push_str(&format!(
+            "  fill rate        : {:.2}% of orders ({} filled, {} partial, {} never) — {:.2}% of size\n",
+            f.fill_rate_pct, f.filled_orders, f.partial_orders, f.unfilled_orders, f.size_fill_ratio_pct
+        ));
+        s.push_str(&format!(
+            "  partial fills    : {:.2}% of orders (#183)\n",
+            f.partial_rate_pct
+        ));
         let t = &self.trades;
         s.push_str(&format!(
             "  trades           : {} closed ({} win / {} loss / {} flat, win {:.0}%)\n",
@@ -333,6 +375,8 @@ pub struct EventBacktester {
     tail_ms: i64,
     /// Orders by their last observed status.
     order_status: HashMap<String, String>,
+    /// Orders by the last observed `(size, filled_size)` (#183).
+    order_sizes: HashMap<String, (Decimal, Decimal)>,
     fills: u64,
     trades: Vec<TradeLine>,
     risk_alerts: Vec<String>,
@@ -403,6 +447,7 @@ impl EventBacktester {
             tick_ms,
             tail_ms: cfg.tail_ms.max(0),
             order_status: HashMap::new(),
+            order_sizes: HashMap::new(),
             fills: 0,
             trades: Vec::new(),
             risk_alerts: Vec::new(),
@@ -470,6 +515,11 @@ impl EventBacktester {
                 Event::OrderUpdate { order } => {
                     self.order_status
                         .insert(order.order_id.clone(), format!("{:?}", order.status));
+                    // Latest (size, filled) per order: the fill-rate view (#183)
+                    // needs what was ASKED for against what TRADED, which the
+                    // status alone cannot say.
+                    self.order_sizes
+                        .insert(order.order_id.clone(), (order.size, order.filled_size));
                 }
                 Event::Fill { .. } => self.fills += 1,
                 Event::RiskAlert { code, message } => {
@@ -509,6 +559,39 @@ impl EventBacktester {
             }
         }
         c
+    }
+
+    /// Fill rate / partial-fill rate over every order the run saw (#183).
+    fn fill_stats(&self) -> FillStats {
+        let mut s = FillStats {
+            orders: self.order_sizes.len() as u64,
+            ..Default::default()
+        };
+        let mut requested = Decimal::ZERO;
+        let mut filled = Decimal::ZERO;
+        for (size, got) in self.order_sizes.values() {
+            requested += *size;
+            filled += *got;
+            if *got <= Decimal::ZERO {
+                s.unfilled_orders += 1;
+            } else if *got >= *size {
+                s.filled_orders += 1;
+            } else {
+                s.partial_orders += 1;
+            }
+        }
+        let pct = |n: Decimal, d: Decimal| {
+            if d <= Decimal::ZERO {
+                Decimal::ZERO
+            } else {
+                n * Decimal::ONE_HUNDRED / d
+            }
+        };
+        let total = Decimal::from(s.orders);
+        s.fill_rate_pct = pct(Decimal::from(s.filled_orders + s.partial_orders), total);
+        s.partial_rate_pct = pct(Decimal::from(s.partial_orders), total);
+        s.size_fill_ratio_pct = pct(filled, requested);
+        s
     }
 
     fn trade_stats(&self, fees_usd: Decimal) -> TradeStats {
@@ -679,6 +762,7 @@ impl Backtester for EventBacktester {
             fill_model: self.core.config().fill_model,
             entry_maker_timeout_ms: self.core.config().entry_maker_timeout_ms,
             orders: self.order_counts(),
+            fill_stats: self.fill_stats(),
             fills: self.fills,
             trades,
             strategies,
@@ -901,6 +985,110 @@ mod tests {
         assert!(
             r.trades.fees_usd > Decimal::ZERO,
             "the escalated taker entry pays a fee"
+        );
+        // #183: the report also states the fill rate it actually achieved, so an
+        // acceptance run cannot read as "everything filled" by assumption.
+        assert_eq!(r.fill_stats.orders, 3, "entry maker, escalated leg, exit");
+        assert_eq!(r.fill_stats.filled_orders, 2);
+        assert_eq!(r.fill_stats.partial_orders, 0);
+        assert_eq!(r.fill_stats.unfilled_orders, 1, "the cancelled maker entry");
+        assert_eq!(r.fill_stats.partial_rate_pct, Decimal::ZERO);
+        assert!(
+            r.fill_stats.size_fill_ratio_pct > Decimal::ZERO
+                && r.fill_stats.size_fill_ratio_pct < Decimal::ONE_HUNDRED,
+            "the cancelled entry traded no size: {}",
+            r.fill_stats.size_fill_ratio_pct
+        );
+    }
+
+    /// #183 ACCEPTANCE: a shallow crossing book leaves the entry PARTIALLY
+    /// filled, and the report says so — before the depth cap this replay read as
+    /// a 100% fill and hid the live-bug-② shape entirely.
+    #[test]
+    fn a_shallow_book_reports_a_partial_fill() {
+        let mut cfg = base_core(None);
+        // No exit management: the subject here is the entry's fill, not what the
+        // exit policy would do with a one-share position afterwards.
+        cfg.auto_exits_enabled = false;
+        let mut b = EventBacktester::new(
+            BacktestConfig {
+                core: cfg,
+                tick_ms: 50,
+                tail_ms: 0,
+                hot_params: Vec::new(),
+            },
+            Box::new(VecSource::new(vec![
+                TimedEvent {
+                    at_ms: NOW,
+                    event: DataEvent::RoundMarkets {
+                        markets: vec![market(NOW)],
+                        now_ms: NOW,
+                    },
+                },
+                TimedEvent {
+                    at_ms: NOW,
+                    event: DataEvent::Book {
+                        token_id: "up".into(),
+                        bids: vec![(dec!(0.42), dec!(100))],
+                        asks: vec![(dec!(0.44), dec!(100))],
+                        now_ms: NOW,
+                    },
+                },
+                // The dip: one share rests at the resting bid's own price, so
+                // the maker trades exactly that one share and no more.
+                TimedEvent {
+                    at_ms: NOW + 1_000,
+                    event: DataEvent::Book {
+                        token_id: "up".into(),
+                        bids: vec![(dec!(0.42), dec!(100))],
+                        asks: vec![(dec!(0.43), dec!(1))],
+                        now_ms: NOW + 1_000,
+                    },
+                },
+            ])),
+        );
+        b.core_mut()
+            .place(
+                crate::model::OrderRequest {
+                    token_id: "up".into(),
+                    condition_id: "cond".into(),
+                    side: crate::model::Side::Buy,
+                    mode: crate::model::FillPolicy::Maker,
+                    price: dec!(0.43),
+                    size: dec!(5),
+                    internal_key: "entry:shallow".into(),
+                    strategy: "spread_arb".into(),
+                    asset: "BTC".into(),
+                    direction: "up".into(),
+                    round_slot: NOW / 1000 / 900,
+                },
+                0,
+                NOW,
+            )
+            .expect("the maker entry places");
+
+        let r = b.run().expect("replay runs");
+        assert_eq!(r.fill_stats.orders, 1, "\n{}", r.render());
+        assert_eq!(
+            r.fill_stats.partial_orders,
+            1,
+            "1 of 5 shares traded:\n{}",
+            r.render()
+        );
+        assert_eq!(r.fill_stats.filled_orders, 0);
+        assert_eq!(r.fill_stats.unfilled_orders, 0);
+        assert_eq!(
+            r.fill_stats.size_fill_ratio_pct,
+            dec!(20),
+            "1 filled of 5 requested"
+        );
+        assert_eq!(r.fill_stats.partial_rate_pct, dec!(100));
+        assert_eq!(r.fills, 1, "one partial fill is still one fill event");
+        // And the render must show it, not just the JSON.
+        assert!(
+            r.render().contains("partial fill"),
+            "the human report says what traded:\n{}",
+            r.render()
         );
     }
 

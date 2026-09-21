@@ -450,7 +450,8 @@ target/release/blitzkrieg-core --socket <path> --mode dry --engine --feed-ws \
 target/release/blitzkrieg-core --backtest data/archives/events.jsonl --engine \
   --backtest-report data/archives/report.json \
   --assets BTC,ETH,SOL,XRP --min-round-age 30 --min-time-left 180 --round-sec 900 \
-  [--slippage-ticks 1] [--latency-ms 250] [--fill-prob-bps 5000]
+  [--slippage-ticks 1] [--latency-ms 250] [--fill-prob-bps 5000] \
+  [--maker-depth-share-bps 6000]
 ```
 
 - **回放参数必须与采集时一致**（`--assets`/`--round-sec`/`--min-*`/`--max-*`/策略开关），
@@ -460,6 +461,11 @@ target/release/blitzkrieg-core --backtest data/archives/events.jsonl --engine \
   费用、每策略账本、源统计（坏行/乱序）、`forcedDry: true`。报告**逐字节可复现**（同参数两次回放
   完全相同），可以直接用 `diff` 做参数回归。
 - 摩擦三旋钮默认全关（恒等 = 与 live 等价）；逐步打开可回答「滑点/延迟/成交率吃掉多少收益」。
+- **#183 起 maker 成交按对手盘深度封顶**：dry 下单瞬间穿价时，maker 的成交量不再恒等于 `order.size`，
+  而是 `min(remaining, 穿越档位可成交量)`（与 taker 走单复用同一份深度口径，见 `sim::Book::marketable_depth`），
+  剩余量按 `PartiallyFilled` 继续挂着、可撤可等。第四个旋钮 `--maker-depth-share-bps`（0–10000，
+  默认 10000 = 恒等）再按订单 id 的确定性哈希把上限缩到该深度的一个比例，用来复现「排队只吃到一部分」。
+  同一输入必然得到同一成交量（无 RNG、无时钟、无线程调度参与）。
 - **评估节拍**：回放的 `tick + engine_evaluate` 跑在自己的 `--backtest-tick-ms` 定时表上（默认 50 ms，
   与 live 的 `ipc::server` interval 同频），**与事件密度无关**——出场（TP/SL/追踪/强平）因此与 live 同等灵敏。
   真实 feed 是亚毫秒级突发：若把维护周期挂到"到下一事件的间隙"上，13 分钟只会跑 803 个周期（应 15 610），
