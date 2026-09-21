@@ -255,8 +255,11 @@ node scripts/capacity-check.mjs --side sell --book docs/reports/data/capacity-ga
 「声明的公式」和「实际扣的费」不可能各写一份而悄悄漂移。
 
 自证点分两层，互不替代：进程内 `core.feeQuote` 的 `modelMatches` 拿**钉住的参数**
-（`exit_policy::pinned_fee_parameters`，注册表之外的第二份手工维护的数）核对实际扣费——费率从
-0.125 改成 0.07 会报 `false`；跨语言门禁 `scripts/core-parity.mjs::assertPinnedFeeModel` 对着
+（`exit_policy::pinned_fee_parameters`，注册表之外的第二份手工维护的数）核对正在收费的那条曲线
+的 `(rate, exponent)`——费率从 0.125 改成 0.07 会报 `false`。核对的是参数而不是某个采样价格上
+算出的数：`fee_quote` 只采一个价格，两条不同的曲线可以在那里交叉（`0.03125*(p(1-p))^1` 在
+p=0.5 上与 legacy 的 `0.125*(p(1-p))^2` 同价，别的价格上都不同），只看那个数会把错的配置报
+成 `true`；跨语言门禁 `scripts/core-parity.mjs::assertPinnedFeeModel` 对着
 `scripts/lib/fee-model.mjs` 的表核对**默认模型名与参数**（`PINNED_DEFAULT_MODEL`），默认值被改会
 红——**这条才是权威**，两侧的 pin 必须与注册表在同一次改动里一起改。
 
