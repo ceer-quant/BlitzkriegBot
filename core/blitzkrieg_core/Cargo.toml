@@ -74,6 +74,12 @@ libc = "0.2"
 
 [dev-dependencies]
 rust_decimal_macros = "1"
+# #236 seam test (tests/engine_stats_view_seam.rs): the kernel's own
+# `engine.stats` payload is fed to the UI Kit's `EngineStatsView`, so the
+# producer/consumer contract is pinned by a test instead of by review. Test-only
+# on purpose — the shipped library must not link a UI crate (the kit is the layer
+# meant to be replaceable), and a dev-dependency is not part of the lib graph.
+blitzkrieg-ui-kit = { path = "../../ui/ui_kit" }
 # Shared deterministic algorithm used by the E7 in-tree-vs-dylib parity harness
 # (tests/foreign_parity.rs). Dev-only: never linked into the shipped library.
 parity-logic = { path = "../../user_layer/parity_logic" }

@@ -69,8 +69,14 @@ watch(snap, (s) => {
   if (pos > primedPositions) playOrder()
   primedWins = wins; primedLosses = losses; primedPositions = pos
 
-  const err = s.lastError ?? ''
-  const halted = err.toLowerCase().includes('breaker')
+  // Trading halted: the sound's source is the kernel's freeze state
+  // (`stats.tradingFrozen`), not `snapshot.lastError` — that one is the
+  // GATEWAY's "core not reachable" string, which never contains "breaker", so
+  // this pair of sounds could never fire (issue 236 shook this loose). The
+  // daily-loss breaker is a DIFFERENT signal (`dailyLoss.tripped`, still not
+  // carried through the seam) and would need its own line here if the panel
+  // should hear it too.
+  const halted = s.stats?.tradingFrozen?.active === true
   if (halted && !wasHalted) playWuwu()
   if (!halted && wasHalted) playDing()
   wasHalted = halted

@@ -389,24 +389,75 @@ pub fn render_json_full(
             "rejectionCauses": r.rejection_causes,
         })).collect::<Vec<_>>(),
         // E9-g: engine counters for the overview page (older cores omit).
-        "stats": s.stats.as_ref().map(|st| serde_json::json!({
-            "books": st.books, "tops": st.tops, "spots": st.spots,
-            "rounds": st.rounds, "evaluations": st.evaluations,
-            "signals": st.signals, "placeRejected": st.place_rejected,
-            "orderCounts": st.confirmed.len(),
-            "strategies": st.strategies.iter().map(|r| serde_json::json!({
-                "name": r.name, "enabled": r.enabled, "source": r.source,
-                "ordersPlaced": r.orders_placed, "ordersRejected": r.orders_rejected,
-                "limitRejected": r.limit_rejected,
-                "blockedTiming": r.blocked_timing, "blockedMomentum": r.blocked_momentum,
-                "gateExemptedTiming": r.gate_exempted_timing,
-                "gateExemptedMomentum": r.gate_exempted_momentum,
-                "gateExemptions": r.gate_exemptions,
-                "closedTrades": r.closed_trades, "wins": r.wins, "losses": r.losses,
-                "netPnlUsd": r.net_pnl_usd,
-                "rejectionCauses": r.rejection_causes,
-            })).collect::<Vec<_>>(),
-        })),
+        //
+        // #236: the four trading-safety keys ride along with them. They are NOT
+        // optional decoration — they are the only source of the panel's freeze /
+        // last-error / self-check banners, and before this they were dropped a
+        // layer up (a key the view type could not carry is a key no adapter can
+        // render). A core that omits one yields `null`, which every consumer
+        // reads as "unknown" and renders as no banner.
+        //
+        // Built in a block with named intermediates rather than inline: four
+        // more nested `json!` calls in one literal blow past the macro recursion
+        // limit, and the closure body keeps each block shallow.
+        "stats": s.stats.as_ref().map(|st| {
+            let last_error = st.last_error.as_ref().map(|e| {
+                serde_json::json!({ "tsMs": e.ts_ms, "code": e.code, "message": e.message })
+            });
+            let last_venue_error = st.last_venue_error.as_ref().map(|e| {
+                serde_json::json!({ "tsMs": e.ts_ms, "message": e.message })
+            });
+            let reconcile = st.reconcile.as_ref().map(|r| {
+                serde_json::json!({
+                    "consecutiveSweepFailures": r.consecutive_sweep_failures,
+                    "freezeThreshold": r.freeze_threshold })
+            });
+            let self_check = st.self_check.as_ref().map(|c| {
+                serde_json::json!({
+                    "ok": c.ok, "tsMs": c.ts_ms,
+                    "items": c.items.iter().map(|i| serde_json::json!({
+                        "name": i.name, "ok": i.ok, "detail": i.detail,
+                    })).collect::<Vec<_>>() })
+            });
+            // `reason` is omitted rather than nulled while trading is live, which
+            // is how the kernel sends it — the panel reads a missing reason as
+            // "no reason given", never as a different state.
+            let trading_frozen = st.trading_frozen.as_ref().map(|f| match &f.reason {
+                Some(r) => serde_json::json!({ "active": f.active, "reason": r }),
+                None => serde_json::json!({ "active": f.active }),
+            });
+            let strategies = st
+                .strategies
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "name": r.name, "enabled": r.enabled, "source": r.source,
+                        "ordersPlaced": r.orders_placed, "ordersRejected": r.orders_rejected,
+                        "limitRejected": r.limit_rejected,
+                        "blockedTiming": r.blocked_timing, "blockedMomentum": r.blocked_momentum,
+                        "gateExemptedTiming": r.gate_exempted_timing,
+                        "gateExemptedMomentum": r.gate_exempted_momentum,
+                        "gateExemptions": r.gate_exemptions,
+                        "closedTrades": r.closed_trades, "wins": r.wins, "losses": r.losses,
+                        "netPnlUsd": r.net_pnl_usd,
+                        "rejectionCauses": r.rejection_causes,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "books": st.books, "tops": st.tops, "spots": st.spots,
+                "rounds": st.rounds, "evaluations": st.evaluations,
+                "signals": st.signals, "placeRejected": st.place_rejected,
+                "orderCounts": st.confirmed.len(),
+                "venueRejected": st.venue_rejected,
+                "lastError": last_error,
+                "lastVenueError": last_venue_error,
+                "reconcile": reconcile,
+                "selfCheck": self_check,
+                "tradingFrozen": trading_frozen,
+                "strategies": strategies,
+            })
+        }),
         "strategies": s.strategies.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),
         "extensions": s.extensions.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),
         "marketPlugins": s.market_plugins.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),
@@ -1889,6 +1940,9 @@ fn body_to_command(body: &str) -> String {
 
 #[cfg(test)]
 mod auth_tests;
+
+#[cfg(test)]
+mod safety_tests;
 
 #[cfg(test)]
 mod tests {

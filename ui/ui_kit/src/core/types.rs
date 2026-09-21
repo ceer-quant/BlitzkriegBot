@@ -38,6 +38,22 @@ pub fn de_num_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Err
     }
 }
 
+/// Accept the field's own type *or* an explicit JSON `null` → `T::default()`.
+///
+/// `#[serde(default)]` covers only an ABSENT key. The kernel sends `null` for a
+/// block it cannot build — `engine.stats.blocked` is `null` whenever no engine
+/// is installed (`--engine` is opt-in) — and a bare `null` into a struct is a
+/// hard error that fails the WHOLE payload, so one unavailable counter used to
+/// cost the panel every counter (found by the #236 seam test, not by review).
+/// Read "null" as "this block is not there", never as a broken snapshot.
+pub fn de_null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
 // ── core.ready ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
@@ -178,7 +194,7 @@ pub struct BookLevelView {
 /// E9-g: one row of core `engine.stats.strategies[]` — the per-strategy
 /// accounting the WebUI plugins/strategies page renders (counters are
 /// deserialized defensively: older cores may omit any subset).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StrategyStatsRow {
     #[serde(default)]
@@ -215,7 +231,7 @@ pub struct StrategyStatsRow {
     pub gate_exemptions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BlockedCounters {
     #[serde(default)]
     pub timing: u64,
@@ -223,7 +239,87 @@ pub struct BlockedCounters {
     pub momentum: u64,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// #236: the kernel's ONE panel-visible error slot (`engine.stats.lastError`).
+/// Structured, not prose: `code` is the same `CoreErrorCode` vocabulary a
+/// rejected RPC carries in `data.coreCode`, so a client can branch on it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastErrorView {
+    #[serde(default)]
+    pub ts_ms: i64,
+    /// The `CoreErrorCode` of the failure, as the kernel spells it
+    /// (`VENUE_ERROR`, `RISK_REJECTED`, `KILL_SWITCH_ACTIVE`, …).
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+/// The LEGACY spelling of [`LastErrorView`] (`engine.stats.lastVenueError`):
+/// same record, message pre-rendered as `<CODE>: <message>`. Read only as the
+/// fallback for a core that predates the structured key.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyVenueErrorView {
+    #[serde(default)]
+    pub ts_ms: i64,
+    #[serde(default)]
+    pub message: String,
+}
+
+/// #163: one probe of the trading-capability self-check.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelfCheckItemView {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// The newest self-check report; `null` until one has run (a dry core never
+/// runs one, and a restart clears it).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelfCheckView {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub ts_ms: i64,
+    #[serde(default)]
+    pub items: Vec<SelfCheckItemView>,
+}
+
+/// Kill-switch state. Always present on a core that has the key — the kernel
+/// emits `{active:false}` rather than `null` when trading is live — but a core
+/// that predates the key leaves this `None`, which must read as "unknown", not
+/// as "frozen".
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradingFrozenView {
+    #[serde(default)]
+    pub active: bool,
+    /// Why trading froze. Only sent while `active` (the kernel omits the key
+    /// otherwise), so `None` beside `active == true` means "no reason given".
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// E31-b: how close the reconcile sweep is to freezing trading. The counter is
+/// the missing half of the last error — the error says a sweep failed, the
+/// counter says how many in a row, the threshold says when the freeze lands.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconcileView {
+    #[serde(default)]
+    pub consecutive_sweep_failures: u64,
+    #[serde(default)]
+    pub freeze_threshold: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatsView {
     #[serde(default)]
@@ -240,13 +336,38 @@ pub struct EngineStatsView {
     pub signals: u64,
     #[serde(default)]
     pub place_rejected: u64,
-    #[serde(default)]
+    /// Gate tallies. `null` from the kernel when no engine is installed (see
+    /// [`de_null_default`]) — an absent engine has no gate, which reads as zero
+    /// blocks, not as an unreadable snapshot.
+    #[serde(default, deserialize_with = "de_null_default")]
     pub blocked: BlockedCounters,
     #[serde(default)]
     pub confirmed: Vec<String>,
     /// E9-g: per-strategy accounting rows (older cores omit the key entirely).
     #[serde(default)]
     pub strategies: Vec<StrategyStatsRow>,
+    /// #226: orders a live venue refused this session (older cores omit).
+    #[serde(default)]
+    pub venue_rejected: u64,
+    /// #180: the kernel's last recorded error — venue refusal, safety net, or
+    /// the kernel's own refusal of a leg. The panel's trading-error banner
+    /// reads this (structured) key.
+    #[serde(default)]
+    pub last_error: Option<LastErrorView>,
+    /// The legacy spelling of the same record, kept so a panel running against
+    /// an older core still has something to show. Never a second, staler copy:
+    /// the kernel writes both from one `LastError`.
+    #[serde(default)]
+    pub last_venue_error: Option<LegacyVenueErrorView>,
+    /// E31-b: reconcile-sweep failure streak against the freeze threshold.
+    #[serde(default)]
+    pub reconcile: Option<ReconcileView>,
+    /// #163: newest trading-capability self-check report.
+    #[serde(default)]
+    pub self_check: Option<SelfCheckView>,
+    /// Whether the kill switch is down. The panel's freeze banner reads this.
+    #[serde(default)]
+    pub trading_frozen: Option<TradingFrozenView>,
 }
 
 // ── trades.history ───────────────────────────────────────────────────────────

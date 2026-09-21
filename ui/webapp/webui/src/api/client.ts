@@ -247,8 +247,38 @@ export interface EngineStats {
   placeRejected?: number
   /** Orders the live venue refused (session-scoped). Older cores omit. */
   venueRejected?: number
-  /** The last venue/self-check failure, with its wall-clock ts. Older cores omit. */
+  /**
+   * The kernel's last recorded error — STRUCTURED (#180), and the source of the
+   * panel's trading-error banner.
+   *
+   * One slot, one writer (`Core::note_error`): whichever path went wrong last,
+   * it lands here. That is why the banner must not name a source in its title —
+   * this record carries a venue refusal, a safety-net failure (reconcile sweep,
+   * failed self-check) AND the kernel's own refusal of a leg.
+   *
+   * `code` is the `CoreErrorCode` the kernel classified it with
+   * (`VENUE_ERROR`, `RISK_REJECTED`, `KILL_SWITCH_ACTIVE`, …) — the same
+   * vocabulary a rejected RPC carries in `data.coreCode`, so a client that
+   * branches on one can branch on the other.
+   *
+   * `undefined`/`null` means "no error recorded" (a healthy core, or one older
+   * than #180 — an old core still sends `lastVenueError`).
+   */
+  lastError?: { tsMs: number; code: string; message: string } | null
+  /**
+   * LEGACY spelling of the SAME record (`<CODE>: <message>` pre-rendered).
+   *
+   * Read it only as the fallback for a core that predates `lastError`; new code
+   * reads `lastError`. The kernel writes both from one `LastError`, so they
+   * never disagree — one record, one instant, never a second, staler copy.
+   */
   lastVenueError?: { tsMs: number; message: string } | null
+  /**
+   * E31-b: the reconcile sweep's consecutive-failure streak against the freeze
+   * threshold. `consecutiveSweepFailures / freezeThreshold` is how close the
+   * kernel is to freezing trading on its own. Older cores omit.
+   */
+  reconcile?: { consecutiveSweepFailures: number; freezeThreshold: number } | null
   /** Newest trading-capability self-check report. Older cores omit. */
   selfCheck?: {
     ok: boolean
