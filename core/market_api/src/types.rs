@@ -431,6 +431,125 @@ pub struct SelfCheckReport {
     pub items: Vec<SelfCheckItem>,
 }
 
+// ── Settlement / redemption (issue #175) ─────────────────────────────────────
+
+/// A market the core still holds a position in, whose resolution it does not
+/// yet know. The venue plugin answers with a [`MarketResolution`]; the core
+/// asks, the venue answers, and neither side reads the other's state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettlementQuery {
+    pub condition_id: String,
+    /// The tokens the core holds positions on in this market. A lookup hint for
+    /// a venue that has to fall back to a token-based query.
+    #[serde(default)]
+    pub token_ids: Vec<TokenId>,
+    /// Round expiry, so the venue can skip a market that cannot have resolved.
+    pub expires_at_ms: i64,
+}
+
+/// The venue's verdict on one [`SettlementQuery`].
+///
+/// `payouts` is the authoritative per-token redemption value: the collateral a
+/// holder of one share of that token receives once the market resolves. A
+/// binary market pays exactly one of its two tokens 1.0 and the other 0.0, but
+/// the boundary states both explicitly rather than assuming it — the core books
+/// what the venue says and nothing else.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketResolution {
+    pub condition_id: String,
+    /// True once the market has resolved (UMA/condition resolution final).
+    pub resolved: bool,
+    /// `(token_id, payout per share)` in the MARKET'S OWN OUTCOME ORDER — the
+    /// same order the NegRisk adapter indexes its redeem amounts by. Empty
+    /// while `resolved` is false.
+    #[serde(default)]
+    pub payouts: Vec<(TokenId, Decimal)>,
+    /// The market settles through the NegRisk adapter.
+    pub neg_risk: bool,
+    pub resolved_at_ms: i64,
+    /// Where the verdict came from (`gamma`, `clob`, `core` for a synthetic one
+    /// in tests/dry runs), for the log and the panel.
+    pub source: String,
+}
+
+impl MarketResolution {
+    /// The collateral one share of `token_id` is worth after resolution, or
+    /// `None` when the token is not part of this resolution.
+    pub fn payout_per_share(&self, token_id: &str) -> Option<Decimal> {
+        self.payouts
+            .iter()
+            .find(|(t, _)| t == token_id)
+            .map(|(_, p)| *p)
+    }
+
+    /// The token this resolution pays a positive amount for, if any (the
+    /// winner of a binary market; the redeem path needs it).
+    pub fn winning_token(&self) -> Option<&TokenId> {
+        self.payouts
+            .iter()
+            .find(|(_, p)| *p > Decimal::ZERO)
+            .map(|(t, _)| t)
+    }
+}
+
+/// A settled position whose collateral has not reached the wallet yet: the
+/// core booked the payout as RECEIVABLE and the venue must redeem it on-chain.
+///
+/// This is the "已结算未赎回" object. It carries everything the redeem call
+/// needs, so the venue never has to reconstruct our book.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedemptionRequest {
+    /// Stable claim id: the market's condition id, and `<condition_id>#2`,
+    /// `#3`, … if the same market settles again after an earlier claim of it was
+    /// already redeemed. One id is never redeemed twice, across retries or a
+    /// restart.
+    pub id: String,
+    pub condition_id: String,
+    pub neg_risk: bool,
+    /// Share counts held per outcome, in the market's own outcome order (the
+    /// order of the resolution's `payouts`). The NegRisk adapter redeems
+    /// exactly these amounts; the plain CTF path redeems both index sets and is
+    /// paid for the winner.
+    #[serde(default)]
+    pub outcome_shares: Vec<Decimal>,
+    /// The payout the core booked for this claim, for the log and the panel.
+    #[serde(with = "decimal")]
+    pub expected_payout_usd: Decimal,
+    /// The outcome token this claim expects to be paid for.
+    pub winning_token_id: TokenId,
+}
+
+/// Why a redemption attempt did not land. `manual` marks the failures no retry
+/// can fix (the signer does not hold the positions, the market is not resolved
+/// on-chain yet), which are reported once and left to the operator instead of
+/// being hammered; everything else is retried with backoff.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedemptionFailure {
+    pub message: String,
+    pub manual: bool,
+}
+
+/// The outcome of one [`RedemptionRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedemptionResult {
+    pub id: String,
+    pub condition_id: String,
+    /// On-chain transaction hash, when one was mined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_number: Option<u64>,
+    /// `None` = confirmed; the claim's receivable is now cash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<RedemptionFailure>,
+    pub at_ms: i64,
+}
+
 // ── Plugin configuration ─────────────────────────────────────────────────────
 
 /// Data-feed parameters (orderbook subscription + optional spot stream).

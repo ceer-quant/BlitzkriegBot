@@ -8,14 +8,15 @@
 //! Credentials are read here from the process environment; Node never supplies
 //! them. The venue maps SDK types onto the market-api boundary types.
 
+use crate::gamma::{GammaResolutionInput, resolution_from_market};
 use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
 use anyhow::Context as _;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE;
 use blitzkrieg_market_api::{
-    CoreError, CoreErrorCode, CoreResult, FillPolicy, MarketFill, PendingOrder, SelfCheckItem,
-    SelfCheckReport, Side, VenueTradeInfo,
+    CoreError, CoreErrorCode, CoreResult, FillPolicy, MarketFill, MarketResolution, PendingOrder,
+    SelfCheckItem, SelfCheckReport, SettlementQuery, Side, VenueTradeInfo,
 };
 use futures_util::StreamExt;
 use hmac::{Hmac, Mac as _};
@@ -30,7 +31,10 @@ use polymarket_client_sdk_v2::clob::ws::types::response::{
     TradeMessage, TradeMessageStatus, WsMessage,
 };
 use polymarket_client_sdk_v2::clob::{Client, Config};
-use polymarket_client_sdk_v2::types::{Address, Decimal as SdkDecimal, U256};
+use polymarket_client_sdk_v2::gamma::Client as GammaClient;
+use polymarket_client_sdk_v2::gamma::types::request::MarketsRequest;
+use polymarket_client_sdk_v2::gamma::types::response::Market as GammaMarket;
+use polymarket_client_sdk_v2::types::{Address, B256, Decimal as SdkDecimal, U256};
 use polymarket_client_sdk_v2::ws::config::Config as WsConfig;
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE};
 use rust_decimal::Decimal;
@@ -39,6 +43,10 @@ use std::str::FromStr;
 use tokio::sync::{mpsc, oneshot};
 
 const DEFAULT_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com";
+
+/// Gamma is where a market's outcome becomes knowable; the same host round
+/// discovery reads.
+const GAMMA_URL: &str = "https://gamma-api.polymarket.com";
 
 /// The sweep transport impersonates a browser: Cloudflare fronting the CLOB
 /// treats unknown custom UAs differently per endpoint class, and a
@@ -139,6 +147,14 @@ pub enum VenueCmd {
     SelfCheck {
         reply: oneshot::Sender<CoreResult<SelfCheckReport>>,
     },
+    /// What did each of these markets resolve to? One answer per query, in
+    /// order: a market that has not resolved yet answers `resolved: false`,
+    /// which is what keeps the core's silence detection measuring a live
+    /// channel instead of a missing reply.
+    Resolutions {
+        queries: Vec<SettlementQuery>,
+        reply: oneshot::Sender<CoreResult<Vec<MarketResolution>>>,
+    },
 }
 
 /// Result of posting an order to the venue.
@@ -205,6 +221,20 @@ impl LiveVenue {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(VenueCmd::SelfCheck { reply: tx })
+            .await
+            .map_err(|_| CoreError::new(CoreErrorCode::Internal, "venue actor stopped"))?;
+        rx.await
+            .map_err(|_| CoreError::new(CoreErrorCode::Internal, "venue actor dropped reply"))?
+    }
+
+    /// Market resolutions for the core's settlement queries (Gamma).
+    pub async fn resolutions(
+        &self,
+        queries: Vec<SettlementQuery>,
+    ) -> CoreResult<Vec<MarketResolution>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(VenueCmd::Resolutions { queries, reply: tx })
             .await
             .map_err(|_| CoreError::new(CoreErrorCode::Internal, "venue actor stopped"))?;
         rx.await
@@ -333,6 +363,17 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
     // sweep summary only when the counts actually change (failures always
     // print via the periodic loop in live.rs).
     let mut last_sweep: Option<(usize, usize, usize)> = None;
+    // Settlement answers come from Gamma. A client that cannot be built here
+    // (a broken http stack) makes the settle path answer NOTHING: the core then
+    // alerts that it is blind to resolutions, which is the honest outcome — no
+    // fabricated verdict, and no effect on trading.
+    let gamma = match GammaClient::new(GAMMA_URL) {
+        Ok(g) => Some(g),
+        Err(e) => {
+            eprintln!("polymarket-extension: gamma client init failed for settlement: {e}");
+            None
+        }
+    };
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             VenueCmd::Place { order, reply } => {
@@ -381,8 +422,95 @@ async fn actor_loop<S: alloy::signers::Signer + Clone + Send + Sync + 'static>(
                 .await;
                 let _ = reply.send(res);
             }
+            VenueCmd::Resolutions { queries, reply } => {
+                let res = match gamma.as_ref() {
+                    Some(g) => sdk_resolutions(g, &queries).await,
+                    None => Err(CoreError::new(
+                        CoreErrorCode::VenueError,
+                        "gamma client unavailable: settlement queries cannot be answered",
+                    )),
+                };
+                let _ = reply.send(res);
+            }
         }
     }
+}
+
+/// Answer the core's settlement queries from Gamma: one verdict per query, in
+/// order, with "not resolved" for anything Gamma does not (yet) report as final.
+///
+/// A market Gamma does not know at all also answers "not resolved": the core
+/// keeps it on its watch list (and shows it in the panel) instead of inventing a
+/// payout. A transport failure, by contrast, fails the whole batch — the caller
+/// must be able to tell "no answer" from "answered: still trading".
+async fn sdk_resolutions(
+    gamma: &GammaClient,
+    queries: &[SettlementQuery],
+) -> CoreResult<Vec<MarketResolution>> {
+    let mut out = Vec::with_capacity(queries.len());
+    for query in queries {
+        let condition = match B256::from_str(query.condition_id.trim()) {
+            Ok(c) => c,
+            Err(e) => {
+                // A condition id that is not bytes32 can never resolve; saying
+                // so per query keeps one bad id from blinding the whole batch.
+                eprintln!(
+                    "polymarket-extension: settlement query for {} is not a bytes32: {e}",
+                    query.condition_id
+                );
+                out.push(unresolved(&query.condition_id));
+                continue;
+            }
+        };
+        let req = MarketsRequest::builder()
+            .condition_ids(vec![condition])
+            .build();
+        match gamma.markets(&req).await {
+            Ok(found) => {
+                let verdict = found
+                    .iter()
+                    .find_map(|m| resolution_of(m, &query.condition_id));
+                out.push(verdict.unwrap_or_else(|| unresolved(&query.condition_id)));
+            }
+            Err(e) => return Err(map_sdk_err(&e.to_string())),
+        }
+    }
+    Ok(out)
+}
+
+fn unresolved(condition_id: &str) -> MarketResolution {
+    MarketResolution {
+        condition_id: condition_id.to_string(),
+        resolved: false,
+        payouts: Vec::new(),
+        neg_risk: false,
+        resolved_at_ms: 0,
+        source: "gamma".to_string(),
+    }
+}
+
+/// One Gamma market's resolution, if it reports a final one.
+fn resolution_of(market: &GammaMarket, condition_id: &str) -> Option<MarketResolution> {
+    // Token ids are decimal strings everywhere else on this boundary (round
+    // discovery formats them the same way), so the payouts have to be too —
+    // they are matched against the token ids the core holds positions on.
+    let tokens: Vec<String> = market
+        .clob_token_ids
+        .clone()
+        .unwrap_or_default()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let prices = market.outcome_prices.clone().unwrap_or_default();
+    resolution_from_market(&GammaResolutionInput {
+        condition_id,
+        closed: market.closed.unwrap_or(false),
+        uma_resolution_status: market.uma_resolution_status.as_deref(),
+        outcome_prices: &prices,
+        clob_token_ids: &tokens,
+        neg_risk: market.neg_risk.unwrap_or(false),
+        end_ms: market.end_date.map(|d| d.timestamp_millis()).unwrap_or(0),
+    })
 }
 
 async fn sdk_place<S: alloy::signers::Signer + Sync>(
