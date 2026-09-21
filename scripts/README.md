@@ -70,6 +70,22 @@ cargo build --release --workspace --locked
   checkout it was generated from and execs the freshly built binary there, so
   it can never go stale and core/strategy/data resolution keeps working from
   any directory. It overwrites only its own earlier output.
+- `upgrade.sh` — the one-shot production upgrade behind `blitzkrieg upgrade`
+  (the shim routes that verb here). Light data backup → fetch + resolve the
+  source branch → check out the production build worktree `target/bk-main-build`
+  → build the release workspace, the strategy cdylibs **and** the panel's webui
+  bundle → run the core lib tests **and** the panel's `check:all` (both must be
+  green) → stage and checksum every artifact *before* anything is touched →
+  stop the stack and wait for the core to actually exit → swap the binaries in,
+  keeping the previous set under `target/rollback-<ts>` → start, then verify
+  **identity** (the build that is answering is the one just built) within 120s,
+  restoring and restarting the previous set if it is not. `--check` runs
+  everything up to the gates and leaves the live stack alone. Two things the
+  checks are deliberately *not*: the readiness probe is core identity rather
+  than the `self-check balance` line (that line is emitted by the live venue
+  bridge, so a dry stack never logs it), and the gate status is cargo's own
+  rather than a pipeline's tail (`… | tail -1` reports tail's status, which is
+  how a red suite once shipped).
 - `dry-observe.mjs` — attach to a running dry core and print round/order/position ticks.
 - `soak-health.sh` / `soak-health-loop.sh` / `soak-monitor.mjs` — long-run health monitoring.
   `soak-health.sh` exits 0 (healthy) / 1 (anomaly) / 2 (not a repo root) and prints
