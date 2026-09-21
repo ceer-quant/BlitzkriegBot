@@ -10,7 +10,12 @@
  *   - per-strategy ledger: closed trades, wins/losses, win rate, payoff,
  *     profit factor, net PnL, fees — the "按策略独立账本" view;
  *   - per-UTC-day breakdown for the requested window;
- *   - portfolio totals.
+ *   - portfolio totals;
+ *   - fill rate / partial-fill rate over the ORDER ledger
+ *     (`data/orders/orders.jsonl`, issue #183): how many orders actually
+ *     traded, how many were left partially filled, and what share of the
+ *     requested size filled. A dry run used to fill every crossing maker
+ *     whole, so this read a flat 100% and hid the live-bug-② shape.
  *
  * The tool is read-only over the ledger and never trades. `--days N` selects
  * the trailing window (default 7 = the acceptance's DryRun week); `--from
@@ -19,7 +24,11 @@
  *
  * Usage:
  *   node scripts/dryrun-report.mjs [--days 7] [--trades data/trades/trades.jsonl]
- *        [--evolution-dir data/evolution] [--out <dir>]
+ *        [--orders data/orders/orders.jsonl]
+ *        [--evolution-dir data/evolution] [--out <dir>] [--json]
+ *
+ * `--json` prints the same manifest the `--out` directory would receive, so a
+ * script can consume the metrics without parsing the markdown.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, readdirSync } from 'fs';
@@ -35,11 +44,13 @@ const flag = (name) => {
 };
 
 const tradesPath = resolve(ROOT, flag('--trades') ?? 'data/trades/trades.jsonl');
+const ordersPath = resolve(ROOT, flag('--orders') ?? 'data/orders/orders.jsonl');
 const evolutionDir = resolve(ROOT, flag('--evolution-dir') ?? 'data/evolution');
 const days = Number(flag('--days') ?? 7);
 const fromArg = flag('--from');
 const toArg = flag('--to');
 const outDir = flag('--out') ? resolve(flag('--out')) : null;
+const asJson = args.includes('--json');
 
 const utc = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -111,6 +122,62 @@ function aggregate(rows) {
   };
 }
 
+// ── order flow: fill rate / partial-fill rate (#183) ────────────────────────
+//
+// The trade ledger only knows CLOSED positions, so it cannot say whether the
+// entries that opened them filled whole. The order log can: it appends the
+// order's current snapshot on every state change, so folding it to the latest
+// line per order id yields each order's final `size` / `filledSize` / `status`.
+// Absent file is not an error — the report is still valid without it, so the
+// section is simply reported as unavailable rather than failing the run.
+function orderFlow(path) {
+  if (!existsSync(path)) return null;
+  const latest = new Map();
+  let malformed = 0;
+  let total = 0;
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    total++;
+    let o;
+    try { o = JSON.parse(line); } catch { malformed++; continue; }
+    const id = o.orderId ?? o.order_id;
+    if (id == null) { malformed++; continue; }
+    latest.set(id, o);
+  }
+  const numOr = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  let filledOrders = 0, partialOrders = 0, unfilledOrders = 0;
+  let requested = 0, filled = 0;
+  for (const o of latest.values()) {
+    const size = numOr(o.size);
+    const got = numOr(o.filledSize ?? o.filled_size);
+    requested += size;
+    filled += got;
+    if (got <= 0) unfilledOrders++;
+    else if (got >= size) filledOrders++;
+    else partialOrders++;
+  }
+  const orders = latest.size;
+  const pct = (n, d) => (d > 0 ? Number(((n / d) * 100).toFixed(4)) : 0);
+  return {
+    path,
+    lines: total,
+    malformedLines: malformed,
+    orders,
+    filledOrders,
+    partialOrders,
+    unfilledOrders,
+    // Share of orders that traded at all (whole or partial).
+    fillRatePct: pct(filledOrders + partialOrders, orders),
+    // Share of orders left PARTIALLY filled: the dry run's exposure to the
+    // live-bug-② shape (issue #183).
+    partialRatePct: pct(partialOrders, orders),
+    // Filled size over requested size across every order: the volume view.
+    sizeFillRatioPct: pct(filled, requested),
+  };
+}
+
+const orderFlowStats = orderFlow(ordersPath);
+
 const strategies = [...new Set(inWindow.map((t) => t.strategy ?? 'unknown'))].sort();
 const perStrategy = {};
 for (const s of strategies) {
@@ -158,12 +225,24 @@ const manifest = {
   perStrategy,
   perDay: daysOut,
   portfolio,
+  // #183 fill realism. `null` when the order log is not present: the metric is
+  // then unknown, which is not the same as "everything filled".
+  orderFlow: orderFlowStats,
+  orderFlowNote: orderFlowStats
+    ? undefined
+    : `order log not found at ${ordersPath}: fill rate unavailable (pass --orders)`,
   breakerTrips: breakerTrips.sort((a, b) => a.ts - b.ts),
 };
 
 if (outDir) {
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, 'dryrun-report.json'), JSON.stringify(manifest, null, 2) + '\n');
+}
+
+if (asJson) {
+  // Machine-readable surface: the same manifest `--out` writes, on stdout.
+  console.log(JSON.stringify(manifest, null, 2));
+  process.exit(0);
 }
 
 // ── markdown ────────────────────────────────────────────────────────────────
@@ -192,6 +271,19 @@ md.push('');
 md.push('## Portfolio (组合)');
 md.push('');
 md.push(`closed ${portfolio.closed}, WR ${r3(portfolio.winRatePct)}%, payoff ${r3(portfolio.payoff)}, PF ${r3(portfolio.profitFactor)}, fees ${r3(portfolio.feesUsd)}, **net ${r3(portfolio.netPnlUsd)} USD**.`);
+md.push('');
+md.push('## Fill rate / partial fills (#183)');
+md.push('');
+if (orderFlowStats) {
+  const f = orderFlowStats;
+  md.push('| orders | filled | partial | never filled | fill rate % | partial rate % | size filled % |');
+  md.push('|---|---|---|---|---|---|---|');
+  md.push(`| ${f.orders} | ${f.filledOrders} | ${f.partialOrders} | ${f.unfilledOrders} | ${r3(f.fillRatePct)} | ${r3(f.partialRatePct)} | ${r3(f.sizeFillRatioPct)} |`);
+  md.push('');
+  md.push(`${f.path}: ${f.lines} lines folded to ${f.orders} orders. "fill rate" = orders that traded at all; "partial rate" = orders left partially filled (the live-bug-② shape).`);
+} else {
+  md.push(`order log not found at ${ordersPath} — fill rate unavailable (pass \`--orders\`).`);
+}
 md.push('');
 if (breakerTrips.length) {
   md.push('## Breaker / evolution events in window');

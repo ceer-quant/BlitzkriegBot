@@ -460,6 +460,73 @@ fn a_restart_re_reserves_the_unfilled_notional() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ── #183 · a dry maker fills at most the crossing depth ────────────────────
+
+/// ACCEPTANCE (#183): the live-bug-② shape — an entry that only partly fills —
+/// must be reproducible in DRY, with the order, the position and the ledger all
+/// telling the same story afterwards.
+///
+/// The old dry matcher filled a crossing maker WHOLE (`authoritative_fill(id,
+/// order.size, …)`), so dry could neither reproduce a partial fill nor price the
+/// entry that live leaves half-open, and every dry fill-rate read 100%.
+#[test]
+fn a_dry_maker_fills_at_most_the_crossing_depth() {
+    let mut c = core();
+    // 4 shares rest at the crossing ask. A 10-share maker can trade 4 of them.
+    c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(4))], 1);
+    let (id, status) = c
+        .place(buy(dec!(10), dec!(0.40), "entry:depth-183"), 0, 1)
+        .expect("dry maker places");
+    assert_eq!(
+        status,
+        OrderStatus::PartiallyFilled,
+        "the book already crossed at submit: 4 of 10 filled, 6 still working"
+    );
+    assert_eq!(
+        c.ome().get(&id).unwrap().status,
+        OrderStatus::PartiallyFilled,
+        "the crossing filled 4 of 10: {:#?}",
+        c.ome().get(&id)
+    );
+
+    // The three records agree, share for share.
+    let o = c.ome().get(&id).unwrap();
+    assert_eq!(o.filled_size, dec!(4));
+    assert_eq!(c.ome().remaining(&id), dec!(6), "6 shares still working");
+    let pos = &c.positions().open_positions()[0];
+    assert_eq!(
+        pos.shares,
+        dec!(4),
+        "the position is the fill, not the order"
+    );
+    assert_eq!(
+        pos.entry_price,
+        dec!(0.40),
+        "a maker fills at its own quote"
+    );
+    assert_eq!(pos.cost_usd, dec!(1.6));
+    // Cash: 4 × 0.40 spent, the other 6 shares still reserved and reversible.
+    assert_eq!(c.ledger().balance(), SEED - dec!(1.6));
+    assert_eq!(c.ledger().reserved(), dec!(2.4));
+    assert!(c.ledger().is_balanced());
+    assert_eq!(c.ledger().available(), c.ledger().balance() - dec!(2.4));
+
+    // The remainder is cancellable, and cancelling releases exactly the
+    // unfilled commitment without touching the filled half.
+    c.cancel_remaining(&id, 2).expect("cancel the resting half");
+    assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Cancelled);
+    assert_eq!(c.ome().get(&id).unwrap().filled_size, dec!(4));
+    assert_eq!(c.ledger().reserved(), Decimal::ZERO);
+    assert_eq!(c.ledger().available(), c.ledger().balance());
+    assert_eq!(c.positions().open_positions()[0].shares, dec!(4));
+    assert_eq!(c.ledger().balance(), SEED - dec!(1.6));
+    assert!(c.ledger().is_balanced());
+
+    let audit = c.run_accounting_audit(3);
+    assert!(audit.ok, "{}", audit.note);
+    assert_eq!(audit.drift_usd, Decimal::ZERO);
+}
+
 // ── #189 · in-kernel active reconciliation ─────────────────────────────────
 
 /// ACCEPTANCE: artificially created drift is alerted, persisted and blocks new
