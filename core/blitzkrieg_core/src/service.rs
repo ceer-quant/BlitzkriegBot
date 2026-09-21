@@ -194,6 +194,18 @@ pub struct CoreConfig {
     /// stop the automatic retries for good (`next_attempt_ms = i64::MAX`). Only
     /// meaningful together with [`CoreConfig::dry_redeem_fail`].
     pub dry_redeem_manual: bool,
+    /// This core replays archived events, and may therefore charge a taker-fee
+    /// schedule other than the shipped one (#234, item 4).
+    ///
+    /// `--fee-model` is the counterfactual knob for a replay, and the CLI refuses
+    /// it without `--backtest`; this field is the same statement made where the
+    /// charge happens. The two live charge sites
+    /// ([`Core::live_taker_fee_pct`]) assert that a core which has NOT declared
+    /// itself a replay is charging the shipped schedule — the isolation used to
+    /// live only in the CLI, which meant a future caller of `set_fee_schedule`
+    /// could have repriced live fills with no code objecting. Default `false`:
+    /// only the backtester sets it.
+    pub fee_schedule_replay: bool,
 }
 
 impl CoreConfig {
@@ -545,6 +557,8 @@ impl Default for CoreConfig {
             settlement_log_path: None,
             dry_redeem_fail: 0,
             dry_redeem_manual: false,
+            // #234: nothing but the backtester may charge a counterfactual fee.
+            fee_schedule_replay: false,
         }
     }
 }
@@ -569,53 +583,85 @@ impl Default for CoreConfig {
 // is the point. What that costs the strategies is measured, not argued:
 // `scripts/fee-model-sensitivity-check.mjs` replays the frozen corpus under both
 // schedules (#203).
+//
+// #234 finished the close-out. The curve's arithmetic has ONE spelling in the
+// kernel — `FeeSchedule::fee_per_share` — so `fee_quote` no longer recomputes
+// `rate * (p*(1-p))^exponent` beside it; `model_matches` now holds the charged
+// fee against the PINNED parameters (`exit_policy::pinned_fee_parameters`), a
+// source independent of the schedule it is checking, so a changed rate is
+// reported instead of hiding behind two identical spellings. The authoritative
+// cross-language self-check is `scripts/core-parity.mjs::assertPinnedFeeModel`
+// against `scripts/lib/fee-model.mjs`; this one is the in-process half.
 
-/// The fee actually charged per share at `price`: `(taker_fee_pct(p)/100) * p`,
-/// spelled exactly as the charge path spells it (`apply_delta_effects`,
-/// `reconcile`), so a quote cannot drift from a fill. Maker fills are exempt and
-/// are reported separately as zero.
-pub fn charged_fee_per_share(price: Decimal) -> Decimal {
-    if price <= Decimal::ZERO {
-        return Decimal::ZERO;
-    }
-    (crate::exit_policy::taker_fee_pct(price) / Decimal::ONE_HUNDRED) * price
+/// The fee actually charged per share at `price` under `schedule`:
+/// `(schedule.fee_pct(p)/100) * p`, spelled exactly as the charge path spells it
+/// (`apply_delta_effects`, `reconcile`), so a quote cannot drift from a fill.
+/// Maker fills are exempt and are reported separately as zero.
+fn charged_per_share(schedule: crate::exit_policy::FeeSchedule, price: Decimal) -> Decimal {
+    (schedule.fee_pct(price) / Decimal::ONE_HUNDRED) * price
 }
 
-/// The ACTIVE schedule's own arithmetic — `rate * (p*(1-p))^exponent` — used
-/// only to check that the declaration still describes what is charged.
-fn declared_fee_per_share(price: Decimal) -> Decimal {
-    if price <= Decimal::ZERO {
-        return Decimal::ZERO;
-    }
-    let schedule = crate::exit_policy::fee_schedule();
-    let base = price * (Decimal::ONE - price);
-    let mut acc = Decimal::ONE;
-    for _ in 0..schedule.exponent {
-        acc *= base;
-    }
-    schedule.rate * acc
+/// The fee actually charged per share at `price` under the schedule in force.
+pub fn charged_fee_per_share(price: Decimal) -> Decimal {
+    charged_per_share(crate::exit_policy::fee_schedule(), price)
+}
+
+/// Does the schedule in force still price what this repository PINS for its
+/// declared name (#234, item 1)?
+///
+/// The pin is `exit_policy::pinned_fee_parameters` — deliberately NOT the
+/// registry the schedule itself came from, because a check that reads the same
+/// source as the thing it checks cannot fail: flipping the shipped rate from
+/// 0.125 to 0.07 moved the declaration and the charge together and this reported
+/// `true` while the fee moved 44%. Reading the pin makes that flip report
+/// `false`, which is what the field was introduced to mean.
+///
+/// Both sides are evaluated through the same expression, so the comparison is
+/// EXACT: an equal `(rate, exponent)` is bit-identical, and any difference that
+/// survives Decimal's 28 significant digits is a real parameter change. A
+/// schedule whose name this repository cannot describe is reported as NOT
+/// matching, rather than as a green "nothing to check".
+///
+/// This is the in-process half. The authoritative, cross-language fee self-check
+/// is `scripts/core-parity.mjs::assertPinnedFeeModel`, which holds this kernel's
+/// `core.feeQuote` against the pinned table in `scripts/lib/fee-model.mjs` — the
+/// two pins must be changed together, in the same change as the schedule.
+fn schedule_reproduces_pin(schedule: crate::exit_policy::FeeSchedule, price: Decimal) -> bool {
+    let Some((rate, exponent)) = crate::exit_policy::pinned_fee_parameters(schedule.name) else {
+        return false;
+    };
+    let pinned = crate::exit_policy::FeeSchedule {
+        rate,
+        exponent,
+        ..schedule
+    };
+    charged_per_share(schedule, price) == charged_per_share(pinned, price)
 }
 
 /// Read-only quote of the fee schedule (#182). `price` defaults to the widest
 /// point of the schedule (0.5) so a caller that only wants the model metadata
 /// does not have to invent a price.
 pub fn fee_quote(price: Option<Decimal>) -> crate::ipc::schema::FeeQuoteResult {
+    fee_quote_at(crate::exit_policy::fee_schedule(), price)
+}
+
+/// [`fee_quote`] with the schedule supplied, so a test can ask what a
+/// DIFFERENT schedule would report — the check has to be able to say "no", and
+/// the process-wide schedule can only be set once (#234).
+fn fee_quote_at(
+    schedule: crate::exit_policy::FeeSchedule,
+    price: Option<Decimal>,
+) -> crate::ipc::schema::FeeQuoteResult {
     let price = price.unwrap_or_else(|| dec!(0.5));
-    let schedule = crate::exit_policy::fee_schedule();
-    let charged = charged_fee_per_share(price);
-    let declared = declared_fee_per_share(price);
-    // Same expression, two spellings: the difference is Decimal's own rounding at
-    // the 20th+ significant digit, so the comparison is relative and generous
-    // against dust while still catching a model change (0.125 -> 0.07 is 44%).
-    let scale = charged.abs().max(dec!(0.000000000001));
-    let model_matches = (charged - declared).abs() / scale < dec!(0.000000001);
+    let charged = charged_per_share(schedule, price);
+    let model_matches = schedule_reproduces_pin(schedule, price);
     crate::ipc::schema::FeeQuoteResult {
         model: schedule.name.to_string(),
         rate: schedule.rate,
         exponent: schedule.exponent,
         price,
         fee_per_share: charged,
-        fee_pct_of_price: crate::exit_policy::taker_fee_pct(price),
+        fee_pct_of_price: schedule.fee_pct(price),
         maker_fee_per_share: Decimal::ZERO,
         model_matches,
     }
@@ -3553,6 +3599,43 @@ impl Core {
         message
     }
 
+    /// The taker fee a LIVE charge site may use, at `price` (#234, item 4).
+    ///
+    /// The schedule is process-wide and set-once, and only a replay may install
+    /// one other than the shipped default — `--fee-model` is refused without
+    /// `--backtest`, and the backtester is the only caller of `set_fee_schedule`.
+    /// That isolation used to live ENTIRELY in the CLI: the two live charge sites
+    /// read whatever was installed and could not tell a replay from a live
+    /// session. This makes the invariant explicit where the money is: a core that
+    /// has not declared itself a replay charges the shipped schedule or the
+    /// process stops.
+    ///
+    /// It fails CLOSED on purpose. A counterfactual fee on a real fill is a wrong
+    /// number in the ledger, in every PnL derived from it and in the loss
+    /// breakers that read them — silent and unrepairable after the fact — while a
+    /// refused charge is loud and stops before it can book. If a live run ever
+    /// legitimately needs another schedule, that is a design change to the charge
+    /// path, not a flag flip.
+    fn live_taker_fee_pct(&self, price: Decimal) -> Decimal {
+        let schedule = crate::exit_policy::fee_schedule();
+        assert!(
+            self.may_charge(schedule),
+            "non-replay core would charge the '{}' taker-fee schedule: --fee-model is \
+             replay-only (set CoreConfig::fee_schedule_replay only in a backtest) (#234)",
+            schedule.name
+        );
+        schedule.fee_pct(price)
+    }
+
+    /// Whether a charge under `schedule` is legal for THIS core (#234, item 4).
+    /// Split out from [`Core::live_taker_fee_pct`] so the predicate can be tested
+    /// without installing a schedule: the process-wide schedule is set-once, so a
+    /// test cannot put a second one in place.
+    fn may_charge(&self, schedule: crate::exit_policy::FeeSchedule) -> bool {
+        self.config.fee_schedule_replay
+            || schedule == crate::exit_policy::legacy_quadratic_schedule()
+    }
+
     /// Ledger + position projection for a canonical fill delta. Single choke
     /// point shared by dry fills, live user-WS fills and reconciliation gaps.
     ///
@@ -3570,7 +3653,7 @@ impl Core {
     /// cancelled).
     fn apply_delta_effects(&mut self, d: FillDelta, now_ms: i64) {
         let px = d.price;
-        // A maker fill pays no fee; a taker fill pays taker_fee_pct(price) on the
+        // A maker fill pays no fee; a taker fill pays the schedule in force on the
         // fill's own notional. `d.role` is what the fill actually did — the old
         // `match d.mode` read the REQUESTED policy, which charged a
         // MakerThenTaker order the taker fee while its position record said maker.
@@ -3582,9 +3665,7 @@ impl Core {
             let fee_pct = if d.role.is_maker() {
                 Decimal::ZERO
             } else {
-                // The fee follows the schedule in force (see
-                // `exit_policy::fee_schedule`), not a curve restated here.
-                crate::exit_policy::taker_fee_pct(px)
+                self.live_taker_fee_pct(px)
             };
             fee_usd = (fee_pct / Decimal::ONE_HUNDRED) * notional;
             match d.side {
@@ -4245,9 +4326,9 @@ impl Core {
             let fee_usd = if t.maker == Some(true) {
                 Decimal::ZERO
             } else {
-                // The fee follows the schedule in force (see
-                // `exit_policy::fee_schedule`), not a curve restated here.
-                (crate::exit_policy::taker_fee_pct(t.price) / Decimal::ONE_HUNDRED) * notional
+                // The fee follows the schedule in force, under the same
+                // replay-only guard the fill choke point uses (#234, item 4).
+                (self.live_taker_fee_pct(t.price) / Decimal::ONE_HUNDRED) * notional
             };
             self.ledger.settle_sell_fill(notional, fee_usd);
             let role = if t.maker == Some(true) {
@@ -10197,6 +10278,127 @@ mod account_precision_tests {
             dec!(1.72),
             "summing the held basis double-counts the 4-share release"
         );
+    }
+}
+
+#[cfg(test)]
+mod fee_quote_tests {
+    use super::*;
+    use crate::exit_policy::{FeeSchedule, legacy_quadratic_schedule, official_schedule};
+
+    fn core_with(fee_schedule_replay: bool) -> Core {
+        Core::new(CoreConfig {
+            fee_schedule_replay,
+            ..CoreConfig::default()
+        })
+    }
+
+    /// #234, item 1 — the check has to be able to say NO. Both sides used to read
+    /// `fee_schedule()`, so changing the shipped rate moved the declaration and the
+    /// charge together and `model_matches` stayed `true` while the fee moved 44%.
+    /// Here the charge side is the shipped curve with exactly that rate change.
+    #[test]
+    fn model_matches_reports_a_changed_rate() {
+        let shipped = legacy_quadratic_schedule();
+        // The shipped curve is what this repository pins, so it matches...
+        assert!(fee_quote_at(shipped, Some(dec!(0.5))).model_matches);
+        // ...and 0.125 -> 0.07 on the same curve must not be reported as a match.
+        let repriced = FeeSchedule {
+            rate: dec!(0.07),
+            ..shipped
+        };
+        assert_eq!(repriced.exponent, 2, "only the rate moves here");
+        let quote = fee_quote_at(repriced, Some(dec!(0.5)));
+        assert!(
+            !quote.model_matches,
+            "rate 0.125 -> 0.07 is a 44% fee change and the quote must say so"
+        );
+        // The quote still reports what it CHARGES: the flag is the split between
+        // the charge and the pin, not a reason to hide the number.
+        assert_eq!(quote.fee_per_share, dec!(0.004375));
+        assert_eq!(quote.fee_pct_of_price, dec!(0.875));
+        assert_eq!(quote.model, "legacy_quadratic");
+    }
+
+    /// The exponent is a parameter of the pin too, and a schedule this repository
+    /// cannot describe is not one it can vouch for.
+    #[test]
+    fn model_matches_reports_a_changed_exponent_and_an_unknown_name() {
+        let shipped = legacy_quadratic_schedule();
+        let re_exponented = FeeSchedule {
+            exponent: 1,
+            ..shipped
+        };
+        assert!(!fee_quote_at(re_exponented, Some(dec!(0.5))).model_matches);
+        let unknown = FeeSchedule {
+            name: "not_a_schedule",
+            ..shipped
+        };
+        assert!(
+            !fee_quote_at(unknown, Some(dec!(0.5))).model_matches,
+            "an undescribed schedule must report 'no', not 'nothing to check'"
+        );
+    }
+
+    /// The production entry point reads the schedule in force and agrees with the
+    /// pinned numbers — the anchor #224's裁决 rests on: legacy @0.50 = 1.5625%.
+    #[test]
+    fn the_shipped_quote_matches_the_pin_and_the_anchor() {
+        let quote = fee_quote(None);
+        assert_eq!(quote.model, "legacy_quadratic");
+        assert_eq!(quote.rate, dec!(0.125));
+        assert_eq!(quote.exponent, 2);
+        assert_eq!(quote.price, dec!(0.5));
+        assert_eq!(quote.fee_per_share, dec!(0.0078125));
+        assert_eq!(quote.fee_pct_of_price, dec!(1.5625));
+        assert!(quote.model_matches);
+        // The public helper the quote is built from spells the charge the same way.
+        assert_eq!(charged_fee_per_share(dec!(0.5)), quote.fee_per_share);
+        // A counterfactual curve is checked against the pin FOR ITS OWN NAME, so a
+        // replay's official schedule matches here — `model_matches` answers "does
+        // this curve price what this repository says that curve prices", not "is
+        // this the shipped default". Which schedule is the default is a separate
+        // assertion (`exit_policy::tests::default_fee_schedule_is_the_shipped_one`,
+        // and PINNED_DEFAULT_MODEL on the gate side); confusing the two would make
+        // this flag unable to answer either question.
+        let official = fee_quote_at(official_schedule(), Some(dec!(0.5)));
+        assert!(official.model_matches);
+        assert_eq!(
+            official.fee_pct_of_price,
+            dec!(3.5),
+            "official @0.50 = 3.5% of price (#224 anchor)"
+        );
+        assert_eq!(official.fee_per_share, dec!(0.0175));
+    }
+
+    /// #234, item 4 — the live charge sites' invariant: only a core that declared
+    /// itself a replay may charge anything but the shipped schedule. The predicate
+    /// is tested directly because the process-wide schedule is set-once, so a test
+    /// cannot install a second one.
+    #[test]
+    fn only_a_replay_may_charge_a_counterfactual_schedule() {
+        let live = core_with(false);
+        assert!(live.may_charge(legacy_quadratic_schedule()));
+        assert!(
+            !live.may_charge(official_schedule()),
+            "a live core must refuse the counterfactual schedule"
+        );
+        let repriced = FeeSchedule {
+            rate: dec!(0.07),
+            ..legacy_quadratic_schedule()
+        };
+        assert!(
+            !live.may_charge(repriced),
+            "a repriced legacy curve keeps the name and is still not the shipped one"
+        );
+        let replay = core_with(true);
+        assert!(replay.may_charge(official_schedule()));
+
+        // The guard does not obstruct the shipped deployment: the live charge
+        // sites still price the schedule in force (this call is the assert's
+        // happy path, and would panic if the default config tripped it).
+        assert_eq!(live.live_taker_fee_pct(dec!(0.5)), dec!(1.5625));
+        assert_eq!(replay.live_taker_fee_pct(dec!(0.5)), dec!(1.5625));
     }
 }
 

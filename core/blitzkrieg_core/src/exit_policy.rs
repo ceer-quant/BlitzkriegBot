@@ -241,14 +241,22 @@ pub struct FeeSchedule {
 }
 
 impl FeeSchedule {
-    /// This schedule's taker fee as a PERCENTAGE OF THE FILL PRICE — the unit the
-    /// charge path settles in (`fee_usd = pct/100 * price * shares`). The schedule
-    /// stores the per-share form (`rate * (p*(1-p))^exponent` USD per share,
-    /// which is how Polymarket publishes it); dividing by `price` converts it, so
-    /// both curves keep ONE accounting convention at every call site.
-    /// `price <= 0` charges nothing.
-    pub fn fee_pct(&self, price: Decimal) -> Decimal {
-        if price <= Decimal::ZERO {
+    /// This schedule's taker fee in USD PER SHARE — `rate * (p*(1-p))^exponent`,
+    /// which is how Polymarket publishes it. THE one spelling of the curve in the
+    /// kernel (#234, item 2): the percentage the charge path settles in, the
+    /// per-share fee `fee_quote` reports, and every fee figure a test asserts are
+    /// all derived from this, so a third curve shape cannot drift into a second
+    /// implementation.
+    ///
+    /// A price outside `(0, 1)` charges nothing. The upper bound is not
+    /// decoration: with `exponent >= 1` a price above 1 makes `p*(1-p)` NEGATIVE,
+    /// so the fee would be a rebate — money moving the wrong way on a live fill.
+    /// The deleted `FeeModel::PolymarketCrypto` clamped exactly here for exactly
+    /// that reason, and the general method has to keep the guarantee. (`p == 1`
+    /// is zero only for the accidental reason that the base is 0, and the legacy
+    /// curve's `exponent = 2` hides the sign by squaring it.)
+    pub fn fee_per_share(&self, price: Decimal) -> Decimal {
+        if price <= Decimal::ZERO || price >= Decimal::ONE {
             return Decimal::ZERO;
         }
         let base = price * (Decimal::ONE - price);
@@ -256,7 +264,20 @@ impl FeeSchedule {
         for _ in 0..self.exponent {
             acc *= base;
         }
-        ((self.rate * acc) / price) * Decimal::ONE_HUNDRED
+        self.rate * acc
+    }
+
+    /// The same fee as a PERCENTAGE OF THE FILL PRICE — the unit the charge path
+    /// settles in (`fee_usd = pct/100 * price * shares`). Dividing the per-share
+    /// form by `price` converts it, so both curves keep ONE accounting convention
+    /// at every call site. The `price <= 0` guard is also what keeps the division
+    /// safe; which prices are chargeable at all is decided in
+    /// [`FeeSchedule::fee_per_share`].
+    pub fn fee_pct(&self, price: Decimal) -> Decimal {
+        if price <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        (self.fee_per_share(price) / price) * Decimal::ONE_HUNDRED
     }
 }
 
@@ -299,6 +320,32 @@ pub fn fee_schedule_by_name(name: &str) -> Option<FeeSchedule> {
     }
 }
 
+/// The `(rate, exponent)` this repository PINS for a schedule name (#234, item 1).
+///
+/// Deliberately a SECOND, hand-maintained copy of the numbers the constructors
+/// above build — not a view onto them. It is the only thing that lets the kernel
+/// answer, in-process and without node: "is the curve I am charging still the
+/// curve this repository believes it charges?" A check that read the registry
+/// would answer `yes` by construction: flipping `legacy_quadratic`'s rate from
+/// 0.125 to 0.07 moves the declaration and the charge together and the check
+/// stays green while the fee moves 44% (`service.rs::fee_quote`). Reading the pin
+/// instead makes that same flip report `modelMatches: false`.
+///
+/// So changing a schedule's parameters means changing them here too, deliberately,
+/// in the same change as `scripts/lib/fee-model.mjs` (whose `TAKER_FEE_MODELS` is
+/// the cross-language pin the gates read). Do NOT add a test asserting this table
+/// equals the registry: that equality is exactly what the check must be able to
+/// lose. The authoritative, cross-language fee self-check remains
+/// `scripts/core-parity.mjs::assertPinnedFeeModel`, which holds the kernel's
+/// `core.feeQuote` against `scripts/lib/fee-model.mjs`.
+pub fn pinned_fee_parameters(name: &str) -> Option<(Decimal, u32)> {
+    match name {
+        "legacy_quadratic" => Some((dec!(0.125), 2)),
+        "official" => Some((dec!(0.07), 1)),
+        _ => None,
+    }
+}
+
 /// The schedule in force. Defaults to the shipped one; only a replay changes it.
 static ACTIVE_FEE_SCHEDULE: std::sync::OnceLock<FeeSchedule> = std::sync::OnceLock::new();
 
@@ -330,9 +377,8 @@ pub fn set_fee_schedule(schedule: FeeSchedule) -> Result<(), String> {
 /// accounting basis every gate reconciles against and the cost parameter the
 /// strategies were tuned under (#182, #203).
 pub fn taker_fee_pct(price: Decimal) -> Decimal {
-    if price <= Decimal::ZERO {
-        return Decimal::ZERO;
-    }
+    // The price bounds are owned by `FeeSchedule::fee_pct` — restating them here
+    // would be a second place for the charge policy to drift apart (#234).
     fee_schedule().fee_pct(price)
 }
 
@@ -931,18 +977,50 @@ mod tests {
         let official = fee_schedule_by_name("official").expect("official schedule");
         assert_eq!(official.rate, dec!(0.07));
         assert_eq!(official.exponent, 1);
-        let per_share = |s: &FeeSchedule, p: Decimal| {
-            let mut acc = Decimal::ONE;
-            let base = p * (Decimal::ONE - p);
-            for _ in 0..s.exponent {
-                acc *= base;
-            }
-            s.rate * acc
-        };
         let legacy = legacy_quadratic_schedule();
-        let at = |p: Decimal| per_share(&official, p) / per_share(&legacy, p);
+        // The ratio is taken through the ONE production spelling of the curve
+        // (#234, item 2): a restated copy here would test the copy, not the fee.
+        let at = |p: Decimal| official.fee_per_share(p) / legacy.fee_per_share(p);
         assert_eq!(at(dec!(0.40)).round_dp(2), dec!(2.33));
         assert_eq!(at(dec!(0.12)).round_dp(2), dec!(5.30));
+    }
+
+    /// A price outside `(0, 1)` charges nothing — for EVERY schedule, in both
+    /// conventions (#234, item 3). The `p > 1` half is the money-path case: with
+    /// `exponent >= 1` the un-clamped curve prices a NEGATIVE fee there, i.e. a
+    /// rebate on a live fill. `p == 1` is 0 for the accidental reason that the
+    /// base is 0, so it is pinned here rather than left to arithmetic luck.
+    #[test]
+    fn out_of_range_prices_are_charged_nothing() {
+        for s in [legacy_quadratic_schedule(), official_schedule()] {
+            for p in [dec!(1), dec!(1.0000001), dec!(1.5), dec!(2), dec!(100)] {
+                assert_eq!(
+                    s.fee_per_share(p),
+                    Decimal::ZERO,
+                    "{}: {p} is not a price in (0,1)",
+                    s.name
+                );
+                assert_eq!(
+                    s.fee_pct(p),
+                    Decimal::ZERO,
+                    "{}: {p} must charge nothing as a percentage either",
+                    s.name
+                );
+                assert!(
+                    s.fee_per_share(p) >= Decimal::ZERO,
+                    "{}: a fee at {p} must never be a rebate",
+                    s.name
+                );
+            }
+            for p in [dec!(0), dec!(-0.5), dec!(-1)] {
+                assert_eq!(s.fee_per_share(p), Decimal::ZERO, "{}: p={p}", s.name);
+                assert_eq!(s.fee_pct(p), Decimal::ZERO, "{}: p={p}", s.name);
+            }
+        }
+        // The charge path in force goes through the same clamp.
+        assert_eq!(taker_fee_pct(dec!(1)), Decimal::ZERO);
+        assert_eq!(taker_fee_pct(dec!(1.5)), Decimal::ZERO);
+        assert_eq!(taker_fee_pct(dec!(2)), Decimal::ZERO);
     }
 
     /// Every schedule must name where its parameters come from. `0.07` is only
@@ -1310,6 +1388,12 @@ mod tests {
         assert_eq!(taker_fee_pct(dec!(0.50)), legacy.fee_pct(dec!(0.50)));
         assert_eq!(legacy.fee_pct(dec!(0)), Decimal::ZERO);
         assert_eq!(legacy.fee_pct(dec!(-1)), Decimal::ZERO);
+        // At and above a full dollar nothing is charged (#234, item 3): `p == 1`
+        // for the base's sake, `p > 1` because squaring must not be what hides a
+        // rebate.
+        assert_eq!(legacy.fee_pct(dec!(1)), Decimal::ZERO);
+        assert_eq!(legacy.fee_pct(dec!(1.5)), Decimal::ZERO);
+        assert_eq!(legacy.fee_per_share(dec!(1.5)), Decimal::ZERO);
     }
 
     #[test]
@@ -1341,9 +1425,17 @@ mod tests {
             (official.fee_pct(dec!(0.50)) / legacy.fee_pct(dec!(0.50))).round_dp(2),
             dec!(2.24)
         );
-        // Edge prices charge nothing.
+        // Edge prices charge nothing. `p > 1` is the one that matters here: this
+        // schedule's exponent is 1, so without the clamp `p*(1-p)` is negative
+        // and the fee becomes a REBATE — money moving the wrong way (#234,
+        // item 3). `p == 1` is 0 for the base's sake.
         assert_eq!(official.fee_pct(dec!(0)), Decimal::ZERO);
         assert_eq!(official.fee_pct(dec!(1)), Decimal::ZERO);
+        assert_eq!(official.fee_pct(dec!(1.5)), Decimal::ZERO);
+        assert!(
+            official.fee_per_share(dec!(1.5)) >= Decimal::ZERO,
+            "a fee above $1 of price must never be negative"
+        );
     }
 
     #[test]

@@ -475,6 +475,29 @@ fn cooldown_key(asset: &str, direction: SignalDirection) -> String {
     format!("{asset}_{}", direction.as_str())
 }
 
+/// The fee the close path charges on the unsold remainder it prices itself.
+///
+/// Pure over `schedule` on purpose (#234, item 5). The active schedule is
+/// process-wide and set-once (`exit_policy::ACTIVE_FEE_SCHEDULE`), so no test can
+/// price two schedules through the close path in one process — but the DIFFERENCE
+/// between them is what the dust test exists to prove, and a test that restates
+/// the arithmetic proves only that the restatement is stable. Taking the schedule
+/// as a parameter lets the test drive BOTH curves through this, the production
+/// expression, while [`PositionManager::close`] passes the one in force.
+///
+/// Maker exits pay nothing: the schedule charges takers only.
+fn dust_fee_for(
+    schedule: crate::exit_policy::FeeSchedule,
+    exit_price: Decimal,
+    dust_notional: Decimal,
+    was_maker: bool,
+) -> Decimal {
+    if was_maker {
+        return Decimal::ZERO;
+    }
+    (schedule.fee_pct(exit_price) / Decimal::ONE_HUNDRED) * dust_notional
+}
+
 impl PositionManager {
     pub fn new(config: PositionConfig) -> Self {
         let daily_store = config.daily_pnl_path.clone().map(DailyLossStore::new);
@@ -1088,12 +1111,13 @@ impl PositionManager {
         // Shares with no exit fill of their own (a direct close, or the sub-grid
         // remainder) are priced here, so they must carry a fee here too — at the
         // role of the order the caller just placed. The fee follows the schedule
-        // in force, not a curve restated at this call site.
-        let dust_fee = if was_maker {
-            Decimal::ZERO
-        } else {
-            (crate::exit_policy::taker_fee_pct(exit_price) / Decimal::ONE_HUNDRED) * dust_notional
-        };
+        // in force, through the one expression that prices a dust remainder.
+        let dust_fee = dust_fee_for(
+            crate::exit_policy::fee_schedule(),
+            exit_price,
+            dust_notional,
+            was_maker,
+        );
 
         let cost = pos.flows.entry_cost_usd;
         let entry_fee_usd = pos.flows.entry_fee_usd;
@@ -1459,9 +1483,13 @@ mod tests {
     /// curve charges 1.2% of the $0.06 notional = $0.00072, where the published
     /// crypto curve (2.8% of price) would charge $0.00168 — $0.00096 more.
     ///
-    /// The active schedule is set-once per process, so this cannot run the two
-    /// schedules side by side; the assertion is the absolute net, which pins the
-    /// dust fee inside it, plus the delta the other schedule would have made.
+    /// Both curves are priced through `dust_fee_for` — the expression the close
+    /// path itself runs (#234, item 5) — so the delta below is the close path's
+    /// delta and not a restatement's. The end-to-end half still runs under the one
+    /// schedule this process has installed (`OnceLock` is set-once, and installing
+    /// a second would poison every other test in the binary): what cannot be
+    /// shown in-process is the two closed positions side by side, and that is
+    /// stated here rather than papered over.
     #[test]
     fn close_dust_fee_follows_the_active_schedule() {
         assert_eq!(
@@ -1490,11 +1518,35 @@ mod tests {
         assert_eq!(closed.net_pnl_usd, dec!(1.928));
 
         let dust_notional = dec!(0.6) * dec!(0.1);
-        let legacy_dust = (dec!(1.2) / Decimal::ONE_HUNDRED) * dust_notional;
-        let official_dust = (crate::exit_policy::official_schedule().fee_pct(dec!(0.60))
-            / Decimal::ONE_HUNDRED)
-            * dust_notional;
+        let legacy_dust = dust_fee_for(
+            crate::exit_policy::legacy_quadratic_schedule(),
+            dec!(0.60),
+            dust_notional,
+            false,
+        );
+        let official_dust = dust_fee_for(
+            crate::exit_policy::official_schedule(),
+            dec!(0.60),
+            dust_notional,
+            false,
+        );
+        // The absolute anchors, not only the delta: 1.2% and 2.8% of the $0.06
+        // remainder, through the production expression.
+        assert_eq!(legacy_dust, dec!(0.00072));
+        assert_eq!(official_dust, dec!(0.00168));
         assert_eq!(official_dust - legacy_dust, dec!(0.00096));
+        // A maker exit pays no dust fee under either schedule.
+        for s in [
+            crate::exit_policy::legacy_quadratic_schedule(),
+            crate::exit_policy::official_schedule(),
+        ] {
+            assert_eq!(
+                dust_fee_for(s, dec!(0.60), dust_notional, true),
+                Decimal::ZERO,
+                "{}: a maker exit pays nothing",
+                s.name
+            );
+        }
     }
 
     #[test]
