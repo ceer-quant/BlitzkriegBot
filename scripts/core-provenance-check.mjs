@@ -137,6 +137,29 @@ function localRefFor(deployRef) {
   return null;
 }
 
+/**
+ * Every ref that resolves for a line NAME: the local branch first, then each
+ * remote-tracking ref of that name (`ceer/x`, `origin/x`, …). A local branch that
+ * predates its upstream is the normal state of a clone nobody fetched, and
+ * reporting only that one would answer "what does this line contain" with a
+ * stale sha — so both are shown when they disagree, each named, and the reader
+ * can see which is which instead of trusting the first hit.
+ */
+function lineageRefs(name) {
+  const out = [];
+  const push = (c) => {
+    if (out.includes(c)) return;
+    if (git(['rev-parse', '--verify', '--quiet', `${c}^{commit}`]) !== null) out.push(c);
+  };
+  push(name);
+  const tracked = (git(['for-each-ref', '--format=%(refname:short)', 'refs/remotes']) ?? '')
+    .split('\n')
+    .map((r) => r.trim())
+    .filter((r) => r.endsWith(`/${name}`));
+  for (const r of tracked) push(r);
+  return out;
+}
+
 /** How many commits each side of `ref...HEAD` has, or null when it cannot be read. */
 function divergence(ref) {
   const out = git(['rev-list', '--left-right', '--count', `${ref}...HEAD`]);
@@ -219,7 +242,10 @@ summary(`- checkout ${head ?? 'unknown'}; expected from ${expected.source ?? 'un
   `${expected.sha ? ` (${expected.sha})` : ''}`);
 summary(`- deployment source: \`${deployRef ?? 'scripts/upgrade.sh is not in this tree (see #179)'}\``);
 
-const refs = [...new Set([...LINES, ...requiredAncestors].map((l) => localRefFor(l) ?? l))];
+const refs = [...new Set([...LINES, ...requiredAncestors].flatMap((l) => {
+  const all = lineageRefs(l);
+  return all.length ? all : [l];
+}))];
 for (const ref of refs) {
   if (git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]) === null) {
     console.log(`  line ${ref}: not present in this clone (fetch it to compare)`);
