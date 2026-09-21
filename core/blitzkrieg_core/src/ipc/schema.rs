@@ -210,6 +210,16 @@ pub struct PlaceResult {
     #[serde(rename = "orderId")]
     pub order_id: OrderId,
     pub status: OrderStatus,
+    /// Why the KERNEL refused the leg, when it did — the dry/read-only taker the
+    /// book could not fill (#180). Same vocabulary a rejected call carries in
+    /// `data.coreCode`, so a client branches on one or the other the same way.
+    /// Absent for an order the kernel accepted (even one the venue may refuse
+    /// later: that arrives on `Event::Error`, not on this result), which keeps
+    /// the shape backward compatible for existing consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<CoreErrorCode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

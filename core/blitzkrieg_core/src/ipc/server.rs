@@ -365,10 +365,14 @@ pub async fn run(
         }
     };
     eprintln!(
-        "blitzkrieg-core listening on {socket_path} mode={:?} version={} socketMode={mode} peerAuth={}",
+        "blitzkrieg-core listening on {socket_path} mode={:?} version={} socketMode={mode} peerAuth={} logLevel={}",
         config.mode,
         crate::CORE_VERSION,
-        peer_auth_support()
+        peer_auth_support(),
+        // #184: the level this process actually records, on the same banner as the
+        // socket mode — "was this run quiet by design or by accident?" is
+        // answerable from the run log alone.
+        crate::logging::effective_level()
     );
     // Log the EFFECTIVE risk/exit tuning at boot: a stale binary silently ran the
     // old wide stop for a whole soak; this makes the deployed parameters visible
@@ -605,10 +609,22 @@ async fn handle_line(
                 let core = core.clone();
                 async move {
                     let mut c = core.lock().await;
-                    let (order_id, status) = c.place(p.order, p.maker_timeout_ms, now_ms())?;
+                    // `place_outcome`, not `place`: when the kernel refuses the leg
+                    // itself (a dry taker the book cannot fill) the result carries
+                    // the structured reason instead of a bare REJECTED (#180).
+                    let outcome = c.place_outcome(p.order, p.maker_timeout_ms, now_ms())?;
+                    let (code, message) = match outcome.rejection {
+                        Some(err) => (Some(err.code), Some(err.message)),
+                        None => (None, None),
+                    };
                     Ok::<_, CoreError>(
-                        serde_json::to_value(PlaceResult { order_id, status })
-                            .unwrap_or(Value::Null),
+                        serde_json::to_value(PlaceResult {
+                            order_id: outcome.order_id,
+                            status: outcome.status,
+                            code,
+                            message,
+                        })
+                        .unwrap_or(Value::Null),
                     )
                 }
             })
