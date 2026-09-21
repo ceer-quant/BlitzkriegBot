@@ -32,11 +32,13 @@ fn start(creds: Option<(&str, &str)>) -> SocketAddr {
 
 /// As [`start`], but `gateway` builds the server in gateway mode (auth always
 /// required) and returns the chosen credentials so a test can log in.
+///
+/// The server binds `:0` and the test reads the port back from the panel's own
+/// listener (`bound_addr`). Probing for a free port and binding it a moment
+/// later loses the port to whatever else on the machine takes it in between —
+/// the connect then fails with "connection refused" and the test looks like an
+/// auth bug.
 fn start_with(creds: Option<(&str, &str)>, gateway: bool) -> SocketAddr {
-    let probe = TcpListener::bind("127.0.0.1:0").expect("probe bind");
-    let addr = probe.local_addr().expect("addr");
-    drop(probe);
-
     // A socket path that is never contacted — snapshot calls degrade offline;
     // auth behavior is checked before IPC.
     let sock = std::env::temp_dir().join(format!(
@@ -58,11 +60,12 @@ fn start_with(creds: Option<(&str, &str)>, gateway: bool) -> SocketAddr {
     if let Some((u, p)) = creds {
         server.set_panel_credentials(Some(u.to_string()), Some(p.to_string()));
     }
+    let server = Arc::new(server);
+    let serving = Arc::clone(&server);
     thread::spawn(move || {
-        let _ = server.serve(&addr.to_string());
+        let _ = serving.serve("127.0.0.1:0");
     });
-    thread::sleep(Duration::from_millis(150));
-    addr
+    wait_for_bound(&server)
 }
 
 fn request(addr: SocketAddr, raw: &str) -> u16 {
@@ -170,21 +173,37 @@ fn half_configured_credentials_do_not_arm_a_passwordless_panel() {
     // pair is refused wholesale, leaving the read-only surface unauthenticated —
     // and gateway mode, which must have a password, refuses to start instead of
     // choosing one (see `gateway_mode_refuses_to_start_without_env_credentials`).
-    let probe = TcpListener::bind("127.0.0.1:0").expect("probe bind");
-    let addr = probe.local_addr().expect("addr");
-    drop(probe);
     let sock = std::env::temp_dir().join("uikit-auth-half.sock");
     let mut server = WebServer::new(IpcClient::new(sock.to_string_lossy().to_string()), 10);
     server.set_panel_credentials(Some("admin".to_string()), None);
+    let server = Arc::new(server);
+    let serving = Arc::clone(&server);
     thread::spawn(move || {
-        let _ = server.serve(&addr.to_string());
+        let _ = serving.serve("127.0.0.1:0");
     });
-    thread::sleep(Duration::from_millis(150));
+    let addr = wait_for_bound(&server);
     assert_eq!(
         request(addr, "GET /api/snapshot HTTP/1.1\r\n\r\n"),
         200,
         "a lone user half must not arm auth against an empty password"
     );
+}
+
+/// Wait for a server started on `:0` to report the port it actually bound.
+fn wait_for_bound(server: &Arc<WebServer>) -> SocketAddr {
+    try_wait_for_bound(server, 500).expect("the panel never reported a bound address")
+}
+
+/// As [`wait_for_bound`], but `None` after `attempts` tries — for a bind this
+/// environment may refuse outright.
+fn try_wait_for_bound(server: &Arc<WebServer>, attempts: usize) -> Option<SocketAddr> {
+    for _ in 0..attempts {
+        if let Some(addr) = server.bound_addr().and_then(|a| a.parse().ok()) {
+            return Some(addr);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    None
 }
 
 /// Log in and return the session token.
@@ -885,23 +904,22 @@ fn the_loopback_default_is_reported_as_local_only() {
 fn a_non_loopback_bind_is_recorded_and_shown_on_the_panel() {
     // The deliberate-exposure case. It must be loud in three places: the
     // startup log, the JSON a panel reads, and the built-in HTML panel itself.
-    let Ok(probe) = TcpListener::bind("0.0.0.0:0") else {
-        eprintln!("skipping: this environment does not allow a wildcard bind");
-        return;
-    };
-    let port = probe.local_addr().expect("addr").port();
-    drop(probe);
-
     let server = Arc::new(WebServer::new(
         IpcClient::new("/nonexistent-wildcard-bind.sock"),
         10,
     ));
-    let shared = server.clone();
-    let addr = format!("0.0.0.0:{port}");
+    let shared = Arc::clone(&server);
     thread::spawn(move || {
-        let _ = shared.serve(&addr);
+        let _ = shared.serve("0.0.0.0:0");
     });
-    thread::sleep(Duration::from_millis(250));
+    let Some(bound) = try_wait_for_bound(&server, 300) else {
+        eprintln!("skipping: this environment does not allow a wildcard bind");
+        return;
+    };
+    assert!(
+        !bound.ip().is_loopback(),
+        "bound {bound} must not be loopback"
+    );
 
     let warning = server
         .bind_warning()

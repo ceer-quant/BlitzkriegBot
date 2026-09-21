@@ -1465,6 +1465,19 @@ impl WebServer {
         ))
     }
 
+    /// The address this panel actually bound, once `serve()` has it, as
+    /// `host:port`. `None` before the listener exists.
+    ///
+    /// Exists so a caller that needs the port (tests, an embedder that passed
+    /// `:0`) can read it from the listener instead of probing for a free port
+    /// and racing whoever takes it in between.
+    pub fn bound_addr(&self) -> Option<String> {
+        self.bind
+            .lock()
+            .ok()
+            .and_then(|b| b.as_ref().map(|i| i.addr.clone()))
+    }
+
     /// The `security` block of the snapshot document: what a panel or an
     /// external monitor needs to see the two exposure facts without reading logs.
     fn security_doc(&self) -> serde_json::Value {
