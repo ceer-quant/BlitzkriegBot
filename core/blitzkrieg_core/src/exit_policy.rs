@@ -58,10 +58,6 @@ pub struct ExitConfig {
     pub exit_grace_sec: i64,
     pub maker_exits_for_tp_only: bool,
     pub maker_first_exit_enabled: bool,
-    /// F8: which taker-fee schedule fees are computed with. Defaults to the
-    /// shipped legacy quadratic so behaviour does not change under this commit;
-    /// set `PolymarketCrypto` for markets billed on the official crypto fee.
-    pub fee_model: FeeModel,
     /// F6: a book older than this (sec, measured against the tick's `now_ms`)
     /// must not price an exit — a stale quote is not an executable one.
     /// Snapshots with `timestamp <= 0` (synthetic tests, legacy records) are
@@ -124,7 +120,6 @@ impl Default for ExitConfig {
             exit_grace_sec: 3,
             maker_exits_for_tp_only: false,
             maker_first_exit_enabled: true,
-            fee_model: FeeModel::default(),
             max_book_age_sec: 60,
         }
     }
@@ -211,62 +206,134 @@ pub fn effective_stop_pct(base: Decimal, time_left_sec: i64, cfg: &ExitConfig) -
     min_pct + (base - min_pct) * frac
 }
 
-/// fee_per_share = 0.125*(p*(1-p))^2; as a percentage of price.
-///
-/// F8: the legacy formula is the DEFAULT so existing behaviour does not move
-/// under this change, but it no longer has to be the ONLY fee model. Use
-/// [`FeeModel::rate_for_price`] (or carry a [`FeeModel`] in [`ExitConfig`]) to
-/// charge a market-appropriate schedule — e.g. the official Polymarket crypto
-/// per-share fee `0.07 * p * (1-p)`, which is roughly 2.2x the legacy curve at
-/// p=0.50 and flips a marginal round-trip from profit to loss.
+// ── The taker-fee schedule (#182, #203) ─────────────────────────────────────
+//
+// The fee is one number with two jobs: it is the accounting basis every gate
+// reconciles against, and it is a COST PARAMETER the strategies were tuned
+// under. #182 fixed the first job (the gates now read the kernel's own quote
+// instead of restating the formula). #203 is the second: changing the schedule
+// is a cost change of the same order as the strategy's whole edge, so the
+// question "what does this schedule cost the strategy" has to be answerable
+// with a measurement rather than an argument.
+//
+// That is what the schedule below exists for. It is a process-wide, SET-ONCE
+// value: the default is the shipped schedule and the live path never changes
+// it, while a replay may be run under a different one via `--fee-model` (the
+// CLI refuses that flag without `--backtest`, exactly like `--backtest-knob`).
+// Set-once rather than a config field on purpose — a fee that can move between
+// a fill and its reconciliation is an accounting hazard, and threading a
+// parameter through every call site would touch the charge path for a knob no
+// live run may use.
+
+/// One taker-fee schedule: `fee_per_share = rate * (p*(1-p))^exponent` USD.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FeeSchedule {
+    /// Declared name, reported by `core.feeQuote` and pinned by the gates.
+    pub name: &'static str,
+    /// Coefficient of the schedule.
+    pub rate: Decimal,
+    /// Exponent of `p*(1-p)`.
+    pub exponent: u32,
+    /// Where the parameters come from — the thing a reader needs to decide
+    /// whether a number is authoritative. Kept in the type so a new schedule
+    /// cannot be added without saying who published it.
+    pub source: &'static str,
+}
+
+impl FeeSchedule {
+    /// This schedule's taker fee as a PERCENTAGE OF THE FILL PRICE — the unit the
+    /// charge path settles in (`fee_usd = pct/100 * price * shares`). The schedule
+    /// stores the per-share form (`rate * (p*(1-p))^exponent` USD per share,
+    /// which is how Polymarket publishes it); dividing by `price` converts it, so
+    /// both curves keep ONE accounting convention at every call site.
+    /// `price <= 0` charges nothing.
+    pub fn fee_pct(&self, price: Decimal) -> Decimal {
+        if price <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        let base = price * (Decimal::ONE - price);
+        let mut acc = Decimal::ONE;
+        for _ in 0..self.exponent {
+            acc *= base;
+        }
+        ((self.rate * acc) / price) * Decimal::ONE_HUNDRED
+    }
+}
+
+/// The schedule the deployment line charges: `0.125*(p*(1-p))^2`. Its
+/// provenance is NOT a published schedule (see `source`); it is the value the
+/// kernel has always charged, and #203's finding is that it is 2.3x-5.3x
+/// CHEAPER than the published crypto schedule at the prices traded.
+pub fn legacy_quadratic_schedule() -> FeeSchedule {
+    FeeSchedule {
+        name: "legacy_quadratic",
+        rate: dec!(0.125),
+        exponent: 2,
+        source: "history: unchanged since the fee was first charged; no external \
+                 publication states this curve (see #203, fee-model.mjs)",
+    }
+}
+
+/// Polymarket's published crypto taker schedule, `0.07 * p * (1-p)` USD per
+/// share. Primary source (quoted in `scripts/lib/fee-model.mjs`, which is what
+/// the gates read): Polymarket docs, fees page — `fee = C * feeRate * p * (1-p)`
+/// with `feeRate = 0.07` for the Crypto category, maker side 0.
+pub fn official_schedule() -> FeeSchedule {
+    FeeSchedule {
+        name: "official",
+        rate: dec!(0.07),
+        exponent: 1,
+        source: "Polymarket docs, fees: fee = C x feeRate x p x (1-p); Crypto feeRate = 0.07, maker 0",
+    }
+}
+
+/// Every schedule a replay may be asked for, by name.
+pub const FEE_SCHEDULE_NAMES: &[&str] = &["legacy_quadratic", "official"];
+
+/// Look a schedule up by its declared name.
+pub fn fee_schedule_by_name(name: &str) -> Option<FeeSchedule> {
+    match name {
+        "legacy_quadratic" => Some(legacy_quadratic_schedule()),
+        "official" => Some(official_schedule()),
+        _ => None,
+    }
+}
+
+/// The schedule in force. Defaults to the shipped one; only a replay changes it.
+static ACTIVE_FEE_SCHEDULE: std::sync::OnceLock<FeeSchedule> = std::sync::OnceLock::new();
+
+/// The taker-fee schedule the kernel is charging right now.
+pub fn fee_schedule() -> FeeSchedule {
+    *ACTIVE_FEE_SCHEDULE
+        .get()
+        .unwrap_or(&legacy_quadratic_schedule_ref())
+}
+
+/// `OnceLock<FeeSchedule>` needs a `'static` reference; `legacy_quadratic_schedule()`
+/// builds a fresh value, so the default is memoised here instead.
+fn legacy_quadratic_schedule_ref() -> FeeSchedule {
+    static DEFAULT: std::sync::OnceLock<FeeSchedule> = std::sync::OnceLock::new();
+    *DEFAULT.get_or_init(legacy_quadratic_schedule)
+}
+
+/// Install a schedule for this process. Refuses a second call: set-once is the
+/// point (a fee that moves mid-run cannot be reconciled against), and it means
+/// the only way to change what is charged is to restart with a different flag.
+pub fn set_fee_schedule(schedule: FeeSchedule) -> Result<(), String> {
+    ACTIVE_FEE_SCHEDULE
+        .set(schedule)
+        .map_err(|_| "the taker-fee schedule is already set for this process".to_string())
+}
+
+/// The taker fee in force, as a percentage of the fill price: the active
+/// schedule's own arithmetic ([`FeeSchedule::fee_pct`]). One owner for the
+/// accounting basis every gate reconciles against and the cost parameter the
+/// strategies were tuned under (#182, #203).
 pub fn taker_fee_pct(price: Decimal) -> Decimal {
     if price <= Decimal::ZERO {
         return Decimal::ZERO;
     }
-    let one_minus = Decimal::ONE - price;
-    let fee = dec!(0.125) * (price * one_minus) * (price * one_minus);
-    (fee / price) * Decimal::ONE_HUNDRED
-}
-
-/// F8: which taker-fee schedule a fill is charged.
-///
-/// Units matter and the two curves are NOT in the same unit: the legacy curve
-/// yields a PERCENTAGE OF PRICE (`taker_fee_pct`), while the Polymarket crypto
-/// schedule is quoted as an ABSOLUTE USD-AMOUNT-PER-SHARE
-/// (`shares * 0.07 * p * (1-p)`). Every caller settles in
-/// `fee_usd = pct/100 * price * shares`, so [`FeeModel::fee_pct`] converts the
-/// per-share dollar amount back into a percentage of the fill price
-/// (`0.07 * (1-p) * 100`), keeping ONE accounting convention at every call
-/// site instead of teaching each one about per-share arithmetic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum FeeModel {
-    /// `0.125 * (p(1-p))^2`, charged as a percentage of the fill price. The
-    /// shipped default — existing books and backtests replay unchanged.
-    #[default]
-    LegacyQuadratic,
-    /// Polymarket's official crypto-market taker fee:
-    /// `shares * 0.07 * p * (1-p)` USD. Converted here to a percentage of the
-    /// fill price so the accounting contract (`net = gross − fees`) is shared.
-    PolymarketCrypto,
-}
-
-impl FeeModel {
-    /// The taker fee as a PERCENTAGE OF THE FILL PRICE under this model — the
-    /// unit every existing caller (`fee_usd = pct/100 * price * shares`)
-    /// already multiplies by. `price <= 0` charges nothing.
-    pub fn fee_pct(&self, price: Decimal) -> Decimal {
-        match self {
-            FeeModel::LegacyQuadratic => taker_fee_pct(price),
-            FeeModel::PolymarketCrypto => {
-                if price <= Decimal::ZERO || price >= Decimal::ONE {
-                    return Decimal::ZERO;
-                }
-                // per-share fee_usd / price = 0.07 * (1-p); as a percentage:
-                (dec!(0.07) * (Decimal::ONE - price)) * Decimal::ONE_HUNDRED
-            }
-        }
-    }
+    fee_schedule().fee_pct(price)
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -836,6 +903,65 @@ mod tests {
         }
     }
 
+    /// The shipped default must stay the shipped default. If a change flips it,
+    /// this is the test that says so before a replay is needed (#203).
+    #[test]
+    fn default_fee_schedule_is_the_shipped_one() {
+        let s = fee_schedule();
+        assert_eq!(s.name, "legacy_quadratic");
+        assert_eq!(s.rate, dec!(0.125));
+        assert_eq!(s.exponent, 2);
+    }
+
+    /// The legacy curve as charged: `0.125*(p*(1-p))^2` per share, quoted as a
+    /// percentage of price (p=0.40 -> $0.0072/share, 1.8% of price).
+    #[test]
+    fn legacy_schedule_prices_as_documented() {
+        assert_eq!(taker_fee_pct(dec!(0.4)), dec!(1.8));
+        assert_eq!(taker_fee_pct(dec!(0.5)), dec!(1.5625));
+        assert_eq!(taker_fee_pct(dec!(0)), Decimal::ZERO);
+    }
+
+    /// #203's decision rests on this ratio: the published crypto schedule is
+    /// 2.33x the legacy curve at p=0.40 and 5.30x at p=0.12. A test, not a
+    /// comment, because the whole "switching is a cost increase" claim is this
+    /// arithmetic.
+    #[test]
+    fn official_schedule_is_the_published_multiple_of_legacy() {
+        let official = fee_schedule_by_name("official").expect("official schedule");
+        assert_eq!(official.rate, dec!(0.07));
+        assert_eq!(official.exponent, 1);
+        let per_share = |s: &FeeSchedule, p: Decimal| {
+            let mut acc = Decimal::ONE;
+            let base = p * (Decimal::ONE - p);
+            for _ in 0..s.exponent {
+                acc *= base;
+            }
+            s.rate * acc
+        };
+        let legacy = legacy_quadratic_schedule();
+        let at = |p: Decimal| per_share(&official, p) / per_share(&legacy, p);
+        assert_eq!(at(dec!(0.40)).round_dp(2), dec!(2.33));
+        assert_eq!(at(dec!(0.12)).round_dp(2), dec!(5.30));
+    }
+
+    /// Every schedule must name where its parameters come from. `0.07` is only
+    /// authoritative because the publication says so; a schedule with a blank
+    /// source is a number nobody can check (#203 acceptance).
+    #[test]
+    fn every_schedule_declares_its_source() {
+        for name in FEE_SCHEDULE_NAMES {
+            let s = fee_schedule_by_name(name).unwrap_or_else(|| panic!("{name} missing"));
+            assert!(
+                s.source.len() > 20,
+                "{name}: the schedule must say who published its parameters, got {:?}",
+                s.source
+            );
+            assert_eq!(s.name, *name, "lookup name and declared name disagree");
+        }
+        assert!(fee_schedule_by_name("no_such_model").is_none());
+    }
+
     #[test]
     fn force_exit_fires_at_deadline() {
         let cfg = ExitConfig::default();
@@ -1169,54 +1295,68 @@ mod tests {
     }
 
     // ── F8: fee schedules ────────────────────────────────────────────────────
+    //
+    // These assert on schedule VALUES, never on an installed one: the active
+    // schedule is set-once per process, so a test that swapped it would poison
+    // every other test in the binary. `FeeSchedule` is a plain `Copy` value and
+    // needs no installation to be measured.
 
     #[test]
-    fn legacy_fee_model_is_unchanged() {
+    fn legacy_schedule_fee_is_unchanged() {
+        let legacy = legacy_quadratic_schedule();
         // p=0.50: 0.125 * (0.25)^2 = 0.0078125 USD/share → /0.50 = 1.5625%.
-        assert_eq!(taker_fee_pct(dec!(0.50)), dec!(1.5625));
-        assert_eq!(
-            FeeModel::LegacyQuadratic.fee_pct(dec!(0.50)),
-            taker_fee_pct(dec!(0.50))
-        );
-        assert_eq!(FeeModel::LegacyQuadratic.fee_pct(dec!(0)), Decimal::ZERO);
-        assert_eq!(FeeModel::LegacyQuadratic.fee_pct(dec!(-1)), Decimal::ZERO);
+        assert_eq!(legacy.fee_pct(dec!(0.50)), dec!(1.5625));
+        // The process default is this curve, so the charge path agrees.
+        assert_eq!(taker_fee_pct(dec!(0.50)), legacy.fee_pct(dec!(0.50)));
+        assert_eq!(legacy.fee_pct(dec!(0)), Decimal::ZERO);
+        assert_eq!(legacy.fee_pct(dec!(-1)), Decimal::ZERO);
     }
 
     #[test]
-    fn polymarket_crypto_fee_matches_official_parameters() {
+    fn official_schedule_fee_matches_official_parameters() {
         // Official: fee_usd = shares * 0.07 * p * (1-p). 100 shares @0.50 →
         // 100 * 0.07 * 0.25 = $1.75. As a percentage of the fill price:
         // 0.07 * 0.5 * 100 = 3.5%, and 3.5% * 0.50 * 100 shares = $1.75. The
         // per-share and percentage conventions must agree at every price.
-        let m = FeeModel::PolymarketCrypto;
+        let official = official_schedule();
         for p in [dec!(0.50), dec!(0.40), dec!(0.62), dec!(0.95)] {
             let per_share_fee = dec!(0.07) * p * (Decimal::ONE - p);
-            let pct = m.fee_pct(p);
+            let pct = official.fee_pct(p);
             assert_eq!(
                 (pct / Decimal::ONE_HUNDRED) * p,
                 per_share_fee,
                 "pct convention must equal the official per-share fee at p={p}"
             );
         }
+        // p=0.50: 0.07 * 0.25 = 0.0175 USD/share → /0.50 = 3.5% of price.
+        assert_eq!(official.fee_pct(dec!(0.50)), dec!(3.5));
         // 100 shares @0.50 → exactly $1.75.
-        let fee_usd = (m.fee_pct(dec!(0.50)) / Decimal::ONE_HUNDRED) * dec!(0.50) * dec!(100);
+        let fee_usd =
+            (official.fee_pct(dec!(0.50)) / Decimal::ONE_HUNDRED) * dec!(0.50) * dec!(100);
         assert_eq!(fee_usd, dec!(1.75));
+        // At p=0.50 the published curve is 2.24x the legacy one — the cost jump
+        // #203 measured.
+        let legacy = legacy_quadratic_schedule();
+        assert_eq!(
+            (official.fee_pct(dec!(0.50)) / legacy.fee_pct(dec!(0.50))).round_dp(2),
+            dec!(2.24)
+        );
         // Edge prices charge nothing.
-        assert_eq!(m.fee_pct(dec!(0)), Decimal::ZERO);
-        assert_eq!(m.fee_pct(dec!(1)), Decimal::ZERO);
+        assert_eq!(official.fee_pct(dec!(0)), Decimal::ZERO);
+        assert_eq!(official.fee_pct(dec!(1)), Decimal::ZERO);
     }
 
     #[test]
     fn crypto_fee_flips_the_marginal_round_trip_sign() {
         // Audit F8: 100 shares taker 0.50 in → 0.52 out. Legacy ≈ +0.44 net;
         // official crypto fee ≈ −1.497 net. The sign must flip.
-        let round_trip = |m: FeeModel| -> Decimal {
-            let entry_fee = (m.fee_pct(dec!(0.50)) / Decimal::ONE_HUNDRED) * dec!(0.50) * dec!(100);
-            let exit_fee = (m.fee_pct(dec!(0.52)) / Decimal::ONE_HUNDRED) * dec!(0.52) * dec!(100);
+        let round_trip = |s: &FeeSchedule| -> Decimal {
+            let entry_fee = (s.fee_pct(dec!(0.50)) / Decimal::ONE_HUNDRED) * dec!(0.50) * dec!(100);
+            let exit_fee = (s.fee_pct(dec!(0.52)) / Decimal::ONE_HUNDRED) * dec!(0.52) * dec!(100);
             (dec!(0.52) - dec!(0.50)) * dec!(100) - entry_fee - exit_fee
         };
-        let legacy = round_trip(FeeModel::LegacyQuadratic);
-        let crypto = round_trip(FeeModel::PolymarketCrypto);
+        let legacy = round_trip(&legacy_quadratic_schedule());
+        let crypto = round_trip(&official_schedule());
         assert!(
             legacy > Decimal::ZERO,
             "legacy round trip was profitable: {legacy}"

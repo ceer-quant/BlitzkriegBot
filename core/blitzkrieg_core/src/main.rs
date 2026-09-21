@@ -69,7 +69,8 @@
 //! Backtest (offline; forces dry mode, starts no feeds and writes no logs):
 //!   blitzkrieg-core --backtest <archive.jsonl> [--backtest-report <path>]
 //!                   [--backtest-tick-ms 50] [--backtest-tail-ms 0] [model flags]
-//!                   [--backtest-knob <strategy>:<knob>=<value>]... [strategy knobs:
+//!                   [--backtest-knob <strategy>:<knob>=<value>]...
+//!                   [--fee-model <legacy_quadratic|official>] [strategy knobs:
 //!                    --trend-confirm-sec --spread-arb-entry-factor
 //!                    --spread-arb-min-obi --spread-arb-max-spread-pct
 //!                    --spread-arb-dip-max-pct --spread-arb-bounce-min-pct
@@ -82,6 +83,10 @@
 //!   registry — the same cell, the same `on_hot_params` push as a live
 //!   evolution — so a counterfactual arm differs from the shipped one by exactly
 //!   that value (see `scripts/mean-reversion-gate-evidence.mjs`).
+//!   `--fee-model` is the fee-side counterpart (#203): the same corpus replayed
+//!   under a different taker-fee schedule, so "what would the published crypto
+//!   rate cost this strategy" is a measurement rather than an argument (see
+//!   `scripts/fee-model-sensitivity-check.mjs`).
 //!
 //! Env (live): POLYMARKET_PRIVATE_KEY, POLYMARKET_FUNDER_ADDRESS, CLOB_API_URL.
 
@@ -243,6 +248,11 @@ struct Args {
     /// handed to the replayed strategies through the Shadow Evolution hot-param
     /// path (so a replay can A/B a knob value on the SAME frozen corpus).
     backtest_knobs: Vec<(String, String, Decimal)>,
+    /// Counterfactual taker-fee schedule for a replay (#203): `--fee-model
+    /// <name>`. None = the shipped schedule. Replay-only, exactly like
+    /// `--backtest-knob`: what a live run charges is not a per-invocation choice,
+    /// so asking for this without `--backtest` is refused rather than ignored.
+    fee_model: Option<blitzkrieg_core::exit_policy::FeeSchedule>,
     /// MarketRegime evaluation over an archive (E16 / #98): label windows and
     /// score the online state machine against the offline labels.
     regime_eval: Option<String>,
@@ -537,6 +547,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut backtest_tick_ms: i64 = 50;
     let mut backtest_tail_ms: i64 = 0;
     let mut backtest_knobs: Vec<(String, String, Decimal)> = Vec::new();
+    // #203: replay-only fee schedule (see `Args::fee_model`).
+    let mut fee_model: Option<blitzkrieg_core::exit_policy::FeeSchedule> = None;
     let mut regime_eval: Option<String> = None;
     let mut regime_report: Option<String> = None;
     let mut regime_token: Option<String> = None;
@@ -822,6 +834,22 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                         Ok(k) => backtest_knobs.push(k),
                         Err(e) => {
                             eprintln!("blitzkrieg-core: --backtest-knob {spec}: {e}");
+                            std::process::exit(2);
+                        }
+                    }
+                }
+            }
+            // #203: which taker-fee schedule a REPLAY charges. Not a live knob —
+            // see `Args::fee_model`.
+            "--fee-model" => {
+                if let Some(name) = it.next() {
+                    match blitzkrieg_core::exit_policy::fee_schedule_by_name(&name) {
+                        Some(s) => fee_model = Some(s),
+                        None => {
+                            eprintln!(
+                                "blitzkrieg-core: --fee-model {name}: unknown schedule; known: {}",
+                                blitzkrieg_core::exit_policy::FEE_SCHEDULE_NAMES.join(", ")
+                            );
                             std::process::exit(2);
                         }
                     }
@@ -1298,6 +1326,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         backtest_tick_ms,
         backtest_tail_ms,
         backtest_knobs,
+        fee_model,
         regime_eval,
         regime_report,
         regime_token,
@@ -1846,6 +1875,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(path) = &args.backtest {
+        // #203: install the counterfactual fee schedule BEFORE the core is built,
+        // so every fill the replay charges is priced under it. Set-once: a failed
+        // install means a schedule was already chosen, which cannot happen here
+        // (this branch runs once) and must not be silent if it somehow does.
+        if let Some(schedule) = args.fee_model
+            && let Err(e) = blitzkrieg_core::exit_policy::set_fee_schedule(schedule)
+        {
+            eprintln!("blitzkrieg-core: --fee-model {}: {e}", schedule.name);
+            std::process::exit(2);
+        }
         // Offline replay: never re-record into (or read from) the file being
         // replayed — an appended-to-archive would feed the source its own tail.
         let mut cfg = config.clone();
@@ -1866,6 +1905,14 @@ async fn main() -> anyhow::Result<()> {
     if !args.backtest_knobs.is_empty() {
         eprintln!(
             "blitzkrieg-core: --backtest-knob only applies to a replay; pass --backtest <archive.jsonl>"
+        );
+        std::process::exit(2);
+    }
+    if let Some(schedule) = args.fee_model {
+        eprintln!(
+            "blitzkrieg-core: --fee-model {} only applies to a replay; pass --backtest <archive.jsonl> \
+             (the schedule a live run charges is not a per-invocation choice, #203)",
+            schedule.name
         );
         std::process::exit(2);
     }

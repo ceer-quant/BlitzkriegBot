@@ -155,6 +155,35 @@ pub struct TradeStats {
     pub fees_usd: Decimal,
 }
 
+/// The taker-fee schedule a replay charged, as reported (#203).
+///
+/// Part of the report rather than a CLI transcript detail: a fee-sensitive
+/// conclusion ("this strategy is still profitable") is only interpretable
+/// against the schedule it was measured under, and the fee is exactly the input
+/// that moved the strategy's sign. `source` travels with it so a reader of the
+/// JSON — a reviewer, a later gate — can see whether the parameters are
+/// published or inherited from this repository's history.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeeScheduleReport {
+    pub name: String,
+    #[serde(with = "crate::decimal")]
+    pub rate: Decimal,
+    pub exponent: u32,
+    pub source: String,
+}
+
+impl From<crate::exit_policy::FeeSchedule> for FeeScheduleReport {
+    fn from(s: crate::exit_policy::FeeSchedule) -> Self {
+        Self {
+            name: s.name.to_string(),
+            rate: s.rate,
+            exponent: s.exponent,
+            source: s.source.to_string(),
+        }
+    }
+}
+
 /// Order counts by the last status each order reached.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -208,6 +237,8 @@ pub struct BacktestReport {
     pub end_at_ms: i64,
     pub virtual_ms: i64,
     pub fill_model: FillModel,
+    /// The taker-fee schedule this replay charged (#203). See [`FeeScheduleReport`].
+    pub fee_schedule: FeeScheduleReport,
     pub entry_maker_timeout_ms: i64,
     pub orders: OrderCounts,
     /// Fill rate / partial-fill rate (#183): what actually traded, order by
@@ -257,6 +288,10 @@ impl BacktestReport {
         s.push_str(&format!(
             "  entry escalate   : {} ms\n",
             self.entry_maker_timeout_ms
+        ));
+        s.push_str(&format!(
+            "  taker fee        : {} rate={} exponent={} (#203)\n",
+            self.fee_schedule.name, self.fee_schedule.rate, self.fee_schedule.exponent
         ));
         s.push_str(&format!(
             "  orders           : {} ({} filled, {} cancelled, {} rejected, {} failed, {} live at end)\n",
@@ -760,6 +795,7 @@ impl Backtester for EventBacktester {
             end_at_ms,
             virtual_ms: clock - start_at_ms,
             fill_model: self.core.config().fill_model,
+            fee_schedule: crate::exit_policy::fee_schedule().into(),
             entry_maker_timeout_ms: self.core.config().entry_maker_timeout_ms,
             orders: self.order_counts(),
             fill_stats: self.fill_stats(),

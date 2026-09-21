@@ -549,7 +549,7 @@ impl Default for CoreConfig {
     }
 }
 
-// ── Fee model (#182) ─────────────────────────────────────────────────────────
+// ── Fee model (#182, #203) ───────────────────────────────────────────────────
 //
 // The taker fee was a formula copied into four places: the kernel's charge path
 // and three gate/reconcile scripts. Copies cannot notice each other changing,
@@ -559,17 +559,16 @@ impl Default for CoreConfig {
 // `core.feeQuote` (below) and pin the DECLARED model, so a change here without a
 // change there is a red gate instead of a wrong green one.
 //
-// One model is declared today. `official` (Polymarket's published
+// The schedule itself lives in ONE place — `exit_policy::FeeSchedule`, whose
+// `source` field names the publication each set of parameters comes from — and
+// the quote below reports whatever that is, so a fee can never be charged under
+// one name and declared under another. `official` (Polymarket's published
 // `rate * p * (1 - p)`, exponent 1) is the succession path: switching the
-// default means changing these three constants AND the pinned expectation in
-// `scripts/lib/fee-model.mjs`, in the same change — which is the point.
-
-/// Declared name of the taker-fee model the kernel charges today.
-pub const TAKER_FEE_MODEL: &str = "legacy_quadratic";
-/// Declared coefficient: `fee_per_share = rate * (p * (1 - p))^exponent`.
-pub const TAKER_FEE_RATE: Decimal = dec!(0.125);
-/// Declared exponent of the same expression.
-pub const TAKER_FEE_EXPONENT: u32 = 2;
+// default means changing `exit_policy::legacy_quadratic_schedule` to it AND the
+// pinned expectation in `scripts/lib/fee-model.mjs`, in the same change — which
+// is the point. What that costs the strategies is measured, not argued:
+// `scripts/fee-model-sensitivity-check.mjs` replays the frozen corpus under both
+// schedules (#203).
 
 /// The fee actually charged per share at `price`: `(taker_fee_pct(p)/100) * p`,
 /// spelled exactly as the charge path spells it (`apply_delta_effects`,
@@ -582,18 +581,19 @@ pub fn charged_fee_per_share(price: Decimal) -> Decimal {
     (crate::exit_policy::taker_fee_pct(price) / Decimal::ONE_HUNDRED) * price
 }
 
-/// The DECLARED model's own arithmetic — `rate * (p*(1-p))^exponent` — used only
-/// to check that the declaration still describes what is charged.
+/// The ACTIVE schedule's own arithmetic — `rate * (p*(1-p))^exponent` — used
+/// only to check that the declaration still describes what is charged.
 fn declared_fee_per_share(price: Decimal) -> Decimal {
     if price <= Decimal::ZERO {
         return Decimal::ZERO;
     }
+    let schedule = crate::exit_policy::fee_schedule();
     let base = price * (Decimal::ONE - price);
     let mut acc = Decimal::ONE;
-    for _ in 0..TAKER_FEE_EXPONENT {
+    for _ in 0..schedule.exponent {
         acc *= base;
     }
-    TAKER_FEE_RATE * acc
+    schedule.rate * acc
 }
 
 /// Read-only quote of the fee schedule (#182). `price` defaults to the widest
@@ -601,6 +601,7 @@ fn declared_fee_per_share(price: Decimal) -> Decimal {
 /// does not have to invent a price.
 pub fn fee_quote(price: Option<Decimal>) -> crate::ipc::schema::FeeQuoteResult {
     let price = price.unwrap_or_else(|| dec!(0.5));
+    let schedule = crate::exit_policy::fee_schedule();
     let charged = charged_fee_per_share(price);
     let declared = declared_fee_per_share(price);
     // Same expression, two spellings: the difference is Decimal's own rounding at
@@ -609,9 +610,9 @@ pub fn fee_quote(price: Option<Decimal>) -> crate::ipc::schema::FeeQuoteResult {
     let scale = charged.abs().max(dec!(0.000000000001));
     let model_matches = (charged - declared).abs() / scale < dec!(0.000000001);
     crate::ipc::schema::FeeQuoteResult {
-        model: TAKER_FEE_MODEL.to_string(),
-        rate: TAKER_FEE_RATE,
-        exponent: TAKER_FEE_EXPONENT,
+        model: schedule.name.to_string(),
+        rate: schedule.rate,
+        exponent: schedule.exponent,
         price,
         fee_per_share: charged,
         fee_pct_of_price: crate::exit_policy::taker_fee_pct(price),
@@ -3581,8 +3582,9 @@ impl Core {
             let fee_pct = if d.role.is_maker() {
                 Decimal::ZERO
             } else {
-                // F8: fees follow the configured fee model (ExitConfig.fee_model).
-                self.config.positions.exit.fee_model.fee_pct(px)
+                // The fee follows the schedule in force (see
+                // `exit_policy::fee_schedule`), not a curve restated here.
+                crate::exit_policy::taker_fee_pct(px)
             };
             fee_usd = (fee_pct / Decimal::ONE_HUNDRED) * notional;
             match d.side {
@@ -4243,9 +4245,9 @@ impl Core {
             let fee_usd = if t.maker == Some(true) {
                 Decimal::ZERO
             } else {
-                // F8: fees follow the configured fee model (ExitConfig.fee_model).
-                (self.config.positions.exit.fee_model.fee_pct(t.price) / Decimal::ONE_HUNDRED)
-                    * notional
+                // The fee follows the schedule in force (see
+                // `exit_policy::fee_schedule`), not a curve restated here.
+                (crate::exit_policy::taker_fee_pct(t.price) / Decimal::ONE_HUNDRED) * notional
             };
             self.ledger.settle_sell_fill(notional, fee_usd);
             let role = if t.maker == Some(true) {

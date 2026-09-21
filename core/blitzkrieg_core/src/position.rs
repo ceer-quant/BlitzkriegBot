@@ -1087,12 +1087,12 @@ impl PositionManager {
 
         // Shares with no exit fill of their own (a direct close, or the sub-grid
         // remainder) are priced here, so they must carry a fee here too — at the
-        // role of the order the caller just placed. F8: the fee follows the
-        // configured fee model, not a hard-wired curve.
+        // role of the order the caller just placed. The fee follows the schedule
+        // in force, not a curve restated at this call site.
         let dust_fee = if was_maker {
             Decimal::ZERO
         } else {
-            (self.config.exit.fee_model.fee_pct(exit_price) / Decimal::ONE_HUNDRED) * dust_notional
+            (crate::exit_policy::taker_fee_pct(exit_price) / Decimal::ONE_HUNDRED) * dust_notional
         };
 
         let cost = pos.flows.entry_cost_usd;
@@ -1453,49 +1453,48 @@ mod tests {
             .unwrap_or(0)
     }
 
-    /// F8: the configured fee model drives the close-path (dust) fee. 0.1
-    /// unsold share written off at 0.60 taker: legacy 1.2% of price vs official
-    /// crypto 0.07*(1-0.6)*100% = 2.8% of price → dust fee differs by
-    /// 1.6% * (0.60 * 0.1) = $0.00096.
+    /// The close path prices the unsold remainder itself, so it must charge it
+    /// the ACTIVE schedule's taker fee rather than a curve restated at that call
+    /// site. 0.1 unsold share written off at 0.60 taker: the shipped legacy
+    /// curve charges 1.2% of the $0.06 notional = $0.00072, where the published
+    /// crypto curve (2.8% of price) would charge $0.00168 — $0.00096 more.
+    ///
+    /// The active schedule is set-once per process, so this cannot run the two
+    /// schedules side by side; the assertion is the absolute net, which pins the
+    /// dust fee inside it, plus the delta the other schedule would have made.
     #[test]
-    fn close_dust_fee_follows_the_fee_model() {
-        let dust_fee = |model: crate::exit_policy::FeeModel| -> Decimal {
-            let mut pm = PositionManager::new(PositionConfig {
-                exit: crate::exit_policy::ExitConfig {
-                    fee_model: model,
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
-            let p = enter(
-                &mut pm,
-                params("BTC", SignalDirection::Up, dec!(0.4)),
-                OrderRole::Maker,
-                0,
-            );
-            // Sell 9.90 of 10 shares (sub-grid remainder stays) as a taker; the
-            // partial's own fee is identical in both runs and cancels out.
-            let exit_fee = (crate::exit_policy::FeeModel::LegacyQuadratic.fee_pct(dec!(0.6))
-                / Decimal::ONE_HUNDRED)
-                * dec!(0.6)
-                * dec!(9.9);
-            pm.apply_exit_fill(&p.id, dec!(9.9), dec!(0.6), exit_fee, OrderRole::Taker)
-                .unwrap();
-            let closed = pm
-                .close(&p.id, dec!(0.60), ExitReason::Manual, false, 1000)
-                .unwrap();
-            closed.net_pnl_usd
-        };
-        // The only difference between the two runs is the dust fee schedule.
-        // legacy dust: 1.2% * (0.60 * 0.1) = 0.00072
-        // crypto dust: 2.8% * (0.60 * 0.1) = 0.00168
-        let legacy = dust_fee(crate::exit_policy::FeeModel::LegacyQuadratic);
-        let crypto = dust_fee(crate::exit_policy::FeeModel::PolymarketCrypto);
+    fn close_dust_fee_follows_the_active_schedule() {
         assert_eq!(
-            legacy - crypto,
-            dec!(0.00096),
-            "net = gross − fees, per model"
+            crate::exit_policy::fee_schedule().name,
+            "legacy_quadratic",
+            "no schedule is installed in tests, so the shipped default is active"
         );
+        let mut pm = PositionManager::new(PositionConfig::default());
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
+        // Sell 9.90 of 10 shares (sub-grid remainder stays) as a taker; that
+        // fill's own fee is charged by the caller, as production does.
+        let exit_fee = (dec!(1.2) / Decimal::ONE_HUNDRED) * dec!(0.6) * dec!(9.9);
+        pm.apply_exit_fill(&p.id, dec!(9.9), dec!(0.6), exit_fee, OrderRole::Taker)
+            .unwrap();
+        let closed = pm
+            .close(&p.id, dec!(0.60), ExitReason::Manual, false, 1000)
+            .unwrap();
+        // gross = 5.94 (the 9.90 sold) + 0.06 (dust) − 4.00 (maker cost) = 2.00
+        // fees  = 0.07128 (1.2% of the taker fill's 5.94) + 0.00072 (legacy
+        //         dust) = 0.072
+        assert_eq!(closed.net_pnl_usd, dec!(1.928));
+
+        let dust_notional = dec!(0.6) * dec!(0.1);
+        let legacy_dust = (dec!(1.2) / Decimal::ONE_HUNDRED) * dust_notional;
+        let official_dust = (crate::exit_policy::official_schedule().fee_pct(dec!(0.60))
+            / Decimal::ONE_HUNDRED)
+            * dust_notional;
+        assert_eq!(official_dust - legacy_dust, dec!(0.00096));
     }
 
     #[test]

@@ -57,59 +57,17 @@
  *        (cd user_layer/strategies && cargo build --release)
  */
 import { spawn } from './lib/child-guard.mjs';
-import { createHash } from 'crypto';
-import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
-import { gunzipSync, gzipSync } from 'zlib';
-import { createInterface } from 'readline';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
+// The corpus pins live in one place (#203): a second copy of four hashes is a
+// copy that cannot notice the original moving.
+import { WINDOWS, buildCorpus, corpusPath, materialize } from './lib/frozen-corpus.mjs';
 
 const ROOT = process.cwd();
 const BIN = join(ROOT, 'target', 'release', 'blitzkrieg-core');
 const STRATEGY_DIR = join(ROOT, 'user_layer', 'strategies', 'target', 'release');
 const ARCHIVE_DIR = join(ROOT, 'data', 'archive');
-const CORPUS_DIR = join(ROOT, 'docs', 'reports', 'data', 'mean-reversion-gate');
 
-const LEAD_MS = 15 * 60 * 1000;
-const SPAN_MS = 60 * 60 * 1000;
-const TOP_LEVELS = 3;
-
-// ---------------------------------------------------------------------------
-// The frozen corpus. `sha256` is over the DECOMPRESSED jsonl; a run whose file
-// does not hash to it is refused rather than reported.
-// ---------------------------------------------------------------------------
-const WINDOWS = [
-  {
-    name: 'trend-20260919T1000Z',
-    at: '2026-09-19T10:00:00Z',
-    regime: 'one-sided',
-    basis: 'worst shipped-config PnL of 2026-09-19 (-$12.11, 0 wins / 20 trades)',
-    sha256: 'eb43ecef092dd4d1cc37064d8d0b7ce7ec754fcd25b7ea9e357ae4aa34104d18',
-  },
-  {
-    name: 'range-20260919T1600Z',
-    at: '2026-09-19T16:00:00Z',
-    regime: 'two-sided',
-    basis: 'best shipped-config win rate of 2026-09-19 (7 wins / 17 trades, 41%)',
-    sha256: '497b921df3d24911604132c42a7b7102573d0da2a29485eb53d44f82b3ee87d0',
-  },
-  {
-    name: 'trend-20260920T2100Z',
-    at: '2026-09-20T21:00:00Z',
-    regime: 'one-sided',
-    basis: 'worst shipped-config PnL of 2026-09-20 (-$10.16, 0 wins / 17 trades)',
-    sha256: '5179ac7f7f7eb7108b8baf8a5a0153868f0ea3d10f63f085fc0300b6fb5a0836',
-  },
-  {
-    name: 'range-20260920T2300Z',
-    at: '2026-09-20T23:00:00Z',
-    regime: 'two-sided',
-    basis: 'best shipped-config win rate of 2026-09-20 (7 wins / 18 trades, 39%; the only profitable hour of the capture)',
-    sha256: '3c365b0a9574117cc2f0b3e60d96f8e0159035dee9b3cc8c50e4dcd559f6ea79',
-  },
-];
-
-// Arms. `knobs` is exactly what differs between two runs.
 const SHIPPED = { label: 'shipped (gate 600s/-30%)', knobs: [] };
 const NO_GATE = { label: 'no gate (pre-#176)', knobs: [['trend_window_sec', '0']] };
 const SWEEP = [
@@ -131,81 +89,6 @@ function parseKnobSpec(spec) {
   const i = spec.indexOf(':');
   const j = spec.indexOf('=');
   return [spec.slice(0, i), spec.slice(i + 1, j), spec.slice(j + 1)];
-}
-
-function truncateBook(ev) {
-  const b = Array.isArray(ev.b) ? ev.b.slice(-TOP_LEVELS) : undefined;
-  const a = Array.isArray(ev.a) ? ev.a.slice(-TOP_LEVELS) : undefined;
-  const out = { at: ev.at, k: 'book', t: ev.t };
-  if (b) out.b = b;
-  if (a) out.a = a;
-  return JSON.stringify(out);
-}
-
-async function buildCorpus(archiveDir) {
-  if (!existsSync(archiveDir)) {
-    console.error(`missing ${archiveDir}: --build-corpus needs the recorded capture (override with --archive <dir>)`);
-    process.exit(2);
-  }
-  const files = (await import('fs')).readdirSync(archiveDir).filter((f) => /^events.*\.jsonl$/.test(f)).sort();
-  mkdirSync(CORPUS_DIR, { recursive: true });
-  const rows = new Map(WINDOWS.map((w) => [w.name, []]));
-  let scanned = 0;
-  for (const f of files) {
-    const rl = createInterface({ input: createReadStream(join(archiveDir, f)), crlfDelay: Infinity });
-    for await (const line of rl) {
-      // Cheap prefilter before JSON: books and rounds only.
-      if (!line.includes('"k":"book"') && !line.includes('"k":"round"')) continue;
-      scanned += 1;
-      const at = Number(/^\{?"?at"?:\s*(\d+)/.exec(line)?.[1] ?? /"at":(\d+)/.exec(line)?.[1] ?? NaN);
-      if (!Number.isFinite(at)) continue;
-      for (const w of WINDOWS) {
-        const t0 = Date.parse(w.at);
-        if (at < t0 - LEAD_MS || at >= t0 + SPAN_MS) continue;
-        rows.get(w.name).push(line.includes('"k":"book"') ? truncateBook(JSON.parse(line)) : line);
-      }
-    }
-  }
-  for (const w of WINDOWS) {
-    const body = rows.get(w.name);
-    body.sort((x, y) => JSON.parse(x).at - JSON.parse(y).at);
-    const jsonl = body.join('\n') + '\n';
-    const buf = Buffer.from(jsonl, 'utf8');
-    const sha = createHash('sha256').update(buf).digest('hex');
-    const gz = join(CORPUS_DIR, `${w.name}.jsonl.gz`);
-    writeFileSync(gz, gzipSync(buf, { level: 9 }));
-    const expect = w.sha256 === 'PENDING' ? '(paste this)' : w.sha256;
-    const ok = w.sha256 === 'PENDING' || w.sha256 === sha;
-    console.log(`${w.name}: ${body.length} events, ${(buf.length / 1e6).toFixed(2)} MB raw, ${(readFileSync(gz).length / 1e6).toFixed(2)} MB gz`);
-    console.log(`  sha256(uncompressed) ${sha} ${w.sha256 === 'PENDING' ? expect : ok ? 'OK' : `MISMATCH want ${expect}`}`);
-    if (!ok) process.exit(1);
-  }
-  console.log(`scanned ${scanned} archive lines`);
-}
-
-// ---------------------------------------------------------------------------
-// Replay arms
-// ---------------------------------------------------------------------------
-function corpusPath(w) {
-  return join(CORPUS_DIR, `${w.name}.jsonl.gz`);
-}
-
-function materialize(w) {
-  const gz = corpusPath(w);
-  if (!existsSync(gz)) {
-    console.error(`missing corpus ${gz}: run --build-corpus from a checkout with data/archive`);
-    process.exit(2);
-  }
-  const buf = gunzipSync(readFileSync(gz));
-  const sha = createHash('sha256').update(buf).digest('hex');
-  if (w.sha256 !== 'PENDING' && sha !== w.sha256) {
-    console.error(`${w.name}: corpus sha256 ${sha} != pinned ${w.sha256} — refusing to report on a changed corpus`);
-    process.exit(2);
-  }
-  const dir = mkdtempSync(join(tmpdir(), 'bk-mr-gate-'));
-  const path = join(dir, `${w.name}.jsonl`);
-  writeFileSync(path, buf);
-  return { path, dir, sha };
 }
 
 /** One replay. Returns the report's own numbers, no re-derivation. */
@@ -279,7 +162,7 @@ async function main() {
   const argv = process.argv.slice(2);
   if (argv.includes('--build-corpus')) {
     const ai = argv.indexOf('--archive');
-    await buildCorpus(ai >= 0 && argv[ai + 1] ? argv[ai + 1] : ARCHIVE_DIR);
+    await buildCorpus(ROOT, ai >= 0 && argv[ai + 1] ? argv[ai + 1] : ARCHIVE_DIR);
     return;
   }
   if (!existsSync(BIN)) {
@@ -295,7 +178,7 @@ async function main() {
   const arms = sweep ? [NO_GATE, ...SWEEP] : [NO_GATE, SHIPPED];
   const result = { windows: [], arms: arms.map((a) => a.label), generated: new Date().toISOString() };
   for (const w of WINDOWS) {
-    const corpus = materialize(w);
+    const corpus = materialize(ROOT, w);
     const rows = [];
     for (const arm of arms) rows.push(await runArm(corpus, arm));
     printWindow(w, rows);
