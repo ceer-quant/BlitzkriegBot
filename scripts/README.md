@@ -70,6 +70,27 @@ cargo build --release --workspace --locked
   checkout it was generated from and execs the freshly built binary there, so
   it can never go stale and core/strategy/data resolution keeps working from
   any directory. It overwrites only its own earlier output.
+- `upgrade.sh` — the one-shot production upgrade behind the shim's `upgrade`
+  verb (#252, #244): light data backup → fetch the source (`ceer/…`, override
+  with `BLITZKRIEG_UPGRADE_SOURCE`) → detached checkout of the build worktree
+  `target/bk-main-build` → release build of the workspace, the strategy cdylibs
+  and the panel's webui bundle → local gates (core lib tests **and** the panel's
+  `check:all`; no pipeline, so a red suite actually stops the deploy) → stage the
+  whole release and print what it changes → stop → install → start → verify
+  identity through `.core-lock`. A release carries more than the four binaries:
+  `user_layer/configs/*.toml` (the factory values), `user_layer/*/target/release/
+  *.dylib` (the strategy code the kernel `dlopen`s out of the *running* checkout)
+  and `ui/webapp/webui/dist` (the bundle the launcher serves). Every replaced file
+  is kept under `target/rollback-<ts>` (three newest kept) and restored if the new
+  build does not answer within `BLITZKRIEG_UPGRADE_DEADLINE` (120s). `--check`
+  builds, gates and stages without touching the live stack. It never edits `.env`.
+- `lib/upgrade-artifacts.sh` — the staging/drift/install/verify/rollback half of
+  the above, sourced by `upgrade.sh` and driven directly by
+  `upgrade-propagate-test.sh` (no build, no network).
+- `upgrade-propagate-test.sh` — `sh scripts/upgrade-propagate-test.sh`, exit 0 =
+  pass: stages into two throwaway trees, asserts the drift report, installs,
+  catches a half-written install, rolls back (including a hand-edited config the
+  upgrade replaced) and prunes the rollback sets.
 - `dry-observe.mjs` — attach to a running dry core and print round/order/position ticks.
 - `soak-health.sh` / `soak-health-loop.sh` / `soak-monitor.mjs` — long-run health monitoring.
   `soak-health.sh` exits 0 (healthy) / 1 (anomaly) / 2 (not a repo root) and prints
