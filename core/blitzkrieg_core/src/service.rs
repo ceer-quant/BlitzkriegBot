@@ -817,6 +817,17 @@ pub struct Core {
     position_db: Option<crate::position_db::PositionDb>,
     /// Feed/decision counters for observability (P4 diagnostics).
     stats: CoreStats,
+    /// When this core's ACCOUNTING SESSION began, in epoch ms (issue #200).
+    ///
+    /// A seeded (`dry`/`readonly`) core re-seeds its cash ledger here
+    /// (`Ledger::set_balance(dry_seed_balance)` in `new`) while its trade log
+    /// and position log outlive the process. A cold ledger beside a trade book
+    /// that still holds earlier sessions answers a different question than the
+    /// cash identity asks, so an out-of-process audit of a seeded core has to
+    /// scope `realized` to the trades closed at/after this instant. A live core
+    /// ignores it: its opening cash is the venue's, and its identity telescopes
+    /// across polls instead.
+    started_at_ms: i64,
     /// Optional mirror of every market-data event into a JSONL archive (P-1.3).
     /// The backtester replays this file.
     event_archive: Option<crate::data_source::EventArchive>,
@@ -1045,6 +1056,11 @@ impl Core {
             order_db,
             position_db,
             stats: CoreStats::default(),
+            // The session clock for the accounting identity (issue #200). Read
+            // once, at construction: the ledger below is seeded at the same
+            // instant, so "cash since the seed" and "trades since startedAtMs"
+            // describe the same window.
+            started_at_ms: now_ms(),
             event_archive,
             strategy_accounting: HashMap::new(),
             place_cooldowns: HashMap::new(),
@@ -1226,6 +1242,14 @@ impl Core {
     }
     pub fn mode(&self) -> Mode {
         self.config.mode
+    }
+
+    /// The instant this core's accounting session began (epoch ms) — see the
+    /// field doc. Exposed read-only over `core.ready` so an external audit can
+    /// scope the seeded cash identity to the trades this process can be
+    /// responsible for (issue #200).
+    pub fn started_at_ms(&self) -> i64 {
+        self.started_at_ms
     }
     /// Read-only fee quote (#182) — the `core.feeQuote` entry point, so a gate or
     /// a reconcile script asks the kernel for the schedule it is charging instead
