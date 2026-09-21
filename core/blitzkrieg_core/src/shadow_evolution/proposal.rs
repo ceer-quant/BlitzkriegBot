@@ -224,18 +224,75 @@ impl ProposalStore {
 
     /// Fold `proposals.jsonl` into memory: the last line per id is the live
     /// state, every line stays on disk as history.
+    ///
+    /// The fold is read-only, and that is load-bearing. An earlier build folded
+    /// through [`Self::put`], whose disk half appends — so every start re-appended
+    /// what it had just read and the file doubled per restart. In production that
+    /// reached 2.92 GB / 3.3M lines for two live ids, and the resulting startup
+    /// cost made the kernel miss its readiness deadline (#243).
     pub fn load(&mut self) {
         let path = self.proposals_path();
         let Ok(text) = std::fs::read_to_string(&path) else {
             return;
         };
+        let total = text.lines().filter(|l| !l.trim().is_empty()).count();
         for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
             }
             if let Ok(p) = serde_json::from_str::<EvolutionProposal>(line) {
-                self.put(p);
+                self.fold(p);
             }
+        }
+        // A file whose lines are mostly repeat folds of ids the view already holds
+        // carries nothing a reader can use, and it is what the NEXT start must read
+        // through. Rewrite it as one line per id — the audit and promotion logs own
+        // the narrative history; the folded state is what anything reads back.
+        if total > 4 * self.records.len().max(1) {
+            tracing::warn!(
+                lines = total,
+                kept = self.records.len(),
+                "proposals.jsonl was mostly duplicated folds — rewriting compacted"
+            );
+            self.compact();
+        }
+    }
+
+    /// Memory-only half of [`Self::put`]: fold one record into the view and touch
+    /// no file. [`Self::load`] uses this — a load that writes is what doubled the
+    /// file on every restart.
+    fn fold(&mut self, p: EvolutionProposal) {
+        let id = p.id.clone();
+        if !self.order.contains(&id) {
+            self.order.push(id.clone());
+        }
+        self.records.insert(id, p);
+        while self.order.len() > self.cap {
+            let dropped = self.order.remove(0);
+            self.records.remove(&dropped);
+        }
+    }
+
+    /// Rewrite `proposals.jsonl` as one line per known id: the folded state, which
+    /// is all any reader gets back. tmp+rename like `state.json` — a crash midway
+    /// must not truncate the only copy of the live proposals.
+    fn compact(&self) {
+        let path = self.proposals_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut body = String::new();
+        for id in &self.order {
+            if let Some(p) = self.records.get(id)
+                && let Ok(line) = serde_json::to_string(p)
+            {
+                body.push_str(&line);
+                body.push('\n');
+            }
+        }
+        let tmp = path.with_extension("jsonl.tmp");
+        if std::fs::write(&tmp, body).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
         }
     }
 
@@ -591,5 +648,47 @@ mod tests {
         assert!(empty.load_state().is_none());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(tmp_dir("state-missing"));
+    }
+
+    /// #243: a load must never write. The earlier build folded through `put`,
+    /// whose disk half appends, so the file doubled on every start — production
+    /// measured 2.92 GB / 3.3M lines for two live ids, and the kernel missed its
+    /// readiness deadline reading it back.
+    #[test]
+    fn loading_folds_without_reappending_and_compacts_a_flooded_file() {
+        let dir = tmp_dir("loadfold");
+        let path = {
+            let mut store = ProposalStore::new(&dir);
+            store.put(proposal("p1", "alpha", 10, ProposalState::Proposed));
+            store.put(proposal("p2", "beta", 20, ProposalState::Proposed));
+            store.proposals_path()
+        };
+        let before = std::fs::read_to_string(&path).unwrap().lines().count();
+
+        let mut reloaded = ProposalStore::new(&dir);
+        reloaded.load();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().lines().count(),
+            before,
+            "load must not append anything"
+        );
+        assert_eq!(reloaded.pending().len(), 2);
+
+        // The damage a legacy build already wrote: the same folds, repeated.
+        // A reload compacts back to one line per id.
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.repeat(30)).unwrap();
+        let mut healed = ProposalStore::new(&dir);
+        healed.load();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().lines().count(),
+            before,
+            "compaction keeps one line per id"
+        );
+        assert_eq!(healed.pending().len(), 2);
+
+        // A load of an already-clean file leaves no temp file behind.
+        assert!(!path.with_extension("jsonl.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
