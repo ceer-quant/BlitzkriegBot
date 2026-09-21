@@ -106,6 +106,26 @@ cargo build --release --workspace --locked
   `exec-script: DENIED (exit=126)`). Boot persistence would need the user to grant
   Full Disk Access — a security-posture change, so it is left as a decision (D-33).
   `soak-monitor-check.mjs` gates both lifetimes and the stop switch.
+- `stack-watchdog.sh` / `com.blitzkrieg.stack-watchdog.plist` — 交易内核的心跳检查与
+  「停机」告警（issue #211 的 B 路线：只判定与告警，**不拉起**）。退出码 `0` = 内核存活
+  并在服务；`1` = 不在跑 / socket 不可达（已告警）；`2` = 用法或配置错误。存活判定复用
+  `soak-resident.sh` 的 `alive()` 语义（pidfile + `kill -0` + 命令行匹配）；内核自己不写
+  pidfile，所以未配 `--pidfile` 时用 `pgrep -f` 发现候选、再用同一套语义复核。在此之上多
+  一个 UDS connect 探针（与 `ui_kit` 的 `socket_served()` 同语义），于是输出能把「进程不在」
+  和「进程在但 socket 不通」分开说——前者是停机，后者是卡死/抢占，处置方式不同。
+  告警正文：当前模式（dry / live / readonly，**只读** `.env` 且永不改 `DRY_RUN`）、未平仓与
+  未赎回应收（读 `data/`，读不到就写「无法判定」，绝不假装 0）、最后已知存活时间（状态文件
+  无记录时退回数据落盘时间并标注是推断）、可直接粘贴的恢复命令。去抖：只在状态翻转时出声，
+  持续停机期间最多每 `--repeat-sec`（默认 900s）重复一次。**默认绝不自动拉起**：要动手必须
+  同时给出 `--autostart` 与 `BK_AUTOSTART_CMD`（两把钥匙），且 **live 模式一律硬拒绝**。
+  计划内停机先 `touch $STATE_DIR/silence`，免得收到一条完全正确的告警。
+  自测：`bash scripts/stack-watchdog.sh --self-test`（12 组用例 / 42 项断言，fixture 驱动，
+  不需要真内核、不碰生产 `data/`、不建默认状态目录）。
+  部署与「重启后谁跑它」见 README.md §3.5；**外置卷的 TCC 限制对它同样成立**（launchd 拉起
+  的进程被拒读/执行本卷），三种应对：授予完全磁盘访问权限 / 把脚本复制到内置盘并用
+  `BK_REPO_ROOT` 指回本仓库 / 把检出搬到内置盘。仓库里附的
+  `com.blitzkrieg.stack-autostart.plist.disabled` 是路线 A 的骨架：**装上它 = 无人值守自动
+  拉起 live，属于用户决定，默认不安装**。
 - `analyze-signals.mjs` / `analyze-strategy.mjs` — offline signal/strategy analysis.
 - `walk-forward-sweep.mjs` / `shadow-export.mjs` / `strategy-ab-compare.mjs` — the
   strategy-evolution toolkit (E15 / #97). The sweep splits a frozen event archive

@@ -199,6 +199,71 @@ cargo build --release -p blitzkrieg-ui-kit
 
 终端面板（可选）：`target/release/blitzkrieg tui`（或 `cargo run -p blitzkrieg-ui-panel`）。
 
+### 3.5 重启之后：停机告警与自动拉起（issue #211）
+
+**重启后会发生什么（当前事实，不是猜测）**：机器重启后**没有任何东西会把交易内核带回来**——
+`launchctl list` 里只有 `com.blitzkrieg.databackup.*` 两个备份 job，内核与面板都得有人手动
+`blitzkrieg run`。2026-09-21 的事故就是这样：内核从当日起不再运行，而**没有任何告警**。
+根因不是「忘了写 agent」：本仓库在外置卷，macOS 拒绝 launchd 拉起的进程读/执行该卷
+（实测 `read-volume: DENIED`、`exec-script: DENIED (exit=126)`），连 databackup 自己现在
+都在以 `/bin/sh: .../data-backup-cli.sh: Operation not permitted` 失败。所以这里把两半分开：
+
+- **B 路线（已实现，安全的那一半）**：`scripts/stack-watchdog.sh`——判定 + 告警，**不拉起**。
+- **A 路线（只有骨架，未启用）**：`scripts/com.blitzkrieg.stack-autostart.plist.disabled`。
+  **安装它 = 无人值守地自动拉起内核，`DRY_RUN=false`（live）时也一样**——这与
+  「live 只在用户在场时开」的约定冲突，所以是**用户决定、需要明确批准**，默认不安装。
+
+**装 watchdog（B 路线）**
+
+```bash
+# 1) 先只读地看一眼：不告警、不落状态、不拉起（内核在跑则打印 RUNNING）
+bash scripts/stack-watchdog.sh --status
+
+# 2) 手工跑一次真检查：内核不在跑 → 退出 1，并落日志 + STACK_DOWN 标记 + 本地通知
+bash scripts/stack-watchdog.sh
+
+# 3) 装成「登录/重启后立刻一次 + 之后每 60 秒一次」（StartInterval=60, RunAtLoad）
+cp scripts/com.blitzkrieg.stack-watchdog.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.blitzkrieg.stack-watchdog.plist
+launchctl list | grep blitzkrieg     # 应当看到 com.blitzkrieg.stack-watchdog
+```
+
+退出码：`0` 内核存活并在服务；`1` 内核不在跑 / socket 不可达（已告警）；`2` 用法或配置错误。
+（plist 里有两处烧死的本机路径——脚本路径与 `StandardOutPath`：检出不在
+`/Volumes/Hard Disk/BlitzkriegBot`、或用户名不是 `fancer`，就改这两行。）
+
+日志：`$STATE_DIR/watchdog.log`（默认 `~/Library/Logs/blitzkrieg-stack-watchdog/`，与 plist 的
+stdout 同一份）；内核正在 down 时另有 `$STATE_DIR/STACK_DOWN` 标记，恢复后自动删除。
+告警正文包含：当前模式（dry / live / readonly，来源一并写明）、**未平仓与未赎回应收**
+（读 `data/` 的真实数字；读不到就写「无法判定」，绝不假装 0）、最后已知存活时间、可直接粘贴的
+恢复命令。判定复用 `scripts/soak-resident.sh` 的 `alive()` 语义（pidfile + `kill -0` + 命令行匹配），
+再加一个 UDS connect 探针，因此「进程不在」与「进程在但 socket 不通」在输出里是两句话。
+
+**外置卷的 TCC 会让第 3 步跑不起来**（错误会出现在
+`~/Library/Logs/blitzkrieg-stack-watchdog.log`）。三选一，细节见 `scripts/README.md`：
+(a) 给解释器（`/bin/sh`）授予完全磁盘访问权限——安全姿态变更，**你拍板**；
+(b) 把脚本复制到内置盘，用 `BK_REPO_ROOT` 指回本仓库——停机判定与告警仍然成立（`pgrep` 与
+`$TMPDIR` 下的 socket 都在受保护卷之外），只有模式 / 未平仓会显示「无法判定（权限被拒）」；
+(c) 把检出搬到内置盘。
+
+**DRY_RUN 与自动拉起的关系**（一句话：**默认不拉起，live 永不自动拉起**）
+
+| 条件 | watchdog 会不会拉起内核 |
+| --- | --- |
+| 默认（没有 `--autostart`，也没有 `BK_AUTOSTART_CMD`） | 不会，只告警 |
+| `--autostart`（或 `BK_AUTOSTART=1`）但**没有** `BK_AUTOSTART_CMD` | 不会（两把钥匙缺一不动） |
+| 两把钥匙都有 + 模式 dry | 会：执行 `BK_AUTOSTART_CMD`，输出记入 `autostart.log` |
+| 两把钥匙都有 + 模式 live | **不会**：代码里的硬门禁，开关打开也一样 |
+| 两把钥匙都有 + `--readonly` 或模式无法判定 | 不会（只允许 dry） |
+| 进程在但 socket 不通 | 不会（再拉一个会有两个内核抢同一个 socket，交人工） |
+
+- watchdog **只读** `.env`（只取 `DRY_RUN` 一行用于显示），**永不写 `.env`、永不改 `DRY_RUN` 的值**。
+- 计划内停机（自己 `blitzkrieg stop`）先 `touch ~/Library/Logs/blitzkrieg-stack-watchdog/silence`，
+  起来后删掉：静默只压「喊人」（不通知、不落告警正文），状态、`STACK_DOWN` 标记与退出码照常。
+- 去抖：只在状态翻转时出声；持续停机期间最多每 15 分钟（`--repeat-sec`）重复一次，不刷屏。
+- 自测（CI 可直接跑：fixture 驱动，**不需要真内核**，不碰生产 `data/`）：
+  `bash scripts/stack-watchdog.sh --self-test`
+
 ---
 
 ## 4. 工作原理

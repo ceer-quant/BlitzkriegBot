@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.blitzkrieg.stack-watchdog</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-lc</string>
+    <string>exec "/Volumes/Hard Disk/BlitzkriegBot/scripts/stack-watchdog.sh"</string>
+  </array>
+
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BK_REPO_ROOT</key><string>/Volumes/Hard Disk/BlitzkriegBot</string>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+  </dict>
+
+  <key>AbandonProcessGroup</key><true/>
+
+  <key>ProcessType</key><string>Background</string>
+  <key>Nice</key><integer>10</integer>
+  <key>LowPriorityIO</key><true/>
+
+  <key>StandardOutPath</key><string>/Users/fancer/Library/Logs/blitzkrieg-stack-watchdog.log</string>
+  <key>StandardErrorPath</key><string>/Users/fancer/Library/Logs/blitzkrieg-stack-watchdog.log</string>
+</dict>
+</plist>
