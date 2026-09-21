@@ -6,8 +6,9 @@ use crate::ipc::schema::Event;
 use crate::ipc::server::now_ms;
 use crate::ledger::Ledger;
 use crate::model::*;
-use crate::ome::{FillDelta, Ome, SubmitParams};
+use crate::ome::{AppliedFillRecord, FillDelta, FillOutcome, LateFill, Ome, SubmitParams};
 use crate::position::{OpenParams, PositionConfig, PositionManager};
+use crate::reconcile::{AuditInput, AuditReport, CashIdentity};
 use crate::risk::{LossBreakers, RiskConfig, RiskGate};
 use crate::shadow_evolution::{
     EvolutionOutcome, EvolutionStatus, MutableParams, ShadowEvolution, ShadowEvolutionConfig,
@@ -143,6 +144,23 @@ pub struct CoreConfig {
     /// MiB free (0 = no guard). Checked once per rotation, so it costs nothing on
     /// the hot path.
     pub event_archive_min_free_mb: u64,
+    /// How often the in-kernel accounting audit runs, in seconds (issue #189).
+    /// 0 disables it. Default 30: the acceptance criterion is "drift is alerted,
+    /// persisted and blocks new entries within 30s of appearing".
+    pub audit_interval_sec: i64,
+    /// Where to append one JSONL record per audit (issue #189). None = derive
+    /// `reconcile.jsonl` beside the order log; `order_log_path: None` (the
+    /// backtester and most tests) means no audit file at all.
+    pub audit_log_path: Option<String>,
+    /// Where to persist the applied-fill idempotency table (issue #178). None =
+    /// derive `applied-fills.jsonl` beside the order log; `order_log_path: None`
+    /// means no persistence, i.e. the table is per-session.
+    pub applied_log_path: Option<String>,
+    /// Whether a failing audit blocks NEW entries (default true; issue #189).
+    /// Exits are never blocked — a drifted ledger must not be able to trap the
+    /// bot in a position (the #174 failure mode). Turning this off keeps the
+    /// alert and the persisted record while leaving the gates alone.
+    pub audit_halt_entries: bool,
 }
 
 impl CoreConfig {
@@ -474,6 +492,10 @@ impl Default for CoreConfig {
             event_archive_max_mb: 512,
             event_archive_rotate_mb: 0,
             event_archive_min_free_mb: 0,
+            audit_interval_sec: 30,
+            audit_log_path: None,
+            applied_log_path: None,
+            audit_halt_entries: true,
         }
     }
 }
@@ -507,6 +529,150 @@ type EscalationTarget = (
     i64,
     i64,
 );
+
+/// Append-only journal of the OME's applied-fill idempotency table (issue #178).
+///
+/// The table used to be memory-only, so a restart forgot which venue trade ids
+/// had already been booked and the venue's own re-delivery (a WS replay or the
+/// REST sweep's recent-trade window) booked the same fill a second time — the
+/// position doubled and the cash moved twice. Rebuilding it from `trades.jsonl`
+/// is not possible: that log stores ONE AGGREGATED record per CLOSED position and
+/// carries no venue trade ids at all, so there is nothing to fold a fill key from.
+///
+/// Same shape as the order log: one line per MUTATION (a key's applied size, or
+/// a tombstone when it is evicted), folded latest-wins on load. The file lives
+/// beside the order log because it is the OME's state, and it is compacted to the
+/// live table on restore so it cannot grow across restarts.
+struct AppliedFillLog {
+    path: std::path::PathBuf,
+}
+
+impl AppliedFillLog {
+    fn new(path: impl AsRef<std::path::Path>) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+        }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Append the mutations. Best effort, like every other log here: a write
+    /// failure must never interrupt trading (the in-memory table stays
+    /// authoritative for this run, and the OME warns when its journal is full).
+    fn append(&self, records: &[AppliedFillRecord]) {
+        if records.is_empty() {
+            return;
+        }
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let mut buf = String::new();
+        for r in records {
+            match serde_json::to_string(r) {
+                Ok(line) => {
+                    buf.push_str(&line);
+                    buf.push('\n');
+                }
+                Err(e) => tracing::warn!(error = %e, "cannot serialize applied-fill record"),
+            }
+        }
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            if let Err(e) = f.write_all(buf.as_bytes()) {
+                tracing::warn!(error = %e, path = %self.path.display(), "applied-fill log append failed");
+            }
+        } else {
+            tracing::warn!(path = %self.path.display(), "cannot open applied-fill log");
+        }
+    }
+
+    /// Load the mutations in file order (the OME folds them). Unparseable lines
+    /// are skipped, never fatal: a corrupt tail must not stop the core from
+    /// starting, and every record kept is a duplicate the table will refuse.
+    fn load(&self) -> Vec<AppliedFillRecord> {
+        let Ok(text) = std::fs::read_to_string(&self.path) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut skipped = 0usize;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<AppliedFillRecord>(line) {
+                Ok(r) => out.push(r),
+                Err(_) => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                skipped,
+                path = %self.path.display(),
+                "applied-fill log: skipped unparseable lines"
+            );
+        }
+        out
+    }
+
+    /// Rewrite the log as the current table (one line per live key). Called after
+    /// a restore, so the file is the table rather than every mutation ever made.
+    fn compact(&self, snapshot: &[AppliedFillRecord]) {
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let mut buf = String::new();
+        for r in snapshot {
+            match serde_json::to_string(r) {
+                Ok(line) => {
+                    buf.push_str(&line);
+                    buf.push('\n');
+                }
+                Err(e) => tracing::warn!(error = %e, "cannot serialize applied-fill record"),
+            }
+        }
+        if let Err(e) = std::fs::write(&self.path, buf) {
+            tracing::warn!(error = %e, path = %self.path.display(), "applied-fill log compact failed");
+        }
+    }
+}
+
+/// In-kernel accounting audit state (issue #189). Session-scoped: the anchor and
+/// the strike counter describe THIS run's observations, and the durable record is
+/// the audit JSONL.
+#[derive(Debug, Clone, Default)]
+struct AuditRuntime {
+    /// Last audit instant (0 = never).
+    last_at_ms: i64,
+    /// Last audit that was written to the log even though it passed (heartbeat).
+    last_heartbeat_ms: i64,
+    /// The baseline the anchored cash identity is measured from. Taken at the
+    /// first audit whose structural checks pass and NEVER moved while the books
+    /// are wrong — re-anchoring would hide the drift it exists to expose.
+    anchor: Option<CashIdentity>,
+    report: Option<AuditReport>,
+    /// Consecutive cross-source-only failures; two in a row halt (a single one
+    /// can be a stale venue read).
+    cross_source_failures: u32,
+    /// New entries are currently blocked by a failing audit.
+    halted: bool,
+    halt_reason: String,
+    runs: u64,
+    failures: u64,
+    /// Where each audit appends its verdict (None = no persistence).
+    audit_log_path: Option<String>,
+    /// The last time the ledger's cash was SET from the venue rather than moved
+    /// by a fill: `(at_ms, delta)`. The plugin host does this deliberately when
+    /// nothing rests, so the trade-leg check can tell the venue's own correction
+    /// from a local inconsistency instead of halting entries over it.
+    last_realign: Option<(i64, Decimal)>,
+}
 
 pub struct Core {
     config: CoreConfig,
@@ -577,6 +743,16 @@ pub struct Core {
     recon_watermark_ms: i64,
     /// Newest trading-capability self-check report (panel visibility).
     last_self_check: Option<blitzkrieg_market_api::SelfCheckReport>,
+    /// Durable journal of the applied-fill idempotency table (issue #178). The
+    /// OME never touches the filesystem; the service drains its mutation journal
+    /// after every applied fill and appends it here, and restores the table from
+    /// it at startup.
+    applied_log: Option<AppliedFillLog>,
+    /// In-kernel accounting audit state (issue #189).
+    audit: AuditRuntime,
+    /// Last free-cash figure the venue reported, as `(at_ms, free)` — the venue
+    /// leg of the audit compares against it.
+    venue_free: Option<(i64, Decimal)>,
     next_id: u64,
     tx: Option<mpsc::UnboundedSender<Event>>,
 }
@@ -595,6 +771,21 @@ impl Core {
             .position_log_path
             .as_ref()
             .map(crate::position_db::PositionDb::new);
+        // Both side-log paths are derived from the order log's directory when not
+        // set explicitly: they belong to the same durable state, and a deployment
+        // that persists orders wants its idempotency table and audit trail on
+        // disk too. `order_log_path: None` (the backtester, most tests) means no
+        // persistence for any of them.
+        let side_log_path = |explicit: &Option<String>, name: &str| -> Option<String> {
+            if let Some(p) = explicit {
+                return Some(p.clone());
+            }
+            let dir = std::path::Path::new(config.order_log_path.as_deref()?).parent()?;
+            Some(dir.join(name).to_string_lossy().to_string())
+        };
+        let applied_log =
+            side_log_path(&config.applied_log_path, "applied-fills.jsonl").map(AppliedFillLog::new);
+        let audit_log = side_log_path(&config.audit_log_path, "reconcile.jsonl");
         let shadow_cfg = {
             let mut c = ShadowEvolutionConfig {
                 enabled: config.shadow_evolution_enabled,
@@ -750,6 +941,12 @@ impl Core {
             last_venue_error: None,
             recon_watermark_ms: 0,
             last_self_check: None,
+            applied_log,
+            audit: AuditRuntime {
+                audit_log_path: audit_log,
+                ..Default::default()
+            },
+            venue_free: None,
             next_id: 1,
             tx: None,
         }
@@ -763,7 +960,24 @@ impl Core {
     /// startup, BEFORE trading begins. Live orders are re-adopted (with their
     /// venue ids) so the startup sweep can reconcile them; terminal orders are
     /// dropped and the log compacted to just the restored set.
+    ///
+    /// Also restores the applied-fill idempotency table (issue #178) — without it,
+    /// the venue's own re-delivery of an already-booked trade id books the fill a
+    /// second time after every restart — and re-establishes the BUY reservations
+    /// those restored orders still commit (issue #181), which a fresh Ledger would
+    /// otherwise start without.
     pub fn restore_orders(&mut self) -> usize {
+        let applied = self.restore_applied();
+        if applied.0 > 0 {
+            self.emit(Event::RiskAlert {
+                code: CoreErrorCode::Internal,
+                message: format!(
+                    "restored {} applied-fill key(s) from {} after restart (duplicate venue \
+                     trades stay idempotent)",
+                    applied.0, applied.1
+                ),
+            });
+        }
         let Some(db) = self.order_db.as_ref() else {
             return 0;
         };
@@ -777,12 +991,61 @@ impl Core {
         self.ome.restore(live.clone());
         db.compact(&live);
         if n > 0 {
+            // A re-adopted order still commits its unfilled notional. The local
+            // reservation table is empty on a fresh process, so without this the
+            // reserve gate would believe the whole balance is free and the next
+            // entries would over-commit against cash the venue has already
+            // spoken for (issue #181).
+            let mut restored_notional = Decimal::ZERO;
+            for o in &live {
+                if o.side != Side::Buy {
+                    continue;
+                }
+                let remaining = (o.size - o.filled_size).max(Decimal::ZERO);
+                let notional = o.price * remaining;
+                self.ledger.sync_buy_reservation(&o.order_id, notional);
+                restored_notional += notional;
+            }
             self.emit(Event::RiskAlert {
                 code: CoreErrorCode::Internal,
-                message: format!("recovered {n} live order(s) from the order log after restart"),
+                message: format!(
+                    "recovered {n} live order(s) from the order log after restart \
+                     ({restored_notional} of BUY notional re-reserved)"
+                ),
             });
         }
         n
+    }
+
+    /// Fold the persisted applied-fill journal into the OME. Returns
+    /// `(keys restored, path)`.
+    fn restore_applied(&mut self) -> (usize, String) {
+        let Some(log) = self.applied_log.as_ref() else {
+            return (0, String::new());
+        };
+        let records = log.load();
+        if records.is_empty() {
+            return (0, log.path().display().to_string());
+        }
+        self.ome.restore_applied(records);
+        let n = self.ome.applied_len();
+        // The file was every mutation ever made; it is now the live table.
+        self.ome.take_applied_journal();
+        log.compact(&self.ome.applied_snapshot());
+        (n, log.path().display().to_string())
+    }
+
+    /// Append whatever the OME journalled since the last drain. Called after every
+    /// applied fill (the only thing that changes the table), so the file is
+    /// crash-consistent with the in-memory table at all times.
+    fn persist_applied_journal(&mut self) {
+        let records = self.ome.take_applied_journal();
+        if records.is_empty() {
+            return;
+        }
+        if let Some(log) = self.applied_log.as_ref() {
+            log.append(&records);
+        }
     }
 
     /// Persist one order's current snapshot (best effort).
@@ -847,7 +1110,32 @@ impl Core {
     pub fn mode(&self) -> Mode {
         self.config.mode
     }
+
+    /// Set/realign the ledger's cash from the venue (startup seed and the periodic
+    /// free-cash sync both land here).
+    ///
+    /// In LIVE the figure is remembered as the venue leg of the accounting audit
+    /// (issue #189) — an audit compares it against what the ledger believes is
+    /// free, and a mismatch that survives the venue's own retry is drift.
     pub fn set_balance(&mut self, b: Decimal) {
+        if self.config.mode == Mode::Live {
+            let ts = now_ms();
+            let previous = self.ledger.balance();
+            if previous != b {
+                // The host realigns the ledger to the venue when there are no
+                // resting commitments, so a change between two reports is either
+                // a real fill or cash that moved without a fill event. The move is
+                // recorded so the audit's anchored identity can separate the two
+                // instead of reporting the venue's own correction as local drift.
+                self.audit.last_realign = Some((ts, b - previous));
+                tracing::info!(
+                    previous = %previous,
+                    reported = %b,
+                    "ledger cash set from the venue (no resting commitment)"
+                );
+            }
+            self.venue_free = Some((ts, b));
+        }
         self.ledger.set_balance(b);
     }
     pub fn ledger(&self) -> &Ledger {
@@ -1974,6 +2262,9 @@ impl Core {
             } else {
                 serde_json::json!({ "active": false })
             },
+            // In-kernel accounting audit (issue #189): the latest verdict, so the
+            // panel shows what the kernel itself concluded about the books.
+            "accountingAudit": self.accounting_audit_view(),
             "blocked": blocked,
             "confirmed": confirmed,
             "confirmedDetail": confirmed_detail,
@@ -1984,6 +2275,28 @@ impl Core {
                 .map(|a| serde_json::to_value(a.status()).unwrap_or(serde_json::Value::Null))
                 .unwrap_or(serde_json::Value::Null),
         })
+    }
+
+    /// The latest accounting audit as the panel reads it. `null` until the first
+    /// audit runs (the audit interval has not elapsed, or it is disabled).
+    pub fn accounting_audit_view(&self) -> serde_json::Value {
+        let mut v = match self.audit.report.as_ref() {
+            Some(r) => serde_json::to_value(r).unwrap_or(serde_json::Value::Null),
+            None => serde_json::json!({ "ok": true, "note": "audit not run yet" }),
+        };
+        v["halted"] = serde_json::json!(self.audit.halted);
+        v["haltReason"] = serde_json::json!(self.audit.halt_reason);
+        v["runs"] = serde_json::json!(self.audit.runs);
+        v["failures"] = serde_json::json!(self.audit.failures);
+        v["anchored"] = serde_json::json!(self.audit.anchor.is_some());
+        v["summary"] = serde_json::json!(
+            self.audit
+                .report
+                .as_ref()
+                .map(|r| r.summary())
+                .unwrap_or_default()
+        );
+        v
     }
 
     /// Snapshot the current round for the UI.
@@ -2134,6 +2447,11 @@ impl Core {
         req: OrderRequest,
         now_ms: i64,
     ) -> CoreResult<(OrderId, OrderStatus)> {
+        if req.side == Side::Buy {
+            // Same entry gate as `place`: a pending opening order is an opening
+            // order, however it is submitted.
+            self.audit_entry_gate()?;
+        }
         self.risk.check(&req)?;
         let id = self.new_order_id();
         if req.side == Side::Buy {
@@ -2360,6 +2678,242 @@ impl Core {
         ));
     }
 
+    // ── In-kernel accounting audit (issue #189) ─────────────────────────────
+    // The kernel's own three-way money check, on a timer: the ledger's books
+    // against themselves, against the trade records, and against the venue's
+    // reported free cash. A failure alerts, persists a record and blocks NEW
+    // entries — deliberately not the kill switch, which (see #174) blocks closes
+    // too and would trap the position the drift is about.
+
+    /// Assemble the audit's input from the core's own state. Cheap enough to run
+    /// on the maintenance tick: a handful of sums over live orders, open
+    /// positions and the reservation table.
+    fn build_audit_input(&self, now_ms: i64) -> AuditInput {
+        let mut open_buy_notional = Decimal::ZERO;
+        let mut open_buys = 0usize;
+        for o in self.ome.live_orders() {
+            if o.side != Side::Buy {
+                continue;
+            }
+            open_buys += 1;
+            open_buy_notional += o.price * (o.size - o.filled_size).max(Decimal::ZERO);
+        }
+        // A reservation is "stray" when the order behind it is not a tracked live
+        // BUY: nobody can ever release it, so it is a permanent phantom hold.
+        let stray_reservations: Vec<(OrderId, Decimal)> = self
+            .ledger
+            .reservations_snapshot()
+            .into_iter()
+            .filter(|(id, _)| {
+                !self
+                    .ome
+                    .get(id)
+                    .map(|o| o.side == Side::Buy && o.status.is_live())
+                    .unwrap_or(false)
+            })
+            .collect();
+        let (realized, seen_trades, has_trade_log) = match self.trade_db.as_ref() {
+            Some(db) => (
+                f64_to_decimal(db.summary().total_net_pnl),
+                db.summary().total_trades,
+                true,
+            ),
+            None => (Decimal::ZERO, 0, false),
+        };
+        let mut spent = Decimal::ZERO;
+        let mut received = Decimal::ZERO;
+        for p in self.positions.open_positions() {
+            spent += p.flows.entry_cost_usd + p.flows.entry_fee_usd;
+            received += p.flows.proceeds_usd - p.flows.exit_fee_usd;
+        }
+        let open_positions = self.positions.open_positions().len();
+        AuditInput {
+            now_ms,
+            live: self.config.mode == Mode::Live,
+            identity: CashIdentity {
+                balance: self.ledger.balance(),
+                realized,
+                spent,
+                received,
+            },
+            reserved: self.ledger.reserved(),
+            ledger_balanced: self.ledger.is_balanced(),
+            unfunded_reserved: self.ledger.unfunded_reserved(),
+            open_buy_notional,
+            open_buys,
+            stray_reservations,
+            venue_free: self.venue_free.map(|(_, b)| b),
+            venue_free_at_ms: self.venue_free.map(|(t, _)| t),
+            ledger_realigned: self.audit.last_realign,
+            open_positions,
+            seen_trades,
+            has_trade_log,
+        }
+    }
+
+    /// Run the accounting audit now and act on its verdict: alert, persist, and
+    /// block/halt new entries. Returns the report (also kept for the panel).
+    ///
+    /// Called from `tick` on `audit_interval_sec`, and directly by tests.
+    pub fn run_accounting_audit(&mut self, now_ms: i64) -> AuditReport {
+        let input = self.build_audit_input(now_ms);
+        let report = crate::reconcile::audit_accounting(&input, self.audit.anchor.as_ref());
+
+        // Anchor: taken at the first audit the STRUCTURAL checks pass, then never
+        // moved while anything is failing — re-anchoring on a failure would hide
+        // exactly the movement the identity exists to expose.
+        if self.audit.anchor.is_none() && !report.structural_failure {
+            self.audit.anchor = Some(input.identity);
+        }
+        self.audit.runs += 1;
+        if report.ok {
+            self.audit.cross_source_failures = 0;
+        } else {
+            self.audit.failures += 1;
+            if report.structural_failure {
+                // Local inconsistency: no fetch race to forgive.
+                self.audit.cross_source_failures = 0;
+            } else {
+                self.audit.cross_source_failures += 1;
+            }
+        }
+        let cross_strike = self.audit.cross_source_failures >= 2;
+        // A halt is warranted by a structural failure immediately, by a venue
+        // mismatch only after it repeats (a single stale read must not stop
+        // entries), and only when the operator left the brake enabled.
+        let should_halt = !report.ok
+            && (report.structural_failure || cross_strike)
+            && self.config.audit_halt_entries;
+        let was_halted = self.audit.halted;
+        let mut resumed = false;
+
+        if should_halt && !was_halted {
+            self.audit.halted = true;
+            self.audit.halt_reason = report.note.clone();
+            let message = format!(
+                "accounting audit FAILED — new entries blocked until it passes: {}",
+                report.note
+            );
+            eprintln!("core: {message}");
+            tracing::error!(drift = %report.drift_usd, "{}", message);
+            self.emit(Event::RiskAlert {
+                code: CoreErrorCode::Internal,
+                message,
+            });
+        } else if should_halt {
+            self.audit.halt_reason = report.note.clone();
+        } else if was_halted {
+            self.audit.halted = false;
+            self.audit.halt_reason.clear();
+            resumed = true;
+            let message = format!(
+                "accounting audit recovered — new entries resumed ({})",
+                report.note
+            );
+            eprintln!("core: {message}");
+            tracing::info!("{message}");
+            self.emit(Event::RiskAlert {
+                code: CoreErrorCode::Internal,
+                message,
+            });
+        } else if !report.ok {
+            // Failing but not (yet) halting: still loud, still persisted.
+            let message = format!("accounting audit drift: {}", report.note);
+            eprintln!("core: {message}");
+            tracing::warn!(drift = %report.drift_usd, "{}", message);
+            self.emit(Event::RiskAlert {
+                code: CoreErrorCode::Internal,
+                message,
+            });
+        }
+
+        // Persist on every failure, every halt/resume, and otherwise as a
+        // heartbeat — a healthy audit is the evidence that the check RAN. The
+        // very first audit is written too: a fresh process must be able to prove
+        // it checked before anything went wrong.
+        let heartbeat = self.audit.last_heartbeat_ms == 0
+            || now_ms - self.audit.last_heartbeat_ms >= AUDIT_HEARTBEAT_MS;
+        if !report.ok || should_halt || was_halted || resumed || heartbeat {
+            self.audit.last_heartbeat_ms = now_ms;
+            self.persist_audit_report(&report);
+        }
+        self.audit.report = Some(report.clone());
+        self.audit.last_at_ms = now_ms;
+        report
+    }
+
+    /// The latest audit verdict, for the panel (and for a caller that wants the
+    /// report without running one).
+    pub fn accounting_audit(&self) -> Option<&AuditReport> {
+        self.audit.report.as_ref()
+    }
+
+    /// New entries are blocked by a failing accounting audit (issue #189).
+    pub fn audit_blocks_entries(&self) -> bool {
+        self.audit.halted
+    }
+
+    /// Why new entries are blocked (empty when they are not).
+    pub fn audit_halt_reason(&self) -> &str {
+        &self.audit.halt_reason
+    }
+
+    /// The gate itself: refuses a NEW entry while the audit is failing. Exits
+    /// (SELL) never consult this — a drifted ledger must not be able to trap the
+    /// bot in a position, which is what routing this through the kill switch did
+    /// (#174).
+    fn audit_entry_gate(&self) -> CoreResult<()> {
+        if self.audit.halted {
+            return Err(CoreError::new(
+                CoreErrorCode::RiskRejected,
+                format!(
+                    "accounting audit halted new entries: {}",
+                    self.audit.halt_reason
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Mutable ledger access, for tests that must put the books into the exact
+    /// state a bug leaves behind (a stranded reservation, cash that moved with no
+    /// trade) and assert the audit NOTICES it. Gated behind the `test-support`
+    /// feature the crate enables for its own test targets, so no production build
+    /// can reach it.
+    #[cfg(feature = "test-support")]
+    pub fn ledger_mut(&mut self) -> &mut Ledger {
+        &mut self.ledger
+    }
+
+    /// Append one audit verdict (or a late-fill record) to the audit log.
+    fn persist_audit_value(&self, value: serde_json::Value) {
+        let Some(path) = self.audit_log_path() else {
+            return;
+        };
+        if let Some(dir) = std::path::Path::new(path).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{value}");
+        }
+    }
+
+    fn persist_audit_report(&self, report: &AuditReport) {
+        match serde_json::to_value(report) {
+            Ok(v) => self.persist_audit_value(v),
+            Err(e) => tracing::warn!(error = %e, "cannot serialize audit report"),
+        }
+    }
+
+    fn audit_log_path(&self) -> Option<&str> {
+        self.audit.audit_log_path.as_deref()
+    }
+
     /// Trading-capability self-check result from the live venue bridge. A
     /// failed report freezes trading — the probe exercised the venue paths a
     /// live order shares (authenticated balance, reconciliation sweep), so
@@ -2415,10 +2969,85 @@ impl Core {
     /// same idempotent ledger + OME path the dry matcher uses, then project the
     /// resulting delta onto the position book.
     pub fn ingest_fill(&mut self, fill: Fill, now_ms: i64) -> CoreResult<()> {
-        if let Some(d) = self.ome.apply_fill(fill, now_ms)? {
-            self.apply_delta_effects(d.clone(), now_ms);
-        }
+        let outcome = self.ome.apply_fill_report(fill, now_ms)?;
+        self.report_fill_outcome(outcome, now_ms);
         Ok(())
+    }
+
+    /// Ledger/position projection plus the late-fill signal for one applied fill
+    /// (issue #178). A late fill still moves size and cash; what it must NOT do is
+    /// rewrite a terminal order status, and it must reach the operator.
+    fn report_fill_outcome(&mut self, outcome: FillOutcome, now_ms: i64) {
+        if let Some(d) = outcome.delta {
+            self.apply_delta_effects(d, now_ms);
+        }
+        if let Some(late) = outcome.late_fill {
+            self.emit_late_fill(&late, now_ms);
+        }
+    }
+
+    /// Surface a fill that landed on an order which had already ended (or that
+    /// reports more size than the order could hold). Returns the alert text.
+    ///
+    /// `ipc/schema.rs` is outside this change's territory, so this rides the
+    /// existing `RiskAlert` event rather than adding a dedicated variant; the
+    /// message is a greppable `late_fill …` line so an operator, the audit log
+    /// and the panel all show the same fact without a new wire type.
+    pub fn emit_late_fill(&mut self, late: &LateFill, now_ms: i64) -> String {
+        let status = late
+            .absorbed_by
+            .map(|s| format!("{s:?}"))
+            .unwrap_or_else(|| "live".to_string());
+        let message = format!(
+            "late_fill order={} trade={} status={} size={} cumulative={}/{} reported={} overfill={}",
+            late.order_id,
+            if late.trade_id.is_empty() {
+                "-"
+            } else {
+                &late.trade_id
+            },
+            status,
+            late.size,
+            late.cumulative,
+            late.order_size,
+            late.reported_cumulative,
+            late.overfill,
+        );
+        tracing::warn!(
+            order = %late.order_id,
+            trade = %late.trade_id,
+            status = %status,
+            size = %late.size,
+            cumulative = %late.cumulative,
+            order_size = %late.order_size,
+            reported_cumulative = %late.reported_cumulative,
+            overfill = late.overfill,
+            "fill arrived for an order that had already ended (status kept, size booked)"
+        );
+        eprintln!("core: {message}");
+        self.emit(Event::RiskAlert {
+            code: if late.overfill {
+                // The venue thinks more shares exist than the order asked for:
+                // over-delivery, the one case that can exceed our own books.
+                CoreErrorCode::RiskRejected
+            } else {
+                CoreErrorCode::Internal
+            },
+            message: message.clone(),
+        });
+        self.persist_audit_value(serde_json::json!({
+            "atMs": now_ms,
+            "event": "late_fill",
+            "orderId": late.order_id,
+            "tradeId": late.trade_id,
+            "absorbedBy": status,
+            "size": late.size.to_string(),
+            "cumulative": late.cumulative.to_string(),
+            "orderSize": late.order_size.to_string(),
+            "reportedCumulative": late.reported_cumulative.to_string(),
+            "overfill": late.overfill,
+        }));
+        message
     }
 
     /// Ledger + position projection for a canonical fill delta. Single choke
@@ -2427,6 +3056,15 @@ impl Core {
     /// E17: the fee follows the fill's RESOLVED role (`d.role`), and the cash
     /// movement and the position accrual are computed from ONE fee value, so the
     /// ledger and the trade record cannot disagree about what was paid.
+    ///
+    /// #181: this is also where the BUY reservation is retired. Two numbers move:
+    /// the CASH (the execution price that actually left) and the RESERVATION (the
+    /// limit-price notional those shares had reserved up front). They differ on a
+    /// price-improved fill, and then the reservation is re-synced to the order's
+    /// real outstanding commitment — so a full fill, a partial fill and a
+    /// terminal transition all leave it exactly right rather than leaving residue
+    /// behind (which no cancel path would ever release: a Filled order never gets
+    /// cancelled).
     fn apply_delta_effects(&mut self, d: FillDelta, now_ms: i64) {
         let px = d.price;
         // A maker fill pays no fee; a taker fill pays taker_fee_pct(price) on the
@@ -2446,7 +3084,10 @@ impl Core {
             fee_usd = (fee_pct / Decimal::ONE_HUNDRED) * notional;
             match d.side {
                 Side::Buy => {
-                    self.ledger.settle_buy_fill(&d.order_id, notional);
+                    // Release the notional reserved at the LIMIT price for these
+                    // shares, and pay the execution price in cash.
+                    self.ledger
+                        .settle_buy_fill(&d.order_id, notional, d.limit_price * d.delta);
                     self.ledger.charge_fee(fee_usd);
                 }
                 Side::Sell => self.ledger.settle_sell_fill(notional, fee_usd),
@@ -2455,11 +3096,36 @@ impl Core {
             // Rollback/correction: revert the cash with no fee.
             match d.side {
                 Side::Buy => self.ledger.settle_sell_fill(-px * d.delta, Decimal::ZERO),
-                Side::Sell => self.ledger.settle_buy_fill(&d.order_id, -px * d.delta),
+                // A reversed SELL gives the cash back to the venue; no reservation
+                // is involved (SELLs never reserve), so the release is zero.
+                Side::Sell => {
+                    self.ledger
+                        .settle_buy_fill(&d.order_id, -px * d.delta, Decimal::ZERO);
+                }
+            }
+        }
+        // Re-sync the reservation to the order's true outstanding commitment: the
+        // filled shares are no longer committed (zero when the order ended); a
+        // BUY rollback puts them back.
+        if d.side == Side::Buy {
+            let target = match self.ome.get(&d.order_id) {
+                Some(o) if o.status.is_live() => o.price * self.ome.remaining(&d.order_id),
+                _ => Decimal::ZERO,
+            };
+            let before = self.ledger.sync_buy_reservation(&d.order_id, target);
+            if before > Decimal::ZERO && target == Decimal::ZERO {
+                tracing::debug!(
+                    order = %d.order_id,
+                    released = %before,
+                    "buy reservation retired (order no longer has an outstanding commitment)"
+                );
             }
         }
         self.project_fill_delta(&d, fee_usd, now_ms);
         self.emit_fill(d);
+        // The idempotency table changed with this fill; get it on disk before the
+        // next event can arrive (issue #178).
+        self.persist_applied_journal();
     }
 
     /// Keep the position book in sync with fills: BUY opens/averages-in, SELL
@@ -2693,6 +3359,11 @@ impl Core {
             _ => None,
         }) {
             self.apply_delta_effects(gap, snap.now_ms);
+        }
+        // Fills the sweep absorbed into an order that had already ended (#178):
+        // the size is booked, the terminal status kept, and the operator told.
+        for late in report.late_fills.clone() {
+            self.emit_late_fill(&late, snap.now_ms);
         }
         // Trades on orders the OME never issued (manual closes made directly
         // on the venue): fold them into the position book so the position
@@ -2956,6 +3627,11 @@ impl Core {
         // Entry gates apply to opening BUY orders only; exits (SELL) are never
         // blocked by capacity, breaker or cooldowns.
         if entry_gates && req.side == Side::Buy {
+            // A failing accounting audit blocks NEW entries (issue #189). It is
+            // deliberately not the kill switch: that also blocks closes (#174), so
+            // a drifted ledger would trap the bot in whatever it holds. Only the
+            // opening side is refused, and only until an audit passes again.
+            self.audit_entry_gate()?;
             // KI-10: only the ORDER'S OWN strategy's streak can block it — a
             // losing leg no longer vetoes every other strategy's entries.
             if self.breaker.is_halted(&req.strategy, now_ms) {
@@ -3341,8 +4017,19 @@ impl Core {
 
         // Retry buffered fills (orders registered since the event arrived).
         let pending = self.ome.drain_pending(now_ms)?;
-        for d in pending {
-            self.apply_delta_effects(d, now_ms);
+        for outcome in pending {
+            self.report_fill_outcome(outcome, now_ms);
+        }
+
+        // Accounting audit (issue #189): the kernel's own periodic three-way money
+        // check, so drift is caught (and blocks new entries) even when nothing
+        // external is polling. Cheap: sums over live orders and open positions.
+        if self.config.audit_interval_sec > 0 {
+            let due = self.audit.last_at_ms == 0
+                || now_ms - self.audit.last_at_ms >= self.config.audit_interval_sec * 1000;
+            if due {
+                self.run_accounting_audit(now_ms);
+            }
         }
 
         // Resume entries when a per-strategy breaker cooldown elapses (KI-10):
@@ -3758,6 +4445,20 @@ const FREEZE_ON_REJECTS: u32 = 5;
 /// Consecutive failed reconciliation sweeps that freeze trading (E31-b): a
 /// blind sweep is the failure mode that lets ghosts and orphans accumulate.
 const SWEEP_FAILURE_FREEZE: u32 = 3;
+/// A passing accounting audit is written to the audit log this often, so the log
+/// proves the check RAN and not merely that it never failed (issue #189).
+const AUDIT_HEARTBEAT_MS: i64 = 600_000;
+
+/// The trade summary keeps realized PnL as `f64` (Node-compatible on disk); the
+/// audit compares it against `Decimal` cash, so the conversion is explicit here
+/// rather than an `as` cast in the comparison.
+fn f64_to_decimal(v: f64) -> Decimal {
+    use std::str::FromStr;
+    if !v.is_finite() {
+        return Decimal::ZERO;
+    }
+    Decimal::from_str(&format!("{v:.9}")).unwrap_or(Decimal::ZERO)
+}
 
 /// A placement intent that CLOSES exposure (an automated exit, a strategy
 /// close, a flatten or a residual backstop) rather than opening one.

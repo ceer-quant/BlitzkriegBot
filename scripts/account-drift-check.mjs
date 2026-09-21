@@ -17,6 +17,13 @@
  * run when the book happens to be flat. It is the same identity the Rust gate
  * asserts; here it is asserted against a live session.
  *
+ * 口径 SYNC (issue #189): the kernel now runs this SAME anchored identity on its
+ * own maintenance tick (`Core::run_accounting_audit`, 30s default) and blocks new
+ * entries when it fails — see `core/blitzkrieg_core/src/reconcile.rs`. This script
+ * stays the OUT-OF-PROCESS cross-check (it also covers a session whose kernel is
+ * wedged, and the fill-role / dust legs below): the two must agree, so a change to
+ * `expected_after` there or to the sums here has to be mirrored in the other.
+ *
  * A LIVE core reports no seed (its cash is the venue's), so its identity is the
  * same equation shifted by the previous poll — telescoping the unknown opening
  * cash out entirely. From the second poll on, every poll asserts:
