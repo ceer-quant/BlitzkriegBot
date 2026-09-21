@@ -118,12 +118,45 @@ const LOG_OK = join(FIX, 'clean.log');
 const LOG_PANIC = join(FIX, 'panicked.log');
 const LOG_MISSING = join(FIX, 'never-written.log');
 const SOCK_OK = join(FIX, 'core.sock');
+// Backup-freshness fixtures (issue #217). These MUST be set for every run: the
+// check's real defaults point at the production backup volume and the operator's
+// ~/Library/Logs, so a gate without them would assert against whatever this
+// machine happens to have — and would be red on CI, where none of it exists.
+const BK_DIR = join(FIX, 'backups');
+const BK_STATE = join(FIX, 'backup-state');
+const BK_LOGS = join(FIX, 'backup-logs');
 
 mkdirSync(SOAK_DIR, { recursive: true });
 mkdirSync(ARCH_DIR, { recursive: true });
 mkdirSync(dirname(TRADES), { recursive: true });
+mkdirSync(BK_DIR, { recursive: true });
+mkdirSync(BK_STATE, { recursive: true });
+mkdirSync(BK_LOGS, { recursive: true });
 writeFileSync(LOG_OK, 'INFO engine up\nINFO round 1\n');
 writeFileSync(LOG_PANIC, 'INFO engine up\nthread panicked at src/ome.rs:1\n');
+
+/** A backup artifact for `tier`, `ageHours` old — the healthy fixture state.
+ *  `root` defaults to the shared fixture, and is passed explicitly by the
+ *  controls so they cannot pollute (or be polluted by) it. */
+function writeBackup(tier, ageHours = 0, root = BK_DIR) {
+  const d = join(root, tier, 'blitzkrieg-data-20260101T000000Z');
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, 'data.tar.gz'), 'x');
+  const t = (Date.now() - ageHours * 3600 * 1000) / 1000;
+  utimesSync(d, t, t);
+  return d;
+}
+/** A fresh, empty backup root, for the "never produced" controls. */
+function emptyBackupRoot() {
+  const w = mkdtempSync(join(tmpdir(), 'soak-health-backup-'));
+  mkdirSync(join(w, 'light'), { recursive: true });
+  mkdirSync(join(w, 'full'), { recursive: true });
+  mkdirSync(join(w, 'logs'), { recursive: true });
+  mkdirSync(join(w, 'state'), { recursive: true });
+  return w;
+}
+writeBackup('light');
+writeBackup('full');
 
 const nowMs = () => Date.now();
 function writeSoak(ageSec) {
@@ -250,6 +283,9 @@ const BASE_ENV = {
   BK_ARCH_DIR: ARCH_DIR,
   BK_TRADES: TRADES,
   BK_TRADES_LOOKBACK_SEC: '86400',
+  BK_BACKUP_DIR: BK_DIR,
+  BK_BACKUP_STATUS_DIR: BK_STATE,
+  BK_BACKUP_LOG_DIR: BK_LOGS,
 };
 
 /**
@@ -334,6 +370,7 @@ let core1 = null;
   assert(has(r, 'soak=ok('), 'healthy fixture reports a fresh soak');
   assert(has(r, 'log=ok'), 'healthy fixture reports log=ok');
   assert(has(r, 'archive=ok('), 'healthy fixture reports a fresh archive');
+  assert(has(r, 'backup=light=ok('), 'healthy fixture reports both backup tiers fresh (the new sub-status)');
   assert(!has(r, 'ANOMALY'), 'healthy fixture does not report ANOMALY');
 }
 
@@ -509,6 +546,97 @@ console.log('3. negative controls — each guard fires');
   assert(out.includes('not in BlitzkriegBot root'), 'not a repo root names the reason');
 }
 
+// ── 3b. backup freshness (issue #217) ───────────────────────────────────────
+// The incident: a schedule that had been "installed and healthy" for a day had
+// never once produced a backup, and nothing anywhere said so. Every control below
+// therefore drives the state that USED to look healthy, and the last one proves
+// the check can also go back to green — an alarm that cannot clear is the KI-30
+// defect, and it is the failure mode of exactly this kind of check.
+console.log('3b. backup freshness — the incident state must be an ANOMALY, and it must clear');
+{
+  // (a) the incident: both tiers present, empty; scheduler evidence absent.
+  const w = emptyBackupRoot();
+  const env = {
+    ...healthEnv,
+    BK_BACKUP_DIR: w,
+    BK_BACKUP_LOG_DIR: join(w, 'logs'),
+    BK_BACKUP_STATUS_DIR: join(w, 'state'),
+  };
+  let r = await runHealth(env);
+  assert(r.code !== 0, 'tiers that have never produced a backup → exit non-zero');
+  assert(has(r, 'backup is not happening'), 'the anomaly names what is wrong ("backup is not happening")');
+  assert(has(r, 'backup=light=NONE'), 'the per-tier state is in the --quiet summary');
+  assert(has(r, 'diagnose with'), 'the anomaly says which command to run next');
+
+  // (b) BACKUP_DIR unset/unreachable is a different failure and must say so
+  // rather than being reported as "stale".
+  r = await runHealth({ ...env, BK_BACKUP_DIR: join(w, 'no-such-volume') });
+  assert(has(r, 'backup=light=ABSENT'), 'an unreachable backup root reports ABSENT (not "stale")');
+
+  // (c) a stale artifact with a WORKING scheduler is still an anomaly — this is
+  // the "the loop died a week ago" case, where every log looks fine.
+  const stale = emptyBackupRoot();
+  const staleEnv = {
+    ...healthEnv,
+    BK_BACKUP_DIR: stale,
+    BK_BACKUP_LOG_DIR: join(stale, 'logs'),
+    BK_BACKUP_STATUS_DIR: join(stale, 'state'),
+  };
+  writeBackup('light', 999, stale);
+  writeBackup('full', 0, stale);
+  r = await runHealth(staleEnv);
+  assert(r.code !== 0 && has(r, 'backup=light=STALE('), 'a stale artifact → ANOMALY naming the tier');
+  assert(has(r, 'backup=light=STALE(999h)/sched=no-evidence full=ok(0h)'), 'the fresh tier rides along as ok, not dragged red');
+
+  // (d) THE case that started this: a FRESH artifact (a hand-run backup) while the
+  // SCHEDULE is failing with the TCC denial. An artifact-only check calls this
+  // healthy, which is precisely how a completely un-backed-up system looked fine.
+  const denied = emptyBackupRoot();
+  writeBackup('light', 0, denied);
+  writeBackup('full', 0, denied);
+  writeFileSync(
+    join(denied, 'logs', 'blitzkrieg-data-backup-light.log'),
+    '/bin/sh: /Volumes/Hard Disk/BlitzkriegBot/scripts/data-backup-cli.sh: Operation not permitted\n'
+  );
+  r = await runHealth({
+    ...healthEnv,
+    BK_BACKUP_DIR: denied,
+    BK_BACKUP_LOG_DIR: join(denied, 'logs'),
+    BK_BACKUP_STATUS_DIR: join(denied, 'state'),
+  });
+  assert(r.code !== 0, 'fresh artifacts do NOT hide a failing scheduler');
+  assert(has(r, 'backup=light=ok(0h)/sched=FAILED('), 'the failing scheduler is named in the summary');
+  assert(has(r, 'Operation not permitted'), 'the summary carries the failure signature, not just a red word');
+
+  // (e) ...and it CLEARS. Without this the check could be permanently red and
+  // still "pass" every control above (KI-30).
+  const green = await runHealth(healthEnv);
+  assert(green.code === 0 && has(green, 'backup=light=ok('), 'the same check returns to green (an alarm that can clear)');
+
+  // (f) a missing data-backup.sh is an ANOMALY, not a silent skip: a check that
+  // disappears when a file is renamed is the defect it is meant to catch.
+  const noScript = mkdtempSync(join(tmpdir(), 'soak-health-nobackup-'));
+  mkdirSync(join(noScript, 'scripts'), { recursive: true });
+  writeFileSync(join(noScript, 'scripts', 'soak-health.sh'), readFileSync(HEALTH));
+  mkdirSync(join(noScript, '.git'), { recursive: true });
+  writeFileSync(join(noScript, 'Cargo.toml'), '[package]\n');
+  const rs = await runScript([join(noScript, 'scripts', 'soak-health.sh'), '--quiet'], {
+    cwd: noScript,
+    env: { ...process.env, ...BASE_ENV },
+    timeoutMs: 30000,
+  });
+  assert(rs.code !== 0, 'a missing data-backup.sh → exit non-zero');
+  assert(has(rs, 'backup=missing-script'), 'a missing check script is reported, not skipped');
+
+  // (g) the delegated engine refusing to run (a bad tolerance is the likely cause)
+  // must carry ITS reason: "unparseable" alone would turn an env-var typo into a
+  // mystery red at the moment the operator is least able to guess.
+  r = await runHealth({ ...healthEnv, BK_BACKUP_STALE_HOURS: 'soon' });
+  assert(r.code !== 0, 'a bad BK_BACKUP_STALE_HOURS → exit non-zero');
+  assert(has(r, 'backup=unusable('), 'the summary says the engine was unusable, not merely red');
+  assert(has(r, 'must be a non-negative integer'), 'the engine\'s own reason is carried into the anomaly');
+}
+
 // ── 4. quiet output carries every sub-status the loop reads ─────────────────
 console.log('4. the loop reads only --quiet output, so every sub-status must be in it');
 {
@@ -516,7 +644,7 @@ console.log('4. the loop reads only --quiet output, so every sub-status must be 
   writeArchive(5);
   writeTrades([]);
   const r = await runHealth(healthEnv);
-  for (const field of ['core=', 'round=', 'panel=', 'core-ping=', 'soak=', 'trades=', 'archive=', 'log=']) {
+  for (const field of ['core=', 'round=', 'panel=', 'core-ping=', 'soak=', 'trades=', 'archive=', 'log=', 'backup=']) {
     assert(has(r, field), `--quiet summary carries ${field}`);
   }
 }

@@ -23,7 +23,11 @@
 # Stop:  pkill -f soak-health-loop
 
 set -uo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# BK_REPO_ROOT exists for the same reason as in soak-health.sh and
+# stack-watchdog.sh: the supported way to run this under launchd is a COPY on the
+# internal disk pointing back here (macOS TCC denies a launchd-spawned process
+# access to the external volume this repo lives on).
+ROOT="${BK_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT" || exit 2
 
 INTERVAL=1800

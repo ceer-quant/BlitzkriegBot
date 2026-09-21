@@ -28,6 +28,7 @@
 # Usage:
 #   scripts/data-backup.sh --dest <dir> [--keep N] [--exclude-archive] [--dry-run]
 #   scripts/data-backup.sh --verify <backup-dir>
+#   scripts/data-backup.sh --status [--stale-hours N] [--full-stale-hours N] [--quiet]
 #
 #   --dest <dir>        Destination root. Required. Must be outside the repo.
 #   --keep N            Keep the N newest backups in dest (default 7; 0 = keep all).
@@ -35,9 +36,38 @@
 #                       fast, frequent light backup).
 #   --dry-run           Print exactly what would happen, write nothing.
 #   --verify <dir>      Re-check an existing backup directory against its manifest.
+#   --status            Report in ONE line how fresh each tier's newest backup is
+#                       and what the last scheduled attempt did. Exit 0 = fresh,
+#                       1 = a tier is stale / never produced / its last attempt
+#                       failed, 2 = usage error. This is what makes a silent
+#                       scheduler failure visible (issue #217): it judges the
+#                       ARTIFACT and the ATTEMPT RECORD, so "the job never ran"
+#                       and "the job ran and failed" are both loud, instead of
+#                       being a `0` in `launchctl list`'s exit-code column.
+#   --quiet             With --status: the one-line verdict only. That is the line
+#                       scripts/soak-health.sh folds into its summary.
 #   --data <dir>        Source tree override (default: <repo>/data). For tests.
 #
 # Exit: 0 = ok, 1 = failure, 2 = usage error or refusal.
+#
+# Env seams for --status (each has a real default; they exist so the gates can
+# drive stale / never / failed / unreachable with fixtures):
+#   BK_BACKUP_DIR              destination root (default /Volumes/Hard Disk/BlitzkriegBotBackup;
+#                              must agree with data-backup-cli.sh's default)
+#   BK_BACKUP_STATUS_DIR       per-tier attempt records, written by every actor
+#                              through scripts/lib/backup-attempt.sh
+#                              (default $HOME/Library/Logs — deliberately on the
+#                              INTERNAL disk: a scheduler that has been denied
+#                              access to the external volume can still record
+#                              "I ran and could not reach the repo" there, which
+#                              is the one signal TCC cannot silence)
+#   BK_BACKUP_LOG_DIR          where the launchd plists write per-tier logs
+#                              (default $HOME/Library/Logs)
+#   BK_BACKUP_STALE_HOURS      light tolerance (default 26 = daily 04:00 + 2h slack)
+#   BK_BACKUP_FULL_STALE_HOURS full tolerance (default 192 = weekly + 1 day slack)
+#   BK_PYTHON                  interpreter used to read file mtimes (default python3).
+#                              A seam so the gates can inject its absence: without it
+#                              --status REFUSES (exit 2) rather than mis-report ages.
 
 set -uo pipefail
 
@@ -45,7 +75,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # The repo root is identified by markers that actually exist post-Node-removal.
 # (`package.json` was deleted with the Node layer, so a check for it would
 # refuse to run in the very tree this script lives in.)
-[ -f "$ROOT/Cargo.toml" ] && [ -d "$ROOT/.git" ] \
+#
+# `.git` is a DIRECTORY in a normal clone but a FILE in a linked worktree
+# (`gitdir: …`), so both are accepted. Guarding on `[ -d .git ]` alone made every
+# worktree exit 2 with "not a BlitzkriegBot checkout" — and to a scheduler exit 2
+# is indistinguishable from "ran fine", so an entire class of backups silently
+# did not happen (issue #231). soak-health.sh already carried this fix; this is
+# the same guard with the same reasoning.
+[ -f "$ROOT/Cargo.toml" ] && { [ -d "$ROOT/.git" ] || [ -f "$ROOT/.git" ]; } \
   || { echo "refusing: not a BlitzkriegBot checkout ($ROOT)" >&2; exit 2; }
 
 DATA="$ROOT/data"
@@ -54,8 +91,22 @@ KEEP=7
 EXCLUDE_ARCHIVE=0
 DRY_RUN=0
 VERIFY_DIR=""
+STATUS_MODE=0
+STATUS_QUIET=0
+# --status defaults. The destination root default must agree with
+# data-backup-cli.sh / data-backup-install.sh; it is repeated rather than shared
+# so that `--status` works with nothing but this file (a checker that needs the
+# component it is checking is not a checker).
+BACKUP_ROOT="${BK_BACKUP_DIR:-/Volumes/Hard Disk/BlitzkriegBotBackup}"
+STATUS_DIR="${BK_BACKUP_STATUS_DIR:-$HOME/Library/Logs}"
+SCHED_LOG_DIR="${BK_BACKUP_LOG_DIR:-$HOME/Library/Logs}"
+STALE_LIGHT_H="${BK_BACKUP_STALE_HOURS:-26}"
+STALE_FULL_H="${BK_BACKUP_FULL_STALE_HOURS:-192}"
 
-usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; }
+# Usage text is this file's own header comment, omitted line 1 — one place to keep
+# true, and it cannot drift from the flags in the loop below (a fixed `sed 2,68p`
+# silently truncated the help the moment the header grew).
+usage() { awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -64,6 +115,10 @@ while [ $# -gt 0 ]; do
     --exclude-archive) EXCLUDE_ARCHIVE=1; shift ;;
     --dry-run)         DRY_RUN=1; shift ;;
     --verify)          VERIFY_DIR="${2:-}"; shift 2 ;;
+    --status)          STATUS_MODE=1; shift ;;
+    --quiet)           STATUS_QUIET=1; shift ;;
+    --stale-hours)     STALE_LIGHT_H="${2:-}"; shift 2 ;;
+    --full-stale-hours) STALE_FULL_H="${2:-}"; shift 2 ;;
     --data)            DATA="${2:-}"; shift 2 ;;
     -h|--help)         usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -193,6 +248,254 @@ if [ -n "$VERIFY_DIR" ]; then
   echo "  ok   all $n file(s) match the manifest"
   echo "RESULT: backup verifies."
   exit 0
+fi
+
+# ── status mode — the "is a backup actually happening?" verdict (issue #217) ─
+# WHY THIS MODE EXISTS
+#   The scheduled backup ran for the first time on 2026-09-21 04:00 and failed
+#   with `Operation not permitted` (macOS TCC refuses a launchd-spawned process
+#   access to this external volume — read AND exec, both measured). `launchctl
+#   list` showed exit code 0, the log file was 94 bytes, and NOTHING else
+#   changed: from every operational vantage point the schedule looked installed
+#   and healthy while zero scheduled backups had ever been produced. The defect
+#   is not the TCC refusal (that is a deployment choice, D-33); it is that the
+#   refusal was INVISIBLE.
+#
+#   A freshness check that only looked at artifact age would NOT have caught it:
+#   a hand-run backup makes the artifact fresh again while the SCHEDULE stays
+#   broken, which is exactly the "KI-24 closed, daily backup live" false comfort
+#   the issue is about. So two questions are judged separately:
+#
+#     1. ARTIFACT: when was a backup actually produced? Judged on the directory
+#        on disk (strict `blitzkrieg-data-*` name). This is the safety property
+#        and it cannot be faked by a scheduler that never ran.
+#
+#     2. SCHEDULER: what did the most recent AUTOMATIC attempt do? Judged on the
+#        NEWEST of the two evidences a scheduler can leave behind:
+#          * the per-tier launchd log (what the installed plist writes), and
+#          * the attempt record every actor writes through
+#            scripts/lib/backup-attempt.sh (launcher / resident loop / CLI).
+#        Whichever is newer decides, so the check follows whichever path is
+#        actually deployed and two mechanisms cannot contradict each other.
+#
+#   Deliberate non-alarms (KI-30: a check that can never clear is as useless as
+#   one that can never fire):
+#     * Only the LATEST attempt counts. An old failure superseded by a success
+#       must not keep the verdict red.
+#     * "No scheduler evidence at all" is NOT an alarm on its own — running the
+#       backup from a resident loop or by hand is a legitimate deployment, and
+#       pinning it red forever is the same defect as never firing. The artifact
+#       clause is what covers "nothing is producing backups".
+#     * A missing attempt record is never the verdict, only a diagnostic.
+record_get() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
+
+# Newest backup directory for a tier, by the strict name pattern only, so a
+# stranger's directory in the same root can never be mistaken for a backup.
+# Names are UTC timestamps, so a lexical max is a chronological max.
+newest_backup_dir() {
+  local d base best="" bestbase=""
+  for d in "$1"/*; do
+    [ -d "$d" ] || continue
+    base="${d##*/}"
+    [[ "$base" =~ $BACKUP_NAME_RE ]] || continue
+    if [ -z "$bestbase" ] || [[ "$base" > "$bestbase" ]]; then best="$d"; bestbase="$base"; fi
+  done
+  printf '%s' "$best"
+}
+
+# mtime as epoch seconds. python3 rather than `stat`: `stat -f%m` is BSD-only and
+# GNU's `-f` means "filesystem", so a two-form fallback is a portability landmine
+# (this script also runs on Ubuntu CI).
+#
+# The interpreter is a seam (`BK_PYTHON`) and its ABSENCE is fatal in --status
+# (checked there): the failure mode of "no python3" is not a crash, it is an
+# unreadable mtime falling back to `date +%s` — i.e. a week-old backup reported as
+# 0h old, which is precisely the silent false-green this mode exists to remove.
+# Better to refuse to answer than to answer wrongly.
+path_epoch() {
+  "${BK_PYTHON:-python3}" -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$1" 2>/dev/null \
+    || printf '%s' "$(date +%s)"
+}
+
+# Failure signature for a scheduler log line. Kept tight on purpose: a family of
+# broad patterns (`error`, `cannot`) would turn a successful run's own prose into
+# an alarm. These are the shapes a failed scheduled run actually leaves:
+#   /bin/sh: /Volumes/.../data-backup-cli.sh: Operation not permitted   (TCC)
+#   error: backup destination ... missing and cannot be created         (CLI)
+#   FAIL: ...                                                           (data-backup.sh)
+#   refusing: ...                                                       (data-backup.sh)
+LOG_FAIL_RE='Operation not permitted|Permission denied|No such file or directory|not a BlitzkriegBot checkout|^[[:space:]]*(FAIL|refusing|error):'
+
+# The SAME failures, reduced to the portable signature, for the one-line verdict.
+# `.. Operation not permitted` truncated at an arbitrary 80 characters reads as
+# "Operation " — the incident's own signature cut off exactly where it stops being
+# searchable. The signature is what an operator greps for and what the runbook
+# names, so it is extracted rather than truncated.
+LOG_SIG_RE='Operation not permitted|Permission denied|No such file or directory|not a BlitzkriegBot checkout'
+
+# Newest AUTOMATIC scheduler evidence for a tier: result ok|fail|none + when +
+# what + why. Sets S_EPOCH / S_RESULT / S_DETAIL / S_SOURCE / S_AGE_H.
+#
+# The two automatic deployment paths each leave their own log, and both are
+# considered:
+#   launchd  → $SCHED_LOG_DIR/blitzkrieg-data-backup-<tier>.log   (what the plist writes)
+#   loop     → $SCHED_LOG_DIR/blitzkrieg-data-backup-<tier>-loop.log
+# plus the attempt records those paths write (source=launchd|loop).
+#
+# A MANUAL run's record (source=cli) is deliberately NOT scheduler evidence: a
+# successful hand run must never mark the schedule healthy, which is exactly the
+# false comfort issue #217 is about ("KI-24 closed, daily backup live" while the
+# scheduler had never once succeeded).
+#
+# Newest evidence wins, so the verdict follows whichever path is actually
+# deployed and a stale log from an uninstalled agent cannot pin the check red.
+scheduler_evidence() {
+  # `rec` is assigned on its own line: word expansion runs before `local` does, so
+  # `local tier="$1" rec="…$tier…"` would expand `$tier` from the CALLER's scope.
+  # It happened to work only because the only caller has a `tier` of its own.
+  local tier="$1" log line ep src rec
+  rec="$STATUS_DIR/$tier.status"
+
+  S_EPOCH=""; S_RESULT="none"; S_DETAIL=""; S_SOURCE="none"; S_AGE_H=-1
+
+  # Keep the newest candidate. A tie is won by the later consideration, so the
+  # record (which carries a machine-readable reason) beats a log line at the same
+  # second.
+  _consider() {
+    [ -n "$1" ] || return 0
+    case "$1" in *[!0-9]*) return 0 ;; esac
+    if [ -z "$S_EPOCH" ] || [ "$1" -ge "$S_EPOCH" ]; then
+      S_EPOCH="$1"; S_RESULT="$2"; S_SOURCE="$3"; S_DETAIL="$4"
+    fi
+  }
+
+  for log in "$SCHED_LOG_DIR/blitzkrieg-data-backup-$tier-loop.log" \
+             "$SCHED_LOG_DIR/blitzkrieg-data-backup-$tier.log"; do
+    [ -f "$log" ] || continue
+    ep="$(path_epoch "$log")"
+    line="$(grep -v '^[[:space:]]*$' "$log" 2>/dev/null | tail -1)"
+    if printf '%s' "$line" | grep -qE "$LOG_FAIL_RE"; then
+      _consider "$ep" fail "log:${log##*/}" "$line"
+    else
+      _consider "$ep" ok "log:${log##*/}" "$line"
+    fi
+  done
+
+  # Records come last: only automatic sources qualify, and they are compared
+  # against both logs above.
+  if [ -f "$rec" ]; then
+    src="$(record_get "$rec" source)"
+    case "$src" in
+      launchd|loop)
+        _consider "$(record_get "$rec" attempt_epoch)" \
+                  "$(record_get "$rec" result)" "record:$src" "$(record_get "$rec" detail)" ;;
+    esac
+  fi
+
+  if [ -n "$S_EPOCH" ]; then
+    S_AGE_H=$(( ($(date +%s) - S_EPOCH) / 3600 ))
+  fi
+}
+
+status_problems=()
+status_line=""
+
+# One tier → "<tier>=<artifact>(<age>h) sched=<sched>" appended to status_line,
+# with any problem appended to status_problems.
+# `$1` tier, `$2` destination dir, `$3` tolerance h.
+tier_verdict() {
+  local tier="$1" dir="$2" tol_h="$3"
+  local newest age_h now state="" sched="" log="$SCHED_LOG_DIR/blitzkrieg-data-backup-$tier.log"
+  now="$(date +%s)"
+  newest="$(newest_backup_dir "$dir")"
+
+  if [ -n "$newest" ]; then
+    age_h=$(( (now - $(path_epoch "$newest")) / 3600 ))
+    if [ "$age_h" -le "$tol_h" ]; then
+      state="ok"
+    else
+      state="STALE"
+      status_problems+=("$tier backup is stale: newest is ${age_h}h old (> ${tol_h}h) — $newest")
+    fi
+  else
+    # No artifact we can see. Distinguish the three causes, because they are three
+    # different fixes: the volume is not there, the directory is there but empty,
+    # or it is there and unreadable — the last one being the state that used to
+    # look identical to a healthy one.
+    if [ ! -e "$dir" ]; then
+      state="ABSENT"
+      status_problems+=("$tier backup root does not exist: $dir (backup volume not mounted, or access denied)")
+    elif [ ! -d "$dir" ]; then
+      state="NOTDIR"
+      status_problems+=("$tier backup root is not a directory: $dir")
+    elif ! ls "$dir" >/dev/null 2>&1; then
+      state="DENIED"
+      status_problems+=("$tier backup root is unreadable: $dir (TCC / permissions — a job in this context cannot see it)")
+    else
+      state="NONE"
+      status_problems+=("$tier has never produced a backup in $dir")
+    fi
+    age_h=-1
+  fi
+
+  scheduler_evidence "$tier"
+  case "$S_RESULT" in
+    ok)   sched="ok(${S_AGE_H}h)" ;;
+    fail)
+      # The reason goes IN the token, not only in the verbose block: under
+      # --quiet this one line is all scripts/soak-health.sh folds into its
+      # summary, and an alarm that says "FAILED" without saying why costs the
+      # reader another command at exactly the moment they are least inclined to
+      # run one. Preference order: the matched failure signature (short, stable,
+      # greppable), else the first 60 characters of the line.
+      sig="$(printf '%s' "$S_DETAIL" | grep -oE "$LOG_SIG_RE" | head -1)"
+      [ -n "$sig" ] || sig="$(printf '%s' "$S_DETAIL" | cut -c1-60)"
+      sched="FAILED(${S_AGE_H}h:${sig})"
+      status_problems+=("$tier most recent automatic attempt FAILED (${S_SOURCE}, ${S_AGE_H}h ago): ${S_DETAIL}") ;;
+    *)    sched="no-evidence" ;;
+  esac
+
+  if [ "$STATUS_QUIET" -eq 0 ]; then
+    printf '  %s: artifact=%s  sched=%s\n' "$tier" \
+      "$([ "$age_h" -ge 0 ] && echo "$state(${age_h}h)" || echo "$state")" "$sched"
+    printf '      newest      : %s\n' "${newest:-<none>}"
+    printf '      scheduler   : %s%s\n' "$S_SOURCE" \
+      "$([ -n "$S_EPOCH" ] && echo " at $(date -r "$S_EPOCH" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$S_EPOCH")" || echo "")"
+    [ "$S_RESULT" = "none" ] || printf '      last detail : %s\n' "${S_DETAIL:0:200}"
+    printf '      sandbox log : %s%s\n' "$log" "$([ -f "$log" ] && echo " ($(wc -c < "$log" | tr -d ' ') bytes)" || echo " (absent)")"
+  fi
+
+  if [ "$age_h" -ge 0 ]; then
+    status_line="$status_line $tier=$state(${age_h}h)/sched=$sched"
+  else
+    status_line="$status_line $tier=$state/sched=$sched"
+  fi
+}
+
+if [ "$STATUS_MODE" -eq 1 ]; then
+  case "$STALE_LIGHT_H" in ''|*[!0-9]*) die "--stale-hours must be a non-negative integer" ;; esac
+  case "$STALE_FULL_H"  in ''|*[!0-9]*) die "--full-stale-hours must be a non-negative integer" ;; esac
+  # Ages come from file mtimes (see path_epoch). Without the interpreter the
+  # fallback would silently report every artifact as 0h old — a stale-backup
+  # check that answers "fresh" when it cannot read a clock is worse than no check,
+  # so this refuses instead. (`command -v` also accepts an absolute BK_PYTHON.)
+  command -v "${BK_PYTHON:-python3}" >/dev/null 2>&1 \
+    || die "--status needs ${BK_PYTHON:-python3} to read file mtimes (BK_PYTHON overrides; without it a stale backup would be reported fresh)"
+
+  tier_verdict light "$BACKUP_ROOT/light" "$STALE_LIGHT_H"
+  tier_verdict full  "$BACKUP_ROOT/full"  "$STALE_FULL_H"
+
+  echo "backup: ${status_line# }"
+  if [ ${#status_problems[@]} -eq 0 ]; then
+    exit 0
+  fi
+  # --quiet is the one-line contract the health check consumes: the verdict token
+  # already carries the reason (see `sched=FAILED(...)` above), so the detail
+  # lines are for a human running this by hand and are suppressed here.
+  if [ "$STATUS_QUIET" -eq 0 ]; then
+    for p in "${status_problems[@]}"; do echo "  - $p"; done
+  fi
+  exit 1
 fi
 
 [ -n "$DEST" ] || { usage; echo >&2; die "--dest is required"; }
