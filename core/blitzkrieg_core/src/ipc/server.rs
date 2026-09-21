@@ -10,11 +10,176 @@ use crate::model::{CoreError, Mode};
 use crate::service::{Core, CoreConfig};
 use rust_decimal::Decimal;
 use serde_json::Value;
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, oneshot};
+
+/// Permission bits the IPC socket file carries: owner read/write only.
+///
+/// `UnixListener::bind` creates the node with `0777 & !umask`, which on a
+/// default umask is `srwxr-xr-x` — connectable by every local user. This channel
+/// can place and cancel orders, close positions and trip the kill switch, so it
+/// is an owner-only surface (#187).
+const SOCKET_MODE: u32 = 0o600;
+
+/// The uid the kernel compares a connecting peer against.
+fn own_uid() -> u32 {
+    // SAFETY: `getuid` is always safe to call and cannot fail.
+    unsafe { libc::getuid() }
+}
+
+/// What we know about the process on the other end of an accepted socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerAuth {
+    /// The peer runs as the same uid as this core. Accepted.
+    SameUid { uid: u32 },
+    /// The peer runs as somebody else. Refused before a single byte is read.
+    OtherUid { uid: u32 },
+    /// The platform cannot report peer credentials (or the syscall failed).
+    /// The socket's 0600 mode is then the only control — see [`SOCKET_MODE`].
+    Unavailable { reason: String },
+}
+
+impl PeerAuth {
+    /// Whether a session may be spawned for this peer.
+    fn accepted(&self) -> bool {
+        matches!(
+            self,
+            PeerAuth::SameUid { .. } | PeerAuth::Unavailable { .. }
+        )
+    }
+
+    /// uid for the ready handshake, when known.
+    fn uid(&self) -> Option<u32> {
+        match self {
+            PeerAuth::SameUid { uid } | PeerAuth::OtherUid { uid } => Some(*uid),
+            PeerAuth::Unavailable { .. } => None,
+        }
+    }
+
+    /// One line for the ready handshake / logs.
+    fn describe(&self) -> String {
+        match self {
+            PeerAuth::SameUid { uid } => format!("same-uid peer (uid {uid})"),
+            PeerAuth::OtherUid { uid } => format!("foreign peer (uid {uid})"),
+            PeerAuth::Unavailable { reason } => format!("peer credentials unavailable: {reason}"),
+        }
+    }
+}
+
+/// Peer uid of a connected Unix-domain socket.
+///
+/// macOS and Linux expose this through different syscalls (`LOCAL_PEERCRED`
+/// versus `SO_PEERCRED`) and different structs, so each has its own branch.
+/// Both report the *kernel-recorded* identity of the peer at connect time, so a
+/// peer cannot claim another uid.
+#[cfg(target_os = "macos")]
+fn peer_uid(fd: RawFd) -> Result<u32, String> {
+    // `struct xucred` from <sys/ucred.h>. `libc` does not expose it for Apple
+    // targets, so the layout is declared here; `XUCRED_VERSION` is 0 and the
+    // kernel rejects any other value, which is what makes this safe to parse.
+    #[repr(C)]
+    struct Xucred {
+        cr_version: u32,
+        cr_uid: u32,
+        cr_ngroups: i16,
+        cr_groups: [u32; 16],
+    }
+    // <sys/un.h>: SOL_LOCAL is 0 and LOCAL_PEERCRED is 1 on the BSD socket API.
+    // They are not part of libc's Apple bindings, so they are spelled out here.
+    const SOL_LOCAL: libc::c_int = 0;
+    const LOCAL_PEERCRED: libc::c_int = 1;
+    const XUCRED_VERSION: u32 = 0;
+
+    let mut cred: Xucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<Xucred>() as libc::socklen_t;
+    // SAFETY: `fd` is a connected socket owned by the caller, the option writes
+    // exactly `len` bytes into `cred`, and both are valid for the call.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            SOL_LOCAL,
+            LOCAL_PEERCRED,
+            &mut cred as *mut Xucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    if cred.cr_version != XUCRED_VERSION {
+        return Err(format!("unexpected xucred version {}", cred.cr_version));
+    }
+    Ok(cred.cr_uid)
+}
+
+/// Peer uid on Linux, via `SO_PEERCRED` (see [`peer_uid`]).
+#[cfg(target_os = "linux")]
+fn peer_uid(fd: RawFd) -> Result<u32, String> {
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: as in the macOS branch — connected socket, matching struct size.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(cred.uid)
+}
+
+/// Other unix: peer credentials are not implemented. Degrade to the file mode
+/// rather than refusing every connection — an unsupported platform must not look
+/// like a broken core.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn peer_uid(_fd: RawFd) -> Result<u32, String> {
+    Err("peer credentials not implemented on this platform".to_string())
+}
+
+/// Classify an accepted connection by its kernel-reported peer uid.
+fn classify_peer(stream: &UnixStream) -> PeerAuth {
+    let ours = own_uid();
+    match peer_uid(stream.as_raw_fd()) {
+        Ok(uid) if uid == ours => PeerAuth::SameUid { uid },
+        Ok(uid) => PeerAuth::OtherUid { uid },
+        Err(reason) => PeerAuth::Unavailable { reason },
+    }
+}
+
+/// What the boot banner should say about peer authentication on this platform.
+fn peer_auth_support() -> &'static str {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        "enforced (same-uid only)"
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        "unavailable (file mode 0600 only)"
+    }
+}
+
+/// Restrict the socket node to its owner and report the mode actually applied.
+///
+/// The order matters: bind, then chmod, then serve. `bind` cannot create the node
+/// with a chosen mode and this process cannot safely change its own umask (it is
+/// process-wide and the runtime is already multi-threaded), so the window before
+/// the chmod is unavoidable — it is also harmless, because the accept loop
+/// refuses a foreign uid at connect time before reading anything.
+fn restrict_socket(path: &str) -> std::io::Result<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(SOCKET_MODE))?;
+    let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+    Ok(mode)
+}
 
 /// Run the UDS server until the shutdown oneshot fires or a signal arrives.
 pub async fn run(
@@ -149,16 +314,46 @@ pub async fn run(
     {
         anyhow::bail!("another blitzkrieg-core is already listening on {socket_path}");
     }
-    // Stale socket from a crashed process: safe to remove.
+    // Stale socket from a crashed process: safe to remove — but only when it is
+    // OURS. Unlinking a node owned by another uid would tear a live core off the
+    // wire (or hand the path to whoever binds next), so refuse instead.
+    if let Ok(meta) = std::fs::metadata(&socket_path) {
+        use std::os::unix::fs::MetadataExt;
+        if meta.uid() != own_uid() {
+            anyhow::bail!(
+                "refusing to remove {socket_path}: it is owned by uid {} (this core runs as uid {})",
+                meta.uid(),
+                own_uid()
+            );
+        }
+    }
     let _ = std::fs::remove_file(&socket_path);
     if let Some(parent) = std::path::Path::new(&socket_path).parent() {
         std::fs::create_dir_all(parent).ok();
     }
     let listener = UnixListener::bind(&socket_path)?;
+    // Owner-only, immediately after bind (#187). The mode is reported at boot
+    // because "the socket exists" says nothing about who may connect to it — the
+    // audit found `srwxr-xr-x`, i.e. the full trading control surface readable
+    // and writable by every local user.
+    let mode = match restrict_socket(&socket_path) {
+        Ok(m) => format!("{m:04o}"),
+        Err(e) => {
+            // Fail LOUD but keep serving: a filesystem that refuses chmod (some
+            // network mounts) still gets the peer-uid check below.
+            eprintln!(
+                "blitzkrieg-core: WARNING could not restrict {socket_path} to {:04o}: {e} — \
+                 the socket may be connectable by other local users",
+                SOCKET_MODE
+            );
+            "unknown".to_string()
+        }
+    };
     eprintln!(
-        "blitzkrieg-core listening on {socket_path} mode={:?} version={}",
+        "blitzkrieg-core listening on {socket_path} mode={:?} version={} socketMode={mode} peerAuth={}",
         config.mode,
-        crate::CORE_VERSION
+        crate::CORE_VERSION,
+        peer_auth_support()
     );
     // Log the EFFECTIVE risk/exit tuning at boot: a stale binary silently ran the
     // old wide stop for a whole soak; this makes the deployed parameters visible
@@ -202,10 +397,34 @@ pub async fn run(
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
     tokio::pin!(shutdown);
+    // Report an unavailable peer check once, not per connection.
+    let mut peer_warning_logged = false;
     loop {
         tokio::select! {
             accept = listener.accept() => match accept {
-                Ok((stream, _)) => spawn_session(stream, core.clone(), bus_tx.subscribe(), registry.clone()),
+                Ok((stream, _)) => {
+                    // Authenticate the PEER before serving it (#187): the socket
+                    // mode is the file-system control, this is the identity one.
+                    let peer = classify_peer(&stream);
+                    if !peer.accepted() {
+                        // Refused without a single byte read or written, so a
+                        // foreign caller learns nothing — not even the protocol.
+                        eprintln!(
+                            "blitzkrieg-core: refusing IPC connection from {} (this core runs as uid {})",
+                            peer.describe(),
+                            own_uid()
+                        );
+                        continue;
+                    }
+                    if matches!(peer, PeerAuth::Unavailable { .. }) && !peer_warning_logged {
+                        peer_warning_logged = true;
+                        eprintln!(
+                            "blitzkrieg-core: WARNING {} — falling back to the socket file mode alone",
+                            peer.describe()
+                        );
+                    }
+                    spawn_session(stream, peer, core.clone(), bus_tx.subscribe(), registry.clone())
+                }
                 Err(e) => tracing::warn!(error = %e, "accept failed"),
             },
             _ = sigterm.recv() => break,
@@ -228,6 +447,7 @@ pub fn now_ms() -> i64 {
 
 fn spawn_session(
     stream: UnixStream,
+    peer: PeerAuth,
     core: Arc<AsyncMutex<Core>>,
     events: broadcast::Receiver<Event>,
     registry: crate::market::registry::MarketPluginRegistry,
@@ -270,7 +490,7 @@ fn spawn_session(
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) if !line.trim().is_empty() => {
-                    let response = handle_line(&core, &registry, line).await;
+                    let response = handle_line(&core, &registry, line, &peer).await;
                     if out_tx.send(format!("{response}\n")).is_err() {
                         break;
                     }
@@ -288,6 +508,7 @@ async fn handle_line(
     core: &Arc<AsyncMutex<Core>>,
     registry: &crate::market::registry::MarketPluginRegistry,
     line: String,
+    peer: &PeerAuth,
 ) -> String {
     let req: Request = match serde_json::from_str(&line) {
         Ok(r) => r,
@@ -312,6 +533,9 @@ async fn handle_line(
             Ok(serde_json::json!({
                 "version": crate::CORE_VERSION,
                 "mode": c.mode(),
+                // Venue-side authentication (wallet signer/funder), NOT the IPC
+                // peer check — that one is `peerVerified` below. Kept `false`
+                // here so existing clients keep their meaning for this field.
                 "authenticated": false,
                 "signer": Value::Null,
                 "funder": Value::Null,
@@ -321,6 +545,11 @@ async fn handle_line(
                 "build": crate::ipc::build_info::version_string(),
                 "commit": crate::ipc::build_info::GIT_SHA,
                 "dirty": crate::ipc::build_info::is_dirty(),
+                // #187: the IPC trust boundary, as observed rather than assumed.
+                "peerVerified": matches!(peer, PeerAuth::SameUid { .. }),
+                "peerUid": peer.uid(),
+                "peerAuth": peer.describe(),
+                "socketMode": format!("{SOCKET_MODE:04o}"),
             }))
         }
 
@@ -1089,4 +1318,89 @@ fn core_err(e: crate::model::CoreError) -> (i32, String, Option<ErrorData>) {
             raw: e.raw,
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The kernel must be able to read a peer's uid on a real connected socket:
+    /// a helper that always errors would silently downgrade every deployment to
+    /// "file mode only" without anyone noticing.
+    #[test]
+    fn peer_uid_of_a_real_socketpair_is_our_own_uid() {
+        let (a, _b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let got = peer_uid(a.as_raw_fd());
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert_eq!(
+                got.expect("peer credentials on this platform"),
+                own_uid(),
+                "a socketpair peer is this process, so its uid must be ours"
+            );
+        }
+    }
+
+    /// Same uid → accepted; different uid → refused. This is the predicate the
+    /// accept loop applies, and the whole point of #187: the socket mode is not
+    /// the only control.
+    #[test]
+    fn a_foreign_uid_is_refused_and_our_own_is_accepted() {
+        assert!(PeerAuth::SameUid { uid: 501 }.accepted());
+        assert!(!PeerAuth::OtherUid { uid: 502 }.accepted());
+        // Unsupported platforms degrade instead of refusing every session.
+        assert!(
+            PeerAuth::Unavailable {
+                reason: "unsupported".into()
+            }
+            .accepted()
+        );
+    }
+
+    /// `classify_peer` on a real loopback socketpair must land on SameUid — the
+    /// shape the accept loop sees for a legitimate client (the kernel, the panel
+    /// and the gate scripts all run as the core's own user).
+    #[test]
+    fn classify_peer_accepts_our_own_uid() {
+        if !cfg!(any(target_os = "linux", target_os = "macos")) {
+            return;
+        }
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        // Wrapping the std socket in a tokio one needs a reactor, and it must be
+        // the same `UnixStream` type the accept loop hands to `classify_peer`.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        theirs.set_nonblocking(true).expect("nonblocking");
+        let peer = rt.block_on(async {
+            let tokio_end = UnixStream::from_std(theirs).expect("tokio wrap");
+            classify_peer(&tokio_end)
+        });
+        assert_eq!(peer, PeerAuth::SameUid { uid: own_uid() });
+        drop(ours);
+    }
+
+    /// The socket node must end up owner-only. `bind` creates it `0777 & !umask`
+    /// (often 0755), which is exactly what the audit found.
+    #[test]
+    fn restrict_socket_narrows_a_loose_mode_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("bk-ipc-sock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("probe.sock");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _listener = rt.block_on(async { UnixListener::bind(&path).expect("bind") });
+        let created = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert!(
+            created & 0o077 != 0 || created == SOCKET_MODE,
+            "precondition: bind creates a non-owner-only mode (got {created:04o})"
+        );
+        let applied = restrict_socket(path.to_str().unwrap()).expect("chmod");
+        assert_eq!(applied, SOCKET_MODE, "socket must be owner-only after bind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
