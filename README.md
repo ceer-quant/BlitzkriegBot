@@ -228,7 +228,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.blitzkrieg.stack-wat
 launchctl list | grep blitzkrieg     # 应当看到 com.blitzkrieg.stack-watchdog
 ```
 
-退出码：`0` 内核存活并在服务；`1` 内核不在跑 / socket 不可达（已告警）；`2` 用法或配置错误。
+退出码：`0` 唯一内核存活并在服务；`1` 内核不在跑 / socket 不可达（已告警）；`2` 用法或配置错误；
+`3` **发现 ≥2 个内核进程（重复内核）**——见下面「重复内核」一节，它优先于 `1`。
 （plist 里有两处烧死的本机路径——脚本路径与 `StandardOutPath`：检出不在
 `/Volumes/Hard Disk/BlitzkriegBot`、或用户名不是 `fancer`，就改这两行。）
 
@@ -238,6 +239,36 @@ stdout 同一份）；内核正在 down 时另有 `$STATE_DIR/STACK_DOWN` 标记
 （读 `data/` 的真实数字；读不到就写「无法判定」，绝不假装 0）、最后已知存活时间、可直接粘贴的
 恢复命令。判定复用 `scripts/soak-resident.sh` 的 `alive()` 语义（pidfile + `kill -0` + 命令行匹配），
 再加一个 UDS connect 探针，因此「进程不在」与「进程在但 socket 不通」在输出里是两句话。
+命令行一律用 `ps -ww` 读、并**拒收僵尸**（`kill -0` 对僵尸是成功的，`state=Z` 时必须另外判死；
+实测：BSD `ps` 只在自己的 stdout 是 tty 时才按终端宽度截断，脚本永远把 `ps` 接进管道，
+所以 `-ww` 是防御性写法而不是现场 bug 的修复——但它保证有人手工在窄终端里复现时结论一致）。
+
+**重复内核是独立的一等信号（issue #199）**
+
+「有两个内核在跑」不是停机的一种，是**另一种事故形态**：两个内核会写同一份账本与订单库
+（`data/positions`、`data/orders`），造成重复下单或持仓口径错乱。而它唯一的表现形态就是
+**看起来一切正常**——socket 通、日志干净。所以判定与处置都不依附于 up/down：
+
+- **退出码 `3`**（优先于 `1`），`--status` 与正常检查都给 `3`：调度器/CI 能编程发现，
+  绝不显示成「一切正常」；`--status` 一行 `内核: DUPLICATE（N 个内核进程在跑，预期 1 个；pid …）`。
+- 落 `$STATE_DIR/DUPLICATE_CORES` 标记文件；解除后自动删除，并记一行、发一条
+  「重复内核已解除」（不会误报成「栈已恢复」——栈本来就没停）。
+- **告警正文自包含**：风险（#199）、**全部 pid**、每个 pid 各自的 argv 模式与 socket、
+  可直接粘贴的止损命令 `cd "<repo>" && blitzkrieg stop`、未平仓与未赎回应收、最后已知存活。
+- 去抖与停机告警共用同一套状态机（翻转时出声，持续期间每 `--repeat-sec` 重复一次）。
+- **重复期间绝不自动拉起**：多出来的那个不是「没起来」，再拉只会更多。同理，pidfile 判死
+  但 `pgrep` 复核发现内核在跑时也不拉起（会变成重复内核），改为提示核对 pidfile。
+- 复核口径：先 `pgrep -f` 发现候选，再逐个用 `kill -0` + `ps -ww` 命令行匹配复核，只数
+  复核通过的；`pgrep -f | head -1` 取哪个 pid 是**不确定的**（内核之间没有主次之分），
+  所以单一 pid 只用于显示与推导 socket，计数与告警都以复核后的完整列表为准。
+- **复核是子串匹配，所以它会喊多**（实测）：默认串 `target/release/blitzkrieg-core` 命中了
+  4 个 `zsh -c … cargo build …` / `ls -la target/release/blitzkrieg-core` 的构建 shell，
+  `--status` 于是报「4 个内核进程」。判定**故意不收紧**（收紧成「必须带 `--socket`」会让
+  手工起的不带该参数的真内核被漏掉——漏报才是 #211 的原病），改为两条：告警里逐个 pid
+  点名，**argv 里既没有 `--mode` 也没有 `--socket` 的标「可疑」**并提示逐条核对（真内核
+  的 argv 一定同时带这两个参数，`supervisor.rs` 的 `to_args()` 每次都显式传）；要更严的
+  部署方把 `BK_CORE_PGREP` 改成 `target/release/blitzkrieg-core.*--socket` 即可（自测第
+  22 组把这两条都钉住：松串仍报重复但点名可疑，收紧串则一个都不算）。
 
 **外置卷的 TCC 会让第 3 步跑不起来**（错误会出现在
 `~/Library/Logs/blitzkrieg-stack-watchdog.log`）。三选一，细节见 `scripts/README.md`：
@@ -256,13 +287,19 @@ stdout 同一份）；内核正在 down 时另有 `$STATE_DIR/STACK_DOWN` 标记
 | 两把钥匙都有 + 模式 live | **不会**：代码里的硬门禁，开关打开也一样 |
 | 两把钥匙都有 + `--readonly` 或模式无法判定 | 不会（只允许 dry） |
 | 进程在但 socket 不通 | 不会（再拉一个会有两个内核抢同一个 socket，交人工） |
+| 发现 ≥2 个内核进程（重复内核，退出码 `3`） | **不会**：多出来的那个不是「没起来」，再拉只会更多；先 `blitzkrieg stop` |
+| pidfile 判死、但 `pgrep` 复核发现内核在跑 | 不会（拉起会变成重复内核；先核对 pidfile） |
 
 - watchdog **只读** `.env`（只取 `DRY_RUN` 一行用于显示），**永不写 `.env`、永不改 `DRY_RUN` 的值**。
 - 计划内停机（自己 `blitzkrieg stop`）先 `touch ~/Library/Logs/blitzkrieg-stack-watchdog/silence`，
   起来后删掉：静默只压「喊人」（不通知、不落告警正文），状态、`STACK_DOWN` 标记与退出码照常。
 - 去抖：只在状态翻转时出声；持续停机期间最多每 15 分钟（`--repeat-sec`）重复一次，不刷屏。
-- 自测（CI 可直接跑：fixture 驱动，**不需要真内核**，不碰生产 `data/`）：
-  `bash scripts/stack-watchdog.sh --self-test`
+- 自测（CI 可直接跑：fixture 驱动，**不需要真内核**，不碰生产 `data/`；当前
+  `22 组用例 / 97 项断言`）：`bash scripts/stack-watchdog.sh --self-test`
+  覆盖用法错误、活着/死了的 pidfile、socket 不通、去抖与静默、自动拉起的两把钥匙与
+  live 硬门禁、`--status` 只读、**无 `--pidfile` 的 pgrep 发现分支**（命中 / 无命中 /
+  两个命中 / 复核不认 / pidfile 过期）、**「只在命令行里提到内核路径」的构建 shell
+  不该把重复信号喊成狼来了**，以及僵尸进程与长命令行两个实测回归。
 
 ---
 
