@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- 退出码：0 = 唯一内核存活并在服务；1 = 内核不在跑 / socket 不可达；2 = 用法或配置错误；
+     3 = 发现 ≥2 个内核进程（重复内核，issue #199，优先于 1）。
+     launchd 不解释退出码（它只看进程有没有退出），所以「重复内核」的可见性靠三处：
+     $BK_WATCHDOG_DIR/DUPLICATE_CORES 标记文件、追加进 StandardOutPath 的告警正文、
+     以及外部调度器 / CI 直接跑本脚本时拿到的退出码 3。 -->
+<dict>
+  <key>Label</key><string>com.blitzkrieg.stack-watchdog</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-lc</string>
+    <string>exec "/Volumes/Hard Disk/BlitzkriegBot/scripts/stack-watchdog.sh"</string>
+  </array>
+
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BK_REPO_ROOT</key><string>/Volumes/Hard Disk/BlitzkriegBot</string>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+  </dict>
+
+  <key>AbandonProcessGroup</key><true/>
+
+  <key>ProcessType</key><string>Background</string>
+  <key>Nice</key><integer>10</integer>
+  <key>LowPriorityIO</key><true/>
+
+  <key>StandardOutPath</key><string>/Users/fancer/Library/Logs/blitzkrieg-stack-watchdog.log</string>
+  <key>StandardErrorPath</key><string>/Users/fancer/Library/Logs/blitzkrieg-stack-watchdog.log</string>
+</dict>
+</plist>
