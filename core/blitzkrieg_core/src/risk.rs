@@ -349,11 +349,18 @@ mod tests {
             "entries stay frozen"
         );
         // Every closing-intent prefix the placement path produces must pass.
+        // The escalated variant is here because a maker→taker close leg keeps
+        // the SAME key with `:escalated` appended (service.rs), so an exemption
+        // that stopped at the first colon would re-lock the exit exactly when
+        // the maker leg failed to fill.
         for key in [
             "exit:tok:StopLoss",
             "exit-strategy:tok:close",
             "flatten:hft-3",
             "exit-residual:tok",
+            "exit:tok:StopLoss:escalated",
+            "flatten:hft-3:escalated",
+            "exit-residual:tok:escalated",
         ] {
             g.check(&req_with_key(Side::Sell, key))
                 .unwrap_or_else(|e| panic!("{key} must pass the kill gate: {e}"));
