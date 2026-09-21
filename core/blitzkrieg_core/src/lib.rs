@@ -15,6 +15,7 @@
 
 pub mod backtest;
 pub mod config;
+pub mod data_lock;
 pub mod data_source;
 pub mod decimal;
 pub mod engine;
