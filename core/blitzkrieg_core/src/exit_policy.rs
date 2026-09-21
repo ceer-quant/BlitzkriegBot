@@ -10,6 +10,11 @@
 //!
 //! Protective stops additionally require the bid not to be a dislocated wick
 //! (bid within maxBidWickPct of mid); profit-side triggers don't need that.
+//! The guard judges on the mid when the bid is a wick and on the last known
+//! price when the book is dark — it must never be the reason a stop is skipped
+//! in a waterfall (P0 #177): every trigger it withholds is reported as a
+//! [`SuppressedStop`], and every exit evaluation carries that back to the
+//! caller in an [`ExitVerdict`].
 
 use crate::model::{ExitReason, OrderbookSnapshot};
 use rust_decimal::Decimal;
@@ -40,6 +45,11 @@ pub struct ExitConfig {
     pub ratchet_confirm_ticks: u32,
     pub ratchet_confirm_tolerance_pct: Decimal,
     pub max_bid_wick_pct: Decimal,
+    /// How old the last known price may be to stand in for a protective stop
+    /// when the book has no usable quote left (no bid AND no mid). A trigger
+    /// judged on a price older than this has nothing honest to stand on and
+    /// stays silent; the profit side never uses this at all (P0 #177).
+    pub max_last_price_age_sec: i64,
     pub stale_profit_pct: Decimal,
     pub stale_profit_bid_unchanged_sec: i64,
     pub stagnant_profit_pct: Decimal,
@@ -91,6 +101,10 @@ impl Default for ExitConfig {
             ratchet_confirm_ticks: 3,
             ratchet_confirm_tolerance_pct: dec!(0.5),
             max_bid_wick_pct: dec!(8),
+            // The engine's book freshness gate is 8s; a protective stop may act
+            // on a quote a few multiples older than that rather than on nothing
+            // at all (see `stop_reference`).
+            max_last_price_age_sec: 30,
             stale_profit_pct: dec!(20),
             stale_profit_bid_unchanged_sec: 10,
             stagnant_profit_pct: dec!(5),
@@ -206,6 +220,12 @@ pub struct ExitState {
     pub confirmed_high: Decimal,
     pub last_bid_price: Decimal,
     pub bid_unchanged_since: i64,
+    /// When the last usable quote was folded in. Ages the fallback price a
+    /// protective stop may still use when the book goes dark (P0 #177).
+    /// Snapshots written before this field existed carry the serde default 0 =
+    /// "age unknown" (see `last_known_price`).
+    #[serde(default)]
+    pub last_quote_at_ms: i64,
     pub last_progress_at: i64,
     pub last_progress_pct: Decimal,
     pub initial_depth: Decimal,
@@ -222,6 +242,9 @@ impl ExitState {
             confirmed_high: entry_price,
             last_bid_price: entry_price,
             bid_unchanged_since: now_ms,
+            // The entry fill is itself a real price at `now_ms`: it is what the
+            // position's last-known price means until a book arrives.
+            last_quote_at_ms: now_ms,
             last_progress_at: now_ms,
             last_progress_pct: Decimal::ZERO,
             initial_depth: Decimal::ZERO,
@@ -253,12 +276,182 @@ pub fn executable_bid(book: Option<&OrderbookSnapshot>) -> Decimal {
     }
 }
 
-fn bid_confirmed_by_mid(book: &OrderbookSnapshot, cfg: &ExitConfig) -> bool {
-    if book.best_bid <= Decimal::ZERO || book.mid_price <= Decimal::ZERO {
-        return false;
+/// Where a protective stop's reference price came from (P0 #177).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopRefSource {
+    /// A live best bid that is not a dislocated wick.
+    Bid,
+    /// The mid: either the book had no bid at all, or the bid was a wick.
+    Mid,
+    /// The last known price, when no book (or no usable price in it) is left.
+    LastKnown,
+}
+
+/// The price a PROTECTIVE stop is judged on, with the provenance a reviewer
+/// needs to explain the decision afterwards.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StopReference {
+    pub price: Decimal,
+    pub source: StopRefSource,
+    /// The raw best bid that would have breached the stop, when the wick guard
+    /// judged on a stable mid instead. `Some` means "the guard held a trigger
+    /// back" — the caller must surface it, never swallow it (P0 #177).
+    pub suppressed_bid: Option<Decimal>,
+}
+
+/// A protective stop the wick guard held back: the raw bid breached it while
+/// the mid did NOT confirm the move. Reported so review sees the trigger that
+/// was deliberately not taken (P0 #177).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SuppressedStop {
+    pub bid: Decimal,
+    pub mid: Decimal,
+    pub pnl_pct_at_bid: Decimal,
+    pub pnl_pct_at_mid: Decimal,
+    pub stop_pct: Decimal,
+}
+
+/// What one exit evaluation concluded: the decision (if any) plus the
+/// protective stop the guard suppressed (if any). [`decide_exit`] keeps the old
+/// `Option<ExitDecision>` shape for callers that only act on the decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExitVerdict {
+    pub decision: Option<ExitDecision>,
+    pub suppressed_stop: Option<SuppressedStop>,
+}
+
+impl ExitVerdict {
+    fn exit(reason: ExitReason, use_maker: bool) -> Self {
+        Self {
+            decision: Some(ExitDecision { reason, use_maker }),
+            suppressed_stop: None,
+        }
     }
-    let wick = (book.mid_price - book.best_bid) / book.mid_price;
-    wick <= cfg.max_bid_wick_pct / Decimal::ONE_HUNDRED
+    fn hold() -> Self {
+        Self {
+            decision: None,
+            suppressed_stop: None,
+        }
+    }
+}
+
+/// The last known price, if it is fresh enough to stand in for a live quote.
+fn last_known_price(
+    fallback: Option<Decimal>,
+    state: &ExitState,
+    now_ms: i64,
+    cfg: &ExitConfig,
+) -> Option<Decimal> {
+    let price = fallback.filter(|p| *p > Decimal::ZERO)?;
+    // Age unknown (a snapshot written before the field existed): the value is
+    // the position's own last valuation, which is never newer than the position
+    // itself — still the only honest number left, and a stale protective stop
+    // errs toward exiting rather than toward staying in.
+    if state.last_quote_at_ms <= 0 {
+        return Some(price);
+    }
+    let age_ms = now_ms.saturating_sub(state.last_quote_at_ms);
+    (age_ms <= cfg.max_last_price_age_sec.max(1) * 1_000).then_some(price)
+}
+
+/// Resolve the price a PROTECTIVE stop is judged on (P0 #177).
+///
+/// The wick guard exists so a dislocated bid cannot TRIGGER a market exit — it
+/// is not a reason to abandon the stop, and the one moment it must never win is
+/// when the book is emptied and the mid collapsed with it. In order:
+///   1. a live bid that is not a wick → judge on the bid (unchanged);
+///   2. a live bid that IS a wick → judge on the mid: if the mid breached the
+///      stop too the move is real and the stop fires; if the mid held, the
+///      trigger the raw bid would have produced is reported as suppressed;
+///   3. no bid at all but a mid → judge on the mid (it is already the price
+///      `executable_bid` values the position at, so nothing can veto a stop on
+///      top of it);
+///   4. no usable price in the book → the last known price, if still fresh.
+fn stop_reference(
+    book: Option<&OrderbookSnapshot>,
+    fallback: Option<Decimal>,
+    state: &ExitState,
+    now_ms: i64,
+    cfg: &ExitConfig,
+) -> Option<StopReference> {
+    if let Some(b) = book {
+        // A book with NO levels at all carries no price information: its
+        // `mid_price` is the builder's placeholder (0 and 1 → 0.5), not a
+        // quote, and letting it veto the stop is the very hole this fixes.
+        let has_levels = !b.bids.is_empty() || !b.asks.is_empty();
+        if b.best_bid > Decimal::ZERO {
+            if b.mid_price > Decimal::ZERO {
+                let wick = (b.mid_price - b.best_bid) / b.mid_price;
+                if wick > cfg.max_bid_wick_pct / Decimal::ONE_HUNDRED {
+                    return Some(StopReference {
+                        price: b.mid_price,
+                        source: StopRefSource::Mid,
+                        suppressed_bid: Some(b.best_bid),
+                    });
+                }
+            }
+            return Some(StopReference {
+                price: b.best_bid,
+                source: StopRefSource::Bid,
+                suppressed_bid: None,
+            });
+        }
+        if has_levels && b.mid_price > Decimal::ZERO {
+            return Some(StopReference {
+                price: b.mid_price,
+                source: StopRefSource::Mid,
+                suppressed_bid: None,
+            });
+        }
+    }
+    last_known_price(fallback, state, now_ms, cfg).map(|price| StopReference {
+        price,
+        source: StopRefSource::LastKnown,
+        suppressed_bid: None,
+    })
+}
+
+/// The protective-stop verdict for one tick.
+enum StopVerdict {
+    /// The reference price breached the stop: place the exit.
+    Fire,
+    /// The raw bid breached the stop but the mid did not confirm the move: the
+    /// guard withholds it, and the caller must report the withheld trigger.
+    Suppressed(SuppressedStop),
+    Nothing,
+}
+
+fn stop_verdict(
+    entry_price: Decimal,
+    stop_pct: Decimal,
+    book: Option<&OrderbookSnapshot>,
+    fallback: Option<Decimal>,
+    state: &ExitState,
+    now_ms: i64,
+    cfg: &ExitConfig,
+) -> StopVerdict {
+    let Some(reference) = stop_reference(book, fallback, state, now_ms, cfg) else {
+        return StopVerdict::Nothing;
+    };
+    let pct = pnl_pct(reference.price, entry_price);
+    if pct <= -stop_pct {
+        return StopVerdict::Fire;
+    }
+    // The guard only withholds a trigger it would otherwise have produced: the
+    // raw bid must itself have breached the stop, and the mid must not have.
+    if let Some(bid) = reference.suppressed_bid {
+        let at_bid = pnl_pct(bid, entry_price);
+        if at_bid <= -stop_pct {
+            return StopVerdict::Suppressed(SuppressedStop {
+                bid,
+                mid: reference.price,
+                pnl_pct_at_bid: at_bid,
+                pnl_pct_at_mid: pct,
+                stop_pct,
+            });
+        }
+    }
+    StopVerdict::Nothing
 }
 
 /// Update HWM / staleness / depth from a fresh book, using the executable price.
@@ -277,6 +470,9 @@ pub fn update_exit_state(
     if val <= Decimal::ZERO {
         return;
     }
+    // A usable quote was seen: stamps the age the protective stop's fallback is
+    // bounded by (P0 #177).
+    state.last_quote_at_ms = now_ms;
     let pct = pnl_pct(val, entry_price);
 
     if pct > state.high_pnl_pct {
@@ -339,7 +535,23 @@ pub struct ExitTickInput<'a> {
 const BREAKEVEN_LOCK_TRIGGER_PCT: i64 = 3;
 
 /// Pure exit decision; mutates nothing. Mandatory exits return use_maker=false.
+///
+/// This is the narrow shape for callers that only act on the decision (offline
+/// replay, shadow variants); the kernel's live path uses
+/// [`decide_exit_verdict`], which also carries back the protective stop the
+/// wick guard withheld (P0 #177).
 pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
+    decide_exit_verdict(input).decision
+}
+
+/// Pure exit decision plus the suppressed-stop report; mutates nothing.
+///
+/// The protective stop is the ONE rule that keeps working when the quote is
+/// gone, because "no usable bid" is the situation it exists for. Every
+/// profit-side rule below is evaluated against the live executable bid only —
+/// acting on a stale or dislocated quote to take a profit is exactly the
+/// mistake the fallback must not introduce.
+pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
     let ExitTickInput {
         entry_price,
         book,
@@ -351,11 +563,12 @@ pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
         cfg,
     } = input;
     if entry_price <= Decimal::ZERO {
-        return None;
+        return ExitVerdict::hold();
     }
 
     let bid = executable_bid(book);
-    let usable = if bid > Decimal::ZERO {
+    let live = bid > Decimal::ZERO;
+    let usable = if live {
         bid
     } else {
         fallback_price
@@ -366,67 +579,68 @@ pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
     // 1. Force exit — absolute deadline; must fire even without a fresh book.
     if time_left_sec <= cfg.force_exit_sec {
         if usable <= Decimal::ZERO {
-            return None;
+            return ExitVerdict::hold();
         }
-        return Some(ExitDecision {
-            reason: ExitReason::ForceExit,
-            use_maker: false,
-        });
+        return ExitVerdict::exit(ExitReason::ForceExit, false);
     }
 
-    if bid <= Decimal::ZERO {
-        return None;
+    // The stop needs SOME price to judge on, and may fall back to the last
+    // known one; every other rule additionally requires a live quote.
+    if !live && stop_reference(book, fallback_price, state, now_ms, cfg).is_none() {
+        return ExitVerdict::hold();
     }
-    let pct = pnl_pct(bid, entry_price);
+    let pct = if live {
+        pnl_pct(bid, entry_price)
+    } else {
+        Decimal::ZERO
+    };
+    let mut suppressed: Option<SuppressedStop> = None;
 
     if cfg.simple_exit_enabled {
-        if cfg.take_profit_pct > Decimal::ZERO
+        if live
+            && cfg.take_profit_pct > Decimal::ZERO
             && cfg.take_profit_pct < dec!(9999)
             && pct >= cfg.take_profit_pct
         {
-            return Some(ExitDecision {
-                reason: ExitReason::TakeProfit,
-                use_maker: cfg.maker_first_exit_enabled,
-            });
+            return ExitVerdict::exit(ExitReason::TakeProfit, cfg.maker_first_exit_enabled);
         }
-        if pct <= -effective_stop_pct(cfg.stop_loss_pct, time_left_sec, cfg)
-            && book.map(|b| bid_confirmed_by_mid(b, cfg)).unwrap_or(true)
-        {
-            return Some(ExitDecision {
-                reason: ExitReason::StopLoss,
-                use_maker: false,
-            });
+        match stop_verdict(
+            entry_price,
+            effective_stop_pct(cfg.stop_loss_pct, time_left_sec, cfg),
+            book,
+            fallback_price,
+            state,
+            now_ms,
+            cfg,
+        ) {
+            StopVerdict::Fire => return ExitVerdict::exit(ExitReason::StopLoss, false),
+            StopVerdict::Suppressed(s) => suppressed = Some(s),
+            StopVerdict::Nothing => {}
         }
-        if cfg.trailing_enabled && state.high_pnl_pct >= cfg.trailing_min_high_pct {
+        if live && cfg.trailing_enabled && state.high_pnl_pct >= cfg.trailing_min_high_pct {
             let profit_trail = get_profit_trail_pct(state.high_pnl_pct, cfg);
             let time_trail = get_time_trail_pct(time_left_sec);
             let trail = cfg.min_trail_pct.max(profit_trail.min(time_trail));
             if state.high_pnl_pct - pct >= trail {
-                return Some(ExitDecision {
-                    reason: ExitReason::TrailingStop,
-                    use_maker: false,
-                });
+                return ExitVerdict::exit(ExitReason::TrailingStop, false);
             }
         }
-        if time_left_sec <= cfg.min_time_left_sec {
-            return Some(ExitDecision {
-                reason: ExitReason::TimeExit,
-                use_maker: false,
-            });
+        if live && time_left_sec <= cfg.min_time_left_sec {
+            return ExitVerdict::exit(ExitReason::TimeExit, false);
         }
-        return None;
+        return ExitVerdict {
+            decision: None,
+            suppressed_stop: suppressed,
+        };
     }
 
     // Full mode: grace period right after a maker fill.
     if hold_sec < cfg.exit_grace_sec {
-        return None;
+        return ExitVerdict::hold();
     }
 
-    if pct >= cfg.take_profit_pct {
-        return Some(ExitDecision {
-            reason: ExitReason::TakeProfit,
-            use_maker: cfg.maker_first_exit_enabled,
-        });
+    if live && pct >= cfg.take_profit_pct {
+        return ExitVerdict::exit(ExitReason::TakeProfit, cfg.maker_first_exit_enabled);
     }
 
     let base_stop = if cfg.tight_stop_enabled {
@@ -434,91 +648,81 @@ pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
     } else {
         cfg.stop_loss_pct
     };
-    let stop = effective_stop_pct(base_stop, time_left_sec, cfg);
-    if pct <= -stop && book.map(|b| bid_confirmed_by_mid(b, cfg)).unwrap_or(true) {
-        return Some(ExitDecision {
-            reason: ExitReason::StopLoss,
-            use_maker: false,
-        });
+    match stop_verdict(
+        entry_price,
+        effective_stop_pct(base_stop, time_left_sec, cfg),
+        book,
+        fallback_price,
+        state,
+        now_ms,
+        cfg,
+    ) {
+        StopVerdict::Fire => return ExitVerdict::exit(ExitReason::StopLoss, false),
+        StopVerdict::Suppressed(s) => suppressed = Some(s),
+        StopVerdict::Nothing => {}
     }
 
-    if cfg.ratchet_enabled {
-        let confirmed_high_pct = pnl_pct(state.confirmed_high, entry_price);
-        if pct <= get_ratchet_floor(confirmed_high_pct) {
-            return Some(ExitDecision {
-                reason: ExitReason::RatchetFloor,
-                use_maker: false,
-            });
+    if live {
+        if cfg.ratchet_enabled {
+            let confirmed_high_pct = pnl_pct(state.confirmed_high, entry_price);
+            if pct <= get_ratchet_floor(confirmed_high_pct) {
+                return ExitVerdict::exit(ExitReason::RatchetFloor, false);
+            }
         }
-    }
 
-    if state.high_pnl_pct >= Decimal::from(BREAKEVEN_LOCK_TRIGGER_PCT) {
-        let lock_floor = dec!(0.5).max(taker_fee_pct(bid) + dec!(0.2));
-        if pct <= lock_floor {
-            return Some(ExitDecision {
-                reason: ExitReason::BreakevenLock,
-                use_maker: false,
-            });
+        if state.high_pnl_pct >= Decimal::from(BREAKEVEN_LOCK_TRIGGER_PCT) {
+            let lock_floor = dec!(0.5).max(taker_fee_pct(bid) + dec!(0.2));
+            if pct <= lock_floor {
+                return ExitVerdict::exit(ExitReason::BreakevenLock, false);
+            }
         }
-    }
 
-    if cfg.trailing_enabled && state.high_pnl_pct >= cfg.trailing_min_high_pct {
-        let profit_trail = get_profit_trail_pct(state.high_pnl_pct, cfg);
-        let time_trail = get_time_trail_pct(time_left_sec);
-        let trail = cfg.min_trail_pct.max(profit_trail.min(time_trail));
-        if state.high_pnl_pct - pct >= trail {
-            return Some(ExitDecision {
-                reason: ExitReason::TrailingStop,
-                use_maker: false,
-            });
+        if cfg.trailing_enabled && state.high_pnl_pct >= cfg.trailing_min_high_pct {
+            let profit_trail = get_profit_trail_pct(state.high_pnl_pct, cfg);
+            let time_trail = get_time_trail_pct(time_left_sec);
+            let trail = cfg.min_trail_pct.max(profit_trail.min(time_trail));
+            if state.high_pnl_pct - pct >= trail {
+                return ExitVerdict::exit(ExitReason::TrailingStop, false);
+            }
         }
-    }
 
-    if let Some(book) = book
-        && state.initial_depth > Decimal::ZERO
-    {
-        let current_depth = book.bid_depth + book.ask_depth;
-        let depth_change =
-            ((current_depth - state.initial_depth) / state.initial_depth) * Decimal::ONE_HUNDRED;
-        if depth_change <= -cfg.depth_collapse_threshold_pct
-            && bid < state.high_water_mark
-            && pct >= dec!(2)
+        if let Some(book) = book
+            && state.initial_depth > Decimal::ZERO
         {
-            return Some(ExitDecision {
-                reason: ExitReason::DepthCollapse,
-                use_maker: false,
-            });
+            let current_depth = book.bid_depth + book.ask_depth;
+            let depth_change = ((current_depth - state.initial_depth) / state.initial_depth)
+                * Decimal::ONE_HUNDRED;
+            if depth_change <= -cfg.depth_collapse_threshold_pct
+                && bid < state.high_water_mark
+                && pct >= dec!(2)
+            {
+                return ExitVerdict::exit(ExitReason::DepthCollapse, false);
+            }
+        }
+
+        if pct >= cfg.stale_profit_pct {
+            let stale_sec = (now_ms - state.bid_unchanged_since) / 1000;
+            if stale_sec >= cfg.stale_profit_bid_unchanged_sec {
+                return ExitVerdict::exit(ExitReason::StaleProfit, true);
+            }
+        }
+
+        if pct >= cfg.stagnant_profit_pct && pct < cfg.take_profit_pct {
+            let stagnant_sec = (now_ms - state.last_progress_at) / 1000;
+            if stagnant_sec >= cfg.stagnant_duration_sec {
+                return ExitVerdict::exit(ExitReason::StagnantProfit, true);
+            }
+        }
+
+        if time_left_sec <= cfg.min_time_left_sec {
+            return ExitVerdict::exit(ExitReason::TimeExit, cfg.maker_exits_for_tp_only);
         }
     }
 
-    if pct >= cfg.stale_profit_pct {
-        let stale_sec = (now_ms - state.bid_unchanged_since) / 1000;
-        if stale_sec >= cfg.stale_profit_bid_unchanged_sec {
-            return Some(ExitDecision {
-                reason: ExitReason::StaleProfit,
-                use_maker: true,
-            });
-        }
+    ExitVerdict {
+        decision: None,
+        suppressed_stop: suppressed,
     }
-
-    if pct >= cfg.stagnant_profit_pct && pct < cfg.take_profit_pct {
-        let stagnant_sec = (now_ms - state.last_progress_at) / 1000;
-        if stagnant_sec >= cfg.stagnant_duration_sec {
-            return Some(ExitDecision {
-                reason: ExitReason::StagnantProfit,
-                use_maker: true,
-            });
-        }
-    }
-
-    if time_left_sec <= cfg.min_time_left_sec {
-        return Some(ExitDecision {
-            reason: ExitReason::TimeExit,
-            use_maker: cfg.maker_exits_for_tp_only,
-        });
-    }
-
-    None
 }
 
 #[cfg(test)]
@@ -631,11 +835,178 @@ mod tests {
         let cfg = ExitConfig::default();
         let st = ExitState::new(dec!(0.4), 0);
         let b = book(0.20, 0.60);
+        let verdict = decide_exit_verdict(ExitTickInput {
+            entry_price: dec!(0.4),
+            book: Some(&b),
+            fallback_price: None,
+            time_left_sec: 600,
+            hold_sec: 20,
+            state: &st,
+            now_ms: 1000,
+            cfg: &cfg,
+        });
+        assert!(verdict.decision.is_none());
+        // …but the trigger it withheld must be reported (P0 #177): a stop that
+        // fired on the raw bid and was held back is NOT the same as no trigger.
+        let s = verdict
+            .suppressed_stop
+            .expect("a withheld protective stop must be reported");
+        assert_eq!(s.bid, dec!(0.20));
+        assert_eq!(s.mid, dec!(0.40));
+        assert_eq!(s.pnl_pct_at_bid, dec!(-50));
+        assert_eq!(s.pnl_pct_at_mid, dec!(0));
+    }
+
+    /// A bid-less book is the situation the protective stop exists for: the
+    /// mid is the only price left, and it must be able to fire the stop.
+    #[test]
+    fn zero_bid_falling_mid_fires_stop() {
+        let cfg = ExitConfig::default();
+        let st = ExitState::new(dec!(0.4), 0);
+        let mut b = book(0.30, 0.30);
+        b.best_bid = Decimal::ZERO;
+        b.mid_price = dec!(0.15);
+        b.bids.clear();
+        let d = decide_exit(ExitTickInput {
+            entry_price: dec!(0.4),
+            book: Some(&b),
+            fallback_price: None,
+            time_left_sec: 600,
+            hold_sec: 20,
+            state: &st,
+            now_ms: 1000,
+            cfg: &cfg,
+        })
+        .expect("a collapsed mid with no bid must still fire the stop");
+        assert_eq!(d.reason, ExitReason::StopLoss);
+        assert!(!d.use_maker);
+    }
+
+    /// No book at all: the position's own last price (fresh) stands in.
+    #[test]
+    fn missing_book_uses_fresh_last_price_for_stop() {
+        let cfg = ExitConfig::default();
+        let st = ExitState::new(dec!(0.4), 0);
+        let d = decide_exit(ExitTickInput {
+            entry_price: dec!(0.4),
+            book: None,
+            fallback_price: Some(dec!(0.15)),
+            time_left_sec: 600,
+            hold_sec: 20,
+            state: &st,
+            now_ms: 1000,
+            cfg: &cfg,
+        })
+        .expect("a fresh last price must be able to fire the stop");
+        assert_eq!(d.reason, ExitReason::StopLoss);
+    }
+
+    /// …but the fallback is bounded by freshness: a stale last price can no
+    /// longer speak for the market.
+    #[test]
+    fn stale_last_price_does_not_fire_stop() {
+        let cfg = ExitConfig::default();
+        let mut st = ExitState::new(dec!(0.4), 0);
+        st.last_quote_at_ms = 0; // written before the field existed = age unknown
+        // Age the quote well past the bound.
+        let aged = ExitState {
+            last_quote_at_ms: 1,
+            ..st
+        };
+        let d = decide_exit(ExitTickInput {
+            entry_price: dec!(0.4),
+            book: None,
+            fallback_price: Some(dec!(0.15)),
+            time_left_sec: 600,
+            hold_sec: 20,
+            state: &aged,
+            now_ms: 1 + cfg.max_last_price_age_sec * 1_000 + 1,
+            cfg: &cfg,
+        });
+        assert!(d.is_none());
+        // The same price, still fresh, does fire — the bound is the only
+        // difference between the two.
+        let d = decide_exit(ExitTickInput {
+            entry_price: dec!(0.4),
+            book: None,
+            fallback_price: Some(dec!(0.15)),
+            time_left_sec: 600,
+            hold_sec: 20,
+            state: &aged,
+            now_ms: 1 + cfg.max_last_price_age_sec * 1_000,
+            cfg: &cfg,
+        });
+        assert_eq!(d.unwrap().reason, ExitReason::StopLoss);
+    }
+
+    /// A real decline that ALSO trips the wick ratio (thin book, bid hanging
+    /// far under the ask) is not a pin bar: the mid collapsed with it, so the
+    /// stop must fire rather than hide behind the wick guard.
+    #[test]
+    fn wick_ratio_with_collapsed_mid_fires_stop() {
+        let cfg = ExitConfig::default();
+        let st = ExitState::new(dec!(0.4), 0);
+        let b = book(0.05, 0.075); // mid 0.0625: -84% from entry, wick 20%
+        let d = decide_exit(ExitTickInput {
+            entry_price: dec!(0.4),
+            book: Some(&b),
+            fallback_price: None,
+            time_left_sec: 600,
+            hold_sec: 20,
+            state: &st,
+            now_ms: 1000,
+            cfg: &cfg,
+        })
+        .expect("a mid that fell in sync is a real decline, not a wick");
+        assert_eq!(d.reason, ExitReason::StopLoss);
+    }
+
+    /// A book with no levels on either side ("the book was swept") has no price
+    /// at all: its placeholder mid must not veto the stop, so the last known
+    /// price decides.
+    #[test]
+    fn an_emptied_book_falls_back_to_the_last_price() {
+        let cfg = ExitConfig::default();
+        let st = ExitState::new(dec!(0.4), 0);
+        let mut b = book(0.0, 0.0);
+        b.best_bid = Decimal::ZERO;
+        b.best_ask = Decimal::ONE;
+        b.mid_price = dec!(0.5); // the from_levels placeholder
+        b.bids.clear();
+        b.asks.clear();
+        let d = decide_exit(ExitTickInput {
+            entry_price: dec!(0.4),
+            book: Some(&b),
+            fallback_price: Some(dec!(0.15)),
+            time_left_sec: 600,
+            hold_sec: 20,
+            state: &st,
+            now_ms: 1000,
+            cfg: &cfg,
+        })
+        .expect("an emptied book must not hide the stop behind a placeholder mid");
+        assert_eq!(d.reason, ExitReason::StopLoss);
+    }
+
+    /// A dead book — no levels on either side, so the mid is only the
+    /// construction placeholder — plus a fallback quote far ABOVE entry is a
+    /// paper profit with no executable price behind it. The fallback may not
+    /// manufacture a take-profit any more than it may hide a stop.
+    #[test]
+    fn dead_book_fallback_cannot_take_profit() {
+        let cfg = ExitConfig::default();
+        let st = ExitState::new(dec!(0.4), 0);
+        let mut b = book(0.0, 0.0);
+        b.best_bid = Decimal::ZERO;
+        b.best_ask = Decimal::ZERO;
+        b.mid_price = Decimal::ZERO;
+        b.bids.clear();
+        b.asks.clear();
         assert!(
             decide_exit(ExitTickInput {
                 entry_price: dec!(0.4),
                 book: Some(&b),
-                fallback_price: None,
+                fallback_price: Some(dec!(1.0)), // +150% on paper
                 time_left_sec: 600,
                 hold_sec: 20,
                 state: &st,
