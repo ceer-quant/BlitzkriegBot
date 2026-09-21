@@ -303,7 +303,8 @@ pub struct FeeQuoteParams {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeeQuoteResult {
-    /// Declared model name, e.g. `legacy_quadratic` (see `service::TAKER_FEE_MODEL`).
+    /// Declared model name, e.g. `legacy_quadratic` (see
+    /// `exit_policy::fee_schedule`; a replay may run under another one, #203).
     pub model: String,
     /// Declared coefficient of the model.
     #[serde(with = "crate::decimal")]

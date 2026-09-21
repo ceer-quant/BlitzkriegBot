@@ -198,14 +198,117 @@ pub fn effective_stop_pct(base: Decimal, time_left_sec: i64, cfg: &ExitConfig) -
     min_pct + (base - min_pct) * frac
 }
 
-/// fee_per_share = 0.125*(p*(1-p))^2; as a percentage of price.
+// ── The taker-fee schedule (#182, #203) ─────────────────────────────────────
+//
+// The fee is one number with two jobs: it is the accounting basis every gate
+// reconciles against, and it is a COST PARAMETER the strategies were tuned
+// under. #182 fixed the first job (the gates now read the kernel's own quote
+// instead of restating the formula). #203 is the second: changing the schedule
+// is a cost change of the same order as the strategy's whole edge, so the
+// question "what does this schedule cost the strategy" has to be answerable
+// with a measurement rather than an argument.
+//
+// That is what the schedule below exists for. It is a process-wide, SET-ONCE
+// value: the default is the shipped schedule and the live path never changes
+// it, while a replay may be run under a different one via `--fee-model` (the
+// CLI refuses that flag without `--backtest`, exactly like `--backtest-knob`).
+// Set-once rather than a config field on purpose — a fee that can move between
+// a fill and its reconciliation is an accounting hazard, and threading a
+// parameter through every call site would touch the charge path for a knob no
+// live run may use.
+
+/// One taker-fee schedule: `fee_per_share = rate * (p*(1-p))^exponent` USD.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FeeSchedule {
+    /// Declared name, reported by `core.feeQuote` and pinned by the gates.
+    pub name: &'static str,
+    /// Coefficient of the schedule.
+    pub rate: Decimal,
+    /// Exponent of `p*(1-p)`.
+    pub exponent: u32,
+    /// Where the parameters come from — the thing a reader needs to decide
+    /// whether a number is authoritative. Kept in the type so a new schedule
+    /// cannot be added without saying who published it.
+    pub source: &'static str,
+}
+
+/// The schedule the deployment line charges: `0.125*(p*(1-p))^2`. Its
+/// provenance is NOT a published schedule (see `source`); it is the value the
+/// kernel has always charged, and #203's finding is that it is 2.3x-5.3x
+/// CHEAPER than the published crypto schedule at the prices traded.
+pub fn legacy_quadratic_schedule() -> FeeSchedule {
+    FeeSchedule {
+        name: "legacy_quadratic",
+        rate: dec!(0.125),
+        exponent: 2,
+        source: "history: unchanged since the fee was first charged; no external \
+                 publication states this curve (see #203, fee-model.mjs)",
+    }
+}
+
+/// Polymarket's published crypto taker schedule, `0.07 * p * (1-p)` USD per
+/// share. Primary source (quoted in `scripts/lib/fee-model.mjs`, which is what
+/// the gates read): Polymarket docs, fees page — `fee = C * feeRate * p * (1-p)`
+/// with `feeRate = 0.07` for the Crypto category, maker side 0.
+pub fn official_schedule() -> FeeSchedule {
+    FeeSchedule {
+        name: "official",
+        rate: dec!(0.07),
+        exponent: 1,
+        source: "Polymarket docs, fees: fee = C x feeRate x p x (1-p); Crypto feeRate = 0.07, maker 0",
+    }
+}
+
+/// Every schedule a replay may be asked for, by name.
+pub const FEE_SCHEDULE_NAMES: &[&str] = &["legacy_quadratic", "official"];
+
+/// Look a schedule up by its declared name.
+pub fn fee_schedule_by_name(name: &str) -> Option<FeeSchedule> {
+    match name {
+        "legacy_quadratic" => Some(legacy_quadratic_schedule()),
+        "official" => Some(official_schedule()),
+        _ => None,
+    }
+}
+
+/// The schedule in force. Defaults to the shipped one; only a replay changes it.
+static ACTIVE_FEE_SCHEDULE: std::sync::OnceLock<FeeSchedule> = std::sync::OnceLock::new();
+
+/// The taker-fee schedule the kernel is charging right now.
+pub fn fee_schedule() -> FeeSchedule {
+    *ACTIVE_FEE_SCHEDULE
+        .get()
+        .unwrap_or(&legacy_quadratic_schedule_ref())
+}
+
+/// `OnceLock<FeeSchedule>` needs a `'static` reference; `legacy_quadratic_schedule()`
+/// builds a fresh value, so the default is memoised here instead.
+fn legacy_quadratic_schedule_ref() -> FeeSchedule {
+    static DEFAULT: std::sync::OnceLock<FeeSchedule> = std::sync::OnceLock::new();
+    *DEFAULT.get_or_init(legacy_quadratic_schedule)
+}
+
+/// Install a schedule for this process. Refuses a second call: set-once is the
+/// point (a fee that moves mid-run cannot be reconciled against), and it means
+/// the only way to change what is charged is to restart with a different flag.
+pub fn set_fee_schedule(schedule: FeeSchedule) -> Result<(), String> {
+    ACTIVE_FEE_SCHEDULE
+        .set(schedule)
+        .map_err(|_| "the taker-fee schedule is already set for this process".to_string())
+}
+
+/// fee_per_share = rate*(p*(1-p))^exponent; as a percentage of price.
 pub fn taker_fee_pct(price: Decimal) -> Decimal {
     if price <= Decimal::ZERO {
         return Decimal::ZERO;
     }
-    let one_minus = Decimal::ONE - price;
-    let fee = dec!(0.125) * (price * one_minus) * (price * one_minus);
-    (fee / price) * Decimal::ONE_HUNDRED
+    let schedule = fee_schedule();
+    let base = price * (Decimal::ONE - price);
+    let mut acc = Decimal::ONE;
+    for _ in 0..schedule.exponent {
+        acc *= base;
+    }
+    ((schedule.rate * acc) / price) * Decimal::ONE_HUNDRED
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -747,6 +850,65 @@ mod tests {
             mid_price: (bd + ad) / Decimal::TWO,
             timestamp: 0,
         }
+    }
+
+    /// The shipped default must stay the shipped default. If a change flips it,
+    /// this is the test that says so before a replay is needed (#203).
+    #[test]
+    fn default_fee_schedule_is_the_shipped_one() {
+        let s = fee_schedule();
+        assert_eq!(s.name, "legacy_quadratic");
+        assert_eq!(s.rate, dec!(0.125));
+        assert_eq!(s.exponent, 2);
+    }
+
+    /// The legacy curve as charged: `0.125*(p*(1-p))^2` per share, quoted as a
+    /// percentage of price (p=0.40 -> $0.0072/share, 1.8% of price).
+    #[test]
+    fn legacy_schedule_prices_as_documented() {
+        assert_eq!(taker_fee_pct(dec!(0.4)), dec!(1.8));
+        assert_eq!(taker_fee_pct(dec!(0.5)), dec!(1.5625));
+        assert_eq!(taker_fee_pct(dec!(0)), Decimal::ZERO);
+    }
+
+    /// #203's decision rests on this ratio: the published crypto schedule is
+    /// 2.33x the legacy curve at p=0.40 and 5.30x at p=0.12. A test, not a
+    /// comment, because the whole "switching is a cost increase" claim is this
+    /// arithmetic.
+    #[test]
+    fn official_schedule_is_the_published_multiple_of_legacy() {
+        let official = fee_schedule_by_name("official").expect("official schedule");
+        assert_eq!(official.rate, dec!(0.07));
+        assert_eq!(official.exponent, 1);
+        let per_share = |s: &FeeSchedule, p: Decimal| {
+            let mut acc = Decimal::ONE;
+            let base = p * (Decimal::ONE - p);
+            for _ in 0..s.exponent {
+                acc *= base;
+            }
+            s.rate * acc
+        };
+        let legacy = legacy_quadratic_schedule();
+        let at = |p: Decimal| per_share(&official, p) / per_share(&legacy, p);
+        assert_eq!(at(dec!(0.40)).round_dp(2), dec!(2.33));
+        assert_eq!(at(dec!(0.12)).round_dp(2), dec!(5.30));
+    }
+
+    /// Every schedule must name where its parameters come from. `0.07` is only
+    /// authoritative because the publication says so; a schedule with a blank
+    /// source is a number nobody can check (#203 acceptance).
+    #[test]
+    fn every_schedule_declares_its_source() {
+        for name in FEE_SCHEDULE_NAMES {
+            let s = fee_schedule_by_name(name).unwrap_or_else(|| panic!("{name} missing"));
+            assert!(
+                s.source.len() > 20,
+                "{name}: the schedule must say who published its parameters, got {:?}",
+                s.source
+            );
+            assert_eq!(s.name, *name, "lookup name and declared name disagree");
+        }
+        assert!(fee_schedule_by_name("no_such_model").is_none());
     }
 
     #[test]
