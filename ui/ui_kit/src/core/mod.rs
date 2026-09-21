@@ -8,3 +8,5 @@ pub mod notifier;
 #[cfg(test)]
 mod notifier_tests;
 pub mod types;
+#[cfg(test)]
+mod types_tests;

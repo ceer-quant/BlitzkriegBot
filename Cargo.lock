@@ -1174,6 +1174,7 @@ dependencies = [
  "async-trait",
  "blitzkrieg-market-api",
  "blitzkrieg-strategy-api",
+ "blitzkrieg-ui-kit",
  "criterion",
  "dhat",
  "libc",
