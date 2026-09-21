@@ -19,24 +19,23 @@
  */
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
+import { requireFreshStrategyDylibs, strategyDylibPath } from './lib/strategy-dylib-freshness.mjs';
 import net from 'net';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { existsSync, unlinkSync, mkdtempSync, rmSync } from 'fs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
-const DYLIB = join(
-  process.cwd(),
-  'user_layer', 'strategies', 'target', 'release',
-  process.platform === 'darwin' ? 'libdog_strategy.dylib'
-    : process.platform === 'win32' ? 'dog_strategy.dll'
-    : 'libdog_strategy.so',
-);
+const DYLIB = strategyDylibPath('dog_strategy');
 const ROUND_SEC = 3600;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 if (!existsSync(BIN)) { console.error(`missing binary: ${BIN} (cargo build --release --workspace --locked)`); process.exit(2); }
-if (!existsSync(DYLIB)) { console.error(`missing strategy library: ${DYLIB} ((cd user_layer/strategies && cargo build --release))`); process.exit(2); }
+
+// #207: the dog cdylib is loaded by explicit path and is the SUBJECT of this
+// gate (its sizing declarations and gate exemptions). Assert the library under
+// test was built from this checkout before reporting anything about it.
+requireFreshStrategyDylibs({ gate: 'strategy-gate-check', require: ['dog_strategy'] });
 
 /**
  * Spawn a dry core on `sock` in `workdir`, wait for the socket, connect, and

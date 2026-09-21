@@ -26,24 +26,24 @@
  */
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
+import { requireFreshStrategyDylibs, strategyDylibPath } from './lib/strategy-dylib-freshness.mjs';
 import net from 'net';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { existsSync, unlinkSync, mkdtempSync, readFileSync, readdirSync } from 'fs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
-const DYLIB = join(
-  process.cwd(),
-  'user_layer', 'strategies', 'target', 'release',
-  process.platform === 'darwin' ? 'libdog_strategy.dylib'
-    : process.platform === 'win32' ? 'dog_strategy.dll'
-    : 'libdog_strategy.so',
-);
+const DYLIB = strategyDylibPath('dog_strategy');
+
 const ROUND_SEC = 3600;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 if (!existsSync(BIN)) { console.error(`missing binary: ${BIN} (cargo build --release --workspace --locked)`); process.exit(2); }
-if (!existsSync(DYLIB)) { console.error(`missing strategy library: ${DYLIB} ((cd user_layer/strategies && cargo build --release))`); process.exit(2); }
+
+// #207: this gate loads the `dog` cdylib by explicit path. The library — not the
+// binary — carries the knob declarations and the per-strategy audit behaviour it
+// asserts, so a stale one makes every claim below describe a previous build.
+requireFreshStrategyDylibs({ gate: 'strategy-evolution-check', require: ['dog_strategy'] });
 
 async function run() {
   const tag = `${process.pid}-${Math.random().toString(36).slice(2)}`;

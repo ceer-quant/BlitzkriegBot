@@ -31,6 +31,7 @@
  */
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
+import { requireFreshStrategyDylibs } from './lib/strategy-dylib-freshness.mjs';
 import net from 'net';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -41,6 +42,11 @@ const ROUND_SEC = 3600;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 if (!existsSync(BIN)) { console.error(`missing binary: ${BIN} (cargo build --release --workspace --locked)`); process.exit(2); }
+
+// #207: the chase leg is a cdylib the kernel dlopens — not code in the binary
+// built above. A stale library would make every assertion below describe the
+// previous build of the leg.
+requireFreshStrategyDylibs({ gate: 'trend-follow-check', require: ['trend_follow_strategy'] });
 
 /**
  * Spawn a core, hand the connected RPC client to `body`, always tear down.
