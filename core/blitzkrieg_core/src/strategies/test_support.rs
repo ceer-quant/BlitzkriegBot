@@ -479,13 +479,18 @@ impl EngineStrategy for TestMeanReversion {
                     .map(|b| b.mid_price)
                     .unwrap_or(Decimal::ZERO);
                 let drop = self.tracker.drop_pct(&t, ctx.now_ms());
+                let trend_drop = self.tracker.trend_drop_pct(&t, ctx.now_ms());
                 let entry = mid * eff.entry_factor;
+                // #176: the trend gate is part of "would the evaluator place?".
+                let in_slide = self.tracker.in_trend_slide(&t, ctx.now_ms());
                 let firable = mid > Decimal::ZERO
                     && mid <= eff.max_price
                     && drop <= -eff.min_drop_pct
+                    && !in_slide
                     && entry < mid;
                 serde_json::json!({
                     "token": t, "mid": mid, "dropPct": drop,
+                    "trendDropPct": trend_drop, "inTrendSlide": in_slide,
                     "entry": entry, "cap": eff.max_price, "firable": firable,
                 })
             })
@@ -510,6 +515,9 @@ impl EngineStrategy for TestMeanReversion {
                 "entryFactor": cfg.entry_factor.to_string(),
                 "maxSpreadPct": cfg.max_spread_pct.to_string(),
                 "cooldownSec": cfg.cooldown_sec,
+                // #176 trend gate: 0 = off (pre-gate behaviour).
+                "trendWindowSec": cfg.trend_window_sec,
+                "trendDropPct": cfg.trend_drop_pct.to_string(),
             })
             .to_string(),
         )

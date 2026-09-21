@@ -917,15 +917,19 @@ fn parity_mean_reversion_cdylib_matches_adapter() {
             markets: vec![market(2_700_000)],
             now_ms: now,
         });
-        // High point: 0.50 (spread 0.02: 0.49 / 0.51, spread_pct 4% <= 8%)
+        // High point: mid 0.40 (spread 0.02: 0.39 / 0.41, spread_pct 2.5% <= 8%).
+        // Chosen so the fall below is a DIP and not a one-sided slide: the same
+        // fall off a 0.50 high would be -40% over the 600 s trend window and the
+        // #176 gate would refuse the entry (its own unit tests cover that arm).
         eng.on_data(DataEvent::Book {
             token_id: "up".into(),
-            bids: vec![(dec!(0.49), dec!(100))],
-            asks: vec![(dec!(0.51), dec!(100))],
+            bids: vec![(dec!(0.39), dec!(100))],
+            asks: vec![(dec!(0.41), dec!(100))],
             now_ms: now,
         });
-        // Crash to 0.30: drop is (0.30 - 0.50)/0.50 = -40% <= -10%, and mid 0.30 <= max_price 0.35
-        // spread 0.02: 0.29 / 0.31, spread_pct 6.67% <= 8%
+        // Crash to 0.30: drop is (0.30 - 0.40)/0.40 = -25% <= -10%, and mid 0.30 <= max_price 0.35
+        // spread 0.02: 0.29 / 0.31, spread_pct 6.67% <= 8%. The 600 s high is that same 0.40,
+        // so -25% stays well inside the gate's -30%.
         eng.on_data(DataEvent::Book {
             token_id: "up".into(),
             bids: vec![(dec!(0.29), dec!(100))],

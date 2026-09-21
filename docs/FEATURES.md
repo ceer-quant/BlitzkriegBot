@@ -96,7 +96,7 @@ market.list
 | --- | --- |
 | `spread_arb` | `trend_min_price`（0.55, [0.50,0.95]）· `trend_entry_factor`（0.98, [0.80,1.00]）· `trend_max_entry_price` · `trend_broken_price` |
 | `trend_follow` | `momentum_window_sec`（30, [5,300]）· `min_move_pct`（3.0, [0.5,10]）· `min_confirm_price`（0.55, [0.50,0.95]）· `break_price`（0.45, [0.05,0.60]）· `max_entry_price`（0.88, [0.50,0.98]）· `max_spread_pct`（3.0, [0.10,20]） |
-| `mean_reversion` | `lookback_sec`（120, [10,600]）· `min_drop_pct`（10, [1,50]）· `max_price`（0.35, [0.10,0.60]）· `entry_factor`（0.98, [0.80,1.00]）· `max_spread_pct`（8, [0.10,25]）· `cooldown_sec`（60, [0,600]） |
+| `mean_reversion` | `lookback_sec`（120, [10,600]）· `min_drop_pct`（10, [1,50]）· `max_price`（0.35, [0.10,0.60]）· `entry_factor`（0.98, [0.80,1.00]）· `max_spread_pct`（8, [0.10,25]）· `cooldown_sec`（60, [0,600]）· `trend_window_sec`（600, [0,600]，0 = 关闭闸门）· `trend_drop_pct`（30, [5,90]）——后两个是 #176 的趋势闸门：单个 token 在 600s 窗口内自高点回落 ≥ 30% 即判定为单边下行，不再抄底 |
 
 **旋钮由策略自证**：trait `evolvable_knobs()`（外挂为可选符号 `bk_strategy_evolvable_knobs`）。
 **不声明 = 明确不可进化**。配置若落在默认取值域之外，取值域会**自动扩宽以包含现值**

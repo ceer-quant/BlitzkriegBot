@@ -52,6 +52,15 @@ pub struct BacktestConfig {
     /// After the last event, keep the clock running this long (ms) so pending
     /// maker escalations and exits fire. 0 = stop at the last event.
     pub tail_ms: i64,
+    /// Counterfactual knob overrides for a replay: `(strategy, knob, value)`.
+    ///
+    /// Delivered through the SAME hot-param registry Shadow Evolution uses, so a
+    /// counterfactual run differs from the shipped behaviour only in the value
+    /// handed over — same declared knobs, same cell, same `on_hot_params` push on
+    /// the hot path. Empty (the default) replays the config in force. A knob the
+    /// strategy does not declare is simply not applied by it (the declaration is
+    /// the strategy's own), exactly as a proposal would be.
+    pub hot_params: Vec<(String, String, Decimal)>,
 }
 
 impl Default for BacktestConfig {
@@ -60,6 +69,7 @@ impl Default for BacktestConfig {
             core: CoreConfig::default(),
             tick_ms: 50,
             tail_ms: 0,
+            hot_params: Vec::new(),
         }
     }
 }
@@ -361,6 +371,27 @@ impl EventBacktester {
         let mut core = Core::new(core_cfg.clone());
         if core_cfg.engine_enabled {
             core_cfg.install_engine(&mut core);
+        }
+        // Counterfactual knobs go in AFTER the engine registered its strategies
+        // (the registry forwards to what is already wired), through the same
+        // cell a Shadow Evolution proposal writes.
+        if !cfg.hot_params.is_empty() {
+            use crate::shadow_evolution::{ParamRegistry, StrategyParams};
+            let mut by_strategy: std::collections::BTreeMap<&str, StrategyParams> =
+                std::collections::BTreeMap::new();
+            for (strategy, knob, value) in &cfg.hot_params {
+                by_strategy
+                    .entry(strategy.as_str())
+                    .or_default()
+                    .set(knob, *value);
+            }
+            let registry = std::sync::Arc::new(ParamRegistry::new());
+            for (strategy, params) in by_strategy {
+                registry.publish(strategy, params);
+            }
+            if let Some(engine) = core.engine.as_mut() {
+                engine.set_hot_params(Some(registry));
+            }
         }
         let (tx, rx) = mpsc::unbounded_channel::<Event>();
         core.set_event_sink(tx);
@@ -790,6 +821,7 @@ mod tests {
                 core,
                 tick_ms: 50,
                 tail_ms,
+                hot_params: Vec::new(),
             },
             src,
         );

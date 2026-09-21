@@ -53,6 +53,33 @@ use std::collections::{HashMap, HashSet};
 ///    with no change in entry quality on the slice.
 ///  * `cooldown_sec = 60` — one candidate per token per minute, so a token
 ///    grinding down to zero cannot re-fire with every tick.
+///
+/// The trend gate (`trend_window_sec` / `trend_drop_pct`, #176) is the one
+/// control here that is not about the DEPTH of the fall but about its AGE: a mid
+/// 10% off its 120 s high is a dip only if the token is not several legs into a
+/// one-sided slide. It measures the same quantity as `min_drop_pct` — the draw
+/// off the high of the token's own history — over a LONGER window, so it needs
+/// no second price series, and it refuses exactly the case the fade premise has
+/// no basis for: a double market's cheap side is not oversold, it is being
+/// repriced, and every further leg of the slide is another knife.
+///
+/// Grounded in the frozen corpus `docs/reports/data/mean-reversion-gate/` (four
+/// 1 h slices of the recorded 2026-09-19/20 capture — the worst-PnL and the
+/// best-PnL hour of each day — replayed through THIS engine by
+/// `scripts/mean-reversion-gate-evidence.mjs`): with the gate off the shipped
+/// config closed 72 trades, 14 of them winners, for -$22.80 net and a $31.00
+/// drawdown, and 37 of those (0 wins, -$22.27) came off the two one-sided
+/// slices. At 600 s / -30% those two slices keep 8 trades (0 wins, -$5.23); the
+/// two two-sided slices give up 27 of their 35 entries but 5 of the 8 survivors
+/// win (14/35 -> 5/8); the corpus ends at +$0.82 with a $7.16 drawdown.
+///
+/// Read that honestly: the gate mostly means "trade much less", and it is not a
+/// moneymaker — it cuts the loss tail. The threshold is also not robust: the
+/// sweep is monotone (net PnL rises to -30% and falls again from -35%), and the
+/// value sits at the edge of the net-positive band, so a few points tighter
+/// flips the sign. It is the LOOSEST setting that is still net-positive with at
+/// least 10 trades (600 s / -20% is +$1.16 on 4). `trend_window_sec = 0` is the
+/// pre-gate behaviour exactly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeanReversionConfig {
     /// Memory window (sec) the drop is measured over.
@@ -67,6 +94,13 @@ pub struct MeanReversionConfig {
     pub max_spread_pct: Decimal,
     /// At most one candidate per token per this many seconds.
     pub cooldown_sec: i64,
+    /// Trend gate: the window (sec) the SLIDE is measured over — the drop of the
+    /// mid off the high of this much history, a `min_drop_pct` over a longer
+    /// memory. `0` disables the gate and restores the pre-gate behaviour.
+    pub trend_window_sec: i64,
+    /// Trend gate: a mid this far (%) below the trend-window high is the latest
+    /// leg of a one-sided slide, not a dip — no entry.
+    pub trend_drop_pct: Decimal,
 }
 
 impl Default for MeanReversionConfig {
@@ -78,6 +112,8 @@ impl Default for MeanReversionConfig {
             entry_factor: dec!(0.98),
             max_spread_pct: dec!(8),
             cooldown_sec: 60,
+            trend_window_sec: 600,
+            trend_drop_pct: dec!(30),
         }
     }
 }
@@ -91,13 +127,20 @@ impl Default for MeanReversionConfig {
 /// rejects rather than an inversion of the strategy — kept in-domain so a hot
 /// swap can approach it without tripping the domain guard, and rejected by the
 /// pricing rule instead.
-pub const MEAN_REVERSION_KNOBS: [(&str, Decimal, Decimal, Decimal); 6] = [
+pub const MEAN_REVERSION_KNOBS: [(&str, Decimal, Decimal, Decimal); 8] = [
     ("lookback_sec", dec!(120), dec!(10), dec!(600)),
     ("min_drop_pct", dec!(10), dec!(1.0), dec!(50.0)),
     ("max_price", dec!(0.35), dec!(0.10), dec!(0.60)),
     ("entry_factor", dec!(0.98), dec!(0.80), dec!(1.00)),
     ("max_spread_pct", dec!(8), dec!(0.10), dec!(25.0)),
     ("cooldown_sec", dec!(60), dec!(0), dec!(600)),
+    // #176: the trend gate. A window of 0 is the pre-gate behaviour, and it is
+    // in-domain on purpose — "no gate" has to be reachable by evolution (and by
+    // the reverse-acceptance test that proves the gate is what blocks entries).
+    // The window ceiling equals the longest lookback retention the tracker
+    // keeps, so every legal window is measurable.
+    ("trend_window_sec", dec!(600), dec!(0), dec!(600)),
+    ("trend_drop_pct", dec!(30), dec!(5), dec!(90)),
 ];
 
 fn knob_value(cfg: &MeanReversionConfig, name: &str) -> Decimal {
@@ -108,6 +151,8 @@ fn knob_value(cfg: &MeanReversionConfig, name: &str) -> Decimal {
         "entry_factor" => cfg.entry_factor,
         "max_spread_pct" => cfg.max_spread_pct,
         "cooldown_sec" => Decimal::from(cfg.cooldown_sec),
+        "trend_window_sec" => Decimal::from(cfg.trend_window_sec),
+        "trend_drop_pct" => cfg.trend_drop_pct,
         _ => Decimal::ZERO,
     }
 }
@@ -138,10 +183,20 @@ pub fn apply_knobs(base: &MeanReversionConfig, params: &StrategyParams) -> MeanR
                     cfg.cooldown_sec = secs;
                 }
             }
+            // 0 is a legal window (the gate off); a negative one is not, and a
+            // fractional one truncates so the window stays a whole second count.
+            "trend_window_sec" => {
+                if let Some(secs) = v.trunc().to_i64()
+                    && secs >= 0
+                {
+                    cfg.trend_window_sec = secs;
+                }
+            }
             "min_drop_pct" => cfg.min_drop_pct = v,
             "max_price" => cfg.max_price = v,
             "entry_factor" => cfg.entry_factor = v,
             "max_spread_pct" => cfg.max_spread_pct = v,
+            "trend_drop_pct" => cfg.trend_drop_pct = v,
             _ => {}
         }
     }
@@ -165,10 +220,24 @@ pub struct FadeTracker {
     in_zone: HashMap<String, bool>,
 }
 
-/// Retention (sec) for each token's price history — the widest legal lookback.
+/// Retention (sec) for each token's price history — the widest window any
+/// declared knob can measure over, so a hot swap can never read a window the
+/// buffer has already forgotten. Both the drop window and the trend window are
+/// declared with a 600 s ceiling; the maximum is taken rather than the constant
+/// so raising either ceiling cannot silently truncate the other's history.
 fn history_retention_sec(cfg: &MeanReversionConfig) -> i64 {
-    let ceiling = MEAN_REVERSION_KNOBS[0].3.to_i64().unwrap_or(600);
-    cfg.lookback_sec.max(1).max(ceiling)
+    let ceiling = |name: &str| {
+        MEAN_REVERSION_KNOBS
+            .iter()
+            .find(|(n, ..)| *n == name)
+            .map(|(_, _, _, max)| max.to_i64().unwrap_or(600))
+            .unwrap_or(600)
+    };
+    let widest = ceiling("lookback_sec").max(ceiling("trend_window_sec"));
+    cfg.lookback_sec
+        .max(cfg.trend_window_sec)
+        .max(1)
+        .max(widest)
 }
 
 impl FadeTracker {
@@ -238,6 +307,43 @@ impl FadeTracker {
                 (cur - hi) / hi * Decimal::ONE_HUNDRED
             })
             .unwrap_or(Decimal::ZERO)
+    }
+
+    /// The drop (%) of one token's current mid off the highest mid in its TREND
+    /// window — the same measure [`Self::drop_pct`] takes over the lookback, read
+    /// over a longer memory. Zero when the gate is off or history is short, so a
+    /// disabled gate and a fresh token both read "no slide" and never block.
+    pub fn trend_drop_pct(&self, token_id: &str, now_ms: i64) -> Decimal {
+        let window = self.cfg.trend_window_sec;
+        if window <= 0 {
+            return Decimal::ZERO;
+        }
+        self.buffers
+            .get(token_id)
+            .map(|b| {
+                if b.len() < 2 {
+                    return Decimal::ZERO;
+                }
+                let hi = b.highest(window, now_ms);
+                if hi <= Decimal::ZERO {
+                    return Decimal::ZERO;
+                }
+                let cur = b.latest();
+                (cur - hi) / hi * Decimal::ONE_HUNDRED
+            })
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    /// Is the token's fall the latest leg of a one-sided slide rather than a dip?
+    ///
+    /// True when the mid sits `trend_drop_pct` or more below the high of the
+    /// trend window. A window of 0 disables the gate (always false).
+    pub fn in_trend_slide(&self, token_id: &str, now_ms: i64) -> bool {
+        let cfg = &self.cfg;
+        if cfg.trend_window_sec <= 0 {
+            return false;
+        }
+        self.trend_drop_pct(token_id, now_ms) <= -cfg.trend_drop_pct
     }
 
     /// Cooldown check and record for one token's candidate fire.
@@ -318,6 +424,14 @@ pub fn evaluate_mean_reversion(
         if cfg.min_drop_pct > Decimal::ZERO && drop > -cfg.min_drop_pct {
             continue;
         }
+        // #176 trend gate: the same drop read over a LONGER memory. A token
+        // several legs into a one-sided slide is being repriced, not oversold —
+        // in a double market the cheap side of a trend keeps cheapening, and
+        // every further dip is another knife. Blocks the entry; the caller's
+        // cooldown still records the attempt, exactly like the other refusals.
+        if tracker.in_trend_slide(token, now_ms) {
+            continue;
+        }
         let mut entry = (mid * cfg.entry_factor).max(dec!(0.05)).min(dec!(0.9));
         entry = round2(entry);
         if book.best_bid > Decimal::ZERO && entry > book.best_bid {
@@ -380,10 +494,32 @@ mod tests {
         now
     }
 
+    /// Hold `p` for `secs` one tick per second; returns the clock.
+    fn hold(t: &mut FadeTracker, token: &str, p: Decimal, secs: usize, start: i64) -> i64 {
+        let mut now = start;
+        for _ in 0..secs {
+            now += 1_000;
+            t.on_price(token, p, now);
+        }
+        now
+    }
+
+    /// Drive a DIP on `token`: `from` held 5 s, then a 20 s fall to `to`,
+    /// one tick per second. Returns the clock at the low.
+    ///
+    /// The SHAPE is what separates a dip from a one-sided slide (#176): the high
+    /// `from` sits 25 s behind the low, so both memories see it, and the gate
+    /// reads the depth. `0.40 -> 0.30` is -25% (faded), `0.50 -> 0.30` is -40%
+    /// (refused). Both are past `min_drop_pct` over the 120 s lookback.
+    fn dip(t: &mut FadeTracker, token: &str, from: Decimal, to: Decimal, start: i64) -> i64 {
+        let now = hold(t, token, from, 5, start);
+        fall(t, token, from, to, 20, now)
+    }
+
     #[test]
     fn declarations_report_the_config_in_force_and_are_coherent() {
         let k = mean_reversion_knobs(&MeanReversionConfig::default());
-        assert_eq!(k.len(), 6);
+        assert_eq!(k.len(), 8);
         for spec in &k {
             assert!(spec.is_coherent(), "{spec:?}");
         }
@@ -392,6 +528,14 @@ mod tests {
         let drop = k.iter().find(|s| s.name == "min_drop_pct").unwrap();
         assert_eq!(drop.value, dec!(10));
         assert_eq!(drop.max, dec!(50));
+        // The #176 gate: 600 s / -30% in force, and the gate-OFF window (0) has
+        // to stay inside the declared box or a proposal could not switch it off.
+        let tw = k.iter().find(|s| s.name == "trend_window_sec").unwrap();
+        assert_eq!(tw.value, dec!(600));
+        assert!(tw.contains(dec!(0)), "{tw:?}");
+        let td = k.iter().find(|s| s.name == "trend_drop_pct").unwrap();
+        assert_eq!(td.value, dec!(30));
+        assert!(td.contains(dec!(60)), "{td:?}");
         // An out-of-domain starting config widens the declared domain.
         let cfg = MeanReversionConfig {
             lookback_sec: 900,
@@ -410,16 +554,32 @@ mod tests {
         p.set("max_price", dec!(0.30));
         p.set("lookback_sec", dec!(45.7));
         p.set("cooldown_sec", dec!(30.9));
+        p.set("trend_window_sec", dec!(300.9));
+        p.set("trend_drop_pct", dec!(45));
         p.set("hard_stop_loss_pct", dec!(0)); // not ours
         let out = apply_knobs(&base, &p);
         assert_eq!(out.max_price, dec!(0.30));
         assert_eq!(out.lookback_sec, 45, "a fractional lookback truncates");
         assert_eq!(out.cooldown_sec, 30);
+        assert_eq!(out.trend_window_sec, 300, "a fractional window truncates");
+        assert_eq!(out.trend_drop_pct, dec!(45));
         assert_eq!(out.min_drop_pct, base.min_drop_pct);
         // A non-positive lookback can never be written through the overlay.
         let mut bad = StrategyParams::new();
         bad.set("lookback_sec", dec!(0));
         assert_eq!(apply_knobs(&base, &bad).lookback_sec, base.lookback_sec);
+        // The trend window is the exception: 0 is the gate OFF and is writable
+        // (that is how a proposal — and the reverse-acceptance test — reaches the
+        // pre-#176 behaviour), while a negative window is not.
+        let mut off = StrategyParams::new();
+        off.set("trend_window_sec", dec!(0));
+        assert_eq!(apply_knobs(&base, &off).trend_window_sec, 0);
+        let mut neg = StrategyParams::new();
+        neg.set("trend_window_sec", dec!(-5));
+        assert_eq!(
+            apply_knobs(&base, &neg).trend_window_sec,
+            base.trend_window_sec
+        );
     }
 
     #[test]
@@ -470,12 +630,15 @@ mod tests {
     fn the_entry_rests_below_the_mid_like_the_dip_buyer() {
         let cfg = MeanReversionConfig::default();
         let mut t = FadeTracker::new(cfg.clone());
-        // 0.50 → 0.30 in 5 s: -40% off the lookback high inside the zone.
-        let now = fall(&mut t, "t", dec!(0.50), dec!(0.30), 5, 10_000);
+        // 0.40 -> 0.30 within 25 s: -25% off the lookback high, inside the cheap
+        // zone, and shallow enough that the 600 s window does not read it as a
+        // one-sided slide — this test isolates the PRICING, so its fixture is a
+        // dip; the gate has its own tests below.
+        let now = dip(&mut t, "t", dec!(0.40), dec!(0.30), 10_000);
         // Live book round the mid: bid 0.29, ask 0.31 → entry = round2(0.294) = 0.29.
         let b = book(0.29, 0.31);
         let sig = evaluate_mean_reversion("BTC", "c", "t", "t-down", Some(&b), None, &t, now, &cfg)
-            .expect("a deep crash in the cheap zone must fire");
+            .expect("a dip into the cheap zone must fire");
         assert_eq!(sig.strategy, "mean_reversion");
         assert_eq!(sig.direction, SignalDirection::Up);
         assert_eq!(sig.token_id, "t");
@@ -485,15 +648,168 @@ mod tests {
         assert!(sig.reason.contains("resting bid"), "{}", sig.reason);
     }
 
+    /// #176 acceptance, first half: a ONE-SIDED SLIDE is refused while the same
+    /// setup one leg shallower is faded. The two tokens share the cheap-zone low
+    /// and the shape of the fall; only the depth of the 600 s draw differs, and
+    /// the gate is the only rule that separates them.
+    #[test]
+    fn a_one_sided_slide_is_refused_while_a_dip_is_faded() {
+        let cfg = MeanReversionConfig::default();
+        let mut t = FadeTracker::new(cfg.clone());
+        let a = dip(&mut t, "dip", dec!(0.40), dec!(0.30), 10_000); // -25%
+        let b = dip(&mut t, "slide", dec!(0.50), dec!(0.30), 10_000); // -40%
+        let now = a.max(b);
+        let book = book(0.29, 0.31); // mid 0.30, inside the cheap zone
+
+        // Both are watched and both are "oversold" on the 120 s memory: the gate
+        // is not refusing the slide for want of depth or of a cheap mid.
+        assert!(t.is_in_zone("dip") && t.is_in_zone("slide"));
+        assert!(
+            t.drop_pct("dip", now) <= dec!(-10),
+            "{}",
+            t.drop_pct("dip", now)
+        );
+        assert!(
+            t.drop_pct("slide", now) <= dec!(-10),
+            "{}",
+            t.drop_pct("slide", now)
+        );
+
+        // Only the longer memory tells them apart.
+        assert!(
+            !t.in_trend_slide("dip", now),
+            "a -25% fall off the 600 s high is a dip: {}",
+            t.trend_drop_pct("dip", now)
+        );
+        assert!(
+            t.in_trend_slide("slide", now),
+            "a -40% fall off the 600 s high is a slide: {}",
+            t.trend_drop_pct("slide", now)
+        );
+
+        let faded = evaluate_mean_reversion(
+            "BTC",
+            "c",
+            "dip",
+            "dip-down",
+            Some(&book),
+            None,
+            &t,
+            now,
+            &cfg,
+        );
+        assert!(faded.is_some(), "a -25% dip must still be faded");
+        let refused = evaluate_mean_reversion(
+            "ETH",
+            "c",
+            "slide",
+            "slide-down",
+            Some(&book),
+            None,
+            &t,
+            now,
+            &cfg,
+        );
+        assert!(
+            refused.is_none(),
+            "a -40% slide must be refused: {refused:?}"
+        );
+    }
+
+    /// #176 acceptance, second half — the reverse at unit scale: the refusal IS
+    /// the gate, not the fixture. Switching the window off (the declared `0`)
+    /// restores the pre-#176 entry, a threshold loosened past the slide admits
+    /// it, and a window too short to hold the high admits it too. An
+    /// always-allow gate turns exactly this test red.
+    #[test]
+    fn the_trend_gate_is_what_refuses_the_slide() {
+        // The tracker owns the price history AND its own config (production keeps
+        // the two in sync on every book tick / hot-param push), so each arm gets
+        // its own tracker built from the config under test.
+        let book = book(0.29, 0.31);
+        let fires = |cfg: &MeanReversionConfig| {
+            let mut t = FadeTracker::new(cfg.clone());
+            let now = dip(&mut t, "t", dec!(0.50), dec!(0.30), 10_000); // a -40% slide
+            evaluate_mean_reversion("BTC", "c", "t", "t-down", Some(&book), None, &t, now, cfg)
+                .is_some()
+        };
+
+        assert!(
+            !fires(&MeanReversionConfig::default()),
+            "600 s / -30% refuses a -40% slide"
+        );
+        assert!(
+            fires(&MeanReversionConfig {
+                trend_window_sec: 0,
+                ..Default::default()
+            }),
+            "a zero window is the pre-gate behaviour exactly"
+        );
+        assert!(
+            fires(&MeanReversionConfig {
+                trend_drop_pct: dec!(45),
+                ..Default::default()
+            }),
+            "a threshold past the slide's depth admits it"
+        );
+        assert!(
+            !fires(&MeanReversionConfig {
+                trend_drop_pct: dec!(35),
+                ..Default::default()
+            }),
+            "a threshold inside the slide's depth still refuses it"
+        );
+        assert!(
+            fires(&MeanReversionConfig {
+                trend_window_sec: 10,
+                ..Default::default()
+            }),
+            "10 s of memory does not contain the slide's high"
+        );
+    }
+
+    /// The trend window is only measurable if the history reaches back that far:
+    /// the buffer is sized from the DECLARED ceilings, not from `lookback_sec`.
+    #[test]
+    fn the_price_history_reaches_the_widest_declared_window() {
+        let cfg = MeanReversionConfig::default();
+        assert_eq!(
+            history_retention_sec(&cfg),
+            600,
+            "the trend ceiling sizes the sample history"
+        );
+        let mut t = FadeTracker::new(cfg);
+        // A high 400 s behind the low: invisible to the 120 s lookback, decisive
+        // for the 600 s trend window.
+        t.on_price("t", dec!(0.50), 1_000);
+        t.on_price("t", dec!(0.30), 401_000);
+        assert_eq!(
+            t.drop_pct("t", 401_000),
+            Decimal::ZERO,
+            "the high is outside the lookback"
+        );
+        assert!(
+            t.in_trend_slide("t", 401_000),
+            "{}",
+            t.trend_drop_pct("t", 401_000)
+        );
+        // A hand config past the declared ceiling drags the retention with it.
+        let wide = MeanReversionConfig {
+            lookback_sec: 900,
+            ..Default::default()
+        };
+        assert_eq!(history_retention_sec(&wide), 900);
+    }
+
     #[test]
     fn a_shallow_drop_a_wide_book_or_a_recovered_mid_each_blocks_the_entry() {
         let cfg = MeanReversionConfig::default();
         // 1. Shallow drop: 0.50 → 0.47 is 6% — below the 10% minimum.
         let mut t = FadeTracker::new(cfg.clone());
-        let now = fall(&mut t, "t2", dec!(0.50), dec!(0.47), 3, 10_000);
+        let _ = fall(&mut t, "t2", dec!(0.50), dec!(0.47), 3, 10_000);
         // For live-book purposes the token must also sit in the cheap zone
-        // with a deep drop behind it: give the crash token "t" its own fall.
-        let _ = fall(&mut t, "t", dec!(0.50), dec!(0.30), 5, 10_000);
+        // with a deep drop behind it: give the dip token "t" its own fall.
+        let now = dip(&mut t, "t", dec!(0.40), dec!(0.30), 10_000);
         assert!(t.is_in_zone("t"));
 
         // (a) recovered mid (above the cheap cap) — the zone guard refuses even
@@ -522,7 +838,7 @@ mod tests {
                 &cfg
             )
             .is_some(),
-            "sanity: the real crash token fires"
+            "sanity: the real dip token fires"
         );
 
         // (c) wide book refused.
@@ -566,14 +882,13 @@ mod tests {
     fn the_entry_never_exceeds_the_bid_or_the_ceiling() {
         let cfg = MeanReversionConfig::default();
         let mut t = FadeTracker::new(cfg.clone());
-        let _ = fall(&mut t, "t", dec!(0.50), dec!(0.30), 5, 10_000);
-        let now = 10_000 + 5 * 1_000;
+        let now = dip(&mut t, "t", dec!(0.40), dec!(0.30), 10_000);
 
         // entry_factor would put the bid above the live best bid: clamp DOWN to
         // the bid, still strictly below the mid.
         let b = book(0.32, 0.33); // mid 0.325, entry 0.32 = exactly the bid -> clamp
         let sig = evaluate_mean_reversion("BTC", "c", "t", "t-down", Some(&b), None, &t, now, &cfg)
-            .expect("in-zone, crash-fallen token must fire");
+            .expect("in-zone, dip-fallen token must fire");
         assert_eq!(sig.price, dec!(0.32), "clamped to the best bid");
         assert!(sig.price < b.mid_price);
 
