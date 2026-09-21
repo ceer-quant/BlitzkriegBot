@@ -270,6 +270,24 @@ jobs:
         run: |
           node scripts/capacity-check.mjs
           node scripts/equity-drawdown-check.mjs --self-test
+      # #203: the taker-fee schedule is a COST PARAMETER, not just an accounting
+      # basis — the strategies were tuned under the shipped legacy curve, and
+      # `official` (Polymarket's published `0.07*p*(1-p)`) is 2.3x-5.3x it over the
+      # prices they trade while the fee is already the majority of gross. This gate
+      # replays the frozen corpus (#176's four sha256-pinned hours, in-repo, no
+      # network) under BOTH schedules with the release core built above, and the
+      # recorded #203 'hold' is re-checked in BOTH directions: red if the pin moves
+      # to the candidate without a re-decision, and red if the recorded reason for
+      # holding (the candidate is not viable) stops being true. It runs beside
+      # capacity-check because both read `lib/fee-model.mjs`; the corpus arm needs
+      # the release core and the dog cdylibs built above, and --self-test needs
+      # neither, which is what keeps the fixture half covered even if a build
+      # regresses.
+      - name: Fee-model sensitivity gate (#203)
+        timeout-minutes: 10
+        run: |
+          node scripts/fee-model-sensitivity-check.mjs --self-test
+          node scripts/fee-model-sensitivity-check.mjs
       # #202: what ONE order may commit, as a share of the live account. The
       # kernel had no such bound: `--max-order-notional` is an absolute number,
       # so the supervisor's 6.00 USD default is 125% of the 4.8 USDC book and the

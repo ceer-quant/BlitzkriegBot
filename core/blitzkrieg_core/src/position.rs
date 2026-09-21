@@ -6,8 +6,8 @@
 //! the open/closed books, daily PnL, and per-asset/direction cooldowns.
 
 use crate::exit_policy::{
-    ExitConfig, ExitState, ExitTickInput, decide_exit_verdict, executable_bid, pnl_pct,
-    update_exit_state,
+    ExitConfig, ExitState, ExitTickInput, decide_exit_verdict, effective_stop_pct, executable_bid,
+    pnl_pct, reference_price, update_exit_state,
 };
 use crate::model::{ExitReason, OrderRole, OrderbookSnapshot, Side, SignalDirection};
 
@@ -190,16 +190,41 @@ pub struct DailyTrip {
     pub at_ms: i64,
 }
 
-/// One protective stop the wick guard withheld — "should have triggered" made
-/// visible to review and to the panel (P0 #177).
+/// Why a protective stop that wanted to fire did not become an exit order.
+///
+/// Both causes mean the same thing to the operator — "I should have stopped out
+/// and did not" — but they need different fixes, so they are told apart rather
+/// than flattened into one alert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopSuppressionCause {
+    /// The wick guard: the raw bid breached the stop but the mid did not
+    /// confirm, so the breach looked like a wick rather than a move (#177).
+    WickGuard,
+    /// F6: the exit rule fired, but no bid was both live and fresh enough to
+    /// price a SELL against. Sending an order priced off a number no buyer was
+    /// showing is the thing the F6 gate forbids — so the position is held, and
+    /// the held exit is reported here instead of vanishing.
+    NoExecutableQuote,
+}
+
+/// One exit the F6 gate withheld from becoming an order — "should have
+/// triggered" made visible to review and to the panel (P0 #177, F6).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SuppressedStopEvent {
+    pub cause: StopSuppressionCause,
     pub position_id: String,
     pub token_id: String,
     pub strategy: String,
     pub asset: String,
     pub entry_price: Decimal,
+    /// The bid that was rejected as a price: zero when the book showed no bid
+    /// at all, the stale level when it showed one past the staleness budget.
+    /// For [`StopSuppressionCause::WickGuard`] it is the raw bid that breached
+    /// the stop.
     pub bid: Decimal,
+    /// For [`StopSuppressionCause::WickGuard`]: the mid that failed to confirm.
+    /// For [`StopSuppressionCause::NoExecutableQuote`]: the last known price the
+    /// stop actually judged on, since no bid was available to report.
     pub mid: Decimal,
     pub pnl_pct_at_bid: Decimal,
     pub pnl_pct_at_mid: Decimal,
@@ -211,18 +236,42 @@ impl SuppressedStopEvent {
     /// The audit-trail line: what the raw bid would have done, what the mid
     /// said instead, and the stop that was therefore not taken.
     pub fn message(&self) -> String {
-        format!(
-            "stop SUPPRESSED (wick guard): {} {} entry {} bid {} (-{}%) mid {} ({}%) stop {}% — \
-             raw bid breached the stop, mid did not confirm",
-            self.position_id,
-            self.asset,
-            self.entry_price,
-            self.bid,
-            self.pnl_pct_at_bid.abs(),
-            self.mid,
-            self.pnl_pct_at_mid,
-            self.stop_pct
-        )
+        match self.cause {
+            StopSuppressionCause::WickGuard => format!(
+                "stop SUPPRESSED (wick guard): {} {} entry {} bid {} (-{}%) mid {} ({}%) stop {}% — \
+                 raw bid breached the stop, mid did not confirm",
+                self.position_id,
+                self.asset,
+                self.entry_price,
+                self.bid,
+                self.pnl_pct_at_bid.abs(),
+                self.mid,
+                self.pnl_pct_at_mid,
+                self.stop_pct
+            ),
+            StopSuppressionCause::NoExecutableQuote if self.bid > Decimal::ZERO => format!(
+                "stop SUPPRESSED (stale quote): {} {} entry {} bid {} ({}%) stop {}% — the exit \
+                 rule fired, but the book was past its staleness budget, so that bid could not \
+                 price a SELL; the position is held until a fresh quote appears or expiry settles it",
+                self.position_id,
+                self.asset,
+                self.entry_price,
+                self.bid,
+                self.pnl_pct_at_bid,
+                self.stop_pct
+            ),
+            StopSuppressionCause::NoExecutableQuote => format!(
+                "stop SUPPRESSED (no executable bid): {} {} entry {} last {} ({}%) stop {}% — the \
+                 exit rule fired, but the book showed no bid at all, so no order was sent; the \
+                 position is held until a buyer appears or expiry settles it",
+                self.position_id,
+                self.asset,
+                self.entry_price,
+                self.mid,
+                self.pnl_pct_at_mid,
+                self.stop_pct
+            ),
+        }
     }
 }
 
@@ -297,6 +346,12 @@ pub struct OpenPosition {
     pub target_exit_price: Option<Decimal>,
     pub entered_at_ms: i64,
     pub expires_at_ms: i64,
+    /// F6: when the exit path last received a book for this token (ms epoch).
+    /// A forced exit may consult it to refuse pricing off a stale quote; it is
+    /// `0` until the first book arrives (serde default keeps old snapshots
+    /// loading as "no book seen since restart").
+    #[serde(default)]
+    pub last_book_ts: i64,
     pub state: ExitState,
     /// Actual cash flows since the position opened. Snapshots written before E17
     /// carry the serde default (all zero) and are repaired by [`OpenPosition::flows`].
@@ -680,6 +735,7 @@ impl PositionManager {
             target_exit_price: p.target_exit_price,
             entered_at_ms: now_ms,
             expires_at_ms: p.expires_at_ms,
+            last_book_ts: 0,
             state: ExitState::new(p.entry_price, now_ms),
             flows: CashFlows::default(),
         };
@@ -801,6 +857,11 @@ impl PositionManager {
     /// Update a single position's exit state AND its `current_price` from a book.
     /// This is what makes the UI's unrealized PnL move; it must run independently
     /// of whether automated exits are enabled.
+    ///
+    /// F6: `current_price` is a REFERENCE valuation (bid, else two-sided mid,
+    /// else the stale value) — the dashboard may keep showing it. It is never
+    /// again a substitute for an executable quote: exit decisions and SELL fills
+    /// price off `executable_bid`, which is zero when no bid quotes.
     fn valuate_one(
         pos: &mut OpenPosition,
         book: Option<&OrderbookSnapshot>,
@@ -808,10 +869,19 @@ impl PositionManager {
         cfg: &ExitConfig,
     ) {
         update_exit_state(&mut pos.state, pos.entry_price, book, now_ms, cfg);
-        let val = executable_bid(book);
+        let val = reference_price(book, pos.current_price);
         if val > Decimal::ZERO && pos.current_price != val {
             pos.prev_price = pos.current_price;
             pos.current_price = val;
+        }
+        // Track the freshness of the last book the valuation actually saw: the
+        // SNAPSHOT's own receive time when the caller supplies one (backtest /
+        // replay), else `now`. The exit path uses this to refuse pricing a SELL
+        // off a stale quote. NOTE: the live service rebuilds cached snapshots
+        // with `timestamp = now_ms`, which always looks fresh — preserving the
+        // real receive time through that cache is a service-layer follow-up.
+        if let Some(b) = book {
+            pos.last_book_ts = if b.timestamp > 0 { b.timestamp } else { now_ms };
         }
     }
 
@@ -840,19 +910,32 @@ impl PositionManager {
         for pos in self.open.iter_mut() {
             let book = books(&pos.token_id);
             Self::valuate_one(pos, book.as_ref(), now_ms, &cfg);
+            // F6: the exit price is an EXECUTABLE bid or nothing. The old code
+            // fell back to `pos.current_price` — a stale reference that could
+            // be an arbitrary number of seconds old, or a one-sided-book
+            // phantom — and let forced exits book profit no buyer was offering.
+            // A book older than the staleness budget is not a quote either: a
+            // bid captured minutes ago is not a buyer standing here now.
+            //
+            // This gate prices the ORDER, and only the order. It must not skip
+            // the DECISION: `decide_exit_verdict` already draws the same line
+            // (a mandatory or profit-side exit needs a live bid; the protective
+            // stop may read a fresh last-known price), and short-circuiting
+            // here made a breached stop indistinguishable from a quiet market —
+            // no order AND no report. So the verdict runs either way, and a
+            // decision that cannot be priced becomes a held-stop report below.
             let exit_price = executable_bid(book.as_ref());
-            let exit_price = if exit_price > Decimal::ZERO {
-                exit_price
-            } else if pos.current_price > Decimal::ZERO {
-                pos.current_price
-            } else {
-                continue;
+            let book_fresh = match book.as_ref() {
+                Some(b) => b.timestamp <= 0 || now_ms - b.timestamp <= cfg.max_book_age_sec * 1000,
+                None => true,
             };
+            let priceable = exit_price > Decimal::ZERO && book_fresh;
             let time_left_sec = (pos.expires_at_ms - now_ms) / 1000;
             let hold_sec = (now_ms - pos.entered_at_ms) / 1000;
 
             // Fixed-target strategies (e.g. sharp_reversal).
             if let Some(t) = pos.target_exit_price
+                && priceable
                 && exit_price >= t
                 && hold_sec >= self.config.exit.exit_grace_sec
             {
@@ -880,6 +963,7 @@ impl PositionManager {
             });
             if let Some(s) = verdict.suppressed_stop {
                 withheld.push(SuppressedStopEvent {
+                    cause: StopSuppressionCause::WickGuard,
                     position_id: pos.id.clone(),
                     token_id: pos.token_id.clone(),
                     strategy: pos.strategy.clone(),
@@ -894,12 +978,36 @@ impl PositionManager {
                 });
             }
             if let Some(d) = verdict.decision {
-                out.push(ExitRequest {
-                    position_id: pos.id.clone(),
-                    reason: d.reason,
-                    exit_price,
-                    use_maker: d.use_maker,
-                });
+                if priceable {
+                    out.push(ExitRequest {
+                        position_id: pos.id.clone(),
+                        reason: d.reason,
+                        exit_price,
+                        use_maker: d.use_maker,
+                    });
+                } else {
+                    // The rule fired but there is no buyer to sell to at any
+                    // price we can name — hold, and report the held exit so it
+                    // reaches review instead of dying in memory.
+                    withheld.push(SuppressedStopEvent {
+                        cause: StopSuppressionCause::NoExecutableQuote,
+                        position_id: pos.id.clone(),
+                        token_id: pos.token_id.clone(),
+                        strategy: pos.strategy.clone(),
+                        asset: pos.asset.clone(),
+                        entry_price: pos.entry_price,
+                        bid: exit_price,
+                        mid: pos.current_price,
+                        pnl_pct_at_bid: if exit_price > Decimal::ZERO {
+                            pnl_pct(exit_price, pos.entry_price)
+                        } else {
+                            Decimal::ZERO
+                        },
+                        pnl_pct_at_mid: pnl_pct(pos.current_price, pos.entry_price),
+                        stop_pct: effective_stop_pct(cfg.stop_loss_pct, time_left_sec, &cfg),
+                        now_ms,
+                    });
+                }
             }
         }
         for ev in withheld {
@@ -979,7 +1087,8 @@ impl PositionManager {
 
         // Shares with no exit fill of their own (a direct close, or the sub-grid
         // remainder) are priced here, so they must carry a fee here too — at the
-        // role of the order the caller just placed.
+        // role of the order the caller just placed. The fee follows the schedule
+        // in force, not a curve restated at this call site.
         let dust_fee = if was_maker {
             Decimal::ZERO
         } else {
@@ -1083,6 +1192,37 @@ impl PositionManager {
             pos.shares = shares;
             pos.cost_usd = entry_price * shares;
         }
+    }
+
+    /// F4: undo one `close()`. The venue reported the closing fill FAILED, so
+    /// the position was never sold: put the pre-close row back (shares, basis,
+    /// accrued flows, exit state — exactly as it stood), hand back the daily
+    /// PnL the close added, and drop the closed record from the in-memory book
+    /// so `balance == seed + Σ closed.net_pnl` holds again.
+    ///
+    /// The close-time cooldowns (`exit_cooldowns`, `asset_last_*`) are left
+    /// alone on purpose: they only delay actions conservatively, and the
+    /// pre-close values they overwrote are gone — trying to fake them would
+    /// just move the drift.
+    ///
+    /// Returns false (and changes nothing) if the position id is already open,
+    /// so a repeated unwind cannot duplicate the row.
+    pub fn restore_closed(&mut self, pre_close: OpenPosition, closed: &ClosedPosition) -> bool {
+        if self.open.iter().any(|p| p.id == pre_close.id) {
+            return false;
+        }
+        // The deploy line keeps the day's realized PnL inside `DailyLossState`
+        // (#173), so the reversal is the exact inverse of `close()`'s credit.
+        self.daily.realized_pnl_usd -= closed.net_pnl_usd;
+        if let Some(i) = self
+            .closed
+            .iter()
+            .rposition(|c| c.id == closed.id && c.exited_at_ms == closed.exited_at_ms)
+        {
+            self.closed.remove(i);
+        }
+        self.open.push(pre_close);
+        true
     }
 
     /// Capacity + cooldown gate (mirrors TS `canOpen`).
@@ -1198,6 +1338,163 @@ mod tests {
         };
         pm.apply_entry_fill(&pos.id, shares, price, fee, role)
             .unwrap()
+    }
+
+    fn one_sided_book(ask: Decimal, ts: i64) -> OrderbookSnapshot {
+        // F6 regression fixture: NO bids at all, only an ask. The old mid
+        // arithmetic turned this into a phantom sellable price of ask/2.
+        OrderbookSnapshot::from_levels("tok_BTC".to_string(), vec![], vec![(ask, dec!(100))], ts)
+    }
+
+    fn two_sided_book(bid: Decimal, ask: Decimal, ts: i64) -> OrderbookSnapshot {
+        OrderbookSnapshot::from_levels(
+            "tok_BTC".to_string(),
+            vec![(bid, dec!(100))],
+            vec![(ask, dec!(100))],
+            ts,
+        )
+    }
+
+    /// F6: with no buyer in the book, no exit request may be produced at all —
+    /// not from the mid, not from the stale `current_price`. Deadline pressure
+    /// (force-exit territory) included.
+    #[test]
+    fn no_bid_mint_no_exit_request_even_at_deadline() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
+        // 10 s before expiry: a live bid would fire ForceExit immediately.
+        let now = p.expires_at_ms - 10_000;
+        let reqs = pm.check_exits(
+            &|token| {
+                if token == "tok_BTC" {
+                    Some(one_sided_book(dec!(0.90), now))
+                } else {
+                    None
+                }
+            },
+            now,
+        );
+        assert!(
+            reqs.is_empty(),
+            "no bid ⇒ no sellable quote ⇒ no exit request"
+        );
+
+        // Sanity: the same tick WITH a real bid still exits (gate works both ways).
+        let reqs = pm.check_exits(
+            &|token| {
+                if token == "tok_BTC" {
+                    Some(two_sided_book(dec!(0.50), dec!(0.52), now))
+                } else {
+                    None
+                }
+            },
+            now,
+        );
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            reqs[0].exit_price,
+            dec!(0.50),
+            "exit prices off the live bid"
+        );
+    }
+
+    /// F6: a stale bid is not a buyer standing here now — an expired book must
+    /// not price a forced exit at an old price.
+    #[test]
+    fn stale_book_does_not_price_a_forced_exit() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
+        let now = p.expires_at_ms - 10_000;
+        // Bid 0.60 captured 2 minutes ago (budget: default 60 s).
+        let stale = now - 120_000;
+        let reqs = pm.check_exits(
+            &|token| {
+                if token == "tok_BTC" {
+                    Some(two_sided_book(dec!(0.60), dec!(0.62), stale))
+                } else {
+                    None
+                }
+            },
+            now,
+        );
+        assert!(reqs.is_empty(), "stale book must not price an exit");
+        assert_eq!(pos_book_ts(&pm, &p.id), stale, "last book seen is recorded");
+
+        // The same bid, received NOW, is executable again.
+        let reqs = pm.check_exits(
+            &|token| {
+                if token == "tok_BTC" {
+                    Some(two_sided_book(dec!(0.60), dec!(0.62), now))
+                } else {
+                    None
+                }
+            },
+            now,
+        );
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].exit_price, dec!(0.60));
+    }
+
+    fn pos_book_ts(pm: &PositionManager, id: &str) -> i64 {
+        pm.open_positions()
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.last_book_ts)
+            .unwrap_or(0)
+    }
+
+    /// The close path prices the unsold remainder itself, so it must charge it
+    /// the ACTIVE schedule's taker fee rather than a curve restated at that call
+    /// site. 0.1 unsold share written off at 0.60 taker: the shipped legacy
+    /// curve charges 1.2% of the $0.06 notional = $0.00072, where the published
+    /// crypto curve (2.8% of price) would charge $0.00168 — $0.00096 more.
+    ///
+    /// The active schedule is set-once per process, so this cannot run the two
+    /// schedules side by side; the assertion is the absolute net, which pins the
+    /// dust fee inside it, plus the delta the other schedule would have made.
+    #[test]
+    fn close_dust_fee_follows_the_active_schedule() {
+        assert_eq!(
+            crate::exit_policy::fee_schedule().name,
+            "legacy_quadratic",
+            "no schedule is installed in tests, so the shipped default is active"
+        );
+        let mut pm = PositionManager::new(PositionConfig::default());
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
+        // Sell 9.90 of 10 shares (sub-grid remainder stays) as a taker; that
+        // fill's own fee is charged by the caller, as production does.
+        let exit_fee = (dec!(1.2) / Decimal::ONE_HUNDRED) * dec!(0.6) * dec!(9.9);
+        pm.apply_exit_fill(&p.id, dec!(9.9), dec!(0.6), exit_fee, OrderRole::Taker)
+            .unwrap();
+        let closed = pm
+            .close(&p.id, dec!(0.60), ExitReason::Manual, false, 1000)
+            .unwrap();
+        // gross = 5.94 (the 9.90 sold) + 0.06 (dust) − 4.00 (maker cost) = 2.00
+        // fees  = 0.07128 (1.2% of the taker fill's 5.94) + 0.00072 (legacy
+        //         dust) = 0.072
+        assert_eq!(closed.net_pnl_usd, dec!(1.928));
+
+        let dust_notional = dec!(0.6) * dec!(0.1);
+        let legacy_dust = (dec!(1.2) / Decimal::ONE_HUNDRED) * dust_notional;
+        let official_dust = (crate::exit_policy::official_schedule().fee_pct(dec!(0.60))
+            / Decimal::ONE_HUNDRED)
+            * dust_notional;
+        assert_eq!(official_dust - legacy_dust, dec!(0.00096));
     }
 
     #[test]

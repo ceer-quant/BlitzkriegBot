@@ -58,6 +58,13 @@ pub struct ExitConfig {
     pub exit_grace_sec: i64,
     pub maker_exits_for_tp_only: bool,
     pub maker_first_exit_enabled: bool,
+    /// F6: a book older than this (sec, measured against the tick's `now_ms`)
+    /// must not price an exit — a stale quote is not an executable one.
+    /// Snapshots with `timestamp <= 0` (synthetic tests, legacy records) are
+    /// exempt because their age cannot be judged. Live service books are
+    /// rebuilt with `timestamp = now_ms` and are therefore always "fresh" at
+    /// this layer; real receive-time preservation happens upstream.
+    pub max_book_age_sec: i64,
 }
 
 impl Default for ExitConfig {
@@ -113,6 +120,7 @@ impl Default for ExitConfig {
             exit_grace_sec: 3,
             maker_exits_for_tp_only: false,
             maker_first_exit_enabled: true,
+            max_book_age_sec: 60,
         }
     }
 }
@@ -232,6 +240,26 @@ pub struct FeeSchedule {
     pub source: &'static str,
 }
 
+impl FeeSchedule {
+    /// This schedule's taker fee as a PERCENTAGE OF THE FILL PRICE — the unit the
+    /// charge path settles in (`fee_usd = pct/100 * price * shares`). The schedule
+    /// stores the per-share form (`rate * (p*(1-p))^exponent` USD per share,
+    /// which is how Polymarket publishes it); dividing by `price` converts it, so
+    /// both curves keep ONE accounting convention at every call site.
+    /// `price <= 0` charges nothing.
+    pub fn fee_pct(&self, price: Decimal) -> Decimal {
+        if price <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        let base = price * (Decimal::ONE - price);
+        let mut acc = Decimal::ONE;
+        for _ in 0..self.exponent {
+            acc *= base;
+        }
+        ((self.rate * acc) / price) * Decimal::ONE_HUNDRED
+    }
+}
+
 /// The schedule the deployment line charges: `0.125*(p*(1-p))^2`. Its
 /// provenance is NOT a published schedule (see `source`); it is the value the
 /// kernel has always charged, and #203's finding is that it is 2.3x-5.3x
@@ -297,18 +325,15 @@ pub fn set_fee_schedule(schedule: FeeSchedule) -> Result<(), String> {
         .map_err(|_| "the taker-fee schedule is already set for this process".to_string())
 }
 
-/// fee_per_share = rate*(p*(1-p))^exponent; as a percentage of price.
+/// The taker fee in force, as a percentage of the fill price: the active
+/// schedule's own arithmetic ([`FeeSchedule::fee_pct`]). One owner for the
+/// accounting basis every gate reconciles against and the cost parameter the
+/// strategies were tuned under (#182, #203).
 pub fn taker_fee_pct(price: Decimal) -> Decimal {
     if price <= Decimal::ZERO {
         return Decimal::ZERO;
     }
-    let schedule = fee_schedule();
-    let base = price * (Decimal::ONE - price);
-    let mut acc = Decimal::ONE;
-    for _ in 0..schedule.exponent {
-        acc *= base;
-    }
-    ((schedule.rate * acc) / price) * Decimal::ONE_HUNDRED
+    fee_schedule().fee_pct(price)
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -363,20 +388,42 @@ pub fn pnl_pct(price: Decimal, entry_price: Decimal) -> Decimal {
     }
 }
 
-/// The price a long can realistically sell at: live best bid, else mid, else 0.
+/// The price a long can realistically SELL at: the live best bid, or nothing.
+///
+/// F6: this must never fall back to the mid. A book with no bids has NO buyer —
+/// the mid `(0 + ask)/2` is an arithmetic artifact, not a level anyone will
+/// lift; returning it manufactured a sell price out of a one-sided book
+/// (ask 0.90, no bid → a phantom 0.45) and let exits book profit no counterparty
+/// was offering. Valuation (a display reference) and executability (an order
+/// that can actually fill) are different questions; callers that need a
+/// reference price use [`reference_price`], while anything that places a SELL
+/// or books realised PnL prices itself off THIS function and must treat a zero
+/// return as "no executable quote".
 pub fn executable_bid(book: Option<&OrderbookSnapshot>) -> Decimal {
     match book {
         None => Decimal::ZERO,
-        Some(b) => {
-            if b.best_bid > Decimal::ZERO {
-                b.best_bid
-            } else if b.mid_price > Decimal::ZERO {
-                b.mid_price
-            } else {
-                Decimal::ZERO
-            }
+        Some(b) if b.best_bid > Decimal::ZERO => b.best_bid,
+        _ => Decimal::ZERO,
+    }
+}
+
+/// A display/reference valuation for a long position when there is no
+/// executable bid: the mid of a two-sided book, else the last known
+/// `current_price`. NEVER use this to price a fill — realised PnL, SELL fills
+/// and forced exits must go through [`executable_bid`] — it exists so the
+/// dashboard keeps showing something sensible while a book is one-sided.
+pub fn reference_price(book: Option<&OrderbookSnapshot>, fallback: Decimal) -> Decimal {
+    if let Some(b) = book {
+        if b.best_bid > Decimal::ZERO {
+            return b.best_bid;
+        }
+        // model.rs zeroes the mid of a one-sided book, so this cannot
+        // resurrect the phantom `(0 + ask)/2` price that started F6.
+        if b.mid_price > Decimal::ZERO {
+            return b.mid_price;
         }
     }
+    fallback
 }
 
 /// Where a protective stop's reference price came from (P0 #177).
@@ -649,6 +696,12 @@ pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
 
 /// Pure exit decision plus the suppressed-stop report; mutates nothing.
 ///
+/// F6: every exit decision prices off the EXECUTABLE bid. `fallback_price` is a
+/// stale display reference — a position can no longer be force-exited or
+/// stopped out of it when nobody is bidding, because that books a SELL at a
+/// price no counterparty ever offered. Expiry without a bid must be settled as
+/// a market outcome (the service layer's job), not sold at the last price.
+///
 /// The protective stop is the ONE rule that keeps working when the quote is
 /// gone, because "no usable bid" is the situation it exists for. Every
 /// profit-side rule below is evaluated against the live executable bid only —
@@ -670,18 +723,16 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
     }
 
     let bid = executable_bid(book);
+    // F6 (main #168) and the deploy line's stop machinery agree on the same
+    // split: only a LIVE bid may price a mandatory/voluntary SELL; the last
+    // known price may still price the protective stop (bounded by
+    // `max_last_price_age_sec`), and nothing may price a profit-side exit.
     let live = bid > Decimal::ZERO;
-    let usable = if live {
-        bid
-    } else {
-        fallback_price
-            .filter(|p| *p > Decimal::ZERO)
-            .unwrap_or(Decimal::ZERO)
-    };
 
-    // 1. Force exit — absolute deadline; must fire even without a fresh book.
+    // 1. Force exit — absolute deadline. It still prices off the live bid:
+    //    deadline pressure alone must not mint a SELL against a dried-up book.
     if time_left_sec <= cfg.force_exit_sec {
-        if usable <= Decimal::ZERO {
+        if !live {
             return ExitVerdict::hold();
         }
         return ExitVerdict::exit(ExitReason::ForceExit, false);
@@ -1176,6 +1227,143 @@ mod tests {
                 cfg: &cfg,
             })
             .is_none()
+        );
+    }
+
+    // ── F6: a one-sided book must never mint an executable sell price ───────
+
+    fn one_sided_book(ask: Decimal) -> OrderbookSnapshot {
+        OrderbookSnapshot {
+            token_id: "t".into(),
+            bids: vec![],
+            asks: vec![(ask, dec!(100))],
+            bid_depth: Decimal::ZERO,
+            ask_depth: dec!(100),
+            obi: Decimal::ZERO,
+            spread: Decimal::ZERO,
+            spread_pct: Decimal::ZERO,
+            best_bid: Decimal::ZERO,
+            best_ask: ask,
+            // A one-sided book carries NO mid (see strategy_logic
+            // `from_sorted_levels`): `(0 + ask)/2` was the phantom price that
+            // started F6.
+            mid_price: Decimal::ZERO,
+            timestamp: 0,
+        }
+    }
+
+    #[test]
+    fn no_bid_means_no_executable_price_even_with_a_high_ask() {
+        // ask 0.90, zero bids: the old code returned mid = 0.45 here.
+        let b = one_sided_book(dec!(0.90));
+        assert_eq!(executable_bid(Some(&b)), Decimal::ZERO);
+        assert_eq!(executable_bid(None), Decimal::ZERO);
+    }
+
+    #[test]
+    fn force_exit_does_not_fire_without_an_executable_bid() {
+        // The audit's F6 scenario: maker entry @0.40, then only an ask 0.90
+        // remains. Deadline pressure must not mint a 0.45 SELL out of thin air.
+        let cfg = ExitConfig::default();
+        let st = ExitState::new(dec!(0.4), 0);
+        let b = one_sided_book(dec!(0.90));
+        assert!(
+            decide_exit(ExitTickInput {
+                entry_price: dec!(0.4),
+                book: Some(&b),
+                // The stale last-known price is a reference, not a quote: even
+                // offered as fallback it must not price a forced SELL.
+                fallback_price: Some(dec!(0.45)),
+                time_left_sec: 10,
+                hold_sec: 800,
+                state: &st,
+                now_ms: 900_000,
+                cfg: &cfg,
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn reference_price_prefers_bid_then_two_sided_mid_then_fallback() {
+        let two_sided = book(0.40, 0.44);
+        assert_eq!(reference_price(Some(&two_sided), dec!(9)), dec!(0.40));
+        // One-sided book: no phantom mid — fall back to the last known price.
+        let one_sided = one_sided_book(dec!(0.90));
+        assert_eq!(reference_price(Some(&one_sided), dec!(9)), dec!(9));
+        assert_eq!(reference_price(None, dec!(9)), dec!(9));
+    }
+
+    // ── F8: fee schedules ────────────────────────────────────────────────────
+    //
+    // These assert on schedule VALUES, never on an installed one: the active
+    // schedule is set-once per process, so a test that swapped it would poison
+    // every other test in the binary. `FeeSchedule` is a plain `Copy` value and
+    // needs no installation to be measured.
+
+    #[test]
+    fn legacy_schedule_fee_is_unchanged() {
+        let legacy = legacy_quadratic_schedule();
+        // p=0.50: 0.125 * (0.25)^2 = 0.0078125 USD/share → /0.50 = 1.5625%.
+        assert_eq!(legacy.fee_pct(dec!(0.50)), dec!(1.5625));
+        // The process default is this curve, so the charge path agrees.
+        assert_eq!(taker_fee_pct(dec!(0.50)), legacy.fee_pct(dec!(0.50)));
+        assert_eq!(legacy.fee_pct(dec!(0)), Decimal::ZERO);
+        assert_eq!(legacy.fee_pct(dec!(-1)), Decimal::ZERO);
+    }
+
+    #[test]
+    fn official_schedule_fee_matches_official_parameters() {
+        // Official: fee_usd = shares * 0.07 * p * (1-p). 100 shares @0.50 →
+        // 100 * 0.07 * 0.25 = $1.75. As a percentage of the fill price:
+        // 0.07 * 0.5 * 100 = 3.5%, and 3.5% * 0.50 * 100 shares = $1.75. The
+        // per-share and percentage conventions must agree at every price.
+        let official = official_schedule();
+        for p in [dec!(0.50), dec!(0.40), dec!(0.62), dec!(0.95)] {
+            let per_share_fee = dec!(0.07) * p * (Decimal::ONE - p);
+            let pct = official.fee_pct(p);
+            assert_eq!(
+                (pct / Decimal::ONE_HUNDRED) * p,
+                per_share_fee,
+                "pct convention must equal the official per-share fee at p={p}"
+            );
+        }
+        // p=0.50: 0.07 * 0.25 = 0.0175 USD/share → /0.50 = 3.5% of price.
+        assert_eq!(official.fee_pct(dec!(0.50)), dec!(3.5));
+        // 100 shares @0.50 → exactly $1.75.
+        let fee_usd =
+            (official.fee_pct(dec!(0.50)) / Decimal::ONE_HUNDRED) * dec!(0.50) * dec!(100);
+        assert_eq!(fee_usd, dec!(1.75));
+        // At p=0.50 the published curve is 2.24x the legacy one — the cost jump
+        // #203 measured.
+        let legacy = legacy_quadratic_schedule();
+        assert_eq!(
+            (official.fee_pct(dec!(0.50)) / legacy.fee_pct(dec!(0.50))).round_dp(2),
+            dec!(2.24)
+        );
+        // Edge prices charge nothing.
+        assert_eq!(official.fee_pct(dec!(0)), Decimal::ZERO);
+        assert_eq!(official.fee_pct(dec!(1)), Decimal::ZERO);
+    }
+
+    #[test]
+    fn crypto_fee_flips_the_marginal_round_trip_sign() {
+        // Audit F8: 100 shares taker 0.50 in → 0.52 out. Legacy ≈ +0.44 net;
+        // official crypto fee ≈ −1.497 net. The sign must flip.
+        let round_trip = |s: &FeeSchedule| -> Decimal {
+            let entry_fee = (s.fee_pct(dec!(0.50)) / Decimal::ONE_HUNDRED) * dec!(0.50) * dec!(100);
+            let exit_fee = (s.fee_pct(dec!(0.52)) / Decimal::ONE_HUNDRED) * dec!(0.52) * dec!(100);
+            (dec!(0.52) - dec!(0.50)) * dec!(100) - entry_fee - exit_fee
+        };
+        let legacy = round_trip(&legacy_quadratic_schedule());
+        let crypto = round_trip(&official_schedule());
+        assert!(
+            legacy > Decimal::ZERO,
+            "legacy round trip was profitable: {legacy}"
+        );
+        assert!(
+            crypto < Decimal::ZERO,
+            "crypto round trip must lose: {crypto}"
         );
     }
 }

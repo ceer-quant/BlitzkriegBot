@@ -917,8 +917,15 @@ pub struct WalkForwardResult {
     pub min_train: usize,
 }
 
-/// Expanding-window walk-forward: pick the best grid point on records[0..k],
-/// apply it once to record k. Guards against curve-fitting a handful of paths.
+/// Expanding-window walk-forward: pick the best grid point on the past, apply
+/// it once to record k. Guards against curve-fitting a handful of paths.
+///
+/// F9: "the past" is not `records[..k]`. A training path may only vote when
+/// its OUTCOME was already knowable at the validation trade's entry time —
+/// its path's last event happened at or before that entry. Selection by
+/// entry order alone leaked outcomes that happened after the validation
+/// entry (a path entered earlier but resolved later), so training slices are
+/// filtered by knowable-result time before any grid scoring.
 pub fn walk_forward(
     records: &[ShadowRecord],
     base: &ExitConfig,
@@ -940,7 +947,10 @@ pub fn walk_forward(
     let mut oos_count = 0usize;
     if records.len() > min_train {
         for k in min_train..records.len() {
-            let train = &records[..k];
+            let train = knowable_train(records, k);
+            if train.len() < min_train {
+                continue; // not enough KNOWN history to choose params honestly
+            }
             let best = grid
                 .iter()
                 .max_by_key(|g| {
@@ -961,6 +971,28 @@ pub fn walk_forward(
         oos_pnl,
         min_train,
     }
+}
+
+/// The moment a record's OUTCOME became knowable. A `ShadowRecord` carries no
+/// explicit close time, so the bound is its own path's LAST event: entry time
+/// plus the newest sample's offset (an unclosed path is only knowable at
+/// entry, and contributes nothing to training anyway).
+fn outcome_known_ms(rec: &ShadowRecord) -> i64 {
+    rec.entered_at_ms + rec.own.last().map(|s| s.t_ms).unwrap_or(0)
+}
+
+/// The training candidates for validating `records[idx]`: earlier records
+/// whose result was already knowable when this validation trade was entered
+/// (F9). Overlapping paths — an earlier ENTRY whose result lands after the
+/// validation entry — are excluded; they are the future leaking backwards.
+fn knowable_train(records: &[ShadowRecord], idx: usize) -> Vec<&ShadowRecord> {
+    let Some(t_k) = records.get(idx).map(|r| r.entered_at_ms) else {
+        return Vec::new();
+    };
+    records[..idx]
+        .iter()
+        .filter(|r| outcome_known_ms(r) <= t_k)
+        .collect()
 }
 
 /// Parse one Node-format shadow JSONL line (as written by the TS shadow engine)
@@ -1113,19 +1145,70 @@ mod tests {
 
     #[test]
     fn walk_forward_reports_oos_and_in_sample() {
-        // Five records: mostly losers, one big winner.
+        // Five records: mostly losers, one big winner. Each entry is spaced
+        // past every earlier path's last event (10s apart, paths end at 2s),
+        // so every earlier outcome is knowable when the later OOS checks run
+        // (the F9 knowability filter).
         let recs: Vec<ShadowRecord> = vec![
             rec_with_path(dec!(0.40), &[(0, 0.40), (1000, 0.30), (2000, 0.20)]),
             rec_with_path(dec!(0.40), &[(0, 0.40), (1000, 0.35), (2000, 0.25)]),
             rec_with_path(dec!(0.40), &[(0, 0.40), (1000, 0.60), (2000, 1.0)]),
             rec_with_path(dec!(0.40), &[(0, 0.40), (1000, 0.38), (2000, 0.30)]),
             rec_with_path(dec!(0.40), &[(0, 0.40), (1000, 0.50), (2000, 0.45)]),
-        ];
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut r)| {
+            r.entered_at_ms = i as i64 * 10_000;
+            r
+        })
+        .collect();
         let out = walk_forward(&recs, &ExitConfig::default(), &default_grid(), 3);
         assert_eq!(out.in_sample.len(), default_grid().len());
         assert_eq!(out.oos_count, 2);
         // The in-sample list is named and ordered by the grid.
         assert_eq!(out.in_sample[0].0, default_grid()[0].name);
+    }
+
+    /// F9: a path entered EARLIER but resolved LATER must not train a
+    /// validation trade that happened in between. A entered at 0s and only
+    /// exits at 180s; B enters at 60s. At B's entry A's result is still in
+    /// the future, so B gets no honest training slice and is not scored;
+    /// once the validation window advances past 180s, A becomes training
+    /// material again.
+    #[test]
+    fn walk_forward_does_not_train_on_outcomes_from_the_future() {
+        let mut a = rec_with_path(dec!(0.40), &[(0, 0.40), (180_000, 1.0)]);
+        a.entered_at_ms = 0;
+        a.token_id = "a".into();
+        // B's own path ends at 150s (entered 60s + 90s of samples).
+        let mut b = rec_with_path(dec!(0.40), &[(0, 0.40), (90_000, 0.50)]);
+        b.entered_at_ms = 60_000;
+        b.token_id = "b".into();
+        let mut c = rec_with_path(dec!(0.40), &[(0, 0.40), (10_000, 0.45)]);
+        c.entered_at_ms = 200_000;
+        c.token_id = "c".into();
+        let recs = vec![a, b, c]; // already entry-ordered
+
+        assert_eq!(outcome_known_ms(&recs[0]), 180_000);
+        // B's validation entry at 60s: A's outcome (180s) is not knowable yet
+        // → the training slice must not contain A — here it is empty entirely.
+        let train_b = knowable_train(&recs, 1);
+        assert!(
+            train_b.iter().all(|r| r.token_id != "a"),
+            "A's 180s result leaked into B's 60s training slice"
+        );
+        // And with nothing knowable at all, walk_forward must not invent a
+        // choice: B is skipped instead of scored on fabricated params.
+        let out = walk_forward(&recs, &ExitConfig::default(), &default_grid(), 1);
+        assert_eq!(out.oos_count, 1, "only C is scored out-of-sample");
+
+        // The window advanced past A's resolution (180s) and B's (150s):
+        // both are now knowable and DO train C's 200s validation entry.
+        let train_c = knowable_train(&recs, 2);
+        assert_eq!(train_c.len(), 2);
+        assert!(train_c.iter().any(|r| r.token_id == "a"));
+        assert!(train_c.iter().any(|r| r.token_id == "b"));
     }
 
     #[test]

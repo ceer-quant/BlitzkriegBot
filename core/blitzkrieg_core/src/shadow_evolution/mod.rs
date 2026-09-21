@@ -1149,11 +1149,19 @@ mod tests {
     }
 
     /// Drive ONE strategy's twin set through `times` cycles where the baseline
-    /// LOSES and a loosened cap WINS: a dip the baseline's own cap admits (mid
-    /// 0.395 <= 0.40) that collapses, then a shallower dip only a loosened cap
-    /// reaches (mid 0.405 > 0.40) that rallies. The baseline therefore has
-    /// samples but a zero win rate, so it satisfies the sample floor while the
-    /// loosened variant beats it on both win rate and profit factor.
+    /// LOSES and a variant WINS: a dip the baseline's own cap admits (mid
+    /// 0.39 <= 0.40) that collapses, then — one tick later — a collapsed price
+    /// (mid 0.20) a variant that MISSED the dip is free to buy and ride all the
+    /// way back up. The baseline is already holding through the crash, so it
+    /// stops out at the collapse and keeps samples but a zero win rate, while
+    /// the crash-entry variant beats it on win rate and profit factor.
+    ///
+    /// The dip and crash books are LOCKED (bid = ask = mid): under the F7
+    /// fillability rule a resting bid only fills when the offer side reaches
+    /// its price, so the offer must sit at the entry level for a position to
+    /// open. The rally book's offer deliberately sits ABOVE every entry limit —
+    /// a signal to re-enter the rally is therefore not fillable and produces no
+    /// trade (F7), keeping the comparison down to executable trades only.
     fn drive_wins(m: &mut ShadowEvolution, name: &str, times: usize, t0: i64) {
         let round = market();
         let i = m.units.iter().position(|u| u.strategy == name).unwrap();
@@ -1161,7 +1169,7 @@ mod tests {
         for _ in 0..times {
             // A loser the baseline also takes: entry under the cap, then collapse.
             now += 1_000;
-            let dip = book(0.39, 0.40); // mid 0.395
+            let dip = book(0.39, 0.39); // mid 0.39 — locked, offer at the entry price
             for v in m.units[i].set.variants.iter_mut() {
                 v.on_tick(&tick_ctx(
                     std::slice::from_ref(&round),
@@ -1173,7 +1181,10 @@ mod tests {
                 ));
             }
             now += 1_000;
-            let crash = book(0.20, 0.21); // mid 0.205 → well past the 12% stop
+            // LOCKED at the crash level: holders stop out at the 0.20 bid, and a
+            // variant that missed the dip may take the collapsed price — its
+            // offer must reach the entry level for that entry to be fillable.
+            let crash = book(0.20, 0.20); // mid 0.20 → well past the 12% stop
             for v in m.units[i].set.variants.iter_mut() {
                 v.on_tick(&tick_ctx(
                     std::slice::from_ref(&round),
@@ -1184,9 +1195,12 @@ mod tests {
                     now,
                 ));
             }
-            // A winner only a LOOSENED cap reaches: mid 0.405 > the 0.40 baseline.
+            // The rally: mid 0.41 clears the 0.40 baseline cap, but its OFFER
+            // (0.43) sits above every entry limit, so re-entering here is not
+            // fillable (F7) — and its bid stays under the 100% take-profit
+            // floor, so the collapsed-price entry rides on to the up tick.
             now += 1_000;
-            let shallow = book(0.40, 0.41);
+            let shallow = book(0.39, 0.43); // mid 0.41 > the 0.40 baseline cap
             for v in m.units[i].set.variants.iter_mut() {
                 v.on_tick(&tick_ctx(
                     std::slice::from_ref(&round),
