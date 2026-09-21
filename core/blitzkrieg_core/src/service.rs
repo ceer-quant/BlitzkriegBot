@@ -9615,7 +9615,7 @@ mod settlement_service_tests {
     use crate::model::{FillPolicy, OrderStatus, Side};
     use rust_decimal_macros::dec;
 
-    fn scratch(name: &str) -> std::path::PathBuf {
+    pub(super) fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "bk-settle-{name}-{}-{:?}",
             std::process::id(),
@@ -9628,7 +9628,7 @@ mod settlement_service_tests {
 
     /// A dry core whose market expires 1s after the entry round and whose durable
     /// logs (positions, trades, settlement journal) all land in `dir`.
-    fn settling_core(dir: &std::path::Path, balance: Decimal) -> Core {
+    pub(super) fn settling_core(dir: &std::path::Path, balance: Decimal) -> Core {
         let path = |name: &str| Some(dir.join(name).to_string_lossy().to_string());
         let mut c = Core::new(CoreConfig {
             mode: Mode::Dry,
@@ -9665,7 +9665,7 @@ mod settlement_service_tests {
 
     /// Open a 5-share position at 0.40 (taker: cost 2.00 + 0.036 fee) on a market
     /// that expires at t=2000ms, and take the audit anchor with it open.
-    fn open_and_anchor(c: &mut Core, balance: Decimal) {
+    pub(super) fn open_and_anchor(c: &mut Core, balance: Decimal) {
         c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
         let (_id, status) = c.place(entry_order(dec!(0.40), dec!(5)), 0, 1).unwrap();
         assert_eq!(status, OrderStatus::Filled);
@@ -9685,7 +9685,7 @@ mod settlement_service_tests {
     }
 
     /// The resolution the venue would report: the held token pays 1.00/share.
-    fn winning_resolution() -> blitzkrieg_market_api::MarketResolution {
+    pub(super) fn winning_resolution() -> blitzkrieg_market_api::MarketResolution {
         blitzkrieg_market_api::MarketResolution {
             condition_id: "cond".into(),
             resolved: true,
@@ -10174,6 +10174,9 @@ mod settlement_service_tests {
 /// token must never inherit a dead reason.
 #[cfg(test)]
 mod exit_reason_table_tests {
+    use super::settlement_service_tests::{
+        open_and_anchor, scratch, settling_core, winning_resolution,
+    };
     use super::*;
     use crate::model::{FillPolicy, OrderStatus, Side};
     use crate::position::OpenParams;
@@ -10282,6 +10285,38 @@ mod exit_reason_table_tests {
         );
         assert_eq!(c.exit_reasons_view()["tracked"], serde_json::json!(0));
         assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(0));
+    }
+
+    /// The other cleanup site, and the one every internal close funnels through:
+    /// a position that settles locally never had its exit fill, so
+    /// `take_exit_reason` never ran for it and the retirement inside
+    /// `on_position_closed` is the only thing that removes the entry.
+    #[test]
+    fn a_local_settlement_retires_the_pending_exit_reason() {
+        let dir = scratch("settle-reason");
+        let mut c = settling_core(&dir, dec!(10));
+        open_and_anchor(&mut c, dec!(10));
+        // A stop was decided, its exit never filled, and the market resolved
+        // under it: the reason must die with the position it belonged to.
+        c.note_exit_reason("tok", ExitReason::StopLoss);
+        assert_eq!(c.exit_reasons_view()["tracked"], serde_json::json!(1));
+
+        c.on_market_resolution(winning_resolution(), 2_001);
+
+        assert_eq!(
+            c.positions().closed_positions()[0].exit_reason,
+            ExitReason::Settlement,
+            "the settlement, not the dead stop, is what closed this position"
+        );
+        assert!(
+            c.exit_reasons.is_empty(),
+            "a settled position must not leave its exit reason behind: {:?}",
+            c.exit_reasons
+        );
+        assert_eq!(c.exit_reasons_view()["tracked"], serde_json::json!(0));
+        assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(0));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The mis-attribution this issue is about: a reason recorded for an exit
