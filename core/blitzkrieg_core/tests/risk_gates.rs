@@ -1199,6 +1199,184 @@ fn a_same_day_dry_to_live_restart_rebases_the_cap_on_the_live_book() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Write the day's state file as a kernel wrote it: `basis = None` produces the
+/// PRE-#235 shape, where `openingEquityUsd` is in the file and the book it was
+/// measured from is absent.
+///
+/// That is the shape of the issue's own evidence — the dry run stamped
+/// `openingEquityUsd: 10000` and nothing said which account that was — so the
+/// compatibility path is exercised by building a real [`DailyLossState`] and
+/// dropping the field, rather than by hand-writing JSON that could drift from
+/// what the kernel actually persists.
+fn write_daily(
+    path: &std::path::Path,
+    day: i64,
+    opening_equity: Decimal,
+    basis: Option<EquityBasis>,
+) {
+    let mut value = serde_json::to_value(DailyLossState {
+        day_index: Some(day),
+        opening_equity_usd: opening_equity,
+        equity_basis: basis,
+        opened_at_ms: NOW,
+        ..Default::default()
+    })
+    .expect("the day's state must serialize");
+    if basis.is_none() {
+        let dropped = value
+            .as_object_mut()
+            .expect("DailyLossState is a JSON object")
+            .remove("equityBasis");
+        assert!(
+            dropped.is_some(),
+            "the fixture must actually drop the basis field"
+        );
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string(&value).expect("serialize the day's state"),
+    )
+    .expect("write the day's state file");
+}
+
+/// The file the issue's evidence came from: a state file written BEFORE the fix
+/// records no basis at all, so its $10 000 base cannot be attributed to any book.
+/// An unattributable base is not a licence to keep the old cap — it must be
+/// re-anchored onto the live book in front of it, and 20% of that $50 book (not
+/// 20% of the $10 000 the file happened to carry) is the day's cap.
+#[test]
+fn a_legacy_state_file_with_no_basis_rebases_onto_the_live_book() {
+    let path = temp_path("legacy-basis-live");
+    write_daily(&path, utc_day_index(NOW), dec!(10_000), None);
+    let cfg = budget_config(
+        Decimal::ZERO,
+        dec!(20),
+        Some(path.to_string_lossy().into_owned()),
+    );
+
+    // What the file carries in, and why it is the fail-open the issue reports:
+    // 20% of the unattributable base is a $2 000 cap on a $50 account.
+    let stale = persisted_daily(&path);
+    assert_eq!(stale.day_index, Some(utc_day_index(NOW)));
+    assert_eq!(stale.opening_equity_usd, dec!(10_000));
+    assert_eq!(stale.equity_basis, None, "the fixture must not name a book");
+    assert_eq!(stale.opening_equity_usd * dec!(20) / dec!(100), dec!(2_000));
+
+    // Same UTC day, a live $50 book.
+    let mut live = PositionManager::new(cfg);
+    let (rolled, logs) = with_logs(|| live.roll_daily(NOW + 60_000, dec!(50), EquityBasis::Live));
+    assert!(
+        rolled.is_none(),
+        "same UTC day: no day boundary was crossed"
+    );
+    assert_eq!(
+        live.effective_daily_loss_limit(),
+        dec!(10),
+        "50 x 20% — NOT the $2 000 the unattributable base implied"
+    );
+    assert_eq!(live.daily_state().opening_equity_usd, dec!(50));
+    assert_eq!(live.daily_state().equity_basis, Some(EquityBasis::Live));
+    assert!(
+        logs.contains("opening equity 10000 (unrecorded) -> 50 (live)"),
+        "an unrecorded basis must be named as such: {logs}"
+    );
+    let rebased = persisted_daily(&path);
+    assert_eq!(rebased.opening_equity_usd, dec!(50));
+    assert_eq!(rebased.equity_basis, Some(EquityBasis::Live));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Where the missing LABEL is the only thing that can act: the book moves by less
+/// than the 50% deviation fallback, so a file that names the live book is an
+/// ordinary restart and a file that names nothing is re-anchored — on the same
+/// $200 → $150 move.
+///
+/// Without this pair the rule is untested: the headline case drops 99.5%, which
+/// the deviation fallback catches whether or not an unrecorded basis counts as a
+/// change.
+#[test]
+fn a_legacy_state_file_rebases_where_a_recorded_one_would_not() {
+    let day = utc_day_index(NOW);
+    let labeled = temp_path("legacy-basis-control");
+    write_daily(&labeled, day, dec!(200), Some(EquityBasis::Live));
+    let unlabeled = temp_path("legacy-basis-discriminating");
+    write_daily(&unlabeled, day, dec!(200), None);
+
+    // Control: the file says the base came from the live book, and the live book
+    // is 25% smaller — inside the deviation band — so nothing moves.
+    let mut control = PositionManager::new(budget_config(
+        Decimal::ZERO,
+        dec!(20),
+        Some(labeled.to_string_lossy().into_owned()),
+    ));
+    control.roll_daily(NOW + 60_000, dec!(150), EquityBasis::Live);
+    assert_eq!(
+        control.daily_state().opening_equity_usd,
+        dec!(200),
+        "a restarted live book keeps the day's base"
+    );
+    assert_eq!(control.effective_daily_loss_limit(), dec!(40));
+
+    // The same numbers with no basis recorded: it re-anchors onto the live book.
+    let mut legacy = PositionManager::new(budget_config(
+        Decimal::ZERO,
+        dec!(20),
+        Some(unlabeled.to_string_lossy().into_owned()),
+    ));
+    legacy.roll_daily(NOW + 60_000, dec!(150), EquityBasis::Live);
+    assert_eq!(
+        legacy.daily_state().opening_equity_usd,
+        dec!(150),
+        "an unattributable base re-anchors even inside the deviation band"
+    );
+    assert_eq!(
+        legacy.effective_daily_loss_limit(),
+        dec!(30),
+        "20% of the $150 book, not 20% of the $200 the file carried"
+    );
+    assert_eq!(legacy.daily_state().equity_basis, Some(EquityBasis::Live));
+
+    let _ = std::fs::remove_file(&labeled);
+    let _ = std::fs::remove_file(&unlabeled);
+}
+
+/// The other direction of the same file: a base that UNDERSTATES the book is not
+/// re-anchored upward, because re-anchoring may only ever tighten. A same-day
+/// switch must never hand the day a bigger budget than it already had, so the
+/// smaller base (and its smaller cap) stays.
+#[test]
+fn a_legacy_state_file_never_loosens_the_cap_when_the_book_is_bigger() {
+    let path = temp_path("legacy-basis-grow");
+    write_daily(&path, utc_day_index(NOW), dec!(50), None);
+    let cfg = budget_config(
+        Decimal::ZERO,
+        dec!(20),
+        Some(path.to_string_lossy().into_owned()),
+    );
+
+    let mut live = PositionManager::new(cfg);
+    let (rolled, logs) = with_logs(|| live.roll_daily(NOW + 60_000, dec!(200), EquityBasis::Live));
+    assert!(
+        rolled.is_none(),
+        "same UTC day: no day boundary was crossed"
+    );
+    assert_eq!(
+        live.daily_state().opening_equity_usd,
+        dec!(50),
+        "the day keeps the tighter base it already had"
+    );
+    assert_eq!(
+        live.effective_daily_loss_limit(),
+        dec!(10),
+        "…so the cap stays $10, not the $40 the bigger book would allow"
+    );
+    assert!(
+        !logs.contains("re-anchored"),
+        "a tightening move that does not happen must not be announced: {logs}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
 /// The boundary the fix must not break: the SAME book at (roughly) the same size
 /// is an ordinary restart. It must not move the day's base, must not disturb how
 /// much of the day's budget is already spent, and must not warn.
