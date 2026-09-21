@@ -97,7 +97,11 @@ cargo build --release --workspace --locked
 - `soak-resident.sh` — start/stop/status for the resident soak pair (D-30).
   `soak-monitor.mjs --forever` samples continuously instead of for a 12h window,
   and this wrapper is its explicit stop switch; `start` refuses to stack a second
-  sampler (two samplers would double every figure in `soak.jsonl`). Deployment
+  sampler (two samplers would double every figure in `soak.jsonl`). When a
+  pidfile is stale it says WHY before starting a fresh one — "pid is not
+  running", or "the pid was recycled by another process" — because replacing a
+  pidfile in silence makes a correct refusal to adopt a stranger's pid look like
+  `start` being broken (#212). Deployment
   config (notably `BK_RUN_LOG`) is read from `$BK_SOAK_DIR/resident.env` as a
   fallback, with an explicit env value or `--run-log` winning over it.
   **It does not survive a reboot**, and that is a TCC limit, not an oversight:
