@@ -23,7 +23,7 @@ use std::sync::Arc;
 /// JSON-RPC object per line, so this is orders of magnitude above any real
 /// event; it exists only so a peer streaming without newlines cannot grow the
 /// reader's line buffer without bound.
-const MAX_LINE_BYTES: usize = 1 << 20;
+pub(crate) const MAX_LINE_BYTES: usize = 1 << 20;
 
 /// Sell one reader thread as a daemon. Returns an `Arc<AtomicBool>` flag that
 /// flips false when the thread is asked to stop (`stop()`).
