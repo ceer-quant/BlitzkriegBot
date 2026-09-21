@@ -1169,6 +1169,17 @@ async fn main() -> anyhow::Result<()> {
     // Configuration is loaded BEFORE the arguments, because the arguments are
     // resolved against it (CLI > env > TOML > default).
     let argv: Vec<String> = std::env::args().skip(1).collect();
+
+    // `--version` is answered before anything else is touched: it must work with
+    // no config file, no socket, no data/ and no git, and must not boot a core.
+    // The string carries the built revision (`<semver>+g<sha>`, #179), which is
+    // what lets a gate compare the binary under test against the commit it is
+    // checking instead of trusting whatever is on disk (#172).
+    if argv.iter().any(|a| a == "--version" || a == "-V") {
+        println!("{}", blitzkrieg_core::ipc::build_info::version_string());
+        return Ok(());
+    }
+
     let env = EnvVars::from_process();
     let choice = config_choice(&argv, &env);
     let file = match &choice {
@@ -1202,6 +1213,15 @@ async fn main() -> anyhow::Result<()> {
     for line in &args.daily_loss_echo {
         eprintln!("blitzkrieg-core: {line}");
     }
+
+    // Which code this process is (#179). On stderr and deliberately NOT through
+    // `tracing`: the shipped default log filter is ERROR (#184), so a provenance
+    // line sent to the log layer would be absent from exactly the runs that are
+    // later asked "which build was that?".
+    eprintln!(
+        "blitzkrieg-core: {}",
+        blitzkrieg_core::ipc::build_info::provenance_line()
+    );
 
     // DRY_RUN env honours the existing convention when --mode is not explicit.
     let mode = if std::env::args().any(|a| a == "--mode") {

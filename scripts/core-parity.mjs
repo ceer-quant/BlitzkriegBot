@@ -5,11 +5,20 @@
  * order/fill/ledger semantics:
  *
  *  - taker fills immediately and spends price*size
+ *  - the three taker outcomes a dry FOK must tell apart: no opposing depth or
+ *    depth outside the limit -> REJECTED (unfilled, unreserved), enough depth ->
+ *    FILLED at the VWAP of the levels it walked
  *  - maker rests until the book crosses, then fills at its limit
  *  - maker_then_taker escalates to a taker after the timeout
  *  - cancel releases the reserved notional
  *  - risk (per-order cap) and ledger (insufficient funds) reject, structured
  *  - idempotent position effects arrive as typed FILL events
+ *
+ * It also states WHICH code it is testing (#172/#179) — the binary's embedded
+ * revision must be the checkout's — and derives every fee it asserts from the
+ * kernel's own `core.feeQuote`, checking that schedule against the pinned one
+ * (#182). Both are here because this gate's most expensive historical failure
+ * was a conclusion that silently described the wrong code state.
  *
  * Exit 0 only if every assertion passes. Requires `cargo build --release`.
  */
@@ -19,9 +28,11 @@ import { tmpdir } from 'os';
 import { mkdtempSync } from 'fs';
 import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
+import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
+import { describeQuote, feeModelProblems, feeQuoter, feeUsdFor } from './lib/fee-model.mjs';
 
 const SOCK = scratchSocketPath('parity');
-const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
+const BIN = coreBinaryPath();
 
 // The core persists its trade log at a RELATIVE path, so every synthetic order
 // this harness places would be appended to the real data/trades/trades.jsonl.
@@ -69,26 +80,50 @@ const c = makeCore(SOCK, ['--no-auto-exits', '--max-positions', '99']);
 c.onEvent = (e) => { if (e.kind === 'FILL') fills.push(e); };
 
 /**
- * Taker fee in USD for one fill: `fee_per_share = 0.125*(p*(1-p))^2`
- * (Polymarket's published schedule, mirrored by
- * `core/blitzkrieg_core/src/exit_policy.rs::taker_fee_pct`).
+ * Taker fee in USD for one fill.
  *
- * Maker fills are free, and the core charges taker fills on entry and exit
- * alike (`service.rs::apply_delta_effects`), so the cash ledger sits on the
- * same net-realized basis as the per-trade `netPnlUsd` views. Deriving the
- * expected balance from this formula rather than hard-coding a number is what
- * keeps these assertions honest when the fee model or the fill sequence moves:
- * a bare `94` silently described the pre-#75 ledger that did not charge fees.
+ * The number comes from the KERNEL's own `core.feeQuote` — not from a formula
+ * restated here (#182): a copy of the schedule cannot notice the kernel changing
+ * its default, and a gate that keeps asserting the old arithmetic stops meaning
+ * anything. `assertPinnedFeeModel` below is the other half: the kernel is also
+ * required to report the model this repository pinned, so switching the default
+ * without updating the gates is a RED gate rather than a quietly different
+ * expectation.
+ *
+ * Maker fills are free, and the core charges taker fills on entry and exit alike
+ * (`service.rs::apply_delta_effects`), so the cash ledger sits on the same
+ * net-realized basis as the per-trade `netPnlUsd` views.
  */
-const takerFeeUsd = (price, shares) => 0.125 * (price * (1 - price)) ** 2 * shares;
+const quoteFee = feeQuoter((method, params) => current.request(method, params));
+
+// The core the fee quotes are taken from (assigned as soon as the first one is
+// running — the quote is a fact about a running kernel, not about a file).
+let current = null;
+
+/** Assert the kernel reports the pinned schedule; print what it reports. */
+function assertPinnedFeeModel(quote) {
+  console.log(`  fee  ${describeQuote(quote)}`);
+  const problems = feeModelProblems(quote);
+  check('kernel fee model matches the pinned schedule (#182)', problems.length === 0, problems.join(' | '));
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 try {
+  checkCoreProvenance(BIN, check);
   await c.start();
+  current = c;
   await rpc.ping(c);
   const ready = await rpc.ready(c);
   check('ready handshake reports dry core', ready.mode === 'dry' && /^\d+\.\d+\.\d+$/.test(ready.version), JSON.stringify(ready));
+  // The revision the SERVING core reports, not the one on disk: this is the
+  // statement that ties every assertion below to a commit (#172).
+  console.log(`  core ${ready.build ?? '(no build field)'} commit=${ready.commit ?? '?'} dirty=${ready.dirty ?? '?'}`);
+  check('serving core names its commit', typeof ready.commit === 'string' && ready.commit.length > 0, JSON.stringify(ready));
+
+  const fee04 = await quoteFee(0.4);
+  const fee05 = await quoteFee(0.5);
+  assertPinnedFeeModel(fee04);
 
   // 1. Taker fills immediately, spends 0.4*5=2. A live FOK needs resting
   //    depth at or inside its limit, so the fixture mirrors an ask first.
@@ -108,7 +143,7 @@ try {
   // Spent so far: the taker fill's 0.4*5 = 2 notional plus its taker fee, and
   // the resting maker's 0.4*5 = 2 reservation.
   const balResting = await rpc.balance(c);
-  const expectedAvailable = 100 - 2 - takerFeeUsd(0.4, 5) - 2;
+  const expectedAvailable = 100 - 2 - feeUsdFor(fee04, 5) - 2;
   check('reservation held while resting', balResting.available === expectedAvailable,
     `available ${balResting.available} != ${expectedAvailable}`);
   await rpc.bookSnapshot(c, 'mk1', [], [[0.45, 100]]);
@@ -137,15 +172,58 @@ try {
   // leg takes the ask the book is actually offering (0.50), not the maker's
   // rejected passive limit — a live FOK reprices; the two taker legs carry a
   // fee at their own prices, the crossed one is a *maker* fill and is free.
-  // Balance 100 - 6.5 - takerFeeUsd(0.4, 5) - takerFeeUsd(0.5, 5) = 93.4249375.
+  // Balance 100 - 6.5 - fee(0.4) - fee(0.5) at the kernel's own quoted rates.
   const bal = await rpc.balance(c);
-  const expectedFinal = 100 - 6.5 - takerFeeUsd(0.4, 5) - takerFeeUsd(0.5, 5);
+  const expectedFinal = 100 - 6.5 - feeUsdFor(fee04, 5) - feeUsdFor(fee05, 5);
   check('final balance reflects 3 fills, net of taker fees', bal.balance === expectedFinal && bal.reserved === 0,
     `${JSON.stringify(bal)} != ${expectedFinal}`);
 
   // FILL events: taker + crossed maker + escalated taker = 3.
   check('three authoritative FILL events', fills.length === 3, `got ${fills.length}`);
   check('fill deltas are typed', fills.every((f) => typeof f.delta.delta === 'number' && typeof f.delta.price === 'number'));
+
+  // ── 5b. The three taker semantics a dry FOK must tell apart (#172) ─────────
+  // A taker is priced off the mirrored book, so exactly three outcomes exist and
+  // each must be reached for its own reason. These are asserted together on
+  // purpose: the gate's earlier failure was a taker rejected for having no book
+  // while the gate believed it had proved a fill — the distinction is the gate's
+  // subject, so it is stated explicitly rather than inferred from order counts.
+  //
+  // (a) nothing on the opposing side at ANY price: a live FOK would be killed
+  //     with nothing touched. REJECTED — not a fill at the limit, not an error.
+  const noBook = await rpc.placeOrder(c, order('taker', 'tk-nb', 0.4, 5, 'k-nb', 'LINK'));
+  check('taker with no book on the opposing side -> REJECTED', noBook.status === 'REJECTED', JSON.stringify(noBook));
+
+  // (b) depth exists but none of it is inside the limit (0.45 > our 0.40): the
+  //     order may not lift a price worse than it states.
+  await rpc.bookSnapshot(c, 'tk-out', [], [[0.45, 100]]);
+  const outside = await rpc.placeOrder(c, order('taker', 'tk-out', 0.4, 5, 'k-out', 'SOL'));
+  check('taker whose depth is all outside its limit -> REJECTED', outside.status === 'REJECTED', JSON.stringify(outside));
+
+  // (c) enough depth inside the limit, but it takes TWO levels: the fill is the
+  //     volume-weighted price of the walk (2@0.39 + 3@0.40 = 0.396), not the
+  //     best price and not the limit — that is the number the ledger must use.
+  await rpc.bookSnapshot(c, 'tk-walk', [], [[0.39, 2], [0.40, 3]]);
+  const before = await rpc.balance(c);
+  const walk = await rpc.placeOrder(c, order('taker', 'tk-walk', 0.4, 5, 'k-walk', 'DOT'));
+  check('marketable taker fills across two levels', walk.status === 'FILLED', JSON.stringify(walk));
+  // The event travels out-of-band (mpsc -> broadcast -> socket), so a fill is
+  // allowed to arrive a moment after the response that announced it.
+  const fillDeadline = Date.now() + 2000;
+  let walkFill;
+  while (Date.now() < fillDeadline) {
+    walkFill = fills.find((f) => f.delta.orderId === walk.orderId);
+    if (walkFill) break;
+    await sleep(25);
+  }
+  const vwap = (0.39 * 2 + 0.40 * 3) / 5;
+  check('the fill is the VWAP of the levels it walked', walkFill !== undefined && Math.abs(walkFill.delta.price - vwap) < 1e-9,
+    `fill price ${walkFill?.delta.price} != vwap ${vwap}`);
+  const feeWalker = feeUsdFor(await quoteFee(vwap), 5);
+  const after = await rpc.balance(c);
+  check('the ledger charges the walked notional and its fee',
+    Math.abs((Number(before.balance) - Number(after.balance)) - (0.39 * 2 + 0.40 * 3 + feeWalker)) < 1e-9,
+    `${before.balance} -> ${after.balance}, expected -${0.39 * 2 + 0.40 * 3 + feeWalker}`);
 
   // 6. Reconcile method is exposed and is a no-op for a snapshot that mentions
   //    no local order (the venue-id-driven repair itself is covered by Rust

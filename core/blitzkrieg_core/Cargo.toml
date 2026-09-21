@@ -1,6 +1,6 @@
 [package]
 name = "blitzkrieg-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Blitzkrieg Quant Core: market-agnostic trading core (strategy engine, OME, risk, ledger, market data, execution). Node/UI is a shell over this."
 

@@ -108,6 +108,8 @@ impl Failure {
 pub mod method {
     pub const PING: &str = "core.ping";
     pub const READY: &str = "core.ready";
+    /// Read-only quote of the taker fee schedule the kernel is charging (#182).
+    pub const CORE_FEE_QUOTE: &str = "core.feeQuote";
     pub const RISK_KILL: &str = "risk.kill";
     pub const RISK_RESUME: &str = "risk.resume";
     pub const ORDER_PLACE: &str = "orders.place";
@@ -278,6 +280,54 @@ pub struct ReadyResult {
     pub authenticated: bool,
     pub signer: Option<String>,
     pub funder: Option<String>,
+}
+
+// ── Fee model quote (#182) ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeeQuoteParams {
+    /// Price to quote at. Defaults to `0.5`, where the schedule is widest.
+    #[serde(default, with = "crate::decimal::opt")]
+    pub price: Option<Decimal>,
+}
+
+/// The taker-fee schedule the kernel is actually charging, quoted at a price.
+///
+/// Exists so the gate/reconcile scripts stop carrying a COPY of the fee formula
+/// (#182): a copy cannot notice the kernel changing its default, and the two
+/// then disagree in exactly the direction that leaves a green gate behind. The
+/// scripts take `fee_per_share` from here and assert the declared model against
+/// a pinned expectation, so changing the kernel's model (or its parameters)
+/// turns them red on purpose.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeeQuoteResult {
+    /// Declared model name, e.g. `legacy_quadratic` (see `service::TAKER_FEE_MODEL`).
+    pub model: String,
+    /// Declared coefficient of the model.
+    #[serde(with = "crate::decimal")]
+    pub rate: Decimal,
+    /// Declared exponent of the model.
+    pub exponent: u32,
+    /// The price this quote is for.
+    #[serde(with = "crate::decimal")]
+    pub price: Decimal,
+    /// Fee charged per share at `price`, from the kernel's authoritative
+    /// arithmetic — the number a fee assertion must be derived from.
+    #[serde(with = "crate::decimal")]
+    pub fee_per_share: Decimal,
+    /// The same fee as a percentage of price (what `taker_fee_pct` reports and
+    /// what `exitPolicy::takerFeePct` shows in trade records).
+    #[serde(with = "crate::decimal")]
+    pub fee_pct_of_price: Decimal,
+    /// Maker fee per share: always zero (the schedule charges takers only).
+    #[serde(with = "crate::decimal")]
+    pub maker_fee_per_share: Decimal,
+    /// True when the DECLARED parameters above reproduce `fee_per_share` at this
+    /// price. A kernel whose formula moved without its declaration moving reports
+    /// `false` here — the split is reported, not silently papered over.
+    pub model_matches: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -315,7 +315,22 @@ async fn handle_line(
                 "authenticated": false,
                 "signer": Value::Null,
                 "funder": Value::Null,
+                // Build provenance (#179): the revision this binary was compiled
+                // from, so a client can state WHICH code answered it without
+                // spawning `--version` beside the running core (#172).
+                "build": crate::ipc::build_info::version_string(),
+                "commit": crate::ipc::build_info::GIT_SHA,
+                "dirty": crate::ipc::build_info::is_dirty(),
             }))
+        }
+
+        // Read-only fee schedule (#182). Stateless: no lock on the order book, no
+        // mutation, no venue. Absent/blank price means "quote the neutral 0.5".
+        method::CORE_FEE_QUOTE => {
+            let p: FeeQuoteParams =
+                serde_json::from_value(params.clone()).unwrap_or(FeeQuoteParams { price: None });
+            let quote = core.lock().await.fee_quote(p.price);
+            Ok(serde_json::to_value(quote).unwrap_or(Value::Null))
         }
 
         method::RISK_KILL => {

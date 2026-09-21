@@ -166,6 +166,28 @@ jobs:
         run: node scripts/gateway-crash-recovery-check.mjs
       - name: Gateway signal shutdown gate
         run: node scripts/gateway-signal-stop-check.mjs
+      # #172/#179: a gate's conclusion must name the code it describes. Before the
+      # parity gates below report anything, this states the revision EMBEDDED in
+      # the binary they will drive, requires it to be this checkout's, and requires
+      # a core started from that binary to report the same revision over the wire.
+      # It exists because core-parity once produced eight failures that all
+      # descended from the gate's script and the binary coming from two different
+      # code states — nothing in its output said so, and the only way to notice was
+      # `nm | grep` on the binary. The summary lands in the run's step summary.
+      - name: Core build provenance (which code is under test)
+        run: node scripts/core-provenance-check.mjs
+      # The lineage half of #179: does this commit contain the branch it will be
+      # merged into? Advisory rather than blocking, because the deployment line and
+      # `main` legitimately diverge today and #179's convergence half is tracked
+      # separately — a permanent red would hide the next real one. It is a real
+      # check all the same: a PR built on a stale base shows up as a failing step
+      # with the missing branch named, which is exactly the #172 mismatch.
+      - name: Branch lineage (advisory — #179)
+        continue-on-error: true
+        run: |
+          git fetch --no-tags --depth=200 origin \
+            "+refs/heads/${{ github.base_ref || 'main' }}:refs/remotes/origin/${{ github.base_ref || 'main' }}" || true
+          node scripts/core-provenance-check.mjs --require-ancestor "origin/${{ github.base_ref || 'main' }}"
       # Order/ledger semantics over the real wire (the compiled TS client this
       # used to depend on was removed with the Node layer; the bare-Node client
       # speaks the same newline-framed JSON-RPC 2.0).
@@ -207,6 +229,23 @@ jobs:
           node scripts/backtest-check.mjs
           node scripts/order-recovery-check.mjs
           node scripts/position-recovery-check.mjs
+      # #192: what a position size COSTS, and what the curve it produces looks
+      # like. `capacity-check` walks the kernel's own dry FOK match against a
+      # stated ladder and reports the fill, VWAP, slippage in bps and the size at
+      # which impact spends the budget — then states the configured caps against
+      # that measurement (the default 100 USD notional cap is 25x the fixture's
+      # 100-bps capacity, which is the finding, not a threshold). The equity gate
+      # runs its --self-test here: the metrics and the verdicts are exercised
+      # against fixtures with hand-computed answers, including a curve whose max
+      # drawdown is exactly 50% (must be flagged at a 20% budget) and one that
+      # reaches ruin — a size/curve gate that cannot fail is the defect this repo
+      # keeps re-finding. The real-log mode is an ops run:
+      #   node scripts/equity-drawdown-check.mjs --trades data/trades/trades.jsonl \
+      #        --initial-balance 6 --capacity /tmp/capacity.json
+      - name: Capacity & equity-curve gates (#192)
+        run: |
+          node scripts/capacity-check.mjs
+          node scripts/equity-drawdown-check.mjs --self-test
       # E2: strategy-scoped sizing, gate exemptions (real dog cdylib), and
       # per-strategy shadow evolution.
       - name: Strategy-scoped gates (E2)

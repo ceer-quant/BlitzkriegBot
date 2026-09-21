@@ -57,6 +57,22 @@
  *   * no position is left holding a sub-grid stub of shares (the dust case the
  *     E17-d fix had to write off inside `net` rather than leave on the book).
  *
+ * The fee side gets no formula of its own (#182): every taker expectation comes
+ * from the kernel's own `core.feeQuote` (`feePerShare` at the trade's price), and
+ * the model the kernel REPORTS is checked against `scripts/lib/fee-model.mjs`'s
+ * pin on every poll. A copy of the schedule here could not notice the kernel
+ * changing its default — it would keep auditing against arithmetic nobody
+ * charges. So: a kernel whose default moves without the pin moving is a FAIL
+ * (the acceptance for #182), and a kernel too old to expose `core.feeQuote` is a
+ * fatal "cannot audit this, restart it on a current build" — the same treatment
+ * the pre-E17 shape already gets, for the same reason.
+ *
+ * It also states WHICH core it is auditing (#172/#179): `core.ready` carries the
+ * revision the SERVING process was built from, which is printed at startup and
+ * on every line of drift.jsonl. A core that is swapped mid-window (supervisor
+ * restart into a new build) is detected by that revision changing, and the live
+ * anchor is dropped rather than chaining a delta across two different programs.
+ *
  * A drift is only reported once it PERSISTS: each failed poll is re-audited five
  * seconds later against the same anchor, and only a second failure counts. The
  * four concurrent reads are not one transaction, so a fill landing between them
@@ -78,6 +94,7 @@ import { appendFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { resolveSocketPath } from './lib/core-socket.mjs';
+import { describeQuote, feeModelProblems, PINNED_DEFAULT_MODEL } from './lib/fee-model.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -127,7 +144,21 @@ function rpc(sock, method, params = {}, timeoutMs = 5000) {
   });
 }
 
-const takerFeeUsd = (price, shares) => 0.125 * (price * (1 - price)) ** 2 * shares;
+/**
+ * Memoised kernel-fee lookup: `feePerShare` at a price, from the kernel's own
+ * `core.feeQuote` (#182). Keyed by the SERVING REVISION as well as the price, so
+ * a core swapped mid-window cannot answer with the schedule of the process it
+ * replaced. Each distinct (revision, price) pair costs exactly one extra read,
+ * once per process; the poll count does not multiply it.
+ */
+const feeQuotes = new Map();
+async function kernelFeePerShare(sock, revision, price) {
+  const key = `${revision}|${price}`;
+  if (feeQuotes.has(key)) return feeQuotes.get(key);
+  const q = await rpc(sock, 'core.feeQuote', { price });
+  feeQuotes.set(key, q.feePerShare);
+  return q.feePerShare;
+}
 
 /**
  * One accounting audit of the core. Returns {ok, residual, ...evidence}.
@@ -137,12 +168,37 @@ const takerFeeUsd = (price, shares) => 0.125 * (price * (1 - price)) ** 2 * shar
  * identity baseline.
  */
 async function audit(sock, anchor) {
-  const [bal, tradesRes, posRes, sumRes] = await Promise.all([
+  const [bal, tradesRes, posRes, sumRes, ready] = await Promise.all([
     rpc(sock, 'ledger.balance'),
     rpc(sock, 'trades.history', { limit: 500 }),
     rpc(sock, 'positions.list'),
     rpc(sock, 'trades.summary'),
+    rpc(sock, 'core.ready'),
   ]);
+
+  // Which code is answering (#172/#179): the revision the SERVING process was
+  // built from, not the one on disk. Every number below is a statement about
+  // that revision, so it travels with the poll's record.
+  const commit = ready.commit ?? null;
+  const build = ready.build ?? null;
+
+  // The fee schedule the kernel actually charges (#182), asked of the kernel for
+  // the same reason `anchor` is asked of the core: a formula restated here could
+  // not notice the kernel changing its default. A core that cannot answer is a
+  // core whose fee charges cannot be audited — fatal, and for the same reason the
+  // pre-E17 shape below is fatal: retrying cannot fix a binary.
+  let schedule;
+  try {
+    schedule = await rpc(sock, 'core.feeQuote', {});
+  } catch (e) {
+    const err = new Error(
+      `the core on this socket does not expose core.feeQuote (${e.message}) — it predates #182, ` +
+      'so the fees it charges cannot be checked against the schedule it declares. Restart it on ' +
+      'a current build (the monitor script and the core must come from the same code state).'
+    );
+    err.fatal = true;
+    throw err;
+  }
 
   const trades = tradesRes.trades || [];
   const positions = posRes.positions || [];
@@ -202,6 +258,12 @@ async function audit(sock, anchor) {
 
   const problems = [];
 
+  // The schedule the kernel declared this poll, checked against the pin (#182).
+  // This is the half that must go red when the kernel's default moves without
+  // the gates being updated in the same change — deliberately.
+  const scheduleProblems = feeModelProblems(schedule);
+  for (const p of scheduleProblems) problems.push(p);
+
   if (expected !== null && Math.abs(residual) > TOL) {
     problems.push(
       `drift: balance ${balance} vs expected ${round(expected)} (residual ${residual.toExponential(3)})`
@@ -221,10 +283,15 @@ async function audit(sock, anchor) {
     );
   }
 
-  // Each order must be charged on ONE basis, the one its fills actually had.
+  // Each order must be charged on ONE basis, the one its fills actually had. The
+  // expected fee per share comes from the KERNEL's own quote at that trade's
+  // price (#182), so "was this leg charged?" is answered with the arithmetic the
+  // kernel itself uses — never with a formula restated here.
   for (const t of trades) {
-    const takerEntry = takerFeeUsd(Number(t.entryPrice), Number(t.shares));
-    const takerExit = takerFeeUsd(Number(t.exitPrice), Number(t.shares));
+    const takerEntry = (await kernelFeePerShare(sock, commit, Number(t.entryPrice)))
+      * Number(t.shares);
+    const takerExit = (await kernelFeePerShare(sock, commit, Number(t.exitPrice)))
+      * Number(t.shares);
     if (t.entryFeePct === 0 && t.exitFeePct === 0 && Number(t.feesUsd) !== 0) {
       problems.push(`trade ${t.id}: both legs are maker but ${t.feesUsd} was charged`);
     }
@@ -252,6 +319,15 @@ async function audit(sock, anchor) {
   return {
     ok: problems.length === 0,
     problems,
+    // Which code answered, and which schedule it declared (#172/#179/#182):
+    // without these a drift line cannot be attributed to a revision, and a fee
+    // finding cannot be attributed to a model.
+    commit,
+    build,
+    feeModel: schedule.model,
+    feeRate: schedule.rate,
+    feeExponent: schedule.exponent,
+    feeModelMatches: schedule.modelMatches === true,
     balance,
     reserved: Number(bal.reserved),
     expected: expected === null ? null : round(expected),
@@ -278,11 +354,29 @@ async function main() {
       console.error('  Start one first:  blitzkrieg core --mode dry   (or the TUI panel: ui_kit_panel)');
       process.exit(2);
     }
+    // State WHICH code is being audited before auditing it (#172/#179), and which
+    // fee model it says it charges (#182) — the two facts every line below is a
+    // statement about.
+    const ready = await rpc(sock, 'core.ready');
+    console.log(`  core version=${ready.version} build=${ready.build ?? '?'} ` +
+      `commit=${ready.commit ?? '?'} dirty=${ready.dirty ?? '?'}`);
+    try {
+      const schedule = await rpc(sock, 'core.feeQuote', {});
+      console.log(`  fee  ${describeQuote(schedule)} (pinned: ${PINNED_DEFAULT_MODEL})`);
+    } catch (e) {
+      console.error(`  FAIL no fee schedule from the core (${e.message}) — it predates #182; ` +
+        'its fees cannot be audited against the schedule it charges. Restart it on a current build.');
+      process.exit(2);
+    }
   }
 
   let polls = 0;
   let failures = 0;
   let maxResidual = 0;
+  // Last observed provenance/schedule, for the closing summary: the two facts
+  // that say WHAT these poll results are about.
+  let lastCommit = null;
+  let lastModel = null;
   // Anchor for the live-core identity: the previous poll's result. The deltas
   // between consecutive results chain across the whole window, so the first
   // poll only establishes the baseline (its live identity is not yet defined).
@@ -290,9 +384,19 @@ async function main() {
 
   for (;;) {
     let line;
+    let reanchored = false;
     try {
-      const r = await audit(sock, prev);
+      let r = await audit(sock, prev);
       polls++;
+      // A core swapped mid-window (supervisor restart into another build) must not
+      // have its cash chained against the previous process's: drop the anchor and
+      // re-baseline instead of reporting a drift that is really a new program.
+      if (prev !== null && prev.commit !== r.commit) {
+        console.log(`  note core revision changed ${prev.commit} -> ${r.commit}: re-baselining the live identity`);
+        r = await audit(sock, null);
+        polls++;
+        reanchored = true;
+      }
       if (r.residual !== null) maxResidual = Math.max(maxResidual, Math.abs(r.residual));
       let reported = r;
       if (!r.ok) {
@@ -312,10 +416,14 @@ async function main() {
         }
       }
       prev = reported;
+      lastCommit = reported.commit;
+      lastModel = reported.feeModel;
       line = { ts: Date.now(), ...reported };
+      if (reanchored) line.reanchored = true;
       if (polls % 60 === 1 || !reported.ok) {
         console.log(
           `  ${reported.ok ? 'ok  ' : 'DRIFT'} t=${new Date().toISOString()} ` +
+          `commit=${reported.commit} model=${reported.feeModel} ` +
           `balance=${reported.balance} expected=${reported.expected} residual=${reported.residual} ` +
           `open=${reported.open} trades=${reported.trades}`
         );
@@ -338,6 +446,7 @@ async function main() {
 
   console.log('');
   console.log(`  polls: ${polls}, failed: ${failures}, max |residual|: ${maxResidual.toExponential(2)}`);
+  console.log(`  audited core: commit=${lastCommit ?? 'unknown'}, fee model=${lastModel ?? 'unknown'} (pinned ${PINNED_DEFAULT_MODEL})`);
   console.log(`  log:   ${OUT}`);
   if (failures === 0) {
     console.log(`\naccount:drift-check — no drift over ${HOURS}h (${polls} polls).`);

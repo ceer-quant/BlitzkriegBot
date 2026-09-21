@@ -40,8 +40,10 @@ import { tmpdir } from 'os';
 import { mkdtempSync, existsSync } from 'fs';
 import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
+import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
+import { describeQuote, feeModelProblems, feeQuoter, feeUsdFor } from './lib/fee-model.mjs';
 
-const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
+const BIN = coreBinaryPath();
 const SEED = 1000;
 const ENTRY_PX = 0.43;
 const EXIT_PX = 0.95;
@@ -62,11 +64,16 @@ function check(name, cond, detail = '') {
 const round = (n) => Math.round(n * 1e8) / 1e8;
 
 /**
- * Taker fee in USD for one execution: `0.125 * (p*(1-p))^2 * shares`, the
- * Polymarket schedule mirrored by `exit_policy::taker_fee_pct`. Derived rather
- * than hard-coded so the assertion survives a fee-model change.
+ * Taker fee in USD for one execution, taken from the KERNEL's own
+ * `core.feeQuote` (#182) rather than from a formula restated here: a copy of the
+ * schedule cannot notice the kernel changing its default, and this gate exists
+ * to prove the two accounting paths agree about the SAME money. The quoted
+ * model is additionally pinned below, so a schedule change is a red gate instead
+ * of a silently different expectation.
  */
-const takerFeeUsd = (price, shares) => 0.125 * (price * (1 - price)) ** 2 * shares;
+let takerFeeUsd = () => {
+  throw new Error('fee quotes not loaded yet — the kernel must be running before fees can be asserted');
+};
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -246,8 +253,31 @@ const expectedFees = (entryRole, exitRole) =>
   (exitRole === 'taker' ? takerFeeUsd(EXIT_PX, SIZE) : 0);
 
 try {
+  checkCoreProvenance(BIN, check);
   await dryCore.start();
   await liveCore.start();
+
+  // Fees come from the kernel, so load the schedule once the core is up and turn
+  // the two price-level quotes into the per-trip helper the assertions use.
+  const quoteFee = feeQuoter((method, params) => dryCore.request(method, params));
+  const qEntry = await quoteFee(ENTRY_PX);
+  const qExit = await quoteFee(EXIT_PX);
+  console.log(`  fee  ${describeQuote(qEntry)}`);
+  console.log(`  fee  ${describeQuote(qExit)}`);
+  const feeProblems = feeModelProblems(qEntry);
+  check('kernel fee model matches the pinned schedule (#182)', feeProblems.length === 0, feeProblems.join(' | '));
+  const entryFeeUsd = feeUsdFor(qEntry, SIZE);
+  const exitFeeUsd = feeUsdFor(qExit, SIZE);
+  takerFeeUsd = (price) => {
+    if (price !== ENTRY_PX && price !== EXIT_PX) {
+      throw new Error(`no kernel fee quote for ${price}; quote it above rather than restating the formula`);
+    }
+    return price === ENTRY_PX ? entryFeeUsd : exitFeeUsd;
+  };
+  console.log(`  fee  entry ${ENTRY_PX} -> ${entryFeeUsd} USD, exit ${EXIT_PX} -> ${exitFeeUsd} USD (for ${SIZE} shares)`);
+
+  const dryReady = await rpc.ready(dryCore);
+  console.log(`  core dry=${dryReady.build ?? '?'} commit=${dryReady.commit ?? '?'}`);
 
   for (const combo of COMBOS) {
     const label = `${combo.entry}→${combo.exit}`;
