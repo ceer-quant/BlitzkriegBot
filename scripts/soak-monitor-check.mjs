@@ -28,7 +28,7 @@
  *
  * Run: node scripts/soak-monitor-check.mjs
  */
-import { spawn } from './lib/child-guard.mjs';
+import { execFileSync, spawn } from './lib/child-guard.mjs';
 import { mkdtempSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -267,10 +267,77 @@ console.log('5. soak-resident.sh owns the pair: idempotent start, real stop');
   assert(r.out.includes('started: health loop'), 'start reports the health loop');
   assert(r.out.includes('started: sampler'), 'start reports the sampler');
 
-  const pidLoop = Number(readFileSync(join(SOAK_DIR, 'resident-loop.pid'), 'utf8').trim());
-  const pidSample = Number(readFileSync(join(SOAK_DIR, 'resident-sampler.pid'), 'utf8').trim());
-  assert(Number.isInteger(pidLoop) && pidLoop > 0, 'the loop pidfile holds a pid');
-  assert(Number.isInteger(pidSample) && pidSample > 0, 'the sampler pidfile holds a pid');
+  // `start` forks and returns; it says nothing about whether the child is still
+  // there a moment later, and the next assertions are "already running" — which
+  // are only meaningful once the loop IS running. Asserting them immediately
+  // made a short-lived loop (or a pid the OS had already recycled for an
+  // unrelated process) produce two assertions that contradicted each other with
+  // no diagnosis: CI run 35573742115 failed both `a second start refuses the
+  // loop` and `loop pid N is really gone` on a PR that touched no soak script
+  // (issue #212). So wait for the state under test, and when it never arrives,
+  // print what actually happened instead of blaming the refusal.
+  const pidFrom = (file) => {
+    const p = join(SOAK_DIR, file);
+    if (!existsSync(p)) return NaN;
+    const n = Number(readFileSync(p, 'utf8').trim());
+    return Number.isInteger(n) && n > 0 ? n : NaN;
+  };
+  /** Poll `status` until it reports `want` — using the resident script's own
+   *  liveness rule (pidfile + `kill -0` + command match) rather than a second
+   *  copy of it, so the gate and the deployment cannot disagree about what
+   *  "running" means. The answer must hold for TWO consecutive polls 250ms
+   *  apart: a single sighting is not enough, because a process that has just
+   *  exited can still answer `kill -0` for the moment before its parent
+   *  collects it, and the assertion that follows ("a second start refuses") is
+   *  about a state that must still be true a little later. Returns the last
+   *  output either way. */
+  const waitRunning = async (want, budgetMs = 5000) => {
+    const deadline = Date.now() + budgetMs;
+    let confirmations = 0;
+    for (;;) {
+      const out = (await sh(['status'])).out;
+      confirmations = out.includes(want) ? confirmations + 1 : 0;
+      if (confirmations >= 2 || Date.now() > deadline) return out;
+      await new Promise((res) => setTimeout(res, 250));
+    }
+  };
+  /** Everything a reader needs to tell "the child died" from "the pid is not
+   *  ours", without a second run and without guessing. */
+  const diagnose = () => {
+    const lines = [];
+    for (const [label, file, pattern] of [
+      ['loop', 'resident-loop.pid', 'soak-health-loop.sh'],
+      ['sampler', 'resident-sampler.pid', 'soak-monitor.mjs'],
+    ]) {
+      const pid = pidFrom(file);
+      if (!Number.isInteger(pid)) {
+        lines.push(`         ${label}: pidfile ${existsSync(join(SOAK_DIR, file)) ? 'unparseable' : 'absent'}`);
+        continue;
+      }
+      let cmd = '';
+      try { cmd = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' }).trim(); } catch { cmd = ''; }
+      const verdict = cmd === '' ? 'not running' : cmd.includes(pattern) ? 'ours, still alive' : `RECYCLED — now ${cmd}`;
+      lines.push(`         ${label} pid ${pid}: ${verdict}`);
+    }
+    for (const file of ['resident-loop.out', 'resident-sampler.out']) {
+      const p = join(SOAK_DIR, file);
+      if (!existsSync(p)) continue;
+      const tail = readFileSync(p, 'utf8').trim().split('\n').slice(-6).filter((l) => l !== '');
+      if (tail.length > 0) lines.push(`         ${file} tail:`, ...tail.map((l) => `           ${l}`));
+    }
+    return lines.join('\n');
+  };
+
+  const loopUp = await waitRunning('health loop: RUNNING');
+  const sampleUp = await waitRunning('sampler:     RUNNING');
+  const pairUp = loopUp.includes('health loop: RUNNING') && sampleUp.includes('sampler:     RUNNING');
+  assert(pairUp, 'both residents are RUNNING once start has returned (waited up to 5s)');
+  if (!pairUp) console.error(diagnose());
+
+  const pidLoop = pidFrom('resident-loop.pid');
+  const pidSample = pidFrom('resident-sampler.pid');
+  assert(Number.isInteger(pidLoop), 'the loop pidfile holds a pid');
+  assert(Number.isInteger(pidSample), 'the sampler pidfile holds a pid');
 
   // Starting again must NOT stack a second sampler. Two samplers on one socket
   // would double every figure in soak.jsonl — a silent corruption that looks
@@ -296,9 +363,20 @@ console.log('5. soak-resident.sh owns the pair: idempotent start, real stop');
   assert(!existsSync(join(SOAK_DIR, 'resident-sampler.pid')), 'stop removes the sampler pidfile');
 
   // Anti-vacuous: actually verify the pids are gone, not just that stop said so.
-  const gone = (pid) => { try { process.kill(pid, 0); return false; } catch { return true; } };
-  assert(gone(pidLoop), `loop pid ${pidLoop} is really gone`);
-  assert(gone(pidSample), `sampler pid ${pidSample} is really gone`);
+  // Identity-guarded: `process.kill(pid, 0)` succeeding proves *a* process holds
+  // that pid, not that it is the one we started. Without the command check a
+  // recycled pid reported "the loop survived stop" for a process that was never
+  // ours (issue #212). What this asserts is the LOOP's death, so that is what it
+  // now measures — and a loop that really did survive still fails here.
+  const gone = (pid, pattern) => {
+    try { process.kill(pid, 0); } catch { return true; }
+    try {
+      const cmd = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+      return !cmd.includes(pattern);
+    } catch { return true; }
+  };
+  assert(gone(pidLoop, 'soak-health-loop.sh'), `loop pid ${pidLoop} is no longer held by the loop`);
+  assert(gone(pidSample, 'soak-monitor.mjs'), `sampler pid ${pidSample} is no longer held by the sampler`);
 
   r = await sh(['status']);
   assert(r.out.includes('health loop: not running'), 'status after stop: loop not running');

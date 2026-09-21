@@ -69,13 +69,37 @@ SAMPLE_INTERVAL=600      # how often the sampler records a sample
 # kill -9, a reboot), and `kill -0` on a recycled pid would report a stranger as
 # running. So match the command string too.
 alive() {
-  local pf=$1 pat=$2 pid
+  local pf=$1 pat=$2 pid st
   [ -f "$pf" ] || return 1
   pid=$(cat "$pf" 2>/dev/null) || return 1
   [ -n "$pid" ] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
+  # `kill -0` also succeeds for a ZOMBIE: the process table entry survives until
+  # the parent collects it, so a process that has ALREADY exited reads as running
+  # for the few milliseconds before it is reaped. That window is why `status`
+  # could report an exited loop as RUNNING and made the resident gate
+  # non-deterministic — the same run passed and then failed on an identical tree
+  # (issue #212). A zombie is not running; state `Z` is not "ours, still alive".
+  st=$(ps -o state= -p "$pid" 2>/dev/null | tr -d ' ')
+  case "$st" in Z*) return 1 ;; esac
   ps -o command= -p "$pid" 2>/dev/null | grep -q "$pat" || return 1
   return 0
+}
+
+# WHY a pidfile was rejected, for the log. `alive` collapses three different
+# situations into one false — no pidfile, a dead pid, and a pid the OS handed to
+# an unrelated process — and `start` used to replace all three in silence. The
+# third is the one that costs an afternoon: refusing to adopt a recycled pid is
+# correct behaviour, but with nothing printed it reads as "start is broken",
+# which is what turned a gate's false red into a hunt through an unrelated PR
+# (issue #212). Empty output means there is nothing to explain.
+stale_reason() {
+  local pf=$1 pat=$2 pid
+  [ -f "$pf" ] || return 0
+  pid=$(cat "$pf" 2>/dev/null)
+  [ -n "$pid" ] || { echo "pidfile $(basename "$pf") is empty"; return 0; }
+  kill -0 "$pid" 2>/dev/null || { echo "stale pidfile: pid $pid is not running"; return 0; }
+  echo "stale pidfile: pid $pid is not $pat (the pid was recycled by another process)"
 }
 
 sample_age_sec() {
@@ -117,6 +141,8 @@ case "$cmd" in
     if alive "$PID_LOOP" "soak-health-loop.sh"; then
       echo "already running: health loop pid $(cat "$PID_LOOP")"
     else
+      reason=$(stale_reason "$PID_LOOP" "soak-health-loop.sh")
+      if [ -n "$reason" ]; then echo "note: $reason — starting a fresh loop"; fi
       nohup ./scripts/soak-health-loop.sh --interval-sec "$HEALTH_INTERVAL" \
         >> "$OUT_LOOP" 2>&1 &
       echo $! > "$PID_LOOP"
@@ -128,6 +154,8 @@ case "$cmd" in
     if alive "$PID_SAMPLE" "soak-monitor.mjs"; then
       echo "already running: sampler pid $(cat "$PID_SAMPLE")"
     else
+      reason=$(stale_reason "$PID_SAMPLE" "soak-monitor.mjs")
+      if [ -n "$reason" ]; then echo "note: $reason — starting a fresh sampler"; fi
       nohup node ./scripts/soak-monitor.mjs --forever --interval-sec "$SAMPLE_INTERVAL" \
         </dev/null >> "$OUT_SAMPLE" 2>&1 &
       echo $! > "$PID_SAMPLE"
