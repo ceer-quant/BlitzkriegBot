@@ -205,8 +205,9 @@ cargo build --release -p blitzkrieg-ui-kit
 `launchctl list` 里只有 `com.blitzkrieg.databackup.*` 两个备份 job，内核与面板都得有人手动
 `blitzkrieg run`。2026-09-21 的事故就是这样：内核从当日起不再运行，而**没有任何告警**。
 根因不是「忘了写 agent」：本仓库在外置卷，macOS 拒绝 launchd 拉起的进程读/执行该卷
-（实测 `read-volume: DENIED`、`exec-script: DENIED (exit=126)`），连 databackup 自己现在
-都在以 `/bin/sh: .../data-backup-cli.sh: Operation not permitted` 失败。所以这里把两半分开：
+（实测 `read-volume: DENIED`、`exec-script: DENIED (exit=126)`），连 databackup 自己当初
+都在以 `/bin/sh: .../data-backup-cli.sh: Operation not permitted` 失败（#217，已按 §3.6 修：
+失败不再静默 + 内置盘 launcher + 备份新鲜度巡检）。所以这里把两半分开：
 
 - **B 路线（已实现，安全的那一半）**：`scripts/stack-watchdog.sh`——判定 + 告警，**不拉起**。
 - **A 路线（只有骨架，未启用）**：`scripts/com.blitzkrieg.stack-autostart.plist.disabled`。
@@ -301,6 +302,68 @@ stdout 同一份）；内核正在 down 时另有 `$STATE_DIR/STACK_DOWN` 标记
   两个命中 / 复核不认 / pidfile 过期）、**「只在命令行里提到内核路径」的构建 shell
   不该把重复信号喊成狼来了**，以及僵尸进程与长命令行两个实测回归。
 
+### 3.6 自动备份：TCC 拦住了什么、现在怎么跑（issue #217）
+
+**现象（实测，2026-09-21 发现）**：`com.blitzkrieg.databackup.light/full` 两个 LaunchAgent
+从装上起**一次都没成功过**，却看不出任何异常——`launchctl list` 的退出码是 `0`，日志只有 94 字节
+一行 `/bin/sh: /Volumes/Hard Disk/BlitzkriegBot/scripts/data-backup-cli.sh: Operation not permitted`，
+而 `--status` 一查：**零个自动备份**。缺陷不是「TCC 拒绝」（那是部署选择），而是**拒绝是静默的**。
+
+**根因**：本仓库在外置卷，macOS TCC 拒绝 launchd 拉起的进程读**和**执行该卷上的任何东西
+（探针 agent 实测：`ls` 仓库、`head` 仓库内文件、exec 脚本，全部 EPERM / exit 126）。
+所以把 launcher 挪到内置盘是**必要但不充分**的：脚本本身还在被拒的卷上。
+
+**A 路线：LaunchAgent + 完全磁盘访问**（重启/登出后仍然有效）
+
+```bash
+bash scripts/data-backup-install.sh              # 安装 + 自检探针（仍被拒时非零退出）
+bash scripts/data-backup-install.sh --no-verify  # 跳过探针
+bash scripts/data-backup-install.sh --uninstall  # 卸载 agent 与内置盘 launcher
+```
+
+安装器会把一个**内置盘 launcher** 写到
+`~/Library/Application Support/blitzkrieg/data-backup-launch.sh`，plist 的
+`ProgramArguments` 指向它（`/bin/sh <launcher> <light|full>`）——因为一个连自己脚本都读不到的
+`/bin/sh` 没有能力报告任何事。launcher 会**真的读一次**仓库；被拒时写下带日期的
+`FAIL: … (Operation not permitted)` 并以 **126** 退出（不再静默），否则 `exec` 真正的
+`data-backup-cli.sh … --attempt-source launchd`。日志仍在
+`~/Library/Logs/blitzkrieg-data-backup-<tier>.log`。
+
+**剩下的一步只能你做，我无法代做**（安全姿态变更，D-33）：
+1. 系统设置 → 隐私与安全性 → **完全磁盘访问权限**；
+2. 点 **+**，按 ⌘⇧G 输入 `/bin/sh`（launchd 实际启动的解释器，即 `ProgramArguments[0]`），
+   加进去并打开开关；
+3. 重新跑 `bash scripts/data-backup-install.sh`（会重新探针），或等下一个 04:00 后跑
+   `bash scripts/data-backup.sh --status`；
+4. 只有探针 `PASS` / 状态行为 `ok` 才算生效——「已安装」不是证据。
+
+**B 路线：常驻循环**（今天就能用，**不需要任何权限变更**，但**不跨重启/登出**）
+
+```bash
+scripts/data-backup-loop.sh start          # 每天 04:00 light，周日 04:30 full
+scripts/data-backup-loop.sh start --once   # 立刻跑一次 light 后退出
+scripts/data-backup-loop.sh status|stop
+```
+
+`nohup` 从你自己的会话里拉起的进程**继承该会话的 TCC 权限**，与
+`scripts/soak-resident.sh` 同一套语义；它写与 A 路线相同的日志和尝试记录，所以 `--status`
+读哪条路线都一样。**重启后要重新 `start`**——这正是下面这个检查存在的理由。
+
+**判定「备份到底有没有在发生」**（两条路线共用）
+
+```bash
+bash scripts/data-backup.sh --status    # 一行；没有新鲜备份就退出 1
+blitzkrieg backup --status              # 同一件事，走 shim
+```
+
+`--status` 分开判两件事：磁盘上最新的**产物**（按 tier 的年龄，并把
+`ABSENT`（卷不在）/ `NOTDIR` / `DENIED`（读不到）/ `NONE`（从未产出）分成四种原因），
+以及最新一次**自动**尝试（launchd/loop 日志最后一行按失败签名归类 + 每次运行都会写的
+`scripts/lib/backup-attempt.sh` 记录）。`source=cli` 的记录**故意不算调度证据**：手工跑成功
+一次绝不能让调度看起来健康——只判产物的检查会重现事故里那种「假的安心」。这个检查已接进
+`scripts/soak-health.sh` 的既有告警通道（`backup=` 子状态），但**告警只在有人跑健康巡检时才会响**：
+`soak-health-loop.sh` 没在跑的时候，请把 `blitzkrieg backup --status` 当作手工闸门。
+
 ---
 
 ## 4. 工作原理
@@ -373,7 +436,9 @@ cd ui/webapp/webui && npm run check:all
 - `scripts/shutdown-cleanliness-check.mjs` / `parent-monitor-check.mjs` / `readonly-egress-check.mjs` / `crash-recovery-check.mjs` / `gateway-signal-stop-check.mjs` —— 生命周期、只读出口、崩溃恢复与网关信号收尾验收。
 - `scripts/unified-launcher-check.mjs` —— 单二进制 `blitzkrieg` 一体化启动验收（子命令 / 托管 / 优雅退出 / `--readonly` 穿透）。
 - `scripts/strategy-gate-check.mjs` —— 策略门禁豁免（声明兑现 + D-31 剩余时间下限双向断言）。
-- `scripts/soak-health.sh` —— 长跑健康巡检（面板/核心/采样/账本异常一行判定；常驻配对见 `scripts/README.md`）。
+- `scripts/soak-health.sh` —— 长跑健康巡检（面板/核心/采样/账本/备份新鲜度一行判定；常驻配对见 `scripts/README.md`）。
+- `scripts/data-backup.sh --status` —— 「备份到底有没有在发生」一行判定（产物年龄 + 最近一次自动尝试；没有新鲜备份就退出 1）。
+  调度与 TCC 见 §3.6；三条路线（LaunchAgent+FDA / 常驻循环 / 手工）都写同一份日志与尝试记录，所以判定不受路线影响。
 
 > **禁止**在未通过上述验证时提交到 `main`；完整门禁矩阵见 `dev-docs/DEVELOPMENT.md`（内部）。
 

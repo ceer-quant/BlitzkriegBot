@@ -15,6 +15,14 @@ cargo build --release --workspace --locked
 
 ## lib/
 
+- `lib/backup-attempt.sh` — the one attempt-record format (`tier`/`source`/`at`/
+  `attempt_epoch`/`result`/`detail`/`dest` + the last SUCCESS's `success_at`/
+  `success_epoch`) written by every actor that can start a backup: the launchd
+  launcher, the resident loop, and a hand run. It lives on the **internal** disk
+  (`$BK_BACKUP_STATUS_DIR`, default `$HOME/Library/Logs`) precisely so that "I ran
+  and could not reach the repo (Operation not permitted)" survives on a machine
+  whose external volume is unreachable. Three inline copies would drift, and a
+  drifted record reads as "no attempt" — back to the silence issue #217 is about.
 - `lib/core-client.mjs` — zero-dependency UDS JSON-RPC client + process
   supervisor (`CoreClient`): spawn/boot/retry, request/timeout, events,
   clean stop (cancels resting orders) and `killNow()` (exit guard).
@@ -41,8 +49,8 @@ cargo build --release --workspace --locked
 | `child-guard-check.mjs` | A child spawned through `lib/child-guard.mjs` cannot outlive its spawner — on normal exit, error, or signal; grandchildren included, and only after a chance to shut down cleanly |
 | `readonly-egress-check.mjs` | `--readonly` is structural: live mode + credentials still cannot trade |
 | `unified-launcher-check.mjs` | Single binary `blitzkrieg`: `run` starts both parts, subcommands dispatch, `--readonly` holds, `stop` reaps the stack (unified / orphan / adopted shapes), `.env` self-load supplies credentials, zero leftovers |
-| `data-backup-check.mjs` | `data/` backup refuses dangerous destinations, self-verifies, prunes only its own dirs |
-| `soak-health-check.mjs` | The ops health check can actually fail: every guard is inject-tested (down/wedged core, panel HTML fallback, stale sampling, panic log, both zero-hold causes) *and* a healthy fixture must exit 0. Bounded by its own watchdog (`BK_GATE_WATCHDOG_MS`) — it must also *exit* |
+| `data-backup-check.mjs` | `data/` backup refuses dangerous destinations, self-verifies, prunes only its own dirs; `--status` separates fresh / stale / never / unreadable / failed-scheduler and clears again; the attempt record is one format for all three actors; a linked worktree (`.git` is a file, #231) is accepted; the resident loop really backs up, records `source=loop` and is loud when a run fails |
+| `soak-health-check.mjs` | The ops health check can actually fail: every guard is inject-tested (down/wedged core, panel HTML fallback, stale sampling, panic log, both zero-hold causes, backup freshness incl. "fresh artifact, failing scheduler" and "a missing check script is an anomaly") *and* a healthy fixture must exit 0. Bounded by its own watchdog (`BK_GATE_WATCHDOG_MS`) — it must also *exit* |
 | `crash-recovery-check.mjs` | SIGKILL a live core → in-flight settles, replacement serves the socket |
 | `webapp-check.mjs` | Panel: bundle served, auth both ways, CSRF, snapshot non-empty |
 | `backtest-check.mjs` | Event-driven backtest: archive → offline replay → bit-identical |
@@ -65,7 +73,7 @@ cargo build --release --workspace --locked
 - `soak-health.sh` / `soak-health-loop.sh` / `soak-monitor.mjs` — long-run health monitoring.
   `soak-health.sh` exits 0 (healthy) / 1 (anomaly) / 2 (not a repo root) and prints
   every sub-status in one line, because that line is all the loop logs:
-  `core= round= panel= core-ping= soak= trades= archive= log=`. Anomalies come after
+  `core= round= panel= core-ping= soak= trades= archive= backup= log=`. Anomalies come after
   it. Checks and their seams (each has a real default; they exist so
   `soak-health-check.mjs` can inject failures):
   - panel liveness — `BK_PANEL_URL` (default `http://127.0.0.1:51888`), via the
@@ -91,9 +99,27 @@ cargo build --release --workspace --locked
     append-only, so an unbounded count would make the alarm light up forever after
     a single historical occurrence — a check that can never clear is the same
     defect as one that can never fire (KI-30).
+  - **backup freshness** (issue #217) — `BK_BACKUP_DIR`, `BK_BACKUP_STATUS_DIR`,
+    `BK_BACKUP_LOG_DIR`, `BK_BACKUP_STALE_HOURS` (26), `BK_BACKUP_FULL_STALE_HOURS`
+    (192). Delegates to `scripts/data-backup.sh --status --quiet` and folds its
+    one-line token into the summary, so "zero backups are happening" reaches the
+    SAME alert channel as everything else (the README already warned about status
+    hiding in four places; a fifth monitor would have been the bug). It is not
+    reimplemented here on purpose: two implementations of "is the backup fresh"
+    would eventually disagree, and the wrong one would be the one nobody reads.
+    A **missing** `data-backup.sh` is an anomaly (`backup=missing-script`), not a
+    skip — a check that silently vanishes when a file is renamed is the defect.
+    This is what catches the incident's shape: a registered, "installed" schedule
+    that had never once produced a backup, with `launchctl list` reporting exit
+    code 0 and a 94-byte log.
   `soak-health-loop.sh` additionally bounds its own `health.log` and `$BK_RUN_LOG`
   (`BK_LOG_MAX_BYTES`, default 20 MiB) by gzip + in-place truncate, leaving a log
   untouched if gzip fails. It no longer calls the deleted `rotate-run-log.sh`.
+  Both health scripts take `BK_REPO_ROOT` (same convention as `stack-watchdog.sh`):
+  it is how a copy on the internal disk runs against the external-volume checkout
+  under launchd. **The backup check is only as alive as its runner** — with
+  `soak-health-loop.sh` not started, nothing runs it; `blitzkrieg backup --status`
+  is then the check you run by hand (and it exits 1 in the broken state).
 - `soak-resident.sh` — start/stop/status for the resident soak pair (D-30).
   `soak-monitor.mjs --forever` samples continuously instead of for a 12h window,
   and this wrapper is its explicit stop switch; `start` refuses to stack a second
@@ -192,7 +218,79 @@ cargo build --release --workspace --locked
   branches (missing/nonexistent/symlinked `--dest`, repo-internal dest, recursive
   nest) before ever exercising a real backup, since the incident happened because
   the destructive path was tested before the guard was. Runs on a throwaway
-  fixture; the real `data/` is never read or written.
+  fixture; the real `data/` is never read or written. It also pins `--status`
+  (empty/absent/stale/unreadable tiers, a failed scheduler, "a manual run is not
+  scheduler evidence", and that a success CLEARS the alarm), the shared attempt
+  record, the linked-worktree checkout guard (#231), and the resident loop
+  (`start --once` must produce a real backup with `source=loop`, be read back as
+  scheduler evidence, and leave a `FAIL:` last line plus a `result=fail` record
+  when the run fails — route B was itself broken by a `local` scoping slip the
+  first time it ran, so it is tested rather than assumed).
+
+### Scheduled backups: two routes, and why (issue #217)
+
+**The fact** (measured 2026-09-21, repo on an external volume): a launchd-spawned
+process gets `Operation not permitted` reading **and** exec'ing anything on this
+volume. The installed `com.blitzkrieg.databackup.*` agents therefore ran, failed
+in under a second, left one 94-byte log line, and reported **exit code 0** in
+`launchctl list` — so a system with *zero* automatic backups looked "installed and
+scheduled" on every surface an operator would check. That is the defect: not that
+TCC refused (that is a deployment choice) but that the refusal was invisible.
+
+**Route A — LaunchAgent + Full Disk Access** (survives reboot and logout):
+
+```bash
+bash scripts/data-backup-install.sh          # install + probe; non-zero if still blocked
+bash scripts/data-backup-install.sh --no-verify   # skip the probe
+bash scripts/data-backup-install.sh --uninstall   # remove agents + launcher
+```
+
+The installer writes a small **launcher on the internal disk**
+(`~/Library/Application Support/blitzkrieg/data-backup-launch.sh`) and points
+`ProgramArguments` at it, because a `/bin/sh` that cannot even read its script has
+no way to report anything. The launcher preflights a real read of the checkout and,
+when it is denied, writes a dated `FAIL: … (Operation not permitted)` line and
+exits **126** instead of failing silently. Then it `exec`s
+`data-backup-cli.sh <tier> --attempt-source launchd`.
+
+Moving the launcher is necessary but **not sufficient**: the remaining step is the
+user's, and it cannot be automated (D-33):
+
+1. System Settings → Privacy & Security → **Full Disk Access**.
+2. **+**, then ⌘⇧G and type `/bin/sh` — the interpreter launchd starts, i.e.
+   `ProgramArguments[0]`; turn its switch on.
+3. Re-run `bash scripts/data-backup-install.sh` (it re-probes) — or wait for the
+   next 04:00 and run `bash scripts/data-backup.sh --status`.
+4. Only a `PASS` / an `ok` status line counts. "installed" is not evidence.
+
+**Route B — the resident loop** (works today, no permission change;
+**does not survive reboot/logout**):
+
+```bash
+scripts/data-backup-loop.sh start          # daily 04:00 light, Sunday 04:30 full
+scripts/data-backup-loop.sh start --once   # one light run now, then exit
+scripts/data-backup-loop.sh status|stop
+```
+
+A detached `nohup` process from the operator's own session inherits that session's
+TCC access, exactly like `scripts/soak-resident.sh`. It writes the same per-tier
+logs and the same attempt records as Route A, so `--status` reads either one.
+
+**The check that makes a forgotten restart loud** (both routes):
+
+```bash
+bash scripts/data-backup.sh --status          # one line; exit 1 if not happening
+blitzkrieg backup --status                    # the same, through the shim
+```
+
+`--status` judges two independent things: the newest **artifact** on disk (age per
+tier, with `ABSENT` / `NOTDIR` / `DENIED` / `NONE` as distinct causes) and the
+newest **automatic** attempt (the launchd/loop log's last line, classified by a
+tight failure signature, plus the attempt record written by every actor via
+`scripts/lib/backup-attempt.sh`). A record whose `source` is `cli` is deliberately
+NOT scheduler evidence: a successful hand-run backup must never mark the schedule
+healthy. An artifact-only check would have reproduced the incident's false
+comfort — a fresh hand-made copy with a scheduler that has never once succeeded.
 
 ## Packaging / CI helpers
 

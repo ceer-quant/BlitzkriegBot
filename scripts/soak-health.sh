@@ -56,6 +56,12 @@
 #                       operator's redirect knows where the log is. Scanning a
 #                       hardcoded path that nothing writes is a check that can
 #                       never fire.
+#   BK_BACKUP_STALE_HOURS / BK_BACKUP_FULL_STALE_HOURS
+#                       backup-freshness tolerances (defaults 26h / 192h; issue
+#                       #217). The verdict itself is delegated to
+#                       `scripts/data-backup.sh --status`, which also reads
+#                       BK_BACKUP_DIR / BK_BACKUP_STATUS_DIR / BK_BACKUP_LOG_DIR —
+#                       set those on this script to move the whole check.
 
 set -uo pipefail
 
@@ -63,7 +69,12 @@ QUIET=0
 [ "${1:-}" = "--quiet" ] && QUIET=1
 
 # Resolve repo root from this script's location (works from any cwd).
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# BK_REPO_ROOT overrides it, and that seam is not academic: this repository lives
+# on an external volume that macOS denies a launchd-spawned process (read AND
+# exec — measured), so the documented deployment for anything that must run under
+# launchd is a COPY on the internal disk pointing back with BK_REPO_ROOT. Same
+# convention as stack-watchdog.sh, so an operator learns it once.
+ROOT="${BK_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT" || exit 2
 # Markers that survive the Node-layer removal: `package.json` was deleted with
 # it, so guarding on that (as this line once did) refuses to run in its own tree.
@@ -326,12 +337,73 @@ if [ -d "$ARCH_DIR" ]; then
   fi
 fi
 
-# ── 8. report ───────────────────────────────────────────────────────────────
+# ── 8. backup freshness (issue #217) ────────────────────────────────────────
+# WHY THIS IS HERE AND NOT IN A NEW SCRIPT
+#   On 2026-09-21 the daily 04:00 backup was found to have NEVER once succeeded:
+#   macOS TCC denies a launchd-spawned process access to the external volume this
+#   repo lives on (`/bin/sh: .../data-backup-cli.sh: Operation not permitted`),
+#   `launchctl list` still showed exit code 0, and the whole log was 94 bytes — so
+#   the system had zero automatic backups while every surface an operator checks
+#   said the schedule was installed and healthy. Detecting that is exactly what
+#   this script exists for, so the check belongs in the existing health
+#   summary/alert channel rather than in a second monitoring system that nobody
+#   would remember to run (the README already names 4 places a status can hide).
+#
+#   The verdict itself is NOT reimplemented here. `data-backup.sh --status` owns
+#   the logic — artifact age plus the newest automatic attempt — and this check
+#   consumes its one-line verdict and exit code. Two implementations of "is the
+#   backup fresh" would eventually disagree, and the one that is wrong would be
+#   the one nobody is looking at.
+#
+#   Crucially it also catches the case that started this: a JOB THAT NEVER RAN.
+#   `--status` judges the artifact on disk (so nothing appearing is an anomaly)
+#   AND the scheduler's own evidence (so a run that failed, like the TCC denial
+#   above, is named with its reason instead of being silent). A missing
+#   checkable script is reported as an anomaly, not skipped: a check that
+#   silently vanishes when a file is renamed is the KI-30 defect, not a pass.
+BK_BACKUP_STALE_HOURS=${BK_BACKUP_STALE_HOURS:-26}
+BK_BACKUP_FULL_STALE_HOURS=${BK_BACKUP_FULL_STALE_HOURS:-192}
+# Exported because the tolerances live in the DELEGATED script, not here: a value
+# this shell keeps to itself while the child uses its own default is precisely the
+# two-implementations drift this check avoids elsewhere.
+export BK_BACKUP_STALE_HOURS BK_BACKUP_FULL_STALE_HOURS
+BACKUP_STATUS_SH="$ROOT/scripts/data-backup.sh"
+# data-backup.sh is a bash script (`set -o pipefail`, `[[ =~ ]]`). Invoking it as
+# `sh` works on macOS (where sh IS bash) and dies instantly on Debian/Ubuntu,
+# where sh is dash: the status verb would then report "backup is not happening"
+# on a perfectly healthy machine — the alarm firing for the wrong reason, which
+# is the defect class this whole change is about. Prefer bash, fall back to the
+# file's own shebang if bash is somehow absent.
+BK_STATUS_INTERP="sh"
+command -v bash >/dev/null 2>&1 && BK_STATUS_INTERP="bash"
+backup_note="off"
+if [ ! -f "$BACKUP_STATUS_SH" ]; then
+  backup_note="missing-script"
+  problems+=("backup freshness check cannot run: $BACKUP_STATUS_SH does not exist")
+else
+  if bk_out=$("$BK_STATUS_INTERP" "$BACKUP_STATUS_SH" --status --quiet 2>&1); then bk_code=0; else bk_code=$?; fi
+  # The verdict token, e.g. "light=ok(3h)/sched=ok(3h) full=ok(40h)/sched=ok(40h)".
+  backup_note=$(printf '%s\n' "$bk_out" | sed -n 's/^backup: //p' | head -1)
+  backup_note=${backup_note:-unparseable}
+  if [ "$bk_code" -ne 0 ]; then
+    if [ "$backup_note" = "unparseable" ]; then
+      # No verdict line at all: the engine refused to run (a bad tolerance, a
+      # missing tree) and said why on stderr. Losing that would turn a typo in an
+      # env var into a mystery red, so the reason is carried, bounded.
+      reason=$(printf '%s\n' "$bk_out" | grep -v '^[[:space:]]*$' | tail -1 | cut -c1-70)
+      backup_note="unusable(${reason:-exit $bk_code})"
+    fi
+    problems+=("backup is not happening: $backup_note")
+    problems+=("  → diagnose with: blitzkrieg backup --status   (or scripts/data-backup.sh --status)")
+  fi
+fi
+
+# ── 9. report ───────────────────────────────────────────────────────────────
 # Every sub-status goes in the summary line, because under --quiet (how the loop
 # runs it) the summary and the problems are the ONLY things that reach
 # data/soak/health.log. A sub-status that lives only in a `note` is invisible
 # exactly where it is needed.
-status="core=${core_n} round=${round_sec:-?} panel=${panel_note} core-ping=${core_ping_note} soak=${soak_note} trades=${trades_n} archive=${arch_note:-?} log=${log_note}"
+status="core=${core_n} round=${round_sec:-?} panel=${panel_note} core-ping=${core_ping_note} soak=${soak_note} trades=${trades_n} archive=${arch_note:-?} backup=${backup_note} log=${log_note}"
 if [ ${#problems[@]} -eq 0 ]; then
   echo "OK  $status"
   exit 0
