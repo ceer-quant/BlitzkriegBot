@@ -25,6 +25,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
 import { existsSync, unlinkSync, mkdtempSync, readFileSync, statSync } from 'fs';
+import { requireFreshStrategyDylibs } from './lib/strategy-dylib-freshness.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -62,6 +63,12 @@ const money = (n) => Number(n).toFixed(8);
 
 if (!existsSync(BIN)) { console.error(`missing binary: ${BIN}`); process.exit(2); }
 try { unlinkSync(SOCK); } catch {}
+
+// #207: the capture AND the replay both run with `--enable-strategy spread_arb`,
+// which the kernel dlopens from user_layer/strategies/target/release. The gate's
+// claim is "the same events produce the same result" — which is only a statement
+// about this checkout if the strategy library is this checkout's build.
+requireFreshStrategyDylibs({ gate: 'backtest-check', require: ['spread_arb_strategy'] });
 
 const args = ['--socket', SOCK, '--mode', 'dry', '--tick-ms', '50', ...KNOBS, '--event-archive', ARCHIVE];
 const proc = spawn(BIN, args, { stdio: ['ignore', 'inherit', 'inherit'], cwd: WORKDIR });

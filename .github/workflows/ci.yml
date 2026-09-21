@@ -273,6 +273,29 @@ jobs:
         run: |
           node scripts/trend-follow-check.mjs
           node scripts/mean-reversion-check.mjs
+      # #175: a settled position is money the chain owes us, and until this gate
+      # nothing in CI drove that path — the whole settle → receivable → redeem →
+      # cash chain was covered by unit tests only. This one runs it end to end over
+      # the IPC wire against a real dry core, on the winning side of a real market,
+      # and asserts the properties that make it trustworthy rather than merely
+      # present:
+      #   * dry mode starts no venue executor even with well-formed live credentials
+      #     in the environment (the adversarial setup `readonly-egress-check` uses),
+      #     and the settlement record itself says `source = core-dry` with a
+      #     `dry-simulated` redemption — no chain hash, no venue order id, anywhere;
+      #   * the receivable becomes cash EXACTLY once: the balance is watched flat
+      #     for longer than the 5 s retry backoff, so a claim that was confirmed but
+      #     not retired from the book (double credit) is a red gate;
+      #   * a failed attempt is stamped and retried on its own backoff, and a
+      #     `manual` failure stops the automatic attempts for good.
+      # The failure hooks are `--dry-redeem-fail` / `--dry-redeem-manual`, dry-only
+      # test switches: `0` (the default) is byte-for-byte production behaviour and
+      # the live path never reads them. The step also pins SWEEP_FAILURE_FREEZE at 3
+      # through the read-only `engine.stats.reconcile` block, so widening the
+      # sweep-freeze threshold (a silently weaker safety net) fails here.
+      - name: Settlement & redemption gate (#175)
+        timeout-minutes: 8
+        run: node scripts/settlement-redeem-check.mjs
       # E5: the panel consumes core events through the EventBus; the UI Kit
       # gateway command surface and plugin toggles work end-to-end.
       - name: UI Kit gates (E5)

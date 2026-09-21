@@ -21,6 +21,7 @@
 //!                   [--entry-maker-timeout-ms 5000]
 //!                   [--max-orderbook-stale-ms 8000]
 //!                   [--slippage-ticks 0] [--latency-ms 0] [--fill-prob-bps 10000]
+//!                   [--dry-redeem-fail 0] [--dry-redeem-manual]
 //!
 //! `--max-orderbook-stale-ms <ms>` (env `BK_MAX_ORDERBOOK_STALE_MS`) is how old
 //! an orderbook may be before the engine refuses to price off it — the knob that
@@ -243,6 +244,12 @@ struct Args {
     latency_ms: i64,
     /// Fill model: maker fill probability (bps of 10000); None = untouched.
     fill_prob_bps: Option<u32>,
+    /// Dry-mode test hook: the first N simulated redemption attempts of each
+    /// claim fail before one lands (0 = every attempt lands).
+    dry_redeem_fail: u32,
+    /// Dry-mode test hook: report those injected failures as `manual`, i.e. stop
+    /// the automatic retries for good.
+    dry_redeem_manual: bool,
     /// One line per file-settable setting, `key=value (source)`, for the startup
     /// report. Only settings resolved from above the compiled default appear, so
     /// "where did this number come from" is answerable from the log alone.
@@ -517,6 +524,11 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     // #205: the orderbook freshness budget, tracked as Option so CLI > env >
     // default resolution can tell "the operator spoke" from "nobody did".
     let mut max_orderbook_stale_ms: Option<i64> = None;
+    // Dry-mode redemption test hooks (#175 gate): fail the first N simulated
+    // redemption attempts of each claim, optionally as a `manual` failure that
+    // stops the retries for good. 0 = production behaviour.
+    let mut dry_redeem_fail: u32 = 0;
+    let mut dry_redeem_manual = false;
 
     let mut it = argv.iter().cloned();
     while let Some(a) = it.next() {
@@ -795,6 +807,16 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                 latency_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(latency_ms)
             }
             "--fill-prob-bps" => fill_prob_bps = it.next().and_then(|v| v.parse().ok()),
+            // Dry-mode test hooks (#175 gate). Both are inert unless a mode that
+            // simulates the redemption is running, so a live deployment can pass
+            // them and see no change at all.
+            "--dry-redeem-fail" => {
+                dry_redeem_fail = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(dry_redeem_fail)
+            }
+            "--dry-redeem-manual" => dry_redeem_manual = true,
             // Consumed by the pre-scan; named here so they are not reported as
             // unknown flags.
             "--config" => {
@@ -1254,6 +1276,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         slippage_ticks,
         latency_ms,
         fill_prob_bps,
+        dry_redeem_fail,
+        dry_redeem_manual,
         config_report: report,
     }
 }
@@ -1738,6 +1762,10 @@ async fn main() -> anyhow::Result<()> {
         event_archive_max_mb,
         event_archive_rotate_mb,
         event_archive_min_free_mb,
+        // #175 gate hooks: dry-mode redemption failure injection, off unless the
+        // flag is given (see `CoreConfig::dry_redeem_fail`).
+        dry_redeem_fail: args.dry_redeem_fail,
+        dry_redeem_manual: args.dry_redeem_manual,
         ..Default::default()
     };
 

@@ -29,10 +29,17 @@ import { mkdtempSync } from 'fs';
 import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
+import { requireFreshStrategyDylibs } from './lib/strategy-dylib-freshness.mjs';
 import { describeQuote, feeModelProblems, feeQuoter, feeUsdFor } from './lib/fee-model.mjs';
 
 const SOCK = scratchSocketPath('parity');
 const BIN = coreBinaryPath();
+
+// #207: the engine section drives `spread_arb`, which the kernel dlopens out of
+// user_layer/strategies/target/release — a different build product from the
+// binary whose revision is pinned below. Both have to be this checkout's, or the
+// conclusion describes a code state nobody can reconstruct.
+requireFreshStrategyDylibs({ gate: 'core-parity', require: ['spread_arb_strategy'] });
 
 // The core persists its trade log at a RELATIVE path, so every synthetic order
 // this harness places would be appended to the real data/trades/trades.jsonl.
