@@ -136,7 +136,16 @@ export class CoreClient {
     this.ownsProc = true;
     this.lastStderr = '';
     child.stderr?.on('data', (d) => {
-      this.lastStderr = (this.lastStderr + ' ' + String(d).trimEnd()).slice(-2000);
+      // Raw, with no separator invented between chunks. `eprintln!` writes an
+      // unbuffered stderr one format fragment at a time, so a single banner line
+      // genuinely arrives as several chunks; joining them with a space puts a
+      // character into the buffer that the stream never contained, and every
+      // assertion whose pattern spans a boundary then fails against a correct
+      // core (`...socketMode=` + ` ` + `0600...` matches neither
+      // `socketMode=0600` nor `socketMode=\S+`). The window is 8 KiB rather than
+      // 2 KiB because the shipped log level is INFO (#184): a boot can now emit
+      // far more than 2 KiB before the first assertion reads this buffer.
+      this.lastStderr = (this.lastStderr + String(d)).slice(-8192);
     });
     child.on('exit', (code, signal) => this.#handleExit(code, signal));
 

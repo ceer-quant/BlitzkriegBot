@@ -100,6 +100,12 @@ const round = (n) => Number(Number(n).toFixed(6));
  * reader can lag, so a single read at READY is a race: it is what made the
  * `socketMode` check red on one run and green on the next. Returning the buffer
  * on timeout (rather than throwing) keeps the failure message useful.
+ *
+ * Poll for the WHOLE thing you are about to assert, never for a prefix of it.
+ * This function returns the instant `re` matches, so a prefix pattern hands the
+ * caller a buffer that may hold only the first half of the fact it wants — and
+ * the banner is written one format fragment per `write(2)` on unbuffered
+ * stderr, so `socketMode=` can land one chunk before `0600` does.
  */
 async function waitForStderr(ctx, re, ms = 3000) {
   const deadline = Date.now() + ms;
@@ -237,7 +243,7 @@ await session('happy', [], async (ctx) => {
   // channels, so the captured buffer can still be empty when READY lands. Poll
   // for it instead of reading once — a single read here made this check flaky
   // (seen red on a run whose only difference was a rebuilt kernel).
-  const banner = await waitForStderr(ctx, /socketMode=/);
+  const banner = await waitForStderr(ctx, /socketMode=0600/);
   check('the boot banner reached the captured stderr (the checks below are not vacuous)',
     /socketMode=/.test(banner), banner.slice(-200) || '(stderr is empty)');
   // The banner is the process's own claim; the mode on the node is the fact. Both
