@@ -77,6 +77,10 @@ pub struct CoreConfig {
     pub size_usd: Decimal,
     pub min_shares: Decimal,
     pub max_shares: Decimal,
+    /// P0 #202 — the per-entry budget as a percentage of the account's cash
+    /// equity, replacing the absolute `size_usd` when > 0. 0 (the default)
+    /// keeps every deployment's current order sizes exactly as they are.
+    pub size_pct: Decimal,
     /// Engine trend confirmation window (sec) and floor (ms) — exposed so tests
     /// and ops can shorten the confirmation window without touching code.
     pub trend_confirm_sec: i64,
@@ -214,6 +218,7 @@ impl CoreConfig {
             size_usd: self.size_usd,
             min_shares: self.min_shares,
             max_shares: self.max_shares,
+            size_pct: self.size_pct,
             strategy_sizes: self
                 .strategy_limits
                 .iter()
@@ -401,6 +406,11 @@ pub struct StrategyLimit {
     /// non-positive weight disables the leg's entries entirely.
     #[serde(with = "crate::decimal::opt", default)]
     pub size_weight: Option<Decimal>,
+    /// This leg's own equity-relative budget (#202). `None` = the global
+    /// `size_pct`; a value is clamped to it when the global is armed, and
+    /// stands alone when the global is off.
+    #[serde(with = "crate::decimal::opt", default)]
+    pub size_pct: Option<Decimal>,
 }
 
 impl StrategyLimit {
@@ -412,6 +422,7 @@ impl StrategyLimit {
             min_shares: self.min_shares,
             max_shares: self.max_shares,
             size_weight: self.size_weight,
+            size_pct: self.size_pct,
         }
     }
 }
@@ -473,6 +484,7 @@ impl Default for CoreConfig {
             size_usd: Decimal::new(25, 1), // 2.5
             min_shares: Decimal::from(10),
             max_shares: Decimal::from(10),
+            size_pct: Decimal::ZERO,
             trend_confirm_sec: 60,
             trend_window_floor_ms: 10_000,
             spread_arb_trend_entry_factor: None,
@@ -2028,6 +2040,10 @@ impl Core {
         // operator. The check itself is one comparison per cycle.
         self.shadow_evolution_maybe_cycle(now_ms);
         let engine = self.engine.as_mut().expect("engine present");
+        // #202: the equity-relative sizing is a percentage of the account, and
+        // the account is the ledger — pushed here, once per cycle, so a ticket
+        // can never be sized against a balance the process no longer has.
+        engine.set_equity_usd(self.ledger.balance());
         let orders = engine.evaluate(now_ms);
         // Close intents produced by strategies this cycle join the SAME exit
         // submission path as policy exits (handled in run_exit_checks).
@@ -2203,6 +2219,7 @@ impl Core {
                         size_usd: self.config.size_usd,
                         min_shares: self.config.min_shares,
                         max_shares: self.config.max_shares,
+                        size_pct: self.config.size_pct,
                         strategy_scoped: false,
                         size_weight: None,
                     });
@@ -2237,6 +2254,17 @@ impl Core {
                     "effectiveMinShares": dec_json(effective.min_shares),
                     "effectiveMaxShares": dec_json(effective.max_shares),
                     "sizeWeight": effective.size_weight.map(dec_json),
+                    // #202: the equity-relative budget in force for this leg and
+                    // what it is worth on the CURRENT balance, so "how much will
+                    // this account commit per entry?" is a number on the panel
+                    // rather than a reading of the flags.
+                    "effectiveSizePct": dec_json(effective.size_pct),
+                    "entryBudgetUsd": dec_json(
+                        self.engine
+                            .as_ref()
+                            .map(|e| e.entry_budget_usd(&name))
+                            .unwrap_or(effective.size_usd),
+                    ),
                     // ── E2-b declared gate exemptions + per-strategy gate counts ──
                     "gateExemptions": declared.gates(),
                     // D-31: the declared `time_left_sec` floor, or null when the
@@ -2378,6 +2406,13 @@ impl Core {
                 // triggered" is a number on the panel, not a silent no-op.
                 "suppressedStops": self.positions.suppressed_stop_count(),
             },
+            // P0 #202: what ONE order can commit on THIS account. The ceiling is
+            // read off the kernel's own knobs — no ticket can hold more than
+            // `max_shares` (every leg is clamped to it) or pay over `max_price`
+            // a share, and when the equity-relative cap is armed the
+            // `balance × k` bound applies on top. `scripts/risk-sizing-check.mjs`
+            // asserts exactly the last line of this block on a live dry core.
+            "sizing": self.sizing_view(),
             // Settlement & redemption (issue #175): settled-but-unredeemed claims
             // are money the chain still owes, and this is where the panel sees
             // them — the same outlet as everything else, no new event type.
@@ -2391,6 +2426,77 @@ impl Core {
                 .as_ref()
                 .map(|a| serde_json::to_value(a.status()).unwrap_or(serde_json::Value::Null))
                 .unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    /// P0 #202 — "how much can any ONE order commit on this account, right
+    /// now?", answered from the kernel's own knobs so the panel (and the sizing
+    /// gate) never re-derive it from the source:
+    ///
+    /// * `shareBandUsd` = `max_shares × max_price`: the widest ticket the
+    ///   engine's own clamp allows, valued at the risk gate's own price ceiling.
+    ///   This is the bound that existed before #202, and on the live 4.8 USDC
+    ///   account it is 10.00 USD — 208% of the book.
+    /// * `sizeBudgetUsd` (#202, when `size_pct > 0`) = `equity × pct%`.
+    /// * `equityCapUsd` (#202, when the relative cap is armed) = `equity × k%`,
+    ///   the bound the risk gate REJECTS over.
+    /// * `worstCaseOrderUsd` = the tightest of the three. Closing intents are
+    ///   exempt from the equity cap by design (`closes_exposure`), and a close
+    ///   is bounded by the position it reduces — never by these knobs — so the
+    ///   number describes NEW exposure, which is what "max possible loss on one
+    ///   order" means for a binary-market BUY (the whole notional can go to 0).
+    fn sizing_view(&self) -> serde_json::Value {
+        let equity = self.ledger.balance();
+        let globals = self.engine.as_ref().map(|e| e.global_sizing()).unwrap_or(
+            crate::engine::EffectiveSizing {
+                size_usd: self.config.size_usd,
+                min_shares: self.config.min_shares,
+                max_shares: self.config.max_shares,
+                size_pct: self.config.size_pct,
+                strategy_scoped: false,
+                size_weight: None,
+            },
+        );
+        let risk = self.risk.config();
+        let share_band = globals.max_shares.max(Decimal::ZERO) * risk.max_price.max(Decimal::ZERO);
+        let able = equity > Decimal::ZERO;
+        let size_budget = (globals.size_pct > Decimal::ZERO && able)
+            .then(|| equity * globals.size_pct / Decimal::ONE_HUNDRED);
+        let equity_cap = (risk.max_order_notional_pct > Decimal::ZERO && able)
+            .then(|| equity * risk.max_order_notional_pct / Decimal::ONE_HUNDRED);
+        let mut worst = share_band;
+        if let Some(b) = size_budget {
+            worst = worst.min(b);
+        }
+        if let Some(c) = equity_cap {
+            worst = worst.min(c);
+        }
+        serde_json::json!({
+            "equityUsd": dec_json(equity),
+            "minShares": dec_json(globals.min_shares),
+            "maxShares": dec_json(globals.max_shares),
+            "maxPrice": dec_json(risk.max_price),
+            "shareBandUsd": dec_json(share_band),
+            "sizePct": dec_json(globals.size_pct),
+            "sizeBudgetUsd": size_budget.map(dec_json),
+            "maxOrderNotionalUsd": dec_json(risk.max_order_notional),
+            "maxOrderNotionalPct": dec_json(risk.max_order_notional_pct),
+            "equityCapUsd": equity_cap.map(dec_json),
+            "worstCaseOrderUsd": dec_json(worst),
+            "worstCasePctOfEquity": if able {
+                dec_json(worst / equity * Decimal::ONE_HUNDRED)
+            } else {
+                serde_json::Value::Null
+            },
+            // The escape hatch, stated where the bounds are: a close/reduce is
+            // never judged by the equity cap, so a bound that would trap a
+            // position cannot be read off this block either (#174/#202).
+            "closesExemptFromEquityCap": true,
+            "sizePctSkippedSignals": self
+                .engine
+                .as_ref()
+                .map(|e| e.size_pct_skip_count())
+                .unwrap_or(0),
         })
     }
 
@@ -2573,7 +2679,10 @@ impl Core {
             // order, however it is submitted.
             self.audit_entry_gate()?;
         }
-        self.risk.check(&req)?;
+        // The #202 equity-relative cap is a percentage of the account as it is
+        // AT SUBMISSION, so the gate is handed the live balance here — the same
+        // number the daily-loss breaker opens its day with.
+        self.risk.check_with_equity(&req, self.ledger.balance())?;
         let id = self.new_order_id();
         if req.side == Side::Buy {
             self.ledger.reserve(&id, req.price * req.size)?;
@@ -3835,7 +3944,10 @@ impl Core {
                 ),
             ));
         }
-        self.risk.check(&req)?;
+        // #202: the equity-relative per-order cap is a percentage of the account
+        // AT SUBMISSION, so the gate is handed the live balance rather than a
+        // remembered copy of it.
+        self.risk.check_with_equity(&req, self.ledger.balance())?;
 
         // Entry gates apply to opening BUY orders only; exits (SELL) are never
         // blocked by capacity, breaker or cooldowns.
@@ -6555,6 +6667,7 @@ mod strategy_dispatch_tests {
             size_usd: dec!(2.5),
             min_shares: dec!(10),
             max_shares: dec!(10),
+            size_pct: Decimal::ZERO,
             strategy_sizes: HashMap::new(),
         }
     }
@@ -7154,6 +7267,143 @@ mod strategy_dispatch_tests {
         assert_eq!(unset["sizingSource"], "global");
         assert_eq!(dec_of(&unset["effectiveSizeUsd"]), dec!(2.5));
         assert_eq!(dec_of(&unset["effectiveMaxShares"]), dec!(10));
+    }
+
+    // ── #202: the engine sizes from the balance the ledger hands it ─────────
+
+    /// A one-asset dip core whose sizing is the production mapping
+    /// (`CoreConfig::engine_config()`), so the ticket a test reads is the ticket
+    /// the live server would emit on that account.
+    fn equity_core(balance: Decimal, size_pct: Decimal) -> Core {
+        let mut c = Core::new(CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(1000),
+                ..Default::default()
+            },
+            dry_seed_balance: balance,
+            engine_enabled: true,
+            round_duration_sec: 900,
+            auto_exits_enabled: false,
+            size_usd: dec!(2.5),
+            // The engine's own ceiling stays wide so the equity budget is what
+            // decides the lot in these tests.
+            min_shares: dec!(1),
+            max_shares: dec!(1000),
+            size_pct,
+            assets: vec!["BTC".into()],
+            positions: crate::position::PositionConfig {
+                max_positions: 5,
+                exit: crate::exit_policy::ExitConfig {
+                    min_time_left_sec: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        c.set_balance(balance);
+        let cfg = c.config().engine_config();
+        let mut eng = Engine::new(cfg.clone());
+        crate::strategies::test_support::host(&mut eng, cfg.trend, cfg.spread_arb);
+        eng.register_user_strategy(
+            Box::new(TargetDip {
+                name: "dip".into(),
+                buy_below: dec!(0.45),
+                assets: vec!["BTC".into()],
+                gates: crate::strategies::GateExemptions::none(),
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(eng.set_strategy_enabled("dip", true));
+        c.enable_engine(eng);
+        c
+    }
+
+    /// Round + a 0.44-mid book on BTC: the dip strategy's one candidate.
+    fn feed_btc_dip(c: &mut Core, now: i64) {
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: three_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
+        feed_dip_on(c, now + 1_000, &["BTC"]);
+    }
+
+    /// The acceptance behind #202's first half: the SAME 20% on two account
+    /// sizes produces lots 100× apart, and the engine reads the balance the
+    /// ledger actually holds rather than a copy taken at configuration time.
+    #[test]
+    fn equity_sizing_scales_one_order_with_the_account() {
+        let now = 1_000_000i64;
+        let mut small = equity_core(dec!(4.8), dec!(20));
+        feed_btc_dip(&mut small, now);
+        assert_eq!(small.engine_evaluate(now + 1_000), 1);
+        // 4.8 × 20% = 0.96 → 0.96/0.44 = 2.18 → 2 shares. The pre-#202 path
+        // sent 10 shares (4.40 USD, 92% of this account) whatever the price.
+        assert_eq!(small.list_orders()[0].size, dec!(2));
+        assert_eq!(
+            small.engine.as_ref().unwrap().equity_usd(),
+            small.ledger.balance(),
+            "the engine must have been handed the ledger's own balance"
+        );
+
+        let mut big = equity_core(dec!(480), dec!(20));
+        feed_btc_dip(&mut big, now);
+        assert_eq!(big.engine_evaluate(now + 1_000), 1);
+        // 96/0.44 = 218.18 → 218 shares: the same statement, 100× the account.
+        assert_eq!(big.list_orders()[0].size, dec!(218));
+        // The panel states both the percentage and what it is worth here, so the
+        // scaling is visible without re-deriving it from the flags.
+        let small_stats = small.strategy_stats();
+        assert_eq!(
+            dec_of(&strategy_entry(&small_stats, "dip")["effectiveSizePct"]),
+            dec!(20)
+        );
+        assert_eq!(
+            dec_of(&strategy_entry(&small_stats, "dip")["entryBudgetUsd"]),
+            dec!(0.96)
+        );
+        let big_stats = big.strategy_stats();
+        assert_eq!(
+            dec_of(&strategy_entry(&big_stats, "dip")["entryBudgetUsd"]),
+            dec!(96)
+        );
+    }
+
+    /// A budget that cannot buy one whole share emits NO order and says so in
+    /// the stats, rather than turning into a 0-size rejection on every tick.
+    #[test]
+    fn an_unaffordable_equity_budget_skips_the_signal_visibly() {
+        let now = 1_000_000i64;
+        let mut c = equity_core(dec!(4.8), dec!(1)); // 0.048 USD per entry
+        feed_btc_dip(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 1_000), 0, "no ticket, no order");
+        assert!(c.list_orders().is_empty());
+        assert_eq!(
+            c.engine_stats_at(now + 1_000)["sizing"]["sizePctSkippedSignals"].as_u64(),
+            Some(1),
+            "the skip must be counted, not silent"
+        );
+    }
+
+    /// Unconfigured (the shipped default) is untouched: the service pushes a
+    /// balance every cycle now, and this is the test that proves that push alone
+    /// changes nothing about an absolute-budget deployment's orders.
+    #[test]
+    fn an_unconfigured_core_keeps_its_historical_lot() {
+        let now = 1_000_000i64;
+        let mut c = equity_core(dec!(4.8), Decimal::ZERO);
+        feed_btc_dip(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 1_000), 1);
+        // The historical path: 2.5/0.44 ≈ 5.68 → 6 shares, inside [1, 1000].
+        assert_eq!(c.list_orders()[0].size, dec!(6));
+        assert_eq!(
+            c.engine_stats_at(now + 1_000)["sizing"]["sizePctSkippedSignals"].as_u64(),
+            Some(0)
+        );
     }
 
     #[test]
