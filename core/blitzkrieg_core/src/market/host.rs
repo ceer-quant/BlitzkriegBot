@@ -405,4 +405,38 @@ impl MarketHost for CoreHost {
             self.core.lock().await.emit_error(error_from_api(&error));
         })
     }
+
+    // ── Settlement & redemption (issue #175) ─────────────────────────────────
+
+    fn take_settlement_queries(&self) -> BoxFuture<'_, Vec<api::SettlementQuery>> {
+        Box::pin(async move {
+            let now = now_ms();
+            let mut c = self.core.lock().await;
+            c.take_settlement_queries(now)
+        })
+    }
+
+    fn on_market_resolution(&self, resolution: api::MarketResolution) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let now = now_ms();
+            let mut c = self.core.lock().await;
+            c.on_market_resolution(resolution, now);
+        })
+    }
+
+    fn take_pending_redemptions(&self) -> BoxFuture<'_, Vec<api::RedemptionRequest>> {
+        Box::pin(async move {
+            let now = now_ms();
+            let mut c = self.core.lock().await;
+            c.take_pending_redemptions(now)
+        })
+    }
+
+    fn on_redemption_result(&self, result: api::RedemptionResult) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let now = now_ms();
+            let mut c = self.core.lock().await;
+            c.on_redemption_result(result, now);
+        })
+    }
 }

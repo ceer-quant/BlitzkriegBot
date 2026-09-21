@@ -77,6 +77,22 @@ pub trait MarketHost: Send + Sync {
     fn note_orphan_cancelled(&self, venue_order_id: &str) -> BoxFuture<'_, ()>;
     /// Surface a venue/plugin error to the core (never swallowed).
     fn report_error(&self, error: CoreError) -> BoxFuture<'_, ()>;
+
+    // ── Settlement / redemption (issue #175) ─────────────────────────────────
+    /// Markets the core holds a position in and whose resolution it does not
+    /// know yet. The plugin answers each one with
+    /// [`MarketHost::on_market_resolution`] — including "not resolved yet", so
+    /// the core can tell a venue that answered from one that is not running.
+    fn take_settlement_queries(&self) -> BoxFuture<'_, Vec<SettlementQuery>>;
+    /// The venue's verdict on a market (or `resolved: false` while it is still
+    /// open). The core books the settlement from this and nothing else.
+    fn on_market_resolution(&self, resolution: MarketResolution) -> BoxFuture<'_, ()>;
+    /// Settled positions whose collateral has not been redeemed on-chain yet,
+    /// with any retry backoff already elapsed. The plugin performs the redeem
+    /// and reports back through [`MarketHost::on_redemption_result`].
+    fn take_pending_redemptions(&self) -> BoxFuture<'_, Vec<RedemptionRequest>>;
+    /// The outcome of one redemption: a mined tx hash + block, or a failure.
+    fn on_redemption_result(&self, result: RedemptionResult) -> BoxFuture<'_, ()>;
 }
 
 /// The market-data component: owns a long-lived push connection (orderbook /

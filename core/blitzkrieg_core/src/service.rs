@@ -10,6 +10,7 @@ use crate::ome::{AppliedFillRecord, FillDelta, FillOutcome, LateFill, Ome, Submi
 use crate::position::{OpenParams, PositionConfig, PositionManager};
 use crate::reconcile::{AuditInput, AuditReport, CashIdentity};
 use crate::risk::{LossBreakers, RiskConfig, RiskGate};
+use crate::settlement::{SETTLEMENT_EXIT_REASON, SettlementBook, booking_for, settlement_key};
 use crate::shadow_evolution::{
     EvolutionOutcome, EvolutionStatus, MutableParams, ShadowEvolution, ShadowEvolutionConfig,
 };
@@ -166,6 +167,10 @@ pub struct CoreConfig {
     /// bot in a position (the #174 failure mode). Turning this off keeps the
     /// alert and the persisted record while leaving the gates alone.
     pub audit_halt_entries: bool,
+    /// Where to persist the SETTLEMENT journal (issue #175). None = derive
+    /// `settlements.jsonl` beside the order log; `order_log_path: None` means no
+    /// persistence, i.e. settlement idempotency is per-session.
+    pub settlement_log_path: Option<String>,
 }
 
 impl CoreConfig {
@@ -509,6 +514,7 @@ impl Default for CoreConfig {
             audit_log_path: None,
             applied_log_path: None,
             audit_halt_entries: true,
+            settlement_log_path: None,
         }
     }
 }
@@ -834,6 +840,12 @@ pub struct Core {
     applied_log: Option<AppliedFillLog>,
     /// In-kernel accounting audit state (issue #189).
     audit: AuditRuntime,
+    /// Settlement + redemption book (issue #175): which positions a market
+    /// resolution has settled (durable, so a second round cannot re-book them),
+    /// and the claims whose collateral is still on-chain. In dry mode the core
+    /// resolves its own markets and simulates the redemption; in live mode the
+    /// venue plugin answers and redeems.
+    settlement: SettlementBook,
     /// Last free-cash figure the venue reported, as `(at_ms, free)` — the venue
     /// leg of the audit compares against it.
     venue_free: Option<(i64, Decimal)>,
@@ -870,6 +882,8 @@ impl Core {
         let applied_log =
             side_log_path(&config.applied_log_path, "applied-fills.jsonl").map(AppliedFillLog::new);
         let audit_log = side_log_path(&config.audit_log_path, "reconcile.jsonl");
+        let settlement_log = side_log_path(&config.settlement_log_path, "settlements.jsonl");
+        let settlement = SettlementBook::new(settlement_log.as_deref().map(std::path::Path::new));
         let shadow_cfg = {
             let mut c = ShadowEvolutionConfig {
                 enabled: config.shadow_evolution_enabled,
@@ -1030,6 +1044,7 @@ impl Core {
                 audit_log_path: audit_log,
                 ..Default::default()
             },
+            settlement,
             venue_free: None,
             next_id: 1,
             tx: None,
@@ -1164,6 +1179,9 @@ impl Core {
                 ),
             });
         }
+        // A settlement whose close never landed is a position that looks open but
+        // is already paid: finish it before anything trades (issue #175).
+        self.recover_settlements();
         n
     }
 
@@ -2395,6 +2413,10 @@ impl Core {
             // `balance × k` bound applies on top. `scripts/risk-sizing-check.mjs`
             // asserts exactly the last line of this block on a live dry core.
             "sizing": self.sizing_view(),
+            // Settlement & redemption (issue #175): settled-but-unredeemed claims
+            // are money the chain still owes, and this is where the panel sees
+            // them — the same outlet as everything else, no new event type.
+            "settlement": self.settlement_view(as_of_ms),
             "blocked": blocked,
             "confirmed": confirmed,
             "confirmedDetail": confirmed_detail,
@@ -2490,6 +2512,10 @@ impl Core {
         v["runs"] = serde_json::json!(self.audit.runs);
         v["failures"] = serde_json::json!(self.audit.failures);
         v["anchored"] = serde_json::json!(self.audit.anchor.is_some());
+        // Settled-but-unredeemed payout: money owed to us, part of the identity's
+        // `total` but not of `balance` until the redeem transaction confirms
+        // (issue #175).
+        v["receivableUsd"] = dec_json(self.settlement.receivable_usd());
         v["summary"] = serde_json::json!(
             self.audit
                 .report
@@ -2940,6 +2966,8 @@ impl Core {
             live: self.config.mode == Mode::Live,
             identity: CashIdentity {
                 balance: self.ledger.balance(),
+                // Settled but not yet redeemed: owed to us, not in the wallet.
+                receivable: self.settlement.receivable_usd(),
                 realized,
                 spent,
                 received,
@@ -4303,6 +4331,495 @@ impl Core {
         }
     }
 
+    // ── Settlement & redemption (issue #175) ────────────────────────────────
+    //
+    // A position that survives to its market's resolution used to sit in the
+    // book forever: never closed, never paid, with its cash permanently short.
+    // This section closes it at the resolution's payout price and books that
+    // payout as a RECEIVABLE — never as cash. The distinction is the whole
+    // design: the wallet does not hold the money until the on-chain redemption
+    // confirms, and crediting `balance` early would make the ledger claim cash
+    // the venue does not have, which is exactly what the live leg of the
+    // accounting audit reads as divergence (and halts entries over). The
+    // receivable is part of `CashIdentity::total`, so the anchored identity
+    // stays true at every instant: settlement moves the payout into `total`
+    // against the realized PnL of the close, redemption moves it from the
+    // receivable into `balance` without changing `total`.
+    //
+    // Booking is idempotent on two levels, because a settlement is real money:
+    // an in-memory applied set (this process) and an append-only journal whose
+    // replayed lines rebuild that set (every later process).
+
+    /// Markets the core is waiting on a verdict for, as queries for the venue.
+    /// The plugin drains this in live mode; dry mode answers itself in
+    /// [`Core::tick`], so the same code path is exercised without a chain.
+    pub fn take_settlement_queries(
+        &mut self,
+        now_ms: i64,
+    ) -> Vec<blitzkrieg_market_api::SettlementQuery> {
+        self.sync_settlement_watch(now_ms);
+        self.settlement.take_queries(now_ms)
+    }
+
+    /// Keep the settlement watch list in step with the open book: a market is
+    /// watched once a position of ours is past its expiry, and forgotten as soon
+    /// as its last position leaves (settled, or closed by an ordinary exit).
+    fn sync_settlement_watch(&mut self, now_ms: i64) {
+        let positions: Vec<crate::position::OpenPosition> =
+            self.positions.open_positions().to_vec();
+        self.settlement.track_markets(&positions, now_ms);
+        let live: HashSet<&str> = positions.iter().map(|p| p.condition_id.as_str()).collect();
+        for condition_id in self.settlement.tracked_condition_ids() {
+            if !live.contains(condition_id.as_str()) {
+                self.settlement.forget_market(&condition_id);
+            }
+        }
+    }
+
+    /// A market's resolution arrived from the venue (live) or was synthesized by
+    /// the core (dry). Closes every position held on that market exactly once and
+    /// books the payout as a receivable.
+    ///
+    /// Loud on anything it cannot settle: a position whose token the resolution
+    /// does not price stays OPEN (inventing a payout would be worse than the
+    /// drift it fixes) and the market stays watched.
+    pub fn on_market_resolution(
+        &mut self,
+        resolution: blitzkrieg_market_api::MarketResolution,
+        now_ms: i64,
+    ) {
+        self.settlement
+            .note_answer(&resolution.condition_id, resolution.resolved, now_ms);
+        if !resolution.resolved {
+            return; // not resolved yet — the query re-arms on its own cadence
+        }
+        let mut market_positions: Vec<crate::position::OpenPosition> = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.condition_id == resolution.condition_id)
+            .cloned()
+            .collect();
+        // Paying legs first: the market's claim must exist before a worthless leg
+        // joins it, because a NegRisk redemption takes the whole outcome-share
+        // vector in one call (a leg booked first could not be added afterwards).
+        market_positions.sort_by_key(|p| {
+            std::cmp::Reverse(
+                resolution
+                    .payout_per_share(&p.token_id)
+                    .unwrap_or(Decimal::ZERO),
+            )
+        });
+        if market_positions.is_empty() {
+            self.settlement.forget_market(&resolution.condition_id);
+            return;
+        }
+        let mut settled = 0usize;
+        let mut payout_usd = Decimal::ZERO;
+        let mut unpriced: Vec<String> = Vec::new();
+        for pos in &market_positions {
+            let Some(booking) = booking_for(pos, &resolution) else {
+                unpriced.push(format!("{} (position {})", pos.token_id, pos.id));
+                continue;
+            };
+            // Commit BEFORE closing. The journal line is what makes the close
+            // replay-safe (and `book` returns None for a key it already holds, so
+            // a re-delivered resolution cannot book the same position twice).
+            let Some(committed) = self.settlement.book(&booking, &resolution, now_ms) else {
+                continue;
+            };
+            payout_usd += committed.payout_usd;
+            // A redemption through the CTF pays no fee, so the settlement exit is
+            // a maker close: `close` charges no exit fee and the realized net is
+            // `payout − entry cost − entry fee` — exactly the movement the
+            // identity's receivable records.
+            let closed = self.positions.close(
+                &committed.position_id,
+                committed.payout_per_share,
+                SETTLEMENT_EXIT_REASON,
+                true,
+                now_ms,
+            );
+            match closed {
+                Some(closed) => {
+                    // Trade record first, then the position snapshot: recovery
+                    // needs the realized record to already exist, because the
+                    // audit's expected side is built from it (see
+                    // `SettlementBook::recover`).
+                    self.on_position_closed(&closed, now_ms);
+                    self.settlement.note_closed(&committed.key, now_ms);
+                    self.persist_positions();
+                    settled += 1;
+                    tracing::info!(
+                        position = %committed.position_id,
+                        condition = %committed.condition_id,
+                        shares = %committed.shares,
+                        payout_per_share = %committed.payout_per_share,
+                        payout_usd = %committed.payout_usd,
+                        winning = committed.winning,
+                        source = %resolution.source,
+                        "position settled at market resolution"
+                    );
+                }
+                None => {
+                    // The booking is committed but the position was not in the
+                    // book (an external close raced it). Nothing to close, and
+                    // the claim stands: the tokens are ours on-chain whatever the
+                    // local book says.
+                    tracing::warn!(
+                        position = %committed.position_id,
+                        "settlement booked but the position was already closed locally"
+                    );
+                }
+            }
+        }
+        if settled > 0 {
+            self.persist_positions();
+            self.emit(Event::RiskAlert {
+                code: blitzkrieg_market_api::CoreErrorCode::Internal,
+                message: format!(
+                    "settled {settled} position(s) on {} — {payout_usd} USDC receivable pending redemption",
+                    resolution.condition_id
+                ),
+            });
+        }
+        if !unpriced.is_empty() {
+            let message = format!(
+                "settlement: resolution of {} (source {}) prices no outcome for {} — left open",
+                resolution.condition_id,
+                resolution.source,
+                unpriced.join(", ")
+            );
+            tracing::error!("{message}");
+            self.emit(Event::Error {
+                error: CoreError::new(blitzkrieg_market_api::CoreErrorCode::Internal, message),
+            });
+            return; // keep the market watched: a later resolution may price it
+        }
+        self.settlement.forget_market(&resolution.condition_id);
+    }
+
+    /// Claims due for a redemption attempt. The plugin drains this in live mode
+    /// and reports each one back through `on_redemption_result`; dispatching
+    /// stamps the claim's backoff, so a result that never arrives is retried
+    /// rather than forgotten.
+    pub fn take_pending_redemptions(
+        &mut self,
+        now_ms: i64,
+    ) -> Vec<blitzkrieg_market_api::RedemptionRequest> {
+        self.settlement.take_redemptions(now_ms)
+    }
+
+    /// A redemption attempt came back.
+    ///
+    /// Success is the exact instant the payout becomes cash: the claim leaves the
+    /// receivable and the same amount enters the ledger balance, so the audit's
+    /// `total` is unchanged by it. Failure is loud, is retried on the book's
+    /// backoff, and never blocks a close or a new entry — this path touches
+    /// neither the risk gate nor the order manager.
+    pub fn on_redemption_result(
+        &mut self,
+        result: blitzkrieg_market_api::RedemptionResult,
+        now_ms: i64,
+    ) {
+        match result.failure {
+            None => {
+                let Some(payout) = self.settlement.note_confirmed(
+                    &result.id,
+                    result.tx_hash.clone(),
+                    result.block_number,
+                    now_ms,
+                ) else {
+                    // Unknown or already-redeemed claim: crediting here is how a
+                    // phantom payout would enter the books, so it does not.
+                    tracing::warn!(
+                        claim = %result.id,
+                        "redemption success for an unknown or already-redeemed claim — ignored"
+                    );
+                    return;
+                };
+                self.ledger.credit_redemption(payout);
+                tracing::info!(
+                    claim = %result.id,
+                    condition = %result.condition_id,
+                    payout_usd = %payout,
+                    tx = result.tx_hash.as_deref().unwrap_or(""),
+                    block = result.block_number.unwrap_or_default(),
+                    "settled claim redeemed on-chain — payout credited to cash"
+                );
+                self.emit(Event::RiskAlert {
+                    code: blitzkrieg_market_api::CoreErrorCode::Internal,
+                    message: format!(
+                        "redeemed settled position: +{payout} USDC on-chain (claim {}, tx {})",
+                        result.id,
+                        result.tx_hash.as_deref().unwrap_or("n/a")
+                    ),
+                });
+            }
+            Some(failure) => {
+                let what = if failure.manual {
+                    "manual redemption required"
+                } else {
+                    "will retry"
+                };
+                let message = format!(
+                    "redemption of claim {} failed ({what}): {}",
+                    result.id, failure.message
+                );
+                if !self.settlement.note_failure(&result.id, &failure, now_ms) {
+                    tracing::error!(
+                        claim = %result.id,
+                        error = %failure.message,
+                        "redemption failed for an unknown or already-redeemed claim"
+                    );
+                } else {
+                    tracing::error!(
+                        claim = %result.id,
+                        manual = failure.manual,
+                        error = %failure.message,
+                        "redemption failed"
+                    );
+                }
+                eprintln!("core: {message}");
+                self.emit(Event::Error {
+                    error: CoreError::new(
+                        blitzkrieg_market_api::CoreErrorCode::VenueError,
+                        message,
+                    ),
+                });
+            }
+        }
+    }
+
+    /// Dry mode: simulate the redemption of every due claim. The claim is
+    /// confirmed with a `dry-simulated` tx hash, so the ledger move is the same
+    /// one a mined transaction produces and the whole path (settle → receivable →
+    /// cash) is testable with no chain at all.
+    fn simulate_redemptions(&mut self, now_ms: i64) {
+        for request in self.settlement.take_redemptions(now_ms) {
+            let result = blitzkrieg_market_api::RedemptionResult {
+                id: request.id.clone(),
+                condition_id: request.condition_id.clone(),
+                tx_hash: Some("dry-simulated".to_string()),
+                block_number: None,
+                failure: None,
+                at_ms: now_ms,
+            };
+            self.on_redemption_result(result, now_ms);
+        }
+    }
+
+    /// Answer a settlement query locally (dry/read-only modes). The convention is
+    /// the market's own last mid: the highest-valued token held wins and pays 1,
+    /// the others pay 0 — and when no token is above 0.5 the market pays nobody,
+    /// which understates rather than invents a payout. Documented here because it
+    /// is a simulation rule, not a fact about the market: `source` says
+    /// `core-dry`, so a simulated settlement can never be read as a real one.
+    ///
+    /// The mid comes from the mirrored BOOK when we have one, not from the
+    /// position's last valuation: settlement runs before the tick's exit pass, so
+    /// `current_price` can be a tick stale, and a stale mid is a wrong payout.
+    fn dry_resolution(
+        &self,
+        query: &blitzkrieg_market_api::SettlementQuery,
+        now_ms: i64,
+    ) -> Option<blitzkrieg_market_api::MarketResolution> {
+        let positions = self.positions.open_positions();
+        let priced: Vec<(&str, Decimal)> = query
+            .token_ids
+            .iter()
+            .map(|t| {
+                let book_mid = self.books.get(t).map(|b| {
+                    crate::model::OrderbookSnapshot::from_levels(
+                        t.to_string(),
+                        b.bids.clone(),
+                        b.asks.clone(),
+                        now_ms,
+                    )
+                    .mid_price
+                });
+                let mid = book_mid
+                    .filter(|m| *m > Decimal::ZERO)
+                    .or_else(|| {
+                        positions
+                            .iter()
+                            .find(|p| &p.token_id == t)
+                            .map(|p| p.current_price)
+                    })
+                    .unwrap_or(Decimal::ZERO);
+                (t.as_str(), mid)
+            })
+            .collect();
+        if priced.is_empty() {
+            return None;
+        }
+        let (winner, best) =
+            priced.iter().fold(
+                ("", Decimal::ZERO),
+                |acc, (t, p)| {
+                    if *p > acc.1 { (*t, *p) } else { acc }
+                },
+            );
+        let pays = best > Decimal::new(5, 1);
+        let payouts = priced
+            .iter()
+            .map(|(t, _)| {
+                let payout = if pays && *t == winner {
+                    Decimal::ONE
+                } else {
+                    Decimal::ZERO
+                };
+                ((*t).to_string(), payout)
+            })
+            .collect();
+        Some(blitzkrieg_market_api::MarketResolution {
+            condition_id: query.condition_id.clone(),
+            resolved: true,
+            payouts,
+            // A simulated market has no venue metadata to carry.
+            neg_risk: false,
+            resolved_at_ms: now_ms,
+            source: "core-dry".to_string(),
+        })
+    }
+
+    /// One settlement round, dry modes only: the core asks itself (through the
+    /// same query path the venue plugin uses) and answers from the last books it
+    /// saw. Live resolutions arrive from the venue instead.
+    ///
+    /// The simulated redemption runs at the end of the round, so dry mode
+    /// exercises the whole path (settle → receivable → cash) with no chain —
+    /// `on_market_resolution` itself only ever books, whatever the mode.
+    fn drive_settlement(&mut self, now_ms: i64) {
+        if !self.config.mode.settles_locally() {
+            return;
+        }
+        for query in self.take_settlement_queries(now_ms) {
+            if let Some(resolution) = self.dry_resolution(&query, now_ms) {
+                self.on_market_resolution(resolution, now_ms);
+            }
+        }
+        self.simulate_redemptions(now_ms);
+    }
+
+    /// Alert once when a watched market stops being answered (see
+    /// [`SettlementBook::note_blind_state`]). Loud but not repeated: the panel's
+    /// `blindSinceMs` is the continuous signal.
+    fn alert_if_settlement_blind(&mut self, now_ms: i64) {
+        let blind = self.settlement.blind_since_ms(now_ms);
+        if self.settlement.note_blind_state(blind.is_some()) {
+            let since = blind.unwrap_or(now_ms);
+            let message = format!(
+                "settlement: no market verdict since {since} — {} market(s) past expiry cannot settle until the venue answers",
+                self.settlement.tracked_markets()
+            );
+            tracing::error!("{message}");
+            self.emit(Event::Error {
+                error: CoreError::new(blitzkrieg_market_api::CoreErrorCode::Internal, message),
+            });
+        }
+    }
+
+    /// Finish settlements whose close never became durable (a crash between the
+    /// journal commit and the close). The booking stands — the tokens are ours
+    /// on-chain — so the position is closed here exactly once, at the recorded
+    /// payout price.
+    ///
+    /// Called from [`Core::restore_positions`], before trading resumes: the
+    /// trade record has to exist for the audit's expected side to balance (see
+    /// `SettlementBook::recover`), and this is the only moment the books can
+    /// still be repaired.
+    fn recover_settlements(&mut self) -> usize {
+        let stale: Vec<crate::position::OpenPosition> = self
+            .settlement
+            .recover(self.positions.open_positions())
+            .into_iter()
+            .cloned()
+            .collect();
+        let mut recovered = 0usize;
+        for pos in stale {
+            let key = settlement_key(&pos);
+            let Some(record) = self.settlement.record(&key) else {
+                continue;
+            };
+            let (payout_per_share, at_ms) = (record.payout_per_share, record.applied_at_ms);
+            let closed = self.positions.close(
+                &pos.id,
+                payout_per_share,
+                SETTLEMENT_EXIT_REASON,
+                true,
+                at_ms,
+            );
+            if let Some(closed) = closed {
+                // The trade record was lost with the crash: write it now, once,
+                // and mark the close durable so no later start repeats it.
+                self.on_position_closed(&closed, at_ms);
+                self.settlement.note_closed(&key, at_ms);
+                recovered += 1;
+                tracing::warn!(
+                    position = %closed.id,
+                    condition = %closed.condition_id,
+                    payout_per_share = %payout_per_share,
+                    "recovered a settlement whose close never landed — closed at the booked payout"
+                );
+            }
+        }
+        if recovered > 0 {
+            self.persist_positions();
+            self.emit(Event::RiskAlert {
+                code: blitzkrieg_market_api::CoreErrorCode::Internal,
+                message: format!(
+                    "recovered {recovered} settled position(s) whose close was interrupted — redeemed claims unaffected"
+                ),
+            });
+        }
+        recovered
+    }
+
+    /// The settlement block of the engine stats: what is settled, what the chain
+    /// still owes us, and anything stuck. Read by the panel through the existing
+    /// `engine_stats` outlet (no new event type).
+    fn settlement_view(&self, as_of_ms: i64) -> serde_json::Value {
+        let claims: Vec<serde_json::Value> = self
+            .settlement
+            .claims()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "conditionId": c.condition_id,
+                    "payoutUsd": dec_json(c.payout_usd),
+                    "negRisk": c.neg_risk,
+                    "shares": c.outcome_shares.iter().map(|s| dec_json(*s)).collect::<Vec<_>>(),
+                    "positions": c.position_ids.len(),
+                    "attempts": c.attempts,
+                    "nextAttemptMs": c.next_attempt_ms,
+                    "manual": c.manual,
+                    "txHash": c.tx_hash,
+                    "blockNumber": c.block_number,
+                    "lastError": c.last_error,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "settledPositions": self.settlement.applied_count(),
+            "bookedThisSession": self.settlement.booked_this_session(),
+            "receivableUsd": dec_json(self.settlement.receivable_usd()),
+            "pendingRedemptions": self.settlement.pending_claim_count(),
+            "retryableRedemptions": self.settlement.retryable_claim_count(),
+            "manualRedemptions": self.settlement.manual_claim_count(),
+            "redeemedClaims": self.settlement.redeemed_count(),
+            "trackedMarkets": self.settlement.tracked_markets(),
+            "blindSinceMs": self.settlement.blind_since_ms(as_of_ms),
+            "lastError": match self.settlement.last_error() {
+                Some((claim, message, manual)) => serde_json::json!({
+                    "claim": claim, "message": message, "manual": manual,
+                }),
+                None => serde_json::Value::Null,
+            },
+            "claims": claims,
+        })
+    }
+
     // ── Maintenance: pending-fill retry + maker→taker escalation + exits ────
     pub fn tick(&mut self, now_ms: i64) -> CoreResult<()> {
         // Flush the market-data archive at most once a second, so a reader of the
@@ -4317,6 +4834,17 @@ impl Core {
         for outcome in pending {
             self.report_fill_outcome(outcome, now_ms);
         }
+
+        // Settlement (issue #175): a position past its market's expiry has to
+        // become cash, and only the news of the market's resolution can do it.
+        // Runs before the audit so the money a settlement moves is accounted in
+        // the same round it happens (the ordering is free: `drive_settlement` is
+        // a no-op in live mode, where resolutions arrive from the venue).
+        self.drive_settlement(now_ms);
+        // A market we are watching whose verdict never arrives strands the
+        // position: say so once per episode (the panel carries `blindSinceMs`
+        // continuously, this is the alert).
+        self.alert_if_settlement_blind(now_ms);
 
         // Accounting audit (issue #189): the kernel's own periodic three-way money
         // check, so drift is caught (and blocks new entries) even when nothing
@@ -8835,5 +9363,569 @@ mod trading_capability_tests {
             direction: "up".into(),
             round_slot: 1,
         }
+    }
+}
+
+/// Settlement & redemption end-to-end (issue #175), at the `Core` level: a
+/// position that reaches its market's resolution has to become cash without ever
+/// breaking the accounting identity. These tests own the acceptance criteria —
+/// the settle → `run_accounting_audit` → ok proof, the idempotency proof, and the
+/// loud-failure proof.
+#[cfg(test)]
+mod settlement_service_tests {
+    use super::*;
+    use crate::model::{FillPolicy, OrderStatus, Side};
+    use rust_decimal_macros::dec;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bk-settle-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A dry core whose market expires 1s after the entry round and whose durable
+    /// logs (positions, trades, settlement journal) all land in `dir`.
+    fn settling_core(dir: &std::path::Path, balance: Decimal) -> Core {
+        let path = |name: &str| Some(dir.join(name).to_string_lossy().to_string());
+        let mut c = Core::new(CoreConfig {
+            mode: Mode::Dry,
+            round_duration_sec: 1,
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: balance,
+            position_log_path: path("positions.jsonl"),
+            trade_log_path: path("trades.jsonl"),
+            settlement_log_path: path("settlements.jsonl"),
+            ..Default::default()
+        });
+        c.set_balance(balance);
+        c
+    }
+
+    fn entry_order(price: Decimal, size: Decimal) -> OrderRequest {
+        OrderRequest {
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode: FillPolicy::Taker,
+            price,
+            size,
+            internal_key: "k1".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 1,
+        }
+    }
+
+    /// Open a 5-share position at 0.40 (taker: cost 2.00 + 0.036 fee) on a market
+    /// that expires at t=2000ms, and take the audit anchor with it open.
+    fn open_and_anchor(c: &mut Core, balance: Decimal) {
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
+        let (_id, status) = c.place(entry_order(dec!(0.40), dec!(5)), 0, 1).unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+        assert_eq!(c.positions().open_positions().len(), 1);
+        assert_eq!(c.positions().open_positions()[0].expires_at_ms, 2_000);
+        // The book moves to 0.95/0.96 before expiry: the market's own last mid is
+        // what the dry resolution pays on (> 0.5 wins, a full 1.00/share).
+        c.book_snapshot(
+            "tok",
+            vec![(dec!(0.95), dec!(100))],
+            vec![(dec!(0.96), dec!(100))],
+            1_998,
+        );
+        let anchor = c.run_accounting_audit(1_999);
+        assert!(anchor.ok, "anchor audit: {}", anchor.summary());
+        assert_eq!(c.ledger().balance(), balance - dec!(2.036));
+    }
+
+    /// The resolution the venue would report: the held token pays 1.00/share.
+    fn winning_resolution() -> blitzkrieg_market_api::MarketResolution {
+        blitzkrieg_market_api::MarketResolution {
+            condition_id: "cond".into(),
+            resolved: true,
+            payouts: vec![("tok".to_string(), Decimal::ONE)],
+            neg_risk: false,
+            resolved_at_ms: 2_000,
+            source: "test".into(),
+        }
+    }
+
+    fn settlement_json(c: &Core) -> serde_json::Value {
+        c.engine_stats_at(3_000)["settlement"].clone()
+    }
+
+    /// Acceptance: settle → `run_accounting_audit` → ok, with the payout held as a
+    /// receivable (not cash) until the redemption confirms.
+    #[test]
+    fn settlement_keeps_the_accounting_identity_true() {
+        let dir = scratch("identity");
+        let mut c = settling_core(&dir, dec!(10));
+        open_and_anchor(&mut c, dec!(10));
+        let balance_before = c.ledger().balance();
+
+        c.on_market_resolution(winning_resolution(), 2_001);
+
+        // The position is closed at its redemption value, reason `settlement`.
+        assert!(c.positions().open_positions().is_empty());
+        let closed = &c.positions().closed_positions()[0];
+        assert_eq!(closed.exit_reason, ExitReason::Settlement);
+        assert_eq!(closed.exit_price, Decimal::ONE);
+        assert_eq!(
+            closed.net_pnl_usd,
+            dec!(2.964),
+            "payout 5 − cost 2 − entry fee 0.036"
+        );
+        let record =
+            serde_json::to_value(crate::trade_db::TradeRecord::from_closed(closed)).unwrap();
+        assert_eq!(record["exitReason"], "settlement");
+        assert_eq!(record["netPnlUsd"], serde_json::json!(2.964));
+
+        // Cash did NOT move: the payout is an account receivable (the wallet
+        // holds conditional tokens, not USDC, until the redeem is mined).
+        assert_eq!(c.ledger().balance(), balance_before);
+        let stats = settlement_json(&c);
+        assert_eq!(stats["receivableUsd"], serde_json::json!(5.0));
+        assert_eq!(stats["settledPositions"], serde_json::json!(1));
+        assert_eq!(stats["pendingRedemptions"], serde_json::json!(1));
+        assert_eq!(
+            stats["trackedMarkets"],
+            serde_json::json!(0),
+            "nothing left to watch"
+        );
+
+        // The audit is green with the receivable on the books: `total` explains
+        // the settlement exactly (Δrealized 2.964 + Δspent 2.036 = 5.0).
+        let report = c.run_accounting_audit(2_002);
+        assert!(report.ok, "audit after settlement: {}", report.summary());
+
+        // The claim the venue has to execute.
+        let due = c.take_pending_redemptions(2_003);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, "cond");
+        assert_eq!(due[0].condition_id, "cond");
+        assert_eq!(due[0].outcome_shares, vec![dec!(5), dec!(0)]);
+        assert_eq!(due[0].expected_payout_usd, dec!(5));
+        assert!(!due[0].neg_risk);
+        assert!(
+            c.take_pending_redemptions(2_003).is_empty(),
+            "not re-sent in flight"
+        );
+
+        // The redemption confirms: receivable → cash, and `total` does not move.
+        c.on_redemption_result(
+            blitzkrieg_market_api::RedemptionResult {
+                id: "cond".into(),
+                condition_id: "cond".into(),
+                tx_hash: Some("0xabc".into()),
+                block_number: Some(42),
+                failure: None,
+                at_ms: 2_004,
+            },
+            2_004,
+        );
+        assert_eq!(c.ledger().balance(), balance_before + dec!(5));
+        let stats = settlement_json(&c);
+        assert_eq!(stats["receivableUsd"], serde_json::json!(0.0));
+        assert_eq!(stats["pendingRedemptions"], serde_json::json!(0));
+        assert_eq!(stats["redeemedClaims"], serde_json::json!(1));
+        let report = c.run_accounting_audit(2_005);
+        assert!(report.ok, "audit after redemption: {}", report.summary());
+        assert_eq!(
+            c.engine_stats_at(2_005)["accountingAudit"]["receivableUsd"],
+            serde_json::json!(0.0)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Idempotency: a re-delivered resolution (the venue's own retry, a restart,
+    /// a duplicated answer) must not book, close or pay the same position twice.
+    #[test]
+    fn a_redelivered_resolution_does_not_settle_twice() {
+        let dir = scratch("idempotent");
+        let mut c = settling_core(&dir, dec!(10));
+        open_and_anchor(&mut c, dec!(10));
+
+        c.on_market_resolution(winning_resolution(), 2_001);
+        // The same answer again, and a second query round's answer as well.
+        c.on_market_resolution(winning_resolution(), 2_002);
+        c.on_market_resolution(winning_resolution(), 2_003);
+
+        assert_eq!(c.positions().closed_positions().len(), 1, "one close only");
+        let trades = c.trade_summary();
+        assert_eq!(trades["totalTrades"], serde_json::json!(1));
+        assert_eq!(trades["totalNetPnl"], serde_json::json!(2.964));
+        let stats = settlement_json(&c);
+        assert_eq!(
+            stats["receivableUsd"],
+            serde_json::json!(5.0),
+            "paid once, not 15"
+        );
+        assert_eq!(stats["pendingRedemptions"], serde_json::json!(1));
+        assert!(c.run_accounting_audit(2_004).ok);
+
+        // The same resolution after the claim was redeemed: still nothing new.
+        let due = c.take_pending_redemptions(2_005);
+        c.on_redemption_result(
+            blitzkrieg_market_api::RedemptionResult {
+                id: due[0].id.clone(),
+                condition_id: "cond".into(),
+                tx_hash: Some("0xabc".into()),
+                block_number: Some(42),
+                failure: None,
+                at_ms: 2_006,
+            },
+            2_006,
+        );
+        c.on_market_resolution(winning_resolution(), 2_007);
+        assert_eq!(c.ledger().balance(), dec!(10) - dec!(2.036) + dec!(5));
+        assert_eq!(c.trade_summary()["totalTrades"], serde_json::json!(1));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A redemption failure is loud, credited with nothing, retried on the
+    /// book's backoff, and never blocks the next entry.
+    #[test]
+    fn a_failed_redemption_is_loud_and_retried() {
+        let dir = scratch("failure");
+        let mut c = settling_core(&dir, dec!(10));
+        open_and_anchor(&mut c, dec!(10));
+        c.on_market_resolution(winning_resolution(), 2_001);
+        let balance_before = c.ledger().balance();
+
+        let due = c.take_pending_redemptions(2_002);
+        let id = due[0].id.clone();
+        let mut errors = Vec::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        c.set_event_sink(tx);
+        c.on_redemption_result(
+            blitzkrieg_market_api::RedemptionResult {
+                id: id.clone(),
+                condition_id: "cond".into(),
+                tx_hash: None,
+                block_number: None,
+                failure: Some(blitzkrieg_market_api::RedemptionFailure {
+                    message: "nonce too low".into(),
+                    manual: false,
+                }),
+                at_ms: 2_003,
+            },
+            2_003,
+        );
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Error { error } = ev {
+                errors.push(error.message);
+            }
+        }
+        assert_eq!(errors.len(), 1, "a failed redemption must be loud");
+        assert!(errors[0].contains("nonce too low"), "{}", errors[0]);
+        // Nothing was credited, and the money is still owed to us.
+        assert_eq!(c.ledger().balance(), balance_before);
+        let stats = settlement_json(&c);
+        assert_eq!(stats["receivableUsd"], serde_json::json!(5.0));
+        assert_eq!(stats["retryableRedemptions"], serde_json::json!(1));
+        assert_eq!(stats["lastError"]["message"], "nonce too low");
+        assert!(
+            c.run_accounting_audit(2_004).ok,
+            "a failed redeem is not a books failure"
+        );
+
+        // Backoff: not re-attempted immediately, attempted again once armed.
+        assert!(c.take_pending_redemptions(2_005).is_empty());
+        let retry_at = c.settlement.claim(&id).unwrap().next_attempt_ms;
+        let due = c.take_pending_redemptions(retry_at);
+        assert_eq!(due.len(), 1, "the retry is armed");
+
+        // A failed redemption never blocks a new entry (a different asset, so
+        // the settlement's exit cooldown on this one does not mask the result).
+        c.book_snapshot("tok2", vec![], vec![(dec!(0.40), dec!(100))], 2_006);
+        let order = OrderRequest {
+            token_id: "tok2".into(),
+            condition_id: "cond2".into(),
+            asset: "ETH".into(),
+            ..entry_order(dec!(0.40), dec!(2))
+        };
+        let (_id, status) = c.place(order, 0, 2_006).unwrap();
+        assert_eq!(status, OrderStatus::Filled, "entries keep working");
+
+        // The retry lands: exactly one credit.
+        c.on_redemption_result(
+            blitzkrieg_market_api::RedemptionResult {
+                id,
+                condition_id: "cond".into(),
+                tx_hash: Some("0xdef".into()),
+                block_number: Some(43),
+                failure: None,
+                at_ms: retry_at + 1,
+            },
+            retry_at + 1,
+        );
+        assert_eq!(
+            c.ledger().balance(),
+            balance_before + dec!(5) - dec!(0.8) - dec!(0.0144)
+        );
+        // A duplicate confirmation for an already-redeemed claim credits nothing.
+        c.on_redemption_result(
+            blitzkrieg_market_api::RedemptionResult {
+                id: "cond".into(),
+                condition_id: "cond".into(),
+                tx_hash: Some("0xdef".into()),
+                block_number: Some(43),
+                failure: None,
+                at_ms: retry_at + 2,
+            },
+            retry_at + 2,
+        );
+        assert_eq!(
+            c.ledger().balance(),
+            balance_before + dec!(5) - dec!(0.8) - dec!(0.0144)
+        );
+        assert!(c.run_accounting_audit(retry_at + 3).ok, "audit stays green");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A manual verdict (the signer cannot move the positions) is reported, not
+    /// retried forever.
+    #[test]
+    fn a_manual_redemption_verdict_stops_the_retries() {
+        let dir = scratch("manual");
+        let mut c = settling_core(&dir, dec!(10));
+        open_and_anchor(&mut c, dec!(10));
+        c.on_market_resolution(winning_resolution(), 2_001);
+        let due = c.take_pending_redemptions(2_002);
+        c.on_redemption_result(
+            blitzkrieg_market_api::RedemptionResult {
+                id: due[0].id.clone(),
+                condition_id: "cond".into(),
+                tx_hash: None,
+                block_number: None,
+                failure: Some(blitzkrieg_market_api::RedemptionFailure {
+                    message: "positions are held by another address".into(),
+                    manual: true,
+                }),
+                at_ms: 2_003,
+            },
+            2_003,
+        );
+        let stats = settlement_json(&c);
+        assert_eq!(stats["manualRedemptions"], serde_json::json!(1));
+        assert_eq!(stats["retryableRedemptions"], serde_json::json!(0));
+        assert!(
+            c.take_pending_redemptions(i64::MAX / 2).is_empty(),
+            "no automatic attempt after a manual verdict"
+        );
+        assert_eq!(
+            stats["receivableUsd"],
+            serde_json::json!(5.0),
+            "still owed to us"
+        );
+        assert!(c.run_accounting_audit(2_004).ok);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A worthless leg is closed at 0 (the loss was already cash) and books no
+    /// claim: there is nothing on-chain to redeem.
+    #[test]
+    fn a_losing_position_settles_to_zero_without_a_claim() {
+        let dir = scratch("loser");
+        let mut c = settling_core(&dir, dec!(10));
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
+        let (_id, status) = c.place(entry_order(dec!(0.40), dec!(5)), 0, 1).unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+        assert!(c.run_accounting_audit(1_999).ok);
+
+        c.on_market_resolution(
+            blitzkrieg_market_api::MarketResolution {
+                condition_id: "cond".into(),
+                resolved: true,
+                payouts: vec![("tok".to_string(), Decimal::ZERO)],
+                neg_risk: false,
+                resolved_at_ms: 2_000,
+                source: "test".into(),
+            },
+            2_001,
+        );
+        let closed = &c.positions().closed_positions()[0];
+        assert_eq!(closed.exit_reason, ExitReason::Settlement);
+        assert_eq!(
+            closed.net_pnl_usd,
+            dec!(-2.036),
+            "cost + entry fee, nothing back"
+        );
+        let stats = settlement_json(&c);
+        assert_eq!(stats["receivableUsd"], serde_json::json!(0.0));
+        assert_eq!(stats["pendingRedemptions"], serde_json::json!(0));
+        assert!(
+            c.take_pending_redemptions(2_002).is_empty(),
+            "nothing to redeem"
+        );
+        let report = c.run_accounting_audit(2_003);
+        assert!(report.ok, "audit after a loss: {}", report.summary());
+        // Total cash is short by exactly the loss: the money is accounted for,
+        // not held hostage by a position nobody can convert.
+        assert_eq!(c.ledger().balance(), dec!(10) - dec!(2.036));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A resolution that does not price a held token leaves the position open and
+    /// says so: inventing a payout would be worse than the drift it fixes.
+    #[test]
+    fn an_unpriced_token_is_reported_and_left_open() {
+        let dir = scratch("unpriced");
+        let mut c = settling_core(&dir, dec!(10));
+        open_and_anchor(&mut c, dec!(10));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        c.set_event_sink(tx);
+        c.on_market_resolution(
+            blitzkrieg_market_api::MarketResolution {
+                condition_id: "cond".into(),
+                resolved: true,
+                payouts: vec![("someone-elses-token".to_string(), Decimal::ONE)],
+                neg_risk: false,
+                resolved_at_ms: 2_000,
+                source: "test".into(),
+            },
+            2_001,
+        );
+        let mut errors = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Error { error } = ev {
+                errors.push(error.message);
+            }
+        }
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("prices no outcome"), "{}", errors[0]);
+        assert_eq!(c.positions().open_positions().len(), 1, "still open");
+        assert_eq!(settlement_json(&c)["receivableUsd"], serde_json::json!(0.0));
+        assert!(
+            c.run_accounting_audit(2_002).ok,
+            "an open position is not drift"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Dry mode answers its own queries on the tick: the whole path (query →
+    /// resolution → close → receivable → simulated redemption) runs without a
+    /// chain, and the ledger ends up holding the payout as cash.
+    #[test]
+    fn dry_mode_settles_on_its_own_tick_without_a_chain() {
+        let dir = scratch("dry-tick");
+        let mut c = settling_core(&dir, dec!(10));
+        open_and_anchor(&mut c, dec!(10));
+        let balance_before = c.ledger().balance();
+
+        c.tick(2_001).unwrap();
+
+        assert!(c.positions().open_positions().is_empty());
+        assert_eq!(
+            c.positions().closed_positions()[0].exit_reason,
+            ExitReason::Settlement
+        );
+        // The simulated redemption confirmed, so the payout is cash.
+        assert_eq!(c.ledger().balance(), balance_before + dec!(5));
+        let stats = settlement_json(&c);
+        assert_eq!(stats["receivableUsd"], serde_json::json!(0.0));
+        assert_eq!(stats["redeemedClaims"], serde_json::json!(1));
+        assert_eq!(stats["settledPositions"], serde_json::json!(1));
+        assert!(c.run_accounting_audit(2_002).ok);
+        // The journal records the dry redemption as dry, never as a real tx.
+        let journal = std::fs::read_to_string(dir.join("settlements.jsonl")).unwrap();
+        assert!(journal.contains("dry-simulated"), "{journal}");
+        assert!(journal.contains("\"kind\":\"closed\""), "{journal}");
+
+        // Nothing settles twice on later ticks.
+        c.tick(2_500).unwrap();
+        assert_eq!(c.ledger().balance(), balance_before + dec!(5));
+        assert_eq!(c.trade_summary()["totalTrades"], serde_json::json!(1));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A crash between the settlement commit and the close is repaired on the
+    /// next start, exactly once.
+    #[test]
+    fn an_interrupted_settlement_recovers_once_on_restart() {
+        let dir = scratch("recover");
+        let balance = dec!(10);
+        let mut c = settling_core(&dir, balance);
+        open_and_anchor(&mut c, balance);
+        let pos = c.positions().open_positions()[0].clone();
+        c.persist_positions();
+        drop(c); // the process dies here
+
+        // What the crash left behind: the settlement is durable, the close is not.
+        {
+            let journal = dir.join("settlements.jsonl");
+            let mut book = crate::settlement::SettlementBook::new(Some(&journal));
+            let booking =
+                crate::settlement::booking_for(&pos, &winning_resolution()).expect("bookable");
+            assert!(book.book(&booking, &winning_resolution(), 2_001).is_some());
+            assert_eq!(book.receivable_usd(), dec!(5));
+        }
+
+        // Restart: the position log still holds it, and the settlement stands.
+        let mut c = settling_core(&dir, balance - dec!(2.036));
+        assert_eq!(c.restore_positions(), 1);
+        assert!(
+            c.positions().open_positions().is_empty(),
+            "closed by recovery"
+        );
+        assert_eq!(
+            c.positions().closed_positions()[0].exit_reason,
+            ExitReason::Settlement
+        );
+        assert_eq!(c.trade_summary()["totalTrades"], serde_json::json!(1));
+        assert_eq!(c.trade_summary()["totalNetPnl"], serde_json::json!(2.964));
+        let stats = settlement_json(&c);
+        assert_eq!(stats["receivableUsd"], serde_json::json!(5.0));
+        let report = c.run_accounting_audit(3_001);
+        assert!(report.ok, "audit after recovery: {}", report.summary());
+
+        // A second restart must not close or record it again.
+        let mut c = settling_core(&dir, balance - dec!(2.036));
+        assert_eq!(c.restore_positions(), 0, "the position log is empty now");
+        assert_eq!(c.trade_summary()["totalTrades"], serde_json::json!(1));
+        assert_eq!(settlement_json(&c)["receivableUsd"], serde_json::json!(5.0));
+        c.on_market_resolution(winning_resolution(), 3_002);
+        assert_eq!(c.trade_summary()["totalTrades"], serde_json::json!(1));
+        assert_eq!(settlement_json(&c)["receivableUsd"], serde_json::json!(5.0));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The panel sees settled-but-unredeemed money through the existing
+    /// `engine_stats` outlet, with no new event type.
+    #[test]
+    fn the_panel_can_see_a_settled_but_unredeemed_claim() {
+        let dir = scratch("panel");
+        let mut c = settling_core(&dir, dec!(10));
+        open_and_anchor(&mut c, dec!(10));
+        c.on_market_resolution(winning_resolution(), 2_001);
+
+        let stats = settlement_json(&c);
+        assert_eq!(stats["claims"][0]["id"], "cond");
+        assert_eq!(stats["claims"][0]["payoutUsd"], serde_json::json!(5.0));
+        assert_eq!(stats["claims"][0]["positions"], serde_json::json!(1));
+        assert_eq!(stats["claims"][0]["attempts"], serde_json::json!(0));
+        assert_eq!(stats["claims"][0]["manual"], serde_json::json!(false));
+        assert_eq!(stats["blindSinceMs"], serde_json::Value::Null);
+        // And the audit view names the receivable beside the balance it is not part of.
+        let audit = c.engine_stats_at(2_002)["accountingAudit"].clone();
+        assert_eq!(audit["receivableUsd"], serde_json::json!(5.0));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

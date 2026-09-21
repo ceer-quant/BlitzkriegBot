@@ -37,6 +37,7 @@ pub mod risk;
 pub mod risk_context;
 pub mod scanner;
 pub mod service;
+pub mod settlement;
 pub mod shadow;
 pub mod shadow_evolution;
 pub mod signal;

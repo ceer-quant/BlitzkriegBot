@@ -184,6 +184,17 @@ impl Ledger {
     pub fn charge_fee(&mut self, fee_usd: Decimal) {
         self.balance = (self.balance - fee_usd).max(Decimal::ZERO);
     }
+
+    /// Credit collateral redeemed on-chain (issue #175): the payout of a settled
+    /// position moving out of the receivable and into spendable cash. Called
+    /// exactly once per claim — the settlement book's durable journal is the
+    /// idempotency guard, so a replayed redemption result cannot credit twice.
+    pub fn credit_redemption(&mut self, payout_usd: Decimal) {
+        if payout_usd <= Decimal::ZERO {
+            return;
+        }
+        self.balance += payout_usd;
+    }
 }
 
 /// Market-agnostic reservation lifecycle (see `ledger_api`). The core pipeline
