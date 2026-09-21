@@ -171,6 +171,19 @@ pub struct CoreConfig {
     /// `settlements.jsonl` beside the order log; `order_log_path: None` means no
     /// persistence, i.e. settlement idempotency is per-session.
     pub settlement_log_path: Option<String>,
+    /// TEST HOOK, dry mode only: make the first N redemption attempts of every
+    /// claim fail before one succeeds. `0` (the default) is the production
+    /// behaviour — the simulated redemption always lands. A failure is a real
+    /// `RedemptionFailure` through the real path (`note_failure` → backoff →
+    /// retry), so the retry clock, the receivable and the manual-stop rule are
+    /// exercised exactly as a venue failure would exercise them. The live path
+    /// never reads this field: `simulate_redemptions` is the only consumer and it
+    /// runs only where `settles_locally()` holds.
+    pub dry_redeem_fail: u32,
+    /// TEST HOOK, dry mode only: report those injected failures as `manual`, i.e.
+    /// stop the automatic retries for good (`next_attempt_ms = i64::MAX`). Only
+    /// meaningful together with [`CoreConfig::dry_redeem_fail`].
+    pub dry_redeem_manual: bool,
 }
 
 impl CoreConfig {
@@ -515,6 +528,8 @@ impl Default for CoreConfig {
             applied_log_path: None,
             audit_halt_entries: true,
             settlement_log_path: None,
+            dry_redeem_fail: 0,
+            dry_redeem_manual: false,
         }
     }
 }
@@ -2370,6 +2385,18 @@ impl Core {
             "lastVenueError": match &self.last_venue_error {
                 Some((ts, message)) => serde_json::json!({ "tsMs": ts, "message": message }),
                 None => serde_json::Value::Null,
+            },
+            // E31-b: how close the reconcile sweep is to freezing trading. The
+            // counter is the missing half of `lastVenueError` — the error says a
+            // sweep failed, the counter says how many in a row, and the threshold
+            // says when the freeze lands. Read-only: nothing here sets either
+            // value, and the sweep's own success still resets the streak
+            // (`Core::reconcile`). Exposed because the transition itself is only
+            // reachable from a market plugin, so this is the only way an outside
+            // observer (panel, gate) can see the kernel's own threshold.
+            "reconcile": {
+                "consecutiveSweepFailures": self.consecutive_sweep_failures,
+                "freezeThreshold": SWEEP_FAILURE_FREEZE,
             },
             "selfCheck": match &self.last_self_check {
                 Some(r) => serde_json::json!({
@@ -4595,14 +4622,36 @@ impl Core {
     /// confirmed with a `dry-simulated` tx hash, so the ledger move is the same
     /// one a mined transaction produces and the whole path (settle → receivable →
     /// cash) is testable with no chain at all.
+    ///
+    /// `config.dry_redeem_fail` (test hook, off by default) makes the first N
+    /// attempts of each claim fail instead. The failure travels the production
+    /// path — `on_redemption_result` → `note_failure` → backoff, or a permanent
+    /// stop when it is `manual` — so a gate can drive the retry clock and the
+    /// receivable with no venue to fail for it. The count is per claim (its
+    /// `attempts` counter, which the dispatch stamps), so the retry that follows
+    /// a backoff is attempt 2 and lands.
     fn simulate_redemptions(&mut self, now_ms: i64) {
         for request in self.settlement.take_redemptions(now_ms) {
+            let attempts = self
+                .settlement
+                .claim(&request.id)
+                .map(|c| c.attempts)
+                .unwrap_or(0);
+            let failure = (attempts <= self.config.dry_redeem_fail).then(|| {
+                blitzkrieg_market_api::RedemptionFailure {
+                    message: format!(
+                        "dry-simulated redemption failure (attempt {attempts} of {} injected)",
+                        self.config.dry_redeem_fail
+                    ),
+                    manual: self.config.dry_redeem_manual,
+                }
+            });
             let result = blitzkrieg_market_api::RedemptionResult {
                 id: request.id.clone(),
                 condition_id: request.condition_id.clone(),
-                tx_hash: Some("dry-simulated".to_string()),
+                tx_hash: failure.is_none().then(|| "dry-simulated".to_string()),
                 block_number: None,
-                failure: None,
+                failure,
                 at_ms: now_ms,
             };
             self.on_redemption_result(result, now_ms);
