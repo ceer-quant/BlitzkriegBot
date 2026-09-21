@@ -15,6 +15,7 @@ use crate::shadow_evolution::{
 };
 use crate::sim::{Book, rests_on_book};
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 
@@ -497,6 +498,77 @@ impl Default for CoreConfig {
             applied_log_path: None,
             audit_halt_entries: true,
         }
+    }
+}
+
+// ── Fee model (#182) ─────────────────────────────────────────────────────────
+//
+// The taker fee was a formula copied into four places: the kernel's charge path
+// and three gate/reconcile scripts. Copies cannot notice each other changing,
+// and the failure is one-directional and quiet — the kernel switches its default
+// schedule, the scripts keep asserting the old arithmetic, and a gate that
+// passes stops meaning what it says. The scripts now take the per-share fee from
+// `core.feeQuote` (below) and pin the DECLARED model, so a change here without a
+// change there is a red gate instead of a wrong green one.
+//
+// One model is declared today. `official` (Polymarket's published
+// `rate * p * (1 - p)`, exponent 1) is the succession path: switching the
+// default means changing these three constants AND the pinned expectation in
+// `scripts/lib/fee-model.mjs`, in the same change — which is the point.
+
+/// Declared name of the taker-fee model the kernel charges today.
+pub const TAKER_FEE_MODEL: &str = "legacy_quadratic";
+/// Declared coefficient: `fee_per_share = rate * (p * (1 - p))^exponent`.
+pub const TAKER_FEE_RATE: Decimal = dec!(0.125);
+/// Declared exponent of the same expression.
+pub const TAKER_FEE_EXPONENT: u32 = 2;
+
+/// The fee actually charged per share at `price`: `(taker_fee_pct(p)/100) * p`,
+/// spelled exactly as the charge path spells it (`apply_delta_effects`,
+/// `reconcile`), so a quote cannot drift from a fill. Maker fills are exempt and
+/// are reported separately as zero.
+pub fn charged_fee_per_share(price: Decimal) -> Decimal {
+    if price <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+    (crate::exit_policy::taker_fee_pct(price) / Decimal::ONE_HUNDRED) * price
+}
+
+/// The DECLARED model's own arithmetic — `rate * (p*(1-p))^exponent` — used only
+/// to check that the declaration still describes what is charged.
+fn declared_fee_per_share(price: Decimal) -> Decimal {
+    if price <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+    let base = price * (Decimal::ONE - price);
+    let mut acc = Decimal::ONE;
+    for _ in 0..TAKER_FEE_EXPONENT {
+        acc *= base;
+    }
+    TAKER_FEE_RATE * acc
+}
+
+/// Read-only quote of the fee schedule (#182). `price` defaults to the widest
+/// point of the schedule (0.5) so a caller that only wants the model metadata
+/// does not have to invent a price.
+pub fn fee_quote(price: Option<Decimal>) -> crate::ipc::schema::FeeQuoteResult {
+    let price = price.unwrap_or_else(|| dec!(0.5));
+    let charged = charged_fee_per_share(price);
+    let declared = declared_fee_per_share(price);
+    // Same expression, two spellings: the difference is Decimal's own rounding at
+    // the 20th+ significant digit, so the comparison is relative and generous
+    // against dust while still catching a model change (0.125 -> 0.07 is 44%).
+    let scale = charged.abs().max(dec!(0.000000000001));
+    let model_matches = (charged - declared).abs() / scale < dec!(0.000000001);
+    crate::ipc::schema::FeeQuoteResult {
+        model: TAKER_FEE_MODEL.to_string(),
+        rate: TAKER_FEE_RATE,
+        exponent: TAKER_FEE_EXPONENT,
+        price,
+        fee_per_share: charged,
+        fee_pct_of_price: crate::exit_policy::taker_fee_pct(price),
+        maker_fee_per_share: Decimal::ZERO,
+        model_matches,
     }
 }
 
@@ -1109,6 +1181,15 @@ impl Core {
     }
     pub fn mode(&self) -> Mode {
         self.config.mode
+    }
+    /// Read-only fee quote (#182) — the `core.feeQuote` entry point, so a gate or
+    /// a reconcile script asks the kernel for the schedule it is charging instead
+    /// of carrying its own copy of the formula. It sits on `Core` rather than
+    /// being a bare function because the day the schedule becomes a per-core
+    /// setting (the `--taker-fee-legacy` switch in flight) the lookup belongs
+    /// here, and only here.
+    pub fn fee_quote(&self, price: Option<Decimal>) -> crate::ipc::schema::FeeQuoteResult {
+        fee_quote(price)
     }
 
     /// Set/realign the ledger's cash from the venue (startup seed and the periodic
