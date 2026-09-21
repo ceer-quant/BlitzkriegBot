@@ -246,6 +246,21 @@ jobs:
         run: |
           node scripts/capacity-check.mjs
           node scripts/equity-drawdown-check.mjs --self-test
+      # #202: what ONE order may commit, as a share of the live account. The
+      # kernel had no such bound: `--max-order-notional` is an absolute number,
+      # so the supervisor's 6.00 USD default is 125% of the 4.8 USDC book and the
+      # fixed 10-share lot spends 83% of it. `risk-sizing-check` runs a dry core
+      # on the stated balance, reads the bound the kernel itself reports
+      # (`engine.stats.sizing`), and probes the wire: an over-cap entry must be
+      # RISK_REJECTED (never truncated), the largest in-cap entry must fill, and
+      # a close above the cap must still pass — the escape hatch #174 depends on.
+      # A missing cap (k = 0, today's production posture) is a FAILURE here, not
+      # a skip, and --self-test exercises the verdict against eight fixtures
+      # including a refused-but-partially-filled order and a closed hatch.
+      - name: Per-order exposure bound (#202)
+        run: |
+          node scripts/risk-sizing-check.mjs --balance 4.8 --size-pct 20 --max-order-notional-pct 20
+          node scripts/risk-sizing-check.mjs --self-test
       # E2: strategy-scoped sizing, gate exemptions (real dog cdylib), and
       # per-strategy shadow evolution.
       - name: Strategy-scoped gates (E2)
