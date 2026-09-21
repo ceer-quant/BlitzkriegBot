@@ -22,11 +22,12 @@
 
 use blitzkrieg_core::ipc::schema::Event;
 use blitzkrieg_core::model::{
-    CoreErrorCode, ExitReason, FillPolicy, OrderRequest, OrderRole, OrderStatus, OrderbookSnapshot,
-    Side, SignalDirection,
+    CoreErrorCode, ExitReason, FillPolicy, Mode, OrderRequest, OrderRole, OrderStatus,
+    OrderbookSnapshot, Side, SignalDirection,
 };
 use blitzkrieg_core::position::{
-    OpenParams, PositionConfig, PositionManager, StopSuppressionCause, utc_day_index,
+    DailyLossState, EquityBasis, OpenParams, PositionConfig, PositionManager, StopSuppressionCause,
+    utc_day_index,
 };
 use blitzkrieg_core::risk::RiskConfig;
 use blitzkrieg_core::service::{Core, CoreConfig};
@@ -574,7 +575,7 @@ fn realize(
 fn the_cap_is_a_share_of_the_days_opening_equity_and_resets_only_across_days() {
     let mut pm = PositionManager::new(budget_config(Decimal::ZERO, dec!(20), None));
     let roll = pm
-        .roll_daily(NOW, dec!(100))
+        .roll_daily(NOW, dec!(100), EquityBasis::Dry)
         .expect("the first tick stamps the day");
     assert_eq!(roll.day_index, utc_day_index(NOW));
     assert_eq!(roll.limit_usd, dec!(20), "20% of the $100 opening equity");
@@ -608,12 +609,15 @@ fn the_cap_is_a_share_of_the_days_opening_equity_and_resets_only_across_days() {
     assert!(err.contains("Daily loss limit"), "{err}");
 
     // Same day: a later tick does not clear it.
-    assert!(pm.roll_daily(NOW + 60_000, dec!(70)).is_none());
+    assert!(
+        pm.roll_daily(NOW + 60_000, dec!(70), EquityBasis::Dry)
+            .is_none()
+    );
     assert!(pm.daily_loss_tripped());
 
     // A real UTC day boundary does — and re-bases the cap on the new equity.
     let roll = pm
-        .roll_daily(NOW + DAY_MS, dec!(70))
+        .roll_daily(NOW + DAY_MS, dec!(70), EquityBasis::Dry)
         .expect("crossing midnight UTC must roll the budget");
     assert_eq!(roll.previous_day_index, Some(utc_day_index(NOW)));
     assert_eq!(roll.day_index, utc_day_index(NOW + DAY_MS));
@@ -629,12 +633,12 @@ fn the_cap_is_a_share_of_the_days_opening_equity_and_resets_only_across_days() {
 fn the_absolute_cap_still_wins_when_it_is_the_tighter_one() {
     // Absolute $5 against a 50% relative cap on $100 → $5.
     let mut pm = PositionManager::new(budget_config(dec!(5), dec!(50), None));
-    pm.roll_daily(NOW, dec!(100));
+    pm.roll_daily(NOW, dec!(100), EquityBasis::Dry);
     assert_eq!(pm.effective_daily_loss_limit(), dec!(5));
 
     // …and a generous absolute cap never raises the relative one.
     let mut pm = PositionManager::new(budget_config(dec!(500), dec!(10), None));
-    pm.roll_daily(NOW, dec!(100));
+    pm.roll_daily(NOW, dec!(100), EquityBasis::Dry);
     assert_eq!(pm.effective_daily_loss_limit(), dec!(10));
 }
 
@@ -648,7 +652,7 @@ fn a_restart_keeps_the_days_loss_and_the_next_day_still_clears_it() {
     );
 
     let mut first = PositionManager::new(cfg.clone());
-    first.roll_daily(NOW, dec!(100));
+    first.roll_daily(NOW, dec!(100), EquityBasis::Dry);
     let net = realize(
         &mut first,
         "tok",
@@ -679,7 +683,7 @@ fn a_restart_keeps_the_days_loss_and_the_next_day_still_clears_it() {
 
     // The boundary still lifts it, restored budget and all.
     let roll = second
-        .roll_daily(NOW + DAY_MS, dec!(85))
+        .roll_daily(NOW + DAY_MS, dec!(85), EquityBasis::Dry)
         .expect("the next UTC day resets it");
     assert!(roll.previous_tripped);
     assert!(!second.daily_loss_tripped());
@@ -801,4 +805,502 @@ fn a_trip_reaches_the_panel_and_the_audit_trail() {
         .expect("the new day's entries are open again");
     assert_eq!(status, OrderStatus::Filled);
     let _ = std::fs::remove_file(&path);
+}
+
+// ── #235: the day's base belongs to a BOOK, and a dry→live switch is a
+//          different one ────────────────────────────────────────────────────
+
+/// A live-mode core on `balance`: the money is the VENUE's here, so it is seeded
+/// through the host path (`set_balance`) rather than `dry_seed_balance` — which
+/// is also what makes the day's basis "live" (P1 #235).
+fn live_core(positions: PositionConfig, balance: Decimal, position_log: &std::path::Path) -> Core {
+    let mut c = Core::new(CoreConfig {
+        mode: Mode::Live,
+        risk: RiskConfig {
+            max_order_notional: dec!(1000),
+            ..Default::default()
+        },
+        round_duration_sec: 900,
+        auto_exits_enabled: true,
+        positions,
+        position_log_path: Some(position_log.to_string_lossy().into_owned()),
+        ..Default::default()
+    });
+    c.set_balance(balance);
+    c
+}
+
+/// A dry core on a SEEDED book, with the open-position log wired so a test can
+/// carry a position across a restart the way the kernel does.
+fn dry_core_at(positions: PositionConfig, seed: Decimal, position_log: &std::path::Path) -> Core {
+    let mut c = Core::new(CoreConfig {
+        risk: RiskConfig {
+            max_order_notional: dec!(1000),
+            ..Default::default()
+        },
+        dry_seed_balance: seed,
+        round_duration_sec: 900,
+        auto_exits_enabled: true,
+        positions,
+        position_log_path: Some(position_log.to_string_lossy().into_owned()),
+        ..Default::default()
+    });
+    c.set_balance(seed);
+    c
+}
+
+/// Everything `f` logged on this thread, as text. Thread-local, so tests
+/// running in parallel do not capture each other's lines.
+#[derive(Clone, Default)]
+struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = LogSink;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn with_logs<R>(f: impl FnOnce() -> R) -> (R, String) {
+    let sink = LogSink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let out = f();
+    drop(guard);
+    let text = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+    (out, text)
+}
+
+/// Read back what the day's budget persisted.
+fn persisted_daily(path: &std::path::Path) -> DailyLossState {
+    let text = std::fs::read_to_string(path).expect("the day's budget must be on disk");
+    serde_json::from_str(&text).expect("the persisted budget must parse")
+}
+
+/// The issue's headline: `--seed-balance 10000` in dry, then live on a $50 book
+/// within the same UTC day. The old code kept the dry base, so 20% of it was a
+/// $2 000 cap on a $50 account — a breaker that cannot trip.
+#[test]
+fn a_same_day_dry_to_live_restart_rebases_the_cap_on_the_live_book() {
+    let path = temp_path("basis-switch");
+    let cfg = budget_config(
+        Decimal::ZERO,
+        dec!(20),
+        Some(path.to_string_lossy().into_owned()),
+    );
+
+    // The seeded dry run stamps the day against the simulated book.
+    let mut dry = PositionManager::new(cfg.clone());
+    let roll = dry
+        .roll_daily(NOW, dec!(10_000), EquityBasis::Dry)
+        .expect("the first tick stamps the day");
+    assert_eq!(roll.limit_usd, dec!(2_000), "20% of the simulated $10 000");
+    drop(dry);
+    let stamped = persisted_daily(&path);
+    assert_eq!(stamped.opening_equity_usd, dec!(10_000));
+    assert_eq!(
+        stamped.equity_basis,
+        Some(EquityBasis::Dry),
+        "the base must record which book it came from"
+    );
+
+    // Same UTC day, the operator switches to live on a $50 book.
+    let mut live = PositionManager::new(cfg);
+    let (rolled, logs) = with_logs(|| live.roll_daily(NOW + 60_000, dec!(50), EquityBasis::Live));
+    assert!(
+        rolled.is_none(),
+        "a re-anchor is not a day boundary — nothing was closed"
+    );
+    assert_eq!(
+        live.daily_state().opening_equity_usd,
+        dec!(50),
+        "the day's base now belongs to the live book"
+    );
+    assert_eq!(live.daily_state().equity_basis, Some(EquityBasis::Live));
+    assert_eq!(
+        live.effective_daily_loss_limit(),
+        dec!(10),
+        "20% of the live $50 — NOT the $2 000 the dry seed implied"
+    );
+
+    // The switch is announced, with both numbers and both books.
+    assert!(logs.contains("WARN"), "it must be a warning: {logs}");
+    assert!(
+        logs.contains("opening equity 10000 (dry) -> 50 (live)"),
+        "the warning must carry old/new value and old/new basis: {logs}"
+    );
+
+    // …and persisted, so the next restart starts from the live book.
+    let rebased = persisted_daily(&path);
+    assert_eq!(rebased.opening_equity_usd, dec!(50));
+    assert_eq!(rebased.equity_basis, Some(EquityBasis::Live));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The boundary the fix must not break: the SAME book at (roughly) the same size
+/// is an ordinary restart. It must not move the day's base, must not disturb how
+/// much of the day's budget is already spent, and must not warn.
+#[test]
+fn a_same_basis_restart_neither_rebases_the_day_nor_warns() {
+    let path = temp_path("basis-same");
+    let cfg = budget_config(
+        Decimal::ZERO,
+        dec!(20),
+        Some(path.to_string_lossy().into_owned()),
+    );
+
+    let mut first = PositionManager::new(cfg.clone());
+    first.roll_daily(NOW, dec!(10_000), EquityBasis::Dry);
+    let realized = realize(
+        &mut first,
+        "tok",
+        dec!(0.40),
+        dec!(100),
+        dec!(0.10),
+        NOW + 1_000,
+    );
+    assert!(realized < dec!(-10), "expected a real loss, got {realized}");
+    drop(first);
+
+    // Same day, same book, 5% smaller (fees and a losing trade): a restart.
+    let mut second = PositionManager::new(cfg);
+    let (_, logs) = with_logs(|| {
+        assert!(
+            second
+                .roll_daily(NOW + 60_000, dec!(9_500), EquityBasis::Dry)
+                .is_none()
+        );
+    });
+    assert_eq!(
+        second.daily_state().opening_equity_usd,
+        dec!(10_000),
+        "the day's base is the day's"
+    );
+    assert_eq!(second.effective_daily_loss_limit(), dec!(2_000));
+    assert_eq!(
+        second.daily_pnl(),
+        realized,
+        "a restart must not disturb the day's realized loss"
+    );
+    assert!(
+        logs.trim().is_empty(),
+        "a same-basis restart must stay quiet: {logs}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The basis branch ON ITS OWN: the two books happen to be the same size, so
+/// only the recorded basis can tell that the day's base came from the other one.
+/// A mutation that disables the basis check leaves this test the only one red —
+/// the scale-move tests would still pass on the deviation fallback.
+#[test]
+fn a_same_day_basis_change_rebases_even_when_the_books_are_the_same_size() {
+    let path = temp_path("basis-same-size");
+    let cfg = budget_config(
+        Decimal::ZERO,
+        dec!(20),
+        Some(path.to_string_lossy().into_owned()),
+    );
+
+    let mut dry = PositionManager::new(cfg.clone());
+    dry.roll_daily(NOW, dec!(10_000), EquityBasis::Dry);
+    drop(dry);
+
+    // Live on a $9 000 book: 10% smaller, so nothing but the basis moved.
+    let mut live = PositionManager::new(cfg);
+    let (_, logs) = with_logs(|| {
+        live.roll_daily(NOW + 60_000, dec!(9_000), EquityBasis::Live);
+    });
+    assert_eq!(live.daily_state().opening_equity_usd, dec!(9_000));
+    assert_eq!(live.daily_state().equity_basis, Some(EquityBasis::Live));
+    assert_eq!(
+        live.effective_daily_loss_limit(),
+        dec!(1_800),
+        "20% of the live $9 000 — the dry seed's number is not this book's"
+    );
+    assert!(
+        logs.contains("opening equity 10000 (dry) -> 9000 (live)"),
+        "{logs}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The fallback the basis alone cannot cover: the label is unchanged but the
+/// ACCOUNT is not (a re-seeded dry run, a deposit, a withdrawal).
+#[test]
+fn a_same_basis_but_rescaled_book_rebases_the_day_too() {
+    let path = temp_path("basis-rescale");
+    let cfg = budget_config(
+        Decimal::ZERO,
+        dec!(20),
+        Some(path.to_string_lossy().into_owned()),
+    );
+
+    let mut first = PositionManager::new(cfg.clone());
+    first.roll_daily(NOW, dec!(10_000), EquityBasis::Dry);
+    drop(first);
+
+    // Same label, a hundredth of the book: `--seed-balance 50`.
+    let mut second = PositionManager::new(cfg);
+    let (_, logs) = with_logs(|| {
+        second.roll_daily(NOW + 60_000, dec!(50), EquityBasis::Dry);
+    });
+    assert_eq!(
+        second.effective_daily_loss_limit(),
+        dec!(10),
+        "the cap must follow the book that is actually trading"
+    );
+    assert!(
+        logs.contains("opening equity 10000 (dry) -> 50 (dry)"),
+        "{logs}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The re-anchor may only ever TIGHTEN. A bigger book keeps the day's smaller
+/// base: handing the day a budget it never had is the fail-open direction.
+#[test]
+fn a_rebase_never_loosens_the_days_cap() {
+    let path = temp_path("basis-grow");
+    let cfg = budget_config(
+        Decimal::ZERO,
+        dec!(20),
+        Some(path.to_string_lossy().into_owned()),
+    );
+
+    // A dry $100 day, then a live $50 000 book on the same UTC day.
+    let mut first = PositionManager::new(cfg.clone());
+    first.roll_daily(NOW, dec!(100), EquityBasis::Dry);
+    drop(first);
+
+    let mut second = PositionManager::new(cfg);
+    second.roll_daily(NOW + 60_000, dec!(50_000), EquityBasis::Live);
+    assert_eq!(
+        second.daily_state().opening_equity_usd,
+        dec!(100),
+        "the day keeps the tighter base it already had"
+    );
+    assert_eq!(second.effective_daily_loss_limit(), dec!(20));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Suggestion 3: a re-anchor that lands UNDER the day's realized loss must
+/// freeze the day on the spot — the tightened cap is already spent, and the day
+/// must never read as healthy again.
+#[test]
+fn a_rebase_below_the_days_realized_loss_trips_it_immediately() {
+    let path = temp_path("rebase-trip");
+    let cfg = budget_config(
+        Decimal::ZERO,
+        dec!(20),
+        Some(path.to_string_lossy().into_owned()),
+    );
+
+    // Dry, $10 000: a −$30 loss is deep inside the $2 000 cap.
+    let mut dry = PositionManager::new(cfg.clone());
+    dry.roll_daily(NOW, dec!(10_000), EquityBasis::Dry);
+    let realized = realize(
+        &mut dry,
+        "tok",
+        dec!(0.40),
+        dec!(100),
+        dec!(0.10),
+        NOW + 1_000,
+    );
+    assert!(realized <= dec!(-30), "expected ≈ −$30, got {realized}");
+    assert!(realized > dec!(-2_000), "…but inside the seeded cap");
+    assert!(!dry.daily_loss_tripped());
+    assert!(dry.can_open(None, None, NOW + 2_000).is_ok());
+    drop(dry);
+
+    // Live, $50, same UTC day: the cap is now $10 and the day is already past it.
+    let mut live = PositionManager::new(cfg.clone());
+    let (_, logs) = with_logs(|| {
+        live.roll_daily(NOW + 60_000, dec!(50), EquityBasis::Live);
+    });
+    assert_eq!(live.effective_daily_loss_limit(), dec!(10));
+    assert!(
+        live.daily_loss_tripped(),
+        "a spent, tightened cap must freeze the day instead of healing it"
+    );
+    assert!(
+        live.daily_state().tripped,
+        "…and the trip must be LATCHED on the spot, not left to be re-derived"
+    );
+    assert_eq!(
+        live.daily_state().tripped_limit_usd,
+        dec!(10),
+        "the frozen cap is the live one"
+    );
+    assert!(
+        logs.contains("already spent"),
+        "the freeze must be part of the same warning: {logs}"
+    );
+    let err = live
+        .can_open(None, None, NOW + 61_000)
+        .expect_err("entries must be refused");
+    assert!(err.contains("Daily loss limit"), "{err}");
+
+    // …and it is persisted: a further restart cannot launder it either.
+    drop(live);
+    let again = PositionManager::new(cfg);
+    assert!(again.daily_loss_tripped());
+    assert_eq!(again.effective_daily_loss_limit(), dec!(10));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The same thing end to end, through the kernel's own entry points: a seeded
+/// dry run leaves the day stamped at $10 000 AND a position on the book; the
+/// live process restores the position, re-anchors the day onto its $50, trips
+/// it, refuses the next entry — and still lets the open position out (#174's
+/// guarantee, re-checked on this new trip path).
+#[test]
+fn a_dry_to_live_rebase_trips_the_day_and_still_lets_the_position_out() {
+    let day_path = temp_path("rebase-trip-core-day");
+    let log_path = temp_path("rebase-trip-core-positions");
+    let positions = budget_config(
+        Decimal::ZERO,
+        dec!(20),
+        Some(day_path.to_string_lossy().into_owned()),
+    );
+
+    // (1) The seeded dry run (`--seed-balance 10000`): the day is stamped
+    //     against $10 000, a loss lands well inside that cap, and one position
+    //     is left open.
+    let mut dry = dry_core_at(positions.clone(), dec!(10_000), &log_path);
+    dry.tick(NOW).unwrap();
+    assert_eq!(
+        dry.positions().daily_state().opening_equity_usd,
+        dec!(10_000)
+    );
+    open_long(
+        &mut dry,
+        "tokA",
+        dec!(0.39),
+        dec!(0.40),
+        dec!(100),
+        NOW + 1_000,
+    );
+    dry.book_snapshot(
+        "tokA",
+        vec![(dec!(0.05), dec!(1000))],
+        vec![(dec!(0.06), dec!(1000))],
+        NOW + 2_000,
+    );
+    dry.tick(NOW + 2_000).unwrap();
+    let realized = dry.positions().daily_pnl();
+    assert!(
+        realized <= dec!(-30) && realized > dec!(-2_000),
+        "a loss inside the seeded cap, past the live one: {realized}"
+    );
+    assert!(!dry.positions().daily_loss_tripped());
+    open_long(
+        &mut dry,
+        "tokB",
+        dec!(0.39),
+        dec!(0.40),
+        dec!(10),
+        NOW + 3_000,
+    );
+    assert_eq!(dry.positions().open_positions().len(), 1);
+    drop(dry);
+
+    // (2) Same UTC day, live on a $50 book: the open position comes back with
+    //     the process (crash recovery); the day comes back carrying the dry
+    //     base, which is the window the issue is about.
+    let mut c = live_core(positions, dec!(50), &log_path);
+    assert_eq!(
+        c.restore_positions(),
+        1,
+        "the open position survives the restart"
+    );
+    assert_eq!(c.ledger().balance(), dec!(50), "the live book is $50");
+    assert_eq!(
+        c.positions().effective_daily_loss_limit(),
+        dec!(2_000),
+        "before the first tick the day still carries the dry base"
+    );
+
+    // (3) The first tick re-anchors the day onto the live book, and the day's
+    //     realized loss is already past the $10 cap that book allows.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.set_event_sink(tx);
+    c.tick(NOW + 60_000).unwrap();
+    assert_eq!(c.positions().effective_daily_loss_limit(), dec!(10));
+    assert_eq!(c.positions().daily_state().opening_equity_usd, dec!(50));
+    assert_eq!(
+        c.positions().daily_state().equity_basis,
+        Some(EquityBasis::Live)
+    );
+    assert!(
+        c.positions().daily_loss_tripped(),
+        "the day must be frozen, not quietly healed"
+    );
+    let alerts = drain_alerts(&mut rx);
+    assert!(
+        alerts
+            .iter()
+            .any(|m| m.contains("DAILY LOSS LIMIT REACHED")),
+        "the freeze must reach the operator: {alerts:?}"
+    );
+    // The panel states the fact too: a $10 cap measured against a LIVE book.
+    let stats = c.engine_stats_at(NOW + 60_000);
+    assert_eq!(stats["dailyLoss"]["equityBasis"].as_str(), Some("live"));
+    assert_eq!(
+        stats["dailyLoss"]["openingEquityUsd"]
+            .to_string()
+            .trim_matches('"'),
+        "50"
+    );
+    assert_eq!(
+        stats["dailyLoss"]["limitUsd"].to_string().trim_matches('"'),
+        "10"
+    );
+
+    // (4) A new entry is refused…
+    let err = c
+        .place(
+            order(
+                "tokC",
+                Side::Buy,
+                dec!(0.40),
+                dec!(10),
+                "entry:tokC",
+                NOW + 61_000,
+            ),
+            0,
+            NOW + 61_000,
+        )
+        .expect_err("a spent, tightened cap must refuse entries");
+    assert_eq!(err.code, CoreErrorCode::RiskRejected);
+    assert!(err.message.contains("Daily loss limit"), "{}", err.message);
+
+    // (5) …and the position that was already open still gets out.
+    c.book_snapshot(
+        "tokB",
+        vec![(dec!(0.38), dec!(1000))],
+        vec![(dec!(0.40), dec!(1000))],
+        NOW + 62_000,
+    );
+    assert_eq!(
+        c.flatten(None, NOW + 62_000).unwrap(),
+        1,
+        "the closing sell must be submitted while the day is tripped"
+    );
+    let _ = std::fs::remove_file(&day_path);
+    let _ = std::fs::remove_file(&log_path);
 }
