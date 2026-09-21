@@ -18,6 +18,7 @@
  */
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
+import { requireFreshStrategyDylibs } from './lib/strategy-dylib-freshness.mjs';
 import net from 'net';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -28,6 +29,10 @@ const ROUND_SEC = 3600;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 if (!existsSync(BIN)) { console.error(`missing binary: ${BIN} (cargo build --release)`); process.exit(2); }
+
+// #207: the sizes asserted below are produced by the `spread_arb` cdylib the
+// kernel dlopens, not by the binary. Pin the library to this checkout.
+requireFreshStrategyDylibs({ gate: 'strategy-limit-check', require: ['spread_arb_strategy'] });
 
 /** One full engine cycle with `limitFlag` applied; returns the observed state. */
 async function probe(limitFlag) {

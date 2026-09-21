@@ -39,6 +39,7 @@
  */
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
+import { requireFreshStrategyDylibs } from './lib/strategy-dylib-freshness.mjs';
 import net from 'net';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -49,6 +50,13 @@ const ROUND_SEC = 3600;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 if (!existsSync(BIN)) { console.error(`missing binary: ${BIN} (cargo build --release --workspace --locked)`); process.exit(2); }
+
+// #207: the fade leg is a cdylib the kernel dlopens from
+// user_layer/strategies/target/release — NOT code in the binary this gate builds.
+// Asserting the source while the kernel runs a previous build of it is how this
+// gate once stayed green on a trend gate that had been disabled. Refuse to report
+// at all unless the library under test is the one this checkout describes.
+requireFreshStrategyDylibs({ gate: 'mean-reversion-check', require: ['mean_reversion_strategy'] });
 
 /**
  * Spawn a core, hand the connected RPC client to `body`, always tear down.
