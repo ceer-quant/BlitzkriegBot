@@ -190,10 +190,27 @@ node scripts/strategy-devcheck.mjs my_dip_fade
 是完整范例——编译/加载/协商流程与模板完全一致，两条路径产出的 dylib 在内核侧
 不可区分；存量手写库不需要任何改动即可继续加载（新可选符号缺失 = 未声明）。
 
-加载器协商顺序（两条路径相同）：路径策略 → dlopen →
+加载器协商顺序（两条路径相同）：**路径策略** → dlopen →
 `bk_strategy_abi_version()==2`（v1 直接拒绝）→ vtable/必需钩子校验 →
 `create()`。文件名含 `key/secret/private/credential/.env` 或非
 `.so/.dylib/.dll` 一律在 dlopen 之前拒绝。
+
+路径策略（#188）在 dlopen 之前判三件事，任何一件不过就拒绝加载：
+
+1. **批准根**：库必须位于 `<仓库>/user_layer/strategies` 或
+   `<仓库>/user_layer/parity_strategy`（CI 的 ABI v2 参照实现）之内，或位于
+   `BLITZKRIEG_STRATEGY_ALLOW_DIRS`（`:` 分隔）列出的目录之内。共享临时目录与
+   下载目录（`/tmp`、`/var/tmp`、`$TMPDIR`、`/Users/Shared`、`~/Downloads`、
+   `~/Desktop`）**永远不是**批准根。
+2. **审批清单**：不在批准根内、或路径含 `data/`、`shadow_evolution/`、
+   `shadow*`/`evolution*` 组件（机器生成产物）的库，必须被人工写进
+   `sha256 <路径>` 清单（默认 `user_layer/strategies/approved.manifest`，
+   可用 `BLITZKRIEG_STRATEGY_MANIFEST` 覆盖）且**磁盘摘要与清单一致**才允许加载；
+   摘要不符时拒绝并提示「重新评审后更新清单」。
+3. **不可被他人改写**：库文件 world-writable（任何本地用户可改）直接拒绝。
+
+注意这是**来源与批准**的门禁，不是沙箱：dlopen 与内核同进程、同权限，被批准的库
+能做什么由它自己决定（残余风险见 [SECURITY.md](../../SECURITY.md)）。
 
 ### 3.3 策略实现与分发（0 内核耦合）
 内核自带 **0 个交易策略**（内核侧 0 策略，彻底解耦）。所有生产策略均通过 C ABI v2 共享库（`.dylib` / `.so` / `.dll`）在运行时加载：

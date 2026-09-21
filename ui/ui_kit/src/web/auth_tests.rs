@@ -20,6 +20,7 @@ use crate::gateway::{Dispatcher, SupervisorConfig};
 use crate::web::{WebServer, SESSION_IDLE_MS, SESSION_TTL_MS};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -31,11 +32,13 @@ fn start(creds: Option<(&str, &str)>) -> SocketAddr {
 
 /// As [`start`], but `gateway` builds the server in gateway mode (auth always
 /// required) and returns the chosen credentials so a test can log in.
+///
+/// The server binds `:0` and the test reads the port back from the panel's own
+/// listener (`bound_addr`). Probing for a free port and binding it a moment
+/// later loses the port to whatever else on the machine takes it in between —
+/// the connect then fails with "connection refused" and the test looks like an
+/// auth bug.
 fn start_with(creds: Option<(&str, &str)>, gateway: bool) -> SocketAddr {
-    let probe = TcpListener::bind("127.0.0.1:0").expect("probe bind");
-    let addr = probe.local_addr().expect("addr");
-    drop(probe);
-
     // A socket path that is never contacted — snapshot calls degrade offline;
     // auth behavior is checked before IPC.
     let sock = std::env::temp_dir().join(format!(
@@ -57,11 +60,12 @@ fn start_with(creds: Option<(&str, &str)>, gateway: bool) -> SocketAddr {
     if let Some((u, p)) = creds {
         server.set_panel_credentials(Some(u.to_string()), Some(p.to_string()));
     }
+    let server = Arc::new(server);
+    let serving = Arc::clone(&server);
     thread::spawn(move || {
-        let _ = server.serve(&addr.to_string());
+        let _ = serving.serve("127.0.0.1:0");
     });
-    thread::sleep(Duration::from_millis(150));
-    addr
+    wait_for_bound(&server)
 }
 
 fn request(addr: SocketAddr, raw: &str) -> u16 {
@@ -169,21 +173,37 @@ fn half_configured_credentials_do_not_arm_a_passwordless_panel() {
     // pair is refused wholesale, leaving the read-only surface unauthenticated —
     // and gateway mode, which must have a password, refuses to start instead of
     // choosing one (see `gateway_mode_refuses_to_start_without_env_credentials`).
-    let probe = TcpListener::bind("127.0.0.1:0").expect("probe bind");
-    let addr = probe.local_addr().expect("addr");
-    drop(probe);
     let sock = std::env::temp_dir().join("uikit-auth-half.sock");
     let mut server = WebServer::new(IpcClient::new(sock.to_string_lossy().to_string()), 10);
     server.set_panel_credentials(Some("admin".to_string()), None);
+    let server = Arc::new(server);
+    let serving = Arc::clone(&server);
     thread::spawn(move || {
-        let _ = server.serve(&addr.to_string());
+        let _ = serving.serve("127.0.0.1:0");
     });
-    thread::sleep(Duration::from_millis(150));
+    let addr = wait_for_bound(&server);
     assert_eq!(
         request(addr, "GET /api/snapshot HTTP/1.1\r\n\r\n"),
         200,
         "a lone user half must not arm auth against an empty password"
     );
+}
+
+/// Wait for a server started on `:0` to report the port it actually bound.
+fn wait_for_bound(server: &Arc<WebServer>) -> SocketAddr {
+    try_wait_for_bound(server, 500).expect("the panel never reported a bound address")
+}
+
+/// As [`wait_for_bound`], but `None` after `attempts` tries — for a bind this
+/// environment may refuse outright.
+fn try_wait_for_bound(server: &Arc<WebServer>, attempts: usize) -> Option<SocketAddr> {
+    for _ in 0..attempts {
+        if let Some(addr) = server.bound_addr().and_then(|a| a.parse().ok()) {
+            return Some(addr);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    None
 }
 
 /// Log in and return the session token.
@@ -759,5 +779,180 @@ fn allowlisted_origin_is_accepted_without_being_same_origin() {
     assert!(
         !server.origin_allowed(&req("http://other.example")),
         "any other foreign origin stays refused"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #185 — the panel's own exposure: login throttle and non-loopback binds
+// ---------------------------------------------------------------------------
+
+/// One raw request → (status, header block, body).
+fn request_full(addr: SocketAddr, raw: &str) -> (u16, String, String) {
+    let mut s = TcpStream::connect(addr).expect("connect");
+    s.write_all(raw.as_bytes()).unwrap();
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    let status = out
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let (head, body) = out.split_once("\r\n\r\n").unwrap_or((out.as_str(), ""));
+    (status, head.to_string(), body.to_string())
+}
+
+/// One login attempt → (status, header block, body).
+fn login_attempt(addr: SocketAddr, user: &str, password: &str) -> (u16, String, String) {
+    let body = format!("{{\"user\":\"{user}\",\"password\":\"{password}\"}}");
+    request_full(
+        addr,
+        &format!(
+            "POST /api/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+}
+
+#[test]
+fn repeated_failed_logins_lock_the_client_out() {
+    // #185 acceptance: the panel used to answer an unlimited number of guesses
+    // at full speed. Ten failures must spend the budget and lock the client out.
+    let addr = start(Some(("admin", "s3cret")));
+    for i in 1..=crate::web::MAX_LOGIN_FAILURES {
+        let (code, _, body) = login_attempt(addr, "admin", "wrong-password");
+        assert_eq!(
+            code, 401,
+            "failure {i} is under the threshold: 401 expected"
+        );
+        assert!(body.contains("用户名或密码错误"), "body: {body}");
+    }
+
+    // The threshold is spent: the next attempt is refused WITHOUT the
+    // credentials being examined at all.
+    let (code, head, body) = login_attempt(addr, "admin", "wrong-password");
+    assert_eq!(code, 429, "past the threshold the client is locked out");
+    assert!(
+        head.to_ascii_lowercase().contains("retry-after:"),
+        "a lockout must say when to come back: {head}"
+    );
+
+    // The lockout answer does not depend on the credentials. The CORRECT
+    // password gets the same status and the same body — otherwise the panel
+    // would confirm a guessed password while claiming to be locked, which is
+    // exactly the leak the audit asked to avoid.
+    let (code_ok, _, body_ok) = login_attempt(addr, "admin", "s3cret");
+    assert_eq!(
+        code_ok, 429,
+        "the correct password is refused too, by design"
+    );
+    assert_eq!(
+        body, body_ok,
+        "locked responses must not vary with the credentials supplied"
+    );
+    assert!(
+        !body.contains("用户名或密码错误"),
+        "a lockout must not report the password as wrong: {body}"
+    );
+}
+
+#[test]
+fn a_successful_login_clears_the_failure_counter() {
+    // A client that gets the password right is not half-way to a lockout: the
+    // counter is per-client state about FAILURES, not a permanent score.
+    let addr = start(Some(("admin", "s3cret")));
+    for _ in 0..3 {
+        assert_eq!(login_attempt(addr, "admin", "nope").0, 401);
+    }
+    assert_eq!(login_attempt(addr, "admin", "s3cret").0, 200);
+
+    // Nine more failures. If the counter had NOT been reset, the running total
+    // (12) would already be past the threshold and one of these would 429.
+    for i in 1..=9 {
+        let (code, _, _) = login_attempt(addr, "admin", "nope");
+        assert_eq!(
+            code, 401,
+            "attempt {i} after a success must be a plain 401, not a lockout"
+        );
+    }
+}
+
+#[test]
+fn the_loopback_default_is_reported_as_local_only() {
+    // The default the audit asks for: the panel is reachable from this machine
+    // and says so on the wire, with no exposure warning.
+    let addr = start(None);
+    let (code, _, body) = request_full(addr, "GET /api/snapshot HTTP/1.1\r\n\r\n");
+    assert_eq!(code, 200);
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("snapshot json");
+    assert_eq!(
+        doc["security"]["loopbackOnly"],
+        serde_json::json!(true),
+        "a loopback bind must be reported as local-only"
+    );
+    assert!(
+        doc["security"]["warning"].is_null(),
+        "and must not raise an exposure warning"
+    );
+    assert_eq!(
+        doc["security"]["login"]["maxFailures"],
+        serde_json::json!(crate::web::MAX_LOGIN_FAILURES)
+    );
+}
+
+#[test]
+fn a_non_loopback_bind_is_recorded_and_shown_on_the_panel() {
+    // The deliberate-exposure case. It must be loud in three places: the
+    // startup log, the JSON a panel reads, and the built-in HTML panel itself.
+    let server = Arc::new(WebServer::new(
+        IpcClient::new("/nonexistent-wildcard-bind.sock"),
+        10,
+    ));
+    let shared = Arc::clone(&server);
+    thread::spawn(move || {
+        let _ = shared.serve("0.0.0.0:0");
+    });
+    let Some(bound) = try_wait_for_bound(&server, 300) else {
+        eprintln!("skipping: this environment does not allow a wildcard bind");
+        return;
+    };
+    assert!(
+        !bound.ip().is_loopback(),
+        "bound {bound} must not be loopback"
+    );
+
+    let warning = server
+        .bind_warning()
+        .expect("a wildcard bind must produce an exposure warning");
+    assert!(warning.contains("非本地地址"), "warning: {warning}");
+    assert!(
+        warning.contains("127.0.0.1:51888"),
+        "the warning must say how to get back to loopback: {warning}"
+    );
+    assert!(
+        warning.contains("明文"),
+        "the warning must name the plaintext-HTTP exposure: {warning}"
+    );
+
+    let doc = server.security_doc();
+    assert_eq!(doc["loopbackOnly"], serde_json::json!(false));
+    assert!(
+        doc["warning"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("非本地地址"),
+        "the JSON must carry the same warning the log printed"
+    );
+
+    // And the panel a human actually looks at renders it as a red banner.
+    let html = crate::web::render_html_full(
+        &crate::core::types::UiSnapshot::default(),
+        false,
+        None,
+        server.bind_warning().as_deref(),
+    );
+    assert!(
+        html.contains("面板正在监听非本地地址"),
+        "the built-in panel must show the exposure"
     );
 }

@@ -45,6 +45,21 @@ pub fn render_html(s: &UiSnapshot) -> String {
 
 /// As [`render_html`], optionally including the command console (gateway mode).
 pub fn render_html_with(s: &UiSnapshot, console: bool) -> String {
+    render_html_full(s, console, None, None)
+}
+
+/// The full built-in panel: snapshot + the two notices that must not be missed.
+///
+/// `lifecycle` carries the gateway's process state, which is where the give-up
+/// alert lives (#186); `bind_warning` is set when this panel is listening on a
+/// non-loopback address (#185). Both are rendered as red banners at the top of
+/// the page — a notice an operator has to go looking for is not a notice.
+pub fn render_html_full(
+    s: &UiSnapshot,
+    console: bool,
+    lifecycle: Option<&LifecycleView>,
+    bind_warning: Option<&str>,
+) -> String {
     let mode = esc(s.mode());
     let mut rows = String::new();
     if let Some(r) = &s.round {
@@ -127,6 +142,8 @@ pub fn render_html_with(s: &UiSnapshot, console: bool) -> String {
         .map(|e| format!("<div class=err>last error: {}</div>", esc(e)))
         .unwrap_or_default();
 
+    let notices = panel_notices_html(lifecycle, bind_warning);
+
     let console_html = if console {
         r#"<div class=panel><h2>Command console</h2>
 <form id=cmdform onsubmit="return runCmd(event)">
@@ -170,6 +187,9 @@ th{{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.06e
 .pos{{color:var(--pos)}}.neg{{color:var(--neg)}}.err{{color:var(--neg);margin-top:12px}}
 .pill{{display:inline-block;background:var(--card);border:1px solid var(--bd);border-radius:999px;padding:2px 10px;margin:2px;font-size:12px}}
 .panel{{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:14px;margin-bottom:20px}}
+.alert{{background:#3d1418;border:1px solid var(--neg);border-radius:8px;padding:14px;margin-bottom:16px}}
+.alert h2{{margin:0 0 6px;font-size:14px;color:var(--neg);letter-spacing:.02em}}
+.alert pre{{margin:10px 0 0;max-height:220px;overflow:auto}}
 .panel h2{{margin:0 0 10px;font-size:13px}}
 #cmdinput{{width:min(560px,70%);background:#0d1117;color:var(--fg);border:1px solid var(--bd);border-radius:6px;padding:8px 10px;font:inherit}}
 button{{background:#21262d;color:var(--fg);border:1px solid var(--bd);border-radius:6px;padding:8px 14px;font:inherit;cursor:pointer}}
@@ -177,6 +197,7 @@ pre{{white-space:pre-wrap;margin:10px 0 0}}
 </style></head><body>
 <h1>Blitzkrieg UI Kit</h1>
 <div class=mode>core mode: <b>{mode}</b> · connected: {} · source: UDS JSON-RPC (read-only panel){gateway_note}</div>
+{notices}
 <div class=grid>{rows}</div>
 <div class=panel><h2>Open Positions</h2><table>
 <tr><th>Asset</th><th>Dir</th><th>Entry</th><th>Cur</th><th>PnL</th><th>Left</th></tr>{pos_rows}</table></div>
@@ -198,6 +219,7 @@ pre{{white-space:pre-wrap;margin:10px 0 0}}
             ""
         },
         console_html = console_html,
+        notices = notices,
         err = err,
     )
 }
@@ -230,6 +252,38 @@ pub struct LifecycleView {
     /// asked for, so the panel can say which happened instead of inferring it
     /// from a missing pid.
     pub last_exit: Option<LifecycleExit>,
+    /// The alert raised when the restart budget ran out (#186). Null while the
+    /// supervisor is still trying: a crash it is about to replace is a restart,
+    /// not an alert. Set → the kernel is DOWN and nothing will bring it back.
+    pub give_up: Option<LifecycleGiveUp>,
+}
+
+/// The give-up alert, flattened for the panel.
+///
+/// `restart_given_up` says the core will not come back; this says *why*, which is
+/// the difference between a status field and something an operator can act on.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleGiveUp {
+    /// Replacements attempted before giving up.
+    pub attempts: u32,
+    /// Unix milliseconds when the budget was spent.
+    pub at_ms: i64,
+    /// Operator-readable summary (already localised by the supervisor).
+    pub message: String,
+    /// Last stderr lines of the core that died — the reason, when it printed one.
+    pub stderr_tail: Vec<String>,
+}
+
+impl From<&crate::gateway::supervisor::GiveUpAlert> for LifecycleGiveUp {
+    fn from(a: &crate::gateway::supervisor::GiveUpAlert) -> Self {
+        Self {
+            attempts: a.attempts,
+            at_ms: a.at_ms,
+            message: a.message.clone(),
+            stderr_tail: a.stderr_tail.clone(),
+        }
+    }
 }
 
 /// A core exit, flattened for the panel.
@@ -269,6 +323,19 @@ impl From<&crate::gateway::supervisor::ExitReport> for LifecycleExit {
 /// to null, so a consumer cannot mistake "no gateway here" for "a gateway that
 /// reports nothing".
 pub fn render_json(s: &UiSnapshot, lifecycle: Option<&LifecycleView>) -> String {
+    render_json_full(s, lifecycle, None)
+}
+
+/// As [`render_json`], plus a `security` block describing this server's own
+/// exposure (#185) — the listen address, whether it is loopback-only, and the
+/// login-throttle state. Passed separately because it describes the *server*,
+/// while the snapshot describes the core; a caller with neither (tests, a
+/// read-only render) passes `None` and the key is omitted.
+pub fn render_json_full(
+    s: &UiSnapshot,
+    lifecycle: Option<&LifecycleView>,
+    security: Option<serde_json::Value>,
+) -> String {
     let mut doc = serde_json::json!({
         "connected": s.connected,
         "mode": s.mode(),
@@ -395,9 +462,76 @@ pub fn render_json(s: &UiSnapshot, lifecycle: Option<&LifecycleView>) -> String 
             "restarts": l.restarts,
             "restartGivenUp": l.restart_given_up,
             "lastExit": l.last_exit,
+            // #186: the alert behind `restartGivenUp`. A panel that only shows
+            // the boolean can say "gave up" but not why, and "why" is what an
+            // operator needs at 3am.
+            "giveUp": l.give_up,
         });
     }
+
+    // #185: this server's own exposure. Always present when the caller supplies
+    // it, including the healthy case (`loopbackOnly: true`), so a panel can show
+    // a banner from the value rather than from the absence of one.
+    if let Some(sec) = security {
+        doc["security"] = sec;
+    }
     doc.to_string()
+}
+
+/// The red banners at the top of the built-in panel.
+///
+/// Two facts are worth interrupting the operator for, and both are states the
+/// panel would otherwise render as "everything is fine":
+///
+///   * the kernel is down and the supervisor has stopped trying to bring it back
+///     (#186) — the give-up alert, with the core's own last words;
+///   * this panel is listening on a non-loopback address (#185), so its plaintext
+///     HTTP surface is reachable from the network.
+fn panel_notices_html(lifecycle: Option<&LifecycleView>, bind_warning: Option<&str>) -> String {
+    let mut out = String::new();
+    if let Some(w) = bind_warning {
+        out.push_str(&format!(
+            "<div class=alert><h2>⚠ 面板正在监听非本地地址</h2><div>{}</div></div>",
+            esc(w)
+        ));
+    }
+    if let Some(g) = lifecycle.and_then(|l| l.give_up.as_ref()) {
+        let tail = if g.stderr_tail.is_empty() {
+            "<div class=sub>内核退出前没有向 stderr 写入任何内容</div>".to_string()
+        } else {
+            format!(
+                "<div class=sub>内核最后的 stderr 输出：</div><pre>{}</pre>",
+                esc(&g.stderr_tail.join("\n"))
+            )
+        };
+        out.push_str(&format!(
+            "<div class=alert><h2>⚠ 内核已停机：已放弃重启</h2>\
+             <div>{}</div>\
+             <div class=sub>重启尝试 {} 次 · 发生于 {} · 交易已停止，需人工启动内核</div>{}</div>",
+            esc(&g.message),
+            g.attempts,
+            relative_time(g.at_ms),
+            tail
+        ));
+    }
+    out
+}
+
+/// "N 秒前 / N 分钟前 / N 小时前" from a unix-millisecond stamp. Deliberately
+/// relative: the panel is read live, and a relative age needs no timezone.
+fn relative_time(at_ms: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let secs = now.saturating_sub(at_ms) / 1000;
+    if secs < 60 {
+        format!("{secs} 秒前")
+    } else if secs < 3600 {
+        format!("{} 分钟前", secs / 60)
+    } else {
+        format!("{} 小时前", secs / 3600)
+    }
 }
 
 /// One token's book side for the JSON snapshot (E8-c). `None` metrics pass
@@ -612,11 +746,72 @@ const SESSION_IDLE_MS: u64 = 30 * 60 * 1_000;
 /// Live-session cap; the oldest is evicted past it.
 const MAX_SESSIONS: usize = 64;
 
+/// Failed logins from one client before it is locked out (#185).
+///
+/// Ten is the number the audit asked for and a defensible one for a password a
+/// human types: it leaves room for honest typos and is far below what an online
+/// guessing attack needs.
+const MAX_LOGIN_FAILURES: u32 = 10;
+/// First lockout (after the 10th failure). Doubles per further failure, so a
+/// client that keeps going is pushed out to [`LOGIN_LOCKOUT_MAX_MS`].
+const LOGIN_LOCKOUT_BASE_MS: u64 = 30_000;
+/// Ceiling on the lockout: an operator who mistypes must not be locked out for
+/// a day, and an attacker must not be handed a denial of service against them.
+const LOGIN_LOCKOUT_MAX_MS: u64 = 15 * 60 * 1_000;
+/// Bounded throttle state — at most this many clients are remembered.
+const MAX_LOGIN_TRACKED: usize = 512;
+/// Ceiling on the per-failure delay below.
+const LOGIN_FAILURE_DELAY_MAX_MS: u64 = 400;
+
+/// Delay applied before answering a FAILED login: 100 ms doubling to 400 ms.
+///
+/// This is a speed bump, not the defence — the lockout is. It exists so that a
+/// fast guessing loop pays for every attempt even before the counter trips. It is
+/// deliberately short and capped: this server answers one connection at a time
+/// (see [`WebServer::serve`]), so a long sleep would let an attacker stall the
+/// operator's own panel, which is the denial of service the throttle is meant to
+/// prevent. Successful logins are never delayed.
+fn login_failure_delay_ms(failures: u32) -> u64 {
+    let shift = failures.saturating_sub(1).min(3);
+    (100u64 << shift).min(LOGIN_FAILURE_DELAY_MAX_MS)
+}
+
+/// Lockout for a client that has failed `failures` times: 0 below the threshold,
+/// then doubling from [`LOGIN_LOCKOUT_BASE_MS`], capped.
+fn login_lockout_ms(failures: u32) -> u64 {
+    if failures < MAX_LOGIN_FAILURES {
+        return 0;
+    }
+    let over = u64::from(failures - MAX_LOGIN_FAILURES).min(20);
+    LOGIN_LOCKOUT_BASE_MS
+        .saturating_mul(1u64 << over)
+        .min(LOGIN_LOCKOUT_MAX_MS)
+}
+
 fn auth_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Failed-login accounting for one client (an IP address).
+#[derive(Debug, Clone, Copy, Default)]
+struct LoginAttempt {
+    failures: u32,
+    /// Unix ms until which this client is refused without the credentials even
+    /// being examined.
+    locked_until_ms: u64,
+    /// When this record was last touched, for bounded-map eviction.
+    last_ms: u64,
+}
+
+/// The address this panel actually bound, recorded by [`WebServer::serve`].
+#[derive(Debug, Clone)]
+struct BindInfo {
+    addr: String,
+    /// Bound to a loopback interface only.
+    loopback_only: bool,
 }
 
 /// One issued session. `seen_ms` refreshes on use, which is what makes idleness
@@ -770,6 +965,11 @@ pub struct WebServer {
     allowed_origins: Vec<String>,
     /// Sessions issued by `POST /api/login`, keyed by token.
     sessions: Arc<Mutex<std::collections::BTreeMap<String, Session>>>,
+    /// Failed-login state, keyed by client address (see [`LoginAttempt`]).
+    login_failures: Arc<Mutex<std::collections::BTreeMap<String, LoginAttempt>>>,
+    /// The address `serve()` bound, recorded so the panel can tell the operator
+    /// when it is reachable beyond this machine (#185). `None` before binding.
+    bind: Arc<Mutex<Option<BindInfo>>>,
 }
 
 impl WebServer {
@@ -786,6 +986,8 @@ impl WebServer {
             auth_required: false,
             allowed_origins: Vec::new(),
             sessions: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            login_failures: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            bind: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -980,6 +1182,74 @@ impl WebServer {
         self.sessions.lock().map(|s| s.len()).unwrap_or(0)
     }
 
+    /// The client address a login attempt is charged to.
+    ///
+    /// The peer address, not the submitted username: charging the username would
+    /// let an attacker lock the operator's own account out by guessing it, which
+    /// turns a throttle into a denial of service. A connection whose peer address
+    /// cannot be read shares one bucket, which is the conservative direction.
+    fn login_client_key(stream: &TcpStream) -> String {
+        stream
+            .peer_addr()
+            .map(|a| a.ip().to_string())
+            .unwrap_or_else(|_| "unknown".to_string())
+    }
+
+    /// Seconds this client must wait, when it is locked out.
+    fn login_lockout_remaining(&self, key: &str) -> Option<u64> {
+        let now = auth_now_ms();
+        let guard = self.login_failures.lock().ok()?;
+        let entry = guard.get(key)?;
+        (entry.locked_until_ms > now).then(|| (entry.locked_until_ms - now).div_ceil(1_000))
+    }
+
+    /// Count a failed login and (past the threshold) lock the client out.
+    ///
+    /// Returns the new failure count, which the caller uses for the log line and
+    /// the pre-response delay. It is deliberately NOT echoed to the client: the
+    /// response must not depend on anything the caller supplied.
+    fn note_login_failure(&self, key: &str) -> u32 {
+        let now = auth_now_ms();
+        let Ok(mut guard) = self.login_failures.lock() else {
+            return 0;
+        };
+        // Bounded state: a client table that grows with every probe is its own
+        // denial of service.
+        if guard.len() >= MAX_LOGIN_TRACKED && !guard.contains_key(key) {
+            let mut live: Vec<(String, u64)> =
+                guard.iter().map(|(k, v)| (k.clone(), v.last_ms)).collect();
+            live.sort_by_key(|(_, t)| *t);
+            for (k, _) in live.into_iter().take(guard.len() / 4 + 1) {
+                guard.remove(&k);
+            }
+        }
+        let entry = guard.entry(key.to_string()).or_default();
+        entry.failures = entry.failures.saturating_add(1);
+        entry.last_ms = now;
+        let lock = login_lockout_ms(entry.failures);
+        if lock > 0 {
+            entry.locked_until_ms = now + lock;
+        }
+        entry.failures
+    }
+
+    /// A successful login clears the client's record.
+    fn note_login_success(&self, key: &str) {
+        if let Ok(mut guard) = self.login_failures.lock() {
+            guard.remove(key);
+        }
+    }
+
+    /// (tracked clients, currently locked-out clients) — for the panel and tests.
+    pub fn login_throttle_summary(&self) -> (usize, usize) {
+        let now = auth_now_ms();
+        let Ok(guard) = self.login_failures.lock() else {
+            return (0, 0);
+        };
+        let locked = guard.values().filter(|e| e.locked_until_ms > now).count();
+        (guard.len(), locked)
+    }
+
     fn token_from_cookies(&self, req: &HttpRequest) -> Option<String> {
         let cookies = req.header("cookie")?;
         for pair in cookies.split(';') {
@@ -1074,6 +1344,8 @@ impl WebServer {
             auth_required: true,
             allowed_origins: Vec::new(),
             sessions: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            login_failures: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            bind: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1103,16 +1375,38 @@ impl WebServer {
             auth_required: true,
             allowed_origins: Vec::new(),
             sessions: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            login_failures: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            bind: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Serve until the process is stopped. `addr` e.g. `127.0.0.1:51888`.
     pub fn serve(&self, addr: &str) -> std::io::Result<()> {
         let listener = TcpListener::bind(addr)?;
+        // Classify the address that was ACTUALLY bound, not the string we were
+        // given: `localhost` can resolve either way, and a hostname says nothing
+        // about which interface the kernel chose.
+        let local = listener.local_addr().ok();
+        let bound = local
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| addr.to_string());
+        let loopback_only = local.map(|a| a.ip().is_loopback()).unwrap_or(true);
+        if let Ok(mut b) = self.bind.lock() {
+            *b = Some(BindInfo {
+                addr: bound.clone(),
+                loopback_only,
+            });
+        }
         let console = self.dispatcher.is_some();
         println!(
-            "ui_kit web adapter listening on http://{addr}/  (panel) and /api/snapshot (JSON)"
+            "ui_kit web adapter listening on http://{bound}/  (panel) and /api/snapshot (JSON)"
         );
+        // #185: a non-loopback bind is an explicit operator choice, but it is the
+        // difference between "this panel is mine" and "anyone on the network can
+        // reach the process controls", so it is never allowed to be quiet.
+        if !loopback_only {
+            println!("{}", self.bind_warning().unwrap_or_default());
+        }
         if console {
             println!(
                 "  gateway: /api/command (GET ?cmd=… or POST body){}",
@@ -1139,6 +1433,72 @@ impl WebServer {
             .unwrap_or(false)
     }
 
+    /// The loud warning shown when this panel is listening beyond loopback, or
+    /// `None` while it is local-only.
+    ///
+    /// Plaintext HTTP is the load-bearing part: the panel password crosses the
+    /// wire unencrypted and the panel can start and stop the trading kernel, so
+    /// "reachable from the network" and "safe to reach from the network" are not
+    /// the same claim. The fix for an operator who needs remote access is a
+    /// tunnel (`ssh -L`), a VPN, or a TLS-terminating reverse proxy that is
+    /// itself authenticated — never exposing this port directly.
+    pub fn bind_warning(&self) -> Option<String> {
+        let bind = self.bind.lock().ok().and_then(|b| b.clone())?;
+        if bind.loopback_only {
+            return None;
+        }
+        Some(format!(
+            "\n\
+             ======================================================================\n\
+             ⚠  安全提示：面板监听在 {}（非本地地址）\n\
+                 1) 面板是明文 HTTP，没有 TLS：登录凭据以明文在网络中传输。\n\
+                 2) 面板可以启动/停止交易内核，等于把进程控制权暴露给网络。\n\
+                 3) 请勿直接暴露该端口；只放在已认证的隧道/VPN 或带 TLS 的\n\
+                    反向代理之后，并把可信来源写入 BLITZKRIEG_ALLOWED_ORIGINS。\n\
+                 如需回到仅本机可访问：把 .env 里的 BLITZKRIEG_PANEL_ADDR 设为\n\
+                 127.0.0.1:51888（默认值），或启动时传 --addr 127.0.0.1:51888。\n\
+                 登录失败已限速：同一来源连续 {} 次失败后锁定（指数退避，最长 {} 分钟）。\n\
+             ======================================================================\n",
+            bind.addr,
+            MAX_LOGIN_FAILURES,
+            LOGIN_LOCKOUT_MAX_MS / 60_000
+        ))
+    }
+
+    /// The address this panel actually bound, once `serve()` has it, as
+    /// `host:port`. `None` before the listener exists.
+    ///
+    /// Exists so a caller that needs the port (tests, an embedder that passed
+    /// `:0`) can read it from the listener instead of probing for a free port
+    /// and racing whoever takes it in between.
+    pub fn bound_addr(&self) -> Option<String> {
+        self.bind
+            .lock()
+            .ok()
+            .and_then(|b| b.as_ref().map(|i| i.addr.clone()))
+    }
+
+    /// The `security` block of the snapshot document: what a panel or an
+    /// external monitor needs to see the two exposure facts without reading logs.
+    fn security_doc(&self) -> serde_json::Value {
+        let bind = self.bind.lock().ok().and_then(|b| b.clone());
+        let (tracked, locked) = self.login_throttle_summary();
+        serde_json::json!({
+            // Absent before `serve()` binds: assume the safe answer is unknown,
+            // but do not claim exposure we cannot demonstrate either.
+            "loopbackOnly": bind.as_ref().map(|b| b.loopback_only).unwrap_or(true),
+            "bind": bind.as_ref().map(|b| b.addr.clone()),
+            "warning": self.bind_warning(),
+            "login": {
+                "maxFailures": MAX_LOGIN_FAILURES,
+                "lockoutBaseSec": LOGIN_LOCKOUT_BASE_MS / 1_000,
+                "lockoutMaxSec": LOGIN_LOCKOUT_MAX_MS / 1_000,
+                "trackedClients": tracked,
+                "lockedClients": locked,
+            },
+        })
+    }
+
     /// Process-control state for the panel. `None` when this server has no
     /// dispatcher at all (pure read-only adapter).
     ///
@@ -1159,6 +1519,7 @@ impl WebServer {
             restarts: health.restarts,
             restart_given_up: health.restart_given_up,
             last_exit: health.last_exit.as_ref().map(LifecycleExit::from),
+            give_up: health.alert.as_ref().map(LifecycleGiveUp::from),
         })
     }
 
@@ -1187,6 +1548,9 @@ impl WebServer {
             return;
         }
 
+        // Set by a route that wants a header the plain (status, ctype, body)
+        // tuple cannot carry — currently only `Retry-After` on a login lockout.
+        let mut retry_after: Option<u64> = None;
         let (status, ctype, body): (u16, &'static str, Vec<u8>) = match (
             req.method.as_str(),
             target.as_str(),
@@ -1230,7 +1594,8 @@ impl WebServer {
                 (
                     200,
                     "application/json",
-                    render_json(&snap, lifecycle.as_ref()).into_bytes(),
+                    render_json_full(&snap, lifecycle.as_ref(), Some(self.security_doc()))
+                        .into_bytes(),
                 )
             }
             ("GET", "/api/command") | ("POST", "/api/command") => {
@@ -1244,31 +1609,79 @@ impl WebServer {
             ("POST", "/api/login") => {
                 // body: {"user":"…","password":"…"} → {"ok":true,"token":…,
                 // "user":…} so the WebUI can store it as a session.
-                let creds = body_to_command(&req.body); // reuse tiny parse? no — dedicated parse below
-                let _ = creds;
-                let doc = match parse_login_body(&req.body) {
-                    Some((u, p)) => match self.login(&u, &p) {
-                        Some(tok) => serde_json::json!({
-                            "ok": true, "token": tok, "user": u,
-                        }),
-                        None => serde_json::json!({
-                            "ok": false, "error": "用户名或密码错误",
-                        }),
-                    },
-                    None => serde_json::json!({
-                        "ok": false, "error": "请求格式错误（需要 JSON {user, password}）",
-                    }),
-                };
-                let status = if doc["ok"] == serde_json::json!(true) {
-                    200
+                //
+                // #185: every failure is counted against the CLIENT ADDRESS, and a
+                // client that has failed enough is refused outright. The refusal
+                // happens BEFORE the credentials are examined, which is what keeps
+                // the lockout from leaking whether a guessed password was right:
+                // the answer is the same for every input while locked.
+                let key = Self::login_client_key(&stream);
+                if let Some(secs) = self.login_lockout_remaining(&key) {
+                    retry_after = Some(secs);
+                    eprintln!(
+                        "panel: login refused — {key} is locked out for another {secs}s \
+                         ({MAX_LOGIN_FAILURES} failures reached)"
+                    );
+                    let doc = serde_json::json!({
+                        "ok": false,
+                        "locked": true,
+                        "retryAfterSec": secs,
+                        "error": format!(
+                            "登录失败次数过多，已暂时锁定，请在 {secs} 秒后重试"
+                        ),
+                    });
+                    (
+                        429,
+                        "application/json; charset=utf-8",
+                        serde_json::to_string(&doc).unwrap_or_default().into_bytes(),
+                    )
                 } else {
-                    401
-                };
-                (
-                    status,
-                    "application/json; charset=utf-8",
-                    serde_json::to_string(&doc).unwrap_or_default().into_bytes(),
-                )
+                    let doc = match parse_login_body(&req.body) {
+                        Some((u, p)) => match self.login(&u, &p) {
+                            Some(tok) => {
+                                self.note_login_success(&key);
+                                serde_json::json!({
+                                    "ok": true, "token": tok, "user": u,
+                                })
+                            }
+                            None => {
+                                let failures = self.note_login_failure(&key);
+                                // Loud, and deliberately without the submitted
+                                // username or password: the log records that an
+                                // attempt failed and how close the client is to
+                                // the lockout, never what was tried.
+                                eprintln!(
+                                    "panel: failed login from {key} \
+                                     ({failures}/{MAX_LOGIN_FAILURES}){}",
+                                    if failures >= MAX_LOGIN_FAILURES {
+                                        " — client locked out"
+                                    } else {
+                                        ""
+                                    }
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(
+                                    login_failure_delay_ms(failures),
+                                ));
+                                serde_json::json!({
+                                    "ok": false, "error": "用户名或密码错误",
+                                })
+                            }
+                        },
+                        None => serde_json::json!({
+                            "ok": false, "error": "请求格式错误（需要 JSON {user, password}）",
+                        }),
+                    };
+                    let status = if doc["ok"] == serde_json::json!(true) {
+                        200
+                    } else {
+                        401
+                    };
+                    (
+                        status,
+                        "application/json; charset=utf-8",
+                        serde_json::to_string(&doc).unwrap_or_default().into_bytes(),
+                    )
+                }
             }
             ("GET", "/api/logout") | ("POST", "/api/logout") => {
                 // Session token via any channel; revoke it. Harmless if absent.
@@ -1294,10 +1707,17 @@ impl WebServer {
                     Some((body, ctype)) => (200, ctype, body),
                     None => {
                         let snap = self.snapshot();
+                        let lifecycle = self.lifecycle_view();
                         (
                             200,
                             "text/html; charset=utf-8",
-                            render_html_with(&snap, self.dispatcher.is_some()).into_bytes(),
+                            render_html_full(
+                                &snap,
+                                self.dispatcher.is_some(),
+                                lifecycle.as_ref(),
+                                self.bind_warning().as_deref(),
+                            )
+                            .into_bytes(),
                         )
                     }
                 }
@@ -1311,10 +1731,17 @@ impl WebServer {
             }
             ("GET", _) => {
                 let snap = self.snapshot();
+                let lifecycle = self.lifecycle_view();
                 (
                     200,
                     "text/html; charset=utf-8",
-                    render_html_with(&snap, self.dispatcher.is_some()).into_bytes(),
+                    render_html_full(
+                        &snap,
+                        self.dispatcher.is_some(),
+                        lifecycle.as_ref(),
+                        self.bind_warning().as_deref(),
+                    )
+                    .into_bytes(),
                 )
             }
             _ => (404, "text/plain; charset=utf-8", b"not found".to_vec()),
@@ -1328,9 +1755,19 @@ impl WebServer {
                 body.len()
             );
         }
-        let reason = if status == 200 { "OK" } else { "Not Found" };
+        let reason = match status {
+            200 => "OK",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            404 => "Not Found",
+            429 => "Too Many Requests",
+            _ => "Not Found",
+        };
+        let extra = retry_after
+            .map(|s| format!("Retry-After: {s}\r\n"))
+            .unwrap_or_default();
         let head = format!(
-            "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\n{extra}Connection: close\r\n\r\n",
             body.len()
         );
         let _ = stream.write_all(head.as_bytes());
@@ -1529,6 +1966,7 @@ mod tests {
             restarts: 0,
             restart_given_up: false,
             last_exit: None,
+            give_up: None,
         };
         let doc: serde_json::Value =
             serde_json::from_str(&render_json(&snap, Some(&adopted))).unwrap();
@@ -1552,6 +1990,7 @@ mod tests {
                 signal: Some(9),
                 description: "core pid 111 CRASHED (killed by signal 9)".into(),
             }),
+            give_up: None,
         };
         let doc: serde_json::Value =
             serde_json::from_str(&render_json(&snap, Some(&owned))).unwrap();
@@ -1579,9 +2018,84 @@ mod tests {
             restarts: 0,
             restart_given_up: false,
             last_exit: None,
+            give_up: None,
         };
         let doc: serde_json::Value =
             serde_json::from_str(&render_json(&snap, Some(&readonly))).unwrap();
         assert_eq!(doc["gateway"]["lifecycleEnabled"], serde_json::json!(false));
+    }
+
+    /// #186: a supervisor that has given up must be impossible to miss.
+    ///
+    /// `restartGivenUp` alone tells the panel *that* the kernel is gone; the
+    /// alert carries *why*, which is what an operator needs to decide what to do
+    /// next. Both the JSON and the built-in HTML panel are checked here because
+    /// the Vue panel reads the former and the fallback panel renders the latter.
+    #[test]
+    fn a_give_up_alert_reaches_the_panel_with_its_reason() {
+        let snap = UiSnapshot::default();
+        let give_up = LifecycleView {
+            enabled: true,
+            managed: true,
+            pid: None,
+            socket: "/tmp/x.sock".into(),
+            restarts: 5,
+            restart_given_up: true,
+            last_exit: Some(LifecycleExit {
+                pid: 111,
+                kind: "crash",
+                code: Some(3),
+                signal: None,
+                description: "core pid 111 CRASHED (exit code 3)".into(),
+            }),
+            give_up: Some(LifecycleGiveUp {
+                attempts: 5,
+                at_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+                message: "内核连崩 6 次后已放弃重启（预算 5 次已用尽），进程不会自行恢复".into(),
+                stderr_tail: vec!["thread 'main' panicked: no market plugin".into()],
+            }),
+        };
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&render_json(&snap, Some(&give_up))).unwrap();
+        assert_eq!(doc["gateway"]["restartGivenUp"], serde_json::json!(true));
+        let alert = &doc["gateway"]["giveUp"];
+        assert_eq!(alert["attempts"], serde_json::json!(5));
+        assert!(
+            alert["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("放弃重启"),
+            "the panel must receive the reason, not only the boolean: {alert}"
+        );
+        assert_eq!(
+            alert["stderrTail"][0],
+            serde_json::json!("thread 'main' panicked: no market plugin"),
+            "the core's own last words must survive to the panel"
+        );
+
+        let html = render_html_full(&snap, true, Some(&give_up), None);
+        assert!(
+            html.contains("内核已停机：已放弃重启"),
+            "the built-in panel must show the give-up state"
+        );
+        assert!(
+            html.contains("no market plugin"),
+            "and the stderr tail that explains it"
+        );
+        assert!(html.contains("重启尝试 5 次"));
+
+        // The healthy case renders no banner at all: a notice that is always on
+        // is a notice nobody reads.
+        let healthy = LifecycleView {
+            give_up: None,
+            restart_given_up: false,
+            ..give_up
+        };
+        let html = render_html_full(&snap, true, Some(&healthy), None);
+        assert!(!html.contains("已放弃重启"), "no alert → no banner");
     }
 }
