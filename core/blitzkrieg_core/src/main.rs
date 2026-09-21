@@ -39,12 +39,19 @@
 //! Backtest (offline; forces dry mode, starts no feeds and writes no logs):
 //!   blitzkrieg-core --backtest <archive.jsonl> [--backtest-report <path>]
 //!                   [--backtest-tick-ms 50] [--backtest-tail-ms 0] [model flags]
-//!                   [strategy knobs: --trend-confirm-sec --spread-arb-entry-factor
+//!                   [--backtest-knob <strategy>:<knob>=<value>]... [strategy knobs:
+//!                    --trend-confirm-sec --spread-arb-entry-factor
 //!                    --spread-arb-min-obi --spread-arb-max-spread-pct
 //!                    --spread-arb-dip-max-pct --spread-arb-bounce-min-pct
 //!                    --spread-arb-bounce-window-sec]
-//!   The knobs flow through CoreConfig → engine_config, the same mapping the
-//!   live server uses, so a sweep is a pure CLI variation with no rebuild (E15).
+//!   The CoreConfig knobs flow through CoreConfig → engine_config, the same
+//!   mapping the live server uses, so a sweep is a pure CLI variation with no
+//!   rebuild (E15). `--backtest-knob` is the other half: a knob a strategy
+//!   declares but CoreConfig does not carry (the cdylibs' own parameters) is
+//!   handed to the replayed strategy through the Shadow Evolution hot-param
+//!   registry — the same cell, the same `on_hot_params` push as a live
+//!   evolution — so a counterfactual arm differs from the shipped one by exactly
+//!   that value (see `scripts/mean-reversion-gate-evidence.mjs`).
 //!
 //! Env (live): POLYMARKET_PRIVATE_KEY, POLYMARKET_FUNDER_ADDRESS, CLOB_API_URL.
 
@@ -178,6 +185,10 @@ struct Args {
     backtest_tick_ms: i64,
     /// Keep the replay clock running this long after the last event (ms).
     backtest_tail_ms: i64,
+    /// Counterfactual `--backtest-knob <strategy>:<knob>=<value>` overrides,
+    /// handed to the replayed strategies through the Shadow Evolution hot-param
+    /// path (so a replay can A/B a knob value on the SAME frozen corpus).
+    backtest_knobs: Vec<(String, String, Decimal)>,
     /// MarketRegime evaluation over an archive (E16 / #98): label windows and
     /// score the online state machine against the offline labels.
     regime_eval: Option<String>,
@@ -334,6 +345,28 @@ fn split_assets(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// Parse one `--backtest-knob <strategy>:<knob>=<value>` override.
+///
+/// Shape is deliberate: exactly one `:` and one `=`, the strategy and knob names
+/// non-empty, and the value a decimal string (the wire rule for knob values
+/// everywhere else). A malformed spec is a startup error, never a silently
+/// ignored counterfactual that would make a comparison meaningless.
+fn parse_backtest_knob(spec: &str) -> Result<(String, String, Decimal), String> {
+    let (strategy, rest) = spec
+        .split_once(':')
+        .ok_or_else(|| "want <strategy>:<knob>=<value>".to_string())?;
+    let (knob, value) = rest
+        .split_once('=')
+        .ok_or_else(|| "want <strategy>:<knob>=<value>".to_string())?;
+    let strategy = strategy.trim();
+    let knob = knob.trim();
+    if strategy.is_empty() || knob.is_empty() {
+        return Err("strategy and knob must not be empty".into());
+    }
+    let value = Decimal::from_str(value.trim()).map_err(|e| format!("bad decimal value: {e}"))?;
+    Ok((strategy.to_string(), knob.to_string(), value))
+}
+
 fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: &EnvVars) -> Args {
     let mut socket = default_socket();
     let mut mode = Mode::Dry;
@@ -406,6 +439,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut backtest_report: Option<String> = None;
     let mut backtest_tick_ms: i64 = 50;
     let mut backtest_tail_ms: i64 = 0;
+    let mut backtest_knobs: Vec<(String, String, Decimal)> = Vec::new();
     let mut regime_eval: Option<String> = None;
     let mut regime_report: Option<String> = None;
     let mut regime_token: Option<String> = None;
@@ -642,6 +676,18 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     .next()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(backtest_tail_ms)
+            }
+            // `<strategy>:<knob>=<value>`; repeatable. A replay-only counterfactual.
+            "--backtest-knob" => {
+                if let Some(spec) = it.next() {
+                    match parse_backtest_knob(&spec) {
+                        Ok(k) => backtest_knobs.push(k),
+                        Err(e) => {
+                            eprintln!("blitzkrieg-core: --backtest-knob {spec}: {e}");
+                            std::process::exit(2);
+                        }
+                    }
+                }
             }
             "--slippage-ticks" => {
                 slippage_ticks = it
@@ -984,6 +1030,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         backtest_report,
         backtest_tick_ms,
         backtest_tail_ms,
+        backtest_knobs,
         regime_eval,
         regime_report,
         regime_token,
@@ -1492,8 +1539,15 @@ async fn main() -> anyhow::Result<()> {
             cfg,
             args.backtest_tick_ms,
             args.backtest_tail_ms,
+            args.backtest_knobs,
         );
         return Ok(());
+    }
+    if !args.backtest_knobs.is_empty() {
+        eprintln!(
+            "blitzkrieg-core: --backtest-knob only applies to a replay; pass --backtest <archive.jsonl>"
+        );
+        std::process::exit(2);
     }
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -1565,6 +1619,7 @@ fn run_backtest(
     cfg: CoreConfig,
     tick_ms: i64,
     tail_ms: i64,
+    knobs: Vec<(String, String, Decimal)>,
 ) {
     use blitzkrieg_core::backtest::{BacktestConfig, Backtester, EventBacktester};
     use blitzkrieg_core::data_source::open_replay_all;
@@ -1584,11 +1639,15 @@ fn run_backtest(
         }
     };
     let core_cfg = cfg.clone();
+    for (strategy, knob, value) in &knobs {
+        eprintln!("blitzkrieg-core: counterfactual {strategy}.{knob} = {value}");
+    }
     let mut bt = EventBacktester::new(
         BacktestConfig {
             core: cfg,
             tick_ms,
             tail_ms,
+            hot_params: knobs,
         },
         Box::new(src),
     );

@@ -11,9 +11,15 @@
  *      moves the others;
  *   2. independent accounting — `engine.stats.strategies[]` carries its own row
  *      with its own orders, attributed by name, and `source = builtin`;
- *   3. it fades a crash by RESTING a bid below the falling mid (the inverse of
- *      the chase leg's lift), and it is the fade leg that takes a deep fall the
- *      dip buyer's spread/TrendConfig path would refuse;
+ *   3. it fades a DIP by RESTING a bid below the falling mid (the inverse of the
+ *      chase leg's lift), and it is the fade leg that takes a fall the dip
+ *      buyer's spread/TrendConfig path would refuse;
+ *   3b. #176: the SAME setup, one leg deeper, is a one-sided slide and the trend
+ *      gate refuses it. Same process, same config, same book shape; only the
+ *      depth of the 600 s draw differs, so the gate is the only rule between an
+ *      order and none. (The unit tests carry the other half — a forced
+ *      always-allow gate turns them red — and `scripts/mean-reversion-gate-
+ *      evidence.mjs` the quantitative one on the frozen corpus.)
  *   4. no starvation — with all three enabled and each presented the setup it
  *      wants on a different asset, all three enter in the same cycle;
  *   5. it declares a `momentum` gate exemption and it is HONOURED: with spot
@@ -21,9 +27,9 @@
  *      row shows `gateExemptedMomentum > 0` and the order still places. The
  *      timing gate is NOT waived;
  *   6. it is evolvable like any other strategy — Shadow Evolution carries its
- *      own six declared knobs (read off the live instance, so present even while
- *      the strategy is off), and a runtime toggle neither adds nor drops that
- *      cell.
+ *      own eight declared knobs (#176 added `trend_window_sec` /
+ *      `trend_drop_pct`; read off the live instance, so present even while the
+ *      strategy is off), and a runtime toggle neither adds nor drops that cell.
  *
  * Everything runs in a scratch dir on a private socket: no production data, no
  * network, dry mode only. Live is never reachable from here.
@@ -145,13 +151,32 @@ async function setMarket(rpc, { now, upBid, upAsk, downBid, downAsk }) {
 }
 
 /**
- * Feed a crash: the token's bid sinks 0.50 → 0.30 on the real cent grid. The
- * fade leg needs a lookback-high drop >= 10% within 120s, so every step below
- * the first extends the window the entry is measured against.
+ * A DIP the fade leg may buy: the book sinks 0.42 → 0.34 on the real cent grid,
+ * so the mid falls 0.425 → 0.345 (-18.8%). That is past `min_drop_pct` (10% over
+ * the 120 s lookback) and it lands inside the cheap zone (mid <= `max_price`
+ * 0.35) on the LAST step — the leg enters at the mid it was priced off, so the
+ * resting bid stays below the mid the check reads back. The 600 s high is the
+ * same 0.425, well inside the #176 gate's -30%.
  */
-async function feedCrash(rpc, tokenId = 'UP', steps = 12) {
+const DIP = { from: 0.42, to: 0.34 };
+/**
+ * The SLIDE the gate must refuse: the same shape and the same cheap-zone landing
+ * (mid 0.345), one long memory deeper — 0.605 is the high, so the fall is -43%
+ * off the 600 s high and the token is several legs into a one-sided slide.
+ * Identical fixture, identical book width, identical zone; only the depth of the
+ * draw differs from `DIP`.
+ */
+const SLIDE = { from: 0.60, to: 0.34 };
+
+/**
+ * Feed a fall `from` → `to` on the real cent grid, one book snapshot per step.
+ * Both legs of the fade family read the MID, so each snapshot is a one-cent
+ * book round `bid`; the tracker's history is built from mid ticks exactly as it
+ * is in production.
+ */
+async function feedFall(rpc, tokenId, { from, to }, steps = 12) {
   for (let i = 0; i <= steps; i++) {
-    const bid = Math.round((0.50 - i / 75) * 100) / 100;
+    const bid = Math.round((from + ((to - from) * i) / steps) * 100) / 100;
     await rpc('books.snapshot', { tokenId, bids: [{ price: bid, size: 100 }], asks: [{ price: Math.round((bid + 0.01) * 100) / 100, size: 100 }] });
     await sleep(40);
   }
@@ -220,10 +245,17 @@ async function main() {
       problems.push('--enable-strategy mean_reversion must not enable trend_follow');
     }
 
-    // ── 3. It fades the crash with a resting bid BELOW the falling mid ──────
+    // ── 3. It fades the dip with a resting bid BELOW the falling mid ──────
+    // BTC carries the DIP the leg is allowed to buy, ETH the SLIDE the #176
+    // gate has to refuse (fed further down, in 3b). Both markets are declared
+    // here because `engine.markets` replaces the whole list; only BTC's book is
+    // seeded, so nothing else is firable yet.
     const now = Date.now();
-    await setMarket(rpc, { now, upBid: 0.50, upAsk: 0.51 });
-    await feedCrash(rpc);
+    await setMarkets(rpc, now, [
+      { asset: 'BTC', upToken: 'UP', downToken: 'DOWN', upBid: DIP.from, upAsk: DIP.from + 0.01 },
+      { asset: 'ETH', upToken: 'ETH-UP', downToken: 'ETH-DOWN', upBid: null },
+    ]);
+    await feedFall(rpc, 'UP', DIP);
 
     const fade = await settle(rpc, async (r) => {
       const stats = await r('engine.stats');
@@ -234,14 +266,14 @@ async function main() {
       const stats = await rpc('engine.stats');
       const live = (await rpc('orders.list')).orders || [];
       problems.push(
-        'mean_reversion placed NO entry on a deep, tight, cheap crash ' +
+        'mean_reversion placed NO entry on a deep, tight, cheap dip ' +
         `(row=${JSON.stringify(rowFor(stats, 'mean_reversion'))} orders=${JSON.stringify(live.map((o) => [o.strategy, o.tokenId, o.price, o.status]))})`,
       );
       return;
     }
 
     // Independent accounting: its row exists, is attributed by name, and the
-    // entry is a resting bid below the mid on the crashing token.
+    // entry is a resting bid below the mid on the dipped token.
     const stats = await rpc('engine.stats');
     const row = rowFor(stats, 'mean_reversion');
     sawStartupRow = true;
@@ -251,7 +283,7 @@ async function main() {
     const orders = (await rpc('orders.list')).orders || [];
     const entry = orders.find((o) => o.strategy === 'mean_reversion');
     if (!entry) problems.push('no mean_reversion order in orders.list');
-    else if (entry.tokenId !== 'UP') problems.push(`the fade leg should hold the crashing UP token, got ${entry.tokenId}`);
+    else if (entry.tokenId !== 'UP') problems.push(`the fade leg should hold the dipped UP token, got ${entry.tokenId}`);
     const rv = await rpc('engine.round');
     const px = (rv?.marketPrices || []).find((m) => m.asset === 'BTC');
     if (px && !(entry.price < Number(px.up) * 0.99)) {
@@ -259,6 +291,33 @@ async function main() {
     }
     const arb = rowFor(stats, 'spread_arb');
     if (!arb) problems.push('spread_arb row vanished');
+
+    // ── 3b. #176: the same setup, one leg deeper, is a one-sided slide ─────
+    // Same process, same config, same book shape as the dip above; only the
+    // 600 s draw differs (-39.6% vs -24.7%). The gate is the only rule that can
+    // stand between this feed and an order — and the leg has just proved, in
+    // THIS session, that it does buy a dip.
+    await feedFall(rpc, 'ETH-UP', SLIDE);
+    await sleep(2000); // several engine cycles: long enough for a dip to place
+    const s2 = await rpc('engine.stats');
+    const slideRow = rowFor(s2, 'mean_reversion');
+    const slid = ((await rpc('orders.list')).orders || []).filter((o) => o.strategy === 'mean_reversion' && o.tokenId === 'ETH-UP');
+    // Non-vacuous: the feed landed and the token IS in the fade leg's zone —
+    // the slided side reads as firable on every rule but the gate.
+    const probe = (s2.confirmedDetail || []).find((d) => d.token === 'ETH-UP' && d.trendDropPct !== undefined);
+    if (!probe) {
+      problems.push('the slide fixture never reached the fade leg (no diagnostics row for ETH-UP)');
+    } else {
+      if (!probe.inTrendSlide) problems.push(`the slide must read as a trend slide: ${JSON.stringify(probe)}`);
+      if (!(Number(probe.dropPct) <= -10)) problems.push(`the slide must be past min_drop_pct: ${JSON.stringify(probe)}`);
+      if (probe.firable) problems.push(`a one-sided slide must not read as firable: ${JSON.stringify(probe)}`);
+    }
+    if (slid.length) {
+      problems.push(`the #176 trend gate let a one-sided slide through: ${JSON.stringify(slid.map((o) => [o.tokenId, o.price, o.status]))}`);
+    }
+    if ((slideRow?.ordersPlaced ?? 0) !== (fade?.ordersPlaced ?? 0)) {
+      problems.push(`mean_reversion placed into a one-sided slide: ${JSON.stringify(slideRow)}`);
+    }
   });
   if (!sawStartupRow) problems.push('never observed a mean_reversion accounting row');
 
@@ -266,22 +325,26 @@ async function main() {
   await session('concurrent',
     // The dip buyer confirms over a rolling window: shorten it (and drop the
     // floor) so the check stays fast without weakening what it asserts.
-    ['--trend-confirm-sec', '10', '--trend-window-floor-ms', '0',
+    // `--max-positions 3` because the scenario's claim is "three legs, three
+    // positions, one setup each": the default cap of 2 would refuse the third
+    // entry for a reason that has nothing to do with starvation.
+    ['--max-positions', '3',
+     '--trend-confirm-sec', '10', '--trend-window-floor-ms', '0',
      '--enable-strategy', 'mean_reversion', '--enable-strategy', 'trend_follow',
      '--enable-strategy', 'spread_arb'],
     async ({ rpc, stderr }) => {
     const now = Date.now();
     // Three ASSETS again: the risk layer allows at most one open position per
-    // asset, so shared assets would prove nothing. BTC crashes (fade leg),
+    // asset, so shared assets would prove nothing. BTC dips (fade leg),
     // ETH breaks out (chase leg), SOL dips (spread_arb).
     await setMarkets(rpc, now, [
-      { asset: 'BTC', upToken: 'BTC-UP', downToken: 'BTC-DOWN', upBid: 0.50, upAsk: 0.51 },
+      { asset: 'BTC', upToken: 'BTC-UP', downToken: 'BTC-DOWN', upBid: DIP.from, upAsk: DIP.from + 0.01 },
       { asset: 'ETH', upToken: 'ETH-UP', downToken: 'ETH-DOWN', upBid: 0.50, upAsk: 0.51 },
       { asset: 'SOL', upToken: 'SOL-UP', downToken: 'SOL-DOWN', downBid: 0.61, downAsk: 0.63 },
     ]);
     // Fill the dip buyer's confirmation window on SOL-DOWN BEFORE the dip.
     await feedHold(rpc, 'SOL-DOWN', 0.61, 0.63, 10_500);
-    await feedCrash(rpc, 'BTC-UP');
+    await feedFall(rpc, 'BTC-UP', DIP);
     for (let i = 0; i <= 12; i++) {
       const bid = Math.round((0.50 + i / 100) * 100) / 100;
       await rpc('books.snapshot', { tokenId: 'ETH-UP', bids: [{ price: bid, size: 100 }], asks: [{ price: Math.round((bid + 0.01) * 100) / 100, size: 100 }] });
@@ -323,14 +386,14 @@ async function main() {
   // ── 5. Genuinely waived: spot falling against the fade, the order places ───
   await session('waived', ['--enable-strategy', 'mean_reversion'], async ({ rpc }) => {
     const now = Date.now();
-    await setMarket(rpc, { now, upBid: 0.50, upAsk: 0.51 });
+    await setMarket(rpc, { now, upBid: DIP.from, upAsk: DIP.from + 0.01 });
     // Spot falls hard over the momentum window — exactly what the shared gate
-    // reads as momentum against a BUY — then the same crash arrives.
+    // reads as momentum against a BUY — then the same dip arrives.
     for (let i = 0; i < 10; i++) {
       await rpc('spot.price', { asset: 'BTC', price: 60000 - i * 10 });
       await sleep(30);
     }
-    await feedCrash(rpc);
+    await feedFall(rpc, 'UP', DIP);
 
     const waived = await settle(rpc, async (r) => {
       const stats = await r('engine.stats');
@@ -359,7 +422,7 @@ async function main() {
 
   // ── 6. Shadow Evolution sees it with its own knobs, enabled or not ────────
   const seArgs = ['--shadow-evolution', '--se-min-samples', '2', '--se-cooldown-secs', '0', '--se-min-obs-secs', '0'];
-  const wantKnobs = ['lookback_sec', 'min_drop_pct', 'max_price', 'entry_factor', 'max_spread_pct', 'cooldown_sec'];
+  const wantKnobs = ['lookback_sec', 'min_drop_pct', 'max_price', 'entry_factor', 'max_spread_pct', 'cooldown_sec', 'trend_window_sec', 'trend_drop_pct'];
   const readSe = async (rpc) => {
     const st = await rpc('shadow_evolution.status', {});
     const rows = st.strategies || [];
@@ -408,7 +471,8 @@ if (problems.length) {
 }
 console.log('  ok   starts off and toggles alone; --enable-strategy starts it on');
 console.log('  ok   owns its accounting row and rests its fade bid below the falling mid');
+console.log('  ok   fades a dip and, #176, refuses the same setup one leg deeper as a slide');
 console.log('  ok   three builtins enter together, one setup each, no starvation');
 console.log('  ok   momentum gate exemption declared and honoured; timing never waived');
-console.log('  ok   evolved with its own six knobs, and a toggle neither adds nor drops the cell');
+console.log('  ok   evolved with its own eight knobs, and a toggle neither adds nor drops the cell');
 console.log('\nmean-reversion: pass');

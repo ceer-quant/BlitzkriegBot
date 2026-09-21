@@ -17,6 +17,12 @@
 //! break — once the mid recovers above `max_price` the oversold premise is gone
 //! and the emitted break cancels that token's resting entry bid.
 //!
+//! #176 adds the one entry-side refusal that is about the AGE of the fall rather
+//! than its depth: a mid `trend_drop_pct` or more below the high of its
+//! `trend_window_sec` history is the latest leg of a one-sided slide — in a
+//! double market the cheap side of a trend is being repriced, not oversold — so
+//! no entry is placed. `trend_window_sec = 0` restores the pre-#176 behaviour.
+//!
 //! It declares **the momentum gate exemption** (`gate_exemptions().timing`
 //! stays false): the shared spot filter rejects an entry when spot moves against
 //! the bet, and a crash on the bet's own asset moves spot against it by
@@ -223,13 +229,20 @@ impl SafeStrategy for MeanReversion {
                     .map(|b| b.mid_price)
                     .unwrap_or(Decimal::ZERO);
                 let drop = self.tracker.drop_pct(&t, self.last_now_ms);
+                let trend_drop = self.tracker.trend_drop_pct(&t, self.last_now_ms);
                 let entry = mid * eff.entry_factor;
+                // `firable` answers the question the operator asks: would the
+                // evaluator place? The #176 gate is part of that answer, so it is
+                // part of this flag (and named separately for the diagnosis).
+                let in_slide = self.tracker.in_trend_slide(&t, self.last_now_ms);
                 let firable = mid > Decimal::ZERO
                     && mid <= eff.max_price
                     && drop <= -eff.min_drop_pct
+                    && !in_slide
                     && entry < mid;
                 serde_json::json!({
                     "token": t, "mid": mid, "dropPct": drop,
+                    "trendDropPct": trend_drop, "inTrendSlide": in_slide,
                     "entry": entry, "cap": eff.max_price, "firable": firable,
                 })
             })
@@ -270,6 +283,10 @@ fn config_view_json(cfg: &MeanReversionConfig) -> serde_json::Value {
         "entryFactor": cfg.entry_factor.to_string(),
         "maxSpreadPct": cfg.max_spread_pct.to_string(),
         "cooldownSec": cfg.cooldown_sec,
+        // #176 trend gate: a mid `trendDropPct` below the high of its
+        // `trendWindowSec` history is a one-sided slide, not a dip. 0 = off.
+        "trendWindowSec": cfg.trend_window_sec,
+        "trendDropPct": cfg.trend_drop_pct.to_string(),
     })
 }
 
