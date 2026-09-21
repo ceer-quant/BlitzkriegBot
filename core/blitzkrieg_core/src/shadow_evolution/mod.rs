@@ -192,6 +192,17 @@ impl Unit {
     }
 }
 
+/// Wall-clock ms for the entry points no engine clock reaches: the manager's
+/// construction. (Every other lifecycle timestamp arrives with a tick or an IPC
+/// call.) A variant's age is measured against this stamp, so it is a real clock
+/// by contract, never a placeholder (#250).
+fn wall_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 pub struct ShadowEvolution {
     cfg: ShadowEvolutionConfig,
     enabled: bool,
@@ -277,7 +288,7 @@ impl ShadowEvolution {
             proposal_store: store,
         };
         me.proposal_store.load();
-        me.register_strategies(strategies);
+        me.register_strategies(strategies, wall_now_ms());
         me
     }
 
@@ -288,7 +299,14 @@ impl ShadowEvolution {
     ///
     /// Re-registering is safe and keeps state: `ParamRegistry::publish` returns the
     /// strategy's existing cell, so the parameters in force survive a rebuild.
-    pub fn register_strategies(&mut self, strategies: &[&dyn EngineStrategy]) {
+    ///
+    /// `now_ms` is the birth stamp of every variant this rebuild creates, and it
+    /// must be a real clock: `created_at_ms` is what the evaluator's observation
+    /// floor measures against, so a placeholder here does not merely mislabel a
+    /// timestamp — it retires the floor (#250). A rebuild re-anchors each variant
+    /// around the parameters in force, so all of them start observing at this
+    /// instant by construction.
+    pub fn register_strategies(&mut self, strategies: &[&dyn EngineStrategy], now_ms: i64) {
         // Rebuilding must not forget what each strategy already did: installing
         // an engine (or re-reading declarations) is not a reset, so the cooldown
         // clock, the evolution counters and the rollback anchor carry over.
@@ -353,7 +371,7 @@ impl ShadowEvolution {
         self.restore_adopted_params();
         if self.enabled {
             for i in 0..self.units.len() {
-                self.units[i].scaffold(&self.cfg, 0);
+                self.units[i].scaffold(&self.cfg, now_ms);
             }
         }
     }
