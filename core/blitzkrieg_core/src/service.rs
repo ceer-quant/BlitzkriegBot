@@ -779,6 +779,49 @@ struct AuditRuntime {
     last_realign: Option<(i64, Decimal)>,
 }
 
+/// The kernel's last recorded error, as `engine.stats.lastError` exposes it.
+///
+/// One slot with exactly one writer ([`Core::note_error`]): whichever path went
+/// wrong last — venue refusal, safety net, or the kernel's own refusal of a leg
+/// — the panel banner and any outside observer read the same fact, with the code
+/// that classifies it and the instant it happened. Before #180 the only such
+/// slot was `last_venue_error`, which the taker rejection below never touched,
+/// so `lastError` stayed empty (or stale) while orders were being refused.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastError {
+    pub ts_ms: i64,
+    pub code: CoreErrorCode,
+    pub message: String,
+}
+
+impl LastError {
+    /// How the LEGACY `engine.stats.lastVenueError` key renders this record.
+    ///
+    /// Byte-for-byte what that key carried before #180 (`{:?}` on the code, a
+    /// colon, the message), so the shipped panel banner — and any consumer that
+    /// matched on the old string — is unaffected by the slot growing a code.
+    pub fn legacy_message(&self) -> String {
+        format!("{:?}: {}", self.code, self.message)
+    }
+}
+
+/// One placement's result: the order's id, the status the OME now holds for it,
+/// and — when the kernel itself refused the leg after accepting it (a
+/// dry/read-only taker whose book cannot fill it) — the structured reason.
+///
+/// `status == Rejected` with a `rejection` is the leg the venue would have
+/// killed; `status == Rejected` without one is a leg an external actor (the
+/// venue, a reconcile) retired. Before #180 the drier path returned neither, so
+/// `orders.place` answered a bare `REJECTED` and the caller could not tell "no
+/// crossing liquidity" from "not enough depth" from "risk said no".
+#[derive(Debug, Clone)]
+pub struct PlaceOutcome {
+    pub order_id: OrderId,
+    pub status: OrderStatus,
+    pub rejection: Option<CoreError>,
+}
+
 pub struct Core {
     config: CoreConfig,
     ome: Ome,
@@ -841,8 +884,11 @@ pub struct Core {
     /// Reaching the threshold freezes trading — a blind safety net is the
     /// failure mode that lets ghosts and orphans accumulate (E31-b).
     consecutive_sweep_failures: u32,
-    /// Last venue/self-check failure surfaced to the panel, session-scoped.
-    last_venue_error: Option<(i64, String)>,
+    /// Last error of any kind recorded this session (venue refusal, failed
+    /// self-check or reconcile sweep, kill switch, kernel-side order refusal),
+    /// surfaced to the panel as `engine.stats.lastError`. Session-scoped: a
+    /// restart starts with no error, and nothing clears it but a new one.
+    last_error: Option<LastError>,
     /// Newest external (unknown-order) fill timestamp already folded into the
     /// position book; persisted next to the position log.
     recon_watermark_ms: i64,
@@ -1051,7 +1097,7 @@ impl Core {
             pending_venue_cancels: Vec::new(),
             consecutive_venue_rejects: 0,
             consecutive_sweep_failures: 0,
-            last_venue_error: None,
+            last_error: None,
             recon_watermark_ms: 0,
             last_self_check: None,
             applied_log,
@@ -2382,12 +2428,35 @@ impl Core {
             "placeRejected": self.stats.place_rejected,
             "strategyLimitRejected": self.stats.strategy_limit_rejected,
             "venueRejected": self.stats.venue_rejected,
-            "lastVenueError": match &self.last_venue_error {
-                Some((ts, message)) => serde_json::json!({ "tsMs": ts, "message": message }),
+            // #180: the ONE panel-visible error slot — structured (code + when +
+            // what), written by every internal refusal path, and read by the
+            // panel's error banner. `code` is the same `CoreErrorCode`
+            // vocabulary a rejected RPC carries in `data.coreCode`, so a client
+            // that knows how to branch on one knows how to branch on the other.
+            "lastError": match &self.last_error {
+                Some(e) => serde_json::json!({
+                    "tsMs": e.ts_ms,
+                    "code": e.code,
+                    "message": e.message,
+                }),
+                None => serde_json::Value::Null,
+            },
+            // Legacy spelling of the same record, kept because the shipped panel
+            // (ui/webapp/webui/src/pages/Overview.vue) reads this key for its
+            // "last trading error" banner. Same record, one writer, one
+            // timestamp — never a second, staler copy. The message is rendered
+            // exactly as this key always rendered it (`<code>: <message>`), so a
+            // consumer that parsed the old string keeps working; `lastError`
+            // above is the structured form to migrate to.
+            "lastVenueError": match &self.last_error {
+                Some(e) => serde_json::json!({
+                    "tsMs": e.ts_ms,
+                    "message": e.legacy_message(),
+                }),
                 None => serde_json::Value::Null,
             },
             // E31-b: how close the reconcile sweep is to freezing trading. The
-            // counter is the missing half of `lastVenueError` — the error says a
+            // counter is the missing half of the last error — the error says a
             // sweep failed, the counter says how many in a row, and the threshold
             // says when the freeze lands. Read-only: nothing here sets either
             // value, and the sweep's own success still resets the streak
@@ -2843,7 +2912,7 @@ impl Core {
     ) {
         self.stats.venue_rejected += 1;
         self.consecutive_venue_rejects = self.consecutive_venue_rejects.saturating_add(1);
-        self.last_venue_error = Some((now_ms, format!("{:?}: {}", err.code, err.message)));
+        self.note_error(err, now_ms);
         {
             let acc = self.strategy_accounting.entry(strategy).or_default();
             acc.rejected += 1;
@@ -2920,9 +2989,16 @@ impl Core {
 
     /// Freeze trading (kill switch) with a reason the panel can show. A
     /// restart or an explicit `risk.resume` clears it; the startup self-check
-    /// re-probes either way. The caller owns `last_venue_error` — a rejection
-    /// already wrote the RAW venue error there, and the panel shows the freeze
-    /// reason from `tradingFrozen`.
+    /// re-probes either way. The freeze is logged at error level (#184) — a kill
+    /// switch is the loudest thing this kernel does, and every path that can
+    /// reach it (venue-refusal streak, failed self-check, failed sweep, audit
+    /// halt) must be countable in a run log.
+    ///
+    /// It deliberately does NOT write the error slot: the slot keeps the ROOT
+    /// CAUSE (the raw venue error that pushed a streak over the line), and
+    /// `engine.stats.tradingFrozen.reason` already carries this message for the
+    /// panel's freeze banner. Overwriting the slot here is what would make it
+    /// show a paraphrase instead of the error an operator has to act on.
     fn freeze_trading(&mut self, reason: String, now_ms: i64) {
         if self.risk.is_killed() {
             return; // already frozen — do not re-alarm on every rejection
@@ -2933,7 +3009,8 @@ impl Core {
             code: blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
             message: format!("trading frozen: {reason}"),
         });
-        self.emit_error(crate::model::CoreError::new(
+        tracing::error!(reason = %reason, "trading frozen (kill switch)");
+        self.emit_error_event(crate::model::CoreError::new(
             blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
             reason,
         ));
@@ -3059,6 +3136,12 @@ impl Core {
             );
             eprintln!("core: {message}");
             tracing::error!(drift = %report.drift_usd, "{}", message);
+            // The halt is an error of the highest order (entries are blocked), so
+            // it also lands in the one panel-visible slot (#180).
+            self.note_error(
+                &CoreError::new(CoreErrorCode::Internal, message.clone()),
+                now_ms,
+            );
             self.emit(Event::RiskAlert {
                 code: CoreErrorCode::Internal,
                 message,
@@ -3194,14 +3277,36 @@ impl Core {
         }
         self.last_self_check = Some(report);
         if !ok {
-            self.last_venue_error = Some((
-                ts,
-                "trading self-check failed (venue unreachable or credentials rejected)".to_string(),
-            ));
-            self.freeze_trading(
-                "trading self-check failed (venue unreachable or credentials rejected)".to_string(),
+            // #184: name the failing probe(s) in the message, not just "failed".
+            // The items are already in `engine.stats.selfCheck`, but an operator
+            // reading the log needs the reason on the line itself.
+            let failed = self
+                .last_self_check
+                .as_ref()
+                .map(|r| {
+                    r.items
+                        .iter()
+                        .filter(|i| !i.ok)
+                        .map(|i| format!("{}: {}", i.name, i.detail))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let message = if failed.is_empty() {
+                "trading self-check failed (venue unreachable or credentials rejected)".to_string()
+            } else {
+                format!("trading self-check failed: {}", failed.join("; "))
+            };
+            tracing::error!(detail = %message, "trading self-check failed");
+            // Root cause into the one slot (code VENUE_ERROR, not the freeze's
+            // own wording) — this path has no other carrier of its own.
+            self.note_error(
+                &crate::model::CoreError::new(
+                    blitzkrieg_market_api::CoreErrorCode::VenueError,
+                    message.clone(),
+                ),
                 ts,
             );
+            self.freeze_trading(message, ts);
         }
     }
 
@@ -3212,11 +3317,22 @@ impl Core {
     pub fn on_reconcile_failed(&mut self, err: crate::model::CoreError, now_ms: i64) {
         self.consecutive_sweep_failures = self.consecutive_sweep_failures.saturating_add(1);
         let streak = self.consecutive_sweep_failures;
-        self.last_venue_error = Some((
+        let message = format!("reconciliation sweep failed ({streak}): {}", err.message);
+        // #184: the safety net reporting on itself is an ops-critical line, and it
+        // belongs at error level from the FIRST failure — not only when the third
+        // one finally freezes trading. The streak and the threshold ride along so
+        // one line answers "how bad is this and what happens next".
+        tracing::error!(
+            streak,
+            threshold = SWEEP_FAILURE_FREEZE,
+            code = ?err.code,
+            "{}",
+            message
+        );
+        self.note_error(
+            &crate::model::CoreError::new(err.code, message.clone()),
             now_ms,
-            format!("reconciliation sweep failed ({streak}): {}", err.message),
-        ));
-        eprintln!("core: reconciliation sweep failed {streak} times in a row: {err:?}");
+        );
         if streak >= SWEEP_FAILURE_FREEZE {
             self.freeze_trading(
                 format!(
@@ -3640,24 +3756,45 @@ impl Core {
             || !report.suspect_ghost_ids.is_empty()
             || !report.unknown_fills.is_empty()
         {
+            let filled = report
+                .actions
+                .iter()
+                .filter(|a| matches!(a, crate::reconcile::ReconcileAction::FilledGap { .. }))
+                .count();
+            let marked_filled = report
+                .actions
+                .iter()
+                .filter(|a| matches!(a, crate::reconcile::ReconcileAction::MarkedFilled { .. }))
+                .count();
+            let marked_cancelled = report
+                .actions
+                .iter()
+                .filter(|a| matches!(a, crate::reconcile::ReconcileAction::MarkedCancelled { .. }))
+                .count();
+            // #184: a sweep that had to REPAIR something is a drift report — the
+            // local book disagreed with the venue and the safety net caught it.
+            // The net working is good news; the divergence is not, and an
+            // operator has to be able to see it in the run log without reading
+            // the panel. Only repairs and ghost suspicions are errors: external
+            // fills alone are a manual close made on the venue (informational).
+            if !report.actions.is_empty() || !report.suspect_ghost_ids.is_empty() {
+                tracing::error!(
+                    filled_gaps = filled,
+                    marked_filled,
+                    marked_cancelled,
+                    ghosts = ?report.suspect_ghost_ids,
+                    "reconciliation drift repaired: the venue disagreed with the core's book"
+                );
+            } else {
+                tracing::info!(
+                    external_fills = report.unknown_fills.len(),
+                    "reconciliation: external (manual) fills folded into the position book"
+                );
+            }
             self.emit(Event::ReconcileReport {
-                filled: report
-                    .actions
-                    .iter()
-                    .filter(|a| matches!(a, crate::reconcile::ReconcileAction::FilledGap { .. }))
-                    .count(),
-                marked_filled: report
-                    .actions
-                    .iter()
-                    .filter(|a| matches!(a, crate::reconcile::ReconcileAction::MarkedFilled { .. }))
-                    .count(),
-                marked_cancelled: report
-                    .actions
-                    .iter()
-                    .filter(|a| {
-                        matches!(a, crate::reconcile::ReconcileAction::MarkedCancelled { .. })
-                    })
-                    .count(),
+                filled,
+                marked_filled,
+                marked_cancelled,
                 ghost_ids: report.suspect_ghost_ids.clone(),
             });
         }
@@ -3829,8 +3966,38 @@ impl Core {
     pub fn risk_config_mut(&mut self) -> &mut RiskConfig {
         self.risk.config_mut()
     }
-    /// Broadcast a structured error to Node (never swallowed).
-    pub fn emit_error(&self, e: CoreError) {
+    /// The ONE writer of the panel-visible last-error slot (#180). Every
+    /// internal refusal path funnels through here — directly, or via
+    /// [`Core::emit_error`] — so the slot cannot be written with a message no
+    /// code classifies, and cannot be skipped because one path forgot. It is
+    /// also what makes the slot a *fresh* fact: each write carries the instant
+    /// the failure was observed, so a reader can tell a new failure from an old
+    /// banner (`tsMs` moves, `message` is the newest reason).
+    fn note_error(&mut self, err: &CoreError, now_ms: i64) {
+        self.last_error = Some(LastError {
+            ts_ms: now_ms,
+            code: err.code,
+            message: err.message.clone(),
+        });
+    }
+    /// Broadcast a structured error to Node (never swallowed) AND record it in
+    /// the one panel-visible error slot.
+    pub fn emit_error(&mut self, e: CoreError) {
+        self.emit_error_at(e, now_ms());
+    }
+    /// [`Core::emit_error`] with the caller's own instant, for error paths that
+    /// carry the event time (a sweep at its `ts`) rather than the time of this
+    /// call.
+    pub fn emit_error_at(&mut self, e: CoreError, now_ms: i64) {
+        self.note_error(&e, now_ms);
+        self.emit_error_event(e);
+    }
+    /// Emit an error event WITHOUT touching the slot, for a consequence whose
+    /// cause is already recorded: the slot must keep showing the error an
+    /// operator has to act on (the raw venue refusal), not the kernel's own
+    /// reaction to it (the freeze). Everything else goes through
+    /// [`Core::emit_error`].
+    fn emit_error_event(&self, e: CoreError) {
         self.emit(Event::Error { error: e });
     }
     /// Broadcast a risk alert.
@@ -3927,6 +4094,23 @@ impl Core {
         maker_timeout_ms: i64,
         now_ms: i64,
     ) -> CoreResult<(OrderId, OrderStatus)> {
+        let outcome = self.place_inner(req, maker_timeout_ms, now_ms, true)?;
+        Ok((outcome.order_id, outcome.status))
+    }
+
+    /// [`Core::place`] with the full outcome: the id, the status AND — when the
+    /// kernel itself refused the leg after accepting it (a dry/read-only taker
+    /// the book cannot fill) — the structured reason for that refusal.
+    ///
+    /// `orders.place` answers from this (#180) so a caller is never handed a
+    /// bare `REJECTED`; everything in-tree keeps the tuple shape, which is what
+    /// the strategy/engine paths use.
+    pub fn place_outcome(
+        &mut self,
+        req: OrderRequest,
+        maker_timeout_ms: i64,
+        now_ms: i64,
+    ) -> CoreResult<PlaceOutcome> {
         self.place_inner(req, maker_timeout_ms, now_ms, true)
     }
 
@@ -3944,16 +4128,34 @@ impl Core {
         req: OrderRequest,
         now_ms: i64,
     ) -> CoreResult<(OrderId, OrderStatus)> {
-        self.place_inner(req, 0, now_ms, false)
+        let outcome = self.place_inner(req, 0, now_ms, false)?;
+        Ok((outcome.order_id, outcome.status))
     }
 
+    /// Every refusal this kernel makes about an order funnels through here, so
+    /// the one error slot (#180) is updated whichever gate said no — and so the
+    /// slot can never be skipped because one path forgot to record.
     fn place_inner(
         &mut self,
         req: OrderRequest,
         maker_timeout_ms: i64,
         now_ms: i64,
         entry_gates: bool,
-    ) -> CoreResult<(OrderId, OrderStatus)> {
+    ) -> CoreResult<PlaceOutcome> {
+        let outcome = self.place_gated(req, maker_timeout_ms, now_ms, entry_gates);
+        if let Err(e) = &outcome {
+            self.note_error(e, now_ms);
+        }
+        outcome
+    }
+
+    fn place_gated(
+        &mut self,
+        req: OrderRequest,
+        maker_timeout_ms: i64,
+        now_ms: i64,
+        entry_gates: bool,
+    ) -> CoreResult<PlaceOutcome> {
         // An intent the venue just refused waits out its backoff locally —
         // re-POSTing at full tick rate is exactly the rejection storm this
         // guards against. Manual attempts are only paused while the backoff
@@ -4018,7 +4220,7 @@ impl Core {
             submitted_at_ms: now_ms,
             maker_timeout_ms,
         })?;
-        self.place_after_submit(&id, maker_timeout_ms, now_ms)?;
+        let rejection = self.place_after_submit(&id, maker_timeout_ms, now_ms)?;
 
         let status = self
             .ome
@@ -4026,7 +4228,11 @@ impl Core {
             .map(|o| o.status)
             .unwrap_or(OrderStatus::Pending);
         self.emit_order(&id);
-        Ok((id, status))
+        Ok(PlaceOutcome {
+            order_id: id,
+            status,
+            rejection,
+        })
     }
 
     /// The price a taker leg must state to guarantee a full fill of `size` on
@@ -4044,12 +4250,61 @@ impl Core {
         self.books.get(token)?.walk_marketable(side, limit, size)
     }
 
+    /// Why a dry/read-only taker leg could not be filled, as the structured
+    /// error the submitter gets back (#180).
+    ///
+    /// Two different causes reach this point — nothing crosses the limit, or not
+    /// enough size rests at or inside it — and they are different operational
+    /// facts (a quote that moved vs a book too thin for our size), so each gets a
+    /// stable leading token a log search, the panel and a gate can match on. Both
+    /// carry `WOULD_CROSS`: that is exactly the code a live FOK is killed under
+    /// (the venue adapter maps its "no match" / "cross" / "post-only" errors to
+    /// it), and a refusal must not invent a second error model.
+    fn taker_refusal(&self, order: &TrackedOrder, book: &Book) -> CoreError {
+        let (crosses, depth) = book.crossing_depth(order.side, order.price);
+        let best = match order.side {
+            Side::Buy => book.best_ask().map(|p| format!("best ask {p}")),
+            Side::Sell => book.best_bid().map(|p| format!("best bid {p}")),
+        }
+        .unwrap_or_else(|| {
+            format!(
+                "no {} rests",
+                match order.side {
+                    Side::Buy => "ask",
+                    Side::Sell => "bid",
+                }
+            )
+        });
+        let message = match (order.side, crosses) {
+            (Side::Buy, false) => format!(
+                "taker_no_crossing_liquidity: no ask at or inside the {} buy limit ({best}; token {}, size {})",
+                order.price, order.token_id, order.size
+            ),
+            (Side::Sell, false) => format!(
+                "taker_no_crossing_liquidity: no bid at or inside the {} sell limit ({best}; token {}, size {})",
+                order.price, order.token_id, order.size
+            ),
+            (Side::Buy, true) => format!(
+                "taker_insufficient_depth: only {depth} of {} shares rest at or inside the {} buy limit ({best}; token {})",
+                order.size, order.price, order.token_id
+            ),
+            (Side::Sell, true) => format!(
+                "taker_insufficient_depth: only {depth} of {} shares rest at or inside the {} sell limit ({best}; token {})",
+                order.size, order.price, order.token_id
+            ),
+        };
+        CoreError::new(CoreErrorCode::WouldCross, message)
+    }
+
+    /// The dry/read-only half of submission: settle the leg locally, since there
+    /// is no venue to report a fill. Returns the kernel-side refusal when the leg
+    /// was rejected here, so the submitter learns WHY (#180).
     fn place_after_submit(
         &mut self,
         id: &str,
         maker_timeout_ms: i64,
         now_ms: i64,
-    ) -> CoreResult<()> {
+    ) -> CoreResult<Option<CoreError>> {
         let order =
             self.ome.get(id).cloned().ok_or_else(|| {
                 CoreError::new(CoreErrorCode::Internal, "order missing after submit")
@@ -4062,6 +4317,7 @@ impl Core {
             // egress, not accounting — see `Mode::readonly`.
             Mode::Dry | Mode::ReadOnly => {
                 self.ome.mark_live(id, now_ms)?;
+                let mut rejection = None;
                 match order.mode {
                     FillPolicy::Taker => {
                         // Fill like a live FOK: walk the opposing side's resting
@@ -4086,7 +4342,27 @@ impl Core {
                                     self.ledger.release(id);
                                 }
                                 self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
+                                // #180: a refusal is a first-class fact — it goes
+                                // into the one error slot, reaches Node as an
+                                // Event::Error, lands in the log at error level and
+                                // travels back to the submitter on the
+                                // `orders.place` result. Before this, the reject
+                                // branch emitted an order update and nothing else,
+                                // so `orders.place` answered a bare REJECTED and
+                                // `engine.stats.lastError` stayed empty.
+                                let err = self.taker_refusal(&order, &book);
+                                tracing::error!(
+                                    order = id,
+                                    token = %order.token_id,
+                                    side = ?order.side,
+                                    size = %order.size,
+                                    limit = %order.price,
+                                    reason = %err.message,
+                                    "order rejected: taker leg has no fillable liquidity"
+                                );
+                                self.emit_error_at(err.clone(), now_ms);
                                 self.emit_order(id);
+                                rejection = Some(err);
                             }
                         }
                     }
@@ -4103,13 +4379,16 @@ impl Core {
                         self.try_maker_fill(id, now_ms);
                     }
                 }
+                // `emit_order` after the rejection is recorded, so an event
+                // consumer that reads stats on the update sees the reason.
+                Ok(rejection)
             }
             Mode::Live => {
                 // Pending until the venue adapter confirms; the async layer calls
                 // mark_live / feeds user-WS fills. Implemented with the CLOB adapter.
+                Ok(None)
             }
         }
-        Ok(())
     }
 
     /// Apply one authoritative (cumulative) fill and its ledger effect.
@@ -4184,7 +4463,11 @@ impl Core {
         }
         // Dry maker fills are full fills at the resting limit (Node parity).
         if let Err(e) = self.authoritative_fill(id, order.size, order.price, true, now_ms) {
-            self.emit(Event::Error { error: e });
+            // Through the one error slot like every other internal failure: a fill
+            // the OME refuses is exactly the kind of thing an operator must see
+            // (#180/#184 rather than a bare Event::Error).
+            tracing::error!(order = id, error = %e, "maker fill could not be applied");
+            self.emit_error_at(e, now_ms);
         }
     }
 
@@ -4518,9 +4801,13 @@ impl Core {
                 unpriced.join(", ")
             );
             tracing::error!("{message}");
-            self.emit(Event::Error {
-                error: CoreError::new(blitzkrieg_market_api::CoreErrorCode::Internal, message),
-            });
+            // Through the one error slot as well: a market that cannot be priced
+            // is why positions sit unresolved, and that must be visible in
+            // `engine.stats` without reading logs (#180).
+            self.emit_error(CoreError::new(
+                blitzkrieg_market_api::CoreErrorCode::Internal,
+                message,
+            ));
             return; // keep the market watched: a later resolution may price it
         }
         self.settlement.forget_market(&resolution.condition_id);
@@ -4608,12 +4895,12 @@ impl Core {
                     );
                 }
                 eprintln!("core: {message}");
-                self.emit(Event::Error {
-                    error: CoreError::new(
-                        blitzkrieg_market_api::CoreErrorCode::VenueError,
-                        message,
-                    ),
-                });
+                // Through the one slot as well: a claim whose collateral is stuck
+                // is money the operator is waiting on (#180).
+                self.emit_error(CoreError::new(
+                    blitzkrieg_market_api::CoreErrorCode::VenueError,
+                    message,
+                ));
             }
         }
     }
@@ -4763,9 +5050,12 @@ impl Core {
                 self.settlement.tracked_markets()
             );
             tracing::error!("{message}");
-            self.emit(Event::Error {
-                error: CoreError::new(blitzkrieg_market_api::CoreErrorCode::Internal, message),
-            });
+            // Also the one slot (#180): "settlement has been blind since X" is the
+            // single most important thing an operator can know about a live book.
+            self.emit_error(CoreError::new(
+                blitzkrieg_market_api::CoreErrorCode::Internal,
+                message,
+            ));
         }
     }
 
@@ -6161,10 +6451,30 @@ mod tests {
         let mut c = dry_core(dec!(10));
         // Best ask 0.50 is outside a 0.40 buy limit — a live FOK dies.
         c.book_snapshot("tok", vec![], vec![(dec!(0.50), dec!(100))], 1);
-        let (_id, st) = c
-            .place(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1)
+        let out = c
+            .place_outcome(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1)
             .unwrap();
-        assert_eq!(st, OrderStatus::Rejected);
+        assert_eq!(out.status, OrderStatus::Rejected);
+        // #180: the refusal names its cause, in the code a live FOK dies under.
+        let err = out
+            .rejection
+            .expect("a kernel refusal must carry its reason");
+        assert_eq!(err.code, CoreErrorCode::WouldCross);
+        assert!(
+            err.message.starts_with("taker_no_crossing_liquidity:"),
+            "want the no-crossing cause, got {:?}",
+            err.message
+        );
+        assert!(
+            err.message.contains("0.50"),
+            "names the best ask: {}",
+            err.message
+        );
+        // And the same reason is the one the panel/`engine.stats` reader sees.
+        let stats = c.engine_stats();
+        assert_eq!(stats["lastError"]["code"], "WOULD_CROSS");
+        assert_eq!(stats["lastError"]["message"], err.message);
+        assert_eq!(stats["lastError"]["tsMs"], 1);
         assert_eq!(c.ledger().balance(), dec!(10));
         assert_eq!(c.ledger().reserved(), dec!(0));
         assert!(c.positions().open_positions().is_empty());
@@ -6176,13 +6486,89 @@ mod tests {
         // Ask 0.40 crosses, but only 3 shares rest — an all-or-nothing FOK
         // cannot take 5, so the whole order is rejected.
         c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(3))], 1);
-        let (_id, st) = c
-            .place(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1)
+        let out = c
+            .place_outcome(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1)
             .unwrap();
-        assert_eq!(st, OrderStatus::Rejected);
+        assert_eq!(out.status, OrderStatus::Rejected);
+        let err = out
+            .rejection
+            .expect("a kernel refusal must carry its reason");
+        assert_eq!(err.code, CoreErrorCode::WouldCross);
+        // A DIFFERENT cause from the non-crossing case, and the message says
+        // which one: a quote that moved is not a book too thin for our size.
+        assert!(
+            err.message.starts_with("taker_insufficient_depth:"),
+            "want the depth cause, got {:?}",
+            err.message
+        );
+        assert!(
+            err.message.contains("only 3 of 5 shares"),
+            "names the shortfall: {}",
+            err.message
+        );
+        let stats = c.engine_stats();
+        assert_eq!(stats["lastError"]["code"], "WOULD_CROSS");
+        assert_eq!(stats["lastError"]["message"], err.message);
         assert_eq!(c.ledger().balance(), dec!(10));
         assert_eq!(c.ledger().reserved(), dec!(0));
         assert!(c.positions().open_positions().is_empty());
+    }
+
+    #[test]
+    fn a_risk_rejection_reaches_the_error_slot_with_its_own_reason() {
+        // The third refusal kind a caller can hit (the observability gate drives
+        // all three): the per-order notional cap. It reaches the caller as a
+        // structured Err — and, since #180, it also refreshes the one error slot,
+        // so the panel's answer to "why did nothing get placed?" is the same
+        // reason the caller got, not a stale banner.
+        let mut c = dry_core(dec!(10));
+        c.risk_config_mut().max_order_notional = dec!(1);
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
+        let err = c
+            .place_outcome(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1)
+            .expect_err("2.00 notional must be refused by the 1 USD per-order cap");
+        assert_eq!(err.code, CoreErrorCode::RiskRejected);
+        assert!(
+            err.message.contains("exceeds per-order cap"),
+            "names the cap that refused it: {}",
+            err.message
+        );
+        let stats = c.engine_stats();
+        assert_eq!(stats["lastError"]["code"], "RISK_REJECTED");
+        assert_eq!(stats["lastError"]["message"], err.message);
+        assert_eq!(stats["lastError"]["tsMs"], 1);
+        // Nothing reached the OME, and the reason is NOT one of the two liquidity
+        // causes — the three refusal kinds stay distinguishable.
+        assert!(c.list_orders().is_empty());
+        assert!(
+            !err.message.contains("taker_no_crossing_liquidity")
+                && !err.message.contains("taker_insufficient_depth"),
+            "a risk refusal must not read like a liquidity one: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_filled_taker_leaves_no_error_and_a_maker_leg_reports_none() {
+        // The other direction: the slot must stay EMPTY on the happy path (an
+        // error slot that is always populated tells an operator nothing).
+        let mut c = dry_core(dec!(10));
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
+        let out = c
+            .place_outcome(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1)
+            .unwrap();
+        assert_eq!(out.status, OrderStatus::Filled);
+        assert!(out.rejection.is_none());
+        assert_eq!(c.engine_stats()["lastError"], serde_json::Value::Null);
+
+        // A resting maker is not a refusal either — it may fill later.
+        let mut c = dry_core(dec!(10));
+        let out = c
+            .place_outcome(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k2"), 0, 1)
+            .unwrap();
+        assert_eq!(out.status, OrderStatus::Live);
+        assert!(out.rejection.is_none());
+        assert_eq!(c.engine_stats()["lastError"], serde_json::Value::Null);
     }
 
     #[test]
@@ -9289,7 +9675,20 @@ mod trading_capability_tests {
                 .as_str()
                 .unwrap()
                 .contains("NotAuthenticated"),
-            "the panel must show the RAW venue error, not the freeze message"
+            "the panel must show the RAW venue error, not the freeze message: {stats}"
+        );
+        // #180: and the slot is structured now — the raw message AND the code
+        // that classifies it, so a client can branch without parsing text.
+        assert_eq!(
+            stats["lastError"]["code"], "NOT_AUTHENTICATED",
+            "the slot keeps the ROOT CAUSE, not the KILL_SWITCH_ACTIVE paraphrase"
+        );
+        assert_eq!(stats["lastError"]["message"], "auth failed");
+        // Both keys are the same record: one timestamp, one writer.
+        assert_eq!(stats["lastVenueError"]["tsMs"], stats["lastError"]["tsMs"]);
+        assert_eq!(
+            stats["lastVenueError"]["message"], "NotAuthenticated: auth failed",
+            "the legacy key keeps its pre-#180 rendering exactly"
         );
         let e = c.place_pending(pending_req("k9", "s1"), 6_000).unwrap_err();
         assert_eq!(

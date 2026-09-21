@@ -296,6 +296,25 @@ jobs:
       - name: Settlement & redemption gate (#175)
         timeout-minutes: 8
         run: node scripts/settlement-redeem-check.mjs
+      # #180 / #184: the two audit findings that share one operator question —
+      # "why is nothing happening, and where would I have seen it?" — are asserted
+      # on the real binary over the real IPC channel:
+      #   * a refused taker carries a structured code AND a reason naming its
+      #     cause, and the three refusal kinds (no crossing liquidity, not enough
+      #     depth, risk cap) are mutually distinct — not one generic sentence;
+      #   * the reason reaches `engine.stats.lastError` (what the panel's error
+      #     banner reads) within a second, with a fresh timestamp, and the legacy
+      #     `lastVenueError` key keeps its pre-#180 rendering;
+      #   * the shipped default log filter records INFO and WARN, the boot banner
+      #     says which level is in force and where it came from, and an explicit
+      #     RUST_LOG still overrides it as a real filter.
+      # The default-level assertion is deliberately an INFO line and a WARN line:
+      # a revert to the old ERROR default still lets `tracing::error!` through, so
+      # an ERROR-only assertion could not fail. Both sessions run their own dry
+      # core; neither touches the production socket (see lib/child-guard.mjs).
+      - name: Observability gate (#180 / #184)
+        timeout-minutes: 5
+        run: node scripts/observability-check.mjs
       # E5: the panel consumes core events through the EventBus; the UI Kit
       # gateway command surface and plugin toggles work end-to-end.
       - name: UI Kit gates (E5)
