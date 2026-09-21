@@ -17,7 +17,7 @@ use crate::shadow_evolution::{
 use crate::sim::{Book, rests_on_book};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
@@ -764,6 +764,19 @@ struct AuditRuntime {
     last_realign: Option<(i64, Decimal)>,
 }
 
+/// Upper bound on the kernel's pending-close exit-reason table (issue #190).
+///
+/// The table holds one entry per token whose closing SELL has been submitted but
+/// not yet filled — a *pending-close* ledger, not a history — so its live
+/// working set is the engine's tradeable fan-out: the round's tokens across the
+/// configured assets (8 tokens × 3 assets = 24 on the shipped Polymarket
+/// deployment) plus whatever manual flattens add on top. 64 is ≈2.5× the widest
+/// live set, so a legitimate session never reaches the bound; it exists so a leak
+/// is bounded for the life of the process instead of growing forever. Eviction
+/// prefers entries whose position is already gone (stale by construction) and
+/// drops the oldest otherwise; both are counted in `engine.stats.exitReasons`.
+const EXIT_REASON_TABLE_MAX: usize = 64;
+
 pub struct Core {
     config: CoreConfig,
     ome: Ome,
@@ -776,7 +789,23 @@ pub struct Core {
     books: HashMap<TokenId, Book>,
     /// Exit reason chosen for an in-flight closing SELL, keyed by token id, so a
     /// full sell fill closes the position with the right reason.
+    ///
+    /// A PENDING-CLOSE ledger, not a history (issue #190): an entry exists only
+    /// while the token still has an open position, and the table can never
+    /// exceed [`EXIT_REASON_TABLE_MAX`]. A leaked entry would be inherited by
+    /// the NEXT position on the same token and mis-attribute its exit.
     exit_reasons: HashMap<TokenId, ExitReason>,
+    /// Insertion order of [`Self::exit_reasons`], oldest first. The map cannot
+    /// name its own oldest entry and the bound has to evict one; kept in
+    /// lockstep with the map's key set by the four helpers below.
+    exit_reason_order: VecDeque<TokenId>,
+    /// Entries dropped by the [`EXIT_REASON_TABLE_MAX`] bound, session-scoped
+    /// and surfaced in `engine.stats`: an eviction loses real exit attribution,
+    /// so it is counted rather than silent.
+    exit_reasons_evicted: u64,
+    /// Entries dropped because their token no longer has an open position — the
+    /// expected path (a close, a round rollover).
+    exit_reasons_swept: u64,
     /// Strategy close intents drained from the engine in `engine_evaluate` and
     /// consumed by the shared exit-submission path in `run_exit_checks`.
     strategy_exits: Vec<crate::strategies::StrategyExitIntent>,
@@ -986,6 +1015,9 @@ impl Core {
             positions,
             books: HashMap::new(),
             exit_reasons: HashMap::new(),
+            exit_reason_order: VecDeque::new(),
+            exit_reasons_evicted: 0,
+            exit_reasons_swept: 0,
             strategy_exits: Vec::new(),
             engine: None,
             feed: None,
@@ -1866,7 +1898,14 @@ impl Core {
             crate::engine::DataEvent::Book { .. } => self.stats.books += 1,
             crate::engine::DataEvent::TopOfBook { .. } => self.stats.tops += 1,
             crate::engine::DataEvent::Spot { .. } => self.stats.spots += 1,
-            crate::engine::DataEvent::RoundMarkets { .. } => self.stats.rounds += 1,
+            crate::engine::DataEvent::RoundMarkets { .. } => {
+                self.stats.rounds += 1;
+                // A round rollover replaces the whole round (`engine.markets`
+                // carries the new list), so it is the moment any pending-close
+                // reason whose position is gone can no longer belong to
+                // anything live (issue #190).
+                self.sweep_exit_reasons();
+            }
         }
 
         // Mirror the latest book into `self.books`, which the position/exit path
@@ -2413,6 +2452,11 @@ impl Core {
             // `balance × k` bound applies on top. `scripts/risk-sizing-check.mjs`
             // asserts exactly the last line of this block on a live dry core.
             "sizing": self.sizing_view(),
+            // #190: the pending-close exit-reason table — how many reasons are
+            // held against the bound, and what the two clean-up paths removed.
+            // `orphaned` must read 0: an entry whose position is gone is the
+            // ghost reason the table used to accumulate.
+            "exitReasons": self.exit_reasons_view(),
             // Settlement & redemption (issue #175): settled-but-unredeemed claims
             // are money the chain still owes, and this is where the panel sees
             // them — the same outlet as everything else, no new event type.
@@ -3455,10 +3499,8 @@ impl Core {
                                 if left <= Decimal::ZERO
                                     || crate::position::floor_to_grid(left) == Decimal::ZERO =>
                             {
-                                let reason = self
-                                    .exit_reasons
-                                    .remove(token)
-                                    .unwrap_or(ExitReason::Manual);
+                                let reason =
+                                    self.take_exit_reason(token).unwrap_or(ExitReason::Manual);
                                 let was_maker = d.role.is_maker();
                                 if let Some(closed) =
                                     self.positions.close(&id, px, reason, was_maker, now_ms)
@@ -3494,6 +3536,11 @@ impl Core {
 
     /// Breaker + event emission when a position closes.
     fn on_position_closed(&mut self, closed: &crate::position::ClosedPosition, now_ms: i64) {
+        // The pending-close reason for this token died with the position it
+        // belonged to (issue #190). Every close path funnels through here, and
+        // an entry left behind would be inherited by the NEXT position on the
+        // same token — the ghost reason that mis-attributed exits.
+        self.clear_exit_reason(&closed.token_id);
         // Persist first so the panel/analysis have the record even if a later
         // step fails (matches the Node behaviour of saving on close).
         if let Some(db) = self.trade_db.as_mut() {
@@ -3549,6 +3596,151 @@ impl Core {
         // reported here (not only on the next tick) so the freeze and the loss
         // land in the same audit window.
         self.emit_daily_trip();
+    }
+
+    // ── Pending-close exit reasons (issue #190) ─────────────────────────────
+    //
+    // The table remembers which reason an in-flight closing SELL was submitted
+    // with, so the fill that completes the close records the right attribution.
+    // An entry therefore lives exactly as long as the close it belongs to, and
+    // these four helpers are the only way in or out — `exit_reasons` is never
+    // touched directly. Before #190 the table was only ever inserted into: an
+    // exit that never filled (cancelled, replaced by a settlement, a venue pull)
+    // left its reason behind for the NEXT position on that token to inherit.
+
+    /// Record the reason an in-flight close of `token` was submitted with.
+    fn note_exit_reason(&mut self, token: &str, reason: ExitReason) {
+        if self
+            .exit_reasons
+            .insert(token.to_string(), reason)
+            .is_none()
+        {
+            self.exit_reason_order.push_back(token.to_string());
+        }
+        self.enforce_exit_reason_bound();
+    }
+
+    /// Consume the pending reason for `token`: the close that fills uses it, and
+    /// it must not outlive that close.
+    fn take_exit_reason(&mut self, token: &str) -> Option<ExitReason> {
+        let reason = self.exit_reasons.remove(token);
+        if reason.is_some() {
+            self.exit_reason_order.retain(|t| t != token);
+        }
+        reason
+    }
+
+    /// Forget the pending reason for `token` without consuming it — the close
+    /// that landed carried its own reason (a settlement, a reconciled venue
+    /// close), so the in-flight one is stale either way.
+    fn clear_exit_reason(&mut self, token: &str) {
+        if self.exit_reasons.remove(token).is_some() {
+            self.exit_reason_order.retain(|t| t != token);
+        }
+    }
+
+    /// Drop every entry whose token no longer has an open position.
+    ///
+    /// Run when the round rolls over (`engine.markets` replaces the whole round)
+    /// and after a close: that is the point at which a leftover entry can no
+    /// longer belong to anything live, and an entry whose position is gone would
+    /// otherwise be inherited by the next position on that token.
+    fn sweep_exit_reasons(&mut self) {
+        if self.exit_reasons.is_empty() {
+            return;
+        }
+        let open: HashSet<String> = self
+            .positions
+            .open_positions()
+            .iter()
+            .map(|p| p.token_id.clone())
+            .collect();
+        let stale: Vec<String> = self
+            .exit_reasons
+            .keys()
+            .filter(|t| !open.contains(*t))
+            .cloned()
+            .collect();
+        for token in stale {
+            self.exit_reasons.remove(&token);
+            self.exit_reasons_swept += 1;
+        }
+        self.repair_exit_reason_order();
+    }
+
+    /// Keep the table within [`EXIT_REASON_TABLE_MAX`], evicting what is least
+    /// likely to still be needed: first the entries whose token has no open
+    /// position (stale by construction), then the oldest.
+    fn enforce_exit_reason_bound(&mut self) {
+        if self.exit_reasons.len() <= EXIT_REASON_TABLE_MAX {
+            return;
+        }
+        let open: HashSet<String> = self
+            .positions
+            .open_positions()
+            .iter()
+            .map(|p| p.token_id.clone())
+            .collect();
+        let ghosts: Vec<String> = self
+            .exit_reason_order
+            .iter()
+            .filter(|t| !open.contains(*t))
+            .cloned()
+            .collect();
+        for token in ghosts {
+            if self.exit_reasons.len() <= EXIT_REASON_TABLE_MAX {
+                break;
+            }
+            self.exit_reasons.remove(&token);
+            self.exit_reasons_evicted += 1;
+        }
+        while self.exit_reasons.len() > EXIT_REASON_TABLE_MAX {
+            let Some(oldest) = self.exit_reason_order.pop_front() else {
+                break;
+            };
+            if self.exit_reasons.remove(&oldest).is_some() {
+                self.exit_reasons_evicted += 1;
+            }
+        }
+        self.repair_exit_reason_order();
+    }
+
+    /// Drop order entries whose reason is no longer in the map, so the deque
+    /// always describes exactly the map's key set (the invariant the eviction
+    /// path relies on to name the oldest entry).
+    fn repair_exit_reason_order(&mut self) {
+        self.exit_reason_order
+            .retain(|t| self.exit_reasons.contains_key(t));
+        debug_assert_eq!(
+            self.exit_reason_order.len(),
+            self.exit_reasons.len(),
+            "exit_reason_order must mirror exit_reasons"
+        );
+    }
+
+    /// The pending-close table as the panel reads it (issue #190): how many
+    /// reasons are held, the bound, and what the two clean-up paths removed.
+    /// `orphaned` counts entries whose position is gone — the ghost this table
+    /// used to accumulate; it is 0 at rest.
+    fn exit_reasons_view(&self) -> serde_json::Value {
+        let open: HashSet<&str> = self
+            .positions
+            .open_positions()
+            .iter()
+            .map(|p| p.token_id.as_str())
+            .collect();
+        let orphaned = self
+            .exit_reasons
+            .keys()
+            .filter(|t| !open.contains(t.as_str()))
+            .count();
+        serde_json::json!({
+            "tracked": self.exit_reasons.len(),
+            "capacity": EXIT_REASON_TABLE_MAX,
+            "orphaned": orphaned,
+            "evictedTotal": self.exit_reasons_evicted,
+            "sweptTotal": self.exit_reasons_swept,
+        })
     }
 
     /// Map a venue order id to a core order (for user-WS events). Returns the
@@ -3695,6 +3887,11 @@ impl Core {
                     t.maker == Some(true),
                     now_ms,
                 );
+                // This path closes without going through `on_position_closed`
+                // (the OME never issued the order, so there is no core order to
+                // report), so the pending-close reason is retired here: the
+                // position it belonged to is gone (issue #190).
+                self.clear_exit_reason(&t.token_id);
             }
             self.persist_positions();
             applied += 1;
@@ -4287,7 +4484,7 @@ impl Core {
                 .map(|(_, worst)| worst)
                 .filter(|p| *p > Decimal::ZERO)
                 .unwrap_or(Decimal::new(1, 2));
-            self.exit_reasons.insert(token.clone(), ExitReason::Manual);
+            self.note_exit_reason(&token, ExitReason::Manual);
             let order = OrderRequest {
                 token_id: token,
                 condition_id: condition,
@@ -5179,8 +5376,9 @@ impl Core {
                 direction: job.direction,
                 round_slot: 0,
             };
-            // Record the intended exit reason so a full sell fill closes with it.
-            self.exit_reasons.insert(job.token.clone(), job.reason);
+            // Record the intended exit reason so a full sell fill closes with it
+            // (bounded and cleaned up by the close: issue #190).
+            self.note_exit_reason(&job.token, job.reason);
             if let Err(e) = self.place(order, 0, now_ms) {
                 self.emit_error(e);
             }
@@ -9927,5 +10125,243 @@ mod settlement_service_tests {
         assert_eq!(audit["receivableUsd"], serde_json::json!(5.0));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Pending-close exit reasons (issue #190). The table is a ledger of IN-FLIGHT
+/// closes, not a history: an entry must not outlive the position it belongs to,
+/// the table must never grow without bound, and a later position on the same
+/// token must never inherit a dead reason.
+#[cfg(test)]
+mod exit_reason_table_tests {
+    use super::*;
+    use crate::model::{FillPolicy, OrderStatus, Side};
+    use crate::position::OpenParams;
+    use rust_decimal_macros::dec;
+
+    /// Dry core, seed 1000, automated exits OFF: the fixture drives every close
+    /// explicitly so the path under test is the only one that runs.
+    fn core() -> Core {
+        let mut c = Core::new(CoreConfig {
+            mode: Mode::Dry,
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(1000),
+            auto_exits_enabled: false,
+            ..Default::default()
+        });
+        c.set_balance(dec!(1000));
+        c
+    }
+
+    fn order(side: Side, price: Decimal, size: Decimal, token: &str, key: &str) -> OrderRequest {
+        OrderRequest {
+            token_id: token.into(),
+            condition_id: "cond".into(),
+            side,
+            mode: FillPolicy::Taker,
+            price,
+            size,
+            internal_key: key.into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 1,
+        }
+    }
+
+    /// Open a 10-share position on `token` at 0.40 off a resting ask.
+    fn open_position(c: &mut Core, token: &str, at_ms: i64) {
+        c.book_snapshot(token, vec![], vec![(dec!(0.40), dec!(500))], at_ms - 1);
+        let (_, status) = c
+            .place(
+                order(Side::Buy, dec!(0.40), dec!(10), token, "entry"),
+                0,
+                at_ms,
+            )
+            .unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+    }
+
+    /// Close the position on `token` the way a venue-side manual sell would: a
+    /// SELL fill the OME never issued, folded in by the reconcile sweep. This
+    /// path does NOT go through `on_position_closed`.
+    fn venue_close(c: &mut Core, token: &str, at_ms: i64) {
+        let snap = crate::reconcile::VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![crate::reconcile::VenueTrade {
+                venue_order_id: format!("manual-{token}"),
+                trade_id: format!("t-{token}"),
+                token_id: token.into(),
+                side: Side::Sell,
+                size: dec!(10),
+                price: dec!(0.60),
+                ts_ms: at_ms,
+                tx_hash: None,
+                maker: Some(false),
+            }],
+            now_ms: at_ms + 100,
+        };
+        c.reconcile(snap).unwrap();
+        assert!(
+            c.positions()
+                .open_positions()
+                .iter()
+                .all(|p| p.token_id != token),
+            "the venue close must leave no open position on {token}"
+        );
+    }
+
+    /// A close retires the reason that was pending for it, whichever path lands
+    /// the close — including the reconciled venue close, which does not funnel
+    /// through `on_position_closed`.
+    #[test]
+    fn a_close_retires_the_pending_exit_reason() {
+        let mut c = core();
+        open_position(&mut c, "tok", 1_000);
+        // The exit policy decided to leave (a stop); the reason stays pending
+        // until the closing sell fills.
+        c.note_exit_reason("tok", ExitReason::StopLoss);
+        assert_eq!(c.exit_reasons.len(), 1);
+        assert_eq!(c.exit_reasons_view()["tracked"], serde_json::json!(1));
+        assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(0));
+
+        venue_close(&mut c, "tok", 1_100);
+
+        assert!(
+            c.exit_reasons.is_empty(),
+            "a closed position must not leave its exit reason behind: {:?}",
+            c.exit_reasons
+        );
+        assert_eq!(c.exit_reasons_view()["tracked"], serde_json::json!(0));
+        assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(0));
+    }
+
+    /// The mis-attribution this issue is about: a reason recorded for an exit
+    /// that never filled must not be applied to the NEXT position on the same
+    /// token. The internal exit-fill path is the one that reads the table, so
+    /// the assertion is on the recorded close reason.
+    #[test]
+    fn a_later_position_never_inherits_a_dead_exit_reason() {
+        let mut c = core();
+        open_position(&mut c, "tok", 1_000);
+        c.note_exit_reason("tok", ExitReason::StopLoss); // an exit that never filled
+        venue_close(&mut c, "tok", 1_100); // the position dies first
+
+        // The next round reuses the token (past the exit cooldown): a new
+        // position, with no reason of its own.
+        open_position(&mut c, "tok", 200_000);
+        c.book_snapshot("tok", vec![(dec!(0.55), dec!(500))], vec![], 200_100);
+        let (_, status) = c
+            .place(
+                order(Side::Sell, dec!(0.55), dec!(10), "tok", "close-2"),
+                0,
+                200_100,
+            )
+            .unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+
+        let closed = c.positions().closed_positions();
+        assert_eq!(closed.len(), 2);
+        assert_eq!(
+            closed[1].exit_reason,
+            ExitReason::Manual,
+            "the second close inherited the first position's dead stop reason"
+        );
+    }
+
+    /// The table is bounded, and the bound evicts the entries whose position is
+    /// already gone before it touches a live one.
+    #[test]
+    fn the_table_is_bounded_and_evicts_dead_entries_first() {
+        let mut c = core();
+        open_position(&mut c, "live", 1_000);
+        c.note_exit_reason("live", ExitReason::TakeProfit);
+        for i in 0..EXIT_REASON_TABLE_MAX {
+            c.note_exit_reason(&format!("dead-{i}"), ExitReason::StopLoss);
+        }
+        assert_eq!(
+            c.exit_reasons.len(),
+            EXIT_REASON_TABLE_MAX,
+            "the table must never exceed its bound"
+        );
+        assert_eq!(
+            c.exit_reasons.get("live"),
+            Some(&ExitReason::TakeProfit),
+            "a live position's reason must survive while dead entries remain"
+        );
+        assert_eq!(c.exit_reasons_view()["evictedTotal"], serde_json::json!(1));
+        assert_eq!(c.exit_reason_order.len(), c.exit_reasons.len());
+    }
+
+    /// …and when EVERY entry still has an open position, the oldest is the one
+    /// dropped (the table cannot be allowed to exceed the bound either way).
+    #[test]
+    fn the_oldest_entry_is_evicted_when_all_of_them_are_live() {
+        let mut c = core();
+        for i in 0..=EXIT_REASON_TABLE_MAX {
+            let token = format!("tok-{i}");
+            c.positions.open(
+                OpenParams {
+                    strategy: "spread_arb".into(),
+                    asset: "BTC".into(),
+                    direction: crate::model::SignalDirection::Up,
+                    token_id: token.clone(),
+                    condition_id: "cond".into(),
+                    entry_price: dec!(0.40),
+                    expires_at_ms: 9_999,
+                    was_maker: false,
+                    target_exit_price: None,
+                },
+                1_000,
+            );
+            c.note_exit_reason(&token, ExitReason::TakeProfit);
+        }
+        assert_eq!(c.exit_reasons.len(), EXIT_REASON_TABLE_MAX);
+        assert!(
+            !c.exit_reasons.contains_key("tok-0"),
+            "the oldest entry is the one evicted"
+        );
+        assert!(
+            c.exit_reasons
+                .contains_key(&format!("tok-{EXIT_REASON_TABLE_MAX}"))
+        );
+        assert_eq!(c.exit_reason_order.len(), c.exit_reasons.len());
+    }
+
+    /// The round rollover is the backstop: an entry whose position is gone by
+    /// then can no longer belong to anything live, so it is swept — which is
+    /// what keeps `orphaned` at 0 for the panel.
+    #[test]
+    fn a_round_rollover_sweeps_reasons_whose_position_is_gone() {
+        let mut c = core();
+        open_position(&mut c, "live", 1_000);
+        c.note_exit_reason("live", ExitReason::TakeProfit);
+        // An exit submitted for a position that closed in between: the entry is
+        // real, its position is not.
+        c.note_exit_reason("ghost", ExitReason::StopLoss);
+        assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(1));
+
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![],
+                now_ms: 5_000,
+            },
+            5_000,
+        );
+
+        assert!(
+            !c.exit_reasons.contains_key("ghost"),
+            "a round rollover must sweep a reason whose position is gone"
+        );
+        assert_eq!(
+            c.exit_reasons.get("live"),
+            Some(&ExitReason::TakeProfit),
+            "the live position's reason is not swept"
+        );
+        assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(0));
+        assert_eq!(c.exit_reasons_view()["sweptTotal"], serde_json::json!(1));
     }
 }
