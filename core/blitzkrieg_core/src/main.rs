@@ -77,6 +77,17 @@ struct Args {
     max_open_notional: Decimal,
     min_shares: Option<Decimal>,
     max_shares: Option<Decimal>,
+    /// #202 — the sizing knobs that are relative to the account: `size_pct` is
+    /// the per-entry budget as a percentage of cash equity (0 = off, the
+    /// absolute `size_usd` path), `max_order_notional_pct` the per-order
+    /// notional bound in the same unit (0 = off). Both default to off, so an
+    /// unconfigured deployment keeps its exact order sizes.
+    size_pct: Decimal,
+    max_order_notional_pct: Decimal,
+    /// The startup echo for the sizing/notional knobs, printed unconditionally
+    /// (same rationale as `daily_loss_echo`: "what bounds one order here?"
+    /// must be answerable from the boot log of a run that set no flags).
+    sizing_echo: Vec<String>,
     markets: Vec<String>,
     auto_exits: bool,
     max_positions: usize,
@@ -377,6 +388,12 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut max_open_notional = Decimal::ZERO;
     let mut min_shares: Option<Decimal> = None;
     let mut max_shares: Option<Decimal> = None;
+    // #202: the equity-relative sizing and per-order cap. Both tracked as Option
+    // so CLI > env > default resolution can tell "the operator spoke" from
+    // "nobody did", and both default to 0 (off) — the shipped absolute
+    // behaviour, untouched.
+    let mut size_pct: Option<Decimal> = None;
+    let mut max_order_notional_pct: Option<Decimal> = None;
     let mut markets: Vec<String> = Vec::new();
     let mut auto_exits = true;
     let mut max_positions: usize = 2;
@@ -482,6 +499,21 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     .next()
                     .and_then(|v| Decimal::from_str(&v).ok())
                     .unwrap_or(max_open_notional)
+            }
+            // #202: per-entry budget as a share of the account, and the
+            // per-order notional bound in the same unit. Both are percentages
+            // (20 = 20%), both default to 0 = off.
+            "--size-pct" => {
+                size_pct = it
+                    .next()
+                    .and_then(|v| Decimal::from_str(&v).ok())
+                    .or(size_pct)
+            }
+            "--max-order-notional-pct" => {
+                max_order_notional_pct = it
+                    .next()
+                    .and_then(|v| Decimal::from_str(&v).ok())
+                    .or(max_order_notional_pct)
             }
             "--min-shares" => {
                 min_shares = it
@@ -943,6 +975,74 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         );
     }
 
+    // ── #202: the account-relative sizing / per-order bound ─────────────────
+    // Same treatment as the daily-loss budget above, and for the same reason: a
+    // bound that is only in the source is not a bound anyone can verify against
+    // the account it runs on. `size_pct` also changes ORDER SIZES, so the boot
+    // log has to say whether the absolute path or the equity path is in force.
+    let size_pct = pick(
+        size_pct,
+        env.num::<Decimal>("BK_SIZE_PCT"),
+        None,
+        Decimal::ZERO,
+    );
+    let notional_pct = pick(
+        max_order_notional_pct,
+        env.num::<Decimal>("BK_MAX_ORDER_NOTIONAL_PCT"),
+        None,
+        Decimal::ZERO,
+    );
+    if size_pct.is_explicit() {
+        report.push(format!(
+            "engine.size_pct={} ({})",
+            size_pct.value,
+            size_pct.source.as_str()
+        ));
+    }
+    if notional_pct.is_explicit() {
+        report.push(format!(
+            "risk.max_order_notional_pct={} ({})",
+            notional_pct.value,
+            notional_pct.source.as_str()
+        ));
+    }
+    let mut sizing_echo = vec![
+        format!(
+            "order sizing: per-entry budget {} (0 = off: the absolute size_usd path, order sizes unchanged), \
+             per-order notional cap {}% of the account's cash equity (0 = off)",
+            if size_pct.value > Decimal::ZERO {
+                format!(
+                    "{}% of cash equity ({}; replaces size_usd)",
+                    size_pct.value,
+                    size_pct.source.as_str()
+                )
+            } else {
+                format!(
+                    "absolute size_usd ({}; --size-pct/BK_SIZE_PCT off)",
+                    size_pct.source.as_str()
+                )
+            },
+            notional_pct.value,
+        ),
+        format!(
+            "per-order bounds in force: absolute cap ${}, plus {} (relative cap ON: an over-cap order is REJECTED, never truncated, and closing intents are exempt)",
+            max_order_notional,
+            if notional_pct.value > Decimal::ZERO {
+                format!("{}% of the account's cash equity", notional_pct.value)
+            } else {
+                "NO equity-relative cap".to_string()
+            }
+        ),
+    ];
+    if notional_pct.value <= Decimal::ZERO {
+        sizing_echo.push(
+            "per-order bounds in force: this account has NO bound as a share of itself — one order may commit \
+             the whole of `max_shares × max_price` (10 shares × 1.00 = 10.00 USD by default, 208% of a 4.8 USDC \
+             book). Pass --max-order-notional-pct <pct> or run `node scripts/risk-sizing-check.mjs` to see the number"
+                .to_string(),
+        );
+    }
+
     Args {
         socket,
         mode,
@@ -953,6 +1053,9 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         max_open_notional,
         min_shares,
         max_shares,
+        size_pct: size_pct.value,
+        max_order_notional_pct: notional_pct.value,
+        sizing_echo,
         markets,
         auto_exits,
         max_positions,
@@ -1100,6 +1203,8 @@ fn resolve_event_archive(
 ///   (E2-a: per-strategy sizing, clamped by the global risk band)
 /// * …`:weight` (E16/#98: 7-segment form; the leg's allocation weight, "-"/""
 ///   = unweighted)
+/// * …`:weight:size_pct` (#202: 8-segment form; the leg's own share of the
+///   account per entry, clamped to the global `--size-pct` when that is armed)
 ///
 /// Malformed flags are ignored with a warning so a typo cannot brick startup.
 fn parse_strategy_limits(
@@ -1116,11 +1221,10 @@ fn parse_strategy_limits(
     let mut out = std::collections::HashMap::new();
     for raw in args {
         let parts: Vec<&str> = raw.split(':').collect();
-        if (parts.len() != 3 && parts.len() != 6 && parts.len() != 7) || parts[0].trim().is_empty()
-        {
+        if !matches!(parts.len(), 3 | 6 | 7 | 8) || parts[0].trim().is_empty() {
             eprintln!(
                 "blitzkrieg-core: ignoring malformed --strategy-limit '{raw}' \
-                 (want name:max_open:max_notional[:size_usd:min_shares:max_shares[:weight]])"
+                 (want name:max_open:max_notional[:size_usd:min_shares:max_shares[:weight[:size_pct]]])"
             );
             continue;
         }
@@ -1165,12 +1269,26 @@ fn parse_strategy_limits(
         } else {
             (None, None, None)
         };
-        // E16/#98 allocation weight: 7-segment form only.
-        let size_weight = if parts.len() == 7 {
+        // E16/#98 allocation weight: 7- and 8-segment forms.
+        let size_weight = if parts.len() >= 7 {
             match opt_dec(parts[6]) {
                 Ok(v) => v,
                 Err(_) => {
                     eprintln!("blitzkrieg-core: ignoring --strategy-limit '{raw}' (bad weight)");
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        // #202 equity-relative sizing: 8-segment form only; the weight segment
+        // stays mandatory (write "-" to skip it) so the trailing percentage can
+        // never be mistaken for it.
+        let size_pct = if parts.len() == 8 {
+            match opt_dec(parts[7]) {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("blitzkrieg-core: ignoring --strategy-limit '{raw}' (bad size_pct)");
                     continue;
                 }
             }
@@ -1186,6 +1304,7 @@ fn parse_strategy_limits(
                 min_shares,
                 max_shares,
                 size_weight,
+                size_pct,
             },
         );
     }
@@ -1258,6 +1377,12 @@ async fn main() -> anyhow::Result<()> {
     // layer configured it — a run that set nothing must still say what protects
     // it (the old default was silently uncapped for a small book).
     for line in &args.daily_loss_echo {
+        eprintln!("blitzkrieg-core: {line}");
+    }
+    // #202: what one order may commit on THIS account. Printed unconditionally
+    // for the same reason as the breaker's budget above: the answer must not
+    // depend on someone having thought to configure (or grep) it.
+    for line in &args.sizing_echo {
         eprintln!("blitzkrieg-core: {line}");
     }
 
@@ -1402,6 +1527,8 @@ async fn main() -> anyhow::Result<()> {
         default_maker_timeout_ms: 5000,
         risk: RiskConfig {
             max_order_notional: args.max_order_notional,
+            // #202: the same bound as a share of the account (0 = off).
+            max_order_notional_pct: args.max_order_notional_pct,
             max_open_notional_usd: args.max_open_notional,
             ..Default::default()
         },
@@ -1416,6 +1543,9 @@ async fn main() -> anyhow::Result<()> {
         engine_enabled: args.engine,
         min_shares,
         max_shares,
+        // #202: equity-relative per-entry budget (0 = the absolute size_usd path,
+        // i.e. every deployment's current order sizes, unchanged).
+        size_pct: args.size_pct,
         near_miss_path,
         trade_log_path,
         order_log_path,
@@ -1967,6 +2097,7 @@ mod tests {
             "spread_arb:0:-:abc:1:2",     // bad size_usd
             "spread_arb:0:-:1:abc:2",     // bad min_shares
             "spread_arb:0:-:1:2:abc",     // bad max_shares
+            "spread_arb:0:-:1:2:3:4:x",   // bad size_pct (#202)
         ] {
             assert!(parse_one(bad).is_none(), "must be ignored: {bad}");
         }
@@ -2186,6 +2317,110 @@ mod tests {
             daily_loss_path_for("/tmp/x/pos.jsonl"),
             "/tmp/x/pos.daily-loss.json"
         );
+    }
+
+    // ── #202: the equity-relative sizing / per-order bound ──────────────────
+
+    /// Both knobs default to OFF — the shipped absolute path, order sizes
+    /// unchanged — and the boot log says so, including the number the operator
+    /// would otherwise have to derive: the widest ticket the defaults allow as a
+    /// share of the live 4.8 USDC book.
+    #[test]
+    fn the_equity_knobs_default_to_off_and_the_echo_states_the_worst_case() {
+        let a = args_from(&[]);
+        assert_eq!(a.size_pct, Decimal::ZERO);
+        assert_eq!(a.max_order_notional_pct, Decimal::ZERO);
+        assert!(
+            !a.config_report
+                .iter()
+                .any(|l| l.contains("size_pct") || l.contains("notional_pct")),
+            "nothing explicit, nothing reported: {:?}",
+            a.config_report
+        );
+        let echo = a.sizing_echo.join("\n");
+        assert!(echo.contains("absolute size_usd"), "{echo}");
+        assert!(
+            echo.contains("(default; --size-pct/BK_SIZE_PCT off)"),
+            "{echo}"
+        );
+        assert!(echo.contains("NO equity-relative cap"), "{echo}");
+        assert!(echo.contains("208% of a 4.8 USDC book"), "{echo}");
+        assert!(echo.contains("scripts/risk-sizing-check.mjs"), "{echo}");
+    }
+
+    #[test]
+    fn the_equity_knobs_are_settable_by_flag_and_by_env() {
+        let a = args_from(&["--size-pct", "20", "--max-order-notional-pct", "20"]);
+        assert_eq!(a.size_pct, dec!(20));
+        assert_eq!(a.max_order_notional_pct, dec!(20));
+        assert!(
+            a.config_report
+                .iter()
+                .any(|l| l == "engine.size_pct=20 (cli)"),
+            "{:?}",
+            a.config_report
+        );
+        assert!(
+            a.config_report
+                .iter()
+                .any(|l| l == "risk.max_order_notional_pct=20 (cli)"),
+            "{:?}",
+            a.config_report
+        );
+        let echo = a.sizing_echo.join("\n");
+        assert!(
+            echo.contains("20% of cash equity (cli; replaces size_usd)"),
+            "{echo}"
+        );
+        assert!(echo.contains("REJECTED, never truncated"), "{echo}");
+
+        // Same chain as every other knob: env supplies, CLI outranks.
+        let env = env_of(&[("BK_SIZE_PCT", "7.5"), ("BK_MAX_ORDER_NOTIONAL_PCT", "15")]);
+        let b = parse_args(
+            &blitzkrieg_core::config::FileConfig::default(),
+            &["--no-config".to_string()],
+            &env,
+        );
+        assert_eq!(b.size_pct, dec!(7.5));
+        assert_eq!(b.max_order_notional_pct, dec!(15));
+        assert!(
+            b.config_report
+                .iter()
+                .any(|l| l == "engine.size_pct=7.5 (env)"),
+            "{:?}",
+            b.config_report
+        );
+        let c = parse_args(
+            &blitzkrieg_core::config::FileConfig::default(),
+            &["--size-pct".to_string(), "9".to_string()],
+            &env,
+        );
+        assert_eq!(c.size_pct, dec!(9), "CLI must outrank the environment");
+        assert_eq!(
+            c.max_order_notional_pct,
+            dec!(15),
+            "untouched env knob stays"
+        );
+    }
+
+    #[test]
+    fn eight_segment_form_parses_the_legs_own_equity_pct() {
+        // #202: the 8th segment is the leg's own share of the account.
+        let l = parse_one("dip_buyer:2:20:1.5:4:8:0.5:10").expect("8-segment form must parse");
+        assert_eq!(l.size_weight, Some(dec!(0.5)));
+        assert_eq!(l.size_pct, Some(dec!(10)));
+        assert!(l.sizing().overrides_anything());
+        // The weight slot stays mandatory, so a percentage can never be read as
+        // a weight ("-" skips the weight, the same convention as every segment).
+        let l2 = parse_one("dip_buyer:2:20:1.5:4:8:-:10").expect("blank weight = unweighted");
+        assert_eq!(l2.size_weight, None);
+        assert_eq!(l2.size_pct, Some(dec!(10)));
+        // The 7- and 6-segment forms keep their own meaning: no percentage.
+        assert_eq!(
+            parse_one("dip_buyer:2:20:1.5:4:8:0.5").unwrap().size_pct,
+            None
+        );
+        assert_eq!(parse_one("dip_buyer:2:20:1.5:4:8").unwrap().size_pct, None);
     }
 
     #[test]

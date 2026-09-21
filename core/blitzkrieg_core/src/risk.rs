@@ -32,6 +32,18 @@ fn closes_exposure(req: &OrderRequest) -> bool {
 #[derive(Debug, Clone)]
 pub struct RiskConfig {
     pub max_order_notional: Decimal,
+    /// P0 #202 — the same per-order bound, expressed as a PERCENTAGE of the
+    /// account's cash equity at submission time. 0 = disabled (the shipped
+    /// default: an unconfigured kernel behaves exactly as before).
+    ///
+    /// The absolute `max_order_notional` is a fixed number, so on a small book
+    /// it is decoration rather than a bound: the supervisor derives 6.00 USD
+    /// from `max_shares × 0.6`, which on the live 4.8 USDC account is 125% of
+    /// it — and 10 shares at 0.60 (the smallest ticket the default share band
+    /// produces) is already 125% of the book. A cap relative to the account is
+    /// the only form that bounds "any one order" on every account size, which
+    /// is what the operator actually asked for.
+    pub max_order_notional_pct: Decimal,
     /// Portfolio-level cap on TOTAL open notional across all strategies
     /// (E16/#98). 0 = disabled (the shipped default); per-strategy caps are
     /// partitioned by `StrategyLimit.max_open_notional_usd`.
@@ -46,6 +58,7 @@ impl Default for RiskConfig {
             // Mirrors the Node HFT defaults ($2.5/order, prices within the band).
             max_order_notional: Decimal::from(100),
             // Off by default: a shipped-behaviour change would need data.
+            max_order_notional_pct: Decimal::ZERO,
             max_open_notional_usd: Decimal::ZERO,
             min_price: Decimal::ZERO,
             max_price: Decimal::ONE,
@@ -235,6 +248,21 @@ impl RiskGate {
     }
 
     pub fn check(&self, req: &OrderRequest) -> CoreResult<()> {
+        self.check_with_equity(req, Decimal::ZERO)
+    }
+
+    /// [`RiskGate::check`] with the account's cash equity, which the
+    /// equity-relative per-order cap (#202) is a percentage of. The caller that
+    /// knows the balance is the one that holds the ledger, so the equity is
+    /// passed in rather than remembered here: a stored copy can go stale, and a
+    /// stale equity silently bounds a grown account by an old number.
+    ///
+    /// `equity_usd <= 0` means "unknown" and disables only the relative cap. An
+    /// absent equity must not veto orders (the cap is a bound, and refusing
+    /// everything because a caller did not say how big the account is would be
+    /// the wrong failure); the wiring test in `service` is what keeps the live
+    /// path from silently losing the cap.
+    pub fn check_with_equity(&self, req: &OrderRequest, equity_usd: Decimal) -> CoreResult<()> {
         // The kill switch freezes NEW exposure, never the way OUT of it. A kill
         // is raised exactly when the book is most dangerous (venue refusals,
         // failed self-check, blind sweeps), so vetoing the closing SELL would
@@ -275,6 +303,35 @@ impl RiskGate {
                     format!(
                         "notional {notional} exceeds per-order cap {}",
                         self.config.max_order_notional
+                    ),
+                ));
+            }
+        }
+        // P0 #202 — the equity-relative cap. It bounds ANY order that is not
+        // the way OUT of a position, and only over-cap orders: it REJECTS, it
+        // never truncates, because a truncated entry is a different trade than
+        // the one the strategy asked for and the sizing decision belongs to
+        // the sizing knobs (see `EngineConfig::size_pct`), not to a silent
+        // clamp in the risk layer.
+        //
+        // `closes_exposure` is the same single judgment the kill switch uses,
+        // and it is load-bearing here rather than decorative: a 10-share close
+        // at 0.60 on a 4.8 USDC book is 6.00 USD, five times a 20% cap. If the
+        // cap applied to it, the position could not be exited at all — the
+        // #174 hole reopened through a different door.
+        if !closes_exposure(req)
+            && self.config.max_order_notional_pct > Decimal::ZERO
+            && equity_usd > Decimal::ZERO
+        {
+            let cap = equity_usd * self.config.max_order_notional_pct / Decimal::ONE_HUNDRED;
+            let notional = req.price * req.size;
+            if notional > cap {
+                return Err(CoreError::new(
+                    CoreErrorCode::RiskRejected,
+                    format!(
+                        "notional {notional} exceeds the {}% equity cap {cap} (equity {equity_usd}); \
+                         size the order down or raise the cap — the cap never truncates",
+                        self.config.max_order_notional_pct
                     ),
                 ));
             }
@@ -388,6 +445,116 @@ mod tests {
         // ...and resuming restores entries.
         g.resume();
         g.check(&buy).unwrap();
+    }
+
+    /// P0 #202: the per-order notional bound written as a share of the account
+    /// — and the one thing it must never do, block the way out of a position.
+    #[test]
+    fn equity_notional_cap_rejects_over_cap_orders_but_never_closes() {
+        // A 4.8 USDC account with a 20% cap: 0.96 USD per order. The absolute
+        // cap is deliberately wide (1000) so only the RELATIVE one can bite.
+        let equity = dec!(4.8);
+        let g = RiskGate::new(RiskConfig {
+            max_order_notional: dec!(1000),
+            max_order_notional_pct: dec!(20),
+            ..Default::default()
+        });
+        // The measured live ticket — 10 shares at 0.40 = 4.00 = 83% of the
+        // account — is refused. This is the order the 6.00 absolute cap waved
+        // through (issue #202's premise).
+        let err = g
+            .check_with_equity(&req(Side::Buy, dec!(0.40), dec!(10)), equity)
+            .unwrap_err();
+        assert_eq!(err.code, CoreErrorCode::RiskRejected);
+        assert!(
+            err.message.contains("equity cap"),
+            "the refusal must name the cap that bit: {}",
+            err.message
+        );
+        // The largest whole ticket inside the cap passes: 2 shares = 0.80.
+        g.check_with_equity(&req(Side::Buy, dec!(0.40), dec!(2)), equity)
+            .unwrap();
+        // "Any one order" means any: a SELL that does not name a close intent
+        // is bounded too. Today's gate only capped BUYs; this is the wider
+        // scope of the new cap, and it is why the exemption below matters.
+        assert_eq!(
+            g.check_with_equity(&req_with_key(Side::Sell, "spread_arb:BTC"), equity)
+                .unwrap_err()
+                .code,
+            CoreErrorCode::RiskRejected
+        );
+        // Every close-intent spelling passes at a notional far over the cap
+        // (10 shares at 0.60 = 6.00 = 6.25x). This is the escape hatch #174
+        // depends on; a cap that re-locks it is #174 over again.
+        for key in [
+            "exit:tok:StopLoss",
+            "exit-strategy:tok:close",
+            "flatten:hft-3",
+            "exit-residual:tok",
+            "exit:tok:StopLoss:escalated",
+            "flatten:hft-3:escalated",
+        ] {
+            let mut close = req_with_key(Side::Sell, key);
+            close.price = dec!(0.60);
+            close.size = dec!(10);
+            g.check_with_equity(&close, equity)
+                .unwrap_or_else(|e| panic!("{key} must pass the equity cap: {e}"));
+        }
+        // The exemption is exactly one gate wide: the other invariants still
+        // apply to a closing SELL (here: size must be positive).
+        assert_eq!(
+            g.check_with_equity(
+                &OrderRequest {
+                    internal_key: "flatten:hft-1".into(),
+                    size: Decimal::ZERO,
+                    ..req(Side::Sell, dec!(0.5), dec!(1))
+                },
+                equity
+            )
+            .unwrap_err()
+            .code,
+            CoreErrorCode::RiskRejected
+        );
+    }
+
+    /// Unconfigured (`pct = 0`) and equity-less calls must behave exactly as
+    /// before: the relative cap exists only when someone asked for it, so a
+    /// shipped deployment's order flow is unchanged by this PR.
+    #[test]
+    fn equity_notional_cap_is_inert_when_unconfigured_or_equityless() {
+        let plain = RiskGate::new(RiskConfig {
+            max_order_notional: dec!(3),
+            ..Default::default()
+        });
+        // 6.00 over the absolute 3.00 cap → refused by the ABSOLUTE cap only.
+        assert!(
+            plain
+                .check_with_equity(&req(Side::Buy, dec!(0.60), dec!(10)), dec!(4.8))
+                .is_err()
+        );
+        // 2.00 under it → admitted, with or without an equity argument.
+        plain
+            .check_with_equity(&req(Side::Buy, dec!(0.5), dec!(4)), dec!(4.8))
+            .unwrap();
+        plain
+            .check_with_equity(&req(Side::Buy, dec!(0.5), dec!(4)), Decimal::ZERO)
+            .unwrap();
+        // Relative cap armed, equity unknown: still inert (2.00 is 42% of 4.8,
+        // and with the equity stated it IS refused — so the only difference
+        // between these two lines is the argument).
+        let armed = RiskGate::new(RiskConfig {
+            max_order_notional: dec!(1000),
+            max_order_notional_pct: dec!(20),
+            ..Default::default()
+        });
+        armed
+            .check_with_equity(&req(Side::Buy, dec!(0.5), dec!(4)), Decimal::ZERO)
+            .unwrap();
+        assert!(
+            armed
+                .check_with_equity(&req(Side::Buy, dec!(0.5), dec!(4)), dec!(4.8))
+                .is_err()
+        );
     }
 
     #[test]
