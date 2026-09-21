@@ -164,6 +164,29 @@ impl LossBreakers {
         b.record(net_pnl, now_ms)
     }
 
+    /// F4: unwind one recorded close for `strategy`. A FAILED status arriving
+    /// for a trade whose close was already booked must not leave the breaker
+    /// counting a close that never settled.
+    ///
+    /// `streak_before` is the consecutive-loss count on file just before the
+    /// close was recorded; a reversed WIN had reset the streak and that is the
+    /// only recoverable value for it. A reversed loss decrements the count and
+    /// lifts a halt this loss caused (the count dropping below the trip
+    /// threshold means the halt's cause is gone).
+    pub fn retract(&mut self, strategy: &str, net_pnl: Decimal, streak_before: u32) {
+        let Some(b) = self.per_strategy.get_mut(strategy) else {
+            return;
+        };
+        if net_pnl < Decimal::ZERO {
+            b.consecutive_losses = b.consecutive_losses.saturating_sub(1);
+            if b.halted_until_ms > 0 && b.consecutive_losses < self.max_consecutive_losses {
+                b.halted_until_ms = 0;
+            }
+        } else if net_pnl > Decimal::ZERO {
+            b.consecutive_losses = streak_before;
+        }
+    }
+
     /// Is `strategy` currently halted? An unknown strategy is never halted —
     /// a breaker only exists once that leg has recorded a close.
     pub fn is_halted(&self, strategy: &str, now_ms: i64) -> bool {

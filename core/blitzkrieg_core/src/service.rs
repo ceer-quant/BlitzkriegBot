@@ -919,8 +919,30 @@ pub struct Core {
     /// Last free-cash figure the venue reported, as `(at_ms, free)` — the venue
     /// leg of the audit compares against it.
     venue_free: Option<(i64, Decimal)>,
+    /// F4: close-accounting credentials for fill-driven full closes, keyed by
+    /// the OME trade key. A MATCHED sell that emptied a position books TradeDb /
+    /// strategy PnL / breaker immediately; if the venue later reports that same
+    /// trade FAILED, the credential is what lets the service unwind each of
+    /// those ledgers instead of leaving phantom profit behind. FIFO-capped:
+    /// the FAILED normally arrives seconds after the fill that created it.
+    close_credentials: std::collections::VecDeque<(String, CloseCredential)>,
     next_id: u64,
     tx: Option<mpsc::UnboundedSender<Event>>,
+}
+
+/// F4: what a fill-driven full close changed, so a later FAILED status for the
+/// same trade can reverse every one of those ledgers exactly.
+struct CloseCredential {
+    /// The position-book row as it stood BEFORE the closing fill removed it —
+    /// the exact inventory to restore.
+    restored: crate::position::OpenPosition,
+    /// The closed record `on_position_closed` booked (TradeDb / accounting /
+    /// breaker / daily PnL), for unwinding.
+    closed: crate::position::ClosedPosition,
+    /// The strategy breaker's consecutive-loss count just before this close
+    /// was recorded: a reversed WIN had reset the streak, and that is the only
+    /// recoverable value (retract restores it).
+    streak_before: u32,
 }
 
 impl Core {
@@ -1124,6 +1146,7 @@ impl Core {
             },
             settlement,
             venue_free: None,
+            close_credentials: std::collections::VecDeque::new(),
             next_id: 1,
             tx: None,
         }
@@ -3431,7 +3454,8 @@ impl Core {
             let fee_pct = if d.role.is_maker() {
                 Decimal::ZERO
             } else {
-                crate::exit_policy::taker_fee_pct(px)
+                // F8: fees follow the configured fee model (ExitConfig.fee_model).
+                self.config.positions.exit.fee_model.fee_pct(px)
             };
             fee_usd = (fee_pct / Decimal::ONE_HUNDRED) * notional;
             match d.side {
@@ -3542,6 +3566,16 @@ impl Core {
                     .map(|p| p.id.clone());
                 match found {
                     Some(id) => {
+                        // F4: the row BEFORE this exit fill accrues is the exact
+                        // inventory a later FAILED status for this trade must
+                        // restore (after apply_exit_fill the row is a zeroed
+                        // shell — useless for a restore).
+                        let pre_exit = self
+                            .positions
+                            .open_positions()
+                            .iter()
+                            .find(|p| p.id == id)
+                            .cloned();
                         // Accrue the exit first, so the close reads final flows.
                         let left = self
                             .positions
@@ -3574,9 +3608,20 @@ impl Core {
                                 let reason =
                                     self.take_exit_reason(token).unwrap_or(ExitReason::Manual);
                                 let was_maker = d.role.is_maker();
+                                let streak_before = self.breaker.consecutive_losses(&d.strategy);
                                 if let Some(closed) =
                                     self.positions.close(&id, px, reason, was_maker, now_ms)
                                 {
+                                    if let Some(restored) = pre_exit {
+                                        self.push_close_credential(
+                                            d.trade_id.clone(),
+                                            CloseCredential {
+                                                restored,
+                                                closed: closed.clone(),
+                                                streak_before,
+                                            },
+                                        );
+                                    }
                                     self.persist_positions();
                                     self.on_position_closed(&closed, now_ms);
                                 }
@@ -3588,17 +3633,30 @@ impl Core {
                         }
                     }
                     None if d.delta < Decimal::ZERO => {
-                        // No position at all for the token: the reversal cannot be
-                        // applied. Never swallow it.
-                        self.emit(Event::Error {
-                            error: CoreError::new(
-                                CoreErrorCode::Internal,
-                                format!(
-                                    "exit rollback {} for token {token} has no open position to reverse",
-                                    d.order_id
+                        // F4: the fill this rollback reverses may have already
+                        // fully closed the position and booked the close
+                        // (TradeDb / strategy PnL / breaker / daily PnL). Unwind
+                        // all of it; only a rollback with NO credential on file
+                        // is unexplainable.
+                        let consumed = self
+                            .close_credentials
+                            .iter()
+                            .position(|(tid, _)| *tid == d.trade_id)
+                            .map(|i| self.close_credentials.remove(i).unwrap().1);
+                        match consumed {
+                            Some(cred) => self.unwind_closed_trade(cred, d, now_ms),
+                            // No position at all for the token: the reversal cannot
+                            // be applied. Never swallow it.
+                            None => self.emit(Event::Error {
+                                error: CoreError::new(
+                                    CoreErrorCode::Internal,
+                                    format!(
+                                        "exit rollback {} for token {token} has no open position to reverse",
+                                        d.order_id
+                                    ),
                                 ),
-                            ),
-                        });
+                            }),
+                        }
                     }
                     None => {}
                 }
@@ -3834,6 +3892,72 @@ impl Core {
         })
     }
 
+    /// F4: file a close-accounting credential under a trade key. FIFO-capped —
+    /// the FAILED that consumes a credential normally arrives seconds after the
+    /// fill that created it, so a small window is all the pairing needs.
+    fn push_close_credential(&mut self, trade_id: String, cred: CloseCredential) {
+        if trade_id.is_empty() {
+            return;
+        }
+        while self.close_credentials.len() >= 512 {
+            self.close_credentials.pop_front();
+        }
+        self.close_credentials.push_back((trade_id, cred));
+    }
+
+    /// F4: a FAILED status arrived for a trade whose sell fill had already
+    /// fully closed a position and booked the close. Reverse every ledger that
+    /// close touched, in the order the close applied them:
+    ///   1. position inventory — restore the exact open row (shares, basis,
+    ///      flows) and hand back the daily PnL the close added;
+    ///   2. TradeDb — retract the record (JSONL line dropped, summary rebuilt);
+    ///   3. per-strategy accounting — counts, fees and net PnL back out;
+    ///   4. consecutive-loss breaker — remove the loss / restore the streak
+    ///      the win had reset, lifting a halt this close caused.
+    ///
+    /// Cash needs nothing here: `apply_delta_effects` already refunded it
+    /// before projecting this rollback.
+    fn unwind_closed_trade(&mut self, cred: CloseCredential, d: &FillDelta, now_ms: i64) {
+        let closed = &cred.closed;
+        let restored = self.positions.restore_closed(cred.restored, closed);
+        if restored {
+            self.persist_positions();
+        }
+        if let Some(db) = self.trade_db.as_mut() {
+            let rec = crate::trade_db::TradeRecord::from_closed(closed);
+            db.retract(&rec, now_ms);
+        }
+        {
+            let entry_fee =
+                (closed.entry_fee_pct / Decimal::ONE_HUNDRED) * closed.entry_price * closed.shares;
+            let exit_fee =
+                (closed.exit_fee_pct / Decimal::ONE_HUNDRED) * closed.exit_price * closed.shares;
+            let acc = self
+                .strategy_accounting
+                .entry(closed.strategy.clone())
+                .or_default();
+            acc.closed_trades = acc.closed_trades.saturating_sub(1);
+            if closed.net_pnl_usd >= Decimal::ZERO {
+                acc.wins = acc.wins.saturating_sub(1);
+            } else {
+                acc.losses = acc.losses.saturating_sub(1);
+            }
+            acc.fees_usd -= entry_fee + exit_fee;
+            acc.net_pnl_usd -= closed.net_pnl_usd;
+        }
+        self.breaker
+            .retract(&closed.strategy, closed.net_pnl_usd, cred.streak_before);
+        tracing::warn!(
+            order_id = %d.order_id,
+            token = %d.token_id,
+            trade = %d.trade_id,
+            position = %closed.id,
+            inventory_restored = restored,
+            net_pnl_reversed = %closed.net_pnl_usd,
+            "FAILED trade reversed a full close: position inventory restored, close ledgers unwound"
+        );
+    }
+
     /// Map a venue order id to a core order (for user-WS events). Returns the
     /// core id when known.
     pub fn core_id_for_venue(&self, venue_or_core: &str) -> Option<String> {
@@ -3929,6 +4053,12 @@ impl Core {
     /// would fight the engine. Dedup is a persisted watermark: only fills
     /// strictly newer than the last applied one count, so a restart cannot
     /// re-apply what the sweep still reports.
+    ///
+    /// F2: the venue adapter only forwards legs it proved belong to our
+    /// funder, and this loop stays conservative anyway — an unknown SELL is
+    /// never booked beyond the inventory the token's position can actually
+    /// attribute: size AND proceeds are truncated to what is held, so a
+    /// mis-attributed over-sell cannot mint cash.
     fn apply_external_fills(&mut self, fills: &[crate::reconcile::VenueTrade], now_ms: i64) {
         if fills.is_empty() {
             return;
@@ -3945,20 +4075,29 @@ impl Core {
             if t.side != Side::Sell {
                 continue;
             }
-            let Some(position_id) = self
+            let Some((position_id, held)) = self
                 .positions
                 .open_positions()
                 .iter()
                 .find(|p| p.token_id == t.token_id)
-                .map(|p| p.id.clone())
+                .map(|p| (p.id.clone(), p.shares))
             else {
                 continue;
             };
-            let notional = t.price * t.size;
+            // F2: clamp the size to attributable inventory and price the cash
+            // on the CLAMPED size — truncating the size while keeping the full
+            // notional would still book the counterparty's money.
+            let size = t.size.min(held);
+            if size <= Decimal::ZERO {
+                continue;
+            }
+            let notional = t.price * size;
             let fee_usd = if t.maker == Some(true) {
                 Decimal::ZERO
             } else {
-                (crate::exit_policy::taker_fee_pct(t.price) / Decimal::ONE_HUNDRED) * notional
+                // F8: fees follow the configured fee model (ExitConfig.fee_model).
+                (self.config.positions.exit.fee_model.fee_pct(t.price) / Decimal::ONE_HUNDRED)
+                    * notional
             };
             self.ledger.settle_sell_fill(notional, fee_usd);
             let role = if t.maker == Some(true) {
@@ -3968,27 +4107,36 @@ impl Core {
             };
             let remaining = self
                 .positions
-                .apply_exit_fill(&position_id, t.size, t.price, fee_usd, role)
+                .apply_exit_fill(&position_id, size, t.price, fee_usd, role)
                 .unwrap_or(Decimal::ZERO);
             if remaining == Decimal::ZERO {
-                self.positions.close(
+                // F10: a manual full close must hit the SAME close ledger the
+                // engine's own fills do — TradeDb, strategy PnL, win/loss and
+                // the consecutive-loss breaker. `close()` removes the position
+                // from the book, so re-reporting the same trade cannot close
+                // it twice: that removal IS the idempotence guard.
+                if let Some(closed) = self.positions.close(
                     &position_id,
                     t.price,
                     ExitReason::Manual,
                     t.maker == Some(true),
                     now_ms,
-                );
-                // This path closes without going through `on_position_closed`
-                // (the OME never issued the order, so there is no core order to
-                // report), so the pending-close reason is retired here: the
-                // position it belonged to is gone (issue #190).
+                ) {
+                    self.persist_positions();
+                    self.on_position_closed(&closed, now_ms);
+                }
+                // Belt and braces: this path can close without the OME ever
+                // issuing an order, and the pending-close reason must not
+                // outlive the position it belonged to (issue #190) — the
+                // reason is retired here even if no closed record came back.
                 self.clear_exit_reason(&t.token_id);
             }
             self.persist_positions();
             applied += 1;
             tracing::info!(
                 token = %t.token_id,
-                size = %t.size,
+                requested_size = %t.size,
+                applied_size = %size,
                 price = %t.price,
                 remaining = %remaining,
                 "external close reconciled (manual venue sell folded into the position book)"
@@ -4165,17 +4313,18 @@ impl Core {
         self.emit_risk_alert(CoreErrorCode::RiskRejected, message);
     }
 
-    /// Report every protective stop the wick guard withheld (P0 #177): the
+    /// Report every exit withheld from becoming an order (P0 #177, F6): the
     /// audit trail must show "should have triggered" instead of a silent hold.
     fn emit_suppressed_stops(&mut self) {
         for ev in self.positions.drain_suppressed_stops() {
             tracing::warn!(
                 position = %ev.position_id,
                 token = %ev.token_id,
+                cause = ?ev.cause,
                 bid = %ev.bid,
                 mid = %ev.mid,
                 stop_pct = %ev.stop_pct,
-                "protective stop suppressed by the wick guard (mid did not confirm)"
+                "protective stop suppressed"
             );
             self.emit_risk_alert(CoreErrorCode::RiskRejected, ev.message());
         }
@@ -10753,5 +10902,353 @@ mod exit_reason_table_tests {
         let off = view(0);
         assert_eq!(off["maxStaleMs"], serde_json::json!(0));
         assert_eq!(off["checkEnabled"], serde_json::json!(false));
+    }
+}
+
+/// ── Audit F2/F10/F4: reverse acceptance tests ───────────────────────────────
+///
+/// One test per audit finding, each driving the exact counterexample from
+/// `BlitzkriegBot_核心逻辑审计.md` through the REAL production path and
+/// asserting the account does NOT move the way the bug moved it:
+///
+///  - F2: a counterparty's 100-share SELL must never book against a 10-share
+///    inventory — the clamp truncates size AND proceeds; nothing attributable
+///    to inventory is never booked at all.
+///  - F4: a fully-closing SELL that later arrives FAILED must restore the
+///    position inventory and reverse the profit (TradeDb, strategy PnL, daily
+///    PnL, breaker) instead of leaving phantom profit behind.
+///  - F10: a manual (external) full close at a LOSS must reach the SAME close
+///    ledger the engine's own fills do — TradeDb record, strategy net PnL,
+///    win/loss counts and the PositionClosed event.
+#[cfg(test)]
+mod audit_fix_tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    const SEED: Decimal = dec!(1000);
+    const STRATEGY: &str = "acc";
+
+    fn core_with_trade_log(path: Option<std::path::PathBuf>) -> Core {
+        let mut cfg = CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: SEED,
+            auto_exits_enabled: false,
+            ..Default::default()
+        };
+        cfg.trade_log_path = path.map(|p| p.to_string_lossy().into_owned());
+        let mut c = Core::new(cfg);
+        c.set_balance(SEED);
+        c
+    }
+
+    fn core() -> Core {
+        core_with_trade_log(None)
+    }
+
+    fn tmp_trade_log(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        // TradeDb keeps summary.json beside the log, so each fixture needs its
+        // own DIRECTORY — a bare file in the shared temp root would make every
+        // test load (and persist onto) the same summary.json.
+        let dir = std::env::temp_dir().join(format!("bk-audit-{tag}-{nanos}"));
+        dir.join("trades.jsonl")
+    }
+
+    fn req(side: Side, mode: FillPolicy, price: Decimal, size: Decimal, key: &str) -> OrderRequest {
+        OrderRequest {
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            side,
+            mode,
+            price,
+            size,
+            internal_key: key.into(),
+            strategy: STRATEGY.into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 1,
+        }
+    }
+
+    fn fill(
+        order_id: &str,
+        trade: &str,
+        side: Side,
+        price: Decimal,
+        size: Decimal,
+        status: FillStatus,
+    ) -> Fill {
+        Fill {
+            order_id: order_id.into(),
+            trade_id: Some(trade.into()),
+            token_id: "tok".into(),
+            side,
+            price,
+            size,
+            status,
+            ts_ms: 0,
+            tx_hash: None,
+            // Maker-mode orders with no venue report → the policy decides, and
+            // these fixtures are exactly what the policy would produce.
+            maker: None,
+        }
+    }
+
+    /// Open a maker position of `size` shares at `price` through the REAL
+    /// live fill path (register → venue ack → user-WS fill).
+    fn open_maker_position(c: &mut Core, price: Decimal, size: Decimal, now: i64) {
+        let (id, _) = c
+            .place_pending(req(Side::Buy, FillPolicy::Maker, price, size, "entry"), now)
+            .unwrap();
+        c.confirm_live(&id, now).unwrap();
+        c.ingest_fill(
+            fill(&id, "e1", Side::Buy, price, size, FillStatus::Confirmed),
+            now + 1,
+        )
+        .unwrap();
+    }
+
+    fn external_sell(size: Decimal, price: Decimal, ts_ms: i64) -> crate::reconcile::VenueSnapshot {
+        crate::reconcile::VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![crate::reconcile::VenueTrade {
+                venue_order_id: "0xmanual".into(),
+                trade_id: "t-manual".into(),
+                token_id: "tok".into(),
+                side: Side::Sell,
+                size,
+                price,
+                ts_ms,
+                tx_hash: None,
+                maker: Some(true),
+            }],
+            now_ms: ts_ms + 1_000,
+        }
+    }
+
+    /// F2, counterexample: our maker BUY bought 10 shares @ 0.40 (cost 4);
+    /// the counterparty taker SOLD 100 shares in that same match, the other 90
+    /// bought by other makers. A venue SELL leg that cannot be attributed to
+    /// our inventory must not mint cash.
+    ///
+    /// (a) a SELL with NO open position for the token: booked nowhere;
+    /// (b) an oversized SELL against 10 held shares: size AND proceeds are
+    ///     truncated to the attributable inventory — proceeds 4, net 0, cash
+    ///     back to seed — NOT the audit's 40 proceeds / +36 net (882%).
+    #[test]
+    fn external_sell_beyond_attributable_inventory_never_mints_cash() {
+        let mut c = core();
+
+        // (a) no position: the SELL matches nothing and must change nothing.
+        c.reconcile(external_sell(dec!(100), dec!(0.40), 1_000))
+            .unwrap();
+        assert_eq!(c.positions().open_positions().len(), 0);
+        assert_eq!(c.positions().closed_positions().len(), 0);
+        assert_eq!(c.ledger().balance(), SEED, "no position, no booking");
+        assert_eq!(c.positions().daily_pnl(), Decimal::ZERO);
+
+        // (b) hold 10 shares @ 0.40 (maker entry, cost 4, no fee).
+        open_maker_position(&mut c, dec!(0.40), dec!(10), 4_000);
+        assert_eq!(c.positions().open_positions()[0].shares, dec!(10));
+        assert_eq!(c.positions().open_positions()[0].cost_usd, dec!(4));
+        assert_eq!(c.ledger().balance(), SEED - dec!(4));
+        let bal_after_entry = c.ledger().balance();
+
+        // The counterparty's 100-share sell: clamped to the 10 shares we hold.
+        c.reconcile(external_sell(dec!(100), dec!(0.40), 6_000))
+            .unwrap();
+
+        let closed = &c.positions().closed_positions();
+        assert_eq!(closed.len(), 1, "the held shares were sold off");
+        assert_eq!(closed[0].shares, dec!(10));
+        // Proceeds truncated to inventory value: 10 × 0.40 = 4, not 100 × 0.40.
+        assert_eq!(closed[0].pnl_usd, dec!(4) - dec!(4), "proceeds capped at 4");
+        assert_eq!(
+            closed[0].net_pnl_usd,
+            Decimal::ZERO,
+            "no phantom profit from the counterparty's size"
+        );
+        // Cash: entry cost 4, proceeds 4 → back to seed. NOT seed + 36.
+        assert_eq!(
+            c.ledger().balance(),
+            bal_after_entry + dec!(4),
+            "the ledger received exactly the attributable proceeds"
+        );
+        assert_eq!(c.positions().daily_pnl(), Decimal::ZERO);
+        // Strategy accounting: a flat close is NOT a +36 win.
+        let acc = c.strategy_accounting.get(STRATEGY).expect("accounting row");
+        assert_eq!(acc.net_pnl_usd, Decimal::ZERO);
+        assert_eq!(acc.wins, 1);
+        assert_eq!(acc.losses, 0);
+    }
+
+    /// F4, counterexample: maker BUY 10 @ 0.40, maker SELL 10 @ 0.80 booked
+    /// +4 realized on MATCHED; the venue then reports the same trade FAILED.
+    /// The sale never happened: inventory must come back and every ledger the
+    /// close touched must reverse.
+    #[test]
+    fn failed_status_after_full_close_restores_inventory_and_reverses_profit() {
+        let log = tmp_trade_log("f4");
+        let mut c = core_with_trade_log(Some(log.clone()));
+
+        open_maker_position(&mut c, dec!(0.40), dec!(10), 1_000);
+        let (sid, _) = c
+            .place_pending(
+                req(Side::Sell, FillPolicy::Maker, dec!(0.80), dec!(10), "exit"),
+                2_000,
+            )
+            .unwrap();
+        c.confirm_live(&sid, 2_000).unwrap();
+        c.ingest_fill(
+            fill(
+                &sid,
+                "x1",
+                Side::Sell,
+                dec!(0.80),
+                dec!(10),
+                FillStatus::Confirmed,
+            ),
+            3_000,
+        )
+        .unwrap();
+
+        // The close was fully booked.
+        assert!(c.positions().open_positions().is_empty());
+        let closed = &c.positions().closed_positions()[0];
+        assert_eq!(closed.net_pnl_usd, dec!(4));
+        assert_eq!(c.ledger().balance(), SEED + dec!(4));
+        assert_eq!(c.positions().daily_pnl(), dec!(4));
+        {
+            let acc = c.strategy_accounting.get(STRATEGY).expect("accounting row");
+            assert_eq!(acc.closed_trades, 1);
+            assert_eq!(acc.wins, 1);
+            assert_eq!(acc.net_pnl_usd, dec!(4));
+        }
+        assert_eq!(c.trade_db.as_ref().unwrap().summary().total_trades, 1);
+        assert_eq!(c.trade_db.as_ref().unwrap().summary().total_net_pnl, 4.0);
+
+        // FAILED arrives for the same trade → the rollback must unwind it all.
+        c.ingest_fill(
+            fill(
+                &sid,
+                "x1",
+                Side::Sell,
+                dec!(0.80),
+                dec!(10),
+                FillStatus::Failed,
+            ),
+            4_000,
+        )
+        .unwrap();
+
+        // Inventory restored exactly: 10 shares @ 0.40 basis.
+        assert_eq!(
+            c.positions().open_positions().len(),
+            1,
+            "the unsold position is back on the books"
+        );
+        let pos = &c.positions().open_positions()[0];
+        assert_eq!(pos.shares, dec!(10));
+        assert_eq!(pos.cost_usd, dec!(4));
+        assert_eq!(pos.entry_price, dec!(0.40));
+        // The phantom close is gone from the realized book.
+        assert!(
+            c.positions().closed_positions().is_empty(),
+            "a trade that never happened must not stay realized"
+        );
+        // Cash refunded to post-entry; profit reversed.
+        assert_eq!(c.ledger().balance(), SEED - dec!(4));
+        assert_eq!(c.positions().daily_pnl(), Decimal::ZERO);
+        {
+            let acc = c.strategy_accounting.get(STRATEGY).expect("accounting row");
+            assert_eq!(acc.closed_trades, 0);
+            assert_eq!(acc.wins, 0);
+            assert_eq!(acc.fees_usd, Decimal::ZERO);
+            assert_eq!(acc.net_pnl_usd, Decimal::ZERO);
+        }
+        // TradeDb: record withdrawn, summary back to zero.
+        assert_eq!(c.trade_db.as_ref().unwrap().summary().total_trades, 0);
+        assert_eq!(c.trade_db.as_ref().unwrap().summary().total_net_pnl, 0.0);
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .trim()
+                .is_empty(),
+            "the retracted trade must not remain in the JSONL"
+        );
+
+        // E17 cash identity over the whole round trip: cash + open basis
+        // equals the seed — nothing leaked in either direction.
+        assert_eq!(
+            c.ledger().balance() + c.positions().open_positions()[0].cost_usd,
+            SEED
+        );
+
+        let _ = std::fs::remove_file(&log);
+    }
+
+    /// F10, counterexample: the strategy booked an automatic close, then the
+    /// operator flat-closed a position manually on the venue at a LOSS. The
+    /// loss must reach the SAME close ledger: TradeDb record, strategy net
+    /// PnL, win/loss counts and the PositionClosed event — not just cash.
+    #[test]
+    fn manual_venue_loss_reaches_the_trade_ledger() {
+        let log = tmp_trade_log("f10");
+        let mut c = core_with_trade_log(Some(log.clone()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        c.set_event_sink(tx);
+
+        // Hold 10 @ 0.60 (cost 6).
+        open_maker_position(&mut c, dec!(0.60), dec!(10), 1_000);
+        assert_eq!(c.ledger().balance(), SEED - dec!(6));
+
+        // Operator sells flat on the venue at 0.40: a −2 realized LOSS.
+        c.reconcile(external_sell(dec!(10), dec!(0.40), 6_000))
+            .unwrap();
+
+        let closed = &c.positions().closed_positions();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].exit_reason, ExitReason::Manual);
+        assert_eq!(closed[0].net_pnl_usd, dec!(-2));
+
+        // TradeDb received the manual close (audit F10: it used to be missed).
+        assert_eq!(c.trade_db.as_ref().unwrap().summary().total_trades, 1);
+        assert_eq!(c.trade_db.as_ref().unwrap().summary().losses, 1);
+        assert_eq!(c.trade_db.as_ref().unwrap().summary().total_net_pnl, -2.0);
+
+        // Strategy accounting: the loss IS in the strategy's net PnL.
+        let acc = c.strategy_accounting.get(STRATEGY).expect("accounting row");
+        assert_eq!(acc.closed_trades, 1);
+        assert_eq!(acc.losses, 1);
+        assert_eq!(acc.wins, 0);
+        assert_eq!(acc.net_pnl_usd, dec!(-2));
+
+        // Daily PnL sees it too, and the PositionClosed event fired.
+        assert_eq!(c.positions().daily_pnl(), dec!(-2));
+        let position_closed = {
+            let mut found = false;
+            while let Ok(ev) = rx.try_recv() {
+                if matches!(ev, Event::PositionClosed { ref net_pnl_usd, .. } if *net_pnl_usd == dec!(-2))
+                {
+                    found = true;
+                }
+            }
+            found
+        };
+        assert!(
+            position_closed,
+            "the manual close must emit PositionClosed like engine closes do"
+        );
+
+        // Cash identity: SEED + realized net.
+        assert_eq!(c.ledger().balance(), SEED + dec!(-2));
+
+        let _ = std::fs::remove_file(&log);
     }
 }
