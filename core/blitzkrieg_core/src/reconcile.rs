@@ -247,12 +247,27 @@ pub struct CashIdentity {
     /// Cash open positions have returned (proceeds − exit fees).
     #[serde(with = "crate::decimal")]
     pub received: Decimal,
+    /// Settled-but-unredeemed payout: collateral a resolved position has earned
+    /// but that is still conditional tokens on-chain, not cash (issue #175).
+    ///
+    /// It belongs to the identity's TOTAL, and moves into `balance` only when the
+    /// redeem transaction confirms — crediting it before that would claim money
+    /// the venue cannot show, which is exactly the drift the live audit leg
+    /// exists to catch.
+    #[serde(default, with = "crate::decimal")]
+    pub receivable: Decimal,
 }
 
 impl CashIdentity {
-    /// What this identity says the balance should be, given an anchor.
+    /// Cash plus what is owed to us: the value the trade ledger must be able to
+    /// explain.
+    pub fn total(&self) -> Decimal {
+        self.balance + self.receivable
+    }
+
+    /// What this identity says the total should be, given an anchor.
     fn expected_after(&self, anchor: &CashIdentity) -> Decimal {
-        anchor.balance + (self.realized - anchor.realized) - (self.spent - anchor.spent)
+        anchor.total() + (self.realized - anchor.realized) - (self.spent - anchor.spent)
             + (self.received - anchor.received)
     }
 }
@@ -508,15 +523,16 @@ pub fn audit_accounting(input: &AuditInput, anchor: Option<&CashIdentity>) -> Au
                 let expected = id.expected_after(a);
                 let realign = input
                     .ledger_realigned
-                    .filter(|(_, d)| (id.balance - expected - d).abs() <= AUDIT_TOL_USD);
+                    .filter(|(_, d)| (id.total() - expected - d).abs() <= AUDIT_TOL_USD);
                 let mut c = AuditCheck::new(
                     "trade_ledger_identity",
                     realign.is_none(),
                     expected,
-                    id.balance,
+                    id.total(),
                     format!(
-                        "balance since anchor vs trade records: realized {} → {} ({:+}), \
-                         open cash paid {} → {} ({:+}), returned {} → {} ({:+})",
+                        "balance+receivable ({}) since anchor vs trade records: realized {} → {} ({:+}), \
+                         open cash paid {} → {} ({:+}), returned {} → {} ({:+}), receivable {} → {} ({:+})",
+                        id.total(),
                         a.realized,
                         id.realized,
                         id.realized - a.realized,
@@ -526,6 +542,9 @@ pub fn audit_accounting(input: &AuditInput, anchor: Option<&CashIdentity>) -> Au
                         a.received,
                         id.received,
                         id.received - a.received,
+                        a.receivable,
+                        id.receivable,
+                        id.receivable - a.receivable,
                     ),
                 );
                 if let Some((at_ms, d)) = realign {
@@ -912,6 +931,7 @@ mod tests {
                 realized: dec!(0),
                 spent: Decimal::ZERO,
                 received: Decimal::ZERO,
+                receivable: Decimal::ZERO,
             },
             reserved: Decimal::ZERO,
             ledger_balanced: true,
@@ -1001,6 +1021,7 @@ mod tests {
             realized: dec!(0),
             spent: Decimal::ZERO,
             received: Decimal::ZERO,
+            receivable: Decimal::ZERO,
         };
         // Since the anchor: a closed trade realized +4 (its entry cost and exit
         // proceeds live INSIDE `realized`; the two flow sums below belong to
@@ -1012,6 +1033,7 @@ mod tests {
             realized: dec!(4),
             spent: dec!(6),
             received: dec!(10),
+            receivable: Decimal::ZERO,
         };
         let r = audit_accounting(&input, Some(&anchor));
         assert!(r.ok, "{:?}", r.checks);
@@ -1046,6 +1068,7 @@ mod tests {
             realized: dec!(0),
             spent: Decimal::ZERO,
             received: Decimal::ZERO,
+            receivable: Decimal::ZERO,
         };
         let mut input = clean_input();
         input.has_trade_log = false;
@@ -1055,6 +1078,7 @@ mod tests {
             realized: dec!(0),
             spent: Decimal::ZERO,
             received: Decimal::ZERO,
+            receivable: Decimal::ZERO,
         };
         let r = audit_accounting(&input, Some(&anchor));
         assert!(r.ok, "{:?}", r.checks);
@@ -1119,6 +1143,7 @@ mod tests {
             realized: dec!(0),
             spent: Decimal::ZERO,
             received: Decimal::ZERO,
+            receivable: Decimal::ZERO,
         };
         let mut input = clean_input();
         // Cash is 5 short of what the trade records explain…

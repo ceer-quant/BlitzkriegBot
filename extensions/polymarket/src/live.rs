@@ -9,8 +9,13 @@
 //! serves the socket.
 
 use crate::feed::now_ms;
+use crate::redeem::{self, RedeemConfig, RedeemOutcome};
 use crate::venue::{VenueEvent, now_epoch_ms, spawn_from_env};
-use blitzkrieg_market_api::{CoreError, CoreErrorCode, MarketHost, ReconcileSnapshot};
+use alloy::primitives::Address;
+use blitzkrieg_market_api::{
+    CoreError, CoreErrorCode, MarketHost, ReconcileSnapshot, RedemptionFailure, RedemptionRequest,
+};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -28,6 +33,11 @@ const ORPHAN_GRACE_MS: i64 = 20_000;
 /// Consecutive reconciliation sweeps that may fail before the bridge reports
 /// the sweep channel itself as broken: the host freezes trading on it (E31-b).
 const SWEEP_FAILURE_FREEZE: u32 = 3;
+
+/// Redemptions signed and broadcast at once. A redemption is a real
+/// transaction: two sends from one signer race the same nonce, so the bridge
+/// keeps the concurrency at the level one wallet can serialize.
+const REDEEM_MAX_IN_FLIGHT: usize = 2;
 
 /// Spawn the live bridge if credentials are present. `markets` only gates the
 /// spawn (live with no markets = REST-only reconciliation); the user-WS
@@ -49,6 +59,30 @@ pub async fn spawn_if_configured(
     let (evt_tx, mut evt_rx) = mpsc::channel::<VenueEvent>(256);
     let venue = spawn_from_env(markets, evt_tx).await?;
     let (signer, funder) = (venue.signer.clone(), venue.funder.clone());
+
+    // Redemption config, read once: a settled claim is redeemed on-chain by the
+    // bridge itself when an endpoint is available, and reported as MANUAL
+    // (loudly, and only once per claim) when it is not — never left silently
+    // un-redeemed while the ledger waits for cash.
+    let redeem_cfg = match (Address::from_str(&signer), Address::from_str(&funder)) {
+        (Ok(s), Ok(h)) => RedeemConfig::from_env(s, h),
+        (s, h) => Err(RedemptionFailure {
+            message: format!("signer/funder address unreadable: {s:?} / {h:?}"),
+            manual: true,
+        }),
+    };
+    match &redeem_cfg {
+        // Never echo the endpoint: it is operator config and may carry a key.
+        Ok(c) => eprintln!(
+            "polymarket-extension: on-chain redemption enabled (endpoint set, holder {})",
+            c.holder
+        ),
+        Err(f) => eprintln!(
+            "polymarket-extension: on-chain redemption NOT configured ({}); settled claims will \
+             be reported as requiring manual redemption",
+            f.message
+        ),
+    }
 
     // Seed the ledger from the venue so the reserve gate reflects real cash.
     match venue.balance().await {
@@ -123,6 +157,11 @@ pub async fn spawn_if_configured(
         let mut next_probe_ok_ms: i64 = 0;
         // Venue ids the bridge placed recently (orphan-sweep grace window).
         let mut recent_placements: Vec<(String, i64)> = Vec::new();
+        // Redemptions in flight (each one a signed transaction) and the claims
+        // that could not get a slot yet.
+        let mut redeems: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        let mut redeem_queue: std::collections::VecDeque<RedemptionRequest> =
+            std::collections::VecDeque::new();
         loop {
             tick.tick().await;
 
@@ -170,6 +209,67 @@ pub async fn spawn_if_configured(
                     }
                 }
             }
+
+            // 1c) Settlements: ask the venue what happened to every market the
+            // core still holds. A resolved market closes its positions in the
+            // core, which books the payout as a receivable; step 1d turns that
+            // into cash. For a market that has not resolved the venue answers
+            // "not resolved", which is what keeps the core's silence detection
+            // measuring a live channel.
+            let queries = host.take_settlement_queries().await;
+            if !queries.is_empty() {
+                match venue.resolutions(queries).await {
+                    Ok(resolutions) => {
+                        for resolution in resolutions {
+                            host.on_market_resolution(resolution).await;
+                        }
+                    }
+                    // Loud, but never fatal: a Gamma outage must not stop
+                    // trading, and the core alerts on its own once it has waited
+                    // too long for an answer.
+                    Err(e) => eprintln!(
+                        "polymarket-extension: settlement query failed: {e} (raw={:?})",
+                        e.raw
+                    ),
+                }
+            }
+
+            // 1d) Redemptions. Each attempt signs and mines a real transaction,
+            // so it runs OFF this loop (a receipt wait can outlast a block time,
+            // and stalling here would stall order placement) and never more than
+            // REDEEM_MAX_IN_FLIGHT at a time (one wallet, one nonce). A claim
+            // that cannot run now is left for the core, which re-arms it on its
+            // backoff — nothing is dropped.
+            while redeems.len() < REDEEM_MAX_IN_FLIGHT && redeem_queue.is_empty() {
+                let due = host.take_pending_redemptions().await;
+                if due.is_empty() {
+                    break;
+                }
+                redeem_queue.extend(due);
+            }
+            while redeems.len() < REDEEM_MAX_IN_FLIGHT {
+                let Some(request) = redeem_queue.pop_front() else {
+                    break;
+                };
+                let host = Arc::clone(&host);
+                let redeem_cfg = redeem_cfg.clone();
+                redeems.spawn(async move {
+                    let outcome = match &redeem_cfg {
+                        Ok(config) => redeem::redeem_claim(config, &request).await,
+                        // Redemption cannot run in this process at all (no
+                        // endpoint, or a holder the signer cannot move): say so
+                        // as a MANUAL failure, which the core reports once and
+                        // then leaves to the operator.
+                        Err(failure) => RedeemOutcome::Failed {
+                            message: failure.message.clone(),
+                            manual: failure.manual,
+                        },
+                    };
+                    let result = redeem::to_result(&request, outcome, now_epoch_ms());
+                    host.on_redemption_result(result).await;
+                });
+            }
+            while redeems.try_join_next().is_some() {}
 
             // 2) Drain venue events into the host.
             while let Ok(ev) = evt_rx.try_recv() {

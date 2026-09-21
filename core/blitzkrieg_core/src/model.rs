@@ -259,6 +259,10 @@ pub enum ExitReason {
     /// an exit *intent*. The kernel still prices, sizes, risk-checks and
     /// submits it — the strategy never places anything itself.
     StrategySignal,
+    /// The market resolved and the position was closed at its redemption value
+    /// (issue #175). The position did not exit — it reached the end of its
+    /// market, and the winning shares are redeemed on-chain.
+    Settlement,
 }
 
 /// A binary UP/DOWN market for one asset in the current round.
