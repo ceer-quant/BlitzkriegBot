@@ -38,10 +38,54 @@
  * the core folded in from reconcile moves real cash without a trade record, and
  * THAT is precisely what this delta is designed to surface.
  *
- * Realized is taken from `trades.summary.totalNetPnl` — the all-time running
- * total the core updates on every close — not from summing the history window,
- * which truncates at 500 rows and would report a phantom drift of the evicted
- * rows' net the moment the window rolled.
+ * A SEEDED core (`dry` / `readonly`) is the opposite case and used to be audited
+ * with the wrong window (issue #200). Its ledger is re-seeded at process start
+ * (`--seed-balance`, and `Ledger::set_balance` in `Core::new`) while its trade
+ * log and position log OUTLIVE the process. So `trades.summary.totalNetPnl` —
+ * the all-time running total — mixed two different accounts: the balance was
+ * reset to the seed, the realized figure still carried every close of every
+ * earlier session, and the residual came out as exactly the historical net. A
+ * production dry core therefore failed this check from the moment it restarted
+ * until its trade log was wiped: a gate that is red for a structural reason is a
+ * gate nobody reads. The seeded identity is now scoped to THIS SESSION:
+ *
+ *     balance == seed
+ *              + Σ_{trades closed at/after core.startedAtMs} netPnlUsd
+ *              − Σ_open (entryCostUsd + entryFeeUsd)
+ *              + Σ_open (proceedsUsd − exitFeeUsd)
+ *
+ * It stays an ABSOLUTE identity (stronger than a pure anchor: it needs no
+ * previous poll and cannot drift silently from a bad first reading), and it is
+ * self-consistent the instant the core restarts — for a FLAT book. A position
+ * the position log restored from before the restart is NOT account-able this
+ * way (the re-seeded ledger never paid its entry cost, and its cash flows span
+ * both sessions), so the audit names it and declines to assert, rather than
+ * printing a residual equal to its basis. `startedAtMs` comes from the
+ * kernel (`core.ready`), not from this script's clock: the core seeds its ledger
+ * in `Core::new`, so the core's own instant is the only one that describes the
+ * same window.
+ *
+ * The session sum is read from the trade history window, so the window has to
+ * cover the session. It is asked for a default of 500 rows (the same read the
+ * fee checks use); if the window is saturated AND its oldest row is already
+ * inside the session, the closes before it may have been evicted and the sum
+ * cannot be proven complete — the audit then re-reads with a much wider window,
+ * and says so outright if even that is saturated. Silently under-counting would
+ * be the same defect in a new place: a phantom drift whose size nobody can
+ * explain.
+ *
+ * Every line of drift.jsonl carries the identity of the core it audited (#200):
+ * `commit`, `pid`, `mode`, `socket` and `startedAtMs`. A drift record without
+ * them cannot be told apart from a fixture's — the incident in #199, where a
+ * fixture core took the production socket and wrote its numbers into the
+ * production log, was diagnosable only because the numbers looked wrong. The
+ * fields are null (never absent) when a poll never reached the core, so a
+ * log-wide `jq` grouping has a uniform shape.
+ *
+ * Realized for a LIVE core is taken from `trades.summary.totalNetPnl` — the
+ * all-time running total the core updates on every close — not from summing the
+ * history window, which truncates at 500 rows and would report a phantom drift
+ * of the evicted rows' net the moment the window rolled.
  *
  * `entryCostUsd` (total paid on the way in) is deliberate: `costUsd` is the basis
  * of the shares STILL HELD, so on a partial exit it drops by the released basis —
@@ -72,6 +116,9 @@
  * on every line of drift.jsonl. A core that is swapped mid-window (supervisor
  * restart into a new build) is detected by that revision changing, and the live
  * anchor is dropped rather than chaining a delta across two different programs.
+ * A restart into the SAME build moves `startedAtMs` instead: for a seeded core
+ * that changes the session the identity is scoped to, and the residual must
+ * still be zero — which is the whole point of scoping it.
  *
  * A drift is only reported once it PERSISTS: each failed poll is re-audited five
  * seconds later against the same anchor, and only a second failure counts. The
@@ -86,12 +133,19 @@
  *   node scripts/account-drift-check.mjs --hours 0.05         # short smoke run
  *   node scripts/account-drift-check.mjs --interval-sec 5 --hours 1
  *   node scripts/account-drift-check.mjs --once               # one poll, for CI
+ *   node scripts/account-drift-check.mjs --socket /tmp/f/core.sock --out /tmp/f/drift.jsonl
+ *
+ * `--socket` and `--out` exist so the reverse-acceptance fixture can run against
+ * a core it spawned and log to a scratch directory: the default socket path is
+ * the production one, and the default log is the production `data/drift/`. A
+ * fixture that takes either is how #199 happened — the gate's OWN evidence must
+ * never be able to masquerade as the deployment's.
  *
  * Output: data/drift/drift.jsonl (one JSON line per poll) + a summary on stdout.
  */
 import net from 'net';
-import { appendFileSync, existsSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
+import { appendFileSync, mkdirSync } from 'fs';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { resolveSocketPath } from './lib/core-socket.mjs';
 import { describeQuote, feeModelProblems, PINNED_DEFAULT_MODEL } from './lib/fee-model.mjs';
@@ -99,7 +153,6 @@ import { describeQuote, feeModelProblems, PINNED_DEFAULT_MODEL } from './lib/fee
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const OUT_DIR = join(ROOT, 'data', 'drift');
-const OUT = join(OUT_DIR, 'drift.jsonl');
 
 const argv = process.argv.slice(2);
 const opt = (n, d) => { const i = argv.indexOf(n); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
@@ -107,6 +160,25 @@ const HOURS = parseFloat(opt('--hours', '72'));
 const INTERVAL_SEC = Math.max(1, parseInt(opt('--interval-sec', '60'), 10));
 const ONCE = argv.includes('--once');
 const DEADLINE_MS = Date.now() + HOURS * 3600 * 1000;
+/**
+ * Socket and log overrides (issue #200). Both default to the deployment's
+ * paths — resolveSocketPath's canonical socket and data/drift/drift.jsonl — so
+ * an ordinary run is unchanged. They exist so a fixture can audit a core it
+ * spawned into a scratch directory: #199 was a fixture core holding the
+ * PRODUCTION socket and appending to the PRODUCTION log, and the only thing
+ * that made it visible was that the numbers looked wrong.
+ */
+const SOCK_OVERRIDE = opt('--socket', null);
+// `resolve` (not `join`): an ABSOLUTE --out is taken as given, which is what a
+// fixture in a scratch directory needs; a relative one still resolves against
+// the repo root, so the documented default is unchanged.
+const OUT = opt('--out', null) !== null
+  ? resolve(ROOT, opt('--out'))
+  : join(OUT_DIR, 'drift.jsonl');
+/** Rows read from trades.history per poll. 500 matches the pre-#200 read. */
+const TRADE_WINDOW = Math.max(1, parseInt(opt('--trade-window', '500'), 10));
+/** The window re-read when the session sum cannot be proven complete. */
+const TRADE_WINDOW_WIDE = TRADE_WINDOW * 40;
 
 /**
  * Tolerance: the identity is exact in the core's `Decimal`, but this reads f64
@@ -161,6 +233,32 @@ async function kernelFeePerShare(sock, revision, price) {
 }
 
 /**
+ * Rows of `trades.history` for one session-scoped sum, widened when the default
+ * window cannot prove it saw the whole session (issue #200).
+ *
+ * History rows are chronological (the log is appended per close), so if the
+ * window's OLDEST row is already inside the session, everything the sum needs
+ * may still be behind it — only a window that reaches a pre-session row (or the
+ * file's start) proves completeness. Reads the wider window once in that case;
+ * `saturated` says the widened read hit its own cap, which the caller must
+ * report rather than sum silently.
+ */
+async function sessionTrades(sock, startedAtMs) {
+  let limit = TRADE_WINDOW;
+  for (;;) {
+    const res = await rpc(sock, 'trades.history', { limit });
+    const rows = res.trades || [];
+    const oldest = rows.length > 0 ? Number(rows[0].exitTime ?? NaN) : NaN;
+    const full = rows.length >= limit;
+    const covers = rows.length === 0 || !(oldest >= startedAtMs);
+    if (covers || !full || limit >= TRADE_WINDOW_WIDE) {
+      return { rows, limit, saturated: full && !covers };
+    }
+    limit = TRADE_WINDOW_WIDE;
+  }
+}
+
+/**
  * One accounting audit of the core. Returns {ok, residual, ...evidence}.
  * `residual` is how far the ledger sits from what the trade records and the
  * open cash flows say it should be. It must be ~0. `anchor` is the previous
@@ -170,7 +268,7 @@ async function kernelFeePerShare(sock, revision, price) {
 async function audit(sock, anchor) {
   const [bal, tradesRes, posRes, sumRes, ready] = await Promise.all([
     rpc(sock, 'ledger.balance'),
-    rpc(sock, 'trades.history', { limit: 500 }),
+    rpc(sock, 'trades.history', { limit: TRADE_WINDOW }),
     rpc(sock, 'positions.list'),
     rpc(sock, 'trades.summary'),
     rpc(sock, 'core.ready'),
@@ -178,9 +276,18 @@ async function audit(sock, anchor) {
 
   // Which code is answering (#172/#179): the revision the SERVING process was
   // built from, not the one on disk. Every number below is a statement about
-  // that revision, so it travels with the poll's record.
+  // that revision, so it travels with the poll's record. The pid, mode and
+  // session clock are the same kind of statement for #200: `commit` cannot tell
+  // a fresh dry core from the one it replaced, and the seeded identity is scoped
+  // to `startedAtMs`, so both have to be in the record.
   const commit = ready.commit ?? null;
   const build = ready.build ?? null;
+  const pid = ready.pid ?? null;
+  const mode = ready.mode ?? null;
+  const startedAtMs = Number.isFinite(Number(ready.startedAtMs))
+    ? Number(ready.startedAtMs)
+    : null;
+  const identity = { commit, build, pid, mode, socket: sock, startedAtMs };
 
   // The fee schedule the kernel actually charges (#182), asked of the kernel for
   // the same reason `anchor` is asked of the core: a formula restated here could
@@ -230,9 +337,53 @@ async function audit(sock, anchor) {
   }
 
   const summary = sumRes?.summary ?? null;
-  const realized = summary
-    ? Number(summary.totalNetPnl ?? 0)
-    : trades.reduce((s, t) => s + Number(t.netPnlUsd ?? 0), 0);
+  const balance = Number(bal.balance);
+  const seed = bal.seed === undefined || bal.seed === null ? null : Number(bal.seed);
+
+  // ── realized: two different questions for the two kinds of core ─────────────
+  //
+  // Seeded (`dry`/`readonly`): the ledger was re-seeded at `startedAtMs`, so the
+  // only cash the balance can be accountable for is what THIS session's closes
+  // moved. The all-time `totalNetPnl` mixes in every earlier session that
+  // outlived the restart — the structural residual #200 reported.
+  //
+  // Live: the all-time running total, as before, and the identity is the anchor
+  // delta (the opening venue cash is unknown, so only its changes are testable).
+  let realized;
+  let realizedScope;
+  let preSessionTrades = 0;
+  let sessionWindow = null;
+  let unattributable = 0;
+  if (seed === null) {
+    realized = summary
+      ? Number(summary.totalNetPnl ?? 0)
+      : trades.reduce((s, t) => s + Number(t.netPnlUsd ?? 0), 0);
+    realizedScope = 'all-time (live/anchor form)';
+  } else {
+    const session =
+      startedAtMs === null
+        ? { rows: trades, limit: TRADE_WINDOW, saturated: false }
+        : await sessionTrades(sock, startedAtMs);
+    realized = 0;
+    for (const t of session.rows) {
+      const exitAt = Number(t.exitTime);
+      if (!Number.isFinite(exitAt)) {
+        // Not silently rounded into either bucket: a row with no close time
+        // cannot be attributed to a session, and guessing would move the
+        // residual by its whole net.
+        unattributable++;
+        continue;
+      }
+      if (startedAtMs !== null && exitAt < startedAtMs) {
+        preSessionTrades++;
+        continue;
+      }
+      realized += Number(t.netPnlUsd ?? 0);
+    }
+    realizedScope = startedAtMs === null ? 'session (unbounded: no startedAtMs)' : 'session';
+    sessionWindow = { rows: session.rows.length, limit: session.limit, saturated: session.saturated };
+  }
+
   const spent = positions.reduce(
     (s, p) => s + Number(p.entryCostUsd ?? 0) + Number(p.entryFeeUsd ?? 0),
     0
@@ -242,10 +393,34 @@ async function audit(sock, anchor) {
     0
   );
 
-  const balance = Number(bal.balance);
-  const seed = bal.seed === undefined || bal.seed === null ? null : Number(bal.seed);
-  // Seeded core (dry/read-only): the global form. Live core: the form shifted by
-  // the previous observation, which is exact by subtraction of two globals.
+  // The SAME boundary question as a pre-session trade, one process earlier: the
+  // position log outlives the process (`--position-log`), so a restart can
+  // RECOVER an open position that the previous session's ledger paid for. The
+  // re-seeded ledger never paid its entry cost, so subtracting it here would
+  // invent a residual equal to `entryCostUsd + entryFeeUsd` — and its eventual
+  // netPnlUsd subtracts a basis this ledger never held. The identity is then not
+  // assertable at all (the monitor cannot know which of the position's cash
+  // flows landed before the restart), so that is what it says, instead of
+  // reporting arithmetic it knows to be wrong.
+  //
+  // Only for a SEEDED core (`seed !== null`, i.e. dry/read-only): the premise is
+  // about a ledger re-seeded at this process's start. A live core's entry cost
+  // was paid at the venue and its identity is the anchor DELTA, which a
+  // restored position cancels out of — asserting it there would be a new false
+  // positive in the very branch a4f9bbc defined, so it is left exactly as it was.
+  let preSessionPositions = 0;
+  let unattributablePositions = 0;
+  if (seed !== null && startedAtMs !== null) {
+    for (const p of positions) {
+      const enteredAt = Number(p.enteredAtMs);
+      if (!Number.isFinite(enteredAt)) unattributablePositions++;
+      else if (enteredAt < startedAtMs) preSessionPositions++;
+    }
+  }
+
+  // Seeded core (dry/read-only): the ABSOLUTE form, over this session's closes.
+  // Live core: the same equation shifted by the previous observation, which is
+  // exact by subtraction of two globals (the opening venue cash is unknown).
   const expected = seed !== null
     ? seed + realized - spent + received
     : anchor === null
@@ -257,6 +432,39 @@ async function audit(sock, anchor) {
   const residual = expected === null ? null : balance - expected;
 
   const problems = [];
+
+  // A session sum that cannot be shown to cover the whole session is not a
+  // number to assert an identity against: under-counting `realized` by an
+  // evicted close is a phantom drift of exactly that close's net, which is the
+  // shape #200 was reported with. Say it instead of reporting the arithmetic.
+  if (sessionWindow?.saturated) {
+    problems.push(
+      `cannot prove this session's realized total: the trade window is saturated ` +
+      `(${sessionWindow.rows} rows at limit ${sessionWindow.limit}, oldest already inside the ` +
+      'session), so closes before it may have been evicted — re-run with a larger ' +
+      `--trade-window than ${sessionWindow.limit}`
+    );
+  }
+  if (unattributable > 0) {
+    problems.push(
+      `${unattributable} trade row(s) carry no usable exitTime, so they cannot be attributed to ` +
+      'this core\'s session — the seeded identity is not asserted while they are in the window'
+    );
+  }
+  if (preSessionPositions > 0) {
+    problems.push(
+      `${preSessionPositions} open position(s) were entered before this core's start (recovered ` +
+      'from the position log): the re-seeded ledger never paid their entry cost, so the seeded ' +
+      'identity is not assertable while they are open — flatten them first, or audit once the book ' +
+      'is flat again'
+    );
+  }
+  if (unattributablePositions > 0) {
+    problems.push(
+      `${unattributablePositions} open position(s) carry no usable enteredAtMs, so they cannot be ` +
+      'attributed to this core\'s session — the seeded identity is not asserted while they are open'
+    );
+  }
 
   // The schedule the kernel declared this poll, checked against the pin (#182).
   // This is the half that must go red when the kernel's default moves without
@@ -319,11 +527,11 @@ async function audit(sock, anchor) {
   return {
     ok: problems.length === 0,
     problems,
-    // Which code answered, and which schedule it declared (#172/#179/#182):
-    // without these a drift line cannot be attributed to a revision, and a fee
-    // finding cannot be attributed to a model.
-    commit,
-    build,
+    // WHICH core answered, and which schedule it declared
+    // (#172/#179/#182/#200): without these a drift line cannot be attributed to
+    // a revision, to a process, or to a fee model. `socket` is spread into every
+    // line by `main` so an error poll has it too.
+    ...identity,
     feeModel: schedule.model,
     feeRate: schedule.rate,
     feeExponent: schedule.exponent,
@@ -332,7 +540,21 @@ async function audit(sock, anchor) {
     reserved: Number(bal.reserved),
     expected: expected === null ? null : round(expected),
     residual: residual === null ? null : round(residual),
+    // `realized` is session-scoped on a seeded core and all-time on a live one
+    // (the anchor delta needs the running total). The scope travels with the
+    // number: the same field name cannot be compared across the two forms.
     realized: round(realized),
+    realizedScope,
+    // How many trade rows this poll was told it was ignoring, and how many rows
+    // the session sum was computed over — the two facts that make the seeded
+    // residual reproducible from the log alone.
+    preSessionTrades,
+    sessionTrades: sessionWindow === null ? null : sessionWindow.rows,
+    sessionWindowLimit: sessionWindow === null ? null : sessionWindow.limit,
+    // Open positions the ledger re-seed did not pay for (a restart onto a
+    // non-flat book), and open rows with no entry time to judge them by.
+    preSessionPositions,
+    unattributablePositions,
     spent: round(spent),
     received: round(received),
     open: positions.length,
@@ -341,11 +563,15 @@ async function audit(sock, anchor) {
 }
 
 async function main() {
-  const sock = await resolveSocketPath(process.env);
-  if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
+  // An explicit `--socket` is used as given; otherwise the canonical path is
+  // resolved exactly as before (so an ordinary run is unchanged).
+  const sock = SOCK_OVERRIDE ?? await resolveSocketPath(process.env);
+  mkdirSync(dirname(OUT), { recursive: true });
 
-  console.log(`account:drift-check — auditing ${sock}`);
+  console.log(`account:drift-check — auditing ${sock}` +
+    (SOCK_OVERRIDE === null ? '' : ' (--socket override)'));
   console.log(`  window ${HOURS}h, poll every ${INTERVAL_SEC}s, tolerance ${TOL}`);
+  console.log(`  log   ${OUT}`);
   if (sock) {
     try {
       await rpc(sock, 'core.ping');
@@ -356,10 +582,16 @@ async function main() {
     }
     // State WHICH code is being audited before auditing it (#172/#179), and which
     // fee model it says it charges (#182) — the two facts every line below is a
-    // statement about.
+    // statement about. The pid and the session clock are the same statement for
+    // #200: a revision does not distinguish two processes built from one commit.
     const ready = await rpc(sock, 'core.ready');
     console.log(`  core version=${ready.version} build=${ready.build ?? '?'} ` +
       `commit=${ready.commit ?? '?'} dirty=${ready.dirty ?? '?'}`);
+    console.log(`  core pid=${ready.pid ?? '?'} mode=${ready.mode ?? '?'} ` +
+      `startedAtMs=${ready.startedAtMs ?? '?'}` +
+      (Number.isFinite(Number(ready.startedAtMs))
+        ? ` (${new Date(Number(ready.startedAtMs)).toISOString()})`
+        : ' (no session clock: a core older than #200 — the seeded identity cannot be scoped)'));
     try {
       const schedule = await rpc(sock, 'core.feeQuote', {});
       console.log(`  fee  ${describeQuote(schedule)} (pinned: ${PINNED_DEFAULT_MODEL})`);
@@ -377,6 +609,11 @@ async function main() {
   // that say WHAT these poll results are about.
   let lastCommit = null;
   let lastModel = null;
+  // The last "rows older than this core's start" count that was announced. The
+  // first poll of a restarted seeded core announces it (#200); it is repeated
+  // only when the count moves (a later restart changes it), so a 72h run does
+  // not repeat one line 4300 times.
+  let notedPreSession = null;
   // Anchor for the live-core identity: the previous poll's result. The deltas
   // between consecutive results chain across the whole window, so the first
   // poll only establishes the baseline (its live identity is not yet defined).
@@ -396,6 +633,20 @@ async function main() {
         r = await audit(sock, null);
         polls++;
         reanchored = true;
+      }
+      // #200 requirement 3: history the audited core is not responsible for is
+      // NAMED, not silently excluded. On a seeded core the trade log outlives the
+      // process, so a restart leaves rows from earlier sessions in it; they are
+      // left out of `realized` (they did not move this session's ledger) and that
+      // decision is stated.
+      if (r.realizedScope !== 'all-time (live/anchor form)' && r.preSessionTrades !== notedPreSession) {
+        notedPreSession = r.preSessionTrades;
+        if (r.preSessionTrades > 0) {
+          console.log(
+            `  note: ${r.preSessionTrades} trade${r.preSessionTrades === 1 ? '' : 's'} predate this ` +
+            `core's start (ignored for the seeded identity; the ledger was re-seeded at ${r.startedAtMs})`
+          );
+        }
       }
       if (r.residual !== null) maxResidual = Math.max(maxResidual, Math.abs(r.residual));
       let reported = r;
@@ -423,8 +674,10 @@ async function main() {
       if (polls % 60 === 1 || !reported.ok) {
         console.log(
           `  ${reported.ok ? 'ok  ' : 'DRIFT'} t=${new Date().toISOString()} ` +
-          `commit=${reported.commit} model=${reported.feeModel} ` +
+          `core pid=${reported.pid} mode=${reported.mode} commit=${reported.commit} ` +
+          `model=${reported.feeModel} ` +
           `balance=${reported.balance} expected=${reported.expected} residual=${reported.residual} ` +
+          `realized=${reported.realized}(${reported.realizedScope}) ` +
           `open=${reported.open} trades=${reported.trades}`
         );
       }
@@ -435,7 +688,15 @@ async function main() {
       }
       polls++;
       failures++;
-      line = { ts: Date.now(), ok: false, problems: [`poll error: ${e.message}`] };
+      // The identity keys are present and null, never absent: a line belongs to a
+      // core even when the poll never reached it, and a jq grouping must not have
+      // to special-case the shape (issue #200).
+      line = {
+        ts: Date.now(),
+        ok: false,
+        problems: [`poll error: ${e.message}`],
+        commit: null, build: null, pid: null, mode: null, socket: sock, startedAtMs: null,
+      };
       console.log(`  FAIL poll error: ${e.message}`);
     }
     appendFileSync(OUT, JSON.stringify(line) + '\n');

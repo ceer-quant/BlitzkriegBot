@@ -8,8 +8,24 @@
 //! allocation volume is what the code actually controls.
 //!
 //! Run (release so the numbers reflect the shipped build):
-//!   cargo test -p blitzkrieg-core --release --test dhat_profile
-//! dhat writes `dhat-heap.json` to the workspace root at profiler exit.
+//!   cargo test -p blitzkrieg-core --release --test dhat_profile -- --nocapture
+//!
+//! WHERE THE PROFILE GOES (#206): `target/dhat/dhat-heap.json`, i.e. under the
+//! build directory, plus a one-line summary on stdout so the number reaches the
+//! CI log. It used to be written to `docs/perf/dhat-heap.json` — a TRACKED path
+//! — so running this test dirtied the worktree and the only way to keep `git
+//! status` clean was to `git checkout` the file afterwards. Worse, that made a
+//! test artifact look like a curated baseline: the two archived profiles E14
+//! actually cites (`dhat-heap-baseline.json`, `dhat-heap-round2.json`) are
+//! hand-kept, and nothing in `scripts/` or `.github/` ever read any of them
+//! (#206). The profile this test writes is therefore scratch; the archived
+//! baseline is updated by a human who reads the summary and commits it.
+//!
+//! The totals are printed, not asserted: a dhat byte total is a function of the
+//! toolchain, the profile and the target, so a threshold here would be a
+//! platform-specific number pretending to be an invariant. The gate on memory
+//! growth is `scripts/e14-memory-baseline.mjs` (peak RSS ceiling + ratio
+//! against the archived baseline).
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -121,16 +137,62 @@ fn feed_books(c: &mut Core) {
     }
 }
 
+/// Where the profile is written: `<target>/dhat/dhat-heap.json`.
+///
+/// Derived from `current_exe()` rather than from `CARGO_MANIFEST_DIR` so it
+/// follows whatever target directory the build actually used (`CARGO_TARGET_DIR`,
+/// a `--target <triple>` layout, or the CI cache) and always lands on an
+/// ignored path. `current_exe()` is `<target>/<profile>/deps/dhat_profile-<hash>`,
+/// so three `parent()` hops reach the target directory root.
+fn profile_path() -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("test binary path");
+    let target = exe
+        .parent() // deps/
+        .and_then(|p| p.parent()) // <profile>/
+        .and_then(|p| p.parent()) // <target>/
+        .expect("test binary lives at <target>/<profile>/deps/<name>");
+    let dir = target.join("dhat");
+    std::fs::create_dir_all(&dir).expect("create the dhat output dir");
+    dir.join("dhat-heap.json")
+}
+
+/// Total allocated bytes/blocks, summed over dhat's program points — the same
+/// aggregate the archived `docs/perf/*.json` numbers in E14 §8 were read from.
+/// Returns `None` (with the reason printed) rather than panicking: a profile
+/// that cannot be summarised must not turn into a mysterious test failure.
+fn profile_totals(path: &std::path::Path) -> Option<(u64, u64, u64, u64)> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("dhat: cannot re-read {}: {e}", path.display());
+            return None;
+        }
+    };
+    let v: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("dhat: cannot parse {}: {e}", path.display());
+            return None;
+        }
+    };
+    let mut total = (0u64, 0u64); // bytes, blocks
+    let mut at_exit = (0u64, 0u64); // still-live (leaked) bytes, blocks
+    for pp in v["pps"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        let n = |k: &str| pp[k].as_u64().unwrap_or(0);
+        total.0 += n("tb");
+        total.1 += n("tbk");
+        at_exit.0 += n("eb");
+        at_exit.1 += n("ebk");
+    }
+    Some((total.0, total.1, at_exit.0, at_exit.1))
+}
+
 #[test]
 fn hot_path_allocation_profile() {
-    // Absolute output path: the workspace root's `docs/perf/` archive dir, so
-    // the profile survives whatever cwd the test harness runs under.
-    let out =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/perf/dhat-heap.json");
+    let out = profile_path();
     // Default (at-exit) output mode: `testing()` suppressed the write on this
     // toolchain build, and one profile per test binary is all we need.
     let profiler = dhat::Profiler::builder().file_name(out.clone()).build();
-    println!("dhat cwd: {:?}", std::env::current_dir());
     println!("dhat output: {}", out.display());
     {
         let mut c = bench_core();
@@ -170,5 +232,26 @@ fn hot_path_allocation_profile() {
             "fixture must hold the open position"
         );
     }
-    drop(profiler); // dhat-heap.json is emitted here
+    drop(profiler); // the profile is emitted here
+
+    // The summary line is the point of keeping this in CI: the profile file is
+    // scratch under target/, so the numbers have to reach the log to be read by
+    // anyone. Printed with `--nocapture` (CI runs `cargo test --workspace`, whose
+    // captured output a failing run surfaces anyway).
+    match profile_totals(&out) {
+        Some((bytes, blocks, exit_bytes, exit_blocks)) => {
+            println!(
+                "dhat: total allocated {bytes} bytes ({:.2} MiB) in {blocks} blocks; \
+                 live at exit {exit_bytes} bytes ({:.2} MiB) in {exit_blocks} blocks",
+                bytes as f64 / (1024.0 * 1024.0),
+                exit_bytes as f64 / (1024.0 * 1024.0),
+            );
+            // The file must exist and carry a real measurement — this much IS an
+            // invariant: a profiler that silently stopped writing would leave the
+            // memory evidence gone while the test stayed green.
+            assert!(bytes > 0 && blocks > 0, "dhat profile is empty");
+        }
+        None => panic!("dhat profile at {} is unreadable", out.display()),
+    }
+    println!("dhat profile → {}", out.display());
 }

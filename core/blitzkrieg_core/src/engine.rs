@@ -30,6 +30,21 @@ use crate::strategies::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExi
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 
+/// Compiled default for [`EngineConfig::max_orderbook_stale_ms`] (#205): the
+/// value every deployment has run with since the freshness rule existed. It is
+/// the DEFAULT of the runtime knob, not the knob itself — an unconfigured kernel
+/// keeps this behaviour exactly.
+pub const DEFAULT_MAX_ORDERBOOK_STALE_MS: i64 = 8_000;
+
+/// Upper bound accepted for `--max-orderbook-stale-ms` (#205).
+///
+/// Ten minutes is already far past any usable freshness budget (the venue's
+/// rounds are minutes long), so a value above it is a typo — `800000` for
+/// `80000` — rather than a setting. It is refused loudly at startup instead of
+/// being silently clamped: an operator who means "never treat a book as stale"
+/// has `0` for that, spelled out in the usage text.
+pub const MAX_ORDERBOOK_STALE_MS_CEILING: i64 = 600_000;
+
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub scanner: ScannerConfig,
@@ -44,7 +59,15 @@ pub struct EngineConfig {
     /// The fade leg's own entry parameters (E4-b / #31). Same story as
     /// `trend_follow`: compiled defaults, tuned at runtime via Shadow Evolution.
     pub mean_reversion: MeanReversionConfig,
-    /// Max orderbook staleness before we refuse to price off it.
+    /// Max orderbook staleness before we refuse to price off it (#205).
+    ///
+    /// The knob that decides "how long after the feed goes quiet do we stop
+    /// trading", so it is a runtime setting, not a compiled one: it comes from
+    /// `--max-orderbook-stale-ms` / `BK_MAX_ORDERBOOK_STALE_MS` through
+    /// [`crate::service::CoreConfig::max_orderbook_stale_ms`]. `0` = the check is
+    /// OFF (any age is accepted); the compiled default is
+    /// [`DEFAULT_MAX_ORDERBOOK_STALE_MS`], so an unconfigured kernel behaves
+    /// exactly as it did before the knob existed.
     pub max_orderbook_stale_ms: i64,
     /// Spot momentum window (sec) used by the alignment filter.
     pub momentum_window_sec: i64,
@@ -126,7 +149,7 @@ impl Default for EngineConfig {
             spread_arb: SpreadArbConfig::default(),
             trend_follow: TrendFollowConfig::default(),
             mean_reversion: MeanReversionConfig::default(),
-            max_orderbook_stale_ms: 8000,
+            max_orderbook_stale_ms: DEFAULT_MAX_ORDERBOOK_STALE_MS,
             momentum_window_sec: 30,
             momentum_tol_pct: Decimal::new(3, 2), // 0.03%
             size_usd: Decimal::new(25, 1),        // 2.5
@@ -1015,6 +1038,14 @@ impl Engine {
             .min(sizing.max_shares)
     }
 
+    /// The freshness budget in force (#205): the engine refuses to price a book
+    /// older than this, and `0` means the check is OFF. Read by the panel's
+    /// `engine.stats.orderbookFreshness` so the value that actually gates entries
+    /// is reported by the engine that applies it, not re-derived from the config.
+    pub fn max_orderbook_stale_ms(&self) -> i64 {
+        self.cfg.max_orderbook_stale_ms
+    }
+
     /// The global sizing band: what a strategy without an override gets, and
     /// the CEILING every override is clamped to (E2-a). Also the band a report
     /// reads before any strategy is named (#202's worst-case-order view).
@@ -1083,6 +1114,11 @@ impl Engine {
 /// engine's historical freshness rule (non-empty book + `max_orderbook_stale_ms`).
 /// The freshness check runs off `LocalBook`'s own timestamp, so a stale book
 /// never pays for a snapshot allocation at all.
+///
+/// `max_stale_ms <= 0` is the operator's explicit "freshness check OFF" (#205):
+/// the book is then accepted however old it is, and only an EMPTY book still has
+/// nothing to price off. Anything else keeps the historic rule, so the default
+/// is unchanged.
 fn fresh_book(
     books: &HashMap<String, LocalBook>,
     token_id: &str,
@@ -1090,7 +1126,7 @@ fn fresh_book(
     max_stale_ms: i64,
 ) -> Option<OrderbookSnapshot> {
     let b = books.get(token_id)?;
-    if b.is_empty() || now_ms - b.timestamp() > max_stale_ms {
+    if b.is_empty() || (max_stale_ms > 0 && now_ms - b.timestamp() > max_stale_ms) {
         return None;
     }
     Some(b.snapshot(token_id))
@@ -1124,7 +1160,7 @@ mod tests {
             },
             trend_follow: TrendFollowConfig::default(),
             mean_reversion: MeanReversionConfig::default(),
-            max_orderbook_stale_ms: 8000,
+            max_orderbook_stale_ms: DEFAULT_MAX_ORDERBOOK_STALE_MS,
             momentum_window_sec: 30,
             momentum_tol_pct: dec!(0.03),
             size_usd: dec!(2.5),
@@ -2181,6 +2217,113 @@ mod tests {
             "{}",
             orders[0].internal_key
         );
+    }
+
+    /// Issue #205: the freshness budget is the entry gate, so the operator's value
+    /// has to be the one that decides. One book, one decision time, several
+    /// configs: refused at the compiled default, accepted *unchanged* once the
+    /// budget is widened past the book's age. The book is deliberately older than
+    /// any plausible default and well inside the knob's ceiling, so this is the
+    /// exact case an operator reaching for the flag cares about.
+    #[test]
+    fn the_configured_staleness_budget_decides_whether_a_book_can_trade() {
+        let now = 1_000_000i64;
+        let book_ms = now - 30_000; // 30s old at decision time
+
+        let entries = |budget_ms: i64| -> Vec<crate::model::OrderRequest> {
+            let mut e = engine_from(EngineConfig {
+                max_orderbook_stale_ms: budget_ms,
+                ..cfg()
+            });
+            e.register_user_strategy(
+                Box::new(DipBuyer::new("dip_buyer", dec!(0.6))),
+                "test".into(),
+            )
+            .unwrap();
+            assert!(e.set_strategy_enabled("dip_buyer", true));
+            e.on_data(DataEvent::RoundMarkets {
+                markets: vec![market(1_800_000)],
+                now_ms: now,
+            });
+            e.on_data(DataEvent::Book {
+                token_id: "up".into(),
+                bids: vec![(dec!(0.55), dec!(100))],
+                asks: vec![(dec!(0.57), dec!(100))],
+                now_ms: book_ms,
+            });
+            e.evaluate(now)
+        };
+
+        // Default budget → the 30s-old book is stale, and a stale book is not a
+        // priceable book: the strategy never sees it, so nothing is placed.
+        let default_budget = entries(DEFAULT_MAX_ORDERBOOK_STALE_MS);
+        assert!(
+            default_budget.is_empty(),
+            "a {}-ms-old book must not trade under the {DEFAULT_MAX_ORDERBOOK_STALE_MS}ms default: {default_budget:?}",
+            now - book_ms
+        );
+        // Widened budget → the very same book is fresh enough and trades.
+        let wide = entries(60_000);
+        assert_eq!(
+            wide.len(),
+            1,
+            "a 60s budget must accept the same book: {wide:?}"
+        );
+        assert_eq!(wide[0].strategy, "dip_buyer");
+        assert_eq!(wide[0].asset, "BTC");
+        // `0` is the operator's explicit "check OFF": accepted however old.
+        assert_eq!(
+            entries(0).len(),
+            1,
+            "0 disables the freshness check, so the book is accepted"
+        );
+        // The age is the deciding variable, and it sits strictly between the two
+        // budgets — otherwise this test would pass for the wrong reason.
+        assert!(now - book_ms > DEFAULT_MAX_ORDERBOOK_STALE_MS);
+        assert!(now - book_ms < 60_000);
+    }
+
+    /// The boundary of the freshness rule, at the one place that enforces it for
+    /// entries: an age equal to the budget is still fresh, one millisecond past it
+    /// is not, and `0` disables the age test without accepting an EMPTY book
+    /// (there would be nothing to price off).
+    #[test]
+    fn the_freshness_budget_boundary_and_its_off_switch() {
+        let now = 1_000_000i64;
+        let mut books = HashMap::new();
+        let mut b = LocalBook::new();
+        b.apply_snapshot(
+            &[(dec!(0.55), dec!(100))],
+            &[(dec!(0.57), dec!(100))],
+            now - 8_000,
+        );
+        books.insert("up".to_string(), b);
+
+        assert!(
+            fresh_book(&books, "up", now, 8_000).is_some(),
+            "an age exactly at the budget is still fresh"
+        );
+        assert!(
+            fresh_book(&books, "up", now, 7_999).is_none(),
+            "one millisecond past the budget is stale"
+        );
+        assert!(
+            fresh_book(&books, "up", now, 0).is_some(),
+            "0 disables the age test"
+        );
+        assert!(
+            fresh_book(&books, "up", now, -1).is_some(),
+            "any non-positive value is the OFF switch"
+        );
+
+        // OFF is not "accept anything": an empty book is still unpricable.
+        let mut empty = LocalBook::new();
+        empty.apply_snapshot(&[], &[], now);
+        books.insert("flat".to_string(), empty);
+        assert!(fresh_book(&books, "flat", now, 0).is_none());
+        assert!(fresh_book(&books, "flat", now, 8_000).is_none());
+        // An unknown token has no book at all.
+        assert!(fresh_book(&books, "nope", now, 0).is_none());
     }
 
     #[test]

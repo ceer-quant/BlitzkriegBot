@@ -143,8 +143,11 @@ fn replace_levels(side: &mut BTreeMap<Decimal, Decimal>, levels: &[(Decimal, Dec
 
 /// True when the snapshot is fresh enough to price off (mirrors
 /// maxOrderbookStaleMs in `getBook`).
+///
+/// `max_stale_ms <= 0` is the operator's explicit "freshness check OFF" (#205),
+/// matching [`crate::engine::EngineConfig::max_orderbook_stale_ms`].
 pub fn is_fresh(book: &OrderbookSnapshot, now_ms: i64, max_stale_ms: i64) -> bool {
-    now_ms - book.timestamp <= max_stale_ms
+    max_stale_ms <= 0 || now_ms - book.timestamp <= max_stale_ms
 }
 
 #[cfg(test)]

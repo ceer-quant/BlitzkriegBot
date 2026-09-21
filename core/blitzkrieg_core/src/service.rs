@@ -17,7 +17,7 @@ use crate::shadow_evolution::{
 use crate::sim::{Book, rests_on_book};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
@@ -150,6 +150,16 @@ pub struct CoreConfig {
     /// MiB free (0 = no guard). Checked once per rotation, so it costs nothing on
     /// the hot path.
     pub event_archive_min_free_mb: u64,
+    /// How old an orderbook may be before the engine refuses to price off it,
+    /// in milliseconds (issue #205). `0` = the check is OFF (any age accepted).
+    ///
+    /// This is the knob that decides how long after the feed goes quiet the bot
+    /// stops trading, so it is an operator setting rather than a compiled
+    /// constant: CLI `--max-orderbook-stale-ms` / `BK_MAX_ORDERBOOK_STALE_MS`,
+    /// validated at startup and echoed in the boot log. The default is
+    /// [`crate::engine::DEFAULT_MAX_ORDERBOOK_STALE_MS`] — the value every
+    /// deployment has always run with, so an unconfigured kernel is unchanged.
+    pub max_orderbook_stale_ms: i64,
     /// How often the in-kernel accounting audit runs, in seconds (issue #189).
     /// 0 disables it. Default 30: the acceptance criterion is "drift is alerted,
     /// persisted and blocks new entries within 30s of appearing".
@@ -232,6 +242,9 @@ impl CoreConfig {
             min_shares: self.min_shares,
             max_shares: self.max_shares,
             size_pct: self.size_pct,
+            // #205: the runtime freshness budget. It flows through this one
+            // mapping, so a live server and a backtest replay see the same value.
+            max_orderbook_stale_ms: self.max_orderbook_stale_ms,
             strategy_sizes: self
                 .strategy_limits
                 .iter()
@@ -523,6 +536,8 @@ impl Default for CoreConfig {
             event_archive_max_mb: 512,
             event_archive_rotate_mb: 0,
             event_archive_min_free_mb: 0,
+            // #205: the shipped freshness budget, unchanged.
+            max_orderbook_stale_ms: crate::engine::DEFAULT_MAX_ORDERBOOK_STALE_MS,
             audit_interval_sec: 30,
             audit_log_path: None,
             applied_log_path: None,
@@ -833,6 +848,19 @@ pub struct PlaceOutcome {
     pub rejection: Option<CoreError>,
 }
 
+/// Upper bound on the kernel's pending-close exit-reason table (issue #190).
+///
+/// The table holds one entry per token whose closing SELL has been submitted but
+/// not yet filled — a *pending-close* ledger, not a history — so its live
+/// working set is the engine's tradeable fan-out: the round's tokens across the
+/// configured assets (8 tokens × 3 assets = 24 on the shipped Polymarket
+/// deployment) plus whatever manual flattens add on top. 64 is ≈2.5× the widest
+/// live set, so a legitimate session never reaches the bound; it exists so a leak
+/// is bounded for the life of the process instead of growing forever. Eviction
+/// prefers entries whose position is already gone (stale by construction) and
+/// drops the oldest otherwise; both are counted in `engine.stats.exitReasons`.
+const EXIT_REASON_TABLE_MAX: usize = 64;
+
 pub struct Core {
     config: CoreConfig,
     ome: Ome,
@@ -845,7 +873,23 @@ pub struct Core {
     books: HashMap<TokenId, Book>,
     /// Exit reason chosen for an in-flight closing SELL, keyed by token id, so a
     /// full sell fill closes the position with the right reason.
+    ///
+    /// A PENDING-CLOSE ledger, not a history (issue #190): an entry exists only
+    /// while the token still has an open position, and the table can never
+    /// exceed [`EXIT_REASON_TABLE_MAX`]. A leaked entry would be inherited by
+    /// the NEXT position on the same token and mis-attribute its exit.
     exit_reasons: HashMap<TokenId, ExitReason>,
+    /// Insertion order of [`Self::exit_reasons`], oldest first. The map cannot
+    /// name its own oldest entry and the bound has to evict one; kept in
+    /// lockstep with the map's key set by the four helpers below.
+    exit_reason_order: VecDeque<TokenId>,
+    /// Entries dropped by the [`EXIT_REASON_TABLE_MAX`] bound, session-scoped
+    /// and surfaced in `engine.stats`: an eviction loses real exit attribution,
+    /// so it is counted rather than silent.
+    exit_reasons_evicted: u64,
+    /// Entries dropped because their token no longer has an open position — the
+    /// expected path (a close, a round rollover).
+    exit_reasons_swept: u64,
     /// Strategy close intents drained from the engine in `engine_evaluate` and
     /// consumed by the shared exit-submission path in `run_exit_checks`.
     strategy_exits: Vec<crate::strategies::StrategyExitIntent>,
@@ -871,6 +915,17 @@ pub struct Core {
     position_db: Option<crate::position_db::PositionDb>,
     /// Feed/decision counters for observability (P4 diagnostics).
     stats: CoreStats,
+    /// When this core's ACCOUNTING SESSION began, in epoch ms (issue #200).
+    ///
+    /// A seeded (`dry`/`readonly`) core re-seeds its cash ledger here
+    /// (`Ledger::set_balance(dry_seed_balance)` in `new`) while its trade log
+    /// and position log outlive the process. A cold ledger beside a trade book
+    /// that still holds earlier sessions answers a different question than the
+    /// cash identity asks, so an out-of-process audit of a seeded core has to
+    /// scope `realized` to the trades closed at/after this instant. A live core
+    /// ignores it: its opening cash is the venue's, and its identity telescopes
+    /// across polls instead.
+    started_at_ms: i64,
     /// Optional mirror of every market-data event into a JSONL archive (P-1.3).
     /// The backtester replays this file.
     event_archive: Option<crate::data_source::EventArchive>,
@@ -1058,6 +1113,9 @@ impl Core {
             positions,
             books: HashMap::new(),
             exit_reasons: HashMap::new(),
+            exit_reason_order: VecDeque::new(),
+            exit_reasons_evicted: 0,
+            exit_reasons_swept: 0,
             strategy_exits: Vec::new(),
             engine: None,
             feed: None,
@@ -1102,6 +1160,11 @@ impl Core {
             order_db,
             position_db,
             stats: CoreStats::default(),
+            // The session clock for the accounting identity (issue #200). Read
+            // once, at construction: the ledger below is seeded at the same
+            // instant, so "cash since the seed" and "trades since startedAtMs"
+            // describe the same window.
+            started_at_ms: now_ms(),
             event_archive,
             strategy_accounting: HashMap::new(),
             place_cooldowns: HashMap::new(),
@@ -1283,6 +1346,14 @@ impl Core {
     }
     pub fn mode(&self) -> Mode {
         self.config.mode
+    }
+
+    /// The instant this core's accounting session began (epoch ms) — see the
+    /// field doc. Exposed read-only over `core.ready` so an external audit can
+    /// scope the seeded cash identity to the trades this process can be
+    /// responsible for (issue #200).
+    pub fn started_at_ms(&self) -> i64 {
+        self.started_at_ms
     }
     /// Read-only fee quote (#182) — the `core.feeQuote` entry point, so a gate or
     /// a reconcile script asks the kernel for the schedule it is charging instead
@@ -1938,7 +2009,14 @@ impl Core {
             crate::engine::DataEvent::Book { .. } => self.stats.books += 1,
             crate::engine::DataEvent::TopOfBook { .. } => self.stats.tops += 1,
             crate::engine::DataEvent::Spot { .. } => self.stats.spots += 1,
-            crate::engine::DataEvent::RoundMarkets { .. } => self.stats.rounds += 1,
+            crate::engine::DataEvent::RoundMarkets { .. } => {
+                self.stats.rounds += 1;
+                // A round rollover replaces the whole round (`engine.markets`
+                // carries the new list), so it is the moment any pending-close
+                // reason whose position is gone can no longer belong to
+                // anything live (issue #190).
+                self.sweep_exit_reasons();
+            }
         }
 
         // Mirror the latest book into `self.books`, which the position/exit path
@@ -2513,6 +2591,12 @@ impl Core {
                 // triggered" is a number on the panel, not a silent no-op.
                 "suppressedStops": self.positions.suppressed_stop_count(),
             },
+            // #205: how stale a book may be before the engine stops pricing off
+            // it — the value that actually gates entries, read off the engine
+            // that applies it (a backtest can configure its own). "How long
+            // after the feed goes quiet does the bot stop trading?" is a runtime
+            // question and must be answerable from the panel.
+            "orderbookFreshness": self.orderbook_freshness_view(),
             // P0 #202: what ONE order can commit on THIS account. The ceiling is
             // read off the kernel's own knobs — no ticket can hold more than
             // `max_shares` (every leg is clamped to it) or pay over `max_price`
@@ -2520,6 +2604,11 @@ impl Core {
             // `balance × k` bound applies on top. `scripts/risk-sizing-check.mjs`
             // asserts exactly the last line of this block on a live dry core.
             "sizing": self.sizing_view(),
+            // #190: the pending-close exit-reason table — how many reasons are
+            // held against the bound, and what the two clean-up paths removed.
+            // `orphaned` must read 0: an entry whose position is gone is the
+            // ghost reason the table used to accumulate.
+            "exitReasons": self.exit_reasons_view(),
             // Settlement & redemption (issue #175): settled-but-unredeemed claims
             // are money the chain still owes, and this is where the panel sees
             // them — the same outlet as everything else, no new event type.
@@ -3609,10 +3698,8 @@ impl Core {
                                 if left <= Decimal::ZERO
                                     || crate::position::floor_to_grid(left) == Decimal::ZERO =>
                             {
-                                let reason = self
-                                    .exit_reasons
-                                    .remove(token)
-                                    .unwrap_or(ExitReason::Manual);
+                                let reason =
+                                    self.take_exit_reason(token).unwrap_or(ExitReason::Manual);
                                 let was_maker = d.role.is_maker();
                                 if let Some(closed) =
                                     self.positions.close(&id, px, reason, was_maker, now_ms)
@@ -3648,6 +3735,11 @@ impl Core {
 
     /// Breaker + event emission when a position closes.
     fn on_position_closed(&mut self, closed: &crate::position::ClosedPosition, now_ms: i64) {
+        // The pending-close reason for this token died with the position it
+        // belonged to (issue #190). Every close path funnels through here, and
+        // an entry left behind would be inherited by the NEXT position on the
+        // same token — the ghost reason that mis-attributed exits.
+        self.clear_exit_reason(&closed.token_id);
         // Persist first so the panel/analysis have the record even if a later
         // step fails (matches the Node behaviour of saving on close).
         if let Some(db) = self.trade_db.as_mut() {
@@ -3703,6 +3795,170 @@ impl Core {
         // reported here (not only on the next tick) so the freeze and the loss
         // land in the same audit window.
         self.emit_daily_trip();
+    }
+
+    // ── Pending-close exit reasons (issue #190) ─────────────────────────────
+    //
+    // The table remembers which reason an in-flight closing SELL was submitted
+    // with, so the fill that completes the close records the right attribution.
+    // An entry therefore lives exactly as long as the close it belongs to, and
+    // these four helpers are the only way in or out — `exit_reasons` is never
+    // touched directly. Before #190 the table was only ever inserted into: an
+    // exit that never filled (cancelled, replaced by a settlement, a venue pull)
+    // left its reason behind for the NEXT position on that token to inherit.
+
+    /// Record the reason an in-flight close of `token` was submitted with.
+    fn note_exit_reason(&mut self, token: &str, reason: ExitReason) {
+        if self
+            .exit_reasons
+            .insert(token.to_string(), reason)
+            .is_none()
+        {
+            self.exit_reason_order.push_back(token.to_string());
+        }
+        self.enforce_exit_reason_bound();
+    }
+
+    /// Consume the pending reason for `token`: the close that fills uses it, and
+    /// it must not outlive that close.
+    fn take_exit_reason(&mut self, token: &str) -> Option<ExitReason> {
+        let reason = self.exit_reasons.remove(token);
+        if reason.is_some() {
+            self.exit_reason_order.retain(|t| t != token);
+        }
+        reason
+    }
+
+    /// Forget the pending reason for `token` without consuming it — the close
+    /// that landed carried its own reason (a settlement, a reconciled venue
+    /// close), so the in-flight one is stale either way.
+    fn clear_exit_reason(&mut self, token: &str) {
+        if self.exit_reasons.remove(token).is_some() {
+            self.exit_reason_order.retain(|t| t != token);
+        }
+    }
+
+    /// Drop every entry whose token no longer has an open position.
+    ///
+    /// Run when the round rolls over (`engine.markets` replaces the whole round)
+    /// and after a close: that is the point at which a leftover entry can no
+    /// longer belong to anything live, and an entry whose position is gone would
+    /// otherwise be inherited by the next position on that token.
+    fn sweep_exit_reasons(&mut self) {
+        if self.exit_reasons.is_empty() {
+            return;
+        }
+        let open: HashSet<String> = self
+            .positions
+            .open_positions()
+            .iter()
+            .map(|p| p.token_id.clone())
+            .collect();
+        let stale: Vec<String> = self
+            .exit_reasons
+            .keys()
+            .filter(|t| !open.contains(*t))
+            .cloned()
+            .collect();
+        for token in stale {
+            self.exit_reasons.remove(&token);
+            self.exit_reasons_swept += 1;
+        }
+        self.repair_exit_reason_order();
+    }
+
+    /// Keep the table within [`EXIT_REASON_TABLE_MAX`], evicting what is least
+    /// likely to still be needed: first the entries whose token has no open
+    /// position (stale by construction), then the oldest.
+    fn enforce_exit_reason_bound(&mut self) {
+        if self.exit_reasons.len() <= EXIT_REASON_TABLE_MAX {
+            return;
+        }
+        let open: HashSet<String> = self
+            .positions
+            .open_positions()
+            .iter()
+            .map(|p| p.token_id.clone())
+            .collect();
+        let ghosts: Vec<String> = self
+            .exit_reason_order
+            .iter()
+            .filter(|t| !open.contains(*t))
+            .cloned()
+            .collect();
+        for token in ghosts {
+            if self.exit_reasons.len() <= EXIT_REASON_TABLE_MAX {
+                break;
+            }
+            self.exit_reasons.remove(&token);
+            self.exit_reasons_evicted += 1;
+        }
+        while self.exit_reasons.len() > EXIT_REASON_TABLE_MAX {
+            let Some(oldest) = self.exit_reason_order.pop_front() else {
+                break;
+            };
+            if self.exit_reasons.remove(&oldest).is_some() {
+                self.exit_reasons_evicted += 1;
+            }
+        }
+        self.repair_exit_reason_order();
+    }
+
+    /// Drop order entries whose reason is no longer in the map, so the deque
+    /// always describes exactly the map's key set (the invariant the eviction
+    /// path relies on to name the oldest entry).
+    fn repair_exit_reason_order(&mut self) {
+        self.exit_reason_order
+            .retain(|t| self.exit_reasons.contains_key(t));
+        debug_assert_eq!(
+            self.exit_reason_order.len(),
+            self.exit_reasons.len(),
+            "exit_reason_order must mirror exit_reasons"
+        );
+    }
+
+    /// The pending-close table as the panel reads it (issue #190): how many
+    /// reasons are held, the bound, and what the two clean-up paths removed.
+    /// `orphaned` counts entries whose position is gone — the ghost this table
+    /// used to accumulate; it is 0 at rest.
+    fn exit_reasons_view(&self) -> serde_json::Value {
+        let open: HashSet<&str> = self
+            .positions
+            .open_positions()
+            .iter()
+            .map(|p| p.token_id.as_str())
+            .collect();
+        let orphaned = self
+            .exit_reasons
+            .keys()
+            .filter(|t| !open.contains(t.as_str()))
+            .count();
+        serde_json::json!({
+            "tracked": self.exit_reasons.len(),
+            "capacity": EXIT_REASON_TABLE_MAX,
+            "orphaned": orphaned,
+            "evictedTotal": self.exit_reasons_evicted,
+            "sweptTotal": self.exit_reasons_swept,
+        })
+    }
+
+    /// The orderbook freshness budget as the panel reads it (issue #205). The
+    /// engine's own value wins when an engine is installed (a backtest or a
+    /// replay configures its own); without one the configured value is reported,
+    /// which is what the next `install_engine` will apply.
+    fn orderbook_freshness_view(&self) -> serde_json::Value {
+        let max_stale_ms = self
+            .engine
+            .as_ref()
+            .map(|e| e.max_orderbook_stale_ms())
+            .unwrap_or(self.config.max_orderbook_stale_ms);
+        serde_json::json!({
+            "maxStaleMs": max_stale_ms,
+            // `maxStaleMs: 0` is not "a zero budget" (which would refuse every
+            // book the instant it is stamped): it is the explicit "freshness
+            // check OFF". Named here so the panel never renders the two alike.
+            "checkEnabled": max_stale_ms > 0,
+        })
     }
 
     /// Map a venue order id to a core order (for user-WS events). Returns the
@@ -3870,6 +4126,11 @@ impl Core {
                     t.maker == Some(true),
                     now_ms,
                 );
+                // This path closes without going through `on_position_closed`
+                // (the OME never issued the order, so there is no core order to
+                // report), so the pending-close reason is retired here: the
+                // position it belonged to is gone (issue #190).
+                self.clear_exit_reason(&t.token_id);
             }
             self.persist_positions();
             applied += 1;
@@ -4346,7 +4607,13 @@ impl Core {
                             Some((vwap, _)) => {
                                 let fill_price =
                                     self.config.fill_model.apply_slippage(order.side, vwap);
-                                self.authoritative_fill(id, order.size, fill_price, false, now_ms)?
+                                // A FOK is all-or-nothing by construction, so it
+                                // is one execution of the whole size — the trade
+                                // id stays the one this path has always used.
+                                let trade_id = format!("{id}:{now_ms}");
+                                self.authoritative_fill(
+                                    id, &trade_id, order.size, fill_price, false, now_ms,
+                                )?
                             }
                             None => {
                                 if order.side == Side::Buy {
@@ -4409,9 +4676,17 @@ impl Core {
     /// hit (`true`). Stating it keeps DRY and LIVE on the same authority — the
     /// execution itself — instead of DRY inferring from policy and LIVE reading
     /// the venue.
+    ///
+    /// `trade_id` is the execution's own identity, and `cumulative` is the size
+    /// this identity has now reported — NOT an increment. Two executions of one
+    /// order must therefore carry two different ids (a partial fill followed by
+    /// a further partial fill is two trades), which is exactly how a venue
+    /// reports them; re-reporting the same id is a revision of what was already
+    /// booked, not a second trade (issue #178).
     fn authoritative_fill(
         &mut self,
         id: &str,
+        trade_id: &str,
         cumulative: Decimal,
         price: Decimal,
         maker: bool,
@@ -4423,7 +4698,7 @@ impl Core {
         };
         let fill = Fill {
             order_id: id.into(),
-            trade_id: Some(format!("{id}:{now_ms}")),
+            trade_id: Some(trade_id.to_string()),
             token_id: token,
             side,
             price,
@@ -4446,6 +4721,14 @@ impl Core {
     }
 
     /// Fill a resting maker order if the latest book crosses its limit.
+    ///
+    /// The fill is bounded by the crossing side's DEPTH, not by the order's own
+    /// size (issue #183): a maker trades only against the volume that actually
+    /// reaches its limit, so an order bigger than the book leaves the rest
+    /// resting — partially filled — instead of pretending the whole size
+    /// traded. The depth reading is the taker walk's own
+    /// ([`crate::sim::Book::marketable_depth`]), so dry cannot hold two
+    /// different ideas of how much is available.
     fn try_maker_fill(&mut self, id: &str, now_ms: i64) {
         let Some(order) = self.ome.get(id).cloned() else {
             return;
@@ -4453,14 +4736,13 @@ impl Core {
         if !order.status.is_live() || order.filled_size >= order.size {
             return;
         }
-        let crosses = self
-            .books
-            .get(&order.token_id)
-            .map(|b| b.crosses(&order))
-            .unwrap_or(false);
-        if !crosses {
+        let Some(book) = self.books.get(&order.token_id) else {
+            return;
+        };
+        if !book.crosses(&order) {
             return;
         }
+        let depth = book.marketable_depth(order.side, order.price);
         // Fill model (P-1.2), identity by default so this path is unchanged:
         //  - latency: the order cannot be hit before the venue could have it;
         //  - fill probability: a crossing does not guarantee a fill (queue
@@ -4472,8 +4754,17 @@ impl Core {
         if !model.maker_fill_wins(&order.order_id) {
             return;
         }
-        // Dry maker fills are full fills at the resting limit (Node parity).
-        if let Err(e) = self.authoritative_fill(id, order.size, order.price, true, now_ms) {
+        let remaining = (order.size - order.filled_size).max(Decimal::ZERO);
+        let chunk = model.maker_fill_size(&order.order_id, remaining, depth);
+        if chunk <= Decimal::ZERO {
+            // The crossing side offers nothing to take: the order keeps resting.
+            return;
+        }
+        // A maker still fills at its own resting limit (Node parity); only the
+        // SIZE is bounded by the book. Each chunk is its own trade identity, so
+        // a later chunk books on top of this one instead of revising it.
+        let trade_id = format!("{id}:{now_ms}:{}", order.filled_size + chunk);
+        if let Err(e) = self.authoritative_fill(id, &trade_id, chunk, order.price, true, now_ms) {
             // Through the one error slot like every other internal failure: a fill
             // the OME refuses is exactly the kind of thing an operator must see
             // (#180/#184 rather than a bare Event::Error).
@@ -4608,7 +4899,7 @@ impl Core {
                 .map(|(_, worst)| worst)
                 .filter(|p| *p > Decimal::ZERO)
                 .unwrap_or(Decimal::new(1, 2));
-            self.exit_reasons.insert(token.clone(), ExitReason::Manual);
+            self.note_exit_reason(&token, ExitReason::Manual);
             let order = OrderRequest {
                 token_id: token,
                 condition_id: condition,
@@ -5529,8 +5820,9 @@ impl Core {
                 direction: job.direction,
                 round_slot: 0,
             };
-            // Record the intended exit reason so a full sell fill closes with it.
-            self.exit_reasons.insert(job.token.clone(), job.reason);
+            // Record the intended exit reason so a full sell fill closes with it
+            // (bounded and cleaned up by the close: issue #190).
+            self.note_exit_reason(&job.token, job.reason);
             if let Err(e) = self.place(order, 0, now_ms) {
                 self.emit_error(e);
             }
@@ -8884,6 +9176,181 @@ mod fill_model_tests {
         assert!(c.ome().get(&id).unwrap().status.is_live());
         assert_eq!(c.ome().get(&id).unwrap().filled_size, Decimal::ZERO);
     }
+
+    // ── #183 · a dry maker fills at most what the book offers ──────────────
+    //
+    // Before this, a crossing maker filled its WHOLE size at once, so a dry run
+    // could never reproduce the partial fills live hits on day one and every
+    // backtest read as a 100% fill rate.
+
+    /// ACCEPTANCE (#183): a maker only trades the crossing depth, and the three
+    /// records of that fact — order, position and ledger — agree.
+    #[test]
+    fn crossing_depth_limits_the_maker_fill_and_the_books_agree() {
+        let mut c = core_with(FillModel::default());
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        // Only 4 shares rest at the crossing ask. That is the whole of what a
+        // maker can trade on this book.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(4))], 1_100);
+
+        let o = c.ome().get(&id).unwrap();
+        assert_eq!(o.filled_size, dec!(4), "depth, not order size: {o:?}");
+        assert_eq!(o.status, OrderStatus::PartiallyFilled);
+        assert_eq!(c.ome().remaining(&id), dec!(6), "the rest is still working");
+        // What the fill cost is what the ledger moved: 4 × 0.40.
+        assert_eq!(
+            c.ledger().balance(),
+            dec!(1000) - dec!(1.6),
+            "cash follows the fill, not the order"
+        );
+        assert_eq!(
+            c.ledger().reserved(),
+            dec!(2.4),
+            "0.40 × 6 unfilled shares stay committed while the order rests"
+        );
+        assert_eq!(c.ledger().available(), c.ledger().balance() - dec!(2.4));
+        assert!(c.ledger().is_balanced());
+        // The position holds the shares that actually traded.
+        let pos = &c.positions().open_positions()[0];
+        assert_eq!(pos.shares, dec!(4), "position = filled size");
+        assert_eq!(pos.entry_price, dec!(0.40));
+        assert_eq!(pos.cost_usd, dec!(1.6), "basis = cash actually spent");
+        let audit = c.run_accounting_audit(1_200);
+        assert!(audit.ok, "{}", audit.note);
+    }
+
+    /// ACCEPTANCE (#183): the remainder of a partially filled maker is a real,
+    /// cancellable order — the entry that live leaves half-open must be
+    /// closable in dry too.
+    #[test]
+    fn a_partially_filled_maker_keeps_its_remainder_cancellable() {
+        let mut c = core_with(FillModel::default());
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(4))], 1_100);
+
+        c.cancel(&id, 1_200).unwrap();
+
+        let o = c.ome().get(&id).unwrap();
+        assert_eq!(o.status, OrderStatus::Cancelled);
+        assert_eq!(o.filled_size, dec!(4), "cancelling never unwinds a fill");
+        assert_eq!(c.ledger().reserved(), Decimal::ZERO, "2.4 released");
+        assert_eq!(
+            c.ledger().available(),
+            c.ledger().balance(),
+            "stranded cash is unusable cash"
+        );
+        assert!(c.ledger().is_balanced());
+        // The filled half stays a position worth exactly what was paid.
+        let pos = &c.positions().open_positions()[0];
+        assert_eq!(pos.shares, dec!(4));
+        assert_eq!(pos.cost_usd, dec!(1.6));
+        assert_eq!(c.ledger().balance(), dec!(1000) - dec!(1.6));
+        let audit = c.run_accounting_audit(1_300);
+        assert!(audit.ok, "{}", audit.note);
+    }
+
+    /// ACCEPTANCE (#183): successive books keep filling the order up to each
+    /// book's depth until it is whole — a partial fill is not a terminal state.
+    #[test]
+    fn partial_maker_fills_accumulate_until_the_order_is_whole() {
+        let mut c = core_with(FillModel::default());
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(4))], 1_100);
+        assert_eq!(c.ome().get(&id).unwrap().filled_size, dec!(4));
+        // A shallower book a moment later adds only what it offers.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.39), dec!(3))], 1_200);
+        assert_eq!(c.ome().get(&id).unwrap().filled_size, dec!(7));
+        assert_eq!(
+            c.ome().get(&id).unwrap().status,
+            OrderStatus::PartiallyFilled
+        );
+        // The third book covers the remaining 3: the order ends whole.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(10))], 1_300);
+
+        let o = c.ome().get(&id).unwrap();
+        assert_eq!(o.filled_size, dec!(10));
+        assert_eq!(o.status, OrderStatus::Filled);
+        assert_eq!(c.ome().remaining(&id), Decimal::ZERO);
+        assert_eq!(c.ledger().reserved(), Decimal::ZERO);
+        assert_eq!(c.ledger().balance(), dec!(1000) - dec!(4));
+        // Every chunk was a maker fill at the resting limit, so the average is
+        // the quote itself and no taker fee was ever charged.
+        assert_eq!(o.avg_fill_price, Some(dec!(0.40)));
+        assert_eq!(c.positions().open_positions()[0].shares, dec!(10));
+        let audit = c.run_accounting_audit(1_400);
+        assert!(audit.ok, "{}", audit.note);
+    }
+
+    /// Two chunks inside the SAME millisecond are two executions, not one
+    /// revised report: each carries its own trade identity, so the second books
+    /// on top of the first instead of being swallowed as a downward revision.
+    #[test]
+    fn two_partial_chunks_in_one_millisecond_both_book() {
+        let mut c = core_with(FillModel::default());
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(3))], 1_100);
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(4))], 1_100);
+
+        assert_eq!(
+            c.ome().get(&id).unwrap().filled_size,
+            dec!(7),
+            "3 + 4 in the same millisecond: the second chunk is a second trade"
+        );
+        assert_eq!(c.ledger().balance(), dec!(1000) - dec!(2.8));
+        assert!(c.ledger().is_balanced());
+    }
+
+    /// A crossing book whose levels are empty offers nothing to take: the order
+    /// stays whole and resting rather than filling against zero volume.
+    #[test]
+    fn a_crossing_book_with_no_volume_leaves_the_maker_resting() {
+        let mut c = core_with(FillModel::default());
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), Decimal::ZERO)], 1_100);
+
+        let o = c.ome().get(&id).unwrap();
+        assert!(o.status.is_live(), "no volume traded: {o:?}");
+        assert_eq!(o.filled_size, Decimal::ZERO);
+        assert!(c.positions().open_positions().is_empty());
+        assert_eq!(c.ledger().reserved(), dec!(4), "still committed");
+    }
+
+    /// The queue-share dial scales a maker fill below the depth as well, so a
+    /// backtest can price being behind the queue. Identity is its ceiling.
+    #[test]
+    fn depth_share_dial_scales_the_maker_fill() {
+        let mut c = core_with(FillModel {
+            maker_depth_share_bps: 5_000,
+            ..FillModel::default()
+        });
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        // Deep book: the dial, not the depth, is the binding constraint.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1_100);
+
+        let filled = c.ome().get(&id).unwrap().filled_size;
+        assert!(
+            filled > Decimal::ZERO && filled <= dec!(5),
+            "a 50% queue share of a 10-share order: {filled}"
+        );
+        assert_eq!(c.positions().open_positions()[0].shares, filled);
+        assert_eq!(c.ledger().balance(), dec!(1000) - filled * dec!(0.40));
+        assert!(c.ledger().is_balanced());
+        let audit = c.run_accounting_audit(1_200);
+        assert!(audit.ok, "{}", audit.note);
+    }
 }
 
 /// ── E17: accounting precision ────────────────────────────────────────────────
@@ -9836,7 +10303,7 @@ mod settlement_service_tests {
     use crate::model::{FillPolicy, OrderStatus, Side};
     use rust_decimal_macros::dec;
 
-    fn scratch(name: &str) -> std::path::PathBuf {
+    pub(super) fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "bk-settle-{name}-{}-{:?}",
             std::process::id(),
@@ -9849,7 +10316,7 @@ mod settlement_service_tests {
 
     /// A dry core whose market expires 1s after the entry round and whose durable
     /// logs (positions, trades, settlement journal) all land in `dir`.
-    fn settling_core(dir: &std::path::Path, balance: Decimal) -> Core {
+    pub(super) fn settling_core(dir: &std::path::Path, balance: Decimal) -> Core {
         let path = |name: &str| Some(dir.join(name).to_string_lossy().to_string());
         let mut c = Core::new(CoreConfig {
             mode: Mode::Dry,
@@ -9886,7 +10353,7 @@ mod settlement_service_tests {
 
     /// Open a 5-share position at 0.40 (taker: cost 2.00 + 0.036 fee) on a market
     /// that expires at t=2000ms, and take the audit anchor with it open.
-    fn open_and_anchor(c: &mut Core, balance: Decimal) {
+    pub(super) fn open_and_anchor(c: &mut Core, balance: Decimal) {
         c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
         let (_id, status) = c.place(entry_order(dec!(0.40), dec!(5)), 0, 1).unwrap();
         assert_eq!(status, OrderStatus::Filled);
@@ -9906,7 +10373,7 @@ mod settlement_service_tests {
     }
 
     /// The resolution the venue would report: the held token pays 1.00/share.
-    fn winning_resolution() -> blitzkrieg_market_api::MarketResolution {
+    pub(super) fn winning_resolution() -> blitzkrieg_market_api::MarketResolution {
         blitzkrieg_market_api::MarketResolution {
             condition_id: "cond".into(),
             resolved: true,
@@ -10386,5 +10853,315 @@ mod settlement_service_tests {
         assert_eq!(audit["receivableUsd"], serde_json::json!(5.0));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Pending-close exit reasons (issue #190). The table is a ledger of IN-FLIGHT
+/// closes, not a history: an entry must not outlive the position it belongs to,
+/// the table must never grow without bound, and a later position on the same
+/// token must never inherit a dead reason.
+#[cfg(test)]
+mod exit_reason_table_tests {
+    use super::settlement_service_tests::{
+        open_and_anchor, scratch, settling_core, winning_resolution,
+    };
+    use super::*;
+    use crate::model::{FillPolicy, OrderStatus, Side};
+    use crate::position::OpenParams;
+    use rust_decimal_macros::dec;
+
+    /// The fixture's config, exposed so a test can vary exactly one field.
+    fn cfg() -> CoreConfig {
+        CoreConfig {
+            mode: Mode::Dry,
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(1000),
+            auto_exits_enabled: false,
+            ..Default::default()
+        }
+    }
+
+    /// Dry core, seed 1000, automated exits OFF: the fixture drives every close
+    /// explicitly so the path under test is the only one that runs.
+    fn core() -> Core {
+        let mut c = Core::new(cfg());
+        c.set_balance(dec!(1000));
+        c
+    }
+
+    fn order(side: Side, price: Decimal, size: Decimal, token: &str, key: &str) -> OrderRequest {
+        OrderRequest {
+            token_id: token.into(),
+            condition_id: "cond".into(),
+            side,
+            mode: FillPolicy::Taker,
+            price,
+            size,
+            internal_key: key.into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 1,
+        }
+    }
+
+    /// Open a 10-share position on `token` at 0.40 off a resting ask.
+    fn open_position(c: &mut Core, token: &str, at_ms: i64) {
+        c.book_snapshot(token, vec![], vec![(dec!(0.40), dec!(500))], at_ms - 1);
+        let (_, status) = c
+            .place(
+                order(Side::Buy, dec!(0.40), dec!(10), token, "entry"),
+                0,
+                at_ms,
+            )
+            .unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+    }
+
+    /// Close the position on `token` the way a venue-side manual sell would: a
+    /// SELL fill the OME never issued, folded in by the reconcile sweep. This
+    /// path does NOT go through `on_position_closed`.
+    fn venue_close(c: &mut Core, token: &str, at_ms: i64) {
+        let snap = crate::reconcile::VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![crate::reconcile::VenueTrade {
+                venue_order_id: format!("manual-{token}"),
+                trade_id: format!("t-{token}"),
+                token_id: token.into(),
+                side: Side::Sell,
+                size: dec!(10),
+                price: dec!(0.60),
+                ts_ms: at_ms,
+                tx_hash: None,
+                maker: Some(false),
+            }],
+            now_ms: at_ms + 100,
+        };
+        c.reconcile(snap).unwrap();
+        assert!(
+            c.positions()
+                .open_positions()
+                .iter()
+                .all(|p| p.token_id != token),
+            "the venue close must leave no open position on {token}"
+        );
+    }
+
+    /// A close retires the reason that was pending for it, whichever path lands
+    /// the close — including the reconciled venue close, which does not funnel
+    /// through `on_position_closed`.
+    #[test]
+    fn a_close_retires_the_pending_exit_reason() {
+        let mut c = core();
+        open_position(&mut c, "tok", 1_000);
+        // The exit policy decided to leave (a stop); the reason stays pending
+        // until the closing sell fills.
+        c.note_exit_reason("tok", ExitReason::StopLoss);
+        assert_eq!(c.exit_reasons.len(), 1);
+        assert_eq!(c.exit_reasons_view()["tracked"], serde_json::json!(1));
+        assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(0));
+
+        venue_close(&mut c, "tok", 1_100);
+
+        assert!(
+            c.exit_reasons.is_empty(),
+            "a closed position must not leave its exit reason behind: {:?}",
+            c.exit_reasons
+        );
+        assert_eq!(c.exit_reasons_view()["tracked"], serde_json::json!(0));
+        assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(0));
+    }
+
+    /// The other cleanup site, and the one every internal close funnels through:
+    /// a position that settles locally never had its exit fill, so
+    /// `take_exit_reason` never ran for it and the retirement inside
+    /// `on_position_closed` is the only thing that removes the entry.
+    #[test]
+    fn a_local_settlement_retires_the_pending_exit_reason() {
+        let dir = scratch("settle-reason");
+        let mut c = settling_core(&dir, dec!(10));
+        open_and_anchor(&mut c, dec!(10));
+        // A stop was decided, its exit never filled, and the market resolved
+        // under it: the reason must die with the position it belonged to.
+        c.note_exit_reason("tok", ExitReason::StopLoss);
+        assert_eq!(c.exit_reasons_view()["tracked"], serde_json::json!(1));
+
+        c.on_market_resolution(winning_resolution(), 2_001);
+
+        assert_eq!(
+            c.positions().closed_positions()[0].exit_reason,
+            ExitReason::Settlement,
+            "the settlement, not the dead stop, is what closed this position"
+        );
+        assert!(
+            c.exit_reasons.is_empty(),
+            "a settled position must not leave its exit reason behind: {:?}",
+            c.exit_reasons
+        );
+        assert_eq!(c.exit_reasons_view()["tracked"], serde_json::json!(0));
+        assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(0));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mis-attribution this issue is about: a reason recorded for an exit
+    /// that never filled must not be applied to the NEXT position on the same
+    /// token. The internal exit-fill path is the one that reads the table, so
+    /// the assertion is on the recorded close reason.
+    #[test]
+    fn a_later_position_never_inherits_a_dead_exit_reason() {
+        let mut c = core();
+        open_position(&mut c, "tok", 1_000);
+        c.note_exit_reason("tok", ExitReason::StopLoss); // an exit that never filled
+        venue_close(&mut c, "tok", 1_100); // the position dies first
+
+        // The next round reuses the token (past the exit cooldown): a new
+        // position, with no reason of its own.
+        open_position(&mut c, "tok", 200_000);
+        c.book_snapshot("tok", vec![(dec!(0.55), dec!(500))], vec![], 200_100);
+        let (_, status) = c
+            .place(
+                order(Side::Sell, dec!(0.55), dec!(10), "tok", "close-2"),
+                0,
+                200_100,
+            )
+            .unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+
+        let closed = c.positions().closed_positions();
+        assert_eq!(closed.len(), 2);
+        assert_eq!(
+            closed[1].exit_reason,
+            ExitReason::Manual,
+            "the second close inherited the first position's dead stop reason"
+        );
+    }
+
+    /// The table is bounded, and the bound evicts the entries whose position is
+    /// already gone before it touches a live one.
+    #[test]
+    fn the_table_is_bounded_and_evicts_dead_entries_first() {
+        let mut c = core();
+        open_position(&mut c, "live", 1_000);
+        c.note_exit_reason("live", ExitReason::TakeProfit);
+        for i in 0..EXIT_REASON_TABLE_MAX {
+            c.note_exit_reason(&format!("dead-{i}"), ExitReason::StopLoss);
+        }
+        assert_eq!(
+            c.exit_reasons.len(),
+            EXIT_REASON_TABLE_MAX,
+            "the table must never exceed its bound"
+        );
+        assert_eq!(
+            c.exit_reasons.get("live"),
+            Some(&ExitReason::TakeProfit),
+            "a live position's reason must survive while dead entries remain"
+        );
+        assert_eq!(c.exit_reasons_view()["evictedTotal"], serde_json::json!(1));
+        assert_eq!(c.exit_reason_order.len(), c.exit_reasons.len());
+    }
+
+    /// …and when EVERY entry still has an open position, the oldest is the one
+    /// dropped (the table cannot be allowed to exceed the bound either way).
+    #[test]
+    fn the_oldest_entry_is_evicted_when_all_of_them_are_live() {
+        let mut c = core();
+        for i in 0..=EXIT_REASON_TABLE_MAX {
+            let token = format!("tok-{i}");
+            c.positions.open(
+                OpenParams {
+                    strategy: "spread_arb".into(),
+                    asset: "BTC".into(),
+                    direction: crate::model::SignalDirection::Up,
+                    token_id: token.clone(),
+                    condition_id: "cond".into(),
+                    entry_price: dec!(0.40),
+                    expires_at_ms: 9_999,
+                    was_maker: false,
+                    target_exit_price: None,
+                },
+                1_000,
+            );
+            c.note_exit_reason(&token, ExitReason::TakeProfit);
+        }
+        assert_eq!(c.exit_reasons.len(), EXIT_REASON_TABLE_MAX);
+        assert!(
+            !c.exit_reasons.contains_key("tok-0"),
+            "the oldest entry is the one evicted"
+        );
+        assert!(
+            c.exit_reasons
+                .contains_key(&format!("tok-{EXIT_REASON_TABLE_MAX}"))
+        );
+        assert_eq!(c.exit_reason_order.len(), c.exit_reasons.len());
+    }
+
+    /// The round rollover is the backstop: an entry whose position is gone by
+    /// then can no longer belong to anything live, so it is swept — which is
+    /// what keeps `orphaned` at 0 for the panel.
+    #[test]
+    fn a_round_rollover_sweeps_reasons_whose_position_is_gone() {
+        let mut c = core();
+        open_position(&mut c, "live", 1_000);
+        c.note_exit_reason("live", ExitReason::TakeProfit);
+        // An exit submitted for a position that closed in between: the entry is
+        // real, its position is not.
+        c.note_exit_reason("ghost", ExitReason::StopLoss);
+        assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(1));
+
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![],
+                now_ms: 5_000,
+            },
+            5_000,
+        );
+
+        assert!(
+            !c.exit_reasons.contains_key("ghost"),
+            "a round rollover must sweep a reason whose position is gone"
+        );
+        assert_eq!(
+            c.exit_reasons.get("live"),
+            Some(&ExitReason::TakeProfit),
+            "the live position's reason is not swept"
+        );
+        assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(0));
+        assert_eq!(c.exit_reasons_view()["sweptTotal"], serde_json::json!(1));
+    }
+
+    /// Issue #205 requirement 4: the orderbook-staleness budget in force is
+    /// readable from `engine.stats`, so a panel or a harness never has to parse
+    /// the boot log. Built through `install_engine` — the production
+    /// `CoreConfig -> EngineConfig` mapping — so this covers the whole chain and
+    /// reports the value the engine *enforces*, not just the field that was set.
+    #[test]
+    fn engine_stats_reports_the_orderbook_freshness_budget() {
+        let view = |budget_ms: i64| -> serde_json::Value {
+            let mut c = Core::new(CoreConfig {
+                max_orderbook_stale_ms: budget_ms,
+                ..cfg()
+            });
+            let engine_cfg = c.config().engine_config();
+            c.enable_engine(crate::engine::Engine::new(engine_cfg));
+            c.engine_stats_at(1_000)["orderbookFreshness"].clone()
+        };
+
+        let widened = view(25_000);
+        assert_eq!(widened["maxStaleMs"], serde_json::json!(25_000));
+        assert_eq!(widened["checkEnabled"], serde_json::json!(true));
+        // The shipped default is the historic hardcoded value: #205 made the knob
+        // configurable without moving it.
+        let shipped = view(crate::engine::DEFAULT_MAX_ORDERBOOK_STALE_MS);
+        assert_eq!(shipped["maxStaleMs"], serde_json::json!(8_000));
+        assert_eq!(shipped["checkEnabled"], serde_json::json!(true));
+        // 0 = the operator switched the gate off. Reported as such rather than as
+        // a "0ms budget", which would read as "refuse everything".
+        let off = view(0);
+        assert_eq!(off["maxStaleMs"], serde_json::json!(0));
+        assert_eq!(off["checkEnabled"], serde_json::json!(false));
     }
 }

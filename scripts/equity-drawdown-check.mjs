@@ -37,7 +37,8 @@
  * `--capacity <json>` (the file `capacity-check.mjs --json` writes) adds a
  * counterfactual: each trade is charged the measured self-impact for its own size,
  * interpolated on the measured curve. It is an ATTRIBUTION, not a re-simulation —
- * one leg per trade, on a fixture ladder, so it is stated as a bound, not a result.
+ * one leg per trade, and only the side the report measured (`side`, default buy),
+ * so it is stated as a bound, not a result.
  *
  * Read-only: reads the trade log and (optionally) a capacity report, prints, exits.
  */
@@ -226,8 +227,9 @@ function verdicts(m, opts) {
 
 // ── Optional attribution: the measured self-impact, per trade ────────────────
 // Piecewise-linear on the capacity report's curve (size in SHARES → slippage in
-// bps of the best ask). Sizes beyond the measured ladder are clamped to the last
-// point and counted, because an order that size would have been refused outright.
+// bps of the best price on the side the report measured). Sizes beyond the
+// measured ladder are clamped to the last point and counted, because an order
+// that size would have been refused outright.
 function impactCurveLoad(path) {
   if (!path || !existsSync(path)) return null;
   const rep = JSON.parse(readFileSync(path, 'utf8'));
@@ -250,7 +252,9 @@ function impactCurveLoad(path) {
 }
 
 function attributeImpact(rawTrades, curve) {
-  const bestAsk = num(curve.report.bestAsk);
+  // `bestPrice` is the best level of the side the report measured; `bestAsk` is
+  // the same field's name in reports written before `--side` existed.
+  const bestPrice = num(curve.report.bestPrice ?? curve.report.bestAsk);
   let total = 0;
   let beyond = 0;
   const perTrade = [];
@@ -261,7 +265,7 @@ function attributeImpact(rawTrades, curve) {
     if (shares > maxMeasured) beyond++;
     // Slippage is measured at the ladder's price; carry it as USD per share so the
     // attribution does not silently rescale with the trade's own entry price.
-    const usd = shares * bestAsk * (bps / 10000);
+    const usd = shares * bestPrice * (bps / 10000);
     total += usd;
     perTrade.push({ id: t.id, shares, slippageBps: bps, impactUsd: usd });
   }
@@ -378,7 +382,7 @@ function selfTest() {
   // past the ladder is clamped and COUNTED, never extrapolated.
   {
     const curve = {
-      report: { bestAsk: 0.4, rows: [{ size: 10, slippageBps: 0 }, { size: 20, slippageBps: 100 }] },
+      report: { bestPrice: 0.4, side: 'buy', rows: [{ size: 10, slippageBps: 0 }, { size: 20, slippageBps: 100 }] },
       at: null,
     };
     curve.at = (s) => (s <= 10 ? 0 : s <= 20 ? ((s - 10) / 10) * 100 : 100);
@@ -388,6 +392,15 @@ function selfTest() {
     check('fixture 8: a size past the ladder is clamped to the last measured point and counted',
       Math.abs(att.perTrade[1].impactUsd - 50 * 0.4 * 0.01) < 1e-12 && att.beyondCapacity === 1,
       `impact ${att.perTrade[1].impactUsd}, beyond ${att.beyondCapacity}`);
+    // The reference price was called `bestAsk` before `--side` existed. A report
+    // left on disk by the older gate must still attribute — a renamed field that
+    // silently charged $0 (NaN) would turn the attribution into a free pass.
+    const legacy = { report: { bestAsk: 0.5, rows: [{ size: 10, slippageBps: 100 }] }, at: null };
+    legacy.at = () => 100;
+    const legacyAtt = attributeImpact([{ id: 'L', shares: 10 }], legacy);
+    check('fixture 8: a report written before --side (bestAsk, no bestPrice) still attributes',
+      Math.abs(legacyAtt.perTrade[0].impactUsd - 10 * 0.5 * 0.01) < 1e-12,
+      `${legacyAtt.perTrade[0].impactUsd}`);
   }
 
   console.log('');
@@ -465,11 +478,14 @@ function main() {
       const att = attributeImpact(trades, curve);
       const withoutImpact = m.net + att.totalUsd;
       result.impact = { ...att, netWithoutImpactUsd: withoutImpact };
+      const curveSide = curve.report.side ?? 'buy';
+      const curveBook = curve.report.ladder && curve.report.ladder !== 'fixture'
+        ? `the extracted book ${curve.report.ladder}` : 'the fixture ladder';
       console.log('');
-      console.log(`  impact        one leg per trade on the measured curve (${CAPACITY}): ` +
+      console.log(`  impact        one leg per trade on the measured ${curveSide} curve (${CAPACITY}): ` +
         `-$${att.totalUsd.toFixed(4)} over ${m.trades} trades`);
       console.log(`                net ${money(m.net)} → ${money(withoutImpact)} with self-impact returned`);
-      console.log(`                attribution, not a re-simulation: one leg, fixture ladder` +
+      console.log(`                attribution, not a re-simulation: one leg, ${curveSide} side only, ${curveBook}` +
         `${att.beyondCapacity > 0 ? `, ${att.beyondCapacity} trade(s) past the measured ladder (clamped)` : ''}`);
       const modelled = m.feesUsd + att.totalUsd;
       console.log(`                cost split: fees $${m.feesUsd.toFixed(4)} ` +

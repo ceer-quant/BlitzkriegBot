@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.blitzkrieg.stack-autostart —— 路线 A 的骨架（issue #211）。**默认不安装。**
+
+  安装它（把本文件去掉 .disabled 后缀、复制到 ~/Library/LaunchAgents/ 并
+  `launchctl bootstrap`）= 每次登录/重启后**无人值守地自动拉起交易内核**，而且
+  与 `.env` 里的 DRY_RUN 无关：DRY_RUN=false（live）时照样拉起。
+
+  ⚠️ 这与项目既有约定冲突：「live 只在用户在场时开」。所以这是一个**用户决定**，
+  需要使用者明确批准后才安装；本仓库默认不安装、不加载它，watchdog 也不会替它做决定。
+
+  想保留 live 门禁的人不要用它，改用带门禁的那条路：
+      /Volumes/Hard Disk/BlitzkriegBot/scripts/stack-watchdog.sh --autostart
+  后者在 live 模式下**硬拒绝**自动拉起（见 scripts/stack-watchdog.sh 头部与
+  scripts/README.md），dry 下才动手。
+
+  TCC 提醒：本仓库在外置卷，launchd 拉起的进程被拒读/执行该卷（同目录的
+  databackup agent 现在就在以 `Operation not permitted` 失败）。装这个 agent 之前
+  先解决这件事：授予完全磁盘访问权限，或把内核二进制与脚本复制到内置盘。
+
+  另外两处需要按你的机器改：ProgramArguments 里的仓库路径、StandardOutPath /
+  StandardErrorPath 里的日志路径（下面是本机 fancer 的路径）。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.blitzkrieg.stack-autostart</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-lc</string>
+    <string>exec "/Volumes/Hard Disk/BlitzkriegBot/target/release/blitzkrieg" run</string>
+  </array>
+
+  <key>WorkingDirectory</key><string>/Volumes/Hard Disk/BlitzkriegBot</string>
+
+  <key>RunAtLoad</key><true/>
+
+  <!-- KeepAlive=false 是刻意的：true 会让 launchd 把用户主动 `blitzkrieg stop`
+       停掉的内核立刻再拉起来——那等于取消了「停」这个动作本身。 -->
+  <key>KeepAlive</key><false/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+  </dict>
+
+  <key>AbandonProcessGroup</key><true/>
+
+  <key>ProcessType</key><string>Background</string>
+  <key>Nice</key><integer>10</integer>
+
+  <key>StandardOutPath</key><string>/Users/fancer/Library/Logs/blitzkrieg-stack-autostart.log</string>
+  <key>StandardErrorPath</key><string>/Users/fancer/Library/Logs/blitzkrieg-stack-autostart.log</string>
+</dict>
+</plist>

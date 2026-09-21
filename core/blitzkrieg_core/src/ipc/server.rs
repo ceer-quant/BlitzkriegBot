@@ -552,6 +552,15 @@ async fn handle_line(
             Ok(serde_json::json!({
                 "version": crate::CORE_VERSION,
                 "mode": c.mode(),
+                // WHICH PROCESS is answering (issue #200): an out-of-process
+                // audit writes one line per poll, and two cores can be alive on
+                // the same host (a fixture, a supervisor restart, the production
+                // one). `commit` alone cannot tell a fresh dry core from the one
+                // it replaced — the revision is the same — so the identity that
+                // travels with every audit line needs the pid and the session
+                // clock as well.
+                "pid": std::process::id(),
+                "startedAtMs": c.started_at_ms(),
                 // Venue-side authentication (wallet signer/funder), NOT the IPC
                 // peer check — that one is `peerVerified` below. Kept `false`
                 // here so existing clients keep their meaning for this field.

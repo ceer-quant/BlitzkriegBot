@@ -6,7 +6,9 @@
 //!    price; if that side cannot cover the full size, the order is rejected —
 //!    all-or-nothing, the same way the venue would kill it
 //!  - Maker rests post-only and fills only when the live book crosses the limit
-//!    (BUY when best ask <= limit, SELL when best bid >= limit)
+//!    (BUY when best ask <= limit, SELL when best bid >= limit), and then only
+//!    up to the size the crossing side actually offers at prices that cross
+//!    that limit — a maker cannot trade more than reaches it (issue #183)
 //!  - MakerThenTaker rests as maker and is escalated by the service tick after
 //!    maker_timeout_ms.
 //!
@@ -49,30 +51,63 @@ impl Book {
     /// does any resting level cross `limit` at all, and how much size rests at
     /// or inside it.
     ///
-    /// Pure and defined against the same crossing rule the walk uses, so the
-    /// answer describes the walk that just failed rather than forming a second
-    /// opinion about it.
+    /// Defined through [`Book::crossing_levels`], the dry matcher's ONE depth
+    /// reading (#183), so the refusal describes the walk that just failed
+    /// instead of forming a second opinion about it.
     pub fn crossing_depth(&self, side: Side, limit: Decimal) -> (bool, Decimal) {
-        let crosses = |p: Decimal| match side {
-            Side::Buy => p <= limit,
-            Side::Sell => p >= limit,
-        };
-        let levels = match side {
-            Side::Buy => &self.asks,
-            Side::Sell => &self.bids,
-        };
-        let mut any = false;
-        let mut depth = Decimal::ZERO;
-        for (price, size) in levels.iter() {
-            if !crosses(*price) {
-                continue;
-            }
-            any = true;
-            if *size > Decimal::ZERO {
-                depth += *size;
-            }
-        }
+        let levels = self.crossing_levels(side, limit);
+        let any = !levels.is_empty();
+        // A level with no size can make the side "cross" without adding
+        // anything to take, which is exactly the distinction the caller needs.
+        let depth = levels
+            .iter()
+            .map(|(_, size)| *size)
+            .filter(|size| *size > Decimal::ZERO)
+            .sum();
         (any, depth)
+    }
+
+    /// The resting levels a `side` order priced at `limit` would trade
+    /// against, best price first (lowest ask for a BUY, highest bid for a
+    /// SELL).
+    ///
+    /// This is the ONE depth reading of the dry matcher: the taker walk
+    /// ([`Book::walk_marketable`]) and the maker partial-fill cap
+    /// ([`Book::marketable_depth`]) both start here, so "how much can trade"
+    /// cannot drift into two different answers (issue #183).
+    fn crossing_levels(&self, side: Side, limit: Decimal) -> Vec<(Decimal, Decimal)> {
+        let mut levels = match side {
+            Side::Buy => self.asks.clone(),
+            Side::Sell => self.bids.clone(),
+        };
+        levels.sort();
+        // Best first, per side: the best ask is the LOWEST ask, the best bid
+        // is the HIGHEST bid. Ascending sort only serves the ask side; the bid
+        // side must walk down from the top or a deep-but-worse level hides the
+        // better ones behind an early `break`.
+        if side == Side::Sell {
+            levels.reverse();
+        }
+        // Best-first order makes the crossing levels a PREFIX of the walk, so
+        // retaining them is exactly the `break` on the first non-crossing
+        // price the walk used to take.
+        levels.retain(|(p, _)| match side {
+            Side::Buy => *p <= limit,
+            Side::Sell => *p >= limit,
+        });
+        levels
+    }
+
+    /// Total resting size on the side a `side` order priced at `limit` would
+    /// trade against — the volume that is actually there to be taken.
+    ///
+    /// A resting maker's fill is capped by this, not by its own `size`: the
+    /// book can only trade what reaches the order (issue #183).
+    pub fn marketable_depth(&self, side: Side, limit: Decimal) -> Decimal {
+        self.crossing_levels(side, limit)
+            .iter()
+            .map(|(_, s)| *s)
+            .sum()
     }
 
     /// Walk the book as a taker would: consume resting levels, best price
@@ -91,28 +126,10 @@ impl Book {
         if size <= Decimal::ZERO {
             return None;
         }
-        let mut levels = match side {
-            Side::Buy => self.asks.clone(),
-            Side::Sell => self.bids.clone(),
-        };
-        levels.sort();
-        // Best first, per side: the best ask is the LOWEST ask, the best bid
-        // is the HIGHEST bid. Ascending sort only serves the ask side; the bid
-        // side must walk down from the top or a deep-but-worse level hides the
-        // better ones behind an early `break`.
-        if side == Side::Sell {
-            levels.reverse();
-        }
-        let crosses = |p: Decimal| match side {
-            Side::Buy => p <= limit,
-            Side::Sell => p >= limit,
-        };
+        let levels = self.crossing_levels(side, limit);
         let mut remaining = size;
         let mut notional = Decimal::ZERO;
         for (price, level_size) in levels.iter() {
-            if !crosses(*price) {
-                break; // sorted best-first: nothing further out can cross
-            }
             let take = (*level_size).min(remaining);
             notional += *price * take;
             remaining -= take;
@@ -126,7 +143,7 @@ impl Book {
         let vwap = notional / size;
         let worst = levels
             .iter()
-            .filter(|(p, s)| crosses(*p) && *s > Decimal::ZERO)
+            .filter(|(_, s)| *s > Decimal::ZERO)
             .map(|(p, _)| *p)
             .reduce(|a, b| {
                 if side == Side::Buy {
@@ -154,6 +171,14 @@ fn price_max() -> Decimal {
     Decimal::new(99, 2)
 }
 
+/// Default for [`FillModel::maker_depth_share_bps`]: take the whole crossing
+/// depth. Named so the serde default (used when an older config omits the
+/// field) is the same identity value the in-code default carries — a plain
+/// `0` would deserialize into "never take anything".
+fn default_maker_depth_share_bps() -> u32 {
+    10_000
+}
+
 /// Fill-realism model for the dry matcher (P-1.2 backtesting).
 ///
 /// The default is the **identity** — no slippage, no latency, always fill — i.e.
@@ -167,12 +192,25 @@ fn price_max() -> Decimal {
 ///    it was submitted.
 ///  - `maker_fill_prob_bps`: chance a crossing maker order actually fills. The
 ///    draw is a hash of the order id, so a given replay is reproducible.
+///  - `maker_depth_share_bps`: of the volume the crossing side actually offers
+///    ([`Book::marketable_depth`]), how much this maker order gets — its place
+///    in the queue behind everyone already resting. `10_000` (default) takes
+///    all of it; lower values model being late to the front. The draw is a
+///    salted hash of the order id, independent of the `maker_fill_prob_bps`
+///    draw, so a replay is still reproducible and the two dials do not move
+///    together.
+///
+/// The depth cap itself is NOT a dial: a maker fill is always bounded by the
+/// crossing depth (issue #183), because that is venue physics rather than
+/// friction we choose to price.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FillModel {
     pub taker_slippage_ticks: u32,
     pub maker_latency_ms: i64,
     pub maker_fill_prob_bps: u32,
+    #[serde(default = "default_maker_depth_share_bps")]
+    pub maker_depth_share_bps: u32,
 }
 
 impl Default for FillModel {
@@ -181,16 +219,21 @@ impl Default for FillModel {
             taker_slippage_ticks: 0,
             maker_latency_ms: 0,
             maker_fill_prob_bps: 10_000,
+            maker_depth_share_bps: default_maker_depth_share_bps(),
         }
     }
 }
 
 impl FillModel {
-    /// True when the model cannot change any outcome (the default).
+    /// True when no friction dial is engaged (the default).
+    ///
+    /// Note this is about the DIALS only: the maker depth cap applies whatever
+    /// the model says, because it is how the venue works, not a choice.
     pub fn is_identity(&self) -> bool {
         self.taker_slippage_ticks == 0
             && self.maker_latency_ms <= 0
             && self.maker_fill_prob_bps >= 10_000
+            && self.maker_depth_share_bps >= 10_000
     }
 
     /// Price a taker fill would actually get, given the side.
@@ -221,11 +264,51 @@ impl FillModel {
         }
         draw(order_id) % 10_000 < self.maker_fill_prob_bps
     }
+
+    /// How much of a crossing maker order actually trades this time.
+    ///
+    /// `remaining` is what is left of the order; `depth` is
+    /// [`Book::marketable_depth`] on the side this order would consume. The cap
+    /// is `depth`, never `remaining` alone — a maker fills only against volume
+    /// that reaches its limit, so an order larger than the crossing depth is
+    /// left partially filled rather than magically whole (issue #183).
+    ///
+    /// The result is deterministic for a given `(order_id, remaining, depth)`:
+    /// the queue share is a salted hash of the order id, so the same replay
+    /// always produces the same partial fills.
+    pub fn maker_fill_size(&self, order_id: &str, remaining: Decimal, depth: Decimal) -> Decimal {
+        if remaining <= Decimal::ZERO || depth <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        let reachable = remaining.min(depth);
+        if self.maker_depth_share_bps >= 10_000 {
+            return reachable;
+        }
+        if self.maker_depth_share_bps == 0 {
+            return Decimal::ZERO;
+        }
+        // A share in 1..=share_bps: a knob set above zero must never silently
+        // mean "never fill" just because the hash landed on zero.
+        let bps = 1 + (draw_salted(order_id, DEPTH_SHARE_SALT) % self.maker_depth_share_bps);
+        (reachable * Decimal::from(bps) / Decimal::from(10_000u32))
+            .min(reachable)
+            .max(Decimal::ZERO)
+    }
 }
+
+/// Salt for the queue-share draw, so it is statistically independent of the
+/// fill-probability draw on the same order id.
+const DEPTH_SHARE_SALT: u8 = 0x5d;
 
 /// FNV-1a over the order id → a stable pseudo-random draw.
 fn draw(order_id: &str) -> u32 {
-    let mut h: u32 = 0x811c_9dc5;
+    draw_salted(order_id, 0)
+}
+
+/// FNV-1a over the order id, mixed with `salt` first: one stable draw per
+/// (id, salt) pair, so two dials on the same id do not move together.
+fn draw_salted(order_id: &str, salt: u8) -> u32 {
+    let mut h: u32 = 0x811c_9dc5 ^ (salt as u32).wrapping_mul(0x9e37_79b9);
     for b in order_id.as_bytes() {
         h ^= *b as u32;
         h = h.wrapping_mul(0x0100_0193);
@@ -356,6 +439,155 @@ mod tests {
     }
 
     #[test]
+    fn marketable_depth_counts_only_the_crossing_levels() {
+        let book = Book {
+            bids: vec![(dec!(0.30), dec!(100)), (dec!(0.39), dec!(7))],
+            asks: vec![
+                (dec!(0.45), dec!(100)),
+                (dec!(0.40), dec!(3)),
+                (dec!(0.41), dec!(2)),
+            ],
+        };
+        // BUY at 0.41 reaches the 0.40 and 0.41 asks; the 0.45 ask is out of
+        // reach and must not inflate the depth.
+        assert_eq!(book.marketable_depth(Side::Buy, dec!(0.41)), dec!(5));
+        assert_eq!(book.marketable_depth(Side::Buy, dec!(0.45)), dec!(105));
+        // SELL at 0.39 reaches only the 0.39 bid.
+        assert_eq!(book.marketable_depth(Side::Sell, dec!(0.39)), dec!(7));
+        assert_eq!(book.marketable_depth(Side::Sell, dec!(0.30)), dec!(107));
+        // Nothing crosses at all.
+        assert_eq!(book.marketable_depth(Side::Buy, dec!(0.39)), Decimal::ZERO);
+        assert_eq!(book.marketable_depth(Side::Sell, dec!(0.45)), Decimal::ZERO);
+    }
+
+    /// Issue #183: the maker cap and the taker walk must read the SAME depth.
+    /// Two different answers to "how much can trade" was the defect, so this
+    /// pins them to each other rather than to a hard-coded number.
+    #[test]
+    fn maker_depth_and_taker_walk_agree_on_what_can_trade() {
+        let book = Book {
+            bids: vec![(dec!(0.55), dec!(4)), (dec!(0.50), dec!(6))],
+            asks: vec![(dec!(0.60), dec!(3)), (dec!(0.65), dec!(7))],
+        };
+        for (side, limit) in [
+            (Side::Buy, dec!(0.65)),
+            (Side::Buy, dec!(0.60)),
+            (Side::Sell, dec!(0.55)),
+            (Side::Sell, dec!(0.50)),
+        ] {
+            let depth = book.marketable_depth(side, limit);
+            assert!(depth > Decimal::ZERO, "{side:?} @ {limit}: nothing crosses");
+            // Exactly the depth is walkable; one share more is what a live FOK
+            // gets killed for.
+            assert!(
+                book.walk_marketable(side, limit, depth).is_some(),
+                "{side:?} @ {limit}: the measured depth {depth} must be walkable"
+            );
+            assert!(
+                book.walk_marketable(side, limit, depth + dec!(0.01))
+                    .is_none(),
+                "{side:?} @ {limit}: more than the depth {depth} must be unfillable"
+            );
+        }
+    }
+
+    #[test]
+    fn maker_fill_is_capped_by_the_crossing_depth_not_the_order_size() {
+        let m = FillModel::default();
+        // A 10-share maker meets 4 shares of crossing depth: 4 trade, 6 rest.
+        assert_eq!(m.maker_fill_size("dry_1", dec!(10), dec!(4)), dec!(4));
+        // Depth past the order size changes nothing: the order's own remaining
+        // size is still the tighter bound (this is the unchanged behaviour every
+        // deep-book case already relied on).
+        assert_eq!(m.maker_fill_size("dry_1", dec!(10), dec!(100)), dec!(10));
+        // Nothing to take, or nothing left to fill.
+        assert_eq!(
+            m.maker_fill_size("dry_1", dec!(10), Decimal::ZERO),
+            Decimal::ZERO
+        );
+        assert_eq!(
+            m.maker_fill_size("dry_1", Decimal::ZERO, dec!(10)),
+            Decimal::ZERO
+        );
+    }
+
+    #[test]
+    fn depth_share_is_deterministic_and_bounded() {
+        let half = FillModel {
+            maker_depth_share_bps: 5_000,
+            ..FillModel::default()
+        };
+        assert!(!half.is_identity());
+        let first = half.maker_fill_size("dry_42", dec!(10), dec!(10));
+        assert!(
+            first > Decimal::ZERO && first <= dec!(5),
+            "a 50% queue share must leave some of the depth and take some: {first}"
+        );
+        // Same order id → the same partial fill, every time (replays are exact).
+        for _ in 0..10 {
+            assert_eq!(half.maker_fill_size("dry_42", dec!(10), dec!(10)), first);
+        }
+        // And the draw is not degenerate: the share spreads across ids rather
+        // than pinning every order to the same fraction.
+        let shares: Vec<Decimal> = (0..200)
+            .map(|i| half.maker_fill_size(&format!("dry_{i}"), dec!(10), dec!(10)))
+            .collect();
+        assert!(
+            shares.iter().all(|s| *s > Decimal::ZERO && *s <= dec!(5)),
+            "every share stays inside (0, 50%]"
+        );
+        let below_max = shares.iter().filter(|s| **s < dec!(5)).count();
+        assert!(
+            below_max > 150,
+            "the share must vary with the id, not sit at its ceiling ({below_max}/200 below max)"
+        );
+
+        // A zero share never fills; the ceiling share takes everything reachable
+        // and is the identity.
+        let none = FillModel {
+            maker_depth_share_bps: 0,
+            ..FillModel::default()
+        };
+        assert_eq!(
+            none.maker_fill_size("dry_1", dec!(10), dec!(10)),
+            Decimal::ZERO
+        );
+        assert!(!none.is_identity());
+        let all = FillModel::default();
+        assert_eq!(all.maker_fill_size("dry_1", dec!(10), dec!(10)), dec!(10));
+        assert!(all.is_identity());
+    }
+
+    /// Replay reproducibility is a hard requirement (#183): the partial size for
+    /// an order id is a fixed number. The value is PINNED so that changing the
+    /// hash is a deliberate, reviewable act — a test that only checked
+    /// "stable within this process" would not catch a silent replay break.
+    #[test]
+    fn depth_share_hash_is_pinned() {
+        let m = FillModel {
+            maker_depth_share_bps: 5_000,
+            ..FillModel::default()
+        };
+        let got = m.maker_fill_size("dry_order_7", dec!(100), dec!(100));
+        assert_eq!(
+            got,
+            dec!(3.13),
+            "the queue-share draw changed: every archived dry replay would now fill differently"
+        );
+        // The share never depends on the probability dial: the two use
+        // independent salts over the same id, so a backtest can vary one without
+        // silently moving the other.
+        let other_prob = FillModel {
+            maker_fill_prob_bps: 1,
+            ..m
+        };
+        assert_eq!(
+            other_prob.maker_fill_size("dry_order_7", dec!(100), dec!(100)),
+            got
+        );
+    }
+
+    #[test]
     fn mode_classification() {
         assert!(FillPolicy::Taker.immediate());
         assert!(!FillPolicy::Maker.immediate());
@@ -387,6 +619,7 @@ mod tests {
             taker_slippage_ticks: 2,
             maker_latency_ms: 0,
             maker_fill_prob_bps: 10_000,
+            maker_depth_share_bps: 10_000,
         };
         assert_eq!(m.apply_slippage(Side::Buy, dec!(0.42)), dec!(0.44));
         assert_eq!(m.apply_slippage(Side::Sell, dec!(0.42)), dec!(0.40));

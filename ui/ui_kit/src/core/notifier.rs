@@ -16,14 +16,14 @@ use crate::core::event_bus::EventBus;
 use crate::core::types::CoreEvent;
 use std::io::Read;
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Upper bound on a single notification line. The core writes one compact
 /// JSON-RPC object per line, so this is orders of magnitude above any real
 /// event; it exists only so a peer streaming without newlines cannot grow the
 /// reader's line buffer without bound.
-const MAX_LINE_BYTES: usize = 1 << 20;
+pub(crate) const MAX_LINE_BYTES: usize = 1 << 20;
 
 /// Sell one reader thread as a daemon. Returns an `Arc<AtomicBool>` flag that
 /// flips false when the thread is asked to stop (`stop()`).
@@ -31,6 +31,8 @@ pub struct NotificationReader {
     socket_path: String,
     bus: EventBus,
     running: Arc<AtomicBool>,
+    /// Complete lines this reader has handed to the bus (see `lines_handle`).
+    lines: Arc<AtomicUsize>,
     /// Milliseconds between reconnect attempts (and how long a connect probe
     /// is allowed to block).
     retry_ms: u64,
@@ -42,6 +44,7 @@ impl NotificationReader {
             socket_path: socket_path.into(),
             bus,
             running: Arc::new(AtomicBool::new(true)),
+            lines: Arc::new(AtomicUsize::new(0)),
             retry_ms,
         }
     }
@@ -54,6 +57,19 @@ impl NotificationReader {
     /// the reader thread's join handle and need to end it.
     pub fn stop_handle(&self) -> Arc<AtomicBool> {
         self.running.clone()
+    }
+
+    /// Count of complete lines this reader has handed to the bus.
+    ///
+    /// A stalled event stream looks identical from the outside across three
+    /// different causes — the bytes never arrived, they arrived but did not
+    /// decode, or they decoded but the bus was never told — and a report that
+    /// cannot separate them cannot say what to fix. Paired with `EventBus::seq`
+    /// this counter is what tells "the reader never saw the line" from "the
+    /// reader saw it and nothing came out", which is exactly the distinction
+    /// the notifier tests need when one of them fails.
+    pub fn lines_handle(&self) -> Arc<AtomicUsize> {
+        self.lines.clone()
     }
 
     /// Run the read loop (call on a dedicated thread). Loop exits when
@@ -166,6 +182,10 @@ impl NotificationReader {
         if let Ok(text) = std::str::from_utf8(pending) {
             let text = text.trim();
             if !text.is_empty() {
+                // Counted BEFORE the bus sees it, so a line that was read but
+                // never reached the bus (a decode drop, a swallowed publish)
+                // still shows up as read.
+                self.lines.fetch_add(1, Ordering::SeqCst);
                 self.bus.ingest_notification(text);
             }
         }

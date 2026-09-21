@@ -97,7 +97,11 @@ cargo build --release --workspace --locked
 - `soak-resident.sh` — start/stop/status for the resident soak pair (D-30).
   `soak-monitor.mjs --forever` samples continuously instead of for a 12h window,
   and this wrapper is its explicit stop switch; `start` refuses to stack a second
-  sampler (two samplers would double every figure in `soak.jsonl`). Deployment
+  sampler (two samplers would double every figure in `soak.jsonl`). When a
+  pidfile is stale it says WHY before starting a fresh one — "pid is not
+  running", or "the pid was recycled by another process" — because replacing a
+  pidfile in silence makes a correct refusal to adopt a stranger's pid look like
+  `start` being broken (#212). Deployment
   config (notably `BK_RUN_LOG`) is read from `$BK_SOAK_DIR/resident.env` as a
   fallback, with an explicit env value or `--run-log` winning over it.
   **It does not survive a reboot**, and that is a TCC limit, not an oversight:
@@ -106,6 +110,45 @@ cargo build --release --workspace --locked
   `exec-script: DENIED (exit=126)`). Boot persistence would need the user to grant
   Full Disk Access — a security-posture change, so it is left as a decision (D-33).
   `soak-monitor-check.mjs` gates both lifetimes and the stop switch.
+- `stack-watchdog.sh` / `com.blitzkrieg.stack-watchdog.plist` — 交易内核的心跳检查与
+  「停机」告警（issue #211 的 B 路线：只判定与告警，**不拉起**）。退出码 `0` = **唯一**内核存活
+  并在服务；`1` = 不在跑 / socket 不可达（已告警）；`2` = 用法或配置错误；`3` = 发现 ≥2 个内核
+  进程（重复内核，issue #199，**优先于 1**）。存活判定复用
+  `soak-resident.sh` 的 `alive()` 语义（pidfile + `kill -0` + 命令行匹配）；内核自己不写
+  pidfile，所以未配 `--pidfile` 时用 `pgrep -f` 发现候选、再用同一套语义复核（`pgrep -f | head -1`
+  取哪个是**不确定的**——内核之间没有主次，所以计数与告警都以复核后的完整列表为准）。
+  命令行用 `ps -ww` 读并拒收僵尸 `state=Z`（`kill -0` 对僵尸是成功的；
+  实测 BSD `ps` 只在 stdout 是 tty 时按终端宽度截断，脚本永远接管道，`-ww` 是防御性写法）。在此之上多
+  一个 UDS connect 探针（与 `ui_kit` 的 `socket_served()` 同语义），于是输出能把「进程不在」
+  和「进程在但 socket 不通」分开说——前者是停机，后者是卡死/抢占，处置方式不同。
+  告警正文：当前模式（dry / live / readonly，**只读** `.env` 且永不改 `DRY_RUN`）、未平仓与
+  未赎回应收（读 `data/`，读不到就写「无法判定」，绝不假装 0）、最后已知存活时间（状态文件
+  无记录时退回数据落盘时间并标注是推断）、可直接粘贴的恢复命令。去抖：只在状态翻转时出声，
+  持续停机期间最多每 `--repeat-sec`（默认 900s）重复一次。**默认绝不自动拉起**：要动手必须
+  同时给出 `--autostart` 与 `BK_AUTOSTART_CMD`（两把钥匙），且 **live 模式一律硬拒绝**。
+  计划内停机先 `touch $STATE_DIR/silence`，免得收到一条完全正确的告警。
+  **重复内核（issue #199）是不依附于 up/down 的一等信号**：两个内核写同一份账本与订单库，
+  而表现形态恰好是「socket 通、日志干净」。所以 `--status` 与正常检查都给退出码 `3`（调度器
+  可编程发现），落 `$STATE_DIR/DUPLICATE_CORES` 标记，告警正文自包含（风险 + 全部 pid +
+  每个 pid 各自的 argv 模式与 socket + 止损命令 `blitzkrieg stop`），去抖与停机共用状态机，
+  解除时记一行并发「重复内核已解除」（不误报成「栈已恢复」）；**重复期间与「pidfile 判死但
+  pgrep 复核发现内核在跑」时不自动拉起**——再拉只会更多。`BK_CORE_VERIFY_PGREP` 是对
+  已发现 pid 的命令行复核串（默认同 `BK_CORE_PGREP`），只用于自测注入「发现了但复核不认」
+  这一态，生产不要设。
+  自测：`bash scripts/stack-watchdog.sh --self-test`（22 组用例 / 97 项断言，fixture 驱动，
+  不需要真内核、不碰生产 `data/`、不建默认状态目录；含**无 `--pidfile` 的 pgrep 发现分支**
+  命中 / 无命中 / 两个命中 / 复核不认 / pidfile 过期，**子串复核把构建 shell 当内核**的
+  回归，以及僵尸进程与长命令行 pty 两个回归）。
+  复核口径的已知代价：`pgrep -f`/`grep` 都是**整条命令行上的子串匹配**，所以「只在命令行里
+  提到内核路径」的进程也会命中（本机实测 4 个 `cargo build`/`ls` 构建 shell）。判定不收紧
+  （收紧会漏掉手工起的、argv 里没有 `--socket` 的真内核），而是：告警里逐个 pid 点名，
+  argv 里既无 `--mode` 也无 `--socket` 的标「可疑」提示逐条核对；要更严可把
+  `BK_CORE_PGREP` 设成 `target/release/blitzkrieg-core.*--socket`。
+  部署与「重启后谁跑它」见 README.md §3.5；**外置卷的 TCC 限制对它同样成立**（launchd 拉起
+  的进程被拒读/执行本卷），三种应对：授予完全磁盘访问权限 / 把脚本复制到内置盘并用
+  `BK_REPO_ROOT` 指回本仓库 / 把检出搬到内置盘。仓库里附的
+  `com.blitzkrieg.stack-autostart.plist.disabled` 是路线 A 的骨架：**装上它 = 无人值守自动
+  拉起 live，属于用户决定，默认不安装**。
 - `analyze-signals.mjs` / `analyze-strategy.mjs` — offline signal/strategy analysis.
 - `walk-forward-sweep.mjs` / `shadow-export.mjs` / `strategy-ab-compare.mjs` — the
   strategy-evolution toolkit (E15 / #97). The sweep splits a frozen event archive
@@ -122,7 +165,10 @@ cargo build --release --workspace --locked
   (独立账本), per-UTC-day trend and portfolio totals read from the append-only
   trade ledger, plus breaker/evolution audit events in-window. Read-only over
   `data/trades/trades.jsonl`; `--days N` (default 7) or `--from/--to` pin the
-  window.
+  window. It also folds the order log (`--orders data/orders/orders.jsonl`) into
+  the #183 fill metrics — fill rate, partial-fill rate and the filled-size ratio
+  — because the trade ledger only knows CLOSED positions, not how their entries
+  filled; `--json` prints that manifest to stdout for a script.
 - `feed-live-probe.mjs` / `poly-ws-endurance.mjs` / `poly-wire-measure.mjs` — Polymarket feed probes.
 - `price-compare.mjs` / `reconcile-exits.mjs` / `sweep-exits.mjs` / `final-exit-opt.mjs` — pricing and exit sweeps.
 - `account-drift-check.mjs` — live panel/account drift diagnosis.

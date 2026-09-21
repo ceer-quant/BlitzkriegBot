@@ -67,7 +67,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
 # Markers that survive the Node-layer removal: `package.json` was deleted with
 # it, so guarding on that (as this line once did) refuses to run in its own tree.
-[ -f Cargo.toml ] && [ -d .git ] || { echo "ANOMALY: not in BlitzkriegBot root ($ROOT)"; exit 2; }
+# The git marker is a DIRECTORY in a normal clone but a FILE in a linked worktree
+# (`gitdir: …`), so both are accepted: guarding on `[ -d .git ]` alone made every
+# worktree — every agent's build tree, every `git worktree add` — report "not in
+# BlitzkriegBot root" and exit 2, which is why the gate that drives this script
+# was 45 assertions of noise outside CI (issue #213).
+[ -f Cargo.toml ] && { [ -d .git ] || [ -f .git ]; } || { echo "ANOMALY: not in BlitzkriegBot root ($ROOT)"; exit 2; }
 
 CORE_PGREP=${BK_CORE_PGREP:-target/release/blitzkrieg-core}
 PANEL_URL=${BK_PANEL_URL:-http://127.0.0.1:51888}
