@@ -7,7 +7,7 @@ use crate::ipc::server::now_ms;
 use crate::ledger::Ledger;
 use crate::model::*;
 use crate::ome::{AppliedFillRecord, FillDelta, FillOutcome, LateFill, Ome, SubmitParams};
-use crate::position::{OpenParams, PositionConfig, PositionManager};
+use crate::position::{EquityBasis, OpenParams, PositionConfig, PositionManager};
 use crate::reconcile::{AuditInput, AuditReport, CashIdentity};
 use crate::risk::{LossBreakers, RiskConfig, RiskGate};
 use crate::settlement::{SETTLEMENT_EXIT_REASON, SettlementBook, booking_for, settlement_key};
@@ -2655,6 +2655,12 @@ impl Core {
                 "realizedPnlUsd": self.positions.daily_pnl(),
                 "limitUsd": self.positions.effective_daily_loss_limit(),
                 "openingEquityUsd": self.positions.daily_state().opening_equity_usd,
+                // P1 #235: WHICH book that base belongs to ("dry"/"live", null
+                // when the day predates the field). The cap is only as
+                // meaningful as the account it is a share of, and the panel
+                // used to show a self-consistent pair of numbers from two
+                // different books.
+                "equityBasis": self.positions.daily_state().equity_basis,
                 "tripped": self.positions.daily_loss_tripped(),
                 "trippedAtMs": self.positions.daily_state().tripped_at_ms,
                 // #177: protective stops the wick guard withheld — "should have
@@ -4521,7 +4527,10 @@ impl Core {
         // `balance` is already gross of local reservations — adding `reserved`
         // here would double-count resting BUY commitments.
         let equity = self.ledger.balance();
-        if let Some(roll) = self.positions.roll_daily(now_ms, equity) {
+        if let Some(roll) = self
+            .positions
+            .roll_daily(now_ms, equity, self.equity_basis())
+        {
             let message = match roll.previous_day_index {
                 Some(prev) => format!(
                     "daily loss budget: UTC day {prev} closed at ${} realized{} — day {} opens with equity ${}, cap ${}",
@@ -4546,6 +4555,24 @@ impl Core {
                 tracing::info!(day = roll.day_index, "{}", message);
             }
             self.emit_risk_alert(CoreErrorCode::RiskRejected, message);
+        }
+    }
+
+    /// Which book the equity handed to [`Self::roll_daily_budget`] came from
+    /// (P1 #235): the day's percentage cap is a share of an account, and the
+    /// ledger balance means a different thing in each of them.
+    ///
+    /// Derived from the SAME predicate `Core::new` uses to decide which book the
+    /// ledger is seeded from — a locally-settling mode gets `dry_seed_balance`,
+    /// live gets the venue's money — so the label cannot drift from the number
+    /// it describes. A mode that settles locally is trading the simulation even
+    /// when it is called read-only, and it must not be told its base came from
+    /// the venue.
+    fn equity_basis(&self) -> EquityBasis {
+        if self.config.mode.settles_locally() {
+            EquityBasis::Dry
+        } else {
+            EquityBasis::Live
         }
     }
 
@@ -6946,6 +6973,21 @@ mod tests {
         });
         c.set_balance(balance);
         c
+    }
+
+    /// P1 #235: the day's percentage cap is a share of a BOOK, and which book the
+    /// kernel hands the position manager is decided by the same predicate that
+    /// seeded the ledger — so the label cannot drift from the number.
+    #[test]
+    fn the_daily_budget_basis_follows_the_mode() {
+        assert_eq!(dry_core(dec!(100)).equity_basis(), EquityBasis::Dry);
+        assert_eq!(live_core(dec!(100)).equity_basis(), EquityBasis::Live);
+        // Read-only settles locally, so its money is the simulation's too.
+        let read_only = Core::new(CoreConfig {
+            mode: Mode::ReadOnly,
+            ..Default::default()
+        });
+        assert_eq!(read_only.equity_basis(), EquityBasis::Dry);
     }
 
     fn order(mode: FillPolicy, price: Decimal, size: Decimal, key: &str) -> OrderRequest {

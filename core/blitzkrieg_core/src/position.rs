@@ -67,10 +67,12 @@ pub struct PositionConfig {
     /// below is then the whole budget. Kept because an operator may want a hard
     /// dollar number regardless of account size.
     pub max_daily_loss_usd: Decimal,
-    /// Daily-loss cap as a percentage of the day's OPENING cash equity. `0` =
-    /// off. This is the default budget precisely because an absolute default is
-    /// meaningless across account sizes: the old hard-coded 200 USD was an
-    /// unbounded budget for a 4.8 USDC book (P0 #173).
+    /// Daily-loss cap as a percentage of the day's OPENING cash equity — the
+    /// book [`roll_daily`](PositionManager::roll_daily) was told it came from,
+    /// re-anchored when that basis changes mid-day (P1 #235). `0` = off. This is
+    /// the default budget precisely because an absolute default is meaningless
+    /// across account sizes: the old hard-coded 200 USD was an unbounded budget
+    /// for a 4.8 USDC book (P0 #173).
     pub max_daily_loss_equity_pct: Decimal,
     /// Where the per-day realized-loss budget is persisted (a JSON sibling of
     /// the position log, like `positions.recon`). `None` = memory only — the
@@ -123,6 +125,47 @@ pub fn utc_day_index(ms: i64) -> i64 {
     ms.div_euclid(DAY_MS)
 }
 
+/// How far the book may move within one UTC day before the day's base is
+/// treated as belonging to a different account (P1 #235).
+///
+/// Same-day cash moves are fees and realized PnL, and the loss breaker already
+/// bounds the latter at `max_daily_loss_equity_pct` — 50% is far above that, so
+/// normal trading can never trip this, and far below the dry-seed-versus-real
+/// gap (orders of magnitude) this exists to catch. It covers the case the
+/// recorded basis cannot: the label did not change, but the account size did
+/// (a re-seeded dry run, a deposit or a withdrawal).
+fn same_day_rebase_deviation_pct() -> Decimal {
+    Decimal::from(50)
+}
+
+/// Which book the day's opening equity was measured from (P1 #235).
+///
+/// The percentage cap is a share of an ACCOUNT, and this system trades two of
+/// them: the simulated book a locally-settling run trades (`dry_seed_balance`)
+/// and the venue-reconciled book a live run trades. A day stamped against one
+/// and then measured against the other is measured against a number from a
+/// different world — 20% of a $10 000 dry seed is a $2 000 budget on a $50 live
+/// account, which is not a breaker at all. So the base records where it came
+/// from, and a basis change re-anchors it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EquityBasis {
+    /// The simulated book: `Mode::Dry` and `Mode::ReadOnly` both settle against
+    /// it (see `Mode::settles_locally`).
+    Dry,
+    /// The venue-reconciled live book.
+    Live,
+}
+
+impl EquityBasis {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dry => "dry",
+            Self::Live => "live",
+        }
+    }
+}
+
 /// The per-day realized-loss budget, persisted so a restart cannot launder
 /// today's losses (P0 #173).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,8 +178,15 @@ pub struct DailyLossState {
     pub realized_pnl_usd: Decimal,
     /// Cash equity when the day opened — the base the percentage cap is
     /// measured against. Fixed for the day on purpose: a shrinking equity must
-    /// not shrink the budget it is being measured against.
+    /// not shrink the budget it is being measured against. The one thing that
+    /// does move it is [`Self::equity_basis`] changing under it (P1 #235).
     pub opening_equity_usd: Decimal,
+    /// Which book [`Self::opening_equity_usd`] was measured from. `None` = not
+    /// recorded (a state file written before P1 #235), which is NOT the same as
+    /// "whatever is running now": an unrecorded basis can never prove the base
+    /// still belongs to the book in front of it, so it re-anchors like any
+    /// other change.
+    pub equity_basis: Option<EquityBasis>,
     /// True once the cap was breached; entries stay frozen until the next day.
     pub tripped: bool,
     pub tripped_at_ms: i64,
@@ -155,6 +205,7 @@ impl Default for DailyLossState {
             day_index: None,
             realized_pnl_usd: Decimal::ZERO,
             opening_equity_usd: Decimal::ZERO,
+            equity_basis: None,
             tripped: false,
             tripped_at_ms: 0,
             tripped_limit_usd: Decimal::ZERO,
@@ -602,19 +653,27 @@ impl PositionManager {
     /// the new day's opening equity from `equity_usd` (the caller's cash
     /// equity: the position manager cannot read the ledger itself).
     ///
+    /// `basis` says WHICH book that equity came from (P1 #235) — the caller
+    /// reads it off the mode, because the same ledger balance means a different
+    /// thing in dry and in live. Within a day it is what tells a re-anchored
+    /// budget apart from the same account still trading, so it is a parameter
+    /// rather than a default: a caller that forgets it would silently keep the
+    /// fail-open behaviour this exists to close.
+    ///
     /// Returns `Some` exactly when a new day opened, so the caller can put the
     /// old day's result in the audit trail. The FIRST call only stamps the day
     /// (nothing to close yet) and reports it, so the budget's start is visible.
-    pub fn roll_daily(&mut self, now_ms: i64, equity_usd: Decimal) -> Option<DailyRoll> {
+    /// A same-day re-anchor is NOT a new day and reports `None`; it is announced
+    /// by its own warning, and by the trip alert when it freezes the day.
+    pub fn roll_daily(
+        &mut self,
+        now_ms: i64,
+        equity_usd: Decimal,
+        basis: EquityBasis,
+    ) -> Option<DailyRoll> {
         let today = utc_day_index(now_ms);
         if self.daily.day_index == Some(today) {
-            // Same day: only keep the opening equity meaningful when the day
-            // was stamped without one (a restored budget from before the
-            // account size was known).
-            if self.daily.opening_equity_usd <= Decimal::ZERO && equity_usd > Decimal::ZERO {
-                self.daily.opening_equity_usd = equity_usd;
-                self.persist_daily();
-            }
+            self.reconcile_same_day_base(now_ms, equity_usd, basis);
             return None;
         }
         let previous_day_index = self.daily.day_index;
@@ -635,6 +694,7 @@ impl PositionManager {
             day_index: Some(today),
             realized_pnl_usd: carried_pnl,
             opening_equity_usd: equity_usd.max(Decimal::ZERO),
+            equity_basis: Some(basis),
             tripped: carried_trip,
             tripped_at_ms: if carried_trip {
                 self.daily.tripped_at_ms
@@ -660,6 +720,95 @@ impl PositionManager {
             limit_usd: self.effective_daily_loss_limit(),
             previous_tripped,
         })
+    }
+
+    /// Keep the day's opening equity honest WITHIN the day (P1 #235).
+    ///
+    /// The cap is a share of the account the day opened on, and only one thing
+    /// may move that base mid-day: a base that was measured against a DIFFERENT
+    /// book. Without this, a dry run that stamped the day with its $10 000 seed
+    /// leaves a live $50 account carrying a $2 000 cap — and since
+    /// [`Self::effective_daily_loss_limit`] takes the TIGHTER of the absolute
+    /// and the relative cap, an inflated base inflates the cap: the breaker
+    /// cannot trip. That is the fail-open direction, so it is closed here.
+    ///
+    /// Two conditions re-anchor, and both are clamped to the safe direction:
+    ///
+    /// * the basis changed (dry↔live — including a state file that never
+    ///   recorded one, which cannot prove it belongs to the book in front of
+    ///   it), or
+    /// * the book moved by more than [`same_day_rebase_deviation_pct`], the
+    ///   "same label, different account size" case the basis alone misses.
+    ///
+    /// A re-anchor may only TIGHTEN. A larger book keeps the day's smaller base,
+    /// because re-anchoring upward would hand the day a budget it never had —
+    /// the very hole this closes. That is also why a same-basis restart at
+    /// (roughly) the same equity changes nothing and says nothing: a restart
+    /// must not disturb how much of the day's budget is already spent.
+    fn reconcile_same_day_base(&mut self, now_ms: i64, equity_usd: Decimal, basis: EquityBasis) {
+        if equity_usd <= Decimal::ZERO {
+            // No account size to measure against (a live process whose balance
+            // has not arrived yet): keep whatever base the day has.
+            return;
+        }
+        let old_equity = self.daily.opening_equity_usd;
+        let old_basis = self.daily.equity_basis;
+        if old_equity <= Decimal::ZERO {
+            // Stamped before the account size was known: adopt today's book.
+            self.daily.opening_equity_usd = equity_usd;
+            self.daily.equity_basis = Some(basis);
+            self.persist_daily();
+            return;
+        }
+        let basis_changed = old_basis != Some(basis);
+        let moved_pct = ((equity_usd - old_equity).abs() / old_equity) * Decimal::ONE_HUNDRED;
+        if !basis_changed && moved_pct <= same_day_rebase_deviation_pct() {
+            return;
+        }
+        if equity_usd >= old_equity {
+            // The other book is bigger: re-anchoring would LOOSEN the day's cap,
+            // so the day keeps the tighter base it already has.
+            return;
+        }
+        self.daily.opening_equity_usd = equity_usd;
+        self.daily.equity_basis = Some(basis);
+        let limit = self.effective_daily_loss_limit();
+        let breached = limit > Decimal::ZERO && self.daily.realized_pnl_usd <= -limit;
+        if breached {
+            // The tightened cap is already spent. Latch the trip HERE rather
+            // than letting the next tick rediscover it, so the day cannot read
+            // as healthy in between, and re-arm the report: the number the
+            // operator was shown has moved. Exits are untouched either way —
+            // the trip freezes entries (see `can_open`).
+            if !self.daily.tripped {
+                self.daily.tripped = true;
+                self.daily.tripped_at_ms = now_ms;
+            }
+            self.daily.tripped_limit_usd = limit;
+            self.daily.tripped_reported = false;
+        }
+        let old_basis_str = old_basis.map(EquityBasis::as_str).unwrap_or("unrecorded");
+        tracing::warn!(
+            day = self.daily.day_index.unwrap_or(0),
+            old_equity = %old_equity,
+            new_equity = %equity_usd,
+            old_basis = old_basis_str,
+            new_basis = basis.as_str(),
+            realized = %self.daily.realized_pnl_usd,
+            limit = %limit,
+            tripped = breached,
+            "daily loss budget re-anchored within the UTC day: opening equity {} ({}) -> {} ({}){}",
+            old_equity,
+            old_basis_str,
+            equity_usd,
+            basis.as_str(),
+            if breached {
+                " — the tightened cap is already spent, so entries are frozen for the rest of the day (exits are unaffected)"
+            } else {
+                ""
+            }
+        );
+        self.persist_daily();
     }
 
     /// The day's realized PnL, reset. Kept for callers that roll the budget
