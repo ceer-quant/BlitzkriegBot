@@ -335,9 +335,14 @@ pub struct FeeQuoteResult {
     /// Maker fee per share: always zero (the schedule charges takers only).
     #[serde(with = "crate::decimal")]
     pub maker_fee_per_share: Decimal,
-    /// True when the DECLARED parameters above reproduce `fee_per_share` at this
-    /// price. A kernel whose formula moved without its declaration moving reports
-    /// `false` here — the split is reported, not silently papered over.
+    /// True when the parameters this repository PINS for the declared model
+    /// (`exit_policy::pinned_fee_parameters`) reproduce `fee_per_share` at this
+    /// price — the cross-language half of that pin is `TAKER_FEE_MODELS` in
+    /// `scripts/lib/fee-model.mjs`. A kernel whose shipped curve moved without
+    /// its declaration moving reports `false` here: the split is reported, not
+    /// silently papered over. Since #234 the check reads that pin rather than
+    /// recomputing the charged curve, because two spellings of the same
+    /// expression move together and can never disagree.
     pub model_matches: bool,
 }
 

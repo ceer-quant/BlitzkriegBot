@@ -248,11 +248,21 @@ node scripts/capacity-check.mjs --side sell --book docs/reports/data/capacity-ga
 
 ## 3. 成本结构：费用是已建模成本，冲击在小尺寸下为 0
 
-费率只有一处真相（`#203` 收敛的）：`exit_policy.rs` 的 `FeeSchedule` 注册表。
-**收费**（`exit_policy::taker_fee_pct`）、**声明**（`service::declared_fee_per_share`）和
-`core.feeQuote` 报出的 `model/rate/exponent` 读的都是同一个 `fee_schedule()`，所以「声明的
-公式」和「实际扣的费」不可能再各写一份而悄悄漂移；`#182` 的门禁把**默认模型名**钉在
-`scripts/lib/fee-model.mjs::PINNED_DEFAULT_MODEL`，默认值被改会红。
+费率只有一处真相（`#203` 收敛，`#234` 收口）：`exit_policy.rs` 的 `FeeSchedule` 注册表，曲线
+算术的唯一拼写是 `FeeSchedule::fee_per_share`（`taker_fee_pct` 只是把它除以价格换算成百分比，
+不存在第二份 `rate × (p(1-p))^exp`）。**收费**（`exit_policy::taker_fee_pct`）与
+`core.feeQuote` 报出的 `model/rate/exponent/feePerShare` 读的都是同一个 `fee_schedule()`，所以
+「声明的公式」和「实际扣的费」不可能各写一份而悄悄漂移。
+
+自证点分两层，互不替代：进程内 `core.feeQuote` 的 `modelMatches` 拿**钉住的参数**
+（`exit_policy::pinned_fee_parameters`，注册表之外的第二份手工维护的数）核对实际扣费——费率从
+0.125 改成 0.07 会报 `false`；跨语言门禁 `scripts/core-parity.mjs::assertPinnedFeeModel` 对着
+`scripts/lib/fee-model.mjs` 的表核对**默认模型名与参数**（`PINNED_DEFAULT_MODEL`），默认值被改会
+红——**这条才是权威**，两侧的 pin 必须与注册表在同一次改动里一起改。
+
+价格在 `(0,1)` 之外一律收 0（`#234`）：`p >= 1` 不钳、而指数 ≥ 1 时 `p(1-p)` 为负会算出**负
+费率**（倒贴）。live 扣费点另有一条显式断言：只有 `CoreConfig::fee_schedule_replay`（仅回测器
+设置）的进程才允许按非默认 schedule 收费，`--fee-model` 的隔离不再只靠 CLI。
 
 注册表里两条曲线（`source` 是必填字段，缺出处会被 `--self-test` 拒绝）：
 

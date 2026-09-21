@@ -446,6 +446,11 @@ impl EventBacktester {
         core_cfg.market_plugin = None;
         core_cfg.shadow_evolution_enabled = false;
         core_cfg.shadow_evolution_tuning = None;
+        // #234: this core may run under a counterfactual taker-fee schedule
+        // (`--fee-model`), which the live charge sites refuse for any core that
+        // has not declared itself a replay. The declaration belongs here — the
+        // only constructor that may charge one.
+        core_cfg.fee_schedule_replay = true;
 
         let mut core = Core::new(core_cfg.clone());
         if core_cfg.engine_enabled {

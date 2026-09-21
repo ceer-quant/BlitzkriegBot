@@ -191,9 +191,13 @@ export function feeModelTableProblems(table = TAKER_FEE_MODELS) {
 }
 
 /**
- * Taker fee per share in USD under a model, at `price` — the same expression the
- * kernel charges (`exit_policy::taker_fee_pct` / `declared_fee_per_share`), used
- * to reason about a schedule the kernel is not currently running.
+ * Taker fee per share in USD under a model, at `price` — the per-share form the
+ * kernel charges (`exit_policy::FeeSchedule::fee_per_share`, which is the ONE
+ * spelling of the curve in the kernel since #234; `taker_fee_pct` divides it by
+ * the price). Used to reason about a schedule the kernel is not currently
+ * running, and deliberately an INDEPENDENT implementation of the table above:
+ * `feeModelProblems` compares the kernel's own quote against these numbers, so a
+ * shared expression would make the check agree with itself.
  */
 export function feePerShareAt(modelName, price) {
   const m = TAKER_FEE_MODELS[modelName];
