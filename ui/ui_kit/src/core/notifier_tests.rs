@@ -1,17 +1,121 @@
 //! Notifier tests — spec for #33 "断线重连有测试": a real std UDS server emits
 //! `core.event` lines, closes the connection (simulating a core restart), then
 //! serves again; the reader must reconnect and re-deliver.
+//!
+//! Every wait here is event-driven (#201): the test blocks on
+//! `EventBus::wait_for`, which the reader wakes by publishing, so how a loaded
+//! machine treats the reader thread costs these tests nothing. The one wall
+//! clock left is `HANG_PROBE`, a hang detector rather than a latency budget —
+//! see its definition. Nothing in this file polls a stopwatch to decide
+//! PASS/FAIL, and each outcome is asserted separately, so a failure names the
+//! one that happened instead of sharing one "not ingested (or stop hung)" line.
 
-use crate::core::event_bus::EventBus;
+use crate::core::event_bus::{EventBus, Subscription};
 use crate::core::notifier::NotificationReader;
 use crate::core::types::CoreEvent;
 use std::io::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const ALERT: &str = r#"{"jsonrpc":"2.0","method":"core.event","params":{"kind":"RISK_ALERT","code":"KILL_SWITCH_ACTIVE","message":"kill-A"}}"#;
+
+/// Reader retry interval these tests construct readers with. The read timeout
+/// is `max(RETRY_MS, 200)` (see `NotificationReader`), which is the loop
+/// checkpoint the stop contract is measured against.
+const RETRY_MS: u64 = 50;
+
+/// How long a wait may go unsatisfied before a test calls it a HANG.
+///
+/// This is a hang detector, NOT a latency budget: the waits below are released
+/// by the reader publishing (or by `run()` returning), so a busy or starved
+/// machine only delays PASS/FAIL — it cannot turn a working reader into a
+/// failure. 30 s is ~150x the reader's own 200 ms loop checkpoint, so it can
+/// only fire on a reader that is genuinely stuck (or never saw the bytes). On
+/// the failure path the wait ends here and the message says "hang"; on the
+/// happy path this value is never consulted.
+const HANG_PROBE: Duration = Duration::from_secs(30);
+
+/// Bind a fresh socket for one test, clearing a stale file from an earlier run
+/// (a reused PID with a leftover path is a trap, not a fixture).
+fn bind_socket(tag: &str) -> (PathBuf, UnixListener) {
+    let sock =
+        std::env::temp_dir().join(format!("uikit-notifier-{tag}-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let listener = UnixListener::bind(&sock).expect("bind");
+    (sock, listener)
+}
+
+fn cleanup(sock: &Path) {
+    let _ = std::fs::remove_file(sock);
+}
+
+/// A reader under test, on its own thread, with the observables a test needs in
+/// order to avoid a stopwatch: the stop flag, the count of lines it handled,
+/// and a signal for "`run()` has returned".
+///
+/// `run()`'s exit travels through a channel with a bound instead of
+/// `JoinHandle::join`, because joining a reader that never returns wedges the
+/// whole test binary. That is not hypothetical: the old "watchdog" in
+/// `stop_exits_while_silently_connected` joined a thread that joined the reader,
+/// so a regression blocked the suite forever instead of failing, and the one
+/// message in the flaky test ("not ingested (or stop hung)") could not say
+/// which of the two had happened.
+struct ReaderFixture {
+    stop: Arc<AtomicBool>,
+    lines: Arc<AtomicUsize>,
+    done: Receiver<()>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ReaderFixture {
+    fn start(reader: NotificationReader) -> Self {
+        let stop = reader.stop_handle();
+        let lines = reader.lines_handle();
+        let (done_tx, done) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            reader.run();
+            let _ = done_tx.send(());
+        });
+        Self {
+            stop,
+            lines,
+            done,
+            handle: Some(handle),
+        }
+    }
+
+    /// Complete lines the reader has handed to the bus so far.
+    fn lines(&self) -> usize {
+        self.lines.load(Ordering::SeqCst)
+    }
+
+    /// Is the reader thread still running? Part of a hang report: "the reader
+    /// is alive but silent" and "the reader died" are different bugs.
+    fn running(&self) -> bool {
+        self.handle.as_ref().is_some_and(|h| !h.is_finished())
+    }
+
+    /// Set the stop flag and wait, bounded, for `run()` to return. `true` means
+    /// the loop left; `false` means `HANG_PROBE` elapsed first, which the caller
+    /// must REPORT — never inherit, or a stop-path regression hangs the suite.
+    /// A thread that did not return is left running (the harness exits the
+    /// process at the end of the run; a wedged reader must not take the report
+    /// down with it).
+    fn stop_and_wait(&mut self) -> bool {
+        self.stop.store(false, Ordering::SeqCst);
+        let exited = self.done.recv_timeout(HANG_PROBE).is_ok();
+        if exited {
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+        exited
+    }
+}
 
 /// Serve `core.event` ALERTs until the returned flag is cleared, closing every
 /// session it held each round to force a reconnect.
@@ -57,81 +161,73 @@ fn serve_alert_rounds(
     })
 }
 
-/// Poll for a RiskAlert("kill-A") on `sub` — created BEFORE the reader's life
-/// under test, because `subscribe()` is positioned at the current head and a
-/// fresh subscriber per poll would never see previously published events.
-fn poll_alert(
-    sub: &mut crate::core::event_bus::Subscription,
-    bus: &EventBus,
-    up_to: Instant,
-) -> bool {
-    while Instant::now() < up_to {
-        if bus
-            .drain_new(sub)
-            .iter()
-            .any(|ev| matches!(ev, CoreEvent::RiskAlert { message, .. } if message == "kill-A"))
-        {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    false
+/// Wait for the ALERT naming `message`. Event-driven (see `EventBus::wait_for`)
+/// — `HANG_PROBE` bounds only a reader that publishes nothing at all. `sub`
+/// must have been created BEFORE the reader's life under test, because
+/// `subscribe()` is positioned at the current head and a fresh subscriber per
+/// wait would never see previously published events.
+fn wait_alert(sub: &mut Subscription, bus: &EventBus, message: &str) -> bool {
+    bus.wait_for(
+        sub,
+        HANG_PROBE,
+        |ev| matches!(ev, CoreEvent::RiskAlert { message: m, .. } if m == message),
+    )
+    .is_some()
 }
 
-/// Poll for any Error event on `sub`.
-fn poll_error(
-    sub: &mut crate::core::event_bus::Subscription,
-    bus: &EventBus,
-    up_to: Instant,
-) -> bool {
-    while Instant::now() < up_to {
-        if bus
-            .drain_new(sub)
-            .iter()
-            .any(|ev| matches!(ev, CoreEvent::Error { .. }))
-        {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    false
+/// Wait for a `core.event` ERROR whose payload is exactly `payload`.
+///
+/// The payload is matched, not merely the variant: the READER ITSELF publishes
+/// `CoreEvent::Error` when a stream closes ("event stream closed"), so a
+/// predicate as loose as `matches!(CoreEvent::Error { .. })` can be satisfied
+/// by the reader's own transition message while the line under test was never
+/// decoded — a green that means nothing.
+fn wait_error(sub: &mut Subscription, bus: &EventBus, payload: &str) -> bool {
+    bus.wait_for(
+        sub,
+        HANG_PROBE,
+        |ev| matches!(ev, CoreEvent::Error { error } if error.as_str() == Some(payload)),
+    )
+    .is_some()
 }
 
 #[test]
 fn reader_reconnects_and_redelivers() {
-    let sock =
-        std::env::temp_dir().join(format!("uikit-notifier-test-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&sock);
-    let listener = UnixListener::bind(&sock).expect("bind");
+    let (sock, listener) = bind_socket("test");
 
     let bus = EventBus::new(64);
     // Subscribe BEFORE the reader starts so both lives are observable.
     let mut sub = bus.subscribe();
-    let reader = NotificationReader::new(sock.to_string_lossy().to_string(), bus.clone(), 50);
-    let stop = reader.stop_handle();
-    let handle = std::thread::spawn(move || reader.run());
+    let reader = NotificationReader::new(sock.to_string_lossy().to_string(), bus.clone(), RETRY_MS);
+    let mut fixture = ReaderFixture::start(reader);
 
     let connections = Arc::new(AtomicUsize::new(0));
     let serving = Arc::new(AtomicBool::new(true));
     let server = serve_alert_rounds(listener, connections.clone(), serving.clone());
 
     // Life 1: the reader connects and ingests an ALERT.
-    let got1 = poll_alert(&mut sub, &bus, Instant::now() + Duration::from_secs(5));
+    let got1 = wait_alert(&mut sub, &bus, "kill-A");
     // Life 2: the server closed the session, so a second ALERT can only arrive
     // if the reader noticed EOF and reconnected.
-    let got2 = poll_alert(&mut sub, &bus, Instant::now() + Duration::from_secs(5));
+    let got2 = wait_alert(&mut sub, &bus, "kill-A");
 
-    stop.store(false, Ordering::SeqCst);
+    let exited = fixture.stop_and_wait();
     serving.store(false, Ordering::SeqCst);
-    let _ = handle.join();
     let _ = server.join();
-    let _ = std::fs::remove_file(&sock);
+    cleanup(&sock);
 
     assert!(got1, "life-1 ALERT never reached the bus");
     assert!(got2, "life-2 redelivery failed — reconnect broken");
     assert!(
         connections.load(Ordering::SeqCst) >= 2,
         "reader never reconnected after the session closed"
+    );
+    assert!(
+        exited,
+        "hang: run() did not return within {HANG_PROBE:?} of stop() (lines read: {}, \
+         reader thread still running: {})",
+        fixture.lines(),
+        fixture.running()
     );
 }
 
@@ -144,17 +240,15 @@ fn reader_reconnects_and_redelivers() {
 /// record and leaves the trailing half to arrive as a blank line.
 #[test]
 fn reader_delivers_a_line_split_across_a_read_timeout() {
-    let sock =
-        std::env::temp_dir().join(format!("uikit-notifier-split-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&sock);
-    let listener = UnixListener::bind(&sock).expect("bind");
+    let (sock, listener) = bind_socket("split");
     let bus = EventBus::new(8);
     let mut sub = bus.subscribe();
     // retry_ms 50 => 200 ms read timeout, so a 700 ms gap is a timeout landing
-    // squarely inside the line.
-    let reader = NotificationReader::new(sock.to_string_lossy().to_string(), bus.clone(), 50);
-    let stop = reader.stop_handle();
-    let handle = std::thread::spawn(move || reader.run());
+    // squarely inside the line. That gap is FIXTURE PACING, not a pass
+    // criterion: it forces the split this test is about, while the assertion
+    // below still waits on the bus signal, so a starved reader cannot fail it.
+    let reader = NotificationReader::new(sock.to_string_lossy().to_string(), bus.clone(), RETRY_MS);
+    let mut fixture = ReaderFixture::start(reader);
 
     let mut s: UnixStream = listener.accept().expect("accept").0;
     s.write_all(ALERT.as_bytes()).expect("write first half");
@@ -163,12 +257,18 @@ fn reader_delivers_a_line_split_across_a_read_timeout() {
     s.write_all(b"\n").expect("write second half");
     s.flush().ok();
 
-    let got = poll_alert(&mut sub, &bus, Instant::now() + Duration::from_secs(3));
-    stop.store(false, Ordering::SeqCst);
-    let _ = handle.join();
+    let got = wait_alert(&mut sub, &bus, "kill-A");
+    let exited = fixture.stop_and_wait();
     drop(listener);
-    let _ = std::fs::remove_file(&sock);
+    cleanup(&sock);
     assert!(got, "a line split across a read timeout was dropped");
+    assert!(
+        exited,
+        "hang: run() did not return within {HANG_PROBE:?} of stop() (lines read: {}, \
+         reader thread still running: {})",
+        fixture.lines(),
+        fixture.running()
+    );
 }
 
 /// A peer that never sends a newline must not grow the line buffer without
@@ -180,16 +280,13 @@ fn reader_delivers_a_line_split_across_a_read_timeout() {
 /// draining every byte written here.
 #[test]
 fn reader_stops_reading_an_overlong_line_without_a_newline() {
-    let sock = std::env::temp_dir().join(format!(
-        "uikit-notifier-overlong-{}.sock",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&sock);
-    let listener = UnixListener::bind(&sock).expect("bind");
-    let bus = EventBus::new(8);
-    let reader = NotificationReader::new(sock.to_string_lossy().to_string(), bus.clone(), 50);
-    let stop = reader.stop_handle();
-    let handle = std::thread::spawn(move || reader.run());
+    let (sock, listener) = bind_socket("overlong");
+    let reader = NotificationReader::new(
+        sock.to_string_lossy().to_string(),
+        EventBus::new(8),
+        RETRY_MS,
+    );
+    let mut fixture = ReaderFixture::start(reader);
 
     let mut s: UnixStream = listener.accept().expect("accept").0;
     let chunk = vec![b'x'; 64 * 1024];
@@ -205,26 +302,42 @@ fn reader_stops_reading_an_overlong_line_without_a_newline() {
     }
     s.flush().ok();
 
-    stop.store(false, Ordering::SeqCst);
-    let _ = handle.join();
+    let exited = fixture.stop_and_wait();
     drop(listener);
-    let _ = std::fs::remove_file(&sock);
+    cleanup(&sock);
     assert!(
         refused,
         "reader kept consuming a newline-less stream past the bound (sent {sent} bytes)"
     );
+    assert!(
+        exited,
+        "hang: run() did not return within {HANG_PROBE:?} of stop() (lines read: {})",
+        fixture.lines()
+    );
 }
 
+/// The reader must ignore envelopes that are not `core.event`, ingest the ones
+/// that are, and still stop on command.
+///
+/// The ERROR is the SECOND line on purpose: a reader that died on (or threw
+/// away its buffer at) the unknown `ping` method would never deliver it, so the
+/// wait below pins the ignore semantics too.
+///
+/// Both halves are observed on a SIGNAL, not on a stopwatch (#201). The wait is
+/// released by `EventBus::wait_for` the moment the reader publishes, so a
+/// loaded machine costs this test nothing; `HANG_PROBE` bounds only a reader
+/// that never publishes. The two outcomes are asserted separately, so a failure
+/// names the one that happened — the old shared message, "core.event ERROR line
+/// was not ingested (or stop hung)", could not tell a reader that missed the
+/// line from one that never returned, and the 2 s -> 10 s budget bump only
+/// moved the threshold the race ran against.
 #[test]
 fn reader_ignores_non_core_event_lines_and_stops() {
-    let sock = std::env::temp_dir().join(format!("uikit-notifier-ign-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&sock);
-    let listener = UnixListener::bind(&sock).expect("bind");
+    let (sock, listener) = bind_socket("ign");
     let bus = EventBus::new(8);
     let mut sub = bus.subscribe();
-    let reader = NotificationReader::new(sock.to_string_lossy().to_string(), bus.clone(), 50);
-    let stop = reader.stop_handle();
-    let handle = std::thread::spawn(move || reader.run());
+    let reader = NotificationReader::new(sock.to_string_lossy().to_string(), bus.clone(), RETRY_MS);
+    let mut fixture = ReaderFixture::start(reader);
 
     {
         let mut s: UnixStream = listener.accept().expect("accept").0;
@@ -235,43 +348,55 @@ fn reader_ignores_non_core_event_lines_and_stops() {
         s.flush().ok();
         s.shutdown(std::net::Shutdown::Both).ok();
     }
-    // 10s, not 2s: the reader thread must survive a loaded test runner
-    // (workspace runs compile siblings in parallel; a starved reader once
-    // missed the 2s budget even though ingestion itself is instant).
-    let got_err = poll_error(&mut sub, &bus, Instant::now() + Duration::from_secs(10));
-    stop.store(false, Ordering::SeqCst);
-    let _ = handle.join(); // proves run() exits on stop instead of hanging
+
+    // 1. Ingestion: blocks until THIS line's event is published.
+    let ingested = wait_error(&mut sub, &bus, "boom");
+    // 2. Stop: an independent claim, with its own budget and its own message.
+    let exited = fixture.stop_and_wait();
+    // Snapshot the reader's state before the thread is joined: "still running"
+    // is exactly what a hang report has to say, and a join hides it.
+    let running = fixture.running();
+    let lines = fixture.lines();
+    let published = bus.seq();
     drop(listener);
-    let _ = std::fs::remove_file(&sock);
+    cleanup(&sock);
+
     assert!(
-        got_err,
-        "core.event ERROR line was not ingested (or stop hung)"
+        ingested,
+        "NOT INGESTED: the core.event ERROR line never reached the bus within the {HANG_PROBE:?} \
+         hang probe — lines read: {lines}, events published: {published}, reader thread still \
+         running: {running}, run() returned on stop: {exited}"
+    );
+    assert!(
+        exited,
+        "HANG: run() did not return within {HANG_PROBE:?} of stop() being set — the stop path is \
+         stuck, the line under test is not at fault (lines read: {lines}, events published: \
+         {published})"
     );
 }
 
 /// A long-lived silent connection must not hang `stop()` indefinitely:
 /// the flag flip is the contract; run() ends at its next loop checkpoint
-/// (read timeout keeps the loop interruptible).
+/// (read timeout keeps the loop interruptible). The wait for `run()` to return
+/// is bounded, so a regression is REPORTED here instead of wedging the suite.
 #[test]
 fn stop_exits_while_silently_connected() {
-    let sock =
-        std::env::temp_dir().join(format!("uikit-notifier-quiet-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&sock);
-    let listener = UnixListener::bind(&sock).expect("bind");
-    let reader = NotificationReader::new(sock.to_string_lossy().to_string(), EventBus::new(4), 50);
-    let stop = reader.stop_handle();
-    let handle = std::thread::spawn(move || reader.run());
+    let (sock, listener) = bind_socket("quiet");
+    let reader = NotificationReader::new(
+        sock.to_string_lossy().to_string(),
+        EventBus::new(4),
+        RETRY_MS,
+    );
+    let mut fixture = ReaderFixture::start(reader);
     let (_conn, _) = listener.accept().expect("accept"); // stays open, silent
     std::thread::sleep(Duration::from_millis(100));
-    stop.store(false, Ordering::SeqCst);
-    // joined within the read-timeout window would prove the loop exits;
-    // give it a bounded window via a watchdog thread instead of blocking the
-    // test harness forever on a regression.
-    let joined = std::thread::spawn(move || handle.join()).join();
+    let exited = fixture.stop_and_wait();
+    let running = fixture.running();
     drop(listener);
-    let _ = std::fs::remove_file(&sock);
+    cleanup(&sock);
     assert!(
-        joined.is_ok(),
-        "reader thread must exit after stop() even while connected"
+        exited,
+        "HANG: run() did not return within {HANG_PROBE:?} of stop() while a silent peer held the \
+         connection open (reader thread still running: {running})"
     );
 }
