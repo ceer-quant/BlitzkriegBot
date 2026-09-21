@@ -46,6 +46,25 @@ fn wrap_params(strategy: &str, params: StrategyParams) -> MutableParams {
     m
 }
 
+/// The signal an accepted proposal is audited and reported with. Shared by the
+/// operator path and the auto switch's drain (#249), so an adoption looks the
+/// same in the audit log however it was decided.
+fn adoption_signal(proposal: &EvolutionProposal, now_ms: i64) -> EvolveSignal {
+    let strategy = proposal.strategy.clone();
+    EvolveSignal::new(
+        proposal.id.clone(),
+        now_ms,
+        strategy.clone(),
+        wrap_params(&strategy, proposal.from_params.clone()),
+        wrap_params(&strategy, proposal.to_params.clone()),
+        proposal.reason,
+        proposal.confidence,
+        proposal.sample_count,
+        proposal.variant.win_rate - proposal.baseline.win_rate,
+        "proposal".into(),
+    )
+}
+
 pub mod audit;
 pub mod config;
 pub mod evaluator;
@@ -204,14 +223,46 @@ impl ShadowEvolution {
     /// published with the declared values, so the overlay is a no-op rather than
     /// an invented parameter.
     pub fn new(cfg: ShadowEvolutionConfig, strategies: &[&dyn EngineStrategy]) -> Self {
-        let enabled = cfg.enabled;
-        let audit = AuditLog::new(&cfg);
-        // E13: the runtime state (auto-evolve switch + deep-round clock) is
-        // persisted under the audit dir and WINS over the config file — it is
-        // what the UIs' checkbox flips, so a restart must not undo it.
         let store = proposal::ProposalStore::new(&cfg.audit_dir);
-        let (persisted_auto, last_cycle_ms, cycle_seq) =
-            store.load_state().unwrap_or((cfg.auto_evolve, 0, 0));
+        // E13 + #249: the runtime state (both switches + the deep-round clock) is
+        // persisted under the audit dir and WINS over the config file — it is what
+        // the UIs' switches flip, so a restart must not undo the operator. A key
+        // an older kernel never wrote hands that decision back to the config.
+        let st = store.load_state().unwrap_or_default();
+        let mut cfg = cfg;
+        if let Some(on) = st.enabled {
+            // The persisted switch is the operator's most recent word, so it wins
+            // over the file — a deploy editing the file must not undo a switch
+            // flipped in the panel. But when the FILE asks for OFF and the runtime
+            // says ON, that is a kill switch that did not kill: say so loudly, and
+            // name the way out, because "the file says off" is exactly what an
+            // incident responder will look at.
+            if on != cfg.enabled {
+                if on {
+                    tracing::warn!(
+                        file = false,
+                        "the config file disables the evolution engine but the persisted \
+                         runtime switch has it ON — the runtime switch wins; use the panel's \
+                         engine switch, or remove <audit_dir>/state.json, to turn it off"
+                    );
+                } else {
+                    tracing::info!(
+                        file = true,
+                        "the persisted runtime switch keeps the evolution engine off; the \
+                         file re-enables it only once that switch is turned back on"
+                    );
+                }
+            }
+            cfg.enabled = on;
+        }
+        cfg.auto_evolve = st.auto_evolve.unwrap_or(cfg.auto_evolve);
+        let enabled = cfg.enabled;
+        // The audit log's own gate is read from this config: an engine the
+        // persisted state switched on (and the file did not) must not silently
+        // lose every record it writes.
+        let audit = AuditLog::new(&cfg);
+        let (last_cycle_ms, cycle_seq) = (st.last_cycle_ms, st.cycle_seq);
+        let auto_evolve = cfg.auto_evolve;
         let mut me = Self {
             enabled,
             cfg,
@@ -220,7 +271,7 @@ impl ShadowEvolution {
             token_expiry: HashMap::new(),
             round_markets: Vec::new(),
             audit,
-            auto_evolve: persisted_auto,
+            auto_evolve,
             last_cycle_ms,
             cycle_seq,
             proposal_store: store,
@@ -293,9 +344,63 @@ impl ShadowEvolution {
         for (name, _) in carried {
             self.registry.remove(&name);
         }
+        // #245: a promotion used to be memory-only, so a restart dropped the
+        // adopted parameters and every strategy fell back to its declared
+        // defaults while the promotion log still reported the adopted value —
+        // two "current parameters" readings that disagreed. Restore first, so
+        // the scaffold below anchors the variants around what was really in
+        // force rather than around a value nobody chose.
+        self.restore_adopted_params();
         if self.enabled {
             for i in 0..self.units.len() {
                 self.units[i].scaffold(&self.cfg, 0);
+            }
+        }
+    }
+
+    /// Re-apply the last un-rolled-back promotion of every strategy whose cell
+    /// holds nothing but its declared defaults — the exact shape a restart leaves
+    /// behind (#245).
+    ///
+    /// Deliberately narrow: a cell that differs from its declaration was put
+    /// there by something else (an operator override, or a promotion restored
+    /// earlier), and that is not this function's to overwrite. The restore
+    /// re-checks the declaration/domain/immutable locks but NOT the gradient —
+    /// the same rule the E13 rollback uses, because it restores a value that was
+    /// already in force once, which is not a step in an unbounded direction.
+    /// `previous` is left empty on purpose: the E13 rollback then re-derives its
+    /// target from the promotion log with the full re-validation, instead of
+    /// trusting an anchor read back from disk.
+    fn restore_adopted_params(&mut self) {
+        for u in self.units.iter_mut() {
+            let declared = StrategyParams::from_knobs(&u.specs);
+            if **u.cell.load() != declared {
+                continue; // something else owns this cell; not ours to overwrite
+            }
+            let Some(rec) = self.proposal_store.last_active_promotion(&u.strategy) else {
+                continue;
+            };
+            if rec.to_params == declared {
+                continue; // the promotion moved nothing this strategy still lacks
+            }
+            let checked = guard::validate_declared(&rec.to_params, &u.specs)
+                .and_then(|_| guard::validate_domain(&rec.to_params, &u.specs))
+                .and_then(|_| guard::validate_immutable(&self.cfg.risk));
+            match checked {
+                Ok(()) => {
+                    tracing::info!(
+                        strategy = %u.strategy,
+                        proposal = %rec.proposal_id,
+                        "restored the parameters of the last promotion"
+                    );
+                    u.cell.store(Arc::new(rec.to_params));
+                }
+                Err(e) => tracing::warn!(
+                    strategy = %u.strategy,
+                    proposal = %rec.proposal_id,
+                    reason = %e,
+                    "the adopted parameters no longer pass the guards — not restored"
+                ),
             }
         }
     }
@@ -338,6 +443,9 @@ impl ShadowEvolution {
     }
 
     /// Enable evolution: scaffold every unit around the parameters in force.
+    /// Persisted (#249), because the switch is runtime state: a restart that
+    /// silently switched the engine back off is what made "自动进化：开" a label
+    /// that did nothing.
     pub fn enable(&mut self, now_ms: i64) {
         self.enabled = true;
         self.cfg.enabled = true;
@@ -345,6 +453,7 @@ impl ShadowEvolution {
         for i in 0..self.units.len() {
             self.units[i].scaffold(&self.cfg, now_ms);
         }
+        self.persist_state();
     }
 
     pub fn disable(&mut self) {
@@ -354,6 +463,7 @@ impl ShadowEvolution {
         for u in self.units.iter_mut() {
             u.set = VariantSet::empty(&u.strategy);
         }
+        self.persist_state();
     }
 
     /// Record the current round: token expiries for the tick context, and the
@@ -440,19 +550,70 @@ impl ShadowEvolution {
     /// independently (its own baseline metrics, its own cooldown), so at most one
     /// result per strategy and never one strategy's outcome gating another's.
     pub fn evaluate(&mut self, now_ms: i64) -> Vec<EvolutionOutcome> {
-        if !self.enabled {
-            return Vec::new();
-        }
         // E13: undecided proposals past their TTL expire here, so the pending
-        // list never shows a stale decision opportunity.
+        // list never shows a stale decision opportunity. Runs even while the
+        // engine is switched off — a held proposal is bookkeeping, and quietly
+        // letting its TTL lapse is exactly the staleness the operator cannot see.
         let expired = self.proposal_store.expire_stale(now_ms);
         if expired > 0 {
             tracing::info!(count = expired, "shadow evolution proposals expired");
         }
-        let mut out = Vec::new();
+        // The engine switch is the master switch: while it is off nothing moves,
+        // not even a backlog the auto switch would otherwise drain. An operator
+        // who switches the engine off to stop the machinery must not find that it
+        // applied a held proposal anyway.
+        if !self.enabled {
+            return Vec::new();
+        }
+        // #249: in unattended mode a held proposal is a contradiction — nobody is
+        // going to answer it — so the backlog is decided (as `auto`) before this
+        // pass looks for anything new. Done HERE rather than in `set_auto_evolve`
+        // so that flipping the switch does not itself apply a parameter: the next
+        // pass applies it, with the guards re-checked against the parameters in
+        // force at that moment.
+        let mut out = if self.auto_evolve {
+            self.adopt_pending(now_ms)
+        } else {
+            Vec::new()
+        };
         for i in 0..self.units.len() {
             if let Some(o) = self.evaluate_unit(i, now_ms) {
                 out.push(o);
+            }
+        }
+        out
+    }
+
+    /// Decide every held proposal the way the auto switch implies a human would,
+    /// under the very same guards and audit trail (`decide_as` with
+    /// `DecidedBy::Auto`), so an unattended adoption stays as inspectable as a
+    /// hand-clicked one.
+    ///
+    /// A proposal whose premises moved while it was held (the strategy evolved
+    /// again, or an operator edited knobs in between) fails the re-check and is
+    /// closed out as rejected WITH the guard's reason — a stale proposal is
+    /// recorded, never silently dropped. Returns the adoptions, for the event
+    /// stream the UIs follow.
+    fn adopt_pending(&mut self, now_ms: i64) -> Vec<EvolutionOutcome> {
+        let mut out = Vec::new();
+        for p in self.proposal_store.pending() {
+            match self.decide_as(&p.id, Decision::Accept, now_ms, DecidedBy::Auto) {
+                Ok(DecisionResult::Accepted { proposal }) => {
+                    tracing::info!(
+                        strategy = %proposal.strategy,
+                        proposal = %proposal.id,
+                        "auto-evolve adopted a held proposal"
+                    );
+                    out.push(EvolutionOutcome::Applied(adoption_signal(
+                        &proposal, now_ms,
+                    )));
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    proposal = %p.id,
+                    reason = %e,
+                    "auto-evolve could not adopt a held proposal"
+                ),
             }
         }
         out
@@ -710,6 +871,20 @@ impl ShadowEvolution {
         decision: Decision,
         now_ms: i64,
     ) -> Result<DecisionResult, String> {
+        self.decide_as(id, decision, now_ms, DecidedBy::User)
+    }
+
+    /// `decide` with the actor named in the record. The auto switch drains its
+    /// own backlog through here (#249) so that an unattended adoption travels
+    /// the same code path as a hand-clicked one — same guards, same audit, same
+    /// promotion log — and differs only in who is on record.
+    pub fn decide_as(
+        &mut self,
+        id: &str,
+        decision: Decision,
+        now_ms: i64,
+        by: DecidedBy,
+    ) -> Result<DecisionResult, String> {
         let cfg = self.cfg.clone();
         let mut proposal = self
             .proposal_store
@@ -743,7 +918,7 @@ impl ShadowEvolution {
                     // evolved again, or the operator edited knobs): the stale
                     // proposal is refused explicitly and closed out.
                     proposal.state = ProposalState::Rejected;
-                    proposal.decided_by = Some(DecidedBy::User);
+                    proposal.decided_by = Some(by);
                     proposal.decided_at_ms = Some(now_ms);
                     self.proposal_store.put(proposal.clone());
                     return Err(format!("proposal {id} no longer passes the guards: {e}"));
@@ -754,23 +929,12 @@ impl ShadowEvolution {
                 u.evolution_count += 1;
                 u.scaffold(&cfg, now_ms);
                 proposal.state = ProposalState::Accepted;
-                proposal.decided_by = Some(DecidedBy::User);
+                proposal.decided_by = Some(by);
                 proposal.decided_at_ms = Some(now_ms);
                 let from_params = proposal.from_params.clone();
                 let to_params = proposal.to_params.clone();
                 let strategy = proposal.strategy.clone();
-                let signal = EvolveSignal::new(
-                    proposal.id.clone(),
-                    now_ms,
-                    strategy.clone(),
-                    wrap_params(&strategy, from_params.clone()),
-                    wrap_params(&strategy, to_params.clone()),
-                    proposal.reason,
-                    proposal.confidence,
-                    proposal.sample_count,
-                    proposal.variant.win_rate - proposal.baseline.win_rate,
-                    "proposal".into(),
-                );
+                let signal = adoption_signal(&proposal, now_ms);
                 self.audit.record_applied(&signal);
                 self.proposal_store.put(proposal.clone());
                 self.proposal_store.record_promotion(
@@ -778,14 +942,14 @@ impl ShadowEvolution {
                     &strategy,
                     &from_params,
                     &to_params,
-                    DecidedBy::User,
+                    by,
                     now_ms,
                 );
                 Ok(DecisionResult::Accepted { proposal })
             }
             Decision::Reject => {
                 proposal.state = ProposalState::Rejected;
-                proposal.decided_by = Some(DecidedBy::User);
+                proposal.decided_by = Some(by);
                 proposal.decided_at_ms = Some(now_ms);
                 self.audit.record_rejection(
                     &EvolveSignal::new(
@@ -851,6 +1015,13 @@ impl ShadowEvolution {
         (self.last_cycle_ms, self.cycle_seq)
     }
 
+    /// Seconds between DEEP rounds (the status surface's period display). Sent
+    /// with the status because a UI that hard-codes "72 hours" lies the moment
+    /// the config file says otherwise.
+    pub fn cycle_secs(&self) -> i64 {
+        self.cfg.evolution_cycle_secs
+    }
+
     /// When the next DEEP round fires (`None` before the first observation
     /// starts the clock, or while disabled).
     pub fn next_cycle_at_ms(&self, now_ms: i64) -> Option<i64> {
@@ -864,8 +1035,12 @@ impl ShadowEvolution {
     }
 
     fn persist_state(&self) {
-        self.proposal_store
-            .save_state(self.auto_evolve, self.last_cycle_ms, self.cycle_seq);
+        self.proposal_store.save_state(proposal::PersistedState {
+            enabled: Some(self.enabled),
+            auto_evolve: Some(self.auto_evolve),
+            last_cycle_ms: self.last_cycle_ms,
+            cycle_seq: self.cycle_seq,
+        });
     }
 
     /// E13: the 72h DEEP round. First call only starts the clock (a restart
@@ -1794,6 +1969,200 @@ mod tests {
 
         let m2 = ShadowEvolution::new(fast_cfg(false, "autoswitch"), &refs);
         assert!(m2.auto_evolve(), "the persisted switch wins over the file");
+    }
+
+    /// #249: with the auto switch on there is nobody to answer a held proposal,
+    /// so the very next evaluation pass adopts the backlog — as `auto`, through
+    /// the same guards and the same promotion log a hand-clicked acceptance
+    /// writes. Flipping the switch is not what applies a parameter; the pass
+    /// that follows is.
+    #[test]
+    fn auto_mode_adopts_the_held_backlog_on_the_next_pass() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let cfg = fast_cfg(false, "autodrain"); // manual mode: the proposal is held
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = ShadowEvolution::new(cfg, &refs);
+        m.enable(0);
+        m.on_round(&[market()], &[], 0);
+        drive_wins(&mut m, "alpha", 2, 10_000);
+        let held = match &m.evaluate(100_000)[0] {
+            EvolutionOutcome::Proposed(p) => p.clone(),
+            other => panic!("expected a held proposal, got {other:?}"),
+        };
+        assert_eq!(m.pending_proposal_count(), 1);
+
+        let before = m.registry().get("alpha", "cap").unwrap();
+        m.set_auto_evolve(true);
+        assert_eq!(
+            m.registry().get("alpha", "cap").unwrap(),
+            before,
+            "the switch itself applies nothing"
+        );
+
+        let outcomes = m.evaluate(200_000);
+        assert!(
+            outcomes
+                .iter()
+                .any(|o| matches!(o, EvolutionOutcome::Applied(s) if s.strategy == "alpha")),
+            "the pass that follows the switch adopts the backlog: {outcomes:?}"
+        );
+        assert_eq!(m.pending_proposal_count(), 0, "auto mode has no backlog");
+        assert_eq!(
+            m.registry().get("alpha", "cap").unwrap(),
+            held.to_params.get("cap").unwrap(),
+            "the cell holds the proposal's target"
+        );
+        let log = std::fs::read_to_string(dir.join("promotions.jsonl")).unwrap();
+        assert!(log.contains(&held.id), "the adoption is logged: {log}");
+        assert!(
+            log.contains("\"decidedBy\":\"auto\""),
+            "and recorded as unattended: {log}"
+        );
+        let decided = m
+            .all_proposals(10)
+            .into_iter()
+            .find(|p| p.id == held.id)
+            .unwrap();
+        assert_eq!(decided.state, ProposalState::Accepted);
+        assert_eq!(decided.decided_by, Some(DecidedBy::Auto));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A backlog entry whose premises moved while it was held (the operator
+    /// edited the knob in between) must NOT be applied: the drain closes it out
+    /// as rejected with the guard's reason — recorded, never silently dropped,
+    /// and never left pending in a mode that has no one to decide it.
+    #[test]
+    fn auto_mode_closes_out_a_backlog_entry_whose_premises_moved() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let cfg = fast_cfg(false, "autostale");
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = ShadowEvolution::new(cfg, &refs);
+        m.enable(0);
+        m.on_round(&[market()], &[], 0);
+        drive_wins(&mut m, "alpha", 2, 10_000);
+        let held = match &m.evaluate(100_000)[0] {
+            EvolutionOutcome::Proposed(p) => p.clone(),
+            other => panic!("expected a held proposal, got {other:?}"),
+        };
+        // The operator moves the knob the other way (a legal +2.5% step), so the
+        // held proposal's target is now more than one gradient step away.
+        let mut p = StrategyParams::new();
+        p.set("cap", dec!(0.41));
+        m.set_params("alpha", p, 150_000).unwrap();
+
+        m.set_auto_evolve(true);
+        let outcomes = m.evaluate(200_000);
+        assert!(
+            !outcomes
+                .iter()
+                .any(|o| matches!(o, EvolutionOutcome::Applied(_))),
+            "a stale step is not applied: {outcomes:?}"
+        );
+        assert_eq!(m.pending_proposal_count(), 0, "and is not left pending");
+        assert_eq!(
+            m.registry().get("alpha", "cap").unwrap(),
+            dec!(0.41),
+            "the operator's value stands"
+        );
+        let decided = m
+            .all_proposals(10)
+            .into_iter()
+            .find(|p| p.id == held.id)
+            .unwrap();
+        assert_eq!(decided.state, ProposalState::Rejected);
+        assert_eq!(decided.decided_by, Some(DecidedBy::Auto));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #245: an adoption is memory-only during a run, so a restart used to fall
+    /// back to the declared defaults while the promotion log still reported the
+    /// adopted value — two "current parameters" readings that disagreed. A fresh
+    /// manager over the same audit dir restores what was in force, and the
+    /// one-click rollback keeps working behind it.
+    #[test]
+    fn a_restart_restores_the_adopted_parameters() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let cfg = fast_cfg(false, "restore");
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = ShadowEvolution::new(cfg, &refs);
+        m.enable(0);
+        m.on_round(&[market()], &[], 0);
+        drive_wins(&mut m, "alpha", 2, 10_000);
+        let held = match &m.evaluate(100_000)[0] {
+            EvolutionOutcome::Proposed(p) => p.clone(),
+            other => panic!("expected a held proposal, got {other:?}"),
+        };
+        m.decide(&held.id, Decision::Accept, 200_000).unwrap();
+        let adopted = m.registry().get("alpha", "cap").unwrap();
+        assert_ne!(adopted, dec!(0.40), "the acceptance moved the knob");
+
+        // The restart publishes the declared default first and then re-applies
+        // the promotion, so the two readings agree again.
+        let m2 = ShadowEvolution::new(fast_cfg(false, "restore"), &refs);
+        assert_eq!(
+            m2.registry().get("alpha", "cap").unwrap(),
+            adopted,
+            "the adopted parameters survive the restart"
+        );
+        // A third manager still finds the rollback target through the log.
+        let mut m3 = ShadowEvolution::new(fast_cfg(false, "restore"), &refs);
+        match m3.rollback("alpha", 300_000).unwrap() {
+            EvolutionOutcome::RolledBack { to, .. } => {
+                assert_eq!(to.get("alpha", "cap"), Some(dec!(0.40)));
+            }
+            other => panic!("expected a rollback, got {other:?}"),
+        }
+        assert_eq!(
+            m3.registry().get("alpha", "cap").unwrap(),
+            dec!(0.40),
+            "and restores the pre-promotion value"
+        );
+        // A rollback is a decision: the next restart must not re-apply what the
+        // operator just undid.
+        let m4 = ShadowEvolution::new(fast_cfg(false, "restore"), &refs);
+        assert_eq!(
+            m4.registry().get("alpha", "cap").unwrap(),
+            dec!(0.40),
+            "a rolled-back promotion is no longer a restore target"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #249: the engine switch is runtime state too. It used to live in memory
+    /// only, so every restart silently switched the engine back to whatever the
+    /// config file said — that is how "自动进化：开" became a label with zero
+    /// variants behind it.
+    #[test]
+    fn the_engine_switch_survives_a_restart() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let dir = std::path::PathBuf::from(&fast_cfg(false, "engineswitch").audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The file says off, the operator switches it on.
+        let mut m = ShadowEvolution::new(fast_cfg(false, "engineswitch"), &refs);
+        assert!(!m.is_enabled());
+        m.enable(0);
+        let mut m2 = ShadowEvolution::new(fast_cfg(false, "engineswitch"), &refs);
+        assert!(m2.is_enabled(), "the runtime switch wins over the file");
+        assert_eq!(
+            m2.variant_count(),
+            3,
+            "and the engine returns with its twins"
+        );
+
+        // And off is remembered just as firmly, even against a file saying on.
+        m2.disable();
+        let m3 = ShadowEvolution::new(fast_cfg(true, "engineswitch"), &refs);
+        assert!(!m3.is_enabled(), "an operator's off survives the restart");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The 72h DEEP clock: the first observation starts it, the interval

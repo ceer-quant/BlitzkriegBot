@@ -339,6 +339,7 @@ impl App {
             KeyCode::Char('x') if self.tab == Tab::Evolution => self.evo_decide("reject"),
             KeyCode::Char('d') if self.tab == Tab::Evolution => self.evo_decide("defer"),
             KeyCode::Char('e') if self.tab == Tab::Evolution => self.evo_toggle_auto(),
+            KeyCode::Char('m') if self.tab == Tab::Evolution => self.evo_toggle_engine(),
             KeyCode::Char('u') if self.tab == Tab::Evolution => self.evo_rollback(),
             _ => Action::None,
         }
@@ -493,6 +494,21 @@ impl App {
             .map(|s| s.auto_evolve)
             .unwrap_or(false);
         let cmd = format!("auto-evolve {}", if on { "off" } else { "on" });
+        self.log(format!("> {cmd}"));
+        Action::RunCommand(cmd)
+    }
+
+    /// #249: the engine switch — whether anything evolves at all. A different
+    /// question from the auto switch (who applies what qualifies), and the one
+    /// the page has to answer before "auto-evolve ON" means anything.
+    fn evo_toggle_engine(&mut self) -> Action {
+        let on = self
+            .snap
+            .evolution_status
+            .as_ref()
+            .map(|s| s.enabled)
+            .unwrap_or(false);
+        let cmd = format!("evolve {}", if on { "off" } else { "on" });
         self.log(format!("> {cmd}"));
         Action::RunCommand(cmd)
     }

@@ -33,6 +33,24 @@ const store = usePanelStore()
 
 const evo = computed(() => store.snapshot?.evolution ?? null)
 const autoEvolve = computed(() => evo.value?.status?.autoEvolve ?? false)
+/** 引擎开关：false = 评估器根本没跑（无影子策略、无变异体、不会排深度轮）。 */
+const engineOn = computed(() => evo.value?.status?.enabled ?? false)
+/**
+ * 自动模式真正生效的条件是「引擎开着 且 自动开着」：只开自动而引擎未启用时，
+ * 内核既不评估也不会采纳 —— 之前的页面只读 autoEvolve，于是把「自动：开」
+ * 显示成一个什么都不做的开关。所有「内核会自己采纳」的判断都走这个 computed。
+ */
+const autoActive = computed(() => engineOn.value && autoEvolve.value)
+const cycleSeq = computed(() => evo.value?.status?.cycleSeq ?? 0)
+/** 内核上报的深度轮周期（秒）；旧内核不上报时为 0，文案退回「未上报」。 */
+const cycleSecs = computed(() => evo.value?.status?.cycleSecs ?? 0)
+
+/** 当前真实行为，一句话（三种组合分开说，不留含糊）。 */
+const modeSummary = computed(() => {
+  if (!evo.value) return '内核未上报状态'
+  if (!engineOn.value) return '不进化（引擎未启用）'
+  return autoEvolve.value ? '自动：内核自行采纳，无需人工' : '人工：达标变异等你拍板'
+})
 
 const proposals = computed(() => evo.value?.proposals ?? [])
 
@@ -91,15 +109,34 @@ async function setAuto(next: boolean): Promise<void> {
     showFlash('warn', `指令已发出，但内核回报的开关状态仍是「${now ? '自动' : '人工'}」——改动尚未生效，请稍后刷新或查内核日志。`)
     return
   }
+  if (next && !engineOn.value) {
+    showFlash('warn', '自动进化已记录，但进化引擎当前未启用：内核不会评估、不会采纳，也不会有待决提案。请先打开同样的「进化引擎」开关。')
+    return
+  }
   showFlash('info', next
-    ? '自动进化已开启：内核将直接落盘采纳（每次采纳都记进 promotions.jsonl，可用回滚撤销）'
-    : '已关闭自动进化：每个提案都等你拍板')
+    ? '自动进化已开启：内核自行采纳达标的变异（每次采纳都记进 promotions.jsonl，可一键回滚）。待决区不会再堆积需要人工拍板的提案。'
+    : '已关闭自动进化：每个提案都在待决区等你拍板')
+}
+
+async function setEngine(next: boolean): Promise<void> {
+  if (next && !window.confirm('启用进化引擎？内核会为每个策略建立影子变异体并持续评估（有 CPU 开销，所有动作仍在原有风控锁内）。')) {
+    return
+  }
+  if (!await act('evolve', () => api.setEvolve(next))) return
+  const now = evo.value?.status?.enabled ?? false
+  if (now !== next) {
+    showFlash('warn', `指令已发出，但内核回报的引擎状态仍是「${now ? '运行中' : '未启用'}」——请稍后刷新或查内核日志。`)
+    return
+  }
+  showFlash('info', next
+    ? `进化引擎已启用：开始评估影子变异体${autoEvolve.value ? '，并按自动模式自行采纳' : '，达标的变异挂到待决区等你拍板'}。深度轮首次计时从此刻开始。`
+    : '进化引擎已关闭：不再评估、不再采纳，已挂起的提案保留但不会推进。')
 }
 
 async function decide(p: EvolutionProposalRow, decision: 'accept' | 'reject' | 'defer'): Promise<void> {
-  // 自动进化开着时内核自己会采纳，人工采纳只会和它抢同一个提案。
+  // 自动模式（引擎开着且自动开着）内核自己会采纳，人工采纳只会和它抢同一个提案。
   // 按钮已经隐藏，这里再挡一次，防的是渲染与内核状态切换之间的时间差。
-  if (decision === 'accept' && autoEvolve.value) {
+  if (decision === 'accept' && autoActive.value) {
     showFlash('warn', '自动进化已开启：内核会自行采纳提案。要人工拍板，请先关掉上方开关。')
     return
   }
@@ -174,17 +211,46 @@ function ttlLeft(expiresAtMs: number): string {
   return `${Math.max(1, Math.round(left / 60_000))}分`
 }
 
-/** 距下轮深度进化的倒计时（内核上报 nextCycleAtMs；缺省说明内核没给）。 */
+/**
+ * 距下轮深度进化的倒计时。内核上报 nextCycleAtMs 为空有两种截然不同的原因，
+ * 必须分开说：引擎没开（什么都不会发生）和引擎开着但时钟还没起来。把它们
+ * 混成一句「内核未安排」，正是「进化跑没跑」看不清的来源。
+ */
 function untilNext(ms: number | null | undefined): string {
-  if (!ms) return '内核未安排'
+  if (!engineOn.value) return '不会触发（引擎未启用）'
+  if (!ms) return '等待首次计时'
   if (ms - Date.now() <= 0) return '即将触发'
   return ttlLeft(ms)
 }
 
+/** 深度轮周期：内核上报多少就写多少，旧内核不上报时如实说不知道。 */
+const cyclePeriod = computed(() => {
+  const s = cycleSecs.value
+  if (s <= 0) return '周期未上报'
+  const h = Math.round(s / 3600)
+  return `周期 ${h} 小时`
+})
+
+/** 周期卡副标题：深度轮跑过几轮 + 上轮何时。 */
+const cycleDetail = computed(() => {
+  const last = evo.value?.status?.lastCycleMs ?? 0
+  if (!cycleSeq.value) {
+    const started = last ? `，计时自 ${cycleAgo(last)} 起算` : ''
+    return engineOn.value
+      ? `深度轮尚未跑过第 1 轮${started}`
+      : '引擎未启用：不评估、不排深度轮'
+  }
+  return `已完成 ${cycleSeq.value} 轮，上轮 ${last ? cycleAgo(last) : '时间未上报'}`
+})
+
 const emptyPendingText = computed(() => {
-  const last = evo.value?.status?.lastCycleMs
-  const cycle = last ? `上轮深度进化 ${cycleAgo(last)}` : '内核尚未上报深度进化记录'
-  return `暂无待决提案 —— 评估器发现更优变异时会挂到这里。${cycle}，周期 72 小时。`
+  if (!engineOn.value) {
+    return '引擎未启用：内核不会评估，也不会产生提案。打开上方「进化引擎」开关后，达标的变异才会出现在这里。'
+  }
+  if (autoActive.value) {
+    return '自动进化开着：内核自己采纳达标的变异，这里正常情况下会一直是空的 —— 采纳结果见上方「已采纳的变异」与下方台账。'
+  }
+  return `暂无待决提案 —— 评估器发现更优变异时会挂到这里。${cycleDetail.value}，${cyclePeriod.value}。`
 })
 
 interface MetricRow {
@@ -239,34 +305,58 @@ const cycleAgo = (ms: number): string => {
     <!-- 开关 + 周期钟 -->
     <div class="grid gap-3.5 sm:grid-cols-3">
       <Card dense>
-        <CardHeader label="托管模式" />
-        <div class="flex items-center justify-between px-1">
-          <div>
-            <div class="text-[13px] font-semibold" :class="evo?.status?.autoEvolve ? 'text-up' : 'text-primary'">
-              {{ evo?.status?.autoEvolve ? '自动进化：开' : '人工拍板' }}
+        <CardHeader label="进化引擎与托管模式" />
+        <div class="space-y-2.5 px-1">
+          <div class="flex items-center justify-between">
+            <div>
+              <div class="text-[13px] font-semibold" :class="engineOn ? 'text-up' : 'text-down'">
+                {{ engineOn ? '引擎：运行中' : '引擎：未启用' }}
+              </div>
+              <p class="mt-0.5 text-[11.5px] text-faint-fg">
+                {{ engineOn ? '影子变异体在评估（关闭后不再评估、不再采纳）' : '不评估、不采纳、不排深度轮' }}
+              </p>
             </div>
-            <p class="mt-0.5 text-[11.5px] text-faint-fg">
-              {{ evo?.status?.autoEvolve ? '内核直接采纳提案（promotions 可回滚）' : '每个提案都在待决区等你确认' }}
-            </p>
+            <Switch
+              :model-value="engineOn"
+              :disabled="busy === 'evolve'"
+              :label="engineOn ? '开' : '关'"
+              @update:model-value="setEngine"
+            />
           </div>
-          <Switch
-            :model-value="evo?.status?.autoEvolve ?? false"
-            :disabled="busy === 'auto-evolve'"
-            :label="evo?.status?.autoEvolve ? '自动' : '人工'"
-            @update:model-value="setAuto"
-          />
+          <div class="flex items-center justify-between border-t border-line pt-2.5">
+            <div>
+              <div class="text-[13px] font-semibold" :class="autoActive ? 'text-up' : 'text-primary'">
+                {{ autoActive ? '自动进化：开' : autoEvolve ? '自动：已记录（引擎关着，不生效）' : '人工拍板' }}
+              </div>
+              <p class="mt-0.5 text-[11.5px] text-faint-fg">
+                {{ autoActive
+                  ? '内核自行采纳达标的变异，不等人工'
+                  : autoEvolve
+                    ? '引擎未启用，自动采纳不会发生'
+                    : '达标的变异挂进待决区，等你确认' }}
+              </p>
+            </div>
+            <Switch
+              :model-value="autoEvolve"
+              :disabled="busy === 'auto-evolve'"
+              :label="autoEvolve ? '自动' : '人工'"
+              @update:model-value="setAuto"
+            />
+          </div>
+          <p class="border-t border-line pt-2 text-[11px] leading-snug text-faint-fg">
+            当前模式：<span class="font-semibold text-primary">{{ modeSummary }}</span>
+          </p>
         </div>
       </Card>
       <Card dense>
         <CardHeader label="进化周期" />
         <div class="px-1 text-[13px]">
-          <div class="font-semibold">
+          <div class="font-semibold" :class="engineOn ? '' : 'text-faint-fg'">
             <Clock class="mr-1 inline size-3.5 text-primary" />距下轮深度进化
             <span class="num">{{ untilNext(evo?.status?.nextCycleAtMs) }}</span>
           </div>
           <p class="mt-0.5 text-[11.5px] text-faint-fg">
-            上轮 {{ evo?.status?.lastCycleMs ? cycleAgo(evo.status.lastCycleMs) : '内核未上报' }}
-            · 周期 72 小时
+            {{ cycleDetail }} · {{ cyclePeriod }}
           </p>
         </div>
       </Card>
@@ -275,10 +365,27 @@ const cycleAgo = (ms: number): string => {
         <div class="px-1 text-[13px]">
           <div class="text-[22px] font-bold num">{{ pending.length }}</div>
           <p class="mt-0.5 text-[11.5px] text-faint-fg">
-            {{ evo ? `当前 ${pending.length} 个提案待拍板` : '内核未上报进化状态（旧版内核？）' }}
+            {{ evo
+              ? (autoActive
+                ? '自动模式下内核自行采纳，这里应为 0 或短暂停留'
+                : `当前 ${pending.length} 个提案待拍板`)
+              : '内核未上报进化状态（旧版内核？）' }}
           </p>
         </div>
       </Card>
+    </div>
+
+    <!-- 引擎未启用：一切「没动静」的统一解释，放在最显眼处 -->
+    <div v-if="evo && !engineOn" class="mt-3.5">
+      <AlertBanner tone="warn" title="进化引擎未启用">
+        内核当前不评估、不采纳、也不排深度轮 —— 下面的「已采纳的变异」只是历史记录，
+        待决提案不会被自动处理（自动开关记录的是模式，不是运行状态）。
+        打开上方「进化引擎」开关即可让它跑起来，开关状态会持久化，重启后仍然有效。
+        注意：内核上次关机时记下的开关优先于
+        <span class="num">user_layer/configs/shadow_evolution.toml</span> 里的
+        <span class="num">enabled</span>（那一行只决定首次启动），所以改文件关不掉/开不动它 ——
+        想用文件说话，得先删掉 <span class="num">data/evolution/state.json</span>。
+      </AlertBanner>
     </div>
 
     <div v-if="flash" class="mt-3.5">
@@ -362,10 +469,9 @@ const cycleAgo = (ms: number): string => {
 
       <p class="mt-2.5 text-[11px] leading-snug text-faint-fg">
         数据来源：采纳记录（与 <span class="num">data/evolution/promotions.jsonl</span> 同源）。
-        它是对「采纳发生过、改了什么、谁改的、何时」的凭据，
-        <span class="font-semibold">不是运行中参数的实时读数</span> —— 快照不暴露运行中的参数值，
-        而且内核重启后目前不会重新应用采纳记录，参数会回到策略声明默认值（跟踪在
-        <span class="num">#245</span>）。
+        它是对「采纳发生过、改了什么、谁改的、何时」的凭据 ——
+        内核在启动时会按这些记录把参数恢复回来（<span class="num">#245</span> 之后不再回落到声明默认值），
+        但快照仍不暴露运行中参数的实时读数，核对实时值请查内核日志或 IPC。
       </p>
     </Card>
 
@@ -377,9 +483,14 @@ const cycleAgo = (ms: number): string => {
         </template>
       </CardHeader>
 
-      <AlertBanner v-if="autoEvolve" tone="info" class="mb-3">
-        自动进化已开启：内核会自行采纳提案，因此这里不提供「采纳」按钮，只保留拒绝与延后。
-        要人工拍板，请先关掉上方开关。
+      <AlertBanner v-if="autoActive" tone="info" class="mb-3">
+        自动进化已开启：内核会自行采纳达标的变异，因此这里不提供「采纳」按钮，只保留拒绝与延后。
+        正常情况下待决区会保持为空 —— 刚出现的提案会在下一轮评估里被内核采纳。
+        要人工拍板，请先关掉上方「自动」开关。
+      </AlertBanner>
+      <AlertBanner v-else-if="autoEvolve && !engineOn" tone="warn" class="mb-3">
+        自动模式已记录，但引擎未启用：这些提案不会被自动采纳，会一直留到过期（7 天）。
+        现在可以人工拍板，或先打开上方「进化引擎」开关让内核自行处理。
       </AlertBanner>
 
       <EmptyState v-if="!pending.length" :loading="store.loading" :text="emptyPendingText" />
@@ -398,7 +509,7 @@ const cycleAgo = (ms: number): string => {
             </Badge>
             <span class="text-[11.5px] text-faint-fg num">{{ p.id }}</span>
             <Badge variant="outline">
-              <Clock class="mr-1 size-3" />剩余 {{ ttlLeft(p.expiresAtMs) }}
+              <Clock class="mr-1 size-3" />{{ ttlLeft(p.expiresAtMs) }}后过期
             </Badge>
             <Badge v-if="p.cycleSeq" variant="outline">第 {{ p.cycleSeq }} 轮深度进化</Badge>
           </div>
@@ -458,7 +569,7 @@ const cycleAgo = (ms: number): string => {
 
           <div class="mt-3.5 flex flex-wrap items-center gap-2">
             <Button
-              v-if="!autoEvolve"
+              v-if="!autoActive"
               size="sm"
               :disabled="busy === `${p.id}-accept`"
               @click="decide(p, 'accept')"

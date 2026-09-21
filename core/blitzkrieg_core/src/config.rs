@@ -713,7 +713,15 @@ mod tests {
         assert_eq!(cfg.min_time_left_sec, Some(180));
         // Loaded from the sibling file, not invented.
         let s = &cfg.shadow;
-        assert_eq!(s.enabled, Some(false));
+        // #249: the shipped file turns the evaluator ON. The switch is runtime
+        // state that a panel flip persists over this file, so a shipped `false`
+        // was a default nobody could see being reset on every restart — the
+        // engine kept coming back off under a panel that said it was on.
+        assert_eq!(s.enabled, Some(true));
+        // And the unattended mode is the shipped one: with the evaluator running
+        // and nobody watching, a proposal held for a human is a proposal nobody
+        // will ever answer.
+        assert_eq!(s.auto_evolve, Some(true));
         assert_eq!(s.evaluation_window_minutes, Some(30));
         assert_eq!(s.min_sample_count, Some(30));
         assert_eq!(s.min_win_rate_improvement, Some(dec!(0.05)));

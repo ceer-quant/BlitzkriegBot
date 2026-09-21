@@ -547,6 +547,13 @@ mod tests {
             app.on_key(key('e')),
             Action::RunCommand(c) if c == "auto-evolve on"
         ));
+        // #249: 'm' is the other switch — the engine itself. With no status
+        // reported yet it reads the same way 'e' does (unknown → on), and both
+        // verbs reach the same gateway the web panel's switches use.
+        assert!(matches!(
+            app.on_key(key('m')),
+            Action::RunCommand(c) if c == "evolve on"
+        ));
         assert!(matches!(
             app.on_key(key('u')),
             Action::ConfirmToggle(c) if c == "rollback mean_reversion"
