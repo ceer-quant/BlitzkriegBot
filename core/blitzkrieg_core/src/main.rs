@@ -13,6 +13,7 @@
 //!                   [--trade-log <path>] [--no-trade-log]
 //!                   [--order-log <path>] [--no-order-log]
 //!                   [--position-log <path>] [--no-position-log]
+//!                   [--allow-shared-data]
 //!                   [--near-miss-path <path>]
 //!                   [--event-archive <path>] [--no-event-archive]
 //!                   [--event-archive-max-mb 0]
@@ -36,6 +37,24 @@
 //! `--mode live` / `DRY_RUN=false` (giving both is not an error — the read-only
 //! promise simply wins) and settles orders like dry, since a ledger waiting on a
 //! venue that was never started would never move.
+//!
+//! #199 — the data-directory latch. The ledgers ARE the accounting truth the
+//! risk limits rest on, so a second writer is not a logging accident: it breaks
+//! the trade/order/position identities `max_daily_loss_usd`, the loss breakers
+//! and the reconcile audit are computed from, and polluted rows are
+//! indistinguishable from real ones. At startup this process therefore claims
+//! the parent directory of every EFFECTIVE ledger path (`--trade-log`,
+//! `--order-log`, `--position-log`) by writing `.core-lock` — `{pid,
+//! started_at, socket, mode, version}` — into it, and REFUSES TO START (exit 1,
+//! not one byte written anywhere) if a record is already there and its pid is
+//! alive. A record whose pid is gone is taken over, and the boot banner says so.
+//! The banner always prints the absolute path of every file this process may
+//! write, so "where did that run write?" is answered at boot rather than
+//! reconstructed from a cwd afterwards. This is the DATA conflict; #196's socket
+//! probe is the separate SOCKET conflict (who is listening). `--allow-shared-data`
+//! (or `BLITZKRIEG_ALLOW_SHARED_DATA=1`) is the fixture/backtest escape hatch:
+//! the refusal is disabled and the banner states loudly that the directory has
+//! two writers. Never use it for a deployment.
 //!
 //! Strategy selection (repeatable; builtins default to `spread_arb` on and
 //! `trend_follow` off, so a new strategy never changes what a running session
@@ -135,6 +154,10 @@ struct Args {
     no_order_log: bool,
     position_log: Option<String>,
     no_position_log: bool,
+    /// #199: acknowledge that this process may write a data directory another
+    /// core is already writing (fixtures, backtests). Only disables the
+    /// live-owner refusal — the boot banner still says so, loudly.
+    allow_shared_data: bool,
     market_plugin: Option<String>,
     discovery: bool,
     shadow_evolution: bool,
@@ -485,6 +508,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut no_order_log = false;
     let mut position_log: Option<String> = None;
     let mut no_position_log = false;
+    let mut allow_shared_data = false;
     let mut market_plugin: Option<String> = None;
     let mut discovery = true;
     let mut shadow_evolution_flag = false;
@@ -599,6 +623,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--no-order-log" => no_order_log = true,
             "--position-log" => position_log = it.next(),
             "--no-position-log" => no_position_log = true,
+            "--allow-shared-data" => allow_shared_data = true,
             "--market-plugin" => market_plugin = it.next(),
             "--no-discovery" => discovery = false,
             "--shadow-evolution" => shadow_evolution_flag = true,
@@ -1214,6 +1239,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         no_order_log,
         position_log,
         no_position_log,
+        allow_shared_data,
         market_plugin,
         discovery,
         shadow_evolution: shadow_evolution_flag
@@ -1822,6 +1848,141 @@ async fn main() -> anyhow::Result<()> {
             "blitzkrieg-core: --backtest-knob only applies to a replay; pass --backtest <archive.jsonl>"
         );
         std::process::exit(2);
+    }
+
+    // ───────────────────────── #199: the data-directory latch ────────────────
+    // Everything above this line is read-only or in-memory, and every offline
+    // mode (--replay, --regime-eval, --backtest) has already returned. The
+    // serving path is where the ledgers are first touched — `server::run` →
+    // `Core::new` reads them, restore and the first append write them — so the
+    // latch is taken HERE. That placement is the whole reason a refused boot
+    // writes nothing: no lock file, no ledger line, no side file, anywhere.
+    let mode_str = match mode {
+        Mode::Dry => "dry",
+        Mode::Live => "live",
+        Mode::ReadOnly => "readonly",
+    };
+    // The escape hatch. `BLITZKRIEG_ALLOW_SHARED_DATA` is spelled with the
+    // issue's prefix rather than the `BK_*` namespace `EnvVars` collects,
+    // because it is the one knob a fixture author copies out of the issue text.
+    // An unparseable value is treated as UNSET (fail closed): a typo must never
+    // be what silently disables the guard.
+    let allow_shared_data = args.allow_shared_data
+        || match std::env::var("BLITZKRIEG_ALLOW_SHARED_DATA") {
+            Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" | "" => false,
+                other => {
+                    eprintln!(
+                        "blitzkrieg-core: BLITZKRIEG_ALLOW_SHARED_DATA={other:?} is not a \
+                         boolean; treating it as UNSET (the data directories stay guarded)"
+                    );
+                    false
+                }
+            },
+            Err(_) => false,
+        };
+
+    // The latch goes on the parent directory of each EFFECTIVE ledger path, not
+    // on a hardcoded `data/`: `data/` is only this process's cwd-relative
+    // default, so a deployment with `--trade-log /mnt/ledger/trades.jsonl` would
+    // be guarded in the wrong place by a fixed path. Three directories under the
+    // defaults, one when a harness points all three logs at one temp directory
+    // (and two fixtures in two temp directories never see each other), none when
+    // every ledger is disabled. `data_lock`'s module docs carry the full
+    // argument, including why #196's socket probe is not a substitute.
+    let ledger_logs: [(&str, Option<&str>); 3] = [
+        ("trade-log", config.trade_log_path.as_deref()),
+        ("order-log", config.order_log_path.as_deref()),
+        ("position-log", config.position_log_path.as_deref()),
+    ];
+    let anchors = blitzkrieg_core::data_lock::ledger_anchors(&ledger_logs);
+
+    // "Where did this process write?" answered at boot, in absolute terms,
+    // without knowing the cwd it was started from — the incident behind #199 was
+    // found by hand, days later, by comparing files nobody had been told were
+    // being written. Absolute but deliberately NOT canonicalized: the files may
+    // not exist yet, and on macOS canonicalizing `/tmp` would print a path the
+    // operator never typed.
+    for (label, path) in [
+        ("trade-log", config.trade_log_path.as_deref()),
+        ("order-log", config.order_log_path.as_deref()),
+        ("position-log", config.position_log_path.as_deref()),
+        ("near-miss-log", config.near_miss_path.as_deref()),
+        ("event-archive", config.event_archive_path.as_deref()),
+        ("strategy-state", config.strategy_state_path.as_deref()),
+        ("shadow-evolution-audit", args.se_audit_dir.as_deref()),
+    ] {
+        match path {
+            Some(p) => {
+                let abs = blitzkrieg_core::data_lock::absolute(std::path::Path::new(p));
+                if abs.as_path() == std::path::Path::new(p) {
+                    eprintln!("blitzkrieg-core: write path {label}: {}", abs.display());
+                } else {
+                    eprintln!(
+                        "blitzkrieg-core: write path {label}: {} (from {p})",
+                        abs.display()
+                    );
+                }
+            }
+            None => eprintln!("blitzkrieg-core: write path {label}: (disabled)"),
+        }
+    }
+    // The side files that follow those paths are where a "the core only writes
+    // trades.jsonl" assumption goes wrong: the trade summary, the fill/audit/
+    // settlement journals and the daily-loss state all live in the same
+    // directories, so a latch on the log file alone would not describe the
+    // footprint. Naming them here keeps the banner honest about the set.
+    eprintln!(
+        "blitzkrieg-core: side files: summary.json beside the trade log; applied-fills.jsonl / \
+         reconcile.jsonl / settlements.jsonl beside the order log; <position-log>.daily-loss.json \
+         beside the position log"
+    );
+
+    let lock_now = server::now_ms();
+    let record =
+        blitzkrieg_core::data_lock::LockRecord::for_this_process(&args.socket, mode_str, lock_now);
+    // A refusal propagates out of `main` as a non-zero exit with the operator
+    // text `DataDirsBusy` renders (occupant pid / socket / mode / start time,
+    // per busy directory, plus the remedy). The anchors were all decided before
+    // this call and the call writes only what it decided it owns, so a refusal
+    // leaves the filesystem exactly as it found it.
+    let data_lock =
+        blitzkrieg_core::data_lock::DataLock::acquire(&anchors, &record, allow_shared_data)?;
+    if anchors.is_empty() {
+        eprintln!(
+            "blitzkrieg-core: data lock: nothing to claim (every ledger is disabled by \
+             --no-trade-log / --no-order-log / --no-position-log)"
+        );
+    } else {
+        let dirs = data_lock
+            .held()
+            .iter()
+            .map(|h| h.dir.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "blitzkrieg-core: data lock: pid {} claimed {} data director{}: {}",
+            record.pid,
+            anchors.len(),
+            if anchors.len() == 1 { "y" } else { "ies" },
+            dirs
+        );
+    }
+    if allow_shared_data {
+        // Printed even when no live owner was found: the flag is the promise
+        // that this run may share, and the log reader (not the operator who
+        // typed it) is who needs to know a guard was switched off.
+        eprintln!(
+            "blitzkrieg-core: WARNING SHARED DATA MODE: --allow-shared-data \
+             (BLITZKRIEG_ALLOW_SHARED_DATA=1) is set, so a LIVE core writing the same data \
+             directories will NOT refuse this one. Two writers break the trade/order/position \
+             identities the daily-loss breaker and the reconcile audit rest on. Fixtures and \
+             backtests only — never a deployment."
+        );
+    }
+    for line in data_lock.banner(lock_now) {
+        eprintln!("blitzkrieg-core: {line}");
     }
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();

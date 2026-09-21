@@ -22,9 +22,15 @@ function rpc(sock, method, params = {}) {
   });
 }
 
-async function runCore(extra, sock, tag) {
+async function runCore(extra, sock, work) {
   try { unlinkSync(sock); } catch {}
-  const p = spawn(BIN, ['--socket', sock, '--mode', 'dry', '--tick-ms', '100', '--seed-balance', '100', ...extra], { stdio: 'ignore' });
+  // #199: run the core INSIDE the temp work dir. It used to inherit the gate's
+  // cwd (the repo root), where the ledgers this gate does not override — the
+  // order log, the position log, the strategy-state file — all resolve to
+  // `data/…` and were silently written into the production tree on every run.
+  // The trade log stays explicit (that is what this gate asserts) and PROD below
+  // is still the real repo-root ledger, so the assertion is unchanged.
+  const p = spawn(BIN, ['--socket', sock, '--mode', 'dry', '--tick-ms', '100', '--seed-balance', '100', ...extra], { stdio: 'ignore', cwd: work });
   for (let i = 0; i < 60; i++) { if (existsSync(sock)) break; await sleep(50); }
   await sleep(300);
   // Open a position, then close it at a profit so a closed trade is recorded.
@@ -45,12 +51,12 @@ console.log('prod ledger before     :', base);
 // 1) explicit --trade-log under a temp dir
 const dir = mkdtempSync(join(tmpdir(), 'tl-test-'));
 const tlPath = join(dir, 'trades.jsonl');
-const n1 = await runCore(['--trade-log', tlPath], join(tmpdir(), `tl-${process.pid}.sock`), 'trade-log');
+const n1 = await runCore(['--trade-log', tlPath], join(tmpdir(), `tl-${process.pid}.sock`), dir);
 console.log(`--trade-log <tmp>     : core saw ${n1} trade(s); file lines = ${existsSync(tlPath) ? readFileSync(tlPath,'utf8').trim().split('\n').filter(Boolean).length : 0}`);
 console.log('prod ledger after (1) :', prodLines());
 
 // 2) --no-trade-log
-const n2 = await runCore(['--no-trade-log'], join(tmpdir(), `nl-${process.pid}.sock`), 'no-trade-log');
+const n2 = await runCore(['--no-trade-log'], join(tmpdir(), `nl-${process.pid}.sock`), dir);
 console.log(`--no-trade-log        : core saw ${n2} trade(s) (in-memory)`);
 console.log('prod ledger after (2) :', prodLines());
 

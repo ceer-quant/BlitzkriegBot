@@ -620,7 +620,12 @@ fn next_segment_path(path: &Path, at_ms: i64) -> PathBuf {
 
 /// `YYYYMMDDTHHMMSSZ` for a unix-ms instant. Hand-rolled UTC conversion so the
 /// core keeps no date-library dependency for one filename.
-fn utc_stamp(ms: i64) -> Option<String> {
+///
+/// `pub(crate)` since #199: the data-directory lock file records a human-readable
+/// `started_at` for whoever reads it during an incident, and that is the same
+/// one-spelling rule as the archive's segment names — one UTC formatter in the
+/// crate, not two that can drift apart.
+pub(crate) fn utc_stamp(ms: i64) -> Option<String> {
     if ms <= 0 {
         return None;
     }
