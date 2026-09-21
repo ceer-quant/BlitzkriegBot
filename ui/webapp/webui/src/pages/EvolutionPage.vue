@@ -184,6 +184,33 @@ const DECISION_LABELS: Record<'accept' | 'reject' | 'defer', string> = {
   defer: '延后',
 }
 
+/** 四个守卫锁的中文名（内核上报的锁名 → 操作员能看懂的说法）。 */
+const GUARD_LABELS: Record<string, string> = {
+  declared: '声明值锁（该 knob 未被声明为可变）',
+  domain: '定义域锁（目标值越界）',
+  gradient: '梯度锁（单次变动超过 ±5%）',
+  immutable: '不可变锁（不该变的参数被改动）',
+}
+
+/**
+ * 已决提案的结论说明（#251）。内核从 2026-09-21 起才写 `decidedReason`，
+ * 更早的行没有该字段——返回空串让调用方显示「未上报」，绝不替它猜。
+ */
+function decisionNote(p: EvolutionProposalRow): string {
+  const r = p.decidedReason
+  if (!r) return ''
+  switch (r.kind) {
+    case 'guardFailed':
+      return `采纳被守卫拦下 · ${GUARD_LABELS[r.guard] ?? r.guard}：${r.detail}`
+    case 'rejected':
+      return '明确拒绝：维持现行参数'
+    case 'expired':
+      return `超过 ${Math.round((p.expiresAtMs - p.createdAtMs) / 86_400_000) || 7} 天无人处理，自动过期`
+    case 'superseded':
+      return `被更新的提案取代（${r.byId}）`
+  }
+}
+
 /** 决策后内核应当回报的状态：带在快照上校验，用来证明「真的生效了」。 */
 const EXPECTED_STATE: Record<'accept' | 'reject' | 'defer', string> = {
   accept: 'accepted',
@@ -591,12 +618,13 @@ const cycleAgo = (ms: number): string => {
     <Card class="mt-3.5" dense>
       <CardHeader label="处理台账（只读：已采纳 / 已拒绝 / 已过期 / 被取代）" />
       <EmptyState v-if="!ledger.length" text="暂无处理记录" />
-      <table v-else class="w-full min-w-[640px] text-[12.5px]">
+      <table v-else class="w-full min-w-[820px] text-[12.5px]">
         <thead>
           <tr class="text-left">
             <th class="label-micro pb-1.5">提案</th>
             <th class="label-micro pb-1.5">策略</th>
             <th class="label-micro pb-1.5">结论</th>
+            <th class="label-micro pb-1.5">原因</th>
             <th class="label-micro pb-1.5">决定方</th>
             <th class="label-micro pb-1.5">时间</th>
           </tr>
@@ -609,6 +637,11 @@ const cycleAgo = (ms: number): string => {
               <Badge :variant="p.state === 'accepted' ? 'gold' : p.state === 'rejected' ? 'down' : 'default'">
                 {{ STATE_LABELS[p.state] ?? p.state }}
               </Badge>
+            </td>
+            <td class="py-2 text-muted-fg">
+              <span v-if="decisionNote(p)">{{ decisionNote(p) }}</span>
+              <span v-else-if="p.state === 'accepted'" class="text-faint-fg">—</span>
+              <span v-else class="text-faint-fg">原因未上报（内核未写 decidedReason）</span>
             </td>
             <td class="py-2 text-muted-fg">{{ p.decidedBy === 'auto' ? '自动进化' : p.decidedBy === 'user' ? '人工' : '—' }}</td>
             <td class="py-2 num text-faint-fg">{{ p.decidedAtMs ? dateTime(p.decidedAtMs) : '—' }}</td>

@@ -492,6 +492,10 @@ pub fn render_json_full(
                 "baseline": p.baseline, "variant": p.variant,
                 "createdAtMs": p.created_at_ms, "expiresAtMs": p.expires_at_ms,
                 "decidedBy": p.decided_by, "decidedAtMs": p.decided_at_ms,
+                // #251: why it ended. Without it the ledger renders every
+                // decision as one word, and "the guard refused it" reads the
+                // same as "an operator said no".
+                "decidedReason": p.decided_reason,
                 "cycleSeq": p.cycle_seq,
             })).collect::<Vec<_>>(),
         "status": s.evolution_status,
@@ -1940,6 +1944,9 @@ fn body_to_command(body: &str) -> String {
 
 #[cfg(test)]
 mod auth_tests;
+
+#[cfg(test)]
+mod evolution_tests;
 
 #[cfg(test)]
 mod safety_tests;

@@ -538,6 +538,18 @@ export interface EvolutionMetricsRow {
 export type EvolutionState =
   | 'proposed' | 'deferred' | 'accepted' | 'rejected' | 'expired' | 'superseded'
 
+/**
+ * Why a decided proposal ended the way it did (#251). Tagged by `kind`, so a
+ * guard refusal carries the lock that refused it plus the guard's own words.
+ * Absent on rows decided before the core wrote the field — render those as
+ * "未上报" rather than guessing.
+ */
+export type EvolutionDecisionReason =
+  | { kind: 'guardFailed'; guard: string; detail: string }
+  | { kind: 'rejected' }
+  | { kind: 'expired' }
+  | { kind: 'superseded'; byId: string }
+
 /** One evolution proposal row, folded by the gateway for rendering. */
 export interface EvolutionProposalRow {
   id: string
@@ -556,6 +568,7 @@ export interface EvolutionProposalRow {
   expiresAtMs: number
   decidedBy: 'user' | 'auto' | null
   decidedAtMs: number | null
+  decidedReason?: EvolutionDecisionReason | null
   cycleSeq: number
 }
 
