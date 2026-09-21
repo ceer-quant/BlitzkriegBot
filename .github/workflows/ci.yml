@@ -446,9 +446,42 @@ jobs:
           docker run --rm -v "$PWD:/repo" -w /repo \
             ghcr.io/gitleaks/gitleaks:latest detect --config /repo/.gitleaks.toml --redact --verbose
 
+  # The ops scripts are macOS-only by construction (BSD `ps`, launchctl,
+  # osascript), so a Linux runner cannot judge them — it would either fail on
+  # the platform or, worse, pass on semantics the deployment host does not
+  # have. This is the one job on a macOS runner, and it installs nothing and
+  # compiles nothing: pure bash + node, about a minute.
+  ops-gates:
+    name: ops-gates (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      # Cheap and broad, so a syntax break anywhere fails here with a filename
+      # rather than as a mystery inside one script's self-test.
+      - name: Shell syntax (every ops script)
+        run: |
+          for f in scripts/*.sh; do
+            bash -n "$f" || { echo "syntax error: $f"; exit 1; }
+          done
+      - name: LaunchAgent plists parse
+        run: |
+          for f in $(git ls-files | grep -i 'plist'); do
+            plutil -lint "$f" || exit 1
+          done
+      # #211's detector. Its self-test spawns real processes and asserts on exit
+      # codes and log wording, so it is the regression net for the thing that is
+      # supposed to notice the core is down. Reverse-acceptance already proved
+      # it can fail: neutering the command-line re-check turns case 15 red, and
+      # neutering the duplicate-core signal turns 16/17/18/22 red.
+      - name: Stack watchdog self-test (#211)
+        run: bash scripts/stack-watchdog.sh --self-test
+
   notify:
     name: notify (wechat)
-    needs: [rust-check, panel-check, core-gates, release-bundle, secret-scan]
+    needs: [rust-check, panel-check, core-gates, release-bundle, secret-scan, ops-gates]
     if: always()
     runs-on: ubuntu-latest
     # Secret lifted to job env so the step `if` can test it (secret-context
@@ -460,9 +493,9 @@ jobs:
         # Opt-in: silently skips unless the WECHAT_WEBHOOK secret is configured.
         if: ${{ env.WECHAT_WEBHOOK != '' }}
         env:
-          RESULT: ${{ needs.rust-check.result }}/${{ needs.panel-check.result }}/${{ needs.core-gates.result }}/${{ needs.secret-scan.result }}
+          RESULT: ${{ needs.rust-check.result }}/${{ needs.panel-check.result }}/${{ needs.core-gates.result }}/${{ needs.secret-scan.result }}/${{ needs.ops-gates.result }}
         run: |
           icon="✅"; [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] && icon="❌"
           curl -sS -X POST "$WECHAT_WEBHOOK" \
             -H 'Content-Type: application/json' \
-            -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$icon CI ${{ github.repository }}\\n> 分支: ${{ github.ref_name }}\\n> 触发: ${{ github.event_name }} by ${{ github.actor }}\\n> 结果(rust/panel/secret): $RESULT\\n> [查看运行](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})\"}}"
+            -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$icon CI ${{ github.repository }}\\n> 分支: ${{ github.ref_name }}\\n> 触发: ${{ github.event_name }} by ${{ github.actor }}\\n> 结果(rust/panel/core/secret/ops): $RESULT\\n> [查看运行](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})\"}}"
