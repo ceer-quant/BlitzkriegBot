@@ -181,6 +181,46 @@ fn restrict_socket(path: &str) -> std::io::Result<u32> {
     Ok(mode)
 }
 
+/// Claim `socket_path` for this process, or explain why it must not.
+///
+/// The socket is a shared singleton, so three questions are asked in this order —
+/// each one protects the premise of the next:
+///
+/// 1. **Is a core already serving this path?** A live listener means a healthy
+///    kernel owns the name. A second core that unlinked and re-bound it would
+///    orphan the first silently: its clients would talk to the new process while
+///    the old one kept trading. Refuse, and do not touch the node.
+/// 2. **Is the leftover node ours?** A node owned by another uid is either a core
+///    this process cannot probe successfully, or a path someone else prepared;
+///    unlinking it tears that core off the wire (or hands the name to whoever
+///    binds next). Refuse.
+/// 3. Only a stale node of our own uid is safe to remove, so `bind` can succeed.
+///
+/// Split out of `run` because `run` starts feeds, discovery and the executor on
+/// the way to `bind`: the decision that protects a live core has to be testable
+/// without a second kernel trading on the test host.
+fn claim_socket_path(socket_path: &str) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let path = std::path::Path::new(socket_path);
+    if path.exists() && std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
+        anyhow::bail!("another blitzkrieg-core is already listening on {socket_path}");
+    }
+    if let Ok(meta) = std::fs::metadata(socket_path)
+        && meta.uid() != own_uid()
+    {
+        anyhow::bail!(
+            "refusing to remove {socket_path}: it is owned by uid {} (this core runs as uid {})",
+            meta.uid(),
+            own_uid()
+        );
+    }
+    let _ = std::fs::remove_file(socket_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    Ok(())
+}
+
 /// Run the UDS server until the shutdown oneshot fires or a signal arrives.
 pub async fn run(
     socket_path: String,
@@ -305,32 +345,7 @@ pub async fn run(
         );
     }
 
-    // Refuse to start if another core is already listening: the socket is a
-    // shared singleton. Without this probe a second process would unlink the
-    // live socket and bind its own, silently orphaning a healthy core (or
-    // failing with EADDRINUSE under a concurrent-start race).
-    if std::path::Path::new(&socket_path).exists()
-        && std::os::unix::net::UnixStream::connect(&socket_path).is_ok()
-    {
-        anyhow::bail!("another blitzkrieg-core is already listening on {socket_path}");
-    }
-    // Stale socket from a crashed process: safe to remove — but only when it is
-    // OURS. Unlinking a node owned by another uid would tear a live core off the
-    // wire (or hand the path to whoever binds next), so refuse instead.
-    if let Ok(meta) = std::fs::metadata(&socket_path) {
-        use std::os::unix::fs::MetadataExt;
-        if meta.uid() != own_uid() {
-            anyhow::bail!(
-                "refusing to remove {socket_path}: it is owned by uid {} (this core runs as uid {})",
-                meta.uid(),
-                own_uid()
-            );
-        }
-    }
-    let _ = std::fs::remove_file(&socket_path);
-    if let Some(parent) = std::path::Path::new(&socket_path).parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
+    claim_socket_path(&socket_path)?;
     let listener = UnixListener::bind(&socket_path)?;
     // Owner-only, immediately after bind (#187). The mode is reported at boot
     // because "the socket exists" says nothing about who may connect to it — the
@@ -1401,6 +1416,95 @@ mod tests {
         );
         let applied = restrict_socket(path.to_str().unwrap()).expect("chmod");
         assert_eq!(applied, SOCKET_MODE, "socket must be owner-only after bind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A second core must never steal a live socket. "Refused" alone is not the
+    /// property that matters: the theft is the UNLINK, because the old kernel
+    /// keeps trading while every client (panel, gate scripts) reconnects to
+    /// whoever binds next. So this pins three things — a readable refusal, a
+    /// node that survives with the same inode, and the original listener still
+    /// answering — and then the opposite case: a stale node of our own uid is
+    /// still reclaimable, so the guard protects a live service and not the name.
+    #[test]
+    fn a_live_socket_is_not_stolen_by_a_second_core() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::net::{UnixListener as StdListener, UnixStream as StdStream};
+
+        // A private directory under $TMPDIR — never the production socket path.
+        let dir = std::env::temp_dir().join(format!("bk-ipc-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("live.sock");
+        let path_s = path.to_str().expect("utf-8 path").to_string();
+
+        // The first core: a real listener that answers, which is exactly what
+        // the guard's probe sees for a healthy kernel.
+        let listener = StdListener::bind(&path).expect("bind the live socket");
+        let ino = std::fs::metadata(&path).expect("stat").ino();
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let _ = s.write_all(b"alive\n");
+            }
+        });
+
+        // Precondition: the probe reaches the live core, so a passing guard below
+        // is not passing because nothing was listening.
+        let mut probe = StdStream::connect(&path_s).expect("the live socket must accept");
+        let mut line = String::new();
+        BufReader::new(&mut probe)
+            .read_line(&mut line)
+            .expect("read the greeting");
+        assert_eq!(line.trim(), "alive", "precondition: a live core answers");
+        drop(probe);
+
+        // The second core claiming the same path.
+        let err = claim_socket_path(&path_s).expect_err("a live socket must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("already listening"),
+            "the refusal must be readable: {msg}"
+        );
+        assert!(msg.contains(&path_s), "the refusal must name it: {msg}");
+
+        // The node survived, unchanged, and the original listener is still the
+        // one serving it — an unlinked node could not answer at all.
+        assert!(path.exists(), "the live socket node must not be unlinked");
+        assert_eq!(
+            std::fs::metadata(&path).expect("stat").ino(),
+            ino,
+            "same node, not a re-created one"
+        );
+        let mut after =
+            StdStream::connect(&path_s).expect("the live core must still accept after the refusal");
+        let mut line = String::new();
+        BufReader::new(&mut after)
+            .read_line(&mut line)
+            .expect("read the greeting");
+        assert_eq!(
+            line.trim(),
+            "alive",
+            "the original core must still be serving"
+        );
+        drop(after);
+
+        // A crashed core leaves a node with nobody behind it: that one IS
+        // reclaimable, otherwise no restart could ever bind.
+        let stale_path = dir.join("stale.sock");
+        let stale_s = stale_path.to_str().expect("utf-8 path").to_string();
+        let stale = StdListener::bind(&stale_path).expect("bind a node to leave behind");
+        drop(stale);
+        assert!(
+            stale_path.exists(),
+            "precondition: the crashed node is on disk"
+        );
+        claim_socket_path(&stale_s).expect("a stale node must be claimable");
+        assert!(
+            !stale_path.exists(),
+            "a stale node is cleared so bind can succeed"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
