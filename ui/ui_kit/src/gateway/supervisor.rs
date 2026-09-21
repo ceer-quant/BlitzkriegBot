@@ -24,11 +24,14 @@
 //! `scripts/order-recovery-check.mjs` / `position-recovery-check.mjs`), so
 //! either signal is safe.
 
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How long to wait for the core to bind its socket after spawn.
 const STARTUP_DEADLINE: Duration = Duration::from_secs(15);
@@ -36,6 +39,18 @@ const STARTUP_DEADLINE: Duration = Duration::from_secs(15);
 const TERM_GRACE: Duration = Duration::from_secs(5);
 /// Poll interval while waiting for readiness / exit.
 const POLL: Duration = Duration::from_millis(100);
+/// Lines of the dying core's stderr kept for the give-up alert. The tail is what
+/// makes an alert actionable: "it crashed 6 times" without the reason is a
+/// notification nobody can act on.
+const STDERR_TAIL_LINES: usize = 40;
+/// Upper bound on one retained stderr line, so a core streaming without newlines
+/// cannot grow the ring without bound.
+const STDERR_TAIL_LINE_BYTES: usize = 4_000;
+/// Opt-in: `<prefix>_ALERT_NOTIFY=1` also pushes the give-up alert to the
+/// desktop notifier (`osascript` / `notify-send`). Off by default — a supervisor
+/// should not pop windows on a machine that never asked for them — but a
+/// keep-alive wrapper on an unattended box wants exactly this.
+const ENV_ALERT_NOTIFY: &str = "BLITZKRIEG_ALERT_NOTIFY";
 
 /// Whether an owned core's exit was asked for.
 ///
@@ -90,6 +105,156 @@ impl ExitReport {
             ExitKind::Crashed => format!("core pid {} CRASHED ({how})", self.pid),
         }
     }
+}
+
+/// Bounded ring of the child's most recent stderr lines, shared with the reader
+/// thread that drains the pipe.
+#[derive(Debug, Clone, Default)]
+struct StderrTail(Arc<Mutex<VecDeque<String>>>);
+
+impl StderrTail {
+    fn push(&self, line: String) {
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        g.push_back(line);
+        while g.len() > STDERR_TAIL_LINES {
+            g.pop_front();
+        }
+    }
+
+    fn clear(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    fn snapshot(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+/// The supervisor has stopped trying to keep the core up.
+///
+/// This exists because the alternative was silent: the restart budget ran out,
+/// `restart_given_up` flipped to `true` in a status struct, and an unattended
+/// deployment sat with a dead kernel and no notification anywhere. The alert is
+/// produced exactly once per give-up, carries the last exit AND the tail of the
+/// core's own stderr (the only place the reason for the crash is written), and is
+/// delivered on three channels: our stderr banner, [`AlertSink`] (whatever the
+/// embedding gateway already uses for alerts), and [`CoreHealth::alert`] — which
+/// is what the panel renders as "已放弃重启".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GiveUpAlert {
+    /// Replacement attempts made before giving up.
+    pub attempts: u32,
+    /// Why the last owned core stopped.
+    pub last_exit: Option<ExitReport>,
+    /// Unix milliseconds, so a panel can show when this happened.
+    pub at_ms: i64,
+    /// Last lines the core wrote to stderr before it died.
+    pub stderr_tail: Vec<String>,
+    /// Operator-readable one-liner.
+    pub message: String,
+}
+
+impl GiveUpAlert {
+    /// The multi-line banner written to the gateway's own stderr (and thus the
+    /// run log). Loud on purpose: this is the log line an operator greps for
+    /// after finding a dead core.
+    pub fn banner(&self) -> String {
+        let mut out = format!(
+            "\n=== BLITZKRIEG ALERT: core NOT running — supervisor gave up ===\n\
+             {}\n\
+             attempts={} last_exit={}\n",
+            self.message,
+            self.attempts,
+            self.last_exit
+                .as_ref()
+                .map(ExitReport::describe)
+                .unwrap_or_else(|| "no recorded exit".to_string()),
+        );
+        if self.stderr_tail.is_empty() {
+            out.push_str("the core wrote nothing to stderr before it died\n");
+        } else {
+            out.push_str("last stderr from the core:\n");
+            for line in &self.stderr_tail {
+                out.push_str("  | ");
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out.push_str(
+            "the kernel is DOWN and will not be restarted; trading is stopped until it is \
+             started again\n===\n",
+        );
+        out
+    }
+}
+
+/// Extra delivery channel for a give-up alert.
+///
+/// The supervisor is deliberately transport-free — it does not know about the
+/// panel, the event bus or a webhook — so a gateway that already has an alert
+/// channel installs one sink and every give-up reaches it. Implementations must
+/// not block: this is called from the UI's refresh tick.
+pub trait AlertSink: Send + Sync {
+    fn give_up(&self, alert: &GiveUpAlert);
+}
+
+/// The always-on channels: a loud stderr banner, plus the desktop notifier when
+/// the operator opted in with `<prefix>_ALERT_NOTIFY=1`.
+fn emit_give_up(alert: &GiveUpAlert) {
+    eprint!("{}", alert.banner());
+    if std::env::var(ENV_ALERT_NOTIFY)
+        .map(|v| v != "false")
+        .unwrap_or(false)
+    {
+        desktop_notify(alert);
+    }
+}
+
+/// Best-effort OS notification. Fire-and-forget on a thread so the supervisor's
+/// refresh tick never waits on a notifier that may not exist.
+fn desktop_notify(alert: &GiveUpAlert) {
+    let title = "BlitzkriegBot: 内核已停机，停止重启";
+    let body = format!("{}（尝试 {} 次）", alert.message, alert.attempts);
+    std::thread::spawn(move || {
+        let cmds: [(&str, Vec<String>); 2] = [
+            (
+                "osascript",
+                vec![
+                    "-e".into(),
+                    format!(
+                        "display notification {} with title {}",
+                        applescript_quote(&body),
+                        applescript_quote(title)
+                    ),
+                ],
+            ),
+            ("notify-send", vec![title.into(), body]),
+        ];
+        for (bin, args) in cmds {
+            let Ok(mut child) = Command::new(bin)
+                .args(&args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            else {
+                continue;
+            };
+            if child.wait().map(|s| s.success()).unwrap_or(false) {
+                break;
+            }
+        }
+    });
+}
+
+/// Quote a string for an AppleScript literal (only `\` and `"` are special).
+fn applescript_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// How hard the supervisor should try to keep an owned core alive.
@@ -154,6 +319,10 @@ pub struct CoreHealth {
     pub last_exit: Option<ExitReport>,
     /// The restart budget is spent; no further replacement will be attempted.
     pub restart_given_up: bool,
+    /// Set once, at the moment the budget was spent. Carries the crash reason and
+    /// the core's last stderr lines, so the panel can show WHY instead of only
+    /// that it is over.
+    pub alert: Option<GiveUpAlert>,
 }
 
 #[derive(Debug)]
@@ -352,6 +521,12 @@ pub struct Supervisor {
     /// Set when a crash could not be replaced (budget spent). Distinguishes
     /// "down and will stay down" from "down, replacement on its way".
     restart_given_up: bool,
+    /// The one-shot give-up alert, kept for the panel and for the record.
+    give_up_alert: Option<GiveUpAlert>,
+    /// Extra delivery channel, installed by the embedding gateway.
+    alert_sink: Option<Arc<dyn AlertSink>>,
+    /// Tail of the current (or last) child's stderr, drained by a reader thread.
+    stderr_tail: StderrTail,
     /// Backoff to honour before the next attempt, set when an attempt fails
     /// immediately so the retry loop does not spin on a core that cannot boot.
     next_attempt_after: Option<Instant>,
@@ -371,9 +546,66 @@ impl Supervisor {
             restarts: 0,
             last_exit: None,
             restart_given_up: false,
+            give_up_alert: None,
+            alert_sink: None,
+            stderr_tail: StderrTail::default(),
             next_attempt_after: None,
             spawned_at: None,
         }
+    }
+
+    /// Install the gateway's alert channel. Called once, at wiring time; the
+    /// sink is used for every give-up (and only then — a crash that is being
+    /// retried is not an alert, it is a restart).
+    pub fn set_alert_sink(&mut self, sink: Arc<dyn AlertSink>) {
+        self.alert_sink = Some(sink);
+    }
+
+    /// The give-up alert, if the budget has been spent. Same value as
+    /// [`CoreHealth::alert`], for callers that hold the supervisor directly.
+    pub fn give_up_alert(&self) -> Option<&GiveUpAlert> {
+        self.give_up_alert.as_ref()
+    }
+
+    /// Record that a core is (or is coming) up.
+    ///
+    /// Clears the give-up state: `restart_given_up` and its alert describe the
+    /// CURRENT absence of a kernel, so once one is spawned or adopted they are
+    /// history — a panel that kept showing "已放弃重启" over a live core would be
+    /// reporting a problem that no longer exists. A core that dies again gets a
+    /// fresh alert from [`Supervisor::alert_give_up`].
+    fn mark_core_up(&mut self) {
+        self.restart_given_up = false;
+        self.give_up_alert = None;
+    }
+
+    /// Raise the one-shot give-up alert. Idempotent: the transition into
+    /// "given up" happens in two places (the pre-attempt budget check and the
+    /// post-attempt check), and an alert that fired twice would look like two
+    /// separate failures.
+    fn alert_give_up(&mut self) {
+        if self.give_up_alert.is_some() {
+            return;
+        }
+        let alert = GiveUpAlert {
+            attempts: self.restarts,
+            last_exit: self.last_exit.clone(),
+            at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+            stderr_tail: self.stderr_tail.snapshot(),
+            message: format!(
+                "内核连崩 {} 次后已放弃重启（预算 {} 次已用尽），进程不会自行恢复",
+                self.restarts + 1,
+                self.policy.max_attempts
+            ),
+        };
+        emit_give_up(&alert);
+        if let Some(sink) = &self.alert_sink {
+            sink.give_up(&alert);
+        }
+        self.give_up_alert = Some(alert);
     }
 
     /// Turn crash-replacement on or off. Off by default: silently respawning a
@@ -443,6 +675,7 @@ impl Supervisor {
             // choice, see `tryAdopt`).
             self.child = None;
             self.owns = false;
+            self.mark_core_up();
             return Ok(StartOutcome::Adopted);
         }
         if !self.cfg.binary_path.exists() {
@@ -454,16 +687,28 @@ impl Supervisor {
         cmd.args(self.cfg.to_args())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
+            // Piped rather than inherited: the core's own stderr is where it
+            // explains a fatal boot error, and it is the only evidence left when
+            // the restart budget runs out. A reader thread re-emits every line to
+            // our stderr (so the run log is unchanged) while keeping the tail.
+            .stderr(Stdio::piped());
         if let Some(dir) = &self.cfg.cwd {
             cmd.current_dir(dir);
         }
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
         let pid = child.id();
+        // The tail belongs to the child that just died, not to its predecessors:
+        // an alert showing the stderr of attempt 1 while attempt 6 is the one
+        // that mattered would point the operator at the wrong failure.
+        self.stderr_tail.clear();
+        if let Some(err) = child.stderr.take() {
+            drain_stderr(err, self.stderr_tail.clone());
+        }
         self.child = Some(child);
         self.owns = true;
+        self.mark_core_up();
 
         // Poll path: report the spawn and let a later tick observe it. Waiting
         // here would block the UI on the handshake it uses to discover state, and
@@ -635,6 +880,7 @@ impl Supervisor {
         }
         if self.restarts >= self.policy.max_attempts {
             self.restart_given_up = true;
+            self.alert_give_up();
             return;
         }
         let attempt = self.restarts;
@@ -651,7 +897,6 @@ impl Supervisor {
         // the next tick.
         if self.start_within(Duration::ZERO).is_ok() {
             self.next_attempt_after = None;
-            self.restart_given_up = false;
         }
         // Only give up when the budget is spent AND nothing is in flight. A
         // replacement we just spawned has not bound yet, so `is_running()` is
@@ -659,6 +904,7 @@ impl Supervisor {
         // away from serving. A genuinely hung one is retired by the next `pump()`.
         if self.restarts >= self.policy.max_attempts && self.child.is_none() {
             self.restart_given_up = true;
+            self.alert_give_up();
         }
     }
 
@@ -672,6 +918,7 @@ impl Supervisor {
             restarts: self.restarts,
             last_exit: self.last_exit.clone(),
             restart_given_up: self.restart_given_up,
+            alert: self.give_up_alert.clone(),
         }
     }
 }
@@ -683,6 +930,29 @@ impl Drop for Supervisor {
             let _ = self.stop();
         }
     }
+}
+
+/// Drain a child's stderr on its own thread: every line goes to our stderr (so
+/// the gateway's run log keeps showing core output exactly as before) and into
+/// the bounded tail ring that the give-up alert reports.
+fn drain_stderr(err: impl std::io::Read + Send + 'static, tail: StderrTail) {
+    std::thread::spawn(move || {
+        let reader = BufReader::new(err);
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            eprintln!("[core] {line}");
+            let line = if line.len() > STDERR_TAIL_LINE_BYTES {
+                let mut cut = STDERR_TAIL_LINE_BYTES;
+                while cut > 0 && !line.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                format!("{}… (truncated)", &line[..cut])
+            } else {
+                line
+            };
+            tail.push(line);
+        }
+    });
 }
 
 /// Send SIGTERM via `kill(1)`. Dependency-free; falls back to nothing on failure
@@ -949,5 +1219,169 @@ mod tests {
             sup.restarts, 1,
             "the second attempt must wait for the backoff"
         );
+    }
+
+    /// A real executable that writes one line to stderr and exits non-zero —
+    /// the cheapest faithful stand-in for a core that dies on boot with an
+    /// explanation. Returns its path.
+    fn a_dying_binary(tag: &str, stderr_line: &str, code: i32) -> PathBuf {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("bk-sup-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dying-core.sh");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, "echo '{stderr_line}' >&2").unwrap();
+        writeln!(f, "exit {code}").unwrap();
+        drop(f);
+        let mut perm = std::fs::metadata(&path).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&path, perm).unwrap();
+        path
+    }
+
+    /// Records every alert it is handed, so the test asserts the delivery
+    /// channel rather than only the internal field.
+    #[derive(Default)]
+    struct RecordingSink(Mutex<Vec<GiveUpAlert>>);
+
+    impl AlertSink for RecordingSink {
+        fn give_up(&self, alert: &GiveUpAlert) {
+            self.0.lock().unwrap().push(alert.clone());
+        }
+    }
+
+    /// A supervisor whose respawns are instant (no backoff) and whose child dies
+    /// immediately, so "N crashes in a row" is a fast, deterministic test.
+    fn a_flapping_core(tag: &str, stderr_line: &str, max_attempts: u32) -> Supervisor {
+        let cfg = SupervisorConfig::from_env(format!("/tmp/bk-flap-{tag}.sock"));
+        let mut sup = Supervisor::new(cfg);
+        sup.cfg.binary_path = a_dying_binary(tag, stderr_line, 3);
+        sup.cfg.extra_args = Vec::new();
+        sup.set_restart_policy(RestartPolicy {
+            max_attempts,
+            base_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+            ..RestartPolicy::keep_alive()
+        });
+        sup
+    }
+
+    /// Pump until an exit is observed, or fail. A bounded poll rather than a
+    /// fixed sleep: these tests are about the alert, and a fixed sleep would make
+    /// them flaky on a loaded machine for a reason unrelated to the alert.
+    fn pump_until_crash(sup: &mut Supervisor) -> ExitReport {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(report) = sup.pump() {
+                return report;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no exit was observed within 5s of a crash"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn six_consecutive_crashes_raise_a_visible_give_up_alert() {
+        // The acceptance case for #186: a core that crashes on every start must
+        // not simply stop being restarted in silence. Six crashes, a budget of
+        // five replacements, and the alert has to be on every channel — the
+        // internal field the panel reads, the stderr banner, and the sink the
+        // embedding gateway installed.
+        let mut sup = a_flapping_core("giveup", "boom: no market plugin", 5);
+        let sink = Arc::new(RecordingSink::default());
+        sup.set_alert_sink(sink.clone());
+        assert!(sup.start_within(Duration::ZERO).is_ok());
+
+        // Six crashes, observed one at a time. The wait is a bounded poll rather
+        // than a fixed sleep: the point of the test is the ALERT, and a fixed
+        // sleep would make it fail on a loaded machine for a reason that has
+        // nothing to do with the alert.
+        for crash in 1..=6 {
+            let report = pump_until_crash(&mut sup);
+            assert_eq!(report.kind, ExitKind::Crashed);
+            if crash < 6 {
+                assert!(
+                    sup.health().alert.is_none(),
+                    "crash {crash} of 6 must be answered by a restart, not an alert"
+                );
+            }
+        }
+
+        let health = sup.health();
+        assert!(
+            health.restart_given_up,
+            "a spent budget must be visible in the health view"
+        );
+        let alert = health
+            .alert
+            .expect("giving up must produce an alert, not only a status flag");
+        assert_eq!(alert.attempts, 5, "the budget spent is what is reported");
+        assert_eq!(
+            alert.last_exit.as_ref().unwrap().code,
+            Some(3),
+            "the alert names how the core died"
+        );
+        assert!(alert.at_ms > 0, "an alert without a time is not actionable");
+        assert!(
+            alert.message.contains("放弃重启"),
+            "the message must say the supervisor gave up: {}",
+            alert.message
+        );
+        assert!(alert.banner().contains("core NOT running"));
+        assert!(
+            alert.stderr_tail.iter().any(|l| l.contains("boom")),
+            "the core's own stderr is the reason; the alert must carry it: {:?}",
+            alert.stderr_tail
+        );
+
+        // Exactly one alert per give-up: a sink that fires on every tick would
+        // page an operator forever.
+        assert_eq!(sink.0.lock().unwrap().len(), 1);
+        sup.pump();
+        assert_eq!(sink.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_core_that_comes_back_clears_the_give_up_alert() {
+        // The alert is a current-state notice, not a permanent scar: once a core
+        // answers on the socket again the panel must stop saying "gave up".
+        let mut sup = a_flapping_core("recover", "boom", 1);
+        assert!(sup.start_within(Duration::ZERO).is_ok());
+        pump_until_crash(&mut sup); // crash 1 → attempt 1 (the dying binary)
+        pump_until_crash(&mut sup); // crash 2 → budget spent → alert
+        assert!(sup.health().restart_given_up);
+        assert!(sup.health().alert.is_some());
+
+        // Something else brings a core up on the same socket (the operator ran
+        // `start` again, or another launcher did); the give-up notice must go.
+        sup.cfg.binary_path = PathBuf::from("/bin/sleep");
+        sup.cfg.extra_args = vec!["120".into()];
+        let out = sup.start_within(Duration::ZERO);
+        assert!(out.is_ok(), "the operator's start must succeed");
+        let health = sup.health();
+        assert!(
+            health.alert.is_none() && !health.restart_given_up,
+            "a core that is up again must not keep showing a give-up alert"
+        );
+        let _ = sup.stop();
+    }
+
+    #[test]
+    fn the_alert_is_only_raised_while_the_budget_is_spent() {
+        // Off means off: with no restart policy a crash is reported (as before)
+        // but never escalated into a give-up alert.
+        let mut sup = a_flapping_core("noalert", "boom", 0);
+        sup.set_restart_policy(RestartPolicy::off());
+        assert!(sup.start_within(Duration::ZERO).is_ok());
+        pump_until_crash(&mut sup);
+        let health = sup.health();
+        assert_eq!(health.last_exit.as_ref().unwrap().kind, ExitKind::Crashed);
+        assert!(!health.restart_given_up);
+        assert!(health.alert.is_none());
     }
 }
