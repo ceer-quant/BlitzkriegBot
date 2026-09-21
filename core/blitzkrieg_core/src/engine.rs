@@ -54,6 +54,20 @@ pub struct EngineConfig {
     pub size_usd: Decimal,
     pub min_shares: Decimal,
     pub max_shares: Decimal,
+    /// P0 #202 — the per-entry budget as a PERCENTAGE of the account's cash
+    /// equity, instead of the absolute `size_usd`. 0 = OFF (the shipped
+    /// default): the absolute path below runs unchanged, byte for byte.
+    ///
+    /// An absolute budget is not a risk statement: `size_usd = 2.5` with the
+    /// default share band [10, 10] sends 10 shares whatever the price, which on
+    /// the live 4.8 USDC account is 4.00 USD — 83% of it — and the band, not
+    /// the budget, is what decided that. A percentage is the same statement on
+    /// every account size: 20% is 0.96 USD on a 4.8 book and 96 on a 480 one.
+    ///
+    /// When > 0 this REPLACES `size_usd` (an absolute budget left in place
+    /// would cap a grown account at the old size, which is the failure this
+    /// knob exists to remove). See `compute_shares` for the exact rules.
+    pub size_pct: Decimal,
     /// Per-strategy sizing overrides (E2-a). Absent strategies use the globals;
     /// a present override is always clamped so it can never exceed the global
     /// risk values — global is both the fallback and the ceiling.
@@ -71,6 +85,11 @@ pub struct StrategySize {
     /// notional (own override or global × weight). A weight can only shrink
     /// the budget — anything above 1 is clamped back to the global cap.
     pub size_weight: Option<Decimal>,
+    /// This leg's own equity percentage (#202). `None` = the global
+    /// `size_pct`. Clamped to the global when the global is armed (> 0), and
+    /// free when the global is off — a per-strategy percentage is then the
+    /// only one in force, never a zero.
+    pub size_pct: Option<Decimal>,
 }
 
 impl StrategySize {
@@ -81,6 +100,7 @@ impl StrategySize {
             || self.min_shares.is_some()
             || self.max_shares.is_some()
             || self.size_weight.is_some()
+            || self.size_pct.is_some()
     }
 }
 
@@ -90,6 +110,8 @@ pub struct EffectiveSizing {
     pub size_usd: Decimal,
     pub min_shares: Decimal,
     pub max_shares: Decimal,
+    /// The equity percentage in force for this leg (#202); 0 = absolute path.
+    pub size_pct: Decimal,
     /// Whether a per-strategy override set any of these values.
     pub strategy_scoped: bool,
     /// The weight in force (`None` = unweighted).
@@ -110,6 +132,9 @@ impl Default for EngineConfig {
             size_usd: Decimal::new(25, 1),        // 2.5
             min_shares: Decimal::from(10),
             max_shares: Decimal::from(10),
+            // Off by default: the absolute path is what every deployment runs
+            // today, and arming this would change their order sizes silently.
+            size_pct: Decimal::ZERO,
             strategy_sizes: HashMap::new(),
         }
     }
@@ -249,6 +274,16 @@ pub struct Engine {
     /// Strategy close intents gathered during the latest evaluate(), drained by
     /// the host (`Core`) into its shared exit-submission path.
     strategy_exits: Vec<StrategyExitIntent>,
+    /// The account's cash equity, pushed by the host before each evaluation
+    /// (#202). ZERO = not (yet) supplied. Only the equity-relative sizing reads
+    /// it: with `size_pct = 0` the engine's tickets do not depend on this at
+    /// all, so an unconfigured deployment cannot be affected by how (or
+    /// whether) the host feeds it.
+    equity_usd: Decimal,
+    /// Signals the equity-relative sizing produced NO ticket for (#202) —
+    /// a budget that cannot buy one whole share. Counted rather than silent:
+    /// "why is nothing trading?" must be answerable from the stats snapshot.
+    size_pct_skipped: u64,
 }
 
 impl Engine {
@@ -271,6 +306,46 @@ impl Engine {
             strategies,
             strategy_exits: Vec::new(),
             cfg,
+            equity_usd: Decimal::ZERO,
+            size_pct_skipped: 0,
+        }
+    }
+
+    /// The account equity the equity-relative sizing (#202) is a percentage of
+    /// — the host pushes it from the ledger before each evaluation, so the
+    /// ticket follows the account it is actually trading. A non-positive value
+    /// means "unknown": a leg with `size_pct > 0` then emits nothing, because
+    /// sizing against an unknown account has no safe reading, and guessing the
+    /// absolute budget back in would silently restore the fixed lot #202 is
+    /// about.
+    pub fn set_equity_usd(&mut self, equity: Decimal) {
+        self.equity_usd = equity;
+    }
+
+    pub fn equity_usd(&self) -> Decimal {
+        self.equity_usd
+    }
+
+    /// Signals skipped because an equity-relative budget could not buy one
+    /// whole share (#202).
+    pub fn size_pct_skip_count(&self) -> u64 {
+        self.size_pct_skipped
+    }
+
+    /// The per-entry budget in USD that is actually in force for one strategy:
+    /// `equity × pct%` scaled by the leg's weight when the relative mode is
+    /// armed, else the absolute `size_usd`. Reported (panel + the sizing gate)
+    /// so "what will this account commit per entry?" is a number, not a
+    /// reading of the source.
+    pub fn entry_budget_usd(&self, strategy: &str) -> Decimal {
+        let sizing = self.effective_sizing(strategy);
+        if sizing.size_pct <= Decimal::ZERO {
+            return sizing.size_usd;
+        }
+        let raw = self.equity_usd.max(Decimal::ZERO) * sizing.size_pct / Decimal::ONE_HUNDRED;
+        match sizing.size_weight {
+            Some(w) => (raw * w).max(Decimal::ZERO).min(raw),
+            None => raw,
         }
     }
 
@@ -595,7 +670,12 @@ impl Engine {
                 });
             }
 
-            let size = self.compute_shares(sig.price, &sig.strategy);
+            // #202: an equity-relative budget too small for one whole share
+            // produces NO order (counted, not emitted as a 0-size rejection).
+            let Some(size) = self.entry_ticket(sig.price, &sig.strategy) else {
+                self.size_pct_skipped += 1;
+                continue;
+            };
             orders.push(crate::model::OrderRequest {
                 token_id: sig.token_id.clone(),
                 condition_id: sig.condition_id,
@@ -863,6 +943,12 @@ impl Engine {
 
     fn compute_shares(&self, price: Decimal, strategy: &str) -> Decimal {
         let sizing = self.effective_sizing(strategy);
+        // P0 #202: the equity-relative mode REPLACES the absolute budget when
+        // it is armed. Everything below this line is the historical path, and
+        // with `size_pct = 0` (the default) it is reached unchanged.
+        if sizing.size_pct > Decimal::ZERO {
+            return self.equity_shares(price, &sizing);
+        }
         // A zero budget zeroes the leg outright (an explicit weight-0 off
         // switch): the share floor exists to protect a real entry, not to
         // resurrect a disabled one.
@@ -876,19 +962,80 @@ impl Engine {
         raw.max(sizing.min_shares).min(sizing.max_shares)
     }
 
+    /// The ticket for one signal, or `None` when the configured sizing produces
+    /// NO order at all (#202). Only the equity-relative mode can answer `None`
+    /// — an absolute budget of 0 keeps emitting its historical zero-size order,
+    /// so an unconfigured deployment is untouched.
+    ///
+    /// A relative budget that cannot buy one whole share is a statement about
+    /// the account (too small for this percentage), and a 0-size order would
+    /// only convert it into a per-tick "size must be positive" rejection; the
+    /// skip is counted instead (`size_pct_skip_count`) so it stays visible.
+    fn entry_ticket(&self, price: Decimal, strategy: &str) -> Option<Decimal> {
+        let size = self.compute_shares(price, strategy);
+        if size > Decimal::ZERO {
+            return Some(size);
+        }
+        if self.effective_sizing(strategy).size_pct > Decimal::ZERO {
+            return None;
+        }
+        Some(size)
+    }
+
+    /// The equity-relative ticket (#202).
+    ///
+    /// `budget = equity × pct% × weight`; the ticket is the WHOLE number of
+    /// shares that fits inside it (floor, not round — a percentage budget is an
+    /// upper bound, and rounding up would commit up to a share more than the
+    /// operator allowed). `max_shares` still caps the lot.
+    ///
+    /// `min_shares` deliberately does NOT participate here: a share floor that
+    /// can raise a ticket over its budget is the #202 bug itself (the default
+    /// band [10, 10] is what turned a 4.8 USDC book into 10-share tickets), and
+    /// this mode exists to remove it. One whole share is the floor of last
+    /// resort; a budget that cannot buy even that emits nothing (see
+    /// `entry_ticket`).
+    fn equity_shares(&self, price: Decimal, sizing: &EffectiveSizing) -> Decimal {
+        if self.equity_usd <= Decimal::ZERO || price <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        let budget = match sizing.size_weight {
+            Some(w) => {
+                let raw = self.equity_usd * sizing.size_pct / Decimal::ONE_HUNDRED;
+                (raw * w).max(Decimal::ZERO).min(raw)
+            }
+            None => self.equity_usd * sizing.size_pct / Decimal::ONE_HUNDRED,
+        };
+        if budget <= Decimal::ZERO || sizing.max_shares <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        (budget / price)
+            .floor()
+            .max(Decimal::ZERO)
+            .min(sizing.max_shares)
+    }
+
+    /// The global sizing band: what a strategy without an override gets, and
+    /// the CEILING every override is clamped to (E2-a). Also the band a report
+    /// reads before any strategy is named (#202's worst-case-order view).
+    pub fn global_sizing(&self) -> EffectiveSizing {
+        EffectiveSizing {
+            size_usd: self.cfg.size_usd,
+            min_shares: self.cfg.min_shares,
+            max_shares: self.cfg.max_shares,
+            size_pct: self.cfg.size_pct,
+            strategy_scoped: false,
+            size_weight: None,
+        }
+    }
+
     /// The sizing in force for one strategy (E2-a): its own override where
     /// configured, otherwise the globals — then clamped so a strategy can never
     /// spend more notional nor hold more shares than the global risk allows.
     /// `min_shares` is also capped by `max_shares` so the reported band is
     /// always coherent (the ceiling wins when an override overshoots).
     pub fn effective_sizing(&self, strategy: &str) -> EffectiveSizing {
-        let globals = EffectiveSizing {
-            size_usd: self.cfg.size_usd,
-            min_shares: self.cfg.min_shares,
-            max_shares: self.cfg.max_shares,
-            strategy_scoped: false,
-            size_weight: None,
-        };
+        let globals = self.global_sizing();
         let Some(over) = self
             .cfg
             .strategy_sizes
@@ -902,8 +1049,8 @@ impl Engine {
             .map_or(globals.size_usd, |v| v.min(globals.size_usd));
         if let Some(w) = over.size_weight {
             // Weight re-weights this leg's share of the per-entry budget; it
-            // never widens the global cap, and a non-positive weight zeroes
-            // the leg out entirely (an explicit off switch).
+            // never widens the global cap, and a non-positive weight zeroes the
+            // leg out entirely (an explicit off switch).
             size_usd = (size_usd * w).max(Decimal::ZERO).min(globals.size_usd);
         }
         let max_shares = over
@@ -913,10 +1060,19 @@ impl Engine {
             .min_shares
             .map_or(globals.min_shares, |v| v.max(globals.min_shares))
             .min(max_shares);
+        // #202: the global percentage is the ceiling when it is armed. An
+        // unarmed (0) global is "no opinion", not a zero ceiling, so a
+        // per-strategy percentage is what a single leg gets configured with.
+        let size_pct = match over.size_pct {
+            Some(v) if globals.size_pct > Decimal::ZERO => v.min(globals.size_pct),
+            Some(v) => v.max(Decimal::ZERO),
+            None => globals.size_pct,
+        };
         EffectiveSizing {
             size_usd,
             min_shares,
             max_shares,
+            size_pct,
             strategy_scoped: true,
             size_weight: over.size_weight,
         }
@@ -974,6 +1130,7 @@ mod tests {
             size_usd: dec!(2.5),
             min_shares: dec!(10),
             max_shares: dec!(10),
+            size_pct: Decimal::ZERO,
             strategy_sizes: HashMap::new(),
         }
     }
@@ -1217,6 +1374,146 @@ mod tests {
         assert_eq!(e2.compute_shares(dec!(1.25), "spread_arb"), dec!(2));
     }
 
+    // ── #202 equity-relative sizing ─────────────────────────────────────────
+
+    /// A percentage engine. The absolute `size_usd` stays populated (2.5) even
+    /// though the relative mode must ignore it, so any leak of the old budget
+    /// into the ticket shows up as a wrong number here.
+    fn pct_cfg(pct: Decimal, min_shares: Decimal, max_shares: Decimal) -> EngineConfig {
+        let mut c = cfg();
+        c.size_usd = dec!(2.5);
+        c.size_pct = pct;
+        c.min_shares = min_shares;
+        c.max_shares = max_shares;
+        c
+    }
+
+    #[test]
+    fn equity_sizing_replaces_the_fixed_lot_and_follows_the_account() {
+        let mut e = engine_from(pct_cfg(dec!(20), dec!(10), dec!(1000)));
+        e.set_equity_usd(dec!(4.8));
+        // 4.8 × 20% = 0.96 USD → 0.96/0.40 = 2.4 → 2 whole shares (floor: a
+        // percentage budget is an upper bound). The absolute path sends 10
+        // shares = 4.00 USD = 83% of this book.
+        assert_eq!(e.compute_shares(dec!(0.40), "spread_arb"), dec!(2));
+        assert_eq!(e.entry_budget_usd("spread_arb"), dec!(0.96));
+        // The band's own floor (min_shares = 10) must NOT lift it back over the
+        // budget — that floor is the #202 bug itself.
+        assert_eq!(e.effective_sizing("spread_arb").min_shares, dec!(10));
+        assert_eq!(e.compute_shares(dec!(0.40), "spread_arb"), dec!(2));
+        // The same percentage on a 100× account is 100× the budget, and the lot
+        // follows (the point of the knob: 4.8 → 480 must move the order size).
+        e.set_equity_usd(dec!(480));
+        assert_eq!(e.entry_budget_usd("spread_arb"), dec!(96));
+        assert_eq!(e.compute_shares(dec!(0.40), "spread_arb"), dec!(240));
+        // The old ceiling still wins when it is the tighter one: the shipped
+        // [10, 10] band saturates even a 480 USD account at 10 shares (4.00 USD,
+        // 0.8% of it), so arming `size_pct` means revisiting `max_shares`.
+        let mut shipped = engine_from(pct_cfg(dec!(20), dec!(10), dec!(10)));
+        shipped.set_equity_usd(dec!(480));
+        assert_eq!(shipped.compute_shares(dec!(0.40), "spread_arb"), dec!(10));
+    }
+
+    #[test]
+    fn equity_sizing_needs_a_budget_it_can_actually_spend() {
+        // No equity pushed yet: sizing against an unknown account has no safe
+        // reading, and falling back to the absolute lot would silently restore
+        // the fixed 10 shares this knob exists to remove.
+        let mut unknown = engine_from(pct_cfg(dec!(20), dec!(10), dec!(1000)));
+        assert_eq!(
+            unknown.compute_shares(dec!(0.40), "spread_arb"),
+            Decimal::ZERO
+        );
+        unknown.set_equity_usd(dec!(4.8));
+        assert_eq!(unknown.compute_shares(dec!(0.40), "spread_arb"), dec!(2));
+        // A budget that cannot buy one whole share (1% of 4.8 = 0.048 at 0.40)
+        // emits NO order rather than a 0-size one that becomes a per-tick
+        // rejection; the caller counts the skip.
+        let mut tiny = engine_from(pct_cfg(dec!(1), dec!(10), dec!(1000)));
+        tiny.set_equity_usd(dec!(4.8));
+        assert_eq!(tiny.compute_shares(dec!(0.40), "spread_arb"), Decimal::ZERO);
+        assert_eq!(tiny.entry_ticket(dec!(0.40), "spread_arb"), None);
+        // A non-positive price and a zero ceiling are dead ends too, never a
+        // panic or an unbounded ticket.
+        assert_eq!(
+            tiny.equity_shares(Decimal::ZERO, &tiny.global_sizing()),
+            Decimal::ZERO
+        );
+        let mut closed = engine_from(pct_cfg(dec!(20), dec!(10), Decimal::ZERO));
+        closed.set_equity_usd(dec!(4.8));
+        assert_eq!(
+            closed.compute_shares(dec!(0.40), "spread_arb"),
+            Decimal::ZERO
+        );
+    }
+
+    #[test]
+    fn per_strategy_equity_pct_is_clamped_by_the_global() {
+        let over = |pct: Decimal, weight: Option<Decimal>| StrategySize {
+            size_usd: None,
+            min_shares: None,
+            max_shares: None,
+            size_weight: weight,
+            size_pct: Some(pct),
+        };
+        // Global 20%: a 50% leg is clamped down to it, a 5% leg is kept.
+        let mut c = pct_cfg(dec!(20), dec!(10), dec!(1000));
+        c.strategy_sizes = [
+            ("greedy".to_string(), over(dec!(50), None)),
+            ("timid".to_string(), over(dec!(5), None)),
+        ]
+        .into();
+        let mut e = engine_from(c);
+        e.set_equity_usd(dec!(100));
+        assert_eq!(e.effective_sizing("greedy").size_pct, dec!(20));
+        assert!(e.effective_sizing("greedy").strategy_scoped);
+        assert_eq!(e.entry_budget_usd("greedy"), dec!(20));
+        assert_eq!(e.compute_shares(dec!(0.40), "greedy"), dec!(50));
+        assert_eq!(e.compute_shares(dec!(0.40), "timid"), dec!(12)); // 5/0.4 = 12.5
+        // A weight scales the leg's budget inside its own percentage.
+        let mut c2 = pct_cfg(dec!(20), dec!(10), dec!(1000));
+        c2.strategy_sizes = [("half".to_string(), over(dec!(20), Some(dec!(0.5))))].into();
+        let mut e2 = engine_from(c2);
+        e2.set_equity_usd(dec!(100));
+        assert_eq!(e2.entry_budget_usd("half"), dec!(10));
+        assert_eq!(e2.compute_shares(dec!(0.40), "half"), dec!(25));
+        // Global OFF is "no opinion", not a zero ceiling: a leg configured with
+        // its own percentage is then the only one in force, and a leg without
+        // one stays on the absolute path.
+        let mut c3 = pct_cfg(Decimal::ZERO, dec!(10), dec!(1000));
+        c3.strategy_sizes = [("only".to_string(), over(dec!(10), None))].into();
+        let mut e3 = engine_from(c3);
+        e3.set_equity_usd(dec!(100));
+        assert_eq!(e3.entry_budget_usd("only"), dec!(10));
+        assert_eq!(e3.compute_shares(dec!(0.40), "only"), dec!(25));
+        assert_eq!(e3.effective_sizing("unset").size_pct, Decimal::ZERO);
+    }
+
+    /// The shipped default must be untouched by this PR: with `size_pct = 0` the
+    /// engine ignores the equity entirely, so the service pushing a balance once
+    /// per cycle (as it now always does) cannot move one share of an
+    /// unconfigured deployment's order flow.
+    #[test]
+    fn unconfigured_sizing_ignores_the_equity_entirely() {
+        let mut e = engine_from(cfg()); // size_pct = 0, size_usd 2.5, band [10, 10]
+        let before = e.compute_shares(dec!(0.25), "spread_arb");
+        assert_eq!(before, dec!(10));
+        e.set_equity_usd(dec!(4.8));
+        assert_eq!(e.compute_shares(dec!(0.25), "spread_arb"), before);
+        assert_eq!(e.entry_ticket(dec!(0.25), "spread_arb"), Some(before));
+        assert_eq!(e.entry_budget_usd("spread_arb"), dec!(2.5));
+        // Even a zero absolute budget keeps the historical zero-size order (that
+        // path's own off switch) instead of turning into a silent skip.
+        let mut off = cfg();
+        off.size_usd = Decimal::ZERO;
+        let off = engine_from(off);
+        assert_eq!(off.compute_shares(dec!(0.25), "spread_arb"), Decimal::ZERO);
+        assert_eq!(
+            off.entry_ticket(dec!(0.25), "spread_arb"),
+            Some(Decimal::ZERO)
+        );
+    }
+
     // ── E2-a per-strategy sizing ────────────────────────────────────────────
 
     fn sizing_cfg(overrides: &[(&str, StrategySize)]) -> EngineConfig {
@@ -1258,6 +1555,7 @@ mod tests {
                 min_shares: Some(dec!(1)),
                 max_shares: Some(dec!(2)),
                 size_weight: None,
+                size_pct: None,
             },
         )]));
         let s = e.effective_sizing("small");
@@ -1333,6 +1631,7 @@ mod tests {
                 min_shares: Some(dec!(0)),
                 max_shares: Some(dec!(999)),
                 size_weight: None,
+                size_pct: None,
             },
         )]));
         let s = e.effective_sizing("greedy");
@@ -1366,6 +1665,7 @@ mod tests {
                 min_shares: Some(dec!(50)),
                 max_shares: None,
                 size_weight: None,
+                size_pct: None,
             },
         )]));
         let s = e.effective_sizing("weird");
@@ -1403,6 +1703,7 @@ mod tests {
                     min_shares: Some(dec!(1)),
                     max_shares: Some(dec!(1)),
                     size_weight: None,
+                    size_pct: None,
                 },
             ),
             (
@@ -1412,6 +1713,7 @@ mod tests {
                     min_shares: Some(dec!(20)),
                     max_shares: Some(dec!(20)),
                     size_weight: None,
+                    size_pct: None,
                 },
             ),
         ]));

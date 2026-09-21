@@ -98,6 +98,7 @@ fn engine_cfg() -> EngineConfig {
         size_usd: dec!(2.5),
         min_shares: dec!(10),
         max_shares: dec!(10),
+        size_pct: dec!(0),
         strategy_sizes: std::collections::HashMap::new(),
     }
 }

@@ -82,39 +82,92 @@ feePerShare(0.40) = 0.125 × (0.40 × 0.60)² = 0.0072 USD/股（= 该价格的 
 费用与冲击的量级关系在 §5 的加仓讨论里是决定性的：把小账户做大，先咬人的是深度
 （冲击），不是费。
 
-## 4. 与 `--max-order-notional`、`min/max-shares` 对齐
+## 4. 与 `--size-pct`、`--max-order-notional(-pct)`、`min/max-shares` 对齐
 
 内核的下单量公式（`engine.rs::compute_shares`，源码即口径）：
 
 ```text
+# 绝对路径（`--size-pct` 未配置；0 = 关闭，现役部署跑的就是这条，逐字节不变）
 raw    = round(size_usd / price)
 shares = clamp(raw, min_shares, max_shares)      # size_usd = 0 则该腿直接为 0
+
+# 权益相对路径（#202；`--size-pct k` 且 k > 0 时 REPLACES size_usd）
+budget = 余额 × k% × 该腿权重（--strategy-limit 的第 8 段）
+shares = min(floor(budget / price), max_shares)  # min_shares 不再抬升仓位
+                                                # budget 买不到 1 股 → 该信号不发单（计数可见）
 ```
 
-风险层再叠加一道硬上限：单笔名义额 `max_order_notional`（`orders.place` 前拒绝，
-不是截断）。因此**单笔可成交量**是三个旋钮的交集：
+风险层再叠加两道硬上限：绝对的 `max_order_notional`（保留）与**相对的**
+`--max-order-notional-pct k`（#202 新增，k = 余额的百分之几）。两者都是
+`orders.place` 之前**拒绝**、从不截断；相对上限对**平仓/减仓单永久豁免**
+（复用 `closes_exposure` 这一处判定，与 kill switch 同源——否则 #174 的逃生通道会换个门重开）。
+于是**单笔可成交量**是这些旋钮的交集：
 
 ```text
-shares_max = min(max_shares, floor(max_order_notional / price))   # 且 >= min_shares
+shares_max = min(max_shares, floor(max_order_notional / price), floor(余额 × k% / price))
 ```
 
-各套配置在 0.40 价格下的折算：
+各套配置在 0.40 价格下的折算，以及**这套配置在什么资金量级上才是合理的**：
 
-| 配置 | size_usd | min/max shares | max_order_notional | 0.40 下可下单 | 相对实测容量（10 股 / 4 USD） |
+| 配置 | size_usd | min/max shares | max_order_notional | 0.40 下可下单 | **该配置适用的资金量级** |
 |---|---|---|---|---|---|
-| 内核内置默认（`engine.rs:110-112`） | 2.5 | 10 / 10 | 100（`main.rs:331`） | 10 股 | = 容量（冲击 0 bps） |
-| 面板/supervisor 默认（`supervisor.rs:221-229`） | — | 10 / 10 | **6.00** = `max(max_shares×0.6, 6)` | 10 股 | = 容量 |
-| README 部署示例 / 当前 dry 部署 | — | 10 / 10 | 6 | 10 股 | = 容量 |
+| 内核内置默认（`engine.rs`） | 2.5 | 10 / 10 | 100（`main.rs`） | 10 股 | **≥ 40 USD**：单笔 10 股 = 4.00–10.00 USD（0.40–1.00 成交价），即余额的 ≤ 10% |
+| 面板/supervisor 默认（`supervisor.rs`） | — | 10 / 10 | **6.00** = `max(max_shares×0.6, 6)` | 10 股 | **≥ 24 USD**：单笔 4.00–6.00 USD ≤ 余额的 25% |
+| README 部署示例 | — | 10 / 10 | 6 | 10 股 | 同上（≥ 24 USD） |
+| **现役 dry 部署（实测 4.8 USDC）** | — | 10 / 10 | 6.00 | 10 股 | **不适用**：单笔 4.00–6.00 USD = 余额的 **83%–125%**（中位 4.00 = 83%），6.00 的「上限」本身比整个账户还大 |
 
-要点（这三条是「复利/加仓边界」的全部）：
+上表最后一行的实测来源：现役账本 290 笔成交**全部是 10 股**（`min_shares = max_shares = 10`
+把尺寸钉死，没有任何比 10 股更小的档位），`costUsd` 最小 1.00、中位 4.00、最大 4.50 USD；
+按 0.40–0.60 的成交价区间折算即 4.00–6.00 USD。**最差一笔 −3.4736 USD = 现役 4.8 USD 账户的 72%**
+（下单时点的余额更低，占比更高）。也就是说：在现役资金下，`--max-order-notional 6.00`
+是一个**永远不会触发的装饰**——它和最小下单量是同一个数。
+
+`--size-pct` / `--max-order-notional-pct` 的实测口径（现役 4.8 USD，k = 20%）：
+
+```bash
+# 一条命令：现役资金下「任何一笔的最大可能损失」是否 ≤ 余额 × k
+node scripts/risk-sizing-check.mjs --balance 4.8 --size-pct 20 --max-order-notional-pct 20
+```
+
+```text
+risk-sizing: account 4.8 USD, per-order cap 20% = 0.96 USD, per-entry budget 20% of equity
+  kernel: share band 10 shares × 1 = 10 USD; equity cap 0.96; worst case one order 0.96 USD = 20.0% of equity
+  ok   a close/reduce is exempt from the equity cap (the escape hatch #174 depends on)
+  ok   an over-cap entry (the 10-share live ticket): rejected — RiskRejected: notional 4.0 exceeds the 20% equity cap 0.960 (equity 4.8); the cap never truncates
+  ok   the largest in-cap entry (2 shares): admitted (filled 2)
+  ok   a close over the cap (the way out): admitted (filled 2)
+  ok   a non-close sell over the cap: rejected — RiskRejected: notional 1.18 exceeds the 20% equity cap …
+  verdict: worst one-order commitment 0.96 USD vs bound 0.96 USD (20% of 4.8)
+```
+
+把上限摘掉（`--max-order-notional-pct 0`，也即**今天的生产姿态**——supervisor 只传绝对的
+`--max-order-notional 6.00`，从来没人给过相对上限），同一条命令报出的是**现存的洞**而不是
+绿色通过（exit 1）：
+
+```text
+  FAIL an over-cap entry (the 10-share live ticket): admitted (filled 10)
+  FAIL a non-close sell over the cap: admitted (filled 1)
+  verdict: worst one-order commitment 0.96 USD vs bound 0 USD (0% of 4.8)
+  FAIL verdict — no per-order bound as a share of the account (--max-order-notional-pct 0)
+RISK-SIZING FAILED (5)
+```
+
+未配置时的面板数字（`engine.stats.sizing`，见 `tests/risk_gates.rs` 的断言）是
+`worstCaseOrderUsd = 10.00`、`worstCasePctOfEquity = 208.333`、`equityCapUsd = null`——
+即「一笔可以押上整个账户的 2 倍」。
+
+要点（这四条是「复利/加仓边界」的全部）：
 
 1. **`size_usd` 在 [min_shares, max_shares] 内不生效**。默认 min=max=10，于是
    `size_usd` 只有 `round(size_usd/price) ≥ 10`（即 `size_usd ≥ 10 × price`）才有意义；
    低于它时永远是 10 股。**改 `size_usd` 不会加仓**，改的是 `min/max_shares`。
+   要让尺寸随账户走，用 `--size-pct`（余额 × k%）——它**取代** `size_usd`，
+   并且**不理会 `min_shares`**（份额下限把仓位抬到预算之上，正是 #202 本身）。
 2. **`max_order_notional` 是价格上限，不是尺寸旋钮**。`max_shares = 10` 时 6.00 USD
    等价于「价格 ≤ 0.60 才下得出去」；10 股 × 0.70 = 7.00 > 6.00 会被风险层直接拒。
    supervisor 里 `max_shares × 0.6` 的写法就是这个含义（见源码注释：按真实最坏情况定，
-   而不是按策略名义尺寸）。
+   而不是按策略名义尺寸）。**绝对额在账本变化时不会跟着变**，这就是
+   `--max-order-notional-pct` 存在的理由：同一个 k 在 4.8 与 480 USD 上都是同一句话。
 3. **加仓 = 三个旋钮一起动 + 先测容量**。把 10 股提到 50 股，需要同时
    `--min-shares/--max-shares 50`、`--max-order-notional ≥ 50 × 0.6`（supervisor 自动
    跟随）、以及每个策略的 `--strategy-limit name:...:size_usd:...`（全局没有
@@ -123,6 +176,11 @@ shares_max = min(max_shares, floor(max_order_notional / price))   # 且 >= min_s
    已经和往返手续费（50 股 × 0.0144 = 0.72 USD）同级——**容量决定了这个账户能长到
    多大，而不是余额**。这正是 `--require-caps-within-capacity` 存在的理由：它把
    「风险上限必须落在实测容量内」变成一条会失败的断言，而不是一句提醒。
+4. **权益相对定仓会自动加仓，所以必须先看容量**。`--size-pct 20` 在 4.8 USD 上是
+   0.96 USD/笔（2 股 @0.40），在 480 USD 上是 96 USD/笔（218 股 @0.40）——而 §2 的
+   阶梯显示 218 股要吃掉整个 680 股示例簿的三分之一、滑点进入百 bps 级。因此
+   `--require-caps-within-capacity` 与 `risk-sizing-check.mjs` 要**同时**通过：
+   前者管「上限落在容量内」，后者管「单笔 ≤ 余额 × k」。
 
 ## 5. 权益曲线/回撤门禁（`equity-drawdown-check.mjs`）
 
