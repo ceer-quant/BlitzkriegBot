@@ -1843,11 +1843,11 @@ async fn main() -> anyhow::Result<()> {
         // so every fill the replay charges is priced under it. Set-once: a failed
         // install means a schedule was already chosen, which cannot happen here
         // (this branch runs once) and must not be silent if it somehow does.
-        if let Some(schedule) = args.fee_model {
-            if let Err(e) = blitzkrieg_core::exit_policy::set_fee_schedule(schedule) {
-                eprintln!("blitzkrieg-core: --fee-model {}: {e}", schedule.name);
-                std::process::exit(2);
-            }
+        if let Some(schedule) = args.fee_model
+            && let Err(e) = blitzkrieg_core::exit_policy::set_fee_schedule(schedule)
+        {
+            eprintln!("blitzkrieg-core: --fee-model {}: {e}", schedule.name);
+            std::process::exit(2);
         }
         // Offline replay: never re-record into (or read from) the file being
         // replayed — an appended-to-archive would feed the source its own tail.
