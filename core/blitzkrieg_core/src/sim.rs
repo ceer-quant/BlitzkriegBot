@@ -46,6 +46,27 @@ impl Book {
         }
     }
 
+    /// The two questions [`Book::walk_marketable`] collapses into a single
+    /// `None`, asked separately so a refusal can say WHICH one failed (#180):
+    /// does any resting level cross `limit` at all, and how much size rests at
+    /// or inside it.
+    ///
+    /// Defined through [`Book::crossing_levels`], the dry matcher's ONE depth
+    /// reading (#183), so the refusal describes the walk that just failed
+    /// instead of forming a second opinion about it.
+    pub fn crossing_depth(&self, side: Side, limit: Decimal) -> (bool, Decimal) {
+        let levels = self.crossing_levels(side, limit);
+        let any = !levels.is_empty();
+        // A level with no size can make the side "cross" without adding
+        // anything to take, which is exactly the distinction the caller needs.
+        let depth = levels
+            .iter()
+            .map(|(_, size)| *size)
+            .filter(|size| *size > Decimal::ZERO)
+            .sum();
+        (any, depth)
+    }
+
     /// The resting levels a `side` order priced at `limit` would trade
     /// against, best price first (lowest ask for a BUY, highest bid for a
     /// SELL).
@@ -373,6 +394,48 @@ mod tests {
             (dec!(4) * dec!(0.35) + dec!(6) * dec!(0.70)) / dec!(10)
         );
         assert_eq!(worst3, dec!(0.70));
+    }
+
+    #[test]
+    fn crossing_depth_separates_no_crossing_from_not_enough_size() {
+        // The two causes `walk_marketable` folds into one `None`, told apart for
+        // the refusal message (#180): nothing crosses at all vs a crossing side
+        // that is simply too thin for our size.
+        let book = Book {
+            bids: vec![(dec!(0.30), dec!(2)), (dec!(0.20), dec!(50))],
+            asks: vec![(dec!(0.50), dec!(3))],
+        };
+        // BUY 0.40: no ask at or inside the limit — the quote moved.
+        let (crosses, depth) = book.crossing_depth(Side::Buy, dec!(0.40));
+        assert!(!crosses);
+        assert_eq!(depth, dec!(0));
+        assert!(
+            book.walk_marketable(Side::Buy, dec!(0.40), dec!(1))
+                .is_none()
+        );
+        // BUY 0.50: it crosses, but only 3 shares rest there — thin book.
+        let (crosses, depth) = book.crossing_depth(Side::Buy, dec!(0.50));
+        assert!(crosses);
+        assert_eq!(depth, dec!(3));
+        assert!(
+            book.walk_marketable(Side::Buy, dec!(0.50), dec!(5))
+                .is_none()
+        );
+        assert!(
+            book.walk_marketable(Side::Buy, dec!(0.50), dec!(3))
+                .is_some()
+        );
+        // SELL 0.25: the 0.30 bid crosses (2 shares) and the 0.20 does not —
+        // depth counts only what a walk at that limit could actually take.
+        let (crosses, depth) = book.crossing_depth(Side::Sell, dec!(0.25));
+        assert!(crosses);
+        assert_eq!(depth, dec!(2));
+        // An empty book is "nothing crosses", not a panic.
+        let empty = Book::default();
+        assert_eq!(
+            empty.crossing_depth(Side::Buy, dec!(0.50)),
+            (false, dec!(0))
+        );
     }
 
     #[test]

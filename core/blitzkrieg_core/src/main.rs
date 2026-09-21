@@ -1493,11 +1493,21 @@ fn daily_loss_path_for(position_log: &str) -> String {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // #184: INFO by default, not ERROR — `EnvFilter::from_default_env()` with no
+    // RUST_LOG kept only ERROR, so a deployed run's warn/error breadcrumbs never
+    // reached the run log while the process looked healthy. An explicit RUST_LOG
+    // still wins outright. `logging` is the one spelling of that rule; the
+    // effective level is echoed below so the run log states it.
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(blitzkrieg_core::logging::log_filter())
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
+    eprintln!(
+        "blitzkrieg-core: log level {} (source: {})",
+        blitzkrieg_core::logging::effective_level(),
+        blitzkrieg_core::logging::level_source()
+    );
 
     // Configuration is loaded BEFORE the arguments, because the arguments are
     // resolved against it (CLI > env > TOML > default).
@@ -1560,9 +1570,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Which code this process is (#179). On stderr and deliberately NOT through
-    // `tracing`: the shipped default log filter is ERROR (#184), so a provenance
-    // line sent to the log layer would be absent from exactly the runs that are
-    // later asked "which build was that?".
+    // `tracing`: the filter is configurable (`RUST_LOG=error` is a legitimate
+    // operator choice, #184), so a provenance line sent to the log layer could be
+    // absent from exactly the runs later asked "which build was that?".
     eprintln!(
         "blitzkrieg-core: {}",
         blitzkrieg_core::ipc::build_info::provenance_line()

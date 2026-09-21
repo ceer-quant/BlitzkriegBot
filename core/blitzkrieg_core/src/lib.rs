@@ -24,6 +24,7 @@ pub mod extension;
 pub mod ipc;
 pub mod ledger;
 pub mod ledger_api;
+pub mod logging;
 pub mod market;
 pub mod marketdata;
 pub mod model;
