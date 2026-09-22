@@ -141,6 +141,11 @@ impl SafeStrategy for ${camel}Strategy {
                             .clone()
                             .unwrap_or_else(|| mid.to_string()),
                         reason: "${name}_dip".into(),
+                        // \`shares: None\` = the kernel's notional sizing. Set
+                        // \`Some(n.to_string())\` to ask for an explicit share
+                        // count instead (clamped to the kernel's risk band) —
+                        // that is how the legs of a pair are made to match.
+                        shares: None,
                     });
                     buys += 1;
                 }
