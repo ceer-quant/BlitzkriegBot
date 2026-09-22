@@ -45,7 +45,7 @@
  *   const problems = checkStrategyDylibsFresh({ gate: '…' });
  */
 
-import { existsSync, readdirSync, realpathSync, statSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'fs';
 import { dirname, join, relative, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -77,7 +77,8 @@ const SOURCE_ROOTS = [
  * are inputs to all four builds.
  *
  * A cdylib with no entry falls back to ALL source roots (conservative: an unknown
- * library gets the strictest check, not the loosest).
+ * library gets the strictest check, not the loosest) — unless the workspace cannot
+ * build it at all, which is the orphan case handled in `strategyDylibReport`.
  */
 const CRATE_SOURCES = {
   dog_strategy: [STRATEGY_WORKSPACE, join('user_layer', 'strategy_api')],
@@ -88,6 +89,35 @@ const CRATE_SOURCES = {
 
 /** Directories never walked: build output, VCS metadata, editor scratch. */
 const SKIP_DIRS = new Set(['target', 'node_modules', '.git', 'deps', 'build', 'incremental']);
+
+/**
+ * The library names this checkout can actually BUILD, read from the nested
+ * workspace's `members`. One cdylib per member, named `<member>_strategy`
+ * (`Cargo.toml` at the head of that workspace states the convention); the bare
+ * member name is accepted too, for a member that names its library after itself.
+ *
+ * This is what makes the difference between "stale" and "orphan" below. Returns
+ * null when the manifest cannot be read, and every dylib then keeps the
+ * conservative treatment: unknown means strict.
+ */
+function buildableLibraryNames(root) {
+  let text;
+  try {
+    text = readFileSync(join(root, STRATEGY_WORKSPACE, 'Cargo.toml'), 'utf8');
+  } catch {
+    return null;
+  }
+  const block = text.match(/members\s*=\s*\[([^\]]*)\]/s);
+  if (!block) return null;
+  const names = new Set();
+  for (const raw of block[1].split(',')) {
+    const member = raw.trim().replace(/^["']|["']$/g, '');
+    if (!member) continue;
+    names.add(member);
+    names.add(`${member}_strategy`);
+  }
+  return names;
+}
 
 const DYLIB_EXTENSIONS = ['.dylib', '.so', '.dll'];
 
@@ -215,11 +245,24 @@ export function strategyDylibReport({ root = DEFAULT_ROOT, binPath = null, requi
   } catch {
     names = [];
   }
+  const buildable = buildableLibraryNames(root);
   const dylibs = names.map((name) => {
     const path = join(releaseDir, name);
     const crate = crateNameOf(name);
     const roots = CRATE_SOURCES[crate] ?? SOURCE_ROOTS;
-    return { name, crate, path, mtimeMs: mtimeMsOf(path), sources: roots, newestSource: newestSourceUnder(root, roots) };
+    return {
+      name,
+      crate,
+      path,
+      mtimeMs: mtimeMsOf(path),
+      sources: roots,
+      newestSource: newestSourceUnder(root, roots),
+      // A library no member of this checkout produces. It cannot be rebuilt from
+      // here, so its staleness is not this gate's to report: the fix line would
+      // name a command that provably does not refresh it, and a gate that can
+      // never go green gets switched off. Reported as evidence instead.
+      orphan: buildable !== null && !buildable.has(crate),
+    };
   });
 
   const rebuild = `cd ${relative(root, join(dir))} && cargo build --release`;
@@ -242,7 +285,7 @@ export function strategyDylibReport({ root = DEFAULT_ROOT, binPath = null, requi
   }
 
   for (const d of dylibs) {
-    if (d.mtimeMs === null || d.newestSource === null) continue;
+    if (d.orphan || d.mtimeMs === null || d.newestSource === null) continue;
     if (d.mtimeMs < d.newestSource.mtimeMs) {
       problems.push(
         `策略 dylib 陈旧（stale）：${d.path} 构建于 ${stamp(d.mtimeMs)}，` +
@@ -275,12 +318,16 @@ export function checkStrategyDylibsFresh({ root = DEFAULT_ROOT, binPath = null, 
   } else {
     for (const d of report.dylibs) {
       const rel = relative(report.root, d.path);
+      if (d.orphan) {
+        console.log(`  ${rel}  mtime=${stamp(d.mtimeMs)}  <- ORPHAN: no member of this checkout builds it`);
+        continue;
+      }
       const src = d.newestSource ? relative(report.root, d.newestSource.path) : '(no source found)';
       console.log(`  ${rel}  mtime=${stamp(d.mtimeMs)}  <- newest input ${src}`);
     }
   }
   if (report.problems.length === 0) {
-    console.log('  freshness: ok (every cdylib is newer than the newest input it is built from)');
+    console.log('  freshness: ok (every cdylib this checkout builds is newer than the newest input it is built from)');
   } else {
     for (const p of report.problems) {
       console.log(`  STALE ${p}`);
