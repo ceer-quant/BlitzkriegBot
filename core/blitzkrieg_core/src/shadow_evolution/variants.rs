@@ -156,6 +156,11 @@ impl Variant {
         Metrics::from_trades(&trades)
     }
 
+    /// Seconds this variant has been observing. This is the anchor the
+    /// evaluator's observation floor (`min_observation_secs`) is measured
+    /// against, so `created_at_ms` has to be a real clock: a set stamped with a
+    /// placeholder would report an age of decades and no observation floor would
+    /// ever gate it (#250).
     pub fn age_sec(&self, now_ms: i64) -> i64 {
         (now_ms - self.created_at_ms) / 1000
     }

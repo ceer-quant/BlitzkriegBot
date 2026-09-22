@@ -53,7 +53,8 @@ pub fn evaluate(
         if v.is_baseline || v.crashed {
             continue;
         }
-        // Condition 5: observation time.
+        // Condition 5: observation time. Meaningful only because the variant's
+        // birth stamp is a real clock — see `Variant::age_sec` and #250.
         if v.age_sec(now_ms) < cfg.min_observation_secs {
             continue;
         }

@@ -1511,7 +1511,7 @@ impl Core {
             .map(|e| e.set_strategy_enabled(name, enabled))
             .unwrap_or(false);
         if ok {
-            self.rewire_hot_params();
+            self.rewire_hot_params(now_ms());
             // Record the operator's intent: the next boot replays this set.
             // `None` (backtests, most tests) writes nothing.
             if let Some(path) = &self.config.strategy_state_path {
@@ -1580,7 +1580,7 @@ impl Core {
                             // too: a library loaded AFTER evolution was enabled would
                             // otherwise never get a unit, so it could not evolve at
                             // all until a restart.
-                            self.rewire_hot_params();
+                            self.rewire_hot_params(now_ms());
                             format!(
                                 "{name}@{version} registered into the engine dispatch (disabled{declared}{evolvable})"
                             )
@@ -1840,7 +1840,7 @@ impl Core {
     /// While evolution is DISABLED the overlay is detached (`None`): strategies
     /// then run on the config the host pushed, which is byte-for-byte the
     /// pre-evolution behaviour (acceptance: "关闭进化时行为与改动前一致").
-    fn rewire_hot_params(&mut self) {
+    fn rewire_hot_params(&mut self, now_ms: i64) {
         if let Some(e) = self.engine.as_mut() {
             if self.shadow_evolution.is_enabled() {
                 // The whole host set, enabled or not: a declaration is read off the
@@ -1849,8 +1849,13 @@ impl Core {
                 // switched-off strategy's evolved parameters and rollback anchor,
                 // making a toggle lossy. A disabled strategy simply never emits the
                 // candidates that would consume them.
+                //
+                // `now_ms` is the clock the CALLER acts at, forwarded rather than
+                // re-read: this re-registration re-anchors every variant, and the
+                // birth stamp it writes is what the observation floor is measured
+                // against — one operation, one clock (#250).
                 self.shadow_evolution
-                    .register_strategies(&e.strategy_refs());
+                    .register_strategies(&e.strategy_refs(), now_ms);
                 e.set_hot_params(Some(self.shadow_evolution.registry()));
             } else {
                 e.set_hot_params(None);
@@ -1860,13 +1865,13 @@ impl Core {
 
     pub fn shadow_evolution_enable(&mut self, now_ms: i64) -> bool {
         self.shadow_evolution.enable(now_ms);
-        self.rewire_hot_params();
+        self.rewire_hot_params(now_ms);
         true
     }
 
     pub fn shadow_evolution_disable(&mut self) -> bool {
         self.shadow_evolution.disable();
-        self.rewire_hot_params();
+        self.rewire_hot_params(now_ms());
         true
     }
 
@@ -2032,7 +2037,7 @@ impl Core {
         // only build its units once the strategies exist. This also attaches the
         // parameter registry, so installing an engine never leaves the overlay
         // unwired.
-        self.rewire_hot_params();
+        self.rewire_hot_params(now_ms());
     }
     pub fn has_engine(&self) -> bool {
         self.engine.is_some()
@@ -6811,6 +6816,47 @@ mod shadow_evolution_tests {
         assert!(recs[0].manual);
         assert!(recs.iter().all(|r| r.strategy == "spread_arb"));
         assert!(c.shadow_evolution_history(Some("nope"), 10).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #250: every variant born by the enable path carries the clock the caller
+    /// passed. `age_sec` is what the evaluator's observation floor
+    /// (`min_observation_secs`) measures against, so a birth stamp of 0 does not
+    /// merely mislabel a timestamp — against a wall-clock `now` the variant
+    /// reports an age of decades, and the floor stops gating anything: a twin
+    /// seconds old would qualify the moment its trade count allowed it.
+    ///
+    /// The placeholder lived in the re-registration the enable path triggers (the
+    /// hot-param rewire), which is why this asserts on the whole path rather than
+    /// on `scaffold` alone.
+    #[test]
+    fn enabling_stamps_variant_birth_with_the_clock_it_was_given() {
+        let (tuning, dir) = scratch("birth-stamp");
+        let mut c = Core::new(CoreConfig {
+            dry_seed_balance: dec!(1000),
+            shadow_evolution_enabled: false,
+            shadow_evolution_tuning: tuning,
+            ..Default::default()
+        });
+        c.enable_engine(se_engine());
+        // A wall-clock-shaped instant, not a small synthetic one: the defect this
+        // guards against is only visible against a realistic clock.
+        let now = 1_790_003_600_000;
+        c.shadow_evolution_enable(now);
+
+        let views = c.shadow_evolution_variants(now);
+        assert_eq!(
+            views.len(),
+            9,
+            "3 evolvable strategies × (baseline + 2 single-knob variants)"
+        );
+        for v in &views {
+            assert_eq!(
+                v.age_sec, 0,
+                "{} / {} was stamped with a placeholder instead of the enable clock {now}",
+                v.strategy, v.id
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
