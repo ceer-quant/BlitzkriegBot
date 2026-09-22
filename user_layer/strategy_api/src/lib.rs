@@ -136,6 +136,26 @@ pub const BK_CONFIG_VIEW_SYMBOL: &[u8] = b"bk_strategy_config_view\0";
 /// Signature of the optional [`BK_CONFIG_VIEW_SYMBOL`] entry point.
 pub type BkConfigViewFn = unsafe extern "C" fn(handle: BkHandle) -> *mut c_char;
 
+/// Symbol name for the OPTIONAL hold-to-settlement declaration:
+/// `int bk_strategy_settlement_holds(void* handle)` returning 1 when the
+/// strategy's positions are meant to be HELD TO SETTLEMENT (expiry redemption)
+/// rather than sold on the exit ladder, 0 otherwise.
+///
+/// Why it exists: a complete-set pair (UP + DOWN bought below $1) pays exactly
+/// $1 per share-pair at settlement regardless of which side wins. Selling a leg
+/// before expiry turns a riskless payoff into a directional trade, so the host
+/// suppresses the policy exit ladder for such strategies and closes expired
+/// positions at their redemption value instead.
+///
+/// Same ABI-evolution rule as [`BK_GATE_EXEMPTIONS_SYMBOL`]: a separate symbol,
+/// the vtable untouched, an absent symbol reads as 0 ("no declaration") so
+/// older libraries keep loading unchanged and every existing strategy keeps
+/// its exits.
+pub const BK_SETTLEMENT_HOLDS_SYMBOL: &[u8] = b"bk_strategy_settlement_holds\0";
+
+/// Signature of the optional [`BK_SETTLEMENT_HOLDS_SYMBOL`] entry point.
+pub type BkSettlementHoldsFn = unsafe extern "C" fn(handle: BkHandle) -> i32;
+
 /// One price/size level of the order book. Both are decimal strings.
 #[repr(C)]
 #[derive(Clone, Copy)]

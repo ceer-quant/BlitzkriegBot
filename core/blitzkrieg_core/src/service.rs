@@ -365,6 +365,25 @@ impl CoreConfig {
     }
 }
 
+/// True when `name` is the shipped `dog_strategy` crate's OWN artifact: the exact
+/// stem (`dog_strategy`, `libdog_strategy.dylib`) or cargo's hashed form
+/// (`dog_strategy-1a2b3c4d`). That example is loaded dynamically via IPC
+/// `strategy.load` in tests and must not be auto-loaded at startup.
+///
+/// Deliberately not a substring test: `crazydog_strategy` merely ENDS in those
+/// characters, and a substring test would silently drop it from startup with no
+/// error — the exact failure mode that is hardest to notice, since the kernel
+/// boots fine and simply never trades that strategy.
+fn is_dog_strategy_artifact(name: &str) -> bool {
+    let stem = name
+        .strip_prefix("lib")
+        .unwrap_or(name)
+        .split('.')
+        .next()
+        .unwrap_or(name);
+    stem == "dog_strategy" || stem.starts_with("dog_strategy-")
+}
+
 /// Depth-bounded walk gathering `*.dylib`/`*.so` files under `dir`.
 ///
 /// Bounded because `strategy_dir` may point at a crate checkout whose `target/`
@@ -391,7 +410,7 @@ fn collect_strategy_libs(dir: &std::path::Path, depth: usize, out: &mut Vec<std:
                 || name == "build"
                 || name == "incremental"
                 || name.contains("probe")
-                || name.contains("dog_strategy")
+                || is_dog_strategy_artifact(name)
                 || name.contains("devcheck")
             {
                 continue;
@@ -405,7 +424,7 @@ fn collect_strategy_libs(dir: &std::path::Path, depth: usize, out: &mut Vec<std:
             // via IPC `strategy.load` in tests (strategy-gate-check, strategy-evolution-check, strategy-devcheck)
             // and must not be auto-loaded at startup.
             if let Some(file_name) = path.file_name().and_then(|f| f.to_str())
-                && (file_name.contains("dog_strategy")
+                && (is_dog_strategy_artifact(file_name)
                     || file_name.contains("probe")
                     || file_name.contains("devcheck"))
             {
@@ -3936,6 +3955,9 @@ impl Core {
             asset: closed.asset.clone(),
             direction: closed.direction.as_str().to_string(),
             reason: format!("{:?}", closed.exit_reason),
+            strategy: closed.strategy.clone(),
+            token_id: closed.token_id.clone(),
+            condition_id: closed.condition_id.clone(),
             net_pnl_usd: closed.net_pnl_usd,
             net_pnl_pct: closed.net_pnl_pct,
             daily_pnl_usd: self.positions.daily_pnl(),
@@ -4747,7 +4769,38 @@ impl Core {
                 .positions
                 .can_open(Some(&req.asset), Some(direction), now_ms)
             {
-                return Err(CoreError::new(CoreErrorCode::RiskRejected, reason));
+                // PAIR-COMPLETION exemption (hold-to-settlement strategies
+                // only): the one-position-per-asset gate would reject the
+                // second leg of a complete set, but UP + DOWN of the SAME
+                // condition is market-neutral — the pair pays $1 at settlement
+                // regardless of the outcome, so it is not a doubling of
+                // exposure. The override is deliberately narrow: only the
+                // specific "Already in {asset}" rejection, only for a strategy
+                // that declared hold-to-settlement, only as the OPPOSITE
+                // direction of a position it already holds on the SAME
+                // condition. Same-direction stacking and multi-condition
+                // exposure remain rejected, and every other can_open reason
+                // (capacity, daily loss, cooldowns) still applies.
+                let pair_completion = reason.starts_with("Already in")
+                    && self
+                        .engine
+                        .as_ref()
+                        .is_some_and(|e| e.strategy_holds_to_settlement(&req.strategy))
+                    && self.positions.open_positions().iter().any(|p| {
+                        p.asset == req.asset
+                            && p.condition_id == req.condition_id
+                            && p.strategy == req.strategy
+                            && p.direction != direction
+                    });
+                if !pair_completion {
+                    return Err(CoreError::new(CoreErrorCode::RiskRejected, reason));
+                }
+                tracing::info!(
+                    strategy = %req.strategy,
+                    asset = %req.asset,
+                    direction = req.direction,
+                    "pair-completion entry allowed past the one-per-asset gate (hold-to-settlement)"
+                );
             }
         }
 
@@ -5924,6 +5977,32 @@ impl Core {
         let mut jobs: Vec<ExitJob> = Vec::new();
         let mut has_job: HashSet<String> = HashSet::new();
 
+        // Hold-to-settlement strategies keep their positions to expiry: selling
+        // a complete-set leg before redemption destroys the pair's riskless
+        // payoff ($1 per share-pair regardless of which side wins). The policy
+        // ladder therefore skips them — but only where the kernel settles
+        // locally (dry/read-only), where `drive_settlement` does the redemption.
+        // On a LIVE kernel the ladder keeps running until venue resolutions are
+        // a proven path: a position sitting unmanaged past expiry would be
+        // strictly worse than one sold early. Strategy-signal intents still
+        // close such positions everywhere — an explicit "get out" is honoured.
+        let settlement_holders: HashSet<String> = if self.config.mode.settles_locally() {
+            self.positions
+                .open_positions()
+                .iter()
+                .map(|p| p.strategy.clone())
+                .filter(|s| {
+                    self.engine
+                        .as_ref()
+                        .is_some_and(|e| e.strategy_holds_to_settlement(s))
+                })
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let holds_settlement =
+            |pos: &crate::position::OpenPosition| settlement_holders.contains(&pos.strategy);
+
         if self.config.auto_exits_enabled {
             for req in self.positions.check_exits(&book_fn, now_ms) {
                 let Some(pos) = self
@@ -5935,6 +6014,9 @@ impl Core {
                 else {
                     continue;
                 };
+                if holds_settlement(&pos) {
+                    continue;
+                }
                 has_job.insert(pos.id.clone());
                 jobs.push(ExitJob {
                     position_id: pos.id.clone(),
@@ -7840,6 +7922,7 @@ mod strategy_dispatch_tests {
                             condition_id: market.condition_id.clone(),
                             price: book.mid_price,
                             reason: "target dip".into(),
+                            shares: None,
                         });
                     }
                 }

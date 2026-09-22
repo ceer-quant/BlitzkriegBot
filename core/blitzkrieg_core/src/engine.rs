@@ -693,11 +693,28 @@ impl Engine {
                 });
             }
 
-            // #202: an equity-relative budget too small for one whole share
-            // produces NO order (counted, not emitted as a 0-size rejection).
-            let Some(size) = self.entry_ticket(sig.price, &sig.strategy) else {
-                self.size_pct_skipped += 1;
-                continue;
+            // A strategy-declared share count (pair legs must match in SHARES,
+            // not in notional) is honoured only inside the kernel's risk band:
+            // capped at the same `max_shares` ceiling the notional path obeys,
+            // so a declaration can never oversize. A declared count below one
+            // share buys NOTHING — falling back to notional sizing would open
+            // the naked leg of a pair — and `None` keeps notional sizing.
+            let size = match sig.shares {
+                Some(n) => {
+                    if n < Decimal::ONE {
+                        continue;
+                    }
+                    n.min(self.effective_sizing(&sig.strategy).max_shares)
+                }
+                // #202: an equity-relative budget too small for one whole share
+                // produces NO order (counted, not emitted as a 0-size rejection).
+                None => {
+                    let Some(size) = self.entry_ticket(sig.price, &sig.strategy) else {
+                        self.size_pct_skipped += 1;
+                        continue;
+                    };
+                    size
+                }
             };
             orders.push(crate::model::OrderRequest {
                 token_id: sig.token_id.clone(),
@@ -761,6 +778,18 @@ impl Engine {
             .map(|s| (s.strategy.name().to_string(), s.strategy.gate_exemptions()))
             .filter(|(_, e)| e.any())
             .collect()
+    }
+
+    /// Whether the named strategy declared hold-to-settlement semantics: its
+    /// positions are meant to be redeemed at expiry, not sold on the exit
+    /// ladder (a complete-set pair pays $1 at settlement regardless of which
+    /// side wins — selling a leg before expiry would destroy that payoff).
+    /// Read by the host's exit checks; `false` for an unknown strategy.
+    pub fn strategy_holds_to_settlement(&self, name: &str) -> bool {
+        self.strategies
+            .iter()
+            .find(|s| s.strategy.name() == name)
+            .is_some_and(|s| s.strategy.holds_to_settlement())
     }
 
     /// Gate exemptions honoured on the most recent evaluation, in the order the
@@ -1891,6 +1920,7 @@ mod tests {
                             condition_id: market.condition_id.clone(),
                             price: book.mid_price,
                             reason: format!("{} dip", self.name),
+                            shares: None,
                         });
                     }
                 }

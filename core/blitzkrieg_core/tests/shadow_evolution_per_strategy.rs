@@ -111,6 +111,7 @@ impl EngineStrategy for CapStrategy {
                 condition_id: market.condition_id.clone(),
                 price: book.best_ask.min(book.mid_price),
                 reason: format!("mid {} <= cap {cap}", book.mid_price),
+                shares: None,
             });
         }
         out

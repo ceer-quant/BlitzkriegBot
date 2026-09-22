@@ -116,6 +116,14 @@ pub struct TradeLine {
     pub asset: String,
     pub direction: String,
     pub reason: String,
+    /// The position's identity, mirroring `PositionClosed`: `strategy`
+    /// attributes the trade, and `conditionId` groups the legs of ONE trade
+    /// that closed as several positions. A complete-set pair is exactly that —
+    /// it settles as two (winner $1 / loser $0), and neither leg's own P&L says
+    /// anything on its own: the trade's statistics exist only as the group.
+    pub strategy: String,
+    pub token_id: String,
+    pub condition_id: String,
     #[serde(with = "crate::decimal")]
     pub net_pnl_usd: Decimal,
     #[serde(with = "crate::decimal")]
@@ -539,6 +547,9 @@ impl EventBacktester {
                     asset,
                     direction,
                     reason,
+                    strategy,
+                    token_id,
+                    condition_id,
                     net_pnl_usd,
                     net_pnl_pct,
                     ..
@@ -548,6 +559,9 @@ impl EventBacktester {
                         asset,
                         direction,
                         reason,
+                        strategy,
+                        token_id,
+                        condition_id,
                         net_pnl_usd,
                         net_pnl_pct,
                     });

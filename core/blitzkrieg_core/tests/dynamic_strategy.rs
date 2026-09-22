@@ -479,6 +479,7 @@ impl blitzkrieg_core::strategies::EngineStrategy for PlainDip {
             condition_id: "cond".into(),
             price: book.best_bid,
             reason: "plain probe".into(),
+            shares: None,
         }]
     }
 }

@@ -458,6 +458,7 @@ mod tests {
                 condition_id: market.condition_id.clone(),
                 price,
                 reason: "stub".into(),
+                shares: None,
             }]
         }
         fn take_exit_intents(&mut self) -> Vec<StrategyExitIntent> {

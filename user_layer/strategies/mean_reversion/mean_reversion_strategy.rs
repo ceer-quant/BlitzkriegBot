@@ -186,6 +186,7 @@ impl SafeStrategy for MeanReversion {
                         token: sig.token_id.clone(),
                         price: sig.price.to_string(),
                         reason: sig.reason.clone(),
+                        shares: None,
                     });
                 }
             }

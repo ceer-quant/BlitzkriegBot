@@ -709,6 +709,14 @@ pub enum CoreEvent {
         asset: String,
         direction: String,
         reason: String,
+        // Identity fields added with the pair-aware report: defaulted so a
+        // payload from an older core still deserializes.
+        #[serde(default)]
+        strategy: String,
+        #[serde(default)]
+        token_id: String,
+        #[serde(default)]
+        condition_id: String,
         #[serde(deserialize_with = "de_num")]
         net_pnl_usd: f64,
         #[serde(deserialize_with = "de_num")]

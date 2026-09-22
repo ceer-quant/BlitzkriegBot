@@ -100,11 +100,17 @@ pub struct FreshBook {
 
 /// An entry intent. `price` is a LIMIT price as an exact decimal string; the
 /// kernel validates against the live book, sizes the order and owns submission.
+/// `shares` (OPTIONAL decimal string) requests an explicit share count instead
+/// of the kernel's notional sizing — honoured only inside the kernel's risk
+/// band (clamped to `[1, max_shares]`). Set it when the legs of a trade must
+/// match in SHARES rather than notional (a complete-set pair buys the same n
+/// shares of UP and DOWN); `None` keeps kernel sizing.
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub token: String,
     pub price: String,
     pub reason: String,
+    pub shares: Option<String>,
 }
 
 /// An exit intent for an open position; the kernel prices off the live book.
@@ -256,6 +262,20 @@ pub trait SafeStrategy: Send + 'static {
     fn config_view(&self) -> Option<serde_json::Value> {
         None
     }
+
+    /// Declare that this strategy's positions are meant to be HELD TO
+    /// SETTLEMENT (expiry redemption) rather than sold on the exit ladder
+    /// (OPTIONAL `bk_strategy_settlement_holds` symbol; default false).
+    ///
+    /// A complete-set pair (UP + DOWN bought below $1) pays exactly $1 per
+    /// share-pair at settlement regardless of which side wins; selling a leg
+    /// before expiry turns that riskless payoff into a directional trade. The
+    /// host therefore suppresses the policy exit ladder for such strategies and
+    /// closes expired positions at their redemption value (winner $1 / loser
+    /// $0, fee-free) instead.
+    fn holds_to_settlement(&self) -> bool {
+        false
+    }
 }
 
 // ── shell plumbing (strategy authors never see any of this) ──────────────────
@@ -391,10 +411,11 @@ pub unsafe fn parse_eval_ctx(ctx: *const crate::BkEvalCtx) -> Vec<(String, Fresh
 ///   behaviour as a hand-rolled library omitting the optional symbol),
 /// - `#[no_mangle]` exports `bk_strategy_create`, `bk_strategy_abi_version`,
 ///   `bk_strategy_free_string`, `bk_strategy_gate_exemptions`,
-///   `bk_strategy_evolvable_knobs` — the optional-symbol exports always
-///   exist and degrade to "nothing declared" XML when the strategy returns
-///   no exemptions/knobs, which the kernel reads exactly like a hand-rolled
-///   library without the symbol.
+///   `bk_strategy_evolvable_knobs`, `bk_strategy_bind_eval_ctx`,
+///   `bk_strategy_config_view`, `bk_strategy_settlement_holds` — the
+///   optional-symbol exports always exist and degrade to "nothing declared"
+///   when the strategy returns nothing, which the kernel reads exactly like a
+///   hand-rolled library without the symbol.
 #[macro_export]
 macro_rules! export_strategy {
     ($type:ty) => {
@@ -513,11 +534,22 @@ macro_rules! export_strategy {
                     .entries
                     .iter()
                     .map(|e| {
-                        serde_json::json!({
-                            "token": e.token,
-                            "price": e.price,
-                            "reason": e.reason,
-                        })
+                        // `shares` is written only when declared, so a strategy
+                        // that never sets it emits byte-identical JSON to the
+                        // pre-shares envelope (kernel sizing stays untouched).
+                        match &e.shares {
+                            Some(n) => serde_json::json!({
+                                "token": e.token,
+                                "price": e.price,
+                                "reason": e.reason,
+                                "shares": n,
+                            }),
+                            None => serde_json::json!({
+                                "token": e.token,
+                                "price": e.price,
+                                "reason": e.reason,
+                            }),
+                        }
                     })
                     .collect();
                 let exits: Vec<_> = intents
@@ -604,6 +636,16 @@ macro_rules! export_strategy {
                     Some(v) => json_out(v.to_string()),
                     None => core::ptr::null_mut(),
                 }
+            }
+            /// OPTIONAL symbol `bk_strategy_settlement_holds`: 1 when the
+            /// strategy holds its positions to settlement, 0 otherwise. A null
+            /// handle also reads 0 ("no declaration"), never a crash.
+            extern "C" fn settlement_holds(handle: BkHandle) -> i32 {
+                if handle.is_null() {
+                    return 0;
+                }
+                let s = unsafe { &*(handle as *const Shell) };
+                i32::from(s.inner.holds_to_settlement())
             }
             unsafe extern "C" fn on_config(handle: BkHandle, json: *const c_char) -> i32 {
                 let Some(j) = (unsafe { cstr(json) }) else { return 1 };
@@ -758,6 +800,11 @@ macro_rules! export_strategy {
                 // than it is.
                 config_view(handle)
             }
+            #[unsafe(no_mangle)]
+            pub extern "C" fn bk_strategy_settlement_holds(handle: BkHandle) -> i32 {
+                // Same reasoning as config_view: a plain i32 read, not unsafe.
+                settlement_holds(handle)
+            }
         }
     };
 }
@@ -802,6 +849,7 @@ impl SafeStrategy for Doubler {
                         token: token.clone(),
                         price: mid.clone(),
                         reason: "doubler_mid".into(),
+                        shares: None,
                     });
                 }
             }

@@ -292,6 +292,7 @@ pub fn evaluate_trend_follow(
             token_id: token.to_string(),
             condition_id: condition_id.to_string(),
             price: entry,
+            shares: None,
             reason: format!(
                 "{} rising {:+.2}% in {}s (mid {} >= {}), lifted offer {} (cap {})",
                 dir.as_str().to_uppercase(),
