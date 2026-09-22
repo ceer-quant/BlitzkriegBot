@@ -6,8 +6,9 @@
 //! the open/closed books, daily PnL, and per-asset/direction cooldowns.
 
 use crate::exit_policy::{
-    ExitConfig, ExitState, ExitTickInput, ExitVerdict, decide_exit_verdict, effective_stop_pct,
-    executable_bid, pnl_pct, reference_price, update_exit_state,
+    ExitConfig, ExitState, ExitTickInput, ExitVerdict, book_age_ms, book_is_fresh,
+    decide_exit_verdict, effective_stop_pct, executable_bid, pnl_pct, reference_price,
+    update_exit_state,
 };
 use crate::model::{ExitReason, OrderRole, OrderbookSnapshot, Side, SignalDirection};
 
@@ -256,13 +257,36 @@ pub enum StopSuppressionCause {
     /// showing is the thing the F6 gate forbids — so the position is held, and
     /// the held exit is reported here instead of vanishing.
     NoExecutableQuote,
+    /// #268: same held exit, different reason — the book itself is past its
+    /// age budget, so its bid is not a buyer standing here now. A thin market
+    /// and a dead feed look identical from inside `executable_bid` (both return
+    /// zero) but they need opposite responses: a thin market is a price to
+    /// wait out, an outage is an operator problem. The `book_age_ms` on the
+    /// event is what separates them.
+    StaleBook,
 }
+
+/// How many book-freshness budgets a position may stay unpriceable before the
+/// held exit stops being routine and is escalated (#268, item 2).
+///
+/// Deliberately a constant and not a knob: `N x max_book_age_sec` is the
+/// statement the issue asks for — "this position has been unable to act for
+/// longer than the data budget it is judged on, several times over" — and a
+/// configurable version of it would be one more number nobody has a value for.
+/// Three budgets is ~180 s at the shipped default: long enough that a genuinely
+/// thin market never pages anyone, short enough that an outage is called out
+/// while the position is still open.
+const UNPRICEABLE_ESCALATION_BUDGETS: i64 = 3;
 
 /// One exit the F6 gate withheld from becoming an order — "should have
 /// triggered" made visible to review and to the panel (P0 #177, F6).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SuppressedStopEvent {
     pub cause: StopSuppressionCause,
+    /// The exit rule that wanted out, when one did. `None` for the outage
+    /// escalation, which is about a position that could not be priced at all
+    /// rather than about a rule that fired (#268).
+    pub reason: Option<ExitReason>,
     pub position_id: String,
     pub token_id: String,
     pub strategy: String,
@@ -274,24 +298,49 @@ pub struct SuppressedStopEvent {
     /// the stop.
     pub bid: Decimal,
     /// For [`StopSuppressionCause::WickGuard`]: the mid that failed to confirm.
-    /// For [`StopSuppressionCause::NoExecutableQuote`]: the price the exit was
-    /// actually JUDGED on — the protective stop's own reference when the stop
-    /// is what fired (the ask-side price of a bid-less book, #225), otherwise
-    /// the position's last valuation, since no bid was available to report.
+    /// For the held-exit causes: the price the exit was actually JUDGED on —
+    /// the protective stop's own reference when the stop is what fired (the
+    /// ask-side price of a bid-less book, #225), otherwise the profit side's
+    /// reference (#267), and the position's last valuation when neither
+    /// resolved.
     pub mid: Decimal,
     pub pnl_pct_at_bid: Decimal,
     pub pnl_pct_at_mid: Decimal,
     pub stop_pct: Decimal,
+    /// How old the book was at the moment the exit was withheld. `None` = no
+    /// book at all, or one whose age cannot be judged (`timestamp <= 0`).
+    /// This is what tells "the feed is dead" apart from "the market is thin"
+    /// (#268): both leave `bid` at zero.
+    pub book_age_ms: Option<i64>,
+    /// How long this position has been continuously unpriceable, ending at
+    /// `now_ms`. `0` = this is the first tick it could not be priced.
+    pub unpriceable_for_ms: i64,
+    /// True once [`unpriceable_for_ms`](Self::unpriceable_for_ms) passed
+    /// `N x max_book_age_sec`: the suppression is no longer a routine hold but
+    /// an outage worth a risk alert (#268, item 2).
+    pub escalated: bool,
     pub now_ms: i64,
 }
 
 impl SuppressedStopEvent {
-    /// The audit-trail line: what the raw bid would have done, what the mid
-    /// said instead, and the stop that was therefore not taken.
+    /// The audit-trail line: what the exit rule wanted, what it judged on, and
+    /// why no order followed.
+    ///
+    /// The wording names the rule that actually fired (#267). It used to say
+    /// "protective stop suppressed" for every cause, which read as "your stop
+    /// was held back" even when the rule that fired was a trailing stop — the
+    /// one thing a reviewer must not have to guess about.
     pub fn message(&self) -> String {
+        // "protective stop" is a claim about WHICH rule fired, so it is only
+        // made when a protective stop is what fired.
+        let what = match self.reason {
+            Some(ExitReason::StopLoss) => "protective stop SUPPRESSED".to_string(),
+            Some(r) => format!("exit rule {r:?} withheld"),
+            None => "position UNPRICEABLE".to_string(),
+        };
         match self.cause {
             StopSuppressionCause::WickGuard => format!(
-                "stop SUPPRESSED (wick guard): {} {} entry {} bid {} (-{}%) mid {} ({}%) stop {}% — \
+                "{what} (wick guard): {} {} entry {} bid {} (-{}%) mid {} ({}%) stop {}% — \
                  raw bid breached the stop, mid did not confirm",
                 self.position_id,
                 self.asset,
@@ -302,10 +351,25 @@ impl SuppressedStopEvent {
                 self.pnl_pct_at_mid,
                 self.stop_pct
             ),
+            StopSuppressionCause::StaleBook => format!(
+                "{what} (stale book{}): {} {} entry {} bid {} ({}%) judged {} ({}%) — the book is \
+                 {}ms past its age budget, so that bid is not a buyer standing here now and no \
+                 order was sent; the position is held until a fresh book arrives or expiry settles \
+                 it",
+                self.escalation_note(),
+                self.position_id,
+                self.asset,
+                self.entry_price,
+                self.bid,
+                self.pnl_pct_at_bid,
+                self.mid,
+                self.pnl_pct_at_mid,
+                self.book_age_ms.unwrap_or(0)
+            ),
             StopSuppressionCause::NoExecutableQuote if self.bid > Decimal::ZERO => format!(
-                "stop SUPPRESSED (stale quote): {} {} entry {} bid {} ({}%) stop {}% — the exit \
-                 rule fired, but the book was past its staleness budget, so that bid could not \
-                 price a SELL; the position is held until a fresh quote appears or expiry settles it",
+                "{what} (stale quote): {} {} entry {} bid {} ({}%) stop {}% — the exit rule fired, \
+                 but the book was past its staleness budget, so that bid could not price a SELL; \
+                 the position is held until a fresh quote appears or expiry settles it",
                 self.position_id,
                 self.asset,
                 self.entry_price,
@@ -314,9 +378,9 @@ impl SuppressedStopEvent {
                 self.stop_pct
             ),
             StopSuppressionCause::NoExecutableQuote => format!(
-                "stop SUPPRESSED (no executable bid): {} {} entry {} judged {} ({}%) stop {}% — the \
-                 exit rule fired, but the book showed no bid at all, so no order was sent; the \
-                 position is held until a buyer appears or expiry settles it",
+                "{what} (no executable bid): {} {} entry {} judged {} ({}%) stop {}% — the exit \
+                 rule fired, but the book showed no bid at all, so no order was sent; the position \
+                 is held until a buyer appears or expiry settles it",
                 self.position_id,
                 self.asset,
                 self.entry_price,
@@ -324,6 +388,19 @@ impl SuppressedStopEvent {
                 self.pnl_pct_at_mid,
                 self.stop_pct
             ),
+        }
+    }
+
+    /// The escalation clause of the audit line: empty until the position has
+    /// been unpriceable past the total-inaction budget (#268, item 2).
+    fn escalation_note(&self) -> String {
+        if self.escalated {
+            format!(
+                ", ESCALATED: unpriceable {}s",
+                self.unpriceable_for_ms / 1000
+            )
+        } else {
+            String::new()
         }
     }
 }
@@ -522,6 +599,11 @@ pub struct PositionManager {
     suppressed_stop_count: u64,
     /// Last time a suppression was reported, per position — the throttle.
     last_suppression_at: std::collections::HashMap<String, i64>,
+    /// When each position entered its current run of "cannot be priced" (#268,
+    /// item 2). Cleared the moment a tick prices it again, and when it closes,
+    /// so the value is always the START of the current run and never a
+    /// lifetime total.
+    unpriceable_since: std::collections::HashMap<String, i64>,
 }
 
 fn cooldown_key(asset: &str, direction: SignalDirection) -> String {
@@ -575,6 +657,7 @@ impl PositionManager {
             suppressed_stops: Vec::new(),
             suppressed_stop_count: 0,
             last_suppression_at: Default::default(),
+            unpriceable_since: Default::default(),
         }
     }
 
@@ -1099,11 +1182,38 @@ impl PositionManager {
             // no order AND no report. So the verdict runs either way, and a
             // decision that cannot be priced becomes a held-stop report below.
             let exit_price = executable_bid(book.as_ref());
-            let book_fresh = match book.as_ref() {
-                Some(b) => b.timestamp <= 0 || now_ms - b.timestamp <= cfg.max_book_age_sec * 1000,
-                None => true,
-            };
+            // #268: the age is kept as well as the verdict on it, because
+            // "stale" and "thin" need telling apart downstream and the age is
+            // the only thing that can. `book_is_fresh` is the ONE spelling of
+            // the budget question (an unknown age counts as fresh — see its
+            // doc); a missing book has nothing to age and is left to the
+            // judgement-side bounds.
+            let book_age_ms = book.as_ref().and_then(|b| book_age_ms(b, now_ms));
+            let book_fresh = book.as_ref().is_none_or(|b| book_is_fresh(b, now_ms, &cfg));
             let priceable = exit_price > Decimal::ZERO && book_fresh;
+            // #268 item 2: how long this position has been unable to act. The
+            // run starts at the first unpriceable tick and is cleared by the
+            // first tick that can price it, so what the escalation below reads
+            // is a continuous outage and never a lifetime total.
+            let unpriceable_for_ms = if priceable {
+                self.unpriceable_since.remove(&pos.id);
+                0
+            } else {
+                let since = *self
+                    .unpriceable_since
+                    .entry(pos.id.clone())
+                    .or_insert(now_ms);
+                now_ms - since
+            };
+            let escalated =
+                unpriceable_for_ms >= UNPRICEABLE_ESCALATION_BUDGETS * cfg.max_book_age_sec * 1_000;
+            // A held exit names its reason: a stale book and a thin one are the
+            // same zero to `executable_bid`, and only the age separates them.
+            let hold_cause = if book_fresh {
+                StopSuppressionCause::NoExecutableQuote
+            } else {
+                StopSuppressionCause::StaleBook
+            };
             let time_left_sec = (pos.expires_at_ms - now_ms) / 1000;
             let hold_sec = (now_ms - pos.entered_at_ms) / 1000;
 
@@ -1142,6 +1252,7 @@ impl PositionManager {
             if let Some(s) = suppressed_stop {
                 withheld.push(SuppressedStopEvent {
                     cause: StopSuppressionCause::WickGuard,
+                    reason: Some(ExitReason::StopLoss),
                     position_id: pos.id.clone(),
                     token_id: pos.token_id.clone(),
                     strategy: pos.strategy.clone(),
@@ -1152,6 +1263,9 @@ impl PositionManager {
                     pnl_pct_at_bid: s.pnl_pct_at_bid,
                     pnl_pct_at_mid: s.pnl_pct_at_mid,
                     stop_pct: s.stop_pct,
+                    book_age_ms,
+                    unpriceable_for_ms,
+                    escalated,
                     now_ms,
                 });
             }
@@ -1172,10 +1286,13 @@ impl PositionManager {
                     // there is one (#225): a bid-less book whose ask collapsed
                     // can only be judged on that ask, and `current_price` never
                     // moved off the entry there — reporting it would have said
-                    // "flat" about the one case this report exists for.
+                    // "flat" about the one case this report exists for. With no
+                    // stop reference (#267) the profit side's own judgement is
+                    // what fired, and `current_price` is the reference it read.
                     let judged = stop_reference.map_or(pos.current_price, |r| r.price);
                     withheld.push(SuppressedStopEvent {
-                        cause: StopSuppressionCause::NoExecutableQuote,
+                        cause: hold_cause,
+                        reason: Some(d.reason),
                         position_id: pos.id.clone(),
                         token_id: pos.token_id.clone(),
                         strategy: pos.strategy.clone(),
@@ -1190,9 +1307,44 @@ impl PositionManager {
                         },
                         pnl_pct_at_mid: pnl_pct(judged, pos.entry_price),
                         stop_pct: effective_stop_pct(cfg.stop_loss_pct, time_left_sec, &cfg),
+                        book_age_ms,
+                        unpriceable_for_ms,
+                        escalated,
                         now_ms,
                     });
                 }
+            } else if escalated {
+                // #268 item 2: no rule fired, but this position has not been
+                // priceable for longer than the data budget repeated N times.
+                // That is not a quiet market — it is a position that cannot
+                // act at all, and it is exactly the state the operator had no
+                // signal for. Reported through the SAME withheld-exit channel
+                // the panel already turns into a risk alert; the throttle
+                // (`stop_suppression_repeat_sec`) keeps it from becoming a
+                // per-tick storm.
+                let judged = stop_reference.map_or(pos.current_price, |r| r.price);
+                withheld.push(SuppressedStopEvent {
+                    cause: hold_cause,
+                    reason: None,
+                    position_id: pos.id.clone(),
+                    token_id: pos.token_id.clone(),
+                    strategy: pos.strategy.clone(),
+                    asset: pos.asset.clone(),
+                    entry_price: pos.entry_price,
+                    bid: exit_price,
+                    mid: judged,
+                    pnl_pct_at_bid: if exit_price > Decimal::ZERO {
+                        pnl_pct(exit_price, pos.entry_price)
+                    } else {
+                        Decimal::ZERO
+                    },
+                    pnl_pct_at_mid: pnl_pct(judged, pos.entry_price),
+                    stop_pct: effective_stop_pct(cfg.stop_loss_pct, time_left_sec, &cfg),
+                    book_age_ms,
+                    unpriceable_for_ms,
+                    escalated,
+                    now_ms,
+                });
             }
         }
         for ev in withheld {
@@ -1312,6 +1464,7 @@ impl PositionManager {
         // The freeze and its durable record travel WITH the loss (P0 #173).
         self.note_daily_drawdown(now_ms);
         self.last_suppression_at.remove(&pos.id);
+        self.unpriceable_since.remove(&pos.id);
 
         let closed = ClosedPosition {
             id: pos.id,
@@ -1825,6 +1978,280 @@ mod tests {
             pm.can_open(Some("ETH"), Some(SignalDirection::Up), 2000)
                 .is_err()
         );
+    }
+
+    // ── #267 / #268: the exit ladder must keep BOTH halves on a broken book ──
+
+    /// #267, acceptance 2, through the real caller: the profit side fires on the
+    /// position's fresh last known price, there is no bid to price the SELL
+    /// against, and the only thing that comes out is ONE held-exit report naming
+    /// the rule that fired. A "fill at the mid" implementation would surface
+    /// here as a request priced off the ask/2 phantom this test blocks.
+    #[test]
+    fn a_profit_exit_with_no_bid_is_reported_never_priced() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.40)),
+            OrderRole::Maker,
+            0,
+        );
+        // Value the position at +60%, then at +25%: the dashboard ticks on every
+        // book update while exits are evaluated on their own cadence, so a fall
+        // can be valued before the next evaluation judges it. Both quotes are
+        // LIVE, so this is a market move and not a stale memory.
+        pm.tick(
+            &p.id,
+            Some(&two_sided_book(dec!(0.64), dec!(0.66), 100_000)),
+            100_000,
+        );
+        pm.tick(
+            &p.id,
+            Some(&two_sided_book(dec!(0.50), dec!(0.52), 490_000)),
+            490_000,
+        );
+
+        // The buy side is swept: no bid at all, only an ask 0.90. The snapshot
+        // carries no clock (`timestamp 0`), which is the "unknown age counts as
+        // fresh" branch of #268 item 1 — not an outage.
+        let now = 498_000;
+        let reqs = pm.check_exits(&|_| Some(one_sided_book(dec!(0.90), 0)), now);
+        assert!(
+            reqs.is_empty(),
+            "no bid ⇒ no executable price ⇒ no SELL, whatever the judgement said: {reqs:?}"
+        );
+
+        let held = pm.drain_suppressed_stops();
+        assert_eq!(held.len(), 1, "exactly one held exit: {held:?}");
+        let ev = &held[0];
+        assert_eq!(ev.cause, StopSuppressionCause::NoExecutableQuote);
+        assert_eq!(
+            ev.reason,
+            Some(ExitReason::TrailingStop),
+            "the rule that wanted out is named, not flattened into a stop"
+        );
+        assert_eq!(ev.bid, Decimal::ZERO, "the book showed no bid at all");
+        assert_eq!(
+            ev.mid,
+            dec!(0.50),
+            "judged on the position's own last known price"
+        );
+        assert_eq!(ev.pnl_pct_at_mid, dec!(25));
+        assert_eq!(
+            ev.book_age_ms, None,
+            "no clock on the snapshot ⇒ unknown age, which is not an outage"
+        );
+        // #267, item 4: "protective stop" is a claim about WHICH rule fired.
+        assert!(
+            !ev.message().contains("protective stop"),
+            "{}",
+            ev.message()
+        );
+        assert!(ev.message().contains("TrailingStop"), "{}", ev.message());
+        assert_eq!(pm.suppressed_stop_count(), 1);
+    }
+
+    /// #268, item 2: a stale book is an outage, not a thin market. Nothing is
+    /// sold while it lasts; when a fresh book arrives the very same rule exits
+    /// normally — the hold is a wait, never a permanent trap — and the outage
+    /// clock restarts rather than accumulating a lifetime total.
+    #[test]
+    fn a_stale_book_is_an_outage_that_holds_and_then_releases() {
+        // `0` = report every tick, so each of the three ticks is observed alone.
+        let cfg = PositionConfig {
+            stop_suppression_repeat_sec: 0,
+            ..Default::default()
+        };
+        let mut pm = PositionManager::new(cfg);
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.40)),
+            OrderRole::Maker,
+            0,
+        );
+        pm.tick(
+            &p.id,
+            Some(&two_sided_book(dec!(0.64), dec!(0.66), 100_000)),
+            100_000,
+        );
+        pm.tick(
+            &p.id,
+            Some(&two_sided_book(dec!(0.50), dec!(0.52), 490_000)),
+            490_000,
+        );
+
+        // The feed dies: the book freezes at 490_000 and is two minutes old at
+        // decision time (budget: the shipped 60 s).
+        let frozen = two_sided_book(dec!(0.50), dec!(0.52), 490_000);
+
+        let now = 610_000;
+        let reqs = pm.check_exits(&|_| Some(frozen.clone()), now);
+        assert!(
+            reqs.is_empty(),
+            "a stale bid must not price a SELL: {reqs:?}"
+        );
+        let held = pm.drain_suppressed_stops();
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert_eq!(
+            held[0].cause,
+            StopSuppressionCause::StaleBook,
+            "a dead feed must be told apart from a thin market (#268, item 1)"
+        );
+        assert_eq!(held[0].book_age_ms, Some(120_000));
+        assert_eq!(held[0].reason, Some(ExitReason::TrailingStop));
+        assert!(!held[0].escalated, "two minutes is not yet worth a page");
+        assert!(
+            held[0].message().contains("stale book"),
+            "{}",
+            held[0].message()
+        );
+
+        // Recovery: the same bid, received NOW, is executable again and the held
+        // rule exits at it.
+        let now = 611_000;
+        let reqs = pm.check_exits(&|_| Some(two_sided_book(dec!(0.50), dec!(0.52), now)), now);
+        assert_eq!(
+            reqs.len(),
+            1,
+            "recovery must release the held exit: {reqs:?}"
+        );
+        assert_eq!(reqs[0].reason, ExitReason::TrailingStop);
+        assert_eq!(reqs[0].exit_price, dec!(0.50));
+        assert!(pm.drain_suppressed_stops().is_empty());
+
+        // …and the outage clock restarted: the next unpriceable tick counts from
+        // itself, so what the escalation reads is a CONTINUOUS outage.
+        let now = 612_000;
+        let reqs = pm.check_exits(&|_| Some(frozen.clone()), now);
+        assert!(reqs.is_empty());
+        let held = pm.drain_suppressed_stops();
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert_eq!(
+            held[0].unpriceable_for_ms, 0,
+            "the clock restarted at recovery"
+        );
+        assert!(!held[0].escalated);
+    }
+
+    /// #268, item 4 (reverse acceptance): widen the budget past the outage and
+    /// the VERY SAME frozen book prices an exit. That is what proves the
+    /// staleness budget — and not some other gate — is what held it.
+    #[test]
+    fn a_widened_book_budget_prices_the_same_outage() {
+        let cfg = PositionConfig {
+            exit: ExitConfig {
+                max_book_age_sec: 86_400,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut pm = PositionManager::new(cfg);
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.40)),
+            OrderRole::Maker,
+            0,
+        );
+        pm.tick(
+            &p.id,
+            Some(&two_sided_book(dec!(0.64), dec!(0.66), 100_000)),
+            100_000,
+        );
+        pm.tick(
+            &p.id,
+            Some(&two_sided_book(dec!(0.50), dec!(0.52), 490_000)),
+            490_000,
+        );
+
+        let now = 610_000;
+        let reqs = pm.check_exits(
+            &|_| Some(two_sided_book(dec!(0.50), dec!(0.52), 490_000)),
+            now,
+        );
+        assert_eq!(
+            reqs.len(),
+            1,
+            "a 24 h budget must accept the same book: {reqs:?}"
+        );
+        assert_eq!(reqs[0].exit_price, dec!(0.50), "priced at the bid it shows");
+        assert_eq!(reqs[0].reason, ExitReason::TrailingStop);
+        assert!(
+            pm.drain_suppressed_stops().is_empty(),
+            "nothing was held, so nothing is reported"
+        );
+    }
+
+    /// #268, item 2: an outage that outlives `N x` the book budget stops being a
+    /// routine hold. It is escalated through the SAME withheld-exit channel the
+    /// panel already turns into a risk alert (`Core::emit_suppressed_stops`),
+    /// and it says the position could not ACT rather than blaming a stop.
+    #[test]
+    fn a_long_outage_escalates_through_the_existing_alert_channel() {
+        // A 10 s book budget shrinks the escalation point (3 budgets) to 30 s of
+        // continuous silence, so the test does not wait out the shipped 180 s.
+        let cfg = PositionConfig {
+            exit: ExitConfig {
+                max_book_age_sec: 10,
+                ..Default::default()
+            },
+            stop_suppression_repeat_sec: 0,
+            ..Default::default()
+        };
+        let mut pm = PositionManager::new(cfg);
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.40)),
+            OrderRole::Maker,
+            0,
+        );
+        // +10%: a position no exit rule wants out of, so what the outage reports
+        // is the inability to act rather than a rule that fired.
+        pm.tick(
+            &p.id,
+            Some(&two_sided_book(dec!(0.44), dec!(0.46), 100_000)),
+            100_000,
+        );
+        let frozen = two_sided_book(dec!(0.44), dec!(0.46), 100_000);
+
+        // First unpriceable tick: the clock starts, nothing is escalated yet.
+        let now = 501_000;
+        let reqs = pm.check_exits(&|_| Some(frozen.clone()), now);
+        assert!(reqs.is_empty());
+        assert!(
+            pm.drain_suppressed_stops().is_empty(),
+            "a quiet stale tick inside the budget is not yet a page"
+        );
+
+        // Past `N x` the book budget the same silence is escalated.
+        let now = 532_000;
+        let reqs = pm.check_exits(&|_| Some(frozen.clone()), now);
+        assert!(reqs.is_empty(), "an outage is never a reason to sell");
+        let held = pm.drain_suppressed_stops();
+        assert_eq!(held.len(), 1, "{held:?}");
+        let ev = &held[0];
+        assert_eq!(ev.cause, StopSuppressionCause::StaleBook);
+        assert_eq!(
+            ev.reason, None,
+            "no rule fired — the position could not act"
+        );
+        assert_eq!(ev.book_age_ms, Some(432_000));
+        assert_eq!(ev.unpriceable_for_ms, 31_000);
+        assert!(
+            ev.escalated,
+            "31 s unpriceable against a 10 s budget is an outage"
+        );
+        assert!(
+            ev.message().contains("position UNPRICEABLE"),
+            "{}",
+            ev.message()
+        );
+        assert!(ev.message().contains("ESCALATED"), "{}", ev.message());
+        assert!(
+            !ev.message().contains("protective stop"),
+            "{}",
+            ev.message()
+        );
+        assert_eq!(pm.suppressed_stop_count(), 1);
     }
 }
 

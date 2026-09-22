@@ -45,10 +45,17 @@ pub struct ExitConfig {
     pub ratchet_confirm_ticks: u32,
     pub ratchet_confirm_tolerance_pct: Decimal,
     pub max_bid_wick_pct: Decimal,
-    /// How old the last known price may be to stand in for a protective stop
-    /// when the book has no usable quote left (no bid AND no mid). A trigger
-    /// judged on a price older than this has nothing honest to stand on and
-    /// stays silent; the profit side never uses this at all (P0 #177).
+    /// How old the last known price may be to stand in for a live quote. A
+    /// trigger judged on a price older than this has nothing honest to stand on
+    /// and stays silent (P0 #177).
+    ///
+    /// This is the JUDGEMENT window and BOTH sides of the ladder read it: a
+    /// protective stop may act on a remembered price inside it (#177), and a
+    /// profit-side rule may judge on one inside it too (#267 — before that the
+    /// profit side had no fallback at all and went blind the moment the buy side
+    /// emptied). One number for both sides is the point: the two can never
+    /// disagree about what the market is doing. It never prices an ORDER — see
+    /// [`executable_bid`].
     pub max_last_price_age_sec: i64,
     pub stale_profit_pct: Decimal,
     pub stale_profit_bid_unchanged_sec: i64,
@@ -61,11 +68,32 @@ pub struct ExitConfig {
     /// F6: a book older than this (sec, measured against the tick's `now_ms`)
     /// must not price an exit — a stale quote is not an executable one.
     /// Snapshots with `timestamp <= 0` (synthetic tests, legacy records) are
-    /// exempt because their age cannot be judged. Live service books are
-    /// rebuilt with `timestamp = now_ms` and are therefore always "fresh" at
-    /// this layer; real receive-time preservation happens upstream.
+    /// exempt because their age cannot be judged (see [`book_age_ms`]: that
+    /// exemption is a deliberate choice, not an accident, and it is asserted in
+    /// this module's tests). Live service books are rebuilt with
+    /// `timestamp = now_ms` and are therefore always "fresh" at this layer; real
+    /// receive-time preservation happens upstream.
+    ///
+    /// This is the PRICING window, and it is the same concept as
+    /// `max_last_price_age_sec` (the JUDGEMENT window) at twice the budget
+    /// (#268): a book still carries real LEVELS a remembered number has nothing
+    /// behind, so a book may be read for longer. Both defaults are derived from
+    /// [`QUOTE_TRUST_SEC`], so "how long may a quote speak for the market" has
+    /// ONE answer, and the 30–60 s band where a stop could still act while the
+    /// profit side was already blind is stated here rather than implied.
     pub max_book_age_sec: i64,
 }
+
+/// The one "how long may a quote still speak for the market" budget the two
+/// windows below are derived from (#268, item 3). It is the JUDGEMENT window:
+/// how old a remembered price may be before neither a stop nor a profit rule may
+/// judge on it.
+const QUOTE_TRUST_SEC: i64 = 30;
+
+/// The PRICING window: how old a book may be before its levels stop being
+/// quotable. Twice the judgement budget, because a book carries real levels
+/// while a remembered price has no one standing behind it.
+const BOOK_TRUST_SEC: i64 = QUOTE_TRUST_SEC * 2;
 
 impl Default for ExitConfig {
     fn default() -> Self {
@@ -108,10 +136,11 @@ impl Default for ExitConfig {
             ratchet_confirm_ticks: 3,
             ratchet_confirm_tolerance_pct: dec!(0.5),
             max_bid_wick_pct: dec!(8),
-            // The engine's book freshness gate is 8s; a protective stop may act
-            // on a quote a few multiples older than that rather than on nothing
-            // at all (see `stop_reference`).
-            max_last_price_age_sec: 30,
+            // The judgement window, and now the profit side's fallback window
+            // too (#267): a quote a few multiples older than the engine's 8s
+            // entry budget may still JUDGE an exit rather than nothing at all
+            // (see `stop_reference` and `profit_reference`).
+            max_last_price_age_sec: QUOTE_TRUST_SEC,
             stale_profit_pct: dec!(20),
             stale_profit_bid_unchanged_sec: 10,
             stagnant_profit_pct: dec!(5),
@@ -120,7 +149,7 @@ impl Default for ExitConfig {
             exit_grace_sec: 3,
             maker_exits_for_tp_only: false,
             maker_first_exit_enabled: true,
-            max_book_age_sec: 60,
+            max_book_age_sec: BOOK_TRUST_SEC,
         }
     }
 }
@@ -472,6 +501,35 @@ pub fn reference_price(book: Option<&OrderbookSnapshot>, fallback: Decimal) -> D
     fallback
 }
 
+/// How old a book is at `now_ms`, or `None` when its age cannot be judged.
+///
+/// `OrderbookSnapshot::timestamp <= 0` is "no receive time recorded" — synthetic
+/// fixtures and records written before the field was stamped. There is no age to
+/// compute, which is a different statement from "age zero", and the two are kept
+/// apart here so the choice made downstream ([`book_is_fresh`]) is visible
+/// instead of hidden in an `||`.
+pub fn book_age_ms(book: &OrderbookSnapshot, now_ms: i64) -> Option<i64> {
+    (book.timestamp > 0).then(|| now_ms.saturating_sub(book.timestamp))
+}
+
+/// Whether a book is inside the exit path's PRICING window ([#267], #268).
+///
+/// One spelling for a question the exit path asks in two places (this module's
+/// callers and `position.rs`'s `priceable` gate): a book may price an exit while
+/// it is younger than `max_book_age_sec`.
+///
+/// A book whose age is UNKNOWN (`timestamp <= 0`) is treated as fresh. That is a
+/// deliberate choice and not an oversight: refusing to price every synthetic or
+/// legacy snapshot would turn "this record carries no clock" into "this position
+/// can never be exited", which is the failure this whole file is about. It is
+/// asserted explicitly in this module's tests.
+pub fn book_is_fresh(book: &OrderbookSnapshot, now_ms: i64, cfg: &ExitConfig) -> bool {
+    match book_age_ms(book, now_ms) {
+        Some(age) => age <= cfg.max_book_age_sec * 1_000,
+        None => true,
+    }
+}
+
 /// Where a protective stop's reference price came from (P0 #177).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopRefSource {
@@ -563,6 +621,49 @@ fn last_known_price(
     // errs toward exiting rather than toward staying in.
     if state.last_quote_at_ms <= 0 {
         return Some(price);
+    }
+    let age_ms = now_ms.saturating_sub(state.last_quote_at_ms);
+    (age_ms <= cfg.max_last_price_age_sec.max(1) * 1_000).then_some(price)
+}
+
+/// The price a PROFIT-SIDE rule may JUDGE on when there is no executable bid
+/// (#267). `None` = the rule has nothing to judge on and stays silent.
+///
+/// The ladder is [`reference_price`]'s, with one deliberate difference from the
+/// protective stop's [`stop_reference`]:
+///   1. a two-sided book's mid — a one-sided book has none, `from_levels` zeroes
+///      it, so the F6 phantom `(0 + ask)/2` cannot come back through here;
+///   2. the last known price, but ONLY while its age is KNOWN and inside
+///      `max_last_price_age_sec`.
+///
+/// Step 2 is where this differs from `last_known_price`, which also accepts a
+/// price of unknown age. That escape is granted to a protective stop on purpose
+/// — "a stale protective stop errs toward exiting rather than toward staying in"
+/// — and it must NOT be granted here: taking a PROFIT off a price nobody can
+/// date is how a display reference becomes a trade, and it is exactly what
+/// `dead_book_fallback_cannot_take_profit` forbids. So an unknown age is `None`
+/// on this side.
+///
+/// Nothing here can price an order: a book with no bid has `executable_bid` 0
+/// regardless of what this returns, so a trigger resolved here becomes a
+/// REPORTED held exit ("I wanted out and nobody was bidding"), never a fill.
+fn profit_reference(
+    book: Option<&OrderbookSnapshot>,
+    fallback: Option<Decimal>,
+    state: &ExitState,
+    now_ms: i64,
+    cfg: &ExitConfig,
+) -> Option<Decimal> {
+    // `reference_price` answers bid → mid → its fallback; with a zero fallback
+    // its own answer is "the book has a reference price, or nothing".
+    let from_book = reference_price(book, Decimal::ZERO);
+    if from_book > Decimal::ZERO {
+        return Some(from_book);
+    }
+    let price = fallback.filter(|p| *p > Decimal::ZERO)?;
+    if state.last_quote_at_ms <= 0 {
+        // Age unknown: no licence to take a profit (see the doc above).
+        return None;
     }
     let age_ms = now_ms.saturating_sub(state.last_quote_at_ms);
     (age_ms <= cfg.max_last_price_age_sec.max(1) * 1_000).then_some(price)
@@ -780,17 +881,26 @@ pub fn decide_exit(input: ExitTickInput) -> Option<ExitDecision> {
 
 /// Pure exit decision plus the suppressed-stop report; mutates nothing.
 ///
-/// F6: every exit decision prices off the EXECUTABLE bid. `fallback_price` is a
+/// F6: every exit ORDER is priced off the EXECUTABLE bid. `fallback_price` is a
 /// stale display reference — a position can no longer be force-exited or
 /// stopped out of it when nobody is bidding, because that books a SELL at a
 /// price no counterparty ever offered. Expiry without a bid must be settled as
 /// a market outcome (the service layer's job), not sold at the last price.
 ///
-/// The protective stop is the ONE rule that keeps working when the quote is
-/// gone, because "no usable bid" is the situation it exists for. Every
-/// profit-side rule below is evaluated against the live executable bid only —
-/// acting on a stale or dislocated quote to take a profit is exactly the
-/// mistake the fallback must not introduce.
+/// PRICING and JUDGING are different questions, and this function answers both
+/// with different numbers (#267):
+///
+/// * the protective stop judges on [`stop_reference`] — bid, else the mid, else
+///   the ask-side bound, else the last known price inside its freshness budget
+///   (P0 #177 / #225) — and it is the one rule that keeps working when the quote
+///   is gone, because "no usable bid" is the situation it exists for;
+/// * the profit side judges on [`profit_reference`] — the live bid when there is
+///   one, else a two-sided mid, else the last known price inside the SAME
+///   budget. It used to require a live bid to judge at all, which made "cannot
+///   be priced" mean "does not fire" and left a bid-less book with a stop that
+///   still worked and a profit side that had gone dark;
+/// * the live bid, and only the live bid, prices an order: a rule that fires
+///   without one is reported as a held exit by `check_exits`, never filled.
 pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
     let ExitTickInput {
         entry_price,
@@ -808,9 +918,8 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
 
     let bid = executable_bid(book);
     // F6 (main #168) and the deploy line's stop machinery agree on the same
-    // split: only a LIVE bid may price a mandatory/voluntary SELL; the last
-    // known price may still price the protective stop (bounded by
-    // `max_last_price_age_sec`), and nothing may price a profit-side exit.
+    // split: only a LIVE bid may price a mandatory/voluntary SELL. That is a
+    // statement about PRICING an order and about nothing else — see below.
     let live = bid > Decimal::ZERO;
 
     // 1. Force exit — absolute deadline. It still prices off the live bid:
@@ -828,18 +937,33 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
     // is gone (#177), and `check_exits` has to report WHICH price judged when
     // the fired exit cannot be priced into an order (#225).
     let stop_ref = stop_reference(book, fallback_price, state, now_ms, cfg);
-    if !live && stop_ref.is_none() {
+
+    // #267: the profit side needs a price to JUDGE on for exactly the same
+    // reason the stop does. Gating the judgement on `live` conflated "can this
+    // be priced" with "should this fire": on a book with no bid the stop still
+    // fired through its fallback while every profit rule went dark, so the exit
+    // ladder kept its loss half and lost its profit half — "该跑的没跑、该止损的
+    // 照止损". The judgement now reads `profit_reference` (bid → mid → bounded
+    // last known), while `live`/`executable_bid` still decide what may be
+    // PRICED. A trigger with no bid behind it becomes a reported held exit
+    // (`StopSuppressionCause::NoExecutableQuote`), which is the visible form of
+    // "wanted out, nobody bidding" — never a silent non-trigger, and never a
+    // fill priced off a mid.
+    let profit_judge = if live {
+        Some(bid)
+    } else {
+        profit_reference(book, fallback_price, state, now_ms, cfg)
+    };
+    if profit_judge.is_none() && stop_ref.is_none() {
+        // Nothing at all to judge on: no bid, no ask, and no remembered price
+        // inside its budget. There is no rule left that could honestly fire.
         return ExitVerdict::hold();
     }
-    let pct = if live {
-        pnl_pct(bid, entry_price)
-    } else {
-        Decimal::ZERO
-    };
+    let pct = profit_judge.map_or(Decimal::ZERO, |p| pnl_pct(p, entry_price));
     let mut suppressed: Option<SuppressedStop> = None;
 
     if cfg.simple_exit_enabled {
-        if live
+        if profit_judge.is_some()
             && cfg.take_profit_pct > Decimal::ZERO
             && cfg.take_profit_pct < dec!(9999)
             && pct >= cfg.take_profit_pct
@@ -855,7 +979,10 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
             StopVerdict::Suppressed(s) => suppressed = Some(s),
             StopVerdict::Nothing => {}
         }
-        if live && cfg.trailing_enabled && state.high_pnl_pct >= cfg.trailing_min_high_pct {
+        if profit_judge.is_some()
+            && cfg.trailing_enabled
+            && state.high_pnl_pct >= cfg.trailing_min_high_pct
+        {
             let profit_trail = get_profit_trail_pct(state.high_pnl_pct, cfg);
             let time_trail = get_time_trail_pct(time_left_sec);
             let trail = cfg.min_trail_pct.max(profit_trail.min(time_trail));
@@ -863,7 +990,7 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
                 return ExitVerdict::exit(ExitReason::TrailingStop, false, None);
             }
         }
-        if live && time_left_sec <= cfg.min_time_left_sec {
+        if profit_judge.is_some() && time_left_sec <= cfg.min_time_left_sec {
             return ExitVerdict::exit(ExitReason::TimeExit, false, None);
         }
         return ExitVerdict {
@@ -878,7 +1005,7 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
         return ExitVerdict::hold();
     }
 
-    if live && pct >= cfg.take_profit_pct {
+    if profit_judge.is_some() && pct >= cfg.take_profit_pct {
         return ExitVerdict::exit(ExitReason::TakeProfit, cfg.maker_first_exit_enabled, None);
     }
 
@@ -897,11 +1024,13 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
         StopVerdict::Nothing => {}
     }
 
-    if live {
+    if let Some(judge) = profit_judge {
         // None of these is the protective stop — they are the profit-side rules,
-        // which already require a live bid to fire. They carry no stop reference
-        // forward: a report about one of them is about the bid, and
-        // `check_exits` already reports `exit_price` for that.
+        // which now judge on `judge` (the live bid when there is one, else the
+        // bounded reference) and still require an executable bid to become an
+        // ORDER. They carry no stop reference forward: a report about one of
+        // them is about the bid, and `check_exits` already reports `exit_price`
+        // for that.
         if cfg.ratchet_enabled {
             let confirmed_high_pct = pnl_pct(state.confirmed_high, entry_price);
             if pct <= get_ratchet_floor(confirmed_high_pct) {
@@ -910,7 +1039,7 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
         }
 
         if state.high_pnl_pct >= Decimal::from(BREAKEVEN_LOCK_TRIGGER_PCT) {
-            let lock_floor = dec!(0.5).max(taker_fee_pct(bid) + dec!(0.2));
+            let lock_floor = dec!(0.5).max(taker_fee_pct(judge) + dec!(0.2));
             if pct <= lock_floor {
                 return ExitVerdict::exit(ExitReason::BreakevenLock, false, None);
             }
@@ -932,7 +1061,7 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
             let depth_change = ((current_depth - state.initial_depth) / state.initial_depth)
                 * Decimal::ONE_HUNDRED;
             if depth_change <= -cfg.depth_collapse_threshold_pct
-                && bid < state.high_water_mark
+                && judge < state.high_water_mark
                 && pct >= dec!(2)
             {
                 return ExitVerdict::exit(ExitReason::DepthCollapse, false, None);
@@ -1605,5 +1734,145 @@ mod tests {
             crypto < Decimal::ZERO,
             "crypto round trip must lose: {crypto}"
         );
+    }
+
+    // ── #267: a bid-less book must not put the profit side out of work ───────
+
+    /// The exact tick the issue names (#267, acceptance 1): the buy side has been
+    /// swept (`bid 0 / ask 0.90`), the position has run to a high above the
+    /// trailing arming threshold, and its last known price is inside the
+    /// judgement window. Gating every profit rule on `live` made this a `hold`:
+    /// the stop still fired through its fallback while the profit side went
+    /// dark, so the ladder kept its loss half and lost its profit half.
+    #[test]
+    fn a_bidless_book_judges_the_profit_side_on_a_fresh_last_known_price() {
+        let cfg = ExitConfig::default();
+        let now = 1_000_000;
+        let entry = dec!(0.40);
+        let b = one_sided_book(dec!(0.90));
+        assert_eq!(
+            executable_bid(Some(&b)),
+            Decimal::ZERO,
+            "F6: a one-sided book is still not priceable, so the decision below \
+             cannot be coming from a bid"
+        );
+        // `high_pnl_pct` is a RUNNING high: 50% is what the position reached
+        // before the buy side emptied, 0.48 (+20%) is where its own last known
+        // price now sits. Both are `check_exits`' own inputs.
+        let st = ExitState {
+            high_pnl_pct: dec!(50),
+            last_quote_at_ms: now - 5_000,
+            ..ExitState::new(entry, now)
+        };
+
+        fn tick<'a>(
+            b: &'a OrderbookSnapshot,
+            state: &'a ExitState,
+            cfg: &'a ExitConfig,
+            now_ms: i64,
+        ) -> ExitTickInput<'a> {
+            ExitTickInput {
+                entry_price: dec!(0.40),
+                book: Some(b),
+                fallback_price: Some(dec!(0.48)),
+                time_left_sec: 600,
+                hold_sec: 60,
+                state,
+                now_ms,
+                cfg,
+            }
+        }
+
+        let verdict = decide_exit_verdict(tick(&b, &st, &cfg, now));
+        assert_eq!(
+            verdict.decision.map(|d| d.reason),
+            Some(ExitReason::TrailingStop),
+            "the profit side must judge on the remembered price, not go dark"
+        );
+        assert!(
+            verdict.suppressed_stop.is_none(),
+            "nothing was withheld: the stop never fired here"
+        );
+        assert!(
+            verdict.stop_reference.is_none(),
+            "a profit-side exit carries no stop reference: the report is about \
+             the bid, and the two sides judge independently (#267)"
+        );
+
+        // The freshness bound is what governs, not the book's emptiness: the
+        // same tick with the memory past its window has nothing honest left to
+        // judge a profit on, and holds.
+        let aged = ExitState {
+            last_quote_at_ms: now - (cfg.max_last_price_age_sec + 1) * 1_000,
+            ..st.clone()
+        };
+        assert!(
+            decide_exit_verdict(tick(&b, &aged, &cfg, now))
+                .decision
+                .is_none(),
+            "a remembered price past its budget is not a judgement"
+        );
+    }
+
+    // ── #268: one quote-trust budget, two windows ───────────────────────────
+
+    /// #268, item 3: the judgement window (30 s) and the pricing window (60 s)
+    /// are one concept at two budgets, so the band where a stop could still act
+    /// while the profit side was already blind is stated rather than implied.
+    #[test]
+    fn the_two_windows_are_one_quote_trust_budget_at_two_depths() {
+        let cfg = ExitConfig::default();
+        assert_eq!(cfg.max_last_price_age_sec, QUOTE_TRUST_SEC);
+        assert_eq!(cfg.max_book_age_sec, BOOK_TRUST_SEC);
+        assert_eq!(
+            BOOK_TRUST_SEC,
+            QUOTE_TRUST_SEC * 2,
+            "a book carries real levels a remembered number has nobody behind, \
+             so it may be read for twice the budget — derived, never restated"
+        );
+    }
+
+    /// #268, item 1: `timestamp <= 0` is "this record carries no clock", which
+    /// is a different statement from "age zero" and takes the other branch. The
+    /// choice — an unknown age counts as FRESH — is asserted here so nobody has
+    /// to infer it from an `||`.
+    #[test]
+    fn an_unknown_book_age_is_fresh_by_choice_and_a_far_expired_one_is_not() {
+        let cfg = ExitConfig::default();
+        let now = 1_000_000;
+
+        let unknown = one_sided_book(dec!(0.90)); // timestamp 0
+        assert_eq!(
+            book_age_ms(&unknown, now),
+            None,
+            "no clock on the record is not age zero"
+        );
+        assert!(
+            book_is_fresh(&unknown, now, &cfg),
+            "an unknown age counts as fresh ON PURPOSE: refusing to price every \
+             clockless snapshot would make 'no timestamp' mean 'can never exit'"
+        );
+
+        let expired = OrderbookSnapshot::from_levels(
+            "tok",
+            vec![],
+            vec![(dec!(0.90), dec!(100))],
+            now - 10 * 60_000,
+        );
+        assert_eq!(book_age_ms(&expired, now), Some(600_000));
+        assert!(
+            !book_is_fresh(&expired, now, &cfg),
+            "ten minutes old is not a quote standing here now"
+        );
+
+        // The budget is the only difference between the two verdicts: the same
+        // book exactly one budget old is still inside it.
+        let inside = OrderbookSnapshot::from_levels(
+            "tok",
+            vec![],
+            vec![(dec!(0.90), dec!(100))],
+            now - cfg.max_book_age_sec * 1_000,
+        );
+        assert!(book_is_fresh(&inside, now, &cfg));
     }
 }
