@@ -305,6 +305,20 @@ jobs:
         run: |
           node scripts/fee-model-sensitivity-check.mjs --self-test
           node scripts/fee-model-sensitivity-check.mjs
+      # #272: the exit-reachability change (#168/F6) pinned "a profit-side exit is
+      # unreachable without an executable bid" with four unit tests asserting the
+      # MECHANISM, all green, and nothing in the suite could answer whether it made
+      # the strategy earn more or less. This gate replays the same frozen corpus
+      # with the release core and compares the MONEY against a recorded baseline,
+      # so a reachability change is caught in net PnL / win rate / close count
+      # rather than in a mechanism assertion. `--teeth` is the reverse acceptance:
+      # it must go red on every window. See the script header for why the baseline
+      # is a degradation baseline and not an absolute `net >= 0`.
+      - name: Exit-reachability economics gate (#272)
+        timeout-minutes: 15
+        run: |
+          node scripts/exit-economics-check.mjs --self-test
+          node scripts/exit-economics-check.mjs
       # #202: what ONE order may commit, as a share of the live account. The
       # kernel had no such bound: `--max-order-notional` is an absolute number,
       # so the supervisor's 6.00 USD default is 125% of the 4.8 USDC book and the
