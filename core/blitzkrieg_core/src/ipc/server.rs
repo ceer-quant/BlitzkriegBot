@@ -1227,6 +1227,12 @@ async fn handle_line(
                 "enabled": c.shadow_evolution().is_enabled(),
                 "cycleSeq": c.shadow_evolution().cycle_info().1,
                 "cycleSecs": c.shadow_evolution().cycle_secs(),
+                // #269: where `state.json` and the config file disagreed at
+                // startup. The runtime switch wins by design, so the file alone
+                // can read "off" while the engine is on — a panel that shows
+                // only the two booleans cannot explain that, and an operator
+                // reading the file gets the wrong answer.
+                "switchConflicts": c.shadow_evolution().switch_conflicts(),
             }))
         }
         method::SE_HISTORY => {
@@ -1716,7 +1722,7 @@ mod tests {
         };
         let mut c = Core::new(cfg.clone());
         c.set_balance(cfg.dry_seed_balance);
-        cfg.install_engine(&mut c);
+        cfg.install_engine(&mut c).expect("engine install");
         (
             Arc::new(AsyncMutex::new(c)),
             crate::market::registry::MarketPluginRegistry::new(),

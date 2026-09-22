@@ -98,7 +98,7 @@ pub struct ShadowFile {
     pub min_profit_factor_improvement: Option<Decimal>,
     pub min_observation_minutes: Option<i64>,
     pub cooldown_minutes: Option<i64>,
-    /// Per-step relative move ceiling (Lock 1). A file may TIGHTEN this, never
+    /// Per-step relative move ceiling (Lock 2). A file may TIGHTEN this, never
     /// widen it — see [`crate::config::MAX_GRADIENT_CEILING`].
     pub max_gradient: Option<Decimal>,
     pub variant_count: Option<usize>,
@@ -114,8 +114,8 @@ pub struct ShadowFile {
     pub deep_dims: Option<usize>,
 }
 
-/// Lock 1's built-in ceiling (±5% per evolution step). A config file may lower
-/// `max_gradient` but a value above this is rejected with a warning: the three
+/// Lock 2's built-in ceiling (±5% per evolution step). A config file may lower
+/// `max_gradient` but a value above this is rejected with a warning: the four
 /// safety locks are not configurable surfaces, and a setting that could widen
 /// one is not a tuning knob.
 pub const MAX_GRADIENT_CEILING: Decimal = rust_decimal_macros::dec!(0.05);
@@ -756,15 +756,18 @@ mod tests {
         assert_eq!(cfg.min_time_left_sec, Some(180));
         // Loaded from the sibling file, not invented.
         let s = &cfg.shadow;
-        // #249: the shipped file turns the evaluator ON. The switch is runtime
-        // state that a panel flip persists over this file, so a shipped `false`
-        // was a default nobody could see being reset on every restart — the
-        // engine kept coming back off under a panel that said it was on.
-        assert_eq!(s.enabled, Some(true));
-        // And the unattended mode is the shipped one: with the evaluator running
-        // and nobody watching, a proposal held for a human is a proposal nobody
-        // will ever answer.
-        assert_eq!(s.auto_evolve, Some(true));
+        // #269 reverses #249's choice: the shipped file leaves the evaluator OFF.
+        // #249 was right about the trap — a shipped value is only the FIRST
+        // startup's value, because a panel flip persists over it — but that cut
+        // both ways: with `true` shipped, a new machine, a fresh `data/` or a
+        // restored backup silently re-armed unattended auto-evolution. The fix is
+        // the conflict report (`switchConflicts` on `shadow_evolution.status`,
+        // plus a startup WARN), not a shipped `true`: with the two visible, the
+        // "nobody could see it being reset" objection no longer holds.
+        assert_eq!(s.enabled, Some(false));
+        // And the unattended mode is off with it: nothing is evaluated, so there
+        // is nothing for the kernel to apply on its own.
+        assert_eq!(s.auto_evolve, Some(false));
         assert_eq!(s.evaluation_window_minutes, Some(30));
         assert_eq!(s.min_sample_count, Some(30));
         assert_eq!(s.min_win_rate_improvement, Some(dec!(0.05)));

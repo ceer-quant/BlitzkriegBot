@@ -45,7 +45,7 @@ fn startup_config() -> CoreConfig {
 /// startup config (so its sizing is the boot-time COPY, not a live view).
 fn booted(cfg: &CoreConfig) -> Core {
     let mut c = Core::new(cfg.clone());
-    cfg.install_engine(&mut c);
+    cfg.install_engine(&mut c).expect("engine install");
     c
 }
 

@@ -1,6 +1,10 @@
 //! Shadow Evolution — the safety guard (hard, non-bypassable).
 //!
-//! Three locks, all enforced BEFORE any hot swap:
+//! Four locks, all enforced BEFORE any hot swap. This numbering is the canonical
+//! one — `user_layer/configs/shadow_evolution.toml` and `docs/rust-core/
+//! SHADOW_EVOLUTION.md` both defer to it (#269; they used to call the gradient
+//! lock "Lock 1" and the immutable one "Lock 2", one off, because this line used
+//! to say "three" while listing four):
 //!   Lock 0 (declaration): only knobs the strategy DECLARED evolvable may carry
 //!     a value. An undeclared name is not merely ignored — a proposal that
 //!     mentions one is rejected, so nothing can be smuggled in through the

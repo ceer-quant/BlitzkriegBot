@@ -644,6 +644,21 @@ export interface EvolutionStatusRow {
   cycleSeq: number
   /** Configured seconds between deep rounds (reported, never assumed). */
   cycleSecs: number
+  /**
+   * Switches where the shipped file and the persisted runtime state disagree
+   * (#269). The persisted value wins, so editing the file is not a kill switch;
+   * empty is the normal case.
+   */
+  switchConflicts: EvolutionSwitchConflictRow[]
+}
+
+export interface EvolutionSwitchConflictRow {
+  /** `'engine'` (is the evaluator running) or `'autoEvolve'` (who applies it). */
+  switch: string
+  /** What `user_layer/configs/shadow_evolution.toml` says. */
+  fileValue: boolean
+  /** What `data/evolution/state.json` says — the value actually in force. */
+  runtimeValue: boolean
 }
 
 export interface EvolutionDoc {

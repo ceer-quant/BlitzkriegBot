@@ -581,7 +581,7 @@ pub struct ShadowEvolutionTuning {
     /// Rolling metrics window (seconds). Settable from the config file, which
     /// expresses it in minutes (`evaluation_window_minutes`).
     pub evaluation_window_secs: Option<i64>,
-    /// Per-evolution step ceiling (Lock 1). `main` clamps this to the built-in
+    /// Per-evolution step ceiling (Lock 2). `main` clamps this to the built-in
     /// ceiling before it gets here — a config file may tighten the gradient lock
     /// but nothing may widen it.
     pub max_gradient: Option<Decimal>,

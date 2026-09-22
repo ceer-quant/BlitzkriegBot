@@ -1,8 +1,9 @@
 # 影子进化（Shadow Evolution）
 
 > 模块：`core/blitzkrieg_core/src/shadow_evolution/`
-> 默认状态：**出厂文件里是开启的**（`enabled = true` + `auto_evolve = true`，见 §5）；
-> 运行期开关持久化在 `state.json`，面板/`evolve on|off` 随时可关，关掉即完全惰性
+> 默认状态：**出厂文件里是关闭的**（`enabled = false` + `auto_evolve = false`，见 §5，
+> 原因见「出厂即关」一段）；运行期开关持久化在 `state.json` 并**优先于文件**，
+> 面板/`evolve on|off` 随时可开可关，关掉即完全惰性
 > 一句话：**让每个策略各自在实盘运行中，通过影子孪生的反事实推演发现更优参数，
 > 并毫秒级无停机热切到新参数；彼此互不串扰。**
 
@@ -93,7 +94,7 @@ E2-c 修复：`strategy.load` 载入的新库会**立即**拿到参数单元（`
 
 ## 5. 配置
 
-`user_layer/configs/shadow_evolution.toml`（出厂 `enabled = true`，`auto_evolve = true`）。
+`user_layer/configs/shadow_evolution.toml`（出厂 `enabled = false`，`auto_evolve = false`）。
 **该文件已被内核读取**（KI-11 / `MIGRATION_LOG` §59）；启动值优先级
 **CLI > `BK_*` env > 本文件 > 代码默认**，启动时会打印每个非默认值的来源。
 文件里的窗口/观察/冷却用**分钟**，内核内部用秒，换算在加载处做一次。
@@ -110,21 +111,34 @@ E2-c 修复：`strategy.load` 载入的新库会**立即**拿到参数单元（`
 （`evolve on`、`auto-evolve on|off`）写的就是它。代价要写明白——运维想用改文件
 当「急停」时，文件不再生效；这种情况启动日志会 **WARN** 报出（文件说关、运行期
 说开），出路是面板开关或删掉 `<audit_dir>/state.json`。反向（文件说开、运行期
-说关）只记 INFO，因为那是操作员自己关的。
+说关）只记 INFO，因为那是操作员自己关的。**两个开关都会**在启动时比对文件值与
+运行期值：不一致的那一个既写进日志，也作为 `switchConflicts` 出现在
+`shadow_evolution.status` 里（面板据此显示，所以这种分歧不再只活在日志文件里）。
+
+**出厂即关（#269）**：2026-09-23 之前本文件出厂是 `enabled = true` +
+`auto_evolve = true`，即开箱即无人值守的自动进化；生产之所以没跑，只是因为
+`data/evolution/state.json` 记着关——换台机器、清空 `data/`、恢复备份都会**静默
+重新武装**它。现在出厂值明确为关，理由是两条当时仍未收口的问题：其一，进化的
+目标函数继承退出策略的缺陷（P0 / [#262](https://github.com/ceer-quant/BlitzkriegBot/issues/262)），
+变体与实盘走的是**同一条**退出阶梯，于是「少交易、躲开坏的盈利端退出」这种变体
+会被判成进步并被无人值守地采纳；其二，进化目标的 WR/PF 基线尚不可信（同 #262）。
+作为可追溯性的最小补丁，每条 promotions 记录现在带 `caliber` 字段（退出阶梯的
+`exit-fnv1a64:` 指纹）。要打开它是**主动动作**：面板开关（持久化到 `state.json`）、
+`--shadow-evolution`，或改下面两行；等 P0 与 #262 落地后应重新评估这个出厂值。
 
 ```toml
 [shadow_evolution]
-enabled = true                        # 评估器运行（运行期开关会持久化并覆盖本行）
+enabled = false                       # 评估器是否在跑（运行期开关会持久化并覆盖本行）
 evaluation_window_minutes = 30
 min_sample_count = 30
 min_win_rate_improvement = 0.05
 min_profit_factor_improvement = 0.10
 min_observation_minutes = 5
 cooldown_minutes = 10
-max_gradient = 0.05                   # +/-5% per step (Lock 1) — 只能收紧，不能放宽
+max_gradient = 0.05                   # +/-5% per step (Lock 2) — 只能收紧，不能放宽
 variant_count = 3                     # shadow variants (>=2)
 audit_dir = "data/evolution"          # per-strategy: data/evolution/<strategy>.jsonl
-auto_evolve = true                    # true = 内核自行采纳，并排空积压的待决队列
+auto_evolve = false                   # true = 内核自行采纳，并排空积压的待决队列
 evolution_cycle_minutes = 4320        # 72h 深度进化轮（复合变异）
 deep_dims = 2                         # 深度轮同时动的旋钮数
 proposal_ttl_minutes = 10080          # 提案 7 天未决自动过期
@@ -134,11 +148,13 @@ proposal_ttl_minutes = 10080          # 提案 7 天未决自动过期
 （`audit_path_for(strategy)`，非字母数字/`_`/`-`/`.` 的字符替换为 `_`），
 于是审计天然按策略分文件，不需要任何配置就能做到隔离。
 
-内核启动开关：`--shadow-evolution`（把评估器**打开**；出厂文件本身就开，所以这个
-旗标只在文件被改成关时才有用）；测试/运维可覆盖阈值：
+内核启动开关：`--shadow-evolution`（把评估器**打开**；出厂文件本身是关的，
+这是不改文件就打开它的方式）；测试/运维可覆盖阈值：
 `--se-min-samples N`、`--se-cooldown-secs N`、`--se-min-obs-secs N`。
-`max_gradient` 超过内置上限 `0.05`（Lock 1）会被**拒绝并告警**，不是 clamp——
-放宽安全锁的请求必须让操作员看见。
+`max_gradient` 超过内置上限 `0.05`（Lock 2）会被**拒绝并告警**，不是 clamp——
+放宽安全锁的请求必须让操作员看见。锁的**规范编号在 `shadow_evolution/guard.rs`**：
+Lock 0 声明 / Lock 1 域 / Lock 2 渐变 / Lock 3 不可变（#269 之前 TOML 与本文件
+曾把渐变锁写成 Lock 1，已对齐）。
 
 ## 6. IPC
 
@@ -194,7 +210,7 @@ evolutionsApplied, evolutionsRejected, secondsSinceLastEvolution }`。
   回滚跳过渐变锁（恢复的是历史合法值），但域/不可变锁仍然生效。
 
 - **产物进加载路径需人工审批（#188）**：影子进化只改**参数**（进程内热切换，
-  受锁 0/一/二约束），它自己不生成策略库。若某条外部流水线（脚本、CI、手工构建）
+  受锁 0/1/2 约束），它自己不生成策略库。若某条外部流水线（脚本、CI、手工构建）
   把重建的 cdylib 放到 `data/`、`shadow_evolution/` 或任何含 `shadow*`/`evolution*`
   组件的目录下，加载侧按**机器生成产物**处理：这些路径**不因位于策略根内而被信任**，
   必须由人工把 `sha256 <路径>` 写进审批清单（默认
@@ -212,9 +228,11 @@ IPC 增量：
 | `shadow_evolution.enable` / `.disable` | `{}` | 引擎总闸（同样持久化，重启保留；关闭时不评估也不采纳） |
 
 `status` 增量键：`autoEvolve`、`enabled`、`lastCycleMs`、`nextCycleAtMs`、
-`cycleSeq`、`cycleSecs`、`pendingProposals`。（`enabled` 与 `autoEvolve` 是**两个**
-开关：前者是「在不在跑」，后者是「谁落盘」——面板必须分开显示，否则就会出现
-「自动进化：开」挂在一台什么都没评估的内核上。）
+`cycleSeq`、`cycleSecs`、`pendingProposals`、`switchConflicts`。（`enabled` 与
+`autoEvolve` 是**两个**开关：前者是「在不在跑」，后者是「谁落盘」——面板必须分开
+显示，否则就会出现「自动进化：开」挂在一台什么都没评估的内核上。`switchConflicts`
+是启动时文件值与运行期值不一致的开关清单，每项含 `switch` / `fileValue` /
+`runtimeValue`，面板据此提示「文件说关、运行期说开」。）
 
 事件增量：`EVOLUTION_PROPOSED`（提案待决，UI 提示去审）、`EVOLUTION_CYCLE`
 （深度进化轮完成，含轮次/维数/覆盖策略）。
@@ -307,8 +325,11 @@ CLI：`--se-auto-evolve on|off`、`--se-cycle-secs N`、`--se-ttl-secs N`、
    `enabled=false` 运行——`shadow_evolution.status` 自报 `status: "disabled"`、
    `variantCount: 0`、`strategies: []`，而 `data/evolution/state.json` 里只有旧二进制
    写的 `{"autoEvolve":true,...}`（没有 `enabled` 键）。这正是「自动模式却没有自动」
-   的现场：开关记着、什么都没跑、还挂着 1 张 7 天后过期的待决提案。部署后出厂值即
-   `enabled = true` + `auto_evolve = true`，运行期开关以 `<audit_dir>/state.json` 为准。
+   的现场：开关记着、什么都没跑、还挂着 1 张 7 天后过期的待决提案。**现已按 #269
+   把出厂值改为 `enabled = false` + `auto_evolve = false`**，运行期开关仍以
+   `<audit_dir>/state.json` 为准——注意这意味着「文件说关」不再能单独把一台运行期
+   开关为开的内核停下来，这种分歧会在启动日志 WARN 并作为 `switchConflicts`
+   出现在 `status` 里。
 
 ## 11. 设计哲学
 

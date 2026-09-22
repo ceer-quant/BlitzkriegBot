@@ -1,0 +1,1061 @@
+{
+  "source": "replay /tmp/bk-mr-holdout/holdout-corpus.jsonl (1 segment(s))",
+  "sourceStats": {
+    "events": 4388654,
+    "malformedLines": 0,
+    "outOfOrderEvents": 0
+  },
+  "tickMs": 50,
+  "tailMs": 0,
+  "startAtMs": 1789930554858,
+  "endAtMs": 1790012150010,
+  "virtualMs": 81595152,
+  "fillModel": {
+    "takerSlippageTicks": 0,
+    "makerLatencyMs": 0,
+    "makerFillProbBps": 10000,
+    "makerDepthShareBps": 10000
+  },
+  "feeSchedule": {
+    "name": "legacy_quadratic",
+    "rate": 0.125,
+    "exponent": 2,
+    "source": "history: unchanged since the fee was first charged; no external publication states this curve (see #203, fee-model.mjs)"
+  },
+  "entryMakerTimeoutMs": 5000,
+  "orders": {
+    "orders": 87,
+    "filled": 60,
+    "cancelled": 27,
+    "rejected": 0,
+    "failed": 0,
+    "liveAtEnd": 0
+  },
+  "fillStats": {
+    "orders": 87,
+    "filledOrders": 60,
+    "partialOrders": 2,
+    "unfilledOrders": 25,
+    "fillRatePct": 71.26436781609195,
+    "partialRatePct": 2.2988505747126435,
+    "sizeFillRatioPct": 70.31277465927602
+  },
+  "fills": 62,
+  "trades": {
+    "closed": 30,
+    "wins": 8,
+    "losses": 22,
+    "flat": 0,
+    "grossProfitUsd": 8.17748250316,
+    "grossLossUsd": 12.99828366694125,
+    "netPnlUsd": -4.82080116378125,
+    "avgPnlUsd": -0.16069337212604168,
+    "winRatePct": 26.666666666666668,
+    "profitFactor": 0.6291201756088711,
+    "maxDrawdownUsd": 6.70419316694125,
+    "maxDrawdownPct": 0.0,
+    "feesUsd": 2.47090116378125
+  },
+  "strategies": [
+    {
+      "blockedMomentum": 0,
+      "blockedTiming": 0,
+      "closedTrades": 0,
+      "effectiveMaxShares": 10.0,
+      "effectiveMinShares": 10.0,
+      "effectiveSizePct": 0.0,
+      "effectiveSizeUsd": 2.5,
+      "enabled": false,
+      "entryBudgetUsd": 2.5,
+      "feesUsd": 0.0,
+      "gateExemptedMomentum": 0,
+      "gateExemptedTiming": 0,
+      "gateExemptionTimingFloorSec": null,
+      "gateExemptions": [],
+      "limitRejected": 0,
+      "losses": 0,
+      "maxOpenNotionalUsd": null,
+      "maxOpenPositions": null,
+      "name": "spread_arb",
+      "netPnlUsd": 0.0,
+      "openNotionalUsd": 0.0,
+      "openPositions": 0,
+      "ordersPlaced": 0,
+      "ordersRejected": 0,
+      "rejectionCauses": null,
+      "sizeWeight": null,
+      "sizingSource": "global",
+      "source": "dylib:/Volumes/Hard Disk/BlitzkriegBot/user_layer/strategies/target/release/libspread_arb_strategy.dylib",
+      "wins": 0
+    },
+    {
+      "blockedMomentum": 0,
+      "blockedTiming": 0,
+      "closedTrades": 0,
+      "effectiveMaxShares": 10.0,
+      "effectiveMinShares": 10.0,
+      "effectiveSizePct": 0.0,
+      "effectiveSizeUsd": 2.5,
+      "enabled": false,
+      "entryBudgetUsd": 2.5,
+      "feesUsd": 0.0,
+      "gateExemptedMomentum": 0,
+      "gateExemptedTiming": 0,
+      "gateExemptionTimingFloorSec": null,
+      "gateExemptions": [],
+      "limitRejected": 0,
+      "losses": 0,
+      "maxOpenNotionalUsd": null,
+      "maxOpenPositions": null,
+      "name": "trend_follow",
+      "netPnlUsd": 0.0,
+      "openNotionalUsd": 0.0,
+      "openPositions": 0,
+      "ordersPlaced": 0,
+      "ordersRejected": 0,
+      "rejectionCauses": null,
+      "sizeWeight": null,
+      "sizingSource": "global",
+      "source": "dylib:/Volumes/Hard Disk/BlitzkriegBot/user_layer/strategies/target/release/libtrend_follow_strategy.dylib",
+      "wins": 0
+    },
+    {
+      "blockedMomentum": 0,
+      "blockedTiming": 32,
+      "closedTrades": 30,
+      "effectiveMaxShares": 10.0,
+      "effectiveMinShares": 10.0,
+      "effectiveSizePct": 0.0,
+      "effectiveSizeUsd": 2.5,
+      "enabled": true,
+      "entryBudgetUsd": 2.5,
+      "feesUsd": 2.47090116378125,
+      "gateExemptedMomentum": 18,
+      "gateExemptedTiming": 0,
+      "gateExemptionTimingFloorSec": null,
+      "gateExemptions": [
+        "momentum"
+      ],
+      "limitRejected": 0,
+      "losses": 22,
+      "maxOpenNotionalUsd": null,
+      "maxOpenPositions": null,
+      "name": "mean_reversion",
+      "netPnlUsd": -4.82080116378125,
+      "openNotionalUsd": 0.0,
+      "openPositions": 0,
+      "ordersPlaced": 41,
+      "ordersRejected": 17,
+      "rejectionCauses": {
+        "positions.exitCooldown": 14,
+        "positions.max_positions": 2,
+        "risk:breaker": 1
+      },
+      "sizeWeight": null,
+      "sizingSource": "global",
+      "source": "dylib:/Volumes/Hard Disk/BlitzkriegBot/user_layer/strategies/target/release/libmean_reversion_strategy.dylib",
+      "wins": 8
+    },
+    {
+      "blockedMomentum": 0,
+      "blockedTiming": 0,
+      "closedTrades": 0,
+      "effectiveMaxShares": 10.0,
+      "effectiveMinShares": 10.0,
+      "effectiveSizePct": 0.0,
+      "effectiveSizeUsd": 2.5,
+      "enabled": false,
+      "entryBudgetUsd": 2.5,
+      "feesUsd": 0.0,
+      "gateExemptedMomentum": 0,
+      "gateExemptedTiming": 0,
+      "gateExemptionTimingFloorSec": null,
+      "gateExemptions": [],
+      "limitRejected": 0,
+      "losses": 0,
+      "maxOpenNotionalUsd": null,
+      "maxOpenPositions": null,
+      "name": "crazydog",
+      "netPnlUsd": 0.0,
+      "openNotionalUsd": 0.0,
+      "openPositions": 0,
+      "ordersPlaced": 0,
+      "ordersRejected": 0,
+      "rejectionCauses": null,
+      "sizeWeight": null,
+      "sizingSource": "global",
+      "source": "dylib:/Volumes/Hard Disk/BlitzkriegBot/user_layer/strategies/target/release/libcrazydog_strategy.dylib",
+      "wins": 0
+    },
+    {
+      "blockedMomentum": 0,
+      "blockedTiming": 0,
+      "closedTrades": 0,
+      "effectiveMaxShares": 10.0,
+      "effectiveMinShares": 10.0,
+      "effectiveSizePct": 0.0,
+      "effectiveSizeUsd": 2.5,
+      "enabled": false,
+      "entryBudgetUsd": 2.5,
+      "feesUsd": 0.0,
+      "gateExemptedMomentum": 0,
+      "gateExemptedTiming": 0,
+      "gateExemptionTimingFloorSec": 300,
+      "gateExemptions": [
+        "timing",
+        "momentum"
+      ],
+      "limitRejected": 0,
+      "losses": 0,
+      "maxOpenNotionalUsd": null,
+      "maxOpenPositions": null,
+      "name": "pair_arb",
+      "netPnlUsd": 0.0,
+      "openNotionalUsd": 0.0,
+      "openPositions": 0,
+      "ordersPlaced": 0,
+      "ordersRejected": 0,
+      "rejectionCauses": null,
+      "sizeWeight": null,
+      "sizingSource": "global",
+      "source": "dylib:/Volumes/Hard Disk/BlitzkriegBot/user_layer/strategies/target/release/libpair_arb_strategy.dylib",
+      "wins": 0
+    }
+  ],
+  "feed": {
+    "accountingAudit": {
+      "anchor": {
+        "balance": 10000.0,
+        "realized": 0.0,
+        "receivable": 0.0,
+        "received": 0.0,
+        "spent": 0.0
+      },
+      "anchored": true,
+      "at_ms": 1790012124908,
+      "checks": [
+        {
+          "actual": 0.0,
+          "detail": "available (9995.179198836218750000000) + reserved (0) == balance (9995.179198836218750000000); unfunded 0",
+          "drift": 0.0,
+          "expected": 0.0,
+          "name": "cash_identity",
+          "ok": true,
+          "structural": true
+        },
+        {
+          "actual": 0.0,
+          "detail": "reserved must equal the unfilled notional of 0 live BUY order(s)",
+          "drift": 0.0,
+          "expected": 0.0,
+          "name": "reservations_match_open_buys",
+          "ok": true,
+          "structural": true
+        },
+        {
+          "actual": 9995.179198836218,
+          "detail": "no trade log configured: not covered",
+          "drift": 0.0,
+          "expected": 9995.179198836218,
+          "name": "trade_ledger_identity",
+          "ok": true,
+          "structural": true
+        }
+      ],
+      "drift_usd": 0.0,
+      "failures": 0,
+      "haltReason": "",
+      "halt_entries": false,
+      "halted": false,
+      "live": false,
+      "note": "balance=9995.179198836218750000000 reserved=0 open_buys=0 open_positions=0",
+      "ok": true,
+      "open_buys": 0,
+      "open_positions": 0,
+      "receivableUsd": 0.0,
+      "runs": 2720,
+      "seen_trades": 0,
+      "structural_failure": false,
+      "summary": "ok balance=0 reserved_open_buys=0 open_positions=0"
+    },
+    "archive": null,
+    "blocked": {
+      "byStrategy": {
+        "mean_reversion": {
+          "momentum": 0,
+          "timing": 32
+        }
+      },
+      "declaredExemptions": [
+        {
+          "gates": [
+            "momentum"
+          ],
+          "strategy": "mean_reversion"
+        },
+        {
+          "gates": [
+            "timing",
+            "momentum"
+          ],
+          "strategy": "pair_arb",
+          "timingFloorSec": 300
+        }
+      ],
+      "momentum": 0,
+      "timing": 32
+    },
+    "books": 233686,
+    "confirmed": [
+      "107161557979446469179170820994661857725023325129779263184015922181569473388433",
+      "110198981014865665712942125523548182357167418107535538645701948319158221843030",
+      "1326373676572036464888105393767454871540843249184695006009441189765321973317",
+      "2444500455929819756487385933663829682898746528188471716270596282916483602188",
+      "50931438173042987864868944296475791853438703961286775662803016868424075861176",
+      "77282616662481534223796508624839341321027468009601799645184968751406104767782",
+      "84249979452596976619151911835411915347203246694808505007817782654300861829576"
+    ],
+    "confirmedDetail": [
+      {
+        "cap": "0.45",
+        "entry": "0.6864",
+        "inBand": false,
+        "mid": "0.78",
+        "token": "107161557979446469179170820994661857725023325129779263184015922181569473388433"
+      },
+      {
+        "cap": "0.88",
+        "chaseable": true,
+        "entry": "0.79",
+        "mid": "0.78",
+        "movePct": "5.4054054054054054054054054100",
+        "token": "107161557979446469179170820994661857725023325129779263184015922181569473388433"
+      },
+      {
+        "cap": "0.45",
+        "entry": "0.6864",
+        "inBand": false,
+        "mid": "0.78",
+        "token": "107161557979446469179170820994661857725023325129779263184015922181569473388433"
+      },
+      {
+        "cap": "0.45",
+        "entry": "0.462000",
+        "inBand": false,
+        "mid": "0.5250",
+        "token": "110198981014865665712942125523548182357167418107535538645701948319158221843030"
+      },
+      {
+        "cap": "0.88",
+        "chaseable": false,
+        "entry": "0.54",
+        "mid": "0.5250",
+        "movePct": "16.666666666666666666666666670",
+        "token": "110198981014865665712942125523548182357167418107535538645701948319158221843030"
+      },
+      {
+        "cap": "0.45",
+        "entry": "0.462000",
+        "inBand": false,
+        "mid": "0.5250",
+        "token": "110198981014865665712942125523548182357167418107535538645701948319158221843030"
+      },
+      {
+        "cap": "0.45",
+        "entry": "0.347600",
+        "inBand": true,
+        "mid": "0.3950",
+        "token": "1326373676572036464888105393767454871540843249184695006009441189765321973317"
+      },
+      {
+        "cap": "0.45",
+        "entry": "0.347600",
+        "inBand": true,
+        "mid": "0.3950",
+        "token": "1326373676572036464888105393767454871540843249184695006009441189765321973317"
+      },
+      {
+        "cap": "0.45",
+        "entry": "0.585200",
+        "inBand": false,
+        "mid": "0.6650",
+        "token": "2444500455929819756487385933663829682898746528188471716270596282916483602188"
+      },
+      {
+        "cap": "0.88",
+        "chaseable": true,
+        "entry": "0.67",
+        "mid": "0.6650",
+        "movePct": "1.5267175572519083969465648900",
+        "token": "2444500455929819756487385933663829682898746528188471716270596282916483602188"
+      },
+      {
+        "cap": "0.45",
+        "entry": "0.585200",
+        "inBand": false,
+        "mid": "0.6650",
+        "token": "2444500455929819756487385933663829682898746528188471716270596282916483602188"
+      },
+      {
+        "cap": "0.35",
+        "dropPct": "-47.619047619047619047619047620",
+        "entry": "0.2156",
+        "firable": false,
+        "inTrendSlide": true,
+        "mid": "0.22",
+        "token": "50931438173042987864868944296475791853438703961286775662803016868424075861176",
+        "trendDropPct": "-63.636363636363636363636363640"
+      },
+      {
+        "cap": "0.45",
+        "entry": "0.532400",
+        "inBand": false,
+        "mid": "0.6050",
+        "token": "77282616662481534223796508624839341321027468009601799645184968751406104767782"
+      },
+      {
+        "cap": "0.88",
+        "chaseable": true,
+        "entry": "0.62",
+        "mid": "0.6050",
+        "movePct": "2.5423728813559322033898305100",
+        "token": "77282616662481534223796508624839341321027468009601799645184968751406104767782"
+      },
+      {
+        "cap": "0.45",
+        "entry": "0.532400",
+        "inBand": false,
+        "mid": "0.6050",
+        "token": "77282616662481534223796508624839341321027468009601799645184968751406104767782"
+      },
+      {
+        "cap": "0.35",
+        "dropPct": "-38.532110091743119266055045870",
+        "entry": "0.328300",
+        "firable": false,
+        "inTrendSlide": true,
+        "mid": "0.3350",
+        "token": "84249979452596976619151911835411915347203246694808505007817782654300861829576",
+        "trendDropPct": "-39.639639639639639639639639640"
+      }
+    ],
+    "dailyLoss": {
+      "dayIndex": 20717,
+      "equityBasis": "dry",
+      "limitUsd": "1999.009375639756000000000",
+      "openingEquityUsd": "9995.046878198780000000000",
+      "realizedPnlUsd": "0.132320637438750000000",
+      "suppressedStops": 0,
+      "tripped": false,
+      "trippedAtMs": 0
+    },
+    "evaluations": 1631903,
+    "exitReasons": {
+      "capacity": 64,
+      "evictedTotal": 0,
+      "orphaned": 0,
+      "sweptTotal": 0,
+      "tracked": 0
+    },
+    "lastError": {
+      "code": "RISK_REJECTED",
+      "message": "SL cooldown: 178s",
+      "tsMs": 1790006849808
+    },
+    "lastVenueError": {
+      "message": "RiskRejected: SL cooldown: 178s",
+      "tsMs": 1790006849808
+    },
+    "orderbookFreshness": {
+      "checkEnabled": true,
+      "maxStaleMs": 8000
+    },
+    "placeRejected": 17,
+    "reconcile": {
+      "consecutiveSweepFailures": 0,
+      "freezeThreshold": 3
+    },
+    "rounds": 46,
+    "selfCheck": null,
+    "settlement": {
+      "blindSinceMs": null,
+      "bookedThisSession": 0,
+      "claims": [],
+      "lastError": null,
+      "manualRedemptions": 0,
+      "pendingRedemptions": 0,
+      "receivableUsd": 0.0,
+      "redeemedClaims": 0,
+      "retryableRedemptions": 0,
+      "settledPositions": 0,
+      "trackedMarkets": 0
+    },
+    "signals": 58,
+    "sizing": {
+      "closesExemptFromEquityCap": true,
+      "equityCapUsd": null,
+      "equityUsd": 9995.179198836218,
+      "maxOrderNotionalPct": 0.0,
+      "maxOrderNotionalUsd": 100.0,
+      "maxPrice": 1.0,
+      "maxShares": 10.0,
+      "minShares": 10.0,
+      "shareBandUsd": 10.0,
+      "sizeBudgetUsd": null,
+      "sizePct": 0.0,
+      "sizePctSkippedSignals": 0,
+      "worstCaseOrderUsd": 10.0,
+      "worstCasePctOfEquity": 0.10004823126297069
+    },
+    "spots": 4154922,
+    "strategies": [
+      {
+        "blockedMomentum": 0,
+        "blockedTiming": 0,
+        "closedTrades": 0,
+        "effectiveMaxShares": 10.0,
+        "effectiveMinShares": 10.0,
+        "effectiveSizePct": 0.0,
+        "effectiveSizeUsd": 2.5,
+        "enabled": false,
+        "entryBudgetUsd": 2.5,
+        "feesUsd": 0.0,
+        "gateExemptedMomentum": 0,
+        "gateExemptedTiming": 0,
+        "gateExemptionTimingFloorSec": null,
+        "gateExemptions": [],
+        "limitRejected": 0,
+        "losses": 0,
+        "maxOpenNotionalUsd": null,
+        "maxOpenPositions": null,
+        "name": "spread_arb",
+        "netPnlUsd": 0.0,
+        "openNotionalUsd": 0.0,
+        "openPositions": 0,
+        "ordersPlaced": 0,
+        "ordersRejected": 0,
+        "rejectionCauses": null,
+        "sizeWeight": null,
+        "sizingSource": "global",
+        "source": "dylib:/Volumes/Hard Disk/BlitzkriegBot/user_layer/strategies/target/release/libspread_arb_strategy.dylib",
+        "wins": 0
+      },
+      {
+        "blockedMomentum": 0,
+        "blockedTiming": 0,
+        "closedTrades": 0,
+        "effectiveMaxShares": 10.0,
+        "effectiveMinShares": 10.0,
+        "effectiveSizePct": 0.0,
+        "effectiveSizeUsd": 2.5,
+        "enabled": false,
+        "entryBudgetUsd": 2.5,
+        "feesUsd": 0.0,
+        "gateExemptedMomentum": 0,
+        "gateExemptedTiming": 0,
+        "gateExemptionTimingFloorSec": null,
+        "gateExemptions": [],
+        "limitRejected": 0,
+        "losses": 0,
+        "maxOpenNotionalUsd": null,
+        "maxOpenPositions": null,
+        "name": "trend_follow",
+        "netPnlUsd": 0.0,
+        "openNotionalUsd": 0.0,
+        "openPositions": 0,
+        "ordersPlaced": 0,
+        "ordersRejected": 0,
+        "rejectionCauses": null,
+        "sizeWeight": null,
+        "sizingSource": "global",
+        "source": "dylib:/Volumes/Hard Disk/BlitzkriegBot/user_layer/strategies/target/release/libtrend_follow_strategy.dylib",
+        "wins": 0
+      },
+      {
+        "blockedMomentum": 0,
+        "blockedTiming": 32,
+        "closedTrades": 30,
+        "effectiveMaxShares": 10.0,
+        "effectiveMinShares": 10.0,
+        "effectiveSizePct": 0.0,
+        "effectiveSizeUsd": 2.5,
+        "enabled": true,
+        "entryBudgetUsd": 2.5,
+        "feesUsd": 2.47090116378125,
+        "gateExemptedMomentum": 18,
+        "gateExemptedTiming": 0,
+        "gateExemptionTimingFloorSec": null,
+        "gateExemptions": [
+          "momentum"
+        ],
+        "limitRejected": 0,
+        "losses": 22,
+        "maxOpenNotionalUsd": null,
+        "maxOpenPositions": null,
+        "name": "mean_reversion",
+        "netPnlUsd": -4.82080116378125,
+        "openNotionalUsd": 0.0,
+        "openPositions": 0,
+        "ordersPlaced": 41,
+        "ordersRejected": 17,
+        "rejectionCauses": {
+          "positions.exitCooldown": 14,
+          "positions.max_positions": 2,
+          "risk:breaker": 1
+        },
+        "sizeWeight": null,
+        "sizingSource": "global",
+        "source": "dylib:/Volumes/Hard Disk/BlitzkriegBot/user_layer/strategies/target/release/libmean_reversion_strategy.dylib",
+        "wins": 8
+      },
+      {
+        "blockedMomentum": 0,
+        "blockedTiming": 0,
+        "closedTrades": 0,
+        "effectiveMaxShares": 10.0,
+        "effectiveMinShares": 10.0,
+        "effectiveSizePct": 0.0,
+        "effectiveSizeUsd": 2.5,
+        "enabled": false,
+        "entryBudgetUsd": 2.5,
+        "feesUsd": 0.0,
+        "gateExemptedMomentum": 0,
+        "gateExemptedTiming": 0,
+        "gateExemptionTimingFloorSec": null,
+        "gateExemptions": [],
+        "limitRejected": 0,
+        "losses": 0,
+        "maxOpenNotionalUsd": null,
+        "maxOpenPositions": null,
+        "name": "crazydog",
+        "netPnlUsd": 0.0,
+        "openNotionalUsd": 0.0,
+        "openPositions": 0,
+        "ordersPlaced": 0,
+        "ordersRejected": 0,
+        "rejectionCauses": null,
+        "sizeWeight": null,
+        "sizingSource": "global",
+        "source": "dylib:/Volumes/Hard Disk/BlitzkriegBot/user_layer/strategies/target/release/libcrazydog_strategy.dylib",
+        "wins": 0
+      },
+      {
+        "blockedMomentum": 0,
+        "blockedTiming": 0,
+        "closedTrades": 0,
+        "effectiveMaxShares": 10.0,
+        "effectiveMinShares": 10.0,
+        "effectiveSizePct": 0.0,
+        "effectiveSizeUsd": 2.5,
+        "enabled": false,
+        "entryBudgetUsd": 2.5,
+        "feesUsd": 0.0,
+        "gateExemptedMomentum": 0,
+        "gateExemptedTiming": 0,
+        "gateExemptionTimingFloorSec": 300,
+        "gateExemptions": [
+          "timing",
+          "momentum"
+        ],
+        "limitRejected": 0,
+        "losses": 0,
+        "maxOpenNotionalUsd": null,
+        "maxOpenPositions": null,
+        "name": "pair_arb",
+        "netPnlUsd": 0.0,
+        "openNotionalUsd": 0.0,
+        "openPositions": 0,
+        "ordersPlaced": 0,
+        "ordersRejected": 0,
+        "rejectionCauses": null,
+        "sizeWeight": null,
+        "sizingSource": "global",
+        "source": "dylib:/Volumes/Hard Disk/BlitzkriegBot/user_layer/strategies/target/release/libpair_arb_strategy.dylib",
+        "wins": 0
+      }
+    ],
+    "strategyLimitRejected": 0,
+    "tops": 0,
+    "tradingFrozen": {
+      "active": false
+    },
+    "venueRejected": 0
+  },
+  "blocked": {
+    "byStrategy": {
+      "mean_reversion": {
+        "momentum": 0,
+        "timing": 32
+      }
+    },
+    "declaredExemptions": [
+      {
+        "gates": [
+          "momentum"
+        ],
+        "strategy": "mean_reversion"
+      },
+      {
+        "gates": [
+          "timing",
+          "momentum"
+        ],
+        "strategy": "pair_arb",
+        "timingFloorSec": 300
+      }
+    ],
+    "momentum": 0,
+    "timing": 32
+  },
+  "openPositions": 0,
+  "openNotionalUsd": 0.0,
+  "riskAlerts": [
+    "RiskRejected: daily loss budget: UTC day 20716 opens with equity $10000, cap $2000 (realized loss resets at the UTC day boundary)",
+    "RiskRejected: consecutive-loss breaker tripped for strategy mean_reversion: 3 losses, halting its new entries 300s",
+    "RiskRejected: breaker cooldown elapsed — resuming new entries for strategy mean_reversion",
+    "RiskRejected: consecutive-loss breaker tripped for strategy mean_reversion: 3 losses, halting its new entries 300s",
+    "RiskRejected: breaker cooldown elapsed — resuming new entries for strategy mean_reversion",
+    "RiskRejected: daily loss budget: UTC day 20716 closed at $-4.953121801220000000000 realized — day 20717 opens with equity $9995.046878198780000000000, cap $1999.009375639756000000000",
+    "RiskRejected: consecutive-loss breaker tripped for strategy mean_reversion: 3 losses, halting its new entries 300s",
+    "RiskRejected: breaker cooldown elapsed — resuming new entries for strategy mean_reversion",
+    "RiskRejected: consecutive-loss breaker tripped for strategy mean_reversion: 3 losses, halting its new entries 300s",
+    "RiskRejected: breaker cooldown elapsed — resuming new entries for strategy mean_reversion",
+    "RiskRejected: consecutive-loss breaker tripped for strategy mean_reversion: 3 losses, halting its new entries 300s",
+    "RiskRejected: breaker cooldown elapsed — resuming new entries for strategy mean_reversion"
+  ],
+  "errors": [],
+  "tradeLines": [
+    {
+      "id": "hft-1",
+      "asset": "ETH",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "80906168021661169371379787792250642959460673331343846364990004938105382233208",
+      "conditionId": "0x6a2238587326345a882510f4cc781d3737129b1f290227e3ce4faae8da572f0b",
+      "netPnlUsd": -0.5508032,
+      "netPnlPct": -16.69100606060606
+    },
+    {
+      "id": "hft-2",
+      "asset": "ETH",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "30477406028557264425835452360831565836397272021472019045705751300903792810675",
+      "conditionId": "0xeed0755e325347b0c5b08b3647662300dd664254890571fa8b72ddb6b9829570",
+      "netPnlUsd": -0.8439453125,
+      "netPnlPct": -25.57410037878788
+    },
+    {
+      "id": "hft-3",
+      "asset": "BTC",
+      "direction": "up",
+      "reason": "TrailingStop",
+      "strategy": "mean_reversion",
+      "tokenId": "57915112426277145486868715418761121781587200788592639090606159142338458937110",
+      "conditionId": "0x86296dfb6ba74ab530ce26f0a8151be52b472f351a7e569adb1263b32c0cff5a",
+      "netPnlUsd": 0.869663975,
+      "netPnlPct": 28.053676612903224
+    },
+    {
+      "id": "hft-4",
+      "asset": "BTC",
+      "direction": "up",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "74018757137458212791046088450869456303570731080647662265621289855504131045682",
+      "conditionId": "0xff5941dbd605ea0e25a21f8c5fa584af87ce85d56284427551fdcd9b422d9d3b",
+      "netPnlUsd": -0.4830804,
+      "netPnlPct": -18.580015384615386
+    },
+    {
+      "id": "hft-5",
+      "asset": "ETH",
+      "direction": "up",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "37067308984253018346476425065041061332326016380070842716400243083886768710995",
+      "conditionId": "0x770c6697d91795ce218ac4a6c20ef0ee6c7e56d3d467c5ff3d6d3d8e8b1560ac",
+      "netPnlUsd": -0.6415872,
+      "netPnlPct": -21.38624
+    },
+    {
+      "id": "hft-6",
+      "asset": "BTC",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "9298125145846021460708902013947573794809298355414973874824581202963108710576",
+      "conditionId": "0x1289973eb321c1b4b22eb1694286fb7ec26b2891ad97894518a77a7bde99526f",
+      "netPnlUsd": -0.7485605125,
+      "netPnlPct": -22.016485661764705
+    },
+    {
+      "id": "hft-7",
+      "asset": "ETH",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "75794381909214556632933713292837119034947623552368044666599293496456914350832",
+      "conditionId": "0x2c777eb4ec486409c2fd52f6dcbe57b144dc433d9e46ae79da8d5aa69116c888",
+      "netPnlUsd": -0.6198203125,
+      "netPnlPct": -17.709151785714287
+    },
+    {
+      "id": "hft-8",
+      "asset": "SOL",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "110304740819172169887748373408889794535554568100969631701945815160646574591990",
+      "conditionId": "0x35aaa3c52021c7f464305e333c88996880022accf60070c41bfcba2f2a270115",
+      "netPnlUsd": -0.6159377125,
+      "netPnlPct": -18.11581507352941
+    },
+    {
+      "id": "hft-9",
+      "asset": "XRP",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "48593772075116461088596912031899070483148833052320152277792568147271128042675",
+      "conditionId": "0x8d22c7e5f2df16a9e0cce1e8837d669b7d43510ef97aa93201bad72728dc5825",
+      "netPnlUsd": -0.75285623872,
+      "netPnlPct": -22.142830550588236
+    },
+    {
+      "id": "hft-10",
+      "asset": "SOL",
+      "direction": "up",
+      "reason": "TrailingStop",
+      "strategy": "mean_reversion",
+      "tokenId": "105727280950989542786325362486241076573013034930814070322630171067677095262209",
+      "conditionId": "0xb82e7808d3f25969add77486795f147bc55e2048262ea9ce08345b56fff62981",
+      "netPnlUsd": 0.1353046875,
+      "netPnlPct": 4.100142045454546
+    },
+    {
+      "id": "hft-11",
+      "asset": "SOL",
+      "direction": "up",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "55147485424594855634805592632680165145708774554944558089132892619252486840354",
+      "conditionId": "0x19235e67eae1183365357bf986b567065f21ca4210e123d97165e9e6ce2d3885",
+      "netPnlUsd": -0.701499575,
+      "netPnlPct": -21.00298128742515
+    },
+    {
+      "id": "hft-12",
+      "asset": "SOL",
+      "direction": "down",
+      "reason": "TrailingStop",
+      "strategy": "mean_reversion",
+      "tokenId": "26642656732271281296229259292169289702711410979926301767051530835716783659620",
+      "conditionId": "0x23bcab7040942e155182f047b6f5f8059e65c82a9e0443a07c0857ddde501f95",
+      "netPnlUsd": 0.067385175,
+      "netPnlPct": 1.9252907142857143
+    },
+    {
+      "id": "hft-13",
+      "asset": "SOL",
+      "direction": "down",
+      "reason": "TakeProfit",
+      "strategy": "mean_reversion",
+      "tokenId": "77474436741892412053471777077457125593284031967677247719105001568681403836545",
+      "conditionId": "0xaf681814f11b6128dc0ddf0722a93669b250ded6d2aec885746e6b22e0b6e9d4",
+      "netPnlUsd": 3.4,
+      "netPnlPct": 100.0
+    },
+    {
+      "id": "hft-14",
+      "asset": "SOL",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "17543915770334444444271672524855617563610461067427004093503469019497833305952",
+      "conditionId": "0xbc1d5bca804dc45f3f9660b902c93c5d3911a57a6273cd25a45780773defb72f",
+      "netPnlUsd": -0.6235467125,
+      "netPnlPct": -17.32074201388889
+    },
+    {
+      "id": "hft-15",
+      "asset": "BTC",
+      "direction": "down",
+      "reason": "TrailingStop",
+      "strategy": "mean_reversion",
+      "tokenId": "23202975834093517460322958039812983069896793182053506114922332331616109334616",
+      "conditionId": "0x212dc1422640382557f8fd2b9dfa2553eedc5644bfa20380b28f39f93f336502",
+      "netPnlUsd": 0.9630022875,
+      "netPnlPct": 29.1818875
+    },
+    {
+      "id": "hft-16",
+      "asset": "SOL",
+      "direction": "up",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "91893435037791862722502501575989789639074911198872174044232361804205317206083",
+      "conditionId": "0x779dff688ce850f727c712038fec51b9d90bd804fd663fe45ba27245948878d3",
+      "netPnlUsd": -0.63939902052,
+      "netPnlPct": -18.268543443428573
+    },
+    {
+      "id": "hft-17",
+      "asset": "BTC",
+      "direction": "down",
+      "reason": "TrailingStop",
+      "strategy": "mean_reversion",
+      "tokenId": "59813755527312351534274128518211225148686269607352570667796615654077285919122",
+      "conditionId": "0x660af183353c0f15a634a8cfe422c4028ca6067e6dded608557a36872dbf1bb4",
+      "netPnlUsd": 0.858734375,
+      "netPnlPct": 24.535267857142856
+    },
+    {
+      "id": "hft-18",
+      "asset": "SOL",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "76971718339290283366910250699034615444137093904726304816671733471564428904344",
+      "conditionId": "0x55cf9588390e126a27c547abcc9d1f609e098ddf69bc671b59d543251136325e",
+      "netPnlUsd": -0.6159377125,
+      "netPnlPct": -18.11581507352941
+    },
+    {
+      "id": "hft-19",
+      "asset": "XRP",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "98034124539207900632667696051461163584172469362696452635434111245127830823927",
+      "conditionId": "0x5e1f362810f606e423a081d5202a73f7269977dfa03b9246f1c2264514481914",
+      "netPnlUsd": -0.4462722,
+      "netPnlPct": -14.87574
+    },
+    {
+      "id": "hft-20",
+      "asset": "SOL",
+      "direction": "down",
+      "reason": "TrailingStop",
+      "strategy": "mean_reversion",
+      "tokenId": "72440431857200653327513110151782683716663830442059401529442112819627108154076",
+      "conditionId": "0x93219a11aa2ea6d94fe3b27a755bfcf1e9ca7ec13268452e9d1196bcf5fb68c0",
+      "netPnlUsd": -0.0591872,
+      "netPnlPct": -1.8496
+    },
+    {
+      "id": "hft-21",
+      "asset": "BTC",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "36606920853133892459788290652781131320837273441681878495277457061247160812984",
+      "conditionId": "0x71d66d26780dbde50fd808ceb100d5c02325c04b5ab5f015e96e947e6f337ad4",
+      "netPnlUsd": -0.332,
+      "netPnlPct": -14.434782608695652
+    },
+    {
+      "id": "hft-22",
+      "asset": "XRP",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "63475378453827189198741349461444598849335312888411324044339603727669396618014",
+      "conditionId": "0xcd2add257c4cebcbd52eebfa16084a963728ab4672ad7e6a21bc30c3f46c8f85",
+      "netPnlUsd": -0.5462722,
+      "netPnlPct": -17.621683870967743
+    },
+    {
+      "id": "hft-23",
+      "asset": "SOL",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "36229706426581842249573949947144488057164264222794314605076070415555066383500",
+      "conditionId": "0x742010b804f6ebb4f75af2ceec826d258285f03a3e69e9ba92eb2e2b0a248262",
+      "netPnlUsd": -0.4968320911,
+      "netPnlPct": -15.823181983502659
+    },
+    {
+      "id": "hft-24",
+      "asset": "ETH",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "70230108973303651636406652847142995824372722630260747757331759921291354507078",
+      "conditionId": "0x6c63198831faef3c988f29958c48d5c1d2ef05878af67635e4a826905696e2d9",
+      "netPnlUsd": -0.6159377125,
+      "netPnlPct": -18.11581507352941
+    },
+    {
+      "id": "hft-25",
+      "asset": "SOL",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "37065975577655637095572146213702266359842625874605112235477761242321660698194",
+      "conditionId": "0x19e0e85ddef9dc854a9623353277ac6b0f2c44ffc98b886c7603073777e66928",
+      "netPnlUsd": -0.67035864082,
+      "netPnlPct": -19.71643061235294
+    },
+    {
+      "id": "hft-26",
+      "asset": "SOL",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "110798174677747094810948058165674598727776754634297189107608265551738838696078",
+      "conditionId": "0x31868297d6f7e8ab651091daa8aa9c8ad898c4ef626e9aa2c2d57ca54be1ea36",
+      "netPnlUsd": -0.7462722,
+      "netPnlPct": -22.614309090909092
+    },
+    {
+      "id": "hft-27",
+      "asset": "BTC",
+      "direction": "up",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "69313288663496995974854931315556031139445960470388749941664548556117215587052",
+      "conditionId": "0x87fa7cb3e72f259d1b62af283353595ee6d11dd4f50c5d27c2d0158256f78d06",
+      "netPnlUsd": -0.50190531328125,
+      "netPnlPct": -15.209251917613637
+    },
+    {
+      "id": "hft-28",
+      "asset": "BTC",
+      "direction": "down",
+      "reason": "StopLoss",
+      "strategy": "mean_reversion",
+      "tokenId": "9197907080692598062759726184903449281994658871151022127085086561798646673833",
+      "conditionId": "0x2667deebc742931333c3b4265f36b56f5aab09553595a39459f74d71fbdc18f2",
+      "netPnlUsd": -0.7462722,
+      "netPnlPct": -22.614309090909092
+    },
+    {
+      "id": "hft-29",
+      "asset": "SOL",
+      "direction": "up",
+      "reason": "TrailingStop",
+      "strategy": "mean_reversion",
+      "tokenId": "1326373676572036464888105393767454871540843249184695006009441189765321973317",
+      "conditionId": "0x08365e98d6a334b2cd6a921c92dfdba7cdc1cc4258153e62c71e2ff1ab1f74d7",
+      "netPnlUsd": 1.12397851566,
+      "netPnlPct": 34.906165082608695
+    },
+    {
+      "id": "hft-30",
+      "asset": "BTC",
+      "direction": "up",
+      "reason": "TrailingStop",
+      "strategy": "mean_reversion",
+      "tokenId": "84249979452596976619151911835411915347203246694808505007817782654300861829576",
+      "conditionId": "0xbb55275e7dc5580fd6805aa46fa3ee38cc307a2532ab0251833ab47a00c97ae4",
+      "netPnlUsd": 0.7594134875,
+      "netPnlPct": 21.697528214285715
+    }
+  ],
+  "tradeLinesTruncated": 0,
+  "forcedDry": true
+}

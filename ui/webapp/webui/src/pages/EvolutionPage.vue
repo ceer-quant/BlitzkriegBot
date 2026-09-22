@@ -44,6 +44,24 @@ const autoActive = computed(() => engineOn.value && autoEvolve.value)
 const cycleSeq = computed(() => evo.value?.status?.cycleSeq ?? 0)
 /** 内核上报的深度轮周期（秒）；旧内核不上报时为 0，文案退回「未上报」。 */
 const cycleSecs = computed(() => evo.value?.status?.cycleSecs ?? 0)
+/**
+ * #269：文件与 state.json 不一致的开关。两个开关都是运行期状态，所以持久值赢 ——
+ * 这正是「改文件不再是急停开关」的代价。内核为每一条打 WARN，这里把同一事实
+ * 显示出来，免得它只躺在日志里。
+ */
+const switchConflicts = computed(() => evo.value?.status?.switchConflicts ?? [])
+
+/** 冲突开关的显示名与后果（一句话，带方向：文件说什么、实际是什么）。 */
+const conflictText = computed(() =>
+  switchConflicts.value
+    .map((c) => {
+      const name = c.switch === 'autoEvolve' ? '自动进化（auto_evolve）' : '进化引擎（enabled）'
+      const file = c.fileValue ? '开' : '关'
+      const runtime = c.runtimeValue ? '开' : '关'
+      return `${name}：配置文件说「${file}」，但 state.json 记的是「${runtime}」，实际以「${runtime}」运行`
+    })
+    .join('；'),
+)
 
 /** 当前真实行为，一句话（三种组合分开说，不留含糊）。 */
 const modeSummary = computed(() => {
@@ -400,6 +418,18 @@ const cycleAgo = (ms: number): string => {
           </p>
         </div>
       </Card>
+    </div>
+
+    <!-- #269：文件与运行期开关打架 —— 先说清楚「谁在说话」，否则下面所有
+         「引擎未启用 / 自动已开」的文案都可能被读成文件说了算 -->
+    <div v-if="switchConflicts.length" class="mt-3.5">
+      <AlertBanner
+        tone="warn"
+        title="配置文件与运行期开关不一致"
+        hint="以面板开关为准（或删掉 data/evolution/state.json），否则改配置文件不会生效"
+      >
+        {{ conflictText }}
+      </AlertBanner>
     </div>
 
     <!-- 引擎未启用：一切「没动静」的统一解释，放在最显眼处 -->

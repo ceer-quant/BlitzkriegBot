@@ -51,6 +51,21 @@
 //! evidence. `pair_arb` is kept as a RESEARCH INSTRUMENT — it is registered at
 //! startup but never auto-enabled, so nothing trades it unless an operator asks.
 //!
+//! # Entry conditions (`special/no-live`, #270)
+//!
+//! The measured verdict above is why this strategy carries the `special/no-live`
+//! label and is excluded from the #262 WR/PF caliber. It leaves that state only
+//! by meeting a holdout bar, which is recorded — with the grep evidence that no
+//! default-enable list mentions it — in **README §9 「策略状态与进入条件」**
+//! (`README.md`, tracked in the repo; `dev-docs/` is gitignored and is not a
+//! citable source). The bar, verbatim:
+//!
+//! > frozen-corpus holdout PF ≥ 1.5 and net profit > 0, holding on two
+//! > non-overlapping windows.
+//!
+//! Nothing in this file enforces that bar: it is a governance rule, checked by
+//! review. Do not read a green test suite here as permission to enable it live.
+//!
 //! ## Why the maker side, and not "buy the asks"
 //!
 //! The obvious version of this trade — buy both legs at their asks whenever

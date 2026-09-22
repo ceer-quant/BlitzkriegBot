@@ -1,5 +1,5 @@
-# Shadow Evolution — adaptive parameter tuning (the shipped file leaves it ON,
-# in unattended mode; either switch can be turned off at runtime, see below).
+# Shadow Evolution — adaptive parameter tuning (the shipped file leaves it OFF;
+# see "WHY THE SHIPPED FILE IS OFF" at the bottom of this header).
 #
 # THIS FILE IS READ BY THE KERNEL (KI-11 / D-1). Editing a value here changes
 # runtime behaviour; before that fix the file was inert documentation and
@@ -30,14 +30,20 @@
 # its own baseline, is audited in its own file, and is applied/rolled back
 # independently of every other strategy.
 #
-# Three hard safety locks (not configurable here — enforced in code):
-#   Lock 0 domain   : a value outside the strategy's declared [min,max] is
-#                     rejected before the gradient lock is even consulted.
-#   Lock 1 gradient : each mutable knob may move at most +/-5% per evolution.
+# FOUR hard safety locks (not configurable here — enforced in code; the
+# canonical numbering is `shadow_evolution/guard.rs`, which is where they are
+# checked, and the names below match it verbatim):
+#   Lock 0 declaration: only knobs the strategy DECLARED evolvable may carry a
+#                     value. An undeclared name is a rejection, not a silent
+#                     no-op, so nothing can be smuggled in through the bag.
+#   Lock 1 domain   : every value must stay inside the domain the strategy
+#                     declared for that knob — the OUTER bound, which no number
+#                     of successive steps can walk past.
+#   Lock 2 gradient : each mutable knob may move at most +/-5% per evolution.
 #                     `max_gradient` below may TIGHTEN this and can never widen
 #                     it: a larger value is refused with a warning and the
 #                     built-in ceiling stays in force.
-#   Lock 2 immutable: hard stop / loss breaker / daily loss / order notional are
+#   Lock 3 immutable: hard stop / loss breaker / daily loss / order notional are
 #                     NOT part of any swappable parameter set and can never evolve.
 #
 # Enable at runtime with IPC `shadow_evolution.enable`, the WebUI/TUI engine
@@ -65,18 +71,39 @@
 # and WIN over this file on restart, so a switch an operator turned on is not
 # silently turned back off by a deploy. The cost, stated plainly: editing this
 # file is no longer a kill switch. If the file says off and the persisted switch
-# says on, the kernel logs a WARN at startup — turn it off from the panel, or
-# delete `data/evolution/state.json`, to make the file the last word again.
+# says on, the kernel logs a WARN at startup AND reports the disagreement as
+# `switchConflicts` in `shadow_evolution.status` (the panel renders it) — turn it
+# off from the panel, or delete `data/evolution/state.json`, to make the file the
+# last word again.
+#
+# WHY THE SHIPPED FILE IS OFF (#269). Until 2026-09-23 this file shipped
+# `enabled = true` + `auto_evolve = true`, i.e. unattended auto-evolution out of
+# the box. Production was off only because `data/evolution/state.json` said so —
+# so a new machine, a fresh `data/` directory or a restored backup silently
+# re-armed it. That default is now explicitly OFF, for two reasons that are still
+# open:
+#   1. The evolution objective inherits the exit-policy defects under repair
+#      (P0 / #262). A variant is replayed through the SAME exit ladder as the
+#      live path, so a variant that looks better by trading less into a broken
+#      profit-side exit would be judged an improvement and published
+#      unattended. Every promotion record now carries the ladder's identity in
+#      its `caliber` field so this can at least be traced (#269).
+#   2. There is no trustworthy WR/PF baseline for the evolution targets yet
+#      (#262). Measurement that can drift while nobody watches is not
+#      measurement.
+# Turning it on is a deliberate act: flip it in the panel (which persists to
+# `state.json`), pass `--shadow-evolution`, or set the two switches below — then
+# re-evaluate this default once P0 and #262 have landed.
 
 [shadow_evolution]
-enabled = true                       # evaluator runs (runtime switch persists)
+enabled = false                      # evaluator OFF out of the box (#269); runtime switch persists
 evaluation_window_minutes = 30       # rolling metrics window
 min_sample_count = 30                # >=30 virtual trades before judging
 min_win_rate_improvement = 0.05      # variant WR must beat live by +5pp
 min_profit_factor_improvement = 0.10 # variant PF must beat live by +10%
 min_observation_minutes = 5          # variant must exist >=5 min
 cooldown_minutes = 10                # min gap between applied evolutions
-max_gradient = 0.05                  # +/-5% per step (Lock 1; tightenable only)
+max_gradient = 0.05                  # +/-5% per step (Lock 2; tightenable only)
 variant_count = 3                    # shadow variants (>=2)
 
 # Audit DIRECTORY, not a file: the file name is derived from the strategy name,
@@ -97,8 +124,9 @@ audit_dir = "data/evolution"
 # `auto_evolve = true` is the unattended mode: the evaluator applies the
 # improvement itself, still under every guard above — AND it drains any backlog
 # a previous manual period left behind, so this mode never shows a pending
-# proposal waiting for a human who is not there.
-auto_evolve = true
+# proposal waiting for a human who is not there. OFF with the engine above
+# (#269): nothing is evaluated, so there is nothing to apply unattended.
+auto_evolve = false
 
 # The DEEP evolution clock, in minutes (72h = 4320): every round re-anchors
 # each strategy's variant set with COMPOUND mutants that move `deep_dims`

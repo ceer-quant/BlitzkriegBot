@@ -220,6 +220,14 @@ pub struct PromotionRecord {
     /// `true` on a rollback record (the restore itself), so a rollback never
     /// becomes the promotion a later rollback would restore.
     pub rollback: bool,
+    /// The exit-ladder identity this promotion's comparison was measured under
+    /// (#269, [`super::config::exit_caliber`]). Without it a promotion says
+    /// "better" without saying better *than what*: the twin replays the live
+    /// exit policy, so a ladder change silently re-bases every number in the
+    /// log. `default` so records written before the field existed still parse
+    /// (an empty caliber means "unknown, pre-#269").
+    #[serde(default)]
+    pub caliber: String,
 }
 
 /// JSONL persistence under the audit directory. Append-only files; disk
@@ -438,6 +446,13 @@ impl ProposalStore {
     }
 
     /// Record an adoption: the promotion the rollback surface restores.
+    ///
+    /// `caliber` is the exit-ladder identity the comparison was measured under
+    /// (#269) — see [`super::config::exit_caliber`].
+    // The eight parameters are the record's own fields, one for one; bundling
+    // them into a builder would add a type without removing a decision, which is
+    // the same trade `variants.rs` and `signal.rs` already make in this module.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_promotion(
         &self,
         proposal_id: &str,
@@ -446,6 +461,7 @@ impl ProposalStore {
         to: &StrategyParams,
         decided_by: DecidedBy,
         now_ms: i64,
+        caliber: &str,
     ) {
         self.append_line(
             &self.promotions_path(),
@@ -457,6 +473,7 @@ impl ProposalStore {
                 to_params: to.clone(),
                 decided_by,
                 rollback: false,
+                caliber: caliber.to_string(),
             },
         );
     }
@@ -469,6 +486,7 @@ impl ProposalStore {
         from: &StrategyParams,
         to: &StrategyParams,
         now_ms: i64,
+        caliber: &str,
     ) {
         self.append_line(
             &self.promotions_path(),
@@ -480,6 +498,7 @@ impl ProposalStore {
                 to_params: to.clone(),
                 decided_by: DecidedBy::User,
                 rollback: true,
+                caliber: caliber.to_string(),
             },
         );
     }
@@ -568,6 +587,9 @@ pub struct PersistedState {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    /// The exit-ladder identity these tests stamp on a promotion record.
+    const CALIBER: &str = "exit-fnv1a64:0123456789abcdef";
 
     fn metrics(
         closed: u32,
@@ -697,19 +719,49 @@ mod tests {
             p.set("cap", dec!(0.412));
             p
         };
-        store.record_promotion("p1", "alpha", &from, &to, DecidedBy::User, 100);
+        store.record_promotion("p1", "alpha", &from, &to, DecidedBy::User, 100, CALIBER);
         let hit = store.last_active_promotion("alpha").unwrap();
         assert_eq!(hit.proposal_id, "p1");
         assert_eq!(hit.to_params.get("cap"), Some(dec!(0.412)));
+        // #269: the ladder the comparison was measured under travels with it.
+        assert_eq!(hit.caliber, CALIBER);
         assert!(store.last_active_promotion("beta").is_none());
 
         // After a rollback the promotion must stop being restorable — otherwise
         // a second rollback would re-apply the change the user just undid.
-        store.record_rollback("p1", "alpha", &to, &from, 200);
+        store.record_rollback("p1", "alpha", &to, &from, 200, CALIBER);
         assert!(
             store.last_active_promotion("alpha").is_none(),
             "a rolled-back promotion is not a restore target"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #269: a promotion record written before the caliber existed must still
+    /// parse — the rollback surface reads the whole file, so a hard failure on
+    /// one old line would take the restore target with it.
+    #[test]
+    fn a_promotion_without_a_caliber_still_loads() {
+        let dir = tmp_dir("promo-legacy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = ProposalStore::new(&dir);
+        let mut params = StrategyParams::new();
+        params.set("cap", dec!(0.40));
+        // Exactly the shape a pre-#269 kernel wrote: no `caliber` key at all.
+        let legacy = serde_json::json!({
+            "timestamp": 1,
+            "proposalId": "p0",
+            "strategy": "alpha",
+            "fromParams": params,
+            "toParams": params,
+            "decidedBy": "user",
+            "rollback": false,
+        });
+        std::fs::write(store.promotions_path(), format!("{legacy}\n")).unwrap();
+        let hit = store
+            .last_active_promotion("alpha")
+            .expect("a pre-#269 record is still a restore target");
+        assert_eq!(hit.caliber, "", "an absent caliber reads as unknown");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

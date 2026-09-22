@@ -77,7 +77,7 @@ pub mod variants;
 
 pub use config::{
     EvolutionStatus, ImmutableConfig, KnobDeclaration, KnobSpec, MutableParams,
-    ShadowEvolutionConfig, StrategyParams, VariantView,
+    ShadowEvolutionConfig, StrategyParams, SwitchConflict, SwitchName, VariantView, exit_caliber,
 };
 pub use proposal::{DecidedBy, EvolutionProposal, ProposalState, TradeMetrics};
 pub use registry::ParamRegistry;
@@ -238,6 +238,10 @@ pub struct ShadowEvolution {
     /// E13: wall-clock ms of the last DEEP round (0 = clock not started).
     last_cycle_ms: i64,
     cycle_seq: u64,
+    /// #269: switches where `state.json` and the config file disagreed at
+    /// startup. Kept (not merely logged) so the panel can render the state an
+    /// operator reading the file would get wrong.
+    switch_conflicts: Vec<SwitchConflict>,
 }
 
 impl ShadowEvolution {
@@ -256,6 +260,11 @@ impl ShadowEvolution {
         // an older kernel never wrote hands that decision back to the config.
         let st = store.load_state().unwrap_or_default();
         let mut cfg = cfg;
+        // #269: a file/runtime disagreement is not an error (the runtime switch
+        // wins on purpose), but it is the exact state in which "the file says
+        // off" is not a kill switch — so it is kept, not just logged, and the
+        // panel reads it back through `switch_conflicts()`.
+        let mut switch_conflicts: Vec<SwitchConflict> = Vec::new();
         if let Some(on) = st.enabled {
             // The persisted switch is the operator's most recent word, so it wins
             // over the file — a deploy editing the file must not undo a switch
@@ -278,10 +287,35 @@ impl ShadowEvolution {
                          file re-enables it only once that switch is turned back on"
                     );
                 }
+                switch_conflicts.push(SwitchConflict {
+                    switch: SwitchName::Engine,
+                    file_value: cfg.enabled,
+                    runtime_value: on,
+                });
             }
             cfg.enabled = on;
         }
-        cfg.auto_evolve = st.auto_evolve.unwrap_or(cfg.auto_evolve);
+        if let Some(on) = st.auto_evolve {
+            // #269: the SAME precedence applies to the unattended switch, and it
+            // used to be applied silently — the one switch that lets the kernel
+            // adopt a change with nobody watching was the one whose file/runtime
+            // disagreement had no voice at all.
+            if on != cfg.auto_evolve {
+                tracing::warn!(
+                    file = cfg.auto_evolve,
+                    runtime = on,
+                    "the persisted runtime auto-evolve switch disagrees with the config \
+                     file — the runtime switch wins; use the panel's auto switch, or \
+                     remove <audit_dir>/state.json, to make the file the last word again"
+                );
+                switch_conflicts.push(SwitchConflict {
+                    switch: SwitchName::AutoEvolve,
+                    file_value: cfg.auto_evolve,
+                    runtime_value: on,
+                });
+            }
+            cfg.auto_evolve = on;
+        }
         let enabled = cfg.enabled;
         // The audit log's own gate is read from this config: an engine the
         // persisted state switched on (and the file did not) must not silently
@@ -300,6 +334,7 @@ impl ShadowEvolution {
             auto_evolve,
             last_cycle_ms,
             cycle_seq,
+            switch_conflicts,
             proposal_store: store,
         };
         me.proposal_store.load();
@@ -736,7 +771,9 @@ impl ShadowEvolution {
                         u.set.variants[variant_index].metrics(cfg.evaluation_window_secs, now_ms);
                     u.scaffold(&cfg, now_ms);
                     // The adoption is durable: a rollback must be able to undo
-                    // it after a restart, so the promotion log gets the record.
+                    // it after a restart, so the promotion log gets the record —
+                    // stamped with the ladder it was measured under (#269).
+                    let caliber = exit_caliber(&cfg.exit_cfg);
                     self.proposal_store.record_promotion(
                         &signal.signal_id,
                         &u.strategy,
@@ -744,6 +781,7 @@ impl ShadowEvolution {
                         &new_params,
                         DecidedBy::Auto,
                         now_ms,
+                        &caliber,
                     );
                     adopted = Some(EvolutionProposal {
                         // A distinct prefix: this row is not a held proposal that
@@ -943,8 +981,14 @@ impl ShadowEvolution {
             .last_active_promotion(strategy)
             .map(|r| r.proposal_id)
             .unwrap_or_else(|| "memory".into());
-        self.proposal_store
-            .record_rollback(&undone, strategy, &from, &restore, now_ms);
+        self.proposal_store.record_rollback(
+            &undone,
+            strategy,
+            &from,
+            &restore,
+            now_ms,
+            &exit_caliber(&self.cfg.exit_cfg),
+        );
         let (mut fm, mut tm) = (MutableParams::new(), MutableParams::new());
         fm.set_strategy(strategy, from);
         tm.set_strategy(strategy, restore);
@@ -1080,6 +1124,7 @@ impl ShadowEvolution {
                     &to_params,
                     by,
                     now_ms,
+                    &exit_caliber(&self.cfg.exit_cfg),
                 );
                 Ok(DecisionResult::Accepted { proposal })
             }
@@ -1222,6 +1267,21 @@ impl ShadowEvolution {
             "deep evolution round re-anchored variant sets"
         );
         Some(event)
+    }
+
+    /// #269: the switches `state.json` and the config file disagreed about at
+    /// startup. Empty is the normal case; a non-empty list means an operator
+    /// reading the file gets the wrong answer about what is in force, which is
+    /// why the panel renders it rather than leaving it in the log.
+    pub fn switch_conflicts(&self) -> &[SwitchConflict] {
+        &self.switch_conflicts
+    }
+
+    /// The exit-ladder identity this manager's twins replay (#269). Stamped on
+    /// every promotion record, so a comparison can always be traced back to the
+    /// policy it was measured under.
+    pub fn exit_caliber(&self) -> String {
+        exit_caliber(&self.cfg.exit_cfg)
     }
 
     /// Status of one strategy. `None` = this strategy is **not evolvable** (it
@@ -2116,6 +2176,51 @@ mod tests {
         assert!(m2.auto_evolve(), "the persisted switch wins over the file");
     }
 
+    /// #269: when `state.json` and the file disagree, the disagreement must be
+    /// READABLE, not merely logged. The runtime switch still wins — that is the
+    /// design — but a panel that can only print the two booleans cannot explain
+    /// why a file saying "off" sits next to an engine that is on.
+    #[test]
+    fn a_file_runtime_switch_conflict_is_reported_not_only_logged() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        // The shipped file says OFF; a panel flip said ON and was persisted.
+        let cfg = fast_cfg(false, "conflict");
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        proposal::ProposalStore::new(&dir).save_state(proposal::PersistedState {
+            enabled: Some(true),
+            auto_evolve: Some(true),
+            last_cycle_ms: 0,
+            cycle_seq: 0,
+        });
+        let m = ShadowEvolution::new(cfg, &refs);
+        assert!(m.is_enabled(), "the runtime switch wins over the file");
+        assert_eq!(
+            m.switch_conflicts(),
+            [
+                SwitchConflict {
+                    switch: SwitchName::Engine,
+                    file_value: false,
+                    runtime_value: true,
+                },
+                SwitchConflict {
+                    switch: SwitchName::AutoEvolve,
+                    file_value: false,
+                    runtime_value: true,
+                },
+            ],
+            "both switches are reported with the file's value and the one in force"
+        );
+
+        // Agreement is not a conflict, and a missing key is not a disagreement.
+        let clean = ShadowEvolution::new(fast_cfg(true, "conflict-agree"), &refs);
+        assert!(
+            clean.switch_conflicts().is_empty(),
+            "the file and the runtime agree"
+        );
+    }
+
     /// #249: with the auto switch on there is nobody to answer a held proposal,
     /// so the very next evaluation pass adopts the backlog — as `auto`, through
     /// the same guards and the same promotion log a hand-clicked acceptance
@@ -2164,6 +2269,13 @@ mod tests {
         assert!(
             log.contains("\"decidedBy\":\"auto\""),
             "and recorded as unattended: {log}"
+        );
+        // #269: every promotion carries the exit-ladder identity it was judged
+        // under, so "better" can be traced back to a comparison that means
+        // something.
+        assert!(
+            log.contains(&format!("\"caliber\":\"{}\"", m.exit_caliber())),
+            "and stamped with the ladder it was measured under: {log}"
         );
         let decided = m
             .all_proposals(10)
