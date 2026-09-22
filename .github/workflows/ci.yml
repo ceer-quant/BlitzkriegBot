@@ -514,10 +514,12 @@ jobs:
         with:
           node-version: 22
       # Cheap and broad, so a syntax break anywhere fails here with a filename
-      # rather than as a mystery inside one script's self-test.
+      # rather than as a mystery inside one script's self-test. scripts/lib holds
+      # the sourced libraries (backup-attempt.sh, upgrade-artifacts.sh), which
+      # have no entry point of their own and would otherwise never be parsed.
       - name: Shell syntax (every ops script)
         run: |
-          for f in scripts/*.sh; do
+          for f in scripts/*.sh scripts/lib/*.sh; do
             bash -n "$f" || { echo "syntax error: $f"; exit 1; }
           done
       - name: LaunchAgent plists parse
@@ -525,6 +527,20 @@ jobs:
           for f in $(git ls-files | grep -i 'plist'); do
             plutil -lint "$f" || exit 1
           done
+      # #252's propagation path. An upgrade that ships the four binaries and
+      # leaves the configs, the strategy cdylibs and the panel bundle behind is a
+      # deploy that reports success and then runs the previous build, so this is
+      # the regression net for "the release carried everything the kernel reads".
+      # It cannot be tested through `blitzkrieg upgrade` here (that needs a
+      # network, a release build and a live stack), which is why the library works
+      # on caller-named directories and this drives the whole install / verify /
+      # rollback path against two throwaway trees — no cargo, no npm, no network.
+      # Reverse-acceptance: disabling the rollback's added-file cleanup turns
+      # exactly the "cdylib the install ADDED is taken away again" case red, and
+      # dropping the config staging turns staging red with the guard's message.
+      - name: Upgrade propagation self-test (#252)
+        run: sh scripts/upgrade-propagate-test.sh
+
       # #211's detector. Its self-test spawns real processes and asserts on exit
       # codes and log wording, so it is the regression net for the thing that is
       # supposed to notice the core is down. Reverse-acceptance already proved
