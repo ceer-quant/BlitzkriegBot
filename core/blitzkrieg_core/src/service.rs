@@ -988,6 +988,13 @@ pub struct Core {
     /// exponentially and stop after a cap — a stuck exit once burned 380+
     /// rejections hammering a venue that kept refusing at full tick rate.
     place_cooldowns: HashMap<String, RejectCooldown>,
+    /// Orders whose escalation this process already reported as skipped because
+    /// the cross the book offers is refused by the risk gate (#261). The sweep
+    /// retries on every maker timeout, so without this the same unaffordable
+    /// cross would reprint the same line every few seconds. An id leaves the
+    /// set as soon as the order stops being live, or when a later escalation
+    /// actually goes through.
+    escalation_skips: HashSet<String>,
     /// Venue cancels the core has already committed to locally (order marked
     /// Cancelled by a regime pull, round cleanup, escalation or explicit
     /// cancel) while the venue may still hold the order resting. The live
@@ -1241,6 +1248,7 @@ impl Core {
             event_archive,
             strategy_accounting: HashMap::new(),
             place_cooldowns: HashMap::new(),
+            escalation_skips: HashSet::new(),
             pending_venue_cancels: Vec::new(),
             consecutive_venue_rejects: 0,
             consecutive_sweep_failures: 0,
@@ -3075,11 +3083,28 @@ impl Core {
                         direction: o.direction.clone(),
                         round_slot: o.round_slot,
                     };
-                    match self.place_escalated(req, now_ms) {
-                        Ok(_) => {
-                            return Ok(());
-                        }
-                        Err(e2) => self.emit_error(e2),
+                    // The risk gate gets the first word here too (#261): a
+                    // cross the book offers but this core may not afford is
+                    // not an escalation, it is a second refusal — and taking
+                    // it would spend the intent's place in the placement
+                    // history on a leg that never had a chance. Falling
+                    // through books the original venue rejection instead,
+                    // which is the same handling as "no crossing depth".
+                    match self.risk.check(&req) {
+                        Ok(()) => match self.place_escalated(req, now_ms) {
+                            Ok(_) => {
+                                return Ok(());
+                            }
+                            Err(e2) => self.emit_error(e2),
+                        },
+                        Err(e2) => tracing::info!(
+                            order = %id,
+                            strategy = %req.strategy,
+                            price = %worst,
+                            size = %req.size,
+                            error = %e2,
+                            "escalation skipped after WouldCross: the book's cross is refused by the risk gate"
+                        ),
                     }
                 }
             }
@@ -5854,7 +5879,6 @@ impl Core {
                 self.ome.set_escalation(&id, now_ms + timeout)?;
                 continue;
             };
-            self.cancel(&id, now_ms)?;
             let req = OrderRequest {
                 token_id: token,
                 condition_id: condition,
@@ -5868,8 +5892,51 @@ impl Core {
                 direction,
                 round_slot: slot,
             };
-            self.place_escalated(req, now_ms)?;
+            // The maker is about to be cancelled to make room for this leg, so
+            // the risk gate gets the first word — the same gate `place` will
+            // apply a moment later. `marketable_walk` only asks whether the
+            // book HAS depth at the grid's extreme; it does not ask whether
+            // this core may afford it. With a per-order notional cap, the
+            // affordable price is `cap / size`, and a book that only offers
+            // depth above it (a one-sided 0.99 ask is the everyday case) makes
+            // a naive escalation cancel the maker and THEN get refused: the
+            // entry is destroyed rather than deferred, and the propagated
+            // error aborts the whole tick. Skipping instead keeps the resting
+            // maker alive and re-arms the clock — the same semantics as the
+            // no-depth branch above — while saying so once per order.
+            if let Err(e) = self.risk.check(&req) {
+                if self.escalation_skips.insert(id.clone()) {
+                    tracing::info!(
+                        order = %id,
+                        strategy = %req.strategy,
+                        price = %worst,
+                        size = %remaining,
+                        error = %e,
+                        "escalation skipped: the book's cross is refused by the risk gate; maker leg kept resting"
+                    );
+                }
+                self.ome.set_escalation(&id, now_ms + timeout)?;
+                continue;
+            }
+            self.escalation_skips.remove(&id);
+            self.cancel(&id, now_ms)?;
+            // Past the gate, a placement can still fail (a reservation, a
+            // venue refusal). The maker is already gone, so that entry is
+            // lost — but ONE dead escalation must not abort the maintenance
+            // pass: the remaining due orders still have their turn.
+            if let Err(e) = self.place_escalated(req, now_ms) {
+                tracing::warn!(
+                    order = %id,
+                    error = %e,
+                    "the escalated leg was refused after the maker was cancelled"
+                );
+            }
         }
+        // Forget the skip marks of orders that are no longer live: the set is
+        // keyed by order id, and a fresh id is minted for every order.
+        let ome = &self.ome;
+        self.escalation_skips
+            .retain(|id| ome.get(id).is_some_and(|o| o.status.is_live()));
         Ok(())
     }
 
@@ -7327,6 +7394,89 @@ mod tests {
             .collect();
         assert_eq!(filled.len(), 1);
         assert_eq!(filled[0].avg_fill_price, Some(dec!(0.50)));
+    }
+
+    /// #261: an escalated leg the risk gate would refuse must not cost the
+    /// resting maker its life.
+    ///
+    /// Before this fix the sweep cancelled the maker first and escalated
+    /// second, so a book that only offers depth above `cap / size` (3.00 / 5
+    /// shares = 0.60 here; a live 10-share lot under a 6.00 cap gives 0.60 the
+    /// same way) destroyed the entry outright AND failed the whole tick. On the
+    /// deployed dry stack, whose books offer a single 0.99 ask, that was every
+    /// spread_arb entry for a day and a half — zero fills, 15 aborted ticks.
+    #[test]
+    fn unaffordable_cross_keeps_the_maker_and_does_not_fail_the_tick() {
+        let mut c = dry_core(dec!(10));
+        let (id, st) = c
+            .place(
+                order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(5), "k1"),
+                1000,
+                1,
+            )
+            .unwrap();
+        assert_eq!(st, OrderStatus::Live);
+        // The only ask rests at 0.99: crossing 5 shares there costs 4.95, past
+        // the 3.00 per-order cap, so the gate refuses the taker leg.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.99), dec!(100))], 2);
+        c.tick(1002)
+            .expect("an unaffordable cross must not abort the maintenance pass");
+        let o = c.ome().get(&id).cloned().unwrap();
+        assert_eq!(o.status, OrderStatus::Live, "the maker must stay resting");
+        assert_eq!(o.escalate_at_ms, Some(2002), "the clock re-arms");
+        assert_eq!(
+            c.ome()
+                .all()
+                .into_iter()
+                .filter(|o| o.internal_key.ends_with(":escalated"))
+                .count(),
+            0,
+            "no escalated leg may be placed"
+        );
+        // The entry intent survived: once the book is affordable again, the
+        // next due tick escalates and fills as a taker.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.50), dec!(100))], 2003);
+        c.tick(2003).unwrap();
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Cancelled);
+        let filled: Vec<_> = c
+            .ome()
+            .all()
+            .into_iter()
+            .filter(|o| o.status == OrderStatus::Filled)
+            .collect();
+        assert_eq!(filled.len(), 1);
+        assert_eq!(filled[0].avg_fill_price, Some(dec!(0.50)));
+    }
+
+    /// The second half of #261: once the gate has passed, a placement can still
+    /// fail (here the reservation: the maker's own 2.00 was all the cash, and
+    /// the escalated 5 × 0.50 = 2.50 has nothing to reserve). The maker is
+    /// genuinely gone by then, but ONE dead escalation must not abort the
+    /// maintenance pass — the remaining due orders still have their turn.
+    #[test]
+    fn an_escalation_that_dies_after_the_maker_does_not_abort_the_pass() {
+        let mut c = dry_core(dec!(2));
+        let (id, st) = c
+            .place(
+                order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(5), "k1"),
+                1000,
+                1,
+            )
+            .unwrap();
+        assert_eq!(st, OrderStatus::Live);
+        c.book_snapshot("tok", vec![], vec![(dec!(0.50), dec!(100))], 2);
+        c.tick(1002)
+            .expect("a failed escalation must not abort the maintenance pass");
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Cancelled);
+        assert_eq!(
+            c.ome()
+                .all()
+                .into_iter()
+                .filter(|o| o.status == OrderStatus::Filled)
+                .count(),
+            0,
+            "nothing may fill: the escalation was refused"
+        );
     }
 
     #[test]
