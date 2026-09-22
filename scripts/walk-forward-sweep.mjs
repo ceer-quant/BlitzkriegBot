@@ -58,11 +58,23 @@ const PARAM_FLAGS = {
   trend_confirm_sec: '--trend-confirm-sec',
 };
 
-// Ops knobs shared by every run: spread_arb alone, no discovery, no logs, the
-// same documented seed the backtest gate uses (scripts/backtest-check.mjs).
+// The strategies every replay asks for — and the set the kernel's startup
+// self-check (#265) is validated against. ONE list, so the sweep cannot ask for
+// a different number than it verifies: a replay whose kernel resolved fewer
+// strategies than this ran with no trading logic at all, and its 0-trade report
+// must never be read as "the strategy had no signal". That misreading is exactly
+// what #265 cost once (a deployment binary started outside the repo refused all
+// three libraries, printed three FAILED lines and one WARN, and then reported
+// zero trades on every fold).
+const EXPECTED_STRATEGIES = ['spread_arb'];
+
+// Ops knobs shared by every run: the expected strategies alone, no discovery, no
+// logs, the same documented seed the backtest gate uses
+// (scripts/backtest-check.mjs). `--allow-zero-strategies` is deliberately NOT
+// passed: the sweep wants the refusal to be loud.
 const OPS_KNOBS = [
   '--engine',
-  '--enable-strategy', 'spread_arb',
+  ...EXPECTED_STRATEGIES.flatMap((s) => ['--enable-strategy', s]),
   '--no-discovery',
   '--no-trade-log',
   '--no-order-log',
@@ -246,31 +258,89 @@ function extractMetrics(rep) {
   };
 }
 
-/** One replay; exits the sweep on failure — a missing number must never be
- *  silently filled, the walk-forward report is only as good as its runs. */
+/**
+ * The kernel's startup self-check line (#265):
+ *   blitzkrieg-core: strategy startup self-check: requested=N resolved=M enabled=[a, b]
+ * Returns null when the line is absent (a pre-#265 binary, or a log that was
+ * lost) — which is itself a reason to distrust the run, not to accept it.
+ */
+function parseSelfCheck(stderr) {
+  const m = stderr.match(/strategy startup self-check: requested=(\d+) resolved=(\d+) enabled=\[([^\]]*)\]/);
+  if (!m) return null;
+  return {
+    requested: Number(m[1]),
+    resolved: Number(m[2]),
+    enabled: m[3].split(',').map((s) => s.trim()).filter(Boolean),
+  };
+}
+
+/**
+ * Why this run's log says the kernel had no usable strategy — or null when the
+ * log is exactly what the sweep asked for. Every branch is a fact the kernel
+ * printed; nothing is inferred from the trade count (a real strategy with no
+ * signal also closes zero trades, and telling those two apart is the point).
+ */
+function invalidReason(stderr, selfCheck) {
+  if (/unknown strategy requested/.test(stderr)) {
+    return 'kernel log: unknown strategy requested (the library was not loaded)';
+  }
+  if (/refusing to start: none of the \d+ explicitly requested/.test(stderr)) {
+    return 'kernel log: the kernel refused to start over unresolved strategies';
+  }
+  if (!selfCheck) {
+    return 'kernel log: no strategy startup self-check line (binary predates #265?)';
+  }
+  if (selfCheck.resolved < EXPECTED_STRATEGIES.length) {
+    return `kernel log: requested ${selfCheck.requested} strategies but resolved ${selfCheck.resolved} (expected ${EXPECTED_STRATEGIES.length})`;
+  }
+  const missing = EXPECTED_STRATEGIES.filter((s) => !selfCheck.enabled.includes(s));
+  if (missing.length) {
+    return `kernel log: resolved but not enabled: ${missing.join(', ')}`;
+  }
+  return null;
+}
+
+/** One replay. Returns `{ report, invalid }` — `report` is null when the run was
+ *  invalid, and `invalid` is the reason (never a silently filled zero). A run
+ *  that fails for any OTHER reason still exits the sweep: the walk-forward
+ *  report is only as good as its runs. */
 function runBacktest(args2, reportPath) {
   return new Promise((res) => {
     if (existsSync(reportPath)) {
       try {
-        res(JSON.parse(readFileSync(reportPath, 'utf8')));
+        res({ report: JSON.parse(readFileSync(reportPath, 'utf8')), invalid: null, cached: true });
         console.log('    (resume: cached report)');
         return;
       } catch { /* stale file — rerun */ }
     }
     console.log(`    $ blitzkrieg-core ${args2.join(' ')}`);
-    const child = spawn(BIN, args2, { stdio: ['ignore', 'ignore', 'inherit'], cwd: outDir });
+    const child = spawn(BIN, args2, { stdio: ['ignore', 'ignore', 'pipe'], cwd: outDir });
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
     const watchdog = setTimeout(() => {
       console.error(`    TIMEOUT after ${runTimeoutMin} min — stopping the run group`);
       try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch {} }
     }, runTimeoutMin * 60_000);
     child.on('exit', (code) => {
       clearTimeout(watchdog);
+      const invalid = invalidReason(stderr, parseSelfCheck(stderr));
+      if (invalid) {
+        // #265: this is not a crash, it is a kernel that ran (or refused to run)
+        // without the strategies the sweep asked for. Mark the candidate, keep
+        // the sweep going — a 0-trade report from this run would be a lie.
+        for (const line of stderr.split('\n').filter((l) => /FAILED|unknown strategy|refusing to start/.test(l)).slice(0, 8)) {
+          console.error(`      | ${line}`);
+        }
+        res({ report: null, invalid, cached: false });
+        return;
+      }
       if (code !== 0) {
         console.error(`backtest exited ${code}; refusing to write a report from a failed run`);
+        console.error(stderr.split('\n').slice(-10).join('\n'));
         process.exit(1);
       }
       try {
-        res(JSON.parse(readFileSync(reportPath, 'utf8')));
+        res({ report: JSON.parse(readFileSync(reportPath, 'utf8')), invalid: null, cached: false });
       } catch (e) {
         console.error(`cannot parse report ${reportPath}: ${e.message}`);
         process.exit(1);
@@ -285,7 +355,8 @@ if (dryRun) {
   process.exit(0);
 }
 
-const results = []; // { candidate, fold, metrics, reportPath }
+const results = []; // { candidate, fold, metrics, reportPath } — VALID runs only
+const invalidRuns = []; // { candidate, fold, reason } — #265: no report is read from these
 for (const combo of grid) {
   const id = candidateId(combo);
   const cdir = join(runsDir, candidateDir(id));
@@ -294,11 +365,17 @@ for (const combo of grid) {
   console.log(`candidate ${id}`);
   for (let f = 0; f < foldsN; f++) {
     const reportPath = join(cdir, `fold-${f}.json`);
-    const rep = await runBacktest(
+    const run = await runBacktest(
       ['--backtest', foldPaths[f], ...OPS_KNOBS, ...flags,
         '--backtest-report', reportPath, '--backtest-tick-ms', tickMs, '--backtest-tail-ms', tailMs],
       reportPath,
     );
+    if (run.invalid) {
+      invalidRuns.push({ candidate: id, fold: f, reason: run.invalid });
+      console.log(`    fold ${f}: INVALID — ${run.invalid}`);
+      continue;
+    }
+    const rep = run.report;
     results.push({ candidate: id, combo, fold: f, metrics: extractMetrics(rep) });
     const m = extractMetrics(rep);
     console.log(`    fold ${f}: closed=${m.closed} WR=${r3(m.winRatePct)}% payoff=${r3(m.payoff)} PF=${r3(m.profitFactor)} net=${r3(m.netPnlUsd)}`);
@@ -311,34 +388,38 @@ if (!keepFolds && !dryRun) {
   try { if (readdirSync(foldsDir).length === 0) rmdirSync(foldsDir); } catch {}
 }
 
-// ── walk-forward arithmetic ─────────────────────────────────────────────────
+// ── walk-forward arithmetic (over VALID runs only) ──────────────────────────
+// An invalid run is not a zero: it is excluded here and reported separately, and
+// a window with nothing valid left to pick from yields no pick rather than a
+// winner-by-default.
 const metricOf = (r) => r.metrics[selectMetric];
 const better = (a, b) => (a == null ? false : b == null ? true : a > b);
-const candIds = [...new Set(results.map((r) => r.candidate))];
+const rowsOf = (fold) => results.filter((r) => r.fold === fold);
 
 // Selection: on each fold i (0..N-2), the best candidate by the select metric.
 const selections = [];
 for (let i = 0; i < foldsN - 1; i++) {
-  const rows = results.filter((r) => r.fold === i);
+  const rows = rowsOf(i);
   let pick = null;
   for (const r of rows) if (pick === null || better(metricOf(r), metricOf(pick))) pick = r;
-  const validate = results.find((r) => r.fold === i + 1 && r.candidate === pick.candidate);
-  const bestValidate = results.filter((r) => r.fold === i + 1)
+  const validate = pick ? results.find((r) => r.fold === i + 1 && r.candidate === pick.candidate) : null;
+  const bestValidate = rowsOf(i + 1)
     .reduce((acc, r) => (acc === null || better(metricOf(r), metricOf(acc)) ? r : acc), null);
   selections.push({
     trainFold: i,
     trainWindow: { firstAtMs: foldStats[i].firstAtMs, lastAtMs: foldStats[i].lastAtMs },
-    pick: pick.candidate,
-    trainMetric: metricOf(pick),
+    pick: pick ? pick.candidate : null,
+    trainMetric: pick ? metricOf(pick) : null,
     validateFold: i + 1,
     validateMetric: validate ? metricOf(validate) : null,
-    bestValidateCandidate: bestValidate.candidate,
-    bestValidateMetric: metricOf(bestValidate),
-    generalized: validate && bestValidate ? candidateId(pick.combo) === candidateId(bestValidate.combo) : false,
+    bestValidateCandidate: bestValidate ? bestValidate.candidate : null,
+    bestValidateMetric: bestValidate ? metricOf(bestValidate) : null,
+    generalized: Boolean(pick && validate && bestValidate)
+      && candidateId(pick.combo) === candidateId(bestValidate.combo),
   });
 }
 const picks = selections.map((s) => s.pick);
-const stablePick = picks.every((p) => p === picks[0]) ? picks[0] : null;
+const stablePick = picks.length > 0 && picks.every((p) => p === picks[0]) ? picks[0] : null;
 const shippedId = candidateId({});
 const shippedRow = results.find((r) => r.candidate === shippedId);
 
@@ -357,7 +438,13 @@ const report = {
   foldStats,
   results: results.map(({ candidate, fold, metrics }) => ({ candidate, fold, metrics })),
   selections,
+  // #265: runs the kernel's own startup self-check marked unusable. They are
+  // absent from `results` on purpose — a 0-trade report from a kernel that
+  // loaded no strategy is not a data point.
+  invalid: invalidRuns,
+  expectedStrategies: EXPECTED_STRATEGIES,
   verdict: {
+    usable: invalidRuns.length === 0,
     picks,
     stablePick,
     shippedDefaultsCandidate: shippedId,
@@ -373,17 +460,32 @@ md.push(`# Walk-forward sweep — ${utc(report.generatedAtMs)}`);
 md.push('');
 md.push(`- select metric: \`${selectMetric}\`; folds: ${foldsN} (~${perFold} events each, rolling walk-forward)`);
 md.push(`- coverage: ${totalEvents} events, ${spanDays.toFixed(2)} days (${utc(archiveFirst)} → ${utc(archiveLast)})`);
-md.push(`- candidates: ${candIds.map((c) => `\`${c}\``).join(', ')}`);
+md.push(`- candidates: ${grid.map((c) => `\`${candidateId(c)}\``).join(', ')}`);
+if (invalidRuns.length) {
+  const bad = [...new Set(invalidRuns.map((r) => r.candidate))];
+  md.push(`- **INVALID runs: ${invalidRuns.length}** — the kernel's own startup self-check says the strategies were not running (${bad.map((c) => `\`${c}\``).join(', ')}). Those runs are excluded from every number below; their trade counts were never read (#265).`);
+}
 md.push('');
+if (invalidRuns.length) {
+  md.push('## Invalid runs (excluded)');
+  md.push('');
+  md.push('| candidate | fold | reason |');
+  md.push('|---|---|---|');
+  for (const r of invalidRuns) md.push(`| ${r.candidate} | ${r.fold} | ${r.reason} |`);
+  md.push('');
+  md.push(`Expected strategies per replay: ${EXPECTED_STRATEGIES.map((s) => `\`${s}\``).join(', ')}. A run lands here when the kernel log shows the request unresolved (\`unknown strategy requested\`), when it refused to start, or when the startup self-check line is missing — never because it closed few trades.`);
+  md.push('');
+}
 md.push('## Fold × candidate matrix');
 md.push('');
 md.push('| fold | window (UTC) | candidate | closed | WR% | payoff | PF | net USD |');
 md.push('|---|---|---|---|---|---|---|---|');
 for (let f = 0; f < foldsN; f++) {
-  for (const cid of candIds) {
+  for (const cid of grid.map((c) => candidateId(c))) {
     const r = results.find((x) => x.fold === f && x.candidate === cid);
     const m = r?.metrics;
-    md.push(`| ${f} | ${utc(foldStats[f].firstAtMs)} → ${utc(foldStats[f].lastAtMs)} | ${cid} | ${m?.closed ?? '—'} | ${r3(m?.winRatePct)} | ${r3(m?.payoff)} | ${r3(m?.profitFactor)} | ${r3(m?.netPnlUsd)} |`);
+    const cell = invalidRuns.some((x) => x.fold === f && x.candidate === cid) ? 'INVALID' : (m?.closed ?? '—');
+    md.push(`| ${f} | ${utc(foldStats[f].firstAtMs)} → ${utc(foldStats[f].lastAtMs)} | ${cid} | ${cell} | ${r3(m?.winRatePct)} | ${r3(m?.payoff)} | ${r3(m?.profitFactor)} | ${r3(m?.netPnlUsd)} |`);
   }
 }
 md.push('');
@@ -392,12 +494,14 @@ md.push('');
 md.push('| train fold | pick | train metric | validate fold | validate metric | best validate | generalized |');
 md.push('|---|---|---|---|---|---|---|');
 for (const s of selections) {
-  md.push(`| ${s.trainFold} | ${s.pick} | ${r3(s.trainMetric)} | ${s.validateFold} | ${r3(s.validateMetric)} | ${s.bestValidateCandidate} (${r3(s.bestValidateMetric)}) | ${s.generalized ? 'yes' : 'no'} |`);
+  md.push(`| ${s.trainFold} | ${s.pick ?? '—'} | ${r3(s.trainMetric)} | ${s.validateFold} | ${r3(s.validateMetric)} | ${s.bestValidateCandidate ?? '—'} (${r3(s.bestValidateMetric)}) | ${s.generalized ? 'yes' : 'no'} |`);
 }
 md.push('');
 md.push('## Verdict');
 md.push('');
-if (stablePick) {
+if (invalidRuns.length) {
+  md.push(`**This sweep is NOT usable as evidence.** ${invalidRuns.length} of ${foldsN * grid.length} replays ran without the strategies the sweep asked for (see the invalid-runs table). Fix the load path first — a kernel that starts with zero strategies produces 0-trade reports indistinguishable from "no signal", which is exactly the confusion this section exists to prevent.`);
+} else if (stablePick) {
   md.push(`The same candidate wins every selection window: **${stablePick}**.`);
 } else {
   md.push(`Selection is NOT stable across windows: picks were ${picks.map((p) => `\`${p}\``).join(', ')}. A parameter that only wins some windows is noise, not an improvement — do not adopt on this sweep alone.`);
@@ -422,3 +526,7 @@ writeFileSync(join(outDir, 'walk-forward.md'), md.join('\n'));
 
 console.log(`\nreport: ${join(outDir, 'walk-forward.json')}`);
 console.log(`report: ${join(outDir, 'walk-forward.md')}`);
+if (invalidRuns.length) {
+  console.error(`\nINVALID: ${invalidRuns.length} replay(s) ran without the strategies the sweep asked for (${EXPECTED_STRATEGIES.join(', ')}). The report says so and is not usable as evidence — a kernel that starts with zero strategies reports zero trades exactly like a strategy with no signal (#265).`);
+  process.exitCode = 1;
+}

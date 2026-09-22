@@ -26,6 +26,29 @@ round_sec = 900
 min_round_age_sec = 30
 min_time_left_sec = 180
 
+# ── The engine-level exit ladder (E17/#264) ──────────────────────────────────
+# Exits belong to the KERNEL, not to a strategy library: these four knobs are
+# read by `exit_policy::ExitConfig` for every strategy, including one nobody
+# rebuilt. They are the same four the `--exit-*` flags set, and the flags win
+# over this section (CLI > file > compiled default).
+#
+# Nothing is set here on purpose. The shipped ladder is the compiled one, and
+# the ticket that added this section deliberately did NOT move it — a ladder is
+# changed by measuring it (an A/B replay with `--exit-*`), not by editing a
+# default. The values below are therefore documentation, written as comments:
+# uncommenting one is an explicit act, and the startup log then names it
+# (`exit.stop_loss_pct=12 (toml)`).
+#
+#   take_profit_pct       = 100   fixed take-profit, % of entry (a backstop only:
+#                                 normal exits ride the trailing stop)
+#   stop_loss_pct         = 12    stop-loss, % of entry
+#   trailing_min_high_pct = 15    profit (%) needed before the trailing stop arms
+#   min_trail_pct         = 8     floor for the trailing stop's give-back (%)
+#
+# [exit]
+# stop_loss_pct = 12
+# min_trail_pct = 8
+
 # ── Strategies are NOT configured here ───────────────────────────────────────
 # PR-B removed `[strategy]`. The kernel ships ZERO strategies and enables
 # NONE of them by default: every strategy comes from a cdylib under the

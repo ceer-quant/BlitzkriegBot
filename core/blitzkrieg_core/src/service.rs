@@ -73,6 +73,22 @@ pub struct CoreConfig {
     /// and most in-process tests run with `None`, and a toggle then changes
     /// nothing on disk.
     pub strategy_state_path: Option<String>,
+    /// The strategies the OPERATOR named on the command line
+    /// (`--enable-strategy`), kept apart from `enabled_strategies` because the
+    /// startup self-check is about an EXPLICIT request, not about what a
+    /// persisted state file replays (#265).
+    ///
+    /// Empty for every in-process core and for the backtester, which is why the
+    /// refusal below cannot surprise a caller that never asked for a strategy by
+    /// name. The two sets are related by construction: `main` builds
+    /// `enabled_strategies` as the persisted set plus these names.
+    pub requested_strategies: Vec<String>,
+    /// #265 — start even when none of the requested strategies resolved. The
+    /// default is to REFUSE: an explicit request that loads nothing used to be
+    /// one `WARN` line followed by a healthy-looking kernel that had no strategy
+    /// at all (exit 0, socket listening, health probe green). `--allow-zero-strategies`
+    /// is the acknowledged escape hatch for a harness that wants that boot.
+    pub allow_zero_strategies: bool,
     pub min_round_age_sec: i64,
     pub size_usd: Decimal,
     pub min_shares: Decimal,
@@ -276,7 +292,15 @@ impl CoreConfig {
     /// enabled-set is persisted (when `strategy_state_path` is configured) so
     /// the next boot replays it — the boot lists and the runtime toggles write
     /// the same file, and the last explicit intent wins.
-    pub fn install_engine(&self, core: &mut Core) {
+    ///
+    /// Returns `Err` when an EXPLICIT request resolved to zero live strategies
+    /// (#265): the operator named strategies and not one of them exists, so the
+    /// kernel would boot with a healthy-looking banner and trade nothing. The
+    /// refusal belongs to the caller (the server ends the boot, the backtester
+    /// fails the run) rather than to this method, so the facts stay inspectable
+    /// and an embedded caller decides what a zero-strategy engine means to it.
+    /// [`CoreConfig::allow_zero_strategies`] is the acknowledged opt-out.
+    pub fn install_engine(&self, core: &mut Core) -> Result<(), String> {
         core.enable_engine(crate::engine::Engine::new(self.engine_config()));
         self.load_strategy_dir(core);
         for name in &self.enabled_strategies {
@@ -298,6 +322,67 @@ impl CoreConfig {
         if let Some(path) = &self.strategy_state_path {
             crate::strategy_state::save(std::path::Path::new(path), &core.enabled_strategy_names());
         }
+        self.strategy_startup_self_check(core)
+    }
+
+    /// The startup self-check (#265): state what was REQUESTED, what RESOLVED and
+    /// what is enabled, and refuse a boot that resolves an explicit request to
+    /// nothing.
+    ///
+    /// The line is printed unconditionally, refusals included, because it is the
+    /// contract `scripts/walk-forward-sweep.mjs` reads back out of the kernel's
+    /// log: a replay that could not resolve the strategies it asked for must be
+    /// recognisable as such rather than arriving as a report with zero trades
+    /// ("the strategy had no signal" and "there was no strategy" have to be
+    /// different answers).
+    ///
+    /// A name the operator ALSO disabled explicitly is not part of the request —
+    /// `--enable-strategy x --disable-strategy x` asked for nothing — so it can
+    /// never be the reason this refuses.
+    ///
+    /// "Resolved" is asked of the live registry (`Core::strategy_names`), not of
+    /// the enable loop: the question is whether the name exists as a strategy in
+    /// this process, which is exactly what a missing library makes false. The
+    /// persisted set is deliberately not consulted — a name that no longer
+    /// resolves there was never requested by this invocation.
+    fn strategy_startup_self_check(&self, core: &Core) -> Result<(), String> {
+        let requested: Vec<&str> = self
+            .requested_strategies
+            .iter()
+            .map(String::as_str)
+            .filter(|n| !self.disabled_strategies.iter().any(|d| d.as_str() == *n))
+            .collect();
+        let registered = core.strategy_names();
+        let resolved = requested
+            .iter()
+            .filter(|n| registered.iter().any(|r| r == *n))
+            .count();
+        let enabled = core.enabled_strategy_names();
+        eprintln!(
+            "blitzkrieg-core: strategy startup self-check: requested={} resolved={} enabled=[{}]",
+            requested.len(),
+            resolved,
+            enabled.join(", ")
+        );
+        if requested.is_empty() || resolved > 0 || self.allow_zero_strategies {
+            return Ok(());
+        }
+        Err(format!(
+            "refusing to start: none of the {} explicitly requested strateg{} resolved to a live \
+             strategy ({}), so this kernel would run with no strategy at all — while reporting \
+             itself healthy (the engine's live set is [{}]). Take the libraries from the strategy \
+             directory (`--strategy-dir`, `BK_STRATEGY_DIR`, or the default `user_layer/strategies` \
+             of the checkout the binary lives in) — every library there is refused unless it sits \
+             under an approved strategy root (`{}` under a repository root, or a directory named \
+             in {}) — or acknowledge the empty set with --allow-zero-strategies. See the \
+             `strategy auto-load` lines above for what was rejected and why",
+            requested.len(),
+            if requested.len() == 1 { "y" } else { "ies" },
+            requested.join(", "),
+            enabled.join(", "),
+            crate::strategy_engine::loader::APPROVED_ROOTS.join("`, `"),
+            crate::strategy_engine::loader::ENV_ALLOW_DIRS,
+        ))
     }
 
     /// Auto-load every strategy library under `strategy_dir` and enable it.
@@ -537,6 +622,8 @@ impl Default for CoreConfig {
             disabled_strategies: Vec::new(),
             strategy_dir: None,
             strategy_state_path: None,
+            requested_strategies: Vec::new(),
+            allow_zero_strategies: false,
             min_round_age_sec: 30,
             size_usd: Decimal::new(25, 1), // 2.5
             min_shares: Decimal::from(10),
@@ -8422,7 +8509,9 @@ mod strategy_dispatch_tests {
         // for a real library. Nothing is enabled unless the config says so.
         let install = |cfg: CoreConfig| {
             let mut c = Core::new(cfg.clone());
-            cfg.install_engine(&mut c);
+            // No `requested_strategies` here, so the startup self-check has
+            // nothing to insist on and install cannot refuse.
+            cfg.install_engine(&mut c).expect("engine install");
             let cfg2 = cfg.engine_config();
             crate::strategies::test_support::host_disabled(
                 c.engine.as_mut().expect("engine installed"),
@@ -8523,7 +8612,7 @@ mod strategy_dispatch_tests {
         };
         let install = || {
             let mut c = Core::new(cfg.clone());
-            cfg.install_engine(&mut c);
+            cfg.install_engine(&mut c).expect("engine install");
             let cfg2 = cfg.engine_config();
             crate::strategies::test_support::host_disabled(
                 c.engine.as_mut().expect("engine installed"),
@@ -8565,7 +8654,9 @@ mod strategy_dispatch_tests {
         let mut replay_cfg = cfg.clone();
         replay_cfg.enabled_strategies = crate::strategy_state::load(&state);
         let mut rebooted = Core::new(replay_cfg.clone());
-        replay_cfg.install_engine(&mut rebooted);
+        replay_cfg
+            .install_engine(&mut rebooted)
+            .expect("engine install");
         let rcfg = replay_cfg.engine_config();
         crate::strategies::test_support::host_disabled(
             rebooted.engine.as_mut().expect("engine installed"),
@@ -8594,7 +8685,7 @@ mod strategy_dispatch_tests {
             ..Default::default()
         };
         let mut c = Core::new(cfg.clone());
-        cfg.install_engine(&mut c);
+        cfg.install_engine(&mut c).expect("engine install");
         let cfg2 = cfg.engine_config();
         crate::strategies::test_support::host_disabled(
             c.engine.as_mut().expect("engine installed"),
@@ -8603,6 +8694,79 @@ mod strategy_dispatch_tests {
         );
         assert!(c.set_strategy_enabled("trend_follow", true));
         assert_eq!(c.enabled_strategy_names(), vec!["trend_follow".to_string()]);
+    }
+
+    /// #265: naming strategies that do not exist is a REFUSAL, not a warning. A
+    /// kernel that boots with a healthy-looking banner and then trades nothing
+    /// because the library it was told to run was never loaded is exactly the
+    /// failure this guards; `--allow-zero-strategies` is the acknowledged
+    /// opt-out, and a name the operator also disabled explicitly was never
+    /// requested in the first place.
+    #[test]
+    fn an_explicit_request_that_resolves_to_nothing_refuses_the_boot() {
+        // The kernel registers nothing itself (PR-B), so in-process every
+        // requested name is unresolved — which is precisely the production
+        // shape of "the strategy library was not found".
+        let boot = |requested: &[&str], disabled: &[&str], allow: bool| {
+            let cfg = CoreConfig {
+                dry_seed_balance: dec!(1000),
+                engine_enabled: true,
+                requested_strategies: requested.iter().map(|s| (*s).to_string()).collect(),
+                disabled_strategies: disabled.iter().map(|s| (*s).to_string()).collect(),
+                allow_zero_strategies: allow,
+                ..Default::default()
+            };
+            let mut core = Core::new(cfg.clone());
+            cfg.install_engine(&mut core)
+        };
+
+        // Nothing was asked for: the ordinary zero-strategy boot (tests, the
+        // backtester, a session that only hosts builtins) is untouched.
+        assert!(
+            boot(&[], &[], false).is_ok(),
+            "an unrequested empty set must never refuse"
+        );
+
+        // An explicit request that resolves to nothing refuses, and names both
+        // what was asked for and the door out.
+        let err = boot(&["dog_strategy"], &[], false)
+            .expect_err("a request that resolves to nothing must refuse the boot");
+        assert!(
+            err.contains("refusing to start") && err.contains("dog_strategy"),
+            "the refusal must name the request, got: {err}"
+        );
+        assert!(
+            err.contains("--allow-zero-strategies"),
+            "the refusal must name the opt-out, got: {err}"
+        );
+        // The message states the ENGINE's live set, not the request twice: the
+        // first draft filled this slot with the enabled list under the label
+        // "Requested:", which a probe read as "Requested: ." — a refusal that
+        // cannot say what it refused is not a diagnosis.
+        assert!(
+            err.contains("the engine's live set is []"),
+            "the refusal must state the live set, got: {err}"
+        );
+
+        // The door is not welded shut: the flag acknowledges the empty set.
+        assert!(
+            boot(&["dog_strategy"], &[], true).is_ok(),
+            "--allow-zero-strategies must start normally"
+        );
+
+        // `--enable-strategy x --disable-strategy x` asked for nothing, so it is
+        // not a request that failed — the same rule the toggle order follows.
+        assert!(
+            boot(&["dog_strategy"], &["dog_strategy"], false).is_ok(),
+            "an explicitly disabled name is not part of the request"
+        );
+
+        // Several names: the refusal counts and lists them all.
+        let err = boot(&["dog_strategy", "cat_strategy"], &[], false).expect_err("still a refusal");
+        assert!(
+            err.contains("dog_strategy") && err.contains("cat_strategy"),
+            "got: {err}"
+        );
     }
 
     /// Shadow Evolution sees every evolvable strategy the engine hosts, whether it
@@ -8623,7 +8787,7 @@ mod strategy_dispatch_tests {
             ..Default::default()
         };
         let mut c = Core::new(base.clone());
-        base.install_engine(&mut c);
+        base.install_engine(&mut c).expect("engine install");
         // The kernel registers nothing itself (PR-B); host the adapters so the
         // evolution manager has strategies to build units for.
         let ecfg = base.engine_config();

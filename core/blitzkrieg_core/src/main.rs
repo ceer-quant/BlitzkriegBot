@@ -58,10 +58,25 @@
 //! the refusal is disabled and the banner states loudly that the directory has
 //! two writers. Never use it for a deployment.
 //!
-//! Strategy selection (repeatable; builtins default to `spread_arb` on and
-//! `trend_follow` off, so a new strategy never changes what a running session
-//! trades until it is named):
+//! Strategy selection (repeatable; the kernel ships ZERO enabled strategies, so
+//! a new strategy never changes what a running session trades until it is
+//! named):
 //!                   [--enable-strategy <name>] [--disable-strategy <name>]
+//!                   [--allow-zero-strategies]
+//!   An explicit `--enable-strategy` that resolves to NOTHING is a refusal, not a
+//!   warning (#265): the kernel would otherwise boot with a healthy banner and
+//!   trade nothing because the library it was told to run never loaded. The
+//!   opt-out is explicit (`--allow-zero-strategies`), the same rule as an unknown
+//!   argument.
+//!
+//! Exit ladder (E17/#264; engine-level — exits belong to the kernel, not to a
+//! strategy dylib):
+//!                   [--exit-take-profit-pct <pct>] [--exit-stop-loss-pct <pct>]
+//!                   [--exit-trailing-min-high-pct <pct>]
+//!                   [--exit-min-trail-pct <pct>]
+//!   Resolved CLI > `[exit]` in the config file > the shipped `ExitConfig`
+//!   default, so leaving all four out is byte-for-byte the ladder that was
+//!   compiled in before these flags existed.
 //!
 //! Market-data capture is ON by default for an engine session (`--no-event-archive`
 //! disables it): the events behind a past stop-out only exist if recording was
@@ -75,7 +90,9 @@
 //!                    --trend-confirm-sec --spread-arb-entry-factor
 //!                    --spread-arb-min-obi --spread-arb-max-spread-pct
 //!                    --spread-arb-dip-max-pct --spread-arb-bounce-min-pct
-//!                    --spread-arb-bounce-window-sec]
+//!                    --spread-arb-bounce-window-sec
+//!                    --exit-take-profit-pct --exit-stop-loss-pct
+//!                    --exit-trailing-min-high-pct --exit-min-trail-pct]
 //!   The CoreConfig knobs flow through CoreConfig → engine_config, the same
 //!   mapping the live server uses, so a sweep is a pure CLI variation with no
 //!   rebuild (E15). `--backtest-knob` is the other half: a knob a strategy
@@ -168,6 +185,16 @@ struct Args {
     spread_arb_dip_max_pct: Option<Decimal>,
     spread_arb_bounce_min_pct: Option<Decimal>,
     spread_arb_bounce_window_sec: Option<i64>,
+    /// E17/#264 — the engine-level exit ladder, resolved CLI > `[exit]` in the
+    /// config file > the shipped `ExitConfig` value. Exits belong to the kernel
+    /// (they must fire for every strategy, including a dylib nobody rebuilt), so
+    /// these are `ExitConfig` knobs rather than per-strategy parameters. The
+    /// defaults are the compiled ones, unchanged: the flags exist to A/B a
+    /// ladder, not to move the shipped one.
+    exit_take_profit_pct: Decimal,
+    exit_stop_loss_pct: Decimal,
+    exit_trailing_min_high_pct: Decimal,
+    exit_min_trail_pct: Decimal,
     feed_ws: bool,
     /// `--net-check`: probe the venue's network paths, print one JSON report and
     /// exit (0 all passed / 1 any failed). Answered before any service starts,
@@ -215,12 +242,21 @@ struct Args {
     strategy_limits: Vec<String>,
     /// Strategies to switch ON at startup (repeatable, E4-a). The kernel ships
     /// ZERO enabled strategies — what starts enabled is the operator's persisted
-    /// intent (`--strategy-state` file, replayed and rewritten) plus these flags;
-    /// an unknown name is warned about, never fatal.
+    /// intent (`--strategy-state` file, replayed and rewritten) plus these flags.
+    /// A name that resolves to no live strategy is REPORTED and, when it is the
+    /// only thing asked for, REFUSES the boot (#265) unless
+    /// `--allow-zero-strategies` acknowledges it; a name in the persisted set
+    /// that no longer resolves stays a warning (nobody asked for it in this
+    /// invocation).
     enable_strategy: Vec<String>,
     /// Strategies to switch OFF at startup (repeatable). Applied after
     /// `--enable-strategy`, so an explicit "off" wins.
     disable_strategy: Vec<String>,
+    /// #265 — acknowledge that an explicit `--enable-strategy` may resolve to
+    /// nothing. Without it, a boot that asked for strategies and loaded none is
+    /// refused (exit 1) rather than started with a healthy-looking banner and no
+    /// trading logic. This never enables anything: it only stops the refusal.
+    allow_zero_strategies: bool,
     /// Where the effective enabled-set is recorded so toggles and boot flags
     /// survive a restart. Default `data/strategy-state.json`; `none`/empty = no
     /// persistence (a backtest or a hermetic harness wants this).
@@ -463,6 +499,21 @@ fn parse_backtest_knob(spec: &str) -> Result<(String, String, Decimal), String> 
     Ok((strategy.to_string(), knob.to_string(), value))
 }
 
+/// Parse one `--exit-*` percentage value.
+///
+/// Pure so the rejection is unit-testable; the caller keeps the loud failure
+/// (stderr + exit 2). Deliberately STRICTER than the `--spread-arb-*` knobs,
+/// which swallow a typo'd decimal and leave the flag doing nothing: an exit
+/// ladder is what bounds a loss, so a `--exit-stop-loss-pct 1x` that silently
+/// kept the shipped 12 would be the "silent downgrade of a safety knob" #228
+/// removed for unknown arguments, one layer down. Nothing here validates the
+/// VALUE (the engine has its own guards, e.g. `take_profit_pct` only fires
+/// between 0 and 9999) — only that the operator's number was understood.
+fn parse_exit_pct(raw: &str) -> Result<Decimal, String> {
+    Decimal::from_str(raw.trim())
+        .map_err(|e| format!("want a decimal percentage (e.g. 12, 8.5): {e}"))
+}
+
 /// Why `--max-orderbook-stale-ms` / `BK_MAX_ORDERBOOK_STALE_MS` cannot be used as
 /// given, or `None` when it can (#205).
 ///
@@ -534,6 +585,13 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut spread_arb_dip_max_pct: Option<Decimal> = None;
     let mut spread_arb_bounce_min_pct: Option<Decimal> = None;
     let mut spread_arb_bounce_window_sec: Option<i64> = None;
+    // E17/#264: the four engine-level exit knobs, tracked as Option so the
+    // CLI > TOML > default chain can tell "the operator spoke" from "nobody did".
+    let mut exit_take_profit_pct: Option<Decimal> = None;
+    let mut exit_stop_loss_pct: Option<Decimal> = None;
+    let mut exit_trailing_min_high_pct: Option<Decimal> = None;
+    let mut exit_min_trail_pct: Option<Decimal> = None;
+    let mut allow_zero_strategies = false;
     let mut feed_ws = false;
     let mut net_check = false;
     let mut replay: Option<String> = None;
@@ -706,6 +764,11 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     disable_strategy.push(v);
                 }
             }
+            // #265: the explicit opt-out from "an explicit request that resolved
+            // to nothing refuses the boot". Named here (and in the flag table) so
+            // it is never mistaken for an unknown argument; it changes nothing
+            // about what starts enabled.
+            "--allow-zero-strategies" => allow_zero_strategies = true,
             "--strategy-state" => {
                 strategy_state = it.next().filter(|v| !v.trim().is_empty());
             }
@@ -749,6 +812,49 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             }
             "--spread-arb-bounce-window-sec" => {
                 spread_arb_bounce_window_sec = it.next().and_then(|v| v.parse().ok())
+            }
+            // E17/#264: the engine-level exit ladder. Parsed strictly — a value
+            // the engine cannot honour is a startup error, never a silent
+            // fallback to the shipped ladder (see `parse_exit_pct`).
+            "--exit-take-profit-pct" => {
+                let raw = it.next().unwrap_or_default();
+                match parse_exit_pct(&raw) {
+                    Ok(v) => exit_take_profit_pct = Some(v),
+                    Err(e) => {
+                        eprintln!("blitzkrieg-core: --exit-take-profit-pct '{raw}': {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--exit-stop-loss-pct" => {
+                let raw = it.next().unwrap_or_default();
+                match parse_exit_pct(&raw) {
+                    Ok(v) => exit_stop_loss_pct = Some(v),
+                    Err(e) => {
+                        eprintln!("blitzkrieg-core: --exit-stop-loss-pct '{raw}': {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--exit-trailing-min-high-pct" => {
+                let raw = it.next().unwrap_or_default();
+                match parse_exit_pct(&raw) {
+                    Ok(v) => exit_trailing_min_high_pct = Some(v),
+                    Err(e) => {
+                        eprintln!("blitzkrieg-core: --exit-trailing-min-high-pct '{raw}': {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--exit-min-trail-pct" => {
+                let raw = it.next().unwrap_or_default();
+                match parse_exit_pct(&raw) {
+                    Ok(v) => exit_min_trail_pct = Some(v),
+                    Err(e) => {
+                        eprintln!("blitzkrieg-core: --exit-min-trail-pct '{raw}': {e}");
+                        std::process::exit(2);
+                    }
+                }
             }
             "--regime-eval" => regime_eval = it.next(),
             "--regime-report" => regime_report = it.next(),
@@ -1285,6 +1391,53 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         )
     }];
 
+    // ── E17/#264: the engine-level exit ladder ──────────────────────────────
+    // Same chain as every other file-settable knob (CLI > TOML > compiled
+    // default). No env layer: `--spread-arb-*`, the sibling this pipeline
+    // mirrors, has none either, and the durable layer for a ladder is the file.
+    // The defaults are read off `ExitConfig::default()` rather than re-typed, so
+    // "unchanged" is a property of the code, not of a comment.
+    let exit_defaults = blitzkrieg_core::exit_policy::ExitConfig::default();
+    let exit_knob = |report: &mut Vec<String>,
+                     label: &str,
+                     cli: Option<Decimal>,
+                     toml: Option<Decimal>,
+                     default: Decimal| {
+        let s = pick(cli, None::<Decimal>, toml, default);
+        if s.is_explicit() {
+            report.push(format!("{label}={} ({})", s.value, s.source.as_str()));
+        }
+        s.value
+    };
+    let exit_take_profit_pct = exit_knob(
+        &mut report,
+        "exit.take_profit_pct",
+        exit_take_profit_pct,
+        file.exit.take_profit_pct,
+        exit_defaults.take_profit_pct,
+    );
+    let exit_stop_loss_pct = exit_knob(
+        &mut report,
+        "exit.stop_loss_pct",
+        exit_stop_loss_pct,
+        file.exit.stop_loss_pct,
+        exit_defaults.stop_loss_pct,
+    );
+    let exit_trailing_min_high_pct = exit_knob(
+        &mut report,
+        "exit.trailing_min_high_pct",
+        exit_trailing_min_high_pct,
+        file.exit.trailing_min_high_pct,
+        exit_defaults.trailing_min_high_pct,
+    );
+    let exit_min_trail_pct = exit_knob(
+        &mut report,
+        "exit.min_trail_pct",
+        exit_min_trail_pct,
+        file.exit.min_trail_pct,
+        exit_defaults.min_trail_pct,
+    );
+
     Args {
         socket,
         mode,
@@ -1317,6 +1470,10 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         spread_arb_dip_max_pct,
         spread_arb_bounce_min_pct,
         spread_arb_bounce_window_sec,
+        exit_take_profit_pct,
+        exit_stop_loss_pct,
+        exit_trailing_min_high_pct,
+        exit_min_trail_pct,
         feed_ws,
         net_check,
         replay,
@@ -1357,6 +1514,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         strategy_limits,
         enable_strategy,
         disable_strategy,
+        allow_zero_strategies,
         strategy_state: if no_strategy_state {
             None
         } else {
@@ -1826,9 +1984,9 @@ async fn main() -> anyhow::Result<()> {
         .as_deref()
         .map(|p| blitzkrieg_core::strategy_state::load(std::path::Path::new(p)))
         .unwrap_or_default();
-    for s in args.enable_strategy {
-        if !enabled_strategies.contains(&s) {
-            enabled_strategies.push(s);
+    for s in &args.enable_strategy {
+        if !enabled_strategies.contains(s) {
+            enabled_strategies.push(s.clone());
         }
     }
 
@@ -1852,6 +2010,13 @@ async fn main() -> anyhow::Result<()> {
         strategy_limits: parse_strategy_limits(&args.strategy_limits),
         enabled_strategies,
         disabled_strategies: args.disable_strategy,
+        // #265: what THIS invocation asked for by flag (the persisted set is
+        // merged in above but is not an explicit request — a name that no longer
+        // resolves there stays a warning). The startup self-check refuses the
+        // boot when this list resolves to nothing and `--allow-zero-strategies`
+        // was not given.
+        requested_strategies: args.enable_strategy.clone(),
+        allow_zero_strategies: args.allow_zero_strategies,
         strategy_state_path: args.strategy_state,
         strategy_dir: args.strategy_dir,
         markets: args.markets,
@@ -1924,6 +2089,13 @@ async fn main() -> anyhow::Result<()> {
             daily_pnl_path: daily_pnl_path.clone(),
             exit: blitzkrieg_core::exit_policy::ExitConfig {
                 min_time_left_sec: args.min_time_left,
+                // E17/#264: the four resolved exit-ladder knobs. Their defaults
+                // are `ExitConfig::default()`'s own values, so a run that sets
+                // none of them is exactly the pre-flag kernel.
+                take_profit_pct: args.exit_take_profit_pct,
+                stop_loss_pct: args.exit_stop_loss_pct,
+                trailing_min_high_pct: args.exit_trailing_min_high_pct,
+                min_trail_pct: args.exit_min_trail_pct,
                 ..Default::default()
             },
             ..Default::default()
@@ -2701,6 +2873,140 @@ mod tests {
             "nothing is explicit, so nothing is reported: {:?}",
             a.config_report
         );
+    }
+
+    // ── E17/#264: the engine-level exit ladder ──────────────────────────────
+
+    /// The property the ticket turns on: the four flags exist, and leaving them
+    /// out changes NOTHING. `min_trail_pct` is the one the ticket names
+    /// explicitly (8, not the 5 the source branch used), so it is asserted
+    /// against the shipped `ExitConfig` rather than a literal repeated here.
+    #[test]
+    fn the_exit_ladder_defaults_to_the_compiled_one() {
+        let a = args_from(&[]);
+        let d = blitzkrieg_core::exit_policy::ExitConfig::default();
+        assert_eq!(a.exit_take_profit_pct, d.take_profit_pct);
+        assert_eq!(a.exit_stop_loss_pct, d.stop_loss_pct);
+        assert_eq!(a.exit_trailing_min_high_pct, d.trailing_min_high_pct);
+        assert_eq!(a.exit_min_trail_pct, d.min_trail_pct);
+        // Spelled out once, because "unchanged" is the acceptance criterion.
+        assert_eq!(a.exit_take_profit_pct, dec!(100));
+        assert_eq!(a.exit_stop_loss_pct, dec!(12));
+        assert_eq!(a.exit_trailing_min_high_pct, dec!(15));
+        assert_eq!(a.exit_min_trail_pct, dec!(8));
+        assert!(
+            a.config_report.is_empty(),
+            "nothing was configured, so nothing is reported: {:?}",
+            a.config_report
+        );
+    }
+
+    #[test]
+    fn an_exit_flag_overrides_the_ladder_and_is_reported() {
+        let a = args_from(&[
+            "--exit-take-profit-pct",
+            "20",
+            "--exit-stop-loss-pct",
+            "6",
+            "--exit-trailing-min-high-pct",
+            "10",
+            "--exit-min-trail-pct",
+            "5",
+        ]);
+        assert_eq!(a.exit_take_profit_pct, dec!(20));
+        assert_eq!(a.exit_stop_loss_pct, dec!(6));
+        assert_eq!(a.exit_trailing_min_high_pct, dec!(10));
+        assert_eq!(a.exit_min_trail_pct, dec!(5));
+        for line in [
+            "exit.take_profit_pct=20 (cli)",
+            "exit.stop_loss_pct=6 (cli)",
+            "exit.trailing_min_high_pct=10 (cli)",
+            "exit.min_trail_pct=5 (cli)",
+        ] {
+            assert!(
+                a.config_report.iter().any(|l| l == line),
+                "{line} missing from {:?}",
+                a.config_report
+            );
+        }
+    }
+
+    /// The file is the second source, and the flag still wins — the same
+    /// precedence every other file-settable knob follows.
+    #[test]
+    fn the_exit_section_of_the_config_file_is_read_and_outranked_by_the_flag() {
+        let file = file_with(
+            r#"
+            [exit]
+            stop_loss_pct = 9
+            min_trail_pct = "4.5"
+            "#,
+        );
+        let argv: Vec<String> = Vec::new();
+        let a = parse_args(&file, &argv, &EnvVars::default());
+        assert_eq!(a.exit_stop_loss_pct, dec!(9));
+        assert_eq!(a.exit_min_trail_pct, dec!(4.5));
+        // The two the file does not mention keep the compiled value.
+        assert_eq!(a.exit_take_profit_pct, dec!(100));
+        assert_eq!(a.exit_trailing_min_high_pct, dec!(15));
+        assert!(
+            a.config_report
+                .iter()
+                .any(|l| l == "exit.stop_loss_pct=9 (toml)"),
+            "{:?}",
+            a.config_report
+        );
+
+        let a = parse_args(
+            &file,
+            &["--exit-stop-loss-pct".into(), "11".into()],
+            &EnvVars::default(),
+        );
+        assert_eq!(a.exit_stop_loss_pct, dec!(11));
+        assert!(
+            a.config_report
+                .iter()
+                .any(|l| l == "exit.stop_loss_pct=11 (cli)"),
+            "{:?}",
+            a.config_report
+        );
+    }
+
+    /// A decimal the kernel cannot read is a startup error, never a silent
+    /// fallback to the shipped ladder (`parse_exit_pct` is the pure half; the
+    /// `exit(2)` half is the arm that calls it).
+    #[test]
+    fn a_malformed_exit_value_is_rejected_purely() {
+        assert_eq!(parse_exit_pct("8"), Ok(dec!(8)));
+        assert_eq!(parse_exit_pct(" 8.5 "), Ok(dec!(8.5)));
+        assert_eq!(parse_exit_pct("-3"), Ok(dec!(-3)));
+        for bad in ["", "eight", "1x2", "8%"] {
+            assert!(
+                parse_exit_pct(bad).is_err(),
+                "{bad:?} must not parse as a percentage"
+            );
+        }
+        let err = parse_exit_pct("eight").expect_err("not a decimal");
+        assert!(err.contains("decimal percentage"), "{err}");
+    }
+
+    // ── #265: the zero-strategy refusal and its opt-out ─────────────────────
+
+    /// The flag is parsed, defaults to OFF (an ordinary zero-strategy boot is
+    /// not refused), and the request list is what the operator named — the
+    /// persisted set is merged in elsewhere and is not an explicit request.
+    #[test]
+    fn allow_zero_strategies_is_parsed_and_off_by_default() {
+        let a = args_from(&[]);
+        assert!(!a.allow_zero_strategies);
+        assert!(a.enable_strategy.is_empty());
+        let a = args_from(&[
+            "--enable-strategy",
+            "dog_strategy",
+            "--allow-zero-strategies",
+        ]);
+        assert!(a.allow_zero_strategies);
+        assert_eq!(a.enable_strategy, vec!["dog_strategy".to_string()]);
     }
 
     // ── #173: the daily-loss breaker's CLI/env surface ─────────────────────

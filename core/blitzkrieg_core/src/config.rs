@@ -120,6 +120,21 @@ pub struct ShadowFile {
 /// one is not a tuning knob.
 pub const MAX_GRADIENT_CEILING: Decimal = rust_decimal_macros::dec!(0.05);
 
+/// The exit ladder as written in the file (E17/#264). All optional: an absent
+/// key keeps the compiled [`crate::exit_policy::ExitConfig`] value, so a file
+/// that never mentions `[exit]` is the shipped kernel.
+///
+/// Only the four knobs an A/B sweep actually moves live here. The rest of the
+/// ladder stays compiled in on purpose: a static config file that could re-shape
+/// every stop and trail would be a second, silently divergent exit policy.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExitFile {
+    pub take_profit_pct: Option<Decimal>,
+    pub stop_loss_pct: Option<Decimal>,
+    pub trailing_min_high_pct: Option<Decimal>,
+    pub min_trail_pct: Option<Decimal>,
+}
+
 /// Everything read from a config file. `warnings` is what the caller logs; it is
 /// never an error, so the file can be partly wrong and the kernel still starts.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -131,6 +146,8 @@ pub struct FileConfig {
     pub round_sec: Option<i64>,
     pub min_round_age_sec: Option<i64>,
     pub min_time_left_sec: Option<i64>,
+    // ── [exit] ──────────────────────────────────────────────────────────────
+    pub exit: ExitFile,
     // ── [shadow_evolution] ──────────────────────────────────────────────────
     pub shadow: ShadowFile,
     pub warnings: Vec<String>,
@@ -207,7 +224,7 @@ impl FileConfig {
             };
             // A renamed or invented section is the classic silent typo, so it is
             // reported once (its keys are not enumerated individually).
-            if !matches!(section.as_str(), "engine" | "shadow_evolution") {
+            if !matches!(section.as_str(), "engine" | "exit" | "shadow_evolution") {
                 self.unknown_keys.push(section.clone());
                 continue;
             }
@@ -223,6 +240,21 @@ impl FileConfig {
                     }
                     ("engine", "min_time_left_sec") => {
                         got(&mut self.min_time_left_sec, int(v), &full, w)
+                    }
+                    // E17/#264: the engine-level exit ladder. Percentages, so the
+                    // quoted form is accepted exactly like the shadow section's
+                    // decimals.
+                    ("exit", "take_profit_pct") => {
+                        got(&mut self.exit.take_profit_pct, decimal(v), &full, w)
+                    }
+                    ("exit", "stop_loss_pct") => {
+                        got(&mut self.exit.stop_loss_pct, decimal(v), &full, w)
+                    }
+                    ("exit", "trailing_min_high_pct") => {
+                        got(&mut self.exit.trailing_min_high_pct, decimal(v), &full, w)
+                    }
+                    ("exit", "min_trail_pct") => {
+                        got(&mut self.exit.min_trail_pct, decimal(v), &full, w)
                     }
                     ("shadow_evolution", "enabled") => {
                         got(&mut self.shadow.enabled, bool_(v), &full, w)
@@ -641,6 +673,12 @@ mod tests {
             min_round_age_sec = 12
             min_time_left_sec = 34
 
+            [exit]
+            take_profit_pct = 100
+            stop_loss_pct = "12"
+            trailing_min_high_pct = 15
+            min_trail_pct = 5
+
             [shadow_evolution]
             enabled = true
             evaluation_window_minutes = 7
@@ -667,6 +705,11 @@ mod tests {
         assert_eq!(cfg.round_sec, Some(300));
         assert_eq!(cfg.min_round_age_sec, Some(12));
         assert_eq!(cfg.min_time_left_sec, Some(34));
+        // The exit ladder, in both the numeric and the quoted form.
+        assert_eq!(cfg.exit.take_profit_pct, Some(dec!(100)));
+        assert_eq!(cfg.exit.stop_loss_pct, Some(dec!(12)));
+        assert_eq!(cfg.exit.trailing_min_high_pct, Some(dec!(15)));
+        assert_eq!(cfg.exit.min_trail_pct, Some(dec!(5)));
         let s = &cfg.shadow;
         assert_eq!(s.enabled, Some(true));
         assert_eq!(s.evaluation_window_minutes, Some(7));
@@ -731,6 +774,48 @@ mod tests {
         assert_eq!(s.max_gradient, Some(dec!(0.05)));
         assert_eq!(s.variant_count, Some(3));
         assert_eq!(s.audit_dir.as_deref(), Some("data/evolution"));
+    }
+
+    #[test]
+    fn an_absent_exit_section_keeps_the_compiled_ladder() {
+        // The property #264 turns on: a file that never mentions `[exit]` (and a
+        // `--no-config` boot) must leave every exit knob unset, so the caller's
+        // chain falls through to `ExitConfig::default()` — the shipped ladder,
+        // unchanged. `min_trail_pct` is the one the ticket names explicitly.
+        let cfg = parsed(
+            r#"
+            [engine]
+            round_sec = 300
+            "#,
+        );
+        assert_eq!(cfg.exit, ExitFile::default());
+        assert_eq!(cfg.exit.min_trail_pct, None);
+        assert_eq!(cfg.exit.take_profit_pct, None);
+        assert_eq!(cfg.exit.stop_loss_pct, None);
+        assert_eq!(cfg.exit.trailing_min_high_pct, None);
+        // And the compiled defaults those Nones fall through to are the shipped
+        // numbers, not something this module invented.
+        let d = crate::exit_policy::ExitConfig::default();
+        assert_eq!(d.take_profit_pct, dec!(100));
+        assert_eq!(d.stop_loss_pct, dec!(12));
+        assert_eq!(d.trailing_min_high_pct, dec!(15));
+        assert_eq!(d.min_trail_pct, dec!(8));
+    }
+
+    #[test]
+    fn an_exit_key_of_the_wrong_type_warns_and_leaves_the_ladder_alone() {
+        let cfg = parsed(
+            r#"
+            [exit]
+            min_trail_pct = "not a number"
+            stop_loss_pct = 12
+            "#,
+        );
+        assert_eq!(cfg.exit.min_trail_pct, None, "a bad value is not guessed");
+        assert_eq!(cfg.exit.stop_loss_pct, Some(dec!(12)));
+        assert_eq!(cfg.unknown_keys, Vec::<String>::new());
+        assert_eq!(cfg.warnings.len(), 1, "{:?}", cfg.warnings);
+        assert!(cfg.warnings[0].starts_with("exit.min_trail_pct"));
     }
 
     #[test]
