@@ -4901,18 +4901,48 @@ impl Core {
 
     /// Report every exit withheld from becoming an order (P0 #177, F6): the
     /// audit trail must show "should have triggered" instead of a silent hold.
+    ///
+    /// The log line names the cause instead of calling all of them a suppressed
+    /// protective stop (#267): a held TRAILING stop is not a held protective
+    /// stop, and a reviewer reading "protective stop suppressed" about a profit
+    /// rule is being told the wrong story. The wording lives on the event
+    /// (`SuppressedStopEvent::message`), so the panel and the log cannot drift.
     fn emit_suppressed_stops(&mut self) {
         for ev in self.positions.drain_suppressed_stops() {
-            tracing::warn!(
-                position = %ev.position_id,
-                token = %ev.token_id,
-                cause = ?ev.cause,
-                bid = %ev.bid,
-                mid = %ev.mid,
-                stop_pct = %ev.stop_pct,
-                "protective stop suppressed"
-            );
-            self.emit_risk_alert(CoreErrorCode::RiskRejected, ev.message());
+            let message = ev.message();
+            // #268 item 2: past `N x max_book_age_sec` unpriceable, this is no
+            // longer a routine hold — it is a position that cannot act, and it
+            // is raised to error level so it survives a warn filter. Two call
+            // sites rather than a dynamic level: tracing's level is a compile-
+            // time property of the callsite.
+            if ev.escalated {
+                tracing::error!(
+                    position = %ev.position_id,
+                    token = %ev.token_id,
+                    cause = ?ev.cause,
+                    bid = %ev.bid,
+                    mid = %ev.mid,
+                    stop_pct = %ev.stop_pct,
+                    book_age_ms = ?ev.book_age_ms,
+                    unpriceable_for_ms = ev.unpriceable_for_ms,
+                    "{}",
+                    message
+                );
+            } else {
+                tracing::warn!(
+                    position = %ev.position_id,
+                    token = %ev.token_id,
+                    cause = ?ev.cause,
+                    bid = %ev.bid,
+                    mid = %ev.mid,
+                    stop_pct = %ev.stop_pct,
+                    book_age_ms = ?ev.book_age_ms,
+                    unpriceable_for_ms = ev.unpriceable_for_ms,
+                    "{}",
+                    message
+                );
+            }
+            self.emit_risk_alert(CoreErrorCode::RiskRejected, message);
         }
     }
 
