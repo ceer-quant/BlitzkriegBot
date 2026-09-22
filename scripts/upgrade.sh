@@ -93,7 +93,11 @@ sh scripts/data-backup-cli.sh --light
 step "1. fetch ceer, resolve source"
 git fetch ceer --quiet
 SRC_SHA=$(git rev-parse "$SOURCE_REF")
-SRC_SHORT=$(git rev-parse --short "$SRC_SHA")
+# --short=12 because that is what the build stamps into the binary: build.rs runs
+# `git rev-parse --short=12 HEAD`. A plain `--short` (7) can never equal the
+# `g<sha>` in `.core-lock`, which would turn the identity check in step 8 into a
+# guaranteed failure — every upgrade would build, install, then roll itself back.
+SRC_SHORT=$(git rev-parse --short=12 "$SRC_SHA")
 echo "source: $SOURCE_REF @ $SRC_SHORT"
 
 step "2. production build worktree → source"
@@ -193,7 +197,10 @@ while [ "$i" -lt "$READY_DEADLINE" ]; do
   # running, so this proves the SWAP took effect rather than that some core is up.
   # `self-check balance: ok` is deliberately not used — the balance probe is
   # emitted by the live venue bridge, so a dry stack never logs it (#244).
-  if grep -q "\"version\":\"[^\"]*g$SRC_SHORT\"" "$lock" 2>/dev/null; then
+  # `[0-9a-f]*` after the token keeps this a prefix match on the sha rather than an
+  # exact-length one: a future change to the stamp length must not be able to
+  # silently turn this gate back into a guaranteed failure.
+  if grep -q "\"version\":\"[^\"]*g$SRC_SHORT[0-9a-f]*\"" "$lock" 2>/dev/null; then
     ready="$SRC_SHORT"
     break
   fi
