@@ -604,6 +604,52 @@ async fn handle_line(
             Ok(serde_json::json!({ "killed": false }))
         }
 
+        // #191: limited hot reload of the ENTRY limits. Named refusals come
+        // FIRST: an operator who tries to hot-change a breaker, an exit threshold
+        // or a credential is told WHY and what a restart would do, instead of
+        // getting a bare deserialization error. Either way the WHOLE request is
+        // refused — nothing is applied partially.
+        method::RISK_SET_LIMITS => {
+            if let Some((key, why)) = params.as_object().and_then(|obj| {
+                obj.keys()
+                    .find_map(|k| crate::risk::hot_reload_refusal(k).map(|why| (k.as_str(), why)))
+            }) {
+                Err((
+                    Failure::INVALID_PARAMS,
+                    format!(
+                        "{key} is not hot-reloadable: {why}; a restart applies it. \
+                         hot-reloadable: {}",
+                        crate::risk::HOT_RELOADABLE.join(", ")
+                    ),
+                    None,
+                ))
+            } else {
+                match serde_json::from_value::<SetRiskLimitsParams>(params.clone()) {
+                    Err(e) => Err((
+                        Failure::INVALID_PARAMS,
+                        format!(
+                            "{e} — nothing was applied; hot-reloadable: {}",
+                            crate::risk::HOT_RELOADABLE.join(", ")
+                        ),
+                        None,
+                    )),
+                    Ok(p) => {
+                        // The actor is the peer's KERNEL-recorded uid, not a claim
+                        // by the caller: the audit's "who" has to survive a client
+                        // that would say anything it liked.
+                        let actor = match peer {
+                            PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                            _ => "uid:unknown".to_string(),
+                        };
+                        match core.lock().await.apply_risk_limits(&p, &actor, now_ms()) {
+                            Ok(update) => Ok(serde_json::to_value(update).unwrap_or(Value::Null)),
+                            Err(e) => Err(core_err(e)),
+                        }
+                    }
+                }
+            }
+        }
+
         method::ORDER_PLACE => {
             typed(params, |p: PlaceParams| {
                 let core = core.clone();
@@ -1614,5 +1660,263 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── #191: the limited hot reload, at the wire ───────────────────────────
+    //
+    // The issue is about what a client may change LIVE, so both tests below
+    // travel the road a panel/CLI does — `handle_line` with the params bytes.
+    // Between them they pin the three facts that make the feature safe: the
+    // change lands (with its audit record), the NEXT order is judged by the new
+    // value, and everything outside the entry limits is refused with nothing
+    // applied.
+
+    /// One request/response over the same entry point a session uses.
+    async fn rpc(
+        core: &Arc<AsyncMutex<Core>>,
+        registry: &crate::market::registry::MarketPluginRegistry,
+        peer: &PeerAuth,
+        line: String,
+    ) -> Value {
+        serde_json::from_str(&handle_line(core, registry, line, peer).await)
+            .expect("every reply is one JSON object")
+    }
+
+    /// A core whose interesting knob is the per-order cap: 3 USD, so the 2.00
+    /// USD ticket below (`order_line`) is admitted BEFORE any hot change and
+    /// refused once the cap drops to 1. The engine is installed from the startup
+    /// config exactly as `serve` does it, so its sizing is the boot-time COPY a
+    /// change has to reach to count as "live".
+    ///
+    /// Every log path is None: this test places real (dry) orders, and a test
+    /// must not leave a durable order/position log behind in whatever checkout
+    /// it happens to be run from.
+    async fn hot_reload_fixture() -> (
+        Arc<AsyncMutex<Core>>,
+        crate::market::registry::MarketPluginRegistry,
+        PeerAuth,
+    ) {
+        use rust_decimal_macros::dec;
+        let cfg = CoreConfig {
+            risk: crate::risk::RiskConfig {
+                max_order_notional: dec!(3),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(100),
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        };
+        let mut c = Core::new(cfg.clone());
+        c.set_balance(cfg.dry_seed_balance);
+        cfg.install_engine(&mut c);
+        (
+            Arc::new(AsyncMutex::new(c)),
+            crate::market::registry::MarketPluginRegistry::new(),
+            PeerAuth::SameUid { uid: own_uid() },
+        )
+    }
+
+    /// A book with 100 ask @ 0.40, which the dry taker in `order_line` crosses.
+    fn books_line() -> String {
+        r#"{"jsonrpc":"2.0","id":1,"method":"books.snapshot","params":{"tokenId":"tok","bids":[{"price":0.39,"size":100}],"asks":[{"price":0.40,"size":100}]}}"#.to_string()
+    }
+
+    /// 5 × 0.40 = 2.00 USD against `tok`. The `roundSlot` is the LIVE one, so the
+    /// position this opens expires in the future instead of in 1970 (a stale slot
+    /// makes the next tick force-exit it).
+    fn order_line(id: u32, key: &str, asset: &str, direction: &str) -> String {
+        let slot = now_ms() / 1000 / 900;
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"orders.place","params":{{"tokenId":"tok","conditionId":"cond","side":"buy","mode":"taker","price":0.40,"size":5,"internalKey":"{key}","strategy":"s","asset":"{asset}","direction":"{direction}","roundSlot":{slot}}}}}"#
+        )
+    }
+
+    fn stats_line(id: u32) -> String {
+        format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"engine.stats","params":{{}}}}"#)
+    }
+
+    /// #191 acceptance (a): one `risk.setLimits` call moves the entry limits
+    /// without a restart, answers with the audit record (old → new, actor,
+    /// instant, `persisted:false`) and the very NEXT order is judged by the NEW
+    /// value.
+    #[tokio::test]
+    async fn risk_set_limits_binds_the_next_order_without_a_restart() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+
+        let feed = rpc(&core, &registry, &peer, books_line()).await;
+        assert!(feed.get("error").is_none(), "feed the book first: {feed}");
+
+        // 2.00 USD against the 3 USD startup cap: MUST be admitted, or the
+        // post-change refusal below would prove nothing about the change.
+        let before = rpc(
+            &core,
+            &registry,
+            &peer,
+            order_line(2, "probe-before", "BTC", "up"),
+        )
+        .await;
+        assert!(
+            before.get("error").is_none(),
+            "2.00 must pass the 3 USD startup cap: {before}"
+        );
+        assert_eq!(
+            before["result"]["status"],
+            serde_json::json!("FILLED"),
+            "the probe must be a real, filled order: {before}"
+        );
+
+        let applied = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"risk.setLimits","params":{"maxOrderNotional":1,"minShares":2,"maxShares":4,"reason":"tighten after drawdown"}}"#.to_string(),
+        )
+        .await;
+        assert!(
+            applied.get("error").is_none(),
+            "the safe subset must be accepted: {applied}"
+        );
+        let audit = &applied["result"];
+        assert_eq!(
+            audit["persisted"],
+            serde_json::json!(false),
+            "the update must state that it is memory-only: {audit}"
+        );
+        assert_eq!(
+            audit["actor"],
+            serde_json::json!(format!("uid:{}", own_uid())),
+            "who did it must be on the record: {audit}"
+        );
+        assert_eq!(audit["reason"], serde_json::json!("tighten after drawdown"));
+        assert!(
+            audit["atMs"].as_i64().unwrap_or(0) > 0,
+            "when it happened must be on the record: {audit}"
+        );
+        let change = |field: &str| {
+            audit["applied"]
+                .as_array()
+                .expect("an applied list")
+                .iter()
+                .find(|c| c["field"] == serde_json::json!(field))
+                .cloned()
+                .unwrap_or_else(|| panic!("{field} must be in the audit record: {audit}"))
+        };
+        assert_eq!(
+            change("maxOrderNotional")["from"],
+            serde_json::json!(3.0),
+            "the audit keeps the OLD value"
+        );
+        assert_eq!(change("maxOrderNotional")["to"], serde_json::json!(1.0));
+        assert_eq!(change("minShares")["from"], serde_json::json!(10.0));
+        assert_eq!(change("minShares")["to"], serde_json::json!(2.0));
+        assert_eq!(change("maxShares")["to"], serde_json::json!(4.0));
+
+        // `engine.stats.sizing` is what the panel answers "what may ONE entry
+        // commit with?" from, and with an engine installed it is read live off
+        // the engine's own config — the same `global_sizing()` the ticket
+        // arithmetic calls. So this is the no-restart half: the boot-time copy
+        // moved too, not just the `CoreConfig` a new `Core` would be built from.
+        let stats = rpc(&core, &registry, &peer, stats_line(4)).await;
+        let sizing = &stats["result"]["sizing"];
+        assert_eq!(sizing["maxOrderNotionalUsd"], serde_json::json!(1.0));
+        assert_eq!(sizing["minShares"], serde_json::json!(2.0));
+        assert_eq!(sizing["maxShares"], serde_json::json!(4.0));
+
+        // The SAME 2.00 ticket, on another asset (so the only possible reason is
+        // the cap, never the one-position-per-asset gate), judged by the NEW cap.
+        let after = rpc(
+            &core,
+            &registry,
+            &peer,
+            order_line(5, "probe-after", "ETH", "down"),
+        )
+        .await;
+        assert_eq!(
+            after["error"]["data"]["coreCode"],
+            serde_json::json!("RISK_REJECTED"),
+            "the next order must be judged by the new cap: {after}"
+        );
+        assert!(
+            after["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("exceeds per-order cap 1"),
+            "the refusal must name the NEW cap: {after}"
+        );
+    }
+
+    /// #191 acceptance (b): a knob OUTSIDE the safe subset is refused BY NAME,
+    /// with the reason and with what to do instead — and the refusal is atomic,
+    /// so an allowed field riding along in the same patch is not applied either.
+    #[tokio::test]
+    async fn risk_set_limits_refuses_a_forbidden_field_and_applies_nothing() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+
+        let feed = rpc(&core, &registry, &peer, books_line()).await;
+        assert!(feed.get("error").is_none(), "feed the book first: {feed}");
+        let before = rpc(&core, &registry, &peer, stats_line(2)).await;
+
+        // A double carrier: `maxOrderNotional` is inside the safe subset,
+        // `stopLossPct` is an exit threshold. The whole request must be refused.
+        let refused = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"risk.setLimits","params":{"maxOrderNotional":1,"stopLossPct":"0.50"}}"#.to_string(),
+        )
+        .await;
+        assert_eq!(
+            refused["error"]["code"],
+            serde_json::json!(-32602),
+            "a refused patch is INVALID_PARAMS, not a silent no-op: {refused}"
+        );
+        let msg = refused["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("stopLossPct"),
+            "the refusal must name the field: {refused}"
+        );
+        assert!(
+            msg.contains("not hot-reloadable"),
+            "and say what is wrong with it: {refused}"
+        );
+        assert!(
+            msg.contains("a restart applies it"),
+            "and how to get it: {refused}"
+        );
+        assert!(
+            msg.contains("maxOrderNotional"),
+            "and what CAN be changed live: {refused}"
+        );
+
+        // Nothing moved — neither the refused knob nor the allowed one that came
+        // with it. `sizing` is the live view of every number this call could have
+        // touched.
+        let after = rpc(&core, &registry, &peer, stats_line(4)).await;
+        assert_eq!(
+            before["result"]["sizing"], after["result"]["sizing"],
+            "a refused patch must leave the live limits exactly as they were"
+        );
+
+        // ...and the order path agrees: this 2.00 ticket still passes, so the
+        // `maxOrderNotional: 1` that rode along was NOT applied (the same ticket
+        // IS refused once that field really is applied — see the test above).
+        let probe = rpc(
+            &core,
+            &registry,
+            &peer,
+            order_line(5, "probe-after-refusal", "BTC", "up"),
+        )
+        .await;
+        assert!(
+            probe.get("error").is_none(),
+            "the cap must still be the startup 3 USD after a refused patch: {probe}"
+        );
+        assert_eq!(
+            probe["result"]["status"],
+            serde_json::json!("FILLED"),
+            "the probe must be a real, filled order: {probe}"
+        );
     }
 }

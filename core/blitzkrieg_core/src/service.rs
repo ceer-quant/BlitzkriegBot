@@ -4535,6 +4535,157 @@ impl Core {
     pub fn risk_config_mut(&mut self) -> &mut RiskConfig {
         self.risk.config_mut()
     }
+
+    /// Apply a hot update of the ENTRY limits (#191) — the whole safe subset
+    /// ([`crate::risk::HOT_RELOADABLE`]), in memory, with an audit record.
+    ///
+    /// What makes this safe enough to offer at runtime is what the whitelist
+    /// selects for: the order path reads every one of these LIVE (the risk gate
+    /// on each check, the engine's own config on each ticket), they bound NEW
+    /// exposure only — a close is exempt by construction (#174), so tightening a
+    /// limit can never trap an open position — and none of them carries
+    /// accumulated state, so a change cannot retroactively decide something the
+    /// day's book of events already decided.
+    ///
+    /// Atomic: the patch is validated in full (non-negative, coherent band)
+    /// before anything is written, so a refused patch leaves NO trace. Nothing is
+    /// persisted — a restart re-applies the startup flags (#191: "hot" must never
+    /// be read as "permanent"), and the audit says so in the same breath.
+    ///
+    /// The audit is one `tracing::info!` line per changed field (`target: "risk"`,
+    /// old → new + actor + instant) in the run log every deployment already
+    /// writes; the same facts are returned to the caller, so the reply and the log
+    /// cannot tell two different stories.
+    pub fn apply_risk_limits(
+        &mut self,
+        patch: &crate::ipc::schema::SetRiskLimitsParams,
+        actor: &str,
+        now_ms: i64,
+    ) -> CoreResult<crate::ipc::schema::RiskLimitUpdate> {
+        use crate::ipc::schema::{RISK_LIMIT_UPDATE_NOTE, RiskLimitChange, RiskLimitUpdate};
+        use crate::risk::HOT_RELOADABLE;
+
+        if patch.is_empty() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "risk.setLimits needs at least one field; hot-reloadable: {}",
+                    HOT_RELOADABLE.join(", ")
+                ),
+            ));
+        }
+
+        // Plan first, write later: a bad field must not leave a half-applied
+        // patch behind.
+        let risk = self.risk.config();
+        let (notional, notional_pct, open_notional) = (
+            risk.max_order_notional,
+            risk.max_order_notional_pct,
+            risk.max_open_notional_usd,
+        );
+        let (min_shares, max_shares) = (self.config.min_shares, self.config.max_shares);
+        let mut changes: Vec<RiskLimitChange> = Vec::new();
+        let mut plan =
+            |field: &'static str, from: Decimal, to: Option<Decimal>| -> CoreResult<()> {
+                let Some(to) = to else {
+                    return Ok(());
+                };
+                if to < Decimal::ZERO {
+                    return Err(CoreError::new(
+                        CoreErrorCode::InvalidParams,
+                        format!("{field} must be >= 0, got {to}; nothing was applied"),
+                    ));
+                }
+                changes.push(RiskLimitChange { field, from, to });
+                Ok(())
+            };
+        plan("maxOrderNotional", notional, patch.max_order_notional)?;
+        plan(
+            "maxOrderNotionalPct",
+            notional_pct,
+            patch.max_order_notional_pct,
+        )?;
+        plan(
+            "maxOpenNotionalUsd",
+            open_notional,
+            patch.max_open_notional_usd,
+        )?;
+        plan("minShares", min_shares, patch.min_shares)?;
+        plan("maxShares", max_shares, patch.max_shares)?;
+
+        // The band is a band: `effective_sizing` caps the floor by the ceiling, so
+        // an incoherent pair would silently read as something the operator did not
+        // ask for. Refuse it instead.
+        let (new_min, new_max) = (
+            patch.min_shares.unwrap_or(min_shares),
+            patch.max_shares.unwrap_or(max_shares),
+        );
+        if new_min > new_max {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "minShares {new_min} would exceed maxShares {new_max}; \
+                     the share band must stay coherent — nothing was applied"
+                ),
+            ));
+        }
+
+        let band_moved = changes
+            .iter()
+            .any(|c| c.field == "minShares" || c.field == "maxShares");
+        for c in &changes {
+            match c.field {
+                "maxOrderNotional" => self.risk.config_mut().max_order_notional = c.to,
+                "maxOrderNotionalPct" => self.risk.config_mut().max_order_notional_pct = c.to,
+                "maxOpenNotionalUsd" => self.risk.config_mut().max_open_notional_usd = c.to,
+                "minShares" => self.config.min_shares = c.to,
+                "maxShares" => self.config.max_shares = c.to,
+                // Unreachable today (both lists live ten lines apart), and loud
+                // rather than silent if that ever stops being true: an arm that
+                // matched nothing would leave the reply and the audit claiming a
+                // change this function never made.
+                other => {
+                    debug_assert!(false, "unmapped hot-reloadable field {other}");
+                    tracing::error!(
+                        target: "risk",
+                        field = other,
+                        "hot-reloadable field has no write arm; the audit record would be a lie"
+                    );
+                }
+            }
+        }
+        if band_moved {
+            // The engine holds the band the tickets are cut from; the CoreConfig
+            // copy above is what a reader with no engine sees.
+            if let Some(engine) = self.engine.as_mut() {
+                engine.set_share_band(self.config.min_shares, self.config.max_shares);
+            }
+        }
+
+        for c in &changes {
+            tracing::info!(
+                target: "risk",
+                actor = %actor,
+                field = c.field,
+                from = %c.from,
+                to = %c.to,
+                reason = patch.reason.as_deref().unwrap_or(""),
+                "risk limit hot-update: {} {} -> {} ({})",
+                c.field,
+                c.from,
+                c.to,
+                RISK_LIMIT_UPDATE_NOTE,
+            );
+        }
+        Ok(RiskLimitUpdate {
+            applied: changes,
+            at_ms: now_ms,
+            actor: actor.to_string(),
+            reason: patch.reason.clone(),
+            persisted: false,
+            note: RISK_LIMIT_UPDATE_NOTE,
+        })
+    }
     /// The ONE writer of the panel-visible last-error slot (#180). Every
     /// internal refusal path funnels through here — directly, or via
     /// [`Core::emit_error`] — so the slot cannot be written with a message no

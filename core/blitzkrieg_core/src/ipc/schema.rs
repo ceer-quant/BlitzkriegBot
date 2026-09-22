@@ -112,6 +112,11 @@ pub mod method {
     pub const CORE_FEE_QUOTE: &str = "core.feeQuote";
     pub const RISK_KILL: &str = "risk.kill";
     pub const RISK_RESUME: &str = "risk.resume";
+    /// Limited hot reload of the ENTRY limits (#191): the per-order /
+    /// portfolio notional caps and the entry share band, applied in memory
+    /// with an audit record. Everything else is refused by name — see
+    /// [`crate::risk::hot_reload_refusal`].
+    pub const RISK_SET_LIMITS: &str = "risk.setLimits";
     pub const ORDER_PLACE: &str = "orders.place";
     pub const ORDER_CANCEL: &str = "orders.cancel";
     pub const ORDER_CANCEL_ALL: &str = "orders.cancel_all";
@@ -296,6 +301,95 @@ pub struct ReadyResult {
     pub signer: Option<String>,
     pub funder: Option<String>,
 }
+
+// ── Limited hot reload of the entry limits (#191) ────────────────────────────
+
+/// Params of `risk.setLimits` — the ONLY knobs an operator may change without a
+/// restart, and the whole of the safe subset.
+///
+/// `deny_unknown_fields` is what makes the boundary structural rather than
+/// advisory: a field outside this set cannot even deserialize into the type that
+/// carries the patch, so no downstream code path can apply one. The named
+/// refusals ([`crate::risk::hot_reload_refusal`]) exist on top of it to say WHY
+/// for the knobs an operator actually reaches for (breakers, exit thresholds,
+/// credentials), instead of a bare "unknown field".
+///
+/// Every field is optional and every field means "set to this value"; an absent
+/// field is left alone. Setting one to `0` is literal, not "disabled" — see each
+/// field below.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetRiskLimitsParams {
+    /// Absolute cap on ONE order's notional (USD). Read on every order by the
+    /// risk gate, so the next order is judged by the new value. `0` binds hard:
+    /// every BUY is refused (closing SELLs are exempt by construction, #174).
+    #[serde(default, with = "crate::decimal::opt")]
+    pub max_order_notional: Option<Decimal>,
+    /// The same cap as a percentage of the account's cash equity. `0` = off.
+    #[serde(default, with = "crate::decimal::opt")]
+    pub max_order_notional_pct: Option<Decimal>,
+    /// Cap on TOTAL open notional across all strategies (USD). `0` = off.
+    #[serde(default, with = "crate::decimal::opt")]
+    pub max_open_notional_usd: Option<Decimal>,
+    /// Lower bound of the per-entry share lot.
+    #[serde(default, with = "crate::decimal::opt")]
+    pub min_shares: Option<Decimal>,
+    /// Upper bound of the per-entry share lot.
+    #[serde(default, with = "crate::decimal::opt")]
+    pub max_shares: Option<Decimal>,
+    /// Free-text note from the caller, echoed into the audit line so a log
+    /// reader gets the intent beside the numbers.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl SetRiskLimitsParams {
+    /// True when the patch carries no settable field (a request that would audit
+    /// nothing is refused rather than answered with an empty record).
+    pub fn is_empty(&self) -> bool {
+        self.max_order_notional.is_none()
+            && self.max_order_notional_pct.is_none()
+            && self.max_open_notional_usd.is_none()
+            && self.min_shares.is_none()
+            && self.max_shares.is_none()
+    }
+}
+
+/// One audited field change: old value → new value.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskLimitChange {
+    /// The wire (camelCase) name of the field, as the caller spelled it.
+    pub field: &'static str,
+    #[serde(with = "crate::decimal")]
+    pub from: Decimal,
+    #[serde(with = "crate::decimal")]
+    pub to: Decimal,
+}
+
+/// The record an applied `risk.setLimits` returns. The SAME facts go to the run
+/// log (one line per changed field, `target: "risk"`), because an audit that
+/// only exists in a reply is gone as soon as the caller disconnects.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskLimitUpdate {
+    pub applied: Vec<RiskLimitChange>,
+    pub at_ms: i64,
+    /// Who asked — the peer's uid as recorded by the kernel, not a claim.
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// ALWAYS `false`, and on the wire on purpose: a hot update is memory-only.
+    /// A restart re-applies the startup flags/env/TOML, so "I changed it" must
+    /// never be read as "it stuck".
+    pub persisted: bool,
+    /// The same statement in words, for a panel or a log reader.
+    pub note: &'static str,
+}
+
+/// [`RiskLimitUpdate::note`] — one spelling, used by the reply and the log.
+pub const RISK_LIMIT_UPDATE_NOTE: &str =
+    "in-memory only: a restart re-applies the startup flags/env/TOML";
 
 // ── Fee model quote (#182) ───────────────────────────────────────────────────
 

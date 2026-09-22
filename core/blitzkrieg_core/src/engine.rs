@@ -387,6 +387,19 @@ impl Engine {
         self.cfg = cfg;
     }
 
+    /// Move the per-entry share band, in memory, without a restart (#191).
+    ///
+    /// Deliberately NOT `set_config`: that one re-notifies every hosted strategy
+    /// through `on_config`, a side effect no sizing change asked for. The band is
+    /// read live out of `cfg` on every ticket (`compute_shares` →
+    /// `effective_sizing` → `global_sizing`), so writing these two fields is the
+    /// whole change — and it remains the global ceiling that per-strategy
+    /// overrides are clamped by, which is what makes it safe to move at runtime.
+    pub fn set_share_band(&mut self, min_shares: Decimal, max_shares: Decimal) {
+        self.cfg.min_shares = min_shares;
+        self.cfg.max_shares = max_shares;
+    }
+
     /// Tokens whose trend is currently confirmed (diagnostics/tests). The union
     /// over registered strategies.
     pub fn confirmed_tokens(&self) -> HashSet<String> {
