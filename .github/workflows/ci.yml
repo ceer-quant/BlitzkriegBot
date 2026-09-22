@@ -120,7 +120,7 @@ jobs:
           (cd user_layer/strategies && cargo build --release --locked)
           (cd user_layer/parity_strategy && cargo build --release --locked)
       - name: Build the gateway and core (release)
-        run: cargo build --release --locked -p blitzkrieg-ui-kit -p blitzkrieg-core
+        run: cargo build --release --locked -p blitzkrieg-ui-kit -p blitzkrieg-core -p blitzkrieg-ui-panel
       - name: Build the panel bundle
         run: |
           cd ui/webapp/webui
@@ -141,6 +141,19 @@ jobs:
       # answer `engine.stats` at all.
       - name: ui:webapp gate
         run: node scripts/webapp-check.mjs
+      # #260 finding 6: the only gate that drives the TUI through a REAL PTY was
+      # referenced by nothing — no workflow, no doc — so the plugin tab and the `n`
+      # network overlay were covered by a one-line regex in tui-parity.check.mjs and
+      # nothing else. It could not be wired in before because it was red on the
+      # baseline: every strategy ships DISABLED since #269/#277, and the script
+      # assumed the shipped default was enabled, so its "disable" step was silently
+      # ENABLING — no confirm dialog, four assertions failing behind it. The script
+      # now drives the row to the state it needs; it passes 27/27 locally and this
+      # step is what keeps it passing. Isolation is the script's own: private UDS,
+      # scratch workdir, dry mode, no logs or archives.
+      - name: TUI plugin-manager PTY gate (#32, #260)
+        timeout-minutes: 5
+        run: python3 scripts/ui-panel-plugin-pty-check.py
       # E12: shutdown must mean "the core is gone". Both gates need the release
       # binary built above. The first asserts resting orders are settled and the
       # process is reaped before stop() resolves; the second asserts a core

@@ -9,6 +9,12 @@ with the core stopped the tab degrades to an offline notice without crashing.
 Covers (#260): the `n` network self-check overlay opens, lists one row per probed
 path, and Esc closes it.
 
+Every strategy ships DISABLED (#269/#277), so the toggle assertions drive the row
+to the state they need instead of assuming the shipped default: the disable path
+is exercised by enabling first. A script that assumes "shipped = enabled" reads a
+silent enable as a failed confirm — which is exactly what it did before this was
+fixed.
+
 Isolation: private UDS + scratch workdir + dry mode + no logs/archives.
 Exit 0 on PASS, 1 on FAIL. (Uses raw pty.fork — Node `script -q /dev/null`
 does not propagate a winsize, which starves ratatui down a 0×0 frame.)
@@ -167,8 +173,16 @@ try:
     check('enable cursor row rendered as [on ] mean_reversion', '[on ] mean_reversion' in text or 'strategy mean_reversion' in text,
           'cursor row after Enter')
 
-    # Move up×2 → spread_arb; Enter → disable → confirm bar (give the frame time).
+    # Move up×2 → spread_arb. Every strategy SHIPS DISABLED (#269/#277), so the
+    # first Enter ENABLES the row (no confirm) and only the second Enter is the
+    # disable under test. Assuming the shipped default was enabled here is what
+    # made this script red on the baseline (#260 finding 6) — the "disable" step
+    # was silently enabling, so no confirm appeared and four assertions downstream
+    # failed with it.
     p.send(b'\x1b[A\x1b[A', settle=0.4)
+    p.clear()
+    p.send(b'\r', settle=0.9)
+    check('spread_arb enable had no confirm dialog', not p.wait_for('y = confirm', timeout=1.0))
     p.clear()
     p.send(b'\r', settle=0.6)
     found = p.wait_for('⚠')  # the confirm box renders ⚠ before the styled command text
