@@ -16,13 +16,23 @@ cargo build --release --workspace --locked
 ## lib/
 
 - `lib/backup-attempt.sh` — the one attempt-record format (`tier`/`source`/`at`/
-  `attempt_epoch`/`result`/`detail`/`dest` + the last SUCCESS's `success_at`/
-  `success_epoch`) written by every actor that can start a backup: the launchd
-  launcher, the resident loop, and a hand run. It lives on the **internal** disk
+  `attempt_epoch`/`result`/`detail`/`dest`/`artifact`/`bytes` + the last SUCCESS's
+  `success_at`/`success_epoch`/`success_artifact`/`success_bytes`) written by every
+  actor that can start a backup: the launchd launcher, the resident loop, and a hand
+  run. `artifact`/`bytes` are read out of the `BACKUP.json` the backup wrote itself
+  (`sourceBytes + archiveBytes`), so "last success 2 hours ago" can be told apart from
+  "last success was an empty directory" — at no extra cost, since a size computed by
+  `du` would mean walking an 8 GB full backup again. It lives on the **internal** disk
   (`$BK_BACKUP_STATUS_DIR`, default `$HOME/Library/Logs`) precisely so that "I ran
   and could not reach the repo (Operation not permitted)" survives on a machine
   whose external volume is unreachable. Three inline copies would drift, and a
   drifted record reads as "no attempt" — back to the silence issue #217 is about.
+- `templates/` — what a scheduled backup is MADE OF, checked in so it can be read in
+  review instead of only after it lands in `~/Library`: the internal-disk launcher and
+  both plists, rendered by `data-backup-install.sh`. `templates/README.md` documents the
+  manual route and the two facts that cost a month of backups — a plist that exists is
+  not a backup that runs, and moving the launcher to the internal disk does not grant
+  access to the repository (TCC authorization is still required).
 - `lib/core-client.mjs` — zero-dependency UDS JSON-RPC client + process
   supervisor (`CoreClient`): spawn/boot/retry, request/timeout, events,
   clean stop (cancels resting orders) and `killNow()` (exit guard).
@@ -135,8 +145,9 @@ cargo build --release --workspace --locked
     A **missing** `data-backup.sh` is an anomaly (`backup=missing-script`), not a
     skip — a check that silently vanishes when a file is renamed is the defect.
     This is what catches the incident's shape: a registered, "installed" schedule
-    that had never once produced a backup, with `launchctl list` reporting exit
-    code 0 and a 94-byte log.
+    that had never once produced a backup, whose whole outward trace was one
+    94-byte log line (the issue recorded `launchctl list` exit code `0`; a fresh
+    read on 2026-09-23 shows `126` — the code was there, and nothing consumed it).
   `soak-health-loop.sh` additionally bounds its own `health.log` and `$BK_RUN_LOG`
   (`BK_LOG_MAX_BYTES`, default 20 MiB) by gzip + in-place truncate, leaving a log
   untouched if gzip fails. It no longer calls the deleted `rotate-run-log.sh`.
@@ -186,10 +197,18 @@ cargo build --release --workspace --locked
   pgrep 复核发现内核在跑」时不自动拉起**——再拉只会更多。`BK_CORE_VERIFY_PGREP` 是对
   已发现 pid 的命令行复核串（默认同 `BK_CORE_PGREP`），只用于自测注入「发现了但复核不认」
   这一态，生产不要设。
-  自测：`bash scripts/stack-watchdog.sh --self-test`（22 组用例 / 97 项断言，fixture 驱动，
+  自测：`bash scripts/stack-watchdog.sh --self-test`（23 组用例 / 129 项断言，fixture 驱动，
   不需要真内核、不碰生产 `data/`、不建默认状态目录；含**无 `--pidfile` 的 pgrep 发现分支**
   命中 / 无命中 / 两个命中 / 复核不认 / pidfile 过期，**子串复核把构建 shell 当内核**的
-  回归，以及僵尸进程与长命令行 pty 两个回归）。
+  回归，僵尸进程与长命令行 pty 两个回归，以及第 23 组的**备份新鲜度**：新鲜时安静、陈旧时
+  告警 + `BACKUP_STALE` 标记 + 退出码 `4`、去抖与 `--repeat-sec 0` 重报、内核停机时抑制
+  通知但保留标记与退出码、恢复后清标记并记「备份已恢复新鲜」、判定器缺失时报 `unusable`
+  而不是当作通过、`--no-backup-check` 关掉整条）。
+  **备份新鲜度（issue #217）是看门狗的第二条独立信号**：距上次成功备份超过
+  `BK_BACKUP_STALE_HOURS`（light，默认 26h）或 `BK_BACKUP_FULL_STALE_HOURS`（full，默认
+  192h）就告警，退出码 `4`（优先级：重复内核 `3` > 内核停机 `1` > 备份陈旧 `4`）。
+  判定不在这里重新实现：它调 `scripts/data-backup.sh --status --quiet` 并读那一行，
+  两个实现会分歧，一个实现不会。
   复核口径的已知代价：`pgrep -f`/`grep` 都是**整条命令行上的子串匹配**，所以「只在命令行里
   提到内核路径」的进程也会命中（本机实测 4 个 `cargo build`/`ls` 构建 shell）。判定不收紧
   （收紧会漏掉手工起的、argv 里没有 `--socket` 的真内核），而是：告警里逐个 pid 点名，
@@ -257,10 +276,13 @@ cargo build --release --workspace --locked
 **The fact** (measured 2026-09-21, repo on an external volume): a launchd-spawned
 process gets `Operation not permitted` reading **and** exec'ing anything on this
 volume. The installed `com.blitzkrieg.databackup.*` agents therefore ran, failed
-in under a second, left one 94-byte log line, and reported **exit code 0** in
-`launchctl list` — so a system with *zero* automatic backups looked "installed and
-scheduled" on every surface an operator would check. That is the defect: not that
-TCC refused (that is a deployment choice) but that the refusal was invisible.
+in under a second, and left one 94-byte log line as their only trace — so a system
+with *zero* automatic backups looked "installed and scheduled" on every surface an
+operator would check. Nothing consumed the exit status either: the issue recorded
+`0` in `launchctl list`, a fresh read on 2026-09-23 shows `126`, and in both cases
+no status file, no alert and no line of `--status` said anything. That is the
+defect: not that TCC refused (that is a deployment choice) but that the refusal
+was invisible.
 
 **Route A — LaunchAgent + Full Disk Access** (survives reboot and logout):
 
@@ -270,16 +292,25 @@ bash scripts/data-backup-install.sh --no-verify   # skip the probe
 bash scripts/data-backup-install.sh --uninstall   # remove agents + launcher
 ```
 
-The installer writes a small **launcher on the internal disk**
-(`~/Library/Application Support/blitzkrieg/data-backup-launch.sh`) and points
-`ProgramArguments` at it, because a `/bin/sh` that cannot even read its script has
-no way to report anything. The launcher preflights a real read of the checkout and,
-when it is denied, writes a dated `FAIL: … (Operation not permitted)` line and
-exits **126** instead of failing silently. Then it `exec`s
-`data-backup-cli.sh <tier> --attempt-source launchd`.
+The installer **renders two templates that live in this repository**
+(`scripts/templates/data-backup-launch.sh` and the two
+`com.blitzkrieg.databackup.*.plist`) into `~/Library/Application Support/blitzkrieg/`
+and `~/Library/LaunchAgents/`, so what a scheduled job will run is readable in review
+rather than only after it is installed; it lints the rendered plist (`plutil -lint`)
+and parses the rendered launcher (`sh -n`), refusing to finish on a leftover
+placeholder. `scripts/templates/README.md` has the manual route and the warnings.
+The launcher points `ProgramArguments` at the internal-disk copy, because a `/bin/sh`
+that cannot even read its script has no way to report anything. It preflights real
+reads of the checkout and of the backup root; when one is denied it does three things
+instead of failing silently: writes a `result=fail` **attempt record** (internal disk,
+the same file `--status` and the watchdog read), prints a dated
+`FAIL: … (Operation not permitted)` line naming the fix, and exits **126**. When the
+reads succeed it `exec`s `data-backup-cli.sh <tier> --attempt-source launchd`.
 
-Moving the launcher is necessary but **not sufficient**: the remaining step is the
-user's, and it cannot be automated (D-33):
+Moving the launcher is necessary but **not sufficient** — the launcher must still
+read the repository and the backup volume, and TCC denies exactly that. It changes a
+silent failure into a recorded one; it does not make the backup run. The remaining
+step is the user's, and it cannot be automated (D-33):
 
 1. System Settings → Privacy & Security → **Full Disk Access**.
 2. **+**, then ⌘⇧G and type `/bin/sh` — the interpreter launchd starts, i.e.
@@ -287,6 +318,12 @@ user's, and it cannot be automated (D-33):
 3. Re-run `bash scripts/data-backup-install.sh` (it re-probes) — or wait for the
    next 04:00 and run `bash scripts/data-backup.sh --status`.
 4. Only a `PASS` / an `ok` status line counts. "installed" is not evidence.
+
+Issue #217 names two alternatives to this route: move the checkout to the internal
+disk (also fixes the same class of problem for the #211 watchdog), or drop launchd and
+let the trading core — which you started by hand and which therefore already has TCC
+access — trigger the backup itself, with failures going through `emit_error`. Both are
+deployment decisions, not code in this repository.
 
 **Route B — the resident loop** (works today, no permission change;
 **does not survive reboot/logout**):
@@ -312,10 +349,16 @@ blitzkrieg backup --status                    # the same, through the shim
 tier, with `ABSENT` / `NOTDIR` / `DENIED` / `NONE` as distinct causes) and the
 newest **automatic** attempt (the launchd/loop log's last line, classified by a
 tight failure signature, plus the attempt record written by every actor via
-`scripts/lib/backup-attempt.sh`). A record whose `source` is `cli` is deliberately
-NOT scheduler evidence: a successful hand-run backup must never mark the schedule
-healthy. An artifact-only check would have reproduced the incident's false
-comfort — a fresh hand-made copy with a scheduler that has never once succeeded.
+`scripts/lib/backup-attempt.sh` — which also carries the artifact the run produced and
+its size, so a 0-byte "success" cannot pass for a backup). A record whose `source` is
+`cli` is deliberately NOT scheduler evidence: a successful hand-run backup must never
+mark the schedule healthy. An artifact-only check would have reproduced the incident's
+false comfort — a fresh hand-made copy with a scheduler that has never once succeeded.
+
+`stack-watchdog.sh` runs the same verdict every 60 s when its agent is installed (exit
+`4` + a `BACKUP_STALE` marker when a tier is past its tolerance), so a backup that
+stopped happening is alarmable without a human running an inspection first — the
+checkup route (`soak-health.sh`) still carries it as a `backup=` sub-status.
 
 ## Packaging / CI helpers
 

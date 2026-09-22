@@ -61,6 +61,7 @@ if [ -f "$BK_LIB" ]; then
 else
   echo "warning: $BK_LIB missing; backup attempts will not be recorded" >&2
   bk_attempt_write() { :; }
+  bk_attempt_bytes() { :; }
 fi
 
 [ -f "$backup_script" ] || { echo "error: $backup_script missing" >&2; exit 1; }
@@ -142,7 +143,16 @@ case "$mode" in
     case "$rc" in ''|*[!0-9]*) rc=1 ;; esac
 
     if [ "$rc" -eq 0 ]; then
-      bk_attempt_write "$mode" "$attempt_source" ok "" "$dest"
+      # The artifact and its size travel with the record (issue #217): "it last
+      # succeeded 2 hours ago" cannot distinguish a real backup from an empty one,
+      # and the size is read out of the BACKUP.json the run wrote itself — no `du`
+      # over a multi-GB full backup, no second pass over the data. The script
+      # prints `BACKUP OK: <dir>` as its last word on success; `tail -1` in case a
+      # future path prints it more than once. An empty artifact is not fatal: the
+      # record then carries forward the previous one rather than lying.
+      artifact="$(sed -n 's/^BACKUP OK: //p' "$out_file" 2>/dev/null | tail -1)"
+      bytes="$(bk_attempt_bytes "$artifact")"
+      bk_attempt_write "$mode" "$attempt_source" ok "" "$dest" "$artifact" "$bytes"
     else
       detail="$(grep -v '^[[:space:]]*$' "$out_file" 2>/dev/null | tail -1)"
       [ -n "$detail" ] || detail="exit $rc with no output"

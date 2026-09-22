@@ -296,24 +296,41 @@ stdout 同一份）；内核正在 down 时另有 `$STATE_DIR/STACK_DOWN` 标记
   起来后删掉：静默只压「喊人」（不通知、不落告警正文），状态、`STACK_DOWN` 标记与退出码照常。
 - 去抖：只在状态翻转时出声；持续停机期间最多每 15 分钟（`--repeat-sec`）重复一次，不刷屏。
 - 自测（CI 可直接跑：fixture 驱动，**不需要真内核**，不碰生产 `data/`；当前
-  `22 组用例 / 97 项断言`）：`bash scripts/stack-watchdog.sh --self-test`
+  `23 组用例 / 129 项断言`）：`bash scripts/stack-watchdog.sh --self-test`
   覆盖用法错误、活着/死了的 pidfile、socket 不通、去抖与静默、自动拉起的两把钥匙与
   live 硬门禁、`--status` 只读、**无 `--pidfile` 的 pgrep 发现分支**（命中 / 无命中 /
   两个命中 / 复核不认 / pidfile 过期）、**「只在命令行里提到内核路径」的构建 shell
-  不该把重复信号喊成狼来了**，以及僵尸进程与长命令行两个实测回归。
+  不该把重复信号喊成狼来了**、僵尸进程与长命令行两个实测回归，以及**备份新鲜度**
+  （第 23 组：新鲜时安静、变陈旧时告警 + `BACKUP_STALE` 标记 + 退出码 `4`、去抖、
+  内核停机时抑制通知但保留标记、恢复后清除、判定器缺失时报 `unusable` 而不是当作通过）。
 
 ### 3.6 自动备份：TCC 拦住了什么、现在怎么跑（issue #217）
 
 **现象（实测，2026-09-21 发现）**：`com.blitzkrieg.databackup.light/full` 两个 LaunchAgent
-从装上起**一次都没成功过**，却看不出任何异常——`launchctl list` 的退出码是 `0`，日志只有 94 字节
+从装上起**一次都没成功过**，却看不出任何异常——日志只有 94 字节
 一行 `/bin/sh: /Volumes/Hard Disk/BlitzkriegBot/scripts/data-backup-cli.sh: Operation not permitted`，
-而 `--status` 一查：**零个自动备份**。缺陷不是「TCC 拒绝」（那是部署选择），而是**拒绝是静默的**。
+而 `--status` 一查：**零个自动备份**。缺陷不是「TCC 拒绝」（那是部署选择），而是**拒绝是静默的**：
+issue 当时读到的 `launchctl list` 退出码是 `0`，2026-09-23 复查同一行是 `126`——**两种读数都没人消费**，
+没有状态文件、没有告警、`--status` 那一行也不存在。
 
 **根因**：本仓库在外置卷，macOS TCC 拒绝 launchd 拉起的进程读**和**执行该卷上的任何东西
 （探针 agent 实测：`ls` 仓库、`head` 仓库内文件、exec 脚本，全部 EPERM / exit 126）。
 所以把 launcher 挪到内置盘是**必要但不充分**的：脚本本身还在被拒的卷上。
+**「plist 存在」「`launchctl list` 有条目」都不等于备份在跑**——唯一算数的是
+`--status` 的一行 `ok`（或产物的 `MANIFEST.sha256` 校验通过）。
 
-**A 路线：LaunchAgent + 完全磁盘访问**（重启/登出后仍然有效）
+issue #217 列了三条路线，按「当前外置卷布局下是否真的生效」排序：
+
+| 路线 | 说明 | 状态 |
+| --- | --- | --- |
+| **1. 内置盘 launcher + 完全磁盘访问（D-33）** | launcher 放内置盘，/bin/sh 授 FDA。**唯一在当前布局下真正生效的**，跨重启 | 已就绪（模板 + 安装器），**授权是用户手工步骤，尚未做** |
+| **2. 把检出搬到内置盘** | 最彻底：同时解掉 #211 看门狗的同类问题 | 未做（部署决定，属用户） |
+| **3. 放弃 launchd，由内核自己触发备份** | 内核是你手工启动的、已有 TCC 授权；失败走 `emit_error` 可见 | 未做（需要动内核代码，本次范围外） |
+
+本仓库另外提供了一条**今天就能用、不需要任何权限变更**的替代路线（B 路线，下面），
+它不在 issue 的三条里，但同样是「有产物 + 有可见信号」的正规做法。
+
+**A 路线（= issue 路线 1）：LaunchAgent + 完全磁盘访问**（重启/登出后仍然有效）
 
 ```bash
 bash scripts/data-backup-install.sh              # 安装 + 自检探针（仍被拒时非零退出）
@@ -324,10 +341,15 @@ bash scripts/data-backup-install.sh --uninstall  # 卸载 agent 与内置盘 lau
 安装器会把一个**内置盘 launcher** 写到
 `~/Library/Application Support/blitzkrieg/data-backup-launch.sh`，plist 的
 `ProgramArguments` 指向它（`/bin/sh <launcher> <light|full>`）——因为一个连自己脚本都读不到的
-`/bin/sh` 没有能力报告任何事。launcher 会**真的读一次**仓库；被拒时写下带日期的
-`FAIL: … (Operation not permitted)` 并以 **126** 退出（不再静默），否则 `exec` 真正的
+`/bin/sh` 没有能力报告任何事。launcher 会**真的读一次**仓库，被拒时做三件事：写一条
+`result=fail` 的尝试记录（内置盘状态文件，`--status` 与看门狗都读它）、打出一行带日期的
+`FAIL: … (Operation not permitted)`、以 **126** 退出（不再静默）。可读时 `exec` 真正的
 `data-backup-cli.sh … --attempt-source launchd`。日志仍在
 `~/Library/Logs/blitzkrieg-data-backup-<tier>.log`。
+
+launcher 与两个 plist 都是**仓库里的模板**（`scripts/templates/`，安装器渲染后落盘），
+因此「将要跑的东西」在 code review 里可读、可 diff；手工安装与占位符说明见
+[`scripts/templates/README.md`](scripts/templates/README.md)。
 
 **剩下的一步只能你做，我无法代做**（安全姿态变更，D-33）：
 1. 系统设置 → 隐私与安全性 → **完全磁盘访问权限**；
@@ -359,10 +381,22 @@ blitzkrieg backup --status              # 同一件事，走 shim
 `--status` 分开判两件事：磁盘上最新的**产物**（按 tier 的年龄，并把
 `ABSENT`（卷不在）/ `NOTDIR` / `DENIED`（读不到）/ `NONE`（从未产出）分成四种原因），
 以及最新一次**自动**尝试（launchd/loop 日志最后一行按失败签名归类 + 每次运行都会写的
-`scripts/lib/backup-attempt.sh` 记录）。`source=cli` 的记录**故意不算调度证据**：手工跑成功
-一次绝不能让调度看起来健康——只判产物的检查会重现事故里那种「假的安心」。这个检查已接进
-`scripts/soak-health.sh` 的既有告警通道（`backup=` 子状态），但**告警只在有人跑健康巡检时才会响**：
-`soak-health-loop.sh` 没在跑的时候，请把 `blitzkrieg backup --status` 当作手工闸门。
+`scripts/lib/backup-attempt.sh` 记录，后者还带**产物路径与体量**：只有时间戳的话，
+一份 0 字节的「成功」和一个真正的备份在记录里长得一样）。`source=cli` 的记录**故意不算调度证据**：
+手工跑成功一次绝不能让调度看起来健康——只判产物的检查会重现事故里那种「假的安心」。
+
+这个检查接进了**两条**告警通道，不再依赖「有人正好在跑健康巡检」：
+
+- `scripts/soak-health.sh` 的既有告警通道（`backup=` 子状态）——终端里人工巡检时看它；
+- **`scripts/stack-watchdog.sh`（#211 的看门狗；装了 `scripts/com.blitzkrieg.stack-watchdog.plist`
+  就每 60 秒跑一次，本机目前**未装**——它同样受 TCC 限制，安装前请先读它自己的说明）**：距上次成功备份
+  超过 N 小时（`light` 默认 26h、`full` 默认 192h，用 `BK_BACKUP_STALE_HOURS` /
+  `BK_BACKUP_FULL_STALE_HOURS` 调，`--no-backup-check` 整条关掉）
+  就告警，并落一个 `BACKUP_STALE` 标记、以**退出码 `4`** 结束；恢复后清除标记并记一行
+  「备份已恢复新鲜」。两个退出码的优先级是刻意的：重复内核（`3`）> 内核停机（`1`）> 备份陈旧（`4`）；
+  内核停机期间**不喊人**（通知被抑制）但标记与退出码照写——「后端全停了」和「后端在跑但备份没跑」
+  是两件事，看门狗不把它们混成一条消息。判定逻辑不在这里重新实现：看门狗调用
+  `data-backup.sh --status --quiet` 并读它那一行，两个实现会分歧，一个实现不会。
 
 ---
 
