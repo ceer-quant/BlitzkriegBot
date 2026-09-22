@@ -1,10 +1,11 @@
 # Nested workspace for user-layer external dynamic strategies (C ABI v2).
 # One cdylib per member: libdog_strategy / libspread_arb_strategy /
-# libtrend_follow_strategy / libmean_reversion_strategy .{dylib,so,dll}.
+# libtrend_follow_strategy / libmean_reversion_strategy / libpair_arb_strategy
+# .{dylib,so,dll}.
 # SEPARATE from the kernel workspace (own Cargo.lock), like a real third-party
 # strategy author's checkout: the kernel binary contains NO strategy code, and
 # every strategy — shipped example or third-party — enters the engine through
 # the same dlopen path.
 [workspace]
-members = ["dog", "spread_arb", "trend_follow", "mean_reversion"]
+members = ["dog", "spread_arb", "trend_follow", "mean_reversion", "pair_arb"]
 resolver = "2"

@@ -246,6 +246,7 @@ impl EngineStrategy for InTreeParity {
                 condition_id: m.condition_id.clone(),
                 price: Decimal::from_str(&e.price).expect("parity price"),
                 reason: e.reason,
+                shares: None,
             });
         }
         out

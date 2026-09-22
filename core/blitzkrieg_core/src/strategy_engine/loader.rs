@@ -659,6 +659,10 @@ pub struct LoadedForeign {
     /// evolvable** (no symbol, or nothing declared), which is an explicit
     /// declaration and is reported as such at registration.
     pub evolvable_knobs: Vec<crate::shadow_evolution::KnobSpec>,
+    /// Hold-to-settlement declaration: the strategy's positions are meant to be
+    /// redeemed at expiry, not sold on the exit ladder. Default (no symbol) =
+    /// false; reported at registration so the operator sees it.
+    pub holds_to_settlement: bool,
 }
 
 /// Load and negotiate a v2 strategy library, returning it boxed as the full
@@ -807,6 +811,16 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
         unsafe { lib.get::<blitzkrieg_strategy_api::BkConfigViewFn>(BK_CONFIG_VIEW_SYMBOL) }
             .ok()
             .map(|s| *s);
+    // 4d) OPTIONAL hold-to-settlement declaration. Absent symbol = not declared
+    // = the strategy keeps its normal exit ladder, so no ABI bump and older
+    // libraries keep loading unchanged.
+    let settlement_holds_fn = unsafe {
+        lib.get::<blitzkrieg_strategy_api::BkSettlementHoldsFn>(
+            blitzkrieg_strategy_api::BK_SETTLEMENT_HOLDS_SYMBOL,
+        )
+    }
+    .ok()
+    .map(|s| *s);
 
     let name = unsafe { cstr_to_string(vtable.name) }.unwrap_or_else(|| "unnamed".into());
     let version = unsafe { cstr_to_string(vtable.version) }.unwrap_or_else(|| "0.0.0".into());
@@ -824,6 +838,7 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
             evolvable_knobs_fn,
             bind_eval_ctx_fn,
             config_view_fn,
+            settlement_holds_fn,
         )
     };
 
@@ -841,12 +856,14 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
     // registration, not only inferred later.
     let gate_exemptions = crate::strategies::EngineStrategy::gate_exemptions(&strategy);
     let evolvable_knobs = crate::strategies::EngineStrategy::evolvable_knobs(&strategy);
+    let holds_to_settlement = crate::strategies::EngineStrategy::holds_to_settlement(&strategy);
     Ok(LoadedForeign {
         strategy,
         name,
         version,
         gate_exemptions,
         evolvable_knobs,
+        holds_to_settlement,
     })
 }
 

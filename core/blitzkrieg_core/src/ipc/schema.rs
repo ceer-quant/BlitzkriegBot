@@ -520,6 +520,14 @@ pub enum Event {
         asset: String,
         direction: String,
         reason: String,
+        /// The position's identity rides along because a close is only
+        /// meaningful in context: `strategy` attributes the trade, and
+        /// `conditionId` groups the legs of ONE trade that closed as several
+        /// positions — a complete-set pair settles as two (winner $1 / loser
+        /// $0) whose statistics exist only as a group.
+        strategy: String,
+        token_id: String,
+        condition_id: String,
         #[serde(with = "crate::decimal", rename = "netPnlUsd")]
         net_pnl_usd: Decimal,
         #[serde(with = "crate::decimal", rename = "netPnlPct")]

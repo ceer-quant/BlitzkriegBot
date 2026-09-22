@@ -92,6 +92,7 @@ impl SafeStrategy for Dog {
                         token: t.clone(),
                         price,
                         reason: "dog_dip".into(),
+                        shares: None,
                     });
                     self.holding.insert(t.clone());
                 }

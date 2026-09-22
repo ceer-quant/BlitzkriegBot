@@ -258,6 +258,23 @@ pub trait EngineStrategy: Send + Sync {
         GateExemptions::none()
     }
 
+    /// Whether this strategy's positions are meant to be HELD TO SETTLEMENT
+    /// (expiry redemption) rather than sold on the exit ladder.
+    ///
+    /// Why it exists: a complete-set pair (UP + DOWN bought below $1) pays
+    /// exactly $1 per share-pair at settlement regardless of which side wins.
+    /// Selling either leg before expiry converts a riskless payoff into a
+    /// directional trade, so the exit policy's TimeExit ladder must leave these
+    /// positions alone; the host's venue settlement path (issue #175) then
+    /// closes them at their redemption value.
+    ///
+    /// NOT a safety bypass: sizing, risk gate, kill switch and quotas still
+    /// apply to every entry, and an explicit strategy exit intent is always
+    /// honoured. Default: false (every existing strategy keeps its exits).
+    fn holds_to_settlement(&self) -> bool {
+        false
+    }
+
     /// Close intents accumulated since the last drain. The host resolves each
     /// token to a live position and routes it through the SAME exit submission
     /// path as an automated/policy exit (live-sell dedup, `sell_shares`, risk +

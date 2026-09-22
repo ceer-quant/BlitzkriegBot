@@ -1,0 +1,29 @@
+# The `pair_arb` strategy: COMPLETE-SET PAIR ARBITRAGE on one binary market.
+#
+# A complete set (one UP share + one DOWN share of the same market) pays
+# exactly $1 at expiry, whichever side wins. Buying BOTH legs for less than $1
+# locks the difference in at entry and holds it to settlement; there is no view
+# on direction anywhere in the strategy. The pair is priced, sized and emitted
+# together in one evaluation cycle, and the position is declared
+# hold-to-settlement so the kernel's exit ladder leaves it alone and redeems it
+# at expiry instead (see `bk_strategy_settlement_holds`).
+#
+# Self-contained by design: the pair scan is new logic with no counterpart in
+# the shared `strategy-logic` reference crate (which holds the dip-buyer rules
+# the kernel's parity tests pin), so this library depends on the ABI template
+# alone.
+[package]
+name = "pair_arb_strategy"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "pair_arb_strategy"
+path = "pair_arb_strategy.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+blitzkrieg-strategy-api = { path = "../../strategy_api" }
+rust_decimal = "1"
+rust_decimal_macros = "1"
+serde_json = "1"

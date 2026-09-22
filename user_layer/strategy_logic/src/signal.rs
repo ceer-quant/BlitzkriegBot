@@ -394,6 +394,13 @@ pub struct TradeSignal {
     pub condition_id: String,
     pub price: Decimal,
     pub reason: String,
+    /// Strategy-requested share count (OPTIONAL). `None` = the kernel sizes from
+    /// its own notional budget as before; `Some(n)` is honoured only inside the
+    /// kernel's risk band — clamped to `[1, effective_sizing.max_shares]` — so a
+    /// declaration can never bypass the sizing ceiling. Exists for strategies
+    /// whose legs must match in SHARES, not in notional (a complete-set pair
+    /// buys the same n shares of UP and DOWN).
+    pub shares: Option<Decimal>,
 }
 
 /// Trend-confirmed dip buyer. Mirrors the original `evaluateSpreadArb`:
@@ -459,6 +466,7 @@ pub fn evaluate_spread_arb(
             token_id: token.to_string(),
             condition_id: condition_id.to_string(),
             price: entry,
+            shares: None,
             reason: format!(
                 "{} trend confirmed (held >{} for >={}s), resting bid {} ({}% of mid {})",
                 dir.as_str().to_uppercase(),

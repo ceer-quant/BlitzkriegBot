@@ -65,6 +65,9 @@ pub struct LoadedLibrary {
     /// OPTIONAL `bk_strategy_config_view` (E-parity): the config currently in
     /// force, as the strategy reports it. None = "declares nothing".
     config_view_fn: Option<blitzkrieg_strategy_api::BkConfigViewFn>,
+    /// OPTIONAL `bk_strategy_settlement_holds`: hold-to-settlement declaration
+    /// (expiry redemption instead of the exit ladder). None = "no declaration".
+    settlement_holds_fn: Option<blitzkrieg_strategy_api::BkSettlementHoldsFn>,
 }
 
 impl LoadedLibrary {
@@ -81,6 +84,7 @@ impl LoadedLibrary {
         evolvable_knobs_fn: Option<BkEvolvableKnobsFn>,
         bind_eval_ctx_fn: Option<blitzkrieg_strategy_api::BkBindEvalCtxFn>,
         config_view_fn: Option<blitzkrieg_strategy_api::BkConfigViewFn>,
+        settlement_holds_fn: Option<blitzkrieg_strategy_api::BkSettlementHoldsFn>,
     ) -> Arc<Self> {
         Arc::new(Self {
             lib,
@@ -90,6 +94,7 @@ impl LoadedLibrary {
             evolvable_knobs_fn,
             bind_eval_ctx_fn,
             config_view_fn,
+            settlement_holds_fn,
         })
     }
 
@@ -314,6 +319,9 @@ pub struct ForeignStrategy {
     bind_eval_ctx_fn: Option<blitzkrieg_strategy_api::BkBindEvalCtxFn>,
     /// OPTIONAL config-view symbol (copied from the shared library record).
     config_view_fn: Option<blitzkrieg_strategy_api::BkConfigViewFn>,
+    /// OPTIONAL hold-to-settlement symbol (copied from the shared library
+    /// record).
+    settlement_holds_fn: Option<blitzkrieg_strategy_api::BkSettlementHoldsFn>,
 
     // Outputs accumulated during evaluate(), drained by the host.
     exit_intents: Vec<StrategyExitIntent>,
@@ -346,6 +354,7 @@ impl ForeignStrategy {
         let evolvable_knobs_fn = lib.evolvable_knobs_fn;
         let bind_eval_ctx_fn = lib.bind_eval_ctx_fn;
         let config_view_fn = lib.config_view_fn;
+        let settlement_holds_fn = lib.settlement_holds_fn;
         let mut s = Self {
             lib,
             vtable,
@@ -358,6 +367,7 @@ impl ForeignStrategy {
             knobs: Vec::new(),
             bind_eval_ctx_fn,
             config_view_fn,
+            settlement_holds_fn,
             exit_intents: Vec::new(),
             breaks: Vec::new(),
             params: None,
@@ -392,6 +402,7 @@ impl ForeignStrategy {
             knobs: self.knobs.clone(),
             bind_eval_ctx_fn: self.bind_eval_ctx_fn,
             config_view_fn: self.config_view_fn,
+            settlement_holds_fn: self.settlement_holds_fn,
             exit_intents: Vec::new(),
             breaks: Vec::new(),
             params: None,
@@ -618,6 +629,17 @@ impl EngineStrategy for ForeignStrategy {
         self.read_config_view()
     }
 
+    /// Hold-to-settlement declaration, via the library's OPTIONAL
+    /// `bk_strategy_settlement_holds` symbol. Missing symbol = not declared =
+    /// the trait default (false) — every existing library keeps its exits.
+    fn holds_to_settlement(&self) -> bool {
+        let Some(f) = self.settlement_holds_fn else {
+            return false;
+        };
+        // SAFETY: valid handle; the symbol is a pure read of library state.
+        unsafe { f(self.handle) != 0 }
+    }
+
     fn on_book(&mut self, token_id: &str, snap: &OrderbookSnapshot, now_ms: i64) {
         let Some(f) = self.vtable.on_book else { return };
         // on_book carries only a token; label the view with the asset resolved
@@ -798,6 +820,14 @@ impl EngineStrategy for ForeignStrategy {
             let Ok(price) = Decimal::from_str(price_s) else {
                 continue;
             };
+            // OPTIONAL per-entry share count (decimal STRING, the ABI's numeric
+            // form). Absent = the kernel sizes from its notional budget; present
+            // but malformed = ignore it and fall back to kernel sizing, never
+            // reject the entry (a typo must not cost the signal).
+            let shares = e
+                .get("shares")
+                .and_then(|s| s.as_str())
+                .and_then(|s| Decimal::from_str(s).ok());
             let reason = e
                 .get("reason")
                 .and_then(|r| r.as_str())
@@ -815,6 +845,7 @@ impl EngineStrategy for ForeignStrategy {
                         condition_id: m.condition_id.clone(),
                         price,
                         reason: reason.clone(),
+                        shares,
                     });
                     break;
                 }
@@ -827,6 +858,7 @@ impl EngineStrategy for ForeignStrategy {
                         condition_id: m.condition_id.clone(),
                         price,
                         reason: reason.clone(),
+                        shares,
                     });
                     break;
                 }
@@ -995,6 +1027,7 @@ impl ShadowFactory for ForeignShadowFactory {
             knobs: self.knobs.clone(),
             bind_eval_ctx_fn: self.lib.bind_eval_ctx_fn,
             config_view_fn: self.lib.config_view_fn,
+            settlement_holds_fn: self.lib.settlement_holds_fn,
             exit_intents: Vec::new(),
             breaks: Vec::new(),
             params: None,
