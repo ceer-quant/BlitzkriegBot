@@ -66,6 +66,135 @@ impl Default for RiskConfig {
     }
 }
 
+// ── The hot-reload boundary (#191) ───────────────────────────────────────────
+
+/// The knobs `risk.setLimits` may change WITHOUT a restart — the whole safe
+/// subset, in wire (camelCase) spelling.
+///
+/// Membership is a statement about how a knob is read, not about how it sounds:
+///
+/// 1. the order path reads it LIVE on every check (the risk gate for the caps,
+///    the engine's own config for the share band), so there is no cached copy to
+///    keep coherent;
+/// 2. it bounds NEW exposure only — a close is exempt (#174), so tightening a
+///    limit can never trap an open position;
+/// 3. it carries NO accumulated state, so a change cannot retroactively decide
+///    something a book of past events already decided.
+///
+/// The per-entry budget (`sizeUsd` / `sizePct`) is deliberately outside: it is a
+/// target, not a bound, and it decides how much to commit rather than how much
+/// is allowed. Everything not listed here is refused — see
+/// [`hot_reload_refusal`] and [`crate::ipc::schema::SetRiskLimitsParams`].
+pub const HOT_RELOADABLE: &[&str] = &[
+    "maxOrderNotional",
+    "maxOrderNotionalPct",
+    "maxOpenNotionalUsd",
+    "minShares",
+    "maxShares",
+];
+
+/// Knobs refused BY NAME by `risk.setLimits`, each with the reason it needs a
+/// restart. The typed patch already refuses everything outside
+/// [`HOT_RELOADABLE`]; this table exists so the refusal names the cause for the
+/// knobs an operator actually reaches for, instead of answering a daily-loss or
+/// credential change with "unknown field".
+///
+/// Each row lists the spellings that name the SAME startup knob — the wire
+/// camelCase, the struct/TOML snake_case and the `--flag` spelling — because an
+/// operator does not stop to ask which one this method speaks. Lookup ignores
+/// case and separators, so `max_daily_loss_usd`, `maxDailyLossUsd` and
+/// `max-daily-loss` all land on one reason.
+///
+/// Every entry is a real startup knob (`main.rs`'s flags / `CoreConfig` /
+/// `PositionConfig` / `ExitConfig`), so the refusal is actionable, never a dead
+/// end.
+pub const HOT_RELOAD_REFUSED: &[(&[&str], &str)] = &[
+    (
+        &["maxDailyLossUsd", "max_daily_loss_usd", "max-daily-loss"],
+        "the daily-loss breaker is judged against the day's accumulated realized-loss \
+         book; re-arming it mid-day silently changes what is already spent",
+    ),
+    (
+        &[
+            "maxDailyLossEquityPct",
+            "max_daily_loss_equity_pct",
+            "max-daily-loss-pct",
+        ],
+        "a share of the day's OPENING equity — a number the day fixed when it rolled, \
+         so a live change would be measured against a basis the day no longer has",
+    ),
+    (
+        &[
+            "maxConsecutiveLosses",
+            "max_consecutive_losses",
+            "max-consecutive-losses",
+        ],
+        "the consecutive-loss counter is already running; a new threshold \
+         retroactively decides whether the streak on file has tripped",
+    ),
+    (
+        &[
+            "breakerCooldownSec",
+            "breaker_cooldown_sec",
+            "breaker-cooldown-sec",
+        ],
+        "the cooldown is a deadline already running against the streak on file",
+    ),
+    (
+        &["maxPositions", "max_positions", "max-positions"],
+        "enforced by the position manager, in the same config block as the exit \
+         policy — the whole block is outside this whitelist and needs that review",
+    ),
+    (
+        &["stopLossPct", "stop_loss_pct", "stop-loss-pct"],
+        "an exit threshold: already-open positions were entered under the old one, \
+         and a live change moves their risk budget invisibly",
+    ),
+    (
+        &["takeProfitPct", "take_profit_pct", "take-profit-pct"],
+        "an exit threshold — same reason as stopLossPct",
+    ),
+    (
+        &["privateKey", "private_key", "POLYMARKET_PRIVATE_KEY"],
+        "credentials are read from the environment at startup and the live executor \
+         is built from them; they are never a runtime parameter",
+    ),
+    (
+        &[
+            "seedBalance",
+            "seed_balance",
+            "drySeedBalance",
+            "dry_seed_balance",
+        ],
+        "the ledger's principal is fixed when the session opens; changing it \
+         mid-session breaks the balance identity the audit checks",
+    ),
+    (
+        &["sizeUsd", "size_usd", "sizePct", "size_pct"],
+        "the per-entry BUDGET, not a bound: it decides how much a new ticket \
+         commits, so a live change moves every future entry's size at once",
+    ),
+];
+
+/// `key` with case and separators dropped, so the three spellings of one knob
+/// compare equal.
+fn normalised(key: &str) -> String {
+    key.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Why `key` cannot be hot-changed, or `None` when it is not a named refusal
+/// (the typed patch still refuses it if it is outside [`HOT_RELOADABLE`]).
+pub fn hot_reload_refusal(key: &str) -> Option<&'static str> {
+    let key = normalised(key);
+    HOT_RELOAD_REFUSED
+        .iter()
+        .find(|(names, _)| names.iter().any(|n| normalised(n) == key))
+        .map(|(_, why)| *why)
+}
+
 #[derive(Debug, Default)]
 pub struct RiskGate {
     config: RiskConfig,
@@ -626,5 +755,42 @@ mod tests {
         assert!(bs.halted(300_100).is_empty());
         // A second pass resumes nothing (the halt is already cleared).
         assert!(bs.maybe_resume_all(400_000).is_empty());
+    }
+
+    /// #191 — the hot-reload boundary is a WALL, not a mood. The allowed set and
+    /// the refused table must not overlap (a knob both allowed and refused is an
+    /// unanswered question), and a refused knob must answer in the spellings an
+    /// operator actually reaches for: the wire camelCase, the struct/TOML
+    /// snake_case, the `--flag`. The refusal is the feature, so it is pinned
+    /// here rather than left to the message text of one RPC test.
+    #[test]
+    fn the_hot_reload_boundary_names_what_it_refuses() {
+        for allowed in HOT_RELOADABLE {
+            assert!(
+                hot_reload_refusal(allowed).is_none(),
+                "{allowed} is inside the patch, so it cannot be refused by name"
+            );
+        }
+        for key in [
+            "maxDailyLossUsd",
+            "max_daily_loss_usd",
+            "max-daily-loss",
+            "maxDailyLossEquityPct",
+            "stopLossPct",
+            "stop_loss_pct",
+            "takeProfitPct",
+            "privateKey",
+            "dry_seed_balance",
+            "size_pct",
+        ] {
+            assert!(
+                hot_reload_refusal(key).is_some(),
+                "{key} must be refused WITH a reason, not as an unknown field"
+            );
+        }
+        // Nothing else is claimed: an unknown key is refused by the schema, and
+        // this table must not invent an explanation for it.
+        assert!(hot_reload_refusal("maxOrderNotionalUsd").is_none());
+        assert!(hot_reload_refusal("aKnobThatDoesNotExist").is_none());
     }
 }

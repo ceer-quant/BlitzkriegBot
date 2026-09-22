@@ -86,6 +86,33 @@
 |:---|:---|:---|
 | `risk.kill` | `{ reason? }` | `{ "killed": true }` |
 | `risk.resume` | `{}` | `{ "killed": false }` |
+| `risk.setLimits` | `{ maxOrderNotional?, maxOrderNotionalPct?, maxOpenNotionalUsd?, minShares?, maxShares?, reason? }` | `{ applied: [{field, from, to}], atMs, actor, reason?, persisted: false, note }` |
+
+`risk.setLimits` 是**受限热加载**（Issue #191）：只改**开仓限额**——每笔名义上限
+（`maxOrderNotional` / `maxOrderNotionalPct`）、组合开仓上限（`maxOpenNotionalUsd`）与开仓股数区间
+（`minShares` / `maxShares`）。白名单之外的一切都要**重启**才生效，且是**明确拒绝**（`-32602`，
+报文点名是哪个字段、为什么、以及改它需要重启）：
+
+* 退出阈值（`stopLossPct` / `takeProfitPct`）——已开仓的持仓是在旧阈值下开的，热改会让它们的风险
+  预算无声漂移；
+* 日亏熔断（`maxDailyLossUsd` / `maxDailyLossEquityPct`）与连亏熔断
+  （`maxConsecutiveLosses` / `breakerCooldownSec`）——判定依据是**已经跑起来**的当日已实现亏损账 /
+  连亏计数，热改会追溯性地重新判定已经发生的事；
+* `maxPositions`（持仓管理器与退出策略同块，需要整体评审）；
+* 凭据（`privateKey`；内核从自身环境读取，见文首「Node 不持有私钥」）与账本本金
+  （`seedBalance` / 启动的 `--seed-balance`）。
+
+语义（三条，缺一不可）：
+
+1. **只改内存、不落盘**。重启回落启动参数（CLI flag / env / TOML）；响应里的 `persisted: false`
+   与 `note` 就是这个承诺的线上表达——运维不要在重启后惊讶限额变回去了。
+2. **整个请求全有或全无**。任一字段非法（负数、`minShares > maxShares`、未知字段、白名单外的字段）
+   则**一个都不应用**并返回 `-32602`；成功时 `applied` 逐字段给出旧值 → 新值。
+3. **审计走既有日志**（`target: "risk"`，INFO）：每个变更字段一行，带
+   `actor`（对端 uid）/ `field` / `from` / `to` / `reason`，与响应里的 `actor`/`atMs` 是同一份事实。
+   不新增事件类型、不新增审计文件。
+
+`risk.kill` / `risk.resume` 仍是进程级冻结；本方法只动限额，不改 kill 状态。
 
 ### 2.6 扩展与市场插件（P0.5 / P0.6）
 | method | params | result |
@@ -239,3 +266,4 @@ core.set_strategy_enabled("spread_arb", false);
 | 1.1 | E4-a：`Engine::new` 注册第三个内建策略 `trend_follow`（默认关闭）；CLI 增 `--enable-strategy`/`--disable-strategy`，回测/回放同吃（Issue #30） |
 | 1.1 | E4-b：`Engine::new` 注册第四个内建策略 `mean_reversion`（默认关闭，E2-b momentum 豁免的第一个内建使用者——`blocked.declaredExemptions` 常驻 `{"strategy":"mean_reversion","gates":["momentum"]}`）；无任何 RPC schema 变化（Issue #31） |
 | 1.1 | 网络诊断：新增只读方法 `net.check`（`NetCheckReport`，见 §2.8），以及内核一次性开关 `--net-check`（输出 JSON、不起内核、不碰 `data/`）、启动器子命令 `blitzkrieg net-check [--json] [--socket]`、面板路由 `GET /api/netcheck` + `POST /api/netcheck/probe`。协议加项，向后兼容，版本号不变；探测能力来自市场插件（`MarketPlugin::net_check`，默认 `unsupported`） |
+| 1.1 | 受限配置热加载（Issue #191）：新增 `risk.setLimits`（见 §2.5），只允许热改**开仓限额**（每笔/组合名义上限 + 开仓股数区间），白名单之外一律**明确拒绝**并要求重启；**只改内存、不落盘**（响应 `persisted: false`），审计走既有 `target: "risk"` INFO 日志（actor/字段/旧值/新值/reason）。协议加项，向后兼容，版本号不变 |

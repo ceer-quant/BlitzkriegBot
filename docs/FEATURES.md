@@ -47,6 +47,7 @@ BlitzkriegBot 是一个面向 **Polymarket 加密二元（UP/DOWN）预测市场
 | **连亏熔断（LossBreaker）** | ✅ 已验证（离线） | **按策略分片**（KI-10 / D-18 A，`c06c4ba9`）：任一腿连亏不再冻结全核；日亏上限与 kill switch 仍为全局 |
 | **配置文件（TOML）** | ✅ 已验证（离线） | `config.rs` 13 个单测（KI-11 / §59）：`user_layer/configs/*.toml` 真实生效，优先级 CLI > `BK_*` env > TOML > 代码默认，每个值带来源溯源 |
 | **kill switch**（`risk.kill` / `risk.resume`） | ✅ 已实现（测试覆盖） | IPC 命令面；TUI 有醒目红条提醒 |
+| **受限配置热加载**（`risk.setLimits`）：只改开仓限额 | ✅ 已实现（测试覆盖） | 白名单 = 每笔/组合名义上限 + 开仓股数区间，白名单外**明确拒绝**并要求重启（退出阈值/日亏熔断/凭据/账本一律不许热改）；**只改内存、不落盘**（重启回落启动参数）；审计走 `target: "risk"` INFO 日志（actor/字段/旧值/新值/reason）。`ipc/schema.rs` 的 `SetRiskLimitsParams` + 单测/集成测试；见 [`rust-core/INTERFACES.md §2.5`](rust-core/INTERFACES.md) |
 | **出场策略（ExitConfig）**：止损 12% / 移动止盈 arm 15% 回吐下限 8% / 时间兜底 | ✅ 已实盘验证（dry） | `dev-docs/reports/HFT_OPTIMIZATION_REPORT.md`（内部）；冻结留出段 walk-forward |
 | **行情接入（`--feed-ws`）**：Polymarket 走 REST 轮询，Binance 现货走 WS | ✅ 已实盘验证（dry） | 实况行情跳动；`MIGRATION_LOG §57`（REST 轮询替代 WS 通道，流量降 95%） |
 | **轮盘发现（Gamma）** | ✅ 已实盘验证（dry） | 面板轮次头部实时刷新 |
@@ -55,12 +56,12 @@ BlitzkriegBot 是一个面向 **Polymarket 加密二元（UP/DOWN）预测市场
 | **内核接管（adopt）**：重复客户端不重启风暴 | ✅ 已验证（离线） | `scripts/core-adopt-check.mjs`；socket 改名后可发现并领养旧名 |
 | **事件驱动回测器（`--backtest`）** | ✅ 已验证（离线） | `scripts/backtest-check.mjs` 21/21，live vs 回放**逐位相等**（净盈亏 5.12208717） |
 | **行情归档（默认开启）**：分段轮转 256MB、无会话上限、<5GB 停录、单写者锁 | ✅ 已实盘验证（dry） | 真实 feed 13 分钟 / 1,025,963 事件 / 145.7 MB 重放一致 |
-| **UDS + JSON-RPC 2.0 IPC** | ✅ 已实盘验证（dry） | 44 个方法名（见 §1.1）；Node 侧 zod 镜像校验 |
+| **UDS + JSON-RPC 2.0 IPC** | ✅ 已实盘验证（dry） | 45 个方法名（见 §1.1）；Node 侧 zod 镜像校验 |
 | **C ABI v2 策略接口** | ✅ 已验证（离线） | CI 真构建并驱动两个真实 cdylib；`foreign_parity.rs` 逐信号对拍 |
 
-### 1.1 IPC 方法面（44 个）
+### 1.1 IPC 方法面（45 个）
 
-**44 = 内核派发表里的方法数**（`core/blitzkrieg_core/src/ipc/server.rs` 的 `method::*` 分支数，
+**45 = 内核派发表里的方法数**（`core/blitzkrieg_core/src/ipc/server.rs` 的 `method::*` 分支数，
 与 `ipc/schema.rs` 的方法名常量一一对应）。`core.event` 是**事件名**而不是可调用方法，
 所以不在此列。
 
@@ -72,7 +73,7 @@ orders.place · orders.list · orders.cancel · orders.cancel_remaining
 orders.cancel_all · orders.close_filled · orders.reconcile
 positions.list · positions.exit               ledger.balance · spot.price
 trades.history · trades.summary
-risk.kill · risk.resume
+risk.kill · risk.resume · risk.setLimits
 strategy.list · strategy.enable · strategy.load · strategy.unload · strategy.reload
 extension.list · extension.enable · extension.disable            market.list
 net.check
