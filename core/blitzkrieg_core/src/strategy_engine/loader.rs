@@ -398,14 +398,20 @@ fn is_machine_generated(path: &Path) -> bool {
 
 /// Candidate repository roots, canonicalized and de-duplicated.
 ///
-/// Two anchors, because the two matter at different times: the compile-time
-/// crate location (`<root>/core/blitzkrieg_core`) covers the build tree, and the
-/// runtime working directory covers a binary that was built elsewhere and then
-/// deployed — the upgrade path swaps a release binary into a *different* checkout.
+/// Three anchors, because each one matters at a different time: the compile-time
+/// crate location (`<root>/core/blitzkrieg_core`) covers the build tree, the
+/// running binary's own tree covers a DEPLOYED binary started from anywhere
+/// (#265), and the runtime working directory covers the shell that starts a
+/// build-tree binary from the repository root.
 fn repo_roots() -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(build_root) = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2) {
         roots.push(build_root.to_path_buf());
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(root) = repo_root_of(&exe)
+    {
+        roots.push(root);
     }
     if let Ok(cwd) = std::env::current_dir() {
         let mut cur: Option<&Path> = Some(&cwd);
@@ -428,6 +434,46 @@ fn repo_roots() -> Vec<PathBuf> {
     out.sort();
     out.dedup();
     out
+}
+
+/// The repository tree a binary at `exe` lives in, if any (#265).
+///
+/// This is the runtime counterpart of the compile-time anchor above, and it is
+/// the one that holds on a DEPLOYMENT: the release binary is copied into a
+/// checkout (or started from one through a shim) and the process working
+/// directory may be anywhere. `CARGO_MANIFEST_DIR` then names the build machine's
+/// tree — a path that need not exist here — so `canonical_dir` silently drops it
+/// and `approved_dirs` can end up EMPTY while the binary sits inside a perfectly
+/// good checkout. Every strategy is refused at that point and the kernel used to
+/// keep running anyway.
+///
+/// Deliberately a search for a MARKER rather than "two levels up": the deploy
+/// layout (`<checkout>/target/release/blitzkrieg-core`) and a build layout
+/// (`<checkout>/target/debug/deps/<test binary>`) differ in depth, and a fixed
+/// offset silently yields a directory that carries no approved root. The markers
+/// are the same ones the cwd walk uses, plus `user_layer` — the tree a strategy
+/// library ships in is exactly this codebase's definition of "the repository".
+///
+/// A binary that lives outside any such tree (a copy in `/usr/local/bin`, a
+/// cargo target dir with no checkout above it) contributes nothing, on purpose:
+/// approving an arbitrary install prefix as a strategy root would be a trust
+/// change, not a path fix — the operator's escape hatch for that is
+/// [`ENV_ALLOW_DIRS`].
+fn repo_root_of(exe: &Path) -> Option<PathBuf> {
+    let mut cur = exe.parent();
+    // Bounded walk, same bound as the cwd anchor: a binary installed at the
+    // filesystem root does not scan the whole tree.
+    for _ in 0..8 {
+        let dir = cur?;
+        if APPROVED_ROOTS.iter().any(|a| dir.join(a).is_dir())
+            || dir.join("user_layer").is_dir()
+            || dir.join(".git").exists()
+        {
+            return Some(dir.to_path_buf());
+        }
+        cur = dir.parent();
+    }
+    None
 }
 
 /// Make a path comparable with the canonical policy directories.
@@ -1079,6 +1125,54 @@ not-a-hash target/release/ignored.dylib\n";
         // A path outside every root, with no manifest, is refused too.
         let stray = Path::new("/opt/somewhere/libx.dylib");
         assert!(policy.check(stray).is_err());
+    }
+
+    /// #265: the tree the RUNNING BINARY sits in is an approved-root anchor.
+    ///
+    /// The deployment shape is a release binary inside a checkout, started from
+    /// an unrelated cwd: `CARGO_MANIFEST_DIR` then names the BUILD machine's tree
+    /// (which need not exist here), `current_dir()` names something unrelated, and
+    /// every strategy was refused while the kernel booted anyway. The layouts below
+    /// are the ones this repository actually produces — the shipped binary and a
+    /// test binary (which sits one level deeper, in `deps/`), because an anchor
+    /// that only works at a fixed offset is the silent-drop this test exists for.
+    #[test]
+    fn the_running_binary_anchors_its_own_tree() {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("repo root")
+            .to_path_buf();
+        for layout in [
+            "target/release/blitzkrieg-core",
+            "target/debug/blitzkrieg-core",
+            "target/debug/deps/blitzkrieg_core-0123456789abcdef",
+        ] {
+            assert_eq!(
+                repo_root_of(&repo.join(layout)).as_deref(),
+                Some(repo.as_path()),
+                "{layout} must anchor {}",
+                repo.display()
+            );
+        }
+        // A copy installed outside every checkout anchors nothing on purpose: an
+        // arbitrary install prefix is not a strategy root (the operator's escape
+        // hatch for that is the allow-dirs variable, not a path guess).
+        assert!(repo_root_of(Path::new("/usr/local/bin/blitzkrieg-core")).is_none());
+        assert!(repo_root_of(Path::new("/tmp")).is_none());
+
+        // And the anchor survives canonicalization in the real process: for a
+        // binary inside this tree, `repo_roots()` must carry an approved root —
+        // the property that was missing when it came back empty.
+        let roots = repo_roots();
+        assert!(
+            !roots.is_empty(),
+            "the running binary's tree must be a root"
+        );
+        assert!(
+            roots.iter().any(|r| r.join(APPROVED_ROOT).is_dir()),
+            "no candidate root carries an approved strategy tree: {roots:?}"
+        );
     }
 
     /// Hash-pinned approval: listed + matching digest passes, a byte changed

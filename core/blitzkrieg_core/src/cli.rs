@@ -306,6 +306,34 @@ pub const FLAGS: &[FlagSpec] = &[
         "<n>",
         "Spread-arb bounce measurement window, seconds (default: the strategy's own).",
     ),
+    risky(
+        "--exit-take-profit-pct",
+        "<pct>",
+        "Engine-level fixed take-profit, in percent of entry (default 100 = backstop only). \
+         Also settable as `[exit].take_profit_pct`.",
+        "the SHIPPED take-profit is in force (100%), not the level you named",
+    ),
+    risky(
+        "--exit-stop-loss-pct",
+        "<pct>",
+        "Engine-level stop-loss, in percent of entry (default 12). Also settable as \
+         `[exit].stop_loss_pct`.",
+        "the SHIPPED stop-loss is in force (12%), not the loss cap you named",
+    ),
+    risky(
+        "--exit-trailing-min-high-pct",
+        "<pct>",
+        "Profit (in percent) a position must reach before the trailing stop arms \
+         (default 15). Also settable as `[exit].trailing_min_high_pct`.",
+        "the trailing stop arms at the SHIPPED threshold (15%), not the one you named",
+    ),
+    risky(
+        "--exit-min-trail-pct",
+        "<pct>",
+        "Floor for the trailing stop's give-back, in percent (default 8). Also settable \
+         as `[exit].min_trail_pct`.",
+        "the trailing stop gives back the SHIPPED floor (8%), not the one you named",
+    ),
     flag(
         "--strategy-limit",
         "<name:max_open:max_notional_usd>",
@@ -315,14 +343,21 @@ pub const FLAGS: &[FlagSpec] = &[
     flag(
         "--enable-strategy",
         "<name>",
-        "Repeatable: switch one strategy ON at startup (an unknown name is a warning, \
-         not fatal).",
+        "Repeatable: switch one strategy ON at startup. A request that resolves to no \
+         live strategy refuses the boot (exit 1) unless --allow-zero-strategies is given.",
     ),
     flag(
         "--disable-strategy",
         "<name>",
         "Repeatable: switch one strategy OFF at startup; applied after \
          --enable-strategy, so an explicit off wins.",
+    ),
+    flag(
+        "--allow-zero-strategies",
+        "",
+        "Acknowledge that --enable-strategy may resolve to nothing: without it a boot \
+         that asked for strategies and loaded none is refused (exit 1) rather than \
+         started with no trading logic.",
     ),
     flag(
         "--strategy-state",

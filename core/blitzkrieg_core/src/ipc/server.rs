@@ -271,7 +271,13 @@ pub async fn run(
     }
     if config.engine_enabled {
         // One mapping shared with the backtester (`CoreConfig::install_engine`).
-        config.install_engine(&mut core);
+        // A refusal here (the #265 startup self-check: an explicit
+        // `--enable-strategy` that resolved to nothing) ends the boot BEFORE the
+        // socket is bound or a feed is started — the failure mode is a kernel
+        // that looks healthy and trades none of what it was told to run.
+        if let Err(why) = config.install_engine(&mut core) {
+            anyhow::bail!("{why}");
+        }
         eprintln!("blitzkrieg-core: self-driving engine enabled");
     }
     let core = Arc::new(AsyncMutex::new(core));

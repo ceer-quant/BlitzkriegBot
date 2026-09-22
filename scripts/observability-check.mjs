@@ -93,6 +93,13 @@ async function waitForStderr(ctx, re, ms = 3000) {
  * `--event-archive` is on purpose: opening the archive is a deterministic
  * INFO-level line at boot, which is what separates "the default is INFO" from
  * "the default is WARN". `--enable-strategy <unknown>` is the deterministic WARN.
+ *
+ * `--allow-zero-strategies` is REQUIRED beside that unknown name since #265: a
+ * boot whose only explicitly requested strategy resolves to nothing now REFUSES
+ * to start (the same "an unknown argument is never silently ignored" principle,
+ * applied to strategy names), and a refusal never reaches the INFO archive line
+ * this gate asserts on. The flag is the gate saying out loud that it asked for a
+ * name on purpose and wants the WARN, not a boot.
  */
 async function bootLogs(tag, { env = {}, waitFor = [/logLevel=/], ms = 8000 } = {}) {
   const workdir = mkdtempSync(join(tmpdir(), `bk-obs-log-${tag}-`));
@@ -111,6 +118,11 @@ async function bootLogs(tag, { env = {}, waitFor = [/logLevel=/], ms = 8000 } = 
       '--engine',
       '--no-discovery',
       '--enable-strategy', 'no_such_strategy_for_the_observability_gate',
+      // #265: an explicit request that resolves to nothing is a REFUSAL now, so
+      // the deliberate unknown name needs the acknowledgement flag or this boot
+      // dies before the archive line. The WARN still lands (install_engine warns
+      // per unknown name before the self-check runs); the gate wants the WARN.
+      '--allow-zero-strategies',
       '--event-archive', join(workdir, 'events.jsonl'),
     ],
     { cwd: workdir, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] },
@@ -153,8 +165,11 @@ async function session(tag, { env = {}, extraArgs = [] } = {}, body) {
       '--no-discovery',
       // An unknown strategy name is a WARN at startup (`install_engine`), the
       // deterministic warn-level path this gate needs. It is harmless: the name
-      // simply matches nothing.
+      // simply matches nothing — but since #265 a boot whose only requested
+      // strategy resolves to nothing refuses to start, so the request must carry
+      // `--allow-zero-strategies` to reach the WARN and the archive line.
       '--enable-strategy', 'no_such_strategy_for_the_observability_gate',
+      '--allow-zero-strategies',
       '--event-archive', join(workdir, 'events.jsonl'),
       ...extraArgs,
     ],

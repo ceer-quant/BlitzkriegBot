@@ -426,6 +426,11 @@ pub struct EventBacktester {
     errors: Vec<String>,
     /// Re-check the invariants the equivalence gate relies on.
     checked_events: u64,
+    /// A refused engine install (#265): why this replay must not produce a
+    /// report. Kept rather than panicked on in `new` (which cannot fail) so the
+    /// caller gets `run`'s ordinary `Err` — and a sweep can tell "this candidate
+    /// could not load its strategy" from "the strategy had no signal".
+    install_error: Option<String>,
 }
 
 /// Trades kept in the report's `trade_lines` (counts always cover all trades).
@@ -461,9 +466,14 @@ impl EventBacktester {
         core_cfg.fee_schedule_replay = true;
 
         let mut core = Core::new(core_cfg.clone());
-        if core_cfg.engine_enabled {
-            core_cfg.install_engine(&mut core);
-        }
+        // #265: a replay that asked for strategies and resolved none must fail
+        // rather than report zero trades — the whole point of a sweep is that a
+        // number means what it says.
+        let install_error = if core_cfg.engine_enabled {
+            core_cfg.install_engine(&mut core).err()
+        } else {
+            None
+        };
         // Counterfactual knobs go in AFTER the engine registered its strategies
         // (the registry forwards to what is already wired), through the same
         // cell a Shadow Evolution proposal writes.
@@ -501,6 +511,7 @@ impl EventBacktester {
             risk_alerts: Vec::new(),
             errors: Vec::new(),
             checked_events: 0,
+            install_error,
         }
     }
 
@@ -729,6 +740,12 @@ impl Backtester for EventBacktester {
     }
 
     fn run(&mut self) -> Result<BacktestReport, String> {
+        // #265: the engine refused to install (an explicit strategy request that
+        // resolved to nothing). Report it instead of replaying into a report that
+        // would read as "the strategy produced no signals".
+        if let Some(why) = &self.install_error {
+            return Err(format!("strategy startup self-check: {why}"));
+        }
         // The event clock starts at the first event's timestamp — the instant
         // the live core saw its first datum — and only ever moves forward.
         let mut pending = self.source.next_event();
