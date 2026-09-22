@@ -431,6 +431,67 @@ pub struct SelfCheckReport {
     pub items: Vec<SelfCheckItem>,
 }
 
+/// One network probe (`net.check`). The probe walks DNS → TCP → TLS/HTTP and
+/// reports the deepest stage that completed, so a failure is attributable
+/// instead of merely "unreachable".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetCheckItem {
+    /// Stable key of the path probed — `venue-rest`, `venue-ws`, `discovery`,
+    /// `spot-ws`. The UIs label these, so it is an identifier and not prose.
+    pub name: String,
+    /// The endpoint an operator recognises: `clob.polymarket.com`.
+    pub target: String,
+    pub ok: bool,
+    /// Machine verdict: `ok` | `dns_failed` | `tcp_refused` | `tcp_timeout` |
+    /// `tls_cert` | `tls_error` | `timeout` | `http_error` | `transport_error` |
+    /// `rejected` | `unsupported`. `transport_error` is a transport failure the
+    /// finer statuses do not name (including a probe that panicked, which is
+    /// reported rather than dropped); `rejected` means the endpoint was refused
+    /// BY POLICY before any dial (a loopback/private `*_URL` override), which is
+    /// deliberately not the same evidence as a failed connect.
+    /// Which of these a UI renders in which colour is a UI decision; which one
+    /// the probe observed is not.
+    pub status: String,
+    /// Addresses the resolver returned, in order (empty when it returned none).
+    pub addrs: Vec<String>,
+    /// True when every resolved address is inside a proxy's fake-IP range — see
+    /// `crate::net::is_fake_ip`. A fact, not a failure.
+    pub fake_ip: bool,
+    /// Milliseconds spent in the stage that produced [`Self::status`].
+    pub ms: i64,
+    /// One line of numbers and names: what was asked, what answered, how long it
+    /// took. Kept short enough for a table cell; the prose reading of the whole
+    /// report is [`NetCheckReport::hint`].
+    pub detail: String,
+}
+
+/// Result of probing every network path this venue needs.
+///
+/// Scope, deliberately: this answers "is the path there", not "is the venue
+/// usable". Credentials, auth, order acceptance and reconciliation belong to the
+/// trading self-check ([`SelfCheckReport`]); together the two tell an operator
+/// whether a quiet bot is a network problem or a venue problem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetCheckReport {
+    /// True only when every probe passed. An empty or `unsupported` report is
+    /// NEVER a pass: an unreported path must not read as a healthy one.
+    pub ok: bool,
+    pub ts_ms: i64,
+    /// What the report as a whole says, as a key a UI translates: `ok` |
+    /// `tls_blocked` | `dns_failed` | `proxy_env` | `fake_ip` | `partial` |
+    /// `unsupported`.
+    pub hint_code: String,
+    /// The same reading in one sentence, with the supporting observations —
+    /// built by `crate::net::finish`, never assembled by a UI.
+    pub hint: String,
+    /// Names (never values) of the proxy variables visible to the probing
+    /// process. A proxy URL can carry credentials, so only the names travel.
+    pub proxy_env: Vec<String>,
+    pub items: Vec<NetCheckItem>,
+}
+
 // ── Settlement / redemption (issue #175) ─────────────────────────────────────
 
 /// A market the core still holds a position in, whose resolution it does not

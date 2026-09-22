@@ -575,6 +575,13 @@ pub const FLAGS: &[FlagSpec] = &[
          (default 2).",
     ),
     flag(
+        "--net-check",
+        "",
+        "Probe every network path this venue uses (resolver, TCP, TLS, one cheap \
+         request each) and print ONE JSON report; exit 1 when a probe failed. Read-only: \
+         no socket, no ledger, no order, no credential.",
+    ),
+    flag(
         "--config",
         "<path>",
         "TOML config file (default `user_layer/configs/default.toml`; the `=` form \
@@ -617,8 +624,8 @@ pub fn help_text() -> String {
     }
     s.push_str(
         "\nexit codes: 0 — --help/--version; 1 — boot refused (another core owns the data\n\
-         directory, #199); 2 — bad value, unknown argument, or an argument that is only valid\n\
-         with another mode (e.g. --fee-model without --backtest).\n",
+         directory, #199) or --net-check found a failing probe; 2 — bad value, unknown argument,\n\
+         or an argument that is only valid with another mode (e.g. --fee-model without --backtest).\n",
     );
     s
 }

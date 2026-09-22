@@ -252,7 +252,7 @@ pub async fn spawn_feed(
     // exercised against a local server in tests. `CLOB_API_URL` is the same
     // variable the venue actor reads, so one setting covers the whole CLOB API.
     let rest_url =
-        std::env::var("CLOB_API_URL").unwrap_or_else(|_| "https://clob.polymarket.com".into());
+        std::env::var("CLOB_API_URL").unwrap_or_else(|_| crate::venue::DEFAULT_CLOB_URL.into());
     let poll_ms = parse_poll_ms(std::env::var("POLYMARKET_POLL_MS").ok().as_deref());
     {
         let ev_tx = ev_tx.clone();

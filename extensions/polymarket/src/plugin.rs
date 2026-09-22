@@ -6,7 +6,8 @@
 
 use blitzkrieg_market_api::{
     BoxFuture, CoreError, CoreErrorCode, CoreResult, DataFeed, DataFeedConfig, DiscoveryConfig,
-    ExecutorConfig, MarketDiscovery, MarketHost, MarketPlugin, MarketType, OrderExecutor, TokenId,
+    ExecutorConfig, MarketDiscovery, MarketHost, MarketPlugin, MarketType, NetCheckReport,
+    OrderExecutor, TokenId,
 };
 use std::sync::Arc;
 
@@ -39,6 +40,12 @@ impl MarketPlugin for PolymarketPlugin {
     }
     fn executor(&self) -> Option<&dyn OrderExecutor> {
         Some(&POLY_EXECUTOR)
+    }
+    /// The four paths this venue needs — CLOB REST, Gamma, Binance spot and the
+    /// authenticated fill stream — probed resolver-first. Read-only and
+    /// credential-free; `crate::net_check` documents the shape and the ordering.
+    fn net_check(&self) -> BoxFuture<'_, NetCheckReport> {
+        Box::pin(crate::net_check::probe())
     }
 }
 

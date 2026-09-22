@@ -15,6 +15,7 @@
 //!   extension NAME on|off                    enable/disable one extension
 //!   flatten POSITION_ID                       manually force-close one position
 //!   markets                                  list market plugins
+//!   netcheck                                 probe the network paths the venue uses
 //!   help
 //!
 //! No entry-order verb exists here. `stop`/`start` act on the process, while
@@ -22,7 +23,7 @@
 //! core's existing `positions.exit` RPC. All trading decisions stay in the core.
 
 use crate::core::ipc_client::IpcClient;
-use crate::core::types::UiSnapshot;
+use crate::core::types::{NetCheckReportView, UiSnapshot};
 use crate::gateway::supervisor::{
     RestartPolicy, StartOutcome, StopOutcome, Supervisor, SupervisorConfig,
 };
@@ -55,6 +56,8 @@ pub enum Command {
         position_id: String,
     },
     Markets,
+    /// Network self-check: probe the paths the active venue trades over.
+    NetCheck,
     Help,
     /// E13: every known evolution proposal's latest state.
     EvolutionProposals {
@@ -164,6 +167,7 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
             })
         }
         "markets" => Ok(Command::Markets),
+        "netcheck" | "net-check" => Ok(Command::NetCheck),
         "proposals" | "evo" => Ok(Command::EvolutionProposals {
             limit: parts
                 .get(1)
@@ -355,6 +359,15 @@ impl Dispatcher {
             .map_err(|e| e.to_string())
     }
 
+    /// Network self-check (`net.check`): every path the active venue trades
+    /// over, walked resolver → TCP → TLS → one request each.
+    ///
+    /// Takes SECONDS by design (the probe dials), so the browser panel runs it
+    /// on a background thread and the TUI on a worker — never on a render loop.
+    pub fn net_check(&mut self) -> Result<NetCheckReportView, String> {
+        self.client.net_check().map_err(|e| e.to_string())
+    }
+
     /// True when this dispatcher spawned (and owns) the running core.
     pub fn managed(&self) -> bool {
         self.sup.owns()
@@ -418,6 +431,7 @@ impl Dispatcher {
             Command::Strategies => self.cmd_plugin_list(raw, PluginKind::Strategy),
             Command::Extensions => self.cmd_plugin_list(raw, PluginKind::Extension),
             Command::Markets => self.cmd_plugin_list(raw, PluginKind::Market),
+            Command::NetCheck => self.cmd_net_check(raw),
             Command::StrategySet { name, enabled } => {
                 self.cmd_plugin_set(raw, PluginKind::Strategy, &name, enabled)
             }
@@ -519,6 +533,26 @@ impl Dispatcher {
             .with_data(v),
             Err(e) => CommandOutcome::err(raw, e.to_string()),
         }
+    }
+
+    /// Network self-check: probe every path the venue trades over and hand back
+    /// the same table the TUI overlay and `blitzkrieg net-check` print, so the
+    /// command line, the panel and the CLI cannot describe one report three
+    /// ways. Takes seconds — the probe dials.
+    fn cmd_net_check(&mut self, raw: &str) -> CommandOutcome {
+        let report = match self.client.net_check() {
+            Ok(r) => r,
+            Err(e) => return CommandOutcome::err(raw, e.to_string()),
+        };
+        let (passed, total) = report.passed();
+        let message = crate::core::net_check::render_text(&report)
+            .trim_end()
+            .to_string();
+        CommandOutcome::ok(raw, "netcheck", message).with_data(serde_json::json!({
+            "passed": passed,
+            "total": total,
+            "report": serde_json::to_value(&report).unwrap_or_default(),
+        }))
     }
 
     fn cmd_start(
@@ -786,6 +820,7 @@ crypto-hft commands (UI Kit gateway):
   extension <name> on|off                  enable/disable one extension
   flatten <position_id>                    force-close one open position
   markets                                  list market plugins
+  netcheck                                 probe the network paths the venue uses
   proposals [N]                            evolution proposals (pending first)
   decide <id> accept|reject|defer          vote on one evolution proposal
   auto-evolve on|off                       unattended mode switch (persisted)

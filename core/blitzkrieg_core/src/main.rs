@@ -24,6 +24,7 @@
 //!                   [--slippage-ticks 0] [--latency-ms 0] [--fill-prob-bps 10000]
 //!                   [--maker-depth-share-bps 10000]
 //!                   [--dry-redeem-fail 0] [--dry-redeem-manual]
+//!                   [--net-check]
 //!
 //! `--max-orderbook-stale-ms <ms>` (env `BK_MAX_ORDERBOOK_STALE_MS`) is how old
 //! an orderbook may be before the engine refuses to price off it — the knob that
@@ -88,6 +89,24 @@
 //!   rate cost this strategy" is a measurement rather than an argument (see
 //!   `scripts/fee-model-sensitivity-check.mjs`).
 //!
+//! Network self-check (a diagnostic, not a mode — no socket, no ledger, no
+//! order, no credential, and it is answered before the #199 latch, so it is safe
+//! to run against a live deployment):
+//!   blitzkrieg-core --net-check
+//!   Answers the question behind a bot that has gone quiet — "is it us or the
+//!   venue?" — by probing the SAME hosts the live paths use (venue REST,
+//!   discovery, spot stream, venue user stream) through resolver → TCP → TLS →
+//!   one cheap request each, and printing ONE JSON `NetCheckReport` on stdout.
+//!   The wording is deliberately absent from the core: the launcher, the TUI and
+//!   the WebUI render that struct in Chinese, so the core keeps a
+//!   language-neutral data contract. Exit 0 when every probe passed, 1 when any
+//!   failed — and the report is printed either way, so a failure is readable
+//!   rather than inferred from the code. A `CLOB_API_URL` / `POLYMARKET_WS_URL`
+//!   override pointing at a loopback or private address is reported as
+//!   `rejected` instead of being dialled, and proxy-related environment
+//!   variables are NAMED, never printed with their values (a proxy URL may carry
+//!   credentials).
+//!
 //! Env (live): POLYMARKET_PRIVATE_KEY, POLYMARKET_FUNDER_ADDRESS, CLOB_API_URL.
 
 use blitzkrieg_core::ipc::server;
@@ -150,6 +169,10 @@ struct Args {
     spread_arb_bounce_min_pct: Option<Decimal>,
     spread_arb_bounce_window_sec: Option<i64>,
     feed_ws: bool,
+    /// `--net-check`: probe the venue's network paths, print one JSON report and
+    /// exit (0 all passed / 1 any failed). Answered before any service starts,
+    /// so it needs no socket, writes no ledger and places no order.
+    net_check: bool,
     replay: Option<String>,
     replay_near_miss: Option<String>,
     round_sec: i64,
@@ -512,6 +535,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut spread_arb_bounce_min_pct: Option<Decimal> = None;
     let mut spread_arb_bounce_window_sec: Option<i64> = None;
     let mut feed_ws = false;
+    let mut net_check = false;
     let mut replay: Option<String> = None;
     let mut replay_near_miss: Option<String> = None;
     let mut round_sec: Option<i64> = None;
@@ -642,6 +666,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--feed-ws" => feed_ws = true,
             "--replay" => replay = it.next(),
             "--replay-near-miss" => replay_near_miss = it.next(),
+            "--net-check" => net_check = true,
             "--near-miss-path" => near_miss_path = it.next(),
             "--trade-log" => trade_log = it.next(),
             "--no-trade-log" => no_trade_log = true,
@@ -1293,6 +1318,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         spread_arb_bounce_min_pct,
         spread_arb_bounce_window_sec,
         feed_ws,
+        net_check,
         replay,
         replay_near_miss,
         round_sec,
@@ -1548,6 +1574,31 @@ fn daily_loss_path_for(position_log: &str) -> String {
         .into_owned()
 }
 
+/// `--net-check`: probe every network path the ACTIVE market plugin uses and
+/// print one JSON `NetCheckReport` on stdout, returning the code the shell
+/// should see (0 = every probe passed, 1 = something failed).
+///
+/// The registry is built exactly as the server builds it, so the probe covers
+/// the venue this build and its `--market-plugin` would actually talk to —
+/// answering "is it us or the venue?" for the run that is in front of you
+/// rather than for a hardcoded host. The answer is JSON because it is a data
+/// contract: the launcher, the TUI overlay and the WebUI card all render the
+/// same struct in Chinese, and no user-facing wording belongs in the core.
+async fn run_net_check(plugin: Option<&str>) -> i32 {
+    let registry = blitzkrieg_core::market::registry::MarketPluginRegistry::new();
+    blitzkrieg_core::market::register_builtin_markets(&registry);
+    let active = blitzkrieg_core::market::active_market_plugin(&registry, plugin);
+    let report = active.net_check().await;
+    match serde_json::to_string_pretty(&report) {
+        Ok(json) => println!("{json}"),
+        Err(e) => {
+            eprintln!("blitzkrieg-core: net-check report is not serializable: {e}");
+            return 1;
+        }
+    }
+    if report.ok { 0 } else { 1 }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // #184: INFO by default, not ERROR — `EnvFilter::from_default_env()` with no
@@ -1646,6 +1697,17 @@ async fn main() -> anyhow::Result<()> {
         "blitzkrieg-core: {}",
         blitzkrieg_core::ipc::build_info::provenance_line()
     );
+
+    // A diagnostic, not a mode: answered before the mode is decided, before any
+    // data directory is claimed (it writes nothing), and before the replay /
+    // backtest runners — so it needs no socket, no ledger and no `data/`, and is
+    // safe to run against a live deployment. It reads the parsed args only, which
+    // is why it sits here and not beside the other one-shot runners: those are
+    // reached after `CoreConfig` is built, and `CoreConfig` consumes the very
+    // field (`market_plugin`) this needs.
+    if args.net_check {
+        std::process::exit(run_net_check(args.market_plugin.as_deref()).await);
+    }
 
     // DRY_RUN env honours the existing convention when --mode is not explicit.
     let mode = if std::env::args().any(|a| a == "--mode") {

@@ -42,11 +42,15 @@ use sha2::Sha256;
 use std::str::FromStr;
 use tokio::sync::{mpsc, oneshot};
 
-const DEFAULT_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com";
+pub(crate) const DEFAULT_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com";
+
+/// The CLOB REST base: orderbook polling, order placement, balance self-check
+/// and the sweep transport. One override (`CLOB_API_URL`) moves all of them.
+pub(crate) const DEFAULT_CLOB_URL: &str = "https://clob.polymarket.com";
 
 /// Gamma is where a market's outcome becomes knowable; the same host round
 /// discovery reads.
-const GAMMA_URL: &str = "https://gamma-api.polymarket.com";
+pub(crate) const GAMMA_URL: &str = "https://gamma-api.polymarket.com";
 
 /// The sweep transport impersonates a browser: Cloudflare fronting the CLOB
 /// treats unknown custom UAs differently per endpoint class, and a
@@ -56,11 +60,44 @@ const SWEEP_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWeb
 /// The venue URL is process-local config (CLOB_API_URL). Only http(s) with a
 /// public, non-reserved host is acceptable — no loopback, private-range or
 /// reserved-address destinations.
-fn validate_venue_host(raw: &str) -> anyhow::Result<String> {
-    let rest = raw
-        .strip_prefix("https://")
-        .or_else(|| raw.strip_prefix("http://"))
-        .ok_or_else(|| anyhow::anyhow!("CLOB_API_URL must be http(s), got: {raw}"))?;
+///
+/// `pub(crate)` so the net check probes the SAME host it validates: a probe that
+/// accepted a target the real dial would refuse would report a healthy path for
+/// a venue call that can never leave the process.
+pub(crate) fn validate_venue_host(raw: &str) -> anyhow::Result<String> {
+    let url = validate_host(raw, &["https://", "http://"], "http(s)", "CLOB_API_URL")?;
+    // The CLOB client takes this as a base URL and joins paths onto it, so the
+    // trailing slash is part of the contract.
+    if url.ends_with('/') {
+        Ok(url)
+    } else {
+        Ok(format!("{url}/"))
+    }
+}
+
+/// The same rule for the WebSocket endpoints.
+///
+/// `POLYMARKET_WS_URL` is process-local config exactly as `CLOB_API_URL` is, and
+/// it used to reach the socket client UNVALIDATED — an environment variable was
+/// an outbound connection to whatever host it named. Validating it here closes
+/// that: one rule, two wrappers, so the two halves of the venue cannot drift.
+pub(crate) fn validate_ws_host(raw: &str) -> anyhow::Result<String> {
+    // A `ws(s)://` base is used as written (the client appends its own paths),
+    // so unlike the HTTP form it is not normalised to a trailing slash.
+    validate_host(raw, &["wss://", "ws://"], "ws(s)", "POLYMARKET_WS_URL")
+}
+
+/// Scheme + host acceptance, shared by both wrappers above.
+fn validate_host(
+    raw: &str,
+    prefixes: &[&str],
+    scheme_hint: &str,
+    what: &str,
+) -> anyhow::Result<String> {
+    let rest = prefixes
+        .iter()
+        .find_map(|p| raw.strip_prefix(p))
+        .ok_or_else(|| anyhow::anyhow!("{what} must be {scheme_hint}, got: {raw}"))?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let host_part = authority
         .rsplit_once('@')
@@ -75,7 +112,7 @@ fn validate_venue_host(raw: &str) -> anyhow::Result<String> {
             .unwrap_or_default()
             .to_ascii_lowercase()
     };
-    anyhow::ensure!(!host.is_empty(), "CLOB_API_URL has no host");
+    anyhow::ensure!(!host.is_empty(), "{what} has no host");
 
     let reserved_name = host == "localhost"
         || host == "local"
@@ -83,10 +120,7 @@ fn validate_venue_host(raw: &str) -> anyhow::Result<String> {
         || host.ends_with(".local")
         || host.ends_with(".internal")
         || host.ends_with(".internal.invalid");
-    anyhow::ensure!(
-        !reserved_name,
-        "CLOB_API_URL points at a reserved host: {host}"
-    );
+    anyhow::ensure!(!reserved_name, "{what} points at a reserved host: {host}");
 
     if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
         let o = ip.octets();
@@ -100,7 +134,7 @@ fn validate_venue_host(raw: &str) -> anyhow::Result<String> {
             || o[0] >= 224;
         anyhow::ensure!(
             !blocked,
-            "CLOB_API_URL points at a loopback/private/reserved address: {ip}"
+            "{what} points at a loopback/private/reserved address: {ip}"
         );
     }
     if let Ok(ip) = host.parse::<std::net::Ipv6Addr>() {
@@ -112,15 +146,11 @@ fn validate_venue_host(raw: &str) -> anyhow::Result<String> {
             || s[..6] == [0, 0, 0, 0, 0, 0xffff];
         anyhow::ensure!(
             !blocked,
-            "CLOB_API_URL points at a loopback/link-local address: {ip}"
+            "{what} points at a loopback/link-local address: {ip}"
         );
     }
 
-    if raw.ends_with('/') {
-        Ok(raw.to_owned())
-    } else {
-        Ok(format!("{raw}/"))
-    }
+    Ok(raw.to_owned())
 }
 
 // ── Handle ──────────────────────────────────────────────────────────────────
@@ -271,9 +301,9 @@ pub async fn spawn_from_env(
         .context("POLYMARKET_PRIVATE_KEY required for live mode")?;
     let funder_str =
         std::env::var("POLYMARKET_FUNDER_ADDRESS").context("POLYMARKET_FUNDER_ADDRESS required")?;
-    let url =
-        std::env::var("CLOB_API_URL").unwrap_or_else(|_| "https://clob.polymarket.com".into());
+    let url = std::env::var("CLOB_API_URL").unwrap_or_else(|_| DEFAULT_CLOB_URL.to_string());
     let ws_url = std::env::var("POLYMARKET_WS_URL").unwrap_or_else(|_| DEFAULT_WS_URL.into());
+    let ws_url = validate_ws_host(&ws_url)?;
     let url = validate_venue_host(&url)?;
 
     let funder = Address::from_str(&funder_str)?;

@@ -34,6 +34,8 @@ pub enum Msg {
     RefreshError(String),
     /// The plugin registry was re-read (after entering the tab or a toggle).
     PluginsLoaded(UiSnapshot),
+    /// The network self-check answered (`Ok`) or could not be asked (`Err`).
+    NetCheckLoaded(Result<blitzkrieg_ui_kit::core::types::NetCheckReportView, String>),
     /// A decoded core-event batch arrived on the EventBus.
     Events(Vec<blitzkrieg_ui_kit::core::types::CoreEvent>),
     /// The process received an external termination signal.
@@ -303,6 +305,27 @@ pub async fn run_panel_with_dispatcher(
                             }
                         });
                     }
+                    Action::NetCheck => {
+                        // A FRESH client on its own connection, not the shared
+                        // dispatcher: the probe dials for up to ~12 s, and
+                        // holding the dispatcher's lock that long would freeze
+                        // the snapshot poller this panel redraws from.
+                        let socket = app.socket.clone();
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            let out = tokio::task::spawn_blocking(move || {
+                                let mut client =
+                                    blitzkrieg_ui_kit::core::ipc_client::IpcClient::new(socket);
+                                client.net_check().map_err(|e| e.to_string())
+                            })
+                            .await;
+                            let msg = match out {
+                                Ok(r) => Msg::NetCheckLoaded(r),
+                                Err(e) => Msg::NetCheckLoaded(Err(format!("probe task: {e}"))),
+                            };
+                            let _ = tx.send(msg);
+                        });
+                    }
                     Action::ConfirmToggle(cmd) => {
                         if app.toggle_needs_confirmation(&cmd) {
                             app.pending_confirmation = Some(cmd);
@@ -409,6 +432,25 @@ pub async fn run_panel_with_dispatcher(
             Msg::CommandDone(line) => {
                 for l in line.lines() {
                     app.log(l.to_string());
+                }
+            }
+            Msg::NetCheckLoaded(result) => {
+                app.net_busy = false;
+                match result {
+                    Ok(report) => {
+                        // The log keeps the record (the overlay is transient);
+                        // one renderer for both, so the two cannot disagree.
+                        let text = blitzkrieg_ui_kit::core::net_check::render_text(&report);
+                        for l in text.trim_end().lines() {
+                            app.log(l.to_string());
+                        }
+                        app.net_report = Some(report);
+                        app.net_error = None;
+                    }
+                    Err(e) => {
+                        app.log(format!("net-check failed: {e}"));
+                        app.net_error = Some(e);
+                    }
                 }
             }
             Msg::RefreshError(e) => app.log(format!("refresh error: {e}")),

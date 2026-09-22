@@ -53,8 +53,10 @@ pub fn active_market_plugin(
     std::sync::Arc::new(NoopMarketPlugin)
 }
 
-/// Fallback plugin used when no market is compiled in / registered.
-struct NoopMarketPlugin;
+/// Fallback plugin used when no market is compiled in / registered. Visible to
+/// the IPC layer so `net.check` can still answer with a report (its default
+/// probe reports `unsupported`) instead of an error.
+pub(crate) struct NoopMarketPlugin;
 
 impl blitzkrieg_market_api::MarketPlugin for NoopMarketPlugin {
     fn name(&self) -> &str {

@@ -1,3 +1,15 @@
+# Nested workspace of its own, like `user_layer/strategies` (own Cargo.lock):
+# the Tauri shell is NOT a member of the kernel workspace, so Linux CI without
+# the GTK headers never touches it. The `[workspace]` table is what says so to
+# cargo — not the root manifest's `exclude`, which is a path relative to the
+# root and therefore only covers the checkout it sits in. Without the table,
+# `cargo check` here resolves the workspace root by walking UP, and from a git
+# worktree under `<root>/target/` it walks past the worktree's own manifest
+# (which excludes this path) to the main checkout's root (which does not, since
+# that `exclude` entry means the main checkout's own `ui/webapp/src-tauri`) and
+# fails with "believes it's in a workspace when it's not".
+[workspace]
+
 [package]
 name = "blitzkrieg-webapp"
 version = "0.1.0"

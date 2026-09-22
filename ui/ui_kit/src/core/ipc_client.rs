@@ -35,6 +35,11 @@ impl From<std::io::Error> for IpcError {
     }
 }
 
+/// Read budget for `net.check` — the probe dials real endpoints, so it is the
+/// one call on this client that is expected to take seconds (see
+/// [`IpcClient::net_check`]).
+const NET_CHECK_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The IPC method names this client speaks, one place instead of bare string
 /// literals scattered through the wrappers. Mirrors the wire constants in the
 /// core's `ipc::schema::method` — the UI Kit deliberately does not link the
@@ -56,6 +61,8 @@ pub(crate) mod method {
     pub const EXTENSION_ENABLE: &str = "extension.enable";
     pub const EXTENSION_DISABLE: &str = "extension.disable";
     pub const MARKET_LIST: &str = "market.list";
+    /// Network self-check: probe the paths the active venue trades over.
+    pub const NET_CHECK: &str = "net.check";
     pub const POSITIONS_EXIT: &str = "positions.exit";
     pub const SHADOW_EVOLUTION_STATUS: &str = "shadow_evolution.status";
     pub const SHADOW_EVOLUTION_PROPOSALS: &str = "shadow_evolution.proposals";
@@ -259,6 +266,35 @@ impl IpcClient {
     pub fn market_plugins(&mut self) -> Result<MarketListView, IpcError> {
         serde_json::from_value(self.call(method::MARKET_LIST, serde_json::json!({}))?)
             .map_err(|e| IpcError::Protocol(e.to_string()))
+    }
+
+    /// Probe every network path the active venue trades over (`net.check`).
+    ///
+    /// Slow BY DESIGN — each probe walks resolver → TCP → TLS → one request and
+    /// the core runs them concurrently with per-stage timeouts, so a fully
+    /// broken network answers in about a dozen seconds. This client's default
+    /// read timeout is 3 s, which would cut that answer off as `Timeout`; the
+    /// diagnostic that a broken network needs is precisely the one that must not
+    /// time out, so the call raises the budget for its duration and re-connects
+    /// (the socket's own read timeout is armed at connect time, so the handle is
+    /// dropped before and after to re-arm it).
+    ///
+    /// The raised timeout is RESTORED afterwards: every other call on this
+    /// client must keep failing fast — a panel that waits 30 s to notice a dead
+    /// core is a panel that looks fine while nothing is answering.
+    pub fn net_check(&mut self) -> Result<NetCheckReportView, IpcError> {
+        let previous = self.timeout;
+        let widen = self.timeout < NET_CHECK_READ_TIMEOUT;
+        if widen {
+            self.timeout = NET_CHECK_READ_TIMEOUT;
+            self.disconnect();
+        }
+        let out = self.call(method::NET_CHECK, serde_json::json!({}));
+        if widen {
+            self.timeout = previous;
+            self.disconnect();
+        }
+        serde_json::from_value(out?).map_err(|e| IpcError::Protocol(e.to_string()))
     }
 
     // ── Shadow Evolution (E13): the proposal workflow ────────────────────────

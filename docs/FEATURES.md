@@ -55,21 +55,33 @@ BlitzkriegBot 是一个面向 **Polymarket 加密二元（UP/DOWN）预测市场
 | **内核接管（adopt）**：重复客户端不重启风暴 | ✅ 已验证（离线） | `scripts/core-adopt-check.mjs`；socket 改名后可发现并领养旧名 |
 | **事件驱动回测器（`--backtest`）** | ✅ 已验证（离线） | `scripts/backtest-check.mjs` 21/21，live vs 回放**逐位相等**（净盈亏 5.12208717） |
 | **行情归档（默认开启）**：分段轮转 256MB、无会话上限、<5GB 停录、单写者锁 | ✅ 已实盘验证（dry） | 真实 feed 13 分钟 / 1,025,963 事件 / 145.7 MB 重放一致 |
-| **UDS + JSON-RPC 2.0 IPC** | ✅ 已实盘验证（dry） | 31 个方法（见 §3.1）；Node 侧 zod 镜像校验 |
+| **UDS + JSON-RPC 2.0 IPC** | ✅ 已实盘验证（dry） | 44 个方法名（见 §1.1）；Node 侧 zod 镜像校验 |
 | **C ABI v2 策略接口** | ✅ 已验证（离线） | CI 真构建并驱动两个真实 cdylib；`foreign_parity.rs` 逐信号对拍 |
 
-### 1.1 IPC 方法面（31 个）
+### 1.1 IPC 方法面（44 个）
+
+**44 = 内核派发表里的方法数**（`core/blitzkrieg_core/src/ipc/server.rs` 的 `method::*` 分支数，
+与 `ipc/schema.rs` 的方法名常量一一对应）。`core.event` 是**事件名**而不是可调用方法，
+所以不在此列。
 
 ```
-core.ping · core.ready · core.event            books.snapshot · books.top
-engine.book · engine.stats · engine.round · engine.markets · engine.round
-orders.place · orders.list · orders.cancel · orders.cancel_all · orders.reconcile
-positions.list · positions.exit               ledger.balance · trades.history · trades.summary
-risk.kill · risk.resume                       spot.price
+core.ping · core.ready · core.feeQuote
+books.snapshot · books.top
+engine.book · engine.books · engine.stats · engine.round · engine.markets
+orders.place · orders.list · orders.cancel · orders.cancel_remaining
+orders.cancel_all · orders.close_filled · orders.reconcile
+positions.list · positions.exit               ledger.balance · spot.price
+trades.history · trades.summary
+risk.kill · risk.resume
 strategy.list · strategy.enable · strategy.load · strategy.unload · strategy.reload
-extension.list · extension.enable · extension.disable
-market.list
+extension.list · extension.enable · extension.disable            market.list
+net.check
+shadow_evolution.enable · shadow_evolution.disable · shadow_evolution.status
+shadow_evolution.history · shadow_evolution.apply · shadow_evolution.rollback
+shadow_evolution.decide · shadow_evolution.proposals · shadow_evolution.set_auto
 ```
+
+`net.check` 的报文形状见 [`rust-core/INTERFACES.md §2.8`](rust-core/INTERFACES.md)。
 
 ---
 
@@ -183,6 +195,7 @@ ECharts + Pinia + VueUse。设计基调：Apple 风格、金橙主调、liquid g
 | 数字滚动动画（几乎所有数字） | ✅ 已验证 | `check:round` 33 项；实测基线误差 0.00px |
 | 响应式（360→1440 八档无横向溢出） | ✅ 已验证 | 手机端内容上边距 32px |
 | 行情存活检测（feed-dead 提示） | ✅ 已验证 | `check:feed` |
+| 网络诊断（设置页卡片） | ✅ 已验证 | `check:net` 12 项；`GET /api/netcheck` 读缓存 + `POST /api/netcheck/probe` 强制重探（`blitzkrieg net-check` 的同一份报告） |
 | 拒单归因可视化 | ✅ 已验证 | `check:rejections` + `RejectionChart.vue` |
 | 余额口径（本金＋净利润、费用计支出） | ✅ 已验证 | `check:balance` 15 项 |
 | 引擎启停控制 | ✅ 已验证 | `check:lifecycle` |
@@ -201,6 +214,7 @@ ECharts + Pinia + VueUse。设计基调：Apple 风格、金橙主调、liquid g
 | 命令历史（↑/↓）与补全（Tab） | ✅ 已验证 |
 | 失败命令带原因 + 建议动作；`risk.kill` 全屏红条 | ✅ 已验证 |
 | 内核生命周期管理（`--manage`） | ✅ 已验证 |
+| `n` 网络诊断浮层（四条路径逐条点灯，`netcheck` 命令同源） | ✅ 已验证 |
 
 一键启动：`bash scripts/tui-demo.sh` / `bash scripts/tui-demo.sh --manage`；门禁 `node scripts/tui-demo-check.mjs`。
 
@@ -219,7 +233,7 @@ ECharts + Pinia + VueUse。设计基调：Apple 风格、金橙主调、liquid g
 
 | 契约 | 状态 | 证据 |
 | --- | --- | --- |
-| **单二进制多命令分发**（`blitzkrieg [core|tui|web|run|--help]`） | ✅ 已验证 | `scripts/unified-launcher-check.mjs` |
+| **单二进制多命令分发**（`blitzkrieg [core|tui|web|run|stop|net-check|--help]`） | ✅ 已验证 | `scripts/unified-launcher-check.mjs`；`net-check` 退出码 0 全通过 / 1 有失败 / 2 探测跑不起来 |
 | **部分启动模式**（`run` 默认 Web、`run --tui`/`-tui` 仅 TUI、`tui --attach` 只连接） | ✅ 已实现 | 统一启动器参数与共享 Dispatcher |
 | **一体化默认托管**（`blitzkrieg run` 一键同时起内核与 UI，默认 `lifecycle: on`） | ✅ 已验证 | PPID 严格归属 launcher，孤儿守护 |
 | **终端显式接管**（`blitzkrieg tui --attach`） | ✅ 已验证 | 仅监视现有内核，绝不杀死非本进程拉起的内核 |
@@ -249,6 +263,7 @@ Node **仅**作为验收门禁的驱动存在（`scripts/*.mjs`，**零依赖、
 | 行情归档常开（分段轮转 + 磁盘护栏 + 单写者锁） | ✅ 已实盘验证 | `MIGRATION_LOG §36/§37` |
 | 账本/成交/订单/持仓落盘（JSONL + SQLite） | ✅ 已实盘验证 | `data/` 下各文件 |
 | 引擎统计（`engine.stats`）：按策略分账、配额占用、拒单归因、门禁计数 | ✅ 已实盘验证 | 面板策略页 |
+| **网络诊断（`net.check`）**：「是它还是我们？」 | ✅ 已验证 | 四条路径（CLOB REST / Gamma 发现 / Binance 现货 / CLOB 成交流）逐条走 解析→TCP→TLS→一次便宜请求；CLI `blitzkrieg net-check [--json]`、TUI `n`、WebUI 设置页；只读、不碰订单与账本 |
 | 巡检脚本（`scripts/soak-health.sh`，含归档新鲜度） | ✅ 已验证 | 零 token 巡检；可挂 launchd/cron |
 | soak 监控（`scripts/soak-monitor.mjs`） | ✅ 已验证 | 长跑采样 |
 | 微信 CI 通知（`WECHAT_WEBHOOK`，未配则安全跳过） | 🚧 未配置 | `notify (wechat)` 作业已在 CI 中 |
