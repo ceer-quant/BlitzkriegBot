@@ -31,18 +31,25 @@
  *   trend-20260920T2100Z      +$5.75 / 75%       -$0.71 / 42%
  *   range-20260920T2300Z      +$9.93 / 78%       -$1.82 / 33%
  *
- * BEFORE is economically BETTER on every window. So an absolute threshold
- * (`net >= 0`) is red on HEAD (fails criterion 2) and green on BEFORE (fails
- * criterion 3): the two criteria are inversions of each other. That is not a
- * tuning problem — it is #267's regression showing up in the gate, and it says
- * the regression predates this gate rather than being something the gate can
- * pin away.
+ * BEFORE reads better on every window — with a caveat that changes what it means:
+ * `d5c7fec3` predates `96fcf51c` (#171, "honest dry FOK walk + escalation
+ * repricing"), so its maker-timeout escalation leg is booked at the MAKER price
+ * where a real venue fills it as a taker at the deepest ask. #262 says that rule
+ * inflates exactly these numbers and that "历史数字不能当基线，更不能当验收依据".
+ * BEFORE also predates #261's escalation-abort fix. So BEFORE is not a clean
+ * baseline: part of the gap is the booking model becoming honest, and "BEFORE
+ * earned more" is not on its own proof that HEAD lost money.
  *
- * What this gate therefore does instead is the half that can be honest: pin the
- * CURRENT numbers and go red on DEGRADATION. That is what criterion 1 actually
- * needs (a change in exit reachability caught in money), it is green on HEAD,
- * and `--teeth` demonstrates it can fail. The regression itself is #267's to
- * fix; when it is fixed, re-record the baseline and the numbers move up.
+ * That does not change what this gate can do. An absolute threshold (`net >= 0`)
+ * is red on HEAD (fails criterion 2) and green on BEFORE (fails criterion 3), so
+ * the two criteria are inversions of each other either way — and that is not a
+ * tuning problem, it is the economic question #267 is still open on.
+ *
+ * What this gate therefore does is the half that can be honest: pin the CURRENT
+ * numbers and go red on DEGRADATION. That is what criterion 1 actually needs (a
+ * change in exit reachability caught in money), it is green on HEAD, and
+ * `--teeth` demonstrates it can fail. When #267 re-records a baseline on the
+ * honest booking, the numbers move — the mechanism does not.
  *
  * Usage:
  *   node scripts/exit-economics-check.mjs              # the gate (needs the release core)
