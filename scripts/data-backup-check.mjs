@@ -29,11 +29,20 @@
  *      artifacts exits 0, a MANUAL run's record is never scheduler evidence, and
  *      a missing mtime interpreter is REFUSED (exit 2) instead of answered wrongly.
  *   9. The attempt record format shared by the launchd launcher, the resident
- *      loop and the CLI (one writer, one format, best-effort by contract).
+ *      loop and the CLI (one writer, one format, best-effort by contract), and
+ *      the artifact path + size it carries so a success is not just a timestamp
+ *      (#217).
  *  10. The checkout guard accepts a linked worktree (`.git` is a FILE, #231).
- *  11. The resident loop (route B) really backs up, records `source=loop`, is
+ *  11. The resident loop (route B) really backs up, records `source=loop` with the
+ *      artifact it produced and that artifact's own byte count, is
  *      read back as scheduler evidence by `--status`, and is loud on failure —
  *      the fallback route must not be broken too.
+ *  12. The internal-disk launcher template (route A) is rendered by the installer
+ *      rather than inlined, keeps no unsubstituted placeholder, EXECS the CLI when
+ *      the repository is readable, and on a DENIED repository records a
+ *      `result=fail` attempt that `--status` turns into one line — the month-long
+ *      silence of #217 was exactly this path writing nothing (plus both plist
+ *      templates existing, so the schedule is reviewable in the repo).
  *
  * Run: node scripts/data-backup-check.mjs
  */
@@ -51,6 +60,7 @@ import {
   chmodSync,
   utimesSync,
   copyFileSync,
+  realpathSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -496,6 +506,42 @@ ra = attempt(f, `light loop fail "exit 1: disk full" /x/light`);
 rec = readFileSync(join(f.state, 'light.status'), 'utf8');
 assert(/^result=fail$/m.test(rec) && /^success_epoch=\d+$/m.test(rec), 'a later failure keeps the last SUCCESS date (how old is the newest good copy)');
 
+// …and the record names WHAT that good run produced and how big it was (issue
+// #217, requirement 1): `success_epoch` alone cannot tell a healthy copy from an
+// empty one, and the path is the first thing the reader asks for next.
+const artDir = mkdtempSync(join(tmpdir(), 'bk-artifact-'));
+writeFileSync(
+  join(artDir, 'BACKUP.json'),
+  `{${LF}  "fileCount": 2,${LF}  "sourceBytes": 1234,${LF}  "archiveBytes": 66,${LF}  "archiveSha256": "fixture"${LF}}${LF}`
+);
+ra = attempt(f, `light loop ok "" /x/light "${artDir}" "$(bk_attempt_bytes "${artDir}")"`);
+rec = readFileSync(join(f.state, 'light.status'), 'utf8');
+assert(ra.code === 0, 'a success that names its artifact is still written');
+assert(rec.split(LF).includes(`artifact=${artDir}`), `the record names the artifact this attempt produced (${artDir})`);
+assert(/^bytes=1300$/m.test(rec), 'the size is the sum the backup itself reported (sourceBytes+archiveBytes)');
+assert(
+  rec.split(LF).includes(`success_artifact=${artDir}`) && /^success_bytes=1300$/m.test(rec),
+  'the last success remembers its artifact and size too',
+);
+
+// A failure must not keep claiming that artifact as its own output; the LAST GOOD
+// one survives, because that is the copy that actually exists on disk.
+ra = attempt(f, `light loop fail "exit 1: disk full" /x/light`);
+rec = readFileSync(join(f.state, 'light.status'), 'utf8');
+assert(/^artifact=$/m.test(rec) && /^bytes=$/m.test(rec), 'a failed attempt claims no artifact (these fields describe THIS attempt)');
+assert(rec.split(LF).includes(`success_artifact=${artDir}`), 'while the last GOOD artifact survives it');
+
+// The size is a nice-to-have and must never invent a number: no BACKUP.json, a
+// missing directory, or an unparsable field all yield EMPTY, not 0-bytes-as-a-fact.
+const noJsonDir = mkdtempSync(join(tmpdir(), 'bk-nojson-'));
+ra = shell(`. "${LIB}"; bk_attempt_bytes "${noJsonDir}"`);
+assert(ra.code === 0 && ra.out.trim() === '', `a directory with no BACKUP.json yields no size (${ra.out.trim()})`);
+ra = shell(`. "${LIB}"; bk_attempt_bytes "${noJsonDir}-absent"`);
+assert(ra.code === 0 && ra.out.trim() === '', 'a nonexistent artifact yields no size');
+writeFileSync(join(noJsonDir, 'BACKUP.json'), `{"sourceBytes": "lots"${LF}`);
+ra = shell(`. "${LIB}"; bk_attempt_bytes "${noJsonDir}"`);
+assert(ra.code === 0 && ra.out.trim() === '', 'a malformed size is dropped rather than summed as garbage');
+
 // A multi-line detail (a shell error is rarely one line) must not break the
 // format: the record is read back with one `sed` per key.
 ra = attempt(f, `full launchd fail "line one${'\\n'}line two${'\\n'}Operation not permitted" /x/full`);
@@ -605,6 +651,28 @@ assert(existsSync(join(lf.light, loopMade[0] || 'x', 'data.tar.gz')), 'the backu
 let loopRec = readFileSync(join(lf.logs, 'light.status'), 'utf8');
 assert(/^source=loop$/m.test(loopRec) && /^result=ok$/m.test(loopRec), 'the loop identifies itself as `loop` and records ok');
 
+// …and records WHAT it produced and how big it is, taken from the BACKUP.json the
+// run wrote itself (issue #217, requirement 1). Asserted end to end, on a real run:
+// a unit test of bk_attempt_write would not prove the CLI ever passes these.
+// The expected path is resolved through realpath: data-backup.sh records the
+// destination as `cd "$dest" && pwd` sees it, and on macOS the fixture lives under
+// /var, which is a symlink to /private/var — comparing the unresolved string would
+// test the symlink, not the recording.
+const loopArtifact = join(realpathSync(lf.light), loopMade[0]);
+const loopRecLines = loopRec.split(LF);
+const bkJson = JSON.parse(readFileSync(join(loopArtifact, 'BACKUP.json'), 'utf8'));
+const expectBytes = bkJson.sourceBytes + bkJson.archiveBytes;
+assert(expectBytes > 0, `the fixture backup reports real bytes (sourceBytes=${bkJson.sourceBytes}, archiveBytes=${bkJson.archiveBytes})`);
+assert(
+  loopRecLines.includes(`artifact=${loopArtifact}`),
+  `the record names the artifact this run produced (got: ${loopRecLines.find((l) => l.startsWith('artifact='))})`,
+);
+assert(loopRecLines.includes(`success_artifact=${loopArtifact}`), 'the remembered last success is this same artifact');
+assert(
+  loopRecLines.includes(`bytes=${expectBytes}`),
+  `the recorded size is that artifact's own sourceBytes+archiveBytes (${expectBytes})`,
+);
+
 // The loop's own log is SCHEDULER evidence, so --status must read it as such
 // (an artifact-only verdict would already be green here — this is the check that
 // still works when the artifact is old and the scheduler is dead).
@@ -625,6 +693,10 @@ assert(/^\[[^\]]+\] FAIL: light backup rc=/.test(lastLine), `the run log's last 
 loopRec = readFileSync(join(lf.logs, 'light.status'), 'utf8');
 assert(/^result=fail$/m.test(loopRec), 'the attempt record records the failure');
 assert(/cannot be created|not an existing directory|destination/.test(loopRec), 'the record names the reason');
+assert(
+  /^artifact=$/m.test(loopRec) && /^bytes=$/m.test(loopRec),
+  'a failed run records no artifact — it must not inherit the previous run\'s path as if it had made a copy',
+);
 
 // status with no live loop is not "fine": it must say so and point at the check.
 lf = loopRepo();
@@ -642,6 +714,110 @@ assert(rl.code === 2 && /invalid --light-at/.test(rl.out), 'an out-of-range sche
 rl = runLoop(lf, 'start --light-at 4:5');
 assert(rl.code === 2 && /invalid --light-at/.test(rl.out), 'a malformed schedule time is refused (exit 2)');
 assert(!existsSync(join(lf.logs, 'blitzkrieg-data-backup-loop.pid')), 'a refused start left no pidfile behind');
+
+// ── 12. the internal-disk launcher template, route A (issue #217) ───────────
+console.log('');
+console.log('[12] the launcher template refuses loudly, records the refusal, and execs the CLI');
+// The refusal path is the one that ran for a month and produced nothing, so it is
+// driven for real here rather than inspected. A gate cannot make macOS TCC deny it,
+// so the fixture makes the checkout unreadable instead: the template's guards are
+// real reads, and that is the closest a normal user's gate gets to the same shape.
+const TPL_DIR = join(ROOT, 'scripts', 'templates');
+const LAUNCHER_TPL = join(TPL_DIR, 'data-backup-launch.sh');
+const INSTALL = join(ROOT, 'scripts', 'data-backup-install.sh');
+const PLIST_TPLS = ['light', 'full'].map((t) => join(TPL_DIR, `com.blitzkrieg.databackup.${t}.plist`));
+assert(existsSync(LAUNCHER_TPL), 'scripts/templates/data-backup-launch.sh exists');
+assert(PLIST_TPLS.every((p) => existsSync(p)), 'both plist templates exist (the schedule is reviewable in the repo, not only in ~/Library)');
+
+// The installer must RENDER these, not carry a second copy: a launcher that disagrees
+// with its checked-in template is the same class of bug one level up, and the copy in
+// the installer is the one nobody reads.
+const installSrc = readFileSync(INSTALL, 'utf8');
+assert(/TEMPLATE_DIR=.*scripts\/templates/.test(installSrc), 'the installer points at scripts/templates');
+assert(/render_template /.test(installSrc), 'the installer renders templates instead of inlining them');
+assert(!/^cat <<'LAUNCHER_BODY'/m.test(installSrc), 'the launcher heredoc is gone (one source of truth)');
+
+// Every placeholder a template uses must be one the installer substitutes. A
+// placeholder nobody substitutes installs a launcher that tries to read a path
+// literally named __REPO_ROOT__ — at 04:00, into a log nobody reads.
+const tplText = [LAUNCHER_TPL, ...PLIST_TPLS].map((p) => readFileSync(p, 'utf8')).join('');
+const tplPlaceholders = [...new Set([...tplText.matchAll(/__([A-Z_]+)__/g)].map((m) => m[1]))].sort();
+const handled = [...new Set([...installSrc.matchAll(/s\|__([A-Z_]+)__\|/g)].map((m) => m[1]))].sort();
+assert(tplPlaceholders.length > 0, 'the templates do use placeholders');
+assert(
+  tplPlaceholders.every((p) => handled.includes(p)),
+  `every template placeholder is substituted by the installer (templates: ${tplPlaceholders.join(',')} | installer: ${handled.join(',')})`,
+);
+
+// Rendering is textual, and the gate cannot run the installer (it bootstraps a real
+// LaunchAgent — an install is not a test's decision to make), so the rendering itself
+// is checked here against that extracted list.
+let renderedLauncher = readFileSync(LAUNCHER_TPL, 'utf8');
+for (const p of handled) renderedLauncher = renderedLauncher.split(`__${p}__`).join(`/r/${p}`);
+const renderedPath = join(WORK, 'rendered-launcher.sh');
+writeFileSync(renderedPath, renderedLauncher);
+const rn = shell(`sh -n "${renderedPath}"`);
+assert(rn.code === 0, `the rendered launcher parses (${rn.out.trim()})`);
+assert(!/__[A-Z_]+__/.test(renderedLauncher), 'the rendered launcher keeps no placeholder behind');
+
+/** Run the launcher template against a fixture. The env overrides win over the
+ *  placeholders, so the template runs unrendered — the same seam the plists use, and
+ *  the reason a gate can drive the real file instead of a copy of it. */
+function runLauncher(f, tier, env = {}) {
+  return shell(`sh "${LAUNCHER_TPL}" ${tier}`, {
+    BK_REPO_ROOT: f.root,
+    BLITZKRIEG_BACKUP_DIR: f.dest,
+    BK_BACKUP_LOG_DIR: f.logs,
+    BK_BACKUP_STATUS_DIR: f.logs,
+    ...env,
+  });
+}
+function statusLine(f) {
+  return run(['--status', '--quiet'], {
+    BK_BACKUP_DIR: f.dest,
+    BK_BACKUP_LOG_DIR: f.logs,
+    BK_BACKUP_STATUS_DIR: f.logs,
+  });
+}
+
+// (a) readable repository → it must hand over to the real CLI, which records
+// `source=launchd`. That is the third actor the record format claims to serve.
+lf = loopRepo();
+let lr = runLauncher(lf, 'light');
+let rec12 = readFileSync(join(lf.logs, 'light.status'), 'utf8');
+assert(lr.code === 0, `a readable repository is handed to the CLI (exit ${lr.code})`);
+assert(/^source=launchd$/m.test(rec12) && /^result=ok$/m.test(rec12), 'the CLI ran and recorded source=launchd (scheduler evidence, not a hand run)');
+assert(
+  rec12.split(LF).some((l) => l.startsWith('artifact=') && l.length > 'artifact='.length),
+  'and it recorded the artifact it produced, not just the fact that it ran',
+);
+rs = statusLine(lf);
+assert(rs.code === 0 && /light=ok\(0h\)\/sched=ok\(0h\)/.test(rs.out), `--status reads the launcher's run as a healthy scheduler (${rs.out.trim()})`);
+
+// (b) denied repository → recorded refusal, non-zero exit, one-line verdict.
+// Skipped as root, where the mode bits are not enforced.
+if (process.getuid?.() !== 0) {
+  lf = loopRepo();
+  chmodSync(join(lf.root, 'scripts'), 0o000);
+  lr = runLauncher(lf, 'light');
+  chmodSync(join(lf.root, 'scripts'), 0o755); // restore before assertions, so cleanup can run either way
+  assert(lr.code === 126, `a denied repository is refused with exit 126, not a silent success (${lr.code})`);
+  assert(/Full Disk Access/.test(lr.out), 'the refusal names the fix, not only the symptom');
+  assert(
+    /^FAIL: light backup refused/.test(lr.out.trim().split(LF).pop() ?? ''),
+    `the last line is the FAIL shape --status classifies as a failure (${lr.out.trim().split(LF).pop()})`,
+  );
+  rec12 = readFileSync(join(lf.logs, 'light.status'), 'utf8');
+  assert(/^source=launchd$/m.test(rec12) && /^result=fail$/m.test(rec12), 'the refusal is RECORDED where --status reads it (the defect was that this path wrote nothing)');
+  assert(/Operation not permitted/.test(rec12), 'the record carries the TCC signature, so the verdict token is greppable rather than truncated');
+  assert(/^artifact=$/m.test(rec12) && /^bytes=$/m.test(rec12), 'and claims no artifact it did not produce');
+  assert(/^dest=\S/m.test(rec12), 'the record names the destination the refused run never reached');
+  rs = statusLine(lf);
+  assert(
+    rs.code === 1 && /sched=FAILED\([0-9]+h:Operation not permitted\)/.test(rs.out),
+    `--status turns the refusal into one line with the signature (${rs.out.trim()})`,
+  );
+}
 
 // ── result ──────────────────────────────────────────────────────────────────
 rmSync(WORK, { recursive: true, force: true });

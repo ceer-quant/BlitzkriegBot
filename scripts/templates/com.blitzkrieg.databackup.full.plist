@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.blitzkrieg.databackup.full.plist — TEMPLATE (issue #217, requirement 6).
+
+  The weekly FULL tier (D-27): Sunday 04:30, archive included, keep 4 — ~8 GB.
+  Offset from the daily light run so the two never write at once.
+  Rendered by scripts/data-backup-install.sh into ~/Library/LaunchAgents/ and loaded
+  with `launchctl bootstrap gui/$(id -u) <plist>`; scripts/templates/README.md
+  documents the manual route and what this route cannot do on its own.
+
+  A LOADED PLIST IS NOT A RUNNING BACKUP. `launchctl list` reports exit code 0 for a
+  job that has never once succeeded, and a plist sitting in ~/Library/LaunchAgents says
+  nothing about whether the run could reach the repository at all. The only thing that
+  answers "is there a fresh copy" is the status file:
+      blitzkrieg backup --status        # exit 1 = a tier is stale, or its scheduler is failing
+
+  Placeholders: __LABEL__ __TIER__ __LAUNCHER__ __REPO_ROOT__ __BACKUP_DIR__ __LOG_DIR__
+  Substitution is textual, so every value must stay XML-escaped after it (a repository
+  path containing `&` or `<` would yield a plist launchd refuses to load); the installer
+  lints the rendered file with `plutil -lint` for exactly that reason.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>__LAUNCHER__</string>
+    <string>__TIER__</string>
+  </array>
+  <!-- Weekday 0 = Sunday -->
+  <key>StartCalendarInterval</key><dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>4</integer><key>Minute</key><integer>30</integer></dict>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BK_REPO_ROOT</key><string>__REPO_ROOT__</string>
+    <key>BLITZKRIEG_BACKUP_DIR</key><string>__BACKUP_DIR__</string>
+    <key>BK_BACKUP_LOG_DIR</key><string>__LOG_DIR__</string>
+    <!-- Explicit, and not left to $HOME: the attempt record is the signal this whole
+         change exists for, and a record written somewhere nobody reads is the original
+         silence with extra steps. The default would be the same directory. -->
+    <key>BK_BACKUP_STATUS_DIR</key><string>__LOG_DIR__</string>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+  </dict>
+  <key>ProcessType</key><string>Background</string>
+  <key>Nice</key><integer>10</integer>
+  <key>LowPriorityIO</key><true/>
+  <key>StandardOutPath</key><string>__LOG_DIR__/blitzkrieg-data-backup-__TIER__.log</string>
+  <key>StandardErrorPath</key><string>__LOG_DIR__/blitzkrieg-data-backup-__TIER__.log</string>
+</dict>
+</plist>

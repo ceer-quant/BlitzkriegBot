@@ -517,9 +517,13 @@ jobs:
       # rather than as a mystery inside one script's self-test. scripts/lib holds
       # the sourced libraries (backup-attempt.sh, upgrade-artifacts.sh), which
       # have no entry point of their own and would otherwise never be parsed.
+      # scripts/templates holds the files a launchd agent actually RUNS (issue
+      # #217): the launcher and the plists are rendered by the installer and never
+      # executed from here, so nothing else in CI would parse them — and a template
+      # with a syntax error would surface at 04:00, on the machine that installed it.
       - name: Shell syntax (every ops script)
         run: |
-          for f in scripts/*.sh scripts/lib/*.sh; do
+          for f in scripts/*.sh scripts/lib/*.sh scripts/templates/*.sh; do
             bash -n "$f" || { echo "syntax error: $f"; exit 1; }
           done
       - name: LaunchAgent plists parse

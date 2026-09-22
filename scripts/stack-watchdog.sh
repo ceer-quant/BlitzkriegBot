@@ -55,6 +55,28 @@
 # REPEAT_SEC（默认 900 = 15 分钟）重复一次。每分钟一条「内核不在跑」的刷屏和
 # 一条都不发是同一个缺陷——信号都会消失。
 #
+# ── 备份新鲜度：第二条独立信号（issue #217）──────────────────────────────────
+# 内核活着不等于数据安全。2026-09-21 实测：两个 databackup agent 从装上起
+# **一次都没成功过**（macOS TCC 拒绝 launchd 拉起的外部卷访问），而 `launchctl list`
+# 的退出码是 0、日志只有 94 字节——「看起来一切正常」正是它唯一的表现形态。
+# 那条检查此前只存在于 `scripts/soak-health.sh`，而 soak-health 只在有人跑它时才响
+# （`soak-health-loop.sh` 不跨重启、也不常驻）。本脚本是唯一**由 launchd 每 60 秒跑
+# 一次**的检查，所以「距上次成功备份超过 N 小时」的告警必须也在这里有一条。
+#
+# 判定本身**不在本脚本里重写**：`data-backup.sh --status --quiet` 是唯一实现
+# （产物年龄 + 最新一次自动尝试），这里消费它的一行判定与退出码——理由与 soak-health
+# 第 8 节完全相同：两份「备份是否新鲜」迟早会给出两个答案，而错的那份恰好是没人看的
+# 那份。本脚本只把它的结论接进**既有**的告警通道（同一份 watchdog.log、同一个本地
+# 通知、同一套翻转去抖），并给出可编程的退出码 4。
+#
+# 与 up/down 的关系（刻意如此）：
+#   * 它**不改变**内核存活的判定。内核在跑、备份却是三天前的 → 退出码 4，这正是
+#     本条要抓的组合：栈看起来健康，数据没有保障。
+#   * 内核已经停机时**不再单独发这条通知**——停机通知已经把人叫来了，备份缺失是停机的
+#     后果，再刷一条只是把 4 条/小时变成 8 条/小时。但日志、BACKUP_STALE 标记与
+#     退出码照旧：「不喊」不等于「不说」。
+#   * 退出码优先级：3（重复内核）> 1（停机）> 4（备份不新鲜）> 0。
+#
 # 告警去哪里：本地日志（$STATE_DIR/watchdog.log，正在 down 时另有 STACK_DOWN
 # 标记文件）+ macOS 本地通知（osascript `display notification`）。
 # **没有任何出站网络请求**（面板只绑回环，这是本项目的既有约束）。
@@ -86,11 +108,13 @@
 #     --pidfile PATH    内核 pidfile（可选；不给则 pgrep 发现）
 #     --socket PATH     内核 UDS 路径（默认从内核 argv 推导，再退回 $TMPDIR 约定）
 #     --no-notify       不发 macOS 通知（日志与 STACK_DOWN 标记照常）
+#     --no-backup-check 跳过备份新鲜度检查（没有备份调度的部署；单测/CI 用）
 #     --quiet           只在异常（告警）时输出到 stdout
 #     -h | --help
 #
 # 退出码: 0 = 唯一内核存活并在服务；1 = 内核不在跑 / socket 不可达（已告警）；
-#         2 = 用法或配置错误；3 = 发现 ≥2 个内核进程（重复内核，issue #199；优先于 1）
+#         2 = 用法或配置错误；3 = 发现 ≥2 个内核进程（重复内核，issue #199；优先于 1）；
+#         4 = 内核在跑但备份不新鲜（issue #217；3 与 1 优先于它）
 #
 # 环境变量（全部可选，用于部署与测试注入；与 soak-health.sh 的 seam 风格一致）:
 #   BK_REPO_ROOT        仓库根（默认由脚本位置推导；内置盘副本部署时必填）
@@ -113,6 +137,13 @@
 #   BK_NOTIFY           0 = 不发 macOS 通知（默认 1）
 #   BK_SILENCE          1 = 静默（等价于存在 $STATE_DIR/silence）：只抑制通知，
 #                       状态、STACK_DOWN 标记与退出码照常
+#   BK_BACKUP_CHECK     0 = 跳过备份新鲜度检查（默认 1；--no-backup-check 同义）
+#   BK_BACKUP_STALE_HOURS / BK_BACKUP_FULL_STALE_HOURS
+#                       两个 tier 的容忍上限（默认 26h / 192h；与 soak-health.sh 同样的
+#                       默认值，且**导出给子进程**——容忍值住在被判定的那个脚本里）
+#   BK_BACKUP_STATUS_SH 判定引擎（默认 <repo>/scripts/data-backup.sh；自测注入 fixture）
+#   BK_BACKUP_DIR / BK_BACKUP_STATUS_DIR / BK_BACKUP_LOG_DIR
+#                       落在子进程里的部署 seam（不设则用 data-backup.sh 自己的默认）
 #
 # 运维开关：停机告警是给「没人看着」准备的。若这次停机是你自己干的（`blitzkrieg
 # stop`），先 `touch $STATE_DIR/silence` 再停，起来后删掉即可——否则你会收到一条
@@ -145,14 +176,22 @@ AUTOSTART="${BK_AUTOSTART:-0}"
 AUTOSTART_CMD="${BK_AUTOSTART_CMD:-}"
 NOTIFY="${BK_NOTIFY:-1}"
 SILENCE="${BK_SILENCE:-0}"
+BACKUP_CHECK="${BK_BACKUP_CHECK:-1}"
+# 容忍上限住在**被判定的脚本**里（data-backup.sh 的 --stale-hours），所以这两个值
+# 只负责被导出下去。默认值与 soak-health.sh 第 8 节逐字一致：同一个问题在两处被问
+# 出两个答案，比没有答案更糟。
+BK_BACKUP_STALE_HOURS="${BK_BACKUP_STALE_HOURS:-26}"
+BK_BACKUP_FULL_STALE_HOURS="${BK_BACKUP_FULL_STALE_HOURS:-192}"
+export BK_BACKUP_STALE_HOURS BK_BACKUP_FULL_STALE_HOURS
 
 usage() {
   sed -n 's/^# \{0,1\}//p' <<'HDR' >&2
 # 用法: scripts/stack-watchdog.sh [--status|--self-test|--autostart|--no-autostart]
 #        [--repeat-sec N] [--state-dir DIR] [--pidfile PATH] [--socket PATH]
-#        [--no-notify] [--quiet]
+#        [--no-notify] [--no-backup-check] [--quiet]
 # 退出码: 0 = 唯一内核存活；1 = 内核不在跑 / socket 不可达（已告警）；
-#         2 = 用法或配置错误；3 = 发现 ≥2 个内核进程（重复内核，优先于 1）
+#         2 = 用法或配置错误；3 = 发现 ≥2 个内核进程（重复内核，优先于 1）；
+#         4 = 内核在跑但备份不新鲜（issue #217；3 与 1 优先于它）
 HDR
 }
 
@@ -168,6 +207,7 @@ while [ $# -gt 0 ]; do
     --pidfile)       PIDFILE_CFG="${2:-}"; shift ;;
     --socket)        SOCKET_CFG="${2:-}"; shift ;;
     --no-notify)     NOTIFY=0 ;;
+    --no-backup-check) BACKUP_CHECK=0 ;;
     --quiet)         QUIET=1 ;;
     -h|--help)       usage; exit 0 ;;
     *) echo "stack-watchdog: 未知参数: $1" >&2; usage; exit 2 ;;
@@ -178,6 +218,7 @@ done
 case "$REPEAT_SEC" in
   ''|*[!0-9]*) echo "stack-watchdog: --repeat-sec 需要非负整数，得到 '$REPEAT_SEC'" >&2; exit 2 ;;
 esac
+case "$BACKUP_CHECK" in ''|*[!01]*) echo "stack-watchdog: --no-backup-check/BK_BACKUP_CHECK 只能是 0 或 1，得到 '$BACKUP_CHECK'" >&2; exit 2 ;; esac
 [ -n "$STATE_DIR" ] || { echo "stack-watchdog: --state-dir 不能为空" >&2; exit 2; }
 [ -f "$ROOT/Cargo.toml" ] || { echo "stack-watchdog: $ROOT 不是 BlitzkriegBot 仓库根（缺 Cargo.toml）" >&2; exit 2; }
 
@@ -187,6 +228,11 @@ DOWN_MARKER="$STATE_DIR/STACK_DOWN"
 # 重复内核（issue #199）有它自己的标记：它不是「停机」，混用 STACK_DOWN 会让看标记的
 # 人和脚本都读错事故类型。
 DUP_MARKER="$STATE_DIR/DUPLICATE_CORES"
+# 备份不新鲜（issue #217）同样有自己的标记与状态文件。不复用 state 文件的原因很具体：
+# 那里只有一对 last_alert_epoch/kind，两条独立信号共用一对去抖字段就会互相压低对方的
+# 警示——内核刚恢复把 last_alert_epoch 刷新掉，备份那条就闭嘴了，而它可能已经三天没备份。
+BACKUP_MARKER="$STATE_DIR/BACKUP_STALE"
+BACKUP_STATE_FILE="$STATE_DIR/backup-state"
 
 # 只有真正的一次检查（check）才需要可写的状态目录：--status 是只读的（连目录都不建），
 # --self-test 只用 mktemp 的临时目录。自测/状态查询不该在用户 HOME 里留下任何东西
@@ -494,6 +540,97 @@ write_state() { # status last_up last_alert kind
   } > "$tmp" 2>/dev/null && mv -f "$tmp" "$STATE_FILE" 2>/dev/null
   return 0
 }
+# ── 备份新鲜度（issue #217）──────────────────────────────────────────────────
+# 判定引擎是 data-backup.sh --status（唯一实现），这里只负责把它的结论接进既有的
+# 日志/通知/标记/退出码通道。分两个函数是因为两种模式要的东西不同：check 要「该不该
+# 出声 + 标记」，status 只要一行可读的结论（且**不写任何东西**，与 --status 的只读
+# 契约一致）。
+#
+# BK_BK_REASON 是给人看的原因（引擎自己说的那句），BK_BK_NOTE 是给 --status 的一行。
+backup_state_get() {
+  [ -f "$BACKUP_STATE_FILE" ] || return 1
+  sed -n "s/^$1=//p" "$BACKUP_STATE_FILE" 2>/dev/null | head -1
+}
+backup_state_put() { # status last_alert_epoch note
+  local tmp="$BACKUP_STATE_FILE.tmp.$$"
+  {
+    printf 'status=%s\n' "$1"
+    printf 'last_alert_epoch=%s\n' "$2"
+    printf 'note=%s\n' "$3"
+    printf 'last_check_epoch=%s\n' "$(now_epoch)"
+  } > "$tmp" 2>/dev/null && mv -f "$tmp" "$BACKUP_STATE_FILE" 2>/dev/null
+  return 0
+}
+
+# 备份判定引擎：默认 <repo>/scripts/data-backup.sh，可注入（自测）。
+# 解释器与 soak-health.sh 同一套写法：data-backup.sh 是 bash（set -o pipefail、
+# [[ =~ ]]），用 sh 调它在 macOS 上没事、在 Debian/Ubuntu 上（sh 是 dash）会当场
+# 死掉——那样「备份没在发生」这句告警就是为错误的理由响的，正是本改动要消灭的那类缺陷。
+BK_BACKUP_STATUS_SH="${BK_BACKUP_STATUS_SH:-$ROOT/scripts/data-backup.sh}"
+BK_BK_CODE=0        # 0 = 新鲜；其他 = 不新鲜/无法判定（取引擎的退出码，或 2 = 脚本缺失）
+BK_BK_NOTE=""       # 一行判定（引擎的 `backup: ` 那行）
+BK_BK_DETAIL=""     # 引擎说的原因（错误那一行），只在异常时有
+backup_verdict() {
+  local interp out
+  BK_BK_CODE=0; BK_BK_NOTE="off"; BK_BK_DETAIL=""
+  if [ "$BACKUP_CHECK" != "1" ]; then
+    BK_BK_NOTE="off（--no-backup-check / BK_BACKUP_CHECK=0）"
+    return 0
+  fi
+  if [ ! -f "$BK_BACKUP_STATUS_SH" ]; then
+    # KI-30：一个改名就静默消失的检查不是「通过」，是缺陷。缺文件按异常报。
+    BK_BK_CODE=2
+    BK_BK_NOTE="unusable"
+    BK_BK_DETAIL="备份判定脚本不存在: $BK_BACKUP_STATUS_SH"
+    return 0
+  fi
+  interp="sh"
+  command -v bash >/dev/null 2>&1 && interp="bash"
+  # 引擎的 stdout 与 stderr 一起收：判定在 stdout，拒绝运行的理由在 stderr，
+  # 丢掉任何一半都会让告警说不出原因。
+  if out=$("$interp" "$BK_BACKUP_STATUS_SH" --status --quiet 2>&1); then
+    BK_BK_CODE=0
+  else
+    BK_BK_CODE=$?
+    [ -n "$BK_BK_CODE" ] || BK_BK_CODE=1
+    [ "$BK_BK_CODE" -ne 0 ] || BK_BK_CODE=1   # 防御：退出 0 之外的怪值一律当异常
+  fi
+  BK_BK_NOTE=$(printf '%s\n' "$out" | sed -n 's/^backup: //p' | head -1)
+  if [ -z "$BK_BK_NOTE" ]; then
+    BK_BK_NOTE="unusable"
+    # 没有判定行 = 引擎拒绝运行（容忍值打错、树不见了……），它把原因写在最后一行；
+    # 丢了原因就等于把「一个环境变量的笔误」变成一团看不懂的红。有界截断。
+    BK_BK_DETAIL=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1 | cut -c1-160)
+    [ -n "$BK_BK_DETAIL" ] || BK_BK_DETAIL="exit $BK_BK_CODE（引擎没有输出）"
+  fi
+  # 判定行解析出来了就不再另取「原因」：--quiet 的契约是那一行**自带**理由
+  # （`sched=FAILED(0h:Operation not permitted)`），再抄一遍首行只是噪音。
+  return 0
+}
+backup_bad() { [ "$BK_BK_CODE" -ne 0 ]; }
+
+# 告警正文：自带完整解释（判定 + 原因 + 两个 tier 的最新产物从哪看），单看这一条
+# 就能处置——和 duplicate_body 同一个标准。
+backup_body() {
+  printf '[备份告警] 最后一次成功备份已超过容忍上限（issue #217）\n'
+  printf '判定: %s\n' "$BK_BK_NOTE"
+  printf '容忍: light %sh / full %sh（BK_BACKUP_STALE_HOURS / BK_BACKUP_FULL_STALE_HOURS）\n' \
+    "$BK_BACKUP_STALE_HOURS" "$BK_BACKUP_FULL_STALE_HOURS"
+  [ -n "$BK_BK_DETAIL" ] && printf '原因: %s\n' "$BK_BK_DETAIL"
+  printf '为什么现在说: 内核存活与数据安全是两件事——2026-09-21 的实测是备份从装上起从未成功过，\n'
+  printf '  而 launchctl list 的退出码是 0、日志只有 94 字节，「看起来一切正常」是它唯一的表现形态。\n'
+  printf '诊断: blitzkrieg backup --status   （等价：bash scripts/data-backup.sh --status）\n'
+  printf '两条可行路线: A 给 /bin/sh 完全磁盘访问权限后 bash scripts/data-backup-install.sh；\n'
+  printf '  B 无需改权限、今天可用：scripts/data-backup-loop.sh start（不跨重启）\n'
+  printf '说明见 README.md §3.6；本脚本只判定与告警，绝不代替你安装或修改任何 LaunchAgent。\n'
+  printf '日志: %s\n' "$LOG"
+}
+# 通知正文（一行，短）：喊人时最该看到的是「多久没成功备份了」和「怎么查」。
+backup_short_line() {
+  printf '备份不新鲜（%s）｜容忍 light %sh/full %sh｜查: blitzkrieg backup --status' \
+    "$BK_BK_NOTE" "$BK_BACKUP_STALE_HOURS" "$BK_BACKUP_FULL_STALE_HOURS"
+}
+
 # 无存活记录时（重启后第一次跑）用数据落盘时间兜底：比「未知」有用得多，而且是
 # 标注了来源的推断，不是假装看门狗当时在场。
 data_mtime_hint() {
@@ -566,6 +703,15 @@ run_self_test() {
   unset BK_REPO_ROOT BK_CORE_PGREP BK_CORE_PIDFILE BK_SOCKET BK_WATCHDOG_DIR BK_REPEAT_SEC
   unset BK_ENV_FILE BK_POSITIONS BK_SETTLEMENTS BK_DATA_MTIME_HINT
   unset BK_AUTOSTART BK_AUTOSTART_CMD BK_NOTIFY BK_SILENCE
+  unset BK_BACKUP_CHECK BK_BACKUP_STATUS_SH BK_BACKUP_STALE_HOURS BK_BACKUP_FULL_STALE_HOURS
+  unset BK_BACKUP_DIR BK_BACKUP_STATUS_DIR BK_BACKUP_LOG_DIR
+
+  # 备份新鲜度检查默认在自测里**关掉**（第 23 组再显式打开，用 fixture 判定引擎）。
+  # 原因不是「太麻烦」，而是自测的契约：它零外部依赖、绝不碰生产路径。默认打开的话，
+  # 每个用例都会去跑真正的 data-backup.sh，而它读的是真备份卷与真的 ~/Library/Logs——
+  # 于是一台「本来就没有备份」的开发机（以及 Linux CI，那里根本没有
+  # /Volumes/Hard Disk/BlitzkriegBotBackup）会让所有 `run 0`/`run 1` 用例统统变成 4。
+  export BK_BACKUP_CHECK=0
 
   # fixture「内核样」进程。不能 `cp /bin/sleep`：macOS 拒绝执行平台二进制的复制品
   # （`Killed: 9`），复制出来的 fixture 一秒都活不了。改成 exec 一个真程序，并把
@@ -624,6 +770,21 @@ PY
   printf '%s\n' 'DRY_RUN=true' > "$env_dry"
   printf '%s\n' 'DRY_RUN=false' > "$env_live"
   local fake_autostart="touch $marker"
+
+  # ── 备份判定引擎的 fixture（第 23 组）────────────────────────────────────────
+  # 真的去跑 data-backup.sh 会把自测绑到备份卷与 ~/Library/Logs 上，所以第 23 组
+  # 注入三个只有几行的替身：它们唯一要复现的是**接口**——一行 `backup: …` 判定 +
+  # 退出码（0 = 新鲜，非 0 = 不新鲜）+ 出错时的原因行。这样断言的是「看门狗怎么消费
+  # 判定」，而不是「data-backup.sh 判得对不对」——后者的门禁是
+  # scripts/data-backup-check.mjs 第 8 节，两处不重复。
+  local bk_ok="$ST_TMP/backup-ok.sh" bk_bad="$ST_TMP/backup-bad.sh" bk_gone="$ST_TMP/no-such-backup-engine.sh"
+  printf '%s\n' '#!/bin/sh' \
+    'echo "backup: light=ok(2h)/sched=ok(2h) full=ok(30h)/sched=ok(30h)"' \
+    'exit 0' > "$bk_ok"
+  printf '%s\n' '#!/bin/sh' \
+    'echo "backup: light=STALE(97h)/sched=FAILED(97h:Operation not permitted) full=STALE(97h)/sched=FAILED(97h:Operation not permitted)"' \
+    'echo "  - light has never produced a backup" >&2' \
+    'exit 1' > "$bk_bad"
 
   # 每个用例都注入 fixture 路径：自测绝不读生产 data/、绝不碰真 socket、绝不访问
   # 真内核。BK_AUTOSTART_CMD 一律指向 marker 命令，所以**即使门禁逻辑写错**，自测
@@ -1032,16 +1193,119 @@ PY
     run_pgrep="$pgrep_hit"
   fi
 
+  # ── 23. 备份新鲜度（issue #217）────────────────────────────────────────────
+  # 本条要证明的是「内核在跑 + 备份陈旧」这一组合**会自己喊出来**，而且喊完之后
+  # 能恢复（KI-30：一个永远红着的检查与一个永远不响的检查是同一个缺陷）。
+  # 判定引擎是可注入的替身（见 fixture 段的注释），所以这些断言完全不依赖备份卷。
+  echo "== 23. 备份新鲜度（#217）：内核在跑 + 备份陈旧 → 退出 4 + BACKUP_STALE 标记 + 可恢复"
+  # 备份用例的 runner：内核「在跑且 socket 通」（与用例 6 同一套 fixture），判定引擎
+  # 由 bk_engine 注入。要造「内核停机 + 备份陈旧」的组合就用 $common 那条路。
+  local bk_engine="$bk_ok" bk_state="$st/backup-state"
+  run_up() { # run_up <期望退出码> <描述> [参数...]
+    local want=$1 desc=$2; shift 2
+    out=$(BK_REPO_ROOT="$ROOT" BK_CORE_PGREP="$fake_tag" \
+          BK_BACKUP_CHECK=1 BK_BACKUP_STATUS_SH="$bk_engine" \
+          BK_ENV_FILE="$env_dry" BK_POSITIONS="$pos" BK_SETTLEMENTS="$settle" BK_NOTIFY=0 \
+          BK_AUTOSTART_CMD="$fake_autostart" \
+          bash "$SELF" --state-dir "$st" --pidfile "$pidfile_live" --socket "$srv_sock" "$@" 2>&1)
+    rc=$?
+    ck "$desc 退出码" "$want" "$rc"
+    printf '%s\n' "$out"
+  }
+
+  # (a) 干净起点：备份新鲜 → 退出 0、没有标记、状态文件记 ok。
+  rm -f "$st/watchdog.log" "$st/BACKUP_STALE" "$bk_state"
+  out=$(run_up 0 "备份新鲜")
+  ck "新鲜时不写标记" "no" "$([ -f "$st/BACKUP_STALE" ] && echo yes || echo no)"
+  ck "新鲜时状态=ok" "ok" "$(sed -n 's/^status=//p' "$bk_state" 2>/dev/null | head -1)"
+
+  # (b) 翻转成陈旧：退出码必须是 4（而不是 0），告警正文写进日志，标记落盘。
+  bk_engine="$bk_bad"
+  rm -f "$st/watchdog.log"
+  out=$(run_up 4 "内核在跑 + 备份陈旧")
+  printf '%s\n' "$out" > "$ST_TMP/case23b.out"
+  ck_contains "告警标题" "$st/watchdog.log" "备份告警"
+  ck_contains "正文含判定行" "$st/watchdog.log" "light=STALE(97h)"
+  ck_contains "正文含容忍值" "$st/watchdog.log" "容忍: light 26h / full 192h"
+  ck_contains "正文给出诊断命令" "$st/watchdog.log" "blitzkrieg backup --status"
+  ck_contains "正文说明与内核存活无关" "$st/watchdog.log" "内核存活与数据安全是两件事"
+  ck_contains "正文不提自动拉起内核（无关的话不说）" "$st/watchdog.log" "绝不代替你安装或修改任何 LaunchAgent"
+  ck "BACKUP_STALE 标记存在" "yes" "$([ -f "$st/BACKUP_STALE" ] && echo yes || echo no)"
+  ck "状态=bad" "bad" "$(sed -n 's/^status=//p' "$bk_state" | head -1)"
+  ck_contains "stdout 也说明备份不新鲜" "$ST_TMP/case23b.out" "备份: 不新鲜"
+
+  # (c) 去抖：同一状态再来一次不重复告警；窗口到期（--repeat-sec 0）才再喊。
+  #     计数用带锚点的 `^[备份告警]`（= 每次告警的正文标题，一条一次）：正文里每行
+  #     都是独立的日志行，数「出现过这个词」会把一次告警数成两次。
+  out=$(run_up 4 "去抖中" )
+  ck "告警仍只有 1 条" "1" "$(count_matches "$st/watchdog.log" '^\[备份告警\]')"
+  ck_contains "去抖写在日志里" "$st/watchdog.log" "备份仍不新鲜"
+  out=$(run_up 4 "窗口到期" --repeat-sec 0)
+  ck "窗口到期后再次告警" "2" "$(count_matches "$st/watchdog.log" '^\[备份告警\]')"
+
+  # (d) 内核停机 + 备份陈旧：退出码是 1（停机优先），本条不单独发通知但**照样记**
+  #     ——「不喊」不等于「不说」，标记与状态必须还在。
+  rm -f "$st/watchdog.log" "$st/BACKUP_STALE"
+  out=$(BK_REPO_ROOT="$ROOT" BK_CORE_PGREP="$run_pgrep" BK_BACKUP_CHECK=1 BK_BACKUP_STATUS_SH="$bk_bad" \
+        BK_ENV_FILE="$env_dry" BK_POSITIONS="$pos" BK_SETTLEMENTS="$settle" BK_NOTIFY=0 \
+        BK_AUTOSTART_CMD="$fake_autostart" \
+        bash "$SELF" --repeat-sec 0 --state-dir "$st" --pidfile "$pidfile_dead" --socket "$ST_TMP/absent.sock" 2>&1)
+  rc=$?
+  ck "停机优先于备份" "1" "$rc"
+  ck "停机时不落备份告警正文" "0" "$(count_matches "$st/watchdog.log" '^\[备份告警\]')"
+  ck_contains "但写明通知已抑制" "$st/watchdog.log" "内核停机中，本条通知已抑制"
+  ck "标记照旧落盘" "yes" "$([ -f "$st/BACKUP_STALE" ] && echo yes || echo no)"
+
+  # (e) 恢复：判定回到新鲜 → 标记被清掉、日志留一笔、退出码回到 0。
+  bk_engine="$bk_ok"
+  rm -f "$st/watchdog.log"
+  out=$(run_up 0 "恢复新鲜")
+  ck "标记已清掉" "no" "$([ -f "$st/BACKUP_STALE" ] && echo yes || echo no)"
+  ck_contains "恢复写进日志" "$st/watchdog.log" "备份已恢复新鲜"
+  ck "状态回到 ok" "ok" "$(sed -n 's/^status=//p' "$bk_state" | head -1)"
+
+  # (f) 判定引擎缺失是**异常**，不是「跳过」（KI-30：改名一次就静默消失的检查不是通过）。
+  bk_engine="$bk_gone"
+  rm -f "$st/watchdog.log"
+  out=$(run_up 4 "判定脚本缺失")
+  printf '%s\n' "$out" > "$ST_TMP/case23f.out"
+  ck_contains "点名缺失的脚本" "$st/watchdog.log" "$bk_gone"
+  ck_contains "告警正文写明 unusable" "$ST_TMP/case23f.out" "判定: unusable"
+
+  # (g) --status 也要能编程消费：内核在跑 + 备份陈旧 → 退出 4，并打印判定与容忍值。
+  bk_engine="$bk_bad"
+  rm -f "$st/BACKUP_STALE"   # (f) 的 check 模式落下的标记，这组要断言 --status 不再写
+  out=$(BK_REPO_ROOT="$ROOT" BK_CORE_PGREP="$fake_tag" BK_BACKUP_CHECK=1 BK_BACKUP_STATUS_SH="$bk_bad" \
+        BK_ENV_FILE="$env_dry" BK_POSITIONS="$pos" BK_SETTLEMENTS="$settle" \
+        bash "$SELF" --status --state-dir "$st" --pidfile "$pidfile_live" --socket "$srv_sock" 2>&1)
+  rc=$?
+  ck "--status 退出码 4" 4 "$rc"
+  printf '%s\n' "$out" > "$ST_TMP/case23g.out"
+  ck_contains "--status 打印备份判定" "$ST_TMP/case23g.out" "备份: light=STALE(97h)"
+  ck_contains "--status 打印容忍值" "$ST_TMP/case23g.out" "备份容忍: light 26h / full 192h"
+  # 只读契约：--status 不落标记（那条只属于 check 模式）。
+  ck "--status 不写标记" "no" "$([ -f "$st/BACKUP_STALE" ] && echo yes || echo no)"
+
+  # (h) 关掉检查（--no-backup-check / BK_BACKUP_CHECK=0）：判定引擎再坏也不报。
+  #     这是给「这台机器根本没有备份调度」的部署留的出口，不是给 CI 方便的开关。
+  bk_engine="$bk_bad"
+  out=$(BK_REPO_ROOT="$ROOT" BK_CORE_PGREP="$fake_tag" BK_BACKUP_CHECK=0 BK_BACKUP_STATUS_SH="$bk_bad" \
+        BK_ENV_FILE="$env_dry" BK_POSITIONS="$pos" BK_SETTLEMENTS="$settle" BK_NOTIFY=0 \
+        BK_AUTOSTART_CMD="$fake_autostart" \
+        bash "$SELF" --state-dir "$st" --pidfile "$pidfile_live" --socket "$srv_sock" 2>&1)
+  rc=$?
+  ck "--no-backup-check 下退出 0" "0" "$rc"
+
   # 先统计再清理：failures/assertions 就在 $ST_TMP 里，st_cleanup 会把它们一起删掉。
   nfail=$(wc -l < "$failfile" 2>/dev/null | tr -d ' '); [ -n "$nfail" ] || nfail=0
   ncases=$(wc -l < "$asserts" 2>/dev/null | tr -d ' '); [ -n "$ncases" ] || ncases=0
   st_cleanup
   echo
   if [ "$nfail" -eq 0 ]; then
-    echo "SELFTEST PASS（22 组用例 / $ncases 项断言）"
+    echo "SELFTEST PASS（23 组用例 / $ncases 项断言）"
     return 0
   fi
-  echo "SELFTEST FAIL（22 组用例 / $ncases 项断言，$nfail 项失败，见上面 FAIL 行）"
+  echo "SELFTEST FAIL（23 组用例 / $ncases 项断言，$nfail 项失败，见上面 FAIL 行）"
   return 1
 }
 
@@ -1257,15 +1521,84 @@ if [ "$CHECK_MODE" = "status" ]; then
   printf '未赎回应收: %s\n' "$SETTLE_TEXT"
   printf '最后已知存活: %s\n' "$(last_alive_text)"
   printf '状态目录: %s\n' "$STATE_DIR"
+  # 备份新鲜度（issue #217）：--status 只报告，不写标记、不落状态、不通知，
+  # 与这个模式「只读一次」的契约一致。判定引擎能容忍自己写不了东西。
+  backup_verdict
+  printf '备份: %s\n' "$BK_BK_NOTE"
+  [ -n "$BK_BK_DETAIL" ] && printf '备份原因: %s\n' "$BK_BK_DETAIL"
+  printf '备份容忍: light %sh / full %sh（BK_BACKUP_STALE_HOURS / BK_BACKUP_FULL_STALE_HOURS）\n' \
+    "$BK_BACKUP_STALE_HOURS" "$BK_BACKUP_FULL_STALE_HOURS"
   printf '恢复命令: %s\n' "$RECOVERY"
+  # 退出码优先级与 check 模式同一套：重复内核 > 停机 > 备份不新鲜 > 正常。
   [ "$CORE_COUNT" -ge 2 ] && exit 3
-  [ "$STACK_UP" -eq 1 ] && exit 0
+  [ "$STACK_UP" -eq 1 ] && { backup_bad && exit 4; exit 0; }
   exit 1
 fi
 
 # ── 状态机与告警 ────────────────────────────────────────────────────────────
 SILENCED=0
 if [ "$SILENCE" = "1" ] || [ -f "$STATE_DIR/silence" ]; then SILENCED=1; fi
+
+# 备份新鲜度（issue #217）：与 up/down 无关的第二条独立信号。内核活着、备份却停在
+# 三天前，是本条要抓的组合——「栈看起来健康，数据没有保障」。判定委托给
+# data-backup.sh --status（唯一实现），这里只做三件事：出声、落标记、定退出码。
+# 去抖用自己的一对字段（$BACKUP_STATE_FILE），理由写在标记路径的定义处。
+backup_verdict
+BK_BAD=0
+backup_bad && BK_BAD=1
+if [ "$BACKUP_CHECK" = "1" ]; then
+  # 标记文件反映「最近一次取到的判定」。检查被关掉时不写也不清——那种情况下我们
+  # 没有判定，写是谎报、清也是谎报；`--status` 会把 off 说出来。
+  if [ "$BK_BAD" -eq 1 ]; then : > "$BACKUP_MARKER" 2>/dev/null || true
+  else rm -f "$BACKUP_MARKER" 2>/dev/null || true
+  fi
+fi
+if [ "$BK_BAD" -eq 1 ]; then
+  BK_PREV=$(backup_state_get status || true)
+  BK_LAST_ALERT=$(backup_state_get last_alert_epoch || true)
+  BK_ALERT=0; BK_REASON=""
+  if [ "$BK_PREV" != "bad" ]; then
+    BK_ALERT=1; BK_REASON="状态翻转（${BK_PREV:-无记录} → 备份不新鲜）"
+  elif [ -z "$BK_LAST_ALERT" ]; then
+    BK_ALERT=1; BK_REASON="无告警记录"
+  elif [ $((NOW - BK_LAST_ALERT)) -ge "$REPEAT_SEC" ]; then
+    BK_ALERT=1; BK_REASON="距上次告警 $((NOW - BK_LAST_ALERT))s ≥ ${REPEAT_SEC}s"
+  else
+    BK_REASON="去抖中（距上次告警 $((NOW - BK_LAST_ALERT))s < ${REPEAT_SEC}s）"
+  fi
+  if [ "$BK_ALERT" -ne 1 ]; then
+    log_append "$(fmt_epoch "$NOW") 备份仍不新鲜（${BK_REASON}）: ${BK_BK_NOTE}"
+    say "BACKUP 备份仍不新鲜（${BK_REASON}）: ${BK_BK_NOTE}"
+    backup_state_put bad "${BK_LAST_ALERT:-0}" "$BK_BK_NOTE"
+  elif [ "$NEW_STATUS" = "down" ] || [ "$NEW_STATUS" = "down_wedged" ]; then
+    # 内核停机期间不单独发这条通知：停机通知已经把人叫来了，备份缺失是它的后果，
+    # 再刷一条只会把 15 分钟的 4 条变成 8 条。日志与 BACKUP_STALE 标记照旧，退出码
+    # 也仍是 1（停机优先）——「不喊」不等于「不说」。**不消费告警窗口**：内核恢复后
+    # 若备份仍不新鲜，这条要在第一时间（而不是等下一个 REPEAT_SEC）说出口。
+    log_append "$(fmt_epoch "$NOW") 备份不新鲜（${BK_REASON}）——内核停机中，本条通知已抑制（先修停机）: ${BK_BK_NOTE}"
+    say "BACKUP 备份不新鲜（内核停机中，通知已抑制）: ${BK_BK_NOTE}"
+    backup_state_put bad "${BK_LAST_ALERT:-0}" "$BK_BK_NOTE"
+  elif [ "$SILENCED" -eq 1 ]; then
+    log_append "$(fmt_epoch "$NOW") 备份告警（${BK_REASON}）——已静默（$STATE_DIR/silence）：不通知、不落告警正文；BACKUP_STALE 标记与退出码照常"
+    printf '%s\n' "BACKUP 备份不新鲜（已静默：不通知，仅落日志与 BACKUP_STALE 标记）: ${BK_BK_NOTE}"
+    backup_state_put bad "$NOW" "$BK_BK_NOTE"
+  else
+    {
+      printf '%s 备份告警（%s）\n' "$(fmt_epoch "$NOW")" "$BK_REASON"
+      backup_body
+    } >> "$LOG" 2>/dev/null || true
+    printf '%s\n' "$(backup_body)"
+    notify_local "BlitzkriegBot: 备份不新鲜（issue #217）" "$(backup_short_line)"
+    backup_state_put bad "$NOW" "$BK_BK_NOTE"
+  fi
+else
+  # 恢复：只在从 bad 翻回来时记一笔，避免每分钟一行「备份正常」把日志淹掉。
+  if [ "$(backup_state_get status || true)" = "bad" ]; then
+    log_append "$(fmt_epoch "$NOW") 备份已恢复新鲜: ${BK_BK_NOTE}"
+    say "OK 备份已恢复新鲜（${BK_BK_NOTE}）"
+  fi
+  backup_state_put "$([ "$BACKUP_CHECK" = "1" ] && echo ok || echo off)" 0 "$BK_BK_NOTE"
+fi
 
 # 重复内核的标记由「当前事实」决定：不是重复就删掉（是不是刚解除，各分支自己记日志）。
 [ "$NEW_STATUS" != "up_duplicate" ] && rm -f "$DUP_MARKER" 2>/dev/null
@@ -1298,6 +1631,12 @@ if [ "$NEW_STATUS" = "up" ]; then
     say "OK 内核存活（pid ${CORE_PID:-?}，${CORE_SOCKET}）"
   fi
   say "   模式 ${MODE_VALUE}｜未平仓 ${POS_TEXT}｜未赎回 ${SETTLE_TEXT}"
+  # 内核在跑但备份不新鲜（issue #217）：退出码 4，而且**不是 0**。这正是「栈健康、
+  # 数据没保障」唯一能被调度器看见的形状——把备份缺失折进「一切正常」就等于回到事故当天。
+  if [ "$BK_BAD" -eq 1 ]; then
+    say "   备份: 不新鲜（${BK_BK_NOTE}）——详见上方告警；查: blitzkrieg backup --status"
+    exit 4
+  fi
   exit 0
 fi
 
