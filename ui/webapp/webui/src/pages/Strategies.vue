@@ -306,14 +306,13 @@ function toggleExpand(name: string): void {
                 <td colspan="13" class="px-3 py-3">
                   <div class="label-micro mb-2">拒单原因分布（下单函数内部拒绝）</div>
                   <div class="flex flex-wrap gap-2">
-                    <span
-                      v-for="p in causePills(r)"
-                      :key="p.name"
-                      class="inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/12 px-2.5 py-1 text-[11.5px] text-primary"
-                    >
+                    <!-- A pill with a tone triple is a Badge — the kit's `gold`
+                         variant is this exact shape, so the page composes it
+                         instead of copying its tint (issue 260). -->
+                    <Badge v-for="p in causePills(r)" :key="p.name" variant="gold">
                       {{ p.name }}
                       <span class="num font-bold">×<RollingNumber :value="p.n" /></span>
-                    </span>
+                    </Badge>
                   </div>
                   <!--
                     The bare counts look implausible next to a single open position,

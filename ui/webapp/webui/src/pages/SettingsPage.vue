@@ -17,7 +17,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion,
-  TerminalSquare, Play, Square, LogOut, Info, Server, Network, AlertTriangle,
+  TerminalSquare, Play, Square, LogOut, Info, Server, Network,
 } from 'lucide-vue-next'
 import {
   api, getToken, loginAt, logout, ping, probeSession,
@@ -38,6 +38,7 @@ import SegmentedControl from '@/components/ui/segmented/SegmentedControl.vue'
 import Switch from '@/components/ui/switch/Switch.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
+import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const store = usePanelStore()
@@ -321,13 +322,17 @@ const themeValue = computed<ThemeMode>({
         <Server class="size-3.5" />当前网关未上报进程控制信息（旧版网关或只读适配器），指令台不可用。
       </p>
 
-      <div
+      <!--
+        A crash is an alert, so it wears the kit's alert tint rather than a
+        page-local copy of it (issue 260): the hand-rolled `border-down/35 bg-down/8`
+        was the same semantics at a second concentration, which is how the panel
+        ended up with two reds.
+      -->
+      <AlertBanner
         v-if="exit"
-        class="mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-[11.5px] leading-snug"
-        :class="exit.kind === 'crash' ? 'border-down/35 bg-down/8 text-down' : 'border-line bg-panel-2 text-muted-fg'"
-      >
-        <span>{{ exit.kind === 'crash' ? `内核曾崩溃：${exit.description}` : `内核已停止：${exit.description}` }}</span>
-      </div>
+        class="mt-3"
+        :tone="exit.kind === 'crash' ? 'error' : 'info'"
+      >{{ exit.kind === 'crash' ? `内核曾崩溃：${exit.description}` : `内核已停止：${exit.description}` }}</AlertBanner>
 
       <div class="mt-3 flex flex-wrap items-center gap-2">
         <Button variant="default" size="sm" :disabled="busy" title="查询网关与内核状态" @click="send('status')">
@@ -390,8 +395,16 @@ const themeValue = computed<ThemeMode>({
           <span class="text-[12.5px] font-semibold">{{ row.name }}</span>
           <span class="min-w-0 truncate text-[11.5px] text-faint-fg" :title="row.target">{{ row.target }}</span>
           <span class="ml-auto flex items-center gap-2 text-[11.5px] text-muted-fg">
+            <!--
+              The TUI paints this fact in its WARN colour, so it may not sit in
+              the panel's faintest tier here: "the resolver answered with a
+              fake IP" changes how a failure below should be read, and the two
+              faces must not disagree about how loud it is (issue 260). `text-primary`
+              is the panel's existing warn token — the same one AlertBanner's
+              `warn` tone uses.
+            -->
             <Tooltip v-if="row.fakeIp" content="解析到的地址全在代理的 fake-IP 段内：这是解析器的事实，不是这张路径的故障。">
-              <span class="text-faint-fg">fake-IP</span>
+              <span class="text-primary">fake-IP</span>
             </Tooltip>
             <span v-if="row.ms != null" class="num">{{ row.ms }} ms</span>
           </span>
@@ -407,20 +420,23 @@ const themeValue = computed<ThemeMode>({
         :hint="netView.emptyHint ?? undefined"
       />
 
-      <div
-        class="mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-[11.5px] leading-snug"
-        :class="netView.tone === 'down' ? 'border-down/35 bg-down/8 text-down' : 'border-line bg-panel-2 text-muted-fg'"
-      >
-        <AlertTriangle v-if="netView.tone === 'down'" class="mt-px size-3.5 shrink-0" />
-        <Info v-else class="mt-px size-3.5 shrink-0 text-faint-fg" />
-        <span class="min-w-0">
-          <span class="font-semibold">{{ netView.title }}</span>
-          <span class="mx-1">·</span><span>{{ netView.summary }}</span><br />
-          <span>{{ netView.hint }}</span>
-        </span>
-      </div>
+      <!--
+        The verdict strip is an alert, so it is the kit's `AlertBanner` and not a
+        page-local tint (issue 260). `info` covers both "all paths OK, here is the
+        reading" and "no verdict yet" — the same tone the Plugins page uses for a
+        normal state; only a real failure gets the error tint.
+      -->
+      <AlertBanner
+        class="mt-3"
+        :tone="netView.tone === 'down' ? 'error' : 'info'"
+        :title="netView.title"
+        :hint="netView.hint"
+      >{{ netView.summary }}</AlertBanner>
 
-      <p v-if="netView.proxyNote" class="mt-2 text-[11px] leading-snug text-faint-fg">{{ netView.proxyNote }}</p>
+      <!-- Same fact, same volume as the TUI's WARN-coloured proxy line (issue 260):
+           a proxy in front of the probe is the explanation for half the
+           readings below, so it may not be the faintest text on the card. -->
+      <p v-if="netView.proxyNote" class="mt-2 text-[11px] leading-snug text-primary">{{ netView.proxyNote }}</p>
       <p v-if="netErr" class="mt-2 text-[11px] leading-snug text-down">面板调用失败：{{ netErr }}</p>
 
       <div class="mt-3 flex flex-wrap items-center gap-2">

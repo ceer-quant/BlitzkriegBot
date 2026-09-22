@@ -6,6 +6,8 @@ plugin-manager tab works over a REAL PTY against a live core.
 Covers (#32 UI-side): tab 4 renders the three panes; cursor movement highlights
 a row; enable toggle is immediate; disable toggle asks for confirmation (y/N);
 with the core stopped the tab degrades to an offline notice without crashing.
+Covers (#260): the `n` network self-check overlay opens, lists one row per probed
+path, and Esc closes it.
 
 Isolation: private UDS + scratch workdir + dry mode + no logs/archives.
 Exit 0 on PASS, 1 on FAIL. (Uses raw pty.fork — Node `script -q /dev/null`
@@ -230,6 +232,40 @@ try:
     p1.clear()
     text = p1.send(b'\x1b[A', settle=0.7)
     check('↑ recalls last command', 'positions' in text, re.sub(r'\s+', ' ', text[-120:]))
+
+    # ── E11 (#260): the `n` network self-check overlay ────────────────────────
+    # The command bar is still open from the recall test above, and while it owns
+    # input a bare `n` is typed into it rather than opening the overlay — so leave
+    # it first, then press `n`.
+    p1.send(b'\x1b', settle=0.5)
+    # `n` probes on the first press, and the probe dials REAL venues (DNS → TCP →
+    # TLS → one request per path), so the rows land only when the report does —
+    # hence the long timeout, which matches the client's own 30 s read timeout.
+    # A machine with no outbound network still gets one row per path, each of
+    # them failing: what is asserted here is the overlay's shape, never the
+    # verdict, because the verdict depends on where this runs.
+    text = p1.send(b'n', settle=0.8)
+    check('n opens the network overlay', 'Network self-check' in text, text[:70].replace('\n', ' '))
+    # The last row in report order is the one that proves the whole table landed.
+    landed = p1.wait_for('venue-ws', timeout=35.0)
+    frame = strip_ansi(bytes(p1.buf))
+    paths = ('venue-rest', 'discovery', 'spot-ws', 'venue-ws')
+    missing = [n for n in paths if n not in frame]
+    check('overlay lists one row per probed path', landed and not missing,
+          f"missing: {missing}" if missing else 'venue-rest/discovery/spot-ws/venue-ws')
+    # Esc is the other documented way out (the footer says so); assert the overlay
+    # actually leaves, not merely that it stopped being painted in one frame.
+    p1.clear()
+    p1.send(b'\x1b', settle=0.8)
+    gone = False
+    for _ in range(6):
+        p1.buf.clear()
+        p1.drain(0.6)
+        if 'Network self-check' not in strip_ansi(bytes(p1.buf)):
+            gone = True
+            break
+        time.sleep(0.2)
+    check('Esc closes the network overlay', gone, strip_ansi(bytes(p1.buf))[-60:].replace('\n', ' '))
     p1.quit()
 
     # Round 2: core stopped — graceful degradation.

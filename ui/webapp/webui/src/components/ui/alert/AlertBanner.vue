@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { cn } from '@/lib/utils'
 
 const props = withDefaults(
@@ -7,11 +8,16 @@ const props = withDefaults(
 )
 const emit = defineEmits<{ dismiss: [] }>()
 
-const tones = {
+const TONES = {
   error: 'border-down/30 bg-down/10 text-down',
   warn: 'border-primary/30 bg-primary/10 text-primary',
   info: 'border-info/30 bg-info/10 text-info',
-}[props.tone]
+}
+
+// `computed`, not a one-shot lookup: a caller whose tone follows live state
+// (`:tone="netView.tone === 'down' ? 'error' : 'info'"`) would otherwise keep
+// the class it was born with and paint the wrong severity once the state moved.
+const tones = computed(() => TONES[props.tone])
 </script>
 
 <template>

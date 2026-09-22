@@ -10,6 +10,11 @@ const GREEN: Color = Color::Green;
 const RED: Color = Color::Red;
 const DIM: Color = Color::DarkGray;
 const ACCENT: Color = Color::Cyan;
+/// The attention colour: noticed, but not a failure. It exists as a name because
+/// the WebUI renders the same facts at the same volume (see `tui-parity`), and
+/// "which tier is this fact in" is a decision the two faces have to share — a
+/// bare `Color::Yellow` at the call site is how the two sides drifted apart.
+const WARN: Color = Color::Yellow;
 
 fn signed(v: f64, unit: &str) -> String {
     format!("{}{:.2}{}", if v >= 0.0 { "+" } else { "-" }, v.abs(), unit)
@@ -86,7 +91,7 @@ fn render_hint_bar(f: &mut Frame, area: Rect, app: &App) {
         CheckStage::Connecting => Span::styled("○ connecting", Style::default().fg(RED)),
         CheckStage::Handshake => Span::styled(
             "◐ connected · waiting for market data",
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(WARN),
         ),
         CheckStage::Ready => Span::styled("● self-check passed", Style::default().fg(GREEN)),
     };
@@ -213,12 +218,12 @@ fn render_help(f: &mut Frame, _app: &App) {
 /// `core::net_check::render_text`, because a table can colour a failing row and
 /// a plain-text renderer cannot. The two must still agree on what each status
 /// MEANS, so both call `status_label` — the shared vocabulary is the labels,
-/// which is the part that would otherwise drift.
+/// which is the part that would otherwise drift. They also share the COLUMNS
+/// (`row_columns`), so a width change cannot land on one renderer and miss the
+/// other.
 fn render_net_check(f: &mut Frame, app: &App) {
-    use blitzkrieg_ui_kit::core::net_check::{hint_label, status_label};
+    use blitzkrieg_ui_kit::core::net_check::{hint_label, row_columns, status_label};
     let area = f.area();
-    let rect = centered_rect(area, 86, 20);
-    f.render_widget(Clear, rect);
 
     let mut lines: Vec<Line> = Vec::new();
     match (&app.net_report, &app.net_error) {
@@ -264,19 +269,14 @@ fn render_net_check(f: &mut Frame, app: &App) {
                 lines.push(Line::from(vec![
                     Span::raw("  "),
                     mark,
-                    Span::raw(format!(
-                        " {:<11} {:<34} {:>7} ms  ",
-                        item.name,
-                        truncate_cell(&item.target, 34),
-                        item.ms
-                    )),
+                    Span::raw(format!(" {}  ", row_columns(item))),
                     Span::styled(
                         status_label(&item.status),
                         Style::default().fg(if item.ok { GREEN } else { RED }),
                     ),
                     Span::styled(
                         if item.fake_ip { "  [fake-ip]" } else { "" },
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(WARN),
                     ),
                 ]));
                 if !item.detail.trim().is_empty() {
@@ -308,7 +308,7 @@ fn render_net_check(f: &mut Frame, app: &App) {
                         "proxy variables set: {} (names only — a proxy URL can carry credentials)",
                         report.proxy_env.join(", ")
                     ),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(WARN),
                 )));
             }
         }
@@ -325,6 +325,32 @@ fn render_net_check(f: &mut Frame, app: &App) {
         Style::default().fg(DIM),
     )));
 
+    // Height from the CONTENT, not a fixed 20 rows (#260): the report grows a
+    // row per path and a wrapped line per long detail, and a hard-coded box
+    // silently cropped the tail on exactly the reports worth reading. The
+    // paragraph wraps, so the count is of WRAPPED rows — `lines.len()` would
+    // under-count a long detail line and crop it just as the fixed height did.
+    let inner_w = (area.width * NET_OVERLAY_PCT_X / 100).saturating_sub(2);
+    let mut body_rows = wrapped_rows(&lines, inner_w);
+    let max_body = area.height.saturating_sub(2) as usize;
+    if body_rows > max_body && max_body >= 2 {
+        // The screen cannot hold it: say so rather than let the operator read a
+        // truncated list as the whole report. The notice takes the last body row.
+        lines.push(Line::from(Span::styled(
+            format!(
+                "… {} more rows below the fold — enlarge the terminal",
+                body_rows - (max_body - 1)
+            ),
+            Style::default().fg(WARN),
+        )));
+        body_rows = max_body;
+    }
+    let rect = centered_rect(
+        area,
+        NET_OVERLAY_PCT_X,
+        (body_rows as u16).saturating_add(2).min(area.height),
+    );
+    f.render_widget(Clear, rect);
     f.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
@@ -336,15 +362,26 @@ fn render_net_check(f: &mut Frame, app: &App) {
     );
 }
 
-/// Character-safe cell truncation (a byte slice would panic on a long non-ASCII
-/// endpoint; the same rule as the shared text renderer).
-fn truncate_cell(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
+/// Width of the `n` overlay as a percentage of the screen. A constant because
+/// the height calculation has to know the same inner width the paragraph will
+/// wrap to.
+const NET_OVERLAY_PCT_X: u16 = 86;
+
+/// Rows `lines` occupy once wrapped to `width` columns. An empty line still
+/// occupies one row; a line wider than the box wraps onto the next.
+fn wrapped_rows(lines: &[Line], width: u16) -> usize {
+    let width = width.max(1) as usize;
+    lines
+        .iter()
+        .map(|l| {
+            let w = l.width();
+            if w == 0 {
+                1
+            } else {
+                w.div_ceil(width)
+            }
+        })
+        .sum()
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
@@ -1035,7 +1072,7 @@ fn render_evo_status(f: &mut Frame, area: Rect, app: &App, now: i64) {
 fn evo_state_color(state: &str) -> Color {
     match state {
         "proposed" => ACCENT,
-        "deferred" => Color::Yellow,
+        "deferred" => WARN,
         "accepted" => GREEN,
         "rejected" => RED,
         _ => DIM,
@@ -1318,4 +1355,73 @@ fn render_log(f: &mut Frame, area: Rect, app: &App) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(text: &str) -> Line<'static> {
+        Line::from(text.to_string())
+    }
+
+    /// The `n` overlay sized itself from a fixed 20 rows, so a report that grew
+    /// past it lost its tail silently (#260). The height now comes from the
+    /// content, and the content WRAPS — counting `lines.len()` would under-count
+    /// a long detail line and crop it exactly as the fixed height did.
+    #[test]
+    fn the_overlay_height_counts_wrapped_rows_not_just_lines() {
+        assert_eq!(wrapped_rows(&[], 40), 0, "no content, no rows");
+
+        // An empty line is still a row: the overlay's spacers must be counted.
+        assert_eq!(wrapped_rows(&[line("")], 40), 1);
+        assert_eq!(wrapped_rows(&[line(""), line("")], 40), 2);
+
+        // A line that fits is one row, whatever it is made of.
+        assert_eq!(wrapped_rows(&[line("0123456789")], 10), 1);
+        // One column too narrow wraps onto a second row.
+        assert_eq!(wrapped_rows(&[line("0123456789X")], 10), 2);
+        assert_eq!(wrapped_rows(&[line(&"a".repeat(21))], 10), 3);
+
+        // Width is DISPLAY width, not a character count and not a byte count: a
+        // CJK glyph is two columns and three bytes, so six glyphs fill a
+        // 12-column box exactly and an eighth wraps. Counting chars or bytes
+        // would mis-size the box for every Chinese detail line — the same silent
+        // crop, by another route.
+        let six_glyphs = "市场".repeat(3); // 6 glyphs, 12 columns, 18 bytes
+        assert_eq!(wrapped_rows(&[line(&six_glyphs)], 12), 1);
+        assert_eq!(wrapped_rows(&[line(&six_glyphs)], 13), 1);
+        assert_eq!(wrapped_rows(&[line(&"市场".repeat(4))], 12), 2); // 8 glyphs = 16 columns
+
+        // A zero-width box would divide by zero; it degrades to "one row per
+        // character" rather than panicking inside the render loop.
+        assert_eq!(wrapped_rows(&[line("abc")], 0), 3);
+    }
+
+    /// A four-path report is the shape the panel ships with; it must fit in the
+    /// height the overlay asks for, with room for the headline and the footer.
+    #[test]
+    fn a_four_path_report_fits_the_computed_height() {
+        let mut lines = vec![line("4/4 paths OK — all network paths OK"), line("")];
+        for name in ["venue-rest", "venue-ws", "discovery", "spot-ws"] {
+            lines.push(line(&format!(
+                "  ok   {}  {}.example  12 ms  ok",
+                name, name
+            )));
+        }
+        lines.push(line(""));
+        lines.push(line("reading: venue-rest answered in 12 ms"));
+        lines.push(line(""));
+        lines.push(line(
+            "r probe again · n or Esc closes · the same report is in the log pane",
+        ));
+
+        // Comfortably narrower than any real terminal: nothing here wraps.
+        let rows = wrapped_rows(&lines, 100);
+        assert_eq!(rows, lines.len(), "a report that fits must not be padded");
+        assert!(
+            rows + 2 <= 20,
+            "the shipped four-path report outgrew the old box"
+        );
+    }
 }

@@ -126,15 +126,36 @@ pub fn render_text(report: &NetCheckReportView) -> String {
     out
 }
 
+/// Column widths of the one-line-per-path table.
+///
+/// Single source on purpose: the plain-text renderer below and the TUI overlay
+/// both lay a row out from these, and while each hard-coded its own format
+/// string, changing one width silently mis-aligned the other — a table that
+/// reads differently in the log pane than in the overlay is a table nobody can
+/// compare across the two (#260).
+pub const COL_NAME: usize = 11;
+pub const COL_TARGET: usize = 34;
+pub const COL_MS: usize = 7;
+
+/// One row's fixed-width columns — name, truncated target, right-aligned ms —
+/// with no leading mark and no trailing status. Shared so the two renderers
+/// cannot disagree about where the columns are.
+pub fn row_columns(item: &NetCheckItemView) -> String {
+    format!(
+        "{:<COL_NAME$} {:<COL_TARGET$} {:>COL_MS$} ms",
+        item.name,
+        truncate(&item.target, COL_TARGET),
+        item.ms
+    )
+}
+
 /// One table row. The detail is appended only when it adds something the status
 /// does not already say, so a passing row stays one short line.
 fn render_item(item: &NetCheckItemView) -> String {
     let mark = if item.ok { "ok  " } else { "FAIL" };
     let mut line = format!(
-        "  {mark} {:11} {:34} {:>7} ms  {}",
-        item.name,
-        truncate(&item.target, 34),
-        item.ms,
+        "  {mark} {}  {}",
+        row_columns(item),
         status_label(&item.status)
     );
     if item.fake_ip {
@@ -149,7 +170,7 @@ fn render_item(item: &NetCheckItemView) -> String {
 
 /// Truncate to `max` characters with a trailing ellipsis, counting CHARACTERS
 /// (a byte index would panic on a non-ASCII endpoint).
-fn truncate(s: &str, max: usize) -> String {
+pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -286,14 +307,61 @@ mod tests {
 
     #[test]
     fn targets_are_truncated_by_characters_not_bytes() {
-        assert_eq!(truncate("short", 34), "short");
+        assert_eq!(truncate("short", COL_TARGET), "short");
         let long = "a".repeat(40);
-        assert_eq!(truncate(&long, 34).chars().count(), 34);
+        assert_eq!(truncate(&long, COL_TARGET).chars().count(), COL_TARGET);
         // A multi-byte target must not panic or split a character.
         let wide = "市场".repeat(20);
         let cut = truncate(&wide, 10);
         assert_eq!(cut.chars().count(), 10);
         assert!(cut.ends_with('…'));
+    }
+
+    /// The columns have ONE source, so a width change cannot land on one
+    /// renderer and miss the other: both `render_text` and the TUI overlay build
+    /// their row from `row_columns`, and this pins what that helper promises —
+    /// the declared widths, and the truncation to `COL_TARGET`.
+    #[test]
+    fn the_table_columns_have_one_source() {
+        let mut it = item("venue-rest", "ok", true);
+        it.ms = 1234;
+        let row = row_columns(&it);
+
+        // name left-aligned in COL_NAME, then a space, then the target column.
+        let (name_col, rest) = row.split_at(COL_NAME);
+        assert_eq!(name_col, "venue-rest ", "name is padded to COL_NAME");
+        assert_eq!(&rest[..1], " ", "one separator after the name column");
+        let (target_col, rest) = rest[1..].split_at(COL_TARGET);
+        assert_eq!(
+            target_col.trim_end(),
+            it.target.as_str(),
+            "target column is COL_TARGET"
+        );
+        assert_eq!(&rest[..1], " ", "one separator after the target column");
+        // ms is right-aligned in COL_MS, then the literal unit.
+        let (ms_col, unit) = rest[1..].split_at(COL_MS);
+        assert_eq!(ms_col, "   1234", "ms is right-aligned to COL_MS");
+        assert_eq!(unit, " ms");
+
+        // An over-long target is truncated to exactly the column, so the columns
+        // after it do not shift.
+        let mut long = item("venue-rest", "ok", true);
+        long.target = "a".repeat(COL_TARGET * 2);
+        let long_row = row_columns(&long);
+        assert_eq!(long_row.chars().count(), row.chars().count());
+        assert!(
+            long_row.contains('…'),
+            "a clipped target says so: {long_row}"
+        );
+
+        // And the text renderer really is built from it: same columns, with the
+        // mark in front and the status behind.
+        let line = render_item(&it);
+        assert_eq!(
+            line,
+            format!("  ok   {}  {}", row, status_label(&it.status)),
+            "render_item must lay out from row_columns"
+        );
     }
 
     /// A detail that already appears in the line is not repeated.
