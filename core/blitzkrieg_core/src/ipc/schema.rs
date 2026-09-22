@@ -172,6 +172,11 @@ pub mod method {
     pub const EXTENSION_DISABLE: &str = "extension.disable";
     /// Market plugins: list registered market extensions (name/type/capabilities).
     pub const MARKET_LIST: &str = "market.list";
+    /// Network self-check: probe the active market plugin's network paths
+    /// (resolver → TCP → TLS → one cheap request per endpoint) and answer with a
+    /// `NetCheckReport`. Read-only and credential-free; the answer to "is this a
+    /// network problem or a venue problem?" when a bot has gone quiet.
+    pub const NET_CHECK: &str = "net.check";
     /// Shadow Evolution control surface (opt-in feature). Every mutation is
     /// per-strategy (E2-c): `apply`/`rollback` name ONE strategy, and `status`
     /// reports each evolved strategy's own block.

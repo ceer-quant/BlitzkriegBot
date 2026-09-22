@@ -7,9 +7,13 @@
 //!   blitzkrieg tui [--attach] Run interactive terminal panel
 //!   blitzkrieg web [FLAGS]   Run the web gateway / browser panel
 //!   blitzkrieg stop [FLAGS]  Stop the stack attached to one socket
+//!   blitzkrieg net-check     Ask the core to probe the venue's network paths
 //!   blitzkrieg help          Show help
 
-use blitzkrieg_ui_kit::gateway::{Dispatcher, StartOutcome, Supervisor, SupervisorConfig};
+use blitzkrieg_ui_kit::core::net_check::{render_json, render_text};
+use blitzkrieg_ui_kit::gateway::{
+    discover_binary, Dispatcher, StartOutcome, Supervisor, SupervisorConfig,
+};
 use blitzkrieg_ui_kit::web::WebServer;
 use blitzkrieg_ui_kit::{resolve_socket_path, IpcClient};
 use blitzkrieg_ui_panel::{
@@ -32,6 +36,8 @@ SUBCOMMANDS:
   tui [--attach] Run interactive terminal panel (attach to existing core or manage)
   web            Run web gateway / browser panel
   stop           Stop the stack (UI + core) on one socket; also an orphaned core
+  net-check      Ask the core on the socket to probe every network path the venue
+                 uses (read-only; no order, no ledger). --json for scripts
   help           Show this help message
 
 FLAGS (for blitzkrieg / blitzkrieg run / core):
@@ -317,51 +323,72 @@ fn build_supervisor_config(cli: &ParsedCli, fallback_socket: String) -> Supervis
 /// them. The launcher therefore needs no `set -a; source .env` ceremony —
 /// see `blitzkrieg_ui_panel::env_file` for the precedence rule (the exported
 /// environment always wins over the file) and the secrets line.
-fn main() -> std::io::Result<()> {
+fn main() -> std::process::ExitCode {
     blitzkrieg_ui_panel::env_file::load_cwd_env();
     tokio_main()
 }
 
+/// Map one subcommand's result onto the process exit code, reporting the failure
+/// the way a CLI should (one line on stderr) instead of Rust's `Debug` dump of
+/// the error value. Exit codes stay meaningful across every subcommand:
+/// `net-check` in particular returns 1 for a failing probe.
+fn report(result: std::io::Result<()>) -> std::process::ExitCode {
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("blitzkrieg: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 #[tokio::main]
-async fn tokio_main() -> std::io::Result<()> {
+async fn tokio_main() -> std::process::ExitCode {
     let mut raw_args: Vec<String> = std::env::args().skip(1).collect();
     let first = raw_args.first().map(|s| s.as_str());
 
     match first {
         Some("help") | Some("--help") | Some("-h") => {
             println!("{HELP_TEXT}");
-            Ok(())
+            std::process::ExitCode::SUCCESS
         }
         Some("core") => {
             raw_args.remove(0);
-            run_core_subcommand(raw_args).await
+            report(run_core_subcommand(raw_args).await)
         }
         Some("tui") => {
             raw_args.remove(0);
-            run_tui_subcommand(raw_args).await
+            report(run_tui_subcommand(raw_args).await)
         }
         Some("web") => {
             raw_args.remove(0);
-            run_web_subcommand(raw_args).await
+            report(run_web_subcommand(raw_args).await)
         }
         Some("stop") => {
             raw_args.remove(0);
             // stop_stack::run waits out the grace synchronously — blocking
             // pool so the runtime stays free (E14).
-            tokio::task::spawn_blocking(move || run_stop_subcommand(raw_args))
-                .await
-                .map_err(|e| std::io::Error::other(format!("stop task failed: {e}")))?
+            report(
+                tokio::task::spawn_blocking(move || run_stop_subcommand(raw_args))
+                    .await
+                    .map_err(|e| std::io::Error::other(format!("stop task failed: {e}")))
+                    .and_then(|r| r),
+            )
+        }
+        Some("net-check") | Some("netcheck") => {
+            raw_args.remove(0);
+            run_net_check_subcommand(raw_args).await
         }
         Some("run") => {
             raw_args.remove(0);
-            run_unified(raw_args).await
+            report(run_unified(raw_args).await)
         }
-        Some(other) if other.starts_with('-') => run_unified(raw_args).await,
-        None => run_unified(Vec::new()).await,
+        Some(other) if other.starts_with('-') => report(run_unified(raw_args).await),
+        None => report(run_unified(Vec::new()).await),
         Some(unknown) => {
             eprintln!("blitzkrieg: unknown subcommand '{unknown}'");
             eprintln!("See 'blitzkrieg --help' for available commands.");
-            std::process::exit(2);
+            std::process::ExitCode::from(2)
         }
     }
 }
@@ -472,6 +499,97 @@ fn run_stop_subcommand(args: Vec<String>) -> std::io::Result<()> {
         Ok(())
     } else {
         std::process::exit(code)
+    }
+}
+
+/// `blitzkrieg net-check [--json] [--socket <path>]` — is it us or the venue?
+///
+/// The probe runs inside the core already serving this socket. That is not a
+/// convenience: the core is the process whose network actually decides whether
+/// orders and market data flow, and a probe run from here would answer with
+/// THIS shell's environment instead — a different question, and precisely the
+/// one that hides a core booted under a proxy it cannot use.
+///
+/// With no core serving the socket there is nothing to ask, and that is reported
+/// as such, together with the one command that probes without a core. A core
+/// that answers `unsupported` is a report too (exit 1), never a silent pass.
+///
+/// Exit codes: 0 every path OK · 1 a probe failed · 2 the probe could not run.
+async fn run_net_check_subcommand(args: Vec<String>) -> std::process::ExitCode {
+    let mut json = false;
+    let mut socket = resolve_socket_path();
+    let mut iter = args.into_iter();
+    while let Some(a) = iter.next() {
+        match a.as_str() {
+            "--json" => json = true,
+            "--socket" => match iter.next() {
+                Some(s) => socket = s,
+                None => {
+                    eprintln!("blitzkrieg: net-check: --socket needs a path");
+                    return std::process::ExitCode::from(2);
+                }
+            },
+            "--help" | "-h" => {
+                println!("blitzkrieg net-check [--json] [--socket <path>]");
+                println!();
+                println!("Ask the core on <socket> to probe every network path the venue");
+                println!("trades over — resolver, TCP, TLS, one cheap request each — and print");
+                println!("the report. Read-only: no order, no ledger, no credential.");
+                println!();
+                println!("  --socket <path>  the core to ask (default: the resolved socket path)");
+                println!("  --json           print the report as JSON, for scripts");
+                println!();
+                println!("exit codes: 0 every path OK · 1 a probe failed · 2 no core answered");
+                return std::process::ExitCode::SUCCESS;
+            }
+            other => {
+                eprintln!("blitzkrieg: net-check: unknown argument '{other}'");
+                eprintln!("See 'blitzkrieg net-check --help'.");
+                return std::process::ExitCode::from(2);
+            }
+        }
+    }
+
+    // Its own connection on the blocking pool: the probe dials real endpoints
+    // and takes seconds, and the shared dispatcher (or an async worker) held
+    // that long would stall every other caller.
+    let target = socket.clone();
+    let probed = tokio::task::spawn_blocking(move || {
+        let mut client = IpcClient::new(target);
+        client.net_check()
+    })
+    .await;
+
+    let report = match probed {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            eprintln!("blitzkrieg: no net.check from the core on {socket} ({e})");
+            eprintln!("A probe that needs no core, no socket and no ledger:");
+            eprintln!("  {} --net-check", discover_binary().display());
+            return std::process::ExitCode::from(2);
+        }
+        Err(e) => {
+            eprintln!("blitzkrieg: net-check task failed: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    if json {
+        match render_json(&report) {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("blitzkrieg: {e}");
+                return std::process::ExitCode::from(2);
+            }
+        }
+    } else {
+        print!("{}", render_text(&report));
+    }
+
+    if report.ok {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::from(1)
     }
 }
 

@@ -850,6 +850,35 @@ fn auth_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// How long a cached network self-check is served before a new probe is started.
+/// Long enough that opening the panel twice does not dial twice, short enough
+/// that a 30-second-old reading is not presented as the current state.
+const NET_CHECK_TTL_MS: u128 = 20_000;
+
+/// The cached network self-check the browser panel reads.
+///
+/// Why a cache rather than one probe per request: `serve()` accepts connections
+/// in a SINGLE thread (`for stream in listener.incoming()`), so a route that
+/// dials for ten seconds freezes every other request in the process — the
+/// panel's own snapshot poll, its login route, everything. A route that starts
+/// ONE background probe when the cache is stale and answers from the last report
+/// keeps the panel alive while the probe runs, and the client says "探测中…"
+/// from the same `probing` flag the TUI shows.
+#[derive(Default)]
+struct NetCheckCache {
+    /// When `report` landed (monotonic — this is an age, not a timestamp).
+    at: Option<std::time::Instant>,
+    /// A probe is running right now.
+    probing: bool,
+    /// The last report, exactly as the core serialised it.
+    report: Option<serde_json::Value>,
+    /// Why the last probe failed to ANSWER (core unreachable, socket refused).
+    /// Kept apart from a report that answered with failing probes: "the core
+    /// cannot be asked" and "the core asked the network and it is broken" are
+    /// different problems with different fixes.
+    error: Option<String>,
+}
+
 /// Failed-login accounting for one client (an IP address).
 #[derive(Debug, Clone, Copy, Default)]
 struct LoginAttempt {
@@ -1009,6 +1038,8 @@ pub struct WebServer {
     trade_limit: usize,
     /// Present only in gateway mode (`--manage`); enables `/api/command`.
     dispatcher: Option<Arc<Mutex<Dispatcher>>>,
+    /// The last network self-check, and whether one is running now.
+    net_check: Arc<Mutex<NetCheckCache>>,
     /// Panel credentials (`BLITZKRIEG_PANEL_USER` / `…_PASSWORD`), read from the
     /// environment. Gateway mode refuses to start without a complete pair (see
     /// [`Self::require_credentials`]) — it never invents one.
@@ -1034,6 +1065,7 @@ impl WebServer {
             snapshot_src: Arc::new(Mutex::new(client)),
             trade_limit,
             dispatcher: None,
+            net_check: Arc::new(Mutex::new(NetCheckCache::default())),
             panel_user: None,
             panel_password: None,
             // No lifecycle verbs on this surface, so auth stays opt-in here.
@@ -1392,6 +1424,7 @@ impl WebServer {
             snapshot_src: Arc::new(Mutex::new(client)),
             trade_limit,
             dispatcher: Some(Arc::new(Mutex::new(dispatcher))),
+            net_check: Arc::new(Mutex::new(NetCheckCache::default())),
             panel_user: None,
             panel_password: None,
             // This surface can start and stop the trading process, so it is never
@@ -1423,6 +1456,7 @@ impl WebServer {
             snapshot_src: Arc::new(Mutex::new(client)),
             trade_limit,
             dispatcher: Some(dispatcher),
+            net_check: Arc::new(Mutex::new(NetCheckCache::default())),
             panel_user: None,
             panel_password: None,
             // This surface can start and stop the trading process, so it is never
@@ -1486,6 +1520,74 @@ impl WebServer {
             .as_ref()
             .map(|d| d.lock().map(|d| d.lifecycle_enabled()).unwrap_or(false))
             .unwrap_or(false)
+    }
+
+    /// The `/api/netcheck` answer: the cached report, plus whether a probe is
+    /// running right now and why the last one could not answer.
+    ///
+    /// Drop the cached report's age so the next poll starts a fresh probe.
+    ///
+    /// Used by the probe button (see the route): the report itself is kept, so a
+    /// caller that polls mid-probe still gets the previous result plus
+    /// `probing: true` rather than an empty card.
+    fn net_check_invalidate(&self) {
+        if let Ok(mut cache) = self.net_check.lock() {
+            cache.at = None;
+        }
+    }
+
+    /// Starts a background probe when the cache is stale (see the route for why
+    /// nothing is dialled inline). The probe gets its OWN client on its own
+    /// connection, so it holds neither the panel's snapshot client nor the
+    /// dispatcher while it waits on the network.
+    fn net_check_poll(&self) -> String {
+        let socket = self
+            .snapshot_src
+            .lock()
+            .map(|c| c.socket_path().to_string())
+            .unwrap_or_default();
+        let Ok(mut cache) = self.net_check.lock() else {
+            return serde_json::json!({
+                "probing": false,
+                "report": serde_json::Value::Null,
+                "error": "net-check cache poisoned",
+            })
+            .to_string();
+        };
+        let age = cache.at.map(|t| t.elapsed().as_millis());
+        let stale = age.is_none_or(|a| a > NET_CHECK_TTL_MS);
+        if stale && !cache.probing && !socket.is_empty() {
+            cache.probing = true;
+            // The previous probe's error is not this probe's: clear it, or the
+            // panel shows a stale failure beside a fresh "探测中…".
+            cache.error = None;
+            let shared = self.net_check.clone();
+            std::thread::spawn(move || {
+                let mut client = IpcClient::new(socket);
+                let outcome = client.net_check();
+                if let Ok(mut c) = shared.lock() {
+                    c.probing = false;
+                    match outcome {
+                        Ok(report) => match serde_json::to_value(&report) {
+                            Ok(v) => {
+                                c.report = Some(v);
+                                c.at = Some(std::time::Instant::now());
+                                c.error = None;
+                            }
+                            Err(e) => c.error = Some(format!("report is not serializable: {e}")),
+                        },
+                        Err(e) => c.error = Some(e.to_string()),
+                    }
+                }
+            });
+        }
+        serde_json::json!({
+            "probing": cache.probing,
+            "ageMs": age,
+            "report": cache.report,
+            "error": cache.error,
+        })
+        .to_string()
     }
 
     /// The loud warning shown when this panel is listening beyond loopback, or
@@ -1642,6 +1744,31 @@ impl WebServer {
                     }
                 };
                 (200, "application/json", doc.to_string().into_bytes())
+            }
+            ("GET", "/api/netcheck") => {
+                // Network diagnosis (`net.check`): the paths this venue trades
+                // over, walked resolver → TCP → TLS → one cheap request each.
+                //
+                // Answered from a cache, never probed inline: `serve()` accepts
+                // in ONE thread, so a handler that dials for ten seconds freezes
+                // every other request in this process — the panel's own snapshot
+                // poll included. The route starts a background probe when the
+                // cached report is stale and answers immediately; `probing` says
+                // whether a fresh one is still coming. See [`NetCheckCache`].
+                (200, "application/json", self.net_check_poll().into_bytes())
+            }
+            ("POST", "/api/netcheck/probe") => {
+                // The 网络诊断 card's probe button. A separate route rather than
+                // a `?force=1` because `handle` matches on `req.path()`, which
+                // has already dropped the query string.
+                //
+                // It still does not dial inline (the cache rule above): the
+                // timestamp is dropped so the next poll starts a probe, and the
+                // caller gets the same document — `probing: true` until the
+                // fresh report lands. A probe already in flight is left alone:
+                // its result IS the answer to this request.
+                self.net_check_invalidate();
+                (200, "application/json", self.net_check_poll().into_bytes())
             }
             ("GET", "/api/snapshot") => {
                 let snap = self.snapshot();

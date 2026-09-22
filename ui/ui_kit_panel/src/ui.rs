@@ -57,6 +57,9 @@ pub fn render(f: &mut Frame, app: &App) {
     if app.help_visible {
         render_help(f, app);
     }
+    if app.net_visible {
+        render_net_check(f, app);
+    }
     render_command_bar(f, chunks[3], app);
     if let Some(text) = &app.pending_confirmation {
         render_confirm(f, chunks[4], text);
@@ -165,6 +168,7 @@ fn render_help(f: &mut Frame, _app: &App) {
         Line::from("  Tab (bar)      complete the command"),
         Line::from("  Enter /Esc     run / cancel"),
         Line::from("  r              refresh now"),
+        Line::from("  n              network check — which path is broken, if any"),
         Line::from("  y / n          confirm or cancel a dangerous action"),
         Line::from("  a / x / d      Evolution: accept / reject / defer the selected proposal"),
         Line::from("  e / u          Evolution: toggle auto-evolve / rollback selected strategy"),
@@ -187,6 +191,7 @@ fn render_help(f: &mut Frame, _app: &App) {
         Line::from("  auto-evolve on|off    unattended evolution switch"),
         Line::from("  evolve on|off         the engine switch (no evolution runs while off)"),
         Line::from("  rollback <strategy>   undo the last accepted promotion"),
+        Line::from("  netcheck              probe the network paths this venue uses"),
         Line::from("  start ASSETS ...      start a managed DRY core (needs --manage)"),
         Line::from("  stop                  stop the managed core (needs --manage)"),
         Line::from("  help                  what you are reading"),
@@ -200,6 +205,146 @@ fn render_help(f: &mut Frame, _app: &App) {
         ),
         rect,
     );
+}
+
+/// The `n` overlay: the network self-check, one row per path.
+///
+/// Rendered from the report's FIELDS rather than from
+/// `core::net_check::render_text`, because a table can colour a failing row and
+/// a plain-text renderer cannot. The two must still agree on what each status
+/// MEANS, so both call `status_label` — the shared vocabulary is the labels,
+/// which is the part that would otherwise drift.
+fn render_net_check(f: &mut Frame, app: &App) {
+    use blitzkrieg_ui_kit::core::net_check::{hint_label, status_label};
+    let area = f.area();
+    let rect = centered_rect(area, 86, 20);
+    f.render_widget(Clear, rect);
+
+    let mut lines: Vec<Line> = Vec::new();
+    match (&app.net_report, &app.net_error) {
+        (_, Some(e)) => {
+            lines.push(Line::from(Span::styled(
+                "the core could not be asked:",
+                Style::default().fg(RED).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(format!("  {e}")));
+            lines.push(Line::from(Span::styled(
+                "  (this is a CORE/IPC problem, not a network verdict — start the core, then press r)",
+                Style::default().fg(DIM),
+            )));
+        }
+        (None, None) if app.net_busy => {
+            lines.push(Line::from(Span::styled(
+                "probing… (resolver → TCP → TLS → one request per path; takes a few seconds)",
+                Style::default().fg(ACCENT),
+            )));
+        }
+        (None, None) => {
+            lines.push(Line::from("no report yet — press r to probe"));
+        }
+        (Some(report), None) => {
+            let (passed, total) = report.passed();
+            let headline = format!(
+                "{passed}/{total} paths OK — {}",
+                hint_label(&report.hint_code)
+            );
+            lines.push(Line::from(Span::styled(
+                headline,
+                Style::default()
+                    .fg(if report.ok { GREEN } else { RED })
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+            for item in &report.items {
+                let mark = if item.ok {
+                    Span::styled("ok  ", Style::default().fg(GREEN))
+                } else {
+                    Span::styled("FAIL", Style::default().fg(RED))
+                };
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    mark,
+                    Span::raw(format!(
+                        " {:<11} {:<34} {:>7} ms  ",
+                        item.name,
+                        truncate_cell(&item.target, 34),
+                        item.ms
+                    )),
+                    Span::styled(
+                        status_label(&item.status),
+                        Style::default().fg(if item.ok { GREEN } else { RED }),
+                    ),
+                    Span::styled(
+                        if item.fake_ip { "  [fake-ip]" } else { "" },
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ]));
+                if !item.detail.trim().is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!("        {}", item.detail.trim()),
+                        Style::default().fg(DIM),
+                    )));
+                }
+            }
+            if report.items.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  (no probe reported — an empty report is never a pass)",
+                    Style::default().fg(RED),
+                )));
+            }
+            lines.push(Line::from(""));
+            let reading = if report.hint.trim().is_empty() {
+                hint_label(&report.hint_code).to_string()
+            } else {
+                report.hint.clone()
+            };
+            lines.push(Line::from(vec![
+                Span::styled("reading: ", Style::default().fg(ACCENT)),
+                Span::raw(reading),
+            ]));
+            if !report.proxy_env.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "proxy variables set: {} (names only — a proxy URL can carry credentials)",
+                        report.proxy_env.join(", ")
+                    ),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+        }
+    }
+    if app.net_busy && app.net_report.is_some() {
+        lines.push(Line::from(Span::styled(
+            "probing again… (showing the previous report)",
+            Style::default().fg(ACCENT),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "r probe again · n or Esc closes · the same report is in the log pane",
+        Style::default().fg(DIM),
+    )));
+
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Network self-check — is it us or the venue?")
+                .border_style(Style::default().fg(ACCENT)),
+        ),
+        rect,
+    );
+}
+
+/// Character-safe cell truncation (a byte slice would panic on a long non-ASCII
+/// endpoint; the same rule as the shared text renderer).
+fn truncate_cell(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {

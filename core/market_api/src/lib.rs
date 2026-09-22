@@ -7,6 +7,7 @@
 //! forming a Cargo dependency cycle.
 
 pub mod decimal;
+pub mod net;
 pub mod plugin;
 pub mod types;
 

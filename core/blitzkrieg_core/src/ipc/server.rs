@@ -1023,6 +1023,30 @@ async fn handle_line(
             }))
         }
 
+        method::NET_CHECK => {
+            // Resolve the plugin and drop the registry lock BEFORE awaiting: the
+            // probe does real network I/O with multi-second timeouts, and
+            // holding a lock the maintenance tick needs would turn a diagnostic
+            // into a stall. The registry hands out an `Arc`, so the handle
+            // outlives the borrow.
+            let plugin = registry
+                .active()
+                .and_then(|name| registry.get(&name))
+                .or_else(|| registry.names().first().and_then(|n| registry.get(n)))
+                // A market-free build still answers: the no-op plugin's default
+                // probe reports `unsupported`, which is honest and, unlike an
+                // error, keeps the report shape every UI reads.
+                .unwrap_or_else(|| std::sync::Arc::new(crate::market::NoopMarketPlugin));
+            let report = plugin.net_check().await;
+            serde_json::to_value(report).map_err(|e| {
+                (
+                    Failure::APPLICATION,
+                    format!("net.check report is not serializable: {e}"),
+                    None,
+                )
+            })
+        }
+
         method::EXTENSION_ENABLE => {
             let name = params
                 .get("name")

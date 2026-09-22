@@ -466,6 +466,69 @@ pub struct MarketListView {
     pub plugins: Vec<MarketPluginRow>,
 }
 
+// ── net.check ────────────────────────────────────────────────────────────────
+
+/// One network probe (`net.check`). Mirrors the core's `NetCheckItem` — the UI
+/// Kit does not link the core crate, so the shapes are kept in step by hand and
+/// by the snapshot tests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetCheckItemView {
+    /// `venue-rest` | `venue-ws` | `discovery` | `spot-ws` — an identifier the
+    /// UI labels, never prose.
+    pub name: String,
+    /// The endpoint an operator recognises (`clob.polymarket.com`).
+    #[serde(default)]
+    pub target: String,
+    pub ok: bool,
+    /// `ok` | `dns_failed` | `tcp_refused` | `tcp_timeout` | `tls_cert` |
+    /// `tls_error` | `timeout` | `http_error` | `transport_error` | `rejected` |
+    /// `unsupported`. Rendered through `core::net_check::status_label`, which
+    /// echoes an unknown value instead of hiding it.
+    pub status: String,
+    #[serde(default)]
+    pub addrs: Vec<String>,
+    /// Every resolved address is inside a proxy's fake-IP range. A fact about
+    /// the resolver, not a failure of the path.
+    #[serde(default)]
+    pub fake_ip: bool,
+    #[serde(default)]
+    pub ms: i64,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// Result of probing every network path the active venue trades over.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetCheckReportView {
+    /// True only when every probe passed; an empty or `unsupported` report is
+    /// never a pass.
+    pub ok: bool,
+    #[serde(default)]
+    pub ts_ms: i64,
+    /// `ok` | `tls_blocked` | `dns_failed` | `proxy_env` | `fake_ip` |
+    /// `partial` | `unsupported` — see `core::net_check::hint_label`.
+    #[serde(default)]
+    pub hint_code: String,
+    /// The reading in one sentence, composed by the core.
+    #[serde(default)]
+    pub hint: String,
+    /// NAMES (never values) of the proxy variables the probing process saw.
+    #[serde(default)]
+    pub proxy_env: Vec<String>,
+    #[serde(default)]
+    pub items: Vec<NetCheckItemView>,
+}
+
+impl NetCheckReportView {
+    /// How many probes passed / total. `0 / 0` on an unsupported report is
+    /// deliberately not "all clear" — [`Self::ok`] is what decides that.
+    pub fn passed(&self) -> (usize, usize) {
+        (self.items.iter().filter(|i| i.ok).count(), self.items.len())
+    }
+}
+
 // ── orders.list ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]

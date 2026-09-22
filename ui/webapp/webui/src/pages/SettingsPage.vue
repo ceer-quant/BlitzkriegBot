@@ -2,22 +2,29 @@
 /**
  * 设置 — E8-d 指令面 & 收尾。
  *
- * 三块：
+ * 四块：
  *   1. 会话与访问 token：状态探测（/api/ping 三态）、token 掩码展示、复制、
  *      带 ?token= 的面板链接复制（E6-a 会话交接通道）、过期语义提示。
  *   2. Gateway 指令台：网关身份（socket/--manage/managed/pid/重启次数）、
  *      status/start/stop 指令（沿用 lifecycle 的能力闸，不重造规则）。
- *   3. 外观与节奏：主题三态、提示音、行情快速轮询（设置持久化 store）。
+ *   3. 网络诊断：内核拨测它自己出网要走的每条路径（net.check），回答「是网络还是
+ *      交易所」。读法全在 lib/net-check.ts —— 状态词 → 中文标签、未知状态原样回显、
+ *      空报告与「探测中」都不算通过。
+ *   4. 外观与节奏：主题三态、提示音、行情快速轮询（设置持久化 store）。
  *
  * 本页只做展示与指令；凭证与下单原语永不出内核。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion,
-  TerminalSquare, Play, Square, LogOut, Info, Server,
+  TerminalSquare, Play, Square, LogOut, Info, Server, Network, AlertTriangle,
 } from 'lucide-vue-next'
-import { api, getToken, loginAt, logout, ping, probeSession, type CommandDoc } from '@/api/client'
+import {
+  api, getToken, loginAt, logout, ping, probeSession,
+  type CommandDoc, type NetCheckDoc,
+} from '@/api/client'
 import { adjudicateSession } from '@/lib/session'
+import { readNetCheck } from '@/lib/net-check'
 import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
 import { useTheme, type ThemeMode } from '@/lib/theme'
@@ -30,6 +37,7 @@ import Button from '@/components/ui/button/Button.vue'
 import SegmentedControl from '@/components/ui/segmented/SegmentedControl.vue'
 import Switch from '@/components/ui/switch/Switch.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
+import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const store = usePanelStore()
@@ -132,6 +140,63 @@ async function send(cmd: 'start' | 'stop' | 'status'): Promise<void> {
     setTimeout(() => { cmdMsg.value = null }, 6000)
   }
 }
+
+// ── 网络诊断 ────────────────────────────────────────────────────────────────
+const netDoc = ref<NetCheckDoc | null>(null)
+/** 读法（标签、计数、空/探测中/失败三态）全部来自 lib/net-check.ts。 */
+const netView = computed(() => readNetCheck(netDoc.value))
+const netErr = ref<string | null>(null)
+const netBusy = ref(false)
+/** 探测在网关侧后台跑；这里只轮询缓存，直到 `probing` 落下。 */
+let netTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleNetPoll(): void {
+  if (netTimer !== null) {
+    clearTimeout(netTimer)
+    netTimer = null
+  }
+  if (netDoc.value?.probing) {
+    netTimer = setTimeout(() => void loadNet(), 1200)
+  }
+}
+
+async function loadNet(): Promise<void> {
+  try {
+    netDoc.value = await api.netCheck()
+    // 「面板调不到网关」与「内核没应答探测」是两件事，分开报：前者是这一行，
+    // 后者是 netView.hint（网关把内核的错误原样带在 error 里）。
+    netErr.value = null
+  } catch (e) {
+    netErr.value = e instanceof Error ? e.message : String(e)
+  }
+  scheduleNetPoll()
+}
+
+async function probeNet(): Promise<void> {
+  netBusy.value = true
+  try {
+    netDoc.value = await api.probeNetCheck()
+    netErr.value = null
+  } catch (e) {
+    netErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    netBusy.value = false
+    scheduleNetPoll()
+  }
+}
+
+onMounted(() => void loadNet())
+onUnmounted(() => {
+  if (netTimer !== null) clearTimeout(netTimer)
+})
+
+const netBadge = computed(() => {
+  switch (netView.value.tone) {
+    case 'up': return { text: '全部通过', variant: 'up' as const }
+    case 'down': return { text: '有失败', variant: 'down' as const }
+    default: return { text: '探测中', variant: 'default' as const }
+  }
+})
 
 // ── theme segmented ─────────────────────────────────────────────────────────
 const themeSegments = [
@@ -295,6 +360,83 @@ const themeValue = computed<ThemeMode>({
       </div>
       <div v-if="cmdMsg" class="mt-2.5 rounded-md border border-line bg-panel-2 px-3 py-2 text-[12px] text-muted-fg">
         {{ cmdMsg }}
+      </div>
+    </Card>
+
+    <!-- ── 网络诊断 ────────────────────────────────────────────────────── -->
+    <Card class="mt-3.5">
+      <CardHeader label="网络诊断">
+        <template #title>
+          <Network class="size-4 text-faint-fg" />
+        </template>
+        <template #action>
+          <Badge :variant="netBadge.variant" dot>{{ netBadge.text }}</Badge>
+        </template>
+      </CardHeader>
+
+      <p class="text-[11.5px] leading-snug text-muted-fg">
+        内核拨测它自己出网用到的每条路径（解析 → TCP → TLS → 一次廉价请求）。
+        读数是内核进程本身看到的网络，不是浏览器这一侧 —— 这正是「是网络还是交易所」的分界。
+      </p>
+
+      <div v-if="netView.rows.length" class="mt-3">
+        <div
+          v-for="(row, i) in netView.rows"
+          :key="row.name"
+          class="flex flex-wrap items-center gap-x-2 gap-y-1 py-2"
+          :class="i > 0 ? 'border-t border-line' : ''"
+        >
+          <Badge :variant="row.ok ? 'up' : 'down'" dot>{{ row.label }}</Badge>
+          <span class="text-[12.5px] font-semibold">{{ row.name }}</span>
+          <span class="min-w-0 truncate text-[11.5px] text-faint-fg" :title="row.target">{{ row.target }}</span>
+          <span class="ml-auto flex items-center gap-2 text-[11.5px] text-muted-fg">
+            <Tooltip v-if="row.fakeIp" content="解析到的地址全在代理的 fake-IP 段内：这是解析器的事实，不是这张路径的故障。">
+              <span class="text-faint-fg">fake-IP</span>
+            </Tooltip>
+            <span v-if="row.ms != null" class="num">{{ row.ms }} ms</span>
+          </span>
+          <p v-if="row.detail" class="w-full text-[11px] leading-snug text-faint-fg">{{ row.detail }}</p>
+        </div>
+      </div>
+
+      <EmptyState
+        v-else
+        compact
+        :loading="netView.tone === 'default'"
+        :text="netView.summary"
+        :hint="netView.emptyHint ?? undefined"
+      />
+
+      <div
+        class="mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-[11.5px] leading-snug"
+        :class="netView.tone === 'down' ? 'border-down/35 bg-down/8 text-down' : 'border-line bg-panel-2 text-muted-fg'"
+      >
+        <AlertTriangle v-if="netView.tone === 'down'" class="mt-px size-3.5 shrink-0" />
+        <Info v-else class="mt-px size-3.5 shrink-0 text-faint-fg" />
+        <span class="min-w-0">
+          <span class="font-semibold">{{ netView.title }}</span>
+          <span class="mx-1">·</span><span>{{ netView.summary }}</span><br />
+          <span>{{ netView.hint }}</span>
+        </span>
+      </div>
+
+      <p v-if="netView.proxyNote" class="mt-2 text-[11px] leading-snug text-faint-fg">{{ netView.proxyNote }}</p>
+      <p v-if="netErr" class="mt-2 text-[11px] leading-snug text-down">面板调用失败：{{ netErr }}</p>
+
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          :disabled="netBusy || netView.tone === 'default'"
+          title="让内核重新拨测一遍（结果在网关侧缓存 20 秒）"
+          @click="probeNet"
+        >
+          <RefreshCw class="size-3.5" />重新探测
+        </Button>
+        <span class="text-[11px] text-faint-fg">
+          <template v-if="netView.ageNote">结果时间：{{ netView.ageNote }}；探测在网关后台运行，页面自动刷新</template>
+          <template v-else>还没有探测结果</template>
+        </span>
       </div>
     </Card>
 

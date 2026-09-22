@@ -158,4 +158,36 @@ pub trait MarketPlugin: Send + Sync {
             active: false,
         }
     }
+
+    /// Probe the network paths this venue needs (`net.check` / `--net-check` /
+    /// `blitzkrieg net-check`): resolver, TCP, TLS and one cheap request per
+    /// endpoint, read-only and credential-free so it is safe to run while the
+    /// bot trades — which is exactly when an operator reaches for it.
+    ///
+    /// The default answer is an explicit `unsupported` item, never an empty
+    /// success: a plugin that has no probe must not be able to read as healthy.
+    fn net_check(&self) -> BoxFuture<'_, NetCheckReport> {
+        Box::pin(async move {
+            let proxy = crate::net::proxy_env_names();
+            let plugin = self.name().to_string();
+            let report = NetCheckReport {
+                ok: false,
+                ts_ms: crate::net::now_ms(),
+                hint_code: String::new(),
+                hint: String::new(),
+                proxy_env: Vec::new(),
+                items: vec![NetCheckItem {
+                    name: "venue".to_string(),
+                    target: plugin.clone(),
+                    ok: false,
+                    status: crate::net::UNSUPPORTED.to_string(),
+                    addrs: Vec::new(),
+                    fake_ip: false,
+                    ms: 0,
+                    detail: format!("market plugin `{plugin}` implements no network probe"),
+                }],
+            };
+            crate::net::finish(report, proxy)
+        })
+    }
 }

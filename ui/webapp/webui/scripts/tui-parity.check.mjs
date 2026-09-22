@@ -124,6 +124,20 @@ check('TUI flatten confirm dialog ↔ WebUI 强平按钮', () => {
   assert.ok(read('src', 'pages', 'HftPage.vue').includes('强平'), 'WebUI flatten gone')
 })
 
+check('TUI `n` 网络诊断浮层 ↔ WebUI 设置页网络诊断卡片', () => {
+  assert.ok(new RegExp('fn render_net_check\\(').test(ui), 'TUI network overlay gone')
+  assert.ok(app.includes('netcheck'), 'TUI command vocabulary lost the netcheck verb')
+  const settings = read('src', 'pages', 'SettingsPage.vue')
+  assert.ok(settings.includes('网络诊断'), 'WebUI network diagnosis card gone')
+  // Both faces print the same reading rules — a status the core adds must not be
+  // hidden on one side only (Rust `net_check::status_label` ↔ lib/net-check.ts).
+  assert.ok(
+    read('..', '..', 'ui_kit', 'src', 'core', 'net_check.rs').includes('fn status_label'),
+    'the shared Rust status labels are gone',
+  )
+  assert.ok(read('src', 'lib', 'net-check.ts').includes('netStatusLabel'), 'the WebUI labels are gone')
+})
+
 console.log('WebUI surplus — declared, each with where it lives off-panel')
 
 /** Every WebUI tab with no TUI twin must name its off-panel equivalent. */

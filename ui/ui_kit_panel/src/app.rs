@@ -1,6 +1,6 @@
 //! Panel application state — pure data + key handling. Rendering is in `ui.rs`.
 
-use blitzkrieg_ui_kit::core::types::EvolutionProposalView;
+use blitzkrieg_ui_kit::core::types::{EvolutionProposalView, NetCheckReportView};
 use blitzkrieg_ui_kit::UiSnapshot;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::Instant;
@@ -56,6 +56,9 @@ pub enum Action {
     /// Reload the plugin registry (used on entering the Plugins tab and after
     /// a toggling action).
     RefreshPlugins,
+    /// Run the network self-check (`net.check`) off the render loop — the probe
+    /// dials, so it answers in seconds, not milliseconds.
+    NetCheck,
 }
 
 /// How far the self-check has got. Advances as snapshots finally arrive with
@@ -72,13 +75,14 @@ pub enum CheckStage {
 }
 
 /// One bottom-bar hint a newcomer needs; once consumed, it stops rotating.
-pub const HINTS: [&str; 6] = [
+pub const HINTS: [&str; 7] = [
     "press : to type a command — try `status`",
     "1-5 switch pages (Overview/Positions/Trades/Plugins/Evolution)",
     "? for the full key & command help",
     "r refresh now · q quit",
     "start with --manage to enable start/stop commands",
     "Plugins: ↑/↓ move · Enter toggle (dangerous toggles ask y/n)",
+    "n network check — is it us or the venue?",
 ];
 
 pub struct App {
@@ -112,6 +116,18 @@ pub struct App {
     pub history_browse: Option<usize>,
     /// Help overlay is visible (`?` toggles).
     pub help_visible: bool,
+    /// The network self-check overlay (`n` toggles). Full-report, so it sits on
+    /// top and takes the keys while it is up.
+    pub net_visible: bool,
+    /// The last report the core answered with, kept so reopening `n` does not
+    /// dial again. `None` until the first probe lands.
+    pub net_report: Option<NetCheckReportView>,
+    /// Why the last probe could not be answered (core unreachable, IPC error).
+    /// Kept apart from a report that answered with broken paths.
+    pub net_error: Option<String>,
+    /// A probe is running right now (the overlay says so instead of showing an
+    /// empty table).
+    pub net_busy: bool,
     /// Non-empty while the core's kill switch is engaged — the body renders a
     /// full-screen red banner until `risk.resume` clears it.
     pub kill_banner: Option<String>,
@@ -142,6 +158,10 @@ impl App {
             history: Vec::new(),
             history_browse: None,
             help_visible: false,
+            net_visible: false,
+            net_report: None,
+            net_error: None,
+            net_busy: false,
             kill_banner: None,
         }
     }
@@ -190,6 +210,25 @@ impl App {
                     return Action::None;
                 }
             }
+        }
+        // The network self-check overlay sits on top of everything: while it is
+        // up only `n`/Esc (close), `r` (probe again) and `q` act. A full report
+        // the operator is reading must not be switched out from under them by a
+        // stray digit, and `n` is otherwise unused at this level.
+        if self.net_visible {
+            return match key.code {
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.net_visible = false;
+                    Action::None
+                }
+                KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    self.net_busy = true;
+                    Action::NetCheck
+                }
+                _ => Action::None,
+            };
         }
         // Command bar owns input while focused.
         if self.input_active {
@@ -271,10 +310,34 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
+            // Esc closes whichever overlay is up. The help panel has always
+            // advertised "Esc to close" in its title, so this is the key that
+            // makes that true as well as the one that closes the net-check.
+            KeyCode::Esc if self.help_visible || self.net_visible => {
+                self.help_visible = false;
+                self.net_visible = false;
+                Action::None
+            }
             KeyCode::Char('?') => {
                 self.help_visible = !self.help_visible;
                 self.hints_used[2] = true;
                 Action::None
+            }
+            // Network self-check: `n` opens the diagnosis overlay and probes on
+            // the first press; afterwards it shows the report already held, and
+            // `r` re-probes. The probe dials, so it never runs on the render
+            // loop — the action hands it to a worker thread.
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.net_visible = true;
+                self.hints_used[6] = true;
+                if self.net_busy {
+                    Action::None
+                } else if self.net_report.is_none() {
+                    self.net_busy = true;
+                    Action::NetCheck
+                } else {
+                    Action::None
+                }
             }
             KeyCode::Char(':') | KeyCode::Char('/') => {
                 self.input_active = true;
@@ -347,12 +410,13 @@ impl App {
 }
 
 /// The commands the bar completes against (longest-prefix, one candidate).
-pub const COMMANDS: [&str; 13] = [
+pub const COMMANDS: [&str; 14] = [
     "status",
     "positions",
     "strategy",
     "extension",
     "markets",
+    "netcheck",
     "help",
     "start BTC,ETH,SOL,XRP --dry-run",
     "stop",
