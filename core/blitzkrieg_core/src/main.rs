@@ -225,7 +225,7 @@ struct Args {
     se_min_obs_secs: Option<i64>,
     /// Shadow-evolution metrics window (secs), resolved through the same chain.
     se_eval_window_secs: Option<i64>,
-    /// Per-evolution step ceiling (Lock 1), resolved through the same chain and
+    /// Per-evolution step ceiling (Lock 2), resolved through the same chain and
     /// clamped to the built-in ceiling — a file may tighten it, never widen it.
     se_max_gradient: Option<Decimal>,
     se_variant_count: Option<usize>,
@@ -350,6 +350,11 @@ struct Args {
     /// report. Only settings resolved from above the compiled default appear, so
     /// "where did this number come from" is answerable from the log alone.
     config_report: Vec<String>,
+    /// The evolution engine's state at startup, printed unconditionally (#269):
+    /// "is the evaluator running?" must be answerable from the boot log of a run
+    /// that set no flags — it is the question the switch-conflict warning below
+    /// is about.
+    shadow_evolution_echo: Vec<String>,
 }
 
 /// Canonical socket name.
@@ -1172,7 +1177,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         env.num::<Decimal>("BK_SE_MIN_PROFIT_FACTOR"),
         file.shadow.min_profit_factor_improvement
     );
-    // Lock 1 is a safety lock, not a tuning surface: a file may tighten the
+    // Lock 2 is a safety lock, not a tuning surface: a file may tighten the
     // per-step gradient, never widen it. A value above the ceiling is refused
     // outright rather than clamped — silently ignoring a request to loosen a
     // safety lock is the kind of thing an operator must be told about.
@@ -1196,7 +1201,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         s => {
             eprintln!(
                 "blitzkrieg-core: ignoring max_gradient {}: must be > 0 and <= {} \
-                 (Lock 1 is not widenable)",
+                 (Lock 2 is not widenable)",
                 s.value,
                 blitzkrieg_core::config::MAX_GRADIENT_CEILING
             );
@@ -1438,6 +1443,41 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         exit_defaults.min_trail_pct,
     );
 
+    // ── #269: is the evolution engine running? ──────────────────────────────
+    // The one shadow-evolution setting whose origin was never printed, and the
+    // question the switch-conflict warning is about ("the file says off" is only
+    // a kill switch if you can see whether it took). Echoed unconditionally, like
+    // the breaker's budget and the freshness budget above: a boot log must answer
+    // it even for a run that configured nothing.
+    let se_engine = pick(
+        None::<bool>,
+        env.num::<bool>("BK_SHADOW_EVOLUTION"),
+        file.shadow.enabled,
+        false,
+    );
+    let shadow_evolution_enabled = shadow_evolution_flag || se_engine.value;
+    if se_engine.is_explicit() {
+        report.push(format!(
+            "shadow_evolution.enabled={} ({})",
+            se_engine.value,
+            se_engine.source.as_str()
+        ));
+    }
+    let shadow_evolution_echo = vec![format!(
+        "shadow evolution: evaluator {} at startup ({}); the persisted runtime switch in \
+         state.json wins over it, and any disagreement is reported below",
+        if shadow_evolution_enabled {
+            "ON"
+        } else {
+            "OFF"
+        },
+        if shadow_evolution_flag {
+            "from the --shadow-evolution flag"
+        } else {
+            se_engine.source.as_str()
+        },
+    )];
+
     Args {
         socket,
         mode,
@@ -1489,14 +1529,9 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         allow_shared_data,
         market_plugin,
         discovery,
-        shadow_evolution: shadow_evolution_flag
-            || pick(
-                None::<bool>,
-                env.num::<bool>("BK_SHADOW_EVOLUTION"),
-                file.shadow.enabled,
-                false,
-            )
-            .value,
+        // Resolved once, above, so the boot echo cannot disagree with what the
+        // service is actually handed.
+        shadow_evolution: shadow_evolution_enabled,
         assets,
         se_min_samples,
         se_cooldown_secs,
@@ -1511,6 +1546,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         se_cycle_secs,
         se_ttl_secs,
         se_deep_dims,
+        shadow_evolution_echo,
         strategy_limits,
         enable_strategy,
         disable_strategy,
@@ -1844,6 +1880,12 @@ async fn main() -> anyhow::Result<()> {
     // reason: "how long after the feed goes quiet does this bot stop trading?"
     // must be answerable from the boot log of a run that set no flags.
     for line in &args.orderbook_stale_echo {
+        eprintln!("blitzkrieg-core: {line}");
+    }
+    // #269: same reason again — "is the evolution evaluator running?" is the
+    // question an incident responder asks first, and it used to be answerable
+    // only from the IPC status, never from the boot log.
+    for line in &args.shadow_evolution_echo {
         eprintln!("blitzkrieg-core: {line}");
     }
 

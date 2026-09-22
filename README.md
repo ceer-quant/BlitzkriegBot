@@ -524,6 +524,36 @@ cd ui/webapp/webui && npm run check:all
 
 ---
 
-## 9. 许可
+## 9. 策略状态与进入条件
+
+内核**出厂零策略、零默认启用**：策略来自策略目录下的 cdylib，全部以「关闭」启动；真正决定
+启用与否的只有操作员的持久意图 `data/strategy-state.json` 与显式旗标
+`--enable-strategy <name>` / `--disable-strategy <name>`（显式关闭优先）。这条规则的原文在
+`user_layer/configs/default.toml` 顶部（`[strategy]` 段已于 PR-B 移除），本节是**唯一的
+「某策略何时才允许进入默认启用清单」的记录处**——`dev-docs/` 不入库，不能作为引用来源。
+
+### pair_arb — 实验性，禁止上线（`special/no-live`）
+
+`pair_arb`（完整集配对套利）**不在任何默认启用清单里**，并且**禁止实盘启用**，直到它满足
+下面的进入条件：
+
+> **冻结语料 holdout：PF ≥ 1.5 且净利润 > 0，并在两个互不重叠的窗口上同时成立。**
+
+当前实测结论是**不满足**：最佳配置的 PF 仅 **0.659**（胜率可达 85%，但逆向选择吃掉全部价差），
+详见 `user_layer/strategies/pair_arb/pair_arb_strategy.rs` 文件头的四行配置表与「入场规则」
+一节（`1 − (up_bid + down_bid) ≥ min_edge`）。该策略作为**研究工具**保留：会注册、可被
+`--enable-strategy pair_arb` 显式打开，但永不自动启用。
+
+两条配套约束：
+
+- **#262 的 WR/PF 口径（caliber）不包含 pair_arb。** 度量进化目标时把 pair_arb 排除在外，
+  理由与进入条件相同：它没有可比的 PF 基线，纳入只会污染口径。
+- **缺口（只记录，不补）：** 仓库里**没有**「默认启用清单」的自动核对门禁——即没有脚本会在
+  某个策略被写进默认启用列表时报警。当前靠代码评审 + 本节的人工核对，`data/strategy-state.json`
+  仍是唯一权威。若将来新增此类门禁，本节的条件应成为它的断言来源。
+
+---
+
+## 10. 许可
 
 [MIT](./LICENSE)。版权（c）2026 BlitzkriegBot contributors (ceer-quant)。

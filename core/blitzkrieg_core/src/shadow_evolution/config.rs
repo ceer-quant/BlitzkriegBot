@@ -121,6 +121,56 @@ impl Default for ShadowEvolutionConfig {
     }
 }
 
+/// Which switch a config-file / runtime-state disagreement is about (#269).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SwitchName {
+    /// `enabled` — the evaluator switch.
+    Engine,
+    /// `auto_evolve` — the unattended-adoption switch.
+    AutoEvolve,
+}
+
+/// One switch the config FILE and the persisted runtime state disagree about
+/// (#269).
+///
+/// The runtime switch wins by design (an operator's last click must not be
+/// undone by a deploy), so a disagreement is not an error — but it is exactly
+/// the state in which "the file says off" is NOT a kill switch, and an incident
+/// responder reading the file deserves to be told. The log line alone was not
+/// enough: this struct is what the panel renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchConflict {
+    pub switch: SwitchName,
+    /// What the shipped/edited file says.
+    pub file_value: bool,
+    /// What `state.json` says — the value actually in force.
+    pub runtime_value: bool,
+}
+
+/// A stable identifier of the EXIT LADDER a replay was judged under (#269).
+///
+/// A promotion says "the variant is better", and that claim is only meaningful
+/// relative to the exit policy the twin replayed: the same parameters measured
+/// under a different ladder are a different experiment. Recording the ladder's
+/// identity next to the promotion is what makes two records comparable or
+/// provably not comparable.
+///
+/// The identity is a 64-bit FNV-1a hash of the ladder's `Debug` rendering:
+/// complete (every field is in it), stable within a build, and deliberately NOT
+/// a hand-maintained version number — any change to any exit knob, or to the
+/// ladder's field list, moves the value on its own. Recompute with
+/// `exit_caliber(&ExitConfig::default())` for the shipped ladder.
+pub fn exit_caliber(exit: &ExitConfig) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in format!("{exit:?}").as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("exit-fnv1a64:{hash:016x}")
+}
+
 impl ShadowEvolutionConfig {
     /// Audit path for one strategy: `<audit_dir>/<strategy>.jsonl`.
     ///
@@ -192,5 +242,26 @@ mod tests {
             "data/evolution/.._evil.jsonl"
         );
         assert_ne!(cfg.audit_path_for("a"), cfg.audit_path_for("b"));
+    }
+
+    /// #269: the promotion caliber must identify the LADDER, not the run — two
+    /// records measured under the same exit policy must carry the same value,
+    /// and moving any one exit knob must move it.
+    #[test]
+    fn exit_caliber_is_stable_and_moves_with_the_ladder() {
+        let base = ExitConfig::default();
+        let caliber = exit_caliber(&base);
+        assert_eq!(caliber, exit_caliber(&ExitConfig::default()), "same ladder");
+        assert!(
+            caliber.starts_with("exit-fnv1a64:"),
+            "readable prefix, got {caliber}"
+        );
+        let mut moved = ExitConfig::default();
+        moved.stop_loss_pct += rust_decimal_macros::dec!(1);
+        assert_ne!(
+            exit_caliber(&moved),
+            caliber,
+            "a different ladder must not share an identity"
+        );
     }
 }

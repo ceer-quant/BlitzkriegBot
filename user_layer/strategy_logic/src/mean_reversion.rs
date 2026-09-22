@@ -74,12 +74,41 @@ use std::collections::{HashMap, HashSet};
 /// win (14/35 -> 5/8); the corpus ends at +$0.82 with a $7.16 drawdown.
 ///
 /// Read that honestly: the gate mostly means "trade much less", and it is not a
-/// moneymaker — it cuts the loss tail. The threshold is also not robust: the
-/// sweep is monotone (net PnL rises to -30% and falls again from -35%), and the
-/// value sits at the edge of the net-positive band, so a few points tighter
-/// flips the sign. It is the LOOSEST setting that is still net-positive with at
-/// least 10 trades (600 s / -20% is +$1.16 on 4). `trend_window_sec = 0` is the
-/// pre-gate behaviour exactly.
+/// moneymaker — it cuts the loss tail. It is kept ON because two frozen-corpus
+/// replays through THIS engine, on windows that share no events, agree on both
+/// the direction and the ordering (#271):
+///
+/// | window (UTC)                     | gate | trades | net     | PF   | per trade | max DD |
+/// |:---------------------------------|:-----|-------:|--------:|:-----|----------:|-------:|
+/// | 09-19T06:29:40 → 09-20T06:30:42  | ON   |     48 | -$11.16 | 0.50 |   -$0.233 |  11.16 |
+/// |                                  | OFF  |    240 | -$70.46 | 0.34 |   -$0.294 |  70.61 |
+/// | 09-20T18:55:54 → 09-21T17:35:50  | ON   |     30 |  -$4.82 | 0.63 |   -$0.161 |   6.70 |
+/// |                                  | OFF  |    131 | -$29.14 | 0.46 |   -$0.222 |  34.38 |
+///
+/// The first window is the corpus the shipped default was chosen on; the second
+/// is a HOLDOUT — it starts 12h25m after the first ends, shares no events with
+/// it, and contains nothing from the 2026-09-22T04:49Z outbound cut-off (it ends
+/// 11h before that). On both, the gate cuts the net loss by ~83-84% and the
+/// drawdown by 5-6x while trading 4-5x less, and `per trade` improves with it.
+///
+/// What the holdout does NOT show: a profit. Every arm above is net-negative, so
+/// the gate is a loss limiter, not a fix — #262 owns the question of whether this
+/// strategy deserves a live slot at all. And the sample is small on purpose (the
+/// gate's whole job is to refuse entries): 30 trades is a direction, not a
+/// precise estimate. `trend_window_sec = 0` restores the pre-gate behaviour
+/// exactly, and both knobs stay overridable per run through
+/// `--backtest-knob mean_reversion:trend_window_sec=<n>` /
+/// `:trend_drop_pct=<pct>` (that is how the OFF arm above was produced, and the
+/// kernel echoes the override as `counterfactual mean_reversion.trend_window_sec
+/// = 0`).
+///
+/// Reports (verbatim replay output, committed — one file per table row):
+/// `docs/reports/data/mean-reversion-gate/defaultpick-gate-{on,off}-20260919T062940Z.json`
+/// and `.../holdout-gate-{on,off}-20260920T185554Z.json`. To regenerate any of
+/// them, concatenate the two `data/archive/events.*.jsonl` files covering that
+/// window and replay with `--engine --no-config --no-event-archive
+/// --no-strategy-state --no-trade-log`, `--enable-strategy mean_reversion` and
+/// every other strategy disabled; the OFF rows add the knob above.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeanReversionConfig {
     /// Memory window (sec) the drop is measured over.

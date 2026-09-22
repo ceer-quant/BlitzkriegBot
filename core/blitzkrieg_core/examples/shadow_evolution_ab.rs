@@ -660,7 +660,7 @@ fn main() {
     let mb = metrics(&rows_b);
 
     // ── Safety-lock probe (group B's manager): a +20% manual apply must be
-    //    REJECTED by Lock 1 (gradient ±5%). This is the demonstrable proof that
+    //    REJECTED by Lock 2 (gradient ±5%). This is the demonstrable proof that
     //    the lock is live regardless of whether natural proposals trip it.
     let before_cap = core_b
         .shadow_evolution()
@@ -673,7 +673,7 @@ fn main() {
     far.set_strategy(STRATEGY, far_p);
     let lock_probe = match core_b.shadow_evolution_apply(far, 1_700_000_999_999) {
         Ok(()) => "ACCEPTED (UNEXPECTED — lock failed)".to_string(),
-        Err(e) => format!("REJECTED by Lock 1: {e}"),
+        Err(e) => format!("REJECTED by Lock 2: {e}"),
     };
 
     // ── Raw trades CSV.
