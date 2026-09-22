@@ -74,6 +74,33 @@ impl std::fmt::Display for ProposalState {
     }
 }
 
+/// Why a proposal reached the state it is in — carried on the record itself so a
+/// refusal can be explained after the fact (#251).
+///
+/// Structured rather than a free-text note: a UI says it in its own language
+/// ("梯度锁不通过") while the numbers inside stay verbatim, and a machine reader
+/// can branch on `kind` without parsing prose. The audit log keeps its own copy
+/// of the same refusal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum DecisionReason {
+    /// The acceptance re-ran the guard chain and a lock no longer held — the
+    /// parameters in force moved while the proposal was held. `guard` names the
+    /// lock that failed (declared / domain / gradient / immutable), `detail` is
+    /// the guard's own message, numbers included.
+    GuardFailed { guard: String, detail: String },
+    /// A refusal on purpose: the operator over IPC, or the auto switch closing
+    /// out a proposal whose premises moved.
+    Rejected,
+    /// The TTL ran out with no decision.
+    Expired,
+    /// A fresher proposal for the same strategy replaced it.
+    Superseded {
+        #[serde(rename = "byId")]
+        by_id: String,
+    },
+}
+
 /// The comparison block: one side's economics over the evaluation window.
 /// Same figures the offline sweep reports, computed from the twin ledger.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -157,6 +184,12 @@ pub struct EvolutionProposal {
     pub decided_by: Option<DecidedBy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decided_at_ms: Option<i64>,
+    /// Why it ended where it did. Absent while the proposal is still decidable,
+    /// and on an adoption (the comparison block is the reason). A refusal without
+    /// this field is what made an auto-rejected proposal look like a glitch: the
+    /// state said "rejected" and nothing said why (#251).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decided_reason: Option<DecisionReason>,
     /// Which evolution cycle produced it (0 = continuous windowing).
     pub cycle_seq: u64,
 }
@@ -374,6 +407,7 @@ impl ProposalStore {
             if p.is_decidable() && p.expires_at_ms < now_ms {
                 p.state = ProposalState::Expired;
                 p.decided_at_ms = Some(now_ms);
+                p.decided_reason = Some(DecisionReason::Expired);
                 stale.push(p.clone());
             }
         }
@@ -381,6 +415,26 @@ impl ProposalStore {
             self.append_line(&self.proposals_path(), p);
         }
         stale.len()
+    }
+
+    /// How many of one strategy's proposals ended adopted, and how many were
+    /// refused (`Rejected`). Expired and superseded are neither — they are
+    /// visible in the ledger, but nobody said no.
+    ///
+    /// This is the folded view, which is exactly what a reader gets back, so a
+    /// counter seeded from it cannot disagree with the ledger a UI renders —
+    /// which is what the in-memory counters did across a restart (#251).
+    pub fn terminal_counts(&self, strategy: &str) -> (u64, u64) {
+        let mut adopted = 0;
+        let mut rejected = 0;
+        for p in self.records.values().filter(|p| p.strategy == strategy) {
+            match p.state {
+                ProposalState::Accepted => adopted += 1,
+                ProposalState::Rejected => rejected += 1,
+                _ => {}
+            }
+        }
+        (adopted, rejected)
     }
 
     /// Record an adoption: the promotion the rollback surface restores.
@@ -551,6 +605,7 @@ mod tests {
             state,
             decided_by: None,
             decided_at_ms: None,
+            decided_reason: None,
             cycle_seq: 0,
         }
     }

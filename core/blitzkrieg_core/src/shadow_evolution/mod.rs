@@ -93,6 +93,15 @@ use std::sync::Arc;
 use variants::{VariantSet, build_deep_variants, build_variants};
 
 /// Result of one evaluation/action, mapped to events by the caller.
+///
+/// `Proposed` carries a whole proposal record (#251 added the decision reason to
+/// it), which is what clippy's `large_enum_variant` points at. Left inline on
+/// purpose: one of these is built per strategy per pass and consumed
+/// immediately, never held in a large collection, and `EvolutionProposal` is
+/// also carried inline by `DecisionResult` and the proposal store — boxing it
+/// here alone would make the same record's API inconsistent to save a copy that
+/// nothing measures.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum EvolutionOutcome {
     Signal(EvolveSignal),
@@ -149,7 +158,13 @@ struct Unit {
     cell: Arc<arc_swap::ArcSwap<StrategyParams>>,
     /// This strategy's own cooldown clock.
     last_evolution_ms: i64,
+    /// Adoptions that moved this strategy's parameters (evaluator auto-adoptions
+    /// and accepted proposals alike).
     evolution_count: u64,
+    /// Refusals recorded for this strategy: the evaluator's guard refusals plus
+    /// proposals closed out as rejected. Both are counted so the number a
+    /// script reads here equals the 台账's 已拒绝 rows (#251) — the two used to
+    /// disagree, and a disagreement about history is worse than no number.
     rejected_count: u64,
     /// Parameters in force before the most recent applied evolution (rollback).
     previous: Option<StrategyParams>,
@@ -343,8 +358,30 @@ impl ShadowEvolution {
             }
             let params = StrategyParams::from_knobs(&specs);
             let cell = self.registry.publish(s.name(), params);
-            let (last_evolution_ms, evolution_count, rejected_count, previous) =
-                carried.remove(s.name()).unwrap_or((0, 0, 0, None));
+            let carried_unit = carried.remove(s.name());
+            let (last_evolution_ms, evolution_count, rejected_count, previous) = match carried_unit
+            {
+                Some(c) => c,
+                // #251: a unit born now (process start, or a strategy that joined
+                // later) takes its counters from the folded ledger instead of
+                // zero. The counters used to be memory-only, so every restart
+                // showed "已采纳 0 / 已拒绝 0" next to a ledger listing adoptions
+                // and refusals — two readings of the same history that could not
+                // both be right. Seeding from the ledger also keeps the sweep
+                // offset continuous across a restart.
+                None => {
+                    let (adopted, refused) = self.proposal_store.terminal_counts(s.name());
+                    if adopted > 0 || refused > 0 {
+                        tracing::debug!(
+                            strategy = s.name(),
+                            adopted,
+                            refused,
+                            "seeded the evolution counters from the proposal ledger"
+                        );
+                    }
+                    (0, adopted, refused, None)
+                }
+            };
             self.units.push(Unit {
                 strategy: s.name().to_string(),
                 specs,
@@ -644,6 +681,7 @@ impl ShadowEvolution {
         let mut rejection: Option<(EvolveSignal, String)> = None;
         let mut applied: Option<EvolveSignal> = None;
         let mut held: Option<EvolutionProposal> = None;
+        let mut adopted: Option<EvolutionProposal> = None;
         {
             let u = &mut self.units[i];
             // Baseline metrics are computed here and hoisted so a HELD proposal
@@ -688,6 +726,14 @@ impl ShadowEvolution {
                     u.cell.store(Arc::new(new_params.clone()));
                     u.last_evolution_ms = now_ms;
                     u.evolution_count += 1;
+                    // The comparison block is measured BEFORE the re-anchor
+                    // clears the twin's history, and the adoption is recorded as
+                    // a decided proposal (#251): an unattended adoption is the
+                    // one thing an operator most needs to see, and it used to
+                    // leave no ledger row at all — the panel showed an empty
+                    // 台账 while the parameters had in fact moved.
+                    let variant_metrics =
+                        u.set.variants[variant_index].metrics(cfg.evaluation_window_secs, now_ms);
                     u.scaffold(&cfg, now_ms);
                     // The adoption is durable: a rollback must be able to undo
                     // it after a restart, so the promotion log gets the record.
@@ -699,6 +745,29 @@ impl ShadowEvolution {
                         DecidedBy::Auto,
                         now_ms,
                     );
+                    adopted = Some(EvolutionProposal {
+                        // A distinct prefix: this row is not a held proposal that
+                        // was decided, and it must never fold into one that is
+                        // (a same-millisecond id would silently replace a row).
+                        id: format!("auto-{now_ms}-{}", u.strategy),
+                        strategy: u.strategy.clone(),
+                        dims: moved_dims(&old, &new_params),
+                        from_params: old,
+                        to_params: new_params,
+                        baseline: proposal::TradeMetrics::from_window(&baseline),
+                        variant: proposal::TradeMetrics::from_window(&variant_metrics),
+                        reason: signal.reason,
+                        confidence: signal.confidence,
+                        sample_count: signal.sample_count,
+                        created_at_ms: now_ms,
+                        expires_at_ms: now_ms,
+                        state: proposal::ProposalState::Accepted,
+                        decided_by: Some(DecidedBy::Auto),
+                        decided_at_ms: Some(now_ms),
+                        // An adoption's reason is the comparison block itself.
+                        decided_reason: None,
+                        cycle_seq: self.cycle_seq,
+                    });
                     applied = Some(signal);
                 }
                 Ok(()) => {
@@ -725,6 +794,7 @@ impl ShadowEvolution {
                         state: proposal::ProposalState::Proposed,
                         decided_by: None,
                         decided_at_ms: None,
+                        decided_reason: None,
                         cycle_seq: self.cycle_seq,
                     });
                 }
@@ -740,6 +810,11 @@ impl ShadowEvolution {
             outcome = Some(EvolutionOutcome::Rejected { signal, reason });
         } else if let Some(signal) = applied {
             self.audit.record_applied(&signal);
+            // #251: the ledger row for the unattended adoption, written outside
+            // the unit borrow like every other store write here.
+            if let Some(p) = adopted {
+                self.proposal_store.put(p);
+            }
             outcome = Some(EvolutionOutcome::Applied(signal));
         } else if let Some(proposal) = held {
             // One pending proposal per strategy: a fresher qualifying signal
@@ -753,6 +828,9 @@ impl ShadowEvolution {
                 Some(mut prev) => {
                     prev.state = proposal::ProposalState::Superseded;
                     prev.decided_at_ms = Some(now_ms);
+                    prev.decided_reason = Some(proposal::DecisionReason::Superseded {
+                        by_id: proposal.id.clone(),
+                    });
                     self.proposal_store.put(prev);
                     self.proposal_store.put(proposal.clone());
                     outcome = Some(EvolutionOutcome::Proposed(proposal));
@@ -925,21 +1003,61 @@ impl ShadowEvolution {
                         format!("strategy {} is no longer evolvable", proposal.strategy)
                     })?;
                 let old: StrategyParams = (**u.cell.load()).clone();
+                // Which lock refused is part of what an operator reads, so the
+                // chain names it instead of collapsing four locks into one
+                // "guards failed" (#251).
                 let checked = guard::validate_declared(&proposal.to_params, &u.specs)
-                    .and_then(|_| guard::validate_domain(&proposal.to_params, &u.specs))
+                    .map_err(|e| ("declared", e))
+                    .and_then(|_| {
+                        guard::validate_domain(&proposal.to_params, &u.specs)
+                            .map_err(|e| ("domain", e))
+                    })
                     .and_then(|_| {
                         guard::validate_gradient(&old, &proposal.to_params, cfg.max_gradient)
+                            .map_err(|e| ("gradient", e))
                     })
-                    .and_then(|_| guard::validate_immutable(&cfg.risk));
-                if let Err(e) = checked {
+                    .and_then(|_| {
+                        guard::validate_immutable(&cfg.risk).map_err(|e| ("immutable", e))
+                    });
+                if let Err((lock, e)) = checked {
                     // The world moved while the proposal was held (the strategy
                     // evolved again, or the operator edited knobs): the stale
-                    // proposal is refused explicitly and closed out.
+                    // proposal is refused explicitly and closed out — and the lock
+                    // that refused it is recorded on the record and in the audit
+                    // log, because this path used to leave no reason anywhere and
+                    // an auto-refusal then read as a glitch (#251).
+                    let detail = e.to_string();
                     proposal.state = ProposalState::Rejected;
                     proposal.decided_by = Some(by);
                     proposal.decided_at_ms = Some(now_ms);
+                    proposal.decided_reason = Some(proposal::DecisionReason::GuardFailed {
+                        guard: lock.to_string(),
+                        detail: detail.clone(),
+                    });
+                    // The ledger row this writes says 已拒绝, so the counter has to
+                    // say the same thing (#251).
+                    u.rejected_count += 1;
+                    self.audit.record_rejection(
+                        &EvolveSignal::new(
+                            proposal.id.clone(),
+                            now_ms,
+                            proposal.strategy.clone(),
+                            wrap_params(&proposal.strategy, proposal.from_params.clone()),
+                            wrap_params(&proposal.strategy, proposal.to_params.clone()),
+                            proposal.reason,
+                            proposal.confidence,
+                            proposal.sample_count,
+                            proposal.variant.win_rate - proposal.baseline.win_rate,
+                            "proposal".into(),
+                        ),
+                        format!("{lock} lock no longer holds: {detail}"),
+                        if lock == "gradient" { "failed" } else { "n/a" },
+                        if lock == "immutable" { "failed" } else { "n/a" },
+                    );
                     self.proposal_store.put(proposal.clone());
-                    return Err(format!("proposal {id} no longer passes the guards: {e}"));
+                    return Err(format!(
+                        "proposal {id} no longer passes the {lock} lock: {detail}"
+                    ));
                 }
                 u.previous = Some(old);
                 u.cell.store(Arc::new(proposal.to_params.clone()));
@@ -969,6 +1087,14 @@ impl ShadowEvolution {
                 proposal.state = ProposalState::Rejected;
                 proposal.decided_by = Some(by);
                 proposal.decided_at_ms = Some(now_ms);
+                proposal.decided_reason = Some(proposal::DecisionReason::Rejected);
+                if let Some(u) = self
+                    .units
+                    .iter_mut()
+                    .find(|u| u.strategy == proposal.strategy)
+                {
+                    u.rejected_count += 1;
+                }
                 self.audit.record_rejection(
                     &EvolveSignal::new(
                         proposal.id.clone(),
@@ -2094,6 +2220,153 @@ mod tests {
             .unwrap();
         assert_eq!(decided.state, ProposalState::Rejected);
         assert_eq!(decided.decided_by, Some(DecidedBy::Auto));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #251: an adoption refused at decision time used to close the proposal
+    /// with no reason anywhere — the panel said 已拒绝 and the operator could not
+    /// tell "I said no" from "the gradient lock refused it". The lock that
+    /// refused it is now on the row, in the audit log, and in the counter the
+    /// IPC surface reports; a restart reads all of it back from the ledger.
+    #[test]
+    fn a_refused_adoption_records_the_lock_that_refused_it() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let cfg = fast_cfg(false, "reftreason");
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = ShadowEvolution::new(cfg, &refs);
+        m.enable(0);
+        m.on_round(&[market()], &[], 0);
+        drive_wins(&mut m, "alpha", 2, 10_000);
+        let held = match &m.evaluate(100_000)[0] {
+            EvolutionOutcome::Proposed(p) => p.clone(),
+            other => panic!("expected a held proposal, got {other:?}"),
+        };
+        assert_eq!(
+            held.decided_reason, None,
+            "a held proposal has no decision, so no reason"
+        );
+
+        // The operator moves the knob while the proposal is held, so its target
+        // is more than one gradient step from the parameters now in force. The
+        // guards re-run against THOSE, not against the ones it was held on.
+        let mut p = StrategyParams::new();
+        p.set("cap", dec!(0.41));
+        m.set_params("alpha", p, 150_000).unwrap();
+
+        let err = m
+            .decide_as(&held.id, Decision::Accept, 200_000, DecidedBy::Auto)
+            .expect_err("a stale target must not be adopted");
+        assert!(
+            err.contains("gradient"),
+            "the refusal names the lock: {err}"
+        );
+
+        let stored = m
+            .all_proposals(10)
+            .into_iter()
+            .find(|p| p.id == held.id)
+            .unwrap();
+        assert_eq!(stored.state, ProposalState::Rejected);
+        assert_eq!(stored.decided_by, Some(DecidedBy::Auto));
+        match stored
+            .decided_reason
+            .as_ref()
+            .expect("a refusal must say why")
+        {
+            proposal::DecisionReason::GuardFailed { guard, detail } => {
+                assert_eq!(guard, "gradient");
+                assert!(!detail.is_empty(), "the guard's own words are kept");
+            }
+            other => panic!("expected a guard refusal, got {other:?}"),
+        }
+        // The counter the IPC surface reports counts the same refusal the ledger
+        // row records: the two readings of this history must not disagree.
+        assert_eq!(m.rejected_count("alpha"), 1);
+        assert_eq!(m.evolution_count("alpha"), 0);
+        let audit = std::fs::read_to_string(dir.join("alpha.jsonl")).unwrap();
+        assert!(
+            audit.contains("gradient lock no longer holds"),
+            "the audit file carries the same refusal: {audit}"
+        );
+
+        // A restart folds the ledger back and reports the same numbers — the
+        // counters used to reset to 0/0 next to a ledger listing a refusal.
+        let m2 = ShadowEvolution::new(fast_cfg(false, "reftreason"), &refs);
+        let after = m2
+            .all_proposals(10)
+            .into_iter()
+            .find(|p| p.id == held.id)
+            .unwrap();
+        assert_eq!(
+            after.decided_reason, stored.decided_reason,
+            "the reason survives the restart"
+        );
+        assert_eq!(m2.rejected_count("alpha"), 1);
+        assert_eq!(m2.evolution_count("alpha"), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #251: an unattended adoption moved the parameters and left NO ledger row,
+    /// so the panel's 台账 was empty while the strategy was in fact running a new
+    /// version. It is recorded now, as an accepted proposal decided by `auto` —
+    /// and the counters, the ledger and the promotion log all agree about it.
+    #[test]
+    fn an_unattended_adoption_is_a_ledger_row_that_survives_a_restart() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let cfg = fast_cfg(true, "autoledger");
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = ShadowEvolution::new(cfg, &refs);
+        // `enable` re-anchors the twins on the clock the test drives, so the
+        // synthetic `now` below is not in their past (#250 made the birth stamp
+        // real, and a variant born "later" than the tick never qualifies).
+        m.enable(0);
+        m.set_auto_evolve(true);
+        m.on_round(&[market()], &[], 0);
+        drive_wins(&mut m, "alpha", 2, 10_000);
+        let outcomes = m.evaluate(100_000);
+        assert!(
+            outcomes
+                .iter()
+                .any(|o| matches!(o, EvolutionOutcome::Applied(_))),
+            "auto mode adopts: {outcomes:?}"
+        );
+
+        let row = m
+            .all_proposals(10)
+            .into_iter()
+            .find(|p| p.decided_by == Some(DecidedBy::Auto))
+            .expect("an unattended adoption leaves a ledger row");
+        assert_eq!(row.state, ProposalState::Accepted);
+        assert!(
+            row.id.starts_with("auto-"),
+            "and is never mistakable for a decided held proposal: {}",
+            row.id
+        );
+        assert_eq!(
+            row.decided_reason, None,
+            "an adoption's reason is the comparison block it carries, not a refusal"
+        );
+        assert_ne!(
+            row.from_params.get("cap"),
+            row.to_params.get("cap"),
+            "the row records a real move"
+        );
+        assert_eq!(m.evolution_count("alpha"), 1);
+
+        let m2 = ShadowEvolution::new(fast_cfg(true, "autoledger"), &refs);
+        assert!(
+            m2.all_proposals(10).iter().any(|p| p.id == row.id),
+            "the adoption survives the restart"
+        );
+        assert_eq!(
+            m2.evolution_count("alpha"),
+            1,
+            "and the counter is seeded from the ledger instead of restarting at 0"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

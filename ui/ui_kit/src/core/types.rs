@@ -531,6 +531,39 @@ pub struct KnobMove {
     pub to: String,
 }
 
+/// Why a proposal ended the way it did (#251). Mirrors the core's
+/// `DecisionReason`; `None` for rows decided before that field existed.
+///
+/// Without it a decided row said only *that* it was decided: "I said no", "the
+/// guard chain refused it at decision time" and "nobody looked at it for 7
+/// days" all rendered as the same word, and they call for different actions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum DecisionReasonView {
+    /// The adoption stopped on one of the four guard locks, re-run against the
+    /// parameters in force at the moment of the decision.
+    GuardFailed { guard: String, detail: String },
+    /// A human, or the auto switch, said no.
+    Rejected,
+    /// The TTL ran out with nobody deciding.
+    Expired,
+    /// A newer proposal for the same strategy replaced it.
+    Superseded {
+        #[serde(rename = "byId")]
+        by_id: String,
+    },
+}
+
+impl DecisionReasonView {
+    /// The guard lock that refused an adoption, when that is why it ended.
+    pub fn failed_guard(&self) -> Option<&str> {
+        match self {
+            DecisionReasonView::GuardFailed { guard, .. } => Some(guard.as_str()),
+            _ => None,
+        }
+    }
+}
+
 /// One held/historical evolution proposal, one-to-one with the core's
 /// `EvolutionProposal` wire form. `from_params`/`to_params` are knob-bags
 /// (string decimals), folded into an ordered knob-move list for rendering.
@@ -570,6 +603,10 @@ pub struct EvolutionProposalView {
     pub decided_by: Option<String>,
     #[serde(default)]
     pub decided_at_ms: Option<i64>,
+    /// Why it ended this way (#251). Absent on rows written before the field
+    /// existed, and `null` while a proposal is still pending.
+    #[serde(default)]
+    pub decided_reason: Option<DecisionReasonView>,
     #[serde(default)]
     pub cycle_seq: u64,
 }
