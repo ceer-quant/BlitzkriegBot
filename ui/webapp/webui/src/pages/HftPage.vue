@@ -6,7 +6,7 @@
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
-import { Activity, AlertTriangle, Play, Square, Bell, BellOff, Search, X, TrendingUp, TrendingDown, Clock, Filter, Info } from 'lucide-vue-next'
+import { Activity, Play, Square, Bell, BellOff, Search, X, TrendingUp, TrendingDown, Clock, Filter, Info } from 'lucide-vue-next'
 import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type BookSide, type BookLevel } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
@@ -28,6 +28,7 @@ import Button from '@/components/ui/button/Button.vue'
 import SegmentedControl from '@/components/ui/segmented/SegmentedControl.vue'
 import StatRow from '@/components/ui/stat/StatRow.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
+import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import EquityCurve from '@/components/charts/EquityCurve.vue'
 import BookDepth from '@/components/charts/BookDepth.vue'
@@ -543,17 +544,11 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         is a core that crashed, and the operator is the one who decides whether
         that is a fluke or a pattern.
       -->
-      <div
+      <AlertBanner
         v-if="exit"
-        class="mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-[11.5px] leading-snug"
-        :class="exit.kind === 'crash'
-          ? 'border-down/35 bg-down/8 text-down'
-          : 'border-line bg-panel-2 text-muted-fg'"
-      >
-        <AlertTriangle v-if="exit.kind === 'crash'" class="mt-px size-3.5 shrink-0" />
-        <Info v-else class="mt-px size-3.5 shrink-0 text-faint-fg" />
-        <span>{{ exitText }}</span>
-      </div>
+        class="mt-3"
+        :tone="exit.kind === 'crash' ? 'error' : 'info'"
+      >{{ exitText }}</AlertBanner>
 
       <Transition name="fade">
         <div v-if="cmdMsg" class="mt-3 rounded-md border border-line bg-panel-2 px-3 py-2 text-[12px] text-muted-fg">
@@ -569,19 +564,18 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
       countdown keeps running off the local clock. Stated above the prices rather
       than inside them so it is read before the numbers are.
     -->
-    <div
+    <!--
+      A stale feed is an alert, so it is the kit's `AlertBanner` and not a
+      page-local tint (issue 260): the hand-rolled `border-down/35 bg-down/8` was the
+      same semantics at a second concentration.
+    -->
+    <AlertBanner
       v-if="feed.stale"
-      class="mt-3.5 flex items-start gap-2 rounded-md border border-down/35 bg-down/8 px-3 py-2.5 text-[12px] leading-snug text-down"
-    >
-      <AlertTriangle class="mt-px size-4 shrink-0" />
-      <div>
-        <span class="font-semibold">{{ feed.label }}</span>
-        <span class="text-down/85">
-          ：下面的报价是内核最后收到的行情，并非当前市场。轮次与倒计时按本地时钟推进，所以看起来仍在跳动；
-          引擎也会因为行情过期而拒绝开仓。请检查行情插件与网络连接。
-        </span>
-      </div>
-    </div>
+      class="mt-3.5"
+      tone="error"
+      :title="feed.label"
+    >下面的报价是内核最后收到的行情，并非当前市场。轮次与倒计时按本地时钟推进，所以看起来仍在跳动；
+      引擎也会因为行情过期而拒绝开仓。请检查行情插件与网络连接。</AlertBanner>
 
     <div v-if="prices.length" class="mt-3.5 flex items-center gap-2">
       <Activity class="size-3.5" :class="feed.stale ? 'text-down' : 'text-faint-fg'" />

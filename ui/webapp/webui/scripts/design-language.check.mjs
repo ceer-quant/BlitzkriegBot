@@ -14,7 +14,13 @@
  *   2. NO orphan styling: every page composes the shared kit (imports from
  *      `components/ui/`) and surfaces empty/error states through EmptyState /
  *      AlertBanner rather than hand-rolled prose.
- *   3. E8's layout vocabulary is still in use where it belongs (`glass`,
+ *   3. NO hand-rolled alert tint: an alert strip is `border-<tone>/N` +
+ *      `bg-<tone>/N` + `text-<tone>` on one element — i.e. the AlertBanner
+ *      recipe, copied into the page. Six such copies existed at different
+ *      concentrations (`/35 /8` against the primitive's `/30 /10`), which is how
+ *      the panel ended up with two reds for one meaning (#260). The kit owns the
+ *      recipe; a page composes the primitive or a Badge variant instead.
+ *   4. E8's layout vocabulary is still in use where it belongs (`glass`,
  *      `label-micro`, `rise-in`) — a page drifting off it breaks the 10-second
  *      information hierarchy the issue demands.
  *
@@ -94,6 +100,59 @@ for (const f of FILES) {
     assert.ok(hasEmpty || exempt, 'page renders data but has no EmptyState usage')
   })
 }
+
+console.log('alert tint — the recipe lives in the kit, not in the page')
+
+/**
+ * A hand-rolled alert: ONE element whose class string carries a tone border, a
+ * tone background and a tone text — `border-down/35 bg-down/8 text-down`. That
+ * is AlertBanner's recipe copied into a page, and it is what let one meaning
+ * acquire two concentrations (`/35 /8` beside the primitive's `/30 /10`, #260).
+ *
+ * The three parts must appear in a single quoted class literal, so the rule
+ * cannot fire on the two shapes that legitimately live in pages:
+ *   * a directional stat tile (`border-down/25 bg-down/8`) — a surface, no
+ *     tone text on the box itself, and not an alert;
+ *   * a token-coloured span (`text-down`) — text, not a surface.
+ * Both are asserted below so the rule cannot silently grow teeth it did not have.
+ */
+const ALERT_TINT =
+  /border-(up|down|primary|info|gold)\/\d+[^"']*bg-\1\/\d+[^"']*text-\1(?![\w-])/g
+
+for (const f of FILES) {
+  check(`${f.name}: no hand-rolled alert tint (use AlertBanner / Badge)`, () => {
+    const offenders = f.src
+      .split('\n')
+      .map((line, i) => [i + 1, line.match(ALERT_TINT)])
+      .filter(([, m]) => m)
+      .map(([n, m]) => `${f.name}:${n} ${m.join(', ')}`)
+    assert.deepEqual(
+      offenders,
+      [],
+      `hand-rolled alert tint — compose AlertBanner or a Badge variant instead:\n${offenders.join('\n')}`,
+    )
+  })
+}
+
+// The rule above must not be the only reason a page has no alert tint: the
+// primitive has to actually be the thing that replaced it.
+for (const f of FILES.filter((f) => !['App.vue', 'LoginView'].includes(f.name))) {
+  check(`${f.name}: surfaces its alerts through the AlertBanner primitive`, () => {
+    assert.ok(/<AlertBanner/.test(f.src), 'no AlertBanner usage')
+  })
+}
+
+// Guard the rule's own edges: a directional tile and a tone-coloured span are
+// not alerts, and a rule that started failing on them would be a false positive
+// that gets allowlisted instead of fixed.
+check('the alert-tint rule does not fire on a tile or a bare tone span', () => {
+  const tile = `<div class="rounded-md border border-down/25 bg-down/8 px-2.5 py-2">`
+  const span = `<span class="stat-num text-[15px] text-down">`
+  const alert = `<div class="rounded-md border border-down/35 bg-down/8 text-down">`
+  assert.equal(tile.match(ALERT_TINT), null, 'a directional tile is not an alert')
+  assert.equal(span.match(ALERT_TINT), null, 'a tone span is not an alert')
+  assert.notEqual(alert.match(ALERT_TINT), null, 'the rule must still catch a real alert')
+})
 
 console.log('E8 vocabulary still in use')
 

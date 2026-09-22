@@ -9,9 +9,21 @@
  *     按策略在拨号前拒绝，都不是「交易所挂了」。
  *  3. 空报告、`probing`、报错都不能渲染成「通过」：没有证据就是没有证据。
  *
+ * 外加一条**跨语言等价**（#260）：四张标签表 —— Rust `status_label` /
+ * `hint_label` 与 TS `netStatusLabel` / `netHintTitle` —— 的 key 集合必须与内核
+ * 自己声明的词表完全相等。此前两侧各自的测试都手抄同一份 11 项列表，于是
+ * 「两边都覆盖」无从验证，内核新增一个 status 时四张表谁都不会红。
+ *
  *   cd ui/webapp/webui && npm run check:net
  */
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const here = dirname(fileURLToPath(import.meta.url))
+/** Repo root — four levels up from `ui/webapp/webui/scripts`. */
+const read = (...p) => readFileSync(join(here, '..', '..', '..', '..', ...p), 'utf8')
 
 let failures = 0
 const check = (label, fn) => {
@@ -150,6 +162,66 @@ check('an unknown hint code falls back to a neutral title', () => {
   assert.equal(netHintTitle('quic_blocked'), '网络自检')
   assert.equal(netHintTitle(undefined), '网络自检')
 })
+
+// ── 跨语言等价：四张标签表 ↔ 内核自己声明的词表 ──────────────────────────────
+//
+// 内核是词表的唯一权威：`NetCheckItem::status` 与 `NetCheckReport::hint_code`
+// 的文档注释逐字列出了它会产出的值。四张表都必须与它**完全相等** —— 多一个
+// 是死代码，少一个就是「内核加了状态而某个面把它藏起来了」。这样就不再需要
+// 任何一份手抄列表：内核改词表，这里自动跟着改判。
+console.log('网络自检：四张标签表与内核词表逐项相等')
+
+const typesRs = read('core', 'market_api', 'src', 'types.rs')
+const netCheckRs = read('ui', 'ui_kit', 'src', 'core', 'net_check.rs')
+const netCheckTs = read('ui', 'webapp', 'webui', 'src', 'lib', 'net-check.ts')
+
+/** 内核文档注释里反引号括起来的词表，紧挨着它声明的那两个字段。 */
+function coreVocabulary(field, heading) {
+  const doc = typesRs.match(
+    new RegExp(`/// ${heading}[\\s\\S]*?pub ${field}: String`),
+  )
+  assert.notEqual(doc, null, `core no longer documents \`${field}\` with a "${heading}" line`)
+  const words = [...new Set([...doc[0].matchAll(/`([a-z][a-z_]*)`/g)].map((m) => m[1]))]
+  assert.ok(words.length >= 5, `parsed only ${words.length} words out of the core's ${field} doc`)
+  return words.sort()
+}
+
+/** 一个 Rust 函数的函数体（rustfmt 把顶层 `}` 放在第 0 列）。 */
+const rustFn = (name) => {
+  const body = netCheckRs.match(new RegExp(`pub fn ${name}\\([\\s\\S]*?\\n\\}`))
+  assert.notEqual(body, null, `net_check.rs no longer has pub fn ${name}`)
+  return body[0]
+}
+
+/** 一个 TS 导出函数的函数体。 */
+const tsFn = (name) => {
+  const body = netCheckTs.match(new RegExp(`export function ${name}\\([\\s\\S]*?\\n\\}`))
+  assert.notEqual(body, null, `net-check.ts no longer has export function ${name}`)
+  return body[0]
+}
+
+const TABLES = [
+  ['status', 'status_label', 'Machine verdict', 'netStatusLabel'],
+  ['hint_code', 'hint_label', 'What the report as a whole says', 'netHintTitle'],
+]
+
+for (const [field, rustFnName, heading, tsFnName] of TABLES) {
+  const core = coreVocabulary(field, heading)
+  // Rust: `"ok" => "ok"` arms; the catch-all `other =>` has no quoted key.
+  const rust = [...rustFn(rustFnName).matchAll(/"([a-z_]+)"\s*=>/g)].map((m) => m[1]).sort()
+  // TS: `case 'ok': return '通过'` arms; `default:` has no key.
+  const ts = [...tsFn(tsFnName).matchAll(/case '([a-z_]+)':/g)].map((m) => m[1]).sort()
+
+  check(`Rust ${rustFnName} 覆盖内核的每个 ${field}（多一个或少一个都算漂移）`, () => {
+    assert.deepEqual(rust, core, `${field}: Rust labels drifted from the core's own vocabulary`)
+  })
+  check(`TS ${tsFnName} 覆盖内核的每个 ${field}（多一个或少一个都算漂移）`, () => {
+    assert.deepEqual(ts, core, `${field}: WebUI labels drifted from the core's own vocabulary`)
+  })
+  check(`Rust 与 TS 的 ${field} key 集合相等（两侧不会各自漂移）`, () => {
+    assert.deepEqual(ts, rust, `${field}: the two faces label different statuses`)
+  })
+}
 
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`)
