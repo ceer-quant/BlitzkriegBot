@@ -90,9 +90,9 @@ fn spawn_embedded_panel(socket: String) -> std::io::Result<tauri::Url> {
 /// Build the app: embedded panel server + one window on it.
 pub fn run() {
     let panel_url = match std::env::var("BLITZKRIEG_PANEL_URL") {
-        Ok(u) if !u.trim().is_empty() => Some(
-            tauri::Url::parse(u.trim()).expect("BLITZKRIEG_PANEL_URL is not a valid URL"),
-        ),
+        Ok(u) if !u.trim().is_empty() => {
+            Some(tauri::Url::parse(u.trim()).expect("BLITZKRIEG_PANEL_URL is not a valid URL"))
+        }
         _ => None,
     };
 

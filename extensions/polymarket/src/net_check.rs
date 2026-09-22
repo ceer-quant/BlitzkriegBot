@@ -18,7 +18,9 @@
 //!   * `discovery`  — Gamma: how a round's markets are found at all.
 //!   * `spot-ws`    — Binance spot: the momentum filter's reference price.
 //!   * `venue-ws`   — `POLYMARKET_WS_URL`: the authenticated fill stream (live
-//!     mode only, but a silent one is a silent ledger).
+//!     mode only, but a silent one is a silent ledger). Probed at the endpoint
+//!     the SDK's client actually dials, not at the configured base — see
+//!     [`user_stream_url`].
 //!
 //! Deliberately NOT probed: anything requiring credentials. A net check that
 //! failed whenever a key was missing would be indistinguishable from one that
@@ -164,8 +166,44 @@ fn targets() -> Vec<Target> {
             url: BINANCE_SPOT_URL.to_string(),
             kind: Kind::Ws,
         },
-        env_target("venue-ws", ws, validate_ws_host, Kind::Ws),
+        user_stream_target(env_target("venue-ws", ws, validate_ws_host, Kind::Ws)),
     ]
+}
+
+/// Rewrite the `venue-ws` row to the endpoint the client dials.
+///
+/// Validation still decides whether this URL may be dialled at all: a rejected
+/// row keeps its reason, and only an accepted one gets its path rewritten — the
+/// host is the same host either way.
+fn user_stream_target(t: Target) -> Target {
+    match t {
+        Target::Probe { name, url, kind } => Target::Probe {
+            name,
+            url: user_stream_url(&url),
+            kind,
+        },
+        rejected => rejected,
+    }
+}
+
+/// The SDK's own two steps, mirrored: strip a trailing channel suffix off the
+/// base, then append the user channel's path (`normalize_base_endpoint` and
+/// `channel_endpoint` in the SDK's `clob/ws/client.rs`).
+///
+/// `POLYMARKET_WS_URL` is a BASE — the client appends its channel path. A probe
+/// against the base alone dials `/`, which the CLOB edge answers with a 404 from
+/// its CDN: a red row that says nothing about the stream and everything about
+/// the probe asking the wrong question. Measured against the real edge, the
+/// difference is the whole verdict — `/` answers 404 while `/ws/user` completes
+/// the `101` upgrade.
+fn user_stream_url(base: &str) -> String {
+    let trimmed = base.trim_end_matches('/');
+    let base = trimmed
+        .strip_suffix("/ws/market")
+        .or_else(|| trimmed.strip_suffix("/ws/user"))
+        .or_else(|| trimmed.strip_suffix("/ws"))
+        .unwrap_or(trimmed);
+    format!("{base}/ws/user")
 }
 
 /// Either the validated URL, or a row that fails with the validator's own
@@ -226,7 +264,7 @@ async fn probe_one(t: &Target) -> NetCheckItem {
         Target::Rejected { name, raw, reason } => {
             let trail = Trail {
                 name,
-                target: raw.clone(),
+                target: redact_userinfo(raw),
                 addrs: Vec::new(),
                 fake_ip: false,
                 notes: Vec::new(),
@@ -240,7 +278,7 @@ async fn probe_one(t: &Target) -> NetCheckItem {
         None => {
             let trail = Trail {
                 name,
-                target: url.to_string(),
+                target: redact_userinfo(url),
                 addrs: Vec::new(),
                 fake_ip: false,
                 notes: Vec::new(),
@@ -249,7 +287,7 @@ async fn probe_one(t: &Target) -> NetCheckItem {
                 false,
                 "rejected",
                 0,
-                format!("no host readable out of {url}"),
+                format!("no host readable out of {}", redact_userinfo(url)),
             );
         }
     };
@@ -466,6 +504,26 @@ fn classify_http(code: u16) -> (&'static str, bool) {
     }
 }
 
+/// The URL as a report may print it: userinfo removed.
+///
+/// The validators accept `https://user:pw@host` and hand the string back as
+/// written, so a credential placed in `CLOB_API_URL` or `POLYMARKET_WS_URL`
+/// would otherwise be printed by the overlay, the web card and the JSON CLI —
+/// the three surfaces whose documented contract is that they never carry one.
+/// Only the display is rewritten: the probe still dials exactly what the
+/// environment configured, and `host_port` already reads its host past the `@`.
+fn redact_userinfo(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    match authority.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://{host}{tail}"),
+        None => url.to_string(),
+    }
+}
+
 /// `(host, port)` of a URL, with the scheme's default port when it names none.
 fn host_port(url: &str) -> Option<(String, u16)> {
     let (scheme, rest) = url.split_once("://")?;
@@ -598,6 +656,64 @@ mod tests {
             }
             _ => panic!("spot-ws is a fixed URL"),
         }
+    }
+
+    /// The probe asks the question the venue call asks: `POLYMARKET_WS_URL` is a
+    /// base, and the user channel lives at `<base>/ws/user`. Suffix for suffix,
+    /// this is the SDK's own rewriting — a base that arrives with a channel
+    /// suffix already on it must not end up with two.
+    #[test]
+    fn the_user_stream_is_probed_at_the_sdk_dialled_path() {
+        for (base, want) in [
+            (
+                "wss://ws-subscriptions-clob.polymarket.com",
+                "wss://ws-subscriptions-clob.polymarket.com/ws/user",
+            ),
+            ("wss://h.example/", "wss://h.example/ws/user"),
+            ("wss://h.example/ws", "wss://h.example/ws/user"),
+            ("wss://h.example/ws/market", "wss://h.example/ws/user"),
+            ("wss://h.example/ws/user", "wss://h.example/ws/user"),
+            ("wss://user:pw@h.example", "wss://user:pw@h.example/ws/user"),
+        ] {
+            assert_eq!(user_stream_url(base), want, "{base}");
+        }
+    }
+
+    /// …and the row the report prints is that endpoint, not the base.
+    #[test]
+    fn the_venue_ws_row_is_the_user_channel() {
+        match &targets()[3] {
+            Target::Probe { url, kind, .. } => {
+                assert!(matches!(kind, Kind::Ws));
+                assert_eq!(url, &user_stream_url(DEFAULT_WS_URL));
+                assert!(url.ends_with("/ws/user"), "{url}");
+            }
+            _ => panic!("the default ws URL must be accepted"),
+        }
+    }
+
+    /// The report's `target` never carries a credential, whatever the
+    /// environment put in the URL.
+    #[test]
+    fn a_credentialed_url_is_printed_without_its_userinfo() {
+        assert_eq!(
+            redact_userinfo("https://user:pw@clob.example/base?x=1"),
+            "https://clob.example/base?x=1"
+        );
+        assert_eq!(
+            redact_userinfo("wss://token@ws.example"),
+            "wss://ws.example"
+        );
+        assert_eq!(
+            redact_userinfo("https://clob.example/"),
+            "https://clob.example/",
+            "a URL without userinfo is unchanged"
+        );
+        assert_eq!(
+            redact_userinfo("user:pw@not-a-url"),
+            "user:pw@not-a-url",
+            "nothing is stripped from a string that has no scheme"
+        );
     }
 
     /// An env URL that points at a private address never becomes a connection

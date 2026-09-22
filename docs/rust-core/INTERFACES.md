@@ -147,15 +147,16 @@ strategies[] = {
 NetCheckReport = {
   ok,          // 所有已探测路径都通过；unsupported/rejected 不算通过
   tsMs,        // 报告生成时刻（毫秒时间戳）
-  hintCode,    // 失败分类：dns / proxy / tls / timeout / refused / transport_error / ""
+  hintCode,    // 结论分类（按优先级取唯一值）：
+               // unsupported / ok / tls_blocked / dns_failed / proxy_env / fake_ip / partial
   hint,        // 该分类的中文/英文一句话解释，可直接展示
   proxyEnv[],  // 进程环境里出现的代理变量名（只有名字，绝无取值）
   items[] = {
     name,      // venue-rest / discovery / spot-ws / venue-ws
     target,    // 被探测的 URL（已脱敏，不含凭证）
     ok,
-    status,    // ok / timeout / dns_error / refused / tls_error / http_error /
-               // transport_error / unsupported / rejected
+    status,    // ok / dns_failed / tcp_refused / timeout / tls_cert / tls_error /
+               // http_error / transport_error / unsupported / rejected
     addrs[],   // 解析出的地址（DNS 阶段的结果）
     fakeIp,    // 命中伪造 IP（GFW 式 DNS 污染）为 true
     ms,        // 该路径耗时
@@ -167,6 +168,10 @@ NetCheckReport = {
 路径含义：`venue-rest` = CLOB REST，`discovery` = Gamma 发现，`spot-ws` = Binance 现货
 （动量过滤的参考价流），`venue-ws` = CLOB 用户成交流（仅实盘模式，但静默的流等于静默的账本）。
 
+`venue-ws` 探的是**客户端真正拨的那个端点**：`POLYMARKET_WS_URL` 是 base，通道路径由 SDK 追加
+（其 `normalize_base_endpoint` 先剥掉尾部 `/ws[/market|/user]`，`channel_endpoint` 再拼上
+`/ws/user`），探针照抄这两步——拨 base 本身只会命中 CDN 的 404，那是探针问错了问题，不是流坏了。
+
 三条契约：
 
 1. **不探测需要凭证的东西**。缺 key 导致的失败与网络不通无法区分——而区分这两者正是它
@@ -174,7 +179,8 @@ NetCheckReport = {
 2. **`unsupported` / `rejected` 不算通过**（`ok=false`，但也不读作「网络故障」）。前者表示
    该市场插件不提供探测，后者表示被探测的 URL 未能通过主机校验（loopback/私有段/保留地址），
    因此**根本没有拨号**——`detail` 里带着校验器自己的拒绝理由。
-3. **代理变量只以变量名出现**（`proxyEnv[]`），值永不入报告——环境变量常带凭证。
+3. **任何凭证都不入报告**：代理变量只以变量名出现（`proxyEnv[]`），且 `target` 在打印前剥掉
+   URL 的 `user:password@` userinfo——环境变量常带凭证，而报告会出现在终端、网页和 JSON 里。
 
 接口能力：探测实现在市场插件侧（`MarketPlugin::net_check`，默认返回 `unsupported`），因此
 把 venue 换成别的市场，探测跟着换。

@@ -138,8 +138,17 @@ fn hint_text(items: &[NetCheckItem], failing: &[&NetCheckItem], proxy: &[String]
     }
     if failing.is_empty() {
         let mut s = format!("all {} network paths answered", items.len());
-        if !proxy.is_empty() {
-            s.push_str(&proxy_note(proxy));
+        // A green report still carries its context. These are the sentences an
+        // operator wants to have read BEFORE the failure a tunneled resolver
+        // eventually causes, and this function's contract is that no supporting
+        // sentence is lost to the headline — on a passing report the headline has
+        // nothing to say at all, so it is the only branch where that would
+        // actually hide them.
+        for note in [fake_ip_note(items), proxy_note(proxy)] {
+            if !note.is_empty() {
+                s.push_str("; ");
+                s.push_str(&note);
+            }
         }
         return s;
     }
@@ -167,18 +176,9 @@ fn hint_text(items: &[NetCheckItem], failing: &[&NetCheckItem], proxy: &[String]
             dns.join(", ")
         ));
     }
-    let addrs: Vec<String> = items
-        .iter()
-        .filter(|i| i.fake_ip)
-        .flat_map(|i| i.addrs.iter().cloned())
-        .collect();
-    if !addrs.is_empty() && items.iter().all(|i| i.fake_ip) {
-        notes.push(format!(
-            "every address came from a proxy fake-IP range ({}): the resolver answers \
-             on behalf of a tunnel, and reachability depends on whether that tunnel \
-             routes the connection",
-            addrs.join(", ")
-        ));
+    let fake_ip = fake_ip_note(items);
+    if !fake_ip.is_empty() {
+        notes.push(fake_ip);
     }
     if !proxy.is_empty() {
         notes.push(proxy_note(proxy));
@@ -210,9 +210,45 @@ fn hint_text(items: &[NetCheckItem], failing: &[&NetCheckItem], proxy: &[String]
     notes.join("; ")
 }
 
-fn proxy_note(proxy: &[String]) -> String {
+/// The fake-IP sentence, or nothing when the resolver answered with real
+/// addresses.
+///
+/// Shared by both branches on purpose: a report from a resolver that answers on
+/// behalf of a tunnel is still a report about that tunnel whether the paths came
+/// back green or not — that tunnel is what decides whether the next connection
+/// leaves the machine at all.
+fn fake_ip_note(items: &[NetCheckItem]) -> String {
+    if items.is_empty() || !items.iter().all(|i| i.fake_ip) {
+        return String::new();
+    }
+    let addrs: Vec<String> = items
+        .iter()
+        .filter(|i| i.fake_ip)
+        .flat_map(|i| i.addrs.iter().cloned())
+        .collect();
+    if addrs.is_empty() {
+        return String::new();
+    }
     format!(
-        "; proxy variables are visible to this process ({}), so outbound traffic may be \
+        "every address came from a proxy fake-IP range ({}): the resolver answers \
+         on behalf of a tunnel, and reachability depends on whether that tunnel \
+         routes the connection",
+        addrs.join(", ")
+    )
+}
+
+/// The proxy sentence, or nothing when the process sees no proxy variable.
+///
+/// Returns the sentence WITHOUT a leading separator: [`hint_text`] joins its
+/// notes with `"; "`, so a note that carried one of its own was printed as
+/// "…answered; ; proxy variables…" on every failing report from a box that had
+/// one set.
+fn proxy_note(proxy: &[String]) -> String {
+    if proxy.is_empty() {
+        return String::new();
+    }
+    format!(
+        "proxy variables are visible to this process ({}), so outbound traffic may be \
          going somewhere the trading stack never chose — the venue paths fail closed on \
          refused traffic rather than retrying around it",
         proxy.join(", ")
@@ -311,6 +347,38 @@ mod tests {
         assert!(r.ok, "a proxy alone does not fail a reachable path");
         assert_eq!(r.hint_code, "ok");
         assert!(r.hint.contains("HTTPS_PROXY"), "{}", r.hint);
+    }
+
+    /// A green report from a tunneled resolver still says so. That tunnel is
+    /// what decides whether the next connection leaves the machine at all, so it
+    /// is context an operator should not have to rediscover from the failure it
+    /// eventually causes.
+    #[test]
+    fn a_green_report_through_a_fake_ip_resolver_still_names_the_tunnel() {
+        let r = report(
+            vec![
+                item("venue-rest", true, "ok", &["198.18.0.12"]),
+                item("spot-ws", true, "ok", &["198.18.0.9"]),
+            ],
+            &[],
+        );
+        assert!(r.ok);
+        assert_eq!(r.hint_code, "ok");
+        assert!(r.hint.contains("fake-IP range"), "{}", r.hint);
+        assert!(r.hint.contains("198.18.0.12"), "{}", r.hint);
+    }
+
+    /// One separator per note: joining is the caller's job, so a note must not
+    /// arrive with one of its own ("…answered; ; proxy variables…").
+    #[test]
+    fn notes_are_joined_exactly_once() {
+        let r = report(
+            vec![item("venue-rest", false, "tcp_refused", &["1.1.1.1"])],
+            &["ALL_PROXY"],
+        );
+        assert!(r.hint.contains("ALL_PROXY"), "{}", r.hint);
+        assert!(!r.hint.contains("; ;"), "{}", r.hint);
+        assert!(!r.hint.starts_with("; "), "{}", r.hint);
     }
 
     /// The priority that matters for this deployment: a completed TCP connect
