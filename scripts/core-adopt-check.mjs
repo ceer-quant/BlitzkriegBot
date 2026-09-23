@@ -17,10 +17,11 @@ import { execSync } from 'child_process';
 // PPID=1 — holding its socket and engine loop. That really happened: a 33-hour
 // orphan on `adopt-48644.sock` was found in the table on 2026-09-19.
 import { spawn } from './lib/child-guard.mjs';
-import { mkdtempSync, existsSync, unlinkSync } from 'fs';
+import { mkdtempSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { CoreClient, requestOnce } from './lib/core-client.mjs';
+import { waitForSocket } from './lib/wait.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const SOCK = join(tmpdir(), `adopt-${process.pid}.sock`);
@@ -30,7 +31,7 @@ try { unlinkSync(SOCK); } catch {}
 
 // 1) Owner core (the "healthy" one), started directly.
 const owner = spawn(BIN, ['--socket', SOCK, '--mode', 'dry', '--tick-ms', '100', '--seed-balance', '1000', '--no-trade-log'], { stdio: 'ignore', cwd: WORKDIR });
-for (let i = 0; i < 80 && !existsSync(SOCK); i++) await sleep(50);
+await waitForSocket(SOCK, { timeoutMs: 4000 });
 await sleep(400);
 console.log('owner core pid', owner.pid, 'listening');
 

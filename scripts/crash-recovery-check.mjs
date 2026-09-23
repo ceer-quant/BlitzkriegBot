@@ -35,6 +35,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { requestOnce } from './lib/core-client.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { waitFor } from './lib/wait.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -116,16 +117,6 @@ function isAlive(pid) {
   }
 }
 
-async function waitFor(fn, ms, label) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    const v = await fn();
-    if (v) return v;
-    await sleep(50);
-  }
-  throw new Error(`timed out waiting for ${label} (${ms} ms)`);
-}
-
 const gate = createChecks();
 const { check } = gate;
 
@@ -156,8 +147,7 @@ try {
         return false;
       }
     },
-    8000,
-    'initial core ready',
+    { timeoutMs: 8000, label: 'initial core ready' },
   );
 
   const firstPid = core.pid;
@@ -195,9 +185,8 @@ try {
   );
 
   const crashExit = await waitFor(
-    async () => (isAlive(firstPid) ? null : true),
-    5000,
-    'crashed core to be reaped',
+    async () => !isAlive(firstPid),
+    { timeoutMs: 5000, label: 'crashed core to be reaped' },
   ).catch(() => false);
   check('killed core is gone (reaped)', !!crashExit, `pid=${firstPid}`);
   crashedStderr = core.getStderr();
@@ -218,8 +207,7 @@ try {
         return null;
       }
     },
-    15000,
-    'replacement core ready',
+    { timeoutMs: 15000, label: 'replacement core ready' },
   );
   const secondPid = core.pid;
   check(

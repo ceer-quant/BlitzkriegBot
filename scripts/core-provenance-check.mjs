@@ -47,6 +47,7 @@ import { mkdtempSync } from 'fs';
 import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { pollUntil } from './lib/wait.mjs';
 import {
   coreBinaryPath,
   binaryVersion,
@@ -209,10 +210,7 @@ try {
   // back out of a log, so its presence is asserted rather than assumed. It is
   // written to stderr before the socket is bound, so by now it is there — the
   // short poll only absorbs a pipe flush.
-  const deadline = Date.now() + 1000;
-  while (Date.now() < deadline && !(binRevision && core.lastStderr.includes(binRevision))) {
-    await new Promise((r) => setTimeout(r, 25));
-  }
+  await pollUntil(() => Boolean(binRevision && core.lastStderr.includes(binRevision)), { timeoutMs: 1000 });
   check('startup line names the revision it is running',
     binRevision !== null && core.lastStderr.includes(binRevision),
     `stderr did not mention ${binRevision}: ${JSON.stringify(core.lastStderr.slice(-200))}`);

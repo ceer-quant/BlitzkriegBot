@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import net from 'node:net';
 import { requestOnce } from './lib/core-client.mjs';
+import { pollUntil } from './lib/wait.mjs';
 
 const ROOT = process.cwd();
 const BIN = join(ROOT, 'target', 'release', 'blitzkrieg');
@@ -177,18 +178,13 @@ async function main() {
   let launcherPid = child.pid;
   assert(Boolean(launcherPid), `launcher spawned with PID ${launcherPid}`);
 
-  // Wait for socket to become ready
-  let connected = false;
-  for (let i = 0; i < 40; i++) {
-    await sleep(100);
-    if (existsSync(SOCK)) {
-      const ping = await rpc(SOCK, 'core.ping');
-      if (ping !== null) {
-        connected = true;
-        break;
-      }
-    }
-  }
+  // Wait for the socket to be SERVED, not merely to exist: the file appears
+  // before the core reaches its accept loop, and a ping that never lands is not
+  // readiness. `rpc` maps a refusal to null, so this probe cannot throw.
+  const connected = Boolean(await pollUntil(
+    async () => existsSync(SOCK) && (await rpc(SOCK, 'core.ping')) !== null,
+    { timeoutMs: 4000 },
+  ));
   assert(connected, `unified launcher started core and serves socket on ${SOCK}`);
   // The note prints after the core is up; without credentials (env stripped
   // and no .env in WORK yet) the panel must be announced as read-only. The

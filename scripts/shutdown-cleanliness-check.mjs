@@ -24,6 +24,7 @@ import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { requestOnce } from './lib/core-client.mjs';
+import { pollUntil, waitForSocket } from './lib/wait.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -76,7 +77,7 @@ function awaitExit(proc, timeoutMs = 5000) {
 
 const sock = join(WORK, 'core.sock');
 const p = boot(sock);
-for (let i = 0; i < 80 && !existsSync(sock); i++) await sleep(50);
+await waitForSocket(sock, { timeoutMs: 4000 });
 await sleep(400);
 
 // Place a resting maker order that stays LIVE — the thing that must not leak.
@@ -120,8 +121,7 @@ console.log('socket freed:', socketGone);
 let replaced = false;
 if (socketGone) {
   const p2 = boot(sock);
-  for (let i = 0; i < 60 && !existsSync(sock); i++) await sleep(50);
-  replaced = existsSync(sock);
+  replaced = Boolean(await pollUntil(() => existsSync(sock), { timeoutMs: 3000 }));
   const h = await rpc(sock, 'orders.list');
   console.log('replacement : bound =', replaced, '| sees orders =', (h?.orders ?? []).length);
   p2.kill('SIGTERM');

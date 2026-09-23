@@ -23,6 +23,7 @@
 import { spawn, execFileSync } from './lib/child-guard.mjs';
 import { CoreClient } from './lib/core-client.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { waitForSocket } from './lib/wait.mjs';
 import { join, resolve, dirname } from 'path';
 import { tmpdir } from 'os';
 import { existsSync, unlinkSync, mkdtempSync, rmSync } from 'fs';
@@ -103,7 +104,7 @@ async function runCoreChecks(dylib, name, workdir, elapsedMs) {
   const rpc = (method, params = {}) => client.request(method, params);
 
   try {
-    for (let i = 0; i < 120; i++) { if (existsSync(sock)) break; await sleep(50); }
+    await waitForSocket(sock, { timeoutMs: 6000 });
     client = await CoreClient.connect({ socketPath: sock });
     await rpc('core.ready');
 

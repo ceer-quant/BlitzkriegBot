@@ -2,10 +2,11 @@
 /** Verify --market-plugin selection + market.list active flag. */
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
-import { mkdtempSync, existsSync, unlinkSync } from 'fs';
+import { mkdtempSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { requestOnce as rpc } from './lib/core-client.mjs';
+import { waitForSocket } from './lib/wait.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -14,7 +15,7 @@ async function run(args) {
   const sock = join(tmpdir(), `mp-${Math.random().toString(36).slice(2)}.sock`);
   try { unlinkSync(sock); } catch {}
   const p = spawn(BIN, ['--socket', sock, '--mode', 'dry', '--tick-ms', '100', '--seed-balance', '100', '--no-trade-log', ...args], { stdio: 'ignore', cwd: mkdtempSync(join(tmpdir(), 'mp-')) });
-  for (let i = 0; i < 60 && !existsSync(sock); i++) await sleep(50);
+  await waitForSocket(sock, { timeoutMs: 3000 });
   await sleep(300);
   const ml = await rpc(sock, 'market.list');
   p.kill('SIGTERM'); await sleep(200);

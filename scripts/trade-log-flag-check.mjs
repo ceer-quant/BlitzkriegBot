@@ -6,6 +6,7 @@ import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { requestOnce as rpc } from './lib/core-client.mjs';
+import { waitForSocket } from './lib/wait.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const PROD = join(process.cwd(), 'data', 'trades', 'trades.jsonl');
@@ -21,7 +22,7 @@ async function runCore(extra, sock, work) {
   // The trade log stays explicit (that is what this gate asserts) and PROD below
   // is still the real repo-root ledger, so the assertion is unchanged.
   const p = spawn(BIN, ['--socket', sock, '--mode', 'dry', '--tick-ms', '100', '--seed-balance', '100', ...extra], { stdio: 'ignore', cwd: work });
-  for (let i = 0; i < 60; i++) { if (existsSync(sock)) break; await sleep(50); }
+  await waitForSocket(sock, { timeoutMs: 3000 });
   await sleep(300);
   // Open a position, then close it at a profit so a closed trade is recorded.
   // The FOK buy needs resting depth: mirror an ask at the entry price first.

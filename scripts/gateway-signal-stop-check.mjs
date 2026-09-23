@@ -5,6 +5,7 @@
  */
 import { spawn, spawnSync } from './lib/child-guard.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { waitFor } from './lib/wait.mjs';
 import { existsSync, mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -43,12 +44,6 @@ function httpReq(method, path, { body = '', timeoutMs = 20000 } = {}) {
     socket.on('end', finish); socket.on('error', finish); setTimeout(finish, timeoutMs);
   });
 }
-async function waitFor(fn, timeoutMs, label) {
-  const end = Date.now() + timeoutMs;
-  while (Date.now() < end) { if (await fn()) return true; await sleep(250); }
-  throw new Error(`timed out waiting for ${label}`);
-}
-
 for (const [label, path] of [['core', CORE], ['gateway', WEB]]) {
   if (!existsSync(path)) { console.error(`${label} binary missing: ${path}`); process.exit(2); }
 }
@@ -71,14 +66,14 @@ try {
     const snap = json(await httpReq('GET', `/api/snapshot?token=${token}`));
     corePid = snap?.gateway?.corePid ?? 0;
     return snap?.connected === true && snap?.gateway?.managed === true && isOurs(corePid);
-  }, 25000, 'owned core');
+  }, { timeoutMs: 25000, label: 'owned core' });
   check('gateway owns a core identified by the private socket', corePid > 0 && isOurs(corePid), `pid=${corePid}`);
   const gatewayPid = web.pid;
   check('gateway pid is distinct from core pid', gatewayPid > 0 && gatewayPid !== corePid, `gateway=${gatewayPid} core=${corePid}`);
   process.kill(gatewayPid, 'SIGTERM');
-  await waitFor(() => web.exitCode !== null || web.signalCode !== null, 10000, 'gateway exit');
+  await waitFor(() => web.exitCode !== null || web.signalCode !== null, { timeoutMs: 10000, label: 'gateway exit' });
   check('gateway exits after SIGTERM', web.exitCode === 0, `exit=${web.exitCode} signal=${web.signalCode}`);
-  await waitFor(() => !isOurs(corePid), 10000, 'owned core shutdown');
+  await waitFor(() => !isOurs(corePid), { timeoutMs: 10000, label: 'owned core shutdown' });
   check('SIGTERM does not orphan the managed core', !isOurs(corePid), `ps=${commandOf(corePid) || '(gone)'}`);
 } catch (error) {
   check('gate completes without an unexpected error', false, String(error?.message ?? error));

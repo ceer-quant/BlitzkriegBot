@@ -17,6 +17,7 @@ import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { requestOnce as rpc } from './lib/core-client.mjs';
+import { waitForSocket } from './lib/wait.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -28,7 +29,7 @@ async function boot(sock) {
   const p = spawn(BIN, ['--socket', sock, '--mode', 'dry', '--tick-ms', '50', '--seed-balance', '1000',
     '--max-order-notional', '6', '--order-log', ORDER_LOG, '--trade-log', join(WORK, 'trades.jsonl'),
     '--no-discovery', '--no-auto-exits'], { stdio: 'ignore', cwd: WORK });
-  for (let i = 0; i < 80 && !existsSync(sock); i++) await sleep(50);
+  await waitForSocket(sock, { timeoutMs: 4000 });
   await sleep(300);
   return p;
 }

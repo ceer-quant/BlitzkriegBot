@@ -15,6 +15,7 @@
 // it owns) behind with PPID=1.
 import { spawn, reapAllChildren } from './lib/child-guard.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { waitFor } from './lib/wait.mjs';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -35,8 +36,6 @@ for (const p of [BIN, WEB]) {
   }
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 async function cmd(text) {
   const url = `${BASE}/api/command?cmd=${encodeURIComponent(text)}`;
   const res = await fetch(url, { headers: TOKEN ? { 'X-Auth-Token': TOKEN } : {} });
@@ -46,18 +45,6 @@ async function cmd(text) {
 let TOKEN = '';
 const gate = createChecks();
 const { check } = gate;
-
-async function waitFor(label, fn, timeoutMs = 20000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const v = await fn();
-      if (v) return v;
-    } catch { /* retry */ }
-    await sleep(200);
-  }
-  throw new Error(`timeout waiting for ${label}`);
-}
 
 try {
   console.log('== UI Kit gateway check (isolated) ==');
@@ -85,10 +72,10 @@ try {
   // [0] gateway listening, core NOT started → status must report not-reachable.
   // Since #83, /api/* requires a session, so the probe gets 401 before any
   // login — "any HTTP response" is the listening signal, not `.ok`.
-  await waitFor('gateway HTTP', async () => {
+  await waitFor(async () => {
     const r = await fetch(`${BASE}/api/snapshot`);
     return r.status > 0 ? r : null;
-  });
+  }, { label: 'gateway HTTP', timeoutMs: 20000, retryOnError: true });
   // Login with the env credentials and carry the 40-hex token on every
   // subsequent command (webapp-check pins the same auth contract).
   const loginRes = await fetch(`${BASE}/api/login`, {
@@ -108,10 +95,10 @@ try {
   check('start action=started', started.action === 'started', started.action);
 
   // [2] core reachable + round advancing
-  const status = await waitFor('core status connected', async () => {
+  const status = await waitFor(async () => {
     const r = await cmd('status');
     return r.ok && r.data && r.data.connection && r.data.connection.connected && r.data.connection.managed ? r : null;
-  });
+  }, { label: 'core status connected', timeoutMs: 20000, retryOnError: true });
   check('status mode=dry', status.data.mode === 'dry', status.data.mode);
   check('status reports managed pid', Number.isInteger(status.data.connection.pid), `pid=${status.data.connection.pid}`);
   check('status round present', !!(status.data.round && status.data.round.slot > 0), `slot=${status.data.round?.slot}`);
@@ -131,10 +118,10 @@ try {
   check('stop action=stopped', stopped.action === 'stopped', stopped.action);
 
   // [6] stopped core is really gone
-  const after = await waitFor('core down after stop', async () => {
+  const after = await waitFor(async () => {
     const r = await cmd('status');
     return r.ok === false ? r : null;
-  });
+  }, { label: 'core down after stop', timeoutMs: 20000, retryOnError: true });
   check('status after stop = error (core down)', after.ok === false, after.action);
 
   // [7] unknown command is rejected cleanly (no panic)

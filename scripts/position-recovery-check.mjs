@@ -16,6 +16,7 @@
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
 import { CoreClient } from './lib/core-client.mjs';
+import { waitForSocket } from './lib/wait.mjs';
 import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -41,7 +42,7 @@ async function boot(path, extra = []) {
     '--engine', '--no-event-archive', '--no-discovery', '--no-auto-exits', '--round-sec', '3600',
     '--min-round-age', '0', '--min-time-left', '0', ...extra],
     { stdio: 'ignore', cwd: WORK });
-  for (let i = 0; i < 100 && !existsSync(path); i++) await sleep(50);
+  await waitForSocket(path, { timeoutMs: 5000 });
   await sleep(300);
   return p;
 }

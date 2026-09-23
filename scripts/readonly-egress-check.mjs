@@ -34,6 +34,7 @@ import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { requestOnce as rpc } from './lib/core-client.mjs';
+import { pollUntil } from './lib/wait.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -77,7 +78,7 @@ const proc = spawn(
 proc.stdout.on('data', (d) => out.push(String(d)));
 proc.stderr.on('data', (d) => out.push(String(d)));
 
-for (let i = 0; i < 120 && !existsSync(sock); i++) await sleep(50);
+await pollUntil(() => existsSync(sock), { timeoutMs: 6000 });
 if (!existsSync(sock)) {
   console.log('core never bound its socket; output tail:');
   console.log(out.join('').split('\n').slice(-15).join('\n'));
