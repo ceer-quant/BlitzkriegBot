@@ -5,8 +5,8 @@
 > **先读这一段**：内核有**两套**插件机制，别混用——
 > - **市场插件**（`MarketPlugin`，本指南 §2.5）：接入一个**市场**，有下单/行情/发现能力，
 >   经 `MarketHost` 与内核交互。Polymarket 就是它。要加新市场看 §2.5。
-> - **通用扩展**（`Extension`，§2–§4）：只是**观察者/钩子**（事件+日志），**无交易能力**。
->   要加审计/通知这类钩子看 §2–§4。
+> - **通用扩展**（`Extension`，§2–§4）：只有**生命周期钩子**（`on_load`/`on_unload` + 日志），
+>   **没有事件输入**，**无交易能力**。要加生命周期钩子看 §2–§4。
 
 ## 1. 扩展类型
 
@@ -28,7 +28,6 @@ pub trait Extension: Send + Sync {
     fn extension_type(&self) -> ExtensionType;
     async fn on_load(&self, ctx: &dyn ExtensionContext) -> Result<(), String>;
     async fn on_unload(&self) -> Result<(), String>;
-    async fn on_event(&self, event: &Event) -> Result<(), String> { Ok(()) }
 }
 
 pub trait ExtensionContext: Send + Sync {
@@ -84,17 +83,17 @@ discovered → installed → enabled → (running) → disabled → uninstalled
 ```
 
 - `install`：注册（state=Installed）。
-- `enable`：调用 `on_load`；失败 → state=Failed（**不 panic**）。
+- `enable`：调用 `on_load`；返回 `Err` → state=Failed。
 - `disable`：调用 `on_unload`。
 - `uninstall`：移除。
-- `dispatch`：仅向 Enabled 的扩展推送 `core.event`；某扩展 `on_event` 出错只记 warn，不影响内核与其它扩展。
 
-## 4. 隔离与安全（硬性）
+## 4. 边界（硬性）
 
-- 每个扩展运行在独立异步任务；**扩展崩溃不得影响内核**（注册表 + 结果隔离）。
+- 扩展只能通过 `ExtensionContext` 交互（只读策略名 + 日志 + 建议意图）。
 - 扩展**绝不能**获得：私钥、签名器、venue 客户端、OME、UDS socket、内核内部状态。
-- 扩展只能通过 `ExtensionContext` 交互（事件 + 只读策略名 + 日志 + 建议意图）。
-- 任何扩展崩溃或被禁用，内核继续运行。
+- 扩展是**进程内静态链接的 Rust 代码**（workspace 成员 + Cargo feature），不是动态加载，
+  **没有沙箱**：`on_load`/`on_unload` 在调用方任务上、**持着 core 锁**内联执行。
+  所以 panic 或卡死**会**波及内核；只有「返回 `Err`」被隔离（标记 `Failed`，内核继续跑）。
 
 ## 5. 配置
 
@@ -149,15 +148,16 @@ max_daily_loss = 500.0
 
 - **市场插件**：`extensions/polymarket/`——`PolymarketPlugin` 组装 `feed`/`discovery`/`live` 三组件，
   经 `MarketHost` 驱动内核。这是新增市场应照抄的形状。
-- **通用扩展**：`extension/builtins.rs::BinanceSpotExtension`——只统计事件数、写日志，演示
-  `on_load`/`on_event` 生命周期与隔离（**无交易能力**）。
+- **通用扩展**：`extension/builtins.rs::BinanceSpotExtension`——只在 `on_load` 写一行日志，演示
+  生命周期切换与 `Err` → `Failed` 的隔离（**无交易能力**）。
 
 ## 8. 验收清单
 
 - [x] `MarketPlugin` + 三组件 trait 定义完成，注册表可装配、可选 `active`
 - [x] 至少一个真实市场插件（`extensions/polymarket`），内核零市场代码
 - [x] `Extension` trait 定义完成，注册表可装配与生命周期切换
-- [x] 扩展/插件崩溃不影响内核（`on_load` 失败 → Failed，`on_event` 出错 → warn）
+- [x] 扩展 `on_load` 返回 `Err` 不影响内核（→ state=Failed，内核继续跑）
+- [ ] 扩展 panic / 卡死的隔离（沙箱或独立任务）——**未实现**，见 §4
 - [x] 插件无法访问私钥/OME/socket（只能经 `MarketHost`）
 - [x] 配置读取与版本校验（`config.toml` 的 `[meta]` 解析 + 与代码漂移校验）——**已实现**（KI-11/§59）
 - [ ] 配置**热加载**（不重启即生效）——**未实现**；改配置需重启内核

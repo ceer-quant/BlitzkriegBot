@@ -1803,13 +1803,6 @@ impl Core {
         self.enabled_strategy_names().contains(&name.to_string())
     }
 
-    pub fn extensions(&self) -> &crate::extension::ExtensionRegistry {
-        &self.extensions
-    }
-    pub fn extensions_mut(&mut self) -> &mut crate::extension::ExtensionRegistry {
-        &mut self.extensions
-    }
-
     /// List installed extensions (name, type, lifecycle state).
     pub fn extension_list(
         &self,
@@ -1819,16 +1812,6 @@ impl Core {
         crate::extension::ExtensionState,
     )> {
         self.extensions.list()
-    }
-
-    /// Install an extension (state = Installed). Lifecycle transitions then go
-    /// through `enable_extension` / `disable_extension`.
-    pub fn install_extension(
-        &mut self,
-        ext: Box<dyn crate::extension::Extension>,
-        config_path: Option<std::path::PathBuf>,
-    ) {
-        self.extensions.install(ext, config_path);
     }
 
     /// Enable an extension (runs `on_load`). The extension receives ONLY a
@@ -1844,11 +1827,6 @@ impl Core {
     /// Disable an extension (runs `on_unload`).
     pub async fn disable_extension(&mut self, name: &str) -> Result<(), String> {
         self.extensions.disable(name).await
-    }
-
-    /// Broadcast a kernel event to every enabled extension (isolated per ext).
-    pub async fn dispatch_to_extensions(&self, event: &Event) {
-        self.extensions.dispatch(event).await;
     }
 
     /// All-time closed-trade summary for the UI (totalTrades / wins / losses /
