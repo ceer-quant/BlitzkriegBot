@@ -33,6 +33,11 @@ const BIN = join(ROOT, 'target/release/blitzkrieg-core');
 const WEB = join(ROOT, 'target/release/ui_kit_web');
 const REF_DYLIB_DIR = join(ROOT, 'user_layer/parity_strategy/target/release');
 const REF_STRATEGY = 'parity'; // the name the reference cdylib registers
+// CI runs this on Linux; a hardcoded `.dylib` would only ever pass on macOS.
+const REF_DYLIB = join(
+  REF_DYLIB_DIR,
+  `libparity_strategy.${process.platform === 'darwin' ? 'dylib' : process.platform === 'win32' ? 'dll' : 'so'}`,
+);
 const SOCK = join(tmpdir(), `uikit-plugins-${process.pid}.sock`);
 const WORK = mkdtempSync(join(tmpdir(), 'uikit-plugins-data-'));
 const PORT = 18993;
@@ -44,8 +49,8 @@ for (const p of [BIN, WEB]) {
     process.exit(1);
   }
 }
-if (!existsSync(join(REF_DYLIB_DIR, 'libparity_strategy.dylib'))) {
-  console.error(`missing reference cdylib: ${REF_DYLIB_DIR}/libparity_strategy.dylib`);
+if (!existsSync(REF_DYLIB)) {
+  console.error(`missing reference cdylib: ${REF_DYLIB}`);
   console.error('  (run: cd user_layer/parity_strategy && cargo build --release --locked)');
   console.error('  the strategy registry below is only non-empty because a cdylib is loaded —');
   console.error('  the kernel registers no strategy of its own.');
@@ -92,7 +97,9 @@ try {
       ...process.env,
       UIKIT_CORE_BIN: BIN,
       UIKIT_CORE_CWD: WORK,
-      UIKIT_CORE_EXTRA_ARGS: `--engine --feed-ws --strategy-dir ${REF_DYLIB_DIR}`,
+      // Quoted: this checkout's path contains a space, and the gateway splits
+      // UIKIT_CORE_EXTRA_ARGS on whitespace outside quotes.
+      UIKIT_CORE_EXTRA_ARGS: `--engine --feed-ws --strategy-dir "${REF_DYLIB_DIR}"`,
       DRY_RUN: 'true',
       // Gateway mode requires an explicit credential pair since #83.
       BLITZKRIEG_PANEL_USER: 'gate-admin',

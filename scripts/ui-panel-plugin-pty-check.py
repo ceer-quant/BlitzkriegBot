@@ -52,6 +52,10 @@ BIN = os.path.join(ROOT, 'target/release/blitzkrieg-core')
 PANEL = os.path.join(ROOT, 'target/release/ui_kit_panel')
 REF_DYLIB_DIR = os.path.join(ROOT, 'user_layer/parity_strategy/target/release')
 REF_STRATEGY = 'parity'  # the name the reference cdylib registers
+# CI runs this on Linux; a hardcoded `.dylib` would only ever pass on macOS.
+REF_DYLIB = os.path.join(
+    REF_DYLIB_DIR,
+    'libparity_strategy.' + ('dylib' if sys.platform == 'darwin' else 'dll' if sys.platform == 'win32' else 'so'))
 UID = str(os.getpid())
 SOCK = f"/tmp/uikit-pty-{UID}.sock"
 WORK = tempfile.mkdtemp(prefix='uikit-pty-data-')
@@ -59,8 +63,8 @@ WORK = tempfile.mkdtemp(prefix='uikit-pty-data-')
 for p in (BIN, PANEL):
     if not os.path.exists(p):
         sys.exit(f"missing binary: {p} (run: cargo build --release)")
-if not os.path.exists(os.path.join(REF_DYLIB_DIR, 'libparity_strategy.dylib')):
-    sys.exit(f"missing reference cdylib: {REF_DYLIB_DIR}/libparity_strategy.dylib "
+if not os.path.exists(REF_DYLIB):
+    sys.exit(f"missing reference cdylib: {REF_DYLIB} "
              f"(run: cd user_layer/parity_strategy && cargo build --release --locked)")
 
 failures = []
