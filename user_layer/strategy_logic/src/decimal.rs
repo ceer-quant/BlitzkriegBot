@@ -36,35 +36,3 @@ where
         _ => s.serialize_str(&d.to_string()),
     }
 }
-
-pub mod opt {
-    use super::*;
-    pub fn deserialize<'de, D>(d: D) -> Result<Option<Decimal>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::Error;
-        let v = Option::<serde_json::Value>::deserialize(d)?;
-        match v {
-            None | Some(serde_json::Value::Null) => Ok(None),
-            Some(serde_json::Value::String(s)) => Decimal::from_str_exact(s.trim())
-                .map(Some)
-                .map_err(Error::custom),
-            Some(serde_json::Value::Number(n)) => Decimal::from_str_exact(&n.to_string())
-                .map(Some)
-                .map_err(Error::custom),
-            Some(other) => Err(Error::custom(format!(
-                "expected number/string, got {other}"
-            ))),
-        }
-    }
-    pub fn serialize<S>(d: &Option<Decimal>, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match d {
-            Some(v) => super::serialize(v, s),
-            None => s.serialize_none(),
-        }
-    }
-}

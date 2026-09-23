@@ -50,16 +50,6 @@ impl Regime {
             Regime::Volatile => "volatile",
         }
     }
-
-    pub fn parse(s: &str) -> Option<Regime> {
-        match s {
-            "range" => Some(Regime::Range),
-            "trendUp" => Some(Regime::TrendUp),
-            "trendDown" => Some(Regime::TrendDown),
-            "volatile" => Some(Regime::Volatile),
-            _ => None,
-        }
-    }
 }
 
 /// Thresholds of the labelling rule. The same constants drive the offline
@@ -183,7 +173,6 @@ pub struct MarketRegime {
     state: Regime,
     pending: Option<Regime>,
     pending_count: u32,
-    updates: u64,
 }
 
 impl MarketRegime {
@@ -194,7 +183,6 @@ impl MarketRegime {
             state: Regime::default(),
             pending: None,
             pending_count: 0,
-            updates: 0,
         }
     }
 
@@ -202,18 +190,9 @@ impl MarketRegime {
         self.state
     }
 
-    pub fn config(&self) -> &MarketRegimeConfig {
-        &self.config
-    }
-
-    pub fn updates(&self) -> u64 {
-        self.updates
-    }
-
     /// Feed one mid sample. Returns the (possibly still previous) state after
     /// the update — the value an eval harness samples at each window edge.
     pub fn on_price(&mut self, at_ms: i64, mid: Decimal) -> Regime {
-        self.updates += 1;
         // Timestamps arrive in order from every source this crate is fed by;
         // a stray regression prunes nothing extra but is otherwise harmless.
         self.samples.push_back((at_ms, mid));

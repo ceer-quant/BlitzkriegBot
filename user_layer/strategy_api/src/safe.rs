@@ -27,7 +27,7 @@
 
 use core::ffi::c_char;
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 
 pub use crate::{BK_ABI_VERSION, BK_MIN_ABI_VERSION, BkHandle};
 
@@ -154,8 +154,7 @@ pub struct Knob {
 }
 
 /// Host config / shadow-evolution hot params, values kept as the ABI's decimal
-/// strings. Helper accessors coerce to exact decimals on demand; `get_f64`
-/// exists only for display-style knobs and must NOT be used for prices.
+/// strings. Helper accessors coerce to exact decimals on demand.
 #[derive(Debug, Clone, Default)]
 pub struct ParamBag(pub HashMap<String, String>);
 
@@ -163,10 +162,6 @@ impl ParamBag {
     /// Exact decimal value of a knob (prices/sizes/factors: use this).
     pub fn get_dec(&self, key: &str) -> Option<rust_decimal::Decimal> {
         rust_decimal::Decimal::from_str_exact(self.0.get(key)?.trim()).ok()
-    }
-    /// Lossy f64 view. Display and sanity checks only — never price arithmetic.
-    pub fn get_f64(&self, key: &str) -> Option<f64> {
-        self.0.get(key)?.parse().ok()
     }
     pub fn get_str(&self, key: &str) -> Option<&str> {
         self.0.get(key).map(String::as_str)
@@ -303,13 +298,6 @@ pub unsafe fn cstr(p: *const c_char) -> Option<String> {
 pub unsafe fn field(p: *const c_char) -> Option<String> {
     // SAFETY: caller guarantees the borrowed-NUL contract above.
     unsafe { cstr(p) }
-}
-
-pub fn json_bytes_to_out_unused(v: &serde_json::Value) -> *mut c_char {
-    match CString::new(v.to_string()) {
-        Ok(cs) => cs.into_raw(),
-        Err(_) => core::ptr::null_mut(),
-    }
 }
 
 /// Hand an owned JSON string across the ABI (alias of [`crate::bk_string_out`]).
