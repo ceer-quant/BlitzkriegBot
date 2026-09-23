@@ -117,23 +117,20 @@ pub trait EngineStrategy: Send + Sync {
 策略返回的全部是**候选/意图**：内核随后统一执行回合时序、现货动量、单 token 去重、定张数、风控/资金/签名/下单。
 平仓意图经 `ExitReason::StrategySignal` 路由，即使 `auto_exits_enabled=false` 也会被处理（类似手动平仓），但仍受 kill switch / 风控 / 去重 / 持仓存在性约束。
 
-## 3. 三种形态
+## 3. 策略形态
 
-### 3.1 声明式（TOML，推荐给非程序员）
-`user_layer/strategies/trend_strategy.toml`：
-```toml
-[meta]
-name = "trend_follow"
-template = "spread_arb"
-[params]
-trend_min_price = 0.55
-trend_entry_factor = 0.98
-trend_max_entry_price = 0.45
-[risk]
-size_usd = 2.5
-max_positions = 2
-```
-你只填参数，内核套用内建模板。TOML 天然无副作用，最安全。
+### 3.1 声明式（TOML）——**从未实现**
+
+早期文档与 `user_layer/strategies/trend_strategy.toml`（现已删除）描述过一个「只填参数、
+内核套用内建模板」的声明式形态。**代码里没有这条路径**：
+
+- 内核的策略加载只认 C ABI v2 共享库（`.dylib` / `.so` / `.dll`），`load_strategy_dir`
+  按扩展名收集，`.toml` 被静默跳过；
+- `loader::policy_allows` 明确**拒绝** `.toml`（`tests/dynamic_strategy.rs::policy_rejects_bad_paths` 钉住）；
+- 全历史中从未解析过 `template` 键（`git log -S'"template"'` 为空）。
+
+因此按本节写法放一个 TOML 进 `user_layer/strategies/`，内核会照常启动、只是**永远不交易它**。
+要写策略请用 3.2。
 
 ### 3.2 Rust 动态库（v2，全功能）
 
