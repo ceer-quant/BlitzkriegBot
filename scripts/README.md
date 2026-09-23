@@ -45,6 +45,12 @@ cargo build --release --workspace --locked
   gate otherwise leaves a core running with PPID=1, holding its socket. That is
   not hypothetical: on 2026-09-19 the process table held a 33-hour orphan from an
   interrupted run. See `child-guard-check.mjs` for the pinned behaviour.
+- `lib/strategy-leg-harness.mjs` — the harness the two strategy-leg gates share
+  (`trend-follow-check.mjs`, `mean-reversion-check.mjs`): spawn a dry-mode core on
+  a private socket in a scratch dir, speak the UDS JSON-RPC wire, declare markets
+  and feed books, wait for a condition, report. Only the fixture and the
+  assertions differ between the legs; the harness was two byte-identical copies
+  until they drifted, and a fix to it must not have to be made twice.
 
 ## Acceptance gates
 
