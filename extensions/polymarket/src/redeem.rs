@@ -182,13 +182,6 @@ pub fn signer_from_env() -> anyhow::Result<PrivateKeySigner> {
     Ok(signer)
 }
 
-/// The funder/holder address from the environment.
-pub fn holder_from_env() -> anyhow::Result<Address> {
-    let raw = std::env::var("POLYMARKET_FUNDER_ADDRESS")
-        .context("POLYMARKET_FUNDER_ADDRESS required for redemption")?;
-    Ok(Address::from_str(raw.trim())?)
-}
-
 /// Redeem one settled claim on-chain.
 ///
 /// Branches exactly as the venue does: NegRisk markets go through the NegRisk
