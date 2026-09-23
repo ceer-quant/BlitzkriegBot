@@ -143,12 +143,12 @@
  *
  * Output: data/drift/drift.jsonl (one JSON line per poll) + a summary on stdout.
  */
-import net from 'net';
 import { appendFileSync, mkdirSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { resolveSocketPath } from './lib/core-socket.mjs';
 import { describeQuote, feeModelProblems, PINNED_DEFAULT_MODEL } from './lib/fee-model.mjs';
+import { requestOnce } from './lib/core-client.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -190,31 +190,9 @@ const TOL = 1e-6;
 
 const round = (n) => Math.round(n * 1e9) / 1e9;
 
-// ── A tiny read-only JSON-RPC client (the soak monitor's, not the full shell) ──
-function rpc(sock, method, params = {}, timeoutMs = 5000) {
-  return new Promise((resolve, reject) => {
-    const s = net.connect(sock);
-    let buf = '';
-    const timer = setTimeout(() => { s.destroy(); reject(new Error('timeout')); }, timeoutMs);
-    s.on('connect', () => {
-      s.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) + '\n');
-    });
-    s.on('data', (d) => {
-      buf += d.toString();
-      const nl = buf.indexOf('\n');
-      if (nl < 0) return;
-      clearTimeout(timer);
-      const line = buf.slice(0, nl);
-      s.destroy();
-      try {
-        const msg = JSON.parse(line);
-        if (msg.error) reject(new Error(msg.error.message || 'rpc error'));
-        else resolve(msg.result);
-      } catch (e) { reject(e); }
-    });
-    s.on('error', (e) => { clearTimeout(timer); reject(e); });
-  });
-}
+// Rejects on an RPC error or a timeout — this gate audits a live deployment and
+// must never mistake a failed read for a clean comparison.
+const rpc = (sock, method, params = {}, timeoutMs = 5000) => requestOnce(sock, method, params, { timeoutMs });
 
 /**
  * Memoised kernel-fee lookup: `feePerShare` at a price, from the kernel's own

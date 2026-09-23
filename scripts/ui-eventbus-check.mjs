@@ -21,6 +21,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import net from 'net';
+import { requestOnce } from './lib/core-client.mjs';
 
 const ROOT = join(fileURLToPath(import.meta.url), '..', '..');
 const BIN = join(ROOT, 'target/release/blitzkrieg-core');
@@ -46,24 +47,8 @@ function check(name, cond, detail = '') {
   console.log(`  ${tag} ${name}${detail ? ` — ${String(detail).slice(0, 120)}` : ''}`);
 }
 
-function rpc(method, params = {}) {
-  return new Promise((res) => {
-    const c = net.connect(SOCK);
-    let b = '';
-    c.on('connect', () => {
-      c.write(JSON.stringify({ jsonrpc: '2.0', id: 1, version: '1.1', method, params }) + '\n');
-    });
-    c.on('data', (d) => {
-      b += d;
-      const i = b.indexOf('\n');
-      if (i < 0) return;
-      try { res(JSON.parse(b.slice(0, i)).result); } catch { res(null); }
-      c.end();
-    });
-    c.on('error', () => res(null));
-    setTimeout(() => { try { c.end(); } catch {} res(null); }, 3000);
-  });
-}
+// This gate boots the core itself, so the socket is known: bind it here.
+const rpc = (method, params = {}) => requestOnce(SOCK, method, params);
 
 function listenForEvents(fire, timeoutMs) {
   return new Promise((res) => {

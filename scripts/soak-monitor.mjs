@@ -24,12 +24,12 @@
  *         node scripts/soak-monitor.mjs --forever [--interval-sec 600]
  */
 
-import net from 'net';
 import { readFileSync, appendFileSync, existsSync, mkdirSync, statSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { resolveSocketPath } from './lib/core-socket.mjs';
+import { requestOnce } from './lib/core-client.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -83,32 +83,18 @@ function rssKb(pid) {
   } catch { return 0; }
 }
 
-/** Raw UDS JSON-RPC call (does not spawn or own the core). */
-function rpc(method, params = {}, timeoutMs = 3000) {
-  return new Promise((resolve) => {
-    const sock = net.connect(SOCK);
-    let buf = '';
-    let id = 1;
-    const done = (v) => { try { sock.destroy(); } catch {} resolve(v); };
-    const timer = setTimeout(() => done({ error: 'timeout' }), timeoutMs);
-    sock.on('connect', () => sock.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'));
-    sock.on('data', (d) => {
-      buf += d.toString();
-      let i;
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, i); buf = buf.slice(i + 1);
-        if (!line.trim()) continue;
-        try {
-          const m = JSON.parse(line);
-          if (m.method === 'core.event') continue;
-          clearTimeout(timer);
-          done(m.error ? { error: m.error.message, coreCode: m.error.data?.coreCode } : { result: m.result });
-        } catch {}
-      }
-    });
-    sock.on('error', (e) => { clearTimeout(timer); done({ error: String(e.message || e) }); });
-  });
-}
+/**
+ * A sample, not an assertion: this monitor's whole job is to RECORD a core that
+ * is down or wedged, so a refused or unanswered call comes back as `{ error }`
+ * and lands in the sample as an anomaly instead of ending the soak.
+ */
+const rpc = async (method, params = {}, timeoutMs = 3000) => {
+  try {
+    return { result: await requestOnce(SOCK, method, params, { timeoutMs }) };
+  } catch (e) {
+    return { error: e.message, coreCode: e.coreCode };
+  }
+};
 
 // Track run.log read offset to count NEW errors per cycle.
 let logOffset = 0;

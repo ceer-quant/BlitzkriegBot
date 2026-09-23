@@ -21,7 +21,7 @@
  */
 // Guarded spawn: an interrupted gate must not leave its core holding the socket.
 import { spawn, execFileSync } from './lib/child-guard.mjs';
-import net from 'net';
+import { CoreClient } from './lib/core-client.mjs';
 import { join, resolve, dirname } from 'path';
 import { tmpdir } from 'os';
 import { existsSync, unlinkSync, mkdtempSync, rmSync } from 'fs';
@@ -101,26 +101,8 @@ proc.stderr.on('data', (d) => { stderr += d.toString(); });
 
 const results = await (async () => {
   for (let i = 0; i < 120; i++) { if (existsSync(sock)) break; await SLEEP(50); }
-  const sockc = net.connect(sock);
-  let buf = '', seq = 0;
-  const pending = new Map();
-  sockc.on('data', (d) => {
-    buf += d.toString(); let i;
-    while ((i = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, i); buf = buf.slice(i + 1);
-      if (!line.trim()) continue;
-      let msg; try { msg = JSON.parse(line); } catch { continue; }
-      if (msg.id != null && pending.has(msg.id)) {
-        const p = pending.get(msg.id); pending.delete(msg.id);
-        msg.error ? p.reject(new Error(msg.error.message)) : p.resolve(msg.result);
-      }
-    }
-  });
-  await new Promise((res, rej) => { sockc.on('connect', res); sockc.on('error', rej); });
-  const rpc = (method, params = {}) => new Promise((res, rej) => {
-    const id = ++seq; pending.set(id, { resolve: res, reject: rej });
-    sockc.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-  });
+  const client = await CoreClient.connect({ socketPath: sock });
+  const rpc = (method, params = {}) => client.request(method, params);
   await rpc('core.ready');
 
   const out = { loaded: 0, loadErr: [] };

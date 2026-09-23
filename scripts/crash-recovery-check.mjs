@@ -33,7 +33,7 @@ import { spawn } from './lib/child-guard.mjs';
 import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import net from 'net';
+import { requestOnce } from './lib/core-client.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -76,38 +76,9 @@ function isOurs(pid) {
   return false;
 }
 
-function rpc(sock, method, params = {}, timeoutMs = 5000) {
-  return new Promise((res, rej) => {
-    const c = net.connect(sock);
-    let b = '';
-    let done = false;
-    const finish = (fn, v) => {
-      if (done) return;
-      done = true;
-      try {
-        c.end();
-      } catch {}
-      fn(v);
-    };
-    c.on('connect', () =>
-      c.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) + '\n'),
-    );
-    c.on('data', (d) => {
-      b += d;
-      const i = b.indexOf('\n');
-      if (i < 0) return;
-      try {
-        const msg = JSON.parse(b.slice(0, i));
-        if (msg.error) return finish(rej, new Error(msg.error.message || 'rpc error'));
-        finish(res, msg.result);
-      } catch (e) {
-        finish(rej, e);
-      }
-    });
-    c.on('error', (e) => finish(rej, e));
-    setTimeout(() => finish(rej, new Error(`rpc timeout: ${method}`)), timeoutMs);
-  });
-}
+// Same contract as the hand-rolled helper this replaces: rejects on an RPC
+// error or a timeout, and the 4th argument is the per-call budget.
+const rpc = (sock, method, params = {}, timeoutMs) => requestOnce(sock, method, params, { timeoutMs });
 
 /** Boot a core and return its ChildProcess. Args mirror the other gates. */
 function boot(sock) {

@@ -16,22 +16,13 @@ import { spawn } from './lib/child-guard.mjs';
 import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import net from 'net';
+import { requestOnce as rpc } from './lib/core-client.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'orderdb-'));
 const ORDER_LOG = join(WORK, 'orders.jsonl');
 
-function rpc(sock, method, params = {}) {
-  return new Promise((res) => {
-    const c = net.connect(sock); let b = '';
-    c.on('connect', () => c.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) + '\n'));
-    c.on('data', (d) => { b += d; const i = b.indexOf('\n'); if (i < 0) return;
-      try { res(JSON.parse(b.slice(0, i)).result); } catch { res(null); } c.end(); });
-    c.on('error', () => res(null)); setTimeout(() => { try { c.end(); } catch {} res(null); }, 3000);
-  });
-}
 async function boot(sock) {
   try { unlinkSync(sock); } catch {}
   const p = spawn(BIN, ['--socket', sock, '--mode', 'dry', '--tick-ms', '50', '--seed-balance', '1000',
