@@ -3,20 +3,9 @@
 //! rest of the source layer in `62b16c88`).
 //!
 //! Supported verbs (identical in meaning to the Node skill's Rust-core path,
-//! which this module now owns outright):
-//!
-//!   start [ASSETS] [--size N] [--dry-run]   spawn/adopt the core, start trading
-//!   stop                                     stop the core we spawned
-//!   status                                   round + stats + positions + balance
-//!   positions [N]                            closed-trade history (newest first)
-//!   strategies                               list strategies (name + enabled)
-//!   strategy NAME on|off                     enable/disable one strategy
-//!   extensions                               list extensions (name + state)
-//!   extension NAME on|off                    enable/disable one extension
-//!   flatten POSITION_ID                       manually force-close one position
-//!   markets                                  list market plugins
-//!   netcheck                                 probe the network paths the venue uses
-//!   help
+//! which this module now owns outright) are listed exactly once — in
+//! [`COMMANDS`], the table that [`help_text`], the TUI overlay and the command
+//! bar all read.
 //!
 //! No entry-order verb exists here. `stop`/`start` act on the process, while
 //! `flatten` is the explicit human-supervision exit path and delegates to the
@@ -446,8 +435,8 @@ impl Dispatcher {
             Command::EvolutionAuto { on } => self.cmd_evolution_auto(raw, on),
             Command::EvolutionEngine { on } => self.cmd_evolution_engine(raw, on),
             Command::EvolutionRollback { strategy } => self.cmd_evolution_rollback(raw, &strategy),
-            Command::Help => CommandOutcome::ok(raw, "help", HELP)
-                .with_data(serde_json::json!({ "usage": HELP })),
+            Command::Help => CommandOutcome::ok(raw, "help", help_text())
+                .with_data(serde_json::json!({ "usage": help_text() })),
         }
     }
 
@@ -808,25 +797,77 @@ fn state_mark(on: bool) -> &'static str {
     }
 }
 
-pub const HELP: &str = "\
-crypto-hft commands (UI Kit gateway):
-  start [ASSETS] [--size N] [--dry-run]   start the core (adopts if already running)
-  stop                                     stop the core this gateway spawned
-  status                                   round / stats / positions / balance
-  positions [N]                            closed-trade history (newest first)
-  strategies                               list strategies and enabled state
-  strategy <name> on|off                   enable/disable one strategy
-  extensions                               list extensions and state
-  extension <name> on|off                  enable/disable one extension
-  flatten <position_id>                    force-close one open position
-  markets                                  list market plugins
-  netcheck                                 probe the network paths the venue uses
-  proposals [N]                            evolution proposals (pending first)
-  decide <id> accept|reject|defer          vote on one evolution proposal
-  auto-evolve on|off                       unattended mode switch (persisted)
-  evolve on|off                            evolution engine switch (persisted)
-  rollback <strategy>                      undo one strategy's last evolution
-  help";
+/// The gateway's command surface, `(usage, summary)` per command in the order
+/// help prints them. The verb is the usage's first token, so a row cannot
+/// disagree with itself.
+///
+/// This table is the single source: [`help_text`] renders it, the TUI's `?`
+/// overlay and `--help` list it, and the command bar completes against it. A
+/// verb the parser does not dispatch is therefore impossible to offer to a user,
+/// and a verb the parser does dispatch is impossible to leave out of the help.
+pub const COMMANDS: &[(&str, &str)] = &[
+    (
+        "start [ASSETS] [--size N] [--dry-run]",
+        "start the core (adopts if already running)",
+    ),
+    ("stop", "stop the core this gateway spawned"),
+    ("status", "round / stats / positions / balance"),
+    ("positions [N]", "closed-trade history (newest first)"),
+    ("strategies", "list strategies and enabled state"),
+    ("strategy <name> on|off", "enable/disable one strategy"),
+    ("extensions", "list extensions and state"),
+    ("extension <name> on|off", "enable/disable one extension"),
+    ("flatten <position_id>", "force-close one open position"),
+    ("markets", "list market plugins"),
+    ("netcheck", "probe the network paths the venue uses"),
+    ("proposals [N]", "evolution proposals (pending first)"),
+    (
+        "decide <id> accept|reject|defer",
+        "vote on one evolution proposal",
+    ),
+    ("auto-evolve on|off", "unattended mode switch (persisted)"),
+    ("evolve on|off", "evolution engine switch (persisted)"),
+    ("rollback <strategy>", "undo one strategy's last evolution"),
+    ("help", ""),
+];
+
+/// The verb a usage dispatches: its first token.
+fn verb_of(usage: &'static str) -> &'static str {
+    usage.split(' ').next().unwrap_or("")
+}
+
+/// Every verb the gateway dispatches, in help order — what the command bar
+/// offers as completion candidates.
+pub fn command_verbs() -> impl Iterator<Item = &'static str> {
+    COMMANDS.iter().map(|&(usage, _)| verb_of(usage))
+}
+
+/// One line per command, `usage` and `summary` in columns: the single renderer
+/// behind [`help_text`], the TUI overlay and the panel's `--help`.
+pub fn command_lines() -> impl Iterator<Item = String> {
+    let width = COMMANDS
+        .iter()
+        .map(|(usage, _)| usage.len())
+        .max()
+        .unwrap_or(0);
+    COMMANDS.iter().map(move |&(usage, summary)| {
+        if summary.is_empty() {
+            format!("  {usage}")
+        } else {
+            format!("  {usage:<width$}   {summary}")
+        }
+    })
+}
+
+/// The `help` text.
+pub fn help_text() -> String {
+    let mut out = String::from("crypto-hft commands (UI Kit gateway):");
+    for line in command_lines() {
+        out.push('\n');
+        out.push_str(&line);
+    }
+    out
+}
 
 fn status_json(disp: &Dispatcher, s: &UiSnapshot) -> serde_json::Value {
     let round = s.round.as_ref();
@@ -1090,5 +1131,59 @@ mod tests {
             managing.restart_policy().enabled,
             "--manage must imply crash replacement, or E12(c) is report-only"
         );
+    }
+
+    /// Every row of [`COMMANDS`] must dispatch, and to the command its own usage
+    /// claims. The match in `variant` is the tripwire: a new `Command` variant
+    /// stops compiling here until its row is added to the table (the drift that
+    /// left a phantom `risk` in the panel's completion and hid four real verbs).
+    #[test]
+    fn every_command_row_dispatches() {
+        fn variant(c: &Command) -> &'static str {
+            match c {
+                Command::Start { .. } => "start",
+                Command::Stop => "stop",
+                Command::Status => "status",
+                Command::Positions { .. } => "positions",
+                Command::Strategies => "strategies",
+                Command::StrategySet { .. } => "strategy",
+                Command::Extensions => "extensions",
+                Command::ExtensionSet { .. } => "extension",
+                Command::Flatten { .. } => "flatten",
+                Command::Markets => "markets",
+                Command::NetCheck => "netcheck",
+                Command::Help => "help",
+                Command::EvolutionProposals { .. } => "proposals",
+                Command::EvolutionDecide { .. } => "decide",
+                Command::EvolutionAuto { .. } => "auto-evolve",
+                Command::EvolutionEngine { .. } => "evolve",
+                Command::EvolutionRollback { .. } => "rollback",
+            }
+        }
+        // Rows whose usage carries placeholders need a filled-in line to parse.
+        const FILLED: &[(&str, &str)] = &[
+            ("strategy", "strategy alpha on"),
+            ("extension", "extension market_polymarket on"),
+            ("flatten", "flatten pos-1"),
+            ("decide", "decide prop-1 accept"),
+            ("rollback", "rollback alpha"),
+            ("auto-evolve", "auto-evolve on"),
+            ("evolve", "evolve on"),
+        ];
+        for &(usage, _) in COMMANDS {
+            let verb = verb_of(usage);
+            let line = FILLED
+                .iter()
+                .find(|(v, _)| *v == verb)
+                .map(|(_, line)| *line)
+                .unwrap_or(verb);
+            let parsed = parse_command(line)
+                .unwrap_or_else(|e| panic!("COMMANDS row `{verb}` (`{line}`) does not parse: {e}"));
+            assert_eq!(
+                variant(&parsed),
+                verb,
+                "COMMANDS row `{verb}` parses as a different command"
+            );
+        }
     }
 }

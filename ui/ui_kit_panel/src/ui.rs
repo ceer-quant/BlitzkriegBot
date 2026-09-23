@@ -2,6 +2,7 @@
 
 use crate::app::{App, CheckStage, Tab, HINTS};
 use blitzkrieg_ui_kit::core::types::EvolutionProposalView;
+use blitzkrieg_ui_kit::gateway::command_lines;
 use blitzkrieg_ui_kit::UiSnapshot;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
@@ -157,9 +158,7 @@ fn centered_rect(area: Rect, pct_x: u16, height: u16) -> Rect {
 /// The `?` overlay: every key and command in one screen.
 fn render_help(f: &mut Frame, _app: &App) {
     let area = f.area();
-    let rect = centered_rect(area, 80, 28);
-    f.render_widget(Clear, rect);
-    let keys = vec![
+    let mut keys = vec![
         Line::from(Span::styled(
             "KEYS",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -186,21 +185,18 @@ fn render_help(f: &mut Frame, _app: &App) {
             "COMMANDS (in the bar)",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         )),
-        Line::from("  status                core, balance, feed, trades at a glance"),
-        Line::from("  positions [N]         open positions"),
-        Line::from("  strategy              list strategies (+ on/off when allowed)"),
-        Line::from("  extension             list/toggle extensions"),
-        Line::from("  markets               list market plugins"),
-        Line::from("  proposals [N]         evolution proposals (pending first)"),
-        Line::from("  decide <id> a|r|d     accept / reject / defer an evolution proposal"),
-        Line::from("  auto-evolve on|off    unattended evolution switch"),
-        Line::from("  evolve on|off         the engine switch (no evolution runs while off)"),
-        Line::from("  rollback <strategy>   undo the last accepted promotion"),
-        Line::from("  netcheck              probe the network paths this venue uses"),
-        Line::from("  start ASSETS ...      start a managed DRY core (needs --manage)"),
-        Line::from("  stop                  stop the managed core (needs --manage)"),
-        Line::from("  help                  what you are reading"),
     ];
+    for line in command_lines() {
+        keys.push(Line::from(line));
+    }
+    keys.push(Line::from(Span::styled(
+        "  start / stop need --manage",
+        Style::default().fg(DIM),
+    )));
+    // Sized to the content: the list grows with the gateway's command table, and
+    // a fixed height would silently clip its tail.
+    let rect = centered_rect(area, 80, (keys.len() + 2) as u16);
+    f.render_widget(Clear, rect);
     f.render_widget(
         Paragraph::new(keys).block(
             Block::default()
