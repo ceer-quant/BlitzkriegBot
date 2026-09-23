@@ -108,6 +108,27 @@ export class CoreClient {
     return this.starting.finally(() => { this.starting = null; });
   }
 
+  /**
+   * Attach to a core that is ALREADY listening — no spawn.
+   *
+   * The path for every client that did not start the process it is talking to:
+   * the panel supervisor did, another harness did, or (for the operator probes)
+   * the deployment did. `ownsProc` stays false on an adopted client, so `stop()`
+   * can only close this socket — it cannot signal a core it does not own, which
+   * is what makes it safe to point at a live one.
+   *
+   * One attempt, no retry: every caller either spins on the socket path itself
+   * (the gate scripts all wait for it to appear) or is talking to a core it
+   * knows is live. Retrying here would turn "the core is gone" — an assertion
+   * several gates make — into a multi-second wait per probe, and a UDS connect
+   * fails at once (ENOENT / ECONNREFUSED) rather than hanging.
+   */
+  static async connect({ socketPath } = {}) {
+    const client = new CoreClient({ socketPath, autoRestart: false });
+    await client.#connectWithRetry(0); // deadline 0 → the first failure gives up
+    return client;
+  }
+
   async #boot() {
     if (!existsSync(this.binaryPath)) {
       throw new CoreClientError(`blitzkrieg-core binary not found: ${this.binaryPath}`);
@@ -305,6 +326,31 @@ export class CoreClient {
     if (!(await awaitExit(killMs))) {
       throw new CoreClientError(`blitzkrieg-core (pid ${proc.pid}) did not exit after SIGKILL`);
     }
+  }
+}
+
+/**
+ * One request over an already-listening socket, then hang up.
+ *
+ * This replaces the per-script `rpc()` helpers that each spoke the wire
+ * protocol themselves, and it replaces them for a reason beyond line count: the
+ * core broadcasts `core.event` to EVERY session (`ipc/server.rs`), so a client
+ * that reads only the first line can read a notification instead of its reply
+ * and quietly answer `undefined` — a gate that then fails on a correct core, or
+ * worse, passes an assertion about a value it never received. This client
+ * matches replies by id and skips notifications.
+ *
+ * Rejects with a `CoreClientError` on an RPC error, on a timeout, and on an
+ * unreachable socket. `timeoutMs` bounds the request; the connect is a single
+ * attempt (see `connect`).
+ */
+export async function requestOnce(socketPath, method, params = {}, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+  const client = await CoreClient.connect({ socketPath });
+  try {
+    return await client.request(method, params, timeoutMs);
+  } finally {
+    // Closes the socket only: an adopted client owns no process to signal.
+    await client.stop({ cancelRestingOrders: false });
   }
 }
 

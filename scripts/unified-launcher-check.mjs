@@ -27,6 +27,7 @@ import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import net from 'node:net';
+import { requestOnce } from './lib/core-client.mjs';
 
 const ROOT = process.cwd();
 const BIN = join(ROOT, 'target', 'release', 'blitzkrieg');
@@ -63,47 +64,11 @@ function assert(ok, msg) {
   console.log(`  ok   ${msg}`);
 }
 
-function rpc(sock, method, params = {}) {
-  const LF = String.fromCharCode(10);
-  return new Promise((res) => {
-    let resolved = false;
-    const c = net.connect(sock);
-    let b = '';
-    c.on('connect', () =>
-      c.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) + LF)
-    );
-    c.on('data', (d) => {
-      b += d.toString('utf8');
-      let idx;
-      while ((idx = b.indexOf(LF)) >= 0) {
-        const line = b.slice(0, idx).trim();
-        b = b.slice(idx + 1);
-        if (!line) continue;
-        try {
-          const parsed = JSON.parse(line);
-          if (parsed && parsed.id === 1) {
-            resolved = true;
-            c.end();
-            return res(parsed.error ? { __error: parsed.error } : (parsed.result ?? null));
-          }
-        } catch {}
-      }
-    });
-    c.on('error', () => {
-      if (!resolved) {
-        resolved = true;
-        res(null);
-      }
-    });
-    setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        try { c.end(); } catch {}
-        res(null);
-      }
-    }, 4000);
-  });
-}
+// A reachability probe, not a data path: this gate's assertions compare against
+// `null` ("the core is gone") and retry in their own loops, so a refused or
+// unanswered call reads as `null` here rather than throwing.
+const rpc = (sock, method, params = {}) =>
+  requestOnce(sock, method, params, { timeoutMs: 4000 }).catch(() => null);
 
 /**
  * Log into the panel on `port` (gateway mode arms sessions on /api/*) and

@@ -15,48 +15,25 @@
  */
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
+import { CoreClient } from './lib/core-client.mjs';
 import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import net from 'net';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'positiondb-'));
 const POS_LOG = join(WORK, 'positions.jsonl');
 
-let sock, buf = '', seq = 0;
-const pending = new Map();
-function connect(path) {
-  return new Promise((resolve, reject) => {
-    if (sock) { try { sock.destroy(); } catch {} }
-    buf = '';
-    sock = net.connect(path, () => resolve());
-    sock.on('error', reject);
-    sock.on('data', (d) => {
-      buf += d.toString();
-      let i;
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, i); buf = buf.slice(i + 1);
-        if (!line.trim()) continue;
-        let msg; try { msg = JSON.parse(line); } catch { continue; }
-        if (msg.id != null && pending.has(msg.id)) {
-          const { resolve: res, reject: rej } = pending.get(msg.id); pending.delete(msg.id);
-          msg.error ? rej(new Error(`${msg.error.code}: ${msg.error.message}`)) : res(msg.result);
-        }
-      }
-    });
-  });
+// ── JSON-RPC over the UDS ────────────────────────────────────────────────────
+// One adopted connection at a time, from the shared client: this gate spawns
+// each core itself and re-attaches to the replacement's socket.
+let client = null;
+async function connect(path) {
+  await client?.stop({ cancelRestingOrders: false });
+  client = await CoreClient.connect({ socketPath: path });
 }
-function rpc(method, params = {}) {
-  const id = ++seq;
-  return new Promise((res, rej) => {
-    pending.set(id, { resolve: res, reject: rej });
-    // Never hang the harness on a lost reply.
-    setTimeout(() => { if (pending.has(id)) { pending.delete(id); rej(new Error(`timeout: ${method}`)); } }, 5000);
-    sock.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-  });
-}
+const rpc = (method, params = {}) => client.request(method, params);
 async function boot(path, extra = []) {
   try { unlinkSync(path); } catch {}
   const p = spawn(BIN, ['--socket', path, '--mode', 'dry', '--tick-ms', '50', '--seed-balance', '1000',

@@ -20,8 +20,7 @@ import { spawn } from './lib/child-guard.mjs';
 import { mkdtempSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import net from 'net';
-import { CoreClient, rpc } from './lib/core-client.mjs';
+import { CoreClient, requestOnce } from './lib/core-client.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const SOCK = join(tmpdir(), `adopt-${process.pid}.sock`);
@@ -69,13 +68,7 @@ function coreChildren() {
     .split('\n').filter((l) => l.includes('blitzkrieg-core') && l.includes('adopt-')).length;
 }
 const churn = coreChildren();
-const req = (m) => new Promise((res) => {
-  const c = net.connect(SOCK); let b = '';
-  c.on('connect', () => c.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: m }) + '\n'));
-  c.on('data', (d) => { b += d; const i = b.indexOf('\n'); if (i < 0) return; try { res(JSON.parse(b.slice(0, i)).result); } catch { res(null); } c.end(); });
-  c.on('error', () => res(null)); setTimeout(() => { try { c.end(); } catch {} res(null); }, 3000);
-});
-const ml = await req('market.list');
+const ml = await requestOnce(SOCK, 'market.list').catch(() => null);
 console.log(`settled after ${settleMs}ms; doomed-child churn = ${churn} (bounded)`);
 console.log('client connected after settle :', connected);
 console.log('owner still serving market.list:', ml?.active ?? '(none)');

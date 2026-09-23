@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Compare panel prices vs real Polymarket CLOB; detect staleness. */
-import net from 'net';
 import { resolveSocketPath } from './lib/core-socket.mjs';
+import { requestOnce } from './lib/core-client.mjs';
 
 const SOCK = await resolveSocketPath();
 const ROUND_SEC = 900;
@@ -11,17 +11,9 @@ const get = async (url) => {
   return r;
 };
 
-function rpc(method, params = {}) {
-  return new Promise((res) => {
-    const c = net.connect(SOCK); let b = ''; let done = false;
-    const fin = (v) => { if (done) return; done = true; try { c.destroy(); } catch {} res(v); };
-    c.on('connect', () => c.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) + '\n'));
-    c.on('data', (d) => { b += d.toString(); const n = b.indexOf('\n'); if (n < 0) return;
-      try { fin(JSON.parse(b.slice(0, n)).result); } catch { fin(null); } });
-    c.on('error', () => fin(null));
-    setTimeout(() => fin(null), 4000);
-  });
-}
+// A reading, not an assertion: a core that is down has to print as one.
+const rpc = (method, params = {}) =>
+  requestOnce(SOCK, method, params, { timeoutMs: 4000 }).catch(() => null);
 
 const clobMid = async (tok) => {
   try { const r = await get(`https://clob.polymarket.com/midpoint?token_id=${tok}`);

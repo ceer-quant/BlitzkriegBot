@@ -15,7 +15,7 @@
 
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
-import net from 'net';
+import { CoreClient } from './lib/core-client.mjs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
@@ -50,35 +50,11 @@ const args = [
 const proc = spawn(BIN, args, { stdio: ['ignore', 'inherit', 'inherit'], cwd: WORKDIR });
 proc.on('exit', (c) => { if (c !== null) console.error(`core exited early (${c})`); });
 
-// ── minimal JSON-RPC over the UDS ────────────────────────────────────────────
-let sock = null, buf = '', seq = 0;
-const pending = new Map();
-function connect() {
-  return new Promise((resolve, reject) => {
-    sock = net.connect(SOCK, () => resolve());
-    sock.on('error', reject);
-    sock.on('data', (d) => {
-      buf += d.toString();
-      let i;
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, i); buf = buf.slice(i + 1);
-        if (!line.trim()) continue;
-        let msg; try { msg = JSON.parse(line); } catch { continue; }
-        if (msg.id != null && pending.has(msg.id)) {
-          const { resolve: res, reject: rej } = pending.get(msg.id); pending.delete(msg.id);
-          msg.error ? rej(new Error(`${msg.error.code}: ${msg.error.message}`)) : res(msg.result);
-        }
-      }
-    });
-  });
-}
-function rpc(method, params = {}) {
-  const id = ++seq;
-  return new Promise((res, rej) => {
-    pending.set(id, { resolve: res, reject: rej });
-    sock.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-  });
-}
+// ── JSON-RPC over the UDS ────────────────────────────────────────────────────
+// One adopted connection for the whole run, from the shared client: this gate
+// spawns the core itself, so it attaches to the socket it just waited for.
+let client = null;
+const rpc = (method, params = {}) => client.request(method, params);
 
 const M = { BOOK: 'books.snapshot', MARKETS: 'engine.markets', STATS: 'engine.stats',
             POS: 'positions.list', ORDERS: 'orders.list', TRADES: 'trades.history', ROUND: 'engine.round' };
@@ -89,7 +65,7 @@ const fmt = (n) => Number(n).toFixed(4);
 async function main() {
   // wait for the socket
   for (let i = 0; i < 100; i++) { if (existsSync(SOCK)) break; await sleep(50); }
-  await connect();
+  client = await CoreClient.connect({ socketPath: SOCK });
   await rpc('core.ready');
   console.log(`binary: ${BIN}`);
   console.log(`core ready (${args.join(' ')})\n`);

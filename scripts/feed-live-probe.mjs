@@ -1,16 +1,11 @@
 #!/usr/bin/env node
 /** Tight probe: is the panel price feed live, and does it lag real CLOB? */
-import net from 'net';
 import { resolveSocketPath } from './lib/core-socket.mjs';
+import { requestOnce } from './lib/core-client.mjs';
 const SOCK = await resolveSocketPath();
 const RS = 900;
-const rpc = (m, p = {}) => new Promise((res) => {
-  const c = net.connect(SOCK); let b = ''; let d = false;
-  const fin = (v) => { if (d) return; d = true; try { c.destroy(); } catch {} res(v); };
-  c.on('connect', () => c.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: m, params: p }) + '\n'));
-  c.on('data', (x) => { b += x.toString(); const n = b.indexOf('\n'); if (n < 0) return; try { fin(JSON.parse(b.slice(0, n)).result); } catch { fin(null); } });
-  c.on('error', () => fin(null)); setTimeout(() => fin(null), 3000);
-});
+// A reading, not an assertion: a core that is down has to print as one.
+const rpc = (m, p = {}) => requestOnce(SOCK, m, p, { timeoutMs: 3000 }).catch(() => null);
 const mid = async (t) => { try { const r = await fetch(`https://clob.polymarket.com/midpoint?token_id=${t}`, { signal: AbortSignal.timeout(5000) }); if (!r.ok) return null; const j = await r.json(); return j.mid != null ? Number(j.mid) : null; } catch { return null; } };
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 

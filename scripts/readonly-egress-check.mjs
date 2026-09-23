@@ -33,42 +33,13 @@ import { spawn } from './lib/child-guard.mjs';
 import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import net from 'net';
+import { requestOnce as rpc } from './lib/core-client.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'readonly-'));
 const ORDER_LOG = join(WORK, 'orders.jsonl');
 const TRADE_LOG = join(WORK, 'trades.jsonl');
-
-function rpc(sock, method, params = {}) {
-  return new Promise((res) => {
-    const c = net.connect(sock);
-    let b = '';
-    c.on('connect', () =>
-      c.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) + '\n'),
-    );
-    c.on('data', (d) => {
-      b += d;
-      const i = b.indexOf('\n');
-      if (i < 0) return;
-      try {
-        const j = JSON.parse(b.slice(0, i));
-        res(j.error ? { __error: j.error } : j.result);
-      } catch {
-        res(null);
-      }
-      c.end();
-    });
-    c.on('error', () => res(null));
-    setTimeout(() => {
-      try {
-        c.end();
-      } catch {}
-      res(null);
-    }, 3000);
-  });
-}
 
 const sock = join(WORK, 'core.sock');
 const out = [];

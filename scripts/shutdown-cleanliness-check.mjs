@@ -23,40 +23,17 @@ import { spawn } from './lib/child-guard.mjs';
 import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import net from 'net';
+import { requestOnce } from './lib/core-client.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'shutdown-'));
 const ORDER_LOG = join(WORK, 'orders.jsonl');
 
-function rpc(sock, method, params = {}) {
-  return new Promise((res) => {
-    const c = net.connect(sock);
-    let b = '';
-    c.on('connect', () =>
-      c.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) + '\n'),
-    );
-    c.on('data', (d) => {
-      b += d;
-      const i = b.indexOf('\n');
-      if (i < 0) return;
-      try {
-        res(JSON.parse(b.slice(0, i)).result);
-      } catch {
-        res(null);
-      }
-      c.end();
-    });
-    c.on('error', () => res(null));
-    setTimeout(() => {
-      try {
-        c.end();
-      } catch {}
-      res(null);
-    }, 3000);
-  });
-}
+// A refused or unanswered call reads as `null` here on purpose: the verdict
+// table below distinguishes "no reply" from a wrong value, and the gate is about
+// shutdown behaviour, not about which RPC failed.
+const rpc = (sock, method, params = {}) => requestOnce(sock, method, params).catch(() => null);
 
 function boot(sock) {
   const p = spawn(
