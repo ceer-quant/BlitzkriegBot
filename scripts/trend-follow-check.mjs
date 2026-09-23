@@ -30,127 +30,26 @@
  *   (needs target/release/blitzkrieg-core built)
  */
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
-import { spawn } from './lib/child-guard.mjs';
 import { requireFreshStrategyDylibs } from './lib/strategy-dylib-freshness.mjs';
-import net from 'net';
-import { join } from 'path';
-import { tmpdir } from 'os';
-import { existsSync, unlinkSync, mkdtempSync } from 'fs';
+import {
+  isOn, makeSession, report, requireCoreBinary, rowFor, setMarket, setMarkets,
+  settle, sleep, feedHold,
+} from './lib/strategy-leg-harness.mjs';
 
-const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
-const ROUND_SEC = 3600;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-if (!existsSync(BIN)) { console.error(`missing binary: ${BIN} (cargo build --release --workspace --locked)`); process.exit(2); }
+requireCoreBinary();
 
 // #207: the chase leg is a cdylib the kernel dlopens — not code in the binary
 // built above. A stale library would make every assertion below describe the
 // previous build of the leg.
 requireFreshStrategyDylibs({ gate: 'trend-follow-check', require: ['trend_follow_strategy'] });
 
-/**
- * Spawn a core, hand the connected RPC client to `body`, always tear down.
- * `extraArgs` is where a startup flag under test (e.g. --enable-strategy) goes.
- */
-async function session(tag, extraArgs, body) {
-  const sock = join(tmpdir(), `blitzkrieg-e4a-${tag}-${process.pid}.sock`);
-  const workdir = mkdtempSync(join(tmpdir(), `blitzkrieg-e4a-${tag}-`));
-  try { unlinkSync(sock); } catch {}
-
-  const args = [
-    '--socket', sock, '--mode', 'dry', '--tick-ms', '50',
-    '--seed-balance', '1000', '--max-order-notional', '50',
-    '--engine', '--no-discovery', '--no-event-archive', '--no-trade-log',
-    // Scratch dir only: never restore, or leave behind, a real position/order.
-    '--no-order-log', '--no-position-log',
-    '--round-sec', String(ROUND_SEC),
-    // Round-window gates off. The core derives time_left from the WALL clock
-    // (the declared expiresAtMs is not plumbed to the scanner), so with a
-    // 3600s round this check fails for the three minutes before every hour:
-    // entries are refused with "Too close to expiry" and all three assertions
-    // below collapse into "placed NO entry". Pinning the round boundary is not
-    // what this gate is about — the entry, its LIFT pricing and the starve
-    // attribution are — so open the window the way every other engine gate does.
-    '--min-round-age', '0', '--min-time-left', '0',
-    // The confirmation window is 60s by default and its floor 10s; both
-    // strategies here confirm off the tick stream, so shorten the window (and
-    // drop the floor) to keep the check fast without weakening what it asserts.
-    '--trend-confirm-sec', '10', '--trend-window-floor-ms', '0',
-    ...extraArgs,
-  ];
-  const proc = spawn(BIN, args, { stdio: ['ignore', 'ignore', 'pipe'], cwd: workdir });
-  let stderr = '';
-  proc.stderr.on('data', (d) => { stderr += d.toString(); });
-
-  let sockc = null, buf = '', seq = 0;
-  const pending = new Map();
-  const rpc = (method, params = {}) => new Promise((res, rej) => {
-    const id = ++seq; pending.set(id, { resolve: res, reject: rej });
-    sockc.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-  });
-  const connect = () => new Promise((res, rej) => {
-    sockc = net.connect(sock, () => res());
-    sockc.on('error', rej);
-    sockc.on('data', (d) => {
-      buf += d.toString(); let i;
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, i); buf = buf.slice(i + 1);
-        if (!line.trim()) continue;
-        let msg; try { msg = JSON.parse(line); } catch { continue; }
-        if (msg.id != null && pending.has(msg.id)) {
-          const p = pending.get(msg.id); pending.delete(msg.id);
-          msg.error ? p.reject(new Error(msg.error.message)) : p.resolve(msg.result);
-        }
-      }
-    });
-  });
-
-  try {
-    for (let i = 0; i < 120; i++) { if (existsSync(sock)) break; await sleep(50); }
-    await connect();
-    await rpc('core.ready');
-    return await body({ rpc, stderr: () => stderr });
-  } finally {
-    proc.kill('SIGKILL');
-    try { unlinkSync(sock); } catch {}
-  }
-}
-
-const rowFor = (stats, name) => (stats.strategies || []).find((s) => s.name === name);
-const isOn = (list, name) => (list.strategies || []).find((s) => s.name === name)?.enabled;
-
-/**
- * Declare a round's markets in one shot. `specs` is one entry per asset:
- * `{ asset, upToken, downToken, upBid, upAsk, downBid, downAsk }`. A side is
- * left untraded when its bid is null. Feed every asset in the SAME call: the
- * handler replaces the whole market list, so two calls would drop the first.
- */
-async function setMarkets(rpc, now, specs) {
-  const slot = Math.floor(now / 1000 / ROUND_SEC);
-  await rpc('engine.markets', {
-    markets: specs.map((s) => ({
-      asset: s.asset, conditionId: `0xc-${s.asset}`, questionId: `0xq-${s.asset}`,
-      upTokenId: s.upToken, downTokenId: s.downToken, upPrice: 0.5, downPrice: 0.5,
-      expiresAtMs: (slot + 1) * ROUND_SEC * 1000, roundSlot: slot,
-      negRisk: true, question: `${s.asset} up/down`,
-    })),
-  });
-  for (const s of specs) {
-    if (s.upBid != null) {
-      await rpc('books.snapshot', { tokenId: s.upToken, bids: [{ price: s.upBid, size: 100 }], asks: [{ price: s.upAsk, size: 100 }] });
-    }
-    if (s.downBid != null) {
-      await rpc('books.snapshot', { tokenId: s.downToken, bids: [{ price: s.downBid, size: 100 }], asks: [{ price: s.downAsk, size: 100 }] });
-    }
-  }
-}
-
-/** One market, BTC, tokens UP/DOWN — the shape most sections only need. */
-async function setMarket(rpc, { now, upBid, upAsk, downBid, downAsk }) {
-  await setMarkets(rpc, now, [
-    { asset: 'BTC', upToken: 'UP', downToken: 'DOWN', upBid, upAsk, downBid, downAsk },
-  ]);
-}
+// The confirmation window is 60s by default and its floor 10s; both strategies
+// here confirm off the tick stream, so shorten the window (and drop the floor)
+// to keep the check fast without weakening what it asserts.
+const session = makeSession({
+  tagPrefix: 'blitzkrieg-e4a',
+  baseArgs: ['--trend-confirm-sec', '10', '--trend-window-floor-ms', '0'],
+});
 
 /** Feed a breakout: the token's bid climbs 0.50 → 0.62 on the real cent grid. */
 async function feedBreakout(rpc, tokenId = 'UP', steps = 12) {
@@ -159,31 +58,6 @@ async function feedBreakout(rpc, tokenId = 'UP', steps = 12) {
     await rpc('books.snapshot', { tokenId, bids: [{ price: bid, size: 100 }], asks: [{ price: Math.round((bid + 0.01) * 100) / 100, size: 100 }] });
     await sleep(40);
   }
-}
-
-/**
- * Hold a book steady for `ms`. The dip buyer's candidate list only contains
- * trend-CONFIRMED tokens, and confirmation is a rolling window: it needs samples
- * spanning >=90% of `confirm_sec` with the mid held above `min_price`. A single
- * dip snapshot with no history behind it confirms nothing, so the side that is
- * meant to dip has to be held above the threshold for the whole window first.
- */
-async function feedHold(rpc, tokenId, bid, ask, ms, stepMs = 40) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    await rpc('books.snapshot', { tokenId, bids: [{ price: bid, size: 100 }], asks: [{ price: ask, size: 100 }] });
-    await sleep(stepMs);
-  }
-}
-
-/** Wait until `pick(rpc)` returns something truthy, or give up. */
-async function settle(rpc, pick, tries = 120) {
-  for (let i = 0; i < tries; i++) {
-    await sleep(50);
-    const v = await pick(rpc);
-    if (v) return v;
-  }
-  return null;
 }
 
 const problems = [];
@@ -405,13 +279,13 @@ async function main() {
 
 console.log('trend_follow as a first-class strategy on the real binary (E4-a / #30)\n');
 await main();
-if (problems.length) {
-  for (const p of problems) console.log(`  FAIL ${p}`);
-  console.log(`\ntrend-follow: ${problems.length} problem(s)`);
-  process.exit(1);
-}
-console.log('  ok   starts off and toggles alone; --enable-strategy starts it on');
-console.log('  ok   owns its accounting row; declares and honours no gate exemption');
-console.log('  ok   chases a breakout, is gated by spot, and starves nothing');
-console.log('  ok   evolved with its own six knobs, and a toggle neither adds nor drops the cell');
-console.log('\ntrend-follow: pass');
+report({
+  name: 'trend-follow',
+  problems,
+  okLines: [
+    'starts off and toggles alone; --enable-strategy starts it on',
+    'owns its accounting row; declares and honours no gate exemption',
+    'chases a breakout, is gated by spot, and starves nothing',
+    'evolved with its own six knobs, and a toggle neither adds nor drops the cell',
+  ],
+});
