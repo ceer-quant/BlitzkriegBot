@@ -37,6 +37,8 @@ const check = (label, fn) => {
 
 const app = read('..', '..', 'ui_kit_panel', 'src', 'app.rs')
 const ui = read('..', '..', 'ui_kit_panel', 'src', 'ui.rs')
+/** The gateway's single command table — where the bar's vocabulary lives. */
+const gatewayCommands = read('..', '..', 'ui_kit', 'src', 'gateway', 'command.rs')
 const shell = read('src', 'App.vue')
 
 console.log('the two nav surfaces, parsed from source')
@@ -126,7 +128,12 @@ check('TUI flatten confirm dialog ↔ WebUI 强平按钮', () => {
 
 check('TUI `n` 网络诊断浮层 ↔ WebUI 设置页网络诊断卡片', () => {
   assert.ok(new RegExp('fn render_net_check\\(').test(ui), 'TUI network overlay gone')
-  assert.ok(app.includes('netcheck'), 'TUI command vocabulary lost the netcheck verb')
+  // The bar's vocabulary is the gateway's own table now — app.rs used to hold a
+  // hand-copied list, which had already drifted (a phantom `risk`, four real
+  // verbs missing). So pin both halves: the TUI reads the table, and the table
+  // still carries the verb.
+  assert.ok(app.includes('command_verbs('), 'the command bar stopped reading the gateway command table')
+  assert.ok(gatewayCommands.includes('"netcheck"'), 'the gateway command table lost the netcheck verb')
   const settings = read('src', 'pages', 'SettingsPage.vue')
   assert.ok(settings.includes('网络诊断'), 'WebUI network diagnosis card gone')
   // Both faces print the same reading rules — a status the core adds must not be
