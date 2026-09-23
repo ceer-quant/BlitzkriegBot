@@ -455,10 +455,10 @@ impl CoreConfig {
 /// (`dog_strategy-1a2b3c4d`). That example is loaded dynamically via IPC
 /// `strategy.load` in tests and must not be auto-loaded at startup.
 ///
-/// Deliberately not a substring test: `crazydog_strategy` merely ENDS in those
-/// characters, and a substring test would silently drop it from startup with no
-/// error — the exact failure mode that is hardest to notice, since the kernel
-/// boots fine and simply never trades that strategy.
+/// Deliberately not a substring test: any artifact whose stem merely ENDS in
+/// `dog_strategy` would be silently dropped from startup with no error — the
+/// exact failure mode that is hardest to notice, since the kernel boots fine and
+/// simply never trades that strategy.
 fn is_dog_strategy_artifact(name: &str) -> bool {
     let stem = name
         .strip_prefix("lib")
