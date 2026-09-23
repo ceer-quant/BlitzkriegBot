@@ -26,6 +26,7 @@
 // Guarded spawn: this gate starts both a gateway and a core directly, so an
 // interrupted run used to leave them behind with PPID=1.
 import { spawnSync, spawn } from './lib/child-guard.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -38,11 +39,8 @@ const SOCK = join(tmpdir(), `webapp-check-${process.pid}.sock`);
 const WORK = mkdtempSync(join(tmpdir(), 'webapp-check-'));
 const DIST = join(ROOT, 'ui/webapp/webui/dist');
 
-let failures = 0;
-const check = (name, cond, detail = '') => {
-  if (!cond) failures++;
-  console.log(`  ${cond ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
-};
+const gate = createChecks();
+const { check } = gate;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // [0] The Vue build artifact must exist, be non-trivial, and be the thing the
@@ -336,5 +334,5 @@ try {
   try { rmSync(WORK, { recursive: true, force: true }); } catch {}
 }
 
-console.log(failures === 0 ? '\nRESULT: PASS' : `\nRESULT: FAIL (${failures})`);
-process.exit(failures === 0 ? 0 : 1);
+console.log(gate.failures === 0 ? '\nRESULT: PASS' : `\nRESULT: FAIL (${gate.failures})`);
+process.exit(gate.failures === 0 ? 0 : 1);

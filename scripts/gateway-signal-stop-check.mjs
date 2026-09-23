@@ -4,6 +4,7 @@
  * stop the core it owns, rather than orphaning it.
  */
 import { spawn, spawnSync } from './lib/child-guard.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 import { existsSync, mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -18,13 +19,10 @@ const PASSWORD = 'gate-signal-pass-4b71';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'gateway-signal-'));
 const SOCK = join(WORK, 'core.sock');
-const claims = [];
 const spawned = new Set();
 
-function check(name, ok, detail = '') {
-  claims.push({ name, ok });
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
-}
+const gate = createChecks();
+const { check } = gate;
 function commandOf(pid) {
   const out = spawnSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
   return (out.stdout ?? '').trim();
@@ -90,6 +88,6 @@ try {
   await sleep(300);
   try { rmSync(WORK, { recursive: true, force: true }); } catch {}
 }
-const failed = claims.filter((c) => !c.ok);
-console.log(failed.length ? `RESULT: FAIL — ${failed.length}/${claims.length} claims failed` : `RESULT: PASS — ${claims.length}/${claims.length} claims`);
+const failed = gate.results.filter((c) => !c.ok);
+console.log(failed.length ? `RESULT: FAIL — ${failed.length}/${gate.results.length} claims failed` : `RESULT: PASS — ${gate.results.length}/${gate.results.length} claims`);
 if (failed.length) process.exit(1);

@@ -20,6 +20,7 @@
  */
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 import net from 'net';
 import { join, resolve, dirname } from 'path';
 import { tmpdir } from 'os';
@@ -34,11 +35,8 @@ const RUN_MS = FULL ? 600_000 : 90_000;
 const HZ = 10;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const checks = [];
-const check = (name, ok, detail = '') => {
-  checks.push({ name, ok });
-  console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
-};
+const gate = createChecks();
+const { check } = gate;
 
 if (!existsSync(CORE)) {
   console.error(`missing core binary: ${CORE} (cargo build --release --workspace --locked)`);
@@ -208,6 +206,6 @@ try { proc.kill(); } catch {}
 await sleep(120);
 rmSync(workdir, { recursive: true, force: true });
 
-const failed = checks.filter((c) => !c.ok);
+const failed = gate.results.filter((c) => !c.ok);
 console.log(`\nRESULT: ${failed.length === 0 ? 'PASS' : `FAIL (${failed.length})`}`);
 process.exit(failed.length === 0 ? 0 : 1);

@@ -48,6 +48,7 @@ import { createReadStream, existsSync, readdirSync, statSync, writeFileSync } fr
 import { createInterface } from 'readline';
 import { dirname, basename, join, relative, resolve, sep } from 'path';
 import { fileURLToPath } from 'url';
+import { createChecks } from './lib/gate-harness.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -315,11 +316,8 @@ async function scanSegment(path, budget, sink) {
 
 // ── Self-test: the normalization and the selection rule, on hand-made edges ───
 function selfTest() {
-  let failures = 0;
-  const check = (name, cond, detail = '') => {
-    if (cond) console.log(`  ok   ${name}`);
-    else { failures++; console.log(`  FAIL ${name} ${detail}`); }
-  };
+  const gate = createChecks();
+  const { check } = gate;
   const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   // Prices are parsed from decimal STRINGS, so a difference like 0.51 - 0.50
   // carries binary-float noise; the assertions below compare with a tolerance
@@ -449,10 +447,10 @@ function selfTest() {
   check('the emitted book is JSON numbers with the best level first on each side',
     produced === JSON.stringify({ asks: [[0.51, 60], [0.52, 10]], bids: [[0.50, 60], [0.49, 10]] }), produced);
 
-  console.log(failures === 0
+  console.log(gate.failures === 0
     ? '\nARCHIVE-BOOK-EXTRACT SELF-TEST OK — normalization and token selection are what they claim.'
-    : `\nARCHIVE-BOOK-EXTRACT SELF-TEST FAILED (${failures})`);
-  process.exit(failures === 0 ? 0 : 1);
+    : `\nARCHIVE-BOOK-EXTRACT SELF-TEST FAILED (${gate.failures})`);
+  process.exit(gate.failures === 0 ? 0 : 1);
 }
 if (SELF_TEST) selfTest();
 

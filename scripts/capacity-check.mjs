@@ -60,6 +60,7 @@ import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
 import { describeQuote, feeModelProblems, feeQuoter, feeUsdFor } from './lib/fee-model.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -121,11 +122,8 @@ if (ladderPath) {
 }
 
 const BIN = coreBinaryPath();
-let failures = 0;
-function check(name, cond, detail = '') {
-  if (cond) console.log(`  ok   ${name}`);
-  else { failures++; console.log(`  FAIL ${name} ${detail}`); }
-}
+const gate = createChecks();
+const { check } = gate;
 
 const WORKDIR = mkdtempSync(join(tmpdir(), 'blitzkrieg-capacity-'));
 const SOCK = scratchSocketPath('capacity');
@@ -340,7 +338,7 @@ try {
   await core.stop();
 }
 
-console.log(failures === 0
+console.log(gate.failures === 0
   ? `\nCAPACITY OK — the ${sideName}-side impact curve is what it claims, and the caps are stated against it.`
-  : `\nCAPACITY FAILED (${failures})`);
-process.exit(failures === 0 ? 0 : 1);
+  : `\nCAPACITY FAILED (${gate.failures})`);
+process.exit(gate.failures === 0 ? 0 : 1);

@@ -32,6 +32,7 @@
 import { CoreClient, rpc } from './lib/core-client.mjs';
 import { checkCoreProvenance, coreBinaryPath } from './lib/core-provenance.mjs';
 import { spawn } from './lib/child-guard.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 import { mkdtempSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -45,14 +46,8 @@ if (!existsSync(BIN)) {
   process.exit(2);
 }
 
-let failures = 0;
-function check(name, cond, detail = '') {
-  if (cond) console.log(`  ok   ${name}`);
-  else {
-    failures++;
-    console.log(`  FAIL ${name}${detail ? ` ${detail}` : ''}`);
-  }
-}
+const gate = createChecks();
+const { check } = gate;
 const num = (v) => (v == null ? null : Number(v));
 
 /**
@@ -424,8 +419,8 @@ await session('reasons', {}, async (ctx) => {
 });
 
 console.log('');
-if (failures) {
-  console.log(`observability: ${failures} problem(s)`);
+if (gate.failures) {
+  console.log(`observability: ${gate.failures} problem(s)`);
   process.exit(1);
 }
 console.log('  ok   a refused order carries its reason, and the panel slot tracks the last one');

@@ -44,6 +44,7 @@ import { join } from 'path';
 import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -158,11 +159,8 @@ if (SELF_TEST) {
 // ── The real run: an isolated dry core on the account we were asked about ────
 
 const BIN = coreBinaryPath();
-let failures = 0;
-function check(name, cond, detail = '') {
-  if (cond) console.log(`  ok   ${name}`);
-  else { failures++; console.log(`  FAIL ${name} ${detail}`); }
-}
+const gate = createChecks();
+const { check } = gate;
 
 const WORKDIR = mkdtempSync(join(tmpdir(), 'blitzkrieg-sizing-'));
 const SOCK = scratchSocketPath('sizing');
@@ -298,18 +296,17 @@ try {
   for (const p of v.problems) check(`verdict — ${p}`, false);
   ran = true;
 } catch (e) {
-  failures++;
-  console.log('  FAIL harness error', e?.stack || e);
+  check('harness error', false, e?.stack || e);
 } finally {
   await core.stop();
 }
 
 console.log('');
-if (failures === 0 && ran) {
+if (gate.failures === 0 && ran) {
   console.log(`RISK-SIZING OK — every order that may open exposure is bounded by ${capUsd} USD ` +
     `(${CAP_PCT}% of the ${BALANCE} USD account), the over-cap ones are refused rather than truncated, ` +
     'and closing intents still pass at any size.');
 } else {
-  console.log(`RISK-SIZING FAILED (${failures || 1})`);
+  console.log(`RISK-SIZING FAILED (${gate.failures || 1})`);
 }
-process.exit(failures === 0 && ran ? 0 : 1);
+process.exit(gate.failures === 0 && ran ? 0 : 1);

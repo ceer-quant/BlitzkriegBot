@@ -22,6 +22,7 @@ import { join } from 'path';
 import { fileURLToPath } from 'url';
 import net from 'net';
 import { requestOnce } from './lib/core-client.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 
 const ROOT = join(fileURLToPath(import.meta.url), '..', '..');
 const BIN = join(ROOT, 'target/release/blitzkrieg-core');
@@ -40,12 +41,8 @@ for (const p of [BIN, PANEL, CAPTURE_PY]) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-let failures = 0;
-function check(name, cond, detail = '') {
-  const tag = cond ? 'ok  ' : 'FAIL';
-  if (!cond) failures++;
-  console.log(`  ${tag} ${name}${detail ? ` — ${String(detail).slice(0, 120)}` : ''}`);
-}
+const gate = createChecks();
+const { check } = gate;
 
 // This gate boots the core itself, so the socket is known: bind it here.
 const rpc = (method, params = {}) => requestOnce(SOCK, method, params);
@@ -140,8 +137,7 @@ try {
   check('alert shows this run’s kill reason', reason_ok,
     `reason snippet=${(text.match(/(wire-check|panel-check).{0,14}/g) || []).join(' | ')}`);
 } catch (e) {
-  console.error(`unexpected failure: ${e.message}`);
-  failures++;
+  check('the eventbus gate ran to completion', false, e?.stack || e);
 } finally {
   rmSync(MARKER, { force: true });
   await sleep(800);
@@ -150,5 +146,5 @@ try {
   try { rmSync(WORK, { recursive: true, force: true }); } catch {}
 }
 
-console.log(failures === 0 ? '\nRESULT: PASS' : `\nRESULT: FAIL (${failures})`);
-process.exit(failures === 0 ? 0 : 1);
+console.log(gate.failures === 0 ? '\nRESULT: PASS' : `\nRESULT: FAIL (${gate.failures})`);
+process.exit(gate.failures === 0 ? 0 : 1);

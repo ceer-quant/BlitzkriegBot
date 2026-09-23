@@ -45,6 +45,7 @@
 // booting the gateway and its own teardown must not leave the gateway and its
 // owned core behind with PPID=1. That leak was real on 2026-09-19.
 import { spawn, spawnSync } from './lib/child-guard.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 import { mkdtempSync, existsSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -61,11 +62,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'gateway-crash-'));
 const SOCK = join(WORK, 'core.sock');
 
-const claims = [];
-function check(name, ok, detail) {
-  claims.push({ name, ok, detail });
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
-}
+const gate = createChecks();
+const { check } = gate;
 
 // --- preflight ---------------------------------------------------------------
 for (const [label, path] of [['core', CORE], ['gateway', WEB]]) {
@@ -342,12 +340,12 @@ try {
   } catch {}
 }
 
-const failed = claims.filter((c) => !c.ok);
+const failed = gate.results.filter((c) => !c.ok);
 console.log('');
 if (failed.length) {
-  console.log(`RESULT: FAIL — ${failed.length}/${claims.length} claims failed`);
+  console.log(`RESULT: FAIL — ${failed.length}/${gate.results.length} claims failed`);
   process.exit(1);
 }
 console.log(
-  `RESULT: PASS — ${claims.length}/${claims.length} claims: the gateway reports the crash, replaces the core, and keeps a stop out of the crash path`,
+  `RESULT: PASS — ${gate.results.length}/${gate.results.length} claims: the gateway reports the crash, replaces the core, and keeps a stop out of the crash path`,
 );

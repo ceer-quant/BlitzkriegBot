@@ -14,6 +14,7 @@
 // Guarded spawn: an interrupted gate must not leave the gateway (and the core
 // it owns) behind with PPID=1.
 import { spawn, reapAllChildren } from './lib/child-guard.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -42,13 +43,9 @@ async function cmd(text) {
   return res.json();
 }
 
-let failures = 0;
 let TOKEN = '';
-function check(name, cond, detail = '') {
-  const tag = cond ? 'ok  ' : 'FAIL';
-  if (!cond) failures++;
-  console.log(`  ${tag} ${name}${detail ? ` — ${detail}` : ''}`);
-}
+const gate = createChecks();
+const { check } = gate;
 
 async function waitFor(label, fn, timeoutMs = 20000) {
   const deadline = Date.now() + timeoutMs;
@@ -148,8 +145,8 @@ try {
   const help = await cmd('help');
   check('help lists verbs', help.ok === true && /start/.test(help.message), help.action);
 
-  console.log(`\nRESULT: ${failures === 0 ? 'PASS' : `FAIL (${failures})`}`);
-  process.exitCode = failures === 0 ? 0 : 1;
+  console.log(`\nRESULT: ${gate.failures === 0 ? 'PASS' : `FAIL (${gate.failures})`}`);
+  process.exitCode = gate.failures === 0 ? 0 : 1;
 } catch (e) {
   console.error(`\nRESULT: FAIL — ${e.message}`);
   process.exitCode = 1;

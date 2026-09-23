@@ -34,6 +34,7 @@ import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { requestOnce } from './lib/core-client.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -125,11 +126,8 @@ async function waitFor(fn, ms, label) {
   throw new Error(`timed out waiting for ${label} (${ms} ms)`);
 }
 
-const claims = [];
-function check(name, ok, detail) {
-  claims.push({ name, ok, detail });
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
-}
+const gate = createChecks();
+const { check } = gate;
 
 // --- preflight: refuse to run meaningfully without the real binary -----------
 if (!existsSync(BIN)) {
@@ -323,10 +321,10 @@ try {
   }
 }
 
-const failed = claims.filter((c) => !c.ok);
+const failed = gate.results.filter((c) => !c.ok);
 console.log('');
 if (failed.length) {
-  console.log(`RESULT: FAIL — ${failed.length}/${claims.length} claims failed`);
+  console.log(`RESULT: FAIL — ${failed.length}/${gate.results.length} claims failed`);
   process.exit(1);
 }
-console.log(`RESULT: PASS — ${claims.length}/${claims.length} claims: crash is survived, reported, and recoverable`);
+console.log(`RESULT: PASS — ${gate.results.length}/${gate.results.length} claims: crash is survived, reported, and recoverable`);
