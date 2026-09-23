@@ -96,7 +96,6 @@ impl Failure {
     }
     /// JSON-RPC reserved codes.
     pub const PARSE_ERROR: i32 = -32700;
-    pub const INVALID_REQUEST: i32 = -32600;
     pub const METHOD_NOT_FOUND: i32 = -32601;
     pub const INVALID_PARAMS: i32 = -32602;
     /// Application error (see CoreErrorCode in data.core_code).
@@ -237,11 +236,6 @@ pub struct CancelParams {
     #[serde(rename = "orderId")]
     pub order_id: OrderId,
 }
-#[derive(Debug, Clone, Serialize)]
-pub struct CancelResult {
-    pub success: bool,
-}
-
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelAllParams {
@@ -291,15 +285,6 @@ pub struct BalanceResult {
     /// older cores, which the reader must treat as "unknown", not zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<Decimal>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ReadyResult {
-    pub version: String,
-    pub mode: Mode,
-    pub authenticated: bool,
-    pub signer: Option<String>,
-    pub funder: Option<String>,
 }
 
 // ── Limited hot reload of the entry limits (#191) ────────────────────────────

@@ -23,9 +23,7 @@
 use crate::marketdata::LocalBook;
 use crate::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
 use crate::scanner::{Scanner, ScannerConfig};
-use crate::signal::{
-    MeanReversionConfig, PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig, TrendFollowConfig,
-};
+use crate::signal::{PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig};
 use crate::strategies::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -50,15 +48,6 @@ pub struct EngineConfig {
     pub scanner: ScannerConfig,
     pub trend: TrendConfig,
     pub spread_arb: SpreadArbConfig,
-    /// The chase leg's own entry parameters (E4-a / #30). Compiled defaults for
-    /// now: `CoreConfig` does not expose them, and the runtime tuning path is
-    /// Shadow Evolution's per-strategy hot parameters. Hosted external
-    /// strategies receive this through `on_config`; the kernel itself runs no
-    /// strategy.
-    pub trend_follow: TrendFollowConfig,
-    /// The fade leg's own entry parameters (E4-b / #31). Same story as
-    /// `trend_follow`: compiled defaults, tuned at runtime via Shadow Evolution.
-    pub mean_reversion: MeanReversionConfig,
     /// Max orderbook staleness before we refuse to price off it (#205).
     ///
     /// The knob that decides "how long after the feed goes quiet do we stop
@@ -147,8 +136,6 @@ impl Default for EngineConfig {
             scanner: ScannerConfig::default(),
             trend: TrendConfig::default(),
             spread_arb: SpreadArbConfig::default(),
-            trend_follow: TrendFollowConfig::default(),
-            mean_reversion: MeanReversionConfig::default(),
             max_orderbook_stale_ms: DEFAULT_MAX_ORDERBOOK_STALE_MS,
             momentum_window_sec: 30,
             momentum_tol_pct: Decimal::new(3, 2), // 0.03%
@@ -1200,8 +1187,6 @@ mod tests {
                 trend_max_entry_price: dec!(0.45),
                 ..Default::default()
             },
-            trend_follow: TrendFollowConfig::default(),
-            mean_reversion: MeanReversionConfig::default(),
             max_orderbook_stale_ms: DEFAULT_MAX_ORDERBOOK_STALE_MS,
             momentum_window_sec: 30,
             momentum_tol_pct: dec!(0.03),

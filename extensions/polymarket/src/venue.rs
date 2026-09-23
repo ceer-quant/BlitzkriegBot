@@ -523,7 +523,6 @@ fn unresolved(condition_id: &str) -> MarketResolution {
         resolved: false,
         payouts: Vec::new(),
         neg_risk: false,
-        resolved_at_ms: 0,
         source: "gamma".to_string(),
     }
 }

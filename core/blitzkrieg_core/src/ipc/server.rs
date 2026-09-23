@@ -298,7 +298,6 @@ pub async fn run(
     {
         let cfg = blitzkrieg_market_api::DataFeedConfig {
             spot_assets: config.binance_assets.clone(),
-            ws_url: None,
         };
         if let Err(e) = feed.start(host.clone(), cfg, Vec::new()).await {
             eprintln!("blitzkrieg-core: data feed start failed: {e}");

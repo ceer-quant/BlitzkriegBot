@@ -935,7 +935,6 @@ mod tests {
                 .map(|(t, p)| (t.to_string(), p))
                 .collect(),
             neg_risk: true,
-            resolved_at_ms: 1,
             source: "test".into(),
         }
     }

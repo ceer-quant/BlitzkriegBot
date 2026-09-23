@@ -30,22 +30,6 @@ pub fn market_from_api(d: &api::MarketDescriptor) -> m::CryptoMarket {
     }
 }
 
-pub fn market_to_api(m: &m::CryptoMarket) -> api::MarketDescriptor {
-    api::MarketDescriptor {
-        asset: m.asset.clone(),
-        condition_id: m.condition_id.clone(),
-        question_id: m.question_id.clone(),
-        up_token_id: m.up_token_id.clone(),
-        down_token_id: m.down_token_id.clone(),
-        up_price: m.up_price,
-        down_price: m.down_price,
-        expires_at_ms: m.expires_at_ms,
-        round_slot: m.round_slot,
-        neg_risk: m.neg_risk,
-        question: m.question.clone(),
-    }
-}
-
 pub fn error_from_api(e: &api::CoreError) -> m::CoreError {
     let mut out = m::CoreError::new(error_code_from_api(e.code), e.message.clone());
     out.raw = e.raw.clone();

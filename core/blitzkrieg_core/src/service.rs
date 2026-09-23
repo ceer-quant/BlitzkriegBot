@@ -5934,7 +5934,6 @@ impl Core {
             payouts,
             // A simulated market has no venue metadata to carry.
             neg_risk: false,
-            resolved_at_ms: now_ms,
             source: "core-dry".to_string(),
         })
     }
@@ -8258,8 +8257,6 @@ mod strategy_dispatch_tests {
                 trend_max_entry_price: dec!(0.45),
                 ..Default::default()
             },
-            trend_follow: Default::default(),
-            mean_reversion: Default::default(),
             max_orderbook_stale_ms: 8000,
             momentum_window_sec: 30,
             momentum_tol_pct: dec!(0.03),
@@ -11483,7 +11480,6 @@ mod settlement_service_tests {
             resolved: true,
             payouts: vec![("tok".to_string(), Decimal::ONE)],
             neg_risk: false,
-            resolved_at_ms: 2_000,
             source: "test".into(),
         }
     }
@@ -11781,7 +11777,6 @@ mod settlement_service_tests {
                 resolved: true,
                 payouts: vec![("tok".to_string(), Decimal::ZERO)],
                 neg_risk: false,
-                resolved_at_ms: 2_000,
                 source: "test".into(),
             },
             2_001,
@@ -11824,7 +11819,6 @@ mod settlement_service_tests {
                 resolved: true,
                 payouts: vec![("someone-elses-token".to_string(), Decimal::ONE)],
                 neg_risk: false,
-                resolved_at_ms: 2_000,
                 source: "test".into(),
             },
             2_001,

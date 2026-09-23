@@ -193,9 +193,6 @@ pub fn resolution_from_market(input: &GammaResolutionInput<'_>) -> Option<Market
             .zip(input.outcome_prices.iter().copied())
             .collect(),
         neg_risk: input.neg_risk,
-        // Gamma states no resolution timestamp; the market's own end date is the
-        // closest thing it does state, and it is only ever a label here.
-        resolved_at_ms: input.end_ms,
         source: "gamma".to_string(),
     })
 }

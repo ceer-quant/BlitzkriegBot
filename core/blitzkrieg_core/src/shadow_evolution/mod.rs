@@ -1169,11 +1169,6 @@ impl ShadowEvolution {
         }
     }
 
-    /// Pending (still decidable) proposals, newest first.
-    pub fn pending_proposals(&self) -> Vec<EvolutionProposal> {
-        self.proposal_store.pending()
-    }
-
     /// Every known proposal's latest state, newest first (IPC surface).
     pub fn all_proposals(&self, limit: usize) -> Vec<EvolutionProposal> {
         self.proposal_store.latest(limit)

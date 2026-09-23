@@ -114,18 +114,6 @@ pub enum FillStatus {
     Failed,
 }
 
-impl FillStatus {
-    /// Larger = later/more authoritative, mirroring the Node priority table.
-    pub fn priority(self) -> u8 {
-        match self {
-            Self::Failed => 0,
-            Self::Matched => 1,
-            Self::Mined => 2,
-            Self::Confirmed => 3,
-        }
-    }
-}
-
 /// Structured error code crossing the plugin boundary and IPC. `raw` always
 /// carries the venue message so Node never has to flatten or swallow it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -529,7 +517,6 @@ pub struct MarketResolution {
     pub payouts: Vec<(TokenId, Decimal)>,
     /// The market settles through the NegRisk adapter.
     pub neg_risk: bool,
-    pub resolved_at_ms: i64,
     /// Where the verdict came from (`gamma`, `clob`, `core` for a synthetic one
     /// in tests/dry runs), for the log and the panel.
     pub source: String,
@@ -618,8 +605,6 @@ pub struct RedemptionResult {
 pub struct DataFeedConfig {
     /// Spot reference symbols the feed should stream (e.g. ["BTC","ETH"]).
     pub spot_assets: Vec<String>,
-    /// Override the orderbook websocket URL (None = venue default).
-    pub ws_url: Option<String>,
 }
 
 /// Round-discovery parameters.

@@ -22,9 +22,6 @@ impl BinanceSpotExtension {
             events_seen: std::sync::atomic::AtomicU64::new(0),
         }
     }
-    pub fn events_seen(&self) -> u64 {
-        self.events_seen.load(std::sync::atomic::Ordering::SeqCst)
-    }
 }
 
 impl Default for BinanceSpotExtension {

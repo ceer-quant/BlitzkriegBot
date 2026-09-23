@@ -10,7 +10,7 @@ use super::knobs::MutableParams;
 use super::signal::{EvolutionReason, EvolveSignal};
 use serde::Serialize;
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// One evolution attempt, applied or rejected.
 #[derive(Debug, Clone, Serialize)]
@@ -63,16 +63,6 @@ impl AuditLog {
             history: std::collections::BTreeMap::new(),
             enabled: cfg.enabled,
         }
-    }
-
-    /// Unused-path constructor kept for tests that want an explicit directory.
-    pub fn in_dir(dir: impl AsRef<Path>) -> Self {
-        let cfg = ShadowEvolutionConfig {
-            audit_dir: dir.as_ref().to_string_lossy().into_owned(),
-            enabled: true,
-            ..Default::default()
-        };
-        Self::new(&cfg)
     }
 
     pub fn set_enabled(&mut self, on: bool) {
@@ -240,9 +230,6 @@ impl AuditLog {
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-    pub fn len_for(&self, strategy: &str) -> usize {
-        self.history.get(strategy).map(|r| r.len()).unwrap_or(0)
     }
 }
 

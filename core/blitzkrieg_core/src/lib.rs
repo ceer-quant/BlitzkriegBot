@@ -18,7 +18,7 @@ pub mod cli;
 pub mod config;
 pub mod data_lock;
 pub mod data_source;
-pub mod decimal;
+pub use blitzkrieg_market_api::decimal;
 pub mod engine;
 pub mod exit_policy;
 pub mod extension;
