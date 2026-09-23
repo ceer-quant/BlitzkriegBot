@@ -55,6 +55,7 @@ import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { coreBinaryPath, checkCoreProvenance, VERSION_RE } from './lib/core-provenance.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = coreBinaryPath(ROOT);
@@ -68,11 +69,8 @@ function summary(text) {
   }
 }
 
-let failures = 0;
-function check(name, cond, detail = '') {
-  if (cond) console.log(`  ok   ${name}`);
-  else { failures++; console.log(`  FAIL ${name} ${detail}`); }
-}
+const gate = createChecks();
+const { check } = gate;
 
 /**
  * The flags the parser accepts, read from the source the binary was built from.
@@ -88,9 +86,8 @@ function parserFlags() {
   const start = src.indexOf('let mut it = argv.iter().cloned();');
   const end = src.indexOf('// ── Resolve the file-settable settings');
   if (start < 0 || end < 0 || end <= start) {
-    failures++;
-    console.log('  FAIL parse-loop markers not found in core/blitzkrieg_core/src/main.rs — the ' +
-      'help/parser comparison cannot run (start=' + start + ', end=' + end + ')');
+    check('parse-loop markers found in core/blitzkrieg_core/src/main.rs', false,
+      `the help/parser comparison cannot run (start=${start}, end=${end})`);
     return [];
   }
   const out = new Set();
@@ -104,9 +101,8 @@ function parserFlags() {
     if (trimmed.includes('blitzkrieg_core::cli::ALLOW_UNKNOWN_ARGS')) out.add('--allow-unknown-args');
   }
   if (out.size < 50) {
-    failures++;
-    console.log(`  FAIL the parse-loop extraction found only ${out.size} flags, which is far too ` +
-      'few to be the parse loop');
+    check('the parse-loop extraction found enough flags to be the parse loop', false,
+      `found only ${out.size}`);
   }
   return [...out];
 }
@@ -311,9 +307,9 @@ summary(`- binary under test: \`${BIN}\``);
     `wrote: ${sandboxEntries(box).join(', ')}`);
 }
 
-console.log(failures === 0
+console.log(gate.failures === 0
   ? '\nCORE ARGUMENT HANDLING OK — an unknown argument stops the boot, --help is the flag list, ' +
     'and a safety typo cannot start a core.'
-  : `\nCORE ARGUMENT HANDLING FAILED (${failures})`);
-if (failures !== 0) summary(`- **argument-handling gate failed (${failures})**`);
-process.exit(failures === 0 ? 0 : 1);
+  : `\nCORE ARGUMENT HANDLING FAILED (${gate.failures})`);
+if (gate.failures !== 0) summary(`- **argument-handling gate failed (${gate.failures})**`);
+process.exit(gate.failures === 0 ? 0 : 1);

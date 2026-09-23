@@ -22,6 +22,7 @@
 // Guarded spawn: an interrupted gate must not leave its core holding the socket.
 import { spawn, execFileSync } from './lib/child-guard.mjs';
 import { CoreClient } from './lib/core-client.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 import { join, resolve, dirname } from 'path';
 import { tmpdir } from 'os';
 import { existsSync, unlinkSync, mkdtempSync, rmSync } from 'fs';
@@ -34,11 +35,8 @@ const CHECK_LOADED = FAST ? 1 : 50;
 const FULL = !FAST;
 const SLEEP = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const checks = [];
-const check = (name, ok, detail = '') => {
-  checks.push({ name, ok });
-  console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
-};
+const gate = createChecks();
+const { check } = gate;
 
 if (!existsSync(CORE)) {
   console.error(`missing core binary: ${CORE} (cargo build --release --workspace --locked)`);
@@ -164,6 +162,6 @@ if (FULL) {
 }
 rmSync(join(ROOT, 'user_layer', 'strategies', 'scale_probe'), { recursive: true, force: true });
 
-const failed = checks.filter((c) => !c.ok);
+const failed = gate.results.filter((c) => !c.ok);
 console.log(`\nRESULT: ${failed.length === 0 ? 'PASS' : `FAIL (${failed.length})`}`);
 process.exit(failed.length === 0 ? 0 : 1);

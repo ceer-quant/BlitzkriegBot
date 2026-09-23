@@ -43,6 +43,7 @@
  * Read-only: reads the trade log and (optionally) a capacity report, prints, exits.
  */
 import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { createChecks } from './lib/gate-harness.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (name, dflt) => {
@@ -287,11 +288,8 @@ function selfTest() {
       exitTime: t0 + i * gapMs + holdSec * 1000,
     }));
 
-  let failures = 0;
-  const check = (name, cond, detail = '') => {
-    if (cond) console.log(`  ok   ${name}`);
-    else { failures++; console.log(`  FAIL ${name} ${detail}`); }
-  };
+  const gate = createChecks();
+  const { check } = gate;
   const verdictOf = (m, o) => verdicts(m, o).length > 0;
 
   // F1 — a monotone winner: no drawdown at all, and the equity is the sum.
@@ -404,10 +402,10 @@ function selfTest() {
   }
 
   console.log('');
-  console.log(failures === 0
+  console.log(gate.failures === 0
     ? 'EQUITY GATE SELF-TEST OK — the metrics and the verdicts still fire, including on a 50% drawdown and ruin.'
-    : `EQUITY GATE SELF-TEST FAILED — ${failures} fixture(s) wrong; the gate cannot be trusted.`);
-  return failures;
+    : `EQUITY GATE SELF-TEST FAILED — ${gate.failures} fixture(s) wrong; the gate cannot be trusted.`);
+  return gate.failures;
 }
 
 // ── Real run ─────────────────────────────────────────────────────────────────

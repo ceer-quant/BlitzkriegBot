@@ -8,9 +8,10 @@ import { spawn } from './lib/child-guard.mjs';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createChecks } from './lib/gate-harness.mjs';
 
-const checks = [];
-const check = (n, ok, d = '') => { checks.push(ok); console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${n}${d ? ' — ' + d : ''}`); };
+const gate = createChecks();
+const { check } = gate;
 
 mkdtempSync(join(tmpdir(), 'tui-demo-check-'));
 const proc = spawn('bash', [join(process.cwd(), 'scripts/tui-demo.sh')], {
@@ -24,6 +25,6 @@ const sockLine = out.match(/dry core on (\S+)/);
 check('launcher announces the dry core', !!sockLine, sockLine?.[1] ?? '');
 check('panel exits headless without panic', code !== null && !out.includes('panic'), `exit=${code}`);
 if (sockLine) check('socket cleaned up after exit', !existsSync(sockLine[1]), sockLine[1]);
-const fails = checks.filter((c) => !c).length;
+const fails = gate.failures;
 console.log(fails ? `${fails} FAIL` : 'all pass');
 process.exit(fails ? 1 : 0);

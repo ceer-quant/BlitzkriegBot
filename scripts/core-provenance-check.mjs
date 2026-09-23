@@ -3,7 +3,7 @@
  * Which code is under test (#172 / #179).
  *
  * This gate exists because of one specific incident and one specific class of
- * failure. The incident: `scripts/core-parity.mjs` reported eight failures that
+ * failure. The incident: `scripts/core-parity.mjs` reported eight gate.failures that
  * all descended from a taker order being correctly REJECTED — the gate's script
  * came from one checkout while the binary it drove had been built from another,
  * and nothing in the output said so. The class: every gate in this repository is
@@ -46,6 +46,7 @@ import { fileURLToPath } from 'url';
 import { mkdtempSync } from 'fs';
 import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 import {
   coreBinaryPath,
   binaryVersion,
@@ -78,11 +79,8 @@ function summary(text) {
   }
 }
 
-let failures = 0;
-function check(name, cond, detail = '') {
-  if (cond) console.log(`  ok   ${name}`);
-  else { failures++; console.log(`  FAIL ${name} ${detail}`); }
-}
+const gate = createChecks();
+const { check } = gate;
 
 /** Read a git command's stdout, or null when it cannot answer. */
 function git(args) {
@@ -220,8 +218,7 @@ try {
     `stderr did not mention ${binRevision}: ${JSON.stringify(core.lastStderr.slice(-200))}`);
   if (ready.build) summary(`- serving process reports: \`${ready.build}\` (commit ${ready.commit ?? '?'}, dirty ${ready.dirty ?? '?'})`);
 } catch (e) {
-  failures++;
-  console.log(`  FAIL serving-core provenance ${e?.stack || e}`);
+  check('serving-core provenance', false, e?.stack || e);
 } finally {
   await core.stop();
 }
@@ -277,8 +274,8 @@ for (const ref of requiredAncestors) {
     'missing it (that is the #172 mismatch, stated before any gate can report green about it)');
 }
 
-console.log(failures === 0
+console.log(gate.failures === 0
   ? '\nCORE PROVENANCE OK — the binary under test is this checkout, and it says so itself.'
-  : `\nCORE PROVENANCE FAILED (${failures})`);
-if (failures !== 0) summary(`- **provenance gate failed (${failures})**`);
-process.exit(failures === 0 ? 0 : 1);
+  : `\nCORE PROVENANCE FAILED (${gate.failures})`);
+if (gate.failures !== 0) summary(`- **provenance gate failed (${gate.failures})**`);
+process.exit(gate.failures === 0 ? 0 : 1);

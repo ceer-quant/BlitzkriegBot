@@ -30,6 +30,7 @@ import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
 import { describeQuote, feeModelProblems, feeQuoter, feeUsdFor } from './lib/fee-model.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 
 const SOCK = scratchSocketPath('parity');
 const BIN = coreBinaryPath();
@@ -39,11 +40,8 @@ const BIN = coreBinaryPath();
 // Run each core in a throwaway working directory to keep test data out of prod.
 const WORKDIR = mkdtempSync(join(tmpdir(), 'blitzkrieg-parity-'));
 
-let failures = 0;
-function check(name, cond, detail = '') {
-  if (cond) console.log(`  ok   ${name}`);
-  else { failures++; console.log(`  FAIL ${name} ${detail}`); }
-}
+const gate = createChecks();
+const { check } = gate;
 
 function order(mode, tokenId, price, size, key, asset = 'BTC', extra = {}) {
   // roundSlot must describe a LIVE round: the position engine derives
@@ -239,8 +237,7 @@ try {
   check('kill switch blocks placement', killedCode === 'KILL_SWITCH_ACTIVE', `got ${killedCode}`);
   await rpc.resume(c);
 } catch (e) {
-  failures++;
-  console.log('  FAIL harness error', e?.stack || e);
+  check('kill switch harness', false, e?.stack || e);
 } finally {
   await c.stop();
 }
@@ -275,8 +272,7 @@ try {
   const flat = await rpc.exitPositions(pc);
   check('manual flatten closes open positions', flat.closed === 1, JSON.stringify(flat));
 } catch (e) {
-  failures++;
-  console.log('  FAIL position harness error', e?.stack || e);
+  check('position harness', false, e?.stack || e);
 } finally {
   await pc.stop();
 }
@@ -292,5 +288,5 @@ try {
 // wire path "fed books -> strategy -> order on the socket". Restore this section
 // together with the first strategy crate that comes back.
 
-console.log(failures === 0 ? '\nRUST CORE PARITY OK' : `\nRUST CORE PARITY FAILED (${failures})`);
-process.exit(failures === 0 ? 0 : 1);
+console.log(gate.failures === 0 ? '\nRUST CORE PARITY OK' : `\nRUST CORE PARITY FAILED (${gate.failures})`);
+process.exit(gate.failures === 0 ? 0 : 1);

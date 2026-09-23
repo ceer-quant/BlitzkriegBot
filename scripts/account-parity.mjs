@@ -42,6 +42,7 @@ import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
 import { describeQuote, feeModelProblems, feeQuoter, feeUsdFor } from './lib/fee-model.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 
 const BIN = coreBinaryPath();
 const SEED = 1000;
@@ -54,11 +55,8 @@ if (!existsSync(BIN)) {
   process.exit(2);
 }
 
-let failures = 0;
-function check(name, cond, detail = '') {
-  if (cond) console.log(`  ok   ${name}`);
-  else { failures++; console.log(`  FAIL ${name} ${detail}`); }
-}
+const gate = createChecks();
+const { check } = gate;
 
 /** Polkadot-scale rounding so a comparison cannot be won by float dust. */
 const round = (n) => Math.round(n * 1e8) / 1e8;
@@ -285,8 +283,7 @@ try {
       await dryRoundTrip(dryCore, combo.asset, combo.token, combo.entry, combo.exit);
       await liveRoundTrip(liveCore, combo.asset, combo.token, combo.entry, combo.exit);
     } catch (e) {
-      failures++;
-      console.log(`  FAIL ${label} harness error ${e?.message || e}`);
+      check(label, false, `harness error ${e?.message || e}`);
       continue;
     }
 
@@ -298,8 +295,7 @@ try {
     const fees = expectedFees(combo.entry, combo.exit);
 
     if (!dTrade || !lTrade) {
-      failures++;
-      console.log(`  FAIL ${label} no trade record for ${combo.asset}`);
+      check(label, false, `no trade record for ${combo.asset}`);
       continue;
     }
 
@@ -399,21 +395,19 @@ try {
       check('fixture: the escalation did not turn it into a taker',
         t.wasMakerEntry === true && t.wasMakerExit === true, JSON.stringify(t));
     } catch (e) {
-      failures++;
-      console.log(`  FAIL fixture harness error ${e?.stack || e}`);
+      check('fixture', false, `harness error ${e?.stack || e}`);
     } finally {
       await c.stop();
     }
   }
 } catch (e) {
-  failures++;
-  console.log('  FAIL harness error', e?.stack || e);
+  check('harness error', false, e?.stack || e);
 } finally {
   await dryCore.stop();
   await liveCore.stop();
 }
 
-console.log(failures === 0
+console.log(gate.failures === 0
   ? '\naccount:parity — dry and live ledgers are bit-identical.'
-  : `\naccount:parity — ${failures} assertion(s) failed.`);
-process.exit(failures === 0 ? 0 : 1);
+  : `\naccount:parity — ${gate.failures} assertion(s) failed.`);
+process.exit(gate.failures === 0 ? 0 : 1);
