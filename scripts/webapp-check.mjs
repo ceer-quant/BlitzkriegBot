@@ -27,6 +27,7 @@
 // interrupted run used to leave them behind with PPID=1.
 import { spawnSync, spawn } from './lib/child-guard.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { waitForSocket } from './lib/wait.mjs';
 import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -123,7 +124,7 @@ check('configured credentials are used as-is (no generated password)',
 // without it the core answers `engine.stats` with nothing, which would make a
 // "snapshot is non-empty" assertion vacuous.
 const core = spawn(BIN, ['--socket', SOCK, '--mode', 'dry', '--tick-ms', '100', '--seed-balance', '1000', '--engine', '--no-trade-log', '--no-event-archive'], { cwd: WORK, stdio: 'ignore' });
-for (let i = 0; i < 50 && !existsSync(SOCK); i++) await sleep(100);
+await waitForSocket(SOCK, { timeoutMs: 5000 });
 await sleep(300);
 
 async function httpReq(port, method, path, { headers = '', body = '' } = {}) {

@@ -43,6 +43,7 @@ import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
 import { describeQuote, feeModelProblems, feeQuoter, feeUsdFor } from './lib/fee-model.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { pollUntil } from './lib/wait.mjs';
 
 const BIN = coreBinaryPath();
 const SEED = 1000;
@@ -97,16 +98,6 @@ const order = (side, mode, tokenId, price, size, key, asset) => ({
   tokenId, conditionId: `cond-${tokenId}`, side, mode, price, size,
   internalKey: key, strategy: 'acct', asset, direction: 'up', roundSlot: 1,
 });
-
-/** Poll `fn` until it is truthy, or give up (the tick loop is asynchronous). */
-async function until(fn, ms = 2000) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (await fn()) return true;
-    await sleep(25);
-  }
-  return false;
-}
 
 /** Everything we compare, read from one core over the wire. */
 async function snapshot(c) {
@@ -164,7 +155,7 @@ async function dryRoundTrip(c, asset, token, entryRole, exitRole) {
     await rpc.bookSnapshot(c, token, [[entryPrice - 0.05, 500]], [[entryPrice + 0.05, 500]]);
     await sleep(40);
     await rpc.bookSnapshot(c, token, [], [[entryPrice, 500]]);
-    const ok = await until(async () => (await rpc.positions(c)).positions.length > 0);
+    const ok = await pollUntil(async () => (await rpc.positions(c)).positions.length > 0, { timeoutMs: 2000 });
     if (!ok) throw new Error(`dry ${asset}: maker entry never filled`);
   }
 
@@ -179,7 +170,7 @@ async function dryRoundTrip(c, asset, token, entryRole, exitRole) {
     await sleep(40);
     await rpc.bookSnapshot(c, token, [[exitPrice, 500]], []);
   }
-  await until(async () => (await rpc.positions(c)).positions.length === 0);
+  await pollUntil(async () => (await rpc.positions(c)).positions.length === 0, { timeoutMs: 2000 });
 }
 
 /**
@@ -207,7 +198,7 @@ async function liveRoundTrip(c, asset, token, entryRole, exitRole) {
       maker: entryRole === 'maker',
     }],
   });
-  const opened = await until(async () => (await rpc.positions(c)).positions.length > 0);
+  const opened = await pollUntil(async () => (await rpc.positions(c)).positions.length > 0, { timeoutMs: 2000 });
   if (!opened) throw new Error(`live ${asset}: entry gap fill never applied`);
 
   const exit = await rpc.placeOrder(c, order('sell', 'maker', token, exitPrice, SIZE, `x-${token}`, asset));
@@ -224,7 +215,7 @@ async function liveRoundTrip(c, asset, token, entryRole, exitRole) {
       maker: exitRole === 'maker',
     }],
   });
-  await until(async () => (await rpc.positions(c)).positions.length === 0);
+  await pollUntil(async () => (await rpc.positions(c)).positions.length === 0, { timeoutMs: 2000 });
 }
 
 // ── The matrix: every entry-role x exit-role combination ─────────────────────
@@ -366,7 +357,7 @@ try {
           maker: true, // it rested at the bid and was hit
         }],
       });
-      await until(async () => (await rpc.positions(c)).positions.length > 0);
+      await pollUntil(async () => (await rpc.positions(c)).positions.length > 0, { timeoutMs: 2000 });
       const exit = await rpc.placeOrder(
         c,
         order('sell', 'maker', token, EXIT_PX, SIZE, 'x-mtt', 'LINK'),
@@ -379,7 +370,7 @@ try {
           maker: true,
         }],
       });
-      await until(async () => (await rpc.positions(c)).positions.length === 0);
+      await pollUntil(async () => (await rpc.positions(c)).positions.length === 0, { timeoutMs: 2000 });
 
       const s = await snapshot(c);
       const gross = (EXIT_PX - ENTRY_PX) * SIZE;

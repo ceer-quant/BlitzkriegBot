@@ -16,6 +16,7 @@
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
 import { CoreClient } from './lib/core-client.mjs';
+import { waitForSocket } from './lib/wait.mjs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
@@ -64,7 +65,7 @@ const fmt = (n) => Number(n).toFixed(4);
 
 async function main() {
   // wait for the socket
-  for (let i = 0; i < 100; i++) { if (existsSync(SOCK)) break; await sleep(50); }
+  await waitForSocket(SOCK, { timeoutMs: 5000 });
   client = await CoreClient.connect({ socketPath: SOCK });
   await rpc('core.ready');
   console.log(`binary: ${BIN}`);

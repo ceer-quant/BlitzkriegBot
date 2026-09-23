@@ -31,6 +31,7 @@ import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
 import { describeQuote, feeModelProblems, feeQuoter, feeUsdFor } from './lib/fee-model.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { pollUntil } from './lib/wait.mjs';
 
 const SOCK = scratchSocketPath('parity');
 const BIN = coreBinaryPath();
@@ -207,13 +208,7 @@ try {
   check('marketable taker fills across two levels', walk.status === 'FILLED', JSON.stringify(walk));
   // The event travels out-of-band (mpsc -> broadcast -> socket), so a fill is
   // allowed to arrive a moment after the response that announced it.
-  const fillDeadline = Date.now() + 2000;
-  let walkFill;
-  while (Date.now() < fillDeadline) {
-    walkFill = fills.find((f) => f.delta.orderId === walk.orderId);
-    if (walkFill) break;
-    await sleep(25);
-  }
+  const walkFill = await pollUntil(() => fills.find((f) => f.delta.orderId === walk.orderId), { timeoutMs: 2000 });
   const vwap = (0.39 * 2 + 0.40 * 3) / 5;
   check('the fill is the VWAP of the levels it walked', walkFill !== undefined && Math.abs(walkFill.delta.price - vwap) < 1e-9,
     `fill price ${walkFill?.delta.price} != vwap ${vwap}`);
@@ -261,8 +256,7 @@ try {
   await rpc.bookSnapshot(pc, 'pos1', [[0.99, 100]], [[1.0, 100]]);
   // The exit fires on the core's own tick loop, not on the book push — poll
   // briefly instead of trusting one fixed wait (a loaded runner stretches it).
-  const closedDeadline = Date.now() + 5000;
-  while (Date.now() < closedDeadline && positionClosed === null) await sleep(100);
+  await pollUntil(() => positionClosed !== null, { timeoutMs: 5000 });
   check('profit exit closes the position', (await rpc.positions(pc)).positions.length === 0);
   check('POSITION_CLOSED event carries realised PnL', positionClosed !== null && positionClosed.netPnlUsd > 0, JSON.stringify(positionClosed));
 

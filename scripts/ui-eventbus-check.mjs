@@ -23,6 +23,7 @@ import { fileURLToPath } from 'url';
 import net from 'net';
 import { requestOnce } from './lib/core-client.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { pollUntil } from './lib/wait.mjs';
 
 const ROOT = join(fileURLToPath(import.meta.url), '..', '..');
 const BIN = join(ROOT, 'target/release/blitzkrieg-core');
@@ -77,7 +78,7 @@ const core = spawn(BIN, [
   '--max-order-notional', '6', '--assets', 'BTC,ETH', '--min-shares', '1',
   '--max-shares', '10', '--no-trade-log', '--no-event-archive',
 ], { cwd: WORK, stdio: 'ignore' });
-for (let i = 0; i < 60 && !existsSync(SOCK); i++) await sleep(100);
+await pollUntil(() => existsSync(SOCK), { timeoutMs: 6000 });
 if (!existsSync(SOCK)) {
   console.error('core never came up');
   core.kill('SIGKILL');

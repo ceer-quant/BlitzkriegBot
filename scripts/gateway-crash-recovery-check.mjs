@@ -46,6 +46,7 @@
 // owned core behind with PPID=1. That leak was real on 2026-09-19.
 import { spawn, spawnSync } from './lib/child-guard.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { waitFor } from './lib/wait.mjs';
 import { mkdtempSync, existsSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -133,22 +134,6 @@ function isOurs(pid) {
   return pid > 0 && commandOf(pid).includes(SOCK);
 }
 
-async function waitFor(fn, ms, label) {
-  const deadline = Date.now() + ms;
-  let last = null;
-  while (Date.now() < deadline) {
-    try {
-      const v = await fn();
-      if (v) return v;
-      last = v;
-    } catch (e) {
-      last = e.message;
-    }
-    await sleep(250);
-  }
-  throw new Error(`timed out waiting for ${label} (${ms} ms); last=${JSON.stringify(last)}`);
-}
-
 let web = null;
 let token = '';
 let killedPid = 0;
@@ -222,8 +207,7 @@ try {
       const s = await snap();
       return s?.connected === true && s?.gateway?.managed === true ? s : null;
     },
-    25000,
-    'the gateway to own a live core',
+    { timeoutMs: 25000, label: 'the gateway to own a live core', retryOnError: true },
   );
   killedPid = owned.gateway.corePid ?? 0;
   check(
@@ -249,8 +233,7 @@ try {
       const last = s?.gateway?.lastExit;
       return s?.connected === true && (s?.gateway?.restarts ?? 0) >= 1 && last?.kind === 'crash' ? s : null;
     },
-    40000,
-    'the gateway to report the crash and replace the core',
+    { timeoutMs: 40000, label: 'the gateway to report the crash and replace the core', retryOnError: true },
   );
 
   check(
@@ -303,8 +286,7 @@ try {
       const s = await snap();
       return s?.connected === false ? s : null;
     },
-    20000,
-    'the core to be gone after a deliberate stop',
+    { timeoutMs: 20000, label: 'the core to be gone after a deliberate stop', retryOnError: true },
   );
   check(
     'a deliberate stop is reported as CLEAN, not as a crash',

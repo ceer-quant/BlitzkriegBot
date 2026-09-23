@@ -61,6 +61,7 @@ import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
 import { describeQuote, feeModelProblems, feeQuoter, feeUsdFor } from './lib/fee-model.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { pollUntil } from './lib/wait.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -229,13 +230,7 @@ try {
     const before = await rpc.balance(core);
     const key = `cap-${size}`;
     const placed = await rpc.placeOrder(core, order(asset, MARKETABLE_LIMIT, size, key));
-    let fill = null;
-    const deadline = Date.now() + 2000;
-    while (Date.now() < deadline) {
-      fill = fills.find((f) => f.delta.orderId === placed.orderId);
-      if (fill) break;
-      await sleep(20);
-    }
+    const fill = await pollUntil(() => fills.find((f) => f.delta.orderId === placed.orderId), { timeoutMs: 2000 });
     const filled = fill ? Number(fill.delta.delta) : 0;
     const vwap = fill ? Number(fill.delta.price) : null;
     const after = await rpc.balance(core);

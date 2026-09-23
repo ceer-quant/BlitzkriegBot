@@ -24,6 +24,7 @@
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { waitFor } from './lib/wait.mjs';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -58,8 +59,6 @@ if (!existsSync(REF_DYLIB)) {
   process.exit(1);
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 async function cmd(text) {
   const url = `${BASE}/api/command?cmd=${encodeURIComponent(text)}`;
   const res = await fetch(url, { headers: TOKEN ? { 'X-Auth-Token': TOKEN } : {} });
@@ -70,18 +69,6 @@ let gateway = null;
 let TOKEN = '';
 const gate = createChecks();
 const { check } = gate;
-
-async function waitFor(label, fn, timeoutMs = 20000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const v = await fn();
-      if (v) return v;
-    } catch { /* retry */ }
-    await sleep(200);
-  }
-  throw new Error(`timeout waiting for ${label}`);
-}
 
 try {
   console.log('== UI Kit plugin manager check (isolated) ==');
@@ -107,10 +94,10 @@ try {
   gateway.stderr.on('data', (d) => process.stdout.write(`   [gw:err] ${d}`));
   // Since #83, /api/* requires a session — the probe gets 401 until we log in.
   // "Any HTTP response" is the listening signal, not `.ok`.
-  await waitFor('gateway HTTP', async () => {
+  await waitFor(async () => {
     const r = await fetch(`${BASE}/api/snapshot`);
     return r.status > 0 ? r : null;
-  });
+  }, { label: 'gateway HTTP', timeoutMs: 20000, retryOnError: true });
   const loginRes = await fetch(`${BASE}/api/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -130,10 +117,10 @@ try {
   // [1] start an isolated dry core whose only strategy is the reference cdylib.
   const started = await cmd('start BTC,ETH --dry-run');
   check('core started', started.ok === true, started.message);
-  await waitFor('core connected', async () => {
+  await waitFor(async () => {
     const r = await cmd('status');
     return r.ok && r.data?.connection?.connected ? r : null;
-  });
+  }, { label: 'core connected', timeoutMs: 20000, retryOnError: true });
 
   // [2] strategies list: exactly the loaded library — nothing built in.
   const st = await cmd('strategies');

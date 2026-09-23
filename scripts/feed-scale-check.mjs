@@ -21,6 +21,7 @@
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { waitForSocket } from './lib/wait.mjs';
 import net from 'net';
 import { join, resolve, dirname } from 'path';
 import { tmpdir } from 'os';
@@ -57,10 +58,7 @@ const proc = spawn(CORE, [
 let stderr = '';
 proc.stderr.on('data', (d) => { stderr += d.toString(); });
 
-await new Promise(async (res) => {
-  for (let i = 0; i < 120; i++) { if (existsSync(sock)) break; await sleep(50); }
-  res();
-});
+await waitForSocket(sock, { timeoutMs: 6000 });
 
 // ── 40 concurrent UDS sessions ──────────────────────────────────────────────
 const clients = [];
