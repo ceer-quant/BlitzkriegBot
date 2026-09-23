@@ -1,6 +1,7 @@
 //! Panel application state — pure data + key handling. Rendering is in `ui.rs`.
 
 use blitzkrieg_ui_kit::core::types::{EvolutionProposalView, NetCheckReportView};
+use blitzkrieg_ui_kit::gateway::command_verbs;
 use blitzkrieg_ui_kit::UiSnapshot;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::Instant;
@@ -409,23 +410,18 @@ impl App {
     }
 }
 
-/// The commands the bar completes against (longest-prefix, one candidate).
-pub const COMMANDS: [&str; 14] = [
-    "status",
-    "positions",
-    "strategy",
-    "extension",
-    "markets",
-    "netcheck",
-    "help",
-    "start BTC,ETH,SOL,XRP --dry-run",
-    "stop",
-    "risk",
-    "proposals",
-    "decide",
-    "auto-evolve",
-    "rollback",
-];
+/// The commands the bar completes against (longest-prefix, one candidate): the
+/// gateway's own verbs, so a command it would reject can never be offered.
+/// `start` completes to a filled-in example because its arguments are the point
+/// of the line.
+fn candidates() -> Vec<&'static str> {
+    command_verbs()
+        .map(|verb| match verb {
+            "start" => "start BTC,ETH,SOL,XRP --dry-run",
+            other => other,
+        })
+        .collect()
+}
 
 /// Tab-completion: when exactly one known command starts with the current
 /// input, fill it; with several, fill their longest common prefix.
@@ -434,10 +430,9 @@ fn complete(input: &str) -> String {
     if t.is_empty() {
         return input.to_string();
     }
-    let cands: Vec<&str> = COMMANDS
-        .iter()
+    let cands: Vec<&str> = candidates()
+        .into_iter()
         .filter(|c| c.starts_with(t))
-        .copied()
         .collect();
     match cands.first() {
         None => input.to_string(),

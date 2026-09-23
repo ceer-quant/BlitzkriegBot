@@ -12,7 +12,7 @@ pub mod stop_stack;
 pub mod ui;
 
 pub use app::{Action, App, Tab};
-use blitzkrieg_ui_kit::gateway::{Dispatcher, SupervisorConfig};
+use blitzkrieg_ui_kit::gateway::{command_lines, Dispatcher, SupervisorConfig};
 use blitzkrieg_ui_kit::UiSnapshot;
 use crossterm::event::{Event, KeyEventKind};
 use ratatui::DefaultTerminal;
@@ -90,7 +90,7 @@ pub fn parse_args_from(args: impl IntoIterator<Item = String>) -> PanelArgs {
                 }
             }
             "--help" | "-h" => {
-                println!("{}", HELP);
+                println!("{}", help_text());
                 std::process::exit(0);
             }
             other => eprintln!("ignoring unknown arg: {other}"),
@@ -104,7 +104,11 @@ pub fn parse_args_from(args: impl IntoIterator<Item = String>) -> PanelArgs {
     }
 }
 
-pub const HELP: &str = "\
+/// The panel's own `--help`: the flags it takes, then the gateway's command
+/// table (the same rows the TUI overlay and the gateway's `help` print).
+pub fn help_text() -> String {
+    let mut out = String::from(
+        "\
 ui_kit_panel — Blitzkrieg interactive TUI panel (ratatui + crossterm + tokio)
 
 USAGE:
@@ -125,11 +129,15 @@ KEYS:
   e u         Evolution: toggle auto-evolve / rollback selected strategy
   Enter       run command   Esc cancel command
 
-COMMANDS (in the command bar):
-  status | positions [N] | proposals [N] | decide <id> accept|reject|defer
-  auto-evolve on|off | rollback <strategy> | help
-  start [ASSETS] [--size N] [--dry-run] | stop   (requires --manage)
-";
+COMMANDS (in the command bar; start / stop need --manage):
+",
+    );
+    for line in command_lines() {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
 
 pub async fn run_panel(args: PanelArgs) -> std::io::Result<()> {
     let cfg = SupervisorConfig::from_env(args.socket.clone());
