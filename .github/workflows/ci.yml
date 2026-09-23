@@ -203,6 +203,21 @@ jobs:
         run: node scripts/gateway-crash-recovery-check.mjs
       - name: Gateway signal shutdown gate
         run: node scripts/gateway-signal-stop-check.mjs
+      # E12 unified launcher: the `blitzkrieg` binary as a WHOLE — the shape every
+      # other E12 gate above assumes but none of them starts from. It asserts the
+      # subcommand surface is disclosed by --help, that `run` owns its child core
+      # (PPID == launcher), that the child answers real JSON-RPC on an isolated
+      # socket, that `--readonly` is passed through structurally, that SIGTERM
+      # reaps the child and unbinds the socket, that `run --tui` binds no web
+      # address, and that `tui --attach` adopts a core without signalling it.
+      #
+      # It has passed locally since E12 landed but no CI step ever ran it, so the
+      # surface it pins could break in a PR with every gate green — the same gap
+      # #280 fixed for the PTY gate. Its own scratch sockets/TMPDIR keep it off the
+      # production socket and data/; it leaves nothing behind (asserted by its
+      # final group), and it runs in ~20s.
+      - name: Unified launcher gate (E12)
+        run: node scripts/unified-launcher-check.mjs
       # #172/#179: a gate's conclusion must name the code it describes. Before the
       # parity gates below report anything, this states the revision EMBEDDED in
       # the binary they will drive, requires it to be this checkout's, and requires
