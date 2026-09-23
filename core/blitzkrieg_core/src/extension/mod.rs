@@ -4,12 +4,15 @@
 //! strategies, UIs or data sources are installed/enabled as extensions rather
 //! than by editing the kernel.
 //!
-//! SECURITY MODEL:
-//!  - each extension runs in its own async task and holds the shared core only
-//!    through the narrowed `ExtensionContext`;
-//!  - an extension is NEVER given the signer, credentials, the UDS socket or
-//!    direct access to internal state;
-//!  - an extension panic/crash must not take down the kernel (supervised task).
+//! BOUNDARY — what the code actually enforces:
+//!  - an extension reaches the kernel only through the narrowed
+//!    `ExtensionContext`: never the signer, credentials, the UDS socket or
+//!    internal state;
+//!  - extensions are in-process Rust compiled into the kernel binary, not
+//!    dynamically loaded, and NOT sandboxed. `on_load`/`on_unload` run inline on
+//!    the caller's task while the core lock is held, so a panicking or hanging
+//!    extension is NOT isolated from the kernel; only a returned `Err` is
+//!    contained (the extension is marked `Failed` and the kernel keeps running).
 //!
 //! Lifecycle: discovered → installed → enabled → (running) → disabled → uninstalled.
 
@@ -57,8 +60,8 @@ pub enum ExtensionState {
 }
 
 /// The ONLY surface an extension may use to interact with the kernel. It exposes
-/// awareness (which events happened) and a way to suggest intent — never keys,
-/// the venue client, or the order manager.
+/// a read-only strategy view and a way to suggest intent — never keys, the venue
+/// client, or the order manager.
 pub trait ExtensionContext: Send + Sync {
     /// Emit a kernel event (e.g. `strategy.signal` for audit) to subscribers.
     fn emit(&self, event: Event);
@@ -78,10 +81,6 @@ pub trait Extension: Send + Sync {
     async fn on_load(&self, ctx: &dyn ExtensionContext) -> Result<(), String>;
     /// Called when the extension is disabled/uninstalled.
     async fn on_unload(&self) -> Result<(), String>;
-    /// Receive a kernel event (optional; default ignores).
-    async fn on_event(&self, _event: &Event) -> Result<(), String> {
-        Ok(())
-    }
 }
 
 /// A registered extension plus its lifecycle state.
@@ -150,18 +149,6 @@ impl ExtensionRegistry {
         self.entries.remove(name).is_some()
     }
 
-    /// Fan a kernel event to every enabled extension. Errors are isolated so one
-    /// bad extension cannot break the kernel or its peers.
-    pub async fn dispatch(&self, event: &Event) {
-        for e in self.entries.values() {
-            if e.state == ExtensionState::Enabled
-                && let Err(err) = e.extension.on_event(event).await
-            {
-                tracing::warn!(extension = e.extension.name(), error = %err, "extension on_event failed");
-            }
-        }
-    }
-
     pub fn list(&self) -> Vec<(String, ExtensionType, ExtensionState)> {
         self.entries
             .values()
@@ -211,7 +198,6 @@ mod tests {
 
     struct DemoExt {
         loaded: Arc<AtomicUsize>,
-        events: Arc<AtomicUsize>,
     }
     #[async_trait_lite::async_trait]
     impl Extension for DemoExt {
@@ -231,16 +217,11 @@ mod tests {
         async fn on_unload(&self) -> Result<(), String> {
             Ok(())
         }
-        async fn on_event(&self, _e: &Event) -> Result<(), String> {
-            self.events.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
     }
 
     #[tokio::test]
-    async fn lifecycle_install_enable_dispatch_disable_uninstall() {
+    async fn lifecycle_install_enable_disable_uninstall() {
         let loaded = Arc::new(AtomicUsize::new(0));
-        let events = Arc::new(AtomicUsize::new(0));
         let ctx = CountingCtx {
             emitted: Arc::new(AtomicUsize::new(0)),
         };
@@ -249,36 +230,18 @@ mod tests {
         reg.install(
             Box::new(DemoExt {
                 loaded: loaded.clone(),
-                events: events.clone(),
             }),
             None,
         );
         assert_eq!(reg.list().len(), 1);
-        // Dispatch before enable → no delivery.
-        reg.dispatch(&Event::Ready {
-            version: "1".into(),
-            mode: crate::model::Mode::Dry,
-        })
-        .await;
-        assert_eq!(events.load(Ordering::SeqCst), 0);
+        assert_eq!(loaded.load(Ordering::SeqCst), 0); // installed ≠ enabled
 
         reg.enable("demo_market", &ctx).await.unwrap();
         assert_eq!(loaded.load(Ordering::SeqCst), 1);
         assert_eq!(reg.enabled_count(), 1);
-        reg.dispatch(&Event::Ready {
-            version: "1".into(),
-            mode: crate::model::Mode::Dry,
-        })
-        .await;
-        assert_eq!(events.load(Ordering::SeqCst), 1);
 
         reg.disable("demo_market").await.unwrap();
-        reg.dispatch(&Event::Ready {
-            version: "1".into(),
-            mode: crate::model::Mode::Dry,
-        })
-        .await;
-        assert_eq!(events.load(Ordering::SeqCst), 1); // disabled → no delivery
+        assert_eq!(reg.enabled_count(), 0);
         assert!(reg.uninstall("demo_market"));
         assert_eq!(reg.list().len(), 0);
     }

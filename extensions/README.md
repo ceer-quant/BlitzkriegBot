@@ -4,8 +4,8 @@ Two kinds of plugin live in the kernel, and they are **not** the same thing:
 
 | | Market plugin (`MarketPlugin`) | General extension (`Extension`) |
 |:---|:---|:---|
-| Purpose | Integrate a **market** (orders + market data + discovery) | Audit / event hook only |
-| Contract | `DataFeed` / `MarketDiscovery` / `OrderExecutor` | `on_load` / `on_unload` / `on_event` |
+| Purpose | Integrate a **market** (orders + market data + discovery) | Lifecycle hook only (no event input) |
+| Contract | `DataFeed` / `MarketDiscovery` / `OrderExecutor` | `on_load` / `on_unload` |
 | Capability | Pushes data + takes orders via `MarketHost` | No trading ability (emit/log only) |
 | Crate | `extensions/<name>/` (own crate, rlib+cdylib) | compiled into the kernel |
 | Example | `extensions/polymarket/` | `extension/builtins.rs::BinanceSpotExtension` |

@@ -135,14 +135,14 @@ per-strategy 限额/分账。策略标签贯穿订单（`OrderRequest.strategy`�
 
 | | `extension/`（`ExtensionRegistry`） | `market/`（`MarketPluginRegistry`） |
 |:---|:---|:---|
-| 目的 | 审计/事件钩子/生命周期 | 接入一个**市场**（下单+行情+发现） |
-| 契约 | `Extension`（`on_load`/`on_unload`/`on_event`） | `MarketPlugin`（`DataFeed`/`MarketDiscovery`/`OrderExecutor`） |
+| 目的 | 生命周期钩子（无事件输入） | 接入一个**市场**（下单+行情+发现） |
+| 契约 | `Extension`（`on_load`/`on_unload`） | `MarketPlugin`（`DataFeed`/`MarketDiscovery`/`OrderExecutor`） |
 | 能力 | 只能 `emit`/`log`/读策略名——**无交易能力** | 经 `MarketHost` 推行情、取订单、报成交 |
 | IPC | `extension.list/enable/disable` | `market.list`（含 `active`） |
 | 现存 | 内建示例 `BinanceSpotExtension`（installed，默认未启用） | 官方 `polymarket`（默认编译并 active） |
 
-`Extension` 是"观察者/钩子"，**刻意不给交易能力**；`MarketPlugin` 才是"市场接入点"。
-新增一个市场 = 实现 `MarketPlugin` 并加一个 Cargo feature；新增一个审计钩子 = 实现 `Extension`。
+`Extension` 是**生命周期钩子**，**刻意不给交易能力**；`MarketPlugin` 才是"市场接入点"。
+新增一个市场 = 实现 `MarketPlugin` 并加一个 Cargo feature；新增一个生命周期钩子 = 实现 `Extension`。
 
 > `extensions/<name>/config.toml` 的 `[meta]` **已被内核读取并与已链接扩展校验**
 > （KI-11，见 `EXTENSION_GUIDE.md §5`）；`[market]`/`[risk]`/`[dependencies]`
