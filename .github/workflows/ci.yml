@@ -188,6 +188,15 @@ jobs:
       # then "failed to restart" would be indistinguishable from a planned stop.
       - name: Core crash-recovery gate
         run: node scripts/crash-recovery-check.mjs
+      # The other half of the same incident: the gate above asks whether a core can
+      # be RESTARTED, this one asks whether a second client pointed at a live core
+      # can make the system spawn-storm it instead. The 2026-09-14 incident was
+      # ~1300 spawns/minute from duplicate-core rejection plus auto-restart with no
+      # backoff. `dev-docs/DEVELOPMENT.md` §3.3 lists it among the gates that moved
+      # into CI with KI-9, but no step ever ran it — the documentation claimed a
+      # coverage that did not exist, which is worse than an acknowledged gap.
+      - name: Core adopt gate (duplicate client stays bounded)
+        run: node scripts/core-adopt-check.mjs
       # The same acceptance line, asked of the UI instead of the socket. The gate
       # above drives the crash itself, so it measures the core's crash-safety and
       # says nothing about the supervisor — while "内核崩溃后 UI 能恢复/报告" is a
@@ -347,6 +356,17 @@ jobs:
         run: |
           node scripts/risk-sizing-check.mjs --balance 4.8 --size-pct 20 --max-order-notional-pct 20
           node scripts/risk-sizing-check.mjs --self-test
+      # The capacity gate's default ladder is a FIXTURE; its real-book input comes
+      # from `archive-book-extract.mjs`, whose normalization (level order, same-price
+      # merge, zero/negative size, prices outside (0,1), one-sided and crossed books,
+      # `cap-*` scratch rejection, spread ordering, depth/level floors, tie-breaks)
+      # is the difference between a capacity number about the real book and one about
+      # a malformed read of it. `docs/CAPACITY_AND_EQUITY.md` records that its 21
+      # assertions "CI 里可当纯自检跑" — but nothing ever ran them, so a regression in
+      # the extractor would surface only as a wrong capacity figure on the next ops
+      # run. It needs no archive and no core: pure self-test.
+      - name: Capacity book-extractor self-test (#192)
+        run: node scripts/archive-book-extract.mjs --self-test
       # E2: strategy-scoped sizing, gate exemptions (real dog cdylib), and
       # per-strategy shadow evolution.
       - name: Strategy-scoped gates (E2)
