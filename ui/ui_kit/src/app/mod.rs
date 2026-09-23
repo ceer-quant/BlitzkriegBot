@@ -102,7 +102,6 @@ impl AppViewModel {
         self.view = AppView::from_snapshot(&snap);
         &self.view
     }
-
 }
 
 /// Headless renderer: prints the view model the way a native panel would lay it
