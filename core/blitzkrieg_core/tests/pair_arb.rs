@@ -63,7 +63,6 @@ fn require_named_lib(base_name: &str) -> PathBuf {
 
 fn engine_cfg() -> EngineConfig {
     EngineConfig {
-        mean_reversion: blitzkrieg_core::signal::MeanReversionConfig::default(),
         scanner: ScannerConfig {
             assets: vec!["BTC".into()],
             round_duration_sec: 900,
@@ -78,7 +77,6 @@ fn engine_cfg() -> EngineConfig {
             window_floor_ms: 0,
         },
         spread_arb: SpreadArbConfig::default(),
-        trend_follow: Default::default(),
         max_orderbook_stale_ms: 8000,
         momentum_window_sec: 30,
         momentum_tol_pct: dec!(0.03),

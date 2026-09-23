@@ -5,8 +5,7 @@
 //! Polymarket-specific slug construction and Gamma JSON parsing now live in the
 //! Polymarket extension's `gamma` module.
 
-use crate::model::{CryptoMarket, SignalDirection};
-use rust_decimal::Decimal;
+use crate::model::CryptoMarket;
 
 /// Duration label for a round length (5m/15m/1h/4h/daily). Kept in the core
 /// because it describes round cadence, not a venue; the extension reuses the
@@ -238,32 +237,6 @@ impl Scanner {
         let local_slot = (local_now_ms / 1000) / self.cfg.round_duration_sec;
         let local_expected_end = (local_slot + 1) * self.cfg.round_duration_sec * 1000;
         self.clock_offset_ms = end_ms - local_expected_end;
-    }
-
-    /// Update live UP/DOWN prices from WS/feed data.
-    pub fn update_price(&mut self, condition_id: &str, up: Decimal, down: Decimal) {
-        if let Some(m) = self
-            .markets
-            .iter_mut()
-            .find(|m| m.condition_id == condition_id)
-        {
-            m.up_price = up;
-            m.down_price = down;
-        }
-    }
-
-    /// Token id for a direction in the current round's market for an asset.
-    pub fn token_for(&self, asset: &str, dir: SignalDirection) -> Option<(String, String)> {
-        let m = self.market(asset)?;
-        let token = match dir {
-            SignalDirection::Up => m.up_token_id.clone(),
-            SignalDirection::Down => m.down_token_id.clone(),
-        };
-        if token.is_empty() {
-            None
-        } else {
-            Some((token, m.condition_id.clone()))
-        }
     }
 }
 

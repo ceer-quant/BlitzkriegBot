@@ -68,11 +68,6 @@ impl MarketPluginRegistry {
         g.active.clone()
     }
 
-    pub fn is_enabled(&self, name: &str) -> bool {
-        let g = self.inner.lock().expect("market registry poisoned");
-        g.enabled.get(name).copied().unwrap_or(false)
-    }
-
     /// Names in registration order.
     pub fn names(&self) -> Vec<String> {
         let g = self.inner.lock().expect("market registry poisoned");

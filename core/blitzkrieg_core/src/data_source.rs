@@ -31,7 +31,6 @@ use serde_json::{Value, json};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 /// One market-data event plus the timestamp it must be replayed at.
 #[derive(Debug, Clone)]
@@ -79,16 +78,6 @@ pub fn event_at_ms(ev: &DataEvent) -> i64 {
         | DataEvent::TopOfBook { now_ms, .. }
         | DataEvent::Spot { now_ms, .. }
         | DataEvent::RoundMarkets { now_ms, .. } => *now_ms,
-    }
-}
-
-/// The event's kind as it appears in the archive (`book`/`top`/`spot`/`round`).
-pub fn event_kind(ev: &DataEvent) -> &'static str {
-    match ev {
-        DataEvent::Book { .. } => "book",
-        DataEvent::TopOfBook { .. } => "top",
-        DataEvent::Spot { .. } => "spot",
-        DataEvent::RoundMarkets { .. } => "round",
     }
 }
 
@@ -971,11 +960,6 @@ impl DataSource for SegmentSource {
 /// source reports aggregate counters either way.
 pub fn open_replay_all(path: &str) -> Result<SegmentSource, String> {
     SegmentSource::open_dir(Path::new(path))
-}
-
-/// Parse a decimal the way the archive writes it (used by tests and tools).
-pub fn parse_decimal(s: &str) -> Option<Decimal> {
-    Decimal::from_str(s).ok()
 }
 
 #[cfg(test)]

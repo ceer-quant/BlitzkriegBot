@@ -10,7 +10,7 @@ use crate::exit_policy::{
     decide_exit_verdict, effective_stop_pct, executable_bid, pnl_pct, reference_price,
     update_exit_state,
 };
-use crate::model::{ExitReason, OrderRole, OrderbookSnapshot, Side, SignalDirection};
+use crate::model::{ExitReason, OrderRole, OrderbookSnapshot, SignalDirection};
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -493,9 +493,6 @@ impl OpenPosition {
     pub fn high_pnl_pct(&self) -> Decimal {
         self.state.high_pnl_pct
     }
-    pub fn low_pnl_pct(&self) -> Decimal {
-        self.state.low_pnl_pct
-    }
 
     /// The position's cash flows, repaired for a snapshot persisted before E17
     /// recorded them: the pre-E17 fields (`cost_usd`, `entry_fee_pct`) describe
@@ -893,20 +890,6 @@ impl PositionManager {
                 ""
             }
         );
-        self.persist_daily();
-    }
-
-    /// The day's realized PnL, reset. Kept for callers that roll the budget
-    /// themselves; [`roll_daily`] is the kernel's path because it also seeds
-    /// the opening equity and persists.
-    pub fn reset_daily(&mut self) {
-        self.daily.realized_pnl_usd = Decimal::ZERO;
-        self.daily.tripped = false;
-        self.daily.tripped_at_ms = 0;
-        self.daily.tripped_limit_usd = Decimal::ZERO;
-        self.daily.tripped_reported = false;
-        self.last_stop_loss_at = 0;
-        self.exit_cooldowns.clear();
         self.persist_daily();
     }
 
@@ -1519,20 +1502,6 @@ impl PositionManager {
         Some(grid)
     }
 
-    /// Adjust an open position's entry price and share count for an external
-    /// reconciliation that did not arrive as a fill (no-op if unknown).
-    ///
-    /// Deliberately does NOT touch [`CashFlows`]: an adjustment is not cash, and
-    /// letting it rewrite the fee basis is exactly the class of divergence E17
-    /// closed. Real fills go through `apply_entry_fill` / `apply_exit_fill`.
-    pub fn adjust_open(&mut self, position_id: &str, entry_price: Decimal, shares: Decimal) {
-        if let Some(pos) = self.open.iter_mut().find(|p| p.id == position_id) {
-            pos.entry_price = entry_price;
-            pos.shares = shares;
-            pos.cost_usd = entry_price * shares;
-        }
-    }
-
     /// F4: undo one `close()`. The venue reported the closing fill FAILED, so
     /// the position was never sold: put the pre-close row back (shares, basis,
     /// accrued flows, exit state — exactly as it stood), hand back the daily
@@ -1635,10 +1604,6 @@ impl PositionManager {
 
 // SignalDirection::as_str lives on the shared type (strategy_logic::model) —
 // cooldown keys and logs read it from there.
-
-// Keep Side referenced (used by callers wiring exits to orders).
-#[allow(dead_code)]
-fn _side_used(_: Side) {}
 
 #[cfg(test)]
 mod tests {

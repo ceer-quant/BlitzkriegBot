@@ -73,7 +73,6 @@ fn require_lib() -> PathBuf {
 
 fn engine_cfg() -> EngineConfig {
     EngineConfig {
-        mean_reversion: blitzkrieg_core::signal::MeanReversionConfig::default(),
         scanner: ScannerConfig {
             assets: vec!["BTC".into()],
             round_duration_sec: 900,
@@ -91,7 +90,6 @@ fn engine_cfg() -> EngineConfig {
             trend_max_entry_price: dec!(0.45),
             ..Default::default()
         },
-        trend_follow: Default::default(),
         max_orderbook_stale_ms: 8000,
         momentum_window_sec: 30,
         momentum_tol_pct: dec!(0.03),

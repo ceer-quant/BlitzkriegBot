@@ -222,17 +222,6 @@ pub struct TrackedOrder {
     pub maker_timeout_ms: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum EventKind {
-    OrderUpdate,
-    Fill,
-    RiskAlert,
-    Reconcile,
-    Ready,
-    Error,
-}
-
 // ── Exit reasons & orderbook ─────────────────────────────────────────────────
 // `SignalDirection` and `OrderbookSnapshot` are re-exported from
 // `strategy_logic::model` at the top of this file (PR-B): one definition shared
@@ -252,8 +241,6 @@ pub enum ExitReason {
     StagnantProfit,
     TimeExit,
     ForceExit,
-    SpotReversal,
-    QuickProfit,
     Manual,
     /// Explicit close requested by a hosted (in-tree or external) strategy via
     /// an exit *intent*. The kernel still prices, sizes, risk-checks and

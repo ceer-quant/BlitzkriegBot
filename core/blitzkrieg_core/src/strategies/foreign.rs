@@ -380,37 +380,6 @@ impl ForeignStrategy {
         s
     }
 
-    /// A second, independent instance from the same library (shadow twin). Same
-    /// code, its own state, its own handle — nothing is shared with the live
-    /// instance except the read-only vtable and the library mapping.
-    pub fn spawn_twin(&self) -> Option<Self> {
-        let vtable = unsafe { std::ptr::read(self.lib.vtable()) };
-        let create = vtable.create?;
-        let handle = unsafe { create() };
-        if handle.is_null() {
-            return None;
-        }
-        Some(Self {
-            lib: self.lib.clone(),
-            vtable,
-            handle,
-            name: self.name.clone(),
-            version: self.version.clone(),
-            free_string: self.free_string,
-            gate_exemptions_fn: self.gate_exemptions_fn,
-            evolvable_knobs_fn: self.evolvable_knobs_fn,
-            knobs: self.knobs.clone(),
-            bind_eval_ctx_fn: self.bind_eval_ctx_fn,
-            config_view_fn: self.config_view_fn,
-            settlement_holds_fn: self.settlement_holds_fn,
-            exit_intents: Vec::new(),
-            breaks: Vec::new(),
-            params: None,
-            last_hot_json: None,
-            assets: HashMap::new(),
-        })
-    }
-
     pub fn version(&self) -> &str {
         &self.version
     }

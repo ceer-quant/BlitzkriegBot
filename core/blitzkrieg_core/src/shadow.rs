@@ -1,11 +1,17 @@
-//! Shadow recorder + replay (P4).
+//! Shadow replay + near-miss recording (P4).
 //!
-//! Records the price path of every opened position (own side, and the opposite
-//! side for the flip hypothesis) and later replays exit policies over that path
-//! using the SAME `exit_policy` module the live engine trades with. Because the
-//! policy is shared, a backtest cannot drift from production.
+//! Reads a shadow log — the price path of every position that actually opened,
+//! own side and opposite side, written by the producer of `data/signals/` — and
+//! replays exit policies over those recorded paths using the SAME `exit_policy`
+//! module the live engine trades with. Because the policy is shared, a backtest
+//! cannot drift from production. The walk-forward grid and the frozen holdout
+//! below pick an exit configuration out of that replay.
 //!
-//! Observation-only: the recorder never trades.
+//! The near-miss half is the other direction: it records signals the entry gate
+//! BLOCKED together with the path that followed, so offline replay can answer
+//! "had we relaxed the gate, would this have made money?".
+//!
+//! Observation-only: nothing here trades.
 
 use crate::exit_policy::{
     ExitConfig, ExitState, ExitTickInput, decide_exit, executable_bid, update_exit_state,
@@ -39,137 +45,6 @@ pub struct ShadowRecord {
     pub actual_net_pnl: Option<Decimal>,
     /// Seconds left in the round when the position was entered (context.timeLeftSec).
     pub time_left_at_entry_sec: Option<Decimal>,
-}
-
-/// Time-boxed recorder for one position.
-struct Tracked {
-    rec: ShadowRecord,
-    window_end_ms: i64,
-    last_own_at: i64,
-    last_opp_at: i64,
-}
-
-pub struct ShadowRecorder {
-    tracked: HashMap<String, Tracked>,
-    sample_min_interval_ms: i64,
-    window_ms: i64,
-}
-
-impl ShadowRecorder {
-    pub fn new(sample_min_interval_ms: i64, window_ms: i64) -> Self {
-        Self {
-            tracked: HashMap::new(),
-            sample_min_interval_ms,
-            window_ms,
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn on_open(
-        &mut self,
-        position_id: &str,
-        asset: &str,
-        direction: &str,
-        token_id: &str,
-        entry_price: Decimal,
-        shares: Decimal,
-        was_maker: bool,
-        entered_at_ms: i64,
-        expires_at_ms: i64,
-    ) {
-        let window_end_ms = if expires_at_ms > entered_at_ms {
-            // Sample almost to the force-exit horizon.
-            (expires_at_ms - 120_000).max(entered_at_ms)
-        } else {
-            entered_at_ms + self.window_ms
-        };
-        self.tracked.insert(
-            position_id.to_string(),
-            Tracked {
-                rec: ShadowRecord {
-                    token_id: token_id.to_string(),
-                    asset: asset.to_string(),
-                    direction: direction.to_string(),
-                    entry_price,
-                    shares,
-                    was_maker_entry: was_maker,
-                    entered_at_ms,
-                    expires_at_ms,
-                    own: Vec::new(),
-                    opposite: Vec::new(),
-                    actual_net_pnl: None,
-                    time_left_at_entry_sec: None,
-                },
-                window_end_ms,
-                last_own_at: 0,
-                last_opp_at: 0,
-            },
-        );
-    }
-
-    /// Feed a book update for any token; samples are matched to open records.
-    pub fn on_book(&mut self, token_id: &str, book: &OrderbookSnapshot, now_ms: i64) {
-        for t in self.tracked.values_mut() {
-            if now_ms < t.rec.entered_at_ms || now_ms > t.window_end_ms {
-                continue;
-            }
-            if token_id == t.rec.token_id {
-                if now_ms - t.last_own_at >= self.sample_min_interval_ms {
-                    t.last_own_at = now_ms;
-                    t.rec.own.push(Sample {
-                        t_ms: now_ms - t.rec.entered_at_ms,
-                        price: book.mid_price,
-                        bid: Some(book.best_bid),
-                        ask: Some(book.best_ask),
-                    });
-                }
-            } else if now_ms - t.last_opp_at >= self.sample_min_interval_ms {
-                // The caller may feed the opposite token too; record it under the
-                // same elapsed clock. (Matching is by token in the caller.)
-            }
-        }
-    }
-
-    /// Record an opposite-side sample explicitly.
-    pub fn on_opposite(&mut self, position_id: &str, book: &OrderbookSnapshot, now_ms: i64) {
-        if let Some(t) = self.tracked.get_mut(position_id)
-            && now_ms >= t.rec.entered_at_ms
-            && now_ms <= t.window_end_ms
-            && now_ms - t.last_opp_at >= self.sample_min_interval_ms
-        {
-            t.last_opp_at = now_ms;
-            t.rec.opposite.push(Sample {
-                t_ms: now_ms - t.rec.entered_at_ms,
-                price: book.mid_price,
-                bid: Some(book.best_bid),
-                ask: Some(book.best_ask),
-            });
-        }
-    }
-
-    pub fn on_close(&mut self, position_id: &str, net_pnl: Decimal) {
-        if let Some(t) = self.tracked.get_mut(position_id) {
-            t.rec.actual_net_pnl = Some(net_pnl);
-        }
-    }
-
-    /// Finalize records whose window elapsed; returns them for persistence.
-    pub fn tick(&mut self, now_ms: i64) -> Vec<ShadowRecord> {
-        let ready: Vec<String> = self
-            .tracked
-            .iter()
-            .filter(|(_, t)| now_ms >= t.window_end_ms)
-            .map(|(k, _)| k.clone())
-            .collect();
-        ready
-            .into_iter()
-            .filter_map(|k| self.tracked.remove(&k).map(|t| t.rec))
-            .collect()
-    }
-
-    pub fn pending(&self) -> usize {
-        self.tracked.len()
-    }
 }
 
 // ── Near-miss recording ──────────────────────────────────────────────────────
@@ -563,93 +438,6 @@ pub fn replay(rec: &ShadowRecord, cfg: &ExitConfig) -> ReplayResult {
         exit_reason,
         exit_price,
     }
-}
-
-// ── Persistence (Node-analyzer compatible JSONL) ─────────────────────────────
-
-fn rel_pct(base: Decimal, p: Decimal) -> Decimal {
-    if base > Decimal::ZERO {
-        ((p - base) / base) * Decimal::ONE_HUNDRED
-    } else {
-        Decimal::ZERO
-    }
-}
-
-fn path_json(samples: &[Sample], base: Decimal) -> serde_json::Value {
-    let mut maxp = base;
-    let mut minp = base;
-    let mut max_at = 0i64;
-    let mut min_at = 0i64;
-    let mut first: Option<Decimal> = None;
-    let mut arr = Vec::with_capacity(samples.len());
-    for s in samples {
-        if first.is_none() {
-            first = Some(s.price);
-        }
-        if s.price > maxp {
-            maxp = s.price;
-            max_at = s.t_ms;
-        }
-        if s.price < minp {
-            minp = s.price;
-            min_at = s.t_ms;
-        }
-        arr.push(serde_json::json!({ "t": s.t_ms as f64 / 1000.0, "p": s.price, "b": s.bid, "a": s.ask }));
-    }
-    serde_json::json!({
-        "entryRef": first.unwrap_or(base),
-        "samples": arr,
-        "maxPrice": maxp,
-        "minPrice": minp,
-        "maxPct": rel_pct(base, maxp),
-        "minPct": rel_pct(base, minp),
-        "timeToMaxSec": max_at as f64 / 1000.0,
-        "timeToMinSec": min_at as f64 / 1000.0,
-    })
-}
-
-impl ShadowRecord {
-    /// Serialize in the shape `scripts/analyze-signals.mjs` understands (the
-    /// reader is named for the file it consumes, `data/signals/signals.jsonl`),
-    /// so the Rust recorder keeps feeding the same offline tooling the Node
-    /// recorder did.
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "id": format!("rust-{}", self.entered_at_ms),
-            "strategy": "spread_arb",
-            "asset": self.asset,
-            "direction": self.direction,
-            "tokenId": self.token_id,
-            "conditionId": "",
-            "entryPrice": self.entry_price,
-            "shares": self.shares,
-            "wasMakerEntry": self.was_maker_entry,
-            "enteredAt": self.entered_at_ms,
-            "expiredAt": self.expires_at_ms,
-            "windowSec": (self.expires_at_ms - self.entered_at_ms) as f64 / 1000.0,
-            "own": path_json(&self.own, self.entry_price),
-            "oppositeTokenId": null,
-            "opposite": if self.opposite.is_empty() { serde_json::Value::Null } else { path_json(&self.opposite, self.opposite.first().map(|s| s.price).unwrap_or(Decimal::ONE)) },
-            "closed": self.actual_net_pnl.is_some(),
-            "actual": self.actual_net_pnl.map(|p| serde_json::json!({ "netPnlUsd": p })),
-        })
-    }
-}
-
-/// Append records to a JSONL file (creates the directory if needed).
-pub fn persist_records(path: &std::path::Path, records: &[ShadowRecord]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    for r in records {
-        writeln!(f, "{}", r.to_json())?;
-    }
-    Ok(())
 }
 
 // ── Walk-forward evaluation ──────────────────────────────────────────────────
@@ -1127,23 +915,6 @@ mod tests {
     }
 
     #[test]
-    fn recorder_finalizes_after_window() {
-        let mut rec = ShadowRecorder::new(0, 1000);
-        rec.on_open("p1", "BTC", "up", "tok", dec!(0.4), dec!(10), true, 0, 0);
-        let book = OrderbookSnapshot::from_levels(
-            "tok",
-            vec![(dec!(0.4), dec!(1))],
-            vec![(dec!(0.42), dec!(1))],
-            100,
-        );
-        rec.on_book("tok", &book, 100);
-        assert_eq!(rec.pending(), 1);
-        let done = rec.tick(2000);
-        assert_eq!(done.len(), 1);
-        assert_eq!(done[0].own.len(), 1);
-    }
-
-    #[test]
     fn walk_forward_reports_oos_and_in_sample() {
         // Five records: mostly losers, one big winner. Each entry is spaced
         // past every earlier path's last event (10s apart, paths end at 2s),
@@ -1232,15 +1003,6 @@ mod tests {
         assert_eq!(out.frozen_test_pnl, best.test_pnl);
         // The shipped cell is present and scored (regression: it used to be absent).
         assert!(out.rows.iter().any(|r| r.name == "shipped-SL12/trail8"));
-    }
-
-    #[test]
-    fn json_record_has_analyzer_shape() {
-        let r = rec_with_path(dec!(0.40), &[(0, 0.40), (1000, 0.50)]);
-        let v = r.to_json();
-        assert!(v["own"]["samples"].is_array());
-        assert!(v["own"].get("maxPct").is_some());
-        assert_eq!(v["direction"], "up");
     }
 
     #[test]

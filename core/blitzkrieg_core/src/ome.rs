@@ -525,19 +525,6 @@ impl Ome {
             .find(|o| o.venue_order_id.as_deref() == Some(external))
     }
 
-    /// Find a live order by venue id, token and side (fallback for user-WS
-    /// trade events that only carry taker/maker order ids + token).
-    pub fn live_by_venue(&self, venue_id: &str, token: &str, side: Side) -> Option<&TrackedOrder> {
-        if let Some(o) = self.by_venue_or_id(venue_id)
-            && o.status.is_live()
-        {
-            return Some(o);
-        }
-        self.live_for(token, side)
-            .into_iter()
-            .find(|o| o.venue_order_id.as_deref() == Some(venue_id))
-    }
-
     fn mutate(
         &mut self,
         id: &str,
