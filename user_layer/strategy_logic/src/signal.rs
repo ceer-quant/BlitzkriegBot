@@ -108,30 +108,6 @@ impl PriceBuffer {
             .map(|(_, p)| *p)
             .unwrap_or(Decimal::ZERO)
     }
-
-    /// Count direction reversals (steps >= min_step) in the window.
-    pub fn reversals(&self, window_sec: i64, min_step: Decimal, now_ms: i64) -> u32 {
-        let w: Vec<&(i64, Decimal)> = self.in_window(window_sec, now_ms).collect();
-        if w.len() < 3 {
-            return 0;
-        }
-        let mut count = 0u32;
-        let mut last_dir: Option<bool> = None; // true = up
-        for i in 1..w.len() {
-            let diff = w[i - 1].1 - w[i].1;
-            if diff.abs() < min_step {
-                continue;
-            }
-            let dir = diff > Decimal::ZERO;
-            if let Some(prev) = last_dir
-                && dir != prev
-            {
-                count += 1;
-            }
-            last_dir = Some(dir);
-        }
-        count
-    }
 }
 
 // ── Trend tracker ───────────────────────────────────────────────────────────

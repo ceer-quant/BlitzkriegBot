@@ -36,7 +36,7 @@ pub use mean_reversion::{
     FadeTracker, MeanReversionConfig, evaluate_mean_reversion, mean_reversion_knobs,
 };
 pub use model::{OrderbookSnapshot, SignalDirection, TokenId};
-pub use params::{KnobDeclaration, MutableParams, StrategyParams};
+pub use params::{KnobDeclaration, StrategyParams};
 pub use signal::{
     PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig, TrendPhase, TrendTracker,
     evaluate_spread_arb, round2, spread_arb_tracker_gates,

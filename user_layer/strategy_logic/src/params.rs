@@ -224,38 +224,3 @@ impl<'de> Deserialize<'de> for StrategyParams {
 fn dec_from_wire(s: &str) -> Result<Decimal, String> {
     Decimal::from_str(s.trim()).map_err(|e| e.to_string())
 }
-
-/// The aggregate swappable object: **per-strategy named parameter sets**.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct MutableParams {
-    by_strategy: BTreeMap<String, StrategyParams>,
-}
-
-impl MutableParams {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_strategy.is_empty()
-    }
-    pub fn len(&self) -> usize {
-        self.by_strategy.len()
-    }
-    pub fn strategies(&self) -> Vec<&str> {
-        self.by_strategy.keys().map(|k| k.as_str()).collect()
-    }
-    pub fn for_strategy(&self, strategy: &str) -> Option<&StrategyParams> {
-        self.by_strategy.get(strategy)
-    }
-    /// Value of one knob of one strategy (None when either is unknown).
-    pub fn get(&self, strategy: &str, knob: &str) -> Option<Decimal> {
-        self.by_strategy.get(strategy).and_then(|p| p.get(knob))
-    }
-    pub fn set_strategy(&mut self, strategy: &str, params: StrategyParams) {
-        self.by_strategy.insert(strategy.to_string(), params);
-    }
-    pub fn remove_strategy(&mut self, strategy: &str) -> Option<StrategyParams> {
-        self.by_strategy.remove(strategy)
-    }
-}
