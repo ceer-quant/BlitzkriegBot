@@ -5,12 +5,18 @@
  * / markets) against a live core on a private socket.
  *
  * Covers #32's acceptance:
- *   - reads return the three registries (strategies incl. the three builtins,
- *     extensions, market plugins with capability flags + active marker)
- *   - a runtime toggle round-trips: strategy mean_reversion on → listed on →
- *     off again → listed off (boot state untouched)
+ *   - reads return the three registries (strategies, extensions, market plugins
+ *     with capability flags + active marker)
+ *   - a runtime toggle round-trips: strategy parity on → listed on → off again →
+ *     listed off (boot state untouched)
  *   - unknown names / malformed verbs are rejected cleanly
  *   - every verb still works with NO core (graceful degradation)
+ *
+ * The strategy registry this gate reads is filled by a LOADED CDYLIB, not by the
+ * kernel: the kernel registers no strategy of its own, so a core started here
+ * with no `--strategy-dir` would list nothing and the toggle round-trip would
+ * have nothing to flip. `--strategy-dir` therefore points at the reference
+ * implementation (`user_layer/parity_strategy`), which CI builds for this gate.
  *
  * Isolation: private UDS, scratch workdir, dry mode, no logs/archives.
  * Exit 0 on PASS, 1 on FAIL.
@@ -25,6 +31,13 @@ import { existsSync } from 'fs';
 const ROOT = process.cwd();
 const BIN = join(ROOT, 'target/release/blitzkrieg-core');
 const WEB = join(ROOT, 'target/release/ui_kit_web');
+const REF_DYLIB_DIR = join(ROOT, 'user_layer/parity_strategy/target/release');
+const REF_STRATEGY = 'parity'; // the name the reference cdylib registers
+// CI runs this on Linux; a hardcoded `.dylib` would only ever pass on macOS.
+const REF_DYLIB = join(
+  REF_DYLIB_DIR,
+  `libparity_strategy.${process.platform === 'darwin' ? 'dylib' : process.platform === 'win32' ? 'dll' : 'so'}`,
+);
 const SOCK = join(tmpdir(), `uikit-plugins-${process.pid}.sock`);
 const WORK = mkdtempSync(join(tmpdir(), 'uikit-plugins-data-'));
 const PORT = 18993;
@@ -35,6 +48,13 @@ for (const p of [BIN, WEB]) {
     console.error(`missing binary: ${p} (run: cargo build --release)`);
     process.exit(1);
   }
+}
+if (!existsSync(REF_DYLIB)) {
+  console.error(`missing reference cdylib: ${REF_DYLIB}`);
+  console.error('  (run: cd user_layer/parity_strategy && cargo build --release --locked)');
+  console.error('  the strategy registry below is only non-empty because a cdylib is loaded —');
+  console.error('  the kernel registers no strategy of its own.');
+  process.exit(1);
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -77,6 +97,9 @@ try {
       ...process.env,
       UIKIT_CORE_BIN: BIN,
       UIKIT_CORE_CWD: WORK,
+      // Quoted: this checkout's path contains a space, and the gateway splits
+      // UIKIT_CORE_EXTRA_ARGS on whitespace outside quotes.
+      UIKIT_CORE_EXTRA_ARGS: `--engine --feed-ws --strategy-dir "${REF_DYLIB_DIR}"`,
       DRY_RUN: 'true',
       // Gateway mode requires an explicit credential pair since #83.
       BLITZKRIEG_PANEL_USER: 'gate-admin',
@@ -107,7 +130,7 @@ try {
   const off3 = await cmd('extension foo on');
   check('extension toggle without core = clean error', off3.ok === false, off3.message);
 
-  // [1] start an isolated dry core with all three builtins registrable.
+  // [1] start an isolated dry core whose only strategy is the reference cdylib.
   const started = await cmd('start BTC,ETH --dry-run');
   check('core started', started.ok === true, started.message);
   await waitFor('core connected', async () => {
@@ -115,27 +138,26 @@ try {
     return r.ok && r.data?.connection?.connected ? r : null;
   });
 
-  // [2] strategies list: three builtins, defaults preserved (only spread_arb on).
+  // [2] strategies list: exactly the loaded library — nothing built in.
   const st = await cmd('strategies');
   check('strategies ok', st.ok === true, st.message.split('\n')[0]);
   const rows = st.data.strategies ?? [];
   const names = rows.map((r) => r.name);
-  for (const want of ['spread_arb', 'trend_follow', 'mean_reversion']) {
-    check(`strategy listed: ${want}`, names.includes(want), names.join(','));
-  }
+  check(`the loaded cdylib is listed: ${REF_STRATEGY}`, names.includes(REF_STRATEGY), names.join(','));
+  check('the kernel registers no strategy of its own', names.join(',') === REF_STRATEGY, names.join(','));
   // Zero-default (the kernel couples to no strategy): a fresh boot lists every
   // registered strategy DISABLED; what trades is purely the operator's choice.
   check('fresh boot enables nothing', rows.filter((r) => r.enabled).map((r) => r.name).join(',') === '');
 
-  // [3] runtime toggle round-trip: mean_reversion on → on → off → off.
-  const t1 = await cmd('strategy mean_reversion on');
+  // [3] runtime toggle round-trip: parity on → on → off → off.
+  const t1 = await cmd(`strategy ${REF_STRATEGY} on`);
   check('strategy toggle on ok', t1.ok === true && t1.data?.found === true, JSON.stringify(t1.data));
   const st2 = await cmd('strategies');
-  check('mean_reversion now on', st2.data.strategies.find((r) => r.name === 'mean_reversion')?.enabled === true);
-  const t2 = await cmd('strategy mean_reversion off');
+  check('parity now on', st2.data.strategies.find((r) => r.name === REF_STRATEGY)?.enabled === true);
+  const t2 = await cmd(`strategy ${REF_STRATEGY} off`);
   check('strategy toggle off ok', t2.ok === true, t2.message);
   const st3 = await cmd('strategies');
-  check('mean_reversion off again', st3.data.strategies.find((r) => r.name === 'mean_reversion')?.enabled === false);
+  check('parity off again', st3.data.strategies.find((r) => r.name === REF_STRATEGY)?.enabled === false);
   check('no strategy left enabled by the toggle', st3.data.strategies.every((r) => r.enabled === false));
 
   // [4] malformed / unknown are clean errors.

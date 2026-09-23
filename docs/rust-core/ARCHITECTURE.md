@@ -103,13 +103,14 @@ trait 作为后续多市场（含杠杆/强平）的占位。
 per-strategy 限额/分账。策略标签贯穿订单（`OrderRequest.strategy`）→ 持仓 → 平仓账本，
 `engine.stats` 的 `strategies[]` 按策略给出敞口与会话 PnL。
 
-- `strategies::EngineStrategy`（**唯一**的全功能宿主契约，E7/ABI v2 起内建与外挂共用）：
+- `strategies::EngineStrategy`（**唯一**的全功能宿主契约，E7/ABI v2 起内树与外挂共用）：
   `on_book`/`on_round`/`find_candidates`/`take_exit_intents`/`take_breaks`/
-  `confirmed_tokens`/`diagnostics`/`set_hot_params`/`spread_arb_view`/`on_config`；只读视图
+  `confirmed_tokens`/`diagnostics`/`set_hot_params`/`config_view_json`/`on_config`；只读视图
   `StrategyCtx`（markets、回合剩余、`fresh_book`）——**策略无法绕过宿主闸门**
   （sizing/风控/限额都在宿主与 Core 侧；入场不带张数、出场不带价格）。
-- `strategies::SpreadArbBuiltin`：现役 `spread_arb` 的宿主化实现（趋势跟踪 + 热参数 + 入场评估），
-  `internal_key` 与候选顺序与旧 `Engine` 逐位一致（parity 硬门槛）。
+- 内核**自身不注册任何策略**：`strategies/` 下只剩契约（`mod.rs`）、影子孪生契约
+  （`shadow_twin.rs`）、外挂适配（`foreign.rs`）与 `cfg(test)` 适配器（`test_support.rs`）。
+  出厂状态下 `strategy.list` 为空，`Engine` 因此不产生任何候选单。
 - `strategies::foreign::ForeignStrategy`（feature `strategy-loading`，**默认开启**）：把 dlopen 来的
   C ABI **v2** 策略适配为同一个 `EngineStrategy`——全档位盘口、逐回调 `on_book`、出场意图、热参、
   诊断全部过界；**注册后默认 `enabled=false`**，需显式 `strategy.enable` 才开始交易。
@@ -169,7 +170,7 @@ venue/feed/discovery/gamma 从内核**物理迁出**到扩展，行为逐笔等�
 market_api/               # 市场契约（无内部依赖；内核与扩展共享）
 Blitzkrieg_core/          # Rust 内核（零市场代码）
 ├── src/
-│   ├── strategies/       # 多策略宿主契约 + 内建 spread_arb + 用户策略适配器
+│   ├── strategies/       # 多策略宿主契约（内核 0 策略：契约 + 外挂适配 + test 适配器）
 │   ├── strategy_engine/  # 用户策略加载/校验/独立注册表（mod/loader）
 │   ├── market/           # 接缝：mod（选择/注册）/ host / registry
 │   ├── order/            # 订单语义（re-export market_api）

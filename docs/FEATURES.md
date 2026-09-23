@@ -54,7 +54,7 @@ BlitzkriegBot 是一个面向 **Polymarket 加密二元（UP/DOWN）预测市场
 | **崩溃恢复：订单**（孤儿订单防护） | ✅ 已验证（离线） | `scripts/order-recovery-check.mjs`；启动孤儿清算（`startup sweep cancelled N orphan order(s)`） |
 | **崩溃恢复：持仓**（失管防护） | ✅ 已验证（离线） | `position_db.rs` + `restore_positions()`；`scripts/position-recovery-check.mjs` |
 | **内核接管（adopt）**：重复客户端不重启风暴 | ✅ 已验证（离线） | `scripts/core-adopt-check.mjs`；socket 改名后可发现并领养旧名 |
-| **事件驱动回测器（`--backtest`）** | ✅ 已验证（离线） | `scripts/backtest-check.mjs` 21/21，live vs 回放**逐位相等**（净盈亏 5.12208717） |
+| **事件驱动回测器（`--backtest`）** | ✅ 已验证（离线） | `backtest.rs` 单元测试。**端到端那条已退役**：`scripts/backtest-check.mjs`（21/21，live vs 回放**逐位相等**，净盈亏 5.12208717）回放的就是被删的 cdylib，现在没有替代品——要恢复它，先让树里重新有一个可回放的策略库 |
 | **行情归档（默认开启）**：分段轮转 256MB、无会话上限、<5GB 停录、单写者锁 | ✅ 已实盘验证（dry） | 真实 feed 13 分钟 / 1,025,963 事件 / 145.7 MB 重放一致 |
 | **UDS + JSON-RPC 2.0 IPC** | ✅ 已实盘验证（dry） | 45 个方法名（见 §1.1）；Node 侧 zod 镜像校验 |
 | **C ABI v2 策略接口** | ✅ 已验证（离线） | CI 真构建并驱动两个真实 cdylib；`foreign_parity.rs` 逐信号对拍 |
@@ -88,40 +88,45 @@ shadow_evolution.decide · shadow_evolution.proposals · shadow_evolution.set_au
 
 ## 2. 策略
 
-### 2.1 三个内建策略
+### 2.1 策略目录为空（内核零策略）
 
-| 策略 | 方向 | 默认状态 | 可进化旋钮 | 留出段证据 |
-| --- | --- | --- | --- | --- |
-| `spread_arb`（疯狗 / HFT 主策略） | 盘中抄底（趋势确认后的深跌反抽） | **启用** | 4 个 | [`HFT_OPTIMIZATION_REPORT.md`](reports/HFT_OPTIMIZATION_REPORT.md) |
-| `trend_follow`（趋势跟随） | 顺势追涨（突破/动量确认） | **禁用** | 6 个 | [`TREND_FOLLOW_HOLDOUT_REPORT.md`](reports/TREND_FOLLOW_HOLDOUT_REPORT.md) |
-| `mean_reversion`（逆向 / 均值回归） | 逆势接（超跌反弹） | **禁用** | 6 个 | [`MEAN_REVERSION_HOLDOUT_REPORT.md`](reports/MEAN_REVERSION_HOLDOUT_REPORT.md) |
+内核**不含任何策略实现**，`strategy.list` 在出厂状态下返回空。它曾经自带 5 个
+（`spread_arb` 抄底、`trend_follow` 追涨、`mean_reversion` 逆向、`pair_arb` 配对套利、
+`dog` 疯狗）——2026-09-23 全部删除，因为它们的实测结论一致为负且互相纠缠到无法维护。
+每个策略的实测数字、随之退役的门禁、算法留在哪里，见 [CHANGELOG.md](../CHANGELOG.md)。
+
+策略仍完全可用，只是**全部来自外挂 cdylib**：写一个 crate 调用
+`user_layer/strategy_logic` 里的纯逻辑（或你自己的逻辑），走 C ABI v2 加载即可。
+`user_layer/parity_strategy/` 是树里唯一的范例。落地与验收流程见
+[`rust-core/STRATEGY_GUIDE.md`](rust-core/STRATEGY_GUIDE.md)。
 
 > **默认禁用是刻意的安全属性**：升级内核**不会**改变在运行会话的交易行为。
 > 启用是显式的运维动作（`strategy.enable`）。
 >
-> `mean_reversion` 声明了 `momentum` 门禁豁免（`timing: false, momentum: true`）——
-> 「现货正逆着持仓走」正是它要入场的情形。豁免**只作用于它自己的候选单**，
-> 且安全边界物理上不可豁免。
+> 门禁豁免（`GateExemptions`）机制**仍在**：策略可以声明 `timing` / `momentum` 豁免，
+> 例如「现货正逆着持仓走」正是某个逆向策略要入场的情形。豁免**只作用于声明它的那个策略的
+> 候选单**，且安全边界物理上不可豁免。曾经的端到端验证脚本
+> `scripts/strategy-gate-check.mjs` 随被删策略一起退役；现在的覆盖在
+> `core/blitzkrieg_core/src/engine.rs` 的豁免单元测试上（不需要 cdylib）。
 
 ### 2.2 旋钮（可进化参数）
-
-| 策略 | 旋钮 |
-| --- | --- |
-| `spread_arb` | `trend_min_price`（0.55, [0.50,0.95]）· `trend_entry_factor`（0.98, [0.80,1.00]）· `trend_max_entry_price` · `trend_broken_price` |
-| `trend_follow` | `momentum_window_sec`（30, [5,300]）· `min_move_pct`（3.0, [0.5,10]）· `min_confirm_price`（0.55, [0.50,0.95]）· `break_price`（0.45, [0.05,0.60]）· `max_entry_price`（0.88, [0.50,0.98]）· `max_spread_pct`（3.0, [0.10,20]） |
-| `mean_reversion` | `lookback_sec`（120, [10,600]）· `min_drop_pct`（10, [1,50]）· `max_price`（0.35, [0.10,0.60]）· `entry_factor`（0.98, [0.80,1.00]）· `max_spread_pct`（8, [0.10,25]）· `cooldown_sec`（60, [0,600]）· `trend_window_sec`（600, [0,600]，0 = 关闭闸门）· `trend_drop_pct`（30, [5,90]）——后两个是 #176 的趋势闸门：单个 token 在 600s 窗口内自高点回落 ≥ 30% 即判定为单边下行，不再抄底 |
 
 **旋钮由策略自证**：trait `evolvable_knobs()`（外挂为可选符号 `bk_strategy_evolvable_knobs`）。
 **不声明 = 明确不可进化**。配置若落在默认取值域之外，取值域会**自动扩宽以包含现值**
 （声明一个自己都不符合的box 会让每次提案都成域违规）。
 
+内核自身不再注册任何声明旋钮的策略，可运行范例在测试里：
+`core/blitzkrieg_core/src/strategies/test_support.rs` 的 `TestSpreadArb`，以及
+`tests/shadow_evolution_per_strategy.rs` 的两个合成策略。被删三个策略的旋钮名仍在内核 CLI 上
+（`--spread-arb-*` / `--trend-*`），因为它们的纯逻辑仍在 `user_layer/strategy_logic/`。
+
 ### 2.3 策略工程化
 
 | 功能 | 状态 | 证据 |
 | --- | --- | --- |
-| 按策略资金分配（sizing / `max_positions` / 配额） | ✅ 已验证（离线） | `node scripts/strategy-limit-check.mjs`（E2-a / #26） |
-| 按策略门禁豁免（`GateExemptions` + 可选符号） | ✅ 已验证（离线） | `node scripts/strategy-gate-check.mjs`（E2-b / #27） |
-| 影子进化按策略化（参数/孪生/审计/回滚四维隔离） | ✅ 已验证（离线） | `node scripts/strategy-evolution-check.mjs`（E2-c / #28） |
+| 按策略资金分配（sizing / `max_positions` / 配额） | ✅ 已验证（离线） | 内核单元测试；`scripts/strategy-limit-check.mjs` 已随被删策略退役（E2-a / #26） |
+| 按策略门禁豁免（`GateExemptions` + 可选符号） | ✅ 已验证（离线） | `engine.rs` 豁免单测；端到端脚本 `strategy-gate-check.mjs` 已退役（E2-b / #27） |
+| 影子进化按策略化（参数/孪生/审计/回滚四维隔离） | ✅ 已验证（离线） | `tests/shadow_evolution_per_strategy.rs`；`strategy-evolution-check.mjs` 已退役（E2-c / #28） |
 | 策略生命周期：`strategy.load` / `unload` / `reload`（木马式原子交换，带审计） | ✅ 已验证（离线） | E9-b / #64；PR #64 |
 | 一键脚手架（零 unsafe 的 `SafeStrategy`） | ✅ 已验证（离线） | `node scripts/blitzkrieg-new-strategy.mjs`；E9-a / #60 |
 | 开发者全链路门禁（模板→构建→load→enable→信号→旋钮→孪生） | ✅ 已验证（离线） | `node scripts/strategy-devcheck.mjs`；PR #63 |
@@ -296,7 +301,7 @@ GitHub Milestone **v0.1 #1 已关闭**（22 个 Issue 全关）。
 | **E1** Blitzkrieg 清零 | 运行时零遗留品牌相关性（pre-takeover brand） | ✅ 完成（socket/env/协议/化妆项/remote 全部处理；加密盐与链上备注按用户裁决**有意保留**，见 D-13） |
 | **E2** 多策略底座 | 按策略资金 / 门禁 opt-out / 影子进化按策略化 | ✅ 完成（#26/#27/#28） |
 | **E3** 策略重构（疯狗 / HFT） | 用影子进化优化主策略 | ✅ 完成——**结论是「保持基线不改」**：F1/F3/F4 三个候选在留出段上**均不落地**（#29） |
-| **E4** 对冲策略 | ≥1 趋势 + ≥1 逆向 | ✅ 完成（trend_follow #30、mean_reversion #31；两者默认禁用） |
+| **E4** 对冲策略 | ≥1 趋势 + ≥1 逆向 | ✅ 完成（trend_follow #30、mean_reversion #31；两个策略 2026-09-23 已随其余三个一起删除） |
 | **E5** TUI + 插件管理器 | 完整 TUI 与插件管理 | ✅ 完成（#32/#33/#34） |
 | **E6** Tauri WebUI | Tauri 完成 WebUI | 🚧 脚手架 + 最小鉴权边界已交付（#35）；端到端打包验收未做 |
 | **E7** 策略接口全功能化 | C ABI v2 + 外挂标准化 | ✅ 完成（#38） |
@@ -337,10 +342,11 @@ Tauri 打包（`frontendDist` 指 `dist/`，窗口运行时指向内嵌只读服
 | E9-g | WebUI 策略/插件管理与 TUI **完全对等** | 🚧 部分 |
 | E9-h | 策略开发者签名页（浏览器加载本地 dylib） | 📋 **延期到 0.3**（浏览器无法直连 UDS） |
 
-> ⚠️ **E9 的验收标准里有一条未完全达成**：`dog_strategy` 改为 `SafeStrategy` 示例后
-> LOC ≤ 40。当前 `dog_strategy.rs` 仍是 **327 行手写 unsafe FFI**。
-> `SafeStrategy` 已实现，但**示例尚未改写**——这是 Epic 未收口的实质证据之一。
-> 详见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) §3.3。
+> ⚠️ **E9 的验收标准里有一条现在没有落点**：原文要求「`dog_strategy` 改为 `SafeStrategy`
+> 示例后 LOC ≤ 40」。该改写**曾经达成**（KI-7：53 行、零 `unsafe`），但那个示例
+> 2026-09-23 随 5 个策略一起删除，于是 `SafeStrategy`（`user_layer/strategy_api/src/safe.rs`）
+> 在树里**没有任何范例**——它仍然可用、仍有单元测试，只是没有可照抄的模板。
+> 详见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) §3.3 与 KI-7。
 
 ### 9.3 规模化压测
 

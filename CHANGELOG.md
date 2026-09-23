@@ -199,6 +199,77 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   arguments` on existing strategy/venue entry points, `large_enum_variant` on
   `ReconcileAction`). Contributors now get a red build for a new warning.
 
+### Removed
+
+- **The kernel's five shipped strategies, and everything that only existed to
+  exercise them.** `spread_arb`, `trend_follow`, `mean_reversion`, `pair_arb`
+  and `dog` are gone as crates: `user_layer/strategies/{Cargo.toml,Cargo.lock}`
+  (the nested workspace) and the five member directories with it. The kernel
+  now registers **zero** strategies; `strategy.list` is empty on a fresh boot
+  and every strategy arrives through the C ABI v2 `dlopen` path. The reason is
+  in the measurements, not in taste: all five measured negative and they had
+  become entangled past the point of maintenance — the arm matrix put every one
+  of the 61 arms below zero under any honest cost model, `pair_arb`'s win rate
+  was reachable at 85% while its profit factor capped near 1 because maker
+  fills are adversely selected, and the exit-side work that looked like the
+  culprit turned out to be entry-side negative expectancy (the P0 defect in
+  that path, #267, was fixed and shipped in #274 and the strategies still lost).
+  What did **not** change: the algorithms. `user_layer/strategy_logic/` still
+  holds `spread_arb` / `trend_follow` / `mean_reversion`'s pure logic, the
+  kernel's `--spread-arb-*` / `--trend-*` knobs and `EngineConfig.spread_arb`
+  still exist, and `user_layer/parity_strategy/` remains the reference cdylib
+  for writing one. Deleting `strategy_logic` is a separate, larger change.
+
+  **Coverage that went with them (not replaced, and not pretended to be):**
+
+  - Eleven acceptance gates deleted: `strategy-gate-check.mjs`,
+    `strategy-limit-check.mjs`, `strategy-evolution-check.mjs`,
+    `trend-follow-check.mjs`, `mean-reversion-check.mjs`,
+    `mean-reversion-gate-evidence.mjs`, `backtest-check.mjs`,
+    `fee-model-sensitivity-check.mjs`, `exit-economics-check.mjs`,
+    `settlement-redeem-check.mjs`, `lib/strategy-dylib-freshness.mjs`, plus the
+    now-orphaned `lib/strategy-leg-harness.mjs`. Each replayed or drove a
+    shipped cdylib.
+  - **`backtest-check.mjs` is the sharpest loss**: it pinned "same collection,
+    live and replay are bit-identical" (net PnL 5.12208717; 1,025,963 real feed
+    events over 13 minutes, 19/19). `--backtest` itself survives and has unit
+    tests, but that end-to-end assertion has **no substitute** until the tree
+    holds a replayable strategy again.
+  - **The fee-model decision guard is gone.** `fee-model-sensitivity-check.mjs`
+    was the executable answer to "does switching the default schedule to
+    `official` flip net PnL's sign?" (`docs/CAPACITY_AND_EQUITY.md §3`). That
+    question now has no gate at all; `FeeSchedule`'s unit tests pin the curve,
+    not the economics.
+  - `strategy-gate-check.mjs` / `strategy-evolution-check.mjs`'s end-to-end
+    coverage (real core + real cdylib) falls back to the kernel's own tests:
+    `engine.rs`'s exemption tests and
+    `tests/shadow_evolution_per_strategy.rs`. Those are real, but they run on
+    `cfg(test)` adapters, not on a loaded library.
+  - `strategy-devcheck.mjs`, `ui-plugin-check.mjs` and the PTY panel check kept
+    their coverage by pointing at `user_layer/parity_strategy` (the reference
+    cdylib) and asserting the registry holds **exactly** that one entry — a
+    stronger assertion than the old "the three builtins are listed", at the cost
+    of one extra cdylib build in two CI jobs.
+
+  **Upgrade note (operators):** the kernel scans `user_layer/strategies/**` for
+  cdylibs by default (`default_strategy_dir()` walks up from the executable),
+  so a deployment that ever built the old strategies still has five stale
+  `*.dylib` files in `user_layer/strategies/target/release/` — and they will
+  still be loaded and listed. `rm -rf user_layer/strategies/target` on the
+  deployment is what actually makes it zero strategies. The upgrade path
+  deliberately does **not** prune that directory: it is the drop-point where an
+  operator's own strategies live, and stale build output is indistinguishable
+  from a strategy someone put there on purpose.
+
+  Also removed as fossils: the `spread_arb` provenance label the scripts sent
+  with their synthetic orders (now `operator` — it was never validated, it just
+  echoed back into `engine.stats.strategies[]` and invented a phantom strategy
+  row), and `walk-forward-sweep.mjs`'s `EXPECTED_STRATEGIES = ['spread_arb']`
+  constant, which is now a required `--strategy <name>` argument — an
+  `--enable-strategy` that resolves to nothing refuses to boot (#265), so the
+  sweep would have died at startup rather than silently replaying archives
+  through a kernel with no trading logic.
+
 ## [0.2.0] - 2026-09-17
 
 ### Removed

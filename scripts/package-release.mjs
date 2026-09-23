@@ -79,7 +79,8 @@ if (outIdx >= 0 && !argv[outIdx + 1]) {
 const REQUIRED_BINARIES = ['blitzkrieg-core'];
 /** Built but optional: the UI crates are not built on every platform. */
 const OPTIONAL_BINARIES = ['ui_kit_web', 'ui_kit_panel', 'ui_kit_app', 'blitzkrieg'];
-/** Nested workspaces that build strategy cdylibs. */
+/** Where strategy cdylibs are built: the drop-point operators add strategies to,
+ *  and the reference implementation's nested workspace. */
 const CDYLIB_DIRS = ['user_layer/strategies', 'user_layer/parity_strategy'];
 
 function dirSize(p) {

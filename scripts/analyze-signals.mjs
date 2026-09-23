@@ -2,7 +2,9 @@
 /**
  * Analyze shadow signal records (data/signals/signals.jsonl).
  *
- * Answers: does spread_arb have edge, and under which conditions?
+ * Answers: which signals reached the engine, and under which conditions they
+ * turned into entries. The records are whatever strategy produced them — the
+ * kernel ships none of its own, so the file is the operator's to interpret.
  *
  * Usage:
  *   node scripts/analyze-signals.mjs

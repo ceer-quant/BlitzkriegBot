@@ -1,9 +1,11 @@
 //! **Test-only** hosted adapters.
 //!
 //! PR-B hard switch: the kernel ships ZERO strategies. Production binaries
-//! register nothing; every strategy — the shipped examples included — arrives
-//! through the C ABI v2 dlopen path. The kernel-side `spread_arb` /
-//! `trend_follow` / `mean_reversion` wrappers were deleted with the builtins.
+//! register nothing; every strategy arrives through the C ABI v2 dlopen path.
+//! The kernel-side `spread_arb` / `trend_follow` / `mean_reversion` wrappers were
+//! deleted with the builtins, and the example cdylibs that used to live in
+//! `user_layer/strategies/` are gone too — the reference implementation is now
+//! `user_layer/parity_strategy`.
 //!
 //! The engine/service/evolution unit tests still need SOMETHING hosted to drive
 //! candidate dispatch, gate exemptions and hot parameters without building a

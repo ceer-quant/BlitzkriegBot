@@ -359,7 +359,8 @@ pub unsafe extern "C" fn bk_strategy_free_string(p: *mut c_char) {
 // ── SafeStrategy ergonomic layer (E9-a / #60) ───────────────────────────────
 // `use blitzkrieg_strategy_api::{SafeStrategy, export_strategy!}` is now the
 // whole template contract for a third-party strategy crate; the raw ABI below
-// stays available for full-control authors (dog_strategy) and for the kernel.
+// stays available for full-control authors (user_layer/parity_strategy) and for
+// the kernel.
 pub mod safe;
 pub use safe::{
     BookUpdate, Break, Entry, Exit, FreshBook, Intents, Knob, MarketInfo, ParamBag, RoundContext,

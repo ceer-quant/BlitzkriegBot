@@ -49,7 +49,7 @@
 | 冷却期 | 该策略距上次应用 ≥ 10 分钟 |
 
 **判定是逐策略独立的**：策略 A 满足条件并应用，不会改变策略 B 的变体集、计数器、
-基准或冷却期。`spread_arb`（内建，关闭态）与外部 dylib 共存时，各自有独立单元。
+基准或冷却期。两个已加载的 dylib 共存时，各自有独立单元。
 
 ## 3. 安全锁（硬编码，不可绕过）
 
@@ -68,9 +68,10 @@
 而是独立的 `ImmutableConfig`——这是**结构性隔离**，不是一个可绕过的检查：`ArcSwap`
 里根本没有这些字段。`guard::validate_immutable` 再做一次纵深断言。
 
-- 可进化：由**策略自己声明**（内建走 `EngineStrategy::evolvable_knobs()`，
-  外挂走可选符号 `bk_strategy_evolvable_knobs`）。例：`spread_arb` 声明 4 个 `trend_*` 旋钮；
-  `dog_strategy` 声明 `trendMaxEntryPrice`（0.05–0.90）。
+- 可进化：由**策略自己声明**（内树实现覆写 `EngineStrategy::evolvable_knobs()`，
+  外挂导出可选符号 `bk_strategy_evolvable_knobs`）。树里已没有任何声明旋钮的策略，
+  可运行范例在 `core/blitzkrieg_core/src/strategies/test_support.rs`（`TestSpreadArb`，
+  4 个 `trend_*` 旋钮）与 `tests/shadow_evolution_per_strategy.rs` 的合成策略。
 - **不声明 = 明确「不可进化」**，不是「暂时没参数」：该策略拿不到参数单元，也不会出现在
   `status.strategies[]` 里，回滚它会被明确拒绝并说明原因。
 - 不可进化：`hard_stop_loss_pct`、`max_consecutive_losses`、`max_daily_loss_usd`、`max_order_notional`
@@ -289,9 +290,9 @@ CLI：`--se-auto-evolve on|off`、`--se-cycle-secs N`、`--se-ttl-secs N`、
 |:---|:---|:---|
 | 关闭时完全惰性（开关不再隐式） | `enabled=false` 或 `auto_evolve=false` 时无注册、无文件 | 单测 `disabled_by_default_is_fully_inert`、`observation_alone_never_moves_parameters`、`the_engine_switch_survives_a_restart` |
 | 参数模型按策略命名 | `MutableParams` = `BTreeMap<strategy, StrategyParams>` | `knobs.rs` 单测 + 集成 `apply_and_rollback_move_exactly_one_strategy` |
-| 每策略自证旋钮与取值域 | `evolvable_knobs()` / 可选符号 | 单测 `enable_scaffolds_every_strategy_and_publishes_its_own_cell`；门禁 `core:strategy-evolve` 断言 `declares evolvable knobs: trendMaxEntryPrice` |
+| 每策略自证旋钮与取值域 | `evolvable_knobs()` / 可选符号 | 单测 `enable_scaffolds_every_strategy_and_publishes_its_own_cell`；门禁 `core:strategy-evolve` 断言 `declares evolvable knobs: trendMaxEntryPrice`（**该门禁已随被删策略退役**，覆盖落到上面这条单测上） |
 | 未声明 = 不可进化 | 无符号 → 无单元 | 单测 `a_strategy_that_declares_nothing_gets_no_unit`；集成 `an_undeclared_strategy_is_reported_not_evolvable` |
-| 两策略并行互不串扰 | 每策略独立单元与计数器 | 单测 `two_strategies_evolve_in_parallel_without_cross_talk`；集成 `two_strategies_evolve_in_parallel_without_cross_talk_through_the_core`（真 `Core`+`Engine`，含内建 `spread_arb` 全程不动） |
+| 两策略并行互不串扰 | 每策略独立单元与计数器 | 单测 `two_strategies_evolve_in_parallel_without_cross_talk`；集成 `two_strategies_evolve_in_parallel_without_cross_talk_through_the_core`（真 `Core`+`Engine`，两个合成策略互不影响） |
 | ≥2 个变异策略 | `ShadowFactory::make` 生成 ±Δ 孪生 | 单测 `build_produces_a_baseline_plus_directed_single_knob_variants`、`the_sweep_visits_every_knob_and_both_directions` |
 | 虚拟资金不影响真实账本 | 孪生走内核侧 `TwinReplay`，从不触 OME/ledger/positions | 结构性隔离（无句柄）：单测 `metrics_are_windowed_and_identical_for_baseline_and_variant` 证明孪生只在自己的回放账本里累计 |
 | 满足条件发出 EvolveSignal | `evaluator::evaluate` 逐策略 | 单测 `emits_a_strategy_tagged_signal_when_a_variant_clearly_wins`、`the_counterfactual_is_a_real_decision_difference` |
@@ -304,14 +305,15 @@ CLI：`--se-auto-evolve on|off`、`--se-cycle-secs N`、`--se-ttl-secs N`、
 | 风控不可被改 | `ImmutableConfig` + `validate_immutable` | 单测 `immutable_risk_cannot_be_weakened` |
 | 违反锁被记录/告警 | `audit::record_rejection` | 单测 `a_disabled_audit_writes_no_files`、`each_strategy_gets_its_own_file_and_history` |
 | 回滚按策略独立 | `rollback(strategy, …)` | 单测 `rollback_is_per_strategy`；集成 `apply_and_rollback_move_exactly_one_strategy`；门禁回滚 A 不动 B |
-| 每次进化完整审计（分文件） | `data/evolution/<strategy>.jsonl` | 单测 `each_strategy_gets_its_own_file_and_history`；集成断言 `alpha.jsonl` 无 beta/spread_arb 记录且 beta/spread_arb 文件不存在；门禁断言 `spread_arb.jsonl` 从未产生 |
+| 每次进化完整审计（分文件） | `data/evolution/<strategy>.jsonl` | 单测 `each_strategy_gets_its_own_file_and_history`；集成断言 `alpha.jsonl` 无 beta/spread_arb 记录，且 `beta.jsonl` / `spread_arb.jsonl` 不存在（后两者未进化，就不该有文件） |
 | 手动 apply / 回滚有标记 | `manual` / `rollback` 字段 | 单测 `manual_and_rollback_records_are_flagged`、`a_manual_apply_is_audited_and_domain_checked`；集成 `apply_and_rollback_move_exactly_one_strategy` |
 | 关掉进化行为逐位一致 | 覆盖层**摘除**（`None`） | 集成 `evolution_off_is_byte_for_byte_the_previous_behaviour` |
 | 孪生重放的是同一份出场策略 | `ExitConfig` 取自 `config.positions.exit` | 单测 `the_exit_policy_replayed_is_the_configured_one` |
 | 孪生崩溃不影响主策略 | `catch_unwind` + `crashed` 标记（`mod.rs` 逐孪生 tick）| **机制在位但无专门回归测试**（旧版那条测试随 `hot_swap.rs` 一并删除）——见 §10 已知缺口 |
 
-本地门禁：`node scripts/strategy-evolution-check.mjs`（真 release 二进制 + 真 dog cdylib + 私有 socket +
-临时工作目录，断言声明可见、逐策略隔离、域/步长拒绝、分文件审计、回滚、关闭态不变）。
+本地门禁：`node scripts/strategy-evolution-check.mjs`（真 release 二进制 + 真 cdylib + 私有 socket +
+临时工作目录，断言声明可见、逐策略隔离、域/步长拒绝、分文件审计、回滚、关闭态不变）——
+**已随被删策略退役**，上面这张表里凡是标了「集成」的行现在只剩内核测试在守。
 
 ## 10. 已知缺口（登记不隐藏）
 

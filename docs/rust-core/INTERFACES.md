@@ -72,14 +72,19 @@
 | `strategy.enable` | `{ name, enabled }` | `{ name, enabled, found }` |
 | `strategy.load` | `{ path }` | 成功 `"<name>@<version> registered into the engine dispatch (disabled)"`（注册后默认禁用，需再 `strategy.enable`；E2-b 起若该库导出可选符号 `bk_strategy_gate_exemptions`，回执在启用前显式追加 `; declares gate exemptions: timing[,momentum]`）；失败返回 `"Rejected { path, reason }"`（路径策略）/ `"Failed { path, reason }"`（dlopen/协商/`create` 失败）。走 **C ABI v2**：`bk_strategy_abi_version()` 必须为 2（无 v1 兼容层）；新能力一律以「按名字解析的可选符号」追加、vtable 结构体冻结，故 E2-b 不需要 ABI v3。`strategy-loading` 自 E7 起默认开启 |
 
-`strategy.list` 自 E4-b 起返回**三个**内建：`spread_arb`（默认 `enabled:true`）、
-`trend_follow`（默认 `enabled:false`，E4 的追涨腿，6 个可进化入场旋钮、
-不声明任何门禁豁免）与 `mean_reversion`（默认 `enabled:false`，E4-b / #31 的逆向/fade 腿，
-6 个可进化旋钮，**声明 `momentum` 门禁豁免**——`engine.stats.blocked.declaredExemptions`
-因此常驻一条 `{"strategy":"mean_reversion","gates":["momentum"]}`）。开机态也可由 CLI 决定：`--enable-strategy <name>` / `--disable-strategy <name>`
+**内核自身不注册任何策略**，因此出厂状态下 `strategy.list` 返回空数组，`engine.stats` 的
+`strategies[]` 也是空的。曾经自带的三个（`spread_arb` / `trend_follow` / `mean_reversion`，
+以及后来的 `pair_arb` / `dog`）已全部删除（见 [CHANGELOG.md](../../CHANGELOG.md)）；
+列表里出现的每一行都来自被加载的 cdylib，且**注册后默认 `enabled:false`**。
+门禁豁免声明因此不再是常驻项：`engine.stats.blocked.declaredExemptions` 只在某个已加载库
+声明了豁免时才出现（曾经的 `mean_reversion` 条目随之消失）。
+
+开机态也可由 CLI 决定：`--enable-strategy <name>` / `--disable-strategy <name>`
 （可重复，`--disable-strategy` 优先），走的是与 `strategy.enable` **同一个** `set_strategy_enabled`，
 因此开机选择与运行期切换行为一致；回测/回放复用同一份 `CoreConfig`，同样吃这两个开关。
-未知名只记警告日志并忽略（不会让进程失败）。
+未知名只记警告日志并忽略（不会让进程失败）——但**一个库都没解析到**时 `--enable-strategy`
+会让进程**拒绝启动**，除非显式给 `--allow-zero-strategies`（#265：空注册表 + 显式启用意图
+= 配置错误，不该静默跑一个不会交易的内核）。
 
 ### 2.5 风控
 | method | params | result |
@@ -248,7 +253,7 @@ use blitzkrieg_core::service::{Core, CoreConfig};
 let mut core = Core::new(CoreConfig { risk: /*...*/, ..Default::default() });
 let (id, status) = core.place(req, 5000, now_ms)?;
 let names = core.strategy_names();
-core.set_strategy_enabled("spread_arb", false);
+core.set_strategy_enabled("my_strategy", false);
 ```
 
 ## 4. 版本变更记录
@@ -267,3 +272,4 @@ core.set_strategy_enabled("spread_arb", false);
 | 1.1 | E4-b：`Engine::new` 注册第四个内建策略 `mean_reversion`（默认关闭，E2-b momentum 豁免的第一个内建使用者——`blocked.declaredExemptions` 常驻 `{"strategy":"mean_reversion","gates":["momentum"]}`）；无任何 RPC schema 变化（Issue #31） |
 | 1.1 | 网络诊断：新增只读方法 `net.check`（`NetCheckReport`，见 §2.8），以及内核一次性开关 `--net-check`（输出 JSON、不起内核、不碰 `data/`）、启动器子命令 `blitzkrieg net-check [--json] [--socket]`、面板路由 `GET /api/netcheck` + `POST /api/netcheck/probe`。协议加项，向后兼容，版本号不变；探测能力来自市场插件（`MarketPlugin::net_check`，默认 `unsupported`） |
 | 1.1 | 受限配置热加载（Issue #191）：新增 `risk.setLimits`（见 §2.5），只允许热改**开仓限额**（每笔/组合名义上限 + 开仓股数区间），白名单之外一律**明确拒绝**并要求重启；**只改内存、不落盘**（响应 `persisted: false`），审计走既有 `target: "risk"` INFO 日志（actor/字段/旧值/新值/reason）。协议加项，向后兼容，版本号不变 |
+| 1.1 | 内核零策略（2026-09-23）：删除自带的 5 个策略（`spread_arb`/`trend_follow`/`mean_reversion`/`pair_arb`/`dog`）。**协议本身无变化**——`strategy.list` 的形状、`strategy.load` 的回执、`engine.stats` 的字段都没动，变的只是「出厂时列表为空」。上面几条 E4-a/E4-b 的记录保留为历史：它们描述的是当时的注册行为，那些注册点已不存在 |

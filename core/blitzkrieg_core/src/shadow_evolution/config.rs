@@ -233,8 +233,8 @@ mod tests {
             "data/evolution/spread_arb.jsonl"
         );
         assert_eq!(
-            cfg.audit_path_for("dog_strategy").to_string_lossy(),
-            "data/evolution/dog_strategy.jsonl"
+            cfg.audit_path_for("alpha_strategy").to_string_lossy(),
+            "data/evolution/alpha_strategy.jsonl"
         );
         // A separator cannot escape the audit directory.
         assert_eq!(

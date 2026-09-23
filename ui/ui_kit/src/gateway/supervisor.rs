@@ -409,7 +409,7 @@ impl SupervisorConfig {
             .map(PathBuf::from);
         let extra_args: Vec<String> = std::env::var("UIKIT_CORE_EXTRA_ARGS")
             .ok()
-            .map(|s| s.split_whitespace().map(|a| a.to_string()).collect())
+            .map(|s| split_extra_args(&s))
             .unwrap_or_else(|| vec!["--engine".into(), "--feed-ws".into()]);
         Self {
             binary_path,
@@ -933,6 +933,36 @@ impl Drop for Supervisor {
 }
 
 /// Drain a child's stderr on its own thread: every line goes to our stderr (so
+/// Split `UIKIT_CORE_EXTRA_ARGS` into the child's arguments.
+///
+/// Whitespace-separated, except inside single or double quotes. Plain
+/// `split_whitespace` cannot express a value that contains a space, and an
+/// absolute path is exactly that on a checkout whose directory name has one:
+/// `--strategy-dir /Volumes/Hard Disk/…` would arrive as two arguments, and the
+/// core (correctly) refuses to start on an argument it does not understand.
+fn split_extra_args(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for ch in input.chars() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => current.push(ch),
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
 /// the gateway's run log keeps showing core output exactly as before) and into
 /// the bounded tail ring that the give-up alert reports.
 fn drain_stderr(err: impl std::io::Read + Send + 'static, tail: StderrTail) {
@@ -992,6 +1022,33 @@ mod tests {
     #[test]
     fn socket_served_false_for_missing_path() {
         assert!(!socket_served("/tmp/definitely-not-a-socket-12345.sock"));
+    }
+
+    #[test]
+    fn extra_args_split_on_whitespace() {
+        assert_eq!(
+            split_extra_args("--engine --feed-ws --no-trade-log"),
+            ["--engine", "--feed-ws", "--no-trade-log"]
+        );
+        assert_eq!(split_extra_args("   "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn extra_args_keep_quoted_paths_whole() {
+        // A checkout under a directory whose name contains a space is ordinary on
+        // macOS; the strategy dir has to survive as ONE argument.
+        assert_eq!(
+            split_extra_args("--strategy-dir \"/Volumes/Hard Disk/repo/ul/parity\" --engine"),
+            [
+                "--strategy-dir",
+                "/Volumes/Hard Disk/repo/ul/parity",
+                "--engine"
+            ]
+        );
+        assert_eq!(
+            split_extra_args("--strategy-dir '/a b c'"),
+            ["--strategy-dir", "/a b c"]
+        );
     }
 
     #[test]

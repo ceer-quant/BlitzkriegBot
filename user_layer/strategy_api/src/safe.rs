@@ -1,7 +1,7 @@
 //! SafeStrategy — the ergonomic half of `blitzkrieg-strategy-api` (E9-a / #60).
 //!
 //! Writing a v2 strategy against the raw C ABI means hand-writing ~250 lines of
-//! `unsafe` plumbing (`user_layer/strategies/dog_strategy.rs`): the vtable,
+//! `unsafe` plumbing (`user_layer/parity_strategy/parity_strategy.rs`): the vtable,
 //! `#[no_mangle]` exports, `create`/`destroy` boxing, `char*`↔String
 //! conversions, and the JSON envelope around every hook. A business developer
 //! should not touch any of that.
@@ -13,10 +13,10 @@
 //! zero `unsafe` in the caller's code. The generated dylib is indistinguishable
 //! from a hand-rolled v2 library, so the kernel (`strategy.load`, negotiation,
 //! receipts) needs no new support, and existing manual-FFI strategies
-//! (dog_strategy) keep loading unchanged.
+//! (parity_strategy) keep loading unchanged.
 //!
 //! Types are deliberately simple (`f64`/`String`): the shell parses the ABI's
-//! decimal strings once per update, the same numbers dog_strategy computes.
+//! decimal strings once per update, the same numbers the raw ABI hands over.
 //!
 //! # The kernel-side contract is unchanged
 //!

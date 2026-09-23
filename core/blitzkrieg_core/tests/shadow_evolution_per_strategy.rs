@@ -11,8 +11,8 @@
 //!
 //! The strategies are real, full `EngineStrategy` implementations with their own
 //! declared knobs, their own twin factory and their own asset universe — the same
-//! contract the builtin and an external dylib implement, so this exercises the
-//! seam rather than a test double.
+//! contract the `test_support` adapter and an external dylib implement, so this
+//! exercises the seam rather than a test double.
 
 use blitzkrieg_core::engine::{DataEvent, Engine, EngineConfig};
 use blitzkrieg_core::exit_policy::ExitConfig;
@@ -175,8 +175,9 @@ fn engine_cfg() -> EngineConfig {
             min_round_age_sec: 0,
             min_time_left_sec: 0,
         },
-        // Short confirmation window. The builtin's own floor stays 0.55, which
-        // the synthetic books never confirm, so it cannot quietly trade here.
+        // Short confirmation window. The spread_arb adapter's own floor stays
+        // 0.55, which the synthetic books never confirm, so it cannot quietly
+        // trade here.
         trend: TrendConfig {
             confirm_sec: 5,
             ratio: dec!(0.5),
@@ -190,10 +191,10 @@ fn engine_cfg() -> EngineConfig {
     }
 }
 
-/// A core hosting the builtin `spread_arb` (disabled, so it cannot place orders)
-/// plus the two synthetic strategies. The builtin declares knobs too, so it is
-/// tracked as a third unit and must stay put throughout — a stricter isolation
-/// check than two strategies alone.
+/// A core hosting the `spread_arb` test-support adapter (disabled, so it cannot
+/// place orders) plus the two synthetic strategies. That adapter declares knobs
+/// too, so it is tracked as a third unit and must stay put throughout — a
+/// stricter isolation check than two strategies alone.
 fn build_core(dir: &std::path::Path, se_enabled: bool) -> Core {
     let cfg = CoreConfig {
         engine_enabled: true,

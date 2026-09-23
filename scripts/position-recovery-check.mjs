@@ -7,6 +7,10 @@
  * path) must RESTORE it — so the bot keeps valuing it and running exit rules
  * instead of letting the trade drift to expiry unmanaged.
  *
+ * The opening order goes in over the operator wire (`orders.place`) and is filled
+ * by a crossing book: recovery is about the position log, not about who decided
+ * to trade, and the kernel ships no strategy to decide it.
+ *
  * Usage: node scripts/position-recovery-check.mjs
  */
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
@@ -57,9 +61,8 @@ async function boot(path, extra = []) {
   try { unlinkSync(path); } catch {}
   const p = spawn(BIN, ['--socket', path, '--mode', 'dry', '--tick-ms', '50', '--seed-balance', '1000',
     '--max-order-notional', '6', '--position-log', POS_LOG, '--no-trade-log', '--no-order-log',
-    '--engine', '--enable-strategy', 'spread_arb', '--no-event-archive', '--no-discovery', '--no-auto-exits', '--round-sec', '3600',
-    '--min-round-age', '0', '--min-time-left', '0',
-    '--trend-confirm-sec', '3', '--trend-window-floor-ms', '1000', ...extra],
+    '--engine', '--no-event-archive', '--no-discovery', '--no-auto-exits', '--round-sec', '3600',
+    '--min-round-age', '0', '--min-time-left', '0', ...extra],
     { stdio: 'ignore', cwd: WORK });
   for (let i = 0; i < 100 && !existsSync(path); i++) await sleep(50);
   await sleep(300);
@@ -67,6 +70,7 @@ async function boot(path, extra = []) {
 }
 const MARKET = 'engine.markets', BOOK = 'books.snapshot', POS = 'positions.list', ORDERS = 'orders.list';
 const book = (bid, ask) => ({ tokenId: 'UP', bids: [{ price: bid, size: 100 }], asks: [{ price: ask, size: 100 }] });
+const REST = 0.30;
 
 async function openPosition(path) {
   await connect(path);
@@ -75,14 +79,16 @@ async function openPosition(path) {
   await rpc(MARKET, { markets: [{ asset: 'BTC', conditionId: '0xcond', questionId: '0xq',
     upTokenId: 'UP', downTokenId: 'DOWN', upPrice: 0.5, downPrice: 0.5,
     expiresAtMs: (slot + 1) * ROUND * 1000, roundSlot: slot, negRisk: true, question: 'BTC up/down' }] });
-  for (let i = 0; i < 14; i++) { await rpc(BOOK, book(0.57, 0.58)); await sleep(300); }
-  await rpc(BOOK, book(0.43, 0.44)); await sleep(400);   // dip → a resting bid (price belongs to the strategy)
-  // Cross whatever bid the strategy actually rests: the gate owns the order
-  // CHAIN, not the pricing default, so it reads the price instead of
-  // hardcoding one — a discount change then touches nothing here.
-  const resting = ((await rpc(ORDERS)).orders || []).find((o) => o.status === 'LIVE');
-  const restPrice = Number(resting?.price ?? 0);
-  await rpc(BOOK, book(restPrice - 0.01, restPrice)); await sleep(600);   // cross → maker fill → position
+  // Rest a maker bid, then cross it: ask reaches the bid -> maker fill -> position.
+  await rpc('orders.place', {
+    tokenId: 'UP', conditionId: '0xcond', side: 'buy', mode: 'maker',
+    price: REST, size: 10, internalKey: 'k-open',
+    strategy: 'operator', asset: 'BTC', direction: 'up', roundSlot: slot,
+  });
+  await sleep(300);
+  const resting = ((await rpc(ORDERS)).orders || []).filter((o) => o.status === 'LIVE');
+  if (resting.length === 0) throw new Error('the maker bid did not rest — nothing to cross');
+  await rpc(BOOK, book(REST - 0.01, REST)); await sleep(600);   // cross → maker fill → position
 }
 
 // 1) Boot and open a position.

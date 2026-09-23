@@ -135,7 +135,7 @@ console.log('mode over IPC   :', JSON.stringify(mode));
 // ledger would never move and the mode would be useless for its purpose.
 await rpc(sock, 'orders.place', {
   tokenId: 'tok1', conditionId: 'cond1', side: 'buy', mode: 'taker',
-  price: 0.30, size: 10, internalKey: 'k-ro', strategy: 'spread_arb',
+  price: 0.30, size: 10, internalKey: 'k-ro', strategy: 'operator',
   asset: 'BTC', direction: 'up', roundSlot: 1,
 });
 await sleep(600);

@@ -42,7 +42,9 @@ BlitzkriegBot/
 │   └── polymarket/        # 官方 Polymarket 扩展（默认 feature 挂接）
 ├── user_layer/
 │   ├── strategy_api/      # 用户策略 trait / FFI 稳定表面
-│   └── strategies/        # 示例动态策略（独立的嵌套 workspace，产出 cdylib）
+│   ├── strategy_logic/    # 策略算法（与内核共享的纯逻辑，不含任何启用策略）
+│   ├── parity_strategy/   # C ABI v2 参考实现（独立的嵌套 workspace，产出 cdylib）
+│   └── strategies/        # 策略投放点：内核扫描这里，当前为空（只有 README）
 ├── ui/
 │   ├── ui_kit/            # Rust UI 套件（bin: ui_kit_web —— 面板 HTTP 服务器）
 │   ├── ui_kit_panel/      # 终端面板（bin: ui_kit_panel）+ 单二进制启动器（bin: blitzkrieg）
@@ -67,7 +69,7 @@ BlitzkriegBot/
 | `reconcile` | 与交易所成交回报对账 |
 | `ledger` / `trade_db` | 成交与决策审计台账 |
 | `signal` / `scanner` / `marketdata` | 信号、轮盘扫描、行情归集 |
-| `strategy_engine` | 内置策略与动态策略加载器 |
+| `strategy_engine` | 动态策略加载器（dlopen，C ABI v2；内核不含策略） |
 | `shadow` / `shadow_evolution` | 影子回放、近失（near-miss）样本与影子进化 |
 | `sim` | DryRun 模拟成交与估值 |
 | `ipc` | UDS + JSON-RPC 2.0 传输与 schema |
@@ -412,7 +414,7 @@ blitzkrieg backup --status              # 同一件事，走 shim
 ┌───────────────────────────────────────────┴───────────────────────────┐
 │                         blitzkrieg-core（Rust）                          │
 │  engine/ome · order · position · risk · exit_policy · reconcile        │
-│  strategy_engine（内置 + cdylib 热加载） · shadow/shadow_evolution      │
+│  strategy_engine（cdylib 热加载，内核 0 策略） · shadow/shadow_evolution │
 │  market registry（core 市场无关，无任何交易所 SDK）                      │
 └───────────────────────────────┬─────────────────────────────────────────┘
                                  │ 依 feature 挂接
@@ -466,10 +468,10 @@ cd ui/webapp/webui && npm run check:all
 其他常用门禁脚本（`node scripts/<name>.mjs` 直跑，无 npm 别名）：
 
 - `scripts/core-adopt-check.mjs` —— 多客户端竞争与 adopt 语义。
-- `scripts/dry-observe.mjs` —— DryRun 观察。
+- `scripts/dry-observe.mjs` —— DryRun 观察（`--strategy <name>` 指定要加载并启用的 cdylib；内核自己不注册任何策略）。
 - `scripts/shutdown-cleanliness-check.mjs` / `parent-monitor-check.mjs` / `readonly-egress-check.mjs` / `crash-recovery-check.mjs` / `gateway-signal-stop-check.mjs` —— 生命周期、只读出口、崩溃恢复与网关信号收尾验收。
 - `scripts/unified-launcher-check.mjs` —— 单二进制 `blitzkrieg` 一体化启动验收（子命令 / 托管 / 优雅退出 / `--readonly` 穿透）。
-- `scripts/strategy-gate-check.mjs` —— 策略门禁豁免（声明兑现 + D-31 剩余时间下限双向断言）。
+- `scripts/strategy-devcheck.mjs` —— 策略开发链（模板 → 编译 → 加载 → 启用 → 出信号），自己造探针 crate。
 - `scripts/soak-health.sh` —— 长跑健康巡检（面板/核心/采样/账本/备份新鲜度一行判定；常驻配对见 `scripts/README.md`）。
 - `scripts/data-backup.sh --status` —— 「备份到底有没有在发生」一行判定（产物年龄 + 最近一次自动尝试；没有新鲜备份就退出 1）。
   调度与 TCC 见 §3.6；三条路线（LaunchAgent+FDA / 常驻循环 / 手工）都写同一份日志与尝试记录，所以判定不受路线影响。
@@ -526,28 +528,36 @@ cd ui/webapp/webui && npm run check:all
 
 ## 9. 策略状态与进入条件
 
-内核**出厂零策略、零默认启用**：策略来自策略目录下的 cdylib，全部以「关闭」启动；真正决定
-启用与否的只有操作员的持久意图 `data/strategy-state.json` 与显式旗标
-`--enable-strategy <name>` / `--disable-strategy <name>`（显式关闭优先）。这条规则的原文在
-`user_layer/configs/default.toml` 顶部（`[strategy]` 段已于 PR-B 移除），本节是**唯一的
+内核**出厂零策略、零默认启用**：策略来自策略目录（`user_layer/strategies/`）下的 cdylib，
+全部以「关闭」启动；真正决定启用与否的只有操作员的持久意图 `data/strategy-state.json` 与
+显式旗标 `--enable-strategy <name>` / `--disable-strategy <name>`（显式关闭优先）。这条规则的
+原文在 `user_layer/configs/default.toml` 顶部（`[strategy]` 段已于 PR-B 移除），本节是**唯一的
 「某策略何时才允许进入默认启用清单」的记录处**——`dev-docs/` 不入库，不能作为引用来源。
 
-### pair_arb — 实验性，禁止上线（`special/no-live`）
+### 当前状态：策略目录为空
 
-`pair_arb`（完整集配对套利）**不在任何默认启用清单里**，并且**禁止实盘启用**，直到它满足
-下面的进入条件：
+内核曾经自带 5 个 cdylib 策略（`spread_arb` / `trend_follow` / `mean_reversion` / `pair_arb` /
+`dog`）。它们已全部删除，**连同它们的默认启用清单条目**：`user_layer/strategies/` 现在只留
+`README.md`（说明这个投放点的用途），目录里没有任何 `.dylib`。算法本身仍在
+`user_layer/strategy_logic/`，参考实现是 `user_layer/parity_strategy/`；删除的动机、每个策略
+的实测结论与随之退役的门禁见 [CHANGELOG.md](./CHANGELOG.md)。
+
+因此**本节当前没有任何条目**：没有策略需要记录进入条件，也没有策略处于「实验性、禁止上线」
+状态。要新增策略时，先在这里写下它的进入条件，再让它进入任何默认启用清单。
+
+### 进入条件（对任何未来策略的通用规则）
 
 > **冻结语料 holdout：PF ≥ 1.5 且净利润 > 0，并在两个互不重叠的窗口上同时成立。**
 
-当前实测结论是**不满足**：最佳配置的 PF 仅 **0.659**（胜率可达 85%，但逆向选择吃掉全部价差），
-详见 `user_layer/strategies/pair_arb/pair_arb_strategy.rs` 文件头的四行配置表与「入场规则」
-一节（`1 − (up_bid + down_bid) ≥ min_edge`）。该策略作为**研究工具**保留：会注册、可被
-`--enable-strategy pair_arb` 显式打开，但永不自动启用。
+这条规则的来源是 `pair_arb`：它曾被作为研究工具保留并禁止实盘启用，因为实测最佳配置的 PF
+仅 **0.659**（胜率可达 85%，但逆向选择吃掉全部价差），且「PF 上限是退出策略产物」这个归因
+后来被撤回——上限由算术与逆向选择独立支撑。同样的判据适用于任何新策略：**在把它写进任何
+默认启用清单之前，先用冻结语料在两个不重叠的窗口上证明它满足上述条件。**
 
 两条配套约束：
 
-- **#262 的 WR/PF 口径（caliber）不包含 pair_arb。** 度量进化目标时把 pair_arb 排除在外，
-  理由与进入条件相同：它没有可比的 PF 基线，纳入只会污染口径。
+- **#262 的 WR/PF 口径（caliber）只统计有可比基线的策略。** 一个没有 holdout 基线的策略不
+  进入度量口径，纳入只会污染它。
 - **缺口（只记录，不补）：** 仓库里**没有**「默认启用清单」的自动核对门禁——即没有脚本会在
   某个策略被写进默认启用列表时报警。当前靠代码评审 + 本节的人工核对，`data/strategy-state.json`
   仍是唯一权威。若将来新增此类门禁，本节的条件应成为它的断言来源。

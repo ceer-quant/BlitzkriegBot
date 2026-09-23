@@ -165,7 +165,7 @@ if (!(MARKETABLE_LIMIT > 0)) {
 }
 const order = (asset, price, size, key) => ({
   tokenId: `cap-${asset}`, conditionId: 'cond', side: SIDE, mode: 'taker', price, size,
-  internalKey: key, strategy: 'spread_arb', asset, direction: 'up',
+  internalKey: key, strategy: 'operator', asset, direction: 'up',
   roundSlot: liveSlot(),
 });
 if (SIZES.length + 1 > ASSETS.length) {

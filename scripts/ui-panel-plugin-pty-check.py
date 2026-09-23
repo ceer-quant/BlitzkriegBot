@@ -9,11 +9,16 @@ with the core stopped the tab degrades to an offline notice without crashing.
 Covers (#260): the `n` network self-check overlay opens, lists one row per probed
 path, and Esc closes it.
 
-Every strategy ships DISABLED (#269/#277), so the toggle assertions drive the row
-to the state they need instead of assuming the shipped default: the disable path
-is exercised by enabling first. A script that assumes "shipped = enabled" reads a
-silent enable as a failed confirm — which is exactly what it did before this was
-fixed.
+The Strategies pane is filled by a LOADED CDYLIB: the kernel registers no
+strategy of its own, so the core below is pointed at the reference
+implementation (`user_layer/parity_strategy`) with `--strategy-dir`. Without it
+the pane has no rows and the cursor/confirm coverage has nothing to drive.
+
+Every strategy is DISABLED on a fresh boot (#269/#277), so the toggle assertions
+drive the row to the state they need instead of assuming the shipped default: the
+disable path is exercised by enabling first. A script that assumes "shipped =
+enabled" reads a silent enable as a failed confirm — which is exactly what it did
+before this was fixed.
 
 Isolation: private UDS + scratch workdir + dry mode + no logs/archives.
 Exit 0 on PASS, 1 on FAIL. (Uses raw pty.fork — Node `script -q /dev/null`
@@ -45,6 +50,12 @@ RP_SNIPPET = (
 ROOT = os.getcwd()
 BIN = os.path.join(ROOT, 'target/release/blitzkrieg-core')
 PANEL = os.path.join(ROOT, 'target/release/ui_kit_panel')
+REF_DYLIB_DIR = os.path.join(ROOT, 'user_layer/parity_strategy/target/release')
+REF_STRATEGY = 'parity'  # the name the reference cdylib registers
+# CI runs this on Linux; a hardcoded `.dylib` would only ever pass on macOS.
+REF_DYLIB = os.path.join(
+    REF_DYLIB_DIR,
+    'libparity_strategy.' + ('dylib' if sys.platform == 'darwin' else 'dll' if sys.platform == 'win32' else 'so'))
 UID = str(os.getpid())
 SOCK = f"/tmp/uikit-pty-{UID}.sock"
 WORK = tempfile.mkdtemp(prefix='uikit-pty-data-')
@@ -52,6 +63,9 @@ WORK = tempfile.mkdtemp(prefix='uikit-pty-data-')
 for p in (BIN, PANEL):
     if not os.path.exists(p):
         sys.exit(f"missing binary: {p} (run: cargo build --release)")
+if not os.path.exists(REF_DYLIB):
+    sys.exit(f"missing reference cdylib: {REF_DYLIB} "
+             f"(run: cd user_layer/parity_strategy && cargo build --release --locked)")
 
 failures = []
 def check(name, cond, detail=''):
@@ -137,6 +151,7 @@ class Panel:
 core = subprocess.Popen(
     [BIN, '--socket', SOCK, '--mode', 'dry', '--tick-ms', '100', '--seed-balance', '1000',
      '--max-order-notional', '6', '--assets', 'BTC,ETH', '--min-shares', '1', '--max-shares', '10',
+     '--strategy-dir', REF_DYLIB_DIR,
      '--engine', '--no-event-archive'],
     cwd=WORK, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 for _ in range(60):
@@ -154,42 +169,38 @@ try:
     check('panel renders Overview', 'Blitzkrieg Panel' in text and 'DRY' in text, text[:60].replace('\n', ' '))
 
     p.send(b'4', settle=1.0)
-    redraw = p.wait_for('mean_reversion')
+    redraw = p.wait_for(REF_STRATEGY)
     full = strip_ansi(bytes(p.buf))
     check('tab 4 shows Strategies pane', 'Strategies' in full)
-    check('three builtins listed', all(n in full for n in ('spread_arb', 'trend_follow', 'mean_reversion')), redraw)
+    check(f'the loaded cdylib is listed: {REF_STRATEGY}', REF_STRATEGY in full, redraw)
     check('polymarket pane present', 'polymarket' in full)
     check('extensions pane present', 'Extensions' in full)
 
-    # Cursor at row 0 (spread_arb); move down×2 → mean_reversion; Enter → enable (no confirm).
-    # ratatui paints diffs, so log lines are not reliably in the raw stream —
-    # assert no confirm dialog, then verify the toggle in the CORE registry below.
-    p.send(b'\x1b[B\x1b[B', settle=0.4)
+    # Cursor at row 0 — the only row, the reference strategy. Enter → enable (no
+    # confirm). ratatui paints diffs, so log lines are not reliably in the raw
+    # stream — assert no confirm dialog, then verify the toggle in the CORE
+    # registry below.
     p.clear()
     text = p.send(b'\r', settle=1.2)
     # If a dialog had appeared it would be in this frame; wait briefly and confirm absence.
     appeared = p.wait_for('y = confirm', timeout=1.0)
     check('enable had no confirm dialog', not appeared)
-    check('enable cursor row rendered as [on ] mean_reversion', '[on ] mean_reversion' in text or 'strategy mean_reversion' in text,
+    check(f'enable cursor row rendered as [on ] {REF_STRATEGY}',
+          f'[on ] {REF_STRATEGY}' in text or f'strategy {REF_STRATEGY}' in text,
           'cursor row after Enter')
 
-    # Move up×2 → spread_arb. Every strategy SHIPS DISABLED (#269/#277), so the
-    # first Enter ENABLES the row (no confirm) and only the second Enter is the
-    # disable under test. Assuming the shipped default was enabled here is what
-    # made this script red on the baseline (#260 finding 6) — the "disable" step
-    # was silently enabling, so no confirm appeared and four assertions downstream
-    # failed with it.
-    p.send(b'\x1b[A\x1b[A', settle=0.4)
-    p.clear()
-    p.send(b'\r', settle=0.9)
-    check('spread_arb enable had no confirm dialog', not p.wait_for('y = confirm', timeout=1.0))
+    # Same row again: a fresh boot is DISABLED (#269/#277), so the Enter above
+    # ENABLED it and only this second Enter is the disable under test. Assuming
+    # the shipped default was enabled here is what made this script red on the
+    # baseline (#260 finding 6) — the "disable" step was silently enabling, so no
+    # confirm appeared and four assertions downstream failed with it.
     p.clear()
     p.send(b'\r', settle=0.6)
     found = p.wait_for('⚠')  # the confirm box renders ⚠ before the styled command text
     check('confirm bar for disable', found)
     fullcdf = strip_ansi(bytes(p.buf))
     check('confirm bar full text visible', 'y = confirm' in fullcdf or 'confirm' in fullcdf.lower(), 'dialog body')
-    check('confirm names spread_arb', 'spread_arb' in p.drain(0.0) + text)
+    check(f'confirm names {REF_STRATEGY}', REF_STRATEGY in p.drain(0.0) + text)
 
     # n cancels.
     text = p.send(b'n')
@@ -198,13 +209,13 @@ try:
     # Redo and confirm with y.
     p.send(b'\r', settle=0.7)
     text = p.send(b'y', settle=1.0)
-    check('confirmed disable applied', 'strategy spread_arb' in text and 'off' in text,
+    check('confirmed disable applied', f'strategy {REF_STRATEGY}' in text and 'off' in text,
           re.sub(r'\s+', ' ', re.search(r'(Confirm.{0,160}|Log[\s\S]{0,160})', text).group(0) if re.search(r'(Confirm|Log)', text) else text[-250:]))
     # registry row flips to [off]
-    check('spread_arb row now [off]', re.search(r'\[off\]\s*spread_arb', text) is not None)
+    check(f'{REF_STRATEGY} row now [off]', re.search(r'\[off\]\s*' + REF_STRATEGY, text) is not None)
     p.quit()
 
-    # Ground truth: both toggles must be visible in the core's own registry.
+    # Ground truth: the toggle must be visible in the core's own registry.
     out = subprocess.run(['node', '-e', RP_SNIPPET, SOCK, 'strategy.list'],
                          capture_output=True, text=True, timeout=15)
     try:
@@ -212,8 +223,9 @@ try:
         rows = {r['name']: r['enabled'] for r in st.get('result', {}).get('strategies', [])}
     except ValueError:
         rows = {}
-    check('core registry: mean_reversion on', rows.get('mean_reversion') is True, str(rows))
-    check('core registry: spread_arb off', rows.get('spread_arb') is False, str(rows))
+    check('core registry: exactly the loaded cdylib, nothing built in',
+          list(rows.keys()) == [REF_STRATEGY], str(rows))
+    check(f'core registry: {REF_STRATEGY} off', rows.get(REF_STRATEGY) is False, str(rows))
 
     # ── E9-f (#61): onboarding affordances ────────────────────────────────────
     # Fresh panel again (the one above already consumed hints / help state).

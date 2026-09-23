@@ -108,8 +108,7 @@ variant_count = 3                    # shadow variants (>=2)
 
 # Audit DIRECTORY, not a file: the file name is derived from the strategy name,
 # producing one self-describing log per strategy, e.g.
-#   data/evolution/spread_arb.jsonl
-#   data/evolution/dog_strategy.jsonl
+#   data/evolution/my_strategy.jsonl
 # (non-alphanumeric characters outside [A-Za-z0-9_-.] are replaced with '_').
 # The pre-E2-c single global file `data/evolution/evolution.jsonl` is superseded
 # and is no longer written by any code path.

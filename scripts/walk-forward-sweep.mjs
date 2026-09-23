@@ -31,7 +31,7 @@
  *
  * Example:
  *   node scripts/walk-forward-sweep.mjs \
- *     --archive 'data/archive/*.jsonl' --folds 5 \
+ *     --archive 'data/archive/*.jsonl' --strategy my_leg --folds 5 \
  *     --param trend_entry_factor=0.98,0.88 \
  *     --out data/evolution/sweeps/20260920
  */
@@ -66,15 +66,25 @@ const PARAM_FLAGS = {
 // what #265 cost once (a deployment binary started outside the repo refused all
 // three libraries, printed three FAILED lines and one WARN, and then reported
 // zero trades on every fold).
-const EXPECTED_STRATEGIES = ['spread_arb'];
+//
+// It is an argument rather than a constant because the kernel registers no
+// strategy of its own: the name has to be one the operator actually shipped.
+// `--strategy <name>` (repeatable) is required, and an empty list is an error
+// for the same reason #265 makes the refusal loud.
+const STRATEGIES = [];
+for (let i = 0; i < process.argv.length; i++) {
+  if (process.argv[i] === '--strategy' && process.argv[i + 1] && !process.argv[i + 1].startsWith('--')) {
+    STRATEGIES.push(process.argv[i + 1]);
+  }
+}
 
-// Ops knobs shared by every run: the expected strategies alone, no discovery, no
-// logs, the same documented seed the backtest gate uses
-// (scripts/backtest-check.mjs). `--allow-zero-strategies` is deliberately NOT
-// passed: the sweep wants the refusal to be loud.
+// Ops knobs shared by every run: the named strategies alone, no discovery, no
+// logs, the same documented seed the other replay gates use.
+// `--allow-zero-strategies` is deliberately NOT passed: the sweep wants the
+// refusal to be loud.
 const OPS_KNOBS = [
   '--engine',
-  ...EXPECTED_STRATEGIES.flatMap((s) => ['--enable-strategy', s]),
+  ...STRATEGIES.flatMap((s) => ['--enable-strategy', s]),
   '--no-discovery',
   '--no-trade-log',
   '--no-order-log',
@@ -105,7 +115,12 @@ for (let i = 0; i < args.length; i++) {
   if (args[i] === '--param') paramArgs.push(args[i + 1]);
 }
 if (!archivesArg) {
-  console.error('usage: --archive <glob|file>[,more…] --param key=v1,v2 [--folds N] [--select netPnlUsd] [--out dir] [--dry-run]');
+  console.error('usage: --archive <glob|file>[,more…] --strategy <name> --param key=v1,v2 [--folds N] [--select netPnlUsd] [--out dir] [--dry-run]');
+  process.exit(2);
+}
+if (STRATEGIES.length === 0) {
+  console.error('--strategy <name> is required: the kernel registers no strategy of its own, so a sweep ' +
+    'without one replays archives through a kernel with no trading logic and reports zero trades on every fold.');
   process.exit(2);
 }
 if (!Number.isInteger(foldsN) || foldsN < 1 || foldsN > 24) { console.error('--folds must be an integer in 1..24'); process.exit(2); }
