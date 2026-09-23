@@ -7,11 +7,11 @@
 //! driven by a native frontend without change.
 //!
 //! The contract: a frontend calls `AppViewModel::refresh` (via the shared IPC
-//! client) and then reads `AppViewModel::view()`. All of it is plain data — the
-//! native shell only draws it.
+//! client), which returns the render-ready `AppView`. All of it is plain data —
+//! the native shell only draws it.
 
 use crate::core::ipc_client::IpcClient;
-use crate::core::types::{CoreEvent, UiSnapshot};
+use crate::core::types::UiSnapshot;
 
 /// A flat, render-ready view model for a native panel.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -103,54 +103,6 @@ impl AppViewModel {
         &self.view
     }
 
-    pub fn view(&self) -> &AppView {
-        &self.view
-    }
-
-    /// A frontend's "handle an event" hook: format a one-line status for the
-    /// native log pane. The native shell calls this with events it pulls from
-    /// the shared `EventBus`.
-    pub fn describe_event(ev: &CoreEvent) -> String {
-        match ev {
-            CoreEvent::OrderUpdate { order } => {
-                format!("order {} {} {}", order.order_id, order.status, order.asset)
-            }
-            CoreEvent::Fill { order, .. } => format!("fill {} {}", order.asset, order.direction),
-            CoreEvent::PositionClosed {
-                asset,
-                reason,
-                net_pnl_usd,
-                ..
-            } => {
-                format!("closed {asset} {reason} net {net_pnl_usd:+.2}")
-            }
-            CoreEvent::RiskAlert { message, .. } => format!("RISK: {message}"),
-            CoreEvent::ReconcileReport {
-                filled,
-                marked_cancelled,
-                ..
-            } => {
-                format!("reconcile filled={filled} cancelled={marked_cancelled}")
-            }
-            CoreEvent::Error { .. } => "core error".into(),
-            CoreEvent::EvolutionSignal { .. } => "evolution signal".into(),
-            CoreEvent::EvolutionApplied { .. } => "evolution applied".into(),
-            CoreEvent::EvolutionRejected { reason, .. } => format!("evolution rejected: {reason}"),
-            CoreEvent::EvolutionProposed { proposal } => {
-                let strategy = proposal
-                    .get("strategy")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                let id = proposal.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                format!("evolution proposed: {strategy} holds {id} for review")
-            }
-            CoreEvent::EvolutionCycle {
-                cycle_seq, dims, ..
-            } => format!("evolution cycle #{cycle_seq} ({dims}-knob deep round)"),
-            CoreEvent::Ready { version, mode } => format!("core ready v{version} ({mode})"),
-            CoreEvent::Unknown => "event".into(),
-        }
-    }
 }
 
 /// Headless renderer: prints the view model the way a native panel would lay it
