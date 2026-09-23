@@ -139,8 +139,8 @@ pub struct CoreConfig {
     /// Optional Shadow Evolution tuning (tests/ops). None = crate defaults.
     pub shadow_evolution_tuning: Option<ShadowEvolutionTuning>,
     /// Optional per-strategy entry caps, keyed by strategy name (P-1.1). An
-    /// absent entry means unlimited — the builtin `spread_arb` keeps its current
-    /// behaviour unless an operator configures a cap.
+    /// absent entry means unlimited — a strategy keeps its current behaviour
+    /// unless an operator configures a cap.
     pub strategy_limits: HashMap<String, StrategyLimit>,
     /// Maker→taker escalation deadline for engine entries (P-1.2). Defaults to the
     /// long-standing 5000 ms; a backtest may model a different venue latency.
@@ -406,19 +406,12 @@ impl CoreConfig {
         {
             let mut libs = Vec::new();
             collect_strategy_libs(std::path::Path::new(dir), 0, &mut libs);
-            libs.sort_by_key(|p| {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let rank = if name.contains("spread_arb") {
-                    0
-                } else if name.contains("trend_follow") {
-                    1
-                } else if name.contains("mean_reversion") {
-                    2
-                } else {
-                    3
-                };
-                (rank, p.clone())
-            });
+            // Plain path order. It used to rank the shipped legs first
+            // (spread_arb, then trend_follow, then mean_reversion) so a
+            // debug/release pair resolved to a predictable winner; with no
+            // shipped strategies the ranking had no reachable branch left, and
+            // path order alone still makes the first copy the one that wins.
+            libs.sort();
             for path in libs {
                 let receipt = core.load_strategy_lib(&path.to_string_lossy());
                 // The success receipt is exactly "<name>@<version> registered
@@ -450,25 +443,6 @@ impl CoreConfig {
     }
 }
 
-/// True when `name` is the shipped `dog_strategy` crate's OWN artifact: the exact
-/// stem (`dog_strategy`, `libdog_strategy.dylib`) or cargo's hashed form
-/// (`dog_strategy-1a2b3c4d`). That example is loaded dynamically via IPC
-/// `strategy.load` in tests and must not be auto-loaded at startup.
-///
-/// Deliberately not a substring test: any artifact whose stem merely ENDS in
-/// `dog_strategy` would be silently dropped from startup with no error — the
-/// exact failure mode that is hardest to notice, since the kernel boots fine and
-/// simply never trades that strategy.
-fn is_dog_strategy_artifact(name: &str) -> bool {
-    let stem = name
-        .strip_prefix("lib")
-        .unwrap_or(name)
-        .split('.')
-        .next()
-        .unwrap_or(name);
-    stem == "dog_strategy" || stem.starts_with("dog_strategy-")
-}
-
 /// Depth-bounded walk gathering `*.dylib`/`*.so` files under `dir`.
 ///
 /// Bounded because `strategy_dir` may point at a crate checkout whose `target/`
@@ -495,7 +469,6 @@ fn collect_strategy_libs(dir: &std::path::Path, depth: usize, out: &mut Vec<std:
                 || name == "build"
                 || name == "incremental"
                 || name.contains("probe")
-                || is_dog_strategy_artifact(name)
                 || name.contains("devcheck")
             {
                 continue;
@@ -505,13 +478,12 @@ fn collect_strategy_libs(dir: &std::path::Path, depth: usize, out: &mut Vec<std:
             path.extension().and_then(|e| e.to_str()),
             Some("dylib") | Some("so")
         ) {
-            // Test/probe strategies (e.g. dog_strategy, devcheck_probe) are loaded dynamically
-            // via IPC `strategy.load` in tests (strategy-gate-check, strategy-evolution-check, strategy-devcheck)
-            // and must not be auto-loaded at startup.
+            // Probe libraries (`devcheck_probe`) are generated into this tree by
+            // `strategy-devcheck`, loaded through IPC `strategy.load`, and deleted
+            // again. Auto-loading one at startup would make that gate measure a
+            // strategy it did not register.
             if let Some(file_name) = path.file_name().and_then(|f| f.to_str())
-                && (is_dog_strategy_artifact(file_name)
-                    || file_name.contains("probe")
-                    || file_name.contains("devcheck"))
+                && (file_name.contains("probe") || file_name.contains("devcheck"))
             {
                 continue;
             }
@@ -541,11 +513,11 @@ pub struct StrategyLimit {
     /// Ceiling on shares per entry. Clamped to the global `max_shares`.
     #[serde(with = "crate::decimal::opt", default)]
     pub max_shares: Option<Decimal>,
-    /// Relative allocation weight (E16/#98): the three legs (spread_arb /
-    /// trend_follow / mean_reversion) get weighted shares of the per-entry
-    /// budget instead of identical ones. Scales the leg's own size override
-    /// or the global `size_usd`; a weight can only shrink the budget, and a
-    /// non-positive weight disables the leg's entries entirely.
+    /// Relative allocation weight (E16/#98): a leg with a weight gets a weighted
+    /// share of the per-entry budget instead of an identical one. Scales the
+    /// leg's own size override or the global `size_usd`; a weight can only
+    /// shrink the budget, and a non-positive weight disables the leg's entries
+    /// entirely.
     #[serde(with = "crate::decimal::opt", default)]
     pub size_weight: Option<Decimal>,
     /// This leg's own equity-relative budget (#202). `None` = the global
@@ -7274,7 +7246,7 @@ mod shadow_evolution_tests {
 
         let before = cap(&c);
         let mut both = bag("spread_arb", "trend_max_entry_price", before * dec!(1.03));
-        both.set_strategy("dog_strategy", StrategyParams::new());
+        both.set_strategy("alpha_strategy", StrategyParams::new());
         assert!(
             c.shadow_evolution_apply(both, 1000).is_err(),
             "one strategy at a time"
@@ -8579,7 +8551,7 @@ mod strategy_dispatch_tests {
         // An explicit "off" wins over an "on" for the same name, and a name the
         // engine does not host is ignored without taking the session down.
         let both = install(CoreConfig {
-            enabled_strategies: vec!["trend_follow".into(), "dog_strategy".into()],
+            enabled_strategies: vec!["trend_follow".into(), "alpha_strategy".into()],
             disabled_strategies: vec!["trend_follow".into()],
             ..base.clone()
         });
@@ -8734,10 +8706,10 @@ mod strategy_dispatch_tests {
 
         // An explicit request that resolves to nothing refuses, and names both
         // what was asked for and the door out.
-        let err = boot(&["dog_strategy"], &[], false)
+        let err = boot(&["alpha_strategy"], &[], false)
             .expect_err("a request that resolves to nothing must refuse the boot");
         assert!(
-            err.contains("refusing to start") && err.contains("dog_strategy"),
+            err.contains("refusing to start") && err.contains("alpha_strategy"),
             "the refusal must name the request, got: {err}"
         );
         assert!(
@@ -8755,21 +8727,22 @@ mod strategy_dispatch_tests {
 
         // The door is not welded shut: the flag acknowledges the empty set.
         assert!(
-            boot(&["dog_strategy"], &[], true).is_ok(),
+            boot(&["alpha_strategy"], &[], true).is_ok(),
             "--allow-zero-strategies must start normally"
         );
 
         // `--enable-strategy x --disable-strategy x` asked for nothing, so it is
         // not a request that failed — the same rule the toggle order follows.
         assert!(
-            boot(&["dog_strategy"], &["dog_strategy"], false).is_ok(),
+            boot(&["alpha_strategy"], &["alpha_strategy"], false).is_ok(),
             "an explicitly disabled name is not part of the request"
         );
 
         // Several names: the refusal counts and lists them all.
-        let err = boot(&["dog_strategy", "cat_strategy"], &[], false).expect_err("still a refusal");
+        let err =
+            boot(&["alpha_strategy", "cat_strategy"], &[], false).expect_err("still a refusal");
         assert!(
-            err.contains("dog_strategy") && err.contains("cat_strategy"),
+            err.contains("alpha_strategy") && err.contains("cat_strategy"),
             "got: {err}"
         );
     }

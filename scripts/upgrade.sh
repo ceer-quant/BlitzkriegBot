@@ -8,7 +8,8 @@
 #      override with BLITZKRIEG_UPGRADE_SOURCE)
 #   2. update the production build worktree target/bk-main-build to the source
 #      (detached checkout — the branch refs and the main checkout stay untouched)
-#   3. build: release workspace + strategy cdylibs + the panel's webui bundle
+#   3. build: release workspace + the reference strategy cdylib + the panel's
+#      webui bundle
 #   4. LOCAL GATES: core lib tests AND the panel's check:all — both must be green
 #   5. stage the whole release (binaries, cdylibs, panel bundle, config files) and
 #      report what differs from what is running, before anything is stopped
@@ -29,9 +30,9 @@
 #     surface: the runtime switches persist in data/evolution/state.json and
 #     outrank the file. A locally edited copy is backed up under the rollback
 #     directory and named in the log before it is replaced.
-#   * user_layer/*/target/release/*.dylib — the strategy code the kernel
-#     `dlopen`s out of the running checkout. A gate that drives the previous
-#     build of a strategy is not evidence (scripts/lib/strategy-dylib-freshness.mjs).
+#   * user_layer/*/target/release/*.dylib — strategy code the kernel `dlopen`s
+#     out of the running checkout. It is code, not build residue: a stale cdylib
+#     makes the running kernel execute a previous build.
 #   * ui/webapp/webui/dist — the panel bundle the launcher serves from the
 #     exe-relative path; a Rust-only upgrade kept serving the previous JS.
 # scripts/lib/upgrade-artifacts.sh owns all three (and is what
@@ -61,7 +62,12 @@ READY_DEADLINE="${BLITZKRIEG_UPGRADE_DEADLINE:-120}"   # seconds to reach identi
 # terminal panel binary this checkout ships. All four are built by the workspace.
 ARTIFACTS="blitzkrieg blitzkrieg-core libpolymarket_extension.dylib ui_kit_panel"
 # Checkout-relative trees that ship with a release but are not built here (#252).
-DYLIB_DIRS="user_layer/strategies/target/release user_layer/parity_strategy/target/release"
+# `user_layer/strategies` is absent because that tree ships no strategies any
+# more: it is the empty drop-point for an operator's own crate (see its README),
+# and there is nothing to stage out of it. `parity_strategy` stays — it is the
+# reference C ABI v2 implementation the loader tests load, and it is the cdylib
+# this release ships.
+DYLIB_DIRS="user_layer/parity_strategy/target/release"
 CONFIG_DIR="user_layer/configs"
 DIST_DIR="ui/webapp/webui/dist"
 
@@ -104,9 +110,8 @@ step "2. production build worktree → source"
 git -C "$build_wt" fetch ceer --quiet
 git -C "$build_wt" checkout --detach "$SRC_SHA"
 
-step "3. build (release workspace + strategy cdylibs + panel bin + webui bundle)"
+step "3. build (release workspace + reference strategy cdylib + panel bin + webui bundle)"
 ( cd "$build_wt" && cargo build --release --workspace --locked )
-( cd "$build_wt/user_layer/strategies" && cargo build --release --locked )
 ( cd "$build_wt/user_layer/parity_strategy" && cargo build --release --locked )
 (
   cd "$build_wt/ui/webapp/webui"

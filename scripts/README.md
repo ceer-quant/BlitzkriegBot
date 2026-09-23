@@ -45,12 +45,8 @@ cargo build --release --workspace --locked
   gate otherwise leaves a core running with PPID=1, holding its socket. That is
   not hypothetical: on 2026-09-19 the process table held a 33-hour orphan from an
   interrupted run. See `child-guard-check.mjs` for the pinned behaviour.
-- `lib/strategy-leg-harness.mjs` — the harness the two strategy-leg gates share
-  (`trend-follow-check.mjs`, `mean-reversion-check.mjs`): spawn a dry-mode core on
-  a private socket in a scratch dir, speak the UDS JSON-RPC wire, declare markets
-  and feed books, wait for a condition, report. Only the fixture and the
-  assertions differ between the legs; the harness was two byte-identical copies
-  until they drifted, and a fix to it must not have to be made twice.
+- `lib/core-provenance.mjs` — where a core came from (binary path, args, dylibs
+  loaded), used by the gates that must prove which build they exercised.
 
 ## Acceptance gates
 
@@ -69,10 +65,8 @@ cargo build --release --workspace --locked
 | `soak-health-check.mjs` | The ops health check can actually fail: every guard is inject-tested (down/wedged core, panel HTML fallback, stale sampling, panic log, both zero-hold causes, backup freshness incl. "fresh artifact, failing scheduler" and "a missing check script is an anomaly") *and* a healthy fixture must exit 0. Bounded by its own watchdog (`BK_GATE_WATCHDOG_MS`) — it must also *exit* |
 | `crash-recovery-check.mjs` | SIGKILL a live core → in-flight settles, replacement serves the socket |
 | `webapp-check.mjs` | Panel: bundle served, auth both ways, CSRF, snapshot non-empty |
-| `backtest-check.mjs` | Event-driven backtest: archive → offline replay → bit-identical |
 | `order-recovery-check.mjs` / `position-recovery-check.mjs` | Crash recovery for orders / positions |
-| `strategy-gate-check.mjs` / `strategy-limit-check.mjs` / `strategy-evolution-check.mjs` | Strategy-scoped gating / funding / shadow evolution. The gate check runs two cores: one where the timing window is shut by round AGE (the D-31 exemption must still waive it) and one where it is shut by remaining TIME (it must not — the dog declares a 180s floor) |
-| `trend-follow-check.mjs` / `mean-reversion-check.mjs` | Strategy legs, driven through the external cdylibs (the kernel ships no builtins) |
+| `strategy-devcheck.mjs` | The strategy developer's whole loop, end to end: scaffold a cdylib from the template → build it → `strategy.load` → `strategy.enable` → a signal reaches the engine → its declared knob round-trips → its shadow twin builds. It makes its own probe crate, so it needs no shipped strategy |
 | `scale-plugins-check.mjs` / `feed-scale-check.mjs` | Registry read latency / feed loss rate at scale |
 | `ui-eventbus-check.mjs` / `ui-kit-gateway-check.mjs` / `ui-plugin-check.mjs` | UI event push / gateway command surface |
 | `trade-log-flag-check.mjs` / `market-plugin-check.mjs` | `--no-trade-log` isolation / plugin selection |

@@ -2,11 +2,15 @@
 /**
  * Deterministic full-cycle check for the Rust core (no network, no production
  * interference). Proves the deployed binary can execute:
- *   confirm trend -> dip -> resting bid placed -> maker fill -> position opens
+ *   resting bid placed over the operator wire -> maker fill -> position opens
  *   -> live re-valuation as the book moves -> exit.
  *
- * Runs its own core on a private socket with a short trend-confirm window so the
- * whole cycle takes seconds. Usage: node scripts/cycle-check.mjs
+ * The entry is placed by the gate itself (`orders.place`), not by a strategy:
+ * this gate owns the order CHAIN, and the kernel ships no strategy to drive it.
+ * The chain it exercises is production code either way — `orders.place` is the
+ * same `place_outcome` the panel's manual order button calls.
+ *
+ * Runs its own core on a private socket. Usage: node scripts/cycle-check.mjs
  */
 
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
@@ -37,13 +41,11 @@ const args = [
   '--socket', SOCK, '--mode', 'dry', '--tick-ms', '50',
   '--seed-balance', '1000', '--max-order-notional', '6',
   '--engine', '--no-discovery',
-  '--enable-strategy', 'spread_arb',
   '--no-event-archive',
   '--no-trade-log',
   '--round-sec', String(ROUND_SEC),
   '--min-round-age', '0', '--min-time-left', '0',
   '--max-positions', '2',
-  '--trend-confirm-sec', '3', '--trend-window-floor-ms', '1000',
 ];
 const proc = spawn(BIN, args, { stdio: ['ignore', 'inherit', 'inherit'], cwd: WORKDIR });
 proc.on('exit', (c) => { if (c !== null) console.error(`core exited early (${c})`); });
@@ -104,36 +106,30 @@ async function main() {
   await rpc(M.MARKETS, { markets: [market] });
   console.log(`[1] round fed  slot=${slot} expires in ${Math.round(((slot+1)*ROUND_SEC*1000-now)/1000)}s`);
 
-  // [2] Confirm the UP trend: mid 0.575 held for >= 90% of the 3s window.
+  // [2] Rest a maker bid on UP over the operator wire.
   const book = (bid, ask, bs = 100, as = 100) => ({ tokenId: 'UP', bids: [{ price: bid, size: bs }], asks: [{ price: ask, size: as }] });
-  for (let i = 0; i < 14; i++) { await rpc(M.BOOK, book(0.57, 0.58)); await sleep(300); }
-  let st = await rpc(M.STATS);
-  const confirmed = st.confirmed || [];
-  console.log(`[2] trend confirm  books=${st.books} confirmed=${confirmed.length} -> ${confirmed.length ? 'CONFIRMED' : 'NOT CONFIRMED'}`);
-
-  // [3] Dip to mid 0.435 -> the strategy rests a bid at its own discount
-  // (round2(0.435 * trend_entry_factor)) — the gate reads it, not hardcodes it.
-  await rpc(M.BOOK, book(0.43, 0.44));
-  await sleep(400);
-  let orders = (await rpc(M.ORDERS)).orders;
-  console.log(`[3] dip fed (mid 0.435) -> live orders: ${orders.filter(o => o.status === 'LIVE').length}`);
+  const REST = 0.30;
+  await rpc('orders.place', {
+    tokenId: 'UP', conditionId: '0xcond', side: 'buy', mode: 'maker',
+    price: REST, size: 10, internalKey: 'cycle-rest',
+    strategy: 'operator', asset: 'BTC', direction: 'up', roundSlot: slot,
+  });
+  await sleep(300);
+  const orders = (await rpc(M.ORDERS)).orders;
+  console.log(`[2] maker bid placed -> live orders: ${orders.filter(o => o.status === 'LIVE').length}`);
   for (const o of orders.filter(o => o.status === 'LIVE'))
     console.log(`      bid ${fmt(o.price)} x ${o.size} (${o.side}, ${o.mode ?? 'maker_then_taker'})`);
 
-  // [4] Cross whatever resting bid the strategy actually placed — the gate owns
-  // the order CHAIN, not the pricing default, so a discount change touches
-  // nothing here.
-  const resting = orders.filter(o => o.status === 'LIVE')[0];
-  const restBid = Number(resting?.price ?? 0);
-  await rpc(M.BOOK, book(Math.max(restBid - 0.01, 0.01), restBid));
+  // [3] Cross it — the ask reaches the resting bid, so the maker fills.
+  await rpc(M.BOOK, book(REST - 0.01, REST));
   await sleep(500);
   let pos = (await rpc(M.POS)).positions;
-  console.log(`[4] book crossed -> open positions: ${pos.length}`);
+  console.log(`[3] book crossed -> open positions: ${pos.length}`);
   for (const p of pos)
     console.log(`      ${p.asset} ${p.direction} entry=${fmt(p.entryPrice)} cur=${fmt(p.currentPrice)} pnl=${fmt(p.unrealizedPct)}%`);
 
-  // [5] Move the book up and show live re-valuation (the bug the user saw).
-  console.log('[5] live re-valuation as the book moves:');
+  // [4] Move the book up and show live re-valuation (the bug the user saw).
+  console.log('[4] live re-valuation as the book moves:');
   for (const [b, a] of [[0.50, 0.52], [0.60, 0.62], [0.70, 0.72], [0.85, 0.87]]) {
     await rpc(M.BOOK, book(b, a));
     await sleep(250);
@@ -146,8 +142,8 @@ async function main() {
 
   const finalPos = (await rpc(M.POS)).positions;
   const trades = (await rpc(M.TRADES, { limit: 10 })).trades;
-  st = await rpc(M.STATS);
-  console.log(`\n[6] summary  open=${finalPos.length} closed=${trades.length} signals=${st.signals} placeRejected=${st.placeRejected}`);
+  const st = await rpc(M.STATS);
+  console.log(`\n[5] summary  open=${finalPos.length} closed=${trades.length} signals=${st.signals} placeRejected=${st.placeRejected}`);
   for (const t of trades) {
     console.log(`      ${t.asset} ${t.direction} ${fmt(t.entryPrice)} -> ${fmt(t.exitPrice ?? 0)} net=${fmt(t.netPnlUsd ?? 0)} reason=${t.exitReason ?? '-'}`);
   }

@@ -2,6 +2,13 @@
 
 > 状态：方法论 + 首轮实证报告。数据边界如实记录，不夸大结论。
 > 本文档回答 #97 的五条验收，每一条都给出「做了什么 / 结果是什么 / 差距在哪」。
+>
+> ⚠️ **2026-09-23 起本文的实证对象已不存在**：`spread_arb` 与 `trend_follow` 两个
+> 被扫的策略随内核自带的 5 个策略一起删除（见 [CHANGELOG.md](../CHANGELOG.md)）。
+> 方法论与工具（`walk-forward-sweep.mjs`、档案导出器）仍然有效，但**现在必须显式
+> `--strategy <name>`**——内核自身不再注册任何策略，空着扫只会得到一份全是零的报告。
+> 下面的数字保留为当时的记录；那些旋钮（`--spread-arb-*` / `--trend-*`）仍在，
+> 因为算法还在 `user_layer/strategy_logic/`。
 
 ## 0. 一句话结论
 
@@ -56,8 +63,8 @@ KI-1 / #15 影响（挂单永不成交 ⇒ 入场全 taker），#97 自己已标
 / --spread-arb-dip-max-pct / --spread-arb-bounce-min-pct /
 --spread-arb-bounce-window-sec`），默认 `None` = 出厂默认，逐字段映射测试钉住
 （`spread_arb_entry_overrides_flow_through_engine_config`）。dylib 收到的
-`spreadArb` 配置包同步补齐这五个键（`foreign.rs on_config` +
-`spread_arb_strategy.rs on_params`）。
+`spreadArb` 配置包同步补齐这五个键（`foreign.rs on_config`；当时还有
+`spread_arb_strategy.rs` 的 `on_params`，那个文件已删）。
 
 ## 3. 数据驱动的策略重定义（验收 3）——证据链在案
 

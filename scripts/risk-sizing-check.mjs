@@ -171,7 +171,7 @@ const round = (n) => Number(n.toFixed(6));
 const liveSlot = () => Math.floor((Date.now() + 900_000) / 1000 / 900);
 const order = (asset, side, price, size, key) => ({
   tokenId: `sizing-${asset}`, conditionId: 'cond', side, mode: 'taker', price, size,
-  internalKey: key, strategy: 'spread_arb', asset, direction: 'up', roundSlot: liveSlot(),
+  internalKey: key, strategy: 'operator', asset, direction: 'up', roundSlot: liveSlot(),
 });
 
 // The absolute cap is deliberately wide so ONLY the equity-relative one can bite
@@ -289,7 +289,7 @@ try {
   // is for closing intents, not for the SELL side.
   await rpc.bookSnapshot(core, 'sizing-SOL', [[0.59, 10_000]], [[0.60, 10_000]]);
   probes.push(await probe('a non-close sell over the cap',
-    order('SOL', 'sell', 0.59, held, 'spread_arb:sol'), 'rejected', true));
+    order('SOL', 'sell', 0.59, held, 'entry:sol'), 'rejected', true));
 
   const v = verdict({ balance: BALANCE, capPct: CAP_PCT, reportedWorstUsd: Number(sizing.worstCaseOrderUsd), probes });
   console.log('');

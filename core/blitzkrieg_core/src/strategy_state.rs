@@ -5,7 +5,7 @@
 //!   The kernel ships ZERO enabled strategies (PR-B): a freshly booted core
 //!   registers whatever cdylibs the strategy dir holds, every one of them
 //!   disabled. That is the right default — but an operator who enables
-//!   `dog_strategy` in the panel should not have to do it again after every
+//!   `my_strategy` in the panel should not have to do it again after every
 //!   restart. This module records the effective enabled-set whenever it
 //!   changes (a runtime toggle, or the boot-time CLI lists) and replays it at
 //!   the next boot.
@@ -97,13 +97,13 @@ mod tests {
         save(
             &path,
             &[
-                "dog_strategy".into(),
+                "alpha_strategy".into(),
                 "spread_arb".into(),
-                "dog_strategy".into(),
+                "alpha_strategy".into(),
                 "aaa".into(),
             ],
         );
-        assert_eq!(load(&path), vec!["aaa", "dog_strategy", "spread_arb"]);
+        assert_eq!(load(&path), vec!["aaa", "alpha_strategy", "spread_arb"]);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("\"version\":1"), "{text}");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -127,8 +127,8 @@ mod tests {
     fn save_creates_missing_parent_dirs() {
         let dir = tmpdir("parents");
         let path = dir.join("deep/nested/strategy-state.json");
-        save(&path, &["dog_strategy".into()]);
-        assert_eq!(load(&path), vec!["dog_strategy"]);
+        save(&path, &["alpha_strategy".into()]);
+        assert_eq!(load(&path), vec!["alpha_strategy"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

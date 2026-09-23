@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! MutableParams                     ← the aggregate (strategy → params)
-//!   └─ "spread_arb" → StrategyParams ← that strategy's knob values
-//!   └─ "dog_strategy" → StrategyParams
+//!   └─ "alpha_strategy" → StrategyParams ← that strategy's knob values
+//!   └─ "spread_arb" → StrategyParams
 //! KnobSpec { name, value, min, max } ← what a strategy DECLARES evolvable
 //! ```
 //!
@@ -96,14 +96,14 @@ mod tests {
         let mut p1 = StrategyParams::new();
         p1.set("trendMaxEntryPrice", rust_decimal_macros::dec!(0.45));
         let mut m = MutableParams::new();
-        m.set_strategy("dog_strategy", p1);
-        assert_eq!(m.strategies(), vec!["dog_strategy"]);
+        m.set_strategy("alpha_strategy", p1);
+        assert_eq!(m.strategies(), vec!["alpha_strategy"]);
         assert_eq!(
-            m.get("dog_strategy", "trendMaxEntryPrice"),
+            m.get("alpha_strategy", "trendMaxEntryPrice"),
             Some(rust_decimal_macros::dec!(0.45))
         );
         assert_eq!(m.get("spread_arb", "trendMaxEntryPrice"), None);
-        let removed = m.remove_strategy("dog_strategy");
+        let removed = m.remove_strategy("alpha_strategy");
         assert!(removed.is_some());
         assert!(m.is_empty());
     }
@@ -113,9 +113,9 @@ mod tests {
         let mut p = StrategyParams::new();
         p.set("trendMaxEntryPrice", rust_decimal_macros::dec!(0.45));
         let mut m = MutableParams::new();
-        m.set_strategy("dog_strategy", p);
+        m.set_strategy("alpha_strategy", p);
         let json = serde_json::to_string(&m).unwrap();
-        assert_eq!(json, r#"{"dog_strategy":{"trendMaxEntryPrice":"0.45"}}"#);
+        assert_eq!(json, r#"{"alpha_strategy":{"trendMaxEntryPrice":"0.45"}}"#);
         let back: MutableParams = serde_json::from_str(&json).unwrap();
         assert_eq!(back, m);
     }

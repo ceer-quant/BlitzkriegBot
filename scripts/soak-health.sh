@@ -196,10 +196,12 @@ if [ -f "$TRADES" ]; then
   # A zero-hold force_exit has TWO distinct causes, and they need different fixes:
   #   (a) the old "秒平" bug — the position was force-exited the instant it opened
   #       even though the round had plenty of time left;
-  #   (b) a timing-EXEMPT strategy (dog_strategy declares `gate_exemptions =
-  #       ["timing"]`, E2-b/D-16) entering inside the force-exit window, where the
-  #       exit policy fires on the very next tick by design. The entry is legal but
-  #       the round has too little life left to ever reach its target.
+  #   (b) a timing-EXEMPT strategy (one whose cdylib declares `gate_exemptions =
+  #       ["timing"]` — `GateExemptions::timing` in
+  #       `core/blitzkrieg_core/src/strategies/mod.rs`) entering inside the
+  #       force-exit window, where the exit policy fires on the very next tick by
+  #       design. The entry is legal but the round has too little life left to ever
+  #       reach its target.
   # Reporting (b) as (a) sends the reader chasing the wrong bug, so classify by the
   # round clock: timeLeft <= force_exit_sec means the entry itself was late.
   #

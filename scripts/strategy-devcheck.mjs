@@ -10,8 +10,8 @@
  *   3. `strategy.list` shows it present AND enabled=false — the
  *      new-strategies-start-DISABLED invariant;
  *   4. `strategy.enable` + synthetic `engine.book` flow → the strategy's
- *      entry shows up in `engine.stats` (orders evaluated through the same
- *      gate path as builtin strategies);
+ *      entry shows up in `engine.stats` (orders evaluated through the shared
+ *      host gate path — the only path there is, the kernel ships no strategy);
  *   5. `evolvable_knobs` declared by the template are visible to the kernel
  *      (shadow_evolution can target it);
  *   6. (E9-b note) `strategy.unload` doesn't exist yet — recorded, not failed.
@@ -144,13 +144,18 @@ async function runCoreChecks(dylib, name, workdir, elapsedMs) {
     const row = list.find((s) => s.name === name);
     check('strategy.list shows the template', !!row, JSON.stringify(list.map((s) => s.name)));
     check('new strategy registered DISABLED', row && row.enabled === false, JSON.stringify(row));
-    // Loading a new library must not disturb anything else: the other
-    // registered strategies keep their state (all DISABLED on a fresh boot —
-    // the kernel enables nothing by itself).
-    check('existing strategies untouched (still disabled)', list.some((s) => s.name === 'spread_arb' && s.enabled === false));
+    // Loading a new library must not disturb anything else. The kernel ships
+    // zero strategies now, so the sharp form of that check is "exactly one row
+    // exists, and it is the one just loaded" — a phantom or duplicated
+    // registration shows up here, and so does a load that quietly enabled
+    // something (the kernel enables nothing by itself).
+    check('loading one library registers exactly one strategy', list.length === 1 && row !== undefined,
+      JSON.stringify(list.map((s) => ({ name: s.name, enabled: s.enabled }))));
+    check('nothing else is registered or enabled', list.every((s) => s.enabled === false),
+      JSON.stringify(list.map((s) => s.name)));
 
-    // 4. enable + drive books; the strategy must place an order via the same
-    //    engine path as builtins (dry mode maker-fill confirms quickly).
+    // 4. enable + drive books; the strategy must place an order through the
+    //    engine's shared gate path (dry mode maker-fill confirms quickly).
     const en = await rpc('strategy.enable', { name, enabled: true });
     check('strategy.enable was honored', en.found === true, JSON.stringify(en));
 

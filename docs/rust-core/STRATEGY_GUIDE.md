@@ -25,7 +25,7 @@ grep -rE "reqwest|hyper|http" user_layer/strategies/      # 应为空
 
 ## 1.5 冻结的 C ABI v2（动态库）
 
-用户层策略以共享库（`.dylib`/`.so`/`.dll`）交付时，走 **冻结的 C ABI v2**（crate `blitzkrieg-strategy-api`，`#[repr(C)]`，无 Rust 特有类型）。v2 是**全功能**契约：外挂策略与内建策略实现同一个 `EngineStrategy`，「外挂」只是加载方式不同。设计全文见 [ABI_V2_DESIGN.md](ABI_V2_DESIGN.md)。
+用户层策略以共享库（`.dylib`/`.so`/`.dll`）交付时，走 **冻结的 C ABI v2**（crate `blitzkrieg-strategy-api`，`#[repr(C)]`，无 Rust 特有类型）。v2 是**全功能**契约：外挂策略与内核内树策略实现同一个 `EngineStrategy`，「外挂」只是加载方式不同（树里现在没有内树策略）。设计全文见 [ABI_V2_DESIGN.md](ABI_V2_DESIGN.md)。
 
 ```c
 uint32_t bk_strategy_abi_version(void);           // 必须 == 2（协商先于读 vtable）
@@ -77,12 +77,12 @@ typedef struct {
 - 协商顺序固定：路径策略 → dlopen → `bk_strategy_abi_version()`（必须为 2，**无 v1 兼容层**）→ vtable 校验；v1 库在版本步即被拒绝。
 - 变更结构体/vtable **必须**递增 `BK_ABI_VERSION`。
 
-两个可直接参考的真实外挂：
-- `user_layer/strategies/dog_strategy.rs`（疯狗策略）：
-  ```bash
-  cd user_layer/strategies && cargo build --release   # → target/release/libdog_strategy.{dylib,so}
-  ```
-- `user_layer/parity_strategy/parity_strategy.rs`（对拍策略，与内树路径共用 `parity_logic`）。
+一个可直接参考的真实外挂：
+- `user_layer/parity_strategy/parity_strategy.rs`（对拍策略，与内树路径共用 `parity_logic`；
+  纯手写 raw ABI v2，是内核测试 `tests/foreign_parity.rs` 加载的那一份，也是本指南全文的
+  参照物）。它同时是**唯一**留在树里的 cdylib：内核曾经自带 5 个示例策略
+  （`spread_arb` / `trend_follow` / `mean_reversion` / `pair_arb` / `dog`），已全部删除
+  （见 [CHANGELOG.md](../../CHANGELOG.md)）；算法仍在 `user_layer/strategy_logic/`。
 
 ## 2. 契约
 
@@ -163,7 +163,7 @@ node scripts/blitzkrieg-new-strategy.mjs my_dip_fade
   同一裁决（非空且未过期；过期/缺失不可区分）。用它做入场前的新鲜度门；
 - 覆写 `config_view`（导出 `bk_strategy_config_view` 符号）— 返回任意 JSON 描述
   「当前生效配置」（热参叠加后的实际值），宿主经 `strategy_config_views()`
-  展示。树内 `spread_arb_view` 的泛化，外挂与内建能力对等。
+  展示。它与内核侧 `strategy_config_views()` 读到的每一行同形，外挂与内树能力对等。
 
 改完**一条命令全链验证**（真实内核在环，全部走沙盒 dry core）：
 
@@ -182,10 +182,10 @@ node scripts/strategy-devcheck.mjs my_dip_fade
 数据）；**没有任何网络/凭证面**（策略 crate 不连接任何东西）。
 
 需要比 `SafeStrategy` 更细的控制（直接布局内存、绕开包装的 JSON 薄层）时，
-`user_layer/strategies/dog_strategy.rs`（`SafeStrategy` 模板 + 手写 ABI 两条路径
-皆有实例）与 `user_layer/parity_strategy/parity_strategy.rs`（纯手写 raw ABI v2）
-是完整范例——编译/加载/协商流程与模板完全一致，两条路径产出的 dylib 在内核侧
-不可区分；存量手写库不需要任何改动即可继续加载（新可选符号缺失 = 未声明）。
+`user_layer/parity_strategy/parity_strategy.rs`（纯手写 raw ABI v2）是树里唯一的完整范例，
+它与 `SafeStrategy` 模板（§3.2.1 一条命令生成的那种）编译/加载/协商流程完全一致，
+两条路径产出的 dylib 在内核侧不可区分；存量手写库不需要任何改动即可继续加载
+（新可选符号缺失 = 未声明）。
 
 加载器协商顺序（两条路径相同）：**路径策略** → dlopen →
 `bk_strategy_abi_version()==2`（v1 直接拒绝）→ vtable/必需钩子校验 →
@@ -210,56 +210,47 @@ node scripts/strategy-devcheck.mjs my_dip_fade
 能做什么由它自己决定（残余风险见 [SECURITY.md](../../SECURITY.md)）。
 
 ### 3.3 策略实现与分发（0 内核耦合）
-内核自带 **0 个交易策略**（内核侧 0 策略，彻底解耦）。所有生产策略均通过 C ABI v2 共享库（`.dylib` / `.so` / `.dll`）在运行时加载：
-- `user_layer/strategies/dog` → `libdog_strategy`
-- `user_layer/strategies/spread_arb` → `libspread_arb_strategy`
-- `user_layer/strategies/trend_follow` → `libtrend_follow_strategy`
-- `user_layer/strategies/mean_reversion` → `libmean_reversion_strategy`
 
-每个策略库均为独立 cdylib，通过 `user_layer/strategies` 独立工作区编译。算法逻辑与核心内核解耦，所有策略都通过 `strategy.load` / `load_strategy_dir` 挂载，并用 `strategy.list` / `strategy.enable` 进行查询与开关。
+内核自带 **0 个交易策略**（内核侧 0 策略，彻底解耦）。所有生产策略均通过 C ABI v2 共享库
+（`.dylib` / `.so` / `.dll`）在运行时加载，都通过 `strategy.load` / `load_strategy_dir` 挂载，
+并用 `strategy.list` / `strategy.enable` 进行查询与开关。
 
-| 策略 | 默认 | 触发 | 定价 | 出场 |
-|:---|:---|:---|:---|:---|
-| `spread_arb`（抄底腿） | 初始未启用 | 已确认趋势里的回调 | 挂在 mid **之下**的被动买单（`entry < mid`） | 共享出场策略 |
-| `trend_follow`（追涨腿，E4-a / #30） | 初始未启用 | 本 token 的 mid 在窗口内**上涨** ≥ `min_move_pct` | **抬价吃卖单**（`entry = best_ask > mid`），并受 `max_entry_price` 上限约束 | 共享出场策略 |
-| `mean_reversion`（逆向/fade 腿，E4-b / #31） | 初始未启用 | 便宜侧（mid ≤ `max_price`=0.35 且 ≥ 0.05）从 120s 高点跌 ≥ `min_drop_pct`=10%、价差 ≤ `max_spread_pct`=8%，且**未处于单边下行**（600s 高点回落 < `trend_drop_pct`=30%，#176） | **低于 mid 的挂单**（`entry = round2(mid×0.98)`，向下夹到 best_bid，下限 0.05），token/分钟至多一次 | 共享出场策略 |
+**树里现在没有任何策略 cdylib。** 内核曾经自带 5 个示例实现——`spread_arb`（抄底腿）、
+`trend_follow`（追涨腿，E4-a / #30）、`mean_reversion`（逆向/fade 腿，E4-b / #31）、
+`pair_arb`（完整集配对套利）与 `dog`（疯狗，SafeStrategy 模板范例）——它们的 crate、
+嵌套工作区与默认启用清单条目**已全部删除**，动机是这五个的实测结论一致为负且互相纠缠到
+无法维护；每个策略的实测数字、随之退役的门禁、以及算法留在哪里的清单见
+[CHANGELOG.md](../../CHANGELOG.md)。
 
-`spread_arb`/`trend_follow` 是**结构互逆**的一对（一个买被低估的一侧、一个买正在被买上去的一侧），
-因此互为对冲；`mean_reversion` 是第三种形态——买**正在被砸 down** 的便宜侧，
-赌盘口回弹被 trailing 抓住。它是**唯一声明门禁豁免的策略**：反向入场天然与现货动量闸门冲突
-（实测 39–50% 的 fade 候选会被拦），因此宣告 `momentum` 豁免（E2-b 通道），timing 豁免不声明。
+- 算法本身**没有删**：`user_layer/strategy_logic/` 仍持有 `spread_arb` / `trend_follow` /
+  `mean_reversion` 的纯逻辑（`evaluate_spread_arb` 等），内核的 `--spread-arb-*` /
+  `--trend-*` 旋钮与 `EngineConfig.spread_arb` 也仍在。要重新提供一个策略，写一个 cdylib
+  调用这些函数即可——`user_layer/parity_strategy/` 是这条路径的完整范例。
+- 内核单元测试里仍能看到 `spread_arb` / `trend_follow` / `mean_reversion` 这些名字：
+  那是 `core/blitzkrieg_core/src/strategies/test_support.rs` 的 **test-only 适配器**，
+  只在 `cfg(test)` 下编译，用来驱动候选派发/门禁豁免/热参数的测试，不会进入任何二进制。
+- `user_layer/strategies/` 仍是**策略投放点**（内核默认 `--strategy-dir`、loader 的
+  `APPROVED_ROOT`、升级脚本的 `DYLIB_DIRS` 都指向它），里面只有一份 README。
+
 新策略默认**禁用**，这样一次升级不会改变已在运行的会话实际交易什么；要启用有三种等价方式：
 
 ```bash
 # 1) 开机即启（可重复；--disable-strategy 优先于 --enable-strategy）
-blitzkrieg-core --engine --enable-strategy mean_reversion ...
+blitzkrieg-core --engine --enable-strategy my_strategy ...
 # 2) 运行期开关（无需重启）
-{ "method": "strategy.enable", "params": { "name": "mean_reversion", "enabled": true } }
+{ "method": "strategy.enable", "params": { "name": "my_strategy", "enabled": true } }
 # 3) 回测/回放同样吃这两个开关（复用同一份 CoreConfig）
-blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy mean_reversion
+blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy my_strategy
 ```
 
-`trend_follow` 的六个旋钮（`momentum_window_sec` / `min_move_pct` / `min_confirm_price` /
-`break_price` / `max_entry_price` / `max_spread_pct`）都可被影子进化（§3.6）。
-它**不声明任何门禁豁免**：顺势入场天然通过现货动量闸门，需要豁免的是 E4-b 的逆向腿。
-默认值中 `min_move_pct=3.0` 与 `max_spread_pct=3.0` 由 `data/archive/` 实测分布定标
-（详情见 `user_layer/strategies/trend_follow/` 的配置说明与源码）。
-留出段回放表现与通道验证见 [TREND_FOLLOW_HOLDOUT_REPORT.md](../reports/TREND_FOLLOW_HOLDOUT_REPORT.md)。
-
-`mean_reversion` 的八个旋钮（`lookback_sec` / `min_drop_pct` / `max_price` / `entry_factor` /
-`max_spread_pct` / `cooldown_sec` / `trend_window_sec` / `trend_drop_pct`）同样可被影子进化；
-断点 = mid 回升到 `max_price` 之上时冷却重置（镜像趋势腿的 move-death）。`min_drop_pct=10` 与
-`max_spread_pct=8` 由同一 18 h 语料的 round-2 切片定标，其余为结构性选择；完整实证与方法论见
-#31 设计评论与 [MEAN_REVERSION_HOLDOUT_REPORT.md](../reports/MEAN_REVERSION_HOLDOUT_REPORT.md)。
-
-后两个旋钮是 #176 的**趋势闸门**：把入场已经用的同一个量（mid 相对自身历史高点的回落）放到
-**更长窗口**上读一遍，`trend_window_sec=600`/`trend_drop_pct=30` 表示“600s 高点回落 ≥ 30% 即判定
-为单边下行，不再抄这把刀”。它拦的是**下跌的年龄**而不是深度，因此单边行情里不再连续接刀
-（冻结语料上单边切片成交 37 → 8、整段净额 -$22.80 → +$0.82、最大回撤 $31.00 → $7.16）；
-`trend_window_sec=0` 即关闭闸门、精确回到 #176 之前的行为。形状与阈值的对照回测（含扫参表）见
-`docs/reports/data/mean-reversion-gate/` 与 `scripts/mean-reversion-gate-evidence.mjs`。
+> 一个显式的 `--enable-strategy` 若**一个库都没解析到**会被拒绝（#265），除非同时给
+> `--allow-zero-strategies`：内核不会带着健康的横幅、却因为被点名的库从未加载而什么都不交易。
 
 加载进自驱动引擎的用户策略**默认禁用**：`strategy.list` 会显示它，但必须 `strategy.enable` 之后才会参与下单。
+
+> 被删掉的那五个策略的形态记录（触发条件、定价方式、旋钮清单、实测结论与定标依据）不在
+> 本节保留——它们的源码与文档一并删除，结论汇总在 [CHANGELOG.md](../../CHANGELOG.md)。
+> 需要这些数字时读 CHANGELOG，而不是从本节反推：本节现在只描述**内核侧仍然存在的机制**。
 
 ### 3.4 多策略并发（P-1.1）
 自驱动引擎遍历**所有已启用**的策略产生候选单，然后统一过共享闸门：
@@ -295,9 +286,9 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy mean_rever
 | 现货动量 `momentum` | 30 s 窗口、0.03% 容差 | 逆向 / 均值回归（现货越跌越买 Up） |
 
 策略可以**显式声明**自己不需要这两个闸门中的某一个只作用于**它自己的候选单**。默认是全保留，
-因此不声明的策略（含内建 `spread_arb`）行为逐位不变。
+因此不声明的策略行为逐位不变。
 
-- **Rust（内建/内树）**：覆写 trait 方法
+- **Rust（内树实现）**：覆写 trait 方法
   ```rust
   fn gate_exemptions(&self) -> GateExemptions {
       // 只豁免时序窗口，且只豁免到「剩余 ≥180s」为止
@@ -310,7 +301,8 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy mean_rever
   char* bk_strategy_gate_exemptions(void* handle);
   // {"timing":true,"momentum":false,"timing_min_time_left_sec":180}
   ```
-  `dog_strategy` 已导出该符号（`timing:true` + 下限 180）作为可运行范例。**注意**：它是独立可选符号而**不是**
+  该符号由策略库自己决定是否导出（不导出 = 不声明任何豁免），内核侧的自证接口是
+  `core/blitzkrieg_core/src/strategies/mod.rs` 的 `GateExemptions`。**注意**：它是独立可选符号而**不是**
   vtable 的新字段——内核按值拷贝 `BkStrategyVtable`，追加字段会改变 `sizeof` 并迫使
   `BK_ABI_VERSION=3`；按名字解析的可选符号缺省即「未声明」，因此 `BK_ABI_VERSION` 维持 2，
   旧库无需重编译。JSON 里非布尔值/未知键一律按 `false`（降级为「未声明」）处理。
@@ -353,7 +345,7 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy mean_rever
 
 **豁免必须显性且可审计**（不允许静默挖洞）：
 - 每次被兑现的豁免产生一条中文审计日志（`tracing` target `strategy`）：
-  `本单因策略 dog_strategy 豁免门禁 timing（Round too young (12s < 10000s)，token=up）`；
+  `本单因策略 <name> 豁免门禁 timing（Round too young (12s < 10000s)，token=up）`；
 - `strategy.load` 的回执会在**启用前**写明声明了哪些闸门：
   `… registered … (disabled; declares gate exemptions: timing)`；
 - `engine.stats.strategies[]` 增加 `gateExemptions`（声明的闸门）、`blockedTiming`/
@@ -361,9 +353,14 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy mean_rever
 - `engine.stats.blocked` 增加 `byStrategy`（把每次拦截归属到具体策略，键 `timing`/`momentum`）
   与 `declaredExemptions`（当前在生效的全部豁免声明 `[{strategy, gates}]`），原有的
   `timing`/`momentum` 全局总数保留不变。
-- 验收（真机 + 真实 dog cdylib）：`node scripts/strategy-gate-check.mjs`
-  （npm 脚本 `core:strategy-gate`）——时序窗口对所有人关闭时，dog_strategy 仍入场、内建仍被挡、
-  豁免被计数且 momentum 恒为 0。
+- 验收：`core/blitzkrieg_core/src/engine.rs` 的豁免测试覆盖四件事——豁免兑现
+  （`declared_timing_exemption_lets_a_candidate_through_the_window_gate`）、
+  作用域只在声明者身上（`an_exemption_is_scoped_to_the_declaring_strategy_only`）、
+  计数（`honoured_exemptions_are_counted_per_strategy_and_drained_once`）、
+  未声明的策略拿不到豁免（`the_builtin_declares_no_exemptions`）——全部跑在 `test_support`
+  适配器上，不需要 cdylib。
+  端到端那条（真机 + 真实 cdylib）随 `scripts/strategy-gate-check.mjs` 一起退役了——
+  要恢复它，先让树里重新有一个声明 `timing` 豁免的策略库。
 
 > 运维侧「谁可以批准某策略豁免」的授权层（与策略自声明正交的二次授信）**明确不在 E2-b 范围**，
 > 记为 [DECISIONS_PENDING D-16](../DECISIONS_PENDING.md)。
@@ -382,7 +379,7 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy mean_rever
 3. **在自己的 evaluate 里读当前值**：从 `set_hot_params` 给到的注册表读**本策略**那一格；
    覆盖层被摘除时（进化关闭）读不到任何句柄，行为退回 `on_config` 配置。
 
-- **Rust（内建/内树）**：覆写 trait 方法
+- **Rust（内树实现）**：覆写 trait 方法
   ```rust
   fn evolvable_knobs(&self) -> Vec<KnobSpec> {
       vec![KnobSpec::new("trendMaxEntryPrice", dec!(0.43), dec!(0.05), dec!(0.90))]
@@ -391,13 +388,16 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy mean_rever
       Some(Box::new(MyFactory))   // make(&StrategyParams) -> Option<Box<dyn EngineStrategy>>
   }
   ```
-  内建 `spread_arb`（4 个 `trend_*` 旋钮）与 `trend_follow`（6 个入场旋钮）都已实现，作为可运行范例。
+  可运行范例在测试里：`core/blitzkrieg_core/src/strategies/test_support.rs` 的
+  `TestSpreadArb`（4 个 `trend_*` 旋钮）与 `tests/shadow_evolution_per_strategy.rs` 的两个
+  合成策略（各自声明旋钮 + 孪生工厂）。内核自身不再注册任何声明旋钮的策略。
 - **外挂 C ABI v2**：额外导出一个**可选符号**（不导出 = 明确「不可进化」）：
   ```c
   char* bk_strategy_evolvable_knobs(void* handle);
   // {"knobs":[{"name":"trendMaxEntryPrice","value":"0.43","min":"0.05","max":"0.90"}]}
   ```
-  `dog_strategy` 与 `parity_strategy` 都已导出该符号。与 §3.5 同理，它是**独立可选符号**
+  `user_layer/parity_strategy/parity_strategy.rs` 已导出该符号，是树里唯一的 cdylib 范例。
+  与 §3.5 同理，它是**独立可选符号**
   而非 vtable 新字段（内核按值拷贝 vtable），`BK_ABI_VERSION` 维持 2、旧库无需重编译；
   JSON 非法/缺字段一律降级为「未声明」（`KnobDeclaration::parse` 永不 panic）。
 
@@ -413,7 +413,9 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy mean_rever
   结构上就读不到、写不进。
 
 审计按策略分文件：`data/evolution/<strategy>.jsonl`；`apply`/`rollback` 走 IPC
-且**都要求 `strategy` 参数**。门禁：`node scripts/strategy-evolution-check.mjs`。
+且**都要求 `strategy` 参数**。门禁：`core/blitzkrieg_core/tests/shadow_evolution_per_strategy.rs`
+（每策略独立单元、互不串扰、进化关闭时逐位回到原行为）。端到端的
+`scripts/strategy-evolution-check.mjs` 随被删策略一起退役了。
 
 ## 4. 生命周期与开关
 
@@ -467,7 +469,10 @@ target/release/blitzkrieg-core --backtest data/archives/events.jsonl --engine \
   与 live 的 `ipc::server` interval 同频），**与事件密度无关**——出场（TP/SL/追踪/强平）因此与 live 同等灵敏。
   真实 feed 是亚毫秒级突发：若把维护周期挂到"到下一事件的间隙"上，13 分钟只会跑 803 个周期（应 15 610），
   回测出场会比 live 迟钝。该缺陷已修复（`MIGRATION_LOG §35`），并有回归测试钉住两种密度下的周期数。
-- 一致性验收：`node scripts/backtest-check.mjs`（**21/21**）——同一次采集的 live 与回放**逐位相等**
-  （含成交：净盈亏 5.12208717）；真实 feed 归档（1 025 963 事件 / 13 分钟）重放 **19/19**。
+- 一致性验收：`node scripts/backtest-check.mjs` 已随被删策略退役（它回放的就是那些 cdylib）。
+  它曾经钉住「同一次采集的 live 与回放**逐位相等**」（含成交：净盈亏 5.12208717；真实 feed
+  归档 1 025 963 事件 / 13 分钟重放 19/19）。**这条覆盖现在没有替代品**：`--backtest` 本身
+  仍在（`core/blitzkrieg_core/src/backtest.rs` 有单元测试），但「采集→重放逐位相等」这条
+  端到端断言要恢复，得先让树里重新有一个可回放的策略库。
 - 已知口径（D-11）：dry 行情路径的 maker 挂单除下单瞬间外不会成交，入场最终升级为 taker（付 taker 费）；
   归档+回放如实复现，因此 dry 回测的入场成本是**保守**的。

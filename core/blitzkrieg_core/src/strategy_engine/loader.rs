@@ -963,8 +963,8 @@ mod tests {
 
     #[test]
     fn policy_accepts_shared_libraries() {
-        assert!(policy_allows(Path::new("strategies/dog_strategy.dylib")).is_ok());
-        assert!(policy_allows(Path::new("strategies/dog_strategy.so")).is_ok());
+        assert!(policy_allows(Path::new("strategies/sample_strategy.dylib")).is_ok());
+        assert!(policy_allows(Path::new("strategies/sample_strategy.so")).is_ok());
     }
 
     #[test]
@@ -1032,7 +1032,7 @@ mod tests {
         let text = "\
 # approvals\n\
 \n\
-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  target/release/libspread_arb_strategy.dylib\n\
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  target/release/libspread_arb.dylib\n\
 target/release/libother.dylib  *248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1\n\
 not-a-hash target/release/ignored.dylib\n";
         let manifest = Path::new("/srv/strategies/approved.manifest");
@@ -1044,7 +1044,7 @@ not-a-hash target/release/ignored.dylib\n";
         );
         assert_eq!(
             entries[0].path,
-            PathBuf::from("/srv/strategies/target/release/libspread_arb_strategy.dylib")
+            PathBuf::from("/srv/strategies/target/release/libspread_arb.dylib")
         );
         assert_eq!(
             entries[0].sha256,
@@ -1072,7 +1072,7 @@ not-a-hash target/release/ignored.dylib\n";
         )));
         assert!(is_machine_generated(Path::new("/repo/data/foo.dylib")));
         assert!(!is_machine_generated(Path::new(
-            "/repo/user_layer/strategies/target/release/libdog_strategy.dylib"
+            "/repo/user_layer/strategies/target/release/libalpha_strategy.dylib"
         )));
     }
 
@@ -1096,7 +1096,7 @@ not-a-hash target/release/ignored.dylib\n";
         };
 
         // Approved: the tree every strategy build lands in.
-        let good = repo.join("user_layer/strategies/target/release/libdog_strategy.dylib");
+        let good = repo.join("user_layer/strategies/target/release/libalpha_strategy.dylib");
         assert!(
             policy.check(&good).is_ok(),
             "the strategy tree must stay loadable: {:?}",

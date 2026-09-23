@@ -40,10 +40,9 @@ ua_stage() {
     cp "$BUILD_WT/target/release/$f" "$STAGE/bin/$f"
   done
 
-  # Strategy cdylibs. The kernel scans <checkout>/user_layer/strategies recursively
-  # for *.dylib/*.so, so these are code, not build residue — and a gate that runs
-  # them while the kernel loads a previous build is not evidence
-  # (scripts/lib/strategy-dylib-freshness.mjs exists for that reason).
+  # Strategy cdylibs. The kernel scans its approved roots recursively for
+  # *.dylib/*.so, so these are code, not build residue: a stale cdylib means the
+  # running kernel executes a previous build.
   : > "$STAGE/dylibs.list"
   for d in $DYLIB_DIRS; do
     for src in "$BUILD_WT/$d"/*.dylib "$BUILD_WT/$d"/*.so; do

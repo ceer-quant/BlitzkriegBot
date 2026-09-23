@@ -3,11 +3,11 @@
  * blitzkrieg-new-strategy — E9-a (#60) deliverable 1.
  *
  * Generates a complete, buildable Blitzkrieg strategy crate under
- * `user_layer/strategies/<name>/` (its own nested workspace, exactly like the
- * dog example). The generated code contains ZERO unsafe: the business logic
- * lives in `impl SafeStrategy`, and `blitzkrieg-strategy-api`'s
- * `export_strategy!` macro emits the whole C ABI v2 surface (vtable, factory,
- * `#[no_mangle]` exports, JSON envelopes).
+ * `user_layer/strategies/<name>/` (its own nested workspace — the drop-point the
+ * kernel scans, which now holds nothing of its own). The generated code contains
+ * ZERO unsafe: the business logic lives in `impl SafeStrategy`, and
+ * `blitzkrieg-strategy-api`'s `export_strategy!` macro emits the whole C ABI v2
+ * surface (vtable, factory, `#[no_mangle]` exports, JSON envelopes).
  *
  * Usage:
  *   node scripts/blitzkrieg-new-strategy.mjs my_dip_fade

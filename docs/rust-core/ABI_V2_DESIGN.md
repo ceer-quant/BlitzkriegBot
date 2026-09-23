@@ -11,9 +11,9 @@
 或在测试中以通用适配器接入。
 
 因此本批彻底实现**内核 0 策略**与**硬切换解耦**：
-- 内核中完全移除树内硬编码交易策略实现（`spread_arb` / `trend_follow` / `mean_reversion` 全移至独立动态策略工作区 `user_layer/strategies`）；
-- 核心依赖共享逻辑库 `strategy_logic` 提供算法数学与测试参考实现；
-- 生产环境所有策略全部为外挂 C ABI v2 cdylib，分发时不捆绑策略；
+- 内核中完全移除树内硬编码交易策略实现（`spread_arb` / `trend_follow` / `mean_reversion` 全移至独立动态策略工作区 `user_layer/strategies`；**该工作区的 5 个策略已于 2026-09-23 整体删除**，`user_layer/strategies/` 只剩投放点职责，见 [CHANGELOG.md](../../CHANGELOG.md)）；
+- 核心依赖共享逻辑库 `strategy_logic` 提供算法数学与测试参考实现（该库仍在，树内无调用者）；
+- 生产环境所有策略全部为外挂 C ABI v2 cdylib，分发时不捆绑策略（**现已无任何自带策略可分**）；
 - 移除 `[strategy] active = [...]` 等硬编码配置，启动时策略列表为空，由宿主动态加载并启用。
 
 ## 2. 能力对照（v1 → v2）
@@ -35,7 +35,7 @@
 | 新鲜盘口门（E-parity） | ✅ `StrategyCtx::fresh_book` | ❌ | ✅ 可选符号 `bk_strategy_bind_eval_ctx`（§3.6） |
 | 评估期真实计时 | ✅ `ctx.time_left_sec`/`now_ms` | ❌ 曾填 0 | ✅ `BkRound` 原生携带 |
 | 诊断带评估上下文 | ✅ `diagnostics(&ctx)` | ❌ | ✅ 诊断调用前绑定同一 eval ctx（§3.6） |
-| 配置生效视图 | ✅ `spread_arb_view` | ❌ | ✅ 可选符号 `bk_strategy_config_view`（§3.6） |
+| 配置生效视图 | ✅ `config_view_json` | ❌ | ✅ 可选符号 `bk_strategy_config_view`（§3.6） |
 
 ## 3. ABI v2 二进制契约（crate `blitzkrieg-strategy-api`，版本 2）
 
@@ -175,7 +175,7 @@ char* bk_strategy_evolvable_knobs(void* handle);
 // E-parity（§3.6）：评估期借出「轮次视图 + 可定价盘口」，语义=树内 fresh_book
 void bk_strategy_bind_eval_ctx(void* handle, const bk_eval_ctx_t* ctx); // ctx=NULL=解除装订
 
-// E-parity（§3.6）：策略自证「当前生效配置」（树内 spread_arb_view 的泛化）
+// E-parity（§3.6）：策略自证「当前生效配置」（树内 config_view_json 的泛化）
 char* bk_strategy_config_view(void* handle);
 ```
 
@@ -225,7 +225,7 @@ E7 的承诺是「外挂只是换一种加载方式，而不是换一套能力�
 `scanner.round_state(now_ms).time_left_sec` 计算真实剩余秒数，树内与外挂看到
 完全相同的时钟。
 
-**③ 配置生效视图** — 树内 builtin 可覆写 `spread_arb_view`（in-force 配置的
+**③ 配置生效视图** — 树内实现可覆写 `config_view_json`（in-force 配置的
 只读视图）。外挂策略通过导出 `char* bk_strategy_config_view(void* handle)`
 返回任意 JSON（热参叠加后的实际生效值）。缺失符号 / NULL / 非法 UTF-8 = 未声明，
 `engine.strategy_config_views()` 不列该策略；首个真实载体是 parity 库，其

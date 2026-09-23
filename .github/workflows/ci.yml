@@ -42,14 +42,13 @@ jobs:
           components: rustfmt, clippy
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-      # External strategy cdylibs live in their OWN nested workspaces (separate
-      # Cargo.lock), like a real third-party strategy author's project, so they
-      # are not members of the root workspace and must be built explicitly. E7
-      # (#38) acceptance requires a real dylib loaded and driven in CI.
-      - name: Build external strategy cdylibs (standalone workspaces)
-        run: |
-          (cd user_layer/strategies && cargo build --release --locked)
-          (cd user_layer/parity_strategy && cargo build --release --locked)
+      # The reference strategy cdylib lives in its OWN nested workspace (separate
+      # Cargo.lock), like a real third-party strategy author's project, so it is
+      # not a member of the root workspace and must be built explicitly. E7
+      # (#38) acceptance requires a real dylib loaded and driven in CI, and
+      # `user_layer/strategies` ships no strategy of its own — this is the one.
+      - name: Build the reference strategy cdylib (standalone workspace)
+        run: (cd user_layer/parity_strategy && cargo build --release --locked)
       - name: Build (release)
         run: cargo build --release --workspace --locked
       # Size budget (E10-d), BLOCKING. The [profile.release] settings in the root
@@ -113,14 +112,13 @@ jobs:
         with:
           node-version: 22
       # ui_kit_web + blitzkrieg-core in release: the gate drives the real binaries.
-      # The parity gates in this job run a real core with --engine, which loads
-      # external cdylibs from user_layer/strategies.
-      - name: Build external strategy cdylibs (standalone workspaces)
-        run: |
-          (cd user_layer/strategies && cargo build --release --locked)
-          (cd user_layer/parity_strategy && cargo build --release --locked)
+      # The reference cdylib is built because the PTY gate below reads the panel's
+      # Strategies pane, and that pane is filled by a LOADED library — the kernel
+      # registers no strategy of its own. The gate points `--strategy-dir` at it.
       - name: Build the gateway and core (release)
         run: cargo build --release --locked -p blitzkrieg-ui-kit -p blitzkrieg-core -p blitzkrieg-ui-panel
+      - name: Build the reference strategy cdylib (standalone workspace)
+        run: (cd user_layer/parity_strategy && cargo build --release --locked)
       - name: Build the panel bundle
         run: |
           cd ui/webapp/webui
@@ -276,12 +274,20 @@ jobs:
           node-version: 22
       - name: Build the core and UI binaries (release)
         run: cargo build --release --workspace --locked
-      # strategy-gate / strategy-evolution / trend-follow drive the REAL dog
-      # cdylib, which lives in its own nested workspace.
-      - name: Build the strategy cdylibs (standalone workspaces)
-        run: |
-          (cd user_layer/strategies && cargo build --release --locked)
-          (cd user_layer/parity_strategy && cargo build --release --locked)
+      # The gates that drove the shipped strategies (strategy-gate /
+      # strategy-evolution / trend-follow / mean-reversion / strategy-limit) are
+      # retired with them. Two things still need a cdylib, for opposite reasons:
+      #   * strategy-devcheck and scale-plugins build their own probe crate
+      #     through scripts/blitzkrieg-new-strategy.mjs — they test the developer
+      #     chain, so the crate they load must be one an author would write;
+      #   * ui-plugin-check reads the panel's strategy registry, and the kernel
+      #     registers no strategy of its own: with nothing loaded the list is
+      #     empty and the toggle round-trip has nothing to flip. It points
+      #     `--strategy-dir` at the reference implementation instead, so what it
+      #     reads is a real loaded library — and "exactly one row, nothing built
+      #     in" becomes the assertion.
+      - name: Build the reference strategy cdylib (standalone workspace)
+        run: (cd user_layer/parity_strategy && cargo build --release --locked)
       # #228: what the binary does with an argument it does not recognise. The
       # fallback arm of `parse_args` printed `ignoring unknown argument: <token>`
       # and started the core ANYWAY, so a misspelled `--readonly` was a WRITE-mode
@@ -299,12 +305,13 @@ jobs:
       # among the gates because every other gate's arguments go through this parser.
       - name: Core argument handling gate (#228)
         run: node scripts/core-args-check.mjs
-      # E1: the full DryRun order chain, and the event-driven backtester
-      # (capture from a live core → offline replay → bit-identical result).
-      - name: Order-chain & backtest gates
+      # E1: the full DryRun order chain, and crash recovery of both logs. Each of
+      # the three places its own order over the operator wire (`orders.place`);
+      # the entry no longer comes from a strategy, and the capture→replay half of
+      # E1 (backtest-check) went with the strategies it replayed.
+      - name: Order-chain & recovery gates
         run: |
           node scripts/cycle-check.mjs
-          node scripts/backtest-check.mjs
           node scripts/order-recovery-check.mjs
           node scripts/position-recovery-check.mjs
       # #192: what a position size COSTS, and what the curve it produces looks
@@ -324,38 +331,6 @@ jobs:
         run: |
           node scripts/capacity-check.mjs
           node scripts/equity-drawdown-check.mjs --self-test
-      # #203: the taker-fee schedule is a COST PARAMETER, not just an accounting
-      # basis — the strategies were tuned under the shipped legacy curve, and
-      # `official` (Polymarket's published `0.07*p*(1-p)`) is 2.3x-5.3x it over the
-      # prices they trade while the fee is already the majority of gross. This gate
-      # replays the frozen corpus (#176's four sha256-pinned hours, in-repo, no
-      # network) under BOTH schedules with the release core built above, and the
-      # recorded #203 'hold' is re-checked in BOTH directions: red if the pin moves
-      # to the candidate without a re-decision, and red if the recorded reason for
-      # holding (the candidate is not viable) stops being true. It runs beside
-      # capacity-check because both read `lib/fee-model.mjs`; the corpus arm needs
-      # the release core and the dog cdylibs built above, and --self-test needs
-      # neither, which is what keeps the fixture half covered even if a build
-      # regresses.
-      - name: Fee-model sensitivity gate (#203)
-        timeout-minutes: 10
-        run: |
-          node scripts/fee-model-sensitivity-check.mjs --self-test
-          node scripts/fee-model-sensitivity-check.mjs
-      # #272: the exit-reachability change (#168/F6) pinned "a profit-side exit is
-      # unreachable without an executable bid" with four unit tests asserting the
-      # MECHANISM, all green, and nothing in the suite could answer whether it made
-      # the strategy earn more or less. This gate replays the same frozen corpus
-      # with the release core and compares the MONEY against a recorded baseline,
-      # so a reachability change is caught in net PnL / win rate / close count
-      # rather than in a mechanism assertion. `--teeth` is the reverse acceptance:
-      # it must go red on every window. See the script header for why the baseline
-      # is a degradation baseline and not an absolute `net >= 0`.
-      - name: Exit-reachability economics gate (#272)
-        timeout-minutes: 15
-        run: |
-          node scripts/exit-economics-check.mjs --self-test
-          node scripts/exit-economics-check.mjs
       # #202: what ONE order may commit, as a share of the live account. The
       # kernel had no such bound: `--max-order-notional` is an absolute number,
       # so the supervisor's 6.00 USD default is 125% of the 4.8 USDC book and the
@@ -382,41 +357,14 @@ jobs:
       # run. It needs no archive and no core: pure self-test.
       - name: Capacity book-extractor self-test (#192)
         run: node scripts/archive-book-extract.mjs --self-test
-      # E2: strategy-scoped sizing, gate exemptions (real dog cdylib), and
-      # per-strategy shadow evolution.
-      - name: Strategy-scoped gates (E2)
-        run: |
-          node scripts/strategy-limit-check.mjs
-          node scripts/strategy-gate-check.mjs
-          node scripts/strategy-evolution-check.mjs
-      # E4: both builtin legs are first-class strategies, not code-path variants.
-      - name: Strategy leg gates (E4)
-        run: |
-          node scripts/trend-follow-check.mjs
-          node scripts/mean-reversion-check.mjs
-      # #175: a settled position is money the chain owes us, and until this gate
-      # nothing in CI drove that path — the whole settle → receivable → redeem →
-      # cash chain was covered by unit tests only. This one runs it end to end over
-      # the IPC wire against a real dry core, on the winning side of a real market,
-      # and asserts the properties that make it trustworthy rather than merely
-      # present:
-      #   * dry mode starts no venue executor even with well-formed live credentials
-      #     in the environment (the adversarial setup `readonly-egress-check` uses),
-      #     and the settlement record itself says `source = core-dry` with a
-      #     `dry-simulated` redemption — no chain hash, no venue order id, anywhere;
-      #   * the receivable becomes cash EXACTLY once: the balance is watched flat
-      #     for longer than the 5 s retry backoff, so a claim that was confirmed but
-      #     not retired from the book (double credit) is a red gate;
-      #   * a failed attempt is stamped and retried on its own backoff, and a
-      #     `manual` failure stops the automatic attempts for good.
-      # The failure hooks are `--dry-redeem-fail` / `--dry-redeem-manual`, dry-only
-      # test switches: `0` (the default) is byte-for-byte production behaviour and
-      # the live path never reads them. The step also pins SWEEP_FAILURE_FREEZE at 3
-      # through the read-only `engine.stats.reconcile` block, so widening the
-      # sweep-freeze threshold (a silently weaker safety net) fails here.
-      - name: Settlement & redemption gate (#175)
-        timeout-minutes: 8
-        run: node scripts/settlement-redeem-check.mjs
+      # RETIRED with the shipped strategies (they drove the deleted cdylibs, so
+      # there is nothing left for them to drive): the E2 strategy-scoped gates
+      # (strategy-limit / strategy-gate / strategy-evolution), the E4 leg gates
+      # (trend-follow / mean-reversion), the #175 settlement & redemption gate,
+      # the #203 fee-model sensitivity gate and the #272 exit-economics gate.
+      # What that costs is written down in CHANGELOG.md and in the PR that
+      # removed them; the settlement path itself is still covered from the Rust
+      # side, and #272's frozen-corpus economics need a strategy to measure.
       # #180 / #184: the two audit findings that share one operator question —
       # "why is nothing happening, and where would I have seen it?" — are asserted
       # on the real binary over the real IPC channel:
@@ -530,10 +478,8 @@ jobs:
           node-version: 22
       - name: Build the core and the UI binaries (release)
         run: cargo build --release --workspace --locked
-      - name: Build the strategy cdylibs (standalone workspaces)
-        run: |
-          (cd user_layer/strategies && cargo build --release --locked)
-          (cd user_layer/parity_strategy && cargo build --release --locked)
+      - name: Build the reference strategy cdylib (standalone workspace)
+        run: (cd user_layer/parity_strategy && cargo build --release --locked)
       - name: Build the panel bundle
         run: |
           cd ui/webapp/webui

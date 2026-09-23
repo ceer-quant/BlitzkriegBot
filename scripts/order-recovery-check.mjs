@@ -5,6 +5,11 @@
  * Reproduces the orphan-order failure: a live order is placed, the process is
  * killed, and a fresh core (same order-log path) must RESTORE it — so the bot
  * still knows the order exists instead of leaving it orphaned at the venue.
+ *
+ * The order goes in over the operator wire (`orders.place`), which is the same
+ * `place_outcome` path the panel's manual order button drives. No strategy is
+ * involved: the kernel ships none, and recovery is about the order log, not
+ * about who decided to trade.
  */
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
@@ -30,7 +35,7 @@ function rpc(sock, method, params = {}) {
 async function boot(sock) {
   try { unlinkSync(sock); } catch {}
   const p = spawn(BIN, ['--socket', sock, '--mode', 'dry', '--tick-ms', '50', '--seed-balance', '1000',
-    '--max-order-notional', '6', '--enable-strategy', 'spread_arb', '--order-log', ORDER_LOG, '--trade-log', join(WORK, 'trades.jsonl'),
+    '--max-order-notional', '6', '--order-log', ORDER_LOG, '--trade-log', join(WORK, 'trades.jsonl'),
     '--no-discovery', '--no-auto-exits'], { stdio: 'ignore', cwd: WORK });
   for (let i = 0; i < 80 && !existsSync(sock); i++) await sleep(50);
   await sleep(300);
@@ -41,7 +46,7 @@ async function boot(sock) {
 const sock1 = join(tmpdir(), `orderdb-1-${process.pid}.sock`);
 const p1 = await boot(sock1);
 await rpc(sock1, 'orders.place', { tokenId: 'tok1', conditionId: 'cond1', side: 'buy', mode: 'maker',
-  price: 0.30, size: 10, internalKey: 'k-rest', strategy: 'spread_arb', asset: 'BTC', direction: 'up', roundSlot: 1 });
+  price: 0.30, size: 10, internalKey: 'k-rest', strategy: 'operator', asset: 'BTC', direction: 'up', roundSlot: 1 });
 await sleep(300);
 const before = (await rpc(sock1, 'orders.list'))?.orders ?? [];
 const liveBefore = before.filter((o) => o.status === 'LIVE' || o.status === 'PENDING').length;

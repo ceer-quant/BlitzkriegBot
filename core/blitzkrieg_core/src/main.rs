@@ -2735,14 +2735,14 @@ mod tests {
             "caps-only must not masquerade as a sizing override"
         );
 
-        let l2 = parse_one("dip_buyer:-:12.5").expect("blank cap segment = uncapped");
+        let l2 = parse_one("spread_arb:-:12.5").expect("blank cap segment = uncapped");
         assert_eq!(l2.max_open_positions, None);
         assert_eq!(l2.max_open_notional_usd, Some(dec!(12.5)));
     }
 
     #[test]
     fn six_segment_form_parses_per_strategy_sizing() {
-        let l = parse_one("dip_buyer:2:20:1.5:4:8").expect("extended form must parse");
+        let l = parse_one("spread_arb:2:20:1.5:4:8").expect("extended form must parse");
         assert_eq!(l.max_open_positions, Some(2));
         assert_eq!(l.max_open_notional_usd, Some(dec!(20)));
         assert_eq!(l.size_usd, Some(dec!(1.5)));
@@ -3044,11 +3044,11 @@ mod tests {
         assert!(a.enable_strategy.is_empty());
         let a = args_from(&[
             "--enable-strategy",
-            "dog_strategy",
+            "alpha_strategy",
             "--allow-zero-strategies",
         ]);
         assert!(a.allow_zero_strategies);
-        assert_eq!(a.enable_strategy, vec!["dog_strategy".to_string()]);
+        assert_eq!(a.enable_strategy, vec!["alpha_strategy".to_string()]);
     }
 
     // ── #173: the daily-loss breaker's CLI/env surface ─────────────────────
@@ -3228,21 +3228,21 @@ mod tests {
     #[test]
     fn eight_segment_form_parses_the_legs_own_equity_pct() {
         // #202: the 8th segment is the leg's own share of the account.
-        let l = parse_one("dip_buyer:2:20:1.5:4:8:0.5:10").expect("8-segment form must parse");
+        let l = parse_one("spread_arb:2:20:1.5:4:8:0.5:10").expect("8-segment form must parse");
         assert_eq!(l.size_weight, Some(dec!(0.5)));
         assert_eq!(l.size_pct, Some(dec!(10)));
         assert!(l.sizing().overrides_anything());
         // The weight slot stays mandatory, so a percentage can never be read as
         // a weight ("-" skips the weight, the same convention as every segment).
-        let l2 = parse_one("dip_buyer:2:20:1.5:4:8:-:10").expect("blank weight = unweighted");
+        let l2 = parse_one("spread_arb:2:20:1.5:4:8:-:10").expect("blank weight = unweighted");
         assert_eq!(l2.size_weight, None);
         assert_eq!(l2.size_pct, Some(dec!(10)));
         // The 7- and 6-segment forms keep their own meaning: no percentage.
         assert_eq!(
-            parse_one("dip_buyer:2:20:1.5:4:8:0.5").unwrap().size_pct,
+            parse_one("spread_arb:2:20:1.5:4:8:0.5").unwrap().size_pct,
             None
         );
-        assert_eq!(parse_one("dip_buyer:2:20:1.5:4:8").unwrap().size_pct, None);
+        assert_eq!(parse_one("spread_arb:2:20:1.5:4:8").unwrap().size_pct, None);
     }
 
     #[test]
@@ -3357,13 +3357,13 @@ mod tests {
             &blitzkrieg_core::config::FileConfig::default(),
             &[
                 "--enable-strategy".into(),
-                "dog_strategy".into(),
+                "alpha_strategy".into(),
                 "--disable-strategy".into(),
                 "spread_arb".into(),
             ],
             &EnvVars::default(),
         );
-        assert_eq!(a.enable_strategy, vec!["dog_strategy"]);
+        assert_eq!(a.enable_strategy, vec!["alpha_strategy"]);
         assert_eq!(a.disable_strategy, vec!["spread_arb"]);
     }
 

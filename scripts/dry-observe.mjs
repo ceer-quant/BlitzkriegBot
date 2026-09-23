@@ -19,7 +19,12 @@
  *
  * Usage:
  *   node scripts/dry-observe.mjs [--assets BTC,ETH] [--duration-sec 900]
- *                                [--round-sec 300] [--force] [--no-feed-ws]
+ *                                [--round-sec 300] [--strategy <name>]
+ *                                [--force] [--no-feed-ws]
+ *
+ * The kernel ships no strategy of its own, so `--strategy` is what makes the
+ * board show anything: pass the name of a cdylib in the strategy directory (or
+ * under `user_layer/parity_strategy`) and the core loads and enables it.
  */
 
 import { join, dirname } from 'path';
@@ -51,6 +56,11 @@ const ROUND_SEC = parseInt(opt('--round-sec', '0'), 10); // 0 = auto-probe
 const USE_FEED_WS = !has('--no-feed-ws');
 const FORCE = has('--force');
 const POLL_MS = 3000;
+/** `--strategy <name>` (repeatable) — the cdylib(s) to load and enable. */
+const STRATEGIES = argv.reduce((acc, a, i) => {
+  if (a === '--strategy' && argv[i + 1] && !argv[i + 1].startsWith('--')) acc.push(argv[i + 1]);
+  return acc;
+}, []);
 
 // ── Safety guard ─────────────────────────────────────────────────────────────
 if (process.env.DRY_RUN === 'false' && !FORCE) {
@@ -176,6 +186,11 @@ async function main() {
     '--max-order-notional', '5',
     '--seed-balance', '1000',
   ];
+  // The kernel ships ZERO strategies, so watching it trade means naming the one
+  // to run. Without --strategy the core still boots (no refusal: the refusal is
+  // for an explicit --enable-strategy that resolves to nothing) and places
+  // nothing, which is a legal but uninteresting observation.
+  for (const s of STRATEGIES) extraArgs.push('--enable-strategy', s);
   // `--feed-ws` still names the Rust-native market-data path; its Polymarket
   // half is REST `POST /books` polling (Binance spot stays on WS).
   if (USE_FEED_WS) extraArgs.push('--feed-ws');
@@ -253,7 +268,10 @@ async function tick(roundSec, markets) {
   status.roundSlot = round?.slot ?? slot;
   status.timeLeftSec = round?.timeLeftSec ?? 0;
   status.markets = round?.markets ?? markets.length;
-  status.ordersPlaced = orderList.orders.filter((o) => o.strategy === 'spread_arb').length;
+  // Every order in this list belongs to the kernel this script spawned (throwaway
+  // socket and working dir), so the count is strategy-agnostic: the strategy a
+  // given order came from is the operator's choice, not this tool's business.
+  status.ordersPlaced = orderList.orders.length;
   if (stats?.blocked) {
     status.blockedTiming = stats.blocked.timing;
     status.blockedMomentum = stats.blocked.momentum;
@@ -287,7 +305,6 @@ function onEvent(e) {
   switch (e.kind) {
     case 'ORDER_UPDATE': {
       const o = e.order;
-      if (o.strategy !== 'spread_arb') return;
       recentOrders.push(o);
       console.log(`         ORDER ${o.asset} ${o.direction} ${o.side} ${fmt(o.price, 3)} x${fmt(o.size, 0)} -> ${o.status}`);
       break;
@@ -329,7 +346,7 @@ async function shutdown(reason) {
   try { await client?.stop(); } catch { /* noop */ }
   console.log('\n--- observation summary ---');
   console.log(`round slot        : ${status.roundSlot}`);
-  console.log(`spread_arb entries: ${status.ordersPlaced}`);
+  console.log(`entries placed    : ${status.ordersPlaced}`);
   console.log(`fills             : ${status.fills}`);
   console.log(`positions closed  : ${status.closed}`);
   console.log(`risk alerts       : ${status.riskAlerts}`);

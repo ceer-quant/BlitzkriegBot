@@ -29,17 +29,10 @@ import { mkdtempSync } from 'fs';
 import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
-import { requireFreshStrategyDylibs } from './lib/strategy-dylib-freshness.mjs';
 import { describeQuote, feeModelProblems, feeQuoter, feeUsdFor } from './lib/fee-model.mjs';
 
 const SOCK = scratchSocketPath('parity');
 const BIN = coreBinaryPath();
-
-// #207: the engine section drives `spread_arb`, which the kernel dlopens out of
-// user_layer/strategies/target/release — a different build product from the
-// binary whose revision is pinned below. Both have to be this checkout's, or the
-// conclusion describes a code state nobody can reconstruct.
-requireFreshStrategyDylibs({ gate: 'core-parity', require: ['spread_arb_strategy'] });
 
 // The core persists its trade log at a RELATIVE path, so every synthetic order
 // this harness places would be appended to the real data/trades/trades.jsonl.
@@ -61,7 +54,7 @@ function order(mode, tokenId, price, size, key, asset = 'BTC', extra = {}) {
   const liveSlot = Math.floor((Date.now() + 900_000) / 1000 / 900);
   return {
     tokenId, conditionId: 'cond', side: 'buy', mode, price, size,
-    internalKey: key, strategy: 'spread_arb', asset, direction: 'up',
+    internalKey: key, strategy: 'operator', asset, direction: 'up',
     roundSlot: liveSlot, ...extra,
   };
 }
@@ -288,61 +281,16 @@ try {
   await pc.stop();
 }
 
-// ── P3: self-driving engine (the harness feeds data, Rust decides and trades) ─
-// `--no-discovery`: without it the polymarket discovery loop boots with the core
-// and, wherever the venue is reachable (CI), its gamma query wins the race and
-// re-registers the round with REAL token ids — the synthetic 'up'/'down' books
-// then price nothing and no entry can ever be placed (this exact failure).
-const ENG_SOCK = scratchSocketPath('parity-eng');
-const ec = makeCore(ENG_SOCK, ['--engine', '--enable-strategy', 'spread_arb', '--no-discovery', '--no-event-archive', '--min-round-age', '0', '--min-time-left', '0', '--trend-confirm-sec', '0', '--trend-window-floor-ms', '0']);
-
-try {
-  await ec.start();
-  const startMs = Date.now();
-  const endMs = startMs + 900_000;
-  const slot = Math.floor(endMs / 1000 / 900);
-  const market = {
-    asset: 'BTC', conditionId: 'c', questionId: 'q',
-    upTokenId: 'up', downTokenId: 'down',
-    upPrice: 0.6, downPrice: 0.4,
-    expiresAtMs: endMs, roundSlot: slot, negRisk: true, question: 'BTC up?',
-  };
-  await rpc.setMarkets(ec, [market]);
-
-  // Confirm the UP trend with a >=10s window of mid >= 0.5, then dip to 0.44.
-  for (let i = 0; i < 12; i++) {
-    await rpc.bookSnapshot(ec, 'up', [[0.55, 100]], [[0.57, 100]]);
-    await sleep(12);
-  }
-  await rpc.spotPrice(ec, 'BTC', 60000);
-  await rpc.bookSnapshot(ec, 'up', [[0.43, 100]], [[0.45, 100]]);
-  await rpc.spotPrice(ec, 'BTC', 60000);
-
-  // The engine evaluates on its own tick (an interval task, not the book
-  // push), so poll for the entry instead of assuming one fixed wait is enough
-  // — a loaded runner can stretch the first evaluate well past 400 ms.
-  let orders = [];
-  let entry;
-  const deadline = Date.now() + 8000;
-  while (Date.now() < deadline) {
-    orders = (await rpc.listOrders(ec)).orders;
-    entry = orders.find((o) => o.strategy === 'spread_arb');
-    if (entry) break;
-    await sleep(200);
-  }
-  if (!entry) {
-    // Diagnose rather than just fail: show WHY nothing was placed.
-    const stats = await ec.request('engine.stats', {}, 5000).catch((e) => ({ error: e }));
-    console.log('  diag engine.stats:', JSON.stringify(stats).slice(0, 600));
-  }
-  check('engine placed an entry from fed data', entry !== undefined, JSON.stringify(orders.map((o) => o.status)));
-  check('engine entry is trend-confirmed maker_then_taker', entry !== undefined && entry.side === 'buy' && entry.mode === 'maker_then_taker');
-} catch (e) {
-  failures++;
-  console.log('  FAIL engine harness error', e?.stack || e);
-} finally {
-  await ec.stop();
-}
+// ── P3: self-driving engine — REMOVED with the shipped strategies ────────────
+// This section drove `--engine --enable-strategy spread_arb` and asserted the
+// entry that came out was a trend-confirmed maker_then_taker. With the strategy
+// crates deleted there is nothing for the engine to evaluate: the harness could
+// feed the same books and the engine would correctly place nothing, so the
+// assertions would either be deleted or turned into a tautology. The engine's
+// own decision path is covered from the Rust side (core/blitzkrieg_core tests
+// over `strategies/test_support.rs`); what is NOT covered here any more is the
+// wire path "fed books -> strategy -> order on the socket". Restore this section
+// together with the first strategy crate that comes back.
 
 console.log(failures === 0 ? '\nRUST CORE PARITY OK' : `\nRUST CORE PARITY FAILED (${failures})`);
 process.exit(failures === 0 ? 0 : 1);

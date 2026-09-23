@@ -7,6 +7,14 @@
 >
 > 本文只描述与门禁同源的数字：每一个数都能由 §1 的命令复现，或由内核源码的
 > 具名常量给出。凡未实测的，一律写「未覆盖」，不写估计值。
+>
+> ⚠️ **2026-09-23 起本文的费率部分（§3）不再是可复现的记录**：它的唯一测量工具
+> `scripts/fee-model-sensitivity-check.mjs` 随内核自带的 5 个策略一起被删除了
+> （它复放的就是那些 cdylib）。下表里的数字是**当时**的实测值，保留为记录；
+> 任何形如 `node scripts/fee-model-sensitivity-check.mjs …` 的命令现在都会报文件不存在。
+> 要重新测费率敏感度，得先让树里重新有一个可回放的策略库。
+> 费率曲线本身（`lib/fee-model.mjs`、`FeeSchedule`）与本文的容量/权益部分是活的，
+> 那两条门禁（`capacity-check.mjs`、`equity-curve-check` 系列）都还在。
 
 ## 1. 两条门禁（+ 一个只读的归档抽取工具）
 
@@ -399,11 +407,12 @@ sha256 钉死，见 `scripts/lib/frozen-corpus.mjs`），结果：
    - `min_edge` / 最小可交易价差一类的**净边际参数**：任何「毛利 > X」的量都要按新费
      重新推导（低价票上费占价 6.16%，2.3x–5.3x 的差就在这里）。
 
-**守卫（可执行）**：`scripts/fee-model-sensitivity-check.mjs`。
+**守卫（已退役）**：`scripts/fee-model-sensitivity-check.mjs` 曾是这个守卫——
 `--self-test`（无需 binary）钉住判定逻辑本身；默认模式在冻结语料上实测 16 臂并给出
 决策结论；改 `PINNED_DEFAULT_MODEL`、改 rate、断掉 `--fee-model` 接线都会让它变红。
-**它当前没有接进 CI**（`.github/workflows/` 现阶段不允许改动），所以它是一条「手动门禁」：
-在动费率或默认值的那个改动里必须贴出它的输出。
+**它从未接进 CI**，且 2026-09-23 随被删策略一起删除。所以「切默认费率」这条决策
+现在**没有任何可执行守卫**：`FeeSchedule` 的单元测试守的是曲线本身，不是「切过去净收益
+会不会变号」这个经济学问题。
 
 ## 4. 与 `--size-pct`、`--max-order-notional(-pct)`、`min/max-shares` 对齐
 
@@ -640,7 +649,7 @@ node scripts/capacity-check.mjs --book docs/reports/data/capacity-gate/book-2026
 node scripts/capacity-check.mjs --side sell --book docs/reports/data/capacity-gate/book-20260921T041048Z.json \
      --sizes 1,5,10,50,100,120,130,150,250,500,1000
 
-# 费率敏感度（§3a/§3b/§3c，#203）：判定逻辑自检（无需二进制，秒级）
+# 费率敏感度（§3a/§3b/§3c，#203）——工具已退役，下面三条命令都会报「文件不存在」
 node scripts/fee-model-sensitivity-check.mjs --self-test
 # 冻结语料实测 16 臂（需要 release binary + user_layer/strategies 的 cdylib，约 4 分钟）
 node scripts/fee-model-sensitivity-check.mjs --out /tmp/fee-sensitivity.json

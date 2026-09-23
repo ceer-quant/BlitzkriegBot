@@ -41,8 +41,8 @@ console.log('strategy provenance — never invent a source')
 
 check('a real source passes through unchanged', () => {
   assert.equal(
-    strategySource('dylib:user_layer/strategies/target/release/libspread_arb_strategy.dylib'),
-    'dylib:user_layer/strategies/target/release/libspread_arb_strategy.dylib',
+    strategySource('dylib:user_layer/parity_strategy/target/release/libparity_strategy.dylib'),
+    'dylib:user_layer/parity_strategy/target/release/libparity_strategy.dylib',
   )
   assert.equal(strategySource('test'), 'test')
 })
@@ -57,12 +57,13 @@ check('a missing source is unknown, NOT builtin', () => {
 })
 
 check('registry rows (strategy.list) report unknown provenance', () => {
-  // Exactly what /api/plugins serves for the three migrated strategies:
-  // name + enabled, nothing else.
+  // Exactly what /api/plugins serves for a loaded cdylib: name + enabled, nothing
+  // else. The names are the operator's — the kernel ships no strategy of its own,
+  // so nothing here may be labelled `builtin`.
   const rows = registryStrategyRows([
-    { name: 'spread_arb', enabled: true },
-    { name: 'trend_follow', enabled: false },
-    { name: 'mean_reversion', enabled: false },
+    { name: 'alpha_strategy', enabled: true },
+    { name: 'beta_strategy', enabled: false },
+    { name: 'gamma_strategy', enabled: false },
   ])
   assert.equal(rows.length, 3)
   for (const r of rows) {
