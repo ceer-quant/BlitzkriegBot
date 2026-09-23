@@ -108,7 +108,6 @@ impl PriceBuffer {
             .map(|(_, p)| *p)
             .unwrap_or(Decimal::ZERO)
     }
-
 }
 
 // ── Trend tracker ───────────────────────────────────────────────────────────
