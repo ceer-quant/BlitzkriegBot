@@ -262,8 +262,11 @@ struct Args {
     /// persistence (a backtest or a hermetic harness wants this).
     strategy_state: Option<String>,
     /// Directory scanned at startup for user-layer strategy libraries
-    /// (`*.dylib`/`*.so`): every library found is loaded and enabled, so
-    /// dropping a file in the folder is the whole install. `none`/empty = off.
+    /// (`*.dylib`/`*.so`): every library found is LOADED, and registers
+    /// DISABLED. Enabling is a separate decision, made in `install_engine` from
+    /// the persisted set (`strategy_state`) plus `--enable-strategy`, and the
+    /// directory is never consulted for it — so dropping a file in the folder
+    /// INSTALLS a strategy, it does not switch one on. `none`/empty = off.
     /// Default `user_layer/strategies` under the repo; overridden by
     /// `BK_STRATEGY_DIR` (a file-config key would be dead weight: this belongs
     /// to "where is the checkout", not to strategy parameters).

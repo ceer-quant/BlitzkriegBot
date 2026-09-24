@@ -12,7 +12,7 @@
 
 因此本批彻底实现**内核 0 策略**与**硬切换解耦**：
 - 内核中完全移除树内硬编码交易策略实现（`spread_arb` / `trend_follow` / `mean_reversion` 全移至独立动态策略工作区 `user_layer/strategies`；**该工作区的 5 个策略已于 2026-09-23 整体删除**，`user_layer/strategies/` 只剩投放点职责，见 [CHANGELOG.md](../../CHANGELOG.md)）；
-- 核心依赖共享逻辑库 `strategy_logic` 提供算法数学与测试参考实现（该库仍在，树内无调用者）；
+- 核心依赖共享逻辑库 `strategy_logic` 提供算法数学与测试参考实现（该库仍在，**并且内核自己就在调用它**：`shadow_evolution/knobs.rs` 复用它声明的参数类型、`marketdata.rs` 用它导出的 `from_sorted_levels`、`engine.rs` 用它的 `PriceBuffer`。「树内无调用者」只对**已删的那 5 个策略**成立，不适用于这个库本身——它的 `pub` 面是给仓外策略作者用的 API，见该 crate `lib.rs` 的 content rules）；
 - 生产环境所有策略全部为外挂 C ABI v2 cdylib，分发时不捆绑策略（**现已无任何自带策略可分**）；
 - 移除 `[strategy] active = [...]` 等硬编码配置，启动时策略列表为空，由宿主动态加载并启用。
 
