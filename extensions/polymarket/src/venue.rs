@@ -16,7 +16,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE;
 use blitzkrieg_market_api::{
     CoreError, CoreErrorCode, CoreResult, FillPolicy, MarketFill, MarketResolution, PendingOrder,
-    SelfCheckItem, SelfCheckReport, SettlementQuery, Side, VenueTradeInfo,
+    SelfCheckItem, SelfCheckReport, SettlementQuery, Side, VenueTradeInfo, net::now_ms,
 };
 use futures_util::StreamExt;
 use hmac::{Hmac, Mac as _};
@@ -614,7 +614,7 @@ async fn self_check_probe(
     creds: &Credentials,
     signer_checksum: &str,
 ) -> CoreResult<SelfCheckReport> {
-    let ts = now_epoch_ms();
+    let ts = now_ms();
     let mut items: Vec<SelfCheckItem> = Vec::new();
 
     match sdk_balance(client).await {
@@ -662,13 +662,6 @@ async fn self_check_probe(
         ts_ms: ts,
         items,
     })
-}
-
-pub fn now_epoch_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 async fn sdk_balance(client: &Client<Authenticated<Normal>>) -> CoreResult<Decimal> {

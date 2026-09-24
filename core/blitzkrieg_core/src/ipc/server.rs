@@ -8,11 +8,11 @@
 use crate::ipc::schema::*;
 use crate::model::{CoreError, Mode};
 use crate::service::{Core, CoreConfig};
+use blitzkrieg_market_api::net::now_ms;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, oneshot};
@@ -460,13 +460,6 @@ pub async fn run(
     core.lock().await.flush_near_misses();
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
-}
-
-pub fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 fn spawn_session(

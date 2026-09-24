@@ -2336,7 +2336,7 @@ async fn main() -> anyhow::Result<()> {
          beside the position log"
     );
 
-    let lock_now = server::now_ms();
+    let lock_now = blitzkrieg_market_api::net::now_ms();
     let record =
         blitzkrieg_core::data_lock::LockRecord::for_this_process(&args.socket, mode_str, lock_now);
     // A refusal propagates out of `main` as a non-zero exit with the operator
