@@ -50,29 +50,12 @@ impl OrderDb {
     /// Load the latest snapshot per order id (later lines win). Tolerant of a
     /// legacy Node-format file: unparseable lines are skipped, not fatal.
     pub fn load(&self) -> Vec<TrackedOrder> {
-        let Ok(text) = std::fs::read_to_string(&self.jsonl_path) else {
-            return Vec::new();
-        };
         let mut latest: HashMap<String, TrackedOrder> = HashMap::new();
-        let mut skipped = 0usize;
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<TrackedOrder>(line) {
-                Ok(o) => {
-                    latest.insert(o.order_id.clone(), o);
-                }
-                Err(_) => skipped += 1,
-            }
-        }
-        if skipped > 0 {
-            tracing::warn!(
-                skipped,
-                path = %self.jsonl_path.display(),
-                "order log: skipped unparseable lines (legacy/foreign format?)"
-            );
+        for o in crate::jsonl::load::<TrackedOrder>(
+            &self.jsonl_path,
+            "order log: skipped unparseable lines (legacy/foreign format?)",
+        ) {
+            latest.insert(o.order_id.clone(), o);
         }
         latest.into_values().collect()
     }

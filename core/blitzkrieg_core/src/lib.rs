@@ -23,6 +23,7 @@ pub mod engine;
 pub mod exit_policy;
 pub mod extension;
 pub mod ipc;
+pub(crate) mod jsonl;
 pub mod ledger;
 pub mod ledger_api;
 pub mod logging;
