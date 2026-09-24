@@ -22,6 +22,7 @@
 
 use crate::data_source::{DataSource, open_replay_all};
 use crate::engine::DataEvent;
+use blitzkrieg_market_api::net::now_ms;
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -232,7 +233,7 @@ pub fn run_eval(archive: &Path, args: &RegimeEvalArgs) -> Result<Value, String> 
     }
 
     Ok(json!({
-        "generatedAtMs": now_unix_ms(),
+        "generatedAtMs": now_ms(),
         "archive": path_str,
         "protocol": {
             "windowMs": args.config.window_ms,
@@ -275,13 +276,6 @@ fn finalize_window(run: &mut TokenRun, config: &MarketRegimeConfig, idx: i64) {
         "machine": run.machine.state().as_str(),
     }));
     run.window_samples.clear();
-}
-
-fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// Human-readable verdict for the operator (stdout + .md file).

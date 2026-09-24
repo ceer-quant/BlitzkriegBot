@@ -294,7 +294,7 @@ impl std::fmt::Display for DataDirsBusy {
                     "  {} (lock {}): held by {}",
                     b.dir.display(),
                     b.lock.display(),
-                    o.describe(crate::ipc::server::now_ms())
+                    o.describe(blitzkrieg_market_api::net::now_ms())
                 )?,
                 None => writeln!(
                     f,

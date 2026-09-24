@@ -8,10 +8,10 @@
 //! If credentials are absent it stays inert, so a live binary without keys still
 //! serves the socket.
 
-use crate::feed::now_ms;
 use crate::redeem::{self, RedeemConfig, RedeemOutcome};
-use crate::venue::{VenueEvent, now_epoch_ms, spawn_from_env};
+use crate::venue::{VenueEvent, spawn_from_env};
 use alloy::primitives::Address;
+use blitzkrieg_market_api::net::now_ms;
 use blitzkrieg_market_api::{
     CoreError, CoreErrorCode, MarketHost, ReconcileSnapshot, RedemptionFailure, RedemptionRequest,
 };
@@ -173,7 +173,7 @@ pub async fn spawn_if_configured(
                 match venue.place(order).await {
                     Ok(p) => {
                         place_failures = 0;
-                        recent_placements.push((p.venue_order_id.clone(), now_epoch_ms()));
+                        recent_placements.push((p.venue_order_id.clone(), now_ms()));
                         host.on_order_accepted(&core_order_id, &p.venue_order_id)
                             .await
                     }
@@ -186,8 +186,8 @@ pub async fn spawn_if_configured(
                         // signal the capability self-check exists for: probe
                         // the venue directly (rate-limited) so the freeze
                         // decision rests on fresh evidence, not inference.
-                        if place_failures >= 3 && now_epoch_ms() >= next_probe_ok_ms {
-                            next_probe_ok_ms = now_epoch_ms() + PROBE_COOLDOWN_MS;
+                        if place_failures >= 3 && now_ms() >= next_probe_ok_ms {
+                            next_probe_ok_ms = now_ms() + PROBE_COOLDOWN_MS;
                             match venue.self_check().await {
                                 Ok(report) => host.on_self_check(report).await,
                                 Err(e) => host.report_error(e).await,
@@ -265,7 +265,7 @@ pub async fn spawn_if_configured(
                             manual: failure.manual,
                         },
                     };
-                    let result = redeem::to_result(&request, outcome, now_epoch_ms());
+                    let result = redeem::to_result(&request, outcome, now_ms());
                     host.on_redemption_result(result).await;
                 });
             }
@@ -304,7 +304,7 @@ pub async fn spawn_if_configured(
                         // here — every sweep, not just at startup.
                         let known: std::collections::HashSet<String> =
                             host.known_venue_order_ids().await.into_iter().collect();
-                        let now = now_epoch_ms();
+                        let now = now_ms();
                         recent_placements.retain(|(_, at)| now - *at < ORPHAN_GRACE_MS);
                         for id in open_order_ids.clone() {
                             if known.contains(&id)

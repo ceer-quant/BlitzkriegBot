@@ -87,6 +87,7 @@ use crate::model::{CryptoMarket, OrderbookSnapshot};
 use crate::strategies::EngineStrategy;
 use crate::strategies::shadow_twin::ShadowTickCtx;
 use audit::AuditLog;
+use blitzkrieg_market_api::net::now_ms;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -205,17 +206,6 @@ impl Unit {
             cfg.deep_dims,
         );
     }
-}
-
-/// Wall-clock ms for the entry points no engine clock reaches: the manager's
-/// construction. (Every other lifecycle timestamp arrives with a tick or an IPC
-/// call.) A variant's age is measured against this stamp, so it is a real clock
-/// by contract, never a placeholder (#250).
-fn wall_now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 pub struct ShadowEvolution {
@@ -338,7 +328,11 @@ impl ShadowEvolution {
             proposal_store: store,
         };
         me.proposal_store.load();
-        me.register_strategies(strategies, wall_now_ms());
+        // A real wall clock, never a placeholder: this is an entry point no
+        // engine clock reaches (every other lifecycle timestamp arrives with a
+        // tick or an IPC call), and a variant's age is measured against this
+        // stamp (#250).
+        me.register_strategies(strategies, now_ms());
         me
     }
 

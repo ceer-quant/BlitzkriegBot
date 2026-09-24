@@ -3,7 +3,6 @@
 //! is fully unit-testable; the async UDS layer and live venue sit on top.
 
 use crate::ipc::schema::Event;
-use crate::ipc::server::now_ms;
 use crate::ledger::Ledger;
 use crate::model::*;
 use crate::ome::{AppliedFillRecord, FillDelta, FillOutcome, LateFill, Ome, SubmitParams};
@@ -15,6 +14,7 @@ use crate::shadow_evolution::{
     EvolutionOutcome, EvolutionStatus, MutableParams, ShadowEvolution, ShadowEvolutionConfig,
 };
 use crate::sim::{Book, rests_on_book};
+use blitzkrieg_market_api::net::now_ms;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -2064,7 +2064,7 @@ impl Core {
                 self.emit(Event::EvolutionApplied {
                     signal: crate::shadow_evolution::EvolveSignal::new(
                         format!("rollback-{strategy}"),
-                        crate::ipc::server::now_ms(),
+                        blitzkrieg_market_api::net::now_ms(),
                         strategy,
                         from,
                         to,

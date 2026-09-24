@@ -16,6 +16,7 @@
 //! market, so it costs almost nothing, and a fill wants to arrive as an event
 //! rather than on a poll boundary.
 
+use blitzkrieg_market_api::net::now_ms;
 use blitzkrieg_market_api::{BookUpdate, MarketHost, SpotUpdate};
 use futures_util::StreamExt;
 use polymarket_client_sdk_v2::error::{
@@ -183,16 +184,6 @@ pub enum FeedEvent {
         now_ms: i64,
     },
     Info(String),
-}
-
-/// Shared wall clock for the extension's feed-side modules (discovery/live
-/// reuse this one instead of keeping their own copies).
-pub(crate) fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// Run all feeds, forwarding every update to the [`MarketHost`]. `token_ids` is

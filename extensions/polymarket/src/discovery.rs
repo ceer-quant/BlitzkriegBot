@@ -8,8 +8,8 @@
 //! With this running, Node is out of the market-data path entirely: the core
 //! finds its own markets, pulls its own books/spot, decides and trades.
 
-use crate::feed::now_ms;
 use crate::gamma::{duration_label, slug_for};
+use blitzkrieg_market_api::net::now_ms;
 use blitzkrieg_market_api::{MarketDescriptor, MarketHost};
 use polymarket_client_sdk_v2::gamma::Client as GammaClient;
 use polymarket_client_sdk_v2::gamma::types::request::MarketsRequest;

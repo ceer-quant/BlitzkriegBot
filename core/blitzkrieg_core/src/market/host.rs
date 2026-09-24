@@ -4,10 +4,10 @@
 //! a thin, logic-free forward onto the corresponding `Core` method, so the
 //! plugin boundary carries no trading behaviour of its own.
 
-use crate::ipc::server::now_ms;
 use crate::model as m;
 use crate::service::Core;
 use blitzkrieg_market_api as api;
+use blitzkrieg_market_api::net::now_ms;
 use blitzkrieg_market_api::{BoxFuture, MarketHost};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
