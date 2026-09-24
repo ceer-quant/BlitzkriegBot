@@ -1,11 +1,19 @@
 # user_layer/strategies — the strategy drop-point
 
-**This directory ships no strategies.** Every strategy that used to live here
-(`dog`, `spread_arb`, `trend_follow`, `mean_reversion`, `pair_arb`) has been
-deleted; see `CHANGELOG.md` for the entry and the coverage that went with them.
+**The kernel ships no trading strategy, and this directory ships one measurement
+fixture.** The five strategies that used to live here (`dog`, `trend_follow`,
+`mean_reversion`, `pair_arb`, and `spread_arb` as a *traded* strategy) were
+deleted; see `CHANGELOG.md` for that entry and the coverage that went with them.
 
-It is kept as a directory — rather than removed — because three things point at
-it by name:
+`spread_arb/` was restored on its own, as a **fixture, not a product**: the
+economic gate `scripts/exit-economics-check.mjs` (#272) puts a money number on
+exit reachability by replaying the sha256-pinned frozen corpus through a real
+strategy, and a strategy has to come from a cdylib. Nothing enables it by
+default — it registers DISABLED like any other loaded library — and no shipped
+configuration names it.
+
+The directory is kept as a directory — rather than removed — because three
+things point at it by name:
 
 - the kernel's default `--strategy-dir` (`core/blitzkrieg_core/src/service.rs`);
 - `loader::APPROVED_ROOT`, the primary entry in the dylib trust allowlist
@@ -19,8 +27,7 @@ with no flag, exactly as before.
 ## Writing one
 
 The kernel is a strategy host: it ships zero strategy implementations and
-reaches every strategy through C ABI v2 via `dlopen`. Nothing about that changed.
-To add one:
+reaches every strategy through C ABI v2 via `dlopen`. To add one:
 
 1. Write a crate against `user_layer/strategy_api` (the C ABI), `crate-type =
    ["cdylib"]`, with its own `Cargo.lock` — mirroring how an external author
@@ -33,9 +40,18 @@ To add one:
 `docs/rust-core/STRATEGY_GUIDE.md` is the full walkthrough; the ABI itself is
 specified in `docs/rust-core/ABI_V2_DESIGN.md`.
 
-## Why this directory has no `Cargo.toml`
+## The nested workspace
 
-It used to be a nested workspace (`[workspace]` with the five strategies as
-members, excluded from the root workspace so it carried its own `Cargo.lock`).
-With no members left the workspace file was deleted with them; a new strategy
-crate declares its own `[workspace]` and `Cargo.lock`, as the guide describes.
+`Cargo.toml` here is a nested workspace with `spread_arb` as its only member,
+excluded from the root workspace so it carries its own `Cargo.lock` like a real
+external author's checkout. Add your crate as a member, or give it its own
+`[workspace]` — either is fine, as long as the cdylib lands under an approved
+root.
+
+Build the fixture with:
+
+    (cd user_layer/strategies && cargo build --release --locked)
+
+`scripts/lib/strategy-dylib-freshness.mjs` reads this manifest's `members` to
+tell a **stale** cdylib from an **orphan** one, so a gate that drives a cdylib
+fails loudly when the library is older than the sources it was built from.

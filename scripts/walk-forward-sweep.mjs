@@ -305,10 +305,10 @@ function invalidReason(stderr, selfCheck) {
   if (!selfCheck) {
     return 'kernel log: no strategy startup self-check line (binary predates #265?)';
   }
-  if (selfCheck.resolved < EXPECTED_STRATEGIES.length) {
-    return `kernel log: requested ${selfCheck.requested} strategies but resolved ${selfCheck.resolved} (expected ${EXPECTED_STRATEGIES.length})`;
+  if (selfCheck.resolved < STRATEGIES.length) {
+    return `kernel log: requested ${selfCheck.requested} strategies but resolved ${selfCheck.resolved} (expected ${STRATEGIES.length})`;
   }
-  const missing = EXPECTED_STRATEGIES.filter((s) => !selfCheck.enabled.includes(s));
+  const missing = STRATEGIES.filter((s) => !selfCheck.enabled.includes(s));
   if (missing.length) {
     return `kernel log: resolved but not enabled: ${missing.join(', ')}`;
   }
@@ -457,7 +457,7 @@ const report = {
   // absent from `results` on purpose — a 0-trade report from a kernel that
   // loaded no strategy is not a data point.
   invalid: invalidRuns,
-  expectedStrategies: EXPECTED_STRATEGIES,
+  expectedStrategies: STRATEGIES,
   verdict: {
     usable: invalidRuns.length === 0,
     picks,
@@ -488,7 +488,7 @@ if (invalidRuns.length) {
   md.push('|---|---|---|');
   for (const r of invalidRuns) md.push(`| ${r.candidate} | ${r.fold} | ${r.reason} |`);
   md.push('');
-  md.push(`Expected strategies per replay: ${EXPECTED_STRATEGIES.map((s) => `\`${s}\``).join(', ')}. A run lands here when the kernel log shows the request unresolved (\`unknown strategy requested\`), when it refused to start, or when the startup self-check line is missing — never because it closed few trades.`);
+  md.push(`Expected strategies per replay: ${STRATEGIES.map((s) => `\`${s}\``).join(', ')}. A run lands here when the kernel log shows the request unresolved (\`unknown strategy requested\`), when it refused to start, or when the startup self-check line is missing — never because it closed few trades.`);
   md.push('');
 }
 md.push('## Fold × candidate matrix');
@@ -542,6 +542,6 @@ writeFileSync(join(outDir, 'walk-forward.md'), md.join('\n'));
 console.log(`\nreport: ${join(outDir, 'walk-forward.json')}`);
 console.log(`report: ${join(outDir, 'walk-forward.md')}`);
 if (invalidRuns.length) {
-  console.error(`\nINVALID: ${invalidRuns.length} replay(s) ran without the strategies the sweep asked for (${EXPECTED_STRATEGIES.join(', ')}). The report says so and is not usable as evidence — a kernel that starts with zero strategies reports zero trades exactly like a strategy with no signal (#265).`);
+  console.error(`\nINVALID: ${invalidRuns.length} replay(s) ran without the strategies the sweep asked for (${STRATEGIES.join(', ')}). The report says so and is not usable as evidence — a kernel that starts with zero strategies reports zero trades exactly like a strategy with no signal (#265).`);
   process.exitCode = 1;
 }

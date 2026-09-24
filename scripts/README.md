@@ -55,6 +55,7 @@ cargo build --release --workspace --locked
 | `cycle-check.mjs` | DryRun full order chain: confirm → place → fill → position → revalue → exit |
 | `core-parity.mjs` | Order/ledger semantics parity, 22 assertions (taker, maker, risk, kill switch, events) |
 | `account-parity.mjs` | dry/live twin-core ledger bit-for-bit comparison |
+| `exit-economics-check.mjs` | The ECONOMIC gate on exit reachability (#272): replays the core over the four sha256-pinned frozen corpus hours with ONE strategy cdylib (`user_layer/strategies/spread_arb` — the measurement fixture) and judges closed / win rate / net USD against a recorded baseline. It goes red when the same corpus pays **less**, which is the question the mechanism tests cannot answer. `--teeth` is the demonstrated-failing arms; `--arm <flags…>` puts any candidate under the same verdict |
 | `core-adopt-check.mjs` | Duplicate client adopt semantics, no restart storm |
 | `shutdown-cleanliness-check.mjs` | Stop means the core is gone and resting orders settled |
 | `parent-monitor-check.mjs` | No orphaned core after the driver exits |

@@ -93,6 +93,13 @@ async function runCoreChecks(dylib, name, workdir, elapsedMs) {
     '--seed-balance', '1000', '--max-order-notional', '6',
     '--engine', '--no-discovery', '--no-event-archive',
     '--no-trade-log', '--no-order-log', '--no-position-log',
+    // `--no-strategy-dir`, and the gate is sharper for it: the core would
+    // otherwise auto-load whatever `user_layer/strategies` happens to hold (the
+    // `spread_arb` measurement fixture lives there for the exit-economics gate),
+    // so "exactly one row" would silently be a statement about the checkout
+    // rather than about `strategy.load`. With the directory off, the ONLY
+    // registration this gate can observe is the one it performed itself.
+    '--no-strategy-dir',
     '--round-sec', String(ROUND_SEC),
     '--min-round-age', '0', '--min-time-left', '0',
   ];
@@ -124,7 +131,8 @@ async function runCoreChecks(dylib, name, workdir, elapsedMs) {
     check('strategy.list shows the template', !!row, JSON.stringify(list.map((s) => s.name)));
     check('new strategy registered DISABLED', row && row.enabled === false, JSON.stringify(row));
     // Loading a new library must not disturb anything else. The kernel ships
-    // zero strategies now, so the sharp form of that check is "exactly one row
+    // zero strategies of its own and this core runs with `--no-strategy-dir`
+    // (see the spawn args), so the sharp form of that check is "exactly one row
     // exists, and it is the one just loaded" — a phantom or duplicated
     // registration shows up here, and so does a load that quietly enabled
     // something (the kernel enables nothing by itself).
