@@ -3063,13 +3063,14 @@ impl Core {
             // starts on the venue's acceptance (the submit path cannot arm it
             // in LIVE — the ack arrives asynchronously). Without this the
             // maker leg rests forever and the taker fallback never fires.
-            if o.mode == FillPolicy::MakerThenTaker && o.escalate_at_ms.is_none() {
-                let timeout = if o.maker_timeout_ms > 0 {
-                    o.maker_timeout_ms
-                } else {
-                    self.config.default_maker_timeout_ms
-                };
-                self.ome.set_escalation(id, now_ms + timeout)?;
+            // A negative entry timeout is the operator's "never escalate"
+            // switch: no clock is armed, so the leg stays a pure maker.
+            if o.mode == FillPolicy::MakerThenTaker
+                && o.escalate_at_ms.is_none()
+                && let Some(delay) =
+                    escalation_delay_ms(o.maker_timeout_ms, self.config.default_maker_timeout_ms)
+            {
+                self.ome.set_escalation(id, now_ms + delay)?;
             }
         }
         Ok(())
@@ -5213,13 +5214,13 @@ impl Core {
                         }
                     }
                     FillPolicy::Maker | FillPolicy::MakerThenTaker => {
-                        if order.mode == FillPolicy::MakerThenTaker {
-                            let timeout = if maker_timeout_ms > 0 {
-                                maker_timeout_ms
-                            } else {
-                                self.config.default_maker_timeout_ms
-                            };
-                            self.ome.set_escalation(id, now_ms + timeout)?;
+                        if order.mode == FillPolicy::MakerThenTaker
+                            && let Some(delay) = escalation_delay_ms(
+                                maker_timeout_ms,
+                                self.config.default_maker_timeout_ms,
+                            )
+                        {
+                            self.ome.set_escalation(id, now_ms + delay)?;
                         }
                         // Fill now if the current book already crosses.
                         self.try_maker_fill(id, now_ms);
@@ -6592,6 +6593,28 @@ fn reject_backoff_ms(attempts: u32) -> i64 {
     ms.min(REJECT_BACKOFF_MAX_MS)
 }
 
+/// How long a resting `maker_then_taker` order waits before the taker leg
+/// replaces it — or `None` when it must NEVER escalate.
+///
+/// Three-valued on purpose, and the third value is why this is a function:
+/// `0` means "use the configured default" (the long-standing meaning, kept for
+/// every caller that passes nothing), a positive value is the clock itself, and
+/// a NEGATIVE value is the operator's off switch — `--entry-maker-timeout-ms -1`
+/// makes the entry a pure maker that rests until it fills or its round ends.
+///
+/// Without the negative branch there was no way to run a maker-only entry: `0`
+/// fell back to the default and any large positive value merely postponed the
+/// escalation past the round, which is the worst of both (the clock still fires
+/// on a stale, one-sided book — see the `marketable_walk` guard below).
+fn escalation_delay_ms(explicit_ms: i64, default_ms: i64) -> Option<i64> {
+    let delay = if explicit_ms == 0 {
+        default_ms
+    } else {
+        explicit_ms
+    };
+    (delay > 0).then_some(delay)
+}
+
 /// Session-scoped per-strategy aggregates (P-1.1 accounting).
 #[derive(Debug, Default, Clone)]
 struct StrategyAccounting {
@@ -7655,6 +7678,50 @@ mod tests {
         assert_eq!(c.ledger().balance(), dec!(7.4609375));
     }
 
+    /// `--entry-maker-timeout-ms -1`: the entry is a pure maker. The book DOES
+    /// offer a crossing ask at the deadline — `maker_then_taker_escalates_after_timeout`
+    /// above fills at 0.50 under the same setup — and with the clock disarmed
+    /// nothing happens: no cancel, no taker leg, no fill, no money moved.
+    #[test]
+    fn a_negative_entry_timeout_never_escalates() {
+        let mut c = dry_core(dec!(10));
+        let before = c.ledger().balance();
+        let (id, st) = c
+            .place(
+                order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(5), "k1"),
+                -1,
+                1,
+            )
+            .unwrap();
+        assert_eq!(st, OrderStatus::Live);
+        assert!(c.ome().get(&id).unwrap().escalate_at_ms.is_none());
+        c.book_snapshot("tok", vec![], vec![(dec!(0.50), dec!(100))], 2);
+        // Past the 5000 ms default too, not just past the deadline the old
+        // fallback would have armed: if any clock existed at all, it has fired.
+        c.tick(6000).unwrap();
+        let o = c.ome().get(&id).unwrap();
+        assert!(
+            o.escalate_at_ms.is_none(),
+            "a disarmed entry must never arm a clock, not even on the maintenance pass"
+        );
+        assert_eq!(o.status, OrderStatus::Live);
+        assert!(
+            c.ome().all().iter().all(|o| o.status == OrderStatus::Live),
+            "the maker is still the only order; no taker leg was placed"
+        );
+        assert_eq!(c.ledger().balance(), before);
+    }
+
+    #[test]
+    fn escalation_delay_is_three_valued() {
+        // 0 = the configured default (unchanged for every caller that passes
+        // nothing); positive = that clock; negative = never escalate.
+        assert_eq!(escalation_delay_ms(5_000, 5_000), Some(5_000));
+        assert_eq!(escalation_delay_ms(0, 5_000), Some(5_000));
+        assert_eq!(escalation_delay_ms(-1, 5_000), None);
+        assert_eq!(escalation_delay_ms(-3_600_000, 5_000), None);
+    }
+
     #[test]
     fn escalation_without_crossing_depth_rearms_and_keeps_maker() {
         let mut c = dry_core(dec!(10));
@@ -7871,6 +7938,18 @@ mod tests {
             c.ome().get(&id2).unwrap().escalate_at_ms,
             Some(200 + c.config.default_maker_timeout_ms)
         );
+
+        // A negative timeout is the off switch: the venue's acceptance arms no
+        // clock at all, so the leg rests as a pure maker.
+        let (id3, _) = c
+            .place(
+                order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(5), "k5"),
+                -1,
+                3,
+            )
+            .unwrap();
+        c.confirm_live(&id3, 300).unwrap();
+        assert!(c.ome().get(&id3).unwrap().escalate_at_ms.is_none());
     }
 
     #[test]

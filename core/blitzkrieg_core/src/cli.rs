@@ -174,7 +174,9 @@ pub const FLAGS: &[FlagSpec] = &[
     flag(
         "--entry-maker-timeout-ms",
         "<n>",
-        "How long a maker entry may rest before escalation to taker (default 5000).",
+        "How long a maker entry may rest before escalation to taker (ms). 0 uses the \
+         5000 ms default; a NEGATIVE value never escalates, so the entry rests as a \
+         pure maker until it fills or its round ends. A non-number is a startup error.",
     ),
     risky(
         "--max-order-notional",

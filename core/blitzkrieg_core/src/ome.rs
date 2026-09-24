@@ -171,7 +171,10 @@ pub struct SubmitParams {
     pub order_id: OrderId,
     pub request: OrderRequest,
     pub submitted_at_ms: i64,
-    /// Maker→taker escalation window (ms); 0 = no escalation.
+    /// Maker→taker escalation window (ms), three-valued: `0` = the core's
+    /// configured default, positive = that clock, negative = never escalate
+    /// (see `service::escalation_delay_ms`). Not "0 = no escalation" — that was
+    /// the doc, and it was wrong.
     pub maker_timeout_ms: i64,
 }
 

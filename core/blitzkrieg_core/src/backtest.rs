@@ -1412,4 +1412,28 @@ mod tests {
         assert_eq!(r2.fills, 2);
         assert_eq!(r2.trades.closed, 1);
     }
+
+    /// The `-1` off switch at the replay layer — a pure-maker evaluation run.
+    ///
+    /// The window here is LONGER than the 5000 ms default, which is what makes
+    /// this an assertion rather than a restatement: under the old "0 or negative
+    /// falls back to the default" semantics this exact replay armed a 5000 ms
+    /// clock, escalated, filled twice and closed a trade. Disarmed, the maker
+    /// rests to the end and nothing else happens.
+    #[test]
+    fn a_negative_entry_timeout_never_escalates_in_a_replay() {
+        let mut core = base_core(None);
+        core.entry_maker_timeout_ms = -1;
+        let r = bt(core, Box::new(VecSource::new(scenario_events(NOW))), 10_000);
+        assert_eq!(
+            r.orders.orders,
+            1,
+            "the entry is still placed:\n{}",
+            r.render()
+        );
+        assert_eq!(r.orders.live_at_end, 1, "it rests to the end of the replay");
+        assert_eq!(r.fills, 0, "no taker leg ever fires");
+        assert_eq!(r.trades.closed, 0);
+        assert_eq!(r.open_positions, 0);
+    }
 }
