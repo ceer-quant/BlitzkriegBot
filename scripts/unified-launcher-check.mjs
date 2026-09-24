@@ -28,13 +28,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import net from 'node:net';
 import { requestOnce } from './lib/core-client.mjs';
-import { pollUntil } from './lib/wait.mjs';
+import { pollUntil, sleep } from './lib/wait.mjs';
 
 const ROOT = process.cwd();
 const BIN = join(ROOT, 'target', 'release', 'blitzkrieg');
 const CORE_BIN = join(ROOT, 'target', 'release', 'blitzkrieg-core');
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 const WORK = mkdtempSync(join(tmpdir(), 'unified-launcher-'));
 const SOCK = join(WORK, 'unified.sock');
 const READONLY_SOCK = join(WORK, 'readonly.sock');

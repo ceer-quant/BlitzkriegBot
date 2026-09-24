@@ -27,8 +27,8 @@ import { spawn, execSync } from './lib/child-guard.mjs';
 import { mkdtempSync, mkdirSync, unlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
+import { sleep } from './lib/wait.mjs';
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'parent-monitor-'));
 
 // ── Safety interlock ────────────────────────────────────────────────────────

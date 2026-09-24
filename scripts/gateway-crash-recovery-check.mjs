@@ -46,7 +46,7 @@
 // owned core behind with PPID=1. That leak was real on 2026-09-19.
 import { spawn, spawnSync } from './lib/child-guard.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
-import { waitFor } from './lib/wait.mjs';
+import { waitFor, sleep } from './lib/wait.mjs';
 import { mkdtempSync, existsSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -59,7 +59,6 @@ const PORT = Number(process.env.GATEWAY_CRASH_PORT ?? 18996);
 const USER = 'gate-crash-admin';
 const PASSWORD = 'gate-crash-pass-4b71';
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'gateway-crash-'));
 const SOCK = join(WORK, 'core.sock');
 

@@ -31,7 +31,12 @@ import { existsSync } from 'node:fs';
 /** One cadence for every wait. A gate's budget is its timeout, not its poll rate. */
 const POLL_MS = 50;
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/**
+ * The one sleep. Twenty-seven scripts carried their own copy of this one-liner
+ * (in three spellings — `r`, `resolve`, and two `r =>` without parens); this is
+ * that definition, exported so the copies can go.
+ */
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Enough of whatever the probe last produced to name the failure. */
 function describe(value) {

@@ -24,9 +24,9 @@
 //! `scripts/order-recovery-check.mjs` / `position-recovery-check.mjs`), so
 //! either signal is safe.
 
+use crate::socket_served;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -484,11 +484,6 @@ pub fn discover_binary() -> PathBuf {
         .into_iter()
         .find(|p| p.exists())
         .unwrap_or_else(|| root.join("target/release/blitzkrieg-core"))
-}
-
-/// Whether a live core is serving `socket_path` right now.
-pub fn socket_served(socket_path: &str) -> bool {
-    UnixStream::connect(socket_path).is_ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

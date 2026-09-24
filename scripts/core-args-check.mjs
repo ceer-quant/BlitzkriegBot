@@ -56,11 +56,10 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { coreBinaryPath, checkCoreProvenance, VERSION_RE } from './lib/core-provenance.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { sleep } from './lib/wait.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = coreBinaryPath(ROOT);
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 const summaryLines = [];
 function summary(text) {
   summaryLines.push(text);

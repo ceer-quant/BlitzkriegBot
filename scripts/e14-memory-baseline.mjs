@@ -56,6 +56,7 @@ import { join, resolve, dirname, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { sleep } from './lib/wait.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CORE = join(ROOT, 'target', 'release', 'blitzkrieg-core');
@@ -282,8 +283,6 @@ function selfTest() {
   console.log(`e14-memory-baseline --self-test — ${fixtures.length} fixtures, verdicts as expected.`);
   return 0;
 }
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function rpcLine(c, obj) {
   return new Promise((res) => {

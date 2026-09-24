@@ -15,11 +15,11 @@
 pub mod command;
 pub mod supervisor;
 
+pub use crate::socket_served;
 pub use command::{
     command_lines, command_verbs, help_text, parse_command, Command, CommandOutcome, Dispatcher,
     COMMANDS,
 };
 pub use supervisor::{
-    discover_binary, socket_served, StartOutcome, StopOutcome, Supervisor, SupervisorConfig,
-    SupervisorError,
+    discover_binary, StartOutcome, StopOutcome, Supervisor, SupervisorConfig, SupervisorError,
 };

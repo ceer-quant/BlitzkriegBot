@@ -34,10 +34,9 @@ import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { requestOnce as rpc } from './lib/core-client.mjs';
-import { pollUntil } from './lib/wait.mjs';
+import { pollUntil, sleep } from './lib/wait.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'readonly-'));
 const ORDER_LOG = join(WORK, 'orders.jsonl');
 const TRADE_LOG = join(WORK, 'trades.jsonl');

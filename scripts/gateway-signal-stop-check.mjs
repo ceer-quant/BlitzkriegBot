@@ -5,7 +5,7 @@
  */
 import { spawn, spawnSync } from './lib/child-guard.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
-import { waitFor } from './lib/wait.mjs';
+import { waitFor, sleep } from './lib/wait.mjs';
 import { existsSync, mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -17,7 +17,6 @@ const WEB = join(ROOT, 'target', 'release', 'ui_kit_web');
 const PORT = Number(process.env.GATEWAY_SIGNAL_PORT ?? 18997);
 const USER = 'gate-signal-admin';
 const PASSWORD = 'gate-signal-pass-4b71';
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'gateway-signal-'));
 const SOCK = join(WORK, 'core.sock');
 const spawned = new Set();

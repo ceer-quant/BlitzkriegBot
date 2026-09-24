@@ -92,11 +92,6 @@ impl IpcClient {
         }
     }
 
-    pub fn with_timeout(mut self, t: Duration) -> Self {
-        self.timeout = t;
-        self
-    }
-
     pub fn socket_path(&self) -> &str {
         &self.socket_path
     }

@@ -1279,11 +1279,6 @@ impl WebServer {
         }
     }
 
-    /// Number of live sessions (tests + introspection).
-    pub fn session_count(&self) -> usize {
-        self.sessions.lock().map(|s| s.len()).unwrap_or(0)
-    }
-
     /// The client address a login attempt is charged to.
     ///
     /// The peer address, not the submitted username: charging the username would

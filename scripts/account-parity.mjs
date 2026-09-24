@@ -43,7 +43,7 @@ import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
 import { describeQuote, feeModelProblems, feeQuoter, feeUsdFor } from './lib/fee-model.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
-import { pollUntil } from './lib/wait.mjs';
+import { pollUntil, sleep } from './lib/wait.mjs';
 
 const BIN = coreBinaryPath();
 const SEED = 1000;
@@ -73,8 +73,6 @@ const round = (n) => Math.round(n * 1e8) / 1e8;
 let takerFeeUsd = () => {
   throw new Error('fee quotes not loaded yet — the kernel must be running before fees can be asserted');
 };
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** A core in an isolated scratch dir, with nothing persisted or restored. */
 function makeCore(label) {

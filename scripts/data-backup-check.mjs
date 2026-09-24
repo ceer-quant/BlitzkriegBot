@@ -64,6 +64,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createChecks } from './lib/gate-harness.mjs';
 
 const ROOT = process.cwd();
 const SCRIPT = join(ROOT, 'scripts', 'data-backup.sh');
@@ -73,17 +74,11 @@ const WORK = mkdtempSync(join(tmpdir(), 'data-backup-check-'));
 const SRC = join(WORK, 'data');
 const DEST = join(WORK, 'dest');
 
-let failures = 0;
-function ok(msg) {
-  console.log(`  ok   ${msg}`);
-}
-function bad(msg) {
-  console.error(`  FAIL ${msg}`);
-  failures++;
-}
-function assert(cond, msg) {
-  cond ? ok(msg) : bad(msg);
-}
+const gate = createChecks();
+const { check } = gate;
+
+/** This gate's historical `assert(cond, msg)` order (133 call sites). */
+const assert = (cond, msg) => check(msg, cond);
 
 /** Run the script, capturing exit code + output instead of throwing.
  *  `script` defaults to the real one; the guard section runs a copy inside a
@@ -823,8 +818,8 @@ if (process.getuid?.() !== 0) {
 rmSync(WORK, { recursive: true, force: true });
 
 console.log('─'.repeat(72));
-if (failures > 0) {
-  console.error(`RESULT: FAIL — ${failures} assertion(s) failed`);
+if (gate.failures > 0) {
+  console.error(`RESULT: FAIL — ${gate.failures} assertion(s) failed`);
   process.exit(1);
 }
 console.log('RESULT: PASS — data-backup refuses dangerous destinations, verifies its');

@@ -29,6 +29,7 @@
  * Run: node scripts/soak-monitor-check.mjs
  */
 import { execFileSync, spawn } from './lib/child-guard.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 import { mkdtempSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,7 +50,8 @@ const SOAK_DIR = join(WORK, 'soak');
 const SOCK_DIR = mkdtempSync('/tmp/bksm-');
 const noop = () => {};
 
-let failures = 0;
+const gate = createChecks();
+const { check } = gate;
 let liveServers = new Set();
 
 // Same reasoned bound as the soak-health gate: a gate that can hang is a gate
@@ -64,9 +66,8 @@ const watchdog = setTimeout(() => {
 }, WATCHDOG_MS);
 watchdog.unref?.();
 
-function ok(msg) { console.log(`  ok   ${msg}`); }
-function bad(msg) { console.error(`  FAIL ${msg}`); failures++; }
-function assert(cond, msg) { cond ? ok(msg) : bad(msg); }
+/** This gate's historical `assert(cond, msg)` order (46 call sites). */
+const assert = (cond, msg) => check(msg, cond);
 
 /**
  * A fixture core: a UDS server that answers every JSON-RPC call the monitor
@@ -396,8 +397,8 @@ for (const srv of [...liveServers]) {
 rmSync(WORK, { recursive: true, force: true });
 
 console.log('─'.repeat(72));
-if (failures > 0) {
-  console.error(`RESULT: FAIL — ${failures} assertion(s) failed`);
+if (gate.failures > 0) {
+  console.error(`RESULT: FAIL — ${gate.failures} assertion(s) failed`);
   process.exit(1);
 }
 console.log('RESULT: PASS — the sampler\'s two lifetimes are distinguishable in');

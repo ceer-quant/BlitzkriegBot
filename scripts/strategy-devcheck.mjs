@@ -23,7 +23,7 @@
 import { spawn, execFileSync } from './lib/child-guard.mjs';
 import { CoreClient } from './lib/core-client.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
-import { waitForSocket } from './lib/wait.mjs';
+import { waitForSocket, sleep } from './lib/wait.mjs';
 import { join, resolve, dirname } from 'path';
 import { tmpdir } from 'os';
 import { existsSync, unlinkSync, mkdtempSync, rmSync } from 'fs';
@@ -39,8 +39,6 @@ const DYLIB = join(
     : process.platform === 'win32' ? `${NAME}.dll` : `lib${NAME}.so`
 );
 const ROUND_SEC = 3600;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 const gate = createChecks();
 const { check } = gate;
 

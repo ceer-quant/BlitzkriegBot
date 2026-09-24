@@ -21,7 +21,7 @@
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
-import { waitForSocket } from './lib/wait.mjs';
+import { waitForSocket, sleep } from './lib/wait.mjs';
 import net from 'net';
 import { join, resolve, dirname } from 'path';
 import { tmpdir } from 'os';
@@ -34,8 +34,6 @@ const FULL = process.argv.includes('--full');
 const CONNS = 40;
 const RUN_MS = FULL ? 600_000 : 90_000;
 const HZ = 10;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 const gate = createChecks();
 const { check } = gate;
 
