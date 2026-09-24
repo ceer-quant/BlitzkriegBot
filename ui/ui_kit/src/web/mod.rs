@@ -1059,23 +1059,38 @@ pub struct WebServer {
 }
 
 impl WebServer {
-    /// Read-only panel (no command API).
-    pub fn new(client: IpcClient, trade_limit: usize) -> Self {
+    /// Every field the struct has, in one place. Only two differ between the
+    /// read-only panel and a gateway — `dispatcher` (whether the command API
+    /// exists) and `auth_required` (whether a session is demanded) — so those are
+    /// the two the callers pass. A field added here reaches every surface, which
+    /// is the point: three separate literals is how one of them ends up missing
+    /// it.
+    fn surface(
+        client: IpcClient,
+        trade_limit: usize,
+        dispatcher: Option<Arc<Mutex<Dispatcher>>>,
+        auth_required: bool,
+    ) -> Self {
         Self {
             snapshot_src: Arc::new(Mutex::new(client)),
             trade_limit,
-            dispatcher: None,
+            dispatcher,
             net_check: Arc::new(Mutex::new(NetCheckCache::default())),
             panel_user: None,
             panel_password: None,
-            // No lifecycle verbs on this surface, so auth stays opt-in here.
-            // Gateway mode (below) arms it unconditionally.
-            auth_required: false,
+            auth_required,
             allowed_origins: Vec::new(),
             sessions: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             login_failures: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             bind: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Read-only panel (no command API).
+    pub fn new(client: IpcClient, trade_limit: usize) -> Self {
+        // No lifecycle verbs on this surface, so auth stays opt-in here.
+        // Gateway mode (below) arms it unconditionally.
+        Self::surface(client, trade_limit, None, false)
     }
 
     /// Guarantee the panel has credentials before it serves anything.
@@ -1420,21 +1435,7 @@ impl WebServer {
     /// Panel + command API. Lifecycle verbs are gated by the dispatcher's own
     /// `lifecycle_enabled` flag.
     pub fn with_gateway(client: IpcClient, trade_limit: usize, dispatcher: Dispatcher) -> Self {
-        Self {
-            snapshot_src: Arc::new(Mutex::new(client)),
-            trade_limit,
-            dispatcher: Some(Arc::new(Mutex::new(dispatcher))),
-            net_check: Arc::new(Mutex::new(NetCheckCache::default())),
-            panel_user: None,
-            panel_password: None,
-            // This surface can start and stop the trading process, so it is never
-            // exposed without a session.
-            auth_required: true,
-            allowed_origins: Vec::new(),
-            sessions: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-            login_failures: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-            bind: Arc::new(Mutex::new(None)),
-        }
+        Self::with_shared_gateway(client, trade_limit, Arc::new(Mutex::new(dispatcher)))
     }
 
     /// Like [`Self::with_gateway`], but the caller KEEPS a handle to the same
@@ -1452,21 +1453,9 @@ impl WebServer {
         trade_limit: usize,
         dispatcher: std::sync::Arc<std::sync::Mutex<Dispatcher>>,
     ) -> Self {
-        Self {
-            snapshot_src: Arc::new(Mutex::new(client)),
-            trade_limit,
-            dispatcher: Some(dispatcher),
-            net_check: Arc::new(Mutex::new(NetCheckCache::default())),
-            panel_user: None,
-            panel_password: None,
-            // This surface can start and stop the trading process, so it is never
-            // exposed without a session.
-            auth_required: true,
-            allowed_origins: Vec::new(),
-            sessions: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-            login_failures: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-            bind: Arc::new(Mutex::new(None)),
-        }
+        // This surface can start and stop the trading process, so it is never
+        // exposed without a session.
+        Self::surface(client, trade_limit, Some(dispatcher), true)
     }
 
     /// Serve until the process is stopped. `addr` e.g. `127.0.0.1:51888`.
