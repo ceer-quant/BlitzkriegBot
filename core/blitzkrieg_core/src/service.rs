@@ -8234,6 +8234,7 @@ mod strategy_dispatch_tests {
     use crate::risk::RiskConfig;
     use crate::service::shadow_evolution_tests::scratch;
     use crate::shadow_evolution::{MutableParams, StrategyParams};
+    use crate::test_fixtures::round_market;
     use rust_decimal_macros::dec;
 
     /// Mirrors the production engine knobs closely enough to trade the feed below
@@ -9544,29 +9545,12 @@ mod strategy_dispatch_tests {
         assert_eq!(c.list_orders().len(), before, "no new order was tracked");
     }
 
-    fn market(now: i64) -> CryptoMarket {
-        let slot = now / 1000 / 900;
-        CryptoMarket {
-            asset: "BTC".into(),
-            condition_id: "cond".into(),
-            question_id: "q".into(),
-            up_token_id: "up".into(),
-            down_token_id: "down".into(),
-            up_price: dec!(0.6),
-            down_price: dec!(0.4),
-            expires_at_ms: (slot + 1) * 900 * 1000,
-            round_slot: slot,
-            neg_risk: true,
-            question: "BTC up or down".into(),
-        }
-    }
-
     /// Round + confirmed UP trend + calm spot + one dip book: the builtin emits
     /// exactly one spread_arb entry (0.43 x 10 = 4.30 USD) on the next cycle.
     fn feed_entry_setup(c: &mut Core, now: i64) {
         c.engine_on_data(
             DataEvent::RoundMarkets {
-                markets: vec![market(now)],
+                markets: vec![round_market(now)],
                 now_ms: now,
             },
             now,

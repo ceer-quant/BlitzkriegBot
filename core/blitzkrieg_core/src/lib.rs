@@ -49,6 +49,8 @@ pub mod sim;
 pub mod strategies;
 pub mod strategy_engine;
 pub mod strategy_state;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 pub mod trade_db;
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");

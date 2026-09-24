@@ -400,7 +400,7 @@ mod tests {
     use crate::signal::{SpreadArbConfig, TrendConfig};
     use crate::strategies::shadow_twin::tick_ctx;
     use crate::strategies::test_support::TestSpreadArbFactory;
-    use rust_decimal::prelude::FromPrimitive;
+    use crate::test_fixtures::evo_book;
 
     fn specs() -> Vec<KnobSpec> {
         strategy_logic::spread_arb_knobs(&SpreadArbConfig::default())
@@ -411,15 +411,6 @@ mod tests {
             base: SpreadArbConfig::default(),
             trend: TrendConfig::default(),
         })
-    }
-
-    fn book(bid: f64, ask: f64) -> OrderbookSnapshot {
-        OrderbookSnapshot::from_levels(
-            "t",
-            vec![(Decimal::from_f64(bid).unwrap(), dec!(100))],
-            vec![(Decimal::from_f64(ask).unwrap(), dec!(100))],
-            0,
-        )
     }
 
     fn market() -> CryptoMarket {
@@ -573,7 +564,7 @@ mod tests {
         for _ in 0..70 {
             now += 1_000;
             for v in set.variants.iter_mut() {
-                let b = book(0.60, 0.62);
+                let b = evo_book(0.60, 0.62);
                 v.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &b, 1, 880, now));
             }
         }
@@ -583,12 +574,12 @@ mod tests {
             // side reaches its price. Entry = 0.88 * mid = 0.33 on this book
             // (0.43/0.33), and the ask at 0.33 covers the 10-share size — the
             // old book (0.43/0.45) could never have filled that bid.
-            let b = book(0.43, 0.33);
+            let b = evo_book(0.43, 0.33);
             v.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &b, 1, 870, now));
         }
         now += 1_000;
         for v in set.variants.iter_mut() {
-            let b = book(0.95, 0.97);
+            let b = evo_book(0.95, 0.97);
             v.on_tick(&tick_ctx(std::slice::from_ref(&m), "t", &b, 1, 860, now));
         }
         let bm = set.baseline_metrics(1800, now);

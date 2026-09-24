@@ -1359,8 +1359,8 @@ mod tests {
     use crate::signal::TradeSignal;
     use crate::strategies::StrategyCtx;
     use crate::strategies::shadow_twin::{ShadowFactory, tick_ctx};
+    use crate::test_fixtures::{evo_book, evo_market};
     use rust_decimal::Decimal;
-    use rust_decimal::prelude::FromPrimitive;
     use rust_decimal_macros::dec;
 
     /// A synthetic strategy: buys when the mid is at or under `cap`. Exactly one
@@ -1458,31 +1458,6 @@ mod tests {
         }
     }
 
-    fn market() -> CryptoMarket {
-        CryptoMarket {
-            asset: "BTC".into(),
-            condition_id: "c".into(),
-            question_id: "q".into(),
-            up_token_id: "t".into(),
-            down_token_id: "t-d".into(),
-            up_price: dec!(0.5),
-            down_price: dec!(0.5),
-            expires_at_ms: 900_000,
-            round_slot: 1,
-            neg_risk: false,
-            question: "?".into(),
-        }
-    }
-
-    fn book(bid: f64, ask: f64) -> OrderbookSnapshot {
-        OrderbookSnapshot::from_levels(
-            "t",
-            vec![(Decimal::from_f64(bid).unwrap(), dec!(100))],
-            vec![(Decimal::from_f64(ask).unwrap(), dec!(100))],
-            0,
-        )
-    }
-
     fn strategies() -> (CapStrategy, CapStrategy) {
         (
             CapStrategy {
@@ -1511,13 +1486,13 @@ mod tests {
     /// a signal to re-enter the rally is therefore not fillable and produces no
     /// trade (F7), keeping the comparison down to executable trades only.
     fn drive_wins(m: &mut ShadowEvolution, name: &str, times: usize, t0: i64) {
-        let round = market();
+        let round = evo_market();
         let i = m.units.iter().position(|u| u.strategy == name).unwrap();
         let mut now = t0;
         for _ in 0..times {
             // A loser the baseline also takes: entry under the cap, then collapse.
             now += 1_000;
-            let dip = book(0.39, 0.39); // mid 0.39 — locked, offer at the entry price
+            let dip = evo_book(0.39, 0.39); // mid 0.39 — locked, offer at the entry price
             for v in m.units[i].set.variants.iter_mut() {
                 v.on_tick(&tick_ctx(
                     std::slice::from_ref(&round),
@@ -1532,7 +1507,7 @@ mod tests {
             // LOCKED at the crash level: holders stop out at the 0.20 bid, and a
             // variant that missed the dip may take the collapsed price — its
             // offer must reach the entry level for that entry to be fillable.
-            let crash = book(0.20, 0.20); // mid 0.20 → well past the 12% stop
+            let crash = evo_book(0.20, 0.20); // mid 0.20 → well past the 12% stop
             for v in m.units[i].set.variants.iter_mut() {
                 v.on_tick(&tick_ctx(
                     std::slice::from_ref(&round),
@@ -1548,7 +1523,7 @@ mod tests {
             // fillable (F7) — and its bid stays under the 100% take-profit
             // floor, so the collapsed-price entry rides on to the up tick.
             now += 1_000;
-            let shallow = book(0.39, 0.43); // mid 0.41 > the 0.40 baseline cap
+            let shallow = evo_book(0.39, 0.43); // mid 0.41 > the 0.40 baseline cap
             for v in m.units[i].set.variants.iter_mut() {
                 v.on_tick(&tick_ctx(
                     std::slice::from_ref(&round),
@@ -1560,7 +1535,7 @@ mod tests {
                 ));
             }
             now += 1_000;
-            let up = book(0.95, 0.97);
+            let up = evo_book(0.95, 0.97);
             for v in m.units[i].set.variants.iter_mut() {
                 v.on_tick(&tick_ctx(
                     std::slice::from_ref(&round),
@@ -1581,8 +1556,8 @@ mod tests {
         let mut m = ShadowEvolution::new(fast_cfg(false, "off"), &refs);
         assert!(!m.is_enabled());
         assert_eq!(m.aggregate_status(0), EvolutionStatus::Disabled);
-        m.on_round(&[market()], &[], 1000);
-        m.on_tick("t", &book(0.43, 0.45), 1000);
+        m.on_round(&[evo_market()], &[], 1000);
+        m.on_tick("t", &evo_book(0.43, 0.45), 1000);
         assert_eq!(m.variant_count(), 0);
         assert!(m.evaluate(1000).is_empty());
         assert!(m.history(None, 10).is_empty());
@@ -1638,7 +1613,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut m = ShadowEvolution::new(cfg, &refs);
         m.enable(0);
-        m.on_round(&[market()], &[], 0);
+        m.on_round(&[evo_market()], &[], 0);
 
         // Only alpha produces qualifying variants.
         drive_wins(&mut m, "alpha", 2, 10_000);
@@ -1817,9 +1792,9 @@ mod tests {
         let refs: Vec<&dyn EngineStrategy> = vec![&a, &b];
         let mut m = ShadowEvolution::new(fast_cfg(false, "observe"), &refs);
         m.enable(0);
-        m.on_round(&[market()], &[], 0);
-        m.on_tick("t", &book(0.43, 0.45), 1000);
-        m.on_tick("t", &book(0.95, 0.97), 2000);
+        m.on_round(&[evo_market()], &[], 0);
+        m.on_tick("t", &evo_book(0.43, 0.45), 1000);
+        m.on_tick("t", &evo_book(0.95, 0.97), 2000);
         let views = m.variant_views(2000);
         assert!(views.iter().any(|v| v.is_baseline));
         assert_eq!(m.registry().get("alpha", "cap"), Some(dec!(0.40)));
@@ -1923,13 +1898,13 @@ mod tests {
         let (good, _) = strategies();
         let refs: Vec<&dyn EngineStrategy> = vec![&boom, &good];
         let mut m = ShadowEvolution::new(fast_cfg(true, "panic"), &refs);
-        m.on_round(&[market()], &[], 1_000);
+        m.on_round(&[evo_market()], &[], 1_000);
 
         // A tick that makes every twin want to enter (mid 0.395 under any cap).
         // If the panic escaped, this call itself would abort the test.
-        m.on_tick("t", &book(0.39, 0.40), 1_000);
+        m.on_tick("t", &evo_book(0.39, 0.40), 1_000);
         // And a second tick, so a "quarantine" that only works once is caught.
-        m.on_tick("t", &book(0.39, 0.40), 2_000);
+        m.on_tick("t", &evo_book(0.39, 0.40), 2_000);
 
         // The healthy strategy's twins must still have been fed: the panic is
         // isolated, not a reason to skip the rest of the loop.
@@ -1959,11 +1934,11 @@ mod tests {
         };
         let refs: Vec<&dyn EngineStrategy> = vec![&boom];
         let mut m = ShadowEvolution::new(fast_cfg(true, "quarantine"), &refs);
-        m.on_round(&[market()], &[], 1_000);
+        m.on_round(&[evo_market()], &[], 1_000);
 
         // First tick: every variant of "boom" panics inside its own code — the
         // panic is absorbed (this call must not unwind) and `crashed` latches.
-        m.on_tick("t", &book(0.39, 0.40), 1_000);
+        m.on_tick("t", &evo_book(0.39, 0.40), 1_000);
         assert!(
             m.units[0].set.variants.iter().all(|v| v.crashed),
             "a permanently panicking twin must latch `crashed` on its first panic"
@@ -1972,7 +1947,7 @@ mod tests {
         // Second tick: the quarantined variants are skipped — if the flag were
         // not consulted, this would unwind again (and the absorb would hide it,
         // but the skip is what stops the per-tick unwind cost).
-        m.on_tick("t", &book(0.39, 0.40), 2_000);
+        m.on_tick("t", &evo_book(0.39, 0.40), 2_000);
 
         // The evaluation pass must also survive reading a twin that panicked.
         let _ = m.evaluate(3_000);
@@ -1993,7 +1968,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut m = ShadowEvolution::new(cfg, &refs);
         m.enable(0);
-        m.on_round(&[market()], &[], 0);
+        m.on_round(&[evo_market()], &[], 0);
         drive_wins(&mut m, "alpha", 2, 10_000);
 
         let cap_before = m.registry().get("alpha", "cap").unwrap();
@@ -2046,7 +2021,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut m = ShadowEvolution::new(cfg, &refs);
         m.enable(0);
-        m.on_round(&[market()], &[], 0);
+        m.on_round(&[evo_market()], &[], 0);
         drive_wins(&mut m, "alpha", 2, 10_000);
         let outcomes = m.evaluate(100_000);
         let proposal = match &outcomes[0] {
@@ -2085,7 +2060,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut m = ShadowEvolution::new(cfg, &refs);
         m.enable(0);
-        m.on_round(&[market()], &[], 0);
+        m.on_round(&[evo_market()], &[], 0);
         drive_wins(&mut m, "alpha", 2, 10_000);
         let outcomes = m.evaluate(100_000);
         let proposal = match &outcomes[0] {
@@ -2203,7 +2178,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut m = ShadowEvolution::new(cfg, &refs);
         m.enable(0);
-        m.on_round(&[market()], &[], 0);
+        m.on_round(&[evo_market()], &[], 0);
         drive_wins(&mut m, "alpha", 2, 10_000);
         let held = match &m.evaluate(100_000)[0] {
             EvolutionOutcome::Proposed(p) => p.clone(),
@@ -2268,7 +2243,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut m = ShadowEvolution::new(cfg, &refs);
         m.enable(0);
-        m.on_round(&[market()], &[], 0);
+        m.on_round(&[evo_market()], &[], 0);
         drive_wins(&mut m, "alpha", 2, 10_000);
         let held = match &m.evaluate(100_000)[0] {
             EvolutionOutcome::Proposed(p) => p.clone(),
@@ -2318,7 +2293,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut m = ShadowEvolution::new(cfg, &refs);
         m.enable(0);
-        m.on_round(&[market()], &[], 0);
+        m.on_round(&[evo_market()], &[], 0);
         drive_wins(&mut m, "alpha", 2, 10_000);
         let held = match &m.evaluate(100_000)[0] {
             EvolutionOutcome::Proposed(p) => p.clone(),
@@ -2406,7 +2381,7 @@ mod tests {
         // real, and a variant born "later" than the tick never qualifies).
         m.enable(0);
         m.set_auto_evolve(true);
-        m.on_round(&[market()], &[], 0);
+        m.on_round(&[evo_market()], &[], 0);
         drive_wins(&mut m, "alpha", 2, 10_000);
         let outcomes = m.evaluate(100_000);
         assert!(
@@ -2465,7 +2440,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut m = ShadowEvolution::new(cfg, &refs);
         m.enable(0);
-        m.on_round(&[market()], &[], 0);
+        m.on_round(&[evo_market()], &[], 0);
         drive_wins(&mut m, "alpha", 2, 10_000);
         let held = match &m.evaluate(100_000)[0] {
             EvolutionOutcome::Proposed(p) => p.clone(),
@@ -2551,8 +2526,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut m = ShadowEvolution::new(cfg, &refs);
         m.enable(0);
-        m.on_round(&[market()], &[], 0);
-        m.on_tick("t", &book(0.43, 0.45), 1_000);
+        m.on_round(&[evo_market()], &[], 0);
+        m.on_tick("t", &evo_book(0.43, 0.45), 1_000);
 
         // First call starts the clock: no round, and nothing is scheduled yet
         // (the next-fire time is only known once the clock is running).

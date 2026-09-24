@@ -139,7 +139,7 @@ mod tests {
     use crate::signal::TradeSignal;
     use crate::strategies::shadow_twin::{ShadowFactory, tick_ctx};
     use crate::strategies::{EngineStrategy, StrategyCtx};
-    use rust_decimal::prelude::FromPrimitive;
+    use crate::test_fixtures::{evo_book, evo_market};
     use rust_decimal_macros::dec;
 
     /// A synthetic strategy whose ONE knob decides whether it enters: it buys
@@ -206,31 +206,6 @@ mod tests {
         }
     }
 
-    fn market() -> CryptoMarket {
-        CryptoMarket {
-            asset: "BTC".into(),
-            condition_id: "c".into(),
-            question_id: "q".into(),
-            up_token_id: "t".into(),
-            down_token_id: "t-d".into(),
-            up_price: dec!(0.5),
-            down_price: dec!(0.5),
-            expires_at_ms: 900_000,
-            round_slot: 1,
-            neg_risk: false,
-            question: "?".into(),
-        }
-    }
-
-    fn book(bid: f64, ask: f64) -> OrderbookSnapshot {
-        OrderbookSnapshot::from_levels(
-            "t",
-            vec![(Decimal::from_f64(bid).unwrap(), dec!(100))],
-            vec![(Decimal::from_f64(ask).unwrap(), dec!(100))],
-            0,
-        )
-    }
-
     /// Baseline cap 0.40; sweep 0 makes variant-1 cap 0.40 * 1.03 = 0.412. A tick
     /// at mid 0.41 therefore splits the two: only the loosened variant enters.
     fn set_for(count: usize) -> VariantSet {
@@ -266,7 +241,7 @@ mod tests {
             v.on_tick(&tick_ctx(
                 std::slice::from_ref(m),
                 "t",
-                &book(0.41, 0.41),
+                &evo_book(0.41, 0.41),
                 1,
                 880,
                 now,
@@ -275,7 +250,7 @@ mod tests {
             v.on_tick(&tick_ctx(
                 std::slice::from_ref(m),
                 "t",
-                &book(0.95, 0.97),
+                &evo_book(0.95, 0.97),
                 1,
                 880,
                 now,
@@ -293,13 +268,13 @@ mod tests {
     fn the_counterfactual_is_a_real_decision_difference() {
         // Proof that this test can detect what it claims: the baseline cap does
         // not admit the tick, the variant's does.
-        let m = market();
+        let m = evo_market();
         let mut vs = set_for(2);
         vs.on_round(std::slice::from_ref(&m), &[], 0);
         // F7 fillability: the book is locked (bid = ask = 0.41), so the offer
         // side sits exactly at the entry price the twin would rest — the old
         // two-sided book (0.40/0.41) could never have filled that bid.
-        let tick = book(0.41, 0.41);
+        let tick = evo_book(0.41, 0.41);
         vs.variants[0].on_tick(&tick_ctx(
             std::slice::from_ref(&m),
             "t",
@@ -330,7 +305,7 @@ mod tests {
 
     #[test]
     fn emits_a_strategy_tagged_signal_when_a_variant_clearly_wins() {
-        let m = market();
+        let m = evo_market();
         let mut vs = set_for(2);
         vs.on_round(std::slice::from_ref(&m), &[], 0);
         drive_wins(&mut vs.variants[1], &m, 10_000, 2);
@@ -375,7 +350,7 @@ mod tests {
 
     #[test]
     fn cooldown_suppresses_signals_per_strategy() {
-        let m = market();
+        let m = evo_market();
         let mut vs = set_for(2);
         vs.on_round(std::slice::from_ref(&m), &[], 0);
         drive_wins(&mut vs.variants[1], &m, 10_000, 2);
@@ -408,7 +383,7 @@ mod tests {
 
     #[test]
     fn a_losing_variant_never_qualifies() {
-        let m = market();
+        let m = evo_market();
         let mut vs = set_for(2);
         vs.on_round(std::slice::from_ref(&m), &[], 0);
         // Same trade, but exit at a loss instead of a gain.
@@ -420,7 +395,7 @@ mod tests {
                 "t",
                 // Locked book: the offer side sits at the entry price the
                 // twin rests (F7 fillability).
-                &book(0.41, 0.41),
+                &evo_book(0.41, 0.41),
                 1,
                 880,
                 now,
@@ -429,7 +404,7 @@ mod tests {
             vs.variants[1].on_tick(&tick_ctx(
                 std::slice::from_ref(&m),
                 "t",
-                &book(0.10, 0.12),
+                &evo_book(0.10, 0.12),
                 1,
                 880,
                 now,
