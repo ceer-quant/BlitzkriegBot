@@ -1,0 +1,16 @@
+# Nested workspace for user-layer external dynamic strategies (C ABI v2).
+# One cdylib per member: lib<member>_strategy.{dylib,so,dll}.
+# SEPARATE from the kernel workspace (own Cargo.lock), like a real third-party
+# strategy author's checkout: the kernel binary contains NO strategy code, and
+# every strategy — this fixture or a third-party one — enters the engine through
+# the same dlopen path.
+#
+# ONE member, and it is a measurement fixture rather than a shipped strategy:
+# `scripts/exit-economics-check.mjs` (#272) replays the sha256-pinned frozen
+# corpus through a real strategy to put a money number on exit reachability, and
+# a strategy has to come from a cdylib. The other four members (dog /
+# trend_follow / mean_reversion / pair_arb) were deleted with the rest of the
+# shipped set — see CHANGELOG.md.
+[workspace]
+members = ["spread_arb"]
+resolver = "2"

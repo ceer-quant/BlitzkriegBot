@@ -1,7 +1,7 @@
 name: CI
 
 # Runs on every PR and on pushes to the long-lived branches.
-# Five independent gates, matching the repository governance plan:
+# Six independent gates, matching the repository governance plan:
 #   rust-check     — the Rust trading core builds, tests, lints and holds the
 #                    release binary / tracked-tree size budget (E10-d).
 #   panel-check    — the browser panel: Vue checks, then the `ui:webapp` gate
@@ -10,6 +10,10 @@ name: CI
 #                    and the order/ledger parity gates.
 #   core-gates     — the specialized acceptance gates (E2/E4/E5/E9/P-1...),
 #                    promoted from manual-only to CI (KI-9).
+#   exit-economics — #272: the frozen-corpus ECONOMIC gate — the same hours must
+#                    keep paying what they paid. Its own job because it is the
+#                    only gate that needs a strategy built into the directory the
+#                    kernel dlopens from by default (see the job's own note).
 #   release-bundle — assembles the actual deliverable and holds it under 500 MB
 #                    (E10-e). The deliverable is the *union* of what the jobs
 #                    above build piecemeal, so only a job building the union can
@@ -46,7 +50,9 @@ jobs:
       # Cargo.lock), like a real third-party strategy author's project, so it is
       # not a member of the root workspace and must be built explicitly. E7
       # (#38) acceptance requires a real dylib loaded and driven in CI, and
-      # `user_layer/strategies` ships no strategy of its own — this is the one.
+      # `user_layer/parity_strategy` is the author-facing one — the repo's own
+      # `user_layer/strategies` (spread_arb) is built by the exit-economics job,
+      # which is the gate that measures it.
       - name: Build the reference strategy cdylib (standalone workspace)
         run: (cd user_layer/parity_strategy && cargo build --release --locked)
       - name: Build (release)
@@ -360,11 +366,17 @@ jobs:
       # RETIRED with the shipped strategies (they drove the deleted cdylibs, so
       # there is nothing left for them to drive): the E2 strategy-scoped gates
       # (strategy-limit / strategy-gate / strategy-evolution), the E4 leg gates
-      # (trend-follow / mean-reversion), the #175 settlement & redemption gate,
-      # the #203 fee-model sensitivity gate and the #272 exit-economics gate.
-      # What that costs is written down in CHANGELOG.md and in the PR that
-      # removed them; the settlement path itself is still covered from the Rust
-      # side, and #272's frozen-corpus economics need a strategy to measure.
+      # (trend-follow / mean-reversion), the #175 settlement & redemption gate and
+      # the #203 fee-model sensitivity gate. What that costs is written down in
+      # CHANGELOG.md and in the PR that removed them; the settlement path itself is
+      # still covered from the Rust side.
+      #
+      # #272's frozen-corpus economics is back, as the `exit-economics` job below —
+      # "it needs a strategy to measure" stopped being a reason once spread_arb was
+      # restored as a loadable package. It is deliberately NOT in this job: the
+      # gates here must keep running against an empty registry, and the reference
+      # cdylib above is built into a different directory than the one the kernel
+      # falls back to.
       # #180 / #184: the two audit findings that share one operator question —
       # "why is nothing happening, and where would I have seen it?" — are asserted
       # on the real binary over the real IPC channel:
@@ -452,6 +464,59 @@ jobs:
       - name: soak-monitor lifetime gate (D-30)
         timeout-minutes: 5
         run: node scripts/soak-monitor-check.mjs
+
+  # #272: the ECONOMIC gate on exit reachability. It replays the sha256-pinned
+  # frozen corpus (`scripts/lib/frozen-corpus.mjs`, in-repo, no network) through
+  # the release core with ONE strategy and compares the MONEY against a recorded
+  # baseline — no assertion here says HOW an exit is reached, only whether the
+  # same hours earned less. That is the question #168/F6 could not answer: four
+  # unit tests pinned the mechanism and every one of them passed.
+  #
+  # Its own job, for one reason: it is the only gate that needs a strategy built
+  # into the directory the kernel dlopens from by DEFAULT
+  # (`user_layer/strategies/target/release`, resolved from the binary's parent
+  # chain). Building it inside core-gates would put a loaded strategy into the
+  # environment of ~20 unrelated gates that spawn the same binary, several of
+  # which are written against an empty registry ("the kernel ships no strategy of
+  # its own", e.g. cycle-check / position-recovery-check). A gate's environment is
+  # not something to change as a side effect of adding a step elsewhere.
+  exit-economics:
+    name: exit-economics
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Build the core (release)
+        run: cargo build --release --locked -p blitzkrieg-core
+      # The nested workspace the kernel dlopens strategies out of — its own
+      # Cargo.lock, so it is not a member of the root workspace. `--locked` is
+      # load-bearing here: the gate's freshness check (#207) refuses to report a
+      # verdict about a cdylib it cannot trace to this checkout's sources, and a
+      # lockfile that drifted would be a build that did not come from this commit.
+      - name: Build the strategy cdylib the gate measures (standalone workspace)
+        run: (cd user_layer/strategies && cargo build --release --locked)
+      # The verdict logic first, on fixtures with hand-computed answers and no
+      # binary: a gate that cannot fail is the defect this repo keeps re-finding.
+      - name: Exit-economics gate — verdict fixtures (#272)
+        run: node scripts/exit-economics-check.mjs --self-test
+      # BLOCKING. Red when these four hours pay less than they paid at the
+      # recorded baseline (BASELINE in the script carries the commit hash and the
+      # issue; re-record it only with a measurement, never by widening tolerance).
+      - name: Exit-economics gate — the recorded baseline (#272)
+        run: node scripts/exit-economics-check.mjs
+      # The reverse acceptance, wired in rather than left to be run by hand: a
+      # gate whose failure mode is unproven is exactly what #280 found (a script
+      # referenced by no workflow, red on the baseline, silently switched off).
+      # It drives two measured arms that make an exit unreachable and requires
+      # every window to be moved by at least one of them.
+      - name: Exit-economics gate — reverse acceptance (#272)
+        run: node scripts/exit-economics-check.mjs --teeth
 
   # E10-e: the third size target — the *deliverable* ≤ 500 MB — is the one that
   # cannot be read off the working tree. A developer checkout legitimately holds
@@ -563,7 +628,7 @@ jobs:
 
   notify:
     name: notify (wechat)
-    needs: [rust-check, panel-check, core-gates, release-bundle, secret-scan, ops-gates]
+    needs: [rust-check, panel-check, core-gates, exit-economics, release-bundle, secret-scan, ops-gates]
     if: always()
     runs-on: ubuntu-latest
     # Secret lifted to job env so the step `if` can test it (secret-context
@@ -575,9 +640,14 @@ jobs:
         # Opt-in: silently skips unless the WECHAT_WEBHOOK secret is configured.
         if: ${{ env.WECHAT_WEBHOOK != '' }}
         env:
-          RESULT: ${{ needs.rust-check.result }}/${{ needs.panel-check.result }}/${{ needs.core-gates.result }}/${{ needs.secret-scan.result }}/${{ needs.ops-gates.result }}
+          # Every entry of `needs` is listed. The icon below is computed over ALL
+          # of them (`contains(needs.*.result, 'failure')`), so a list that omits
+          # one can show ❌ beside six green results with nothing naming the job
+          # that failed — `release-bundle` was missing from this line until
+          # `exit-economics` was added to it.
+          RESULT: ${{ needs.rust-check.result }}/${{ needs.panel-check.result }}/${{ needs.core-gates.result }}/${{ needs.exit-economics.result }}/${{ needs.release-bundle.result }}/${{ needs.secret-scan.result }}/${{ needs.ops-gates.result }}
         run: |
           icon="✅"; [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] && icon="❌"
           curl -sS -X POST "$WECHAT_WEBHOOK" \
             -H 'Content-Type: application/json' \
-            -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$icon CI ${{ github.repository }}\\n> 分支: ${{ github.ref_name }}\\n> 触发: ${{ github.event_name }} by ${{ github.actor }}\\n> 结果(rust/panel/core/secret/ops): $RESULT\\n> [查看运行](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})\"}}"
+            -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$icon CI ${{ github.repository }}\\n> 分支: ${{ github.ref_name }}\\n> 触发: ${{ github.event_name }} by ${{ github.actor }}\\n> 结果(rust/panel/core/exit/bundle/secret/ops): $RESULT\\n> [查看运行](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})\"}}"
