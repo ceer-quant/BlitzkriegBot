@@ -19,9 +19,13 @@
 //! compiles against, so a knob declaration crosses the ABI and the evolution
 //! machinery unchanged. `MutableParams` (the aggregate) stays kernel-side.
 //!
-//! Only `StrategyParams::set_declared`, `scaled`, `domain_violation`,
-//! `undeclared` and `clamp_to` are exercised by the evolution guard/evaluator;
-//! their tests live with the shared crate.
+//! Of `StrategyParams`' helpers, `undeclared` and `clamp_to` are the two the
+//! evolution guard actually calls (`validate_declared`, `clamped_step`);
+//! `scaled` is used by tests here and nothing else. `set_declared` and
+//! `domain_violation` have no in-tree caller at all, and they stay anyway: they
+//! are part of the shared crate's surface for out-of-tree strategy authors, so
+//! "no in-tree caller" is not evidence of death for them (see that crate's
+//! `lib.rs` content rules).
 
 pub use strategy_logic::params::{KnobDeclaration, KnobSpec, StrategyParams};
 

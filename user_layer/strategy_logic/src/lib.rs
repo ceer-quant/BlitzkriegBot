@@ -17,6 +17,12 @@
 //!  - **Deterministic given the inputs.** No clocks, no randomness, no I/O —
 //!    the same tick sequence produces the same signals bit-for-bit, which is
 //!    what the kernel↔dylib parity gate asserts.
+//!  - **`pub` here is API, not internals.** The first rule is what makes this
+//!    one load-bearing: a third party compiles against this crate, so an item
+//!    with no in-tree caller is not dead code and must not be removed on that
+//!    evidence alone. Grep finds callers; it cannot find consumers. Check the
+//!    docs (`docs/FEATURES.md`, `docs/rust-core/STRATEGY_GUIDE.md`) for the
+//!    documented consumer before cutting any of this surface.
 
 pub mod decimal;
 pub mod knobs;
