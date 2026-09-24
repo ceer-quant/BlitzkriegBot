@@ -49,18 +49,18 @@ pub fn socket_served(path: &str) -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
 }
 
-/// The socket a client should use: the canonical path, provided a live core is
-/// accepting connections on it.
+/// The socket a client should use: always the canonical path.
+///
+/// There is no fallback and no probe. A client that probed and then fell back
+/// would invent a second path and watch an empty socket — the failure the naming
+/// contract exists to prevent; a client that probed and then adopted whatever
+/// answered would attach to a core it did not spawn. The answer is the one this
+/// returns unconditionally either way, so the probe bought nothing and cost a
+/// blocking `connect` before every client could start.
+///
+/// Callers that need to report liveness ask [`socket_served`] themselves.
 pub fn resolve_socket_path() -> String {
-    resolve_socket_path_from(default_socket_path(), socket_served)
-}
-
-/// Precedence rule, split out so it is testable without a live socket on the box.
-fn resolve_socket_path_from(canonical: String, served: impl Fn(&str) -> bool) -> String {
-    if served(&canonical) {
-        return canonical;
-    }
-    canonical
+    default_socket_path()
 }
 
 #[cfg(test)]
@@ -76,17 +76,6 @@ mod socket_tests {
             "canonical path must carry the new brand: {p}"
         );
         assert!(!p.contains("legacy-socket-name"), "{p}");
-    }
-
-    /// Precedence, tested with an injected probe so the result does not depend on
-    /// whatever core happens to be running on the build machine.
-    #[test]
-    fn resolve_returns_canonical_regardless_of_probe() {
-        let c = default_socket_path();
-        let out = resolve_socket_path_from(c.clone(), |_| false);
-        assert_eq!(out, c);
-        let out = resolve_socket_path_from(c.clone(), |_| true);
-        assert_eq!(out, c);
     }
 
     #[test]
