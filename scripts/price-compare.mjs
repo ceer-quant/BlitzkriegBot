@@ -3,7 +3,7 @@
 import { resolveSocketPath } from './lib/core-socket.mjs';
 import { requestOnce } from './lib/core-client.mjs';
 
-const SOCK = await resolveSocketPath();
+const SOCK = resolveSocketPath();
 const ROUND_SEC = 900;
 const timeout = (p, ms, label) => Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error('timeout ' + label)), ms))]);
 const get = async (url) => {

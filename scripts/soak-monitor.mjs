@@ -65,7 +65,7 @@ if (!(INTERVAL_SEC > 0)) {
   process.exit(2);
 }
 
-const SOCK = await resolveSocketPath();
+const SOCK = resolveSocketPath();
 
 function ensureDir() { if (!existsSync(SOAK_DIR)) mkdirSync(SOAK_DIR, { recursive: true }); }
 

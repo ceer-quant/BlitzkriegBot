@@ -31,16 +31,18 @@ export function defaultSocketPath(env = process.env) {
  * (soak-monitor, account-drift-check, feed-live-probe, price-compare) all attach
  * to a core that the panel supervisor spawned.
  *
- * The probe is deliberately not a fallback: it only decides whether the
- * canonical path is LIVE, so a monitor can report "no core answering" instead of
- * silently inventing a second path and watching an empty socket. The path
- * returned is always canonical, which is the whole point of the naming contract
- * documented above.
+ * Always the canonical path: there is no fallback and no probe. A client that
+ * probed and then fell back would invent a second path and watch an empty socket,
+ * which is the failure the naming contract above exists to prevent; a client that
+ * probed and then adopted whatever answered would attach to a core it did not
+ * spawn. The answer is the one this returns unconditionally either way, so the
+ * probe bought nothing and cost a `connect` (plus its 300ms timeout) before every
+ * monitor could start.
+ *
+ * Callers that need to report liveness ask `socketServed` themselves.
  */
-export async function resolveSocketPath(env = process.env) {
-  const canonical = defaultSocketPath(env);
-  if (await socketServed(canonical, 300)) return canonical;
-  return canonical;
+export function resolveSocketPath(env = process.env) {
+  return defaultSocketPath(env);
 }
 
 /** Is something accepting connections on this path right now? */

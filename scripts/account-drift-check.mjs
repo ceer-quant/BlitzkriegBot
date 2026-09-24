@@ -543,7 +543,7 @@ async function audit(sock, anchor) {
 async function main() {
   // An explicit `--socket` is used as given; otherwise the canonical path is
   // resolved exactly as before (so an ordinary run is unchanged).
-  const sock = SOCK_OVERRIDE ?? await resolveSocketPath(process.env);
+  const sock = SOCK_OVERRIDE ?? resolveSocketPath(process.env);
   mkdirSync(dirname(OUT), { recursive: true });
 
   console.log(`account:drift-check — auditing ${sock}` +

@@ -2,7 +2,7 @@
 /** Tight probe: is the panel price feed live, and does it lag real CLOB? */
 import { resolveSocketPath } from './lib/core-socket.mjs';
 import { requestOnce } from './lib/core-client.mjs';
-const SOCK = await resolveSocketPath();
+const SOCK = resolveSocketPath();
 const RS = 900;
 // A reading, not an assertion: a core that is down has to print as one.
 const rpc = (m, p = {}) => requestOnce(SOCK, m, p, { timeoutMs: 3000 }).catch(() => null);
