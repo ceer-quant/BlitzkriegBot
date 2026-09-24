@@ -3488,17 +3488,7 @@ impl Core {
         let Some(path) = self.audit_log_path() else {
             return;
         };
-        if let Some(dir) = std::path::Path::new(path).parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        use std::io::Write as _;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(f, "{value}");
-        }
+        crate::jsonl::append(std::path::Path::new(path), &value);
     }
 
     fn persist_audit_report(&self, report: &AuditReport) {
