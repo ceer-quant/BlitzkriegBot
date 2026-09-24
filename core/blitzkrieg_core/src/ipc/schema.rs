@@ -209,7 +209,9 @@ pub struct PlaceParams {
     #[serde(flatten)]
     pub order: OrderRequest,
     /// Resting maker order escalates to taker after this many ms if unfilled
-    /// (order modes maker_then_taker). 0 = rest until cancelled/expired.
+    /// (order modes maker_then_taker). `0` = the core's configured default,
+    /// a negative value = never escalate (the leg rests until cancelled or the
+    /// round ends).
     #[serde(default)]
     pub maker_timeout_ms: i64,
 }

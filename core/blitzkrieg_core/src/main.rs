@@ -936,11 +936,22 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--event-archive-min-free-mb" => {
                 event_archive_min_free_mb = it.next().and_then(|v| v.parse().ok())
             }
+            // Strict, like `--max-orderbook-stale-ms` below: a value the engine
+            // cannot honour is a startup error, never a silent fallback. The
+            // silent fallback here was worse than usual — a typo produced the
+            // default clock, and an operator who believed they had DISARMED the
+            // maker→taker escalation was running it.
             "--entry-maker-timeout-ms" => {
-                entry_maker_timeout_ms = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(entry_maker_timeout_ms)
+                let raw = it.next().unwrap_or_default();
+                match raw.trim().parse::<i64>() {
+                    Ok(v) => entry_maker_timeout_ms = v,
+                    Err(_) => {
+                        eprintln!(
+                            "blitzkrieg-core: --entry-maker-timeout-ms '{raw}': want a whole number of milliseconds (0 uses the 5000 ms default, a negative value never escalates)"
+                        );
+                        std::process::exit(2);
+                    }
+                }
             }
             // #205: how stale an orderbook may be before the engine refuses to
             // price off it. Parsed strictly — a value the engine cannot honour is
