@@ -268,20 +268,7 @@ struct SettlementJournal {
 
 impl SettlementJournal {
     fn append(&self, line: &JournalLine) {
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let Ok(text) = serde_json::to_string(line) else {
-            return;
-        };
-        use std::io::Write as _;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-        {
-            let _ = writeln!(f, "{text}");
-        }
+        crate::jsonl::append(&self.path, line);
     }
 
     fn load(&self) -> Vec<JournalLine> {

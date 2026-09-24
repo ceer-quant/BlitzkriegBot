@@ -82,19 +82,7 @@ impl AuditLog {
         // Best-effort disk append; an unwritable path must never block trading.
         if self.enabled {
             let path = self.path_for(&strategy);
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Ok(line) = serde_json::to_string(&rec) {
-                use std::io::Write as _;
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-                {
-                    let _ = writeln!(f, "{line}");
-                }
-            }
+            crate::jsonl::append(&path, &rec);
         }
         let ring = self.history.entry(strategy).or_default();
         ring.push_back(rec);

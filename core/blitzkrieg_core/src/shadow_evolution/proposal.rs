@@ -337,21 +337,6 @@ impl ProposalStore {
         }
     }
 
-    fn append_line(&self, path: &Path, value: &impl Serialize) {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(line) = serde_json::to_string(value)
-            && let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-        {
-            use std::io::Write as _;
-            let _ = writeln!(f, "{line}");
-        }
-    }
-
     /// Record a (new or transitioned) proposal: appends to disk and memory.
     pub fn put(&mut self, p: EvolutionProposal) {
         let id = p.id.clone();
@@ -359,7 +344,7 @@ impl ProposalStore {
             self.order.push(id.clone());
         }
         self.records.insert(id, p.clone());
-        self.append_line(&self.proposals_path(), &p);
+        crate::jsonl::append(&self.proposals_path(), &p);
         // Bound the in-memory view; the disk file keeps everything.
         while self.order.len() > self.cap {
             let dropped = self.order.remove(0);
@@ -420,7 +405,7 @@ impl ProposalStore {
             }
         }
         for p in &stale {
-            self.append_line(&self.proposals_path(), p);
+            crate::jsonl::append(&self.proposals_path(), p);
         }
         stale.len()
     }
@@ -463,7 +448,7 @@ impl ProposalStore {
         now_ms: i64,
         caliber: &str,
     ) {
-        self.append_line(
+        crate::jsonl::append(
             &self.promotions_path(),
             &PromotionRecord {
                 timestamp: now_ms,
@@ -488,7 +473,7 @@ impl ProposalStore {
         now_ms: i64,
         caliber: &str,
     ) {
-        self.append_line(
+        crate::jsonl::append(
             &self.promotions_path(),
             &PromotionRecord {
                 timestamp: now_ms,

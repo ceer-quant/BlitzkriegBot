@@ -151,19 +151,7 @@ impl TradeDb {
 
     /// Append a closed trade and update the summary (best effort, never panics).
     pub fn record(&mut self, rec: &TradeRecord, now_ms: i64) {
-        if let Some(dir) = self.jsonl_path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(line) = serde_json::to_string(rec) {
-            use std::io::Write as _;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.jsonl_path)
-            {
-                let _ = writeln!(f, "{line}");
-            }
-        }
+        crate::jsonl::append(&self.jsonl_path, rec);
         self.fold_summary(rec);
         self.summary.last_updated = now_ms;
         self.persist_summary();

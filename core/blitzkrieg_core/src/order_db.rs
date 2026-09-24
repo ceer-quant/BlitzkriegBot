@@ -12,7 +12,6 @@
 
 use crate::model::TrackedOrder;
 use std::collections::HashMap;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 /// An order log bound to a JSONL path.
@@ -34,17 +33,7 @@ impl OrderDb {
     /// Append the order's current state. Best effort: a write failure must never
     /// interrupt trading (the in-memory OME stays authoritative for this run).
     pub fn append(&self, order: &TrackedOrder) {
-        if let Some(dir) = self.jsonl_path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(line) = serde_json::to_string(order)
-            && let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.jsonl_path)
-        {
-            let _ = writeln!(f, "{line}");
-        }
+        crate::jsonl::append(&self.jsonl_path, order);
     }
 
     /// Load the latest snapshot per order id (later lines win). Tolerant of a
