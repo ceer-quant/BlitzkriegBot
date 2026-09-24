@@ -857,31 +857,15 @@ mod tests {
     use crate::data_source::open_replay;
     use crate::engine::DataEvent;
     use crate::exit_policy::ExitConfig;
-    use crate::model::{CryptoMarket, Mode};
+    use crate::model::Mode;
     use crate::position::PositionConfig;
     use crate::risk::RiskConfig;
+    use crate::test_fixtures::round_market;
     use rust_decimal_macros::dec;
     use std::path::PathBuf;
 
     /// A round slot boundary is far away at this clock, so nothing expires.
     const NOW: i64 = 1_000_000;
-
-    fn market(now: i64) -> CryptoMarket {
-        let slot = now / 1000 / 900;
-        CryptoMarket {
-            asset: "BTC".into(),
-            condition_id: "cond".into(),
-            question_id: "q".into(),
-            up_token_id: "up".into(),
-            down_token_id: "down".into(),
-            up_price: dec!(0.6),
-            down_price: dec!(0.4),
-            expires_at_ms: (slot + 1) * 900 * 1000,
-            round_slot: slot,
-            neg_risk: true,
-            question: "BTC up or down".into(),
-        }
-    }
 
     /// The production-shaped scenario (same as the P-1.1 dispatch tests, driven by
     /// the clock instead of by hand): a confirmed UP trend on a calm book, one dip
@@ -892,7 +876,7 @@ mod tests {
         let mut evs = vec![TimedEvent {
             at_ms: now,
             event: DataEvent::RoundMarkets {
-                markets: vec![market(now)],
+                markets: vec![round_market(now)],
                 now_ms: now,
             },
         }];
@@ -1093,7 +1077,7 @@ mod tests {
                 TimedEvent {
                     at_ms: NOW,
                     event: DataEvent::RoundMarkets {
-                        markets: vec![market(NOW)],
+                        markets: vec![round_market(NOW)],
                         now_ms: NOW,
                     },
                 },
@@ -1174,7 +1158,7 @@ mod tests {
         let mut evs = vec![TimedEvent {
             at_ms: NOW,
             event: DataEvent::RoundMarkets {
-                markets: vec![market(NOW)],
+                markets: vec![round_market(NOW)],
                 now_ms: NOW,
             },
         }];
@@ -1225,7 +1209,7 @@ mod tests {
             TimedEvent {
                 at_ms: NOW,
                 event: DataEvent::RoundMarkets {
-                    markets: vec![market(NOW)],
+                    markets: vec![round_market(NOW)],
                     now_ms: NOW,
                 },
             },

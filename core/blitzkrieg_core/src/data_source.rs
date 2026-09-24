@@ -965,30 +965,13 @@ pub fn open_replay_all(path: &str) -> Result<SegmentSource, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::CryptoMarket;
+    use crate::test_fixtures::round_market;
     use rust_decimal_macros::dec;
-
-    fn market(now: i64) -> CryptoMarket {
-        let slot = now / 1000 / 900;
-        CryptoMarket {
-            asset: "BTC".into(),
-            condition_id: "cond".into(),
-            question_id: "q".into(),
-            up_token_id: "up".into(),
-            down_token_id: "down".into(),
-            up_price: dec!(0.6),
-            down_price: dec!(0.4),
-            expires_at_ms: (slot + 1) * 900 * 1000,
-            round_slot: slot,
-            neg_risk: true,
-            question: "BTC up or down".into(),
-        }
-    }
 
     fn all_events(now: i64) -> Vec<DataEvent> {
         vec![
             DataEvent::RoundMarkets {
-                markets: vec![market(now)],
+                markets: vec![round_market(now)],
                 now_ms: now,
             },
             DataEvent::Book {
