@@ -106,18 +106,6 @@ struct ParsedCli {
     allowed_origins: Vec<String>,
 }
 
-/// Origins from the environment: `BLITZKRIEG_ALLOWED_ORIGINS`, comma-separated.
-/// The `.env` self-load means a server deployment can put this next to its
-/// credentials and forget about it.
-fn env_allowed_origins() -> Vec<String> {
-    std::env::var("BLITZKRIEG_ALLOWED_ORIGINS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 /// Parse the shared flag surface of `blitzkrieg` / `blitzkrieg run` /
 /// `blitzkrieg core`. Errors are strings printed verbatim to stderr with a
 /// help hint, then exit code 2 — never a silent swallow: a typo'd flag must
@@ -608,7 +596,7 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
         .filter(|a| !a.trim().is_empty())
         .unwrap_or_else(|| "127.0.0.1:51888".into());
     let allowed_origins = {
-        let mut o = env_allowed_origins();
+        let mut o = blitzkrieg_ui_kit::web::gateway_run::env_allowed_origins();
         o.extend(cli.allowed_origins.iter().cloned());
         o
     };
