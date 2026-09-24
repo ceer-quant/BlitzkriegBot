@@ -285,29 +285,10 @@ impl SettlementJournal {
     }
 
     fn load(&self) -> Vec<JournalLine> {
-        let Ok(text) = std::fs::read_to_string(&self.path) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        let mut skipped = 0usize;
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<JournalLine>(line) {
-                Ok(l) => out.push(l),
-                Err(_) => skipped += 1,
-            }
-        }
-        if skipped > 0 {
-            tracing::warn!(
-                skipped,
-                path = %self.path.display(),
-                "settlement journal: skipped unparseable lines"
-            );
-        }
-        out
+        crate::jsonl::load::<JournalLine>(
+            &self.path,
+            "settlement journal: skipped unparseable lines",
+        )
     }
 }
 

@@ -845,29 +845,10 @@ impl AppliedFillLog {
     /// are skipped, never fatal: a corrupt tail must not stop the core from
     /// starting, and every record kept is a duplicate the table will refuse.
     fn load(&self) -> Vec<AppliedFillRecord> {
-        let Ok(text) = std::fs::read_to_string(&self.path) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        let mut skipped = 0usize;
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<AppliedFillRecord>(line) {
-                Ok(r) => out.push(r),
-                Err(_) => skipped += 1,
-            }
-        }
-        if skipped > 0 {
-            tracing::warn!(
-                skipped,
-                path = %self.path.display(),
-                "applied-fill log: skipped unparseable lines"
-            );
-        }
-        out
+        crate::jsonl::load::<AppliedFillRecord>(
+            &self.path,
+            "applied-fill log: skipped unparseable lines",
+        )
     }
 
     /// Rewrite the log as the current table (one line per live key). Called after
