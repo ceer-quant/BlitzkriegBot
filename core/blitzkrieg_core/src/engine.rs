@@ -513,10 +513,23 @@ impl Engine {
     }
 
     /// Collect trend breaks from every strategy (each break is cancelled once).
+    ///
+    /// Every hosted strategy is DRAINED, but only the enabled ones contribute. The
+    /// hook still runs on a disabled strategy because its library may be queueing
+    /// breaks internally and the call is what empties that queue — skipping it
+    /// would let the queue grow for as long as the strategy stays off. The breaks
+    /// are then dropped rather than returned: a break's only effect is cancelling
+    /// this token's resting entry bids, and a disabled strategy must not change
+    /// another strategy's fills (#302 — `trend_follow` registered-but-off still
+    /// pulled `spread_arb`'s bids, so the fills depended on which libraries
+    /// happened to sit in the strategy directory).
     fn drain_breaks(&mut self) -> Vec<(String, Decimal)> {
         let mut out = Vec::new();
         for s in &mut self.strategies {
-            out.extend(s.strategy.take_breaks());
+            let breaks = s.strategy.take_breaks();
+            if s.enabled {
+                out.extend(breaks);
+            }
         }
         out
     }
@@ -2185,6 +2198,79 @@ mod tests {
             "and it rests below the mid: {}",
             orders[0].price
         );
+    }
+
+    /// Reports one break per call and counts the calls, so a test can tell "the
+    /// hook ran" from "the host acted on what it returned" (#302).
+    struct BreakReporter {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl EngineStrategy for BreakReporter {
+        fn name(&self) -> &str {
+            "break_reporter"
+        }
+        fn on_book(&mut self, _token_id: &str, _snap: &OrderbookSnapshot, _now_ms: i64) {}
+        fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
+        fn take_breaks(&mut self) -> Vec<(String, Decimal)> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            vec![("up".to_string(), dec!(0.5))]
+        }
+        fn find_candidates(&mut self, _ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn a_disabled_strategy_contributes_no_breaks() {
+        let mut e = engine();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        e.register_user_strategy(
+            Box::new(BreakReporter {
+                calls: std::sync::Arc::clone(&calls),
+            }),
+            "test".into(),
+        )
+        .unwrap();
+
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
+        // Several arms end in `drain_breaks`; count from here rather than
+        // assuming how many ran before this event.
+        let drained = calls.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Registered but off. The hook still runs — its library may be queueing
+        // breaks internally and this call is what empties that queue — and
+        // nothing it returns reaches the host.
+        let broken = e.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.55), dec!(100))],
+            asks: vec![(dec!(0.57), dec!(100))],
+            now_ms: now + 1_000,
+        });
+        assert!(
+            broken.is_empty(),
+            "a disabled strategy must not break another's bids, got {broken:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            drained + 1,
+            "the hook is drained even while disabled, so its queue cannot grow"
+        );
+
+        // Enabled, the same break reaches the host.
+        assert!(e.set_strategy_enabled("break_reporter", true));
+        let broken = e.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.55), dec!(100))],
+            asks: vec![(dec!(0.57), dec!(100))],
+            now_ms: now + 2_000,
+        });
+        assert_eq!(broken, vec![("up".to_string(), dec!(0.5))]);
     }
 
     #[test]
