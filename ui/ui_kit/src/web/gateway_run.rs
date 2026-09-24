@@ -118,7 +118,13 @@ pub async fn run_web_gateway(args: Vec<String>, program: &'static str) -> std::i
     }
 }
 
-fn env_allowed_origins() -> Vec<String> {
+/// Origins from the environment: `BLITZKRIEG_ALLOWED_ORIGINS`, comma-separated,
+/// blank entries dropped. The `.env` self-load means a server deployment can put
+/// this next to its credentials and forget about it.
+///
+/// `pub` for the unified launcher, which feeds the same allowlist to its own
+/// [`WebServer`].
+pub fn env_allowed_origins() -> Vec<String> {
     std::env::var("BLITZKRIEG_ALLOWED_ORIGINS")
         .unwrap_or_default()
         .split(',')
