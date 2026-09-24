@@ -1252,6 +1252,48 @@ impl PositionManager {
                     now_ms,
                 });
             }
+            // The held-exit report: an exit was warranted and no order could be
+            // sent for it. Two things file one — a rule that fired with no buyer
+            // to sell to at any price we can name (#225, #267), and a position
+            // that has been unpriceable past the budget (#268, item 2). They
+            // differ in ONE field, whether a rule named the reason, so they are
+            // built once here: a field added for one path cannot go missing from
+            // the other.
+            let held_exit = |reason: Option<ExitReason>| {
+                // What the exit was JUDGED on is the stop's own reference
+                // whenever there is one (#225): a bid-less book whose ask
+                // collapsed can only be judged on that ask, and `current_price`
+                // never moved off the entry there — reporting it would have said
+                // "flat" about the one case this report exists for. With no stop
+                // reference (#267) the profit side's own judgement is what fired,
+                // and `current_price` is the reference it read.
+                let judged = stop_reference.map_or(pos.current_price, |r| r.price);
+                SuppressedStopEvent {
+                    cause: hold_cause,
+                    reason,
+                    position_id: pos.id.clone(),
+                    token_id: pos.token_id.clone(),
+                    strategy: pos.strategy.clone(),
+                    asset: pos.asset.clone(),
+                    entry_price: pos.entry_price,
+                    bid: exit_price,
+                    mid: judged,
+                    // A zero bid is no pnl to report: `pnl_pct` would call it
+                    // -100%, which reads as a wipeout rather than as a market
+                    // with no buyer in it.
+                    pnl_pct_at_bid: if exit_price > Decimal::ZERO {
+                        pnl_pct(exit_price, pos.entry_price)
+                    } else {
+                        Decimal::ZERO
+                    },
+                    pnl_pct_at_mid: pnl_pct(judged, pos.entry_price),
+                    stop_pct: effective_stop_pct(cfg.stop_loss_pct, time_left_sec, &cfg),
+                    book_age_ms,
+                    unpriceable_for_ms,
+                    escalated,
+                    now_ms,
+                }
+            };
             if let Some(d) = decision {
                 if priceable {
                     out.push(ExitRequest {
@@ -1264,37 +1306,7 @@ impl PositionManager {
                     // The rule fired but there is no buyer to sell to at any
                     // price we can name — hold, and report the held exit so it
                     // reaches review instead of dying in memory.
-                    //
-                    // What it judged ON is the stop's own reference whenever
-                    // there is one (#225): a bid-less book whose ask collapsed
-                    // can only be judged on that ask, and `current_price` never
-                    // moved off the entry there — reporting it would have said
-                    // "flat" about the one case this report exists for. With no
-                    // stop reference (#267) the profit side's own judgement is
-                    // what fired, and `current_price` is the reference it read.
-                    let judged = stop_reference.map_or(pos.current_price, |r| r.price);
-                    withheld.push(SuppressedStopEvent {
-                        cause: hold_cause,
-                        reason: Some(d.reason),
-                        position_id: pos.id.clone(),
-                        token_id: pos.token_id.clone(),
-                        strategy: pos.strategy.clone(),
-                        asset: pos.asset.clone(),
-                        entry_price: pos.entry_price,
-                        bid: exit_price,
-                        mid: judged,
-                        pnl_pct_at_bid: if exit_price > Decimal::ZERO {
-                            pnl_pct(exit_price, pos.entry_price)
-                        } else {
-                            Decimal::ZERO
-                        },
-                        pnl_pct_at_mid: pnl_pct(judged, pos.entry_price),
-                        stop_pct: effective_stop_pct(cfg.stop_loss_pct, time_left_sec, &cfg),
-                        book_age_ms,
-                        unpriceable_for_ms,
-                        escalated,
-                        now_ms,
-                    });
+                    withheld.push(held_exit(Some(d.reason)));
                 }
             } else if escalated {
                 // #268 item 2: no rule fired, but this position has not been
@@ -1305,29 +1317,7 @@ impl PositionManager {
                 // the panel already turns into a risk alert; the throttle
                 // (`stop_suppression_repeat_sec`) keeps it from becoming a
                 // per-tick storm.
-                let judged = stop_reference.map_or(pos.current_price, |r| r.price);
-                withheld.push(SuppressedStopEvent {
-                    cause: hold_cause,
-                    reason: None,
-                    position_id: pos.id.clone(),
-                    token_id: pos.token_id.clone(),
-                    strategy: pos.strategy.clone(),
-                    asset: pos.asset.clone(),
-                    entry_price: pos.entry_price,
-                    bid: exit_price,
-                    mid: judged,
-                    pnl_pct_at_bid: if exit_price > Decimal::ZERO {
-                        pnl_pct(exit_price, pos.entry_price)
-                    } else {
-                        Decimal::ZERO
-                    },
-                    pnl_pct_at_mid: pnl_pct(judged, pos.entry_price),
-                    stop_pct: effective_stop_pct(cfg.stop_loss_pct, time_left_sec, &cfg),
-                    book_age_ms,
-                    unpriceable_for_ms,
-                    escalated,
-                    now_ms,
-                });
+                withheld.push(held_exit(None));
             }
         }
         for ev in withheld {
@@ -1996,6 +1986,11 @@ mod tests {
             "the rule that wanted out is named, not flattened into a stop"
         );
         assert_eq!(ev.bid, Decimal::ZERO, "the book showed no bid at all");
+        assert_eq!(
+            ev.pnl_pct_at_bid,
+            Decimal::ZERO,
+            "no bid is no pnl to report — `pnl_pct` would have called it -100%"
+        );
         assert_eq!(
             ev.mid,
             dec!(0.50),
