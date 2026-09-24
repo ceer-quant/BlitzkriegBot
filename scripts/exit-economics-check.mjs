@@ -18,27 +18,36 @@
  * baseline. It goes red when the same corpus pays less than it used to.
  *
  * ---------------------------------------------------------------------------
- * On #272's acceptance criteria 2 and 3 (2026-09-23 measurement)
+ * On #272's acceptance criteria 2 and 3
  *
  * The issue asks for `net >= 0`, `WR >= 60%`, and a reverse acceptance in which
  * a binary built from the pinned BEFORE commit `d5c7fec3` MUST FAIL the gate.
  * Measured on these four windows, that is not satisfiable, and the reason is
- * worth recording rather than papering over:
+ * worth recording rather than papering over.
  *
- *   window                  BEFORE net / WR    HEAD net / WR
- *   trend-20260919T1000Z      +$2.58 / 54%       -$0.02 / 30%
- *   range-20260919T1600Z     +$13.62 / 72%       -$5.07 / 37%
- *   trend-20260920T2100Z      +$5.75 / 75%       -$0.71 / 42%
- *   range-20260920T2300Z      +$9.93 / 78%       -$1.82 / 33%
+ * An earlier revision of this header carried a BEFORE/HEAD table here. It is
+ * gone, because NEITHER column could be reproduced. One of its four HEAD rows
+ * matched the `BASELINE` that sat directly below it; none matches the current
+ * one; and its BEFORE column does not reconcile with the trade-by-trade
+ * attribution in the next paragraph either — it sums to $31.88 where that
+ * attribution implies $36.50. A number nobody can re-derive is not evidence, it
+ * is a rumour with a decimal point. If a BEFORE/HEAD comparison is wanted back,
+ * it has to be measured from both commits by whoever puts it here.
  *
- * BEFORE reads better on every window — with a caveat that changes what it means:
- * `d5c7fec3` predates `96fcf51c` (#171, "honest dry FOK walk + escalation
- * repricing"), so its maker-timeout escalation leg is booked at the MAKER price
- * where a real venue fills it as a taker at the deepest ask. #262 says that rule
- * inflates exactly these numbers and that "历史数字不能当基线，更不能当验收依据".
- * BEFORE also predates #261's escalation-abort fix. So BEFORE is not a clean
- * baseline: part of the gap is the booking model becoming honest, and "BEFORE
- * earned more" is not on its own proof that HEAD lost money.
+ * The direction that table showed is real, and so is the reason not to trust it.
+ * BEFORE does read better on every window — because `d5c7fec3` predates
+ * `96fcf51c` (#171, "honest dry FOK walk + escalation repricing"), and its
+ * maker-timeout escalation leg is booked at the MAKER price where a real venue
+ * fills it as a taker at the deepest ask. That leg also never consulted the
+ * book. The gap was attributed trade by trade (2026-09-23): of BEFORE's
+ * +$52.4207 advantage across these four windows, 87.2% is the escalation leg,
+ * 10.5% is ONE trade filled on a book whose ask side had been empty for 3181
+ * seconds, and the same-trade price differences go BOTH ways (~$1.19 net, with
+ * one window favouring HEAD). The last window is bit-for-bit identical between
+ * the two kernels. #262 says the escalation rule inflates exactly these numbers
+ * and that "历史数字不能当基线，更不能当验收依据". So BEFORE is not a clean
+ * baseline — it is a kernel that minted fills, and "BEFORE earned more" is not
+ * on its own proof that HEAD lost money.
  *
  * That does not change what this gate can do. An absolute threshold (`net >= 0`)
  * is red on HEAD (fails criterion 2) and green on BEFORE (fails criterion 3), so
@@ -50,6 +59,16 @@
  * change in exit reachability caught in money), it is green on HEAD, and
  * `--teeth` demonstrates it can fail. When #267 re-records a baseline on the
  * honest booking, the numbers move — the mechanism does not.
+ *
+ * On why `BASELINE` below was re-recorded (2026-09-24, at `75fd8140`): #296
+ * deleted the sibling strategy cdylibs this gate used to load alongside
+ * `spread_arb`, and the old rows are not reachable any more — not because the
+ * strategy got worse, but because a disabled-but-registered sibling still
+ * cancels this one's resting orders (`engine.rs` `drain_breaks`, issue #302).
+ * Handing the SAME HEAD core the old five-library directory reproduces the old
+ * rows bit for bit, which is how that was established. Fix #302 and the numbers
+ * move again. The criterion for re-recording does not change either time: a
+ * measurement and a commit hash, never a widened tolerance.
  *
  * Usage:
  *   node scripts/exit-economics-check.mjs              # the gate (needs the release core)
