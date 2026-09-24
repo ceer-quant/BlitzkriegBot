@@ -36,11 +36,10 @@ import { createChecks } from './lib/gate-harness.mjs';
 import { mkdtempSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { sleep } from './lib/wait.mjs';
 
 const BIN = coreBinaryPath();
 const SEED = 1000;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 if (!existsSync(BIN)) {
   console.error(`missing binary: ${BIN} (cargo build --release --workspace --locked)`);
   process.exit(2);

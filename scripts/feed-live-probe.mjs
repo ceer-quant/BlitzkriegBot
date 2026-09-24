@@ -2,13 +2,12 @@
 /** Tight probe: is the panel price feed live, and does it lag real CLOB? */
 import { resolveSocketPath } from './lib/core-socket.mjs';
 import { requestOnce } from './lib/core-client.mjs';
+import { sleep } from './lib/wait.mjs';
 const SOCK = resolveSocketPath();
 const RS = 900;
 // A reading, not an assertion: a core that is down has to print as one.
 const rpc = (m, p = {}) => requestOnce(SOCK, m, p, { timeoutMs: 3000 }).catch(() => null);
 const mid = async (t) => { try { const r = await fetch(`https://clob.polymarket.com/midpoint?token_id=${t}`, { signal: AbortSignal.timeout(5000) }); if (!r.ok) return null; const j = await r.json(); return j.mid != null ? Number(j.mid) : null; } catch { return null; } };
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
 let tk = {}, tkSlot = null;
 async function tokens() {
   const s = Math.floor(Date.now() / 1000 / RS) * RS; const out = {};

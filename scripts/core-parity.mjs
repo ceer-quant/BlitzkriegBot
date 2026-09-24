@@ -31,7 +31,7 @@ import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
 import { describeQuote, feeModelProblems, feeQuoter, feeUsdFor } from './lib/fee-model.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
-import { pollUntil } from './lib/wait.mjs';
+import { pollUntil, sleep } from './lib/wait.mjs';
 
 const SOCK = scratchSocketPath('parity');
 const BIN = coreBinaryPath();
@@ -105,8 +105,6 @@ function assertPinnedFeeModel(quote) {
   const problems = feeModelProblems(quote);
   check('kernel fee model matches the pinned schedule (#182)', problems.length === 0, problems.join(' | '));
 }
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 try {
   checkCoreProvenance(BIN, check);

@@ -2,6 +2,7 @@
 /** Compare panel prices vs real Polymarket CLOB; detect staleness. */
 import { resolveSocketPath } from './lib/core-socket.mjs';
 import { requestOnce } from './lib/core-client.mjs';
+import { sleep } from './lib/wait.mjs';
 
 const SOCK = resolveSocketPath();
 const ROUND_SEC = 900;
@@ -20,8 +21,6 @@ const clobMid = async (tok) => {
     if (!r.ok) return `HTTP${r.status}`; const j = await r.json(); return j.mid != null ? Number(j.mid) : null; }
   catch (e) { return 'ERR'; }
 };
-
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 (async () => {
   const slot = Math.floor(Date.now() / 1000 / ROUND_SEC);

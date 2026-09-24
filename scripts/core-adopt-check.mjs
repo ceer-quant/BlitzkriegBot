@@ -21,12 +21,11 @@ import { mkdtempSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { CoreClient, requestOnce } from './lib/core-client.mjs';
-import { waitForSocket } from './lib/wait.mjs';
+import { waitForSocket, sleep } from './lib/wait.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const SOCK = join(tmpdir(), `adopt-${process.pid}.sock`);
 const WORKDIR = mkdtempSync(join(tmpdir(), 'adopt-'));
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 try { unlinkSync(SOCK); } catch {}
 
 // 1) Owner core (the "healthy" one), started directly.

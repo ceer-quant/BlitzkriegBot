@@ -16,7 +16,7 @@
 // Guarded spawn: a core this gate starts must not outlive it (see lib/child-guard.mjs).
 import { spawn } from './lib/child-guard.mjs';
 import { CoreClient } from './lib/core-client.mjs';
-import { waitForSocket } from './lib/wait.mjs';
+import { waitForSocket, sleep } from './lib/wait.mjs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
@@ -32,8 +32,6 @@ const ROUND_SEC = 3600;
 // at RELATIVE paths, so running from a scratch dir guarantees this harness can
 // never touch the live `data/trades/trades.jsonl`.
 const WORKDIR = mkdtempSync(join(tmpdir(), 'blitzkrieg-cycle-'));
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 if (!existsSync(BIN)) { console.error(`missing binary: ${BIN}`); process.exit(2); }
 try { unlinkSync(SOCK); } catch {}

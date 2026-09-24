@@ -45,6 +45,7 @@ import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
+import { sleep } from './lib/wait.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -164,7 +165,6 @@ const { check } = gate;
 
 const WORKDIR = mkdtempSync(join(tmpdir(), 'blitzkrieg-sizing-'));
 const SOCK = scratchSocketPath('sizing');
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const round = (n) => Number(n.toFixed(6));
 const liveSlot = () => Math.floor((Date.now() + 900_000) / 1000 / 900);
 const order = (asset, side, price, size, key) => ({

@@ -36,16 +36,15 @@ import { spawn as rawSpawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createChecks } from './lib/gate-harness.mjs';
+import { sleep } from './lib/wait.mjs';
 
 const LF = String.fromCharCode(10);
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'child-guard-'));
 const GUARD = join(process.cwd(), 'scripts', 'lib', 'child-guard.mjs');
 
-let failures = 0;
-const ok = (m) => console.log(`  ok   ${m}`);
-const bad = (m) => { console.error(`  FAIL ${m}`); failures++; };
-const assert = (c, m) => (c ? ok(m) : bad(m));
+const gate = createChecks();
+const { check } = gate;
 
 if (!existsSync(GUARD)) {
   console.error(`FAIL: ${GUARD} not found`);
@@ -129,10 +128,10 @@ const pidOf = (out, name) => {
 /** Wait for a pid to disappear, killing it only if it never does. */
 async function expectGone(pid, label) {
   for (let i = 0; i < 60; i++) {
-    if (!alive(pid)) { ok(`${label} (pid ${pid}) was reaped`); return true; }
+    if (!alive(pid)) { check(`${label} (pid ${pid}) was reaped`, true); return true; }
     await sleep(50);
   }
-  bad(`${label}: pid ${pid} STILL ALIVE — the guard leaked it`);
+  check(`${label}: pid ${pid} STILL ALIVE — the guard leaked it`, false);
   try { process.kill(pid, 'SIGKILL'); } catch {}
   return false;
 }
@@ -153,8 +152,8 @@ for (const [label, mode] of [
   const pid = pidOf(out, 'CHILD_PID');
   const tracked = /TRACKED=(\d+)/.exec(out);
   // Guard against a vacuous pass: the driver must have reported a live child.
-  assert(pid !== null && pid > 0, `driver started a real child (pid ${pid})`);
-  assert(tracked && Number(tracked[1]) === 1, `the guard tracked exactly one child (${tracked?.[1]})`);
+  check(`driver started a real child (pid ${pid})`, pid !== null && pid > 0);
+  check(`the guard tracked exactly one child (${tracked?.[1]})`, tracked && Number(tracked[1]) === 1);
   if (pid === null) continue;
   // Reaping is synchronous inside the driver's exit handler, so by the time the
   // driver's own exit has been observed the signal is already delivered. A short
@@ -169,8 +168,8 @@ console.log('[grandchild subtree]');
   const { out } = await runDriver('subtree');
   const childPid = pidOf(out, 'CHILD_PID');
   const grandPid = pidOf(out, 'GRANDCHILD_PID');
-  assert(childPid !== null, `driver started the intermediate child (pid ${childPid})`);
-  assert(grandPid !== null && grandPid > 0, `the child really started a grandchild (pid ${grandPid})`);
+  check(`driver started the intermediate child (pid ${childPid})`, childPid !== null);
+  check(`the child really started a grandchild (pid ${grandPid})`, grandPid !== null && grandPid > 0);
   if (grandPid !== null) await expectGone(grandPid, 'the GRANDCHILD did not outlive the driver');
   if (childPid !== null) await expectGone(childPid, 'the child did not outlive the driver');
 }
@@ -182,18 +181,18 @@ console.log('[grace before SIGKILL]');
   const marker = join(WORK, 'trapped');
   const { out } = await runDriver('grace', marker);
   const pid = pidOf(out, 'CHILD_PID');
-  assert(pid !== null, `driver started a child that traps SIGTERM (pid ${pid})`);
-  assert(
-    existsSync(marker),
+  check(`driver started a child that traps SIGTERM (pid ${pid})`, pid !== null);
+  check(
     'the child received SIGTERM and ran its trap before being killed outright',
+    existsSync(marker),
   );
   if (pid !== null) await expectGone(pid, 'the child did not outlive the driver');
 }
 
 console.log('');
 console.log('─'.repeat(72));
-if (failures > 0) {
-  console.error(`RESULT: FAIL — ${failures} assertion(s) failed`);
+if (gate.failures > 0) {
+  console.error(`RESULT: FAIL — ${gate.failures} assertion(s) failed`);
   process.exit(1);
 }
 console.log('RESULT: PASS — a guarded child dies with its spawner on exit, error and signal;');

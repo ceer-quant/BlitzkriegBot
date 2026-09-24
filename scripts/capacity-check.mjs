@@ -61,7 +61,7 @@ import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
 import { describeQuote, feeModelProblems, feeQuoter, feeUsdFor } from './lib/fee-model.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
-import { pollUntil } from './lib/wait.mjs';
+import { pollUntil, sleep } from './lib/wait.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -128,8 +128,6 @@ const { check } = gate;
 
 const WORKDIR = mkdtempSync(join(tmpdir(), 'blitzkrieg-capacity-'));
 const SOCK = scratchSocketPath('capacity');
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 // A live round slot: the position engine would force-exit a position whose round
 // is in the past before the next order is placed (the same trap the parity gate
 // documents). Each size also needs its OWN asset: the risk layer allows one open

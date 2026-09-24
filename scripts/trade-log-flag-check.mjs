@@ -6,11 +6,10 @@ import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { requestOnce as rpc } from './lib/core-client.mjs';
-import { waitForSocket } from './lib/wait.mjs';
+import { waitForSocket, sleep } from './lib/wait.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
 const PROD = join(process.cwd(), 'data', 'trades', 'trades.jsonl');
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const prodLines = () => (existsSync(PROD) ? readFileSync(PROD, 'utf8').trim().split('\n').filter(Boolean).length : 0);
 
 async function runCore(extra, sock, work) {

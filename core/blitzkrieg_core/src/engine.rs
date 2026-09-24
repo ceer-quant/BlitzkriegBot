@@ -362,9 +362,6 @@ impl Engine {
     pub fn scanner(&self) -> &Scanner {
         &self.scanner
     }
-    pub fn scanner_mut(&mut self) -> &mut Scanner {
-        &mut self.scanner
-    }
 
     pub fn set_config(&mut self, cfg: EngineConfig) {
         self.scanner.set_config(cfg.scanner.clone());

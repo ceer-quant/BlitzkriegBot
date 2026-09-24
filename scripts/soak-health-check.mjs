@@ -43,6 +43,7 @@
  *      BK_GATE_WATCHDOG_MS=2500 node scripts/soak-health-check.mjs   # prove it fires
  */
 import { spawn } from './lib/child-guard.mjs';
+import { createChecks } from './lib/gate-harness.mjs';
 import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync,
@@ -77,7 +78,8 @@ const noop = () => {};
  */
 const liveServers = new Set();
 
-let failures = 0;
+const gate = createChecks();
+const { check } = gate;
 
 /**
  * A gate that can hang is a gate that cannot fail on time. Nothing bounded the
@@ -98,16 +100,11 @@ const watchdog = setTimeout(() => {
 }, WATCHDOG_MS);
 watchdog.unref?.();
 
-function ok(msg) {
-  console.log(`  ok   ${msg}`);
-}
-function bad(msg) {
-  console.error(`  FAIL ${msg}`);
-  failures++;
-}
-function assert(cond, msg) {
-  cond ? ok(msg) : bad(msg);
-}
+/**
+ * This gate's historical `assert(cond, msg)` call order (65 call sites) is kept;
+ * the printing and the failure count now belong to the harness.
+ */
+const assert = (cond, msg) => check(msg, cond);
 
 // ── fixture layout ──────────────────────────────────────────────────────────
 const FIX = join(WORK, 'fix');
@@ -672,8 +669,8 @@ if (core1 && core1.exitCode === null) core1.kill('SIGKILL');
 rmSync(WORK, { recursive: true, force: true });
 
 console.log('─'.repeat(72));
-if (failures > 0) {
-  console.error(`RESULT: FAIL — ${failures} assertion(s) failed`);
+if (gate.failures > 0) {
+  console.error(`RESULT: FAIL — ${gate.failures} assertion(s) failed`);
   process.exit(1);
 }
 console.log('RESULT: PASS — soak-health separates healthy from broken in both');

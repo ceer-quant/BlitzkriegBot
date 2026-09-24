@@ -24,10 +24,9 @@ import { mkdtempSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { requestOnce } from './lib/core-client.mjs';
-import { pollUntil, waitForSocket } from './lib/wait.mjs';
+import { pollUntil, waitForSocket, sleep } from './lib/wait.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'shutdown-'));
 const ORDER_LOG = join(WORK, 'orders.jsonl');
 

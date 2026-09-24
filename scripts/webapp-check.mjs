@@ -27,7 +27,7 @@
 // interrupted run used to leave them behind with PPID=1.
 import { spawnSync, spawn } from './lib/child-guard.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
-import { waitForSocket } from './lib/wait.mjs';
+import { waitForSocket, sleep } from './lib/wait.mjs';
 import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -42,8 +42,6 @@ const DIST = join(ROOT, 'ui/webapp/webui/dist');
 
 const gate = createChecks();
 const { check } = gate;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 // [0] The Vue build artifact must exist, be non-trivial, and be the thing the
 //     server hands out. Asserting only that `dist/` exists would pass on a stale
 //     or empty build; comparing bytes against what `/panel` returns is what ties

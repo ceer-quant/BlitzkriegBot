@@ -23,7 +23,7 @@ import { fileURLToPath } from 'url';
 import net from 'net';
 import { requestOnce } from './lib/core-client.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
-import { pollUntil } from './lib/wait.mjs';
+import { pollUntil, sleep } from './lib/wait.mjs';
 
 const ROOT = join(fileURLToPath(import.meta.url), '..', '..');
 const BIN = join(ROOT, 'target/release/blitzkrieg-core');
@@ -41,7 +41,6 @@ for (const p of [BIN, PANEL, CAPTURE_PY]) {
   }
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const gate = createChecks();
 const { check } = gate;
 

@@ -35,10 +35,9 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { requestOnce } from './lib/core-client.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
-import { waitFor } from './lib/wait.mjs';
+import { waitFor, sleep } from './lib/wait.mjs';
 
 const BIN = join(process.cwd(), 'target', 'release', 'blitzkrieg-core');
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WORK = mkdtempSync(join(tmpdir(), 'crashrecovery-'));
 const ORDER_LOG = join(WORK, 'orders.jsonl');
 const SOCK = join(WORK, 'core.sock');
