@@ -26,10 +26,11 @@
  *
  * Two deliberate choices:
  *   * it compares mtimes, not content. A hash of the source would be exact but
- *     would need cargo's own fingerprinting to be re-derived here; mtime is what
- *     cargo itself uses, so it moves exactly when cargo would rebuild. The cost is
- *     the familiar one: touching a source without rebuilding is reported as stale,
- *     which is precisely the report we want.
+ *     would need cargo's own fingerprinting to be re-derived here; mtime is the
+ *     familiar proxy, and the cost is the familiar one: touching a source without
+ *     rebuilding is reported as stale, which is precisely the report we want.
+ *     Which files count as "source" is the other half of the design, and the
+ *     answer is not "everything under the root" — see `isCompileInput`.
  *   * it does not know which cdylibs a given gate needs beyond what the caller
  *     names. `requireFreshStrategyDylibs({ require: ['mean_reversion_strategy'] })`
  *     is the sharp form; the bare call only asserts "every cdylib present is newer
@@ -134,7 +135,32 @@ function crateNameOf(fileName) {
   return base.startsWith('lib') ? base.slice(3) : base;
 }
 
-function walkFiles(dir, out, depth = 0) {
+/**
+ * Whether cargo compiles a crate from this file — the only kind of file that can
+ * make a cdylib stale.
+ *
+ * The predicate is not a detail. An earlier version counted EVERY file under the
+ * roots, so editing `user_layer/strategies/README.md` reported the library as
+ * stale forever (#306). The report was arithmetically true and operationally
+ * useless: cargo never reads that file, so it has nothing to rebuild, so the fix
+ * line named a command that provably does not move the dylib's mtime — the red
+ * survived every rebuild. That is the "gate that can never go green gets switched
+ * off" failure this module's own `orphan` comment warns about, arriving through a
+ * branch it did not cover.
+ *
+ * What cargo reads: the crate's `.rs` sources, plus the manifests and lockfile
+ * that decide what those sources resolve to. Not modelled: `include_str!` /
+ * `include_bytes!` targets — adding one is itself an edit to a `.rs` file, so the
+ * change that introduces it is still caught; only a later edit to the included
+ * file alone would be missed, and this predicate is where to add it if that
+ * becomes real.
+ */
+function isCompileInput(name) {
+  return name.endsWith('.rs') || name === 'Cargo.toml' || name === 'Cargo.lock';
+}
+
+/** Every compilation input under `dir`. Build output and VCS metadata are skipped. */
+function walkCompileInputs(dir, out, depth = 0) {
   if (depth > 8) return out;
   let entries;
   try {
@@ -146,8 +172,8 @@ function walkFiles(dir, out, depth = 0) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) {
       if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
-      walkFiles(path, out, depth + 1);
-    } else if (entry.isFile()) {
+      walkCompileInputs(path, out, depth + 1);
+    } else if (entry.isFile() && isCompileInput(entry.name)) {
       out.push(path);
     }
   }
@@ -162,13 +188,13 @@ function mtimeMsOf(path) {
   }
 }
 
-/** The newest input mtime across `roots`, as `{ path, mtimeMs }` or null. */
+/** The newest compilation input across `roots`, as `{ path, mtimeMs }` or null. */
 function newestSourceUnder(root, roots) {
   let newest = null;
   for (const rel of roots) {
     const abs = join(root, rel);
     if (!existsSync(abs)) continue;
-    for (const file of walkFiles(abs, [])) {
+    for (const file of walkCompileInputs(abs, [])) {
       const ms = mtimeMsOf(file);
       if (ms === null) continue;
       if (newest === null || ms > newest.mtimeMs) newest = { path: file, mtimeMs: ms };
