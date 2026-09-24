@@ -46,9 +46,10 @@ fn wrap_params(strategy: &str, params: StrategyParams) -> MutableParams {
     m
 }
 
-/// The signal an accepted proposal is audited and reported with. Shared by the
-/// operator path and the auto switch's drain (#249), so an adoption looks the
-/// same in the audit log however it was decided.
+/// The signal a proposal is audited with, whether it was accepted or rejected.
+/// Shared by the operator path, the auto switch's drain (#249) and the two
+/// rejection paths, so an evolution looks the same in the audit log however it
+/// was decided.
 fn adoption_signal(proposal: &EvolutionProposal, now_ms: i64) -> EvolveSignal {
     let strategy = proposal.strategy.clone();
     EvolveSignal::new(
@@ -1076,18 +1077,7 @@ impl ShadowEvolution {
                     // say the same thing (#251).
                     u.rejected_count += 1;
                     self.audit.record_rejection(
-                        &EvolveSignal::new(
-                            proposal.id.clone(),
-                            now_ms,
-                            proposal.strategy.clone(),
-                            wrap_params(&proposal.strategy, proposal.from_params.clone()),
-                            wrap_params(&proposal.strategy, proposal.to_params.clone()),
-                            proposal.reason,
-                            proposal.confidence,
-                            proposal.sample_count,
-                            proposal.variant.win_rate - proposal.baseline.win_rate,
-                            "proposal".into(),
-                        ),
+                        &adoption_signal(&proposal, now_ms),
                         format!("{lock} lock no longer holds: {detail}"),
                         if lock == "gradient" { "failed" } else { "n/a" },
                         if lock == "immutable" { "failed" } else { "n/a" },
@@ -1135,18 +1125,7 @@ impl ShadowEvolution {
                     u.rejected_count += 1;
                 }
                 self.audit.record_rejection(
-                    &EvolveSignal::new(
-                        proposal.id.clone(),
-                        now_ms,
-                        proposal.strategy.clone(),
-                        wrap_params(&proposal.strategy, proposal.from_params.clone()),
-                        wrap_params(&proposal.strategy, proposal.to_params.clone()),
-                        proposal.reason,
-                        proposal.confidence,
-                        proposal.sample_count,
-                        proposal.variant.win_rate - proposal.baseline.win_rate,
-                        "proposal".into(),
-                    ),
+                    &adoption_signal(&proposal, now_ms),
                     "rejected by operator".into(),
                     "n/a",
                     "n/a",
