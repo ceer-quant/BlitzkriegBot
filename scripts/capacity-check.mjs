@@ -325,8 +325,7 @@ try {
     console.log(`  report written to ${JSON_OUT}`);
   }
 } catch (e) {
-  failures++;
-  console.log('  FAIL harness error', e?.stack || e);
+  check('harness error', false, e?.stack || e);
 } finally {
   await core.stop();
 }

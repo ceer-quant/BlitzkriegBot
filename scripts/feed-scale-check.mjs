@@ -33,7 +33,6 @@ const CORE = join(ROOT, 'target', 'release', 'blitzkrieg-core');
 const FULL = process.argv.includes('--full');
 const CONNS = 40;
 const RUN_MS = FULL ? 600_000 : 90_000;
-const HZ = 10;
 const gate = createChecks();
 const { check } = gate;
 
@@ -52,9 +51,7 @@ const proc = spawn(CORE, [
   '--engine', '--no-discovery', '--no-event-archive',
   '--no-trade-log', '--no-order-log', '--no-position-log',
   '--round-sec', '3600', '--min-round-age', '0', '--min-time-left', '0',
-], { stdio: ['ignore', 'ignore', 'pipe'], cwd: workdir });
-let stderr = '';
-proc.stderr.on('data', (d) => { stderr += d.toString(); });
+], { stdio: 'ignore', cwd: workdir });
 
 await waitForSocket(sock, { timeoutMs: 6000 });
 
@@ -73,7 +70,6 @@ const bufs = clients.map(() => '');
 const evCounts = clients.map(() => 0);
 let lagged = 0;
 const pendingMaps = clients.map(() => new Map());
-const SEQ = Symbol('ready');
 for (let i = 0; i < clients.length; i++) {
   const c = clients[i];
   c.on('data', (d) => {
