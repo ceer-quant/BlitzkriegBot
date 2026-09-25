@@ -39,6 +39,12 @@ const WEB = join(ROOT, 'target/release/ui_kit_web');
 const SOCK = join(tmpdir(), `webapp-check-${process.pid}.sock`);
 const WORK = mkdtempSync(join(tmpdir(), 'webapp-check-'));
 const DIST = join(ROOT, 'ui/webapp/webui/dist');
+// Both gate ports are overridable (#317) so this gate can run beside another
+// web gate on one machine — `gateway-signal-stop-check.mjs` already honors its
+// own env var. The defaults stay exactly what CI has always run (the two gates
+// execute sequentially in one job), so this changes nothing for existing runs.
+const PORT = Number(process.env.WEBAPP_CHECK_PORT ?? 18997);
+const PORT2 = Number(process.env.WEBAPP_CHECK_PORT2 ?? 18998);
 
 const gate = createChecks();
 const { check } = gate;
@@ -103,7 +109,7 @@ check('blitzkrieg-ui-kit has no tauri dep', !kitToml.includes('tauri'));
 // [3] Gateway auth via a live ui_kit_web with user/password credentials.
 const USER = 'gate-admin';
 const PASSWORD = 'gate-pass-9f3a';
-const web = spawn(WEB, ['--socket', SOCK, '--addr', '127.0.0.1:18997', '--manage'], {
+const web = spawn(WEB, ['--socket', SOCK, '--addr', `127.0.0.1:${PORT}`, '--manage'], {
   cwd: WORK, stdio: ['ignore', 'pipe', 'pipe'],
   env: { ...process.env, BLITZKRIEG_PANEL_USER: USER, BLITZKRIEG_PANEL_PASSWORD: PASSWORD },
 });
@@ -137,20 +143,20 @@ async function httpReq(port, method, path, { headers = '', body = '' } = {}) {
     setTimeout(() => { try { c.end(); } catch {} res(b); }, 3000);
   });
 }
-const httpGet = (path, headers = '') => httpReq(18997, 'GET', path, { headers });
+const httpGet = (path, headers = '') => httpReq(PORT, 'GET', path, { headers });
 const status = (raw) => Number(raw.split('\r\n')[0]?.split(' ')[1]);
 
 try {
   // ── REJECT direction ──────────────────────────────────────────────────────
   check('no session → 401', (await httpGet('/api/snapshot')).startsWith('HTTP/1.1 401'));
-  const badLogin = await httpReq(18997, 'POST', '/api/login', {
+  const badLogin = await httpReq(PORT, 'POST', '/api/login', {
     body: JSON.stringify({ user: USER, password: 'wrong-pass' }),
   });
   check('wrong password → 401', status(badLogin) === 401);
   check('forged token → 401', status(await httpGet('/api/snapshot?token=' + 'a'.repeat(40))) === 401);
 
   // ── ACCEPT direction ──────────────────────────────────────────────────────
-  const login = await httpReq(18997, 'POST', '/api/login', {
+  const login = await httpReq(PORT, 'POST', '/api/login', {
     body: JSON.stringify({ user: USER, password: PASSWORD }),
   });
   const token = /"token":"([0-9a-f]{40})"/.exec(login)?.[1] ?? '';
@@ -206,7 +212,7 @@ try {
   const brand = ['favicon-32.png', 'favicon-16.png', 'apple-touch-icon.png'];
   for (const name of brand) {
     const disk = readFileSync(join(DIST, name));
-    const res = await fetch(`http://127.0.0.1:18997/panel/${name}`);
+    const res = await fetch(`http://127.0.0.1:${PORT}/panel/${name}`);
     const wire = Buffer.from(await res.arrayBuffer());
     check(`${name} is served byte-identical (${disk.length} B)`,
       wire.length === disk.length && wire.equals(disk),
@@ -216,7 +222,7 @@ try {
   const logoName = readdirSync(join(DIST, 'assets')).find((f) => /^logo-.*\.png$/.test(f));
   if (logoName) {
     const disk = readFileSync(join(DIST, 'assets', logoName));
-    const res = await fetch(`http://127.0.0.1:18997/panel/assets/${logoName}`);
+    const res = await fetch(`http://127.0.0.1:${PORT}/panel/assets/${logoName}`);
     const wire = Buffer.from(await res.arrayBuffer());
     check(`bundled ${logoName} is served as a real PNG (${disk.length} B)`,
       wire.equals(disk) && wire.subarray(1, 4).toString() === 'PNG',
@@ -287,10 +293,16 @@ try {
   // the old code served `/api/command` openly on loopback. Credentials now come
   // from the environment only — the process must not invent a password, because
   // then it, and not the operator's secret store, decides who can stop the core.
-  const web2 = spawn(WEB, ['--socket', SOCK, '--addr', '127.0.0.1:18998', '--manage'], {
+  const web2 = spawn(WEB, ['--socket', SOCK, '--addr', `127.0.0.1:${PORT2}`, '--manage'], {
     cwd: WORK, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, BLITZKRIEG_PANEL_USER: '', BLITZKRIEG_PANEL_PASSWORD: '' },
   });
+  // The exit promise is created BEFORE stdout is drained (#286). A refusing
+  // child emits `exit` while the drain loop may still be running; a listener
+  // registered after the loop would never fire — only the timeout's `null`
+  // would arrive, turning a real refusal (exit=2) into a false red. The
+  // assertion and the child's behaviour are deliberately unchanged.
+  const exitPromise = new Promise((res) => web2.on('exit', (code) => res(code)));
   try {
     let out = '';
     let err = '';
@@ -300,10 +312,7 @@ try {
       out += chunk.toString();
       if (/listening on/.test(out)) break;
     }
-    const exited = await Promise.race([
-      new Promise((res) => web2.on('exit', (code) => res(code))),
-      sleep(3000).then(() => null),
-    ]);
+    const exited = await Promise.race([exitPromise, sleep(3000).then(() => null)]);
     const combined = out + err;
     check('no credentials configured → gateway refuses to start',
       exited === 2, `exit=${exited} out=${combined.slice(-200)}`);
@@ -318,7 +327,7 @@ try {
     // connection yields no bytes at all, so there is no status line to parse —
     // that absence *is* the pass condition. A live socket would answer 200/401.
     const deadRaw = await Promise.race([
-      httpReq(18998, 'GET', '/api/snapshot'),
+      httpReq(PORT2, 'GET', '/api/snapshot'),
       sleep(3000).then(() => 'TIMEOUT'),
     ]);
     const dead = /^HTTP\/1\.1 \d{3}/.test(deadRaw) ? status(deadRaw) : -1;
