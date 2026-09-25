@@ -53,4 +53,8 @@ pub mod strategy_state;
 pub(crate) mod test_fixtures;
 pub mod trade_db;
 
-pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
+// The one runtime spelling of the build provenance (VERSIONING.md §3.4):
+// stamped by build.rs into blitzkrieg-build-info, re-exported here so every
+// consumer (IPC, --version, the banner) names the same code.
+pub use blitzkrieg_build_info::BUILD_INFO;
+pub const CORE_VERSION: &str = BUILD_INFO.version;

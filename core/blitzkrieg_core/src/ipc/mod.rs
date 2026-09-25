@@ -3,3 +3,4 @@
 pub mod build_info;
 pub mod schema;
 pub mod server;
+pub mod version;

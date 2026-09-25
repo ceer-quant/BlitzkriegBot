@@ -1,6 +1,6 @@
 [package]
 name = "parity-logic"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "Deterministic reference strategy logic shared by the in-tree and external dylib parity harness (E7/#38)."
 

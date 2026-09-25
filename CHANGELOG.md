@@ -3,6 +3,39 @@
 All notable changes to BlitzkriegBot are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
+## [0.2.1] - 2026-09-25
+
+### Added
+
+- **版本单事实来源（docs/VERSIONING.md E-V1..V7）**。全部 workspace 成员继承根
+  `Cargo.toml` 的 `[workspace.package].version`（0.2.1），由新增的
+  `scripts/version-guard.mjs` 守卫（成员继承 / cargo metadata 一致 / 二进制自述
+  比对 / src-tauri 双版本同步），并接进 CI（`release/**` 纳入触发）。构建期盖章
+  收敛为 `core/build_support`（一处实现）+ `core/build_info`（运行期唯一出口
+  `BUILD_INFO`，零依赖）；`core/blitzkrieg_core/build.rs` 的既有语义（12 位短
+  sha、tracked-only 脏位、`nogit` 兜底、显式盖章 `BLITZKRIEG_GIT_SHA`）全部保留。
+- **`blitzkrieg version [--json] [--core] [--socket]`** 与 `--version`/`-V`/`-v`
+  短路（#228 同形风险：这两个旗标此前会落入启动路径拉起整套交易栈）。
+  三种格式（人读 4 行 / camelCase JSON / `<semver>+g<sha>` 单行）各有测试钉住。
+- **`system.version` IPC**（只读、不取 Core 锁，数据锁未就绪也可回答）：
+  11 字段契约含 `updateAvailable` 三态（`null` = 未检查 ≠ `false` = 已是最新），
+  见 `docs/rust-core/INTERFACES.md` §2.1/§4。TUI 第 6 个 tab（Settings）与
+  WebUI 设置页「版本与更新」卡片同源展示；`tui-parity.check.mjs` 与新增的
+  `version-panel.check.mjs` 双向守卫。
+- **更新检查（默认关闭）**：开关来源 CLI > env > `user_layer/configs/update.toml`
+  > 内置默认（关）；运行时开关持久化 `data/update/state.json`（原子写、落审计）。
+  `checkEnabled=false` 时结构性地一个包都不发（INV-3）。`system.update.check` /
+  `system.update.configure` 两个动词；semver 比较只有内核一处
+  （`0.10.0 > 0.9.0`，rc 不打扰正式版）。
+- **`blitzkrieg update` 动词**：`--check` 经内核询问发布源；校验原语
+  （SHA256SUMS 缺条目拒绝 / 全 64 位比对 / 同目录临时文件原子替换+读回自证）
+  已落地并带反向测试。**安装能力随发布流水线在 0.2.5 落地**（§12.2：安装需要
+  已签名的、带 SHA256SUMS 的发布资产；P26 不为此扩依赖树）。
+- **`.github/workflows/release.yml`**：tag 守卫（tag == v + 清单版本、可达性
+  判定、复用 --manifest-only 守卫）→ 与 CI 同一套门禁 → 三平台构建 + SHA256SUMS
+  + 可选 GPG → Release 去重（同 tag 拒绝覆盖）。`VERSION_RE` 接受 `-rc.N`
+  （V8-5：首个 rc 之前必须先修好正则）。
+
 ## [Unreleased]
 
 ### Added

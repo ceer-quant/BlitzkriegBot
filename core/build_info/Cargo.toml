@@ -1,0 +1,13 @@
+[package]
+name = "blitzkrieg-build-info"
+version.workspace = true # part of the product — inherits the workspace version
+edition = "2021"
+publish = false
+description = "The one runtime spelling of the build provenance stamped by build.rs."
+
+[lib]
+name = "blitzkrieg_build_info"
+path = "src/lib.rs"
+
+[build-dependencies]
+blitzkrieg-build-support = { path = "../build_support" }

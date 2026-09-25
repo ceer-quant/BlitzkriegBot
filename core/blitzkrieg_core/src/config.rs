@@ -86,6 +86,9 @@ pub const DEFAULT_CONFIG_PATH: &str = "user_layer/configs/default.toml";
 /// config so a self-contained config directory stays self-contained.
 pub const SHADOW_SECTION_FILE: &str = "shadow_evolution.toml";
 
+/// Sibling file holding the update-check switches (§7). Same lookup rule.
+pub const UPDATE_SECTION_FILE: &str = "update.toml";
+
 /// Shadow Evolution settings as written in the file. All optional: an absent key
 /// keeps its built-in default.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -112,6 +115,16 @@ pub struct ShadowFile {
     pub proposal_ttl_minutes: Option<i64>,
     /// Knobs one DEEP-cycle variant moves simultaneously (>= 1).
     pub deep_dims: Option<usize>,
+}
+
+/// Update-check switches as written in `update.toml` (VERSIONING.md §7). Both
+/// optional; an absent key keeps the built-in default, which is OFF. The file
+/// is the FACTORY default — the runtime cell in `data/update/state.json`
+/// (written by `system.update.configure`) outranks it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UpdateFile {
+    pub check_enabled: Option<bool>,
+    pub auto_update: Option<bool>,
 }
 
 /// Lock 2's built-in ceiling (±5% per evolution step). A config file may lower
@@ -150,6 +163,8 @@ pub struct FileConfig {
     pub exit: ExitFile,
     // ── [shadow_evolution] ──────────────────────────────────────────────────
     pub shadow: ShadowFile,
+    // ── [update] ────────────────────────────────────────────────────────────
+    pub update: UpdateFile,
     pub warnings: Vec<String>,
     /// Keys present in the file that nothing consumes. Reported, so the
     /// "dead config" problem (KI-11) cannot come back unnoticed.
@@ -175,6 +190,14 @@ impl FileConfig {
                 out.warnings.extend(shadow.warnings);
                 out.unknown_keys.extend(shadow.unknown_keys);
                 out.shadow = shadow.shadow;
+            }
+            // Same rule for the update switches (§7).
+            let update_path = dir.join(UPDATE_SECTION_FILE);
+            if update_path.exists() {
+                let update = Self::load_one(&update_path);
+                out.warnings.extend(update.warnings);
+                out.unknown_keys.extend(update.unknown_keys);
+                out.update = update.update;
             }
         }
         out
@@ -224,7 +247,10 @@ impl FileConfig {
             };
             // A renamed or invented section is the classic silent typo, so it is
             // reported once (its keys are not enumerated individually).
-            if !matches!(section.as_str(), "engine" | "exit" | "shadow_evolution") {
+            if !matches!(
+                section.as_str(),
+                "engine" | "exit" | "shadow_evolution" | "update"
+            ) {
                 self.unknown_keys.push(section.clone());
                 continue;
             }
@@ -258,6 +284,14 @@ impl FileConfig {
                     }
                     ("shadow_evolution", "enabled") => {
                         got(&mut self.shadow.enabled, bool_(v), &full, w)
+                    }
+                    // Update switches (§7). Booleans, same `got` discipline:
+                    // a wrongly-typed key is a warning, not a boot failure.
+                    ("update", "check_enabled") => {
+                        got(&mut self.update.check_enabled, bool_(v), &full, w)
+                    }
+                    ("update", "auto_update") => {
+                        got(&mut self.update.auto_update, bool_(v), &full, w)
                     }
                     ("shadow_evolution", "evaluation_window_minutes") => {
                         got(&mut self.shadow.evaluation_window_minutes, int(v), &full, w)

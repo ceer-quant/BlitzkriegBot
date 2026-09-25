@@ -854,6 +854,48 @@ pub enum CoreEvent {
 
 // ── Aggregated snapshot the adapters render ─────────────────────────────────
 
+/// `system.version` view (VERSIONING.md §5). Fields mirror the kernel's wire
+/// contract one-for-one (keys are camelCase on the wire, hence the serde
+/// rename; nothing is parsed by hand). Every build field defaults so an OLDER
+/// core that lacks optional keys still deserialises instead of failing the
+/// whole snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemVersionView {
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub git_hash: String,
+    #[serde(default)]
+    pub git_dirty: bool,
+    #[serde(default)]
+    pub build_date: String,
+    #[serde(default)]
+    pub target: String,
+    /// `None` = not checked yet (update checking is off by default), or an
+    /// older core with no notion of updates. NOT the same as `Some(false)`.
+    #[serde(default)]
+    pub update_available: Option<bool>,
+    #[serde(default)]
+    pub latest_version: Option<String>,
+    /// The auto-update switch as the KERNEL holds it — never guessed locally.
+    #[serde(default)]
+    pub auto_update: bool,
+    /// Whether outbound checks are allowed at all (off by default).
+    #[serde(default)]
+    pub check_enabled: bool,
+    /// Last update check (UTC ms); `None` when never checked.
+    #[serde(default)]
+    pub last_check_ms: Option<u64>,
+    /// Release page URL, when a release is known.
+    #[serde(default)]
+    pub release_url: Option<String>,
+    /// The verbatim response line, for `blitzkrieg version --core --json` to
+    /// forward without a re-serialisation that could drift.
+    #[serde(skip)]
+    pub raw_json: String,
+}
+
 /// A single point-in-time view of the core, assembled by one round of IPC calls.
 /// This is what every adapter (web/TUI/app) renders — the adapters differ only
 /// in how they present it.
@@ -883,6 +925,10 @@ pub struct UiSnapshot {
     pub evolution_proposals: Vec<EvolutionProposalView>,
     /// E13: the shadow-evolution control block (`None` = older core).
     pub evolution_status: Option<EvolutionStatusView>,
+    /// VERSIONING.md §5: version + build provenance + update state of the
+    /// serving core (`None` = older core or no core). The three-state
+    /// `update_available` travels inside verbatim.
+    pub system_version: Option<SystemVersionView>,
     pub connected: bool,
     pub last_error: Option<String>,
 }

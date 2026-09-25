@@ -365,6 +365,10 @@ pub fn render_json_full(
         // All-time totals (trades.summary): cumulative order count + net profit
         // NOT capped by the windowed history above. Older cores omit → null.
         "tradeSummary": s.trade_summary,
+        // VERSIONING.md §5: version + build provenance + update three-state.
+        // Older cores refuse the method → null; the card says so instead of
+        // inventing a version number.
+        "systemVersion": s.system_version,
         // Full closed-trade rows for the history tab (snapshot already capped
         // by the trade_limit the bin passes to IpcClient::snapshot).
         "tradeRows": s.trades.iter().map(|t| serde_json::json!({
@@ -879,6 +883,25 @@ struct NetCheckCache {
     error: Option<String>,
 }
 
+/// The in-flight guard for `POST /api/version/check` (VERSIONING.md §6.3).
+/// Same shape of problem as the net-check cache: the kernel's
+/// `system.update.check` dials GitHub with its own timeout, and this server
+/// accepts on ONE thread — so the route starts the ask in a background thread
+/// and answers immediately; the card polls the snapshot's `systemVersion`
+/// until the kernel's `lastCheckMs` moves. Only the transient state lives
+/// here: the VERDICT is the kernel's persisted update state, never a gateway
+/// copy of it.
+#[derive(Default)]
+struct UpdateCheckCache {
+    /// A check is running right now (one at a time — a second click while one
+    /// is in flight must not start a second dial).
+    running: bool,
+    /// Why the last background ask could not be ANSWERED (core unreachable,
+    /// IPC error). A check that RAN and failed lands in the kernel's state as
+    /// unknown, which is where the UI reads it — that is not an error here.
+    error: Option<String>,
+}
+
 /// Failed-login accounting for one client (an IP address).
 #[derive(Debug, Clone, Copy, Default)]
 struct LoginAttempt {
@@ -1040,6 +1063,8 @@ pub struct WebServer {
     dispatcher: Option<Arc<Mutex<Dispatcher>>>,
     /// The last network self-check, and whether one is running now.
     net_check: Arc<Mutex<NetCheckCache>>,
+    /// The in-flight guard for the update-check button (§6.3).
+    update_check: Arc<Mutex<UpdateCheckCache>>,
     /// Panel credentials (`BLITZKRIEG_PANEL_USER` / `…_PASSWORD`), read from the
     /// environment. Gateway mode refuses to start without a complete pair (see
     /// [`Self::require_credentials`]) — it never invents one.
@@ -1076,6 +1101,7 @@ impl WebServer {
             trade_limit,
             dispatcher,
             net_check: Arc::new(Mutex::new(NetCheckCache::default())),
+            update_check: Arc::new(Mutex::new(UpdateCheckCache::default())),
             panel_user: None,
             panel_password: None,
             auth_required,
@@ -1514,6 +1540,75 @@ impl WebServer {
     /// Used by the probe button (see the route): the report itself is kept, so a
     /// caller that polls mid-probe still gets the previous result plus
     /// `probing: true` rather than an empty card.
+    /// Start one background `system.update.check` against the serving core
+    /// (VERSIONING.md §6.3). The kernel holds the switches and the verdict —
+    /// this route only triggers the ask and reports whether it started.
+    fn version_check_start(&self) -> String {
+        let socket = self
+            .snapshot_src
+            .lock()
+            .map(|c| c.socket_path().to_string())
+            .unwrap_or_default();
+        let Ok(mut cache) = self.update_check.lock() else {
+            return serde_json::json!({ "started": false, "error": "update-check cache poisoned" })
+                .to_string();
+        };
+        if cache.running {
+            return serde_json::json!({ "started": false, "running": true }).to_string();
+        }
+        if socket.is_empty() {
+            return serde_json::json!({ "started": false, "error": "no core socket" }).to_string();
+        }
+        cache.running = true;
+        cache.error = None;
+        let shared = self.update_check.clone();
+        std::thread::spawn(move || {
+            let mut client = IpcClient::new(socket);
+            let outcome = client.update_check();
+            if let Ok(mut c) = shared.lock() {
+                c.running = false;
+                if let Err(e) = outcome {
+                    // A kernel REFUSAL (checkEnabled=false) arrives here as an
+                    // Rpc error — the operator asked with the switch off, which
+                    // the card must say out loud, never paper over.
+                    c.error = Some(e.to_string());
+                }
+            }
+        });
+        serde_json::json!({ "started": true }).to_string()
+    }
+
+    /// The 自动更新 switch write: `{"autoUpdate": bool}` in, the kernel's own
+    /// echo out. Inline (fast), and the kernel persists it — a switch that did
+    /// not land on disk is an error the card shows verbatim.
+    fn version_configure(&self, body: &str) -> String {
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(body);
+        let on = parsed
+            .ok()
+            .as_ref()
+            .and_then(|v| v.get("autoUpdate"))
+            .and_then(|b| b.as_bool());
+        let Some(on) = on else {
+            return serde_json::json!({ "ok": false, "error": "body must be {\"autoUpdate\": bool}" })
+                .to_string();
+        };
+        let socket = self
+            .snapshot_src
+            .lock()
+            .map(|c| c.socket_path().to_string())
+            .unwrap_or_default();
+        if socket.is_empty() {
+            return serde_json::json!({ "ok": false, "error": "no core socket" }).to_string();
+        }
+        let mut client = IpcClient::new(socket);
+        match client.update_configure(None, Some(on)) {
+            Ok(v) => {
+                serde_json::json!({ "ok": true, "autoUpdate": v.get("autoUpdate") }).to_string()
+            }
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
+        }
+    }
+
     fn net_check_invalidate(&self) {
         if let Ok(mut cache) = self.net_check.lock() {
             cache.at = None;
@@ -1753,6 +1848,29 @@ impl WebServer {
                 // its result IS the answer to this request.
                 self.net_check_invalidate();
                 (200, "application/json", self.net_check_poll().into_bytes())
+            }
+            ("POST", "/api/version/check") => {
+                // The 设置页's 检查更新 button (VERSIONING.md §6.3). Never
+                // inline — the kernel dials GitHub with its own timeout — so
+                // this starts the background ask and answers at once; the card
+                // polls the snapshot until the kernel's own state moves. A
+                // kernel-side refusal (checkEnabled=false) is instant and lands
+                // in the cache's error, which the next GET rides along with.
+                (
+                    200,
+                    "application/json",
+                    self.version_check_start().into_bytes(),
+                )
+            }
+            ("POST", "/api/version/configure") => {
+                // The 自动更新 switch: {"autoUpdate": bool}. Inline is fine —
+                // the kernel answers in milliseconds (a small file write plus
+                // an audit line).
+                (
+                    200,
+                    "application/json",
+                    self.version_configure(&req.body).into_bytes(),
+                )
             }
             ("GET", "/api/snapshot") => {
                 let snap = self.snapshot();

@@ -18,10 +18,11 @@
     "check:design": "node --experimental-strip-types scripts/design-language.check.mjs",
     "check:first-run": "node --experimental-strip-types scripts/first-run.check.mjs",
     "check:separation": "node --experimental-strip-types scripts/page-separation.check.mjs",
+    "check:version-panel": "node --experimental-strip-types scripts/version-panel.check.mjs",
     "check:parity": "node --experimental-strip-types scripts/tui-parity.check.mjs",
     "check:safety": "node --experimental-strip-types scripts/safety-banners.check.mjs",
     "check:net": "node --experimental-strip-types scripts/net-check.check.mjs",
-    "check:all": "npm run check && npm run check:theme && npm run check:balance && npm run check:lifecycle && npm run check:rejections && npm run check:safety && npm run check:net && npm run check:feed && npm run check:session && npm run check:history && npm run check:round && npm run check:expand && npm run check:source && npm run check:design && npm run check:first-run && npm run check:separation && npm run check:parity"
+    "check:all": "npm run check && npm run check:theme && npm run check:balance && npm run check:lifecycle && npm run check:rejections && npm run check:safety && npm run check:net && npm run check:feed && npm run check:session && npm run check:history && npm run check:round && npm run check:expand && npm run check:source && npm run check:design && npm run check:first-run && npm run check:separation && npm run check:version-panel && npm run check:parity"
   },
   "license": "ISC",
   "type": "module",

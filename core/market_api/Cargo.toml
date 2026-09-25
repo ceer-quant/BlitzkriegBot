@@ -1,6 +1,6 @@
 [package]
 name = "blitzkrieg-market-api"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "Market-agnostic plugin contract: domain DTOs + DataFeed/MarketDiscovery/OrderExecutor traits + MarketHost. Depends on nothing internal, so both the core and every market extension can link it without a dependency cycle."
 

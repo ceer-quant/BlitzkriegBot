@@ -24,7 +24,7 @@ name: CI
 # reports the aggregate result to WeChat when configured.
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, 'release/**']
   pull_request:
 
 concurrency:
@@ -104,6 +104,11 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # One source of truth for the version (VERSIONING.md §8.6): manifest-only
+      # is pure-text and millisecond-fast, so it fits the PR gate; the full check
+      # (incl. the binary's self-description) belongs to the release pipeline.
+      - name: Version guard — one source of truth
+        run: node scripts/version-guard.mjs --manifest-only
 
   panel-check:
     name: panel-check

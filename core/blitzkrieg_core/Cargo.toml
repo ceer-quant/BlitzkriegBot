@@ -1,6 +1,6 @@
 [package]
 name = "blitzkrieg-core"
-version = "0.2.0"
+version.workspace = true
 edition = "2024"
 description = "Blitzkrieg Quant Core: market-agnostic trading core (strategy engine, OME, risk, ledger, market data, execution). Node/UI is a shell over this."
 
@@ -33,6 +33,14 @@ account-precision = []
 test-support = []
 
 [dependencies]
+# Build provenance (VERSIONING.md §3.4): the one runtime spelling of what
+# build.rs stamps, shared with the launcher so the two cannot disagree.
+blitzkrieg-build-info = { path = "../build_info" }
+# Update check (VERSIONING.md §7.3): both are already in the dependency tree
+# (reqwest via the market extension, semver transitively) — direct use adds no
+# new tree, only a named edge (P26). rustls-only, no default features.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+semver = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

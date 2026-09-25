@@ -237,6 +237,10 @@ struct Args {
     se_cycle_secs: Option<i64>,
     se_ttl_secs: Option<i64>,
     se_deep_dims: Option<usize>,
+    /// Update-check switches (VERSIONING.md §7), resolved through the same
+    /// chain; `None` keeps the built-in default (off).
+    update_check_enabled: Option<bool>,
+    update_auto: Option<bool>,
     /// Per-strategy entry caps: `name:max_open_positions:max_notional_usd`
     /// (repeatable; `-` or empty = no cap on that segment).
     strategy_limits: Vec<String>,
@@ -620,6 +624,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut se_cooldown_secs: Option<i64> = None;
     let mut se_min_obs_secs: Option<i64> = None;
     let mut se_auto_evolve: Option<bool> = None;
+    let mut update_check_enabled: Option<bool> = None;
+    let mut update_auto: Option<bool> = None;
     let mut se_cycle_secs: Option<i64> = None;
     let mut se_ttl_secs: Option<i64> = None;
     let mut se_deep_dims: Option<usize> = None;
@@ -755,6 +761,22 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                 })
             }
             "--se-cycle-secs" => se_cycle_secs = it.next().and_then(|v| v.parse().ok()),
+            // Update switches (VERSIONING.md §7): explicit `true|false` values,
+            // like --se-auto-evolve, so a caller can turn OFF as well as on.
+            "--update-check" => {
+                update_check_enabled = it.next().and_then(|v| match v.as_str() {
+                    "true" | "1" | "on" => Some(true),
+                    "false" | "0" | "off" => Some(false),
+                    _ => None,
+                })
+            }
+            "--update-auto" => {
+                update_auto = it.next().and_then(|v| match v.as_str() {
+                    "true" | "1" | "on" => Some(true),
+                    "false" | "0" | "off" => Some(false),
+                    _ => None,
+                })
+            }
             "--se-ttl-secs" => se_ttl_secs = it.next().and_then(|v| v.parse().ok()),
             "--se-deep-dims" => se_deep_dims = it.next().and_then(|v| v.parse().ok()),
             "--strategy-limit" => {
@@ -1234,6 +1256,29 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         }),
         file.shadow.auto_evolve
     );
+    // VERSIONING.md §7: CLI > env > update.toml > built-in default (off).
+    let update_check_enabled = resolve_opt!(
+        "update.check_enabled",
+        update_check_enabled,
+        env.text("BLITZKRIEG_UPDATE_CHECK")
+            .and_then(|v| match v.trim() {
+                "true" | "1" | "on" | "yes" => Some(true),
+                "false" | "0" | "off" | "no" => Some(false),
+                _ => None,
+            }),
+        file.update.check_enabled
+    );
+    let update_auto = resolve_opt!(
+        "update.auto_update",
+        update_auto,
+        env.text("BLITZKRIEG_UPDATE_AUTO")
+            .and_then(|v| match v.trim() {
+                "true" | "1" | "on" | "yes" => Some(true),
+                "false" | "0" | "off" | "no" => Some(false),
+                _ => None,
+            }),
+        file.update.auto_update
+    );
     let se_cycle_secs = resolve_opt!(
         "shadow_evolution.evolution_cycle_secs",
         se_cycle_secs,
@@ -1560,6 +1605,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         se_cycle_secs,
         se_ttl_secs,
         se_deep_dims,
+        update_check_enabled,
+        update_auto,
         shadow_evolution_echo,
         strategy_limits,
         enable_strategy,
@@ -2088,6 +2135,8 @@ async fn main() -> anyhow::Result<()> {
         order_log_path,
         position_log_path,
         discovery_enabled: args.discovery,
+        update_check_enabled: args.update_check_enabled.unwrap_or(false),
+        update_auto: args.update_auto.unwrap_or(false),
         shadow_evolution_enabled: args.shadow_evolution,
         shadow_evolution_tuning: if args.se_min_samples.is_some()
             || args.se_cooldown_secs.is_some()

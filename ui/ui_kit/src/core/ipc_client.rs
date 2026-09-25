@@ -71,6 +71,12 @@ pub(crate) mod method {
     pub const SHADOW_EVOLUTION_ENABLE: &str = "shadow_evolution.enable";
     pub const SHADOW_EVOLUTION_DISABLE: &str = "shadow_evolution.disable";
     pub const SHADOW_EVOLUTION_ROLLBACK: &str = "shadow_evolution.rollback";
+    /// Version + build provenance + update state of the serving core.
+    pub const SYSTEM_VERSION: &str = "system.version";
+    /// Read/write of the update switches (the write lands an audit record).
+    pub const SYSTEM_UPDATE_CONFIGURE: &str = "system.update.configure";
+    /// One manual update check (the "check for updates" button).
+    pub const SYSTEM_UPDATE_CHECK: &str = "system.update.check";
 }
 
 pub struct IpcClient {
@@ -292,6 +298,47 @@ impl IpcClient {
         serde_json::from_value(out?).map_err(|e| IpcError::Protocol(e.to_string()))
     }
 
+    /// `system.version` — version + build provenance + update state.
+    ///
+    /// An older core (method unknown) yields an ERROR, not an empty view: the
+    /// caller can then say "this kernel does not speak system.version", which
+    /// is more honest than inventing an empty version string.
+    pub fn system_version(&mut self) -> Result<SystemVersionView, IpcError> {
+        let raw = self.call(method::SYSTEM_VERSION, serde_json::json!({}))?;
+        let mut v: SystemVersionView =
+            serde_json::from_value(raw.clone()).map_err(|e| IpcError::Protocol(e.to_string()))?;
+        v.raw_json = raw.to_string();
+        Ok(v)
+    }
+
+    /// `system.update.configure` — set one or both update switches. The kernel
+    /// persists them; the reply echoes what it now holds.
+    pub fn update_configure(
+        &mut self,
+        check_enabled: Option<bool>,
+        auto_update: Option<bool>,
+    ) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            method::SYSTEM_UPDATE_CONFIGURE,
+            serde_json::json!({
+                "checkEnabled": check_enabled,
+                "autoUpdate": auto_update,
+            }),
+        )
+    }
+
+    /// `system.update.check` — one manual check. Errors when the kernel's
+    /// check switch is off (the caller must say "checks are disabled", never
+    /// sneak a request out) — and a check that RAN but failed lands in the
+    /// state as unknown, so the follow-up `system.version` is the verdict.
+    pub fn update_check(&mut self) -> Result<SystemVersionView, IpcError> {
+        let raw = self.call(method::SYSTEM_UPDATE_CHECK, serde_json::json!({}))?;
+        let mut v: SystemVersionView =
+            serde_json::from_value(raw.clone()).map_err(|e| IpcError::Protocol(e.to_string()))?;
+        v.raw_json = raw.to_string();
+        Ok(v)
+    }
+
     // ── Shadow Evolution (E13): the proposal workflow ────────────────────────
 
     /// Full shadow-evolution status block (`shadow_evolution.status`). Older
@@ -453,6 +500,9 @@ impl IpcClient {
         // never an error.
         s.evolution_proposals = self.evolution_proposals(50).unwrap_or_default();
         s.evolution_status = self.evolution_status().ok();
+        // VERSIONING.md §5: version + update state. Older cores refuse the
+        // method → None; the UI then says so instead of inventing a version.
+        s.system_version = self.system_version().ok();
         s
     }
 }

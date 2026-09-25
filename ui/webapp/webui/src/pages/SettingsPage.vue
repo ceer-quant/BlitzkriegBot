@@ -2,7 +2,7 @@
 /**
  * 设置 — E8-d 指令面 & 收尾。
  *
- * 四块：
+ * 五块：
  *   1. 会话与访问 token：状态探测（/api/ping 三态）、token 掩码展示、复制、
  *      带 ?token= 的面板链接复制（E6-a 会话交接通道）、过期语义提示。
  *   2. Gateway 指令台：网关身份（socket/--manage/managed/pid/重启次数）、
@@ -10,14 +10,16 @@
  *   3. 网络诊断：内核拨测它自己出网要走的每条路径（net.check），回答「是网络还是
  *      交易所」。读法全在 lib/net-check.ts —— 状态词 → 中文标签、未知状态原样回显、
  *      空报告与「探测中」都不算通过。
- *   4. 外观与节奏：主题三态、提示音、行情快速轮询（设置持久化 store）。
+ *   4. 版本与更新：内核自述的版本/构建来源（system.version）+ 更新三态徽章。
+ *      三态读法全在 lib/version.ts —— null ≠ false，旧内核明说「不认识」。
+ *   5. 外观与节奏：主题三态、提示音、行情快速轮询（设置持久化 store）。
  *
  * 本页只做展示与指令；凭证与下单原语永不出内核。
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion,
-  TerminalSquare, Play, Square, LogOut, Info, Server, Network,
+  TerminalSquare, Play, Square, LogOut, Info, Server, Network, Tag,
 } from 'lucide-vue-next'
 import {
   api, getToken, loginAt, logout, ping, probeSession,
@@ -25,6 +27,7 @@ import {
 } from '@/api/client'
 import { adjudicateSession } from '@/lib/session'
 import { readNetCheck } from '@/lib/net-check'
+import { revisionText, versionBadge } from '@/lib/version'
 import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
 import { useTheme, type ThemeMode } from '@/lib/theme'
@@ -197,6 +200,68 @@ const netBadge = computed(() => {
     case 'down': return { text: '有失败', variant: 'down' as const }
     default: return { text: '探测中', variant: 'default' as const }
   }
+})
+
+// ── 版本与更新 ──────────────────────────────────────────────────────────────
+// 数据来自 snapshot 轮询里的 systemVersion（内核自述，非本地猜测）。
+// 三态读法只有一份（lib/version.ts）：null = 未检查，绝不画成「已是最新」。
+const version = computed(() => store.snapshot?.systemVersion ?? null)
+const versionBadgeView = computed(() => versionBadge(version.value))
+const versionErr = ref<string | null>(null)
+const checkBusy = ref(false)
+
+/**
+ * 「检查更新」：网关只是转交（内核拨 GitHub 以秒计，网关绝不等它），所以这里
+ * 轮询 snapshot 直到内核的 lastCheckMs 动了；内核明确拒绝（checkEnabled=false）
+ * 时 error 原样展示 —— 关闭就是关闭，不静默、不偷跑。
+ */
+let checkTimer: ReturnType<typeof setTimeout> | null = null
+const checkDeadlineAt = ref(0)
+
+async function checkNow(): Promise<void> {
+  if (!version.value || checkBusy.value) return
+  const before = version.value.lastCheckMs
+  try {
+    const res = await api.updateCheck()
+    if (res.error) {
+      versionErr.value = res.error
+      return
+    }
+  } catch (e) {
+    versionErr.value = e instanceof Error ? e.message : String(e)
+    return
+  }
+  checkBusy.value = true
+  checkDeadlineAt.value = Date.now() + 45_000
+  const poll = async (): Promise<void> => {
+    await store.refresh()
+    const now = store.snapshot?.systemVersion
+    const moved = now && now.lastCheckMs !== before && now.lastCheckMs !== null
+    if (moved || Date.now() > checkDeadlineAt.value) {
+      checkBusy.value = false
+      return
+    }
+    checkTimer = setTimeout(() => void poll(), 1500)
+  }
+  void poll()
+}
+
+/** 「自动更新」开关：状态来源是内核；写盘失败必须报错（不静默回退）。 */
+async function toggleAutoUpdate(on: boolean): Promise<void> {
+  try {
+    const res = await api.updateConfigure(on)
+    if (res.ok === false && res.error) {
+      versionErr.value = res.error
+    }
+  } catch (e) {
+    versionErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    await store.refresh()
+  }
+}
+
+onUnmounted(() => {
+  if (checkTimer !== null) clearTimeout(checkTimer)
 })
 
 // ── theme segmented ─────────────────────────────────────────────────────────
@@ -454,6 +519,91 @@ const themeValue = computed<ThemeMode>({
           <template v-else>还没有探测结果</template>
         </span>
       </div>
+    </Card>
+
+    <!-- ── 版本与更新 ──────────────────────────────────────────────────── -->
+    <Card class="mt-3.5">
+      <CardHeader label="版本与更新">
+        <template #title>
+          <Tag class="size-4 text-faint-fg" />
+        </template>
+        <template #action>
+          <Badge v-if="versionBadgeView" :variant="versionBadgeView.variant" dot>{{ versionBadgeView.text }}</Badge>
+          <Badge v-else variant="default" dot>不可用</Badge>
+        </template>
+      </CardHeader>
+
+      <p class="text-[11.5px] leading-snug text-muted-fg">
+        版本是<strong>正在运行</strong>的内核自述的（system.version），与磁盘上安装的是哪一版不是一回事 ——
+        分别可问：<code>blitzkrieg version</code>（磁盘）/ <code>blitzkrieg version --core</code>（运行中）。
+      </p>
+
+      <!--
+        旧内核不认识 system.version：说「不认识」，不画一个空版本号（§5.6）。
+        这条与 net.check 的「空报告不算通过」是同一条诚实规则。
+      -->
+      <AlertBanner v-if="!version && !versionErr" class="mt-3" tone="info">正在读取内核版本…</AlertBanner>
+      <AlertBanner v-else-if="!version" class="mt-3" tone="warn">
+        这个内核不认识 system.version（{{ versionErr ?? '内核离线或版本过旧' }}）。版本信息不可用。
+      </AlertBanner>
+
+      <template v-else>
+        <div class="mt-3 grid gap-x-6 gap-y-2 text-[12px] sm:grid-cols-2">
+          <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
+            <span class="text-faint-fg">版本</span>
+            <span class="font-mono">{{ version.version }}</span>
+          </div>
+          <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
+            <span class="text-faint-fg">修订号</span>
+            <span class="font-mono">
+              {{ revisionText(version.gitHash) }}
+              <span v-if="version.gitDirty" class="text-primary">dirty</span>
+              <span v-else class="text-faint-fg">clean</span>
+            </span>
+          </div>
+          <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
+            <span class="text-faint-fg">构建时间</span>
+            <span class="font-mono">{{ version.buildDate }}</span>
+          </div>
+          <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
+            <span class="text-faint-fg">目标平台</span>
+            <span class="font-mono">{{ version.target }}</span>
+          </div>
+          <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
+            <span class="text-faint-fg">上次检查</span>
+            <span class="num">{{ version.lastCheckMs ? dateTime(version.lastCheckMs) : '—' }}</span>
+          </div>
+          <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
+            <span class="text-faint-fg">出网检查</span>
+            <Badge :variant="version.checkEnabled ? 'up' : 'default'">
+              {{ version.checkEnabled ? '已允许' : '已关闭' }}
+            </Badge>
+          </div>
+        </div>
+
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="checkBusy || !version.checkEnabled"
+            :title="version.checkEnabled
+              ? '让内核询问一次发布源（后台执行，结果自动刷新）'
+              : '出网检查已在配置中关闭；开启后此按钮才可用（user_layer/configs/update.toml 或下方开关说明）'"
+            @click="checkNow"
+          >
+            <RefreshCw class="size-3.5" />{{ checkBusy ? '检查中…' : '检查更新' }}
+          </Button>
+          <Tooltip v-if="!version.checkEnabled" content="INV-3：检查关闭时内核一个包都不发 —— 这不是故障，是默认承诺。">
+            <span class="text-[11px] text-faint-fg">检查已关闭</span>
+          </Tooltip>
+
+          <div class="ml-auto flex items-center gap-2">
+            <span class="text-[11px] text-faint-fg">自动更新（默认关闭；开启后安装由启动器校验执行，需重启内核生效）</span>
+            <Switch :model-value="version.autoUpdate" @update:model-value="toggleAutoUpdate" />
+          </div>
+        </div>
+        <p v-if="versionErr" class="mt-2 text-[11px] leading-snug text-down">{{ versionErr }}</p>
+      </template>
     </Card>
 
     <!-- ── 外观与节奏 ──────────────────────────────────────────────────── -->

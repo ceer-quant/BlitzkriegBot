@@ -54,8 +54,9 @@ const tuiVariants = [...enumBody.matchAll(/^\s{4}([A-Z]\w+),$/gm)].map((m) => m[
 const TUI_TAB_SETS = [
   ['Overview', 'Positions', 'Trades', 'Plugins'],
   ['Overview', 'Positions', 'Trades', 'Plugins', 'Evolution'],
+  ['Overview', 'Positions', 'Trades', 'Plugins', 'Evolution', 'Settings'],
 ]
-check('TUI tabs are a known layout (4-tab, or 5-tab with Evolution)', () => {
+check('TUI tabs are a known layout (4-tab, 5-tab with Evolution, or 6-tab with Settings)', () => {
   assert.ok(
     TUI_TAB_SETS.some((s) => s.join(',') === tuiVariants.join(',')),
     `unknown TUI tab set: ${tuiVariants.join('/')} — extend TUI_TAB_SETS deliberately`,
@@ -89,6 +90,11 @@ const TUI_TO_WEBUI = [
 // stay gated instead of one side waiting on the other.
 if (tuiVariants.includes('Evolution')) {
   TUI_TO_WEBUI.push(['Evolution', ['evolution'], 'EvolutionPage.vue', '拍板'])
+}
+// The Settings face ships with the version card (VERSIONING.md §6.4); its
+// pairing is asserted once the TUI carries the tab, same rule as Evolution.
+if (tuiVariants.includes('Settings')) {
+  TUI_TO_WEBUI.push(['Settings', ['settings'], 'SettingsPage.vue', '版本与更新'])
 }
 for (const [tab, targets, pageFile, marker] of TUI_TO_WEBUI) {
   check(`TUI ${tab} → WebUI ${targets.join(' + ')}（${marker} 在页上）`, () => {
@@ -124,6 +130,19 @@ check('TUI `?` help overlay ↔ WebUI 首次引导 + 设置页会话说明', () 
 check('TUI flatten confirm dialog ↔ WebUI 强平按钮', () => {
   assert.ok(new RegExp('fn render_confirm\\(').test(ui), 'TUI confirm dialog gone')
   assert.ok(read('src', 'pages', 'HftPage.vue').includes('强平'), 'WebUI flatten gone')
+})
+
+check('TUI 设置页 ↔ WebUI 设置页版本卡片同源（VERSIONING.md §6.4）', () => {
+  assert.ok(/fn render_settings\(/.test(ui), 'TUI render_settings 缺失')
+  const settingsPage = read('src', 'pages', 'SettingsPage.vue')
+  assert.ok(settingsPage.includes('版本与更新'), 'WebUI 版本卡片缺失')
+  // 同一事实、同一条三态规则：两侧都要能从内核问版本（system.version）。
+  assert.ok(
+    read('..', '..', 'ui_kit', 'src', 'core', 'ipc_client.rs').includes('fn system_version'),
+    'ui_kit 的 system_version 客户端方法缺失',
+  )
+  // TUI 侧也必须经同一接口取值，不自己 parse 版本字符串。
+  assert.ok(ui.includes('git_hash'), 'TUI 不再从 system.version 读修订号')
 })
 
 check('TUI `n` 网络诊断浮层 ↔ WebUI 设置页网络诊断卡片', () => {
@@ -242,17 +261,19 @@ check('浮层高度由内容算出来，不再写死', () => {
 
 console.log('WebUI surplus — declared, each with where it lives off-panel')
 
-/** Every WebUI tab with no TUI twin must name its off-panel equivalent. */
+/** Every WebUI tab with no TUI twin must name its off-panel equivalent.
+ * `settings` stopped being surplus when the TUI gained its own Settings tab
+ * (VERSIONING.md §6.4) — the version card is now a PAIRED face asserted in
+ * TUI_TO_WEBUI; only the theme/sound/token extras remain WebUI enhancements. */
 const WEBUI_SURPLUS = [
   ['backtest', 'CLI: blitzkrieg-core --backtest --backtest-report（回放复盘是 WebUI 增强面）'],
   ['strategies', 'TUI 指令台 strategy <name> on|off 同动词；账本表格是 WebUI 增强面'],
-  ['settings', 'TUI header 遥测（在线/模式）；主题/声音/token 管理是 WebUI 增强面'],
 ]
 check('every WebUI-only tab has a declared off-panel equivalent', () => {
   const surplus = webuiIds.filter((id) => !TUI_TO_WEBUI.some(([, ts]) => ts.includes(id)))
   assert.deepEqual(
     surplus,
-    ['backtest', 'strategies', 'settings'],
+    ['backtest', 'strategies'],
     'new WebUI tab without a parity note — add it to WEBUI_SURPLUS and this list',
   )
 })

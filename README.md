@@ -486,6 +486,11 @@ cd ui/webapp/webui && npm run check:all
 - 短期分支：`feat/*`、`fix/*`、`chore/*`、`release/*`。
 - 所有合入走 Pull Request + 全绿检查。
 - **远端名为 `ceer`**（`origin` 已移除）。
+- **版本与 tag（VERSIONING.md §2/§8）**：版本号的唯一事实来源是根
+  `Cargo.toml` 的 `[workspace.package].version`（`scripts/version-guard.mjs`
+  守卫）；tag 形态 `v<version>`，只落在 `main` 或 `release/*` 线上，由
+  `release.yml` 构建并发布（同一 tag 永不覆盖，一次发布 = 一批字节）。发布
+  顺序、rc 路径与守卫细节见 [`docs/VERSIONING.md`](./docs/VERSIONING.md) §8.2。
 
 ### 不可逾越的安全红线
 
@@ -507,6 +512,7 @@ cd ui/webapp/webui && npm run check:all
 | [docs/rust-core/ABI_V2_DESIGN.md](./docs/rust-core/ABI_V2_DESIGN.md) | 策略 C ABI v2 设计（vtable 已冻结，新能力走可选符号） |
 | [docs/rust-core/INTERFACES.md](./docs/rust-core/INTERFACES.md) | UDS JSON-RPC 2.0 方法/事件契约与版本变更记录 |
 | [docs/rust-core/SHADOW_EVOLUTION.md](./docs/rust-core/SHADOW_EVOLUTION.md) | 影子进化（按策略参数 / 孪生 / 审计 / apply·rollback） |
+| [docs/VERSIONING.md](./docs/VERSIONING.md) | 版本管理体系：单事实来源、`system.version` 契约、更新机制、发布流水线与分支模型 |
 | [CHANGELOG.md](./CHANGELOG.md) | 变更史 |
 
 内部开发文档（门禁矩阵、决策记录、迁移日志、GitHub 治理规范等）在 `dev-docs/`，

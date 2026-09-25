@@ -13,7 +13,7 @@
  * So this gate asserts the three identities that make the other gates readable:
  *
  *   1. the binary under test EMBEDS a revision (`<semver>+g<sha>`, stamped at
- *      compile time by `core/blitzkrieg_core/build.rs` — see #179);
+ *      compile time by the `core/build_info` crate's build.rs — see #179);
  *   2. that revision is THIS checkout's revision (or `BK_EXPECT_SHA`'s), so the
  *      script and the binary are the same code state, not two different ones;
  *   3. a core STARTED FROM that binary reports the same revision over the wire
@@ -214,6 +214,28 @@ try {
   check('startup line names the revision it is running',
     binRevision !== null && core.lastStderr.includes(binRevision),
     `stderr did not mention ${binRevision}: ${JSON.stringify(core.lastStderr.slice(-200))}`);
+  // VERSIONING.md V3-4: the same process, asked the newer, richer question.
+  // `system.version` and `core.ready` describe ONE build, so they must agree;
+  // the update half must arrive three-state (null = not checked) with the
+  // switch off on a default stack — never a fabricated `false`. An older core
+  // answers "unknown method": a note, not a failure, the method is additive
+  // (and BK_CORE_BIN routinely points this gate at frozen baselines).
+  try {
+    const sv = await rpc.systemVersion(core);
+    console.log(`  core ${sv.version}+g${sv.gitHash}${sv.gitDirty ? ' (dirty)' : ''} ` +
+      `built ${sv.buildDate} for ${sv.target}`);
+    check('system.version agrees with core.ready about the build',
+      sv.version === ready.version && sv.gitHash === ready.commit && sv.gitDirty === ready.dirty,
+      `system.version ${JSON.stringify(sv)} vs core.ready ${JSON.stringify(ready)}`);
+    check('system.version keeps the update state three-state on a default stack',
+      sv.updateAvailable === null && sv.lastCheckMs === null && sv.checkEnabled === false,
+      `updateAvailable=${JSON.stringify(sv.updateAvailable)} checkEnabled=${sv.checkEnabled} — ` +
+      'a default stack checks nothing and reports "not checked", never "up to date"');
+    summary(`- system.version: \`${sv.version}+g${sv.gitHash}\` ` +
+      `(checkEnabled ${sv.checkEnabled}, updateAvailable ${JSON.stringify(sv.updateAvailable)})`);
+  } catch (e) {
+    console.log(`  note system.version not answered (${e.message}) — older core, additive method`);
+  }
   if (ready.build) summary(`- serving process reports: \`${ready.build}\` (commit ${ready.commit ?? '?'}, dirty ${ready.dirty ?? '?'})`);
 } catch (e) {
   check('serving-core provenance', false, e?.stack || e);

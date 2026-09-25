@@ -38,6 +38,10 @@ SUBCOMMANDS:
   stop           Stop the stack (UI + core) on one socket; also an orphaned core
   net-check      Ask the core on the socket to probe every network path the venue
                  uses (read-only; no order, no ledger). --json for scripts
+  version        Print the build version / git hash / build date / target
+                 (--json for scripts; --core to ask the running kernel)
+  update         Update surface: --check asks the running kernel to check the
+                 release feed (read-only); --install is not available yet
   help           Show this help message
 
 FLAGS (for blitzkrieg / blitzkrieg run / core):
@@ -312,6 +316,18 @@ fn build_supervisor_config(cli: &ParsedCli, fallback_socket: String) -> Supervis
 /// see `blitzkrieg_ui_panel::env_file` for the precedence rule (the exported
 /// environment always wins over the file) and the secrets line.
 fn main() -> std::process::ExitCode {
+    // `--version` is answered before anything else is touched — the same hole
+    // the kernel closed (#228): the flag used to fall through to run_unified
+    // and boot the whole trading stack. One line, `<semver>+g<sha>`, the same
+    // format and source as the kernel's, so gates parse both identically.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv
+        .iter()
+        .any(|a| a == "--version" || a == "-V" || a == "-v")
+    {
+        println!("{}", blitzkrieg_build_info::BUILD_INFO.version_string());
+        return std::process::ExitCode::SUCCESS;
+    }
     blitzkrieg_ui_panel::env_file::load_cwd_env();
     tokio_main()
 }
@@ -339,6 +355,14 @@ async fn tokio_main() -> std::process::ExitCode {
         Some("help") | Some("--help") | Some("-h") => {
             println!("{HELP_TEXT}");
             std::process::ExitCode::SUCCESS
+        }
+        Some("version") => {
+            raw_args.remove(0);
+            run_version_subcommand(raw_args).await
+        }
+        Some("update") => {
+            raw_args.remove(0);
+            run_update_subcommand(raw_args).await
         }
         Some("core") => {
             raw_args.remove(0);
@@ -579,6 +603,233 @@ async fn run_net_check_subcommand(args: Vec<String>) -> std::process::ExitCode {
     } else {
         std::process::ExitCode::from(1)
     }
+}
+
+/// `blitzkrieg version [--json] [--core] [--socket <path>]` — what is installed
+/// on disk, or (with `--core`) what is RUNNING.
+///
+/// The default answers from the compile-time stamp and needs no process at all;
+/// `--core` asks the kernel over IPC. The two answers can legitimately differ —
+/// that is exactly why both must be askable separately (the #172 lesson: a
+/// gate's conclusion described a different code state than the one under test).
+///
+/// Exit codes: 0 answered · 1 no core answered (--core) · 2 usage error.
+async fn run_version_subcommand(args: Vec<String>) -> std::process::ExitCode {
+    let mut json = false;
+    let mut ask_core = false;
+    let mut socket: Option<String> = None;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--json" => json = true,
+            "--core" => ask_core = true,
+            "--socket" => match it.next() {
+                Some(p) => socket = Some(p),
+                None => {
+                    eprintln!("blitzkrieg: version: --socket needs a path");
+                    return std::process::ExitCode::from(2);
+                }
+            },
+            "--help" | "-h" => {
+                println!("blitzkrieg version [--json] [--core] [--socket <path>]");
+                println!();
+                println!("Default: print THIS binary's version and build info (what is on disk).");
+                println!("--core:  ask the kernel running on <socket> instead (what is running).");
+                println!("--json:  structured output (version/gitHash/gitDirty/buildDate/target,");
+                println!(
+                    "         plus updateAvailable/latestVersion with --core; null = not checked)."
+                );
+                return std::process::ExitCode::SUCCESS;
+            }
+            other => {
+                eprintln!("blitzkrieg: version: unknown argument '{other}'");
+                eprintln!("See 'blitzkrieg version --help'.");
+                return std::process::ExitCode::from(2);
+            }
+        }
+    }
+
+    let info = blitzkrieg_build_info::BUILD_INFO;
+
+    if !ask_core {
+        if json {
+            // One spelling of the JSON shape, from the shared crate (§3.3).
+            println!("{}", info.to_json());
+        } else {
+            print!("{}", local_version_text(&info));
+        }
+        return std::process::ExitCode::SUCCESS;
+    }
+
+    // `--core`: talk to the kernel. Socket resolution reuses the existing rule;
+    // the call gets its own connection on the blocking pool (E14: no blocking
+    // IPC on the async workers — same shape as net-check).
+    let socket = socket.unwrap_or_else(resolve_socket_path);
+    let target = socket.clone();
+    let asked = tokio::task::spawn_blocking(move || {
+        let mut client = IpcClient::new(target);
+        client.system_version()
+    })
+    .await;
+
+    let v = match asked {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            // Exit 1 = "could not ask", distinct from usage errors (2): a script
+            // can tell "not installed right" from "not running".
+            eprintln!("blitzkrieg: version: no core on {socket}: {e}");
+            eprintln!("  (drop --core to read the version installed on disk.)");
+            return std::process::ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("blitzkrieg: version task failed: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    if json {
+        // The kernel already sent the full shape; forwarding it verbatim is the
+        // most faithful answer (no local re-serialisation to drift).
+        println!("{}", v.raw_json);
+    } else {
+        println!("BlitzkriegBot {} (running core)", v.version);
+        println!(
+            "  git      {} ({})",
+            v.git_hash,
+            if v.git_dirty { "dirty" } else { "clean" }
+        );
+        println!("  built    {}", v.build_date);
+        println!("  target   {}", v.target);
+        println!("  socket   {socket}");
+        // Three states, never collapsed to two: null means "not checked",
+        // which must stay distinguishable from "up to date" (INV-3).
+        match (&v.update_available, &v.latest_version) {
+            (Some(true), Some(latest)) => {
+                println!(
+                    "  update   {latest} available (auto-update: {})",
+                    v.auto_update
+                )
+            }
+            (Some(true), None) => println!("  update   available (auto-update: {})", v.auto_update),
+            (Some(false), _) => println!("  update   up to date"),
+            (None, _) => println!("  update   not checked (update checking is off by default)"),
+        }
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+/// The 4-line human form of the on-disk build info. Factored out pure so the
+/// format is pin-able by a unit test without capturing stdout.
+fn local_version_text(info: &blitzkrieg_build_info::BuildInfo) -> String {
+    format!(
+        "BlitzkriegBot {}\n  git      {} ({})\n  built    {}\n  target   {}\n",
+        info.version,
+        info.git_hash,
+        if info.is_dirty() { "dirty" } else { "clean" },
+        info.build_date,
+        info.target,
+    )
+}
+
+/// `blitzkrieg update [--check] [--install] [--socket <path>]` — the update
+/// surface (VERSIONING.md §7.5).
+///
+/// `--check` (the default) asks the RUNNING kernel to perform one update check;
+/// the kernel owns the switch and the verdict, this verb only relays them.
+///
+/// `--install` is a deliberate deferral (VERSIONING.md §12.2): installing ships
+/// WITH the release pipeline in 0.2.5, because the installer needs signed,
+/// hash-listed release assets — and the archive unpacking would need `tar` /
+/// `flate2`, which the dependency tree deliberately does not carry (P26).
+/// Until then `blitzkrieg upgrade` is the shipped, tested install path. The
+/// verification primitives it will use already live in
+/// [`blitzkrieg_ui_panel::update`] with their refusal tests.
+///
+/// Exit codes: 0 answered · 1 no core / cannot install · 2 usage error.
+async fn run_update_subcommand(args: Vec<String>) -> std::process::ExitCode {
+    let mut install = false;
+    let mut socket: Option<String> = None;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--check" => {}
+            "--install" => install = true,
+            "--yes-while-holding" => {
+                // Accepted so a script written against the 0.2.5 CLI already
+                // parses; it only ever matters to the installer.
+                eprintln!("blitzkrieg: update: --yes-while-holding only matters with --install");
+            }
+            "--socket" => match it.next() {
+                Some(p) => socket = Some(p),
+                None => {
+                    eprintln!("blitzkrieg: update: --socket needs a path");
+                    return std::process::ExitCode::from(2);
+                }
+            },
+            "--help" | "-h" => {
+                println!("blitzkrieg update [--check] [--install] [--socket <path>]");
+                println!();
+                println!(
+                    "--check  (default) ask the running kernel to check the release feed once."
+                );
+                println!("         The kernel's checkEnabled switch governs this: with the switch");
+                println!("         off the kernel refuses, and nothing is sent to the network.");
+                println!("--install  not available yet — install lands with the release pipeline");
+                println!("           (VERSIONING.md 0.2.5); use `blitzkrieg upgrade` meanwhile.");
+                return std::process::ExitCode::SUCCESS;
+            }
+            other => {
+                eprintln!("blitzkrieg: update: unknown argument '{other}'");
+                eprintln!("See 'blitzkrieg update --help'.");
+                return std::process::ExitCode::from(2);
+            }
+        }
+    }
+
+    if install {
+        eprintln!(
+            "blitzkrieg: update: --install is not available in this build — install ships with \
+             the release pipeline (VERSIONING.md 0.2.5)."
+        );
+        eprintln!("  Until then: blitzkrieg upgrade (builds from source, verifies, keeps a rollback point).");
+        return std::process::ExitCode::FAILURE;
+    }
+
+    let socket = socket.unwrap_or_else(resolve_socket_path);
+    let target = socket.clone();
+    let asked = tokio::task::spawn_blocking(move || {
+        let mut client = IpcClient::new(target);
+        client.update_check().map_err(|e| e.to_string())
+    })
+    .await;
+
+    let verdict = match asked {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            eprintln!("blitzkrieg: update: no answer from the core on {socket}: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("blitzkrieg: update task failed: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    // The three states, verbatim — null is "not checked", never "up to date".
+    match verdict.update_available {
+        Some(true) => println!(
+            "BlitzkriegBot {} → {} available (auto-update: {})",
+            verdict.version,
+            verdict.latest_version.as_deref().unwrap_or("?"),
+            verdict.auto_update
+        ),
+        Some(false) => println!("BlitzkriegBot {} — up to date", verdict.version),
+        None => println!(
+            "BlitzkriegBot {} — check failed, status unknown (see the core log)",
+            verdict.version
+        ),
+    }
+    std::process::ExitCode::SUCCESS
 }
 
 /// Unified launcher: starts the core and the UI together in a single command.
@@ -827,5 +1078,53 @@ mod tests {
     fn assets_are_uppercased_and_trimmed() {
         let cli = parse(&["--assets", " btc , eth ,,"]).expect("assets parse");
         assert_eq!(cli.assets, Some(vec!["BTC".into(), "ETH".into()]));
+    }
+
+    // ── version subcommand formats (VERSIONING.md V2-4) ──────────────────────
+    // `--version` must print exactly one gate-parsable line and boot nothing;
+    // the no-boot half is proven end-to-end by the provenance gates (F4), which
+    // run the real binary. Here the FORMATS are pinned.
+
+    #[test]
+    fn version_string_is_a_single_gate_parsable_line() {
+        let v = blitzkrieg_build_info::BUILD_INFO.version_string();
+        assert!(!v.contains(char::is_whitespace), "no spaces allowed: {v}");
+        let (semver, meta) = v.split_once('+').expect("must carry +<metadata>");
+        assert!(
+            semver.chars().all(|c| c.is_ascii_digit() || c == '.'),
+            "semver half: {v}"
+        );
+        assert!(
+            meta == "nogit"
+                || (meta.starts_with('g') && meta[1..].chars().all(|c| c.is_ascii_hexdigit())),
+            "metadata half: {v}"
+        );
+    }
+
+    #[test]
+    fn local_version_text_has_the_four_documented_lines() {
+        let text = local_version_text(&blitzkrieg_build_info::BUILD_INFO);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "{text}");
+        assert!(lines[0].starts_with("BlitzkriegBot "), "{text}");
+        assert!(lines[1].starts_with("  git      "), "{text}");
+        assert!(lines[2].starts_with("  built    "), "{text}");
+        assert!(lines[3].starts_with("  target   "), "{text}");
+    }
+
+    #[test]
+    fn local_version_json_carries_the_contract_keys() {
+        // The launcher's --json IS the shared crate's to_json(); pinning it here
+        // keeps a refactor from swapping in a hand-rolled shape.
+        let j = blitzkrieg_build_info::BUILD_INFO.to_json();
+        for key in [
+            "\"version\"",
+            "\"gitHash\"",
+            "\"gitDirty\"",
+            "\"buildDate\"",
+            "\"target\"",
+        ] {
+            assert!(j.contains(key), "{j} is missing {key}");
+        }
     }
 }

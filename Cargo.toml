@@ -4,6 +4,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "core/build_support", # 构建期注入逻辑（build.rs 专用，VERSIONING.md §3.2）
+    "core/build_info", # 运行期构建常量的唯一出口（BUILD_INFO）
     "core/market_api",
     "core/blitzkrieg_core",
     "extensions/polymarket",
@@ -18,6 +20,14 @@ members = [
 # intentionally excluded so they carry their own Cargo.lock like a real external
 # strategy author would.
 exclude = ["user_layer/strategies", "user_layer/parity_strategy", "ui/webapp/src-tauri"]
+
+# ── 版本单事实来源（VERSIONING.md §3）────────────────────────────────────────
+# 这是全仓库唯一人工编辑的版本号。任何 crate 都不得再写死 version（用
+# `version.workspace = true` 继承）；scripts/version-guard.mjs 是这条规则的守卫。
+# 语义化 `<major>.<minor>.<patch>[-rc.N]`；tag 形态为 v<version>，由 CI 守卫。
+# 注意：构建元数据（+g<sha>）不写在这里 —— 它由 build.rs 在运行时拼接。
+[workspace.package]
+version = "0.2.1"
 
 # ── Release profile (E10-d) ──────────────────────────────────────────────────
 # Size/performance hardening for shipped binaries. Measured, not guessed: see

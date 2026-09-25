@@ -1,6 +1,6 @@
 [package]
 name = "blitzkrieg-strategy-api"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "Frozen C ABI for user-layer Blitzkrieg strategies (dynamic libraries)."
 

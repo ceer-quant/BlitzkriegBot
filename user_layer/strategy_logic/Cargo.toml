@@ -1,6 +1,6 @@
 [package]
 name = "strategy-logic"
-version = "0.2.0"
+version.workspace = true
 edition = "2024"
 description = "Deterministic strategy primitives shared by the kernel and every external strategy: price buffers, trackers, entry evaluators, knob declarations"
 license = "MIT OR Apache-2.0"

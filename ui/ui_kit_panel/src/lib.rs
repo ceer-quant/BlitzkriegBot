@@ -10,6 +10,7 @@ pub mod env_file;
 pub mod input;
 pub mod stop_stack;
 pub mod ui;
+pub mod update;
 
 pub use app::{Action, App, Tab};
 use blitzkrieg_ui_kit::gateway::{command_lines, Dispatcher, SupervisorConfig};
@@ -36,6 +37,12 @@ pub enum Msg {
     PluginsLoaded(UiSnapshot),
     /// The network self-check answered (`Ok`) or could not be asked (`Err`).
     NetCheckLoaded(Result<blitzkrieg_ui_kit::core::types::NetCheckReportView, String>),
+    /// The update check answered; the verdict is the fresh `system.version`.
+    UpdateCheckLoaded(Result<blitzkrieg_ui_kit::core::types::SystemVersionView, String>),
+    /// The auto-update switch write landed (`Ok(new_value)` or `Err`).
+    UpdateConfigured(Result<bool, String>),
+    /// The launcher-side install subprocess finished with its captured output.
+    UpdateInstallDone(Result<String, String>),
     /// A decoded core-event batch arrived on the EventBus.
     Events(Vec<blitzkrieg_ui_kit::core::types::CoreEvent>),
     /// The process received an external termination signal.
@@ -86,6 +93,7 @@ pub fn parse_args_from(args: impl IntoIterator<Item = String>) -> PanelArgs {
                     Some("3") | Some("trades") => Tab::Trades,
                     Some("4") | Some("plugins") => Tab::Plugins,
                     Some("5") | Some("evolution") => Tab::Evolution,
+                    Some("6") | Some("settings") => Tab::Settings,
                     _ => Tab::Overview,
                 }
             }
@@ -119,11 +127,11 @@ FLAGS:
   --interval-ms  Snapshot refresh interval (default 1000)
   --manage       Enable lifecycle commands (start/stop). Off by default.
   --attach       Attach to an existing core in monitor mode (disables lifecycle)
-  --tab          Initial view: 1 Overview (default), 2 Positions, 3 Trades, 4 Plugins, 5 Evolution
+  --tab          Initial view: 1 Overview (default), 2 Positions, 3 Trades, 4 Plugins, 5 Evolution, 6 Settings
 
 KEYS:
   q / Ctrl-C  quit          :  focus command bar
-  1-5 / Tab   switch view   r  refresh now
+  1-6 / Tab   switch view   r  refresh now
   ↑/↓         move selection (Plugins / Evolution)
   a x d       Evolution: accept / reject / defer the selected proposal
   e u         Evolution: toggle auto-evolve / rollback selected strategy
@@ -341,6 +349,64 @@ pub async fn run_panel_with_dispatcher(
                             dispatch_command(&dispatcher, &tx, &cmd).await;
                         }
                     }
+                    Action::UpdateCheck => {
+                        // A FRESH client on its own connection (same reasoning
+                        // as NetCheck): the check dials GitHub with its own
+                        // timeout and must not hold the snapshot poller.
+                        let socket = app.socket.clone();
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            let out = tokio::task::spawn_blocking(move || {
+                                let mut client =
+                                    blitzkrieg_ui_kit::core::ipc_client::IpcClient::new(socket);
+                                client.update_check().map_err(|e| e.to_string())
+                            })
+                            .await;
+                            let msg = match out {
+                                Ok(r) => Msg::UpdateCheckLoaded(r),
+                                Err(e) => Msg::UpdateCheckLoaded(Err(format!("task: {e}"))),
+                            };
+                            let _ = tx.send(msg);
+                        });
+                    }
+                    Action::UpdateConfigure(on) => {
+                        let socket = app.socket.clone();
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            let out = tokio::task::spawn_blocking(move || {
+                                let mut client =
+                                    blitzkrieg_ui_kit::core::ipc_client::IpcClient::new(socket);
+                                // Only the AUTO switch is touched here; the
+                                // outbound-check switch is the operator's
+                                // config decision, not a panel checkbox.
+                                client
+                                    .update_configure(None, Some(on))
+                                    .map_err(|e| e.to_string())
+                            })
+                            .await;
+                            let msg = match out {
+                                Ok(Ok(v)) => Msg::UpdateConfigured(Ok(v
+                                    .get("autoUpdate")
+                                    .and_then(|b| b.as_bool())
+                                    .unwrap_or(on))),
+                                Ok(Err(e)) => Msg::UpdateConfigured(Err(e)),
+                                Err(e) => Msg::UpdateConfigured(Err(format!("task: {e}"))),
+                            };
+                            let _ = tx.send(msg);
+                        });
+                    }
+                    Action::UpdateInstall => {
+                        // Deliberate deferral (VERSIONING.md §12.2): install
+                        // ships WITH the release pipeline in 0.2.5, because an
+                        // installer without signed, hash-listed release assets
+                        // has nothing legitimate to install. Until then the
+                        // shipped upgrade path stays `blitzkrieg upgrade`.
+                        app.log(
+                            "auto-install lands with the release pipeline (VERSIONING.md \
+                             0.2.5) — until then use `blitzkrieg upgrade`"
+                                .to_string(),
+                        );
+                    }
                     Action::RunCommand(cmd) => {
                         dispatch_command(&dispatcher, &tx, &cmd).await;
                     }
@@ -461,10 +527,41 @@ pub async fn run_panel_with_dispatcher(
                     }
                 }
             }
+            Msg::UpdateCheckLoaded(result) => {
+                app.update_busy = false;
+                match result {
+                    Ok(sv) => {
+                        // The verdict is the fresh system.version: the same
+                        // three-state rendering the Settings pane uses.
+                        match sv.update_available {
+                            Some(true) => {
+                                app.log(format!(
+                                    "update check: {} available (auto-update: {})",
+                                    sv.latest_version.as_deref().unwrap_or("?"),
+                                    sv.auto_update
+                                ));
+                            }
+                            Some(false) => app.log("update check: up to date".to_string()),
+                            None => app.log("update check: failed — status unknown".to_string()),
+                        }
+                    }
+                    Err(e) => app.log(format!("update check failed: {e}")),
+                }
+            }
+            Msg::UpdateConfigured(result) => {
+                app.update_busy = false;
+                match result {
+                    Ok(on) => app.log(format!(
+                        "auto-update is now {} (persisted by the kernel; restart-safe)",
+                        if on { "ON" } else { "OFF" }
+                    )),
+                    Err(e) => app.log(format!("auto-update toggle failed: {e}")),
+                }
+            }
+            Msg::UpdateInstallDone(_) => { /* deferred with the release pipeline */ }
             Msg::RefreshError(e) => app.log(format!("refresh error: {e}")),
             Msg::Shutdown => app.should_quit = true,
         }
-
         if app.should_quit {
             break;
         }
@@ -614,8 +711,11 @@ mod tests {
         assert!(app.toggle_needs_confirmation("rollback mean_reversion"));
         assert!(!app.toggle_needs_confirmation("decide prop-42 reject"));
 
-        // Tab cycles through all five pages: from Evolution one press wraps
-        // back to Overview, four more come the long way round to Evolution.
+        // Tab cycles through all six pages: from Evolution one press lands on
+        // Settings (VERSIONING.md §6.2), the next wraps back to Overview, and
+        // four more come the long way round to Evolution again.
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.tab, Tab::Settings);
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.tab, Tab::Overview);
         for _ in 0..4 {
@@ -627,6 +727,51 @@ mod tests {
         assert_eq!(
             parse_args_from(["--tab".into(), "5".into()]).tab,
             Tab::Evolution
+        );
+    }
+
+    /// VERSIONING.md V5-3: the Settings keys. `a` must ASK (nothing flips the
+    /// auto-replace switch silently), and the confirmed answer routes to the
+    /// update verb, not the gateway dispatcher. `i` is gated on auto-update
+    /// being ON, exactly like the sketch says.
+    #[test]
+    fn settings_tab_asks_before_flipping_auto_update() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let mut app = App::new("test.sock".into(), false);
+        app.on_key(key('6'));
+        assert_eq!(app.tab, Tab::Settings);
+
+        // `a`: auto-update starts OFF, so the toggle targets ON and asks first.
+        assert!(matches!(app.on_key(key('a')), Action::None));
+        assert_eq!(
+            app.pending_confirmation.as_deref(),
+            Some("update.auto on"),
+            "the confirm bar must name the pending flip"
+        );
+        // `y` resolves the confirm into the configure verb.
+        assert!(matches!(
+            app.on_key(key('y')),
+            Action::UpdateConfigure(true)
+        ));
+
+        // `i` with auto-update OFF is a no-op with an explanation, never a
+        // silent action (auto-update is OFF by default, INV-3).
+        assert!(matches!(app.on_key(key('i')), Action::None));
+
+        // `c` with the check switch off says WHY instead of dialling (the
+        // default snapshot carries checkEnabled=false).
+        app.snap.system_version = Some(blitzkrieg_ui_kit::core::types::SystemVersionView {
+            version: "0.2.1".into(),
+            check_enabled: false,
+            ..Default::default()
+        });
+        assert!(matches!(app.on_key(key('c')), Action::None));
+        assert!(
+            app.logs.iter().any(|l| l.contains("disabled")),
+            "the disabled message must be logged: {:?}",
+            app.logs
         );
     }
 }

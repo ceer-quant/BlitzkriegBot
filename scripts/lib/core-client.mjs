@@ -361,6 +361,7 @@ export async function requestOnce(socketPath, method, params = {}, { timeoutMs =
 export const rpc = {
   ping: (c) => c.request('core.ping'),
   ready: (c) => c.request('core.ready'),
+  systemVersion: (c) => c.request('system.version'),
   placeOrder: (c, p) => c.request('orders.place', {
     ...p,
     makerTimeoutMs: p.makerTimeoutMs ?? 0,

@@ -208,6 +208,23 @@ export const api = {
    * 一次 —— 那次的result 就是答案。
    */
   probeNetCheck: () => request<NetCheckDoc>('/netcheck/probe', { method: 'POST' }),
+
+  /**
+   * 设置页「检查更新」按钮（VERSIONING.md §6.3）。网关只负责把请求转给内核并
+   * 立即返回 —— 内核拨 GitHub 以秒计，网关的单线程接受循环绝不等它。轮询
+   * snapshot 的 `systemVersion` 直到 `lastCheckMs` 变化；`error` 非空时是内核
+   * 明确拒绝（例如 checkEnabled=false），必须原样展示，不许静默。
+   */
+  updateCheck: () => request<{ started: boolean; running?: boolean; error?: string }>('/version/check', { method: 'POST' }),
+  /**
+   * 设置页「自动更新」开关（VERSIONING.md §7.4）。内核是开关的唯一事实来源：
+   * 它落盘 + 落审计后回显新值；写盘失败必须报错（静默回退的开关比没有更糟）。
+   */
+  updateConfigure: (autoUpdate: boolean) =>
+    request<{ ok: boolean; autoUpdate?: boolean; error?: string }>('/version/configure', {
+      method: 'POST',
+      body: JSON.stringify({ autoUpdate }),
+    }),
 }
 
 // ── 网络自检（mirror core/market_api + ui_kit core/types.rs + web/mod.rs 缓存）─
@@ -536,11 +553,36 @@ export interface Snapshot {
   } | null
   strategyStats?: StrategyStatsRow[]
   /**
+   * VERSIONING.md §5 — version + build provenance + update state of the
+   * serving core. `null`/absent on older gateways or cores: read as
+   * "unavailable", never as a fabricated version (§5.6).
+   */
+  systemVersion?: SystemVersion | null
+  /**
    * E13 evolution block — pending proposals + the switch/cycle clock. Absent on
    * older gateways (treat as "no proposal workflow"); never present with a
    * partial status: the gateway always writes both keys together.
    */
   evolution?: EvolutionDoc | null
+}
+
+/**
+ * `system.version` (VERSIONING.md §5.3): the serving core's self-description.
+ * `updateAvailable` is THREE-STATE — `null` = not checked (checks are OFF by
+ * default), which must never be rendered as "up to date" (INV-3).
+ */
+export interface SystemVersion {
+  version: string
+  gitHash: string
+  gitDirty: boolean
+  buildDate: string
+  target: string
+  updateAvailable: boolean | null
+  latestVersion: string | null
+  autoUpdate: boolean
+  checkEnabled: boolean
+  lastCheckMs: number | null
+  releaseUrl: string | null
 }
 
 export interface PluginRow {

@@ -134,6 +134,14 @@ pub struct CoreConfig {
     /// Discover rounds inside the core (Gamma slug queries) instead of relying on
     /// Node to push `engine.markets`. Default true when the engine is on.
     pub discovery_enabled: bool,
+    /// Update-check switches (VERSIONING.md §7). Resolved in `main` through
+    /// CLI > env > `configs/update.toml`; the runtime cell persisted in
+    /// `data/update/state.json` outranks all three. Both default false — a
+    /// default-configured stack makes zero outbound connections (INV-3).
+    pub update_check_enabled: bool,
+    /// Apply an update automatically (the kernel still never installs: the
+    /// launcher owns that, P12). Default false.
+    pub update_auto: bool,
     /// Start with Shadow Evolution enabled (opt-in; default false).
     pub shadow_evolution_enabled: bool,
     /// Optional Shadow Evolution tuning (tests/ops). None = crate defaults.
@@ -617,6 +625,8 @@ impl Default for CoreConfig {
             order_log_path: Some("data/orders/orders.jsonl".to_string()),
             position_log_path: Some("data/positions/positions.jsonl".to_string()),
             discovery_enabled: true,
+            update_check_enabled: false,
+            update_auto: false,
             shadow_evolution_enabled: false,
             shadow_evolution_tuning: None,
             strategy_limits: HashMap::new(),

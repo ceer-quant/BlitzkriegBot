@@ -417,6 +417,28 @@ pub async fn run(
         });
     }
 
+    // Process-level update state (VERSIONING.md §5.5): deliberately outside
+    // `Core`, so version questions never wait behind the trading lock. The
+    // initial switches come from the resolved boot config (CLI > env > TOML;
+    // built-in default off); the runtime cell persisted in
+    // `data/update/state.json` outranks all three and is restored first. The
+    // startup check spawns ONLY if the (restored) switch is on — with the
+    // shipped defaults this mount is a no-op and the stack makes zero
+    // outbound connections.
+    let update_state = Arc::new(crate::ipc::version::UpdateState::new(
+        config.update_check_enabled,
+        config.update_auto,
+    ));
+    crate::ipc::version::load_into(&update_state);
+    let github_token = std::env::var("BLITZKRIEG_GITHUB_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty());
+    crate::ipc::version::spawn_startup_check(
+        update_state.clone(),
+        crate::ipc::build_info::BUILD_INFO.version.to_string(),
+        github_token,
+    );
+
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
@@ -447,7 +469,14 @@ pub async fn run(
                             peer.describe()
                         );
                     }
-                    spawn_session(stream, peer, core.clone(), bus_tx.subscribe(), registry.clone())
+                    spawn_session(
+                        stream,
+                        peer,
+                        core.clone(),
+                        bus_tx.subscribe(),
+                        registry.clone(),
+                        update_state.clone(),
+                    )
                 }
                 Err(e) => tracing::warn!(error = %e, "accept failed"),
             },
@@ -468,6 +497,7 @@ fn spawn_session(
     core: Arc<AsyncMutex<Core>>,
     events: broadcast::Receiver<Event>,
     registry: crate::market::registry::MarketPluginRegistry,
+    update_state: Arc<crate::ipc::version::UpdateState>,
 ) {
     tokio::spawn(async move {
         let (read_half, write_half) = stream.into_split();
@@ -507,7 +537,7 @@ fn spawn_session(
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) if !line.trim().is_empty() => {
-                    let response = handle_line(&core, &registry, line, &peer).await;
+                    let response = handle_line(&core, &registry, line, &peer, &update_state).await;
                     if out_tx.send(format!("{response}\n")).is_err() {
                         break;
                     }
@@ -526,6 +556,7 @@ async fn handle_line(
     registry: &crate::market::registry::MarketPluginRegistry,
     line: String,
     peer: &PeerAuth,
+    update_state: &Arc<crate::ipc::version::UpdateState>,
 ) -> String {
     let req: Request = match serde_json::from_str(&line) {
         Ok(r) => r,
@@ -577,6 +608,113 @@ async fn handle_line(
                 "peerAuth": peer.describe(),
                 "socketMode": format!("{SOCKET_MODE:04o}"),
             }))
+        }
+
+        // VERSIONING.md §5: version + build provenance + update state.
+        // Read-only, zero side effects, NO Core lock — it must answer while the
+        // data lock is still starting ("which build is running" cannot wait for
+        // startup), which is why the update state is a separate cell.
+        method::SYSTEM_VERSION => Ok(serde_json::to_value(
+            crate::ipc::version::system_version_payload(
+                crate::ipc::build_info::BUILD_INFO,
+                &update_state.snapshot(),
+            ),
+        )
+        .unwrap_or(Value::Null)),
+
+        // VERSIONING.md §7.4: the update switches. A write lands an audit
+        // record AND must persist — a switch that silently reverts on restart
+        // is a switch the operator believed was on.
+        method::SYSTEM_UPDATE_CONFIGURE => {
+            match serde_json::from_value::<crate::ipc::version::UpdateConfigureParams>(
+                params.clone(),
+            ) {
+                Err(e) => Err((Failure::INVALID_PARAMS, format!("{e}"), None)),
+                Ok(req) => {
+                    // Audit: who turned "may auto-replace binaries" on. A
+                    // security-relevant state change, recorded at risk.kill's
+                    // level; the actor is the kernel-recorded peer uid, not a
+                    // caller's claim.
+                    let actor = match peer {
+                        PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                        _ => "uid:unknown".to_string(),
+                    };
+                    update_state.set_enabled(req.check_enabled, req.auto_update);
+                    match crate::ipc::version::persist(update_state) {
+                        // A switch that did not land on disk silently reverts on
+                        // restart while the operator believes it was on — so the
+                        // caller MUST hear about it.
+                        Err(e) => Err((
+                            Failure::APPLICATION,
+                            format!("update state not persisted: {e}"),
+                            None,
+                        )),
+                        Ok(()) => {
+                            let s = update_state.snapshot();
+                            crate::ipc::version::audit_event(&serde_json::json!({
+                                "ts": now_ms(),
+                                "event": "update.configure",
+                                "actor": actor,
+                                "checkEnabled": s.check_enabled,
+                                "autoUpdate": s.auto_update,
+                            }));
+                            Ok(serde_json::json!({
+                                "checkEnabled": s.check_enabled,
+                                "autoUpdate": s.auto_update,
+                            }))
+                        }
+                    }
+                }
+            }
+        }
+
+        method::SYSTEM_UPDATE_CHECK => {
+            // The manual check is ALSO bound by check_enabled: the switch means
+            // "may go out at all", not "may go out automatically". A disabled
+            // button answers clearly instead of sneaking a request out.
+            if !update_state.snapshot().check_enabled {
+                Err((
+                    Failure::APPLICATION,
+                    "update checking is disabled (checkEnabled=false); enable it in \
+                     user_layer/configs/update.toml or via system.update.configure"
+                        .to_string(),
+                    None,
+                ))
+            } else {
+                let actor = match peer {
+                    PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                    _ => "uid:unknown".to_string(),
+                };
+                let local = crate::ipc::build_info::BUILD_INFO.version.to_string();
+                let token = std::env::var("BLITZKRIEG_GITHUB_TOKEN")
+                    .ok()
+                    .filter(|t| !t.trim().is_empty());
+                // Ok and Err are both values, never escapes: the fetch result is
+                // consumed by check_once, which writes whatever happened into the
+                // state cell.
+                crate::ipc::version::check_once(
+                    update_state,
+                    &local,
+                    now_ms() as u64,
+                    crate::ipc::version::fetch_latest(token),
+                )
+                .await;
+                let s = update_state.snapshot();
+                crate::ipc::version::audit_event(&serde_json::json!({
+                    "ts": now_ms(),
+                    "event": "update.check",
+                    "actor": actor,
+                    "outcome": s.outcome.token(),
+                    "latest": s.latest,
+                }));
+                Ok(
+                    serde_json::to_value(crate::ipc::version::system_version_payload(
+                        crate::ipc::build_info::BUILD_INFO,
+                        &s,
+                    ))
+                    .unwrap_or(Value::Null),
+                )
+            }
         }
 
         // Read-only fee schedule (#182). Stateless: no lock on the order book, no
@@ -1682,7 +1820,8 @@ mod tests {
         peer: &PeerAuth,
         line: String,
     ) -> Value {
-        serde_json::from_str(&handle_line(core, registry, line, peer).await)
+        let update_state = Arc::new(crate::ipc::version::UpdateState::new(false, false));
+        serde_json::from_str(&handle_line(core, registry, line, peer, &update_state).await)
             .expect("every reply is one JSON object")
     }
 
@@ -1922,5 +2061,97 @@ mod tests {
             serde_json::json!("FILLED"),
             "the probe must be a real, filled order: {probe}"
         );
+    }
+
+    // ── VERSIONING.md §7.4: the update verbs, at the wire ────────────────────
+
+    /// Like [`rpc`], but the caller owns the update state — the verbs read AND
+    /// write it, so a test has to hold the same cell the branch holds.
+    async fn rpc_with_updates(
+        core: &Arc<AsyncMutex<Core>>,
+        registry: &crate::market::registry::MarketPluginRegistry,
+        peer: &PeerAuth,
+        update_state: &Arc<crate::ipc::version::UpdateState>,
+        line: String,
+    ) -> Value {
+        serde_json::from_str(&handle_line(core, registry, line, peer, update_state).await)
+            .expect("every reply is one JSON object")
+    }
+
+    /// A2's wire shape: with the switch off, `system.update.check` answers a
+    /// clear APPLICATION error — and the state stays NotChecked, which is only
+    /// possible because the fetch future is never even polled (INV-3).
+    #[tokio::test]
+    async fn a_disabled_update_check_is_refused_by_name() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let updates = Arc::new(crate::ipc::version::UpdateState::new(false, false));
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &updates,
+            r#"{"jsonrpc":"2.0","id":1,"method":"system.update.check","params":{}}"#.to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "a disabled check must be refused, not silently answered: {reply}"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("checkEnabled=false"),
+            "the refusal must say WHY: {reply}"
+        );
+        assert_eq!(
+            updates.snapshot().outcome,
+            crate::ipc::version::CheckOutcome::NotChecked,
+            "no request may have been made, not even a failed one"
+        );
+    }
+
+    /// The configure verb: the answer carries the new switch values, the state
+    /// cell holds them, and they LAND ON DISK (`data/update/state.json`) —
+    /// which is the whole point: a switch that silently reverts on restart is
+    /// a switch the operator believed was on. The audit line lands beside it.
+    #[tokio::test]
+    async fn update_configure_answers_and_persists() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let updates = Arc::new(crate::ipc::version::UpdateState::new(false, false));
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &updates,
+            r#"{"jsonrpc":"2.0","id":1,"method":"system.update.configure","params":{"checkEnabled":true,"autoUpdate":false}}"#.to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "a valid configure must succeed: {reply}"
+        );
+        assert_eq!(reply["result"]["checkEnabled"], serde_json::json!(true));
+        assert_eq!(reply["result"]["autoUpdate"], serde_json::json!(false));
+        assert!(updates.snapshot().check_enabled, "the cell must hold it");
+
+        // The state.json the next startup will read back.
+        let doc: Value = serde_json::from_str(
+            &std::fs::read_to_string("data/update/state.json")
+                .expect("configure must persist the switch state"),
+        )
+        .expect("persisted state is JSON");
+        assert_eq!(doc["checkEnabled"], serde_json::json!(true));
+        assert_eq!(doc["autoUpdate"], serde_json::json!(false));
+
+        // The audit trail names the event (the actor test is uid-shape only —
+        // the fixture's peer is the test process's own uid).
+        let audit = std::fs::read_to_string("data/update/audit.jsonl")
+            .expect("configure must append an audit line");
+        assert!(audit.contains("\"event\":\"update.configure\""), "{audit}");
+
+        // Cleanup: these two files belong to this test alone.
+        let _ = std::fs::remove_dir_all("data/update");
     }
 }

@@ -199,6 +199,14 @@ pub mod method {
     /// Supply the current round's UP/DOWN markets (discovered by Node's scanner
     /// in P3-transition; the Rust scanner takes over in P4).
     pub const ENGINE_MARKETS: &str = "engine.markets";
+    /// Version + build provenance + update state (VERSIONING.md §5).
+    /// Request: empty params `{}`; reply: a `SystemVersion` payload. Read-only,
+    /// side-effect-free, takes no Core lock.
+    pub const SYSTEM_VERSION: &str = "system.version";
+    /// Read/write of the update switches (§7.4). The write lands an audit record.
+    pub const SYSTEM_UPDATE_CONFIGURE: &str = "system.update.configure";
+    /// One manual update check (the UI's "check for updates" button).
+    pub const SYSTEM_UPDATE_CHECK: &str = "system.update.check";
 }
 
 // ── Typed params / results ───────────────────────────────────────────────────

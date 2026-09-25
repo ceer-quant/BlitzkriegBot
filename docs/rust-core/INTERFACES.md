@@ -41,6 +41,7 @@
 |:---|:---|:---|
 | `core.ping` | `{}` | `{ "pong": true, "ts": <ms> }` |
 | `core.ready` | `{}` | `{ "version", "mode", "authenticated", "signer", "funder" }` |
+| `system.version` | `{}` | `{ "version", "gitHash", "gitDirty", "buildDate", "target", "updateAvailable", "latestVersion", "autoUpdate", "checkEnabled", "lastCheckMs", "releaseUrl" }` —— 版本 + 构建来源 + 更新状态。`updateAvailable`/`latestVersion`/`lastCheckMs`/`releaseUrl` 可空；`updateAvailable` 是**三态**：`null` = 尚未检查（更新检查默认关闭）≠ `false` = 已是最新，消费方不得把 `null` 画成「已是最新」。只读、无副作用、**不取 Core 锁**（数据锁未就绪时也必须能回答）。逐字段契约见 `docs/VERSIONING.md` §5.3 |
 
 ### 2.2 订单 / 持仓 / 账本
 | method | params | result |
@@ -273,3 +274,4 @@ core.set_strategy_enabled("my_strategy", false);
 | 1.1 | 网络诊断：新增只读方法 `net.check`（`NetCheckReport`，见 §2.8），以及内核一次性开关 `--net-check`（输出 JSON、不起内核、不碰 `data/`）、启动器子命令 `blitzkrieg net-check [--json] [--socket]`、面板路由 `GET /api/netcheck` + `POST /api/netcheck/probe`。协议加项，向后兼容，版本号不变；探测能力来自市场插件（`MarketPlugin::net_check`，默认 `unsupported`） |
 | 1.1 | 受限配置热加载（Issue #191）：新增 `risk.setLimits`（见 §2.5），只允许热改**开仓限额**（每笔/组合名义上限 + 开仓股数区间），白名单之外一律**明确拒绝**并要求重启；**只改内存、不落盘**（响应 `persisted: false`），审计走既有 `target: "risk"` INFO 日志（actor/字段/旧值/新值/reason）。协议加项，向后兼容，版本号不变 |
 | 1.1 | 内核零策略（2026-09-23）：删除自带的 5 个策略（`spread_arb`/`trend_follow`/`mean_reversion`/`pair_arb`/`dog`）。**协议本身无变化**——`strategy.list` 的形状、`strategy.load` 的回执、`engine.stats` 的字段都没动，变的只是「出厂时列表为空」。上面几条 E4-a/E4-b 的记录保留为历史：它们描述的是当时的注册行为，那些注册点已不存在 |
+| 1.1 | 版本单事实来源（docs/VERSIONING.md E-V1..V3，2026-09-25）：新增只读方法 `system.version`（版本 + 构建来源 + 更新三态；`updateAvailable: null=未检查 ≠ false=已是最新`；不取 Core 锁，数据锁未就绪也可回答），字段契约见 `docs/VERSIONING.md` §5.3。启动器同步补 `--version`/`-V`/`-v` 短路（不再落入 `run_unified` 启动路径，#228 同形风险）与 `blitzkrieg version [--json] [--core] [--socket]` 子命令（`--core` 即问本方法；旧内核返回 unknown method，UI 不得编造空版本）。workspace 全成员版本继承根 `[workspace.package].version`，由 `scripts/version-guard.mjs` 守卫。协议加项，向后兼容，版本号不变 |

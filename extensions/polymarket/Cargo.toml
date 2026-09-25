@@ -1,6 +1,6 @@
 [package]
 name = "polymarket-extension"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "Official Polymarket market extension for Blitzkrieg core (Poly1271, CLOB, Gamma discovery)."
 

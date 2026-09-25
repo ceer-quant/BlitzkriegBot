@@ -9,10 +9,11 @@
  * the code it describes is not evidence.
  *
  * So every gate that drives the release binary now starts by stating the
- * revision the binary carries (`<semver>+g<sha>`, stamped by
- * `core/blitzkrieg_core/build.rs`) and, when the checkout's own revision is
- * knowable, asserting the two are the same. A mismatch is a RED gate with the
- * cause named in the message, not a silent wrong answer.
+ * revision the binary carries (`<semver>+g<sha>`, stamped by the
+ * `core/build_info` crate's build.rs — see VERSIONING.md §3.2) and, when the
+ * checkout's own revision is knowable, asserting the two are the same. A
+ * mismatch is a RED gate with the cause named in the message, not a silent
+ * wrong answer.
  *
  * The pin is resolved with this precedence:
  *   BK_EXPECT_SHA   — an explicit expectation (what the deployment line is)
@@ -30,8 +31,11 @@ import { fileURLToPath } from 'url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-/** `<semver>+g<sha>` / `<semver>+nogit`, as `--version` prints it. */
-export const VERSION_RE = /^\d+\.\d+\.\d+\+(?:g[0-9a-f]{4,40}|nogit)$/;
+/** `<semver>+g<sha>` / `<semver>+nogit`, as `--version` prints it. The semver
+ * half may carry a pre-release `-rc.N` (VERSIONING.md V8-5) — accept it BEFORE
+ * any rc is ever cut, so the first rc does not sail through with the gate
+ * silently refusing its self-description. */
+export const VERSION_RE = /^\d+\.\d+\.\d+(?:-rc\.\d+)?\+(?:g[0-9a-f]{4,40}|nogit)$/;
 
 /**
  * Run `<bin> --version`. Returns null when the binary is missing or does not

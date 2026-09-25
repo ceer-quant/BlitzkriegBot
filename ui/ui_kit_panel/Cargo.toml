@@ -1,6 +1,6 @@
 [package]
 name = "blitzkrieg-ui-panel"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Blitzkrieg interactive terminal panel: ratatui + crossterm + tokio over the UI Kit's core data layer. Presentation + command dispatch only — no trading logic."
 
@@ -18,6 +18,12 @@ path = "src/bin/blitzkrieg.rs"
 
 [dependencies]
 blitzkrieg-ui-kit = { path = "../ui_kit" }
+# Launcher stamps itself (VERSIONING.md §3.4): `blitzkrieg version` must answer
+# without a running kernel.
+blitzkrieg-build-info = { path = "../../core/build_info" }
+# Update-asset verification (VERSIONING.md §7.5): already in the tree via the
+# market extension — a named edge, not a new tree (P26).
+sha2 = "0.10"
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "signal"] }

@@ -166,6 +166,18 @@ pub const FLAGS: &[FlagSpec] = &[
          #199 latch refuses the boot (exit 1). For fixtures only.",
     ),
     flag(
+        "--update-check",
+        "<bool>",
+        "Allow the kernel to contact the release feed (VERSIONING.md §7). Default \
+         off: a default-configured stack makes zero outbound connections.",
+    ),
+    flag(
+        "--update-auto",
+        "<bool>",
+        "Allow updates to be applied without an explicit operator action. The \
+         kernel never installs anything either way — the launcher owns that.",
+    ),
+    flag(
         "--max-orderbook-stale-ms",
         "<n>",
         "Refuse to price off an orderbook older than this (ms); 0 disables the check. \

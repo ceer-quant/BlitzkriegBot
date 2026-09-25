@@ -1,0 +1,17 @@
+# Update-check switches (docs/VERSIONING.md §7).
+#
+# These are the FACTORY defaults, not the operator's surface: the runtime state
+# persisted in data/update/state.json (written by `system.update.configure`)
+# outranks this file, the same way the evolution switches work. CLI flags and
+# env vars sit above the file: CLI > env > this file > built-in default.
+#
+# INV-3: with both switches false (the shipped state), the kernel makes ZERO
+# outbound connections for update purposes — no probe, no telemetry, nothing.
+
+[update]
+# May the kernel contact the release feed at all (GitHub Releases latest)?
+check_enabled = false
+# May an update be applied without an explicit operator action? The kernel
+# itself never installs anything either way — installation is the launcher's
+# job (blitzkrieg update); this switch only governs the UI's "i" affordance.
+auto_update = false

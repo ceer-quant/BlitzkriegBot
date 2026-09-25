@@ -55,6 +55,7 @@ pub fn render(f: &mut Frame, app: &App) {
         Tab::Trades => render_trades(f, chunks[2], &app.snap),
         Tab::Plugins => render_plugins(f, chunks[2], app),
         Tab::Evolution => render_evolution(f, chunks[2], app),
+        Tab::Settings => render_settings(f, chunks[2], app),
     }
     // Kill switch engaged: the body talks with one voice until resume.
     if let Some(msg) = &app.kill_banner {
@@ -948,6 +949,136 @@ fn short_id(id: &str) -> String {
 /// proposals (each with its baseline-vs-variant 对比表) in the middle, recent
 /// decisions at the bottom. The keys drive the same gateway verbs the command
 /// bar accepts (`decide` / `auto-evolve` / `rollback`) — one shared backend.
+/// The Settings pane (VERSIONING.md §6.2): version + build provenance + the
+/// update three-state. The name `render_settings` is load-bearing — the
+/// TUI/WebUI parity gate finds `fn render_<tab>` by this exact spelling.
+fn render_settings(f: &mut Frame, area: Rect, app: &App) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    // ── VERSION ── the running core's self-description (not a local guess) ──
+    lines.push(Line::from(Span::styled(
+        "VERSION",
+        Style::default().fg(ACCENT),
+    )));
+    match &app.snap.system_version {
+        Some(sv) => {
+            lines.push(Line::from(Span::styled(
+                format!("  BlitzkriegBot {}", sv.version),
+                Style::default().fg(GREEN),
+            )));
+            lines.push(Line::from(format!(
+                "  git     {} ({})",
+                if sv.git_hash == "nogit" {
+                    "无法指认修订号"
+                } else {
+                    &sv.git_hash
+                },
+                if sv.git_dirty { "dirty" } else { "clean" }
+            )));
+            lines.push(Line::from(format!("  built   {}", sv.build_date)));
+            lines.push(Line::from(format!("  target  {}", sv.target)));
+        }
+        None => {
+            lines.push(Line::from(Span::styled(
+                "  (no core answered system.version — version unavailable)",
+                Style::default().fg(DIM),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+
+    // ── UPDATE ── three states, never collapsed to two (INV-3) ──
+    lines.push(Line::from(Span::styled(
+        "UPDATE",
+        Style::default().fg(ACCENT),
+    )));
+    let sv = app.snap.system_version.as_ref();
+    let (mark, status_text, color) = match sv.map(|v| v.update_available) {
+        Some(Some(true)) => (
+            "▲",
+            format!(
+                "{} available",
+                sv.and_then(|v| v.latest_version.clone())
+                    .unwrap_or_default()
+            ),
+            WARN,
+        ),
+        Some(Some(false)) => ("✓", "up to date".to_string(), GREEN),
+        _ => (
+            "…",
+            "not checked (checks are OFF by default)".to_string(),
+            DIM,
+        ),
+    };
+    lines.push(Line::from(Span::styled(
+        format!("  status   {mark} {status_text}"),
+        Style::default().fg(color),
+    )));
+    let last = sv
+        .and_then(|v| v.last_check_ms)
+        .map(|ms| utc_stamp((ms / 1000) as i64))
+        .unwrap_or_else(|| "—".to_string());
+    lines.push(Line::from(format!("  last     {last}")));
+    let auto_on = sv.map(|v| v.auto_update).unwrap_or(false);
+    let check_on = sv.map(|v| v.check_enabled).unwrap_or(false);
+    lines.push(Line::from(format!(
+        "  auto     [{}] {}",
+        if auto_on { "x" } else { " " },
+        if auto_on { "on" } else { "off" }
+    )));
+    lines.push(Line::from(format!(
+        "  check    [{}] {}",
+        if check_on { "x" } else { " " },
+        if check_on {
+            "outbound checks allowed"
+        } else {
+            "outbound checks disabled"
+        }
+    )));
+    lines.push(Line::from(""));
+    if app.update_busy {
+        lines.push(Line::from(Span::styled(
+            "  working…",
+            Style::default().fg(WARN),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  [c] check now   [a] toggle auto-update (asks y/n)   [i] install (needs auto on)",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  unknown state is shown as \"… not checked\" — never as \"up to date\"",
+        Style::default().fg(DIM),
+    )));
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Settings"))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// Epoch seconds → `YYYY-MM-DD HH:MMZ` (UTC), for the "last check" line.
+/// Same Hinnant civil-calendar conversion the build stamper uses — a date must
+/// not depend on a date library or on hand-rolled month arithmetic.
+fn utc_stamp(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, mi) = (rem / 3600, (rem % 3600) / 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}Z")
+}
+
 fn render_evolution(f: &mut Frame, area: Rect, app: &App) {
     if !app.snap.connected {
         let msg = app

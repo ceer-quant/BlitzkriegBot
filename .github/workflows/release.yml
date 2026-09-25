@@ -1,0 +1,247 @@
+name: Release
+
+# Only tags trigger a release. **Never** push.branches — a release is the
+# product of a version identity, not a side effect of "some branch went green"
+# (VERSIONING.md §8.3). Tags must sit on main or a release/* line (guarded
+# below), so feat/* / fix/* tags are refused before anything is built (P18).
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Re-pushes of the same tag do not run in parallel — but they are not cancelled
+# either: a Release that already exists must not be overwritten halfway by a
+# second run (P19; enforced again, hard, in the release job).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least privilege: the workflow is read-only EXCEPT the publish/release jobs.
+permissions:
+  contents: read
+
+jobs:
+  # ── Guard: the tag and the manifest version must agree exactly ────────────
+  # Why this exists: a tag that disagrees with [workspace.package].version
+  # produces a binary whose SELF-DESCRIPTION is a different version than the
+  # tag it shipped under. Nothing downstream can detect that after the fact,
+  # so it must be refused before anything is built.
+  guard:
+    name: tag-guard
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # the tag must point at a real commit; a shallow clone makes the checks below meaningless
+      - name: Resolve the tag and the manifest version
+        id: v
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME}"
+          MANIFEST=$(grep -m1 '^version' Cargo.toml | sed -n 's/.*"\(.*\)".*/\1/p')
+          echo "tag=$TAG manifest=$MANIFEST"
+          echo "version=$MANIFEST" >> "$GITHUB_OUTPUT"
+          # ① Shape: v<semver> — a tag never carries +build-metadata (P2).
+          case "$TAG" in
+            v*) ;;
+            *) echo "FAIL: tag '$TAG' must start with 'v'"; exit 1 ;;
+          esac
+          EXPECTED="v$MANIFEST"
+          if [ "$TAG" != "$EXPECTED" ]; then
+            echo "FAIL: tag '$TAG' != 'v' + [workspace.package].version ('$EXPECTED')"
+            echo "      bump the version in the SAME commit the tag points at"
+            exit 1
+          fi
+      - name: The version must exist in only ONE place
+        run: |
+          set -eu
+          # Every member must inherit; any `version = "0.` left behind is a
+          # missed edit. The guard is the same implementation the PR gate uses,
+          # so the two cannot drift apart.
+          node scripts/version-guard.mjs --manifest-only
+      - name: The tag must sit on a release line (not a feature branch)
+        run: |
+          set -eu
+          # Judged by REACHABILITY, not by branch name: a tag carries no branch
+          # information, and "is this commit contained in main or any release/*"
+          # is the question that actually matters (P18).
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' 2>/dev/null || true
+          ok=0
+          for ref in $(git for-each-ref --format='%(refname)' \
+                       'refs/remotes/**/main' 'refs/remotes/**/release/*'); do
+            if git merge-base --is-ancestor "$GITHUB_SHA" "$ref"; then
+              echo "ok: $GITHUB_SHA is reachable from $ref"
+              ok=1
+            fi
+          done
+          if [ "$ok" != 1 ]; then
+            echo "FAIL: $GITHUB_SHA is not reachable from main or any release/* branch"
+            echo "      a tag on an unreleased line would publish code that no branch owns"
+            exit 1
+          fi
+
+  # ── Gates: the SAME verdicts CI runs on a PR — no "release exemption" ──────
+  gates:
+    name: gates
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: (cd user_layer/parity_strategy && cargo build --release --locked)
+      - run: cargo build --release --workspace --locked
+      - run: BK_REQUIRE_DYLIB=1 cargo test --workspace --locked
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - run: node scripts/binary-size-check.mjs --verbose
+      - name: Version guard (the full check)
+        run: node scripts/version-guard.mjs
+
+  # ── Build per platform and upload artifacts ────────────────────────────────
+  publish:
+    name: publish
+    needs: [guard, gates]
+    runs-on: ${{ matrix.runner }}
+    # Only this (and the release job below) may write. It makes no verdicts —
+    # the verdicts are already in.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Asset names align with package-release.mjs's artifacts (§8.3).
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # build.rs stamps from .git; a shallow clone degrades to nogit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      # Explicit stamp: whatever shape the checked-out .git has, the artifact
+      # must be able to name its revision (the build_info convention). The
+      # run_started_at stamp is normalized by build_support to YYYYMMDDTHHMMSSZ.
+      - name: Build (release)
+        env:
+          BLITZKRIEG_GIT_SHA: ${{ github.sha }}
+          BLITZKRIEG_BUILD_DATE: ${{ github.run_started_at }}
+        run: cargo build --release --workspace --locked --target ${{ matrix.target }}
+
+      - name: Assemble the archive
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          STAGE="blitzkrieg-${VERSION}-${TARGET}"
+          mkdir -p "$STAGE/bin"
+          # The kernel is REQUIRED. Optional artifacts ship when present
+          # (same classification as package-release.mjs).
+          cp "target/${TARGET}/release/blitzkrieg-core" "$STAGE/bin/"
+          for b in blitzkrieg ui_kit_web ui_kit_panel ui_kit_app; do
+            [ -f "target/${TARGET}/release/$b" ] && cp "target/${TARGET}/release/$b" "$STAGE/bin/" || true
+          done
+          cp LICENSE "$STAGE/" 2>/dev/null || true
+          tar -czf "${STAGE}.tar.gz" "$STAGE"
+          shasum -a 256 "${STAGE}.tar.gz" | awk '{print $1"  '$STAGE'.tar.gz"}' > /tmp/sums.txt
+
+      - name: GPG-sign the archive (skipped when the secret is absent)
+        id: gpg
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+        run: |
+          set -eu
+          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
+            # Unavailable does NOT fail the release (signing is recommended, not
+            # required — §0.2), but it must leave a VISIBLE notice, never a
+            # silent downgrade.
+            echo "::warning::RELEASE_GPG_PRIVATE_KEY is not configured — publishing UNSIGNED (SHA256SUMS only)"
+            echo "signed=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          STAGE="blitzkrieg-$(echo '${{ needs.guard.outputs.version }}')-$(echo '${{ matrix.target }}')"
+          gpg --batch --yes --detach-sign --armor "${STAGE}.tar.gz"
+          echo "signed=1" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.tar.gz.asc
+
+  # ── Release: one Release per tag, assembled from all three platforms ──────
+  release:
+    name: release
+    needs: [guard, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Build SHA256SUMS over everything
+        run: |
+          set -eu
+          cd dist
+          # One `<hex>  <name>` line per file — the exact shape
+          # scripts/lib/upgrade-artifacts.sh writes and the (0.2.5) installer's
+          # expected_sha256 parses.
+          shasum -a 256 *.tar.gz | awk '{print $1"  "$2}' | sort -k2 > SHA256SUMS
+          echo "--- SHA256SUMS ---"; cat SHA256SUMS
+      - name: Refuse to publish an empty or duplicate Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # A re-push of the same tag must NEVER overwrite the published bytes —
+          # a version number must point at one batch of bytes forever, or every
+          # checksum and post-mortem done against it is void (P19/N14).
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "::error::release $GITHUB_REF_NAME already exists; refusing to overwrite artifacts"
+            echo "        cut a NEW tag (v0.2.3) instead of republishing a released version"
+            exit 1
+          fi
+      - name: Create the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          PRERELEASE=""
+          case "$GITHUB_REF_NAME" in *-rc.*) PRERELEASE="--prerelease" ;; esac
+          NOTES=$(awk -v v="${GITHUB_REF_NAME#v}" '
+            $0 ~ "^## \\["v"\\]" {on=1; next}
+            on && /^## \[/ {exit}
+            on {print}
+          ' CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            echo "::error::no CHANGELOG section for $GITHUB_REF_NAME — the release notes would be empty"
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "BlitzkriegBot ${GITHUB_REF_NAME#v}" \
+            --notes "$NOTES" $PRERELEASE \
+            dist/*.tar.gz dist/*.asc dist/SHA256SUMS 2>/dev/null || \
+          gh release create "$GITHUB_REF_NAME" \
+            --title "BlitzkriegBot ${GITHUB_REF_NAME#v}" \
+            --notes "$NOTES" $PRERELEASE \
+            dist/*.tar.gz dist/SHA256SUMS

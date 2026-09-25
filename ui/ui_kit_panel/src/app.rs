@@ -13,6 +13,7 @@ pub enum Tab {
     Trades,
     Plugins,
     Evolution,
+    Settings,
 }
 
 impl Tab {
@@ -23,6 +24,7 @@ impl Tab {
             "3 Trades",
             "4 Plugins",
             "5 Evolution",
+            "6 Settings",
         ]
     }
     pub fn index(self) -> usize {
@@ -32,6 +34,7 @@ impl Tab {
             Tab::Trades => 2,
             Tab::Plugins => 3,
             Tab::Evolution => 4,
+            Tab::Settings => 5,
         }
     }
     pub fn next(self) -> Self {
@@ -40,7 +43,8 @@ impl Tab {
             Tab::Positions => Tab::Trades,
             Tab::Trades => Tab::Plugins,
             Tab::Plugins => Tab::Evolution,
-            Tab::Evolution => Tab::Overview,
+            Tab::Evolution => Tab::Settings,
+            Tab::Settings => Tab::Overview,
         }
     }
 }
@@ -60,6 +64,16 @@ pub enum Action {
     /// Run the network self-check (`net.check`) off the render loop — the probe
     /// dials, so it answers in seconds, not milliseconds.
     NetCheck,
+    /// `system.update.check` off the render loop (VERSIONING.md §7.4). The
+    /// verdict travels in the next snapshot's `system_version`.
+    UpdateCheck,
+    /// `system.update.configure` for the AUTO switch (the checked side is only
+    /// written by the operator's config or the configure verb itself).
+    UpdateConfigure(bool),
+    /// Run the LAUNCHER's install (`current_exe() update --install`): the
+    /// panel process never replaces the kernel binary itself (P12) — it
+    /// triggers the launcher-side installer and reports its output.
+    UpdateInstall,
 }
 
 /// How far the self-check has got. Advances as snapshots finally arrive with
@@ -78,13 +92,18 @@ pub enum CheckStage {
 /// One bottom-bar hint a newcomer needs; once consumed, it stops rotating.
 pub const HINTS: [&str; 7] = [
     "press : to type a command — try `status`",
-    "1-5 switch pages (Overview/Positions/Trades/Plugins/Evolution)",
+    "1-6 switch pages (Overview/Positions/Trades/Plugins/Evolution/Settings)",
     "? for the full key & command help",
     "r refresh now · q quit",
     "start with --manage to enable start/stop commands",
     "Plugins: ↑/↓ move · Enter toggle (dangerous toggles ask y/n)",
     "n network check — is it us or the venue?",
 ];
+
+/// Sentinel prefix for the one Settings confirmation that is not a gateway
+/// command: flipping the AUTO-UPDATE switch. `y` on the confirm bar routes it
+/// to [`Action::UpdateConfigure`] instead of the dispatcher.
+pub const UPDATE_AUTO_CONFIRM_PREFIX: &str = "update.auto ";
 
 pub struct App {
     pub snap: UiSnapshot,
@@ -132,6 +151,9 @@ pub struct App {
     /// Non-empty while the core's kill switch is engaged — the body renders a
     /// full-screen red banner until `risk.resume` clears it.
     pub kill_banner: Option<String>,
+    /// An update check / configure / install round-trip is in flight (the
+    /// Settings pane says so instead of inviting a double click).
+    pub update_busy: bool,
 }
 
 /// Cap the in-panel log so a long soak can't grow it without bound.
@@ -164,6 +186,7 @@ impl App {
             net_error: None,
             net_busy: false,
             kill_banner: None,
+            update_busy: false,
         }
     }
 
@@ -204,6 +227,11 @@ impl App {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.log(format!("> {text} (confirmed)"));
+                    // The update switch is not a gateway command; it routes to
+                    // the update verbs instead of the dispatcher.
+                    if let Some(on) = text.strip_prefix(UPDATE_AUTO_CONFIRM_PREFIX) {
+                        return Action::UpdateConfigure(on == "on");
+                    }
                     return Action::RunCommand(text);
                 }
                 _ => {
@@ -366,6 +394,58 @@ impl App {
             KeyCode::Char('5') => {
                 self.tab = Tab::Evolution;
                 Action::None // the 1 s poller re-fetches proposals with the snapshot
+            }
+            KeyCode::Char('6') => {
+                self.tab = Tab::Settings;
+                Action::None // the snapshot poller carries system_version
+            }
+            // Settings keys (VERSIONING.md §6.2). `a` is the one switch that
+            // decides "may the launcher auto-replace binaries later", so it
+            // always asks — nothing flips silently.
+            KeyCode::Char('c') if self.tab == Tab::Settings && !self.update_busy => {
+                if self.snap.system_version.as_ref().map(|v| v.check_enabled) == Some(false) {
+                    self.log(
+                        "update check is disabled — enable it in user_layer/configs/update.toml \
+                         or the WebUI settings first"
+                            .to_string(),
+                    );
+                    Action::None
+                } else {
+                    self.update_busy = true;
+                    Action::UpdateCheck
+                }
+            }
+            KeyCode::Char('a') if self.tab == Tab::Settings && !self.update_busy => {
+                let on = self
+                    .snap
+                    .system_version
+                    .as_ref()
+                    .map(|v| v.auto_update)
+                    .unwrap_or(false);
+                self.pending_confirmation = Some(format!(
+                    "{UPDATE_AUTO_CONFIRM_PREFIX}{}",
+                    if on { "off" } else { "on" }
+                ));
+                Action::None
+            }
+            KeyCode::Char('i') if self.tab == Tab::Settings && !self.update_busy => {
+                let auto_on = self
+                    .snap
+                    .system_version
+                    .as_ref()
+                    .map(|v| v.auto_update)
+                    .unwrap_or(false);
+                if !auto_on {
+                    self.log(
+                        "install needs auto-update ON (press a first) — the switch is OFF by \
+                         default and the kernel never installs on its own"
+                            .to_string(),
+                    );
+                    Action::None
+                } else {
+                    self.update_busy = true;
+                    Action::UpdateInstall
+                }
             }
             KeyCode::Tab => {
                 let was_plugins = self.tab == Tab::Plugins;

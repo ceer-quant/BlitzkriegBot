@@ -1,0 +1,12 @@
+[package]
+name = "blitzkrieg-build-support"
+# Deliberately NOT inherited (VERSIONING.md §3.2): this is a build tool, not part
+# of the product; scripts/version-guard.mjs allowlists it for exactly that reason.
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Build-time provenance stamping (cargo::rustc-env), used from build.rs."
+
+[lib]
+name = "build_support"
+path = "src/lib.rs"
