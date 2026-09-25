@@ -23,7 +23,7 @@
 import { spawn, execFileSync } from './lib/child-guard.mjs';
 import { CoreClient } from './lib/core-client.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
-import { waitForSocket } from './lib/wait.mjs';
+import { waitForSocket, sleep } from './lib/wait.mjs';
 import { join, resolve, dirname } from 'path';
 import { tmpdir } from 'os';
 import { existsSync, unlinkSync, mkdtempSync, rmSync } from 'fs';
@@ -34,7 +34,6 @@ const CORE = join(ROOT, 'target', 'release', 'blitzkrieg-core');
 const FAST = !process.argv.includes('--full');
 const CHECK_LOADED = FAST ? 1 : 50;
 const FULL = !FAST;
-const SLEEP = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const gate = createChecks();
 const { check } = gate;
@@ -94,9 +93,7 @@ const proc = spawn(CORE, [
   '--engine', '--no-discovery', '--no-event-archive',
   '--no-trade-log', '--no-order-log', '--no-position-log',
   '--round-sec', '3600', '--min-round-age', '0', '--min-time-left', '0',
-], { stdio: ['ignore', 'ignore', 'pipe'], cwd: workdir });
-let stderr = '';
-proc.stderr.on('data', (d) => { stderr += d.toString(); });
+], { stdio: 'ignore', cwd: workdir });
 
 const results = await (async () => {
   await waitForSocket(sock, { timeoutMs: 6000 });
@@ -117,7 +114,7 @@ const results = await (async () => {
   for (const n of toLoad) {
     try { await rpc('strategy.enable', { name: n, enabled: true }); } catch {}
   }
-  await SLEEP(200);
+  await sleep(200);
 
   // 100 rounds of the three registry reads; per-call latency, no cache.
   const tStrategy = [], tMarket = [], tStats = [];
@@ -138,7 +135,7 @@ const results = await (async () => {
 })();
 
 try { proc.kill(); } catch {}
-await SLEEP(120);
+await sleep(120);
 
 console.log(`\nloaded strategies: ${results.loaded}${results.loadErr.length ? ` (errors: ${results.loadErr.slice(0, 3).join(' | ')})` : ''}`);
 console.log(`strategy.list  p50=${results.strategy.p50}ms p95=${results.strategy.p95}ms max=${results.strategy.max}ms`);

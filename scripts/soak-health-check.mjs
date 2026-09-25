@@ -44,7 +44,6 @@
  */
 import { spawn } from './lib/child-guard.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
-import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync,
   mkdirSync,
