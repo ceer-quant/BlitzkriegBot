@@ -472,8 +472,10 @@ enum LockFile {
 #[derive(Debug)]
 struct DirClaim {
     /// The open directory the lock is held on — held, never read: the lock lives
-    /// exactly as long as this file descriptor, and the kernel releases it when
-    /// the descriptor closes or the process dies. Dropping it IS the release.
+    /// exactly as long as this file descriptor's open file description, and the
+    /// kernel releases it when the process dies. Dropping the claim is the
+    /// release, and [`Drop`] performs it explicitly rather than by close alone
+    /// (see there for why).
     _file: File,
     dir: PathBuf,
     /// True when this call created the directory. Only a directory this call
@@ -529,7 +531,23 @@ impl DirClaim {
         if self.created_dir {
             let _ = std::fs::remove_dir(&self.dir);
         }
-        // `self.file` drops here; that is what releases the kernel lock.
+        // `self` drops here; `Drop` releases the kernel lock explicitly.
+    }
+}
+
+impl Drop for DirClaim {
+    /// Release the kernel lock the moment the claim goes away (#311).
+    ///
+    /// Closing the descriptor is NOT enough to release it: the lock lives on
+    /// the open file description, and a duplicate of this descriptor keeps
+    /// that description — and the lock with it — alive past the close. A
+    /// concurrent `fork` makes exactly such a duplicate (the child holds it
+    /// from fork until exec), which is why the corrupt-lock test saw a lock
+    /// this process had already released still held, and flaked as
+    /// `WouldBlock`. `unlock` clears the lock itself, immediately, whatever
+    /// else still refers to the description.
+    fn drop(&mut self) {
+        let _ = self._file.unlock();
     }
 }
 
@@ -959,6 +977,34 @@ mod tests {
             lock.held()[0].state,
             AnchorState::TookOverStale { previous: None }
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #311: the release must not be delayed by a descriptor a concurrent
+    /// `fork` copied out of this process.
+    ///
+    /// The lock lives on the open file description, and a duplicated descriptor
+    /// keeps that description — and the lock with it — alive past the close the
+    /// release performs. A forked child holds exactly such a copy until it
+    /// execs, which is why the corrupt-lock test flaked as `WouldBlock` on its
+    /// own second `acquire` whenever the parallel suite had a child in flight.
+    /// `try_clone` produces the child's copy deterministically, with no fork.
+    #[test]
+    fn a_release_is_not_delayed_by_a_duplicated_descriptor() {
+        let dir = scratch("dup-release");
+        let claim = DirClaim::take(&dir)
+            .expect("take never fails on a scratch dir")
+            .expect("the scratch dir is unclaimed");
+        // Stand in for the fd table a concurrent `fork` copied: same open file
+        // description, second descriptor, still open when the claim is released.
+        let forked = claim._file.try_clone().expect("duplicate the claim's fd");
+        drop(claim); // the release the second `acquire` is racing
+
+        let reclaimed = DirClaim::take(&dir)
+            .expect("take never fails on a scratch dir")
+            .expect("a release must clear the lock itself, not defer it to close");
+        drop(reclaimed);
+        drop(forked);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
