@@ -1119,18 +1119,99 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
     }
 }
 
+thread_local! {
+    /// The buffer the current thread is capturing into. `None` outside a
+    /// `with_logs` call — including on threads that never capture at all.
+    static CAPTURE_SINK: std::cell::RefCell<Option<LogSink>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The capture subscriber's writer: routes each line to the calling thread's
+/// sink, discarding lines from threads that are not capturing.
+struct ThreadRoutedWriter;
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadRoutedWriter {
+    type Writer = LogSink;
+    fn make_writer(&'a self) -> Self::Writer {
+        CAPTURE_SINK
+            .with(|s| s.borrow().clone())
+            .unwrap_or_default()
+    }
+}
+
+/// Install this suite's capture subscriber, once per test process.
+///
+/// #318: a callsite's interest is PROCESS-global and fixed when it is first
+/// registered — and with only scoped dispatchers around, that registration
+/// consults the registering thread's default subscriber. A thread with none
+/// (any test that touches the callsite without `with_logs`) cached `never` for
+/// the callsite, and every later capture dropped the event before any
+/// subscriber saw it: the empty `{logs}` this suite flaked into (1/263). A
+/// real global subscriber removes the thread without an opinion from the
+/// equation — and installing it rebuilds every callsite's interest, healing
+/// any that an earlier registration had already poisoned. It is also the shape
+/// production runs (`main` installs one global fmt subscriber), so the tests
+/// capture through the same path the run logs do.
+fn install_capture() {
+    static INSTALL: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INSTALL.get_or_init(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(ThreadRoutedWriter)
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        // This test binary installs no other subscriber, so this succeeds;
+        // tolerate a foreign one rather than fail the suite.
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+}
+
 fn with_logs<R>(f: impl FnOnce() -> R) -> (R, String) {
+    install_capture();
     let sink = LogSink::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(sink.clone())
-        .with_ansi(false)
-        .with_max_level(tracing::Level::TRACE)
-        .finish();
-    let guard = tracing::subscriber::set_default(subscriber);
+    /// Clears this thread's route even if `f` panics, so a failed test cannot
+    /// leak its sink into whatever runs next on this thread.
+    struct Route(());
+    impl Drop for Route {
+        fn drop(&mut self) {
+            CAPTURE_SINK.with(|s| *s.borrow_mut() = None);
+        }
+    }
+    CAPTURE_SINK.with(|s| *s.borrow_mut() = Some(sink.clone()));
+    let route = Route(());
     let out = f();
-    drop(guard);
+    drop(route);
     let text = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
     (out, text)
+}
+
+/// #318: a callsite's interest is PROCESS-global and decided by whoever
+/// registers it FIRST. With only scoped dispatchers registered, the
+/// registration consults the registering thread's own default subscriber — so a
+/// thread with none caches `never` for the callsite, and every later capture
+/// drops the event before any subscriber sees it. That is the empty `{logs}`
+/// this suite flaked into (1/263). Pin the interleaving deterministically: a
+/// bare thread first-touches the callsite while our capture is installed.
+#[test]
+fn a_bare_thread_registering_a_callsite_first_must_not_silence_the_capture() {
+    // A callsite only this test touches, so its first registration is ours to
+    // arrange — in the suite, that first registration races instead.
+    fn probe() {
+        tracing::warn!("probe: bare-thread first touch");
+    }
+
+    let (_, logs) = with_logs(|| {
+        std::thread::spawn(probe)
+            .join()
+            .expect("the probe thread ran");
+        probe(); // …and the capturing thread must still see its own warning.
+    });
+
+    assert!(
+        logs.contains("bare-thread first touch"),
+        "a first touch from a thread without a subscriber must not absorb the \
+         callsite: {logs:?}"
+    );
 }
 
 /// Read back what the day's budget persisted.
