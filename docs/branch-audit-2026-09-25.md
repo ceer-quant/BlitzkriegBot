@@ -148,3 +148,59 @@ squash 合并，squash 过的分支在 git 眼里永远「未合入」——判�
 | `tmp/walk-fix` | 03236e81 | 2026-09-21 | fix(gates): feed resting depth to the FOK scenarios; assert the honest economy |
 | `ui-gateway-auth-plugins` | b55418f2 | 2026-09-15 | chore: de-CloddsBot purge — /panel cutover, port 51888, canonical-only paths |
 | `heads/wip/local-line-20260923` | ba1a58e4 | 2026-09-23 | chore(perf): dhat 堆采样刷新到 trading-safety 代码之后 |
+
+## 第二遍判定（同日补充）：squash 化石的补丁等价清理
+
+第一遍的 105 条「未合入」大多是被 squash 合并吸收的历史工作——git 的祖先判定
+看不见它们。用 `git cherry`（patch-id 等价）逐条复核：**62 条**的全部提交都已在
+发布线（全 `-`，逐条验证后 `-D` 删除），**43 条**仍有真实独立内容（保留，数字为
+不在发布线的提交数）：
+
+```
+chore/post-purge-entropy-sweep (2/2 not in main)
+dependabot/github_actions/actions/checkout-7 (1/1 not in main)
+dependabot/github_actions/actions/setup-node-7 (1/1 not in main)
+dependabot/npm_and_yarn/minor-updates-b638239526 (1/1 not in main)
+feat/e12-shutdown-cleanliness (6/6 not in main)
+feat/e13-evolution-proposals (1/1 not in main)
+feat/e15-e16-evolution-toolkit (7/13 not in main)
+feat/e6a-tauri-scaffold (3/4 not in main)
+feat/e7-abi-v2 (2/2 not in main)
+feat/mean-reversion-entry-factor (1/1 not in main)
+feat/net-check (3/3 not in main)
+feat/pair-arb-complete-set (2/2 not in main)
+feat/poly-top-coalescer (2/2 not in main)
+fix/244-upgrade-pipeline (1/1 not in main)
+fix/audit-f2-f10-f4 (3/3 not in main)
+fix/audit-f6-f8 (2/2 not in main)
+fix/audit-f7-f9 (3/3 not in main)
+fix/backup-launchagent (2/2 not in main)
+fix/ci-gates-trace (2/2 not in main)
+fix/daily-loss-and-fee (3/3 not in main)
+fix/evolution-ui-accept-gate (2/2 not in main)
+fix/fee-model-reestimate (2/2 not in main)
+fix/gate-integrity (15/15 not in main)
+fix/gates-and-drift (2/2 not in main)
+fix/kernel-cleanup (14/14 not in main)
+fix/ki-30-dead-health-guards (3/3 not in main)
+fix/observability (3/3 not in main)
+fix/risk-gates (2/2 not in main)
+fix/sec-ipc-panel (9/9 not in main)
+fix/settlement-redeem (2/2 not in main)
+fix/soak-gate-robustness (2/2 not in main)
+fix/stack-watchdog (2/2 not in main)
+fix/ui-kit-notifier-flake (2/2 not in main)
+fix/upgrade-full-propagation (2/2 not in main)
+heads/wip/local-line-20260923 (8/8 not in main)
+integration/2026-09-21-wave2 (14/15 not in main)
+local-line-20260923 (8/8 not in main)
+panel-auth-session-hardening (3/3 not in main)
+panel-e8e9-design-overhaul (8/9 not in main)
+simplify/delete-shipped-strategies (2/2 not in main)
+test/exit-economics-gate (2/2 not in main)
+tmp/walk-fix (4/4 not in main)
+ui-gateway-auth-plugins (2/2 not in main)
+```
+
+本地分支 118 → 47。远端 57 条**未动**（删除影响其他克隆）；需要时可对远端跑同一套
+cherry 判定后逐条确认。
