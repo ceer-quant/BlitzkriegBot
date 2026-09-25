@@ -601,6 +601,10 @@ mod tests {
         serde_json::to_string(&books).expect("serialize books")
     }
 
+    /// One request the fake venue saw: the instant it landed, and the token ids
+    /// it asked for.
+    type SeenRequest = (std::time::Instant, Vec<String>);
+
     /// A throwaway HTTP/1.1 server that answers `POST /books` and records the
     /// token ids each request asked for.
     ///
@@ -610,7 +614,12 @@ mod tests {
     /// responder keeps this test dependency-free.
     struct FakeClob {
         url: String,
-        requests: Arc<tokio::sync::Mutex<Vec<Vec<String>>>>,
+        /// Every request the venue saw, with the instant it was recorded. The
+        /// timestamps are what let the backoff test assert on the *interval*
+        /// between requests — the limiter's definition — rather than counting
+        /// requests inside a wall-clock window, a shape that reads a loaded
+        /// scheduler as a broken limiter (#320).
+        requests: Arc<tokio::sync::Mutex<Vec<SeenRequest>>>,
         _stop: tokio::sync::oneshot::Sender<()>,
     }
 
@@ -668,7 +677,9 @@ mod tests {
                                         .collect()
                                 })
                                 .unwrap_or_default();
-                        reqs.lock().await.push(ids.clone());
+                        reqs.lock()
+                            .await
+                            .push((std::time::Instant::now(), ids.clone()));
 
                         let code = status.load(Ordering::SeqCst);
                         let (reason, payload) = if code == 200 {
@@ -697,12 +708,12 @@ mod tests {
             }
         }
 
-        async fn seen(&self) -> Vec<Vec<String>> {
+        async fn seen(&self) -> Vec<SeenRequest> {
             self.requests.lock().await.clone()
         }
 
         /// Wait until at least `n` requests have arrived, then return all of them.
-        async fn wait_for_requests(&self, n: usize) -> Vec<Vec<String>> {
+        async fn wait_for_requests(&self, n: usize) -> Vec<SeenRequest> {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             loop {
                 let seen = self.seen().await;
@@ -780,7 +791,7 @@ mod tests {
 
         let first = srv.wait_for_requests(1).await;
         assert_eq!(
-            first[0],
+            first[0].1,
             vec![a.clone()],
             "the first poll must use the first token set"
         );
@@ -789,7 +800,7 @@ mod tests {
         let after = srv.wait_for_requests(2).await;
         handle.abort();
 
-        let latest = after.last().expect("at least one later poll");
+        let latest = &after.last().expect("at least one later poll").1;
         assert!(
             latest.contains(&b),
             "the new round must be polled; polls={after:?}"
@@ -830,6 +841,13 @@ mod tests {
     /// The venue advertised no rate-limit headers and answered 15 consecutive
     /// 1/second calls with 200, so this path guards a limit that has not been
     /// observed rather than one that has.
+    ///
+    /// Anchored on observed requests and judged by the gap between them (#320):
+    /// the limiter's definition is the delay between polls, and that delay only
+    /// ever *grows* when the scheduler is loaded. The previous revision slept a
+    /// fixed 900 ms and counted requests in it, so a busy machine that had not
+    /// yet issued its first poll read as "the poller gave up" — a false red
+    /// reproduced at 24/24 under 8-way load (and removed by this shape).
     #[tokio::test]
     async fn a_rate_limited_poll_backs_off() {
         let srv = FakeClob::start(429).await;
@@ -843,19 +861,29 @@ mod tests {
             MIN_POLL_MS,
         ));
 
-        tokio::time::sleep(Duration::from_millis(900)).await;
-        let polls = srv.seen().await.len();
+        // Wait for each poll to actually land before judging it. "It must keep
+        // trying" is thus observed, not budgeted: if the poller stops after one
+        // request, the wait itself fails with "only N poll(s) arrived".
+        srv.wait_for_requests(1).await;
+        let after_first = srv.wait_for_requests(2).await;
+        let after_second = srv.wait_for_requests(3).await;
         handle.abort();
 
-        // Doubling from the 250 ms floor admits the immediate poll plus one more
-        // at ~500 ms; a loop that ignored 429 would have issued ~4 by now.
+        // Doubling from the 250 ms floor: the gap after the first 429 is ~500 ms,
+        // after the second ~1000 ms. tokio timers never fire early, so both are
+        // lower bounds a loaded machine can only stretch — that is what makes
+        // these assertions load-proof. 450/900 ms separate cleanly from a limiter
+        // that ignored 429 (gaps would stay at ~250 ms) and from one that backs
+        // off only once (the second gap would stay at ~500 ms).
+        let first_gap = after_first[1].0 - after_first[0].0;
         assert!(
-            polls <= 2,
-            "429 must reduce the poll rate; {polls} polls in 900ms"
+            first_gap >= Duration::from_millis(450),
+            "429 must reduce the poll rate; the first gap was {first_gap:?}"
         );
+        let second_gap = after_second[2].0 - after_second[1].0;
         assert!(
-            polls >= 1,
-            "the poller must keep trying rather than give up"
+            second_gap >= Duration::from_millis(900),
+            "the backoff must keep doubling; the second gap was {second_gap:?}"
         );
         assert!(
             !ev_rx
