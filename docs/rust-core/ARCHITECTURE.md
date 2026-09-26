@@ -164,6 +164,32 @@ P0.6 **不改变交易语义**：`ome / ledger / risk / position / exit_policy /
 engine / scanner（回合时序）/ reconcile / shadow` 全部保持原实现与行为；Polymarket 的
 venue/feed/discovery/gamma 从内核**物理迁出**到扩展，行为逐笔等价（见 `MIGRATION_LOG.md §19`）。
 
+## 7.5 裁决流水线（E25 / #331，DEV_V0_3 §3）
+
+策略建议、内核裁决：策略是 0 信任组件，只提交建议；`arbitration/` 的
+`process_intent` 对每条建议跑四道关卡，产出唯一 `Decision`：
+
+| 关卡 | 复用的既有实现（不重写） |
+|:--|:--|
+| Gate 1 合法性 | `market_api::OrderIntent::validate()` + 本轮 token 检查 |
+| Gate 2 系统风控 | `RiskGate::check_with_equity` + 既有 `LossBreakers`（平仓 intent 豁免——既有语义） |
+| Gate 3 资金预扣 | `Ledger::reserve` 探针（reserve→release，复用既有拒绝逻辑，账本净零） |
+| Gate 4 生存绑定 | `exit_policy::effective_stop_pct` 等的**投影**（只记录，不加触发路径） |
+
+三条纪律，违反任何一条的 PR 拒绝合入：
+
+1. **不重复判定**——每道关卡只调用既有实现，绝不复制阈值；风控的真相只有
+   `RiskGate` 里那一份。
+2. **无短路**——被拒的建议同样逐条落审计（`data/audit/intents.jsonl`，每条
+   一行；审计写失败只 `warn!` 一次，绝不阻塞交易）。
+3. **审计是旁路**——`--no-intent-audit` 只关审计**写入**，关卡永远在跑；
+   有/无审计两种情形都必须通过既有经济基线（P1）。
+
+`Rejected` 的建议不进入 `place()`/OME；`Approved` 的建议交给**既有**提交路径。
+`INTENT_DECISION` 推送按 `(strategy, gate, reason)` 折叠到 ≤1 条/秒（折叠的是
+推送，不是审计）；面板的「裁决流」（WebUI `Decisions.vue` / TUI Decisions tab）
+逐字打印内核写的 `GateTrace.detail`，不自行编文案。
+
 ## 8. 目录
 
 ```

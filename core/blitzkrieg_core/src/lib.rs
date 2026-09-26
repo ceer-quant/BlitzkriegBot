@@ -14,6 +14,9 @@
 //!  - `ipc`      UDS JSON-RPC 2.0 schema + transport
 
 pub mod account;
+/// v0.3 E25 (#331): the four-gate suggestion→decision pipeline (§3). The
+/// strategy advises; the kernel adjudicates; every suggestion is audited.
+pub mod arbitration;
 pub mod backtest;
 pub mod cli;
 pub mod config;

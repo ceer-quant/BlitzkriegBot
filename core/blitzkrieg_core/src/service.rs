@@ -230,6 +230,11 @@ pub struct CoreConfig {
     /// could have repriced live fills with no code objecting. Default `false`:
     /// only the backtester sets it.
     pub fee_schedule_replay: bool,
+    /// E25 (#331): write the intent-audit trail (`data/audit/intents.jsonl` +
+    /// throttled `INTENT_DECISION` pushes). The ARBITRATION GATES always run;
+    /// this silences only the WRITES (`--no-intent-audit`), which is exactly
+    /// what P1's with/without-baseline double-run proves off the trading path.
+    pub intent_audit_enabled: bool,
 }
 
 impl CoreConfig {
@@ -596,6 +601,7 @@ impl Default for CoreConfig {
             breaker_cooldown_sec: 300,
             round_duration_sec: 900,
             auto_exits_enabled: true,
+            intent_audit_enabled: true,
             engine_enabled: false,
             assets: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
             enabled_strategies: Vec::new(),
@@ -989,6 +995,9 @@ pub struct Core {
     /// Per-strategy consecutive-loss breakers (KI-10 / D-18 A). The daily loss
     /// cap and kill switch stay global — see [`LossBreakers`].
     breaker: LossBreakers,
+    /// E25 (#331): the intent-audit sink — one JSONL line per arbitrated
+    /// suggestion plus the throttled `INTENT_DECISION` push state (§3.4).
+    intent_audit: crate::arbitration::AuditSink,
     positions: PositionManager,
     books: HashMap<TokenId, Book>,
     /// Exit reason chosen for an in-flight closing SELL, keyed by token id, so a
@@ -1253,12 +1262,15 @@ impl Core {
         if config.mode.settles_locally() {
             ledger.set_balance(config.dry_seed_balance);
         }
+        let mut intent_audit = crate::arbitration::AuditSink::new("default");
+        intent_audit.enabled = config.intent_audit_enabled;
         Self {
             risk: RiskGate::new(config.risk.clone()),
             config,
             ome: Ome::new(),
             ledger,
             breaker,
+            intent_audit,
             positions,
             books: HashMap::new(),
             exit_reasons: HashMap::new(),
@@ -1662,8 +1674,13 @@ impl Core {
                             // otherwise never get a unit, so it could not evolve at
                             // all until a restart.
                             self.rewire_hot_params(now_ms());
+                            // API 1.0 naming (DEV_V0_3 §2.2, E24 #330): the
+                            // receipt KEEPS its old text — the test above pins
+                            // it — and only APPENDS the protocol line. E24
+                            // handed this hunk to the service.rs hotspot
+                            // guardian (E25); it lands here.
                             format!(
-                                "{name}@{version} registered into the engine dispatch (disabled{declared}{evolvable})"
+                                "{name}@{version} registered into the engine dispatch (disabled{declared}{evolvable}); API 1.0 (line protocol 2)"
                             )
                         }
                         Err(reason) => format!("rejected: {reason}"),
@@ -2358,6 +2375,63 @@ impl Core {
         // behavior-free by charter (deviation disclosed in the PR body).
         for (token, req) in tokens {
             let name = req.strategy.clone();
+            // ── E25 (#331): arbitration BEFORE the E16 portfolio cap — this is
+            // the seam Wave 0 planted. Every strategy intent is arbitrated
+            // exactly once through the four gates; a Rejected suggestion never
+            // reaches place()/OME, an Approved one is handed to the SAME path
+            // as before. The gates reuse the existing implementations
+            // (OrderIntent::validate / RiskGate / breakers / Ledger::reserve /
+            // effective_stop_pct), so no threshold has two truths (§3.3).
+            let intent = crate::arbitration::StrategyIntent::from_request(req);
+            let outcome = {
+                let round_tokens = self
+                    .engine
+                    .as_ref()
+                    .map(|e| e.round_token_ids())
+                    .unwrap_or_default();
+                let time_left_sec = self
+                    .engine
+                    .as_ref()
+                    .map(|e| e.last_time_left_sec())
+                    .unwrap_or(0);
+                let equity = self.ledger.balance();
+                let mut ctx = crate::arbitration::IntentCtx {
+                    round_tokens: &round_tokens,
+                    risk: &self.risk,
+                    breaker: &self.breaker,
+                    ledger: &mut self.ledger,
+                    exit_cfg: &self.config.positions.exit,
+                    time_left_sec,
+                    now_ms,
+                    equity,
+                };
+                crate::arbitration::process_intent(&intent, &mut ctx)
+            };
+            self.record_intent_decision(&intent, &outcome, now_ms);
+            if let crate::arbitration::Decision::Rejected {
+                reason,
+                gate,
+                detail,
+                ..
+            } = &outcome.decision
+            {
+                self.stats.place_rejected += 1;
+                let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                acc.rejected += 1;
+                // Bucket through the EXISTING classifier over the gate's own
+                // message, so the attribution vocabulary is the one place()
+                // would have written — the rejection happened earlier, the
+                // story an operator reads does not change (E9-c buckets).
+                let cause = classify_rejection(&crate::model::CoreError::new(
+                    crate::arbitration::reason_code(*reason),
+                    detail.clone(),
+                ));
+                *acc.rejection_causes.entry(cause).or_default() += 1;
+                tracing::info!(target: "strategy",
+                    "entry rejected: strategy={name} cause=arbitration gate={gate:?} reason={reason:?} detail={detail}");
+                continue;
+            }
+            let req = intent.request;
             // E16/#98 portfolio-level exposure cap (0 = off): the account's
             // total open commitment across ALL strategies is bounded too —
             // per-strategy caps partition it, but their sum needs its own
@@ -4739,6 +4813,60 @@ impl Core {
         self.note_error(&e, now_ms);
         self.emit_error_event(e);
     }
+
+    /// E25 (#331): ONE audit line per arbitrated suggestion — never folded,
+    /// never blocking (a failed append warns once and the trade goes on) —
+    /// plus AT MOST one `INTENT_DECISION` push per `(strategy, gate, reason)`
+    /// per second (§12.3): the PUSH folds, the audit does not.
+    fn record_intent_decision(
+        &mut self,
+        intent: &crate::arbitration::StrategyIntent,
+        outcome: &crate::arbitration::Outcome,
+        now_ms: i64,
+    ) {
+        let intent_json = serde_json::to_value(&intent.request).unwrap_or(serde_json::Value::Null);
+        let record = self.intent_audit.record(
+            now_ms,
+            &intent.request.strategy,
+            &intent_json,
+            &outcome.decision,
+            &outcome.gates,
+            outcome.latency_us,
+        );
+        // The throttle key is (strategy, gate, reason); for a non-rejection the
+        // "reason" slot carries the status, so an approval storm folds too.
+        let (gate, key_reason) = match &outcome.decision {
+            crate::arbitration::Decision::Rejected { gate, reason, .. } => (
+                format!("{gate:?}").to_uppercase(),
+                format!("{reason:?}").to_uppercase(),
+            ),
+            _ => (
+                outcome
+                    .gates
+                    .last()
+                    .map(|g| format!("{:?}", g.gate).to_uppercase())
+                    .unwrap_or_else(|| "UNKNOWN".into()),
+                outcome.decision.status().to_string(),
+            ),
+        };
+        if let Some(count) =
+            self.intent_audit
+                .throttle(&intent.request.strategy, &gate, &key_reason, now_ms)
+        {
+            let push = crate::arbitration::AuditSink::push_for(&record, count);
+            self.emit(Event::IntentDecision {
+                account_id: self.intent_audit.account_id.clone(),
+                strategy: push.strategy,
+                intent_id: push.intent_id,
+                status: push.status,
+                gate: push.gate,
+                detail: push.detail,
+                ts_ms: push.ts_ms,
+                count: push.count,
+            });
+        }
+    }
+
     /// Emit an error event WITHOUT touching the slot, for a consequence whose
     /// cause is already recorded: the slot must keep showing the error an
     /// operator has to act on (the raw venue refusal), not the kernel's own

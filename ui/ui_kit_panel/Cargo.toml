@@ -28,3 +28,7 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "signal"] }
 libc = { workspace = true }
+# E25 (#331): the Decisions tab renders the audit tail as raw JSON rows — the
+# crate is already in the workspace (every UI layer decodes the core's JSON),
+# this only names the edge. No new crate enters the tree.
+serde_json = { workspace = true }
