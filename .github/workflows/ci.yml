@@ -299,6 +299,11 @@ jobs:
       #     in" becomes the assertion.
       - name: Build the reference strategy cdylib (standalone workspace)
         run: (cd user_layer/parity_strategy && cargo build --release --locked)
+      # E24 (#330): the API 1.0 examples workspace — the momentum_alpha
+      # reference strategy and the e24_modes_fixture the declaration gate
+      # drives through the real loader.
+      - name: Build the API 1.0 examples cdylibs (standalone workspace)
+        run: (cd user_layer/examples && cargo build --release --locked)
       # #228: what the binary does with an argument it does not recognise. The
       # fallback arm of `parse_args` printed `ignoring unknown argument: <token>`
       # and started the core ANYWAY, so a misspelled `--readonly` was a WRITE-mode
@@ -415,6 +420,17 @@ jobs:
           node scripts/strategy-devcheck.mjs
           node scripts/scale-plugins-check.mjs
           node scripts/feed-scale-check.mjs
+      # v0.3.0 gates (E24 / #330): every new gate proves it can go red BEFORE it
+      # guards (§A.4) — teeth first, then the real verdict. Later epics append
+      # their own gates to these two blocks.
+      - name: v0.3 gates — reverse acceptance (--teeth) [E24]
+        run: |
+          node scripts/strategy-no-stop-loss-check.mjs --teeth
+          node scripts/strategy-declaration-check.mjs --teeth
+      - name: v0.3 gates — the real verdicts [E24]
+        run: |
+          node scripts/strategy-no-stop-loss-check.mjs
+          node scripts/strategy-declaration-check.mjs
       # Assorted one-off invariants kept cheap.
       - name: Assorted gates (plugin selection / trade-log flag / TUI demo)
         run: |

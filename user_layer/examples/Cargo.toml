@@ -1,0 +1,18 @@
+# Nested workspace for the official BlitzkriegStrategy API 1.0 examples.
+# SEPARATE from the kernel workspace (own Cargo.lock), like a real third-party
+# strategy author's checkout: examples depend ONLY on the frozen interface
+# crate (`blitzkrieg-strategy-api`), never on the kernel.
+#
+#   * momentum_alpha     — the reference strategy of DEV_V0_3 §A.2.1 (E24):
+#                          declares prediction/binary_outcome_wheel + 2
+#                          capability bits, computes no stop-loss.
+#   * e24_modes_fixture  — a TEST fixture (not a reference example): a
+#                          hand-written ABI whose `bk_strategy_declare_modes`
+#                          returns whatever payload
+#                          `scripts/strategy-declaration-check.mjs` writes to
+#                          `BK_E24_DECLARATION_FILE`, so one dylib drives all
+#                          of §16.4's legal/illegal declaration cases through
+#                          the real loader.
+[workspace]
+members = ["momentum_alpha", "e24_modes_fixture"]
+resolver = "2"
