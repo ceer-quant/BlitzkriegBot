@@ -65,6 +65,59 @@ impl MarketCapabilities {
     }
 }
 
+/// Combining capability requirements is the first thing every declaration
+/// author writes (`WEBSOCKET_FEED | LEVEL2_SNAPSHOT`, DEV_V0_3 §A.2.1), so the
+/// OR is part of the frozen shape, not glue each caller re-derives from `.0`.
+impl std::ops::BitOr for MarketCapabilities {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+/// The wire spelling of every capability bit (DEV_V0_3 §7.2), in bit order.
+///
+/// Declarations carry capabilities as these READABLE NAMES — the payload is
+/// what an operator reads in a load report and what the declaration gates pin —
+/// while the bits stay the u64 constants above. One table, so parsing
+/// (`parse_strategy_modes` here, the plugin side in E27) and the docs cannot
+/// drift: E27's `capability_by_name()` reads this same list.
+pub const CAPABILITY_NAMES: [(u64, &str); 10] = [
+    (MarketCapabilities::WEBSOCKET_FEED.0, "websocket_feed"),
+    (MarketCapabilities::LEVEL2_SNAPSHOT.0, "level2_snapshot"),
+    (MarketCapabilities::KLINE_STREAM.0, "kline_stream"),
+    (MarketCapabilities::TRADE_STREAM.0, "trade_stream"),
+    (MarketCapabilities::LEVERAGE.0, "leverage"),
+    (MarketCapabilities::SHORT_SELLING.0, "short_selling"),
+    (MarketCapabilities::BATCH_ORDERS.0, "batch_orders"),
+    (MarketCapabilities::POST_ONLY.0, "post_only"),
+    (
+        MarketCapabilities::CANCEL_ON_DISCONNECT.0,
+        "cancel_on_disconnect",
+    ),
+    (MarketCapabilities::MAKER_REBATE.0, "maker_rebate"),
+];
+
+/// The bit of `name`, or `None` for a name this table does not carry — the
+/// lookup every payload validator needs, in the one place the names live.
+pub fn capability_bit(name: &str) -> Option<MarketCapabilities> {
+    CAPABILITY_NAMES
+        .iter()
+        .find(|(_, n)| *n == name)
+        .map(|(bit, _)| MarketCapabilities(*bit))
+}
+
+/// The readable names of every bit set in `caps`, in bit order — the encoding
+/// side of the same table (the `export_strategy!` macro serializes a
+/// strategy's declaration with it).
+pub fn capabilities_to_names(caps: MarketCapabilities) -> Vec<&'static str> {
+    CAPABILITY_NAMES
+        .iter()
+        .filter(|(bit, _)| caps.0 & bit != 0)
+        .map(|(_, name)| *name)
+        .collect()
+}
+
 /// One market mode a PLUGIN declares. Field meanings are identical to the
 /// strategy-side `StrategyMode`; the two types exist to say WHO is declaring,
 /// not to carry two different shapes. Validation is one shared implementation

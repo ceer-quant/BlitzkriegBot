@@ -1,0 +1,13 @@
+[package]
+name = "e24_modes_fixture"
+version = "0.1.0"
+edition = "2024"
+description = "Test fixture for scripts/strategy-declaration-check.mjs (E24 / #330) — NOT a reference example."
+
+[lib]
+name = "e24_modes_fixture"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+blitzkrieg-strategy-api = { path = "../../strategy_api" }

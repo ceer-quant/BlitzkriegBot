@@ -23,7 +23,7 @@ members = [
 # workspaces (each has [workspace]) that build example/test cdylibs —
 # intentionally excluded so they carry their own Cargo.lock like a real external
 # strategy author would.
-exclude = ["user_layer/strategies", "user_layer/parity_strategy", "ui/webapp/src-tauri"]
+exclude = ["user_layer/strategies", "user_layer/parity_strategy", "user_layer/examples", "ui/webapp/src-tauri"]
 
 # ── 版本单事实来源（VERSIONING.md §3）────────────────────────────────────────
 # 这是全仓库唯一人工编辑的版本号。任何 crate 都不得再写死 version（用

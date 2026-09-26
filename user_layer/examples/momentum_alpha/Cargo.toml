@@ -1,0 +1,16 @@
+[package]
+name = "momentum-alpha-strategy"
+version = "0.1.0"
+edition = "2024"
+description = "Reference external strategy for BlitzkriegStrategy API 1.0 (Rust)."
+
+[lib]
+name = "momentum_alpha_strategy"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+# 与真实第三人称作者一样：只依赖冻结的接口 crate，不依赖内核。
+blitzkrieg-strategy-api = { path = "../../strategy_api" }
+rust_decimal = "1"
+serde_json = "1"
