@@ -229,6 +229,58 @@ NetCheckReport = {
 > WebUI 不在请求里内联拨号：面板的 `serve()` 单线程 accept，一次十秒探测会冻结进程内所有
 > 其它请求（包括面板自己的快照轮询）。因此路由只读缓存，探测在后台线程用独立连接完成。
 
+### 2.9 v0.3 接口冻结（#329 Wave 0）
+
+v0.3 的全部 IPC 变更是**加项**：新增方法、新增事件变体、既有响应加字段。
+**协议版本号保持 `1.1` 不变**（与 §4 惯例一致：加项不改版本号）。设计真相见
+`DEV_V0_3.md` §12；本节只写「已冻结、可依赖」的部分。
+
+#### 2.9.1 两个只读信封（Wave 0 已落地）
+
+两个方法与信封形状在 Wave 0 冻结并已进 `server.rs`。都只读、无副作用、**不取 Core 锁**
+（对齐 `system.version` 的姿势）。二者的「空」是**如实回答**，不是占位符：
+
+| method | params | result |
+|:---|:---|:---|
+| `kline.history` | `{ "symbol", "interval", "limit"? }` | `{ "symbol", "interval", "klines": [KlineView...] }` |
+| `intent.audit.tail` | `{ "limit"?: 50, "accountId"?, "strategy"?, "decision"?: "rejected" }` | `{ "records": [IntentAuditRecord...], "total"? }` |
+
+`kline.history`：`interval` 取 `sec1` / `sec5` / `sec15` / `min1` / `min5` / `min15` /
+`hour1` / `hour4` / `day1`（共享类型 `KlineInterval` 的 wire 拼写）。
+`KlineView` = `Kline` 的 camelCase 形状：`{ symbol, interval, openTimeMs, closeTimeMs,
+open, high, low, close, volume, tradeCount, isClosed }`（Decimal 一律字符串）。
+按 `openTimeMs` 升序；`limit` 默认 200、上限 1000——上限由聚合器执行，随 E29 落地。
+**Wave 0 的事实**：聚合器尚不存在（E29），本方法只回照请求的 `symbol`/`interval` 与
+**空 `klines` 列表**；E29 换成真实尾部数据时信封不变。
+
+`intent.audit.tail`：`records` 为 `data/audit/intents.jsonl` 中**落盘记录的原样**（camelCase
+对象，字段见 `DEV_V0_3.md` §3.4 的 `IntentAuditRecord`；`decision` 是带 `status`
+标签的枚举对象）——不引入镜像类型，审计只有一种拼写。返回**最新** `limit` 条（默认 50），
+在窗口内保持文件顺序（旧 → 新）；`total` 为过滤后的总条数。`decision` 过滤值与
+`decision.status` 大小写不敏感匹配（`approved` / `modified` / `rejected`）。
+**Wave 0 的事实**：写入方尚未存在（E25）；缺文件 = 空列表（JSONL 的既有规则，
+坏行跳过不致命）。
+
+相关事件（`KLINE_UPDATE` / `INTENT_DECISION`，形状见 `DEV_V0_3.md` §12.2/§12.3）
+随各自 Epic（E29 / E25）落地——Wave 0 不预声明无发射方的变体。
+
+#### 2.9.2 v0.3 其余契约（冻结方向，随 Epic 落地）
+
+以下形状已在 `DEV_V0_3.md` §12 冻结；各 Epic 只实现、不再改形状。**在对应 Epic 合并前，
+调用方不得假设它们存在**（旧内核返回 unknown method）：
+
+| 变更 | 归属 Epic | 契约位置 |
+|:---|:---|:---|
+| `account.list` / `account.switch` / `account.status`（`AccountView`） | E28 | §12.1 |
+| `kline.subscribe` / `kline.unsubscribe`（**会话级**，断连自动退订） | E29 | §12.2 |
+| `risk.limits`（生效值 + `source` 四值 `default/toml/env/flag`） | E26 | §12.4、§4.4 |
+| `market.list` 加 `structure`/`capabilities`/`capabilitiesBits`；`strategy.list` 加 `modes`/`compatible`/`incompatibleReason`；`strategy.load` 回执加 `; API 1.0 (line protocol 2)` | E27 / E24 | §12.5 |
+| `positions.list` / `orders.list` 行加 `accountId`；`orders.place` / `ledger.balance` 加可选 `accountId`；`engine.stats` 加 `accounts`/`kline`；`core.ready` 加 `apiVersion`/`accountId` | E28 / E26 / E29 | §12.6 |
+
+共享类型（`Kline`/`AccountId`/`MarketStructure`/`StrategyMode` 等）已于 Wave 0 落在
+`market_api` / `strategy_api` 并由内核 re-export——与上面的方法不同，它们是**已编译的
+既有类型**，可以直接依赖。
+
 ## 3. 调用示例
 
 ### Node（门禁脚本内的裸 Node 客户端）
@@ -275,3 +327,4 @@ core.set_strategy_enabled("my_strategy", false);
 | 1.1 | 受限配置热加载（Issue #191）：新增 `risk.setLimits`（见 §2.5），只允许热改**开仓限额**（每笔/组合名义上限 + 开仓股数区间），白名单之外一律**明确拒绝**并要求重启；**只改内存、不落盘**（响应 `persisted: false`），审计走既有 `target: "risk"` INFO 日志（actor/字段/旧值/新值/reason）。协议加项，向后兼容，版本号不变 |
 | 1.1 | 内核零策略（2026-09-23）：删除自带的 5 个策略（`spread_arb`/`trend_follow`/`mean_reversion`/`pair_arb`/`dog`）。**协议本身无变化**——`strategy.list` 的形状、`strategy.load` 的回执、`engine.stats` 的字段都没动，变的只是「出厂时列表为空」。上面几条 E4-a/E4-b 的记录保留为历史：它们描述的是当时的注册行为，那些注册点已不存在 |
 | 1.1 | 版本单事实来源（docs/VERSIONING.md E-V1..V3，2026-09-25）：新增只读方法 `system.version`（版本 + 构建来源 + 更新三态；`updateAvailable: null=未检查 ≠ false=已是最新`；不取 Core 锁，数据锁未就绪也可回答），字段契约见 `docs/VERSIONING.md` §5.3。启动器同步补 `--version`/`-V`/`-v` 短路（不再落入 `run_unified` 启动路径，#228 同形风险）与 `blitzkrieg version [--json] [--core] [--socket]` 子命令（`--core` 即问本方法；旧内核返回 unknown method，UI 不得编造空版本）。workspace 全成员版本继承根 `[workspace.package].version`，由 `scripts/version-guard.mjs` 守卫。协议加项，向后兼容，版本号不变 |
+| 1.1 | v0.3 Wave 0 接口冻结（#329）：§2.9 落进本文件——两个只读信封先落地（`kline.history` / `intent.audit.tail`，见 §2.9.1）；共享类型（`Kline`/`KlineInterval`/`AccountId`/`AccountStatus`/`CredentialKeys`/`MarketStructure`/`MarketCapabilities`/`MarketMode`/`StrategyMode`）落在 `market_api` / `strategy_api`，内核 re-export；C ABI 增第六个可选符号 `bk_strategy_declare_modes`（未导出=不声明；vtable 与 `BK_ABI_VERSION=2` 冻结）；`SafeStrategy` 增 `declare_modes()` / `on_kline()` 两个带默认实现的签名。§2.9.2 其余契约（`account.*`、`kline.subscribe`、`risk.limits`、既有方法字段扩展）随各 Epic 落地。协议加项，向后兼容，版本号不变 |

@@ -1,0 +1,19 @@
+[package]
+name = "blitzkrieg-lua-runtime"
+version.workspace = true
+edition = "2024"
+description = "Lua 5.4 sandbox host for user-authored strategies (mlua, vendored). Wave 0 (#329) ships the dependency tree only — the sandbox itself lands with E30."
+
+[lib]
+name = "blitzkrieg_lua_runtime"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+# DEV_V0_3 §6.1: mlua + Lua 5.4, vendored — the ONE new dependency tree of 0.3.
+# It lands here (Wave 0) on purpose: Cargo.lock is shared by every branch and
+# CI builds with --locked, so the lock must change exactly once (§14.0).
+mlua = { version = "0.12", features = ["lua54", "vendored"] }
+# §11.1 dependency direction: lua_runtime ──► strategy_api (type alignment
+# only). This crate must never depend on the core.
+blitzkrieg-strategy-api = { path = "../strategy_api" }

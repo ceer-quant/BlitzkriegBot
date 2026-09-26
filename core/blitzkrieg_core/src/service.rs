@@ -2348,6 +2348,14 @@ impl Core {
             .map(|o| (o.token_id.clone(), o))
             .collect();
         let mut placed = 0;
+        // ── v0.3 Wave 0 (#329): the E25 arbitration delegation seam ──────────
+        // E25 inserts its one-line per-intent delegation at the head of the
+        // loop below: `process_intent` (arbitration/) runs BEFORE the E16
+        // portfolio cap, so every strategy intent is arbitrated exactly once
+        // and the SAME Request that cleared the gates is the one handed to
+        // `self.place(...)`. Wave 0 lands the seam only — a comment, not a
+        // call: `arbitration/` does not exist yet and this PR is
+        // behavior-free by charter (deviation disclosed in the PR body).
         for (token, req) in tokens {
             let name = req.strategy.clone();
             // E16/#98 portfolio-level exposure cap (0 = off): the account's

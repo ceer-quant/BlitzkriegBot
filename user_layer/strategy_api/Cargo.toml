@@ -9,6 +9,11 @@ serde_json = "1"
 # Exact decimal parsing for the safe layer (`dec`/`ParamBag::get_dec`): the
 # template must never route a price through f64.
 rust_decimal = "1"
+# The ONE new crate edge of 0.3 (DEV_V0_3 §11.1): shared declaration types
+# (`MarketType`/`MarketStructure`/`MarketCapabilities`/`Kline`/`AccountId`)
+# live in market_api — the crate with no internal dependencies — because this
+# crate may NOT depend on the core, and both sides must agree on ONE type.
+blitzkrieg-market-api = { path = "../../core/market_api" }
 
 [lib]
 name = "blitzkrieg_strategy_api"

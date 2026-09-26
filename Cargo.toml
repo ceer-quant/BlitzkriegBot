@@ -12,6 +12,10 @@ members = [
     "user_layer/strategy_api",
     "user_layer/strategy_logic",
     "user_layer/parity_logic",
+    # Wave 0 (#329): the Lua sandbox host — an intentionally empty crate whose
+    # ONLY job in 0.3 Wave 0 is to pin mlua in Cargo.lock exactly once, so no
+    # Epic has to edit the shared lock (§14.0). The sandbox itself is E30.
+    "user_layer/lua_runtime",
     "ui/ui_kit",
     "ui/ui_kit_panel",
 ]

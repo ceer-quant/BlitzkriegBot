@@ -168,13 +168,24 @@ pub type CoreResult<T> = Result<T, CoreError>;
 // ── Order intent (market-agnostic) ───────────────────────────────────────────
 
 /// Which class of market an intent targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Wire = `snake_case`. Adding variants is wire-compatible: an OLD consumer
+/// that meets `earn` must fail loudly rather than draw it as `prediction` —
+/// which is why v0.3 adds `Margin`/`Earn`/`Bot` to the enum instead of
+/// smuggling them through a string field (§7.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarketType {
     Prediction,
     Spot,
+    /// Leveraged spot / borrowed balances.
+    Margin,
     Futures,
     Options,
+    /// Yield / interest-bearing, read-mostly.
+    Earn,
+    /// Third-party bot-hosted markets.
+    Bot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

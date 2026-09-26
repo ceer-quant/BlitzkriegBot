@@ -1,9 +1,15 @@
-//! Blitzkrieg Strategy API — C ABI **v2** (full-featured external strategies).
+//! BlitzkriegStrategy API **1.0** (full-featured external strategies).
+//!
+//! Formal name since 0.3: **BlitzkriegStrategy API 1.0** (the old name "C ABI
+//! v2" is deprecated). The wire stays at `BK_ABI_VERSION = 2` — the rename
+//! touches the spec's name and semantics boundary (strategy advises, kernel
+//! adjudicates), NOT the memory layout; every 0.2-built cdylib keeps loading
+//! without recompilation. See DEV_V0_3 §2.
 //!
 //! This crate is the ONLY binary contract between the kernel and a strategy
-//! shipped as a shared library (`.so` / `.dylib` / `.dll`). v2 closes the
-//! capability gap that v1 had between in-tree strategies (`EngineStrategy`) and
-//! external ones: a v2 dylib sees exactly what an in-tree strategy sees —
+//! shipped as a shared library (`.so` / `.dylib` / `.dll`). The API closes the
+//! capability gap between in-tree strategies (`EngineStrategy`) and external
+//! ones: a strategy dylib sees exactly what an in-tree strategy sees —
 //! every book callback, the full price-depth ladder, derived depth/OBI/spread
 //! metrics, the round/market context — and can express entries, exits, trend
 //! breaks, confirmation state, diagnostics, config and hot-parameter updates.
@@ -155,6 +161,33 @@ pub const BK_SETTLEMENT_HOLDS_SYMBOL: &[u8] = b"bk_strategy_settlement_holds\0";
 
 /// Signature of the optional [`BK_SETTLEMENT_HOLDS_SYMBOL`] entry point.
 pub type BkSettlementHoldsFn = unsafe extern "C" fn(handle: BkHandle) -> i32;
+
+/// Symbol name for the OPTIONAL three-layer market-mode declaration
+/// (DEV_V0_3 §2.3): `char* bk_strategy_declare_modes(void* handle)` returning
+///
+/// ```json
+/// {"modes":[{"market_type":"prediction",
+///            "structure":"binary_outcome_wheel",
+///            "capabilities":["websocket_feed","level2_snapshot"]}]}
+/// ```
+///
+/// Four optional-symbol precedents exist already ([`BK_GATE_EXEMPTIONS_SYMBOL`],
+/// [`BK_EVOLVABLE_KNOBS_SYMBOL`], [`BK_BIND_EVAL_CTX_SYMBOL`],
+/// [`BK_CONFIG_VIEW_SYMBOL`], [`BK_SETTLEMENT_HOLDS_SYMBOL`]); this is the
+/// sixth, same rule: an absent symbol / NULL / non-JSON payload degrades to
+/// "undeclared" — EXCEPT `{"modes":[]}`, which is an ILLEGAL declaration
+/// (`ModeError::Empty`), not an absence (§7.4). The vtable is untouched;
+/// `sizeof` never changes, so 0.2-built libraries keep loading.
+///
+/// Wire spelling is snake_case (same rule as `MarketType`'s existing wire).
+/// The payload is validated by the ONE shared `ModeDecl` validator the plugin
+/// side also uses. Generated for Rust authors by `export_strategy!` from
+/// [`safe::SafeStrategy::declare_modes`] (empty → NULL, i.e. "symbol present,
+/// declares nothing").
+pub const BK_DECLARE_MODES_SYMBOL: &[u8] = b"bk_strategy_declare_modes\0";
+
+/// Signature of the optional [`BK_DECLARE_MODES_SYMBOL`] entry point.
+pub type BkDeclareModesFn = unsafe extern "C" fn(handle: BkHandle) -> *mut c_char;
 
 /// One price/size level of the order book. Both are decimal strings.
 #[repr(C)]
@@ -366,6 +399,16 @@ pub use safe::{
     BookUpdate, Break, Entry, Exit, FreshBook, Intents, Knob, MarketInfo, ParamBag, RoundContext,
     RoundInfo, SafeStrategy, dec,
 };
+
+// ── three-layer market-mode declaration (DEV_V0_3 §2.5 / §7) ────────────────
+// The shared types live in `blitzkrieg_market_api` (the one new crate edge of
+// 0.3, §11.1) so both declaration sides agree on ONE type; re-exported here so
+// strategy authors import everything from `blitzkrieg_strategy_api`.
+pub mod modes;
+pub use blitzkrieg_market_api::{
+    Kline, KlineInterval, MarketCapabilities, MarketStructure, MarketType,
+};
+pub use modes::StrategyMode;
 
 /// Shell helpers the generated `__bk_export` module imports via `$crate::shell`.
 #[doc(hidden)]
