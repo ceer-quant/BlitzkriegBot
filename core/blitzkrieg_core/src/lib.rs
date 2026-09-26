@@ -13,6 +13,7 @@
 //!  - `service`  typed command layer assembling ome/ledger/risk/sim
 //!  - `ipc`      UDS JSON-RPC 2.0 schema + transport
 
+pub mod account;
 pub mod backtest;
 pub mod cli;
 pub mod config;
@@ -24,6 +25,7 @@ pub mod exit_policy;
 pub mod extension;
 pub mod ipc;
 pub(crate) mod jsonl;
+pub mod kline;
 pub mod ledger;
 pub mod ledger_api;
 pub mod logging;

@@ -11,6 +11,7 @@
 //!
 //! Node never sends a private key; the core loads credentials itself.
 
+use crate::kline::{Kline, KlineInterval};
 use crate::model::*;
 use crate::ome::FillDelta;
 use rust_decimal::Decimal;
@@ -207,6 +208,17 @@ pub mod method {
     pub const SYSTEM_UPDATE_CONFIGURE: &str = "system.update.configure";
     /// One manual update check (the UI's "check for updates" button).
     pub const SYSTEM_UPDATE_CHECK: &str = "system.update.check";
+
+    // ── v0.3 Wave 0 (#329) — the two read-only envelope freezes ─────────────
+    // The two arms Wave 0 lands in `server.rs`, with their wire shapes frozen
+    // here (§12.2/§12.3). Both answer truthfully with an empty envelope until
+    // their producers land (E25: `data/audit/intents.jsonl`; E29: the K-line
+    // aggregator); neither takes the Core lock.
+
+    /// Historical K-lines for one `(symbol, interval)` (§12.2). Read-only.
+    pub const KLINE_HISTORY: &str = "kline.history";
+    /// Tail of the intent-arbitration audit log (§12.3). Read-only.
+    pub const INTENT_AUDIT_TAIL: &str = "intent.audit.tail";
 }
 
 // ── Typed params / results ───────────────────────────────────────────────────
@@ -589,6 +601,72 @@ pub struct PositionExitParams {
 #[serde(rename_all = "camelCase")]
 pub struct PositionExitResult {
     pub closed: usize,
+}
+
+// ── v0.3 Wave 0 (#329): the two read-only envelopes ──────────────────────────
+//
+// The wire shapes the two Wave-0 `server.rs` arms speak (§12.2/§12.3), frozen
+// here so E25/E28/E29 extend behaviour without re-spelling the envelopes.
+
+/// `kline.history` params (§12.2): `{ "symbol", "interval", "limit"? }`.
+///
+/// `interval` is the shared [`KlineInterval`] — wire values `sec1` … `day1` —
+/// so the enum spelling lives with the K-line type itself (`crate::kline`)
+/// instead of a second copy of the strings here.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KlineHistoryParams {
+    pub symbol: String,
+    pub interval: KlineInterval,
+    /// Bars requested. Default 200, capped at 1000 (§12.2). The cap is the
+    /// aggregator's (E29) to enforce — no bars exist yet, so the Wave-0 arm
+    /// returns the empty list and this field is carried, not applied.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `kline.history` result (§12.2): bars ascending by `openTimeMs`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KlineHistoryResult {
+    pub symbol: String,
+    pub interval: KlineInterval,
+    pub klines: Vec<Kline>,
+}
+
+/// `intent.audit.tail` params (§12.3).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntentAuditTailParams {
+    /// Records to return, taken from the newest end. Defaults to 50.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    /// `approved` / `modified` / `rejected` (§12.3), matched
+    /// case-insensitively against the record's `decision.status`.
+    #[serde(default)]
+    pub decision: Option<String>,
+}
+
+/// `intent.audit.tail` result (§12.3).
+///
+/// `records` carries the log rows **verbatim** — the camelCase objects the
+/// arbitration audit writes (§3.4) — rather than a mirror type: a second
+/// struct over the same bytes would be a second spelling of the audit truth,
+/// and one-truth-per-fact is the rule the arbitration design exists to keep.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntentAuditTailResult {
+    /// The newest `limit` records matching every filter, in file order
+    /// (oldest → newest).
+    pub records: Vec<serde_json::Value>,
+    /// How many records matched the filters in total — `records` is only the
+    /// tail window. Optional in the wire contract (§12.3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<usize>,
 }
 
 // ── Server → Node events ─────────────────────────────────────────────────────

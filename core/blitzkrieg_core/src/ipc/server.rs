@@ -1527,6 +1527,75 @@ async fn handle_line(
             .await
         }
 
+        // ── v0.3 Wave 0 (#329): the two read-only envelope freezes ───────────
+        // Both answer without the Core lock (same posture as `system.version`)
+        // and state today's truth with today's data — no stub values:
+        //
+        // * `intent.audit.tail` reads whatever `data/audit/intents.jsonl`
+        //   holds (E25 lands the writer; a missing file is the documented
+        //   empty envelope, and the JSONL rules skip a torn tail line).
+        // * `kline.history` returns no bars because no aggregator exists yet
+        //   (E29) — the empty list is the current fact.
+        method::KLINE_HISTORY => {
+            typed(params, |p: KlineHistoryParams| async move {
+                Ok::<_, CoreError>(
+                    serde_json::to_value(KlineHistoryResult {
+                        symbol: p.symbol,
+                        interval: p.interval,
+                        klines: Vec::new(),
+                    })
+                    .unwrap_or(Value::Null),
+                )
+            })
+            .await
+        }
+
+        method::INTENT_AUDIT_TAIL => {
+            typed(params, |p: IntentAuditTailParams| async move {
+                let all = crate::jsonl::load::<Value>(
+                    std::path::Path::new("data/audit/intents.jsonl"),
+                    "intent audit log: skipped unparseable lines",
+                );
+                let keep = |rec: &Value| {
+                    if let Some(f) = p.account_id.as_deref()
+                        && rec.get("accountId").and_then(Value::as_str) != Some(f)
+                    {
+                        return false;
+                    }
+                    if let Some(f) = p.strategy.as_deref()
+                        && rec.get("strategy").and_then(Value::as_str) != Some(f)
+                    {
+                        return false;
+                    }
+                    if let Some(f) = p.decision.as_deref()
+                        && !rec
+                            .get("decision")
+                            .and_then(|d| d.get("status"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| s.eq_ignore_ascii_case(f))
+                    {
+                        return false;
+                    }
+                    true
+                };
+                let matched: Vec<Value> = all.into_iter().filter(keep).collect();
+                let total = matched.len();
+                let limit = p.limit.unwrap_or(50);
+                let records: Vec<Value> = matched
+                    .into_iter()
+                    .skip(total.saturating_sub(limit))
+                    .collect();
+                Ok::<_, CoreError>(
+                    serde_json::to_value(IntentAuditTailResult {
+                        records,
+                        total: Some(total),
+                    })
+                    .unwrap_or(Value::Null),
+                )
+            })
+            .await
+        }
+
         other => Err((
             Failure::METHOD_NOT_FOUND,
             format!("unknown method: {other}"),
@@ -2153,5 +2222,131 @@ mod tests {
 
         // Cleanup: these two files belong to this test alone.
         let _ = std::fs::remove_dir_all("data/update");
+    }
+
+    // ── v0.3 Wave 0 (#329): the two read-only envelopes, at the wire ────────
+    //
+    // Both arms are ADDITIVE (two new methods; nothing existing moves), so what
+    // these tests pin is the envelope a consumer parses: the echoed routing
+    // fields and the empty list — never `null`, never METHOD_NOT_FOUND. E25 and
+    // E29 fill the lists later; these shapes must survive that swap.
+
+    /// `kline.history` answers the frozen envelope: symbol/interval echoed
+    /// verbatim (`interval` in the shared `KlineInterval` spelling) and an
+    /// empty `klines` — the truth until E29's aggregator exists.
+    #[tokio::test]
+    async fn kline_history_answers_the_frozen_envelope() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"kline.history","params":{"symbol":"BTC-UP","interval":"min1"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "a Wave-0 envelope must answer, not 404: {reply}"
+        );
+        assert_eq!(reply["result"]["symbol"], serde_json::json!("BTC-UP"));
+        assert_eq!(reply["result"]["interval"], serde_json::json!("min1"));
+        assert_eq!(reply["result"]["klines"], serde_json::json!([]));
+    }
+
+    /// `intent.audit.tail`: a missing log is the documented empty envelope;
+    /// with rows present it answers the NEWEST window in file order, and
+    /// `accountId` / `decision` filter BEFORE the window is taken (`decision`
+    /// case-insensitively against `decision.status`, the §3.4 wire shape).
+    #[tokio::test]
+    async fn intent_audit_tail_reads_the_tail_and_filters() {
+        let dir = std::path::Path::new("data/audit");
+        let _ = std::fs::remove_dir_all(dir);
+        let (core, registry, peer) = hot_reload_fixture().await;
+
+        // Fresh data dir: the empty envelope, not an error.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"intent.audit.tail","params":{}}"#.to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "{reply}");
+        assert_eq!(reply["result"]["records"], serde_json::json!([]));
+        assert_eq!(reply["result"]["total"], serde_json::json!(0));
+
+        // Three rows shaped like §3.4's IntentAuditRecord (camelCase; the
+        // decision is the status-tagged enum).
+        std::fs::create_dir_all(dir).expect("create data/audit");
+        let rows = [
+            r#"{"tsMs":1,"accountId":"default","strategy":"s","intentId":"i1","decision":{"status":"APPROVED"},"gates":[],"latencyUs":1}"#,
+            r#"{"tsMs":2,"accountId":"paper","strategy":"s","intentId":"i2","decision":{"status":"REJECTED"},"gates":[],"latencyUs":1}"#,
+            r#"{"tsMs":3,"accountId":"default","strategy":"s","intentId":"i3","decision":{"status":"MODIFIED"},"gates":[],"latencyUs":1}"#,
+        ];
+        std::fs::write(dir.join("intents.jsonl"), rows.join("\n")).expect("write rows");
+
+        // No filter: all three, oldest → newest (file order preserved).
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"intent.audit.tail","params":{}}"#.to_string(),
+        )
+        .await;
+        assert_eq!(reply["result"]["total"], serde_json::json!(3));
+        assert_eq!(
+            reply["result"]["records"][0]["intentId"],
+            serde_json::json!("i1")
+        );
+        assert_eq!(
+            reply["result"]["records"][2]["intentId"],
+            serde_json::json!("i3")
+        );
+
+        // `limit` takes the NEWEST rows, still oldest → newest inside the
+        // window; `total` keeps reporting the full filtered count.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"intent.audit.tail","params":{"limit":1}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(reply["result"]["records"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            reply["result"]["records"][0]["intentId"],
+            serde_json::json!("i3")
+        );
+        assert_eq!(reply["result"]["total"], serde_json::json!(3));
+
+        // `decision` matches case-insensitively against `decision.status` …
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"intent.audit.tail","params":{"decision":"rejected"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(reply["result"]["total"], serde_json::json!(1));
+        assert_eq!(
+            reply["result"]["records"][0]["intentId"],
+            serde_json::json!("i2")
+        );
+
+        // … and `accountId` is an exact match.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"intent.audit.tail","params":{"accountId":"default"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(reply["result"]["total"], serde_json::json!(2));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

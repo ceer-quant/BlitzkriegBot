@@ -15,9 +15,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "blitzkrieg-market-api"
+version = "0.2.1"
+dependencies = [
+ "rust_decimal",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "blitzkrieg-strategy-api"
 version = "0.2.1"
 dependencies = [
+ "blitzkrieg-market-api",
  "rust_decimal",
  "serde_json",
 ]
