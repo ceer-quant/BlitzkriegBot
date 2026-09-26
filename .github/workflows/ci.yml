@@ -415,6 +415,15 @@ jobs:
           node scripts/strategy-devcheck.mjs
           node scripts/scale-plugins-check.mjs
           node scripts/feed-scale-check.mjs
+      # v0.3.0 gates: every new gate proves it can go red BEFORE it guards
+      # (§A.4) — teeth first, then the real verdict. Epics append their own
+      # lines to these two blocks; E25 (#331) lands the block.
+      - name: v0.3 gates — reverse acceptance (--teeth)
+        run: |
+          node scripts/intent-audit-check.mjs --teeth
+      - name: v0.3 gates — the real verdicts
+        run: |
+          node scripts/intent-audit-check.mjs
       # Assorted one-off invariants kept cheap.
       - name: Assorted gates (plugin selection / trade-log flag / TUI demo)
         run: |

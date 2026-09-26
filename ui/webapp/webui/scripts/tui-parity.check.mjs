@@ -55,21 +55,46 @@ const TUI_TAB_SETS = [
   ['Overview', 'Positions', 'Trades', 'Plugins'],
   ['Overview', 'Positions', 'Trades', 'Plugins', 'Evolution'],
   ['Overview', 'Positions', 'Trades', 'Plugins', 'Evolution', 'Settings'],
+  // E25 (#331): the arbitration audit gets its own face on BOTH sides — the
+  // audit is the kernel's answer to "why did this strategy stop placing", so
+  // it is a paired face, not WebUI surplus.
+  [
+    'Overview',
+    'Positions',
+    'Trades',
+    'Plugins',
+    'Evolution',
+    'Decisions',
+    'Settings',
+  ],
 ]
-check('TUI tabs are a known layout (4-tab, 5-tab with Evolution, or 6-tab with Settings)', () => {
-  assert.ok(
-    TUI_TAB_SETS.some((s) => s.join(',') === tuiVariants.join(',')),
-    `unknown TUI tab set: ${tuiVariants.join('/')} — extend TUI_TAB_SETS deliberately`,
-  )
-})
+check(
+  'TUI tabs are a known layout (4-tab, 5-tab with Evolution, or 6-tab with Settings, 7-tab with Decisions)',
+  () => {
+    assert.ok(
+      TUI_TAB_SETS.some((s) => s.join(',') === tuiVariants.join(',')),
+      `unknown TUI tab set: ${tuiVariants.join('/')} — extend TUI_TAB_SETS deliberately`,
+    )
+  },
+)
 
 /** WebUI nav ids, read out of the segments array. */
 const webuiIds = [...shell.matchAll(/id: '(\w+)', label: /g)].map((m) => m[1])
 const WEBUI_TAB_SETS = [
   ['overview', 'hft', 'backtest', 'strategies', 'plugins', 'settings'],
   ['overview', 'hft', 'backtest', 'strategies', 'evolution', 'plugins', 'settings'],
+  [
+    'overview',
+    'hft',
+    'backtest',
+    'strategies',
+    'decisions',
+    'evolution',
+    'plugins',
+    'settings',
+  ],
 ]
-check('WebUI nav is a known tab set (six, or seven with evolution)', () => {
+check('WebUI nav is a known tab set (six, seven with evolution, eight with decisions)', () => {
   assert.ok(
     WEBUI_TAB_SETS.some((s) => s.join(',') === webuiIds.join(',')),
     `unknown WebUI tab set: ${webuiIds.join('/')} — extend WEBUI_TAB_SETS deliberately`,
@@ -95,6 +120,11 @@ if (tuiVariants.includes('Evolution')) {
 // pairing is asserted once the TUI carries the tab, same rule as Evolution.
 if (tuiVariants.includes('Settings')) {
   TUI_TO_WEBUI.push(['Settings', ['settings'], 'SettingsPage.vue', '版本与更新'])
+}
+// The Decisions face ships with the E25 arbitration audit (#331); paired the
+// same way — both sides render the kernel's GateTrace.detail verbatim.
+if (tuiVariants.includes('Decisions')) {
+  TUI_TO_WEBUI.push(['Decisions', ['decisions'], 'Decisions.vue', '裁决'])
 }
 for (const [tab, targets, pageFile, marker] of TUI_TO_WEBUI) {
   check(`TUI ${tab} → WebUI ${targets.join(' + ')}（${marker} 在页上）`, () => {

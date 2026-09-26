@@ -54,6 +54,7 @@ pub fn render(f: &mut Frame, app: &App) {
         Tab::Positions => render_positions(f, chunks[2], &app.snap),
         Tab::Trades => render_trades(f, chunks[2], &app.snap),
         Tab::Plugins => render_plugins(f, chunks[2], app),
+        Tab::Decisions => render_decisions(f, chunks[2], app),
         Tab::Evolution => render_evolution(f, chunks[2], app),
         Tab::Settings => render_settings(f, chunks[2], app),
     }
@@ -707,6 +708,104 @@ fn render_trades(f: &mut Frame, area: Rect, s: &UiSnapshot) {
             .title(format!("Closed Trades ({})", s.trades.len())),
     );
     f.render_widget(table, area);
+}
+
+/// The arbitration audit (E25 / #331, §13.4's TUI face): the SAME five columns
+/// the WebUI's Decisions page shows — 时间 / 策略 / 结果 / 关卡 / 详情 — with the
+/// detail column printed VERBATIM from the kernel's GateTrace. The rows are the
+/// raw audit tail; no second decision model exists on this side either.
+fn render_decisions(f: &mut Frame, area: Rect, app: &App) {
+    let header = Row::new(["time", "strategy", "status", "gate", "detail"])
+        .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD));
+    let rows: Vec<Row> = app
+        .decisions
+        .iter()
+        .map(|r| {
+            let status = r
+                .get("decision")
+                .and_then(|d| d.get("status"))
+                .and_then(tui_s)
+                .unwrap_or_else(|| "?".into());
+            let (status_text, color) = match status.as_str() {
+                "APPROVED" => ("approved", GREEN),
+                "MODIFIED" => ("modified", WARN),
+                "REJECTED" => ("rejected", RED),
+                _ => (status.as_str(), DIM),
+            };
+            // REJECTED shows the rejecting gate; otherwise the last trace.
+            let gate = if status == "REJECTED" {
+                r.get("decision")
+                    .and_then(|d| d.get("gate"))
+                    .and_then(tui_s)
+            } else {
+                r.get("gates")
+                    .and_then(|g| g.as_array())
+                    .and_then(|a| a.last())
+                    .and_then(|g| g.get("gate"))
+                    .and_then(tui_s)
+            }
+            .unwrap_or_else(|| "—".into());
+            let detail = if status == "REJECTED" {
+                r.get("decision")
+                    .and_then(|d| d.get("detail"))
+                    .and_then(tui_s)
+            } else {
+                r.get("gates")
+                    .and_then(|g| g.as_array())
+                    .and_then(|a| a.last())
+                    .and_then(|g| g.get("detail"))
+                    .and_then(tui_s)
+            }
+            .unwrap_or_default();
+            Row::new([
+                Cell::from(
+                    r.get("tsMs")
+                        .and_then(tui_i64)
+                        .map(ts_hms)
+                        .unwrap_or_else(|| "—".into()),
+                )
+                .style(Style::default().fg(DIM)),
+                Cell::from(r.get("strategy").and_then(tui_s).unwrap_or_default()),
+                Cell::from(status_text.to_string()).style(Style::default().fg(color)),
+                Cell::from(gate).style(Style::default().fg(DIM)),
+                Cell::from(detail),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(9),
+            Constraint::Length(18),
+            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Fill(1),
+        ],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::ALL).title(format!(
+        "Decisions — arbitration audit ({} rows)",
+        app.decisions.len()
+    )));
+    f.render_widget(table, area);
+}
+
+fn tui_s(v: &serde_json::Value) -> Option<String> {
+    v.as_str().map(String::from)
+}
+
+fn tui_i64(v: &serde_json::Value) -> Option<i64> {
+    v.as_i64()
+}
+
+fn ts_hms(ms: i64) -> String {
+    let secs = ms.div_euclid(1000).rem_euclid(86_400);
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
 }
 
 /// The plugin-manager view (E5-a): strategies / market plugins / extensions in

@@ -45,6 +45,8 @@ pub enum Msg {
     UpdateInstallDone(Result<String, String>),
     /// A decoded core-event batch arrived on the EventBus.
     Events(Vec<blitzkrieg_ui_kit::core::types::CoreEvent>),
+    /// E25 (#331): the intent-audit tail was re-read (Decisions tab).
+    Decisions(Vec<serde_json::Value>),
     /// The process received an external termination signal.
     Shutdown,
 }
@@ -267,6 +269,30 @@ pub async fn run_panel_with_dispatcher(
                     }
                 }
                 tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
+    // E25 (#331): the decisions tab's own poller — a slower cadence than the
+    // snapshot (the audit is append-only history, not live book state).
+    {
+        let d = dispatcher.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            loop {
+                let rows = tokio::task::spawn_blocking({
+                    let d = d.clone();
+                    move || match d.lock() {
+                        Ok(mut g) => g.intent_audit_tail(200),
+                        Err(_) => Vec::new(),
+                    }
+                })
+                .await
+                .unwrap_or_default();
+                if tx.send(Msg::Decisions(rows)).is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
     }
@@ -560,6 +586,7 @@ pub async fn run_panel_with_dispatcher(
             }
             Msg::UpdateInstallDone(_) => { /* deferred with the release pipeline */ }
             Msg::RefreshError(e) => app.log(format!("refresh error: {e}")),
+            Msg::Decisions(rows) => app.decisions = rows,
             Msg::Shutdown => app.should_quit = true,
         }
         if app.should_quit {
@@ -711,9 +738,12 @@ mod tests {
         assert!(app.toggle_needs_confirmation("rollback mean_reversion"));
         assert!(!app.toggle_needs_confirmation("decide prop-42 reject"));
 
-        // Tab cycles through all six pages: from Evolution one press lands on
-        // Settings (VERSIONING.md §6.2), the next wraps back to Overview, and
-        // four more come the long way round to Evolution again.
+        // Tab cycles through all seven pages: from Evolution one press lands on
+        // the E25 Decisions face, the next on Settings (VERSIONING.md §6.2),
+        // the next wraps back to Overview, and four more come the long way
+        // round to Evolution again.
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.tab, Tab::Decisions);
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.tab, Tab::Settings);
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
