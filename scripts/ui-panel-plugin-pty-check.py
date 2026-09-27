@@ -152,6 +152,10 @@ core = subprocess.Popen(
     [BIN, '--socket', SOCK, '--mode', 'dry', '--tick-ms', '100', '--seed-balance', '1000',
      '--max-order-notional', '6', '--assets', 'BTC,ETH', '--min-shares', '1', '--max-shares', '10',
      '--strategy-dir', REF_DYLIB_DIR,
+     # E30: the official Lua package auto-loads by default; this gate asserts
+     # "exactly the loaded cdylib, nothing built in", so the Lua package
+     # surface is switched off and the registry stays dylib-only.
+     '--no-lua-strategy-dir',
      '--engine', '--no-event-archive'],
     cwd=WORK, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 for _ in range(60):

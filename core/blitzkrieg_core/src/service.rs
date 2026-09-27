@@ -67,6 +67,15 @@ pub struct CoreConfig {
     /// directory (auto-load off). Load failures are reported and skipped,
     /// never fatal — a broken file must not brick the kernel.
     pub strategy_dir: Option<String>,
+    /// E30 (§6.4): directory scanned at startup for Lua strategy PACKAGES
+    /// (directories carrying `manifest.json`). Same discipline as
+    /// `strategy_dir`: every valid package LOADS and registers DISABLED; the
+    /// enable decision comes from the persisted set plus `--enable-strategy`.
+    /// Deliberately SEPARATE from `strategy_dir` — that path is the dylib
+    /// scanner's root, and Lua packages are never dylibs (§6.4: mixing them
+    /// in would blur the measurement fixtures' semantics). `None` = off;
+    /// default `user_layer/strategies_lua` under the repo.
+    pub lua_strategy_dir: Option<String>,
     /// Where the effective enabled-set is recorded so runtime toggles and boot
     /// flags survive a restart (`data/strategy-state.json` in production; see
     /// [`crate::strategy_state`]). `None` disables persistence — the backtester
@@ -311,6 +320,7 @@ impl CoreConfig {
     pub fn install_engine(&self, core: &mut Core) -> Result<(), String> {
         core.enable_engine(crate::engine::Engine::new(self.engine_config()));
         self.load_strategy_dir(core);
+        self.load_lua_strategy_dir(core);
         for name in &self.enabled_strategies {
             // E27 (§8.2): the startup `--enable-strategy` request runs through
             // the SAME handshake as `strategy.enable`: a strategy the active
@@ -467,6 +477,34 @@ impl CoreConfig {
             let _ = core;
         }
     }
+
+    /// E30 (§6.6): scan `lua_strategy_dir` for Lua strategy packages and
+    /// register each one DISABLED — the Lua mirror of `load_strategy_dir`.
+    /// Load failures are reported and skipped, never fatal; a duplicate name
+    /// is skipped (the first package in sorted order wins, like dylibs).
+    fn load_lua_strategy_dir(&self, core: &mut Core) {
+        let Some(dir) = &self.lua_strategy_dir else {
+            return;
+        };
+        for pkg in
+            crate::strategy_engine::lua_loader::discover_lua_packages(std::path::Path::new(dir))
+        {
+            let receipt = core.load_lua_package_inner(&pkg, false);
+            if receipt.contains("already registered") {
+                eprintln!(
+                    "blitzkrieg-core: lua strategy auto-load skipped (duplicate): {}",
+                    pkg.display()
+                );
+                continue;
+            }
+            let ok = receipt.contains("registered into the engine dispatch");
+            eprintln!(
+                "blitzkrieg-core: lua strategy auto-load {}: {}",
+                if ok { "ok" } else { "FAILED" },
+                receipt
+            );
+        }
+    }
 }
 
 /// Depth-bounded walk gathering `*.dylib`/`*.so` files under `dir`.
@@ -619,6 +657,7 @@ impl Default for CoreConfig {
             enabled_strategies: Vec::new(),
             disabled_strategies: Vec::new(),
             strategy_dir: None,
+            lua_strategy_dir: None,
             strategy_state_path: None,
             requested_strategies: Vec::new(),
             allow_zero_strategies: false,
@@ -1732,6 +1771,13 @@ impl Core {
         {
             use crate::strategy_engine::loader::load_foreign;
             let p = std::path::Path::new(path);
+            // E30 (§6.4): a DIRECTORY is a Lua package, never a dylib — route
+            // it through the Lua loader so the two stacks cannot load each
+            // other's artifacts (the dylib scanner owns `*.dylib`, the Lua
+            // loader owns `manifest.json` packages).
+            if p.is_dir() {
+                return self.load_lua_package_inner(p, enforce);
+            }
             let Some(engine) = self.engine.as_mut() else {
                 return "Failed: strategy engine not attached (load libraries after engine init)"
                     .into();
@@ -1822,6 +1868,62 @@ impl Core {
         {
             let outcome = crate::strategy_engine::loader::load_strategy(std::path::Path::new(path));
             format!("{outcome:?}")
+        }
+    }
+
+    /// E30 (#336): load one Lua strategy package (a directory carrying
+    /// `manifest.json`) and register it into the live dispatch. The E27
+    /// handshake applies UNCHANGED — a Lua declaration the active plugin
+    /// cannot serve is refused in ENFORCE mode (IPC `strategy.load`) or
+    /// registered-disabled-with-verbatim-receipt in SCAN mode (the startup
+    /// walk), byte-identical to the dylib rows (§8.2). The receipt carries
+    /// the `(lua)` marker so an operator sees the runtime at a glance
+    /// (§6.6: 回执含 `(lua)` 标记). A poisoning breach inside the sandbox is
+    /// reported on the receipt; it is not a load failure (the strategy is
+    /// alive, it just refused to run).
+    fn load_lua_package_inner(&mut self, dir: &std::path::Path, enforce: bool) -> String {
+        use crate::strategy_engine::lua_loader::{LuaEngineAdapter, load_lua_package};
+        let Some(engine) = self.engine.as_mut() else {
+            return "Failed: strategy engine not attached (load libraries after engine init)"
+                .into();
+        };
+        match load_lua_package(dir) {
+            Ok(loaded) => {
+                let name = loaded.name.clone();
+                let version = loaded.version.clone();
+                let tunables = loaded.tunables.clone();
+                // E27 (§8.2): the SAME handshake verdict BEFORE registration.
+                let refusal =
+                    Self::modes_refusal(self.plugin_modes.as_ref(), &name, &loaded.declared_modes);
+                if enforce && let Some(refusal) = refusal {
+                    return format!("Failed: {refusal}");
+                }
+                let incompatible = match refusal {
+                    Some(r) => format!("; INCOMPATIBLE: {r}"),
+                    None => String::new(),
+                };
+                match engine.register_user_strategy(
+                    Box::new(LuaEngineAdapter::new(loaded.strategy, tunables)),
+                    format!("lua:{}", dir.display()),
+                ) {
+                    Ok(_) => {
+                        // E30: an ABSENT manifest.modes stays absent — an empty
+                        // Vec would render `modes: []` on strategy.list, and
+                        // §8.3's contract is `null = undeclared` (E27). Insert
+                        // only a package that actually declared modes.
+                        if !loaded.declared_modes.is_empty() {
+                            self.strategy_declarations
+                                .insert(name.clone(), loaded.declared_modes.clone());
+                        }
+                        self.rewire_hot_params(now_ms());
+                        format!(
+                            "{name}@{version} (lua) registered into the engine dispatch (disabled{incompatible})"
+                        )
+                    }
+                    Err(reason) => format!("rejected: {reason}"),
+                }
+            }
+            Err(reason) => format!("Failed: {reason}"),
         }
     }
 
@@ -2484,6 +2586,15 @@ impl Core {
         // can never be sized against a balance the process no longer has.
         engine.set_equity_usd(self.ledger.balance());
         let orders = engine.evaluate(now_ms);
+        // E30 (§6.3): drain the sandbox poison alerts now; each is raised as
+        // ONE RISK_ALERT after the engine borrow ends below — the message
+        // names the strategy, the sandbox itself refuses every later call
+        // from it, and the kernel keeps running (a poisoned strategy is
+        // quarantined, not a crash).
+        let poison_alerts = engine.drain_poison_alerts();
+        for (name, alert) in &poison_alerts {
+            tracing::error!(strategy = %name, %alert, "lua strategy poisoned; all further calls refused");
+        }
         // Close intents produced by strategies this cycle join the SAME exit
         // submission path as policy exits (handled in run_exit_checks).
         self.strategy_exits.extend(engine.drain_strategy_exits());
@@ -2492,6 +2603,12 @@ impl Core {
         // opt-out is auditable rather than a silent hole in the entry gates.
         for rec in engine.take_exemptions() {
             tracing::info!(target: "strategy", "{}", rec.audit_line());
+        }
+        for (name, alert) in poison_alerts {
+            self.emit(Event::RiskAlert {
+                code: CoreErrorCode::Internal,
+                message: format!("lua strategy '{name}' poisoned: {alert}"),
+            });
         }
         self.stats.signals += orders.len() as u64;
         let tokens: Vec<(String, crate::model::OrderRequest)> = orders

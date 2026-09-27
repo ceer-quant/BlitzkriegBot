@@ -337,4 +337,14 @@ pub trait EngineStrategy: Send + Sync {
 
     /// The host config changed (trend / spread_arb knobs).
     fn on_config(&mut self, _trend: &TrendConfig, _spread_arb: &SpreadArbConfig) {}
+
+    /// E30 (§6.3): the one-shot poison alert from a sandboxed runtime (the
+    /// Lua state machine breached its instruction budget or memory ceiling).
+    /// The sandbox refuses every later call itself; this drains the ONE
+    /// alert message the host raises as a single RISK_ALERT naming the
+    /// strategy. Default: none — every non-sandboxed strategy answers `None`
+    /// forever.
+    fn poison_alert(&mut self) -> Option<String> {
+        None
+    }
 }

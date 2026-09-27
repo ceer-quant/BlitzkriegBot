@@ -1184,6 +1184,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "blitzkrieg-build-info",
+ "blitzkrieg-lua-runtime",
  "blitzkrieg-market-api",
  "blitzkrieg-strategy-api",
  "blitzkrieg-ui-kit",
@@ -1212,6 +1213,7 @@ version = "0.2.1"
 dependencies = [
  "blitzkrieg-strategy-api",
  "mlua",
+ "serde_json",
 ]
 
 [[package]]

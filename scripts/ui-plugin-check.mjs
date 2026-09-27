@@ -83,7 +83,11 @@ try {
       UIKIT_CORE_CWD: WORK,
       // Quoted: this checkout's path contains a space, and the gateway splits
       // UIKIT_CORE_EXTRA_ARGS on whitespace outside quotes.
-      UIKIT_CORE_EXTRA_ARGS: `--engine --feed-ws --strategy-dir "${REF_DYLIB_DIR}"`,
+      // --no-lua-strategy-dir (E30): the official Lua package auto-loads by
+      // default; this gate's assertion is "exactly the loaded cdylib, nothing
+      // built in", and the Lua package surface is a different dispatch row —
+      // isolated here so the E5 invariant stays about dylibs only.
+      UIKIT_CORE_EXTRA_ARGS: `--engine --feed-ws --strategy-dir "${REF_DYLIB_DIR}" --no-lua-strategy-dir`,
       DRY_RUN: 'true',
       // Gateway mode requires an explicit credential pair since #83.
       BLITZKRIEG_PANEL_USER: 'gate-admin',

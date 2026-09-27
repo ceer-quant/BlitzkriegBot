@@ -442,13 +442,146 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy my_strateg
 （每策略独立单元、互不串扰、进化关闭时逐位回到原行为）。端到端的
 `scripts/strategy-evolution-check.mjs` 随被删策略一起退役了。
 
+### 3.7 Lua 5.4 沙箱策略（E30 / #336）
+
+Lua 策略以**目录包**分发（不是 dylib），运行在 mlua 5.4 沙箱里，与 Rust 动态库栈并存、
+互不加载对方产物：加载器按**目录路由**——`strategy.load`/扫描遇**目录**走 Lua 装载器、
+遇**文件**走 dylib 扫描器，两条栈的产物物理上不可能混载。
+
+#### 3.7.1 分发格式（§6.4）
+
+```
+user_layer/strategies_lua/my_strategy/
+├── manifest.json      # 清单：签名与身份
+├── strategy.lua       # 入口脚本
+└── README.md          # 缺失只 WARN 不拒载（文档不挡交易）
+```
+
+`manifest.json`（`api` 必须是 `"1.0"`）：
+
+```json
+{
+  "name": "my_strategy",
+  "version": "0.1.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "<64 位十六进制，entry 文件的真实摘要>",
+  "tunables": { "threshold": { "type": "decimal", "default": "0.04" } }
+}
+```
+
+装载器的校验链（任何一环不过即拒载，回执写明原因）：
+
+| 校验 | 失败语义 |
+|:---|:---|
+| manifest 解析 / `api == "1.0"` | 拒载 |
+| **目录名 == `manifest.name`** | 拒载——一个包不允许有两个身份（错误含两个名字） |
+| **`manifest.sha256` == entry 文件真实 SHA-256** | 拒载——错误**同时携带 expected 与 actual 两个摘要**（不能追溯到源码的策略不予加载） |
+| 非十六进制 / 非 64 位 | 拒载（`not a sha256 hex digest`） |
+| `bk_evaluate` 缺失 | 拒载（必需入口点） |
+| `modes` 已声明但插件不能服务 | E27 同一套握手（`strategy.load` 拒绝；扫描只登记不拒） |
+
+sha256 是**签名语义**：磁盘上的脚本必须就是清单担保的那份。改了脚本就必须重算摘要——
+这正是「篡改检测」的牙齿。`tunables` 是 `bk.params()` 的初值袋（十进制字符串），
+热参推送（ParamRegistry cell）会在每个评估周期整体替换它。
+
+#### 3.7.2 入口点
+
+| 函数 | 必需性 | 调用时机 |
+|:---|:---|:---|
+| `bk_evaluate(ctx)` | **必需** | 每个评估周期一次；返回意图表（见下） |
+| `bk_on_book(book)` | 可选 | 每次盘口推送（仅 fresh 盘口） |
+| `bk_on_round(round)` | 可选 | 回合切换（`round` 形如 `bk.round()`） |
+| `bk_on_kline(kline)` | 可选 | K 线推送 |
+
+**意图表**（`bk_evaluate` 返回；全部十进制走 **STRING**，内核统一裁决——
+张数、风控、资金、签名、下单都不归你，见 §0/§2）：
+
+```lua
+return {
+  entries = { { token = up, price = "0.62", reason = "momentum", shares = "10" } },
+  exits   = { { token = up, reason = "signal gone" } },
+  breaks  = { { token = up, broken_price = "0.41" } },
+}
+```
+
+- `entries`：`token`/`price` 必需（字符串），`reason`/`shares` 可选；token 不在本回合市场里的会被内核丢弃（内核永不交易未知 token）。
+- `exits`：`token` 必需；经 `ExitReason::strategy_signal` 路由，语义同 §2。
+- `breaks`：`token` + `broken_price` 必需。
+- 返回 nil / 空表都合法（本周期无意图）；**字段类型错**（如 `price` 给了数字）会被防御式解析拒绝并记入诊断，不会崩内核。
+
+#### 3.7.3 `bk.*` 只读面（§6.5 线格式）
+
+| 调用 | 返回 |
+|:---|:---|
+| `bk.now_ms()` | 主机毫秒时钟（整数） |
+| `bk.round()` | `{slot, time_left_sec, now_ms}` 或 nil（无回合） |
+| `bk.markets()` | 数组：`{asset, condition_id, up_token, down_token, expires_at_ms, slot, neg_risk}` |
+| `bk.book(symbol)` | 盘口表或 nil，见下 |
+| `bk.params()` | `{名字 → 十进制字符串}`（manifest tunables 初值，可被热参覆盖） |
+| `bk.kline(symbol, interval)` | K 线表或 nil；`interval` 用 snake_case 线名（`"sec1"`/`"min1"`/…）。**E30 基线上恒为 nil**（E29 聚合器合并后才有数据）——这不是错误，是「暂无数据」 |
+| `bk.account()` | `{id, name, market_type, balance, available, reserved}`（金额可缺失 → nil）或 nil |
+
+`bk.book(symbol)` 的字段集**精确**为（§6.5）：`symbol, best_bid, best_ask, mid, obi, spread,
+bid_depth, ask_depth, ts_ms, fresh`。价格/深度全部十进制 **STRING**；盘口为空的一侧是 nil；
+`ts_ms` 是毫秒时间戳（不叫 `timestamp_ms`）；`fresh` 是主机的新鲜度裁决，仅在评估周期
+推送的盘口上携带。**没有** `asset`/`spread_pct`/档位数组——Lua 面是 §6.5 最小面，全档位
+深度走 Rust v2（§3.2）。
+
+#### 3.7.4 沙箱与两个配额（§6.3）
+
+运行环境：Lua 5.4，标准库只开 `math`/`string`/`table`；`luaopen_base` 仍会装基础库，
+所以黑名单把危险全局钉成 **nil**：`require, dofile, loadfile, load, loadstring,
+collectgarbage, print, assert, xpcall, _G, os, io, debug, package, coroutine` 与
+`string.dump`。黑名单是**真实安全层**（base 库确实暴露过它们），不是文档。`pcall` 可用
+（见下）；脚本里的断言请用 `error(msg, 0)`——`assert` 已被禁。
+
+每个宿主侧回调两个配额，**超限即投毒**：
+
+| 配额 | 值 | 触发 |
+|:---|:---|:---|
+| 内存上限 | **16 MiB**（`set_memory_limit`） | 一次超大分配（如 `string.rep('x', 17*1024*1024)`）以确定性 MemoryError 失败，绝不表现为宿主 OOM |
+| 指令预算 | **每次回调 1e6 条 VM 指令**（10 000 粒度的指令钩子） | `while true do end` 在预算耗尽处被打断 |
+
+**投毒语义**（先标记、后报错）：
+
+1. 配额耗尽 → **先置毒旗**（幂等，首次原因保留）→ **再抛错**；
+2. `pcall` 吞得掉错误、**吞不掉毒**——调用成功返回前宿主复查毒旗，结果作废
+   （"pcall swallows the error, never the poison"）；
+3. 该沙箱此后**所有**调用被拒绝（隔离，不是崩溃）；
+4. 内核每个周期排空毒旗，对每个中毒策略发**恰好一次** `RISK_ALERT`
+   （`code: Internal`，消息含策略名与原因），内核继续运行；
+5. **普通 Lua 错误不是毒**：访问黑名单全局（`require('io')`、`os.time()`）得到的是
+   确定性 bug（nil 调用错误）——宿主记录诊断、继续调用、不发 RISK_ALERT。
+
+#### 3.7.5 运行与开关
+
+```bash
+# 显式目录
+blitzkrieg-core --lua-strategy-dir /path/to/packages
+# 关闭（默认目录也不扫描；优先于默认值与环境变量）
+blitzkrieg-core --no-lua-strategy-dir
+# 默认：本地 ./user_layer/strategies_lua → 向上查找 → 内置默认
+# 环境变量：BK_LUA_STRATEGY_DIR
+```
+
+扫描/装载回执（`strategy.load` 的返回、扫描的 stderr 行都同形）：
+`my_strategy@0.1.0 (lua) registered into the engine dispatch (disabled…)`——
+`(lua)` 是栈标记；dylib 的回执**没有**它。`strategy.list` 两栈**同一行形状**
+（`{name, enabled, modes, compatible, incompatibleReason}`，§8.3）；manifest 未声明
+`modes` 的包读作 `modes: null`（未声明），与 0.2 策略同形。
+
+门禁：`node scripts/lua-sandbox-check.mjs`（默认真实判定：官方示例 + 四个敌意夹具
+双栈正跑；`--self-test` 纯判定器夹具；`--teeth` 喂坏实现的输出、要求红——
+E 删投毒置位、F 删 sha256 校验）。
+
 ## 4. 生命周期与开关
 
 | method | 说明 |
 |:---|:---|
 | `strategy.list` | 列出内核支持的策略及启用状态 |
 | `strategy.enable` | `{ name, enabled }` 开关某策略 |
-| `strategy.load` | 加载用户层动态库（feature 开启时） |
+| `strategy.load` | 加载用户层策略库（feature 开启时）：**文件**走 dylib、**目录**走 Lua 包（§3.7） |
 
 回合切换时内核调用 `on_round(slot)`，策略应在此清空本回合状态。
 
