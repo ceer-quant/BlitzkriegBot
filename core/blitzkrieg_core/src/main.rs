@@ -275,6 +275,15 @@ struct Args {
     /// `BK_STRATEGY_DIR` (a file-config key would be dead weight: this belongs
     /// to "where is the checkout", not to strategy parameters).
     strategy_dir: Option<String>,
+    /// E30 (§6.4): directory scanned at startup for Lua strategy PACKAGES
+    /// (directories carrying `manifest.json`). Same install/enable split as
+    /// `strategy_dir`: dropping a package in the folder INSTALLS it DISABLED;
+    /// enabling comes from the persisted set plus `--enable-strategy`.
+    /// Deliberately separate from the dylib scanner's root (§6.4: Lua packages
+    /// are never dylibs, and `user_layer/strategies` is also the measurement
+    /// fixtures' root). Default `user_layer/strategies_lua` under the repo;
+    /// overridden by `BK_LUA_STRATEGY_DIR`.
+    lua_strategy_dir: Option<String>,
     /// Mirror every market-data event into this JSONL archive (P-1.3).
     /// None = use the always-on default for an engine session (see `--no-event-archive`).
     event_archive: Option<String>,
@@ -393,6 +402,26 @@ fn default_strategy_dir() -> Option<String> {
         }
     }
     Some("user_layer/strategies".to_string())
+}
+
+/// E30 (§6.4): the Lua package scan root, resolved like `default_strategy_dir`
+/// — repo checkout first, then upward from the binary.
+fn default_lua_strategy_dir() -> Option<String> {
+    let local = std::path::Path::new("user_layer/strategies_lua");
+    if local.is_dir() {
+        return Some("user_layer/strategies_lua".to_string());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cur = exe.parent();
+        while let Some(dir) = cur {
+            let candidate = dir.join("user_layer/strategies_lua");
+            if candidate.is_dir() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+            cur = dir.parent();
+        }
+    }
+    Some("user_layer/strategies_lua".to_string())
 }
 
 /// Where the config file comes from, settled BEFORE argument parsing (the file
@@ -583,6 +612,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut no_strategy_state = false;
     let mut strategy_dir: Option<String> = None;
     let mut no_strategy_dir = false;
+    let mut lua_strategy_dir: Option<String> = None;
+    let mut no_lua_strategy_dir = false;
     let mut engine = false;
     // File-settable settings are collected as Option so the precedence chain can
     // resolve them at the end; a concrete default would erase the "was this flag
@@ -805,6 +836,11 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--no-strategy-state" => no_strategy_state = true,
             "--strategy-dir" => strategy_dir = it.next().filter(|v| !v.trim().is_empty()),
             "--no-strategy-dir" => no_strategy_dir = true,
+            // E30 (§6.4): the Lua package scan root (`none`/empty = off).
+            "--lua-strategy-dir" => {
+                lua_strategy_dir = it.next().filter(|v| !v.trim().is_empty());
+            }
+            "--no-lua-strategy-dir" => no_lua_strategy_dir = true,
             "--assets" => assets_arg = it.next(),
             "--round-sec" => round_sec = it.next().and_then(|v| v.parse().ok()).or(round_sec),
             "--min-round-age" => {
@@ -1624,6 +1660,13 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                 .or_else(|| env.text("BK_STRATEGY_DIR"))
                 .or_else(default_strategy_dir)
         },
+        lua_strategy_dir: if no_lua_strategy_dir {
+            None
+        } else {
+            lua_strategy_dir
+                .or_else(|| env.text("BK_LUA_STRATEGY_DIR"))
+                .or_else(default_lua_strategy_dir)
+        },
         event_archive,
         no_event_archive,
         event_archive_max_mb,
@@ -2122,6 +2165,7 @@ async fn main() -> anyhow::Result<()> {
         allow_zero_strategies: args.allow_zero_strategies,
         strategy_state_path: args.strategy_state,
         strategy_dir: args.strategy_dir,
+        lua_strategy_dir: args.lua_strategy_dir,
         markets: args.markets,
         auto_exits_enabled: args.auto_exits,
         engine_enabled: args.engine,

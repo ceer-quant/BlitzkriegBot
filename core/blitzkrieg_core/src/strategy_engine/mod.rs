@@ -24,3 +24,9 @@ pub mod loader;
 /// feature) so the non-feature build can still report a clean, testable refusal.
 #[cfg(not(feature = "strategy-loading"))]
 pub mod loader;
+
+/// E30 (#336): Lua package discovery, manifest validation (sha256 + directory
+/// name + api version) and the `EngineStrategy` adapter. Unconditional like
+/// `loader` — the sandbox is a locked workspace dependency, not a
+/// feature-gated dlopen.
+pub mod lua_loader;

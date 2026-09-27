@@ -392,6 +392,18 @@ pub const FLAGS: &[FlagSpec] = &[
     ),
     flag("--no-strategy-dir", "", "Load no external strategies."),
     flag(
+        "--lua-strategy-dir",
+        "<path|none>",
+        "Directory scanned for Lua strategy packages (directories with \
+         manifest.json), every package found is loaded (E30; default \
+         `user_layer/strategies_lua`; `none` = load none).",
+    ),
+    flag(
+        "--no-lua-strategy-dir",
+        "",
+        "Load no Lua strategy packages.",
+    ),
+    flag(
         "--shadow-evolution",
         "",
         "Run the shadow-evolution loop alongside trading.",

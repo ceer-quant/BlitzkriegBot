@@ -1003,6 +1003,20 @@ impl Engine {
         std::mem::take(&mut self.strategy_exits)
     }
 
+    /// E30 (§6.3): drain the one-shot poison alerts from sandboxed strategies.
+    /// Each name pairs with the single alert message the core raises as one
+    /// RISK_ALERT; the sandbox itself refuses every later call from a poisoned
+    /// strategy, so this is reporting, not enforcement.
+    pub fn drain_poison_alerts(&mut self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for s in self.strategies.iter_mut() {
+            if let Some(alert) = s.strategy.poison_alert() {
+                out.push((s.strategy.name().to_string(), alert));
+            }
+        }
+        out
+    }
+
     fn compute_shares(&self, price: Decimal, strategy: &str) -> Decimal {
         let sizing = self.effective_sizing(strategy);
         // P0 #202: the equity-relative mode REPLACES the absolute budget when
