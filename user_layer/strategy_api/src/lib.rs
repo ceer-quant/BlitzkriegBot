@@ -49,6 +49,7 @@
 //! char* bk_strategy_evolvable_knobs(void* handle);    // {"knobs":[{name,value,min,max}]}
 //! void  bk_strategy_bind_eval_ctx(void* h, const BkEvalCtx*);  // fresh-book gate
 //! char* bk_strategy_config_view(void* handle);        // config in force, JSON
+//! char* bk_strategy_declare_modes(void* handle);      // {"modes":[{market_type,structure?,capabilities}]}
 //! ```
 
 use core::ffi::{c_char, c_void};

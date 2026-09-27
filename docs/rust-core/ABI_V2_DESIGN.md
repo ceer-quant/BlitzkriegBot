@@ -336,3 +336,54 @@ E2-c（[#28](https://github.com/ceer-quant/BlitzkriegBot/issues/28)）把这一�
 - 不实现 E2-c 的按策略参数模型、不实现 E3/E4 新策略（它们将直接实现本契约，
   且必须能外挂——修正 #30/#31 原「仅原生」前提）。
 - 不引入 v1 shim。
+
+## 10. v0.3 增补：BlitzkriegStrategy API 1.0（E24 / #330）
+
+> 本文件自 v0.3 起的正式名称是 **BlitzkriegStrategy API 1.0**（旧名「C ABI v2」
+> 弃用）。改名只涉及规范名称与语义边界（策略建议、内核裁决），**不动线协议**：
+> `BK_ABI_VERSION` 仍为 2，vtable 冻结，0.2 构建的 cdylib 不重编译直接加载
+> （E24 验收第一条，由 `strategy:declaration-check --compat-dylib` 复验）。
+> 任何情况下不得出现 `BK_ABI_VERSION = 3` 的临时分支（D-15：v2 是干净切换）。
+
+### 10.1 第六个可选符号：`bk_strategy_declare_modes`
+
+```c
+/* 可选导出符号。返回 UTF-8 JSON 字符串，由该库自己的 bk_strategy_free_string
+ * 释放。缺失 / NULL 一律降级为「未声明」。 */
+char* bk_strategy_declare_modes(void* handle);
+```
+
+- 载荷：`{"modes":[{"market_type":"prediction","structure":"binary_outcome_wheel","capabilities":["websocket_feed","level2_snapshot"]}]}`
+  （snake_case，`structure` 可选 = 该类型下全部结构；DEV_V0_3 §2.3）。
+- 校验：`parse_strategy_modes`（`strategy_api`，复用 `market_api::ModeError`）。
+  **非法 → 拒载**，错误含 `index` 与 `got`；`{"modes":[]}` = `ModeError::Empty`
+  **非法**（声明了就必须是合法声明，把空数组当「未声明」会让写错的声明静默变成
+  不声明——风险 R10，反向验收由 `strategy:declaration-check --teeth` 钉住）。
+- 加载期读取：loader 用一次性探针实例（`create` → 读 → `destroy`）在注册前
+  校验；`declared_modes` 落在 `LoadedForeign`，0.2 库无符号 → 未声明，零成本。
+- Rust 作者由 `export_strategy!` 从 `SafeStrategy::declare_modes()` 生成
+  （空 `Vec` → `NULL`）。宏**只能产生合法载荷**；非法载荷的测试夹具是
+  `user_layer/examples/e24_modes_fixture`（手写符号，载荷由
+  `BK_E24_DECLARATION_FILE` 在调用时给出）。
+
+### 10.2 三个保留键：封口，而非删除（§2.4）
+
+`suggested_stop_loss` / `suggested_take_profit` / `suggested_max_hold_sec`
+在 0.2 代码中**从未存在**（全仓库检索命中仅设计文档自身）。v0.3 的动作是封口：
+
+1. **契约层明示禁止**：本节即声明——这三个键是 **Reserved / Refused**，
+   止损归属内核（exit_policy + position，STRATEGY_GUIDE「止损不归你管」）。
+2. **解析层显式拒绝**：intent 解析（`foreign.rs::adopt_eval_json`）遇键 →
+   `tracing::warn!`（`target: "strategy"`，含策略名、键名、token）并**丢弃该键**
+   继续处理其余字段，**不因它拒绝整单**；入场结果与「不带该键」逐字段相同
+   （单元测试 `reserved_key_intent_warns_once_and_entry_is_field_identical`，
+   反向验收 B）。
+3. **门禁层静态扫描**：`strategy:no-stop-loss-check` 对策略源码
+   （`user_layer/{strategies,parity_strategy,examples,strategies_lua}`）做文本
+   扫描，命中 `stop-loss logic found` → 红（反向验收 A）。
+
+### 10.3 回执
+
+`strategy.load` 成功回执追加 ` ; API 1.0 (line protocol 2)`，**保留既有文本**
+（既有测试钉住 `receipt.contains("registered into the engine dispatch")`）。
+该改动落 `service.rs`（热点，监护人 E25），随 E25 落地。
