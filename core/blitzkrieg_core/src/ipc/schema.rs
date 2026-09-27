@@ -753,6 +753,27 @@ pub enum Event {
         #[serde(rename = "atMs")]
         at_ms: i64,
     },
+    /// E25 (#331, §12.3): a suggestion was adjudicated by the four-gate
+    /// pipeline. THROTTLED — pushes fold per `(strategy, gate, status)` to at
+    /// most one per second; `count` is how many decisions one push summarizes.
+    /// The audit (`data/audit/intents.jsonl`) is NEVER folded.
+    IntentDecision {
+        #[serde(rename = "accountId")]
+        account_id: String,
+        strategy: String,
+        #[serde(rename = "intentId")]
+        intent_id: String,
+        /// `APPROVED` / `MODIFIED` / `REJECTED` — the same vocabulary the
+        /// `intent.audit.tail` filter uses.
+        status: String,
+        gate: String,
+        /// The kernel's own justification, verbatim from the `GateTrace`
+        /// (the panel prints it as-is, §13.4 — UI never re-words it).
+        detail: String,
+        #[serde(rename = "tsMs")]
+        ts_ms: i64,
+        count: u64,
+    },
 }
 
 /// Wire view of FillDelta (field names match Node conventions).

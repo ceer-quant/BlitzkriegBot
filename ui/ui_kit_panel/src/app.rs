@@ -13,6 +13,9 @@ pub enum Tab {
     Trades,
     Plugins,
     Evolution,
+    /// E25 (#331): the arbitration audit — every suggestion and the kernel's
+    /// four-gate verdict (§13.4's TUI face).
+    Decisions,
     Settings,
 }
 
@@ -24,7 +27,8 @@ impl Tab {
             "3 Trades",
             "4 Plugins",
             "5 Evolution",
-            "6 Settings",
+            "6 Decisions",
+            "7 Settings",
         ]
     }
     pub fn index(self) -> usize {
@@ -34,7 +38,8 @@ impl Tab {
             Tab::Trades => 2,
             Tab::Plugins => 3,
             Tab::Evolution => 4,
-            Tab::Settings => 5,
+            Tab::Decisions => 5,
+            Tab::Settings => 6,
         }
     }
     pub fn next(self) -> Self {
@@ -43,7 +48,8 @@ impl Tab {
             Tab::Positions => Tab::Trades,
             Tab::Trades => Tab::Plugins,
             Tab::Plugins => Tab::Evolution,
-            Tab::Evolution => Tab::Settings,
+            Tab::Evolution => Tab::Decisions,
+            Tab::Decisions => Tab::Settings,
             Tab::Settings => Tab::Overview,
         }
     }
@@ -118,6 +124,9 @@ pub struct App {
     pub should_quit: bool,
     /// When the snapshot shown was last updated (for the "Xs ago" header).
     pub last_update: Option<Instant>,
+    /// E25 (#331): the intent-audit tail as RAW rows — the Decisions tab
+    /// renders exactly what `data/audit/intents.jsonl` holds, no second model.
+    pub decisions: Vec<serde_json::Value>,
     /// Plugin-manager selection: 0=strategies pane column, then row index per pane.
     pub plugin_focus: usize,
     /// Evolution-tab selection: index into the pending-proposal list (the same
@@ -173,6 +182,7 @@ impl App {
             socket,
             should_quit: false,
             last_update: None,
+            decisions: Vec::new(),
             plugin_focus: 0,
             evo_focus: 0,
             pending_confirmation: None,

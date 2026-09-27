@@ -329,6 +329,19 @@ impl Dispatcher {
         s
     }
 
+    /// E25 (#331): the intent-audit tail (§12.3) as RAW JSON rows — the
+    /// panel's decisions tab renders exactly what the audit holds, so the TUI
+    /// needs no second model of a decision. Empty on any error (the tab says
+    /// so itself; this is a read, never a lifecycle action).
+    pub fn intent_audit_tail(&mut self, limit: usize) -> Vec<serde_json::Value> {
+        self.client
+            .call("intent.audit.tail", serde_json::json!({ "limit": limit }))
+            .ok()
+            .and_then(|v| v.get("records").cloned())
+            .and_then(|r| r.as_array().cloned())
+            .unwrap_or_default()
+    }
+
     /// Enable/disable one strategy. Returns the raw RPC payload (`found` says
     /// whether the name is registered).
     pub fn set_strategy(&mut self, name: &str, enabled: bool) -> Result<serde_json::Value, String> {

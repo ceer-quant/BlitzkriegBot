@@ -664,6 +664,19 @@ impl HttpRequest {
         }
         None
     }
+
+    /// E25 (#331): one decoded `name=value` query parameter, for the
+    /// intent-audit proxy's pass-through filters.
+    fn query_param(&self, name: &str) -> Option<String> {
+        let q = self.target.split_once('?')?.1;
+        for pair in q.split('&') {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            if k == name {
+                return Some(url_decode(v));
+            }
+        }
+        None
+    }
 }
 
 /// Byte-equal compare in time proportional to the expected value, so short
@@ -1794,6 +1807,35 @@ impl WebServer {
             ("GET", "/api/ping") | ("HEAD", "/api/ping") => {
                 // Unauthenticated by design; see `ping_doc`.
                 (200, "application/json", self.ping_doc().into_bytes())
+            }
+            ("GET", "/api/intent-audit") => {
+                // E25 (#331): the decisions page reads the arbitration audit
+                // through the SAME core client the snapshot uses — a thin
+                // proxy of `intent.audit.tail` (§12.3); the query filters
+                // (`limit` / `strategy` / `decision`) pass through untouched.
+                let mut params = serde_json::Map::new();
+                if let Some(n) = req
+                    .query_param("limit")
+                    .and_then(|v| v.parse::<usize>().ok())
+                {
+                    params.insert("limit".into(), serde_json::json!(n));
+                }
+                if let Some(v) = req.query_param("strategy") {
+                    params.insert("strategy".into(), serde_json::json!(v));
+                }
+                if let Some(v) = req.query_param("decision") {
+                    params.insert("decision".into(), serde_json::json!(v));
+                }
+                let doc = match self.snapshot_src.lock() {
+                    Ok(mut c) => {
+                        match c.call("intent.audit.tail", serde_json::Value::Object(params)) {
+                            Ok(v) => v,
+                            Err(e) => serde_json::json!({ "error": e.to_string() }),
+                        }
+                    }
+                    Err(_) => serde_json::json!({ "error": "audit client poisoned" }),
+                };
+                (200, "application/json", doc.to_string().into_bytes())
             }
             ("GET", "/api/plugins") => {
                 // E9-g: the registry trio the TUI Plugins page shows (strategies
