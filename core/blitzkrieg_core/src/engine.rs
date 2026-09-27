@@ -259,6 +259,9 @@ pub struct Engine {
     spot: HashMap<String, PriceBuffer>,
     /// Tokens with a live entry order this round, to avoid re-signalling.
     pending_tokens: HashSet<String>,
+    /// E25 (#331): `time_left_sec` of the most recent evaluate cycle — the
+    /// arbitration physics projection reads it (`effective_stop_pct`).
+    last_time_left_sec: i64,
     /// Near-miss signals from the most recent evaluate().
     last_blocked: Vec<BlockedCandidate>,
     /// Per-strategy gate exemptions HONOURED during the most recent evaluate()
@@ -306,6 +309,7 @@ impl Engine {
             books: HashMap::new(),
             spot: HashMap::new(),
             pending_tokens: HashSet::new(),
+            last_time_left_sec: 0,
             last_blocked: Vec::new(),
             last_exemptions: Vec::new(),
             near_miss: crate::shadow::NearMissRecorder::new(500, 300_000),
@@ -563,6 +567,9 @@ impl Engine {
         self.last_exemptions.clear();
 
         let round = self.scanner.round_timing(now_ms);
+        // E25: the arbitration pipeline's physics projection reads the SAME
+        // round timing this cycle was judged against.
+        self.last_time_left_sec = round.time_left_sec;
         let timing = self.scanner.can_trade_reason(now_ms).err();
 
         // Candidates are computed regardless of the timing gate so we can record
@@ -773,6 +780,21 @@ impl Engine {
 
     /// The per-strategy gate exemptions registered strategies declared
     /// (E2-b / #27). None for an unknown strategy.
+    /// E25 (#331): the token ids tradable THIS round (both sides of every
+    /// market) — Gate 1's "token 属于本轮" check reads this.
+    pub fn round_token_ids(&self) -> Vec<String> {
+        self.scanner
+            .markets()
+            .iter()
+            .flat_map(|m| [m.up_token_id.clone(), m.down_token_id.clone()])
+            .collect()
+    }
+
+    /// E25 (#331): `time_left_sec` of the most recent evaluate cycle.
+    pub fn last_time_left_sec(&self) -> i64 {
+        self.last_time_left_sec
+    }
+
     pub fn strategy_gate_exemptions(&self, name: &str) -> Option<GateExemptions> {
         self.strategies
             .iter()

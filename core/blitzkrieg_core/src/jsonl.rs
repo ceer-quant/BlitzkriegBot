@@ -58,20 +58,23 @@ pub(crate) fn load<T: serde::de::DeserializeOwned>(path: &Path, skipped_warning:
 /// contract of the logs that use it — a trade, an order snapshot or an audit row
 /// that cannot be persisted must not interrupt trading, because the in-memory
 /// state is authoritative for the run. A caller that needs to know about a
-/// failure must write its own bytes.
-pub(crate) fn append(path: &Path, value: &impl serde::Serialize) {
+/// failure must write its own bytes — or read the return value (E25 / #331:
+/// `true` when a line landed; the intent-audit sink warns once on `false`,
+/// without ever blocking the trade).
+pub(crate) fn append(path: &Path, value: &impl serde::Serialize) -> bool {
     use std::io::Write as _;
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let Ok(line) = serde_json::to_string(value) else {
-        return;
+        return false;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
     {
-        let _ = writeln!(f, "{line}");
+        Ok(mut f) => writeln!(f, "{line}").is_ok(),
+        Err(_) => false,
     }
 }

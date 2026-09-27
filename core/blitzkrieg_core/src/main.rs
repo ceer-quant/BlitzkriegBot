@@ -210,6 +210,9 @@ struct Args {
     no_order_log: bool,
     position_log: Option<String>,
     no_position_log: bool,
+    /// E25 (#331): silence the intent-audit WRITES only — the arbitration
+    /// gates always run (P1 proves both settings hit the same baseline).
+    no_intent_audit: bool,
     /// #199: acknowledge that this process may write a data directory another
     /// core is already writing (fixtures, backtests). Only disables the
     /// live-owner refusal — the boot banner still says so, loudly.
@@ -647,6 +650,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut no_order_log = false;
     let mut position_log: Option<String> = None;
     let mut no_position_log = false;
+    let mut no_intent_audit = false;
     let mut allow_shared_data = false;
     let mut market_plugin: Option<String> = None;
     let mut discovery = true;
@@ -777,6 +781,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--no-order-log" => no_order_log = true,
             "--position-log" => position_log = it.next(),
             "--no-position-log" => no_position_log = true,
+            "--no-intent-audit" => no_intent_audit = true,
             "--allow-shared-data" => allow_shared_data = true,
             "--market-plugin" => market_plugin = it.next(),
             "--no-discovery" => discovery = false,
@@ -1621,6 +1626,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         no_order_log,
         position_log,
         no_position_log,
+        no_intent_audit,
         allow_shared_data,
         market_plugin,
         discovery,
@@ -2168,6 +2174,7 @@ async fn main() -> anyhow::Result<()> {
         lua_strategy_dir: args.lua_strategy_dir,
         markets: args.markets,
         auto_exits_enabled: args.auto_exits,
+        intent_audit_enabled: !args.no_intent_audit,
         engine_enabled: args.engine,
         min_shares,
         max_shares,

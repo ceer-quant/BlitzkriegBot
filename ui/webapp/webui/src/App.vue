@@ -5,7 +5,7 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useNow } from '@vueuse/core'
-import { LayoutDashboard, Activity, History, Boxes, Puzzle, Settings, Moon, Sun, SunMoon, Bell, BellOff, LogOut, Radio, FlaskConical } from 'lucide-vue-next'
+import { LayoutDashboard, Activity, History, Boxes, Puzzle, Settings, Moon, Sun, SunMoon, Bell, BellOff, LogOut, Radio, FlaskConical, Gavel } from 'lucide-vue-next'
 import { usePanelStore } from './stores/panel'
 import { hasToken, logout, ping } from './api/client'
 import { SESSION_EXPIRED_REASON } from './lib/session'
@@ -16,6 +16,7 @@ import OverviewPage from './pages/Overview.vue'
 import HftPage from './pages/HftPage.vue'
 import BacktestPage from './pages/BacktestPage.vue'
 import StrategiesPage from './pages/Strategies.vue'
+import DecisionsPage from './pages/Decisions.vue'
 import EvolutionPage from './pages/EvolutionPage.vue'
 import PluginsPage from './pages/Plugins.vue'
 import SettingsPage from './pages/SettingsPage.vue'
@@ -25,7 +26,7 @@ import SegmentedControl from './components/ui/segmented/SegmentedControl.vue'
 import Button from './components/ui/button/Button.vue'
 import AlertBanner from './components/ui/alert/AlertBanner.vue'
 
-type TabId = 'overview' | 'hft' | 'backtest' | 'strategies' | 'evolution' | 'plugins' | 'settings'
+type TabId = 'overview' | 'hft' | 'backtest' | 'strategies' | 'decisions' | 'evolution' | 'plugins' | 'settings'
 
 const store = usePanelStore()
 const { theme, isDark, cycleTheme, sound, toggleSound } = useTheme()
@@ -57,6 +58,7 @@ const pages = {
   hft: HftPage,
   backtest: BacktestPage,
   strategies: StrategiesPage,
+  decisions: DecisionsPage,
   evolution: EvolutionPage,
   plugins: PluginsPage,
   settings: SettingsPage,
@@ -68,6 +70,7 @@ const segments = [
   { id: 'hft', label: '行情面板', icon: Activity },
   { id: 'backtest', label: '回放复盘', icon: History },
   { id: 'strategies', label: '策略', icon: Boxes },
+  { id: 'decisions', label: '裁决流', icon: Gavel },
   { id: 'evolution', label: '进化', icon: FlaskConical },
   { id: 'plugins', label: '插件', icon: Puzzle },
   { id: 'settings', label: '设置', icon: Settings },
