@@ -269,6 +269,20 @@ pub async fn run(
     if config.mode.settles_locally() {
         core.set_balance(config.dry_seed_balance);
     }
+
+    // Market plugins: the concrete venue is compiled in via a feature and
+    // registered here; the core drives its components through the market seam.
+    // E27 (§8.2): this MUST run before `install_engine`, which loads and
+    // enables strategies — the startup `--enable-strategy` request and both
+    // IPC handshake sites judge against the same declaration snapshot.
+    // `None` would leave the handshake inert.
+    let registry = crate::market::registry::MarketPluginRegistry::new();
+    crate::market::register_builtin_markets(&registry);
+    let active = crate::market::active_market_plugin(&registry, config.market_plugin.as_deref());
+    core.set_plugin_modes(Some(crate::market::compat::PluginModes::for_plugin(
+        active.as_ref(),
+    )));
+
     if config.engine_enabled {
         // One mapping shared with the backtester (`CoreConfig::install_engine`).
         // A refusal here (the #265 startup self-check: an explicit
@@ -282,11 +296,6 @@ pub async fn run(
     }
     let core = Arc::new(AsyncMutex::new(core));
 
-    // Market plugins: the concrete venue is compiled in via a feature and
-    // registered here; the core drives its components through the market seam.
-    let registry = crate::market::registry::MarketPluginRegistry::new();
-    crate::market::register_builtin_markets(&registry);
-    let active = crate::market::active_market_plugin(&registry, config.market_plugin.as_deref());
     let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
         Arc::new(crate::market::host::CoreHost::new(core.clone()));
 
@@ -1115,7 +1124,19 @@ async fn handle_line(
                 .into_iter()
                 .map(|name| {
                     let is_on = enabled.contains(&name);
-                    serde_json::json!({ "name": name, "enabled": is_on })
+                    // E27 (§8.3): the row carries the strategy's declared modes
+                    // as the §2.3 wire objects (`null` = undeclared), the
+                    // compatible flag, and the refusal reason when the
+                    // handshake would refuse it. Every 0.2 strategy reads as
+                    // `modes: null, compatible: true, incompatibleReason: null`.
+                    let (modes, compatible, incompatible_reason) = c.strategy_compat_view(&name);
+                    serde_json::json!({
+                        "name": name,
+                        "enabled": is_on,
+                        "modes": modes,
+                        "compatible": compatible,
+                        "incompatibleReason": incompatible_reason,
+                    })
                 })
                 .collect();
             Ok(serde_json::json!({
@@ -1130,8 +1151,22 @@ async fn handle_line(
                 .get("enabled")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            let found = core.lock().await.set_strategy_enabled(name, enabled);
-            Ok(serde_json::json!({ "name": name, "enabled": enabled, "found": found }))
+            // E27 (§8.2): the enable runs through the handshake. A disabling
+            // toggle is never gated (standing down is always allowed); an
+            // enable the active plugin cannot serve is REFUSED with the §8.2
+            // diagnostic — `{ name, enabled: false, found: true, reason }` —
+            // and the dispatch keeps the strategy off.
+            let (found, applied, reason) = core
+                .lock()
+                .await
+                .set_strategy_enabled_checked(name, enabled);
+            Ok(serde_json::json!({
+                "name": name,
+                "enabled": if reason.is_some() { false } else { enabled && applied },
+                "found": found,
+                "applied": applied,
+                "reason": reason,
+            }))
         }
 
         method::STRATEGY_LOAD => {
@@ -1187,9 +1222,18 @@ async fn handle_line(
                 .list()
                 .into_iter()
                 .map(|p| {
+                    // E27 (§8.3): the row carries the plugin's declared
+                    // structure and the union of its capability bits — with
+                    // the readable names beside the raw value so the modes
+                    // gate can push the two against each other in both
+                    // directions.
+                    let caps = blitzkrieg_market_api::modes::capabilities_to_names(p.capabilities);
                     serde_json::json!({
                         "name": p.name,
                         "type": p.market_type,
+                        "structure": p.structure,
+                        "capabilities": caps,
+                        "capabilitiesBits": p.capabilities.0,
                         "hasDataFeed": p.has_data_feed,
                         "hasDiscovery": p.has_discovery,
                         "hasExecutor": p.has_executor,

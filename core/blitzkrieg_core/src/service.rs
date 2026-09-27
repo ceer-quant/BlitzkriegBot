@@ -312,7 +312,21 @@ impl CoreConfig {
         core.enable_engine(crate::engine::Engine::new(self.engine_config()));
         self.load_strategy_dir(core);
         for name in &self.enabled_strategies {
-            if !core.set_strategy_enabled(name, true) {
+            // E27 (§8.2): the startup `--enable-strategy` request runs through
+            // the SAME handshake as `strategy.enable`: a strategy the active
+            // plugin cannot serve is SKIPPED with an ERROR line — never
+            // enabled silently, never able to trade in a market it declared
+            // itself unfit for.
+            let (found, applied, refusal) = core.set_strategy_enabled_checked(name, true);
+            if let Some(reason) = refusal {
+                tracing::error!(
+                    strategy = name,
+                    reason = reason,
+                    "startup enable refused by the market-mode handshake; strategy skipped"
+                );
+                continue;
+            }
+            if !found || !applied {
                 tracing::warn!(
                     strategy = name,
                     "unknown strategy requested at startup; ignored"
@@ -421,7 +435,11 @@ impl CoreConfig {
             // path order alone still makes the first copy the one that wins.
             libs.sort();
             for path in libs {
-                let receipt = core.load_strategy_lib(&path.to_string_lossy());
+                // E27 (§8.2 row 1): the startup scan is the LOG-ONLY handshake
+                // site — an incompatible library registers disabled with the
+                // mismatch on its receipt; the enable gate is where refusal
+                // happens.
+                let receipt = core.load_strategy_lib_scan(&path.to_string_lossy());
                 // The success receipt is exactly "<name>@<version> registered
                 // into the engine dispatch…"; a duplicate registration is
                 // REJECTED with a message that itself contains the word
@@ -1018,6 +1036,16 @@ pub struct Core {
     /// Crate-visible so the replay driver can host strategies without going
     /// through the loader path (the kernel ships none to load).
     pub(crate) engine: Option<crate::engine::Engine>,
+    /// E27 (§8.2): market-mode declarations of loaded user strategies, keyed
+    /// by strategy name. In-tree strategies and libraries without a
+    /// declaration are ABSENT = undeclared = the handshake does not apply
+    /// (§8.1 — every 0.2 library's state).
+    strategy_declarations: HashMap<String, Vec<blitzkrieg_strategy_api::StrategyMode>>,
+    /// E27 (§8.2): the active plugin's declaration snapshot, injected by the
+    /// server assembly BEFORE any strategy is loaded or enabled, so all three
+    /// handshake sites judge against the same view. `None` (backtester,
+    /// tests) leaves the handshake inert: nothing to be incompatible with.
+    plugin_modes: Option<crate::market::compat::PluginModes>,
     /// Optional Rust-native feed handle (P4); set when `--feed-ws` is enabled.
     feed: Option<std::sync::Arc<dyn blitzkrieg_market_api::SubscriptionControl>>,
     /// Extension registry (plugin lifecycle).
@@ -1267,6 +1295,8 @@ impl Core {
             exit_reasons_swept: 0,
             strategy_exits: Vec::new(),
             engine: None,
+            strategy_declarations: HashMap::new(),
+            plugin_modes: None,
             feed: None,
             extensions: {
                 use crate::extension::Extension;
@@ -1604,12 +1634,99 @@ impl Core {
         }
         ok
     }
+    // ── E27: market-mode compatibility handshake (§7.5 / §8.2) ──────────────
+
+    /// The handshake verdict for one declaration, as an associated function so
+    /// the load path can run it while the engine borrow is live (only
+    /// field-disjoint access is legal there). `None` = compatible: an
+    /// undeclared strategy participates not (§8.1 — every 0.2 library's
+    /// state), and no active plugin (backtester, tests) leaves nothing to
+    /// refuse against.
+    fn modes_refusal(
+        plugin: Option<&crate::market::compat::PluginModes>,
+        name: &str,
+        modes: &[blitzkrieg_strategy_api::StrategyMode],
+    ) -> Option<String> {
+        if modes.is_empty() {
+            return None;
+        }
+        let plugin = plugin?;
+        crate::market::compat::check_compatibility(name, modes, plugin).err()
+    }
+
+    /// The handshake verdict for a strategy already in the dispatch, by name.
+    pub(crate) fn compatibility_refusal(&self, name: &str) -> Option<String> {
+        match self.strategy_declarations.get(name) {
+            Some(modes) => Self::modes_refusal(self.plugin_modes.as_ref(), name, modes),
+            None => None,
+        }
+    }
+
+    /// Inject the active plugin's declaration snapshot (server assembly,
+    /// BEFORE any strategy is loaded or enabled, so all three §8.2 handshake
+    /// sites judge against the same view). `None` leaves the handshake inert
+    /// (backtester, tests).
+    pub fn set_plugin_modes(&mut self, modes: Option<crate::market::compat::PluginModes>) {
+        self.plugin_modes = modes;
+    }
+
+    /// The enable path with the handshake. Returns `(found, applied, reason)`:
+    /// `found` says the name exists in the dispatch, `applied` says the toggle
+    /// took effect, and `reason` carries the §8.2 diagnostic when the
+    /// handshake refused an enable. Disabling is never gated — standing down
+    /// is always allowed.
+    pub fn set_strategy_enabled_checked(
+        &mut self,
+        name: &str,
+        enabled: bool,
+    ) -> (bool, bool, Option<String>) {
+        let found = self.strategy_names().iter().any(|n| n == name);
+        if enabled && found {
+            if let Some(reason) = self.compatibility_refusal(name) {
+                return (true, false, Some(reason));
+            }
+        }
+        let applied = self.set_strategy_enabled(name, enabled);
+        (found, applied, None)
+    }
+
+    /// E27 (§8.3): the `strategy.list` view for one strategy — the declared
+    /// modes as the §2.3 wire objects (`null` = undeclared), the compatible
+    /// flag and the refusal reason when incompatible. Declarations describe
+    /// live dispatch members only (recorded at load, cleared at unload).
+    pub fn strategy_compat_view(&self, name: &str) -> (serde_json::Value, bool, Option<String>) {
+        match self.strategy_declarations.get(name) {
+            None => (serde_json::Value::Null, true, None),
+            Some(modes) => {
+                let wire: Vec<serde_json::Value> = modes
+                    .iter()
+                    .map(blitzkrieg_strategy_api::modes::mode_wire_json)
+                    .collect();
+                let refusal = Self::modes_refusal(self.plugin_modes.as_ref(), name, modes);
+                (serde_json::Value::Array(wire), refusal.is_none(), refusal)
+            }
+        }
+    }
+
     /// Load an external v2 strategy shared library and register it into the
-    /// driving engine's live dispatch. It starts DISABLED — an explicit
-    /// `strategy.enable` is required before it can trade. External and in-tree
-    /// strategies implement the same full `EngineStrategy` contract; this is
-    /// only a loading difference. Requires `strategy-loading`.
+    /// driving engine's live dispatch (the IPC `strategy.load` entry). Runs
+    /// the E27 handshake in ENFORCE mode: a library whose declaration the
+    /// active plugin cannot serve is refused, not registered-and-unable-to-
+    /// enable (§8.2 row 2).
     pub fn load_strategy_lib(&mut self, path: &str) -> String {
+        self.load_strategy_lib_inner(path, true)
+    }
+
+    /// The startup scan path (`load_strategy_dir`). §8.2 row 1: the scan only
+    /// LOGS what was declared — it never refuses. An incompatible library
+    /// still registers (disabled) with the mismatch named on its receipt;
+    /// the enable handshake (both `strategy.enable` and the startup
+    /// `--enable-strategy` loop) is the gate.
+    fn load_strategy_lib_scan(&mut self, path: &str) -> String {
+        self.load_strategy_lib_inner(path, false)
+    }
+
+    fn load_strategy_lib_inner(&mut self, path: &str, enforce: bool) -> String {
         #[cfg(feature = "strategy-loading")]
         {
             use crate::strategy_engine::loader::load_foreign;
@@ -1622,6 +1739,28 @@ impl Core {
                 Ok(loaded) => {
                     let name = loaded.name.clone();
                     let version = loaded.version.clone();
+                    // E27 (§8.2): the handshake verdict BEFORE registration.
+                    // ENFORCE (the IPC `strategy.load` path): a library whose
+                    // declaration the active plugin cannot serve is refused,
+                    // not registered-and-silently-unable-to-enable. SCAN (the
+                    // startup `strategy_dir` walk): §8.2 row 1 — the scan only
+                    // logs, so the library registers disabled and the receipt
+                    // itself names the mismatch; the enable handshake is the
+                    // gate there. Either way the text names both sides (R-B).
+                    let refusal = Self::modes_refusal(
+                        self.plugin_modes.as_ref(),
+                        &name,
+                        &loaded.declared_modes,
+                    );
+                    if enforce && let Some(refusal) = refusal {
+                        // `refusal` already opens with "incompatible modes:" and
+                        // names both sides (§8.2) — prefix only the verdict tag.
+                        return format!("Failed: {refusal}");
+                    }
+                    let incompatible = match refusal {
+                        Some(r) => format!("; INCOMPATIBLE: {r}"),
+                        None => String::new(),
+                    };
                     // E2-b: the load receipt names the gates the library declared
                     // unnecessary, so an opt-out is visible before it is enabled.
                     // D-31: if the declaration carries a `time_left_sec` floor,
@@ -1657,13 +1796,19 @@ impl Core {
                         format!("dylib:{}", p.display()),
                     ) {
                         Ok(_) => {
+                            // E27: the declaration is recorded only on a
+                            // successful registration, so `strategy.list` and
+                            // the enable-time handshake describe live dispatch
+                            // members and nothing else.
+                            self.strategy_declarations
+                                .insert(name.clone(), loaded.declared_modes.clone());
                             // The new strategy's declaration must reach the manager
                             // too: a library loaded AFTER evolution was enabled would
                             // otherwise never get a unit, so it could not evolve at
                             // all until a restart.
                             self.rewire_hot_params(now_ms());
                             format!(
-                                "{name}@{version} registered into the engine dispatch (disabled{declared}{evolvable})"
+                                "{name}@{version} registered into the engine dispatch (disabled{declared}{evolvable}{incompatible})"
                             )
                         }
                         Err(reason) => format!("rejected: {reason}"),
@@ -1702,7 +1847,12 @@ impl Core {
             .as_mut()
             .map(|e| e.unregister_user_strategy(name))
         {
-            Some(Ok(true)) => format!("{name} unloaded (engine dispatch removed); library freed"),
+            Some(Ok(true)) => {
+                // E27: the declaration leaves with the instance — the
+                // handshake and `strategy.list` describe live members only.
+                self.strategy_declarations.remove(name);
+                format!("{name} unloaded (engine dispatch removed); library freed")
+            }
             Some(Ok(false)) => format!("not found: no strategy named {name}"),
             Some(Err(reason)) => format!("rejected: {reason}"),
             None => "Failed: strategy engine not attached".into(),

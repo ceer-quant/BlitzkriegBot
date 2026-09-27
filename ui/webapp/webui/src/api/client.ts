@@ -152,6 +152,8 @@ export interface CommandDoc {
   ok: boolean
   action?: string
   message?: string
+  /** E27 (§8.2): the mode-handshake refusal when a `strategy … on` is refused. */
+  reason?: string
   [extra: string]: unknown
 }
 
@@ -319,6 +321,12 @@ export interface StrategyStatsRow {
   losses: number
   netPnlUsd: string | number
   rejectionCauses: RejectionCauses | null
+  /** E27 (§8.3): declared modes as §2.3 wire objects; `null` = undeclared. Older cores omit. */
+  modes?: unknown
+  /** §8.3: `false` = no active plugin can satisfy any declared mode. Older cores omit. */
+  compatible?: boolean
+  /** §8.3: when `compatible === false`, the handshake's rendered refusal reason. */
+  incompatibleReason?: string | null
 }
 
 export interface EngineStats {
@@ -606,6 +614,24 @@ export interface PluginRow {
   hasDataFeed?: boolean
   hasDiscovery?: boolean
   hasExecutor?: boolean
+  // ── E27 (§8.3) mode declaration fields — market.list rows ────────────────
+  /**
+   * The concrete structure the plugin declares, when its `declare_modes()`
+   * names the SAME concrete structure unanimously; null/absent = unspecified
+   * (undeclared / multi-structure / structure-less plugins).
+   */
+  structure?: string | null
+  /** Union of the declared capability bits (raw value, for cross-checking). */
+  capabilitiesBits?: number
+  /** Readable capability names, in bit order (`websocket_feed`, …). */
+  capabilities?: string[]
+  // ── E27 (§8.3) mode declaration fields — strategy.list rows ──────────────
+  /** The strategy's declared modes (§2.3 wire objects); null = undeclared. */
+  modes?: unknown
+  /** False only when the handshake would refuse this strategy. */
+  compatible?: boolean
+  /** The refusal reason when incompatible, else null. */
+  incompatibleReason?: string | null
   /** extension.list lifecycle state, e.g. "installed". */
   state?: string
 }

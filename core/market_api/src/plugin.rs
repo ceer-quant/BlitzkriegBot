@@ -4,6 +4,7 @@
 //! Async dispatch uses boxed futures (the same pattern as `MarketAdapter`), so
 //! every trait stays object-safe and this crate needs no async-trait dependency.
 
+use crate::modes::{MarketCapabilities, MarketMode};
 use crate::types::*;
 use std::future::Future;
 use std::pin::Pin;
@@ -148,15 +149,40 @@ pub trait MarketPlugin: Send + Sync {
     }
     /// Static capability report for `market.list`.
     fn info(&self) -> PluginInfo {
+        let modes = self.declare_modes();
+        // Summary of the declaration (§8.3): capabilities OR across every
+        // declared mode; structure only when every mode names the SAME
+        // concrete structure — a plugin spanning structures cannot be summed
+        // up as one, and `None` here reads as "unspecified", which is exactly
+        // how the handshake treats it.
+        let capabilities = modes
+            .iter()
+            .fold(MarketCapabilities::NONE, |acc, m| acc | m.capabilities);
+        let structure = modes
+            .first()
+            .and_then(|m| m.structure)
+            .filter(|first| modes.iter().all(|m| m.structure == Some(*first)));
         PluginInfo {
             name: self.name().to_string(),
             market_type: self.market_type(),
+            structure,
+            capabilities,
             has_data_feed: self.data_feed().is_some(),
             has_discovery: self.discovery().is_some(),
             has_executor: self.executor().is_some(),
             enabled: false,
             active: false,
         }
+    }
+
+    /// The market modes this plugin declares (§7.3). Empty = undeclared: the
+    /// handshake then treats the plugin as ONE implicit market_type-only mode
+    /// (its `market_type()`, no structure, no capabilities — the server
+    /// assembly applies that fallback before the judge runs). The default
+    /// keeps every existing and third-party plugin compiling and loading
+    /// strategies unchanged.
+    fn declare_modes(&self) -> Vec<MarketMode> {
+        Vec::new()
     }
 
     /// Probe the network paths this venue needs (`net.check` / `--net-check` /

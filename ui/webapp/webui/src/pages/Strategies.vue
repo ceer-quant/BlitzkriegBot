@@ -33,8 +33,10 @@ async function toggle(r: StrategyStatsRow, next: boolean): Promise<void> {
     const res = await api.setStrategy(r.name, next)
     flash.value = {
       name: r.name,
-      ok: res.ok !== false,
-      msg: res.message ?? `${r.name} 已${next ? '启用' : '停用'}`,
+      ok: res.ok !== false && !res.reason,
+      // §8.2: an enable refused by the mode handshake speaks BOTH sides —
+      // surface the core's reason verbatim instead of the generic "已启用".
+      msg: res.reason ?? res.message ?? `${r.name} 已${next ? '启用' : '停用'}`,
     }
     await store.refresh()
   } catch (e) {
@@ -64,6 +66,25 @@ const totals = computed(() => {
 })
 
 const profile = (r: StrategyStatsRow) => refusalProfile(r)
+
+/**
+ * E27 (§8.3): the strategy's declared modes as compact `type[/structure]`
+ * tags, straight off the §2.3 wire objects (`strategy.list` rows). Null =
+ * undeclared (§7.4): the strategy sits out of the handshake entirely, so it
+ * renders no mode badges at all — not even a "未声明" marker, matching the
+ * core's semantics that undeclared means "no claim, no conflict".
+ */
+function modeTags(r: StrategyStatsRow): string[] {
+  if (!Array.isArray(r.modes)) return []
+  return r.modes
+    .filter((m): m is Record<string, unknown> => m !== null && typeof m === 'object')
+    .map((m) => {
+      const mt = typeof m.market_type === 'string' ? m.market_type : '?'
+      const st = typeof m.structure === 'string' ? `/${m.structure}` : ''
+      const caps = Array.isArray(m.capabilities) ? m.capabilities.length : 0
+      return caps ? `${mt}${st}+${caps}` : `${mt}${st}`
+    })
+}
 
 /**
  * The tooltip must say how FAR an opt-out reaches (D-31). Two strategies both
@@ -219,12 +240,22 @@ function toggleExpand(name: string): void {
             <template v-for="r in rows" :key="r.name">
               <tr class="border-t border-line transition-colors hover:bg-panel-2">
                 <td class="px-2 py-2.5 font-semibold">
-                  <span class="inline-flex min-w-0 items-center gap-2">
+                  <span class="inline-flex min-w-0 flex-wrap items-center gap-2">
                     <span
                       class="size-1.5 shrink-0 rounded-full"
                       :style="{ background: r.enabled ? 'var(--up)' : 'var(--faint-fg)' }"
                     />
                     <span class="truncate" :title="r.name">{{ r.name }}</span>
+                    <Badge
+                      v-for="t in modeTags(r)"
+                      :key="`m-${t}`"
+                      variant="outline"
+                    >{{ t }}</Badge>
+                    <!-- E27 (§8.3): incompatible = no active plugin satisfies any
+                         declared mode; the hover speaks both sides verbatim. -->
+                    <Tooltip v-if="r.compatible === false" :content="r.incompatibleReason ?? '无相容插件模式'">
+                      <Badge variant="down" dot>不相容</Badge>
+                    </Tooltip>
                   </span>
                 </td>
                 <td class="px-2 py-2.5">

@@ -420,17 +420,19 @@ jobs:
           node scripts/strategy-devcheck.mjs
           node scripts/scale-plugins-check.mjs
           node scripts/feed-scale-check.mjs
-      # v0.3.0 gates (E24 / #330): every new gate proves it can go red BEFORE it
-      # guards (§A.4) — teeth first, then the real verdict. Later epics append
-      # their own gates to these two blocks.
-      - name: v0.3 gates — reverse acceptance (--teeth) [E24]
+      # v0.3.0 gates (E24 / #330, E27 / #333): every new gate proves it can go
+      # red BEFORE it guards (§A.4) — teeth first, then the real verdict. Later
+      # epics append their own gates to these two blocks.
+      - name: v0.3 gates — reverse acceptance (--teeth) [E24+E27]
         run: |
           node scripts/strategy-no-stop-loss-check.mjs --teeth
           node scripts/strategy-declaration-check.mjs --teeth
-      - name: v0.3 gates — the real verdicts [E24]
+          node scripts/plugin-modes-check.mjs --teeth
+      - name: v0.3 gates — the real verdicts [E24+E27]
         run: |
           node scripts/strategy-no-stop-loss-check.mjs
           node scripts/strategy-declaration-check.mjs
+          node scripts/plugin-modes-check.mjs
       # Assorted one-off invariants kept cheap.
       - name: Assorted gates (plugin selection / trade-log flag / TUI demo)
         run: |

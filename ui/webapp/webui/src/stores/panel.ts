@@ -54,10 +54,29 @@ export const usePanelStore = defineStore('panel', () => {
   // Prefer engine snapshot strategyStats (richer); fall back to /api/plugins.
   const strategyRows = computed<StrategyStatsRow[]>(() => {
     const st = snapshot.value?.strategyStats
-    if (st && st.length) return st
     const fromStats = (snapshot.value as unknown as { stats?: { strategies?: StrategyStatsRow[] } } | undefined)?.stats?.strategies
-    if (fromStats && fromStats.length) return fromStats
     const plug = plugins.value?.strategies
+    if ((st && st.length) || (fromStats && fromStats.length)) {
+      const rows = st && st.length ? st : fromStats ?? []
+      // E27 (§8.3): engine.stats rows predate the mode handshake and carry no
+      // compat verdict; the registry rows (`strategy.list`) now do. Merge by
+      // name so the table shows one consistent view regardless of which path
+      // provided the counters.
+      if (plug?.length) {
+        const reg = new Map(plug.map((r) => [r.name, r]))
+        return rows.map((row) => {
+          const match = reg.get(row.name)
+          if (!match) return row
+          return {
+            ...row,
+            modes: match.modes ?? null,
+            compatible: match.compatible ?? true,
+            incompatibleReason: match.incompatibleReason ?? null,
+          }
+        })
+      }
+      return rows
+    }
     if (plug) {
       // Registry-only rows: no counters and no provenance. `strategySource`
       // reports the source as unknown rather than defaulting to `builtin` —

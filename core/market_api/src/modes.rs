@@ -184,3 +184,215 @@ impl std::fmt::Display for ModeError {
 }
 
 impl std::error::Error for ModeError {}
+
+// ── the §7.4 validator, plugin side (E27) ───────────────────────────────────
+//
+// One contract, two spellings of "who declared". The strategy-side parse
+// (`parse_strategy_modes`, producing `StrategyMode`) lives in
+// `strategy_api::modes` — E24's territory, landed there because the S1 serial
+// pair needed a working refusal path before this file grew its parser. This is
+// the plugin-side twin producing `MarketMode`: same wire shape, same rules,
+// same frozen `ModeError`, same positioned diagnostics. A payload this parser
+// accepts, the strategy side accepts too, and vice versa — that symmetry is
+// the §7.4 "one shared implementation" as the crates actually lie (the
+// dependency edge points strategy_api → market_api, so `StrategyMode` cannot
+// appear here).
+
+/// Parse and validate a plugin's modes declaration (§7.3). Same wire shape the
+/// strategy side declares:
+///
+/// `{"modes":[{"market_type":"prediction","structure":"binary_outcome_wheel",
+///             "capabilities":["websocket_feed","level2_snapshot"]}]}`
+///
+/// "Empty" is an ERROR, never "undeclared" (§7.4): the only spelling of
+/// "undeclared" on the plugin side is the trait default — an empty `Vec` from
+/// `MarketPlugin::declare_modes`, never an empty payload.
+pub fn parse_modes(payload: &str) -> Result<Vec<MarketMode>, ModeError> {
+    let root: serde_json::Value =
+        serde_json::from_str(payload).map_err(|e| ModeError::NotJson(format!("{e}")))?;
+    let Some(modes) = root.get("modes").and_then(|m| m.as_array()) else {
+        return Err(ModeError::NotJson(
+            "payload is not an object with a `modes` array".into(),
+        ));
+    };
+    if modes.is_empty() {
+        return Err(ModeError::Empty);
+    }
+    let mut out = Vec::with_capacity(modes.len());
+    for (index, mode) in modes.iter().enumerate() {
+        let Some(mt) = mode.get("market_type").and_then(|v| v.as_str()) else {
+            // Missing or non-string: the one required field. (A `null` or a
+            // number is as invalid as an absent key — both are "not saying
+            // which market this is".)
+            return Err(ModeError::MissingMarketType { index });
+        };
+        let market_type: MarketType = serde_json::from_value(serde_json::Value::String(mt.into()))
+            .map_err(|_| ModeError::UnknownMarketType {
+                index,
+                got: mt.to_string(),
+            })?;
+
+        let structure = match mode.get("structure") {
+            None => None,
+            Some(v) => {
+                let Some(s) = v.as_str() else {
+                    return Err(ModeError::UnknownStructure {
+                        index,
+                        got: v.to_string(),
+                    });
+                };
+                Some(
+                    serde_json::from_value::<MarketStructure>(serde_json::Value::String(s.into()))
+                        .map_err(|_| ModeError::UnknownStructure {
+                            index,
+                            got: s.to_string(),
+                        })?,
+                )
+            }
+        };
+
+        let mut caps = MarketCapabilities::NONE;
+        match mode.get("capabilities") {
+            None => {}
+            Some(v) => {
+                let Some(list) = v.as_array() else {
+                    return Err(ModeError::UnknownCapability {
+                        index,
+                        got: v.to_string(),
+                    });
+                };
+                for item in list {
+                    let Some(name) = item.as_str() else {
+                        return Err(ModeError::UnknownCapability {
+                            index,
+                            got: item.to_string(),
+                        });
+                    };
+                    let Some(bit) = capability_bit(name) else {
+                        return Err(ModeError::UnknownCapability {
+                            index,
+                            got: name.to_string(),
+                        });
+                    };
+                    caps.0 |= bit.0;
+                }
+            }
+        }
+
+        out.push(MarketMode {
+            market_type,
+            structure,
+            capabilities: caps,
+        });
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_full_plugin_mode() {
+        let out = parse_modes(
+            r#"{"modes":[{"market_type":"prediction",
+                          "structure":"binary_outcome_wheel",
+                          "capabilities":["websocket_feed","level2_snapshot"]}]}"#,
+        )
+        .expect("full mode must parse");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].market_type, MarketType::Prediction);
+        assert_eq!(out[0].structure, Some(MarketStructure::BinaryOutcomeWheel));
+        assert!(
+            out[0]
+                .capabilities
+                .satisfies(MarketCapabilities::WEBSOCKET_FEED)
+        );
+        assert!(
+            out[0]
+                .capabilities
+                .satisfies(MarketCapabilities::LEVEL2_SNAPSHOT)
+        );
+        assert!(!out[0].capabilities.satisfies(MarketCapabilities::LEVERAGE));
+    }
+
+    #[test]
+    fn parses_minimal_plugin_mode() {
+        let out = parse_modes(r#"{"modes":[{"market_type":"futures"}]}"#).expect("minimal parses");
+        assert_eq!(out[0].market_type, MarketType::Futures);
+        assert_eq!(out[0].structure, None);
+        assert_eq!(out[0].capabilities, MarketCapabilities::NONE);
+    }
+
+    #[test]
+    fn explicit_empty_capabilities_is_requires_nothing() {
+        let out = parse_modes(r#"{"modes":[{"market_type":"spot","capabilities":[]}]}"#)
+            .expect("explicit empty capabilities must parse");
+        assert_eq!(out[0].capabilities, MarketCapabilities::NONE);
+    }
+
+    #[test]
+    fn rejects_non_json() {
+        let err = parse_modes("not json at all").unwrap_err();
+        assert!(matches!(err, ModeError::NotJson(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_empty_array_and_says_so() {
+        let err = parse_modes(r#"{"modes":[]}"#).unwrap_err();
+        assert!(matches!(err, ModeError::Empty), "got {err:?}");
+        assert!(err.to_string().contains("Empty"), "{err}");
+    }
+
+    #[test]
+    fn rejects_missing_market_type_with_index() {
+        let err =
+            parse_modes(r#"{"modes":[{"structure":"central_limit_order_book"}]}"#).unwrap_err();
+        assert!(
+            matches!(err, ModeError::MissingMarketType { index: 0 }),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("index=0"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unknown_market_type_with_index_and_got() {
+        let err = parse_modes(r#"{"modes":[{"market_type":"nft_market"}]}"#).unwrap_err();
+        assert!(
+            matches!(err, ModeError::UnknownMarketType { index: 0, .. }),
+            "got {err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("index=0"), "{text}");
+        assert!(text.contains("got=\"nft_market\""), "{text}");
+    }
+
+    #[test]
+    fn rejects_unknown_structure_with_index_and_got() {
+        let err = parse_modes(
+            r#"{"modes":[{"market_type":"spot"},{"market_type":"spot","structure":"not_a_structure"}]}"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ModeError::UnknownStructure { index: 1, .. }),
+            "got {err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("index=1"), "{text}");
+        assert!(text.contains("got=\"not_a_structure\""), "{text}");
+    }
+
+    #[test]
+    fn rejects_unknown_capability_with_index_and_got() {
+        let err =
+            parse_modes(r#"{"modes":[{"market_type":"earn","capabilities":["time_travel"]}]}"#)
+                .unwrap_err();
+        assert!(
+            matches!(err, ModeError::UnknownCapability { index: 0, .. }),
+            "got {err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("index=0"), "{text}");
+        assert!(text.contains("got=\"time_travel\""), "{text}");
+    }
+}

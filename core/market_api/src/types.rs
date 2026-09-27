@@ -648,4 +648,18 @@ pub struct PluginInfo {
     pub enabled: bool,
     /// True for the single plugin actually driving this process.
     pub active: bool,
+    /// The concrete structure the plugin declares, when its `declare_modes()`
+    /// names the SAME concrete structure unanimously — the `market.list`
+    /// summary of the declaration (§8.3). `None` covers undeclared,
+    /// multi-structure and explicitly-structure-less plugins alike: on the
+    /// wire it reads as "unspecified", which is exactly what the handshake
+    /// treats it as (a strategy requiring a concrete structure is refused).
+    #[serde(default)]
+    pub structure: Option<crate::modes::MarketStructure>,
+    /// Union of every declared mode's capability bits. `market.list` carries
+    /// the readable names BESIDE this raw value (§8.3) so an operator — and
+    /// the modes gate — can push the two against each other in both
+    /// directions.
+    #[serde(default)]
+    pub capabilities: crate::modes::MarketCapabilities,
 }

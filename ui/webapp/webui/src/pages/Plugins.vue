@@ -154,13 +154,23 @@ const segments = computed(() => [
                 <Badge :variant="status(r).tone" dot>{{ status(r).label }}</Badge>
               </td>
               <td v-if="s.key === 'market'" class="px-2 py-2.5">
-                <span class="inline-flex gap-1.5">
+                <span class="inline-flex flex-wrap gap-1.5">
                   <Badge
                     v-for="c in caps(r)"
                     :key="c.label"
                     :variant="c.on ? 'up' : 'default'"
                     :class="c.on ? '' : 'opacity-45'"
                   >{{ c.label }}</Badge>
+                  <!-- E27 (§8.3): the plugin's own mode declaration — concrete
+                       structure when unanimous, capability seams by name.
+                       Neither present = undeclared (implicit type-only mode). -->
+                  <Badge v-if="r.structure" variant="info">{{ r.structure }}</Badge>
+                  <Badge v-for="c in r.capabilities ?? []" :key="`m-${c}`" variant="outline">{{ c }}</Badge>
+                  <Badge
+                    v-if="!r.structure && !r.capabilities?.length"
+                    variant="default"
+                    class="opacity-60"
+                  >未声明</Badge>
                 </span>
               </td>
               <td class="px-2 py-2.5 text-[12px] text-muted-fg">
