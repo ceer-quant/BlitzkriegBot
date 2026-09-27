@@ -1681,10 +1681,11 @@ impl Core {
         enabled: bool,
     ) -> (bool, bool, Option<String>) {
         let found = self.strategy_names().iter().any(|n| n == name);
-        if enabled && found {
-            if let Some(reason) = self.compatibility_refusal(name) {
-                return (true, false, Some(reason));
-            }
+        if enabled
+            && found
+            && let Some(reason) = self.compatibility_refusal(name)
+        {
+            return (true, false, Some(reason));
         }
         let applied = self.set_strategy_enabled(name, enabled);
         (found, applied, None)
