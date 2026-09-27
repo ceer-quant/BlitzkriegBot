@@ -3,6 +3,31 @@
 > **一句话**：你写策略"逻辑"，内核执行"交易"。
 > 策略逻辑只接收行情，返回一个信号；其余（校验、风控、资金、签名、下单、对账、平仓）全部由内核负责。
 
+## 0. 止损不归你管
+
+**止损不归你管。**
+
+策略只写赚钱逻辑，生存交给内核。你不需要、也不能在策略里做这些事：
+计算止损价、监视止损价、在 `exits` 里表达"止损"、用 `breaks` 冒充止损。
+
+原因：内核的出场纪律是**与账户余额、回合剩余时间、盘口新鲜度联动**的；策略只能看到其中的一小部分。策略写的止损一定会与内核的止损不一致，而两个止损并存意味着两个真相——其中一个必然在错误的时间开火。
+
+你要做的：`entries` 写你**为什么进场**（`reason` 是给人和审计看的），`exits` 写你**为什么离场**（信号消失、机会成本、结构破坏）。**何时**以及**多大比例**离场，内核决定。
+
+自检：`strategy:no-stop-loss-check` 会把写进策略的止损逻辑钉出来。把你的止损逻辑写进策略，门禁会红。
+
+封口的三层实现（E24 / #330）：intent 里带 `suggested_stop_loss` / `suggested_take_profit` / `suggested_max_hold_sec` 会被内核 `warn!` 并**丢弃**（`strategy.load` 不因此拒绝）；`strategy:no-stop-loss-check` 静态扫描策略源码；`strategy:declaration-check` 在真实内核上验证 `bk_strategy_declare_modes` 声明的合法/非法载荷。
+
+### 官方示例索引
+
+| 示例 | 语言 | 位置 | 看点 |
+|:---|:---|:---|:---|
+| `momentum_alpha` | Rust | `user_layer/examples/momentum_alpha/` | API 1.0 参考策略：`declare_modes` 声明 `prediction / binary_outcome_wheel` + 2 个能力位；只写 `entries` + `confirmed_tokens`；全文无止损逻辑；`export_strategy!` 一行生成全部 ABI 表面 |
+| `e24_modes_fixture` | Rust | `user_layer/examples/e24_modes_fixture/` | 测试夹具（**不是**参考示例）：手写 ABI，给 `strategy:declaration-check` 喂合法/非法声明 |
+| Lua 示例 | Lua | `user_layer/strategies_lua/`（随 E30 沙箱落地） | 沙箱分发格式、`bk.*` 只读接口、配额与投毒防护 |
+
+构建示例：`cd user_layer/examples && cargo build --release`（独立嵌套 workspace，自带 `Cargo.lock`，与真实第三方作者的 checkout 同形）。
+
 ## 1. 边界（硬性）
 
 策略逻辑文件**绝不能**包含：

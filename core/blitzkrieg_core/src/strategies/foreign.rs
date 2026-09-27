@@ -753,87 +753,10 @@ impl EngineStrategy for ForeignStrategy {
         let Some(v) = (unsafe { self.take_json(out) }) else {
             return Vec::new();
         };
-
-        if let Some(serde_json::Value::Array(exits)) = v.get("exits") {
-            for e in exits {
-                if let Some(token) = e.get("token").and_then(|t| t.as_str()) {
-                    let reason = e
-                        .get("reason")
-                        .and_then(|r| r.as_str())
-                        .unwrap_or("strategy")
-                        .to_string();
-                    self.exit_intents.push(StrategyExitIntent {
-                        token_id: token.to_string(),
-                        reason,
-                    });
-                }
-            }
-        }
-        if let Some(serde_json::Value::Array(br)) = v.get("breaks") {
-            parse_breaks(&serde_json::Value::Array(br.clone()))
-                .into_iter()
-                .for_each(|b| self.breaks.push(b));
-        }
-
-        let mut candidates = Vec::new();
-        let Some(entries) = v.get("entries").and_then(|e| e.as_array()) else {
-            return candidates;
-        };
-        for e in entries {
-            let (Some(token), Some(price_s)) = (
-                e.get("token").and_then(|t| t.as_str()),
-                e.get("price").and_then(|p| p.as_str()),
-            ) else {
-                continue;
-            };
-            let Ok(price) = Decimal::from_str(price_s) else {
-                continue;
-            };
-            // OPTIONAL per-entry share count (decimal STRING, the ABI's numeric
-            // form). Absent = the kernel sizes from its notional budget; present
-            // but malformed = ignore it and fall back to kernel sizing, never
-            // reject the entry (a typo must not cost the signal).
-            let shares = e
-                .get("shares")
-                .and_then(|s| s.as_str())
-                .and_then(|s| Decimal::from_str(s).ok());
-            let reason = e
-                .get("reason")
-                .and_then(|r| r.as_str())
-                .unwrap_or("strategy entry")
-                .to_string();
-            // Resolve asset/condition/direction from the round's markets. A
-            // token outside this round cannot be traded and is dropped.
-            for m in ctx.markets() {
-                if m.up_token_id == token {
-                    candidates.push(TradeSignal {
-                        strategy: self.name.clone(),
-                        asset: m.asset.clone(),
-                        direction: crate::model::SignalDirection::Up,
-                        token_id: m.up_token_id.clone(),
-                        condition_id: m.condition_id.clone(),
-                        price,
-                        reason: reason.clone(),
-                        shares,
-                    });
-                    break;
-                }
-                if m.down_token_id == token {
-                    candidates.push(TradeSignal {
-                        strategy: self.name.clone(),
-                        asset: m.asset.clone(),
-                        direction: crate::model::SignalDirection::Down,
-                        token_id: m.down_token_id.clone(),
-                        condition_id: m.condition_id.clone(),
-                        price,
-                        reason: reason.clone(),
-                        shares,
-                    });
-                    break;
-                }
-            }
-        }
-        candidates
+        // The JSON→intents adoption lives in a FREE function so the §2.4
+        // reserved-key seal is testable without a loaded library — reverse
+        // acceptance B drives it directly (`reserved_key_tests` below).
+        adopt_eval_json(&self.name, v, ctx, &mut self.exit_intents, &mut self.breaks)
     }
 
     fn take_exit_intents(&mut self) -> Vec<StrategyExitIntent> {
@@ -1011,6 +934,28 @@ impl ShadowFactory for ForeignShadowFactory {
     }
 }
 
+/// The three §2.4 reserved keys. Stop-loss, take-profit and max-hold sizing
+/// belong to the kernel (exit policy / risk): an intent that carries one has
+/// the key DROPPED — with a `target: "strategy"` warn, so "someone is still
+/// writing stop losses" stays visible without refusing a legitimate trade
+/// over a stray field.
+const RESERVED_INTENT_KEYS: [&str; 3] = [
+    "suggested_stop_loss",
+    "suggested_take_profit",
+    "suggested_max_hold_sec",
+];
+
+/// Which reserved keys are present on one intent object, in declaration order.
+/// The one place a reserved key can be observed, so both the warn/drop path
+/// and its test read from here.
+fn reserved_intent_keys(obj: &serde_json::Value) -> Vec<&'static str> {
+    RESERVED_INTENT_KEYS
+        .iter()
+        .copied()
+        .filter(|k| obj.get(*k).is_some())
+        .collect()
+}
+
 fn parse_breaks(v: &serde_json::Value) -> Vec<(String, Decimal)> {
     v.as_array()
         .map(|a| {
@@ -1027,4 +972,250 @@ fn parse_breaks(v: &serde_json::Value) -> Vec<(String, Decimal)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Adopt a strategy's evaluate JSON: split it into exit intents, breaks and
+/// entry candidates. A free function (not a method) on purpose — the §2.4
+/// reserved-key seal (warn + drop, entry otherwise untouched) must be
+/// provable without a dylib, and its inputs are exactly the strategy name,
+/// the JSON value and the round context.
+fn adopt_eval_json(
+    strategy_name: &str,
+    v: serde_json::Value,
+    ctx: &StrategyCtx<'_>,
+    exit_intents: &mut Vec<StrategyExitIntent>,
+    breaks_out: &mut Vec<(String, Decimal)>,
+) -> Vec<TradeSignal> {
+    if let Some(serde_json::Value::Array(exits)) = v.get("exits") {
+        for e in exits {
+            if let Some(token) = e.get("token").and_then(|t| t.as_str()) {
+                // §2.4 reserved keys on a close intent: same warn-and-drop
+                // rule as entries above.
+                for key in reserved_intent_keys(e) {
+                    tracing::warn!(
+                        target: "strategy",
+                        strategy = %strategy_name,
+                        token = %token,
+                        key,
+                        "reserved key dropped (stop-loss / take-profit / max-hold sizing belongs to the kernel)"
+                    );
+                }
+                let reason = e
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("strategy")
+                    .to_string();
+                exit_intents.push(StrategyExitIntent {
+                    token_id: token.to_string(),
+                    reason,
+                });
+            }
+        }
+    }
+    if let Some(serde_json::Value::Array(br)) = v.get("breaks") {
+        parse_breaks(&serde_json::Value::Array(br.clone()))
+            .into_iter()
+            .for_each(|b| breaks_out.push(b));
+    }
+
+    let mut candidates = Vec::new();
+    let Some(entries) = v.get("entries").and_then(|e| e.as_array()) else {
+        return candidates;
+    };
+    for e in entries {
+        let (Some(token), Some(price_s)) = (
+            e.get("token").and_then(|t| t.as_str()),
+            e.get("price").and_then(|p| p.as_str()),
+        ) else {
+            continue;
+        };
+        let Ok(price) = Decimal::from_str(price_s) else {
+            continue;
+        };
+        // §2.4 reserved keys (API 1.0): stop-loss / take-profit / max-hold
+        // sizing belongs to the kernel (exit policy / risk), never to a
+        // strategy intent. A reserved key is logged under target
+        // `strategy` and DROPPED — the entry itself is never refused (a
+        // stray field must not cost a signal) and `TradeSignal` has no
+        // field it could reach, so the entry result is exactly what this
+        // intent would have produced without it.
+        for key in reserved_intent_keys(e) {
+            tracing::warn!(
+                target: "strategy",
+                strategy = %strategy_name,
+                token = %token,
+                key,
+                "reserved key dropped (stop-loss / take-profit / max-hold sizing belongs to the kernel)"
+            );
+        }
+        // OPTIONAL per-entry share count (decimal STRING, the ABI's numeric
+        // form). Absent = the kernel sizes from its notional budget; present
+        // but malformed = ignore it and fall back to kernel sizing, never
+        // reject the entry (a typo must not cost the signal).
+        let shares = e
+            .get("shares")
+            .and_then(|s| s.as_str())
+            .and_then(|s| Decimal::from_str(s).ok());
+        let reason = e
+            .get("reason")
+            .and_then(|r| r.as_str())
+            .unwrap_or("strategy entry")
+            .to_string();
+        // Resolve asset/condition/direction from the round's markets. A
+        // token outside this round cannot be traded and is dropped.
+        for m in ctx.markets() {
+            if m.up_token_id == token {
+                candidates.push(TradeSignal {
+                    strategy: strategy_name.to_string(),
+                    asset: m.asset.clone(),
+                    direction: crate::model::SignalDirection::Up,
+                    token_id: m.up_token_id.clone(),
+                    condition_id: m.condition_id.clone(),
+                    price,
+                    reason: reason.clone(),
+                    shares,
+                });
+                break;
+            }
+            if m.down_token_id == token {
+                candidates.push(TradeSignal {
+                    strategy: strategy_name.to_string(),
+                    asset: m.asset.clone(),
+                    direction: crate::model::SignalDirection::Down,
+                    token_id: m.down_token_id.clone(),
+                    condition_id: m.condition_id.clone(),
+                    price,
+                    reason: reason.clone(),
+                    shares,
+                });
+                break;
+            }
+        }
+    }
+    candidates
+}
+
+#[cfg(test)]
+mod reserved_key_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex, MutexGuard};
+
+    /// In-memory warn capture: a `MakeWriter` over a shared buffer, so the
+    /// test can count the `reserved key dropped` events a parse produces.
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = CaptureWriter<'a>;
+        fn make_writer(&'a self) -> Self::Writer {
+            CaptureWriter(self.0.lock().unwrap())
+        }
+    }
+
+    struct CaptureWriter<'a>(MutexGuard<'a, Vec<u8>>);
+
+    impl std::io::Write for CaptureWriter<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.flush()
+        }
+    }
+
+    /// Presence is the signal, whatever the value: an intent that carries a
+    /// reserved key is warned about and the key dropped — never refused.
+    #[test]
+    fn reserved_intent_keys_are_detected_by_presence() {
+        let one = serde_json::json!({
+            "token": "UP", "price": "0.40", "suggested_stop_loss": "0.30"
+        });
+        assert_eq!(reserved_intent_keys(&one), vec!["suggested_stop_loss"]);
+
+        let two = serde_json::json!({
+            "token": "UP", "suggested_take_profit": "0.9", "suggested_max_hold_sec": 60
+        });
+        assert_eq!(
+            reserved_intent_keys(&two),
+            vec!["suggested_take_profit", "suggested_max_hold_sec"]
+        );
+
+        // `null` still counts as present: the author wrote the key, which is
+        // the thing that must be visible.
+        let null_valued = serde_json::json!({ "suggested_stop_loss": null });
+        assert_eq!(
+            reserved_intent_keys(&null_valued),
+            vec!["suggested_stop_loss"]
+        );
+
+        // A clean intent, and a non-object, both yield nothing.
+        let clean = serde_json::json!({ "token": "UP", "price": "0.40" });
+        assert!(reserved_intent_keys(&clean).is_empty());
+        assert!(reserved_intent_keys(&serde_json::json!("not an object")).is_empty());
+    }
+
+    /// Reverse acceptance B (§16.6): an intent carrying `suggested_stop_loss`
+    /// warns EXACTLY ONCE and the entry it produces is field-identical to the
+    /// same intent without the key — the seal has no stop effect at all.
+    #[test]
+    fn reserved_key_intent_warns_once_and_entry_is_field_identical() {
+        let market = crate::model::CryptoMarket {
+            asset: "asset-1".into(),
+            condition_id: "cond-1".into(),
+            question_id: "q-1".into(),
+            up_token_id: "UP".into(),
+            down_token_id: "DOWN".into(),
+            up_price: rust_decimal_macros::dec!(0.5),
+            down_price: rust_decimal_macros::dec!(0.5),
+            expires_at_ms: 0,
+            round_slot: 1,
+            neg_risk: false,
+            question: "q".into(),
+        };
+        let markets = vec![market];
+        let no_book = |_: &str| None;
+        let ctx = StrategyCtx::new(&markets, 1, 600, 1_000, &no_book);
+
+        let with_key = serde_json::json!({
+            "entries": [{
+                "token": "UP", "price": "0.40", "reason": "band", "shares": "10",
+                "suggested_stop_loss": "0.30"
+            }]
+        });
+        let without_key = serde_json::json!({
+            "entries": [{ "token": "UP", "price": "0.40", "reason": "band", "shares": "10" }]
+        });
+
+        let captured = Capture(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
+        let (with, without) = tracing::subscriber::with_default(subscriber, || {
+            let mut exits = Vec::new();
+            let mut breaks = Vec::new();
+            let with = adopt_eval_json("probe", with_key, &ctx, &mut exits, &mut breaks);
+            let without = adopt_eval_json("probe", without_key, &ctx, &mut exits, &mut breaks);
+            (with, without)
+        });
+
+        let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            logs.matches("reserved key dropped").count(),
+            1,
+            "the reserved key must warn exactly once; captured:\n{logs}"
+        );
+
+        assert_eq!(with.len(), 1, "the entry must not be refused");
+        assert_eq!(without.len(), 1);
+        // Field-by-field: `TradeSignal` derives PartialEq, so this compares
+        // every field — the dropped key reaches none of them.
+        assert_eq!(
+            with[0], without[0],
+            "entry with the key must equal the entry without it"
+        );
+        assert_eq!(with[0].shares, Some(rust_decimal_macros::dec!(10)));
+        assert_eq!(with[0].reason, "band");
+    }
 }
