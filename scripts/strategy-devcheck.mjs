@@ -98,6 +98,10 @@ async function runCoreChecks(dylib, name, workdir, elapsedMs) {
     // rather than about `strategy.load`. With the directory off, the ONLY
     // registration this gate can observe is the one it performed itself.
     '--no-strategy-dir',
+    // E30: same isolation for the Lua package surface — the official package
+    // auto-loads by default, and "exactly one row" must stay about the
+    // strategy.load this gate performed, not about the checkout.
+    '--no-lua-strategy-dir',
     '--round-sec', String(ROUND_SEC),
     '--min-round-age', '0', '--min-time-left', '0',
   ];
