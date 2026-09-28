@@ -1,0 +1,34 @@
+# E28 多账户账本（DEV_V0_3 §9.5）—— 账户簿配置示例（双账户）。
+#
+# 本文件是 OPTIONAL：删掉/改名它，内核按单一 `default` 账户启动，
+# 与 0.2 部署行为完全一致。文件存在但解析失败 / 无账户 / id 重复
+# → 内核拒绝启动（fail-closed）：配置笔误绝不能悄悄把账本缩成一个
+# 你以为还带着限制的 default。
+#
+# 字段（snake_case，未知键拒绝）：
+#   id              必填，非空；运行时/审计的唯一句柄，绝不隐式创建
+#   name            展示名，缺省 = id
+#   market_type     缺省 prediction（0.3 唯一有插件的市场类型）
+#   status          缺省 active；wire 词表 active / read_only / frozen /
+#                   suspended —— 文件只携带限制，开箱永远从最保守写起
+#   api_key_env / secret_env / passphrase_env / private_key_env
+#                   【只写环境变量的名字，绝不写值】（§9.4：值只在内核
+#                   进程环境；wire 只回 credentialsLoaded 布尔）
+#
+# 姿态（Gate 2 permits_order）：只有 active 能开新仓；平仓豁免除
+# read_only 外全部姿态（冻结绝不困住持仓）。运行时 account.status
+# 只能收紧，本文件是放宽的唯一入口（改文件 + 重启）。
+
+[[account]]
+id = "default"
+name = "主账户"
+
+# 不命名凭证环境变量 = 插件自己的环境变量处理原样保留（0.2 语义）。
+# 要显式接管时示例：
+#   api_key_env = "POLYMARKET_API_KEY"
+#   secret_env  = "POLYMARKET_SECRET"
+
+[[account]]
+id = "paper"
+name = "纸面练习"
+status = "read_only"

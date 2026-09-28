@@ -511,6 +511,7 @@ mod tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 

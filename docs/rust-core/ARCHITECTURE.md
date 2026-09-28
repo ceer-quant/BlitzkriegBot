@@ -190,6 +190,36 @@ venue/feed/discovery/gamma 从内核**物理迁出**到扩展，行为逐笔等�
 推送，不是审计）；面板的「裁决流」（WebUI `Decisions.vue` / TUI Decisions tab）
 逐字打印内核写的 `GateTrace.detail`，不自行编文案。
 
+## 7.6 多账户账本（E28，DEV_V0_3 §9）
+
+账户是**部署事实**，不是运行时对象：`user_layer/configs/accounts.toml` 装载失败
+→ 内核拒绝启动（fail-closed）；文件缺失 → 单一 `default` 账户（0.2 部署零改动）。
+运行时**从不隐式建账本**——未知账户显式拒绝（`unknown account`，反向验收 C）。
+
+| 件 | 语义 |
+|:--|:--|
+| `AccountLedgers`（§9.3） | 每账户独立 `Ledger` 实例 = 独立钱包，不是别名；`get_mut` 缺账户显式报错 |
+| 账户姿态（Gate 2） | `permits_order(id, is_close)`：只有 `active` 可开新仓；平仓豁免除 `read_only` 外全部姿态（冻结绝不困住持仓）；拒绝码 `ACCOUNT_LIMIT` |
+| 凭证（§9.4） | config 只存环境变量**名**；值只在内核进程环境；wire 只回 `credentialsLoaded: bool`，哨兵门禁锚词 `sentinel leaked` |
+| 会话级 active（§9.5） | `account.switch` 只写本 IPC 连接的私有 cell，进程级 active 不动；`orders.place` 未带 `accountId` 时注入本连接默认（缺省 = 默认，显式 id 永远获胜） |
+| `account.status` | **只能收紧**（tighten-only）：loosen 一律拒 wire 级 `INVALID_PARAMS` |
+
+三条纪律，违反任何一条的 PR 拒绝合入：
+
+1. **独立钱包，不共享现金**——A 账户的交易、亏损、回撤**完全不影响** B 账户的
+   `balance`/`available`/持仓/日 PnL；dry 模式种子按账本各自 `set_balance`
+   （`seed_all`），单账户路径 bit-identical 于 0.2 的单次 set_balance。
+2. **从不改道（no re-route）**——A 账户发起平仓 B 账户的持仓 → 显式拒绝
+   （`cross-account close refused`），绝不改道到持仓归属账户执行——改道就是
+   隐式账本事故换名（反向验收 A）。
+3. **account_id 贯穿**——订单 → 成交 → 持仓 → wire 每一行都带归属；0.2 无
+   `account_id` 的旧行读回为 `default`，重新写出的行带 `"default"`（读旧写新，
+   无迁移脚本）。
+
+UI 呈现：WebUI 顶栏 `AccountSwitcher.vue`（经 gateway `accounts` / `account <id>`
+命令动词透传 `account.list` / `account.switch`）、TUI 命令栏 `account <id>`；
+凭证在像素层同样只显 `credentialsLoaded` 布尔。
+
 ## 8. 目录
 
 ```

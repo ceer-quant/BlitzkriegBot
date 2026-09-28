@@ -77,6 +77,10 @@ pub(crate) mod method {
     pub const SYSTEM_UPDATE_CONFIGURE: &str = "system.update.configure";
     /// One manual update check (the "check for updates" button).
     pub const SYSTEM_UPDATE_CHECK: &str = "system.update.check";
+    /// E28: the multi-account book + this connection's effective default (§12.1).
+    pub const ACCOUNT_LIST: &str = "account.list";
+    /// E28: switch THIS connection's session-default account (§9.5).
+    pub const ACCOUNT_SWITCH: &str = "account.switch";
 }
 
 pub struct IpcClient {
@@ -417,6 +421,26 @@ impl IpcClient {
         self.call(
             method::POSITIONS_EXIT,
             serde_json::json!({ "positionId": position_id }),
+        )
+    }
+
+    // ── Accounts (E28): the multi-account book ───────────────────────────────
+
+    /// `account.list` — every account in the book plus the ACTIVE id this
+    /// connection would trade with. Raw JSON on purpose: the gateway forwards
+    /// the account table to the panel verbatim, so a second view struct here
+    /// would be one more thing to keep field-identical with the core's wire.
+    pub fn account_list(&mut self) -> Result<serde_json::Value, IpcError> {
+        self.call(method::ACCOUNT_LIST, serde_json::json!({}))
+    }
+
+    /// `account.switch` — point THIS connection's session default at another
+    /// account (§9.5: session-scoped, other connections unaffected). Returns
+    /// `{ "active": <id> }`.
+    pub fn account_switch(&mut self, account_id: &str) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            method::ACCOUNT_SWITCH,
+            serde_json::json!({ "accountId": account_id }),
         )
     }
 

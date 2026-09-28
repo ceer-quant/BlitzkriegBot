@@ -70,6 +70,13 @@ pub enum Command {
     EvolutionRollback {
         strategy: String,
     },
+    /// E28: the multi-account book — every account plus the account this
+    /// connection would trade with (§9.5).
+    Accounts,
+    /// E28: point THIS connection's session default at another account.
+    AccountSwitch {
+        account_id: String,
+    },
 }
 
 /// Parse one command line. Unknown verbs yield `Err(message)` (never a panic).
@@ -198,6 +205,14 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                 return Err("usage: rollback <strategy>".into());
             }
             Ok(Command::EvolutionRollback { strategy })
+        }
+        "accounts" => Ok(Command::Accounts),
+        "account" => {
+            let id = parts.get(1).copied().unwrap_or("").to_string();
+            if id.is_empty() || parts.len() != 2 {
+                return Err("usage: account <id>".into());
+            }
+            Ok(Command::AccountSwitch { account_id: id })
         }
         "help" | "?" => Ok(Command::Help),
         other => Err(format!("unknown command: {other}")),
@@ -448,6 +463,8 @@ impl Dispatcher {
             Command::EvolutionAuto { on } => self.cmd_evolution_auto(raw, on),
             Command::EvolutionEngine { on } => self.cmd_evolution_engine(raw, on),
             Command::EvolutionRollback { strategy } => self.cmd_evolution_rollback(raw, &strategy),
+            Command::Accounts => self.cmd_accounts(raw),
+            Command::AccountSwitch { account_id } => self.cmd_account_switch(raw, &account_id),
             Command::Help => CommandOutcome::ok(raw, "help", help_text())
                 .with_data(serde_json::json!({ "usage": help_text() })),
         }
@@ -533,6 +550,57 @@ impl Dispatcher {
                 format!("{strategy} rolled back to its previous parameters"),
             )
             .with_data(v),
+            Err(e) => CommandOutcome::err(raw, e.to_string()),
+        }
+    }
+
+    /// E28: the account book, verbatim. The core's `account.list` reply IS the
+    /// panel's model (id / status / balance / credentialsLoaded); the gateway
+    /// adds no second rendering of it — same discipline as the decisions tab.
+    fn cmd_accounts(&mut self, raw: &str) -> CommandOutcome {
+        match self.client.account_list() {
+            Ok(v) => {
+                let active = v
+                    .get("active")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let n = v
+                    .get("accounts")
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                CommandOutcome::ok(
+                    raw,
+                    "accounts",
+                    format!("{n} account(s), default: {active}"),
+                )
+                .with_data(v)
+            }
+            Err(e) => CommandOutcome::err(raw, e.to_string()),
+        }
+    }
+
+    /// E28: switch THIS connection's session default (§9.5 — the web adapter
+    /// serves every browser session through its own long-lived IPC client, so
+    /// the switch is panel-process-scoped, exactly what a single operator's
+    /// panel means by "my default"). The core validates the id; the reply's
+    /// `active` is echoed so the panel re-fetches nothing to know it landed.
+    fn cmd_account_switch(&mut self, raw: &str, account_id: &str) -> CommandOutcome {
+        match self.client.account_switch(account_id) {
+            Ok(v) => {
+                let active = v
+                    .get("active")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or(account_id)
+                    .to_string();
+                CommandOutcome::ok(
+                    raw,
+                    "account",
+                    format!("this connection's default account: {active}"),
+                )
+                .with_data(v)
+            }
             Err(e) => CommandOutcome::err(raw, e.to_string()),
         }
     }
@@ -841,6 +909,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("auto-evolve on|off", "unattended mode switch (persisted)"),
     ("evolve on|off", "evolution engine switch (persisted)"),
     ("rollback <strategy>", "undo one strategy's last evolution"),
+    (
+        "accounts",
+        "list the account book and this connection's default",
+    ),
+    (
+        "account <id>",
+        "switch this connection's default account (E28)",
+    ),
     ("help", ""),
 ];
 
@@ -1171,6 +1247,8 @@ mod tests {
                 Command::EvolutionAuto { .. } => "auto-evolve",
                 Command::EvolutionEngine { .. } => "evolve",
                 Command::EvolutionRollback { .. } => "rollback",
+                Command::Accounts => "accounts",
+                Command::AccountSwitch { .. } => "account",
             }
         }
         // Rows whose usage carries placeholders need a filled-in line to parse.
@@ -1182,6 +1260,7 @@ mod tests {
             ("rollback", "rollback alpha"),
             ("auto-evolve", "auto-evolve on"),
             ("evolve", "evolve on"),
+            ("account", "account main"),
         ];
         for &(usage, _) in COMMANDS {
             let verb = verb_of(usage);

@@ -136,6 +136,7 @@ fn open_position(c: &mut Core) {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: slot,
+            account_id: blitzkrieg_core::model::default_account_id(),
         },
         0,
         n,

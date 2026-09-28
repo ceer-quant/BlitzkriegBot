@@ -10,7 +10,9 @@ use crate::exit_policy::{
     decide_exit_verdict, effective_stop_pct, executable_bid, pnl_pct, reference_price,
     update_exit_state,
 };
-use crate::model::{ExitReason, OrderRole, OrderbookSnapshot, SignalDirection};
+use crate::model::{
+    AccountId, ExitReason, OrderRole, OrderbookSnapshot, SignalDirection, default_account_id,
+};
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -476,6 +478,12 @@ pub struct OpenPosition {
     pub target_exit_price: Option<Decimal>,
     pub entered_at_ms: i64,
     pub expires_at_ms: i64,
+    /// E28 (§9.2): the account the position belongs to. Defaulted on read so
+    /// a 0.2 snapshot lands in the `default` book without a migration; the
+    /// entry path writes it explicitly from the originating order (read old,
+    /// write new).
+    #[serde(default = "default_account_id")]
+    pub account_id: AccountId,
     /// F6: when the exit path last received a book for this token (ms epoch).
     /// A forced exit may consult it to refuse pricing off a stale quote; it is
     /// `0` until the first book arrives (serde default keeps old snapshots
@@ -551,6 +559,10 @@ pub struct ClosedPosition {
     /// Unsold shares written off at close (below the 0.01 share grid, or beyond
     /// the held size). Non-zero only in that corner; see [`PositionManager::close`].
     pub dust_shares: Decimal,
+    /// E28 (§9.2): the account the trade settled in — carried from the position
+    /// (which carried it from the order), so per-account realized PnL is a field
+    /// read, never a strategy-name heuristic.
+    pub account_id: AccountId,
 }
 
 pub struct OpenParams {
@@ -559,6 +571,9 @@ pub struct OpenParams {
     pub direction: SignalDirection,
     pub token_id: String,
     pub condition_id: String,
+    /// E28 (§9.2): the account this position spends — stamped from the entry
+    /// order, so per-account PnL/positions are a field read, never a guess.
+    pub account_id: AccountId,
     /// The order's limit price; the position's actual entry price is the basis
     /// per share once its fills land (see [`PositionManager::apply_entry_fill`]).
     pub entry_price: Decimal,
@@ -975,6 +990,7 @@ impl PositionManager {
             target_exit_price: p.target_exit_price,
             entered_at_ms: now_ms,
             expires_at_ms: p.expires_at_ms,
+            account_id: p.account_id,
             last_book_ts: 0,
             state: ExitState::new(p.entry_price, now_ms),
             flows: CashFlows::default(),
@@ -1467,6 +1483,9 @@ impl PositionManager {
             entry_role: pos.entry_role,
             exit_role: pos.exit_role,
             dust_shares: dust,
+            // E28 (§9.2): the settled trade carries the position's account, so
+            // per-account realized PnL is a field read.
+            account_id: pos.account_id,
         };
         self.closed.push(closed.clone());
         if self.closed.len() > 5000 {
@@ -1611,6 +1630,7 @@ mod tests {
             expires_at_ms: 900_000,
             was_maker: true,
             target_exit_price: None,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -2243,6 +2263,7 @@ mod precision_tests {
                 expires_at_ms: 1_000_000,
                 was_maker: false,
                 target_exit_price: None,
+                account_id: crate::model::default_account_id(),
             },
             0,
         )

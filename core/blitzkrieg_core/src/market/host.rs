@@ -47,6 +47,7 @@ fn error_code_from_api(c: api::CoreErrorCode) -> m::CoreErrorCode {
         A::InvalidSize => C::InvalidSize,
         A::InsufficientFunds => C::InsufficientFunds,
         A::RiskRejected => C::RiskRejected,
+        A::AccountLimit => C::AccountLimit,
         A::KillSwitchActive => C::KillSwitchActive,
         A::MarketHalted => C::MarketHalted,
         A::NotAuthenticated => C::NotAuthenticated,
@@ -86,6 +87,12 @@ fn fill_from_api(f: &api::MarketFill) -> m::Fill {
         tx_hash: f.tx_hash.clone(),
         // The venue's own maker/taker report rides straight through to the OME.
         maker: f.maker,
+        // E28: `api::MarketFill` carries no account yet — the market-plugin
+        // ABI addition is deferred (disclosed in the E28 PR), so a
+        // venue-routed fill lands in the `default` book. Core-internal fills
+        // (dry matcher, reconciliation) copy the account from their tracked
+        // order instead, so multi-account routing does not depend on this hop.
+        account_id: m::default_account_id(),
     }
 }
 

@@ -93,9 +93,15 @@ impl AuditSink {
     /// Build the record for one arbitrated suggestion and append it. Returns
     /// the record (the caller emits the throttled push from the same fields);
     /// a failed append warns ONCE and never blocks the trade.
+    ///
+    /// E28: `account_id` is the account the SUGGESTION itself names (§9.2 —
+    /// the record attributes the decision to the account whose money was
+    /// judged), stamped per call rather than fixed at sink construction.
+    #[allow(clippy::too_many_arguments)]
     pub fn record(
         &mut self,
         ts_ms: i64,
+        account_id: &str,
         strategy: &str,
         intent: &serde_json::Value,
         decision: &Decision,
@@ -104,7 +110,7 @@ impl AuditSink {
     ) -> IntentAuditRecord {
         let record = IntentAuditRecord {
             ts_ms,
-            account_id: self.account_id.clone(),
+            account_id: account_id.to_string(),
             strategy: strategy.to_string(),
             intent_id: self.next_intent_id(),
             intent: intent.clone(),
@@ -215,6 +221,7 @@ mod tests {
             let ts = i / 4;
             let record = sink.record(
                 ts,
+                "default",
                 "probe",
                 &serde_json::json!({"token": "UP", "price": "1.5"}),
                 &rejected_record(ts).decision,
@@ -245,6 +252,7 @@ mod tests {
         sink.path = dir.join("intents.jsonl");
         let record = sink.record(
             0,
+            "default",
             "probe",
             &serde_json::json!({}),
             &rejected_record(0).decision,
@@ -301,6 +309,7 @@ mod tests {
         sink.path = dir.join("intents.jsonl");
         sink.record(
             0,
+            "default",
             "probe",
             &serde_json::json!({"price": dec!(0.40).to_string()}),
             &rejected_record(0).decision,

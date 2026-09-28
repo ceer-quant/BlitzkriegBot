@@ -14,6 +14,10 @@ pub use blitzkrieg_market_api::{
     CoreError, CoreErrorCode, CoreResult, FillPolicy, FillStatus, OrderId, OrderStatus, OrderType,
     Side, TokenId, TradeId,
 };
+// E28 (§9.1): account identity is a market_api type for the same reason
+// `Kline` is — the strategy API names the account a round targets and may not
+// depend on the core. Re-exported so the kernel's import paths stay stable.
+pub use blitzkrieg_market_api::{AccountId, default_account_id};
 // Shared strategy-layer data shapes (single source of truth = strategy_logic,
 // PR-B): the orderbook snapshot and signal direction the shared evaluators
 // accept. Re-exported so the kernel's import paths stay stable.
@@ -153,6 +157,14 @@ pub struct OrderRequest {
     #[serde(rename = "direction")]
     pub direction: String,
     pub round_slot: i64,
+    /// E28 (§9.2): which account the order spends. `serde(default)` makes the
+    /// wire default equal the old single-account behaviour — a 0.2 client (or
+    /// a 0.2 line in a persisted log) reads as `default` without a migration.
+    /// An account that is not configured is refused later (the ledger lookup
+    /// is explicit; §9.3), so a default here can never silently spend a
+    /// non-default book.
+    #[serde(default = "default_account_id")]
+    pub account_id: AccountId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +189,12 @@ pub struct Fill {
     /// order's fill policy. Never inferred from the cumulative size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maker: Option<bool>,
+    /// E28 (§9.2): the account the money moved in. Defaulted on read so a
+    /// 0.2 line (or a dry/reconciliation synthesis that predates the field)
+    /// lands in the `default` book without a migration; written explicitly
+    /// on every new fill (read old, write new).
+    #[serde(default = "default_account_id")]
+    pub account_id: AccountId,
 }
 
 /// A core-side tracked order. Mirrors the Node TrackedOrder but is authoritative.
@@ -220,6 +238,11 @@ pub struct TrackedOrder {
     /// `confirm_live` starts it from this value once the venue accepts.
     #[serde(default)]
     pub maker_timeout_ms: i64,
+    /// E28 (§9.2): the account the order belongs to. Defaulted on read so a
+    /// 0.2 log line lands in the `default` book without a migration; written
+    /// explicitly on every new order (read old, write new).
+    #[serde(default = "default_account_id")]
+    pub account_id: AccountId,
 }
 
 // ── Exit reasons & orderbook ─────────────────────────────────────────────────

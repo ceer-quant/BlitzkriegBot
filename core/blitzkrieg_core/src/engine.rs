@@ -751,6 +751,12 @@ impl Engine {
                 asset: sig.asset.clone(),
                 direction: sig.direction.as_str().to_string(),
                 round_slot: round.slot,
+                // E28 (§9.2): the engine feeds strategies, and strategies have
+                // no account of their own (§9.4: the kernel is the only
+                // credential/identity holder). Kernel-side order construction
+                // therefore targets the process-level default account; the
+                // per-account routing happens at the service/IPC layer.
+                account_id: crate::model::default_account_id(),
             });
         }
         orders

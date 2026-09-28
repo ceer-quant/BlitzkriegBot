@@ -126,6 +126,11 @@ pub enum CoreErrorCode {
     InvalidSize,
     InsufficientFunds,
     RiskRejected,
+    /// E28 (§9.1): the account's lifecycle status refused the action — a
+    /// non-`Active` account cannot place new entries, a `ReadOnly` one
+    /// cannot close either. Distinct from `RiskRejected`: this is an
+    /// account-state fact, not a risk-gate judgment.
+    AccountLimit,
     KillSwitchActive,
     MarketHalted,
     NotAuthenticated,

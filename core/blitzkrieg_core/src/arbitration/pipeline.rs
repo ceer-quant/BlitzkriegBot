@@ -78,6 +78,12 @@ pub struct IntentCtx<'a> {
     /// The account's cash equity at judgment time (the #202 relative cap is a
     /// percentage of the LIVE balance, same rule as the submission path).
     pub equity: Decimal,
+    /// E28 (§9.1): `Some(reason)` when the target account's posture refuses
+    /// new entries (`read_only`/`frozen`/`suspended`, or the account is not
+    /// configured at all) — Gate 2 turns it into an ACCOUNT_LIMIT rejection
+    /// carrying this detail, so the audit trail shows the account gate with
+    /// the same vocabulary the submission path uses. `None` = may place.
+    pub account_entry_block: Option<String>,
 }
 
 /// The pipeline's full product: the decision AND the traces the audit needs
@@ -156,6 +162,28 @@ pub fn process_intent(intent: &StrategyIntent, ctx: &mut IntentCtx<'_>) -> Outco
             detail: "close intent exempt — closing intents always pass (existing rule)".into(),
         });
     } else {
+        // E28 (§9.1): the account's posture is a Gate-2 fact — a non-Active
+        // account refuses NEW entries here, with the same ACCOUNT_LIMIT
+        // vocabulary the submission path uses. The submission path
+        // (place_gated) independently enforces the same rule (defense in
+        // depth), so the two can never drift apart.
+        if let Some(block) = &ctx.account_entry_block {
+            let detail = block.clone();
+            gates.push(GateTrace {
+                gate: GateId::Risk,
+                outcome: GateOutcome::Reject,
+                detail: detail.clone(),
+            });
+            return finish(
+                Decision::Rejected {
+                    reason: RejectReason::AccountLimit,
+                    gate: GateId::Risk,
+                    detail,
+                },
+                gates,
+                started,
+            );
+        }
         if let Err(e) = ctx.risk.check_with_equity(&intent.request, ctx.equity) {
             let reason = match e.code {
                 blitzkrieg_market_api::CoreErrorCode::KillSwitchActive => RejectReason::KillSwitch,
@@ -325,6 +353,7 @@ mod tests {
             asset: "asset".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -344,6 +373,7 @@ mod tests {
             time_left_sec: 600,
             now_ms: 1_000,
             equity: dec!(1000),
+            account_entry_block: None,
         }
     }
 
@@ -576,6 +606,47 @@ mod tests {
         assert!(
             started.elapsed().as_secs() < 2,
             "the gates must keep up with a storm"
+        );
+    }
+
+    /// E28 (§9.1): a non-Active account refuses new entries at Gate 2 with
+    /// ACCOUNT_LIMIT — before the risk gates even consult the equity. Closes
+    /// bypass this branch entirely (the account gate never traps a close).
+    #[test]
+    fn a_blocked_account_refuses_entries_at_gate_2_with_account_limit() {
+        let (mut ledger, risk, breaker, exit_cfg, tokens) = setup();
+        let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
+        c.account_entry_block =
+            Some("account `paper` is read_only — new entries refused at Gate 2".into());
+        let out = process_intent(
+            &StrategyIntent::from_request(request(dec!(0.40), dec!(10))),
+            &mut c,
+        );
+        match out.decision {
+            Decision::Rejected {
+                reason: RejectReason::AccountLimit,
+                gate: GateId::Risk,
+                detail,
+            } => assert!(detail.contains("read_only"), "{detail}"),
+            other => panic!("expected ACCOUNT_LIMIT rejection, got {other:?}"),
+        }
+        // The rejection is traced with the account fact as its detail.
+        assert!(
+            out.gates
+                .iter()
+                .any(|g| g.gate == GateId::Risk && g.outcome == GateOutcome::Reject)
+        );
+
+        // A close on the same account is EXEMPT: the account block only
+        // refuses new exposure.
+        let mut close = request(dec!(0.40), dec!(10));
+        close.internal_key = "exit:tok-up:StopLoss".into();
+        close.side = Side::Sell;
+        let out = process_intent(&StrategyIntent::from_request(close), &mut c);
+        assert!(
+            matches!(out.decision, Decision::Approved { .. }),
+            "a frozen account must never trap a close: {:?}",
+            out.decision
         );
     }
 }
