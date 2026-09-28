@@ -112,6 +112,8 @@ pub fn reconcile(ome: &mut Ome, snap: &VenueSnapshot) -> CoreResult<ReconcileRep
             order_id: order.order_id.clone(),
             trade_id,
             token_id: order.token_id.clone(),
+            // E28 (§9.2): a gap fill moves cash in the order's own book.
+            account_id: order.account_id.clone(),
             side: order.side,
             price: t.price,
             size: t.size, // per-trade executed size, NOT cumulative
@@ -662,6 +664,7 @@ mod tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -727,6 +730,7 @@ mod tests {
                 ts_ms: 2,
                 tx_hash: None,
                 maker: Some(true),
+                account_id: crate::model::default_account_id(),
             },
             2,
         )

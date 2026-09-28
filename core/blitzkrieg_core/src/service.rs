@@ -239,6 +239,11 @@ pub struct CoreConfig {
     /// could have repriced live fills with no code objecting. Default `false`:
     /// only the backtester sets it.
     pub fee_schedule_replay: bool,
+    /// E25 (#331): write the intent-audit trail (`data/audit/intents.jsonl` +
+    /// throttled `INTENT_DECISION` pushes). The ARBITRATION GATES always run;
+    /// this silences only the WRITES (`--no-intent-audit`), which is exactly
+    /// what P1's with/without-baseline double-run proves off the trading path.
+    pub intent_audit_enabled: bool,
 }
 
 impl CoreConfig {
@@ -652,6 +657,7 @@ impl Default for CoreConfig {
             breaker_cooldown_sec: 300,
             round_duration_sec: 900,
             auto_exits_enabled: true,
+            intent_audit_enabled: true,
             engine_enabled: false,
             assets: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
             enabled_strategies: Vec::new(),
@@ -818,7 +824,7 @@ fn fee_quote_at(
 
 /// One position selected by `Core::flatten`, in the order its destructuring
 /// loop consumes: id, token, condition, shares, strategy, asset, direction,
-/// current price.
+/// current price, account id.
 type FlattenTarget = (
     String,
     String,
@@ -828,11 +834,12 @@ type FlattenTarget = (
     String,
     String,
     Decimal,
+    AccountId,
 );
 
 /// One due `maker_then_taker` order selected by `Core::tick`, in the order its
 /// destructuring loop consumes: id, side, remaining, token, condition,
-/// strategy, asset, direction, round slot, maker timeout.
+/// strategy, asset, direction, round slot, maker timeout, account id.
 type EscalationTarget = (
     String,
     Side,
@@ -844,6 +851,7 @@ type EscalationTarget = (
     String,
     i64,
     i64,
+    AccountId,
 );
 
 /// Append-only journal of the OME's applied-fill idempotency table (issue #178).
@@ -1041,11 +1049,19 @@ const EXIT_REASON_TABLE_MAX: usize = 64;
 pub struct Core {
     config: CoreConfig,
     ome: Ome,
-    ledger: Ledger,
+    /// E28 (§9.3): the per-account money truth. "The ledger" is now a lookup
+    /// keyed by the order/request's `account_id` at every money-moving site —
+    /// the active account's book stands in where no order context exists
+    /// (seeding, equity views, the audit's cash identity). `Ledger` itself is
+    /// UNTOUCHED: reserve/release/settle keep their exact signatures.
+    accounts: crate::account::AccountLedgers,
     risk: RiskGate,
     /// Per-strategy consecutive-loss breakers (KI-10 / D-18 A). The daily loss
     /// cap and kill switch stay global — see [`LossBreakers`].
     breaker: LossBreakers,
+    /// E25 (#331): the intent-audit sink — one JSONL line per arbitrated
+    /// suggestion plus the throttled `INTENT_DECISION` push state (§3.4).
+    intent_audit: crate::arbitration::AuditSink,
     positions: PositionManager,
     books: HashMap<TokenId, Book>,
     /// Exit reason chosen for an in-flight closing SELL, keyed by token id, so a
@@ -1198,6 +1214,36 @@ struct CloseCredential {
 
 impl Core {
     pub fn new(config: CoreConfig) -> Self {
+        // E28 (§9.5): the account book loads from `user_layer/configs/
+        // accounts.toml` relative to the process cwd — a missing file is the
+        // zero-config 0.2 deployment (one `default` account), a MALFORMED one
+        // refuses the boot (fail-closed: a book that is not what the operator
+        // wrote must not trade). The credential probe runs here too, so
+        // `account.list` answers `credentialsLoaded` from boot-time facts.
+        // Tests (and embedders) inject a book directly via
+        // [`Core::with_account_book`] instead of touching the cwd.
+        let accounts = crate::account::config::load_account_ledgers(
+            std::path::Path::new(crate::account::config::ACCOUNTS_CONFIG_PATH),
+            now_ms(),
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "refusing to boot: {} (fail-closed: fix accounts.toml and restart)",
+                e.message
+            )
+        });
+        Self::with_account_book(config, accounts)
+    }
+
+    /// The constructor with the account book SUPPLIED (E28): a multi-account
+    /// book for tests without touching the real `user_layer/configs/
+    /// accounts.toml` the process cwd decides. Production always enters
+    /// through [`Core::new`], which fails closed on a malformed file; this
+    /// variant trusts the caller's book.
+    pub fn with_account_book(
+        config: CoreConfig,
+        mut accounts: crate::account::AccountLedgers,
+    ) -> Self {
         let trade_db = config
             .trade_log_path
             .as_ref()
@@ -1312,20 +1358,25 @@ impl Core {
                 }
             }
         });
-        let mut ledger = Ledger::new();
-        // A locally-settling mode has no venue to reconcile against; seed the
-        // local cash so the reserve/overspend gate is meaningful for embedders
-        // that don't seed it. Uses the predicate, not `== Dry`: the equality form
-        // is invisible to the compiler and left ReadOnly funding at zero.
+        // E28 (§9.5): a locally-settling mode has no venue to reconcile
+        // against; seed the local cash so the reserve/overspend gate is
+        // meaningful for embedders that don't seed it. Uses the predicate, not
+        // `== Dry`: the equality form is invisible to the compiler and left
+        // ReadOnly funding at zero. EVERY account is seeded (§9.3: the books
+        // are separate wallets, not one wallet with aliases); with one
+        // account this is exactly the single `set_balance` 0.2 ran.
         if config.mode.settles_locally() {
-            ledger.set_balance(config.dry_seed_balance);
+            accounts.seed_all(config.dry_seed_balance);
         }
+        let mut intent_audit = crate::arbitration::AuditSink::new(accounts.active_id().as_str());
+        intent_audit.enabled = config.intent_audit_enabled;
         Self {
             risk: RiskGate::new(config.risk.clone()),
             config,
             ome: Ome::new(),
-            ledger,
+            accounts,
             breaker,
+            intent_audit,
             positions,
             books: HashMap::new(),
             exit_reasons: HashMap::new(),
@@ -1457,7 +1508,11 @@ impl Core {
                 }
                 let remaining = (o.size - o.filled_size).max(Decimal::ZERO);
                 let notional = o.price * remaining;
-                self.ledger.sync_buy_reservation(&o.order_id, notional);
+                // E28: the reservation re-commits cash in the ORDER'S OWN book —
+                // a restored order must never spend from another account.
+                if let Ok(l) = self.accounts.get_mut(&o.account_id) {
+                    l.sync_buy_reservation(&o.order_id, notional);
+                }
                 restored_notional += notional;
             }
             self.emit(Event::RiskAlert {
@@ -1594,7 +1649,7 @@ impl Core {
     pub fn set_balance(&mut self, b: Decimal) {
         if self.config.mode == Mode::Live {
             let ts = now_ms();
-            let previous = self.ledger.balance();
+            let previous = self.accounts.active_ledger().balance();
             if previous != b {
                 // The host realigns the ledger to the venue when there are no
                 // resting commitments, so a change between two reports is either
@@ -1610,11 +1665,109 @@ impl Core {
             }
             self.venue_free = Some((ts, b));
         }
-        self.ledger.set_balance(b);
+        // The venue realign targets the ACTIVE account's book (§9.5: the
+        // process-level default; 0.2 deployments have exactly one).
+        self.accounts.active_ledger_mut().set_balance(b);
     }
+    /// The active account's ledger (§9.5). Views and callers with no order
+    /// context read this; money-moving sites route by the order's own
+    /// `account_id` instead.
     pub fn ledger(&self) -> &Ledger {
-        &self.ledger
+        self.accounts.active_ledger()
     }
+
+    /// E28 (§9.3): the account book — IPC `account.*` reads it, the gates
+    /// route through it. Money-moving code does NOT go through this handle;
+    /// it routes by the order's own `account_id` at each site.
+    pub fn accounts(&self) -> &crate::account::AccountLedgers {
+        &self.accounts
+    }
+
+    /// E28 `account.list` (§12.1): one [`crate::ipc::schema::AccountView`]
+    /// per configured account, sorted by id (`AccountLedgers::account_list`
+    /// order). Every money field is the account's OWN book — this view is
+    /// how cross-account isolation is READ; `dayRealizedUsd` sums the
+    /// account's own closes of the current UTC day.
+    pub fn account_views(&self, now_ms: i64) -> Vec<crate::ipc::schema::AccountView> {
+        let today = crate::position::utc_day_index(now_ms);
+        self.accounts
+            .account_list()
+            .iter()
+            .map(|a| {
+                let id = &a.id;
+                let ledger = self
+                    .accounts
+                    .ledger_of(id)
+                    .expect("configured account always has a ledger");
+                let open_positions = self
+                    .positions
+                    .open_positions()
+                    .iter()
+                    .filter(|p| &p.account_id == id)
+                    .count();
+                let day_realized_usd = self
+                    .positions
+                    .closed_positions()
+                    .iter()
+                    .filter(|c| {
+                        &c.account_id == id
+                            && crate::position::utc_day_index(c.exited_at_ms) == today
+                    })
+                    .map(|c| c.net_pnl_usd)
+                    .sum();
+                let (status_tag, status_reason) = match &a.status {
+                    crate::account::AccountStatus::Suspended { reason } => {
+                        (a.status.wire_tag(), Some(reason.clone()))
+                    }
+                    _ => (a.status.wire_tag(), None),
+                };
+                crate::ipc::schema::AccountView {
+                    id: id.as_str().to_string(),
+                    name: a.name.clone(),
+                    market_type: a.market_type,
+                    status: status_tag.to_string(),
+                    status_reason,
+                    balance: ledger.balance(),
+                    available: ledger.available(),
+                    reserved: ledger.reserved(),
+                    credentials_loaded: a.credential_keys.loaded,
+                    open_positions,
+                    day_realized_usd,
+                    updated_at_ms: a.updated_at_ms,
+                }
+            })
+            .collect()
+    }
+
+    /// E28 `account.status` (§12.1): a runtime call may only TIGHTEN — a
+    /// loosening (`frozen -> active`, `read_only -> frozen`) is refused with
+    /// INVALID_PARAMS, because an unwind a single IPC call could undo is not
+    /// an unwind. Unfreezing is config + restart.
+    pub fn tighten_account_status(
+        &mut self,
+        id: &crate::account::AccountId,
+        status: crate::account::AccountStatus,
+        now_ms: i64,
+    ) -> CoreResult<()> {
+        self.accounts.require(id)?;
+        let current = self
+            .accounts
+            .account(id)
+            .expect("require checked existence")
+            .status
+            .clone();
+        if !current.can_tighten_to(&status) {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "account `{id}` is {current} — changing it to {status} would LOOSEN it; \
+                     tighten-only at runtime (unfreeze = config + restart)"
+                ),
+            ));
+        }
+        self.accounts.set_status(id, status, now_ms)
+    }
+
     pub fn ome(&self) -> &Ome {
         &self.ome
     }
@@ -1854,8 +2007,13 @@ impl Core {
                             // otherwise never get a unit, so it could not evolve at
                             // all until a restart.
                             self.rewire_hot_params(now_ms());
+                            // API 1.0 naming (DEV_V0_3 §2.2, E24 #330): the
+                            // receipt KEEPS its old text — the test above pins
+                            // it — and only APPENDS the protocol line. E24
+                            // handed this hunk to the service.rs hotspot
+                            // guardian (E25); it lands here.
                             format!(
-                                "{name}@{version} registered into the engine dispatch (disabled{declared}{evolvable}{incompatible})"
+                                "{name}@{version} registered into the engine dispatch (disabled{declared}{evolvable}{incompatible}); API 1.0 (line protocol 2)"
                             )
                         }
                         Err(reason) => format!("rejected: {reason}"),
@@ -2584,7 +2742,10 @@ impl Core {
         // #202: the equity-relative sizing is a percentage of the account, and
         // the account is the ledger — pushed here, once per cycle, so a ticket
         // can never be sized against a balance the process no longer has.
-        engine.set_equity_usd(self.ledger.balance());
+        // E28: the engine sizes against the ACTIVE account's book (§9.4: the
+        // kernel drives strategies with no account of their own; per-account
+        // routing happens when each order passes through the gates).
+        engine.set_equity_usd(self.accounts.active_ledger().balance());
         let orders = engine.evaluate(now_ms);
         // E30 (§6.3): drain the sandbox poison alerts now; each is raised as
         // ONE RISK_ALERT after the engine borrow ends below — the message
@@ -2626,6 +2787,95 @@ impl Core {
         // behavior-free by charter (deviation disclosed in the PR body).
         for (token, req) in tokens {
             let name = req.strategy.clone();
+            // ── E25 (#331): arbitration BEFORE the E16 portfolio cap — this is
+            // the seam Wave 0 planted. Every strategy intent is arbitrated
+            // exactly once through the four gates; a Rejected suggestion never
+            // reaches place()/OME, an Approved one is handed to the SAME path
+            // as before. The gates reuse the existing implementations
+            // (OrderIntent::validate / RiskGate / breakers / Ledger::reserve /
+            // effective_stop_pct), so no threshold has two truths (§3.3).
+            // E28 (§9.2): the intent is arbitrated in the account its own
+            // request names — the pipeline's reserve lands in THAT book, not
+            // the active one. The posture is judged before the request moves
+            // into the intent.
+            let account_id = req.account_id.clone();
+            let is_close = crate::risk::is_close_intent(&req.internal_key);
+            let account_entry_block = self
+                .accounts
+                .permits_order(&account_id, is_close)
+                .err()
+                .map(|e| e.message);
+            let intent = crate::arbitration::StrategyIntent::from_request(req);
+            let outcome = {
+                let round_tokens = self
+                    .engine
+                    .as_ref()
+                    .map(|e| e.round_token_ids())
+                    .unwrap_or_default();
+                let time_left_sec = self
+                    .engine
+                    .as_ref()
+                    .map(|e| e.last_time_left_sec())
+                    .unwrap_or(0);
+                // E28 (§9.3): the pipeline's reserve happens in THIS account's
+                // book. An unknown account is refused — no implicit empty book,
+                // ever (reverse acceptance C) — with the same Gate-2 accounting
+                // as an arbitration rejection.
+                match self.accounts.get_mut(&account_id) {
+                    Err(e) => crate::arbitration::Outcome {
+                        decision: crate::arbitration::Decision::Rejected {
+                            reason: crate::arbitration::RejectReason::AccountLimit,
+                            gate: crate::arbitration::GateId::Risk,
+                            detail: e.message,
+                        },
+                        gates: Vec::new(),
+                        latency_us: 0,
+                    },
+                    Ok(ledger) => {
+                        // E28: the #202 equity is a percentage of THIS
+                        // account's live balance, same rule as the submission
+                        // path.
+                        let equity = ledger.balance();
+                        let mut ctx = crate::arbitration::IntentCtx {
+                            round_tokens: &round_tokens,
+                            risk: &self.risk,
+                            breaker: &self.breaker,
+                            ledger,
+                            exit_cfg: &self.config.positions.exit,
+                            time_left_sec,
+                            now_ms,
+                            equity,
+                            account_entry_block,
+                        };
+                        crate::arbitration::process_intent(&intent, &mut ctx)
+                    }
+                }
+            };
+            self.record_intent_decision(&intent, &outcome, now_ms);
+            if let crate::arbitration::Decision::Rejected {
+                reason,
+                gate,
+                detail,
+                ..
+            } = &outcome.decision
+            {
+                self.stats.place_rejected += 1;
+                let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                acc.rejected += 1;
+                // Bucket through the EXISTING classifier over the gate's own
+                // message, so the attribution vocabulary is the one place()
+                // would have written — the rejection happened earlier, the
+                // story an operator reads does not change (E9-c buckets).
+                let cause = classify_rejection(&crate::model::CoreError::new(
+                    crate::arbitration::reason_code(*reason),
+                    detail.clone(),
+                ));
+                *acc.rejection_causes.entry(cause).or_default() += 1;
+                tracing::info!(target: "strategy",
+                    "entry rejected: strategy={name} cause=arbitration gate={gate:?} reason={reason:?} detail={detail}");
+                continue;
+            }
+            let req = intent.request;
             // E16/#98 portfolio-level exposure cap (0 = off): the account's
             // total open commitment across ALL strategies is bounded too —
             // per-strategy caps partition it, but their sum needs its own
@@ -3062,7 +3312,9 @@ impl Core {
     ///   number describes NEW exposure, which is what "max possible loss on one
     ///   order" means for a binary-market BUY (the whole notional can go to 0).
     fn sizing_view(&self) -> serde_json::Value {
-        let equity = self.ledger.balance();
+        // E28: the sizing view describes the ACTIVE account's book (the panel
+        // is a per-session view of the session's account, §9.5).
+        let equity = self.accounts.active_ledger().balance();
         let globals = self.engine.as_ref().map(|e| e.global_sizing()).unwrap_or(
             crate::engine::EffectiveSizing {
                 size_usd: self.config.size_usd,
@@ -3252,6 +3504,9 @@ impl Core {
                 direction: p.direction.as_str().to_string(),
                 strategy: p.strategy.clone(),
                 token_id: p.token_id.clone(),
+                // E28 (§9.2): the account the position settles into — a field
+                // read, and the row the panel filters per account.
+                account_id: p.account_id.as_str().to_string(),
                 entry_price: p.entry_price,
                 current_price: p.current_price,
                 shares: p.shares,
@@ -3297,11 +3552,20 @@ impl Core {
         }
         // The #202 equity-relative cap is a percentage of the account as it is
         // AT SUBMISSION, so the gate is handed the live balance here — the same
-        // number the daily-loss breaker opens its day with.
-        self.risk.check_with_equity(&req, self.ledger.balance())?;
+        // number the daily-loss breaker opens its day with. E28: the account
+        // is the one the request names, and its posture gates the place too.
+        self.accounts
+            .permits_order(&req.account_id, is_close_intent(&req.internal_key))?;
+        // G5: a close settles into the book that PAID for the shares — a
+        // close order naming another account is refused, never re-routed.
+        self.refuse_cross_account_close(&req)?;
+        self.risk
+            .check_with_equity(&req, self.accounts.ledger_of(&req.account_id)?.balance())?;
         let id = self.new_order_id();
         if req.side == Side::Buy {
-            self.ledger.reserve(&id, req.price * req.size)?;
+            self.accounts
+                .get_mut(&req.account_id)?
+                .reserve(&id, req.price * req.size)?;
         }
         self.ome.submit(SubmitParams {
             order_id: id.clone(),
@@ -3359,7 +3623,11 @@ impl Core {
     ) -> CoreResult<()> {
         if let Some(o) = self.ome.get(id).cloned() {
             if o.side == Side::Buy {
-                self.ledger.release(id);
+                // E28: the reservation is released in the ORDER'S OWN book —
+                // a venue reject must never refund another account's cash.
+                if let Ok(l) = self.accounts.get_mut(&o.account_id) {
+                    l.release(id);
+                }
             }
             self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
             self.emit_order(id);
@@ -3406,6 +3674,9 @@ impl Core {
                         asset: o.asset.clone(),
                         direction: o.direction.clone(),
                         round_slot: o.round_slot,
+                        // E28 (§9.2): the escalated leg spends from the same
+                        // account as the maker order it replaces.
+                        account_id: o.account_id.clone(),
                     };
                     // The risk gate gets the first word here too (#261): a
                     // cross the book offers but this core may not afford is
@@ -3577,7 +3848,8 @@ impl Core {
         // A reservation is "stray" when the order behind it is not a tracked live
         // BUY: nobody can ever release it, so it is a permanent phantom hold.
         let stray_reservations: Vec<(OrderId, Decimal)> = self
-            .ledger
+            .accounts
+            .active_ledger()
             .reservations_snapshot()
             .into_iter()
             .filter(|(id, _)| {
@@ -3603,20 +3875,24 @@ impl Core {
             received += p.flows.proceeds_usd - p.flows.exit_fee_usd;
         }
         let open_positions = self.positions.open_positions().len();
+        // E28: the audit's cash identity describes the ACTIVE account's book
+        // (§9.5). Cross-account isolation is asserted by the dedicated gate
+        // (account-cross-isolation-check.mjs), not by widening this identity.
+        let active = self.accounts.active_ledger();
         AuditInput {
             now_ms,
             live: self.config.mode == Mode::Live,
             identity: CashIdentity {
-                balance: self.ledger.balance(),
+                balance: active.balance(),
                 // Settled but not yet redeemed: owed to us, not in the wallet.
                 receivable: self.settlement.receivable_usd(),
                 realized,
                 spent,
                 received,
             },
-            reserved: self.ledger.reserved(),
-            ledger_balanced: self.ledger.is_balanced(),
-            unfunded_reserved: self.ledger.unfunded_reserved(),
+            reserved: active.reserved(),
+            ledger_balanced: active.is_balanced(),
+            unfunded_reserved: active.unfunded_reserved(),
             open_buy_notional,
             open_buys,
             stray_reservations,
@@ -3766,7 +4042,9 @@ impl Core {
     /// can reach it.
     #[cfg(feature = "test-support")]
     pub fn ledger_mut(&mut self) -> &mut Ledger {
-        &mut self.ledger
+        // E28: tests poking the books target the ACTIVE account's ledger —
+        // the same default a 0.2 deployment has exactly one of.
+        self.accounts.active_ledger_mut()
     }
 
     /// Append one audit verdict (or a late-fill record) to the audit log.
@@ -4011,12 +4289,9 @@ impl Core {
     /// cancelled).
     fn apply_delta_effects(&mut self, d: FillDelta, now_ms: i64) {
         let px = d.price;
-        // A maker fill pays no fee; a taker fill pays the schedule in force on the
-        // fill's own notional. `d.role` is what the fill actually did — the old
-        // `match d.mode` read the REQUESTED policy, which charged a
-        // MakerThenTaker order the taker fee while its position record said maker.
-        // Fee applies to the incremental delta (not the cumulative), so partial
-        // fills charge exactly once per share; rollbacks (delta <= 0) charge none.
+        // The fee reads only the schedule in force (an &self read), so it is
+        // computed BEFORE the account's ledger is taken mutably (E28: the two
+        // borrows must not overlap).
         let mut fee_usd = Decimal::ZERO;
         if d.delta > Decimal::ZERO {
             let notional = px * d.delta;
@@ -4026,25 +4301,47 @@ impl Core {
                 self.live_taker_fee_pct(px)
             };
             fee_usd = (fee_pct / Decimal::ONE_HUNDRED) * notional;
+        }
+        // E28 (§9.3): every cash movement below lands in the fill's OWN book —
+        // the delta carries the account its tracked order was placed with.
+        // An unknown account here is a data-integrity fault (a fill arrived
+        // for an account this core never configured): it is logged and the
+        // fill is dropped rather than silently minting an implicit book
+        // (reverse acceptance C) — the position projection and the event
+        // emission below are skipped with it.
+        let Ok(ledger) = self.accounts.get_mut(&d.account_id) else {
+            tracing::error!(
+                order = %d.order_id,
+                account = %d.account_id.as_str(),
+                "fill for an unknown account dropped — the money fact is not booked"
+            );
+            return;
+        };
+        // A maker fill pays no fee; a taker fill pays the schedule in force on the
+        // fill's own notional. `d.role` is what the fill actually did — the old
+        // `match d.mode` read the REQUESTED policy, which charged a
+        // MakerThenTaker order the taker fee while its position record said maker.
+        // Fee applies to the incremental delta (not the cumulative), so partial
+        // fills charge exactly once per share; rollbacks (delta <= 0) charge none.
+        if d.delta > Decimal::ZERO {
+            let notional = px * d.delta;
             match d.side {
                 Side::Buy => {
                     // Release the notional reserved at the LIMIT price for these
                     // shares, and pay the execution price in cash.
-                    self.ledger
-                        .settle_buy_fill(&d.order_id, notional, d.limit_price * d.delta);
-                    self.ledger.charge_fee(fee_usd);
+                    ledger.settle_buy_fill(&d.order_id, notional, d.limit_price * d.delta);
+                    ledger.charge_fee(fee_usd);
                 }
-                Side::Sell => self.ledger.settle_sell_fill(notional, fee_usd),
+                Side::Sell => ledger.settle_sell_fill(notional, fee_usd),
             }
         } else {
             // Rollback/correction: revert the cash with no fee.
             match d.side {
-                Side::Buy => self.ledger.settle_sell_fill(-px * d.delta, Decimal::ZERO),
+                Side::Buy => ledger.settle_sell_fill(-px * d.delta, Decimal::ZERO),
                 // A reversed SELL gives the cash back to the venue; no reservation
                 // is involved (SELLs never reserve), so the release is zero.
                 Side::Sell => {
-                    self.ledger
-                        .settle_buy_fill(&d.order_id, -px * d.delta, Decimal::ZERO);
+                    ledger.settle_buy_fill(&d.order_id, -px * d.delta, Decimal::ZERO);
                 }
             }
         }
@@ -4056,7 +4353,7 @@ impl Core {
                 Some(o) if o.status.is_live() => o.price * self.ome.remaining(&d.order_id),
                 _ => Decimal::ZERO,
             };
-            let before = self.ledger.sync_buy_reservation(&d.order_id, target);
+            let before = ledger.sync_buy_reservation(&d.order_id, target);
             if before > Decimal::ZERO && target == Decimal::ZERO {
                 tracing::debug!(
                     order = %d.order_id,
@@ -4110,6 +4407,9 @@ impl Core {
                             expires_at_ms,
                             was_maker: d.role.is_maker(),
                             target_exit_price: None,
+                            // E28 (§9.2): the position belongs to the account
+                            // whose fill opened it.
+                            account_id: d.account_id.clone(),
                         };
                         self.positions.open(p, now_ms).id
                     }
@@ -4278,6 +4578,7 @@ impl Core {
             strategy: closed.strategy.clone(),
             token_id: closed.token_id.clone(),
             condition_id: closed.condition_id.clone(),
+            account_id: closed.account_id.clone(),
             net_pnl_usd: closed.net_pnl_usd,
             net_pnl_pct: closed.net_pnl_pct,
             daily_pnl_usd: self.positions.daily_pnl(),
@@ -4667,12 +4968,12 @@ impl Core {
             if t.side != Side::Sell {
                 continue;
             }
-            let Some((position_id, held)) = self
+            let Some((position_id, held, position_account)) = self
                 .positions
                 .open_positions()
                 .iter()
                 .find(|p| p.token_id == t.token_id)
-                .map(|p| (p.id.clone(), p.shares))
+                .map(|p| (p.id.clone(), p.shares, p.account_id.clone()))
             else {
                 continue;
             };
@@ -4691,7 +4992,20 @@ impl Core {
                 // replay-only guard the fill choke point uses (#234, item 4).
                 (self.live_taker_fee_pct(t.price) / Decimal::ONE_HUNDRED) * notional
             };
-            self.ledger.settle_sell_fill(notional, fee_usd);
+            // E28: a manual (external) close settles into the POSITION'S OWN
+            // book — the proceeds belong to the account that paid for the
+            // shares. An unknown account is logged and skipped (no implicit
+            // book, no silent mint).
+            if let Ok(l) = self.accounts.get_mut(&position_account) {
+                l.settle_sell_fill(notional, fee_usd);
+            } else {
+                tracing::error!(
+                    token = %t.token_id,
+                    account = %position_account.as_str(),
+                    "external sell for an unknown account dropped — proceeds not booked"
+                );
+                continue;
+            }
             let role = if t.maker == Some(true) {
                 crate::model::OrderRole::Maker
             } else {
@@ -5007,6 +5321,61 @@ impl Core {
         self.note_error(&e, now_ms);
         self.emit_error_event(e);
     }
+
+    /// E25 (#331): ONE audit line per arbitrated suggestion — never folded,
+    /// never blocking (a failed append warns once and the trade goes on) —
+    /// plus AT MOST one `INTENT_DECISION` push per `(strategy, gate, reason)`
+    /// per second (§12.3): the PUSH folds, the audit does not.
+    fn record_intent_decision(
+        &mut self,
+        intent: &crate::arbitration::StrategyIntent,
+        outcome: &crate::arbitration::Outcome,
+        now_ms: i64,
+    ) {
+        let intent_json = serde_json::to_value(&intent.request).unwrap_or(serde_json::Value::Null);
+        let record = self.intent_audit.record(
+            now_ms,
+            intent.request.account_id.as_str(),
+            &intent.request.strategy,
+            &intent_json,
+            &outcome.decision,
+            &outcome.gates,
+            outcome.latency_us,
+        );
+        // The throttle key is (strategy, gate, reason); for a non-rejection the
+        // "reason" slot carries the status, so an approval storm folds too.
+        let (gate, key_reason) = match &outcome.decision {
+            crate::arbitration::Decision::Rejected { gate, reason, .. } => (
+                format!("{gate:?}").to_uppercase(),
+                format!("{reason:?}").to_uppercase(),
+            ),
+            _ => (
+                outcome
+                    .gates
+                    .last()
+                    .map(|g| format!("{:?}", g.gate).to_uppercase())
+                    .unwrap_or_else(|| "UNKNOWN".into()),
+                outcome.decision.status().to_string(),
+            ),
+        };
+        if let Some(count) =
+            self.intent_audit
+                .throttle(&intent.request.strategy, &gate, &key_reason, now_ms)
+        {
+            let push = crate::arbitration::AuditSink::push_for(&record, count);
+            self.emit(Event::IntentDecision {
+                account_id: record.account_id.clone(),
+                strategy: push.strategy,
+                intent_id: push.intent_id,
+                status: push.status,
+                gate: push.gate,
+                detail: push.detail,
+                ts_ms: push.ts_ms,
+                count: push.count,
+            });
+        }
+    }
+
     /// Emit an error event WITHOUT touching the slot, for a consequence whose
     /// cause is already recorded: the slot must keep showing the error an
     /// operator has to act on (the raw venue refusal), not the kernel's own
@@ -5031,8 +5400,11 @@ impl Core {
     /// the boundary is already counted in the new day.
     fn roll_daily_budget(&mut self, now_ms: i64) {
         // `balance` is already gross of local reservations — adding `reserved`
-        // here would double-count resting BUY commitments.
-        let equity = self.ledger.balance();
+        // here would double-count resting BUY commitments. E28: the daily
+        // budget opens on the ACTIVE account's equity (the kernel-wide daily
+        // loss state stays global, §9.3 — per-account loss attribution is the
+        // position book's, not the ledger's).
+        let equity = self.accounts.active_ledger().balance();
         if let Some(roll) = self
             .positions
             .roll_daily(now_ms, equity, self.equity_basis())
@@ -5216,6 +5588,36 @@ impl Core {
         outcome
     }
 
+    /// E28 (§9.2, G5): a CLOSE is inventory-bound — the open position for a
+    /// token belongs to exactly one account, and a close order naming another
+    /// account would settle money into a book that never paid for the shares.
+    /// Refused, never re-routed: re-routing would be the implicit-ledger
+    /// accident (§9.3) under a different name. Opens are unaffected (a BUY
+    /// commits its own book's cash); an exit for a token with NO open
+    /// position passes here and is handled by the fill projection as before.
+    fn refuse_cross_account_close(&self, req: &OrderRequest) -> CoreResult<()> {
+        if req.side != Side::Sell || !crate::risk::is_close_intent(&req.internal_key) {
+            return Ok(());
+        }
+        if let Some(p) = self
+            .positions
+            .open_positions()
+            .iter()
+            .find(|p| p.token_id == req.token_id)
+            && p.account_id != req.account_id
+        {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "cross-account close refused: position {} on token {} belongs to \
+                     account `{}`, the order names `{}`",
+                    p.id, p.token_id, p.account_id, req.account_id
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn place_gated(
         &mut self,
         req: OrderRequest,
@@ -5240,10 +5642,23 @@ impl Core {
                 ),
             ));
         }
+        // E28 Gate 2 (§9.1): the account's posture gates the place BEFORE the
+        // risk gates consult equity — only `Active` places new entries; closes
+        // pass every posture except `ReadOnly` (a freeze must never trap a
+        // position). This is the submission-path enforcement point; the
+        // arbitration pipeline carries the same check earlier for strategy
+        // intents (defense in depth, one vocabulary: ACCOUNT_LIMIT).
+        self.accounts
+            .permits_order(&req.account_id, is_close_intent(&req.internal_key))?;
+        // G5: a close settles into the book that PAID for the shares — a
+        // close order naming another account is refused, never re-routed.
+        self.refuse_cross_account_close(&req)?;
         // #202: the equity-relative per-order cap is a percentage of the account
         // AT SUBMISSION, so the gate is handed the live balance rather than a
-        // remembered copy of it.
-        self.risk.check_with_equity(&req, self.ledger.balance())?;
+        // remembered copy of it. E28: the account is the one the request names —
+        // an unknown account is refused, never implicitly created.
+        self.risk
+            .check_with_equity(&req, self.accounts.ledger_of(&req.account_id)?.balance())?;
 
         // Entry gates apply to opening BUY orders only; exits (SELL) are never
         // blocked by capacity, breaker or cooldowns.
@@ -5307,9 +5722,12 @@ impl Core {
 
         let id = self.new_order_id();
 
-        // Reserve BUY notional up front (prevents over-commitment).
+        // Reserve BUY notional up front (prevents over-commitment). E28: the
+        // reservation commits cash in the REQUEST'S OWN book.
         if req.side == Side::Buy {
-            self.ledger.reserve(&id, req.price * req.size)?;
+            self.accounts
+                .get_mut(&req.account_id)?
+                .reserve(&id, req.price * req.size)?;
         }
 
         self.ome.submit(SubmitParams {
@@ -5443,7 +5861,11 @@ impl Core {
                             }
                             None => {
                                 if order.side == Side::Buy {
-                                    self.ledger.release(id);
+                                    // E28: the refused taker's reservation is
+                                    // released in the ORDER'S OWN book.
+                                    if let Ok(l) = self.accounts.get_mut(&order.account_id) {
+                                        l.release(id);
+                                    }
                                 }
                                 self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
                                 // #180: a refusal is a first-class fact — it goes
@@ -5518,14 +5940,15 @@ impl Core {
         maker: bool,
         now_ms: i64,
     ) -> CoreResult<()> {
-        let (token, side) = match self.ome.get(id) {
-            Some(o) => (o.token_id.clone(), o.side),
+        let (token, side, account_id) = match self.ome.get(id) {
+            Some(o) => (o.token_id.clone(), o.side, o.account_id.clone()),
             None => return Err(CoreError::new(CoreErrorCode::UnknownOrder, id)),
         };
         let fill = Fill {
             order_id: id.into(),
             trade_id: Some(trade_id.to_string()),
             token_id: token,
+            account_id,
             side,
             price,
             size: cumulative,
@@ -5607,7 +6030,11 @@ impl Core {
             .ok_or_else(|| CoreError::new(CoreErrorCode::UnknownOrder, id))?;
         let was_live = order.status.is_live();
         if order.side == Side::Buy {
-            self.ledger.release(id);
+            // E28: the reservation is released in the ORDER'S OWN book — a
+            // cancel must never refund another account's cash.
+            if let Ok(l) = self.accounts.get_mut(&order.account_id) {
+                l.release(id);
+            }
         }
         self.ome.mark_terminal(id, OrderStatus::Cancelled, now_ms)?;
         // The venue may still hold the order resting: hand its id to the live
@@ -5700,11 +6127,16 @@ impl Core {
                     p.asset.clone(),
                     p.direction.as_str().to_string(),
                     p.current_price,
+                    // E28 (§9.2): the manual close spends from the position's
+                    // own account.
+                    p.account_id.clone(),
                 )
             })
             .collect();
         let mut closed = 0usize;
-        for (id, token, condition, shares, strategy, asset, direction, _current) in targets {
+        for (id, token, condition, shares, strategy, asset, direction, _current, account_id) in
+            targets
+        {
             // Already have a live sell for this token? skip.
             if self
                 .ome
@@ -5738,6 +6170,10 @@ impl Core {
                 asset,
                 direction,
                 round_slot: 0,
+                // E28 (§9.2): the closing sell spends from the position's own
+                // account — a cross-account flatten must never touch another
+                // book.
+                account_id,
             };
             if let Err(e) = self.place(order, 0, now_ms) {
                 self.emit_error(e);
@@ -5980,7 +6416,10 @@ impl Core {
                     );
                     return;
                 };
-                self.ledger.credit_redemption(payout);
+                // E28: settlement redemption credits the ACTIVE account's book
+                // (§9.3: settlement claims carry no account identity in 0.3 —
+                // the claim's cash lands where the process funder says).
+                self.accounts.active_ledger_mut().credit_redemption(payout);
                 tracing::info!(
                     claim = %result.id,
                     condition = %result.condition_id,
@@ -6383,11 +6822,24 @@ impl Core {
                     // The maker's own timeout, rebuilt from when it was
                     // armed: a re-armed clock waits the same interval again.
                     o.escalate_at_ms.unwrap_or(now_ms) - o.submitted_at_ms,
+                    // E28 (§9.2): the taker leg spends from the maker's account.
+                    o.account_id.clone(),
                 )
             })
             .collect();
-        for (id, side, remaining, token, condition, strategy, asset, direction, slot, timeout) in
-            due
+        for (
+            id,
+            side,
+            remaining,
+            token,
+            condition,
+            strategy,
+            asset,
+            direction,
+            slot,
+            timeout,
+            account_id,
+        ) in due
         {
             if remaining <= Decimal::ZERO {
                 continue;
@@ -6419,6 +6871,9 @@ impl Core {
                 asset,
                 direction,
                 round_slot: slot,
+                // E28 (§9.2): the escalated leg spends from the maker's own
+                // account.
+                account_id: account_id.clone(),
             };
             // The maker is about to be cancelled to make room for this leg, so
             // the risk gate gets the first word — the same gate `place` will
@@ -6514,6 +6969,9 @@ impl Core {
             strategy: String,
             asset: String,
             direction: String,
+            /// E28 (§9.2): the account the closing SELL spends from — the
+            /// position's own book, so an exit can never debit another account.
+            account_id: AccountId,
         }
 
         let mut jobs: Vec<ExitJob> = Vec::new();
@@ -6571,6 +7029,9 @@ impl Core {
                     strategy: pos.strategy.clone(),
                     asset: pos.asset.clone(),
                     direction: pos.direction.as_str().to_string(),
+                    // E28 (§9.2): the automated exit spends from the position's
+                    // own account.
+                    account_id: pos.account_id.clone(),
                 });
             }
         }
@@ -6618,6 +7079,9 @@ impl Core {
                 strategy: pos.strategy.clone(),
                 asset: pos.asset.clone(),
                 direction: pos.direction.as_str().to_string(),
+                // E28 (§9.2): the strategy-signal exit spends from the
+                // position's own account.
+                account_id: pos.account_id.clone(),
             });
         }
 
@@ -6665,6 +7129,9 @@ impl Core {
                     strategy: pos.strategy.clone(),
                     asset: pos.asset.clone(),
                     direction: pos.direction.as_str().to_string(),
+                    // E28 (§9.2): the residual re-close spends from the
+                    // position's own account.
+                    account_id: pos.account_id.clone(),
                 });
             }
         }
@@ -6715,6 +7182,9 @@ impl Core {
                 asset: job.asset,
                 direction: job.direction,
                 round_slot: 0,
+                // E28 (§9.2): the closing SELL spends from the position's own
+                // account (carried on the job from the position).
+                account_id: job.account_id,
             };
             // Record the intended exit reason so a full sell fill closes with it
             // (bounded and cleaned up by the close: issue #190).
@@ -7090,6 +7560,7 @@ mod books_mirror_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: slot,
+            account_id: crate::model::default_account_id(),
         };
         c.place(req, 0, now).unwrap();
         assert_eq!(c.positions().open_positions().len(), 1);
@@ -7186,6 +7657,7 @@ mod books_mirror_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: slot,
+            account_id: crate::model::default_account_id(),
         };
         let id = c.place(req, 0, now).unwrap().0;
         assert_eq!(
@@ -7257,6 +7729,7 @@ mod books_mirror_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: now / 1000 / 900,
+            account_id: crate::model::default_account_id(),
         };
         let id = c.place(req, 0, now).unwrap().0;
         // Ask 0.44 > limit 0.43: still resting after many feed ticks.
@@ -7316,6 +7789,7 @@ mod round_expiry_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: slot,
+            account_id: crate::model::default_account_id(),
         };
         // Ask 0.40 crosses the buy limit with enough depth: an honest FOK
         // fills at the walked price, opening the position under test.
@@ -7735,6 +8209,7 @@ mod tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -8140,6 +8615,7 @@ mod tests {
             ts_ms: 10,
             tx_hash: None,
             maker,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -8466,6 +8942,7 @@ mod tests {
             asset: asset.into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         };
         let lose_once = |c: &mut Core, asset: &str, token: &str| {
             // The entry is a FOK taker: it needs resting ask depth to fill.
@@ -9311,7 +9788,7 @@ mod strategy_dispatch_tests {
         assert_eq!(small.list_orders()[0].size, dec!(2));
         assert_eq!(
             small.engine.as_ref().unwrap().equity_usd(),
-            small.ledger.balance(),
+            small.ledger().balance(),
             "the engine must have been handed the ledger's own balance"
         );
 
@@ -10279,6 +10756,7 @@ mod fill_model_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -10617,6 +11095,7 @@ mod account_precision_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -10636,6 +11115,7 @@ mod account_precision_tests {
             // policy would produce. A test that needs the VENUE to overrule the
             // policy uses `fill_as` below.
             maker: None,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -11453,6 +11933,7 @@ mod trading_capability_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -11660,6 +12141,7 @@ mod trading_capability_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 }
@@ -11720,6 +12202,7 @@ mod settlement_service_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -12274,6 +12757,7 @@ mod exit_reason_table_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -12451,6 +12935,7 @@ mod exit_reason_table_tests {
                     expires_at_ms: 9_999,
                     was_maker: false,
                     target_exit_price: None,
+                    account_id: crate::model::default_account_id(),
                 },
                 1_000,
             );
@@ -12603,6 +13088,7 @@ mod audit_fix_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -12627,6 +13113,7 @@ mod audit_fix_tests {
             // Maker-mode orders with no venue report → the policy decides, and
             // these fixtures are exactly what the policy would produce.
             maker: None,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -12880,5 +13367,99 @@ mod audit_fix_tests {
         assert_eq!(c.ledger().balance(), SEED + dec!(-2));
 
         let _ = std::fs::remove_file(&log);
+    }
+
+    // ── E28 (G5): a cross-account close is refused, never re-routed ─────────
+
+    /// A two-account core built through the injection constructor — no test
+    /// touches the real `user_layer/configs/accounts.toml` the cwd decides.
+    /// Both books are seeded (§9.3: separate wallets, not aliases).
+    fn two_book_core() -> Core {
+        let book = crate::account::AccountLedgers::new(
+            vec![
+                crate::account::Account {
+                    id: crate::account::AccountId::from("default"),
+                    name: "default".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    updated_at_ms: 0,
+                },
+                crate::account::Account {
+                    id: crate::account::AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    updated_at_ms: 0,
+                },
+            ],
+            crate::account::AccountId::from("default"),
+        );
+        let cfg = CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: SEED,
+            auto_exits_enabled: false,
+            ..Default::default()
+        };
+        Core::with_account_book(cfg, book)
+    }
+
+    #[test]
+    fn a_cross_account_close_is_refused_not_rerouted() {
+        let mut c = two_book_core();
+        // The position belongs to `default` (the req helper names it).
+        open_maker_position(&mut c, dec!(0.40), dec!(10), 1);
+
+        // The WRONG account tries the close: refused, naming both sides.
+        let mut wrong = req(
+            Side::Sell,
+            FillPolicy::Taker,
+            dec!(0.90),
+            dec!(10),
+            "exit:tok:StopLoss",
+        );
+        wrong.account_id = crate::account::AccountId::from("paper");
+        let err = c.place(wrong, 0, 2).unwrap_err();
+        assert!(
+            err.message.contains("cross-account close refused"),
+            "the refusal must name the fault: {err}"
+        );
+        assert!(
+            err.message.contains("`default`") && err.message.contains("`paper`"),
+            "the refusal must name whose money is whose: {err}"
+        );
+        // Nothing settled: the position still open.
+        assert_eq!(c.positions().open_positions().len(), 1);
+
+        // The RIGHT account closes: a bid rests so the dry taker fills.
+        c.book_snapshot("tok", vec![(dec!(0.90), dec!(500))], vec![], 3);
+        let right = req(
+            Side::Sell,
+            FillPolicy::Taker,
+            dec!(0.90),
+            dec!(10),
+            "exit:tok:Manual2", // a different key: the refused one is in cooldown
+        );
+        c.place(right, 0, 4).unwrap();
+        assert!(
+            c.positions().open_positions().is_empty(),
+            "the position's own account may close it"
+        );
+        // The proceeds landed in the book that PAID for the shares; the
+        // other book never moved.
+        let paper = c
+            .accounts()
+            .ledger_of(&crate::account::AccountId::from("paper"))
+            .unwrap()
+            .balance();
+        assert_eq!(paper, SEED, "paper's book is untouched by default's close");
+        assert!(
+            c.ledger().balance() > SEED,
+            "default's book took the profit"
+        );
     }
 }

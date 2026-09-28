@@ -345,6 +345,7 @@ mod tests {
             escalate_at_ms: None,
             maker_timeout_ms: 0,
             role: OrderRole::Pending,
+            account_id: crate::model::default_account_id(),
         }
     }
 

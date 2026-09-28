@@ -99,6 +99,7 @@ fn intent(key: &str) -> OrderRequest {
         asset: "BTC".into(),
         direction: "up".into(),
         round_slot: 1,
+        account_id: blitzkrieg_core::model::default_account_id(),
     }
 }
 

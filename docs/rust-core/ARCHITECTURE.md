@@ -164,6 +164,62 @@ P0.6 **不改变交易语义**：`ome / ledger / risk / position / exit_policy /
 engine / scanner（回合时序）/ reconcile / shadow` 全部保持原实现与行为；Polymarket 的
 venue/feed/discovery/gamma 从内核**物理迁出**到扩展，行为逐笔等价（见 `MIGRATION_LOG.md §19`）。
 
+## 7.5 裁决流水线（E25 / #331，DEV_V0_3 §3）
+
+策略建议、内核裁决：策略是 0 信任组件，只提交建议；`arbitration/` 的
+`process_intent` 对每条建议跑四道关卡，产出唯一 `Decision`：
+
+| 关卡 | 复用的既有实现（不重写） |
+|:--|:--|
+| Gate 1 合法性 | `market_api::OrderIntent::validate()` + 本轮 token 检查 |
+| Gate 2 系统风控 | `RiskGate::check_with_equity` + 既有 `LossBreakers`（平仓 intent 豁免——既有语义） |
+| Gate 3 资金预扣 | `Ledger::reserve` 探针（reserve→release，复用既有拒绝逻辑，账本净零） |
+| Gate 4 生存绑定 | `exit_policy::effective_stop_pct` 等的**投影**（只记录，不加触发路径） |
+
+三条纪律，违反任何一条的 PR 拒绝合入：
+
+1. **不重复判定**——每道关卡只调用既有实现，绝不复制阈值；风控的真相只有
+   `RiskGate` 里那一份。
+2. **无短路**——被拒的建议同样逐条落审计（`data/audit/intents.jsonl`，每条
+   一行；审计写失败只 `warn!` 一次，绝不阻塞交易）。
+3. **审计是旁路**——`--no-intent-audit` 只关审计**写入**，关卡永远在跑；
+   有/无审计两种情形都必须通过既有经济基线（P1）。
+
+`Rejected` 的建议不进入 `place()`/OME；`Approved` 的建议交给**既有**提交路径。
+`INTENT_DECISION` 推送按 `(strategy, gate, reason)` 折叠到 ≤1 条/秒（折叠的是
+推送，不是审计）；面板的「裁决流」（WebUI `Decisions.vue` / TUI Decisions tab）
+逐字打印内核写的 `GateTrace.detail`，不自行编文案。
+
+## 7.6 多账户账本（E28，DEV_V0_3 §9）
+
+账户是**部署事实**，不是运行时对象：`user_layer/configs/accounts.toml` 装载失败
+→ 内核拒绝启动（fail-closed）；文件缺失 → 单一 `default` 账户（0.2 部署零改动）。
+运行时**从不隐式建账本**——未知账户显式拒绝（`unknown account`，反向验收 C）。
+
+| 件 | 语义 |
+|:--|:--|
+| `AccountLedgers`（§9.3） | 每账户独立 `Ledger` 实例 = 独立钱包，不是别名；`get_mut` 缺账户显式报错 |
+| 账户姿态（Gate 2） | `permits_order(id, is_close)`：只有 `active` 可开新仓；平仓豁免除 `read_only` 外全部姿态（冻结绝不困住持仓）；拒绝码 `ACCOUNT_LIMIT` |
+| 凭证（§9.4） | config 只存环境变量**名**；值只在内核进程环境；wire 只回 `credentialsLoaded: bool`，哨兵门禁锚词 `sentinel leaked` |
+| 会话级 active（§9.5） | `account.switch` 只写本 IPC 连接的私有 cell，进程级 active 不动；`orders.place` 未带 `accountId` 时注入本连接默认（缺省 = 默认，显式 id 永远获胜） |
+| `account.status` | **只能收紧**（tighten-only）：loosen 一律拒 wire 级 `INVALID_PARAMS` |
+
+三条纪律，违反任何一条的 PR 拒绝合入：
+
+1. **独立钱包，不共享现金**——A 账户的交易、亏损、回撤**完全不影响** B 账户的
+   `balance`/`available`/持仓/日 PnL；dry 模式种子按账本各自 `set_balance`
+   （`seed_all`），单账户路径 bit-identical 于 0.2 的单次 set_balance。
+2. **从不改道（no re-route）**——A 账户发起平仓 B 账户的持仓 → 显式拒绝
+   （`cross-account close refused`），绝不改道到持仓归属账户执行——改道就是
+   隐式账本事故换名（反向验收 A）。
+3. **account_id 贯穿**——订单 → 成交 → 持仓 → wire 每一行都带归属；0.2 无
+   `account_id` 的旧行读回为 `default`，重新写出的行带 `"default"`（读旧写新，
+   无迁移脚本）。
+
+UI 呈现：WebUI 顶栏 `AccountSwitcher.vue`（经 gateway `accounts` / `account <id>`
+命令动词透传 `account.list` / `account.switch`）、TUI 命令栏 `account <id>`；
+凭证在像素层同样只显 `credentialsLoaded` 布尔。
+
 ## 8. 目录
 
 ```

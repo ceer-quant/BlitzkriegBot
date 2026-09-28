@@ -11,6 +11,7 @@
 //!
 //! Node never sends a private key; the core loads credentials itself.
 
+use crate::account::AccountStatus;
 use crate::kline::{Kline, KlineInterval};
 use crate::model::*;
 use crate::ome::FillDelta;
@@ -219,6 +220,18 @@ pub mod method {
     pub const KLINE_HISTORY: &str = "kline.history";
     /// Tail of the intent-arbitration audit log (§12.3). Read-only.
     pub const INTENT_AUDIT_TAIL: &str = "intent.audit.tail";
+
+    // ── E28 (§12.1) — account management ────────────────────────────────────
+    /// Every configured account with its own book (§12.1 AccountView).
+    /// Read-only.
+    pub const ACCOUNT_LIST: &str = "account.list";
+    /// Move THIS connection's default account (§9.5: session-level — the
+    /// process-level active account and every other connection are
+    /// untouched).
+    pub const ACCOUNT_SWITCH: &str = "account.switch";
+    /// Tighten one account's lifecycle status (§12.1: a live call may never
+    /// GRANT a capability — unfreezing is config + restart).
+    pub const ACCOUNT_STATUS: &str = "account.status";
 }
 
 // ── Typed params / results ───────────────────────────────────────────────────
@@ -543,6 +556,11 @@ pub struct PositionView {
     pub direction: String,
     pub strategy: String,
     pub token_id: TokenId,
+    /// E28 (§9.2): the account this position settles into — a field read off
+    /// the position (which carried it from the entry order), never a guess.
+    /// The read side of "account_id 贯穿持仓": the panel filters on it after
+    /// `account.switch` (整页重取，不合并显示).
+    pub account_id: String,
     #[serde(with = "crate::decimal")]
     pub entry_price: Decimal,
     #[serde(with = "crate::decimal")]
@@ -669,6 +687,83 @@ pub struct IntentAuditTailResult {
     pub total: Option<usize>,
 }
 
+// ── E28 (§12.1) — account management wire types ─────────────────────────────
+
+/// `account.switch` params (§12.1).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSwitchParams {
+    pub account_id: String,
+}
+
+/// `account.status` params (§12.1). `status` takes the wire spellings
+/// (`active` / `read_only` / `frozen` / `suspended` — or the config file's
+/// map form for a suspension); `reason` is the FLAT carrier the spec shows
+/// for a suspension reason and overrides the placeholder a bare-string
+/// `suspended` would carry. The tighten-only rule is enforced server-side,
+/// not by the shape.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountStatusParams {
+    pub account_id: String,
+    pub status: AccountStatus,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// One account as `account.list` reports it (§12.1 AccountView). The money
+/// fields are the account's OWN book; `credentialsLoaded` is a boolean,
+/// never a value (§9.4); `dayRealizedUsd` sums the account's own closes of
+/// the current UTC day.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountView {
+    pub id: String,
+    pub name: String,
+    pub market_type: blitzkrieg_market_api::MarketType,
+    /// The wire tag (§12.1): `active` / `read_only` / `frozen` /
+    /// `suspended` — a plain string, so a suspension does not turn the
+    /// field into a map mid-list.
+    pub status: String,
+    /// The operator-facing reason, present only for `suspended`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+    #[serde(with = "crate::decimal")]
+    pub balance: Decimal,
+    #[serde(with = "crate::decimal")]
+    pub available: Decimal,
+    #[serde(with = "crate::decimal")]
+    pub reserved: Decimal,
+    /// Presence fact only (§9.4): the kernel probed its own environment; the
+    /// values never cross the wire in either direction.
+    pub credentials_loaded: bool,
+    pub open_positions: usize,
+    #[serde(with = "crate::decimal")]
+    pub day_realized_usd: Decimal,
+    pub updated_at_ms: i64,
+}
+
+/// `account.list` result (§12.1). `active` is the SESSION's default account
+/// when this connection switched, else the process-level one (§9.5).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountListResult {
+    pub version: String,
+    pub active: String,
+    pub accounts: Vec<AccountView>,
+}
+
+/// `account.status` result (§12.1: `{ id, status }`, plus the suspension
+/// reason when the tightened posture carries one).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountStatusResult {
+    pub id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+}
+
 // ── Server → Node events ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -700,6 +795,10 @@ pub enum Event {
         strategy: String,
         token_id: String,
         condition_id: String,
+        /// E28 (§9.2): the account the trade settled in — per-account history
+        /// is a field read, never a strategy-name guess.
+        #[serde(rename = "accountId")]
+        account_id: AccountId,
         #[serde(with = "crate::decimal", rename = "netPnlUsd")]
         net_pnl_usd: Decimal,
         #[serde(with = "crate::decimal", rename = "netPnlPct")]
@@ -753,6 +852,27 @@ pub enum Event {
         #[serde(rename = "atMs")]
         at_ms: i64,
     },
+    /// E25 (#331, §12.3): a suggestion was adjudicated by the four-gate
+    /// pipeline. THROTTLED — pushes fold per `(strategy, gate, status)` to at
+    /// most one per second; `count` is how many decisions one push summarizes.
+    /// The audit (`data/audit/intents.jsonl`) is NEVER folded.
+    IntentDecision {
+        #[serde(rename = "accountId")]
+        account_id: String,
+        strategy: String,
+        #[serde(rename = "intentId")]
+        intent_id: String,
+        /// `APPROVED` / `MODIFIED` / `REJECTED` — the same vocabulary the
+        /// `intent.audit.tail` filter uses.
+        status: String,
+        gate: String,
+        /// The kernel's own justification, verbatim from the `GateTrace`
+        /// (the panel prints it as-is, §13.4 — UI never re-words it).
+        detail: String,
+        #[serde(rename = "tsMs")]
+        ts_ms: i64,
+        count: u64,
+    },
 }
 
 /// Wire view of FillDelta (field names match Node conventions).
@@ -762,6 +882,11 @@ pub struct FillDeltaView {
     pub order_id: OrderId,
     #[serde(rename = "tokenId")]
     pub token_id: TokenId,
+    /// E28 (§9.2): the account the fill's cash moved in — copied from the
+    /// tracked order, so a panel can group fills per account without a
+    /// lookup.
+    #[serde(rename = "accountId")]
+    pub account_id: AccountId,
     pub side: Side,
     #[serde(with = "crate::decimal")]
     pub delta: Decimal,
@@ -781,6 +906,7 @@ impl From<FillDelta> for FillDeltaView {
         Self {
             order_id: d.order_id,
             token_id: d.token_id,
+            account_id: d.account_id,
             side: d.side,
             delta: d.delta,
             price: d.price,

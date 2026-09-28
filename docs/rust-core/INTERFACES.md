@@ -55,6 +55,13 @@
 | `positions.exit` | `{ positionId? }` | `{ "closed": <n> }` |
 | `ledger.balance` | `{}` | `{ balance, reserved, available }` |
 
+### 2.2.1 账户（E28 · v1.1）
+| method | params | result |
+|:---|:---|:---|
+| `account.list` | `{}` | `{ "version": "1.1", "active", "accounts": [{ id, name, marketType, status, statusReason?, balance, available, reserved, credentialsLoaded, openPositions, dayRealizedUsd, updatedAtMs }] }` —— `active` 是**本连接**的默认账户（§9.5：无会话切换时 = 进程级）；`credentialsLoaded` 只是布尔存在事实（§9.4：凭证值永不过线） |
+| `account.switch` | `{ accountId }` | `{ "active": <id> }` —— **会话级**：只改本连接的默认账户，其他连接与进程级 active 不动（§9.5）；未知 id 拒 `INVALID_PARAMS` |
+| `account.status` | `{ accountId, status, reason? }` | `{ id, status, statusReason? }` —— **只能收紧**（tighten-only）：loosen（如 `frozen→active`）一律拒 `INVALID_PARAMS`；`status` 走 wire 词表 `active`/`read_only`/`frozen`/`suspended`，裸 `suspended` 由 `reason` 兜底为 `statusReason` |
+
 ### 2.3 行情 / 引擎
 | method | params | result |
 |:---|:---|:---|
@@ -329,3 +336,4 @@ core.set_strategy_enabled("my_strategy", false);
 | 1.1 | 版本单事实来源（docs/VERSIONING.md E-V1..V3，2026-09-25）：新增只读方法 `system.version`（版本 + 构建来源 + 更新三态；`updateAvailable: null=未检查 ≠ false=已是最新`；不取 Core 锁，数据锁未就绪也可回答），字段契约见 `docs/VERSIONING.md` §5.3。启动器同步补 `--version`/`-V`/`-v` 短路（不再落入 `run_unified` 启动路径，#228 同形风险）与 `blitzkrieg version [--json] [--core] [--socket]` 子命令（`--core` 即问本方法；旧内核返回 unknown method，UI 不得编造空版本）。workspace 全成员版本继承根 `[workspace.package].version`，由 `scripts/version-guard.mjs` 守卫。协议加项，向后兼容，版本号不变 |
 | 1.1 | v0.3 Wave 0 接口冻结（#329）：§2.9 落进本文件——两个只读信封先落地（`kline.history` / `intent.audit.tail`，见 §2.9.1）；共享类型（`Kline`/`KlineInterval`/`AccountId`/`AccountStatus`/`CredentialKeys`/`MarketStructure`/`MarketCapabilities`/`MarketMode`/`StrategyMode`）落在 `market_api` / `strategy_api`，内核 re-export；C ABI 增第六个可选符号 `bk_strategy_declare_modes`（未导出=不声明；vtable 与 `BK_ABI_VERSION=2` 冻结）；`SafeStrategy` 增 `declare_modes()` / `on_kline()` 两个带默认实现的签名。§2.9.2 其余契约（`account.*`、`kline.subscribe`、`risk.limits`、既有方法字段扩展）随各 Epic 落地。协议加项，向后兼容，版本号不变 |
 | 1.1 | v0.3 E24 — BlitzkriegStrategy API 1.0 封口（#330）：① `strategy.load` 成功回执**追加** ` ; API 1.0 (line protocol 2)`（保留既有文本不替换）；② 可选符号 `bk_strategy_declare_modes` 的载荷由 §7.4 校验器验证，**非法 → 拒载**，错误含 `index` 与 `got`（`{"modes":[]}` = `Empty` 非法，不是「未声明」；未导出符号 / NULL = 未声明）；③ 三个保留键 `suggested_stop_loss` / `suggested_take_profit` / `suggested_max_hold_sec` **封口**（从未存在于 0.2 代码）：intent 解析遇键 → `warn!(target:"strategy")` 记录策略名/键名/token 并**丢弃该键**、不拒单；④ 门禁 `strategy:no-stop-loss-check`（策略源码零止损逻辑 + intent 零保留键）与 `strategy:declaration-check`（合法 3 例 / 非法 5 例，真实内核）接入 `core-gates`；⑤ 官方 Rust 示例 `user_layer/examples/momentum_alpha/`（嵌套 workspace，声明 `prediction/binary_outcome_wheel` + websocket_feed/level2_snapshot，零止损逻辑）。协议加项，向后兼容，`BK_ABI_VERSION=2` 不变 |
+| 1.1 | v0.3 E28 — 多市场多账户一等公民（§2.2.1）：新增 `account.list` / `account.switch` / `account.status` 三方法（§9.3-9.5：`AccountLedgers` 每账户独立账本；`account.switch` 只写**会话级** active，进程级不动；`account.status` **只能收紧**，loosen 拒 `INVALID_PARAMS`）。`accounts.toml` 缺省 → 单一 `default`（0.2 部署零改动）；`orders.place` 未带 `accountId` 时注入本连接默认（显式 id 永远获胜）；`positions.list` 每行增 `accountId`；Gate 2 按账户姿态放行（`permits_order`），跨账户平仓显式拒绝（从不改道）。协议加项，向后兼容，版本号不变 |
