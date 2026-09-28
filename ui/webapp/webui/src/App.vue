@@ -22,6 +22,7 @@ import PluginsPage from './pages/Plugins.vue'
 import SettingsPage from './pages/SettingsPage.vue'
 import LoginView from './components/LoginView.vue'
 import OnboardingTour from './components/OnboardingTour.vue'
+import AccountSwitcher from './components/AccountSwitcher.vue'
 import SegmentedControl from './components/ui/segmented/SegmentedControl.vue'
 import Button from './components/ui/button/Button.vue'
 import AlertBanner from './components/ui/alert/AlertBanner.vue'
@@ -151,6 +152,9 @@ onMounted(() => {
 
       <!-- telemetry -->
       <div class="ml-auto flex shrink-0 items-center gap-2">
+        <!-- E28: the account book lives beside the connection telemetry — it is
+             the other half of "what am I actually trading on". -->
+        <AccountSwitcher />
         <span class="hidden items-center gap-2 rounded-full border border-line bg-panel-2 px-2.5 py-1 lg:flex">
           <span
             class="pulse-dot size-1.5 rounded-full"
