@@ -220,6 +220,38 @@ UI 呈现：WebUI 顶栏 `AccountSwitcher.vue`（经 gateway `accounts` / `accou
 命令动词透传 `account.list` / `account.switch`）、TUI 命令栏 `account <id>`；
 凭证在像素层同样只显 `credentialsLoaded` 布尔。
 
+## 7.7 系统性风控限额（E26，DEV_V0_3 §4）
+
+两条 §4.1 原则，违反任何一条的 PR 拒绝合入：
+
+1. **不可绕过**——限额判定长在仲裁管线（Gate 2 系统判定、Gate 4 物理绑定）与
+   平仓记账点，策略/插件/Lua 没有任何风控 API 可调：能下建议的地方就被同一个
+   管线覆盖，不存在「另一个入口」。
+2. **出厂即静默**——九个新限额出厂 0 = off；未武装时管线零额外判定、零额外
+   trace，审计与未加风控的管线**逐位一致**（P1 字节门禁）。一个未配置的内核
+   报告它没有执行任何新约束，而不是假装有。
+
+| 件 | 语义 |
+|:--|:--|
+| `risk/limits.rs` `Bound` | 每个限额 = 值 + 来源（default/toml/env/flag）——**来源是值的一半**：没有 "toml" 的 "35" 不是操作者能据以行动的答案（§4.4） |
+| 限额矩阵（§4.2） | 账户级 5（单笔最大亏损 / 当日回撤 / 单仓上限 / 连亏次数 / 冷静期分钟）+ 全局级 4（总仓位 / 总敞口 / 同资产敞口 / 急停亏损）；出厂全 0 |
+| 当日回撤 | 与既有 #173 daily-loss **同一预算**：`[risk] max_daily_drawdown_usd` 是既有 pick 链的 TOML 槽位别名，不发明第二个每日计数器 |
+| 连亏熔断 | 走既有 `LossBreakers`，账户粒度 = 保留键 `__account__:{id}`（`record_with` 显式阈值对）；触发拒新仓（`LOSS_BREAKER`，detail 命名账户）、冷静期后自恢复；**平仓永不拦**——困住持仓的帽是 #174 换一扇门 |
+| Gate 2 系统判定 | 顺序：急停帽（当日实亏触顶拒新仓）→ 全局三帽（数量 / 敞口 / 同资产）→ 账户缩量两帽（取更紧者、detail 命名约束）；一股都装不下才拒；缩量以 `MODIFIED`（SizeReduced）下行——floor 整股，`approved × 单股亏损 ≤ cap` 构造成立，帽只封顶、从不上取整 |
+| Gate 4 物理绑定（§4.3） | 每笔入场绑 stop_price（既有 `effective_stop_pct` 时间感知）+ force_exit_sec + 阶梯快照；无显式梯子时快照是既有退出策略的**投影**（单步全平）——行为不变，只把隐含的退出纪律记录到审计 |
+| `[[risk.ladder]]` | 显式阶梯 opt-in 接管投影（逐行校验、倒梯警告、不完整行不接管） |
+| `risk.limits`（§4.4） | 只读读数，boot 快照、**不取 Core 锁**（`system.version` 同款免锁）；契约 v"1.1"：`account{id, limits}` + `global{limits}` + `exit{stopLossPct, takeProfitPct, forceExitSec}`；Bound 值过线一律字符串 |
+| 热改边界 | 九个新限额**不进** `risk.setLimits` 白名单——改配置需重启生效；`risk.setLimits` 既有热键集不变 |
+
+UI 呈现：WebUI 设置页「生效风控」卡片（经 gateway `/api/risk-limits` 薄代理
+`risk.limits`，每行 值 + 来源徽章；出厂显示「出厂（全部关闭）」）；出厂九行全显
+「关闭」而非伪装成保护措施的 0。
+
+门禁：`scripts/risk-systemic-check.mjs`——出厂静默旁证（boot log + 审计无
+systemic 字样）+ 武装读数（toml 来源）+ 缩量真实（下单尺寸 = approved）+ 物理
+绑定对齐内核自身投影 trace + 连亏→熔断→恢复全程 + 1000 组随机缩量不变量；
+`--self-test` 判定面自证、`--teeth` 三种坏实现必须变红。
+
 ## 8. 目录
 
 ```

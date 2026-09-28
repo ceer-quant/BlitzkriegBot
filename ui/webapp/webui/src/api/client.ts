@@ -203,6 +203,53 @@ export interface IntentAuditTailDoc {
   error?: string
 }
 
+// ── E26 systemic risk readout (mirror ipc/schema.rs's RiskLimitsResult) ──────
+
+/** WHERE a limit's effective value came from (§4.4). */
+export type LimitSource = 'default' | 'toml' | 'env' | 'flag'
+
+/**
+ * One limit: value AND provenance, together (§4.4) — "35" without "toml" is
+ * not an answer an operator can act on. Decimals cross as STRINGS.
+ */
+export interface RiskBound {
+  value: string
+  source: LimitSource | string
+}
+
+/** The per-account matrix (§4.2, five). */
+export interface AccountRiskLimitsView {
+  maxSingleLossUsd: RiskBound
+  maxDailyDrawdownUsd: RiskBound
+  maxPositionSize: RiskBound
+  maxConsecutiveLosses: RiskBound
+  cooldownMinutes: RiskBound
+}
+
+/** The process-wide matrix (§4.2, four). */
+export interface GlobalRiskLimitsView {
+  maxTotalPosition: RiskBound
+  maxTotalExposureUsd: RiskBound
+  maxCorrelationUsd: RiskBound
+  globalKillSwitchLossUsd: RiskBound
+}
+
+/** The exit triple Gate 4 binds per entry (plain numbers, not Bounds). */
+export interface RiskExitView {
+  stopLossPct: number | string
+  takeProfitPct: number | string
+  forceExitSec: number
+}
+
+/** The whole `risk.limits` readout. */
+export interface RiskLimitsDoc {
+  version: string
+  account: { id: string; limits: AccountRiskLimitsView }
+  global: { limits: GlobalRiskLimitsView }
+  exit: RiskExitView
+  error?: string
+}
+
 export const api = {
   snapshot: () => request<Snapshot>('/snapshot'),
   plugins: () => request<PluginsDoc>('/plugins'),
@@ -218,6 +265,12 @@ export const api = {
     const qs = q.toString()
     return request<IntentAuditTailDoc>(`/intent-audit${qs ? `?${qs}` : ''}`)
   },
+  /**
+   * E26 (§4.4): the effective systemic limits and where each came from — a
+   * thin proxy of the core's `risk.limits` (read-only; the core answers from
+   * a boot-time snapshot without the Core lock).
+   */
+  riskLimits: () => request<RiskLimitsDoc>('/risk-limits'),
   /** Dispatch a gateway command verb (`status`/`start`/`stop`/…). */
   command: (cmd: string) =>
     request<CommandDoc>('/command', { method: 'POST', body: cmd }),

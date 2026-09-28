@@ -170,6 +170,10 @@ struct Args {
     /// log of a run that set no flags (that silence was half of P0-2).
     daily_loss_usd: Decimal,
     daily_loss_pct: Decimal,
+    /// E26 (§4.2): which layer armed the daily-loss budget — the drawdown
+    /// bound on `risk.limits` must name the TRUE source (a `--max-daily-loss`
+    /// run reads `flag` there, not `default`), and only the resolver knows.
+    daily_loss_source: blitzkrieg_core::config::Source,
     /// The startup echo lines for the daily-loss budget, printed unconditionally
     /// (kept out of `config_report`, which lists only settings moved away from
     /// their compiled default).
@@ -1348,7 +1352,9 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let daily_loss_usd = pick(
         max_daily_loss,
         env.num::<Decimal>("BK_MAX_DAILY_LOSS"),
-        None,
+        // E26 (§4.2): the [risk] drawdown key IS this budget's TOML face —
+        // one budget, resolved through the one chain, never a second counter.
+        file.risk.max_daily_drawdown_usd,
         daily_loss_defaults.max_daily_loss_usd,
     );
     let daily_loss_pct = pick(
@@ -1598,6 +1604,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         max_positions,
         daily_loss_usd: daily_loss_usd.value,
         daily_loss_pct: daily_loss_pct.value,
+        daily_loss_source: daily_loss_usd.source,
         daily_loss_echo,
         engine,
         min_round_age,
@@ -1992,6 +1999,35 @@ async fn main() -> anyhow::Result<()> {
     for line in &args.orderbook_stale_echo {
         eprintln!("blitzkrieg-core: {line}");
     }
+    // E26 (§4): the systemic risk limits in force, resolved from the config
+    // file's [risk] section — this Epic's only wired input — and echoed
+    // unconditionally like every other budget above: the factory posture
+    // (all nine off, §4.1) must be visible in the boot log, not greppable.
+    // The set is then handed to the core through `RiskConfig`, the one
+    // hand-off `RiskGate::new` already makes.
+    let systemic = blitzkrieg_core::risk::limits::SystemicRiskLimits::from_file(&file.risk);
+    // E26 (§4.4): the drawdown bound on the readout names the TRUE layer that
+    // armed the budget. The resolver already picked CLI > env > [risk] > the
+    // compiled default for the daily-loss breaker — the matrix must agree
+    // with what it prints, not silently claim `default` (or `toml`) for a
+    // number a flag overrode.
+    let systemic = {
+        let mut s = systemic;
+        s.account.max_daily_drawdown_usd = if args.daily_loss_usd > Decimal::ZERO {
+            blitzkrieg_core::risk::limits::Bound::new(
+                args.daily_loss_usd,
+                args.daily_loss_source.into(),
+            )
+        } else {
+            blitzkrieg_core::risk::limits::Bound::off()
+        };
+        s
+    };
+    let explicit_ladder: Vec<blitzkrieg_core::arbitration::LadderStep> =
+        file.risk.ladder.iter().map(|row| row.to_step()).collect();
+    for line in systemic.report_lines() {
+        eprintln!("blitzkrieg-core: {line}");
+    }
     // #269: same reason again — "is the evolution evaluator running?" is the
     // question an incident responder asks first, and it used to be answerable
     // only from the IPC status, never from the boot log.
@@ -2154,6 +2190,11 @@ async fn main() -> anyhow::Result<()> {
             // #202: the same bound as a share of the account (0 = off).
             max_order_notional_pct: args.max_order_notional_pct,
             max_open_notional_usd: args.max_open_notional,
+            // E26 (§4): the systemic limits resolved from the config file's
+            // [risk] section (factory = all off, §4.1), plus an explicit
+            // [[risk.ladder]] when the operator opted in (§4.3).
+            systemic,
+            explicit_ladder,
             ..Default::default()
         },
         dry_seed_balance: args.seed_balance,

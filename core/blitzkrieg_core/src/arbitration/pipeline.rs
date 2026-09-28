@@ -16,10 +16,14 @@
 //!    "closing intents always pass") and Gate 4 (a close needs no survival
 //!    binding). Not new behavior: the existing rule, written into the flow.
 
-use super::{Decision, GateId, GateOutcome, GateTrace, LadderStep, PhysicsBinding, RejectReason};
+use super::{Decision, GateId, GateOutcome, GateTrace, Modification, PhysicsBinding, RejectReason};
 use crate::exit_policy::{ExitConfig, effective_stop_pct};
 use crate::ledger::Ledger;
 use crate::model::{OrderRequest, Side};
+use crate::risk::limits::{
+    EntryJudgment, SystemicFacts, SystemicReject, account_breaker_key, judge_entry,
+};
+use crate::risk::physics::apply_physics;
 use crate::risk::{LossBreakers, RiskGate, is_close_intent};
 use blitzkrieg_market_api::{MarketType, OrderIntent, OrderKind, TimeInForce};
 use rust_decimal::Decimal;
@@ -84,6 +88,13 @@ pub struct IntentCtx<'a> {
     /// carrying this detail, so the audit trail shows the account gate with
     /// the same vocabulary the submission path uses. `None` = may place.
     pub account_entry_block: Option<String>,
+    /// E26 (§4.2): the aggregates the systemic limits judge, read from the
+    /// books by the caller. Carried rather than computed here so this module
+    /// stays a pure shape (rule 1) and never needs a second path to the
+    /// position table. Default (all zero) = the factory facts: a caller that
+    /// does not supply them cannot accidentally arm a cap — arming needs the
+    /// operator's explicit `[risk]` values on `RiskGate`'s config.
+    pub systemic_facts: SystemicFacts,
 }
 
 /// The pipeline's full product: the decision AND the traces the audit needs
@@ -155,6 +166,11 @@ pub fn process_intent(intent: &StrategyIntent, ctx: &mut IntentCtx<'_>) -> Outco
     });
 
     // ── Gate 2: system risk (existing RiskGate + the strategy's own breaker) ─
+    // E26 (§4.2): the systemic block's SHRINK, if any — carried to Gate 3
+    // (the probe asks the effective question) and the final decision (a
+    // reduced entry is a MODIFIED one). A close keeps its size; closing is
+    // never shrunk.
+    let mut shrink: Option<(Decimal, &'static str)> = None;
     if intent.is_close() {
         gates.push(GateTrace {
             gate: GateId::Risk,
@@ -227,11 +243,97 @@ pub fn process_intent(intent: &StrategyIntent, ctx: &mut IntentCtx<'_>) -> Outco
                 started,
             );
         }
+        // E26 (§4.2): the ACCOUNT-level consecutive-loss streak, one breaker
+        // per account under the reserved `__account__:` key — the SAME
+        // breaker map, the SAME vocabulary, so an account halt shows in the
+        // audit as a LossBreaker rejection attributed to the account key.
+        let account_key = account_breaker_key(intent.request.account_id.as_str());
+        if ctx.breaker.is_halted(&account_key, ctx.now_ms) {
+            let detail = format!(
+                "loss breaker active until {} for account {}",
+                ctx.breaker.halted_until_ms(&account_key),
+                intent.request.account_id.as_str()
+            );
+            gates.push(GateTrace {
+                gate: GateId::Risk,
+                outcome: GateOutcome::Reject,
+                detail: detail.clone(),
+            });
+            return finish(
+                Decision::Rejected {
+                    reason: RejectReason::LossBreaker,
+                    gate: GateId::Risk,
+                    detail,
+                },
+                gates,
+                started,
+            );
+        }
         gates.push(GateTrace {
             gate: GateId::Risk,
             outcome: GateOutcome::Pass,
             detail: "RiskGate::check_with_equity ok, breaker clear".into(),
         });
+        // E26 (§4.2): the systemic block — the kill-switch cap, the three
+        // global caps, and the account sizing bounds — judged ONLY when the
+        // operator armed something. With every bound off (the factory
+        // posture, §4.1) this block is INVISIBLE: no judgment, no trace, and
+        // the shipped pipeline's output stays byte-identical (the audit's
+        // parity is a byte gate). When armed, a bound that bites either
+        // refuses here or shrinks the entry — the reduced size rides through
+        // Gate 3's probe and the decision comes back MODIFIED.
+        let limits = ctx.risk.systemic_snapshot();
+        if limits.any_armed() {
+            let bound_stop_pct =
+                effective_stop_pct(ctx.exit_cfg.stop_loss_pct, ctx.time_left_sec, ctx.exit_cfg);
+            match judge_entry(
+                limits,
+                &ctx.systemic_facts,
+                intent.request.price,
+                intent.request.size,
+                bound_stop_pct,
+            ) {
+                EntryJudgment::Pass => {
+                    gates.push(GateTrace {
+                        gate: GateId::Risk,
+                        outcome: GateOutcome::Pass,
+                        detail: "systemic limits armed — entry within every bound".into(),
+                    });
+                }
+                EntryJudgment::Reduce { approved, limit } => {
+                    gates.push(GateTrace {
+                        gate: GateId::Risk,
+                        outcome: GateOutcome::Modify,
+                        detail: format!(
+                            "systemic: {limit} shrinks {} → {approved} shares",
+                            intent.request.size
+                        ),
+                    });
+                    shrink = Some((approved, limit));
+                }
+                EntryJudgment::Reject { reject, detail } => {
+                    let reason = match reject {
+                        SystemicReject::KillSwitch => RejectReason::KillSwitch,
+                        SystemicReject::GlobalLimit => RejectReason::GlobalLimit,
+                        SystemicReject::AccountLimit => RejectReason::AccountLimit,
+                    };
+                    gates.push(GateTrace {
+                        gate: GateId::Risk,
+                        outcome: GateOutcome::Reject,
+                        detail: detail.clone(),
+                    });
+                    return finish(
+                        Decision::Rejected {
+                            reason,
+                            gate: GateId::Risk,
+                            detail,
+                        },
+                        gates,
+                        started,
+                    );
+                }
+            }
+        }
     }
 
     // ── Gate 3: reservation probe (the existing Ledger::reserve refusal) ────
@@ -242,7 +344,9 @@ pub fn process_intent(intent: &StrategyIntent, ctx: &mut IntentCtx<'_>) -> Outco
         // a probe id asks the EXISTING refusal logic the exact question the
         // submission path would ask ("does price*size fit what is available
         // right now?") and then releases, so the ledger is net-unchanged.
-        let notional = intent.request.price * intent.request.size;
+        // E26: with a systemic shrink in force, the question is asked about
+        // the SHRUNKEN entry — the only size that will actually be placed.
+        let notional = intent.request.price * shrink.map_or(intent.request.size, |(s, _)| s);
         const PROBE: &str = "__arbitration_probe__";
         if let Err(e) = ctx.ledger.reserve(PROBE, notional) {
             gates.push(GateTrace {
@@ -287,42 +391,75 @@ pub fn process_intent(intent: &StrategyIntent, ctx: &mut IntentCtx<'_>) -> Outco
             ladder: Vec::new(),
         }
     } else {
+        // E26 (§4.3): the binding comes from `apply_physics` — the ONE fact
+        // point, the same one the systemic block's cap arithmetic consults.
+        // An explicit `[[risk.ladder]]` takes over; the projection (no ladder
+        // configured) is byte-equal to the shipped formula: stop =
+        // `effective_stop_pct`, one full-close step at take-profit. The
+        // `stop_pct` re-read below is the trace's own wording — the same pure
+        // function of the same inputs, not a second judgment.
         let stop_pct =
             effective_stop_pct(ctx.exit_cfg.stop_loss_pct, ctx.time_left_sec, ctx.exit_cfg);
-        let stop_price = intent.request.price * (Decimal::ONE - stop_pct / Decimal::from(100));
-        // §4.3 projection: with no ladder configured, ONE step closing the
-        // whole position at the configured take-profit — the same
-        // "close it all at once" semantics the shipped kernel already has.
-        let ladder = vec![LadderStep {
-            at_pct: ctx.exit_cfg.take_profit_pct,
-            close_ratio: Decimal::ONE,
-            move_stop_to: None,
-        }];
+        let physics = apply_physics(
+            intent.request.price,
+            ctx.time_left_sec,
+            ctx.exit_cfg,
+            &ctx.risk.config().explicit_ladder,
+        );
+        let stop_price = physics.stop_price;
+        let detail = match physics.ladder.first() {
+            // The shipped projection, word for word.
+            Some(step) if physics.ladder.len() == 1 && step.close_ratio == Decimal::ONE => {
+                format!(
+                    "projection: stop {stop_pct}% → {stop_price}, force-exit {}s, ladder[0] close 1.0 at {}%",
+                    ctx.exit_cfg.force_exit_sec, step.at_pct
+                )
+            }
+            // An operator-authored ladder says so in the trace.
+            Some(_) => format!(
+                "explicit ladder: stop {stop_pct}% → {stop_price}, force-exit {}s, {} steps",
+                ctx.exit_cfg.force_exit_sec,
+                physics.ladder.len()
+            ),
+            None => format!(
+                "projection: stop {stop_pct}% → {stop_price}, force-exit {}s, empty ladder",
+                ctx.exit_cfg.force_exit_sec
+            ),
+        };
         gates.push(GateTrace {
             gate: GateId::Physics,
             outcome: GateOutcome::Pass,
-            detail: format!(
-                "projection: stop {stop_pct}% → {stop_price}, force-exit {}s, ladder[0] close 1.0 at {}%",
-                ctx.exit_cfg.force_exit_sec, ctx.exit_cfg.take_profit_pct
-            ),
+            detail,
         });
-        PhysicsBinding {
-            stop_price,
-            force_exit_sec: ctx.exit_cfg.force_exit_sec,
-            ladder,
-        }
+        physics
     };
 
-    finish(
+    // E26 (§4.2): a systemic shrink turns the verdict into MODIFIED — the
+    // audit names the bound that bit, and the caller places the reduced size.
+    // The request object itself is never rewritten: the suggestion's
+    // provenance stays exactly what the engine emitted.
+    let decision = if let Some((approved, limit)) = shrink {
+        Decision::Modified {
+            request_id: intent.request.internal_key.clone(),
+            modification: Modification::SizeReduced {
+                suggested: intent.request.size,
+                approved,
+                limit: limit.to_string(),
+            },
+            shares: approved,
+            price: intent.request.price,
+            physics,
+        }
+    } else {
         Decision::Approved {
             request_id: intent.request.internal_key.clone(),
             shares: intent.request.size,
             price: intent.request.price,
             physics,
-        },
-        gates,
-        started,
-    )
+        }
+    };
+
+    finish(decision, gates, started)
 }
 
 fn finish(decision: Decision, gates: Vec<GateTrace>, started: Instant) -> Outcome {
@@ -337,6 +474,7 @@ fn finish(decision: Decision, gates: Vec<GateTrace>, started: Instant) -> Outcom
 mod tests {
     use super::*;
     use crate::model::{FillPolicy, OrderRequest};
+    use crate::risk::limits::{Bound, LimitSource};
     use crate::service::CoreConfig;
     use rust_decimal_macros::dec;
 
@@ -374,6 +512,7 @@ mod tests {
             now_ms: 1_000,
             equity: dec!(1000),
             account_entry_block: None,
+            systemic_facts: SystemicFacts::default(),
         }
     }
 
@@ -647,6 +786,233 @@ mod tests {
             matches!(out.decision, Decision::Approved { .. }),
             "a frozen account must never trap a close: {:?}",
             out.decision
+        );
+    }
+
+    // ── E26 (§4): the systemic block ─────────────────────────────────────────
+
+    /// §4.1: the factory posture must leave the shipped pipeline's verdict
+    /// AND trace list untouched — four gates, no systemic trace, the shipped
+    /// Physics wording. The armed-path tests below are the only ones that may
+    /// see a fifth trace.
+    #[test]
+    fn factory_posture_produces_the_shipped_trace_list() {
+        let (mut ledger, risk, breaker, exit_cfg, tokens) = setup();
+        let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
+        let out = process_intent(
+            &StrategyIntent::from_request(request(dec!(0.40), dec!(10))),
+            &mut c,
+        );
+        assert!(matches!(out.decision, Decision::Approved { .. }));
+        assert_eq!(out.gates.len(), 4, "no systemic trace at the factory");
+        assert!(out.gates.iter().all(|g| g.outcome == GateOutcome::Pass));
+        assert!(
+            out.gates[3].detail.starts_with("projection: stop "),
+            "{}",
+            out.gates[3].detail
+        );
+        assert!(
+            out.gates[3].detail.contains("ladder[0] close 1.0"),
+            "{}",
+            out.gates[3].detail
+        );
+    }
+
+    /// §4.2: an armed size cap SHRINKS an oversized entry — the decision is
+    /// MODIFIED with the bound named, and Gate 3's probe asks the SHRUNKEN
+    /// entry's question (the only size that will actually be placed).
+    #[test]
+    fn an_armed_size_cap_shrinks_the_entry_to_a_modified_decision() {
+        let (mut ledger, mut risk, breaker, exit_cfg, tokens) = setup();
+        risk.config_mut().systemic.account.max_position_size =
+            Bound::new(dec!(7), LimitSource::Toml);
+        let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
+        let out = process_intent(
+            &StrategyIntent::from_request(request(dec!(0.40), dec!(100))),
+            &mut c,
+        );
+        match &out.decision {
+            Decision::Modified {
+                modification:
+                    Modification::SizeReduced {
+                        suggested,
+                        approved,
+                        limit,
+                    },
+                shares,
+                ..
+            } => {
+                assert_eq!(*suggested, dec!(100));
+                assert_eq!(*approved, dec!(7));
+                assert_eq!(*shares, dec!(7));
+                assert_eq!(limit, "max_position_size");
+            }
+            other => panic!("expected MODIFIED, got {other:?}"),
+        }
+        let modify = out
+            .gates
+            .iter()
+            .find(|g| g.outcome == GateOutcome::Modify)
+            .expect("a MODIFY trace");
+        assert!(
+            modify.detail.contains("max_position_size"),
+            "{}",
+            modify.detail
+        );
+        // Gate 3 probed 7 × 0.40, not 100 × 0.40 — the probe rides AFTER the
+        // systemic trace, so it is found by gate id, not by index.
+        let probe = out
+            .gates
+            .iter()
+            .find(|g| g.gate == GateId::Reservation)
+            .expect("a reservation trace");
+        assert!(probe.detail.contains("2.80"), "{}", probe.detail);
+    }
+
+    /// §4.2: an armed systemic block never touches a close — no shrink, no
+    /// trace, the shipped four-gate shape.
+    #[test]
+    fn an_armed_systemic_block_never_shrinks_a_close() {
+        let (mut ledger, mut risk, breaker, exit_cfg, tokens) = setup();
+        risk.config_mut().systemic.account.max_position_size =
+            Bound::new(dec!(7), LimitSource::Toml);
+        let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
+        let mut close = request(dec!(0.60), dec!(100));
+        close.side = Side::Sell;
+        close.internal_key = "exit:tok-up:StopLoss".into();
+        let out = process_intent(&StrategyIntent::from_request(close), &mut c);
+        assert!(
+            matches!(out.decision, Decision::Approved { .. }),
+            "{:?}",
+            out.decision
+        );
+        assert_eq!(
+            out.gates.len(),
+            4,
+            "the systemic block never runs for a close"
+        );
+    }
+
+    /// §4.2: the kill-switch cap refuses new entries when the day's loss
+    /// reached it — with the same KillSwitch vocabulary the existing gate
+    /// maps from `check_with_equity`.
+    #[test]
+    fn the_kill_switch_cap_refuses_entries_when_the_day_is_lost() {
+        let (mut ledger, mut risk, breaker, exit_cfg, tokens) = setup();
+        risk.config_mut()
+            .systemic
+            .global
+            .global_kill_switch_loss_usd = Bound::new(dec!(50), LimitSource::Toml);
+        let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
+        c.systemic_facts.day_realized_usd = dec!(-50);
+        let out = process_intent(
+            &StrategyIntent::from_request(request(dec!(0.40), dec!(10))),
+            &mut c,
+        );
+        match out.decision {
+            Decision::Rejected {
+                reason: RejectReason::KillSwitch,
+                gate: GateId::Risk,
+                detail,
+            } => assert!(detail.contains("global_kill_switch_loss_usd"), "{detail}"),
+            other => panic!("expected KillSwitch, got {other:?}"),
+        }
+    }
+
+    /// §4.2: the global exposure cap refuses an entry whose notional plus the
+    /// open commitment exceeds it.
+    #[test]
+    fn the_global_exposure_cap_refuses_an_entry_that_over_commits() {
+        let (mut ledger, mut risk, breaker, exit_cfg, tokens) = setup();
+        risk.config_mut().systemic.global.max_total_exposure_usd =
+            Bound::new(dec!(100), LimitSource::Toml);
+        let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
+        c.systemic_facts.open_exposure_usd = dec!(95);
+        let out = process_intent(
+            &StrategyIntent::from_request(request(dec!(0.50), dec!(20))),
+            &mut c,
+        );
+        match out.decision {
+            Decision::Rejected {
+                reason: RejectReason::GlobalLimit,
+                gate: GateId::Risk,
+                detail,
+            } => assert!(detail.contains("max_total_exposure_usd"), "{detail}"),
+            other => panic!("expected GlobalLimit, got {other:?}"),
+        }
+    }
+
+    /// §4.2: the ACCOUNT-level streak trips through the SAME breaker map
+    /// under the reserved `__account__:` key, and the audit names the account
+    /// — not the strategy, whose own breaker never recorded a loss.
+    #[test]
+    fn the_account_breaker_refuses_entries_for_a_tripped_account() {
+        let (mut ledger, risk, mut breaker, exit_cfg, tokens) = setup();
+        let key = account_breaker_key(crate::model::default_account_id().as_str());
+        breaker.record_with(&key, 2, 60, dec!(-1), 0);
+        breaker.record_with(&key, 2, 60, dec!(-1), 0);
+        assert!(breaker.is_halted(&key, 1_000));
+        assert!(
+            !breaker.is_halted("probe-strategy", 1_000),
+            "the strategy's own breaker never recorded a loss"
+        );
+        let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
+        let out = process_intent(
+            &StrategyIntent::from_request(request(dec!(0.40), dec!(10))),
+            &mut c,
+        );
+        match out.decision {
+            Decision::Rejected {
+                reason: RejectReason::LossBreaker,
+                gate: GateId::Risk,
+                detail,
+            } => assert!(detail.contains("for account"), "{detail}"),
+            other => panic!("expected LossBreaker, got {other:?}"),
+        }
+    }
+
+    /// §4.3: an explicit `[[risk.ladder]]` takes over the survival binding —
+    /// the operator's steps verbatim, the stop still from the config (only
+    /// the ladder is taken over), and the trace SAYS explicit.
+    #[test]
+    fn an_explicit_ladder_takes_over_the_survival_binding() {
+        let (mut ledger, mut risk, breaker, exit_cfg, tokens) = setup();
+        risk.config_mut().explicit_ladder = vec![
+            crate::arbitration::LadderStep {
+                at_pct: dec!(3),
+                close_ratio: dec!(0.5),
+                move_stop_to: Some(dec!(1)),
+            },
+            crate::arbitration::LadderStep {
+                at_pct: dec!(6),
+                close_ratio: dec!(0.5),
+                move_stop_to: None,
+            },
+        ];
+        let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
+        let out = process_intent(
+            &StrategyIntent::from_request(request(dec!(0.40), dec!(10))),
+            &mut c,
+        );
+        let Decision::Approved { physics, .. } = &out.decision else {
+            panic!("expected Approved, got {:?}", out.decision);
+        };
+        // The operator's steps, field by field (LadderStep has no PartialEq —
+        // E25 territory).
+        assert_eq!(physics.ladder.len(), 2);
+        assert_eq!(physics.ladder[0].at_pct, dec!(3));
+        assert_eq!(physics.ladder[0].close_ratio, dec!(0.5));
+        assert_eq!(physics.ladder[0].move_stop_to, Some(dec!(1)));
+        assert_eq!(physics.ladder[1].at_pct, dec!(6));
+        assert_eq!(physics.ladder[1].move_stop_to, None);
+        // Only the LADDER is taken over; the stop stays the config's number.
+        let want_stop = dec!(0.40) * (Decimal::ONE - exit_cfg.stop_loss_pct / Decimal::from(100));
+        assert_eq!(physics.stop_price, want_stop);
+        assert_eq!(physics.force_exit_sec, exit_cfg.force_exit_sec);
+        assert!(
+            out.gates[3].detail.contains("explicit ladder"),
+            "{}",
+            out.gates[3].detail
         );
     }
 }

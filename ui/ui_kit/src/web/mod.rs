@@ -1837,6 +1837,24 @@ impl WebServer {
                 };
                 (200, "application/json", doc.to_string().into_bytes())
             }
+            ("GET", "/api/risk-limits") => {
+                // E26 (§4.4): the settings page's risk card reads the EFFECTIVE
+                // systemic limits through the SAME core client the snapshot
+                // uses — a thin proxy of `risk.limits` (read-only, no params;
+                // the core answers from a boot-time snapshot WITHOUT the Core
+                // lock). Same house pattern as /api/intent-audit above.
+                let doc = match self.snapshot_src.lock() {
+                    Ok(mut c) => match c.call(
+                        "risk.limits",
+                        serde_json::Value::Object(serde_json::Map::new()),
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => serde_json::json!({ "error": e.to_string() }),
+                    },
+                    Err(_) => serde_json::json!({ "error": "core client poisoned" }),
+                };
+                (200, "application/json", doc.to_string().into_bytes())
+            }
             ("GET", "/api/plugins") => {
                 // E9-g: the registry trio the TUI Plugins page shows (strategies
                 // / extensions / market plugins) in one authenticated call.

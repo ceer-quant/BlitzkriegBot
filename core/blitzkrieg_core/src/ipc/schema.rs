@@ -232,6 +232,91 @@ pub mod method {
     /// Tighten one account's lifecycle status (§12.1: a live call may never
     /// GRANT a capability — unfreezing is config + restart).
     pub const ACCOUNT_STATUS: &str = "account.status";
+
+    // ── E26 (§4.4) — systemic risk readout ────────────────────────────────
+    /// The effective systemic limits and WHERE each came from. Read-only,
+    /// zero side effects, and answered from a boot-time snapshot WITHOUT the
+    /// Core lock: the nine new limits are restart-to-change (deliberately
+    /// absent from `risk.setLimits`) and the exit resolution is not a #191
+    /// hot key either, so nothing on this readout can go stale mid-run.
+    pub const RISK_LIMITS: &str = "risk.limits";
+}
+
+// ── E26 (§4.4) — systemic risk readout ──────────────────────────────────────
+
+/// The whole `risk.limits` readout: WHAT each systemic limit is and WHERE it
+/// came from, plus the exit resolution the entry pipeline binds at Gate 4.
+/// Assembled ONCE at boot — the nine new limits change only with a restart
+/// (deliberately absent from `risk.setLimits`) and the exit ladder is not a
+/// #191 hot key — so the arm serves this snapshot without the Core lock,
+/// exactly like `system.version`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskLimitsResult {
+    /// Readout contract version (§4.4).
+    pub version: String,
+    /// The per-account matrix, shown for the kernel's default account
+    /// (§4.2: every account runs under the SAME configured matrix).
+    pub account: RiskAccountLimitsView,
+    /// The process-wide matrix.
+    pub global: RiskGlobalLimitsView,
+    /// The exit triple Gate 4 binds per entry.
+    pub exit: RiskExitView,
+}
+
+impl RiskLimitsResult {
+    /// The boot-time snapshot: systemic limits + exit resolution exactly as
+    /// THIS run resolved them.
+    pub fn snapshot(
+        systemic: &crate::risk::limits::SystemicRiskLimits,
+        exit: &crate::exit_policy::ExitConfig,
+    ) -> Self {
+        Self {
+            version: "1.1".into(),
+            account: RiskAccountLimitsView {
+                id: default_account_id().as_str().to_owned(),
+                limits: systemic.account.clone(),
+            },
+            global: RiskGlobalLimitsView {
+                limits: systemic.global.clone(),
+            },
+            exit: RiskExitView {
+                stop_loss_pct: exit.stop_loss_pct,
+                take_profit_pct: exit.take_profit_pct,
+                force_exit_sec: exit.force_exit_sec,
+            },
+        }
+    }
+}
+
+/// One account's slice of the readout.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskAccountLimitsView {
+    pub id: String,
+    pub limits: crate::risk::limits::AccountRiskLimits,
+}
+
+/// The process-wide matrix. Bare `limits` (no id): the holder is the kernel
+/// process itself, not any one account.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskGlobalLimitsView {
+    pub limits: crate::risk::limits::GlobalRiskLimits,
+}
+
+/// The exit resolution Gate 4 binds: stop/take percentages of the entry fill
+/// and the hard force-exit deadline. Plain numbers — the IPC contract's usual
+/// Decimal convention — NOT the `Bound` envelope: these are behaviour knobs
+/// with factory values, not operator limits with provenance.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskExitView {
+    #[serde(with = "crate::decimal")]
+    pub stop_loss_pct: Decimal,
+    #[serde(with = "crate::decimal")]
+    pub take_profit_pct: Decimal,
+    pub force_exit_sec: i64,
 }
 
 // ── Typed params / results ───────────────────────────────────────────────────

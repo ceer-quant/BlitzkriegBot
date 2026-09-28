@@ -449,6 +449,16 @@ pub async fn run(
         github_token,
     );
 
+    // The `risk.limits` readout (§4.4), assembled ONCE: the nine new
+    // systemic limits are restart-to-change (deliberately absent from
+    // `risk.setLimits`) and the exit resolution is not a #191 hot key, so
+    // the snapshot can never go stale mid-run — which is what lets the arm
+    // answer WITHOUT the Core lock, exactly like `system.version`.
+    let risk_limits = Arc::new(crate::ipc::schema::RiskLimitsResult::snapshot(
+        &config.risk.systemic,
+        &config.positions.exit,
+    ));
+
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
@@ -486,6 +496,7 @@ pub async fn run(
                         bus_tx.subscribe(),
                         registry.clone(),
                         update_state.clone(),
+                        risk_limits.clone(),
                     )
                 }
                 Err(e) => tracing::warn!(error = %e, "accept failed"),
@@ -508,6 +519,7 @@ fn spawn_session(
     events: broadcast::Receiver<Event>,
     registry: crate::market::registry::MarketPluginRegistry,
     update_state: Arc<crate::ipc::version::UpdateState>,
+    risk_limits: Arc<crate::ipc::schema::RiskLimitsResult>,
 ) {
     tokio::spawn(async move {
         let (read_half, write_half) = stream.into_split();
@@ -557,6 +569,7 @@ fn spawn_session(
                         line,
                         &peer,
                         &update_state,
+                        &risk_limits,
                         &mut session_active,
                     )
                     .await;
@@ -579,6 +592,7 @@ async fn handle_line(
     line: String,
     peer: &PeerAuth,
     update_state: &Arc<crate::ipc::version::UpdateState>,
+    risk_limits: &Arc<crate::ipc::schema::RiskLimitsResult>,
     session_active: &mut Option<AccountId>,
 ) -> String {
     let req: Request = match serde_json::from_str(&line) {
@@ -644,6 +658,15 @@ async fn handle_line(
             ),
         )
         .unwrap_or(Value::Null)),
+
+        // E26 (§4.4): the systemic-risk readout — WHAT each limit is and
+        // WHERE it came from, plus the exit triple Gate 4 binds. Read-only,
+        // zero side effects, NO Core lock: the snapshot was assembled once at
+        // boot and nothing on it can change mid-run (the nine new limits are
+        // restart-to-change by design, and the exit resolution is not a #191
+        // hot key), so the readout answers even while a fill holds the
+        // trading lock.
+        method::RISK_LIMITS => Ok(serde_json::to_value(&**risk_limits).unwrap_or(Value::Null)),
 
         // VERSIONING.md §7.4: the update switches. A write lands an audit
         // record AND must persist — a switch that silently reverts on restart
@@ -2052,6 +2075,15 @@ mod tests {
         line: String,
     ) -> Value {
         let update_state = Arc::new(crate::ipc::version::UpdateState::new(false, false));
+        // The boot-time snapshot the arm serves, assembled from the SAME
+        // config this core runs under — the honest road `serve` takes.
+        let risk_limits = {
+            let c = core.lock().await;
+            Arc::new(crate::ipc::schema::RiskLimitsResult::snapshot(
+                &c.config().risk.systemic,
+                &c.config().positions.exit,
+            ))
+        };
         let mut session_active: Option<AccountId> = None;
         serde_json::from_str(
             &handle_line(
@@ -2060,6 +2092,7 @@ mod tests {
                 line,
                 peer,
                 &update_state,
+                &risk_limits,
                 &mut session_active,
             )
             .await,
@@ -2319,10 +2352,117 @@ mod tests {
         session_active: &mut Option<AccountId>,
         line: String,
     ) -> Value {
+        let risk_limits = {
+            let c = core.lock().await;
+            Arc::new(crate::ipc::schema::RiskLimitsResult::snapshot(
+                &c.config().risk.systemic,
+                &c.config().positions.exit,
+            ))
+        };
         serde_json::from_str(
-            &handle_line(core, registry, line, peer, update_state, session_active).await,
+            &handle_line(
+                core,
+                registry,
+                line,
+                peer,
+                update_state,
+                &risk_limits,
+                session_active,
+            )
+            .await,
         )
         .expect("every reply is one JSON object")
+    }
+
+    /// The §4.4 factory readout: all nine NEW limits silent (0, "default"),
+    /// the exit triple at its factory resolution (12 / 100 / 120), camelCase
+    /// keys, and the version tag. This is the wire face of §4.1's
+    /// factory-silence — an unconfigured kernel REPORTS that it enforces
+    /// nothing new, with provenance saying where every number came from.
+    #[tokio::test]
+    async fn the_factory_risk_limits_readout_is_silent_and_provenanced() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":7,"method":"risk.limits","params":{}}"#.to_string(),
+        )
+        .await;
+        let r = &reply["result"];
+        assert_eq!(r["version"], "1.1");
+        assert_eq!(r["account"]["id"], "default");
+        for key in [
+            "maxSingleLossUsd",
+            "maxDailyDrawdownUsd",
+            "maxPositionSize",
+            "maxConsecutiveLosses",
+            "cooldownMinutes",
+        ] {
+            assert_eq!(r["account"]["limits"][key]["value"], "0", "{key}");
+            assert_eq!(r["account"]["limits"][key]["source"], "default", "{key}");
+        }
+        for key in [
+            "maxTotalPosition",
+            "maxTotalExposureUsd",
+            "maxCorrelationUsd",
+            "globalKillSwitchLossUsd",
+        ] {
+            assert_eq!(r["global"]["limits"][key]["value"], "0", "{key}");
+            assert_eq!(r["global"]["limits"][key]["source"], "default", "{key}");
+        }
+        assert_eq!(r["exit"]["stopLossPct"].as_f64(), Some(12.0));
+        assert_eq!(r["exit"]["takeProfitPct"].as_f64(), Some(100.0));
+        assert_eq!(r["exit"]["forceExitSec"].as_i64(), Some(120));
+    }
+
+    /// A configured limit crosses the wire as a STRING with its provenance —
+    /// §4.4's rule that "35" without "toml" is not an answer an operator can
+    /// act on. And the untouched siblings stay factory-silent in the same
+    /// readout: one configured key must not leak posture onto the others.
+    #[tokio::test]
+    async fn a_configured_limit_crosses_the_wire_as_a_string_with_provenance() {
+        use crate::risk::limits::{AccountRiskLimits, Bound, LimitSource, SystemicRiskLimits};
+        use rust_decimal_macros::dec;
+        let cfg = CoreConfig {
+            risk: crate::risk::RiskConfig {
+                max_order_notional: dec!(3),
+                systemic: SystemicRiskLimits {
+                    account: AccountRiskLimits {
+                        max_single_loss_usd: Bound::new(dec!(35), LimitSource::Toml),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(100),
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        };
+        let core = Arc::new(AsyncMutex::new(Core::new(cfg)));
+        let registry = crate::market::registry::MarketPluginRegistry::new();
+        let peer = PeerAuth::SameUid { uid: own_uid() };
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":7,"method":"risk.limits","params":{}}"#.to_string(),
+        )
+        .await;
+        let single = &reply["result"]["account"]["limits"]["maxSingleLossUsd"];
+        assert_eq!(single["value"], "35");
+        assert_eq!(single["source"], "toml");
+        assert_eq!(
+            reply["result"]["global"]["limits"]["maxTotalPosition"]["value"],
+            "0"
+        );
+        assert_eq!(
+            reply["result"]["global"]["limits"]["maxTotalPosition"]["source"],
+            "default"
+        );
     }
 
     /// A2's wire shape: with the switch off, `system.update.check` answers a

@@ -49,6 +49,39 @@ min_time_left_sec = 180
 # stop_loss_pct = 12
 # min_trail_pct = 8
 
+# ── Systemic risk limits (E26 / DEV_V0_3 §4) ─────────────────────────────────
+# Nine NEW limits that bound what any entry can put at risk, each shipped at
+# 0 = OFF: an unconfigured kernel behaves EXACTLY as before (byte-identical
+# audit — the factory promise). Uncommenting one is an explicit act, and the
+# startup log names it (`risk.systemic: max_single_loss_usd=0.20 (toml)`), as
+# does the readout the settings page shows (`risk.limits`: every number carries
+# WHERE it came from — a bare "35" is not an answer an operator can act on).
+#
+# These are NOT hot keys: unlike risk.setLimits' per-order cap, a change here
+# takes effect at the next kernel START. The daily-drawdown slot below is the
+# SAME budget as the #173 daily-loss breaker (a slot alias, not a second
+# counter).
+#
+#   [risk]
+#   max_single_loss_usd         = "0.20"   # one entry's stop-loss loss (USD)
+#   max_daily_drawdown_usd      = "5"      # = the #173 daily-loss budget (USD)
+#   max_position_size           = "200"    # shares per account per token
+#   max_consecutive_losses      = "3"      # account-level breaker (count)
+#   cooldown_minutes            = "5"      # breaker cooldown (minutes)
+#   max_total_position          = "10"     # open positions across ALL accounts
+#   max_total_exposure_usd      = "50"     # open notional across ALL accounts
+#   max_correlation_usd         = "20"     # same-asset notional ceiling (USD)
+#   global_kill_switch_loss_usd = "10"     # all-accounts daily-loss halt (USD)
+#
+# The exit ladder Gate 4 binds is the exit policy's PROJECTION unless an
+# explicit ladder opts in (validated row by row; a backwards ladder is
+# warned about and does NOT take over):
+#
+#   [[risk.ladder]]
+#   at_pct       = 50    # profit % of entry at which the step fires
+#   close_ratio  = 0.5   # fraction of the position this step closes
+#   move_stop_to = "0.45" # optional: where the stop moves to (price)
+
 # ── Strategies are NOT configured here ───────────────────────────────────────
 # PR-B removed `[strategy]`. The kernel ships ZERO strategies and enables
 # NONE of them by default: every strategy comes from a cdylib under the

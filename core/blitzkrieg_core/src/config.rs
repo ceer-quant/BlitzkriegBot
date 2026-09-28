@@ -148,6 +148,57 @@ pub struct ExitFile {
     pub min_trail_pct: Option<Decimal>,
 }
 
+/// One `[[risk.ladder]]` row as written in the file (E26 §4.3). A mirror of
+/// the arbitration-face `LadderStep` rather than a re-export: that type lives
+/// in E25 territory without `PartialEq`, and the config layer owns its own
+/// equality for `FileConfig`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LadderFile {
+    pub at_pct: Decimal,
+    pub close_ratio: Decimal,
+    pub move_stop_to: Option<Decimal>,
+}
+
+impl LadderFile {
+    /// The arbitration step this row configures (§4.3: an explicit ladder
+    /// opts in and takes over the projection).
+    pub fn to_step(&self) -> crate::arbitration::LadderStep {
+        crate::arbitration::LadderStep {
+            at_pct: self.at_pct,
+            close_ratio: self.close_ratio,
+            move_stop_to: self.move_stop_to,
+        }
+    }
+}
+
+/// The `[risk]` section as written in the file (E26 §4.2). All optional: an
+/// absent key is "not configured" and resolves to the factory posture — every
+/// [`crate::risk::limits::Bound`] off (§4.1: silent until the operator speaks).
+/// `Option` keeps "never written" distinguishable from an explicit `0`; both
+/// enforce nothing, but only an explicit value has a non-default source to
+/// report on `risk.limits`.
+///
+/// The nine scalars are `Decimal` (not `i64`) on purpose: the wire contract
+/// (§4.4) renders every bound as a decimal string, and a count that later
+/// wants a fractional knob should not need a type change to get one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RiskFile {
+    // ── account-level (§4.2, five) ──────────────────────────────────────────
+    pub max_single_loss_usd: Option<Decimal>,
+    pub max_daily_drawdown_usd: Option<Decimal>,
+    pub max_position_size: Option<Decimal>,
+    pub max_consecutive_losses: Option<Decimal>,
+    pub cooldown_minutes: Option<Decimal>,
+    // ── global-level (§4.2, four) ───────────────────────────────────────────
+    pub max_total_position: Option<Decimal>,
+    pub max_total_exposure_usd: Option<Decimal>,
+    pub max_correlation_usd: Option<Decimal>,
+    pub global_kill_switch_loss_usd: Option<Decimal>,
+    /// Explicit `[[risk.ladder]]` rows. Empty = no opt-in: the exit policy's
+    /// projection stays in charge (§4.3 default = shipped behavior).
+    pub ladder: Vec<LadderFile>,
+}
+
 /// Everything read from a config file. `warnings` is what the caller logs; it is
 /// never an error, so the file can be partly wrong and the kernel still starts.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -161,6 +212,8 @@ pub struct FileConfig {
     pub min_time_left_sec: Option<i64>,
     // ── [exit] ──────────────────────────────────────────────────────────────
     pub exit: ExitFile,
+    // ── [risk] (E26 §4) ─────────────────────────────────────────────────────
+    pub risk: RiskFile,
     // ── [shadow_evolution] ──────────────────────────────────────────────────
     pub shadow: ShadowFile,
     // ── [update] ────────────────────────────────────────────────────────────
@@ -249,7 +302,7 @@ impl FileConfig {
             // reported once (its keys are not enumerated individually).
             if !matches!(
                 section.as_str(),
-                "engine" | "exit" | "shadow_evolution" | "update"
+                "engine" | "exit" | "risk" | "shadow_evolution" | "update"
             ) {
                 self.unknown_keys.push(section.clone());
                 continue;
@@ -281,6 +334,93 @@ impl FileConfig {
                     }
                     ("exit", "min_trail_pct") => {
                         got(&mut self.exit.min_trail_pct, decimal(v), &full, w)
+                    }
+                    // E26 §4.2: the systemic risk limits. Decimals, same `got`
+                    // discipline: a wrongly-typed key is a warning, not a boot
+                    // failure — a typo must not stop a trading kernel.
+                    ("risk", "max_single_loss_usd") => {
+                        got(&mut self.risk.max_single_loss_usd, decimal(v), &full, w)
+                    }
+                    ("risk", "max_daily_drawdown_usd") => {
+                        got(&mut self.risk.max_daily_drawdown_usd, decimal(v), &full, w)
+                    }
+                    ("risk", "max_position_size") => {
+                        got(&mut self.risk.max_position_size, decimal(v), &full, w)
+                    }
+                    ("risk", "max_consecutive_losses") => {
+                        got(&mut self.risk.max_consecutive_losses, decimal(v), &full, w)
+                    }
+                    ("risk", "cooldown_minutes") => {
+                        got(&mut self.risk.cooldown_minutes, decimal(v), &full, w)
+                    }
+                    ("risk", "max_total_position") => {
+                        got(&mut self.risk.max_total_position, decimal(v), &full, w)
+                    }
+                    ("risk", "max_total_exposure_usd") => {
+                        got(&mut self.risk.max_total_exposure_usd, decimal(v), &full, w)
+                    }
+                    ("risk", "max_correlation_usd") => {
+                        got(&mut self.risk.max_correlation_usd, decimal(v), &full, w)
+                    }
+                    ("risk", "global_kill_switch_loss_usd") => got(
+                        &mut self.risk.global_kill_switch_loss_usd,
+                        decimal(v),
+                        &full,
+                        w,
+                    ),
+                    // E26 §4.3: an explicit `[[risk.ladder]]` opts in and takes
+                    // over the exit projection. One bad row warns and is left
+                    // out — a truncated ladder is louder than a silent one, and
+                    // the whole array must validate before it can take over.
+                    ("risk", "ladder") => {
+                        let rows = match v.as_array() {
+                            Some(rows) => rows,
+                            None => {
+                                w.push(format!("{full}: expected an array of tables; ignoring it"));
+                                continue;
+                            }
+                        };
+                        let mut file_rows = Vec::with_capacity(rows.len());
+                        let mut steps: Vec<crate::arbitration::LadderStep> =
+                            Vec::with_capacity(rows.len());
+                        for (i, row) in rows.iter().enumerate() {
+                            let Some(table) = row.as_table() else {
+                                w.push(format!("{full}[{i}]: expected a table; ignoring it"));
+                                continue;
+                            };
+                            let mut at_pct: Option<Decimal> = None;
+                            let mut close_ratio: Option<Decimal> = None;
+                            let mut move_stop_to: Option<Decimal> = None;
+                            for (key, val) in table {
+                                let fkey = format!("{full}[{i}].{key}");
+                                match key.as_str() {
+                                    "at_pct" => got(&mut at_pct, decimal(val), &fkey, w),
+                                    "close_ratio" => got(&mut close_ratio, decimal(val), &fkey, w),
+                                    "move_stop_to" => {
+                                        got(&mut move_stop_to, decimal(val), &fkey, w)
+                                    }
+                                    _ => self.unknown_keys.push(fkey),
+                                }
+                            }
+                            let (Some(at_pct), Some(close_ratio)) = (at_pct, close_ratio) else {
+                                w.push(format!(
+                                    "{full}[{i}]: needs at_pct and close_ratio; ignoring the row"
+                                ));
+                                continue;
+                            };
+                            let file_row = LadderFile {
+                                at_pct,
+                                close_ratio,
+                                move_stop_to,
+                            };
+                            steps.push(file_row.to_step());
+                            file_rows.push(file_row);
+                        }
+                        if let Err(what) = crate::risk::physics::validate_ladder(&steps) {
+                            w.push(what);
+                            continue;
+                        }
+                        self.risk.ladder = file_rows;
                     }
                     ("shadow_evolution", "enabled") => {
                         got(&mut self.shadow.enabled, bool_(v), &full, w)
@@ -853,6 +993,195 @@ mod tests {
         assert_eq!(cfg.unknown_keys, Vec::<String>::new());
         assert_eq!(cfg.warnings.len(), 1, "{:?}", cfg.warnings);
         assert!(cfg.warnings[0].starts_with("exit.min_trail_pct"));
+    }
+
+    #[test]
+    fn a_risk_section_parses_all_nine_limits() {
+        let cfg = parsed(
+            r#"
+            [risk]
+            max_single_loss_usd = "35"
+            max_daily_drawdown_usd = 100
+            max_position_size = "10"
+            max_consecutive_losses = 3
+            cooldown_minutes = 5
+            max_total_position = "40"
+            max_total_exposure_usd = 500
+            max_correlation_usd = "200"
+            global_kill_switch_loss_usd = 1000
+            "#,
+        );
+        let r = &cfg.risk;
+        assert_eq!(r.max_single_loss_usd, Some(dec!(35)));
+        assert_eq!(r.max_daily_drawdown_usd, Some(dec!(100)));
+        assert_eq!(r.max_position_size, Some(dec!(10)));
+        assert_eq!(r.max_consecutive_losses, Some(dec!(3)));
+        assert_eq!(r.cooldown_minutes, Some(dec!(5)));
+        assert_eq!(r.max_total_position, Some(dec!(40)));
+        assert_eq!(r.max_total_exposure_usd, Some(dec!(500)));
+        assert_eq!(r.max_correlation_usd, Some(dec!(200)));
+        assert_eq!(r.global_kill_switch_loss_usd, Some(dec!(1000)));
+        assert_eq!(cfg.unknown_keys, Vec::<String>::new());
+        assert_eq!(cfg.warnings, Vec::<String>::new());
+        // The file face resolves into the effective set: a present key becomes
+        // a toml-sourced Bound, and the resolution is where "where did this
+        // number come from" (§4.4) is answered.
+        let sys = crate::risk::limits::SystemicRiskLimits::from_file(r);
+        use crate::risk::limits::LimitSource;
+        assert_eq!(sys.account.max_single_loss_usd.value(), dec!(35));
+        assert_eq!(sys.account.max_single_loss_usd.source(), LimitSource::Toml);
+        assert!(sys.account.max_single_loss_usd.is_enabled());
+        assert_eq!(sys.global.max_correlation_usd.value(), dec!(200));
+        assert_eq!(sys.global.max_correlation_usd.source(), LimitSource::Toml);
+    }
+
+    #[test]
+    fn an_absent_risk_section_is_the_factory_posture_everything_off() {
+        // §4.1: a file that never mentions [risk] (and a --no-config boot)
+        // must leave every bound off with the default source — the kernel
+        // enforces nothing new and reports nothing invented.
+        let cfg = parsed(
+            r#"
+            [engine]
+            round_sec = 300
+            "#,
+        );
+        assert_eq!(cfg.risk, RiskFile::default());
+        let sys = crate::risk::limits::SystemicRiskLimits::from_file(&cfg.risk);
+        let off = [
+            (
+                "account.max_single_loss_usd",
+                &sys.account.max_single_loss_usd,
+            ),
+            (
+                "account.max_daily_drawdown_usd",
+                &sys.account.max_daily_drawdown_usd,
+            ),
+            ("account.max_position_size", &sys.account.max_position_size),
+            (
+                "account.max_consecutive_losses",
+                &sys.account.max_consecutive_losses,
+            ),
+            ("account.cooldown_minutes", &sys.account.cooldown_minutes),
+            ("global.max_total_position", &sys.global.max_total_position),
+            (
+                "global.max_total_exposure_usd",
+                &sys.global.max_total_exposure_usd,
+            ),
+            (
+                "global.max_correlation_usd",
+                &sys.global.max_correlation_usd,
+            ),
+            (
+                "global.global_kill_switch_loss_usd",
+                &sys.global.global_kill_switch_loss_usd,
+            ),
+        ];
+        for (name, bound) in off {
+            assert!(!bound.is_enabled(), "{name} must be off at the factory");
+            assert_eq!(
+                bound.source(),
+                crate::risk::limits::LimitSource::Default,
+                "{name} must carry the default source"
+            );
+        }
+    }
+
+    #[test]
+    fn a_risk_key_of_the_wrong_type_warns_and_leaves_the_limit_off() {
+        let cfg = parsed(
+            r#"
+            [risk]
+            max_single_loss_usd = "not a number"
+            cooldown_minutes = 5
+            "#,
+        );
+        assert_eq!(
+            cfg.risk.max_single_loss_usd, None,
+            "a bad value is not guessed"
+        );
+        assert_eq!(cfg.risk.cooldown_minutes, Some(dec!(5)));
+        assert_eq!(cfg.warnings.len(), 1, "{:?}", cfg.warnings);
+        assert!(cfg.warnings[0].starts_with("risk.max_single_loss_usd"));
+        let sys = crate::risk::limits::SystemicRiskLimits::from_file(&cfg.risk);
+        assert!(!sys.account.max_single_loss_usd.is_enabled());
+        assert!(sys.account.cooldown_minutes.is_enabled());
+    }
+
+    #[test]
+    fn a_risk_ladder_parses_rows_and_maps_to_the_arbitration_step() {
+        let cfg = parsed(
+            r#"
+            [risk]
+            ladder = [
+                { at_pct = "3", close_ratio = "0.5" },
+                { at_pct = "6", close_ratio = "0.5", move_stop_to = "1" },
+            ]
+            "#,
+        );
+        assert_eq!(cfg.warnings, Vec::<String>::new());
+        assert_eq!(cfg.risk.ladder.len(), 2);
+        let steps: Vec<_> = cfg.risk.ladder.iter().map(|row| row.to_step()).collect();
+        crate::risk::physics::validate_ladder(&steps).expect("a parsed ladder validates");
+        assert_eq!(steps[0].at_pct, dec!(3));
+        assert_eq!(steps[0].close_ratio, dec!(0.5));
+        assert_eq!(steps[0].move_stop_to, None);
+        assert_eq!(steps[1].at_pct, dec!(6));
+        assert_eq!(steps[1].close_ratio, dec!(0.5));
+        assert_eq!(steps[1].move_stop_to, Some(dec!(1)));
+    }
+
+    #[test]
+    fn a_backwards_ladder_warns_and_is_not_adopted() {
+        // §4.3: an explicit ladder takes over the projection ONLY if the whole
+        // array validates. A ladder whose at_pct goes backwards is refused at
+        // parse time, so nothing partial or inconsistent can arm.
+        let cfg = parsed(
+            r#"
+            [risk]
+            ladder = [
+                { at_pct = "6", close_ratio = "0.5" },
+                { at_pct = "3", close_ratio = "0.5" },
+            ]
+            "#,
+        );
+        assert!(
+            cfg.risk.ladder.is_empty(),
+            "a ladder that fails validation must not take over"
+        );
+        assert_eq!(cfg.warnings.len(), 1, "{:?}", cfg.warnings);
+        assert!(
+            cfg.warnings[0].contains("risk.ladder"),
+            "{:?}",
+            cfg.warnings
+        );
+    }
+
+    #[test]
+    fn an_incomplete_ladder_row_is_dropped_with_a_warning() {
+        let cfg = parsed(
+            r#"
+            [risk]
+            ladder = [
+                { at_pct = "6" },
+                { at_pct = "3", close_ratio = "0.5", mystery = 1 },
+            ]
+            "#,
+        );
+        // Row 0 lacks close_ratio and is dropped; row 1 is complete but names
+        // an unknown key, which is reported one by one like everywhere else.
+        assert_eq!(cfg.risk.ladder.len(), 1);
+        assert_eq!(cfg.risk.ladder[0].at_pct, dec!(3));
+        assert_eq!(cfg.risk.ladder[0].close_ratio, dec!(0.5));
+        assert_eq!(cfg.warnings.len(), 1, "{:?}", cfg.warnings);
+        assert!(cfg.warnings[0].contains("needs at_pct and close_ratio"));
+        assert!(
+            cfg.unknown_keys
+                .iter()
+                .any(|k| k == "risk.ladder[1].mystery"),
+            "{:?}",
+            cfg.unknown_keys
+        );
     }
 
     #[test]

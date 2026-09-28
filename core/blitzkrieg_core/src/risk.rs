@@ -50,6 +50,16 @@ pub struct RiskConfig {
     pub max_open_notional_usd: Decimal,
     pub min_price: Decimal,
     pub max_price: Decimal,
+    /// E26 (§4): the systemic limit set in force — the per-account and
+    /// process-wide matrices, every bound off at the factory (§4.1). Carried
+    /// on this type so `RiskGate::new` — the one hand-off the kernel already
+    /// makes — delivers it to the judgment sites with no second constructor
+    /// and no new wiring in the service layer.
+    pub systemic: crate::risk::limits::SystemicRiskLimits,
+    /// E26 (§4.3): an explicit `[[risk.ladder]]` opts in and takes over the
+    /// Gate 4 projection. Empty = the shipped projection stays in charge,
+    /// which is every existing deployment's behavior.
+    pub explicit_ladder: Vec<crate::arbitration::LadderStep>,
 }
 
 impl Default for RiskConfig {
@@ -62,6 +72,10 @@ impl Default for RiskConfig {
             max_open_notional_usd: Decimal::ZERO,
             min_price: Decimal::ZERO,
             max_price: Decimal::ONE,
+            // §4.1: the factory posture — every systemic bound off, no
+            // explicit ladder. An unconfigured kernel enforces nothing new.
+            systemic: Default::default(),
+            explicit_ladder: Vec::new(),
         }
     }
 }
@@ -293,6 +307,27 @@ impl LossBreakers {
         b.record(net_pnl, now_ms)
     }
 
+    /// E26 (§4.2): record a close under an EXPLICIT threshold pair — the
+    /// account-level streak (`account_breaker_key`) runs the account's own
+    /// configured bounds, not the kernel-wide pair the constructor holds.
+    /// The breaker created for `key` keeps the pair it was born with for its
+    /// whole life (the same rule the strategy breakers follow, whose pair
+    /// happens to equal the shared one).
+    pub fn record_with(
+        &mut self,
+        key: &str,
+        max_consecutive_losses: u32,
+        cooldown_sec: i64,
+        net_pnl: Decimal,
+        now_ms: i64,
+    ) -> bool {
+        let b = self
+            .per_strategy
+            .entry(key.to_string())
+            .or_insert_with(|| LossBreaker::new(max_consecutive_losses, cooldown_sec));
+        b.record(net_pnl, now_ms)
+    }
+
     /// F4: unwind one recorded close for `strategy`. A FAILED status arriving
     /// for a trade whose close was already booked must not leave the breaker
     /// counting a close that never settled.
@@ -308,7 +343,12 @@ impl LossBreakers {
         };
         if net_pnl < Decimal::ZERO {
             b.consecutive_losses = b.consecutive_losses.saturating_sub(1);
-            if b.halted_until_ms > 0 && b.consecutive_losses < self.max_consecutive_losses {
+            // The lift condition reads the breaker's OWN threshold, not the
+            // shared pair: strategy breakers were born from the shared pair
+            // (identical behavior), but an E26 account key (§4.2,
+            // `record_with`) carries the account matrix's own pair — a halt
+            // it caused must lift when the streak drops below ITS number.
+            if b.halted_until_ms > 0 && b.consecutive_losses < b.max_consecutive_losses {
                 b.halted_until_ms = 0;
             }
         } else if net_pnl > Decimal::ZERO {
@@ -397,6 +437,12 @@ impl RiskGate {
 
     pub fn config_mut(&mut self) -> &mut RiskConfig {
         &mut self.config
+    }
+
+    /// E26 (§4.4): the systemic limit set in force. A readout, not a lock —
+    /// the same no-side-effect posture the `risk.limits` wire answer keeps.
+    pub fn systemic_snapshot(&self) -> &crate::risk::limits::SystemicRiskLimits {
+        &self.config.systemic
     }
 
     pub fn check(&self, req: &OrderRequest) -> CoreResult<()> {
@@ -795,3 +841,14 @@ mod tests {
         assert!(hot_reload_refusal("aKnobThatDoesNotExist").is_none());
     }
 }
+
+// ── E26 (§4): systemic limits + the survival binding ─────────────────────────
+//
+// The gate above is untouched — the hard constraint is that the EXISTING
+// judgment bodies get zero edits (§14.3: a modified existing check is
+// rejected at review). Everything E26 adds lives in these two submodules;
+// the readout (`risk.limits`) and the tail-append hooks wire them in,
+// default-off (§4.1 factory-silent): an unconfigured kernel behaves
+// exactly as before.
+pub mod limits;
+pub mod physics;

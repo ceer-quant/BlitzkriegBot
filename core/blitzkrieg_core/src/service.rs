@@ -1210,6 +1210,11 @@ struct CloseCredential {
     /// was recorded: a reversed WIN had reset the streak, and that is the only
     /// recoverable value (retract restores it).
     streak_before: u32,
+    /// E26 (§4.2): the ACCOUNT-level streak's count just before this close —
+    /// the same recovery fact for the reserved `__account__:` key. Captured
+    /// even when the account bound is off (a zero count is the truth then),
+    /// so a close cannot choose whether to leave evidence.
+    account_streak_before: u32,
 }
 
 impl Core {
@@ -2836,6 +2841,30 @@ impl Core {
                         // account's live balance, same rule as the submission
                         // path.
                         let equity = ledger.balance();
+                        // E26 (§4.2): the aggregates the systemic limits
+                        // judge — process-wide facts (the global caps are
+                        // kernel-wide), read from the books the kernel
+                        // already maintains. The day number is the #173
+                        // budget's own `daily_pnl`, so the kill-switch cap
+                        // and the daily-loss breaker can never disagree
+                        // about what today lost.
+                        let systemic_facts = crate::risk::limits::SystemicFacts {
+                            open_positions: self.positions.open_positions().len(),
+                            open_exposure_usd: self
+                                .positions
+                                .open_positions()
+                                .iter()
+                                .map(|p| p.cost_usd)
+                                .sum(),
+                            same_asset_exposure_usd: self
+                                .positions
+                                .open_positions()
+                                .iter()
+                                .filter(|p| p.asset == intent.request.asset)
+                                .map(|p| p.cost_usd)
+                                .sum(),
+                            day_realized_usd: self.positions.daily_pnl(),
+                        };
                         let mut ctx = crate::arbitration::IntentCtx {
                             round_tokens: &round_tokens,
                             risk: &self.risk,
@@ -2846,6 +2875,7 @@ impl Core {
                             now_ms,
                             equity,
                             account_entry_block,
+                            systemic_facts,
                         };
                         crate::arbitration::process_intent(&intent, &mut ctx)
                     }
@@ -2875,7 +2905,22 @@ impl Core {
                     "entry rejected: strategy={name} cause=arbitration gate={gate:?} reason={reason:?} detail={detail}");
                 continue;
             }
-            let req = intent.request;
+            let mut req = intent.request;
+            // E26 (§4.2): a systemic shrink rides the decision as MODIFIED —
+            // the audit names the bound that bit; here the reduced size is
+            // what gets placed. The pipeline never rewrote the request (the
+            // suggestion's provenance stays exactly what the engine emitted),
+            // so the shrink is applied at the one point that spends money.
+            if let crate::arbitration::Decision::Modified {
+                modification: crate::arbitration::Modification::SizeReduced { approved, .. },
+                ..
+            } = &outcome.decision
+            {
+                tracing::info!(target: "strategy",
+                    "entry modified: strategy={name} systemic shrinks {} -> {approved} shares",
+                    req.size);
+                req.size = *approved;
+            }
             // E16/#98 portfolio-level exposure cap (0 = off): the account's
             // total open commitment across ALL strategies is bounded too —
             // per-strategy caps partition it, but their sum needs its own
@@ -4477,6 +4522,15 @@ impl Core {
                                     self.take_exit_reason(token).unwrap_or(ExitReason::Manual);
                                 let was_maker = d.role.is_maker();
                                 let streak_before = self.breaker.consecutive_losses(&d.strategy);
+                                // E26 (§4.2): the account streak's count just
+                                // before this close, from the SAME map — the
+                                // evidence a FAILED rollback needs, captured
+                                // whether or not the bound is armed.
+                                let account_streak_before = self.breaker.consecutive_losses(
+                                    &crate::risk::limits::account_breaker_key(
+                                        d.account_id.as_str(),
+                                    ),
+                                );
                                 if let Some(closed) =
                                     self.positions.close(&id, px, reason, was_maker, now_ms)
                                 {
@@ -4487,6 +4541,7 @@ impl Core {
                                                 restored,
                                                 closed: closed.clone(),
                                                 streak_before,
+                                                account_streak_before,
                                             },
                                         );
                                     }
@@ -4593,6 +4648,45 @@ impl Core {
                     self.config.breaker_cooldown_sec
                 ),
             });
+        }
+        // E26 (§4.2): the ACCOUNT-level streak lives in the SAME breaker map
+        // under the reserved `__account__:` key, with the account matrix's
+        // own pair (`max_consecutive_losses`, `cooldown_minutes` → secs; a
+        // cooldown the matrix does not name falls back to the shipped
+        // `breaker_cooldown_sec`). Off at the factory: nothing is recorded
+        // unless the operator armed the bound.
+        {
+            let account_limits = &self.risk.config().systemic.account;
+            let max_losses =
+                u32::try_from(account_limits.max_consecutive_losses.value().floor()).unwrap_or(0);
+            if max_losses >= 1 {
+                let cooldown_sec = if account_limits.cooldown_minutes.is_enabled() {
+                    i64::try_from(account_limits.cooldown_minutes.value() * Decimal::from(60))
+                        .unwrap_or(self.config.breaker_cooldown_sec)
+                } else {
+                    self.config.breaker_cooldown_sec
+                };
+                let account_key =
+                    crate::risk::limits::account_breaker_key(closed.account_id.as_str());
+                let account_tripped = self.breaker.record_with(
+                    &account_key,
+                    max_losses,
+                    cooldown_sec,
+                    closed.net_pnl_usd,
+                    now_ms,
+                );
+                if account_tripped {
+                    self.emit(Event::RiskAlert {
+                        code: CoreErrorCode::RiskRejected,
+                        message: format!(
+                            "consecutive-loss breaker tripped for account {}: {} losses, halting its new entries {}s",
+                            closed.account_id.as_str(),
+                            self.breaker.consecutive_losses(&account_key),
+                            cooldown_sec
+                        ),
+                    });
+                }
+            }
         }
         // #173: the daily budget freezes entries the moment its cap is reached —
         // reported here (not only on the next tick) so the freeze and the loss
@@ -4819,6 +4913,16 @@ impl Core {
         }
         self.breaker
             .retract(&closed.strategy, closed.net_pnl_usd, cred.streak_before);
+        // E26 (§4.2): the ACCOUNT-level streak unwinds symmetrically — the
+        // same retract, against the reserved `__account__:` key with the
+        // count captured before the close. A reversed loss drops the account
+        // streak (lifting a halt its own threshold caused); a reversed win
+        // restores the streak the win had reset.
+        self.breaker.retract(
+            &crate::risk::limits::account_breaker_key(closed.account_id.as_str()),
+            closed.net_pnl_usd,
+            cred.account_streak_before,
+        );
         tracing::warn!(
             order_id = %d.order_id,
             token = %d.token_id,
