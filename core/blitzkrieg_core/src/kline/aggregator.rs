@@ -462,4 +462,69 @@ mod tests {
         assert!(hist[..2].iter().all(|b| b.is_closed));
         assert!(!hist[2].is_closed, "the growing bar rides last");
     }
+
+    /// P4 (§16.5): the 10k-trade aggregation throughput and the memory upper
+    /// bound are MEASURED, not thresholded — the numbers land in
+    /// `docs/perf/V0_3.md`. Same LCG stream as the offline-parity test above,
+    /// fed through the PRODUCTION interval set (`with_default_intervals`),
+    /// timed on the steady state after a warm-up. The memory bound is the
+    /// §10.3 formula over a realistic fleet: 100 symbols × the 9 production
+    /// intervals × (1 growing bar + the capped closed history).
+    #[test]
+    fn ten_k_trade_throughput_and_memory_bound_measured() {
+        let mut state = 0x5eed_u64;
+        let mut next = move |modulus: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % modulus
+        };
+        let base: i64 = 1_758_887_940_000;
+        let mut ticks: Vec<(i64, Decimal)> = (0..10_000)
+            .map(|_| {
+                let ts = base + next(3_600_000) as i64; // spread over one hour
+                let price = dec!(0.40) + Decimal::from(next(2_000)) / dec!(10000);
+                (ts, price)
+            })
+            .collect();
+        ticks.sort_by_key(|(ts, _)| *ts);
+
+        let mut a = KlineAggregator::with_default_intervals();
+        for (ts, price) in &ticks[..500] {
+            let _ = a.on_trade("TOKEN", *price, dec!(1), *ts);
+        }
+        // Time ONLY the tail: re-feeding the warmed prefix would (correctly)
+        // count as out-of-order for the fast intervals, and the number this
+        // prints is the cost of folding, not of discarding.
+        let timed = &ticks[500..];
+        let t0 = std::time::Instant::now();
+        for (ts, price) in timed {
+            let _ = a.on_trade("TOKEN", *price, dec!(1), *ts);
+        }
+        let elapsed = t0.elapsed();
+        let per_tick_us = elapsed.as_micros() as f64 / timed.len() as f64;
+        let kline_size = std::mem::size_of::<Kline>();
+        let fleet_bound = 100usize * a.intervals().len() * (CLOSED_HISTORY_CAP + 1) * kline_size;
+        println!(
+            "kline aggregation: {} trades x {} intervals (this build): \
+             total={}ms per-tick={:.2}us | memory bound: 100 symbols x {} intervals \
+             x {} bars x {}B = {:.1}MB",
+            ticks.len(),
+            a.intervals().len(),
+            elapsed.as_millis(),
+            per_tick_us,
+            a.intervals().len(),
+            CLOSED_HISTORY_CAP + 1,
+            kline_size,
+            fleet_bound as f64 / (1024.0 * 1024.0),
+        );
+        // The measure rests on the discipline it reports: a sorted feed drops
+        // nothing, so the throughput number is the cost of folding, not of
+        // discarding.
+        assert_eq!(
+            a.stats().dropped_out_of_order,
+            0,
+            "sorted feed drops nothing"
+        );
+    }
 }

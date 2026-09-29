@@ -31,7 +31,7 @@ exclude = ["user_layer/strategies", "user_layer/parity_strategy", "user_layer/ex
 # 语义化 `<major>.<minor>.<patch>[-rc.N]`；tag 形态为 v<version>，由 CI 守卫。
 # 注意：构建元数据（+g<sha>）不写在这里 —— 它由 build.rs 在运行时拼接。
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 
 # ── Release profile (E10-d) ──────────────────────────────────────────────────
 # Size/performance hardening for shipped binaries. Measured, not guessed: see

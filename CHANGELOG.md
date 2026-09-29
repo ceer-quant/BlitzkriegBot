@@ -3,6 +3,43 @@
 All notable changes to BlitzkriegBot are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
+## [0.3.0] - 2026-09-29
+
+### Added
+- **BlitzkriegStrategy API 1.0**（原 C ABI v2 更名，`BK_ABI_VERSION` 仍为 2）：
+  新增可选符号 `bk_strategy_declare_modes`；`SafeStrategy` 增 `declare_modes()` /
+  `on_kline()`（均有默认实现，0.2 构建的 dylib 零改动可加载）（E24 / #330）。
+- **策略建议 / 内核裁决分离**：`process_intent` 四层裁决流水线 + `Decision`
+  （Approved/Modified/Rejected）+ 审计 `data/audit/intents.jsonl` +
+  `intent.audit.tail` / `INTENT_DECISION`（E25 / #331）。
+- **系统级风控**：账户级 5 项 + 全局级 4 项限额（**默认全部 0 = 关闭**），
+  `apply_physics` 把既有出场纪律随单绑定并落审计；`risk.limits` 返回生效值与来源
+  （E26 / #332）。
+- **市场三层声明**：`MarketType`（+Margin/Earn/Bot）、`MarketStructure`、
+  `MarketCapabilities`；插件与策略双向声明 + 加载期兼容性握手（E27 / #333）。
+- **多账户一等公民**：`AccountId` 贯穿订单/持仓/账本/成交/事件；`AccountLedgers`
+  隔离；`account.list` / `account.switch` / `account.status`（只能收紧）
+  （E28 / #334）。
+- **K 线兼容**：`Kline` / `KlineInterval` / `KlineAggregator` / `on_kline` /
+  `kline.history|subscribe|unsubscribe` / `KLINE_UPDATE`；面板 `KlineChart.vue`
+  （E29 / #335）。
+- **Lua 5.4 沙箱**（mlua + vendored）：16MB / 1e6 指令配额、投毒语义、`bk.*`
+  只读 API、`strategy.lua + manifest.json + README.md` 分发格式、
+  `--lua-strategy-dir`（E30 / #336）。
+- 9 个新门禁，全部带 `--teeth` 反向验收并接入 CI（`core-gates`）。
+
+### Changed
+- 对外命名统一为 BlitzkriegStrategy API 1.0（旧称进入废弃期，符号全部保留）。
+- `apply_physics` 使既有出场纪律（止损价 / 时间退出 / 阶梯）**显式可见**：
+  写入裁决审计与面板；触发路径未变。
+
+### Deprecated
+- "C ABI v2" 名称（仅名称；无代码删除）。
+
+### Not changed（明示）
+- `exit_policy` / `position` / `sim` / `ome` 既有行为；所有既有风控默认阈值；
+  `frozen-corpus.mjs` 的 sha256；`exit-economics-check.mjs` 的 `BASELINE`。
+
 ## [0.2.1] - 2026-09-25
 
 ### Added
@@ -35,10 +72,6 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   判定、复用 --manifest-only 守卫）→ 与 CI 同一套门禁 → 三平台构建 + SHA256SUMS
   + 可选 GPG → Release 去重（同 tag 拒绝覆盖）。`VERSION_RE` 接受 `-rc.N`
   （V8-5：首个 rc 之前必须先修好正则）。
-
-## [Unreleased]
-
-### Added
 
 - **The strategy-evolution toolkit (E15 / #97): walk-forward sweep, shadow
   export, A/B verdict.** `scripts/walk-forward-sweep.mjs` splits a frozen event
