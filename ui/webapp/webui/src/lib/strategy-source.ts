@@ -65,5 +65,12 @@ export function registryStrategyRows(rows: readonly PluginRow[]): StrategyStatsR
     losses: 0,
     netPnlUsd: 0,
     rejectionCauses: null,
+    // E27 (§8.3): the registry is the one source that carries the mode
+    // handshake verdict (`strategy.list` rows gained `modes`/`compatible`/
+    // `incompatibleReason`). Defaults mirror the core's serde defaults so an
+    // older core (fields absent) still reads as "undeclared, compatible".
+    modes: r.modes ?? null,
+    compatible: r.compatible ?? true,
+    incompatibleReason: r.incompatibleReason ?? null,
   }))
 }

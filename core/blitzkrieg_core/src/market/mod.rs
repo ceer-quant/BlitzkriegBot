@@ -6,6 +6,7 @@
 //! live in their own crates (see `extensions/*`); this module only hosts the
 //! registry and the feature-gated registration seam.
 
+pub mod compat;
 pub mod host;
 pub mod registry;
 

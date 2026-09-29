@@ -170,6 +170,10 @@ struct Args {
     /// log of a run that set no flags (that silence was half of P0-2).
     daily_loss_usd: Decimal,
     daily_loss_pct: Decimal,
+    /// E26 (§4.2): which layer armed the daily-loss budget — the drawdown
+    /// bound on `risk.limits` must name the TRUE source (a `--max-daily-loss`
+    /// run reads `flag` there, not `default`), and only the resolver knows.
+    daily_loss_source: blitzkrieg_core::config::Source,
     /// The startup echo lines for the daily-loss budget, printed unconditionally
     /// (kept out of `config_report`, which lists only settings moved away from
     /// their compiled default).
@@ -210,6 +214,9 @@ struct Args {
     no_order_log: bool,
     position_log: Option<String>,
     no_position_log: bool,
+    /// E25 (#331): silence the intent-audit WRITES only — the arbitration
+    /// gates always run (P1 proves both settings hit the same baseline).
+    no_intent_audit: bool,
     /// #199: acknowledge that this process may write a data directory another
     /// core is already writing (fixtures, backtests). Only disables the
     /// live-owner refusal — the boot banner still says so, loudly.
@@ -275,6 +282,15 @@ struct Args {
     /// `BK_STRATEGY_DIR` (a file-config key would be dead weight: this belongs
     /// to "where is the checkout", not to strategy parameters).
     strategy_dir: Option<String>,
+    /// E30 (§6.4): directory scanned at startup for Lua strategy PACKAGES
+    /// (directories carrying `manifest.json`). Same install/enable split as
+    /// `strategy_dir`: dropping a package in the folder INSTALLS it DISABLED;
+    /// enabling comes from the persisted set plus `--enable-strategy`.
+    /// Deliberately separate from the dylib scanner's root (§6.4: Lua packages
+    /// are never dylibs, and `user_layer/strategies` is also the measurement
+    /// fixtures' root). Default `user_layer/strategies_lua` under the repo;
+    /// overridden by `BK_LUA_STRATEGY_DIR`.
+    lua_strategy_dir: Option<String>,
     /// Mirror every market-data event into this JSONL archive (P-1.3).
     /// None = use the always-on default for an engine session (see `--no-event-archive`).
     event_archive: Option<String>,
@@ -393,6 +409,26 @@ fn default_strategy_dir() -> Option<String> {
         }
     }
     Some("user_layer/strategies".to_string())
+}
+
+/// E30 (§6.4): the Lua package scan root, resolved like `default_strategy_dir`
+/// — repo checkout first, then upward from the binary.
+fn default_lua_strategy_dir() -> Option<String> {
+    let local = std::path::Path::new("user_layer/strategies_lua");
+    if local.is_dir() {
+        return Some("user_layer/strategies_lua".to_string());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cur = exe.parent();
+        while let Some(dir) = cur {
+            let candidate = dir.join("user_layer/strategies_lua");
+            if candidate.is_dir() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+            cur = dir.parent();
+        }
+    }
+    Some("user_layer/strategies_lua".to_string())
 }
 
 /// Where the config file comes from, settled BEFORE argument parsing (the file
@@ -583,6 +619,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut no_strategy_state = false;
     let mut strategy_dir: Option<String> = None;
     let mut no_strategy_dir = false;
+    let mut lua_strategy_dir: Option<String> = None;
+    let mut no_lua_strategy_dir = false;
     let mut engine = false;
     // File-settable settings are collected as Option so the precedence chain can
     // resolve them at the end; a concrete default would erase the "was this flag
@@ -616,6 +654,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut no_order_log = false;
     let mut position_log: Option<String> = None;
     let mut no_position_log = false;
+    let mut no_intent_audit = false;
     let mut allow_shared_data = false;
     let mut market_plugin: Option<String> = None;
     let mut discovery = true;
@@ -746,6 +785,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--no-order-log" => no_order_log = true,
             "--position-log" => position_log = it.next(),
             "--no-position-log" => no_position_log = true,
+            "--no-intent-audit" => no_intent_audit = true,
             "--allow-shared-data" => allow_shared_data = true,
             "--market-plugin" => market_plugin = it.next(),
             "--no-discovery" => discovery = false,
@@ -805,6 +845,11 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--no-strategy-state" => no_strategy_state = true,
             "--strategy-dir" => strategy_dir = it.next().filter(|v| !v.trim().is_empty()),
             "--no-strategy-dir" => no_strategy_dir = true,
+            // E30 (§6.4): the Lua package scan root (`none`/empty = off).
+            "--lua-strategy-dir" => {
+                lua_strategy_dir = it.next().filter(|v| !v.trim().is_empty());
+            }
+            "--no-lua-strategy-dir" => no_lua_strategy_dir = true,
             "--assets" => assets_arg = it.next(),
             "--round-sec" => round_sec = it.next().and_then(|v| v.parse().ok()).or(round_sec),
             "--min-round-age" => {
@@ -1307,7 +1352,9 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let daily_loss_usd = pick(
         max_daily_loss,
         env.num::<Decimal>("BK_MAX_DAILY_LOSS"),
-        None,
+        // E26 (§4.2): the [risk] drawdown key IS this budget's TOML face —
+        // one budget, resolved through the one chain, never a second counter.
+        file.risk.max_daily_drawdown_usd,
         daily_loss_defaults.max_daily_loss_usd,
     );
     let daily_loss_pct = pick(
@@ -1557,6 +1604,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         max_positions,
         daily_loss_usd: daily_loss_usd.value,
         daily_loss_pct: daily_loss_pct.value,
+        daily_loss_source: daily_loss_usd.source,
         daily_loss_echo,
         engine,
         min_round_age,
@@ -1585,6 +1633,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         no_order_log,
         position_log,
         no_position_log,
+        no_intent_audit,
         allow_shared_data,
         market_plugin,
         discovery,
@@ -1623,6 +1672,13 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             strategy_dir
                 .or_else(|| env.text("BK_STRATEGY_DIR"))
                 .or_else(default_strategy_dir)
+        },
+        lua_strategy_dir: if no_lua_strategy_dir {
+            None
+        } else {
+            lua_strategy_dir
+                .or_else(|| env.text("BK_LUA_STRATEGY_DIR"))
+                .or_else(default_lua_strategy_dir)
         },
         event_archive,
         no_event_archive,
@@ -1943,6 +1999,35 @@ async fn main() -> anyhow::Result<()> {
     for line in &args.orderbook_stale_echo {
         eprintln!("blitzkrieg-core: {line}");
     }
+    // E26 (§4): the systemic risk limits in force, resolved from the config
+    // file's [risk] section — this Epic's only wired input — and echoed
+    // unconditionally like every other budget above: the factory posture
+    // (all nine off, §4.1) must be visible in the boot log, not greppable.
+    // The set is then handed to the core through `RiskConfig`, the one
+    // hand-off `RiskGate::new` already makes.
+    let systemic = blitzkrieg_core::risk::limits::SystemicRiskLimits::from_file(&file.risk);
+    // E26 (§4.4): the drawdown bound on the readout names the TRUE layer that
+    // armed the budget. The resolver already picked CLI > env > [risk] > the
+    // compiled default for the daily-loss breaker — the matrix must agree
+    // with what it prints, not silently claim `default` (or `toml`) for a
+    // number a flag overrode.
+    let systemic = {
+        let mut s = systemic;
+        s.account.max_daily_drawdown_usd = if args.daily_loss_usd > Decimal::ZERO {
+            blitzkrieg_core::risk::limits::Bound::new(
+                args.daily_loss_usd,
+                args.daily_loss_source.into(),
+            )
+        } else {
+            blitzkrieg_core::risk::limits::Bound::off()
+        };
+        s
+    };
+    let explicit_ladder: Vec<blitzkrieg_core::arbitration::LadderStep> =
+        file.risk.ladder.iter().map(|row| row.to_step()).collect();
+    for line in systemic.report_lines() {
+        eprintln!("blitzkrieg-core: {line}");
+    }
     // #269: same reason again — "is the evolution evaluator running?" is the
     // question an incident responder asks first, and it used to be answerable
     // only from the IPC status, never from the boot log.
@@ -2105,6 +2190,11 @@ async fn main() -> anyhow::Result<()> {
             // #202: the same bound as a share of the account (0 = off).
             max_order_notional_pct: args.max_order_notional_pct,
             max_open_notional_usd: args.max_open_notional,
+            // E26 (§4): the systemic limits resolved from the config file's
+            // [risk] section (factory = all off, §4.1), plus an explicit
+            // [[risk.ladder]] when the operator opted in (§4.3).
+            systemic,
+            explicit_ladder,
             ..Default::default()
         },
         dry_seed_balance: args.seed_balance,
@@ -2122,8 +2212,10 @@ async fn main() -> anyhow::Result<()> {
         allow_zero_strategies: args.allow_zero_strategies,
         strategy_state_path: args.strategy_state,
         strategy_dir: args.strategy_dir,
+        lua_strategy_dir: args.lua_strategy_dir,
         markets: args.markets,
         auto_exits_enabled: args.auto_exits,
+        intent_audit_enabled: !args.no_intent_audit,
         engine_enabled: args.engine,
         min_shares,
         max_shares,

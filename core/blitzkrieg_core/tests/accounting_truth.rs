@@ -108,6 +108,7 @@ fn req(side: Side, size: Decimal, price: Decimal, key: &str) -> OrderRequest {
         asset: "BTC".into(),
         direction: "up".into(),
         round_slot: 1,
+        account_id: blitzkrieg_core::model::default_account_id(),
     }
 }
 
@@ -126,6 +127,7 @@ fn fill(order_id: &str, trade: &str, side: Side, price: Decimal, size: Decimal) 
         ts_ms: 0,
         tx_hash: None,
         maker: Some(true),
+        account_id: blitzkrieg_core::model::default_account_id(),
     }
 }
 

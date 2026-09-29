@@ -67,6 +67,15 @@ pub struct CoreConfig {
     /// directory (auto-load off). Load failures are reported and skipped,
     /// never fatal — a broken file must not brick the kernel.
     pub strategy_dir: Option<String>,
+    /// E30 (§6.4): directory scanned at startup for Lua strategy PACKAGES
+    /// (directories carrying `manifest.json`). Same discipline as
+    /// `strategy_dir`: every valid package LOADS and registers DISABLED; the
+    /// enable decision comes from the persisted set plus `--enable-strategy`.
+    /// Deliberately SEPARATE from `strategy_dir` — that path is the dylib
+    /// scanner's root, and Lua packages are never dylibs (§6.4: mixing them
+    /// in would blur the measurement fixtures' semantics). `None` = off;
+    /// default `user_layer/strategies_lua` under the repo.
+    pub lua_strategy_dir: Option<String>,
     /// Where the effective enabled-set is recorded so runtime toggles and boot
     /// flags survive a restart (`data/strategy-state.json` in production; see
     /// [`crate::strategy_state`]). `None` disables persistence — the backtester
@@ -230,6 +239,11 @@ pub struct CoreConfig {
     /// could have repriced live fills with no code objecting. Default `false`:
     /// only the backtester sets it.
     pub fee_schedule_replay: bool,
+    /// E25 (#331): write the intent-audit trail (`data/audit/intents.jsonl` +
+    /// throttled `INTENT_DECISION` pushes). The ARBITRATION GATES always run;
+    /// this silences only the WRITES (`--no-intent-audit`), which is exactly
+    /// what P1's with/without-baseline double-run proves off the trading path.
+    pub intent_audit_enabled: bool,
 }
 
 impl CoreConfig {
@@ -311,8 +325,23 @@ impl CoreConfig {
     pub fn install_engine(&self, core: &mut Core) -> Result<(), String> {
         core.enable_engine(crate::engine::Engine::new(self.engine_config()));
         self.load_strategy_dir(core);
+        self.load_lua_strategy_dir(core);
         for name in &self.enabled_strategies {
-            if !core.set_strategy_enabled(name, true) {
+            // E27 (§8.2): the startup `--enable-strategy` request runs through
+            // the SAME handshake as `strategy.enable`: a strategy the active
+            // plugin cannot serve is SKIPPED with an ERROR line — never
+            // enabled silently, never able to trade in a market it declared
+            // itself unfit for.
+            let (found, applied, refusal) = core.set_strategy_enabled_checked(name, true);
+            if let Some(reason) = refusal {
+                tracing::error!(
+                    strategy = name,
+                    reason = reason,
+                    "startup enable refused by the market-mode handshake; strategy skipped"
+                );
+                continue;
+            }
+            if !found || !applied {
                 tracing::warn!(
                     strategy = name,
                     "unknown strategy requested at startup; ignored"
@@ -421,7 +450,11 @@ impl CoreConfig {
             // path order alone still makes the first copy the one that wins.
             libs.sort();
             for path in libs {
-                let receipt = core.load_strategy_lib(&path.to_string_lossy());
+                // E27 (§8.2 row 1): the startup scan is the LOG-ONLY handshake
+                // site — an incompatible library registers disabled with the
+                // mismatch on its receipt; the enable gate is where refusal
+                // happens.
+                let receipt = core.load_strategy_lib_scan(&path.to_string_lossy());
                 // The success receipt is exactly "<name>@<version> registered
                 // into the engine dispatch…"; a duplicate registration is
                 // REJECTED with a message that itself contains the word
@@ -447,6 +480,34 @@ impl CoreConfig {
         #[cfg(not(feature = "strategy-loading"))]
         {
             let _ = core;
+        }
+    }
+
+    /// E30 (§6.6): scan `lua_strategy_dir` for Lua strategy packages and
+    /// register each one DISABLED — the Lua mirror of `load_strategy_dir`.
+    /// Load failures are reported and skipped, never fatal; a duplicate name
+    /// is skipped (the first package in sorted order wins, like dylibs).
+    fn load_lua_strategy_dir(&self, core: &mut Core) {
+        let Some(dir) = &self.lua_strategy_dir else {
+            return;
+        };
+        for pkg in
+            crate::strategy_engine::lua_loader::discover_lua_packages(std::path::Path::new(dir))
+        {
+            let receipt = core.load_lua_package_inner(&pkg, false);
+            if receipt.contains("already registered") {
+                eprintln!(
+                    "blitzkrieg-core: lua strategy auto-load skipped (duplicate): {}",
+                    pkg.display()
+                );
+                continue;
+            }
+            let ok = receipt.contains("registered into the engine dispatch");
+            eprintln!(
+                "blitzkrieg-core: lua strategy auto-load {}: {}",
+                if ok { "ok" } else { "FAILED" },
+                receipt
+            );
         }
     }
 }
@@ -596,11 +657,13 @@ impl Default for CoreConfig {
             breaker_cooldown_sec: 300,
             round_duration_sec: 900,
             auto_exits_enabled: true,
+            intent_audit_enabled: true,
             engine_enabled: false,
             assets: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
             enabled_strategies: Vec::new(),
             disabled_strategies: Vec::new(),
             strategy_dir: None,
+            lua_strategy_dir: None,
             strategy_state_path: None,
             requested_strategies: Vec::new(),
             allow_zero_strategies: false,
@@ -761,7 +824,7 @@ fn fee_quote_at(
 
 /// One position selected by `Core::flatten`, in the order its destructuring
 /// loop consumes: id, token, condition, shares, strategy, asset, direction,
-/// current price.
+/// current price, account id.
 type FlattenTarget = (
     String,
     String,
@@ -771,11 +834,12 @@ type FlattenTarget = (
     String,
     String,
     Decimal,
+    AccountId,
 );
 
 /// One due `maker_then_taker` order selected by `Core::tick`, in the order its
 /// destructuring loop consumes: id, side, remaining, token, condition,
-/// strategy, asset, direction, round slot, maker timeout.
+/// strategy, asset, direction, round slot, maker timeout, account id.
 type EscalationTarget = (
     String,
     Side,
@@ -787,6 +851,7 @@ type EscalationTarget = (
     String,
     i64,
     i64,
+    AccountId,
 );
 
 /// Append-only journal of the OME's applied-fill idempotency table (issue #178).
@@ -984,11 +1049,19 @@ const EXIT_REASON_TABLE_MAX: usize = 64;
 pub struct Core {
     config: CoreConfig,
     ome: Ome,
-    ledger: Ledger,
+    /// E28 (§9.3): the per-account money truth. "The ledger" is now a lookup
+    /// keyed by the order/request's `account_id` at every money-moving site —
+    /// the active account's book stands in where no order context exists
+    /// (seeding, equity views, the audit's cash identity). `Ledger` itself is
+    /// UNTOUCHED: reserve/release/settle keep their exact signatures.
+    accounts: crate::account::AccountLedgers,
     risk: RiskGate,
     /// Per-strategy consecutive-loss breakers (KI-10 / D-18 A). The daily loss
     /// cap and kill switch stay global — see [`LossBreakers`].
     breaker: LossBreakers,
+    /// E25 (#331): the intent-audit sink — one JSONL line per arbitrated
+    /// suggestion plus the throttled `INTENT_DECISION` push state (§3.4).
+    intent_audit: crate::arbitration::AuditSink,
     positions: PositionManager,
     books: HashMap<TokenId, Book>,
     /// Exit reason chosen for an in-flight closing SELL, keyed by token id, so a
@@ -1018,6 +1091,16 @@ pub struct Core {
     /// Crate-visible so the replay driver can host strategies without going
     /// through the loader path (the kernel ships none to load).
     pub(crate) engine: Option<crate::engine::Engine>,
+    /// E27 (§8.2): market-mode declarations of loaded user strategies, keyed
+    /// by strategy name. In-tree strategies and libraries without a
+    /// declaration are ABSENT = undeclared = the handshake does not apply
+    /// (§8.1 — every 0.2 library's state).
+    strategy_declarations: HashMap<String, Vec<blitzkrieg_strategy_api::StrategyMode>>,
+    /// E27 (§8.2): the active plugin's declaration snapshot, injected by the
+    /// server assembly BEFORE any strategy is loaded or enabled, so all three
+    /// handshake sites judge against the same view. `None` (backtester,
+    /// tests) leaves the handshake inert: nothing to be incompatible with.
+    plugin_modes: Option<crate::market::compat::PluginModes>,
     /// Optional Rust-native feed handle (P4); set when `--feed-ws` is enabled.
     feed: Option<std::sync::Arc<dyn blitzkrieg_market_api::SubscriptionControl>>,
     /// Extension registry (plugin lifecycle).
@@ -1127,10 +1210,45 @@ struct CloseCredential {
     /// was recorded: a reversed WIN had reset the streak, and that is the only
     /// recoverable value (retract restores it).
     streak_before: u32,
+    /// E26 (§4.2): the ACCOUNT-level streak's count just before this close —
+    /// the same recovery fact for the reserved `__account__:` key. Captured
+    /// even when the account bound is off (a zero count is the truth then),
+    /// so a close cannot choose whether to leave evidence.
+    account_streak_before: u32,
 }
 
 impl Core {
     pub fn new(config: CoreConfig) -> Self {
+        // E28 (§9.5): the account book loads from `user_layer/configs/
+        // accounts.toml` relative to the process cwd — a missing file is the
+        // zero-config 0.2 deployment (one `default` account), a MALFORMED one
+        // refuses the boot (fail-closed: a book that is not what the operator
+        // wrote must not trade). The credential probe runs here too, so
+        // `account.list` answers `credentialsLoaded` from boot-time facts.
+        // Tests (and embedders) inject a book directly via
+        // [`Core::with_account_book`] instead of touching the cwd.
+        let accounts = crate::account::config::load_account_ledgers(
+            std::path::Path::new(crate::account::config::ACCOUNTS_CONFIG_PATH),
+            now_ms(),
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "refusing to boot: {} (fail-closed: fix accounts.toml and restart)",
+                e.message
+            )
+        });
+        Self::with_account_book(config, accounts)
+    }
+
+    /// The constructor with the account book SUPPLIED (E28): a multi-account
+    /// book for tests without touching the real `user_layer/configs/
+    /// accounts.toml` the process cwd decides. Production always enters
+    /// through [`Core::new`], which fails closed on a malformed file; this
+    /// variant trusts the caller's book.
+    pub fn with_account_book(
+        config: CoreConfig,
+        mut accounts: crate::account::AccountLedgers,
+    ) -> Self {
         let trade_db = config
             .trade_log_path
             .as_ref()
@@ -1245,20 +1363,25 @@ impl Core {
                 }
             }
         });
-        let mut ledger = Ledger::new();
-        // A locally-settling mode has no venue to reconcile against; seed the
-        // local cash so the reserve/overspend gate is meaningful for embedders
-        // that don't seed it. Uses the predicate, not `== Dry`: the equality form
-        // is invisible to the compiler and left ReadOnly funding at zero.
+        // E28 (§9.5): a locally-settling mode has no venue to reconcile
+        // against; seed the local cash so the reserve/overspend gate is
+        // meaningful for embedders that don't seed it. Uses the predicate, not
+        // `== Dry`: the equality form is invisible to the compiler and left
+        // ReadOnly funding at zero. EVERY account is seeded (§9.3: the books
+        // are separate wallets, not one wallet with aliases); with one
+        // account this is exactly the single `set_balance` 0.2 ran.
         if config.mode.settles_locally() {
-            ledger.set_balance(config.dry_seed_balance);
+            accounts.seed_all(config.dry_seed_balance);
         }
+        let mut intent_audit = crate::arbitration::AuditSink::new(accounts.active_id().as_str());
+        intent_audit.enabled = config.intent_audit_enabled;
         Self {
             risk: RiskGate::new(config.risk.clone()),
             config,
             ome: Ome::new(),
-            ledger,
+            accounts,
             breaker,
+            intent_audit,
             positions,
             books: HashMap::new(),
             exit_reasons: HashMap::new(),
@@ -1267,6 +1390,8 @@ impl Core {
             exit_reasons_swept: 0,
             strategy_exits: Vec::new(),
             engine: None,
+            strategy_declarations: HashMap::new(),
+            plugin_modes: None,
             feed: None,
             extensions: {
                 use crate::extension::Extension;
@@ -1388,7 +1513,11 @@ impl Core {
                 }
                 let remaining = (o.size - o.filled_size).max(Decimal::ZERO);
                 let notional = o.price * remaining;
-                self.ledger.sync_buy_reservation(&o.order_id, notional);
+                // E28: the reservation re-commits cash in the ORDER'S OWN book —
+                // a restored order must never spend from another account.
+                if let Ok(l) = self.accounts.get_mut(&o.account_id) {
+                    l.sync_buy_reservation(&o.order_id, notional);
+                }
                 restored_notional += notional;
             }
             self.emit(Event::RiskAlert {
@@ -1525,7 +1654,7 @@ impl Core {
     pub fn set_balance(&mut self, b: Decimal) {
         if self.config.mode == Mode::Live {
             let ts = now_ms();
-            let previous = self.ledger.balance();
+            let previous = self.accounts.active_ledger().balance();
             if previous != b {
                 // The host realigns the ledger to the venue when there are no
                 // resting commitments, so a change between two reports is either
@@ -1541,11 +1670,109 @@ impl Core {
             }
             self.venue_free = Some((ts, b));
         }
-        self.ledger.set_balance(b);
+        // The venue realign targets the ACTIVE account's book (§9.5: the
+        // process-level default; 0.2 deployments have exactly one).
+        self.accounts.active_ledger_mut().set_balance(b);
     }
+    /// The active account's ledger (§9.5). Views and callers with no order
+    /// context read this; money-moving sites route by the order's own
+    /// `account_id` instead.
     pub fn ledger(&self) -> &Ledger {
-        &self.ledger
+        self.accounts.active_ledger()
     }
+
+    /// E28 (§9.3): the account book — IPC `account.*` reads it, the gates
+    /// route through it. Money-moving code does NOT go through this handle;
+    /// it routes by the order's own `account_id` at each site.
+    pub fn accounts(&self) -> &crate::account::AccountLedgers {
+        &self.accounts
+    }
+
+    /// E28 `account.list` (§12.1): one [`crate::ipc::schema::AccountView`]
+    /// per configured account, sorted by id (`AccountLedgers::account_list`
+    /// order). Every money field is the account's OWN book — this view is
+    /// how cross-account isolation is READ; `dayRealizedUsd` sums the
+    /// account's own closes of the current UTC day.
+    pub fn account_views(&self, now_ms: i64) -> Vec<crate::ipc::schema::AccountView> {
+        let today = crate::position::utc_day_index(now_ms);
+        self.accounts
+            .account_list()
+            .iter()
+            .map(|a| {
+                let id = &a.id;
+                let ledger = self
+                    .accounts
+                    .ledger_of(id)
+                    .expect("configured account always has a ledger");
+                let open_positions = self
+                    .positions
+                    .open_positions()
+                    .iter()
+                    .filter(|p| &p.account_id == id)
+                    .count();
+                let day_realized_usd = self
+                    .positions
+                    .closed_positions()
+                    .iter()
+                    .filter(|c| {
+                        &c.account_id == id
+                            && crate::position::utc_day_index(c.exited_at_ms) == today
+                    })
+                    .map(|c| c.net_pnl_usd)
+                    .sum();
+                let (status_tag, status_reason) = match &a.status {
+                    crate::account::AccountStatus::Suspended { reason } => {
+                        (a.status.wire_tag(), Some(reason.clone()))
+                    }
+                    _ => (a.status.wire_tag(), None),
+                };
+                crate::ipc::schema::AccountView {
+                    id: id.as_str().to_string(),
+                    name: a.name.clone(),
+                    market_type: a.market_type,
+                    status: status_tag.to_string(),
+                    status_reason,
+                    balance: ledger.balance(),
+                    available: ledger.available(),
+                    reserved: ledger.reserved(),
+                    credentials_loaded: a.credential_keys.loaded,
+                    open_positions,
+                    day_realized_usd,
+                    updated_at_ms: a.updated_at_ms,
+                }
+            })
+            .collect()
+    }
+
+    /// E28 `account.status` (§12.1): a runtime call may only TIGHTEN — a
+    /// loosening (`frozen -> active`, `read_only -> frozen`) is refused with
+    /// INVALID_PARAMS, because an unwind a single IPC call could undo is not
+    /// an unwind. Unfreezing is config + restart.
+    pub fn tighten_account_status(
+        &mut self,
+        id: &crate::account::AccountId,
+        status: crate::account::AccountStatus,
+        now_ms: i64,
+    ) -> CoreResult<()> {
+        self.accounts.require(id)?;
+        let current = self
+            .accounts
+            .account(id)
+            .expect("require checked existence")
+            .status
+            .clone();
+        if !current.can_tighten_to(&status) {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "account `{id}` is {current} — changing it to {status} would LOOSEN it; \
+                     tighten-only at runtime (unfreeze = config + restart)"
+                ),
+            ));
+        }
+        self.accounts.set_status(id, status, now_ms)
+    }
+
     pub fn ome(&self) -> &Ome {
         &self.ome
     }
@@ -1604,16 +1831,111 @@ impl Core {
         }
         ok
     }
+    // ── E27: market-mode compatibility handshake (§7.5 / §8.2) ──────────────
+
+    /// The handshake verdict for one declaration, as an associated function so
+    /// the load path can run it while the engine borrow is live (only
+    /// field-disjoint access is legal there). `None` = compatible: an
+    /// undeclared strategy participates not (§8.1 — every 0.2 library's
+    /// state), and no active plugin (backtester, tests) leaves nothing to
+    /// refuse against.
+    fn modes_refusal(
+        plugin: Option<&crate::market::compat::PluginModes>,
+        name: &str,
+        modes: &[blitzkrieg_strategy_api::StrategyMode],
+    ) -> Option<String> {
+        if modes.is_empty() {
+            return None;
+        }
+        let plugin = plugin?;
+        crate::market::compat::check_compatibility(name, modes, plugin).err()
+    }
+
+    /// The handshake verdict for a strategy already in the dispatch, by name.
+    pub(crate) fn compatibility_refusal(&self, name: &str) -> Option<String> {
+        match self.strategy_declarations.get(name) {
+            Some(modes) => Self::modes_refusal(self.plugin_modes.as_ref(), name, modes),
+            None => None,
+        }
+    }
+
+    /// Inject the active plugin's declaration snapshot (server assembly,
+    /// BEFORE any strategy is loaded or enabled, so all three §8.2 handshake
+    /// sites judge against the same view). `None` leaves the handshake inert
+    /// (backtester, tests).
+    pub fn set_plugin_modes(&mut self, modes: Option<crate::market::compat::PluginModes>) {
+        self.plugin_modes = modes;
+    }
+
+    /// The enable path with the handshake. Returns `(found, applied, reason)`:
+    /// `found` says the name exists in the dispatch, `applied` says the toggle
+    /// took effect, and `reason` carries the §8.2 diagnostic when the
+    /// handshake refused an enable. Disabling is never gated — standing down
+    /// is always allowed.
+    pub fn set_strategy_enabled_checked(
+        &mut self,
+        name: &str,
+        enabled: bool,
+    ) -> (bool, bool, Option<String>) {
+        let found = self.strategy_names().iter().any(|n| n == name);
+        if enabled
+            && found
+            && let Some(reason) = self.compatibility_refusal(name)
+        {
+            return (true, false, Some(reason));
+        }
+        let applied = self.set_strategy_enabled(name, enabled);
+        (found, applied, None)
+    }
+
+    /// E27 (§8.3): the `strategy.list` view for one strategy — the declared
+    /// modes as the §2.3 wire objects (`null` = undeclared), the compatible
+    /// flag and the refusal reason when incompatible. Declarations describe
+    /// live dispatch members only (recorded at load, cleared at unload).
+    pub fn strategy_compat_view(&self, name: &str) -> (serde_json::Value, bool, Option<String>) {
+        match self.strategy_declarations.get(name) {
+            None => (serde_json::Value::Null, true, None),
+            Some(modes) => {
+                let wire: Vec<serde_json::Value> = modes
+                    .iter()
+                    .map(blitzkrieg_strategy_api::modes::mode_wire_json)
+                    .collect();
+                let refusal = Self::modes_refusal(self.plugin_modes.as_ref(), name, modes);
+                (serde_json::Value::Array(wire), refusal.is_none(), refusal)
+            }
+        }
+    }
+
     /// Load an external v2 strategy shared library and register it into the
-    /// driving engine's live dispatch. It starts DISABLED — an explicit
-    /// `strategy.enable` is required before it can trade. External and in-tree
-    /// strategies implement the same full `EngineStrategy` contract; this is
-    /// only a loading difference. Requires `strategy-loading`.
+    /// driving engine's live dispatch (the IPC `strategy.load` entry). Runs
+    /// the E27 handshake in ENFORCE mode: a library whose declaration the
+    /// active plugin cannot serve is refused, not registered-and-unable-to-
+    /// enable (§8.2 row 2).
     pub fn load_strategy_lib(&mut self, path: &str) -> String {
+        self.load_strategy_lib_inner(path, true)
+    }
+
+    /// The startup scan path (`load_strategy_dir`). §8.2 row 1: the scan only
+    /// LOGS what was declared — it never refuses. An incompatible library
+    /// still registers (disabled) with the mismatch named on its receipt;
+    /// the enable handshake (both `strategy.enable` and the startup
+    /// `--enable-strategy` loop) is the gate.
+    fn load_strategy_lib_scan(&mut self, path: &str) -> String {
+        self.load_strategy_lib_inner(path, false)
+    }
+
+    fn load_strategy_lib_inner(&mut self, path: &str, enforce: bool) -> String {
         #[cfg(feature = "strategy-loading")]
         {
             use crate::strategy_engine::loader::load_foreign;
             let p = std::path::Path::new(path);
+            // E30 (§6.4): a DIRECTORY is a Lua package, never a dylib — route
+            // it through the Lua loader so the two stacks cannot load each
+            // other's artifacts (the dylib scanner owns `*.dylib`, the Lua
+            // loader owns `manifest.json` packages).
+            if p.is_dir() {
+                return self.load_lua_package_inner(p, enforce);
+            }
             let Some(engine) = self.engine.as_mut() else {
                 return "Failed: strategy engine not attached (load libraries after engine init)"
                     .into();
@@ -1622,6 +1944,28 @@ impl Core {
                 Ok(loaded) => {
                     let name = loaded.name.clone();
                     let version = loaded.version.clone();
+                    // E27 (§8.2): the handshake verdict BEFORE registration.
+                    // ENFORCE (the IPC `strategy.load` path): a library whose
+                    // declaration the active plugin cannot serve is refused,
+                    // not registered-and-silently-unable-to-enable. SCAN (the
+                    // startup `strategy_dir` walk): §8.2 row 1 — the scan only
+                    // logs, so the library registers disabled and the receipt
+                    // itself names the mismatch; the enable handshake is the
+                    // gate there. Either way the text names both sides (R-B).
+                    let refusal = Self::modes_refusal(
+                        self.plugin_modes.as_ref(),
+                        &name,
+                        &loaded.declared_modes,
+                    );
+                    if enforce && let Some(refusal) = refusal {
+                        // `refusal` already opens with "incompatible modes:" and
+                        // names both sides (§8.2) — prefix only the verdict tag.
+                        return format!("Failed: {refusal}");
+                    }
+                    let incompatible = match refusal {
+                        Some(r) => format!("; INCOMPATIBLE: {r}"),
+                        None => String::new(),
+                    };
                     // E2-b: the load receipt names the gates the library declared
                     // unnecessary, so an opt-out is visible before it is enabled.
                     // D-31: if the declaration carries a `time_left_sec` floor,
@@ -1657,13 +2001,24 @@ impl Core {
                         format!("dylib:{}", p.display()),
                     ) {
                         Ok(_) => {
+                            // E27: the declaration is recorded only on a
+                            // successful registration, so `strategy.list` and
+                            // the enable-time handshake describe live dispatch
+                            // members and nothing else.
+                            self.strategy_declarations
+                                .insert(name.clone(), loaded.declared_modes.clone());
                             // The new strategy's declaration must reach the manager
                             // too: a library loaded AFTER evolution was enabled would
                             // otherwise never get a unit, so it could not evolve at
                             // all until a restart.
                             self.rewire_hot_params(now_ms());
+                            // API 1.0 naming (DEV_V0_3 §2.2, E24 #330): the
+                            // receipt KEEPS its old text — the test above pins
+                            // it — and only APPENDS the protocol line. E24
+                            // handed this hunk to the service.rs hotspot
+                            // guardian (E25); it lands here.
                             format!(
-                                "{name}@{version} registered into the engine dispatch (disabled{declared}{evolvable})"
+                                "{name}@{version} registered into the engine dispatch (disabled{declared}{evolvable}{incompatible}); API 1.0 (line protocol 2)"
                             )
                         }
                         Err(reason) => format!("rejected: {reason}"),
@@ -1676,6 +2031,62 @@ impl Core {
         {
             let outcome = crate::strategy_engine::loader::load_strategy(std::path::Path::new(path));
             format!("{outcome:?}")
+        }
+    }
+
+    /// E30 (#336): load one Lua strategy package (a directory carrying
+    /// `manifest.json`) and register it into the live dispatch. The E27
+    /// handshake applies UNCHANGED — a Lua declaration the active plugin
+    /// cannot serve is refused in ENFORCE mode (IPC `strategy.load`) or
+    /// registered-disabled-with-verbatim-receipt in SCAN mode (the startup
+    /// walk), byte-identical to the dylib rows (§8.2). The receipt carries
+    /// the `(lua)` marker so an operator sees the runtime at a glance
+    /// (§6.6: 回执含 `(lua)` 标记). A poisoning breach inside the sandbox is
+    /// reported on the receipt; it is not a load failure (the strategy is
+    /// alive, it just refused to run).
+    fn load_lua_package_inner(&mut self, dir: &std::path::Path, enforce: bool) -> String {
+        use crate::strategy_engine::lua_loader::{LuaEngineAdapter, load_lua_package};
+        let Some(engine) = self.engine.as_mut() else {
+            return "Failed: strategy engine not attached (load libraries after engine init)"
+                .into();
+        };
+        match load_lua_package(dir) {
+            Ok(loaded) => {
+                let name = loaded.name.clone();
+                let version = loaded.version.clone();
+                let tunables = loaded.tunables.clone();
+                // E27 (§8.2): the SAME handshake verdict BEFORE registration.
+                let refusal =
+                    Self::modes_refusal(self.plugin_modes.as_ref(), &name, &loaded.declared_modes);
+                if enforce && let Some(refusal) = refusal {
+                    return format!("Failed: {refusal}");
+                }
+                let incompatible = match refusal {
+                    Some(r) => format!("; INCOMPATIBLE: {r}"),
+                    None => String::new(),
+                };
+                match engine.register_user_strategy(
+                    Box::new(LuaEngineAdapter::new(loaded.strategy, tunables)),
+                    format!("lua:{}", dir.display()),
+                ) {
+                    Ok(_) => {
+                        // E30: an ABSENT manifest.modes stays absent — an empty
+                        // Vec would render `modes: []` on strategy.list, and
+                        // §8.3's contract is `null = undeclared` (E27). Insert
+                        // only a package that actually declared modes.
+                        if !loaded.declared_modes.is_empty() {
+                            self.strategy_declarations
+                                .insert(name.clone(), loaded.declared_modes.clone());
+                        }
+                        self.rewire_hot_params(now_ms());
+                        format!(
+                            "{name}@{version} (lua) registered into the engine dispatch (disabled{incompatible})"
+                        )
+                    }
+                    Err(reason) => format!("rejected: {reason}"),
+                }
+            }
+            Err(reason) => format!("Failed: {reason}"),
         }
     }
 
@@ -1702,7 +2113,12 @@ impl Core {
             .as_mut()
             .map(|e| e.unregister_user_strategy(name))
         {
-            Some(Ok(true)) => format!("{name} unloaded (engine dispatch removed); library freed"),
+            Some(Ok(true)) => {
+                // E27: the declaration leaves with the instance — the
+                // handshake and `strategy.list` describe live members only.
+                self.strategy_declarations.remove(name);
+                format!("{name} unloaded (engine dispatch removed); library freed")
+            }
             Some(Ok(false)) => format!("not found: no strategy named {name}"),
             Some(Err(reason)) => format!("rejected: {reason}"),
             None => "Failed: strategy engine not attached".into(),
@@ -2331,8 +2747,20 @@ impl Core {
         // #202: the equity-relative sizing is a percentage of the account, and
         // the account is the ledger — pushed here, once per cycle, so a ticket
         // can never be sized against a balance the process no longer has.
-        engine.set_equity_usd(self.ledger.balance());
+        // E28: the engine sizes against the ACTIVE account's book (§9.4: the
+        // kernel drives strategies with no account of their own; per-account
+        // routing happens when each order passes through the gates).
+        engine.set_equity_usd(self.accounts.active_ledger().balance());
         let orders = engine.evaluate(now_ms);
+        // E30 (§6.3): drain the sandbox poison alerts now; each is raised as
+        // ONE RISK_ALERT after the engine borrow ends below — the message
+        // names the strategy, the sandbox itself refuses every later call
+        // from it, and the kernel keeps running (a poisoned strategy is
+        // quarantined, not a crash).
+        let poison_alerts = engine.drain_poison_alerts();
+        for (name, alert) in &poison_alerts {
+            tracing::error!(strategy = %name, %alert, "lua strategy poisoned; all further calls refused");
+        }
         // Close intents produced by strategies this cycle join the SAME exit
         // submission path as policy exits (handled in run_exit_checks).
         self.strategy_exits.extend(engine.drain_strategy_exits());
@@ -2342,14 +2770,157 @@ impl Core {
         for rec in engine.take_exemptions() {
             tracing::info!(target: "strategy", "{}", rec.audit_line());
         }
+        for (name, alert) in poison_alerts {
+            self.emit(Event::RiskAlert {
+                code: CoreErrorCode::Internal,
+                message: format!("lua strategy '{name}' poisoned: {alert}"),
+            });
+        }
         self.stats.signals += orders.len() as u64;
         let tokens: Vec<(String, crate::model::OrderRequest)> = orders
             .into_iter()
             .map(|o| (o.token_id.clone(), o))
             .collect();
         let mut placed = 0;
+        // ── v0.3 Wave 0 (#329): the E25 arbitration delegation seam ──────────
+        // E25 inserts its one-line per-intent delegation at the head of the
+        // loop below: `process_intent` (arbitration/) runs BEFORE the E16
+        // portfolio cap, so every strategy intent is arbitrated exactly once
+        // and the SAME Request that cleared the gates is the one handed to
+        // `self.place(...)`. Wave 0 lands the seam only — a comment, not a
+        // call: `arbitration/` does not exist yet and this PR is
+        // behavior-free by charter (deviation disclosed in the PR body).
         for (token, req) in tokens {
             let name = req.strategy.clone();
+            // ── E25 (#331): arbitration BEFORE the E16 portfolio cap — this is
+            // the seam Wave 0 planted. Every strategy intent is arbitrated
+            // exactly once through the four gates; a Rejected suggestion never
+            // reaches place()/OME, an Approved one is handed to the SAME path
+            // as before. The gates reuse the existing implementations
+            // (OrderIntent::validate / RiskGate / breakers / Ledger::reserve /
+            // effective_stop_pct), so no threshold has two truths (§3.3).
+            // E28 (§9.2): the intent is arbitrated in the account its own
+            // request names — the pipeline's reserve lands in THAT book, not
+            // the active one. The posture is judged before the request moves
+            // into the intent.
+            let account_id = req.account_id.clone();
+            let is_close = crate::risk::is_close_intent(&req.internal_key);
+            let account_entry_block = self
+                .accounts
+                .permits_order(&account_id, is_close)
+                .err()
+                .map(|e| e.message);
+            let intent = crate::arbitration::StrategyIntent::from_request(req);
+            let outcome = {
+                let round_tokens = self
+                    .engine
+                    .as_ref()
+                    .map(|e| e.round_token_ids())
+                    .unwrap_or_default();
+                let time_left_sec = self
+                    .engine
+                    .as_ref()
+                    .map(|e| e.last_time_left_sec())
+                    .unwrap_or(0);
+                // E28 (§9.3): the pipeline's reserve happens in THIS account's
+                // book. An unknown account is refused — no implicit empty book,
+                // ever (reverse acceptance C) — with the same Gate-2 accounting
+                // as an arbitration rejection.
+                match self.accounts.get_mut(&account_id) {
+                    Err(e) => crate::arbitration::Outcome {
+                        decision: crate::arbitration::Decision::Rejected {
+                            reason: crate::arbitration::RejectReason::AccountLimit,
+                            gate: crate::arbitration::GateId::Risk,
+                            detail: e.message,
+                        },
+                        gates: Vec::new(),
+                        latency_us: 0,
+                    },
+                    Ok(ledger) => {
+                        // E28: the #202 equity is a percentage of THIS
+                        // account's live balance, same rule as the submission
+                        // path.
+                        let equity = ledger.balance();
+                        // E26 (§4.2): the aggregates the systemic limits
+                        // judge — process-wide facts (the global caps are
+                        // kernel-wide), read from the books the kernel
+                        // already maintains. The day number is the #173
+                        // budget's own `daily_pnl`, so the kill-switch cap
+                        // and the daily-loss breaker can never disagree
+                        // about what today lost.
+                        let systemic_facts = crate::risk::limits::SystemicFacts {
+                            open_positions: self.positions.open_positions().len(),
+                            open_exposure_usd: self
+                                .positions
+                                .open_positions()
+                                .iter()
+                                .map(|p| p.cost_usd)
+                                .sum(),
+                            same_asset_exposure_usd: self
+                                .positions
+                                .open_positions()
+                                .iter()
+                                .filter(|p| p.asset == intent.request.asset)
+                                .map(|p| p.cost_usd)
+                                .sum(),
+                            day_realized_usd: self.positions.daily_pnl(),
+                        };
+                        let mut ctx = crate::arbitration::IntentCtx {
+                            round_tokens: &round_tokens,
+                            risk: &self.risk,
+                            breaker: &self.breaker,
+                            ledger,
+                            exit_cfg: &self.config.positions.exit,
+                            time_left_sec,
+                            now_ms,
+                            equity,
+                            account_entry_block,
+                            systemic_facts,
+                        };
+                        crate::arbitration::process_intent(&intent, &mut ctx)
+                    }
+                }
+            };
+            self.record_intent_decision(&intent, &outcome, now_ms);
+            if let crate::arbitration::Decision::Rejected {
+                reason,
+                gate,
+                detail,
+                ..
+            } = &outcome.decision
+            {
+                self.stats.place_rejected += 1;
+                let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                acc.rejected += 1;
+                // Bucket through the EXISTING classifier over the gate's own
+                // message, so the attribution vocabulary is the one place()
+                // would have written — the rejection happened earlier, the
+                // story an operator reads does not change (E9-c buckets).
+                let cause = classify_rejection(&crate::model::CoreError::new(
+                    crate::arbitration::reason_code(*reason),
+                    detail.clone(),
+                ));
+                *acc.rejection_causes.entry(cause).or_default() += 1;
+                tracing::info!(target: "strategy",
+                    "entry rejected: strategy={name} cause=arbitration gate={gate:?} reason={reason:?} detail={detail}");
+                continue;
+            }
+            let mut req = intent.request;
+            // E26 (§4.2): a systemic shrink rides the decision as MODIFIED —
+            // the audit names the bound that bit; here the reduced size is
+            // what gets placed. The pipeline never rewrote the request (the
+            // suggestion's provenance stays exactly what the engine emitted),
+            // so the shrink is applied at the one point that spends money.
+            if let crate::arbitration::Decision::Modified {
+                modification: crate::arbitration::Modification::SizeReduced { approved, .. },
+                ..
+            } = &outcome.decision
+            {
+                tracing::info!(target: "strategy",
+                    "entry modified: strategy={name} systemic shrinks {} -> {approved} shares",
+                    req.size);
+                req.size = *approved;
+            }
             // E16/#98 portfolio-level exposure cap (0 = off): the account's
             // total open commitment across ALL strategies is bounded too —
             // per-strategy caps partition it, but their sum needs its own
@@ -2786,7 +3357,9 @@ impl Core {
     ///   number describes NEW exposure, which is what "max possible loss on one
     ///   order" means for a binary-market BUY (the whole notional can go to 0).
     fn sizing_view(&self) -> serde_json::Value {
-        let equity = self.ledger.balance();
+        // E28: the sizing view describes the ACTIVE account's book (the panel
+        // is a per-session view of the session's account, §9.5).
+        let equity = self.accounts.active_ledger().balance();
         let globals = self.engine.as_ref().map(|e| e.global_sizing()).unwrap_or(
             crate::engine::EffectiveSizing {
                 size_usd: self.config.size_usd,
@@ -2976,6 +3549,9 @@ impl Core {
                 direction: p.direction.as_str().to_string(),
                 strategy: p.strategy.clone(),
                 token_id: p.token_id.clone(),
+                // E28 (§9.2): the account the position settles into — a field
+                // read, and the row the panel filters per account.
+                account_id: p.account_id.as_str().to_string(),
                 entry_price: p.entry_price,
                 current_price: p.current_price,
                 shares: p.shares,
@@ -3021,11 +3597,20 @@ impl Core {
         }
         // The #202 equity-relative cap is a percentage of the account as it is
         // AT SUBMISSION, so the gate is handed the live balance here — the same
-        // number the daily-loss breaker opens its day with.
-        self.risk.check_with_equity(&req, self.ledger.balance())?;
+        // number the daily-loss breaker opens its day with. E28: the account
+        // is the one the request names, and its posture gates the place too.
+        self.accounts
+            .permits_order(&req.account_id, is_close_intent(&req.internal_key))?;
+        // G5: a close settles into the book that PAID for the shares — a
+        // close order naming another account is refused, never re-routed.
+        self.refuse_cross_account_close(&req)?;
+        self.risk
+            .check_with_equity(&req, self.accounts.ledger_of(&req.account_id)?.balance())?;
         let id = self.new_order_id();
         if req.side == Side::Buy {
-            self.ledger.reserve(&id, req.price * req.size)?;
+            self.accounts
+                .get_mut(&req.account_id)?
+                .reserve(&id, req.price * req.size)?;
         }
         self.ome.submit(SubmitParams {
             order_id: id.clone(),
@@ -3083,7 +3668,11 @@ impl Core {
     ) -> CoreResult<()> {
         if let Some(o) = self.ome.get(id).cloned() {
             if o.side == Side::Buy {
-                self.ledger.release(id);
+                // E28: the reservation is released in the ORDER'S OWN book —
+                // a venue reject must never refund another account's cash.
+                if let Ok(l) = self.accounts.get_mut(&o.account_id) {
+                    l.release(id);
+                }
             }
             self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
             self.emit_order(id);
@@ -3130,6 +3719,9 @@ impl Core {
                         asset: o.asset.clone(),
                         direction: o.direction.clone(),
                         round_slot: o.round_slot,
+                        // E28 (§9.2): the escalated leg spends from the same
+                        // account as the maker order it replaces.
+                        account_id: o.account_id.clone(),
                     };
                     // The risk gate gets the first word here too (#261): a
                     // cross the book offers but this core may not afford is
@@ -3301,7 +3893,8 @@ impl Core {
         // A reservation is "stray" when the order behind it is not a tracked live
         // BUY: nobody can ever release it, so it is a permanent phantom hold.
         let stray_reservations: Vec<(OrderId, Decimal)> = self
-            .ledger
+            .accounts
+            .active_ledger()
             .reservations_snapshot()
             .into_iter()
             .filter(|(id, _)| {
@@ -3327,20 +3920,24 @@ impl Core {
             received += p.flows.proceeds_usd - p.flows.exit_fee_usd;
         }
         let open_positions = self.positions.open_positions().len();
+        // E28: the audit's cash identity describes the ACTIVE account's book
+        // (§9.5). Cross-account isolation is asserted by the dedicated gate
+        // (account-cross-isolation-check.mjs), not by widening this identity.
+        let active = self.accounts.active_ledger();
         AuditInput {
             now_ms,
             live: self.config.mode == Mode::Live,
             identity: CashIdentity {
-                balance: self.ledger.balance(),
+                balance: active.balance(),
                 // Settled but not yet redeemed: owed to us, not in the wallet.
                 receivable: self.settlement.receivable_usd(),
                 realized,
                 spent,
                 received,
             },
-            reserved: self.ledger.reserved(),
-            ledger_balanced: self.ledger.is_balanced(),
-            unfunded_reserved: self.ledger.unfunded_reserved(),
+            reserved: active.reserved(),
+            ledger_balanced: active.is_balanced(),
+            unfunded_reserved: active.unfunded_reserved(),
             open_buy_notional,
             open_buys,
             stray_reservations,
@@ -3490,7 +4087,9 @@ impl Core {
     /// can reach it.
     #[cfg(feature = "test-support")]
     pub fn ledger_mut(&mut self) -> &mut Ledger {
-        &mut self.ledger
+        // E28: tests poking the books target the ACTIVE account's ledger —
+        // the same default a 0.2 deployment has exactly one of.
+        self.accounts.active_ledger_mut()
     }
 
     /// Append one audit verdict (or a late-fill record) to the audit log.
@@ -3735,12 +4334,9 @@ impl Core {
     /// cancelled).
     fn apply_delta_effects(&mut self, d: FillDelta, now_ms: i64) {
         let px = d.price;
-        // A maker fill pays no fee; a taker fill pays the schedule in force on the
-        // fill's own notional. `d.role` is what the fill actually did — the old
-        // `match d.mode` read the REQUESTED policy, which charged a
-        // MakerThenTaker order the taker fee while its position record said maker.
-        // Fee applies to the incremental delta (not the cumulative), so partial
-        // fills charge exactly once per share; rollbacks (delta <= 0) charge none.
+        // The fee reads only the schedule in force (an &self read), so it is
+        // computed BEFORE the account's ledger is taken mutably (E28: the two
+        // borrows must not overlap).
         let mut fee_usd = Decimal::ZERO;
         if d.delta > Decimal::ZERO {
             let notional = px * d.delta;
@@ -3750,25 +4346,47 @@ impl Core {
                 self.live_taker_fee_pct(px)
             };
             fee_usd = (fee_pct / Decimal::ONE_HUNDRED) * notional;
+        }
+        // E28 (§9.3): every cash movement below lands in the fill's OWN book —
+        // the delta carries the account its tracked order was placed with.
+        // An unknown account here is a data-integrity fault (a fill arrived
+        // for an account this core never configured): it is logged and the
+        // fill is dropped rather than silently minting an implicit book
+        // (reverse acceptance C) — the position projection and the event
+        // emission below are skipped with it.
+        let Ok(ledger) = self.accounts.get_mut(&d.account_id) else {
+            tracing::error!(
+                order = %d.order_id,
+                account = %d.account_id.as_str(),
+                "fill for an unknown account dropped — the money fact is not booked"
+            );
+            return;
+        };
+        // A maker fill pays no fee; a taker fill pays the schedule in force on the
+        // fill's own notional. `d.role` is what the fill actually did — the old
+        // `match d.mode` read the REQUESTED policy, which charged a
+        // MakerThenTaker order the taker fee while its position record said maker.
+        // Fee applies to the incremental delta (not the cumulative), so partial
+        // fills charge exactly once per share; rollbacks (delta <= 0) charge none.
+        if d.delta > Decimal::ZERO {
+            let notional = px * d.delta;
             match d.side {
                 Side::Buy => {
                     // Release the notional reserved at the LIMIT price for these
                     // shares, and pay the execution price in cash.
-                    self.ledger
-                        .settle_buy_fill(&d.order_id, notional, d.limit_price * d.delta);
-                    self.ledger.charge_fee(fee_usd);
+                    ledger.settle_buy_fill(&d.order_id, notional, d.limit_price * d.delta);
+                    ledger.charge_fee(fee_usd);
                 }
-                Side::Sell => self.ledger.settle_sell_fill(notional, fee_usd),
+                Side::Sell => ledger.settle_sell_fill(notional, fee_usd),
             }
         } else {
             // Rollback/correction: revert the cash with no fee.
             match d.side {
-                Side::Buy => self.ledger.settle_sell_fill(-px * d.delta, Decimal::ZERO),
+                Side::Buy => ledger.settle_sell_fill(-px * d.delta, Decimal::ZERO),
                 // A reversed SELL gives the cash back to the venue; no reservation
                 // is involved (SELLs never reserve), so the release is zero.
                 Side::Sell => {
-                    self.ledger
-                        .settle_buy_fill(&d.order_id, -px * d.delta, Decimal::ZERO);
+                    ledger.settle_buy_fill(&d.order_id, -px * d.delta, Decimal::ZERO);
                 }
             }
         }
@@ -3780,7 +4398,7 @@ impl Core {
                 Some(o) if o.status.is_live() => o.price * self.ome.remaining(&d.order_id),
                 _ => Decimal::ZERO,
             };
-            let before = self.ledger.sync_buy_reservation(&d.order_id, target);
+            let before = ledger.sync_buy_reservation(&d.order_id, target);
             if before > Decimal::ZERO && target == Decimal::ZERO {
                 tracing::debug!(
                     order = %d.order_id,
@@ -3834,6 +4452,9 @@ impl Core {
                             expires_at_ms,
                             was_maker: d.role.is_maker(),
                             target_exit_price: None,
+                            // E28 (§9.2): the position belongs to the account
+                            // whose fill opened it.
+                            account_id: d.account_id.clone(),
                         };
                         self.positions.open(p, now_ms).id
                     }
@@ -3901,6 +4522,15 @@ impl Core {
                                     self.take_exit_reason(token).unwrap_or(ExitReason::Manual);
                                 let was_maker = d.role.is_maker();
                                 let streak_before = self.breaker.consecutive_losses(&d.strategy);
+                                // E26 (§4.2): the account streak's count just
+                                // before this close, from the SAME map — the
+                                // evidence a FAILED rollback needs, captured
+                                // whether or not the bound is armed.
+                                let account_streak_before = self.breaker.consecutive_losses(
+                                    &crate::risk::limits::account_breaker_key(
+                                        d.account_id.as_str(),
+                                    ),
+                                );
                                 if let Some(closed) =
                                     self.positions.close(&id, px, reason, was_maker, now_ms)
                                 {
@@ -3911,6 +4541,7 @@ impl Core {
                                                 restored,
                                                 closed: closed.clone(),
                                                 streak_before,
+                                                account_streak_before,
                                             },
                                         );
                                     }
@@ -4002,6 +4633,7 @@ impl Core {
             strategy: closed.strategy.clone(),
             token_id: closed.token_id.clone(),
             condition_id: closed.condition_id.clone(),
+            account_id: closed.account_id.clone(),
             net_pnl_usd: closed.net_pnl_usd,
             net_pnl_pct: closed.net_pnl_pct,
             daily_pnl_usd: self.positions.daily_pnl(),
@@ -4016,6 +4648,45 @@ impl Core {
                     self.config.breaker_cooldown_sec
                 ),
             });
+        }
+        // E26 (§4.2): the ACCOUNT-level streak lives in the SAME breaker map
+        // under the reserved `__account__:` key, with the account matrix's
+        // own pair (`max_consecutive_losses`, `cooldown_minutes` → secs; a
+        // cooldown the matrix does not name falls back to the shipped
+        // `breaker_cooldown_sec`). Off at the factory: nothing is recorded
+        // unless the operator armed the bound.
+        {
+            let account_limits = &self.risk.config().systemic.account;
+            let max_losses =
+                u32::try_from(account_limits.max_consecutive_losses.value().floor()).unwrap_or(0);
+            if max_losses >= 1 {
+                let cooldown_sec = if account_limits.cooldown_minutes.is_enabled() {
+                    i64::try_from(account_limits.cooldown_minutes.value() * Decimal::from(60))
+                        .unwrap_or(self.config.breaker_cooldown_sec)
+                } else {
+                    self.config.breaker_cooldown_sec
+                };
+                let account_key =
+                    crate::risk::limits::account_breaker_key(closed.account_id.as_str());
+                let account_tripped = self.breaker.record_with(
+                    &account_key,
+                    max_losses,
+                    cooldown_sec,
+                    closed.net_pnl_usd,
+                    now_ms,
+                );
+                if account_tripped {
+                    self.emit(Event::RiskAlert {
+                        code: CoreErrorCode::RiskRejected,
+                        message: format!(
+                            "consecutive-loss breaker tripped for account {}: {} losses, halting its new entries {}s",
+                            closed.account_id.as_str(),
+                            self.breaker.consecutive_losses(&account_key),
+                            cooldown_sec
+                        ),
+                    });
+                }
+            }
         }
         // #173: the daily budget freezes entries the moment its cap is reached —
         // reported here (not only on the next tick) so the freeze and the loss
@@ -4242,6 +4913,16 @@ impl Core {
         }
         self.breaker
             .retract(&closed.strategy, closed.net_pnl_usd, cred.streak_before);
+        // E26 (§4.2): the ACCOUNT-level streak unwinds symmetrically — the
+        // same retract, against the reserved `__account__:` key with the
+        // count captured before the close. A reversed loss drops the account
+        // streak (lifting a halt its own threshold caused); a reversed win
+        // restores the streak the win had reset.
+        self.breaker.retract(
+            &crate::risk::limits::account_breaker_key(closed.account_id.as_str()),
+            closed.net_pnl_usd,
+            cred.account_streak_before,
+        );
         tracing::warn!(
             order_id = %d.order_id,
             token = %d.token_id,
@@ -4391,12 +5072,12 @@ impl Core {
             if t.side != Side::Sell {
                 continue;
             }
-            let Some((position_id, held)) = self
+            let Some((position_id, held, position_account)) = self
                 .positions
                 .open_positions()
                 .iter()
                 .find(|p| p.token_id == t.token_id)
-                .map(|p| (p.id.clone(), p.shares))
+                .map(|p| (p.id.clone(), p.shares, p.account_id.clone()))
             else {
                 continue;
             };
@@ -4415,7 +5096,20 @@ impl Core {
                 // replay-only guard the fill choke point uses (#234, item 4).
                 (self.live_taker_fee_pct(t.price) / Decimal::ONE_HUNDRED) * notional
             };
-            self.ledger.settle_sell_fill(notional, fee_usd);
+            // E28: a manual (external) close settles into the POSITION'S OWN
+            // book — the proceeds belong to the account that paid for the
+            // shares. An unknown account is logged and skipped (no implicit
+            // book, no silent mint).
+            if let Ok(l) = self.accounts.get_mut(&position_account) {
+                l.settle_sell_fill(notional, fee_usd);
+            } else {
+                tracing::error!(
+                    token = %t.token_id,
+                    account = %position_account.as_str(),
+                    "external sell for an unknown account dropped — proceeds not booked"
+                );
+                continue;
+            }
             let role = if t.maker == Some(true) {
                 crate::model::OrderRole::Maker
             } else {
@@ -4731,6 +5425,61 @@ impl Core {
         self.note_error(&e, now_ms);
         self.emit_error_event(e);
     }
+
+    /// E25 (#331): ONE audit line per arbitrated suggestion — never folded,
+    /// never blocking (a failed append warns once and the trade goes on) —
+    /// plus AT MOST one `INTENT_DECISION` push per `(strategy, gate, reason)`
+    /// per second (§12.3): the PUSH folds, the audit does not.
+    fn record_intent_decision(
+        &mut self,
+        intent: &crate::arbitration::StrategyIntent,
+        outcome: &crate::arbitration::Outcome,
+        now_ms: i64,
+    ) {
+        let intent_json = serde_json::to_value(&intent.request).unwrap_or(serde_json::Value::Null);
+        let record = self.intent_audit.record(
+            now_ms,
+            intent.request.account_id.as_str(),
+            &intent.request.strategy,
+            &intent_json,
+            &outcome.decision,
+            &outcome.gates,
+            outcome.latency_us,
+        );
+        // The throttle key is (strategy, gate, reason); for a non-rejection the
+        // "reason" slot carries the status, so an approval storm folds too.
+        let (gate, key_reason) = match &outcome.decision {
+            crate::arbitration::Decision::Rejected { gate, reason, .. } => (
+                format!("{gate:?}").to_uppercase(),
+                format!("{reason:?}").to_uppercase(),
+            ),
+            _ => (
+                outcome
+                    .gates
+                    .last()
+                    .map(|g| format!("{:?}", g.gate).to_uppercase())
+                    .unwrap_or_else(|| "UNKNOWN".into()),
+                outcome.decision.status().to_string(),
+            ),
+        };
+        if let Some(count) =
+            self.intent_audit
+                .throttle(&intent.request.strategy, &gate, &key_reason, now_ms)
+        {
+            let push = crate::arbitration::AuditSink::push_for(&record, count);
+            self.emit(Event::IntentDecision {
+                account_id: record.account_id.clone(),
+                strategy: push.strategy,
+                intent_id: push.intent_id,
+                status: push.status,
+                gate: push.gate,
+                detail: push.detail,
+                ts_ms: push.ts_ms,
+                count: push.count,
+            });
+        }
+    }
+
     /// Emit an error event WITHOUT touching the slot, for a consequence whose
     /// cause is already recorded: the slot must keep showing the error an
     /// operator has to act on (the raw venue refusal), not the kernel's own
@@ -4755,8 +5504,11 @@ impl Core {
     /// the boundary is already counted in the new day.
     fn roll_daily_budget(&mut self, now_ms: i64) {
         // `balance` is already gross of local reservations — adding `reserved`
-        // here would double-count resting BUY commitments.
-        let equity = self.ledger.balance();
+        // here would double-count resting BUY commitments. E28: the daily
+        // budget opens on the ACTIVE account's equity (the kernel-wide daily
+        // loss state stays global, §9.3 — per-account loss attribution is the
+        // position book's, not the ledger's).
+        let equity = self.accounts.active_ledger().balance();
         if let Some(roll) = self
             .positions
             .roll_daily(now_ms, equity, self.equity_basis())
@@ -4940,6 +5692,36 @@ impl Core {
         outcome
     }
 
+    /// E28 (§9.2, G5): a CLOSE is inventory-bound — the open position for a
+    /// token belongs to exactly one account, and a close order naming another
+    /// account would settle money into a book that never paid for the shares.
+    /// Refused, never re-routed: re-routing would be the implicit-ledger
+    /// accident (§9.3) under a different name. Opens are unaffected (a BUY
+    /// commits its own book's cash); an exit for a token with NO open
+    /// position passes here and is handled by the fill projection as before.
+    fn refuse_cross_account_close(&self, req: &OrderRequest) -> CoreResult<()> {
+        if req.side != Side::Sell || !crate::risk::is_close_intent(&req.internal_key) {
+            return Ok(());
+        }
+        if let Some(p) = self
+            .positions
+            .open_positions()
+            .iter()
+            .find(|p| p.token_id == req.token_id)
+            && p.account_id != req.account_id
+        {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "cross-account close refused: position {} on token {} belongs to \
+                     account `{}`, the order names `{}`",
+                    p.id, p.token_id, p.account_id, req.account_id
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn place_gated(
         &mut self,
         req: OrderRequest,
@@ -4964,10 +5746,23 @@ impl Core {
                 ),
             ));
         }
+        // E28 Gate 2 (§9.1): the account's posture gates the place BEFORE the
+        // risk gates consult equity — only `Active` places new entries; closes
+        // pass every posture except `ReadOnly` (a freeze must never trap a
+        // position). This is the submission-path enforcement point; the
+        // arbitration pipeline carries the same check earlier for strategy
+        // intents (defense in depth, one vocabulary: ACCOUNT_LIMIT).
+        self.accounts
+            .permits_order(&req.account_id, is_close_intent(&req.internal_key))?;
+        // G5: a close settles into the book that PAID for the shares — a
+        // close order naming another account is refused, never re-routed.
+        self.refuse_cross_account_close(&req)?;
         // #202: the equity-relative per-order cap is a percentage of the account
         // AT SUBMISSION, so the gate is handed the live balance rather than a
-        // remembered copy of it.
-        self.risk.check_with_equity(&req, self.ledger.balance())?;
+        // remembered copy of it. E28: the account is the one the request names —
+        // an unknown account is refused, never implicitly created.
+        self.risk
+            .check_with_equity(&req, self.accounts.ledger_of(&req.account_id)?.balance())?;
 
         // Entry gates apply to opening BUY orders only; exits (SELL) are never
         // blocked by capacity, breaker or cooldowns.
@@ -5031,9 +5826,12 @@ impl Core {
 
         let id = self.new_order_id();
 
-        // Reserve BUY notional up front (prevents over-commitment).
+        // Reserve BUY notional up front (prevents over-commitment). E28: the
+        // reservation commits cash in the REQUEST'S OWN book.
         if req.side == Side::Buy {
-            self.ledger.reserve(&id, req.price * req.size)?;
+            self.accounts
+                .get_mut(&req.account_id)?
+                .reserve(&id, req.price * req.size)?;
         }
 
         self.ome.submit(SubmitParams {
@@ -5167,7 +5965,11 @@ impl Core {
                             }
                             None => {
                                 if order.side == Side::Buy {
-                                    self.ledger.release(id);
+                                    // E28: the refused taker's reservation is
+                                    // released in the ORDER'S OWN book.
+                                    if let Ok(l) = self.accounts.get_mut(&order.account_id) {
+                                        l.release(id);
+                                    }
                                 }
                                 self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
                                 // #180: a refusal is a first-class fact — it goes
@@ -5242,14 +6044,15 @@ impl Core {
         maker: bool,
         now_ms: i64,
     ) -> CoreResult<()> {
-        let (token, side) = match self.ome.get(id) {
-            Some(o) => (o.token_id.clone(), o.side),
+        let (token, side, account_id) = match self.ome.get(id) {
+            Some(o) => (o.token_id.clone(), o.side, o.account_id.clone()),
             None => return Err(CoreError::new(CoreErrorCode::UnknownOrder, id)),
         };
         let fill = Fill {
             order_id: id.into(),
             trade_id: Some(trade_id.to_string()),
             token_id: token,
+            account_id,
             side,
             price,
             size: cumulative,
@@ -5331,7 +6134,11 @@ impl Core {
             .ok_or_else(|| CoreError::new(CoreErrorCode::UnknownOrder, id))?;
         let was_live = order.status.is_live();
         if order.side == Side::Buy {
-            self.ledger.release(id);
+            // E28: the reservation is released in the ORDER'S OWN book — a
+            // cancel must never refund another account's cash.
+            if let Ok(l) = self.accounts.get_mut(&order.account_id) {
+                l.release(id);
+            }
         }
         self.ome.mark_terminal(id, OrderStatus::Cancelled, now_ms)?;
         // The venue may still hold the order resting: hand its id to the live
@@ -5424,11 +6231,16 @@ impl Core {
                     p.asset.clone(),
                     p.direction.as_str().to_string(),
                     p.current_price,
+                    // E28 (§9.2): the manual close spends from the position's
+                    // own account.
+                    p.account_id.clone(),
                 )
             })
             .collect();
         let mut closed = 0usize;
-        for (id, token, condition, shares, strategy, asset, direction, _current) in targets {
+        for (id, token, condition, shares, strategy, asset, direction, _current, account_id) in
+            targets
+        {
             // Already have a live sell for this token? skip.
             if self
                 .ome
@@ -5462,6 +6274,10 @@ impl Core {
                 asset,
                 direction,
                 round_slot: 0,
+                // E28 (§9.2): the closing sell spends from the position's own
+                // account — a cross-account flatten must never touch another
+                // book.
+                account_id,
             };
             if let Err(e) = self.place(order, 0, now_ms) {
                 self.emit_error(e);
@@ -5704,7 +6520,10 @@ impl Core {
                     );
                     return;
                 };
-                self.ledger.credit_redemption(payout);
+                // E28: settlement redemption credits the ACTIVE account's book
+                // (§9.3: settlement claims carry no account identity in 0.3 —
+                // the claim's cash lands where the process funder says).
+                self.accounts.active_ledger_mut().credit_redemption(payout);
                 tracing::info!(
                     claim = %result.id,
                     condition = %result.condition_id,
@@ -6107,11 +6926,24 @@ impl Core {
                     // The maker's own timeout, rebuilt from when it was
                     // armed: a re-armed clock waits the same interval again.
                     o.escalate_at_ms.unwrap_or(now_ms) - o.submitted_at_ms,
+                    // E28 (§9.2): the taker leg spends from the maker's account.
+                    o.account_id.clone(),
                 )
             })
             .collect();
-        for (id, side, remaining, token, condition, strategy, asset, direction, slot, timeout) in
-            due
+        for (
+            id,
+            side,
+            remaining,
+            token,
+            condition,
+            strategy,
+            asset,
+            direction,
+            slot,
+            timeout,
+            account_id,
+        ) in due
         {
             if remaining <= Decimal::ZERO {
                 continue;
@@ -6143,6 +6975,9 @@ impl Core {
                 asset,
                 direction,
                 round_slot: slot,
+                // E28 (§9.2): the escalated leg spends from the maker's own
+                // account.
+                account_id: account_id.clone(),
             };
             // The maker is about to be cancelled to make room for this leg, so
             // the risk gate gets the first word — the same gate `place` will
@@ -6238,6 +7073,9 @@ impl Core {
             strategy: String,
             asset: String,
             direction: String,
+            /// E28 (§9.2): the account the closing SELL spends from — the
+            /// position's own book, so an exit can never debit another account.
+            account_id: AccountId,
         }
 
         let mut jobs: Vec<ExitJob> = Vec::new();
@@ -6295,6 +7133,9 @@ impl Core {
                     strategy: pos.strategy.clone(),
                     asset: pos.asset.clone(),
                     direction: pos.direction.as_str().to_string(),
+                    // E28 (§9.2): the automated exit spends from the position's
+                    // own account.
+                    account_id: pos.account_id.clone(),
                 });
             }
         }
@@ -6342,6 +7183,9 @@ impl Core {
                 strategy: pos.strategy.clone(),
                 asset: pos.asset.clone(),
                 direction: pos.direction.as_str().to_string(),
+                // E28 (§9.2): the strategy-signal exit spends from the
+                // position's own account.
+                account_id: pos.account_id.clone(),
             });
         }
 
@@ -6389,6 +7233,9 @@ impl Core {
                     strategy: pos.strategy.clone(),
                     asset: pos.asset.clone(),
                     direction: pos.direction.as_str().to_string(),
+                    // E28 (§9.2): the residual re-close spends from the
+                    // position's own account.
+                    account_id: pos.account_id.clone(),
                 });
             }
         }
@@ -6439,6 +7286,9 @@ impl Core {
                 asset: job.asset,
                 direction: job.direction,
                 round_slot: 0,
+                // E28 (§9.2): the closing SELL spends from the position's own
+                // account (carried on the job from the position).
+                account_id: job.account_id,
             };
             // Record the intended exit reason so a full sell fill closes with it
             // (bounded and cleaned up by the close: issue #190).
@@ -6814,6 +7664,7 @@ mod books_mirror_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: slot,
+            account_id: crate::model::default_account_id(),
         };
         c.place(req, 0, now).unwrap();
         assert_eq!(c.positions().open_positions().len(), 1);
@@ -6910,6 +7761,7 @@ mod books_mirror_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: slot,
+            account_id: crate::model::default_account_id(),
         };
         let id = c.place(req, 0, now).unwrap().0;
         assert_eq!(
@@ -6981,6 +7833,7 @@ mod books_mirror_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: now / 1000 / 900,
+            account_id: crate::model::default_account_id(),
         };
         let id = c.place(req, 0, now).unwrap().0;
         // Ask 0.44 > limit 0.43: still resting after many feed ticks.
@@ -7040,6 +7893,7 @@ mod round_expiry_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: slot,
+            account_id: crate::model::default_account_id(),
         };
         // Ask 0.40 crosses the buy limit with enough depth: an honest FOK
         // fills at the walked price, opening the position under test.
@@ -7459,6 +8313,7 @@ mod tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -7864,6 +8719,7 @@ mod tests {
             ts_ms: 10,
             tx_hash: None,
             maker,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -8190,6 +9046,7 @@ mod tests {
             asset: asset.into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         };
         let lose_once = |c: &mut Core, asset: &str, token: &str| {
             // The entry is a FOK taker: it needs resting ask depth to fill.
@@ -9035,7 +9892,7 @@ mod strategy_dispatch_tests {
         assert_eq!(small.list_orders()[0].size, dec!(2));
         assert_eq!(
             small.engine.as_ref().unwrap().equity_usd(),
-            small.ledger.balance(),
+            small.ledger().balance(),
             "the engine must have been handed the ledger's own balance"
         );
 
@@ -10003,6 +10860,7 @@ mod fill_model_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -10341,6 +11199,7 @@ mod account_precision_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -10360,6 +11219,7 @@ mod account_precision_tests {
             // policy would produce. A test that needs the VENUE to overrule the
             // policy uses `fill_as` below.
             maker: None,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -11177,6 +12037,7 @@ mod trading_capability_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -11384,6 +12245,7 @@ mod trading_capability_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 }
@@ -11444,6 +12306,7 @@ mod settlement_service_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -11998,6 +12861,7 @@ mod exit_reason_table_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -12175,6 +13039,7 @@ mod exit_reason_table_tests {
                     expires_at_ms: 9_999,
                     was_maker: false,
                     target_exit_price: None,
+                    account_id: crate::model::default_account_id(),
                 },
                 1_000,
             );
@@ -12327,6 +13192,7 @@ mod audit_fix_tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 1,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -12351,6 +13217,7 @@ mod audit_fix_tests {
             // Maker-mode orders with no venue report → the policy decides, and
             // these fixtures are exactly what the policy would produce.
             maker: None,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -12604,5 +13471,99 @@ mod audit_fix_tests {
         assert_eq!(c.ledger().balance(), SEED + dec!(-2));
 
         let _ = std::fs::remove_file(&log);
+    }
+
+    // ── E28 (G5): a cross-account close is refused, never re-routed ─────────
+
+    /// A two-account core built through the injection constructor — no test
+    /// touches the real `user_layer/configs/accounts.toml` the cwd decides.
+    /// Both books are seeded (§9.3: separate wallets, not aliases).
+    fn two_book_core() -> Core {
+        let book = crate::account::AccountLedgers::new(
+            vec![
+                crate::account::Account {
+                    id: crate::account::AccountId::from("default"),
+                    name: "default".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    updated_at_ms: 0,
+                },
+                crate::account::Account {
+                    id: crate::account::AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    updated_at_ms: 0,
+                },
+            ],
+            crate::account::AccountId::from("default"),
+        );
+        let cfg = CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: SEED,
+            auto_exits_enabled: false,
+            ..Default::default()
+        };
+        Core::with_account_book(cfg, book)
+    }
+
+    #[test]
+    fn a_cross_account_close_is_refused_not_rerouted() {
+        let mut c = two_book_core();
+        // The position belongs to `default` (the req helper names it).
+        open_maker_position(&mut c, dec!(0.40), dec!(10), 1);
+
+        // The WRONG account tries the close: refused, naming both sides.
+        let mut wrong = req(
+            Side::Sell,
+            FillPolicy::Taker,
+            dec!(0.90),
+            dec!(10),
+            "exit:tok:StopLoss",
+        );
+        wrong.account_id = crate::account::AccountId::from("paper");
+        let err = c.place(wrong, 0, 2).unwrap_err();
+        assert!(
+            err.message.contains("cross-account close refused"),
+            "the refusal must name the fault: {err}"
+        );
+        assert!(
+            err.message.contains("`default`") && err.message.contains("`paper`"),
+            "the refusal must name whose money is whose: {err}"
+        );
+        // Nothing settled: the position still open.
+        assert_eq!(c.positions().open_positions().len(), 1);
+
+        // The RIGHT account closes: a bid rests so the dry taker fills.
+        c.book_snapshot("tok", vec![(dec!(0.90), dec!(500))], vec![], 3);
+        let right = req(
+            Side::Sell,
+            FillPolicy::Taker,
+            dec!(0.90),
+            dec!(10),
+            "exit:tok:Manual2", // a different key: the refused one is in cooldown
+        );
+        c.place(right, 0, 4).unwrap();
+        assert!(
+            c.positions().open_positions().is_empty(),
+            "the position's own account may close it"
+        );
+        // The proceeds landed in the book that PAID for the shares; the
+        // other book never moved.
+        let paper = c
+            .accounts()
+            .ledger_of(&crate::account::AccountId::from("paper"))
+            .unwrap()
+            .balance();
+        assert_eq!(paper, SEED, "paper's book is untouched by default's close");
+        assert!(
+            c.ledger().balance() > SEED,
+            "default's book took the profit"
+        );
     }
 }

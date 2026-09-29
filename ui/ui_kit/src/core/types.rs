@@ -417,6 +417,22 @@ pub struct StrategyRow {
     pub name: String,
     #[serde(default)]
     pub enabled: bool,
+    /// E27 (§8.3): the strategy's declared modes as the §2.3 wire objects;
+    /// `null` = undeclared (every 0.2 library's state). Older cores omit the
+    /// field entirely — the default keeps them rendering as before.
+    #[serde(default)]
+    pub modes: serde_json::Value,
+    /// E27 (§8.3): false only when the handshake WOULD refuse this strategy
+    /// against the active plugin. Absent (older cores) = compatible.
+    #[serde(default = "default_true")]
+    pub compatible: bool,
+    /// E27 (§8.3): the refusal reason when incompatible, else null.
+    #[serde(default)]
+    pub incompatible_reason: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -454,6 +470,18 @@ pub struct MarketPluginRow {
     pub enabled: bool,
     #[serde(default)]
     pub active: bool,
+    /// E27 (§8.3): the structure the plugin declares, when its
+    /// `declare_modes()` names the SAME concrete structure unanimously; null
+    /// = unspecified (undeclared / multi-structure / structure-less). Older
+    /// cores omit — the default renders them as before.
+    #[serde(default)]
+    pub structure: Option<String>,
+    /// E27 (§8.3): union of the declared capability bits (raw value).
+    #[serde(default)]
+    pub capabilities_bits: u64,
+    /// E27 (§8.3): readable names of the capability bits, in bit order.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

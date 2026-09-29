@@ -6,8 +6,8 @@
 
 use blitzkrieg_market_api::{
     BoxFuture, CoreError, CoreErrorCode, CoreResult, DataFeed, DataFeedConfig, DiscoveryConfig,
-    ExecutorConfig, MarketDiscovery, MarketHost, MarketPlugin, MarketType, NetCheckReport,
-    OrderExecutor, TokenId,
+    ExecutorConfig, MarketCapabilities, MarketDiscovery, MarketHost, MarketMode, MarketPlugin,
+    MarketStructure, MarketType, NetCheckReport, OrderExecutor, TokenId,
 };
 use std::sync::Arc;
 
@@ -31,6 +31,29 @@ impl MarketPlugin for PolymarketPlugin {
     }
     fn market_type(&self) -> MarketType {
         MarketType::Prediction
+    }
+    /// The market modes this plugin actually serves (§7.3): one mode —
+    /// prediction on the binary outcome wheel (one settlement per round, two
+    /// complementary tokens). Capabilities are declared from what THIS
+    /// extension exercises, not what the venue advertises (§7.2: the design
+    /// doc does not guess the bitmap for us):
+    ///   - `websocket_feed`: market data reaches the core as PUSHED callbacks
+    ///     — the feed task drives `on_book`/`on_spot` from its own connection
+    ///     and a strategy never polls. The venue's market WS channel is
+    ///     deliberately NOT used (see `feed.rs` for the bandwidth verdict);
+    ///     the bit describes the delivery contract at the seam, not the venue
+    ///     transport.
+    ///   - `level2_snapshot`: `POST /books` returns full depth per token.
+    ///   - `post_only`: the executor's maker path posts GTC limits through the
+    ///     SDK's `post_only` flag (`venue.rs`).
+    fn declare_modes(&self) -> Vec<MarketMode> {
+        vec![MarketMode {
+            market_type: MarketType::Prediction,
+            structure: Some(MarketStructure::BinaryOutcomeWheel),
+            capabilities: MarketCapabilities::WEBSOCKET_FEED
+                | MarketCapabilities::LEVEL2_SNAPSHOT
+                | MarketCapabilities::POST_ONLY,
+        }]
     }
     fn data_feed(&self) -> Option<&dyn DataFeed> {
         Some(&POLY_DATA_FEED)

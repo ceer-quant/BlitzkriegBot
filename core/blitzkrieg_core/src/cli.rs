@@ -166,6 +166,13 @@ pub const FLAGS: &[FlagSpec] = &[
          #199 latch refuses the boot (exit 1). For fixtures only.",
     ),
     flag(
+        "--no-intent-audit",
+        "",
+        "E25: silence the intent-audit WRITES (data/audit/intents.jsonl + \
+         INTENT_DECISION pushes). The arbitration gates always run; this is the \
+         byte-equivalence knob for the with/without baseline double-run.",
+    ),
+    flag(
         "--update-check",
         "<bool>",
         "Allow the kernel to contact the release feed (VERSIONING.md §7). Default \
@@ -391,6 +398,18 @@ pub const FLAGS: &[FlagSpec] = &[
          loaded (default `user_layer/strategies`; `none` = load none).",
     ),
     flag("--no-strategy-dir", "", "Load no external strategies."),
+    flag(
+        "--lua-strategy-dir",
+        "<path|none>",
+        "Directory scanned for Lua strategy packages (directories with \
+         manifest.json), every package found is loaded (E30; default \
+         `user_layer/strategies_lua`; `none` = load none).",
+    ),
+    flag(
+        "--no-lua-strategy-dir",
+        "",
+        "Load no Lua strategy packages.",
+    ),
     flag(
         "--shadow-evolution",
         "",

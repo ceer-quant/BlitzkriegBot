@@ -6,6 +6,7 @@
 //! contract that outlives it.
 
 use crate::position::ClosedPosition;
+use blitzkrieg_market_api::{AccountId, default_account_id};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -20,6 +21,12 @@ pub struct TradeRecord {
     pub direction: String,
     pub token_id: String,
     pub condition_id: String,
+    /// E28 (§9.2): the account the trade settled in. A row written before E28
+    /// carries no `accountId` and reads as `default` (serde default — no
+    /// migration); every new record writes the field explicitly (read old,
+    /// write new).
+    #[serde(default = "default_account_id")]
+    pub account_id: AccountId,
     #[serde(with = "crate::decimal")]
     pub entry_price: Decimal,
     #[serde(with = "crate::decimal")]
@@ -71,6 +78,7 @@ impl TradeRecord {
             direction: c.direction.as_str().to_string(),
             token_id: c.token_id.clone(),
             condition_id: c.condition_id.clone(),
+            account_id: c.account_id.clone(),
             entry_price: c.entry_price,
             exit_price: c.exit_price,
             shares: c.shares,
@@ -291,6 +299,7 @@ mod tests {
             entry_role: OrderRole::Maker,
             exit_role: OrderRole::Taker,
             dust_shares: Decimal::ZERO,
+            account_id: crate::model::default_account_id(),
         }
     }
 

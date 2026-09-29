@@ -56,6 +56,10 @@ rust_decimal_macros = "1"
 libloading = { version = "0.8", optional = true }
 # Frozen C ABI for user-layer dynamic strategies (path dep; rlib+cdylib).
 blitzkrieg-strategy-api = { path = "../../user_layer/strategy_api" }
+# E30 (#336): the Lua 5.4 sandbox host. The mlua tree is already in
+# Cargo.lock (Wave 0 #329); this edge adds NO new package, only the named
+# path dependency the loader/adapter import (§6.4).
+blitzkrieg-lua-runtime = { path = "../../user_layer/lua_runtime" }
 # THE shared strategy reference implementation (PR-B): the three builtin
 # strategies' trackers/evaluators/knob tables live here, so the kernel wrapper
 # and every external cdylib run the same code and cannot drift.

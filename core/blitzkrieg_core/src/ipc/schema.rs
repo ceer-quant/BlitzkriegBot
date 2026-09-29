@@ -11,6 +11,8 @@
 //!
 //! Node never sends a private key; the core loads credentials itself.
 
+use crate::account::AccountStatus;
+use crate::kline::{Kline, KlineInterval};
 use crate::model::*;
 use crate::ome::FillDelta;
 use rust_decimal::Decimal;
@@ -207,6 +209,114 @@ pub mod method {
     pub const SYSTEM_UPDATE_CONFIGURE: &str = "system.update.configure";
     /// One manual update check (the UI's "check for updates" button).
     pub const SYSTEM_UPDATE_CHECK: &str = "system.update.check";
+
+    // ── v0.3 Wave 0 (#329) — the two read-only envelope freezes ─────────────
+    // The two arms Wave 0 lands in `server.rs`, with their wire shapes frozen
+    // here (§12.2/§12.3). Both answer truthfully with an empty envelope until
+    // their producers land (E25: `data/audit/intents.jsonl`; E29: the K-line
+    // aggregator); neither takes the Core lock.
+
+    /// Historical K-lines for one `(symbol, interval)` (§12.2). Read-only.
+    pub const KLINE_HISTORY: &str = "kline.history";
+    /// Tail of the intent-arbitration audit log (§12.3). Read-only.
+    pub const INTENT_AUDIT_TAIL: &str = "intent.audit.tail";
+
+    // ── E28 (§12.1) — account management ────────────────────────────────────
+    /// Every configured account with its own book (§12.1 AccountView).
+    /// Read-only.
+    pub const ACCOUNT_LIST: &str = "account.list";
+    /// Move THIS connection's default account (§9.5: session-level — the
+    /// process-level active account and every other connection are
+    /// untouched).
+    pub const ACCOUNT_SWITCH: &str = "account.switch";
+    /// Tighten one account's lifecycle status (§12.1: a live call may never
+    /// GRANT a capability — unfreezing is config + restart).
+    pub const ACCOUNT_STATUS: &str = "account.status";
+
+    // ── E26 (§4.4) — systemic risk readout ────────────────────────────────
+    /// The effective systemic limits and WHERE each came from. Read-only,
+    /// zero side effects, and answered from a boot-time snapshot WITHOUT the
+    /// Core lock: the nine new limits are restart-to-change (deliberately
+    /// absent from `risk.setLimits`) and the exit resolution is not a #191
+    /// hot key either, so nothing on this readout can go stale mid-run.
+    pub const RISK_LIMITS: &str = "risk.limits";
+}
+
+// ── E26 (§4.4) — systemic risk readout ──────────────────────────────────────
+
+/// The whole `risk.limits` readout: WHAT each systemic limit is and WHERE it
+/// came from, plus the exit resolution the entry pipeline binds at Gate 4.
+/// Assembled ONCE at boot — the nine new limits change only with a restart
+/// (deliberately absent from `risk.setLimits`) and the exit ladder is not a
+/// #191 hot key — so the arm serves this snapshot without the Core lock,
+/// exactly like `system.version`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskLimitsResult {
+    /// Readout contract version (§4.4).
+    pub version: String,
+    /// The per-account matrix, shown for the kernel's default account
+    /// (§4.2: every account runs under the SAME configured matrix).
+    pub account: RiskAccountLimitsView,
+    /// The process-wide matrix.
+    pub global: RiskGlobalLimitsView,
+    /// The exit triple Gate 4 binds per entry.
+    pub exit: RiskExitView,
+}
+
+impl RiskLimitsResult {
+    /// The boot-time snapshot: systemic limits + exit resolution exactly as
+    /// THIS run resolved them.
+    pub fn snapshot(
+        systemic: &crate::risk::limits::SystemicRiskLimits,
+        exit: &crate::exit_policy::ExitConfig,
+    ) -> Self {
+        Self {
+            version: "1.1".into(),
+            account: RiskAccountLimitsView {
+                id: default_account_id().as_str().to_owned(),
+                limits: systemic.account.clone(),
+            },
+            global: RiskGlobalLimitsView {
+                limits: systemic.global.clone(),
+            },
+            exit: RiskExitView {
+                stop_loss_pct: exit.stop_loss_pct,
+                take_profit_pct: exit.take_profit_pct,
+                force_exit_sec: exit.force_exit_sec,
+            },
+        }
+    }
+}
+
+/// One account's slice of the readout.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskAccountLimitsView {
+    pub id: String,
+    pub limits: crate::risk::limits::AccountRiskLimits,
+}
+
+/// The process-wide matrix. Bare `limits` (no id): the holder is the kernel
+/// process itself, not any one account.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskGlobalLimitsView {
+    pub limits: crate::risk::limits::GlobalRiskLimits,
+}
+
+/// The exit resolution Gate 4 binds: stop/take percentages of the entry fill
+/// and the hard force-exit deadline. Plain numbers — the IPC contract's usual
+/// Decimal convention — NOT the `Bound` envelope: these are behaviour knobs
+/// with factory values, not operator limits with provenance.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskExitView {
+    #[serde(with = "crate::decimal")]
+    pub stop_loss_pct: Decimal,
+    #[serde(with = "crate::decimal")]
+    pub take_profit_pct: Decimal,
+    pub force_exit_sec: i64,
 }
 
 // ── Typed params / results ───────────────────────────────────────────────────
@@ -531,6 +641,11 @@ pub struct PositionView {
     pub direction: String,
     pub strategy: String,
     pub token_id: TokenId,
+    /// E28 (§9.2): the account this position settles into — a field read off
+    /// the position (which carried it from the entry order), never a guess.
+    /// The read side of "account_id 贯穿持仓": the panel filters on it after
+    /// `account.switch` (整页重取，不合并显示).
+    pub account_id: String,
     #[serde(with = "crate::decimal")]
     pub entry_price: Decimal,
     #[serde(with = "crate::decimal")]
@@ -591,6 +706,149 @@ pub struct PositionExitResult {
     pub closed: usize,
 }
 
+// ── v0.3 Wave 0 (#329): the two read-only envelopes ──────────────────────────
+//
+// The wire shapes the two Wave-0 `server.rs` arms speak (§12.2/§12.3), frozen
+// here so E25/E28/E29 extend behaviour without re-spelling the envelopes.
+
+/// `kline.history` params (§12.2): `{ "symbol", "interval", "limit"? }`.
+///
+/// `interval` is the shared [`KlineInterval`] — wire values `sec1` … `day1` —
+/// so the enum spelling lives with the K-line type itself (`crate::kline`)
+/// instead of a second copy of the strings here.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KlineHistoryParams {
+    pub symbol: String,
+    pub interval: KlineInterval,
+    /// Bars requested. Default 200, capped at 1000 (§12.2). The cap is the
+    /// aggregator's (E29) to enforce — no bars exist yet, so the Wave-0 arm
+    /// returns the empty list and this field is carried, not applied.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `kline.history` result (§12.2): bars ascending by `openTimeMs`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KlineHistoryResult {
+    pub symbol: String,
+    pub interval: KlineInterval,
+    pub klines: Vec<Kline>,
+}
+
+/// `intent.audit.tail` params (§12.3).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntentAuditTailParams {
+    /// Records to return, taken from the newest end. Defaults to 50.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    /// `approved` / `modified` / `rejected` (§12.3), matched
+    /// case-insensitively against the record's `decision.status`.
+    #[serde(default)]
+    pub decision: Option<String>,
+}
+
+/// `intent.audit.tail` result (§12.3).
+///
+/// `records` carries the log rows **verbatim** — the camelCase objects the
+/// arbitration audit writes (§3.4) — rather than a mirror type: a second
+/// struct over the same bytes would be a second spelling of the audit truth,
+/// and one-truth-per-fact is the rule the arbitration design exists to keep.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntentAuditTailResult {
+    /// The newest `limit` records matching every filter, in file order
+    /// (oldest → newest).
+    pub records: Vec<serde_json::Value>,
+    /// How many records matched the filters in total — `records` is only the
+    /// tail window. Optional in the wire contract (§12.3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<usize>,
+}
+
+// ── E28 (§12.1) — account management wire types ─────────────────────────────
+
+/// `account.switch` params (§12.1).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSwitchParams {
+    pub account_id: String,
+}
+
+/// `account.status` params (§12.1). `status` takes the wire spellings
+/// (`active` / `read_only` / `frozen` / `suspended` — or the config file's
+/// map form for a suspension); `reason` is the FLAT carrier the spec shows
+/// for a suspension reason and overrides the placeholder a bare-string
+/// `suspended` would carry. The tighten-only rule is enforced server-side,
+/// not by the shape.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountStatusParams {
+    pub account_id: String,
+    pub status: AccountStatus,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// One account as `account.list` reports it (§12.1 AccountView). The money
+/// fields are the account's OWN book; `credentialsLoaded` is a boolean,
+/// never a value (§9.4); `dayRealizedUsd` sums the account's own closes of
+/// the current UTC day.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountView {
+    pub id: String,
+    pub name: String,
+    pub market_type: blitzkrieg_market_api::MarketType,
+    /// The wire tag (§12.1): `active` / `read_only` / `frozen` /
+    /// `suspended` — a plain string, so a suspension does not turn the
+    /// field into a map mid-list.
+    pub status: String,
+    /// The operator-facing reason, present only for `suspended`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+    #[serde(with = "crate::decimal")]
+    pub balance: Decimal,
+    #[serde(with = "crate::decimal")]
+    pub available: Decimal,
+    #[serde(with = "crate::decimal")]
+    pub reserved: Decimal,
+    /// Presence fact only (§9.4): the kernel probed its own environment; the
+    /// values never cross the wire in either direction.
+    pub credentials_loaded: bool,
+    pub open_positions: usize,
+    #[serde(with = "crate::decimal")]
+    pub day_realized_usd: Decimal,
+    pub updated_at_ms: i64,
+}
+
+/// `account.list` result (§12.1). `active` is the SESSION's default account
+/// when this connection switched, else the process-level one (§9.5).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountListResult {
+    pub version: String,
+    pub active: String,
+    pub accounts: Vec<AccountView>,
+}
+
+/// `account.status` result (§12.1: `{ id, status }`, plus the suspension
+/// reason when the tightened posture carries one).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountStatusResult {
+    pub id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+}
+
 // ── Server → Node events ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -622,6 +880,10 @@ pub enum Event {
         strategy: String,
         token_id: String,
         condition_id: String,
+        /// E28 (§9.2): the account the trade settled in — per-account history
+        /// is a field read, never a strategy-name guess.
+        #[serde(rename = "accountId")]
+        account_id: AccountId,
         #[serde(with = "crate::decimal", rename = "netPnlUsd")]
         net_pnl_usd: Decimal,
         #[serde(with = "crate::decimal", rename = "netPnlPct")]
@@ -675,6 +937,27 @@ pub enum Event {
         #[serde(rename = "atMs")]
         at_ms: i64,
     },
+    /// E25 (#331, §12.3): a suggestion was adjudicated by the four-gate
+    /// pipeline. THROTTLED — pushes fold per `(strategy, gate, status)` to at
+    /// most one per second; `count` is how many decisions one push summarizes.
+    /// The audit (`data/audit/intents.jsonl`) is NEVER folded.
+    IntentDecision {
+        #[serde(rename = "accountId")]
+        account_id: String,
+        strategy: String,
+        #[serde(rename = "intentId")]
+        intent_id: String,
+        /// `APPROVED` / `MODIFIED` / `REJECTED` — the same vocabulary the
+        /// `intent.audit.tail` filter uses.
+        status: String,
+        gate: String,
+        /// The kernel's own justification, verbatim from the `GateTrace`
+        /// (the panel prints it as-is, §13.4 — UI never re-words it).
+        detail: String,
+        #[serde(rename = "tsMs")]
+        ts_ms: i64,
+        count: u64,
+    },
 }
 
 /// Wire view of FillDelta (field names match Node conventions).
@@ -684,6 +967,11 @@ pub struct FillDeltaView {
     pub order_id: OrderId,
     #[serde(rename = "tokenId")]
     pub token_id: TokenId,
+    /// E28 (§9.2): the account the fill's cash moved in — copied from the
+    /// tracked order, so a panel can group fills per account without a
+    /// lookup.
+    #[serde(rename = "accountId")]
+    pub account_id: AccountId,
     pub side: Side,
     #[serde(with = "crate::decimal")]
     pub delta: Decimal,
@@ -703,6 +991,7 @@ impl From<FillDelta> for FillDeltaView {
         Self {
             order_id: d.order_id,
             token_id: d.token_id,
+            account_id: d.account_id,
             side: d.side,
             delta: d.delta,
             price: d.price,

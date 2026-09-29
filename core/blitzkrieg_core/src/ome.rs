@@ -59,6 +59,11 @@ const APPLIED_JOURNAL_CAP: usize = 16_384;
 pub struct FillDelta {
     pub order_id: OrderId,
     pub token_id: TokenId,
+    /// E28 (§9.2): the account this fill's cash moves in, copied from the
+    /// tracked order when the delta is built — every downstream ledger move is
+    /// then a field read on the fill fact, never a lookup that can fail or
+    /// guess between books.
+    pub account_id: AccountId,
     pub side: Side,
     /// Signed change in filled shares (negative = rollback of a provisional fill).
     pub delta: Decimal,
@@ -479,6 +484,8 @@ impl Ome {
             escalate_at_ms: None,
             maker_timeout_ms: p.maker_timeout_ms,
             role: OrderRole::Pending,
+            // E28 (§9.2): the order belongs to the account its request named.
+            account_id: r.account_id.clone(),
         };
         self.by_internal
             .insert(r.internal_key.clone(), p.order_id.clone());
@@ -781,6 +788,7 @@ impl Ome {
         let delta = FillDelta {
             order_id: id.to_string(),
             token_id: order.token_id.clone(),
+            account_id: order.account_id.clone(),
             side: order.side,
             delta: effective,
             price,
@@ -852,6 +860,7 @@ mod tests {
             asset: "BTC".into(),
             direction: "up".into(),
             round_slot: 7,
+            account_id: crate::model::default_account_id(),
         }
     }
 
@@ -874,6 +883,7 @@ mod tests {
             tx_hash: None,
             // No venue report: the order's own fill policy decides the role.
             maker: None,
+            account_id: crate::model::default_account_id(),
         }
     }
 

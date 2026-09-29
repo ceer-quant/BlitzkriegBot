@@ -152,12 +152,125 @@ export interface CommandDoc {
   ok: boolean
   action?: string
   message?: string
+  /** E27 (§8.2): the mode-handshake refusal when a `strategy … on` is refused. */
+  reason?: string
   [extra: string]: unknown
+}
+
+// ── E25 arbitration audit (mirror arbitration/audit.rs's IntentAuditRecord) ──
+
+/** One gate's verdict inside an audited suggestion (§3.2). */
+export interface GateTraceView {
+  gate: 'LEGALITY' | 'RISK' | 'RESERVATION' | 'PHYSICS' | string
+  outcome: 'PASS' | 'MODIFY' | 'REJECT' | string
+  /** The kernel's own justification — the UI prints it verbatim (§13.4). */
+  detail: string
+}
+
+/** The decision, tagged by `status` — same vocabulary as the tail filter. */
+export interface DecisionView {
+  status: 'APPROVED' | 'MODIFIED' | 'REJECTED' | string
+  /** Present on REJECTED. */
+  reason?: string
+  gate?: string
+  detail?: string
+  request_id?: string
+  shares?: string | number
+  price?: string | number
+  physics?: {
+    stopPrice: string | number
+    forceExitSec: number
+    ladder: { atPct: string | number; closeRatio: string | number; moveStopTo: string | number | null }[]
+  }
+  modification?: { kind: string; suggested?: string | number; approved?: string | number; limit?: string; tick?: string | number }
+}
+
+/** One audited suggestion (§3.4). Decimal values cross as STRINGS. */
+export interface IntentAuditRecordView {
+  tsMs: number
+  accountId: string
+  strategy: string
+  intentId: string
+  intent: unknown
+  decision: DecisionView
+  gates: GateTraceView[]
+  latencyUs: number
+}
+
+export interface IntentAuditTailDoc {
+  records: IntentAuditRecordView[]
+  total?: number
+  error?: string
+}
+
+// ── E26 systemic risk readout (mirror ipc/schema.rs's RiskLimitsResult) ──────
+
+/** WHERE a limit's effective value came from (§4.4). */
+export type LimitSource = 'default' | 'toml' | 'env' | 'flag'
+
+/**
+ * One limit: value AND provenance, together (§4.4) — "35" without "toml" is
+ * not an answer an operator can act on. Decimals cross as STRINGS.
+ */
+export interface RiskBound {
+  value: string
+  source: LimitSource | string
+}
+
+/** The per-account matrix (§4.2, five). */
+export interface AccountRiskLimitsView {
+  maxSingleLossUsd: RiskBound
+  maxDailyDrawdownUsd: RiskBound
+  maxPositionSize: RiskBound
+  maxConsecutiveLosses: RiskBound
+  cooldownMinutes: RiskBound
+}
+
+/** The process-wide matrix (§4.2, four). */
+export interface GlobalRiskLimitsView {
+  maxTotalPosition: RiskBound
+  maxTotalExposureUsd: RiskBound
+  maxCorrelationUsd: RiskBound
+  globalKillSwitchLossUsd: RiskBound
+}
+
+/** The exit triple Gate 4 binds per entry (plain numbers, not Bounds). */
+export interface RiskExitView {
+  stopLossPct: number | string
+  takeProfitPct: number | string
+  forceExitSec: number
+}
+
+/** The whole `risk.limits` readout. */
+export interface RiskLimitsDoc {
+  version: string
+  account: { id: string; limits: AccountRiskLimitsView }
+  global: { limits: GlobalRiskLimitsView }
+  exit: RiskExitView
+  error?: string
 }
 
 export const api = {
   snapshot: () => request<Snapshot>('/snapshot'),
   plugins: () => request<PluginsDoc>('/plugins'),
+  /**
+   * E25 (#331): the arbitration audit tail — a thin proxy of the core's
+   * `intent.audit.tail` (§12.3). Filters pass through untouched.
+   */
+  intentAuditTail: (params?: { limit?: number; strategy?: string; decision?: string }) => {
+    const q = new URLSearchParams()
+    if (params?.limit != null) q.set('limit', String(params.limit))
+    if (params?.strategy) q.set('strategy', params.strategy)
+    if (params?.decision) q.set('decision', params.decision)
+    const qs = q.toString()
+    return request<IntentAuditTailDoc>(`/intent-audit${qs ? `?${qs}` : ''}`)
+  },
+  /**
+   * E26 (§4.4): the effective systemic limits and where each came from — a
+   * thin proxy of the core's `risk.limits` (read-only; the core answers from
+   * a boot-time snapshot without the Core lock).
+   */
+  riskLimits: () => request<RiskLimitsDoc>('/risk-limits'),
   /** Dispatch a gateway command verb (`status`/`start`/`stop`/…). */
   command: (cmd: string) =>
     request<CommandDoc>('/command', { method: 'POST', body: cmd }),
@@ -319,6 +432,12 @@ export interface StrategyStatsRow {
   losses: number
   netPnlUsd: string | number
   rejectionCauses: RejectionCauses | null
+  /** E27 (§8.3): declared modes as §2.3 wire objects; `null` = undeclared. Older cores omit. */
+  modes?: unknown
+  /** §8.3: `false` = no active plugin can satisfy any declared mode. Older cores omit. */
+  compatible?: boolean
+  /** §8.3: when `compatible === false`, the handshake's rendered refusal reason. */
+  incompatibleReason?: string | null
 }
 
 export interface EngineStats {
@@ -606,6 +725,24 @@ export interface PluginRow {
   hasDataFeed?: boolean
   hasDiscovery?: boolean
   hasExecutor?: boolean
+  // ── E27 (§8.3) mode declaration fields — market.list rows ────────────────
+  /**
+   * The concrete structure the plugin declares, when its `declare_modes()`
+   * names the SAME concrete structure unanimously; null/absent = unspecified
+   * (undeclared / multi-structure / structure-less plugins).
+   */
+  structure?: string | null
+  /** Union of the declared capability bits (raw value, for cross-checking). */
+  capabilitiesBits?: number
+  /** Readable capability names, in bit order (`websocket_feed`, …). */
+  capabilities?: string[]
+  // ── E27 (§8.3) mode declaration fields — strategy.list rows ──────────────
+  /** The strategy's declared modes (§2.3 wire objects); null = undeclared. */
+  modes?: unknown
+  /** False only when the handshake would refuse this strategy. */
+  compatible?: boolean
+  /** The refusal reason when incompatible, else null. */
+  incompatibleReason?: string | null
   /** extension.list lifecycle state, e.g. "installed". */
   state?: string
 }

@@ -126,6 +126,11 @@ pub enum CoreErrorCode {
     InvalidSize,
     InsufficientFunds,
     RiskRejected,
+    /// E28 (§9.1): the account's lifecycle status refused the action — a
+    /// non-`Active` account cannot place new entries, a `ReadOnly` one
+    /// cannot close either. Distinct from `RiskRejected`: this is an
+    /// account-state fact, not a risk-gate judgment.
+    AccountLimit,
     KillSwitchActive,
     MarketHalted,
     NotAuthenticated,
@@ -168,13 +173,24 @@ pub type CoreResult<T> = Result<T, CoreError>;
 // ── Order intent (market-agnostic) ───────────────────────────────────────────
 
 /// Which class of market an intent targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Wire = `snake_case`. Adding variants is wire-compatible: an OLD consumer
+/// that meets `earn` must fail loudly rather than draw it as `prediction` —
+/// which is why v0.3 adds `Margin`/`Earn`/`Bot` to the enum instead of
+/// smuggling them through a string field (§7.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarketType {
     Prediction,
     Spot,
+    /// Leveraged spot / borrowed balances.
+    Margin,
     Futures,
     Options,
+    /// Yield / interest-bearing, read-mostly.
+    Earn,
+    /// Third-party bot-hosted markets.
+    Bot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -637,4 +653,18 @@ pub struct PluginInfo {
     pub enabled: bool,
     /// True for the single plugin actually driving this process.
     pub active: bool,
+    /// The concrete structure the plugin declares, when its `declare_modes()`
+    /// names the SAME concrete structure unanimously — the `market.list`
+    /// summary of the declaration (§8.3). `None` covers undeclared,
+    /// multi-structure and explicitly-structure-less plugins alike: on the
+    /// wire it reads as "unspecified", which is exactly what the handshake
+    /// treats it as (a strategy requiring a concrete structure is refused).
+    #[serde(default)]
+    pub structure: Option<crate::modes::MarketStructure>,
+    /// Union of every declared mode's capability bits. `market.list` carries
+    /// the readable names BESIDE this raw value (§8.3) so an operator — and
+    /// the modes gate — can push the two against each other in both
+    /// directions.
+    #[serde(default)]
+    pub capabilities: crate::modes::MarketCapabilities,
 }

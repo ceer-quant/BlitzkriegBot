@@ -53,8 +53,9 @@
 #[cfg(feature = "strategy-loading")]
 use blitzkrieg_strategy_api::{
     BK_ABI_VERSION, BK_BIND_EVAL_CTX_SYMBOL, BK_CONFIG_VIEW_SYMBOL, BK_CREATE_SYMBOL,
-    BK_EVOLVABLE_KNOBS_SYMBOL, BK_FREE_STRING_SYMBOL, BK_GATE_EXEMPTIONS_SYMBOL,
-    BK_MIN_ABI_VERSION, BK_VERSION_SYMBOL, BkStrategyVtable, bk_strategy_free_string,
+    BK_DECLARE_MODES_SYMBOL, BK_EVOLVABLE_KNOBS_SYMBOL, BK_FREE_STRING_SYMBOL,
+    BK_GATE_EXEMPTIONS_SYMBOL, BK_MIN_ABI_VERSION, BK_VERSION_SYMBOL, BkStrategyVtable,
+    bk_strategy_free_string,
 };
 use std::path::{Path, PathBuf};
 
@@ -709,6 +710,12 @@ pub struct LoadedForeign {
     /// redeemed at expiry, not sold on the exit ladder. Default (no symbol) =
     /// false; reported at registration so the operator sees it.
     pub holds_to_settlement: bool,
+    /// Strategy-API-1.0 mode declaration (E24 / #330), read once at load
+    /// through the OPTIONAL `bk_strategy_declare_modes` symbol. Empty = no
+    /// symbol, or the symbol returned NULL — the "undeclared" of §7.4, which
+    /// is every 0.2 library's state. An INVALID payload never reaches here:
+    /// the load is refused earlier with the validator's `index`/`got` error.
+    pub declared_modes: Vec<blitzkrieg_strategy_api::StrategyMode>,
 }
 
 /// Load and negotiate a v2 strategy library, returning it boxed as the full
@@ -868,8 +875,104 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
     .ok()
     .map(|s| *s);
 
+    // 4e) OPTIONAL mode declaration (E24 / #330, API 1.0 §2.3). Absent symbol =
+    // "undeclared", which is every 0.2 library's state and needs no ABI bump.
+    // The payload is read just below through a THROWAWAY probe instance
+    // (`create` → read → `destroy`) and VALIDATED before anything is
+    // registered: a declared-but-invalid payload is a configuration error and
+    // refuses the load (§7.4) — only the absence of the symbol (or a NULL
+    // return) means "undeclared".
+    let declare_modes_fn =
+        unsafe { lib.get::<blitzkrieg_strategy_api::BkDeclareModesFn>(BK_DECLARE_MODES_SYMBOL) }
+            .ok()
+            .map(|s| *s);
+
     let name = unsafe { cstr_to_string(vtable.name) }.unwrap_or_else(|| "unnamed".into());
     let version = unsafe { cstr_to_string(vtable.version) }.unwrap_or_else(|| "0.0.0".into());
+
+    tracing::info!(
+        strategy = %name,
+        symbol_present = declare_modes_fn.is_some(),
+        "mode declaration: begin read"
+    );
+    // 4e, read) Read the §2.3 declaration through a THROWAWAY probe instance
+    // (`create` → symbol → `destroy`) and VALIDATE it before step 5 builds
+    // anything persistent: a declared-but-invalid payload is a configuration
+    // error and refuses the load with the validator's `index`/`got`
+    // diagnostic (§7.4). The probe exists because the declaration is a
+    // read-once, load-time property — plumbing a ninth optional symbol through
+    // every instance (and every shadow twin) would buy nothing. `create` and
+    // `destroy` were verified present in step 4; a null `create` result leaves
+    // the declaration unreadable, and an unreadable optional declaration is
+    // "undeclared" — the same rule a NULL return already gets.
+    let declared_modes = match declare_modes_fn {
+        None => Vec::new(),
+        Some(f) => {
+            // SAFETY: required-hook presence verified in step 4; the probe is
+            // driven exactly like the real instance (create → read → destroy).
+            let probe = unsafe { vtable.create.unwrap_or_else(|| unreachable!())() };
+            if probe.is_null() {
+                Vec::new()
+            } else {
+                let raw = unsafe { f(probe) };
+                // Copy (and free through the LIBRARY's own deallocator) BEFORE
+                // destroying the handle that owns the string.
+                let payload = if raw.is_null() {
+                    None
+                } else {
+                    let text = unsafe { std::ffi::CStr::from_ptr(raw) }
+                        .to_str()
+                        .map(str::to_string)
+                        .map_err(|_| "declaration payload is not valid UTF-8".to_string());
+                    unsafe { free_string(raw) };
+                    Some(text)
+                };
+                // SAFETY: the probe was produced by this vtable's `create`; the
+                // pairing with `destroy` is the documented contract.
+                unsafe { vtable.destroy.unwrap_or_else(|| unreachable!())(probe) };
+                match payload {
+                    // Symbol present but NULL return: "declares nothing" — the
+                    // same state as a 0.2 library without the symbol at all.
+                    None => Vec::new(),
+                    Some(Err(reason)) => {
+                        return fail(format!("invalid modes declaration: {reason}"));
+                    }
+                    Some(Ok(text)) => {
+                        match blitzkrieg_strategy_api::modes::parse_strategy_modes(&text) {
+                            Ok(modes) => {
+                                tracing::info!(
+                                    strategy = %name,
+                                    modes = ?modes,
+                                    "strategy declared market modes (API 1.0)"
+                                );
+                                modes
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    strategy = %name,
+                                    error = %e,
+                                    "invalid modes declaration; refusing load"
+                                );
+                                return fail(format!("invalid modes declaration: {e}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    if declare_modes_fn.is_none() {
+        tracing::info!(
+            strategy = %name,
+            "no mode declaration symbol (undeclared; not participating in the compatibility handshake)"
+        );
+    }
+    tracing::info!(
+        strategy = %name,
+        symbol_present = declare_modes_fn.is_some(),
+        count = declared_modes.len(),
+        "mode declaration: end read"
+    );
 
     // 5) The library handle is shared: the live instance and every shadow twin it
     // spawns hold the same Arc, so the mapping outlives them all.
@@ -903,6 +1006,7 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
     let gate_exemptions = crate::strategies::EngineStrategy::gate_exemptions(&strategy);
     let evolvable_knobs = crate::strategies::EngineStrategy::evolvable_knobs(&strategy);
     let holds_to_settlement = crate::strategies::EngineStrategy::holds_to_settlement(&strategy);
+
     Ok(LoadedForeign {
         strategy,
         name,
@@ -910,6 +1014,7 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
         gate_exemptions,
         evolvable_knobs,
         holds_to_settlement,
+        declared_modes,
     })
 }
 

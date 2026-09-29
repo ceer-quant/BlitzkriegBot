@@ -386,6 +386,12 @@ export const rpc = {
   stats: (c) => c.request('engine.stats'),
   round: (c) => c.request('engine.round'),
   tradesHistory: (c, limit = 50) => c.request('trades.history', { limit }),
+  // E28 (§12.1): the account verbs. `accountList` reads the 1.1 envelope;
+  // `accountSwitch` is SESSION-scoped on this connection (§9.5).
+  accountList: (c) => c.request('account.list', {}),
+  accountSwitch: (c, accountId) => c.request('account.switch', { accountId }),
+  accountStatus: (c, accountId, status, reason) =>
+    c.request('account.status', { accountId, status, ...(reason ? { reason } : {}) }),
   kill: (c, reason = 'manual') => c.request('risk.kill', { reason }),
   resume: (c) => c.request('risk.resume'),
 };

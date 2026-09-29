@@ -164,6 +164,94 @@ P0.6 **不改变交易语义**：`ome / ledger / risk / position / exit_policy /
 engine / scanner（回合时序）/ reconcile / shadow` 全部保持原实现与行为；Polymarket 的
 venue/feed/discovery/gamma 从内核**物理迁出**到扩展，行为逐笔等价（见 `MIGRATION_LOG.md §19`）。
 
+## 7.5 裁决流水线（E25 / #331，DEV_V0_3 §3）
+
+策略建议、内核裁决：策略是 0 信任组件，只提交建议；`arbitration/` 的
+`process_intent` 对每条建议跑四道关卡，产出唯一 `Decision`：
+
+| 关卡 | 复用的既有实现（不重写） |
+|:--|:--|
+| Gate 1 合法性 | `market_api::OrderIntent::validate()` + 本轮 token 检查 |
+| Gate 2 系统风控 | `RiskGate::check_with_equity` + 既有 `LossBreakers`（平仓 intent 豁免——既有语义） |
+| Gate 3 资金预扣 | `Ledger::reserve` 探针（reserve→release，复用既有拒绝逻辑，账本净零） |
+| Gate 4 生存绑定 | `exit_policy::effective_stop_pct` 等的**投影**（只记录，不加触发路径） |
+
+三条纪律，违反任何一条的 PR 拒绝合入：
+
+1. **不重复判定**——每道关卡只调用既有实现，绝不复制阈值；风控的真相只有
+   `RiskGate` 里那一份。
+2. **无短路**——被拒的建议同样逐条落审计（`data/audit/intents.jsonl`，每条
+   一行；审计写失败只 `warn!` 一次，绝不阻塞交易）。
+3. **审计是旁路**——`--no-intent-audit` 只关审计**写入**，关卡永远在跑；
+   有/无审计两种情形都必须通过既有经济基线（P1）。
+
+`Rejected` 的建议不进入 `place()`/OME；`Approved` 的建议交给**既有**提交路径。
+`INTENT_DECISION` 推送按 `(strategy, gate, reason)` 折叠到 ≤1 条/秒（折叠的是
+推送，不是审计）；面板的「裁决流」（WebUI `Decisions.vue` / TUI Decisions tab）
+逐字打印内核写的 `GateTrace.detail`，不自行编文案。
+
+## 7.6 多账户账本（E28，DEV_V0_3 §9）
+
+账户是**部署事实**，不是运行时对象：`user_layer/configs/accounts.toml` 装载失败
+→ 内核拒绝启动（fail-closed）；文件缺失 → 单一 `default` 账户（0.2 部署零改动）。
+运行时**从不隐式建账本**——未知账户显式拒绝（`unknown account`，反向验收 C）。
+
+| 件 | 语义 |
+|:--|:--|
+| `AccountLedgers`（§9.3） | 每账户独立 `Ledger` 实例 = 独立钱包，不是别名；`get_mut` 缺账户显式报错 |
+| 账户姿态（Gate 2） | `permits_order(id, is_close)`：只有 `active` 可开新仓；平仓豁免除 `read_only` 外全部姿态（冻结绝不困住持仓）；拒绝码 `ACCOUNT_LIMIT` |
+| 凭证（§9.4） | config 只存环境变量**名**；值只在内核进程环境；wire 只回 `credentialsLoaded: bool`，哨兵门禁锚词 `sentinel leaked` |
+| 会话级 active（§9.5） | `account.switch` 只写本 IPC 连接的私有 cell，进程级 active 不动；`orders.place` 未带 `accountId` 时注入本连接默认（缺省 = 默认，显式 id 永远获胜） |
+| `account.status` | **只能收紧**（tighten-only）：loosen 一律拒 wire 级 `INVALID_PARAMS` |
+
+三条纪律，违反任何一条的 PR 拒绝合入：
+
+1. **独立钱包，不共享现金**——A 账户的交易、亏损、回撤**完全不影响** B 账户的
+   `balance`/`available`/持仓/日 PnL；dry 模式种子按账本各自 `set_balance`
+   （`seed_all`），单账户路径 bit-identical 于 0.2 的单次 set_balance。
+2. **从不改道（no re-route）**——A 账户发起平仓 B 账户的持仓 → 显式拒绝
+   （`cross-account close refused`），绝不改道到持仓归属账户执行——改道就是
+   隐式账本事故换名（反向验收 A）。
+3. **account_id 贯穿**——订单 → 成交 → 持仓 → wire 每一行都带归属；0.2 无
+   `account_id` 的旧行读回为 `default`，重新写出的行带 `"default"`（读旧写新，
+   无迁移脚本）。
+
+UI 呈现：WebUI 顶栏 `AccountSwitcher.vue`（经 gateway `accounts` / `account <id>`
+命令动词透传 `account.list` / `account.switch`）、TUI 命令栏 `account <id>`；
+凭证在像素层同样只显 `credentialsLoaded` 布尔。
+
+## 7.7 系统性风控限额（E26，DEV_V0_3 §4）
+
+两条 §4.1 原则，违反任何一条的 PR 拒绝合入：
+
+1. **不可绕过**——限额判定长在仲裁管线（Gate 2 系统判定、Gate 4 物理绑定）与
+   平仓记账点，策略/插件/Lua 没有任何风控 API 可调：能下建议的地方就被同一个
+   管线覆盖，不存在「另一个入口」。
+2. **出厂即静默**——九个新限额出厂 0 = off；未武装时管线零额外判定、零额外
+   trace，审计与未加风控的管线**逐位一致**（P1 字节门禁）。一个未配置的内核
+   报告它没有执行任何新约束，而不是假装有。
+
+| 件 | 语义 |
+|:--|:--|
+| `risk/limits.rs` `Bound` | 每个限额 = 值 + 来源（default/toml/env/flag）——**来源是值的一半**：没有 "toml" 的 "35" 不是操作者能据以行动的答案（§4.4） |
+| 限额矩阵（§4.2） | 账户级 5（单笔最大亏损 / 当日回撤 / 单仓上限 / 连亏次数 / 冷静期分钟）+ 全局级 4（总仓位 / 总敞口 / 同资产敞口 / 急停亏损）；出厂全 0 |
+| 当日回撤 | 与既有 #173 daily-loss **同一预算**：`[risk] max_daily_drawdown_usd` 是既有 pick 链的 TOML 槽位别名，不发明第二个每日计数器 |
+| 连亏熔断 | 走既有 `LossBreakers`，账户粒度 = 保留键 `__account__:{id}`（`record_with` 显式阈值对）；触发拒新仓（`LOSS_BREAKER`，detail 命名账户）、冷静期后自恢复；**平仓永不拦**——困住持仓的帽是 #174 换一扇门 |
+| Gate 2 系统判定 | 顺序：急停帽（当日实亏触顶拒新仓）→ 全局三帽（数量 / 敞口 / 同资产）→ 账户缩量两帽（取更紧者、detail 命名约束）；一股都装不下才拒；缩量以 `MODIFIED`（SizeReduced）下行——floor 整股，`approved × 单股亏损 ≤ cap` 构造成立，帽只封顶、从不上取整 |
+| Gate 4 物理绑定（§4.3） | 每笔入场绑 stop_price（既有 `effective_stop_pct` 时间感知）+ force_exit_sec + 阶梯快照；无显式梯子时快照是既有退出策略的**投影**（单步全平）——行为不变，只把隐含的退出纪律记录到审计 |
+| `[[risk.ladder]]` | 显式阶梯 opt-in 接管投影（逐行校验、倒梯警告、不完整行不接管） |
+| `risk.limits`（§4.4） | 只读读数，boot 快照、**不取 Core 锁**（`system.version` 同款免锁）；契约 v"1.1"：`account{id, limits}` + `global{limits}` + `exit{stopLossPct, takeProfitPct, forceExitSec}`；Bound 值过线一律字符串 |
+| 热改边界 | 九个新限额**不进** `risk.setLimits` 白名单——改配置需重启生效；`risk.setLimits` 既有热键集不变 |
+
+UI 呈现：WebUI 设置页「生效风控」卡片（经 gateway `/api/risk-limits` 薄代理
+`risk.limits`，每行 值 + 来源徽章；出厂显示「出厂（全部关闭）」）；出厂九行全显
+「关闭」而非伪装成保护措施的 0。
+
+门禁：`scripts/risk-systemic-check.mjs`——出厂静默旁证（boot log + 审计无
+systemic 字样）+ 武装读数（toml 来源）+ 缩量真实（下单尺寸 = approved）+ 物理
+绑定对齐内核自身投影 trace + 连亏→熔断→恢复全程 + 1000 组随机缩量不变量；
+`--self-test` 判定面自证、`--teeth` 三种坏实现必须变红。
+
 ## 8. 目录
 
 ```

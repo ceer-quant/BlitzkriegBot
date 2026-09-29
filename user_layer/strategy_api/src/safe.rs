@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 
 pub use crate::{BK_ABI_VERSION, BK_MIN_ABI_VERSION, BkHandle};
+use crate::{Kline, StrategyMode};
 
 /// Parse one decimal-string field into an exact [`rust_decimal::Decimal`].
 /// This is the ONLY numeric path the safe layer offers: no `f64` conversion
@@ -271,6 +272,28 @@ pub trait SafeStrategy: Send + 'static {
     fn holds_to_settlement(&self) -> bool {
         false
     }
+
+    /// The market modes this strategy declares it can work in (OPTIONAL
+    /// `bk_strategy_declare_modes` symbol, BlitzkriegStrategy API 1.0 /
+    /// DEV_V0_3 §2.5). Empty `Vec` = UNDECLARED = does not participate in the
+    /// load-time compatibility handshake (identical to a 0.2 library that
+    /// exports no such symbol).
+    ///
+    /// A non-empty declaration takes part in the plugin handshake: when no
+    /// mode of the target plugin can satisfy any declared mode, `strategy.load`
+    /// refuses registration and `strategy.enable` refuses enabling (§8.2).
+    /// The directionality rule is loose-strategy / specific-plugin (`None`
+    /// structure on the PLUGIN side never satisfies a strategy asking for a
+    /// concrete structure).
+    fn declare_modes(&self) -> Vec<StrategyMode> {
+        Vec::new()
+    }
+
+    /// Called for every CLOSED kline bar (`is_closed = true`; DEV_V0_3 §10.4).
+    /// Unclosed bars are read on demand via `bk.kline(symbol, interval)`, not
+    /// pushed here — a strategy that forgot to check `is_closed` would fire a
+    /// repeated signal on every trade. Default: no-op.
+    fn on_kline(&mut self, _kline: &Kline) {}
 }
 
 // ── shell plumbing (strategy authors never see any of this) ──────────────────
@@ -635,6 +658,25 @@ macro_rules! export_strategy {
                 let s = unsafe { &*(handle as *const Shell) };
                 i32::from(s.inner.holds_to_settlement())
             }
+            /// OPTIONAL symbol `bk_strategy_declare_modes` (API 1.0, DEV_V0_3
+            /// §2.3/§2.5): the strategy's market modes as the §2.3 payload.
+            /// Empty `Vec` (and a null handle) → `NULL` = "symbol present,
+            /// declares nothing", which the kernel reads exactly like a 0.2
+            /// library that exports no such symbol. NON-empty → the payload;
+            /// the kernel validates it at load and REFUSES registration on an
+            /// invalid declaration (declared-but-broken is an error, never a
+            /// silent opt-out).
+            extern "C" fn declare_modes(handle: BkHandle) -> *mut c_char {
+                if handle.is_null() {
+                    return core::ptr::null_mut();
+                }
+                let s = unsafe { &*(handle as *const Shell) };
+                let modes = s.inner.declare_modes();
+                if modes.is_empty() {
+                    return core::ptr::null_mut();
+                }
+                json_out($crate::modes::modes_payload_json(&modes))
+            }
             unsafe extern "C" fn on_config(handle: BkHandle, json: *const c_char) -> i32 {
                 let Some(j) = (unsafe { cstr(json) }) else { return 1 };
                 let s = unsafe { &mut *(handle as *mut Shell) };
@@ -792,6 +834,14 @@ macro_rules! export_strategy {
             pub extern "C" fn bk_strategy_settlement_holds(handle: BkHandle) -> i32 {
                 // Same reasoning as config_view: a plain i32 read, not unsafe.
                 settlement_holds(handle)
+            }
+            #[unsafe(no_mangle)]
+            pub extern "C" fn bk_strategy_declare_modes(handle: BkHandle) -> *mut c_char {
+                // Same reasoning as config_view / settlement_holds: a plain
+                // read of the strategy's declaration, serialized to JSON —
+                // safe surface, empty → NULL ("symbol present, declares
+                // nothing").
+                declare_modes(handle)
             }
         }
     };

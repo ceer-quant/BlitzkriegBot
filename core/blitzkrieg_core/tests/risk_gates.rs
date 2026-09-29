@@ -88,6 +88,7 @@ fn order(
         asset: "BTC".into(),
         direction: "up".into(),
         round_slot: slot_at(now),
+        account_id: blitzkrieg_core::model::default_account_id(),
     }
 }
 
@@ -271,6 +272,7 @@ fn position(
             expires_at_ms: now + 900_000,
             was_maker: false,
             target_exit_price: None,
+            account_id: blitzkrieg_core::model::default_account_id(),
         },
         now,
     );

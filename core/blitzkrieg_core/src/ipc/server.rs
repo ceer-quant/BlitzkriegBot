@@ -5,8 +5,9 @@
 //! an async lock; a writer task per connection serialises responses and pushed
 //! notifications onto the socket.
 
+use crate::account::{AccountId, AccountStatus};
 use crate::ipc::schema::*;
-use crate::model::{CoreError, Mode};
+use crate::model::{CoreError, CoreErrorCode, Mode};
 use crate::service::{Core, CoreConfig};
 use blitzkrieg_market_api::net::now_ms;
 use rust_decimal::Decimal;
@@ -269,6 +270,20 @@ pub async fn run(
     if config.mode.settles_locally() {
         core.set_balance(config.dry_seed_balance);
     }
+
+    // Market plugins: the concrete venue is compiled in via a feature and
+    // registered here; the core drives its components through the market seam.
+    // E27 (§8.2): this MUST run before `install_engine`, which loads and
+    // enables strategies — the startup `--enable-strategy` request and both
+    // IPC handshake sites judge against the same declaration snapshot.
+    // `None` would leave the handshake inert.
+    let registry = crate::market::registry::MarketPluginRegistry::new();
+    crate::market::register_builtin_markets(&registry);
+    let active = crate::market::active_market_plugin(&registry, config.market_plugin.as_deref());
+    core.set_plugin_modes(Some(crate::market::compat::PluginModes::for_plugin(
+        active.as_ref(),
+    )));
+
     if config.engine_enabled {
         // One mapping shared with the backtester (`CoreConfig::install_engine`).
         // A refusal here (the #265 startup self-check: an explicit
@@ -282,11 +297,6 @@ pub async fn run(
     }
     let core = Arc::new(AsyncMutex::new(core));
 
-    // Market plugins: the concrete venue is compiled in via a feature and
-    // registered here; the core drives its components through the market seam.
-    let registry = crate::market::registry::MarketPluginRegistry::new();
-    crate::market::register_builtin_markets(&registry);
-    let active = crate::market::active_market_plugin(&registry, config.market_plugin.as_deref());
     let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
         Arc::new(crate::market::host::CoreHost::new(core.clone()));
 
@@ -439,6 +449,16 @@ pub async fn run(
         github_token,
     );
 
+    // The `risk.limits` readout (§4.4), assembled ONCE: the nine new
+    // systemic limits are restart-to-change (deliberately absent from
+    // `risk.setLimits`) and the exit resolution is not a #191 hot key, so
+    // the snapshot can never go stale mid-run — which is what lets the arm
+    // answer WITHOUT the Core lock, exactly like `system.version`.
+    let risk_limits = Arc::new(crate::ipc::schema::RiskLimitsResult::snapshot(
+        &config.risk.systemic,
+        &config.positions.exit,
+    ));
+
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
@@ -476,6 +496,7 @@ pub async fn run(
                         bus_tx.subscribe(),
                         registry.clone(),
                         update_state.clone(),
+                        risk_limits.clone(),
                     )
                 }
                 Err(e) => tracing::warn!(error = %e, "accept failed"),
@@ -498,6 +519,7 @@ fn spawn_session(
     events: broadcast::Receiver<Event>,
     registry: crate::market::registry::MarketPluginRegistry,
     update_state: Arc<crate::ipc::version::UpdateState>,
+    risk_limits: Arc<crate::ipc::schema::RiskLimitsResult>,
 ) {
     tokio::spawn(async move {
         let (read_half, write_half) = stream.into_split();
@@ -533,11 +555,24 @@ fn spawn_session(
             });
         }
 
+        // The session's own active account (§9.5): `account.switch` writes
+        // THIS cell — never Core's process-level one — so two connections can
+        // look at two accounts side by side.
+        let mut session_active: Option<AccountId> = None;
         let mut lines = BufReader::new(read_half).lines();
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) if !line.trim().is_empty() => {
-                    let response = handle_line(&core, &registry, line, &peer, &update_state).await;
+                    let response = handle_line(
+                        &core,
+                        &registry,
+                        line,
+                        &peer,
+                        &update_state,
+                        &risk_limits,
+                        &mut session_active,
+                    )
+                    .await;
                     if out_tx.send(format!("{response}\n")).is_err() {
                         break;
                     }
@@ -557,6 +592,8 @@ async fn handle_line(
     line: String,
     peer: &PeerAuth,
     update_state: &Arc<crate::ipc::version::UpdateState>,
+    risk_limits: &Arc<crate::ipc::schema::RiskLimitsResult>,
+    session_active: &mut Option<AccountId>,
 ) -> String {
     let req: Request = match serde_json::from_str(&line) {
         Ok(r) => r,
@@ -621,6 +658,15 @@ async fn handle_line(
             ),
         )
         .unwrap_or(Value::Null)),
+
+        // E26 (§4.4): the systemic-risk readout — WHAT each limit is and
+        // WHERE it came from, plus the exit triple Gate 4 binds. Read-only,
+        // zero side effects, NO Core lock: the snapshot was assembled once at
+        // boot and nothing on it can change mid-run (the nine new limits are
+        // restart-to-change by design, and the exit resolution is not a #191
+        // hot key), so the readout answers even while a fill holds the
+        // trading lock.
+        method::RISK_LIMITS => Ok(serde_json::to_value(&**risk_limits).unwrap_or(Value::Null)),
 
         // VERSIONING.md §7.4: the update switches. A write lands an audit
         // record AND must persist — a switch that silently reverts on restart
@@ -787,14 +833,28 @@ async fn handle_line(
         }
 
         method::ORDER_PLACE => {
+            // §9.5: an order with NO accountId of its own spends this
+            // connection's default — the SESSION's active account (what
+            // `account.switch` set), else the process-level one. The check is
+            // on the RAW params, BEFORE the serde default fills the gap: an
+            // omitted accountId is "this connection's default", but an
+            // EXPLICIT `accountId: "default"` NAMES that account and must
+            // stand — an explicit id is never re-routed by a session cell.
+            let explicit_account = params.get("accountId").is_some();
             typed(params, |p: PlaceParams| {
                 let core = core.clone();
                 async move {
                     let mut c = core.lock().await;
+                    let mut order = p.order;
+                    if !explicit_account {
+                        order.account_id = session_active
+                            .clone()
+                            .unwrap_or_else(|| c.accounts().active_id().clone());
+                    }
                     // `place_outcome`, not `place`: when the kernel refuses the leg
                     // itself (a dry taker the book cannot fill) the result carries
                     // the structured reason instead of a bare REJECTED (#180).
-                    let outcome = c.place_outcome(p.order, p.maker_timeout_ms, now_ms())?;
+                    let outcome = c.place_outcome(order, p.maker_timeout_ms, now_ms())?;
                     let (code, message) = match outcome.rejection {
                         Some(err) => (Some(err.code), Some(err.message)),
                         None => (None, None),
@@ -1115,7 +1175,19 @@ async fn handle_line(
                 .into_iter()
                 .map(|name| {
                     let is_on = enabled.contains(&name);
-                    serde_json::json!({ "name": name, "enabled": is_on })
+                    // E27 (§8.3): the row carries the strategy's declared modes
+                    // as the §2.3 wire objects (`null` = undeclared), the
+                    // compatible flag, and the refusal reason when the
+                    // handshake would refuse it. Every 0.2 strategy reads as
+                    // `modes: null, compatible: true, incompatibleReason: null`.
+                    let (modes, compatible, incompatible_reason) = c.strategy_compat_view(&name);
+                    serde_json::json!({
+                        "name": name,
+                        "enabled": is_on,
+                        "modes": modes,
+                        "compatible": compatible,
+                        "incompatibleReason": incompatible_reason,
+                    })
                 })
                 .collect();
             Ok(serde_json::json!({
@@ -1130,8 +1202,22 @@ async fn handle_line(
                 .get("enabled")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            let found = core.lock().await.set_strategy_enabled(name, enabled);
-            Ok(serde_json::json!({ "name": name, "enabled": enabled, "found": found }))
+            // E27 (§8.2): the enable runs through the handshake. A disabling
+            // toggle is never gated (standing down is always allowed); an
+            // enable the active plugin cannot serve is REFUSED with the §8.2
+            // diagnostic — `{ name, enabled: false, found: true, reason }` —
+            // and the dispatch keeps the strategy off.
+            let (found, applied, reason) = core
+                .lock()
+                .await
+                .set_strategy_enabled_checked(name, enabled);
+            Ok(serde_json::json!({
+                "name": name,
+                "enabled": if reason.is_some() { false } else { enabled && applied },
+                "found": found,
+                "applied": applied,
+                "reason": reason,
+            }))
         }
 
         method::STRATEGY_LOAD => {
@@ -1187,9 +1273,18 @@ async fn handle_line(
                 .list()
                 .into_iter()
                 .map(|p| {
+                    // E27 (§8.3): the row carries the plugin's declared
+                    // structure and the union of its capability bits — with
+                    // the readable names beside the raw value so the modes
+                    // gate can push the two against each other in both
+                    // directions.
+                    let caps = blitzkrieg_market_api::modes::capabilities_to_names(p.capabilities);
                     serde_json::json!({
                         "name": p.name,
                         "type": p.market_type,
+                        "structure": p.structure,
+                        "capabilities": caps,
+                        "capabilitiesBits": p.capabilities.0,
                         "hasDataFeed": p.has_data_feed,
                         "hasDiscovery": p.has_discovery,
                         "hasExecutor": p.has_executor,
@@ -1527,6 +1622,144 @@ async fn handle_line(
             .await
         }
 
+        // ── v0.3 Wave 0 (#329): the two read-only envelope freezes ───────────
+        // Both answer without the Core lock (same posture as `system.version`)
+        // and state today's truth with today's data — no stub values:
+        //
+        // * `intent.audit.tail` reads whatever `data/audit/intents.jsonl`
+        //   holds (E25 lands the writer; a missing file is the documented
+        //   empty envelope, and the JSONL rules skip a torn tail line).
+        // * `kline.history` returns no bars because no aggregator exists yet
+        //   (E29) — the empty list is the current fact.
+        method::KLINE_HISTORY => {
+            typed(params, |p: KlineHistoryParams| async move {
+                Ok::<_, CoreError>(
+                    serde_json::to_value(KlineHistoryResult {
+                        symbol: p.symbol,
+                        interval: p.interval,
+                        klines: Vec::new(),
+                    })
+                    .unwrap_or(Value::Null),
+                )
+            })
+            .await
+        }
+
+        method::INTENT_AUDIT_TAIL => {
+            typed(params, |p: IntentAuditTailParams| async move {
+                let all = crate::jsonl::load::<Value>(
+                    std::path::Path::new("data/audit/intents.jsonl"),
+                    "intent audit log: skipped unparseable lines",
+                );
+                let keep = |rec: &Value| {
+                    if let Some(f) = p.account_id.as_deref()
+                        && rec.get("accountId").and_then(Value::as_str) != Some(f)
+                    {
+                        return false;
+                    }
+                    if let Some(f) = p.strategy.as_deref()
+                        && rec.get("strategy").and_then(Value::as_str) != Some(f)
+                    {
+                        return false;
+                    }
+                    if let Some(f) = p.decision.as_deref()
+                        && !rec
+                            .get("decision")
+                            .and_then(|d| d.get("status"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| s.eq_ignore_ascii_case(f))
+                    {
+                        return false;
+                    }
+                    true
+                };
+                let matched: Vec<Value> = all.into_iter().filter(keep).collect();
+                let total = matched.len();
+                let limit = p.limit.unwrap_or(50);
+                let records: Vec<Value> = matched
+                    .into_iter()
+                    .skip(total.saturating_sub(limit))
+                    .collect();
+                Ok::<_, CoreError>(
+                    serde_json::to_value(IntentAuditTailResult {
+                        records,
+                        total: Some(total),
+                    })
+                    .unwrap_or(Value::Null),
+                )
+            })
+            .await
+        }
+
+        // ── E28 (§12.1) — the account verbs ──────────────────────────────
+        // All three read/write the SESSION cell (§9.5): `account.switch`
+        // changes THIS connection's default only, `account.list` reports it,
+        // and Core's process-level active account is never touched from the
+        // wire. Two panels can therefore look at two accounts side by side.
+        method::ACCOUNT_LIST => {
+            let c = core.lock().await;
+            let active = session_active
+                .clone()
+                .unwrap_or_else(|| c.accounts().active_id().clone());
+            Ok(serde_json::to_value(AccountListResult {
+                version: PROTOCOL_VERSION.to_string(),
+                active: active.as_str().to_string(),
+                accounts: c.account_views(now_ms()),
+            })
+            .unwrap_or(Value::Null))
+        }
+
+        method::ACCOUNT_SWITCH => {
+            match serde_json::from_value::<AccountSwitchParams>(params) {
+                Ok(p) => {
+                    let id = AccountId::from(p.account_id.as_str());
+                    let c = core.lock().await;
+                    // Existence only: switching TO a frozen account to LOOK at
+                    // it is legal — the posture gates the orders, not the view.
+                    if let Err(e) = c.accounts().require(&id) {
+                        Err(client_err(e))
+                    } else {
+                        *session_active = Some(id);
+                        Ok(serde_json::json!({ "active": p.account_id }))
+                    }
+                }
+                Err(e) => Err((Failure::INVALID_PARAMS, e.to_string(), None)),
+            }
+        }
+
+        method::ACCOUNT_STATUS => {
+            match serde_json::from_value::<AccountStatusParams>(params) {
+                Ok(p) => {
+                    // The flat wire `reason` overrides the placeholder a
+                    // bare-string `suspended` would carry (§12.1); a map-form
+                    // reason survives when no flat one is sent.
+                    let status = match (p.status, p.reason) {
+                        (AccountStatus::Suspended { .. }, Some(r)) => {
+                            AccountStatus::Suspended { reason: r }
+                        }
+                        (s, _) => s,
+                    };
+                    let status_tag = status.wire_tag().to_string();
+                    let status_reason = match &status {
+                        AccountStatus::Suspended { reason } => Some(reason.clone()),
+                        _ => None,
+                    };
+                    let id = AccountId::from(p.account_id.as_str());
+                    let mut c = core.lock().await;
+                    match c.tighten_account_status(&id, status, now_ms()) {
+                        Ok(()) => Ok(serde_json::to_value(AccountStatusResult {
+                            id: p.account_id,
+                            status: status_tag,
+                            status_reason,
+                        })
+                        .unwrap_or(Value::Null)),
+                        Err(e) => Err(client_err(e)),
+                    }
+                }
+                Err(e) => Err((Failure::INVALID_PARAMS, e.to_string(), None)),
+            }
+        }
+
         other => Err((
             Failure::METHOD_NOT_FOUND,
             format!("unknown method: {other}"),
@@ -1571,6 +1804,27 @@ fn core_err(e: crate::model::CoreError) -> (i32, String, Option<ErrorData>) {
     let msg = format!("{e}");
     (
         Failure::APPLICATION,
+        msg,
+        Some(ErrorData {
+            core_code: e.code,
+            raw: e.raw,
+        }),
+    )
+}
+
+/// A core error that is a CLIENT fault — an unknown account id, a tighten-only
+/// refusal — surfaces as the wire-level INVALID_PARAMS the spec shows
+/// (§12.1: `frozen -> active` must be refused with INVALID_PARAMS), not as a
+/// generic application error. Anything else stays APPLICATION.
+fn client_err(e: crate::model::CoreError) -> (i32, String, Option<ErrorData>) {
+    let msg = format!("{e}");
+    let code = if e.code == CoreErrorCode::InvalidParams {
+        Failure::INVALID_PARAMS
+    } else {
+        Failure::APPLICATION
+    };
+    (
+        code,
         msg,
         Some(ErrorData {
             core_code: e.code,
@@ -1821,8 +2075,29 @@ mod tests {
         line: String,
     ) -> Value {
         let update_state = Arc::new(crate::ipc::version::UpdateState::new(false, false));
-        serde_json::from_str(&handle_line(core, registry, line, peer, &update_state).await)
-            .expect("every reply is one JSON object")
+        // The boot-time snapshot the arm serves, assembled from the SAME
+        // config this core runs under — the honest road `serve` takes.
+        let risk_limits = {
+            let c = core.lock().await;
+            Arc::new(crate::ipc::schema::RiskLimitsResult::snapshot(
+                &c.config().risk.systemic,
+                &c.config().positions.exit,
+            ))
+        };
+        let mut session_active: Option<AccountId> = None;
+        serde_json::from_str(
+            &handle_line(
+                core,
+                registry,
+                line,
+                peer,
+                &update_state,
+                &risk_limits,
+                &mut session_active,
+            )
+            .await,
+        )
+        .expect("every reply is one JSON object")
     }
 
     /// A core whose interesting knob is the per-order cap: 3 USD, so the 2.00
@@ -2066,16 +2341,128 @@ mod tests {
     // ── VERSIONING.md §7.4: the update verbs, at the wire ────────────────────
 
     /// Like [`rpc`], but the caller owns the update state — the verbs read AND
-    /// write it, so a test has to hold the same cell the branch holds.
+    /// write it, so a test has to hold the same cell the branch holds. The
+    /// session's active account is the same kind of cell: the caller may hold
+    /// it to assert a switch LINGERED across requests on one connection.
     async fn rpc_with_updates(
         core: &Arc<AsyncMutex<Core>>,
         registry: &crate::market::registry::MarketPluginRegistry,
         peer: &PeerAuth,
         update_state: &Arc<crate::ipc::version::UpdateState>,
+        session_active: &mut Option<AccountId>,
         line: String,
     ) -> Value {
-        serde_json::from_str(&handle_line(core, registry, line, peer, update_state).await)
-            .expect("every reply is one JSON object")
+        let risk_limits = {
+            let c = core.lock().await;
+            Arc::new(crate::ipc::schema::RiskLimitsResult::snapshot(
+                &c.config().risk.systemic,
+                &c.config().positions.exit,
+            ))
+        };
+        serde_json::from_str(
+            &handle_line(
+                core,
+                registry,
+                line,
+                peer,
+                update_state,
+                &risk_limits,
+                session_active,
+            )
+            .await,
+        )
+        .expect("every reply is one JSON object")
+    }
+
+    /// The §4.4 factory readout: all nine NEW limits silent (0, "default"),
+    /// the exit triple at its factory resolution (12 / 100 / 120), camelCase
+    /// keys, and the version tag. This is the wire face of §4.1's
+    /// factory-silence — an unconfigured kernel REPORTS that it enforces
+    /// nothing new, with provenance saying where every number came from.
+    #[tokio::test]
+    async fn the_factory_risk_limits_readout_is_silent_and_provenanced() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":7,"method":"risk.limits","params":{}}"#.to_string(),
+        )
+        .await;
+        let r = &reply["result"];
+        assert_eq!(r["version"], "1.1");
+        assert_eq!(r["account"]["id"], "default");
+        for key in [
+            "maxSingleLossUsd",
+            "maxDailyDrawdownUsd",
+            "maxPositionSize",
+            "maxConsecutiveLosses",
+            "cooldownMinutes",
+        ] {
+            assert_eq!(r["account"]["limits"][key]["value"], "0", "{key}");
+            assert_eq!(r["account"]["limits"][key]["source"], "default", "{key}");
+        }
+        for key in [
+            "maxTotalPosition",
+            "maxTotalExposureUsd",
+            "maxCorrelationUsd",
+            "globalKillSwitchLossUsd",
+        ] {
+            assert_eq!(r["global"]["limits"][key]["value"], "0", "{key}");
+            assert_eq!(r["global"]["limits"][key]["source"], "default", "{key}");
+        }
+        assert_eq!(r["exit"]["stopLossPct"].as_f64(), Some(12.0));
+        assert_eq!(r["exit"]["takeProfitPct"].as_f64(), Some(100.0));
+        assert_eq!(r["exit"]["forceExitSec"].as_i64(), Some(120));
+    }
+
+    /// A configured limit crosses the wire as a STRING with its provenance —
+    /// §4.4's rule that "35" without "toml" is not an answer an operator can
+    /// act on. And the untouched siblings stay factory-silent in the same
+    /// readout: one configured key must not leak posture onto the others.
+    #[tokio::test]
+    async fn a_configured_limit_crosses_the_wire_as_a_string_with_provenance() {
+        use crate::risk::limits::{AccountRiskLimits, Bound, LimitSource, SystemicRiskLimits};
+        use rust_decimal_macros::dec;
+        let cfg = CoreConfig {
+            risk: crate::risk::RiskConfig {
+                max_order_notional: dec!(3),
+                systemic: SystemicRiskLimits {
+                    account: AccountRiskLimits {
+                        max_single_loss_usd: Bound::new(dec!(35), LimitSource::Toml),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(100),
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        };
+        let core = Arc::new(AsyncMutex::new(Core::new(cfg)));
+        let registry = crate::market::registry::MarketPluginRegistry::new();
+        let peer = PeerAuth::SameUid { uid: own_uid() };
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":7,"method":"risk.limits","params":{}}"#.to_string(),
+        )
+        .await;
+        let single = &reply["result"]["account"]["limits"]["maxSingleLossUsd"];
+        assert_eq!(single["value"], "35");
+        assert_eq!(single["source"], "toml");
+        assert_eq!(
+            reply["result"]["global"]["limits"]["maxTotalPosition"]["value"],
+            "0"
+        );
+        assert_eq!(
+            reply["result"]["global"]["limits"]["maxTotalPosition"]["source"],
+            "default"
+        );
     }
 
     /// A2's wire shape: with the switch off, `system.update.check` answers a
@@ -2090,6 +2477,7 @@ mod tests {
             &registry,
             &peer,
             &updates,
+            &mut None,
             r#"{"jsonrpc":"2.0","id":1,"method":"system.update.check","params":{}}"#.to_string(),
         )
         .await;
@@ -2125,6 +2513,7 @@ mod tests {
             &registry,
             &peer,
             &updates,
+            &mut None,
             r#"{"jsonrpc":"2.0","id":1,"method":"system.update.configure","params":{"checkEnabled":true,"autoUpdate":false}}"#.to_string(),
         )
         .await;
@@ -2153,5 +2542,493 @@ mod tests {
 
         // Cleanup: these two files belong to this test alone.
         let _ = std::fs::remove_dir_all("data/update");
+    }
+
+    // ── v0.3 Wave 0 (#329): the two read-only envelopes, at the wire ────────
+    //
+    // Both arms are ADDITIVE (two new methods; nothing existing moves), so what
+    // these tests pin is the envelope a consumer parses: the echoed routing
+    // fields and the empty list — never `null`, never METHOD_NOT_FOUND. E25 and
+    // E29 fill the lists later; these shapes must survive that swap.
+
+    /// `kline.history` answers the frozen envelope: symbol/interval echoed
+    /// verbatim (`interval` in the shared `KlineInterval` spelling) and an
+    /// empty `klines` — the truth until E29's aggregator exists.
+    #[tokio::test]
+    async fn kline_history_answers_the_frozen_envelope() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"kline.history","params":{"symbol":"BTC-UP","interval":"min1"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "a Wave-0 envelope must answer, not 404: {reply}"
+        );
+        assert_eq!(reply["result"]["symbol"], serde_json::json!("BTC-UP"));
+        assert_eq!(reply["result"]["interval"], serde_json::json!("min1"));
+        assert_eq!(reply["result"]["klines"], serde_json::json!([]));
+    }
+
+    /// `intent.audit.tail`: a missing log is the documented empty envelope;
+    /// with rows present it answers the NEWEST window in file order, and
+    /// `accountId` / `decision` filter BEFORE the window is taken (`decision`
+    /// case-insensitively against `decision.status`, the §3.4 wire shape).
+    #[tokio::test]
+    async fn intent_audit_tail_reads_the_tail_and_filters() {
+        let dir = std::path::Path::new("data/audit");
+        let _ = std::fs::remove_dir_all(dir);
+        let (core, registry, peer) = hot_reload_fixture().await;
+
+        // Fresh data dir: the empty envelope, not an error.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"intent.audit.tail","params":{}}"#.to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "{reply}");
+        assert_eq!(reply["result"]["records"], serde_json::json!([]));
+        assert_eq!(reply["result"]["total"], serde_json::json!(0));
+
+        // Three rows shaped like §3.4's IntentAuditRecord (camelCase; the
+        // decision is the status-tagged enum).
+        std::fs::create_dir_all(dir).expect("create data/audit");
+        let rows = [
+            r#"{"tsMs":1,"accountId":"default","strategy":"s","intentId":"i1","decision":{"status":"APPROVED"},"gates":[],"latencyUs":1}"#,
+            r#"{"tsMs":2,"accountId":"paper","strategy":"s","intentId":"i2","decision":{"status":"REJECTED"},"gates":[],"latencyUs":1}"#,
+            r#"{"tsMs":3,"accountId":"default","strategy":"s","intentId":"i3","decision":{"status":"MODIFIED"},"gates":[],"latencyUs":1}"#,
+        ];
+        std::fs::write(dir.join("intents.jsonl"), rows.join("\n")).expect("write rows");
+
+        // No filter: all three, oldest → newest (file order preserved).
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"intent.audit.tail","params":{}}"#.to_string(),
+        )
+        .await;
+        assert_eq!(reply["result"]["total"], serde_json::json!(3));
+        assert_eq!(
+            reply["result"]["records"][0]["intentId"],
+            serde_json::json!("i1")
+        );
+        assert_eq!(
+            reply["result"]["records"][2]["intentId"],
+            serde_json::json!("i3")
+        );
+
+        // `limit` takes the NEWEST rows, still oldest → newest inside the
+        // window; `total` keeps reporting the full filtered count.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"intent.audit.tail","params":{"limit":1}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(reply["result"]["records"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            reply["result"]["records"][0]["intentId"],
+            serde_json::json!("i3")
+        );
+        assert_eq!(reply["result"]["total"], serde_json::json!(3));
+
+        // `decision` matches case-insensitively against `decision.status` …
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"intent.audit.tail","params":{"decision":"rejected"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(reply["result"]["total"], serde_json::json!(1));
+        assert_eq!(
+            reply["result"]["records"][0]["intentId"],
+            serde_json::json!("i2")
+        );
+
+        // … and `accountId` is an exact match.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"intent.audit.tail","params":{"accountId":"default"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(reply["result"]["total"], serde_json::json!(2));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ── E28 (§12.1): the account verbs, at the wire ─────────────────────────
+
+    /// A two-account core (`default` + `paper`) through the INJECTION
+    /// constructor: no test touches the real `user_layer/configs/accounts.toml`
+    /// the process cwd decides, and no durable log is left behind.
+    async fn two_account_fixture() -> (
+        Arc<AsyncMutex<Core>>,
+        crate::market::registry::MarketPluginRegistry,
+        PeerAuth,
+    ) {
+        let now = now_ms();
+        let book = crate::account::AccountLedgers::new(
+            vec![
+                crate::account::Account {
+                    id: AccountId::from("default"),
+                    name: "default".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    updated_at_ms: now,
+                },
+                crate::account::Account {
+                    id: AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    updated_at_ms: now,
+                },
+            ],
+            AccountId::from("default"),
+        );
+        let cfg = CoreConfig {
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        };
+        let c = Core::with_account_book(cfg, book);
+        (
+            Arc::new(AsyncMutex::new(c)),
+            crate::market::registry::MarketPluginRegistry::new(),
+            PeerAuth::SameUid { uid: own_uid() },
+        )
+    }
+
+    /// The §12.1 wire shape: `version` + the SESSION's active + one view per
+    /// configured account, each carrying its OWN book (§9.3) — and no
+    /// credential value anywhere on the wire (§9.4: `credentialsLoaded` is a
+    /// boolean, never a value).
+    #[tokio::test]
+    async fn account_list_reports_the_session_default_and_every_book() {
+        let (core, registry, peer) = two_account_fixture().await;
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.list","params":{}}"#.to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "list must answer: {reply}");
+        assert_eq!(reply["result"]["version"], serde_json::json!("1.1"));
+        // No session switch yet: the process-level active is what's reported.
+        assert_eq!(reply["result"]["active"], serde_json::json!("default"));
+        let accounts = reply["result"]["accounts"].as_array().expect("views");
+        assert_eq!(accounts.len(), 2, "one view per configured account");
+        assert_eq!(accounts[0]["id"], serde_json::json!("default"));
+        assert_eq!(accounts[1]["id"], serde_json::json!("paper"));
+        assert_eq!(accounts[0]["status"], serde_json::json!("active"));
+        // Money fields are the account's OWN book: the seeded default carries
+        // the dry seed; paper starts flat.
+        assert!(accounts[0]["balance"].is_number());
+        assert!(accounts[1]["balance"].is_number());
+        assert_eq!(
+            accounts[0]["credentialsLoaded"],
+            serde_json::json!(false),
+            "§9.4: a presence fact only"
+        );
+        let raw = reply.to_string();
+        assert!(
+            !raw.contains("apiKeyValue") && !raw.contains("secretValue"),
+            "no credential VALUE may ride the wire: {raw}"
+        );
+    }
+
+    /// §9.5: the session's default account drives the orders an un-versioned
+    /// client places — an omitted accountId rides the session cell (what this
+    /// connection switched to), an explicit one always stands.
+    #[tokio::test]
+    async fn an_omitted_account_id_rides_the_session_default_and_an_explicit_one_stands() {
+        let (core, registry, peer) = two_account_fixture().await;
+        let updates = Arc::new(crate::ipc::version::UpdateState::new(false, false));
+        let mut session: Option<AccountId> = None;
+
+        // Switch the session to `paper` first.
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &updates,
+            &mut session,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.switch","params":{"accountId":"paper"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "switch must land: {reply}");
+
+        // A book for `tok`, so the taker crosses.
+        let feed = |id: u32| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"books.snapshot","params":{{"tokenId":"tok","bids":[{{"price":0.40,"size":100}}],"asks":[{{"price":0.41,"size":100}}]}}}}"#
+            )
+        };
+        let slot = now_ms() / 1000 / 900;
+        let buy_omitted = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"orders.place","params":{{"tokenId":"tok","conditionId":"cond","side":"buy","mode":"taker","price":0.41,"size":2,"internalKey":"e-omitted","strategy":"s","asset":"BTC","direction":"up","roundSlot":{slot}}}}}"#
+        );
+        let reply =
+            rpc_with_updates(&core, &registry, &peer, &updates, &mut session, feed(1)).await;
+        assert!(reply.get("error").is_none(), "book feed must land: {reply}");
+        let reply =
+            rpc_with_updates(&core, &registry, &peer, &updates, &mut session, buy_omitted).await;
+        assert!(
+            reply.get("error").is_none(),
+            "an orderless place must land: {reply}"
+        );
+
+        // The position (and the reservation) belong to `paper` — the session's
+        // default, not the process-level `default` account.
+        let c = core.lock().await;
+        let paper = c.accounts().ledger_of(&AccountId::from("paper")).unwrap();
+        assert!(
+            paper.reserved() > rust_decimal::Decimal::ZERO || {
+                let views = c.position_views(now_ms());
+                !views.is_empty() && views.iter().all(|v| v.account_id == "paper")
+            },
+            "the omitted-account order must spend the SESSION's book"
+        );
+        let def = c
+            .accounts()
+            .ledger_of(&AccountId::from("default"))
+            .unwrap()
+            .balance();
+        assert_eq!(
+            def,
+            rust_decimal::Decimal::from(10_000),
+            "the process-level book is untouched"
+        );
+        drop(c);
+
+        // An EXPLICIT `accountId: "default"` NAMES its account: it spends the
+        // process-level book even though the session points at paper. A second
+        // token, because the position book is one-position-per-token and the
+        // first order already holds `tok`.
+        let slot = now_ms() / 1000 / 900;
+        let feed2 = r#"{"jsonrpc":"2.0","id":3,"method":"books.snapshot","params":{"tokenId":"tok2","bids":[{"price":0.40,"size":100}],"asks":[{"price":0.41,"size":100}]}}"#.to_string();
+        let reply = rpc_with_updates(&core, &registry, &peer, &updates, &mut session, feed2).await;
+        assert!(reply.get("error").is_none(), "book 2 must land: {reply}");
+        let buy_explicit = format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"orders.place","params":{{"tokenId":"tok2","conditionId":"cond2","side":"buy","mode":"taker","price":0.41,"size":2,"internalKey":"e-explicit","strategy":"s","asset":"ETH","direction":"up","roundSlot":{slot},"accountId":"default"}}}}"#
+        );
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &updates,
+            &mut session,
+            buy_explicit,
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "an explicit place must land: {reply}"
+        );
+        let c = core.lock().await;
+        let views = c.position_views(now_ms());
+        assert!(
+            views.iter().any(|v| v.account_id == "default"),
+            "the explicit accountId must stand: {views:?}"
+        );
+    }
+
+    /// `account.switch` is SESSION-level (§9.5): the switched connection sees
+    /// the new default on its NEXT request, a second connection still sees the
+    /// process-level one, and Core's process active never moves.
+    #[tokio::test]
+    async fn a_switch_is_session_scoped_and_survives_across_requests() {
+        let (core, registry, peer) = two_account_fixture().await;
+        let updates = Arc::new(crate::ipc::version::UpdateState::new(false, false));
+        let mut session_a: Option<AccountId> = None;
+        let mut session_b: Option<AccountId> = None;
+
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &updates,
+            &mut session_a,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.switch","params":{"accountId":"paper"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "switch must answer: {reply}");
+        assert_eq!(reply["result"]["active"], serde_json::json!("paper"));
+
+        // Session A now defaults to paper …
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &updates,
+            &mut session_a,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.list","params":{}}"#.to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["result"]["active"],
+            serde_json::json!("paper"),
+            "the session cell lingers across requests"
+        );
+
+        // … while session B still sees the process-level one.
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &updates,
+            &mut session_b,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.list","params":{}}"#.to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["result"]["active"],
+            serde_json::json!("default"),
+            "another connection is NOT switched"
+        );
+
+        // And the process-level active itself never moved.
+        let c = core.lock().await;
+        assert_eq!(c.accounts().active_id().as_str(), "default");
+    }
+
+    /// A switch to an account the deployment never configured is refused and
+    /// leaves the session cell exactly where it was (§9.3: no implicit
+    /// account, ever).
+    #[tokio::test]
+    async fn a_switch_to_an_unknown_account_is_refused_without_touching_the_session() {
+        let (core, registry, peer) = two_account_fixture().await;
+        let updates = Arc::new(crate::ipc::version::UpdateState::new(false, false));
+        let mut session: Option<AccountId> = None;
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &updates,
+            &mut session,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.switch","params":{"accountId":"ghost"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::INVALID_PARAMS),
+            "an unknown account must fail loud: {reply}"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unknown account"),
+            "the refusal must say WHY: {reply}"
+        );
+        // The session still resolves to the process default.
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &updates,
+            &mut session,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.list","params":{}}"#.to_string(),
+        )
+        .await;
+        assert_eq!(reply["result"]["active"], serde_json::json!("default"));
+    }
+
+    /// §12.1 / §14 acceptance: a tighten lands (`active -> frozen`, then
+    /// `frozen -> suspended` with the flat reason), and the reverse is
+    /// refused with INVALID_PARAMS — an unwind one IPC call could undo is
+    /// not an unwind. Unfreezing is config + restart.
+    #[tokio::test]
+    async fn a_status_tighten_lands_and_a_loosening_is_refused() {
+        let (core, registry, peer) = two_account_fixture().await;
+
+        // active -> frozen: allowed, and the view carries no reason.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.status","params":{"accountId":"paper","status":"frozen"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "a tighten must land: {reply}");
+        assert_eq!(reply["result"]["id"], serde_json::json!("paper"));
+        assert_eq!(reply["result"]["status"], serde_json::json!("frozen"));
+        assert!(
+            reply["result"].get("statusReason").is_none(),
+            "a freeze without a reason reports none: {reply}"
+        );
+
+        // frozen -> suspended WITH a reason: still a tighten, the flat reason
+        // is carried onto the view.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.status","params":{"accountId":"paper","status":"suspended","reason":"ops review"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "a tighten must land: {reply}");
+        assert_eq!(reply["result"]["status"], serde_json::json!("suspended"));
+        assert_eq!(
+            reply["result"]["statusReason"],
+            serde_json::json!("ops review")
+        );
+
+        // The posture is visible in the list view, as a plain string.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"account.list","params":{}}"#.to_string(),
+        )
+        .await;
+        let accounts = reply["result"]["accounts"].as_array().expect("views");
+        assert_eq!(accounts[1]["status"], serde_json::json!("suspended"));
+        assert_eq!(accounts[1]["statusReason"], serde_json::json!("ops review"));
+
+        // And the loosening is refused at the wire with INVALID_PARAMS.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":4,"method":"account.status","params":{"accountId":"paper","status":"active"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::INVALID_PARAMS),
+            "suspended -> active must be refused with INVALID_PARAMS: {reply}"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("LOOSEN"),
+            "the refusal must say WHY: {reply}"
+        );
     }
 }

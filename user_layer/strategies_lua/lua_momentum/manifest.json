@@ -1,0 +1,12 @@
+{
+  "name": "lua_momentum",
+  "version": "0.1.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "e38d43cf3e55aff2889be2951e3fab5a79f2a7ad4b5df9da9d48f51c84bdf3d0",
+  "author": "BlitzkriegBot",
+  "description": "Official Lua example: per-token momentum follower on the read-only bk.* surface; entries priced off fresh books only, all intents adjudicated by the kernel.",
+  "tunables": {
+    "threshold": { "type": "decimal", "default": "0.04" }
+  }
+}

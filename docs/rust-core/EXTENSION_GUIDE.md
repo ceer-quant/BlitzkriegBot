@@ -76,6 +76,55 @@ pub trait MarketPlugin: Send + Sync {
 地方是 `market::register_builtin_markets()`。运行时用 `--market-plugin <name>` 选择（未注册则回退
 第一个并告警）。
 
+## 2.6 模式声明（`declare_modes`，E27）
+
+**方向性（§7.5，一句话）**：策略可宽松、插件必须具体——声明 `structure: None` 的插件是
+"我适配该 market_type 下一切结构"，但正因为它说不清自己是不是 CLOB，它就**不能**与要求
+具体结构的策略相容。
+
+市场插件可选实现 `declare_modes()`（`MarketPlugin` 默认方法，默认空 `Vec`）：
+
+```rust
+fn declare_modes(&self) -> Vec<MarketMode> {
+    vec![MarketMode {
+        market_type: MarketType::Prediction,
+        structure: Some(MarketStructure::BinaryOutcomeWheel),
+        capabilities: MarketCapabilities::WEBSOCKET_FEED
+            | MarketCapabilities::LEVEL2_SNAPSHOT
+            | MarketCapabilities::POST_ONLY,
+    }]
+}
+```
+
+**语义（§7.4）**：
+
+- 不覆盖（空 `Vec`）= **未声明**：握手把插件当作**一个**隐式 market_type-only 模式——
+  只有 `market_type()`，无结构、无能力位；要求结构或能力的策略将被拒。
+- `capabilities` 申报的是**接缝交付契约**（本扩展实际走到的路径），不是场地宣传位图
+  （§7.2：设计文档不代猜位图）。参考口径见 `extensions/polymarket/src/plugin.rs`。
+
+**相容规则（§7.5）**：一个策略模式与一个插件模式相容 ⟺
+1. `market_type` 强相等；
+2. 策略 `structure` 为 `None`（不挑结构）或与插件相等；
+3. 插件能力位是策略要求位的**超集**（`MarketCapabilities::satisfies`）。
+
+策略可装载 ⟺ 未声明（空 = 不参与，一切 0.2 库的常态）或存在至少一个相容对。
+
+**握手三时机（§8.2）**：
+
+| 时机 | 行为 |
+|:---|:---|
+| 启动扫描（`--strategy-dir`） | 只记录不拒绝：不兼容库**仍注册**（disabled），回执带 `INCOMPATIBLE:` 说明 |
+| `strategy.load` | **拒绝注册**，reason 同时说明两边（策略要什么 / 插件供什么） |
+| `strategy.enable` / 启动 `--enable-strategy` | **拒绝启用** `{name, enabled:false, found:true, reason}`；停用永不拦；启动期被拒的策略跳过并 ERROR 日志 |
+
+**呈现（§8.3）**：`market.list` 行新增 `structure` / `capabilities`（可读名数组）/
+`capabilitiesBits`（位图原值）；`strategy.list` 行新增 `modes`（§2.3 wire 对象数组，
+null = 未声明）/ `compatible` / `incompatibleReason`。
+
+**门禁**：`node scripts/plugin-modes-check.mjs`（`--self-test` 钉判定器；`--teeth` 三变异
+必须红：satisfies 方向翻转 / 市场类型过滤丢失 / 插件 None 当万能结构）。
+
 ## 3. 生命周期
 
 ```
@@ -139,7 +188,7 @@ max_daily_loss = 500.0
 | `extension.list` | `{ version, extensions: [{ name, type, state }] }` |
 | `extension.enable` | 启用通用扩展（执行 `on_load`）；返回 `{ name, enabled: true }` |
 | `extension.disable` | 停用通用扩展（执行 `on_unload`）；返回 `{ name, enabled: false }` |
-| `market.list` | `{ version, active, plugins: [{ name, type, hasDataFeed, hasDiscovery, hasExecutor, enabled, active }] }` |
+| `market.list` | `{ version, active, plugins: [{ name, type, structure, capabilities, capabilitiesBits, hasDataFeed, hasDiscovery, hasExecutor, enabled, active }] }`（E27：`structure`/`capabilities`/`capabilitiesBits` 为 §2.6 声明汇总，见 §8.3） |
 
 内建示例扩展 `binance_spot`（`Extension`）默认 installed，可 `extension.enable`/`disable`。
 市场插件（`MarketPlugin`）走 `market.list` 只读查询；选择用 `--market-plugin`（暂无 enable/disable IPC）。

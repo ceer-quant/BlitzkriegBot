@@ -103,6 +103,7 @@ mod tests {
             target_exit_price: None,
             entered_at_ms: 1000,
             expires_at_ms: 900_000,
+            account_id: crate::model::default_account_id(),
             last_book_ts: 0,
             state: ExitState::new(dec!(0.43), 1000),
             flows: crate::position::CashFlows {
