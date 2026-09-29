@@ -67,6 +67,11 @@ const NOT_CARRIED: &[(&str, &str)] = &[
     ),
     ("confirmedDetail", "per-token confirmation diagnostics"),
     ("archive", "event archive status; no panel surface yet"),
+    (
+        "kline",
+        "K-line aggregator diagnostics (E29); the chart polls kline.history, \
+         no panel surface reads engine.stats for it yet",
+    ),
 ];
 
 /// A dry kernel with no durable state at all: `trade_log_path`/`order_log_path`/
