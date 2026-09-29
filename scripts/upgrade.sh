@@ -4,8 +4,10 @@
 # Full pipeline, aborts on the first failure — never deploys a red tree, and
 # never leaves the stack stopped:
 #   0. data/ light backup (a few MB, seconds — the upgrade leaves a rollback point)
-#   1. fetch ceer and resolve the source (default: ceer/feat/trading-safety-selfcheck,
-#      override with BLITZKRIEG_UPGRADE_SOURCE)
+#   1. fetch ceer and resolve the source (default: ceer/main — the deploy line
+#      moved to main with v0.3.0; it used to be the feat/trading-safety-selfcheck
+#      branch, which stalled at Wave 0 and left every upgrade a no-op at 0.2.1),
+#      override with BLITZKRIEG_UPGRADE_SOURCE
 #   2. update the production build worktree target/bk-main-build to the source
 #      (detached checkout — the branch refs and the main checkout stay untouched)
 #   3. build: release workspace + the reference strategy cdylib + the panel's
@@ -54,7 +56,7 @@ set -eu
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 build_wt="$repo_root/target/bk-main-build"
 release="$repo_root/target/release"
-SOURCE_REF="${BLITZKRIEG_UPGRADE_SOURCE:-ceer/feat/trading-safety-selfcheck}"
+SOURCE_REF="${BLITZKRIEG_UPGRADE_SOURCE:-ceer/main}"
 RUN_LOG="/tmp/blitzkrieg-run.log"
 READY_DEADLINE="${BLITZKRIEG_UPGRADE_DEADLINE:-120}"   # seconds to reach identity
 
