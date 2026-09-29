@@ -304,6 +304,14 @@ impl EngineStrategy for LuaEngineAdapter {
         std::mem::take(&mut self.breaks)
     }
 
+    // E29 (§10.4): forward CLOSED bars into the Lua runtime — LuaStrategy's
+    // `on_kline` records the bar for `bk.kline` reads and calls the script's
+    // `bk_on_kline`. Same `Kline` type on both sides (one re-export, no
+    // mirror), so this is a pass-through, not a translation.
+    fn on_kline(&mut self, kline: &crate::kline::Kline) {
+        self.inner.on_kline(kline);
+    }
+
     fn confirmed_tokens(&self) -> HashSet<String> {
         self.inner.confirmed_tokens().into_iter().collect()
     }

@@ -240,6 +240,16 @@ pub mod method {
     /// absent from `risk.setLimits`) and the exit resolution is not a #191
     /// hot key either, so nothing on this readout can go stale mid-run.
     pub const RISK_LIMITS: &str = "risk.limits";
+
+    // ── E29 (§12.2) — K-line subscriptions ─────────────────────────────────
+    // (`kline.history` itself was frozen by Wave 0 above; only the
+    // session-scoped subscription pair is new here.)
+    /// Session-scoped subscription (§12.2: dies WITH the connection, so a
+    /// closed panel cannot keep receiving market pushes).
+    pub const KLINE_SUBSCRIBE: &str = "kline.subscribe";
+    /// Explicit counterpart; the auto-unsubscribe on disconnect makes this
+    /// optional for clients, not useless (a live panel can narrow its feed).
+    pub const KLINE_UNSUBSCRIBE: &str = "kline.unsubscribe";
 }
 
 // ── E26 (§4.4) — systemic risk readout ──────────────────────────────────────
@@ -317,6 +327,30 @@ pub struct RiskExitView {
     #[serde(with = "crate::decimal")]
     pub take_profit_pct: Decimal,
     pub force_exit_sec: i64,
+}
+
+// ── E29 (§12.2) — K-line subscriptions ───────────────────────────────────────
+// (`kline.history`'s envelope was frozen by Wave 0 below; E29 extends its
+// BEHAVIOUR — real bars — without re-spelling the shape. One semantic note
+// now that bars exist: `klines` is oldest first with the still-growing bar
+// riding LAST (`isClosed = false`), so a chart draws it translucent without
+// a second call.)
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KlineSubscribeParams {
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    #[serde(default)]
+    pub intervals: Vec<crate::kline::KlineInterval>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KlineSubscribeResult {
+    /// Size of the session's subscription set after this call (dedup —
+    /// resubscribing an existing pair changes nothing).
+    pub subscribed: usize,
 }
 
 // ── Typed params / results ───────────────────────────────────────────────────
@@ -957,6 +991,14 @@ pub enum Event {
         #[serde(rename = "tsMs")]
         ts_ms: i64,
         count: u64,
+    },
+    /// E29 (§12.2): one K-line bar. Pushed twice-shaped: a CLOSED bar exactly
+    /// once (never throttled — a swallowed close would leave the chart
+    /// missing a bar forever), and the still-growing bar at most 1/s per
+    /// `(symbol, interval)` (the "正在长" preview). `isClosed` tells the two
+    /// apart; the strategy-visible `on_kline` callback sees CLOSED only.
+    KlineUpdate {
+        kline: crate::kline::Kline,
     },
 }
 

@@ -297,6 +297,12 @@ pub struct Engine {
     /// a budget that cannot buy one whole share. Counted rather than silent:
     /// "why is nothing trading?" must be answerable from the stats snapshot.
     size_pct_skipped: u64,
+    /// E29 (§10.3): the K-line aggregator. Fed from the SAME data path that
+    /// already reaches `on_data` (book mids — the venue publishes no trade
+    /// tape this deployment can read; §10.3's "input source" is the existing
+    /// data path, whatever it carries). Closed bars dispatch `on_kline` and
+    /// are drained by the host as `KLINE_UPDATE` events.
+    klines: crate::kline::KlineAggregator,
 }
 
 impl Engine {
@@ -322,6 +328,7 @@ impl Engine {
             cfg,
             equity_usd: Decimal::ZERO,
             size_pct_skipped: 0,
+            klines: crate::kline::KlineAggregator::with_default_intervals(),
         }
     }
 
@@ -447,6 +454,7 @@ impl Engine {
                     s.strategy.on_book(&token_id, &snap, now_ms);
                 }
                 self.near_miss.on_book(&token_id, &snap, now_ms);
+                self.feed_klines(&token_id, &snap, now_ms);
             }
             DataEvent::TopOfBook {
                 token_id,
@@ -461,6 +469,7 @@ impl Engine {
                     s.strategy.on_book(&token_id, &snap, now_ms);
                 }
                 self.near_miss.on_book(&token_id, &snap, now_ms);
+                self.feed_klines(&token_id, &snap, now_ms);
             }
             DataEvent::Spot {
                 asset,
@@ -468,9 +477,10 @@ impl Engine {
                 now_ms,
             } => {
                 self.spot
-                    .entry(asset)
+                    .entry(asset.clone())
                     .or_insert_with(|| PriceBuffer::new(180))
                     .push(price, now_ms);
+                self.feed_kline_price(&asset, price, now_ms);
                 return Vec::new();
             }
             DataEvent::RoundMarkets { markets, now_ms } => {
@@ -511,6 +521,66 @@ impl Engine {
             }
         }
         self.drain_breaks()
+    }
+
+    /// E29 (§10.3): fold one book-derived price into the K-line aggregator.
+    ///
+    /// The venue publishes no trade tape this deployment can read, so the bar
+    /// is built from the book MID at the event's own timestamp — the same
+    /// price the exit policy and the trend filter already decide on, not a
+    /// new feed and not a guess. One tick per `(symbol, interval)` per event;
+    /// the aggregator owns bucketing, out-of-order drops and closing.
+    ///
+    /// `_now_ms` is deliberately the EVENT timestamp (`now_ms` carried by the
+    /// DataEvent), not the host wall clock: K-line bucketing runs on venue
+    /// time, the clock every other decision here already runs on.
+    fn feed_klines(&mut self, symbol: &str, snap: &OrderbookSnapshot, ts_ms: i64) {
+        self.feed_kline_price(symbol, snap.mid_price, ts_ms);
+    }
+
+    /// E29: fold one price tick (book mid or spot print) into the aggregator
+    /// and dispatch the bars it closed. Non-positive prices are skipped: an
+    /// empty or one-sided book has no honest price to fold.
+    fn feed_kline_price(&mut self, symbol: &str, price: Decimal, ts_ms: i64) {
+        if price <= Decimal::ZERO {
+            return;
+        }
+        let closed = self.klines.on_trade(symbol, price, Decimal::ONE, ts_ms);
+        if closed.is_empty() {
+            return;
+        }
+        // §10.4: strategies see CLOSED bars only, in closure order.
+        for s in &mut self.strategies {
+            for bar in &closed {
+                s.strategy.on_kline(bar);
+            }
+        }
+    }
+
+    /// E29: bars closed since the last drain — the host's `KLINE_UPDATE`
+    /// source. Drained exactly once (§12.2: a closed bar MUST be pushed).
+    pub fn take_closed_klines(&mut self) -> Vec<crate::kline::Kline> {
+        self.klines.take_closed()
+    }
+
+    /// E29: the still-growing bars, for the throttled "正在长" push.
+    pub fn kline_current_bars(&self) -> Vec<crate::kline::Kline> {
+        self.klines.current_bars()
+    }
+
+    /// E29: `kline.history` body — closed tail + the growing bar last.
+    pub fn kline_history(
+        &self,
+        symbol: &str,
+        interval: crate::kline::KlineInterval,
+        limit: usize,
+    ) -> Vec<crate::kline::Kline> {
+        self.klines.history(symbol, interval, limit)
+    }
+
+    /// E29: aggregation counters (drops must be visible, never silent).
+    pub fn kline_stats(&self) -> crate::kline::AggregatorStats {
+        self.klines.stats()
     }
 
     /// Collect trend breaks from every strategy (each break is cancelled once).

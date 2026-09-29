@@ -534,14 +534,41 @@ fn spawn_session(
             }
         });
 
+        // The connection-scoped state (§9.5 + §12.2): the session's default
+        // account (`account.switch` writes THIS cell — never Core's
+        // process-level one, so two connections can look at two accounts side
+        // by side) and the session's K-line subscription set (§12.2) —
+        // written by this connection's `kline.subscribe`/`kline.unsubscribe`
+        // arms, read by the event-forwarding task below, and dropped with the
+        // connection, which IS the auto-unsubscribe (a closed panel cannot
+        // keep receiving market pushes; a reconnect starts clean, so no
+        // double-push).
+        let mut session = SessionState::default();
+
         // Server -> client notifications.
         {
             let out_tx = out_tx.clone();
+            let session_subs = session.kline_subs.clone();
             tokio::spawn(async move {
                 let mut events = events;
                 loop {
                     match events.recv().await {
                         Ok(ev) => {
+                            // KLINE_UPDATE is the one event a session must
+                            // OPT INTO (§12.2): an unfiltered broadcast would
+                            // push every bucket's preview to every client —
+                            // nine intervals × every symbol at 1/s each.
+                            if let Event::KlineUpdate { kline } = &ev {
+                                let subscribed = session_subs
+                                    .lock()
+                                    .map(|subs| {
+                                        subs.contains(&(kline.symbol.clone(), kline.interval))
+                                    })
+                                    .unwrap_or(false);
+                                if !subscribed {
+                                    continue;
+                                }
+                            }
                             if let Ok(json) = serde_json::to_string(&Notification::new(ev))
                                 && out_tx.send(format!("{json}\n")).is_err()
                             {
@@ -555,10 +582,6 @@ fn spawn_session(
             });
         }
 
-        // The session's own active account (§9.5): `account.switch` writes
-        // THIS cell — never Core's process-level one — so two connections can
-        // look at two accounts side by side.
-        let mut session_active: Option<AccountId> = None;
         let mut lines = BufReader::new(read_half).lines();
         loop {
             match lines.next_line().await {
@@ -570,7 +593,7 @@ fn spawn_session(
                         &peer,
                         &update_state,
                         &risk_limits,
-                        &mut session_active,
+                        &mut session,
                     )
                     .await;
                     if out_tx.send(format!("{response}\n")).is_err() {
@@ -586,6 +609,18 @@ fn spawn_session(
     });
 }
 
+/// The state a connection accumulates across its requests (§9.5's session
+/// account; §12.2's K-line subscription set shares the same scope and dies
+/// with the same connection — the Arc lets the event-forwarding task read
+/// the set concurrently while `handle_line` mutates it).
+#[derive(Default)]
+struct SessionState {
+    session_active: Option<AccountId>,
+    kline_subs: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashSet<(String, crate::kline::KlineInterval)>>,
+    >,
+}
+
 async fn handle_line(
     core: &Arc<AsyncMutex<Core>>,
     registry: &crate::market::registry::MarketPluginRegistry,
@@ -593,7 +628,7 @@ async fn handle_line(
     peer: &PeerAuth,
     update_state: &Arc<crate::ipc::version::UpdateState>,
     risk_limits: &Arc<crate::ipc::schema::RiskLimitsResult>,
-    session_active: &mut Option<AccountId>,
+    session: &mut SessionState,
 ) -> String {
     let req: Request = match serde_json::from_str(&line) {
         Ok(r) => r,
@@ -847,7 +882,8 @@ async fn handle_line(
                     let mut c = core.lock().await;
                     let mut order = p.order;
                     if !explicit_account {
-                        order.account_id = session_active
+                        order.account_id = session
+                            .session_active
                             .clone()
                             .unwrap_or_else(|| c.accounts().active_id().clone());
                     }
@@ -1622,25 +1658,93 @@ async fn handle_line(
             .await
         }
 
-        // ── v0.3 Wave 0 (#329): the two read-only envelope freezes ───────────
-        // Both answer without the Core lock (same posture as `system.version`)
-        // and state today's truth with today's data — no stub values:
+        // ── v0.3 Wave 0 (#329) / E29: the read-only envelope freezes ─────────
+        // Both answer and state today's truth with today's data — no stubs:
         //
         // * `intent.audit.tail` reads whatever `data/audit/intents.jsonl`
-        //   holds (E25 lands the writer; a missing file is the documented
+        //   holds (E25 landed the writer; a missing file is the documented
         //   empty envelope, and the JSONL rules skip a torn tail line).
-        // * `kline.history` returns no bars because no aggregator exists yet
-        //   (E29) — the empty list is the current fact.
+        // * `kline.history` (E29): the aggregator's closed tail plus the
+        //   still-growing bar as the last element. Takes the Core lock —
+        //   the bars live in the engine, and unlike `risk.limits` nothing
+        //   here is boot-frozen. `limit` default 200, ceiling 1000 = the
+        //   aggregator's own closed-tail cap, so a request can never want
+        //   bars the kernel dropped.
         method::KLINE_HISTORY => {
-            typed(params, |p: KlineHistoryParams| async move {
-                Ok::<_, CoreError>(
-                    serde_json::to_value(KlineHistoryResult {
-                        symbol: p.symbol,
-                        interval: p.interval,
-                        klines: Vec::new(),
-                    })
-                    .unwrap_or(Value::Null),
-                )
+            typed(params, |p: KlineHistoryParams| {
+                let core = core.clone();
+                async move {
+                    let limit = p.limit.unwrap_or(200).clamp(1, 1000);
+                    let c = core.lock().await;
+                    let klines = c.kline_history(&p.symbol, p.interval, limit);
+                    Ok::<_, CoreError>(
+                        serde_json::to_value(KlineHistoryResult {
+                            symbol: p.symbol,
+                            interval: p.interval,
+                            klines,
+                        })
+                        .unwrap_or(Value::Null),
+                    )
+                }
+            })
+            .await
+        }
+
+        // ── E29 (§12.2): the session-scoped subscription pair ────────────────
+        // The set lives in the SESSION (see `spawn_session`): these arms only
+        // mutate/remove that connection's own set, so two panels subscribe
+        // independently, and dropping the connection IS the auto-unsubscribe.
+        method::KLINE_SUBSCRIBE => {
+            typed(params, |p: KlineSubscribeParams| {
+                let session_subs = session.kline_subs.clone();
+                async move {
+                    // A poisoned lock can only mean a peer task panicked while
+                    // holding the set; refuse the call rather than fabricate a
+                    // count — the subscription state is then unknowable.
+                    let mut subs = session_subs.lock().map_err(|_| {
+                        CoreError::new(
+                            CoreErrorCode::Internal,
+                            "kline subscription state is poisoned (peer task panicked)",
+                        )
+                    })?;
+                    for s in &p.symbols {
+                        for iv in &p.intervals {
+                            subs.insert((s.clone(), *iv));
+                        }
+                    }
+                    Ok::<_, CoreError>(
+                        serde_json::to_value(KlineSubscribeResult {
+                            subscribed: subs.len(),
+                        })
+                        .unwrap_or(Value::Null),
+                    )
+                }
+            })
+            .await
+        }
+
+        method::KLINE_UNSUBSCRIBE => {
+            typed(params, |p: KlineSubscribeParams| {
+                let session_subs = session.kline_subs.clone();
+                async move {
+                    let mut subs = session_subs.lock().map_err(|_| {
+                        CoreError::new(
+                            CoreErrorCode::Internal,
+                            "kline subscription state is poisoned (peer task panicked)",
+                        )
+                    })?;
+                    for s in &p.symbols {
+                        for iv in &p.intervals {
+                            subs.remove(&(s.clone(), *iv));
+                        }
+                    }
+                    Ok::<_, CoreError>(
+                        serde_json::to_value(KlineSubscribeResult {
+                            subscribed: subs.len(),
+                        })
+                        .unwrap_or(Value::Null),
+                    )
+                }
             })
             .await
         }
@@ -1698,7 +1802,8 @@ async fn handle_line(
         // wire. Two panels can therefore look at two accounts side by side.
         method::ACCOUNT_LIST => {
             let c = core.lock().await;
-            let active = session_active
+            let active = session
+                .session_active
                 .clone()
                 .unwrap_or_else(|| c.accounts().active_id().clone());
             Ok(serde_json::to_value(AccountListResult {
@@ -1719,7 +1824,7 @@ async fn handle_line(
                     if let Err(e) = c.accounts().require(&id) {
                         Err(client_err(e))
                     } else {
-                        *session_active = Some(id);
+                        session.session_active = Some(id);
                         Ok(serde_json::json!({ "active": p.account_id }))
                     }
                 }
@@ -2084,7 +2189,7 @@ mod tests {
                 &c.config().positions.exit,
             ))
         };
-        let mut session_active: Option<AccountId> = None;
+        let mut session = SessionState::default();
         serde_json::from_str(
             &handle_line(
                 core,
@@ -2093,13 +2198,46 @@ mod tests {
                 peer,
                 &update_state,
                 &risk_limits,
-                &mut session_active,
+                &mut session,
             )
             .await,
         )
         .expect("every reply is one JSON object")
     }
 
+    /// Like [`rpc`], but the caller owns the whole session state — the E29
+    /// verbs read AND write the session's kline subscription set, so a test
+    /// asserting a session's set LINGERED across requests has to hold the
+    /// same cell the arm holds.
+    async fn rpc_with_subs(
+        core: &Arc<AsyncMutex<Core>>,
+        registry: &crate::market::registry::MarketPluginRegistry,
+        peer: &PeerAuth,
+        session: &mut SessionState,
+        line: String,
+    ) -> Value {
+        let update_state = Arc::new(crate::ipc::version::UpdateState::new(false, false));
+        let risk_limits = {
+            let c = core.lock().await;
+            Arc::new(crate::ipc::schema::RiskLimitsResult::snapshot(
+                &c.config().risk.systemic,
+                &c.config().positions.exit,
+            ))
+        };
+        serde_json::from_str(
+            &handle_line(
+                core,
+                registry,
+                line,
+                peer,
+                &update_state,
+                &risk_limits,
+                session,
+            )
+            .await,
+        )
+        .expect("every reply is one JSON object")
+    }
     /// A core whose interesting knob is the per-order cap: 3 USD, so the 2.00
     /// USD ticket below (`order_line`) is admitted BEFORE any hot change and
     /// refused once the cap drops to 1. The engine is installed from the startup
@@ -2349,7 +2487,7 @@ mod tests {
         registry: &crate::market::registry::MarketPluginRegistry,
         peer: &PeerAuth,
         update_state: &Arc<crate::ipc::version::UpdateState>,
-        session_active: &mut Option<AccountId>,
+        session: &mut SessionState,
         line: String,
     ) -> Value {
         let risk_limits = {
@@ -2367,7 +2505,7 @@ mod tests {
                 peer,
                 update_state,
                 &risk_limits,
-                session_active,
+                session,
             )
             .await,
         )
@@ -2477,7 +2615,7 @@ mod tests {
             &registry,
             &peer,
             &updates,
-            &mut None,
+            &mut SessionState::default(),
             r#"{"jsonrpc":"2.0","id":1,"method":"system.update.check","params":{}}"#.to_string(),
         )
         .await;
@@ -2513,7 +2651,7 @@ mod tests {
             &registry,
             &peer,
             &updates,
-            &mut None,
+            &mut SessionState::default(),
             r#"{"jsonrpc":"2.0","id":1,"method":"system.update.configure","params":{"checkEnabled":true,"autoUpdate":false}}"#.to_string(),
         )
         .await;
@@ -2551,12 +2689,16 @@ mod tests {
     // fields and the empty list — never `null`, never METHOD_NOT_FOUND. E25 and
     // E29 fill the lists later; these shapes must survive that swap.
 
-    /// `kline.history` answers the frozen envelope: symbol/interval echoed
-    /// verbatim (`interval` in the shared `KlineInterval` spelling) and an
-    /// empty `klines` — the truth until E29's aggregator exists.
+    /// `kline.history` keeps the frozen envelope (symbol/interval echoed
+    /// verbatim, `klines` oldest first). E29 swaps the EMPTY list for real
+    /// bars: with no engine data the empty list is still the truth; the
+    /// bar-producing path is driven with CONTROLLED timestamps through the
+    /// same `engine_on_data` entry the feed arm drives (the arm stamps the
+    /// host clock, so a wall-clock wire feed cannot pin bucketing here).
     #[tokio::test]
     async fn kline_history_answers_the_frozen_envelope() {
         let (core, registry, peer) = hot_reload_fixture().await;
+        // Fresh core, no data: the empty envelope — never `null`, never 404.
         let reply = rpc(
             &core,
             &registry,
@@ -2572,6 +2714,116 @@ mod tests {
         assert_eq!(reply["result"]["symbol"], serde_json::json!("BTC-UP"));
         assert_eq!(reply["result"]["interval"], serde_json::json!("min1"));
         assert_eq!(reply["result"]["klines"], serde_json::json!([]));
+
+        // Two mids one minute apart: the first min1 bar closes. Driven
+        // through `engine_on_data` — the same entry `books.snapshot` lands
+        // in — with venue timestamps under the test's control.
+        use rust_decimal_macros::dec;
+        for (ts_ms, bid, ask) in [
+            (1_758_888_010_000, dec!(0.40), dec!(0.41)),
+            (1_758_888_070_000, dec!(0.50), dec!(0.51)),
+        ] {
+            core.lock().await.engine_on_data(
+                crate::engine::DataEvent::Book {
+                    token_id: "BTC-UP".to_string(),
+                    bids: vec![(bid, dec!(100))],
+                    asks: vec![(ask, dec!(100))],
+                    now_ms: ts_ms,
+                },
+                ts_ms,
+            );
+        }
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"kline.history","params":{"symbol":"BTC-UP","interval":"min1"}}"#
+                .to_string(),
+        )
+        .await;
+        let bars = &reply["result"]["klines"];
+        assert_eq!(bars.as_array().map(Vec::len), Some(2), "{reply}");
+        assert_eq!(bars[0]["isClosed"], serde_json::json!(true));
+        assert_eq!(bars[0]["open"], serde_json::json!(0.405));
+        assert_eq!(bars[0]["close"], serde_json::json!(0.405));
+        assert_eq!(bars[0]["tradeCount"], serde_json::json!(1));
+        assert!(!bars[1]["isClosed"].as_bool().unwrap_or(true));
+        assert_eq!(bars[1]["open"], serde_json::json!(0.505));
+        // `limit` clamps the window.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":4,"method":"kline.history","params":{"symbol":"BTC-UP","interval":"min1","limit":1}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(reply["result"]["klines"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// §12.2: the subscription pair writes THE SESSION's set — all three
+    /// calls below share one set (as one connection's arms do), the reply
+    /// counts the set size AFTER the change, dedup holds (resubscribing an
+    /// existing pair does not grow it), and an unsubscribe carves the set
+    /// down. The auto-unsubscribe on disconnect is `spawn_session`'s drop of
+    /// this very Arc — structural, nothing to assert here beyond the set
+    /// arithmetic the reply reports.
+    #[tokio::test]
+    async fn kline_subscribe_and_unsubscribe_shape_the_session_set() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let mut session = SessionState::default();
+        let reply = rpc_with_subs(
+            &core,
+            &registry,
+            &peer,
+            &mut session,
+            r#"{"jsonrpc":"2.0","id":1,"method":"kline.subscribe","params":{"symbols":["BTC-UP","BTC-DOWN"],"intervals":["min1","min5"]}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "{reply}");
+        assert_eq!(reply["result"]["subscribed"], serde_json::json!(4));
+
+        // Dedup: the same four pairs again — the count does not grow.
+        let reply = rpc_with_subs(
+            &core,
+            &registry,
+            &peer,
+            &mut session,
+            r#"{"jsonrpc":"2.0","id":2,"method":"kline.subscribe","params":{"symbols":["BTC-UP"],"intervals":["min1"]}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(reply["result"]["subscribed"], serde_json::json!(4));
+
+        // Unsubscribe two pairs.
+        let reply = rpc_with_subs(
+            &core,
+            &registry,
+            &peer,
+            &mut session,
+            r#"{"jsonrpc":"2.0","id":3,"method":"kline.unsubscribe","params":{"symbols":["BTC-UP","BTC-DOWN"],"intervals":["min5"]}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(reply["result"]["subscribed"], serde_json::json!(2));
+
+        // The caller-owned set holds exactly what the replies said.
+        assert_eq!(session.kline_subs.lock().expect("subs").len(), 2);
+        assert!(
+            session
+                .kline_subs
+                .lock()
+                .expect("subs")
+                .contains(&("BTC-UP".into(), crate::kline::KlineInterval::Min1))
+        );
+        assert!(
+            session
+                .kline_subs
+                .lock()
+                .expect("subs")
+                .contains(&("BTC-DOWN".into(), crate::kline::KlineInterval::Min1))
+        );
     }
 
     /// `intent.audit.tail`: a missing log is the documented empty envelope;
@@ -2762,7 +3014,7 @@ mod tests {
     async fn an_omitted_account_id_rides_the_session_default_and_an_explicit_one_stands() {
         let (core, registry, peer) = two_account_fixture().await;
         let updates = Arc::new(crate::ipc::version::UpdateState::new(false, false));
-        let mut session: Option<AccountId> = None;
+        let mut session = SessionState::default();
 
         // Switch the session to `paper` first.
         let reply = rpc_with_updates(
@@ -2859,8 +3111,8 @@ mod tests {
     async fn a_switch_is_session_scoped_and_survives_across_requests() {
         let (core, registry, peer) = two_account_fixture().await;
         let updates = Arc::new(crate::ipc::version::UpdateState::new(false, false));
-        let mut session_a: Option<AccountId> = None;
-        let mut session_b: Option<AccountId> = None;
+        let mut session_a = SessionState::default();
+        let mut session_b = SessionState::default();
 
         let reply = rpc_with_updates(
             &core,
@@ -2919,7 +3171,7 @@ mod tests {
     async fn a_switch_to_an_unknown_account_is_refused_without_touching_the_session() {
         let (core, registry, peer) = two_account_fixture().await;
         let updates = Arc::new(crate::ipc::version::UpdateState::new(false, false));
-        let mut session: Option<AccountId> = None;
+        let mut session = SessionState::default();
         let reply = rpc_with_updates(
             &core,
             &registry,
