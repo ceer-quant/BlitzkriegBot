@@ -70,14 +70,24 @@
  * move again. The criterion for re-recording does not change either time: a
  * measurement and a commit hash, never a widened tolerance.
  *
+ * On the fixture change (2026-09-29): the repo no longer ships a Rust strategy.
+ * `spread_arb` is the LUA package `user_layer/strategies_lua/spread_arb` — an
+ * exact port of the retired cdylib (strategy_logic's TrendTracker +
+ * evaluate_spread_arb; scaled-integer decimals incl. rust_decimal's
+ * MidpointNearestEven round2). The port was proven on THIS gate before the
+ * cdylib was removed: with `--lua-strategy-dir` driving the package, all four
+ * frozen windows reproduced the recorded `BASELINE` rows VERBATIM
+ * (14/21.43%/−2.8780, 17/41.18%/−4.7336, 9/33.33%/−2.8141, 14/0%/−10.9323) —
+ * the same measurement that justified every prior baseline move, applied to a
+ * fixture swap. The BASELINE itself carries over untouched.
+ *
  * Usage:
  *   node scripts/exit-economics-check.mjs              # the gate (needs the release core)
  *   node scripts/exit-economics-check.mjs --self-test  # verdict fixtures, no binary
  *   node scripts/exit-economics-check.mjs --teeth      # the demonstrated-failing arms
  *   node scripts/exit-economics-check.mjs --arm <flags...>   # any candidate, same verdict
  *
- * `BK_CORE_BIN` points the replay at another build of the core (see BIN below);
- * the strategy cdylibs are always the ones this checkout builds.
+ * `BK_CORE_BIN` points the replay at another build of the core (see BIN below).
  */
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
@@ -85,7 +95,6 @@ import { spawn } from 'child_process';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { WINDOWS, materialize } from './lib/frozen-corpus.mjs';
-import { requireFreshStrategyDylibs } from './lib/strategy-dylib-freshness.mjs';
 
 const ROOT = process.cwd();
 // `BK_CORE_BIN` exists for one reason: `target/release/blitzkrieg-core` may be
@@ -100,6 +109,13 @@ const BIN = process.env.BK_CORE_BIN || join(ROOT, 'target', 'release', 'blitzkri
 const STRATEGY_DIR = join(ROOT, 'user_layer', 'strategies', 'target', 'release');
 
 const STRATEGY = 'spread_arb';
+// The measurement fixture is the OFFICIAL spread_arb — the LUA package at
+// user_layer/strategies_lua/spread_arb. The repo ships no Rust strategy: the
+// retired cdylib fixture was proven bit-identical on this gate's four frozen
+// windows before its removal (BASELINE rows verbatim), so the recorded
+// economics carry over untouched.
+const LUA_DIR = join(ROOT, 'user_layer', 'strategies_lua');
+const strategyArgs = ['--lua-strategy-dir', LUA_DIR, '--enable-strategy', STRATEGY];
 
 // ---------------------------------------------------------------------------
 // The recorded baseline. Change it only with a measurement, and say which
@@ -183,8 +199,7 @@ function runArm({ corpus, windowName, dir, extraFlags = [] }) {
       '--engine',
       '--no-discovery',
       '--no-strategy-state',
-      '--strategy-dir', STRATEGY_DIR,
-      '--enable-strategy', STRATEGY,
+      ...strategyArgs,
       '--no-trade-log', '--no-order-log', '--no-position-log', '--no-event-archive',
       '--round-sec', '900', '--min-round-age', '0', '--min-time-left', '0',
       '--seed-balance', '1000', '--max-order-notional', '12',
@@ -329,7 +344,6 @@ async function main() {
     console.error(`missing binary ${BIN}: cargo build --release --workspace --locked`);
     process.exit(2);
   }
-  requireFreshStrategyDylibs({ gate: 'exit-economics-check', require: [`${STRATEGY}_strategy`] });
 
   const dir = mkdtempSync(join(tmpdir(), 'bk-exit-economics-'));
   const measured = [];

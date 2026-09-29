@@ -92,9 +92,9 @@ async function runCoreChecks(dylib, name, workdir, elapsedMs) {
     '--engine', '--no-discovery', '--no-event-archive',
     '--no-trade-log', '--no-order-log', '--no-position-log',
     // `--no-strategy-dir`, and the gate is sharper for it: the core would
-    // otherwise auto-load whatever `user_layer/strategies` happens to hold (the
-    // `spread_arb` measurement fixture lives there for the exit-economics gate),
-    // so "exactly one row" would silently be a statement about the checkout
+    // otherwise auto-load whatever `user_layer/strategies` happens to hold (a
+    // stale measurement cdylib or an operator's own build lands there), so
+    // "exactly one row" would silently be a statement about the checkout
     // rather than about `strategy.load`. With the directory off, the ONLY
     // registration this gate can observe is the one it performed itself.
     '--no-strategy-dir',

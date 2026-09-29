@@ -1,0 +1,22 @@
+{
+  "name": "spread_arb",
+  "version": "1.0.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "42480633bef9a4834da509fd43056a11d7d512d329871b0669d4e76200b44077",
+  "author": "BlitzkriegBot",
+  "description": "Trend-confirmed dip buyer — the exact Lua port of the Rust reference implementation (strategy_logic TrendTracker + evaluate_spread_arb). Prices run on scaled-integer decimals (rust_decimal semantics incl. banker's round2); entries are resting bids at factor*mid off FRESH books only; every intent is adjudicated by the kernel.",
+  "tunables": {
+    "trend_min_price": { "type": "decimal", "default": "0.55" },
+    "trend_confirm_sec": { "type": "int", "default": "60" },
+    "trend_broken_price": { "type": "decimal", "default": "0.35" },
+    "trend_entry_price": { "type": "decimal", "default": "0" },
+    "trend_entry_factor": { "type": "decimal", "default": "0.88" },
+    "trend_max_entry_price": { "type": "decimal", "default": "0.45" },
+    "entry_min_obi": { "type": "decimal", "default": "0" },
+    "entry_max_spread_pct": { "type": "decimal", "default": "0" },
+    "entry_dip_max_pct": { "type": "decimal", "default": "0" },
+    "entry_bounce_min_pct": { "type": "decimal", "default": "0" },
+    "entry_bounce_window_sec": { "type": "int", "default": "5" }
+  }
+}

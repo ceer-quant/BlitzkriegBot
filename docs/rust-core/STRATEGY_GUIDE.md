@@ -25,6 +25,7 @@
 | `momentum_alpha` | Rust | `user_layer/examples/momentum_alpha/` | API 1.0 参考策略：`declare_modes` 声明 `prediction / binary_outcome_wheel` + 2 个能力位；只写 `entries` + `confirmed_tokens`；全文无止损逻辑；`export_strategy!` 一行生成全部 ABI 表面 |
 | `e24_modes_fixture` | Rust | `user_layer/examples/e24_modes_fixture/` | 测试夹具（**不是**参考示例）：手写 ABI，给 `strategy:declaration-check` 喂合法/非法声明 |
 | Lua 示例 | Lua | `user_layer/strategies_lua/`（随 E30 沙箱落地） | 沙箱分发格式、`bk.*` 只读接口、配额与投毒防护 |
+| `spread_arb` | **Lua** | `user_layer/strategies_lua/spread_arb/` | **官方策略**（2026-09-29 起仓库不再提供 Rust 策略）：Rust 参考实现的逐位精确移植（缩放整数十进制 + 银行家圆整）；趋势确认抄底 + tracker 入场闸门 + 破位 breaks；同时是经济门禁的测量夹具 |
 
 构建示例：`cd user_layer/examples && cargo build --release`（独立嵌套 workspace，自带 `Cargo.lock`，与真实第三方作者的 checkout 同形）。
 

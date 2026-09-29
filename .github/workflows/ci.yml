@@ -51,8 +51,7 @@ jobs:
       # not a member of the root workspace and must be built explicitly. E7
       # (#38) acceptance requires a real dylib loaded and driven in CI, and
       # `user_layer/parity_strategy` is the author-facing one — the repo's own
-      # `user_layer/strategies` (spread_arb) is built by the exit-economics job,
-      # which is the gate that measures it.
+      # strategies ship as Lua packages (no cdylib to build).
       - name: Build the reference strategy cdylib (standalone workspace)
         run: (cd user_layer/parity_strategy && cargo build --release --locked)
       - name: Build (release)
@@ -507,14 +506,13 @@ jobs:
   # same hours earned less. That is the question #168/F6 could not answer: four
   # unit tests pinned the mechanism and every one of them passed.
   #
-  # Its own job, for one reason: it is the only gate that needs a strategy built
-  # into the directory the kernel dlopens from by DEFAULT
-  # (`user_layer/strategies/target/release`, resolved from the binary's parent
-  # chain). Building it inside core-gates would put a loaded strategy into the
-  # environment of ~20 unrelated gates that spawn the same binary, several of
-  # which are written against an empty registry ("the kernel ships no strategy of
-  # its own", e.g. cycle-check / position-recovery-check). A gate's environment is
-  # not something to change as a side effect of adding a step elsewhere.
+  # Its own job for the old reason inverted: the replay is the heaviest gate
+  # (four frozen-corpus windows through a real core) and it used to need a
+  # cdylib built into the directory the kernel dlopens from by DEFAULT —
+  # building that inside core-gates would have polluted the environment of ~20
+  # unrelated gates written against an empty registry. The fixture is the Lua
+  # `spread_arb` package now (no dylib, no build), but the job stays separate:
+  # a 10-minute replay does not belong inside core-gates' budget.
   exit-economics:
     name: exit-economics
     runs-on: ubuntu-latest
@@ -529,13 +527,9 @@ jobs:
           node-version: 22
       - name: Build the core (release)
         run: cargo build --release --locked -p blitzkrieg-core
-      # The nested workspace the kernel dlopens strategies out of — its own
-      # Cargo.lock, so it is not a member of the root workspace. `--locked` is
-      # load-bearing here: the gate's freshness check (#207) refuses to report a
-      # verdict about a cdylib it cannot trace to this checkout's sources, and a
-      # lockfile that drifted would be a build that did not come from this commit.
-      - name: Build the strategy cdylib the gate measures (standalone workspace)
-        run: (cd user_layer/strategies && cargo build --release --locked)
+      # The fixture is the Lua `spread_arb` package (user_layer/strategies_lua)
+      # — data, not a build: the manifest sha256 is its integrity, there is
+      # nothing to compile.
       # The verdict logic first, on fixtures with hand-computed answers and no
       # binary: a gate that cannot fail is the defect this repo keeps re-finding.
       - name: Exit-economics gate — verdict fixtures (#272)

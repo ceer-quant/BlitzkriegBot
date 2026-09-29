@@ -3,6 +3,40 @@
 All notable changes to BlitzkriegBot are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
+## [Unreleased]
+
+### Changed
+
+- **The official `spread_arb` is a Lua strategy, and the repo ships no Rust
+  strategy.** `user_layer/strategies_lua/spread_arb/` is an EXACT port of the
+  Rust reference implementation (`strategy_logic`'s `TrendTracker` +
+  `evaluate_spread_arb` + the tracker entry gates): prices run on scaled-integer
+  decimals with rust_decimal's semantics including `round()`'s
+  MidpointNearestEven at the 0.01 grid — a float `mid * 0.88` would flip real
+  resting-bid boundaries; the only float divisions are the ratio comparisons,
+  which cannot disagree with the 28-digit decimals on market data. The port was
+  proven on the economic gate itself before the cdylib was removed: all four
+  frozen-corpus windows reproduced the recorded `BASELINE` (`75fd8140`) rows
+  VERBATIM (14/21.43%/−2.8780, 17/41.18%/−4.7336, 9/33.33%/−2.8141,
+  14/0%/−10.9323), so the economics carry over without a re-record. Knobs come
+  from the manifest tunables (`bk.params()`); the kernel's `--spread-arb-*` CLI
+  flags do not reach Lua strategies (the dylib on_params channel), and shadow
+  evolution / evolvable-knob declarations are dylib-surface capabilities the
+  Lua stack does not expose yet (production evolution is off).
+
+### Removed
+
+- **The Rust `spread_arb` cdylib fixture** — `user_layer/strategies/spread_arb`
+  and the one-member nested workspace with it. `user_layer/strategies/` stays
+  as the operator cdylib drop-point (kernel's default `--strategy-dir` +
+  trust-allowlist root); its README now carries the stale-build warning (a
+  leftover `*.dylib` keeps loading after its crate is gone and can collide with
+  a same-named Lua package). `scripts/lib/strategy-dylib-freshness.mjs` is
+  retired with the last cdylib fixture: with no measurement dylib there is no
+  freshness contract to enforce. The exit-economics gate drives the Lua package
+  directly (`--lua-strategy-dir`); the CI job's nested-workspace build step is
+  gone.
+
 ## [0.3.0] - 2026-09-29
 
 ### Added
