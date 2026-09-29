@@ -459,4 +459,99 @@ mod tests {
         assert!(matches!(err, InvokeError::PoisonedBy(_)), "got {err:?}");
         assert!(sb.is_poisoned());
     }
+
+    /// P3 (§16.5): per-callback latency under the sandbox quotas is MEASURED
+    /// via `--nocapture`, and the realistic-callback p99 carries the only NEW
+    /// perf threshold 0.3 adds: **≤ 5 ms** (10× headroom against the 50 ms
+    /// engine tick). Two shapes are timed in the steady state:
+    /// a real-work evaluate (table building + arithmetic — what a legitimate
+    /// strategy does every round), and the WORST legal callback — a tight
+    /// loop that burns just under the full 1e6-instruction budget before the
+    /// hook would poison it (the bound a misbehaving-but-legal strategy
+    /// imposes on the host thread). Numbers land in `docs/perf/V0_3.md`.
+    #[test]
+    fn callback_latency_p50_p99_measured() {
+        let sb = sandbox();
+        sb.load(
+            "function bk_evaluate(book) \
+             local entries = {} \
+             for i = 1, 20 do \
+             entries[i] = { price = book.mid - i * 0.001, size = i, reason = 'grid' } \
+             end \
+             return { entries = entries, exits = {}, breaks = {} } \
+             end",
+            "bench",
+        )
+        .expect("bench callback loads");
+        let f: Function = sb.lua().globals().get("bk_evaluate").expect("present");
+        let table = sb.lua().create_table().expect("book table");
+        table.raw_set("mid", 0.50).expect("book.mid");
+        let book = mlua::Value::Table(table);
+        let run = || sb.invoke("evaluate", |_| f.call::<mlua::Value>(book.clone()));
+
+        // Warm caches, then time the steady state.
+        for _ in 0..200 {
+            let _ = run();
+        }
+        let mut samples: Vec<u128> = Vec::with_capacity(5_000);
+        for _ in 0..5_000 {
+            let t0 = std::time::Instant::now();
+            let _ = run();
+            samples.push(t0.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+        let p = |q: f64| -> u128 {
+            let idx = ((samples.len() as f64) * q).ceil() as usize;
+            samples[(idx - 1).min(samples.len() - 1)]
+        };
+        let p99_us = p(0.99);
+        println!(
+            "lua callback latency over {} runs (this build): p50={}us p99={}us max={}us",
+            samples.len(),
+            p(0.50),
+            p99_us,
+            samples[samples.len() - 1]
+        );
+        // THE threshold (§16.5 P3). Exceeded → lower the instruction budget
+        // and record the new number — do not widen the line.
+        assert!(
+            p99_us <= 5_000,
+            "P3 violated: realistic-callback p99 {p99_us}us > 5000us — \
+             lower the instruction budget and record the measured value"
+        );
+
+        // The worst LEGAL callback: ~95k loop iterations ≈ just under the
+        // 1e6-instruction budget. It must RETURN (not poison) and cost less
+        // than one engine tick even in a debug build — that bound is what
+        // keeps a budget-burning strategy from stalling the 50 ms loop.
+        let burn = sandbox();
+        burn.load(
+            "function bk_burn() local i = 0 while i < 95000 do i = i + 1 end return i end",
+            "burn",
+        )
+        .expect("burn callback loads");
+        let g: Function = burn.lua().globals().get("bk_burn").expect("present");
+        let mut burn_us: Vec<u128> = Vec::with_capacity(200);
+        for _ in 0..200 {
+            let t0 = std::time::Instant::now();
+            let r = burn
+                .invoke("burn", |_| g.call::<i64>(()))
+                .expect("95000 iterations stay under the budget");
+            assert_eq!(r, 95_000);
+            burn_us.push(t0.elapsed().as_micros());
+        }
+        burn_us.sort_unstable();
+        println!(
+            "lua full-budget callback (≈0.95e6 instructions): p50={}us p99={}us max={}us (this build)",
+            burn_us[burn_us.len() / 2],
+            burn_us[(burn_us.len() as f64 * 0.99).ceil() as usize - 1],
+            burn_us[burn_us.len() - 1]
+        );
+        assert!(
+            burn_us[burn_us.len() - 1] <= 50_000,
+            "a budget-bounded callback must cost less than one 50ms engine tick, \
+             got max {}us",
+            burn_us[burn_us.len() - 1]
+        );
+    }
 }
