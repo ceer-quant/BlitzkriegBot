@@ -153,6 +153,14 @@ pub struct RoundView {
 pub struct AssetBooksView {
     #[serde(default)]
     pub asset: String,
+    /// E29 (§12.2): the aggregator keys prediction-token bars by TOKEN id;
+    /// the panel needs the same key to ask `kline.history` for the right
+    /// series. Empty on older cores (serde default) — the K-line card hides
+    /// rather than queries a wrong key.
+    #[serde(default)]
+    pub up_token_id: String,
+    #[serde(default)]
+    pub down_token_id: String,
     #[serde(default)]
     pub up: BookSideView,
     #[serde(default)]

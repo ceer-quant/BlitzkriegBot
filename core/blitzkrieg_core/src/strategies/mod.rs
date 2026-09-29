@@ -228,6 +228,13 @@ pub trait EngineStrategy: Send + Sync {
     /// book tick or run on a zeroed clock.
     fn on_round(&mut self, slot: i64, time_left_sec: i64, now_ms: i64);
 
+    /// E29 (§10.4): a K-line bar CLOSED (`is_closed = true` — only closed
+    /// bars are ever pushed, so a strategy never filters). Receives the SAME
+    /// `Kline` type the strategy API re-exports, so a cdylib sees one shape.
+    /// Default no-op: strategies that ignore K-lines are untouched by the
+    /// dispatch (vtable grows but every existing behaviour is identical).
+    fn on_kline(&mut self, _kline: &crate::kline::Kline) {}
+
     /// Tokens whose setup broke since the last call; the host cancels their
     /// resting entry bids. Drains: each break is returned exactly once.
     fn take_breaks(&mut self) -> Vec<(String, Decimal)> {

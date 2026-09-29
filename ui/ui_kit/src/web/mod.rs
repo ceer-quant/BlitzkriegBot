@@ -1855,6 +1855,37 @@ impl WebServer {
                 };
                 (200, "application/json", doc.to_string().into_bytes())
             }
+            ("GET", "/api/kline-history") => {
+                // E29 (§12.2): the K-line chart reads bars through the SAME
+                // core client — a thin proxy of `kline.history` (read-only).
+                // Query params (`symbol` / `interval` / `limit`) pass through
+                // untouched in wire shape; the kernel clamps limit 1..=1000
+                // and answers "what happened" from its aggregator. The panel
+                // has no WebSocket, so it re-polls this on its fast tick and
+                // draws the growing bar as-is — §12.2's 1/s preview throttle
+                // is a push-side courtesy, not a read-side contract.
+                let mut params = serde_json::Map::new();
+                if let Some(v) = req.query_param("symbol") {
+                    params.insert("symbol".into(), serde_json::json!(v));
+                }
+                if let Some(v) = req.query_param("interval") {
+                    params.insert("interval".into(), serde_json::json!(v));
+                }
+                if let Some(n) = req
+                    .query_param("limit")
+                    .and_then(|v| v.parse::<usize>().ok())
+                {
+                    params.insert("limit".into(), serde_json::json!(n));
+                }
+                let doc = match self.snapshot_src.lock() {
+                    Ok(mut c) => match c.call("kline.history", serde_json::Value::Object(params)) {
+                        Ok(v) => v,
+                        Err(e) => serde_json::json!({ "error": e.to_string() }),
+                    },
+                    Err(_) => serde_json::json!({ "error": "core client poisoned" }),
+                };
+                (200, "application/json", doc.to_string().into_bytes())
+            }
             ("GET", "/api/plugins") => {
                 // E9-g: the registry trio the TUI Plugins page shows (strategies
                 // / extensions / market plugins) in one authenticated call.

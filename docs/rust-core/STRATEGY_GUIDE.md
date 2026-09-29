@@ -122,6 +122,7 @@ pub trait EngineStrategy: Send + Sync {
     fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal>;
 
     // 以下均为可选（有默认实现）：
+    fn on_kline(&mut self, kline: &Kline);                        // E29：K 线**闭合**推送（只推 is_closed=true；默认 no-op，见 §10.4 契约）
     fn gate_exemptions(&self) -> GateExemptions;                  // 入场闸门豁免（E2-b，默认全保留，见 §3.5）
     fn take_exit_intents(&mut self) -> Vec<StrategyExitIntent>;   // 平仓意图
     fn take_breaks(&mut self) -> Vec<(String, Decimal)>;          // 趋势破位
@@ -492,7 +493,7 @@ sha256 是**签名语义**：磁盘上的脚本必须就是清单担保的那份
 | `bk_evaluate(ctx)` | **必需** | 每个评估周期一次；返回意图表（见下） |
 | `bk_on_book(book)` | 可选 | 每次盘口推送（仅 fresh 盘口） |
 | `bk_on_round(round)` | 可选 | 回合切换（`round` 形如 `bk.round()`） |
-| `bk_on_kline(kline)` | 可选 | K 线推送 |
+| `bk_on_kline(kline)` | 可选 | K 线**闭合**推送（E29：只推 `is_closed = true` 的 bar——未闭合 bar 永不进回调，§10.4） |
 
 **意图表**（`bk_evaluate` 返回；全部十进制走 **STRING**，内核统一裁决——
 张数、风控、资金、签名、下单都不归你，见 §0/§2）：
@@ -519,7 +520,7 @@ return {
 | `bk.markets()` | 数组：`{asset, condition_id, up_token, down_token, expires_at_ms, slot, neg_risk}` |
 | `bk.book(symbol)` | 盘口表或 nil，见下 |
 | `bk.params()` | `{名字 → 十进制字符串}`（manifest tunables 初值，可被热参覆盖） |
-| `bk.kline(symbol, interval)` | K 线表或 nil；`interval` 用 snake_case 线名（`"sec1"`/`"min1"`/…）。**E30 基线上恒为 nil**（E29 聚合器合并后才有数据）——这不是错误，是「暂无数据」 |
+| `bk.kline(symbol, interval)` | **最近一根已闭合**的 K 线表，或 nil（该 `(symbol, interval)` 还没有任何闭合 bar——「暂无数据」不是错误）；`interval` 用 snake_case 线名（`"sec1"`/`"min1"`/…）。E29 起内核聚合器在喂（盘口 mid / spot 价），闭合 bar 经 `bk_on_kline` 持续刷新此格 |
 | `bk.account()` | `{id, name, market_type, balance, available, reserved}`（金额可缺失 → nil）或 nil |
 
 `bk.book(symbol)` 的字段集**精确**为（§6.5）：`symbol, best_bid, best_ask, mid, obi, spread,
@@ -527,6 +528,12 @@ bid_depth, ask_depth, ts_ms, fresh`。价格/深度全部十进制 **STRING**；
 `ts_ms` 是毫秒时间戳（不叫 `timestamp_ms`）；`fresh` 是主机的新鲜度裁决，仅在评估周期
 推送的盘口上携带。**没有** `asset`/`spread_pct`/档位数组——Lua 面是 §6.5 最小面，全档位
 深度走 Rust v2（§3.2）。
+
+`bk.kline(symbol, interval)` 返回的表（与 `bk_on_kline(kline)` 收到的同一形状）字段集
+**精确**为：`symbol, interval, open_time_ms, close_time_ms, open, high, low, close,
+volume, trade_count, is_closed`。OHLC/volume 全部十进制 **STRING**（与 `bk.book` 同约定）；
+时间戳是毫秒整数；`is_closed` 恒为 `true`（只有闭合 bar 会进入此格）；区间不变式
+`close_time_ms == open_time_ms + interval_secs*1000 - 1` 由内核构造器保证。
 
 #### 3.7.4 沙箱与两个配额（§6.3）
 

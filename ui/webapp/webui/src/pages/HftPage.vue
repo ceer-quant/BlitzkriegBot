@@ -32,6 +32,7 @@ import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import EquityCurve from '@/components/charts/EquityCurve.vue'
 import BookDepth from '@/components/charts/BookDepth.vue'
+import KlineChart from '@/components/charts/KlineChart.vue'
 import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const store = usePanelStore()
@@ -143,6 +144,23 @@ const activeSide = computed<BookSide | null>(() => {
   const b = activeBook.value
   if (!b) return null
   return depthToken.value === 'up' ? b.up : b.down
+})
+
+// ── K线 (E29, kline.history) ─────────────────────────────────────────────────
+/**
+ * The aggregator keys prediction-token bars by TOKEN id (what `feed_klines`
+ * was fed), not by asset name — the same key the books view now exposes.
+ * Empty on older cores: the card hides rather than queries a wrong key.
+ */
+const klineReady = computed(() => {
+  const b = activeBook.value
+  if (!b) return false
+  return depthToken.value === 'up' ? !!b.upTokenId : !!b.downTokenId
+})
+const klineSymbol = computed(() => {
+  const b = activeBook.value
+  if (!b) return ''
+  return depthToken.value === 'up' ? b.upTokenId : b.downTokenId
 })
 
 const depthMetrics = computed(() => {
@@ -672,6 +690,35 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
     </Card>
     <Card v-else-if="!hasDepthData" class="mt-3.5">
       <EmptyState text="盘口深度暂不可用" hint="当前内核未提供 engine.books——重启到新内核后自动出现。" compact />
+    </Card>
+
+    <!-- ── K线 (E29, kline.history) ─────────────────────────────────────────
+      The aggregator keys bars by TOKEN id, so the card needs the books view's
+      E29 token-id fields. Older cores omit them (empty string): the card hides
+      rather than queries a wrong key. Shares the depth card's asset/token
+      pickers so one selection drives both charts.
+    -->
+    <Card v-if="klineReady && klineSymbol" class="mt-3.5">
+      <CardHeader label="K线">
+        <template #action>
+          <div class="flex items-center gap-2">
+            <select v-model="depthAsset" class="filter-select">
+              <option v-for="b in books" :key="b.asset" :value="b.asset">{{ b.asset }}</option>
+            </select>
+            <SegmentedControl
+              v-model="depthToken"
+              :segments="[
+                { id: 'up', label: 'UP' },
+                { id: 'down', label: 'DOWN' },
+              ]"
+              size="sm"
+            />
+          </div>
+        </template>
+      </CardHeader>
+      <div class="mt-2">
+        <KlineChart :symbol="klineSymbol" :height="260" />
+      </div>
     </Card>
 
     <!-- ── stats row ─────────────────────────────────────────────────────── -->

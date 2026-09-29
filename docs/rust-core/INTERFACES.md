@@ -31,6 +31,7 @@
 | `RISK_ALERT` | 风控告警（含 coreCode） |
 | `RECONCILE_REPORT` | 对账结果（补成交 / 标记 / 幽灵单） |
 | `ERROR` | 结构化错误（code + message + raw） |
+| `KLINE_UPDATE` | K 线推送（E29，`kline` = KlineView）。**OPT-IN**：只有本连接显式 `kline.subscribe` 过的 `(symbol, interval)` 才会收到（§12.2）；断连即退订。闭合 bar 一 bar 一条**永不节流**；未闭合 bar（`isClosed:false`）是预览，限流 ≤1 条/秒/(symbol, interval) |
 
 > 规划中（占位）：`position.update`、`balance.update`、`extension.status`、`strategy.signal`（策略信号审计）。
 
@@ -71,7 +72,7 @@
 | `spot.price` | `{ asset, price }` | `{ ok: true }` |
 | `engine.markets` | `{ markets: [CryptoMarket...] }` | `{ ok: true }` |
 | `engine.round` | `{}` | `{ slot, ageSec, timeLeftSec, markets, canTrade, marketPrices:[{asset,up,down}] }` |
-| `engine.stats` | `{}` | `{ books, tops, spots, rounds, evaluations, signals, placeRejected, strategyLimitRejected, blocked:{timing,momentum,byStrategy,declaredExemptions}, confirmed:[...], confirmedDetail:[{token,mid,entry,cap,inBand}], strategies:[...]（P-1.1 按策略分账；E2-a 增 `maxOpenPositions`/`maxOpenNotionalUsd`（未配置为 null）、`sizingSource:"global"|"strategy"`、`effectiveSizeUsd`/`effectiveMinShares`/`effectiveMaxShares`；E2-b 增 `gateExemptions:string[]`（声明豁免的入场闸门，`[]`=全保留）、`blockedTiming`/`blockedMomentum`、`gateExemptedTiming`/`gateExemptedMomentum`）, archive:{ path, events, bytes, dropped, recording, rotateBytes, segmentBytes, segments, freeBytes, stoppedReason:"cap"\|"disk"\|"io"\|"locked"\|null }\|null（P-1.3 归档状态；**内核默认常开**，`--no-event-archive` 关闭 + 分段轮转 + 单写者锁） }`。`blocked.byStrategy` 把每次 timing/momentum 拦截归属到候选单所属策略（`{<name>:{timing,momentum}}`，全 0 省略），`blocked.declaredExemptions` 列出当前生效的全部豁免声明 `[{strategy,gates}]`；原 `timing`/`momentum` 全局总数语义不变。诊断列表按 token 排序、按调用时刻计算（回测报告内用虚拟钟），因此可复现、可 diff |
+| `engine.stats` | `{}` | `{ books, tops, spots, rounds, evaluations, signals, placeRejected, strategyLimitRejected, blocked:{timing,momentum,byStrategy,declaredExemptions}, confirmed:[...], confirmedDetail:[{token,mid,entry,cap,inBand}], strategies:[...]（P-1.1 按策略分账；E2-a 增 `maxOpenPositions`/`maxOpenNotionalUsd`（未配置为 null）、`sizingSource:"global"|"strategy"`、`effectiveSizeUsd`/`effectiveMinShares`/`effectiveMaxShares`；E2-b 增 `gateExemptions:string[]`（声明豁免的入场闸门，`[]`=全保留）、`blockedTiming`/`blockedMomentum`、`gateExemptedTiming`/`gateExemptedMomentum`）, archive:{ path, events, bytes, dropped, recording, rotateBytes, segmentBytes, segments, freeBytes, stoppedReason:"cap"\|"disk"\|"io"\|"locked"\|null }\|null（P-1.3 归档状态；**内核默认常开**，`--no-event-archive` 关闭 + 分段轮转 + 单写者锁） }`。`blocked.byStrategy` 把每次 timing/momentum 拦截归属到候选单所属策略（`{<name>:{timing,momentum}}`，全 0 省略），`blocked.declaredExemptions` 列出当前生效的全部豁免声明 `[{strategy,gates}]`；原 `timing`/`momentum` 全局总数语义不变。诊断列表按 token 排序、按调用时刻计算（回测报告内用虚拟钟），因此可复现、可 diff。E29 增 `kline`（聚合器计数器 `{symbols, liveBars, closedBars, droppedOutOfOrder, noDataBars, intervals[]}`，无引擎为 `null`——§10.3 的丢弃必须可见） |
 
 ### 2.4 策略（P0.5）
 | method | params | result |
@@ -255,10 +256,13 @@ v0.3 的全部 IPC 变更是**加项**：新增方法、新增事件变体、既
 `kline.history`：`interval` 取 `sec1` / `sec5` / `sec15` / `min1` / `min5` / `min15` /
 `hour1` / `hour4` / `day1`（共享类型 `KlineInterval` 的 wire 拼写）。
 `KlineView` = `Kline` 的 camelCase 形状：`{ symbol, interval, openTimeMs, closeTimeMs,
-open, high, low, close, volume, tradeCount, isClosed }`（Decimal 一律字符串）。
-按 `openTimeMs` 升序；`limit` 默认 200、上限 1000——上限由聚合器执行，随 E29 落地。
-**Wave 0 的事实**：聚合器尚不存在（E29），本方法只回照请求的 `symbol`/`interval` 与
-**空 `klines` 列表**；E29 换成真实尾部数据时信封不变。
+open, high, low, close, volume, tradeCount, isClosed }`（Decimal 走 `market_api`
+decimal 序列化：有限值为 JSON number，非有限值退化为字符串）。
+按 `openTimeMs` 升序；`limit` 默认 200、上限 1000。
+**E29 已落地**：内核内置 K 线聚合器（§10.3：数据驱动闭合、乱序丢弃计数、静默空桶计数），
+本方法回答「闭合尾 + 生长 bar 最后」的真实序列——最后一根 `isClosed:false` 是正在生长的
+bar；无引擎（或该序列无数据）时回**空 `klines` 列表**，信封不变。喂入源是既有数据通路
+（预测 token 按盘口 mid、spot 按现货价），非独立成交 tape。
 
 `intent.audit.tail`：`records` 为 `data/audit/intents.jsonl` 中**落盘记录的原样**（camelCase
 对象，字段见 `DEV_V0_3.md` §3.4 的 `IntentAuditRecord`；`decision` 是带 `status`
@@ -268,8 +272,8 @@ open, high, low, close, volume, tradeCount, isClosed }`（Decimal 一律字符�
 **Wave 0 的事实**：写入方尚未存在（E25）；缺文件 = 空列表（JSONL 的既有规则，
 坏行跳过不致命）。
 
-相关事件（`KLINE_UPDATE` / `INTENT_DECISION`，形状见 `DEV_V0_3.md` §12.2/§12.3）
-随各自 Epic（E29 / E25）落地——Wave 0 不预声明无发射方的变体。
+相关事件：`KLINE_UPDATE` 已随 E29 落地（见 §1——OPT-IN、闭合不节流、预览 ≤1/s）；
+`INTENT_DECISION` 随 E25 落地。形状见 `DEV_V0_3.md` §12.2/§12.3。
 
 #### 2.9.2 v0.3 其余契约（冻结方向，随 Epic 落地）
 
@@ -279,10 +283,23 @@ open, high, low, close, volume, tradeCount, isClosed }`（Decimal 一律字符�
 | 变更 | 归属 Epic | 契约位置 |
 |:---|:---|:---|
 | `account.list` / `account.switch` / `account.status`（`AccountView`） | E28 | §12.1 |
-| `kline.subscribe` / `kline.unsubscribe`（**会话级**，断连自动退订） | E29 | §12.2 |
+| ~~`kline.subscribe` / `kline.unsubscribe`（**会话级**，断连自动退订）~~ **✅ E29 已落地**（§2.9.3） | E29 | §12.2 |
 | `risk.limits`（生效值 + `source` 四值 `default/toml/env/flag`） | E26 | §12.4、§4.4 |
 | `market.list` 加 `structure`/`capabilities`/`capabilitiesBits`；`strategy.list` 加 `modes`/`compatible`/`incompatibleReason`；`strategy.load` 回执加 `; API 1.0 (line protocol 2)` | E27 / E24 | §12.5 |
-| `positions.list` / `orders.list` 行加 `accountId`；`orders.place` / `ledger.balance` 加可选 `accountId`；`engine.stats` 加 `accounts`/`kline`；`core.ready` 加 `apiVersion`/`accountId` | E28 / E26 / E29 | §12.6 |
+| `positions.list` / `orders.list` 行加 `accountId`；`orders.place` / `ledger.balance` 加可选 `accountId`；`engine.stats` 加 ~~`accounts`~~/`kline`（**`kline` ✅ E29 已落地**：聚合器计数器 `{symbols, liveBars, closedBars, droppedOutOfOrder, noDataBars, intervals[]}`，无引擎为 `null`）；`core.ready` 加 `apiVersion`/`accountId` | E28 / E26 / E29 | §12.6 |
+
+#### 2.9.3 K 线订阅（E29 已落地）
+
+| method | params | result |
+|:---|:---|:---|
+| `kline.subscribe` | `{ "symbols": [..], "intervals": [KlineInterval..] }` | `{ "subscribed": <本会话集合大小> }` |
+| `kline.unsubscribe` | `{ "symbols": [..], "intervals": [KlineInterval..] }` | `{ "subscribed": <本会话集合大小> }` |
+
+**会话级**：订阅集活在本连接的会话状态里（§9.5 同域），`kline.subscribe` 只写本连接的
+集合——两个面板各自订阅互不相扰；**断连即退订**（集合随会话死亡，重连从零开始，不存在
+双推）。`KLINE_UPDATE` 是唯一需要 OPT-IN 的事件（§1）：不订阅就一条 K 线都收不到。
+同一 `(symbol, interval)` 重复 subscribe 幂等（集合去重，计数不涨）。锁中毒（对端任务
+panic 时持有集合）→ 拒 `INTERNAL`，如实报错而不是编造计数。
 
 共享类型（`Kline`/`AccountId`/`MarketStructure`/`StrategyMode` 等）已于 Wave 0 落在
 `market_api` / `strategy_api` 并由内核 re-export——与上面的方法不同，它们是**已编译的
@@ -337,3 +354,4 @@ core.set_strategy_enabled("my_strategy", false);
 | 1.1 | v0.3 Wave 0 接口冻结（#329）：§2.9 落进本文件——两个只读信封先落地（`kline.history` / `intent.audit.tail`，见 §2.9.1）；共享类型（`Kline`/`KlineInterval`/`AccountId`/`AccountStatus`/`CredentialKeys`/`MarketStructure`/`MarketCapabilities`/`MarketMode`/`StrategyMode`）落在 `market_api` / `strategy_api`，内核 re-export；C ABI 增第六个可选符号 `bk_strategy_declare_modes`（未导出=不声明；vtable 与 `BK_ABI_VERSION=2` 冻结）；`SafeStrategy` 增 `declare_modes()` / `on_kline()` 两个带默认实现的签名。§2.9.2 其余契约（`account.*`、`kline.subscribe`、`risk.limits`、既有方法字段扩展）随各 Epic 落地。协议加项，向后兼容，版本号不变 |
 | 1.1 | v0.3 E24 — BlitzkriegStrategy API 1.0 封口（#330）：① `strategy.load` 成功回执**追加** ` ; API 1.0 (line protocol 2)`（保留既有文本不替换）；② 可选符号 `bk_strategy_declare_modes` 的载荷由 §7.4 校验器验证，**非法 → 拒载**，错误含 `index` 与 `got`（`{"modes":[]}` = `Empty` 非法，不是「未声明」；未导出符号 / NULL = 未声明）；③ 三个保留键 `suggested_stop_loss` / `suggested_take_profit` / `suggested_max_hold_sec` **封口**（从未存在于 0.2 代码）：intent 解析遇键 → `warn!(target:"strategy")` 记录策略名/键名/token 并**丢弃该键**、不拒单；④ 门禁 `strategy:no-stop-loss-check`（策略源码零止损逻辑 + intent 零保留键）与 `strategy:declaration-check`（合法 3 例 / 非法 5 例，真实内核）接入 `core-gates`；⑤ 官方 Rust 示例 `user_layer/examples/momentum_alpha/`（嵌套 workspace，声明 `prediction/binary_outcome_wheel` + websocket_feed/level2_snapshot，零止损逻辑）。协议加项，向后兼容，`BK_ABI_VERSION=2` 不变 |
 | 1.1 | v0.3 E28 — 多市场多账户一等公民（§2.2.1）：新增 `account.list` / `account.switch` / `account.status` 三方法（§9.3-9.5：`AccountLedgers` 每账户独立账本；`account.switch` 只写**会话级** active，进程级不动；`account.status` **只能收紧**，loosen 拒 `INVALID_PARAMS`）。`accounts.toml` 缺省 → 单一 `default`（0.2 部署零改动）；`orders.place` 未带 `accountId` 时注入本连接默认（显式 id 永远获胜）；`positions.list` 每行增 `accountId`；Gate 2 按账户姿态放行（`permits_order`），跨账户平仓显式拒绝（从不改道）。协议加项，向后兼容，版本号不变 |
+| 1.1 | v0.3 E29 — K 线聚合器与呈现（§12.2/§10）：① 内核内置 `KlineAggregator`（§10.3：数据驱动闭合、乱序输入丢弃且计数 `droppedOutOfOrder`、静默空桶计 `noDataBars`、闭合历史有界 deque 上限 1000 对齐 `kline.history` 上限）；喂入源=既有数据通路（`engine.book`/`books.*` 臂按盘口 mid 喂 token、`spot.price` 喂 asset；价格 ≤0 跳过）。② `EngineStrategy` 增 `on_kline(&Kline)` 默认方法——只推**闭合** bar（§10.4），默认 no-op；Lua 适配层同步转发（E30 的 `bk_on_kline` 由此得数据）。③ 新增 `kline.subscribe` / `kline.unsubscribe`（会话级，断连自动退订；§2.9.3）+ `KLINE_UPDATE` 事件（唯一 OPT-IN 事件：闭合 bar 永不节流、未闭合预览 ≤1/s/(symbol,interval)）。④ `kline.history` 从 Wave-0 空信封换成真实尾部（信封不变）；`engine.stats` 增 `kline` 聚合器计数器。⑤ 门禁 `kline-aggregation-check`（--teeth 6 变异 + 真跑 11 断言）接入 core-gates。协议加项，向后兼容，版本号不变 |

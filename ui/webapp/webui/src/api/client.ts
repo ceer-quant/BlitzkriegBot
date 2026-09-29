@@ -250,6 +250,54 @@ export interface RiskLimitsDoc {
   error?: string
 }
 
+// ── E29 K-line (mirror core/market_api/src/kline.rs wire shape) ─────────────
+
+/** Wire interval spelling (serde `snake_case`): sec1…day1. */
+export type KlineIntervalWire =
+  | 'sec1' | 'sec5' | 'sec15'
+  | 'min1' | 'min5' | 'min15'
+  | 'hour1' | 'hour4' | 'day1'
+
+/** The nine intervals, in ascending span — dropdown order. */
+export const KLINE_INTERVALS: { value: KlineIntervalWire; label: string }[] = [
+  { value: 'sec1', label: '1秒' },
+  { value: 'sec5', label: '5秒' },
+  { value: 'sec15', label: '15秒' },
+  { value: 'min1', label: '1分' },
+  { value: 'min5', label: '5分' },
+  { value: 'min15', label: '15分' },
+  { value: 'hour1', label: '1时' },
+  { value: 'hour4', label: '4时' },
+  { value: 'day1', label: '1天' },
+]
+
+/**
+ * One OHLCV bar (camelCase wire). Prices are 0..1 prediction tokens; market_api
+ * decimals cross as JSON numbers (finite values serialize as numbers).
+ */
+export interface KlineBar {
+  symbol: string
+  interval: KlineIntervalWire | string
+  openTimeMs: number
+  closeTimeMs: number
+  open: number | string
+  high: number | string
+  low: number | string
+  close: number | string
+  volume: number | string
+  tradeCount: number
+  /** True exactly once the bar has closed; the LAST bar is usually false (growing). */
+  isClosed: boolean
+}
+
+/** The `kline.history` readout (proxied at GET /api/kline-history). */
+export interface KlineHistoryDoc {
+  symbol: string
+  interval: KlineIntervalWire | string
+  klines: KlineBar[]
+  error?: string
+}
+
 export const api = {
   snapshot: () => request<Snapshot>('/snapshot'),
   plugins: () => request<PluginsDoc>('/plugins'),
@@ -271,6 +319,18 @@ export const api = {
    * a boot-time snapshot without the Core lock).
    */
   riskLimits: () => request<RiskLimitsDoc>('/risk-limits'),
+  /**
+   * E29 (§12.2): the K-line chart's bars — a thin proxy of the core's
+   * `kline.history` (read-only). `limit` clamps to 1..=1000 kernel-side;
+   * the last bar is the GROWING one (`isClosed: false`), re-polled on the
+   * panel's fast tick. The panel has no WebSocket, so this is the whole
+   * data channel: poll, redraw, poll.
+   */
+  klineHistory: (params: { symbol: string; interval: KlineIntervalWire; limit?: number }) => {
+    const q = new URLSearchParams({ symbol: params.symbol, interval: params.interval })
+    if (params.limit != null) q.set('limit', String(params.limit))
+    return request<KlineHistoryDoc>(`/kline-history?${q.toString()}`)
+  },
   /** Dispatch a gateway command verb (`status`/`start`/`stop`/…). */
   command: (cmd: string) =>
     request<CommandDoc>('/command', { method: 'POST', body: cmd }),
@@ -541,6 +601,10 @@ export interface BookSide {
 /** Per-asset L2 depth for the 盘口深度 chart. Older cores omit the field. */
 export interface AssetBook {
   asset: string
+  /** E29 (§12.2): the K-line series key for the UP/DOWN token. Absent on
+   *  older cores — the K-line card hides rather than queries a wrong key. */
+  upTokenId?: string
+  downTokenId?: string
   up: BookSide
   down: BookSide
 }

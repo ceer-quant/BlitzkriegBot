@@ -423,18 +423,20 @@ jobs:
       # v0.3.0 gates (E24 / #330, E25 / #331, E27 / #333): every new gate
       # proves it can go red BEFORE it guards (§A.4) — teeth first, then the
       # real verdict. Later epics append their own lines to these two blocks.
-      - name: v0.3 gates — reverse acceptance (--teeth) [E24+E25+E27]
+      - name: v0.3 gates — reverse acceptance (--teeth) [E24+E25+E27+E29]
         run: |
           node scripts/intent-audit-check.mjs --teeth
           node scripts/strategy-no-stop-loss-check.mjs --teeth
           node scripts/strategy-declaration-check.mjs --teeth
           node scripts/plugin-modes-check.mjs --teeth
-      - name: v0.3 gates — the real verdicts [E24+E25+E27]
+          node scripts/kline-aggregation-check.mjs --teeth
+      - name: v0.3 gates — the real verdicts [E24+E25+E27+E29]
         run: |
           node scripts/intent-audit-check.mjs
           node scripts/strategy-no-stop-loss-check.mjs
           node scripts/strategy-declaration-check.mjs
           node scripts/plugin-modes-check.mjs
+          node scripts/kline-aggregation-check.mjs
       # Assorted one-off invariants kept cheap.
       - name: Assorted gates (plugin selection / trade-log flag / TUI demo)
         run: |

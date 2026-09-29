@@ -16,3 +16,6 @@
 //! lands with **E30** on top of it. Only "types and signatures" arrive here.
 
 pub use blitzkrieg_market_api::kline::{Kline, KlineInterval};
+
+mod aggregator;
+pub use aggregator::{AggregatorStats, CLOSED_HISTORY_CAP, DEFAULT_INTERVALS, KlineAggregator};

@@ -1195,6 +1195,12 @@ pub struct Core {
     close_credentials: std::collections::VecDeque<(String, CloseCredential)>,
     next_id: u64,
     tx: Option<mpsc::UnboundedSender<Event>>,
+    /// E29 (§12.2): per-`(symbol, interval)` wall-clock (ms) of the LAST
+    /// throttled push of that bucket's still-growing bar. Only the throttle
+    /// state lives here — the bars live in the engine's aggregator; the map
+    /// is touched only where an engine exists, so a core without one
+    /// allocates nothing.
+    kline_preview_last_ms: std::collections::HashMap<(String, crate::kline::KlineInterval), i64>,
 }
 
 /// F4: what a fill-driven full close changed, so a later FAILED status for the
@@ -1459,6 +1465,7 @@ impl Core {
             close_credentials: std::collections::VecDeque::new(),
             next_id: 1,
             tx: None,
+            kline_preview_last_ms: std::collections::HashMap::new(),
         }
     }
 
@@ -2678,6 +2685,13 @@ impl Core {
         // round feed below, so this is an `if let`, not an early return.
         if let Some(engine) = self.engine.as_mut() {
             let broken = engine.on_data(ev);
+            // E29 (§12.2): CLOSED bars push immediately — NEVER throttled (a
+            // swallowed close would leave the chart missing that bar forever).
+            // The aggregator yields each closed bar exactly once, so the
+            // "一 bar 一条，一条不少" promise is this loop alone. Drained here,
+            // while `engine` is borrowed — the emits below run after the
+            // borrow ends (NLL), past the cancel loop.
+            let closed_bars = engine.take_closed_klines();
             for (token, _price) in broken {
                 // Regime change: pull resting entry bids for this token.
                 let ids: Vec<String> = self
@@ -2690,6 +2704,9 @@ impl Core {
                 for id in ids {
                     let _ = self.cancel(&id, now_ms);
                 }
+            }
+            for bar in closed_bars {
+                self.emit(Event::KlineUpdate { kline: bar });
             }
         }
 
@@ -3158,6 +3175,28 @@ impl Core {
         self.engine_stats_at(now_ms())
     }
 
+    /// E29 (§12.2): `kline.history` body — the aggregator's closed tail plus
+    /// the still-growing bar as the last element. A core without an engine
+    /// answers the empty list: the documented envelope for "no bars exist",
+    /// exactly what the Wave-0 placeholder arm used to answer.
+    pub fn kline_history(
+        &self,
+        symbol: &str,
+        interval: crate::kline::KlineInterval,
+        limit: usize,
+    ) -> Vec<crate::kline::Kline> {
+        self.engine
+            .as_ref()
+            .map(|e| e.kline_history(symbol, interval, limit))
+            .unwrap_or_default()
+    }
+
+    /// E29: aggregation counters for the stats surface (§10.3: drops must be
+    /// visible). Zeros when no engine is attached.
+    pub fn kline_stats(&self) -> Option<crate::kline::AggregatorStats> {
+        self.engine.as_ref().map(|e| e.kline_stats())
+    }
+
     /// The same snapshot as of an explicit instant. The token lists are sorted:
     /// their source is a `HashSet`, whose iteration order is randomised per
     /// process, and a report that shuffles between runs cannot be diffed.
@@ -3337,6 +3376,15 @@ impl Core {
                 .as_ref()
                 .map(|a| serde_json::to_value(a.status()).unwrap_or(serde_json::Value::Null))
                 .unwrap_or(serde_json::Value::Null),
+            // E29 (§12.2/§10.3): the K-line aggregator's counters — drops MUST
+            // be visible (§10.3), and this is where an outside observer sees
+            // them. `droppedOutOfOrder` counts discarded late ticks,
+            // `noDataBars` counts silently skipped empty buckets. Null when no
+            // engine is attached (same posture as `archive`).
+            "kline": self
+                .kline_stats()
+                .map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null))
+                .unwrap_or(serde_json::Value::Null),
         })
     }
 
@@ -3497,6 +3545,8 @@ impl Core {
             .iter()
             .map(|m| AssetBooksView {
                 asset: m.asset.clone(),
+                up_token_id: m.up_token_id.clone(),
+                down_token_id: m.down_token_id.clone(),
                 up: Self::book_side_view(&self.books, &m.up_token_id, max_levels),
                 down: Self::book_side_view(&self.books, &m.down_token_id, max_levels),
             })
@@ -6838,6 +6888,26 @@ impl Core {
             a.flush_if_due(now_ms, 1000);
         }
 
+        // E29 (§12.2): the still-growing bars push at most 1/s per
+        // `(symbol, interval)` — the "正在长" preview a chart draws translucent.
+        // CLOSED bars are pushed by `engine_on_data` the instant they close and
+        // are NEVER subject to this throttle (a swallowed close would leave the
+        // chart missing that bar forever). The throttle is per bucket on the
+        // CORE's clock, shared by every subscribed session.
+        if let Some(engine) = self.engine.as_ref() {
+            for bar in engine.kline_current_bars() {
+                let key = (bar.symbol.clone(), bar.interval);
+                let due = self
+                    .kline_preview_last_ms
+                    .get(&key)
+                    .is_none_or(|last| now_ms - *last >= 1_000);
+                if due {
+                    self.kline_preview_last_ms.insert(key, now_ms);
+                    self.emit(Event::KlineUpdate { kline: bar });
+                }
+            }
+        }
+
         // Retry buffered fills (orders registered since the event arrived).
         let pending = self.ome.drain_pending(now_ms)?;
         for outcome in pending {
@@ -7545,6 +7615,11 @@ pub struct MarketPriceView {
 #[serde(rename_all = "camelCase")]
 pub struct AssetBooksView {
     pub asset: String,
+    /// E29 (§12.2): the aggregator keys prediction-token bars by TOKEN id, so
+    /// the panel needs the same key `feed_klines` was fed to ask
+    /// `kline.history` for the right series.
+    pub up_token_id: String,
+    pub down_token_id: String,
     pub up: BookSideView,
     pub down: BookSideView,
 }
@@ -12697,6 +12772,103 @@ mod settlement_service_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E29 (§12.2) throttle semantics, at the Core: the still-growing bars
+    /// preview at most 1/s per `(symbol, interval)` on the tick clock, while
+    /// CLOSED bars push IMMEDIATELY from `engine_on_data` — never folded, even
+    /// when nine intervals close at once and the wall clock hasn't moved (a
+    /// swallowed close would leave the chart missing that bar forever).
+    #[test]
+    fn kline_previews_are_throttled_but_closes_are_never_folded() {
+        use crate::kline::KlineInterval;
+        use rust_decimal_macros::dec;
+        let mut c = Core::new(CoreConfig::default());
+        CoreConfig::default()
+            .install_engine(&mut c)
+            .expect("engine install");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        c.set_event_sink(tx);
+
+        let feed = |c: &mut Core, ts_ms: i64, price: Decimal| {
+            c.engine_on_data(
+                crate::engine::DataEvent::Book {
+                    token_id: "tok".to_string(),
+                    bids: vec![(price, Decimal::ONE)],
+                    asks: vec![(price + Decimal::ONE, Decimal::ONE)],
+                    now_ms: ts_ms,
+                },
+                ts_ms,
+            );
+        };
+        // Drain the sink, splitting closed from preview pushes.
+        let drain = |rx: &mut mpsc::UnboundedReceiver<Event>| -> (Vec<Event>, Vec<Event>) {
+            let mut closed = Vec::new();
+            let mut previews = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                if let Event::KlineUpdate { ref kline } = ev {
+                    if kline.is_closed {
+                        closed.push(ev);
+                    } else {
+                        previews.push(ev);
+                    }
+                }
+            }
+            (closed, previews)
+        };
+
+        // One bucket @60_000 (min1) with two ticks inside it. Previews ride
+        // the TICK clock, so tick first.
+        feed(&mut c, 60_000, dec!(1));
+        feed(&mut c, 60_100, dec!(2));
+        c.tick(60_200).unwrap();
+        // First preview per bucket: every interval's growing bar pushes ONCE.
+        let (_, previews) = drain(&mut rx);
+        let min1_previews = previews
+            .iter()
+            .filter(|ev| matches!(ev, Event::KlineUpdate { kline } if kline.interval == KlineInterval::Min1))
+            .count();
+        assert_eq!(min1_previews, 1, "first preview per bucket: {previews:?}");
+        assert_eq!(previews.len(), 9, "one preview per configured interval");
+
+        // Half a second later: NOTHING new — the 1/s fold holds per bucket.
+        c.tick(60_700).unwrap();
+        let (closed, previews) = drain(&mut rx);
+        assert!(closed.is_empty() && previews.is_empty(), "throttled hard");
+
+        // Past the 1s boundary: the preview releases, again exactly once.
+        c.tick(61_250).unwrap();
+        let (_, previews) = drain(&mut rx);
+        assert_eq!(previews.len(), 9, "released after the fold window");
+
+        // Now cross the bucket: @120_000 closes exactly the intervals whose
+        // bucket boundary lies in (60_000, 120_000] — Sec1/Sec5/Sec15/Min1,
+        // four bars at the same wall-clock instant — and NONE of them is
+        // throttled. (Min5/Min15/Hour1/Hour4/Day1 keep their bars open:
+        // @60_000 and @120_000 share one Min5 bucket, folding not closing.)
+        feed(&mut c, 120_000, dec!(3));
+        let (closed, previews) = drain(&mut rx);
+        assert!(previews.is_empty(), "the feed itself never previews");
+        assert_eq!(
+            closed.len(),
+            4,
+            "一 bar 一条，一条不少: every bucket boundary crossed closes, never folded"
+        );
+        for ev in &closed {
+            let Event::KlineUpdate { kline } = ev else {
+                unreachable!("filtered above")
+            };
+            assert_eq!(kline.open_time_ms, 60_000, "{kline:?}");
+        }
+
+        // A preview in the SAME wall second as a close cannot suppress it.
+        c.tick(120_050).unwrap(); // previews the bars
+        let (_, previews) = drain(&mut rx);
+        assert_eq!(previews.len(), 9);
+        feed(&mut c, 180_000, dec!(4)); // closes Sec1/5/15/Min1 again, same wall second
+        let (closed, previews) = drain(&mut rx);
+        assert!(previews.is_empty());
+        assert_eq!(closed.len(), 4, "closes are never subject to the fold");
     }
 
     /// Dry mode answers its own queries on the tick: the whole path (query →
