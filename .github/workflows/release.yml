@@ -198,6 +198,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The notes come from the repo's CHANGELOG at the TAGGED commit — the
+      # artifacts alone are not a checkout, and the 0.3.0 first attempt died
+      # right here (`awk: cannot open CHANGELOG.md`): this job had never run
+      # to completion before (0.2.1's two attempts died earlier upstream).
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
           path: dist
