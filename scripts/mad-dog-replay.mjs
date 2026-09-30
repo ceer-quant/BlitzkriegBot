@@ -34,6 +34,10 @@ const OUT_DIR = process.env.BK_MAD_DOG_OUT || join(tmpdir(), 'bk-mad-dog-replay'
 const args = process.argv.slice(2);
 const params = {};
 const extraFlags = [];
+const flag = (name) => {
+  const i = args.indexOf(name);
+  return i >= 0 ? args[i + 1] : undefined;
+};
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--param') {
     const [k, v] = args[i + 1].split('=');
@@ -111,12 +115,43 @@ const armDir = join(OUT_DIR, Object.keys(params).length ? 'arm-' + Object.entrie
 rmSync(armDir, { recursive: true, force: true });
 mkdirSync(armDir, { recursive: true });
 
+// --corpus-dir <dir>: pre-built <name>.jsonl files (the spot builder's
+// output) instead of the pinned book-only corpus. --window name=AT adds a
+// custom window (repeatable); with any --window given, ONLY those run.
+const CORPUS_DIR = flag('--corpus-dir');
+const only = flag('--only');
+const customWindows = [];
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--window') {
+    const [name, at] = args[i + 1].split('=');
+    customWindows.push({ name, at });
+    i++;
+  }
+}
+const runList = customWindows.length
+  ? customWindows
+  : WINDOWS.filter((w) => !only || w.name === only);
+
 const rows = [];
-for (const w of WINDOWS) {
-  const { path } = materialize(ROOT, w);
+for (const w of runList) {
+  const path = CORPUS_DIR
+    ? (() => {
+        const p = join(CORPUS_DIR, `${w.name}.jsonl`);
+        if (!existsSync(p)) throw new Error(`missing ${p} (run mad-dog-spot-corpus.mjs first)`);
+        return p;
+      })()
+    : materialize(ROOT, w).path;
   rows.push(await runOne(luaDir, w.name, path, armDir));
 }
-console.log(`# arm ${JSON.stringify(params)}`);
+let agg = { closed: 0, wins: 0, net: 0 };
+for (const r of rows) {
+  if (!r.error) {
+    agg.closed += r.closed;
+    agg.wins += r.wins;
+    agg.net += Number(r.netPnlUsd);
+  }
+}
+console.log(`# arm ${JSON.stringify(params)}  windows=${rows.length}`);
 for (const r of rows) {
   if (r.error) console.log(`${r.window}  ERROR  ${r.error}`);
   else
@@ -124,4 +159,4 @@ for (const r of rows) {
       `${r.window}  closed=${r.closed}  wins=${r.wins}  WR=${Number(r.winRatePct).toFixed(2)}%  net=${Number(r.netPnlUsd).toFixed(4)}`,
     );
 }
-console.log(`# reports in ${armDir}`);
+console.log(`# TOTAL closed=${agg.closed}  wins=${agg.wins}  net=${agg.net.toFixed(4)}  reports in ${armDir}`);

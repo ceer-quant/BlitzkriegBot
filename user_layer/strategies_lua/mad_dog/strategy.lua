@@ -57,6 +57,13 @@ local function dec_parse(str)
   elseif c == "+" then t = t:sub(2) end
   local int_part, frac_part = t:match("^(%d*)%.?(%d*)$")
   if not int_part or (int_part == "" and frac_part == "") then return nil end
+  -- Host decimals can carry up to 28 significant digits (rust_decimal
+  -- division output — obi/spread_pct). Keep the mantissa inside i64 by
+  -- capping significant digits at 18: drop frac digits beyond what the
+  -- integer part leaves room for. The 1e-12-scale wobble this can add is
+  -- orders of magnitude below every threshold compared here.
+  local keep = 18 - #int_part
+  if #frac_part > keep then frac_part = frac_part:sub(1, keep) end
   local m = tonumber(int_part .. frac_part)
   if m == nil then return nil end
   local s = #frac_part
@@ -77,11 +84,23 @@ local function dec_fmt(d)
 end
 
 local function dec_rescale(d, s)
-  return d.m * POW10[s - d.s]
+  -- Total: the host's rust_decimal fields (obi, spread_pct, depth sums) are
+  -- DIVISION results carrying up to 28 significant digits, so s can sit
+  -- BELOW d.s. Truncate toward -inf in that direction (an 1e-18-scale wobble
+  -- is orders of magnitude below every threshold compared here); the
+  -- multiply path stays exact while the shift fits POW10.
+  if s >= d.s then return d.m * POW10[s - d.s] end
+  return d.m // POW10[d.s - s]
 end
 
+local DEC_CMP_MAX_SCALE = 18
+
 local function dec_cmp(a, b)
-  local s = math.max(a.s, b.s)
+  -- Cap the common scale: aligning a 28-digit obi against a 2-digit
+  -- threshold would want POW10[26], which does not exist. Truncation past
+  -- the 18th significant digit cannot flip a comparison whose tightest
+  -- threshold sits at the 2nd decimal.
+  local s = math.max(math.min(a.s, DEC_CMP_MAX_SCALE), math.min(b.s, DEC_CMP_MAX_SCALE))
   local am, bm = dec_rescale(a, s), dec_rescale(b, s)
   if am < bm then return -1 elseif am > bm then return 1 else return 0 end
 end

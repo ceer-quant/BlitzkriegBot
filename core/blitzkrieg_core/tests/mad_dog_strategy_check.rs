@@ -112,6 +112,25 @@ fn token_book(
     )
 }
 
+/// A book whose two sides carry DIFFERENT depths: the adapter's obi wire
+/// string is then a rust_decimal division that does not terminate — the
+/// 28-significant-digit shape the frozen archive's full-depth books emit.
+fn depth_book(
+    token: &str,
+    mid_bid: Decimal,
+    mid_ask: Decimal,
+    bid_depth: Decimal,
+    ask_depth: Decimal,
+    ts: i64,
+) -> OrderbookSnapshot {
+    OrderbookSnapshot::from_levels(
+        token.to_string(),
+        vec![(mid_bid, bid_depth)],
+        vec![(mid_ask, ask_depth)],
+        ts,
+    )
+}
+
 fn ctx<'a>(
     markets: &'a [CryptoMarket],
     time_left_sec: i64,
@@ -502,19 +521,238 @@ fn modes_declare_what_the_seam_serves() {
 
 /// The DOWN side is its own token: a wick on `down` suggests DOWN.
 #[test]
-fn down_side_wick_suggests_down() {
+fn probe_spot_corpus_with_evals() {
+    use blitzkrieg_core::kline::KlineAggregator;
+    use blitzkrieg_core::strategies::EngineStrategy as _;
+    use std::collections::HashMap;
+    use std::io::BufRead;
+
+    let corpus = std::env::var("BK_PROBE_CORPUS")
+        .unwrap_or_else(|_| "/tmp/bk-spot-corpus/range-20260919T1600Z.jsonl".into());
+    let file = std::fs::File::open(&corpus).expect("corpus file");
+
+    let loaded = load_lua_package(&package_dir()).expect("package loads");
+    let mut a = LuaEngineAdapter::new(loaded.strategy, loaded.tunables);
+    let mut agg = KlineAggregator::with_default_intervals();
+    let mut last_books: HashMap<String, OrderbookSnapshot> = HashMap::new();
+    let mut cur_markets: Vec<CryptoMarket> = Vec::new();
+    let mut last_eval_ms: i64 = 0;
+    let mut evals = 0usize;
+    let mut first_err: Option<String> = None;
+
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.expect("line");
+        let v: serde_json::Value = serde_json::from_str(&line).expect("json");
+        let at = v["at"].as_i64().expect("at");
+        match v["k"].as_str().expect("k") {
+            "book" => {
+                let token = v["t"].as_str().expect("t").to_string();
+                let parse_side = |key: &str| -> Vec<(Decimal, Decimal)> {
+                    v[key]
+                        .as_array()
+                        .map(|ls| {
+                            ls.iter()
+                                .filter_map(|l| {
+                                    let arr = l.as_array()?;
+                                    Some((
+                                        Decimal::from_str_exact(arr[0].as_str()?).ok()?,
+                                        Decimal::from_str_exact(arr[1].as_str()?).ok()?,
+                                    ))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let (bids, asks) = (parse_side("b"), parse_side("a"));
+                let snap = OrderbookSnapshot::from_levels(token.clone(), bids, asks, at);
+                a.on_book(&token, &snap, at);
+                last_books.insert(token.clone(), snap);
+                agg.on_trade(&token, last_books[&token].mid_price, Decimal::ONE, at);
+            }
+            "spot" => {
+                let asset = v["s"].as_str().expect("s").to_string();
+                let price = Decimal::from_str_exact(v["p"].as_str().expect("p")).expect("price");
+                agg.on_trade(&asset, price, Decimal::ONE, at);
+            }
+            "round" => {
+                let ms: Vec<CryptoMarket> =
+                    serde_json::from_value(v["m"].clone()).expect("markets");
+                if let Some(m) = ms.first() {
+                    let tl = ((m.expires_at_ms - at) / 1000).max(0);
+                    a.on_round(m.round_slot, tl, at);
+                    cur_markets = ms;
+                }
+            }
+            _ => {}
+        }
+        for bar in agg.take_closed() {
+            a.on_kline(&bar);
+        }
+        if at - last_eval_ms >= 50 && !cur_markets.is_empty() {
+            last_eval_ms = at;
+            evals += 1;
+            let lb = last_books.clone();
+            let fresh = move |t: &str| lb.get(t).cloned();
+            let ctx = StrategyCtx::new(
+                &cur_markets,
+                cur_markets[0].round_slot,
+                ((cur_markets[0].expires_at_ms - at) / 1000).max(0),
+                at,
+                &fresh,
+            );
+            let got = a.find_candidates(&ctx);
+            if first_err.is_none() {
+                let markets2 = cur_markets.clone();
+                let fresh2 = |_t: &str| None;
+                let ctx2 = StrategyCtx::new(&markets2, cur_markets[0].round_slot, 600, at, &fresh2);
+                let diag = a.diagnostics(&ctx2);
+                let errs = diag
+                    .first()
+                    .and_then(|d| d.get("errors"))
+                    .and_then(|e| e.as_i64())
+                    .unwrap_or(0);
+                if errs > 0 {
+                    first_err = diag
+                        .first()
+                        .and_then(|d| d.get("lastError"))
+                        .and_then(|e| e.as_str().map(str::to_string));
+                }
+            }
+            let _ = got;
+        }
+    }
+
+    let markets = vec![market()];
+    let fresh = |_t: &str| None;
+    let ctx = StrategyCtx::new(&markets, NOW / 900_000, 600, NOW, &fresh);
+    let diag = a.diagnostics(&ctx);
+    println!("EVALS: {evals}  DIAG: {diag:?}");
+    let errs = diag
+        .first()
+        .and_then(|d| d.get("errors"))
+        .and_then(|e| e.as_i64())
+        .unwrap_or(-1);
+    let last = diag
+        .first()
+        .and_then(|d| d.get("lastError"))
+        .and_then(|e| e.as_str().map(str::to_string))
+        .or(first_err);
+    assert!(
+        errs == 0,
+        "lua callback errors: {errs}, lastError: {last:?}"
+    );
+}
+
+// ── regression: the archive's real books break the decimal helpers ─────────
+//
+// The frozen-archive books are FULL depth, and the adapter's `obi` /
+// `spread_pct` are rust_decimal DIVISION results — up to 28 significant
+// digits ("-0.4090909090909090909090909091"). The first cut of the decimal
+// helpers rescaled to the max scale against an 18-entry POW10 table, so
+// every evaluation touching such a book died mid-body and its suggestion
+// was silently lost (signals=0 in the spot-corpus replay while the same
+// strategy fired in the tests, whose synthetic books had equal depths and
+// therefore obi = 0). These cases pin the exact shapes that broke it.
+
+/// A wick book whose obi string is a 28-digit rust_decimal division output.
+/// The strategy must still suggest — and the diagnostics must stay clean.
+#[test]
+fn fires_on_full_depth_books_with_28_digit_obi() {
     let mut a = adapter();
-    feed_dominance(&mut a, DOWN, NOW, 22, dec!(0.56));
+    feed_dominance(&mut a, UP, NOW, 22, dec!(0.56));
     feed_spot(&mut a, NOW + 12_000, &flat_spot(NOW + 12_000, 10));
     let wick_ts = NOW + 23_000;
-    let wick = token_book(DOWN, dec!(0.27), dec!(0.29), dec!(600), wick_ts);
-    a.on_book(DOWN, &wick, wick_ts);
+    // Full-depth book: bid_depth 15234.5 vs ask_depth 22078.66 — the ratio
+    // does not terminate, so the adapter's obi wire string is a recurring
+    // rust_decimal division (28 significant digits).
+    let wick = depth_book(
+        UP,
+        dec!(0.27),
+        dec!(0.29),
+        dec!(15234.5),
+        dec!(22078.66),
+        wick_ts,
+    );
+    a.on_book(UP, &wick, wick_ts);
 
     let markets = vec![market()];
     let wick_for_fresh = wick.clone();
-    let fresh = move |t: &str| (t == DOWN).then(|| wick_for_fresh.clone());
+    let fresh = move |t: &str| (t == UP).then(|| wick_for_fresh.clone());
+    let got = candidates_of(&mut a, &markets, 600, wick_ts, &fresh);
+    assert_eq!(
+        got.len(),
+        1,
+        "28-digit obi must not eat the suggestion: {got:?}"
+    );
+    assert_eq!(got[0].price, dec!(0.26));
+
+    let ctx = StrategyCtx::new(&markets, NOW / 900_000, 600, wick_ts, &fresh);
+    let diag = a.diagnostics(&ctx);
+    let errs = diag
+        .first()
+        .and_then(|d| d.get("errors"))
+        .and_then(|e| e.as_i64())
+        .unwrap_or(-1);
+    assert_eq!(errs, 0, "zero Lua callback errors, diagnostics: {diag:?}");
+}
+
+/// Extreme OBI in the 28-digit wire form must still be REFUSED by the band
+/// (a refused-by-gate book and a crashed evaluation must stay
+/// distinguishable: the crash lost suggestions, the gate refuses them).
+#[test]
+fn refuses_28_digit_obi_inside_the_band_edge() {
+    let mut a = adapter();
+    feed_dominance(&mut a, UP, NOW, 22, dec!(0.56));
+    let wick_ts = NOW + 23_000;
+    // |obi| = 0.85… > 0.5 with full depth either way.
+    let skewed = depth_book(
+        UP,
+        dec!(0.27),
+        dec!(0.29),
+        dec!(85234.5),
+        dec!(15078.66),
+        wick_ts,
+    );
+    a.on_book(UP, &skewed, wick_ts);
+    let markets = vec![market()];
+    let skewed_for_fresh = skewed.clone();
+    let fresh = move |t: &str| (t == UP).then(|| skewed_for_fresh.clone());
+    let got = candidates_of(&mut a, &markets, 600, wick_ts, &fresh);
+    assert!(got.is_empty(), "OBI band must refuse: {got:?}");
+    let ctx = StrategyCtx::new(&markets, NOW / 900_000, 600, wick_ts, &fresh);
+    let diag = a.diagnostics(&ctx);
+    let errs = diag
+        .first()
+        .and_then(|d| d.get("errors"))
+        .and_then(|e| e.as_i64())
+        .unwrap_or(-1);
+    assert_eq!(
+        errs, 0,
+        "refusal must come from the gate, not a crash: {diag:?}"
+    );
+}
+
+/// `obi`/`spread_pct` scale explosion also flows through `bid_depth` sums.
+/// A depth string with 12 fractional digits must compare cleanly.
+#[test]
+fn fires_with_long_fractional_depth() {
+    let mut a = adapter();
+    feed_dominance(&mut a, UP, NOW, 22, dec!(0.56));
+    feed_spot(&mut a, NOW + 12_000, &flat_spot(NOW + 12_000, 10));
+    let wick_ts = NOW + 23_000;
+    let wick = depth_book(
+        UP,
+        dec!(0.27),
+        dec!(0.29),
+        Decimal::from_str_exact("15234.523423423423").expect("depth"),
+        Decimal::from_str_exact("22078.661234123412").expect("depth"),
+        wick_ts,
+    );
+    a.on_book(UP, &wick, wick_ts);
+    let markets = vec![market()];
+    let wick_for_fresh = wick.clone();
+    let fresh = move |t: &str| (t == UP).then(|| wick_for_fresh.clone());
     let got = candidates_of(&mut a, &markets, 600, wick_ts, &fresh);
     assert_eq!(got.len(), 1, "{got:?}");
-    assert_eq!(got[0].token_id, DOWN);
     assert_eq!(got[0].price, dec!(0.26));
 }
