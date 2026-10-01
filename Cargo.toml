@@ -33,33 +33,30 @@ exclude = ["user_layer/strategies", "user_layer/parity_strategy", "user_layer/ex
 [workspace.package]
 version = "0.3.0"
 
-# ── Release profile ──────────────────────────────────────────────────────────
-# Low-spec-friendly build (user-directed 2026-09-30): cheap and fast to
-# compile on small machines — no whole-program LTO, 16 codegen units, basic
-# optimization. Honest tradeoff: the shipped binary runs slower than the old
-# measured baseline (opt-level 3 + lto=fat + codegen-units=1, numbers in
-# dev-docs/blitzkrieg/MIGRATION_LOG.md §49); `binary-size-check.mjs` still
-# gates the 50 MB budget in CI.
-#
-# Two prior decisions survive the change on purpose:
-#   * `strip = "debuginfo"`, deliberately NOT `true`: strip=symbols removes
-#     the symbol table too, so a release-mode panic backtrace comes out
-#     EMPTY (verified on a minimal repro). On a trading core, naming the
-#     panicking frame is worth the megabytes.
-#   * EXPLICITLY NOT `panic = "abort"`, despite it being the usual size
-#     lever. A panicking user-authored strategy variant must not take down
-#     the live engine; that guarantee is `catch_unwind`, which abort makes
-#     unable to catch (strategies/shadow_twin.rs swallows the twin's own
-#     panic; shadow_evolution/mod.rs quarantines a panicking variant — abort
-#     voids BOTH, one panic would kill the core mid-session with open
-#     positions orphaned). See DECISIONS_PENDING D-20. Stated explicitly so
-#     nobody re-adds it by reflex.
+# ── Release profile (E10-d) ──────────────────────────────────────────────────
+# Size/performance hardening for shipped binaries. Measured, not guessed: see
+# dev-docs/blitzkrieg/MIGRATION_LOG.md §49 (internal) for the before/after numbers.
 [profile.release]
-opt-level = 1
-codegen-units = 16
-lto = false
-debug = false
+opt-level = 3
+# Whole-program LTO + a single codegen unit: the two settings that actually
+# matter for both throughput and size, at the cost of a slower link.
+lto = "fat"
+codegen-units = 1
+# Keeps the symbol table but drops DWARF debug info. Deliberately NOT `true`:
+# `strip = true` (== strip=symbols) removes symbols too, so a release-mode panic
+# backtrace comes out EMPTY — verified on a minimal repro, not assumed. Measured
+# cost of keeping symbols: 9.56 MB vs 8.07 MB (+1.49 MB, +18%) on the core
+# binary. On a trading core, being able to name the panicking frame is worth it.
 strip = "debuginfo"
+# EXPLICITLY NOT `panic = "abort"`, despite it being the usual size lever.
+# A panicking user-authored strategy variant must not take down the live engine,
+# and that guarantee is implemented with `catch_unwind` — which `panic = "abort"`
+# makes unable to catch. Two layers exist (strategies/shadow_twin.rs:277 swallows
+# the twin's own panic; shadow_evolution/mod.rs:327 quarantines a panicking
+# variant), and abort would void BOTH: one panic would terminate the core
+# mid-session with open positions orphaned. The size win is not worth it —
+# strip+lto already puts us 5x under the 50 MB target. See DECISIONS_PENDING
+# D-20. Stated explicitly so nobody re-adds it by reflex.
 panic = "unwind"
 
 [workspace.dependencies]
