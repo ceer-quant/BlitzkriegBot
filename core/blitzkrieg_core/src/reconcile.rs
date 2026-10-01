@@ -673,6 +673,9 @@ mod tests {
             order_id: core_id.into(),
             request: req(key, dec!(10)),
             submitted_at_ms: now,
+            decision_at_ms: now,
+            execute_at_ms: now,
+            report_at_ms: now,
             maker_timeout_ms: 0,
         })
         .unwrap();
@@ -827,6 +830,9 @@ mod tests {
             order_id: "dry1".into(),
             request: req("k9", dec!(10)),
             submitted_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
             maker_timeout_ms: 0,
         })
         .unwrap();

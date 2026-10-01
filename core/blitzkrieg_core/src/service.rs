@@ -1046,9 +1046,33 @@ pub struct PlaceOutcome {
 /// drops the oldest otherwise; both are counted in `engine.stats.exitReasons`.
 const EXIT_REASON_TABLE_MAX: usize = 64;
 
+/// #351: a dry-mode taker leg in flight — the fill model prices travel time
+/// (`taker_latency_ms`) and report time (`taker_rtt_ms`), so the leg must
+/// never fill on the decision-time quote. Stage 1 (match) fires at the first
+/// drain with `now >= execute_at_ms` against the book as it stood then
+/// (strictly no future data); stage 2 (report) books the fill or the kill at
+/// the first drain with `now >= report_at_ms`.
+#[derive(Debug, Clone)]
+struct InflightTaker {
+    order_id: OrderId,
+    /// When the leg arrives at the venue and is matched.
+    execute_at_ms: i64,
+    /// When the report (fill or kill) reaches the local books.
+    report_at_ms: i64,
+    /// Stage 1: the price the venue would have printed — walk VWAP plus the
+    /// model's slippage, full size (FOK is all-or-nothing).
+    matched_price: Option<Decimal>,
+    /// Stage 1: why the venue would have killed the FOK.
+    rejected_msg: Option<String>,
+}
+
 pub struct Core {
     config: CoreConfig,
     ome: Ome,
+    /// #351: dry taker legs in flight — two-stage time-causal fill
+    /// (match at `execute_at_ms`, report at `report_at_ms`). Empty
+    /// whenever `fill_model.taker_latency_ms <= 0 && taker_rtt_ms <= 0`.
+    inflight_takers: Vec<InflightTaker>,
     /// E28 (§9.3): the per-account money truth. "The ledger" is now a lookup
     /// keyed by the order/request's `account_id` at every money-moving site —
     /// the active account's book stands in where no order context exists
@@ -1385,6 +1409,7 @@ impl Core {
             risk: RiskGate::new(config.risk.clone()),
             config,
             ome: Ome::new(),
+            inflight_takers: Vec::new(),
             accounts,
             breaker,
             intent_audit,
@@ -2570,10 +2595,17 @@ impl Core {
     /// Feed a market-data event to the engine; applies any trend-break bid
     /// cancellation and, for round updates, nothing else.
     pub fn engine_on_data(&mut self, ev: crate::engine::DataEvent, now_ms: i64) {
+        // #351: advance in-flight taker legs BEFORE the incoming event is
+        // mirrored into `self.books`, so a leg whose `execute_at_ms` falls at
+        // this clock is matched against the book as the venue had it — never
+        // against the event that arrives at (or after) the same instant. The
+        // tick path drains too (rounds with no data still advance time).
+        self.drain_inflight_takers(now_ms);
         // Archive the raw event BEFORE anything consumes it, so a replay sees
         // exactly the stream the engine saw (P-1.3). The event's own timestamp is
         // authoritative (it is the clock the engine decides on); the caller's
-        // `now_ms` is only a fallback for an event that arrived unstamped.
+        // `now_ms` is one step behind, a second drain here is a no-op
+        // (legs in stage 2 wait for `report_at_ms`).
         if let Some(a) = self.event_archive.as_mut() {
             let own = crate::data_source::event_at_ms(&ev);
             let at = if own > 0 { own } else { now_ms };
@@ -2583,13 +2615,42 @@ impl Core {
             crate::engine::DataEvent::Book { .. } => self.stats.books += 1,
             crate::engine::DataEvent::TopOfBook { .. } => self.stats.tops += 1,
             crate::engine::DataEvent::Spot { .. } => self.stats.spots += 1,
-            crate::engine::DataEvent::RoundMarkets { .. } => {
+            crate::engine::DataEvent::RoundMarkets { markets, .. } => {
                 self.stats.rounds += 1;
                 // A round rollover replaces the whole round (`engine.markets`
                 // carries the new list), so it is the moment any pending-close
                 // reason whose position is gone can no longer belong to
                 // anything live (issue #190).
                 self.sweep_exit_reasons();
+                // #351: the rollover closed every market of the old round. A
+                // taker leg still un-matched for a token the new round does
+                // not carry can never fill — the venue rejects a FOK for a
+                // closed market — so the honest model kills it NOW (it
+                // reports as a rejection at its report time, reservation
+                // released). A leg that already matched keeps its fill: the
+                // venue matched it before the close.
+                let tokens: Vec<String> = markets
+                    .iter()
+                    .flat_map(|m| [m.up_token_id.clone(), m.down_token_id.clone()])
+                    .collect();
+                for leg in self.inflight_takers.iter_mut() {
+                    if leg.matched_price.is_none() && leg.rejected_msg.is_none() {
+                        let ended = self
+                            .ome
+                            .get(&leg.order_id)
+                            .map(|o| !tokens.contains(&o.token_id))
+                            .unwrap_or(true);
+                        if ended {
+                            leg.rejected_msg = Some(format!(
+                                "taker_killed_round_ended: the order's market closed while the leg was in flight (token {})",
+                                self.ome
+                                    .get(&leg.order_id)
+                                    .map(|o| o.token_id.clone())
+                                    .unwrap_or_default()
+                            ));
+                        }
+                    }
+                }
             }
         }
 
@@ -3676,6 +3737,11 @@ impl Core {
                 .reserve(&id, req.price * req.size)?;
         }
         self.ome.submit(SubmitParams {
+            // #351: the pre-submit path settles locally with zero latency
+            // dials — decision, execution and report all land here.
+            decision_at_ms: now_ms,
+            execute_at_ms: now_ms,
+            report_at_ms: now_ms,
             order_id: id.clone(),
             request: req,
             submitted_at_ms: now_ms,
@@ -5897,7 +5963,17 @@ impl Core {
                 .reserve(&id, req.price * req.size)?;
         }
 
+        // #351 order lifecycle: the decision is THIS instant; the leg arrives
+        // at the venue `taker_latency_ms` later and its report lands
+        // `taker_rtt_ms` after that. Zero dials = all three collapse to
+        // `now_ms`, the historic immediate-fill behaviour.
+        let execute_at = now_ms.saturating_add(self.config.fill_model.taker_latency_ms.max(0));
+        let report_at = execute_at.saturating_add(self.config.fill_model.taker_rtt_ms.max(0));
+
         self.ome.submit(SubmitParams {
+            decision_at_ms: now_ms,
+            execute_at_ms: execute_at,
+            report_at_ms: report_at,
             order_id: id.clone(),
             request: req,
             submitted_at_ms: now_ms,
@@ -5999,63 +6075,88 @@ impl Core {
             // forever and the ledger would never move. What separates them is
             // egress, not accounting — see `Mode::readonly`.
             Mode::Dry | Mode::ReadOnly => {
-                self.ome.mark_live(id, now_ms)?;
+                // #351: an in-flight taker has NOT reached the venue yet — it
+                // stays Pending (the same shape a LIVE order has until the
+                // venue acks) and turns terminal only at its report time.
+                let model = self.config.fill_model;
+                let inflight = order.mode == FillPolicy::Taker
+                    && (model.taker_latency_ms > 0 || model.taker_rtt_ms > 0);
+                if !inflight {
+                    self.ome.mark_live(id, now_ms)?;
+                }
                 let mut rejection = None;
                 match order.mode {
                     FillPolicy::Taker => {
-                        // Fill like a live FOK: walk the opposing side's resting
-                        // levels, best first, no worse than the order's own
-                        // limit, and fill at the volume-weighted price. A book
-                        // that does not cross or cannot cover the size is what
-                        // the venue would kill the order for — reject with the
-                        // same economics instead of inventing a fill at a price
-                        // nobody was offering. The walk prices the VISIBLE
-                        // book; the fill model's slippage dial prices the
-                        // impact of our own size beyond it (identity by
-                        // default → unchanged economics).
-                        let book = self.books.get(&order.token_id).cloned().unwrap_or_default();
-                        match book.walk_marketable(order.side, order.price, order.size) {
-                            Some((vwap, _)) => {
-                                let fill_price =
-                                    self.config.fill_model.apply_slippage(order.side, vwap);
-                                // A FOK is all-or-nothing by construction, so it
-                                // is one execution of the whole size — the trade
-                                // id stays the one this path has always used.
-                                let trade_id = format!("{id}:{now_ms}");
-                                self.authoritative_fill(
-                                    id, &trade_id, order.size, fill_price, false, now_ms,
-                                )?
-                            }
-                            None => {
-                                if order.side == Side::Buy {
-                                    // E28: the refused taker's reservation is
-                                    // released in the ORDER'S OWN book.
-                                    if let Ok(l) = self.accounts.get_mut(&order.account_id) {
-                                        l.release(id);
-                                    }
+                        // #351: with the latency dials engaged the leg is IN
+                        // FLIGHT — it matches at `execute_at_ms` against the
+                        // book as it stands THEN (never the decision-time
+                        // quote) and reports at `report_at_ms`. Zero dials
+                        // keep the historic immediate fill below, bit-for-bit.
+                        let model = self.config.fill_model;
+                        if model.taker_latency_ms > 0 || model.taker_rtt_ms > 0 {
+                            let arrive = order.execute_at_ms.max(now_ms);
+                            self.inflight_takers.push(InflightTaker {
+                                order_id: id.to_string(),
+                                execute_at_ms: arrive,
+                                report_at_ms: order.report_at_ms.max(arrive),
+                                matched_price: None,
+                                rejected_msg: None,
+                            });
+                        } else {
+                            // Fill like a live FOK: walk the opposing side's resting
+                            // levels, best first, no worse than the order's own
+                            // limit, and fill at the volume-weighted price. A book
+                            // that does not cross or cannot cover the size is what
+                            // the venue would kill the order for — reject with the
+                            // same economics instead of inventing a fill at a price
+                            // nobody was offering. The walk prices the VISIBLE
+                            // book; the fill model's slippage dial prices the
+                            // impact of our own size beyond it (identity by
+                            // default → unchanged economics).
+                            let book = self.books.get(&order.token_id).cloned().unwrap_or_default();
+                            match book.walk_marketable(order.side, order.price, order.size) {
+                                Some((vwap, _)) => {
+                                    let fill_price =
+                                        self.config.fill_model.apply_slippage(order.side, vwap);
+                                    // A FOK is all-or-nothing by construction, so it
+                                    // is one execution of the whole size — the trade
+                                    // id stays the one this path has always used.
+                                    let trade_id = format!("{id}:{now_ms}");
+                                    self.authoritative_fill(
+                                        id, &trade_id, order.size, fill_price, false, now_ms,
+                                    )?
                                 }
-                                self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
-                                // #180: a refusal is a first-class fact — it goes
-                                // into the one error slot, reaches Node as an
-                                // Event::Error, lands in the log at error level and
-                                // travels back to the submitter on the
-                                // `orders.place` result. Before this, the reject
-                                // branch emitted an order update and nothing else,
-                                // so `orders.place` answered a bare REJECTED and
-                                // `engine.stats.lastError` stayed empty.
-                                let err = self.taker_refusal(&order, &book);
-                                tracing::error!(
-                                    order = id,
-                                    token = %order.token_id,
-                                    side = ?order.side,
-                                    size = %order.size,
-                                    limit = %order.price,
-                                    reason = %err.message,
-                                    "order rejected: taker leg has no fillable liquidity"
-                                );
-                                self.emit_error_at(err.clone(), now_ms);
-                                self.emit_order(id);
-                                rejection = Some(err);
+                                None => {
+                                    if order.side == Side::Buy {
+                                        // E28: the refused taker's reservation is
+                                        // released in the ORDER'S OWN book.
+                                        if let Ok(l) = self.accounts.get_mut(&order.account_id) {
+                                            l.release(id);
+                                        }
+                                    }
+                                    self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
+                                    // #180: a refusal is a first-class fact — it goes
+                                    // into the one error slot, reaches Node as an
+                                    // Event::Error, lands in the log at error level and
+                                    // travels back to the submitter on the
+                                    // `orders.place` result. Before this, the reject
+                                    // branch emitted an order update and nothing else,
+                                    // so `orders.place` answered a bare REJECTED and
+                                    // `engine.stats.lastError` stayed empty.
+                                    let err = self.taker_refusal(&order, &book);
+                                    tracing::error!(
+                                        order = id,
+                                        token = %order.token_id,
+                                        side = ?order.side,
+                                        size = %order.size,
+                                        limit = %order.price,
+                                        reason = %err.message,
+                                        "order rejected: taker leg has no fillable liquidity"
+                                    );
+                                    self.emit_error_at(err.clone(), now_ms);
+                                    self.emit_order(id);
+                                    rejection = Some(err);
+                                }
                             }
                         }
                     }
@@ -6145,6 +6246,109 @@ impl Core {
     /// traded. The depth reading is the taker walk's own
     /// ([`crate::sim::Book::marketable_depth`]), so dry cannot hold two
     /// different ideas of how much is available.
+    /// #351: advance the in-flight taker legs. Runs at every clock advance —
+    /// the head of [`Self::engine_on_data`] (BEFORE the incoming book is
+    /// mirrored, so a match can never see the event that triggered the drain)
+    /// and in [`Self::tick`]. Both call sites observe the invariant that the
+    /// mirrored book only holds events ≤ the current clock, so a match is
+    /// priced strictly off data the venue could have had at `execute_at_ms`
+    /// or earlier — no future data, by construction.
+    ///
+    /// Stage 1 (match, once per leg at the first drain with
+    /// `now >= execute_at_ms`): the FOK walks the CURRENT mirrored book at the
+    /// order's decision-time limit; a book that no longer crosses or cannot
+    /// cover the size is a kill — exactly what a live venue does to a late
+    /// FOK. Stage 2 (report, `now >= report_at_ms`): the fill books with that
+    /// instant (ledger/position effects land at report time), or the kill
+    /// releases the BUY reservation.
+    fn drain_inflight_takers(&mut self, now_ms: i64) {
+        if self.inflight_takers.is_empty() {
+            return;
+        }
+        let model = self.config.fill_model;
+        let legs = std::mem::take(&mut self.inflight_takers);
+        let mut remaining = Vec::new();
+        for mut leg in legs {
+            // Stage 1: match at the venue.
+            if leg.matched_price.is_none() && leg.rejected_msg.is_none() {
+                if now_ms < leg.execute_at_ms {
+                    remaining.push(leg);
+                    continue;
+                }
+                let order = match self.ome.get(&leg.order_id).cloned() {
+                    Some(o) if o.status.is_live() => o,
+                    // Cancelled/terminal while in flight: the venue never
+                    // filled it (the cancel won the race) — drop the leg.
+                    _ => continue,
+                };
+                let book = self.books.get(&order.token_id).cloned().unwrap_or_default();
+                match book.walk_marketable(order.side, order.price, order.size) {
+                    Some((vwap, _)) => {
+                        leg.matched_price = Some(model.apply_slippage(order.side, vwap));
+                    }
+                    None => leg.rejected_msg = Some(self.taker_refusal(&order, &book).message),
+                }
+            }
+            // Stage 2: report at the local books.
+            if now_ms < leg.report_at_ms {
+                remaining.push(leg);
+                continue;
+            }
+            if let Some(price) = leg.matched_price {
+                let order = match self.ome.get(&leg.order_id) {
+                    // A cancel that won the race between match and report
+                    // leaves the order terminal: the venue never reports a
+                    // fill for an order it was told to forget.
+                    Some(o) if o.status.is_live() => o.clone(),
+                    Some(_) => continue,
+                    None => continue,
+                };
+                let trade_id = format!("{}:{}", order.order_id, leg.execute_at_ms);
+                if let Err(e) = self.authoritative_fill(
+                    &order.order_id,
+                    &trade_id,
+                    order.size,
+                    price,
+                    false,
+                    leg.report_at_ms,
+                ) {
+                    tracing::error!(
+                        order = %order.order_id,
+                        error = %e,
+                        "inflight taker fill could not be applied"
+                    );
+                    self.emit_error_at(e, leg.report_at_ms);
+                }
+            } else if let Some(msg) = leg.rejected_msg.take() {
+                let order = match self.ome.get(&leg.order_id) {
+                    Some(o) => o.clone(),
+                    None => continue,
+                };
+                if order.side == Side::Buy {
+                    // E28: the killed FOK's reservation is released in the
+                    // ORDER'S OWN book.
+                    if let Ok(l) = self.accounts.get_mut(&order.account_id) {
+                        l.release(&order.order_id);
+                    }
+                }
+                let _ = self.ome.mark_terminal(
+                    &order.order_id,
+                    OrderStatus::Rejected,
+                    leg.report_at_ms,
+                );
+                let err = CoreError::new(CoreErrorCode::WouldCross, msg);
+                tracing::error!(
+                    order = %order.order_id,
+                    reason = %err.message,
+                    "inflight taker killed at execute_at (book no longer crosses)"
+                );
+                self.emit_error_at(err, leg.report_at_ms);
+                self.emit_order(&order.order_id);
+            }
+        }
+        self.inflight_takers = remaining;
+    }
+
     fn try_maker_fill(&mut self, id: &str, now_ms: i64) {
         let Some(order) = self.ome.get(id).cloned() else {
             return;
@@ -6929,6 +7133,10 @@ impl Core {
 
     // ── Maintenance: pending-fill retry + maker→taker escalation + exits ────
     pub fn tick(&mut self, now_ms: i64) -> CoreResult<()> {
+        // #351: advance in-flight taker legs — the tick path covers rounds
+        // where the clock moves without data events (the replay tail keeps
+        // reporting legs after the last event). A no-op when no leg waits.
+        self.drain_inflight_takers(now_ms);
         // Flush the market-data archive at most once a second, so a reader of the
         // live file stays close behind without paying a write syscall every tick
         // (P-1.3).
@@ -11158,6 +11366,120 @@ mod fill_model_tests {
         );
         assert!(c.ome().get(&id).unwrap().status.is_live());
         assert_eq!(c.ome().get(&id).unwrap().filled_size, Decimal::ZERO);
+    }
+
+    // ── #351 反向验收 · a taker with latency is a two-stage in-flight leg ───
+    //
+    // With the latency dials engaged a taker is IN FLIGHT between decision and
+    // venue: it must not fill at decision time, it must match the book as it
+    // stands at execute_at (never the decision quote), and its ledger effects
+    // land at report_at. Each test below is RED against the historic
+    // fill-at-decision behaviour it replaces.
+
+    /// The lifecycle pins the three timestamps: decision 1000, match 1100,
+    /// report 1150 — no position and no cash movement before report_at.
+    #[test]
+    fn an_inflight_taker_does_not_fill_at_decision_time() {
+        let mut c = core_with(FillModel {
+            taker_latency_ms: 100,
+            taker_rtt_ms: 50,
+            ..FillModel::default()
+        });
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(500))], 900);
+        let (id, st) = c
+            .place(buy(FillPolicy::Taker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        assert_eq!(
+            st,
+            OrderStatus::Pending,
+            "in flight: the venue has not acked yet"
+        );
+        assert!(c.positions().open_positions().is_empty());
+        assert_eq!(
+            c.ledger().reserved(),
+            dec!(4),
+            "the FOK reservation holds while the leg is in flight"
+        );
+
+        // Before execute_at: still nothing — the leg has not reached the venue.
+        c.tick(1_050).unwrap();
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Pending);
+        assert!(c.positions().open_positions().is_empty());
+
+        // At execute_at the venue MATCHES (the book still crosses) but the
+        // report has not landed: no position, reservation still held.
+        c.tick(1_100).unwrap();
+        assert_eq!(
+            c.ome().get(&id).unwrap().status,
+            OrderStatus::Pending,
+            "matched at the venue, not yet reported locally"
+        );
+        assert!(c.positions().open_positions().is_empty());
+
+        // At report_at the fill books: decision 1000, match 1100, report 1150.
+        c.tick(1_150).unwrap();
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Filled);
+        assert_eq!(c.positions().open_positions()[0].entry_price, dec!(0.40));
+        // Taker entry: 4.00 notional + the 1.8% taker fee (0.072).
+        assert_eq!(c.ledger().balance(), dec!(1000) - dec!(4) - dec!(0.072));
+        assert_eq!(c.ledger().reserved(), Decimal::ZERO);
+    }
+
+    /// The decision book offered 500 shares at 0.40; the venue's book at
+    /// execute_at does not. A FOK that cannot fill on arrival dies — the
+    /// decision-time quote is not a fill.
+    #[test]
+    fn an_inflight_taker_matches_the_execute_at_book_not_the_decision_book() {
+        let mut c = core_with(FillModel {
+            taker_latency_ms: 100,
+            taker_rtt_ms: 50,
+            ..FillModel::default()
+        });
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(500))], 900);
+        let (id, _) = c
+            .place(buy(FillPolicy::Taker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        // The ask is pulled before the order could arrive at the venue.
+        c.book_snapshot("tok", vec![], vec![], 1_050);
+        c.tick(1_100).unwrap(); // execute_at: nothing to walk → the venue kills it
+        c.tick(1_150).unwrap(); // report_at: the kill reports
+        assert_eq!(
+            c.ome().get(&id).unwrap().status,
+            OrderStatus::Rejected,
+            "a FOK that cannot fill at execute_at dies, whatever the decision book had"
+        );
+        assert!(c.positions().open_positions().is_empty());
+        assert_eq!(
+            c.ledger().balance(),
+            dec!(1000),
+            "the reservation is released"
+        );
+        assert_eq!(c.ledger().reserved(), Decimal::ZERO);
+    }
+
+    /// A cancel that wins the race leaves no ghost fill: the dead leg is
+    /// dropped at its next drain, whatever the book does afterwards.
+    #[test]
+    fn a_cancel_that_wins_the_race_leaves_no_ghost_fill() {
+        let mut c = core_with(FillModel {
+            taker_latency_ms: 100,
+            taker_rtt_ms: 50,
+            ..FillModel::default()
+        });
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(500))], 900);
+        let (id, _) = c
+            .place(buy(FillPolicy::Taker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        c.cancel(&id, 1_050).unwrap();
+        c.tick(1_100).unwrap(); // execute_at passes — for a dead order
+        c.tick(1_200).unwrap(); // report_at passes
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Cancelled);
+        assert!(
+            c.positions().open_positions().is_empty(),
+            "no fill may report for an order the venue was told to forget"
+        );
+        assert_eq!(c.ledger().balance(), dec!(1000));
+        assert_eq!(c.ledger().reserved(), Decimal::ZERO);
     }
 
     // ── #183 · a dry maker fills at most what the book offers ──────────────

@@ -73,6 +73,10 @@ polymarket-extension = { path = "../../extensions/polymarket", optional = true }
 async-trait = "0.1"
 # Lock-free atomic parameter swap for Shadow Evolution (strategy hot path).
 arc-swap = "1"
+# #351: the backtest report's per-run trade-list digest — two replays of the
+# same data must hash identically (reproducibility is a gate, not a hope).
+# Already in the dependency tree; this names the edge.
+sha2 = "0.10"
 
 # statvfs for the archive's free-space guard (unix only).
 [target.'cfg(unix)'.dependencies]

@@ -226,6 +226,25 @@ pub struct TrackedOrder {
     pub round_slot: i64,
     pub submitted_at_ms: i64,
     pub updated_at_ms: i64,
+    /// #351 order lifecycle: when the strategy made the decision this order
+    /// carries. Equals `submitted_at_ms` everywhere the kernel itself submits
+    /// (the decision is the submission); a caller that stamps a later or
+    /// earlier decision records the difference here. Defaulted on read so a
+    /// 0.2/0.3.0 order log line lands as "decided at submission" without a
+    /// migration.
+    #[serde(default)]
+    pub decision_at_ms: i64,
+    /// #351: when the order arrives at the venue (`decision_at + taker
+    /// latency`). A dry taker with latency > 0 fills against the book as it
+    /// stands AT this instant, never the decision-time quote. `0`/absent =
+    /// the historic immediate-fill behaviour.
+    #[serde(default)]
+    pub execute_at_ms: i64,
+    /// #351: when the fill report reaches the local book
+    /// (`execute_at + network rtt`). Ledger/position effects are stamped with
+    /// this instant. `0`/absent = effects apply at execution.
+    #[serde(default)]
+    pub report_at_ms: i64,
     /// Exchange order id once the venue acknowledges a LIVE order (None in dry,
     /// or before the POST resolves). Reconciliation matches WS/REST on this.
     #[serde(default)]

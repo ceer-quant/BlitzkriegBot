@@ -176,6 +176,16 @@ pub struct SubmitParams {
     pub order_id: OrderId,
     pub request: OrderRequest,
     pub submitted_at_ms: i64,
+    /// #351 order lifecycle: when the strategy decided (defaults to
+    /// `submitted_at_ms` when the caller has nothing earlier to say).
+    pub decision_at_ms: i64,
+    /// #351: when the order arrives at the venue (`decision_at + taker
+    /// latency`). A dry taker with latency fills against the book as it
+    /// stands AT this instant.
+    pub execute_at_ms: i64,
+    /// #351: when the fill report reaches the local book
+    /// (`execute_at + rtt`). Ledger/position effects are stamped here.
+    pub report_at_ms: i64,
     /// Maker→taker escalation window (ms), three-valued: `0` = the core's
     /// configured default, positive = that clock, negative = never escalate
     /// (see `service::escalation_delay_ms`). Not "0 = no escalation" — that was
@@ -480,6 +490,13 @@ impl Ome {
             round_slot: r.round_slot,
             submitted_at_ms: p.submitted_at_ms,
             updated_at_ms: p.submitted_at_ms,
+            decision_at_ms: if p.decision_at_ms > 0 {
+                p.decision_at_ms
+            } else {
+                p.submitted_at_ms
+            },
+            execute_at_ms: p.execute_at_ms,
+            report_at_ms: p.report_at_ms,
             venue_order_id: None,
             escalate_at_ms: None,
             maker_timeout_ms: p.maker_timeout_ms,
@@ -894,6 +911,9 @@ mod tests {
             order_id: "o1".into(),
             request: req("k1", dec!(10)),
             submitted_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
             maker_timeout_ms: 0,
         })
         .unwrap();
@@ -943,6 +963,9 @@ mod tests {
             order_id: "o1".into(),
             request: req("k1", dec!(10)),
             submitted_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
             maker_timeout_ms: 0,
         })
         .unwrap();
@@ -983,6 +1006,9 @@ mod tests {
             order_id: "o1".into(),
             request: req("k1", dec!(10)),
             submitted_at_ms: 3,
+            decision_at_ms: 3,
+            execute_at_ms: 3,
+            report_at_ms: 3,
             maker_timeout_ms: 0,
         })
         .unwrap();
@@ -1000,6 +1026,9 @@ mod tests {
             order_id: "o1".into(),
             request: req("k1", dec!(10)),
             submitted_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
             maker_timeout_ms: 0,
         })
         .unwrap();
@@ -1008,6 +1037,9 @@ mod tests {
                 order_id: "o2".into(),
                 request: req("k1", dec!(10)),
                 submitted_at_ms: 2,
+                decision_at_ms: 2,
+                execute_at_ms: 2,
+                report_at_ms: 2,
                 maker_timeout_ms: 0,
             })
             .is_err()
@@ -1019,6 +1051,9 @@ mod tests {
                 order_id: "o3".into(),
                 request: req("k1", dec!(10)),
                 submitted_at_ms: 4,
+                decision_at_ms: 4,
+                execute_at_ms: 4,
+                report_at_ms: 4,
                 maker_timeout_ms: 0,
             })
             .is_ok()
@@ -1039,6 +1074,9 @@ mod tests {
                 order_id: "o1".into(),
                 request: req("k1", dec!(10)),
                 submitted_at_ms: 1,
+                decision_at_ms: 1,
+                execute_at_ms: 1,
+                report_at_ms: 1,
                 maker_timeout_ms: 0,
             })
             .unwrap();
@@ -1093,6 +1131,9 @@ mod tests {
             order_id: "old".into(),
             request: req("k-old", dec!(10)),
             submitted_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
             maker_timeout_ms: 0,
         })
         .unwrap();
@@ -1112,6 +1153,9 @@ mod tests {
                 order_id: "new".into(),
                 request: req("k-new", dec!(10)),
                 submitted_at_ms: 5,
+                decision_at_ms: 5,
+                execute_at_ms: 5,
+                report_at_ms: 5,
                 maker_timeout_ms: 0,
             })
             .unwrap();
@@ -1145,6 +1189,9 @@ mod tests {
             order_id: "o1".into(),
             request: req("k1", dec!(10)),
             submitted_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
             maker_timeout_ms: 0,
         })
         .unwrap();
@@ -1196,6 +1243,9 @@ mod tests {
             order_id: "o1".into(),
             request: req("k1", dec!(10)),
             submitted_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
             maker_timeout_ms: 0,
         })
         .unwrap();
@@ -1239,6 +1289,9 @@ mod tests {
             order_id: "o1".into(),
             request: req("k1", dec!(10)),
             submitted_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
             maker_timeout_ms: 0,
         })
         .unwrap();
@@ -1273,6 +1326,9 @@ mod tests {
             order_id: "live".into(),
             request: req("k-live", dec!(1000)),
             submitted_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
             maker_timeout_ms: 0,
         })
         .unwrap();
@@ -1290,6 +1346,9 @@ mod tests {
                 order_id: id.clone(),
                 request: req(&format!("k{i}"), dec!(1)),
                 submitted_at_ms: 10,
+                decision_at_ms: 10,
+                execute_at_ms: 10,
+                report_at_ms: 10,
                 maker_timeout_ms: 0,
             })
             .unwrap();
@@ -1337,6 +1396,9 @@ mod tests {
             order_id: "o1".into(),
             request: req("k1", dec!(10)),
             submitted_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
             maker_timeout_ms: 0,
         })
         .unwrap();
@@ -1366,6 +1428,9 @@ mod tests {
             order_id: "o1".into(),
             request: req("k1", dec!(10)),
             submitted_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
             maker_timeout_ms: 0,
         })
         .unwrap();

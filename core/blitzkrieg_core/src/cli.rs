@@ -597,6 +597,28 @@ pub const FLAGS: &[FlagSpec] = &[
         "Repeatable: counterfactual knob override handed to the replayed strategy.",
     ),
     flag(
+        "--backtest-mode",
+        "<mine|verify|sweep>",
+        "#351: run the replay under a latency mode — mine (zero latency, friction \
+         as configured), verify (one real-latency run), sweep (the latency ladder \
+         with a verdict table).",
+    ),
+    flag(
+        "--verify-latency-ms",
+        "<n>",
+        "Latency rung for --backtest-mode verify (default 286).",
+    ),
+    flag(
+        "--taker-latency-ms",
+        "<n>",
+        "Fill model: taker decision→venue latency in ms (default 0).",
+    ),
+    flag(
+        "--taker-rtt-ms",
+        "<n>",
+        "Fill model: taker venue→report RTT in ms (default 0).",
+    ),
+    flag(
         "--fee-model",
         "<legacy_quadratic|official>",
         "Replay-only: which taker-fee schedule the replay charges (asking for it \
