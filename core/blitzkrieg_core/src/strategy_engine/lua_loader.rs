@@ -34,7 +34,7 @@ use arc_swap::ArcSwap;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-use blitzkrieg_lua_runtime::LuaStrategy;
+use blitzkrieg_lua_runtime::{FeeScheduleView, LuaStrategy};
 use blitzkrieg_strategy_api::{
     BookUpdate, FreshBook, MarketInfo, RoundContext, RoundInfo, SafeStrategy, StrategyMode,
 };
@@ -68,6 +68,34 @@ pub struct LuaManifest {
     pub tunables: BTreeMapDefs,
     #[serde(default)]
     pub modes: Option<serde_json::Value>,
+    /// Hold-to-settlement declaration: the strategy's positions are meant to
+    /// be COLLECTED at expiry — redeemed on settlement or MERGED as complete
+    /// UP+DOWN pairs — never sold on the exit ladder. Gates two host
+    /// behaviours: the pair-completion entry exemption ("Already in {asset}"
+    /// waived for the opposite leg of the same condition) and the exit-ladder
+    /// skip (dry/read-only). The merge channel itself needs no declaration —
+    /// it is intent-driven, and merging requires the account to actually hold
+    /// both legs (the same authority an on-chain wallet needs to burn its own
+    /// pair). Default false — existing packages keep today's behaviour.
+    #[serde(default)]
+    pub holds_to_settlement: bool,
+    /// Entry-gate exemptions (E2-b, the dylib declaration surface's Lua
+    /// mirror). Default: nothing declared = fully gated.
+    #[serde(default)]
+    pub gate_exemptions: ManifestGateExemptions,
+}
+
+/// The manifest's spelling of [`crate::strategies::GateExemptions`] — that
+/// type derives no serde, so the wire gets its own struct and the loader
+/// converts once.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ManifestGateExemptions {
+    #[serde(default)]
+    pub timing: bool,
+    #[serde(default)]
+    pub momentum: bool,
+    #[serde(default)]
+    pub timing_min_time_left_sec: Option<i64>,
 }
 
 /// `{"threshold": {"type": "decimal", "default": "0.04"}}` — the §6.4
@@ -102,6 +130,12 @@ pub struct LoadedLua {
     /// The manifest tunables' defaults — the initial `bk.params()` bag
     /// (§6.4); a ParamRegistry cell replaces it if one is ever attached.
     pub tunables: HashMap<String, String>,
+    /// The manifest's hold-to-settlement declaration (collection semantics:
+    /// redeem or MERGE, never ladder-sell). `false` when absent.
+    pub holds_to_settlement: bool,
+    /// The manifest's entry-gate exemptions. `none()` when absent — every
+    /// existing package keeps today's fully-gated behaviour.
+    pub gate_exemptions: GateExemptions,
 }
 
 /// Every package directory directly under `dir` that carries a
@@ -213,6 +247,12 @@ pub fn load_lua_package(dir: &Path) -> Result<LoadedLua, String> {
         version: manifest.version,
         declared_modes,
         tunables: manifest.tunables.defaults(),
+        holds_to_settlement: manifest.holds_to_settlement,
+        gate_exemptions: GateExemptions {
+            timing: manifest.gate_exemptions.timing,
+            momentum: manifest.gate_exemptions.momentum,
+            timing_min_time_left_sec: manifest.gate_exemptions.timing_min_time_left_sec,
+        },
     })
 }
 
@@ -229,6 +269,11 @@ pub struct LuaEngineAdapter {
     last_books: HashMap<String, BookUpdate>,
     exit_intents: Vec<StrategyExitIntent>,
     breaks: Vec<(String, Decimal)>,
+    /// Manifest declarations (§6.4): collection semantics + entry-gate
+    /// exemptions. Defaults keep today's behaviour for packages that declare
+    /// neither.
+    holds_to_settlement: bool,
+    gate_exemptions: GateExemptions,
     /// The strategy's cell of the shared ParamRegistry, when one is attached
     /// (E2-c plumbing; a cell exists only for strategies that declared
     /// evolvable knobs).
@@ -249,7 +294,31 @@ impl LuaEngineAdapter {
             last_books: HashMap::new(),
             exit_intents: Vec::new(),
             breaks: Vec::new(),
+            holds_to_settlement: false,
+            gate_exemptions: GateExemptions::none(),
             params_cell: None,
+        }
+    }
+
+    /// Stamp the manifest's declarations (the loaded-package path). A strategy
+    /// that declared hold-to-settlement holds its legs for COLLECTION —
+    /// redeemed at settlement or MERGED as complete pairs — so the exit ladder
+    /// skips it (dry/read-only) and the pair-completion entry exemption may
+    /// assemble both legs of one condition.
+    pub fn declare(mut self, holds_to_settlement: bool, gate_exemptions: GateExemptions) -> Self {
+        self.holds_to_settlement = holds_to_settlement;
+        self.gate_exemptions = gate_exemptions;
+        self
+    }
+
+    /// Inject the kernel's ONE fee schedule (the adapter cannot read the core;
+    /// the service can). Powers `bk.fees()` — a strategy prices the fee from
+    /// the same curve the charge path settles in, never from a copied
+    /// constant. A package that never receives this sees `bk.fees() == nil`
+    /// and must fail closed (no entries, never "assume the fee is zero").
+    pub fn set_fee_schedule(&self, view: FeeScheduleView) {
+        if let Ok(mut st) = self.inner.state().lock() {
+            st.fee_schedule = Some(view);
         }
     }
 
@@ -450,7 +519,11 @@ impl EngineStrategy for LuaEngineAdapter {
     }
 
     fn gate_exemptions(&self) -> GateExemptions {
-        GateExemptions::none()
+        self.gate_exemptions
+    }
+
+    fn holds_to_settlement(&self) -> bool {
+        self.holds_to_settlement
     }
 
     fn take_exit_intents(&mut self) -> Vec<StrategyExitIntent> {

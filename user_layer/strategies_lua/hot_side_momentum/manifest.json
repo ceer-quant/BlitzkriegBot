@@ -1,0 +1,30 @@
+{
+  "name": "hot_side_momentum",
+  "version": "1.0.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "b7cf647629cd708777c2f3a5922fee2601b3d49e14166873984867cb6609246f",
+  "author": "BlitzkriegBot",
+  "description": "Confirmed-leader holder for binary rounds: when a round is 40%-70% through, Binance spot momentum (|move| >= 0.10% inside a 15s window, real coverage) CONFIRMS the market's leading side — the one ask-priced in [0.60, 0.80] — buy that side at its ask and HOLD TO SETTLEMENT; the winner redeems $1.00/share. A momentum move contradicting the leader is not a trade; equal asks name no leader; a stale trigger describes a market that already repriced. One attempt per condition per round; exits are never emitted (collection happens at settlement). Signal-only: the kernel adjudicates, sizes, gates and settles every intent.",
+  "holds_to_settlement": true,
+  "gate_exemptions": {
+    "timing": true,
+    "momentum": true,
+    "timing_min_time_left_sec": 30
+  },
+  "tunables": {
+    "round_sec": { "type": "int", "default": "900" },
+    "mom_window_sec": { "type": "int", "default": "15" },
+    "mom_threshold_pct": { "type": "decimal", "default": "0.10" },
+    "mom_max_age_ms": { "type": "int", "default": "2000" },
+    "min_leading_price": { "type": "decimal", "default": "0.60" },
+    "max_leading_price": { "type": "decimal", "default": "0.80" }
+  },
+  "modes": [
+    {
+      "market_type": "prediction",
+      "structure": "binary_outcome_wheel",
+      "capabilities": ["websocket_feed", "level2_snapshot", "post_only"]
+    }
+  ]
+}

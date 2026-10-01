@@ -194,7 +194,7 @@ fn feed_ramp(
     }
 }
 
-fn flat_spot(start_open_ms: i64, n: usize) -> Vec<Decimal> {
+fn flat_spot(_start_open_ms: i64, n: usize) -> Vec<Decimal> {
     vec![dec!(60000); n]
 }
 

@@ -565,6 +565,26 @@ pub struct ClosedPosition {
     pub account_id: AccountId,
 }
 
+/// The result of one MERGE (task 2.2): complete UP+DOWN share-pairs of one
+/// condition burned into their on-chain collateral. Each merged leg leaves at
+/// $0.50/share, so the pair's two exit notionals sum to exactly the $1.00 the
+/// ledger credits per pair — the trade records and the cash never disagree.
+#[derive(Debug, Clone)]
+pub struct MergeOutcome {
+    pub condition_id: String,
+    /// E28 (§9.2): the account whose wallet owned the pair — the collateral
+    /// credit lands here, never in another book.
+    pub account_id: AccountId,
+    /// Complete share-pairs merged (the smaller side's share count).
+    pub pairs_merged: Decimal,
+    /// Collateral collected: `pairs_merged` × $1.00.
+    pub cash_credited_usd: Decimal,
+    /// Legs fully consumed by the merge (closed as `ExitReason::Merge`).
+    pub closed: Vec<ClosedPosition>,
+    /// Shares left open on the longer leg(s) — they stay for settlement.
+    pub unpaired_shares: Decimal,
+}
+
 pub struct OpenParams {
     pub strategy: String,
     pub asset: String,
@@ -1495,6 +1515,107 @@ impl PositionManager {
         Some(closed)
     }
 
+    /// MERGE (task 2.2): burn complete UP+DOWN share-pairs of one condition into
+    /// their on-chain collateral — $1.00 per pair, the collection channel of
+    /// pair-discount arbitrage (@almach: 12,570 merges, zero sells).
+    ///
+    /// Each leg's paired shares leave at **$0.50/share** through the same
+    /// `apply_exit_fill`/`close` bookkeeping every exit uses, so the two legs'
+    /// exit notionals sum to exactly what [`crate::ledger::Ledger::credit_merge`]
+    /// credits (`pairs × $1.00`) — the trade records and the cash ledger can
+    /// never disagree. The merge itself pays NO fee: it is not a market order.
+    ///
+    /// Only complete pairs merge: `min(up_shares, down_shares)` floored to the
+    /// share grid. A longer leg's remainder STAYS OPEN for settlement —
+    /// unpaired shares have no collateral claim until the market resolves.
+    /// Returns `None` (and changes nothing) unless both legs exist on the same
+    /// account with at least one grid-legal pair: an on-chain merge is a
+    /// single-wallet operation, and one-sided inventory has nothing to burn.
+    pub fn merge_condition(&mut self, condition_id: &str, now_ms: i64) -> Option<MergeOutcome> {
+        // Both legs must exist, on ONE account (a merge spends one wallet's
+        // tokens on-chain; a cross-account pair is not mergeable).
+        let up = self
+            .open
+            .iter()
+            .find(|p| p.condition_id == condition_id && p.direction == SignalDirection::Up)
+            .cloned()?;
+        let down = self
+            .open
+            .iter()
+            .find(|p| p.condition_id == condition_id && p.direction == SignalDirection::Down)
+            .cloned()?;
+        if up.account_id != down.account_id {
+            tracing::warn!(
+                condition = %condition_id,
+                up_account = %up.account_id,
+                down_account = %down.account_id,
+                "merge refused: legs sit in different accounts — no single wallet owns the pair"
+            );
+            return None;
+        }
+        let pairs = floor_to_grid(up.shares).min(floor_to_grid(down.shares));
+        if pairs <= Decimal::ZERO {
+            return None;
+        }
+
+        // Burn the paired shares at $0.50/share per leg (fee-free, maker-role
+        // bookkeeping: a merge is collateral collection, not a market exit).
+        let merge_leg_price = Decimal::new(5, 1); // $0.50 per share
+        let account_id = up.account_id.clone();
+        let mut closed = Vec::new();
+        for leg in [up, down] {
+            let remaining = self.apply_exit_fill(
+                &leg.id,
+                pairs,
+                merge_leg_price,
+                Decimal::ZERO,
+                OrderRole::Maker,
+            );
+            if remaining == Some(Decimal::ZERO) {
+                // The merge consumed the whole leg: record the close. The fee
+                // is zero and the exit notionals already sit in `flows`.
+                if let Some(c) =
+                    self.close(&leg.id, merge_leg_price, ExitReason::Merge, true, now_ms)
+                {
+                    closed.push(c);
+                }
+            }
+        }
+        // A merge is collateral collection, NOT a market exit: close() armed the
+        // exit/asset cooldowns unconditionally, but the merged inventory is GONE
+        // — @almach's rhythm is merge-then-reenter round over round, and the
+        // next round's entry is a fresh decision on a fresh book, not a
+        // rapid-fire re-entry into the same one. The $0.50/leg accounting makes
+        // one leg's sign red by construction (entry 0.60 → exit 0.50), so a
+        // per-leg "loss" is an artifact, not a signal: no loss cooldown either.
+        // (A genuinely red PAIR — entry sum > 1 — is a strategy bug the entry
+        // gate forbids; it never reaches this code.)
+        for c in &closed {
+            self.exit_cooldowns
+                .remove(&cooldown_key(&c.asset, c.direction));
+            self.asset_last_exit_at.remove(&c.asset);
+            self.asset_last_loss_at.remove(&c.asset);
+        }
+        let unpaired = {
+            let mut unpaired = Decimal::ZERO;
+            for leg in self.open.iter() {
+                if leg.condition_id == condition_id {
+                    unpaired += leg.shares;
+                }
+            }
+            unpaired
+        };
+        let outcome = MergeOutcome {
+            condition_id: condition_id.to_string(),
+            account_id,
+            pairs_merged: pairs,
+            cash_credited_usd: pairs, // $1.00 per pair
+            closed,
+            unpaired_shares: unpaired,
+        };
+        Some(outcome)
+    }
+
     /// Sell size for a full exit: exactly the shares held, floored to the venue's
     /// 0.01 share grid so the order can never oversell (E17-d).
     ///
@@ -1674,7 +1795,15 @@ mod tests {
     /// (force-exit territory) included.
     #[test]
     fn no_bid_mint_no_exit_request_even_at_deadline() {
-        let mut pm = PositionManager::new(PositionConfig::default());
+        // Pins the guillotine ON: this is the F6 deadline mechanism test, and
+        // the calibrated default now ships it OFF (`force_exit_sec = 0`).
+        let mut pm = PositionManager::new(PositionConfig {
+            exit: ExitConfig {
+                force_exit_sec: 120,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
         let p = enter(
             &mut pm,
             params("BTC", SignalDirection::Up, dec!(0.4)),
@@ -1721,7 +1850,14 @@ mod tests {
     /// not price a forced exit at an old price.
     #[test]
     fn stale_book_does_not_price_a_forced_exit() {
-        let mut pm = PositionManager::new(PositionConfig::default());
+        // Pins the guillotine ON (mechanism test); the shipped default is OFF.
+        let mut pm = PositionManager::new(PositionConfig {
+            exit: ExitConfig {
+                force_exit_sec: 120,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
         let p = enter(
             &mut pm,
             params("BTC", SignalDirection::Up, dec!(0.4)),
@@ -1964,7 +2100,16 @@ mod tests {
     /// here as a request priced off the ask/2 phantom this test blocks.
     #[test]
     fn a_profit_exit_with_no_bid_is_reported_never_priced() {
-        let mut pm = PositionManager::new(PositionConfig::default());
+        // Trailing explicitly ON: this pins the #267 reporting MECHANISM (the
+        // rule that wanted out is named), orthogonal to the calibrated default
+        // of banking nothing via trailing sells.
+        let mut pm = PositionManager::new(PositionConfig {
+            exit: ExitConfig {
+                trailing_enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
         let p = enter(
             &mut pm,
             params("BTC", SignalDirection::Up, dec!(0.40)),
@@ -2038,7 +2183,13 @@ mod tests {
     #[test]
     fn a_stale_book_is_an_outage_that_holds_and_then_releases() {
         // `0` = report every tick, so each of the three ticks is observed alone.
+        // Trailing explicitly ON (mechanism test — the rule being held/released
+        // is the trailing stop); the calibrated default ships it OFF.
         let cfg = PositionConfig {
+            exit: ExitConfig {
+                trailing_enabled: true,
+                ..Default::default()
+            },
             stop_suppression_repeat_sec: 0,
             ..Default::default()
         };
@@ -2118,8 +2269,11 @@ mod tests {
     /// staleness budget — and not some other gate — is what held it.
     #[test]
     fn a_widened_book_budget_prices_the_same_outage() {
+        // Trailing explicitly ON (mechanism test — the rule pricing on the widened
+        // budget is the trailing stop); the calibrated default ships it OFF.
         let cfg = PositionConfig {
             exit: ExitConfig {
+                trailing_enabled: true,
                 max_book_age_sec: 86_400,
                 ..Default::default()
             },
@@ -2232,6 +2386,185 @@ mod tests {
             ev.message()
         );
         assert_eq!(pm.suppressed_stop_count(), 1);
+    }
+    // ── MERGE (task 2.2): pair collection for pair-discount arbitrage ────────
+
+    /// One leg of a binary condition. `params` above pins a shared token;
+    /// a pair needs DISTINCT tokens on ONE condition.
+    fn leg_params(
+        dir: SignalDirection,
+        token: &str,
+        condition: &str,
+        entry: Decimal,
+    ) -> OpenParams {
+        OpenParams {
+            strategy: "pair_discount_arb".into(),
+            asset: "BTC".into(),
+            direction: dir,
+            token_id: token.into(),
+            condition_id: condition.into(),
+            entry_price: entry,
+            expires_at_ms: 900_000,
+            was_maker: true,
+            target_exit_price: None,
+            account_id: crate::model::default_account_id(),
+        }
+    }
+
+    /// Equal legs: the whole pair merges — both legs close as `Merge` at
+    /// $0.50/share (their notionals sum to the $1.00/pair the ledger credits),
+    /// nothing stays open, and NO cooldown is armed: a merge is collection,
+    /// not an exit, so the next round's entry is a fresh decision.
+    #[test]
+    fn merge_burns_a_complete_pair_into_collateral() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        let up = enter(
+            &mut pm,
+            leg_params(SignalDirection::Up, "tok-up", "cond", dec!(0.48)),
+            OrderRole::Maker,
+            0,
+        );
+        let down = enter(
+            &mut pm,
+            leg_params(SignalDirection::Down, "tok-down", "cond", dec!(0.45)),
+            OrderRole::Maker,
+            0,
+        );
+        let out = pm
+            .merge_condition("cond", 1_000)
+            .expect("a complete pair merges");
+        assert_eq!(out.pairs_merged, dec!(10));
+        assert_eq!(out.cash_credited_usd, dec!(10), "$1.00 per share-pair");
+        assert_eq!(out.unpaired_shares, Decimal::ZERO);
+        assert_eq!(out.closed.len(), 2);
+        for c in &out.closed {
+            assert_eq!(c.exit_reason, ExitReason::Merge);
+            assert_eq!(c.exit_price, dec!(0.50));
+            assert!(c.was_maker_exit, "a merge pays no fee");
+            assert_eq!(c.exit_fee_pct, Decimal::ZERO);
+        }
+        // Leg PnL: exit notional 5.00 each; maker entries were fee-free.
+        let up_closed = out.closed.iter().find(|c| c.id == up.id).unwrap();
+        let down_closed = out.closed.iter().find(|c| c.id == down.id).unwrap();
+        assert_eq!(up_closed.net_pnl_usd, dec!(5.0) - dec!(4.8));
+        assert_eq!(down_closed.net_pnl_usd, dec!(5.0) - dec!(4.5));
+        assert!(pm.open_positions().is_empty());
+        // The collection channel must not lock the next round out.
+        assert!(
+            pm.can_open(Some("BTC"), Some(SignalDirection::Up), 2_000)
+                .is_ok(),
+            "merge arms no exit cooldown"
+        );
+        assert!(
+            pm.can_open(Some("BTC"), Some(SignalDirection::Down), 2_000)
+                .is_ok(),
+            "merge arms no loss/asset cooldown either"
+        );
+    }
+
+    /// Unequal legs: only complete pairs merge. The shorter leg is consumed
+    /// whole; the longer leg keeps its unpaired shares — they have no
+    /// collateral claim until the market resolves.
+    #[test]
+    fn merge_pairs_only_the_smaller_leg_and_leaves_the_rest() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        enter(
+            &mut pm,
+            leg_params(SignalDirection::Up, "tok-up", "cond", dec!(0.48)),
+            OrderRole::Maker,
+            0,
+        );
+        let down = enter(
+            &mut pm,
+            leg_params(SignalDirection::Down, "tok-down", "cond", dec!(0.45)),
+            OrderRole::Maker,
+            0,
+        );
+        // Trim the DOWN leg to 6 shares first: only 6 complete pairs exist.
+        pm.apply_exit_fill(
+            &down.id,
+            dec!(4),
+            dec!(0.44),
+            Decimal::ZERO,
+            OrderRole::Maker,
+        );
+        let out = pm
+            .merge_condition("cond", 1_000)
+            .expect("a partial pair still merges its complete part");
+        assert_eq!(out.pairs_merged, dec!(6));
+        assert_eq!(out.cash_credited_usd, dec!(6));
+        // DOWN is consumed whole; UP keeps its unpaired 4 shares for settlement.
+        assert_eq!(out.closed.len(), 1);
+        assert_eq!(out.closed[0].direction, SignalDirection::Down);
+        assert_eq!(out.closed[0].exit_reason, ExitReason::Merge);
+        assert_eq!(out.unpaired_shares, dec!(4));
+        assert_eq!(pm.open_positions().len(), 1);
+        assert_eq!(pm.open_positions()[0].direction, SignalDirection::Up);
+        assert_eq!(pm.open_positions()[0].shares, dec!(4));
+    }
+
+    /// Reverse: a ONE-SIDED position has nothing to burn — no merge, no close,
+    /// no cash. Unpaired inventory waits for settlement.
+    #[test]
+    fn merge_refuses_a_one_sided_position() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        enter(
+            &mut pm,
+            leg_params(SignalDirection::Up, "tok-up", "cond", dec!(0.48)),
+            OrderRole::Maker,
+            0,
+        );
+        assert!(pm.merge_condition("cond", 1_000).is_none());
+        assert_eq!(pm.open_positions().len(), 1, "the lone leg is untouched");
+        assert!(pm.closed_positions().is_empty());
+        // An unknown condition has nothing to merge either.
+        assert!(pm.merge_condition("other", 1_000).is_none());
+    }
+
+    /// Reverse: legs in DIFFERENT accounts are not one wallet's inventory —
+    /// an on-chain merge spends a single wallet's tokens, so it is refused
+    /// whole and no leg is touched.
+    #[test]
+    fn merge_refuses_legs_in_different_accounts() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        let mut up = leg_params(SignalDirection::Up, "tok-up", "cond", dec!(0.48));
+        up.account_id = AccountId::from("acct-a");
+        let mut down = leg_params(SignalDirection::Down, "tok-down", "cond", dec!(0.45));
+        down.account_id = AccountId::from("acct-b");
+        enter(&mut pm, up, OrderRole::Maker, 0);
+        enter(&mut pm, down, OrderRole::Maker, 0);
+        assert!(pm.merge_condition("cond", 1_000).is_none());
+        assert_eq!(pm.open_positions().len(), 2, "no leg is touched");
+        assert!(pm.closed_positions().is_empty());
+    }
+
+    /// Reverse: a remainder below the 0.01 share grid completes no pair —
+    /// the venue cannot merge fractional dust.
+    #[test]
+    fn merge_refuses_a_pair_below_the_share_grid() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        enter(
+            &mut pm,
+            leg_params(SignalDirection::Up, "tok-up", "cond", dec!(0.48)),
+            OrderRole::Maker,
+            0,
+        );
+        let down = enter(
+            &mut pm,
+            leg_params(SignalDirection::Down, "tok-down", "cond", dec!(0.45)),
+            OrderRole::Maker,
+            0,
+        );
+        // 0.005 shares left on DOWN: below the grid, no complete pair.
+        pm.apply_exit_fill(
+            &down.id,
+            dec!(9.995),
+            dec!(0.44),
+            Decimal::ZERO,
+            OrderRole::Maker,
+        );
+        assert!(pm.merge_condition("cond", 1_000).is_none());
+        assert_eq!(pm.open_positions().len(), 2);
     }
 }
 

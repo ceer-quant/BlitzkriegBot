@@ -195,6 +195,19 @@ impl Ledger {
         }
         self.balance += payout_usd;
     }
+
+    /// Credit the collateral of MERGED share-pairs (task 2.2): one complete
+    /// UP+DOWN pair of a condition merges on-chain into $1.00 of USDC — the
+    /// collection channel of pair-discount arbitrage (@almach: 12,570 merges,
+    /// zero sells). `pairs` counts share-pairs; each credits $1.00. Idempotence
+    /// lives upstream: the merged shares leave the position book in the same
+    /// transaction, so a replayed merge finds no pair to burn.
+    pub fn credit_merge(&mut self, pairs: Decimal) {
+        if pairs <= Decimal::ZERO {
+            return;
+        }
+        self.balance += pairs;
+    }
 }
 
 /// Market-agnostic reservation lifecycle (see `ledger_api`). The core pipeline
@@ -259,6 +272,20 @@ mod tests {
         assert_eq!(l.balance(), dec!(19));
         // Entry fee also comes out of cash.
         l.charge_fee(dec!(2));
+        assert_eq!(l.balance(), dec!(17));
+    }
+
+    /// MERGE (task 2.2): one complete UP+DOWN pair merges into $1.00 of
+    /// collateral — @almach's collection channel. Zero/negative pair counts are
+    /// no-ops: no phantom collateral ever enters the book.
+    #[test]
+    fn merge_credits_one_dollar_per_pair() {
+        let mut l = Ledger::new();
+        l.set_balance(dec!(10));
+        l.credit_merge(dec!(7));
+        assert_eq!(l.balance(), dec!(17));
+        l.credit_merge(Decimal::ZERO);
+        l.credit_merge(dec!(-3));
         assert_eq!(l.balance(), dec!(17));
     }
 

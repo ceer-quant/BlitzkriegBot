@@ -2062,6 +2062,8 @@ impl Core {
                 let name = loaded.name.clone();
                 let version = loaded.version.clone();
                 let tunables = loaded.tunables.clone();
+                let holds = loaded.holds_to_settlement;
+                let exemptions = loaded.gate_exemptions;
                 // E27 (§8.2): the SAME handshake verdict BEFORE registration.
                 let refusal =
                     Self::modes_refusal(self.plugin_modes.as_ref(), &name, &loaded.declared_modes);
@@ -2072,10 +2074,21 @@ impl Core {
                     Some(r) => format!("; INCOMPATIBLE: {r}"),
                     None => String::new(),
                 };
-                match engine.register_user_strategy(
-                    Box::new(LuaEngineAdapter::new(loaded.strategy, tunables)),
-                    format!("lua:{}", dir.display()),
-                ) {
+                // The fee projection (`bk.fees()`): the kernel's ONE schedule,
+                // stamped at load so a strategy prices the fee from the same
+                // curve the charge path settles in.
+                let sched = crate::exit_policy::fee_schedule();
+                let fee_view = blitzkrieg_lua_runtime::FeeScheduleView {
+                    name: sched.name.to_string(),
+                    rate: sched.rate.to_string(),
+                    exponent: sched.exponent,
+                };
+                let adapter =
+                    LuaEngineAdapter::new(loaded.strategy, tunables).declare(holds, exemptions);
+                adapter.set_fee_schedule(fee_view);
+                match engine
+                    .register_user_strategy(Box::new(adapter), format!("lua:{}", dir.display()))
+                {
                     Ok(_) => {
                         // E30: an ABSENT manifest.modes stays absent — an empty
                         // Vec would render `modes: []` on strategy.list, and
@@ -6666,45 +6679,75 @@ impl Core {
         }
     }
 
-    /// Answer a settlement query locally (dry/read-only modes). The convention is
-    /// the market's own last mid: the highest-valued token held wins and pays 1,
-    /// the others pay 0 — and when no token is above 0.5 the market pays nobody,
-    /// which understates rather than invents a payout. Documented here because it
-    /// is a simulation rule, not a fact about the market: `source` says
-    /// `core-dry`, so a simulated settlement can never be read as a real one.
+    /// Answer a settlement query locally (dry/read-only modes). The rule: the
+    /// token whose VALUE EVIDENCE is highest wins and pays 1, the others pay 0
+    /// — and when no token's evidence clears 0.5 the resolution is WITHHELD
+    /// (`None`): the query re-arms on its own cadence and the blind alert
+    /// fires. A binary market past expiry always has a winner on-chain, so
+    /// booking 0 for every token would silently zero a REAL winner — the
+    /// bid-less-winner bug this ladder exists for. "Cannot tell" now holds the
+    /// position open loudly instead of settling it at an invented 0.
     ///
-    /// The mid comes from the mirrored BOOK when we have one, not from the
-    /// position's last valuation: settlement runs before the tick's exit pass, so
-    /// `current_price` can be a tick stale, and a stale mid is a wrong payout.
+    /// Evidence per token, first rung that has a price:
+    ///   1. a two-sided book → its mid (the original rule, unchanged);
+    ///   2. a bid-less book with a real ask → THE ASK: the buy side being
+    ///      swept does not make the winner worthless. At expiry nobody sells a
+    ///      sure dollar cheap, so the winner's ask sits near 1 while a loser's
+    ///      sits near 0 — the old code read a one-sided mid (zeroed by
+    ///      `from_levels`) and settled bid-less winners to 0;
+    ///   3. an ask-less book with a bid → the bid (still a real level);
+    ///   4. no usable book → the position's own last valuation.
+    ///
+    /// Documented as a simulation rule, not a market fact: `source` says
+    /// `core-dry`, so a simulated settlement can never be read as a real one.
+    /// It flows through `on_market_resolution` exactly like a venue answer —
+    /// one booking path, two sources, both traceable (`core-dry` vs the
+    /// venue's own).
     fn dry_resolution(
         &self,
         query: &blitzkrieg_market_api::SettlementQuery,
-        now_ms: i64,
     ) -> Option<blitzkrieg_market_api::MarketResolution> {
         let positions = self.positions.open_positions();
         let priced: Vec<(&str, Decimal)> = query
             .token_ids
             .iter()
             .map(|t| {
-                let book_mid = self.books.get(t).map(|b| {
-                    crate::model::OrderbookSnapshot::from_levels(
-                        t.to_string(),
-                        b.bids.clone(),
-                        b.asks.clone(),
-                        now_ms,
-                    )
-                    .mid_price
-                });
-                let mid = book_mid
-                    .filter(|m| *m > Decimal::ZERO)
-                    .or_else(|| {
-                        positions
+                let book = self.books.get(t);
+                let top_bid = book
+                    .map(|b| {
+                        b.bids
                             .iter()
-                            .find(|p| &p.token_id == t)
-                            .map(|p| p.current_price)
+                            .map(|(p, _)| *p)
+                            .filter(|p| *p > Decimal::ZERO)
+                            .max()
+                            .unwrap_or(Decimal::ZERO)
                     })
                     .unwrap_or(Decimal::ZERO);
-                (t.as_str(), mid)
+                // A real ask is < 1; the empty-side sentinel `best_ask = 1`
+                // must never read as "someone offers a dollar".
+                let top_ask = book.and_then(|b| {
+                    b.asks
+                        .iter()
+                        .map(|(p, _)| *p)
+                        .filter(|p| *p > Decimal::ZERO && *p < Decimal::ONE)
+                        .min()
+                });
+                let mut value = if top_bid > Decimal::ZERO {
+                    match top_ask {
+                        Some(a) => (top_bid + a) / Decimal::TWO,
+                        None => top_bid,
+                    }
+                } else {
+                    top_ask.unwrap_or(Decimal::ZERO)
+                };
+                if value <= Decimal::ZERO {
+                    value = positions
+                        .iter()
+                        .find(|p| &p.token_id == t)
+                        .map(|p| p.current_price)
+                        .unwrap_or(Decimal::ZERO);
+                }
+                (t.as_str(), value)
             })
             .collect();
         if priced.is_empty() {
@@ -6717,11 +6760,16 @@ impl Core {
                     if *p > acc.1 { (*t, *p) } else { acc }
                 },
             );
-        let pays = best > Decimal::new(5, 1);
+        // Withhold instead of "pays nobody": at expiry the only honest
+        // zero-payout is a named loser, and naming one requires evidence above
+        // the coin-flip. Anything darker is our view being broken — re-arm.
+        if best <= Decimal::new(5, 1) {
+            return None;
+        }
         let payouts = priced
             .iter()
             .map(|(t, _)| {
-                let payout = if pays && *t == winner {
+                let payout = if *t == winner {
                     Decimal::ONE
                 } else {
                     Decimal::ZERO
@@ -6751,7 +6799,7 @@ impl Core {
             return;
         }
         for query in self.take_settlement_queries(now_ms) {
-            if let Some(resolution) = self.dry_resolution(&query, now_ms) {
+            if let Some(resolution) = self.dry_resolution(&query) {
                 self.on_market_resolution(resolution, now_ms);
             }
         }
@@ -7113,6 +7161,60 @@ impl Core {
         if self.positions.open_positions().is_empty() {
             return Ok(());
         }
+
+        // MERGE interception (task 2.2): a strategy close intent tagged "merge"
+        // is a pair-COLLECTION request, not a market exit. Complete UP+DOWN
+        // pairs of the intent's condition are burned into their on-chain
+        // collateral ($1 per pair) immediately — no order is placed, no ladder
+        // prices it, the on-chain merge IS the fill, exactly like settlement's
+        // redemption. Unpaired remainders stay open for settlement; an intent
+        // with no complete pair behind it is dropped like every intent.
+        // Runs BEFORE any book borrow: a merge is priced by construction
+        // ($0.50 per leg), never off a quote.
+        let (merge_intents, sell_intents): (Vec<_>, Vec<_>) =
+            intents.into_iter().partition(|i| i.reason == "merge");
+        for intent in merge_intents {
+            let Some(condition_id) = self
+                .positions
+                .open_positions()
+                .iter()
+                .find(|p| p.token_id == intent.token_id)
+                .map(|p| p.condition_id.clone())
+            else {
+                continue;
+            };
+            let Some(outcome) = self.positions.merge_condition(&condition_id, now_ms) else {
+                tracing::info!(
+                    condition = %condition_id,
+                    "merge intent: no complete pair to burn (one-sided or cross-account) — legs stay open"
+                );
+                continue;
+            };
+            if outcome.pairs_merged > Decimal::ZERO {
+                // E28: the collateral belongs to the account whose wallet held
+                // the pair — an unknown account is an error, never a mint.
+                match self.accounts.get_mut(&outcome.account_id) {
+                    Ok(l) => l.credit_merge(outcome.pairs_merged),
+                    Err(e) => tracing::error!(
+                        account = %outcome.account_id,
+                        error = %e,
+                        "merge credit dropped: unknown account"
+                    ),
+                }
+            }
+            self.persist_positions();
+            for closed in &outcome.closed {
+                self.on_position_closed(closed, now_ms);
+            }
+            tracing::info!(
+                condition = %outcome.condition_id,
+                pairs = %outcome.pairs_merged,
+                cash_usd = %outcome.cash_credited_usd,
+                unpaired = %outcome.unpaired_shares,
+                "merged complete pairs into collateral"
+            );
+        }
+
         // Always re-value open positions from the latest books so the dashboard's
         // unrealized PnL / HWM move even when automated exits are disabled.
         // Read the live books through a shared immutable borrow instead of
@@ -7129,6 +7231,7 @@ impl Core {
             })
         };
         self.positions.valuate(&book_fn, now_ms);
+        let intents = sell_intents;
 
         // A unit of closing work resolved against a concrete open position.
         #[derive(Clone)]
@@ -9029,6 +9132,11 @@ mod tests {
     #[test]
     fn forced_exit_closes_at_a_loss() {
         let mut c = dry_core(dec!(100));
+        // Pins the guillotine ON (mechanism test — the force-exit deadline
+        // closing at a loss); the calibrated default ships it OFF.
+        let mut pc = c.config.positions.clone();
+        pc.exit.force_exit_sec = 120;
+        c.positions.set_config(pc);
         // Buy at 0.40 (round_slot 1 → expires at the END of slot 1 = 1_800_000ms).
         // A FOK taker needs resting ask depth to fill.
         c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 0);
@@ -9059,9 +9167,13 @@ mod tests {
     #[test]
     fn entry_is_blocked_by_daily_loss_limit() {
         let mut c = dry_core(dec!(100));
-        // Shrink the daily loss cap so one losing trade trips it.
+        // Shrink the daily loss cap so one losing trade trips it. Pins the
+        // guillotine ON: this test needs the expiring position CLOSED at a loss
+        // to move `daily_pnl`, and the calibrated default ships the guillotine
+        // OFF (expiry belongs to settlement).
         let mut pc = c.config.positions.clone();
         pc.max_daily_loss_usd = dec!(1);
+        pc.exit.force_exit_sec = 120;
         pc.asset_cooldown_sec = 0;
         pc.loss_cooldown_sec = 0;
         pc.stop_loss_cooldown_sec = 0;
@@ -9103,6 +9215,10 @@ mod tests {
         let mut pc = c.config.positions.clone();
         pc.max_positions = 4;
         pc.max_daily_loss_usd = dec!(1_000); // isolate the consecutive-loss breaker
+        // Pins the guillotine ON: each leg's loss must CLOSE at expiry to feed
+        // the consecutive-loss breaker; the calibrated default ships it OFF
+        // (expiry belongs to settlement).
+        pc.exit.force_exit_sec = 120;
         pc.stop_loss_cooldown_sec = 0;
         pc.exit_cooldown_sec = 0;
         pc.asset_cooldown_sec = 0;
@@ -12904,6 +13020,228 @@ mod settlement_service_tests {
         c.tick(2_500).unwrap();
         assert_eq!(c.ledger().balance(), balance_before + dec!(5));
         assert_eq!(c.trade_summary()["totalTrades"], serde_json::json!(1));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reverse acceptance (calibration): a bid-less WINNER must settle at $1,
+    /// never at 0. The buy side being swept is not evidence the token lost —
+    /// at expiry nobody sells a sure dollar cheap, so the ask IS the verdict
+    /// when there is no bid. The pre-calibration `dry_resolution` read the
+    /// one-sided mid (zeroed by `from_levels`), fell through to a stale
+    /// valuation, found nothing above the coin-flip and booked 0 for everyone:
+    /// a real winner silently zeroed. This test is RED on that code.
+    #[test]
+    fn a_bidless_winner_settles_at_one_not_zero() {
+        let dir = scratch("bidless-winner");
+        let mut c = settling_core(&dir, dec!(10));
+        // Entry at 0.40 (taker: cost 2.00 + 0.036 fee) on the expiring market.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
+        let (_id, status) = c.place(entry_order(dec!(0.40), dec!(5)), 0, 1).unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+        // The buy side is swept before expiry: NO bid at all, only an ask at
+        // 0.97 — nobody offers a dollar, nobody bids for one either.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.97), dec!(100))], 1_998);
+
+        c.tick(2_001).unwrap();
+
+        assert!(
+            c.positions().open_positions().is_empty(),
+            "settled, not held: the ask is evidence enough"
+        );
+        let closed = &c.positions().closed_positions()[0];
+        assert_eq!(closed.exit_reason, ExitReason::Settlement);
+        assert_eq!(
+            closed.exit_price,
+            Decimal::ONE,
+            "the winner pays $1/share — the old code booked 0 here"
+        );
+        assert_eq!(
+            closed.net_pnl_usd,
+            dec!(2.964),
+            "payout 5 − cost 2 − entry fee 0.036"
+        );
+        // The simulated redemption confirmed: the payout is cash.
+        assert_eq!(c.ledger().balance(), dec!(10) - dec!(2.036) + dec!(5));
+        assert!(c.run_accounting_audit(2_002).ok);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reverse acceptance (calibration): with NO evidence above the coin-flip
+    /// the resolution is WITHHELD, not booked as a zero payout. A binary
+    /// market always has a winner on-chain; "our view is dark" must hold the
+    /// position open (loudly, via the blind alert) until evidence arrives —
+    /// and the query must re-arm so late evidence still settles it.
+    #[test]
+    fn a_dark_market_withholds_settlement_instead_of_zeroing() {
+        let dir = scratch("dark-withhold");
+        let mut c = settling_core(&dir, dec!(10));
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
+        let (_id, status) = c.place(entry_order(dec!(0.40), dec!(5)), 0, 1).unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+        // Sub-coin-flip evidence only: a lone 0.30 bid (or nothing) must not
+        // name a winner.
+        c.book_snapshot("tok", vec![(dec!(0.30), dec!(100))], vec![], 1_998);
+
+        c.tick(2_001).unwrap();
+
+        assert_eq!(
+            c.positions().open_positions().len(),
+            1,
+            "held open: booking 0 here zeroes a real winner"
+        );
+        let stats = settlement_json(&c);
+        assert_eq!(stats["settledPositions"], serde_json::json!(0));
+        assert_eq!(stats["receivableUsd"], serde_json::json!(0.0));
+
+        // Evidence arrives late (the re-armed query): the market settles.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.97), dec!(100))], 120_000);
+        c.tick(130_000).unwrap();
+        assert!(c.positions().open_positions().is_empty());
+        let closed = &c.positions().closed_positions()[0];
+        assert_eq!(closed.exit_reason, ExitReason::Settlement);
+        assert_eq!(closed.exit_price, Decimal::ONE);
+        assert!(c.run_accounting_audit(130_001).ok);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A two-legged BUY order on one condition (pair_discount_arb's shape).
+    fn pair_order(
+        token: &str,
+        direction: &str,
+        price: Decimal,
+        size: Decimal,
+        key: &str,
+    ) -> OrderRequest {
+        OrderRequest {
+            token_id: token.into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode: FillPolicy::Taker,
+            price,
+            size,
+            internal_key: key.into(),
+            strategy: "pair_discount_arb".into(),
+            asset: "BTC".into(),
+            direction: direction.into(),
+            round_slot: 1,
+            account_id: crate::model::default_account_id(),
+        }
+    }
+
+    /// Acceptance (task 2.2): a strategy close intent tagged "merge" collects
+    /// the pair's collateral — $1.00 per complete share-pair — through
+    /// `PositionManager::merge_condition` + `Ledger::credit_merge`, closes both
+    /// legs as `ExitReason::Merge` at $0.50/share, and the E17 accounting
+    /// identity survives: the trade records' exit notionals (2×$2.50) sum to
+    /// exactly the $5.00 the ledger credited. RED before the MERGE channel
+    /// existed: the intent was read as a SELL of one leg at the market price.
+    #[test]
+    fn a_merge_intent_collects_one_dollar_per_pair_and_the_audit_stays_true() {
+        let dir = scratch("merge-pair");
+        let mut c = settling_core(&dir, dec!(10));
+        c.book_snapshot("tok-up", vec![], vec![(dec!(0.48), dec!(100))], 1);
+        let (_id, status) = c
+            .place(
+                pair_order("tok-up", "up", dec!(0.48), dec!(5), "k-up"),
+                0,
+                1,
+            )
+            .unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+        // Second leg, same condition, opposite side. Entry gates would refuse
+        // it here ("Already in BTC") — this kernel has no engine to read a
+        // hold-to-settlement declaration from; production reaches this state
+        // through the pair-completion exemption, so the test opens it gate-free.
+        c.book_snapshot("tok-down", vec![], vec![(dec!(0.45), dec!(100))], 1);
+        let outcome = c
+            .place_inner(
+                pair_order("tok-down", "down", dec!(0.45), dec!(5), "k-down"),
+                0,
+                1,
+                false,
+            )
+            .unwrap();
+        assert_eq!(outcome.status, OrderStatus::Filled);
+        assert_eq!(c.positions().open_positions().len(), 2);
+        let after_entries = c.ledger().balance();
+        // Anchor BEFORE the collection, so the audit must explain the $5 move.
+        assert!(c.run_accounting_audit(2).ok);
+
+        c.strategy_exits
+            .push(crate::strategies::StrategyExitIntent {
+                token_id: "tok-up".into(),
+                reason: "merge".into(),
+            });
+        c.tick(3).unwrap();
+
+        assert!(
+            c.positions().open_positions().is_empty(),
+            "both legs consumed by the merge"
+        );
+        let closed = c.positions().closed_positions();
+        assert_eq!(closed.len(), 2);
+        assert!(closed.iter().all(|r| r.exit_reason == ExitReason::Merge));
+        assert!(
+            closed.iter().all(|r| r.exit_price == dec!(0.50)),
+            "each leg leaves at $0.50/share so the pair's notionals sum to $1"
+        );
+        // Gross per leg: 5 shares × $0.50 = $2.50 notional − basis (fees are
+        // zero on the merge itself).
+        let up = closed
+            .iter()
+            .find(|r| r.direction == SignalDirection::Up)
+            .unwrap();
+        let down = closed
+            .iter()
+            .find(|r| r.direction == SignalDirection::Down)
+            .unwrap();
+        assert_eq!(up.pnl_usd, dec!(2.5) - dec!(2.4));
+        assert_eq!(down.pnl_usd, dec!(2.5) - dec!(2.25));
+        // The collection: exactly $1 per share-pair, $5 total.
+        assert_eq!(c.ledger().balance(), after_entries + dec!(5));
+        // Trade records and cash agree — the identity survives the new channel.
+        let report = c.run_accounting_audit(4);
+        assert!(report.ok, "audit after merge: {}", report.summary());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reverse acceptance (task 2.2): a merge intent with NO complete pair
+    /// behind it collects nothing — one-sided inventory waits for settlement,
+    /// the ledger is untouched, no trade record appears.
+    #[test]
+    fn a_merge_intent_without_a_pair_collects_nothing() {
+        let dir = scratch("merge-one-sided");
+        let mut c = settling_core(&dir, dec!(10));
+        c.book_snapshot("tok-up", vec![], vec![(dec!(0.48), dec!(100))], 1);
+        let (_id, status) = c
+            .place(
+                pair_order("tok-up", "up", dec!(0.48), dec!(5), "k-up"),
+                0,
+                1,
+            )
+            .unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+        let after_entry = c.ledger().balance();
+
+        c.strategy_exits
+            .push(crate::strategies::StrategyExitIntent {
+                token_id: "tok-up".into(),
+                reason: "merge".into(),
+            });
+        c.tick(3).unwrap();
+
+        assert_eq!(
+            c.positions().open_positions().len(),
+            1,
+            "one-sided inventory waits for settlement"
+        );
+        assert!(c.positions().closed_positions().is_empty());
+        assert_eq!(c.ledger().balance(), after_entry, "no pair, no collateral");
+        assert!(c.run_accounting_audit(4).ok);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

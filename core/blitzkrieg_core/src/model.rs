@@ -273,6 +273,13 @@ pub enum ExitReason {
     /// (issue #175). The position did not exit — it reached the end of its
     /// market, and the winning shares are redeemed on-chain.
     Settlement,
+    /// A complete UP+DOWN share-pair on one condition was merged on-chain for
+    /// its collateral ($1 per share-pair). The collection channel of
+    /// pair-discount arbitrage (@almach: 12,570 merges, zero sells) — not a
+    /// market exit: each leg leaves at $0.50/share so the pair's exit notional
+    /// is exactly the $1.00 the ledger credits per pair. Unpaired remainders
+    /// stay open for settlement.
+    Merge,
 }
 
 /// A binary UP/DOWN market for one asset in the current round.

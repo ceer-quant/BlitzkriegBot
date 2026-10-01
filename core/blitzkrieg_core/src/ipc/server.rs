@@ -2551,7 +2551,8 @@ mod tests {
         }
         assert_eq!(r["exit"]["stopLossPct"].as_f64(), Some(12.0));
         assert_eq!(r["exit"]["takeProfitPct"].as_f64(), Some(100.0));
-        assert_eq!(r["exit"]["forceExitSec"].as_i64(), Some(120));
+        // Calibrated default: the guillotine ships OFF (`0` disables the rule).
+        assert_eq!(r["exit"]["forceExitSec"].as_i64(), Some(0));
     }
 
     /// A configured limit crosses the wire as a STRING with its provenance —

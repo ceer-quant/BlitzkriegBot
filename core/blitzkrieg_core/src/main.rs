@@ -199,6 +199,10 @@ struct Args {
     exit_stop_loss_pct: Decimal,
     exit_trailing_min_high_pct: Decimal,
     exit_min_trail_pct: Decimal,
+    /// The force-exit deadline in seconds-left. The compiled default is 0 = OFF
+    /// (calibration: the deadline amputated rounds that went on to pay); a
+    /// non-zero value re-arms it.
+    exit_force_sec: i64,
     feed_ws: bool,
     /// `--net-check`: probe the venue's network paths, print one JSON report and
     /// exit (0 all passed / 1 any failed). Answered before any service starts,
@@ -641,6 +645,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut exit_stop_loss_pct: Option<Decimal> = None;
     let mut exit_trailing_min_high_pct: Option<Decimal> = None;
     let mut exit_min_trail_pct: Option<Decimal> = None;
+    let mut exit_force_sec: Option<i64> = None;
     let mut allow_zero_strategies = false;
     let mut feed_ws = false;
     let mut net_check = false;
@@ -927,6 +932,18 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     Ok(v) => exit_min_trail_pct = Some(v),
                     Err(e) => {
                         eprintln!("blitzkrieg-core: --exit-min-trail-pct '{raw}': {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--exit-force-sec" => {
+                let raw = it.next().unwrap_or_default();
+                match raw.parse::<i64>() {
+                    Ok(v) => exit_force_sec = Some(v),
+                    Err(_) => {
+                        eprintln!(
+                            "blitzkrieg-core: --exit-force-sec '{raw}': expected an integer (seconds left; 0 = off)"
+                        );
                         std::process::exit(2);
                     }
                 }
@@ -1548,6 +1565,24 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         file.exit.min_trail_pct,
         exit_defaults.min_trail_pct,
     );
+    // force_exit_sec is an INT knob (seconds), so the Decimal-typed `exit_knob`
+    // closure above does not fit; the chain is the same CLI > TOML > default.
+    let exit_force_sec = {
+        let s = pick(
+            exit_force_sec,
+            None::<i64>,
+            file.exit.force_exit_sec,
+            exit_defaults.force_exit_sec,
+        );
+        if s.is_explicit() {
+            report.push(format!(
+                "exit.force_exit_sec={} ({})",
+                s.value,
+                s.source.as_str()
+            ));
+        }
+        s.value
+    };
 
     // ── #269: is the evolution engine running? ──────────────────────────────
     // The one shadow-evolution setting whose origin was never printed, and the
@@ -1621,6 +1656,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         exit_stop_loss_pct,
         exit_trailing_min_high_pct,
         exit_min_trail_pct,
+        exit_force_sec,
         feed_ws,
         net_check,
         replay,
@@ -2286,13 +2322,15 @@ async fn main() -> anyhow::Result<()> {
             daily_pnl_path: daily_pnl_path.clone(),
             exit: blitzkrieg_core::exit_policy::ExitConfig {
                 min_time_left_sec: args.min_time_left,
-                // E17/#264: the four resolved exit-ladder knobs. Their defaults
+                // E17/#264: the engine-level exit-ladder knobs. Their defaults
                 // are `ExitConfig::default()`'s own values, so a run that sets
-                // none of them is exactly the pre-flag kernel.
+                // none of them is exactly the pre-flag kernel — which since the
+                // @almach calibration means force_exit OFF (0), trailing OFF.
                 take_profit_pct: args.exit_take_profit_pct,
                 stop_loss_pct: args.exit_stop_loss_pct,
                 trailing_min_high_pct: args.exit_trailing_min_high_pct,
                 min_trail_pct: args.exit_min_trail_pct,
+                force_exit_sec: args.exit_force_sec,
                 ..Default::default()
             },
             ..Default::default()

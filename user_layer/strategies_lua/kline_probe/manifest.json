@@ -1,0 +1,9 @@
+{
+  "name": "kline_probe",
+  "version": "1.0.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "97aefbfa6c2bedd73396bc020677b0126cf2c087bdcbb63ec8cd7f2ce3b39474",
+  "tunables": {},
+  "modes": [{ "market_type": "prediction", "structure": "binary_outcome_wheel", "capabilities": ["websocket_feed", "level2_snapshot", "post_only"] }]
+}
