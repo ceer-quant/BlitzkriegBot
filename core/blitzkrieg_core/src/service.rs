@@ -2615,6 +2615,10 @@ impl Core {
             crate::engine::DataEvent::Book { .. } => self.stats.books += 1,
             crate::engine::DataEvent::TopOfBook { .. } => self.stats.tops += 1,
             crate::engine::DataEvent::Spot { .. } => self.stats.spots += 1,
+            // #352: observed on-chain prints / round boundaries are archived
+            // above but are not engine inputs — no counter, no strategy effect.
+            crate::engine::DataEvent::Trade { .. } => {}
+            crate::engine::DataEvent::RoundEnd { .. } => {}
             crate::engine::DataEvent::RoundMarkets { markets, .. } => {
                 self.stats.rounds += 1;
                 // A round rollover replaces the whole round (`engine.markets`

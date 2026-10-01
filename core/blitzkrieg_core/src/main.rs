@@ -365,6 +365,20 @@ struct Args {
     regime_volatile_mad_ticks: Decimal,
     /// Confirmation hysteresis before the machine switches state.
     regime_confirmations: u32,
+    /// #352: pull a wallet's on-chain fills and convert to the backtest JSONL
+    /// event stream (Polymarket Data/Gamma/CLOB APIs). The offline twin of a
+    /// live feed — the same `--backtest` consumes the output.
+    onchain_pull: Option<String>,
+    /// #352 pull window start (`YYYY-MM-DD` or epoch seconds, UTC).
+    onchain_start: Option<String>,
+    /// #352 pull window end (inclusive of fills up to this instant).
+    onchain_end: Option<String>,
+    /// #352 pull filter: one asset's updown rounds (`BTC`/`ETH`/`SOL`/`XRP`).
+    onchain_asset: Option<String>,
+    /// #352 pull filter: one round duration (`5m`/`15m`/`1h`/`4h`).
+    onchain_market: Option<String>,
+    /// #352 output root (default `data/onchain`).
+    onchain_out_dir: Option<String>,
     /// Fill model: taker slippage in ticks (0.01).
     slippage_ticks: u32,
     /// Fill model: maker latency (ms).
@@ -717,6 +731,13 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut regime_min_efficiency = Decimal::new(5, 1);
     let mut regime_volatile_mad_ticks = Decimal::new(15, 1);
     let mut regime_confirmations: u32 = 2;
+    // #352: on-chain pull knobs (offline subcommand, like --regime-eval).
+    let mut onchain_pull: Option<String> = None;
+    let mut onchain_start: Option<String> = None;
+    let mut onchain_end: Option<String> = None;
+    let mut onchain_asset: Option<String> = None;
+    let mut onchain_market: Option<String> = None;
+    let mut onchain_out_dir: Option<String> = None;
     let mut slippage_ticks: u32 = 0;
     let mut latency_ms: i64 = 0;
     let mut taker_latency_ms: i64 = 0;
@@ -972,6 +993,13 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--regime-eval" => regime_eval = it.next(),
             "--regime-report" => regime_report = it.next(),
             "--regime-token" => regime_token = it.next(),
+            // #352: the on-chain pull subcommand and its knobs.
+            "--onchain-pull" => onchain_pull = it.next(),
+            "--onchain-start" => onchain_start = it.next(),
+            "--onchain-end" => onchain_end = it.next(),
+            "--onchain-asset" => onchain_asset = it.next(),
+            "--onchain-market" => onchain_market = it.next(),
+            "--onchain-out-dir" => onchain_out_dir = it.next(),
             "--regime-max-tokens" => {
                 regime_max_tokens = it
                     .next()
@@ -1789,6 +1817,12 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         regime_min_efficiency,
         regime_volatile_mad_ticks,
         regime_confirmations,
+        onchain_pull,
+        onchain_start,
+        onchain_end,
+        onchain_asset,
+        onchain_market,
+        onchain_out_dir,
         slippage_ticks,
         latency_ms,
         taker_latency_ms,
@@ -2417,6 +2451,89 @@ async fn main() -> anyhow::Result<()> {
         run_replay_near_miss(std::path::Path::new(path));
         return Ok(());
     }
+    if let Some(wallet) = &args.onchain_pull {
+        // #352: the offline on-chain pull — Polymarket Data/Gamma/CLOB APIs →
+        // the backtest JSONL event stream under data/onchain. Like
+        // --regime-eval it needs no mode, no feeds and never trades; unlike
+        // it, the pull is async (page-sized progress on stderr, never a
+        // blocking loop without feedback).
+        let (Some(start), Some(end)) = (&args.onchain_start, &args.onchain_end) else {
+            eprintln!(
+                "blitzkrieg-core: --onchain-pull needs --onchain-start and --onchain-end \
+                 (YYYY-MM-DD or epoch seconds, UTC)"
+            );
+            std::process::exit(2);
+        };
+        let start_sec = match blitzkrieg_core::onchain::parse_time_arg(start) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("blitzkrieg-core: --onchain-start: {e}");
+                std::process::exit(2);
+            }
+        };
+        let end_sec = match blitzkrieg_core::onchain::parse_time_arg(end) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("blitzkrieg-core: --onchain-end: {e}");
+                std::process::exit(2);
+            }
+        };
+        // The end date is inclusive: a `--onchain-end 2026-10-01` covers the
+        // whole day, not the midnight instant. (An epoch arg is the instant
+        // itself — no day to expand.)
+        let end_is_date = end.trim().parse::<i64>().is_err();
+        let end_inclusive_sec = if end_is_date {
+            end_sec + 86_400 - 1
+        } else {
+            end_sec
+        };
+        let out_dir = args
+            .onchain_out_dir
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("data/onchain"));
+        let req = blitzkrieg_core::onchain::PullRequest {
+            wallet: wallet.clone(),
+            start_ms: start_sec * 1000,
+            end_ms: end_inclusive_sec * 1000,
+            asset: args.onchain_asset.clone(),
+            market: args.onchain_market.clone(),
+            out_dir,
+            page_limit: 500,
+        };
+        let fetch = blitzkrieg_core::onchain::HttpFetcher::new(150);
+        let outcome = blitzkrieg_core::onchain::pull_and_convert(
+            &fetch,
+            &req,
+            &|p: &blitzkrieg_core::onchain::PullProgress| {
+                eprintln!("onchain {}: {} — {}", p.phase, p.fetched, p.detail);
+            },
+        )
+        .await;
+        match outcome {
+            Ok(o) => {
+                println!(
+                    "onchain: {} trades → {} events\n  trades:  {}\n  events:  {}\n  manifest: {}{}",
+                    o.trades,
+                    o.events,
+                    o.trades_path.display(),
+                    o.events_path.display(),
+                    o.manifest_path.display(),
+                    if o.cache_hit {
+                        "\n  (cache hit, sha256 verified)"
+                    } else {
+                        ""
+                    },
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("blitzkrieg-core: onchain pull failed: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     if let Some(path) = &args.regime_eval {
         // Offline MarketRegime evaluation: independent of the engine — it
         // needs no mode, no feeds and never trades.

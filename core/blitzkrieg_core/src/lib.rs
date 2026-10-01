@@ -36,6 +36,9 @@ pub mod market;
 pub mod marketdata;
 pub mod model;
 pub mod ome;
+/// #352: on-chain data pull + conversion (Polymarket Data/Gamma/CLOB APIs →
+/// the backtest JSONL event stream, with resume + cache + SHA256 manifests).
+pub mod onchain;
 pub mod order;
 pub mod order_db;
 pub mod position;

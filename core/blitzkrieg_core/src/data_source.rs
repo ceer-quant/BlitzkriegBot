@@ -19,13 +19,21 @@
 //! {"at":1757851200150,"k":"top","t":"<token>","bb":"0.42","ba":"0.43"}
 //! {"at":1757851200200,"k":"spot","s":"BTC","p":"62850.12"}
 //! {"at":1757851200000,"k":"round","m":[{...CryptoMarket camelCase...}]}
+//! {"at":1757851200300,"k":"trade","t":"<token>","s":"BUY","p":"0.42","q":"100"}
+//! {"at":1757851500000,"k":"round_end"}
 //! ```
+//!
+//! `trade` / `round_end` (#352) are INFORMATION events: the onchain converter
+//! emits them so a replay carries the observed wallet prints and round
+//! boundaries. The engine does not trade on them; they exist so a replay is
+//! complete (no skipped lines) and a benchmark can read the wallet's fills.
 //!
 //! `at` is the event's own `now_ms` (venue time when available) — the same value
 //! the live core stamped the event with, so a replay reconstructs the identical
 //! decision clock.
 
 use crate::engine::DataEvent;
+use crate::model::Side;
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use std::fs::{File, OpenOptions};
@@ -77,7 +85,9 @@ pub fn event_at_ms(ev: &DataEvent) -> i64 {
         DataEvent::Book { now_ms, .. }
         | DataEvent::TopOfBook { now_ms, .. }
         | DataEvent::Spot { now_ms, .. }
-        | DataEvent::RoundMarkets { now_ms, .. } => *now_ms,
+        | DataEvent::RoundMarkets { now_ms, .. }
+        | DataEvent::Trade { now_ms, .. }
+        | DataEvent::RoundEnd { now_ms } => *now_ms,
     }
 }
 
@@ -125,6 +135,27 @@ pub fn event_to_json(ev: &DataEvent) -> Value {
             "k": "round",
             // CryptoMarket already has the camelCase serde form used on the wire.
             "m": serde_json::to_value(markets).unwrap_or(Value::Null),
+        }),
+        DataEvent::Trade {
+            token_id,
+            side,
+            price,
+            size,
+            now_ms,
+        } => json!({
+            "at": now_ms,
+            "k": "trade",
+            "t": token_id,
+            "s": match side {
+                Side::Buy => "BUY",
+                Side::Sell => "SELL",
+            },
+            "p": price.to_string(),
+            "q": size.to_string(),
+        }),
+        DataEvent::RoundEnd { now_ms } => json!({
+            "at": now_ms,
+            "k": "round_end",
         }),
     }
 }
@@ -177,6 +208,21 @@ pub fn event_from_json(v: &Value) -> Result<DataEvent, String> {
                 serde_json::from_value(m.clone()).map_err(|e| format!("bad round markets: {e}"))?;
             Ok(DataEvent::RoundMarkets { markets, now_ms })
         }
+        "trade" => {
+            let side = match str_field(v, "s")?.as_str() {
+                "BUY" => crate::model::Side::Buy,
+                "SELL" => crate::model::Side::Sell,
+                other => return Err(format!("bad trade side `{other}`")),
+            };
+            Ok(DataEvent::Trade {
+                token_id: str_field(v, "t")?,
+                side,
+                price: dec_field(v, "p")?,
+                size: dec_field(v, "q")?,
+                now_ms,
+            })
+        }
+        "round_end" => Ok(DataEvent::RoundEnd { now_ms }),
         other => Err(format!("unknown event kind `{other}`")),
     }
 }
@@ -480,9 +526,43 @@ fn stamped_event(at: i64, ev: &DataEvent) -> DataEvent {
         DataEvent::Book { now_ms, .. }
         | DataEvent::TopOfBook { now_ms, .. }
         | DataEvent::Spot { now_ms, .. }
-        | DataEvent::RoundMarkets { now_ms, .. } => *now_ms = at,
+        | DataEvent::RoundMarkets { now_ms, .. }
+        | DataEvent::Trade { now_ms, .. }
+        | DataEvent::RoundEnd { now_ms } => *now_ms = at,
     }
     out
+}
+
+/// Does `name` match the exact shape `next_segment_path` produces —
+/// `{stem}.{UTC-stamp|ms}[-NNNN].jsonl`? The old prefix-only rule
+/// (`{stem}.` + any tail) swallowed sibling datasets like
+/// `<stem>.trades.jsonl` (#352: the onchain raw-fills side file) as
+/// phantom replay segments, so every raw line was counted malformed.
+fn is_rotated_segment(stem: &str, name: &str) -> bool {
+    let Some(body) = name
+        .strip_prefix(&format!("{stem}."))
+        .and_then(|b| b.strip_suffix(".jsonl"))
+    else {
+        return false;
+    };
+    let body = match body.rsplit_once('-') {
+        // Trailing `-NNNN` is the rotate-clobber disambiguator.
+        Some((base, seq)) if !seq.is_empty() && seq.chars().all(|c| c.is_ascii_digit()) => base,
+        _ => body,
+    };
+    // The timestamp itself is a fixed-width UTC stamp (`YYYYMMDDTHHMMSSZ`:
+    // digits with one `T` at index 8 and a trailing `Z`) or the numeric
+    // fallback (venue ms). Anything else is a different dataset, not a
+    // segment of this one.
+    if !body.is_empty() && body.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    body.len() == 16
+        && body.as_bytes()[8] == b'T'
+        && body.ends_with('Z')
+        && body
+            .char_indices()
+            .all(|(i, c)| c.is_ascii_digit() || i == 8 || i == 15)
 }
 
 /// Sort key for an archive segment name: rotated segments first (in write order),
@@ -867,9 +947,10 @@ impl SegmentSource {
                 continue;
             }
             // Belongs to this archive when it is the archive itself, or a rotated
-            // sibling `stem.<stamp>.jsonl`.
-            let is_mine = Some(&name) == live.as_ref()
-                || (name.starts_with(&format!("{stem}.")) && name.len() > stem.len() + 6);
+            // sibling in the exact shape the writer produces (`stem.<stamp>[-N].jsonl`).
+            // A loose prefix rule would swallow sibling datasets like the #352
+            // onchain `<stem>.trades.jsonl` and count every raw line malformed.
+            let is_mine = Some(&name) == live.as_ref() || is_rotated_segment(&stem, &name);
             if is_mine {
                 names.push(name);
             }
@@ -1123,6 +1204,51 @@ mod tests {
         }
         assert_eq!(src.out_of_order_events(), 0);
         assert_eq!(src.skipped_lines(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_dir_does_not_swallow_sibling_datasets_as_segments() {
+        let dir = std::env::temp_dir().join(format!("bk-archive-sib-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        std::fs::write(
+            &path,
+            "{\"at\":10,\"k\":\"spot\",\"s\":\"BTC\",\"p\":\"1\"}\n",
+        )
+        .unwrap();
+        // The #352 onchain layout: a raw-fills side file sharing the stem. Its
+        // lines are venue JSON without an `at` — they must never be read as a
+        // replay segment (the old prefix rule counted every one malformed).
+        std::fs::write(
+            dir.join("events.trades.jsonl"),
+            "{\"transactionHash\":\"0x1\"}\n{\"transactionHash\":\"0x2\"}\n",
+        )
+        .unwrap();
+        // A genuine rotated sibling must still be picked up.
+        std::fs::write(
+            dir.join("events.20250914T120000Z.jsonl"),
+            "{\"at\":5,\"k\":\"spot\",\"s\":\"BTC\",\"p\":\"2\"}\n",
+        )
+        .unwrap();
+
+        let mut src = SegmentSource::open_dir(&path).unwrap();
+        assert_eq!(src.segments(), 2, "live + the real rotated segment only");
+        let mut n = 0;
+        let mut last = 0i64;
+        while let Some(te) = src.next_event() {
+            last = te.at_ms;
+            n += 1;
+        }
+        assert_eq!(n, 2, "every archive event, and nothing else");
+        let st = src.stats();
+        assert_eq!(
+            st.malformed_lines, 0,
+            "sibling dataset lines must not be read"
+        );
+        assert_eq!(st.out_of_order_events, 0);
+        assert_eq!(last, 10, "rotated segment first (older), live last");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

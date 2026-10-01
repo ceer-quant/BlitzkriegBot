@@ -21,7 +21,7 @@
 //! events and an injected clock, so it is unit-testable without network.
 
 use crate::marketdata::LocalBook;
-use crate::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
+use crate::model::{CryptoMarket, OrderbookSnapshot, Side, SignalDirection};
 use crate::scanner::{Scanner, ScannerConfig};
 use crate::signal::{PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig};
 use crate::strategies::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent};
@@ -242,6 +242,19 @@ pub enum DataEvent {
         markets: Vec<CryptoMarket>,
         now_ms: i64,
     },
+    /// #352: one on-chain print observed on a token — information only.
+    /// The engine does not trade on it; replay consumers (e.g. an @almach
+    /// benchmark) and the archive completeness counters do.
+    Trade {
+        token_id: String,
+        side: Side,
+        price: Decimal,
+        size: Decimal,
+        now_ms: i64,
+    },
+    /// #352: a round's markets resolved — the boundary event a replay uses to
+    /// close the book on that round. Information only.
+    RoundEnd { now_ms: i64 },
 }
 
 /// A strategy registered with the engine, plus its enablement and provenance.
@@ -518,6 +531,17 @@ impl Engine {
                         }
                     }
                 }
+            }
+            DataEvent::RoundEnd { now_ms: _ } => {
+                // #352: boundary marker only — the rollover that actually
+                // replaces the markets is `RoundMarkets`; a replay consumer
+                // uses RoundEnd to close the round's book. Nothing to trade on.
+                return Vec::new();
+            }
+            DataEvent::Trade { .. } => {
+                // #352: an on-chain print is information, not a book update —
+                // strategies decide on books and spot only.
+                return Vec::new();
             }
         }
         self.drain_breaks()

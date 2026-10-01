@@ -673,6 +673,39 @@ pub const FLAGS: &[FlagSpec] = &[
          (default 2).",
     ),
     flag(
+        "--onchain-pull",
+        "<wallet>",
+        "#352: pull a wallet's on-chain fills (Polymarket Data API) and convert \
+         them to the backtest JSONL event stream. Offline: no feed, no trading.",
+    ),
+    flag(
+        "--onchain-start",
+        "<date|epoch>",
+        "Pull window start (YYYY-MM-DD or epoch seconds, UTC; required with \
+         --onchain-pull).",
+    ),
+    flag(
+        "--onchain-end",
+        "<date|epoch>",
+        "Pull window end (a YYYY-MM-DD covers the whole day; required with \
+         --onchain-pull).",
+    ),
+    flag(
+        "--onchain-asset",
+        "<BTC|ETH|SOL|XRP>",
+        "Pull filter: only this asset's updown rounds (default: all).",
+    ),
+    flag(
+        "--onchain-market",
+        "<5m|15m|1h|4h>",
+        "Pull filter: only this round duration (default: all).",
+    ),
+    flag(
+        "--onchain-out-dir",
+        "<path>",
+        "Pull output root (default data/onchain; resumable + sha256 manifest).",
+    ),
+    flag(
         "--net-check",
         "",
         "Probe every network path this venue uses (resolver, TCP, TLS, one cheap \
