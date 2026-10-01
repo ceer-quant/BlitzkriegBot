@@ -1,16 +1,20 @@
 <script setup lang="ts">
 /**
- * 回放复盘（E8-c）— 载入 blitzkrieg-core `--backtest` 产出的报告 JSON，
- * 用 ECharts 呈现权益曲线、单笔盈亏分布与分策略归因，并列出风控告警/错误。
- * 报告持久化在 localStorage，刷新不丢；可随时替换或清除。
+ * 回测（issue 353）— 傻白甜全流程：拉数据 → 选数据集 → 跑回测 → 看结果，全在浏览器完成。
+ * 页面自身不碰本地文件系统：数据集列表 / 拉取 / 回测 / 导出全部经由网关代理的
+ * 内核 IPC（backtest.onchain.pull|list、backtest.run|status|result|export），
+ * 网关是纯代理、内核是唯一执行者。三张图：资金曲线 / 平仓原因分布 / 入场价格带分布。
+ * 报告持久化在 localStorage，刷新不丢；可导出 JSON 或清除。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import type { EChartsOption } from 'echarts'
-import { Upload, Trash2, FileJson, TrendingDown, TrendingUp, AlertTriangle, ShieldAlert, ShieldOff } from 'lucide-vue-next'
+import { Download, HardDriveDownload, Play, RefreshCw, Trash2 } from 'lucide-vue-next'
+import { api, ApiError } from '@/api/client'
+import type { BacktestDataset, BacktestJobStatusDoc, BacktestResultDoc } from '@/api/client'
 import { backtestLabel, loadBacktest, saveBacktest, clearBacktest } from '@/composables/backtestStore'
 import type { BacktestReport } from '@/backtest'
 import { useChart, areaFade, palette, tooltipStyle, axisX, axisY } from '@/lib/chart'
-import { num, money, signedMoney, pct, duration, dateTime } from '@/lib/format'
+import { num, money, signedMoney, pct, duration, dateTime, shortAddr } from '@/lib/format'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
@@ -18,15 +22,260 @@ import Button from '@/components/ui/button/Button.vue'
 import StatTile from '@/components/ui/stat/StatTile.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
-import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
+import Input from '@/components/ui/input/Input.vue'
+import SegmentedControl from '@/components/ui/segmented/SegmentedControl.vue'
 
-const fileEl = ref<HTMLInputElement | null>(null)
-const report = ref<BacktestReport | null>(null)
-const loadErr = ref<string | null>(null)
+// ── 通用 ────────────────────────────────────────────────────────────────────
 
-// ── derived series ──────────────────────────────────────────────────────────
-/** Cumulative net PnL over tradeLines (oldest → newest), with a 0 origin. */
+const err = ref<string | null>(null)
+function setErr(m: string | null): void {
+  err.value = m
+}
+function failMsg(e: unknown): string {
+  if (e instanceof ApiError) return e.message
+  return e instanceof Error ? e.message : String(e)
+}
+
+/** UTC 日历日（内核接受 `YYYY-MM-DD`，含尾日）。 */
+function isoDay(d: Date): string {
+  return d.toISOString().slice(0, 10)
+}
+
+// ── 第一步：数据集 ──────────────────────────────────────────────────────────
+
+const datasets = ref<BacktestDataset[]>([])
+const listErr = ref<string | null>(null)
+const selected = ref<string | null>(null) // eventsPath — 内核按数据集根校验
+const loadingList = ref(false)
+
+const selectedDataset = computed(() => datasets.value.find((d) => d.eventsPath === selected.value) ?? null)
+
+async function refreshDatasets(): Promise<void> {
+  loadingList.value = true
+  try {
+    const doc = await api.backtestOnchainList()
+    datasets.value = doc.datasets ?? []
+    listErr.value = doc.error ?? null
+    if (!selected.value) selected.value = datasets.value[0]?.eventsPath ?? null
+  } catch (e) {
+    listErr.value = failMsg(e)
+  } finally {
+    loadingList.value = false
+  }
+}
+
+// 拉取表单 — 预填默认值：最近 7 天（UTC）。
+const wallet = ref('')
+const start = ref(isoDay(new Date(Date.now() - 7 * 86400_000)))
+const end = ref(isoDay(new Date()))
+const assetsRaw = ref('')
+const pulling = ref(false)
+const pullDocs = ref<BacktestJobStatusDoc[]>([])
+const pullsSettled = ref(false) // 全部落定后只刷新一次列表
+
+const pullBusy = computed(() => pullDocs.value.some((d) => d.state === 'running'))
+
+async function startPull(): Promise<void> {
+  setErr(null)
+  const w = wallet.value.trim()
+  if (!(w.startsWith('0x') && w.length >= 4)) {
+    setErr('钱包地址要以 0x 开头（完整地址共 42 个字符）。')
+    return
+  }
+  if (!start.value || !end.value) {
+    setErr('请填起止日期。')
+    return
+  }
+  if (start.value > end.value) {
+    setErr('开始日期晚于结束日期 — 把两个日期换过来再试。')
+    return
+  }
+  const assets = assetsRaw.value.trim() ? assetsRaw.value.split(/[\s,，、]+/).filter(Boolean) : []
+  pulling.value = true
+  pullsSettled.value = false
+  try {
+    const { jobIds } = await api.backtestOnchainPull({ wallet: w, start: start.value, end: end.value, assets })
+    pullDocs.value = jobIds.map((jobId) => ({
+      jobId,
+      kind: 'pull',
+      state: 'running',
+      phase: 'queued',
+      detail: '已提交，等待内核受理…',
+      progress: 0,
+      startedAtMs: Date.now(),
+      finishedAtMs: null,
+      error: null,
+    }))
+    startPoll()
+  } catch (e) {
+    setErr(`拉取没发出去：${failMsg(e)}`)
+  } finally {
+    pulling.value = false
+  }
+}
+
+// ── 第二步：回测配置 ────────────────────────────────────────────────────────
+
+const modeSegments = [
+  { id: 'mine', label: '我的摩擦', badge: '默认' },
+  { id: 'verify', label: '验证延迟' },
+  { id: 'sweep', label: '延迟扫描' },
+]
+const MODE_HINTS: Record<string, string> = {
+  mine: '完全按你配置的滑点重放一遍 — 结果最接近「如果实盘」。',
+  verify: '在指定延迟（默认 286ms，香港 VPS 实测往返）下再跑一遍，看利润是否扛得住。',
+  sweep: '从 0ms 逐档加延迟跑出一张阶梯表 — 判断策略是延迟敏感还是稳。',
+}
+const mode = ref('mine')
+const modeHint = computed(() => MODE_HINTS[mode.value] ?? '')
+const slippageTicks = ref('1')
+const verifyLatencyMs = ref('286')
+const strategiesRaw = ref('')
+
+const btDoc = ref<BacktestJobStatusDoc | null>(null)
+const lastResult = ref<BacktestResultDoc | null>(null)
+const lastBtId = ref<string | null>(null)
+const canRun = computed(() => selected.value !== null && btDoc.value?.state !== 'running')
+
+async function runBacktest(): Promise<void> {
+  setErr(null)
+  const archive = selected.value
+  if (!archive) {
+    setErr('先在第一步选择一个数据集（或先拉一次数据）。')
+    return
+  }
+  const slip = Math.floor(Number(slippageTicks.value))
+  if (!Number.isFinite(slip) || slip < 1) {
+    setErr('滑点至少 1 tick — 0 滑点会把回测吹成神话，内核同样会拒绝。')
+    return
+  }
+  const verify = mode.value === 'verify' ? Math.floor(Number(verifyLatencyMs.value)) || 286 : undefined
+  const strategies = strategiesRaw.value.trim()
+    ? strategiesRaw.value.split(/[\s,，、]+/).filter(Boolean)
+    : undefined
+  try {
+    const { jobId } = await api.backtestRun({
+      archive,
+      mode: mode.value,
+      slippageTicks: slip,
+      verifyLatencyMs: verify,
+      strategies,
+    })
+    lastBtId.value = jobId
+    btDoc.value = {
+      jobId,
+      kind: 'backtest',
+      state: 'running',
+      phase: 'replay',
+      detail: '已提交，引擎正在虚拟时钟里重放数据集…',
+      progress: 0,
+      startedAtMs: Date.now(),
+      finishedAtMs: null,
+      error: null,
+    }
+    startPoll()
+  } catch (e) {
+    setErr(`回测没发出去：${failMsg(e)}`)
+  }
+}
+
+const MODE_NAMES: Record<string, string> = { mine: '我的摩擦', verify: '验证延迟', sweep: '延迟扫描' }
+function modeName(m: string): string {
+  return MODE_NAMES[m] ?? m
+}
+
+// ── 轮询：~1s 一次 backtest.status，直到任务落定 ────────────────────────────
+
+let timer: number | null = null
+function startPoll(): void {
+  if (timer === null) timer = window.setInterval(pollOnce, 1000)
+}
+function stopPoll(): void {
+  if (timer !== null) {
+    window.clearInterval(timer)
+    timer = null
+  }
+}
+onUnmounted(stopPoll)
+
+async function pollOnce(): Promise<void> {
+  for (const d of pullDocs.value) {
+    if (d.state !== 'running') continue
+    try {
+      Object.assign(d, await api.backtestStatus(d.jobId))
+    } catch {
+      /* 瞬时网络抖动 — 下一轮再试 */
+    }
+  }
+  if (pullDocs.value.length > 0 && !pullBusy.value && !pullsSettled.value) {
+    pullsSettled.value = true
+    await refreshDatasets()
+  }
+
+  const b = btDoc.value
+  if (b?.state === 'running') {
+    try {
+      const nd = await api.backtestStatus(b.jobId)
+      btDoc.value = nd
+      if (nd.state === 'done') await collectResult(nd.jobId)
+    } catch {
+      /* 继续轮询 */
+    }
+  }
+  if (!pullBusy.value && btDoc.value?.state !== 'running') stopPoll()
+}
+
+async function collectResult(id: string): Promise<void> {
+  try {
+    const res = await api.backtestResult(id)
+    lastResult.value = res
+    report.value = res.report
+    saveBacktest(res.report)
+  } catch (e) {
+    setErr(`结果取回失败：${failMsg(e)} — 任务已完成，稍后重试导出即可。`)
+  }
+}
+
+// ── 导出 / 清除 ─────────────────────────────────────────────────────────────
+
+const exporting = ref(false)
+async function exportReport(): Promise<void> {
+  if (!lastBtId.value) return
+  exporting.value = true
+  try {
+    const doc = await api.backtestExport(lastBtId.value)
+    const blob = new Blob([doc.content], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = doc.fileName
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    setErr(`导出失败：${failMsg(e)}`)
+  } finally {
+    exporting.value = false
+  }
+}
+
+function onClear(): void {
+  report.value = null
+  lastResult.value = null
+  clearBacktest()
+}
+
+// ── 报告（localStorage 恢复）与派生序列 ─────────────────────────────────────
+
+const report = ref<BacktestReport | null>(loadBacktest())
+
+/** 内核口径的已实现净盈亏（已扣手续费）— 决定曲线颜色。 */
+const netPnl = computed(() => Number(report.value?.trades?.netPnlUsd ?? 0))
+
+/** 超出 tradeLines 容量的笔数 — 曲线来自截断后的列表。 */
+const truncated = computed(() => Number(report.value?.tradeLinesTruncated ?? 0))
+
+/** 资金曲线：逐笔累计净盈亏，带 0 起点。 */
 const equity = computed<number[]>(() => {
   const r = report.value
   if (!r) return []
@@ -38,531 +287,395 @@ const equity = computed<number[]>(() => {
   }, [])]
 })
 
-/** Kernel-authoritative realized net PnL (fees already deducted). */
-const netPnl = computed(() => Number(report.value?.trades?.netPnlUsd ?? 0))
-const positive = computed(() => netPnl.value >= 0)
+interface DistRow {
+  label: string
+  count: number
+  avg: number
+}
 
-/** Trades past the `tradeLines` cap — the curve is plotted from a truncated list. */
-const truncated = computed(() => Number(report.value?.tradeLinesTruncated ?? 0))
-
-const perTrade = computed(() => (report.value?.tradeLines ?? []).map((t) => Number(t.netPnlUsd) || 0))
-
-const strategyAgg = computed(() => {
-  const r = report.value
-  if (!r) return []
-  return r.strategies
-    .map((s) => ({
-      name: s.name,
-      net: Number(s.netPnlUsd ?? 0),
-      fees: Number(s.feesUsd ?? 0),
-      closed: Number(s.closedTrades ?? 0),
-      wins: Number(s.wins ?? 0),
-      losses: Number(s.losses ?? 0),
-    }))
-    .sort((a, b) => b.net - a.net)
+/** 平仓原因分布：按 reason 聚合，桶色按该原因的平均盈亏符号。 */
+const reasonDist = computed<DistRow[]>(() => {
+  const m = new Map<string, { count: number; pnl: number }>()
+  for (const t of report.value?.tradeLines ?? []) {
+    const k = String(t.reason || '未注明')
+    const e = m.get(k) ?? { count: 0, pnl: 0 }
+    e.count += 1
+    e.pnl += Number(t.netPnlUsd) || 0
+    m.set(k, e)
+  }
+  return [...m.entries()]
+    .map(([label, v]) => ({ label, count: v.count, avg: v.count ? v.pnl / v.count : 0 }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10)
 })
 
-/** Gate rejections attributed per strategy (`blocked.byStrategy`). */
-const blockedRows = computed(() => {
-  const map = report.value?.blocked?.byStrategy ?? {}
-  return Object.entries(map)
-    .map(([name, v]) => ({
-      name,
-      momentum: Number(v?.momentum ?? 0),
-      timing: Number(v?.timing ?? 0),
-    }))
-    .filter((r) => r.momentum + r.timing > 0)
-    .sort((a, b) => b.momentum + b.timing - (a.momentum + a.timing))
+function fmtPrice(p: number): string {
+  return p.toFixed(p >= 1 ? 2 : p >= 0.01 ? 4 : 6)
+}
+
+/** 入场价格带分布：entryPrice 分 12 桶，桶色按该桶平均盈亏符号。 */
+const bandDist = computed<DistRow[]>(() => {
+  const lines = (report.value?.tradeLines ?? [])
+    .map((t) => ({ price: Number(t.entryPrice), pnl: Number(t.netPnlUsd) || 0 }))
+    .filter((t) => Number.isFinite(t.price) && t.price > 0)
+  if (lines.length === 0) return []
+  let lo = Infinity
+  let hi = -Infinity
+  for (const t of lines) {
+    if (t.price < lo) lo = t.price
+    if (t.price > hi) hi = t.price
+  }
+  const NB = 12
+  if (!(hi > lo)) {
+    return [{ label: fmtPrice(lo), count: lines.length, avg: lines.reduce((s, t) => s + t.pnl, 0) / lines.length }]
+  }
+  const w = (hi - lo) / NB
+  const buckets = Array.from({ length: NB }, () => ({ count: 0, pnl: 0 }))
+  for (const t of lines) {
+    let i = Math.floor((t.price - lo) / w)
+    if (i >= NB) i = NB - 1
+    if (i < 0) i = 0
+    buckets[i].count += 1
+    buckets[i].pnl += t.pnl
+  }
+  return buckets.map((b, i) => ({
+    label: fmtPrice(lo + w * (i + 0.5)),
+    count: b.count,
+    avg: b.count ? b.pnl / b.count : 0,
+  }))
 })
 
-const blockedTotal = computed(() => blockedRows.value.reduce((a, r) => a + r.momentum + r.timing, 0))
-const exemptions = computed(() => report.value?.blocked?.declaredExemptions ?? [])
+// ── 三张图（容器 v-show 常驻：ECharts 实例不能挂在被卸载的节点上）──────────
 
-const worstTrade = computed(() => {
-  const rows = report.value?.tradeLines ?? []
-  if (!rows.length) return null
-  return rows.reduce((w, t) => (Number(t.netPnlUsd) < Number(w.netPnlUsd) ? t : w))
-})
-const bestTrade = computed(() => {
-  const rows = report.value?.tradeLines ?? []
-  if (!rows.length) return null
-  return rows.reduce((b, t) => (Number(t.netPnlUsd) > Number(b.netPnlUsd) ? t : b))
-})
-
-/** Per-strategy rows sorted by trade count — the attribution table. */
-const strategyTable = computed(() => [...strategyAgg.value].sort((a, b) => b.closed - a.closed))
-
-// ── charts ──────────────────────────────────────────────────────────────────
 const eqEl = ref<HTMLDivElement | null>(null)
-const distEl = ref<HTMLDivElement | null>(null)
-const stratEl = ref<HTMLDivElement | null>(null)
+const reasonEl = ref<HTMLDivElement | null>(null)
+const bandEl = ref<HTMLDivElement | null>(null)
 
-const equityOption = computed<EChartsOption>(() => {
+function eqOption(): EChartsOption {
   const p = palette()
-  const pts = equity.value
-  const color = positive.value ? p.up : p.down
+  const c = netPnl.value >= 0 ? p.up : p.down
   return {
-    animationDuration: 560,
-    animationEasing: 'cubicOut',
-    grid: { left: 58, right: 14, top: 14, bottom: 26 },
-    tooltip: {
-      trigger: 'axis',
-      ...tooltipStyle(),
-      valueFormatter: (v) => signedMoney(Number(v)),
-    },
-    xAxis: { ...axisX(pts.map((_, i) => `#${i}`)), boundaryGap: false, axisLine: { show: false } },
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis', ...tooltipStyle(), valueFormatter: (v) => signedMoney(v) },
+    grid: { left: 8, right: 14, top: 18, bottom: 6, containLabel: true },
+    xAxis: { ...axisX(equity.value.map((_, i) => String(i))), boundaryGap: false },
     yAxis: axisY(),
     series: [{
       type: 'line',
-      data: pts,
+      data: equity.value,
+      smooth: true,
       showSymbol: false,
-      smooth: 0.35,
-      lineStyle: { width: 2.2, color, shadowColor: color, shadowBlur: 12, shadowOffsetY: 3 },
-      areaStyle: areaFade(color, positive.value ? '4d' : '40'),
-      markLine: pts.length > 1
-        ? {
-            silent: true,
-            symbol: 'none',
-            label: { show: false },
-            lineStyle: { color: p.axis, type: 'dashed', width: 1 },
-            data: [{ yAxis: 0 }],
-          }
-        : undefined,
+      lineStyle: { color: c, width: 2 },
+      itemStyle: { color: c },
+      areaStyle: areaFade(c, '40'),
     }],
   }
-})
+}
 
-const distOption = computed<EChartsOption>(() => {
+function distOption(rows: DistRow[]): EChartsOption {
   const p = palette()
-  const vals = perTrade.value
-  const bins = 21
-  let min = 0
-  let max = 0
-  if (vals.length) {
-    min = Math.min(...vals)
-    max = Math.max(...vals)
-  }
-  const span = max - min || 1
-  const w = span / bins
-  const counts = new Array(bins).fill(0)
-  for (const v of vals) {
-    const i = Math.min(bins - 1, Math.max(0, Math.floor((v - min) / w)))
-    counts[i]++
-  }
   return {
-    animationDuration: 520,
-    grid: { left: 44, right: 14, top: 14, bottom: 40 },
-    tooltip: {
-      trigger: 'axis',
-      ...tooltipStyle(),
-      formatter: (params: unknown) => {
-        const arr = params as { dataIndex: number; value: number }[]
-        const i = arr?.[0]?.dataIndex ?? 0
-        const lo = min + i * w
-        return `${signedMoney(lo)} ~ ${signedMoney(lo + w)}<br/><b>${arr?.[0]?.value ?? 0}</b> 笔`
-      },
-    },
-    xAxis: {
-      type: 'category',
-      data: counts.map((_, i) => signedMoney(min + i * w, 2)),
-      axisLine: { lineStyle: { color: p.axis } },
-      axisTick: { show: false },
-      axisLabel: { color: p.textDim, fontSize: 9.5, rotate: 50, interval: 2 },
-    },
-    yAxis: { ...axisY(), minInterval: 1 },
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis', ...tooltipStyle() },
+    grid: { left: 8, right: 14, top: 22, bottom: 6, containLabel: true },
+    xAxis: axisX(rows.map((r) => r.label)),
+    yAxis: axisY(),
     series: [{
       type: 'bar',
-      data: counts.map((v, i) => ({
-        value: v,
-        itemStyle: {
-          color: min + (i + 0.5) * w >= 0 ? p.up : p.down,
-          borderRadius: [3, 3, 0, 0],
-        },
-      })),
-      barCategoryGap: '18%',
-    }],
-  }
-})
-
-const stratOption = computed<EChartsOption>(() => {
-  const p = palette()
-  const rows = strategyAgg.value
-  const vals = rows.map((r) => r.net)
-  const hi = Math.max(0, ...vals)
-  const lo = Math.min(0, ...vals)
-  return {
-    animationDuration: 520,
-    grid: { left: 128, right: 64, top: 8, bottom: 8 },
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, ...tooltipStyle() },
-    xAxis: {
-      type: 'value',
-      show: false,
-      // Pad both directions so a bar tip never reaches the edge and its label
-      // always has room (an all-negative set otherwise pins the tip to the axis max).
-      min: lo < 0 ? lo * 1.35 : undefined,
-      max: hi > 0 ? hi * 1.35 : undefined,
-    },
-    yAxis: {
-      type: 'category',
-      inverse: true,
-      data: rows.map((r) => r.name),
-      axisLine: { show: false },
-      axisTick: { show: false },
-      axisLabel: { color: p.textDim, fontSize: 11 },
-    },
-    series: [{
-      type: 'bar',
+      barMaxWidth: 26,
       data: rows.map((r) => ({
-        value: r.net,
-        itemStyle: { borderRadius: r.net >= 0 ? [0, 5, 5, 0] : [5, 0, 0, 5], color: r.net >= 0 ? p.up : p.down },
-        label: {
-          show: true,
-          position: r.net >= 0 ? 'right' : 'left',
-          color: p.textDim,
-          fontSize: 10.5,
-          formatter: () => signedMoney(r.net),
-        },
+        value: r.count,
+        itemStyle: { color: r.avg >= 0 ? p.up : p.down, borderRadius: [3, 3, 0, 0] },
       })),
-      barMaxWidth: 16,
+      label: { show: true, position: 'top', color: p.textDim, fontSize: 10 },
     }],
   }
-})
-
-useChart(eqEl, () => equityOption.value)
-useChart(distEl, () => distOption.value)
-useChart(stratEl, () => stratOption.value)
-
-// ── file IO ─────────────────────────────────────────────────────────────────
-function pickFile(): void {
-  fileEl.value?.click()
 }
+const reasonOption = () => distOption(reasonDist.value)
+const bandOption = () => distOption(bandDist.value)
 
-async function onFile(e: Event): Promise<void> {
-  loadErr.value = null
-  const inp = e.target as HTMLInputElement
-  const f = inp.files?.[0]
-  if (!f) return
-  try {
-    const parsed = JSON.parse(await f.text()) as BacktestReport
-    if (!parsed || typeof parsed.source !== 'string' || !parsed.trades) {
-      loadErr.value = '不是有效的回测报告（缺少 source / trades 字段）'
-      return
-    }
-    if (parsed.tradeLines && !Array.isArray(parsed.tradeLines)) parsed.tradeLines = []
-    if (!Array.isArray(parsed.tradeLines)) parsed.tradeLines = []
-    if (!Array.isArray(parsed.strategies)) parsed.strategies = []
-    if (!Array.isArray(parsed.riskAlerts)) parsed.riskAlerts = []
-    if (!Array.isArray(parsed.errors)) parsed.errors = []
-    if (!parsed.blocked || typeof parsed.blocked !== 'object') parsed.blocked = {}
-    if (!parsed.feed || typeof parsed.feed !== 'object') parsed.feed = {}
-    if (!parsed.sourceStats || typeof parsed.sourceStats !== 'object') {
-      parsed.sourceStats = { events: 0, malformedLines: 0, outOfOrderEvents: 0 }
-    }
-    report.value = parsed
-    saveBacktest(parsed)
-  } catch (err) {
-    loadErr.value = `解析失败：${err instanceof Error ? err.message : String(err)}`
-  } finally {
-    inp.value = ''
-  }
-}
-
-function onClear(): void {
-  clearBacktest()
-  report.value = null
-}
+useChart(eqEl, eqOption)
+useChart(reasonEl, reasonOption)
+useChart(bandEl, bandOption)
 
 onMounted(() => {
-  const saved = loadBacktest()
-  if (saved) report.value = saved
+  void refreshDatasets()
 })
-
-const windowSec = computed(() => Math.round((report.value?.virtualMs ?? 0) / 1000))
 </script>
 
 <template>
-  <div v-if="report" class="rise-in">
-    <!-- headline -->
+  <div class="rise-in space-y-4">
+    <AlertBanner
+      v-if="err"
+      tone="error"
+      title="操作没成功"
+      :hint="err"
+      dismissible
+      @dismiss="setErr(null)"
+    />
+
+    <!-- 第一步 · 数据源 -->
     <Card>
-      <div class="flex flex-wrap items-center gap-x-6 gap-y-4">
+      <CardHeader label="第一步 · 拉数据">
+        <template #action>
+          <Button variant="ghost" size="sm" :disabled="loadingList" @click="refreshDatasets">
+            <RefreshCw class="size-3.5" />刷新
+          </Button>
+        </template>
+      </CardHeader>
+
+      <div class="space-y-3">
+        <AlertBanner
+          v-if="listErr"
+          tone="warn"
+          title="数据集列表读不到"
+          :hint="`${listErr} — 确认内核在跑，然后点右上角「刷新」。`"
+        />
+        <EmptyState
+          v-else-if="datasets.length === 0"
+          text="还没有链上数据集"
+          hint="填下面的钱包和时间范围，点「拉取数据」— 拉完它会自动出现在这里。"
+          :loading="loadingList"
+        />
+        <div v-else class="grid gap-2 md:grid-cols-2">
+          <button
+            v-for="d in datasets"
+            :key="d.dataset"
+            type="button"
+            class="rounded-md border px-3 py-2 text-left transition-colors"
+            :class="selected === d.eventsPath
+              ? 'border-primary/55 bg-primary/8'
+              : 'border-line bg-panel-2 hover:border-line-strong'"
+            @click="selected = d.eventsPath"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <span class="truncate text-[13px] font-medium text-fg">{{ d.dataset }}</span>
+              <Badge variant="default">{{ num(d.manifest?.counts?.events) }} 事件</Badge>
+            </div>
+            <div class="mt-0.5 text-[11.5px] text-faint-fg">
+              {{ shortAddr(d.manifest?.wallet) }} · {{ num(d.manifest?.counts?.trades) }} 笔成交 · {{ dateTime(d.manifest?.generatedAtMs) }}
+            </div>
+          </button>
+        </div>
+
+        <!-- 拉取任务进度 -->
+        <div v-if="pullDocs.length" class="space-y-1.5 rounded-md border border-line bg-panel-2 p-2.5">
+          <div v-for="d in pullDocs" :key="d.jobId" class="flex items-center gap-2 text-[12px]">
+            <span
+              v-if="d.state === 'running'"
+              class="size-3 shrink-0 animate-spin rounded-full border-2 border-line-strong border-t-primary"
+            />
+            <span v-else-if="d.state === 'done'" class="shrink-0 text-up">✓</span>
+            <span v-else class="shrink-0 text-down">✕</span>
+            <span class="min-w-0 truncate text-fg">{{ d.detail || d.phase }}</span>
+            <span v-if="d.state === 'running'" class="shrink-0 text-faint-fg">{{ num(d.progress) }} 笔</span>
+            <span v-if="d.error" class="min-w-0 truncate text-down">{{ d.error }}</span>
+          </div>
+        </div>
+
+        <div class="grid gap-2 md:grid-cols-4">
+          <label class="md:col-span-2">
+            <span class="label-micro">钱包地址</span>
+            <Input v-model="wallet" placeholder="0x…（要回测的钱包）" size="sm" />
+          </label>
+          <label>
+            <span class="label-micro">开始日期 (UTC)</span>
+            <Input v-model="start" type="date" size="sm" />
+          </label>
+          <label>
+            <span class="label-micro">结束日期 (UTC)</span>
+            <Input v-model="end" type="date" size="sm" />
+          </label>
+        </div>
+        <div class="flex items-end gap-2">
+          <label class="flex-1">
+            <span class="label-micro">只拉这些资产（可选，逗号分隔，留空 = 全部）</span>
+            <Input v-model="assetsRaw" placeholder="例如 BTC, ETH" size="sm" />
+          </label>
+          <Button :disabled="pulling || pullBusy" @click="startPull">
+            <HardDriveDownload class="size-4" />
+            {{ pullBusy ? '拉取中…' : '拉取数据' }}
+          </Button>
+        </div>
+      </div>
+    </Card>
+
+    <!-- 第二步 · 跑回测 -->
+    <Card>
+      <CardHeader label="第二步 · 跑回测" />
+      <div class="space-y-3">
+        <div>
+          <span class="label-micro">回测模式</span>
+          <SegmentedControl v-model="mode" :segments="modeSegments" />
+          <p class="mt-1.5 text-[12px] text-faint-fg">{{ modeHint }}</p>
+        </div>
+        <div class="grid gap-2 md:grid-cols-3">
+          <label>
+            <span class="label-micro">滑点 (tick)</span>
+            <Input v-model="slippageTicks" type="number" size="sm" />
+          </label>
+          <label v-if="mode === 'verify'">
+            <span class="label-micro">延迟 (ms)</span>
+            <Input v-model="verifyLatencyMs" type="number" size="sm" />
+          </label>
+          <label :class="mode === 'verify' ? '' : 'md:col-span-2'">
+            <span class="label-micro">只跑这些策略（可选，留空 = 当前启用的）</span>
+            <Input v-model="strategiesRaw" placeholder="策略名，逗号分隔" size="sm" />
+          </label>
+        </div>
+        <p class="text-[12px] text-faint-fg">
+          滑点是诚实摩擦的下限（至少 1 tick）— 策略栏只收名字，任何代码都会被内核拒绝。
+        </p>
+        <div class="flex items-center gap-2">
+          <Button :disabled="!canRun" @click="runBacktest">
+            <Play class="size-4" />开始回测
+          </Button>
+          <span v-if="!selectedDataset" class="text-[12px] text-faint-fg">先在第一步选择一个数据集</span>
+          <span v-else class="min-w-0 truncate text-[12px] text-faint-fg">数据集：{{ selectedDataset.dataset }}</span>
+        </div>
+      </div>
+    </Card>
+
+    <!-- 回测进行中 -->
+    <Card v-if="btDoc && btDoc.state === 'running'">
+      <div class="flex items-center gap-3">
+        <span class="size-4 shrink-0 animate-spin rounded-full border-2 border-line-strong border-t-primary" />
         <div class="min-w-0">
-          <div class="flex items-center gap-2">
-            <Badge variant="gold" dot>{{ backtestLabel }}</Badge>
-            <Badge :variant="report.forcedDry ? 'info' : 'up'">
-              {{ report.forcedDry ? '强制 dry' : 'dry' }}
-            </Badge>
+          <div class="text-[13px] text-fg">
+            回测进行中 — 已处理 <RollingNumber :value="btDoc.progress" /> 个事件
           </div>
-          <p class="mt-2 truncate text-[13px] font-semibold">{{ report.source }}</p>
-          <p class="mt-1 text-[11.5px] text-faint-fg num">
-            {{ dateTime(report.startAtMs) }} → {{ dateTime(report.endAtMs) }}
-            · 窗口 <RollingNumber :value="duration(windowSec)" /> · tick <RollingNumber :value="report.tickMs" />ms
-            <template v-if="report.tailMs"> · tail <RollingNumber :value="report.tailMs" />ms</template>
-          </p>
-          <p class="mt-1 text-[11px] text-faint-fg num">
-            事件 <RollingNumber :value="num(report.sourceStats?.events)" />
-            · 坏行 <span :class="report.sourceStats?.malformedLines ? 'text-down' : ''"><RollingNumber :value="num(report.sourceStats?.malformedLines)" /></span>
-            · 乱序 <RollingNumber :value="num(report.sourceStats?.outOfOrderEvents)" />
-            · 匹配盘口 <RollingNumber :value="num(report.feed?.books)" /> / 轮次 <RollingNumber :value="num(report.feed?.rounds)" />
-          </p>
-        </div>
-
-        <div class="text-center">
-          <div class="stat-num text-[34px] leading-none" :class="positive ? 'text-up' : 'text-down'">
-            <RollingNumber :value="signedMoney(netPnl)" />
-          </div>
-          <div class="label-micro mt-1.5">回放净 PnL（扣费）</div>
-        </div>
-
-        <div class="ml-auto flex items-center gap-2">
-          <Button variant="default" @click="pickFile"><Upload class="size-3.5" />替换报告</Button>
-          <Button variant="ghost" @click="onClear"><Trash2 class="size-3.5" />清除</Button>
+          <div class="truncate text-[12px] text-faint-fg">{{ btDoc.detail || btDoc.phase }}</div>
         </div>
       </div>
     </Card>
+    <AlertBanner
+      v-else-if="btDoc && btDoc.state === 'failed'"
+      tone="error"
+      title="回测失败了"
+      :hint="btDoc.error ?? '未知原因 — 修正参数后重试。'"
+    />
 
-    <!-- KPIs -->
-    <div class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
-      <StatTile
-        label="胜 / 负 / 平"
-        :value="String(report.trades.wins)"
-        tone="up"
-      >
-        <template #sub>
-          <span class="text-down font-semibold"><RollingNumber :value="report.trades.losses" /></span> 亏 ·
-          <RollingNumber :value="report.trades.flat" /> 平 · 共 <RollingNumber :value="report.trades.closed" /> 笔平仓
-        </template>
-      </StatTile>
-      <StatTile
-        label="胜率"
-        :value="pct(report.trades.winRatePct)"
-        :tone="report.trades.winRatePct >= 50 ? 'up' : 'down'"
-      >
-        <template #sub>
-          盈亏比 <RollingNumber :value="report.trades.profitFactor != null ? num(report.trades.profitFactor) : '—'" /> ·
-          均笔 <RollingNumber :value="signedMoney(report.trades.avgPnlUsd)" />
-        </template>
-      </StatTile>
-      <StatTile label="手续费" :value="money(report.trades.feesUsd)">
-        <template #sub>
-          毛利 +<RollingNumber :value="money(report.trades.grossProfitUsd)" /> ·
-          毛亏 <RollingNumber :value="money(report.trades.grossLossUsd)" />
-        </template>
-      </StatTile>
-      <StatTile
-        label="最大回撤"
-        :value="money(report.trades.maxDrawdownUsd)"
-        :tone="report.trades.maxDrawdownUsd ? 'down' : 'default'"
-      >
-        <template #sub>
-          <Tooltip content="回撤金额 ÷ 回撤前的权益峰值。净值基数很小时百分比会被放大，属正常现象。">
-            <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-              占权益峰 <RollingNumber :value="pct(report.trades.maxDrawdownPct)" />
-            </span>
-          </Tooltip>
-        </template>
-      </StatTile>
-    </div>
-
-    <div class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
-      <StatTile label="订单流水" :value="num(report.orders.orders)">
-        <template #sub>
-          成交 <RollingNumber :value="report.fills" /> · 撤 <RollingNumber :value="report.orders.cancelled" /> ·
-          拒 <RollingNumber :value="report.orders.rejected" /> · 失败 <RollingNumber :value="report.orders.failed" />
-        </template>
-      </StatTile>
-      <StatTile
-        label="收盘未完成单"
-        :value="num(report.orders.liveAtEnd)"
-        :tone="report.orders.liveAtEnd ? 'gold' : 'default'"
-      >
-        <template #sub>回放结束时仍未终态的订单（挂单/部分成交）</template>
-      </StatTile>
-      <StatTile
-        label="未平仓"
-        :value="num(report.openPositions)"
-        :tone="report.openPositions ? 'gold' : 'default'"
-      >
-        <template #sub>占用名义 <RollingNumber :value="money(report.openNotionalUsd)" /></template>
-      </StatTile>
-      <StatTile
-        label="门禁拦截"
-        :value="num(blockedTotal)"
-        :tone="blockedTotal ? 'gold' : 'default'"
-      >
-        <template #sub>
-          动量 <RollingNumber :value="num(report.blocked?.momentum)" /> · 时点 <RollingNumber :value="num(report.blocked?.timing)" />
-        </template>
-      </StatTile>
-    </div>
-
-    <!-- equity -->
-    <Card class="mt-3.5">
-      <CardHeader label="权益曲线">
-        <template #action>
-          <Tooltip v-if="truncated" :content="`报告只保留前 ${report.tradeLines.length} 笔明细，另有 ${truncated} 笔未列出；曲线按已列出的明细绘制。`">
-            <Badge variant="gold">{{ report.tradeLines.length }} / {{ report.tradeLines.length + truncated }} 笔</Badge>
-          </Tooltip>
-          <Badge v-else variant="default">{{ report.tradeLines.length }} 笔</Badge>
-        </template>
-      </CardHeader>
-      <div ref="eqEl" class="h-[240px] w-full" />
-    </Card>
-
-    <div class="mt-3.5 grid gap-3.5 xl:grid-cols-2">
+    <!-- 结果总览 -->
+    <template v-if="report">
       <Card>
-        <CardHeader label="单笔盈亏分布" />
-        <div ref="distEl" class="h-[220px] w-full" />
-      </Card>
-      <Card>
-        <CardHeader label="分策略归因" />
-        <div v-if="strategyAgg.length" ref="stratEl" class="h-[220px] w-full" />
-        <EmptyState v-else text="报告未携带分策略数据" hint="用 --engine 重跑回放并挂载策略，即可看到分策略表现。" compact />
-      </Card>
-    </div>
-
-    <!-- strategy table -->
-    <Card v-if="strategyTable.length" class="mt-3.5" dense>
-      <CardHeader label="策略明细" />
-      <div class="-mx-2 overflow-x-auto">
-        <table class="w-full min-w-[680px] text-[13px]">
-          <thead>
-            <tr class="text-left">
-              <th class="label-micro px-2 pb-2.5">策略</th>
-              <th class="label-micro px-2 pb-2.5 text-right">平仓</th>
-              <th class="label-micro px-2 pb-2.5 text-right">胜 / 负</th>
-              <th class="label-micro px-2 pb-2.5 text-right">胜率</th>
-              <th class="label-micro px-2 pb-2.5 text-right">手续费</th>
-              <th class="label-micro px-2 pb-2.5 text-right">净 PnL</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="s in strategyTable" :key="s.name" class="border-t border-line">
-              <td class="px-2 py-2.5 font-semibold">{{ s.name }}</td>
-              <td class="px-2 py-2.5 text-right num"><RollingNumber :value="num(s.closed)" /></td>
-              <td class="px-2 py-2.5 text-right num">
-                <span class="text-up"><RollingNumber :value="num(s.wins)" /></span>
-                <span class="text-faint-fg"> / </span>
-                <span class="text-down"><RollingNumber :value="num(s.losses)" /></span>
-              </td>
-              <td class="px-2 py-2.5 text-right num text-muted-fg">
-                <RollingNumber :value="s.wins + s.losses ? pct((s.wins / (s.wins + s.losses)) * 100) : '—'" />
-              </td>
-              <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="money(s.fees)" /></td>
-              <td class="px-2 py-2.5 text-right num font-semibold" :class="s.net >= 0 ? 'text-up' : 'text-down'">
-                <RollingNumber :value="signedMoney(s.net)" />
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </Card>
-
-    <!-- gate rejections (blocked.byStrategy) -->
-    <Card v-if="blockedRows.length || exemptions.length" class="mt-3.5" dense>
-      <CardHeader label="门禁拦截归因">
-        <template #action>
-          <Badge :variant="blockedTotal ? 'gold' : 'default'"><RollingNumber :value="blockedTotal" /> 次</Badge>
-        </template>
-      </CardHeader>
-      <div v-if="blockedRows.length" class="-mx-2 overflow-x-auto">
-        <table class="w-full min-w-[480px] text-[13px]">
-          <thead>
-            <tr class="text-left">
-              <th class="label-micro px-2 pb-2.5">策略</th>
-              <th class="label-micro px-2 pb-2.5 text-right">动量门禁</th>
-              <th class="label-micro px-2 pb-2.5 text-right">时点门禁</th>
-              <th class="label-micro px-2 pb-2.5 text-right">合计</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="b in blockedRows" :key="b.name" class="border-t border-line">
-              <td class="px-2 py-2.5 font-semibold">{{ b.name }}</td>
-              <td class="px-2 py-2.5 text-right num" :class="b.momentum ? 'text-primary' : 'text-faint-fg'"><RollingNumber :value="num(b.momentum)" /></td>
-              <td class="px-2 py-2.5 text-right num" :class="b.timing ? 'text-primary' : 'text-faint-fg'"><RollingNumber :value="num(b.timing)" /></td>
-              <td class="px-2 py-2.5 text-right num font-semibold"><RollingNumber :value="num(b.momentum + b.timing)" /></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div v-if="exemptions.length" class="mt-3 flex flex-wrap gap-2">
-        <Tooltip v-for="e in exemptions" :key="e.strategy" :content="`${e.strategy} 声明豁免：${(e.gates ?? []).join(' / ')}`">
-          <span class="inline-flex items-center gap-1.5 rounded-full border border-line bg-panel-2 px-2.5 py-1 text-[11.5px] text-info">
-            <ShieldOff class="size-3" />{{ e.strategy }}
-          </span>
-        </Tooltip>
-      </div>
-    </Card>
-
-    <!-- extremes + risk -->
-    <div class="mt-3.5 grid gap-3.5 xl:grid-cols-2">
-      <Card>
-        <CardHeader label="最佳 / 最差单笔" />
-        <div v-if="bestTrade && worstTrade" class="space-y-2.5">
-          <div class="flex items-center justify-between rounded-md border border-up/25 bg-up/8 px-3 py-2">
-            <span class="inline-flex items-center gap-2 text-[12.5px] text-up">
-              <TrendingUp class="size-3.5" />{{ bestTrade.asset }} {{ bestTrade.direction.toUpperCase() }}
-            </span>
-            <span class="stat-num text-[15px] text-up"><RollingNumber :value="signedMoney(bestTrade.netPnlUsd)" /></span>
-          </div>
-          <div class="flex items-center justify-between rounded-md border border-down/25 bg-down/8 px-3 py-2">
-            <span class="inline-flex items-center gap-2 text-[12.5px] text-down">
-              <TrendingDown class="size-3.5" />{{ worstTrade.asset }} {{ worstTrade.direction.toUpperCase() }}
-            </span>
-            <span class="stat-num text-[15px] text-down"><RollingNumber :value="signedMoney(worstTrade.netPnlUsd)" /></span>
-          </div>
-        </div>
-        <EmptyState v-else text="本次回放没有平仓交易" hint="换更活跃的语料或放宽入场阈值后重跑。" compact />
-      </Card>
-
-      <Card>
-        <CardHeader label="风控告警 / 错误">
+        <CardHeader label="回测结果">
           <template #action>
-            <Badge :variant="report.riskAlerts.length ? 'gold' : 'default'"><RollingNumber :value="report.riskAlerts.length" /></Badge>
-            <Badge :variant="report.errors.length ? 'down' : 'default'"><RollingNumber :value="report.errors.length" /></Badge>
+            <Button variant="ghost" size="sm" :disabled="exporting || lastBtId === null" @click="exportReport">
+              <Download class="size-3.5" />导出 JSON
+            </Button>
+            <Button variant="ghost" size="sm" @click="onClear">
+              <Trash2 class="size-3.5" />清除
+            </Button>
           </template>
         </CardHeader>
-        <div v-if="report.riskAlerts.length || report.errors.length" class="space-y-2">
-          <AlertBanner v-for="(a, i) in report.riskAlerts" :key="`ra-${i}`" tone="warn">
-            <span class="inline-flex items-start gap-1.5"><ShieldAlert class="mt-px size-3.5" />{{ a }}</span>
-          </AlertBanner>
-          <AlertBanner v-for="(er, i) in report.errors" :key="`er-${i}`" tone="error">
-            <span class="inline-flex items-start gap-1.5"><AlertTriangle class="mt-px size-3.5" />{{ er }}</span>
-          </AlertBanner>
+
+        <div class="flex flex-wrap items-center gap-2 text-[12px] text-muted-fg">
+          <Badge variant="gold" dot>{{ backtestLabel }}</Badge>
+          <Badge v-if="lastResult" variant="outline">{{ modeName(lastResult.mode) }}</Badge>
+          <span>
+            事件 {{ num(report.sourceStats?.events) }} · 匹配盘口 {{ num(report.feed?.books) }}
+            · tick {{ report.tickMs }}ms · 虚拟时长 {{ duration(Math.floor(Number(report.virtualMs ?? 0) / 1000)) }}
+          </span>
         </div>
-        <EmptyState v-else text="回放全程未触发风控告警或错误" hint="风控零拦截，无需处理。" compact />
+
+        <AlertBanner
+          v-if="lastResult && lastResult.ladder.length > 1"
+          tone="info"
+          :title="lastResult.verdict"
+          hint="阶梯每一档都是完整重放：延迟越高利润越薄是正常物理，关键是哪一档转负。"
+        />
+
+        <div v-if="lastResult && lastResult.ladder.length" class="mt-3 overflow-x-auto">
+          <table class="w-full text-[12.5px]">
+            <thead>
+              <tr class="label-micro text-left">
+                <th class="py-1.5 pr-3 font-medium">延迟</th>
+                <th class="py-1.5 pr-3 font-medium">净盈亏</th>
+                <th class="py-1.5 pr-3 font-medium">平仓笔数</th>
+                <th class="py-1.5 pr-3 font-medium">胜率</th>
+                <th class="py-1.5 font-medium">盈亏比</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in lastResult.ladder" :key="r.latencyMs" class="border-t border-line">
+                <td class="stat-num py-1.5 pr-3"><RollingNumber :value="r.latencyMs" />ms</td>
+                <td class="stat-num py-1.5 pr-3" :class="Number(r.netPnlUsd) >= 0 ? 'text-up' : 'text-down'">
+                  <RollingNumber :value="signedMoney(r.netPnlUsd)" />
+                </td>
+                <td class="stat-num py-1.5 pr-3"><RollingNumber :value="num(r.closed)" /></td>
+                <td class="stat-num py-1.5 pr-3"><RollingNumber :value="pct(r.winRatePct)" /></td>
+                <td class="stat-num py-1.5">
+                  <RollingNumber :value="r.profitFactor != null ? num(r.profitFactor) : '—'" />
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </Card>
+
+      <div class="grid gap-3 md:grid-cols-4">
+        <StatTile label="净盈亏" :tone="netPnl >= 0 ? 'up' : 'down'" :value="signedMoney(netPnl)">
+          <template #sub>
+            毛利 +{{ money(report.trades?.grossProfitUsd) }} · 毛亏 {{ money(report.trades?.grossLossUsd) }}
+          </template>
+        </StatTile>
+        <StatTile label="胜率" :value="pct(report.trades?.winRatePct)">
+          <template #sub>
+            <span class="text-up">{{ num(report.trades?.wins) }}</span> 胜 ·
+            <span class="text-down">{{ num(report.trades?.losses) }}</span> 亏 ·
+            共 {{ num(report.trades?.closed) }} 笔
+          </template>
+        </StatTile>
+        <StatTile
+          label="盈亏比"
+          :value="report.trades?.profitFactor != null ? num(report.trades.profitFactor) : '—'"
+        >
+          <template #sub>均笔 {{ signedMoney(report.trades?.avgPnlUsd) }}</template>
+        </StatTile>
+        <StatTile label="最大回撤" :value="money(report.trades?.maxDrawdownUsd)">
+          <template #sub>
+            占权益峰 {{ pct(report.trades?.maxDrawdownPct) }} · 手续费 {{ money(report.trades?.feesUsd) }}
+          </template>
+        </StatTile>
+      </div>
+    </template>
+    <EmptyState
+      v-else
+      text="还没有回测结果"
+      hint="在第二步点「开始回测」— 跑完这里会出现净盈亏、胜率和三张图。"
+    />
+
+    <!-- 三张图。v-show 而非 v-if：容器必须常驻，否则 ECharts 实例会挂在被卸载的节点上。 -->
+    <div v-show="report" class="space-y-3">
+      <Card>
+        <CardHeader label="资金曲线">
+          <template #action>
+            <span class="text-[11.5px] text-faint-fg">逐笔累计净盈亏（已扣手续费）</span>
+          </template>
+        </CardHeader>
+        <div ref="eqEl" class="h-56 w-full" />
+        <p v-if="truncated > 0" class="mt-1 text-[11.5px] text-faint-fg">
+          曲线只画了报告保留的成交明细（另有 {{ num(truncated) }} 笔超出容量未画）；上面的汇总数字仍是全量的。
+        </p>
+      </Card>
+      <div class="grid gap-3 md:grid-cols-2">
+        <Card>
+          <CardHeader label="平仓原因分布">
+            <template #action>
+              <span class="text-[11.5px] text-faint-fg">绿 = 平均赚钱 · 红 = 平均亏钱</span>
+            </template>
+          </CardHeader>
+          <div ref="reasonEl" class="h-56 w-full" />
+        </Card>
+        <Card>
+          <CardHeader label="入场价格带分布">
+            <template #action>
+              <span class="text-[11.5px] text-faint-fg">按入场价分桶 · 桶色 = 该桶平均盈亏</span>
+            </template>
+          </CardHeader>
+          <div ref="bandEl" class="h-56 w-full" />
+        </Card>
+      </div>
     </div>
   </div>
-
-  <!-- empty / load prompt -->
-  <Card v-else class="rise-in">
-    <div class="flex flex-col items-center gap-3 py-10 text-center">
-      <span class="grid size-12 place-items-center rounded-xl border border-line bg-panel-2 text-primary">
-        <FileJson class="size-6" />
-      </span>
-      <div>
-        <p class="text-[15px] font-semibold">还没有回放报告</p>
-        <p class="mt-1 text-[12.5px] text-faint-fg">
-          先用内核跑一次回放，再把生成的 JSON 载入这里。
-        </p>
-      </div>
-      <code class="rounded-md border border-line bg-panel-2 px-3 py-1.5 text-[11.5px] text-muted-fg">
-        blitzkrieg-core --backtest &lt;archive.jsonl&gt; --engine --backtest-report report.json
-      </code>
-      <Button variant="gold" class="mt-1" @click="pickFile">
-        <Upload class="size-3.5" />加载回测报告 JSON
-      </Button>
-      <div v-if="loadErr" class="w-full max-w-[560px]">
-        <AlertBanner
-          tone="error"
-          title="加载失败"
-          hint="确认文件存在且为 --backtest-report 产物，然后重新加载。"
-          dismissible
-          @dismiss="loadErr = null"
-        >{{ loadErr }}</AlertBanner>
-      </div>
-    </div>
-  </Card>
-
-  <input ref="fileEl" type="file" accept="application/json,.json" class="hidden" @change="onFile">
 </template>

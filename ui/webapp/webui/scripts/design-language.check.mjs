@@ -45,13 +45,13 @@ const check = (label, fn) => {
   }
 }
 
-/** Shell + login + all six pages = the 5 界面 of the issue (回放 included). */
+/** Shell + login + all six pages = the 5 界面 of the issue (回测 included). */
 const FILES = [
   ['App.vue', 'src', 'App.vue'],
   ['LoginView', 'src', 'components', 'LoginView.vue'],
   ['Overview', 'src', 'pages', 'Overview.vue'],
   ['行情面板', 'src', 'pages', 'HftPage.vue'],
-  ['回放复盘', 'src', 'pages', 'BacktestPage.vue'],
+  ['回测', 'src', 'pages', 'BacktestPage.vue'],
   ['策略', 'src', 'pages', 'Strategies.vue'],
   ['插件', 'src', 'pages', 'Plugins.vue'],
   ['设置', 'src', 'pages', 'SettingsPage.vue'],

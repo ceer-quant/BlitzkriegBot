@@ -4,7 +4,7 @@
  * The two faces must cover the same operational surface, but they are NOT
  * clones: the TUI is a tab cockpit driven by one command bar (four tabs today,
  * five once the Evolution tab lands with #154), while the WebUI adds richer
- * pages (进化, 策略账本, 回放复盘, 设置). This check parses BOTH sources — the
+ * pages (进化, 策略账本, 回测, 设置). This check parses BOTH sources — the
  * Rust tab enum and its renderers, the Vue nav segments — and asserts every
  * TUI face has a live WebUI home with the matching content, then pins the
  * deliberate surplus on the WebUI side with its off-panel equivalent (CLI verb
@@ -296,7 +296,7 @@ console.log('WebUI surplus — declared, each with where it lives off-panel')
  * (VERSIONING.md §6.4) — the version card is now a PAIRED face asserted in
  * TUI_TO_WEBUI; only the theme/sound/token extras remain WebUI enhancements. */
 const WEBUI_SURPLUS = [
-  ['backtest', 'CLI: blitzkrieg-core --backtest --backtest-report（回放复盘是 WebUI 增强面）'],
+  ['backtest', 'CLI: blitzkrieg-core --backtest --backtest-report（回测是 WebUI 增强面）'],
   ['strategies', 'TUI 指令台 strategy <name> on|off 同动词；账本表格是 WebUI 增强面'],
 ]
 check('every WebUI-only tab has a declared off-panel equivalent', () => {

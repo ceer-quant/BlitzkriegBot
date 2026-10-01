@@ -956,3 +956,150 @@ fn a_non_loopback_bind_is_recorded_and_shown_on_the_panel() {
         "the built-in panel must show the exposure"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #353 — the backtest proxy: verbatim forwarding, nothing else
+// ---------------------------------------------------------------------------
+
+/// A stand-in core on a real UDS: answers every JSON-RPC request with
+/// `{echoMethod, echoParams}` — the echo IS the assertion surface, because
+/// the spec's boundary ("WebUI 必须走 IPC") is exactly that the gateway adds
+/// nothing and shapes nothing between the browser and the kernel.
+struct FakeCore {
+    sock: std::path::PathBuf,
+    seen: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FakeCore {
+    fn start(tag: &str) -> Self {
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let sock =
+            std::env::temp_dir().join(format!("uikit-backtest-{tag}-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).expect("bind fake core");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let seen2 = Arc::clone(&seen);
+        let stop2 = Arc::clone(&stop);
+        thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            loop {
+                if stop2.load(Ordering::SeqCst) {
+                    break;
+                }
+                let conn = match listener.accept() {
+                    Ok((s, _)) => s,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                // On macOS/BSD accept() inherits the listener's O_NONBLOCK; a
+                // blocking read loop then trips WouldBlock between requests and
+                // looks like a disconnect (the same trap notifier_tests
+                // documents). Clear it — the read timeout stays.
+                conn.set_nonblocking(false).expect("blocking conn");
+                let _ = conn.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut reader = BufReader::new(conn.try_clone().expect("clone"));
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break, // connection closed / stale
+                        Ok(_) => {}
+                    }
+                    let v: serde_json::Value = match serde_json::from_str(line.trim()) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    seen2.lock().unwrap().push(v.clone());
+                    let reply = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": v.get("id").cloned().unwrap_or(serde_json::json!(0)),
+                        "result": {
+                            "echoMethod": v.get("method").cloned().unwrap_or(serde_json::Value::Null),
+                            "echoParams": v.get("params").cloned().unwrap_or(serde_json::Value::Null),
+                        },
+                    });
+                    let mut w = conn.try_clone().expect("clone");
+                    let _ = w.write_all(format!("{reply}\n").as_bytes());
+                    let _ = w.flush();
+                }
+            }
+        });
+        Self { sock, seen, stop }
+    }
+}
+
+impl Drop for FakeCore {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = std::fs::remove_file(&self.sock);
+    }
+}
+
+/// The six backtest routes are a PURE IPC proxy: a POST body travels to the
+/// kernel as the params object verbatim (the route fixes the method, the body
+/// never picks one), `?id=` becomes exactly `{"id": …}` with nothing shaped
+/// in, and a non-JSON body is refused by the GATEWAY — it never reaches the
+/// kernel at all. The browser side never gets a filesystem or a command.
+#[test]
+fn the_backtest_routes_forward_verbatim_and_shape_nothing() {
+    let fake = FakeCore::start("proxy");
+    let server = Arc::new(WebServer::new(
+        IpcClient::new(fake.sock.to_string_lossy().to_string()),
+        10,
+    ));
+    let serving = Arc::clone(&server);
+    thread::spawn(move || {
+        let _ = serving.serve("127.0.0.1:0");
+    });
+    let addr = wait_for_bound(&server);
+
+    // POST: the body IS the IPC params object, byte-for-byte; the METHOD is
+    // fixed by the route, never by the body.
+    let body = r#"{"wallet":"0x0000000000000000000000000000000000000001","start":"2026-01-01","end":"2026-01-02"}"#;
+    let (code, out) = request_body(
+        addr,
+        &format!(
+            "POST /api/backtest/onchain-pull HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert_eq!(code, 200, "{out}");
+    // The gateway unwraps the IPC result: the body IS `{echoMethod, echoParams}`.
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(doc["echoMethod"], "backtest.onchain.pull");
+    assert_eq!(
+        doc["echoParams"],
+        serde_json::from_str::<serde_json::Value>(body).unwrap(),
+        "the params object is the body, verbatim"
+    );
+
+    // GET with ?id=: exactly {"id": …}, nothing added.
+    let (code, out) = request_body(addr, "GET /api/backtest/status?id=bt-7 HTTP/1.1\r\n\r\n");
+    assert_eq!(code, 200, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(doc["echoMethod"], "backtest.status");
+    assert_eq!(doc["echoParams"], serde_json::json!({"id":"bt-7"}));
+
+    // A body that is not JSON is refused by the GATEWAY itself (400) — the
+    // fake core saw only the two well-formed calls above.
+    let (code, _) = request_body(
+        addr,
+        "POST /api/backtest/run HTTP/1.1\r\nContent-Length: 8\r\n\r\nnot json",
+    );
+    assert_eq!(code, 400, "a non-JSON body never reaches the kernel");
+    let seen = fake.seen.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        2,
+        "exactly the two well-formed calls reached the core: {seen:?}"
+    );
+    assert_eq!(seen[0]["method"], "backtest.onchain.pull");
+    assert_eq!(seen[1]["method"], "backtest.status");
+}

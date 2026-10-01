@@ -18,6 +18,10 @@ pub mod account;
 /// strategy advises; the kernel adjudicates; every suggestion is audited.
 pub mod arbitration;
 pub mod backtest;
+/// #353: the in-kernel backtest job registry — the WebUI's 拉数据→配置→回测→
+/// 看结果 flow runs as tokio tasks inside the core process, addressed over
+/// IPC; no subprocess, no filesystem writes from the WebUI.
+pub mod backtest_jobs;
 pub mod cli;
 pub mod config;
 pub mod data_lock;

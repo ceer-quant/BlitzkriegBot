@@ -1622,6 +1622,52 @@ impl WebServer {
         }
     }
 
+    /// #353: proxy one backtest IPC call through the shared core client. The
+    /// gateway adds nothing and reads nothing back out: it forwards the WebUI's
+    /// JSON verbatim to the kernel's job registry and returns the kernel's
+    /// answer (or the transport error) as-is. No filesystem access, no command
+    /// construction, no parameter shaping — the spec's "WebUI 必须走 IPC"
+    /// boundary is enforced by the shape of this function: there is nothing
+    /// here a malicious body could steer onto a path or a subprocess.
+    fn proxy_backtest(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> (u16, &'static str, Vec<u8>) {
+        let doc = match self.snapshot_src.lock() {
+            Ok(mut c) => match c.call(method, params) {
+                Ok(v) => v,
+                Err(e) => serde_json::json!({ "error": e.to_string() }),
+            },
+            Err(_) => serde_json::json!({ "error": "core client poisoned" }),
+        };
+        (200, "application/json", doc.to_string().into_bytes())
+    }
+
+    /// #353: the POST trio (`onchain-pull` / `run`) — the body IS the IPC
+    /// params object; a body that is not valid JSON is a 400 that never
+    /// reaches the kernel.
+    fn proxy_backtest_body(&self, method: &str, body: &str) -> (u16, &'static str, Vec<u8>) {
+        match body_params(body) {
+            Ok(p) => self.proxy_backtest(method, p),
+            Err(e) => (
+                400,
+                "application/json",
+                serde_json::json!({ "error": e }).to_string().into_bytes(),
+            ),
+        }
+    }
+
+    /// #353: the GET trio (`status` / `result` / `export`) — the single `?id=`
+    /// query param forwarded verbatim; a missing id reaches the kernel's own
+    /// validation, which names the field.
+    fn proxy_backtest_id(&self, method: &str, id: Option<String>) -> (u16, &'static str, Vec<u8>) {
+        let params = id
+            .map(|i| serde_json::json!({ "id": i }))
+            .unwrap_or_else(|| serde_json::json!({}));
+        self.proxy_backtest(method, params)
+    }
+
     fn net_check_invalidate(&self) {
         if let Ok(mut cache) = self.net_check.lock() {
             cache.at = None;
@@ -1836,6 +1882,42 @@ impl WebServer {
                     Err(_) => serde_json::json!({ "error": "audit client poisoned" }),
                 };
                 (200, "application/json", doc.to_string().into_bytes())
+            }
+            ("GET", "/api/backtest/onchain-list") => {
+                // #353: the backtest page's dataset picker — a verbatim proxy
+                // of `backtest.onchain.list` (the kernel's dataset root is
+                // fixed there; no caller parameter to smuggle a path through).
+                self.proxy_backtest("backtest.onchain.list", serde_json::json!({}))
+            }
+            ("GET", "/api/backtest/status") => {
+                // #353: the page's ~1s poll — verbatim proxy of
+                // `backtest.status`, `?id=` forwarded untouched.
+                let id = req.query_param("id");
+                self.proxy_backtest_id("backtest.status", id)
+            }
+            ("GET", "/api/backtest/result") => {
+                // #353: the finished job's full report — verbatim proxy of
+                // `backtest.result`.
+                let id = req.query_param("id");
+                self.proxy_backtest_id("backtest.result", id)
+            }
+            ("GET", "/api/backtest/export") => {
+                // #353: the download envelope (`fileName` + `content`) — the
+                // BROWSER writes the file, the gateway never does.
+                let id = req.query_param("id");
+                self.proxy_backtest_id("backtest.export", id)
+            }
+            ("POST", "/api/backtest/onchain-pull") => {
+                // #353: 拉数据 — the body IS the `backtest.onchain.pull`
+                // params object (wallet/window/assets), forwarded verbatim.
+                self.proxy_backtest_body("backtest.onchain.pull", &req.body)
+            }
+            ("POST", "/api/backtest/run") => {
+                // #353: 回测 — the body IS the `backtest.run` params object
+                // (dataset/mode/knobs), forwarded verbatim. The kernel's typed
+                // deserialization validates every field; the gateway shapes
+                // nothing.
+                self.proxy_backtest_body("backtest.run", &req.body)
             }
             ("GET", "/api/risk-limits") => {
                 // E26 (§4.4): the settings page's risk card reads the EFFECTIVE
@@ -2260,6 +2342,17 @@ fn body_to_command(body: &str) -> String {
         }
     }
     t.to_string()
+}
+
+/// #353: parse a POST body as the JSON params object a backtest IPC call
+/// takes. Nothing is interpreted, filtered or reshaped — the object travels
+/// verbatim to the kernel, whose typed deserialization is the validator.
+fn body_params(body: &str) -> Result<serde_json::Value, String> {
+    let t = body.trim();
+    if t.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(t).map_err(|e| format!("body must be a JSON object: {e}"))
 }
 
 #[cfg(test)]

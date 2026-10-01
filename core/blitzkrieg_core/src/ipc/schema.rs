@@ -250,6 +250,20 @@ pub mod method {
     /// Explicit counterpart; the auto-unsubscribe on disconnect makes this
     /// optional for clients, not useless (a live panel can narrow its feed).
     pub const KLINE_UNSUBSCRIBE: &str = "kline.unsubscribe";
+
+    // ── #353 — the WebUI backtest surface (拉数据→配置→回测→看结果) ──────────
+    // Every arm fronts the in-kernel job registry (`crate::backtest_jobs`):
+    // the WebUI names datasets/assets/strategy names over IPC and NEVER
+    // touches the local filesystem or executable code — the spec's hard
+    // boundary. Pull = resumable, cache-addressable #352 pulls (one per asset
+    // filter); run = the #351 mode ladder on one dataset; status/result/export
+    // poll a running or finished job.
+    pub const BACKTEST_ONCHAIN_PULL: &str = "backtest.onchain.pull";
+    pub const BACKTEST_ONCHAIN_LIST: &str = "backtest.onchain.list";
+    pub const BACKTEST_RUN: &str = "backtest.run";
+    pub const BACKTEST_STATUS: &str = "backtest.status";
+    pub const BACKTEST_RESULT: &str = "backtest.result";
+    pub const BACKTEST_EXPORT: &str = "backtest.export";
 }
 
 // ── E26 (§4.4) — systemic risk readout ──────────────────────────────────────
@@ -914,6 +928,10 @@ pub enum Event {
         strategy: String,
         token_id: String,
         condition_id: String,
+        /// Entry price of the position — the #353 price-band view groups
+        /// closed trades by it.
+        #[serde(with = "crate::decimal", rename = "entryPrice")]
+        entry_price: Decimal,
         /// E28 (§9.2): the account the trade settled in — per-account history
         /// is a field read, never a strategy-name guess.
         #[serde(rename = "accountId")]

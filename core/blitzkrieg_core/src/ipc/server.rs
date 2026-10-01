@@ -459,6 +459,11 @@ pub async fn run(
         &config.positions.exit,
     ));
 
+    // #353: the backtest job registry — the WebUI's 拉数据→配置→回测→看结果
+    // flow runs as tokio tasks INSIDE this process, addressed over IPC. One
+    // registry for the whole server; every session's arms share it.
+    let jobs = Arc::new(crate::backtest_jobs::BacktestJobs::new());
+
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
@@ -497,6 +502,7 @@ pub async fn run(
                         registry.clone(),
                         update_state.clone(),
                         risk_limits.clone(),
+                        jobs.clone(),
                     )
                 }
                 Err(e) => tracing::warn!(error = %e, "accept failed"),
@@ -512,6 +518,7 @@ pub async fn run(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // session wiring — each param has one job
 fn spawn_session(
     stream: UnixStream,
     peer: PeerAuth,
@@ -520,6 +527,7 @@ fn spawn_session(
     registry: crate::market::registry::MarketPluginRegistry,
     update_state: Arc<crate::ipc::version::UpdateState>,
     risk_limits: Arc<crate::ipc::schema::RiskLimitsResult>,
+    jobs: Arc<crate::backtest_jobs::BacktestJobs>,
 ) {
     tokio::spawn(async move {
         let (read_half, write_half) = stream.into_split();
@@ -593,6 +601,7 @@ fn spawn_session(
                         &peer,
                         &update_state,
                         &risk_limits,
+                        &jobs,
                         &mut session,
                     )
                     .await;
@@ -621,6 +630,7 @@ struct SessionState {
     >,
 }
 
+#[allow(clippy::too_many_arguments)] // one shared-context param per subsystem arm
 async fn handle_line(
     core: &Arc<AsyncMutex<Core>>,
     registry: &crate::market::registry::MarketPluginRegistry,
@@ -628,6 +638,7 @@ async fn handle_line(
     peer: &PeerAuth,
     update_state: &Arc<crate::ipc::version::UpdateState>,
     risk_limits: &Arc<crate::ipc::schema::RiskLimitsResult>,
+    jobs: &Arc<crate::backtest_jobs::BacktestJobs>,
     session: &mut SessionState,
 ) -> String {
     let req: Request = match serde_json::from_str(&line) {
@@ -1865,6 +1876,103 @@ async fn handle_line(
             }
         }
 
+        // ── #353: the WebUI backtest surface (拉数据→配置→回测→看结果) ────────
+        // Every arm fronts the in-kernel job registry: validation is
+        // synchronous and fail-closed, the heavy work runs as tokio tasks in
+        // THIS process, and the WebUI names datasets/assets/strategy names —
+        // never files outside the dataset root, never executable code.
+        method::BACKTEST_ONCHAIN_PULL => {
+            typed(params, |p: crate::backtest_jobs::OnchainPullParams| {
+                let jobs = jobs.clone();
+                async move {
+                    let ids = jobs
+                        .start_pull(p)
+                        .map_err(|e| CoreError::new(CoreErrorCode::InvalidParams, e))?;
+                    Ok(serde_json::json!({ "jobIds": ids }))
+                }
+            })
+            .await
+        }
+
+        method::BACKTEST_ONCHAIN_LIST => {
+            typed(params, |_: crate::backtest_jobs::OnchainListParams| {
+                let jobs = jobs.clone();
+                async move {
+                    jobs.list_datasets()
+                        .map_err(|e| CoreError::new(CoreErrorCode::Internal, e))
+                }
+            })
+            .await
+        }
+
+        method::BACKTEST_RUN => {
+            typed(params, |p: crate::backtest_jobs::BacktestRunParams| {
+                let core = core.clone();
+                let jobs = jobs.clone();
+                async move {
+                    // The replay needs a config SNAPSHOT, not the live core:
+                    // trading keeps running while the job drives its own
+                    // replay instance (no #199 ledger-dir contention — the
+                    // backtester forces the no-log replay subset).
+                    let cfg = {
+                        let c = core.lock().await;
+                        c.config().clone()
+                    };
+                    let id = jobs
+                        .start_backtest(&cfg, p)
+                        .map_err(|e| CoreError::new(CoreErrorCode::InvalidParams, e))?;
+                    Ok(serde_json::json!({ "jobId": id }))
+                }
+            })
+            .await
+        }
+
+        method::BACKTEST_STATUS => {
+            typed(params, |p: crate::backtest_jobs::JobIdParams| {
+                let jobs = jobs.clone();
+                async move {
+                    match jobs.status(&p.id) {
+                        Some((view, result)) => {
+                            let mut v = serde_json::to_value(&view).unwrap_or(Value::Null);
+                            if let Some(r) = result
+                                && let Some(obj) = v.as_object_mut()
+                            {
+                                obj.insert("result".into(), r);
+                            }
+                            Ok(v)
+                        }
+                        None => Err(CoreError::new(
+                            CoreErrorCode::InvalidParams,
+                            format!("unknown job {}", p.id),
+                        )),
+                    }
+                }
+            })
+            .await
+        }
+
+        method::BACKTEST_RESULT => {
+            typed(params, |p: crate::backtest_jobs::JobIdParams| {
+                let jobs = jobs.clone();
+                async move {
+                    jobs.result(&p.id)
+                        .map_err(|e| CoreError::new(CoreErrorCode::InvalidParams, e))
+                }
+            })
+            .await
+        }
+
+        method::BACKTEST_EXPORT => {
+            typed(params, |p: crate::backtest_jobs::JobIdParams| {
+                let jobs = jobs.clone();
+                async move {
+                    jobs.export(&p.id)
+                        .map_err(|e| CoreError::new(CoreErrorCode::InvalidParams, e))
+                }
+            })
+            .await
+        }
+
         other => Err((
             Failure::METHOD_NOT_FOUND,
             format!("unknown method: {other}"),
@@ -2189,6 +2297,7 @@ mod tests {
                 &c.config().positions.exit,
             ))
         };
+        let jobs = Arc::new(crate::backtest_jobs::BacktestJobs::new());
         let mut session = SessionState::default();
         serde_json::from_str(
             &handle_line(
@@ -2198,6 +2307,7 @@ mod tests {
                 peer,
                 &update_state,
                 &risk_limits,
+                &jobs,
                 &mut session,
             )
             .await,
@@ -2224,6 +2334,7 @@ mod tests {
                 &c.config().positions.exit,
             ))
         };
+        let jobs = Arc::new(crate::backtest_jobs::BacktestJobs::new());
         serde_json::from_str(
             &handle_line(
                 core,
@@ -2232,6 +2343,7 @@ mod tests {
                 peer,
                 &update_state,
                 &risk_limits,
+                &jobs,
                 session,
             )
             .await,
@@ -2291,6 +2403,130 @@ mod tests {
 
     fn stats_line(id: u32) -> String {
         format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"engine.stats","params":{{}}}}"#)
+    }
+
+    // ── #353: the WebUI backtest surface, at the wire ────────────────────────
+
+    /// Like [`rpc`], but the caller holds the job registry — the six backtest
+    /// arms all front ONE shared registry, and a test pinning submission-time
+    /// validation must hand in the same instance (with its pinned dataset
+    /// root), not a fresh one per call.
+    #[allow(clippy::too_many_arguments)]
+    async fn rpc_jobs(
+        core: &Arc<AsyncMutex<Core>>,
+        registry: &crate::market::registry::MarketPluginRegistry,
+        peer: &PeerAuth,
+        jobs: &Arc<crate::backtest_jobs::BacktestJobs>,
+        id: u32,
+        method: &str,
+        params: &str,
+    ) -> Value {
+        let line =
+            format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{params}}}"#);
+        let update_state = Arc::new(crate::ipc::version::UpdateState::new(false, false));
+        let risk_limits = {
+            let c = core.lock().await;
+            Arc::new(crate::ipc::schema::RiskLimitsResult::snapshot(
+                &c.config().risk.systemic,
+                &c.config().positions.exit,
+            ))
+        };
+        let mut session = SessionState::default();
+        serde_json::from_str(
+            &handle_line(
+                core,
+                registry,
+                line,
+                peer,
+                &update_state,
+                &risk_limits,
+                jobs,
+                &mut session,
+            )
+            .await,
+        )
+        .expect("every reply is one JSON object")
+    }
+
+    /// The six arms are wired to the registry through the REAL entry point:
+    /// list answers the envelope, the read trio name unknown jobs, run/pull
+    /// validate at the wire (a refusal here is a JSON-RPC error with the
+    /// actionable message, and NO job exists behind it).
+    #[tokio::test]
+    async fn the_backtest_surface_answers_at_the_wire() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let dir =
+            std::env::temp_dir().join(format!("bk-ipc-jobs-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).expect("scratch root");
+        let jobs = Arc::new(crate::backtest_jobs::BacktestJobs::with_root(dir.clone()));
+
+        // list: an empty root is a valid, empty envelope — not an error.
+        let list = rpc_jobs(
+            &core,
+            &registry,
+            &peer,
+            &jobs,
+            1,
+            method::BACKTEST_ONCHAIN_LIST,
+            "{}",
+        )
+        .await;
+        assert!(list.get("error").is_none(), "list answers: {list}");
+        assert!(list["result"]["datasets"].is_array(), "{list}");
+
+        // run: an archive outside the dataset root is refused BY NAME at the
+        // wire — and no job was created behind the refusal.
+        let run = rpc_jobs(
+            &core,
+            &registry,
+            &peer,
+            &jobs,
+            2,
+            method::BACKTEST_RUN,
+            r#"{"archive":"/etc/passwd"}"#,
+        )
+        .await;
+        assert!(
+            run["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("not a dataset")),
+            "the refusal names the boundary: {run}"
+        );
+
+        // The read trio on a job id that never existed: named JSON-RPC errors.
+        for (id, m) in [
+            (3, method::BACKTEST_STATUS),
+            (4, method::BACKTEST_RESULT),
+            (5, method::BACKTEST_EXPORT),
+        ] {
+            let v = rpc_jobs(&core, &registry, &peer, &jobs, id, m, r#"{"id":"bt-9999"}"#).await;
+            assert!(
+                v["error"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("unknown job")),
+                "{m} names the unknown job: {v}"
+            );
+        }
+
+        // pull: a malformed wallet is refused with the actionable message.
+        let pull = rpc_jobs(
+            &core,
+            &registry,
+            &peer,
+            &jobs,
+            6,
+            method::BACKTEST_ONCHAIN_PULL,
+            r#"{"wallet":"0xabc","start":"2026-01-01","end":"2026-01-02"}"#,
+        )
+        .await;
+        assert!(
+            pull["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("0x")),
+            "the refusal names the wallet shape: {pull}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// #191 acceptance (a): one `risk.setLimits` call moves the entry limits
@@ -2497,6 +2733,7 @@ mod tests {
                 &c.config().positions.exit,
             ))
         };
+        let jobs = Arc::new(crate::backtest_jobs::BacktestJobs::new());
         serde_json::from_str(
             &handle_line(
                 core,
@@ -2505,6 +2742,7 @@ mod tests {
                 peer,
                 update_state,
                 &risk_limits,
+                &jobs,
                 session,
             )
             .await,

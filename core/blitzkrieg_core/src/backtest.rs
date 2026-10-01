@@ -41,8 +41,9 @@ pub trait Backtester {
     fn describe(&self) -> String;
 }
 
-/// How to run a replay.
-#[derive(Debug, Clone)]
+/// How to run a replay. Manual `Debug` because `progress` is a closure (its
+/// `Clone` is the `Arc`'s — the callback is shared, not duplicated).
+#[derive(Clone)]
 pub struct BacktestConfig {
     /// Base core config (strategy knobs: assets, sizing, gates, exit policy,
     /// per-strategy limits). The replay forces the safe subset — see
@@ -63,6 +64,25 @@ pub struct BacktestConfig {
     /// strategy does not declare is simply not applied by it (the declaration is
     /// the strategy's own), exactly as a proposal would be.
     pub hot_params: Vec<(String, String, Decimal)>,
+    /// Progress callback: `(delivered_events, virtual_clock_ms)`, invoked at
+    /// most once per wall second. The single producer — the replay loop — has
+    /// two consumers: the CLI prints it to stderr, the #353 IPC job registry
+    /// updates a status cell the WebUI polls. `None` keeps the CLI stderr
+    /// heartbeat.
+    #[allow(clippy::type_complexity)]
+    pub progress: Option<std::sync::Arc<dyn Fn(u64, i64) + Send + Sync>>,
+}
+
+impl std::fmt::Debug for BacktestConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BacktestConfig")
+            .field("core", &self.core)
+            .field("tick_ms", &self.tick_ms)
+            .field("tail_ms", &self.tail_ms)
+            .field("hot_params", &self.hot_params)
+            .field("progress", &self.progress.as_ref().map(|_| "<fn>"))
+            .finish()
+    }
 }
 
 impl Default for BacktestConfig {
@@ -72,7 +92,78 @@ impl Default for BacktestConfig {
             tick_ms: 50,
             tail_ms: 0,
             hot_params: Vec::new(),
+            progress: None,
         }
+    }
+}
+
+// ── #351 mode ladder (in the lib so the #353 IPC job registry composes the
+//    SAME contract the CLI does — one definition, two consumers) ────────────
+
+/// The mode's latency rungs. Latency is the ONLY dial a mode moves: slippage
+/// and the fee schedule stay as configured, so the rungs are comparable and
+/// any expectation change is attributable to latency alone.
+pub fn mode_rungs(mode: &str, verify_latency_ms: i64) -> Result<Vec<i64>, String> {
+    match mode {
+        "sweep" => Ok(vec![0, 50, 100, 200, 300]),
+        "mine" => Ok(vec![0]),
+        "verify" => Ok(vec![verify_latency_ms]),
+        other => Err(format!(
+            "unknown --backtest-mode {other} (mine|verify|sweep)"
+        )),
+    }
+}
+
+/// The fill model for one mode rung: `mine` zeroes the latency dials keeping
+/// the configured friction, `verify`/`sweep` stamp the rung onto every
+/// latency. Zero taker slippage is refused (fail-closed) for every mode —
+/// the honest-friction floor is `--slippage-ticks 1`.
+pub fn mode_rung_model(mode: &str, base: FillModel, rung: i64) -> Result<FillModel, String> {
+    if base.taker_slippage_ticks == 0 {
+        return Err(format!(
+            "backtest-mode {mode} refuses zero taker slippage: the honest-friction floor is \
+             --slippage-ticks 1 (mine 模式禁止把滑点设为 0)"
+        ));
+    }
+    Ok(match mode {
+        "mine" => FillModel {
+            taker_latency_ms: 0,
+            taker_rtt_ms: 0,
+            maker_latency_ms: 0,
+            ..base
+        },
+        "verify" | "sweep" => FillModel {
+            taker_latency_ms: rung,
+            taker_rtt_ms: rung,
+            maker_latency_ms: rung,
+            ..base
+        },
+        other => {
+            return Err(format!(
+                "unknown --backtest-mode {other} (mine|verify|sweep)"
+            ));
+        }
+    })
+}
+
+/// The sweep verdict, from the per-rung net PnLs: all positive → insensitive
+/// to latency; positive at 0 ms but negative at the top rung → latency-bound
+/// edge; negative at 0 ms → the strategy has no edge at all, eliminate it.
+pub fn latency_verdict(nets: &[Decimal]) -> &'static str {
+    let Some(first) = nets.first() else {
+        return "no rungs ran";
+    };
+    let Some(last) = nets.last() else {
+        return "no rungs ran";
+    };
+    if nets.iter().all(|n| *n > Decimal::ZERO) {
+        "all rungs positive → 延迟不敏感（稳）"
+    } else if *first > Decimal::ZERO && *last < Decimal::ZERO {
+        "positive at 0ms, negative at the top rung → 延迟敏感型"
+    } else if *first <= Decimal::ZERO {
+        "negative at 0ms → 策略本身无正期望，淘汰"
+    } else {
+        "mixed → 见表"
     }
 }
 
@@ -126,6 +217,10 @@ pub struct TradeLine {
     pub strategy: String,
     pub token_id: String,
     pub condition_id: String,
+    /// Entry price of the position — the #353 price-band distribution groups
+    /// trades by it.
+    #[serde(with = "crate::decimal")]
+    pub entry_price: Decimal,
     #[serde(with = "crate::decimal")]
     pub net_pnl_usd: Decimal,
     #[serde(with = "crate::decimal")]
@@ -438,6 +533,10 @@ pub struct EventBacktester {
     /// caller gets `run`'s ordinary `Err` — and a sweep can tell "this candidate
     /// could not load its strategy" from "the strategy had no signal".
     install_error: Option<String>,
+    /// Progress consumer handed in via [`BacktestConfig::progress`] (None =
+    /// CLI stderr heartbeat). Stashed on the struct because `run` takes `&mut
+    /// self` and the callback needs to outlive the config.
+    cfg_progress: Option<std::sync::Arc<dyn Fn(u64, i64) + Send + Sync>>,
 }
 
 /// Trades kept in the report's `trade_lines` (counts always cover all trades).
@@ -519,6 +618,7 @@ impl EventBacktester {
             errors: Vec::new(),
             checked_events: 0,
             install_error,
+            cfg_progress: cfg.progress.take(),
         }
     }
 
@@ -568,6 +668,7 @@ impl EventBacktester {
                     strategy,
                     token_id,
                     condition_id,
+                    entry_price,
                     net_pnl_usd,
                     net_pnl_pct,
                     ..
@@ -580,6 +681,7 @@ impl EventBacktester {
                         strategy,
                         token_id,
                         condition_id,
+                        entry_price,
                         net_pnl_usd,
                         net_pnl_pct,
                     });
@@ -766,6 +868,12 @@ impl Backtester for EventBacktester {
         // live and exits would fire late (see `dense_stream_keeps_live_cadence`).
         let mut next_eval_ms = clock + self.tick_ms;
 
+        // #353: one stderr heartbeat per wall-second — the gateway's backtest
+        // job parses these into the panel's progress bar. Tests never see one
+        // (they finish inside the first second) and the pipe can never fill
+        // at one line per second.
+        let mut last_beat = std::time::Instant::now();
+
         while let Some(te) = pending.take() {
             let at = if te.at_ms > 0 { te.at_ms } else { clock };
             if at > clock {
@@ -782,6 +890,13 @@ impl Backtester for EventBacktester {
             self.checked_events += 1;
             delivered += 1;
             end_at_ms = clock;
+            if last_beat.elapsed() >= std::time::Duration::from_secs(1) {
+                match &self.cfg_progress {
+                    Some(cb) => cb(delivered, clock),
+                    None => eprintln!("backtest progress: {delivered} events, virtual {clock}ms"),
+                }
+                last_beat = std::time::Instant::now();
+            }
             self.drain();
             pending = self.source.next_event();
         }
@@ -985,6 +1100,7 @@ mod tests {
                 tick_ms: 50,
                 tail_ms,
                 hot_params: Vec::new(),
+                progress: None,
             },
             src,
         );
@@ -1147,6 +1263,7 @@ mod tests {
                 tick_ms: 50,
                 tail_ms: 0,
                 hot_params: Vec::new(),
+                progress: None,
             },
             Box::new(VecSource::new(vec![
                 TimedEvent {

@@ -2810,44 +2810,9 @@ fn run_regime_eval(
     }
 }
 
-/// #351: the fill model one backtest-mode rung trades with, plus the friction
-/// validation the honest modes demand. Pure so the reverse acceptance (a
-/// zero-friction mine run must be REFUSED, never silently run) is
-/// unit-testable without a process exit. `rung` is the latency the rung
-/// trades through (verify: the `--verify-latency-ms` dial; sweep: the ladder
-/// step; mine: ignored — every latency dial is zeroed).
-fn mode_rung_model(
-    mode: &str,
-    base: blitzkrieg_core::sim::FillModel,
-    rung: i64,
-) -> Result<blitzkrieg_core::sim::FillModel, String> {
-    if base.taker_slippage_ticks == 0 {
-        return Err(format!(
-            "backtest-mode {mode} refuses zero taker slippage: the honest-friction floor is \
-             --slippage-ticks 1 (mine 模式禁止把滑点设为 0)"
-        ));
-    }
-    Ok(match mode {
-        "mine" => blitzkrieg_core::sim::FillModel {
-            taker_latency_ms: 0,
-            taker_rtt_ms: 0,
-            maker_latency_ms: 0,
-            ..base
-        },
-        "verify" | "sweep" => blitzkrieg_core::sim::FillModel {
-            taker_latency_ms: rung,
-            taker_rtt_ms: rung,
-            maker_latency_ms: rung,
-            ..base
-        },
-        other => {
-            return Err(format!(
-                "unknown --backtest-mode {other} (mine|verify|sweep)"
-            ));
-        }
-    })
-}
-
+// #351: `mode_rung_model` / `mode_rungs` / `latency_verdict` moved into the
+// lib (`backtest`) so the #353 IPC job registry composes the SAME contract
+// the CLI does.
 /// One replay: open the archive, drive the SAME core, print and (optionally)
 /// write the report. The single-rung primitive every mode composes. Returns
 /// the report so a mode runner can build its ladder table without a second
@@ -2887,6 +2852,7 @@ fn backtest_once(
             tick_ms,
             tail_ms,
             hot_params: knobs.to_vec(),
+            progress: None,
         },
         Box::new(src),
     );
@@ -2953,18 +2919,16 @@ fn run_mode_backtest(
 ) {
     use rust_decimal::Decimal;
     let base_model = cfg.fill_model;
-    let rungs: Vec<i64> = match mode {
-        "sweep" => vec![0, 50, 100, 200, 300],
-        "mine" => vec![0],
-        "verify" => vec![verify_latency_ms],
-        other => {
-            eprintln!("blitzkrieg-core: unknown --backtest-mode {other} (mine|verify|sweep)");
+    let rungs = match blitzkrieg_core::backtest::mode_rungs(mode, verify_latency_ms) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("blitzkrieg-core: {e}");
             std::process::exit(2);
         }
     };
     let mut rows: Vec<(i64, blitzkrieg_core::backtest::BacktestReport)> = Vec::new();
     for rung in rungs {
-        let model = match mode_rung_model(mode, base_model, rung) {
+        let model = match blitzkrieg_core::backtest::mode_rung_model(mode, base_model, rung) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("blitzkrieg-core: {e}");
@@ -3016,17 +2980,7 @@ fn run_mode_backtest(
     }
     println!();
     let nets: Vec<Decimal> = rows.iter().map(|(_, r)| r.trades.net_pnl_usd).collect();
-    let first = nets[0];
-    let last = nets[nets.len() - 1];
-    let verdict = if nets.iter().all(|n| *n > Decimal::ZERO) {
-        "all rungs positive → 延迟不敏感（稳）"
-    } else if first > Decimal::ZERO && last < Decimal::ZERO {
-        "positive at 0ms, negative at the top rung → 延迟敏感型"
-    } else if first <= Decimal::ZERO {
-        "negative at 0ms → 策略本身无正期望，淘汰"
-    } else {
-        "mixed → 见表"
-    };
+    let verdict = blitzkrieg_core::backtest::latency_verdict(&nets);
     println!("verdict: {verdict}");
 }
 
@@ -3255,15 +3209,16 @@ mod tests {
             taker_slippage_ticks: 0,
             ..Default::default()
         };
-        let err = mode_rung_model("mine", base, 0).expect_err("zero slippage must die");
+        let err = blitzkrieg_core::backtest::mode_rung_model("mine", base, 0)
+            .expect_err("zero slippage must die");
         assert!(
             err.contains("refuses zero taker slippage"),
             "the refusal must name the floor: {err}"
         );
         // The floor is mode-independent: verify and sweep run on the same
         // honest-friction contract.
-        assert!(mode_rung_model("verify", base, 0).is_err());
-        assert!(mode_rung_model("sweep", base, 0).is_err());
+        assert!(blitzkrieg_core::backtest::mode_rung_model("verify", base, 0).is_err());
+        assert!(blitzkrieg_core::backtest::mode_rung_model("sweep", base, 0).is_err());
     }
 
     /// The other side of the knob contract: mine zeroes the latency dials
@@ -3278,7 +3233,8 @@ mod tests {
             maker_latency_ms: 13,
             ..Default::default()
         };
-        let mine = mode_rung_model("mine", base, 0).expect("mine above the floor");
+        let mine = blitzkrieg_core::backtest::mode_rung_model("mine", base, 0)
+            .expect("mine above the floor");
         assert_eq!(mine.taker_latency_ms, 0);
         assert_eq!(mine.taker_rtt_ms, 0);
         assert_eq!(mine.maker_latency_ms, 0);
@@ -3286,7 +3242,8 @@ mod tests {
             mine.taker_slippage_ticks, 1,
             "mine keeps the real friction; latency is the only dial it turns"
         );
-        let verify = mode_rung_model("verify", base, 286).expect("verify above the floor");
+        let verify = blitzkrieg_core::backtest::mode_rung_model("verify", base, 286)
+            .expect("verify above the floor");
         assert_eq!(verify.taker_latency_ms, 286);
         assert_eq!(verify.taker_rtt_ms, 286);
         assert_eq!(verify.maker_latency_ms, 286);

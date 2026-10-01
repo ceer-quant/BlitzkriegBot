@@ -4766,6 +4766,7 @@ impl Core {
             strategy: closed.strategy.clone(),
             token_id: closed.token_id.clone(),
             condition_id: closed.condition_id.clone(),
+            entry_price: closed.entry_price,
             account_id: closed.account_id.clone(),
             net_pnl_usd: closed.net_pnl_usd,
             net_pnl_pct: closed.net_pnl_pct,
