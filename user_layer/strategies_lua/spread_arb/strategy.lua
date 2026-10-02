@@ -143,6 +143,12 @@ local function read_config()
     entry_dip_max_pct = dec_param(p, "entry_dip_max_pct", { m = 0, s = 0 }),
     entry_bounce_min_pct = dec_param(p, "entry_bounce_min_pct", { m = 0, s = 0 }),
     entry_bounce_window_sec = int_param(p, "entry_bounce_window_sec", 5),
+    -- #176-style long-memory slide gate (mean_reversion's proven lever): a
+    -- token whose mid sits `entry_trend_drop_pct`% or more below the high of
+    -- the last `entry_trend_window_sec` is in a one-sided slide — every
+    -- further dip is another knife. 0 = off (the pre-gate behaviour).
+    entry_trend_window_sec = int_param(p, "entry_trend_window_sec", 0),
+    entry_trend_drop_pct = dec_param(p, "entry_trend_drop_pct", { m = 30, s = 0 }),
     -- Fixed tracker internals the spread_arb knob set does not expose
     -- (TrendConfig::default() fields the hot bag never carried).
     trend_ratio_threshold = 0.8,
@@ -158,14 +164,23 @@ local tracker = { states = {}, round_slot = nil, broken = {} }
 
 local function tracker_on_price(cfg, token, price, now_ms)
   if token == "" or price.m <= 0 then return end
-  local window_ms = math.max(cfg.trend_confirm_sec * 1000, cfg.trend_window_floor_ms)
+  local confirm_ms = math.max(cfg.trend_confirm_sec * 1000, cfg.trend_window_floor_ms)
+  -- The slide gate reads a LONGER memory than confirmation does, so the ring
+  -- retains the union of both windows; the confirmation ratio is still computed
+  -- over the confirm window only (identical to the pre-gate behaviour, which
+  -- pruned to exactly that window).
+  local trend_ms = 0
+  if cfg.entry_trend_window_sec > 0 then
+    trend_ms = math.max(cfg.entry_trend_window_sec * 1000, confirm_ms)
+  end
+  local retain_ms = math.max(confirm_ms, trend_ms)
   local st = tracker.states[token]
   if not st then
     st = { phase = "idle", samples = {} }
     tracker.states[token] = st
   end
   st.samples[#st.samples + 1] = { now_ms, price }
-  local cutoff = now_ms - window_ms
+  local cutoff = now_ms - retain_ms
   local kept, n = {}, 0
   for i = 1, #st.samples do
     if st.samples[i][1] >= cutoff then
@@ -174,16 +189,34 @@ local function tracker_on_price(cfg, token, price, now_ms)
     end
   end
   st.samples = kept
+  -- signal.rs PriceBuffer::push's exact memory cap: at most the newest 2000
+  -- samples, the oldest dropped first. Never fires below the cap (the confirm
+  -- window alone sits under it); without it a long slide window would retain
+  -- an unbounded ring — a memory-model divergence from the Rust gate this
+  -- ports, and an O(n) scan on every book update.
+  local excess = #st.samples - 2000
+  if excess > 0 then
+    local trimmed = {}
+    for i = excess + 1, #st.samples do
+      trimmed[#trimmed + 1] = st.samples[i]
+    end
+    st.samples = trimmed
+  end
 
-  local total = #st.samples
+  local cutoff_confirm = now_ms - confirm_ms
+  local total = 0
   local above = 0
-  for i = 1, total do
-    if dec_cmp(st.samples[i][2], cfg.trend_min_price) >= 0 then above = above + 1 end
+  local oldest_ts = now_ms
+  for i = 1, #st.samples do
+    local t, p = st.samples[i][1], st.samples[i][2]
+    if t >= cutoff_confirm then
+      total = total + 1
+      if total == 1 then oldest_ts = t end
+      if dec_cmp(p, cfg.trend_min_price) >= 0 then above = above + 1 end
+    end
   end
   local above_ratio = 0
   if total > 0 then above_ratio = above / total end
-  local oldest_ts = now_ms
-  if total > 0 then oldest_ts = st.samples[1][1] end
   local spanned_ms = now_ms - oldest_ts
 
   -- Regime change: a confirmed trend broke its floor.
@@ -196,7 +229,7 @@ local function tracker_on_price(cfg, token, price, now_ms)
   -- Confirmation needs a full-ish window and a high above-threshold ratio.
   -- (The Rust computes `(window_ms as f64 * 0.9) as i64` — the same float
   -- truncate, mirrored deliberately.)
-  if st.phase ~= "confirmed" and spanned_ms >= math.floor(window_ms * 0.9)
+  if st.phase ~= "confirmed" and spanned_ms >= math.floor(confirm_ms * 0.9)
     and above_ratio >= cfg.trend_ratio_threshold then
     st.phase = "confirmed"
     return
@@ -209,6 +242,32 @@ local function tracker_on_price(cfg, token, price, now_ms)
       st.phase = "idle"
     end
   end
+end
+
+--- The #176 measure: the current mid's drop (%) off the highest mid inside
+--- the LONG trend window. 0 when the gate is off or history is short — a
+--- disabled gate and a fresh token both read "no slide" and never block
+--- (mean_reversion.rs `trend_drop_pct`, mirrored exactly).
+local function tracker_trend_drop_pct(cfg, token, now_ms)
+  if cfg.entry_trend_window_sec <= 0 then return 0 end
+  local st = tracker.states[token]
+  if not st or #st.samples < 2 then return 0 end
+  local cutoff = now_ms - cfg.entry_trend_window_sec * 1000
+  local hi = { m = 0, s = 0 }
+  for i = 1, #st.samples do
+    local t, p = st.samples[i][1], st.samples[i][2]
+    if t >= cutoff and dec_cmp(p, hi) > 0 then hi = p end
+  end
+  if hi.m <= 0 then return 0 end
+  local cur = st.samples[#st.samples][2]
+  local diff = dec_sub(cur, hi)
+  -- ((cur - hi) / hi) * 100 — mean_reversion.rs trend_drop_pct's exact
+  -- measure. Each factor is O(price), so the double error (~1e-16 relative)
+  -- sits far below any 1-2 decimal threshold (header discipline). The naive
+  -- diff.m/(POW10[diff.s]*hi.m) form silently drops hi's OWN scale from the
+  -- divisor — a 10^hi.s understatement (100x at price scale 2) that read a
+  -- -7.27% slide as -0.0727% and never fired the gate.
+  return (diff.m / POW10[diff.s]) / (hi.m / POW10[hi.s]) * 100
 end
 
 local function tracker_reset_if_new_round(slot)
@@ -243,7 +302,12 @@ local function tracker_move_pct(token, window_sec, now_ms)
   if not oldest or not newest then return 0 end
   if oldest.m <= 0 then return 0 end
   local diff = dec_sub(newest, oldest)
-  return (diff.m / (POW10[diff.s] * oldest.m)) * 100
+  -- ((newest - oldest) / oldest) * 100 — signal.rs PriceBuffer::move_pct's
+  -- exact measure; same scale-carrying float form as the slide gate (the
+  -- naive form drops oldest's own scale from the divisor). Latent until now:
+  -- the bounce gate that calls this is OFF by default and off in every
+  -- frozen window, so the byte-identity gate never crossed it.
+  return (diff.m / POW10[diff.s]) / (oldest.m / POW10[oldest.s]) * 100
 end
 
 -- ── the evaluator (evaluate_spread_arb + tracker gates, exactly) ────────────
@@ -275,6 +339,18 @@ local function evaluate_token(cfg, confirmed, token, now_ms)
   if cfg.entry_max_spread_pct.m > 0 then
     local sp = dec_parse(book.spread_pct)
     if sp and dec_cmp(sp, cfg.entry_max_spread_pct) > 0 then return nil end
+  end
+
+  -- #176 trend gate (mean_reversion's proven lever, ported): a token several
+  -- legs into a one-sided slide is being repriced, not oversold — in a double
+  -- market the cheap side of a trend keeps cheapening, and every further dip
+  -- is another knife. Blocks the entry only; nothing reprices what passes.
+  -- The arming guard mirrors the Rust knob validation (5..90): a zero
+  -- threshold here would read `drop <= -0` and refuse EVERY entry, so an
+  -- unarmed threshold means the gate is off, not always-on.
+  local drop = tracker_trend_drop_pct(cfg, token, now_ms)
+  if cfg.entry_trend_drop_pct.m > 0 and drop <= -tonumber(dec_fmt(cfg.entry_trend_drop_pct)) then
+    return nil
   end
 
   local raw
