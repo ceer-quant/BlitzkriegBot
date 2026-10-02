@@ -88,6 +88,17 @@ for (const [cid, toks] of legTokens) if (toks.size >= 2) pairRounds.add(cid);
 
 // ── backtest side: per-condition net from the report's tradeLines ──────────
 const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+// Fail-closed on a clipped trade list: a truncated report would bias the
+// per-condition overlay toward the earliest rounds. Since #355 the core
+// serializes every closed trade, so this only fires on stale binaries.
+if ((report.tradeLinesTruncated ?? 0) > 0) {
+  console.error(
+    `FATAL: ${reportPath} reports tradeLinesTruncated=${report.tradeLinesTruncated} — ` +
+      'the per-condition overlay must never read a clipped prefix. Re-run the ' +
+      'replay with a core that serializes the full trade list (post-#355).',
+  );
+  process.exit(1);
+}
 const btNet = new Map(); // cid -> sum netPnlUsd
 for (const tl of report.tradeLines ?? []) {
   const cid = tl.conditionId;

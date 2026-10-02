@@ -375,7 +375,10 @@ pub struct BacktestReport {
     pub risk_alerts: Vec<String>,
     pub errors: Vec<String>,
     pub trade_lines: Vec<TradeLine>,
-    /// Trades beyond the `trade_lines` cap (list truncated, counts not).
+    /// #355: ALWAYS 0 — the serialized `trade_lines` list is complete (a
+    /// per-condition aggregator like the @almach overlay must never read a
+    /// clipped prefix). Kept for report-schema compatibility; the Display
+    /// summary still caps its own printout at [`MAX_TRADE_LINES`].
     pub trade_lines_truncated: u64,
     /// #351 reproducibility digest: SHA256 over the closed-trade list in close
     /// order (each line's canonical JSON, concatenated). Two replays of the
@@ -492,14 +495,18 @@ impl BacktestReport {
         }
         if !self.trade_lines.is_empty() {
             s.push_str("  trades:\n");
-            for line in &self.trade_lines {
+            // The serialized `trade_lines` list is complete (#355); the human
+            // summary still caps its printout at MAX_TRADE_LINES.
+            let shown = self.trade_lines.len().min(MAX_TRADE_LINES);
+            for line in &self.trade_lines[..shown] {
                 s.push_str(&format!(
                     "    {:<14} {:<4} {:<18} {:>8.2} ({:.2}%)\n",
                     line.asset, line.direction, line.reason, line.net_pnl_usd, line.net_pnl_pct
                 ));
             }
-            if self.trade_lines_truncated > 0 {
-                s.push_str(&format!("    … {} more\n", self.trade_lines_truncated));
+            let more = self.trade_lines.len() - shown;
+            if more > 0 {
+                s.push_str(&format!("    … {more} more\n"));
             }
         }
         s
@@ -552,7 +559,9 @@ pub struct EventBacktester {
     cfg_progress: Option<std::sync::Arc<dyn Fn(u64, i64) + Send + Sync>>,
 }
 
-/// Trades kept in the report's `trade_lines` (counts always cover all trades).
+/// Trades shown by the report's Display summary. The serialized `trade_lines`
+/// list is complete since #355 (counts always cover all trades) — a per-
+/// condition aggregator must never read a clipped prefix.
 const MAX_TRADE_LINES: usize = 2_000;
 /// Risk alerts / errors kept in the report.
 const MAX_MESSAGES: usize = 200;
@@ -964,20 +973,18 @@ impl Backtester for EventBacktester {
         let views = self.core.position_views(clock);
         let open_notional: Decimal = views.iter().map(|p| p.entry_price * p.shares).sum();
         let stats = self.source.stats();
-        let (trade_lines, truncated) = if self.trades.len() > MAX_TRADE_LINES {
-            (
-                self.trades[..MAX_TRADE_LINES].to_vec(),
-                (self.trades.len() - MAX_TRADE_LINES) as u64,
-            )
-        } else {
-            (self.trades.clone(), 0)
-        };
+        // #355: the serialized report carries EVERY closed trade — a per-
+        // condition aggregator (the @almach overlay) must never compute from
+        // a silently clipped prefix (a full-window 5m replay closes ~24k
+        // legs; the old 2k cap kept only the earliest). The Display summary
+        // still caps its own printout at MAX_TRADE_LINES.
+        let trade_lines = self.trades.clone();
         let trades = self.trade_stats(fees_usd);
         // #351 reproducibility digest: the canonical JSON of every closed trade
         // in close order, concatenated and SHA256'd. Two replays of the same
         // archive under the same config MUST agree byte-for-byte — a differing
         // digest is a determinism bug, not a statistic. Hashed from the FULL
-        // trade list (the report's `tradeLines` may be truncated for size).
+        // trade list, which `tradeLines` now also carries complete.
         let mut hasher = Sha256::new();
         for t in &self.trades {
             let line = serde_json::to_string(t).unwrap_or_default();
@@ -1016,7 +1023,7 @@ impl Backtester for EventBacktester {
             risk_alerts: std::mem::take(&mut self.risk_alerts),
             errors: std::mem::take(&mut self.errors),
             trade_lines,
-            trade_lines_truncated: truncated,
+            trade_lines_truncated: 0,
             trades_sha256,
             forced_dry: true,
         })
