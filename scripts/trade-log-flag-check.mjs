@@ -25,9 +25,17 @@ async function runCore(extra, sock, work) {
   await sleep(300);
   // Open a position, then close it at a profit so a closed trade is recorded.
   // The FOK buy needs resting depth: mirror an ask at the entry price first.
+  // The close is EXPLICIT (`positions.exit`) since the #351 calibration
+  // (561c1f5e): the shipped kernel holds positions to settlement — the
+  // guillotine is OFF and the take-profit exit rides a maker order that a
+  // static book never crosses — so the old implicit 600ms close is
+  // unreachable, run 1 left its position open in the shared work dir, and
+  // run 2 restored it only to refuse the new entry ("Already in BTC").
+  // A flatten's sell needs a bid to cross: mirror 0.95 before exiting.
   await rpc(sock, 'books.snapshot', { tokenId: 'tok', bids: [], asks: [{ price: 0.4, size: 100 }] });
   await rpc(sock, 'orders.place', { tokenId: 'tok', conditionId: 'c', side: 'buy', mode: 'taker', price: 0.4, size: 5, internalKey: 'k', strategy: 't', asset: 'BTC', direction: 'up', roundSlot: 1 });
   await rpc(sock, 'books.snapshot', { tokenId: 'tok', bids: [{ price: 0.95, size: 100 }], asks: [{ price: 0.99, size: 100 }] });
+  await rpc(sock, 'positions.exit', {});
   await sleep(600);
   const trades = await rpc(sock, 'trades.history', { limit: 0 });
   p.kill('SIGTERM');
