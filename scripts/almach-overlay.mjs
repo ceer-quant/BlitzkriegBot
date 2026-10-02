@@ -157,10 +157,14 @@ const btInvested = new Map();
 for (const tl of report.tradeLines ?? []) {
   const cid = tl.conditionId;
   if (!cid || !pairRounds.has(cid) || !settled.has(cid)) continue;
-  // entryPrice is per-share; shares are not in the report — approximate the
-  // invested basis with entryPrice (1 share units) ONLY for the ratio shape;
-  // the comparison that matters is per-round edge, not this approximation.
-  btInvested.set(cid, (btInvested.get(cid) ?? 0) + (tl.entryPrice ?? 0));
+  // Exact invested basis: the report computes netPnlPct = netPnlUsd /
+  // invested × 100, so invested = netPnlUsd / netPnlPct × 100 per close
+  // (0-PnL flats carry 0 in both, excluded consistently).
+  const inv =
+    tl.netPnlPct && tl.netPnlPct !== 0
+      ? Math.abs((tl.netPnlUsd / tl.netPnlPct) * 100)
+      : 0;
+  btInvested.set(cid, (btInvested.get(cid) ?? 0) + inv);
 }
 const btRoi = roiCurve(btCurve, btInvested);
 
@@ -216,7 +220,7 @@ const result = {
     backtestFinalPct: btRoi.at(-1)?.[1] ?? 0,
     actualCurve: actualRoi,
     backtestCurve: btRoi,
-    note: 'backtest invested-basis approximates 1-share units (entryPrice sum): the shape, not the level, is comparable',
+    note: 'invested basis derived exactly per close (netPnlUsd / netPnlPct x 100); both sides are realized / invested',
   },
   signals: {
     sharedRounds: both,
