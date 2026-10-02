@@ -316,6 +316,15 @@ pub struct CryptoMarket {
     pub down_price: Decimal,
     pub expires_at_ms: i64,
     pub round_slot: i64,
+    /// #354 (5.4): the round's own duration in seconds, as the venue declares
+    /// it (slug `5m` → 300, `15m` → 900). `0` = undeclared (old archives): the
+    /// replay then falls back to the configured grid and the cadence gate
+    /// stays silent. Declared durations that disagree with the configured
+    /// grid are what the #354 fail-closed gate refuses — a 5m corpus replayed
+    /// on the 15m assumption ages every round 3× too slowly and the window
+    /// gates mis-time every exit.
+    #[serde(default)]
+    pub round_duration_sec: i64,
     pub neg_risk: bool,
     pub question: String,
 }

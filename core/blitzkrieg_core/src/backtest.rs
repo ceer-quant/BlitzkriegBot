@@ -22,6 +22,7 @@
 //! a replay is a re-run of the same decisions, not an approximation.
 
 use crate::data_source::{DataSource, SourceStats, TimedEvent};
+use crate::engine::DataEvent;
 use crate::ipc::schema::Event;
 use crate::service::{Core, CoreConfig};
 use crate::sim::FillModel;
@@ -173,15 +174,25 @@ pub struct VecSource {
     events: std::vec::IntoIter<TimedEvent>,
     label: String,
     total: u64,
+    /// #354 (5.2): Spot ticks in the stream, counted up front — the same
+    /// completeness anchor a replay source reports, so an equivalence
+    /// comparison of `SourceStats` between the live feed and its archive
+    /// replay compares like with like.
+    spots: u64,
 }
 
 impl VecSource {
     pub fn new(events: Vec<TimedEvent>) -> Self {
         let total = events.len() as u64;
+        let spots = events
+            .iter()
+            .filter(|te| matches!(te.event, DataEvent::Spot { .. }))
+            .count() as u64;
         Self {
             events: events.into_iter(),
             label: format!("memory ({total} events)"),
             total,
+            spots,
         }
     }
 }
@@ -196,6 +207,7 @@ impl DataSource for VecSource {
     fn stats(&self) -> SourceStats {
         SourceStats {
             events: self.total,
+            spot_events: self.spots,
             ..Default::default()
         }
     }
@@ -384,10 +396,11 @@ impl BacktestReport {
             self.start_at_ms, self.end_at_ms, self.virtual_ms
         ));
         s.push_str(&format!(
-            "  events           : {} ({} malformed skipped, {} out-of-order)\n",
+            "  events           : {} ({} malformed skipped, {} out-of-order, {} spot)\n",
             self.source_stats.events,
             self.source_stats.malformed_lines,
-            self.source_stats.out_of_order_events
+            self.source_stats.out_of_order_events,
+            self.source_stats.spot_events
         ));
         s.push_str(&format!(
             "  fill model       : slippage {} tick(s), maker latency {} ms, maker fill {} bps\n",
@@ -884,6 +897,27 @@ impl Backtester for EventBacktester {
                 }
                 clock = at;
             }
+            // #354 (5.4): the replay grid is fail-closed against the corpus.
+            // A market that DECLARES its round duration (converter-written,
+            // non-zero) and disagrees with the configured grid would run every
+            // scanner gate — age, time-left, slot expiry — on the wrong clock:
+            // the exact silent mis-timing this issue exists to kill. Refuse
+            // the replay instead. An undeclared market (0: old archives, and
+            // the live host's own path) stays silent — it rides the configured
+            // grid by definition.
+            if let DataEvent::RoundMarkets { markets, .. } = &te.event {
+                let grid = self.core.config().round_duration_sec;
+                for m in markets {
+                    if m.round_duration_sec > 0 && m.round_duration_sec != grid {
+                        return Err(format!(
+                            "replay cadence mismatch: round for {} declares {}s but the replay \
+                             grid is {}s (--round-sec). Every timing gate would run on the \
+                             wrong clock; replay with the matching --round-sec.",
+                            m.asset, m.round_duration_sec, grid
+                        ));
+                    }
+                }
+            }
             // Late/out-of-order events still get the current clock (never a
             // backwards jump) — the source counts them separately.
             self.core.engine_on_data(te.event, clock);
@@ -1093,7 +1127,14 @@ mod tests {
         }
     }
 
-    fn bt(core: CoreConfig, src: Box<dyn DataSource>, tail_ms: i64) -> BacktestReport {
+    /// `bt` but keeping the Result: the #354 cadence gate refuses a replay
+    /// whose corpus disagrees with the configured grid, and the tests below
+    /// need to see that refusal, not just a panic.
+    fn bt_result(
+        core: CoreConfig,
+        src: Box<dyn DataSource>,
+        tail_ms: i64,
+    ) -> Result<BacktestReport, String> {
         let mut b = EventBacktester::new(
             BacktestConfig {
                 core,
@@ -1121,7 +1162,130 @@ mod tests {
             b.core_mut().set_strategy_enabled("spread_arb", true),
             "the hosted adapter registers under its reference name"
         );
-        b.run().expect("replay runs")
+        b.run()
+    }
+
+    fn bt(core: CoreConfig, src: Box<dyn DataSource>, tail_ms: i64) -> BacktestReport {
+        bt_result(core, src, tail_ms).expect("replay runs")
+    }
+
+    // ── #354 (5.4) · the replay grid is fail-closed against the corpus ─────
+    //
+    // The converter stamps every market with the duration its slug declares.
+    // A 5m corpus replayed on the 15m grid would run every scanner gate on
+    // the wrong clock — silently. The gate refuses the replay; the
+    // lazily-correct answer to "corpus and config disagree" is an error, not
+    // a plausible-looking number.
+
+    /// A market the way the converter writes it: slot and expiry derived from
+    /// the round's OWN duration, and that duration declared on the market.
+    fn market_declaring(now: i64, duration_sec: i64) -> crate::model::CryptoMarket {
+        let mut m = round_market(now);
+        m.round_duration_sec = duration_sec;
+        m.round_slot = now / 1000 / duration_sec;
+        m.expires_at_ms = (m.round_slot + 1) * duration_sec * 1000;
+        m
+    }
+
+    fn round_markets_event(now: i64, duration_sec: i64) -> TimedEvent {
+        TimedEvent {
+            at_ms: now,
+            event: DataEvent::RoundMarkets {
+                markets: vec![market_declaring(now, duration_sec)],
+                now_ms: now,
+            },
+        }
+    }
+
+    /// RED must stay red: a 5m corpus replayed on the 15m grid is refused,
+    /// not mis-timed into a report that looks fine.
+    #[test]
+    fn a_five_minute_corpus_on_a_fifteen_minute_grid_is_refused() {
+        let core = base_core(None); // the 900s grid
+        let err = bt_result(
+            core,
+            Box::new(VecSource::new(vec![round_markets_event(NOW, 300)])),
+            0,
+        )
+        .expect_err("5m corpus on the 15m grid must be refused");
+        assert!(
+            err.contains("300") && err.contains("900"),
+            "the refusal names both cadences: {err}"
+        );
+    }
+
+    /// The same corpus on the matching grid replays cleanly.
+    #[test]
+    fn a_five_minute_corpus_replays_on_its_own_grid() {
+        let mut core = base_core(None);
+        core.round_duration_sec = 300;
+        let r = bt_result(
+            core,
+            Box::new(VecSource::new(vec![round_markets_event(NOW, 300)])),
+            0,
+        )
+        .expect("the declared cadence matches the configured grid");
+        assert!(r.errors.is_empty(), "a clean replay reports no errors");
+    }
+
+    /// Pre-#354 archives declare nothing (`round_duration_sec = 0`): they ride
+    /// the configured grid exactly as the live host does — silently, on any grid.
+    #[test]
+    fn an_undeclared_round_replays_silently_on_any_grid() {
+        let core = base_core(None); // the 900s grid
+        let mut m = round_market(NOW); // slot/expiry already on that grid
+        m.round_duration_sec = 0; // the pre-#354 shape: no declaration at all
+        let r = bt_result(
+            core,
+            Box::new(VecSource::new(vec![TimedEvent {
+                at_ms: NOW,
+                event: DataEvent::RoundMarkets {
+                    markets: vec![m],
+                    now_ms: NOW,
+                },
+            }])),
+            0,
+        )
+        .expect("undeclared archives stay compatible");
+        assert!(r.errors.is_empty());
+    }
+
+    /// #354 (5.1): the replay charges the ACTIVE schedule's curve on taker
+    /// legs and NOTHING on maker legs. The scenario's entry is an escalated
+    /// taker (10 shares at the 0.45 ask); its take-profit exit is a maker at
+    /// the bid. Strict equality against the charge-site's own formula pins
+    /// all three claims at once: the entry fee follows the real schedule
+    /// curve (not a flat rate), the maker exit contributes zero, and a taker
+    /// fee charged on a maker exit breaks the equality. RED on any of those.
+    #[test]
+    fn the_replay_charges_the_schedule_curve_on_taker_legs_and_zero_on_maker_legs() {
+        let r = bt(
+            base_core(None),
+            Box::new(VecSource::new(scenario_events(NOW))),
+            10_000,
+        );
+        assert_eq!(r.trades.closed, 1, "\n{}", r.render());
+        // Entry: the escalated taker leg crosses at the 12s book's ask (0.45),
+        // 10 shares (size_usd 2.5 clamps up to min_shares 10).
+        let expected = (crate::exit_policy::taker_fee_pct(dec!(0.45)) / Decimal::ONE_HUNDRED)
+            * dec!(0.45)
+            * dec!(10);
+        assert!(
+            expected > Decimal::ZERO,
+            "the scenario must actually incur a fee, or this pin is vacuous"
+        );
+        assert_eq!(
+            r.trades.fees_usd,
+            expected,
+            "fees must be exactly the taker entry leg's schedule fee — no more \
+             (a maker exit pays nothing) and no less (the entry pays the curve):\n{}",
+            r.render()
+        );
+        // The report names the schedule the fees were charged under (#203).
+        let active = crate::exit_policy::fee_schedule();
+        assert_eq!(r.fee_schedule.name, active.name);
+        assert_eq!(r.fee_schedule.rate, active.rate);
+        assert_eq!(r.fee_schedule.exponent, active.exponent);
     }
 
     fn tmp_dir(tag: &str) -> PathBuf {

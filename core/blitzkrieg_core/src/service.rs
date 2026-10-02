@@ -8023,6 +8023,7 @@ mod books_mirror_tests {
                     down_price: dec!(0.4),
                     expires_at_ms: end,
                     round_slot: slot,
+                    round_duration_sec: 900,
                     neg_risk: true,
                     question: "?".into(),
                 }],
@@ -8122,6 +8123,7 @@ mod books_mirror_tests {
                     down_price: dec!(0.4),
                     expires_at_ms: end,
                     round_slot: slot,
+                    round_duration_sec: 900,
                     neg_risk: true,
                     question: "?".into(),
                 }],
@@ -9730,6 +9732,7 @@ mod strategy_dispatch_tests {
                 down_price: dec!(0.4),
                 expires_at_ms: 1_800_000,
                 round_slot: 1,
+                round_duration_sec: 900,
                 neg_risk: true,
                 question: format!("{a} up or down"),
             })
@@ -13430,6 +13433,76 @@ mod settlement_service_tests {
         assert_eq!(closed.exit_reason, ExitReason::Settlement);
         assert_eq!(closed.exit_price, Decimal::ONE);
         assert!(c.run_accounting_audit(130_001).ok);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reverse acceptance (calibration): the venue's own answer is booked as it
+    /// reports it — an UMA-invalid market pays 0.5/share to BOTH sides, and
+    /// that half is real collateral, not a rounding artifact to snap to 0 or 1.
+    /// The booking layer takes any payout the venue reports; the DRY source
+    /// keeps its own 0/1 verdict shape (pinned by the bid-less tests above) —
+    /// two sources, both traceable through the journal's `source` field.
+    #[test]
+    fn an_uma_invalid_half_payout_books_and_redeems_as_half() {
+        let dir = scratch("uma-invalid");
+        let mut c = settling_core(&dir, dec!(10));
+        open_and_anchor(&mut c, dec!(10));
+        let balance_before = c.ledger().balance();
+
+        c.on_market_resolution(
+            blitzkrieg_market_api::MarketResolution {
+                condition_id: "cond".into(),
+                resolved: true,
+                payouts: vec![("tok".to_string(), dec!(0.5))],
+                neg_risk: false,
+                source: "uma-invalid".into(),
+            },
+            2_001,
+        );
+
+        // The position closes at exactly the reported half — 0 would zero real
+        // collateral, 1 would invent a winner.
+        assert!(c.positions().open_positions().is_empty());
+        let closed = &c.positions().closed_positions()[0];
+        assert_eq!(closed.exit_reason, ExitReason::Settlement);
+        assert_eq!(closed.exit_price, dec!(0.5));
+        assert_eq!(
+            closed.net_pnl_usd,
+            dec!(0.464),
+            "payout 2.5 − cost 2 − entry fee 0.036"
+        );
+
+        // The half is held as a receivable until the redeem confirms.
+        let stats = settlement_json(&c);
+        assert_eq!(stats["receivableUsd"], serde_json::json!(2.5));
+        assert_eq!(stats["pendingRedemptions"], serde_json::json!(1));
+        assert!(c.run_accounting_audit(2_002).ok);
+
+        // The venue-sourced redemption credits 2.5 to cash.
+        let due = c.take_pending_redemptions(2_002);
+        assert_eq!(due.len(), 1);
+        c.on_redemption_result(
+            blitzkrieg_market_api::RedemptionResult {
+                id: due[0].id.clone(),
+                condition_id: "cond".into(),
+                tx_hash: Some("0xinvalid".into()),
+                block_number: Some(42),
+                failure: None,
+                at_ms: 2_003,
+            },
+            2_003,
+        );
+        assert_eq!(c.ledger().balance(), balance_before + dec!(2.5));
+        let stats = settlement_json(&c);
+        assert_eq!(stats["receivableUsd"], serde_json::json!(0.0));
+        assert_eq!(stats["redeemedClaims"], serde_json::json!(1));
+        assert!(c.run_accounting_audit(2_004).ok);
+
+        // The journal carries the source verbatim: a simulated settlement can
+        // never be mistaken for a venue one (and vice versa).
+        let journal = std::fs::read_to_string(dir.join("settlements.jsonl")).unwrap();
+        assert!(journal.contains("\"source\":\"uma-invalid\""), "{journal}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

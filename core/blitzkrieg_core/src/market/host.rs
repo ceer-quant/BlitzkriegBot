@@ -25,6 +25,11 @@ pub fn market_from_api(d: &api::MarketDescriptor) -> m::CryptoMarket {
         down_price: d.down_price,
         expires_at_ms: d.expires_at_ms,
         round_slot: d.round_slot,
+        // Live markets ride the configured grid (the scanner slots off
+        // `round_duration_sec`), and the API descriptor declares no duration —
+        // `0` keeps the #354 cadence gate silent on the live path, where the
+        // grid IS the assumption.
+        round_duration_sec: 0,
         neg_risk: d.neg_risk,
         question: d.question.clone(),
     }

@@ -1355,6 +1355,7 @@ mod tests {
             down_price: dec!(0.4),
             expires_at_ms: end_ms,
             round_slot: end_ms / 1000 / 900,
+            round_duration_sec: 900,
             neg_risk: true,
             question: "BTC up or down".into(),
         }
@@ -1895,6 +1896,7 @@ mod tests {
             down_price: dec!(0.4),
             expires_at_ms: end_ms,
             round_slot: end_ms / 1000 / 900,
+            round_duration_sec: 900,
             neg_risk: true,
             question: format!("{asset} up or down"),
         }

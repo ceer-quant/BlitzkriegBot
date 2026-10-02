@@ -874,7 +874,18 @@ fn convert(
             up_price: seed(&up),
             down_price: seed(&down),
             expires_at_ms: end_sec * 1000,
-            round_slot: rs.start_sec,
+            // #354 (5.4): the kernel's slot is an INDEX on the round grid
+            // (scanner `current_slot` = now_ms/1000/duration; a manual close's
+            // expiry derives `(slot+1) * round_duration_sec`), not an epoch.
+            // The converter used to write the round's absolute start second,
+            // which a 5m round under any grid arithmetic silently mis-times —
+            // the slot index is start/duration by definition.
+            round_slot: rs.start_sec / rs.duration_sec,
+            // #354 (5.4): the slug's declared duration travels with the market,
+            // so a replay can refuse a corpus whose round cadence disagrees
+            // with the configured grid (5m data on a 15m assumption ages every
+            // round 3× too slowly) instead of silently mis-timing it.
+            round_duration_sec: rs.duration_sec,
             neg_risk: g.get("negRisk").and_then(Value::as_bool).unwrap_or(false),
             question: sample
                 .get("title")

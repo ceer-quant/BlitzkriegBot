@@ -57,6 +57,11 @@ pub struct SourceStats {
     pub malformed_lines: u64,
     /// Events whose timestamp went backwards relative to the previous event.
     pub out_of_order_events: u64,
+    /// #354 (5.2): Spot ticks the source parsed — the corpus-completeness
+    /// anchor for the spot-driven strategies. A corpus that lost its spot rows
+    /// reports a count far below the builder's tally instead of replaying
+    /// "successfully" blind.
+    pub spot_events: u64,
 }
 
 /// Pull side: a timestamp-ordered supply of market-data events.
@@ -805,6 +810,8 @@ pub struct ReplaySource {
     events: u64,
     skipped: u64,
     out_of_order: u64,
+    /// #354 (5.2): Spot ticks parsed — the completeness counter.
+    spots: u64,
     last_at_ms: Option<i64>,
     warned: bool,
 }
@@ -820,6 +827,7 @@ impl ReplaySource {
             events: 0,
             skipped: 0,
             out_of_order: 0,
+            spots: 0,
             last_at_ms: None,
             warned: false,
         })
@@ -875,6 +883,9 @@ impl DataSource for ReplaySource {
                     continue;
                 }
             };
+            if matches!(event, DataEvent::Spot { .. }) {
+                self.spots += 1;
+            }
             let at_ms = event_at_ms(&event);
             if let Some(prev) = self.last_at_ms
                 && at_ms < prev
@@ -898,6 +909,7 @@ impl DataSource for ReplaySource {
             events: self.events,
             malformed_lines: self.skipped,
             out_of_order_events: self.out_of_order,
+            spot_events: self.spots,
         }
     }
 }
@@ -917,6 +929,8 @@ pub struct SegmentSource {
     events: u64,
     skipped: u64,
     out_of_order: u64,
+    /// #354 (5.2): Spot ticks folded in from exhausted segments.
+    spots: u64,
     last_at_ms: Option<i64>,
     label: String,
 }
@@ -989,6 +1003,7 @@ impl SegmentSource {
             events: 0,
             skipped: 0,
             out_of_order: 0,
+            spots: 0,
             last_at_ms: None,
             label,
         })
@@ -1019,6 +1034,7 @@ impl DataSource for SegmentSource {
             }
             // Exhausted: fold in this segment's parse counters and move on.
             self.skipped += src.skipped_lines();
+            self.spots += src.stats().spot_events;
             self.current += 1;
         }
     }
@@ -1032,6 +1048,7 @@ impl DataSource for SegmentSource {
             events: self.events,
             malformed_lines: self.skipped,
             out_of_order_events: self.out_of_order,
+            spot_events: self.spots,
         }
     }
 }
@@ -1204,6 +1221,11 @@ mod tests {
         }
         assert_eq!(src.out_of_order_events(), 0);
         assert_eq!(src.skipped_lines(), 0);
+        assert_eq!(
+            src.stats().spot_events,
+            1,
+            "the one Spot of all_events is tallied"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1248,6 +1270,10 @@ mod tests {
             "sibling dataset lines must not be read"
         );
         assert_eq!(st.out_of_order_events, 0);
+        assert_eq!(
+            st.spot_events, 2,
+            "the spot rows of BOTH segments are folded into the tally"
+        );
         assert_eq!(last, 10, "rotated segment first (older), live last");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1294,6 +1320,46 @@ mod tests {
         assert_eq!(src.next_event().unwrap().at_ms, 10);
         assert_eq!(src.next_event().unwrap().at_ms, 5);
         assert_eq!(src.out_of_order_events(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #354 (5.2): a corpus that lost its spot rows does not replay silently —
+    /// the source's own tally is the difference the reconciliation catches.
+    /// RED on the pre-#354 shape, where the count did not exist and a stripped
+    /// corpus replayed "successfully" blind.
+    #[test]
+    fn a_corpus_that_dropped_its_spot_rows_is_visible_in_the_tally() {
+        let dir = std::env::temp_dir().join(format!("bk-archive-drops-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The full shape: book + spot interleaved.
+        std::fs::write(
+            dir.join("full.jsonl"),
+            "{\"at\":1,\"k\":\"book\",\"t\":\"tok\",\"b\":[[\"0.4\",\"10\"]],\"a\":[[\"0.5\",\"10\"]]}\n\
+             {\"at\":2,\"k\":\"spot\",\"s\":\"BTC\",\"p\":\"60000\"}\n\
+             {\"at\":3,\"k\":\"spot\",\"s\":\"BTC\",\"p\":\"60001\"}\n",
+        )
+        .unwrap();
+        // The stripped shape the completeness gate must catch: same books, the
+        // spots gone.
+        std::fs::write(
+            dir.join("stripped.jsonl"),
+            "{\"at\":1,\"k\":\"book\",\"t\":\"tok\",\"b\":[[\"0.4\",\"10\"]],\"a\":[[\"0.5\",\"10\"]]}\n",
+        )
+        .unwrap();
+
+        let mut full = ReplaySource::open(&dir.join("full.jsonl")).unwrap();
+        while full.next_event().is_some() {}
+        assert_eq!(full.stats().spot_events, 2);
+
+        let mut stripped = ReplaySource::open(&dir.join("stripped.jsonl")).unwrap();
+        while stripped.next_event().is_some() {}
+        let st = stripped.stats();
+        assert_eq!(st.events, 1, "the book survived");
+        assert_eq!(
+            st.spot_events, 0,
+            "the dropped spot rows show as zero, not as success"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

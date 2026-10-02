@@ -73,6 +73,7 @@ fn market() -> CryptoMarket {
         down_price: dec!(0.45),
         expires_at_ms: NOW + 300_000,
         round_slot: NOW / 300_000,
+        round_duration_sec: 300,
         neg_risk: false,
         question: "BTC up or down".into(),
     }

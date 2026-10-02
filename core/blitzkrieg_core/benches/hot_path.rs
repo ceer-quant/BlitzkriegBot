@@ -95,6 +95,7 @@ fn bench_core() -> Core {
             down_price: dec!(0.4),
             expires_at_ms: end,
             round_slot: slot,
+            round_duration_sec: 900,
             neg_risk: true,
             question: "?".into(),
         })
@@ -229,6 +230,7 @@ fn bench_evaluate(c: &mut Criterion) {
                         down_price: dec!(0.4),
                         expires_at_ms: end,
                         round_slot: slot,
+                        round_duration_sec: 900,
                         neg_risk: true,
                         question: "?".into(),
                     }],

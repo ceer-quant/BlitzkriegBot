@@ -261,6 +261,7 @@ fn market(asset: &str, up: &str, down: &str) -> CryptoMarket {
         down_price: dec!(0.5),
         expires_at_ms: T0 + ROUND_MS,
         round_slot: T0 / ROUND_MS,
+        round_duration_sec: 900,
         neg_risk: true,
         question: format!("{asset} up or down"),
     }
