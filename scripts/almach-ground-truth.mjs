@@ -40,6 +40,12 @@ const conds = new Map(); // cid -> {slug, tokens:Set}
 let fills = 0;
 let redeemUsd = 0, redeemRows = 0, mergeUsd = 0, mergeRows = 0;
 let rebateUsd = 0, rewardUsd = 0;
+// #355 acceptance: fill distribution (price bands, UTC-hour bands, assets)
+const priceBands = new Map();
+const hourHist = new Map();
+const assetCounts = new Map();
+const bandOf = (p) =>
+  p < 0.1 ? '<0.10' : p < 0.3 ? '0.10-0.30' : p < 0.5 ? '0.30-0.50' : p < 0.7 ? '0.50-0.70' : p < 0.9 ? '0.70-0.90' : '>=0.90';
 
 const lines = readFileSync(ledgerPath, 'utf8').split('\n');
 for (const line of lines) {
@@ -67,6 +73,13 @@ for (const line of lines) {
   if (!d) continue; // non-round markets the wallet also touched
   if (durFilter && d !== durFilter) continue;
   fills += 1;
+  const px = r.price ?? 0;
+  const pb = bandOf(px);
+  priceBands.set(pb, (priceBands.get(pb) ?? 0) + 1);
+  const hour = new Date(ts * 1000).getUTCHours();
+  hourHist.set(hour, (hourHist.get(hour) ?? 0) + 1);
+  const asset = (r.slug ?? '').split('-')[0] || '?';
+  assetCounts.set(asset, (assetCounts.get(asset) ?? 0) + 1);
   const key = `${r.conditionId}\u0000${r.asset}`;
   let leg = legs.get(key);
   if (!leg) {
@@ -145,6 +158,15 @@ const result = {
     rebatesUsd: +rebateUsd.toFixed(2),
     rewardsUsd: +rewardUsd.toFixed(2),
     netUsd: +(redeemUsd + mergeUsd + rebateUsd + rewardUsd - tradeUsd).toFixed(2),
+  },
+  // #355 acceptance 6.1: the fill distribution (price bands, UTC-hour
+  // bands, per-asset) — the market-type axis is the duration split itself
+  // (a filtered run covers one market type; the unfiltered run's rounds
+  // count is the whole-wallet picture).
+  distribution: {
+    priceBands: Object.fromEntries([...priceBands.entries()].sort()),
+    utcHours: Object.fromEntries([...hourHist.entries()].sort((a, b) => a[0] - b[0])),
+    assets: Object.fromEntries([...assetCounts.entries()].sort((a, b) => b[1] - a[1])),
   },
 };
 console.log(JSON.stringify(result, null, 2));
