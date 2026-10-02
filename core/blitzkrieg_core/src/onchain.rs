@@ -52,9 +52,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const DATA_API_BASE: &str = "https://data-api.polymarket.com";
 pub const GAMMA_API_BASE: &str = "https://gamma-api.polymarket.com";
 pub const CLOB_API_BASE: &str = "https://clob.polymarket.com";
-/// Runaway guard: 100k fills is far past any single-wallet window we replay;
-/// past it the pull refuses rather than spin forever against a paging bug.
-pub const MAX_OFFSET: i64 = 100_000;
+/// Runaway guard on total fills appended across every segment: 100k is far
+/// past any single-wallet window we replay; past it the pull refuses rather
+/// than spin forever against a paging bug.
+pub const MAX_FILLS: i64 = 100_000;
+/// The venue's own `offset` ceiling on `/trades` (probed live 2026-10-02:
+/// `offset=10000` still answers, `offset=10500` errors with "max historical
+/// trades offset of 10000 exceeded"). A segment never requests past it —
+/// when a full page lands at the ceiling, the walk recurses on the window's
+/// older half (`start → min_ts`), where offsets restart from 0.
+pub const TRADES_OFFSET_CAP: i64 = 10_000;
 
 // ── fetcher ─────────────────────────────────────────────────────────────────
 
@@ -513,32 +520,39 @@ pub async fn pull_and_convert(
 
     // ── Trades ────────────────────────────────────────────────────────────
     let rp = raw_path(req);
-    let manifest: Value = if mp.exists() {
-        read_json(&mp)?
-    } else {
-        json!({})
-    };
-    let mut offset = manifest
-        .pointer("/state/tradesOffset")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let mut fetched: u64 = manifest
-        .pointer("/state/fetched")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+    // The walk restarts from the window start on every call — a stored
+    // offset would lie (the venue's filtered list can shift between
+    // processes), and every re-served page lands as a duplicate the
+    // fill-key dedupe removes at finalize. The expensive phases (gamma,
+    // prices) resume through their per-item caches instead.
+    let mut offset: i64 = 0;
+    let mut fetched: u64 = 0;
     let start_sec = req.start_ms / 1000;
     let end_sec = req.end_ms / 1000;
     report(
         progress,
         PullPhase::Trades,
-        fetched,
-        format!("resuming at offset {offset}"),
+        0,
+        format!("window [{start_sec}, {end_sec}]"),
     );
-    // The loop only ever exits on `break` (empty page, or a whole page
-    // below the window start — DESC order means everything further is older).
+    // The walk: server-side time filter (`start`/`end`, both inclusive —
+    // probed live 2026-10-02: the pair returns exactly that window, rows
+    // newest-first), offset-paged. The venue caps the OFFSET ITSELF at
+    // TRADES_OFFSET_CAP (10000 answers, 10500 errors with "max historical
+    // trades offset of 10000 exceeded"), so when the walk has run past the
+    // cap it reacts by page shape: a FULL page means there is likely more
+    // depth below — split the window at the oldest in-window timestamp
+    // seen and restart at offset 0 on `[start, min_ts]`; a SHORT page is
+    // the exhaustion signal (a frozen historical list cannot grow at its
+    // tail) — done, because the usual empty-page confirmation would die on
+    // the venue's offset error instead of answering empty. Below the cap a
+    // short page still gets its confirmation request. Boundary rows
+    // re-served across a split land as duplicates the fill-key dedupe
+    // removes at finalize; overlaps are always harmless.
+    let (seg_start, mut seg_end) = (start_sec, end_sec);
     loop {
         let url = format!(
-            "{DATA_API_BASE}/trades?user={}&limit={}&offset={offset}",
+            "{DATA_API_BASE}/trades?user={}&limit={}&offset={offset}&start={seg_start}&end={seg_end}",
             req.wallet, req.page_limit
         );
         let page = fetch
@@ -551,22 +565,23 @@ pub async fn pull_and_convert(
         if rows.is_empty() {
             break;
         }
-        let mut below = 0usize;
+        let mut min_ts = i64::MAX;
         for row in rows {
             let ts = row.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
-            if ts > end_sec || ts < start_sec {
-                if ts < start_sec {
-                    below += 1;
-                }
+            // The server already filtered; this check is the belt-and-braces
+            // against a venue quirk leaking out-of-window rows into the corpus
+            // — and a leaked row must not steer the split point either.
+            if ts > seg_end || ts < seg_start {
                 continue;
             }
+            min_ts = min_ts.min(ts);
             let line = row.to_string();
             append_line(&rp, &line)?;
             fetched += 1;
         }
         offset += rows.len() as i64;
-        // Persist the resume state after EVERY page: the crash window is one
-        // page of duplicate appends (deduped at finalize), never lost data.
+        // Persist the resume state after EVERY page: a crash loses nothing
+        // that the dedupe cannot absorb on the restart.
         write_json_atomic(
             &mp,
             &json!({
@@ -582,13 +597,32 @@ pub async fn pull_and_convert(
             fetched,
             format!("offset {offset} (+{})", rows.len()),
         );
-        if below == rows.len() {
-            break; // the whole page predates the window: done (DESC order)
-        }
-        if offset > MAX_OFFSET {
+        if fetched as i64 > MAX_FILLS {
             return Err(format!(
-                "offset {offset} exceeds the {MAX_OFFSET} safety cap — narrow the time window"
+                "the window holds more than {MAX_FILLS} fills — narrow the time window"
             ));
+        }
+        // The venue refuses any request past TRADES_OFFSET_CAP. Once the
+        // offset has run past it: a SHORT page is exhaustion — the usual
+        // empty-page confirmation would die on the venue's offset error
+        // instead of answering empty — and a FULL page means un-fetched
+        // depth below, so the window splits at the oldest in-window
+        // timestamp seen and the segment restarts at offset 0. The guard
+        // keeps the split honest: no time progress would mean an infinite
+        // walk.
+        let full = rows.len() as i64 == req.page_limit;
+        if offset > TRADES_OFFSET_CAP {
+            if !full {
+                break;
+            }
+            if min_ts >= seg_end {
+                return Err(format!(
+                    "trades walk stalled at the offset cap: segment [{seg_start}, {seg_end}] \
+                     oldest ts {min_ts} makes no time progress"
+                ));
+            }
+            seg_end = min_ts;
+            offset = 0;
         }
     }
 
@@ -1300,6 +1334,144 @@ mod tests {
         let alive = Scripted::new(vec![rows_ab(), vec![]], gamma_map(), false);
         let o = pull_and_convert(&alive, &r, &noop_cb()).await.unwrap();
         assert_eq!(o.trades, 2, "overlapping pages must dedupe to unique fills");
+        verify_dataset(&o.manifest_path).unwrap();
+    }
+
+    /// A venue-faithful mock: the frozen history is filtered by the URL's
+    /// own `start`/`end` and served `offset`/`limit`-paged (newest first) —
+    /// the exact semantics probed live 2026-10-02. Unlike `Scripted` this
+    /// mock is offset-AWARE, so a walk that pages wrongly loses or dupes
+    /// rows, and any request past `TRADES_OFFSET_CAP` dies the way the real
+    /// venue does ("max historical trades offset of 10000 exceeded").
+    struct PagingVenue {
+        all: Vec<Value>,
+        trades_urls: Mutex<Vec<String>>,
+        gammas: BTreeMap<String, Value>,
+    }
+
+    impl JsonFetcher for PagingVenue {
+        fn get_json<'a>(
+            &'a self,
+            url: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'a>> {
+            let out: Result<Value, String> = if url.contains("/trades?") {
+                self.trades_urls.lock().unwrap().push(url.to_string());
+                let param = |key: &str| {
+                    url.split(&format!("{key}="))
+                        .nth(1)
+                        .and_then(|s| s.split('&').next())
+                        .and_then(|s| s.parse::<i64>().ok())
+                };
+                let window = (
+                    param("limit"),
+                    param("offset"),
+                    param("start"),
+                    param("end"),
+                );
+                if let (Some(limit), Some(offset), Some(start), Some(end)) = window {
+                    if offset > TRADES_OFFSET_CAP {
+                        Err("max historical trades offset of 10000 exceeded".into())
+                    } else {
+                        let rows: Vec<Value> = self
+                            .all
+                            .iter()
+                            .filter(|r| {
+                                let ts = r.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
+                                ts >= start && ts <= end
+                            })
+                            .skip(offset as usize)
+                            .take(limit as usize)
+                            .cloned()
+                            .collect();
+                        Ok(Value::Array(rows))
+                    }
+                } else {
+                    Err(format!("trades url without the window contract: {url}"))
+                }
+            } else if url.contains("gamma-api") {
+                let cid = url
+                    .split("condition_ids=")
+                    .nth(1)
+                    .unwrap_or("")
+                    .split('&')
+                    .next()
+                    .unwrap_or("");
+                Ok(json!([self
+                    .gammas
+                    .get(cid)
+                    .cloned()
+                    .unwrap_or(Value::Null)]))
+            } else if url.contains("prices-history") {
+                let start: i64 = url
+                    .split("startTs=")
+                    .nth(1)
+                    .and_then(|s| s.split('&').next())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                Ok(json!({ "history": [
+                    { "t": start + 60, "p": 0.4 },
+                    { "t": start + 120, "p": 0.6 },
+                ]}))
+            } else {
+                Err(format!("unexpected url {url}"))
+            };
+            Box::pin(async move { out })
+        }
+    }
+
+    /// Acceptance (#355 prerequisite): a history longer than the venue's
+    /// offset ceiling is walked COMPLETELY — the full-page-at-the-cap split
+    /// resumes on the older prefix, the boundary row re-served by both
+    /// segments lands exactly once (fill-key dedupe), and every request
+    /// carried the server-side window. 10,503 fills × 500-page = 21 full
+    /// pages: one more than the 10,000 ceiling allows, so the tail is
+    /// reachable ONLY through the split.
+    #[tokio::test]
+    async fn a_full_history_walk_splits_at_the_venue_offset_cap() {
+        const N: usize = 10_503;
+        const T0: i64 = 1_790_785_000;
+        let all: Vec<Value> = (0..N)
+            .map(|i| {
+                let ts = T0 - i as i64;
+                let even = i % 2 == 0;
+                json!({
+                    "proxyWallet": WALLET, "side": "BUY",
+                    "asset": if even { UP1 } else { DOWN2 },
+                    "conditionId": if even { COND1 } else { COND2 },
+                    "size": 1.0, "price": 0.5, "timestamp": ts,
+                    "title": "t",
+                    "slug": if even { "btc-updown-15m-1790784900" } else { "btc-updown-5m-1790785200" },
+                    "outcome": "Up", "outcomeIndex": 0,
+                    "transactionHash": format!("0x{i:x}"),
+                })
+            })
+            .collect();
+        let fetch = PagingVenue {
+            all,
+            trades_urls: Mutex::default(),
+            gammas: gamma_map(),
+        };
+        let mut r = req(tmp("paging"));
+        // Wide enough that every generated second sits inside the window.
+        r.start_ms = (T0 - (N as i64 + 500)) * 1000;
+        r.end_ms = (T0 + 10) * 1000;
+        let o = pull_and_convert(&fetch, &r, &noop_cb()).await.unwrap();
+        assert_eq!(
+            o.trades, N as u64,
+            "every fill captured exactly once despite the boundary re-serve"
+        );
+        let urls = fetch.trades_urls.lock().unwrap();
+        assert!(
+            urls.iter()
+                .all(|u| u.contains("start=") && u.contains("end=")),
+            "every trades request must carry the server-side window: {:?}",
+            urls.first()
+        );
+        assert!(
+            urls.len() > 21,
+            "the walk crossed the offset cap only via the split: {} requests",
+            urls.len()
+        );
         verify_dataset(&o.manifest_path).unwrap();
     }
 
