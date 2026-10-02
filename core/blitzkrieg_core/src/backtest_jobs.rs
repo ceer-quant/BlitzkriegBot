@@ -324,6 +324,7 @@ impl BacktestJobs {
                 market: p.market.clone(),
                 out_dir: out_dir.clone(),
                 page_limit: 500,
+                fill_source: Default::default(),
             };
             let jobs = Arc::clone(self);
             let id2 = id.clone();

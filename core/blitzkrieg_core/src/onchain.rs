@@ -5,7 +5,12 @@
 //! every fill on chain and publishes it through three read APIs:
 //!
 //! * Data API  `data-api.polymarket.com/trades?user=<addr>` — the wallet's
-//!   fills, newest first, offset-paged (`limit` ≤ 500).
+//!   fills, newest first, offset-paged (`limit` ≤ 500). NOTE (#355): this
+//!   endpoint answers only a TAKER-SIDE SUBSET of the wallet's fills
+//!   (measured 2026-10-02: 17.6% of the same window's buy notional vs the
+//!   `/activity` ledger, with 98%+ row-key overlap) — a fill universe built
+//!   from it silently drops most rounds. `FillSource::ActivityFile` reads a
+//!   pre-fetched `/activity` export as the complete universe instead.
 //! * Gamma API `gamma-api.polymarket.com/markets?condition_ids=<id>` — market
 //!   metadata; `clobTokenIds[0]`=Up / `[1]`=Down, `endDate` = round close.
 //! * CLOB API  `clob.polymarket.com/prices-history?market=<token>&startTs=&endTs=&fidelity=1`
@@ -39,6 +44,7 @@
 
 use crate::engine::DataEvent;
 use crate::model::CryptoMarket;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -47,7 +53,9 @@ use std::future::Future;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::Semaphore;
 
 pub const DATA_API_BASE: &str = "https://data-api.polymarket.com";
 pub const GAMMA_API_BASE: &str = "https://gamma-api.polymarket.com";
@@ -62,6 +70,12 @@ pub const MAX_FILLS: i64 = 100_000;
 /// when a full page lands at the ceiling, the walk recurses on the window's
 /// older half (`start → min_ts`), where offsets restart from 0.
 pub const TRADES_OFFSET_CAP: i64 = 10_000;
+/// #355: bounded concurrency for the metadata/price phases. The HttpFetcher
+/// paces SENDS globally (one per `delay_ms`), so concurrency pipelines
+/// round-trips behind the next send slot — it never raises the request rate;
+/// it stops every fetch from serialising behind the previous response.
+pub const META_CONCURRENCY: usize = 8;
+pub const PRICE_CONCURRENCY: usize = 8;
 
 // ── fetcher ─────────────────────────────────────────────────────────────────
 
@@ -80,7 +94,11 @@ pub trait JsonFetcher: Send + Sync {
 pub struct HttpFetcher {
     client: reqwest::Client,
     delay_ms: u64,
-    seq: AtomicU64,
+    /// Global send schedule: the instant the NEXT request may go out. A
+    /// serial walk paces per request; a concurrent walk pipelines (hiding
+    /// round-trips) without ever raising the request rate above 1/delay_ms —
+    /// the semaphore bounds what is in flight, this bounds what is SENT.
+    next_send: std::sync::Mutex<Option<tokio::time::Instant>>,
 }
 
 impl HttpFetcher {
@@ -88,7 +106,26 @@ impl HttpFetcher {
         Self {
             client: reqwest::Client::new(),
             delay_ms,
-            seq: AtomicU64::new(0),
+            next_send: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Reserve the next send slot and wait for it. Locks only synchronously —
+    /// no await under the lock, so concurrent callers serialise on the
+    /// schedule, not on the lock.
+    async fn pace(&self) {
+        let when = {
+            let mut g = self.next_send.lock().unwrap();
+            let now = tokio::time::Instant::now();
+            let when = match *g {
+                Some(t) if t > now => t,
+                _ => now,
+            };
+            *g = Some(when + std::time::Duration::from_millis(self.delay_ms));
+            when
+        };
+        if when > tokio::time::Instant::now() {
+            tokio::time::sleep_until(when).await;
         }
     }
 }
@@ -99,10 +136,10 @@ impl JsonFetcher for HttpFetcher {
         url: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'a>> {
         Box::pin(async move {
-            let n = self.seq.fetch_add(1, Ordering::Relaxed);
-            if n > 0 && self.delay_ms > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
-            }
+            // Global pacing: concurrent callers take send slots 1/delay_ms
+            // apart — pipelining hides round-trips, it never raises the
+            // request rate.
+            self.pace().await;
             let mut last = String::new();
             for attempt in 0..3 {
                 if attempt > 0 {
@@ -148,6 +185,30 @@ pub struct PullRequest {
     /// Output root; `data/onchain` in production.
     pub out_dir: PathBuf,
     pub page_limit: i64,
+    /// Where the fill universe comes from. Default [`FillSource::TradesApi`]
+    /// keeps the #352 behaviour; [`FillSource::ActivityFile`] (#355) trusts a
+    /// pre-fetched `/activity` export instead — the Data API's `/trades`
+    /// endpoint answers with a TAKER-SIDE SUBSET of the wallet's fills
+    /// (measured 2026-10-02: 17.6% of the same window's buy notional, with
+    /// 98%+ row-key overlap), so a universe built from it silently drops
+    /// ~82% of the rounds. The activity ledger is complete; its rows carry
+    /// every field the converter reads (slug/conditionId/asset/size/price/
+    /// timestamp).
+    pub fill_source: FillSource,
+}
+
+/// The source of the pull's fill universe (see [`PullRequest::fill_source`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum FillSource {
+    /// Walk `GET /trades` live (the original #352 path: offset-paged,
+    /// offset-cap-aware segmented walk, resumable).
+    #[default]
+    TradesApi,
+    /// Read a pre-fetched `/activity` JSONL export (one row per line, same
+    /// field names) as the complete fill ledger, write it through the
+    /// canonical dedupe, and build the universe from it. `page_limit` is
+    /// unused.
+    ActivityFile(PathBuf),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +277,17 @@ fn stem(req: &PullRequest) -> String {
     }
     if let Some(m) = &req.market {
         s.push_str(&format!("-{}", m.to_lowercase()));
+    }
+    if let FillSource::ActivityFile(p) = &req.fill_source {
+        // The fill source is part of the request identity: an activity-ledger
+        // pull and a /trades walk of the same window are different datasets
+        // (~5x universe size) and must never answer each other's cache — and
+        // the ledger's identity is its CONTENT, so a re-fetched export with
+        // more history gets a fresh dataset instead of a stale cache hit.
+        let tag = sha256_file(p)
+            .map(|h| h[..12].to_string())
+            .unwrap_or_else(|_| "missing".into());
+        s.push_str(&format!("-act-{tag}"));
     }
     s
 }
@@ -474,6 +546,269 @@ fn finalize_trades(raw: &Path, out: &Path) -> Result<u64, String> {
     Ok(n)
 }
 
+/// One condition's metadata with the CLOB fallback (gamma prunes closed
+/// short-cycle updown markets; `/markets/{condition_id}` keeps the full
+/// record). Adapted into the gamma shape the converter consumes —
+/// `clobTokenIds` as the JSON-encoded string array, Up first, Down second.
+/// Extracted from the pull loop so the bounded-concurrency pipeline calls
+/// it per condition.
+async fn fetch_meta(fetch: &dyn JsonFetcher, cid: &str) -> Result<Value, String> {
+    let url = format!("{GAMMA_API_BASE}/markets?condition_ids={cid}");
+    let resp = fetch
+        .get_json(&url)
+        .await
+        .map_err(|e| format!("gamma {cid}: {e}"))?;
+    let arr = resp.as_array().cloned().unwrap_or_default();
+    let mut v = arr.into_iter().next().unwrap_or(Value::Null);
+    if v.is_null() || v.get("clobTokenIds").is_none() {
+        let url = format!("{CLOB_API_BASE}/markets/{cid}");
+        match fetch.get_json(&url).await {
+            Ok(c) => {
+                let toks = c
+                    .get("tokens")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let token_of = |t: &Value| {
+                    t.get("token_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                let mut up = String::new();
+                let mut down = String::new();
+                for t in &toks {
+                    match t.get("outcome").and_then(Value::as_str) {
+                        Some("Up") if up.is_empty() => up = token_of(t),
+                        Some("Down") if down.is_empty() => down = token_of(t),
+                        _ => {}
+                    }
+                }
+                if up.is_empty() {
+                    up = toks.first().map(&token_of).unwrap_or_default();
+                }
+                if down.is_empty() {
+                    down = toks.get(1).map(token_of).unwrap_or_default();
+                }
+                if !up.is_empty() || !down.is_empty() {
+                    v = json!({
+                        "clobTokenIds": serde_json::to_string(&[up, down]).unwrap_or_default(),
+                        "questionID": c
+                            .get("question_id")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                        "negRisk": c.get("neg_risk").cloned().unwrap_or(json!(false)),
+                        "closed": c.get("closed").cloned().unwrap_or(json!(true)),
+                        "source": "clob-fallback",
+                    });
+                }
+            }
+            Err(e) => {
+                return Err(format!("clob {cid}: {e}"));
+            }
+        }
+    }
+    Ok(v)
+}
+
+/// The published price points of one token/window history, in the
+/// `(t, price)` shape the converter consumes. Non-parseable points are
+/// dropped, never invented.
+fn parse_price_points(hist: &Value) -> Vec<(i64, Decimal)> {
+    hist.pointer("/history")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| {
+            let t = p.get("t").and_then(Value::as_i64).unwrap_or(0);
+            let raw = p.get("p").map(|x| x.to_string()).unwrap_or_default();
+            Decimal::from_str_exact(raw.trim_matches('"'))
+                .ok()
+                .map(|d| (t, d))
+        })
+        .collect()
+}
+
+/// One token's published price history for a round window.
+async fn fetch_prices(
+    fetch: &dyn JsonFetcher,
+    token: &str,
+    start_sec: i64,
+    end_sec: i64,
+) -> Result<Value, String> {
+    let url = format!(
+        "{CLOB_API_BASE}/prices-history?market={token}&startTs={start_sec}&endTs={end_sec}&fidelity=1"
+    );
+    fetch
+        .get_json(&url)
+        .await
+        .map_err(|e| format!("prices {token}: {e}"))
+}
+
+// ── fill-universe sources ───────────────────────────────────────────────────
+
+/// The `/trades` walk (the original #352 fill source): offset-paged,
+/// offset-cap-aware segmented walk, appending pages to the raw side file.
+/// Returns `(final offset, fetched rows)`.
+async fn walk_trades(
+    fetch: &dyn JsonFetcher,
+    req: &PullRequest,
+    rp: &Path,
+    mp: &Path,
+    progress: &ProgressCb<'_>,
+) -> Result<(i64, u64), String> {
+    // The walk restarts from the window start on every call — a stored
+    // offset would lie (the venue's filtered list can shift between
+    // processes), and every re-served page lands as a duplicate the
+    // fill-key dedupe removes at finalize. The expensive phases (gamma,
+    // prices) resume through their per-item caches instead.
+    let mut offset: i64 = 0;
+    let mut fetched: u64 = 0;
+    let start_sec = req.start_ms / 1000;
+    let end_sec = req.end_ms / 1000;
+    report(
+        progress,
+        PullPhase::Trades,
+        0,
+        format!("window [{start_sec}, {end_sec}]"),
+    );
+    // The walk: server-side time filter (`start`/`end`, both inclusive —
+    // probed live 2026-10-02: the pair returns exactly that window, rows
+    // newest-first), offset-paged. The venue caps the OFFSET ITSELF at
+    // TRADES_OFFSET_CAP (10000 answers, 10500 errors with "max historical
+    // trades offset of 10000 exceeded"), so when the walk has run past the
+    // cap it reacts by page shape: a FULL page means there is likely more
+    // depth below — split the window at the oldest in-window timestamp
+    // seen and restart at offset 0 on `[start, min_ts]`; a SHORT page is
+    // the exhaustion signal (a frozen historical list cannot grow at its
+    // tail) — done, because the usual empty-page confirmation would die on
+    // the venue's offset error instead of answering empty. Below the cap a
+    // short page still gets its confirmation request. Boundary rows
+    // re-served across a split land as duplicates the fill-key dedupe
+    // removes at finalize; overlaps are always harmless.
+    let (seg_start, mut seg_end) = (start_sec, end_sec);
+    loop {
+        let url = format!(
+            "{DATA_API_BASE}/trades?user={}&limit={}&offset={offset}&start={seg_start}&end={seg_end}",
+            req.wallet, req.page_limit
+        );
+        let page = fetch
+            .get_json(&url)
+            .await
+            .map_err(|e| format!("trades offset {offset}: {e}"))?;
+        let rows = page
+            .as_array()
+            .ok_or_else(|| format!("trades offset {offset}: expected an array"))?;
+        if rows.is_empty() {
+            break;
+        }
+        let mut min_ts = i64::MAX;
+        for row in rows {
+            let ts = row.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
+            // The server already filtered; this check is the belt-and-braces
+            // against a venue quirk leaking out-of-window rows into the corpus
+            // — and a leaked row must not steer the split point either.
+            if ts > seg_end || ts < seg_start {
+                continue;
+            }
+            min_ts = min_ts.min(ts);
+            let line = row.to_string();
+            append_line(rp, &line)?;
+            fetched += 1;
+        }
+        offset += rows.len() as i64;
+        // Persist the resume state after EVERY page: a crash loses nothing
+        // that the dedupe cannot absorb on the restart.
+        write_json_atomic(
+            mp,
+            &json!({
+                "wallet": req.wallet,
+                "startMs": req.start_ms, "endMs": req.end_ms,
+                "asset": req.asset, "market": req.market,
+                "state": { "tradesOffset": offset, "fetched": fetched, "complete": false },
+            }),
+        )?;
+        report(
+            progress,
+            PullPhase::Trades,
+            fetched,
+            format!("offset {offset} (+{})", rows.len()),
+        );
+        if fetched as i64 > MAX_FILLS {
+            return Err(format!(
+                "the window holds more than {MAX_FILLS} fills — narrow the time window"
+            ));
+        }
+        // The venue refuses any request past TRADES_OFFSET_CAP. Once the
+        // offset has run past it: a SHORT page is exhaustion — the usual
+        // empty-page confirmation would die on the venue's offset error
+        // instead of answering empty — and a FULL page means un-fetched
+        // depth below, so the window splits at the oldest in-window
+        // timestamp seen and the segment restarts at offset 0. The guard
+        // keeps the split honest: no time progress would mean an infinite
+        // walk.
+        let full = rows.len() as i64 == req.page_limit;
+        if offset > TRADES_OFFSET_CAP {
+            if !full {
+                break;
+            }
+            if min_ts >= seg_end {
+                return Err(format!(
+                    "trades walk stalled at the offset cap: segment [{seg_start}, {seg_end}] \
+                     oldest ts {min_ts} makes no time progress"
+                ));
+            }
+            seg_end = min_ts;
+            offset = 0;
+        }
+    }
+    Ok((offset, fetched))
+}
+
+/// #355: the activity-ledger fill source. Copies every in-window `TRADE`
+/// row through the raw side file; finalize dedupes/sorts exactly as for
+/// walked pages. The copy is a local read — always rewritten from scratch,
+/// idempotent by construction (no resume state needed).
+fn copy_activity(req: &PullRequest, path: &Path, rp: &Path) -> Result<u64, String> {
+    if let Some(parent) = rp.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let start_sec = req.start_ms / 1000;
+    let end_sec = req.end_ms / 1000;
+    let mut f = std::io::BufWriter::new(
+        std::fs::File::create(rp).map_err(|e| format!("create {}: {e}", rp.display()))?,
+    );
+    let mut n: u64 = 0;
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue, // a torn line — same tolerance as finalize
+        };
+        // The activity ledger also carries REDEEM/MERGE/rebate rows; only
+        // TRADE rows are fills.
+        if v.get("type").and_then(Value::as_str) != Some("TRADE") {
+            continue;
+        }
+        let ts = v.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
+        if ts < start_sec || ts > end_sec {
+            continue;
+        }
+        // No MAX_FILLS guard here: the ledger is a local, finite file — the
+        // runaway guard exists for the network walk, not for a bounded copy.
+        writeln!(f, "{v}").map_err(|e| format!("write {}: {e}", rp.display()))?;
+        n += 1;
+    }
+    f.flush()
+        .map_err(|e| format!("flush {}: {e}", rp.display()))?;
+    Ok(n)
+}
+
 // ── the pull itself ─────────────────────────────────────────────────────────
 
 /// Pull a wallet's fills for the window, convert to the backtest event
@@ -531,111 +866,24 @@ pub async fn pull_and_convert(
 
     // ── Trades ────────────────────────────────────────────────────────────
     let rp = raw_path(req);
-    // The walk restarts from the window start on every call — a stored
-    // offset would lie (the venue's filtered list can shift between
-    // processes), and every re-served page lands as a duplicate the
-    // fill-key dedupe removes at finalize. The expensive phases (gamma,
-    // prices) resume through their per-item caches instead.
-    let mut offset: i64 = 0;
-    let mut fetched: u64 = 0;
-    let start_sec = req.start_ms / 1000;
-    let end_sec = req.end_ms / 1000;
-    report(
-        progress,
-        PullPhase::Trades,
-        0,
-        format!("window [{start_sec}, {end_sec}]"),
-    );
-    // The walk: server-side time filter (`start`/`end`, both inclusive —
-    // probed live 2026-10-02: the pair returns exactly that window, rows
-    // newest-first), offset-paged. The venue caps the OFFSET ITSELF at
-    // TRADES_OFFSET_CAP (10000 answers, 10500 errors with "max historical
-    // trades offset of 10000 exceeded"), so when the walk has run past the
-    // cap it reacts by page shape: a FULL page means there is likely more
-    // depth below — split the window at the oldest in-window timestamp
-    // seen and restart at offset 0 on `[start, min_ts]`; a SHORT page is
-    // the exhaustion signal (a frozen historical list cannot grow at its
-    // tail) — done, because the usual empty-page confirmation would die on
-    // the venue's offset error instead of answering empty. Below the cap a
-    // short page still gets its confirmation request. Boundary rows
-    // re-served across a split land as duplicates the fill-key dedupe
-    // removes at finalize; overlaps are always harmless.
-    let (seg_start, mut seg_end) = (start_sec, end_sec);
-    loop {
-        let url = format!(
-            "{DATA_API_BASE}/trades?user={}&limit={}&offset={offset}&start={seg_start}&end={seg_end}",
-            req.wallet, req.page_limit
-        );
-        let page = fetch
-            .get_json(&url)
-            .await
-            .map_err(|e| format!("trades offset {offset}: {e}"))?;
-        let rows = page
-            .as_array()
-            .ok_or_else(|| format!("trades offset {offset}: expected an array"))?;
-        if rows.is_empty() {
-            break;
+    // Two fill sources, one canonical output: the live `/trades` walk (the
+    // original #352 path) or a pre-fetched `/activity` ledger (#355 — the
+    // complete universe; /trades answers only a taker-side subset). Both
+    // feed the same raw side file; finalize dedupes and sorts identically.
+    let (offset, fetched) = match &req.fill_source {
+        FillSource::TradesApi => walk_trades(fetch, req, &rp, &mp, progress).await?,
+        FillSource::ActivityFile(path) => {
+            report(
+                progress,
+                PullPhase::Trades,
+                0,
+                format!("activity ledger {}", path.display()),
+            );
+            let n = copy_activity(req, path, &rp)?;
+            report(progress, PullPhase::Trades, n, "rows copied".into());
+            (0, n)
         }
-        let mut min_ts = i64::MAX;
-        for row in rows {
-            let ts = row.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
-            // The server already filtered; this check is the belt-and-braces
-            // against a venue quirk leaking out-of-window rows into the corpus
-            // — and a leaked row must not steer the split point either.
-            if ts > seg_end || ts < seg_start {
-                continue;
-            }
-            min_ts = min_ts.min(ts);
-            let line = row.to_string();
-            append_line(&rp, &line)?;
-            fetched += 1;
-        }
-        offset += rows.len() as i64;
-        // Persist the resume state after EVERY page: a crash loses nothing
-        // that the dedupe cannot absorb on the restart.
-        write_json_atomic(
-            &mp,
-            &json!({
-                "wallet": req.wallet,
-                "startMs": req.start_ms, "endMs": req.end_ms,
-                "asset": req.asset, "market": req.market,
-                "state": { "tradesOffset": offset, "fetched": fetched, "complete": false },
-            }),
-        )?;
-        report(
-            progress,
-            PullPhase::Trades,
-            fetched,
-            format!("offset {offset} (+{})", rows.len()),
-        );
-        if fetched as i64 > MAX_FILLS {
-            return Err(format!(
-                "the window holds more than {MAX_FILLS} fills — narrow the time window"
-            ));
-        }
-        // The venue refuses any request past TRADES_OFFSET_CAP. Once the
-        // offset has run past it: a SHORT page is exhaustion — the usual
-        // empty-page confirmation would die on the venue's offset error
-        // instead of answering empty — and a FULL page means un-fetched
-        // depth below, so the window splits at the oldest in-window
-        // timestamp seen and the segment restarts at offset 0. The guard
-        // keeps the split honest: no time progress would mean an infinite
-        // walk.
-        let full = rows.len() as i64 == req.page_limit;
-        if offset > TRADES_OFFSET_CAP {
-            if !full {
-                break;
-            }
-            if min_ts >= seg_end {
-                return Err(format!(
-                    "trades walk stalled at the offset cap: segment [{seg_start}, {seg_end}] \
-                     oldest ts {min_ts} makes no time progress"
-                ));
-            }
-            seg_end = min_ts;
-            offset = 0;
-        }
-    }
+    };
 
     // ── Finalize: canonical, deduped, sorted raw ─────────────────────────
     let trades_n = finalize_trades(&rp, &tp)?;
@@ -700,95 +948,55 @@ pub async fn pull_and_convert(
     );
     let mut gamma: BTreeMap<String, Value> = BTreeMap::new();
     let mut no_meta: u64 = 0;
-    for cid in &conditions {
-        let cp = condition_cache_path(&req.out_dir, cid);
-        let cached = if cp.exists() {
-            Some(read_json(&cp)?)
-        } else {
-            None
-        };
-        // A cached `null` is a MISS, not a fact: Gamma prunes closed
-        // short-cycle updown markets (it answered `[]` for every September
-        // 2026 condition — probed live), and the CLOB fallback below recovers
-        // them, so a re-pull self-heals instead of replaying the hole.
-        let v = match cached {
-            Some(v) if !v.is_null() && v.get("clobTokenIds").is_some() => v,
-            _ => {
-                let url = format!("{GAMMA_API_BASE}/markets?condition_ids={cid}");
-                let resp = fetch
-                    .get_json(&url)
-                    .await
-                    .map_err(|e| format!("gamma {cid}: {e}"))?;
-                let arr = resp.as_array().cloned().unwrap_or_default();
-                let mut v = arr.into_iter().next().unwrap_or(Value::Null);
-                // Gamma-prune fallback: CLOB `/markets/{condition_id}` keeps
-                // the full record for closed markets (tokens with outcome
-                // Up/Down, question_id, neg_risk). Adapt it into the gamma
-                // shape the converter consumes — `clobTokenIds` as the
-                // JSON-encoded string array, Up first, Down second.
-                if v.is_null() || v.get("clobTokenIds").is_none() {
-                    let url = format!("{CLOB_API_BASE}/markets/{cid}");
-                    match fetch.get_json(&url).await {
-                        Ok(c) => {
-                            let toks = c
-                                .get("tokens")
-                                .and_then(Value::as_array)
-                                .cloned()
-                                .unwrap_or_default();
-                            let token_of = |t: &Value| {
-                                t.get("token_id")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_string()
-                            };
-                            let mut up = String::new();
-                            let mut down = String::new();
-                            for t in &toks {
-                                match t.get("outcome").and_then(Value::as_str) {
-                                    Some("Up") if up.is_empty() => up = token_of(t),
-                                    Some("Down") if down.is_empty() => down = token_of(t),
-                                    _ => {}
-                                }
-                            }
-                            if up.is_empty() {
-                                up = toks.first().map(&token_of).unwrap_or_default();
-                            }
-                            if down.is_empty() {
-                                down = toks.get(1).map(token_of).unwrap_or_default();
-                            }
-                            if !up.is_empty() || !down.is_empty() {
-                                v = json!({
-                                    "clobTokenIds": serde_json::to_string(&[up, down])
-                                        .unwrap_or_default(),
-                                    "questionID": c
-                                        .get("question_id")
-                                        .cloned()
-                                        .unwrap_or(Value::Null),
-                                    "negRisk": c.get("neg_risk").cloned().unwrap_or(json!(false)),
-                                    "closed": c.get("closed").cloned().unwrap_or(json!(true)),
-                                    "source": "clob-fallback",
-                                });
-                            }
+    {
+        // Bounded-concurrency metadata pipeline: conditions stream through a
+        // semaphore-backed window (META_CONCURRENCY in flight), each task
+        // reusing the extracted per-condition fetch. Cache hits return
+        // without touching the network, so a re-pull pays only for holes.
+        let sem = Arc::new(Semaphore::new(META_CONCURRENCY));
+        let mut tasks: FuturesUnordered<_> = conditions
+            .iter()
+            .map(|cid| {
+                let sem = sem.clone();
+                async move {
+                    let _g = sem.acquire().await;
+                    let cp = condition_cache_path(&req.out_dir, cid);
+                    let cached = if cp.exists() {
+                        Some(read_json(&cp)?)
+                    } else {
+                        None
+                    };
+                    // A cached `null` is a MISS, not a fact: Gamma prunes closed
+                    // short-cycle updown markets (it answered `[]` for every September
+                    // 2026 condition — probed live), and the CLOB fallback recovers
+                    // them, so a re-pull self-heals instead of replaying the hole.
+                    match cached {
+                        Some(v) if !v.is_null() && v.get("clobTokenIds").is_some() => {
+                            Ok::<_, String>((cid.clone(), v, false))
                         }
-                        Err(e) => {
-                            return Err(format!("clob {cid}: {e}"));
+                        _ => {
+                            let v = fetch_meta(fetch, cid).await?;
+                            let missed = v.is_null();
+                            write_json_atomic(&cp, &v)?;
+                            Ok((cid.clone(), v, missed))
                         }
                     }
                 }
-                write_json_atomic(&cp, &v)?;
-                if v.is_null() {
-                    no_meta += 1;
-                }
-                v
+            })
+            .collect();
+        while let Some(r) = tasks.next().await {
+            let (cid, v, missed) = r?;
+            if missed {
+                no_meta += 1;
             }
-        };
-        gamma.insert(cid.clone(), v);
-        report(
-            progress,
-            PullPhase::Markets,
-            gamma.len() as u64,
-            cid.clone(),
-        );
+            gamma.insert(cid.clone(), v);
+            report(
+                progress,
+                PullPhase::Markets,
+                gamma.len() as u64,
+                cid.clone(),
+            );
+        }
     }
     // Fail-closed against a systemic metadata outage: scattered dead
     // conditions (a wallet also touched non-round markets) are fine — the
@@ -805,8 +1013,11 @@ pub async fn pull_and_convert(
     }
 
     // Per condition: slug → timing; gamma → token ids; prices-history → the
-    // published price series (the honest top-of-book reconstruction).
+    // published price series (the honest top-of-book reconstruction). The
+    // work list is deduped up front (a token can serve several conditions),
+    // then streamed through the bounded-concurrency pipeline.
     let mut price_series: BTreeMap<(String, i64, i64), Vec<(i64, Decimal)>> = BTreeMap::new();
+    let mut price_jobs: Vec<(String, i64, i64)> = Vec::new();
     for cid in &conditions {
         let g = gamma.get(cid).cloned().unwrap_or(Value::Null);
         let slug = rows
@@ -819,43 +1030,40 @@ pub async fn pull_and_convert(
             continue;
         };
         let end_sec = rs.start_sec + rs.duration_sec;
-        let tokens = gamma_tokens(&g);
-        for token in tokens {
+        for token in gamma_tokens(&g) {
             if token.is_empty() {
                 continue;
             }
             let key = (token.clone(), rs.start_sec, end_sec);
-            if price_series.contains_key(&key) {
-                continue;
+            if !price_jobs.contains(&key) {
+                price_jobs.push(key);
             }
-            let pp = price_cache_path(&req.out_dir, &token, rs.start_sec, end_sec);
-            let hist = if pp.exists() {
-                read_json(&pp)?
-            } else {
-                let url = format!(
-                    "{CLOB_API_BASE}/prices-history?market={token}&startTs={}&endTs={}&fidelity=1",
-                    rs.start_sec, end_sec
-                );
-                let v = fetch
-                    .get_json(&url)
-                    .await
-                    .map_err(|e| format!("prices {token}: {e}"))?;
-                write_json_atomic(&pp, &v)?;
-                v
-            };
-            let mut pts = Vec::new();
-            for p in hist
-                .pointer("/history")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-            {
-                let t = p.get("t").and_then(Value::as_i64).unwrap_or(0);
-                let raw = p.get("p").map(|x| x.to_string()).unwrap_or_default();
-                if let Ok(d) = Decimal::from_str_exact(raw.trim_matches('"')) {
-                    pts.push((t, d));
+        }
+    }
+    {
+        let sem = Arc::new(Semaphore::new(PRICE_CONCURRENCY));
+        let mut tasks: FuturesUnordered<_> = price_jobs
+            .into_iter()
+            .map(|key| {
+                let sem = sem.clone();
+                async move {
+                    let _g = sem.acquire().await;
+                    let (ref token, start_sec, end_sec) = key;
+                    let pp = price_cache_path(&req.out_dir, token, start_sec, end_sec);
+                    let hist = if pp.exists() {
+                        read_json(&pp)?
+                    } else {
+                        let v = fetch_prices(fetch, token, start_sec, end_sec).await?;
+                        write_json_atomic(&pp, &v)?;
+                        v
+                    };
+                    Ok::<_, String>((key, parse_price_points(&hist)))
                 }
-            }
+            })
+            .collect();
+        while let Some(r) = tasks.next().await {
+            let (key, pts) = r?;
+            let token = key.0.clone();
             price_series.insert(key, pts);
             report(
                 progress,
@@ -1353,6 +1561,7 @@ mod tests {
             market: None,
             out_dir: out,
             page_limit: 500,
+            fill_source: Default::default(),
         }
     }
 
@@ -1666,6 +1875,81 @@ mod tests {
         assert!(
             !events.contains(COND2),
             "no event references the filtered-out condition"
+        );
+        verify_dataset(&o.manifest_path).unwrap();
+    }
+
+    /// #355: the activity-ledger fill source. `/trades` answers only a
+    /// taker-side subset of a wallet's fills (measured 2026-10-02: 17.6% of
+    /// the same window's notional), so the pull must be able to take its
+    /// universe from a pre-fetched `/activity` export instead: TRADE rows
+    /// only, window-clamped, ZERO network in the fills phase — while the
+    /// metadata/price phases still run (the ledger carries no token ids).
+    #[tokio::test]
+    async fn an_activity_ledger_seeds_the_universe_without_trades_api_calls() {
+        const T0: i64 = 1_790_785_000;
+        let fill = |i: usize, cid: &str, tok: &str, slug: &str, ts: i64| {
+            json!({
+                "proxyWallet": WALLET, "type": "TRADE", "side": "BUY",
+                "asset": tok, "conditionId": cid,
+                "size": 1.0, "price": 0.5, "timestamp": ts,
+                "slug": slug, "outcome": "Up", "outcomeIndex": 0,
+                "transactionHash": format!("0x{i:x}"),
+            })
+        };
+        let mut rows = Vec::new();
+        for i in 0..40 {
+            let (cid, tok, slug) = if i % 2 == 0 {
+                (COND1, UP1, "btc-updown-15m-1790784900")
+            } else {
+                (COND2, DOWN2, "btc-updown-5m-1790785200")
+            };
+            rows.push(fill(i, cid, tok, slug, T0));
+        }
+        // A REDEEM row and an out-of-window fill must never enter the corpus.
+        rows.push(json!({
+            "proxyWallet": WALLET, "type": "REDEEM", "side": "",
+            "asset": UP1, "conditionId": COND1, "size": 10.0, "usdcSize": 10.0,
+            "price": 0, "timestamp": T0, "slug": "btc-updown-15m-1790784900",
+            "transactionHash": "0xdead",
+        }));
+        rows.push(fill(99, COND1, UP1, "btc-updown-15m-1790784900", T0 - 3600));
+        let ledger = tmp("activity").join("activity.jsonl");
+        std::fs::write(
+            &ledger,
+            rows.iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+
+        let fetch = PagingVenue {
+            all: Vec::new(),
+            trades_urls: Mutex::default(),
+            meta_urls: Mutex::default(),
+            gammas: gamma_map(),
+        };
+        let mut r = req(tmp("activity-pull"));
+        r.fill_source = FillSource::ActivityFile(ledger);
+        let o = pull_and_convert(&fetch, &r, &noop_cb()).await.unwrap();
+
+        assert!(
+            fetch.trades_urls.lock().unwrap().is_empty(),
+            "the /trades endpoint is never touched by the activity source"
+        );
+        assert_eq!(
+            o.trades, 40,
+            "in-window TRADE rows only: no REDEEM, no out-of-window row"
+        );
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(&o.manifest_path).unwrap()).unwrap();
+        assert_eq!(
+            manifest
+                .pointer("/counts/conditions")
+                .and_then(Value::as_u64),
+            Some(2),
+            "both durations' conditions survive into the dataset"
         );
         verify_dataset(&o.manifest_path).unwrap();
     }

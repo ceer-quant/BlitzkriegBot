@@ -377,6 +377,10 @@ struct Args {
     onchain_asset: Option<String>,
     /// #352 pull filter: one round duration (`5m`/`15m`/`1h`/`4h`).
     onchain_market: Option<String>,
+    /// #355: read the fill universe from a pre-fetched `/activity` JSONL
+    /// export instead of walking `/trades` (which answers only a taker-side
+    /// subset — 17.6% of the same window's notional, measured 2026-10-02).
+    onchain_fills: Option<String>,
     /// #352 output root (default `data/onchain`).
     onchain_out_dir: Option<String>,
     /// Fill model: taker slippage in ticks (0.01).
@@ -737,6 +741,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut onchain_end: Option<String> = None;
     let mut onchain_asset: Option<String> = None;
     let mut onchain_market: Option<String> = None;
+    let mut onchain_fills: Option<String> = None;
     let mut onchain_out_dir: Option<String> = None;
     let mut slippage_ticks: u32 = 0;
     let mut latency_ms: i64 = 0;
@@ -999,6 +1004,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--onchain-end" => onchain_end = it.next(),
             "--onchain-asset" => onchain_asset = it.next(),
             "--onchain-market" => onchain_market = it.next(),
+            "--onchain-fills" => onchain_fills = it.next(),
             "--onchain-out-dir" => onchain_out_dir = it.next(),
             "--regime-max-tokens" => {
                 regime_max_tokens = it
@@ -1822,6 +1828,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         onchain_end,
         onchain_asset,
         onchain_market,
+        onchain_fills,
         onchain_out_dir,
         slippage_ticks,
         latency_ms,
@@ -2500,6 +2507,12 @@ async fn main() -> anyhow::Result<()> {
             market: args.onchain_market.clone(),
             out_dir,
             page_limit: 500,
+            fill_source: match &args.onchain_fills {
+                Some(path) => blitzkrieg_core::onchain::FillSource::ActivityFile(
+                    std::path::PathBuf::from(path),
+                ),
+                None => Default::default(),
+            },
         };
         let fetch = blitzkrieg_core::onchain::HttpFetcher::new(150);
         let outcome = blitzkrieg_core::onchain::pull_and_convert(
