@@ -38,6 +38,18 @@ spread_arb。
 | `entry_dip_max_pct` | 0 | 距趋势高点最大回撤 %（0 = 关） |
 | `entry_bounce_min_pct` | 0 | 短窗反弹下限 %（0 = 关） |
 | `entry_bounce_window_sec` | 5 | 反弹观察窗（秒） |
+| `entry_trend_window_sec` | 0 | 长记忆滑坡门的观察窗（秒，0 = 关；#176 移植） |
+| `entry_trend_drop_pct` | 30 | 滑坡门阈值 %：mid 距趋势窗口高点跌幅 ≥ 此值 → 拒绝该 token 入场（门只在窗口开启时武装，阈值 0 不等于全拦） |
+
+## 滑坡门（#176 移植，默认关）
+
+`entry_trend_window_sec > 0` 时，每个入场评估额外量测：当前 mid 相对**长记忆窗口**
+（`entry_trend_window_sec`，独立于确认窗）高点的跌幅百分比；跌幅 ≤ −`entry_trend_drop_pct`%
+→ 拒绝入场（只挡入场，不影响已挂单——退出纪律归内核）。语义与
+`mean_reversion.rs` 的 `trend_drop_pct`/`in_trend_slide` 一致（百分数刻度、窗口 ≤0 关、
+历史不足两样本读零）。臂矩阵证据（Rust mean_reversion，#176）：600s 窗 / 30% 阈值
+四窗一致 +$23.7/4h；Lua spread_arb 冻结语料复测结论见合并本改动的 PR 描述——
+**测得为改善才改出厂值，否则默认保持关**。
 
 注意：内核的 `--spread-arb-*` CLI 旋钮**不触达 Lua 策略**（那是 dylib on_params
 通道）——本包的旋钮唯一来源是这份 manifest。影子进化/可进化旋钮声明是 dylib 面

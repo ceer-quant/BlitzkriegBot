@@ -126,7 +126,13 @@ const STRATEGY = 'spread_arb';
 // windows before its removal (BASELINE rows verbatim), so the recorded
 // economics carry over untouched.
 const LUA_DIR = join(ROOT, 'user_layer', 'strategies_lua');
-const strategyArgs = ['--lua-strategy-dir', LUA_DIR, '--enable-strategy', STRATEGY];
+// `--no-strategy-dir` isolates the replay: the fixture is the Lua package and
+// ONLY the Lua package — an operator cdylib sitting in the default drop-point
+// must not silently become the thing this gate measures (two same-named
+// strategies would also race for the registry).
+const strategyArgs = [
+  '--no-strategy-dir', '--lua-strategy-dir', LUA_DIR, '--enable-strategy', STRATEGY,
+];
 
 // ---------------------------------------------------------------------------
 // The recorded baseline. Change it only with a measurement, and say which

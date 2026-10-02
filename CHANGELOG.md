@@ -24,6 +24,30 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   evolution / evolvable-knob declarations are dylib-surface capabilities the
   Lua stack does not expose yet (production evolution is off).
 
+- **spread_arb (Lua) gains the #176 long-memory slide gate — default OFF — and
+  two percent-unit bugs are fixed.** `entry_trend_window_sec` (0 = off) +
+  `entry_trend_drop_pct` (30) port `mean_reversion.rs`'s `trend_drop_pct`/
+  `in_trend_slide`: an entry is refused when the mid sits `drop_pct`% or more
+  below the high of the long window. Three correctness items landed with it:
+  the port's first cut returned a FRACTION, not a percent (the divisor dropped
+  `hi`'s own scale — a 10^scale understatement that never fired the gate; the
+  frozen fixtures could not see it because the gate ships off); the tracker's
+  `move_pct` (bounce-gate leg) carried the same latent bug (bounce also ships
+  off — unfired since the port); and a zero threshold with the window on would
+  have read `drop <= -0` and refused EVERY entry, so the gate now arms only on
+  a strictly positive threshold, mirroring the Rust knob validation (5..90).
+  The sample ring also mirrors `PriceBuffer::push`'s 2000-sample cap. Shipped
+  defaults are unchanged: the gate measured −21.3581 → −13.4863 net over the
+  four frozen windows (id tier; −28.1201 → −18.6183 under 1-tick slippage) —
+  a real bleed reduction, but the blocked fills average BETTER than the
+  survivors (−$0.33 vs −$0.45/fill), the truncation signature of a negative-EV
+  entry set rather than selection, and one window degrades in both tiers — per
+  the arm-matrix discipline that is not enough to move factory defaults. The
+  exit-economics gate itself is now isolated (`--no-strategy-dir`): the fixture
+  is the Lua package and ONLY the Lua package, so an operator cdylib in the
+  default drop-point cannot silently become the measured thing (two same-named
+  strategies would race for the registry).
+
 ### Removed
 
 - **The Rust `spread_arb` cdylib fixture** — `user_layer/strategies/spread_arb`
