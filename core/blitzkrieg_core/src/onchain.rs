@@ -652,6 +652,36 @@ pub async fn pull_and_convert(
         }
         let v: Value =
             serde_json::from_str(line).map_err(|e| format!("canonical trades re-parse: {e}"))?;
+        // Push the asset/market filters ahead of the expensive phases: a
+        // filtered pull must not spend hours fetching gamma/clob metadata
+        // and price history for conditions the converter would skip anyway
+        // (two parallel filtered pulls would otherwise walk the SAME
+        // unfiltered condition set, duplicating each other's work through
+        // the shared cache). Only applied when a filter was requested — an
+        // unfiltered pull keeps its exact row set, and the converter's own
+        // skip accounting (non-updown markets, dead slugs) stays untouched.
+        if req.asset.is_some() || req.market.is_some() {
+            let kept = parse_round_slug(v.get("slug").and_then(Value::as_str).unwrap_or(""))
+                .is_some_and(|rs| {
+                    let dur_label = match rs.duration_sec {
+                        300 => "5m",
+                        900 => "15m",
+                        3600 => "1h",
+                        14_400 => "4h",
+                        _ => "",
+                    };
+                    req.asset
+                        .as_ref()
+                        .is_none_or(|a| a.eq_ignore_ascii_case(&rs.asset))
+                        && req
+                            .market
+                            .as_ref()
+                            .is_none_or(|m| m.eq_ignore_ascii_case(dur_label))
+                });
+            if !kept {
+                continue;
+            }
+        }
         let cid = v
             .get("conditionId")
             .and_then(Value::as_str)
@@ -1438,6 +1468,7 @@ mod tests {
     struct PagingVenue {
         all: Vec<Value>,
         trades_urls: Mutex<Vec<String>>,
+        meta_urls: Mutex<Vec<String>>,
         gammas: BTreeMap<String, Value>,
     }
 
@@ -1481,6 +1512,7 @@ mod tests {
                     Err(format!("trades url without the window contract: {url}"))
                 }
             } else if url.contains("gamma-api") {
+                self.meta_urls.lock().unwrap().push(url.to_string());
                 let cid = url
                     .split("condition_ids=")
                     .nth(1)
@@ -1541,6 +1573,7 @@ mod tests {
         let fetch = PagingVenue {
             all,
             trades_urls: Mutex::default(),
+            meta_urls: Mutex::default(),
             gammas: gamma_map(),
         };
         let mut r = req(tmp("paging"));
@@ -1563,6 +1596,76 @@ mod tests {
             urls.len() > 21,
             "the walk crossed the offset cap only via the split: {} requests",
             urls.len()
+        );
+        verify_dataset(&o.manifest_path).unwrap();
+    }
+
+    /// The asset/market filters are part of the EXPENSIVE phases, not just
+    /// the converter: a filtered pull must not spend hours fetching gamma
+    /// metadata and price history for conditions the converter would skip
+    /// (two parallel filtered pulls would walk the same unfiltered
+    /// condition set through the shared cache, duplicating work). A 15m
+    /// pull over a mixed 15m+5m corpus captures only the 15m fills and
+    /// touches only the 15m conditions' metadata.
+    #[tokio::test]
+    async fn a_filtered_pull_skips_metadata_for_filtered_out_conditions() {
+        const N: usize = 100;
+        const T0: i64 = 1_790_785_000;
+        let all: Vec<Value> = (0..N)
+            .map(|i| {
+                let ts = T0 - i as i64;
+                let even = i % 2 == 0;
+                json!({
+                    "proxyWallet": WALLET, "side": "BUY",
+                    "asset": if even { UP1 } else { DOWN2 },
+                    "conditionId": if even { COND1 } else { COND2 },
+                    "size": 1.0, "price": 0.5, "timestamp": ts,
+                    "title": "t",
+                    "slug": if even { "btc-updown-15m-1790784900" } else { "btc-updown-5m-1790785200" },
+                    "outcome": "Up", "outcomeIndex": 0,
+                    "transactionHash": format!("0x{i:x}"),
+                })
+            })
+            .collect();
+        let fetch = PagingVenue {
+            all,
+            trades_urls: Mutex::default(),
+            meta_urls: Mutex::default(),
+            gammas: gamma_map(),
+        };
+        let mut r = req(tmp("filtered-meta"));
+        r.market = Some("15m".into());
+        r.start_ms = (T0 - (N as i64 + 500)) * 1000;
+        r.end_ms = (T0 + 10) * 1000;
+        let o = pull_and_convert(&fetch, &r, &noop_cb()).await.unwrap();
+        // The walk itself stays unfiltered (the offset-cap split needs the
+        // real page shape; the raw corpus is the wallet's whole-window
+        // truth) — the filter lives in the row collection: metadata is
+        // fetched ONLY for surviving conditions and the event stream
+        // carries only them.
+        assert_eq!(o.trades, N as u64, "raw corpus is the unfiltered truth");
+        let metas = fetch.meta_urls.lock().unwrap();
+        assert!(
+            metas.iter().any(|u| u.contains(COND1)),
+            "the kept condition's metadata is fetched"
+        );
+        assert!(
+            metas.iter().all(|u| !u.contains(COND2)),
+            "no metadata requests for the filtered-out 5m condition: {metas:?}"
+        );
+        let manifest = std::fs::read_to_string(&o.manifest_path).unwrap();
+        let manifest: Value = serde_json::from_str(&manifest).unwrap();
+        assert_eq!(
+            manifest
+                .pointer("/counts/conditions")
+                .and_then(Value::as_u64),
+            Some(1),
+            "only the 15m condition survives into the dataset"
+        );
+        let events = std::fs::read_to_string(&o.events_path).unwrap();
+        assert!(
+            !events.contains(COND2),
+            "no event references the filtered-out condition"
         );
         verify_dataset(&o.manifest_path).unwrap();
     }
