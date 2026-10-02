@@ -319,11 +319,22 @@ fn read_json(path: &Path) -> Result<Value, String> {
 /// Atomic-ish JSON write: temp file + rename, so a crash never leaves a
 /// half-written manifest (the resume state is the one thing that must not
 /// corrupt).
+///
+/// The tmp name is unique per writer (pid + in-process counter): two
+/// concurrent pulls sharing a cache dir would otherwise rename the same
+/// `X.tmp` out from under each other and one dies with ENOENT. A crashed
+/// run may leave an orphaned tmp behind — harmless garbage, the next
+/// successful write replaces the canonical file.
 fn write_json_atomic(path: &Path, v: &Value) -> Result<(), String> {
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let tmp = path.with_extension("tmp");
+    let tmp = path.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let s = serde_json::to_string_pretty(v).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, s).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
