@@ -60,15 +60,26 @@
  * `--teeth` demonstrates it can fail. When #267 re-records a baseline on the
  * honest booking, the numbers move — the mechanism does not.
  *
- * On why `BASELINE` below was re-recorded (2026-09-24, at `75fd8140`): #296
- * deleted the sibling strategy cdylibs this gate used to load alongside
- * `spread_arb`, and the old rows are not reachable any more — not because the
- * strategy got worse, but because a disabled-but-registered sibling still
- * cancels this one's resting orders (`engine.rs` `drain_breaks`, issue #302).
- * Handing the SAME HEAD core the old five-library directory reproduces the old
- * rows bit for bit, which is how that was established. Fix #302 and the numbers
- * move again. The criterion for re-recording does not change either time: a
- * measurement and a commit hash, never a widened tolerance.
+ * On why `BASELINE` below has been re-recorded twice:
+ *
+ * (1) 2026-09-24, at `75fd8140`: #296 deleted the sibling strategy cdylibs
+ * this gate used to load alongside `spread_arb`, and the old rows were not
+ * reachable any more — not because the strategy got worse, but because a
+ * disabled-but-registered sibling still cancels this one's resting orders
+ * (`engine.rs` `drain_breaks`, issue #302). Handing the SAME HEAD core the old
+ * five-library directory reproduced the old rows bit for bit, which is how
+ * that was established.
+ *
+ * (2) 2026-10-02, at `ea347172`: the #351 calibration wave (561c1f5e, @almach)
+ * changed the SHIPPED kernel defaults — most visibly `force_exit_sec` 120 → 0,
+ * the guillotine OFF (no deadline amputation; every exit is a redeem/merge or
+ * a protective stop) — so the pre-calibration rows are unreachable on the
+ * calibrated kernel by construction. The economics moved with the defaults,
+ * and that IS the calibration, measured: the trend window improved (+5.21 vs
+ * −2.88 on trend-1000Z) while the range windows slid.
+ *
+ * The criterion for re-recording did not change either time: a measurement
+ * and a commit hash, never a widened tolerance.
  *
  * On the fixture change (2026-09-29): the repo no longer ships a Rust strategy.
  * `spread_arb` is the LUA package `user_layer/strategies_lua/spread_arb` — an
@@ -122,33 +133,31 @@ const strategyArgs = ['--lua-strategy-dir', LUA_DIR, '--enable-strategy', STRATE
 // commit the measurement was taken at — a baseline with no provenance is a
 // number nobody can re-derive.
 //
-// RE-RECORDED 2026-09-24, and the measurement that moved it is the point.
+// RE-RECORDED 2026-10-02, at `ea347172`, and the measurement that moved it is
+// the point.
 //
-// The 2026-09-23 recording (c76b3c22) was taken with FIVE cdylibs in
-// STRATEGY_DIR. #296 deleted four of them along with the kernel's built-in
-// strategies, so the directory this gate measures holds one library now and
-// the old numbers are unreachable by construction — not because anything got
-// worse. The kernel did not change: the same HEAD core, handed the old
-// five-library directory, reproduces the old row bit-for-bit
-// (14/21.43%/-2.878, 16/37.50%/-5.0782, 9/33.33%/-2.8141, 11/18.18%/-5.149).
+// The 2026-09-24 recording (75fd8140) was taken on the PRE-calibration kernel.
+// The #351 calibration wave (561c1f5e, @almach) changed the shipped defaults —
+// `force_exit_sec` 120 → 0, the guillotine OFF — so those rows are unreachable
+// on the calibrated kernel by construction, not because anything got worse:
+// the same LUA fixture, handed the calibrated HEAD core, produces the rows
+// below bit for bit. The delta IS the calibration, measured: with no deadline
+// amputation the trend window closes fewer positions but they are the right
+// ones (trend-1000Z: +5.21 vs −2.88), while the range windows — where the
+// guillotine used to cap the bleed — now run the full hold and pay for it.
 //
-// The delta is the sibling set, and it is not benign: a registered-but-DISABLED
-// `trend_follow` still cancels this strategy's resting bids through
-// `drain_breaks` (engine.rs:516), which is why the two range windows move and
-// the two trend windows do not. That coupling is #302. Until it is fixed this
-// baseline is only meaningful for the one-library directory named above — the
-// number this gate produces depends on what is sitting in the directory, not
-// only on what is enabled.
+// One measurement, one commit hash, never a widened tolerance. Tolerances
+// below are UNCHANGED.
 // ---------------------------------------------------------------------------
 const BASELINE = Object.freeze({
-  recorded: '2026-09-24',
-  commit: '75fd8140',
+  recorded: '2026-10-02',
+  commit: 'ea347172',
   issue: 'https://github.com/ceer-quant/BlitzkriegBot/issues/272',
   windows: {
-    'trend-20260919T1000Z': { closed: 14, wins: 3, winRatePct: 21.43, netPnlUsd: -2.878 },
-    'range-20260919T1600Z': { closed: 17, wins: 7, winRatePct: 41.18, netPnlUsd: -4.7336 },
-    'trend-20260920T2100Z': { closed: 9, wins: 3, winRatePct: 33.33, netPnlUsd: -2.8141 },
-    'range-20260920T2300Z': { closed: 14, wins: 0, winRatePct: 0, netPnlUsd: -10.9323 },
+    'trend-20260919T1000Z': { closed: 13, wins: 4, winRatePct: 30.77, netPnlUsd: 5.207 },
+    'range-20260919T1600Z': { closed: 12, wins: 2, winRatePct: 16.67, netPnlUsd: -0.2262 },
+    'trend-20260920T2100Z': { closed: 6, wins: 1, winRatePct: 16.67, netPnlUsd: -0.3556 },
+    'range-20260920T2300Z': { closed: 13, wins: 0, winRatePct: 0, netPnlUsd: -11.0845 },
   },
 });
 
