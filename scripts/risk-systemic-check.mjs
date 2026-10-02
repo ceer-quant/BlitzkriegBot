@@ -11,7 +11,8 @@
  *
  *   1. FACTORY POSTURE — a `--no-config` core: `risk.limits` answers all
  *      nine limits as {"value":"0","source":"default"} with the exit triple
- *      at the factory resolution (12 / 100 / 120); the boot log carries the
+ *      at the calibrated factory resolution (12 / 100 / 0 — the guillotine
+ *      is OFF since @almach, 561c1f5e); the boot log carries the
  *      "at factory (all nine limits off)" line; and the probe strategy's
  *      approved audit record shows four gates with NO systemic trace —
  *      the pipeline the shipped kernel runs, byte for byte.
@@ -142,9 +143,13 @@ export function judgeReadout(r, posture = 'factory') {
     }
   }
   const exit = r.exit ?? {};
+  // The calibrated shipped default (@almach, 561c1f5e): the guillotine is OFF —
+  // `force_exit_sec 0` disables the deadline, every exit is a redeem/merge or a
+  // protective stop. The factory triple pins that default; a kernel that
+  // silently re-arms a 120s deadline shows up here.
   const wantExit = posture === 'armed'
-    ? { stopLossPct: STOP_PCT, takeProfitPct: 100, forceExitSec: 120 }
-    : { stopLossPct: 12, takeProfitPct: 100, forceExitSec: 120 };
+    ? { stopLossPct: STOP_PCT, takeProfitPct: 100, forceExitSec: 0 }
+    : { stopLossPct: 12, takeProfitPct: 100, forceExitSec: 0 };
   for (const [key, want] of Object.entries(wantExit)) {
     if (Math.abs(num(exit[key]) - want) > EPS) {
       problems.push(`exit.${key} must be ${want}, got ${JSON.stringify(exit[key])}`);
@@ -397,7 +402,7 @@ function armedReadoutFixture() {
       maxCorrelationUsd: { value: '0', source: 'default' },
       globalKillSwitchLossUsd: { value: '0', source: 'default' },
     } },
-    exit: { stopLossPct: 20, takeProfitPct: 100, forceExitSec: 120 },
+    exit: { stopLossPct: 20, takeProfitPct: 100, forceExitSec: 0 },
   };
 }
 
@@ -413,7 +418,7 @@ function factoryReadoutFixture() {
       maxTotalPosition: zero, maxTotalExposureUsd: zero,
       maxCorrelationUsd: zero, globalKillSwitchLossUsd: zero,
     } },
-    exit: { stopLossPct: 12, takeProfitPct: 100, forceExitSec: 120 },
+    exit: { stopLossPct: 12, takeProfitPct: 100, forceExitSec: 0 },
   };
 }
 

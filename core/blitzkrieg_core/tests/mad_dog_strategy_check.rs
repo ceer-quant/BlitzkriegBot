@@ -522,6 +522,9 @@ fn modes_declare_what_the_seam_serves() {
 
 /// The DOWN side is its own token: a wick on `down` suggests DOWN.
 #[test]
+#[ignore = "probe: needs a local spot corpus (BK_PROBE_CORPUS, default \
+/tmp/bk-spot-corpus/range-20260919T1600Z.jsonl) that CI does not carry — \
+run explicitly where the corpus exists"]
 fn probe_spot_corpus_with_evals() {
     use blitzkrieg_core::kline::KlineAggregator;
     use blitzkrieg_core::strategies::EngineStrategy as _;
