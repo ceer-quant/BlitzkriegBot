@@ -199,6 +199,10 @@ struct Args {
     exit_stop_loss_pct: Decimal,
     exit_trailing_min_high_pct: Decimal,
     exit_min_trail_pct: Decimal,
+    /// The force-exit deadline in seconds-left. The compiled default is 0 = OFF
+    /// (calibration: the deadline amputated rounds that went on to pay); a
+    /// non-zero value re-arms it.
+    exit_force_sec: i64,
     feed_ws: bool,
     /// `--net-check`: probe the venue's network paths, print one JSON report and
     /// exit (0 all passed / 1 any failed). Answered before any service starts,
@@ -330,6 +334,13 @@ struct Args {
     /// handed to the replayed strategies through the Shadow Evolution hot-param
     /// path (so a replay can A/B a knob value on the SAME frozen corpus).
     backtest_knobs: Vec<(String, String, Decimal)>,
+    /// #351: the replay mode — `mine` / `verify` / `sweep`. Empty = the
+    /// historic single-run behaviour (no mode requested, one replay, one
+    /// report — the shape every existing gate and script drives).
+    backtest_mode: String,
+    /// #351: `verify` mode's latency dial (ms). The HK-VPS number the spec
+    /// names is 286; `sweep` ignores this (it owns its own ladder).
+    verify_latency_ms: i64,
     /// Counterfactual taker-fee schedule for a replay (#203): `--fee-model
     /// <name>`. None = the shipped schedule. Replay-only, exactly like
     /// `--backtest-knob`: what a live run charges is not a per-invocation choice,
@@ -358,6 +369,13 @@ struct Args {
     slippage_ticks: u32,
     /// Fill model: maker latency (ms).
     latency_ms: i64,
+    /// #351 fill model: taker latency (ms) — a taker leg fills against the
+    /// book as it stands `decision_at + taker_latency_ms`, never the
+    /// decision-time quote. 0 = the historic immediate fill.
+    taker_latency_ms: i64,
+    /// #351 fill model: taker fill-report rtt (ms) — ledger effects land at
+    /// `execute_at + taker_rtt_ms`. 0 = effects apply at execution.
+    taker_rtt_ms: i64,
     /// Fill model: maker fill probability (bps of 10000); None = untouched.
     fill_prob_bps: Option<u32>,
     /// Fill model: share of the crossing depth a resting maker takes, in bps of
@@ -641,6 +659,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut exit_stop_loss_pct: Option<Decimal> = None;
     let mut exit_trailing_min_high_pct: Option<Decimal> = None;
     let mut exit_min_trail_pct: Option<Decimal> = None;
+    let mut exit_force_sec: Option<i64> = None;
     let mut allow_zero_strategies = false;
     let mut feed_ws = false;
     let mut net_check = false;
@@ -682,6 +701,11 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut backtest_tick_ms: i64 = 50;
     let mut backtest_tail_ms: i64 = 0;
     let mut backtest_knobs: Vec<(String, String, Decimal)> = Vec::new();
+    // #351: the replay mode — `mine` (zero latency, friction as configured),
+    // `verify` (one real-latency run), `sweep` (latency ladder). Empty = the
+    // historic single-run behaviour, byte-identical CLI surface.
+    let mut backtest_mode = String::new();
+    let mut verify_latency_ms: i64 = 286;
     // #203: replay-only fee schedule (see `Args::fee_model`).
     let mut fee_model: Option<blitzkrieg_core::exit_policy::FeeSchedule> = None;
     let mut regime_eval: Option<String> = None;
@@ -695,6 +719,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut regime_confirmations: u32 = 2;
     let mut slippage_ticks: u32 = 0;
     let mut latency_ms: i64 = 0;
+    let mut taker_latency_ms: i64 = 0;
+    let mut taker_rtt_ms: i64 = 0;
     let mut fill_prob_bps: Option<u32> = None;
     let mut maker_depth_share_bps: Option<u32> = None;
     // #205: the orderbook freshness budget, tracked as Option so CLI > env >
@@ -931,6 +957,18 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     }
                 }
             }
+            "--exit-force-sec" => {
+                let raw = it.next().unwrap_or_default();
+                match raw.parse::<i64>() {
+                    Ok(v) => exit_force_sec = Some(v),
+                    Err(_) => {
+                        eprintln!(
+                            "blitzkrieg-core: --exit-force-sec '{raw}': expected an integer (seconds left; 0 = off)"
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--regime-eval" => regime_eval = it.next(),
             "--regime-report" => regime_report = it.next(),
             "--regime-token" => regime_token = it.next(),
@@ -1087,8 +1125,37 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(slippage_ticks)
             }
+            // #351 backtest mode: `mine` (zero latency, keep real friction),
+            // `verify` (a real-latency dial set), `sweep` (latency ladder
+            // 0..300). Only meaningful with --backtest; the mode re-prices
+            // the fill model's LATENCY dials only — slippage/fees stay as
+            // configured, so the friction between modes is comparable.
+            "--backtest-mode" => {
+                backtest_mode = it.next().unwrap_or_else(|| "mine".into());
+            }
+            // #351 verify mode's one dial: the round-trip the strategy
+            // actually trades through (the HK VPS number is 286 ms).
+            "--verify-latency-ms" => {
+                verify_latency_ms = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(verify_latency_ms);
+            }
             "--latency-ms" => {
                 latency_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(latency_ms)
+            }
+            // #351: taker-leg travel dials (see Args docs above).
+            "--taker-latency-ms" => {
+                taker_latency_ms = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(taker_latency_ms)
+            }
+            "--taker-rtt-ms" => {
+                taker_rtt_ms = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(taker_rtt_ms)
             }
             "--fill-prob-bps" => fill_prob_bps = it.next().and_then(|v| v.parse().ok()),
             "--maker-depth-share-bps" => {
@@ -1548,6 +1615,24 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         file.exit.min_trail_pct,
         exit_defaults.min_trail_pct,
     );
+    // force_exit_sec is an INT knob (seconds), so the Decimal-typed `exit_knob`
+    // closure above does not fit; the chain is the same CLI > TOML > default.
+    let exit_force_sec = {
+        let s = pick(
+            exit_force_sec,
+            None::<i64>,
+            file.exit.force_exit_sec,
+            exit_defaults.force_exit_sec,
+        );
+        if s.is_explicit() {
+            report.push(format!(
+                "exit.force_exit_sec={} ({})",
+                s.value,
+                s.source.as_str()
+            ));
+        }
+        s.value
+    };
 
     // ── #269: is the evolution engine running? ──────────────────────────────
     // The one shadow-evolution setting whose origin was never printed, and the
@@ -1621,6 +1706,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         exit_stop_loss_pct,
         exit_trailing_min_high_pct,
         exit_min_trail_pct,
+        exit_force_sec,
         feed_ws,
         net_check,
         replay,
@@ -1691,6 +1777,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         backtest_tick_ms,
         backtest_tail_ms,
         backtest_knobs,
+        backtest_mode,
+        verify_latency_ms,
         fee_model,
         regime_eval,
         regime_report,
@@ -1703,6 +1791,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         regime_confirmations,
         slippage_ticks,
         latency_ms,
+        taker_latency_ms,
+        taker_rtt_ms,
         fill_prob_bps,
         maker_depth_share_bps,
         dry_redeem_fail,
@@ -2286,13 +2376,15 @@ async fn main() -> anyhow::Result<()> {
             daily_pnl_path: daily_pnl_path.clone(),
             exit: blitzkrieg_core::exit_policy::ExitConfig {
                 min_time_left_sec: args.min_time_left,
-                // E17/#264: the four resolved exit-ladder knobs. Their defaults
+                // E17/#264: the engine-level exit-ladder knobs. Their defaults
                 // are `ExitConfig::default()`'s own values, so a run that sets
-                // none of them is exactly the pre-flag kernel.
+                // none of them is exactly the pre-flag kernel — which since the
+                // @almach calibration means force_exit OFF (0), trailing OFF.
                 take_profit_pct: args.exit_take_profit_pct,
                 stop_loss_pct: args.exit_stop_loss_pct,
                 trailing_min_high_pct: args.exit_trailing_min_high_pct,
                 min_trail_pct: args.exit_min_trail_pct,
+                force_exit_sec: args.exit_force_sec,
                 ..Default::default()
             },
             ..Default::default()
@@ -2303,6 +2395,8 @@ async fn main() -> anyhow::Result<()> {
             maker_latency_ms: args.latency_ms,
             maker_fill_prob_bps: args.fill_prob_bps.unwrap_or(10_000),
             maker_depth_share_bps: args.maker_depth_share_bps.unwrap_or(10_000),
+            taker_latency_ms: args.taker_latency_ms,
+            taker_rtt_ms: args.taker_rtt_ms,
         },
         event_archive_path,
         event_archive_max_mb,
@@ -2363,14 +2457,30 @@ async fn main() -> anyhow::Result<()> {
         cfg.event_archive_max_mb = 0;
         cfg.event_archive_rotate_mb = 0;
         cfg.event_archive_min_free_mb = 0;
-        run_backtest(
-            path,
-            args.backtest_report.as_deref(),
-            cfg,
-            args.backtest_tick_ms,
-            args.backtest_tail_ms,
-            args.backtest_knobs,
-        );
+        // #351: an explicit mode takes the mode runner (mine / verify /
+        // sweep); an empty mode keeps the historic single-run shape so every
+        // existing gate and script is byte-identical.
+        if args.backtest_mode.is_empty() {
+            run_backtest(
+                path,
+                args.backtest_report.as_deref(),
+                cfg,
+                args.backtest_tick_ms,
+                args.backtest_tail_ms,
+                args.backtest_knobs,
+            );
+        } else {
+            run_mode_backtest(
+                path,
+                args.backtest_report.as_deref(),
+                cfg,
+                args.backtest_tick_ms,
+                args.backtest_tail_ms,
+                args.backtest_knobs,
+                &args.backtest_mode,
+                args.verify_latency_ms,
+            );
+        }
         return Ok(());
     }
     if !args.backtest_knobs.is_empty() {
@@ -2583,17 +2693,56 @@ fn run_regime_eval(
     }
 }
 
-/// Offline event-driven backtest (P-1.2): replay a market-data archive through
-/// the same core the live path runs. Always dry: the backtester forces dry mode,
-/// starts no feeds and writes no trade/order/position logs.
-fn run_backtest(
+/// #351: the fill model one backtest-mode rung trades with, plus the friction
+/// validation the honest modes demand. Pure so the reverse acceptance (a
+/// zero-friction mine run must be REFUSED, never silently run) is
+/// unit-testable without a process exit. `rung` is the latency the rung
+/// trades through (verify: the `--verify-latency-ms` dial; sweep: the ladder
+/// step; mine: ignored — every latency dial is zeroed).
+fn mode_rung_model(
+    mode: &str,
+    base: blitzkrieg_core::sim::FillModel,
+    rung: i64,
+) -> Result<blitzkrieg_core::sim::FillModel, String> {
+    if base.taker_slippage_ticks == 0 {
+        return Err(format!(
+            "backtest-mode {mode} refuses zero taker slippage: the honest-friction floor is \
+             --slippage-ticks 1 (mine 模式禁止把滑点设为 0)"
+        ));
+    }
+    Ok(match mode {
+        "mine" => blitzkrieg_core::sim::FillModel {
+            taker_latency_ms: 0,
+            taker_rtt_ms: 0,
+            maker_latency_ms: 0,
+            ..base
+        },
+        "verify" | "sweep" => blitzkrieg_core::sim::FillModel {
+            taker_latency_ms: rung,
+            taker_rtt_ms: rung,
+            maker_latency_ms: rung,
+            ..base
+        },
+        other => {
+            return Err(format!(
+                "unknown --backtest-mode {other} (mine|verify|sweep)"
+            ));
+        }
+    })
+}
+
+/// One replay: open the archive, drive the SAME core, print and (optionally)
+/// write the report. The single-rung primitive every mode composes. Returns
+/// the report so a mode runner can build its ladder table without a second
+/// replay.
+fn backtest_once(
     archive: &str,
-    report_path: Option<&str>,
     cfg: CoreConfig,
     tick_ms: i64,
     tail_ms: i64,
-    knobs: Vec<(String, String, Decimal)>,
-) {
+    knobs: &[(String, String, Decimal)],
+    report_path: Option<&str>,
+) -> blitzkrieg_core::backtest::BacktestReport {
     use blitzkrieg_core::backtest::{BacktestConfig, Backtester, EventBacktester};
     use blitzkrieg_core::data_source::open_replay_all;
 
@@ -2611,16 +2760,16 @@ fn run_backtest(
             std::process::exit(2);
         }
     };
-    let core_cfg = cfg.clone();
-    for (strategy, knob, value) in &knobs {
+    for (strategy, knob, value) in knobs {
         eprintln!("blitzkrieg-core: counterfactual {strategy}.{knob} = {value}");
     }
+    let core_cfg = cfg.clone();
     let mut bt = EventBacktester::new(
         BacktestConfig {
             core: cfg,
             tick_ms,
             tail_ms,
-            hot_params: knobs,
+            hot_params: knobs.to_vec(),
         },
         Box::new(src),
     );
@@ -2648,12 +2797,120 @@ fn run_backtest(
                     Err(e) => eprintln!("backtest: cannot encode report: {e}"),
                 }
             }
+            report
         }
         Err(e) => {
             eprintln!("backtest failed: {e}");
             std::process::exit(2);
         }
     }
+}
+
+/// Historic single-run path (no `--backtest-mode`): byte-identical CLI surface.
+fn run_backtest(
+    archive: &str,
+    report_path: Option<&str>,
+    cfg: CoreConfig,
+    tick_ms: i64,
+    tail_ms: i64,
+    knobs: Vec<(String, String, Decimal)>,
+) {
+    let _ = backtest_once(archive, cfg, tick_ms, tail_ms, &knobs, report_path);
+}
+
+/// #351: the mode runner — `mine` (zero latency, friction as configured),
+/// `verify` (one real-latency run), `sweep` (the latency ladder with the
+/// verdict table). Latency is the ONLY dial the mode moves: slippage and the
+/// fee schedule stay as configured, so the rungs are comparable and any
+/// expectation change is attributable to latency alone.
+#[allow(clippy::too_many_arguments)]
+fn run_mode_backtest(
+    archive: &str,
+    report_path: Option<&str>,
+    mut cfg: CoreConfig,
+    tick_ms: i64,
+    tail_ms: i64,
+    knobs: Vec<(String, String, Decimal)>,
+    mode: &str,
+    verify_latency_ms: i64,
+) {
+    use rust_decimal::Decimal;
+    let base_model = cfg.fill_model;
+    let rungs: Vec<i64> = match mode {
+        "sweep" => vec![0, 50, 100, 200, 300],
+        "mine" => vec![0],
+        "verify" => vec![verify_latency_ms],
+        other => {
+            eprintln!("blitzkrieg-core: unknown --backtest-mode {other} (mine|verify|sweep)");
+            std::process::exit(2);
+        }
+    };
+    let mut rows: Vec<(i64, blitzkrieg_core::backtest::BacktestReport)> = Vec::new();
+    for rung in rungs {
+        let model = match mode_rung_model(mode, base_model, rung) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("blitzkrieg-core: {e}");
+                std::process::exit(2);
+            }
+        };
+        cfg.fill_model = model;
+        // A leg submitted at the last event still needs the clock to reach
+        // its report_at: give the tail at least the full round trip.
+        let tail = tail_ms.max(rung.saturating_mul(2) + 100);
+        let rp: Option<String> = report_path.map(|p| {
+            if mode == "sweep" {
+                let stem = p.strip_suffix(".json").unwrap_or(p);
+                format!("{stem}-lat{rung}.json")
+            } else {
+                p.to_string()
+            }
+        });
+        eprintln!("=== backtest-mode {mode} @ latency {rung} ms ===");
+        let report = backtest_once(archive, cfg.clone(), tick_ms, tail, &knobs, rp.as_deref());
+        rows.push((rung, report));
+    }
+    // The ladder table.
+    let width = 10;
+    print!("backtest-mode {mode} — latency ladder:\n  latency (ms) :");
+    for (rung, _) in &rows {
+        print!("{rung:>width$}");
+    }
+    print!("\n  net PnL ($)  :");
+    for (_, r) in &rows {
+        print!("{:>width$}", format!("{:.2}", r.trades.net_pnl_usd));
+    }
+    print!("\n  closed       :");
+    for (_, r) in &rows {
+        print!("{:>width$}", r.trades.closed);
+    }
+    print!("\n  win rate (%) :");
+    for (_, r) in &rows {
+        print!("{:>width$}", format!("{:.2}", r.trades.win_rate_pct));
+    }
+    print!("\n  profit factor:");
+    for (_, r) in &rows {
+        let pf = r
+            .trades
+            .profit_factor
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "n/a".into());
+        print!("{:>width$}", pf);
+    }
+    println!();
+    let nets: Vec<Decimal> = rows.iter().map(|(_, r)| r.trades.net_pnl_usd).collect();
+    let first = nets[0];
+    let last = nets[nets.len() - 1];
+    let verdict = if nets.iter().all(|n| *n > Decimal::ZERO) {
+        "all rungs positive → 延迟不敏感（稳）"
+    } else if first > Decimal::ZERO && last < Decimal::ZERO {
+        "positive at 0ms, negative at the top rung → 延迟敏感型"
+    } else if first <= Decimal::ZERO {
+        "negative at 0ms → 策略本身无正期望，淘汰"
+    } else {
+        "mixed → 见表"
+    };
+    println!("verdict: {verdict}");
 }
 
 /// Offline walk-forward over a shadow JSONL file, using the SAME exit policy the
@@ -2869,6 +3126,55 @@ fn pct(wins: usize, n: usize) -> usize {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    // ── #351 反向验收 · the honest-friction floor is enforced ───────────────
+
+    /// The spec's floor: "mine 模式拒绝 slippage=0（fail-closed）". A sweep
+    /// that asked for a frictionless run must be refused at the knob, not run
+    /// and quietly print fantasy PnL.
+    #[test]
+    fn mine_mode_refuses_zero_slippage() {
+        let base = blitzkrieg_core::sim::FillModel {
+            taker_slippage_ticks: 0,
+            ..Default::default()
+        };
+        let err = mode_rung_model("mine", base, 0).expect_err("zero slippage must die");
+        assert!(
+            err.contains("refuses zero taker slippage"),
+            "the refusal must name the floor: {err}"
+        );
+        // The floor is mode-independent: verify and sweep run on the same
+        // honest-friction contract.
+        assert!(mode_rung_model("verify", base, 0).is_err());
+        assert!(mode_rung_model("sweep", base, 0).is_err());
+    }
+
+    /// The other side of the knob contract: mine zeroes the latency dials
+    /// (0 decision→venue distance, real slippage/fees kept from `base`), while
+    /// verify/sweep stamp the rung onto every latency.
+    #[test]
+    fn mode_rung_model_wires_the_latency_dials_per_mode() {
+        let base = blitzkrieg_core::sim::FillModel {
+            taker_slippage_ticks: 1,
+            taker_latency_ms: 7,
+            taker_rtt_ms: 11,
+            maker_latency_ms: 13,
+            ..Default::default()
+        };
+        let mine = mode_rung_model("mine", base, 0).expect("mine above the floor");
+        assert_eq!(mine.taker_latency_ms, 0);
+        assert_eq!(mine.taker_rtt_ms, 0);
+        assert_eq!(mine.maker_latency_ms, 0);
+        assert_eq!(
+            mine.taker_slippage_ticks, 1,
+            "mine keeps the real friction; latency is the only dial it turns"
+        );
+        let verify = mode_rung_model("verify", base, 286).expect("verify above the floor");
+        assert_eq!(verify.taker_latency_ms, 286);
+        assert_eq!(verify.taker_rtt_ms, 286);
+        assert_eq!(verify.maker_latency_ms, 286);
+        assert_eq!(verify.taker_slippage_ticks, 1);
+    }
 
     // ── E2-a: the --strategy-limit grammar ──────────────────────────────────
 

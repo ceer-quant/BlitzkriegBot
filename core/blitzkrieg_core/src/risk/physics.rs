@@ -95,7 +95,14 @@ mod tests {
     use rust_decimal_macros::dec;
 
     fn cfg() -> ExitConfig {
-        ExitConfig::default()
+        // The pre-calibration geometry pinned for the mechanism tests: the
+        // tightening ramp reaches its floor AT the force-exit deadline. The
+        // shipped default is 0 = guillotine off, under which the ramp floor
+        // extends to expiry itself (shallower mid-ramp stops, same floor).
+        ExitConfig {
+            force_exit_sec: 120,
+            ..Default::default()
+        }
     }
 
     /// The projection must stay bit-identical to the shipped Gate-4 formula:

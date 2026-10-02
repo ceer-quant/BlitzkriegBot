@@ -1,0 +1,26 @@
+{
+  "name": "oracle_ruler",
+  "version": "1.0.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "e22aeb07fdb6c3564d9f75c54e9dcb5229be50ea715ad20e07cab8ff3839b039",
+  "author": "BlitzkriegBot",
+  "description": "Calibration probe for the measurement layer, not a strategy: rests one unconditional maker bid at entry_price on the round's UP token, every round, no gates and no exits. Booked PnL must match the closed-form expectation built into the synthetic corpus (scripts/lib/oracle-ruler.mjs); any disagreement is a measurement-layer defect, by construction.",
+  "tunables": {
+    "entry_price": {
+      "type": "decimal",
+      "default": "0.30"
+    }
+  },
+  "modes": [
+    {
+      "market_type": "prediction",
+      "structure": "binary_outcome_wheel",
+      "capabilities": [
+        "websocket_feed",
+        "level2_snapshot",
+        "post_only"
+      ]
+    }
+  ]
+}

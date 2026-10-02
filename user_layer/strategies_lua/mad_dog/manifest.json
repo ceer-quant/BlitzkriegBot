@@ -1,0 +1,78 @@
+{
+  "name": "mad_dog",
+  "version": "1.0.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "6427d4a17f227bdd1e3df92f2716540440470fabd53895c55903a6ab8272af11",
+  "author": "BlitzkriegBot",
+  "description": "Panic-wick catcher for 15-minute binary rounds: after one direction holds (mid >= 0.55 by a 20s hold or a 60s rolling mean), a fast wick below 0.35 arms a resting maker bid 0.02 under the wick low; the underlying-asset momentum gate reads engine-side sec1 spot bars. Signal-only: the kernel adjudicates, sizes and gates every intent.",
+  "tunables": {
+    "dominant_min_price": {
+      "type": "decimal",
+      "default": "0.55"
+    },
+    "dominant_hold_sec": {
+      "type": "int",
+      "default": "20"
+    },
+    "dominant_mean_sec": {
+      "type": "int",
+      "default": "60"
+    },
+    "broken_price": {
+      "type": "decimal",
+      "default": "0.35"
+    },
+    "dip_speed_pct": {
+      "type": "decimal",
+      "default": "15"
+    },
+    "dip_speed_sec": {
+      "type": "int",
+      "default": "3"
+    },
+    "spot_max_move_pct": {
+      "type": "decimal",
+      "default": "0.5"
+    },
+    "spot_window_sec": {
+      "type": "int",
+      "default": "10"
+    },
+    "spot_missing": {
+      "type": "string",
+      "default": "block"
+    },
+    "min_time_left_sec": {
+      "type": "int",
+      "default": "180"
+    },
+    "min_bid_depth": {
+      "type": "decimal",
+      "default": "500"
+    },
+    "max_abs_obi": {
+      "type": "decimal",
+      "default": "0.5"
+    },
+    "min_available_usd": {
+      "type": "decimal",
+      "default": "1.00"
+    },
+    "wick_offset": {
+      "type": "decimal",
+      "default": "0.02"
+    }
+  },
+  "modes": [
+    {
+      "market_type": "prediction",
+      "structure": "binary_outcome_wheel",
+      "capabilities": [
+        "websocket_feed",
+        "level2_snapshot",
+        "post_only"
+      ]
+    }
+  ]
+}

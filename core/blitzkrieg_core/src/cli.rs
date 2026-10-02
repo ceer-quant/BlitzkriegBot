@@ -355,6 +355,14 @@ pub const FLAGS: &[FlagSpec] = &[
          as `[exit].min_trail_pct`.",
         "the trailing stop gives back the SHIPPED floor (8%), not the one you named",
     ),
+    risky(
+        "--exit-force-sec",
+        "<sec>",
+        "Force-exit deadline in seconds-left (default 0 = OFF — the guillotine is \
+         disabled by the @almach calibration). A non-zero value re-arms it. Also \
+         settable as `[exit].force_exit_sec`.",
+        "the force-exit guillotine is at the level you named, not the shipped OFF",
+    ),
     flag(
         "--strategy-limit",
         "<name:max_open:max_notional_usd>",
@@ -587,6 +595,28 @@ pub const FLAGS: &[FlagSpec] = &[
         "--backtest-knob",
         "<strategy:knob=value>",
         "Repeatable: counterfactual knob override handed to the replayed strategy.",
+    ),
+    flag(
+        "--backtest-mode",
+        "<mine|verify|sweep>",
+        "#351: run the replay under a latency mode — mine (zero latency, friction \
+         as configured), verify (one real-latency run), sweep (the latency ladder \
+         with a verdict table).",
+    ),
+    flag(
+        "--verify-latency-ms",
+        "<n>",
+        "Latency rung for --backtest-mode verify (default 286).",
+    ),
+    flag(
+        "--taker-latency-ms",
+        "<n>",
+        "Fill model: taker decision→venue latency in ms (default 0).",
+    ),
+    flag(
+        "--taker-rtt-ms",
+        "<n>",
+        "Fill model: taker venue→report RTT in ms (default 0).",
     ),
     flag(
         "--fee-model",

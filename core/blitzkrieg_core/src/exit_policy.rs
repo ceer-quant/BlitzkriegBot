@@ -97,14 +97,22 @@ const BOOK_TRUST_SEC: i64 = QUOTE_TRUST_SEC * 2;
 
 impl Default for ExitConfig {
     fn default() -> Self {
-        // Tuned from the exit walk-forward study (MIGRATION_LOG §26/§27). The
-        // profit side mirrors Node: fixed TP 100% is only a backstop, and normal
-        // exits ride the trailing stop. The ONE deliberate deviation from Node is
-        // the stop-loss (50 -> 15), which the study showed was the dominant loss
-        // source; that change alone flipped profit factor from 1.55 to ~2.5.
+        // Calibrated against the one proven-profitable on-chain operator the
+        // replay was ever pointed at (@almach, 85k fills, SELL=0 — every exit
+        // is a REDEEM or a MERGE): the profit side HOLDS to settlement and the
+        // only in-flight exits are protective. Concretely:
+        //   * force_exit_sec 0 = the guillotine is OFF (0 disables the rule) —
+        //     the old 120s deadline amputated rounds that went on to pay;
+        //   * min_time_left_sec 0 = the time exit fires only at expiry itself,
+        //     i.e. "time exit" and "settlement" are the same event;
+        //   * trailing_enabled false = no profit-banking sells (SELL=0); the
+        //     fixed TP 100% backstop stays as the only profit-side rule.
+        // The stop half is untouched (12% hard stop, tighten ramp) — containment
+        // is what the ladder must keep doing. A caller that wants the pre-
+        // calibration behaviour pins the old values explicitly (the tests do).
         Self {
-            force_exit_sec: 120,
-            min_time_left_sec: 180,
+            force_exit_sec: 0,
+            min_time_left_sec: 0,
             // Fixed take-profit is a BACKSTOP only, matching Node (takeProfitPct=100):
             // normal profits are locked by the trailing stop below, while this guard
             // banks a near-certain binary win (+100%, e.g. 0.45 -> 0.90) if it ever
@@ -120,7 +128,11 @@ impl Default for ExitConfig {
             dynamic_stop_enabled: true,
             stop_tighten_start_sec: 300,
             stop_min_pct: dec!(10),
-            trailing_enabled: true,
+            // Calibrated: the proven operator NEVER sells into profit (SELL=0,
+            // every exit is a REDEEM/MERGE) — trailing banking is a counter-
+            // factual behaviour the ladder must not default to. Callers that
+            // want it set the flag explicitly.
+            trailing_enabled: false,
             trailing_min_high_pct: dec!(15),
             // Node uses 10. A canonical sweep shows 8 locks profit slightly sooner
             // and raises net at essentially unchanged PF; 6 gains only ~$0.5 more
@@ -924,11 +936,29 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
 
     // 1. Force exit — absolute deadline. It still prices off the live bid:
     //    deadline pressure alone must not mint a SELL against a dried-up book.
-    if time_left_sec <= cfg.force_exit_sec {
+    //    `force_exit_sec <= 0` DISABLES the guillotine (the calibrated default:
+    //    the deadline amputated rounds that went on to pay); a non-positive
+    //    threshold can never be a deadline, it can only be a misfire.
+    if cfg.force_exit_sec > 0 && time_left_sec <= cfg.force_exit_sec {
         if !live {
             return ExitVerdict::hold();
         }
         return ExitVerdict::exit(ExitReason::ForceExit, false, None);
+    }
+
+    // Calibrated expiry gate (@almach: SELL=0, every exit a REDEEM/MERGE).
+    // When the guillotine is OFF (the shipped default) a position at/past
+    // expiry belongs to SETTLEMENT, not to this ladder: every rule below
+    // prices off a book that is dying with the round, and letting them fire
+    // converts a $1 winner into a "stop-loss" at the residual bid — the same
+    // failure that zeroed bid-less winners at settlement. Placed AFTER the
+    // force-exit check on purpose: an operator who re-arms the guillotine has
+    // made the explicit choice to sell at the deadline, expiry included; the
+    // calibrated default lets settlement own the position (dry:
+    // `drive_settlement`; live: the venue answer). Strategy-signal exits
+    // bypass this ladder entirely, so an explicit "get out" is honoured.
+    if cfg.force_exit_sec <= 0 && time_left_sec <= 0 {
+        return ExitVerdict::hold();
     }
 
     // The stop needs SOME price to judge on, and may fall back to the last
@@ -1211,7 +1241,13 @@ mod tests {
 
     #[test]
     fn force_exit_fires_at_deadline() {
-        let cfg = ExitConfig::default();
+        // The guillotine is OFF by default (calibrated: the deadline amputated
+        // rounds that went on to pay), so the deadline itself is pinned here:
+        // the RULE still works when an operator turns it on.
+        let cfg = ExitConfig {
+            force_exit_sec: 120,
+            ..Default::default()
+        };
         let st = ExitState::new(dec!(0.4), 0);
         let b = book(0.39, 0.41);
         let d = decide_exit(ExitTickInput {
@@ -1225,6 +1261,36 @@ mod tests {
             cfg: &cfg,
         });
         assert_eq!(d.unwrap().reason, ExitReason::ForceExit);
+    }
+
+    /// The calibrated default: `force_exit_sec = 0` DISABLES the guillotine —
+    /// including the `time_left == 0` edge a non-positive threshold would
+    /// otherwise misfire on ahead of settlement.
+    #[test]
+    fn force_exit_default_is_disabled() {
+        let cfg = ExitConfig::default();
+        assert_eq!(cfg.force_exit_sec, 0);
+        assert_eq!(cfg.min_time_left_sec, 0);
+        let st = ExitState::new(dec!(0.4), 0);
+        let b = book(0.39, 0.41);
+        let d = decide_exit(ExitTickInput {
+            entry_price: dec!(0.4),
+            book: Some(&b),
+            fallback_price: None,
+            time_left_sec: 0,
+            hold_sec: 900,
+            state: &st,
+            now_ms: 1000,
+            cfg: &cfg,
+        });
+        // At expiry with the guillotine OFF the ladder is SILENT — the position
+        // belongs to settlement (dry: `drive_settlement`; live: the venue
+        // answer). No dying-book rule (stop included) may fire: letting them
+        // would sell a $1 winner at the residual bid.
+        assert!(
+            d.is_none(),
+            "expiry + guillotine OFF = hold; settlement owns the position"
+        );
     }
 
     #[test]
@@ -1746,7 +1812,13 @@ mod tests {
     /// dark, so the ladder kept its loss half and lost its profit half.
     #[test]
     fn a_bidless_book_judges_the_profit_side_on_a_fresh_last_known_price() {
-        let cfg = ExitConfig::default();
+        // Trailing is explicitly ON here: this test pins the #267 MECHANISM
+        // (a bid-less book still JUDGES the profit side), which is orthogonal
+        // to the calibrated default of banking nothing via trailing sells.
+        let cfg = ExitConfig {
+            trailing_enabled: true,
+            ..Default::default()
+        };
         let now = 1_000_000;
         let entry = dec!(0.40);
         let b = one_sided_book(dec!(0.90));

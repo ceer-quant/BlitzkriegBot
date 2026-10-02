@@ -1,0 +1,32 @@
+{
+  "name": "market_maker",
+  "version": "1.0.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "72e860688d5ebaa44258b45e6ef2af4707613a96440245947c7df08cfd4b24ec",
+  "author": "BlitzkriegBot",
+  "description": "Passive spread harvester for 15-minute binary rounds: a cheap chip (mid 0.20-0.42) with a deep, balanced, non-one-sided book and a calm underlying earns one resting maker bid 0.02 under its mid; when the mid climbs 0.03 over the bid the close is suggested and the thesis re-arms. Signal-only: the kernel adjudicates, sizes, gates every intent and owns the exit ladder.",
+  "tunables": {
+    "min_mid_price": { "type": "decimal", "default": "0.20" },
+    "max_mid_price": { "type": "decimal", "default": "0.42" },
+    "bid_offset": { "type": "decimal", "default": "0.02" },
+    "take_profit_spread": { "type": "decimal", "default": "0.03" },
+    "min_time_left_sec": { "type": "int", "default": "120" },
+    "min_bid_depth": { "type": "decimal", "default": "300" },
+    "min_ask_depth": { "type": "decimal", "default": "300" },
+    "max_abs_obi": { "type": "decimal", "default": "0.4" },
+    "trend_window_sec": { "type": "int", "default": "30" },
+    "trend_max_move_pct": { "type": "decimal", "default": "5" },
+    "spot_window_sec": { "type": "int", "default": "30" },
+    "spot_max_move_pct": { "type": "decimal", "default": "1.5" },
+    "spot_missing": { "type": "string", "default": "block" },
+    "min_available_usd": { "type": "decimal", "default": "1.00" }
+  },
+  "modes": [
+    {
+      "market_type": "prediction",
+      "structure": "binary_outcome_wheel",
+      "capabilities": ["websocket_feed", "level2_snapshot", "post_only"]
+    }
+  ]
+}

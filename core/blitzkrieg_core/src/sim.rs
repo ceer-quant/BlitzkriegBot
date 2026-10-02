@@ -199,6 +199,12 @@ fn default_maker_depth_share_bps() -> u32 {
 ///    salted hash of the order id, independent of the `maker_fill_prob_bps`
 ///    draw, so a replay is still reproducible and the two dials do not move
 ///    together.
+///  - `taker_latency_ms` (#351): a TAKER order reaches the venue this long
+///    after its decision, and fills against the book as it stands THEN —
+///    never against the decision-time quote. `0` = the historic identity.
+///  - `taker_rtt_ms` (#351): the venue's fill report travels back this long,
+///    so the ledger/position effects land at `execute_at + taker_rtt_ms`.
+///    `0` = effects apply at execution, the historic behaviour.
 ///
 /// The depth cap itself is NOT a dial: a maker fill is always bounded by the
 /// crossing depth (issue #183), because that is venue physics rather than
@@ -211,6 +217,19 @@ pub struct FillModel {
     pub maker_fill_prob_bps: u32,
     #[serde(default = "default_maker_depth_share_bps")]
     pub maker_depth_share_bps: u32,
+    /// #351: how long a TAKER order takes to reach the venue (ms) — the leg
+    /// fills against the book as it stands at `decision_at + taker_latency_ms`,
+    /// never against the decision-time quote. `0` = the historic identity
+    /// (fill immediately at the current book); the default keeps every existing
+    /// replay bit-for-bit until a run raises the dial.
+    #[serde(default)]
+    pub taker_latency_ms: i64,
+    /// #351: how long the venue's fill report takes to travel back (ms) — the
+    /// ledger/position effects of a taker fill land at
+    /// `execute_at + taker_rtt_ms`. `0` = effects apply at execution, the
+    /// historic behaviour.
+    #[serde(default)]
+    pub taker_rtt_ms: i64,
 }
 
 impl Default for FillModel {
@@ -220,6 +239,8 @@ impl Default for FillModel {
             maker_latency_ms: 0,
             maker_fill_prob_bps: 10_000,
             maker_depth_share_bps: default_maker_depth_share_bps(),
+            taker_latency_ms: 0,
+            taker_rtt_ms: 0,
         }
     }
 }
@@ -234,6 +255,8 @@ impl FillModel {
             && self.maker_latency_ms <= 0
             && self.maker_fill_prob_bps >= 10_000
             && self.maker_depth_share_bps >= 10_000
+            && self.taker_latency_ms <= 0
+            && self.taker_rtt_ms <= 0
     }
 
     /// Price a taker fill would actually get, given the side.
@@ -341,6 +364,9 @@ mod tests {
             round_slot: 1,
             submitted_at_ms: 1,
             updated_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
             venue_order_id: None,
             escalate_at_ms: None,
             maker_timeout_ms: 0,
@@ -621,6 +647,8 @@ mod tests {
             maker_latency_ms: 0,
             maker_fill_prob_bps: 10_000,
             maker_depth_share_bps: 10_000,
+            taker_latency_ms: 0,
+            taker_rtt_ms: 0,
         };
         assert_eq!(m.apply_slippage(Side::Buy, dec!(0.42)), dec!(0.44));
         assert_eq!(m.apply_slippage(Side::Sell, dec!(0.42)), dec!(0.40));

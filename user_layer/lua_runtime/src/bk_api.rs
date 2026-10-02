@@ -17,6 +17,7 @@
 //! | `bk.params()`     | this strategy's hot parameters (`name → string value`)     |
 //! | `bk.kline(sym,iv)`| the last CLOSED bar, or `nil` (E29's aggregator owns bars) |
 //! | `bk.account()`    | public display fields only (§11.1: no credentials)         |
+//! | `bk.fees()`       | the active taker-fee schedule (`name/rate/exponent`) or nil |
 //!
 //! Prices and sizes cross as exact decimal STRINGS (the `safe.rs` boundary
 //! rule): a float would let a resting price drift by a tick. `bk.kline`
@@ -46,6 +47,18 @@ pub struct AccountView {
     pub reserved: Option<String>,
 }
 
+/// The active taker-fee schedule as plain data (`bk.fees()`), the same
+/// spelling the kernel charges by: `fee_usd = rate * (p*(1-p))^exponent` per
+/// share. Strings on the decimal-STRING wire rule; `exponent` is an integer
+/// count. Injected by the adapter from the core's ONE fee schedule — a
+/// strategy never carries its own fee copy to guess with.
+#[derive(Debug, Clone, Default)]
+pub struct FeeScheduleView {
+    pub name: String,
+    pub rate: String,
+    pub exponent: u32,
+}
+
 /// Host-side snapshot the adapter refreshes before every sandbox call. One
 /// `Mutex` around plain data: the adapter writes on its host thread, the `bk`
 /// closures read on the same thread inside the VM call — no contention in
@@ -65,6 +78,11 @@ pub struct BkState {
     pub fresh: HashMap<String, bool>,
     /// This strategy's hot parameters (host config + shadow-evolution bag).
     pub params: HashMap<String, String>,
+    /// The active taker-fee schedule, as plain data (lua_runtime must not
+    /// depend on the core): `name/rate/exponent` strings. `None` = no schedule
+    /// in force — `bk.fees()` returns nil and a strategy that prices fees
+    /// must fail closed (skip the trade, never assume zero).
+    pub fee_schedule: Option<FeeScheduleView>,
     pub account: Option<AccountView>,
     /// Last CLOSED bar per `(symbol, interval)` the host has seen. Empty until
     /// a host actually feeds klines — with no E29 aggregator there is no
@@ -301,6 +319,27 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                         None => t.raw_set(key, Value::Nil)?,
                     }
                 }
+                Ok(Value::Table(t))
+            })?,
+        )?;
+    }
+
+    // -- bk.fees() ----------------------------------------------------------
+    {
+        let st = Arc::clone(&state);
+        bk.raw_set(
+            "fees",
+            lua.create_function(move |lua, ()| {
+                let st = st.lock().expect("bk state mutex");
+                let Some(f) = &st.fee_schedule else {
+                    // No schedule in force: "unknown", never "free". A strategy
+                    // that prices fees must fail closed on nil.
+                    return Ok(Value::Nil);
+                };
+                let t = lua.create_table()?;
+                t.raw_set("name", f.name.as_str())?;
+                t.raw_set("rate", f.rate.as_str())?;
+                t.raw_set("exponent", f.exponent)?;
                 Ok(Value::Table(t))
             })?,
         )?;

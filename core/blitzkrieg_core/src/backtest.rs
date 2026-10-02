@@ -27,7 +27,9 @@ use crate::service::{Core, CoreConfig};
 use crate::sim::FillModel;
 use rust_decimal::Decimal;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt::Write as FmtWrite;
 use tokio::sync::mpsc;
 
 /// A `Backtester` replays a data source and reports what the strategy did.
@@ -268,6 +270,11 @@ pub struct BacktestReport {
     pub trade_lines: Vec<TradeLine>,
     /// Trades beyond the `trade_lines` cap (list truncated, counts not).
     pub trade_lines_truncated: u64,
+    /// #351 reproducibility digest: SHA256 over the closed-trade list in close
+    /// order (each line's canonical JSON, concatenated). Two replays of the
+    /// same archive under the same config MUST produce the same digest — a
+    /// differing one is a determinism bug, not a statistic.
+    pub trades_sha256: String,
     /// True when the replay had to force `Mode::Dry` (it always does).
     pub forced_dry: bool,
 }
@@ -817,6 +824,21 @@ impl Backtester for EventBacktester {
             (self.trades.clone(), 0)
         };
         let trades = self.trade_stats(fees_usd);
+        // #351 reproducibility digest: the canonical JSON of every closed trade
+        // in close order, concatenated and SHA256'd. Two replays of the same
+        // archive under the same config MUST agree byte-for-byte — a differing
+        // digest is a determinism bug, not a statistic. Hashed from the FULL
+        // trade list (the report's `tradeLines` may be truncated for size).
+        let mut hasher = Sha256::new();
+        for t in &self.trades {
+            let line = serde_json::to_string(t).unwrap_or_default();
+            hasher.update(line.as_bytes());
+            hasher.update(b"\n");
+        }
+        let mut trades_sha256 = String::new();
+        for b in hasher.finalize() {
+            let _ = write!(trades_sha256, "{b:02x}");
+        }
         debug_assert_eq!(
             delivered, stats.events,
             "source delivered a different event count"
@@ -846,6 +868,7 @@ impl Backtester for EventBacktester {
             errors: std::mem::take(&mut self.errors),
             trade_lines,
             trade_lines_truncated: truncated,
+            trades_sha256,
             forced_dry: true,
         })
     }
@@ -990,6 +1013,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    // ── #351 反向验收 · 100% reproducibility must be observable ─────────────
+    //
+    // The spec demands "100% 可复现（SHA256 校验）"; a report that merely
+    // LOOKS deterministic is not acceptance — the digest must pin the exact
+    // trade list, byte for byte.
+
+    /// ACCEPTANCE (#351): replaying the same scenario twice produces the same
+    /// `trades_sha256`, and any difference in the trade list shows in it.
+    #[test]
+    fn the_same_replay_twice_hashes_identically() {
+        let a = bt(
+            base_core(None),
+            Box::new(VecSource::new(scenario_events(NOW))),
+            10_000,
+        );
+        let b = bt(
+            base_core(None),
+            Box::new(VecSource::new(scenario_events(NOW))),
+            10_000,
+        );
+        assert_eq!(
+            a.trades.closed,
+            1,
+            "fixture sanity: the scenario must trade:\n{}",
+            a.render()
+        );
+        assert!(!a.trades_sha256.is_empty(), "the digest must be present");
+        assert_eq!(
+            a.trades_sha256, b.trades_sha256,
+            "identical scenario + identical knobs must hash identically"
+        );
+
+        // A different knob changes the trade list, so it must change the hash —
+        // the digest is a fingerprint of the fills, not a constant.
+        let slipped_core = CoreConfig {
+            fill_model: crate::sim::FillModel {
+                taker_slippage_ticks: 2,
+                ..Default::default()
+            },
+            ..base_core(None)
+        };
+        let c = bt(
+            slipped_core,
+            Box::new(VecSource::new(scenario_events(NOW))),
+            10_000,
+        );
+        assert_ne!(
+            a.trades_sha256, c.trades_sha256,
+            "a changed trade list must change the digest"
+        );
     }
 
     fn strategy<'a>(r: &'a BacktestReport, name: &str) -> &'a Value {

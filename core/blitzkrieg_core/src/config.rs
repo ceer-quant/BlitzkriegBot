@@ -137,15 +137,18 @@ pub const MAX_GRADIENT_CEILING: Decimal = rust_decimal_macros::dec!(0.05);
 /// key keeps the compiled [`crate::exit_policy::ExitConfig`] value, so a file
 /// that never mentions `[exit]` is the shipped kernel.
 ///
-/// Only the four knobs an A/B sweep actually moves live here. The rest of the
+/// Only the knobs an A/B sweep actually moves live here. The rest of the
 /// ladder stays compiled in on purpose: a static config file that could re-shape
 /// every stop and trail would be a second, silently divergent exit policy.
+/// `force_exit_sec` is the fifth (calibration): the shipped default is OFF —
+/// `0` disables the guillotine — and an A/B arm may turn a deadline back on.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExitFile {
     pub take_profit_pct: Option<Decimal>,
     pub stop_loss_pct: Option<Decimal>,
     pub trailing_min_high_pct: Option<Decimal>,
     pub min_trail_pct: Option<Decimal>,
+    pub force_exit_sec: Option<i64>,
 }
 
 /// One `[[risk.ladder]]` row as written in the file (E26 §4.3). A mirror of
@@ -334,6 +337,9 @@ impl FileConfig {
                     }
                     ("exit", "min_trail_pct") => {
                         got(&mut self.exit.min_trail_pct, decimal(v), &full, w)
+                    }
+                    ("exit", "force_exit_sec") => {
+                        got(&mut self.exit.force_exit_sec, int(v), &full, w)
                     }
                     // E26 §4.2: the systemic risk limits. Decimals, same `got`
                     // discipline: a wrongly-typed key is a warning, not a boot

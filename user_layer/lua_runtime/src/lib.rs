@@ -31,6 +31,6 @@ pub mod sandbox;
 // The loader-facing surface, at the crate root: the core imports these by
 // short name (`blitzkrieg_lua_runtime::{LuaStrategy, PoisonHandle}`), and the
 // one-import rule keeps the core/lua_runtime seam auditable in a glance.
-pub use bk_api::{AccountView, BkState};
+pub use bk_api::{AccountView, BkState, FeeScheduleView};
 pub use lua_strategy::{LuaHealth, LuaStrategy};
 pub use sandbox::{InvokeError, PoisonHandle};
