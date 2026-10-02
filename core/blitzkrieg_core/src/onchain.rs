@@ -658,20 +658,88 @@ pub async fn pull_and_convert(
         format!("{} conditions", conditions.len()),
     );
     let mut gamma: BTreeMap<String, Value> = BTreeMap::new();
+    let mut no_meta: u64 = 0;
     for cid in &conditions {
         let cp = condition_cache_path(&req.out_dir, cid);
-        let v = if cp.exists() {
-            read_json(&cp)?
+        let cached = if cp.exists() {
+            Some(read_json(&cp)?)
         } else {
-            let url = format!("{GAMMA_API_BASE}/markets?condition_ids={cid}");
-            let resp = fetch
-                .get_json(&url)
-                .await
-                .map_err(|e| format!("gamma {cid}: {e}"))?;
-            let arr = resp.as_array().cloned().unwrap_or_default();
-            let v = arr.into_iter().next().unwrap_or(Value::Null);
-            write_json_atomic(&cp, &v)?;
-            v
+            None
+        };
+        // A cached `null` is a MISS, not a fact: Gamma prunes closed
+        // short-cycle updown markets (it answered `[]` for every September
+        // 2026 condition — probed live), and the CLOB fallback below recovers
+        // them, so a re-pull self-heals instead of replaying the hole.
+        let v = match cached {
+            Some(v) if !v.is_null() && v.get("clobTokenIds").is_some() => v,
+            _ => {
+                let url = format!("{GAMMA_API_BASE}/markets?condition_ids={cid}");
+                let resp = fetch
+                    .get_json(&url)
+                    .await
+                    .map_err(|e| format!("gamma {cid}: {e}"))?;
+                let arr = resp.as_array().cloned().unwrap_or_default();
+                let mut v = arr.into_iter().next().unwrap_or(Value::Null);
+                // Gamma-prune fallback: CLOB `/markets/{condition_id}` keeps
+                // the full record for closed markets (tokens with outcome
+                // Up/Down, question_id, neg_risk). Adapt it into the gamma
+                // shape the converter consumes — `clobTokenIds` as the
+                // JSON-encoded string array, Up first, Down second.
+                if v.is_null() || v.get("clobTokenIds").is_none() {
+                    let url = format!("{CLOB_API_BASE}/markets/{cid}");
+                    match fetch.get_json(&url).await {
+                        Ok(c) => {
+                            let toks = c
+                                .get("tokens")
+                                .and_then(Value::as_array)
+                                .cloned()
+                                .unwrap_or_default();
+                            let token_of = |t: &Value| {
+                                t.get("token_id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string()
+                            };
+                            let mut up = String::new();
+                            let mut down = String::new();
+                            for t in &toks {
+                                match t.get("outcome").and_then(Value::as_str) {
+                                    Some("Up") if up.is_empty() => up = token_of(t),
+                                    Some("Down") if down.is_empty() => down = token_of(t),
+                                    _ => {}
+                                }
+                            }
+                            if up.is_empty() {
+                                up = toks.first().map(&token_of).unwrap_or_default();
+                            }
+                            if down.is_empty() {
+                                down = toks.get(1).map(token_of).unwrap_or_default();
+                            }
+                            if !up.is_empty() || !down.is_empty() {
+                                v = json!({
+                                    "clobTokenIds": serde_json::to_string(&[up, down])
+                                        .unwrap_or_default(),
+                                    "questionID": c
+                                        .get("question_id")
+                                        .cloned()
+                                        .unwrap_or(Value::Null),
+                                    "negRisk": c.get("neg_risk").cloned().unwrap_or(json!(false)),
+                                    "closed": c.get("closed").cloned().unwrap_or(json!(true)),
+                                    "source": "clob-fallback",
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            return Err(format!("clob {cid}: {e}"));
+                        }
+                    }
+                }
+                write_json_atomic(&cp, &v)?;
+                if v.is_null() {
+                    no_meta += 1;
+                }
+                v
+            }
         };
         gamma.insert(cid.clone(), v);
         report(
@@ -680,6 +748,19 @@ pub async fn pull_and_convert(
             gamma.len() as u64,
             cid.clone(),
         );
+    }
+    // Fail-closed against a systemic metadata outage: scattered dead
+    // conditions (a wallet also touched non-round markets) are fine — the
+    // converter skips them — but if MOST of the window has no record the
+    // event stream would be a half-blind fiction. Refuse before converting;
+    // per-condition caches persist, so a re-run when the APIs answer is
+    // cheap.
+    if no_meta * 2 > conditions.len() as u64 {
+        return Err(format!(
+            "metadata coverage collapsed: {no_meta} of {} conditions have no \
+             gamma/clob record — refusing to convert a half-blind stream",
+            conditions.len()
+        ));
     }
 
     // Per condition: slug → timing; gamma → token ids; prices-history → the
@@ -1473,6 +1554,115 @@ mod tests {
             urls.len()
         );
         verify_dataset(&o.manifest_path).unwrap();
+    }
+
+    /// Gamma prunes closed short-cycle updown markets (probed live: it
+    /// answered `[]` for every September 2026 condition), and a pull made
+    /// before the fallback existed cached those holes as literal `null`
+    /// files. The gate: a `null` cache is a MISS — the CLOB fallback
+    /// recovers the record, the round declarations carry both token ids,
+    /// and the healed cache is written back.
+    struct GammaPruned {
+        clob_tokens: bool,
+        trades_pages: Mutex<Vec<Vec<Value>>>,
+    }
+
+    impl JsonFetcher for GammaPruned {
+        fn get_json<'a>(
+            &'a self,
+            url: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'a>> {
+            let out: Result<Value, String> = if url.contains("/trades?") {
+                let mut pages = self.trades_pages.lock().unwrap();
+                if pages.is_empty() {
+                    Ok(Value::Array(Vec::new()))
+                } else {
+                    Ok(Value::Array(pages.remove(0)))
+                }
+            } else if url.contains("gamma-api") {
+                Ok(json!([])) // pruned: the hole that started this
+            } else if url.contains("/markets/0x") {
+                let cid = url.rsplit('/').next().unwrap_or("");
+                let tokens = if self.clob_tokens {
+                    let (up, down) = if cid == COND1 {
+                        (UP1, DOWN1)
+                    } else {
+                        (UP2, DOWN2)
+                    };
+                    json!([
+                        { "token_id": up, "outcome": "Up", "price": 0, "winner": false },
+                        { "token_id": down, "outcome": "Down", "price": 1, "winner": true },
+                    ])
+                } else {
+                    json!([])
+                };
+                Ok(json!({
+                    "condition_id": cid, "tokens": tokens,
+                    "question_id": "q", "neg_risk": false, "closed": true,
+                }))
+            } else if url.contains("prices-history") {
+                let start: i64 = url
+                    .split("startTs=")
+                    .nth(1)
+                    .and_then(|s| s.split('&').next())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                Ok(json!({ "history": [
+                    { "t": start + 60, "p": 0.4 },
+                    { "t": start + 120, "p": 0.6 },
+                ]}))
+            } else {
+                Err(format!("unexpected url {url}"))
+            };
+            Box::pin(async move { out })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gamma_pruned_condition_is_recovered_from_clob() {
+        let fetch = GammaPruned {
+            clob_tokens: true,
+            trades_pages: Mutex::new(vec![rows_ab()]),
+        };
+        let r = req(tmp("pruned"));
+        // The pre-fallback world: a literal `null` cached for COND1.
+        let cp = condition_cache_path(&r.out_dir, COND1);
+        std::fs::create_dir_all(cp.parent().unwrap()).unwrap();
+        write_json_atomic(&cp, &Value::Null).unwrap();
+        let o = pull_and_convert(&fetch, &r, &noop_cb()).await.unwrap();
+        assert_eq!(o.trades, 2);
+        assert_eq!(o.events, EXPECTED_EVENTS);
+        // Both round declarations carry the CLOB-recovered token ids — the
+        // converter saw a real record, not the hole.
+        let txt = std::fs::read_to_string(&o.events_path).unwrap();
+        assert!(
+            txt.contains(UP1) && txt.contains(DOWN2),
+            "token ids present"
+        );
+        // The healed cache is no longer a hole.
+        let healed: Value = read_json(&cp).unwrap();
+        assert!(
+            healed.get("clobTokenIds").is_some(),
+            "a re-pull must overwrite the null cache with the CLOB record"
+        );
+        verify_dataset(&o.manifest_path).unwrap();
+    }
+
+    /// Reverse gate: scattered dead conditions are fine, but when MOST of
+    /// the window has no gamma/clob record the stream would be half-blind —
+    /// refuse before converting instead of shipping a fiction.
+    #[tokio::test]
+    async fn a_metadata_coverage_collapse_refuses_to_convert() {
+        let fetch = GammaPruned {
+            clob_tokens: false, // CLOB answers too, but tokenless
+            trades_pages: Mutex::new(vec![rows_ab()]),
+        };
+        let r = req(tmp("coverage"));
+        let err = pull_and_convert(&fetch, &r, &noop_cb()).await.unwrap_err();
+        assert!(
+            err.contains("metadata coverage collapsed"),
+            "want the collapse refusal, got {err}"
+        );
     }
 
     /// Reverse gate: a manifest without sha256 pins is a REFUSAL, not a pass.
