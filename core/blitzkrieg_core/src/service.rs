@@ -1531,6 +1531,26 @@ impl Core {
             loaded.into_iter().filter(|o| o.status.is_live()).collect();
         let n = live.len();
         self.ome.restore(live.clone());
+        // The restored orders keep their ORIGINAL ids and stay in the OME
+        // registry, while a fresh process's id counter starts at 1. Without
+        // this, the first new placements walk straight into the restored ids
+        // and the dedup guard refuses the collision — production saw
+        // `order already registered: dry_6` right after a restart that
+        // recovered one live order. Same rule the position recovery already
+        // applies (advance `next_id` past the restored ids).
+        let mut max_restored: Option<u64> = None;
+        for o in &live {
+            if let Some((_, n)) = o.order_id.rsplit_once('_')
+                && let Ok(v) = n.parse::<u64>()
+            {
+                max_restored = Some(max_restored.unwrap_or(0).max(v));
+            }
+        }
+        if let Some(max_id) = max_restored
+            && max_id + 1 > self.next_id
+        {
+            self.next_id = max_id + 1;
+        }
         db.compact(&live);
         if n > 0 {
             // A re-adopted order still commits its unfilled notional. The local
@@ -8708,6 +8728,72 @@ mod tests {
             round_slot: 1,
             account_id: crate::model::default_account_id(),
         }
+    }
+
+    /// A restarted core restores live orders into the OME under their ORIGINAL
+    /// ids; the id counter must skip past them, or the first new placements
+    /// re-allocate a restored order's id and the OME's dedup guard refuses it.
+    /// Production saw `order already registered: dry_6` right after the 0.3.0
+    /// upgrade restart: `restore_orders` re-adopted a live `dry_6` while the
+    /// fresh process's counter was still at 1, and the sixth new placement
+    /// walked straight into it. Same rule the position recovery already
+    /// applies (advance past the restored ids, position.rs).
+    #[test]
+    fn restored_live_orders_push_the_id_counter_past_their_ids() {
+        let dir = std::env::temp_dir().join(format!("bk-restore-ids-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("orders.jsonl");
+        let restored = crate::model::TrackedOrder {
+            order_id: "dry_6".into(),
+            internal_key: "k6".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode: FillPolicy::Maker,
+            role: OrderRole::Pending,
+            price: dec!(0.40),
+            size: dec!(5),
+            filled_size: Decimal::ZERO,
+            avg_fill_price: None,
+            status: OrderStatus::Live,
+            round_slot: 1,
+            submitted_at_ms: 1,
+            updated_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
+            venue_order_id: None,
+            escalate_at_ms: None,
+            maker_timeout_ms: 0,
+            account_id: crate::model::default_account_id(),
+        };
+        std::fs::write(&log, serde_json::to_string(&restored).unwrap() + "\n").unwrap();
+        let mut c = Core::new(CoreConfig {
+            order_log_path: Some(log.to_string_lossy().into_owned()),
+            risk: RiskConfig {
+                max_order_notional: dec!(3),
+                ..Default::default()
+            },
+            dry_seed_balance: Decimal::from(10_000),
+            ..Default::default()
+        });
+        assert_eq!(c.restore_orders(), 1, "the live order is re-adopted");
+
+        // The counter was seeded past the restored id: the FIRST placement
+        // after the restart must not collide with `dry_6` — before the fix
+        // ids started at dry_1 and the sixth walked into the restored one.
+        let (id, _) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "new-1"), 0, 1)
+            .unwrap();
+        assert_eq!(id, "dry_7", "the counter skips the restored ids entirely");
+        let (id2, _) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "new-2"), 0, 1)
+            .unwrap();
+        assert_eq!(id2, "dry_8");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
