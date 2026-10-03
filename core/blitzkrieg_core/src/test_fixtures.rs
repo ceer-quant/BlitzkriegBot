@@ -33,6 +33,7 @@ pub fn round_market(now: i64) -> CryptoMarket {
         down_price: dec!(0.4),
         expires_at_ms: (slot + 1) * 900 * 1000,
         round_slot: slot,
+        round_duration_sec: 900,
         neg_risk: true,
         question: "BTC up or down".into(),
     }
@@ -51,6 +52,7 @@ pub fn evo_market() -> CryptoMarket {
         down_price: dec!(0.5),
         expires_at_ms: 900_000,
         round_slot: 1,
+        round_duration_sec: 900,
         neg_risk: false,
         question: "?".into(),
     }

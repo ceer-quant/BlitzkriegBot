@@ -365,6 +365,24 @@ struct Args {
     regime_volatile_mad_ticks: Decimal,
     /// Confirmation hysteresis before the machine switches state.
     regime_confirmations: u32,
+    /// #352: pull a wallet's on-chain fills and convert to the backtest JSONL
+    /// event stream (Polymarket Data/Gamma/CLOB APIs). The offline twin of a
+    /// live feed — the same `--backtest` consumes the output.
+    onchain_pull: Option<String>,
+    /// #352 pull window start (`YYYY-MM-DD` or epoch seconds, UTC).
+    onchain_start: Option<String>,
+    /// #352 pull window end (inclusive of fills up to this instant).
+    onchain_end: Option<String>,
+    /// #352 pull filter: one asset's updown rounds (`BTC`/`ETH`/`SOL`/`XRP`).
+    onchain_asset: Option<String>,
+    /// #352 pull filter: one round duration (`5m`/`15m`/`1h`/`4h`).
+    onchain_market: Option<String>,
+    /// #355: read the fill universe from a pre-fetched `/activity` JSONL
+    /// export instead of walking `/trades` (which answers only a taker-side
+    /// subset — 17.6% of the same window's notional, measured 2026-10-02).
+    onchain_fills: Option<String>,
+    /// #352 output root (default `data/onchain`).
+    onchain_out_dir: Option<String>,
     /// Fill model: taker slippage in ticks (0.01).
     slippage_ticks: u32,
     /// Fill model: maker latency (ms).
@@ -717,6 +735,14 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut regime_min_efficiency = Decimal::new(5, 1);
     let mut regime_volatile_mad_ticks = Decimal::new(15, 1);
     let mut regime_confirmations: u32 = 2;
+    // #352: on-chain pull knobs (offline subcommand, like --regime-eval).
+    let mut onchain_pull: Option<String> = None;
+    let mut onchain_start: Option<String> = None;
+    let mut onchain_end: Option<String> = None;
+    let mut onchain_asset: Option<String> = None;
+    let mut onchain_market: Option<String> = None;
+    let mut onchain_fills: Option<String> = None;
+    let mut onchain_out_dir: Option<String> = None;
     let mut slippage_ticks: u32 = 0;
     let mut latency_ms: i64 = 0;
     let mut taker_latency_ms: i64 = 0;
@@ -972,6 +998,14 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--regime-eval" => regime_eval = it.next(),
             "--regime-report" => regime_report = it.next(),
             "--regime-token" => regime_token = it.next(),
+            // #352: the on-chain pull subcommand and its knobs.
+            "--onchain-pull" => onchain_pull = it.next(),
+            "--onchain-start" => onchain_start = it.next(),
+            "--onchain-end" => onchain_end = it.next(),
+            "--onchain-asset" => onchain_asset = it.next(),
+            "--onchain-market" => onchain_market = it.next(),
+            "--onchain-fills" => onchain_fills = it.next(),
+            "--onchain-out-dir" => onchain_out_dir = it.next(),
             "--regime-max-tokens" => {
                 regime_max_tokens = it
                     .next()
@@ -1789,6 +1823,13 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         regime_min_efficiency,
         regime_volatile_mad_ticks,
         regime_confirmations,
+        onchain_pull,
+        onchain_start,
+        onchain_end,
+        onchain_asset,
+        onchain_market,
+        onchain_fills,
+        onchain_out_dir,
         slippage_ticks,
         latency_ms,
         taker_latency_ms,
@@ -2417,6 +2458,95 @@ async fn main() -> anyhow::Result<()> {
         run_replay_near_miss(std::path::Path::new(path));
         return Ok(());
     }
+    if let Some(wallet) = &args.onchain_pull {
+        // #352: the offline on-chain pull — Polymarket Data/Gamma/CLOB APIs →
+        // the backtest JSONL event stream under data/onchain. Like
+        // --regime-eval it needs no mode, no feeds and never trades; unlike
+        // it, the pull is async (page-sized progress on stderr, never a
+        // blocking loop without feedback).
+        let (Some(start), Some(end)) = (&args.onchain_start, &args.onchain_end) else {
+            eprintln!(
+                "blitzkrieg-core: --onchain-pull needs --onchain-start and --onchain-end \
+                 (YYYY-MM-DD or epoch seconds, UTC)"
+            );
+            std::process::exit(2);
+        };
+        let start_sec = match blitzkrieg_core::onchain::parse_time_arg(start) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("blitzkrieg-core: --onchain-start: {e}");
+                std::process::exit(2);
+            }
+        };
+        let end_sec = match blitzkrieg_core::onchain::parse_time_arg(end) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("blitzkrieg-core: --onchain-end: {e}");
+                std::process::exit(2);
+            }
+        };
+        // The end date is inclusive: a `--onchain-end 2026-10-01` covers the
+        // whole day, not the midnight instant. (An epoch arg is the instant
+        // itself — no day to expand.)
+        let end_is_date = end.trim().parse::<i64>().is_err();
+        let end_inclusive_sec = if end_is_date {
+            end_sec + 86_400 - 1
+        } else {
+            end_sec
+        };
+        let out_dir = args
+            .onchain_out_dir
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("data/onchain"));
+        let req = blitzkrieg_core::onchain::PullRequest {
+            wallet: wallet.clone(),
+            start_ms: start_sec * 1000,
+            end_ms: end_inclusive_sec * 1000,
+            asset: args.onchain_asset.clone(),
+            market: args.onchain_market.clone(),
+            out_dir,
+            page_limit: 500,
+            fill_source: match &args.onchain_fills {
+                Some(path) => blitzkrieg_core::onchain::FillSource::ActivityFile(
+                    std::path::PathBuf::from(path),
+                ),
+                None => Default::default(),
+            },
+        };
+        let fetch = blitzkrieg_core::onchain::HttpFetcher::new(150);
+        let outcome = blitzkrieg_core::onchain::pull_and_convert(
+            &fetch,
+            &req,
+            &|p: &blitzkrieg_core::onchain::PullProgress| {
+                eprintln!("onchain {}: {} — {}", p.phase, p.fetched, p.detail);
+            },
+        )
+        .await;
+        match outcome {
+            Ok(o) => {
+                println!(
+                    "onchain: {} trades → {} events\n  trades:  {}\n  events:  {}\n  manifest: {}{}",
+                    o.trades,
+                    o.events,
+                    o.trades_path.display(),
+                    o.events_path.display(),
+                    o.manifest_path.display(),
+                    if o.cache_hit {
+                        "\n  (cache hit, sha256 verified)"
+                    } else {
+                        ""
+                    },
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("blitzkrieg-core: onchain pull failed: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     if let Some(path) = &args.regime_eval {
         // Offline MarketRegime evaluation: independent of the engine — it
         // needs no mode, no feeds and never trades.
@@ -2693,44 +2823,9 @@ fn run_regime_eval(
     }
 }
 
-/// #351: the fill model one backtest-mode rung trades with, plus the friction
-/// validation the honest modes demand. Pure so the reverse acceptance (a
-/// zero-friction mine run must be REFUSED, never silently run) is
-/// unit-testable without a process exit. `rung` is the latency the rung
-/// trades through (verify: the `--verify-latency-ms` dial; sweep: the ladder
-/// step; mine: ignored — every latency dial is zeroed).
-fn mode_rung_model(
-    mode: &str,
-    base: blitzkrieg_core::sim::FillModel,
-    rung: i64,
-) -> Result<blitzkrieg_core::sim::FillModel, String> {
-    if base.taker_slippage_ticks == 0 {
-        return Err(format!(
-            "backtest-mode {mode} refuses zero taker slippage: the honest-friction floor is \
-             --slippage-ticks 1 (mine 模式禁止把滑点设为 0)"
-        ));
-    }
-    Ok(match mode {
-        "mine" => blitzkrieg_core::sim::FillModel {
-            taker_latency_ms: 0,
-            taker_rtt_ms: 0,
-            maker_latency_ms: 0,
-            ..base
-        },
-        "verify" | "sweep" => blitzkrieg_core::sim::FillModel {
-            taker_latency_ms: rung,
-            taker_rtt_ms: rung,
-            maker_latency_ms: rung,
-            ..base
-        },
-        other => {
-            return Err(format!(
-                "unknown --backtest-mode {other} (mine|verify|sweep)"
-            ));
-        }
-    })
-}
-
+// #351: `mode_rung_model` / `mode_rungs` / `latency_verdict` moved into the
+// lib (`backtest`) so the #353 IPC job registry composes the SAME contract
+// the CLI does.
 /// One replay: open the archive, drive the SAME core, print and (optionally)
 /// write the report. The single-rung primitive every mode composes. Returns
 /// the report so a mode runner can build its ladder table without a second
@@ -2770,6 +2865,7 @@ fn backtest_once(
             tick_ms,
             tail_ms,
             hot_params: knobs.to_vec(),
+            progress: None,
         },
         Box::new(src),
     );
@@ -2836,18 +2932,16 @@ fn run_mode_backtest(
 ) {
     use rust_decimal::Decimal;
     let base_model = cfg.fill_model;
-    let rungs: Vec<i64> = match mode {
-        "sweep" => vec![0, 50, 100, 200, 300],
-        "mine" => vec![0],
-        "verify" => vec![verify_latency_ms],
-        other => {
-            eprintln!("blitzkrieg-core: unknown --backtest-mode {other} (mine|verify|sweep)");
+    let rungs = match blitzkrieg_core::backtest::mode_rungs(mode, verify_latency_ms) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("blitzkrieg-core: {e}");
             std::process::exit(2);
         }
     };
     let mut rows: Vec<(i64, blitzkrieg_core::backtest::BacktestReport)> = Vec::new();
     for rung in rungs {
-        let model = match mode_rung_model(mode, base_model, rung) {
+        let model = match blitzkrieg_core::backtest::mode_rung_model(mode, base_model, rung) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("blitzkrieg-core: {e}");
@@ -2899,17 +2993,7 @@ fn run_mode_backtest(
     }
     println!();
     let nets: Vec<Decimal> = rows.iter().map(|(_, r)| r.trades.net_pnl_usd).collect();
-    let first = nets[0];
-    let last = nets[nets.len() - 1];
-    let verdict = if nets.iter().all(|n| *n > Decimal::ZERO) {
-        "all rungs positive → 延迟不敏感（稳）"
-    } else if first > Decimal::ZERO && last < Decimal::ZERO {
-        "positive at 0ms, negative at the top rung → 延迟敏感型"
-    } else if first <= Decimal::ZERO {
-        "negative at 0ms → 策略本身无正期望，淘汰"
-    } else {
-        "mixed → 见表"
-    };
+    let verdict = blitzkrieg_core::backtest::latency_verdict(&nets);
     println!("verdict: {verdict}");
 }
 
@@ -3138,15 +3222,16 @@ mod tests {
             taker_slippage_ticks: 0,
             ..Default::default()
         };
-        let err = mode_rung_model("mine", base, 0).expect_err("zero slippage must die");
+        let err = blitzkrieg_core::backtest::mode_rung_model("mine", base, 0)
+            .expect_err("zero slippage must die");
         assert!(
             err.contains("refuses zero taker slippage"),
             "the refusal must name the floor: {err}"
         );
         // The floor is mode-independent: verify and sweep run on the same
         // honest-friction contract.
-        assert!(mode_rung_model("verify", base, 0).is_err());
-        assert!(mode_rung_model("sweep", base, 0).is_err());
+        assert!(blitzkrieg_core::backtest::mode_rung_model("verify", base, 0).is_err());
+        assert!(blitzkrieg_core::backtest::mode_rung_model("sweep", base, 0).is_err());
     }
 
     /// The other side of the knob contract: mine zeroes the latency dials
@@ -3161,7 +3246,8 @@ mod tests {
             maker_latency_ms: 13,
             ..Default::default()
         };
-        let mine = mode_rung_model("mine", base, 0).expect("mine above the floor");
+        let mine = blitzkrieg_core::backtest::mode_rung_model("mine", base, 0)
+            .expect("mine above the floor");
         assert_eq!(mine.taker_latency_ms, 0);
         assert_eq!(mine.taker_rtt_ms, 0);
         assert_eq!(mine.maker_latency_ms, 0);
@@ -3169,7 +3255,8 @@ mod tests {
             mine.taker_slippage_ticks, 1,
             "mine keeps the real friction; latency is the only dial it turns"
         );
-        let verify = mode_rung_model("verify", base, 286).expect("verify above the floor");
+        let verify = blitzkrieg_core::backtest::mode_rung_model("verify", base, 286)
+            .expect("verify above the floor");
         assert_eq!(verify.taker_latency_ms, 286);
         assert_eq!(verify.taker_rtt_ms, 286);
         assert_eq!(verify.maker_latency_ms, 286);

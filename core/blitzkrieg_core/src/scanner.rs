@@ -292,6 +292,7 @@ mod tests {
             down_price: dec!(0.5),
             expires_at_ms: 1_800_000,
             round_slot: 1,
+            round_duration_sec: 900,
             neg_risk: true,
             question: "".into(),
         }]);
@@ -324,6 +325,7 @@ mod tests {
             down_price: dec!(0.5),
             expires_at_ms: 1_800_000,
             round_slot: 1,
+            round_duration_sec: 900,
             neg_risk: true,
             question: "".into(),
         }]);

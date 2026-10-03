@@ -1169,6 +1169,7 @@ mod reserved_key_tests {
             down_price: rust_decimal_macros::dec!(0.5),
             expires_at_ms: 0,
             round_slot: 1,
+            round_duration_sec: 900,
             neg_risk: false,
             question: "q".into(),
         };

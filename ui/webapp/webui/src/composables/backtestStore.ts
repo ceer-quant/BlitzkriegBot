@@ -1,5 +1,5 @@
 /**
- * 本地保存的回放报告 — localStorage 持久化，刷新不丢。
+ * 本地保存的回测报告 — localStorage 持久化，刷新不丢。
  * 报告 JSON 可能到几百 KB；超过 ~2MB 时放弃持久化（只在当前会话展示）。
  */
 import type { BacktestReport } from '../backtest'
@@ -30,4 +30,4 @@ export function clearBacktest(): void {
   localStorage.removeItem(KEY)
 }
 
-export const backtestLabel = 'ECharts 回放复盘'
+export const backtestLabel = 'ECharts 回测'

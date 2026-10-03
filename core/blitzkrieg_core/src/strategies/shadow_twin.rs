@@ -484,6 +484,7 @@ mod tests {
             down_price: dec!(0.5),
             expires_at_ms: 900_000,
             round_slot: 1,
+            round_duration_sec: 900,
             neg_risk: false,
             question: "?".into(),
         }

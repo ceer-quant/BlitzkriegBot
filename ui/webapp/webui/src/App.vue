@@ -68,7 +68,7 @@ const activePage = computed(() => pages[tab.value])
 const segments = [
   { id: 'overview', label: '总览', icon: LayoutDashboard },
   { id: 'hft', label: '行情面板', icon: Activity },
-  { id: 'backtest', label: '回放复盘', icon: History },
+  { id: 'backtest', label: '回测', icon: History },
   { id: 'strategies', label: '策略', icon: Boxes },
   { id: 'decisions', label: '裁决流', icon: Gavel },
   { id: 'evolution', label: '进化', icon: FlaskConical },

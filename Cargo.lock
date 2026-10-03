@@ -1190,6 +1190,7 @@ dependencies = [
  "blitzkrieg-ui-kit",
  "criterion",
  "dhat",
+ "futures-util",
  "libc",
  "libloading",
  "parity-logic",

@@ -18,6 +18,10 @@ pub mod account;
 /// strategy advises; the kernel adjudicates; every suggestion is audited.
 pub mod arbitration;
 pub mod backtest;
+/// #353: the in-kernel backtest job registry — the WebUI's 拉数据→配置→回测→
+/// 看结果 flow runs as tokio tasks inside the core process, addressed over
+/// IPC; no subprocess, no filesystem writes from the WebUI.
+pub mod backtest_jobs;
 pub mod cli;
 pub mod config;
 pub mod data_lock;
@@ -36,6 +40,9 @@ pub mod market;
 pub mod marketdata;
 pub mod model;
 pub mod ome;
+/// #352: on-chain data pull + conversion (Polymarket Data/Gamma/CLOB APIs →
+/// the backtest JSONL event stream, with resume + cache + SHA256 manifests).
+pub mod onchain;
 pub mod order;
 pub mod order_db;
 pub mod position;

@@ -48,6 +48,8 @@ export interface BacktestTradeLine {
   asset: string
   direction: string
   reason: string
+  /** Entry price (#353) — feeds the 价格带分布 chart. */
+  entryPrice: number
   netPnlUsd: number
   netPnlPct: number
 }

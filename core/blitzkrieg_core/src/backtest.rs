@@ -22,6 +22,7 @@
 //! a replay is a re-run of the same decisions, not an approximation.
 
 use crate::data_source::{DataSource, SourceStats, TimedEvent};
+use crate::engine::DataEvent;
 use crate::ipc::schema::Event;
 use crate::service::{Core, CoreConfig};
 use crate::sim::FillModel;
@@ -41,8 +42,9 @@ pub trait Backtester {
     fn describe(&self) -> String;
 }
 
-/// How to run a replay.
-#[derive(Debug, Clone)]
+/// How to run a replay. Manual `Debug` because `progress` is a closure (its
+/// `Clone` is the `Arc`'s — the callback is shared, not duplicated).
+#[derive(Clone)]
 pub struct BacktestConfig {
     /// Base core config (strategy knobs: assets, sizing, gates, exit policy,
     /// per-strategy limits). The replay forces the safe subset — see
@@ -63,6 +65,25 @@ pub struct BacktestConfig {
     /// strategy does not declare is simply not applied by it (the declaration is
     /// the strategy's own), exactly as a proposal would be.
     pub hot_params: Vec<(String, String, Decimal)>,
+    /// Progress callback: `(delivered_events, virtual_clock_ms)`, invoked at
+    /// most once per wall second. The single producer — the replay loop — has
+    /// two consumers: the CLI prints it to stderr, the #353 IPC job registry
+    /// updates a status cell the WebUI polls. `None` keeps the CLI stderr
+    /// heartbeat.
+    #[allow(clippy::type_complexity)]
+    pub progress: Option<std::sync::Arc<dyn Fn(u64, i64) + Send + Sync>>,
+}
+
+impl std::fmt::Debug for BacktestConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BacktestConfig")
+            .field("core", &self.core)
+            .field("tick_ms", &self.tick_ms)
+            .field("tail_ms", &self.tail_ms)
+            .field("hot_params", &self.hot_params)
+            .field("progress", &self.progress.as_ref().map(|_| "<fn>"))
+            .finish()
+    }
 }
 
 impl Default for BacktestConfig {
@@ -72,7 +93,78 @@ impl Default for BacktestConfig {
             tick_ms: 50,
             tail_ms: 0,
             hot_params: Vec::new(),
+            progress: None,
         }
+    }
+}
+
+// ── #351 mode ladder (in the lib so the #353 IPC job registry composes the
+//    SAME contract the CLI does — one definition, two consumers) ────────────
+
+/// The mode's latency rungs. Latency is the ONLY dial a mode moves: slippage
+/// and the fee schedule stay as configured, so the rungs are comparable and
+/// any expectation change is attributable to latency alone.
+pub fn mode_rungs(mode: &str, verify_latency_ms: i64) -> Result<Vec<i64>, String> {
+    match mode {
+        "sweep" => Ok(vec![0, 50, 100, 200, 300]),
+        "mine" => Ok(vec![0]),
+        "verify" => Ok(vec![verify_latency_ms]),
+        other => Err(format!(
+            "unknown --backtest-mode {other} (mine|verify|sweep)"
+        )),
+    }
+}
+
+/// The fill model for one mode rung: `mine` zeroes the latency dials keeping
+/// the configured friction, `verify`/`sweep` stamp the rung onto every
+/// latency. Zero taker slippage is refused (fail-closed) for every mode —
+/// the honest-friction floor is `--slippage-ticks 1`.
+pub fn mode_rung_model(mode: &str, base: FillModel, rung: i64) -> Result<FillModel, String> {
+    if base.taker_slippage_ticks == 0 {
+        return Err(format!(
+            "backtest-mode {mode} refuses zero taker slippage: the honest-friction floor is \
+             --slippage-ticks 1 (mine 模式禁止把滑点设为 0)"
+        ));
+    }
+    Ok(match mode {
+        "mine" => FillModel {
+            taker_latency_ms: 0,
+            taker_rtt_ms: 0,
+            maker_latency_ms: 0,
+            ..base
+        },
+        "verify" | "sweep" => FillModel {
+            taker_latency_ms: rung,
+            taker_rtt_ms: rung,
+            maker_latency_ms: rung,
+            ..base
+        },
+        other => {
+            return Err(format!(
+                "unknown --backtest-mode {other} (mine|verify|sweep)"
+            ));
+        }
+    })
+}
+
+/// The sweep verdict, from the per-rung net PnLs: all positive → insensitive
+/// to latency; positive at 0 ms but negative at the top rung → latency-bound
+/// edge; negative at 0 ms → the strategy has no edge at all, eliminate it.
+pub fn latency_verdict(nets: &[Decimal]) -> &'static str {
+    let Some(first) = nets.first() else {
+        return "no rungs ran";
+    };
+    let Some(last) = nets.last() else {
+        return "no rungs ran";
+    };
+    if nets.iter().all(|n| *n > Decimal::ZERO) {
+        "all rungs positive → 延迟不敏感（稳）"
+    } else if *first > Decimal::ZERO && *last < Decimal::ZERO {
+        "positive at 0ms, negative at the top rung → 延迟敏感型"
+    } else if *first <= Decimal::ZERO {
+        "negative at 0ms → 策略本身无正期望，淘汰"
+    } else {
+        "mixed → 见表"
     }
 }
 
@@ -82,15 +174,25 @@ pub struct VecSource {
     events: std::vec::IntoIter<TimedEvent>,
     label: String,
     total: u64,
+    /// #354 (5.2): Spot ticks in the stream, counted up front — the same
+    /// completeness anchor a replay source reports, so an equivalence
+    /// comparison of `SourceStats` between the live feed and its archive
+    /// replay compares like with like.
+    spots: u64,
 }
 
 impl VecSource {
     pub fn new(events: Vec<TimedEvent>) -> Self {
         let total = events.len() as u64;
+        let spots = events
+            .iter()
+            .filter(|te| matches!(te.event, DataEvent::Spot { .. }))
+            .count() as u64;
         Self {
             events: events.into_iter(),
             label: format!("memory ({total} events)"),
             total,
+            spots,
         }
     }
 }
@@ -105,6 +207,7 @@ impl DataSource for VecSource {
     fn stats(&self) -> SourceStats {
         SourceStats {
             events: self.total,
+            spot_events: self.spots,
             ..Default::default()
         }
     }
@@ -126,6 +229,10 @@ pub struct TradeLine {
     pub strategy: String,
     pub token_id: String,
     pub condition_id: String,
+    /// Entry price of the position — the #353 price-band distribution groups
+    /// trades by it.
+    #[serde(with = "crate::decimal")]
+    pub entry_price: Decimal,
     #[serde(with = "crate::decimal")]
     pub net_pnl_usd: Decimal,
     #[serde(with = "crate::decimal")]
@@ -268,7 +375,10 @@ pub struct BacktestReport {
     pub risk_alerts: Vec<String>,
     pub errors: Vec<String>,
     pub trade_lines: Vec<TradeLine>,
-    /// Trades beyond the `trade_lines` cap (list truncated, counts not).
+    /// #355: ALWAYS 0 — the serialized `trade_lines` list is complete (a
+    /// per-condition aggregator like the @almach overlay must never read a
+    /// clipped prefix). Kept for report-schema compatibility; the Display
+    /// summary still caps its own printout at [`MAX_TRADE_LINES`].
     pub trade_lines_truncated: u64,
     /// #351 reproducibility digest: SHA256 over the closed-trade list in close
     /// order (each line's canonical JSON, concatenated). Two replays of the
@@ -289,10 +399,11 @@ impl BacktestReport {
             self.start_at_ms, self.end_at_ms, self.virtual_ms
         ));
         s.push_str(&format!(
-            "  events           : {} ({} malformed skipped, {} out-of-order)\n",
+            "  events           : {} ({} malformed skipped, {} out-of-order, {} spot)\n",
             self.source_stats.events,
             self.source_stats.malformed_lines,
-            self.source_stats.out_of_order_events
+            self.source_stats.out_of_order_events,
+            self.source_stats.spot_events
         ));
         s.push_str(&format!(
             "  fill model       : slippage {} tick(s), maker latency {} ms, maker fill {} bps\n",
@@ -384,14 +495,18 @@ impl BacktestReport {
         }
         if !self.trade_lines.is_empty() {
             s.push_str("  trades:\n");
-            for line in &self.trade_lines {
+            // The serialized `trade_lines` list is complete (#355); the human
+            // summary still caps its printout at MAX_TRADE_LINES.
+            let shown = self.trade_lines.len().min(MAX_TRADE_LINES);
+            for line in &self.trade_lines[..shown] {
                 s.push_str(&format!(
                     "    {:<14} {:<4} {:<18} {:>8.2} ({:.2}%)\n",
                     line.asset, line.direction, line.reason, line.net_pnl_usd, line.net_pnl_pct
                 ));
             }
-            if self.trade_lines_truncated > 0 {
-                s.push_str(&format!("    … {} more\n", self.trade_lines_truncated));
+            let more = self.trade_lines.len() - shown;
+            if more > 0 {
+                s.push_str(&format!("    … {more} more\n"));
             }
         }
         s
@@ -438,9 +553,15 @@ pub struct EventBacktester {
     /// caller gets `run`'s ordinary `Err` — and a sweep can tell "this candidate
     /// could not load its strategy" from "the strategy had no signal".
     install_error: Option<String>,
+    /// Progress consumer handed in via [`BacktestConfig::progress`] (None =
+    /// CLI stderr heartbeat). Stashed on the struct because `run` takes `&mut
+    /// self` and the callback needs to outlive the config.
+    cfg_progress: Option<std::sync::Arc<dyn Fn(u64, i64) + Send + Sync>>,
 }
 
-/// Trades kept in the report's `trade_lines` (counts always cover all trades).
+/// Trades shown by the report's Display summary. The serialized `trade_lines`
+/// list is complete since #355 (counts always cover all trades) — a per-
+/// condition aggregator must never read a clipped prefix.
 const MAX_TRADE_LINES: usize = 2_000;
 /// Risk alerts / errors kept in the report.
 const MAX_MESSAGES: usize = 200;
@@ -519,6 +640,7 @@ impl EventBacktester {
             errors: Vec::new(),
             checked_events: 0,
             install_error,
+            cfg_progress: cfg.progress.take(),
         }
     }
 
@@ -568,6 +690,7 @@ impl EventBacktester {
                     strategy,
                     token_id,
                     condition_id,
+                    entry_price,
                     net_pnl_usd,
                     net_pnl_pct,
                     ..
@@ -580,6 +703,7 @@ impl EventBacktester {
                         strategy,
                         token_id,
                         condition_id,
+                        entry_price,
                         net_pnl_usd,
                         net_pnl_pct,
                     });
@@ -766,6 +890,12 @@ impl Backtester for EventBacktester {
         // live and exits would fire late (see `dense_stream_keeps_live_cadence`).
         let mut next_eval_ms = clock + self.tick_ms;
 
+        // #353: one stderr heartbeat per wall-second — the gateway's backtest
+        // job parses these into the panel's progress bar. Tests never see one
+        // (they finish inside the first second) and the pipe can never fill
+        // at one line per second.
+        let mut last_beat = std::time::Instant::now();
+
         while let Some(te) = pending.take() {
             let at = if te.at_ms > 0 { te.at_ms } else { clock };
             if at > clock {
@@ -776,12 +906,40 @@ impl Backtester for EventBacktester {
                 }
                 clock = at;
             }
+            // #354 (5.4): the replay grid is fail-closed against the corpus.
+            // A market that DECLARES its round duration (converter-written,
+            // non-zero) and disagrees with the configured grid would run every
+            // scanner gate — age, time-left, slot expiry — on the wrong clock:
+            // the exact silent mis-timing this issue exists to kill. Refuse
+            // the replay instead. An undeclared market (0: old archives, and
+            // the live host's own path) stays silent — it rides the configured
+            // grid by definition.
+            if let DataEvent::RoundMarkets { markets, .. } = &te.event {
+                let grid = self.core.config().round_duration_sec;
+                for m in markets {
+                    if m.round_duration_sec > 0 && m.round_duration_sec != grid {
+                        return Err(format!(
+                            "replay cadence mismatch: round for {} declares {}s but the replay \
+                             grid is {}s (--round-sec). Every timing gate would run on the \
+                             wrong clock; replay with the matching --round-sec.",
+                            m.asset, m.round_duration_sec, grid
+                        ));
+                    }
+                }
+            }
             // Late/out-of-order events still get the current clock (never a
             // backwards jump) — the source counts them separately.
             self.core.engine_on_data(te.event, clock);
             self.checked_events += 1;
             delivered += 1;
             end_at_ms = clock;
+            if last_beat.elapsed() >= std::time::Duration::from_secs(1) {
+                match &self.cfg_progress {
+                    Some(cb) => cb(delivered, clock),
+                    None => eprintln!("backtest progress: {delivered} events, virtual {clock}ms"),
+                }
+                last_beat = std::time::Instant::now();
+            }
             self.drain();
             pending = self.source.next_event();
         }
@@ -815,20 +973,18 @@ impl Backtester for EventBacktester {
         let views = self.core.position_views(clock);
         let open_notional: Decimal = views.iter().map(|p| p.entry_price * p.shares).sum();
         let stats = self.source.stats();
-        let (trade_lines, truncated) = if self.trades.len() > MAX_TRADE_LINES {
-            (
-                self.trades[..MAX_TRADE_LINES].to_vec(),
-                (self.trades.len() - MAX_TRADE_LINES) as u64,
-            )
-        } else {
-            (self.trades.clone(), 0)
-        };
+        // #355: the serialized report carries EVERY closed trade — a per-
+        // condition aggregator (the @almach overlay) must never compute from
+        // a silently clipped prefix (a full-window 5m replay closes ~24k
+        // legs; the old 2k cap kept only the earliest). The Display summary
+        // still caps its own printout at MAX_TRADE_LINES.
+        let trade_lines = self.trades.clone();
         let trades = self.trade_stats(fees_usd);
         // #351 reproducibility digest: the canonical JSON of every closed trade
         // in close order, concatenated and SHA256'd. Two replays of the same
         // archive under the same config MUST agree byte-for-byte — a differing
         // digest is a determinism bug, not a statistic. Hashed from the FULL
-        // trade list (the report's `tradeLines` may be truncated for size).
+        // trade list, which `tradeLines` now also carries complete.
         let mut hasher = Sha256::new();
         for t in &self.trades {
             let line = serde_json::to_string(t).unwrap_or_default();
@@ -867,7 +1023,7 @@ impl Backtester for EventBacktester {
             risk_alerts: std::mem::take(&mut self.risk_alerts),
             errors: std::mem::take(&mut self.errors),
             trade_lines,
-            trade_lines_truncated: truncated,
+            trade_lines_truncated: 0,
             trades_sha256,
             forced_dry: true,
         })
@@ -978,13 +1134,21 @@ mod tests {
         }
     }
 
-    fn bt(core: CoreConfig, src: Box<dyn DataSource>, tail_ms: i64) -> BacktestReport {
+    /// `bt` but keeping the Result: the #354 cadence gate refuses a replay
+    /// whose corpus disagrees with the configured grid, and the tests below
+    /// need to see that refusal, not just a panic.
+    fn bt_result(
+        core: CoreConfig,
+        src: Box<dyn DataSource>,
+        tail_ms: i64,
+    ) -> Result<BacktestReport, String> {
         let mut b = EventBacktester::new(
             BacktestConfig {
                 core,
                 tick_ms: 50,
                 tail_ms,
                 hot_params: Vec::new(),
+                progress: None,
             },
             src,
         );
@@ -1005,7 +1169,130 @@ mod tests {
             b.core_mut().set_strategy_enabled("spread_arb", true),
             "the hosted adapter registers under its reference name"
         );
-        b.run().expect("replay runs")
+        b.run()
+    }
+
+    fn bt(core: CoreConfig, src: Box<dyn DataSource>, tail_ms: i64) -> BacktestReport {
+        bt_result(core, src, tail_ms).expect("replay runs")
+    }
+
+    // ── #354 (5.4) · the replay grid is fail-closed against the corpus ─────
+    //
+    // The converter stamps every market with the duration its slug declares.
+    // A 5m corpus replayed on the 15m grid would run every scanner gate on
+    // the wrong clock — silently. The gate refuses the replay; the
+    // lazily-correct answer to "corpus and config disagree" is an error, not
+    // a plausible-looking number.
+
+    /// A market the way the converter writes it: slot and expiry derived from
+    /// the round's OWN duration, and that duration declared on the market.
+    fn market_declaring(now: i64, duration_sec: i64) -> crate::model::CryptoMarket {
+        let mut m = round_market(now);
+        m.round_duration_sec = duration_sec;
+        m.round_slot = now / 1000 / duration_sec;
+        m.expires_at_ms = (m.round_slot + 1) * duration_sec * 1000;
+        m
+    }
+
+    fn round_markets_event(now: i64, duration_sec: i64) -> TimedEvent {
+        TimedEvent {
+            at_ms: now,
+            event: DataEvent::RoundMarkets {
+                markets: vec![market_declaring(now, duration_sec)],
+                now_ms: now,
+            },
+        }
+    }
+
+    /// RED must stay red: a 5m corpus replayed on the 15m grid is refused,
+    /// not mis-timed into a report that looks fine.
+    #[test]
+    fn a_five_minute_corpus_on_a_fifteen_minute_grid_is_refused() {
+        let core = base_core(None); // the 900s grid
+        let err = bt_result(
+            core,
+            Box::new(VecSource::new(vec![round_markets_event(NOW, 300)])),
+            0,
+        )
+        .expect_err("5m corpus on the 15m grid must be refused");
+        assert!(
+            err.contains("300") && err.contains("900"),
+            "the refusal names both cadences: {err}"
+        );
+    }
+
+    /// The same corpus on the matching grid replays cleanly.
+    #[test]
+    fn a_five_minute_corpus_replays_on_its_own_grid() {
+        let mut core = base_core(None);
+        core.round_duration_sec = 300;
+        let r = bt_result(
+            core,
+            Box::new(VecSource::new(vec![round_markets_event(NOW, 300)])),
+            0,
+        )
+        .expect("the declared cadence matches the configured grid");
+        assert!(r.errors.is_empty(), "a clean replay reports no errors");
+    }
+
+    /// Pre-#354 archives declare nothing (`round_duration_sec = 0`): they ride
+    /// the configured grid exactly as the live host does — silently, on any grid.
+    #[test]
+    fn an_undeclared_round_replays_silently_on_any_grid() {
+        let core = base_core(None); // the 900s grid
+        let mut m = round_market(NOW); // slot/expiry already on that grid
+        m.round_duration_sec = 0; // the pre-#354 shape: no declaration at all
+        let r = bt_result(
+            core,
+            Box::new(VecSource::new(vec![TimedEvent {
+                at_ms: NOW,
+                event: DataEvent::RoundMarkets {
+                    markets: vec![m],
+                    now_ms: NOW,
+                },
+            }])),
+            0,
+        )
+        .expect("undeclared archives stay compatible");
+        assert!(r.errors.is_empty());
+    }
+
+    /// #354 (5.1): the replay charges the ACTIVE schedule's curve on taker
+    /// legs and NOTHING on maker legs. The scenario's entry is an escalated
+    /// taker (10 shares at the 0.45 ask); its take-profit exit is a maker at
+    /// the bid. Strict equality against the charge-site's own formula pins
+    /// all three claims at once: the entry fee follows the real schedule
+    /// curve (not a flat rate), the maker exit contributes zero, and a taker
+    /// fee charged on a maker exit breaks the equality. RED on any of those.
+    #[test]
+    fn the_replay_charges_the_schedule_curve_on_taker_legs_and_zero_on_maker_legs() {
+        let r = bt(
+            base_core(None),
+            Box::new(VecSource::new(scenario_events(NOW))),
+            10_000,
+        );
+        assert_eq!(r.trades.closed, 1, "\n{}", r.render());
+        // Entry: the escalated taker leg crosses at the 12s book's ask (0.45),
+        // 10 shares (size_usd 2.5 clamps up to min_shares 10).
+        let expected = (crate::exit_policy::taker_fee_pct(dec!(0.45)) / Decimal::ONE_HUNDRED)
+            * dec!(0.45)
+            * dec!(10);
+        assert!(
+            expected > Decimal::ZERO,
+            "the scenario must actually incur a fee, or this pin is vacuous"
+        );
+        assert_eq!(
+            r.trades.fees_usd,
+            expected,
+            "fees must be exactly the taker entry leg's schedule fee — no more \
+             (a maker exit pays nothing) and no less (the entry pays the curve):\n{}",
+            r.render()
+        );
+        // The report names the schedule the fees were charged under (#203).
+        let active = crate::exit_policy::fee_schedule();
+        assert_eq!(r.fee_schedule.name, active.name);
+        assert_eq!(r.fee_schedule.rate, active.rate);
+        assert_eq!(r.fee_schedule.exponent, active.exponent);
     }
 
     fn tmp_dir(tag: &str) -> PathBuf {
@@ -1147,6 +1434,7 @@ mod tests {
                 tick_ms: 50,
                 tail_ms: 0,
                 hot_params: Vec::new(),
+                progress: None,
             },
             Box::new(VecSource::new(vec![
                 TimedEvent {
