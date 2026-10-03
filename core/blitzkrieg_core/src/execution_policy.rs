@@ -586,7 +586,8 @@ pub struct SectionDefaults {
 /// deployment without a config file (or without an account section) keeps
 /// its historical behaviour BIT FOR BIT, which is the exit-economics
 /// four-window replay's contract and the two #202 sizing tests' acceptance.
-/// The 10%/$1/$50 the issue names as today's numbers are the SHIPPED FILE's
+/// The 10%/$1/$50 the issue names as today's numbers — and the
+/// `open_positions >= 2 → skip` backstop — are the SHIPPED FILE's
 /// `[defaults]`, not compiled constants — operators edit them there.
 /// Defaults MUST NOT drift: the replay depends on it.
 pub fn code_defaults() -> SectionDefaults {
@@ -596,24 +597,14 @@ pub fn code_defaults() -> SectionDefaults {
         max_budget_usd: dec!(1_000_000_000),
         min_equity_usd: Decimal::ZERO,
         max_positions_per_asset: 1,
-        rules: vec![Rule {
-            name: "global_backstop".to_string(),
-            priority: 100,
-            enabled: true,
-            when: When {
-                field: ConditionField::OpenPositions,
-                op: CompareOp::Ge,
-                value: ConditionValue::Num(Decimal::from(2)),
-            },
-            then: Action {
-                action: Some(SkipAction::Skip),
-                budget_ratio: None,
-                min_budget_usd: None,
-                max_budget_usd: None,
-                cooldown_sec: None,
-            },
-            reason: Some("全局兜底：持仓数达上限（open_positions >= 2）".to_string()),
-        }],
+        // NO rules. The backstop (`open_positions >= 2 → skip`) is the
+        // SHIPPED FILE's rule, not a compiled one: a zero-config deployment
+        // must be the neutral kernel in FULL — no skips, no cooldowns — or
+        // the bit-for-bit contract above is a lie and every no-file replay
+        // silently trades under a rule the operator never wrote (it skewed
+        // the #355 almach restore replay: 11,864 silent skips on the 5m
+        // stream).
+        rules: Vec::new(),
     }
 }
 
@@ -1928,20 +1919,25 @@ then = { budget_ratio = 0.05 }
 
     #[test]
     fn empty_account_section_inherits_globals() {
-        // The globals come from the FILE's [defaults] here (the classic
-        // 10%/$1/$50) — the compiled defaults are the neutral kernel.
+        // The globals come from the FILE's [defaults] here — including a
+        // rule — while the compiled defaults are the neutral kernel (no
+        // rules of their own), so anything the section carries came from
+        // the file.
         let policy = Policy::load_with_env(
-            "version = 1\n\n[defaults]\nbudget_ratio = \"0.10\"\nmin_budget_usd = \"1\"\n\n[accounts.empty-acct]\n",
+            "version = 1\n\n[defaults]\nbudget_ratio = \"0.10\"\nmin_budget_usd = \"1\"\n\n\
+             [[defaults.rules]]\nname = \"file_rule\"\nenabled = true\npriority = 100\n\
+             when = \"open_positions >= 2\"\nthen = { action = \"skip\" }\n\n\
+             [accounts.empty-acct]\n",
             no_env,
         )
         .unwrap();
         let section = policy.section_for("empty-acct");
         assert_eq!(section.budget_ratio, dec!(0.10));
         // The section carries no `rules` of its own, so it inherits the
-        // globals' — including the code default's backstop. "未配置账户继承
-        // defaults" means the WHOLE resolved section, rules included.
-        assert_eq!(section.rules.len(), 1, "inherited the global backstop");
-        assert_eq!(section.rules[0].name, "global_backstop");
+        // globals'. "未配置账户继承 defaults" means the WHOLE resolved
+        // section, rules included.
+        assert_eq!(section.rules.len(), 1, "inherited the file's rule");
+        assert_eq!(section.rules[0].name, "file_rule");
     }
 
     #[test]
