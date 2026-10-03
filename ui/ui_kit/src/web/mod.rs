@@ -1937,6 +1937,60 @@ impl WebServer {
                 };
                 (200, "application/json", doc.to_string().into_bytes())
             }
+            ("GET", "/api/execution-policy") | ("GET", "/api/execution-policy/preview") => {
+                // #364: the settings page's 生效风控 section. Effective view =
+                // `execution_policy.get` (the kernel folds `[accounts.<id>]`
+                // over `[defaults]` itself; the browser never reads the TOML),
+                // preview = `execution_policy.preview` (`?accountId=`
+                // forwarded untouched). Both read-only, both the SAME core
+                // client the snapshot uses.
+                let method = if req.path() == "/api/execution-policy/preview" {
+                    "execution_policy.preview"
+                } else {
+                    "execution_policy.get"
+                };
+                let mut params = serde_json::Map::new();
+                if let Some(a) = req.query_param("accountId") {
+                    params.insert("accountId".into(), serde_json::json!(a));
+                }
+                self.proxy_backtest(method, serde_json::Value::Object(params))
+            }
+            ("GET", "/api/execution-policy/list") => {
+                // #364: which accounts the book knows + whether a policy file
+                // loaded — the account chips' source. Verbatim proxy.
+                self.proxy_backtest("execution_policy.list", serde_json::json!({}))
+            }
+            ("GET", "/api/execution-policy/history") => {
+                // #364: the audit journal for one account — the version list
+                // the rollback UI counts. `?accountId=` forwarded verbatim.
+                let mut params = serde_json::Map::new();
+                if let Some(a) = req.query_param("accountId") {
+                    params.insert("accountId".into(), serde_json::json!(a));
+                }
+                if let Some(n) = req
+                    .query_param("limit")
+                    .and_then(|v| v.parse::<usize>().ok())
+                {
+                    params.insert("limit".into(), serde_json::json!(n));
+                }
+                self.proxy_backtest(
+                    "execution_policy.history",
+                    serde_json::Value::Object(params),
+                )
+            }
+            ("POST", "/api/execution-policy/set") | ("POST", "/api/execution-policy/reset") => {
+                // #364: write paths — the body IS the IPC params object
+                // (accountId + the SectionFields the kernel's typed
+                // deserializer validates; the gateway shapes nothing). The
+                // kernel answers only after write→reread→audit, so a 200 body
+                // IS the fresh effective view the UI re-renders from.
+                let method = if req.path() == "/api/execution-policy/set" {
+                    "execution_policy.set"
+                } else {
+                    "execution_policy.reset"
+                };
+                self.proxy_backtest_body(method, &req.body)
+            }
             ("GET", "/api/kline-history") => {
                 // E29 (§12.2): the K-line chart reads bars through the SAME
                 // core client — a thin proxy of `kline.history` (read-only).

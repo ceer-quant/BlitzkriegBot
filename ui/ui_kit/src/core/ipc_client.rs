@@ -81,6 +81,15 @@ pub(crate) mod method {
     pub const ACCOUNT_LIST: &str = "account.list";
     /// E28: switch THIS connection's session-default account (§9.5).
     pub const ACCOUNT_SWITCH: &str = "account.switch";
+    /// #363/#364: the execution policy surface the settings faces read/write.
+    /// The TUI and the webui BOTH go through these methods — neither reads the
+    /// TOML file itself (the file is the kernel's, written only by its `set`).
+    pub const EXECUTION_POLICY_LIST: &str = "execution_policy.list";
+    pub const EXECUTION_POLICY_GET: &str = "execution_policy.get";
+    pub const EXECUTION_POLICY_PREVIEW: &str = "execution_policy.preview";
+    pub const EXECUTION_POLICY_SET: &str = "execution_policy.set";
+    pub const EXECUTION_POLICY_RESET: &str = "execution_policy.reset";
+    pub const EXECUTION_POLICY_HISTORY: &str = "execution_policy.history";
 }
 
 pub struct IpcClient {
@@ -440,6 +449,75 @@ impl IpcClient {
     pub fn account_switch(&mut self, account_id: &str) -> Result<serde_json::Value, IpcError> {
         self.call(
             method::ACCOUNT_SWITCH,
+            serde_json::json!({ "accountId": account_id }),
+        )
+    }
+
+    // ── Execution policy (#363/#364): the settings page's 生效风控 section ────
+
+    /// `execution_policy.list` — which accounts the loaded policy names with
+    /// their own sections, plus the global defaults. Raw JSON: the panel and
+    /// the webui both render the kernel's own view, so a second struct here
+    /// would be one more wire shape to keep field-identical.
+    pub fn execution_policy_list(&mut self) -> Result<serde_json::Value, IpcError> {
+        self.call(method::EXECUTION_POLICY_LIST, serde_json::json!({}))
+    }
+
+    /// `execution_policy.get` — one account's EFFECTIVE section (own
+    /// overrides folded over the globals, rules included) as raw JSON.
+    pub fn execution_policy_get(
+        &mut self,
+        account_id: &str,
+    ) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            method::EXECUTION_POLICY_GET,
+            serde_json::json!({ "accountId": account_id }),
+        )
+    }
+
+    /// `execution_policy.preview` (#364) — the current section replayed over
+    /// the account's recent closed trades, judged by the kernel's own
+    /// `evaluate`. Read-only; the verdicts are the kernel's, not a re-derivation.
+    pub fn execution_policy_preview(
+        &mut self,
+        account_id: &str,
+    ) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            method::EXECUTION_POLICY_PREVIEW,
+            serde_json::json!({ "accountId": account_id }),
+        )
+    }
+
+    /// `execution_policy.set` — write ONE account's section (params verbatim;
+    /// the kernel validates by round-tripping through the real parser BEFORE
+    /// any file write, then full-reloads and lands one audit line).
+    pub fn execution_policy_set(
+        &mut self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, IpcError> {
+        self.call(method::EXECUTION_POLICY_SET, params)
+    }
+
+    /// `execution_policy.reset` — remove the account's section (it falls back
+    /// to the globals), full-reload, audit.
+    pub fn execution_policy_reset(
+        &mut self,
+        account_id: &str,
+    ) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            method::EXECUTION_POLICY_RESET,
+            serde_json::json!({ "accountId": account_id }),
+        )
+    }
+
+    /// `execution_policy.history` — the account's audit journal (the version
+    /// list the rollback UI counts). Raw array of audit records.
+    pub fn execution_policy_history(
+        &mut self,
+        account_id: &str,
+    ) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            method::EXECUTION_POLICY_HISTORY,
             serde_json::json!({ "accountId": account_id }),
         )
     }
