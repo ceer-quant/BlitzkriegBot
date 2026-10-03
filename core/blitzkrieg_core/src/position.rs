@@ -66,6 +66,15 @@ pub struct CashFlows {
 pub struct PositionConfig {
     pub exit: ExitConfig,
     pub max_positions: usize,
+    /// #363: how many positions may be open at once on ONE asset. This
+    /// replaces the hardcoded one-per-asset gate (the binary
+    /// "already in this asset?" check) with a count the execution policy
+    /// (and `--max-positions-per-asset`) can raise — the @Almach replay
+    /// shows the chain running CONCURRENT positions on one asset across
+    /// rounds, so the old gate was a benchmark distortion (§ #355 point 1).
+    /// The default `1` is the historical behaviour byte for byte: the same
+    /// entries, the same "Already in {asset}" refusal text.
+    pub max_positions_per_asset: u32,
     /// Absolute daily-loss cap in USD. `0` = no absolute cap: the relative cap
     /// below is then the whole budget. Kept because an operator may want a hard
     /// dollar number regardless of account size.
@@ -98,6 +107,8 @@ impl Default for PositionConfig {
         Self {
             exit: ExitConfig::default(),
             max_positions: 2,
+            // #363: the historical one-per-asset gate, now a number.
+            max_positions_per_asset: 1,
             // Off by default; the relative budget below carries the protection.
             max_daily_loss_usd: Decimal::ZERO,
             // 20% of the day's opening cash equity. Meaningful on any account
@@ -730,6 +741,22 @@ impl PositionManager {
     }
     pub fn daily_pnl(&self) -> Decimal {
         self.daily.realized_pnl_usd
+    }
+
+    /// #363: the account's net realized PnL over the TRAILING HOUR, read
+    /// straight off the closed-trade list (`exited_at_ms` is the close's own
+    /// timestamp, so a restart loses the window until the first fresh close —
+    /// the same session-scope the streak counter has; a policy that needs the
+    /// last hour across restarts should gate on `consecutive_losses` instead,
+    /// which is persisted). Per-account by field, the E28 way — never a
+    /// strategy-name heuristic.
+    pub fn recent_pnl_1h_for(&self, account_id: &str, now_ms: i64) -> Decimal {
+        let window = 3_600_000i64;
+        self.closed
+            .iter()
+            .filter(|c| c.account_id.as_str() == account_id && now_ms - c.exited_at_ms <= window)
+            .map(|c| c.net_pnl_usd)
+            .sum()
     }
 
     /// The day's realized-loss budget as the panel/CLI report it.
@@ -1695,10 +1722,21 @@ impl PositionManager {
                 + 1;
             return Err(format!("SL cooldown: {left}s"));
         }
-        if let Some(asset) = asset
-            && self.open.iter().any(|p| p.asset == asset)
-        {
-            return Err(format!("Already in {asset}"));
+        if let Some(asset) = asset {
+            // #363: the per-asset cap is a COUNT now (`max_positions_per_asset`,
+            // default 1 = the historical one-per-asset behaviour), not a binary
+            // "already in?" — the @Almach replay runs concurrent same-asset
+            // entries across rounds, and the execution policy / CLI raises this
+            // cap for strategies that model that. The refusal KEEPS the exact
+            // "Already in {asset}" text: `classify_rejection` buckets it as
+            // `positions.already_in` and the WebUI attribution check pins the
+            // vocabulary, so a wording drift would be a silent telemetry break.
+            // At the old cap of 1 the message reads exactly as before; above it,
+            // the count rides the same line so an operator can see why.
+            let in_asset = self.open.iter().filter(|p| p.asset == asset).count();
+            if in_asset >= self.config.max_positions_per_asset as usize {
+                return Err(format!("Already in {asset}"));
+            }
         }
         if let (Some(asset), Some(direction)) = (asset, direction) {
             let key = cooldown_key(asset, direction);
@@ -2036,6 +2074,72 @@ mod tests {
             pm.can_open(Some("SOL"), Some(SignalDirection::Up), 1000)
                 .is_err()
         ); // max positions
+    }
+
+    /// #363: the per-asset gate is a COUNT. `max_positions_per_asset = 3`
+    /// admits the 2nd and 3rd same-asset entry and refuses the 4th — the
+    /// configurable form of the @Almach "same asset across concurrent rounds"
+    /// behaviour — while the default (`1`) keeps the historical exactly-one
+    /// rule with the SAME refusal text ("Already in {asset}").
+    #[test]
+    fn per_asset_cap_is_configurable_count() {
+        let cfg = PositionConfig {
+            max_positions: 5,
+            max_positions_per_asset: 3,
+            asset_cooldown_sec: 0,
+            loss_cooldown_sec: 0,
+            exit_cooldown_sec: 0,
+            ..Default::default()
+        };
+        let mut pm = PositionManager::new(cfg);
+        for i in 0..3 {
+            assert!(
+                pm.can_open(Some("BTC"), Some(SignalDirection::Up), 1000 + i)
+                    .is_ok(),
+                "entry {i} of 3 must pass the per-asset cap"
+            );
+            enter(
+                &mut pm,
+                params("BTC", SignalDirection::Up, dec!(0.4)),
+                OrderRole::Maker,
+                1000 + i,
+            );
+        }
+        // The 4th same-asset entry is refused, with the pinned vocabulary.
+        let err = pm
+            .can_open(Some("BTC"), Some(SignalDirection::Up), 2000)
+            .unwrap_err();
+        assert_eq!(err, "Already in BTC");
+        // A different asset is unaffected by BTC's count.
+        assert!(
+            pm.can_open(Some("ETH"), Some(SignalDirection::Up), 2000)
+                .is_ok()
+        );
+    }
+
+    /// #363: default config = the historical binary gate. The refusal text is
+    /// what `classify_rejection` buckets as `positions.already_in` — pinned
+    /// here so a wording drift fails a test instead of silently breaking the
+    /// WebUI's refusal attribution.
+    #[test]
+    fn default_per_asset_cap_is_one_with_pinned_text() {
+        assert_eq!(PositionConfig::default().max_positions_per_asset, 1);
+        let mut pm = PositionManager::new(PositionConfig {
+            asset_cooldown_sec: 0,
+            loss_cooldown_sec: 0,
+            exit_cooldown_sec: 0,
+            ..Default::default()
+        });
+        enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
+        let err = pm
+            .can_open(Some("BTC"), Some(SignalDirection::Up), 1000)
+            .unwrap_err();
+        assert_eq!(err, "Already in BTC");
     }
 
     #[test]

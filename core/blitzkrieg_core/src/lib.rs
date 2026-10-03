@@ -30,6 +30,10 @@ pub mod data_lock;
 pub mod data_source;
 pub use blitzkrieg_market_api::decimal;
 pub mod engine;
+/// #363: the account-isolated execution policy rule engine. Strategy emits
+/// signals; THIS module decides whether an entry may place and with what
+/// budget, per account, under the operator's `execution_policy.toml`.
+pub mod execution_policy;
 pub mod exit_policy;
 pub mod extension;
 pub mod ipc;

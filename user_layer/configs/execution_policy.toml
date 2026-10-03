@@ -1,0 +1,69 @@
+# Execution policy (#363) — per-account order-sizing and gating rules.
+#
+# The kernel judges every entry signal against this file BEFORE arbitration:
+# the verdict either skips the entry, puts the ACCOUNT into a cooldown, or
+# caps the ticket budget. The policy can only REMOVE or SHRINK an intent —
+# it can never relax a RiskEngine gate, a breaker, or a stop (those knobs do
+# not exist in this schema, and `action = "skip"` is the only refusal).
+#
+# Order of evaluation: [accounts.<id>] by the order's account id (its own
+# section overrides the globals); no section = [defaults]. Rules sort by
+# `priority` ascending; the FIRST enabled rule whose `when` holds wins; no
+# hit = the section's defaults. An order without an account id is refused,
+# never silently judged under the defaults.
+#
+# Budget formula (the ONE sizing path):
+#   budget_usd = clamp(max(available_balance x budget_ratio, min_budget_usd), <= max_budget_usd)
+#
+# Environment overrides (per account: suffix = account id, uppercased,
+# non-alphanumeric -> `_`, e.g. BUDGET_RATIO_PAPER):
+#   BUDGET_RATIO[_<ACCOUNT_ID>]
+#   MAX_BUDGET_USD[_<ACCOUNT_ID>]
+#
+# Precedence: account env > account section > global env > [defaults] > code.
+#
+# The values below replicate the historical hardcoded sizing (10% of balance,
+# floor $1, ceiling $50, $1 equity floor, one position per asset). A missing
+# file (or section) means the NEUTRAL kernel: the engine's own sizing decides
+# the ticket and the policy never shrinks it.
+
+version = 1
+
+[defaults]
+budget_ratio = "0.10"
+min_budget_usd = "1"
+max_budget_usd = "50"
+min_equity_usd = "1"
+max_positions_per_asset = 1
+
+[[defaults.rules]]
+name = "global_backstop"
+enabled = true
+priority = 100
+when = "open_positions >= 2"
+then = { action = "skip" }
+reason = "全局兜底：持仓数达上限（open_positions >= 2）"
+
+# Per-account sections. Example (remove the `#`s to activate):
+#
+# [accounts.paper]
+# budget_ratio = "0.05"
+# min_budget_usd = "1"
+# max_budget_usd = "20"
+# max_positions_per_asset = 2
+#
+# [[accounts.paper.rules]]
+# name = "small_balance_ratio"
+# enabled = true
+# priority = 10
+# when = "available_balance < 20"
+# then = { budget_ratio = "0.05" }
+# reason = "小余额降杠杆"
+#
+# [[accounts.paper.rules]]
+# name = "cooldown_after_losing_hour"
+# enabled = true
+# priority = 20
+# when = "recent_pnl_1h < -5"
+# then = { cooldown_sec = 1800 }
+# reason = "一小时净亏超过 $5 后暂停 30 分钟"

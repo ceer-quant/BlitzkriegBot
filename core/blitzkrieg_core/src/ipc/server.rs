@@ -1876,6 +1876,104 @@ async fn handle_line(
             }
         }
 
+        // ── #363: execution policy surface ─────────────────────────────────
+        // The two write arms go through one path: serialize the section to
+        // TOML, rewrite the file, full-reload in memory, land one audit line.
+        // A file that will not re-parse keeps the LAST GOOD policy in memory
+        // (fail-closed: a broken write never trades unguarded) and answers
+        // INVALID_PARAMS; the on-disk file is left as the write produced it
+        // so the operator can see and fix what they broke.
+        method::EXECUTION_POLICY_LIST => {
+            let c = core.lock().await;
+            let defaults = c
+                .execution_policy_section_view("*")
+                .map(|v| serde_json::to_value(&v).unwrap_or(Value::Null))
+                .unwrap_or(Value::Null);
+            let accounts: Vec<serde_json::Value> = c
+                .execution_policy_account_ids()
+                .into_iter()
+                .filter_map(|id| {
+                    c.execution_policy_section_view(&id).map(|view| {
+                        serde_json::json!({
+                            "accountId": id,
+                            "section": serde_json::to_value(&view).unwrap_or(Value::Null),
+                        })
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "loaded": c.execution_policy_loaded(),
+                "defaults": defaults,
+                "accounts": accounts,
+            }))
+        }
+
+        method::EXECUTION_POLICY_GET => {
+            match serde_json::from_value::<ExecutionPolicyGetParams>(params) {
+                Ok(p) => {
+                    let c = core.lock().await;
+                    match c.execution_policy_section_view(&p.account_id) {
+                        Some(view) => Ok(serde_json::to_value(view).unwrap_or(Value::Null)),
+                        None => Err((
+                            Failure::INVALID_PARAMS,
+                            format!(
+                                "execution policy: no section for account `{}` and no policy loaded",
+                                p.account_id
+                            ),
+                            None,
+                        )),
+                    }
+                }
+                Err(e) => Err((Failure::INVALID_PARAMS, e.to_string(), None)),
+            }
+        }
+
+        method::EXECUTION_POLICY_SET => {
+            match serde_json::from_value::<ExecutionPolicySetParams>(params) {
+                Ok(p) => execution_policy_set(core, p).await,
+                Err(e) => Err((Failure::INVALID_PARAMS, e.to_string(), None)),
+            }
+        }
+
+        method::EXECUTION_POLICY_RESET => {
+            match serde_json::from_value::<ExecutionPolicyGetParams>(params) {
+                Ok(p) => execution_policy_reset(core, p).await,
+                Err(e) => Err((Failure::INVALID_PARAMS, e.to_string(), None)),
+            }
+        }
+
+        method::EXECUTION_POLICY_HISTORY => {
+            match serde_json::from_value::<ExecutionPolicyHistoryParams>(params) {
+                Ok(p) => {
+                    let c = core.lock().await;
+                    let records: Vec<crate::execution_policy::PolicyAuditRecord> = c
+                        .execution_policy_audit()
+                        .into_iter()
+                        .filter(|r| {
+                            p.account_id
+                                .as_ref()
+                                .map(|id| &r.account_id == id)
+                                .unwrap_or(true)
+                        })
+                        .collect();
+                    let views: Vec<crate::ipc::schema::ExecutionPolicyAuditView> = records
+                        .iter()
+                        .map(|r| crate::ipc::schema::ExecutionPolicyAuditView {
+                            ts_ms: r.ts_ms,
+                            actor: r.actor.clone(),
+                            action: r.action.clone(),
+                            account_id: r.account_id.clone(),
+                            before: r.before.clone(),
+                            after: r.after.clone(),
+                            error: r.error.clone(),
+                        })
+                        .collect();
+                    Ok(serde_json::to_value(views).unwrap_or(Value::Null))
+                }
+                Err(e) => Err((Failure::INVALID_PARAMS, e.to_string(), None)),
+            }
+        }
+
         // ── #353: the WebUI backtest surface (拉数据→配置→回测→看结果) ────────
         // Every arm fronts the in-kernel job registry: validation is
         // synchronous and fail-closed, the heavy work runs as tokio tasks in
@@ -2007,6 +2105,192 @@ where
             }),
         )
     })
+}
+
+/// #363: the `execution_policy.set` flow — validate params, write the ONE
+/// named account's section, full-reload in memory, land one audit line.
+/// Separate from `handle_line` so the early returns are plain `?`/`return`
+/// on a real `Result` (a dispatch arm's tail cannot `return` from the match
+/// without skipping the reply encoding).
+async fn execution_policy_set(
+    core: &Arc<AsyncMutex<Core>>,
+    p: ExecutionPolicySetParams,
+) -> Result<Value, (i32, String, Option<ErrorData>)> {
+    let path = {
+        let c = core.lock().await;
+        match c.config().execution_policy_path.clone() {
+            Some(p) => p,
+            None => {
+                return Err((
+                    Failure::INVALID_PARAMS,
+                    "execution policy disabled (no config path)".to_string(),
+                    None,
+                ));
+            }
+        }
+    };
+    let before = {
+        let c = core.lock().await;
+        c.execution_policy_section_view(&p.account_id)
+            .map(|v| serde_json::to_value(&v).unwrap_or(Value::Null))
+    };
+    let section = section_from_set_params(&p).map_err(|e| (Failure::INVALID_PARAMS, e, None))?;
+    policy_section_write(&path, &p.account_id, Some(section))
+        .map_err(|e| (Failure::INVALID_PARAMS, e, None))?;
+    let mut c = core.lock().await;
+    c.reload_execution_policy()
+        .map_err(|e| (Failure::INVALID_PARAMS, e, None))?;
+    // `after` is the RELOADED view — the state the kernel will actually
+    // judge under, not the in-memory state the write replaced.
+    let after = c
+        .execution_policy_section_view(&p.account_id)
+        .map(|v| serde_json::to_value(&v).unwrap_or(Value::Null));
+    crate::execution_policy::append_audit(&crate::execution_policy::PolicyAuditRecord {
+        ts_ms: now_ms(),
+        actor: crate::execution_policy::ACTOR_IPC.to_string(),
+        action: "set".to_string(),
+        account_id: p.account_id.clone(),
+        before,
+        after,
+        error: None,
+    });
+    Ok(serde_json::json!({ "accountId": p.account_id }))
+}
+
+/// #363: the `execution_policy.reset` flow — remove the account's section
+/// (it falls back to the globals), full-reload, audit.
+async fn execution_policy_reset(
+    core: &Arc<AsyncMutex<Core>>,
+    p: ExecutionPolicyGetParams,
+) -> Result<Value, (i32, String, Option<ErrorData>)> {
+    let path = {
+        let c = core.lock().await;
+        match c.config().execution_policy_path.clone() {
+            Some(p) => p,
+            None => {
+                return Err((
+                    Failure::INVALID_PARAMS,
+                    "execution policy disabled (no config path)".to_string(),
+                    None,
+                ));
+            }
+        }
+    };
+    let before = {
+        let c = core.lock().await;
+        c.execution_policy_section_view(&p.account_id)
+            .map(|v| serde_json::to_value(&v).unwrap_or(Value::Null))
+    };
+    policy_section_write(&path, &p.account_id, None)
+        .map_err(|e| (Failure::INVALID_PARAMS, e, None))?;
+    let mut c = core.lock().await;
+    c.reload_execution_policy()
+        .map_err(|e| (Failure::INVALID_PARAMS, e, None))?;
+    // `after` is the RELOADED view (see the set arm).
+    let after = c
+        .execution_policy_section_view(&p.account_id)
+        .map(|v| serde_json::to_value(&v).unwrap_or(Value::Null));
+    crate::execution_policy::append_audit(&crate::execution_policy::PolicyAuditRecord {
+        ts_ms: now_ms(),
+        actor: crate::execution_policy::ACTOR_IPC.to_string(),
+        action: "reset".to_string(),
+        account_id: p.account_id.clone(),
+        before,
+        after,
+        error: None,
+    });
+    Ok(serde_json::json!({ "accountId": p.account_id }))
+}
+
+/// #363: turn `execution_policy.set` params into the section that lands in
+/// the TOML. Decimals arrive as strings so the shortest-decimal rule (0.10
+/// is the decimal 0.10, not a binary expansion) survives the JSON hop; they
+/// are validated HERE by round-tripping through the real parser before any
+/// file is touched — a bad ratio is refused on the wire, not discovered by a
+/// later boot refusal.
+fn section_from_set_params(
+    p: &ExecutionPolicySetParams,
+) -> Result<crate::execution_policy::SectionFields, String> {
+    use crate::execution_policy::SectionFields;
+    let mut s = SectionFields::default();
+    if let Some(v) = &p.budget_ratio {
+        s.budget_ratio = Some(
+            rust_decimal::Decimal::from_str_exact(v)
+                .map_err(|_| format!("budgetRatio `{v}` is not a decimal"))?,
+        );
+    }
+    if let Some(v) = &p.min_budget_usd {
+        s.min_budget_usd = Some(
+            rust_decimal::Decimal::from_str_exact(v)
+                .map_err(|_| format!("minBudgetUsd `{v}` is not a decimal"))?,
+        );
+    }
+    if let Some(v) = &p.max_budget_usd {
+        s.max_budget_usd = Some(
+            rust_decimal::Decimal::from_str_exact(v)
+                .map_err(|_| format!("maxBudgetUsd `{v}` is not a decimal"))?,
+        );
+    }
+    if let Some(v) = &p.min_equity_usd {
+        s.min_equity_usd = Some(
+            rust_decimal::Decimal::from_str_exact(v)
+                .map_err(|_| format!("minEquityUsd `{v}` is not a decimal"))?,
+        );
+    }
+    s.max_positions_per_asset = p.max_positions_per_asset;
+    if let Some(rules) = &p.rules {
+        let mut out = Vec::with_capacity(rules.len());
+        for r in rules {
+            out.push(
+                serde_json::from_value::<crate::execution_policy::Rule>(r.clone())
+                    .map_err(|e| format!("rules entry does not parse: {e}"))?,
+            );
+        }
+        s.rules = Some(out);
+    }
+    // The section must validate as the file would see it: render a tiny
+    // one-section file and parse it back. Same parser, same refusals.
+    let rendered =
+        toml::to_string_pretty(&s).map_err(|e| format!("section does not render: {e}"))?;
+    let probe = format!("version = 1\n[accounts.__probe__]\n{rendered}");
+    crate::execution_policy::Policy::load_from_str(&probe)
+        .map_err(|e| format!("section rejected: {e}"))?;
+    Ok(s)
+}
+
+/// #363: rewrite ONE account section inside the policy TOML (read file →
+/// swap the map entry → write back). The section is REPLACED wholesale —
+/// `set` never touches another account's lines, and `reset` (section =
+/// None) removes the entry so the account falls back to the globals.
+/// Cross-account safety is structural: the caller names exactly one
+/// account id and this function writes exactly that map key.
+fn policy_section_write(
+    path: &str,
+    account_id: &str,
+    section: Option<crate::execution_policy::SectionFields>,
+) -> Result<(), String> {
+    if account_id.trim().is_empty() {
+        return Err("account id must not be empty".to_string());
+    }
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut file: crate::execution_policy::PolicyFile = toml::from_str(&text)
+        .map_err(|e| format!("existing file does not parse; refusing to edit: {e}"))?;
+    match section {
+        Some(s) => {
+            file.accounts.insert(account_id.to_string(), s);
+        }
+        None => {
+            if file.accounts.remove(account_id).is_none() {
+                return Err(format!(
+                    "execution policy: no section for account `{account_id}` to reset"
+                ));
+            }
+        }
+    }
+    let out =
+        toml::to_string_pretty(&file).map_err(|e| format!("policy file does not render: {e}"))?;
+    std::fs::write(path, out).map_err(|e| format!("policy file write failed: {e}"))?;
+    Ok(())
 }
 
 fn fail(id: Value, code: i32, message: String, data: Option<ErrorData>) -> String {
@@ -3072,7 +3356,10 @@ mod tests {
     #[tokio::test]
     async fn intent_audit_tail_reads_the_tail_and_filters() {
         let dir = std::path::Path::new("data/audit");
-        let _ = std::fs::remove_dir_all(dir);
+        // Remove only THIS test's log: the directory is shared with the
+        // execution-policy audit, which the concurrent policy IPC test
+        // reads — a directory nuke here raced its history read.
+        let _ = std::fs::remove_file(dir.join("intents.jsonl"));
         let (core, registry, peer) = hot_reload_fixture().await;
 
         // Fresh data dir: the empty envelope, not an error.
@@ -3158,7 +3445,7 @@ mod tests {
         .await;
         assert_eq!(reply["result"]["total"], serde_json::json!(2));
 
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_file(dir.join("intents.jsonl"));
     }
 
     // ── E28 (§12.1): the account verbs, at the wire ─────────────────────────
@@ -3521,5 +3808,195 @@ mod tests {
                 .contains("LOOSEN"),
             "the refusal must say WHY: {reply}"
         );
+    }
+
+    // ── #363: the execution policy surface, at the wire ─────────────────────
+
+    /// A core pointed at a policy file in a scratch dir. The file ships the
+    /// global section only; the arms below add/reset account sections
+    /// through the wire and read back what landed.
+    async fn policy_fixture() -> (
+        Arc<AsyncMutex<Core>>,
+        crate::market::registry::MarketPluginRegistry,
+        PeerAuth,
+        std::path::PathBuf,
+    ) {
+        use rust_decimal_macros::dec;
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "bk-ipc-policy-{}-{}-{}",
+            std::process::id(),
+            now_ms(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch root");
+        let path = dir.join("execution_policy.toml");
+        std::fs::write(
+            &path,
+            "version = 1\n\n[defaults]\nbudget_ratio = \"0.10\"\n",
+        )
+        .expect("write policy");
+        let cfg = CoreConfig {
+            execution_policy_path: Some(path.to_string_lossy().to_string()),
+            dry_seed_balance: dec!(100),
+            ..Default::default()
+        };
+        let c = Core::new(cfg);
+        (
+            Arc::new(AsyncMutex::new(c)),
+            crate::market::registry::MarketPluginRegistry::new(),
+            PeerAuth::SameUid { uid: own_uid() },
+            path,
+        )
+    }
+
+    #[tokio::test]
+    async fn execution_policy_surface_list_get_set_reset_history() {
+        let (core, registry, peer, path) = policy_fixture().await;
+        let t0 = now_ms();
+
+        // list: the shipped global section only, no accounts.
+        let v = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"execution_policy.list","params":{}}"#.into(),
+        )
+        .await;
+        assert!(v.get("error").is_none(), "list answers: {v}");
+        assert_eq!(v["result"]["loaded"], serde_json::json!(true));
+        assert_eq!(
+            v["result"]["defaults"]["budgetRatio"],
+            serde_json::json!("0.10")
+        );
+        assert!(
+            v["result"]["accounts"]
+                .as_array()
+                .is_some_and(|a| a.is_empty())
+        );
+
+        // get: an account with no section folds over the globals (effective view).
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"execution_policy.get","params":{"accountId":"acct-a"}}"#.into())
+            .await;
+        assert!(v.get("error").is_none(), "get falls back to globals: {v}");
+        assert_eq!(v["result"]["budgetRatio"], serde_json::json!("0.10"));
+
+        // set: write ONE account's section; decimals arrive as strings.
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"execution_policy.set","params":{"accountId":"acct-a","budgetRatio":"0.05","maxBudgetUsd":"20"}}"#.into())
+            .await;
+        assert!(v.get("error").is_none(), "set answers: {v}");
+
+        // The file now carries the section, rendered as valid TOML…
+        let text = std::fs::read_to_string(&path).expect("policy file");
+        assert!(text.contains("[accounts.acct-a]"), "section landed: {text}");
+        // …and the reload sees it (the effective view is the account's own).
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":4,"method":"execution_policy.get","params":{"accountId":"acct-a"}}"#.into())
+            .await;
+        assert_eq!(
+            v["result"]["budgetRatio"],
+            serde_json::json!("0.05"),
+            "set then get: {v}"
+        );
+        assert_eq!(v["result"]["maxBudgetUsd"], serde_json::json!("20"), "{v}");
+        // The untouched global section is byte-identical in intent.
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":5,"method":"execution_policy.get","params":{"accountId":"someone-else"}}"#.into())
+            .await;
+        assert_eq!(
+            v["result"]["budgetRatio"],
+            serde_json::json!("0.10"),
+            "cross-account untouched: {v}"
+        );
+
+        // set with an out-of-range ratio is refused on the wire (INVALID_PARAMS),
+        // and the in-memory policy is untouched.
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":6,"method":"execution_policy.set","params":{"accountId":"acct-a","budgetRatio":"1.5"}}"#.into())
+            .await;
+        assert_eq!(
+            v["error"]["code"],
+            serde_json::json!(Failure::INVALID_PARAMS),
+            "bad ratio refused: {v}"
+        );
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":7,"method":"execution_policy.get","params":{"accountId":"acct-a"}}"#.into())
+            .await;
+        assert_eq!(
+            v["result"]["budgetRatio"],
+            serde_json::json!("0.05"),
+            "refusal kept old section: {v}"
+        );
+
+        // history: this run's set landed one audit line; the refused set did
+        // not. The journal file persists across runs (fixed audit path), so
+        // only records stamped after the test started are counted.
+        let this_run = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":8,"method":"execution_policy.history","params":{"accountId":"acct-a"}}"#.into())
+            .await;
+        let lines = this_run["result"].as_array().expect("history array");
+        let fresh: Vec<&Value> = lines
+            .iter()
+            .filter(|l| l["tsMs"].as_i64().map(|ts| ts >= t0).unwrap_or(false))
+            .collect();
+        assert_eq!(
+            fresh.len(),
+            1,
+            "one set line this run, refusals do not audit: {this_run}"
+        );
+        assert_eq!(fresh[0]["action"], serde_json::json!("set"));
+        assert_eq!(fresh[0]["accountId"], serde_json::json!("acct-a"));
+        // The `after` summary is the RELOADED state: the account's own 0.05.
+        assert_eq!(
+            fresh[0]["after"]["budgetRatio"],
+            serde_json::json!("0.05"),
+            "{this_run}"
+        );
+
+        // reset: the section goes away; the account folds back to the globals.
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":9,"method":"execution_policy.reset","params":{"accountId":"acct-a"}}"#.into())
+            .await;
+        assert!(v.get("error").is_none(), "reset answers: {v}");
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":10,"method":"execution_policy.get","params":{"accountId":"acct-a"}}"#.into())
+            .await;
+        assert_eq!(
+            v["result"]["budgetRatio"],
+            serde_json::json!("0.10"),
+            "reset falls back: {v}"
+        );
+        let text = std::fs::read_to_string(&path).expect("policy file");
+        assert!(
+            !text.contains("[accounts.acct-a]"),
+            "section removed: {text}"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The reset of a section that does not exist is refused by name — an
+    /// operator who fat-fingers an id finds out immediately, not "silently ok".
+    #[tokio::test]
+    async fn execution_policy_reset_of_unknown_section_refuses() {
+        let (core, registry, peer, path) = policy_fixture().await;
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"execution_policy.reset","params":{"accountId":"never-existed"}}"#.into())
+            .await;
+        assert_eq!(
+            v["error"]["code"],
+            serde_json::json!(Failure::INVALID_PARAMS),
+            "{v}"
+        );
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("never-existed"),
+            "the refusal names the account: {v}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
