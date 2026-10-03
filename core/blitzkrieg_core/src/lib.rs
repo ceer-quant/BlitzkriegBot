@@ -22,6 +22,8 @@ pub mod backtest;
 /// 看结果 flow runs as tokio tasks inside the core process, addressed over
 /// IPC; no subprocess, no filesystem writes from the WebUI.
 pub mod backtest_jobs;
+/// #361: the blueprint JSON → three-stage compile → Lua strategy surface.
+pub mod blueprint;
 pub mod cli;
 pub mod config;
 pub mod data_lock;
