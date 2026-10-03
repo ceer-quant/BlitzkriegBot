@@ -585,7 +585,7 @@ async fn fetch_meta(fetch: &dyn JsonFetcher, cid: &str) -> Result<Value, String>
                     }
                 }
                 if up.is_empty() {
-                    up = toks.first().map(&token_of).unwrap_or_default();
+                    up = toks.first().map(token_of).unwrap_or_default();
                 }
                 if down.is_empty() {
                     down = toks.get(1).map(token_of).unwrap_or_default();
