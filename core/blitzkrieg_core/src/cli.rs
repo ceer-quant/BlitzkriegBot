@@ -713,6 +713,18 @@ pub const FLAGS: &[FlagSpec] = &[
         "Pull output root (default data/onchain; resumable + sha256 manifest).",
     ),
     flag(
+        "--blueprint-compile",
+        "<blueprint.json>",
+        "#361: compile a blueprint JSON decision graph to a Lua strategy body and \
+         exit (see --blueprint-out). No socket, no ledger, no feed.",
+    ),
+    flag(
+        "--blueprint-out",
+        "<path>",
+        "Where --blueprint-compile writes the Lua (default: strategy.lua beside the \
+         blueprint). Refused without --blueprint-compile.",
+    ),
+    flag(
         "--net-check",
         "",
         "Probe every network path this venue uses (resolver, TCP, TLS, one cheap \

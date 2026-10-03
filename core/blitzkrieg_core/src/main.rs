@@ -25,6 +25,7 @@
 //!                   [--maker-depth-share-bps 10000]
 //!                   [--dry-redeem-fail 0] [--dry-redeem-manual]
 //!                   [--net-check]
+//!                   [--blueprint-compile <blueprint.json> [--blueprint-out <path>]]
 //!
 //! `--max-orderbook-stale-ms <ms>` (env `BK_MAX_ORDERBOOK_STALE_MS`) is how old
 //! an orderbook may be before the engine refuses to price off it — the knob that
@@ -125,6 +126,15 @@
 //!   credentials).
 //!
 //! Env (live): POLYMARKET_PRIVATE_KEY, POLYMARKET_FUNDER_ADDRESS, CLOB_API_URL.
+//!
+//! Blueprint compile (#361; offline, like --net-check — answered before the
+//! #199 latch, no socket, no ledger, no order):
+//!   blitzkrieg-core --blueprint-compile <blueprint.json> [--blueprint-out <path>]
+//!   Compiles a version-1 blueprint JSON decision graph (8 node types, three
+//!   validation stages: structure → semantics → codegen) into a human-readable
+//!   Lua strategy body carrying `on_tick(tick)` + `declare_modes()`. Errors
+//!   name the node id and the reason. The default output is `strategy.lua`
+//!   beside the blueprint.
 
 use blitzkrieg_core::ipc::server;
 use blitzkrieg_core::model::Mode;
@@ -383,6 +393,11 @@ struct Args {
     onchain_fills: Option<String>,
     /// #352 output root (default `data/onchain`).
     onchain_out_dir: Option<String>,
+    /// #361: compile this blueprint JSON to a Lua strategy body and exit
+    /// (offline, like --regime-eval: no mode, no feed, no ledger).
+    blueprint_compile: Option<String>,
+    /// #361 output override (default `strategy.lua` beside the blueprint).
+    blueprint_out: Option<String>,
     /// Fill model: taker slippage in ticks (0.01).
     slippage_ticks: u32,
     /// Fill model: maker latency (ms).
@@ -743,6 +758,10 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut onchain_market: Option<String> = None;
     let mut onchain_fills: Option<String> = None;
     let mut onchain_out_dir: Option<String> = None;
+    // #361: the offline blueprint compiler (`--blueprint-compile <json>`),
+    // plus its optional output override (`--blueprint-out <path>`).
+    let mut blueprint_compile: Option<String> = None;
+    let mut blueprint_out: Option<String> = None;
     let mut slippage_ticks: u32 = 0;
     let mut latency_ms: i64 = 0;
     let mut taker_latency_ms: i64 = 0;
@@ -1006,6 +1025,9 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--onchain-market" => onchain_market = it.next(),
             "--onchain-fills" => onchain_fills = it.next(),
             "--onchain-out-dir" => onchain_out_dir = it.next(),
+            // #361: the offline blueprint compiler and its output knob.
+            "--blueprint-compile" => blueprint_compile = it.next(),
+            "--blueprint-out" => blueprint_out = it.next(),
             "--regime-max-tokens" => {
                 regime_max_tokens = it
                     .next()
@@ -1830,6 +1852,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         onchain_market,
         onchain_fills,
         onchain_out_dir,
+        blueprint_compile,
+        blueprint_out,
         slippage_ticks,
         latency_ms,
         taker_latency_ms,
@@ -2569,6 +2593,15 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(path) = &args.blueprint_compile {
+        // #361: the offline blueprint compiler — JSON decision graph → Lua
+        // strategy body. Like --regime-eval it needs no mode, no feed, no
+        // ledger and never trades; it also never touches the data latch (the
+        // branch returns before it).
+        run_blueprint_compile(path, args.blueprint_out.as_deref());
+        return Ok(());
+    }
+
     if let Some(path) = &args.backtest {
         // #203: install the counterfactual fee schedule BEFORE the core is built,
         // so every fill the replay charges is priced under it. Set-once: a failed
@@ -2612,6 +2645,13 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         return Ok(());
+    }
+    if args.blueprint_out.is_some() && args.blueprint_compile.is_none() {
+        eprintln!(
+            "blitzkrieg-core: --blueprint-out only applies to a compile; pass \
+             --blueprint-compile <blueprint.json>"
+        );
+        std::process::exit(2);
     }
     if !args.backtest_knobs.is_empty() {
         eprintln!(
@@ -2777,6 +2817,53 @@ async fn main() -> anyhow::Result<()> {
 /// Offline MarketRegime evaluation (E16 / #98): label the archive's windows
 /// with the offline rule and score the online state machine against those
 /// labels. Builds no Core, never trades, never writes to the archive.
+/// #361: compile one blueprint JSON document to a Lua strategy body. The
+/// default output is `strategy.lua` beside the blueprint (the package layout
+/// §6.4 expects); `--blueprint-out` moves it. Errors exit 2 with the node id
+/// the compiler named — a refused blueprint must be fixable from the message
+/// alone.
+fn run_blueprint_compile(blueprint_path: &str, out_path: Option<&str>) {
+    eprintln!("blitzkrieg-core: blueprint compile {blueprint_path}");
+    let json = match std::fs::read_to_string(blueprint_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("blitzkrieg-core: --blueprint-compile {blueprint_path}: {e}");
+            std::process::exit(2);
+        }
+    };
+    match blitzkrieg_core::blueprint::compile(&json) {
+        Ok(lua) => {
+            let out = out_path.unwrap_or("strategy.lua");
+            let out = if std::path::Path::new(out).is_absolute() {
+                out.to_string()
+            } else {
+                std::path::Path::new(blueprint_path)
+                    .parent()
+                    .map(|dir| dir.join(out).display().to_string())
+                    .unwrap_or_else(|| out.to_string())
+            };
+            if let Some(dir) = std::path::Path::new(&out).parent()
+                && !dir.as_os_str().is_empty()
+            {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            match std::fs::write(&out, &lua) {
+                Ok(()) => {
+                    println!("blueprint: wrote {out} ({} bytes)", lua.len());
+                }
+                Err(e) => {
+                    eprintln!("blitzkrieg-core: --blueprint-out {out}: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("blitzkrieg-core: blueprint compile failed: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn run_regime_eval(
     archive: &str,
     report_path: Option<&str>,
