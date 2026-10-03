@@ -11794,17 +11794,19 @@ mod strategy_dispatch_tests {
 
     // ── #363: the execution-policy verdict seam, wired into the pipeline ────
 
-    /// A dip-buying core whose policy skips every entry for `default` until
-    /// the open-position count reaches 2 — the shipped global_backstop rule.
-    /// The point: the skip happens BEFORE arbitration, so the RiskGate never
-    /// sees the intent (the policy may remove, never relax), and the
-    /// refusal is bucketed `policy.skip`.
+    /// A dip-buying core with an operator-supplied policy. The point of the
+    /// seam: a policy verdict happens BEFORE arbitration, so the RiskGate
+    /// never sees a refused intent (the policy may remove, never relax),
+    /// and the refusal is bucketed `policy.skip`.
     fn policy_core(mut c: Core, policy: crate::execution_policy::Policy) -> Core {
         c.execution_policy = Some(policy);
         c
     }
 
-    fn backstop_policy() -> crate::execution_policy::Policy {
+    /// The compiled default: no rules, budget unbound — the zero-config
+    /// kernel. (The `open_positions >= 2 → skip` backstop lives in the
+    /// SHIPPED FILE, not here.)
+    fn neutral_policy() -> crate::execution_policy::Policy {
         crate::execution_policy::Policy::default()
     }
 
@@ -11834,10 +11836,10 @@ mod strategy_dispatch_tests {
 
     #[test]
     fn policy_skip_refuses_the_entry_before_the_risk_gate() {
-        // The code-default backstop (open_positions >= 2 → skip) can only
+        // The shipped file's backstop (open_positions >= 2 → skip) can only
         // bite at 2+ positions, so here judge the STRUCTURAL facts instead:
         // a policy whose ONLY content is a skip-everything rule.
-        let mut policy = backstop_policy();
+        let mut policy = neutral_policy();
         policy.defaults.rules = vec![crate::execution_policy::Rule {
             name: "sit_out".into(),
             priority: 1,
@@ -11879,7 +11881,7 @@ mod strategy_dispatch_tests {
     /// (neutral, budget = full balance) leaves it exactly alone.
     #[test]
     fn policy_place_leaves_the_ticket_untouched_when_neutral() {
-        let mut c = policy_core(equity_core(dec!(4.8), Decimal::ZERO), backstop_policy());
+        let mut c = policy_core(equity_core(dec!(4.8), Decimal::ZERO), neutral_policy());
         let now = 1_000_000i64;
         feed_btc_dip(&mut c, now);
         assert_eq!(c.engine_evaluate(now + 1_000), 1);
@@ -11897,7 +11899,7 @@ mod strategy_dispatch_tests {
     /// is visible in the strategy's rejection causes.
     #[test]
     fn a_missing_account_id_refuses_the_order() {
-        let mut c = policy_core(equity_core(dec!(4.8), Decimal::ZERO), backstop_policy());
+        let mut c = policy_core(equity_core(dec!(4.8), Decimal::ZERO), neutral_policy());
         let now = 1_000_000i64;
         feed_btc_dip(&mut c, now);
         // Blank the account id on the produced intent before the verdict is
@@ -12001,7 +12003,7 @@ mod strategy_dispatch_tests {
     /// out, then entries resume — the caller owns the clock.
     #[test]
     fn a_cooldown_rule_ices_the_account_then_thaws_it() {
-        let mut policy = backstop_policy();
+        let mut policy = neutral_policy();
         // The rule arms while the account is funded (balance >= 100): the
         // triggering cycle consumes the entry AND starts the 60s ice. Later
         // the balance is drawn down so the rule no longer matches — proving
