@@ -233,6 +233,24 @@ pub mod method {
     /// GRANT a capability — unfreezing is config + restart).
     pub const ACCOUNT_STATUS: &str = "account.status";
 
+    // ── #363 — execution policy surface ─────────────────────────────────────
+    /// List every account section the loaded policy names, plus the effective
+    /// global defaults. Read-only.
+    pub const EXECUTION_POLICY_LIST: &str = "execution_policy.list";
+    /// One account's effective section (its own overrides folded over the
+    /// globals) and its rules. Read-only.
+    pub const EXECUTION_POLICY_GET: &str = "execution_policy.get";
+    /// Write ONE account's section to the policy TOML (section-replace,
+    /// never a whole-file rewrite of other accounts), then full-reload the
+    /// policy in memory and land one audit line. Refuses accounts other
+    /// than the named one — cross-account writes are a fail-closed no.
+    pub const EXECUTION_POLICY_SET: &str = "execution_policy.set";
+    /// Remove one account's section from the file (it falls back to the
+    /// globals), full-reload, audit.
+    pub const EXECUTION_POLICY_RESET: &str = "execution_policy.reset";
+    /// The audit journal tail for one account (or all accounts).
+    pub const EXECUTION_POLICY_HISTORY: &str = "execution_policy.history";
+
     // ── E26 (§4.4) — systemic risk readout ────────────────────────────────
     /// The effective systemic limits and WHERE each came from. Read-only,
     /// zero side effects, and answered from a boot-time snapshot WITHOUT the
@@ -842,6 +860,80 @@ pub struct AccountStatusParams {
     pub status: AccountStatus,
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+// ── #363 — execution policy wire types ──────────────────────────────────────
+
+/// `execution_policy.set` params: the target account and the section to
+/// write for it. Fields left `null` inherit the globals (fold semantics);
+/// `rules` present REPLACES the section's rules entirely; `rules: []`
+/// clears them. `cooldownSec` is the account's standing cooldown applied
+/// after every entry.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionPolicySetParams {
+    pub account_id: String,
+    #[serde(default)]
+    pub budget_ratio: Option<String>,
+    #[serde(default)]
+    pub min_budget_usd: Option<String>,
+    #[serde(default)]
+    pub max_budget_usd: Option<String>,
+    #[serde(default)]
+    pub min_equity_usd: Option<String>,
+    #[serde(default)]
+    pub max_positions_per_asset: Option<u32>,
+    #[serde(default)]
+    pub rules: Option<Vec<serde_json::Value>>,
+}
+
+/// `execution_policy.get` / `.reset` params.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionPolicyGetParams {
+    pub account_id: String,
+}
+
+/// `execution_policy.history` params: account optional (absent = all).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionPolicyHistoryParams {
+    #[serde(default)]
+    pub account_id: Option<String>,
+}
+
+/// One account section as the read arms report it — the EFFECTIVE view
+/// (own overrides folded over the globals), decimals as strings.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionPolicySectionView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_ratio: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_budget_usd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_budget_usd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_equity_usd: Option<String>,
+    pub max_positions_per_asset: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<serde_json::Value>>,
+}
+
+/// One audit line as `execution_policy.history` reports it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionPolicyAuditView {
+    pub ts_ms: i64,
+    pub actor: String,
+    pub action: String,
+    pub account_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// One account as `account.list` reports it (§12.1 AccountView). The money

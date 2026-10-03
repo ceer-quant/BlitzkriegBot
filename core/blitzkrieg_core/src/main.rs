@@ -162,6 +162,10 @@ struct Args {
     markets: Vec<String>,
     auto_exits: bool,
     max_positions: usize,
+    /// #363 — how many positions may be open at once on ONE asset. `None`
+    /// (flag absent) = the execution-policy file decides (or 1, the
+    /// historical one-per-asset gate); an explicit flag wins over the file.
+    max_positions_per_asset: Option<u32>,
     /// #173 — the daily-loss breaker's budget. `daily_loss_usd` is the absolute
     /// cap (0 = none) and `daily_loss_pct` the cap as a percentage of the day's
     /// opening cash equity (0 = off). The EFFECTIVE cap is the tighter of the
@@ -644,6 +648,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut markets: Vec<String> = Vec::new();
     let mut auto_exits = true;
     let mut max_positions: usize = 2;
+    let mut max_positions_per_asset: Option<u32> = None;
     // #173: the daily-loss budget, tracked as Option so CLI > env > default
     // resolution can tell "the operator spoke" from "nobody did".
     let mut max_daily_loss: Option<Decimal> = None;
@@ -1047,6 +1052,15 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     .next()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(max_positions)
+            }
+            // #363: per-asset entries (the @Almach replay needs > 1). Absent
+            // = the execution-policy file decides; 0 is refused at boot
+            // (it would refuse every entry).
+            "--max-positions-per-asset" => {
+                max_positions_per_asset = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .or(max_positions_per_asset)
             }
             // #173: absolute USD cap for the day's realized loss (0 = none).
             "--max-daily-loss" => {
@@ -1721,6 +1735,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         markets,
         auto_exits,
         max_positions,
+        max_positions_per_asset,
         daily_loss_usd: daily_loss_usd.value,
         daily_loss_pct: daily_loss_pct.value,
         daily_loss_source: daily_loss_usd.source,
@@ -2406,8 +2421,14 @@ async fn main() -> anyhow::Result<()> {
         feed_ws_enabled: args.feed_ws,
         market_plugin: args.market_plugin,
         round_duration_sec: args.round_sec,
+        // #363: the EXPLICIT flag only (None = let the policy file decide).
+        max_positions_per_asset: args.max_positions_per_asset,
         positions: PositionConfig {
             max_positions: args.max_positions,
+            // #363: `None` = the flag is absent → the policy file's value (or
+            // the compiled 1) flows through in service.rs; `Some` = the flag
+            // wins over the file. 1 is the historical one-per-asset gate.
+            max_positions_per_asset: args.max_positions_per_asset.unwrap_or(1),
             // #173: the budget comes from the CLI/env, and its durable side file
             // is derived from the position log (the same convention as the
             // `.recon` watermark beside it) so a restart resumes the SAME day's
@@ -3791,6 +3812,26 @@ mod tests {
             None
         );
         assert_eq!(parse_one("spread_arb:2:20:1.5:4:8").unwrap().size_pct, None);
+    }
+
+    /// #363: the per-asset cap parses from the flag and stays `None` (the
+    /// policy file decides) when the flag is absent. Lockstep with cli.rs's
+    /// FLAGS entry is pinned by the same crate test that pins every other
+    /// flag; this pins the PARSER half.
+    #[test]
+    fn the_per_asset_position_cap_parses_and_defaults_to_none() {
+        let file = file_with("");
+        let a = parse_args(
+            &file,
+            &["--max-positions-per-asset".to_string(), "3".to_string()],
+            &EnvVars::default(),
+        );
+        assert_eq!(a.max_positions_per_asset, Some(3));
+        let a = parse_args(&file, &[], &EnvVars::default());
+        assert_eq!(
+            a.max_positions_per_asset, None,
+            "absent flag = the execution-policy file decides"
+        );
     }
 
     #[test]

@@ -243,6 +243,12 @@ pub const FLAGS: &[FlagSpec] = &[
         "the position count is the compiled default (2)",
     ),
     risky(
+        "--max-positions-per-asset",
+        "<n>",
+        "Concurrent positions on ONE asset; the execution-policy file's value unless set (default 1).",
+        "the per-asset cap is the policy file's (or the compiled 1: one position per asset)",
+    ),
+    risky(
         "--no-auto-exits",
         "",
         "Disable the kernel's automatic exit management (stops, targets).",
