@@ -625,6 +625,13 @@ pub const FLAGS: &[FlagSpec] = &[
          without --backtest is refused).",
     ),
     flag(
+        "--onchain-fills",
+        "<activity.jsonl>",
+        "#355: seed the onchain pull universe from an /activity ledger file instead \
+         of the /trades API (the ledger is the complete universe; the API is a \
+         taker-side subset).",
+    ),
+    flag(
         "--regime-eval",
         "<archive.jsonl>",
         "Label market regimes over an archive and score the online state machine \
