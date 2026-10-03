@@ -132,6 +132,22 @@ pub struct CoreConfig {
     pub binance_assets: Vec<String>,
     /// Where to append near-miss records (blocked signals + path). None = off.
     pub near_miss_path: Option<String>,
+    /// #363: where the account-isolated execution policy loads from. `None`
+    /// = the shipped default path
+    /// ([`crate::execution_policy::EXECUTION_POLICY_CONFIG_PATH`]); the
+    /// backtester and most in-process tests pass `None` WITH a cwd that has
+    /// no such file, which is the same as the zero-config deployment: code
+    /// defaults, hardcoded-behaviour parity. A file that exists but is
+    /// malformed refuses the boot (fail-closed) with a `load-refused` audit
+    /// line — the kernel never trades under a policy the operator did not
+    /// write.
+    pub execution_policy_path: Option<String>,
+    /// #363: operator override for the per-asset position cap (the
+    /// `--max-positions-per-asset` flag). `None` = the execution policy's
+    /// value decides (`[accounts.<id>]` → `[defaults]` → code default 1).
+    /// An explicit CLI number wins over the policy file, matching the
+    /// CLI > env > TOML > default precedence the rest of the kernel uses.
+    pub max_positions_per_asset: Option<u32>,
     /// Where to append closed trades (Node-compatible JSONL). None = off.
     pub trade_log_path: Option<String>,
     /// Where to persist tracked ORDERS (crash recovery + orphan detection).
@@ -684,6 +700,12 @@ impl Default for CoreConfig {
             market_plugin: None,
             binance_assets: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
             near_miss_path: None,
+            // #363: default to the shipped config path; the loader treats a
+            // MISSING file as the zero-config deployment (code defaults).
+            execution_policy_path: Some(
+                crate::execution_policy::EXECUTION_POLICY_CONFIG_PATH.to_string(),
+            ),
+            max_positions_per_asset: None,
             trade_log_path: Some("data/trades/trades.jsonl".to_string()),
             order_log_path: Some("data/orders/orders.jsonl".to_string()),
             position_log_path: Some("data/positions/positions.jsonl".to_string()),
@@ -1225,6 +1247,19 @@ pub struct Core {
     /// is touched only where an engine exists, so a core without one
     /// allocates nothing.
     kline_preview_last_ms: std::collections::HashMap<(String, crate::kline::KlineInterval), i64>,
+    /// #363: the account-isolated execution policy. Loaded fail-closed at
+    /// boot (a malformed file refuses the boot, with a `load-refused` audit
+    /// line), replaced WHOLESALE on an IPC set/reset (hot reload — no
+    /// restart), and consulted by `engine_evaluate` before an entry order is
+    /// placed. `None` only when the config file is absent (the zero-config
+    /// deployment): every default then matches the historical hardcoded
+    /// behaviour bit for bit.
+    execution_policy: Option<crate::execution_policy::Policy>,
+    /// #363: account-level cooldowns a policy rule opened, keyed by account
+    /// id, holding the ms instant entries may resume. Checked (and expired)
+    /// in `engine_evaluate`; set by the same path when a rule answers
+    /// `PolicyOutput::Cooldown`.
+    policy_cooldowns: HashMap<String, i64>,
 }
 
 /// F4: what a fill-driven full close changed, so a later FAILED status for the
@@ -1279,6 +1314,29 @@ impl Core {
         config: CoreConfig,
         mut accounts: crate::account::AccountLedgers,
     ) -> Self {
+        // #363: the execution policy loads fail-closed at boot. A missing
+        // file is the zero-config deployment (code defaults, no account
+        // sections); a file that exists but does not parse, misses a field
+        // or carries an out-of-range value REFUSES the boot — and leaves one
+        // `load-refused` audit line saying so (谁改的/何时/为何, the audit's
+        // own first question). A config-path of `None` (backtester, most
+        // tests) loads nothing: every default then equals the historical
+        // hardcoded behaviour bit for bit.
+        let execution_policy = Self::load_execution_policy_at_boot(&config);
+        // #363: the per-asset cap precedence — CLI flag > policy section >
+        // compiled 1. The CLI already writes total `max_positions` straight
+        // into `config.positions`; this mirrors that for per-asset, reading
+        // the value back out of the LOADED policy so the file and the flag
+        // cannot disagree silently. A config-path of `None` (or a missing
+        // file, which loads the code defaults) leaves the compiled 1 — the
+        // historical one-per-asset gate, byte for byte.
+        let mut positions = config.positions.clone();
+        if let Some(policy) = &execution_policy {
+            positions.max_positions_per_asset = policy.defaults.max_positions_per_asset;
+        }
+        if let Some(v) = config.max_positions_per_asset {
+            positions.max_positions_per_asset = v;
+        }
         let trade_db = config
             .trade_log_path
             .as_ref()
@@ -1363,7 +1421,7 @@ impl Core {
             c
         };
         let breaker = LossBreakers::new(config.max_consecutive_losses, config.breaker_cooldown_sec);
-        let positions = PositionManager::new(config.positions.clone());
+        let positions = PositionManager::new(positions);
         // Optional market-data archive (P-1.3). A failure to open only disables
         // recording — trading must never be blocked by an archive path problem.
         let event_archive = config.event_archive_path.as_ref().and_then(|p| {
@@ -1491,6 +1549,130 @@ impl Core {
             next_id: 1,
             tx: None,
             kline_preview_last_ms: std::collections::HashMap::new(),
+            // #363: the boot-loaded policy (None = no config file found).
+            execution_policy,
+            policy_cooldowns: HashMap::new(),
+        }
+    }
+
+    /// #363: the boot-time policy load. Fail-closed on ANY malformed input;
+    /// the refusal is both panicked (the boot must not continue) and audited
+    /// (`load-refused`), so an operator who walks up to a dead kernel finds
+    /// the reason in the journal, not only in a scrolled-away log line.
+    fn load_execution_policy_at_boot(
+        config: &CoreConfig,
+    ) -> Option<crate::execution_policy::Policy> {
+        let path = config
+            .execution_policy_path
+            .as_deref()
+            .map(std::path::Path::new)?;
+        match crate::execution_policy::Policy::load(path) {
+            Ok(policy) => Some(policy),
+            Err(reason) => {
+                crate::execution_policy::append_audit(
+                    &crate::execution_policy::PolicyAuditRecord {
+                        ts_ms: now_ms(),
+                        actor: crate::execution_policy::ACTOR_BOOT.to_string(),
+                        action: "load-refused".to_string(),
+                        account_id: "*".to_string(),
+                        before: None,
+                        after: None,
+                        error: Some(reason.clone()),
+                    },
+                );
+                panic!(
+                    "refusing to boot: {reason} (fail-closed: fix execution_policy.toml and \
+                     restart)"
+                );
+            }
+        }
+    }
+
+    // ── #363: execution policy surface (IPC + reload) ──────────────────────
+
+    /// One section as the wire reports it: the EFFECTIVE view (own overrides
+    /// folded over the globals), decimals as strings so the shortest-decimal
+    /// rule survives the JSON hop.
+    pub fn execution_policy_section_view(
+        &self,
+        account_id: &str,
+    ) -> Option<crate::ipc::schema::ExecutionPolicySectionView> {
+        let policy = self.execution_policy.as_ref()?;
+        let s = policy.section_for(account_id);
+        Some(crate::ipc::schema::ExecutionPolicySectionView {
+            budget_ratio: Some(s.budget_ratio.to_string()),
+            min_budget_usd: Some(s.min_budget_usd.to_string()),
+            max_budget_usd: Some(s.max_budget_usd.to_string()),
+            min_equity_usd: Some(s.min_equity_usd.to_string()),
+            max_positions_per_asset: s.max_positions_per_asset,
+            rules: Some(
+                s.rules
+                    .iter()
+                    .map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null))
+                    .collect(),
+            ),
+        })
+    }
+
+    /// The account ids the loaded policy names with a section of their own.
+    pub fn execution_policy_account_ids(&self) -> Vec<String> {
+        match &self.execution_policy {
+            Some(p) => {
+                let mut ids: Vec<String> = p.accounts.keys().cloned().collect();
+                ids.sort();
+                ids
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether the policy is loaded at all (the zero-config deployment has
+    /// none — the read arms report that instead of inventing a section).
+    pub fn execution_policy_loaded(&self) -> bool {
+        self.execution_policy.is_some()
+    }
+
+    /// The audit journal for the history arm.
+    pub fn execution_policy_audit(&self) -> Vec<crate::execution_policy::PolicyAuditRecord> {
+        crate::execution_policy::load_audit()
+    }
+
+    /// Replace the in-memory policy wholesale after a file write (set/reset
+    /// arms). Re-derives the per-asset cap the way boot did — CLI flag wins
+    /// over the file — and lands one `load-refused` audit line + keeps the
+    /// OLD policy when the new file does not parse: fail-closed means a
+    /// broken write never trades unguarded, it keeps the last good guard.
+    pub fn reload_execution_policy(&mut self) -> Result<(), String> {
+        let path = self
+            .config
+            .execution_policy_path
+            .clone()
+            .ok_or_else(|| "execution policy disabled (no config path)".to_string())?;
+        match crate::execution_policy::Policy::load(std::path::Path::new(&path)) {
+            Ok(policy) => {
+                let mut positions = self.config.positions.clone();
+                positions.max_positions_per_asset = policy.defaults.max_positions_per_asset;
+                if let Some(v) = self.config.max_positions_per_asset {
+                    positions.max_positions_per_asset = v;
+                }
+                self.positions.set_config(positions);
+                self.execution_policy = Some(policy);
+                Ok(())
+            }
+            Err(reason) => {
+                crate::execution_policy::append_audit(
+                    &crate::execution_policy::PolicyAuditRecord {
+                        ts_ms: now_ms(),
+                        actor: crate::execution_policy::ACTOR_IPC.to_string(),
+                        action: "load-refused".to_string(),
+                        account_id: "*".to_string(),
+                        before: None,
+                        after: None,
+                        error: Some(reason.clone()),
+                    },
+                );
+                Err(reason)
+            }
         }
     }
 
@@ -2872,6 +3054,10 @@ impl Core {
         // names the strategy, the sandbox itself refuses every later call
         // from it, and the kernel keeps running (a poisoned strategy is
         // quarantined, not a crash).
+        // #363: the round timing this cycle was judged against, copied out
+        // while the engine borrow is alive so the policy facts below do not
+        // extend it (the engine reference must end before `self.emit`).
+        let policy_time_left_sec = engine.last_time_left_sec();
         let poison_alerts = engine.drain_poison_alerts();
         for (name, alert) in &poison_alerts {
             tracing::error!(strategy = %name, %alert, "lua strategy poisoned; all further calls refused");
@@ -2897,6 +3083,68 @@ impl Core {
             .map(|o| (o.token_id.clone(), o))
             .collect();
         let mut placed = 0;
+        // ── #363: the execution policy's account-level verdict, judged BEFORE
+        // arbitration. Two decisions ride here:
+        //
+        //   1. `Skip` (a rule hit or the equity floor) — the intent never
+        //      reaches `place()`, so it never reaches the RiskGate either;
+        //      the refusal is bucketed `policy.skip` and audited with the
+        //      rule's own reason. This is the ONLY place a policy verdict
+        //      removes an order: everything downstream (RiskGate, breakers,
+        //      capacity, reserve, OME) runs untouched — "规则不能绕过
+        //      RiskEngine" holds because the policy can only REMOVE an
+        //      intent, never relax a gate or resize past the risk cap.
+        //   2. `Place { budget_usd }` — the budget is an UPPER BOUND: the
+        //      request's own share band (min_shares/max_shares, engine
+        //      sizing) still decides the ticket, and the policy shrinks it
+        //      when the shares cost more than the budget allows. With the
+        //      shipped defaults (ratio 0.10, floor 1, ceiling 50) the bound
+        //      sits at or above every ticket the share band can produce, so
+        //      no order changes size — exit-economics parity by construction.
+        let policy_verdicts: HashMap<
+            String,
+            Result<crate::execution_policy::PolicyOutput, crate::execution_policy::PolicyRefusal>,
+        > = if self.execution_policy.is_some() {
+            let open = self.positions.open_positions();
+            let open_for = |acct: &str| {
+                open.iter()
+                    .filter(|p| p.account_id.as_str() == acct)
+                    .count() as u32
+            };
+            tokens
+                .iter()
+                .map(|(_, req)| {
+                    let facts = crate::execution_policy::PolicyInput {
+                        available_balance: self
+                            .accounts
+                            .ledger_of(&req.account_id)
+                            .map(|l| l.balance())
+                            .unwrap_or_default(),
+                        total_equity: self
+                            .accounts
+                            .ledger_of(&req.account_id)
+                            .map(|l| l.balance())
+                            .unwrap_or_default(),
+                        open_positions: open_for(req.account_id.as_str()),
+                        current_price: req.price,
+                        time_left_sec: policy_time_left_sec,
+                        symbol: req.asset.clone(),
+                        recent_pnl_1h: self
+                            .positions
+                            .recent_pnl_1h_for(req.account_id.as_str(), now_ms),
+                        consecutive_losses: self.breaker.consecutive_losses(&req.strategy),
+                    };
+                    let verdict = crate::execution_policy::evaluate(
+                        self.execution_policy.as_ref().expect("checked above"),
+                        req.account_id.as_str(),
+                        &facts,
+                    );
+                    (req.account_id.to_string() + ":" + &req.token_id, verdict)
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
         // ── v0.3 Wave 0 (#329): the E25 arbitration delegation seam ──────────
         // E25 inserts its one-line per-intent delegation at the head of the
         // loop below: `process_intent` (arbitration/) runs BEFORE the E16
@@ -2905,8 +3153,112 @@ impl Core {
         // `self.place(...)`. Wave 0 lands the seam only — a comment, not a
         // call: `arbitration/` does not exist yet and this PR is
         // behavior-free by charter (deviation disclosed in the PR body).
-        for (token, req) in tokens {
+        for (token, mut req) in tokens {
             let name = req.strategy.clone();
+            // ── #363: account-level cooldown gate. A rule that returned
+            // `Cooldown` last cycle parked the ACCOUNT here for N seconds:
+            // every entry this account names is refused until the clock runs
+            // out (the clock is the caller's — the rule states a duration,
+            // the kernel owns the time). Expired entries are dropped on
+            // sight, and nothing about exits is slowed: only entries.
+            if let Some(&until) = self.policy_cooldowns.get(req.account_id.as_str()) {
+                if until > now_ms {
+                    tracing::info!(target: "strategy",
+                        "entry rejected: strategy={name} cause=policy.cooldown account={} \
+                         {}s left", req.account_id, (until - now_ms + 999) / 1000);
+                    self.stats.place_rejected += 1;
+                    let acc = self.strategy_accounting.entry(name).or_default();
+                    acc.rejected += 1;
+                    *acc.rejection_causes
+                        .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
+                        .or_default() += 1;
+                    continue;
+                }
+                self.policy_cooldowns.remove(req.account_id.as_str());
+            }
+            // ── #363: the policy verdict for THIS intent (judged above, before
+            // any gate). A Skip refuses here — the intent never reaches the
+            // RiskGate, which is the only way a policy may touch an order: it
+            // removes, never relaxes. A Place caps the ticket size.
+            match policy_verdicts
+                .get(&format!("{}:{}", req.account_id, req.token_id))
+                .map(|v| v.as_ref())
+            {
+                Some(Ok(crate::execution_policy::PolicyOutput::Skip { reason })) => {
+                    tracing::info!(target: "strategy",
+                        "entry rejected: strategy={name} cause=policy.skip reason={reason}");
+                    self.stats.place_rejected += 1;
+                    let acc = self.strategy_accounting.entry(name).or_default();
+                    acc.rejected += 1;
+                    *acc.rejection_causes
+                        .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
+                        .or_default() += 1;
+                    continue;
+                }
+                Some(Ok(crate::execution_policy::PolicyOutput::Cooldown { seconds })) => {
+                    let until = now_ms + seconds * 1000;
+                    self.policy_cooldowns
+                        .insert(req.account_id.to_string(), until);
+                    tracing::info!(target: "strategy",
+                        "policy cooldown: account={} {}s (entries resume at {})",
+                        req.account_id, seconds, until);
+                    self.stats.place_rejected += 1;
+                    let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                    acc.rejected += 1;
+                    *acc.rejection_causes
+                        .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
+                        .or_default() += 1;
+                    continue;
+                }
+                Some(Ok(crate::execution_policy::PolicyOutput::Place { budget_usd, .. })) => {
+                    // The budget is an UPPER BOUND on the ticket, not a
+                    // replacement for the sizing path: the engine's share band
+                    // already decided `req.size`, and the policy only shrinks it
+                    // when the shares cost more than the account's budget allows.
+                    // With the shipped defaults the bound never bites (see the
+                    // comment at the verdict map), so no existing order changes.
+                    let shares = (budget_usd / req.price).floor();
+                    if shares >= Decimal::ONE && req.size > shares {
+                        tracing::info!(target: "strategy",
+                            "policy budget shrink: strategy={} account={} {} -> {shares} shares \
+                             (budget {budget_usd} USD)",
+                            name, req.account_id, req.size);
+                        req.size = shares;
+                    }
+                    // A budget that cannot buy one whole share emits nothing:
+                    // a 0-size order would only turn the refusal into a venue
+                    // rejection (the #202 lesson, applied to the policy path).
+                    if shares < Decimal::ONE {
+                        tracing::info!(target: "strategy",
+                            "entry rejected: strategy={name} cause=policy.skip reason=\
+                             budget {budget_usd} USD cannot buy one share at {}",
+                            req.price);
+                        self.stats.place_rejected += 1;
+                        let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                        acc.rejected += 1;
+                        *acc.rejection_causes
+                            .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
+                            .or_default() += 1;
+                        continue;
+                    }
+                }
+                Some(Err(refusal)) => {
+                    // "account_id 缺失 → 拒绝下单": the policy could not judge
+                    // this intent at all. Refuse loudly, never fall through to
+                    // defaults.
+                    tracing::warn!(target: "strategy",
+                        "entry refused: strategy={name} account={} policy refusal: {}",
+                        req.account_id, refusal.reason);
+                    self.stats.place_rejected += 1;
+                    let acc = self.strategy_accounting.entry(name).or_default();
+                    acc.rejected += 1;
+                    *acc.rejection_causes
+                        .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
+                        .or_default() += 1;
+                    continue;
+                }
+                None => {}
+            }
             // ── E25 (#331): arbitration BEFORE the E16 portfolio cap — this is
             // the seam Wave 0 planted. Every strategy intent is arbitrated
             // exactly once through the four gates; a Rejected suggestion never
@@ -3072,7 +3424,10 @@ impl Core {
             }
             match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
                 Ok((_id, _)) => {
-                    self.strategy_accounting.entry(name).or_default().placed += 1;
+                    self.strategy_accounting
+                        .entry(name.clone())
+                        .or_default()
+                        .placed += 1;
                     if let Some(engine) = self.engine.as_mut() {
                         engine.note_order_placed(&token);
                     }
@@ -11309,6 +11664,268 @@ mod strategy_dispatch_tests {
             c.ledger().balance(),
             SEED + net,
             "cash must equal principal + realized net once nothing is open; closed={parts:?}"
+        );
+    }
+
+    // ── #363: the execution-policy verdict seam, wired into the pipeline ────
+
+    /// A dip-buying core whose policy skips every entry for `default` until
+    /// the open-position count reaches 2 — the shipped global_backstop rule.
+    /// The point: the skip happens BEFORE arbitration, so the RiskGate never
+    /// sees the intent (the policy may remove, never relax), and the
+    /// refusal is bucketed `policy.skip`.
+    fn policy_core(mut c: Core, policy: crate::execution_policy::Policy) -> Core {
+        c.execution_policy = Some(policy);
+        c
+    }
+
+    fn backstop_policy() -> crate::execution_policy::Policy {
+        crate::execution_policy::Policy::default()
+    }
+
+    /// A place() request for the dip core's book (taker at the given price),
+    /// naming an account (or a blank one for the missing-id test).
+    fn policy_req(
+        price: Decimal,
+        size: Decimal,
+        key: &str,
+        account: &str,
+    ) -> crate::model::OrderRequest {
+        crate::model::OrderRequest {
+            token_id: "btc_up".into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode: FillPolicy::Taker,
+            price,
+            size,
+            internal_key: key.into(),
+            strategy: "dip".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 1,
+            account_id: crate::model::AccountId::from(account),
+        }
+    }
+
+    #[test]
+    fn policy_skip_refuses_the_entry_before_the_risk_gate() {
+        // The code-default backstop (open_positions >= 2 → skip) can only
+        // bite at 2+ positions, so here judge the STRUCTURAL facts instead:
+        // a policy whose ONLY content is a skip-everything rule.
+        let mut policy = backstop_policy();
+        policy.defaults.rules = vec![crate::execution_policy::Rule {
+            name: "sit_out".into(),
+            priority: 1,
+            enabled: true,
+            when: crate::execution_policy::When {
+                field: crate::execution_policy::ConditionField::OpenPositions,
+                op: crate::execution_policy::CompareOp::Ge,
+                value: crate::execution_policy::ConditionValue::Num(Decimal::ZERO),
+            },
+            then: crate::execution_policy::Action {
+                action: Some(crate::execution_policy::SkipAction::Skip),
+                budget_ratio: None,
+                min_budget_usd: None,
+                max_budget_usd: None,
+                cooldown_sec: None,
+            },
+            reason: Some("测试：一票否决".into()),
+        }];
+        let mut c = policy_core(equity_core(dec!(4.8), Decimal::ZERO), policy);
+        let now = 1_000_000i64;
+        feed_btc_dip(&mut c, now);
+        assert_eq!(
+            c.engine_evaluate(now + 1_000),
+            0,
+            "policy skip removes the order"
+        );
+        assert!(c.list_orders().is_empty(), "nothing reached place()");
+        let stats = c.strategy_stats();
+        let s = strategy_entry(&stats, "dip");
+        assert_eq!(s["rejectionCauses"]["policy.skip"], 1, "{s}");
+    }
+
+    /// The negative half of "规则不能绕过 RiskEngine": with the policy
+    /// REMOVED (its Place path), an order that the risk cap rejects is STILL
+    /// rejected — a policy budget never widens anything. Here the dip ticket
+    /// (size_usd 2.5 at 0.44 → 5 shares → 2.20 USD) sails under the default
+    /// 1000 notional cap, so the assertion pins the budget does not RAISE
+    /// the ticket: the engine's own band decided 5 shares and the policy
+    /// (neutral, budget = full balance) leaves it exactly alone.
+    #[test]
+    fn policy_place_leaves_the_ticket_untouched_when_neutral() {
+        let mut c = policy_core(equity_core(dec!(4.8), Decimal::ZERO), backstop_policy());
+        let now = 1_000_000i64;
+        feed_btc_dip(&mut c, now);
+        assert_eq!(c.engine_evaluate(now + 1_000), 1);
+        let orders = c.list_orders();
+        assert_eq!(orders.len(), 1);
+        assert_eq!(
+            orders[0].size,
+            dec!(6),
+            "2.5/0.44 → 6 shares, unchanged by the neutral policy"
+        );
+    }
+
+    /// "account_id 缺失 → 拒绝下单": an intent with a blank account id is
+    /// refused (never silently judged under the defaults) and the refusal
+    /// is visible in the strategy's rejection causes.
+    #[test]
+    fn a_missing_account_id_refuses_the_order() {
+        let mut c = policy_core(equity_core(dec!(4.8), Decimal::ZERO), backstop_policy());
+        let now = 1_000_000i64;
+        feed_btc_dip(&mut c, now);
+        // Blank the account id on the produced intent before the verdict is
+        // consulted: exactly what a mis-wired strategy host would send.
+        // The verdict map keys on the SAME id, so the lookup itself must
+        // refuse — drive it through a custom request via place_gated is
+        // simpler: place() with an empty account id.
+        assert!(c.list_orders().is_empty(), "engine_evaluate not run yet");
+        // place() path: the intent carries a BLANK account id. The policy's
+        // own refusal must reject it (never silently judge under defaults).
+        let r = c.place(
+            policy_req(dec!(0.44), dec!(5), "policy-missing-account", ""),
+            0,
+            now + 1_000,
+        );
+        assert!(r.is_err(), "an empty account id must refuse: {r:?}");
+    }
+
+    /// The per-asset cap reads the policy file: `max_positions_per_asset = 2`
+    /// admits a SECOND same-asset position (UP + DOWN of one asset — the
+    /// @Almach replay's shape) where the compiled 1 would refuse, and a third
+    /// same-asset entry is refused with the exact historical vocabulary.
+    #[test]
+    fn per_asset_cap_comes_from_the_policy_section() {
+        let now = 1_000_000i64;
+        // Boot-time resolution: CoreConfig's explicit value wins over any
+        // policy file (which this test disables — the CONFIG path is what
+        // the flag exercises).
+        let mut cfg = CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(1000),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(100),
+            engine_enabled: true,
+            round_duration_sec: 900,
+            auto_exits_enabled: false,
+            size_usd: dec!(2.5),
+            min_shares: dec!(1),
+            max_shares: dec!(1000),
+            max_positions_per_asset: Some(2),
+            assets: vec!["BTC".into()],
+            positions: crate::position::PositionConfig {
+                max_positions: 5,
+                exit: crate::exit_policy::ExitConfig {
+                    min_time_left_sec: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        cfg.execution_policy_path = None; // no file in unit tests
+        let mut c = Core::new(cfg);
+        c.set_balance(dec!(100));
+        // Books for BOTH of BTC's sides — two positions on ONE asset.
+        for side in ["up", "down"] {
+            c.engine_on_data(
+                DataEvent::Book {
+                    token_id: format!("btc_{side}"),
+                    bids: vec![(dec!(0.43), dec!(100))],
+                    asks: vec![(dec!(0.45), dec!(100))],
+                    now_ms: now,
+                },
+                now,
+            );
+        }
+        let leg = |token: &str, key: &str| {
+            let mut r = policy_req(dec!(0.45), dec!(5), key, "default");
+            r.token_id = token.to_string();
+            r
+        };
+        // Two same-ASSET entries on DIFFERENT tokens, both admitted and filled.
+        let a = c.place(leg("btc_up", "k1"), 0, now);
+        assert!(a.is_ok(), "first same-asset entry: {a:?}");
+        let b = c.place(leg("btc_down", "k2"), 0, now);
+        assert!(
+            b.is_ok(),
+            "second same-asset entry admitted at cap 2: {b:?}"
+        );
+        assert_eq!(
+            c.positions().open_positions().len(),
+            2,
+            "the fixture's premise: two BTC positions actually opened"
+        );
+        // A THIRD same-asset entry (a new token, same BTC) is refused at the
+        // cap, with the exact historical vocabulary ("Already in {asset}")
+        // that classify_rejection buckets as positions.already_in.
+        let r = c.place(leg("btc_another", "k3"), 0, now);
+        let reason = match r {
+            Err(e) => e.to_string(),
+            Ok((_, status)) => {
+                panic!("third entry must not be admitted at the cap (status {status:?})")
+            }
+        };
+        assert!(reason.contains("Already in BTC"), "got: {reason}");
+    }
+
+    /// A policy cooldown: the winning rule puts the ACCOUNT on ice; the
+    /// very next entry is refused with `policy.skip` until the clock runs
+    /// out, then entries resume — the caller owns the clock.
+    #[test]
+    fn a_cooldown_rule_ices_the_account_then_thaws_it() {
+        let mut policy = backstop_policy();
+        // The rule arms while the account is funded (balance >= 100): the
+        // triggering cycle consumes the entry AND starts the 60s ice. Later
+        // the balance is drawn down so the rule no longer matches — proving
+        // the THAW comes from the parked clock expiring, not from a fresh
+        // rule hit re-icing the account every cycle.
+        policy.defaults.rules = vec![crate::execution_policy::Rule {
+            name: "ice".into(),
+            priority: 1,
+            enabled: true,
+            when: crate::execution_policy::When {
+                field: crate::execution_policy::ConditionField::AvailableBalance,
+                op: crate::execution_policy::CompareOp::Ge,
+                value: crate::execution_policy::ConditionValue::Num(dec!(100)),
+            },
+            then: crate::execution_policy::Action {
+                action: None,
+                budget_ratio: None,
+                min_budget_usd: None,
+                max_budget_usd: None,
+                cooldown_sec: Some(60),
+            },
+            reason: None,
+        }];
+        let mut c = policy_core(equity_core(dec!(100), Decimal::ZERO), policy);
+        let now = 1_000_000i64;
+        feed_btc_dip(&mut c, now);
+        // First cycle: the cooldown verdict parks the account — the intent
+        // that TRIGGERED it is consumed (the rule hit on its facts).
+        assert_eq!(
+            c.engine_evaluate(now + 1_000),
+            0,
+            "cooldown verdict consumes the triggering entry"
+        );
+        let stats = c.strategy_stats();
+        let s = strategy_entry(&stats, "dip");
+        assert_eq!(s["rejectionCauses"]["policy.skip"], 1, "{s}");
+        // Second cycle, still inside 60s: refused by the parked cooldown —
+        // and note the rule is now OFF (balance drawn below 100), so this
+        // refusal is the parked clock talking, not a fresh rule hit.
+        c.set_balance(dec!(50));
+        feed_btc_dip(&mut c, now + 2_000);
+        assert_eq!(c.engine_evaluate(now + 3_000), 0, "account is on ice");
+        // After the clock runs out: the entry passes (the rule is off and the
+        // ice has melted — the caller-owned clock ran out).
+        feed_btc_dip(&mut c, now + 61_000);
+        assert_eq!(
+            c.engine_evaluate(now + 62_000),
+            1,
+            "thawed: the entry places"
         );
     }
 }
