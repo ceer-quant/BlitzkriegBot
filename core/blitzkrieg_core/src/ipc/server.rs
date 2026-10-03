@@ -1974,6 +1974,23 @@ async fn handle_line(
             }
         }
 
+        // #364: the CURRENT section replayed over the recent closed trades —
+        // the read-only fact behind the UIs' preview strip ("these rules
+        // would skip N of the last M"). Judged by `evaluate` itself, so the
+        // preview cannot drift from the kernel.
+        method::EXECUTION_POLICY_PREVIEW => {
+            match serde_json::from_value::<ExecutionPolicyPreviewParams>(params) {
+                Ok(p) => {
+                    let c = core.lock().await;
+                    Ok(
+                        serde_json::to_value(c.execution_policy_preview(&p.account_id, 100))
+                            .unwrap_or(Value::Null),
+                    )
+                }
+                Err(e) => Err((Failure::INVALID_PARAMS, e.to_string(), None)),
+            }
+        }
+
         // ── #353: the WebUI backtest surface (拉数据→配置→回测→看结果) ────────
         // Every arm fronts the in-kernel job registry: validation is
         // synchronous and fail-closed, the heavy work runs as tokio tasks in
@@ -2248,12 +2265,20 @@ fn section_from_set_params(
         }
         s.rules = Some(out);
     }
-    // The section must validate as the file would see it: render a tiny
-    // one-section file and parse it back. Same parser, same refusals.
+    // The section must validate as the file would see it: round-trip it the
+    // way `policy_section_write` actually writes — insert into a typed file,
+    // render the WHOLE file, parse it back. Same parser, same refusals.
+    // (Rendering the bare section under a hand-typed header is NOT the same
+    // thing: `toml::to_string_pretty` spells the rules array `[[rules]]`
+    // without the `[accounts.<id>]` prefix, so a section with rules could
+    // never pass that probe — #364 fixed the validator to match the writer.)
+    let mut probe_file = crate::execution_policy::PolicyFile::default();
+    probe_file
+        .accounts
+        .insert("__probe__".to_string(), s.clone());
     let rendered =
-        toml::to_string_pretty(&s).map_err(|e| format!("section does not render: {e}"))?;
-    let probe = format!("version = 1\n[accounts.__probe__]\n{rendered}");
-    crate::execution_policy::Policy::load_from_str(&probe)
+        toml::to_string_pretty(&probe_file).map_err(|e| format!("section does not render: {e}"))?;
+    crate::execution_policy::Policy::load_from_str(&rendered)
         .map_err(|e| format!("section rejected: {e}"))?;
     Ok(s)
 }
@@ -3814,8 +3839,14 @@ mod tests {
 
     /// A core pointed at a policy file in a scratch dir. The file ships the
     /// global section only; the arms below add/reset account sections
-    /// through the wire and read back what landed.
-    async fn policy_fixture() -> (
+    /// through the wire and read back what landed. `accounts` names the ids
+    /// the book is configured with (through the INJECTION constructor, so
+    /// no test touches the real `user_layer/configs/accounts.toml` the
+    /// process cwd decides); an empty list means the single-`default` book
+    /// a missing accounts.toml produces.
+    async fn policy_fixture_with_accounts(
+        accounts: &[&str],
+    ) -> (
         Arc<AsyncMutex<Core>>,
         crate::market::registry::MarketPluginRegistry,
         PeerAuth,
@@ -3839,9 +3870,31 @@ mod tests {
         let cfg = CoreConfig {
             execution_policy_path: Some(path.to_string_lossy().to_string()),
             dry_seed_balance: dec!(100),
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
             ..Default::default()
         };
-        let c = Core::new(cfg);
+        let c = if accounts.is_empty() {
+            Core::new(cfg)
+        } else {
+            let now = now_ms();
+            let book = crate::account::AccountLedgers::new(
+                accounts
+                    .iter()
+                    .map(|id| crate::account::Account {
+                        id: AccountId::from(*id),
+                        name: (*id).to_string(),
+                        market_type: blitzkrieg_market_api::MarketType::Prediction,
+                        status: AccountStatus::Active,
+                        credential_keys: crate::account::CredentialKeys::default(),
+                        updated_at_ms: now,
+                    })
+                    .collect(),
+                AccountId::from(accounts[0]),
+            );
+            Core::with_account_book(cfg, book)
+        };
         (
             Arc::new(AsyncMutex::new(c)),
             crate::market::registry::MarketPluginRegistry::new(),
@@ -3850,10 +3903,32 @@ mod tests {
         )
     }
 
+    async fn policy_fixture() -> (
+        Arc<AsyncMutex<Core>>,
+        crate::market::registry::MarketPluginRegistry,
+        PeerAuth,
+        std::path::PathBuf,
+    ) {
+        policy_fixture_with_accounts(&[]).await
+    }
+
     #[tokio::test]
     async fn execution_policy_surface_list_get_set_reset_history() {
         let (core, registry, peer, path) = policy_fixture().await;
-        let t0 = now_ms();
+
+        // The journal file is FIXED (`data/audit/…`) and persists across runs,
+        // and its stamps are wall-clock — a backward step between two now_ms()
+        // calls would make "records stamped after the test started" miss this
+        // run's own set. So freshness is proven by COUNT, not by clock: read
+        // the account's journal length first, then assert it grew by exactly
+        // one — the set that answered, no audit for the refused one.
+        let before_set = {
+            let c = core.lock().await;
+            c.execution_policy_audit()
+                .iter()
+                .filter(|r| r.account_id == "acct-a")
+                .count()
+        };
 
         // list: the shipped global section only, no accounts.
         let v = rpc(
@@ -3931,26 +4006,23 @@ mod tests {
         );
 
         // history: this run's set landed one audit line; the refused set did
-        // not. The journal file persists across runs (fixed audit path), so
-        // only records stamped after the test started are counted.
+        // not. Counted against the pre-set length (clock-free freshness —
+        // see the note at the top of this test).
         let this_run = rpc(&core, &registry, &peer,
             r#"{"jsonrpc":"2.0","id":8,"method":"execution_policy.history","params":{"accountId":"acct-a"}}"#.into())
             .await;
         let lines = this_run["result"].as_array().expect("history array");
-        let fresh: Vec<&Value> = lines
-            .iter()
-            .filter(|l| l["tsMs"].as_i64().map(|ts| ts >= t0).unwrap_or(false))
-            .collect();
         assert_eq!(
-            fresh.len(),
-            1,
+            lines.len(),
+            before_set + 1,
             "one set line this run, refusals do not audit: {this_run}"
         );
-        assert_eq!(fresh[0]["action"], serde_json::json!("set"));
-        assert_eq!(fresh[0]["accountId"], serde_json::json!("acct-a"));
+        let fresh = lines.last().expect("the one fresh line");
+        assert_eq!(fresh["action"], serde_json::json!("set"));
+        assert_eq!(fresh["accountId"], serde_json::json!("acct-a"));
         // The `after` summary is the RELOADED state: the account's own 0.05.
         assert_eq!(
-            fresh[0]["after"]["budgetRatio"],
+            fresh["after"]["budgetRatio"],
             serde_json::json!("0.05"),
             "{this_run}"
         );
@@ -3997,6 +4069,180 @@ mod tests {
                 .contains("never-existed"),
             "the refusal names the account: {v}"
         );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// #364 — the FRESHNESS contract at the wire: after `execution_policy.set`
+    /// answers, a `get` on the SAME connection (any connection — the policy
+    /// is core state, not session state) must return the NEW view, and
+    /// `history` must carry one more audit line for the account. This is the
+    /// testable form of "WebUI saves → TUI reads stale → red": the two faces
+    /// share the core's state, and this pins that a write is visible to the
+    /// next reader without any restart or re-login.
+    #[tokio::test]
+    async fn execution_policy_set_is_fresh_for_the_next_reader() {
+        let (core, registry, peer, path) = policy_fixture().await;
+
+        // The baseline read: the account folds over the globals (0.10).
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"execution_policy.get","params":{"accountId":"acct-fresh"}}"#.into())
+            .await;
+        assert_eq!(
+            v["result"]["budgetRatio"],
+            serde_json::json!("0.10"),
+            "pre-set view: {v}"
+        );
+        let history_before = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"execution_policy.history","params":{"accountId":"acct-fresh"}}"#.into())
+            .await;
+        let before_len = history_before["result"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
+
+        // A write lands through the wire…
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"execution_policy.set","params":{"accountId":"acct-fresh","budgetRatio":"0.07","maxBudgetUsd":"25"}}"#.into())
+            .await;
+        assert!(v.get("error").is_none(), "set answers: {v}");
+
+        // …and the VERY NEXT reader sees the new state, no restart, no
+        // re-login, no cache to invalidate.
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":4,"method":"execution_policy.get","params":{"accountId":"acct-fresh"}}"#.into())
+            .await;
+        assert_eq!(
+            v["result"]["budgetRatio"],
+            serde_json::json!("0.07"),
+            "post-set get must be FRESH: {v}"
+        );
+        assert_eq!(v["result"]["maxBudgetUsd"], serde_json::json!("25"), "{v}");
+
+        // The audit trail grew by exactly one line for this account, and it
+        // is the set that just answered.
+        let history_after = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":5,"method":"execution_policy.history","params":{"accountId":"acct-fresh"}}"#.into())
+            .await;
+        let lines = history_after["result"].as_array().expect("history array");
+        assert_eq!(
+            lines.len(),
+            before_len + 1,
+            "history must grow by one per set: {history_after}"
+        );
+        let last = lines.last().expect("one fresh line");
+        assert_eq!(last["action"], serde_json::json!("set"));
+        assert_eq!(
+            last["after"]["budgetRatio"],
+            serde_json::json!("0.07"),
+            "the after snapshot is the reloaded state"
+        );
+
+        // The preview strip rides the same freshness: the new ratio decides
+        // the budget the replay reports (0.07 × the seeded balance).
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":6,"method":"execution_policy.preview","params":{"accountId":"acct-fresh"}}"#.into())
+            .await;
+        assert!(v.get("error").is_none(), "preview answers: {v}");
+        assert!(
+            v["result"]["considered"].is_u64(),
+            "preview carries a considered count: {v}"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// #364 — the preview arm: a skip rule removes exactly the rows it names,
+    /// and the budget the replay reports for the survivors is the balance ×
+    /// ratio clamp the live order path would have handed out.
+    #[tokio::test]
+    async fn execution_policy_preview_replays_history_through_evaluate() {
+        use rust_decimal_macros::dec;
+        let (core, registry, peer, path) = policy_fixture_with_accounts(&["acct-prev"]).await;
+
+        // An account section with a rule that skips BTC outright: the seed
+        // trades below hit it by name. The condition rides the table form
+        // ({field, op, value}) — the same spelling the file carries.
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"execution_policy.set","params":{"accountId":"acct-prev","budgetRatio":"0.10","minBudgetUsd":"1","maxBudgetUsd":"50","rules":[{"name":"no_btc","priority":10,"enabled":true,"when":{"field":"symbol","op":"==","value":"BTC"},"then":{"action":"skip"},"reason":"no bitcoin"}]}}"#.into())
+            .await;
+        assert!(v.get("error").is_none(), "set with rules: {v}");
+
+        // Seed two closed trades for the account: one BTC (skipped), one ETH
+        // (placed). Rows land in the position manager's own closed book —
+        // the same book `trades.history` reports from — so the preview
+        // replays exactly what the panel shows.
+        let balance;
+        {
+            use crate::model::{ExitReason, OrderRole, SignalDirection};
+            use crate::position::ClosedPosition;
+            let mut c = core.lock().await;
+            balance = dec!(100);
+            c.accounts_mut()
+                .get_mut(&AccountId::from("acct-prev"))
+                .expect("configured ledger")
+                .set_balance(balance);
+            let mk = |asset: &str, price: Decimal| ClosedPosition {
+                id: format!("hft-prev-{asset}"),
+                strategy: "spread_arb".into(),
+                asset: asset.into(),
+                direction: SignalDirection::Up,
+                token_id: format!("tok-{asset}"),
+                condition_id: "cond".into(),
+                account_id: AccountId::from("acct-prev"),
+                entry_price: price,
+                exit_price: price,
+                shares: dec!(10),
+                cost_usd: price * dec!(10),
+                was_maker_entry: true,
+                was_maker_exit: false,
+                entry_fee_pct: Decimal::ZERO,
+                exit_fee_pct: Decimal::ZERO,
+                pnl_usd: Decimal::ZERO,
+                pnl_pct: Decimal::ZERO,
+                net_pnl_usd: Decimal::ZERO,
+                net_pnl_pct: Decimal::ZERO,
+                high_pnl_pct: Decimal::ZERO,
+                low_pnl_pct: Decimal::ZERO,
+                hold_time_sec: 60,
+                exit_reason: ExitReason::TakeProfit,
+                entered_at_ms: now_ms() - 60_000,
+                exited_at_ms: now_ms(),
+                entry_role: OrderRole::Maker,
+                exit_role: OrderRole::Taker,
+                dust_shares: Decimal::ZERO,
+            };
+            c.positions_mut()
+                .push_closed_for_test(mk("BTC", dec!(0.40)));
+            c.positions_mut()
+                .push_closed_for_test(mk("ETH", dec!(0.60)));
+        }
+        let v = rpc(&core, &registry, &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"execution_policy.preview","params":{"accountId":"acct-prev"}}"#.into())
+            .await;
+        let r = &v["result"];
+        assert_eq!(r["considered"], serde_json::json!(2), "{v}");
+        assert_eq!(r["skipped"], serde_json::json!(1), "the BTC row skips: {v}");
+        // One placed row at 10% of the seeded balance — the budget the rules
+        // would have handed that entry.
+        let expected = balance * dec!(0.10);
+        assert_eq!(
+            r["avgBudgetUsd"],
+            serde_json::json!(expected.to_string()),
+            "average budget = balance × ratio over the placed rows: {v}"
+        );
+        let rows = r["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2, "one row per replayed entry");
+        assert!(
+            rows.iter()
+                .any(|row| row["symbol"] == "BTC" && row["verdict"] == "skip"),
+            "the BTC row is a skip: {v}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row["symbol"] == "ETH" && row["verdict"] == "place"),
+            "the ETH row places: {v}"
+        );
+
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
