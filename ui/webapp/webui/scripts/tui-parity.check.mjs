@@ -93,13 +93,37 @@ const WEBUI_TAB_SETS = [
     'plugins',
     'settings',
   ],
+  // #362: the blueprint editor joins the nav (between 回测 and 策略 — it is the
+  // authoring face whose output lands in 策略). The TUI has no canvas, so this
+  // stays WebUI surplus, paired to the strategy list it feeds.
+  [
+    'overview',
+    'hft',
+    'backtest',
+    'blueprint',
+    'strategies',
+    'decisions',
+    'evolution',
+    'plugins',
+    'settings',
+  ],
 ]
-check('WebUI nav is a known tab set (six, seven with evolution, eight with decisions)', () => {
+check('WebUI nav is a known tab set (six, seven with evolution, eight with decisions, nine with blueprint)', () => {
   assert.ok(
     WEBUI_TAB_SETS.some((s) => s.join(',') === webuiIds.join(',')),
     `unknown WebUI tab set: ${webuiIds.join('/')} — extend WEBUI_TAB_SETS deliberately`,
   )
 })
+
+// The blueprint face is WebUI-only (authoring needs a canvas, not a TUI grid);
+// pair it to the page that consumes its output so the surplus stays pinned.
+if (webuiIds.includes('blueprint')) {
+  check('WebUI blueprint → page exists and reaches the kernel blueprint.* IPC', () => {
+    const page = read('src', 'pages', 'BlueprintPage.vue')
+    assert.ok(page.includes('api.blueprintCompile'), 'BlueprintPage does not call api.blueprintCompile')
+    assert.ok(page.includes('api.blueprintSave'), 'BlueprintPage does not call api.blueprintSave')
+  })
+}
 
 console.log('TUI face → WebUI home (every TUI tab must live somewhere)')
 
@@ -297,13 +321,14 @@ console.log('WebUI surplus — declared, each with where it lives off-panel')
  * TUI_TO_WEBUI; only the theme/sound/token extras remain WebUI enhancements. */
 const WEBUI_SURPLUS = [
   ['backtest', 'CLI: blitzkrieg-core --backtest --backtest-report（回测是 WebUI 增强面）'],
+  ['blueprint', 'CLI/JSON: 手写 blueprint.json 过 blueprint.compile（画布是 WebUI 专属增强面，产物进策略包）'],
   ['strategies', 'TUI 指令台 strategy <name> on|off 同动词；账本表格是 WebUI 增强面'],
 ]
 check('every WebUI-only tab has a declared off-panel equivalent', () => {
   const surplus = webuiIds.filter((id) => !TUI_TO_WEBUI.some(([, ts]) => ts.includes(id)))
   assert.deepEqual(
     surplus,
-    ['backtest', 'strategies'],
+    ['backtest', 'blueprint', 'strategies'],
     'new WebUI tab without a parity note — add it to WEBUI_SURPLUS and this list',
   )
 })

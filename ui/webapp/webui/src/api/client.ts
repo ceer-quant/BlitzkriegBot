@@ -432,6 +432,59 @@ export const api = {
   /** 导出信封（`backtest.export`）：文件由浏览器自己保存（`fileName`+`content`）。 */
   backtestExport: (id: string) =>
     request<BacktestExportDoc>(`/backtest/export?id=${encodeURIComponent(id)}`),
+
+  // ── #362 蓝图编辑器（compile 预览 + save 落盘，全程走内核 IPC）────────────
+  // 两条都是内核 `blueprint.*` IPC 的纯代理（网关 body 即 params 逐字转发），
+  // 内核错误包成 200 + `{error}` — 调用方必须检查 `error` 并内联渲染。
+
+  /**
+   * 编译预览（`blueprint.compile`）：把当前画布 JSON 编成 Lua 源码。纯只读；
+   * 拒绝消息含节点 id（#361 三阶段编译链保证），必须原样展示，绝不静默。
+   */
+  blueprintCompile: (json: string) =>
+    request<BlueprintCompileDoc>('/blueprint/compile', {
+      method: 'POST',
+      body: JSON.stringify({ json }),
+    }),
+  /**
+   * 保存策略包（`blueprint.save`）：内核校验名字 → 现场编译 → 写入
+   * blueprint.json + strategy.lua + manifest.json。UI 永不碰文件系统；
+   * 同名包已存在时必须显式 `overwrite`（回执里带三个文件路径 + sha256）。
+   */
+  blueprintSave: (body: BlueprintSaveBody) =>
+    request<BlueprintSaveDoc>('/blueprint/save', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+}
+
+// ── #362 蓝图编辑器（mirror core/blitzkrieg_core/src/ipc/schema.rs）──────────
+
+/** `blueprint.compile` 应答：生成的 Lua 源码。 */
+export interface BlueprintCompileDoc {
+  lua: string
+  error?: string
+}
+
+/** `blueprint.save` 的请求体（camelCase wire 与内核 serde 对齐）。 */
+export interface BlueprintSaveBody {
+  name: string
+  json: string
+  /** 同名策略包已存在时必须显式为 true。 */
+  overwrite?: boolean
+}
+
+/** `blueprint.save` 回执：写了什么、写到哪、sha256 可对账。 */
+export interface BlueprintSaveDoc {
+  name: string
+  packageDir: string
+  blueprintPath: string
+  luaPath: string
+  manifestPath: string
+  luaSha256: string
+  /** blueprint/lua/manifest 三个文件的字节数。 */
+  bytes: number[]
+  error?: string
 }
 
 // ── #353 回测类型（mirror core/blitzkrieg_core/src/backtest_jobs.rs 的 wire 形）──

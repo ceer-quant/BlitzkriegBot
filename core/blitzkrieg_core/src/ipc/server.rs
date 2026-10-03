@@ -1973,6 +1973,42 @@ async fn handle_line(
             .await
         }
 
+        // ── #362: the blueprint editor surface (compile + save) ──────────────
+        // The WebUI canvas authors blueprint JSON and asks the KERNEL for every
+        // side effect. `compile` is stateless and read-only (the preview pane's
+        // only data source); `save` is the one arm that touches the filesystem,
+        // and it does so under the loader's OWN package contract: the name is
+        // validated before anything exists, the blueprint is compiled FRESH
+        // here (never a caller-supplied lua), and the package lands as
+        // `blueprint.json` + `strategy.lua` + `manifest.json` under the same
+        // strategy root `--lua-strategy-dir` points at — the directory the
+        // kernel already scans, so a saved package is discovered on the next
+        // start exactly like a hand-written one.
+        method::BLUEPRINT_COMPILE => {
+            typed(params, |p: BlueprintCompileParams| async move {
+                // Compile errors carry the node id by construction (#361);
+                // InvalidParams is the wire class for "your document is wrong".
+                let lua = crate::blueprint::compile(&p.json)
+                    .map_err(|e| CoreError::new(CoreErrorCode::InvalidParams, e))?;
+                Ok::<_, CoreError>(
+                    serde_json::to_value(BlueprintCompileResult { lua }).unwrap_or(Value::Null),
+                )
+            })
+            .await
+        }
+
+        method::BLUEPRINT_SAVE => {
+            // The save root is configuration: snapshot the core's config before
+            // the async move (a sync field clone, no lock held across await).
+            let core_cfg = core.lock().await.config().clone();
+            typed(params, |p: BlueprintSaveParams| async move {
+                let receipt = blueprint_save(&p, &core_cfg)
+                    .map_err(|e| CoreError::new(CoreErrorCode::InvalidParams, e))?;
+                Ok::<_, CoreError>(serde_json::to_value(receipt).unwrap_or(Value::Null))
+            })
+            .await
+        }
+
         other => Err((
             Failure::METHOD_NOT_FOUND,
             format!("unknown method: {other}"),
@@ -2006,6 +2042,142 @@ where
                 raw: e.raw,
             }),
         )
+    })
+}
+
+/// The strategy-package root `blueprint.save` writes into.
+///
+/// The kernel's OWN discovery rule decides the path (not the spec's draft
+/// wording): Lua packages live where `--lua-strategy-dir` scans, which is
+/// `user_layer/strategies_lua` by default (`main::default_lua_strategy_dir`)
+/// — `user_layer/strategies` is the DYLIB fixture tree and must never receive
+/// a Lua package (docs/DEV_V0_3.md §1901). `BLITZKRIEG_LUA_STRATEGY_DIR`
+/// overrides the default — the same deployment knob idea as the CLI flag,
+/// kept as an env var so a host operator can redirect package writes without
+/// an IPC-side path parameter (no caller may ever name a directory).
+/// #362: validate a save request and write the strategy package.
+///
+/// Order is the safety property, mirroring the compile chain: the NAME is
+/// screened first (it becomes a directory name and a `place_order`-adjacent
+/// literal — the same `os.`/`io.`/`debug` wall the compiler applies to the
+/// blueprint name applies here, plus a package must not be named like a path),
+/// then the blueprint compiles fresh (a compile refusal means nothing was
+/// written), then an EXISTING package of the same name refuses the save unless
+/// the caller explicitly overwrote (a silent overwrite could replace a
+/// strategy an operator has enabled), and only then do the three files land.
+/// The save root, read from the core's OWN config (falling back to the
+/// deployment default). An env-var read here would be a shared-process side
+/// channel that races test parallelism for no production benefit: the kernel's
+/// strategy root is configuration, so it is read as configuration.
+fn blueprint_strategy_root(core_cfg: &crate::service::CoreConfig) -> String {
+    core_cfg
+        .lua_strategy_dir
+        .clone()
+        .unwrap_or_else(|| "user_layer/strategies_lua".to_string())
+}
+
+fn blueprint_save(
+    p: &BlueprintSaveParams,
+    core_cfg: &crate::service::CoreConfig,
+) -> Result<BlueprintSaveResult, String> {
+    use sha2::Digest;
+
+    const FORBIDDEN: [&str; 3] = ["os.", "io.", "debug"];
+    let name = p.name.trim();
+    if name.is_empty() {
+        return Err("blueprint name must not be empty".to_string());
+    }
+    if name.len() > 64 {
+        return Err(format!(
+            "blueprint name is {} characters; the ceiling is 64",
+            name.len()
+        ));
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(format!(
+            "blueprint name {name:?} may only hold ASCII letters, digits, '_' and '-' — \
+             it becomes a strategy-package directory name"
+        ));
+    }
+    if let Some(bad) = FORBIDDEN.iter().find(|bad| name.contains(**bad)) {
+        return Err(format!(
+            "blueprint name {bad:?} substring is refused: the name is embedded in the \
+             generated source verbatim"
+        ));
+    }
+
+    // Compile FRESH — the receipt vouches for what THIS call produced, and a
+    // structurally invalid blueprint writes nothing.
+    let lua = crate::blueprint::compile(&p.json)?;
+
+    let root = blueprint_strategy_root(core_cfg);
+    let pkg = std::path::Path::new(&root).join(name);
+    if pkg.join("manifest.json").is_file() && !p.overwrite {
+        return Err(format!(
+            "strategy package {root}/{name} already exists — saving over a package the \
+             loader scans must be explicit (overwrite: true)"
+        ));
+    }
+    std::fs::create_dir_all(&pkg).map_err(|e| format!("cannot create {root}/{name}: {e}"))?;
+
+    let blueprint_path = pkg.join("blueprint.json");
+    let lua_path = pkg.join("strategy.lua");
+    std::fs::write(&blueprint_path, p.json.as_bytes())
+        .map_err(|e| format!("cannot write {root}/{name}/blueprint.json: {e}"))?;
+    std::fs::write(&lua_path, lua.as_bytes())
+        .map_err(|e| format!("cannot write {root}/{name}/strategy.lua: {e}"))?;
+
+    // The manifest follows §6.4 exactly: name = directory name (one identity),
+    // sha256 = the digest of the entry file we just wrote (the loader verifies
+    // it and REFUSES the package on any drift), modes = the fixed declaration
+    // the codegen emits inside declare_modes().
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(lua.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    let manifest = serde_json::json!({
+        "name": name,
+        "version": "1.0.0",
+        "api": "1.0",
+        "entry": "strategy.lua",
+        "sha256": digest,
+        "author": "BlitzkriegBot",
+        "description": format!(
+            "Blueprint-compiled strategy from blueprint.json (name {name:?}); every \
+             decision is the whitelisted node graph it declares — the kernel \
+             adjudicates, sizes and gates every intent."
+        ),
+        "modes": [
+            {
+                "market_type": "prediction",
+                "structure": "binary_outcome_wheel",
+                "capabilities": ["websocket_feed", "level2_snapshot"]
+            }
+        ],
+    });
+    let manifest_body = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&manifest)
+            .map_err(|e| format!("manifest serialization failed: {e}"))?
+    );
+    let manifest_path = pkg.join("manifest.json");
+    std::fs::write(&manifest_path, manifest_body.as_bytes())
+        .map_err(|e| format!("cannot write {root}/{name}/manifest.json: {e}"))?;
+
+    Ok(BlueprintSaveResult {
+        name: name.to_string(),
+        package_dir: pkg.display().to_string(),
+        blueprint_path: blueprint_path.display().to_string(),
+        lua_path: lua_path.display().to_string(),
+        manifest_path: manifest_path.display().to_string(),
+        lua_sha256: digest,
+        bytes: [
+            p.json.len() as u64,
+            lua.len() as u64,
+            manifest_body.len() as u64,
+        ],
     })
 }
 
@@ -3521,5 +3693,295 @@ mod tests {
                 .contains("LOOSEN"),
             "the refusal must say WHY: {reply}"
         );
+    }
+
+    // ── #362: the blueprint editor surface, at the wire ──────────────────────
+    //
+    // The compile arm is pure (stateless, no Core lock), the save arm is the
+    // one place this surface touches the filesystem, so every test here pins
+    // the write shape from a temp ROOT via the same entry the sessions use.
+
+    /// The spec's four-node example — the same document the blueprint module's
+    /// own DOG_BLUEPRINT test pins, so the wire arm and the compiler agree on
+    /// the happy path.
+    const WIRE_BLUEPRINT: &str = r#"{"version":1,"name":"wire_dog","nodes":[
+        {"id":"n1","type":"data_source","params":{"field":"tick.price"}},
+        {"id":"n2","type":"condition","params":{"op":"<=","value":0.25}},
+        {"id":"n3","type":"condition","params":{"field":"tick.trend_confirmed","op":"==","value":true}},
+        {"id":"n4","type":"action_buy","params":{"price":0.25,"budget_ratio":0.10}}],
+        "edges":[{"from":"n1","to":"n2","when":true},{"from":"n2","to":"n3","when":true},
+        {"from":"n3","to":"n4","when":true}]}"#;
+
+    #[tokio::test]
+    async fn blueprint_compile_answers_the_generated_lua() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let params = serde_json::json!({ "json": WIRE_BLUEPRINT }).to_string();
+        let line =
+            format!(r#"{{"jsonrpc":"2.0","id":1,"method":"blueprint.compile","params":{params}}}"#);
+        let reply = rpc(&core, &registry, &peer, line).await;
+        assert!(reply.get("error").is_none(), "compile must answer: {reply}");
+        let lua = reply["result"]["lua"].as_str().expect("lua is a string");
+        assert!(lua.contains("function on_tick(tick)"), "{lua}");
+        assert!(lua.contains("tick.price <= 0.25"), "{lua}");
+        assert!(lua.contains("side = \"buy\""), "{lua}");
+    }
+
+    /// Reverse acceptance: every refusal class the editor must render INLINE
+    /// reaches the wire with the node id (or the parse position) and nothing
+    /// else changed — no partial result, no silent success.
+    #[tokio::test]
+    async fn blueprint_compile_refusals_carry_the_editor_context() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+
+        // Cycle: names the node on it.
+        let cyclic = json_line(
+            1,
+            "blueprint.compile",
+            &serde_json::json!({
+                "json": r#"{"version":1,"name":"cyc","nodes":[
+                {"id":"a1","type":"data_source","params":{"field":"tick.price"}},
+                {"id":"a2","type":"condition","params":{"op":"<","value":1}},
+                {"id":"a3","type":"condition","params":{"op":">","value":0}},
+                {"id":"a4","type":"action_buy","params":{}}],
+                "edges":[{"from":"a1","to":"a2"},{"from":"a2","to":"a3"},
+                {"from":"a3","to":"a2"},{"from":"a3","to":"a4"}]}"#,
+            }),
+        );
+        let reply = rpc(&core, &registry, &peer, cyclic).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("cycle") && msg.contains("a2"), "{reply}");
+
+        // No reachable action: the whole-graph failure with no node id.
+        let actionless = json_line(
+            2,
+            "blueprint.compile",
+            &serde_json::json!({
+                "json": r#"{"version":1,"name":"noact","nodes":[
+                {"id":"a1","type":"data_source","params":{"field":"tick.price"}},
+                {"id":"a2","type":"condition","params":{"op":"<","value":1}}],
+                "edges":[{"from":"a1","to":"a2"}]}"#,
+            }),
+        );
+        let reply = rpc(&core, &registry, &peer, actionless).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("no reachable action output"), "{reply}");
+
+        // Non-whitelisted field: names the node AND the field.
+        let bad_field = json_line(
+            3,
+            "blueprint.compile",
+            &serde_json::json!({
+                "json": r#"{"version":1,"name":"badf","nodes":[
+                {"id":"a1","type":"data_source","params":{"field":"tick.close"}},
+                {"id":"a2","type":"condition","params":{"op":"<","value":1}},
+                {"id":"a3","type":"action_buy","params":{}}],
+                "edges":[{"from":"a1","to":"a2"},{"from":"a2","to":"a3"}]}"#,
+            }),
+        );
+        let reply = rpc(&core, &registry, &peer, bad_field).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("a1") && msg.contains("tick.close"), "{reply}");
+
+        // Malformed JSON: the parse error travels verbatim.
+        let not_json = json_line(
+            4,
+            "blueprint.compile",
+            &serde_json::json!({ "json": "{not json" }),
+        );
+        let reply = rpc(&core, &registry, &peer, not_json).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("blueprint parse failed"), "{reply}");
+    }
+
+    /// Build one JSON-RPC line from a params object (the save tests' helper).
+    fn json_line(id: u32, method: &str, params: &serde_json::Value) -> String {
+        format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{params}}}"#)
+    }
+
+    /// The save tests' core: the standard fixture with its `lua_strategy_dir`
+    /// pointed at a private temp root, so a save lands where the assertions
+    /// look and never in the checkout. The save arm reads the root from this
+    /// config snapshot — the same road `serve` takes, no process-wide knob.
+    async fn save_fixture(
+        root: &std::path::Path,
+    ) -> (
+        Arc<AsyncMutex<Core>>,
+        crate::market::registry::MarketPluginRegistry,
+        PeerAuth,
+    ) {
+        use rust_decimal_macros::dec;
+        let cfg = CoreConfig {
+            risk: crate::risk::RiskConfig {
+                max_order_notional: dec!(3),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(100),
+            lua_strategy_dir: Some(root.display().to_string()),
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        };
+        let mut c = Core::new(cfg.clone());
+        c.set_balance(cfg.dry_seed_balance);
+        cfg.install_engine(&mut c).expect("engine install");
+        (
+            Arc::new(AsyncMutex::new(c)),
+            crate::market::registry::MarketPluginRegistry::new(),
+            PeerAuth::SameUid { uid: own_uid() },
+        )
+    }
+
+    #[tokio::test]
+    async fn blueprint_save_writes_the_package_files_and_receipt() {
+        // A private strategy root through the core's OWN config — no process
+        // env knob, so the two save tests cannot race each other for a shared
+        // cell and nothing ever writes into the real checkout.
+        let root = std::env::temp_dir().join(format!(
+            "bk-ipc-bpsave-ok-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let (core, registry, peer) = save_fixture(&root).await;
+        let json = serde_json::json!({ "json": WIRE_BLUEPRINT, "name": "wire_dog" }).to_string();
+        let line = json_line(
+            1,
+            "blueprint.save",
+            &serde_json::from_str::<Value>(&json).expect("obj"),
+        );
+        let reply = rpc(&core, &registry, &peer, line).await;
+        assert!(reply.get("error").is_none(), "save must land: {reply}");
+
+        let r = &reply["result"];
+        assert_eq!(r["name"], serde_json::json!("wire_dog"));
+        let pkg = root.join("wire_dog");
+        // The receipt's paths are the files on disk, and all three exist.
+        assert_eq!(
+            r["packageDir"],
+            serde_json::json!(pkg.display().to_string())
+        );
+        let lua = std::fs::read_to_string(pkg.join("strategy.lua")).expect("strategy.lua written");
+        assert!(lua.contains("function on_tick(tick)"), "{lua}");
+        let bp =
+            std::fs::read_to_string(pkg.join("blueprint.json")).expect("blueprint.json written");
+        assert_eq!(bp, WIRE_BLUEPRINT, "the blueprint bytes land verbatim");
+        let manifest: Value = serde_json::from_str(
+            &std::fs::read_to_string(pkg.join("manifest.json")).expect("manifest written"),
+        )
+        .expect("manifest is JSON");
+        assert_eq!(manifest["name"], "wire_dog");
+        assert_eq!(manifest["entry"], "strategy.lua");
+        assert_eq!(manifest["api"], "1.0");
+        // The manifest's digest matches the receipt AND the file — the loader
+        // verifies exactly this, so a drifted copy would refuse the package.
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(lua.as_bytes());
+        let digest = format!("{:x}", hasher.finalize());
+        assert_eq!(r["luaSha256"], serde_json::json!(digest));
+        assert_eq!(manifest["sha256"], serde_json::json!(digest));
+        // The receipt counts the bytes of all three files.
+        assert_eq!(
+            r["bytes"],
+            serde_json::json!([
+                WIRE_BLUEPRINT.len(),
+                lua.len(),
+                std::fs::read_to_string(pkg.join("manifest.json"))
+                    .unwrap()
+                    .len()
+            ])
+        );
+
+        // A second save of the SAME name refuses: the package is now on the
+        // loader's scan path and a silent overwrite could swap a strategy an
+        // operator believes they know.
+        let line2 = json_line(
+            2,
+            "blueprint.save",
+            &serde_json::from_str::<Value>(&json).expect("obj"),
+        );
+        let reply = rpc(&core, &registry, &peer, line2).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("already exists"), "{reply}");
+
+        // With the explicit flag the SAME call lands: overwrite is possible,
+        // never silent.
+        let line3 = json_line(
+            3,
+            "blueprint.save",
+            &serde_json::json!({
+                "name": "wire_dog", "json": WIRE_BLUEPRINT, "overwrite": true,
+            }),
+        );
+        let reply = rpc(&core, &registry, &peer, line3).await;
+        assert!(
+            reply.get("error").is_none(),
+            "an explicit overwrite must land: {reply}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn blueprint_save_refusals_write_nothing() {
+        // Same config-rooted fixture as the ok-path test.
+        let root = std::env::temp_dir().join(format!(
+            "bk-ipc-bpsave-bad-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let (core, registry, peer) = save_fixture(&root).await;
+
+        // A path-flavoured name is refused BEFORE any directory exists.
+        let line = json_line(
+            1,
+            "blueprint.save",
+            &serde_json::json!({
+                "name": "../escape", "json": WIRE_BLUEPRINT,
+            }),
+        );
+        let reply = rpc(&core, &registry, &peer, line).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("ASCII letters"), "{reply}");
+        assert!(!root.join("escape").exists(), "no directory was created");
+
+        // An invalid blueprint is refused by the compiler — nothing on disk.
+        let line = json_line(
+            2,
+            "blueprint.save",
+            &serde_json::json!({
+                "name": "no_action_pkg",
+                "json": r#"{"version":1,"name":"noact","nodes":[
+                {"id":"a1","type":"data_source","params":{"field":"tick.price"}},
+                {"id":"a2","type":"condition","params":{"op":"<","value":1}}],
+                "edges":[{"from":"a1","to":"a2"}]}"#,
+            }),
+        );
+        let reply = rpc(&core, &registry, &peer, line).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("no reachable action output"), "{reply}");
+        assert!(
+            !root.join("no_action_pkg").exists(),
+            "a refused compile must write nothing"
+        );
+
+        // A name carrying a forbidden substring is refused (it would be
+        // embedded in the generated source verbatim).
+        let line = json_line(
+            3,
+            "blueprint.save",
+            &serde_json::json!({
+                "name": "debug_probe", "json": WIRE_BLUEPRINT,
+            }),
+        );
+        let reply = rpc(&core, &registry, &peer, line).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("refused"), "{reply}");
+        assert!(
+            !root.join("debug_probe").exists(),
+            "no directory was created"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
