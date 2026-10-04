@@ -129,8 +129,25 @@ export async function logout(): Promise<void> {
   window.location.reload()
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, {
+/**
+ * Optional query params are encoded HERE (URLSearchParams), never spliced into
+ * `path` by callers: the path stays a static literal, so a stray value can
+ * never turn the request into something it was not written to be (the
+ * request-forgery shape the push gate refuses).
+ */
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  query?: Record<string, string | number | undefined>,
+): Promise<T> {
+  const qs = query
+    ? new URLSearchParams(
+        Object.entries(query)
+          .filter(([, v]) => v !== undefined && v !== '')
+          .map(([k, v]) => [k, String(v)] as [string, string]),
+      ).toString()
+    : ''
+  const res = await fetch(`/api${path}${qs ? `?${qs}` : ''}`, {
     ...init,
     headers: {
       'X-Auth-Token': token,
@@ -307,14 +324,12 @@ export const api = {
    * E25 (#331): the arbitration audit tail — a thin proxy of the core's
    * `intent.audit.tail` (§12.3). Filters pass through untouched.
    */
-  intentAuditTail: (params?: { limit?: number; strategy?: string; decision?: string }) => {
-    const q = new URLSearchParams()
-    if (params?.limit != null) q.set('limit', String(params.limit))
-    if (params?.strategy) q.set('strategy', params.strategy)
-    if (params?.decision) q.set('decision', params.decision)
-    const qs = q.toString()
-    return request<IntentAuditTailDoc>(`/intent-audit${qs ? `?${qs}` : ''}`)
-  },
+  intentAuditTail: (params?: { limit?: number; strategy?: string; decision?: string }) =>
+    request<IntentAuditTailDoc>('/intent-audit', {}, {
+      limit: params?.limit,
+      strategy: params?.strategy,
+      decision: params?.decision,
+    }),
   /**
    * E26 (§4.4): the effective systemic limits and where each came from — a
    * thin proxy of the core's `risk.limits` (read-only; the core answers from
@@ -328,11 +343,12 @@ export const api = {
    * panel's fast tick. The panel has no WebSocket, so this is the whole
    * data channel: poll, redraw, poll.
    */
-  klineHistory: (params: { symbol: string; interval: KlineIntervalWire; limit?: number }) => {
-    const q = new URLSearchParams({ symbol: params.symbol, interval: params.interval })
-    if (params.limit != null) q.set('limit', String(params.limit))
-    return request<KlineHistoryDoc>(`/kline-history?${q.toString()}`)
-  },
+  klineHistory: (params: { symbol: string; interval: KlineIntervalWire; limit?: number }) =>
+    request<KlineHistoryDoc>('/kline-history', {}, {
+      symbol: params.symbol,
+      interval: params.interval,
+      limit: params.limit,
+    }),
   /** Dispatch a gateway command verb (`status`/`start`/`stop`/…). */
   command: (cmd: string) =>
     request<CommandDoc>('/command', { method: 'POST', body: cmd }),
