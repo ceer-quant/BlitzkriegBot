@@ -1919,6 +1919,21 @@ impl WebServer {
                 // nothing.
                 self.proxy_backtest_body("backtest.run", &req.body)
             }
+            ("POST", "/api/blueprint/compile") => {
+                // #362: the blueprint editor's preview pane — the body IS the
+                // `blueprint.compile` params object (`{json}`), forwarded
+                // verbatim. Read-only and stateless kernel-side: a refusal
+                // names the node id, and the gateway shapes nothing.
+                self.proxy_backtest_body("blueprint.compile", &req.body)
+            }
+            ("POST", "/api/blueprint/save") => {
+                // #362: save — the body IS the `blueprint.save` params object
+                // (`{name, json, overwrite?}`). The kernel validates the name,
+                // compiles FRESH, and writes the strategy package under its
+                // own strategy root; the browser never learns a filesystem and
+                // the gateway shapes nothing.
+                self.proxy_backtest_body("blueprint.save", &req.body)
+            }
             ("GET", "/api/risk-limits") => {
                 // E26 (§4.4): the settings page's risk card reads the EFFECTIVE
                 // systemic limits through the SAME core client the snapshot

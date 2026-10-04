@@ -1103,3 +1103,74 @@ fn the_backtest_routes_forward_verbatim_and_shape_nothing() {
     assert_eq!(seen[0]["method"], "backtest.onchain.pull");
     assert_eq!(seen[1]["method"], "backtest.status");
 }
+
+/// #362 — the blueprint editor's two routes are the same pure IPC proxy: the
+/// method is fixed by the ROUTE (a POST body can never name one), the body
+/// travels as the params object verbatim, and a non-JSON body is refused by
+/// the gateway before the kernel sees anything. The browser side never gets a
+/// filesystem: the kernel decides where a saved package lands.
+#[test]
+fn the_blueprint_routes_forward_verbatim_and_shape_nothing() {
+    let fake = FakeCore::start("blueprint");
+    let server = Arc::new(WebServer::new(
+        IpcClient::new(fake.sock.to_string_lossy().to_string()),
+        10,
+    ));
+    let serving = Arc::clone(&server);
+    thread::spawn(move || {
+        let _ = serving.serve("127.0.0.1:0");
+    });
+    let addr = wait_for_bound(&server);
+
+    // compile: `{json}` verbatim — the preview pane's whole contract.
+    let body = r#"{"json":"{\"version\":1}"}"#;
+    let (code, out) = request_body(
+        addr,
+        &format!(
+            "POST /api/blueprint/compile HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert_eq!(code, 200, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(doc["echoMethod"], "blueprint.compile");
+    assert_eq!(
+        doc["echoParams"],
+        serde_json::from_str::<serde_json::Value>(body).unwrap(),
+        "the params object is the body, verbatim"
+    );
+
+    // save: `{name, json, overwrite}` verbatim — the kernel validates the
+    // name and owns the destination; the gateway adds no path.
+    let body = r#"{"name":"dog","json":"{}","overwrite":true}"#;
+    let (code, out) = request_body(
+        addr,
+        &format!(
+            "POST /api/blueprint/save HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert_eq!(code, 200, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(doc["echoMethod"], "blueprint.save");
+    assert_eq!(
+        doc["echoParams"],
+        serde_json::from_str::<serde_json::Value>(body).unwrap(),
+        "the save params travel untouched"
+    );
+
+    // A non-JSON body is refused by the GATEWAY (400) and reaches nothing.
+    let (code, _) = request_body(
+        addr,
+        "POST /api/blueprint/save HTTP/1.1\r\nContent-Length: 8\r\n\r\nnot json",
+    );
+    assert_eq!(code, 400, "a non-JSON body never reaches the kernel");
+    let seen = fake.seen.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        2,
+        "only the two well-formed calls landed: {seen:?}"
+    );
+    assert_eq!(seen[0]["method"], "blueprint.compile");
+    assert_eq!(seen[1]["method"], "blueprint.save");
+}
