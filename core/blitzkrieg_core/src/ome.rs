@@ -43,7 +43,7 @@
 use crate::model::*;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// Entries the applied-fill table keeps before old ones are evicted. Only
 /// terminal/untracked entries are evictable (see [`Ome::evict_applied`]), so the
@@ -196,6 +196,15 @@ pub struct SubmitParams {
 pub struct Ome {
     orders: HashMap<OrderId, TrackedOrder>,
     by_internal: HashMap<String, OrderId>,
+    /// `(submitted_at_ms, order_id)` for every tracked order, kept in sync at
+    /// the only two insertion points (`submit`, `restore`). `submitted_at_ms`
+    /// is immutable after creation, so the set never needs re-keying. Query
+    /// methods iterate this in key order instead of re-sorting the whole
+    /// orders map on every call — the per-tick maintenance path calls
+    /// `all()`/`live_orders()` several times per tick, and an O(n log n) sort
+    /// over an ever-growing order table collapsed replay throughput
+    /// (replay profile: ~54% of busy samples in `sort_by_key` under `Ome::all`).
+    by_submitted: BTreeSet<(i64, OrderId)>,
     applied: HashMap<String, AppliedFill>,
     /// Mutations of `applied`, in application order; the caller drains this and
     /// persists it. Empty on a core that never persists (the OME does no I/O).
@@ -210,6 +219,7 @@ impl Ome {
         Self {
             orders: HashMap::new(),
             by_internal: HashMap::new(),
+            by_submitted: BTreeSet::new(),
             applied: HashMap::new(),
             applied_journal: Vec::new(),
             applied_seq: 0,
@@ -239,6 +249,16 @@ impl Ome {
         for o in orders {
             self.by_internal
                 .insert(o.internal_key.clone(), o.order_id.clone());
+            // Idempotent per order id: drop a stale index key when the order
+            // already exists (a re-restore with a different timestamp would
+            // otherwise leave the old key behind and the query views would
+            // yield that order twice).
+            if let Some(prev) = self.orders.get(&o.order_id) {
+                self.by_submitted
+                    .remove(&(prev.submitted_at_ms, o.order_id.clone()));
+            }
+            self.by_submitted
+                .insert((o.submitted_at_ms, o.order_id.clone()));
             self.orders.insert(o.order_id.clone(), o);
         }
     }
@@ -425,27 +445,24 @@ impl Ome {
             .collect()
     }
     pub fn all(&self) -> Vec<&TrackedOrder> {
-        let mut v: Vec<_> = self.orders.values().collect();
-        v.sort_by_key(|o| o.submitted_at_ms);
-        v
+        self.by_submitted
+            .iter()
+            .filter_map(|(_, id)| self.orders.get(id))
+            .collect()
     }
     pub fn live_orders(&self) -> Vec<&TrackedOrder> {
-        let mut v: Vec<_> = self
-            .orders
-            .values()
+        self.by_submitted
+            .iter()
+            .filter_map(|(_, id)| self.orders.get(id))
             .filter(|o| o.status.is_live())
-            .collect();
-        v.sort_by_key(|o| o.submitted_at_ms);
-        v
+            .collect()
     }
     pub fn live_for(&self, token_id: &str, side: Side) -> Vec<&TrackedOrder> {
-        let mut v: Vec<_> = self
-            .orders
-            .values()
+        self.by_submitted
+            .iter()
+            .filter_map(|(_, id)| self.orders.get(id))
             .filter(|o| o.status.is_live() && o.token_id == token_id && o.side == side)
-            .collect();
-        v.sort_by_key(|o| o.submitted_at_ms);
-        v
+            .collect()
     }
 
     /// True while an order with this internal key is not terminal (dedup guard).
@@ -506,6 +523,8 @@ impl Ome {
         };
         self.by_internal
             .insert(r.internal_key.clone(), p.order_id.clone());
+        self.by_submitted
+            .insert((p.submitted_at_ms, p.order_id.clone()));
         self.orders.insert(p.order_id.clone(), order);
         Ok(())
     }
@@ -1502,5 +1521,65 @@ mod tests {
         assert_eq!(journal[0].applied, applied);
         assert!(!journal[0].evicted);
         assert!(journal[0].seq > 0);
+    }
+
+    #[test]
+    fn query_views_stay_submitted_ordered_without_resorting() {
+        let mut ome = Ome::new();
+        // Insert out of submission order — the views must not care.
+        for (id, ts) in [("o2", 2i64), ("o1", 1), ("o3", 3)] {
+            ome.submit(SubmitParams {
+                order_id: id.into(),
+                request: req(&format!("k-{id}"), dec!(10)),
+                submitted_at_ms: ts,
+                decision_at_ms: ts,
+                execute_at_ms: ts,
+                report_at_ms: ts,
+                maker_timeout_ms: 0,
+            })
+            .unwrap();
+        }
+        let ids: Vec<_> = ome.all().iter().map(|o| o.order_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["o1", "o2", "o3"],
+            "all() orders by submitted_at_ms, not insertion"
+        );
+
+        // A fully filled order leaves the live views with no re-sorting.
+        ome.mark_live("o2", 3).unwrap();
+        ome.apply_fill(
+            fill("o2", "t1", dec!(10), dec!(0.40), FillStatus::Confirmed),
+            5,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ome.get("o2").unwrap().status, OrderStatus::Filled);
+        let live: Vec<_> = ome
+            .live_orders()
+            .iter()
+            .map(|o| o.order_id.as_str())
+            .collect();
+        assert_eq!(live, ["o1", "o3"]);
+        assert!(
+            ome.live_for("tok", Side::Buy)
+                .iter()
+                .all(|o| o.order_id != "o2")
+        );
+
+        // Restore is idempotent per order id: a re-restore whose persisted
+        // timestamp changed must re-key the index, never duplicate the order.
+        let snapshot: Vec<TrackedOrder> = ome.all().into_iter().cloned().collect();
+        let mut fresh = Ome::new();
+        fresh.restore(snapshot.clone());
+        let mut again = snapshot;
+        again[0].submitted_at_ms += 1_000; // o1's persisted timestamp moved
+        fresh.restore(again);
+        let ids: Vec<_> = fresh.all().iter().map(|o| o.order_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["o2", "o3", "o1"],
+            "re-restore re-keys, no duplicates, new order wins"
+        );
     }
 }
