@@ -24,6 +24,10 @@ import {
 import {
   api, getToken, loginAt, logout, ping, probeSession,
   type CommandDoc, type NetCheckDoc, type RiskBound, type RiskLimitsDoc,
+  type ExecutionPolicyListDoc, type ExecutionPolicySectionDoc,
+  type ExecutionPolicyPreviewDoc, type ExecutionPolicyHistoryDoc,
+  type ExecutionPolicySetParams, type PolicyRuleView,
+  type PolicyWhenView, type PolicyThenView,
 } from '@/api/client'
 import { adjudicateSession } from '@/lib/session'
 import { readNetCheck } from '@/lib/net-check'
@@ -37,6 +41,7 @@ import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
 import Button from '@/components/ui/button/Button.vue'
+import Input from '@/components/ui/input/Input.vue'
 import SegmentedControl from '@/components/ui/segmented/SegmentedControl.vue'
 import Switch from '@/components/ui/switch/Switch.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
@@ -337,6 +342,294 @@ const riskHint = computed(() => {
     ? '新限额改配置后需重启内核生效；连亏熔断触发时暂停该账户的新开仓，平仓永不受限。'
     : '九项系统限额全部为 0 = 关闭（出厂承诺）：内核行为与未加风控时逐位一致，改配置需重启内核。'
 })
+
+// ── 生效风控 · 执行策略（Issue 364）───────────────────────────────────────────
+// 可编辑的账户执行策略。纪律与后端同一条：浏览器不读 TOML —— 生效视图是
+// 内核 `execution_policy.get` 自己折叠出来的，写路径是 `set`/`reset`（内核
+// 落盘→重读→落审计后才应答），预览是内核自己的 evaluate 重放最近已平仓交易。
+// 保存成功后重新 get：页面永远渲染「内核确认过的」状态，不渲染本地猜测。
+const policyList = ref<ExecutionPolicyListDoc | null>(null)
+const policySection = ref<ExecutionPolicySectionDoc | null>(null)
+const policyPreview = ref<ExecutionPolicyPreviewDoc | null>(null)
+const policyHistory = ref<ExecutionPolicyHistoryDoc>([])
+const policyAccountId = ref<string>('defaults')
+const policyErr = ref<string | null>(null)
+const policyMsg = ref<string | null>(null)
+const policyBusy = ref(false)
+const policySaving = ref(false)
+/** 新建/编辑中的规则（null = 构建器收起）。 */
+const ruleDraft = ref<PolicyRuleView | null>(null)
+const ruleDraftIdx = ref<number | null>(null)
+/** 构建器的 when.value 以文本编辑：数字、符号，或 `in` 的逗号分隔列表。 */
+const ruleDraftValueText = ref('')
+const ruleDraftThenArg = ref('')
+/** 拖拽中的规则下标（HTML5 原生拖放排序优先级）。 */
+const dragIdx = ref<number | null>(null)
+const dragOverIdx = ref<number | null>(null)
+
+/** chips：固定的 defaults + 内核报来的账户列表。 */
+const policyChips = computed(() => [
+  { id: 'defaults', label: 'defaults' },
+  ...(policyList.value?.accounts ?? []).map((a) => ({
+    id: a.accountId,
+    label: a.accountId,
+  })),
+])
+
+/** 本地编辑缓冲：进入页面/切换账户时从生效视图拷贝，保存时整体写回。 */
+const editBudgetRatio = ref('')
+const editMinBudgetUsd = ref('')
+const editMaxBudgetUsd = ref('')
+const editMinEquityUsd = ref('')
+/** Input 组件以 string 过线（decimals 本就是字符串约定），保存时再解析。 */
+const editMaxPositionsPerAsset = ref('1')
+const editRules = ref<PolicyRuleView[]>([])
+const editDirty = ref(false)
+
+function loadEditorFromSection(doc: ExecutionPolicySectionDoc | null): void {
+  editBudgetRatio.value = doc?.budgetRatio ?? ''
+  editMinBudgetUsd.value = doc?.minBudgetUsd ?? ''
+  editMaxBudgetUsd.value = doc?.maxBudgetUsd ?? ''
+  editMinEquityUsd.value = doc?.minEquityUsd ?? ''
+  editMaxPositionsPerAsset.value = String(doc?.maxPositionsPerAsset ?? 1)
+  editRules.value = (doc?.rules ?? []).map((r) => structuredClone(r))
+  editDirty.value = false
+}
+
+async function loadPolicy(): Promise<void> {
+  policyBusy.value = true
+  try {
+    const list = await api.executionPolicyList()
+    if (list.error) throw new Error(list.error)
+    policyList.value = list
+    const section = await api.executionPolicyGet(policyAccountId.value)
+    policySection.value = 'error' in (section as object) ? null : section
+    loadEditorFromSection(section)
+    try {
+      policyPreview.value = await api.executionPolicyPreview(policyAccountId.value)
+    } catch { /* preview 缺席不阻塞页面（无已平仓交易/无策略都可能出现） */ }
+    policyHistory.value = await api.executionPolicyHistory(policyAccountId.value)
+    policyErr.value = null
+  } catch (e) {
+    policyErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    policyBusy.value = false
+  }
+}
+onMounted(() => void loadPolicy())
+
+async function switchAccount(id: string): Promise<void> {
+  if (policyBusy.value || id === policyAccountId.value) return
+  policyAccountId.value = id
+  ruleDraft.value = null
+  await loadPolicy()
+}
+
+/** 「恢复 defaults 后自定义」：把当前编辑缓冲清回全局段的值（仍需保存落盘）。 */
+function resetToDefaultsLocal(): void {
+  loadEditorFromSection(policyList.value?.defaults ?? null)
+  editDirty.value = true
+  policyMsg.value = '已按 defaults 重置编辑区 —— 保存后才写入内核。'
+}
+
+function markDirty(): void {
+  editDirty.value = true
+}
+
+// ── 规则构建器 ──
+const CONDITION_FIELDS = [
+  { value: 'available_balance', label: '可用余额', unit: 'USD', numeric: true },
+  { value: 'total_equity', label: '总权益', unit: 'USD', numeric: true },
+  { value: 'open_positions', label: '持仓数', unit: '笔', numeric: true },
+  { value: 'current_price', label: '当前价', unit: '', numeric: true },
+  { value: 'time_left_sec', label: '剩余秒数', unit: 's', numeric: true },
+  { value: 'symbol', label: '交易标的', unit: '', numeric: false },
+  { value: 'recent_pnl_1h', label: '近1小时盈亏', unit: 'USD', numeric: true },
+  { value: 'consecutive_losses', label: '连亏次数', unit: '次', numeric: true },
+] as const
+const CONDITION_OPS = ['<', '<=', '>', '>=', '==', '!=', 'in'] as const
+const THEN_ACTIONS = [
+  { value: 'skip', label: '跳过本单（不下）' },
+  { value: 'budget_ratio', label: '覆盖下注比例' },
+  { value: 'min_budget_usd', label: '覆盖最小下注' },
+  { value: 'max_budget_usd', label: '覆盖最大下注' },
+  { value: 'cooldown_sec', label: '冷静期（秒）' },
+] as const
+
+function draftValueFor(v: PolicyWhenView['value']): string {
+  if (Array.isArray(v)) return v.join(',')
+  return v == null ? '' : String(v)
+}
+
+function startAddRule(): void {
+  ruleDraftIdx.value = null
+  ruleDraft.value = {
+    name: '',
+    priority: (editRules.value.reduce((m, r) => Math.max(m, r.priority ?? 0), 0) || 90) + 10,
+    enabled: true,
+    when: { field: 'open_positions', op: '>=', value: 2 },
+    then: { action: 'skip' },
+    reason: '',
+  }
+  ruleDraftValueText.value = '2'
+  ruleDraftThenArg.value = ''
+}
+
+function startEditRule(i: number): void {
+  const r = structuredClone(editRules.value[i])
+  ruleDraftIdx.value = i
+  ruleDraft.value = r
+  ruleDraftValueText.value = draftValueFor(r.when.value)
+  const t = r.then
+  if (t.action === 'skip') ruleDraftThenArg.value = ''
+  else if (t.cooldown_sec != null) ruleDraftThenArg.value = String(t.cooldown_sec)
+  else ruleDraftThenArg.value = t.budget_ratio ?? t.min_budget_usd ?? t.max_budget_usd ?? ''
+}
+
+function draftFieldMeta() {
+  return CONDITION_FIELDS.find((f) => f.value === ruleDraft.value?.when.field)
+    ?? CONDITION_FIELDS[2]
+}
+
+/** 构建器 → 规则对象：值类型跟字段走（数字字段转 number，symbol/in 为文本）。 */
+function commitDraft(): void {
+  const d = ruleDraft.value
+  if (!d) return
+  const field = draftFieldMeta()
+  let value: PolicyWhenView['value']
+  if (d.when.op === 'in') {
+    value = ruleDraftValueText.value.split(',').map((s) => s.trim()).filter(Boolean)
+    if (!value.length) { policyMsg.value = 'in 条件至少要一个标的'; return }
+  } else if (field.numeric) {
+    const n = Number(ruleDraftValueText.value)
+    if (!Number.isFinite(n)) { policyMsg.value = '条件值必须是数字'; return }
+    value = n
+  } else {
+    value = ruleDraftValueText.value.trim()
+    if (!value) { policyMsg.value = '条件值不能为空'; return }
+  }
+  d.when.value = value
+  const action = d.then.action ?? 'skip'
+  const then: PolicyThenView = { action }
+  if (action !== 'skip') {
+    const arg = ruleDraftThenArg.value.trim()
+    if (action === 'cooldown_sec') {
+      const secs = Number(arg)
+      if (!Number.isInteger(secs) || secs <= 0) { policyMsg.value = '冷静期必须是正整数秒'; return }
+      then.cooldown_sec = secs
+    } else {
+      if (!arg) { policyMsg.value = '该动作需要一个数值'; return }
+      then[action] = arg
+    }
+  }
+  d.then = then
+  d.name = d.name.trim()
+  if (!d.name) { policyMsg.value = '规则需要一个名字'; return }
+  if (ruleDraftIdx.value == null) editRules.value.push(d)
+  else editRules.value[ruleDraftIdx.value] = d
+  ruleDraft.value = null
+  ruleDraftIdx.value = null
+  editDirty.value = true
+  policyMsg.value = null
+}
+
+function removeRule(i: number): void {
+  editRules.value.splice(i, 1)
+  editDirty.value = true
+}
+
+/** 优先级重排（HTML5 拖放）：拖到目标位置后，按新顺序把 priority 重写成
+ *  10, 20, 30…（升序、互不相等 — 内核按 priority 升序取第一个命中的规则）。 */
+function onDrop(target: number): void {
+  const from = dragIdx.value
+  dragIdx.value = null
+  dragOverIdx.value = null
+  if (from == null || from === target) return
+  const [moved] = editRules.value.splice(from, 1)
+  editRules.value.splice(target, 0, moved)
+  editRules.value.forEach((r, i) => { r.priority = (i + 1) * 10 })
+  editDirty.value = true
+}
+
+// ── 保存 / 回滚 ──
+function buildSetParams(): ExecutionPolicySetParams {
+  const params: ExecutionPolicySetParams = { accountId: policyAccountId.value }
+  if (editBudgetRatio.value) params.budgetRatio = editBudgetRatio.value
+  if (editMinBudgetUsd.value) params.minBudgetUsd = editMinBudgetUsd.value
+  if (editMaxBudgetUsd.value) params.maxBudgetUsd = editMaxBudgetUsd.value
+  if (editMinEquityUsd.value) params.minEquityUsd = editMinEquityUsd.value
+  const maxPos = Number(editMaxPositionsPerAsset.value)
+  if (Number.isInteger(maxPos) && maxPos > 0) params.maxPositionsPerAsset = maxPos
+  params.rules = editRules.value
+  return params
+}
+
+/** 保存 = set（内核验证→落盘→重读→审计），成功后重新 get 刷新整个视图。 */
+async function savePolicy(): Promise<void> {
+  policySaving.value = true
+  policyMsg.value = null
+  try {
+    const res = await api.executionPolicySet(buildSetParams())
+    if (res.error) throw new Error(res.error)
+    editDirty.value = false
+    policyMsg.value = `已保存（${policyAccountId.value}）—— 内核已重读生效。`
+    await loadPolicy()
+  } catch (e) {
+    policyErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    policySaving.value = false
+  }
+}
+
+/** 回滚 = 取该账户最近一次 set 的 before 状态写回（版本号 = 审计记录数）。 */
+const policyVersion = computed(() => policyHistory.value.length)
+async function rollbackPolicy(): Promise<void> {
+  const lastSet = [...policyHistory.value]
+    .reverse()
+    .find((l) => l.action === 'set' && l.before)
+  if (!lastSet?.before) {
+    policyMsg.value = '没有可回滚的历史版本（该账户还没有 set 记录）。'
+    return
+  }
+  const b = lastSet.before
+  const params: ExecutionPolicySetParams = { accountId: policyAccountId.value }
+  if (b.budgetRatio) params.budgetRatio = b.budgetRatio
+  if (b.minBudgetUsd) params.minBudgetUsd = b.minBudgetUsd
+  if (b.maxBudgetUsd) params.maxBudgetUsd = b.maxBudgetUsd
+  if (b.minEquityUsd) params.minEquityUsd = b.minEquityUsd
+  if (b.maxPositionsPerAsset) params.maxPositionsPerAsset = b.maxPositionsPerAsset
+  params.rules = b.rules ?? []
+  policySaving.value = true
+  policyMsg.value = null
+  try {
+    const res = await api.executionPolicySet(params)
+    if (res.error) throw new Error(res.error)
+    editDirty.value = false
+    policyMsg.value = `已回滚（${policyAccountId.value}）到 v${policyVersion.value - 1}。`
+    await loadPolicy()
+  } catch (e) {
+    policyErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    policySaving.value = false
+  }
+}
+
+function thenText(t: PolicyThenView): string {
+  if (t.action === 'skip') return '跳过本单'
+  if (t.action === 'cooldown_sec') return `冷静 ${t.cooldown_sec}s`
+  if (t.action === 'budget_ratio') return `下注比例 ${t.budget_ratio}`
+  if (t.action === 'min_budget_usd') return `最小下注 $${t.min_budget_usd}`
+  if (t.action === 'max_budget_usd') return `最大下注 $${t.max_budget_usd}`
+  return JSON.stringify(t)
+}
+function verdictBadge(v: string): { text: string; variant: 'up' | 'down' | 'gold' | 'default' } {
+  switch (v) {
+    case 'place': return { text: '放行', variant: 'up' }
+    case 'skip': return { text: '跳过', variant: 'down' }
+    case 'cooldown': return { text: '冷静中', variant: 'gold' }
+    default: return { text: v, variant: 'default' }
+  }
+}
 
 // ── theme segmented ─────────────────────────────────────────────────────────
 const themeSegments = [
@@ -741,6 +1034,226 @@ const themeValue = computed<ThemeMode>({
         </div>
         <p v-if="riskErr" class="mt-2 text-[11px] leading-snug text-down">{{ riskErr }}</p>
       </template>
+    </Card>
+
+    <!-- ── 生效风控 · 执行策略（Issue 364）───────────────────────────────── -->
+    <Card class="mt-3.5">
+      <CardHeader label="生效风控 · 执行策略">
+        <template #title>
+          <ShieldCheck class="size-4 text-faint-fg" />
+        </template>
+        <template #action>
+          <Badge :variant="policyVersion > 0 ? 'gold' : 'default'" dot>
+            v{{ policyVersion }}
+          </Badge>
+        </template>
+      </CardHeader>
+
+      <p class="text-[11.5px] leading-snug text-muted-fg">
+        下单前内核按「基础参数 → 规则（priority 升序，取第一个命中）」裁决每一单：
+        放行 / 跳过 / 冷静期。生效视图由内核折叠后下发，浏览器不读配置文件；
+        保存后内核验证→落盘→重读→落审计才应答，页面渲染的永远是内核确认过的状态。
+      </p>
+
+      <AlertBanner v-if="policyErr" class="mt-3" tone="warn" dismissible @dismiss="policyErr = null">
+        {{ policyErr }}
+      </AlertBanner>
+
+      <!-- 账户 chips：defaults + 各账户 -->
+      <div class="mt-3 flex flex-wrap items-center gap-1.5">
+        <button
+          v-for="chip in policyChips"
+          :key="chip.id"
+          class="rounded-full border px-2.5 py-[3px] text-[11px] font-semibold transition-colors"
+          :class="chip.id === policyAccountId
+            ? 'border-primary/40 bg-primary/14'
+            : 'border-line bg-panel-2 text-muted-fg hover:text-fg'"
+          :disabled="policyBusy"
+          @click="switchAccount(chip.id)"
+        >{{ chip.label }}</button>
+        <Button variant="outline" size="sm" class="ml-1" :disabled="policyBusy" @click="loadPolicy">
+          <RefreshCw class="size-3.5" />刷新
+        </Button>
+        <span v-if="policyBusy" class="text-[11px] text-faint-fg">读取中…</span>
+      </div>
+
+      <!-- 基础参数 -->
+      <div v-if="policySection" class="mt-3 grid gap-2 sm:grid-cols-2">
+        <label class="block">
+          <span class="label-micro">下注比例（balance × ratio）</span>
+          <Input v-model="editBudgetRatio" class="mt-1" type="text" placeholder="如 0.02" @input="markDirty" />
+        </label>
+        <label class="block">
+          <span class="label-micro">最小下注（USD）</span>
+          <Input v-model="editMinBudgetUsd" class="mt-1" type="text" placeholder="如 10" @input="markDirty" />
+        </label>
+        <label class="block">
+          <span class="label-micro">最大下注（USD）</span>
+          <Input v-model="editMaxBudgetUsd" class="mt-1" type="text" placeholder="如 100" @input="markDirty" />
+        </label>
+        <label class="block">
+          <span class="label-micro">最低权益要求（USD）</span>
+          <Input v-model="editMinEquityUsd" class="mt-1" type="text" placeholder="如 50" @input="markDirty" />
+        </label>
+        <label class="block">
+          <span class="label-micro">单标的最多持仓笔数</span>
+          <Input
+            v-model="editMaxPositionsPerAsset"
+            class="mt-1"
+            type="number"
+            min="1"
+            step="1"
+            @input="markDirty"
+          />
+        </label>
+        <div class="flex items-end">
+          <Button variant="outline" size="sm" :disabled="policyBusy" @click="resetToDefaultsLocal">
+            恢复 defaults 后自定义
+          </Button>
+        </div>
+      </div>
+      <AlertBanner v-else-if="!policyBusy && !policyErr" class="mt-3" tone="info">
+        读不到策略视图 —— 这个内核可能不认识 execution_policy。
+      </AlertBanner>
+
+      <!-- 规则列表（拖拽排序 = priority 重排）-->
+      <div v-if="policySection" class="mt-4">
+        <div class="flex items-center justify-between">
+          <span class="label-micro">规则（拖拽卡片调整优先级）</span>
+          <Button variant="outline" size="sm" :disabled="ruleDraft != null" @click="startAddRule">
+            + 新规则
+          </Button>
+        </div>
+        <div class="mt-2 space-y-2">
+          <div
+            v-for="(rule, i) in editRules"
+            :key="`${rule.name}-${i}`"
+            draggable="true"
+            class="rounded-lg border bg-panel-2 px-3 py-2 text-[12px] transition-opacity"
+            :class="[
+              rule.enabled ? 'border-line' : 'border-line opacity-55',
+              dragOverIdx === i && dragIdx !== i ? 'border-primary/50' : '',
+            ]"
+            @dragstart="dragIdx = i"
+            @dragenter.prevent="dragOverIdx = i"
+            @dragover.prevent
+            @drop.prevent="onDrop(i)"
+            @dragend="dragIdx = null; dragOverIdx = null"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-semibold">
+                <span class="text-faint-fg">#{{ rule.priority }}</span>
+                {{ rule.name }}
+                <Badge :variant="rule.enabled ? 'up' : 'default'" class="ml-1">
+                  {{ rule.enabled ? '启用' : '停用' }}
+                </Badge>
+              </span>
+              <span class="flex items-center gap-1">
+                <Button variant="ghost" size="sm" @click="startEditRule(i)">编辑</Button>
+                <Button variant="ghost" size="sm" @click="removeRule(i)">删除</Button>
+              </span>
+            </div>
+            <div class="mt-1 text-muted-fg">
+              WHEN {{ rule.when.field }} {{ rule.when.op }}
+              {{ Array.isArray(rule.when.value) ? rule.when.value.join(', ') : rule.when.value }}
+              → THEN {{ thenText(rule.then) }}
+            </div>
+          </div>
+          <div v-if="!editRules.length" class="rounded-lg border border-dashed border-line px-3 py-3 text-[11.5px] text-faint-fg">
+            无规则 —— 只走基础参数（clamp(max(balance × ratio, min), ≤ max)）。
+          </div>
+        </div>
+
+      <!-- 条件构建器 -->
+        <div v-if="ruleDraft" class="mt-3 rounded-lg border border-primary/30 bg-primary/5 px-3 py-3">
+          <div class="text-[12px] font-semibold">
+            {{ ruleDraftIdx == null ? '新规则' : `编辑规则：${ruleDraft.name}` }}
+          </div>
+          <div class="mt-2 grid gap-2 sm:grid-cols-2">
+            <label class="block">
+              <span class="label-micro">规则名</span>
+              <Input v-model="ruleDraft.name" class="mt-1" type="text" placeholder="如 大额冷静" />
+            </label>
+            <label class="block">
+              <span class="label-micro">WHEN 字段</span>
+              <select v-model="ruleDraft.when.field" class="policy-select mt-1">
+                <option v-for="f in CONDITION_FIELDS" :key="f.value" :value="f.value">{{ f.label }}</option>
+              </select>
+            </label>
+            <label class="block">
+              <span class="label-micro">比较符</span>
+              <select v-model="ruleDraft.when.op" class="policy-select mt-1">
+                <option v-for="op in CONDITION_OPS" :key="op" :value="op">{{ op }}</option>
+              </select>
+            </label>
+            <label class="block">
+              <span class="label-micro">
+                条件值{{ draftFieldMeta().unit ? `（${draftFieldMeta().unit}）` : '' }}
+                <span v-if="ruleDraft.when.op === 'in'" class="text-faint-fg">（逗号分隔多个标的）</span>
+              </span>
+              <Input v-model="ruleDraftValueText" class="mt-1" type="text" placeholder="如 2 或 BTC,ETH" />
+            </label>
+            <label class="block">
+              <span class="label-micro">THEN 动作</span>
+              <select v-model="ruleDraft.then.action" class="policy-select mt-1">
+                <option v-for="a in THEN_ACTIONS" :key="a.value" :value="a.value">{{ a.label }}</option>
+              </select>
+            </label>
+            <label v-if="ruleDraft.then.action && ruleDraft.then.action !== 'skip'" class="block">
+              <span class="label-micro">动作参数（{{ ruleDraft.then.action === 'cooldown_sec' ? '秒' : 'USD / 比例' }}）</span>
+              <Input v-model="ruleDraftThenArg" class="mt-1" type="text" />
+            </label>
+            <label class="block sm:col-span-2">
+              <span class="label-micro">备注（可选，写进审计）</span>
+              <Input :model-value="ruleDraft.reason ?? ''" class="mt-1" type="text" placeholder="为什么要有这条规则" @update:model-value="ruleDraft.reason = $event" />
+            </label>
+          </div>
+          <div class="mt-3 flex items-center gap-2">
+            <Button size="sm" @click="commitDraft">确定</Button>
+            <Button variant="outline" size="sm" @click="ruleDraft = null; ruleDraftIdx = null">取消</Button>
+          </div>
+        </div>
+
+        <!-- 预览：内核用自己的 evaluate 重放最近已平仓交易 -->
+        <div v-if="policyPreview" class="mt-4 rounded-lg border border-line bg-panel-2 px-3 py-2 text-[12px]">
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span class="label-micro">预览（最近已平仓交易重放）</span>
+            <span class="num">最近 {{ policyPreview.considered }} 单</span>
+            <span class="text-muted-fg">跳过 {{ policyPreview.skipped }}</span>
+            <span class="text-muted-fg">平均下注 ${{ policyPreview.avgBudgetUsd ?? '—' }}</span>
+          </div>
+          <div v-if="policyPreview.rows.length" class="mt-1.5 space-y-0.5">
+            <div
+              v-for="(row, i) in policyPreview.rows"
+              :key="`${row.tsMs}-${i}`"
+              class="flex items-center justify-between gap-2 text-[11px] text-muted-fg"
+            >
+              <span class="num">{{ dateTime(row.tsMs) }} · {{ row.symbol }} · 余额 ${{ row.balance }}</span>
+              <Badge :variant="verdictBadge(row.verdict).variant">
+                {{ verdictBadge(row.verdict).text }}<template v-if="row.detail"> · {{ row.detail }}</template>
+              </Badge>
+            </div>
+          </div>
+        </div>
+
+        <!-- 版本与保存 -->
+        <div class="mt-4 flex flex-wrap items-center gap-2">
+          <Button size="sm" :disabled="policySaving || policyBusy" @click="savePolicy">
+            {{ policySaving ? '保存中…' : '保存（写入内核）' }}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="policySaving || policyBusy || policyVersion === 0"
+            :title="policyVersion === 0 ? '还没有可回滚的历史' : `回滚到 v${policyVersion - 1}（取最近一次 set 的 before 状态写回）`"
+            @click="rollbackPolicy"
+          >回滚到 v{{ Math.max(policyVersion - 1, 0) }}</Button>
+          <span class="text-[11px] text-faint-fg">
+            版本号 = 审计记录数（当前 v{{ policyVersion }}）；
+            {{ editDirty ? '有未保存的修改' : '与内核一致' }}
+          </span>
+        </div>
+      </div>
     </Card>
 
     <!-- ── 外观与节奏 ──────────────────────────────────────────────────── -->

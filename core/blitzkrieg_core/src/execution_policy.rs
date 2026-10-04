@@ -339,11 +339,51 @@ pub mod op_symbol {
 /// string (or a list via `in`); every other field compares against a number.
 /// Manual `Deserialize` (rather than `untagged`) so numbers land as clean
 /// shortest decimals via [`wire_dec`]'s rule.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+///
+/// `Serialize` is ALSO manual: the derived form would emit the externally
+/// tagged map `{"Text": "BTC"}` — a shape the deserializer above cannot read
+/// back, so a `set` carrying rules would write a file the kernel refuses at
+/// the next reload. Plain values (`"BTC"`, `2`, `0.4`, `["BTC","ETH"]`) are
+/// what both the TOML file and the JSON wire share, and they are exactly
+/// what [`parse_condition_value`] accepts in the string grammar.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ConditionValue {
     Num(Decimal),
     Text(String),
     TextList(Vec<String>),
+}
+
+impl Serialize for ConditionValue {
+    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use rust_decimal::prelude::ToPrimitive as _;
+        use std::str::FromStr as _;
+        match self {
+            Self::Text(v) => s.serialize_str(v),
+            Self::TextList(items) => s.collect_seq(items),
+            Self::Num(d) => {
+                // Integral values stay integers (TOML `value = 2`, JSON 2);
+                // everything else rides f64 through the shortest-decimal
+                // discipline the deserializer's visit_f64 already reads
+                // back. A value neither path can carry refuses the render —
+                // the set is refused before any file is touched
+                // (fail-closed).
+                if d.scale() == 0
+                    && let Some(i) = d.to_i64()
+                {
+                    return s.serialize_i64(i);
+                }
+                match f64::from_str(&d.to_string()) {
+                    Ok(f) if f.is_finite() => s.serialize_f64(f),
+                    _ => Err(serde::ser::Error::custom(format!(
+                        "condition value `{d}` cannot be written as a plain number"
+                    ))),
+                }
+            }
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for ConditionValue {
