@@ -205,6 +205,22 @@ pub struct Ome {
     /// over an ever-growing order table collapsed replay throughput
     /// (replay profile: ~54% of busy samples in `sort_by_key` under `Ome::all`).
     by_submitted: BTreeSet<(i64, OrderId)>,
+    /// The live subset of `by_submitted`, maintained at the status
+    /// transition points (`submit`/`restore` insert; `mark_terminal` and a
+    /// fill that completes an order remove). `live_orders()`/`live_for()`
+    /// run several times per tick on the maintenance path — once per open
+    /// position — and iterating the FULL table for them made every tick
+    /// O(total orders) with a SipHash lookup per row. The table only grows
+    /// (one row per order ever placed, never removed), so long replays kept
+    /// decaying even after the per-call sort was removed (profile: hash_one
+    /// /memcmp leaves under `Ome::live_for`). Live orders number in the
+    /// tens; this index keeps the per-tick cost at O(live).
+    live_by_submitted: BTreeSet<(i64, OrderId)>,
+    /// Per-token completion times of FILLED SELL orders — the E31-b residual
+    /// backstop's query ("did a sell on this token complete at/after the
+    /// position's entry?") answered in O(log n) instead of a full-table scan
+    /// per open position per tick. Append-only: one entry per completed sell.
+    filled_sell_times: HashMap<String, BTreeSet<i64>>,
     applied: HashMap<String, AppliedFill>,
     /// Mutations of `applied`, in application order; the caller drains this and
     /// persists it. Empty on a core that never persists (the OME does no I/O).
@@ -220,6 +236,8 @@ impl Ome {
             orders: HashMap::new(),
             by_internal: HashMap::new(),
             by_submitted: BTreeSet::new(),
+            live_by_submitted: BTreeSet::new(),
+            filled_sell_times: HashMap::new(),
             applied: HashMap::new(),
             applied_journal: Vec::new(),
             applied_seq: 0,
@@ -230,6 +248,63 @@ impl Ome {
 
     pub fn get(&self, id: &str) -> Option<&TrackedOrder> {
         self.orders.get(id)
+    }
+
+    /// Insert into both order indexes. The two sets must agree: an order in
+    /// `by_submitted` but missing from `live_by_submitted` would vanish from
+    /// the live views once it BECAME live again — impossible, statuses never
+    /// resurrect — so a drift here is a straight bug, and a test pins it.
+    fn index_insert(&mut self, submitted_at_ms: i64, order_id: &str, live: bool) {
+        let key = (submitted_at_ms, order_id.to_string());
+        self.by_submitted.insert(key.clone());
+        if live {
+            self.live_by_submitted.insert(key);
+        }
+    }
+
+    /// Remove an order's keys from both indexes before a map-level overwrite.
+    fn index_remove(&mut self, id: &str) {
+        let prev = self
+            .orders
+            .get(id)
+            .map(|o| (o.submitted_at_ms, o.order_id.clone()));
+        if let Some(key) = prev {
+            self.by_submitted.remove(&key);
+            self.live_by_submitted.remove(&key);
+        }
+    }
+
+    /// Re-place one order's live-index membership after a status flip:
+    /// `was_live` is the PRE-transition status, the map entry is read for the
+    /// POST-transition status. `mutate` and `record_delta` both call this, so
+    /// the live index can never drift from `is_live()`.
+    fn sync_live_index(&mut self, id: &str, was_live: bool) {
+        let Some(o) = self.orders.get(id) else {
+            return;
+        };
+        let is_live = o.status.is_live();
+        let key = (o.submitted_at_ms, o.order_id.clone());
+        match (was_live, is_live) {
+            (false, true) => {
+                self.live_by_submitted.insert(key);
+            }
+            (true, false) => {
+                self.live_by_submitted.remove(&key);
+            }
+            _ => {}
+        }
+        // E31-b: a sell just COMPLETED — stamp its completion time (the
+        // transition's now_ms, already written into updated_at_ms by the
+        // caller) so the residual-backstop query stays O(log n) instead of
+        // scanning every order ever placed, per position, per tick.
+        if was_live && !is_live && o.side == Side::Sell && o.status == OrderStatus::Filled {
+            let token = o.token_id.clone();
+            let completed_at = o.updated_at_ms;
+            self.filled_sell_times
+                .entry(token)
+                .or_default()
+                .insert(completed_at);
+        }
     }
 
     /// Remaining (still resting) size of an order: `size` is the TOTAL requested
@@ -249,17 +324,29 @@ impl Ome {
         for o in orders {
             self.by_internal
                 .insert(o.internal_key.clone(), o.order_id.clone());
-            // Idempotent per order id: drop a stale index key when the order
+            // Idempotent per order id: drop stale index keys when the order
             // already exists (a re-restore with a different timestamp would
-            // otherwise leave the old key behind and the query views would
-            // yield that order twice).
-            if let Some(prev) = self.orders.get(&o.order_id) {
-                self.by_submitted
-                    .remove(&(prev.submitted_at_ms, o.order_id.clone()));
+            // otherwise leave the old keys behind and the query views would
+            // yield that order twice). Both indexes clear together.
+            let live = o.status.is_live();
+            let submitted_at_ms = o.submitted_at_ms;
+            let order_id = o.order_id.clone();
+            let sell_completed = o.side == Side::Sell && o.status == OrderStatus::Filled;
+            let completed_at_ms = o.updated_at_ms;
+            let token_id = o.token_id.clone();
+            self.index_remove(&order_id);
+            self.orders.insert(order_id.clone(), o);
+            self.index_insert(submitted_at_ms, &order_id, live);
+            // The E31-b completion index rebuilds from the snapshot too: a
+            // position whose sell completed before a restart must still get
+            // the residual re-close after it. `updated_at_ms` is the best
+            // completion proxy a snapshot carries (the last delta's now_ms).
+            if sell_completed {
+                self.filled_sell_times
+                    .entry(token_id)
+                    .or_default()
+                    .insert(completed_at_ms);
             }
-            self.by_submitted
-                .insert((o.submitted_at_ms, o.order_id.clone()));
-            self.orders.insert(o.order_id.clone(), o);
         }
     }
 
@@ -451,18 +538,31 @@ impl Ome {
             .collect()
     }
     pub fn live_orders(&self) -> Vec<&TrackedOrder> {
-        self.by_submitted
+        self.live_by_submitted
             .iter()
             .filter_map(|(_, id)| self.orders.get(id))
             .filter(|o| o.status.is_live())
             .collect()
     }
     pub fn live_for(&self, token_id: &str, side: Side) -> Vec<&TrackedOrder> {
-        self.by_submitted
+        self.live_by_submitted
             .iter()
             .filter_map(|(_, id)| self.orders.get(id))
             .filter(|o| o.status.is_live() && o.token_id == token_id && o.side == side)
             .collect()
+    }
+
+    /// True when a SELL on `token_id` COMPLETED (Filled) at/after `since_ms`.
+    /// The E31-b residual backstop's question — "did a sell on this token
+    /// fill at/after the position's entry?" — answered from the completion
+    /// index instead of a full-table scan per open position per tick. The
+    /// stamped instant is the completion transition's `now_ms` (what
+    /// `updated_at_ms` held at Filled); a later absorbed late-fill bump on
+    /// the order row does not move it, which is the truer "filled at" anyway.
+    pub fn has_filled_sell_since(&self, token_id: &str, since_ms: i64) -> bool {
+        self.filled_sell_times
+            .get(token_id)
+            .is_some_and(|ts| ts.range(since_ms..).next().is_some())
     }
 
     /// True while an order with this internal key is not terminal (dedup guard).
@@ -523,8 +623,10 @@ impl Ome {
         };
         self.by_internal
             .insert(r.internal_key.clone(), p.order_id.clone());
-        self.by_submitted
-            .insert((p.submitted_at_ms, p.order_id.clone()));
+        // Pending is live (is_live = Pending|Live|PartiallyFilled): a fresh
+        // order belongs in the live index from birth.
+        let live = order.status.is_live();
+        self.index_insert(p.submitted_at_ms, &p.order_id, live);
         self.orders.insert(p.order_id.clone(), order);
         Ok(())
     }
@@ -577,11 +679,19 @@ impl Ome {
         now_ms: i64,
         f: impl FnOnce(&mut TrackedOrder) -> CoreResult<()>,
     ) -> CoreResult<()> {
-        let o = self.orders.get_mut(id).ok_or_else(|| {
-            CoreError::new(CoreErrorCode::UnknownOrder, format!("unknown order: {id}"))
-        })?;
-        f(o)?;
-        o.updated_at_ms = now_ms;
+        let was_live = self
+            .orders
+            .get(id)
+            .map(|o| o.status.is_live())
+            .ok_or_else(|| {
+                CoreError::new(CoreErrorCode::UnknownOrder, format!("unknown order: {id}"))
+            })?;
+        {
+            let o = self.orders.get_mut(id).expect("checked above");
+            f(o)?;
+            o.updated_at_ms = now_ms;
+        }
+        self.sync_live_index(id, was_live);
         Ok(())
     }
 
@@ -737,6 +847,7 @@ impl Ome {
         let order = self.orders.get_mut(id).ok_or_else(|| {
             CoreError::new(CoreErrorCode::UnknownOrder, format!("unknown order: {id}"))
         })?;
+        let was_live = order.status.is_live();
 
         let prev = order.filled_size;
         let requested = (prev + signed_delta).max(Decimal::ZERO);
@@ -842,6 +953,7 @@ impl Ome {
             trade_id: String::new(),
         };
         debug_assert!(status_after == order.status);
+        self.sync_live_index(id, was_live);
         Ok((Some(delta), late))
     }
 
@@ -1581,5 +1693,158 @@ mod tests {
             ["o2", "o3", "o1"],
             "re-restore re-keys, no duplicates, new order wins"
         );
+    }
+
+    fn sell_req(internal: &str, size: Decimal, token: &str) -> OrderRequest {
+        OrderRequest {
+            side: Side::Sell,
+            token_id: token.into(),
+            ..req(internal, size)
+        }
+    }
+
+    fn sell_fill(
+        order_id: &str,
+        trade: &str,
+        size: Decimal,
+        price: Decimal,
+        status: FillStatus,
+    ) -> Fill {
+        Fill {
+            side: Side::Sell,
+            ..fill(order_id, trade, size, price, status)
+        }
+    }
+
+    fn submit_at(ome: &mut Ome, id: &str, request: OrderRequest, ts: i64) {
+        ome.submit(SubmitParams {
+            order_id: id.into(),
+            request,
+            submitted_at_ms: ts,
+            decision_at_ms: ts,
+            execute_at_ms: ts,
+            report_at_ms: ts,
+            maker_timeout_ms: 0,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn live_index_stays_in_sync_through_transitions() {
+        let mut ome = Ome::new();
+        submit_at(&mut ome, "o1", req("k1", dec!(10)), 1);
+        submit_at(&mut ome, "o2", sell_req("k2", dec!(10), "tok"), 2);
+        // Both are born Pending — and Pending IS live — so both live views
+        // carry them from birth.
+        let live: Vec<_> = ome
+            .live_orders()
+            .iter()
+            .map(|o| o.order_id.as_str())
+            .collect();
+        assert_eq!(live, ["o1", "o2"], "submit inserts into the live index");
+
+        // A fill that completes an order retires it from the live views, and
+        // all() still carries the full history table.
+        ome.mark_live("o1", 3).unwrap();
+        ome.apply_fill(
+            fill("o1", "t1", dec!(10), dec!(0.40), FillStatus::Confirmed),
+            4,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ome.get("o1").unwrap().status, OrderStatus::Filled);
+        assert!(ome.live_orders().iter().all(|o| o.order_id != "o1"));
+        assert_eq!(ome.all().len(), 2);
+
+        // An explicit terminal transition retires too (mark_terminal is the
+        // cancel/reject/fail road in).
+        ome.mark_terminal("o2", OrderStatus::Cancelled, 5).unwrap();
+        assert!(
+            ome.live_orders().is_empty(),
+            "both retired: {:?}",
+            ome.live_orders()
+        );
+
+        // A fresh submit is live again without any transition.
+        submit_at(&mut ome, "o3", req("k3", dec!(10)), 6);
+        let live: Vec<_> = ome
+            .live_orders()
+            .iter()
+            .map(|o| o.order_id.as_str())
+            .collect();
+        assert_eq!(live, ["o3"]);
+        // The restore path rebuilds BOTH indexes, live membership included.
+        let snapshot: Vec<TrackedOrder> = ome.all().into_iter().cloned().collect();
+        let mut fresh = Ome::new();
+        fresh.restore(snapshot);
+        let live: Vec<_> = fresh
+            .live_orders()
+            .iter()
+            .map(|o| o.order_id.as_str())
+            .collect();
+        assert_eq!(live, ["o3"], "restore rebuilds the live index");
+        assert_eq!(fresh.all().len(), 3);
+    }
+
+    #[test]
+    fn filled_sell_completion_index_answers_the_residual_backstop() {
+        let mut ome = Ome::new();
+        // A sell on `tok` completes at now_ms=100: the backstop's "did a sell
+        // on this token complete at/after entry?" is answered from the index.
+        submit_at(&mut ome, "s1", sell_req("ks1", dec!(10), "tok"), 10);
+        ome.mark_live("s1", 11).unwrap();
+        ome.apply_fill(
+            sell_fill("s1", "ts1", dec!(10), dec!(0.60), FillStatus::Confirmed),
+            100,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            ome.has_filled_sell_since("tok", 100),
+            "completed AT 100 counts"
+        );
+        assert!(
+            ome.has_filled_sell_since("tok", 55),
+            "entry before the fill counts"
+        );
+        assert!(
+            !ome.has_filled_sell_since("tok", 101),
+            "strictly-after entry does not"
+        );
+        assert!(!ome.has_filled_sell_since("never-traded", 0));
+
+        // A completed BUY on the same token must NOT register as a sell
+        // completion (the backstop only looks for sells).
+        submit_at(&mut ome, "b1", req("kb1", dec!(10)), 110);
+        ome.mark_live("b1", 111).unwrap();
+        ome.apply_fill(
+            fill("b1", "tb1", dec!(10), dec!(0.40), FillStatus::Confirmed),
+            200,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            !ome.has_filled_sell_since("tok", 150),
+            "a buy completion does not pollute the sell index"
+        );
+
+        // A CANCELLED sell registers nothing: only Filled sells complete.
+        submit_at(&mut ome, "s2", sell_req("ks2", dec!(10), "tok3"), 120);
+        ome.mark_live("s2", 121).unwrap();
+        ome.mark_terminal("s2", OrderStatus::Cancelled, 130)
+            .unwrap();
+        assert!(!ome.has_filled_sell_since("tok3", 0));
+
+        // Restore rebuilds the completion index from the snapshot so a
+        // position whose sell completed before a restart still gets the
+        // E31-b residual re-close after it.
+        let snapshot: Vec<TrackedOrder> = ome.all().into_iter().cloned().collect();
+        let mut fresh = Ome::new();
+        fresh.restore(snapshot);
+        assert!(
+            fresh.has_filled_sell_since("tok", 55),
+            "rebuilt from restore"
+        );
+        assert!(!fresh.has_filled_sell_since("tok", 101));
     }
 }
