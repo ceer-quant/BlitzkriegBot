@@ -1637,6 +1637,115 @@ impl Core {
         crate::execution_policy::load_audit()
     }
 
+    /// #364: replay the CURRENT section over the recent closed trades of one
+    /// account — the read-only fact behind the UI's "these rules would skip
+    /// N of the last M entries". Every historical close supplies the facts a
+    /// live entry would carry (balance is the LIVE ledger, not a per-trade
+    /// snapshot: a ledger is a book, not a tape — disclosed in the row, not
+    /// pretended into history), and `evaluate` — the ONE verdict function —
+    /// judges it. The preview can never disagree with the kernel because it
+    /// does not re-implement the kernel.
+    pub fn execution_policy_preview(
+        &self,
+        account_id: &str,
+        limit: usize,
+    ) -> crate::ipc::schema::ExecutionPolicyPreviewResult {
+        use crate::execution_policy::PolicyOutput;
+        let now = now_ms();
+        // Closed trades of THIS account, oldest first, capped at `limit` —
+        // the same rows `trades.history` reports, judged instead of shown.
+        let mut closed: Vec<&crate::position::ClosedPosition> = self
+            .positions
+            .closed_positions()
+            .iter()
+            .filter(|c| c.account_id.as_str() == account_id)
+            .collect();
+        if closed.len() > limit {
+            closed.drain(0..closed.len() - limit);
+        }
+        // The live book facts (the parts of PolicyInput that are not
+        // per-trade): balance/equity from the account's own ledger, the
+        // trailing-hour PnL, the open count, the strategy streaks.
+        let balance = self
+            .accounts
+            .ledger_of(&blitzkrieg_market_api::AccountId::from(account_id))
+            .map(|l| l.balance())
+            .unwrap_or_default();
+        let open_for = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.account_id.as_str() == account_id)
+            .count() as u32;
+        let mut considered = 0usize;
+        let mut skipped = 0usize;
+        let mut budgets: Vec<Decimal> = Vec::new();
+        let mut rows = Vec::with_capacity(closed.len());
+        for c in &closed {
+            considered += 1;
+            let facts = crate::execution_policy::PolicyInput {
+                available_balance: balance,
+                total_equity: balance,
+                open_positions: open_for,
+                current_price: c.entry_price,
+                // The close is long over; the round it belonged to has
+                // resolved. Zero is the honest "no clock running" fact.
+                time_left_sec: 0,
+                symbol: c.asset.clone(),
+                recent_pnl_1h: self.positions.recent_pnl_1h_for(account_id, now),
+                consecutive_losses: self.breaker.consecutive_losses(&c.strategy),
+            };
+            let (verdict, detail) = match self
+                .execution_policy
+                .as_ref()
+                .map(|p| crate::execution_policy::evaluate(p, account_id, &facts))
+            {
+                None => ("refused".to_string(), Some("no policy loaded".to_string())),
+                Some(Err(refusal)) => ("refused".to_string(), Some(refusal.reason)),
+                Some(Ok(PolicyOutput::Place { budget_usd, .. })) => {
+                    budgets.push(budget_usd);
+                    ("place".to_string(), Some(budget_usd.to_string()))
+                }
+                Some(Ok(PolicyOutput::Skip { reason })) => {
+                    skipped += 1;
+                    ("skip".to_string(), Some(reason))
+                }
+                Some(Ok(PolicyOutput::Cooldown { seconds })) => {
+                    skipped += 1;
+                    ("cooldown".to_string(), Some(format!("{seconds}s")))
+                }
+            };
+            let symbol = facts.symbol.clone();
+            rows.push(crate::ipc::schema::ExecutionPolicyPreviewRow {
+                ts_ms: c.exited_at_ms,
+                symbol,
+                balance,
+                price: c.entry_price,
+                verdict,
+                detail,
+            });
+        }
+        // `in` conditions on symbols judge the asset the trade named; nothing
+        // special-cased here — `evaluate` already handles every field.
+        let avg_budget_usd = if budgets.is_empty() {
+            None
+        } else {
+            let sum = budgets.iter().copied().fold(Decimal::ZERO, |a, b| a + b);
+            let n = Decimal::from(budgets.len() as u64);
+            // Shortest-decimal discipline applies to the WIRE (the `to_string`
+            // below is what crosses IPC), not to the Decimal itself — no
+            // `normalize()` here, it would shave 10.00 down to "10" and break
+            // the money-string convention every other field keeps.
+            Some((sum / n).to_string())
+        };
+        crate::ipc::schema::ExecutionPolicyPreviewResult {
+            considered,
+            skipped,
+            avg_budget_usd,
+            rows,
+        }
+    }
+
     /// Replace the in-memory policy wholesale after a file write (set/reset
     /// arms). Re-derives the per-asset cap the way boot did — CLI flag wins
     /// over the file — and lands one `load-refused` audit line + keeps the
@@ -2012,6 +2121,22 @@ impl Core {
     }
     pub fn positions(&self) -> &PositionManager {
         &self.positions
+    }
+
+    /// Mutable access to the position manager — the same seam `config_mut`
+    /// opens for engine wiring (backtest hosting re-points the config; the
+    /// #364 IPC tests seed closed rows to replay). Not for moving money:
+    /// every cash path routes through the ledgers, not this book.
+    pub fn positions_mut(&mut self) -> &mut PositionManager {
+        &mut self.positions
+    }
+
+    /// Mutable handle on the account book — test/seed seams only (the #364
+    /// IPC tests prime a ledger before replaying history). The LIVE money
+    /// paths never come through here: they route by the order's own
+    /// `account_id` at each site (§9.3).
+    pub fn accounts_mut(&mut self) -> &mut crate::account::AccountLedgers {
+        &mut self.accounts
     }
 
     /// Mutable access to config (engine wiring adjusts exits/positions live).

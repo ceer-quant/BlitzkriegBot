@@ -12,7 +12,7 @@ pub mod stop_stack;
 pub mod ui;
 pub mod update;
 
-pub use app::{Action, App, Tab};
+pub use app::{Action, App, PolicyAction, Tab};
 use blitzkrieg_ui_kit::gateway::{command_lines, Dispatcher, SupervisorConfig};
 use blitzkrieg_ui_kit::UiSnapshot;
 use crossterm::event::{Event, KeyEventKind};
@@ -21,6 +21,16 @@ use std::io::IsTerminal;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// #364: one policy refresh's payload — the account list, the selected
+/// account's effective section, the preview and the audit history, exactly
+/// as the kernel answered them (raw JSON; no second model on this side).
+pub type PolicySnapshot = (
+    Vec<serde_json::Value>,
+    Option<serde_json::Value>,
+    Option<serde_json::Value>,
+    Vec<serde_json::Value>,
+);
 
 /// Messages the main loop reacts to.
 pub enum Msg {
@@ -47,6 +57,16 @@ pub enum Msg {
     Events(Vec<blitzkrieg_ui_kit::core::types::CoreEvent>),
     /// E25 (#331): the intent-audit tail was re-read (Decisions tab).
     Decisions(Vec<serde_json::Value>),
+    /// #364: one policy refresh answered — the account list, the selected
+    /// account's effective section, the preview and the audit history, all
+    /// as the kernel answered them (raw JSON; `Err` = the core refused).
+    PolicyLoaded(Result<PolicySnapshot, String>),
+    /// #364: a policy write landed. `Ok(())` re-reads the face (the reply
+    /// only echoes the account id — the RELOADED view comes from the get).
+    PolicyEditDone(Result<String, String>),
+    /// #364: internal nudge — after a write, run the same refresh a keypress
+    /// would have fired (one Msg round-trip, no duplicate refresh logic).
+    PolicySelfRefresh,
     /// The process received an external termination signal.
     Shutdown,
 }
@@ -436,6 +456,92 @@ pub async fn run_panel_with_dispatcher(
                     Action::RunCommand(cmd) => {
                         dispatch_command(&dispatcher, &tx, &cmd).await;
                     }
+                    Action::PolicyRefresh => {
+                        // The policy face's reads on a FRESH client of its own
+                        // (same reasoning as NetCheck): four calls back to
+                        // back, none of them slow, but they must not hold the
+                        // shared dispatcher while the core thinks.
+                        let socket = app.socket.clone();
+                        let idx = app.policy_account_idx;
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            let out = tokio::task::spawn_blocking(move || {
+                                let mut client =
+                                    blitzkrieg_ui_kit::core::ipc_client::IpcClient::new(socket);
+                                let list =
+                                    client.execution_policy_list().map_err(|e| e.to_string())?;
+                                let accounts = list
+                                    .get("accounts")
+                                    .and_then(|a| a.as_array())
+                                    .cloned()
+                                    .unwrap_or_default();
+                                // The account the cursor names NOW (the list
+                                // may have grown or shrunk under the cursor).
+                                let id = if idx == 0 {
+                                    "defaults".to_string()
+                                } else {
+                                    accounts
+                                        .get(idx - 1)
+                                        .and_then(|v| v.get("accountId"))
+                                        .and_then(|a| a.as_str())
+                                        .unwrap_or("defaults")
+                                        .to_string()
+                                };
+                                let section = client.execution_policy_get(&id).ok();
+                                let preview = client.execution_policy_preview(&id).ok();
+                                let history = client
+                                    .execution_policy_history(&id)
+                                    .ok()
+                                    .and_then(|h| h.as_array().cloned())
+                                    .unwrap_or_default();
+                                Ok::<_, String>((accounts, section, preview, history))
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(format!("policy task: {e}")));
+                            let _ = tx.send(Msg::PolicyLoaded(out));
+                        });
+                    }
+                    Action::PolicyEdit { action } => {
+                        let socket = app.socket.clone();
+                        let account = app.policy_account_id().unwrap_or_default();
+                        let params = match action {
+                            PolicyAction::Set => app
+                                .policy_pending
+                                .as_ref()
+                                .map(|(_, p, _)| p.clone())
+                                .unwrap_or(serde_json::Value::Null),
+                            PolicyAction::Reset => {
+                                serde_json::json!({ "accountId": account })
+                            }
+                        };
+                        app.policy_busy = true;
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            let out = tokio::task::spawn_blocking(move || {
+                                let mut client =
+                                    blitzkrieg_ui_kit::core::ipc_client::IpcClient::new(socket);
+                                let label = match action {
+                                    PolicyAction::Set => "policy saved".to_string(),
+                                    PolicyAction::Reset => {
+                                        "account section reset (falls back to defaults)".to_string()
+                                    }
+                                };
+                                match action {
+                                    PolicyAction::Set => client
+                                        .execution_policy_set(params)
+                                        .map(|_| label)
+                                        .map_err(|e| e.to_string()),
+                                    PolicyAction::Reset => client
+                                        .execution_policy_reset(&account)
+                                        .map(|_| label)
+                                        .map_err(|e| e.to_string()),
+                                }
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(format!("policy task: {e}")));
+                            let _ = tx.send(Msg::PolicyEditDone(out));
+                        });
+                    }
                     Action::None => {}
                 }
             }
@@ -587,7 +693,75 @@ pub async fn run_panel_with_dispatcher(
             Msg::UpdateInstallDone(_) => { /* deferred with the release pipeline */ }
             Msg::RefreshError(e) => app.log(format!("refresh error: {e}")),
             Msg::Decisions(rows) => app.decisions = rows,
+            Msg::PolicyLoaded(result) => match result {
+                Ok((accounts, section, preview, history)) => {
+                    app.policy_accounts = accounts;
+                    app.policy_section = section;
+                    app.policy_preview = preview;
+                    app.policy_history = history;
+                }
+                Err(e) => app.log(format!("policy read failed: {e}")),
+            },
+            Msg::PolicyEditDone(result) => {
+                app.policy_busy = false;
+                app.policy_pending = None;
+                match result {
+                    Ok(msg) if msg.is_empty() => app.log("policy: write landed".to_string()),
+                    Ok(msg) => app.log(format!("policy: {msg}")),
+                    Err(e) => app.log(format!("policy write refused: {e}")),
+                }
+                // Re-read so the face shows the RELOADED state (the same
+                // freshness rule the wire test pins: what follows a write is
+                // a read, never a local guess). The refresh is spawned the
+                // same way a keypress would have fired it.
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(Msg::PolicySelfRefresh);
+                });
+            }
             Msg::Shutdown => app.should_quit = true,
+            Msg::PolicySelfRefresh => {
+                // The write landed; refresh the face exactly as a keypress
+                // would (handled in the Action::PolicyRefresh arm above on
+                // the next loop pass — but the match here consumes the msg,
+                // so run the same worker inline).
+                let socket = app.socket.clone();
+                let idx = app.policy_account_idx;
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let out = tokio::task::spawn_blocking(move || {
+                        let mut client =
+                            blitzkrieg_ui_kit::core::ipc_client::IpcClient::new(socket);
+                        let list = client.execution_policy_list().map_err(|e| e.to_string())?;
+                        let accounts = list
+                            .get("accounts")
+                            .and_then(|a| a.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        let id = if idx == 0 {
+                            "defaults".to_string()
+                        } else {
+                            accounts
+                                .get(idx - 1)
+                                .and_then(|v| v.get("accountId"))
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("defaults")
+                                .to_string()
+                        };
+                        let section = client.execution_policy_get(&id).ok();
+                        let preview = client.execution_policy_preview(&id).ok();
+                        let history = client
+                            .execution_policy_history(&id)
+                            .ok()
+                            .and_then(|h| h.as_array().cloned())
+                            .unwrap_or_default();
+                        Ok::<_, String>((accounts, section, preview, history))
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(format!("policy task: {e}")));
+                    let _ = tx.send(Msg::PolicyLoaded(out));
+                });
+            }
         }
         if app.should_quit {
             break;

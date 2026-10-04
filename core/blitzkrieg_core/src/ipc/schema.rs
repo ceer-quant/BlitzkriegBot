@@ -250,6 +250,10 @@ pub mod method {
     pub const EXECUTION_POLICY_RESET: &str = "execution_policy.reset";
     /// The audit journal tail for one account (or all accounts).
     pub const EXECUTION_POLICY_HISTORY: &str = "execution_policy.history";
+    /// #364: replay the CURRENT section over the recent closed trades of one
+    /// account (`evaluate` on historical facts) — the UI preview's "these
+    /// rules would skip N of the last M entries". Read-only, no audit line.
+    pub const EXECUTION_POLICY_PREVIEW: &str = "execution_policy.preview";
 
     // ── E26 (§4.4) — systemic risk readout ────────────────────────────────
     /// The effective systemic limits and WHERE each came from. Read-only,
@@ -934,6 +938,58 @@ pub struct ExecutionPolicyAuditView {
     pub after: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// `execution_policy.preview` params (#364): the account whose section the
+/// preview replays history against.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionPolicyPreviewParams {
+    pub account_id: String,
+}
+
+/// `execution_policy.preview` result (#364): the CURRENT section replayed
+/// over the recent closed trades, so the operator sees what their rules
+/// would have done before saving them. Each historical close supplies the
+/// facts a live entry would carry; `evaluate` — the ONE verdict function —
+/// judges it, so the preview can never disagree with the kernel.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionPolicyPreviewResult {
+    /// How many historical entries were replayed.
+    pub considered: usize,
+    /// How many of those the current section would SKIP (a rule hit or the
+    /// equity floor).
+    pub skipped: usize,
+    /// Mean budget across the entries the section would still place, as a
+    /// string for the shortest-decimal rule (`None` when everything skips).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_budget_usd: Option<String>,
+    /// One row per replayed entry, oldest first. The UI renders a few and
+    /// keeps the verdict vocabulary intact.
+    pub rows: Vec<ExecutionPolicyPreviewRow>,
+}
+
+/// One replayed entry (#364): the facts it carried and the verdict the
+/// current section returns for them.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionPolicyPreviewRow {
+    pub ts_ms: i64,
+    pub symbol: String,
+    /// The account's balance at preview time (the ledger is a live book, not
+    /// a historical snapshot — disclosed rather than pretended).
+    #[serde(with = "crate::decimal")]
+    pub balance: Decimal,
+    #[serde(with = "crate::decimal")]
+    pub price: Decimal,
+    /// "place" | "skip" | "cooldown" | "refused" — the same words the
+    /// kernel's own verdict path uses.
+    pub verdict: String,
+    /// The place budget, or the skip/cooldown reason — what the log line
+    /// would have said.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// One account as `account.list` reports it (§12.1 AccountView). The money

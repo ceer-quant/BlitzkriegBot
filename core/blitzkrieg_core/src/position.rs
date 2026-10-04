@@ -739,6 +739,16 @@ impl PositionManager {
     pub fn closed_positions(&self) -> &[ClosedPosition] {
         &self.closed
     }
+
+    /// Test seam: land one CLOSED row directly in the book, bypassing
+    /// open→fill→close. The #364 preview replay needs historical facts
+    /// without a full fill simulation; the production path always arrives
+    /// through [`Self::close`], which owns the day-budget fold.
+    #[cfg(test)]
+    pub fn push_closed_for_test(&mut self, closed: ClosedPosition) {
+        self.closed.push(closed);
+    }
+
     pub fn daily_pnl(&self) -> Decimal {
         self.daily.realized_pnl_usd
     }

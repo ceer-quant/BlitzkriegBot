@@ -67,6 +67,16 @@ pub enum Action {
     /// Reload the plugin registry (used on entering the Plugins tab and after
     /// a toggling action).
     RefreshPlugins,
+    /// #364: (re)read the execution-policy face's data off the render loop —
+    /// effective section, list, preview and history in one worker round-trip.
+    /// The writes never run here: `PolicyEdit` carries them.
+    PolicyRefresh,
+    /// #364: one policy write (`set` | `reset`) off the render loop. The
+    /// worker lands the audit line; the reply re-reads the effective view so
+    /// what the face shows next is the RELOADED state, never a local guess.
+    PolicyEdit {
+        action: PolicyAction,
+    },
     /// Run the network self-check (`net.check`) off the render loop — the probe
     /// dials, so it answers in seconds, not milliseconds.
     NetCheck,
@@ -95,6 +105,15 @@ pub enum CheckStage {
     Ready,
 }
 
+/// #364: the two policy writes the face can land. The reset asks first
+/// (same confirm bar as a dangerous toggle) — it silently reverts an
+/// account to the globals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyAction {
+    Set,
+    Reset,
+}
+
 /// One bottom-bar hint a newcomer needs; once consumed, it stops rotating.
 pub const HINTS: [&str; 7] = [
     "press : to type a command — try `status`",
@@ -110,6 +129,12 @@ pub const HINTS: [&str; 7] = [
 /// command: flipping the AUTO-UPDATE switch. `y` on the confirm bar routes it
 /// to [`Action::UpdateConfigure`] instead of the dispatcher.
 pub const UPDATE_AUTO_CONFIRM_PREFIX: &str = "update.auto ";
+
+/// #364 sentinel prefix: a confirmed policy write. The confirm bar's text is
+/// `policy.set <accountId>` / `policy.reset <accountId>`; `y` routes it to
+/// [`Action::PolicyEdit`] (the params were built at ask time and ride in the
+/// App's pending slot) instead of the gateway dispatcher.
+pub const POLICY_CONFIRM_PREFIX: &str = "policy.";
 
 pub struct App {
     pub snap: UiSnapshot,
@@ -163,6 +188,267 @@ pub struct App {
     /// An update check / configure / install round-trip is in flight (the
     /// Settings pane says so instead of inviting a double click).
     pub update_busy: bool,
+    /// #364: the policy face's account list (`defaults` first), each entry as
+    /// the raw JSON the kernel answered with. Empty until the first refresh.
+    pub policy_accounts: Vec<serde_json::Value>,
+    /// #364: index into `policy_accounts` the ←/→ keys move (0 = defaults).
+    pub policy_account_idx: usize,
+    /// #364: the selected account's EFFECTIVE section (kernel-folded), the
+    /// preview over its recent closed trades, and its audit history — all as
+    /// the kernel answered (raw JSON; no second model on this side either).
+    pub policy_section: Option<serde_json::Value>,
+    pub policy_preview: Option<serde_json::Value>,
+    pub policy_history: Vec<serde_json::Value>,
+    /// #364: the condition builder's draft rule (the `[a]` form starts from
+    /// the neutral draft; `[e]` on a rule row copies that rule in). Rendered
+    /// and edited under the rule list; `[Enter]` in the builder commits it.
+    pub policy_draft: Option<PolicyDraft>,
+    /// #364: cursor row within the policy face (base params, then rules).
+    /// 0..4 = the four base params; 5+ = rule rows (5 = rules[0], …).
+    pub policy_focus: usize,
+    /// #364: the policy editor sub-mode. `p` enters it on the Settings tab
+    /// (and re-reads); inside, the policy keys own the keyboard — [a]/[e]/
+    /// [d]/[空格]/[s]/[r] act on the policy and [q]/Esc RETURN out (the
+    /// spec's `[q] return`), so the Settings tab's documented [a] auto-update
+    /// and the global [r] refresh are untouched outside the mode.
+    pub policy_mode: bool,
+    /// #364: a write round-trip is in flight (the face says so instead of
+    /// inviting a double press of `s`).
+    pub policy_busy: bool,
+    /// #364: confirmation state for the destructive rows (`[d]` delete,
+    /// `[r]` rollback): the exact set/reset params, shown on the confirm bar.
+    pub policy_pending: Option<(PolicyAction, serde_json::Value, String)>,
+}
+
+/// #364: one rule mid-edit — the builder's state. Field/op move with ←/→,
+/// the value (and name/reason) type in with the input bar, so nothing is
+/// free-form except what the kernel validates anyway.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolicyDraft {
+    pub name: String,
+    pub priority: u32,
+    pub enabled: bool,
+    /// Index into the eight FIELD spellings (see `PolicyDraft::FIELDS`).
+    pub field_idx: usize,
+    /// Index into the seven OP spellings (`PolicyDraft::OPS`).
+    pub op_idx: usize,
+    /// The raw value text (a number, a quoted symbol, or `A,B,C` for `in` —
+    /// exactly the string grammar `parse_condition_value` accepts).
+    pub value: String,
+    /// Which then-action the rule carries (index into `PolicyDraft::THENS`).
+    pub then_idx: usize,
+    /// The then-action's own argument (ratio/budget as text, seconds as text).
+    pub then_arg: String,
+    pub reason: String,
+    /// `Some(idx)` when editing the existing rule at that index (replace on
+    /// commit); `None` when appending a new one.
+    pub edit_idx: Option<usize>,
+}
+
+impl PolicyDraft {
+    /// The eight condition fields (issue list, verbatim order) the ←/→ keys
+    /// cycle. `symbol` is the one text field; the rest judge numbers.
+    pub const FIELDS: [&'static str; 8] = [
+        "available_balance",
+        "total_equity",
+        "open_positions",
+        "current_price",
+        "time_left_sec",
+        "symbol",
+        "recent_pnl_1h",
+        "consecutive_losses",
+    ];
+    /// The seven operators (symbols as the kernel's string grammar spells
+    /// them; `in` takes a comma-separated symbol list).
+    pub const OPS: [&'static str; 7] = ["<", "<=", ">", ">=", "==", "!=", "in"];
+    /// The closed then-vocabulary — exactly one per rule. Indices into the
+    /// `then` build: 0 = skip, 1-3 = sizing overrides (arg = decimal), 4 =
+    /// standing cooldown (arg = seconds).
+    pub const THENS: [&'static str; 5] = [
+        "skip",
+        "budget_ratio",
+        "min_budget_usd",
+        "max_budget_usd",
+        "cooldown_sec",
+    ];
+
+    /// The neutral draft: skip-everything-nothing — a rule that never fires
+    /// (`open_positions < 0` is unsatisfiable) so a half-typed builder state
+    /// can never be committed as something dangerous by accident.
+    pub fn neutral() -> Self {
+        Self {
+            name: String::new(),
+            priority: 100,
+            enabled: true,
+            field_idx: 2,
+            op_idx: 0,
+            value: "0".to_string(),
+            then_idx: 0,
+            then_arg: String::new(),
+            reason: String::new(),
+            edit_idx: None,
+        }
+    }
+
+    pub fn field(&self) -> &'static str {
+        Self::FIELDS[self.field_idx]
+    }
+    pub fn op(&self) -> &'static str {
+        Self::OPS[self.op_idx]
+    }
+    pub fn then(&self) -> &'static str {
+        Self::THENS[self.then_idx]
+    }
+
+    /// The rule as the kernel's `set` expects it in `rules[]` (table-form
+    /// `when`, plain-value `value`, exactly-one-action `then`). Numbers stay
+    /// unquoted; `symbol ==` and `in` carry text / a list. The kernel's
+    /// validator has the final say — this only shapes what it is asked.
+    pub fn to_rule_json(&self) -> Result<serde_json::Value, String> {
+        let name = self.name.trim().to_string();
+        if name.is_empty() {
+            return Err("rule needs a name".to_string());
+        }
+        let field = self.field();
+        let text_field = field == "symbol";
+        let value: serde_json::Value = if self.op() == "in" {
+            let items: Vec<String> = self
+                .value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if items.is_empty() {
+                return Err("`in` needs at least one symbol (comma-separated)".to_string());
+            }
+            serde_json::json!(items)
+        } else if text_field {
+            let t = self.value.trim().trim_matches('"').to_string();
+            if t.is_empty() {
+                return Err("symbol condition needs a value".to_string());
+            }
+            serde_json::json!(t)
+        } else {
+            let t = self.value.trim();
+            let n: f64 = t.parse().map_err(|_| format!("`{t}` is not a number"))?;
+            serde_json::json!(n)
+        };
+        let then_name = self.then();
+        let then = if then_name == "skip" {
+            serde_json::json!({ "action": "skip" })
+        } else {
+            let arg = self.then_arg.trim();
+            if arg.is_empty() {
+                return Err(format!("{then_name} needs a value"));
+            }
+            // The kernel accepts the decimal/string spelling; send strings so
+            // the shortest-decimal discipline survives the hop (cooldown is
+            // whole seconds).
+            if then_name == "cooldown_sec" {
+                let secs: i64 = arg.parse().map_err(|_| format!("`{arg}` is not seconds"))?;
+                serde_json::json!({ then_name: secs })
+            } else {
+                serde_json::json!({ then_name: arg })
+            }
+        };
+        let mut rule = serde_json::json!({
+            "name": name,
+            "priority": self.priority,
+            "enabled": self.enabled,
+            "when": { "field": field, "op": self.op(), "value": value },
+            "then": then,
+        });
+        let reason = self.reason.trim().to_string();
+        if !reason.is_empty() {
+            rule["reason"] = serde_json::json!(reason);
+        }
+        Ok(rule)
+    }
+
+    /// Build a draft from an existing rule row (the `[e]` path). The wire
+    /// forms the kernel may send are accepted: op as symbol or snake_case,
+    /// value as plain number / string / list, then carrying exactly one key.
+    pub fn from_rule(rule: &serde_json::Value, edit_idx: Option<usize>) -> Result<Self, String> {
+        let get = |k: &str| rule.get(k).cloned().unwrap_or(serde_json::Value::Null);
+        let name = get("name").as_str().unwrap_or_default().to_string();
+        let priority = get("priority").as_u64().unwrap_or(100) as u32;
+        let enabled = get("enabled").as_bool().unwrap_or(true);
+        let when = get("when");
+        let field = when.get("field").and_then(|f| f.as_str()).unwrap_or("");
+        let field_idx = Self::FIELDS
+            .iter()
+            .position(|f| *f == field)
+            .ok_or_else(|| format!("unknown field `{field}`"))?;
+        let op_raw = when.get("op").and_then(|o| o.as_str()).unwrap_or("");
+        // The kernel sends snake_case (`ge`); accept the symbol spelling too.
+        let op_canon = match op_raw {
+            "lt" | "<" => "<",
+            "le" | "<=" => "<=",
+            "gt" | ">" => ">",
+            "ge" | ">=" => ">=",
+            "eq" | "==" => "==",
+            "ne" | "!=" => "!=",
+            "in" => "in",
+            other => return Err(format!("unknown op `{other}`")),
+        };
+        let op_idx = Self::OPS
+            .iter()
+            .position(|o| *o == op_canon)
+            .ok_or_else(|| format!("unknown op `{op_raw}`"))?;
+        let v = when
+            .get("value")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let value = if let Some(list) = v.as_array() {
+            list.iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        } else if let Some(s) = v.as_str() {
+            s.to_string()
+        } else if let Some(n) = v.as_f64() {
+            format!("{n}")
+        } else {
+            String::new()
+        };
+        let then = get("then");
+        // (idx, arg) for the then-block: skip carries no argument; the sizing
+        // overrides carry the decimal as the string the kernel sent; cooldown
+        // carries whole seconds.
+        let then_pair = if then.get("action").and_then(|a| a.as_str()) == Some("skip") {
+            (0usize, String::new())
+        } else if let Some(arg) = then
+            .get("budget_ratio")
+            .or_else(|| then.get("min_budget_usd"))
+            .or_else(|| then.get("max_budget_usd"))
+            .and_then(|b| b.as_str())
+        {
+            let key = if then.get("budget_ratio").is_some() {
+                1
+            } else if then.get("min_budget_usd").is_some() {
+                2
+            } else {
+                3
+            };
+            (key, arg.to_string())
+        } else if let Some(secs) = then.get("cooldown_sec").and_then(|c| c.as_i64()) {
+            (4, secs.to_string())
+        } else {
+            return Err("rule carries no then-action this editor knows".to_string());
+        };
+        Ok(Self {
+            name,
+            priority,
+            enabled,
+            field_idx,
+            op_idx,
+            value,
+            then_idx: then_pair.0,
+            then_arg: then_pair.1,
+            reason: get("reason").as_str().unwrap_or_default().to_string(),
+            edit_idx,
+        })
+    }
 }
 
 /// Cap the in-panel log so a long soak can't grow it without bound.
@@ -197,6 +483,16 @@ impl App {
             net_busy: false,
             kill_banner: None,
             update_busy: false,
+            policy_accounts: Vec::new(),
+            policy_account_idx: 0,
+            policy_section: None,
+            policy_preview: None,
+            policy_history: Vec::new(),
+            policy_draft: None,
+            policy_focus: 0,
+            policy_mode: false,
+            policy_busy: false,
+            policy_pending: None,
         }
     }
 
@@ -242,10 +538,16 @@ impl App {
                     if let Some(on) = text.strip_prefix(UPDATE_AUTO_CONFIRM_PREFIX) {
                         return Action::UpdateConfigure(on == "on");
                     }
+                    // A confirmed policy write carries its params in the
+                    // pending slot (the bar text is only the display name).
+                    if let Some((action, _, _)) = self.policy_pending.take() {
+                        return Action::PolicyEdit { action };
+                    }
                     return Action::RunCommand(text);
                 }
                 _ => {
                     self.log("toggle cancelled".to_string());
+                    self.policy_pending = None;
                     return Action::None;
                 }
             }
@@ -346,6 +648,58 @@ impl App {
             }
         }
 
+        // #364: the policy editor's sub-mode owns the keyboard while active —
+        // it must sit BEFORE the global arms, or `q` would quit the panel and
+        // `r` would refresh the snapshot instead of rolling the policy back.
+        // Inside the mode: ←/→ account · ↑/↓ cursor · [e] edit · [a] add ·
+        // [d] delete (asks) · [空格] on/off (asks) · [s] save (asks) · [r]
+        // rollback (asks) · [q]/Esc RETURN out (the spec's `[q] return`).
+        // Outside the mode the Settings tab's documented [a] auto-update and
+        // the global [r] refresh keep their meaning — the mode is opt-in.
+        if self.policy_mode {
+            return match key.code {
+                KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc
+                    if self.policy_pending.is_none() =>
+                {
+                    self.policy_mode = false;
+                    self.policy_draft = None;
+                    self.policy_focus = 0;
+                    Action::None
+                }
+                KeyCode::Left if !self.policy_busy => {
+                    self.policy_account_idx = self.policy_account_idx.saturating_sub(1);
+                    self.policy_focus = 0;
+                    Action::PolicyRefresh
+                }
+                KeyCode::Right if !self.policy_busy => {
+                    // The chips are `defaults` + one per list entry: the cap
+                    // is the list LENGTH (index 0 is defaults, so the last
+                    // valid index is len, not len-1).
+                    if self.policy_account_idx < self.policy_accounts.len() {
+                        self.policy_account_idx += 1;
+                    }
+                    self.policy_focus = 0;
+                    Action::PolicyRefresh
+                }
+                KeyCode::Up if self.policy_draft.is_none() => {
+                    self.policy_focus = self.policy_focus.saturating_sub(1);
+                    Action::None
+                }
+                KeyCode::Down if self.policy_draft.is_none() => {
+                    self.policy_focus = self.policy_focus.saturating_add(1);
+                    Action::None
+                }
+                KeyCode::Char(c)
+                    if self.policy_draft.is_none()
+                        && !self.policy_busy
+                        && matches!(c, 'e' | 'a' | 'd' | 's' | 'r' | ' ') =>
+                {
+                    self.policy_key(c)
+                }
+                _ => Action::None,
+            };
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
@@ -408,6 +762,13 @@ impl App {
             KeyCode::Char('6') => {
                 self.tab = Tab::Settings;
                 Action::None // the snapshot poller carries system_version
+            }
+            // #364: `p` on the Settings tab enters the policy editor's
+            // sub-mode (its keys and the [q] return are handled above).
+            KeyCode::Char('p') if self.tab == Tab::Settings => {
+                self.policy_mode = true;
+                self.policy_focus = 0;
+                Action::PolicyRefresh
             }
             // Settings keys (VERSIONING.md §6.2). `a` is the one switch that
             // decides "may the launcher auto-replace binaries later", so it
@@ -497,6 +858,247 @@ impl App {
             KeyCode::Char('u') if self.tab == Tab::Evolution => self.evo_rollback(),
             _ => Action::None,
         }
+    }
+
+    /// #364: the Settings-tab policy keys, dispatched from `on_key` only when
+    /// the face owns the key (right tab, no draft open, no write in flight).
+    /// Each arm mirrors one requirement: [e] edit, [a] add rule, [d] delete
+    /// (asks), [↑/↓] priority, [空格] enable/disable, [s] save, [r] rollback.
+    fn policy_key(&mut self, c: char) -> Action {
+        let Some(account) = self.policy_account_id() else {
+            self.log("policy: no account list yet (still loading)".to_string());
+            return Action::None;
+        };
+        let rules_len = self
+            .policy_section
+            .as_ref()
+            .and_then(|s| s.get("rules"))
+            .and_then(|r| r.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let on_rule = self.policy_focus >= 5 && self.policy_focus - 5 < rules_len;
+        match c {
+            'e' => {
+                if self.policy_focus < 4 {
+                    self.log(
+                        "param edit: use the WebUI for base params — here rules are first-class \
+                         (the four numbers are shown for reference)"
+                            .to_string(),
+                    );
+                } else if on_rule {
+                    let idx = self.policy_focus - 5;
+                    let rule = self
+                        .policy_section
+                        .as_ref()
+                        .and_then(|s| s.get("rules"))
+                        .and_then(|r| r.as_array())
+                        .and_then(|a| a.get(idx))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    match PolicyDraft::from_rule(&rule, Some(idx)) {
+                        Ok(d) => {
+                            self.policy_draft = Some(d);
+                        }
+                        Err(e) => self.log(format!("policy: cannot edit that rule: {e}")),
+                    }
+                } else {
+                    self.log("no rule row selected (↑/↓ to move onto a rule)".to_string());
+                }
+                Action::None
+            }
+            'a' => {
+                self.policy_draft = Some(PolicyDraft::neutral());
+                Action::None
+            }
+            'd' => {
+                if on_rule {
+                    let idx = self.policy_focus - 5;
+                    let mut rules = self
+                        .policy_section
+                        .as_ref()
+                        .and_then(|s| s.get("rules"))
+                        .and_then(|r| r.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    rules.remove(idx);
+                    self.ask_policy_edit(
+                        PolicyAction::Set,
+                        self.policy_set_params_with_rules(rules),
+                        format!("delete rule #{}, account {account}", idx + 1),
+                    )
+                } else {
+                    self.log("no rule row selected (↑/↓ to move onto a rule)".to_string());
+                    Action::None
+                }
+            }
+            ' ' => {
+                if on_rule {
+                    let idx = self.policy_focus - 5;
+                    let mut rules = self
+                        .policy_section
+                        .as_ref()
+                        .and_then(|s| s.get("rules"))
+                        .and_then(|r| r.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let on = rules[idx]
+                        .get("enabled")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
+                    rules[idx]["enabled"] = serde_json::json!(!on);
+                    self.ask_policy_edit(
+                        PolicyAction::Set,
+                        self.policy_set_params_with_rules(rules),
+                        format!(
+                            "{} rule #{}, account {account}",
+                            if on { "disable" } else { "enable" },
+                            idx + 1
+                        ),
+                    )
+                } else {
+                    self.log("no rule row selected (↑/↓ to move onto a rule)".to_string());
+                    Action::None
+                }
+            }
+            's' => {
+                let params = self.policy_set_params_from_view();
+                self.ask_policy_edit(
+                    PolicyAction::Set,
+                    params,
+                    format!("save policy, account {account}"),
+                )
+            }
+            'r' => {
+                // Rollback = take the account's own most recent `set`'s
+                // BEFORE-state and write it back via `set` (no new backend
+                // method: the journal IS the version store).
+                match self.policy_rollback_params() {
+                    Ok((label, params)) => self.ask_policy_edit(PolicyAction::Set, params, label),
+                    Err(e) => {
+                        self.log(format!("rollback: {e}"));
+                        Action::None
+                    }
+                }
+            }
+            _ => Action::None,
+        }
+    }
+
+    /// The account id under the ←/→ cursor (`"defaults"` for index 0).
+    /// The account id under the ←/→ cursor (`"defaults"` for index 0; the
+    /// list entries start at chip index 1 = `policy_accounts[0]`).
+    pub fn policy_account_id(&self) -> Option<String> {
+        if self.policy_account_idx == 0 {
+            return Some("defaults".to_string());
+        }
+        self.policy_accounts
+            .get(self.policy_account_idx - 1)
+            .and_then(|v| {
+                v.get("accountId")
+                    .and_then(|a| a.as_str())
+                    .map(|s| s.to_string())
+            })
+    }
+
+    /// Whether the confirmed `policy.` prefix was armed (used by `on_key`).
+    pub fn policy_confirm_armed(&self) -> bool {
+        self.policy_pending.is_some()
+    }
+
+    /// Arm a policy write: the confirm bar shows the label; `y` fires
+    /// [`Action::PolicyEdit`] with the action (params ride along in the
+    /// pending slot). Cancel clears both.
+    fn ask_policy_edit(
+        &mut self,
+        action: PolicyAction,
+        params: serde_json::Value,
+        label: String,
+    ) -> Action {
+        let verb = match action {
+            PolicyAction::Set => "set",
+            PolicyAction::Reset => "reset",
+        };
+        self.policy_pending = Some((action, params, label.clone()));
+        self.pending_confirmation = Some(format!("{POLICY_CONFIRM_PREFIX}{verb} {label}"));
+        Action::None
+    }
+
+    /// The set params for "write the CURRENT effective view back": budget
+    /// triple + equity + cap + rules, taken from the section the kernel last
+    /// answered with (decimals cross as the strings it sent).
+    fn policy_set_params_from_view(&self) -> serde_json::Value {
+        let account = self.policy_account_id().unwrap_or_default();
+        let s = self
+            .policy_section
+            .clone()
+            .unwrap_or(serde_json::Value::Null);
+        let mut params = serde_json::json!({ "accountId": account });
+        for (wire, key) in [
+            ("budgetRatio", "budget_ratio"),
+            ("minBudgetUsd", "min_budget_usd"),
+            ("maxBudgetUsd", "max_budget_usd"),
+            ("minEquityUsd", "min_equity_usd"),
+        ] {
+            if let Some(v) = s.get(key).and_then(|v| v.as_str()) {
+                params[wire] = serde_json::json!(v);
+            }
+        }
+        if let Some(n) = s.get("max_positions_per_asset").and_then(|v| v.as_u64()) {
+            params["maxPositionsPerAsset"] = serde_json::json!(n);
+        }
+        if let Some(rules) = s.get("rules").and_then(|r| r.as_array()) {
+            params["rules"] = serde_json::json!(rules);
+        }
+        params
+    }
+
+    /// Same as above but with the rules replaced (the [d]/[空格] arms).
+    fn policy_set_params_with_rules(&self, rules: Vec<serde_json::Value>) -> serde_json::Value {
+        let mut params = self.policy_set_params_from_view();
+        params["rules"] = serde_json::json!(rules);
+        params
+    }
+
+    /// The rollback write: find the account's most recent `set` audit line
+    /// and return its BEFORE-state as the params to write back. No new
+    /// backend method — the journal already holds each version.
+    fn policy_rollback_params(&self) -> Result<(String, serde_json::Value), String> {
+        let account = self.policy_account_id().unwrap_or_default();
+        let last_set = self
+            .policy_history
+            .iter()
+            .rfind(|l| l.get("action").and_then(|a| a.as_str()) == Some("set"))
+            .ok_or_else(|| format!("no prior version to roll back to for `{account}`"))?;
+        let before = last_set
+            .get("before")
+            .cloned()
+            .filter(|b| !b.is_null())
+            .ok_or_else(|| "the last audit line carries no before-state".to_string())?;
+        let ts = last_set.get("tsMs").and_then(|t| t.as_i64()).unwrap_or(0);
+        let mut params = serde_json::json!({ "accountId": account });
+        for (wire, key) in [
+            ("budgetRatio", "budget_ratio"),
+            ("minBudgetUsd", "min_budget_usd"),
+            ("maxBudgetUsd", "max_budget_usd"),
+            ("minEquityUsd", "min_equity_usd"),
+        ] {
+            if let Some(v) = before.get(key).and_then(|v| v.as_str()) {
+                params[wire] = serde_json::json!(v);
+            }
+        }
+        if let Some(n) = before
+            .get("max_positions_per_asset")
+            .and_then(|v| v.as_u64())
+        {
+            params["maxPositionsPerAsset"] = serde_json::json!(n);
+        }
+        if let Some(rules) = before.get("rules").and_then(|r| r.as_array()) {
+            params["rules"] = serde_json::json!(rules);
+        }
+        Ok((
+            format!("roll back account {account} to the version before {ts}"),
+            params,
+        ))
     }
 }
 
@@ -671,5 +1273,204 @@ impl App {
             || cmd.contains("disable")
             || cmd.contains(" accept")
             || cmd.starts_with("rollback ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// A settings face with one configured account and one rule, as the
+    /// kernel's `list`/`get`/`history` answer them (raw wire shapes).
+    fn app_with_policy() -> App {
+        let mut app = App::new("test.sock".into(), false);
+        app.on_key(key('6'));
+        // Enter the policy sub-mode the way the operator does: `p`.
+        app.on_key(key('p'));
+        app.policy_accounts = vec![serde_json::json!({
+            "accountId": "acct-a",
+            "section": {}
+        })];
+        // The seeded section/history below belong to acct-a: move the chip
+        // cursor onto it (chip 1 = the list's first entry).
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.policy_section = Some(serde_json::json!({
+            "budget_ratio": "0.10",
+            "min_budget_usd": "1.00",
+            "max_budget_usd": "50.00",
+            "min_equity_usd": "1.00",
+            "max_positions_per_asset": 1,
+            "rules": [{
+                "name": "no_btc",
+                "priority": 10,
+                "enabled": true,
+                "when": { "field": "symbol", "op": "eq", "value": "BTC" },
+                "then": { "action": "skip" },
+                "reason": "no bitcoin"
+            }]
+        }));
+        app.policy_history = vec![serde_json::json!({
+            "tsMs": 1,
+            "actor": "ipc",
+            "action": "set",
+            "accountId": "acct-a",
+            "before": { "budget_ratio": "0.20", "max_positions_per_asset": 1 },
+            "after": { "budget_ratio": "0.10", "max_positions_per_asset": 1 }
+        })];
+        app
+    }
+
+    /// #364: `6` enters Settings and demands a policy refresh; ←/→ walk the
+    /// account chips (defaults first, then the kernel's list) and re-read.
+    #[test]
+    fn settings_tab_policy_refresh_and_account_switch() {
+        let mut app = App::new("test.sock".into(), false);
+        // Plain `6` does NOT open the editor (the tab keeps its own keys).
+        assert!(matches!(app.on_key(key('6')), Action::None));
+        assert!(!app.policy_mode);
+        // `p` enters the policy sub-mode and demands a refresh.
+        assert!(matches!(app.on_key(key('p')), Action::PolicyRefresh));
+        assert!(app.policy_mode);
+        assert_eq!(app.policy_account_id().as_deref(), Some("defaults"));
+        // The kernel's list arrives: one configured account.
+        app.policy_accounts = vec![serde_json::json!({ "accountId": "acct-a" })];
+        // → lands on acct-a; the id rides the list.
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.policy_account_id().as_deref(), Some("acct-a"));
+        // ← back to defaults; ← again saturates (no wraparound into nothing).
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.policy_account_id().as_deref(), Some("defaults"));
+        // [q] returns out of the sub-mode (the spec's `[q] return`).
+        app.on_key(key('q'));
+        assert!(!app.policy_mode);
+        assert_eq!(app.tab, Tab::Settings);
+        // …and the tab's own [a] (auto-update) is reachable again: it asks.
+        app.on_key(key('a'));
+        assert_eq!(
+            app.pending_confirmation.as_deref(),
+            Some("update.auto on"),
+            "outside the mode, [a] is the auto-update switch again"
+        );
+    }
+
+    /// [e] on a rule row opens the builder seeded from that rule; [a] starts
+    /// a neutral draft; the draft commits to a valid `rules[]` element the
+    /// kernel's own parser will accept (table-form when, one-action then).
+    #[test]
+    fn rule_edit_and_draft_commit() {
+        let mut app = app_with_policy();
+        // Focus onto the rule row (rules start at focus 5).
+        app.policy_focus = 5;
+        assert!(matches!(app.on_key(key('e')), Action::None));
+        let draft = app.policy_draft.clone().expect("draft opened");
+        assert_eq!(draft.name, "no_btc");
+        assert_eq!(draft.field(), "symbol");
+        assert_eq!(draft.value, "BTC");
+        assert_eq!(draft.edit_idx, Some(0));
+        // A fresh draft commits to a shape the kernel validates.
+        app.policy_draft = Some(PolicyDraft::neutral());
+        let mut d = app.policy_draft.clone().unwrap();
+        d.name = "cap_ratio".into();
+        d.field_idx = PolicyDraft::FIELDS
+            .iter()
+            .position(|f| *f == "available_balance")
+            .unwrap();
+        d.op_idx = PolicyDraft::OPS.iter().position(|o| *o == "<").unwrap();
+        d.value = "10".into();
+        d.then_idx = PolicyDraft::THENS
+            .iter()
+            .position(|t| *t == "budget_ratio")
+            .unwrap();
+        d.then_arg = "0.05".into();
+        d.edit_idx = None;
+        let rule = d.to_rule_json().expect("draft renders");
+        assert_eq!(rule["when"]["op"], "<");
+        assert_eq!(rule["then"]["budget_ratio"], "0.05");
+        assert_eq!(rule["priority"], 100);
+        // A nameless draft refuses to render — the kernel would refuse it too.
+        let mut bad = d.clone();
+        bad.name = String::new();
+        assert!(bad.to_rule_json().is_err());
+    }
+
+    /// [d] and [空格] must ASK first: the confirm bar names the change, `y`
+    /// routes it to `PolicyEdit` with the params built at ask time.
+    #[test]
+    fn delete_and_toggle_ask_before_writing() {
+        let mut app = app_with_policy();
+        app.policy_focus = 5;
+        assert!(matches!(app.on_key(key('d')), Action::None));
+        assert!(app.pending_confirmation.is_some(), "delete asks y/n");
+        let (action, params, _) = app.policy_pending.clone().expect("pending armed");
+        assert_eq!(action, PolicyAction::Set);
+        assert_eq!(params["rules"].as_array().map(|a| a.len()), Some(0));
+        // Any non-`y` cancels and clears the armed write.
+        app.on_key(key('n'));
+        assert!(app.pending_confirmation.is_none());
+        assert!(app.policy_pending.is_none());
+
+        // [空格] flips `enabled` in the staged params (not yet on disk).
+        assert!(matches!(app.on_key(key(' ')), Action::None));
+        let (_, params, _) = app.policy_pending.clone().expect("toggle armed");
+        assert_eq!(params["rules"][0]["enabled"], serde_json::json!(false));
+        app.on_key(key('n'));
+        assert!(app.policy_pending.is_none());
+    }
+
+    /// [r] rollback writes the most recent `set`'s BEFORE-state back through
+    /// `set` — no new backend verb, the journal IS the version store.
+    #[test]
+    fn rollback_takes_the_last_set_before_state() {
+        let mut app = app_with_policy();
+        assert!(matches!(app.on_key(key('r')), Action::None));
+        let (_, params, label) = app.policy_pending.clone().expect("rollback armed");
+        assert_eq!(params["accountId"], serde_json::json!("acct-a"));
+        assert_eq!(
+            params["budgetRatio"],
+            serde_json::json!("0.20"),
+            "the before-state"
+        );
+        assert!(label.contains("roll back"));
+        // No `set` in the journal → a refusal with a reason, never a write.
+        let mut bare = app_with_policy();
+        bare.policy_history.clear();
+        assert!(matches!(bare.on_key(key('r')), Action::None));
+        assert!(bare.pending_confirmation.is_none());
+        assert!(bare
+            .logs
+            .last()
+            .is_some_and(|l| l.contains("no prior version")));
+    }
+
+    /// [s] save stages the CURRENT effective view as the write (visible round
+    /// trip: the face re-reads after the write lands).
+    #[test]
+    fn save_stages_the_effective_view() {
+        let mut app = app_with_policy();
+        assert!(matches!(app.on_key(key('s')), Action::None));
+        let (action, params, _) = app.policy_pending.clone().expect("save armed");
+        assert_eq!(action, PolicyAction::Set);
+        assert_eq!(params["accountId"], serde_json::json!("acct-a"));
+        assert_eq!(params["budgetRatio"], serde_json::json!("0.10"));
+        assert_eq!(params["rules"][0]["name"], serde_json::json!("no_btc"));
+    }
+
+    /// With no rule row under the cursor, the row keys say so instead of
+    /// guessing (the cursor is the only index the face trusts).
+    #[test]
+    fn row_keys_need_a_rule_row() {
+        let mut app = app_with_policy();
+        app.policy_focus = 0; // base-param rows, not a rule
+        for c in ['e', 'd', ' '] {
+            assert!(matches!(app.on_key(key(c)), Action::None));
+            assert!(app.pending_confirmation.is_none());
+            assert!(app.policy_draft.is_none());
+        }
     }
 }
