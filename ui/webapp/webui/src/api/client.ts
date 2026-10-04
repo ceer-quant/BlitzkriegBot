@@ -129,8 +129,25 @@ export async function logout(): Promise<void> {
   window.location.reload()
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, {
+/**
+ * Optional query params are encoded HERE (URLSearchParams), never spliced into
+ * `path` by callers: the path stays a static literal, so a stray value can
+ * never turn the request into something it was not written to be (the
+ * request-forgery shape the push gate refuses).
+ */
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  query?: Record<string, string | number | undefined>,
+): Promise<T> {
+  const qs = query
+    ? new URLSearchParams(
+        Object.entries(query)
+          .filter(([, v]) => v !== undefined && v !== '')
+          .map(([k, v]) => [k, String(v)] as [string, string]),
+      ).toString()
+    : ''
+  const res = await fetch(`/api${path}${qs ? `?${qs}` : ''}`, {
     ...init,
     headers: {
       'X-Auth-Token': token,
@@ -307,14 +324,12 @@ export const api = {
    * E25 (#331): the arbitration audit tail — a thin proxy of the core's
    * `intent.audit.tail` (§12.3). Filters pass through untouched.
    */
-  intentAuditTail: (params?: { limit?: number; strategy?: string; decision?: string }) => {
-    const q = new URLSearchParams()
-    if (params?.limit != null) q.set('limit', String(params.limit))
-    if (params?.strategy) q.set('strategy', params.strategy)
-    if (params?.decision) q.set('decision', params.decision)
-    const qs = q.toString()
-    return request<IntentAuditTailDoc>(`/intent-audit${qs ? `?${qs}` : ''}`)
-  },
+  intentAuditTail: (params?: { limit?: number; strategy?: string; decision?: string }) =>
+    request<IntentAuditTailDoc>('/intent-audit', {}, {
+      limit: params?.limit,
+      strategy: params?.strategy,
+      decision: params?.decision,
+    }),
   /**
    * E26 (§4.4): the effective systemic limits and where each came from — a
    * thin proxy of the core's `risk.limits` (read-only; the core answers from
@@ -328,11 +343,12 @@ export const api = {
    * panel's fast tick. The panel has no WebSocket, so this is the whole
    * data channel: poll, redraw, poll.
    */
-  klineHistory: (params: { symbol: string; interval: KlineIntervalWire; limit?: number }) => {
-    const q = new URLSearchParams({ symbol: params.symbol, interval: params.interval })
-    if (params.limit != null) q.set('limit', String(params.limit))
-    return request<KlineHistoryDoc>(`/kline-history?${q.toString()}`)
-  },
+  klineHistory: (params: { symbol: string; interval: KlineIntervalWire; limit?: number }) =>
+    request<KlineHistoryDoc>('/kline-history', {}, {
+      symbol: params.symbol,
+      interval: params.interval,
+      limit: params.limit,
+    }),
   /** Dispatch a gateway command verb (`status`/`start`/`stop`/…). */
   command: (cmd: string) =>
     request<CommandDoc>('/command', { method: 'POST', body: cmd }),
@@ -476,6 +492,59 @@ export const api = {
     request<ExecutionPolicyHistoryDoc>(
       `/execution-policy/history?accountId=${encodeURIComponent(accountId)}`,
     ),
+
+  // ── #362 蓝图编辑器（compile 预览 + save 落盘，全程走内核 IPC）────────────
+  // 两条都是内核 `blueprint.*` IPC 的纯代理（网关 body 即 params 逐字转发），
+  // 内核错误包成 200 + `{error}` — 调用方必须检查 `error` 并内联渲染。
+
+  /**
+   * 编译预览（`blueprint.compile`）：把当前画布 JSON 编成 Lua 源码。纯只读；
+   * 拒绝消息含节点 id（#361 三阶段编译链保证），必须原样展示，绝不静默。
+   */
+  blueprintCompile: (json: string) =>
+    request<BlueprintCompileDoc>('/blueprint/compile', {
+      method: 'POST',
+      body: JSON.stringify({ json }),
+    }),
+  /**
+   * 保存策略包（`blueprint.save`）：内核校验名字 → 现场编译 → 写入
+   * blueprint.json + strategy.lua + manifest.json。UI 永不碰文件系统；
+   * 同名包已存在时必须显式 `overwrite`（回执里带三个文件路径 + sha256）。
+   */
+  blueprintSave: (body: BlueprintSaveBody) =>
+    request<BlueprintSaveDoc>('/blueprint/save', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+}
+
+// ── #362 蓝图编辑器（mirror core/blitzkrieg_core/src/ipc/schema.rs）──────────
+
+/** `blueprint.compile` 应答：生成的 Lua 源码。 */
+export interface BlueprintCompileDoc {
+  lua: string
+  error?: string
+}
+
+/** `blueprint.save` 的请求体（camelCase wire 与内核 serde 对齐）。 */
+export interface BlueprintSaveBody {
+  name: string
+  json: string
+  /** 同名策略包已存在时必须显式为 true。 */
+  overwrite?: boolean
+}
+
+/** `blueprint.save` 回执：写了什么、写到哪、sha256 可对账。 */
+export interface BlueprintSaveDoc {
+  name: string
+  packageDir: string
+  blueprintPath: string
+  luaPath: string
+  manifestPath: string
+  luaSha256: string
+  /** blueprint/lua/manifest 三个文件的字节数。 */
+  bytes: number[]
+  error?: string
 }
 
 // ── #353 回测类型（mirror core/blitzkrieg_core/src/backtest_jobs.rs 的 wire 形）──
