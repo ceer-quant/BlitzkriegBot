@@ -286,6 +286,71 @@ pub mod method {
     pub const BACKTEST_STATUS: &str = "backtest.status";
     pub const BACKTEST_RESULT: &str = "backtest.result";
     pub const BACKTEST_EXPORT: &str = "backtest.export";
+
+    // ── #362 — the blueprint editor surface (compile + save) ─────────────────
+    // The WebUI canvas authors a blueprint JSON and asks the KERNEL to do
+    // everything that touches bytes on disk: `blueprint.compile` is the pure
+    // three-stage compiler behind the preview pane (a refusal is the same
+    // node-id-bearing message the CLI prints), `blueprint.save` validates THEN
+    // writes the strategy package (blueprint.json + strategy.lua + manifest
+    // under `user_layer/strategies_lua/<name>/`, the directory the loader
+    // scans). The UI never touches the filesystem directly — the repo iron
+    // rule — and the save receipt is the caller's only proof the write landed.
+    pub const BLUEPRINT_COMPILE: &str = "blueprint.compile";
+    pub const BLUEPRINT_SAVE: &str = "blueprint.save";
+}
+
+// ── #362 — the blueprint editor surface ──────────────────────────────────────
+
+/// `blueprint.compile` params: `{ "json": "<blueprint document>" }`.
+///
+/// The document travels as a STRING, not a nested JSON object, so the compile
+/// errors keep quoting the exact bytes the editor sent — the same property
+/// `--blueprint-compile <file>` has on the CLI side.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlueprintCompileParams {
+    pub json: String,
+}
+
+/// `blueprint.compile` result: the generated Lua source, verbatim.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlueprintCompileResult {
+    pub lua: String,
+}
+
+/// `blueprint.save` params. `name` is the package identity (directory name =
+/// manifest name, §6.4); `json` is the blueprint document, compiled fresh by
+/// the save arm — the caller sending a stale `lua` is not a thing: the kernel
+/// compiles, and what it compiled is what lands on disk. `overwrite` must be
+/// explicit to replace a package the loader already scans (a silent overwrite
+/// could swap a strategy an operator believes they know).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlueprintSaveParams {
+    pub name: String,
+    pub json: String,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+/// `blueprint.save` result: the package receipt. Every path is RELATIVE (the
+/// kernel's own strategy root), so a UI can show it without learning the host
+/// filesystem.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlueprintSaveResult {
+    pub name: String,
+    pub package_dir: String,
+    pub blueprint_path: String,
+    pub lua_path: String,
+    pub manifest_path: String,
+    /// The sha256 of the written `strategy.lua`, hex — the same digest the
+    /// manifest's `sha256` field carries, so the receipt is checkable against
+    /// the file without rehashing.
+    pub lua_sha256: String,
+    /// Bytes written per file, in blueprint/lua/manifest order — the receipt
+    /// the IPC contract promises (a save that "succeeded" without saying WHAT
+    /// it wrote is not auditable).
+    pub bytes: [u64; 3],
 }
 
 // ── E26 (§4.4) — systemic risk readout ──────────────────────────────────────

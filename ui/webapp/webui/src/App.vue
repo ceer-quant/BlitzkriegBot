@@ -5,7 +5,7 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useNow } from '@vueuse/core'
-import { LayoutDashboard, Activity, History, Boxes, Puzzle, Settings, Moon, Sun, SunMoon, Bell, BellOff, LogOut, Radio, FlaskConical, Gavel } from 'lucide-vue-next'
+import { LayoutDashboard, Activity, History, Boxes, Puzzle, Settings, Moon, Sun, SunMoon, Bell, BellOff, LogOut, Radio, FlaskConical, Gavel, Workflow } from 'lucide-vue-next'
 import { usePanelStore } from './stores/panel'
 import { hasToken, logout, ping } from './api/client'
 import { SESSION_EXPIRED_REASON } from './lib/session'
@@ -15,6 +15,7 @@ import brandMark from './assets/logo.png'
 import OverviewPage from './pages/Overview.vue'
 import HftPage from './pages/HftPage.vue'
 import BacktestPage from './pages/BacktestPage.vue'
+import BlueprintPage from './pages/BlueprintPage.vue'
 import StrategiesPage from './pages/Strategies.vue'
 import DecisionsPage from './pages/Decisions.vue'
 import EvolutionPage from './pages/EvolutionPage.vue'
@@ -26,7 +27,7 @@ import SegmentedControl from './components/ui/segmented/SegmentedControl.vue'
 import Button from './components/ui/button/Button.vue'
 import AlertBanner from './components/ui/alert/AlertBanner.vue'
 
-type TabId = 'overview' | 'hft' | 'backtest' | 'strategies' | 'decisions' | 'evolution' | 'plugins' | 'settings'
+type TabId = 'overview' | 'hft' | 'backtest' | 'blueprint' | 'strategies' | 'decisions' | 'evolution' | 'plugins' | 'settings'
 
 const store = usePanelStore()
 const { theme, isDark, cycleTheme, sound, toggleSound } = useTheme()
@@ -57,6 +58,7 @@ const pages = {
   overview: OverviewPage,
   hft: HftPage,
   backtest: BacktestPage,
+  blueprint: BlueprintPage,
   strategies: StrategiesPage,
   decisions: DecisionsPage,
   evolution: EvolutionPage,
@@ -69,6 +71,7 @@ const segments = [
   { id: 'overview', label: '总览', icon: LayoutDashboard },
   { id: 'hft', label: '行情面板', icon: Activity },
   { id: 'backtest', label: '回测', icon: History },
+  { id: 'blueprint', label: '蓝图', icon: Workflow },
   { id: 'strategies', label: '策略', icon: Boxes },
   { id: 'decisions', label: '裁决流', icon: Gavel },
   { id: 'evolution', label: '进化', icon: FlaskConical },

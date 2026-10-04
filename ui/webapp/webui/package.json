@@ -28,6 +28,7 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@vue-flow/core": "^1.48.2",
     "@vueuse/core": "^14.4.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
