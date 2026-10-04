@@ -8094,12 +8094,9 @@ impl Core {
                 if has_live_sell {
                     continue;
                 }
-                let closed_here = self.ome.all().iter().any(|o| {
-                    o.side == Side::Sell
-                        && o.token_id == pos.token_id
-                        && o.status == OrderStatus::Filled
-                        && o.updated_at_ms >= pos.entered_at_ms
-                });
+                let closed_here = self
+                    .ome
+                    .has_filled_sell_since(&pos.token_id, pos.entered_at_ms);
                 if !closed_here {
                     continue;
                 }
