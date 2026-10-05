@@ -293,6 +293,7 @@ mod tests {
             expires_at_ms: 1_800_000,
             round_slot: 1,
             round_duration_sec: 900,
+            archive_verdict: false,
             neg_risk: true,
             question: "".into(),
         }]);
@@ -326,6 +327,7 @@ mod tests {
             expires_at_ms: 1_800_000,
             round_slot: 1,
             round_duration_sec: 900,
+            archive_verdict: false,
             neg_risk: true,
             question: "".into(),
         }]);

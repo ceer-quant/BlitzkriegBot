@@ -101,6 +101,7 @@ fn bench_core() -> Core {
             expires_at_ms: end,
             round_slot: slot,
             round_duration_sec: 900,
+            archive_verdict: false,
             neg_risk: true,
             question: "?".into(),
         })

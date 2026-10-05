@@ -103,6 +103,7 @@ fn market(end_ms: i64, slot: i64) -> CryptoMarket {
         expires_at_ms: end_ms,
         round_slot: slot,
         round_duration_sec: 900,
+        archive_verdict: false,
         neg_risk: true,
         question: "BTC up or down".into(),
     }

@@ -1180,6 +1180,12 @@ pub struct Core {
     position_db: Option<crate::position_db::PositionDb>,
     /// Feed/decision counters for observability (P4 diagnostics).
     stats: CoreStats,
+    /// #377 (治 #2): conditions the archive declared to carry an on-chain
+    /// verdict (`RoundMarkets` markets flagged `archive_verdict`). The dry
+    /// settlement ladder must not query these markets — the stream settles
+    /// them — and querying would stamp a query clock no archive answer ever
+    /// resets, tripping the blind alert.
+    archive_verdicts: HashSet<String>,
     /// When this core's ACCOUNTING SESSION began, in epoch ms (issue #200).
     ///
     /// A seeded (`dry`/`readonly`) core re-seeds its cash ledger here
@@ -1588,6 +1594,7 @@ impl Core {
             order_db,
             position_db,
             stats: CoreStats::default(),
+            archive_verdicts: HashSet::new(),
             // The session clock for the accounting identity (issue #200). Read
             // once, at construction: the ledger below is seeded at the same
             // instant, so "cash since the seed" and "trades since startedAtMs"
@@ -3037,8 +3044,46 @@ impl Core {
             // above but are not engine inputs — no counter, no strategy effect.
             crate::engine::DataEvent::Trade { .. } => {}
             crate::engine::DataEvent::RoundEnd { .. } => {}
+            // #377 (治 #2): a verdict from the stream settles its market
+            // directly — recorded like any other data event (above), counted,
+            // and handed to the settlement book. A fill-level wake keeps the
+            // fast path's evaluator in step with the position-set change the
+            // close causes.
+            crate::engine::DataEvent::Resolution {
+                condition_id,
+                payouts,
+                neg_risk,
+                ..
+            } => {
+                self.stats.resolutions += 1;
+                if self.config.backtest_fast {
+                    self.fast_eval_wake = true;
+                }
+                self.on_market_resolution(
+                    blitzkrieg_market_api::MarketResolution {
+                        condition_id: condition_id.clone(),
+                        resolved: true,
+                        payouts: payouts.clone(),
+                        neg_risk: *neg_risk,
+                        // The converter recovered this verdict from the
+                        // wallet's own redemption activity; naming the source
+                        // keeps the settlement journal's provenance honest.
+                        source: "archive".to_string(),
+                    },
+                    now_ms,
+                );
+            }
             crate::engine::DataEvent::RoundMarkets { markets, .. } => {
                 self.stats.rounds += 1;
+                // #377 (治 #2): record which markets the archive promised a
+                // verdict for. Their dry-ladder queries are suppressed below —
+                // the stream settles them, and a query stamped here would wait
+                // for an answer that never comes (blind-alert false positive).
+                for m in markets {
+                    if m.archive_verdict {
+                        self.archive_verdicts.insert(m.condition_id.clone());
+                    }
+                }
                 // Replay fast path: a rollover replaces the scanner's market
                 // list and restarts the round clock — the next evaluation sees
                 // a different round context, and the timing verdict flips.
@@ -7304,8 +7349,19 @@ impl Core {
         {
             return;
         }
-        let positions: Vec<crate::position::OpenPosition> =
+        // #377 (治 #2): markets the archive promised a verdict for are settled
+        // by the stream (`DataEvent::Resolution`), so the dry ladder must not
+        // query them — a stamped query would wait for an answer that never
+        // comes and trip the blind alert. Filtering here removes them from
+        // tracking AND from the forget loop's live set (self-healing: a market
+        // that slipped into the watch list is dropped on the next sync).
+        let all: Vec<crate::position::OpenPosition> =
             self.positions.open_positions().to_vec();
+        let positions: Vec<crate::position::OpenPosition> = all
+            .iter()
+            .filter(|p| !self.archive_verdicts.contains(&p.condition_id))
+            .cloned()
+            .collect();
         self.settlement.track_markets(&positions, now_ms);
         let live: HashSet<&str> = positions.iter().map(|p| p.condition_id.as_str()).collect();
         for condition_id in self.settlement.tracked_condition_ids() {
@@ -7324,8 +7380,12 @@ impl Core {
             // permanently open once the earliest expiry had passed: the
             // busy-phase sample put `take_settlement_queries` at 95% of
             // tick, nearly all of it this watch-list re-derivation cloning
-            // every open position per tick.
-            self.fast_next_expiry_ms = positions
+            // every open position per tick. Computed over the UNFILTERED
+            // set: an archive-verdict position's expiry must still wake the
+            // sync (its settlement event arrives around then), and letting
+            // the minimum collapse to `i64::MAX` would reopen this gate on
+            // every tick — the exact hot path #375 closed.
+            self.fast_next_expiry_ms = all
                 .iter()
                 .map(|p| p.expires_at_ms)
                 .filter(|t| *t > now_ms)
@@ -8530,6 +8590,10 @@ struct CoreStats {
     tops: u64,
     spots: u64,
     rounds: u64,
+    /// #377 (治 #2): archive verdict events replayed into the core — the
+    /// count of on-chain resolutions that came from the stream instead of
+    /// the dry ladder.
+    resolutions: u64,
     evaluations: u64,
     signals: u64,
     place_rejected: u64,
@@ -8813,6 +8877,7 @@ mod books_mirror_tests {
                     expires_at_ms: end,
                     round_slot: slot,
                     round_duration_sec: 900,
+                    archive_verdict: false,
                     neg_risk: true,
                     question: "?".into(),
                 }],
@@ -8913,6 +8978,7 @@ mod books_mirror_tests {
                     expires_at_ms: end,
                     round_slot: slot,
                     round_duration_sec: 900,
+                    archive_verdict: false,
                     neg_risk: true,
                     question: "?".into(),
                 }],
@@ -10716,6 +10782,7 @@ mod strategy_dispatch_tests {
                 expires_at_ms: 1_800_000,
                 round_slot: 1,
                 round_duration_sec: 900,
+                archive_verdict: false,
                 neg_risk: true,
                 question: format!("{a} up or down"),
             })

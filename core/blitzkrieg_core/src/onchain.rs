@@ -317,6 +317,126 @@ fn price_cache_path(out_dir: &Path, token: &str, start_sec: i64, end_sec: i64) -
         .join(format!("{token}_{start_sec}_{end_sec}.json"))
 }
 
+/// Bump when the converter's OUTPUT SEMANTICS change in a way old cached
+/// datasets must not inherit: the manifest pins this number, and a cache hit
+/// with a different (or missing — pre-verdict archives) value re-converts
+/// from the cached fills instead of answering stale.
+const CONVERTER_VERSION: u64 = 1;
+
+fn redemptions_path(req: &PullRequest) -> PathBuf {
+    req.out_dir.join(format!("{}.redemptions.jsonl", stem(req)))
+}
+
+/// What one condition's redemption activity proves about its outcome
+/// (治 #2). Two kinds of evidence, both taken from the wallet's own REDEEM
+/// rows: a WINNING redemption prints the cash received against the winner's
+/// token (`usdcSize > 0`), a worthless one burns the loser's shares
+/// (`usdcSize == 0` against a token, no cash). A row that carries no asset
+/// still carries the outcome index (0 = Up, 1 = Down — gamma's
+/// `clobTokenIds` order), which the converter can map onto the market's
+/// declared tokens.
+#[derive(Debug, Default, Clone)]
+struct ConditionVerdict {
+    winner_asset: Option<String>,
+    winner_index: Option<i64>,
+    loser_asset: Option<String>,
+    loser_index: Option<i64>,
+}
+
+/// Numeric field that tolerates both quoted and bare JSON numbers — the
+/// activity export has used both shapes across versions.
+fn row_f64(v: &Value, key: &str) -> f64 {
+    match v.get(key) {
+        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+        Some(Value::String(s)) => s.trim().parse::<f64>().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+/// Fold one REDEEM row into the verdict map. First evidence wins per slot:
+/// retried redemptions print one row per attempt and never disagree (they
+/// redeem the same outcome), so the fold is order-stable for a given ledger.
+fn fold_redemption(out: &mut BTreeMap<String, ConditionVerdict>, v: &Value) {
+    let Some(cid) = v.get("conditionId").and_then(Value::as_str) else {
+        return;
+    };
+    if cid.is_empty() {
+        return;
+    }
+    let asset = v
+        .get("asset")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let index = v
+        .get("outcomeIndex")
+        .and_then(Value::as_i64)
+        .filter(|i| (0..=1).contains(i));
+    let e = out.entry(cid.to_string()).or_default();
+    if row_f64(v, "usdcSize") > 0.0 {
+        if e.winner_asset.is_none() {
+            e.winner_asset = asset;
+        }
+        if e.winner_index.is_none() {
+            e.winner_index = index;
+        }
+    } else if row_f64(v, "size") > 0.0 {
+        if e.loser_asset.is_none() {
+            e.loser_asset = asset;
+        }
+        if e.loser_index.is_none() {
+            e.loser_index = index;
+        }
+    }
+}
+
+/// Read the redemption side file back (empty when absent — a `/trades` walk
+/// carries no REDEEM rows, so its datasets convert verdict-less and the dry
+/// ladder keeps doing the settling, exactly as before).
+fn load_redemptions(path: &Path) -> Result<BTreeMap<String, ConditionVerdict>, String> {
+    let mut out: BTreeMap<String, ConditionVerdict> = BTreeMap::new();
+    if !path.exists() {
+        return Ok(out);
+    }
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            fold_redemption(&mut out, &v);
+        }
+    }
+    Ok(out)
+}
+
+/// The winning token per the redemption evidence, or `None` when the rows
+/// prove nothing usable against THIS market's declared tokens (stale gamma
+/// tokens, no redeem rows at all). Winner evidence outranks loser evidence;
+/// an outcome index substitutes when the row carries no asset; a proven
+/// loser names the other side as the winner.
+fn resolve_winner(vd: &ConditionVerdict, up: &str, down: &str) -> Option<String> {
+    let known = |a: &str| a == up || a == down;
+    if let Some(a) = vd.winner_asset.as_deref().filter(|a| known(a)) {
+        return Some(a.to_string());
+    }
+    match vd.winner_index {
+        Some(0) => return Some(up.to_string()),
+        Some(1) => return Some(down.to_string()),
+        _ => {}
+    }
+    if let Some(a) = vd.loser_asset.as_deref().filter(|a| known(a)) {
+        return Some((if a == up { down } else { up }).to_string());
+    }
+    match vd.loser_index {
+        Some(0) => return Some(down.to_string()),
+        Some(1) => return Some(up.to_string()),
+        _ => {}
+    }
+    None
+}
+
 // ── sha256 ──────────────────────────────────────────────────────────────────
 
 /// Hex SHA256 of a file's bytes. The manifest carries one per dataset; a
@@ -770,7 +890,16 @@ async fn walk_trades(
 /// row through the raw side file; finalize dedupes/sorts exactly as for
 /// walked pages. The copy is a local read — always rewritten from scratch,
 /// idempotent by construction (no resume state needed).
-fn copy_activity(req: &PullRequest, path: &Path, rp: &Path) -> Result<u64, String> {
+///
+/// 治 #2: REDEEM rows ride along into a SEPARATE side file (never the fill
+/// stream — a redemption is not a fill and would poison the fill key space):
+/// they are the wallet's own redemption activity, the on-chain evidence the
+/// converter turns into verdict events. The window filter is intentionally
+/// WIDER than the fills' (`end_sec` + one day): a round that expired at the
+/// window's last instant settles minutes-to-hours later, and clipping the
+/// evidence to the fill window would blind exactly the settlements the
+/// replay's tail is supposed to close.
+fn copy_activity(req: &PullRequest, path: &Path, rp: &Path) -> Result<(u64, u64), String> {
     if let Some(parent) = rp.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
@@ -778,10 +907,15 @@ fn copy_activity(req: &PullRequest, path: &Path, rp: &Path) -> Result<u64, Strin
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let start_sec = req.start_ms / 1000;
     let end_sec = req.end_ms / 1000;
+    let rdp = redemptions_path(req);
+    let mut rf = std::io::BufWriter::new(
+        std::fs::File::create(&rdp).map_err(|e| format!("create {}: {e}", rdp.display()))?,
+    );
     let mut f = std::io::BufWriter::new(
         std::fs::File::create(rp).map_err(|e| format!("create {}: {e}", rp.display()))?,
     );
     let mut n: u64 = 0;
+    let mut r: u64 = 0;
     for line in content.lines() {
         if line.trim().is_empty() {
             continue;
@@ -790,23 +924,36 @@ fn copy_activity(req: &PullRequest, path: &Path, rp: &Path) -> Result<u64, Strin
             Ok(v) => v,
             Err(_) => continue, // a torn line — same tolerance as finalize
         };
-        // The activity ledger also carries REDEEM/MERGE/rebate rows; only
-        // TRADE rows are fills.
-        if v.get("type").and_then(Value::as_str) != Some("TRADE") {
-            continue;
-        }
         let ts = v.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
-        if ts < start_sec || ts > end_sec {
-            continue;
+        match v.get("type").and_then(Value::as_str) {
+            // The activity ledger also carries MERGE/rebate rows; only TRADE
+            // rows are fills.
+            Some("TRADE") => {
+                if ts < start_sec || ts > end_sec {
+                    continue;
+                }
+                // No MAX_FILLS guard here: the ledger is a local, finite file —
+                // the runaway guard exists for the network walk, not for a
+                // bounded copy.
+                writeln!(f, "{v}").map_err(|e| format!("write {}: {e}", rp.display()))?;
+                n += 1;
+            }
+            Some("REDEEM") => {
+                // Wider window: redemption lags expiry by minutes-to-hours.
+                if ts < start_sec || ts > end_sec + 86_400 {
+                    continue;
+                }
+                writeln!(rf, "{v}").map_err(|e| format!("write {}: {e}", rdp.display()))?;
+                r += 1;
+            }
+            _ => continue,
         }
-        // No MAX_FILLS guard here: the ledger is a local, finite file — the
-        // runaway guard exists for the network walk, not for a bounded copy.
-        writeln!(f, "{v}").map_err(|e| format!("write {}: {e}", rp.display()))?;
-        n += 1;
     }
     f.flush()
         .map_err(|e| format!("flush {}: {e}", rp.display()))?;
-    Ok(n)
+    rf.flush()
+        .map_err(|e| format!("flush {}: {e}", rdp.display()))?;
+    Ok((n, r))
 }
 
 // ── the pull itself ─────────────────────────────────────────────────────────
@@ -838,29 +985,38 @@ pub async fn pull_and_convert(
             .and_then(Value::as_bool)
             .unwrap_or(false);
         if complete && tp.exists() && ep.exists() {
-            verify_dataset(&mp)?;
-            let trades = v
-                .pointer("/counts/trades")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let events = v
-                .pointer("/counts/events")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            report(
-                progress,
-                PullPhase::Done,
-                trades,
-                "cache hit (sha256 verified)".into(),
-            );
-            return Ok(PullOutcome {
-                trades_path: tp,
-                events_path: ep,
-                manifest_path: mp,
-                trades,
-                events,
-                cache_hit: true,
-            });
+            // CONVERTER_VERSION gate (治 #2): a dataset converted by an older
+            // converter carries no verdict events — answering it from cache
+            // would silently replay the settlement blind spot forever. The
+            // stem's content tag hashes the LEDGER (its identity), not the
+            // converter, so a converter bump is checked here against the
+            // manifest pin; a mismatch (or an older manifest with no pin)
+            // falls through to a fresh convert over the same cached fills.
+            if v.pointer("/converterVersion").and_then(Value::as_u64) == Some(CONVERTER_VERSION) {
+                verify_dataset(&mp)?;
+                let trades = v
+                    .pointer("/counts/trades")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let events = v
+                    .pointer("/counts/events")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                report(
+                    progress,
+                    PullPhase::Done,
+                    trades,
+                    "cache hit (sha256 verified)".into(),
+                );
+                return Ok(PullOutcome {
+                    trades_path: tp,
+                    events_path: ep,
+                    manifest_path: mp,
+                    trades,
+                    events,
+                    cache_hit: true,
+                });
+            }
         }
     }
 
@@ -879,8 +1035,13 @@ pub async fn pull_and_convert(
                 0,
                 format!("activity ledger {}", path.display()),
             );
-            let n = copy_activity(req, path, &rp)?;
-            report(progress, PullPhase::Trades, n, "rows copied".into());
+            let (n, r) = copy_activity(req, path, &rp)?;
+            report(
+                progress,
+                PullPhase::Trades,
+                n,
+                format!("rows copied, {r} redemptions"),
+            );
             (0, n)
         }
     };
@@ -1075,13 +1236,18 @@ pub async fn pull_and_convert(
     }
 
     // ── Convert ───────────────────────────────────────────────────────────
-    let (events, skipped) = convert(&rows, &gamma, &price_series, req)?;
+    // 治 #2: the redemption side file (written by copy_activity for an
+    // activity-ledger source; absent for a /trades walk) is the wallet's own
+    // on-chain verdict evidence — folded per condition and handed to the
+    // converter, which flags verdict markets and emits Resolution events.
+    let verdicts = load_redemptions(&redemptions_path(req))?;
+    let (events, skipped) = convert(&rows, &gamma, &price_series, &verdicts, req)?;
     write_events(&ep, &events)?;
     report(
         progress,
         PullPhase::Convert,
         events.len() as u64,
-        String::new(),
+        format!("{} verdict conditions", verdicts.len()),
     );
 
     let trades_sha = sha256_file(&tp)?;
@@ -1090,6 +1256,10 @@ pub async fn pull_and_convert(
         "wallet": req.wallet,
         "startMs": req.start_ms, "endMs": req.end_ms,
         "asset": req.asset, "market": req.market,
+        // 治 #2: the cache-hit gate reads this pin — a dataset converted by
+        // an older converter (no pin, or a lower one) is re-converted instead
+        // of silently replaying the settlement blind spot forever.
+        "converterVersion": CONVERTER_VERSION,
         "pulledAtMs": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -1099,7 +1269,7 @@ pub async fn pull_and_convert(
             "events": ep.file_name().and_then(|s| s.to_str()).unwrap_or(""),
         },
         "state": { "tradesOffset": offset, "fetched": fetched, "complete": true },
-        "counts": { "trades": trades_n, "conditions": conditions.len(), "events": events.len(), "skippedRows": skipped },
+        "counts": { "trades": trades_n, "conditions": conditions.len(), "events": events.len(), "skippedRows": skipped, "verdicts": verdicts.len() },
         "sha256": { "trades": trades_sha, "events": events_sha },
     });
     write_json_atomic(&mp, &manifest)?;
@@ -1126,11 +1296,37 @@ fn gamma_tokens(g: &Value) -> Vec<String> {
     ids
 }
 
+/// The proven (winner, loser) token pair for one market, or `None` when the
+/// evidence cannot name BOTH sides against this market's declared tokens.
+/// The market flag and the emitted event MUST share this one decision: a
+/// flag without an emission would silence the dry ladder and strand the
+/// position (no settlement ever arrives), and an emission without the flag
+/// would race the dry ladder at the expiry tick.
+fn resolved_pair(vd: &ConditionVerdict, up: &str, down: &str) -> Option<(String, String)> {
+    if up.is_empty() || down.is_empty() {
+        return None;
+    }
+    let winner = resolve_winner(vd, up, down)?;
+    let loser = if winner == up {
+        down.to_string()
+    } else {
+        up.to_string()
+    };
+    Some((winner, loser))
+}
+
 /// The deterministic converter: canonical fills + gamma metadata + price
 /// series → the archive event stream. Events are sorted by (at, rank) with
 /// round(0) < top(1) < trade(2) < round_end(3), so the same inputs always
 /// produce byte-identical output (the manifest's sha256 is a real
 /// fingerprint). Returns (events, skipped_rows).
+///
+/// 治 #2: `verdicts` (the wallet's own redemption evidence) marks every
+/// market the archive carries an on-chain winner for — that market's
+/// `CryptoMarket` is flagged `archive_verdict` (the dry ladder stands down)
+/// and a `Resolution` event is emitted at the round's expiry instant, which
+/// the replay settles positions from directly.
+///
 /// One token's published price series over one round window: `(t_sec, price)`
 /// points, keyed by `(token, start_sec, end_sec)`.
 type PriceSeries = BTreeMap<(String, i64, i64), Vec<(i64, Decimal)>>;
@@ -1139,6 +1335,7 @@ fn convert(
     rows: &[Value],
     gamma: &BTreeMap<String, Value>,
     price_series: &PriceSeries,
+    verdicts: &BTreeMap<String, ConditionVerdict>,
     req: &PullRequest,
 ) -> Result<(Vec<DataEvent>, u64), String> {
     use crate::data_source::event_to_json;
@@ -1250,6 +1447,15 @@ fn convert(
             // with the configured grid (5m data on a 15m assumption ages every
             // round 3× too slowly) instead of silently mis-timing it.
             round_duration_sec: rs.duration_sec,
+            // 治 #2: the archive carries this market's on-chain verdict (a
+            // Resolution event rides the stream), so the core's dry settlement
+            // ladder must not synthesize a competing one from book evidence.
+            archive_verdict: resolved_pair(
+                verdicts.get(*cid).map_or(&ConditionVerdict::default(), |v| v),
+                &up,
+                &down,
+            )
+            .is_some(),
             neg_risk: g.get("negRisk").and_then(Value::as_bool).unwrap_or(false),
             question: sample
                 .get("title")
@@ -1269,13 +1475,16 @@ fn convert(
         }
     }
 
-    // rank: round < top < trade < round_end — the canonical same-instant order.
+    // rank: round < top < spot < trade < resolution < round_end — the
+    // canonical same-instant order.
     let rank = |ev: &DataEvent| match ev {
         DataEvent::RoundMarkets { .. } => 0u8,
         DataEvent::TopOfBook { .. } => 1,
-        DataEvent::Trade { .. } => 2,
-        DataEvent::RoundEnd { .. } => 3,
-        _ => 4,
+        DataEvent::Spot { .. } => 2,
+        DataEvent::Trade { .. } => 3,
+        DataEvent::Resolution { .. } => 4,
+        DataEvent::RoundEnd { .. } => 5,
+        DataEvent::Book { .. } => 6,
     };
     let mut events: Vec<DataEvent> = Vec::new();
     for rc in rounds.values() {
@@ -1357,6 +1566,27 @@ fn convert(
         });
     }
     for rc in rounds.values() {
+        // 治 #2: the verdict event rides the round boundary — same instant
+        // as the RoundEnd, ranked just before it, so a replay settles every
+        // archive-verdict market exactly when the round closes and the dry
+        // ladder (suppressed for these markets) never races it.
+        for m in &rc.markets {
+            let Some(vd) = verdicts.get(&m.condition_id) else {
+                continue;
+            };
+            let Some((winner, loser)) = resolved_pair(vd, &m.up_token_id, &m.down_token_id)
+            else {
+                continue;
+            };
+            events.push(DataEvent::Resolution {
+                condition_id: m.condition_id.clone(),
+                // A binary boundary names BOTH sides: the winner pays 1, the
+                // loser 0 — the core books what the stream says.
+                payouts: vec![(winner, Decimal::ONE), (loser, Decimal::ZERO)],
+                neg_risk: m.neg_risk,
+                now_ms: rc.end_sec * 1000,
+            });
+        }
         events.push(DataEvent::RoundEnd {
             now_ms: rc.end_sec * 1000,
         });
