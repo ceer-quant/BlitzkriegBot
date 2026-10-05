@@ -9,7 +9,9 @@
 # deploy could look green and behave like the previous build.
 #
 # This file stages all of them, reports what differs, installs them with a
-# rollback copy, verifies what landed, and can undo itself. It is SOURCED by
+# rollback copy, verifies what landed, and can undo itself. It also owns the one
+# pre-build verdict the panel needs (`ua_node_modules_stale`: has the webui's
+# node_modules fallen behind its lockfile?). It is SOURCED by
 # `scripts/upgrade.sh`, never executed on its own, and it deliberately knows
 # nothing about cargo, npm or git: every function works on directories the caller
 # names, which is what lets `scripts/upgrade-propagate-test.sh` exercise the whole
@@ -244,4 +246,27 @@ ua_prune_rollbacks() {
       *) ua_die "refusing to prune '$old': not a rollback directory" ;;
     esac
   done
+}
+
+# Is the webui's node_modules behind its lockfile? A pure file-mtime verdict —
+# this library still knows nothing about npm. The bare `[ -d node_modules ]`
+# this replaces skipped the install forever after the first one, so a dependency
+# ADDED to package.json never landed and the build died on the import
+# (2026-10-06: Rollup could not resolve @vue-flow/core).
+#   * no node_modules                  -> stale (nothing installed yet)
+#   * package-lock.json NEWER than it  -> stale (deps changed since the install;
+#                                         npm ci recreates the tree, so a fresh
+#                                         install always carries the newer mtime,
+#                                         and a checkout/merge that updates the
+#                                         lockfile is exactly the signal wanted)
+#   * anything else (no lockfile ...)  -> NOT stale: the build itself fails loudly
+#                                         on a broken tree, and that error is the
+#                                         right one — this verdict exists only to
+#                                         catch the silent-skip case.
+# Returns 0 = stale, 1 = fresh. $1 = the webui root.
+ua_node_modules_stale() {
+  webui="$1"
+  [ -d "$webui/node_modules" ] || return 0
+  [ -f "$webui/package-lock.json" ] && [ "$webui/package-lock.json" -nt "$webui/node_modules" ] && return 0
+  return 1
 }

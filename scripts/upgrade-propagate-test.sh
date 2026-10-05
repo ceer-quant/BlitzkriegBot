@@ -15,7 +15,12 @@
 #   4. a tampered install is caught by ua_verify before the stack is restarted;
 #   5. rollback restores the previous binaries, cdylibs, bundle AND configs —
 #      including a config the operator had edited locally;
-#   6. the rollback pruner keeps the three newest sets and nothing else.
+#   6. the rollback pruner keeps the three newest sets and nothing else;
+#   7. the webui node_modules verdict: a fresh install is kept, a lockfile
+#      newer than the install is stale (the 2026-10-06 @vue-flow incident —
+#      the bare `[ -d node_modules ]` it replaced calls that tree fresh), a
+#      missing install is stale, and a lockfile-less tree is left to the
+#      build's own loud failure.
 #
 # Run it from anywhere: `sh scripts/upgrade-propagate-test.sh` (exit 0 = pass).
 
@@ -162,6 +167,52 @@ check "the survivors are the three newest" "rollback-20260103T000000 rollback-20
   "$(ls -1d "$REPO_ROOT"/target/rollback-* | xargs -n1 basename | sort | tr '\n' ' ' | sed 's/ $//')"
 check "an unrelated target/ dir is untouched" "1" \
   "$(ls -1d "$REPO_ROOT"/target/keepme-* | wc -l | tr -d ' ')"
+
+# ── 7. the webui node_modules verdict ────────────────────────────────────────
+printf '\nwebui node_modules verdict\n'
+# Existence guard first: on the two fresh-expected arms a missing function
+# would be indistinguishable from a real "fresh" verdict (both non-zero) and
+# read as a false green. A missing verdict is a hard red instead.
+if ! type ua_node_modules_stale >/dev/null 2>&1; then
+  no "the verdict function exists in the library" "ua_node_modules_stale" "missing — §7 cannot run"
+  printf '\n%s\n' "upgrade-propagate: $pass passed, $fail failed"
+  exit 1
+fi
+# mtimes are pinned with -t stamps (and set AFTER the files exist), so the
+# fresh/stale ordering can never race the test's own file creation.
+mkdir -p "$tmp/webui-fresh/node_modules" "$tmp/webui-stale/node_modules" \
+  "$tmp/webui-nolock/node_modules" "$tmp/webui-missing"
+: > "$tmp/webui-fresh/package-lock.json"
+: > "$tmp/webui-stale/package-lock.json"
+: > "$tmp/webui-missing/package-lock.json"
+touch -t 202601010000 "$tmp/webui-fresh/package-lock.json" \
+  "$tmp/webui-stale/node_modules" "$tmp/webui-nolock/node_modules"
+touch -t 202601020000 "$tmp/webui-fresh/node_modules" \
+  "$tmp/webui-stale/package-lock.json"
+
+if ua_node_modules_stale "$tmp/webui-fresh"; then
+  no "a fresh install is kept" "fresh (exit 1)" "stale (exit 0)"
+else
+  ok "a fresh install is kept"
+fi
+# The 2026-10-06 incident's exact shape: dependencies ADDED to package.json
+# after the last install. The bare `[ -d node_modules ]` this verdict replaces
+# calls exactly this tree fresh — that skip-forever is what this arm pins.
+if ua_node_modules_stale "$tmp/webui-stale"; then
+  ok "a lockfile newer than the install is stale"
+else
+  no "a lockfile newer than the install is stale" "stale (exit 0)" "fresh (exit 1)"
+fi
+if ua_node_modules_stale "$tmp/webui-missing"; then
+  ok "a missing install is stale"
+else
+  no "a missing install is stale" "stale (exit 0)" "fresh (exit 1)"
+fi
+if ua_node_modules_stale "$tmp/webui-nolock"; then
+  no "a lockfile-less tree is left to the build" "fresh (exit 1)" "stale (exit 0)"
+else
+  ok "a lockfile-less tree is left to the build"
+fi
 
 printf '\n%s\n' "upgrade-propagate: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1

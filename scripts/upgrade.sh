@@ -125,7 +125,14 @@ step "3. build (release workspace + reference strategy cdylib + panel bin + webu
   cd "$build_wt/ui/webapp/webui"
   # The panel serves whatever dist/ the build writes, and step 5 installs it into
   # the running checkout — a Rust-only upgrade shipped a stale panel (#244).
-  [ -d node_modules ] || npm ci
+  # The bare `[ -d node_modules ]` this replaces skipped the install forever
+  # after the first one, so a dependency ADDED to package.json never landed in
+  # the build worktree and the upgrade died at this build (2026-10-06: Rollup
+  # could not resolve @vue-flow/core). The verdict is the propagation library's
+  # file-mtime test — this script still touches no npm internals itself.
+  if ua_node_modules_stale "$build_wt/ui/webapp/webui"; then
+    npm ci
+  fi
   npm run build
 )
 
