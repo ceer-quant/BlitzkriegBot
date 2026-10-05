@@ -209,6 +209,11 @@ pub mod method {
     pub const SYSTEM_UPDATE_CONFIGURE: &str = "system.update.configure";
     /// One manual update check (the UI's "check for updates" button).
     pub const SYSTEM_UPDATE_CHECK: &str = "system.update.check";
+    /// #379: download + verify the newer release into the staging directory
+    /// (`data/update/staging/`). REPLACEMENT is the launcher's job (§7.5) —
+    /// this arm only advances the state machine to "restart-ready", it never
+    /// touches a running binary.
+    pub const SYSTEM_UPDATE_STAGE: &str = "system.update.stage";
 
     // ── v0.3 Wave 0 (#329) — the two read-only envelope freezes ─────────────
     // The two arms Wave 0 lands in `server.rs`, with their wire shapes frozen

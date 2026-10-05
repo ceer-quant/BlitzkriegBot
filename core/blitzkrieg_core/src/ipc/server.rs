@@ -439,6 +439,9 @@ pub async fn run(
         config.update_check_enabled,
         config.update_auto,
     ));
+    // #379: the automatic-check clock is boot configuration (never written by
+    // the UI switches); it rides the same state cell so the scheduler reads it.
+    update_state.set_auto_check_interval_secs(config.update_interval_secs);
     crate::ipc::version::load_into(&update_state);
     let github_token = std::env::var("BLITZKRIEG_GITHUB_TOKEN")
         .ok()
@@ -446,9 +449,20 @@ pub async fn run(
     crate::ipc::version::spawn_startup_check(
         update_state.clone(),
         crate::ipc::build_info::BUILD_INFO.version.to_string(),
-        github_token,
+        github_token.clone(),
     );
-
+    // #379 (§7.4): the automatic-check scheduler. A no-op task-less return
+    // unless the interval is configured AND the check switch is on — with the
+    // shipped defaults (interval 0) nothing is spawned and nothing dials.
+    // No shutdown wiring on purpose: the task lives inside this runtime, so
+    // it ends when the server's process ends — an extra channel would only
+    // widen the surface for a lost wakeup.
+    let _auto_check = crate::ipc::version::spawn_auto_check_scheduler(
+        update_state.clone(),
+        crate::ipc::build_info::BUILD_INFO.version.to_string(),
+        github_token.clone(),
+        std::future::pending(),
+    );
     // The `risk.limits` readout (§4.4), assembled ONCE: the nine new
     // systemic limits are restart-to-change (deliberately absent from
     // `risk.setLimits`) and the exit resolution is not a #191 hot key, so
@@ -806,6 +820,61 @@ async fn handle_line(
                     ))
                     .unwrap_or(Value::Null),
                 )
+            }
+        }
+
+        // #379 (§7.5): download + verify the newer release into
+        // `data/update/staging/`. GUARDED by `autoUpdate` — the switch means
+        // "may a newer release be fetched and staged", for the scheduler and
+        // the manual call alike. The reply is the staging state machine; the
+        // bytes are the launcher's to install, and this arm never touches a
+        // running binary (§7.5's iron rule — see the PR description).
+        method::SYSTEM_UPDATE_STAGE => {
+            if !crate::ipc::version::stage_enabled(update_state) {
+                Err((
+                    Failure::APPLICATION,
+                    "update staging is disabled (autoUpdate=false); enable it via \
+                     system.update.configure"
+                        .to_string(),
+                    None,
+                ))
+            } else {
+                let actor = match peer {
+                    PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                    _ => "uid:unknown".to_string(),
+                };
+                let local_target = crate::ipc::build_info::BUILD_INFO.target.to_string();
+                let token = std::env::var("BLITZKRIEG_GITHUB_TOKEN")
+                    .ok()
+                    .filter(|t| !t.trim().is_empty());
+                let staging = crate::ipc::version::staging_dir();
+                let fetch_target = local_target.clone();
+                crate::ipc::version::stage_once(
+                    update_state,
+                    &local_target,
+                    now_ms() as u64,
+                    &staging,
+                    move |tag: String, version: String| async move {
+                        crate::ipc::version::fetch_release_assets(
+                            &tag,
+                            &version,
+                            &fetch_target,
+                            token,
+                        )
+                        .await
+                    },
+                )
+                .await;
+                let stage = update_state.stage_snapshot();
+                crate::ipc::version::audit_event(&serde_json::json!({
+                    "ts": now_ms(),
+                    "event": "update.stage",
+                    "actor": actor,
+                    "phase": stage.phase.token(),
+                    "version": stage.version,
+                    "asset": stage.asset,
+                }));
+                Ok(serde_json::to_value(&stage).unwrap_or(Value::Null))
             }
         }
 
@@ -3355,6 +3424,64 @@ mod tests {
             updates.snapshot().outcome,
             crate::ipc::version::CheckOutcome::NotChecked,
             "no request may have been made, not even a failed one"
+        );
+    }
+
+    /// #379 (§7.5): the staging arm is refused BY NAME when autoUpdate is
+    /// off — the switch guards the download whoever asks for it, and the
+    /// refusal says which switch to flip (A4's shape for staging).
+    #[tokio::test]
+    async fn a_disabled_update_stage_is_refused_by_name() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let updates = Arc::new(crate::ipc::version::UpdateState::new(false, false));
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &updates,
+            &mut SessionState::default(),
+            r#"{"jsonrpc":"2.0","id":1,"method":"system.update.stage","params":{}}"#.to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "a disabled stage must be refused, not silently answered: {reply}"
+        );
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("autoUpdate"),
+            "the refusal must name the switch: {reply}"
+        );
+        assert_eq!(
+            updates.stage_snapshot().phase,
+            crate::ipc::version::StagePhase::Idle,
+            "no download may have been started"
+        );
+    }
+
+    /// #379: the staging reply IS the staging state machine (§7.5 wire): the
+    /// phase travels on the reply, and with nothing `Available` a permitted
+    /// call is a no-op that stays `idle` — not an error.
+    #[tokio::test]
+    async fn a_permitted_stage_with_no_available_verdict_answers_idle() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let updates = Arc::new(crate::ipc::version::UpdateState::new(false, true));
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &updates,
+            &mut SessionState::default(),
+            r#"{"jsonrpc":"2.0","id":1,"method":"system.update.stage","params":{}}"#.to_string(),
+        )
+        .await;
+        let result = reply
+            .get("result")
+            .expect("a permitted no-op stage answers a result, not an error");
+        assert_eq!(
+            result["phase"], "idle",
+            "no Available verdict → nothing to stage: {result}"
         );
     }
 

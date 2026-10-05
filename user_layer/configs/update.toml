@@ -13,5 +13,10 @@
 check_enabled = false
 # May an update be applied without an explicit operator action? The kernel
 # itself never installs anything either way — installation is the launcher's
-# job (blitzkrieg update); this switch only governs the UI's "i" affordance.
+# job (blitzkrieg update); this switch only governs the UI's "i" affordance
+# and (#379) the staging/download gate.
 auto_update = false
+# #379: seconds between AUTOMATIC update checks (CLI > env > this file;
+# 0 or absent = no scheduler task exists — the clock is an explicit opt-in,
+# and with check_enabled=false nothing dials regardless of this value).
+interval_secs = 0

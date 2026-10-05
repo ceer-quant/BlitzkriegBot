@@ -185,6 +185,12 @@ pub const FLAGS: &[FlagSpec] = &[
          kernel never installs anything either way — the launcher owns that.",
     ),
     flag(
+        "--update-interval-secs",
+        "<n>",
+        "#379: seconds between AUTOMATIC update checks; 0 (the default) runs no \
+         scheduler at all. Only effective with --update-check on.",
+    ),
+    flag(
         "--max-orderbook-stale-ms",
         "<n>",
         "Refuse to price off an orderbook older than this (ms); 0 disables the check. \

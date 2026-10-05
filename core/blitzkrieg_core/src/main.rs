@@ -266,6 +266,9 @@ struct Args {
     /// chain; `None` keeps the built-in default (off).
     update_check_enabled: Option<bool>,
     update_auto: Option<bool>,
+    /// #379: seconds between AUTOMATIC update checks; `None`/`0` = no
+    /// scheduler (the default — the timer is an explicit opt-in, INV-3).
+    update_interval_secs: Option<i64>,
     /// Per-strategy entry caps: `name:max_open_positions:max_notional_usd`
     /// (repeatable; `-` or empty = no cap on that segment).
     strategy_limits: Vec<String>,
@@ -731,6 +734,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut se_auto_evolve: Option<bool> = None;
     let mut update_check_enabled: Option<bool> = None;
     let mut update_auto: Option<bool> = None;
+    let mut update_interval_secs: Option<i64> = None;
     let mut se_cycle_secs: Option<i64> = None;
     let mut se_ttl_secs: Option<i64> = None;
     let mut se_deep_dims: Option<usize> = None;
@@ -903,6 +907,12 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     "false" | "0" | "off" => Some(false),
                     _ => None,
                 })
+            }
+            // #379: the automatic-check interval in seconds. 0 explicitly
+            // disables the scheduler; a negative or non-number parses to None
+            // (falling through to env/TOML/default) rather than booting.
+            "--update-interval-secs" => {
+                update_interval_secs = it.next().and_then(|v| v.parse().ok()).filter(|s| *s >= 0)
             }
             "--se-ttl-secs" => se_ttl_secs = it.next().and_then(|v| v.parse().ok()),
             "--se-deep-dims" => se_deep_dims = it.next().and_then(|v| v.parse().ok()),
@@ -1475,6 +1485,17 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             }),
         file.update.auto_update
     );
+    // #379: the automatic-check clock. Same chain; 0 = scheduler off. A
+    // persisted interval is NOT used here by design — the clock is
+    // restart-to-change configuration, so a UI toggle cannot silently arm it.
+    let update_interval_secs = resolve_opt!(
+        "update.interval_secs",
+        update_interval_secs,
+        env.text("BLITZKRIEG_UPDATE_INTERVAL_SECS")
+            .and_then(|v| v.trim().parse::<i64>().ok()),
+        file.update.interval_secs
+    )
+    .filter(|s| *s >= 0);
     let se_cycle_secs = resolve_opt!(
         "shadow_evolution.evolution_cycle_secs",
         se_cycle_secs,
@@ -1827,6 +1848,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         se_deep_dims,
         update_check_enabled,
         update_auto,
+        update_interval_secs,
         shadow_evolution_echo,
         strategy_limits,
         enable_strategy,
@@ -2418,6 +2440,7 @@ async fn main() -> anyhow::Result<()> {
         discovery_enabled: args.discovery,
         update_check_enabled: args.update_check_enabled.unwrap_or(false),
         update_auto: args.update_auto.unwrap_or(false),
+        update_interval_secs: args.update_interval_secs.unwrap_or(0).max(0) as u64,
         shadow_evolution_enabled: args.shadow_evolution,
         shadow_evolution_tuning: if args.se_min_samples.is_some()
             || args.se_cooldown_secs.is_some()

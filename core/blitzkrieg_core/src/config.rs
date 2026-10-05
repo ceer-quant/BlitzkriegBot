@@ -125,6 +125,9 @@ pub struct ShadowFile {
 pub struct UpdateFile {
     pub check_enabled: Option<bool>,
     pub auto_update: Option<bool>,
+    /// #379: seconds between AUTOMATIC update checks (§7.4). Absent/0 = no
+    /// scheduler — the clock is an explicit opt-in, never a default.
+    pub interval_secs: Option<i64>,
 }
 
 /// Lock 2's built-in ceiling (±5% per evolution step). A config file may lower
@@ -438,6 +441,9 @@ impl FileConfig {
                     }
                     ("update", "auto_update") => {
                         got(&mut self.update.auto_update, bool_(v), &full, w)
+                    }
+                    ("update", "interval_secs") => {
+                        got(&mut self.update.interval_secs, int(v), &full, w)
                     }
                     ("shadow_evolution", "evaluation_window_minutes") => {
                         got(&mut self.shadow.evaluation_window_minutes, int(v), &full, w)
