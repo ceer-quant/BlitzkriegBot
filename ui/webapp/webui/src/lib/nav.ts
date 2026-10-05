@@ -3,10 +3,12 @@
  * tui-parity / page-separation 门禁直接 import 它：两侧的面清单从同一份
  * 事实解析，不再各抄一份后悄悄漂移。
  *
- * 两级结构：直连页（总览 / 行情面板 / 插件 / 设置）+ 两个组
- * （回测研究、策略与演化）。组只是导航上的归拢，不是新功能面 —— 组内每个
- * 叶子仍是原页面，TUI 的每个面仍能在叶子上找到家（parity 由 check:parity
- * 断言）；插件与设置保持直连，因为它们是入口而不是产物。
+ * 两级结构：直连页（总览 / 行情 / 插件 / 设置）+ 两个组（回测、策略）。
+ * 主导航是 6 个平铺短标签；组被选中时，组内叶子作为页内 tab 呈现
+ * （SettingsPage 的域切换模式），不再有导航条上的二级控件。组只是导航
+ * 归拢，不是新功能面 —— 组内每个叶子仍是原页面，TUI 的每个面仍能在叶子
+ * 上找到家（parity 由 check:parity 断言）；插件与设置保持直连，因为它们
+ * 是入口而不是产物。
  */
 
 export type TabId =
@@ -20,7 +22,7 @@ export type TabId =
   | 'plugins'
   | 'settings'
 
-export type GroupId = 'research' | 'fleet'
+export type GroupId = 'fleet'
 
 export interface NavLeaf {
   kind: 'page'
@@ -39,22 +41,15 @@ export type NavEntry = NavLeaf | NavGroup
 
 export const NAV: NavEntry[] = [
   { kind: 'page', id: 'overview', label: '总览' },
-  { kind: 'page', id: 'hft', label: '行情面板' },
-  {
-    kind: 'group',
-    id: 'research',
-    label: '回测研究',
-    children: [
-      { kind: 'page', id: 'backtest', label: '回测' },
-      { kind: 'page', id: 'blueprint', label: '蓝图' },
-    ],
-  },
+  { kind: 'page', id: 'hft', label: '行情' },
+  { kind: 'page', id: 'backtest', label: '回测' },
   {
     kind: 'group',
     id: 'fleet',
-    label: '策略与演化',
+    label: '策略',
     children: [
       { kind: 'page', id: 'strategies', label: '策略' },
+      { kind: 'page', id: 'blueprint', label: '蓝图' },
       { kind: 'page', id: 'decisions', label: '裁决流' },
       { kind: 'page', id: 'evolution', label: '进化' },
     ],

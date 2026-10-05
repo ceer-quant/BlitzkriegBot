@@ -95,15 +95,16 @@ const WEBUI_TAB_SETS = [
     'plugins',
     'settings',
   ],
-  // #362: the blueprint editor joins the nav (between 回测 and 策略 — it is the
-  // authoring face whose output lands in 策略). The TUI has no canvas, so this
-  // stays WebUI surplus, paired to the strategy list it feeds.
+  // #362: the blueprint editor joins the nav. #381 (review round): the editor
+  // sits INSIDE the 策略 group, right after the ledger it feeds — 蓝图 is the
+  // authoring face whose output lands in 策略. The TUI has no canvas, so this
+  // stays WebUI surplus, paired to the strategy list it consumes.
   [
     'overview',
     'hft',
     'backtest',
-    'blueprint',
     'strategies',
+    'blueprint',
     'decisions',
     'evolution',
     'plugins',
@@ -335,7 +336,9 @@ check('every WebUI-only tab has a declared off-panel equivalent', () => {
   const surplus = webuiIds.filter((id) => !TUI_TO_WEBUI.some(([, ts]) => ts.includes(id)))
   assert.deepEqual(
     surplus,
-    ['backtest', 'blueprint', 'strategies'],
+    // Same three surplus faces as before #381; the order tracks the nav
+    // (blueprint now sits inside the 策略 group, after the ledger it feeds).
+    ['backtest', 'strategies', 'blueprint'],
     'new WebUI tab without a parity note — add it to WEBUI_SURPLUS and this list',
   )
 })

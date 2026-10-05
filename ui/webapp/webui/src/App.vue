@@ -3,9 +3,11 @@
  * Panel shell — top bar (brand + segmented nav + connection telemetry), page
  * outlet, and the global error surface. Dark is the default identity.
  *
- * issue 381 IA 重构：九个页签归成两级导航 —— 直连页（总览/行情面板/插件/设置）+
- * 两个组（回测研究 = 回测+蓝图；策略与演化 = 策略+裁决流+进化）。导航本身是
- * 纯数据（lib/nav.ts），门禁与页表同源；组只是导航归拢，页签集合不变。
+ * issue 381 IA 重构（审核修订版）：主导航 6 个平铺短标签 —— 总览/行情/回测/
+ * 策略/插件/设置。唯一的组「策略」被选中时，组内叶子（策略/蓝图/裁决流/进化）
+ * 作为页内 tab 呈现（SettingsPage 的域切换模式），导航条上没有二级控件。
+ * 导航本身是纯数据（lib/nav.ts），门禁与页表同源；组只是导航归拢，页签集合
+ * 不变。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Moon, Sun, SunMoon, Bell, BellOff, LogOut, Radio } from 'lucide-vue-next'
@@ -70,7 +72,7 @@ const pages = {
 } as const
 const activePage = computed(() => pages[tab.value])
 
-/** 主导航：直连页 + 组。组被点中时落组内第一个叶子。 */
+/** 主导航：5 个直连页 + 1 个组（策略）。组被点中时落组内第一个叶子。 */
 const topSegments = NAV.map((e) => ({ id: e.id as string, label: e.label }))
 const GROUP_IDS = new Set<string>(NAV.filter((e) => e.kind === 'group').map((e) => e.id))
 const activeGroup = computed(() => groupOf(tab.value))
@@ -152,7 +154,7 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- nav: 直连页 + 两个组（组选中时在下一行展开组内叶子）-->
+      <!-- nav: 6 个平铺短标签（组的叶子在页内 tab 上，导航条无二级控件）-->
       <nav class="mx-auto hidden shrink-0 items-center gap-2 md:flex">
         <SegmentedControl
           :model-value="activeGroup?.id ?? tab"
@@ -195,32 +197,13 @@ onMounted(() => {
       </div>
     </header>
 
-    <!-- sub-nav: 组内叶子；直连页没有第二级，占位行保持间距一致 -->
-    <nav
-      v-if="activeGroup"
-      class="mx-auto mt-6 flex max-w-[1280px] justify-center px-4"
-    >
-      <SegmentedControl
-        v-model="tab"
-        :segments="activeGroup.children"
-        size="sm"
-        :title="`「${activeGroup.label}」组内的页签`"
-      />
-    </nav>
-
     <!-- compact nav for narrow viewports -->
-    <nav class="mx-auto mt-6 flex max-w-[1280px] flex-col items-center gap-2 px-4 md:hidden">
+    <nav class="mx-auto mt-6 flex max-w-[1280px] justify-center px-4 md:hidden">
       <SegmentedControl
         :model-value="activeGroup?.id ?? tab"
         :segments="topSegments"
         size="sm"
         @update:model-value="onTopNav"
-      />
-      <SegmentedControl
-        v-if="activeGroup"
-        v-model="tab"
-        :segments="activeGroup.children"
-        size="sm"
       />
     </nav>
 
@@ -236,8 +219,7 @@ onMounted(() => {
       screens the compact nav is in the same flow between header and content, so
       the gap that matters there is nav→card: `pt-8` gives 32px of clearance
       instead of 24px. From `md` the nav moves inside the header and `pt-10`
-      (40px) clears the sticky offset plus the shadow. With a group expanded the
-      sub-nav owns that slot, so the content clearance applies to it instead.
+      (40px) clears the sticky offset plus the shadow.
     -->
     <main class="mx-auto max-w-[1280px] px-4 pt-8 pb-20 md:pt-10">
       <div v-if="store.error" class="mb-3.5">
@@ -246,6 +228,11 @@ onMounted(() => {
           hint="检查网关进程与端口；网关恢复后本面板会自动重连，无需刷新页面。"
         >{{ store.error }}</AlertBanner>
       </div>
+      <!-- 组内叶子是页内 tab（SettingsPage 的域切换模式）：内容上方一排页签，
+           不在导航条上出现第二级控件。 -->
+      <nav v-if="activeGroup" class="mb-4">
+        <SegmentedControl v-model="tab" :segments="activeGroup.children" />
+      </nav>
       <component :is="activePage" />
     </main>
 
