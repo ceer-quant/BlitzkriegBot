@@ -86,6 +86,11 @@ pub enum Action {
     /// `system.update.configure` for the AUTO switch (the checked side is only
     /// written by the operator's config or the configure verb itself).
     UpdateConfigure(bool),
+    /// #379 (§7.5): `system.update.stage` off the render loop — the kernel
+    /// downloads + verifies the newer release into its staging directory and
+    /// STOPS there; applying it is the launcher's job, never the kernel's
+    /// (and never this panel's).
+    UpdateStage,
     /// Run the LAUNCHER's install (`current_exe() update --install`): the
     /// panel process never replaces the kernel binary itself (P12) — it
     /// triggers the launcher-side installer and reports its output.
@@ -798,6 +803,37 @@ impl App {
                     if on { "off" } else { "on" }
                 ));
                 Action::None
+            }
+            // #379: stage the newer release (download + verify, §7.5). Like
+            // `c`, it is refused up front when the governing switch is off —
+            // and staging additionally requires an Available verdict.
+            KeyCode::Char('s') if self.tab == Tab::Settings && !self.update_busy => {
+                let auto_on = self
+                    .snap
+                    .system_version
+                    .as_ref()
+                    .map(|v| v.auto_update)
+                    .unwrap_or(false);
+                if !auto_on {
+                    self.log(
+                        "staging needs auto-update ON (press a first) — the kernel downloads                          into data/update/staging/ and never installs on its own"
+                            .to_string(),
+                    );
+                    Action::None
+                } else if self
+                    .snap
+                    .system_version
+                    .as_ref()
+                    .map(|v| v.update_available)
+                    != Some(Some(true))
+                {
+                    self.log("nothing to stage — check first; staging follows an                               'available' verdict"
+                        .to_string());
+                    Action::None
+                } else {
+                    self.update_busy = true;
+                    Action::UpdateStage
+                }
             }
             KeyCode::Char('i') if self.tab == Tab::Settings && !self.update_busy => {
                 let auto_on = self
