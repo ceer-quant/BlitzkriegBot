@@ -83,9 +83,11 @@ check('no plugin registry content, no plugin icons', () => {
 console.log('nav — the two pages stay separate entry points')
 
 check('shell nav keeps both pages as distinct tabs', () => {
-  const shell = read('src', 'App.vue')
-  assert.ok(/id: 'strategies', label: '策略'/.test(shell), 'no strategy tab')
-  assert.ok(/id: 'plugins', label: '插件'/.test(shell), 'no plugin tab')
+  // #381: the nav is pure data in lib/nav.ts — the shell renders it and this
+  // gate reads it, so the two entry points stay pinned at the source.
+  const nav = read('src', 'lib', 'nav.ts')
+  assert.ok(/id: 'strategies', label: '策略'/.test(nav), 'no strategy tab')
+  assert.ok(/id: 'plugins', label: '插件'/.test(nav), 'no plugin tab')
 })
 
 console.log(failures === 0 ? '\nRESULT: PASS' : `\nRESULT: FAIL (${failures})`)

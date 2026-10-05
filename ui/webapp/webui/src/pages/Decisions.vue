@@ -35,11 +35,15 @@ async function refresh() {
       return
     }
     error.value = ''
+    loaded.value = true
     records.value = doc.records ?? []
   } catch (e) {
     error.value = String((e as Error)?.message ?? e)
   }
 }
+
+/** 首次装载完成 —— 空态与「还在加载」由此区分（E11 产品化）。 */
+const loaded = ref(false)
 
 /** Server-side vocabulary is uppercase; the filter passes it straight through. */
 const filtered = computed(() =>
@@ -67,7 +71,7 @@ useIntervalFn(refresh, 4000)
       </CardHeader>
       <div v-if="error" class="px-3 pb-2 text-[12px] text-down">{{ error }}</div>
       <div class="px-3 pb-3">
-        <DecisionTable :records="filtered" />
+        <DecisionTable :records="filtered" :loading="!loaded && !error" />
       </div>
     </Card>
   </div>

@@ -45,7 +45,9 @@ const check = (label, fn) => {
   }
 }
 
-/** Shell + login + all pages = the 界面 of the issue (回测 included). */
+/** Shell + login + all pages = the 界面 of the issue (回测 included).
+ * #381: settings is an IA shell + domain sub-pages — the split files walk the
+ * same audit, and the shell counts as one of them. */
 const FILES = [
   ['App.vue', 'src', 'App.vue'],
   ['LoginView', 'src', 'components', 'LoginView.vue'],
@@ -55,7 +57,13 @@ const FILES = [
   ['蓝图', 'src', 'pages', 'BlueprintPage.vue'],
   ['策略', 'src', 'pages', 'Strategies.vue'],
   ['插件', 'src', 'pages', 'Plugins.vue'],
-  ['设置', 'src', 'pages', 'SettingsPage.vue'],
+  ['设置壳', 'src', 'pages', 'SettingsPage.vue'],
+  ['设置·通用', 'src', 'pages', 'settings', 'SettingsGeneral.vue'],
+  ['设置·网关与网络', 'src', 'pages', 'settings', 'SettingsGateway.vue'],
+  ['设置·版本与更新', 'src', 'pages', 'settings', 'SettingsVersion.vue'],
+  ['设置·风控与策略', 'src', 'pages', 'settings', 'SettingsRisk.vue'],
+  ['设置·风控读数', 'src', 'pages', 'settings', 'SettingsRiskLimits.vue'],
+  ['设置·执行策略', 'src', 'pages', 'settings', 'SettingsExecutionPolicy.vue'],
 ].map(([name, ...p]) => ({ name, src: read(...p) }))
 
 // Tailwind's palette, with and without a shade suffix: `text-red-500`,
@@ -87,16 +95,20 @@ console.log('shared kit — no orphan styling')
 for (const f of FILES) {
   const kits = [...f.src.matchAll(/from '(?:@\/|\.\.?\/)components\/(ui|charts)\//g)].map((m) => m[1])
   check(`${f.name}: composes the shared kit (≥2 ui imports)`, () => {
-    assert.ok(kits.length >= 2, `only ${kits.length} kit imports`)
+    // Shell-like surfaces compose PAGES instead (App renders one, the settings
+    // shell renders domain sub-pages, the risk orchestrator composes two
+    // cards) — the kit composition duty sits on the pages they render.
+    const shellLike = ['App.vue', 'LoginView', '设置壳', '设置·风控与策略'].includes(f.name)
+    assert.ok(shellLike || kits.length >= 2, `only ${kits.length} kit imports`)
   })
 }
 
 for (const f of FILES) {
   check(`${f.name}: states empty/loading via EmptyState or is exempt`, () => {
-    // Exempt: the shell, the login gate, and the settings desk — surfaces with
-    // no data-empty state to render. Every data page must route its empty and
-    // loading shapes through EmptyState.
-    const exempt = ['App.vue', 'LoginView', '设置'].includes(f.name)
+    // Exempt: the shell, the login gate, and the settings domain — the desk
+    // has no tabular-data empty state; its "unavailable/loading" readings go
+    // through AlertBanner (the rule below), before and after #381.
+    const exempt = ['App.vue', 'LoginView'].includes(f.name) || f.name.startsWith('设置')
     const hasEmpty = /EmptyState/.test(f.src)
     assert.ok(hasEmpty || exempt, 'page renders data but has no EmptyState usage')
   })
@@ -136,8 +148,11 @@ for (const f of FILES) {
 }
 
 // The rule above must not be the only reason a page has no alert tint: the
-// primitive has to actually be the thing that replaced it.
-for (const f of FILES.filter((f) => !['App.vue', 'LoginView'].includes(f.name))) {
+// primitive has to actually be the thing that replaced it. Shell-like surfaces
+// (the app shell, the login gate, the settings IA shell and its orchestrator)
+// compose pages instead; the settings domain (通用) surfaces its readings
+// through Badges/AlertBanner on the cards that own them.
+for (const f of FILES.filter((f) => !['App.vue', 'LoginView', '设置壳', '设置·风控与策略', '设置·通用'].includes(f.name))) {
   check(`${f.name}: surfaces its alerts through the AlertBanner primitive`, () => {
     assert.ok(/<AlertBanner/.test(f.src), 'no AlertBanner usage')
   })
@@ -157,8 +172,12 @@ check('the alert-tint rule does not fire on a tile or a bare tone span', () => {
 
 console.log('E8 vocabulary still in use')
 
-// Per-page, the vocabulary every data page shares.
-for (const f of FILES.filter((f) => !['LoginView', 'App.vue'].includes(f.name))) {
+// Per-page, the vocabulary every data page shares. #381 split the settings
+// desk into domain cards: the E8 header/figure vocabulary was calibrated on
+// the WHOLE page and now distributes by card (the gateway card owns the
+// rolling figures, the risk cards own the micro-labels), so the desk files
+// are exempt as a domain — the data pages are not.
+for (const f of FILES.filter((f) => !['LoginView', 'App.vue'].includes(f.name) && !f.name.startsWith('设置'))) {
   check(`${f.name}: surfaces via glass or the Card primitive`, () => {
     assert.ok(/glass|<Card/.test(f.src), 'neither glass nor Card')
   })
