@@ -260,6 +260,19 @@ pub struct CoreConfig {
     /// this silences only the WRITES (`--no-intent-audit`), which is exactly
     /// what P1's with/without-baseline double-run proves off the trading path.
     pub intent_audit_enabled: bool,
+    /// Replay fast path (`--backtest-fast`, CLI-refused without `--backtest`,
+    /// mirroring `--fee-model`). Gates three classes of per-tick work that a
+    /// frozen book makes provably redundant:
+    ///   1. the exit LADDER for hold-to-settlement strategies (the host
+    ///      discards every holder verdict anyway — settlement owns them);
+    ///   2. full-book re-valuation of positions whose book did not change;
+    ///   3. Lua evaluation on ticks where no data arrived and no round-timing
+    ///      boundary was crossed (the same inputs reproduce the same output).
+    ///
+    /// Dirty-token and dirty-order tracking keep the traded paths exact.
+    /// Default `false`: every default run keeps the historical byte-for-byte
+    /// tick behaviour, evaluations counter included.
+    pub backtest_fast: bool,
 }
 
 impl CoreConfig {
@@ -732,6 +745,9 @@ impl Default for CoreConfig {
             dry_redeem_manual: false,
             // #234: nothing but the backtester may charge a counterfactual fee.
             fee_schedule_replay: false,
+            // Replay fast path: off by default — historical tick behaviour is
+            // byte-for-byte until the operator opts in with --backtest-fast.
+            backtest_fast: false,
         }
     }
 }
@@ -1260,6 +1276,44 @@ pub struct Core {
     /// in `engine_evaluate`; set by the same path when a rule answers
     /// `PolicyOutput::Cooldown`.
     policy_cooldowns: HashMap<String, i64>,
+    /// Replay fast path (`backtest_fast`): tokens whose book changed in the
+    /// latest `engine_on_data` or fill application — the only positions whose
+    /// marks can move on the next maintenance tick, and the only cycles a
+    /// Lua evaluation can change its output on (entry eligibility demands a
+    /// fresh book). Consumed (cleared) by each maintenance tick.
+    fast_dirty_tokens: HashSet<String>,
+    /// Replay fast path: an engine INPUT arrived since the last real Lua
+    /// evaluation (book / top-of-book / spot / round rollover) — the only
+    /// cycles whose evaluation output can differ from the previous one.
+    /// Consumed by `engine_evaluate`.
+    fast_eval_wake: bool,
+    /// Replay fast path: the next virtual instant a round-timing verdict can
+    /// flip (min-round-age / min-time-left boundaries). Recomputed after every
+    /// real evaluation and round rollover; quiet ticks skip the Lua call
+    /// until this instant.
+    fast_next_timing_ms: i64,
+    /// Replay fast path: the live-order set changed (place / cancel / any
+    /// position open or close) — wakes the escalation sweep and the audit-
+    /// relevant sweeps that a quiet tick would otherwise skip.
+    fast_orders_dirty: bool,
+    /// Replay fast path: the open-position set changed — wakes the
+    /// settlement watch sync (a new position's expiry must join the watch
+    /// list when it passes, exactly when the full scan would have added it).
+    fast_positions_dirty: bool,
+    /// Replay fast path: earliest `escalate_at_ms` over live orders
+    /// (`i64::MAX` = none). Recomputed whenever the escalation sweep runs.
+    fast_next_escalation_ms: i64,
+    /// Replay fast path: earliest `expires_at_ms` over open positions
+    /// (`i64::MAX` = none) — when it passes, the settlement watch must sync
+    /// even with no event in sight. Recomputed on position-set changes.
+    fast_next_expiry_ms: i64,
+    /// Replay fast path: virtual time of the last Lua evaluation. Quiet ticks
+    /// skip the call until `FAST_EVAL_FALLBACK_MS` elapses (a safety net for
+    /// strategies with internal time-based state; entry eligibility itself
+    /// always rides the dirty-token wake).
+    fast_last_eval_ms: i64,
+    /// Replay fast path: virtual time of the last kline-preview pass.
+    fast_last_kline_ms: i64,
 }
 
 /// F4: what a fill-driven full close changed, so a later FAILED status for the
@@ -1281,6 +1335,17 @@ struct CloseCredential {
     /// so a close cannot choose whether to leave evidence.
     account_streak_before: u32,
 }
+
+/// Replay fast path: a quiet tick still re-runs the Lua evaluation at least
+/// this often (virtual ms), as the safety net for strategies whose decisions
+/// read the round clock in ways the timing boundary does not model. The
+/// boundary wake (`fast_next_timing_ms`) and the dirty-input wake cover the
+/// proven inputs; this bounds anything else to a 2 s staleness.
+const FAST_EVAL_FALLBACK_MS: i64 = 2_000;
+/// Replay fast path: the kline-preview pass (per-bucket throttled to 1/s in
+/// the base path) runs at most this often on quiet ticks — the previews are
+/// live-panel decoration, never a backtest report input.
+const FAST_KLINE_MIN_MS: i64 = 250;
 
 impl Core {
     pub fn new(config: CoreConfig) -> Self {
@@ -1552,6 +1617,17 @@ impl Core {
             // #363: the boot-loaded policy (None = no config file found).
             execution_policy,
             policy_cooldowns: HashMap::new(),
+            // Replay fast path: nothing dirty, no deadlines known yet — the
+            // first tick always runs the full sweeps (MAX stamps force them).
+            fast_dirty_tokens: HashSet::new(),
+            fast_eval_wake: true,
+            fast_next_timing_ms: 0,
+            fast_orders_dirty: true,
+            fast_positions_dirty: true,
+            fast_next_escalation_ms: 0,
+            fast_next_expiry_ms: 0,
+            fast_last_eval_ms: 0,
+            fast_last_kline_ms: 0,
         }
     }
 
@@ -2939,15 +3015,37 @@ impl Core {
             a.record_at(at, &ev);
         }
         match &ev {
-            crate::engine::DataEvent::Book { .. } => self.stats.books += 1,
-            crate::engine::DataEvent::TopOfBook { .. } => self.stats.tops += 1,
-            crate::engine::DataEvent::Spot { .. } => self.stats.spots += 1,
+            crate::engine::DataEvent::Book { .. } => {
+                self.stats.books += 1;
+                if self.config.backtest_fast {
+                    self.fast_eval_wake = true;
+                }
+            }
+            crate::engine::DataEvent::TopOfBook { .. } => {
+                self.stats.tops += 1;
+                if self.config.backtest_fast {
+                    self.fast_eval_wake = true;
+                }
+            }
+            crate::engine::DataEvent::Spot { .. } => {
+                self.stats.spots += 1;
+                if self.config.backtest_fast {
+                    self.fast_eval_wake = true;
+                }
+            }
             // #352: observed on-chain prints / round boundaries are archived
             // above but are not engine inputs — no counter, no strategy effect.
             crate::engine::DataEvent::Trade { .. } => {}
             crate::engine::DataEvent::RoundEnd { .. } => {}
             crate::engine::DataEvent::RoundMarkets { markets, .. } => {
                 self.stats.rounds += 1;
+                // Replay fast path: a rollover replaces the scanner's market
+                // list and restarts the round clock — the next evaluation sees
+                // a different round context, and the timing verdict flips.
+                if self.config.backtest_fast {
+                    self.fast_eval_wake = true;
+                    self.fast_next_timing_ms = now_ms;
+                }
                 // A round rollover replaces the whole round (`engine.markets`
                 // carries the new list), so it is the moment any pending-close
                 // reason whose position is gone can no longer belong to
@@ -3035,6 +3133,15 @@ impl Core {
             }
             _ => None,
         };
+
+        // Replay fast path: the mirrored book is the ONLY input a position's
+        // marks can move on between events, so record the token as dirty.
+        // Consumed (and cleared) by the next maintenance tick.
+        if self.config.backtest_fast
+            && let Some(token) = &mirrored_token
+        {
+            self.fast_dirty_tokens.insert(token.clone());
+        }
 
         // KI-1: the market path must also settle resting maker orders the way
         // `book_snapshot` does — a crossing feed event is exactly when a
@@ -3153,11 +3260,44 @@ impl Core {
     /// Run one evaluation cycle: engine produces entry orders, core places them.
     /// Entries go through the usual risk/capacity gates; rejections are skipped.
     /// A configured per-strategy cap (P-1.1) is checked before the order layer.
+    /// Replay fast path: whether THIS cycle must run a real Lua evaluation —
+    /// an engine input arrived since the last one (`fast_eval_wake`), a
+    /// round-timing boundary the gates read is due (`fast_next_timing_ms`),
+    /// or the fallback window elapsed. Between those, the same inputs
+    /// reproduce the same output, so the call is skipped.
+    fn fast_eval_due(&self, now_ms: i64) -> bool {
+        self.fast_eval_wake
+            || now_ms >= self.fast_next_timing_ms
+            || now_ms - self.fast_last_eval_ms >= FAST_EVAL_FALLBACK_MS
+    }
+
     pub fn engine_evaluate(&mut self, now_ms: i64) -> usize {
         if self.engine.is_none() {
             return 0;
         }
         self.stats.evaluations += 1;
+        // Replay fast path: a quiet tick skips the Lua call entirely. Between
+        // engine inputs (book/top/spot/rollover — the dirty wake) the only
+        // strategy inputs that move are the round clock's integer-second
+        // fields, and their gate verdicts cannot flip inside the open
+        // interval the boundary wake (`fast_next_timing_ms`) covers; the
+        // fallback bounds anything the boundary does not model to 2 s.
+        // The evaluations COUNTER still advances every cycle: the sparse-
+        // cadence contract (`sparse_stream_evaluates_every_due_cycle`) pins
+        // the scheduled cycle count, not the wall cost of one cycle.
+        if self.config.backtest_fast
+            && !self.shadow_evolution.is_enabled()
+            && !self.fast_eval_due(now_ms)
+        {
+            return 0;
+        }
+        if self.config.backtest_fast {
+            // A real evaluation consumes the wake; the timing boundary is
+            // recomputed after the engine borrow ends (below).
+            self.fast_eval_wake = false;
+            self.fast_last_eval_ms = now_ms;
+            self.fast_next_timing_ms = i64::MAX;
+        }
         // Shadow Evolution: evaluate FIRST so any applied hot-swap is in force
         // for this very cycle's order decision (next-tick semantics, no restart).
         self.shadow_evolution_evaluate(now_ms);
@@ -3174,6 +3314,12 @@ impl Core {
         // routing happens when each order passes through the gates).
         engine.set_equity_usd(self.accounts.active_ledger().balance());
         let orders = engine.evaluate(now_ms);
+        // Replay fast path: recompute when the round-timing verdict can next
+        // flip — quiet ticks skip the Lua call until then (or the fallback
+        // beat, or a new engine input).
+        if self.config.backtest_fast {
+            self.fast_next_timing_ms = engine.next_timing_boundary_ms(now_ms).unwrap_or(i64::MAX);
+        }
         // E30 (§6.3): drain the sandbox poison alerts now; each is raised as
         // ONE RISK_ALERT after the engine borrow ends below — the message
         // names the strategy, the sandbox itself refuses every later call
@@ -4967,6 +5113,17 @@ impl Core {
     /// cancelled).
     fn apply_delta_effects(&mut self, d: FillDelta, now_ms: i64) {
         let px = d.price;
+        // Replay fast path: a fill advances (or retires) a live order and
+        // moves the position book — the escalation floor and the settlement
+        // watch may both change on the next tick. It is also an ENGINE INPUT:
+        // the strategy's merge-intent emission keys on position completeness,
+        // and the equity push feeds sizing — the next evaluation must run so
+        // its output lands at the same virtual instant the every-tick pass
+        // would have produced it.
+        if self.config.backtest_fast {
+            self.fast_orders_dirty = true;
+            self.fast_eval_wake = true;
+        }
         // The fee reads only the schedule in force (an &self read), so it is
         // computed BEFORE the account's ledger is taken mutably (E28: the two
         // borrows must not overlap).
@@ -5055,6 +5212,12 @@ impl Core {
     fn project_fill_delta(&mut self, d: &FillDelta, fee_usd: Decimal, now_ms: i64) {
         let px = d.price;
         let token = &d.token_id;
+        // Replay fast path: a fill is the one thing that changes the position
+        // set (open/close/drop) and the token's mark.
+        if self.config.backtest_fast {
+            self.fast_positions_dirty = true;
+            self.fast_dirty_tokens.insert(token.clone());
+        }
         match d.side {
             Side::Buy => {
                 let existing = self
@@ -5222,6 +5385,12 @@ impl Core {
 
     /// Breaker + event emission when a position closes.
     fn on_position_closed(&mut self, closed: &crate::position::ClosedPosition, now_ms: i64) {
+        // Replay fast path: the position set changed (merge/settlement/exit
+        // close all funnel here) — the settlement watch and audit input must
+        // resync on the next tick.
+        if self.config.backtest_fast {
+            self.fast_positions_dirty = true;
+        }
         // The pending-close reason for this token died with the position it
         // belonged to (issue #190). Every close path funnels through here, and
         // an entry left behind would be inherited by the NEXT position on the
@@ -6323,6 +6492,11 @@ impl Core {
         if let Err(e) = &outcome {
             self.note_error(e, now_ms);
         }
+        // Replay fast path: a placed order is a live order — the escalation
+        // sweep and the audit input changed.
+        if outcome.is_ok() && self.config.backtest_fast {
+            self.fast_orders_dirty = true;
+        }
         outcome
     }
 
@@ -6913,6 +7087,11 @@ impl Core {
             }
         }
         self.ome.mark_terminal(id, OrderStatus::Cancelled, now_ms)?;
+        // Replay fast path: a live order just left the book — the escalation
+        // sweep and the audit input changed.
+        if was_live && self.config.backtest_fast {
+            self.fast_orders_dirty = true;
+        }
         // The venue may still hold the order resting: hand its id to the live
         // bridge for a real cancel. Nothing to cancel when the venue never
         // acknowledged the order (no id — the venue never heard of it).
@@ -7115,6 +7294,16 @@ impl Core {
     /// watched once a position of ours is past its expiry, and forgotten as soon
     /// as its last position leaves (settled, or closed by an ordinary exit).
     fn sync_settlement_watch(&mut self, now_ms: i64) {
+        // Replay fast path: the watch list only changes when the position set
+        // changes, or when the earliest open position's expiry passes (that is
+        // the instant `track_markets` would first admit the market). Between
+        // those, the scan re-derives the same list — skip it.
+        if self.config.backtest_fast
+            && !self.fast_positions_dirty
+            && now_ms < self.fast_next_expiry_ms
+        {
+            return;
+        }
         let positions: Vec<crate::position::OpenPosition> =
             self.positions.open_positions().to_vec();
         self.settlement.track_markets(&positions, now_ms);
@@ -7123,6 +7312,25 @@ impl Core {
             if !live.contains(condition_id.as_str()) {
                 self.settlement.forget_market(&condition_id);
             }
+        }
+        if self.config.backtest_fast {
+            self.fast_positions_dirty = false;
+            // The next expiry wake is the earliest expiry still IN THE
+            // FUTURE. An already-expired position needs no wake: it is
+            // either tracked (its re-query clock is `next_query_deadline_ms`,
+            // a separate term of the settlement gate) or untrackable (the
+            // `EXPIRY_TRUST_MS` refusal — re-deriving that refusal every
+            // tick produces nothing). Taking the raw minimum kept this gate
+            // permanently open once the earliest expiry had passed: the
+            // busy-phase sample put `take_settlement_queries` at 95% of
+            // tick, nearly all of it this watch-list re-derivation cloning
+            // every open position per tick.
+            self.fast_next_expiry_ms = positions
+                .iter()
+                .map(|p| p.expires_at_ms)
+                .filter(|t| *t > now_ms)
+                .min()
+                .unwrap_or(i64::MAX);
         }
     }
 
@@ -7655,16 +7863,27 @@ impl Core {
         // are NEVER subject to this throttle (a swallowed close would leave the
         // chart missing that bar forever). The throttle is per bucket on the
         // CORE's clock, shared by every subscribed session.
-        if let Some(engine) = self.engine.as_ref() {
-            for bar in engine.kline_current_bars() {
-                let key = (bar.symbol.clone(), bar.interval);
-                let due = self
-                    .kline_preview_last_ms
-                    .get(&key)
-                    .is_none_or(|last| now_ms - *last >= 1_000);
-                if due {
-                    self.kline_preview_last_ms.insert(key, now_ms);
-                    self.emit(Event::KlineUpdate { kline: bar });
+        // Replay fast path: the per-bucket throttle makes any push more often
+        // than 1/s invisible, so on quiet ticks the pass itself runs on a
+        // FAST_KLINE_MIN_MS beat instead of every 50 ms — the previews are
+        // live-panel decoration, never a backtest report input.
+        let kline_pass =
+            !self.config.backtest_fast || now_ms - self.fast_last_kline_ms >= FAST_KLINE_MIN_MS;
+        if kline_pass {
+            if self.config.backtest_fast {
+                self.fast_last_kline_ms = now_ms;
+            }
+            if let Some(engine) = self.engine.as_ref() {
+                for bar in engine.kline_current_bars() {
+                    let key = (bar.symbol.clone(), bar.interval);
+                    let due = self
+                        .kline_preview_last_ms
+                        .get(&key)
+                        .is_none_or(|last| now_ms - *last >= 1_000);
+                    if due {
+                        self.kline_preview_last_ms.insert(key, now_ms);
+                        self.emit(Event::KlineUpdate { kline: bar });
+                    }
                 }
             }
         }
@@ -7680,11 +7899,25 @@ impl Core {
         // Runs before the audit so the money a settlement moves is accounted in
         // the same round it happens (the ordering is free: `drive_settlement` is
         // a no-op in live mode, where resolutions arrive from the venue).
-        self.drive_settlement(now_ms);
-        // A market we are watching whose verdict never arrives strands the
-        // position: say so once per episode (the panel carries `blindSinceMs`
-        // continuously, this is the alert).
-        self.alert_if_settlement_blind(now_ms);
+        // Replay fast path: the whole pass is a pure function of the position
+        // set and the two deadline clocks (query re-query, redemption retry) —
+        // skipped until the position set changes, the earliest expiry passes,
+        // or a deadline arrives. A skipped tick would have dispatched nothing
+        // and stamped nothing, so every dispatch keeps its exact stamp.
+        let settlement_pass = !self.config.backtest_fast
+            || self.fast_positions_dirty
+            || now_ms >= self.fast_next_expiry_ms
+            || now_ms >= self.settlement.next_query_deadline_ms()
+            || now_ms >= self.settlement.next_redemption_ms();
+        if settlement_pass {
+            self.drive_settlement(now_ms);
+            // A market we are watching whose verdict never arrives strands the
+            // position: say so once per episode (the panel carries
+            // `blindSinceMs` continuously, this is the alert). The blind edge
+            // only changes when queries/answers move, so riding the same gate
+            // delays the alert at most to the next deadline tick.
+            self.alert_if_settlement_blind(now_ms);
+        }
 
         // Accounting audit (issue #189): the kernel's own periodic three-way money
         // check, so drift is caught (and blocks new entries) even when nothing
@@ -7732,12 +7965,44 @@ impl Core {
 
         // Evaluate exits for every open position and place a closing SELL.
         self.run_exit_checks(now_ms)?;
+        // Replay fast path: the dirty-token set is consumed by this cycle's
+        // valuation — clear it here (not inside run_exit_checks, whose early
+        // returns would skip the clear) so it never becomes a permanent
+        // over-approximation. Inserts landing between here and the next
+        // tick's exit pass are events that arrive after this point by
+        // construction, so nothing is lost.
+        if self.config.backtest_fast {
+            self.fast_dirty_tokens.clear();
+        }
 
         // #177: a protective stop the wick guard withheld is an event, not a
         // silent no-op — review must be able to see "should have triggered".
         self.emit_suppressed_stops();
 
         // Escalate due maker_then_taker orders: cancel maker, cross as taker.
+        // Replay fast path: the sweep over every live order runs only when
+        // the order set changed, or when the earliest armed escalation
+        // deadline has arrived — between those, no `escalate_at_ms` can be
+        // due (arming never moves a deadline earlier than the sweep that
+        // would notice it recomputes the floor).
+        if !self.config.backtest_fast
+            || self.fast_orders_dirty
+            || now_ms >= self.fast_next_escalation_ms
+        {
+            self.run_escalation_sweep(now_ms)?;
+            if self.config.backtest_fast {
+                self.fast_orders_dirty = false;
+                self.fast_next_escalation_ms = self.ome.next_escalation_ms();
+            }
+        }
+        Ok(())
+    }
+
+    /// Escalate due maker_then_taker orders: cancel the resting maker, cross
+    /// the remainder as a taker. Extracted from `tick` so the replay fast
+    /// path can gate the sweep (order-set dirty OR earliest deadline due)
+    /// without duplicating the submission rules.
+    fn run_escalation_sweep(&mut self, now_ms: i64) -> CoreResult<()> {
         let due: Vec<EscalationTarget> = self
             .ome
             .live_orders()
@@ -7943,7 +8208,26 @@ impl Core {
                 )
             })
         };
-        self.positions.valuate(&book_fn, now_ms);
+        // Replay fast path (--backtest-fast): when EVERY registered strategy
+        // holds to settlement and the kernel settles locally, every ladder
+        // verdict against an open position is discarded by the settlement-
+        // holders filter below — the ladder is pure per-tick waste. The fast
+        // path re-values only dirty tokens and skips the ladder + the E31-b
+        // scan entirely (a holder never places a working sell, so the
+        // residual backstop has nothing to answer between events). A mixed
+        // book (any non-holder registered) keeps the full historical pass.
+        let all_hold = self.config.backtest_fast
+            && self.config.mode.settles_locally()
+            && self
+                .engine
+                .as_ref()
+                .is_some_and(|e| e.all_strategies_hold_to_settlement());
+        if all_hold {
+            self.positions
+                .valuate_dirty_tokens(&book_fn, now_ms, &self.fast_dirty_tokens);
+        } else {
+            self.positions.valuate(&book_fn, now_ms);
+        }
         let intents = sell_intents;
 
         // A unit of closing work resolved against a concrete open position.
@@ -7976,7 +8260,11 @@ impl Core {
         // a proven path: a position sitting unmanaged past expiry would be
         // strictly worse than one sold early. Strategy-signal intents still
         // close such positions everywhere — an explicit "get out" is honoured.
-        let settlement_holders: HashSet<String> = if self.config.mode.settles_locally() {
+        // Fast path: with every strategy a holder, the set is every strategy —
+        // and its only consumers (the ladder loop, skipped above) are gated
+        // off, so the per-tick rebuild is skipped too.
+        let settlement_holders: HashSet<String> = if !all_hold && self.config.mode.settles_locally()
+        {
             self.positions
                 .open_positions()
                 .iter()
@@ -7993,7 +8281,7 @@ impl Core {
         let holds_settlement =
             |pos: &crate::position::OpenPosition| settlement_holders.contains(&pos.strategy);
 
-        if self.config.auto_exits_enabled {
+        if self.config.auto_exits_enabled && !all_hold {
             for req in self.positions.check_exits(&book_fn, now_ms) {
                 let Some(pos) = self
                     .positions
@@ -8081,7 +8369,11 @@ impl Core {
         // exit policy may stay silent (e.g. the profit target already passed).
         // Any position with a sell that filled after the position opened and
         // no live sell now gets an explicit re-close of the remainder.
-        if self.config.auto_exits_enabled {
+        // Fast path: a holder never places a working sell on these tokens,
+        // so between dirty cycles there is no residual to re-close — the
+        // scan is skipped with the ladder (still runs on the non-fast path
+        // and whenever any non-holder strategy is registered).
+        if self.config.auto_exits_enabled && !all_hold {
             for pos in self.positions.open_positions().to_vec() {
                 if !has_job.insert(pos.id.clone()) {
                     continue;
@@ -10127,6 +10419,134 @@ mod strategy_dispatch_tests {
             engine_cfg().spread_arb,
         );
         c
+    }
+
+    // ── Replay fast path (--backtest-fast) gating semantics ────────────────
+
+    /// Counts REAL strategy evaluations (`find_candidates` calls) — the
+    /// observable behind the fast path's "a quiet tick skips the engine
+    /// call" claim, without hosting a Lua runtime.
+    struct ProbeCount {
+        count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl crate::strategies::EngineStrategy for ProbeCount {
+        fn name(&self) -> &str {
+            "probe"
+        }
+        fn on_book(&mut self, _t: &str, _s: &crate::model::OrderbookSnapshot, _n: i64) {}
+        fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
+        fn find_candidates(
+            &mut self,
+            _ctx: &crate::strategies::StrategyCtx<'_>,
+        ) -> Vec<crate::signal::TradeSignal> {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Vec::new()
+        }
+    }
+
+    fn core_with_probe(fast: bool) -> (Core, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let mut c = Core::new(CoreConfig {
+            engine_enabled: true,
+            auto_exits_enabled: false,
+            backtest_fast: fast,
+            ..Default::default()
+        });
+        c.enable_engine(Engine::new(engine_cfg()));
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        c.engine
+            .as_mut()
+            .unwrap()
+            .register_user_strategy(
+                Box::new(ProbeCount {
+                    count: count.clone(),
+                }),
+                "test".into(),
+            )
+            .expect("fresh engine registers the probe");
+        assert!(
+            c.engine
+                .as_mut()
+                .unwrap()
+                .set_strategy_enabled("probe", true)
+        );
+        (c, count)
+    }
+
+    /// The sparse-cadence contract: a quiet tick inside the fallback window
+    /// advances the scheduled-cycle counter but does NOT call the strategy;
+    /// a fresh engine input wakes the evaluation early; the fallback beat
+    /// bounds anything the wake/boundary model does not cover.
+    #[test]
+    fn fast_mode_quiet_tick_skips_the_engine_but_keeps_the_counter() {
+        let (mut c, count) = core_with_probe(true);
+        let t0 = 1_000_000i64;
+        c.tick(t0).unwrap();
+        c.engine_evaluate(t0);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Quiet: no data, no timing boundary, inside the 2 s fallback window.
+        for i in 1..20 {
+            let t = t0 + i * 50;
+            c.tick(t).unwrap();
+            c.engine_evaluate(t);
+        }
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a quiet tick must not call the strategy"
+        );
+        assert_eq!(
+            c.stats.evaluations, 20,
+            "the scheduled-cycle counter advances even on quiet ticks"
+        );
+
+        // An engine input wakes the evaluation before the fallback beat.
+        let tw = t0 + 1000;
+        c.engine_on_data(
+            crate::engine::DataEvent::Book {
+                token_id: "up".into(),
+                bids: vec![(Decimal::new(55, 2), Decimal::from(100))],
+                asks: vec![(Decimal::new(57, 2), Decimal::from(100))],
+                now_ms: tw,
+            },
+            tw,
+        );
+        c.tick(tw).unwrap();
+        c.engine_evaluate(tw);
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a book event wakes the evaluation"
+        );
+
+        // The fallback beat evaluates even with nothing new (last eval was
+        // the wake at t0+1000, so the 2 s bound fires at t0+3000).
+        let tf = t0 + 3000;
+        c.tick(tf).unwrap();
+        c.engine_evaluate(tf);
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the fallback beat evaluates"
+        );
+    }
+
+    /// Fast OFF (the default): every scheduled cycle evaluates the strategy —
+    /// the historical behaviour the fast path must not disturb.
+    #[test]
+    fn default_mode_evaluates_every_scheduled_cycle() {
+        let (mut c, count) = core_with_probe(false);
+        let t0 = 1_000_000i64;
+        for i in 0..5 {
+            let t = t0 + i * 50;
+            c.tick(t).unwrap();
+            c.engine_evaluate(t);
+        }
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            5,
+            "with the fast path off, every scheduled cycle evaluates"
+        );
     }
 
     // ── E2-a: per-strategy sizing + independent quotas ──────────────────────

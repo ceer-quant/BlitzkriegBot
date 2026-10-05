@@ -541,6 +541,29 @@ impl SettlementBook {
         self.queries.len()
     }
 
+    /// Replay fast path: the earliest instant any tracked query may become
+    /// dispatchable again — its re-query cooldown end (`next_query_ms`) when
+    /// it has been answered and is waiting, or `now + REQUERY_MS` when a
+    /// dispatch is currently in flight (the answer may land any time, but
+    /// the next retry cannot be due before the interval ends). `i64::MAX`
+    /// when nothing is tracked. The caller may skip the query drain entirely
+    /// until this instant without moving any dispatch timestamp: `take_que
+    /// ries` stamps only when it actually hands one out, and a skipped tick
+    /// would have handed out nothing (the cooldown comparison is `<= now`).
+    pub fn next_query_deadline_ms(&self) -> i64 {
+        self.queries
+            .values()
+            .map(|q| {
+                if q.sent_at_ms > 0 {
+                    q.sent_at_ms + REQUERY_MS
+                } else {
+                    q.next_query_ms
+                }
+            })
+            .min()
+            .unwrap_or(i64::MAX)
+    }
+
     /// The markets the book is waiting on a verdict for.
     pub fn tracked_condition_ids(&self) -> Vec<String> {
         self.queries.keys().cloned().collect()
@@ -771,6 +794,20 @@ impl SettlementBook {
             }
         }
         out
+    }
+
+    /// Replay fast path: the earliest instant any pending redemption claim
+    /// can become due (`i64::MAX` when none). `take_redemptions` dispatches
+    /// only when `next_attempt_ms <= now`, and a dispatch moves the clock
+    /// strictly later, so skipping the drain until this instant dispatches
+    /// exactly the same set at exactly the same stamps.
+    pub fn next_redemption_ms(&self) -> i64 {
+        self.claims
+            .values()
+            .filter(|c| !c.manual)
+            .map(|c| c.next_attempt_ms)
+            .min()
+            .unwrap_or(i64::MAX)
     }
 
     /// A redemption attempt failed. Alerts on every failure (never silent) and

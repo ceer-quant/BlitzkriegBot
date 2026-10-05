@@ -1209,6 +1209,35 @@ impl PositionManager {
         }
     }
 
+    /// Fast-path valuation (replay `backtest_fast`, all-holder books):
+    /// re-value ONLY positions whose token is in `dirty_tokens` — a book
+    /// actually arrived for it since the last pass. Every other position
+    /// keeps its previous marks, provably what the full pass produced:
+    /// `valuate_one` is a pure function of (book, now, cfg) and the book is
+    /// unchanged between arrivals, so a quiet-tick re-run reproduces the
+    /// same `current_price` (only the tick-count ratchet state stands
+    /// still — unobservable, the fast path never consults the holder
+    /// ladder). The Decimal-heavy pass over hundreds of idle positions
+    /// stops running on every 50 ms maintenance tick.
+    pub fn valuate_dirty_tokens(
+        &mut self,
+        books: &dyn Fn(&str) -> Option<OrderbookSnapshot>,
+        now_ms: i64,
+        dirty_tokens: &std::collections::HashSet<String>,
+    ) {
+        if dirty_tokens.is_empty() {
+            return;
+        }
+        let cfg = self.config.exit.clone();
+        for pos in self.open.iter_mut() {
+            if !dirty_tokens.contains(&pos.token_id) {
+                continue;
+            }
+            let book = books(&pos.token_id);
+            Self::valuate_one(pos, book.as_ref(), now_ms, &cfg);
+        }
+    }
+
     /// Evaluate every open position; returns exit requests for those that hit a
     /// rule. Updates exit state from the book first so the decision and the
     /// recorded HWM share the same quote.

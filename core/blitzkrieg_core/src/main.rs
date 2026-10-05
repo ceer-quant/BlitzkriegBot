@@ -360,6 +360,15 @@ struct Args {
     /// `--backtest-knob`: what a live run charges is not a per-invocation choice,
     /// so asking for this without `--backtest` is refused rather than ignored.
     fee_model: Option<blitzkrieg_core::exit_policy::FeeSchedule>,
+    /// Replay maintenance-gating fast path: `--backtest-fast`. Skips the
+    /// per-tick work an every-tick pass provably discards (the holder ladder,
+    /// full-book re-valuation, per-tick Lua on quiet ticks, the settlement /
+    /// escalation sweeps between their deadlines) while keeping every
+    /// timestamp and reaction instant the historic path produced. Replay-only
+    /// for the same reason as `--fee-model`: a live kernel's tick cadence is
+    /// not a per-invocation choice, so asking for this without `--backtest`
+    /// is refused rather than ignored.
+    backtest_fast: bool,
     /// MarketRegime evaluation over an archive (E16 / #98): label windows and
     /// score the online state machine against the offline labels.
     regime_eval: Option<String>,
@@ -746,6 +755,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut verify_latency_ms: i64 = 286;
     // #203: replay-only fee schedule (see `Args::fee_model`).
     let mut fee_model: Option<blitzkrieg_core::exit_policy::FeeSchedule> = None;
+    // Replay maintenance-gating fast path (see `Args::backtest_fast`).
+    let mut backtest_fast = false;
     let mut regime_eval: Option<String> = None;
     let mut regime_report: Option<String> = None;
     let mut regime_token: Option<String> = None;
@@ -1195,6 +1206,9 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(slippage_ticks)
             }
+            // Replay maintenance-gating fast path: a flag, no value. Not a live
+            // knob — see `Args::backtest_fast` (refusal below, with --fee-model).
+            "--backtest-fast" => backtest_fast = true,
             // #351 backtest mode: `mine` (zero latency, keep real friction),
             // `verify` (a real-latency dial set), `sweep` (latency ladder
             // 0..300). Only meaningful with --backtest; the mode re-prices
@@ -1851,6 +1865,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         backtest_mode,
         verify_latency_ms,
         fee_model,
+        backtest_fast,
         regime_eval,
         regime_report,
         regime_token,
@@ -2354,6 +2369,10 @@ async fn main() -> anyhow::Result<()> {
 
     let config = CoreConfig {
         mode,
+        // Replay maintenance-gating fast path: replay-only, refuse-guarded in
+        // the CLI parser (mirrors --fee-model). Default false = the historic
+        // every-tick behaviour, byte-for-byte.
+        backtest_fast: args.backtest_fast,
         default_maker_timeout_ms: 5000,
         risk: RiskConfig {
             max_order_notional: args.max_order_notional,
@@ -2685,6 +2704,13 @@ async fn main() -> anyhow::Result<()> {
             "blitzkrieg-core: --fee-model {} only applies to a replay; pass --backtest <archive.jsonl> \
              (the schedule a live run charges is not a per-invocation choice, #203)",
             schedule.name
+        );
+        std::process::exit(2);
+    }
+    if args.backtest_fast {
+        eprintln!(
+            "blitzkrieg-core: --backtest-fast only applies to a replay; pass --backtest <archive.jsonl> \
+             (a live kernel's tick cadence is not a per-invocation choice)"
         );
         std::process::exit(2);
     }

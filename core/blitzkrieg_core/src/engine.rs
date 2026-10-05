@@ -902,6 +902,69 @@ impl Engine {
             .map(|s| s.strategy.gate_exemptions())
     }
 
+    /// Replay fast path: the earliest virtual instant the round-timing
+    /// verdict (`scanner.can_trade_reason`) can flip for ANY registered
+    /// strategy, computed from the round clock's integer-second fields —
+    /// the min-round-age start and the min-time-left floor, each pulled
+    /// earlier by 1 s so the wake tick lands at or before the boundary a
+    /// full evaluation would have seen. Strategies with a timing exemption
+    /// contribute their own (lower) floor. `None` when no market is loaded
+    /// (the next rollover re-arms the clock via `fast_next_timing_ms = 0`).
+    ///
+    /// A tick that evaluates before this instant provably reproduces the
+    /// previous evaluation: the round clock's second-hand fields are the
+    /// only strategy inputs that move with `now_ms` between events, and
+    /// their comparisons cannot change verdict inside the open interval.
+    pub fn next_timing_boundary_ms(&self, now_ms: i64) -> Option<i64> {
+        if self.scanner.markets().is_empty() {
+            return None;
+        }
+        let round = self.scanner.round_timing(now_ms);
+        let expires = round.expires_at_ms;
+        let t = round.time_left_sec.max(0);
+        let mut best: i64 = i64::MAX;
+        // A timing verdict flips when time_left_sec first reads a boundary
+        // value. time_left reads V-1 first at `expires - V*1000 + 1` and
+        // reads V first at `expires - V*1000 - 999` (integer-second windows).
+        // A boundary at/behind now clamps to now+1: the next tick re-checks
+        // (cheap, and self-correcting if the arithmetic rounds early).
+        let consider = |b: i64, best: &mut i64| {
+            if b <= now_ms {
+                return;
+            }
+            if b < *best {
+                *best = b;
+            }
+        };
+        // Per-strategy time-left floor: allowed while time_left >= floor,
+        // flips when it first reads floor-1.
+        for s in &self.strategies {
+            let e = s.strategy.gate_exemptions();
+            let floor = if e.timing {
+                e.timing_floor_sec(self.cfg.scanner.min_time_left_sec)
+            } else {
+                self.cfg.scanner.min_time_left_sec
+            };
+            if floor > 0 && t >= floor {
+                consider(expires - floor * 1000 + 1, &mut best);
+            }
+        }
+        // Min-round-age: blocked while age < min_age; flips when time_left
+        // first reads (duration - min_age).
+        let min_age = self.cfg.scanner.min_round_age_sec.max(0);
+        if round.age_sec < min_age {
+            let v = self.cfg.scanner.round_duration_sec - min_age;
+            if v > 0 {
+                consider(expires - v * 1000 - 999, &mut best);
+            }
+        }
+        if best == i64::MAX {
+            None
+        } else {
+            Some(best.max(now_ms + 1))
+        }
+    }
+
     /// Every declared exemption, as `(strategy, exemptions)` in registration
     /// order — the audit view of who opted out of what.
     pub fn declared_gate_exemptions(&self) -> Vec<(String, GateExemptions)> {
@@ -922,6 +985,26 @@ impl Engine {
             .iter()
             .find(|s| s.strategy.name() == name)
             .is_some_and(|s| s.strategy.holds_to_settlement())
+    }
+
+    /// True when EVERY ENABLED strategy holds to settlement — the replay
+    /// fast path's precondition for skipping the exit ladder between dirty
+    /// ticks (a ladder verdict against a holder is discarded by the host
+    /// anyway, so re-running it per maintenance tick with a frozen book is
+    /// pure waste). False when any enabled non-holder is registered or the
+    /// engine is absent, so mixed books keep the full ladder.
+    ///
+    /// Disabled strategies are excluded deliberately: a disabled strategy
+    /// contributes nothing (no evaluation, no orders, no exits — its hook
+    /// output is dropped, see `drain_breaks`), so during a replay it can
+    /// never hold a position and its non-holder declaration must not veto
+    /// the fast path. A registry of nine libraries with one enabled holder
+    /// is exactly the deployment shape the fast path is for.
+    pub fn all_strategies_hold_to_settlement(&self) -> bool {
+        self.strategies
+            .iter()
+            .filter(|s| s.enabled)
+            .all(|s| s.strategy.holds_to_settlement())
     }
 
     /// Gate exemptions honoured on the most recent evaluation, in the order the
@@ -1388,6 +1471,24 @@ mod tests {
         let mut e = Engine::new(cfg.clone());
         crate::strategies::test_support::host(&mut e, cfg.trend, cfg.spread_arb);
         e
+    }
+
+    /// The fast path's all_hold precondition counts only ENABLED strategies:
+    /// a disabled non-holder contributes nothing during a replay (no
+    /// evaluation, no orders, no positions — its hook output is dropped), so
+    /// it must not veto the maintenance-gating skip. A registry of nine
+    /// libraries with one enabled holder is exactly the deployment shape the
+    /// fast path exists for.
+    #[test]
+    fn all_strategies_hold_to_settlement_ignores_disabled_strategies() {
+        let mut e = Engine::new(cfg());
+        crate::strategies::test_support::host_disabled(&mut e, cfg().trend, cfg().spread_arb);
+        // Registered but every one disabled: no replay position can exist —
+        // the enabled-holder set is empty, so the precondition holds vacuously.
+        assert!(e.all_strategies_hold_to_settlement());
+        // Enabling the (non-holder) dip buyer vetoes the fast path.
+        assert!(e.set_strategy_enabled("spread_arb", true));
+        assert!(!e.all_strategies_hold_to_settlement());
     }
 
     #[test]
