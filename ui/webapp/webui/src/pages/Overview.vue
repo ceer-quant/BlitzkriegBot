@@ -129,10 +129,29 @@ const counters = computed(() => [
 const unrealized = computed(() =>
   positions.value.reduce((a, p) => a + (Number(p.unrealizedPct) || 0) * (Number(p.shares) || 0), 0),
 )
+
+/**
+ * 新手线索（issue 381 产品化）：面板在跑但还没有任何启用的策略 —— 数据已经能看，
+ * 机器人还不能动。一条安静的指路行，与首次引导卡同一规则：指向下一步该去
+ * 的页（策略页在「策略与演化」组里），不自作主张改成别的话术。
+ */
+const needsStrategyHint = computed(() =>
+  snap.value !== null && strategyRows.value.length >= 0 && !strategyRows.value.some((r) => r.enabled),
+)
 </script>
 
 <template>
   <template v-if="snap">
+    <!-- beginner hint: the panel is live but the robot is not yet allowed to act -->
+    <div v-if="needsStrategyHint" class="mb-3.5 flex items-center gap-2 rounded-lg border border-dashed border-line bg-panel-2 px-3 py-2 text-[12px] text-muted-fg">
+      <CircleDot class="size-3.5 shrink-0 text-primary" />
+      <span>
+        机器人还没有启用任何策略 —— 到
+        <span class="font-semibold text-fg">策略与演化 → 策略</span>
+        打开开关后，成交与裁决会出现在这里。
+      </span>
+    </div>
+
     <!-- KPI row -->
     <div class="grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
       <StatTile

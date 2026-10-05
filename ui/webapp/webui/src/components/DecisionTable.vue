@@ -11,7 +11,10 @@ import Badge from '@/components/ui/badge/Badge.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import { clockTime } from '@/lib/format'
 
-const props = defineProps<{ records: IntentAuditRecordView[] }>()
+const props = withDefaults(
+  defineProps<{ records: IntentAuditRecordView[]; loading?: boolean }>(),
+  { loading: false },
+)
 
 /** Status → badge tone. Red only ever means the KERNEL refused. */
 function statusMeta(r: IntentAuditRecordView): { label: string; tone: 'up' | 'gold' | 'down' } {
@@ -69,5 +72,10 @@ function detailOf(r: IntentAuditRecordView): string {
       </tbody>
     </table>
   </div>
-  <EmptyState v-else title="还没有裁决记录" description="策略提交建议后，内核的四道关卡裁决会出现在这里。" />
+  <EmptyState
+    v-else
+    :loading="props.loading"
+    text="还没有裁决记录"
+    hint="策略提交建议后，内核的四道关卡裁决会出现在这里。"
+  />
 </template>
