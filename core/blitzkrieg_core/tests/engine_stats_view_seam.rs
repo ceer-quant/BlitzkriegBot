@@ -72,6 +72,12 @@ const NOT_CARRIED: &[(&str, &str)] = &[
         "K-line aggregator diagnostics (E29); the chart polls kline.history, \
          no panel surface reads engine.stats for it yet",
     ),
+    (
+        "resolutions",
+        "#377 (治 #2) archive verdict events replayed into the core; \
+         settlement progress is already surfaced via the settlement block, \
+         no panel surface reads the feed counter yet",
+    ),
 ];
 
 /// A dry kernel with no durable state at all: `trade_log_path`/`order_log_path`/

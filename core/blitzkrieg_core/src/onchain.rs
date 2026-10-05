@@ -1451,7 +1451,9 @@ fn convert(
             // Resolution event rides the stream), so the core's dry settlement
             // ladder must not synthesize a competing one from book evidence.
             archive_verdict: resolved_pair(
-                verdicts.get(*cid).map_or(&ConditionVerdict::default(), |v| v),
+                verdicts
+                    .get(*cid)
+                    .map_or(&ConditionVerdict::default(), |v| v),
                 &up,
                 &down,
             )
@@ -1574,15 +1576,30 @@ fn convert(
             let Some(vd) = verdicts.get(&m.condition_id) else {
                 continue;
             };
-            let Some((winner, loser)) = resolved_pair(vd, &m.up_token_id, &m.down_token_id)
-            else {
+            // ONE decision for both the flag above and this emission: a flag
+            // without an event would silence the dry ladder and strand the
+            // position (no settlement ever arrives).
+            let Some((winner, _)) = resolved_pair(vd, &m.up_token_id, &m.down_token_id) else {
                 continue;
+            };
+            let payout_of = |t: &str| {
+                if t == winner {
+                    Decimal::ONE
+                } else {
+                    Decimal::ZERO
+                }
             };
             events.push(DataEvent::Resolution {
                 condition_id: m.condition_id.clone(),
-                // A binary boundary names BOTH sides: the winner pays 1, the
-                // loser 0 — the core books what the stream says.
-                payouts: vec![(winner, Decimal::ONE), (loser, Decimal::ZERO)],
+                // The market's OWN outcome order ([0]=up, [1]=down) — the same
+                // order the NegRisk adapter indexes redeem amounts by; a
+                // winner-first reordering would corrupt the recorded
+                // outcome_index. A binary boundary names BOTH sides: the
+                // winner pays 1, the loser 0.
+                payouts: vec![
+                    (m.up_token_id.clone(), payout_of(&m.up_token_id)),
+                    (m.down_token_id.clone(), payout_of(&m.down_token_id)),
+                ],
                 neg_risk: m.neg_risk,
                 now_ms: rc.end_sec * 1000,
             });
@@ -2182,6 +2199,252 @@ mod tests {
             "both durations' conditions survive into the dataset"
         );
         verify_dataset(&o.manifest_path).unwrap();
+    }
+
+    /// 治 #2 unit semantics: the two kinds of REDEEM evidence and the two
+    /// fallbacks, folded and resolved exactly as the converter consumes them.
+    #[test]
+    fn redemption_evidence_folds_and_resolves() {
+        // A WINNING row (cash received) names the winner asset outright; the
+        // evidence-free companion row (size 0, no asset) changes nothing.
+        let mut v = BTreeMap::new();
+        fold_redemption(
+            &mut v,
+            &json!({"conditionId": COND1, "type": "REDEEM", "asset": UP1,
+                    "outcomeIndex": 0, "size": 41.0, "usdcSize": 41.0}),
+        );
+        fold_redemption(
+            &mut v,
+            &json!({"conditionId": COND1, "type": "REDEEM", "asset": "",
+                    "outcomeIndex": 0, "size": 0.0, "usdcSize": 0.0}),
+        );
+        let vd = &v[COND1];
+        assert_eq!(resolve_winner(vd, UP1, DOWN1).as_deref(), Some(UP1));
+        assert_eq!(
+            resolved_pair(vd, UP1, DOWN1),
+            Some((UP1.to_string(), DOWN1.to_string()))
+        );
+
+        // A BURN row (no cash, shares destroyed) names the LOSER; the winner
+        // is the other side.
+        let mut v = BTreeMap::new();
+        fold_redemption(
+            &mut v,
+            &json!({"conditionId": COND2, "type": "REDEEM", "asset": UP2,
+                    "outcomeIndex": 0, "size": 41.0, "usdcSize": 0.0}),
+        );
+        assert_eq!(
+            resolve_winner(&v[COND2], UP2, DOWN2).as_deref(),
+            Some(DOWN2)
+        );
+
+        // The outcome index substitutes when the row carries no asset —
+        // gamma's order ([0]=up, [1]=down) is the market's own.
+        let mut v = BTreeMap::new();
+        fold_redemption(
+            &mut v,
+            &json!({"conditionId": "c3", "type": "REDEEM", "asset": "",
+                    "outcomeIndex": 1, "size": 0.0, "usdcSize": 7.0}),
+        );
+        assert_eq!(
+            resolve_winner(&v["c3"], "t-up", "t-down").as_deref(),
+            Some("t-down")
+        );
+        fold_redemption(
+            &mut v,
+            &json!({"conditionId": "c4", "type": "REDEEM", "asset": "",
+                    "outcomeIndex": 0, "size": 9.0, "usdcSize": 0.0}),
+        );
+        assert_eq!(
+            resolve_winner(&v["c4"], "t-up", "t-down").as_deref(),
+            Some("t-down"),
+            "a proven UP loser makes DOWN the winner"
+        );
+
+        // Evidence against neither declared token proves nothing — and a
+        // one-sided market (a pruned gamma) can never name both sides, so it
+        // stays with the dry ladder.
+        let mut v = BTreeMap::new();
+        fold_redemption(
+            &mut v,
+            &json!({"conditionId": "c5", "type": "REDEEM", "asset": "OTHER",
+                    "outcomeIndex": -1, "size": 5.0, "usdcSize": 5.0}),
+        );
+        assert_eq!(resolve_winner(&v["c5"], UP1, DOWN1), None);
+        assert_eq!(resolved_pair(&v["c5"], UP1, DOWN1), None);
+        assert_eq!(resolved_pair(&ConditionVerdict::default(), UP1, ""), None);
+    }
+
+    /// A `/trades` walk (no REDEEM rows) produces no redemption file — its
+    /// datasets convert verdict-less and the dry ladder keeps settling them,
+    /// exactly the pre-治#2 behavior.
+    #[test]
+    fn a_trades_api_dataset_has_no_verdict_file() {
+        let r = req(tmp("no-verdicts"));
+        assert!(load_redemptions(&redemptions_path(&r)).unwrap().is_empty());
+    }
+
+    /// One COND1 trade + its winning REDEEM, plus one COND2 trade with no
+    /// redeem evidence. The dataset must carry the verdict as a first-class
+    /// event at the round boundary AND flag the market, so the replay settles
+    /// from the stream and the dry ladder stands down.
+    fn verdict_dataset(tag: &str) -> (PullRequest, PagingVenue) {
+        const T0: i64 = 1_790_785_000;
+        let rows = [
+            json!({
+                "proxyWallet": WALLET, "type": "TRADE", "side": "BUY",
+                "asset": UP1, "conditionId": COND1, "size": 1.0, "price": 0.5,
+                "timestamp": T0, "slug": "btc-updown-15m-1790784900",
+                "outcome": "Up", "outcomeIndex": 0,
+                "transactionHash": "0x1",
+            }),
+            json!({
+                "proxyWallet": WALLET, "type": "REDEEM", "side": "",
+                "asset": UP1, "conditionId": COND1, "size": 1.0, "usdcSize": 1.0,
+                "price": 0, "timestamp": T0 + 60,
+                "slug": "btc-updown-15m-1790784900",
+                "outcome": "Up", "outcomeIndex": 0,
+                "transactionHash": "0xdead",
+            }),
+            json!({
+                "proxyWallet": WALLET, "type": "TRADE", "side": "SELL",
+                "asset": DOWN2, "conditionId": COND2, "size": 1.0, "price": 0.4,
+                "timestamp": T0, "slug": "btc-updown-5m-1790785200",
+                "outcome": "Down", "outcomeIndex": 1,
+                "transactionHash": "0x2",
+            }),
+        ];
+        let ledger = tmp(tag).join("activity.jsonl");
+        std::fs::write(
+            &ledger,
+            rows.iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let mut r = req(tmp(&format!("{tag}-pull")));
+        r.fill_source = FillSource::ActivityFile(ledger);
+        let fetch = PagingVenue {
+            all: Vec::new(),
+            trades_urls: Mutex::default(),
+            meta_urls: Mutex::default(),
+            gammas: gamma_map(),
+        };
+        (r, fetch)
+    }
+
+    #[tokio::test]
+    async fn activity_redemptions_become_verdict_events_and_flags() {
+        let (r, fetch) = verdict_dataset("verdicts");
+        let o = pull_and_convert(&fetch, &r, &noop_cb()).await.unwrap();
+
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(&o.manifest_path).unwrap()).unwrap();
+        assert_eq!(
+            manifest
+                .pointer("/converterVersion")
+                .and_then(Value::as_u64),
+            Some(CONVERTER_VERSION),
+            "the manifest pins the converter version"
+        );
+        assert_eq!(
+            manifest.pointer("/counts/verdicts").and_then(Value::as_u64),
+            Some(1),
+            "one condition's redemption evidence"
+        );
+
+        // The stream settles COND1 at the round's expiry instant, BOTH sides
+        // named, in the market's OWN outcome order (up first — the NegRisk
+        // redeem order).
+        let txt = std::fs::read_to_string(&o.events_path).unwrap();
+        let line = txt
+            .lines()
+            .find(|l| l.contains("\"k\":\"resolution\""))
+            .expect("a resolution event");
+        let v: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v["c"], COND1);
+        assert_eq!(
+            v["at"],
+            json!(1_790_785_800_000i64),
+            "stamped at the round boundary, not at the redeem print"
+        );
+        assert_eq!(v["p"], json!([[UP1, "1"], [DOWN1, "0"]]));
+        // And the line parses back into the event the replay dispatches.
+        match crate::data_source::event_from_json(&v).unwrap() {
+            crate::engine::DataEvent::Resolution {
+                condition_id,
+                payouts,
+                ..
+            } => {
+                assert_eq!(condition_id, COND1);
+                assert_eq!(
+                    payouts,
+                    vec![
+                        (UP1.to_string(), Decimal::ONE),
+                        (DOWN1.to_string(), Decimal::ZERO)
+                    ]
+                );
+            }
+            other => panic!("wrong kind: {other:?}"),
+        }
+
+        // The declaration flags the verdict market (dry ladder stands down);
+        // the market without redeem evidence stays unflagged.
+        assert!(
+            txt.contains("\"archiveVerdict\":true"),
+            "COND1's market declares the archive verdict: {txt}"
+        );
+        assert!(
+            txt.contains("\"archiveVerdict\":false"),
+            "COND2's market stays unflagged"
+        );
+
+        // A warm-cache re-run with the SAME converter answers from cache.
+        let o2 = pull_and_convert(&fetch, &r, &noop_cb()).await.unwrap();
+        assert!(o2.cache_hit, "same converter version: cache hit");
+    }
+
+    #[tokio::test]
+    async fn a_pre_verdict_dataset_reconverts_instead_of_answering_stale() {
+        let (r, fetch) = verdict_dataset("stale-verdicts");
+        let o = pull_and_convert(&fetch, &r, &noop_cb()).await.unwrap();
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(&o.manifest_path).unwrap()).unwrap();
+        let events_sha = manifest
+            .pointer("/sha256/events")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+
+        // Strip the pin the way an OLDER converter's manifest would lack it.
+        let mp = o.manifest_path.clone();
+        let mut m = manifest;
+        m.as_object_mut().unwrap().remove("converterVersion");
+        std::fs::write(&mp, m.to_string()).unwrap();
+
+        // The next pull must NOT answer from cache: it re-converts over the
+        // same cached fills (the activity path touches no network) and
+        // re-pins the version.
+        let o2 = pull_and_convert(&fetch, &r, &noop_cb()).await.unwrap();
+        assert!(
+            !o2.cache_hit,
+            "a manifest without the version pin is a pre-verdict dataset"
+        );
+        let m2: Value =
+            serde_json::from_str(&std::fs::read_to_string(&o2.manifest_path).unwrap()).unwrap();
+        assert_eq!(
+            m2.pointer("/converterVersion").and_then(Value::as_u64),
+            Some(CONVERTER_VERSION)
+        );
+        // Deterministic converter: the re-converted stream is byte-identical.
+        assert_eq!(
+            m2.pointer("/sha256/events").and_then(Value::as_str),
+            Some(events_sha.as_str()),
+            "the re-convert reproduces the same event stream"
+        );
+        let txt = std::fs::read_to_string(&o2.events_path).unwrap();
+        assert!(txt.contains("\"k\":\"resolution\""));
     }
 
     /// Gamma prunes closed short-cycle updown markets (probed live: it

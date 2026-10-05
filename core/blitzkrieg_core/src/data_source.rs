@@ -1165,10 +1165,7 @@ mod tests {
                 condition_id: "0xcond".into(),
                 // A payout with many digits must survive the round trip
                 // exactly, like every other decimal here.
-                payouts: vec![
-                    ("up".into(), dec!(1)),
-                    ("down".into(), dec!(0.000000001)),
-                ],
+                payouts: vec![("up".into(), dec!(1)), ("down".into(), dec!(0.000000001))],
                 neg_risk: true,
                 now_ms: now + 4,
             },
