@@ -416,6 +416,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ autoUpdate }),
     }),
+  /**
+   * 设置页「暂存下载」按钮（VERSIONING.md §7.5，#379）。让内核把较新的
+   * 发布资产下载到 data/update/staging/ 并校验 SHA256 —— 校验过也只停在
+   * 「重启可应用」，替换二进制永远是启动器的职责，内核不碰自己正在执行的
+   * 文件。网关同样只转发、立即返回；轮询 snapshot 的 `stageState` 直到
+   * phase 变化；`error` 非空是内核拒绝（autoUpdate=false），原样展示。
+   */
+  updateStage: () => request<{ started: boolean; running?: boolean; error?: string }>('/version/stage', { method: 'POST' }),
 
   // ── #353 回测（拉数据 → 配置 → 回测 → 看结果，全程浏览器内）────────────
   // 六条都是内核 `backtest.*` IPC 的纯代理：网关不加工任何参数（body 即
@@ -1096,6 +1104,11 @@ export interface Snapshot {
    */
   systemVersion?: SystemVersion | null
   /**
+   * #379 — the kernel's download/staging state machine. `null`/absent on
+   * older cores: read as "this core cannot stage", never invented.
+   */
+  stageState?: StageState | null
+  /**
    * E13 evolution block — pending proposals + the switch/cycle clock. Absent on
    * older gateways (treat as "no proposal workflow"); never present with a
    * partial status: the gateway always writes both keys together.
@@ -1120,6 +1133,21 @@ export interface SystemVersion {
   checkEnabled: boolean
   lastCheckMs: number | null
   releaseUrl: string | null
+}
+
+/**
+ * 内核的下载/暂存状态机（VERSIONING.md §7.5，#379）。四相，最高只能到
+ * `staged` —— 内核永不替换它正在执行的二进制（§7.5 铁律），安装是启动器的
+ * 职责。`phase` 用内核自己的 token（idle/downloading/staged/failed）；旧内核
+ * 不认识 system.update.stage → snapshot 上是 null，渲染为「不支持暂存」。
+ */
+export interface StageState {
+  phase: 'idle' | 'downloading' | 'staged' | 'failed'
+  detail?: string | null
+  version?: string | null
+  asset?: string | null
+  sha256?: string | null
+  stagedAtMs?: number | null
 }
 
 export interface PluginRow {

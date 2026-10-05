@@ -167,6 +167,11 @@ pub struct CoreConfig {
     /// Apply an update automatically (the kernel still never installs: the
     /// launcher owns that, P12). Default false.
     pub update_auto: bool,
+    /// #379: seconds between AUTOMATIC update checks. `0` (the default) means
+    /// NO scheduler task exists — the clock is an explicit configuration
+    /// choice (`--update-interval-secs` / `BLITZKRIEG_UPDATE_INTERVAL_SECS` /
+    /// `update.interval_secs`), never a default.
+    pub update_interval_secs: u64,
     /// Start with Shadow Evolution enabled (opt-in; default false).
     pub shadow_evolution_enabled: bool,
     /// Optional Shadow Evolution tuning (tests/ops). None = crate defaults.
@@ -725,6 +730,7 @@ impl Default for CoreConfig {
             discovery_enabled: true,
             update_check_enabled: false,
             update_auto: false,
+            update_interval_secs: 0,
             shadow_evolution_enabled: false,
             shadow_evolution_tuning: None,
             strategy_limits: HashMap::new(),

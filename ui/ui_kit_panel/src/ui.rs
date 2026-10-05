@@ -1152,6 +1152,31 @@ fn render_settings_version(f: &mut Frame, area: Rect, app: &App) {
             "outbound checks disabled"
         }
     )));
+    // ── STAGE (#379, §7.5) — the download/verify state machine; the kernel
+    // stops at `staged` and the LAUNCHER applies on the restart path. ──
+    if let Some(stage) = app.snap.stage_state.as_ref() {
+        let (mark, text, color) = match stage.phase.as_str() {
+            "staged" => (
+                "✓",
+                "staged — restart applies it (launcher-side)".to_string(),
+                GREEN,
+            ),
+            "downloading" => ("…", "downloading + verifying".to_string(), WARN),
+            "failed" => (
+                "✗",
+                format!(
+                    "failed — {}",
+                    stage.detail.clone().unwrap_or_else(|| "unknown".into())
+                ),
+                RED,
+            ),
+            _ => ("·", "nothing staged".to_string(), DIM),
+        };
+        lines.push(Line::from(Span::styled(
+            format!("  stage    {mark} {text}"),
+            Style::default().fg(color),
+        )));
+    }
     lines.push(Line::from(""));
     if app.update_busy {
         lines.push(Line::from(Span::styled(
@@ -1160,7 +1185,7 @@ fn render_settings_version(f: &mut Frame, area: Rect, app: &App) {
         )));
     }
     lines.push(Line::from(Span::styled(
-        "  [c] check now   [a] toggle auto-update (asks y/n)   [i] install (needs auto on)",
+        "  [c] check now   [a] toggle auto-update (asks y/n)   [s] stage (needs auto on)   [i] install",
         Style::default().fg(DIM),
     )));
     lines.push(Line::from(Span::styled(

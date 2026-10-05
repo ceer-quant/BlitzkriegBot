@@ -265,6 +265,56 @@ async function toggleAutoUpdate(on: boolean): Promise<void> {
   }
 }
 
+// 暂存状态（issue 379）同样来自 snapshot 轮询：旧内核是 null，明说「不支持暂存」。
+const stage = computed(() => store.snapshot?.stageState ?? null)
+const stageBusy = ref(false)
+const stageErr = ref<string | null>(null)
+
+/** 暂存相位的徽章视图：idle/downloading/staged/failed 各自可分辨，绝不塌缩。 */
+const stageBadgeView = computed(() => {
+  const ph = stage.value?.phase
+  if (ph === 'staged') return { text: '已暂存，重启可应用', variant: 'up' as const }
+  if (ph === 'downloading') return { text: '下载中…', variant: 'default' as const }
+  if (ph === 'failed') return { text: '暂存失败', variant: 'down' as const }
+  return null
+})
+
+/**
+ * 「暂存下载」（§7.5）：内核把较新发布下载到暂存目录并校验 SHA256，然后
+ * 停在那里 —— 替换二进制是启动器的事，内核永不碰自己正在执行的文件。网关
+ * 只转交，这里轮询 snapshot 的 stageState 直到 phase 离开 downloading；
+ * 内核拒绝（autoUpdate=false）时 error 原样展示。
+ */
+let stageTimer: ReturnType<typeof setTimeout> | null = null
+const stageDeadlineAt = ref(0)
+
+async function stageNow(): Promise<void> {
+  if (stageBusy.value) return
+  try {
+    const res = await api.updateStage()
+    if (res.error) {
+      stageErr.value = res.error
+      return
+    }
+  } catch (e) {
+    stageErr.value = e instanceof Error ? e.message : String(e)
+    return
+  }
+  stageBusy.value = true
+  stageDeadlineAt.value = Date.now() + 150_000
+  const poll = async (): Promise<void> => {
+    await store.refresh()
+    const now = store.snapshot?.stageState
+    const settled = now && now.phase !== 'downloading'
+    if (settled || Date.now() > stageDeadlineAt.value) {
+      stageBusy.value = false
+      return
+    }
+    stageTimer = setTimeout(() => void poll(), 1500)
+  }
+  void poll()
+}
+
 onUnmounted(() => {
   if (checkTimer !== null) clearTimeout(checkTimer)
 })
@@ -964,11 +1014,38 @@ const themeValue = computed<ThemeMode>({
             <span class="text-[11px] text-faint-fg">检查已关闭</span>
           </Tooltip>
 
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="stageBusy || !version.autoUpdate || version.updateAvailable !== true"
+            :title="!version.autoUpdate
+              ? '自动更新已关闭：开启后内核才可下载并校验发布资产到暂存目录（§7.5）'
+              : version.updateAvailable !== true
+                ? '先检查出更新，才有东西可暂存'
+                : '下载发布资产到 data/update/staging/ 并校验 SHA256；替换二进制由启动器在重启路径上完成'"
+            @click="stageNow"
+          >
+            <RefreshCw class="size-3.5" />{{ stageBusy ? '暂存中…' : '暂存下载' }}
+          </Button>
+
           <div class="ml-auto flex items-center gap-2">
             <span class="text-[11px] text-faint-fg">自动更新（默认关闭；开启后安装由启动器校验执行，需重启内核生效）</span>
             <Switch :model-value="version.autoUpdate" @update:model-value="toggleAutoUpdate" />
           </div>
         </div>
+
+        <!-- issue 379：暂存状态行：phase 是内核自己的词，四相各自可分辨 -->
+        <div v-if="stage" class="mt-2 flex items-center justify-between gap-3 border-b border-line pb-1.5 text-[12px]">
+          <span class="text-faint-fg">暂存（data/update/staging/）</span>
+          <span class="flex items-center gap-2">
+            <Badge v-if="stageBadgeView" :variant="stageBadgeView.variant" dot>{{ stageBadgeView.text }}</Badge>
+            <Badge v-else variant="default" dot>未暂存</Badge>
+            <span v-if="stage.version" class="font-mono text-[11px] text-muted-fg">v{{ stage.version }}</span>
+            <span v-if="stage.stagedAtMs" class="num text-[11px] text-faint-fg">{{ dateTime(stage.stagedAtMs) }}</span>
+          </span>
+        </div>
+        <p v-if="stage?.detail" class="mt-1 text-[11px] leading-snug text-muted-fg">{{ stage.detail }}</p>
+        <p v-if="stageErr" class="mt-1 text-[11px] leading-snug text-down">{{ stageErr }}</p>
         <p v-if="versionErr" class="mt-2 text-[11px] leading-snug text-down">{{ versionErr }}</p>
       </template>
     </Card>

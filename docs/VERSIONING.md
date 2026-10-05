@@ -1764,6 +1764,70 @@ method::SYSTEM_UPDATE_CHECK => {
 {"ts":1758780600000,"event":"update.check","actor":"uid:501","outcome":"available","latest":"0.2.2"}
 ```
 
+### 7.4b 自动检查调度器（#379，内核侧）
+
+`spawn_startup_check` 只在启动时查一次；想要周期性复查的部署（长持仓
+进程、无人值守机器）用 #379 的调度器补上，规则与启动检查同源：
+
+* **配置链**：CLI `--update-interval-secs` > env `BLITZKRIEG_UPDATE_INTERVAL_SECS`
+  > `update.toml` 的 `update.interval_secs` > 默认 `0`。
+* **0 = 没有调度器任务**（不是「间隔无限长」）：结构上不存在，与 INV-3
+  的「关闭 = 无 spawn」同一条款；出厂配置下栈依然零出站连接。
+* `check_enabled=false` 时同样**不 spawn**；且每一轮都重读开关 ——
+  `system.update.configure` 关掉检查后，下一个边界出站流量就停了，
+  不需要重启。
+* 检查失败照旧落状态单元（`CheckOutcome::Failed`），persist 尽力而为，
+  循环继续 —— 失败的检查永不触碰交易进程（A3）。
+
+```rust
+// core/blitzkrieg_core/src/ipc/server.rs（serve 挂载处）
+let _auto_check = crate::ipc::version::spawn_auto_check_scheduler(
+    update_state.clone(),
+    crate::ipc::build_info::BUILD_INFO.version.to_string(),
+    github_token.clone(),
+    std::future::pending(), // 任务随 runtime 存亡，进程退出即结束
+);
+```
+
+### 7.4c 下载与暂存状态机（#379，内核侧；替换仍然在启动器）
+
+`system.update.stage`（以及 WebUI 的「暂存下载」按钮、TUI 的 `[s]`）驱动
+内核侧的四相状态机。**它只走到 `Staged` 为止** —— 下载、校验、落盘到
+`data/update/staging/`；替换正在执行的二进制仍然是 §7.5 启动器的职责，
+铁律不变。这一段的全部意义是：把「重启可应用」变成一个内核自证的状态，
+而不是让启动器在无人监督时凭空下载。
+
+```
+Idle ──(autoUpdate=on 且有 Available 判定)──▶ Downloading ──▶ Staged
+  ▲                                              │
+  └────────────── 无 Available 判定（no-op）──────┴──▶ Failed
+```
+
+守卫顺序（每一步都是契约）：
+
+1. `autoUpdate=false` → 连 fetch future 都不构造（INV-3 的暂存半，
+   `staging_disabled_makes_no_request` 用「被 await 即 panic」钉死）；
+   手动调用与未来的自动路径**共用这一把闸** —— 开关管的是下载本身，
+   不是谁按的按钮；
+2. 没有 `Available` 判定 → no-op（不是错误，也不得碰已暂存的副本）；
+3. 同一时刻最多一次运行（第二次调用看到 `Downloading` 就离开）；
+4. 通过之后字节才动：release 资产 + `SHA256SUMS` 从 GitHub Releases 取
+   （token 只进请求头，P16），完整 64 位十六进制比对（N8/N10），同目录
+   临时文件 + rename 落盘。
+
+失败路径的纪律：校验失败时**没有**本次的半截字节可清（写入发生在校验
+之后），而一次失败的复查不得毁掉先前已暂存的好副本 —— `Failed` 只落
+新的 detail，`version/asset/sha256/stagedAtMs` 保留。摘要随
+`data/update/state.json` 重启存活；启动器在安装前**重新校验**字节，
+所以一份撒谎的摘要最多浪费一次重启，装不上错误的字节。
+
+```json
+// system.update.stage 的应答就是状态机本身（phase 用内核自己的词）
+{"phase":"staged","detail":"sha256 verified (3f9c…, restart applies it
+(launcher-side))","version":"0.3.2","asset":"blitzkrieg-0.3.2-aarch64-apple-darwin.tar.gz",
+ "sha256":"3f9c…","stagedAtMs":1758790000000}
+```
+
 ### 7.5 下载、校验、安装（启动器侧，`blitzkrieg update --install`）
 
 **为什么在启动器**：内核是持仓进程，替换正在执行的二进制是自伤。启动器已拥有内核生命周期（`Supervisor::start/stop`），且 `scripts/upgrade.sh` 的既有语义就是「停→校验→装→起→验证身份」。
@@ -2526,6 +2590,7 @@ on:
 
 | 编号 | 目标 | 关键任务 | 依赖 |
 |---|---|---|---|
+| V7-0 (#379) | 调度器 + 暂存状态机（内核侧） | `spawn_auto_check_scheduler`（§7.4b）+ `StagePhase`/`stage_once`（§7.4c）；UI 三端接 `[s]` / 暂存下载按钮 / stage 行 | V4-2 |
 | V7-1 | 资产名与摘要解析 | `asset_name` / `expected_sha256`（缺条目 = 拒绝）+ 单测 | V4-2 |
 | V7-2 | SHA256 校验 | `verify_sha256` + 篡改 1 字节的测试（必须 Err 且目标未变） | V7-1 |
 | V7-3 | GPG（可选但可分辨） | `SignatureVerdict` 三态；`Invalid` **永远拒绝**；`require_signature` 默认 false；缺 `gpg` 大声警告 | V7-2 |

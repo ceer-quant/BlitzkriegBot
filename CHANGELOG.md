@@ -5,6 +5,32 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ## [Unreleased]
 
+### Added
+
+- **#379 — the update flow becomes end-to-end: automatic checks and a
+  download/staging state machine close the last two gaps (§7.4/§7.5), with the
+  §7.5 iron rule intact: the kernel never rewrites the binary it is executing —
+  applying/staging-forward is and stays the launcher's job.**
+  *Automatic checks* (#379 gap 3): `spawn_auto_check_scheduler` re-runs the
+  check every `update.interval_secs` (CLI `--update-interval-secs` > env
+  `BLITZKRIEG_UPDATE_INTERVAL_SECS` > `update.toml`; default 0 = NO task
+  exists), re-reads `check_enabled` every round so `system.update.configure`
+  stops the outbound traffic without a restart, and with the shipped defaults
+  spawns nothing at all (INV-3).
+  *Staging* (#379 gap 4): `system.update.stage` (IPC) / the WebUI 暂存下载
+  button / the TUI `[s]` key drive the kernel's four-phase state machine
+  `Idle→Downloading→Staged/Failed`: the release archive + `SHA256SUMS` are
+  fetched from GitHub Releases, the full 64-hex digest is verified (missing
+  entry or a tampered byte refuse — N8/N10), and the verified bytes land in
+  `data/update/staging/` via same-directory temp+rename. Staging is gated by
+  `autoUpdate` (manual and future-auto callers alike), a failed run never
+  clobbers a prior staged copy, the summary survives restarts, and the
+  furthest the machine can go is `Staged` — the launcher re-verifies and
+  installs on the restart path (`blitzkrieg update --install`, §7.5).
+  *Surfaces*: WebUI settings card (stage badge per phase + 暂存下载 button)
+  and TUI Settings tab (`[s]` + stage line) stay phase-verbatim with the
+  kernel; both refuse up front when the governing switch is off (A4).
+
 ### Changed
 
 - **The official `spread_arb` is a Lua strategy, and the repo ships no Rust

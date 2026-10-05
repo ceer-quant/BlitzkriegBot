@@ -77,6 +77,10 @@ pub(crate) mod method {
     pub const SYSTEM_UPDATE_CONFIGURE: &str = "system.update.configure";
     /// One manual update check (the "check for updates" button).
     pub const SYSTEM_UPDATE_CHECK: &str = "system.update.check";
+    /// #379: download + verify the newer release into the kernel's staging
+    /// directory. The kernel never installs (§7.5) — staging is the furthest
+    /// it goes.
+    pub const SYSTEM_UPDATE_STAGE: &str = "system.update.stage";
     /// E28: the multi-account book + this connection's effective default (§12.1).
     pub const ACCOUNT_LIST: &str = "account.list";
     /// E28: switch THIS connection's session-default account (§9.5).
@@ -352,6 +356,16 @@ impl IpcClient {
         Ok(v)
     }
 
+    /// `system.update.stage` (#379) — download + verify the newer release
+    /// into the kernel's staging directory (`data/update/staging/`). Refused
+    /// by the kernel when `autoUpdate` is off; the reply is the kernel's
+    /// staging state machine verbatim. The kernel NEVER installs: applying a
+    /// staged release stays the launcher's job (§7.5).
+    pub fn update_stage(&mut self) -> Result<StageStateView, IpcError> {
+        serde_json::from_value(self.call(method::SYSTEM_UPDATE_STAGE, serde_json::json!({}))?)
+            .map_err(|e| IpcError::Protocol(e.to_string()))
+    }
+
     // ── Shadow Evolution (E13): the proposal workflow ────────────────────────
 
     /// Full shadow-evolution status block (`shadow_evolution.status`). Older
@@ -605,6 +619,9 @@ impl IpcClient {
         // VERSIONING.md §5: version + update state. Older cores refuse the
         // method → None; the UI then says so instead of inventing a version.
         s.system_version = self.system_version().ok();
+        // #379: the staging state machine. Older cores refuse the method →
+        // None, which the UI renders as "this core cannot stage" — honest.
+        s.stage_state = self.update_stage().ok();
         s
     }
 }

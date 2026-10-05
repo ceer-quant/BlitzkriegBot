@@ -932,6 +932,34 @@ pub struct SystemVersionView {
     pub raw_json: String,
 }
 
+/// The kernel's download/staging state machine (VERSIONING.md §7.5, #379).
+/// Four phases, and the furthest it can advance is `Staged`: the kernel never
+/// replaces the binary it is running — installation is the launcher's job.
+/// Every field defaults so an older core that refuses the method deserialises
+/// nothing here at all (the snapshot keeps `None`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageStateView {
+    /// `idle` | `downloading` | `staged` | `failed` — the kernel's own tokens.
+    #[serde(default)]
+    pub phase: String,
+    /// Operator-facing detail (verify summary / failure reason).
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// The staged (or attempted) version.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// The asset file name in the staging directory.
+    #[serde(default)]
+    pub asset: Option<String>,
+    /// The digest the bytes were verified against.
+    #[serde(default)]
+    pub sha256: Option<String>,
+    /// When the asset was staged (UTC ms); `None` while never staged.
+    #[serde(default)]
+    pub staged_at_ms: Option<u64>,
+}
+
 /// A single point-in-time view of the core, assembled by one round of IPC calls.
 /// This is what every adapter (web/TUI/app) renders — the adapters differ only
 /// in how they present it.
@@ -965,6 +993,9 @@ pub struct UiSnapshot {
     /// serving core (`None` = older core or no core). The three-state
     /// `update_available` travels inside verbatim.
     pub system_version: Option<SystemVersionView>,
+    /// #379: the download/staging state machine (`None` = older core that
+    /// refuses `system.update.stage`, or staging refused).
+    pub stage_state: Option<StageStateView>,
     pub connected: bool,
     pub last_error: Option<String>,
 }

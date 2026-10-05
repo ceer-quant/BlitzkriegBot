@@ -53,6 +53,8 @@ pub enum Msg {
     UpdateConfigured(Result<bool, String>),
     /// The launcher-side install subprocess finished with its captured output.
     UpdateInstallDone(Result<String, String>),
+    /// #379: the staging run answered (`Ok(state)` or the kernel's refusal).
+    UpdateStaged(Result<blitzkrieg_ui_kit::core::types::StageStateView, String>),
     /// A decoded core-event batch arrived on the EventBus.
     Events(Vec<blitzkrieg_ui_kit::core::types::CoreEvent>),
     /// E25 (#331): the intent-audit tail was re-read (Decisions tab).
@@ -415,6 +417,26 @@ pub async fn run_panel_with_dispatcher(
                             let _ = tx.send(msg);
                         });
                     }
+                    Action::UpdateStage => {
+                        // A FRESH client on its own connection (same reasoning
+                        // as UpdateCheck): the download runs on the kernel's
+                        // own timeout and must not hold the snapshot poller.
+                        let socket = app.socket.clone();
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            let out = tokio::task::spawn_blocking(move || {
+                                let mut client =
+                                    blitzkrieg_ui_kit::core::ipc_client::IpcClient::new(socket);
+                                client.update_stage().map_err(|e| e.to_string())
+                            })
+                            .await;
+                            let msg = match out {
+                                Ok(r) => Msg::UpdateStaged(r),
+                                Err(e) => Msg::UpdateStaged(Err(format!("task: {e}"))),
+                            };
+                            let _ = tx.send(msg);
+                        });
+                    }
                     Action::UpdateConfigure(on) => {
                         let socket = app.socket.clone();
                         let tx = tx.clone();
@@ -691,6 +713,21 @@ pub async fn run_panel_with_dispatcher(
                 }
             }
             Msg::UpdateInstallDone(_) => { /* deferred with the release pipeline */ }
+            Msg::UpdateStaged(result) => {
+                app.update_busy = false;
+                match result {
+                    Ok(stage) => app.log(format!(
+                        "staging: {}{}",
+                        stage.phase,
+                        stage
+                            .detail
+                            .as_deref()
+                            .map(|d| format!(" — {d}"))
+                            .unwrap_or_default()
+                    )),
+                    Err(e) => app.log(format!("staging refused: {e}")),
+                }
+            }
             Msg::RefreshError(e) => app.log(format!("refresh error: {e}")),
             Msg::Decisions(rows) => app.decisions = rows,
             Msg::PolicyLoaded(result) => match result {
