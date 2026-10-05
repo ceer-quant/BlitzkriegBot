@@ -162,7 +162,18 @@ const lossPerShare = (price, stopPct) => (price * stopPct) / 100;
 
 /** Teeth A surface: one entry record judged against the configured cap.
  * An over-cap APPROVAL (Gate 2 neutered to always-pass) is red; a MODIFIED
- * record whose approved size breaks either invariant is red. */
+ * record whose approved size breaks either invariant is red.
+ *
+ * The per-share loss is measured against the record's OWN physics binding
+ * (`decision.physics.stopPrice`) whenever it carries one: the kernel sizes
+ * with the BOUND stop (`effective_stop_pct`, time-aware — it tightens as the
+ * round's expiry approaches, risk/limits.rs uses the same number the binding
+ * carries), so near a round boundary the configured `stopPct` is flatter
+ * than the discipline that will actually fire and judging with it flags the
+ * kernel for approving exactly what the cap paid for (#382's wall-clock
+ * flake). Records without a binding (teeth/synthetic fixtures) fall back to
+ * the configured stop; the binding itself is pinned to the kernel's own
+ * projection by judgePhysics, not here. */
 export function judgeShrinkRecord(r, { capUsd, stopPct }) {
   const problems = [];
   if (!r || typeof r !== 'object') return ['record is not an object'];
@@ -172,7 +183,10 @@ export function judgeShrinkRecord(r, { capUsd, stopPct }) {
   if (!Number.isFinite(size) || !Number.isFinite(price)) {
     return ['record carries no readable intent size/price'];
   }
-  const per = lossPerShare(price, stopPct);
+  const boundStop = num(r.decision?.physics?.stopPrice);
+  const per = Number.isFinite(boundStop) && boundStop > 0 && price > boundStop
+    ? price - boundStop
+    : lossPerShare(price, stopPct);
   if (status === 'APPROVED' && size * per > capUsd + 1e-9) {
     problems.push(
       `over-cap entry approved: ${size} shares × ${per.toFixed(6)} = ${(size * per).toFixed(6)} ` +
@@ -342,6 +356,18 @@ function selfTest() {
     ['an approved size over the cap is red', judgeShrinkRecord({
       ...goodShrink,
       decision: { ...goodShrink.decision, modification: { kind: 'SIZE_REDUCED', suggested: '10', approved: '5' }, shares: '5' },
+    }, { capUsd: CAP, stopPct: STOP_PCT }), 1, 'does not bound'],
+    ['a bound-stop record near expiry is clean (the #382 shape)', judgeShrinkRecord({
+      strategy: NAME, intent: { price: '0.40', size: '10' },
+      decision: { status: 'MODIFIED', shares: '4',
+        modification: { kind: 'SIZE_REDUCED', suggested: '10', approved: '4' },
+        physics: { stopPrice: '0.35', forceExitSec: 0, ladder: [{ atPct: 100, closeRatio: '1.0' }] } },
+    }, { capUsd: CAP, stopPct: STOP_PCT }), 0, null],
+    ['teeth: an approval over the cap even against its OWN bound stop is red', judgeShrinkRecord({
+      strategy: NAME, intent: { price: '0.40', size: '10' },
+      decision: { status: 'MODIFIED', shares: '6',
+        modification: { kind: 'SIZE_REDUCED', suggested: '10', approved: '6' },
+        physics: { stopPrice: '0.35', forceExitSec: 0, ladder: [{ atPct: 100, closeRatio: '1.0' }] } },
     }, { capUsd: CAP, stopPct: STOP_PCT }), 1, 'does not bound'],
     ['the physics binding matches the kernel projection', judgePhysics(
       physicsRec(proj(20, '0.32', 120), '0.32', 120), { forceExitSec: 120 }), 0, null],
