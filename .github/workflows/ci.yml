@@ -25,7 +25,19 @@ name: CI
 on:
   push:
     branches: [main, develop, 'release/**']
+    # Docs-only pushes (README rewrite, docs/, dev-docs/) skip the whole
+    # suite: none of the six gates reads prose. Mixed changes (any code,
+    # script, workflow or config file) still run everything — the ignore
+    # list only fires when EVERY changed file matches.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'dev-docs/**'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'dev-docs/**'
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
