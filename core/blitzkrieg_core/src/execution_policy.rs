@@ -1436,19 +1436,25 @@ pub struct PolicyAuditRecord {
     pub error: Option<String>,
 }
 
-/// Append one audit line. Best-effort (the in-memory policy stays
-/// authoritative); returns whether a line landed.
-pub fn append_audit(record: &PolicyAuditRecord) -> bool {
-    crate::jsonl::append(Path::new(EXECUTION_POLICY_AUDIT_PATH), record)
+/// Append one audit line to the journal at `path`. Best-effort (the
+/// in-memory policy stays authoritative); returns whether a line landed.
+///
+/// The path is the CALLER's decision, not this module's: production resolves
+/// `CoreConfig::execution_policy_audit_path` (or the shipped
+/// [`EXECUTION_POLICY_AUDIT_PATH`] spelling when unset), and a test core
+/// points at its own private file — two appenders racing on one journal used
+/// to be able to fuse their records into one unparseable line, silently
+/// losing both (the #386 flake; `jsonl::append` now lands each record in one
+/// atomic `write_all`, and the test cores carry private journals on top).
+pub fn append_audit_to(path: &Path, record: &PolicyAuditRecord) -> bool {
+    crate::jsonl::append(path, record)
 }
 
-/// Read the audit trail back (file order). Unparseable lines are skipped
-/// with one warning — the shared JSONL loader discipline.
-pub fn load_audit() -> Vec<PolicyAuditRecord> {
-    crate::jsonl::load(
-        Path::new(EXECUTION_POLICY_AUDIT_PATH),
-        "execution policy audit: skipped unparseable lines",
-    )
+/// Read the audit trail back from the journal at `path` (file order).
+/// Unparseable lines are skipped with one warning — the shared JSONL loader
+/// discipline. A missing file is an empty trail.
+pub fn load_audit_from(path: &Path) -> Vec<PolicyAuditRecord> {
+    crate::jsonl::load(path, "execution policy audit: skipped unparseable lines")
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

@@ -144,6 +144,15 @@ pub struct CoreConfig {
     /// refuses the boot (fail-closed) with a `load-refused` audit line — the
     /// kernel never trades under a policy the operator did not write.
     pub execution_policy_path: Option<String>,
+    /// #386: where the execution-policy audit journal appends and the
+    /// `history` arm reads back. `None` = the shipped
+    /// `data/audit/execution_policy.jsonl` spelling (cwd-relative — one core
+    /// per data directory owns it, the same road the other journals take;
+    /// boot `load-refused` lines included). Tests pass a PRIVATE temp path so
+    /// parallel test cores never share one journal file: two interleaved
+    /// sets once fused into a single unparseable line and vanished from the
+    /// history two tests were counting (the flake PR #378 disclosed).
+    pub execution_policy_audit_path: Option<String>,
     /// #363: operator override for the per-asset position cap (the
     /// `--max-positions-per-asset` flag). `None` = the execution policy's
     /// value decides (`[accounts.<id>]` → `[defaults]` → code default 1).
@@ -728,6 +737,10 @@ impl Default for CoreConfig {
             execution_policy_path: Some(
                 crate::execution_policy::EXECUTION_POLICY_CONFIG_PATH.to_string(),
             ),
+            // #386: the shipped `data/audit/…` spelling resolves against the
+            // process cwd — production's single core owns that directory; a
+            // test that wants isolation passes its own private path.
+            execution_policy_audit_path: None,
             max_positions_per_asset: None,
             trade_log_path: Some("data/trades/trades.jsonl".to_string()),
             order_log_path: Some("data/orders/orders.jsonl".to_string()),
@@ -1670,7 +1683,8 @@ impl Core {
         match crate::execution_policy::Policy::load(path) {
             Ok(policy) => Some(policy),
             Err(reason) => {
-                crate::execution_policy::append_audit(
+                crate::execution_policy::append_audit_to(
+                    &Self::execution_policy_audit_file(config),
                     &crate::execution_policy::PolicyAuditRecord {
                         ts_ms: now_ms(),
                         actor: crate::execution_policy::ACTOR_BOOT.to_string(),
@@ -1727,15 +1741,42 @@ impl Core {
         }
     }
 
+    /// The journal file this config's execution-policy audit lines land in
+    /// (#386): the config's private override, or the shipped
+    /// `data/audit/execution_policy.jsonl` spelling when unset.
+    fn execution_policy_audit_file(config: &CoreConfig) -> std::path::PathBuf {
+        config
+            .execution_policy_audit_path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(crate::execution_policy::EXECUTION_POLICY_AUDIT_PATH)
+            })
+    }
+
     /// Whether the policy is loaded at all (the zero-config deployment has
     /// none — the read arms report that instead of inventing a section).
     pub fn execution_policy_loaded(&self) -> bool {
         self.execution_policy.is_some()
     }
 
-    /// The audit journal for the history arm.
+    /// Append one audit line to THIS core's journal (#386). The wire set/
+    /// reset arms and the reload refusal all land through here, so a test
+    /// core with a private journal never touches the checkout's data dir.
+    pub fn execution_policy_append_audit(
+        &self,
+        record: &crate::execution_policy::PolicyAuditRecord,
+    ) -> bool {
+        crate::execution_policy::append_audit_to(
+            &Self::execution_policy_audit_file(&self.config),
+            record,
+        )
+    }
+
+    /// The audit journal for the history arm — read from THIS core's own
+    /// journal file (#386), not a process-wide fixed path.
     pub fn execution_policy_audit(&self) -> Vec<crate::execution_policy::PolicyAuditRecord> {
-        crate::execution_policy::load_audit()
+        crate::execution_policy::load_audit_from(&Self::execution_policy_audit_file(&self.config))
     }
 
     /// #364: replay the CURRENT section over the recent closed trades of one
@@ -1870,17 +1911,15 @@ impl Core {
                 Ok(())
             }
             Err(reason) => {
-                crate::execution_policy::append_audit(
-                    &crate::execution_policy::PolicyAuditRecord {
-                        ts_ms: now_ms(),
-                        actor: crate::execution_policy::ACTOR_IPC.to_string(),
-                        action: "load-refused".to_string(),
-                        account_id: "*".to_string(),
-                        before: None,
-                        after: None,
-                        error: Some(reason.clone()),
-                    },
-                );
+                self.execution_policy_append_audit(&crate::execution_policy::PolicyAuditRecord {
+                    ts_ms: now_ms(),
+                    actor: crate::execution_policy::ACTOR_IPC.to_string(),
+                    action: "load-refused".to_string(),
+                    account_id: "*".to_string(),
+                    before: None,
+                    after: None,
+                    error: Some(reason.clone()),
+                });
                 Err(reason)
             }
         }
