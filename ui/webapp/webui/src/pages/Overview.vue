@@ -133,7 +133,7 @@ const unrealized = computed(() =>
 /**
  * 新手线索（issue 381 产品化）：面板在跑但还没有任何启用的策略 —— 数据已经能看，
  * 机器人还不能动。一条安静的指路行，与首次引导卡同一规则：指向下一步该去
- * 的页（策略页在「策略与演化」组里），不自作主张改成别的话术。
+ * 的页（主导航「策略」项），不自作主张改成别的话术。
  */
 const needsStrategyHint = computed(() =>
   snap.value !== null && strategyRows.value.length >= 0 && !strategyRows.value.some((r) => r.enabled),
@@ -147,8 +147,8 @@ const needsStrategyHint = computed(() =>
       <CircleDot class="size-3.5 shrink-0 text-primary" />
       <span>
         机器人还没有启用任何策略 —— 到
-        <span class="font-semibold text-fg">策略与演化 → 策略</span>
-        打开开关后，成交与裁决会出现在这里。
+        <span class="font-semibold text-fg">策略</span>
+        页内打开开关后，成交与裁决会出现在这里。
       </span>
     </div>
 
