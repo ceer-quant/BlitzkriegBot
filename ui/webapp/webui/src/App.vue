@@ -2,15 +2,20 @@
 /**
  * Panel shell — top bar (brand + segmented nav + connection telemetry), page
  * outlet, and the global error surface. Dark is the default identity.
+ *
+ * issue 381 IA 重构：九个页签归成两级导航 —— 直连页（总览/行情面板/插件/设置）+
+ * 两个组（回测研究 = 回测+蓝图；策略与演化 = 策略+裁决流+进化）。导航本身是
+ * 纯数据（lib/nav.ts），门禁与页表同源；组只是导航归拢，页签集合不变。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { Moon, Sun, SunMoon, Bell, BellOff, LogOut, Radio } from 'lucide-vue-next'
 import { useIntervalFn, useNow } from '@vueuse/core'
-import { LayoutDashboard, Activity, History, Boxes, Puzzle, Settings, Moon, Sun, SunMoon, Bell, BellOff, LogOut, Radio, FlaskConical, Gavel, Workflow } from 'lucide-vue-next'
 import { usePanelStore } from './stores/panel'
 import { hasToken, logout, ping } from './api/client'
 import { SESSION_EXPIRED_REASON } from './lib/session'
 import { useTheme } from './lib/theme'
 import { clockTime } from './lib/format'
+import { NAV, groupOf, type TabId } from './lib/nav'
 import brandMark from './assets/logo.png'
 import OverviewPage from './pages/Overview.vue'
 import HftPage from './pages/HftPage.vue'
@@ -26,8 +31,6 @@ import OnboardingTour from './components/OnboardingTour.vue'
 import SegmentedControl from './components/ui/segmented/SegmentedControl.vue'
 import Button from './components/ui/button/Button.vue'
 import AlertBanner from './components/ui/alert/AlertBanner.vue'
-
-type TabId = 'overview' | 'hft' | 'backtest' | 'blueprint' | 'strategies' | 'decisions' | 'evolution' | 'plugins' | 'settings'
 
 const store = usePanelStore()
 const { theme, isDark, cycleTheme, sound, toggleSound } = useTheme()
@@ -67,17 +70,19 @@ const pages = {
 } as const
 const activePage = computed(() => pages[tab.value])
 
-const segments = [
-  { id: 'overview', label: '总览', icon: LayoutDashboard },
-  { id: 'hft', label: '行情面板', icon: Activity },
-  { id: 'backtest', label: '回测', icon: History },
-  { id: 'blueprint', label: '蓝图', icon: Workflow },
-  { id: 'strategies', label: '策略', icon: Boxes },
-  { id: 'decisions', label: '裁决流', icon: Gavel },
-  { id: 'evolution', label: '进化', icon: FlaskConical },
-  { id: 'plugins', label: '插件', icon: Puzzle },
-  { id: 'settings', label: '设置', icon: Settings },
-]
+/** 主导航：直连页 + 组。组被点中时落组内第一个叶子。 */
+const topSegments = NAV.map((e) => ({ id: e.id as string, label: e.label }))
+const GROUP_IDS = new Set<string>(NAV.filter((e) => e.kind === 'group').map((e) => e.id))
+const activeGroup = computed(() => groupOf(tab.value))
+/** 组不是页：v-model 落到组 id 时换成组内第一个叶子页。 */
+function onTopNav(id: string): void {
+  if (GROUP_IDS.has(id)) {
+    const g = NAV.find((e) => e.id === id)
+    if (g && g.kind === 'group') tab.value = g.children[0].id
+    return
+  }
+  tab.value = id as TabId
+}
 
 const now = useNow({ interval: 1000 })
 const updatedAt = computed(() => (store.lastUpdated ? clockTime(store.lastUpdated) : '—'))
@@ -147,9 +152,13 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- nav -->
-      <nav class="mx-auto hidden shrink-0 md:block">
-        <SegmentedControl v-model="tab" :segments="segments" />
+      <!-- nav: 直连页 + 两个组（组选中时在下一行展开组内叶子）-->
+      <nav class="mx-auto hidden shrink-0 items-center gap-2 md:flex">
+        <SegmentedControl
+          :model-value="activeGroup?.id ?? tab"
+          :segments="topSegments"
+          @update:model-value="onTopNav"
+        />
       </nav>
 
       <!-- telemetry -->
@@ -186,9 +195,33 @@ onMounted(() => {
       </div>
     </header>
 
+    <!-- sub-nav: 组内叶子；直连页没有第二级，占位行保持间距一致 -->
+    <nav
+      v-if="activeGroup"
+      class="mx-auto mt-6 flex max-w-[1280px] justify-center px-4"
+    >
+      <SegmentedControl
+        v-model="tab"
+        :segments="activeGroup.children"
+        size="sm"
+        :title="`「${activeGroup.label}」组内的页签`"
+      />
+    </nav>
+
     <!-- compact nav for narrow viewports -->
-    <nav class="mx-auto mt-6 flex max-w-[1280px] justify-center px-4 md:hidden">
-      <SegmentedControl v-model="tab" :segments="segments" size="sm" />
+    <nav class="mx-auto mt-6 flex max-w-[1280px] flex-col items-center gap-2 px-4 md:hidden">
+      <SegmentedControl
+        :model-value="activeGroup?.id ?? tab"
+        :segments="topSegments"
+        size="sm"
+        @update:model-value="onTopNav"
+      />
+      <SegmentedControl
+        v-if="activeGroup"
+        v-model="tab"
+        :segments="activeGroup.children"
+        size="sm"
+      />
     </nav>
 
     <!--
@@ -203,7 +236,8 @@ onMounted(() => {
       screens the compact nav is in the same flow between header and content, so
       the gap that matters there is nav→card: `pt-8` gives 32px of clearance
       instead of 24px. From `md` the nav moves inside the header and `pt-10`
-      (40px) clears the sticky offset plus the shadow.
+      (40px) clears the sticky offset plus the shadow. With a group expanded the
+      sub-nav owns that slot, so the content clearance applies to it instead.
     -->
     <main class="mx-auto max-w-[1280px] px-4 pt-8 pb-20 md:pt-10">
       <div v-if="store.error" class="mb-3.5">

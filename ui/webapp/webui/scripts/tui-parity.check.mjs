@@ -39,7 +39,9 @@ const app = read('..', '..', 'ui_kit_panel', 'src', 'app.rs')
 const ui = read('..', '..', 'ui_kit_panel', 'src', 'ui.rs')
 /** The gateway's single command table — where the bar's vocabulary lives. */
 const gatewayCommands = read('..', '..', 'ui_kit', 'src', 'gateway', 'command.rs')
-const shell = read('src', 'App.vue')
+// #381: the nav moved into `src/lib/nav.ts` (pure data) so the shell and this
+// gate parse ONE source. Leaves are flat; groups are a presentation concern.
+const shell = read('src', 'lib', 'nav.ts')
 
 console.log('the two nav surfaces, parsed from source')
 
@@ -78,7 +80,7 @@ check(
   },
 )
 
-/** WebUI nav ids, read out of the segments array. */
+/** WebUI nav ids, read out of lib/nav.ts (the same data the shell renders). */
 const webuiIds = [...shell.matchAll(/id: '(\w+)', label: /g)].map((m) => m[1])
 const WEBUI_TAB_SETS = [
   ['overview', 'hft', 'backtest', 'strategies', 'plugins', 'settings'],
@@ -142,8 +144,9 @@ if (tuiVariants.includes('Evolution')) {
 }
 // The Settings face ships with the version card (VERSIONING.md §6.4); its
 // pairing is asserted once the TUI carries the tab, same rule as Evolution.
+// #381: the WebUI version card lives in pages/settings/SettingsVersion.vue.
 if (tuiVariants.includes('Settings')) {
-  TUI_TO_WEBUI.push(['Settings', ['settings'], 'SettingsPage.vue', '版本与更新'])
+  TUI_TO_WEBUI.push(['Settings', ['settings'], 'settings/SettingsVersion.vue', '版本与更新'])
 }
 // The Decisions face ships with the E25 arbitration audit (#331); paired the
 // same way — both sides render the kernel's GateTrace.detail verbatim.
@@ -169,7 +172,8 @@ console.log('shared control surfaces (not tabs, but faces)')
 
 check('TUI command bar ↔ WebUI 设置页指令台', () => {
   assert.ok(new RegExp('fn render_command_bar\\(').test(ui), 'TUI command bar gone')
-  const settings = read('src', 'pages', 'SettingsPage.vue')
+  // #381: the command desk is a domain card under pages/settings/.
+  const settings = read('src', 'pages', 'settings', 'SettingsGateway.vue')
   assert.ok(settings.includes('指令台'), 'WebUI command desk gone')
 })
 
@@ -188,7 +192,8 @@ check('TUI flatten confirm dialog ↔ WebUI 强平按钮', () => {
 
 check('TUI 设置页 ↔ WebUI 设置页版本卡片同源（VERSIONING.md §6.4）', () => {
   assert.ok(/fn render_settings\(/.test(ui), 'TUI render_settings 缺失')
-  const settingsPage = read('src', 'pages', 'SettingsPage.vue')
+  // #381: the version card is a domain sub-page under pages/settings/.
+  const settingsPage = read('src', 'pages', 'settings', 'SettingsVersion.vue')
   assert.ok(settingsPage.includes('版本与更新'), 'WebUI 版本卡片缺失')
   // 同一事实、同一条三态规则：两侧都要能从内核问版本（system.version）。
   assert.ok(
@@ -207,7 +212,8 @@ check('TUI `n` 网络诊断浮层 ↔ WebUI 设置页网络诊断卡片', () => 
   // still carries the verb.
   assert.ok(app.includes('command_verbs('), 'the command bar stopped reading the gateway command table')
   assert.ok(gatewayCommands.includes('"netcheck"'), 'the gateway command table lost the netcheck verb')
-  const settings = read('src', 'pages', 'SettingsPage.vue')
+  // #381: the network card is a domain sub-page under pages/settings/.
+  const settings = read('src', 'pages', 'settings', 'SettingsGateway.vue')
   assert.ok(settings.includes('网络诊断'), 'WebUI network diagnosis card gone')
   // Both faces print the same reading rules — a status the core adds must not be
   // hidden on one side only (Rust `net_check::status_label` ↔ lib/net-check.ts).
@@ -230,7 +236,8 @@ const topLevelFn = (src, name) => {
 
 const netOverlay = topLevelFn(ui, 'render_net_check')
 const netCheckRs = read('..', '..', 'ui_kit', 'src', 'core', 'net_check.rs')
-const settings = read('src', 'pages', 'SettingsPage.vue')
+// #381: the network card is a domain sub-page under pages/settings/.
+const settings = read('src', 'pages', 'settings', 'SettingsGateway.vue')
 
 // The two faces render the same two FACTS, and they have to say them at the
 // same volume. They did not: the TUI painted a fake-IP resolution and the proxy
