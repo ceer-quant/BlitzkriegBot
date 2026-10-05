@@ -1180,6 +1180,12 @@ pub struct Core {
     position_db: Option<crate::position_db::PositionDb>,
     /// Feed/decision counters for observability (P4 diagnostics).
     stats: CoreStats,
+    /// #377 (治 #2): conditions the archive declared to carry an on-chain
+    /// verdict (`RoundMarkets` markets flagged `archive_verdict`). The dry
+    /// settlement ladder must not query these markets — the stream settles
+    /// them — and querying would stamp a query clock no archive answer ever
+    /// resets, tripping the blind alert.
+    archive_verdicts: HashSet<String>,
     /// When this core's ACCOUNTING SESSION began, in epoch ms (issue #200).
     ///
     /// A seeded (`dry`/`readonly`) core re-seeds its cash ledger here
@@ -1588,6 +1594,7 @@ impl Core {
             order_db,
             position_db,
             stats: CoreStats::default(),
+            archive_verdicts: HashSet::new(),
             // The session clock for the accounting identity (issue #200). Read
             // once, at construction: the ledger below is seeded at the same
             // instant, so "cash since the seed" and "trades since startedAtMs"
@@ -3037,8 +3044,46 @@ impl Core {
             // above but are not engine inputs — no counter, no strategy effect.
             crate::engine::DataEvent::Trade { .. } => {}
             crate::engine::DataEvent::RoundEnd { .. } => {}
+            // #377 (治 #2): a verdict from the stream settles its market
+            // directly — recorded like any other data event (above), counted,
+            // and handed to the settlement book. A fill-level wake keeps the
+            // fast path's evaluator in step with the position-set change the
+            // close causes.
+            crate::engine::DataEvent::Resolution {
+                condition_id,
+                payouts,
+                neg_risk,
+                ..
+            } => {
+                self.stats.resolutions += 1;
+                if self.config.backtest_fast {
+                    self.fast_eval_wake = true;
+                }
+                self.on_market_resolution(
+                    blitzkrieg_market_api::MarketResolution {
+                        condition_id: condition_id.clone(),
+                        resolved: true,
+                        payouts: payouts.clone(),
+                        neg_risk: *neg_risk,
+                        // The converter recovered this verdict from the
+                        // wallet's own redemption activity; naming the source
+                        // keeps the settlement journal's provenance honest.
+                        source: "archive".to_string(),
+                    },
+                    now_ms,
+                );
+            }
             crate::engine::DataEvent::RoundMarkets { markets, .. } => {
                 self.stats.rounds += 1;
+                // #377 (治 #2): record which markets the archive promised a
+                // verdict for. Their dry-ladder queries are suppressed below —
+                // the stream settles them, and a query stamped here would wait
+                // for an answer that never comes (blind-alert false positive).
+                for m in markets {
+                    if m.archive_verdict {
+                        self.archive_verdicts.insert(m.condition_id.clone());
+                    }
+                }
                 // Replay fast path: a rollover replaces the scanner's market
                 // list and restarts the round clock — the next evaluation sees
                 // a different round context, and the timing verdict flips.
@@ -3984,6 +4029,9 @@ impl Core {
             "tops": self.stats.tops,
             "spots": self.stats.spots,
             "rounds": self.stats.rounds,
+            // #377 (治 #2): archive verdict events replayed into the core —
+            // settlements that came from the stream instead of the dry ladder.
+            "resolutions": self.stats.resolutions,
             "evaluations": self.stats.evaluations,
             "signals": self.stats.signals,
             "placeRejected": self.stats.place_rejected,
@@ -7304,8 +7352,18 @@ impl Core {
         {
             return;
         }
-        let positions: Vec<crate::position::OpenPosition> =
-            self.positions.open_positions().to_vec();
+        // #377 (治 #2): markets the archive promised a verdict for are settled
+        // by the stream (`DataEvent::Resolution`), so the dry ladder must not
+        // query them — a stamped query would wait for an answer that never
+        // comes and trip the blind alert. Filtering here removes them from
+        // tracking AND from the forget loop's live set (self-healing: a market
+        // that slipped into the watch list is dropped on the next sync).
+        let all: Vec<crate::position::OpenPosition> = self.positions.open_positions().to_vec();
+        let positions: Vec<crate::position::OpenPosition> = all
+            .iter()
+            .filter(|p| !self.archive_verdicts.contains(&p.condition_id))
+            .cloned()
+            .collect();
         self.settlement.track_markets(&positions, now_ms);
         let live: HashSet<&str> = positions.iter().map(|p| p.condition_id.as_str()).collect();
         for condition_id in self.settlement.tracked_condition_ids() {
@@ -7324,8 +7382,12 @@ impl Core {
             // permanently open once the earliest expiry had passed: the
             // busy-phase sample put `take_settlement_queries` at 95% of
             // tick, nearly all of it this watch-list re-derivation cloning
-            // every open position per tick.
-            self.fast_next_expiry_ms = positions
+            // every open position per tick. Computed over the UNFILTERED
+            // set: an archive-verdict position's expiry must still wake the
+            // sync (its settlement event arrives around then), and letting
+            // the minimum collapse to `i64::MAX` would reopen this gate on
+            // every tick — the exact hot path #375 closed.
+            self.fast_next_expiry_ms = all
                 .iter()
                 .map(|p| p.expires_at_ms)
                 .filter(|t| *t > now_ms)
@@ -8530,6 +8592,10 @@ struct CoreStats {
     tops: u64,
     spots: u64,
     rounds: u64,
+    /// #377 (治 #2): archive verdict events replayed into the core — the
+    /// count of on-chain resolutions that came from the stream instead of
+    /// the dry ladder.
+    resolutions: u64,
     evaluations: u64,
     signals: u64,
     place_rejected: u64,
@@ -8813,6 +8879,7 @@ mod books_mirror_tests {
                     expires_at_ms: end,
                     round_slot: slot,
                     round_duration_sec: 900,
+                    archive_verdict: false,
                     neg_risk: true,
                     question: "?".into(),
                 }],
@@ -8913,6 +8980,7 @@ mod books_mirror_tests {
                     expires_at_ms: end,
                     round_slot: slot,
                     round_duration_sec: 900,
+                    archive_verdict: false,
                     neg_risk: true,
                     question: "?".into(),
                 }],
@@ -10716,6 +10784,7 @@ mod strategy_dispatch_tests {
                 expires_at_ms: 1_800_000,
                 round_slot: 1,
                 round_duration_sec: 900,
+                archive_verdict: false,
                 neg_risk: true,
                 question: format!("{a} up or down"),
             })
@@ -14112,6 +14181,120 @@ mod settlement_service_tests {
 
     fn settlement_json(c: &Core) -> serde_json::Value {
         c.engine_stats_at(3_000)["settlement"].clone()
+    }
+
+    /// #377 (治 #2): a market the archive promised a verdict for never enters
+    /// the dry settlement ladder — the stream settles it. Before this, the
+    /// ladder's coin-flip refusal (best ≤ 0.5 → withheld) stuck the legs open
+    /// past expiry forever and tripped the blind alert; and when book evidence
+    /// DID clear the bar, the dry synthesis could name a different winner than
+    /// the chain did. Both failure modes die with the flag: no query is
+    /// stamped, no payout is invented, and the replayed Resolution closes the
+    /// position exactly once, at the chain's verdict.
+    #[test]
+    fn archive_verdict_markets_are_settled_by_the_stream_not_the_dry_ladder() {
+        let dir = scratch("archive-verdict");
+        let mut c = settling_core(&dir, dec!(10));
+
+        // Declare the market the way the converter's RoundMarkets event now
+        // carries it: flagged `archive_verdict` because the dataset holds the
+        // on-chain winner for this condition.
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![crate::model::CryptoMarket {
+                    asset: "BTC".into(),
+                    condition_id: "cond".into(),
+                    question_id: "q".into(),
+                    up_token_id: "tok".into(),
+                    down_token_id: "d".into(),
+                    up_price: dec!(0.6),
+                    down_price: dec!(0.4),
+                    expires_at_ms: 2_000,
+                    round_slot: 0,
+                    round_duration_sec: 1,
+                    archive_verdict: true,
+                    neg_risk: false,
+                    question: "?".into(),
+                }],
+                now_ms: 1,
+            },
+            1,
+        );
+        // Open the position (entry 0.40, 5 shares) and re-mark the book at
+        // 0.95/0.96 — evidence that would DEFINITELY clear the dry ladder's
+        // coin-flip bar. Under the flag the ladder stands down regardless.
+        open_and_anchor(&mut c, dec!(10));
+
+        // Tick past expiry (2_000) and well past it: no dry settlement may
+        // fire, no query may be stamped, no blind alert may trip.
+        c.tick(2_100).unwrap();
+        c.tick(2_600).unwrap();
+        assert_eq!(
+            c.positions().open_positions().len(),
+            1,
+            "an archive-verdict market is never settled by the dry ladder"
+        );
+        let s = settlement_json(&c);
+        assert_eq!(
+            s["trackedMarkets"],
+            serde_json::json!(0),
+            "the market never enters the dry watch list"
+        );
+        assert_eq!(
+            s["blindSinceMs"],
+            serde_json::json!(None::<i64>),
+            "no blind alert: the stream owns this verdict"
+        );
+
+        // The stream's verdict arrives (what the replay dispatches) and
+        // settles the position exactly once, both sides named in the market's
+        // own outcome order.
+        c.engine_on_data(
+            crate::engine::DataEvent::Resolution {
+                condition_id: "cond".into(),
+                payouts: vec![
+                    ("tok".to_string(), Decimal::ONE),
+                    ("d".to_string(), Decimal::ZERO),
+                ],
+                neg_risk: false,
+                now_ms: 2_700,
+            },
+            2_700,
+        );
+        assert!(
+            c.positions().open_positions().is_empty(),
+            "the stream settles the position"
+        );
+        let closed = &c.positions().closed_positions()[0];
+        assert_eq!(closed.exit_reason, ExitReason::Settlement);
+        assert_eq!(closed.exit_price, Decimal::ONE);
+        assert_eq!(
+            closed.net_pnl_usd,
+            dec!(2.964),
+            "payout 5 − cost 2 − entry fee 0.036: the chain's verdict, not a dry guess"
+        );
+
+        // Provenance: the settlement journal carries the stream as the source.
+        let journal = std::fs::read_to_string(dir.join("settlements.jsonl")).unwrap();
+        let from_stream = journal
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .any(|v| v["record"]["source"] == "archive");
+        assert!(
+            from_stream,
+            "the settlement record names the archive as its source: {journal}"
+        );
+
+        // The feed counters carry the resolutions count.
+        assert_eq!(
+            c.engine_stats_at(3_000)["resolutions"],
+            serde_json::json!(1),
+            "one archive verdict replayed into the core"
+        );
+
+        // The accounting identity holds end to end.
+        let audit = c.run_accounting_audit(3_000);
+        assert!(audit.ok, "audit: {}", audit.summary());
     }
 
     /// Acceptance: settle → `run_accounting_audit` → ok, with the payout held as a

@@ -255,6 +255,22 @@ pub enum DataEvent {
     /// #352: a round's markets resolved — the boundary event a replay uses to
     /// close the book on that round. Information only.
     RoundEnd { now_ms: i64 },
+    /// #377 (治 #2): one market's on-chain verdict, recovered by the converter
+    /// from the wallet's own redemption activity and replayed as a first-class
+    /// event. The Core settles from it directly (`on_market_resolution`) —
+    /// this is what closes the dry ladder's blind spot, where book evidence
+    /// below the coin-flip withheld every settlement and stuck the legs. The
+    /// engine itself trades on books and spot only; for it this is a marker.
+    Resolution {
+        condition_id: String,
+        /// `(token_id, payout per share)` in the market's own outcome order —
+        /// a binary boundary names BOTH sides explicitly: the winner pays 1,
+        /// the loser 0. The core books what the stream says and nothing else.
+        payouts: Vec<(String, Decimal)>,
+        /// The market settles through the NegRisk adapter.
+        neg_risk: bool,
+        now_ms: i64,
+    },
 }
 
 /// A strategy registered with the engine, plus its enablement and provenance.
@@ -541,6 +557,11 @@ impl Engine {
             DataEvent::Trade { .. } => {
                 // #352: an on-chain print is information, not a book update —
                 // strategies decide on books and spot only.
+                return Vec::new();
+            }
+            DataEvent::Resolution { .. } => {
+                // #377 (治 #2): a verdict is settlement input for the Core,
+                // not a book update — no strategy acts on it here.
                 return Vec::new();
             }
         }
@@ -1439,6 +1460,7 @@ mod tests {
             expires_at_ms: end_ms,
             round_slot: end_ms / 1000 / 900,
             round_duration_sec: 900,
+            archive_verdict: false,
             neg_risk: true,
             question: "BTC up or down".into(),
         }
@@ -1998,6 +2020,7 @@ mod tests {
             expires_at_ms: end_ms,
             round_slot: end_ms / 1000 / 900,
             round_duration_sec: 900,
+            archive_verdict: false,
             neg_risk: true,
             question: format!("{asset} up or down"),
         }

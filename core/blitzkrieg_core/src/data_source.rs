@@ -20,6 +20,7 @@
 //! {"at":1757851200200,"k":"spot","s":"BTC","p":"62850.12"}
 //! {"at":1757851200000,"k":"round","m":[{...CryptoMarket camelCase...}]}
 //! {"at":1757851200300,"k":"trade","t":"<token>","s":"BUY","p":"0.42","q":"100"}
+//! {"at":1757851200000,"k":"resolution","c":"<conditionId>","p":[["<winner>","1"],["<loser>","0"]],"n":false}
 //! {"at":1757851500000,"k":"round_end"}
 //! ```
 //!
@@ -27,6 +28,14 @@
 //! emits them so a replay carries the observed wallet prints and round
 //! boundaries. The engine does not trade on them; they exist so a replay is
 //! complete (no skipped lines) and a benchmark can read the wallet's fills.
+//!
+//! `resolution` (#377, 治 #2) is a SETTLEMENT event: the converter recovered
+//! the market's on-chain winner from the wallet's own redemption rows and
+//! stamps it at the round's expiry instant. The core settles positions from
+//! it directly — this is what closes the dry ladder's blind spot (book
+//! evidence below the coin-flip withheld every settlement and stuck the
+//! legs). Markets it covers are flagged `archiveVerdict` in their
+//! `CryptoMarket`, so the dry synthesis never races it.
 //!
 //! `at` is the event's own `now_ms` (venue time when available) — the same value
 //! the live core stamped the event with, so a replay reconstructs the identical
@@ -92,6 +101,7 @@ pub fn event_at_ms(ev: &DataEvent) -> i64 {
         | DataEvent::Spot { now_ms, .. }
         | DataEvent::RoundMarkets { now_ms, .. }
         | DataEvent::Trade { now_ms, .. }
+        | DataEvent::Resolution { now_ms, .. }
         | DataEvent::RoundEnd { now_ms } => *now_ms,
     }
 }
@@ -162,7 +172,33 @@ pub fn event_to_json(ev: &DataEvent) -> Value {
             "at": now_ms,
             "k": "round_end",
         }),
+        DataEvent::Resolution {
+            condition_id,
+            payouts,
+            neg_risk,
+            now_ms,
+        } => json!({
+            "at": now_ms,
+            "k": "resolution",
+            "c": condition_id,
+            // Pairs as [["<token>","<payout>"], …] — same shape the wire's
+            // MarketResolution carries, stringified the way every decimal
+            // here survives the round trip exactly.
+            "p": payouts_json(payouts),
+            "n": neg_risk,
+        }),
     }
+}
+
+fn payouts_json(payouts: &[(String, Decimal)]) -> Value {
+    Value::Array(
+        payouts
+            .iter()
+            .map(|(t, p)| {
+                Value::Array(vec![Value::String(t.clone()), Value::String(p.to_string())])
+            })
+            .collect(),
+    )
 }
 
 fn levels_json(levels: &[(Decimal, Decimal)]) -> Value {
@@ -228,6 +264,37 @@ pub fn event_from_json(v: &Value) -> Result<DataEvent, String> {
             })
         }
         "round_end" => Ok(DataEvent::RoundEnd { now_ms }),
+        "resolution" => {
+            let c = v
+                .get("c")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "missing `c`".to_string())?
+                .to_string();
+            let raw = v
+                .get("p")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "missing `p`".to_string())?;
+            let mut payouts = Vec::with_capacity(raw.len());
+            for pair in raw {
+                let items = pair
+                    .as_array()
+                    .ok_or_else(|| format!("expected [token,payout], got {pair}"))?;
+                if items.len() != 2 {
+                    return Err(format!("expected [token,payout], got {pair}"));
+                }
+                let token = items[0]
+                    .as_str()
+                    .ok_or_else(|| format!("bad payout token {}", items[0]))?
+                    .to_string();
+                payouts.push((token, dec_value(&items[1])?));
+            }
+            Ok(DataEvent::Resolution {
+                condition_id: c,
+                payouts,
+                neg_risk: v.get("n").and_then(Value::as_bool).unwrap_or(false),
+                now_ms,
+            })
+        }
         other => Err(format!("unknown event kind `{other}`")),
     }
 }
@@ -533,6 +600,7 @@ fn stamped_event(at: i64, ev: &DataEvent) -> DataEvent {
         | DataEvent::Spot { now_ms, .. }
         | DataEvent::RoundMarkets { now_ms, .. }
         | DataEvent::Trade { now_ms, .. }
+        | DataEvent::Resolution { now_ms, .. }
         | DataEvent::RoundEnd { now_ms } => *now_ms = at,
     }
     out
@@ -1093,6 +1161,14 @@ mod tests {
                 price: dec!(62850.123456789),
                 now_ms: now + 3,
             },
+            DataEvent::Resolution {
+                condition_id: "0xcond".into(),
+                // A payout with many digits must survive the round trip
+                // exactly, like every other decimal here.
+                payouts: vec![("up".into(), dec!(1)), ("down".into(), dec!(0.000000001))],
+                neg_risk: true,
+                now_ms: now + 4,
+            },
         ]
     }
 
@@ -1152,6 +1228,20 @@ mod tests {
                     now_ms: n2,
                 },
             ) => assert_eq!((m1, n1), (m2, n2)),
+            (
+                DataEvent::Resolution {
+                    condition_id: c1,
+                    payouts: p1,
+                    neg_risk: g1,
+                    now_ms: n1,
+                },
+                DataEvent::Resolution {
+                    condition_id: c2,
+                    payouts: p2,
+                    neg_risk: g2,
+                    now_ms: n2,
+                },
+            ) => assert_eq!((c1, p1, g1, n1), (c2, p2, g2, n2)),
             _ => panic!("kind mismatch: {a:?} vs {b:?}"),
         }
     }

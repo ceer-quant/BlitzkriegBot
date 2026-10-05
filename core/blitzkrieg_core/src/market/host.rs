@@ -30,6 +30,9 @@ pub fn market_from_api(d: &api::MarketDescriptor) -> m::CryptoMarket {
         // `0` keeps the #354 cadence gate silent on the live path, where the
         // grid IS the assumption.
         round_duration_sec: 0,
+        // #377 (治 #2): a live market has no archive verdict — the venue
+        // answers settlement queries itself.
+        archive_verdict: false,
         neg_risk: d.neg_risk,
         question: d.question.clone(),
     }

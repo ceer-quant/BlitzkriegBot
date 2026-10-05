@@ -325,6 +325,13 @@ pub struct CryptoMarket {
     /// gates mis-time every exit.
     #[serde(default)]
     pub round_duration_sec: i64,
+    /// #377 (治 #2): the archive carries the on-chain verdict for this market
+    /// (a `Resolution` event is coming), so the dry settlement ladder must not
+    /// synthesize a competing verdict from book evidence. `false` on live and
+    /// old archives — the serde default keeps byte-compatibility for corpora
+    /// built before the field existed.
+    #[serde(default)]
+    pub archive_verdict: bool,
     pub neg_risk: bool,
     pub question: String,
 }

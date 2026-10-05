@@ -1170,6 +1170,7 @@ mod reserved_key_tests {
             expires_at_ms: 0,
             round_slot: 1,
             round_duration_sec: 900,
+            archive_verdict: false,
             neg_risk: false,
             question: "q".into(),
         };
