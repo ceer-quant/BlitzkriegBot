@@ -75,6 +75,11 @@ DIST_DIR="ui/webapp/webui/dist"
 
 step() { printf '\n==> %s\n' "$1"; }
 die() { printf 'ERROR: %s\n' "$1" >&2; exit 1; }
+# The sourced library's fatal reporter — its contract puts it on the caller
+# (the propagate test defines one too). Without it, any of the library's
+# fatal paths dies as "ua_die: command not found" and the real diagnosis
+# is lost.
+ua_die() { die "$1"; }
 
 mode="ship"
 case "${1:-}" in
