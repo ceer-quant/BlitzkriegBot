@@ -631,6 +631,14 @@ pub const FLAGS: &[FlagSpec] = &[
          without --backtest is refused).",
     ),
     flag(
+        "--backtest-fast",
+        "",
+        "Replay-only: gate the per-tick maintenance work a frozen book makes \
+         redundant (holder ladder, unchanged-mark re-valuation, quiet-tick Lua, \
+         deadline-free sweeps). Timestamps and reaction instants are unchanged; \
+         asking for it without --backtest is refused.",
+    ),
+    flag(
         "--onchain-fills",
         "<activity.jsonl>",
         "#355: seed the onchain pull universe from an /activity ledger file instead \

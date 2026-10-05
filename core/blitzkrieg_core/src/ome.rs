@@ -690,6 +690,21 @@ impl Ome {
         })
     }
 
+    /// Replay fast path: the earliest armed escalation deadline over live
+    /// orders (`i64::MAX` when none). The maintenance sweep may skip the
+    /// live-order scan until this instant: `escalate_at_ms` is armed by the
+    /// submit path and only ever moved to `now + timeout` (never earlier),
+    /// so no deadline can become due between the sweep that noticed it and
+    /// the instant this returns.
+    pub fn next_escalation_ms(&self) -> i64 {
+        self.live_by_submitted
+            .iter()
+            .filter_map(|(_, id)| self.orders.get(id))
+            .filter_map(|o| o.escalate_at_ms)
+            .min()
+            .unwrap_or(i64::MAX)
+    }
+
     /// Bind a core order to its exchange-assigned id after a LIVE POST acks.
     pub fn bind_venue(&mut self, id: &str, venue_order_id: String, now_ms: i64) -> CoreResult<()> {
         self.mutate(id, now_ms, |o| {
