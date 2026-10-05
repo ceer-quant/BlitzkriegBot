@@ -75,9 +75,158 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// The config file, relative to the process cwd (the repo root for the
-/// production shell — the same lookup rule `accounts.toml` uses).
+/// The config file, resolved against the INSTALL ROOT (the executable's
+/// directory and its ancestors) first, the process cwd and its ancestors
+/// second — never the bare cwd (issue #380: a cwd-relative default made
+/// "is the policy loaded?" depend on the launch directory, which silently
+/// swapped a guarded kernel for the neutral one between two runs of the SAME
+/// binary with the SAME arguments). The same lookup rule `default_strategy_dir`
+/// uses in `main.rs`.
 pub const EXECUTION_POLICY_CONFIG_PATH: &str = "user_layer/configs/execution_policy.toml";
+
+/// Where a resolved DEFAULT path was found. The boot log names the winner so
+/// "which base decided?" is answerable from the run log alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultPathSource {
+    /// Found above the executable's directory — the install root (a release
+    /// bundle, or a repo checkout running from `target/release/`).
+    ExeRoot,
+    /// Not beside the executable; found above the process cwd (the dev
+    /// convenience run).
+    Cwd,
+    /// Found NOWHERE: the value is the exe-root-relative spelling, whose
+    /// load will report NotFound — the #372 zero-config deployment (code
+    /// defaults, no rules). The boot WARN names every directory searched.
+    Fallback,
+}
+
+/// The default-policy resolution outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDefaultPath {
+    /// The path the loader will read.
+    pub path: std::path::PathBuf,
+    /// Which base won.
+    pub source: DefaultPathSource,
+    /// The directory the winning base resolved against (the bundle root, the
+    /// repo root, …) — the boot log names it so "WHICH install root decided?"
+    /// is answerable without re-deriving the ancestor walk. `None` only for
+    /// [`DefaultPathSource::Fallback`], where no base won.
+    pub base_dir: Option<std::path::PathBuf>,
+    /// Every directory the lookup probed, in order — the WARN's "I looked
+    /// here and here and found nothing" evidence.
+    pub searched: Vec<std::path::PathBuf>,
+}
+
+/// What [`resolve_execution_policy_path`] settles for a configured value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedPolicyPath {
+    /// The operator named a path (`--execution-policy <path>` / the config
+    /// field): honoured VERBATIM, cwd-relative spellings included — an
+    /// explicit path is a promise about which file to read, not a default to
+    /// second-guess.
+    Explicit(std::path::PathBuf),
+    /// The shipped default: resolved per #380.
+    Default(ResolvedDefaultPath),
+}
+
+/// Walk `start` upward through its ancestors. The chain INCLUDES `start`
+/// itself: for a release bundle the exe sits at `<bundle>/bin/blitzkrieg-core`
+/// and the configs land at `<bundle>/configs`, so the first probe from the
+/// exe's own directory already covers the dev-checkout shape
+/// (`target/release/` → the repo root two levels up).
+fn ancestor_chain(start: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut cur = Some(start);
+    while let Some(dir) = cur {
+        out.push(dir.to_path_buf());
+        cur = dir.parent();
+    }
+    out
+}
+
+/// Settle which file the policy loads from (issue #380). `Some(path)` = the
+/// operator's explicit choice, honoured verbatim; `None` = the shipped
+/// default, resolved against the install root first and the cwd second.
+///
+/// Default lookup order, first EXISTING-FILE hit wins:
+///   1. `<each ancestor of exe_dir>/user_layer/configs/execution_policy.toml`
+///      — the install root: a release bundle (`bin/` + `configs/`), a repo
+///      checkout running from `target/release/`, or any launcher that keeps
+///      the shipped layout beside the binary. This is what makes the policy
+///      load identically no matter which directory the process started in.
+///   2. `<each ancestor of cwd>/user_layer/configs/execution_policy.toml` —
+///      the dev convenience (a core run from an unusual binary location but
+///      the repo root still finds the shipped file). Ordered BELOW the
+///      exe-root so a bundle's own config can never be shadowed by an
+///      unrelated checkout the process happens to run from.
+///   3. Nothing exists → the exe-root-relative spelling, source
+///      [`DefaultPathSource::Fallback`]. The load then reports NotFound,
+///      which is the #372 zero-config deployment: code defaults, no rules.
+///      The boot WARN lists every directory that was searched, so "the
+///      policy did not load" is visible instead of silent.
+///
+/// `None` inputs (current_exe/current_dir failed) simply shorten their
+/// chain — a probe that cannot name a directory is skipped, not an error.
+pub fn resolve_execution_policy_path(explicit: Option<&str>) -> ResolvedPolicyPath {
+    let Some(path) = explicit else {
+        return ResolvedPolicyPath::Default(resolve_default_config_path(
+            std::env::current_exe()
+                .ok()
+                .as_deref()
+                .and_then(Path::parent),
+            std::env::current_dir().ok().as_deref(),
+        ));
+    };
+    ResolvedPolicyPath::Explicit(std::path::PathBuf::from(path))
+}
+
+/// The default-path half of [`resolve_execution_policy_path`]. Kept separate
+/// and parameterised so the PRIORITY ORDER is unit-testable without
+/// mutating the process's exe path or cwd (tests inject directories).
+pub fn resolve_default_config_path(
+    exe_dir: Option<&Path>,
+    cwd: Option<&Path>,
+) -> ResolvedDefaultPath {
+    let relative = Path::new(EXECUTION_POLICY_CONFIG_PATH);
+    let mut searched = Vec::new();
+    if let Some(exe_dir) = exe_dir {
+        for dir in ancestor_chain(exe_dir) {
+            let candidate = dir.join(relative);
+            searched.push(candidate.clone());
+            if candidate.is_file() {
+                return ResolvedDefaultPath {
+                    path: candidate,
+                    source: DefaultPathSource::ExeRoot,
+                    base_dir: Some(dir),
+                    searched,
+                };
+            }
+        }
+    }
+    if let Some(cwd) = cwd {
+        for dir in ancestor_chain(cwd) {
+            let candidate = dir.join(relative);
+            searched.push(candidate.clone());
+            if candidate.is_file() {
+                return ResolvedDefaultPath {
+                    path: candidate,
+                    source: DefaultPathSource::Cwd,
+                    base_dir: Some(dir),
+                    searched,
+                };
+            }
+        }
+    }
+    let fallback = exe_dir
+        .map(|d| d.join(relative))
+        .unwrap_or_else(|| relative.to_path_buf());
+    ResolvedDefaultPath {
+        path: fallback,
+        source: DefaultPathSource::Fallback,
+        base_dir: None,
+        searched,
+    }
+}
 
 /// Where the policy-change audit trail lands. Runtime data beside the other
 /// audit journals (`data/` is git-ignored by charter).
@@ -2023,5 +2172,178 @@ then = { action = "skip" }
 "#;
         let err = Policy::load_with_env(text, no_env).unwrap_err();
         assert!(err.contains("compares against text"), "{err}");
+    }
+
+    // ── #380: the default config path resolves against the install root ────
+
+    /// A scratch tree with the shipped config layout:
+    /// `<root>/user_layer/configs/execution_policy.toml`.
+    fn policy_tree(root: &Path) -> std::path::PathBuf {
+        let dir = root.join("user_layer").join("configs");
+        std::fs::create_dir_all(&dir).expect("create config tree");
+        let file = dir.join("execution_policy.toml");
+        std::fs::write(&file, "version = 1\n").expect("write policy fixture");
+        file
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "bk380-{}-{}-{}",
+            tag,
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch root");
+        dir
+    }
+
+    #[test]
+    fn default_path_resolution_prefers_the_exe_root_over_the_cwd() {
+        let exe_tree = scratch("exe");
+        let cwd_tree = scratch("cwd");
+        let exe_policy = policy_tree(&exe_tree);
+        let _cwd_policy = policy_tree(&cwd_tree);
+        // The exe sits one level below its root (the bundle `bin/` shape).
+        let bin = exe_tree.join("bin");
+        std::fs::create_dir_all(&bin).expect("bin dir");
+        let r = resolve_default_config_path(Some(&bin), Some(&cwd_tree));
+        assert_eq!(r.path, exe_policy, "the exe root's file wins");
+        assert_eq!(r.source, DefaultPathSource::ExeRoot);
+        // The evidence trail stops at the hit: the winning file is the last
+        // probe, the cwd chain was never touched, and every probe names the
+        // one config spelling.
+        assert_eq!(r.searched.last(), Some(&exe_policy));
+        assert!(r.searched.len() <= ancestor_chain(&bin).len());
+        assert!(
+            r.searched
+                .iter()
+                .all(|p| p.ends_with(EXECUTION_POLICY_CONFIG_PATH))
+        );
+        let _ = std::fs::remove_dir_all(&exe_tree);
+        let _ = std::fs::remove_dir_all(&cwd_tree);
+    }
+
+    #[test]
+    fn default_path_resolution_falls_back_to_the_cwd_when_no_exe_file_exists() {
+        let cwd_tree = scratch("cwdonly");
+        let cwd_policy = policy_tree(&cwd_tree);
+        // An exe dir with NO policy file anywhere above it.
+        let lonely = scratch("lonely");
+        let bin = lonely.join("bin");
+        std::fs::create_dir_all(&bin).expect("bin dir");
+        let r = resolve_default_config_path(Some(&bin), Some(&cwd_tree));
+        assert_eq!(r.path, cwd_policy);
+        assert_eq!(r.source, DefaultPathSource::Cwd);
+        // Both chains were probed before the cwd chain hit.
+        assert!(r.searched.len() > ancestor_chain(&bin).len());
+        assert_eq!(r.searched.last(), Some(&cwd_policy));
+        let _ = std::fs::remove_dir_all(&cwd_tree);
+        let _ = std::fs::remove_dir_all(&lonely);
+    }
+
+    #[test]
+    fn default_path_resolution_nowhere_found_is_the_fallback_spelling() {
+        let lonely = scratch("nowhere");
+        let bin = lonely.join("bin");
+        std::fs::create_dir_all(&bin).expect("bin dir");
+        let r = resolve_default_config_path(Some(&bin), Some(&lonely.join("sub")));
+        assert_eq!(r.source, DefaultPathSource::Fallback);
+        assert_eq!(
+            r.path,
+            bin.join(EXECUTION_POLICY_CONFIG_PATH),
+            "the fallback names the exe-root-relative spelling, whose absence the \
+             loader reports as the #372 zero-config deployment"
+        );
+        // The WARN's evidence: every probed directory is on the list, exe
+        // chain first, cwd chain second.
+        assert_eq!(
+            r.searched.len(),
+            ancestor_chain(&bin).len() + ancestor_chain(&lonely.join("sub")).len()
+        );
+        assert_eq!(r.searched[0], bin.join(EXECUTION_POLICY_CONFIG_PATH));
+        let _ = std::fs::remove_dir_all(&lonely);
+    }
+
+    #[test]
+    fn default_path_resolution_walks_up_through_the_ancestors() {
+        let tree = scratch("ancestors");
+        let policy = policy_tree(&tree);
+        // Three levels deep: the exe dir itself, its parent and grandparent
+        // carry no policy file — the great-grandparent (the tree root) does.
+        let deep = tree.join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep).expect("deep dir");
+        let r = resolve_default_config_path(Some(&deep), None);
+        assert_eq!(r.path, policy);
+        assert_eq!(r.source, DefaultPathSource::ExeRoot);
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    #[test]
+    fn default_path_resolution_survives_missing_inputs() {
+        // `None` inputs shorten the chain instead of erroring: a probe that
+        // cannot name a directory is skipped, and with BOTH gone the fallback
+        // is the bare relative spelling.
+        let tree = scratch("noinput");
+        let policy = policy_tree(&tree);
+        let r = resolve_default_config_path(None, Some(&tree));
+        assert_eq!(r.path, policy);
+        assert_eq!(r.source, DefaultPathSource::Cwd);
+        let r = resolve_default_config_path(None, None);
+        assert_eq!(r.path, Path::new(EXECUTION_POLICY_CONFIG_PATH));
+        assert_eq!(r.source, DefaultPathSource::Fallback);
+        assert!(r.searched.is_empty());
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    #[test]
+    fn default_path_is_not_confused_by_a_directory_with_the_config_name() {
+        // A DIRECTORY named execution_policy.toml must not count as a hit:
+        // the probe is is_file(), not exists().
+        let tree = scratch("dirshadow");
+        let dir = tree.join("user_layer").join("configs");
+        std::fs::create_dir_all(dir.join("execution_policy.toml")).expect("shadow dir");
+        let r = resolve_default_config_path(Some(&tree), None);
+        assert_eq!(
+            r.source,
+            DefaultPathSource::Fallback,
+            "a directory is not a policy file"
+        );
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    #[test]
+    fn explicit_policy_path_is_honoured_verbatim() {
+        // The operator's spelling — relative, odd, whatever — is not
+        // second-guessed: an explicit --execution-policy <path> means THAT
+        // file, and #380's install-root lookup must never rewrite it.
+        for spelling in [
+            "user_layer/configs/execution_policy.toml",
+            "/etc/blitzkrieg/policy.toml",
+            "./relative/policy.toml",
+        ] {
+            assert_eq!(
+                resolve_execution_policy_path(Some(spelling)),
+                ResolvedPolicyPath::Explicit(std::path::PathBuf::from(spelling)),
+                "explicit path {spelling} must pass through untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_explicit_policy_path_enters_the_default_resolution() {
+        // None → the #380 default resolution. This runs the REAL current_exe/
+        // current_dir chain; the assertion is shape-only (the environment's
+        // actual layout decides which source wins), the ORDER is pinned by
+        // the injected tests above.
+        match resolve_execution_policy_path(None) {
+            ResolvedPolicyPath::Default(r) => {
+                assert!(
+                    !r.path.as_os_str().is_empty(),
+                    "the default resolution always names a path to try"
+                );
+            }
+            ResolvedPolicyPath::Explicit(_) => panic!("None must not resolve to Explicit"),
+        }
     }
 }
