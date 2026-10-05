@@ -1591,6 +1591,45 @@ impl WebServer {
         serde_json::json!({ "started": true }).to_string()
     }
 
+    /// #379: the in-flight starter for `POST /api/version/stage` — same
+    /// shape of problem as [`Self::version_check_start`]: the kernel dials
+    /// GitHub and downloads an archive on ITS timeout, so the ask runs in a
+    /// background thread; the verdict is the kernel's staging state machine
+    /// (the snapshot's `stageState`), never a gateway copy.
+    fn version_stage_start(&self) -> String {
+        let socket = self
+            .snapshot_src
+            .lock()
+            .map(|c| c.socket_path().to_string())
+            .unwrap_or_default();
+        let Ok(mut cache) = self.update_check.lock() else {
+            return serde_json::json!({ "started": false, "error": "update-check cache poisoned" })
+                .to_string();
+        };
+        if cache.running {
+            return serde_json::json!({ "started": false, "running": true }).to_string();
+        }
+        if socket.is_empty() {
+            return serde_json::json!({ "started": false, "error": "no core socket" }).to_string();
+        }
+        cache.running = true;
+        cache.error = None;
+        let shared = self.update_check.clone();
+        std::thread::spawn(move || {
+            let mut client = IpcClient::new(socket);
+            let outcome = client.update_stage();
+            if let Ok(mut c) = shared.lock() {
+                c.running = false;
+                if let Err(e) = outcome {
+                    // A kernel REFUSAL (autoUpdate=false) arrives here as an
+                    // Rpc error — say it out loud, never paper over it.
+                    c.error = Some(e.to_string());
+                }
+            }
+        });
+        serde_json::json!({ "started": true }).to_string()
+    }
+
     /// The 自动更新 switch write: `{"autoUpdate": bool}` in, the kernel's own
     /// echo out. Inline (fast), and the kernel persists it — a switch that did
     /// not land on disk is an error the card shows verbatim.
@@ -2102,6 +2141,19 @@ impl WebServer {
                     200,
                     "application/json",
                     self.version_check_start().into_bytes(),
+                )
+            }
+            ("POST", "/api/version/stage") => {
+                // #379: the 设置页's 暂存下载 button (§7.5). Like the check
+                // route: never inline — the download has its own timeout — so
+                // this starts the background ask and answers at once; the card
+                // polls the snapshot's `stageState` until the phase moves. A
+                // kernel-side refusal (autoUpdate=false) lands in the cache's
+                // error and rides the next poll.
+                (
+                    200,
+                    "application/json",
+                    self.version_stage_start().into_bytes(),
                 )
             }
             ("POST", "/api/version/configure") => {
