@@ -66,15 +66,71 @@ pub(crate) fn append(path: &Path, value: &impl serde::Serialize) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let Ok(line) = serde_json::to_string(value) else {
+    let Ok(mut buf) = serde_json::to_vec(value) else {
         return false;
     };
+    buf.push(b'\n');
     match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
     {
-        Ok(mut f) => writeln!(f, "{line}").is_ok(),
+        // ONE write_all per record. With O_APPEND every write() lands at the
+        // current end atomically, so concurrent appenders can never fuse two
+        // records into one unparseable line. The two-syscall spelling this
+        // replaced (`writeln!` writes the text, THEN the newline) is exactly
+        // how two interleaved appends destroyed both records at once — the
+        // #386 flake, where the loader's skip-unparseable discipline
+        // silently swallowed two audit lines two tests were counting.
+        Ok(mut f) => f.write_all(&buf).is_ok(),
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #386: concurrent appenders share one journal file in production's
+    /// worst case, and a torn line is a SILENT loss — the loader's
+    /// skip-unparseable discipline is a safety rule for trading, which makes
+    /// "the line landed whole" the append's own job. Threads × records per
+    /// thread go in through [`append`]; the loader must read every one of
+    /// them back parseable. (Against the old two-syscall append this went
+    /// red under contention: text/newline interleaving fused two records
+    /// into one line and both vanished.)
+    #[test]
+    fn concurrent_appends_never_fuse_lines() {
+        const THREADS: usize = 4;
+        const PER_THREAD: usize = 150;
+        let dir = std::env::temp_dir().join(format!(
+            "bk-jsonl-fuse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("audit.jsonl");
+        let mut handles = Vec::new();
+        for t in 0..THREADS {
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..PER_THREAD {
+                    assert!(append(&path, &serde_json::json!({ "thread": t, "i": i }),));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("append thread");
+        }
+        let loaded = load::<serde_json::Value>(&path, "test: skipped unparseable lines");
+        assert_eq!(
+            loaded.len(),
+            THREADS * PER_THREAD,
+            "every appended record must survive concurrent appends whole"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

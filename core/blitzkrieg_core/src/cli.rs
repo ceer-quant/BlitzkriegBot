@@ -254,6 +254,16 @@ pub const FLAGS: &[FlagSpec] = &[
         "Concurrent positions on ONE asset; the execution-policy file's value unless set (default 1).",
         "the per-asset cap is the policy file's (or the compiled 1: one position per asset)",
     ),
+    flag(
+        "--execution-policy",
+        "<path>",
+        "Execution-policy TOML file. Default: resolved against the INSTALL ROOT (the \
+         executable's directory and its ancestors, then the working directory's) — the \
+         policy loads the same no matter which directory the process starts in (#380). \
+         An explicit path is used as given; a file that exists but is invalid stops the \
+         boot, a MISSING file runs the NEUTRAL policy (code defaults, no rules) and says \
+         so in the boot log.",
+    ),
     risky(
         "--no-auto-exits",
         "",

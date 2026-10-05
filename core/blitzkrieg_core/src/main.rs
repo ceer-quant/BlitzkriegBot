@@ -176,6 +176,11 @@ struct Args {
     /// (flag absent) = the execution-policy file decides (or 1, the
     /// historical one-per-asset gate); an explicit flag wins over the file.
     max_positions_per_asset: Option<u32>,
+    /// #380 — the explicit policy-file override (`--execution-policy <path>`).
+    /// `None` = the shipped default, resolved against the install root before
+    /// the core is constructed (the resolution and its boot log live in
+    /// `resolved_policy_path` below). An explicit path is honoured verbatim.
+    execution_policy: Option<String>,
     /// #173 — the daily-loss breaker's budget. `daily_loss_usd` is the absolute
     /// cap (0 = none) and `daily_loss_pct` the cap as a percentage of the day's
     /// opening cash equity (0 = off). The EFFECTIVE cap is the tighter of the
@@ -506,6 +511,76 @@ enum ConfigChoice {
     Path(String),
 }
 
+/// #380: settle WHICH execution-policy file this run loads, and say so.
+///
+/// The shipped default (`user_layer/configs/execution_policy.toml`) used to be
+/// interpreted relative to the process cwd, so the same binary with the same
+/// arguments loaded a guarded policy from the repo root and the NEUTRAL kernel
+/// (code defaults, no rules — #372 semantics) from anywhere else. The default
+/// is now resolved against the install root (the executable's directory and
+/// its ancestors — a release bundle's `bin/`, or a checkout's
+/// `target/release/` walking up to the repo root) first, and the cwd's
+/// ancestors second; an explicit `--execution-policy <path>` passes through
+/// untouched.
+///
+/// The outcome lands in `CoreConfig.execution_policy_path` as the path the
+/// library will read, and the decision is echoed here — INFO with the winning
+/// base, or a LOUD WARN when nothing was found anywhere (the run continues on
+/// the neutral kernel, but "my policy did not load" must be visible in the
+/// boot log, not discovered from the entry counts).
+fn resolved_policy_path(
+    explicit: Option<&str>,
+) -> blitzkrieg_core::execution_policy::ResolvedPolicyPath {
+    use blitzkrieg_core::execution_policy::{DefaultPathSource, ResolvedPolicyPath};
+    let resolved = blitzkrieg_core::execution_policy::resolve_execution_policy_path(explicit);
+    match &resolved {
+        ResolvedPolicyPath::Explicit(path) => {
+            eprintln!(
+                "blitzkrieg-core: execution policy file (explicit): {}",
+                path.display()
+            );
+        }
+        ResolvedPolicyPath::Default(r) => match r.source {
+            DefaultPathSource::ExeRoot => eprintln!(
+                "blitzkrieg-core: execution policy file {} (install root: {})",
+                r.path.display(),
+                r.base_dir
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| r.path.display().to_string()),
+            ),
+            DefaultPathSource::Cwd => eprintln!(
+                "blitzkrieg-core: execution policy file {} (working directory: {})",
+                r.path.display(),
+                r.base_dir
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| r.path.display().to_string()),
+            ),
+            DefaultPathSource::Fallback => {
+                let dirs = r
+                    .searched
+                    .iter()
+                    .filter_map(|p| p.parent())
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "blitzkrieg-core: WARNING — execution policy file not found; running the \
+                     NEUTRAL policy (code defaults, no rules). Searched: {}. Ship \
+                     user_layer/configs/execution_policy.toml beside the executable or pass \
+                     --execution-policy <path>.",
+                    if dirs.is_empty() {
+                        "(no directories could be probed)".to_string()
+                    } else {
+                        dirs.join(", ")
+                    }
+                );
+            }
+        },
+    }
+    resolved
+}
+
 /// The environment layer of the precedence chain, wrapped in a struct so a test
 /// can supply its own map. Mutating the process environment to test precedence
 /// would be global state that parallel tests race on.
@@ -796,6 +871,9 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     // stops the retries for good. 0 = production behaviour.
     let mut dry_redeem_fail: u32 = 0;
     let mut dry_redeem_manual = false;
+    // #380: the explicit policy-file override. `None` = the shipped default,
+    // resolved against the install root (see `resolve_execution_policy_path`).
+    let mut execution_policy: Option<String> = None;
 
     // #228: the explicit opt-out from "an unknown argument stops the boot". Read
     // as a pre-scan rather than as an arm below, because argv order must not
@@ -1104,6 +1182,14 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     .next()
                     .and_then(|v| v.parse().ok())
                     .or(max_positions_per_asset)
+            }
+            // #380: an explicit policy file wins over the install-root
+            // resolution of the shipped default. A relative spelling is
+            // honoured verbatim (resolved against the process cwd, like any
+            // explicit path) — the install-root lookup is for the DEFAULT
+            // only, never a second-guessing of the operator's choice.
+            "--execution-policy" => {
+                execution_policy = it.next();
             }
             // #173: absolute USD cap for the day's realized loss (0 = none).
             "--max-daily-loss" => {
@@ -1793,6 +1879,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         auto_exits,
         max_positions,
         max_positions_per_asset,
+        execution_policy,
         daily_loss_usd: daily_loss_usd.value,
         daily_loss_pct: daily_loss_pct.value,
         daily_loss_source: daily_loss_usd.source,
@@ -2389,6 +2476,22 @@ async fn main() -> anyhow::Result<()> {
     // (the struct literal below consumes `position_log_path`).
     let daily_pnl_path = position_log_path.as_deref().map(daily_loss_path_for);
 
+    // #380: WHERE the execution-policy file lives, settled BEFORE the core is
+    // constructed. An explicit --execution-policy wins; the shipped default is
+    // resolved against the install root (exe ancestors) then the cwd (cwd
+    // ancestors), and the outcome is echoed above the provenance line — the
+    // boot log states the effective file, the base that decided, or (loudly)
+    // that no policy was found and the kernel runs the neutral defaults.
+    let resolved_policy = resolved_policy_path(args.execution_policy.as_deref());
+    let execution_policy_path = match &resolved_policy {
+        blitzkrieg_core::execution_policy::ResolvedPolicyPath::Explicit(p) => {
+            Some(p.to_string_lossy().into_owned())
+        }
+        blitzkrieg_core::execution_policy::ResolvedPolicyPath::Default(r) => {
+            Some(r.path.to_string_lossy().into_owned())
+        }
+    };
+
     let config = CoreConfig {
         mode,
         // Replay maintenance-gating fast path: replay-only, refuse-guarded in
@@ -2518,6 +2621,11 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         },
         entry_maker_timeout_ms: args.entry_maker_timeout_ms,
+        // #380: the RESOLVED policy path (absolute when the install root or
+        // the cwd supplied it) — the library reads what it is handed, the
+        // install-root logic lives above, once, where the boot log can name
+        // the decision.
+        execution_policy_path,
         fill_model: blitzkrieg_core::sim::FillModel {
             taker_slippage_ticks: args.slippage_ticks,
             maker_latency_ms: args.latency_ms,

@@ -132,16 +132,27 @@ pub struct CoreConfig {
     pub binance_assets: Vec<String>,
     /// Where to append near-miss records (blocked signals + path). None = off.
     pub near_miss_path: Option<String>,
-    /// #363: where the account-isolated execution policy loads from. `None`
-    /// = the shipped default path
-    /// ([`crate::execution_policy::EXECUTION_POLICY_CONFIG_PATH`]); the
-    /// backtester and most in-process tests pass `None` WITH a cwd that has
-    /// no such file, which is the same as the zero-config deployment: code
-    /// defaults, hardcoded-behaviour parity. A file that exists but is
-    /// malformed refuses the boot (fail-closed) with a `load-refused` audit
-    /// line — the kernel never trades under a policy the operator did not
-    /// write.
+    /// #363: where the account-isolated execution policy loads from. The
+    /// binary entry (`main.rs`, #380) resolves the SHIPPED default against the
+    /// install root (the executable's ancestors, then the cwd's) and stores
+    /// the outcome here — the library reads this path VERBATIM, so which cwd
+    /// the process started in can no longer flip "guarded kernel" to "neutral
+    /// kernel" (#380's defect). Embedders and tests pass an explicit path (or
+    /// `None` to load nothing — the backtester and most in-process tests,
+    /// which is the same as the zero-config deployment: code defaults,
+    /// hardcoded-behaviour parity). A file that exists but is malformed
+    /// refuses the boot (fail-closed) with a `load-refused` audit line — the
+    /// kernel never trades under a policy the operator did not write.
     pub execution_policy_path: Option<String>,
+    /// #386: where the execution-policy audit journal appends and the
+    /// `history` arm reads back. `None` = the shipped
+    /// `data/audit/execution_policy.jsonl` spelling (cwd-relative — one core
+    /// per data directory owns it, the same road the other journals take;
+    /// boot `load-refused` lines included). Tests pass a PRIVATE temp path so
+    /// parallel test cores never share one journal file: two interleaved
+    /// sets once fused into a single unparseable line and vanished from the
+    /// history two tests were counting (the flake PR #378 disclosed).
+    pub execution_policy_audit_path: Option<String>,
     /// #363: operator override for the per-asset position cap (the
     /// `--max-positions-per-asset` flag). `None` = the execution policy's
     /// value decides (`[accounts.<id>]` → `[defaults]` → code default 1).
@@ -718,11 +729,18 @@ impl Default for CoreConfig {
             market_plugin: None,
             binance_assets: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
             near_miss_path: None,
-            // #363: default to the shipped config path; the loader treats a
-            // MISSING file as the zero-config deployment (code defaults).
+            // #363: default to the shipped config spelling; the loader treats
+            // a MISSING file as the zero-config deployment (code defaults).
+            // #380: this is a SPELLING, not a location — the binary entry
+            // resolves it against the install root before the core is built;
+            // the library honours it verbatim (see the field's doc above).
             execution_policy_path: Some(
                 crate::execution_policy::EXECUTION_POLICY_CONFIG_PATH.to_string(),
             ),
+            // #386: the shipped `data/audit/…` spelling resolves against the
+            // process cwd — production's single core owns that directory; a
+            // test that wants isolation passes its own private path.
+            execution_policy_audit_path: None,
             max_positions_per_asset: None,
             trade_log_path: Some("data/trades/trades.jsonl".to_string()),
             order_log_path: Some("data/orders/orders.jsonl".to_string()),
@@ -1399,6 +1417,13 @@ impl Core {
         // own first question). A config-path of `None` (backtester, most
         // tests) loads nothing: every default then equals the historical
         // hardcoded behaviour bit for bit.
+        //
+        // #380: the DEFAULT path in [`CoreConfig::default`] is a SPELLING,
+        // not a location — the binary entry (`main.rs`) resolves it against
+        // the install root before constructing the config, and logs the
+        // resolution (found / neutral-kernel WARN) there. The library
+        // honours whatever path it is handed, verbatim, so an embedder (and
+        // every in-process test) keeps exactly the semantics it asked for.
         let execution_policy = Self::load_execution_policy_at_boot(&config);
         // #363: the per-asset cap precedence — CLI flag > policy section >
         // compiled 1. The CLI already writes total `max_positions` straight
@@ -1658,7 +1683,8 @@ impl Core {
         match crate::execution_policy::Policy::load(path) {
             Ok(policy) => Some(policy),
             Err(reason) => {
-                crate::execution_policy::append_audit(
+                crate::execution_policy::append_audit_to(
+                    &Self::execution_policy_audit_file(config),
                     &crate::execution_policy::PolicyAuditRecord {
                         ts_ms: now_ms(),
                         actor: crate::execution_policy::ACTOR_BOOT.to_string(),
@@ -1715,15 +1741,42 @@ impl Core {
         }
     }
 
+    /// The journal file this config's execution-policy audit lines land in
+    /// (#386): the config's private override, or the shipped
+    /// `data/audit/execution_policy.jsonl` spelling when unset.
+    fn execution_policy_audit_file(config: &CoreConfig) -> std::path::PathBuf {
+        config
+            .execution_policy_audit_path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(crate::execution_policy::EXECUTION_POLICY_AUDIT_PATH)
+            })
+    }
+
     /// Whether the policy is loaded at all (the zero-config deployment has
     /// none — the read arms report that instead of inventing a section).
     pub fn execution_policy_loaded(&self) -> bool {
         self.execution_policy.is_some()
     }
 
-    /// The audit journal for the history arm.
+    /// Append one audit line to THIS core's journal (#386). The wire set/
+    /// reset arms and the reload refusal all land through here, so a test
+    /// core with a private journal never touches the checkout's data dir.
+    pub fn execution_policy_append_audit(
+        &self,
+        record: &crate::execution_policy::PolicyAuditRecord,
+    ) -> bool {
+        crate::execution_policy::append_audit_to(
+            &Self::execution_policy_audit_file(&self.config),
+            record,
+        )
+    }
+
+    /// The audit journal for the history arm — read from THIS core's own
+    /// journal file (#386), not a process-wide fixed path.
     pub fn execution_policy_audit(&self) -> Vec<crate::execution_policy::PolicyAuditRecord> {
-        crate::execution_policy::load_audit()
+        crate::execution_policy::load_audit_from(&Self::execution_policy_audit_file(&self.config))
     }
 
     /// #364: replay the CURRENT section over the recent closed trades of one
@@ -1858,17 +1911,15 @@ impl Core {
                 Ok(())
             }
             Err(reason) => {
-                crate::execution_policy::append_audit(
-                    &crate::execution_policy::PolicyAuditRecord {
-                        ts_ms: now_ms(),
-                        actor: crate::execution_policy::ACTOR_IPC.to_string(),
-                        action: "load-refused".to_string(),
-                        account_id: "*".to_string(),
-                        before: None,
-                        after: None,
-                        error: Some(reason.clone()),
-                    },
-                );
+                self.execution_policy_append_audit(&crate::execution_policy::PolicyAuditRecord {
+                    ts_ms: now_ms(),
+                    actor: crate::execution_policy::ACTOR_IPC.to_string(),
+                    action: "load-refused".to_string(),
+                    account_id: "*".to_string(),
+                    before: None,
+                    after: None,
+                    error: Some(reason.clone()),
+                });
                 Err(reason)
             }
         }
@@ -12293,6 +12344,138 @@ mod strategy_dispatch_tests {
     fn policy_core(mut c: Core, policy: crate::execution_policy::Policy) -> Core {
         c.execution_policy = Some(policy);
         c
+    }
+
+    // ── #380: the boot-time policy-path contract ────────────────────────────
+
+    /// A scratch tree with the shipped policy file at
+    /// `<root>/user_layer/configs/execution_policy.toml`, carrying ONE
+    /// identifying rule (the backstop) so a loaded file is distinguishable
+    /// from the neutral kernel by `execution_policy_loaded()` alone.
+    fn policy_tree_with_backstop(root: &std::path::Path) -> std::path::PathBuf {
+        use std::sync::atomic::AtomicU64;
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "bk380-boot-{}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            root.file_name().and_then(|s| s.to_str()).unwrap_or("t")
+        ));
+        std::fs::create_dir_all(dir.join("user_layer").join("configs")).expect("config tree");
+        let file = dir
+            .join("user_layer")
+            .join("configs")
+            .join("execution_policy.toml");
+        std::fs::write(
+            &file,
+            r#"
+version = 1
+
+[defaults]
+budget_ratio = 0.10
+min_budget_usd = 1.00
+max_budget_usd = 50.00
+min_equity_usd = 1.00
+max_positions_per_asset = 1
+
+[[defaults.rules]]
+name = "global_backstop"
+enabled = true
+priority = 100
+when = "open_positions >= 2"
+then = { action = "skip" }
+"#,
+        )
+        .expect("write policy fixture");
+        file
+    }
+
+    /// #380: an EXPLICIT policy path is honoured verbatim by the boot load —
+    /// a file written anywhere the cwd's spelling names is loaded, with the
+    /// file's own rule in force. (The install-root resolution itself is
+    /// unit-tested in `execution_policy.rs`; this pins the SERVICE's half:
+    /// the path the config carries is the path the boot actually reads.)
+    #[test]
+    fn boot_loads_the_explicit_policy_path_verbatim() {
+        let tree = std::env::temp_dir().join(format!("bk380-explicit-{}", std::process::id()));
+        let file = policy_tree_with_backstop(&tree);
+        let cfg = CoreConfig {
+            execution_policy_path: Some(file.to_string_lossy().into_owned()),
+            dry_seed_balance: dec!(100),
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        };
+        let c = Core::new(cfg);
+        assert!(
+            c.execution_policy_loaded(),
+            "the explicit file exists: the boot must load it"
+        );
+        // The loaded policy is the FILE's, not the neutral kernel: the
+        // backstop rule the fixture wrote is in force.
+        let section = c
+            .execution_policy_section_view("default")
+            .expect("the file's [defaults] section");
+        let rules = section.rules.expect("the file's backstop rule");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0]["name"], serde_json::json!("global_backstop"));
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    /// #380: the DEFAULT spelling absent everywhere is the zero-config
+    /// deployment — the boot loads the NEUTRAL kernel (code defaults, no
+    /// rules, no account sections). This is the exact behaviour the /tmp A/B
+    /// in the issue saw from a cwd without the file; what changes in #380 is
+    /// that the BINARY says so (WARN with the searched directories) instead
+    /// of degrading silently. The kernel side is unchanged: a missing file
+    /// loads `Policy::default()` — the same `Some` shape a zero-config boot
+    /// always produced, bit for bit.
+    #[test]
+    fn boot_with_the_default_spelling_missing_is_the_neutral_kernel() {
+        // A tree with no policy file anywhere above it — the default spelling
+        // (`user_layer/configs/...`) resolves to nothing there.
+        let bare = std::env::temp_dir().join(format!("bk380-bare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&bare);
+        std::fs::create_dir_all(&bare).expect("bare dir");
+        let resolved = crate::execution_policy::resolve_default_config_path(
+            Some(&bare.join("bin")),
+            Some(&bare),
+        );
+        assert_eq!(
+            resolved.source,
+            crate::execution_policy::DefaultPathSource::Fallback,
+            "the premise: nothing found in the bare tree"
+        );
+        let cfg = CoreConfig {
+            // What `main.rs` stores after a fallback resolution: the
+            // exe-root-relative spelling, pointing at a file that does not
+            // exist here.
+            execution_policy_path: Some(resolved.path.to_string_lossy().into_owned()),
+            dry_seed_balance: dec!(100),
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        };
+        let c = Core::new(cfg);
+        // The boot SUCCEEDS (#372 semantics: missing = zero-config, never a
+        // refusal), and the policy in force is the NEUTRAL kernel: no rules
+        // anywhere, the code defaults exactly.
+        let policy = c.execution_policy.as_ref().expect("#363: always Some");
+        assert!(policy.defaults.rules.is_empty(), "neutral: no rules");
+        assert!(policy.accounts.is_empty(), "neutral: no account sections");
+        assert_eq!(
+            policy.defaults.budget_ratio,
+            crate::execution_policy::code_defaults().budget_ratio,
+            "the neutral budget ratio, not a file's"
+        );
+        assert_eq!(
+            c.execution_policy_section_view("default").unwrap().rules,
+            Some(Vec::new()),
+            "the section view reports an EMPTY rule list for the neutral kernel"
+        );
+        let _ = std::fs::remove_dir_all(&bare);
     }
 
     /// The compiled default: no rules, budget unbound — the zero-config
