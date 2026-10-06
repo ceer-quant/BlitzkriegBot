@@ -1344,14 +1344,7 @@ pub async fn pull_and_convert(
     // `cashflow` event (a /trades walk has none, so its datasets convert
     // cashflow-less and replay exactly as before).
     let cashflows = load_cashflows(&cashflows_path(req))?;
-    let (events, skipped) = convert(
-        &rows,
-        &gamma,
-        &price_series,
-        &verdicts,
-        &cashflows,
-        req,
-    )?;
+    let (events, skipped) = convert(&rows, &gamma, &price_series, &verdicts, &cashflows, req)?;
     write_events(&ep, &events)?;
     report(
         progress,
@@ -2415,7 +2408,9 @@ mod tests {
         let manifest: Value =
             serde_json::from_str(&std::fs::read_to_string(&o.manifest_path).unwrap()).unwrap();
         assert_eq!(
-            manifest.pointer("/counts/cashflows").and_then(Value::as_u64),
+            manifest
+                .pointer("/counts/cashflows")
+                .and_then(Value::as_u64),
             Some(3),
             "in-window MAKER_REBATE/REWARD rows only: no MERGE, no out-of-window row"
         );
@@ -2439,23 +2434,28 @@ mod tests {
         assert_eq!(cf[2].get("which").and_then(Value::as_str), Some("reward"));
         assert_eq!(cf[2].get("usd").and_then(Value::as_str), Some("659.995"));
         assert_eq!(
-            cf.iter().map(|v| v.get("at").and_then(Value::as_i64).unwrap()).sum::<i64>(),
+            cf.iter()
+                .map(|v| v.get("at").and_then(Value::as_i64).unwrap())
+                .sum::<i64>(),
             (T0 + 5) * 1000 + (T0 + 10) * 1000 + (T0 + 15) * 1000,
             "each event rides its own row's timestamp"
         );
 
         // The whole stream still replays clean through the parser.
         verify_dataset(&o.manifest_path).unwrap();
-        let mut src = crate::data_source::open_replay(
-            o.events_path.to_str().unwrap(),
-        )
-        .unwrap();
+        let mut src = crate::data_source::open_replay(o.events_path.to_str().unwrap()).unwrap();
         use crate::data_source::DataSource as _;
         let mut n = 0u64;
         while src.next_event().is_some() {
             n += 1;
         }
-        assert_eq!(n, manifest.pointer("/counts/events").and_then(Value::as_u64).unwrap());
+        assert_eq!(
+            n,
+            manifest
+                .pointer("/counts/events")
+                .and_then(Value::as_u64)
+                .unwrap()
+        );
         assert_eq!(src.stats().malformed_lines, 0, "no line left behind");
     }
 
@@ -2470,7 +2470,9 @@ mod tests {
         let manifest: Value =
             serde_json::from_str(&std::fs::read_to_string(&o.manifest_path).unwrap()).unwrap();
         assert_eq!(
-            manifest.pointer("/counts/cashflows").and_then(Value::as_u64),
+            manifest
+                .pointer("/counts/cashflows")
+                .and_then(Value::as_u64),
             Some(0),
         );
         let txt = std::fs::read_to_string(&o.events_path).unwrap();
@@ -2503,23 +2505,29 @@ mod tests {
         // A non-exact binary float refuses rather than rounding silently
         // (0.1 prints as its exact decimal literal but 1e300's `to_string`
         // is exponential, which `from_str_exact` refuses).
-        assert!(fold_cashflow(
-            &mut out,
-            &json!({"type": "REWARD", "usdcSize": 1e300, "timestamp": 5})
-        )
-        .is_err());
+        assert!(
+            fold_cashflow(
+                &mut out,
+                &json!({"type": "REWARD", "usdcSize": 1e300, "timestamp": 5})
+            )
+            .is_err()
+        );
         // A torn timestamp refuses.
-        assert!(fold_cashflow(
-            &mut out,
-            &json!({"type": "REWARD", "usdcSize": 1.0, "timestamp": 0})
-        )
-        .is_err());
+        assert!(
+            fold_cashflow(
+                &mut out,
+                &json!({"type": "REWARD", "usdcSize": 1.0, "timestamp": 0})
+            )
+            .is_err()
+        );
         // A wrong type refuses.
-        assert!(fold_cashflow(
-            &mut out,
-            &json!({"type": "MERGE", "usdcSize": 1.0, "timestamp": 5})
-        )
-        .is_err());
+        assert!(
+            fold_cashflow(
+                &mut out,
+                &json!({"type": "MERGE", "usdcSize": 1.0, "timestamp": 5})
+            )
+            .is_err()
+        );
         assert_eq!(out.len(), 2, "refusals never push a row");
     }
 

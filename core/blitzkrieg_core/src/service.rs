@@ -3149,9 +3149,7 @@ impl Core {
             // settlement semantics read it, so a corpus without these rows
             // behaves exactly as before (the branch itself is the delta).
             crate::engine::DataEvent::Cashflow {
-                which,
-                amount_usd,
-                ..
+                which, amount_usd, ..
             } => {
                 match which {
                     crate::engine::CashflowKind::Rebate => {
@@ -3163,7 +3161,9 @@ impl Core {
                         self.stats.cashflow_rewards_usd += *amount_usd;
                     }
                 }
-                self.accounts.active_ledger_mut().credit_cashflow(*amount_usd);
+                self.accounts
+                    .active_ledger_mut()
+                    .credit_cashflow(*amount_usd);
             }
             crate::engine::DataEvent::RoundMarkets { markets, .. } => {
                 self.stats.rounds += 1;

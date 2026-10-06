@@ -999,8 +999,7 @@ impl Backtester for EventBacktester {
         // #388: the cash rows the core credited — a snapshot straight off the
         // credit path's counters, so the report and the ledger can never
         // disagree about what was paid.
-        let (cf_rebates, cf_rebates_usd, cf_rewards, cf_rewards_usd) =
-            self.core.cashflow_stats();
+        let (cf_rebates, cf_rebates_usd, cf_rewards, cf_rewards_usd) = self.core.cashflow_stats();
         let blocked = feed.get("blocked").cloned().unwrap_or(Value::Null);
         let fees_usd: Decimal = strategies
             .iter()
