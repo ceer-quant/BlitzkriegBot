@@ -21,6 +21,7 @@
 //! {"at":1757851200000,"k":"round","m":[{...CryptoMarket camelCase...}]}
 //! {"at":1757851200300,"k":"trade","t":"<token>","s":"BUY","p":"0.42","q":"100"}
 //! {"at":1757851200000,"k":"resolution","c":"<conditionId>","p":[["<winner>","1"],["<loser>","0"]],"n":false}
+//! {"at":1757851200500,"k":"cashflow","which":"rebate","usd":"331.2175"}
 //! {"at":1757851500000,"k":"round_end"}
 //! ```
 //!
@@ -36,6 +37,13 @@
 //! evidence below the coin-flip withheld every settlement and stuck the
 //! legs). Markets it covers are flagged `archiveVerdict` in their
 //! `CryptoMarket`, so the dry synthesis never races it.
+//!
+//! `cashflow` (#388) is a CASH event: the converter carries each activity
+//! ledger MAKER_REBATE / REWARD row — money the venue paid the wallet outside
+//! any fill, priced in whole-ledger rows — at the row's own timestamp. The
+//! core credits the active account's ledger at that instant; orders,
+//! positions and settlements never see it, and a corpus without cashflow
+//! rows replays exactly as before.
 //!
 //! `at` is the event's own `now_ms` (venue time when available) — the same value
 //! the live core stamped the event with, so a replay reconstructs the identical
@@ -102,6 +110,7 @@ pub fn event_at_ms(ev: &DataEvent) -> i64 {
         | DataEvent::RoundMarkets { now_ms, .. }
         | DataEvent::Trade { now_ms, .. }
         | DataEvent::Resolution { now_ms, .. }
+        | DataEvent::Cashflow { now_ms, .. }
         | DataEvent::RoundEnd { now_ms } => *now_ms,
     }
 }
@@ -186,6 +195,17 @@ pub fn event_to_json(ev: &DataEvent) -> Value {
             // here survives the round trip exactly.
             "p": payouts_json(payouts),
             "n": neg_risk,
+        }),
+        DataEvent::Cashflow {
+            which,
+            amount_usd,
+            now_ms,
+        } => json!({
+            "at": now_ms,
+            "k": "cashflow",
+            "which": which.as_str(),
+            // String decimal — the exactness convention of every decimal here.
+            "usd": amount_usd.to_string(),
         }),
     }
 }
@@ -292,6 +312,18 @@ pub fn event_from_json(v: &Value) -> Result<DataEvent, String> {
                 condition_id: c,
                 payouts,
                 neg_risk: v.get("n").and_then(Value::as_bool).unwrap_or(false),
+                now_ms,
+            })
+        }
+        "cashflow" => {
+            let which = v
+                .get("which")
+                .and_then(Value::as_str)
+                .and_then(crate::engine::CashflowKind::from_str)
+                .ok_or_else(|| "missing/invalid `which`".to_string())?;
+            Ok(DataEvent::Cashflow {
+                which,
+                amount_usd: dec_field(v, "usd")?,
                 now_ms,
             })
         }
@@ -601,6 +633,7 @@ fn stamped_event(at: i64, ev: &DataEvent) -> DataEvent {
         | DataEvent::RoundMarkets { now_ms, .. }
         | DataEvent::Trade { now_ms, .. }
         | DataEvent::Resolution { now_ms, .. }
+        | DataEvent::Cashflow { now_ms, .. }
         | DataEvent::RoundEnd { now_ms } => *now_ms = at,
     }
     out
@@ -1169,6 +1202,18 @@ mod tests {
                 neg_risk: true,
                 now_ms: now + 4,
             },
+            DataEvent::Cashflow {
+                which: crate::engine::CashflowKind::Rebate,
+                // A real MAKER_REBATE row's many-digit amount must survive the
+                // round trip exactly (#388).
+                amount_usd: dec!(331.2175),
+                now_ms: now + 5,
+            },
+            DataEvent::Cashflow {
+                which: crate::engine::CashflowKind::Reward,
+                amount_usd: dec!(659.995),
+                now_ms: now + 6,
+            },
         ]
     }
 
@@ -1242,6 +1287,18 @@ mod tests {
                     now_ms: n2,
                 },
             ) => assert_eq!((c1, p1, g1, n1), (c2, p2, g2, n2)),
+            (
+                DataEvent::Cashflow {
+                    which: w1,
+                    amount_usd: a1,
+                    now_ms: n1,
+                },
+                DataEvent::Cashflow {
+                    which: w2,
+                    amount_usd: a2,
+                    now_ms: n2,
+                },
+            ) => assert_eq!((w1, a1, n1), (w2, a2, n2)),
             _ => panic!("kind mismatch: {a:?} vs {b:?}"),
         }
     }

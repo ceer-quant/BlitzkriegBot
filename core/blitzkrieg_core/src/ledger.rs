@@ -208,6 +208,19 @@ impl Ledger {
         }
         self.balance += pairs;
     }
+
+    /// #388: credit one wallet-level venue cash payment (a MAKER_REBATE or
+    /// REWARD ledger row) — cash that arrived OUTSIDE any fill, redemption or
+    /// merge. It rides the archive stream at the row's own timestamp and
+    /// credits the active account exactly once per row. A zero/negative row
+    /// is a no-op: the venue does not claw cash back through these rows, and
+    /// a phantom debit would corrupt the cash identity the audit reconciles.
+    pub fn credit_cashflow(&mut self, amount_usd: Decimal) {
+        if amount_usd <= Decimal::ZERO {
+            return;
+        }
+        self.balance += amount_usd;
+    }
 }
 
 /// Market-agnostic reservation lifecycle (see `ledger_api`). The core pipeline
@@ -287,6 +300,24 @@ mod tests {
         l.credit_merge(Decimal::ZERO);
         l.credit_merge(dec!(-3));
         assert_eq!(l.balance(), dec!(17));
+    }
+
+    /// #388: a wallet-level cash row (MAKER_REBATE / REWARD) credits the cash
+    /// book exactly once per row, by the row's exact amount. Zero/negative
+    /// rows are no-ops — the venue pays through these rows, never claws back,
+    /// and a phantom debit would corrupt the cash identity.
+    #[test]
+    fn cashflow_credits_exactly_once_per_row() {
+        let mut l = Ledger::new();
+        l.set_balance(dec!(100000));
+        l.credit_cashflow(dec!(331.2175));
+        assert_eq!(l.balance(), dec!(100331.2175), "one row, exact amount");
+        l.credit_cashflow(dec!(659.995));
+        assert_eq!(l.balance(), dec!(100991.2125), "the second row adds on");
+        l.credit_cashflow(Decimal::ZERO);
+        l.credit_cashflow(dec!(-5));
+        assert_eq!(l.balance(), dec!(100991.2125), "no phantom debit");
+        assert!(l.is_balanced(), "the cash identity survives the credit");
     }
 
     // ── #181: reservation must reach zero on every path ──────────────────────

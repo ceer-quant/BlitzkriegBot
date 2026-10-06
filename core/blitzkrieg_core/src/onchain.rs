@@ -42,7 +42,7 @@
 //! page/phase — the pull is never a blocking loop without feedback (the
 //! #352 reverse gate), and the IPC layer (#353) wraps the same functions.
 
-use crate::engine::DataEvent;
+use crate::engine::{CashflowKind, DataEvent};
 use crate::model::CryptoMarket;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use rust_decimal::Decimal;
@@ -321,10 +321,23 @@ fn price_cache_path(out_dir: &Path, token: &str, start_sec: i64, end_sec: i64) -
 /// datasets must not inherit: the manifest pins this number, and a cache hit
 /// with a different (or missing — pre-verdict archives) value re-converts
 /// from the cached fills instead of answering stale.
-const CONVERTER_VERSION: u64 = 1;
+///
+/// #388: bumped to 2 — the converter now emits `cashflow` events from the
+/// ledger's MAKER_REBATE / REWARD rows. A v1 dataset carries none, so
+/// answering it from cache would replay the wallet's rebates blind forever.
+const CONVERTER_VERSION: u64 = 2;
 
 fn redemptions_path(req: &PullRequest) -> PathBuf {
     req.out_dir.join(format!("{}.redemptions.jsonl", stem(req)))
+}
+
+/// #388: the wallet-level cash rows (MAKER_REBATE / REWARD) ride their own
+/// side file, exactly like the REDEEM rows do — never the fill stream. The
+/// converter folds each row into one `cashflow` event; `0`-amount rows are
+/// kept (an honest row is a row), and the window is the FILLS' window: a
+/// rebate is paid at trade time, not minutes after expiry like a redemption.
+fn cashflows_path(req: &PullRequest) -> PathBuf {
+    req.out_dir.join(format!("{}.cashflows.jsonl", stem(req)))
 }
 
 /// What one condition's redemption activity proves about its outcome
@@ -435,6 +448,63 @@ fn resolve_winner(vd: &ConditionVerdict, up: &str, down: &str) -> Option<String>
         _ => {}
     }
     None
+}
+
+/// #388: fold one MAKER_REBATE / REWARD row into the cash list — one event
+/// per LEDGER ROW, at the row's own timestamp. The amount is `usdcSize` via
+/// the exact decimal path (quoted and bare numbers both seen in the export);
+/// a row whose amount cannot be parsed exactly is refused, never zeroed —
+/// a silently-dropped rebate row would corrupt the wallet's cash view by
+/// exactly the money it earned. The timestamp comes through as seconds
+/// (epoch); a zero/negative one is a torn row, refused like any other.
+fn fold_cashflow(out: &mut Vec<TimedCashflow>, v: &Value) -> Result<(), String> {
+    let which = match v.get("type").and_then(Value::as_str) {
+        Some("MAKER_REBATE") => CashflowKind::Rebate,
+        Some("REWARD") => CashflowKind::Reward,
+        other => return Err(format!("not a cash row: {other:?}")),
+    };
+    let ts = v.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
+    if ts <= 0 {
+        return Err(format!("cash row with no usable timestamp: {v}"));
+    }
+    let raw = match v.get("usdcSize") {
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::String(s)) => s.trim().to_string(),
+        _ => return Err(format!("cash row with no usdcSize: {v}")),
+    };
+    let amount = Decimal::from_str_exact(&raw)
+        .map_err(|e| format!("cash row usdcSize `{raw}` is not exact: {e}"))?;
+    out.push(TimedCashflow {
+        at_ms: ts * 1000,
+        which,
+        amount_usd: amount,
+    });
+    Ok(())
+}
+
+/// Read the cash side file back (empty when absent — a `/trades` walk
+/// carries no cash rows, so its datasets convert cashflow-less and the
+/// replay stays exactly the pre-#388 stream). Malformed rows fail the pull
+/// (fail-closed: a dataset whose cash was silently dropped would misstate
+/// the wallet's balance) — unlike the verdict fold, where missing evidence
+/// merely leaves the dry ladder in charge.
+fn load_cashflows(path: &Path) -> Result<Vec<TimedCashflow>, String> {
+    let mut out: Vec<TimedCashflow> = Vec::new();
+    if !path.exists() {
+        return Ok(out);
+    }
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Value>(line) {
+            Ok(v) => fold_cashflow(&mut out, &v)?,
+            Err(e) => return Err(format!("cash row is not valid JSON: {e}")),
+        }
+    }
+    Ok(out)
 }
 
 // ── sha256 ──────────────────────────────────────────────────────────────────
@@ -899,7 +969,13 @@ async fn walk_trades(
 /// window's last instant settles minutes-to-hours later, and clipping the
 /// evidence to the fill window would blind exactly the settlements the
 /// replay's tail is supposed to close.
-fn copy_activity(req: &PullRequest, path: &Path, rp: &Path) -> Result<(u64, u64), String> {
+///
+/// #388: MAKER_REBATE / REWARD rows ride a THIRD side file (again never the
+/// fill stream — a rebate is not a fill). Each row is one wallet-level cash
+/// payment at its own timestamp; the window is the FILLS' window (a rebate
+/// prints at trade time, unlike a redemption), and the row's identity is its
+/// content, so nothing needs deduping.
+fn copy_activity(req: &PullRequest, path: &Path, rp: &Path) -> Result<(u64, u64, u64), String> {
     if let Some(parent) = rp.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
@@ -911,11 +987,16 @@ fn copy_activity(req: &PullRequest, path: &Path, rp: &Path) -> Result<(u64, u64)
     let mut rf = std::io::BufWriter::new(
         std::fs::File::create(&rdp).map_err(|e| format!("create {}: {e}", rdp.display()))?,
     );
+    let cfp = cashflows_path(req);
+    let mut cf = std::io::BufWriter::new(
+        std::fs::File::create(&cfp).map_err(|e| format!("create {}: {e}", cfp.display()))?,
+    );
     let mut f = std::io::BufWriter::new(
         std::fs::File::create(rp).map_err(|e| format!("create {}: {e}", rp.display()))?,
     );
     let mut n: u64 = 0;
     let mut r: u64 = 0;
+    let mut c: u64 = 0;
     for line in content.lines() {
         if line.trim().is_empty() {
             continue;
@@ -926,8 +1007,9 @@ fn copy_activity(req: &PullRequest, path: &Path, rp: &Path) -> Result<(u64, u64)
         };
         let ts = v.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
         match v.get("type").and_then(Value::as_str) {
-            // The activity ledger also carries MERGE/rebate rows; only TRADE
-            // rows are fills.
+            // The activity ledger also carries MERGE/rebate rows; TRADE rows
+            // are fills, REDEEM rows verdict evidence, and the cash rows
+            // (#388) below wallet-level cash — each in its own channel.
             Some("TRADE") => {
                 if ts < start_sec || ts > end_sec {
                     continue;
@@ -946,6 +1028,15 @@ fn copy_activity(req: &PullRequest, path: &Path, rp: &Path) -> Result<(u64, u64)
                 writeln!(rf, "{v}").map_err(|e| format!("write {}: {e}", rdp.display()))?;
                 r += 1;
             }
+            kind @ (Some("MAKER_REBATE") | Some("REWARD")) => {
+                // Same window as the fills: the row IS the payment.
+                if ts < start_sec || ts > end_sec {
+                    continue;
+                }
+                writeln!(cf, "{v}").map_err(|e| format!("write {}: {e}", cfp.display()))?;
+                let _ = kind;
+                c += 1;
+            }
             _ => continue,
         }
     }
@@ -953,7 +1044,9 @@ fn copy_activity(req: &PullRequest, path: &Path, rp: &Path) -> Result<(u64, u64)
         .map_err(|e| format!("flush {}: {e}", rp.display()))?;
     rf.flush()
         .map_err(|e| format!("flush {}: {e}", rdp.display()))?;
-    Ok((n, r))
+    cf.flush()
+        .map_err(|e| format!("flush {}: {e}", cfp.display()))?;
+    Ok((n, r, c))
 }
 
 // ── the pull itself ─────────────────────────────────────────────────────────
@@ -1026,8 +1119,14 @@ pub async fn pull_and_convert(
     // original #352 path) or a pre-fetched `/activity` ledger (#355 — the
     // complete universe; /trades answers only a taker-side subset). Both
     // feed the same raw side file; finalize dedupes and sorts identically.
-    let (offset, fetched) = match &req.fill_source {
-        FillSource::TradesApi => walk_trades(fetch, req, &rp, &mp, progress).await?,
+    // #388: only the activity ledger carries cash rows, so `cashflows` is
+    // 0 for a /trades walk and its side file is written EMPTY by
+    // `copy_activity` (an empty stream converts zero cashflow events).
+    let (offset, fetched, cashflow_rows) = match &req.fill_source {
+        FillSource::TradesApi => {
+            let (offset, fetched) = walk_trades(fetch, req, &rp, &mp, progress).await?;
+            (offset, fetched, 0u64)
+        }
         FillSource::ActivityFile(path) => {
             report(
                 progress,
@@ -1035,14 +1134,14 @@ pub async fn pull_and_convert(
                 0,
                 format!("activity ledger {}", path.display()),
             );
-            let (n, r) = copy_activity(req, path, &rp)?;
+            let (n, r, c) = copy_activity(req, path, &rp)?;
             report(
                 progress,
                 PullPhase::Trades,
                 n,
-                format!("rows copied, {r} redemptions"),
+                format!("rows copied, {r} redemptions, {c} cash rows"),
             );
-            (0, n)
+            (0, n, c)
         }
     };
 
@@ -1241,13 +1340,28 @@ pub async fn pull_and_convert(
     // on-chain verdict evidence — folded per condition and handed to the
     // converter, which flags verdict markets and emits Resolution events.
     let verdicts = load_redemptions(&redemptions_path(req))?;
-    let (events, skipped) = convert(&rows, &gamma, &price_series, &verdicts, req)?;
+    // #388: the cash side file folds each MAKER_REBATE / REWARD row into one
+    // `cashflow` event (a /trades walk has none, so its datasets convert
+    // cashflow-less and replay exactly as before).
+    let cashflows = load_cashflows(&cashflows_path(req))?;
+    let (events, skipped) = convert(
+        &rows,
+        &gamma,
+        &price_series,
+        &verdicts,
+        &cashflows,
+        req,
+    )?;
     write_events(&ep, &events)?;
     report(
         progress,
         PullPhase::Convert,
         events.len() as u64,
-        format!("{} verdict conditions", verdicts.len()),
+        format!(
+            "{} verdict conditions, {} cashflow events",
+            verdicts.len(),
+            cashflows.len()
+        ),
     );
 
     let trades_sha = sha256_file(&tp)?;
@@ -1269,7 +1383,7 @@ pub async fn pull_and_convert(
             "events": ep.file_name().and_then(|s| s.to_str()).unwrap_or(""),
         },
         "state": { "tradesOffset": offset, "fetched": fetched, "complete": true },
-        "counts": { "trades": trades_n, "conditions": conditions.len(), "events": events.len(), "skippedRows": skipped, "verdicts": verdicts.len() },
+        "counts": { "trades": trades_n, "conditions": conditions.len(), "events": events.len(), "skippedRows": skipped, "verdicts": verdicts.len(), "cashflows": cashflow_rows },
         "sha256": { "trades": trades_sha, "events": events_sha },
     });
     write_json_atomic(&mp, &manifest)?;
@@ -1331,11 +1445,21 @@ fn resolved_pair(vd: &ConditionVerdict, up: &str, down: &str) -> Option<(String,
 /// points, keyed by `(token, start_sec, end_sec)`.
 type PriceSeries = BTreeMap<(String, i64, i64), Vec<(i64, Decimal)>>;
 
+/// #388: one wallet-level cash row ready for emission — the ledger row's
+/// own timestamp, its kind, and its exact amount.
+#[derive(Debug, Clone)]
+struct TimedCashflow {
+    at_ms: i64,
+    which: CashflowKind,
+    amount_usd: Decimal,
+}
+
 fn convert(
     rows: &[Value],
     gamma: &BTreeMap<String, Value>,
     price_series: &PriceSeries,
     verdicts: &BTreeMap<String, ConditionVerdict>,
+    cashflows: &[TimedCashflow],
     req: &PullRequest,
 ) -> Result<(Vec<DataEvent>, u64), String> {
     use crate::data_source::event_to_json;
@@ -1477,8 +1601,9 @@ fn convert(
         }
     }
 
-    // rank: round < top < spot < trade < resolution < round_end — the
-    // canonical same-instant order.
+    // rank: round < top < spot < trade < resolution < round_end < cashflow —
+    // the canonical same-instant order. A cashflow sorts LAST at its instant:
+    // it is bookkeeping, never a decision input.
     let rank = |ev: &DataEvent| match ev {
         DataEvent::RoundMarkets { .. } => 0u8,
         DataEvent::TopOfBook { .. } => 1,
@@ -1487,6 +1612,7 @@ fn convert(
         DataEvent::Resolution { .. } => 4,
         DataEvent::RoundEnd { .. } => 5,
         DataEvent::Book { .. } => 6,
+        DataEvent::Cashflow { .. } => 7,
     };
     let mut events: Vec<DataEvent> = Vec::new();
     for rc in rounds.values() {
@@ -1606,6 +1732,17 @@ fn convert(
         }
         events.push(DataEvent::RoundEnd {
             now_ms: rc.end_sec * 1000,
+        });
+    }
+
+    // #388: wallet-level cash rows — one event per LEDGER ROW, at the row's
+    // own timestamp, exactly as the venue paid it. No per-fill attribution is
+    // invented; the event stream is the ledger's cash view, not an estimate.
+    for cf in cashflows {
+        events.push(DataEvent::Cashflow {
+            which: cf.which,
+            amount_usd: cf.amount_usd,
+            now_ms: cf.at_ms,
         });
     }
 
@@ -2199,6 +2336,191 @@ mod tests {
             "both durations' conditions survive into the dataset"
         );
         verify_dataset(&o.manifest_path).unwrap();
+    }
+
+    /// #388: MAKER_REBATE / REWARD ledger rows become wallet-level `cashflow`
+    /// events — one per row at the row's own timestamp, exact amounts — while
+    /// MERGE rows (and every other type) stay ignored. The manifest counts the
+    /// rows separately from the events, and the stream still replays clean.
+    #[tokio::test]
+    async fn activity_cash_rows_become_cashflow_events() {
+        const T0: i64 = 1_790_785_000;
+        let rows = [
+            json!({
+                "proxyWallet": WALLET, "type": "TRADE", "side": "BUY",
+                "asset": UP1, "conditionId": COND1, "size": 1.0, "price": 0.5,
+                "timestamp": T0, "slug": "btc-updown-15m-1790784900",
+                "outcome": "Up", "outcomeIndex": 0,
+                "transactionHash": "0x1",
+            }),
+            // Two rebates and one reward, all in-window, wallet-level
+            // (conditionId empty — the real export's shape).
+            json!({
+                "proxyWallet": WALLET, "type": "MAKER_REBATE", "side": "",
+                "asset": "", "conditionId": "", "size": 0.0,
+                "usdcSize": 331.2175, "price": 0, "timestamp": T0 + 5,
+                "slug": "", "outcomeIndex": 999,
+                "transactionHash": "0xdead",
+            }),
+            json!({
+                "proxyWallet": WALLET, "type": "MAKER_REBATE", "side": "",
+                "asset": "", "conditionId": "", "size": 0.0,
+                "usdcSize": 120.0, "price": 0, "timestamp": T0 + 10,
+                "slug": "", "outcomeIndex": 999,
+                "transactionHash": "0xdead2",
+            }),
+            json!({
+                "proxyWallet": WALLET, "type": "REWARD", "side": "",
+                "asset": "", "conditionId": "", "size": 0.0,
+                "usdcSize": 659.995, "price": 0, "timestamp": T0 + 15,
+                "slug": "", "outcomeIndex": 999,
+                "transactionHash": "0xdead3",
+            }),
+            // A MERGE row: the ledger carries them too; never a cash event.
+            json!({
+                "proxyWallet": WALLET, "type": "MERGE", "side": "",
+                "asset": "", "conditionId": COND1, "size": 5.0,
+                "usdcSize": 5.0, "price": 0, "timestamp": T0 + 20,
+                "slug": "", "outcomeIndex": 999,
+                "transactionHash": "0xdead4",
+            }),
+            // An out-of-window rebate: clipped by the fills' window.
+            json!({
+                "proxyWallet": WALLET, "type": "MAKER_REBATE", "side": "",
+                "asset": "", "conditionId": "", "size": 0.0,
+                "usdcSize": 9999.0, "price": 0, "timestamp": T0 + 100_000,
+                "slug": "", "outcomeIndex": 999,
+                "transactionHash": "0xdead5",
+            }),
+        ];
+        let ledger = tmp("cashrows").join("activity.jsonl");
+        std::fs::write(
+            &ledger,
+            rows.iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let mut r = req(tmp("cashrows-pull"));
+        r.fill_source = FillSource::ActivityFile(ledger);
+        let fetch = PagingVenue {
+            all: Vec::new(),
+            trades_urls: Mutex::default(),
+            meta_urls: Mutex::default(),
+            gammas: gamma_map(),
+        };
+        let o = pull_and_convert(&fetch, &r, &noop_cb()).await.unwrap();
+
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(&o.manifest_path).unwrap()).unwrap();
+        assert_eq!(
+            manifest.pointer("/counts/cashflows").and_then(Value::as_u64),
+            Some(3),
+            "in-window MAKER_REBATE/REWARD rows only: no MERGE, no out-of-window row"
+        );
+
+        // Exactly three cashflow events, at their rows' own instants, with
+        // the exact amounts the ledger carried.
+        let txt = std::fs::read_to_string(&o.events_path).unwrap();
+        let cf: Vec<Value> = txt
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|v| v.get("k").and_then(Value::as_str) == Some("cashflow"))
+            .collect();
+        assert_eq!(cf.len(), 3, "one event per cash row: {txt}");
+        assert_eq!(cf[0].get("which").and_then(Value::as_str), Some("rebate"));
+        assert_eq!(
+            cf[0].get("usd").and_then(Value::as_str),
+            Some("331.2175"),
+            "the amount rides exactly, string-decimal"
+        );
+        assert_eq!(cf[1].get("usd").and_then(Value::as_str), Some("120.0"));
+        assert_eq!(cf[2].get("which").and_then(Value::as_str), Some("reward"));
+        assert_eq!(cf[2].get("usd").and_then(Value::as_str), Some("659.995"));
+        assert_eq!(
+            cf.iter().map(|v| v.get("at").and_then(Value::as_i64).unwrap()).sum::<i64>(),
+            (T0 + 5) * 1000 + (T0 + 10) * 1000 + (T0 + 15) * 1000,
+            "each event rides its own row's timestamp"
+        );
+
+        // The whole stream still replays clean through the parser.
+        verify_dataset(&o.manifest_path).unwrap();
+        let mut src = crate::data_source::open_replay(
+            o.events_path.to_str().unwrap(),
+        )
+        .unwrap();
+        use crate::data_source::DataSource as _;
+        let mut n = 0u64;
+        while src.next_event().is_some() {
+            n += 1;
+        }
+        assert_eq!(n, manifest.pointer("/counts/events").and_then(Value::as_u64).unwrap());
+        assert_eq!(src.stats().malformed_lines, 0, "no line left behind");
+    }
+
+    /// #388: a `/trades` walk has no cash rows — its dataset converts
+    /// cashflow-less (`counts.cashflows == 0`) and replays exactly the
+    /// pre-#388 stream.
+    #[tokio::test]
+    async fn a_trades_api_dataset_has_no_cashflow_events() {
+        let fetch = Scripted::new(vec![rows_ab(), vec![]], gamma_map(), false);
+        let r = req(tmp("no-cashrows"));
+        let o = pull_and_convert(&fetch, &r, &noop_cb()).await.unwrap();
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(&o.manifest_path).unwrap()).unwrap();
+        assert_eq!(
+            manifest.pointer("/counts/cashflows").and_then(Value::as_u64),
+            Some(0),
+        );
+        let txt = std::fs::read_to_string(&o.events_path).unwrap();
+        assert!(!txt.contains("\"k\":\"cashflow\""));
+    }
+
+    /// #388 unit semantics: the fold refuses what it cannot state exactly —
+    /// a non-exact amount or a torn timestamp fails the row, never zeroes it.
+    #[test]
+    fn cash_rows_fold_exact_or_refuse() {
+        let mut out = Vec::new();
+        fold_cashflow(
+            &mut out,
+            &json!({"type": "MAKER_REBATE", "usdcSize": 331.2175, "timestamp": 1_790_785_005}),
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].which, CashflowKind::Rebate);
+        assert_eq!(out[0].amount_usd, Decimal::new(3312175, 4));
+        assert_eq!(out[0].at_ms, 1_790_785_005_000);
+
+        // A quoted amount (the export's other shape) parses the same.
+        fold_cashflow(
+            &mut out,
+            &json!({"type": "REWARD", "usdcSize": "659.995", "timestamp": 1_790_785_015}),
+        )
+        .unwrap();
+        assert_eq!(out[1].which, CashflowKind::Reward);
+
+        // A non-exact binary float refuses rather than rounding silently
+        // (0.1 prints as its exact decimal literal but 1e300's `to_string`
+        // is exponential, which `from_str_exact` refuses).
+        assert!(fold_cashflow(
+            &mut out,
+            &json!({"type": "REWARD", "usdcSize": 1e300, "timestamp": 5})
+        )
+        .is_err());
+        // A torn timestamp refuses.
+        assert!(fold_cashflow(
+            &mut out,
+            &json!({"type": "REWARD", "usdcSize": 1.0, "timestamp": 0})
+        )
+        .is_err());
+        // A wrong type refuses.
+        assert!(fold_cashflow(
+            &mut out,
+            &json!({"type": "MERGE", "usdcSize": 1.0, "timestamp": 5})
+        )
+        .is_err());
+        assert_eq!(out.len(), 2, "refusals never push a row");
     }
 
     /// 治 #2 unit semantics: the two kinds of REDEEM evidence and the two
