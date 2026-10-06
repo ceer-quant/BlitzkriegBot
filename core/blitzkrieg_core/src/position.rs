@@ -1186,12 +1186,7 @@ impl PositionManager {
     /// else the stale value) — the dashboard may keep showing it. It is never
     /// again a substitute for an executable quote: exit decisions and SELL fills
     /// price off `executable_bid`, which is zero when no bid quotes.
-    fn valuate_one(
-        pos: &mut OpenPosition,
-        book: Option<&BookView>,
-        now_ms: i64,
-        cfg: &ExitConfig,
-    ) {
+    fn valuate_one(pos: &mut OpenPosition, book: Option<&BookView>, now_ms: i64, cfg: &ExitConfig) {
         update_exit_state(&mut pos.state, pos.entry_price, book, now_ms, cfg);
         let val = reference_price(book, pos.current_price);
         if val > Decimal::ZERO && pos.current_price != val {
@@ -1328,7 +1323,8 @@ impl PositionManager {
             return Vec::new();
         }
         self.check_exits_inner(books, now_ms, interval_mode, tick_boundary_ms, dirty_tokens)
-    }    /// The shared ladder body. `interval_mode` selects the #390 spelling: the
+    }
+    /// The shared ladder body. `interval_mode` selects the #390 spelling: the
     /// per-position state update is the merged maintenance update — ONE call
     /// per run at the DOUBLE (2×) backfill rate, because the base kernel's
     /// every-tick valuate pass and every-tick ladder each advance the same
@@ -1445,7 +1441,9 @@ impl PositionManager {
                 stop_reference,
             } = decide_exit_verdict(ExitTickInput {
                 entry_price: pos.entry_price,
-                book: book.as_ref().map(|b| b as &dyn crate::exit_policy::BookScalarView),
+                book: book
+                    .as_ref()
+                    .map(|b| b as &dyn crate::exit_policy::BookScalarView),
                 fallback_price: Some(pos.current_price),
                 time_left_sec,
                 hold_sec,
@@ -2064,7 +2062,11 @@ mod tests {
         let reqs = pm.check_exits(
             &|token| {
                 if token == "tok_BTC" {
-                    Some(BookView::from_snapshot(&two_sided_book(dec!(0.50), dec!(0.52), now)))
+                    Some(BookView::from_snapshot(&two_sided_book(
+                        dec!(0.50),
+                        dec!(0.52),
+                        now,
+                    )))
                 } else {
                     None
                 }
@@ -2103,7 +2105,11 @@ mod tests {
         let reqs = pm.check_exits(
             &|token| {
                 if token == "tok_BTC" {
-                    Some(BookView::from_snapshot(&two_sided_book(dec!(0.60), dec!(0.62), stale)))
+                    Some(BookView::from_snapshot(&two_sided_book(
+                        dec!(0.60),
+                        dec!(0.62),
+                        stale,
+                    )))
                 } else {
                     None
                 }
@@ -2117,7 +2123,11 @@ mod tests {
         let reqs = pm.check_exits(
             &|token| {
                 if token == "tok_BTC" {
-                    Some(BookView::from_snapshot(&two_sided_book(dec!(0.60), dec!(0.62), now)))
+                    Some(BookView::from_snapshot(&two_sided_book(
+                        dec!(0.60),
+                        dec!(0.62),
+                        now,
+                    )))
                 } else {
                     None
                 }
@@ -2434,7 +2444,10 @@ mod tests {
         // carries no clock (`timestamp 0`), which is the "unknown age counts as
         // fresh" branch of #268 item 1 — not an outage.
         let now = 498_000;
-        let reqs = pm.check_exits(&|_| Some(BookView::from_snapshot(&one_sided_book(dec!(0.90), 0))), now);
+        let reqs = pm.check_exits(
+            &|_| Some(BookView::from_snapshot(&one_sided_book(dec!(0.90), 0))),
+            now,
+        );
         assert!(
             reqs.is_empty(),
             "no bid ⇒ no executable price ⇒ no SELL, whatever the judgement said: {reqs:?}"
@@ -2539,7 +2552,16 @@ mod tests {
         // Recovery: the same bid, received NOW, is executable again and the held
         // rule exits at it.
         let now = 611_000;
-        let reqs = pm.check_exits(&|_| Some(BookView::from_snapshot(&two_sided_book(dec!(0.50), dec!(0.52), now))), now);
+        let reqs = pm.check_exits(
+            &|_| {
+                Some(BookView::from_snapshot(&two_sided_book(
+                    dec!(0.50),
+                    dec!(0.52),
+                    now,
+                )))
+            },
+            now,
+        );
         assert_eq!(
             reqs.len(),
             1,
@@ -2598,7 +2620,13 @@ mod tests {
 
         let now = 610_000;
         let reqs = pm.check_exits(
-            &|_| Some(BookView::from_snapshot(&two_sided_book(dec!(0.50), dec!(0.52), 490_000))),
+            &|_| {
+                Some(BookView::from_snapshot(&two_sided_book(
+                    dec!(0.50),
+                    dec!(0.52),
+                    490_000,
+                )))
+            },
             now,
         );
         assert_eq!(

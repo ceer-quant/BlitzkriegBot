@@ -670,10 +670,7 @@ impl BookView {
 /// `current_price`. NEVER use this to price a fill — realised PnL, SELL fills
 /// and forced exits must go through [`executable_bid`] — it exists so the
 /// dashboard keeps showing something sensible while a book is one-sided.
-pub fn reference_price<B: BookScalarView + ?Sized>(
-    book: Option<&B>,
-    fallback: Decimal,
-) -> Decimal {
+pub fn reference_price<B: BookScalarView + ?Sized>(book: Option<&B>, fallback: Decimal) -> Decimal {
     if let Some(b) = book {
         if b.best_bid() > Decimal::ZERO {
             return b.best_bid();
@@ -709,11 +706,7 @@ pub fn book_age_ms<B: BookScalarView + ?Sized>(book: &B, now_ms: i64) -> Option<
 /// legacy snapshot would turn "this record carries no clock" into "this position
 /// can never be exited", which is the failure this whole file is about. It is
 /// asserted explicitly in this module's tests.
-pub fn book_is_fresh<B: BookScalarView + ?Sized>(
-    book: &B,
-    now_ms: i64,
-    cfg: &ExitConfig,
-) -> bool {
+pub fn book_is_fresh<B: BookScalarView + ?Sized>(book: &B, now_ms: i64, cfg: &ExitConfig) -> bool {
     match book_age_ms(book, now_ms) {
         Some(age) => age <= cfg.max_book_age_sec * 1_000,
         None => true,

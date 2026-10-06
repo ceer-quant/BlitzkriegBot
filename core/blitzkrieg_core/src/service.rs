@@ -1467,8 +1467,7 @@ impl Core {
         // The eval fallback fires at the first grid tick at or after
         // last_eval + window — the exact tick the every-tick walk used.
         consider(
-            self.fast_last_eval_ms
-                .saturating_add(FAST_EVAL_FALLBACK_MS),
+            self.fast_last_eval_ms.saturating_add(FAST_EVAL_FALLBACK_MS),
             &mut best,
         );
         consider(self.fast_next_exit_deadline_ms, &mut best);
@@ -1488,7 +1487,8 @@ impl Core {
         }
         consider(self.breaker.next_resume_ms(), &mut best);
         consider(
-            self.audit.last_at_ms
+            self.audit
+                .last_at_ms
                 .checked_add(self.config.audit_interval_sec.max(0) * 1000)
                 .unwrap_or(i64::MAX),
             &mut best,
@@ -1497,11 +1497,7 @@ impl Core {
             (crate::position::utc_day_index(now_ms) + 1) * crate::position::DAY_MS,
             &mut best,
         );
-        if best == i64::MAX {
-            None
-        } else {
-            Some(best)
-        }
+        if best == i64::MAX { None } else { Some(best) }
     }
 
     /// Issue #390 (replay deadline jump): the `evaluations` feed counter
@@ -1536,9 +1532,7 @@ impl Core {
     /// jumping driver forces that landing; skipping it could move a stamp
     /// or a verdict the every-tick walk produced.
     pub fn has_forced_next_tick(&self) -> bool {
-        !self.strategy_exits.is_empty()
-            || self.fast_orders_dirty
-            || self.fast_positions_dirty
+        !self.strategy_exits.is_empty() || self.fast_orders_dirty || self.fast_positions_dirty
     }
 }
 
@@ -3594,9 +3588,7 @@ impl Core {
         // `replay_scheduling` — the strategy surface it observes (signals,
         // fills, trades) is identical, and the eval-call health counter is
         // host diagnostic, not replay semantics.
-        if self.replay_sched()
-            && !self.shadow_evolution.is_enabled()
-            && !self.fast_eval_due(now_ms)
+        if self.replay_sched() && !self.shadow_evolution.is_enabled() && !self.fast_eval_due(now_ms)
         {
             return 0;
         }
@@ -7623,10 +7615,7 @@ impl Core {
         // changes, or when the earliest open position's expiry passes (that is
         // the instant `track_markets` would first admit the market). Between
         // those, the scan re-derives the same list — skip it.
-        if self.replay_sched()
-            && !self.fast_positions_dirty
-            && now_ms < self.fast_next_expiry_ms
-        {
+        if self.replay_sched() && !self.fast_positions_dirty && now_ms < self.fast_next_expiry_ms {
             return;
         }
         // #377 (治 #2): markets the archive promised a verdict for are settled
@@ -8336,9 +8325,7 @@ impl Core {
         // deadline has arrived — between those, no `escalate_at_ms` can be
         // due (arming never moves a deadline earlier than the sweep that
         // would notice it recomputes the floor).
-        if !self.replay_sched()
-            || self.fast_orders_dirty
-            || now_ms >= self.fast_next_escalation_ms
+        if !self.replay_sched() || self.fast_orders_dirty || now_ms >= self.fast_next_escalation_ms
         {
             self.run_escalation_sweep(now_ms)?;
             if self.replay_sched() {
@@ -8691,8 +8678,7 @@ impl Core {
                 (true, false)
             } else if self.config.replay_scheduling {
                 (
-                    !self.fast_dirty_tokens.is_empty()
-                        || now_ms >= self.fast_next_exit_deadline_ms,
+                    !self.fast_dirty_tokens.is_empty() || now_ms >= self.fast_next_exit_deadline_ms,
                     true,
                 )
             } else {
