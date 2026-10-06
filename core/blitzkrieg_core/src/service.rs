@@ -1534,6 +1534,16 @@ impl Core {
     pub fn has_forced_next_tick(&self) -> bool {
         !self.strategy_exits.is_empty() || self.fast_orders_dirty || self.fast_positions_dirty
     }
+
+    /// Issue #390 (replay nofast): true when the standing-candidate cache
+    /// holds a suggestion the driver must not skip over — a skipped grid tick
+    /// would not re-run it into the kernel-side gates the way the base walk
+    /// did every tick (see `engine_replay_cycle`).
+    pub fn has_standing_candidates(&self) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|e| e.has_standing_candidates())
+    }
 }
 
 impl Core {
@@ -3590,7 +3600,23 @@ impl Core {
         // host diagnostic, not replay semantics.
         if self.replay_sched() && !self.shadow_evolution.is_enabled() && !self.fast_eval_due(now_ms)
         {
-            return 0;
+            // Issue #390 (replay nofast): a QUIET cycle. The base walk ran a
+            // full Lua collection here and re-submitted its suggestions into
+            // the kernel-side gates; this cycle re-runs the STANDING
+            // suggestions of the last real evaluation through the SAME
+            // kernel-side pipeline instead — the gate/counter/log/placement
+            // stream is reproduced cycle for cycle without the Lua call
+            // (see `engine_replay_cycle`). A stable-phase cache answers with
+            // orders; an unstable one (a phase transition the last real
+            // evaluation introduced — a latch fired, an emission consumed)
+            // refuses, and THIS cycle runs a real evaluation: the base's
+            // next collection would collect the post-transition output.
+            // The wake flags stay armed either way: a quiet cycle consumes
+            // neither the input wake nor the timing boundary — both belong
+            // to the next REAL evaluation.
+            if let Some(orders) = self.engine_replay_cycle(now_ms) {
+                return orders;
+            }
         }
         if self.replay_sched() {
             // A real evaluation consumes the wake; the timing boundary is
@@ -4025,6 +4051,311 @@ impl Core {
             }
         }
         placed
+    }
+
+    /// Issue #390 (replay nofast): one QUIET evaluation cycle — the base
+    /// walk's every-tick Lua collection replaced by a re-submission of the
+    /// standing candidates through the SAME kernel-side pipeline
+    /// (`engine.replay_candidates` → the shared submit half). Everything the
+    /// base cycle produced from the re-collected suggestions — the
+    /// `signals`/`place_rejected` counters, the per-strategy accounting and
+    /// rejection buckets, the entry-rejected log lines, the gate verdicts and
+    /// their placement instants — is reproduced cycle for cycle without the
+    /// Lua call; the counters are the schedule's, not the wall cost's
+    /// (mirroring `replay_credit_cycles`). Deliberately NOT touched: the eval
+    /// wake flags (a quiet cycle consumes neither the input wake nor the
+    /// timing boundary — both belong to the next REAL evaluation, whose
+    /// Lua collection refreshes the staged set), the shadow-evolution cadence
+    /// (a jumping driver is refused while it is enabled), and the eval-call
+    /// health counters (host diagnostic, exempt host fields).
+    /// Issue #390 (replay nofast): one QUIET evaluation cycle — the base
+    /// walk's every-tick Lua collection replaced by a re-submission of the
+    /// standing candidates through the SAME kernel-side pipeline
+    /// (`engine.replay_candidates` → the shared submit half). Everything the
+    /// base cycle produced from the re-collected suggestions — the
+    /// `signals`/`place_rejected` counters, the per-strategy accounting and
+    /// rejection buckets, the entry-rejected log lines, the gate verdicts and
+    /// their placement instants — is reproduced cycle for cycle without the
+    /// Lua call; the counters are the schedule's, not the wall cost's
+    /// (mirroring `replay_credit_cycles`). Returns `None` when the staged
+    /// set is not in a stable phase (the caller falls back to a real
+    /// evaluation). Deliberately NOT touched: the eval wake flags (a quiet
+    /// cycle consumes neither the input wake nor the timing boundary — both
+    /// belong to the next REAL evaluation, whose Lua collection refreshes the
+    /// staged set), the shadow-evolution cadence (a jumping driver is refused
+    /// while it is enabled), and the eval-call health counters (host
+    /// diagnostic, exempt host fields).
+    fn engine_replay_cycle(&mut self, now_ms: i64) -> Option<usize> {
+        let staged = self
+            .engine
+            .as_mut()
+            .map(|e| {
+                // #202: the same per-cycle equity push the real cycle makes,
+                // so a replayed ticket is sized against the balance the
+                // process has NOW.
+                e.set_equity_usd(self.accounts.active_ledger().balance());
+                e.replay_candidates(now_ms)
+            })
+            .unwrap_or_else(|| Some(Vec::new()))?;
+        let orders = staged;
+        self.stats.signals += orders.len() as u64;
+        // The physics projection the base cycle judged (E25): refreshed for
+        // THIS cycle's round clock by `replay_candidates`.
+        let policy_time_left_sec = self
+            .engine
+            .as_ref()
+            .map(|e| e.last_time_left_sec())
+            .unwrap_or(0);
+        let mut placed = 0;
+        for (token, mut req) in orders
+            .into_iter()
+            .map(|o| (o.token_id.clone(), o))
+            .collect::<Vec<_>>()
+        {
+            let name = req.strategy.clone();
+            // ── #363: the policy verdict for THIS intent. A Skip refuses here
+            // — the intent never reaches the RiskGate. A Place caps the
+            // ticket size. The shipped defaults never bite (see the comment
+            // at the real cycle's verdict map).
+            let policy = self.execution_policy.clone();
+            let policy_verdict = policy.map(|policy| {
+                let open = self.positions.open_positions();
+                let open_for = |acct: &str| {
+                    open.iter()
+                        .filter(|p| p.account_id.as_str() == acct)
+                        .count() as u32
+                };
+                let facts = crate::execution_policy::PolicyInput {
+                    available_balance: self
+                        .accounts
+                        .ledger_of(&req.account_id)
+                        .map(|l| l.balance())
+                        .unwrap_or_default(),
+                    total_equity: self
+                        .accounts
+                        .ledger_of(&req.account_id)
+                        .map(|l| l.balance())
+                        .unwrap_or_default(),
+                    open_positions: open_for(req.account_id.as_str()),
+                    current_price: req.price,
+                    time_left_sec: policy_time_left_sec,
+                    symbol: req.asset.clone(),
+                    recent_pnl_1h: self
+                        .positions
+                        .recent_pnl_1h_for(req.account_id.as_str(), now_ms),
+                    consecutive_losses: self.breaker.consecutive_losses(&req.strategy),
+                };
+                crate::execution_policy::evaluate(&policy, req.account_id.as_str(), &facts)
+            });
+            match policy_verdict {
+                Some(Ok(crate::execution_policy::PolicyOutput::Skip { reason })) => {
+                    tracing::info!(target: "strategy",
+                        "entry rejected: strategy={name} cause=policy.skip reason={reason}");
+                    self.stats.place_rejected += 1;
+                    let acc = self.strategy_accounting.entry(name).or_default();
+                    acc.rejected += 1;
+                    *acc.rejection_causes
+                        .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
+                        .or_default() += 1;
+                    continue;
+                }
+                Some(Ok(crate::execution_policy::PolicyOutput::Cooldown { seconds })) => {
+                    let until = now_ms + seconds * 1000;
+                    self.policy_cooldowns
+                        .insert(req.account_id.to_string(), until);
+                    tracing::info!(target: "strategy",
+                        "policy cooldown: account={} {}s (entries resume at {})",
+                        req.account_id, seconds, until);
+                    self.stats.place_rejected += 1;
+                    let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                    acc.rejected += 1;
+                    *acc.rejection_causes
+                        .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
+                        .or_default() += 1;
+                    continue;
+                }
+                Some(Ok(crate::execution_policy::PolicyOutput::Place { budget_usd, .. })) => {
+                    let shares = (budget_usd / req.price).floor();
+                    if shares >= Decimal::ONE && req.size > shares {
+                        tracing::info!(target: "strategy",
+                            "policy budget shrink: strategy={} account={} {} -> {shares} shares \
+                             (budget {budget_usd} USD)",
+                            name, req.account_id, req.size);
+                        req.size = shares;
+                    }
+                    if shares < Decimal::ONE {
+                        tracing::info!(target: "strategy",
+                            "entry rejected: strategy={name} cause=policy.skip reason=\
+                             budget {budget_usd} USD cannot buy one share at {}",
+                            req.price);
+                        self.stats.place_rejected += 1;
+                        let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                        acc.rejected += 1;
+                        *acc.rejection_causes
+                            .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
+                            .or_default() += 1;
+                        continue;
+                    }
+                }
+                Some(Err(refusal)) => {
+                    tracing::warn!(target: "strategy",
+                        "entry refused: strategy={name} account={} policy refusal: {}",
+                        req.account_id, refusal.reason);
+                    self.stats.place_rejected += 1;
+                    let acc = self.strategy_accounting.entry(name).or_default();
+                    acc.rejected += 1;
+                    *acc.rejection_causes
+                        .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
+                        .or_default() += 1;
+                    continue;
+                }
+                None => {}
+            }
+            // ── E25 (#331): the arbitration seam, identical to the real
+            // cycle's (the gates reuse the existing implementations, so no
+            // threshold has two truths).
+            let account_id = req.account_id.clone();
+            let is_close = crate::risk::is_close_intent(&req.internal_key);
+            let account_entry_block = self
+                .accounts
+                .permits_order(&account_id, is_close)
+                .err()
+                .map(|e| e.message);
+            let intent = crate::arbitration::StrategyIntent::from_request(req);
+            let outcome = {
+                let round_tokens = self
+                    .engine
+                    .as_ref()
+                    .map(|e| e.round_token_ids())
+                    .unwrap_or_default();
+                // E28 (§9.3): the reserve happens in THIS account's book.
+                match self.accounts.get_mut(&account_id) {
+                    Err(e) => crate::arbitration::Outcome {
+                        decision: crate::arbitration::Decision::Rejected {
+                            reason: crate::arbitration::RejectReason::AccountLimit,
+                            gate: crate::arbitration::GateId::Risk,
+                            detail: e.message,
+                        },
+                        gates: Vec::new(),
+                        latency_us: 0,
+                    },
+                    Ok(ledger) => {
+                        let equity = ledger.balance();
+                        let systemic_facts = crate::risk::limits::SystemicFacts {
+                            open_positions: self.positions.open_positions().len(),
+                            open_exposure_usd: self
+                                .positions
+                                .open_positions()
+                                .iter()
+                                .map(|p| p.cost_usd)
+                                .sum(),
+                            same_asset_exposure_usd: self
+                                .positions
+                                .open_positions()
+                                .iter()
+                                .filter(|p| p.asset == intent.request.asset)
+                                .map(|p| p.cost_usd)
+                                .sum(),
+                            day_realized_usd: self.positions.daily_pnl(),
+                        };
+                        let mut ctx = crate::arbitration::IntentCtx {
+                            round_tokens: &round_tokens,
+                            risk: &self.risk,
+                            breaker: &self.breaker,
+                            ledger,
+                            exit_cfg: &self.config.positions.exit,
+                            time_left_sec: policy_time_left_sec,
+                            now_ms,
+                            equity,
+                            account_entry_block,
+                            systemic_facts,
+                        };
+                        crate::arbitration::process_intent(&intent, &mut ctx)
+                    }
+                }
+            };
+            self.record_intent_decision(&intent, &outcome, now_ms);
+            if let crate::arbitration::Decision::Rejected {
+                reason,
+                gate,
+                detail,
+                ..
+            } = &outcome.decision
+            {
+                self.stats.place_rejected += 1;
+                let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                acc.rejected += 1;
+                let cause = classify_rejection(&crate::model::CoreError::new(
+                    crate::arbitration::reason_code(*reason),
+                    detail.clone(),
+                ));
+                *acc.rejection_causes.entry(cause).or_default() += 1;
+                tracing::info!(target: "strategy",
+                    "entry rejected: strategy={name} cause=arbitration gate={gate:?} reason={reason:?} detail={detail}");
+                continue;
+            }
+            let mut req = intent.request;
+            if let crate::arbitration::Decision::Modified {
+                modification: crate::arbitration::Modification::SizeReduced { approved, .. },
+                ..
+            } = &outcome.decision
+            {
+                tracing::info!(target: "strategy",
+                    "entry modified: strategy={name} systemic shrinks {} -> {approved} shares",
+                    req.size);
+                req.size = *approved;
+            }
+            // E16/#98 portfolio-level exposure cap (0 = off).
+            if let Err(reason) = self.portfolio_limit_ok(&req) {
+                self.stats.strategy_limit_rejected += 1;
+                let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                acc.limit_rejected += 1;
+                *acc.rejection_causes
+                    .entry("limit.portfolioNotionalCap".into())
+                    .or_default() += 1;
+                tracing::info!(target: "strategy", "entry rejected: strategy={name} cause=limit.portfolioNotionalCap reason={reason}");
+                continue;
+            }
+            if let Some(limit) = self.config.strategy_limits.get(&name).cloned()
+                && let Err(reason) = self.strategy_limit_ok(&req, &limit)
+            {
+                let bucket = if reason.contains("position cap") {
+                    "limit.positionCap"
+                } else if reason.contains("notional cap") {
+                    "limit.notionalCap"
+                } else {
+                    "limit.other"
+                };
+                self.stats.strategy_limit_rejected += 1;
+                let acc = self.strategy_accounting.entry(name).or_default();
+                acc.limit_rejected += 1;
+                *acc.rejection_causes.entry(bucket.into()).or_default() += 1;
+                continue;
+            }
+            match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
+                Ok((_id, _)) => {
+                    self.strategy_accounting
+                        .entry(name.clone())
+                        .or_default()
+                        .placed += 1;
+                    if let Some(engine) = self.engine.as_mut() {
+                        engine.note_order_placed(&token);
+                    }
+                    placed += 1;
+                }
+                Err(err) => {
+                    self.stats.place_rejected += 1;
+                    let bucket = classify_rejection(&err);
+                    tracing::info!(target: "strategy",
+                        "entry rejected: strategy={name} cause={bucket} reason={}",
+                        err.message);
+                    let acc = self.strategy_accounting.entry(name).or_default();
+                    acc.rejected += 1;
+                    *acc.rejection_causes.entry(bucket).or_default() += 1;
+                }
+            }
+        }
+        Some(placed)
     }
 
     /// Portfolio-level exposure cap (E16/#98): the sum of open notional across

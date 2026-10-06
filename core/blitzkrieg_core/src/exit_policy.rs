@@ -1108,11 +1108,14 @@ pub fn update_exit_state_interval<B: BookScalarView + ?Sized>(
                 };
                 gap_ms.saturating_sub(1) / step.max(1)
             };
+            // `skipped` is bounded by u32::MAX-1 before the cast and the
+            // +1 cannot overflow a saturating add, so the chain stays
+            // within u32::MAX by construction — the explicit `.min`
+            // would be a no-op clippy is right to flag.
             state.hwm_confirm_count = state
                 .hwm_confirm_count
                 .saturating_add((skipped.min(u64::from(u32::MAX - 1))) as u32)
-                .saturating_add(1)
-                .min(u32::MAX);
+                .saturating_add(1);
             if state.hwm_confirm_count >= cfg.ratchet_confirm_ticks {
                 state.confirmed_high = state.high_water_mark;
             }

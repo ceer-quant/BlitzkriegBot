@@ -786,7 +786,7 @@ impl EventBacktester {
                         let p = cursor + off * tick;
                         if p >= until_ms {
                             let s = until_ms - cursor;
-                            let skipped = if s <= 0 { 0 } else { (s - 1) / tick as i64 + 1 };
+                            let skipped = if s <= 0 { 0 } else { (s - 1) / tick + 1 };
                             self.core.replay_credit_cycles(skipped as u64);
                             *next_eval_ms = cursor + skipped * tick;
                             return;
@@ -795,7 +795,7 @@ impl EventBacktester {
                     }
                     None => {
                         let s = until_ms - cursor;
-                        let skipped = if s <= 0 { 0 } else { (s - 1) / tick as i64 + 1 };
+                        let skipped = if s <= 0 { 0 } else { (s - 1) / tick + 1 };
                         self.core.replay_credit_cycles(skipped as u64);
                         *next_eval_ms = cursor + skipped * tick;
                         return;
@@ -810,7 +810,14 @@ impl EventBacktester {
                 *next_eval_ms = landing;
             }
             self.step(*next_eval_ms);
-            force_next = self.core.has_forced_next_tick();
+            // Issue #390 (replay nofast): a standing candidate — a suggestion
+            // the base walk would RE-SUBMIT into the kernel-side gates on
+            // every tick of this gap (cooldowns/breakers time out mid-gap;
+            // the retry that lands the entry is the observable one) — pins
+            // the next landing to the immediate next grid point, exactly like
+            // a forced tick. The quiet-cycle replay keeps the gate stream
+            // cycle-for-cycle; the driver keeps its cadence.
+            force_next = self.core.has_forced_next_tick() || self.core.has_standing_candidates();
             *next_eval_ms += tick;
         }
     }
