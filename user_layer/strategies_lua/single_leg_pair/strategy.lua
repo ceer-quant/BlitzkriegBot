@@ -5,7 +5,8 @@
 -- 55.1% of the @almach wallet's 15m rounds had only ONE leg worth lifting
 -- (5,391 of 9,780), and this package enters those rounds: buy the one side
 -- the book actually offers (or the round's declared leader), hold as a
--- NAKED directional position with its own stop and its own per-round cap.
+-- NAKED directional position: the kernel owns its survival (settlement or
+-- force-exit), the strategy owns entries and a per-round cap.
 --
 -- The ledger's honesty requirement (issue #387: 「诚实标注单腿轮的赔率分布」)
 -- prices the risk boundary — single-leg rounds settled in 2026-08-05..09-30,
@@ -41,19 +42,19 @@
 --         apply at full strength — only the strategy's own time floor
 --         `min_time_left_sec` bounds entries further);
 --       - `max_open_positions` caps the strategy's own openings per round
---         slot (positions settle or stop within their round, so the cap is
+--         slot (positions settle within their round, so the cap is
 --         a true concurrent-exposure ceiling);
---       - the STOP is the strategy's own decision, emitted every evaluation
---         once `time_left_sec <= stop_deadline_sec`: an exit intent tagged
---         "single-leg stop" per entered leg. The kernel routes it as
---         StrategySignal — a taker close it still prices, risk-checks and
---         executes; an intent with no open position behind it is dropped.
---         Riding a naked leg into settlement hoping is not the design: at
---         the deadline the leg leaves at the book, or it was already gone.
+--       - EXITS belong to the kernel (charter 「止损不归你管」, DEV_V0_3
+--         §16.4): this package computes no stop, monitors no stop, and
+--         expresses no stop — a leg rides its round to settlement, the
+--         kernel's force-exit, or an honest hold when no REDEEM evidence
+--         exists. The dead-zone deadline exit this round structure wants
+--         is a KERNEL exit-policy surface, filed as issue #396; a
+--         strategy-side stop is gate-blocked by design.
 --   * holds_to_settlement — declared, and its ONE consequence here is that
 --     the kernel's automated exit ladder (the generic 12% stop, the maker
---     ladder) leaves these legs alone: the naked stop above is this
---     strategy's own exit policy, not the ladder's. Settlement itself is
+--     ladder) leaves these legs alone: this package expresses no exits of
+--     its own, so the legs ride their round. Settlement itself is
 --     untouched — winning legs redeem $1.00, losing legs zero, exactly as
 --     before; a leg with no REDEEM evidence is honestly held, never
 --     fabricated into a result. The strategy NEVER emits `reason = "merge"`
@@ -62,8 +63,7 @@
 --     (`bk.fees()` non-nil and sane). The fee is not part of the trigger
 --     inequality here (the band, not a cost cap, is the edge), but a
 --     kernel with no schedule is a kernel whose cost regime is unknown —
---     fail-closed: no schedule, no entries. Stops are exits and run
---     regardless.
+--     fail-closed: no schedule, no entries.
 --   * One ATTEMPT per condition per round (`armed` latch on emission): a
 --     rejected attempt is not retried into the same book. When
 --     pair_discount_arb runs alongside, its two-leg entries win the
@@ -159,7 +159,6 @@ local function read_config()
     dead_band_floor = dec_param(p, "dead_band_floor", { m = 50, s = 2 }),
     min_gap = dec_param(p, "min_gap", { m = 2, s = 2 }),
     min_time_left_sec = int_param(p, "min_time_left_sec", 45),
-    stop_deadline_sec = int_param(p, "stop_deadline_sec", 25),
     max_open_positions = int_param(p, "max_open_positions", 3),
     min_shares = dec_param(p, "min_shares", { m = 1, s = 0 }),
   }
@@ -168,21 +167,19 @@ end
 -- ── latches (per round slot) ────────────────────────────────────────────────
 -- armed[condition_id] = slot      — set when this package emits its entry;
 --                                   one attempt per condition per round.
--- entered[condition_id] = {token, slot, price} — legs this package opened
---                                   this round; the stop ladders over them.
 -- opened[slot] = n                — openings emitted this slot; the naked
 --                                   exposure cap counts these.
 
 local armed = {}
-local entered = {}
 local opened = {}
 
 -- ── entry points (§6.5) ─────────────────────────────────────────────────────
 
 --- The suggestion surface. Per market, at most ONE entry per round (armed
 --- latch): the sole liftable leg, or the in-band leader above the gap floor.
---- Exits are ONLY the strategy's own naked stop (never a sell ladder, never
---- "merge" — no complete pair exists here); there is no resting order, so
+--- The strategy expresses NO exits — survival is the kernel's (settlement,
+--- force-exit, honest hold; issue #396). Never a sell ladder, never
+--- "merge" — no complete pair exists here. There is no resting order, so
 --- `breaks` is always empty.
 function bk_evaluate()
   local cfg = read_config()
@@ -198,27 +195,8 @@ function bk_evaluate()
   for cond, s in pairs(armed) do
     if s ~= slot then armed[cond] = nil end
   end
-  for cond, e in pairs(entered) do
-    if e.slot ~= slot then entered[cond] = nil end
-  end
   for s in pairs(opened) do
     if s ~= slot then opened[s] = nil end
-  end
-
-  -- THE NAKED STOP — this strategy's own exit policy for its directional
-  -- legs. From the deadline to the last tick, every evaluation asks the
-  -- kernel to close each entered leg at the book (StrategySignal: priced,
-  -- risk-checked, deduped; dropped when nothing is open behind it). This
-  -- runs unconditionally — before any precondition, past the entry floor,
-  -- fee schedule or not: a protection must not depend on the things it
-  -- protects against.
-  if round.time_left_sec <= cfg.stop_deadline_sec then
-    for _, e in pairs(entered) do
-      if e.slot == slot then
-        exits[#exits + 1] = { token = e.token, reason = "single-leg stop" }
-      end
-    end
-    return { entries = entries, exits = exits, breaks = {} }
   end
 
   -- Entry preconditions: inside the strategy's own time floor AND a fee
@@ -240,7 +218,6 @@ function bk_evaluate()
   for _, m in ipairs(bk.markets()) do
     if armed[m.condition_id] == slot then
       -- One attempt per condition per round; the attempt already happened.
-      -- The deadline block above ladders the stops.
     elseif can_enter then
       local bu = bk.book(m.up_token)
       local bd = bk.book(m.down_token)
@@ -304,9 +281,6 @@ function bk_evaluate()
                   -- One attempt per condition per round; the declared share
                   -- count carries the size.
                   armed[m.condition_id] = slot
-                  entered[m.condition_id] = {
-                    token = tok, slot = slot, price = dec_fmt(ask),
-                  }
                   opened[slot] = (opened[slot] or 0) + 1
                   -- The per-round cap is an emission cap: once reached, no
                   -- further entries this slot.

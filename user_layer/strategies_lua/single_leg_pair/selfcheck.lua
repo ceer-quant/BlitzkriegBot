@@ -5,15 +5,14 @@
 -- README promises:
 --   positive  — sole liftable leg in the band → ONE entry at its own ask,
 --               sized to the leg's ask depth; a leader above the gap floor
---               fires; the stop arms AT the deadline and ladders every
---               entered leg to the last tick;
+--               fires;
 --   negative  — dead band (one look, then latched), lottery zone (silent,
 --               re-armable), above-ceiling (silent), leader gap below the
 --               floor, equal asks, stale book, no/corrupt fee schedule,
 --               below the entry time floor, over the per-round cap, one
 --               attempt per condition per round;
---   seal      — exits are ALWAYS the "single-leg stop" tag (never a merge,
---               never an untagged sell), `breaks` is always empty.
+--   seal      — the strategy expresses NO exits (survival is the kernel's,
+--               issue #396): `exits` is always empty, `breaks` always empty.
 --
 -- Run: lua5.4 selfcheck.lua   (exit 0 = all rows hold)
 
@@ -189,8 +188,8 @@ do
   ok(#evaluate().entries == 1, "0.85 is inside the band (inclusive)")
 end
 
--- the stop: arms AT the deadline (<=), ladders the entered leg to the last
--- tick, and never fires before it.
+-- survival is the kernel's (issue #396): after an entry, at the deadline
+-- and to the last tick, the strategy emits NOTHING — no stops, no sells.
 do
   reset()
   world({ cond("c1") },
@@ -199,19 +198,17 @@ do
   world({ cond("c1") },
     { ["up-c1"] = mkbook("0.66", "250"), ["down-c1"] = mkbook("0", "1") }, 26)
   local r = evaluate()
-  ok(#r.entries == 0 and #r.exits == 0, "T-26: deadline not reached, nothing fires")
+  ok(#r.entries == 0 and #r.exits == 0, "T-26: nothing fires")
   world({ cond("c1") },
     { ["up-c1"] = mkbook("0.66", "250"), ["down-c1"] = mkbook("0", "1") }, 25)
   r = evaluate()
-  ok(#r.exits == 1, "deadline emits one stop, got " .. #r.exits)
-  ok(r.exits[1].token == "up-c1", "stop targets the entered leg")
-  ok(r.exits[1].reason == "single-leg stop", "stop is tagged 'single-leg stop'")
-  ok(#r.entries == 0, "no entries at the deadline")
+  ok(#r.exits == 0 and #r.entries == 0,
+    "T-25: no strategy-side stop — the kernel owns exits")
   world({ cond("c1") },
     { ["up-c1"] = mkbook("0.66", "250"), ["down-c1"] = mkbook("0", "1") }, 5)
   r = evaluate()
-  ok(#r.exits == 1 and r.exits[1].reason == "single-leg stop",
-    "the stop ladders to the last tick")
+  ok(#r.exits == 0,
+    "T-5: still nothing — a leg rides to settlement or the kernel's force-exit")
 end
 
 -- the per-round cap: 3 conditions fire, the 4th is refused this slot.
@@ -297,14 +294,13 @@ do
   ok(#evaluate().entries == 0, "absent leg book refuses")
 end
 
--- no fee schedule → no entries (fail-closed); the stop still runs.
+-- no fee schedule → no entries (fail-closed); exits are the kernel's and
+-- this package expresses none regardless of the schedule.
 do
   reset()
   world({ cond("c1") },
     { ["up-c1"] = mkbook("0.66", "250"), ["down-c1"] = mkbook("0", "1") }, 200, "none")
   ok(#evaluate().entries == 0, "no schedule → no entries")
-  -- enter while a schedule is in force, then let it vanish: the stop MUST
-  -- still arm (a protection never depends on what it protects against).
   reset()
   world({ cond("c1") },
     { ["up-c1"] = mkbook("0.66", "250"), ["down-c1"] = mkbook("0", "1") })
@@ -312,8 +308,8 @@ do
   world({ cond("c1") },
     { ["up-c1"] = mkbook("0.66", "250"), ["down-c1"] = mkbook("0", "1") }, 20, "none")
   local r = evaluate()
-  ok(#r.exits == 1 and r.exits[1].reason == "single-leg stop",
-    "the stop does not depend on the fee schedule")
+  ok(#r.exits == 0 and #r.entries == 0,
+    "no schedule → no entries, and no strategy-side exits either")
 end
 
 -- a corrupt schedule (negative rate / bad exponent) refuses too.
@@ -339,11 +335,11 @@ do
     { ["up-c1"] = mkbook("0.66", "100"), ["down-c1"] = mkbook("0", "1") }, 44)
   local r = evaluate()
   ok(#r.entries == 0, "below min_time_left_sec no entries fire")
-  ok(#r.exits == 0, "with nothing entered, nothing stops")
+  ok(#r.exits == 0, "with nothing entered, nothing exits")
 end
 
 -- one ATTEMPT per condition per round: the second evaluation of the same
--- round emits nothing new (and the deadline block still owns the stops).
+-- round emits nothing new.
 do
   reset()
   world({ cond("c1") },
@@ -353,7 +349,7 @@ do
     { ["up-c1"] = mkbook("0.66", "100"), ["down-c1"] = mkbook("0", "1") }, 150)
   local r = evaluate()
   ok(#r.entries == 0, "a rejected/armed attempt is not retried")
-  ok(#r.exits == 0, "armed-but-not-stopped emits no exits")
+  ok(#r.exits == 0, "armed-but-not-exited emits no exits")
 end
 
 -- a new round slot retires every latch: the same condition can fire again.
@@ -366,16 +362,16 @@ do
     { ["up-c1"] = mkbook("0.52", "100"), ["down-c1"] = mkbook("0", "1") }, 200, "none", 2)
   local r = evaluate()
   ok(#r.entries == 0, "new round, dead band still refuses")
-  -- …and the stop of the OLD round does not leak into the new one.
+  -- …and nothing from the OLD round leaks into the new one.
   world({ cond("c1") },
     { ["up-c1"] = mkbook("0.52", "100"), ["down-c1"] = mkbook("0", "1") }, 10, nil, 2)
-  ok(#evaluate().exits == 0, "the previous round's stop does not leak")
+  ok(#evaluate().exits == 0, "the previous round leaks no exits")
 end
 
 -- ═══ SEAL ═══════════════════════════════════════════════════════════════════
 
--- exits are ALWAYS the stop tag — never a merge, never an untagged sell —
--- and `breaks` is always empty.
+-- the strategy expresses NO exits — never a merge, never a sell — and
+-- `breaks` is always empty, at every phase of the round.
 do
   local shapes = {
     { { "0.66", "250" }, nil, 200 },
@@ -391,11 +387,8 @@ do
     world({ cond("c1") },
       { ["up-c1"] = mkbook(s[1][1], s[1][2]), ["down-c1"] = mkbook("0", "1") }, s[3] == 200 and 25 or s[3])
     local r = evaluate()
-    for _, e in ipairs(r.exits) do
-      ok(e.reason == "single-leg stop",
-        "shape " .. i .. ": every exit is the naked stop, got " .. e.reason)
-      ok(e.reason ~= "merge", "shape " .. i .. ": no merge is ever emitted")
-    end
+    ok(#r.exits == 0,
+      "shape " .. i .. ": no strategy-side exits at any phase (kernel owns survival)")
     ok(#r.breaks == 0, "shape " .. i .. ": breaks always empty")
   end
 end
