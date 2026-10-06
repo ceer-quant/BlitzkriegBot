@@ -623,6 +623,11 @@ impl EventBacktester {
         // has not declared itself a replay. The declaration belongs here — the
         // only constructor that may charge one.
         core_cfg.fee_schedule_replay = true;
+        // Issue #390: a replay runs the deadline-driven maintenance scheduling
+        // on BOTH paths — `backtest_fast` implies it, and the nofast replay
+        // opts in here (the live kernel never does: a replay is the one
+        // deployment whose maintenance cadence is a per-invocation choice).
+        core_cfg.replay_scheduling = true;
 
         let mut core = Core::new(core_cfg.clone());
         // #265: a replay that asked for strategies and resolved none must fail
@@ -633,6 +638,10 @@ impl EventBacktester {
         } else {
             None
         };
+        // Issue #390: the exit ladder's deadline schedule backfills its counter
+        // ratchets over the grid the replay actually drives — tell the core the
+        // step it will be stepped with.
+        core.config_mut().tick_schedule_ms = cfg.tick_ms.max(1);
         // Counterfactual knobs go in AFTER the engine registered its strategies
         // (the registry forwards to what is already wired), through the same
         // cell a Shadow Evolution proposal writes.
@@ -708,6 +717,109 @@ impl EventBacktester {
         }
         self.core.engine_evaluate(now_ms);
         self.drain();
+    }
+
+    /// Issue #390 (replay deadline jump): run the maintenance grid from
+    /// `next_eval_ms` up to `until_ms` (EXCLUSIVE — an event instant lands
+    /// here as `at + 1`, matching the base walk's `<= at`), stepping only
+    /// the grid points that can produce output instead of every one.
+    ///
+    /// A quiet grid tick is, after #390's deadline scheduling, a proven
+    /// no-op: the ladder runs on its dirty/deadline gates, the engine
+    /// evaluation on its dirty/timing/fallback gates, settlement on the
+    /// position/expiry clocks, escalations on the order-set dirty flag and
+    /// the armed deadlines. Every one of those re-arms through
+    /// `next_replay_wake_ms`, which the loop re-reads after every step, so
+    /// it never needs to guess when a deadline moves. The only per-cycle
+    /// state a skipped tick would advance is the `evaluations` feed counter
+    /// (the sparse-cadence contract counts scheduled cycles, not real Lua
+    /// calls), credited per skipped span via `replay_credit_cycles`.
+    ///
+    /// Landing points, so every output stays byte-identical:
+    ///   * every grid tick at or after a WAKE deadline — the deadline's
+    ///     owner re-arms inside that tick;
+    ///   * the FIRST grid tick after each event batch — the caller stops
+    ///     the sweep before the event instant, and the event's own tick
+    ///     runs normally (a delivery can wake any dirty gate);
+    ///   * the grid tick IMMEDIATELY after a step that left a dirty flag
+    ///     or an unconsumed strategy exit intent (`has_forced_next_tick`) —
+    ///     its consuming pass must run on the same tick the every-tick
+    ///     walk used, stamps included.
+    ///
+    /// The grid is ANCHORED at the first event's timestamp + k·tick, not at
+    /// absolute multiples of `tick`, so wake instants are ceiled onto the
+    /// anchored grid relative to the current cursor.
+    fn jump_grid(&mut self, next_eval_ms: &mut i64, until_ms: i64) {
+        if !self.core.replay_jump_allowed() {
+            // Shadow Evolution (or a non-replay kernel): the every-tick walk
+            // IS the contract — its per-cycle cadence is observable.
+            while *next_eval_ms < until_ms {
+                self.step(*next_eval_ms);
+                *next_eval_ms += self.tick_ms;
+            }
+            return;
+        }
+        let tick = self.tick_ms;
+        // The FIRST landing of every call is the cursor itself: the first
+        // grid point after the previous event batch — the tick the every-
+        // tick walk used to observe that batch's dirty wakes. After each
+        // step, the flag carries the core's own forced-next state (a step
+        // that left an unconsumed intent or a dirty flag pins the next
+        // landing to the immediate next grid point).
+        let mut force_next = true;
+        loop {
+            let cursor = *next_eval_ms;
+            if !(cursor < until_ms) {
+                break;
+            }
+            let landing = if force_next {
+                cursor
+            } else {
+                match self.core.next_replay_wake_ms(cursor - 1) {
+                    // A wake due at/after `until_ms` skips every remaining
+                    // grid point of this span (they are quiet no-ops — the
+                    // event batch has not been delivered yet). Credit their
+                    // scheduled cycles and leave the cursor on the grid.
+                    Some(t) => {
+                        let d = t - cursor;
+                        let off = if d <= 0 { 0 } else { (d - 1) / tick + 1 };
+                        let p = cursor + off * tick;
+                        if p >= until_ms {
+                            let s = until_ms - cursor;
+                            let skipped = if s <= 0 { 0 } else { (s - 1) / tick + 1 };
+                            self.core.replay_credit_cycles(skipped as u64);
+                            *next_eval_ms = cursor + skipped * tick;
+                            return;
+                        }
+                        p
+                    }
+                    None => {
+                        let s = until_ms - cursor;
+                        let skipped = if s <= 0 { 0 } else { (s - 1) / tick + 1 };
+                        self.core.replay_credit_cycles(skipped as u64);
+                        *next_eval_ms = cursor + skipped * tick;
+                        return;
+                    }
+                }
+            };
+            if landing > cursor {
+                // Quiet grid points between the last run point and the
+                // landing: one scheduled evaluation each.
+                let skipped = ((landing - cursor) / tick) as u64;
+                self.core.replay_credit_cycles(skipped);
+                *next_eval_ms = landing;
+            }
+            self.step(*next_eval_ms);
+            // Issue #390 (replay nofast): a standing candidate — a suggestion
+            // the base walk would RE-SUBMIT into the kernel-side gates on
+            // every tick of this gap (cooldowns/breakers time out mid-gap;
+            // the retry that lands the entry is the observable one) — pins
+            // the next landing to the immediate next grid point, exactly like
+            // a forced tick. The quiet-cycle replay keeps the gate stream
+            // cycle-for-cycle; the driver keeps its cadence.
+            force_next = self.core.has_forced_next_tick() || self.core.has_standing_candidates();
+            *next_eval_ms += tick;
+        }
     }
 
     fn drain(&mut self) {
@@ -930,11 +1042,13 @@ impl Backtester for EventBacktester {
         while let Some(te) = pending.take() {
             let at = if te.at_ms > 0 { te.at_ms } else { clock };
             if at > clock {
-                // Everything the live timer would have fired up to this instant.
-                while next_eval_ms <= at {
-                    self.step(next_eval_ms);
-                    next_eval_ms += self.tick_ms;
-                }
+                // Everything the live timer would have fired up to this
+                // instant — on the subset of grid points that can produce
+                // output (issue #390 deadline jump). `at + 1` keeps the
+                // base walk's `<= at` boundary: the event instant itself
+                // never steps here, and `next_replay_wake_ms`'s probe at
+                // (cursor - 1) admits a wake landing exactly at `at`.
+                self.jump_grid(&mut next_eval_ms, at + 1);
                 clock = at;
             }
             // #354 (5.4): the replay grid is fail-closed against the corpus.
@@ -975,14 +1089,14 @@ impl Backtester for EventBacktester {
             pending = self.source.next_event();
         }
 
-        // Tail: keep ticking so maker escalations and pending exits resolve.
+        // Tail: keep ticking so maker escalations and pending exits resolve
+        // — on the jump-selected subset of the grid, like the main loop.
+        // The final clock still reads `end`, exactly as the base walk left
+        // it (its last step overshoots `end` or lands at `end`, then the
+        // clock clamps to `end` for the report's diagnostics).
         if self.tail_ms > 0 {
             let end = clock + self.tail_ms;
-            while next_eval_ms <= end {
-                clock = next_eval_ms;
-                self.step(clock);
-                next_eval_ms += self.tick_ms;
-            }
+            self.jump_grid(&mut next_eval_ms, end + 1);
             if end > clock {
                 clock = end;
             }

@@ -21,6 +21,76 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
+/// Issue #390: the scalar book surface the exit path reads, implemented by
+/// both the full [`OrderbookSnapshot`] and the allocation-free [`BookView`]
+/// so every function below can take either. `best_live_ask` must see the
+/// emptiness flags, not just the sentinel-carrying top — a snapshot with a
+/// real ask priced at exactly 1.00 is NOT the same as no ask side.
+pub trait BookScalarView {
+    fn best_bid(&self) -> Decimal;
+    fn best_ask(&self) -> Decimal;
+    fn mid_price(&self) -> Decimal;
+    fn bid_depth(&self) -> Decimal;
+    fn ask_depth(&self) -> Decimal;
+    fn timestamp(&self) -> i64;
+    fn has_bids(&self) -> bool;
+    fn has_asks(&self) -> bool;
+}
+
+impl BookScalarView for OrderbookSnapshot {
+    fn best_bid(&self) -> Decimal {
+        self.best_bid
+    }
+    fn best_ask(&self) -> Decimal {
+        self.best_ask
+    }
+    fn mid_price(&self) -> Decimal {
+        self.mid_price
+    }
+    fn bid_depth(&self) -> Decimal {
+        self.bid_depth
+    }
+    fn ask_depth(&self) -> Decimal {
+        self.ask_depth
+    }
+    fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+    fn has_bids(&self) -> bool {
+        !self.bids.is_empty()
+    }
+    fn has_asks(&self) -> bool {
+        !self.asks.is_empty()
+    }
+}
+
+impl BookScalarView for BookView {
+    fn best_bid(&self) -> Decimal {
+        self.best_bid
+    }
+    fn best_ask(&self) -> Decimal {
+        self.best_ask
+    }
+    fn mid_price(&self) -> Decimal {
+        self.mid_price
+    }
+    fn bid_depth(&self) -> Decimal {
+        self.bid_depth
+    }
+    fn ask_depth(&self) -> Decimal {
+        self.ask_depth
+    }
+    fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+    fn has_bids(&self) -> bool {
+        self.has_bids
+    }
+    fn has_asks(&self) -> bool {
+        self.has_asks
+    }
+}
+
 /// Exit-relevant config subset. Mirrors fields read by the TS `decideExit`.
 #[derive(Debug, Clone)]
 pub struct ExitConfig {
@@ -486,11 +556,112 @@ pub fn pnl_pct(price: Decimal, entry_price: Decimal) -> Decimal {
 /// reference price use [`reference_price`], while anything that places a SELL
 /// or books realised PnL prices itself off THIS function and must treat a zero
 /// return as "no executable quote".
-pub fn executable_bid(book: Option<&OrderbookSnapshot>) -> Decimal {
+pub fn executable_bid<B: BookScalarView + ?Sized>(book: Option<&B>) -> Decimal {
     match book {
         None => Decimal::ZERO,
-        Some(b) if b.best_bid > Decimal::ZERO => b.best_bid,
+        Some(b) if b.best_bid() > Decimal::ZERO => b.best_bid(),
         _ => Decimal::ZERO,
+    }
+}
+
+/// Issue #390: the SCALAR projection of a book — exactly the fields the exit
+/// path and the marks refresh read, and none of the level vectors.
+///
+/// The replay's maintenance pass used to build a full [`OrderbookSnapshot`]
+/// per open position per tick: two owned level-vector clones, a token
+/// `String`, and five Decimal reductions (depth sums, OBI, spread)
+/// recomputed from data the core's mirrored [`crate::sim::Book`] already
+/// carries. Every one of those is per-position waste — the ladder and the
+/// marks refresh read ONLY the scalars below (`best_bid`, `best_ask`,
+/// `mid_price`, the two depths, `timestamp`), never the vectors. `BookView`
+/// carries them computed ONCE per mirrored book and copied per position (a
+/// flat `Copy` struct — no allocation), so a quiet-tick refresh of a few
+/// hundred positions stops allocating entirely.
+///
+/// Semantics are the snapshot's, field for field:
+///   * `best_bid` = highest bid, else 0; `best_ask` = lowest ask, else the
+///     pre-existing ONE sentinel ("nothing for sale" read as maximally
+///     expensive, see `strategy_logic::model`);
+///   * `has_bids` / `has_asks` mirror the snapshot's `bids.is_empty()` /
+///     `asks.is_empty()` — the ONE sentinel makes the emptiness flag the only
+///     way to tell "no ask side" from "an ask genuinely priced at 1.00"
+///     ([`best_live_ask`] depends on the distinction);
+///   * `bid_depth` / `ask_depth` are the size sums;
+///   * the F6 side-aware mid: zero unless BOTH sides quote a usable price —
+///     the ask sentinel must not manufacture a mid from a one-sided book.
+///
+/// `from_book` reads the mirrored book UNORDERED (the mirror stores the
+/// producer's level order; only `from_levels` sorts), so it derives the tops
+/// with max/min — the same values `from_sorted_levels`' sort would put first.
+#[derive(Debug, Clone, Copy)]
+pub struct BookView {
+    pub bid_depth: Decimal,
+    pub ask_depth: Decimal,
+    pub best_bid: Decimal,
+    pub best_ask: Decimal,
+    pub mid_price: Decimal,
+    pub timestamp: i64,
+    pub has_bids: bool,
+    pub has_asks: bool,
+}
+
+impl BookView {
+    /// The scalar projection of a mirrored [`crate::sim::Book`] at
+    /// `timestamp` — the same values [`OrderbookSnapshot::from_levels`]
+    /// produces for the same levels, without building the snapshot.
+    pub fn from_book(book: &crate::sim::Book, timestamp: i64) -> Self {
+        let bid_depth: Decimal = book.bids.iter().map(|(_, s)| *s).sum();
+        let ask_depth: Decimal = book.asks.iter().map(|(_, s)| *s).sum();
+        let best_bid = book
+            .bids
+            .iter()
+            .map(|(p, _)| *p)
+            .max()
+            .unwrap_or(Decimal::ZERO);
+        let best_ask = book
+            .asks
+            .iter()
+            .map(|(p, _)| *p)
+            .min()
+            .unwrap_or(Decimal::ONE);
+        // F6 side-aware mid, exactly as `from_sorted_levels` computes it: a
+        // mid exists only when BOTH sides quote a usable price. The ask
+        // sentinel (1 with no asks) must not manufacture a mid — a one-sided
+        // book presents no tradeable reference.
+        let both_sides_quote = !book.bids.is_empty()
+            && !book.asks.is_empty()
+            && best_bid > Decimal::ZERO
+            && best_ask > Decimal::ZERO;
+        let mid_price = if both_sides_quote {
+            (best_bid + best_ask) / Decimal::TWO
+        } else {
+            Decimal::ZERO
+        };
+        Self {
+            bid_depth,
+            ask_depth,
+            best_bid,
+            best_ask,
+            mid_price,
+            timestamp,
+            has_bids: !book.bids.is_empty(),
+            has_asks: !book.asks.is_empty(),
+        }
+    }
+
+    /// The scalar projection of an existing [`OrderbookSnapshot`] — a field
+    /// copy (the snapshot already did the reductions), never a rebuild.
+    pub fn from_snapshot(s: &OrderbookSnapshot) -> Self {
+        Self {
+            bid_depth: s.bid_depth,
+            ask_depth: s.ask_depth,
+            best_bid: s.best_bid,
+            best_ask: s.best_ask,
+            mid_price: s.mid_price,
+            timestamp: s.timestamp,
+            has_bids: !s.bids.is_empty(),
+            has_asks: !s.asks.is_empty(),
+        }
     }
 }
 
@@ -499,15 +670,15 @@ pub fn executable_bid(book: Option<&OrderbookSnapshot>) -> Decimal {
 /// `current_price`. NEVER use this to price a fill — realised PnL, SELL fills
 /// and forced exits must go through [`executable_bid`] — it exists so the
 /// dashboard keeps showing something sensible while a book is one-sided.
-pub fn reference_price(book: Option<&OrderbookSnapshot>, fallback: Decimal) -> Decimal {
+pub fn reference_price<B: BookScalarView + ?Sized>(book: Option<&B>, fallback: Decimal) -> Decimal {
     if let Some(b) = book {
-        if b.best_bid > Decimal::ZERO {
-            return b.best_bid;
+        if b.best_bid() > Decimal::ZERO {
+            return b.best_bid();
         }
         // model.rs zeroes the mid of a one-sided book, so this cannot
         // resurrect the phantom `(0 + ask)/2` price that started F6.
-        if b.mid_price > Decimal::ZERO {
-            return b.mid_price;
+        if b.mid_price() > Decimal::ZERO {
+            return b.mid_price();
         }
     }
     fallback
@@ -520,8 +691,8 @@ pub fn reference_price(book: Option<&OrderbookSnapshot>, fallback: Decimal) -> D
 /// compute, which is a different statement from "age zero", and the two are kept
 /// apart here so the choice made downstream ([`book_is_fresh`]) is visible
 /// instead of hidden in an `||`.
-pub fn book_age_ms(book: &OrderbookSnapshot, now_ms: i64) -> Option<i64> {
-    (book.timestamp > 0).then(|| now_ms.saturating_sub(book.timestamp))
+pub fn book_age_ms<B: BookScalarView + ?Sized>(book: &B, now_ms: i64) -> Option<i64> {
+    (book.timestamp() > 0).then(|| now_ms.saturating_sub(book.timestamp()))
 }
 
 /// Whether a book is inside the exit path's PRICING window ([#267], #268).
@@ -535,7 +706,7 @@ pub fn book_age_ms(book: &OrderbookSnapshot, now_ms: i64) -> Option<i64> {
 /// legacy snapshot would turn "this record carries no clock" into "this position
 /// can never be exited", which is the failure this whole file is about. It is
 /// asserted explicitly in this module's tests.
-pub fn book_is_fresh(book: &OrderbookSnapshot, now_ms: i64, cfg: &ExitConfig) -> bool {
+pub fn book_is_fresh<B: BookScalarView + ?Sized>(book: &B, now_ms: i64, cfg: &ExitConfig) -> bool {
     match book_age_ms(book, now_ms) {
         Some(age) => age <= cfg.max_book_age_sec * 1_000,
         None => true,
@@ -659,8 +830,8 @@ fn last_known_price(
 /// Nothing here can price an order: a book with no bid has `executable_bid` 0
 /// regardless of what this returns, so a trigger resolved here becomes a
 /// REPORTED held exit ("I wanted out and nobody was bidding"), never a fill.
-fn profit_reference(
-    book: Option<&OrderbookSnapshot>,
+fn profit_reference<B: BookScalarView + ?Sized>(
+    book: Option<&B>,
     fallback: Option<Decimal>,
     state: &ExitState,
     now_ms: i64,
@@ -686,9 +857,11 @@ fn profit_reference(
 /// `OrderbookSnapshot::best_ask` is `1` when the ask side is EMPTY — a
 /// pre-existing entry-side sentinel ("nothing for sale" read as maximally
 /// expensive, see `strategy_logic::model`), not a quote. The sentinel must be
-/// read as "no ask", never as "someone is offering a dollar".
-fn best_live_ask(book: &OrderbookSnapshot) -> Option<Decimal> {
-    (!book.asks.is_empty() && book.best_ask > Decimal::ZERO).then_some(book.best_ask)
+/// read as "no ask", never as "someone is offering a dollar". The emptiness
+/// FLAG (not the sentinel value) is the ground truth: a book that genuinely
+/// quotes an ask at exactly 1.00 is a live ask, not an empty side.
+fn best_live_ask<B: BookScalarView + ?Sized>(book: &B) -> Option<Decimal> {
+    (book.has_asks() && book.best_ask() > Decimal::ZERO).then_some(book.best_ask())
 }
 
 /// Resolve the price a PROTECTIVE stop is judged on (P0 #177, #225).
@@ -715,27 +888,27 @@ fn best_live_ask(book: &OrderbookSnapshot) -> Option<Decimal> {
 /// regardless of what this returns, so a trigger resolved through step 3 can
 /// only ever become a reported held stop (#179's split — the gate prices the
 /// order, not the decision).
-fn stop_reference(
-    book: Option<&OrderbookSnapshot>,
+fn stop_reference<B: BookScalarView + ?Sized>(
+    book: Option<&B>,
     fallback: Option<Decimal>,
     state: &ExitState,
     now_ms: i64,
     cfg: &ExitConfig,
 ) -> Option<StopReference> {
     if let Some(b) = book {
-        if b.best_bid > Decimal::ZERO {
-            if b.mid_price > Decimal::ZERO {
-                let wick = (b.mid_price - b.best_bid) / b.mid_price;
+        if b.best_bid() > Decimal::ZERO {
+            if b.mid_price() > Decimal::ZERO {
+                let wick = (b.mid_price() - b.best_bid()) / b.mid_price();
                 if wick > cfg.max_bid_wick_pct / Decimal::ONE_HUNDRED {
                     return Some(StopReference {
-                        price: b.mid_price,
+                        price: b.mid_price(),
                         source: StopRefSource::Mid,
-                        suppressed_bid: Some(b.best_bid),
+                        suppressed_bid: Some(b.best_bid()),
                     });
                 }
             }
             return Some(StopReference {
-                price: b.best_bid,
+                price: b.best_bid(),
                 source: StopRefSource::Bid,
                 suppressed_bid: None,
             });
@@ -802,12 +975,71 @@ fn stop_verdict(
 }
 
 /// Update HWM / staleness / depth from a fresh book, using the executable price.
-pub fn update_exit_state(
+pub fn update_exit_state<B: BookScalarView + ?Sized>(
     state: &mut ExitState,
     entry_price: Decimal,
-    book: Option<&OrderbookSnapshot>,
+    book: Option<&B>,
     now_ms: i64,
     cfg: &ExitConfig,
+) {
+    update_exit_state_interval(
+        state,
+        entry_price,
+        book,
+        now_ms,
+        cfg,
+        now_ms,
+        REPLAY_TICK_BOUNDARY_MS,
+    );
+}
+
+/// [`update_exit_state_interval`] at the replay's DOUBLE update rate: the base
+/// kernel advances `hwm_confirm_count` twice per maintenance tick (the
+/// every-tick valuate pass and the every-tick ladder), so a replay run that
+/// performs ONE merged update at `now_ms` must backfill the skipped
+/// boundaries at 2× for the counter to track the base's walk. Everything else
+/// in the maintenance update is idempotent under re-observation and needs no
+/// rate. `last_run_ms >= now_ms` still leaves the update byte-identical to
+/// [`update_exit_state`].
+pub fn update_exit_state_interval_2x<B: BookScalarView + ?Sized>(
+    state: &mut ExitState,
+    entry_price: Decimal,
+    book: Option<&B>,
+    now_ms: i64,
+    cfg: &ExitConfig,
+    last_run_ms: i64,
+    tick_boundary_ms: i64,
+) {
+    update_exit_state_interval(
+        state,
+        entry_price,
+        book,
+        now_ms,
+        cfg,
+        last_run_ms,
+        2 * tick_boundary_ms,
+    );
+}
+
+/// [`update_exit_state`] with an explicit run interval: the whole ladder sees
+/// now_ms (the DECISION clock never moves — commands stamp the tick they fire
+/// on), and `last_run_ms` is the previous call's own instant, used ONLY to
+/// undo the per-tick counter ratchets the skipped maintenance ticks would
+/// have walked through. Issue #390: the replay maintenance pass runs on the
+/// 50 ms tick grid, and the fast path proves a quiet-tick re-run reproduces
+/// the previous marks exactly — the cheap output-preserving generalisation is
+/// to run the pass on its deadlines and compensate the one stateful counter
+/// the interval invalidates. `last_run_ms >= now_ms` (never ran, or the
+/// same-tick legacy spelling) leaves the ladder byte-identical to
+/// [`update_exit_state`].
+pub fn update_exit_state_interval<B: BookScalarView + ?Sized>(
+    state: &mut ExitState,
+    entry_price: Decimal,
+    book: Option<&B>,
+    now_ms: i64,
+    cfg: &ExitConfig,
+    last_run_ms: i64,
+    tick_boundary_ms: i64,
 ) {
     let Some(book) = book else { return };
     if entry_price <= Decimal::ZERO {
@@ -840,7 +1072,50 @@ pub fn update_exit_state(
             && ((val - state.high_water_mark).abs() / state.high_water_mark * Decimal::ONE_HUNDRED
                 < cfg.ratchet_confirm_tolerance_pct);
         if near_high {
-            state.hwm_confirm_count += 1;
+            // Issue #390: `hwm_confirm_count` walks once per MAINTENANCE tick
+            // that sees the same near-high quote. An interval-compensated run
+            // observes only its own boundaries, so the counter advances by the
+            // tick boundaries the ladder did NOT run through (final +1 = the
+            // observed one). The skipped boundaries carried UNCHANGED books —
+            // a re-run against the same snapshot advances the counter and
+            // touches nothing else — so the arithmetic below reproduces the
+            // ratchet state the every-tick pass would have produced at this
+            // quote. Two correction terms keep the replay exact:
+            //   * `last_run_ms` bounds the backfill (ticks before the ladder
+            //     first ran this position are not ladder ticks), and a
+            //     same-instant legacy run is a plain +1;
+            //   * the counter SATURATES at `ratchet_confirm_ticks` in
+            //     observable terms — once it has fired `confirmed_high`, the
+            //     every-tick pass keeps counting, but `confirmed_high` has
+            //     already latched the value a later HWM step would only
+            //     re-latch after a fresh confirm walk. Reproducing the
+            //     post-saturation count exactly is therefore unnecessary for
+            //     every observable output, and the saturating add (below)
+            //     keeps a long-skipped interval from wrapping the u32.
+            let skipped = if last_run_ms >= now_ms {
+                0u64
+            } else {
+                let gap_ms = (now_ms - last_run_ms).max(0) as u64;
+                // Tick boundaries strictly between the runs: the replay loop
+                // fires its uniform grid, so a gap of G ms carries
+                // floor((G-1)/tick_ms) skipped boundaries. The caller passes
+                // its grid (`tick_boundary_ms`); the constant is only the
+                // documented default.
+                let step = if tick_boundary_ms > 0 {
+                    tick_boundary_ms as u64
+                } else {
+                    REPLAY_TICK_BOUNDARY_MS as u64
+                };
+                gap_ms.saturating_sub(1) / step.max(1)
+            };
+            // `skipped` is bounded by u32::MAX-1 before the cast and the
+            // +1 cannot overflow a saturating add, so the chain stays
+            // within u32::MAX by construction — the explicit `.min`
+            // would be a no-op clippy is right to flag.
+            state.hwm_confirm_count = state
+                .hwm_confirm_count
+                .saturating_add((skipped.min(u64::from(u32::MAX - 1))) as u32)
+                .saturating_add(1);
             if state.hwm_confirm_count >= cfg.ratchet_confirm_ticks {
                 state.confirmed_high = state.high_water_mark;
             }
@@ -850,10 +1125,10 @@ pub fn update_exit_state(
     }
 
     if state.initial_depth == Decimal::ZERO {
-        state.initial_depth = book.bid_depth + book.ask_depth;
+        state.initial_depth = book.bid_depth() + book.ask_depth();
     }
-    if book.best_bid != state.last_bid_price {
-        state.last_bid_price = book.best_bid;
+    if book.best_bid() != state.last_bid_price {
+        state.last_bid_price = book.best_bid();
         state.bid_unchanged_since = now_ms;
     }
     if (pct - state.last_progress_pct).abs() > Decimal::ONE {
@@ -870,7 +1145,11 @@ pub struct ExitDecision {
 
 pub struct ExitTickInput<'a> {
     pub entry_price: Decimal,
-    pub book: Option<&'a OrderbookSnapshot>,
+    /// The book this tick judges on. Generic over the scalar view: callers
+    /// holding a full [`OrderbookSnapshot`] and callers holding the
+    /// allocation-free [`BookView`] (issue #390's replay maintenance pass)
+    /// run the SAME decision code — the exit path reads only the scalars.
+    pub book: Option<&'a dyn BookScalarView>,
     pub fallback_price: Option<Decimal>,
     pub time_left_sec: i64,
     pub hold_sec: i64,
@@ -880,6 +1159,12 @@ pub struct ExitTickInput<'a> {
 }
 
 const BREAKEVEN_LOCK_TRIGGER_PCT: i64 = 3;
+
+/// Issue #390: the replay maintenance grid the interval-compensated ladder
+/// backfills over. The replay driver steps `tick_ms` (50 ms in every shipped
+/// config and test), so the count of skipped boundaries inside a gap of G ms
+/// is (G-1)/tick_ms; the caller passes its own grid for non-default steps.
+pub const REPLAY_TICK_BOUNDARY_MS: i64 = 50;
 
 /// Pure exit decision; mutates nothing. Mandatory exits return use_maker=false.
 ///
@@ -1087,7 +1372,7 @@ pub fn decide_exit_verdict(input: ExitTickInput) -> ExitVerdict {
         if let Some(book) = book
             && state.initial_depth > Decimal::ZERO
         {
-            let current_depth = book.bid_depth + book.ask_depth;
+            let current_depth = book.bid_depth() + book.ask_depth();
             let depth_change = ((current_depth - state.initial_depth) / state.initial_depth)
                 * Decimal::ONE_HUNDRED;
             if depth_change <= -cfg.depth_collapse_threshold_pct
@@ -1570,7 +1855,7 @@ mod tests {
         // ask 0.90, zero bids: the old code returned mid = 0.45 here.
         let b = one_sided_book(dec!(0.90));
         assert_eq!(executable_bid(Some(&b)), Decimal::ZERO);
-        assert_eq!(executable_bid(None), Decimal::ZERO);
+        assert_eq!(executable_bid::<OrderbookSnapshot>(None), Decimal::ZERO);
     }
 
     #[test]
@@ -1604,7 +1889,7 @@ mod tests {
         // One-sided book: no phantom mid — fall back to the last known price.
         let one_sided = one_sided_book(dec!(0.90));
         assert_eq!(reference_price(Some(&one_sided), dec!(9)), dec!(9));
-        assert_eq!(reference_price(None, dec!(9)), dec!(9));
+        assert_eq!(reference_price::<OrderbookSnapshot>(None, dec!(9)), dec!(9));
     }
 
     // ── #225: a bid-less book must not leave the stop with no price ──────────

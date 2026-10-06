@@ -400,6 +400,19 @@ impl LossBreakers {
         v.sort();
         v
     }
+
+    /// Issue #390 (replay deadline jump): the earliest instant any strategy
+    /// breaker resumes, `i64::MAX` when none is halted. Pure read — no halt
+    /// state is consumed, so a wake that lands on this instant still sees
+    /// `maybe_resume_all` fire exactly as the every-tick walk would have.
+    pub fn next_resume_ms(&self) -> i64 {
+        self.per_strategy
+            .values()
+            .filter(|b| b.halted_until_ms > 0)
+            .map(|b| b.halted_until_ms)
+            .min()
+            .unwrap_or(i64::MAX)
+    }
 }
 
 impl RiskGate {

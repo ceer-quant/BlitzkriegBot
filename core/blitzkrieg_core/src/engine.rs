@@ -331,6 +331,27 @@ pub struct Engine {
     spot: HashMap<String, PriceBuffer>,
     /// Tokens with a live entry order this round, to avoid re-signalling.
     pending_tokens: HashSet<String>,
+    /// Issue #390 (replay nofast): the candidate signals of the most recent
+    /// REAL evaluation — the set the quiet-tick replay cycles re-judge. The
+    /// inputs behind a candidate (books, spot, trend tracker, round list) are
+    /// event-driven, so between events the set cannot change; a quiet tick
+    /// re-runs it through the kernel-side gates instead of paying a Lua call.
+    /// Cleared on the round rollover and re-staged by every real evaluation.
+    /// Exit intents are deliberately NOT staged: their first delivery after a
+    /// real evaluation is consumed on the very next tick (forced onto it by
+    /// `has_forced_next_tick`), and a re-delivery is unobservable — a merge
+    /// intent against already-merged conditions resolves to nothing.
+    last_candidates: Vec<TradeSignal>,
+    /// Issue #390 (replay nofast): whether the standing candidate set is in
+    /// a STABLE phase — the last two real evaluations produced the SAME
+    /// candidates. A strategy whose output changes between cycles (a latch:
+    /// pair_discount_arb arms on emission and never re-emits the attempt) is
+    /// mid-phase-transition, and re-playing the previous output there would
+    /// retry an entry the base walk's next collection would never produce.
+    /// A stable set (spread_arb re-emits its confirmed-token candidates every
+    /// cycle) is exactly the state a quiet-tick replay reproduces. Unstable
+    /// phases fall back to real evaluations until the output settles.
+    candidates_stable: bool,
     /// E25 (#331): `time_left_sec` of the most recent evaluate cycle — the
     /// arbitration physics projection reads it (`effective_stop_pct`).
     last_time_left_sec: i64,
@@ -387,6 +408,8 @@ impl Engine {
             books: HashMap::new(),
             spot: HashMap::new(),
             pending_tokens: HashSet::new(),
+            last_candidates: Vec::new(),
+            candidates_stable: false,
             last_time_left_sec: 0,
             last_blocked: Vec::new(),
             last_exemptions: Vec::new(),
@@ -574,6 +597,12 @@ impl Engine {
                     s.strategy.on_round(slot, time_left_sec, now_ms);
                 }
                 self.pending_tokens.clear();
+                // Issue #390 (replay nofast): the new round retires every
+                // staged candidate — the base's next collection ran against
+                // the new market list and round clock, so a replayed set from
+                // the old round must not leak into it.
+                self.last_candidates.clear();
+                self.candidates_stable = false;
                 self.scanner.set_markets(markets);
                 // Seed trend with current mids so confirmation starts immediately.
                 let now = now_ms;
@@ -733,12 +762,12 @@ impl Engine {
         // E25: the arbitration pipeline's physics projection reads the SAME
         // round timing this cycle was judged against.
         self.last_time_left_sec = round.time_left_sec;
-        let timing = self.scanner.can_trade_reason(now_ms).err();
 
         // Candidates are computed regardless of the timing gate so we can record
         // near-misses (a valid dip that the timing gate blocked). This is the data
         // the shadow log lacks and the --replay entry analysis needs.
         let mut candidates: Vec<TradeSignal> = Vec::new();
+        let mut exit_intents: Vec<crate::strategies::StrategyExitIntent> = Vec::new();
         {
             let fresh = |token: &str| {
                 fresh_book(&self.books, token, now_ms, self.cfg.max_orderbook_stale_ms)
@@ -755,11 +784,100 @@ impl Engine {
                     candidates.extend(s.strategy.find_candidates(&ctx));
                     // Close intents accumulate regardless of the entry timing
                     // gate: an open position's exit is never round-timing-gated.
-                    self.strategy_exits.extend(s.strategy.take_exit_intents());
+                    exit_intents.extend(s.strategy.take_exit_intents());
                 }
             }
         }
+        // Issue #390 (replay nofast): stage what this real evaluation
+        // produced, and decide the replay licence. The inputs behind the set
+        // are event-driven, so between events it cannot change — a stable
+        // set (identical to the previous real evaluation's) is the state a
+        // quiet replay cycle reproduces; a changed set is a phase transition
+        // (a latch fired, an emission was consumed) whose NEXT evaluation
+        // must be real, because the base's next collection would collect the
+        // post-transition output this cycle already produced.
+        self.candidates_stable = self.last_candidates == candidates;
+        self.last_candidates = candidates.clone();
+        self.strategy_exits.extend(exit_intents);
+        self.submit_candidate_orders(candidates, now_ms)
+    }
 
+    /// Issue #390 (replay nofast): a quiet-tick evaluation cycle. Runs the
+    /// STANDING candidates of the most recent real evaluation through the
+    /// SAME kernel-side pipeline the real cycle used — the pending filter,
+    /// the live round-timing and momentum gates (with their near-miss and
+    /// exemption trails), sizing, and order construction — mirroring the
+    /// base walk's every-tick behaviour: the base re-collected these
+    /// suggestions from unchanged inputs every tick and re-ran them into the
+    /// same gates, so the replay reproduces its counters, logs and placement
+    /// instants cycle for cycle without a Lua call. Deliberately NOT staged
+    /// back into `last_candidates`: the staged set is a real evaluation's
+    /// output, and every real evaluation (event wake, timing boundary, 2 s
+    /// fallback) refreshes it. Returns None when the staged set is not in a
+    /// stable phase (`candidates_stable == false`) — the caller must run a
+    /// real evaluation instead, because the strategy's next collection would
+    /// produce a post-transition output this cache cannot know.
+    pub fn replay_candidates(&mut self, now_ms: i64) -> Option<Vec<crate::model::OrderRequest>> {
+        if !self.candidates_stable {
+            return None;
+        }
+        self.last_blocked.clear();
+        self.last_exemptions.clear();
+        let round = self.scanner.round_timing(now_ms);
+        self.last_time_left_sec = round.time_left_sec;
+        // The freshness rule is the one collection input that moves with the
+        // clock alone (`now_ms - book.timestamp`): a book that has gone stale
+        // since the staging evaluation drops its suggestion, exactly as the
+        // base's re-collection at this tick would not have produced it.
+        let round_tokens: HashSet<String> = self.round_token_ids().into_iter().collect();
+        let candidates: Vec<TradeSignal> = self
+            .last_candidates
+            .iter()
+            .filter(|sig| {
+                round_tokens.contains(&sig.token_id)
+                    && fresh_book(
+                        &self.books,
+                        &sig.token_id,
+                        now_ms,
+                        self.cfg.max_orderbook_stale_ms,
+                    )
+                    .is_some()
+            })
+            .cloned()
+            .collect();
+        Some(self.submit_candidate_orders(candidates, now_ms))
+    }
+
+    /// Issue #390 (replay driver wake): true when at least one staged
+    /// candidate would survive the pending filter and therefore be re-run
+    /// into the kernel-side gates on the next cycle — the state a skipped
+    /// grid tick would NOT reproduce. Stability is deliberately NOT part of
+    /// this verdict: an unstable set makes the next cycle a REAL evaluation
+    /// (which re-collects and re-submits the same retry stream), a stable one
+    /// makes it a replay — either way the base walk ran it on every tick, so
+    /// the driver must not skip. Pending-covered candidates are excluded: the
+    /// submission path drops them before any gate, counter or log line, so
+    /// their quiet-tick re-emission is unobservable (the base proved this by
+    /// running it every tick) and they must not pin the driver to the
+    /// every-tick walk.
+    pub fn has_standing_candidates(&self) -> bool {
+        self.last_candidates
+            .iter()
+            .any(|sig| !self.pending_tokens.contains(&sig.token_id))
+    }
+
+    /// The kernel-side half of one evaluation cycle: pending/dedup filters,
+    /// the LIVE round-timing and momentum gates (near-miss and exemption
+    /// trails included), sizing, and order construction. Shared verbatim by
+    /// the real evaluation and the replay's quiet-tick cycles — one code
+    /// path, so a replayed suggestion is judged exactly as a fresh one.
+    fn submit_candidate_orders(
+        &mut self,
+        candidates: Vec<TradeSignal>,
+        now_ms: i64,
+    ) -> Vec<crate::model::OrderRequest> {
+        let round = self.scanner.round_timing(now_ms);
+        let timing = self.scanner.can_trade_reason(now_ms).err();
         let mut orders = Vec::new();
         // At most one entry per token per cycle: the first candidate (in
         // registration order) wins, matching the one-live-entry-per-token rule
