@@ -78,6 +78,26 @@ const NOT_CARRIED: &[(&str, &str)] = &[
          settlement progress is already surfaced via the settlement block, \
          no panel surface reads the feed counter yet",
     ),
+    (
+        "cashflowRebates",
+        "#388 wallet-level cash rows credited from the stream (count); \
+         the backtest report carries the number, no panel surface reads it yet",
+    ),
+    (
+        "cashflowRewards",
+        "#388 wallet-level cash rows credited from the stream (count); \
+         the backtest report carries the number, no panel surface reads it yet",
+    ),
+    (
+        "cashflowRebatesUsd",
+        "#388 wallet-level cash rows credited from the stream (USD); \
+         the backtest report carries the number, no panel surface reads it yet",
+    ),
+    (
+        "cashflowRewardsUsd",
+        "#388 wallet-level cash rows credited from the stream (USD); \
+         the backtest report carries the number, no panel surface reads it yet",
+    ),
 ];
 
 /// A dry kernel with no durable state at all: `trade_log_path`/`order_log_path`/

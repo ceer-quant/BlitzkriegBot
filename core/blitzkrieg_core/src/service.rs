@@ -2164,6 +2164,19 @@ impl Core {
         self.accounts.active_ledger()
     }
 
+    /// #388: the wallet-level cash the core credited from the stream —
+    /// `(rebates, rebates_usd, rewards, rewards_usd)`. The replay driver's
+    /// report reads this so the report and the ledger cannot disagree about
+    /// what was paid. `CoreStats` is private; this is the read window.
+    pub(crate) fn cashflow_stats(&self) -> (u64, Decimal, u64, Decimal) {
+        (
+            self.stats.cashflow_rebates,
+            self.stats.cashflow_rebates_usd,
+            self.stats.cashflow_rewards,
+            self.stats.cashflow_rewards_usd,
+        )
+    }
+
     /// E28 (§9.3): the account book — IPC `account.*` reads it, the gates
     /// route through it. Money-moving code does NOT go through this handle;
     /// it routes by the order's own `account_id` at each site.
@@ -3130,6 +3143,28 @@ impl Core {
                     now_ms,
                 );
             }
+            // #388: a wallet-level cash row credits the active account's
+            // ledger at the row's own timestamp — money the venue paid
+            // outside any fill. NOTHING else moves: no position, order or
+            // settlement semantics read it, so a corpus without these rows
+            // behaves exactly as before (the branch itself is the delta).
+            crate::engine::DataEvent::Cashflow {
+                which, amount_usd, ..
+            } => {
+                match which {
+                    crate::engine::CashflowKind::Rebate => {
+                        self.stats.cashflow_rebates += 1;
+                        self.stats.cashflow_rebates_usd += *amount_usd;
+                    }
+                    crate::engine::CashflowKind::Reward => {
+                        self.stats.cashflow_rewards += 1;
+                        self.stats.cashflow_rewards_usd += *amount_usd;
+                    }
+                }
+                self.accounts
+                    .active_ledger_mut()
+                    .credit_cashflow(*amount_usd);
+            }
             crate::engine::DataEvent::RoundMarkets { markets, .. } => {
                 self.stats.rounds += 1;
                 // #377 (治 #2): record which markets the archive promised a
@@ -4089,6 +4124,13 @@ impl Core {
             // #377 (治 #2): archive verdict events replayed into the core —
             // settlements that came from the stream instead of the dry ladder.
             "resolutions": self.stats.resolutions,
+            // #388: wallet-level cash rows credited from the stream — the
+            // count and exact USD total per kind, so a report reconciles the
+            // credit against the ledger it built.
+            "cashflowRebates": self.stats.cashflow_rebates,
+            "cashflowRewards": self.stats.cashflow_rewards,
+            "cashflowRebatesUsd": dec_json(self.stats.cashflow_rebates_usd),
+            "cashflowRewardsUsd": dec_json(self.stats.cashflow_rewards_usd),
             "evaluations": self.stats.evaluations,
             "signals": self.stats.signals,
             "placeRejected": self.stats.place_rejected,
@@ -8653,6 +8695,14 @@ struct CoreStats {
     /// count of on-chain resolutions that came from the stream instead of
     /// the dry ladder.
     resolutions: u64,
+    /// #388: wallet-level cash rows credited from the stream (MAKER_REBATE /
+    /// REWARD ledger rows), and the exact USD total each kind paid. The row
+    /// count and the totals travel together so a report can reconcile the
+    /// credit against the ledger it built.
+    cashflow_rebates: u64,
+    cashflow_rewards: u64,
+    cashflow_rebates_usd: Decimal,
+    cashflow_rewards_usd: Decimal,
     evaluations: u64,
     signals: u64,
     place_rejected: u64,

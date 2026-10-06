@@ -7,6 +7,21 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ### Added
 
+- **#388 — the activity ledger's MAKER_REBATE / REWARD rows become first-class
+  wallet-level cashflow events, and the replay credits them.** The converter
+  (#355 pipeline) copies each cash row into its own side file (never the fill
+  stream, same channel discipline as the REDEEM rows) and emits one
+  `{"k":"cashflow","which":"rebate|reward","usd":"<exact>"}` event per ledger
+  ROW at the row's own timestamp — no per-fill attribution is invented; the
+  stream IS the ledger's cash view. The core credits the active account's
+  ledger at that instant (new `Ledger::credit_cashflow`; zero/negative rows
+  are no-ops) without touching position/order/settlement semantics, the feed
+  counters carry the per-kind count and exact USD total, the backtest report
+  gains the `cashflows` block (`rebates`/`rebatesUsd`/`rewards`/`rewardsUsd`,
+  plus a Display line), and the manifest pins `converterVersion: 2` with a
+  `counts.cashflows` tally. A corpus without cash rows (every pre-#388
+  dataset, and a `/trades` walk) converts and replays exactly as before.
+
 - **#379 — the update flow becomes end-to-end: automatic checks and a
   download/staging state machine close the last two gaps (§7.4/§7.5), with the
   §7.5 iron rule intact: the kernel never rewrites the binary it is executing —

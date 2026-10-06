@@ -301,6 +301,25 @@ impl From<crate::exit_policy::FeeSchedule> for FeeScheduleReport {
     }
 }
 
+/// #388: the wallet-level venue cash a replay credited from the stream
+/// (activity-ledger MAKER_REBATE / REWARD rows), split by kind. Part of the
+/// report rather than the ledger alone: a profitability conclusion is only
+/// interpretable against the cash the wallet earned OUTSIDE its fills, and
+/// the split matters — a rebate scales with maker volume, a reward with the
+/// venue's program. Zero on a corpus without cash rows (the pre-#388 shape).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CashflowReport {
+    /// MAKER_REBATE rows credited (count and exact USD total).
+    pub rebates: u64,
+    #[serde(with = "crate::decimal")]
+    pub rebates_usd: Decimal,
+    /// REWARD rows credited (count and exact USD total).
+    pub rewards: u64,
+    #[serde(with = "crate::decimal")]
+    pub rewards_usd: Decimal,
+}
+
 /// Order counts by the last status each order reached.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -356,6 +375,9 @@ pub struct BacktestReport {
     pub fill_model: FillModel,
     /// The taker-fee schedule this replay charged (#203). See [`FeeScheduleReport`].
     pub fee_schedule: FeeScheduleReport,
+    /// #388: wallet-level venue cash credited from the stream (MAKER_REBATE /
+    /// REWARD ledger rows). See [`CashflowReport`].
+    pub cashflows: CashflowReport,
     pub entry_maker_timeout_ms: i64,
     pub orders: OrderCounts,
     /// Fill rate / partial-fill rate (#183): what actually traded, order by
@@ -418,6 +440,15 @@ impl BacktestReport {
         s.push_str(&format!(
             "  taker fee        : {} rate={} exponent={} (#203)\n",
             self.fee_schedule.name, self.fee_schedule.rate, self.fee_schedule.exponent
+        ));
+        // #388: show the wallet-level cash the venue paid. Always named, so a
+        // reader can tell "no cash rows in the corpus" from "cash not shown".
+        s.push_str(&format!(
+            "  cashflows        : rebates ${:.2} ({}), rewards ${:.2} ({}) (#388)\n",
+            self.cashflows.rebates_usd,
+            self.cashflows.rebates,
+            self.cashflows.rewards_usd,
+            self.cashflows.rewards
         ));
         s.push_str(&format!(
             "  orders           : {} ({} filled, {} cancelled, {} rejected, {} failed, {} live at end)\n",
@@ -965,6 +996,10 @@ impl Backtester for EventBacktester {
         // clock would make every book look years stale in an offline replay.
         let feed = self.core.engine_stats_at(clock);
         let strategies = self.core.strategy_stats();
+        // #388: the cash rows the core credited — a snapshot straight off the
+        // credit path's counters, so the report and the ledger can never
+        // disagree about what was paid.
+        let (cf_rebates, cf_rebates_usd, cf_rewards, cf_rewards_usd) = self.core.cashflow_stats();
         let blocked = feed.get("blocked").cloned().unwrap_or(Value::Null);
         let fees_usd: Decimal = strategies
             .iter()
@@ -1010,6 +1045,15 @@ impl Backtester for EventBacktester {
             virtual_ms: clock - start_at_ms,
             fill_model: self.core.config().fill_model,
             fee_schedule: crate::exit_policy::fee_schedule().into(),
+            // #388: the cash rows the core credited — read straight off the
+            // stats the credit path wrote, so the report and the ledger can
+            // never disagree about what was paid.
+            cashflows: CashflowReport {
+                rebates: cf_rebates,
+                rebates_usd: cf_rebates_usd,
+                rewards: cf_rewards,
+                rewards_usd: cf_rewards_usd,
+            },
             entry_maker_timeout_ms: self.core.config().entry_maker_timeout_ms,
             orders: self.order_counts(),
             fill_stats: self.fill_stats(),

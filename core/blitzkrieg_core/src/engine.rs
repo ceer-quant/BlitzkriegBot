@@ -213,6 +213,37 @@ impl GateExemptionRecord {
     }
 }
 
+/// The kind of a wallet-level cash flow (#388). The activity ledger pays them
+/// as whole-ledger rows — never per fill — so they ride the stream as they
+/// print and the ledger credits each row exactly once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CashflowKind {
+    /// MAKER_REBATE: the venue's maker-side rebate, paid per ledger row.
+    Rebate,
+    /// REWARD: a venue reward program payout (e.g. liquidity rewards).
+    Reward,
+}
+
+impl CashflowKind {
+    /// The archive's `"k":"cashflow"` `which` spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CashflowKind::Rebate => "rebate",
+            CashflowKind::Reward => "reward",
+        }
+    }
+
+    /// Inverse of [`CashflowKind::as_str`]; `None` is a fail-closed parse
+    /// error, never a silent default.
+    pub fn parse_kind(s: &str) -> Option<Self> {
+        match s {
+            "rebate" => Some(CashflowKind::Rebate),
+            "reward" => Some(CashflowKind::Reward),
+            _ => None,
+        }
+    }
+}
+
 /// Market-data events the engine consumes (produced by the feed layer or, in
 /// tests, driven directly).
 #[derive(Debug, Clone)]
@@ -269,6 +300,18 @@ pub enum DataEvent {
         payouts: Vec<(String, Decimal)>,
         /// The market settles through the NegRisk adapter.
         neg_risk: bool,
+        now_ms: i64,
+    },
+    /// #388: one wallet-level cash row from the activity ledger
+    /// (MAKER_REBATE / REWARD) — money the venue paid the wallet OUTSIDE any
+    /// fill, priced in whole-ledger rows. The core credits the active
+    /// account's cash at the row's own timestamp; no order, position or
+    /// settlement semantics touch it, so a corpus without these rows replays
+    /// byte-identically to before.
+    Cashflow {
+        which: CashflowKind,
+        /// The row's `usdcSize` — cash paid to the wallet, USD.
+        amount_usd: Decimal,
         now_ms: i64,
     },
 }
@@ -561,6 +604,11 @@ impl Engine {
             }
             DataEvent::Resolution { .. } => {
                 // #377 (治 #2): a verdict is settlement input for the Core,
+                // not a book update — no strategy acts on it here.
+                return Vec::new();
+            }
+            DataEvent::Cashflow { .. } => {
+                // #388: a wallet-level cash row is ledger input for the Core,
                 // not a book update — no strategy acts on it here.
                 return Vec::new();
             }
