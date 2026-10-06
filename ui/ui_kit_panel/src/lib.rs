@@ -51,6 +51,8 @@ pub enum Msg {
     UpdateCheckLoaded(Result<blitzkrieg_ui_kit::core::types::SystemVersionView, String>),
     /// The auto-update switch write landed (`Ok(new_value)` or `Err`).
     UpdateConfigured(Result<bool, String>),
+    /// #393: the update-CHECK switch write landed (`Ok(new_value)` or `Err`).
+    UpdateCheckConfigured(Result<bool, String>),
     /// The launcher-side install subprocess finished with its captured output.
     UpdateInstallDone(Result<String, String>),
     /// #379: the staging run answered (`Ok(state)` or the kernel's refusal).
@@ -445,8 +447,9 @@ pub async fn run_panel_with_dispatcher(
                                 let mut client =
                                     blitzkrieg_ui_kit::core::ipc_client::IpcClient::new(socket);
                                 // Only the AUTO switch is touched here; the
-                                // outbound-check switch is the operator's
-                                // config decision, not a panel checkbox.
+                                // CHECK switch has its own arm below (#393) —
+                                // the kernel takes both keys optional, so each
+                                // toggle moves exactly one switch.
                                 client
                                     .update_configure(None, Some(on))
                                     .map_err(|e| e.to_string())
@@ -459,6 +462,32 @@ pub async fn run_panel_with_dispatcher(
                                     .unwrap_or(on))),
                                 Ok(Err(e)) => Msg::UpdateConfigured(Err(e)),
                                 Err(e) => Msg::UpdateConfigured(Err(format!("task: {e}"))),
+                            };
+                            let _ = tx.send(msg);
+                        });
+                    }
+                    Action::UpdateConfigureCheck(on) => {
+                        let socket = app.socket.clone();
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            let out = tokio::task::spawn_blocking(move || {
+                                let mut client =
+                                    blitzkrieg_ui_kit::core::ipc_client::IpcClient::new(socket);
+                                // #393: only the CHECK switch moves — the
+                                // "may the kernel dial the release source at
+                                // all" gate, persisted and audited kernel-side.
+                                client
+                                    .update_configure(Some(on), None)
+                                    .map_err(|e| e.to_string())
+                            })
+                            .await;
+                            let msg = match out {
+                                Ok(Ok(v)) => Msg::UpdateCheckConfigured(Ok(v
+                                    .get("checkEnabled")
+                                    .and_then(|b| b.as_bool())
+                                    .unwrap_or(on))),
+                                Ok(Err(e)) => Msg::UpdateCheckConfigured(Err(e)),
+                                Err(e) => Msg::UpdateCheckConfigured(Err(format!("task: {e}"))),
                             };
                             let _ = tx.send(msg);
                         });
@@ -710,6 +739,16 @@ pub async fn run_panel_with_dispatcher(
                         if on { "ON" } else { "OFF" }
                     )),
                     Err(e) => app.log(format!("auto-update toggle failed: {e}")),
+                }
+            }
+            Msg::UpdateCheckConfigured(result) => {
+                app.update_busy = false;
+                match result {
+                    Ok(on) => app.log(format!(
+                        "update check is now {} (persisted by the kernel; restart-safe)",
+                        if on { "ENABLED" } else { "DISABLED" }
+                    )),
+                    Err(e) => app.log(format!("update-check toggle failed: {e}")),
                 }
             }
             Msg::UpdateInstallDone(_) => { /* deferred with the release pipeline */ }

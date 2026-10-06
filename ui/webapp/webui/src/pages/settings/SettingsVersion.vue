@@ -7,7 +7,7 @@
 import { computed, onUnmounted, ref } from 'vue'
 import { RefreshCw, Tag } from 'lucide-vue-next'
 import { api, type StageState } from '@/api/client'
-import { revisionText, versionBadge } from '@/lib/version'
+import { revisionText, versionBadge, stageDependencyHint } from '@/lib/version'
 import { usePanelStore } from '@/stores/panel'
 import { dateTime } from '@/lib/format'
 import Card from '@/components/ui/card/Card.vue'
@@ -15,7 +15,6 @@ import CardHeader from '@/components/ui/card/CardHeader.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
 import Button from '@/components/ui/button/Button.vue'
 import Switch from '@/components/ui/switch/Switch.vue'
-import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 
 const store = usePanelStore()
@@ -66,8 +65,22 @@ async function checkNow(): Promise<void> {
 
 /** 「自动更新」开关：状态来源是内核；写盘失败必须报错（不静默回退）。 */
 async function toggleAutoUpdate(on: boolean): Promise<void> {
+  await configure({ autoUpdate: on })
+}
+
+/**
+ * 「更新检查」开关（issue 393）：出网检查此前只能改 TOML —— 面板有开关、按钮灰着、
+ * 却没有解锁路径，是半成品。内核的 system.update.configure 本就双键可选，
+ * 这里补上第二支开关；同一纪律：状态来自内核，写盘失败原样报错。
+ */
+async function toggleUpdateCheck(on: boolean): Promise<void> {
+  await configure({ checkEnabled: on })
+}
+
+/** 两条开关共用的写路径：内核落盘+落审计后回显，轮询刷新读回内核确认值。 */
+async function configure(body: { autoUpdate?: boolean; checkEnabled?: boolean }): Promise<void> {
   try {
-    const res = await api.updateConfigure(on)
+    const res = await api.updateConfigure(body)
     if (res.ok === false && res.error) {
       versionErr.value = res.error
     }
@@ -189,10 +202,17 @@ onUnmounted(() => {
             <span class="num">{{ version.lastCheckMs ? dateTime(version.lastCheckMs) : '—' }}</span>
           </div>
           <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
-            <span class="text-faint-fg">出网检查</span>
-            <Badge :variant="version.checkEnabled ? 'up' : 'default'">
-              {{ version.checkEnabled ? '已允许' : '已关闭' }}
-            </Badge>
+            <span class="text-faint-fg">出网检查（更新检查）</span>
+            <span class="flex items-center gap-2">
+              <Switch
+                :model-value="version.checkEnabled"
+                :title="version.checkEnabled ? '关闭出网检查（内核将一个包都不发）' : '允许内核检查发布更新'"
+                @update:model-value="toggleUpdateCheck"
+              />
+              <Badge :variant="version.checkEnabled ? 'up' : 'default'">
+                {{ version.checkEnabled ? '已允许' : '已关闭' }}
+              </Badge>
+            </span>
           </div>
         </div>
 
@@ -203,14 +223,17 @@ onUnmounted(() => {
             :disabled="checkBusy || !version.checkEnabled"
             :title="version.checkEnabled
               ? '让内核询问一次发布源（后台执行，结果自动刷新）'
-              : '出网检查已在配置中关闭；开启后此按钮才可用（user_layer/configs/update.toml 或下方开关说明）'"
+              : '出网检查已关闭；用上方「出网检查」开关开启后此按钮才可用'"
             @click="checkNow"
           >
             <RefreshCw class="size-3.5" />{{ checkBusy ? '检查中…' : '检查更新' }}
           </Button>
-          <Tooltip v-if="!version.checkEnabled" content="INV-3：检查关闭时内核一个包都不发 —— 这不是故障，是默认承诺。">
-            <span class="text-[11px] text-faint-fg">检查已关闭</span>
-          </Tooltip>
+          <!-- issue 393 (④): the dependency chains live INLINE next to the buttons —
+               a hover tooltip is undiscoverable, and a grey button with no
+               visible "why" reads as a bug rather than the INV-3 promise. -->
+          <span v-if="!version.checkEnabled" class="text-[11px] leading-snug text-faint-fg">
+            检查已关闭：INV-3 —— 检查关闭时内核一个包都不发，这不是故障，是默认承诺。用上方开关开启。
+          </span>
 
           <Button
             variant="outline"
@@ -225,6 +248,12 @@ onUnmounted(() => {
           >
             <RefreshCw class="size-3.5" />{{ stageBusy ? '暂存中…' : '暂存下载' }}
           </Button>
+          <span
+            v-if="!version.autoUpdate || version.updateAvailable !== true"
+            class="text-[11px] leading-snug text-faint-fg"
+          >
+            {{ stageDependencyHint(version) }}
+          </span>
 
           <div class="ml-auto flex items-center gap-2">
             <span class="text-[11px] text-faint-fg">自动更新（默认关闭；开启后安装由启动器校验执行，需重启内核生效）</span>

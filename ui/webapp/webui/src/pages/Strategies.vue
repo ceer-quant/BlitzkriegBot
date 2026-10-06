@@ -2,9 +2,13 @@
 /**
  * 策略 — 分策略表现总表 + 风控拦截归因（E9-g）。每行可直接启用/停用
  * （网关 `strategy <name> on|off`）；拒单原因按需展开。
+ *
+ * issue 393 (⑤): 蓝图入口 — 页头「创建策略」跳蓝图（新建模式）；Lua 策略行带
+ * 「编辑策略」，跳蓝图并预载该包的蓝图文档（blueprint.load，只读 IPC）。
+ * 跳转走 store 的 navRequest —— 页签是 App 壳的资产，页面只提请求。
  */
 import { computed, ref } from 'vue'
-import { AlertTriangle, ChevronDown, ShieldCheck, ShieldOff } from 'lucide-vue-next'
+import { AlertTriangle, ChevronDown, Pencil, Plus, ShieldCheck, ShieldOff } from 'lucide-vue-next'
 import { api, type StrategyStatsRow } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { num, signedMoney, pct } from '@/lib/format'
@@ -109,12 +113,34 @@ const expanded = ref<string | null>(null)
 function toggleExpand(name: string): void {
   expanded.value = expanded.value === name ? null : name
 }
+
+// ── issue 393 (⑤): blueprint entries ─────────────────────────────────────────────
+// 「创建策略」跳蓝图的新建模式（画布首访本就铺示例模板）；「编辑策略」只在
+ // Lua 策略行出现（source = `lua:<dir>`），跳蓝图并按名预载该包的蓝图文档。
+function createStrategy(): void {
+  store.requestNav('blueprint')
+}
+function editStrategy(name: string): void {
+  store.requestBlueprintPreload(name)
+  store.requestNav('blueprint')
+}
+/** Lua 策略的来源拼法（engine.stats 的 `source`）；蓝图编辑只对 Lua 包有意义。 */
+function isLua(r: StrategyStatsRow): boolean {
+  return typeof r.source === 'string' && r.source.startsWith('lua:')
+}
 </script>
 
 <template>
   <div v-if="rows.length" class="rise-in">
+    <!-- issue 393 (⑤): the page's create entry — jumps to the blueprint canvas. -->
+    <div class="flex items-center justify-end">
+      <Button variant="gold" size="sm" title="在蓝图中新建一个策略" @click="createStrategy">
+        <Plus class="size-3.5" />创建策略
+      </Button>
+    </div>
+
     <!-- fleet KPIs -->
-    <div class="grid gap-3.5 sm:grid-cols-2 xl:grid-cols-5">
+    <div class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-5">
       <StatTile label="策略规模" :value="String(totals.enabled)" tone="gold">
         <template #sub>共 <RollingNumber :value="totals.count" /> 个已注册</template>
       </StatTile>
@@ -251,6 +277,20 @@ function toggleExpand(name: string): void {
                       :key="`m-${t}`"
                       variant="outline"
                     >{{ t }}</Badge>
+                    <!-- issue 393 (⑤): per-row 编辑策略 — jumps to the blueprint
+                         canvas and preloads this package's blueprint document
+                         (kernel `blueprint.load`). Lua rows only: the canvas
+                         edits the graph a blueprint compiles from. -->
+                    <Tooltip v-if="isLua(r)" content="在蓝图中编辑该策略（预载它的蓝图文档）">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        title="在蓝图中编辑该策略"
+                        @click="editStrategy(r.name)"
+                      >
+                        <Pencil class="size-3.5" />
+                      </Button>
+                    </Tooltip>
                     <!-- E27 (§8.3): incompatible = no active plugin satisfies any
                          declared mode; the hover speaks both sides verbatim. -->
                     <Tooltip v-if="r.compatible === false" :content="r.incompatibleReason ?? '无相容插件模式'">
@@ -368,7 +408,13 @@ function toggleExpand(name: string): void {
     <EmptyState
       :loading="store.loading"
       text="暂无策略数据"
-      hint="注册策略后自动出现；新策略可用 blitzkrieg-new-strategy 脚手架生成。"
-    />
+      hint="注册策略后自动出现；新策略可用 blitzkrieg-new-strategy 脚手架生成，或在蓝图中创建。"
+    >
+      <template #default>
+        <Button variant="gold" size="sm" class="mt-3" @click="createStrategy">
+          <Plus class="size-3.5" />创建策略
+        </Button>
+      </template>
+    </EmptyState>
   </Card>
 </template>

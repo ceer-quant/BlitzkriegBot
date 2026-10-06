@@ -3,6 +3,12 @@
  * 生效风控读数（E26 §4.4）：内核的 risk.limits（boot 快照，只读）。每个限额
  * 都是「值 + 来源」，来源不明的数字不是操作者能据以行动的答案。九个新限额
  * 改配置需重启内核生效，读数不会中途变陈旧；进页读一次 + 手动刷新。
+ *
+ * issue 393 (①): 卡片尾部开一个 #params 插槽 —— 账户生效执行参数（budget 三元组
+ * / 最低权益 / 单标的持仓笔数）就地渲染为可编辑字段。它们有运行时写路径
+ * （execution_policy.set），与上面九项 boot 限额（无写路径，重启生效）在
+ * 同一张卡上各归各位；插槽内容（输入与缓冲）由编排壳 SettingsRisk 提供，
+ * 本卡保持无 IPC。
  */
 import { computed, onMounted, ref } from 'vue'
 import { RefreshCw, ShieldCheck } from 'lucide-vue-next'
@@ -136,6 +142,10 @@ const riskHint = computed(() => {
           </span>
         </div>
       </div>
+
+      <!-- issue 393 (①): 账户生效执行参数（可编辑）插进来 —— 有运行时写路径的
+           风控参数与 boot 限额同卡呈现，各归各位（插槽内容来自编排壳）。 -->
+      <slot name="params" />
 
       <div class="mt-3 flex flex-wrap items-center gap-2">
         <Button variant="outline" size="sm" :disabled="riskBusy" title="重新读取内核的风控读数" @click="loadRisk">

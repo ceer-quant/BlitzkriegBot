@@ -4,7 +4,7 @@
  * 外观与刷新节奏（主题三态、提示音、行情快速轮询）。
  */
 import { computed, onMounted, ref } from 'vue'
-import { Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion, LogOut, Info } from 'lucide-vue-next'
+import { Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion, LogOut, Info, SlidersHorizontal } from 'lucide-vue-next'
 import { getToken, loginAt, logout, ping, probeSession } from '@/api/client'
 import { adjudicateSession } from '@/lib/session'
 import { dateTime } from '@/lib/format'
@@ -173,7 +173,12 @@ const themeValue = computed<ThemeMode>({
 
     <!-- ── 外观与节奏 ──────────────────────────────────────────────────── -->
     <Card class="mt-3.5">
-      <CardHeader label="外观与刷新" />
+      <!-- issue 393 (③): same icon-leads-title pattern as every other card. -->
+      <CardHeader label="外观与刷新">
+        <template #title>
+          <SlidersHorizontal class="size-4 text-faint-fg" />
+        </template>
+      </CardHeader>
       <div class="grid gap-4 sm:grid-cols-2">
         <div class="flex items-center justify-between gap-3">
           <div>

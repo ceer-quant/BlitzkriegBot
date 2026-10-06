@@ -2193,6 +2193,21 @@ async fn handle_line(
             .await
         }
 
+        // #393: the read-only mirror of `blueprint.save` — hand a saved
+        // package's blueprint document back so the editor can preload it. No
+        // lock, no write: it answers from the strategy root, and the name is
+        // screened with the save path's own rules so no caller can steer the
+        // read outside that root.
+        method::BLUEPRINT_LOAD => {
+            let core_cfg = core.lock().await.config().clone();
+            typed(params, |p: BlueprintLoadParams| async move {
+                let doc = blueprint_load(&p, &core_cfg)
+                    .map_err(|e| CoreError::new(CoreErrorCode::InvalidParams, e))?;
+                Ok::<_, CoreError>(serde_json::to_value(doc).unwrap_or(Value::Null))
+            })
+            .await
+        }
+
         other => Err((
             Failure::METHOD_NOT_FOUND,
             format!("unknown method: {other}"),
@@ -2457,14 +2472,15 @@ fn blueprint_strategy_root(core_cfg: &crate::service::CoreConfig) -> String {
         .unwrap_or_else(|| "user_layer/strategies_lua".to_string())
 }
 
-fn blueprint_save(
-    p: &BlueprintSaveParams,
-    core_cfg: &crate::service::CoreConfig,
-) -> Result<BlueprintSaveResult, String> {
-    use sha2::Digest;
-
+/// The package-name screen shared by `blueprint.save` and `blueprint.load`
+/// (#393): the name becomes a directory name and a `place_order`-adjacent
+/// literal — the same `os.`/`io.`/`debug` wall the compiler applies to the
+/// blueprint name applies here, plus a package must not be named like a path.
+/// The load path needs the SAME screen so no caller can steer its read
+/// outside the strategy root.
+fn validate_package_name(raw: &str) -> Result<String, String> {
     const FORBIDDEN: [&str; 3] = ["os.", "io.", "debug"];
-    let name = p.name.trim();
+    let name = raw.trim();
     if name.is_empty() {
         return Err("blueprint name must not be empty".to_string());
     }
@@ -2489,13 +2505,50 @@ fn blueprint_save(
              generated source verbatim"
         ));
     }
+    Ok(name.to_string())
+}
+
+/// #393: read one saved package's blueprint document back — the read-only
+/// mirror of [`blueprint_save`], feeding the strategy page's 编辑策略 entry.
+/// Hand-written packages carry no `blueprint.json` (they were never compiled
+/// from one), and that fact is the ERROR — the caller says so, it does not
+/// synthesize a graph the strategy never had.
+fn blueprint_load(
+    p: &BlueprintLoadParams,
+    core_cfg: &crate::service::CoreConfig,
+) -> Result<BlueprintLoadResult, String> {
+    let name = validate_package_name(&p.name)?;
+    let root = blueprint_strategy_root(core_cfg);
+    let path = std::path::Path::new(&root)
+        .join(&name)
+        .join("blueprint.json");
+    let json = std::fs::read_to_string(&path).map_err(|_| {
+        format!(
+            "no blueprint document for `{name}` under {root} — the package was not \
+             written by blueprint.save, so there is no graph to preload"
+        )
+    })?;
+    Ok(BlueprintLoadResult {
+        blueprint_path: format!("{root}/{name}/blueprint.json"),
+        json,
+        name,
+    })
+}
+
+fn blueprint_save(
+    p: &BlueprintSaveParams,
+    core_cfg: &crate::service::CoreConfig,
+) -> Result<BlueprintSaveResult, String> {
+    use sha2::Digest;
+
+    let name = validate_package_name(&p.name)?;
 
     // Compile FRESH — the receipt vouches for what THIS call produced, and a
     // structurally invalid blueprint writes nothing.
     let lua = crate::blueprint::compile(&p.json)?;
 
     let root = blueprint_strategy_root(core_cfg);
-    let pkg = std::path::Path::new(&root).join(name);
+    let pkg = std::path::Path::new(&root).join(&name);
     if pkg.join("manifest.json").is_file() && !p.overwrite {
         return Err(format!(
             "strategy package {root}/{name} already exists — saving over a package the \
@@ -4824,6 +4877,70 @@ mod tests {
             reply.get("error").is_none(),
             "an explicit overwrite must land: {reply}"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn blueprint_load_returns_the_saved_document() {
+        // #393: the read-only mirror of save — a saved package's blueprint
+        // document comes back verbatim; a hand-written (save-less) package and
+        // a path-flavoured name are refused with the honest reasons.
+        let root =
+            std::env::temp_dir().join(format!("bk-ipc-bpload-{}-{}", std::process::id(), now_ms()));
+        let (core, registry, peer) = save_fixture(&root).await;
+
+        // Save one package first — load answers from what save wrote.
+        let save_line = json_line(
+            1,
+            "blueprint.save",
+            &serde_json::json!({ "name": "wire_dog", "json": WIRE_BLUEPRINT }),
+        );
+        let reply = rpc(&core, &registry, &peer, save_line).await;
+        assert!(reply.get("error").is_none(), "save must land: {reply}");
+
+        // The load returns the SAME bytes the save wrote.
+        let load_line = json_line(
+            2,
+            "blueprint.load",
+            &serde_json::json!({ "name": "wire_dog" }),
+        );
+        let reply = rpc(&core, &registry, &peer, load_line).await;
+        assert!(reply.get("error").is_none(), "load must answer: {reply}");
+        let r = &reply["result"];
+        assert_eq!(r["name"], serde_json::json!("wire_dog"));
+        assert_eq!(r["json"], serde_json::json!(WIRE_BLUEPRINT));
+        assert_eq!(
+            r["blueprintPath"],
+            serde_json::json!(
+                root.join("wire_dog")
+                    .join("blueprint.json")
+                    .display()
+                    .to_string()
+            )
+        );
+
+        // A package with no blueprint document (never written by save) is an
+        // explicit refusal, not an invented graph.
+        let no_doc = json_line(
+            3,
+            "blueprint.load",
+            &serde_json::json!({ "name": "no_such_pkg" }),
+        );
+        let reply = rpc(&core, &registry, &peer, no_doc).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("no blueprint document"), "{reply}");
+
+        // The load path screens the name with the save path's own rules, so
+        // no caller can steer the read outside the strategy root.
+        let escape = json_line(
+            4,
+            "blueprint.load",
+            &serde_json::json!({ "name": "../escape" }),
+        );
+        let reply = rpc(&core, &registry, &peer, escape).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("ASCII letters"), "{reply}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -28,7 +28,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use arc_swap::ArcSwap;
 use rust_decimal::Decimal;
@@ -40,8 +40,9 @@ use blitzkrieg_strategy_api::{
 };
 
 use crate::model::{OrderbookSnapshot, SignalDirection};
-use crate::shadow_evolution::knobs::StrategyParams;
+use crate::shadow_evolution::knobs::{KnobSpec, StrategyParams};
 use crate::signal::TradeSignal;
+use crate::strategies::shadow_twin::ShadowFactory;
 use crate::strategies::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent};
 
 /// The one supported manifest API version (§6.4).
@@ -100,6 +101,10 @@ pub struct ManifestGateExemptions {
 
 /// `{"threshold": {"type": "decimal", "default": "0.04"}}` — the §6.4
 /// tunables form. Values cross as strings (the decimal-STRING wire rule).
+/// #393: `min`/`max` are OPTIONAL — a tunable that declares a domain opts its
+/// name into shadow evolution; one that does not stays a plain `bk.params()`
+/// entry. The domain is a hard outer bound the evolution guard enforces, so
+/// it may never be invented kernel-side: absent bounds = not evolvable.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct BTreeMapDefs(pub std::collections::BTreeMap<String, TunableDef>);
 
@@ -108,6 +113,11 @@ pub struct TunableDef {
     #[serde(default)]
     pub r#type: String,
     pub default: String,
+    /// Optional domain (issue 393): decimal strings. Absent = not evolvable.
+    #[serde(default)]
+    pub min: String,
+    #[serde(default)]
+    pub max: String,
 }
 
 impl BTreeMapDefs {
@@ -118,6 +128,71 @@ impl BTreeMapDefs {
             .map(|(k, v)| (k.clone(), v.default.clone()))
             .collect()
     }
+}
+
+/// #393: the evolvable-knob declaration a Lua manifest carries — the Lua
+/// mirror of the dylib surface's OPTIONAL `bk_strategy_evolvable_knobs`
+/// symbol (`ForeignStrategy::read_knobs`). A tunable opts in by declaring a
+/// DOMAIN: `type` `decimal`/`int` plus `min`/`max` bounds that are coherent
+/// (`min <= max`) and contain the declared default. Everything else — a
+/// missing bound, an unparseable number, an incoherent domain — is skipped,
+/// and a package with no qualifying tunable stays **not evolvable**:
+/// fail-closed, and the explicit declaration (D6) the evolution machinery
+/// demands. The kernel never invents a domain.
+fn specs_from_tunables(tunables: &BTreeMapDefs) -> Vec<KnobSpec> {
+    let mut out = Vec::new();
+    for (name, def) in &tunables.0 {
+        if !matches!(def.r#type.as_str(), "decimal" | "int") {
+            continue;
+        }
+        if def.min.is_empty() || def.max.is_empty() {
+            continue;
+        }
+        let (Ok(value), Ok(min), Ok(max)) = (
+            Decimal::from_str_exact(&def.default),
+            Decimal::from_str_exact(&def.min),
+            Decimal::from_str_exact(&def.max),
+        ) else {
+            continue;
+        };
+        let spec = KnobSpec::new(name.clone(), value, min, max);
+        if !spec.is_coherent() {
+            continue;
+        }
+        out.push(spec);
+    }
+    out
+}
+
+/// #393: what an adapter needs to rebuild INDEPENDENT twins of one loaded
+/// package — the entry text, the declared modes, the knob specs and the
+/// manifest defaults. `load_lua_package` records it here keyed by package
+/// name (the manifest name IS the identity, §6.4) because the construction
+/// site hands the adapter only the built [`LuaStrategy`] and the tunables
+/// bag — there is no other channel for the source text a twin's
+/// `LuaStrategy::build` needs. Reload overwrites; a package never loaded
+/// through this loader has no entry, and its adapter stays not-evolvable
+/// (fail-closed).
+#[derive(Debug, Clone)]
+struct PackageSource {
+    code: Arc<str>,
+    modes: Vec<StrategyMode>,
+    specs: Vec<KnobSpec>,
+    defaults: HashMap<String, String>,
+}
+
+static PACKAGE_SOURCES: OnceLock<Mutex<HashMap<String, PackageSource>>> = OnceLock::new();
+
+fn source_vault_remember(name: &str, source: PackageSource) {
+    let map = PACKAGE_SOURCES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut m) = map.lock() {
+        m.insert(name.to_string(), source);
+    }
+}
+
+fn source_vault_for(name: &str) -> Option<PackageSource> {
+    let map = PACKAGE_SOURCES.get_or_init(|| Mutex::new(HashMap::new()));
+    map.lock().ok()?.get(name).cloned()
 }
 
 /// Everything the service needs from one validated package.
@@ -241,6 +316,19 @@ pub fn load_lua_package(dir: &Path) -> Result<LoadedLua, String> {
     )
     .map_err(|e| format!("lua strategy refused: {e}"))?;
 
+    // #393: the package identity twins are rebuilt from — recorded only after
+    // every validation above passed, so the vault never holds a refused
+    // package's text.
+    source_vault_remember(
+        &manifest.name,
+        PackageSource {
+            code: Arc::from(code.as_str()),
+            modes: declared_modes.clone(),
+            specs: specs_from_tunables(&manifest.tunables),
+            defaults: manifest.tunables.defaults(),
+        },
+    );
+
     Ok(LoadedLua {
         strategy,
         name: manifest.name,
@@ -278,15 +366,59 @@ pub struct LuaEngineAdapter {
     /// (E2-c plumbing; a cell exists only for strategies that declared
     /// evolvable knobs).
     params_cell: Option<Arc<ArcSwap<StrategyParams>>>,
+    /// The manifest tunables' defaults — the base bag the hot-param cell
+    /// merges over (#393): the cell carries the EVOLVED knobs, tunables that
+    /// declared no domain keep their manifest default.
+    defaults: HashMap<String, String>,
+    /// #393: the evolvable knobs this package declared (manifest tunables
+    /// with a coherent domain). Empty = not evolvable — the explicit
+    /// declaration, never a kernel-side guess.
+    specs: Vec<KnobSpec>,
+    /// The fee schedule cell shared with any twins this adapter's factory
+    /// builds: `set_fee_schedule` writes it, a twin's `make` reads it at
+    /// birth — a twin prices `bk.fees()` from the same curve the live
+    /// strategy sees.
+    fee_cell: Arc<Mutex<Option<FeeScheduleView>>>,
 }
 
 impl LuaEngineAdapter {
     pub fn new(inner: LuaStrategy, tunables: HashMap<String, String>) -> Self {
         // Seed `bk.params()` with the manifest defaults; a registry cell (if
-        // ever attached) replaces the bag per evaluate.
+        // ever attached) merges over the bag per evaluate.
         let state = inner.state();
         if let Ok(mut st) = state.lock() {
-            st.params = tunables;
+            st.params = tunables.clone();
+        }
+        let specs = source_vault_for(inner.name())
+            .map(|s| s.specs)
+            .unwrap_or_default();
+        Self {
+            inner,
+            assets: HashMap::new(),
+            last_books: HashMap::new(),
+            exit_intents: Vec::new(),
+            breaks: Vec::new(),
+            holds_to_settlement: false,
+            gate_exemptions: GateExemptions::none(),
+            params_cell: None,
+            defaults: tunables,
+            specs,
+            fee_cell: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// #393: the twin constructor — the same shape as [`Self::new`], but the
+    /// fee cell is SHARED with the live adapter (a twin prices `bk.fees()`
+    /// from the same schedule the live strategy sees) and the vault is not
+    /// consulted (twins are never registered for evolution themselves).
+    fn new_with_fee(
+        inner: LuaStrategy,
+        tunables: HashMap<String, String>,
+        fee_cell: Arc<Mutex<Option<FeeScheduleView>>>,
+    ) -> Self {
+        let state = inner.state();
+        if let Ok(mut st) = state.lock() {
+            st.params = tunables.clone();
         }
         Self {
             inner,
@@ -297,6 +429,9 @@ impl LuaEngineAdapter {
             holds_to_settlement: false,
             gate_exemptions: GateExemptions::none(),
             params_cell: None,
+            defaults: tunables,
+            specs: Vec::new(),
+            fee_cell,
         }
     }
 
@@ -316,9 +451,14 @@ impl LuaEngineAdapter {
     /// the same curve the charge path settles in, never from a copied
     /// constant. A package that never receives this sees `bk.fees() == nil`
     /// and must fail closed (no entries, never "assume the fee is zero").
+    /// #393: the view also lands in the shared cell, so a shadow twin built
+    /// later prices from the SAME schedule, not a guessed one.
     pub fn set_fee_schedule(&self, view: FeeScheduleView) {
         if let Ok(mut st) = self.inner.state().lock() {
-            st.fee_schedule = Some(view);
+            st.fee_schedule = Some(view.clone());
+        }
+        if let Ok(mut cell) = self.fee_cell.lock() {
+            *cell = Some(view);
         }
     }
 
@@ -418,15 +558,20 @@ impl EngineStrategy for LuaEngineAdapter {
                 }
             }
         }
-        // Hot parameters: the registry cell (when attached) replaces the
-        // manifest-default bag for this cycle (§6.6: same ParamRegistry).
+        // Hot parameters: the registry cell (when attached) merges the EVOLVED
+        // knobs over the manifest-default bag for this cycle (§6.6: same
+        // ParamRegistry). #393: MERGE, not replace — the cell only carries the
+        // knobs that declared domains, and a tunable without a domain must
+        // keep its manifest default, never vanish from `bk.params()`. A
+        // strategy with no cell (not evolvable) never runs this branch.
         if let Some(cell) = &self.params_cell {
             let params = (**cell.load()).clone();
+            let mut bag = self.defaults.clone();
+            for (k, v) in params.iter() {
+                bag.insert(k.to_string(), v.to_string());
+            }
             if let Ok(mut st) = self.inner.state().lock() {
-                st.params = params
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
+                st.params = bag;
             }
         }
         self.inner.on_eval_books(&books);
@@ -540,6 +685,36 @@ impl EngineStrategy for LuaEngineAdapter {
         self.params_cell = registry.as_ref().and_then(|r| r.handle_for(self.name()));
     }
 
+    /// #393: the knobs this package declared evolvable (manifest tunables
+    /// with a coherent `min`/`max` domain). Empty = not evolvable — the same
+    /// explicit declaration a dylib without `bk_strategy_evolvable_knobs`
+    /// makes; every shipped package keeps today's behaviour.
+    fn evolvable_knobs(&self) -> Vec<KnobSpec> {
+        self.specs.clone()
+    }
+
+    /// #393: build twins of this strategy — the mirror of
+    /// `ForeignStrategy::shadow_factory`. The twin is an INDEPENDENT sandbox
+    /// built from the SAME entry text (the package source recorded at load),
+    /// seeded with the counterfactual parameters before it is driven. No new
+    /// `bk.*` API: the twin's `bk.params()` is the ordinary host-pushed bag,
+    /// and its fee schedule arrives through the shared cell.
+    fn shadow_factory(&self) -> Option<Box<dyn ShadowFactory>> {
+        if self.specs.is_empty() {
+            return None; // explicit "not evolvable"
+        }
+        let source = source_vault_for(self.inner.name())?;
+        Some(Box::new(LuaShadowFactory {
+            name: self.inner.name().to_string(),
+            version: self.inner.version().to_string(),
+            specs: self.specs.clone(),
+            source,
+            holds_to_settlement: self.holds_to_settlement,
+            gate_exemptions: self.gate_exemptions,
+            fee_cell: Arc::clone(&self.fee_cell),
+        }))
+    }
+
     fn config_view_json(&self) -> Option<String> {
         // The Lua strategy declares no config of its own yet — the view names
         // the runtime and version so an operator sees what every strategy is
@@ -560,6 +735,54 @@ impl EngineStrategy for LuaEngineAdapter {
     /// raised as a single RISK_ALERT naming this strategy.
     fn poison_alert(&mut self) -> Option<String> {
         self.inner.take_poison_alert()
+    }
+}
+
+/// Builds independent twins of a loaded Lua strategy (#393) — the mirror of
+/// `ForeignShadowFactory`. A twin is a SECOND sandbox from the SAME entry
+/// text (the package source the loader vaulted), seeded with the
+/// counterfactual parameters BEFORE it is driven, stamped with the live
+/// adapter's declarations, and priced by the SAME fee schedule (the shared
+/// cell the live adapter's `set_fee_schedule` writes). A twin whose sandbox
+/// cannot be built is `None` — the variant is absent, never a half-built one.
+struct LuaShadowFactory {
+    name: String,
+    version: String,
+    specs: Vec<KnobSpec>,
+    source: PackageSource,
+    holds_to_settlement: bool,
+    gate_exemptions: GateExemptions,
+    fee_cell: Arc<Mutex<Option<FeeScheduleView>>>,
+}
+
+impl ShadowFactory for LuaShadowFactory {
+    fn strategy(&self) -> String {
+        self.name.clone()
+    }
+
+    fn knobs(&self) -> Vec<KnobSpec> {
+        self.specs.clone()
+    }
+
+    fn make(&self, params: &StrategyParams) -> Option<Box<dyn EngineStrategy>> {
+        let twin = LuaStrategy::build(
+            self.name.clone(),
+            self.version.clone(),
+            self.source.modes.clone(),
+            &self.source.code,
+        )
+        .ok()?;
+        // The counterfactual bag: the manifest defaults for tunables that
+        // declared no domain, the variant's values for the knobs that did —
+        // seeded BEFORE the twin is driven, so its very first evaluation
+        // already runs the mutated parameters.
+        let mut bag = self.source.defaults.clone();
+        for (k, v) in params.iter() {
+            bag.insert(k.to_string(), v.to_string());
+        }
+        let twin = LuaEngineAdapter::new_with_fee(twin, bag, Arc::clone(&self.fee_cell))
+            .declare(self.holds_to_settlement, self.gate_exemptions);
+        Some(Box::new(twin))
     }
 }
 
@@ -703,6 +926,93 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, vec!["alpha", "zeta"], "sorted, packages only");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// #393: rewrite one test package's manifest through `f` after the base
+    /// write (the entry file is untouched, so the sha256 stays valid).
+    fn with_manifest(dir: &Path, f: impl FnOnce(&mut serde_json::Value)) {
+        let manifest_path = dir.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("read"))
+                .expect("json");
+        f(&mut manifest);
+        std::fs::write(&manifest_path, manifest.to_string()).expect("write");
+    }
+
+    /// #393: a tunable that declares a coherent domain opts the strategy into
+    /// evolution — it becomes a knob with that domain, the factory is present,
+    /// and the factory builds an independent twin of the SAME strategy seeded
+    /// with the counterfactual values. A tunable without a domain (here the
+    /// string one) must NOT become a knob.
+    #[test]
+    fn tunables_with_domains_become_evolvable() {
+        let tmp = std::env::temp_dir().join(format!("bk-lua-evo-{}", std::process::id()));
+        let pkg = write_package(&tmp.join("lua_evo"), "lua_evo", &[]);
+        with_manifest(&pkg, |m| {
+            m["tunables"] = serde_json::json!({
+                "entry_max_price": { "type": "decimal", "default": "0.40", "min": "0.05", "max": "0.95" },
+                "label": { "type": "string", "default": "x" }
+            });
+        });
+        let loaded = load_lua_package(&pkg).expect("loads");
+        let adapter = LuaEngineAdapter::new(loaded.strategy, loaded.tunables);
+        let knobs = adapter.evolvable_knobs();
+        assert_eq!(
+            knobs.len(),
+            1,
+            "only the domain-declaring tunable is a knob"
+        );
+        assert_eq!(knobs[0].name, "entry_max_price");
+        assert_eq!(knobs[0].min, rust_decimal_macros::dec!(0.05));
+        assert_eq!(knobs[0].max, rust_decimal_macros::dec!(0.95));
+
+        let factory = adapter.shadow_factory().expect("factory present");
+        let mut params = StrategyParams::new();
+        params.set("entry_max_price", rust_decimal_macros::dec!(0.55));
+        let twin = factory.make(&params).expect("twin builds");
+        assert_eq!(twin.name(), "lua_evo", "the twin is the same strategy");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// #393: a tunable with NO domain stays a plain `bk.params()` entry — the
+    /// package remains not-evolvable, exactly as every shipped package is
+    /// today (fail-closed; the kernel never invents a domain).
+    #[test]
+    fn tunables_without_domains_stay_not_evolvable() {
+        let tmp = std::env::temp_dir().join(format!("bk-lua-noevo-{}", std::process::id()));
+        let pkg = write_package(&tmp.join("lua_noevo"), "lua_noevo", &[]);
+        with_manifest(&pkg, |m| {
+            m["tunables"] = serde_json::json!({
+                "entry_max_price": { "type": "decimal", "default": "0.40" }
+            });
+        });
+        let loaded = load_lua_package(&pkg).expect("loads");
+        let adapter = LuaEngineAdapter::new(loaded.strategy, loaded.tunables);
+        assert!(adapter.evolvable_knobs().is_empty(), "no domain, no knob");
+        assert!(adapter.shadow_factory().is_none(), "no knobs, no factory");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// #393: an incoherent domain (`min > max`) is skipped, not patched — the
+    /// declaration is the author's, and a bounds the guard would refuse is
+    /// not silently turned into one it would accept.
+    #[test]
+    fn incoherent_domain_is_skipped() {
+        let tmp = std::env::temp_dir().join(format!("bk-lua-baddom-{}", std::process::id()));
+        let pkg = write_package(&tmp.join("lua_baddom"), "lua_baddom", &[]);
+        with_manifest(&pkg, |m| {
+            m["tunables"] = serde_json::json!({
+                "entry_max_price": { "type": "decimal", "default": "0.40", "min": "0.95", "max": "0.05" }
+            });
+        });
+        let loaded = load_lua_package(&pkg).expect("loads");
+        let adapter = LuaEngineAdapter::new(loaded.strategy, loaded.tunables);
+        assert!(
+            adapter.evolvable_knobs().is_empty(),
+            "incoherent domain is not a knob"
+        );
+        assert!(adapter.shadow_factory().is_none());
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

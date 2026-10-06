@@ -7,6 +7,39 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ### Added
 
+- **#393 — the settings/strategy pages become productizable: risk params edit
+  in place, blueprint entries from the strategy page, an update-check switch,
+  and a Lua evolution opt-in.** Six items, one batch:
+  *Effective-risk editing*: the 生效风控 card carries the account's effective
+  execution-policy base params (budget triple / equity floor / per-asset cap)
+  as inline editable fields fed by the SAME `execution_policy.get/set` surface
+  — one section buffer in the domain shell, because the kernel replaces the
+  whole account section on every `set` (a params-only write would wipe rules);
+  the nine boot-time limits stay read-only with their provenance badges (no
+  runtime write path exists by design). *Blueprint entries*: the strategy page
+  gains a 创建策略 header button (→ blueprint canvas) and per-row 编辑策略 on
+  Lua strategies, backed by the new read-only `blueprint.load` IPC (the mirror
+  of `blueprint.save`; a package without a blueprint document refuses with an
+  honest message, and the name is screened with the save path's own rules).
+  *Update-enable chain*: the WebUI gains the missing 更新检查 switch and the
+  TUI a `[k]` toggle — both write `system.update.configure`'s already-optional
+  `checkEnabled` key (the gateway route now forwards it); the grey buttons'
+  dependency chains (check off / auto off / nothing available) moved from
+  hover-only tooltips to inline text. *Title rows*: the shared `CardHeader`
+  renders icon-then-text in one place, and 外观与刷新 gets its icon.
+  *Lua evolution (the audit + the fix)*: the audit confirmed every Lua
+  strategy was structurally not-evolvable — `LuaEngineAdapter` left
+  `evolvable_knobs`/`shadow_factory` at trait defaults, so the evolution
+  manager skipped them (no unit, no evaluation, no proposals, `rollback`
+  errors "not evolvable", and the hot-param writeback channel never
+  activated). The fix lands on the strategy side: a manifest tunable that
+  declares a coherent `min`/`max` domain (the Lua mirror of the dylib surface's
+  `bk_strategy_evolvable_knobs` symbol) now opts the strategy into evolution —
+  the adapter declares the knobs and builds independent twin sandboxes from
+  the vaulted package source, with the fee schedule and non-domain tunables
+  carried over; nothing is invented kernel-side, and packages without domains
+  keep today's behaviour bit for bit.
+
 - **#388 — the activity ledger's MAKER_REBATE / REWARD rows become first-class
   wallet-level cashflow events, and the replay credits them.** The converter
   (#355 pipeline) copies each cash row into its own side file (never the fill
@@ -63,7 +96,8 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   from the manifest tunables (`bk.params()`); the kernel's `--spread-arb-*` CLI
   flags do not reach Lua strategies (the dylib on_params channel), and shadow
   evolution / evolvable-knob declarations are dylib-surface capabilities the
-  Lua stack does not expose yet (production evolution is off).
+  Lua stack does not expose yet (production evolution is off; #393 adds the
+  manifest-domain opt-in).
 
 - **spread_arb (Lua) gains the #176 long-memory slide gate — default OFF — and
   two percent-unit bugs are fixed.** `entry_trend_window_sec` (0 = off) +

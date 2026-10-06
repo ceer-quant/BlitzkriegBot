@@ -29,3 +29,25 @@ export function versionBadge(v: SystemVersion | null | undefined): VersionBadge 
 export function revisionText(gitHash: string): string {
   return gitHash === 'nogit' ? '无法指认修订号' : gitHash
 }
+
+/**
+ * 「暂存下载」的依赖链提示（issue 393 ④）—— 与徽章同源的三态读法。
+ *
+ * 暂存有两道前置：autoUpdate ON，且检查得出了「可更新」结论。此前这条依赖链
+ * 只活在按钮的 hover tooltip 里，灰按钮看起来像坏了而不是 INV-3 的承诺；
+ * 提示文案进页面内联，三态分支（未检查 / 已最新 / 可更新）在这里逐个可分辨，
+ * 页面不自己解三态 —— 同 versionBadge 的判据同源纪律。
+ */
+export function stageDependencyHint(v: SystemVersion | null | undefined): string {
+  if (!v) return ''
+  if (!v.autoUpdate) {
+    return '暂存下载需要两步：先开「自动更新」，再「检查更新」得出可更新结论 —— 现在缺第一步。'
+  }
+  if (v.updateAvailable === null) {
+    return '暂存下载需要「检查更新」先得出可更新结论 —— 现在还没有检查结论。'
+  }
+  if (v.updateAvailable === false) {
+    return '暂存下载需要「检查更新」先得出可更新结论 —— 刚才的检查结论是已是最新。'
+  }
+  return ''
+}

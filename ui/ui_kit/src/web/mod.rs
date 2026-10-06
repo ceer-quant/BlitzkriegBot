@@ -1630,20 +1630,31 @@ impl WebServer {
         serde_json::json!({ "started": true }).to_string()
     }
 
-    /// The 自动更新 switch write: `{"autoUpdate": bool}` in, the kernel's own
-    /// echo out. Inline (fast), and the kernel persists it — a switch that did
-    /// not land on disk is an error the card shows verbatim.
+    /// The update switches write (#393): `{"autoUpdate": bool}` and/or
+    /// `{"checkEnabled": bool}` in, the kernel's own echo out. Inline (fast),
+    /// and the kernel persists it — a switch that did not land on disk is an
+    /// error the card shows verbatim. An absent key leaves that switch exactly
+    /// as the kernel holds it (`system.update.configure` takes both keys
+    /// optional), and the reply carries BOTH values so the panel re-renders
+    /// from kernel state, never from the request.
     fn version_configure(&self, body: &str) -> String {
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(body);
-        let on = parsed
-            .ok()
+        let doc = parsed.ok();
+        let auto = doc
             .as_ref()
             .and_then(|v| v.get("autoUpdate"))
             .and_then(|b| b.as_bool());
-        let Some(on) = on else {
-            return serde_json::json!({ "ok": false, "error": "body must be {\"autoUpdate\": bool}" })
-                .to_string();
-        };
+        let check = doc
+            .as_ref()
+            .and_then(|v| v.get("checkEnabled"))
+            .and_then(|b| b.as_bool());
+        if auto.is_none() && check.is_none() {
+            return serde_json::json!({
+                "ok": false,
+                "error": "body must carry {\"autoUpdate\": bool} and/or {\"checkEnabled\": bool}"
+            })
+            .to_string();
+        }
         let socket = self
             .snapshot_src
             .lock()
@@ -1653,10 +1664,13 @@ impl WebServer {
             return serde_json::json!({ "ok": false, "error": "no core socket" }).to_string();
         }
         let mut client = IpcClient::new(socket);
-        match client.update_configure(None, Some(on)) {
-            Ok(v) => {
-                serde_json::json!({ "ok": true, "autoUpdate": v.get("autoUpdate") }).to_string()
-            }
+        match client.update_configure(check, auto) {
+            Ok(v) => serde_json::json!({
+                "ok": true,
+                "autoUpdate": v.get("autoUpdate"),
+                "checkEnabled": v.get("checkEnabled"),
+            })
+            .to_string(),
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
         }
     }
@@ -1973,6 +1987,14 @@ impl WebServer {
                 // the gateway shapes nothing.
                 self.proxy_backtest_body("blueprint.save", &req.body)
             }
+            ("POST", "/api/blueprint/load") => {
+                // #393: the editor's preload read — the body IS the
+                // `blueprint.load` params object (`{name}`), forwarded
+                // verbatim. Read-only kernel-side; a package that was never
+                // written by blueprint.save refuses with a message the card
+                // shows inline.
+                self.proxy_backtest_body("blueprint.load", &req.body)
+            }
             ("GET", "/api/risk-limits") => {
                 // E26 (§4.4): the settings page's risk card reads the EFFECTIVE
                 // systemic limits through the SAME core client the snapshot
@@ -2157,7 +2179,8 @@ impl WebServer {
                 )
             }
             ("POST", "/api/version/configure") => {
-                // The 自动更新 switch: {"autoUpdate": bool}. Inline is fine —
+                // The update switches (#393): {"autoUpdate": bool} and/or
+                // {"checkEnabled": bool} — at least one. Inline is fine —
                 // the kernel answers in milliseconds (a small file write plus
                 // an audit line).
                 (
