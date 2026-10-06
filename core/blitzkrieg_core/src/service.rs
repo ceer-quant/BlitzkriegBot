@@ -289,6 +289,24 @@ pub struct CoreConfig {
     /// Default `false`: every default run keeps the historical byte-for-byte
     /// tick behaviour, evaluations counter included.
     pub backtest_fast: bool,
+    /// Issue #390 (replay nofast): the maintenance grid the replay drives the
+    /// core on (ms). The deadline-scheduled exit ladder backfills its counter
+    /// ratchets over this step, so the core must know the schedule the caller
+    /// runs. Default 50 ms — the live server's interval, the backtester's
+    /// default and every shipped replay's step. Only read when
+    /// `backtest_fast` is false and an engine drives positions (the nofast
+    /// replay shape); every other path ignores it.
+    pub tick_schedule_ms: i64,
+    /// Issue #390: the replay maintenance scheduling. `true` makes the core
+    /// apply the deadline-driven maintenance gates (Lua eval dirty-wake,
+    /// settlement sync, escalation sweep, kline beat, exit-ladder schedule)
+    /// to the NOFAST replay path — the same output-preserving gates
+    /// `backtest_fast` applies, minus the all-holder skip (a nofast replay
+    /// observes the ladder's suppressed-stop reports, so the ladder still
+    /// runs on its schedule). Set ONLY by the replay driver; a live kernel
+    /// keeps the historic every-tick behaviour on every path. Default
+    /// `false`.
+    pub replay_scheduling: bool,
 }
 
 impl CoreConfig {
@@ -772,6 +790,12 @@ impl Default for CoreConfig {
             // Replay fast path: off by default — historical tick behaviour is
             // byte-for-byte until the operator opts in with --backtest-fast.
             backtest_fast: false,
+            // Issue #390: the maintenance grid the exit ladder's deadline
+            // schedule backfills over (the replay driver's tick step).
+            tick_schedule_ms: 50,
+            // Issue #390: replay maintenance scheduling off by default — the
+            // live kernel stays every-tick on every path.
+            replay_scheduling: false,
         }
     }
 }
@@ -1344,6 +1368,16 @@ pub struct Core {
     fast_last_eval_ms: i64,
     /// Replay fast path: virtual time of the last kline-preview pass.
     fast_last_kline_ms: i64,
+    /// Issue #390 (replay nofast): the next virtual instant one of the
+    /// every-tick maintenance passes whose OUTPUT the replay observes can
+    /// change — the earliest open position's expiry passes (`TimeExit`/
+    /// `ForceExit`/`StaleProfit`/`StagnantProfit`/settlement track, all of
+    /// them clocks), or the 1 s throttle beats (suppressed-stop reports, held
+    /// exits, accounting audit). The exit LADDER is scheduled against this
+    /// deadline, dirty tokens, and its own 1 s report beat; everything else
+    /// this flag covers already rides its own deadline in `tick`.
+    /// `i64::MAX` = nothing scheduled.
+    fast_next_exit_deadline_ms: i64,
 }
 
 /// F4: what a fill-driven full close changed, so a later FAILED status for the
@@ -1376,6 +1410,137 @@ const FAST_EVAL_FALLBACK_MS: i64 = 2_000;
 /// the base path) runs at most this often on quiet ticks — the previews are
 /// live-panel decoration, never a backtest report input.
 const FAST_KLINE_MIN_MS: i64 = 250;
+
+/// Issue #390 (replay nofast): the exit ladder re-runs at least this often on
+/// quiet ticks. Bounds every THROTTLED report the ladder feeds — suppressed
+/// stops (`stop_suppression_repeat_sec` in shipped configs is 1 s+; the
+/// throttle itself decides what is emitted) and the held-exit / escalation
+/// reports (`check_exits` stamps them from its own run) — so their
+/// time-quantised stamps stay exactly what the every-tick pass produced.
+const EXIT_REPORT_BEAT_MS: i64 = 1_000;
+
+impl Core {
+    /// Issue #390: whether THIS core runs the replay maintenance scheduling —
+    /// the deadline-driven gates the fast path pioneered, applied to the
+    /// nofast replay. `backtest_fast` implies it (the fast path is the same
+    /// scheduling plus the all-holder skip); the nofast replay opts in
+    /// through `replay_scheduling`; a live kernel never does.
+    fn replay_sched(&self) -> bool {
+        self.config.backtest_fast || self.config.replay_scheduling
+    }
+
+    /// Issue #390 (replay deadline jump): the earliest virtual instant any
+    /// time-driven kernel gate can next produce output, when the replay
+    /// scheduler is in force. `None` on a live kernel or an unconfigured
+    /// clock — the caller must then keep stepping every tick. The driver
+    /// lands its grid on this instant (clamped forward to the grid), runs
+    /// the tick, and RE-READS the wake: every step re-arms at least one
+    /// deadline here, so the loop cannot stall and never needs to guess
+    /// when a gate's deadline moves.
+    ///
+    /// What must NOT appear here, by design:
+    ///   * engine inputs (books/tops/rounds/verdicts) — they are events, and
+    ///     the driver stops on the first grid tick after every event batch
+    ///     regardless of this clock;
+    ///   * strategy-signal exit consumption — intents enqueued by an
+    ///     evaluation are consumed by the NEXT tick's exit pass by
+    ///     construction (the driver forces the next grid tick after any
+    ///     evaluation that produced one), never a scheduled wake;
+    ///   * place/policy cooldowns and backoffs — submission-path checks on
+    ///     the place call itself, never a timer sweep.
+    pub fn next_replay_wake_ms(&self, now_ms: i64) -> Option<i64> {
+        if !self.replay_sched() {
+            return None;
+        }
+        // `now_ms` arrives as (next grid point - 1): a ">=" gate due exactly
+        // at the next grid point must land THERE, so the probe filters on
+        // t > now_ms (t >= next grid point), not t > next.
+        let mut best = i64::MAX;
+        let consider = |t: i64, best: &mut i64| {
+            // `i64::MAX` (and the "never armed" 0, superseded by the first
+            // tick's own re-arm) is no wake — the gate's owner armed nothing.
+            if t > now_ms && t < *best && t != i64::MAX {
+                *best = t;
+            }
+        };
+        consider(self.fast_next_timing_ms, &mut best);
+        // The eval fallback fires at the first grid tick at or after
+        // last_eval + window — the exact tick the every-tick walk used.
+        consider(
+            self.fast_last_eval_ms
+                .saturating_add(FAST_EVAL_FALLBACK_MS),
+            &mut best,
+        );
+        consider(self.fast_next_exit_deadline_ms, &mut best);
+        consider(self.fast_next_escalation_ms, &mut best);
+        consider(self.fast_next_expiry_ms, &mut best);
+        consider(self.settlement.next_query_deadline_ms(), &mut best);
+        consider(self.settlement.next_redemption_ms(), &mut best);
+        for cd in self.place_cooldowns.values() {
+            consider(cd.next_ok_ms, &mut best);
+        }
+        for until in self.policy_cooldowns.values() {
+            consider(*until, &mut best);
+        }
+        for leg in &self.inflight_takers {
+            consider(leg.execute_at_ms, &mut best);
+            consider(leg.report_at_ms, &mut best);
+        }
+        consider(self.breaker.next_resume_ms(), &mut best);
+        consider(
+            self.audit.last_at_ms
+                .checked_add(self.config.audit_interval_sec.max(0) * 1000)
+                .unwrap_or(i64::MAX),
+            &mut best,
+        );
+        consider(
+            (crate::position::utc_day_index(now_ms) + 1) * crate::position::DAY_MS,
+            &mut best,
+        );
+        if best == i64::MAX {
+            None
+        } else {
+            Some(best)
+        }
+    }
+
+    /// Issue #390 (replay deadline jump): the `evaluations` feed counter
+    /// advances once per scheduled cycle (tick) even when the cycle's Lua
+    /// evaluation is skipped — the sparse-cadence contract pins the SCHEDULED
+    /// count, not the wall cost. A driver that lands on a subset of the grid
+    /// must credit the cycles it did not run, or the report's feed block
+    /// (and the tests that pin it) see a count that disagrees with the
+    /// cycle schedule the replay simulated.
+    pub fn replay_credit_cycles(&mut self, cycles: u64) {
+        // `engine_evaluate` counts only when an engine is installed; the
+        // credit must mirror that exactly or engine-less sweeps would see a
+        // counter the base never produced.
+        if self.engine.is_some() {
+            self.stats.evaluations = self.stats.evaluations.saturating_add(cycles);
+        }
+    }
+
+    /// Issue #390 (replay deadline jump): true when the driver may land on a
+    /// subset of the maintenance grid. Two disqualifiers: replay scheduling
+    /// itself is off (the every-tick walk IS the contract), or Shadow
+    /// Evolution is enabled — its per-tick evaluation cadence is part of its
+    /// observed behaviour, so a jumping driver must not skip cycles under it.
+    pub fn replay_jump_allowed(&self) -> bool {
+        self.replay_sched() && !self.shadow_evolution.is_enabled()
+    }
+
+    /// Issue #390 (replay deadline jump): true when THIS tick left state
+    /// that the immediately following grid tick consumes — strategy exit
+    /// intents awaiting their consuming exit pass, or a dirty flag
+    /// (orders/positions) a scheduled pass would have observed there. The
+    /// jumping driver forces that landing; skipping it could move a stamp
+    /// or a verdict the every-tick walk produced.
+    pub fn has_forced_next_tick(&self) -> bool {
+        !self.strategy_exits.is_empty()
+            || self.fast_orders_dirty
+            || self.fast_positions_dirty
+    }
+}
 
 impl Core {
     pub fn new(config: CoreConfig) -> Self {
@@ -1666,6 +1831,8 @@ impl Core {
             fast_next_expiry_ms: 0,
             fast_last_eval_ms: 0,
             fast_last_kline_ms: 0,
+            // Issue #390 (nofast): 0 = due on the first tick.
+            fast_next_exit_deadline_ms: 0,
         }
     }
 
@@ -3094,19 +3261,19 @@ impl Core {
         match &ev {
             crate::engine::DataEvent::Book { .. } => {
                 self.stats.books += 1;
-                if self.config.backtest_fast {
+                if self.replay_sched() {
                     self.fast_eval_wake = true;
                 }
             }
             crate::engine::DataEvent::TopOfBook { .. } => {
                 self.stats.tops += 1;
-                if self.config.backtest_fast {
+                if self.replay_sched() {
                     self.fast_eval_wake = true;
                 }
             }
             crate::engine::DataEvent::Spot { .. } => {
                 self.stats.spots += 1;
-                if self.config.backtest_fast {
+                if self.replay_sched() {
                     self.fast_eval_wake = true;
                 }
             }
@@ -3126,7 +3293,7 @@ impl Core {
                 ..
             } => {
                 self.stats.resolutions += 1;
-                if self.config.backtest_fast {
+                if self.replay_sched() {
                     self.fast_eval_wake = true;
                 }
                 self.on_market_resolution(
@@ -3179,7 +3346,7 @@ impl Core {
                 // Replay fast path: a rollover replaces the scanner's market
                 // list and restarts the round clock — the next evaluation sees
                 // a different round context, and the timing verdict flips.
-                if self.config.backtest_fast {
+                if self.replay_sched() {
                     self.fast_eval_wake = true;
                     self.fast_next_timing_ms = now_ms;
                 }
@@ -3273,10 +3440,11 @@ impl Core {
 
         // Replay fast path: the mirrored book is the ONLY input a position's
         // marks can move on between events, so record the token as dirty.
-        // Consumed (and cleared) by the next maintenance tick.
-        if self.config.backtest_fast
-            && let Some(token) = &mirrored_token
-        {
+        // Consumed (and cleared) by the next maintenance tick. #390: the
+        // nofast replay needs the same wake — its ladder runs on deadlines
+        // plus dirty tokens, so a book event must reach the next tick's pass
+        // there too. The set is a pure dirty marker; both paths consume it.
+        if let Some(token) = &mirrored_token {
             self.fast_dirty_tokens.insert(token.clone());
         }
 
@@ -3422,13 +3590,17 @@ impl Core {
         // The evaluations COUNTER still advances every cycle: the sparse-
         // cadence contract (`sparse_stream_evaluates_every_due_cycle`) pins
         // the scheduled cycle count, not the wall cost of one cycle.
-        if self.config.backtest_fast
+        // #390: the nofast replay runs the same gates through
+        // `replay_scheduling` — the strategy surface it observes (signals,
+        // fills, trades) is identical, and the eval-call health counter is
+        // host diagnostic, not replay semantics.
+        if self.replay_sched()
             && !self.shadow_evolution.is_enabled()
             && !self.fast_eval_due(now_ms)
         {
             return 0;
         }
-        if self.config.backtest_fast {
+        if self.replay_sched() {
             // A real evaluation consumes the wake; the timing boundary is
             // recomputed after the engine borrow ends (below).
             self.fast_eval_wake = false;
@@ -3442,6 +3614,9 @@ impl Core {
         // process re-anchors its variant sets (compound mutants) without an
         // operator. The check itself is one comparison per cycle.
         self.shadow_evolution_maybe_cycle(now_ms);
+        // #390: read before the engine borrow opens (the re-arm below uses it
+        // while `engine` is still mutably borrowed).
+        let replay_sched = self.replay_sched();
         let engine = self.engine.as_mut().expect("engine present");
         // #202: the equity-relative sizing is a percentage of the account, and
         // the account is the ledger — pushed here, once per cycle, so a ticket
@@ -3453,8 +3628,9 @@ impl Core {
         let orders = engine.evaluate(now_ms);
         // Replay fast path: recompute when the round-timing verdict can next
         // flip — quiet ticks skip the Lua call until then (or the fallback
-        // beat, or a new engine input).
-        if self.config.backtest_fast {
+        // beat, or a new engine input). #390: nofast replay re-arms the same
+        // boundary. (`replay_sched` was read before the engine borrow opened.)
+        if replay_sched {
             self.fast_next_timing_ms = engine.next_timing_boundary_ms(now_ms).unwrap_or(i64::MAX);
         }
         // E30 (§6.3): drain the sandbox poison alerts now; each is raised as
@@ -5267,7 +5443,7 @@ impl Core {
         // and the equity push feeds sizing — the next evaluation must run so
         // its output lands at the same virtual instant the every-tick pass
         // would have produced it.
-        if self.config.backtest_fast {
+        if self.replay_sched() {
             self.fast_orders_dirty = true;
             self.fast_eval_wake = true;
         }
@@ -5360,11 +5536,13 @@ impl Core {
         let px = d.price;
         let token = &d.token_id;
         // Replay fast path: a fill is the one thing that changes the position
-        // set (open/close/drop) and the token's mark.
-        if self.config.backtest_fast {
+        // set (open/close/drop) and the token's mark. #390: the nofast
+        // replay's deadline-scheduled ladder reads the same marker — a fill
+        // is a book-level input to the ladder's next verdict.
+        if self.replay_sched() {
             self.fast_positions_dirty = true;
-            self.fast_dirty_tokens.insert(token.clone());
         }
+        self.fast_dirty_tokens.insert(token.clone());
         match d.side {
             Side::Buy => {
                 let existing = self
@@ -5535,7 +5713,7 @@ impl Core {
         // Replay fast path: the position set changed (merge/settlement/exit
         // close all funnel here) — the settlement watch and audit input must
         // resync on the next tick.
-        if self.config.backtest_fast {
+        if self.replay_sched() {
             self.fast_positions_dirty = true;
         }
         // The pending-close reason for this token died with the position it
@@ -6641,7 +6819,7 @@ impl Core {
         }
         // Replay fast path: a placed order is a live order — the escalation
         // sweep and the audit input changed.
-        if outcome.is_ok() && self.config.backtest_fast {
+        if outcome.is_ok() && self.replay_sched() {
             self.fast_orders_dirty = true;
         }
         outcome
@@ -7236,7 +7414,7 @@ impl Core {
         self.ome.mark_terminal(id, OrderStatus::Cancelled, now_ms)?;
         // Replay fast path: a live order just left the book — the escalation
         // sweep and the audit input changed.
-        if was_live && self.config.backtest_fast {
+        if was_live && self.replay_sched() {
             self.fast_orders_dirty = true;
         }
         // The venue may still hold the order resting: hand its id to the live
@@ -7445,7 +7623,7 @@ impl Core {
         // changes, or when the earliest open position's expiry passes (that is
         // the instant `track_markets` would first admit the market). Between
         // those, the scan re-derives the same list — skip it.
-        if self.config.backtest_fast
+        if self.replay_sched()
             && !self.fast_positions_dirty
             && now_ms < self.fast_next_expiry_ms
         {
@@ -7470,7 +7648,7 @@ impl Core {
                 self.settlement.forget_market(&condition_id);
             }
         }
-        if self.config.backtest_fast {
+        if self.replay_sched() {
             self.fast_positions_dirty = false;
             // The next expiry wake is the earliest expiry still IN THE
             // FUTURE. An already-expired position needs no wake: it is
@@ -8029,9 +8207,9 @@ impl Core {
         // FAST_KLINE_MIN_MS beat instead of every 50 ms — the previews are
         // live-panel decoration, never a backtest report input.
         let kline_pass =
-            !self.config.backtest_fast || now_ms - self.fast_last_kline_ms >= FAST_KLINE_MIN_MS;
+            !self.replay_sched() || now_ms - self.fast_last_kline_ms >= FAST_KLINE_MIN_MS;
         if kline_pass {
-            if self.config.backtest_fast {
+            if self.replay_sched() {
                 self.fast_last_kline_ms = now_ms;
             }
             if let Some(engine) = self.engine.as_ref() {
@@ -8065,7 +8243,7 @@ impl Core {
         // skipped until the position set changes, the earliest expiry passes,
         // or a deadline arrives. A skipped tick would have dispatched nothing
         // and stamped nothing, so every dispatch keeps its exact stamp.
-        let settlement_pass = !self.config.backtest_fast
+        let settlement_pass = !self.replay_sched()
             || self.fast_positions_dirty
             || now_ms >= self.fast_next_expiry_ms
             || now_ms >= self.settlement.next_query_deadline_ms()
@@ -8131,9 +8309,21 @@ impl Core {
         // returns would skip the clear) so it never becomes a permanent
         // over-approximation. Inserts landing between here and the next
         // tick's exit pass are events that arrive after this point by
-        // construction, so nothing is lost.
-        if self.config.backtest_fast {
-            self.fast_dirty_tokens.clear();
+        // construction, so nothing is lost. #390 (nofast): the same set wakes
+        // the deadline-scheduled ladder, so it is cleared here on the nofast
+        // path too — after `run_exit_checks` had its look.
+        self.fast_dirty_tokens.clear();
+        if self.replay_sched() && !self.config.backtest_fast {
+            // #390 (merged maintenance): re-arm the single maintenance
+            // deadline — the merged pass's own 1 s beat (report stamps are
+            // quantised here in the base) plus the earliest position expiry
+            // (time-to-expiry rules). Between these, a quiet grid re-observes
+            // the previous run's inputs; dirty tokens wake the pass early on
+            // their own.
+            self.fast_next_exit_deadline_ms = self
+                .positions
+                .next_maintenance_deadline_ms(now_ms, EXIT_REPORT_BEAT_MS)
+                .unwrap_or(i64::MAX);
         }
 
         // #177: a protective stop the wick guard withheld is an event, not a
@@ -8146,12 +8336,12 @@ impl Core {
         // deadline has arrived — between those, no `escalate_at_ms` can be
         // due (arming never moves a deadline earlier than the sweep that
         // would notice it recomputes the floor).
-        if !self.config.backtest_fast
+        if !self.replay_sched()
             || self.fast_orders_dirty
             || now_ms >= self.fast_next_escalation_ms
         {
             self.run_escalation_sweep(now_ms)?;
-            if self.config.backtest_fast {
+            if self.replay_sched() {
                 self.fast_orders_dirty = false;
                 self.fast_next_escalation_ms = self.ome.next_escalation_ms();
             }
@@ -8310,6 +8500,37 @@ impl Core {
         // with no complete pair behind it is dropped like every intent.
         // Runs BEFORE any book borrow: a merge is priced by construction
         // ($0.50 per leg), never off a quote.
+        // Read the live books through a shared immutable borrow instead of
+        // cloning the whole map per tick: the valuate/check_exits closure only
+        // needs the few tokens behind open positions, not every mirrored book.
+        // (Scoped before the merge interception: the closure must drop before
+        // the merge's `&mut self` calls.)
+        // Issue #390 (replay scheduling, marks only): the base's every-tick
+        // valuate advances `current_price`/`prev_price`/`last_book_ts` before
+        // its ladder runs, and consumers priced off the mark between the two
+        // passes (strategy-signal exits below) see the fresh quote. The merged
+        // replay pass reproduces that ordering with a mark-only refresh —
+        // dirty tokens on a skip tick (only their book changed), every
+        // position on a run tick — and leaves the counter ratchet to the
+        // interval backfill inside the ladder.
+        if !self.config.backtest_fast {
+            let marks_all = !self.config.replay_scheduling
+                || !self.fast_dirty_tokens.is_empty()
+                || now_ms >= self.fast_next_exit_deadline_ms;
+            // Issue #390: the scalar projection (BookView) instead of the
+            // full snapshot — the marks refresh reads best_bid/mid_price/
+            // timestamp only, so the two owned level-vector clones and the
+            // token String per position per tick are gone. `from_book` does
+            // the five Decimal reductions ONCE per mirrored book (the
+            // closure runs once per position; identical inputs, Copy output).
+            let book_fn = |token: &str| {
+                self.books
+                    .get(token)
+                    .map(|b| crate::exit_policy::BookView::from_book(b, now_ms))
+            };
+            self.positions
+                .refresh_marks(&book_fn, now_ms, marks_all, &self.fast_dirty_tokens);
+        }
         let (merge_intents, sell_intents): (Vec<_>, Vec<_>) =
             intents.into_iter().partition(|i| i.reason == "merge");
         for intent in merge_intents {
@@ -8356,19 +8577,6 @@ impl Core {
 
         // Always re-value open positions from the latest books so the dashboard's
         // unrealized PnL / HWM move even when automated exits are disabled.
-        // Read the live books through a shared immutable borrow instead of
-        // cloning the whole map per tick: the valuate/check_exits closure only
-        // needs the few tokens behind open positions, not every mirrored book.
-        let book_fn = |token: &str| {
-            self.books.get(token).map(|b| {
-                crate::model::OrderbookSnapshot::from_levels(
-                    token.to_string(),
-                    b.bids.clone(),
-                    b.asks.clone(),
-                    now_ms,
-                )
-            })
-        };
         // Replay fast path (--backtest-fast): when EVERY registered strategy
         // holds to settlement and the kernel settles locally, every ladder
         // verdict against an open position is discarded by the settlement-
@@ -8383,10 +8591,30 @@ impl Core {
                 .engine
                 .as_ref()
                 .is_some_and(|e| e.all_strategies_hold_to_settlement());
+        // Issue #390: the scalar projection (BookView) instead of the full
+        // snapshot — the ladder reads best_bid/best_ask/mid_price/depths/
+        // timestamp and never the level vectors, so the two owned clones and
+        // the token String per position per tick disappear; the reductions
+        // run once per mirrored book and the Copy result is passed by value.
+        let book_fn = |token: &str| {
+            self.books
+                .get(token)
+                .map(|b| crate::exit_policy::BookView::from_book(b, now_ms))
+        };
         if all_hold {
             self.positions
                 .valuate_dirty_tokens(&book_fn, now_ms, &self.fast_dirty_tokens);
-        } else {
+        } else if !self.config.replay_scheduling || self.config.backtest_fast {
+            // Legacy spelling (live kernels and plain --backtest-fast without
+            // all-hold): the base's every-tick valuate, unchanged.
+            //
+            // Issue #390 (replay scheduling): this pass is MERGED into the
+            // gated ladder below — its state update there runs at the 2×
+            // backfill rate (the base advances the counter ratchet twice per
+            // tick: once here, once in the ladder), and the mark-only refresh
+            // above carries `current_price`/`prev_price`/`last_book_ts`.
+            // Running the full valuate too would double the ratchet again on
+            // run ticks and is pure idempotent re-observation on skip ticks.
             self.positions.valuate(&book_fn, now_ms);
         }
         let intents = sell_intents;
@@ -8443,7 +8671,41 @@ impl Core {
             |pos: &crate::position::OpenPosition| settlement_holders.contains(&pos.strategy);
 
         if self.config.auto_exits_enabled && !all_hold {
-            for req in self.positions.check_exits(&book_fn, now_ms) {
+            // Issue #390 (replay nofast): the ladder runs on its deadline
+            // schedule instead of every tick — dirty tokens (a book arrived
+            // for a held position), the exit-deadline clock (expiry/
+            // force-exit/throttle beats), or the 1 s report beat that keeps
+            // every time-quantised alert stamp the every-tick pass produced.
+            // The nofast replay observes every verdict, so the schedule below
+            // is output-preserving by construction: a skipped tick's only
+            // durable effect on the ladder is the counter ratchet, which the
+            // interval-compensated state update backfills. Every timestamp
+            // still stamps the tick that actually fires.
+            // `interval_mode` is the #390 merged-maintenance spelling —
+            // nofast replay ONLY. The fast path stays on the legacy
+            // per-tick `valuate_one`: its all-holder filter discards every
+            // ladder verdict anyway, so the merged pass buys it nothing,
+            // while the per-position run ledger the merged pass maintains
+            // showed up as a measurable regression (68s → 90s full corpus).
+            let (ladder_run, interval_mode) = if self.config.backtest_fast {
+                (true, false)
+            } else if self.config.replay_scheduling {
+                (
+                    !self.fast_dirty_tokens.is_empty()
+                        || now_ms >= self.fast_next_exit_deadline_ms,
+                    true,
+                )
+            } else {
+                (true, false)
+            };
+            for req in self.positions.check_exits_interval(
+                &book_fn,
+                now_ms,
+                ladder_run,
+                interval_mode,
+                self.config.tick_schedule_ms,
+                &self.fast_dirty_tokens,
+            ) {
                 let Some(pos) = self
                     .positions
                     .open_positions()
@@ -8534,7 +8796,21 @@ impl Core {
         // so between dirty cycles there is no residual to re-close — the
         // scan is skipped with the ladder (still runs on the non-fast path
         // and whenever any non-holder strategy is registered).
-        if self.config.auto_exits_enabled && !all_hold {
+        // Issue #390 (replay scheduling): the scan's inputs move only when an
+        // ORDER event lands (a sell fills, a late entry fills) or when the
+        // ladder actually ran (its verdicts can place/complete sells) —
+        // gating it to those ticks reproduces the every-tick scan: a quiet
+        // tick re-reads the same (live sells, filled-since, open positions)
+        // and would emit nothing. `fast_orders_dirty` is the #388 order-set
+        // wake, maintained on both replay paths.
+        let residual_scan = if self.config.backtest_fast {
+            true
+        } else if self.config.replay_scheduling {
+            self.fast_orders_dirty || now_ms >= self.fast_next_exit_deadline_ms
+        } else {
+            true
+        };
+        if self.config.auto_exits_enabled && !all_hold && residual_scan {
             for pos in self.positions.open_positions().to_vec() {
                 if !has_job.insert(pos.id.clone()) {
                     continue;

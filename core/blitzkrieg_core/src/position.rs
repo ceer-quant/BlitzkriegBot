@@ -6,7 +6,7 @@
 //! the open/closed books, daily PnL, and per-asset/direction cooldowns.
 
 use crate::exit_policy::{
-    ExitConfig, ExitState, ExitTickInput, ExitVerdict, book_age_ms, book_is_fresh,
+    BookView, ExitConfig, ExitState, ExitTickInput, ExitVerdict, book_age_ms, book_is_fresh,
     decide_exit_verdict, effective_stop_pct, executable_bid, pnl_pct, reference_price,
     update_exit_state,
 };
@@ -125,7 +125,7 @@ impl Default for PositionConfig {
 }
 
 /// Milliseconds in one UTC day.
-const DAY_MS: i64 = 86_400_000;
+pub const DAY_MS: i64 = 86_400_000;
 
 /// The UTC day index (days since the Unix epoch) a timestamp falls in.
 ///
@@ -647,6 +647,12 @@ pub struct PositionManager {
     /// so the value is always the START of the current run and never a
     /// lifetime total.
     unpriceable_since: std::collections::HashMap<String, i64>,
+    /// Issue #390 (replay nofast): the instant this position's exit ladder last
+    /// RAN, so an interval-scheduled pass can compensate the per-tick counter
+    /// ratchets the skipped ticks would have walked. Written by
+    /// `check_exits_interval` only; every other writer of exit state is a
+    /// per-event path whose clocks stay event-driven.
+    exit_ladder_last_run: std::collections::HashMap<String, i64>,
 }
 
 fn cooldown_key(asset: &str, direction: SignalDirection) -> String {
@@ -701,6 +707,7 @@ impl PositionManager {
             suppressed_stop_count: 0,
             last_suppression_at: Default::default(),
             unpriceable_since: Default::default(),
+            exit_ladder_last_run: Default::default(),
         }
     }
 
@@ -735,6 +742,9 @@ impl PositionManager {
             self.next_id = max_id + 1;
         }
         self.open = positions;
+        // #390: the restored book replaces the in-memory one wholesale —
+        // ladder run stamps of wiped rows must not leak into the new ids.
+        self.exit_ladder_last_run.clear();
     }
     pub fn closed_positions(&self) -> &[ClosedPosition] {
         &self.closed
@@ -1163,7 +1173,8 @@ impl PositionManager {
     pub fn tick(&mut self, position_id: &str, book: Option<&OrderbookSnapshot>, now_ms: i64) {
         let cfg = self.config.exit.clone();
         if let Some(pos) = self.open.iter_mut().find(|p| p.id == position_id) {
-            Self::valuate_one(pos, book, now_ms, &cfg);
+            let view = book.map(BookView::from_snapshot);
+            Self::valuate_one(pos, view.as_ref(), now_ms, &cfg);
         }
     }
 
@@ -1177,7 +1188,7 @@ impl PositionManager {
     /// price off `executable_bid`, which is zero when no bid quotes.
     fn valuate_one(
         pos: &mut OpenPosition,
-        book: Option<&OrderbookSnapshot>,
+        book: Option<&BookView>,
         now_ms: i64,
         cfg: &ExitConfig,
     ) {
@@ -1201,7 +1212,7 @@ impl PositionManager {
     /// Re-value every open position from the latest books (no exit decisions).
     /// Safe to call even when automated exits are disabled, so the dashboard
     /// always shows live unrealized PnL and HWM.
-    pub fn valuate(&mut self, books: &dyn Fn(&str) -> Option<OrderbookSnapshot>, now_ms: i64) {
+    pub fn valuate(&mut self, books: &dyn Fn(&str) -> Option<BookView>, now_ms: i64) {
         let cfg = self.config.exit.clone();
         for pos in self.open.iter_mut() {
             let book = books(&pos.token_id);
@@ -1221,7 +1232,7 @@ impl PositionManager {
     /// stops running on every 50 ms maintenance tick.
     pub fn valuate_dirty_tokens(
         &mut self,
-        books: &dyn Fn(&str) -> Option<OrderbookSnapshot>,
+        books: &dyn Fn(&str) -> Option<BookView>,
         now_ms: i64,
         dirty_tokens: &std::collections::HashSet<String>,
     ) {
@@ -1243,15 +1254,123 @@ impl PositionManager {
     /// recorded HWM share the same quote.
     pub fn check_exits(
         &mut self,
-        books: &dyn Fn(&str) -> Option<OrderbookSnapshot>,
+        books: &dyn Fn(&str) -> Option<BookView>,
         now_ms: i64,
+    ) -> Vec<ExitRequest> {
+        self.check_exits_inner(books, now_ms, false, 0, &std::collections::HashSet::new())
+    }
+
+    /// Issue #390 (replay scheduling): refresh ONLY the display reference
+    /// marks — `current_price` / `prev_price` / `last_book_ts` — without
+    /// touching the exit state (the counter ratchet in particular). The base
+    /// kernel's every-tick valuate advances these marks on every tick and its
+    /// ladder runs right after, so a consumer priced off `current_price`
+    /// between the two passes sees the fresh mark; the merged replay pass
+    /// keeps that ordering visible by refreshing marks separately:
+    ///
+    ///   * on a SKIP tick, only dirty tokens — the base advanced every mark
+    ///     from the same (unchanged) book a quiet re-run would read, so
+    ///     refreshing just the tokens whose book changed reproduces it;
+    ///   * on a RUN tick, every position — the ladder's own state update
+    ///     runs after this and must observe the same marks the base's
+    ///     valuate fed it (strategy-signal exits price off `current_price`).
+    ///
+    /// Deliberately NOT the ladder's `valuate_one`: that would advance the
+    /// counter ratchet the interval backfill already owns.
+    pub fn refresh_marks(
+        &mut self,
+        books: &dyn Fn(&str) -> Option<BookView>,
+        now_ms: i64,
+        all: bool,
+        dirty_tokens: &std::collections::HashSet<String>,
+    ) {
+        for pos in self.open.iter_mut() {
+            if !all && !dirty_tokens.contains(&pos.token_id) {
+                continue;
+            }
+            let book = books(&pos.token_id);
+            let val = reference_price(book.as_ref(), pos.current_price);
+            if val > Decimal::ZERO && pos.current_price != val {
+                pos.prev_price = pos.current_price;
+                pos.current_price = val;
+            }
+            if let Some(b) = book {
+                pos.last_book_ts = if b.timestamp > 0 { b.timestamp } else { now_ms };
+            }
+        }
+    }
+
+    /// Issue #390 (replay nofast): [`check_exits`] on a deadline schedule.
+    ///
+    /// `run_now` forces the ladder to run this tick (first pass, dirty token,
+    /// deadline); otherwise it is skipped and the caller keeps the previous
+    /// verdicts. `tick_boundary_ms` is the replay maintenance grid — the
+    /// skipped-tick count the counter ratchet compensates over. Tokens in
+    /// `dirty_tokens` (books that arrived since the last pass) must run.
+    ///
+    /// Output contract: the sequence of (books × ticks) the every-tick pass
+    /// observes is partitioned by this pass into "runs" and "skips", and a
+    /// skip is exactly a re-observation of the previous run's inputs at a
+    /// later clock — its only durable effect is the counter ratchets, which
+    /// the interval backfill reproduces (`update_exit_state_interval`). The
+    /// timestamps every command and report carries stay `now_ms` — the tick
+    /// the verdict actually fires on.
+    pub fn check_exits_interval(
+        &mut self,
+        books: &dyn Fn(&str) -> Option<BookView>,
+        now_ms: i64,
+        run_now: bool,
+        interval_mode: bool,
+        tick_boundary_ms: i64,
+        dirty_tokens: &std::collections::HashSet<String>,
+    ) -> Vec<ExitRequest> {
+        if !run_now {
+            return Vec::new();
+        }
+        self.check_exits_inner(books, now_ms, interval_mode, tick_boundary_ms, dirty_tokens)
+    }    /// The shared ladder body. `interval_mode` selects the #390 spelling: the
+    /// per-position state update is the merged maintenance update — ONE call
+    /// per run at the DOUBLE (2×) backfill rate, because the base kernel's
+    /// every-tick valuate pass and every-tick ladder each advance the same
+    /// counter ratchet once per tick, and this single run replaces both (the
+    /// per-position last-run ledger of the first #390 spelling is gone: two
+    /// independent 1× backfills over one shared counter disagree with the
+    /// base's joint walk on latch-mid-gap and reset-walk corners). The legacy
+    /// spelling keeps `valuate_one` and never touches a ledger.
+    ///
+    /// The interval branch reuses the legacy tail VERBATIM through
+    /// `finish_exit_tick` (the push/report section below it); only the state
+    /// update differs (`update_exit_state_interval_2x`).
+    fn check_exits_inner(
+        &mut self,
+        books: &dyn Fn(&str) -> Option<BookView>,
+        now_ms: i64,
+        interval_mode: bool,
+        tick_boundary_ms: i64,
+        _dirty_tokens: &std::collections::HashSet<String>,
     ) -> Vec<ExitRequest> {
         let cfg = self.config.exit.clone();
         let mut out = Vec::new();
         let mut withheld: Vec<SuppressedStopEvent> = Vec::new();
         for pos in self.open.iter_mut() {
             let book = books(&pos.token_id);
-            Self::valuate_one(pos, book.as_ref(), now_ms, &cfg);
+            if interval_mode {
+                crate::exit_policy::update_exit_state_interval_2x(
+                    &mut pos.state,
+                    pos.entry_price,
+                    book.as_ref(),
+                    now_ms,
+                    &cfg,
+                    self.exit_ladder_last_run
+                        .get(&pos.id)
+                        .copied()
+                        .unwrap_or(now_ms),
+                    tick_boundary_ms,
+                );
+                self.exit_ladder_last_run.insert(pos.id.clone(), now_ms);
+            } else {
+                Self::valuate_one(pos, book.as_ref(), now_ms, &cfg);
+            }
             // F6: the exit price is an EXECUTABLE bid or nothing. The old code
             // fell back to `pos.current_price` — a stale reference that could
             // be an arbitrary number of seconds old, or a one-sided-book
@@ -1326,7 +1445,7 @@ impl PositionManager {
                 stop_reference,
             } = decide_exit_verdict(ExitTickInput {
                 entry_price: pos.entry_price,
-                book: book.as_ref(),
+                book: book.as_ref().map(|b| b as &dyn crate::exit_policy::BookScalarView),
                 fallback_price: Some(pos.current_price),
                 time_left_sec,
                 hold_sec,
@@ -1452,6 +1571,40 @@ impl PositionManager {
         std::mem::take(&mut self.suppressed_stops)
     }
 
+    /// Issue #390 (replay nofast): the earliest virtual instant the exit
+    /// ladder MUST run again for its verdicts to stay byte-identical to the
+    /// every-tick pass — the earliest open position's expiry (the deadline
+    /// rules TimeExit/ForceExit, the settlement track, and the
+    /// effective-stop ladder are all functions of time-to-expiry). The
+    /// throttle beats and the counter ratchets are bounded by the caller's
+    /// own report beat; dirty tokens wake the pass through the caller's set.
+    /// `None` with no open positions.
+    pub fn next_exit_deadline_ms(&self, now_ms: i64) -> Option<i64> {
+        self.open
+            .iter()
+            .map(|p| p.expires_at_ms)
+            .filter(|t| *t > now_ms)
+            .min()
+    }
+
+    /// Issue #390 (replay scheduling): the earliest clock at which the next
+    /// maintenance run MUST observe something new — the earlier of the next
+    /// position expiry and the next report beat (the 1 s grid that keeps the
+    /// every-1 s alert stamps the every-tick pass produced). A quiet gap
+    /// between this clock and the previous run re-observes the previous run's
+    /// inputs, so the driver may jump the tick grid straight here without
+    /// changing any output: the counter ratchets backfill over the whole gap,
+    /// and nothing else in the maintenance pass reads the elapsed wall.
+    /// `None` with no open positions.
+    pub fn next_maintenance_deadline_ms(&self, now_ms: i64, report_beat_ms: i64) -> Option<i64> {
+        self.open
+            .iter()
+            .map(|p| p.expires_at_ms)
+            .chain(std::iter::once(now_ms.saturating_add(report_beat_ms)))
+            .filter(|t| *t > now_ms)
+            .min()
+    }
+
     /// How many suppressed stops have been reported in this process (panel counter).
     pub fn suppressed_stop_count(&self) -> u64 {
         self.suppressed_stop_count
@@ -1540,6 +1693,9 @@ impl PositionManager {
         self.note_daily_drawdown(now_ms);
         self.last_suppression_at.remove(&pos.id);
         self.unpriceable_since.remove(&pos.id);
+        // #390: the ladder ledger is keyed by position id; a closed id is
+        // never revisited, so drop its run stamp with the position.
+        self.exit_ladder_last_run.remove(&pos.id);
 
         let closed = ClosedPosition {
             id: pos.id,
@@ -1892,7 +2048,7 @@ mod tests {
         let reqs = pm.check_exits(
             &|token| {
                 if token == "tok_BTC" {
-                    Some(one_sided_book(dec!(0.90), now))
+                    Some(BookView::from_snapshot(&one_sided_book(dec!(0.90), now)))
                 } else {
                     None
                 }
@@ -1908,7 +2064,7 @@ mod tests {
         let reqs = pm.check_exits(
             &|token| {
                 if token == "tok_BTC" {
-                    Some(two_sided_book(dec!(0.50), dec!(0.52), now))
+                    Some(BookView::from_snapshot(&two_sided_book(dec!(0.50), dec!(0.52), now)))
                 } else {
                     None
                 }
@@ -1947,7 +2103,7 @@ mod tests {
         let reqs = pm.check_exits(
             &|token| {
                 if token == "tok_BTC" {
-                    Some(two_sided_book(dec!(0.60), dec!(0.62), stale))
+                    Some(BookView::from_snapshot(&two_sided_book(dec!(0.60), dec!(0.62), stale)))
                 } else {
                     None
                 }
@@ -1961,7 +2117,7 @@ mod tests {
         let reqs = pm.check_exits(
             &|token| {
                 if token == "tok_BTC" {
-                    Some(two_sided_book(dec!(0.60), dec!(0.62), now))
+                    Some(BookView::from_snapshot(&two_sided_book(dec!(0.60), dec!(0.62), now)))
                 } else {
                     None
                 }
@@ -2278,7 +2434,7 @@ mod tests {
         // carries no clock (`timestamp 0`), which is the "unknown age counts as
         // fresh" branch of #268 item 1 — not an outage.
         let now = 498_000;
-        let reqs = pm.check_exits(&|_| Some(one_sided_book(dec!(0.90), 0)), now);
+        let reqs = pm.check_exits(&|_| Some(BookView::from_snapshot(&one_sided_book(dec!(0.90), 0))), now);
         assert!(
             reqs.is_empty(),
             "no bid ⇒ no executable price ⇒ no SELL, whatever the judgement said: {reqs:?}"
@@ -2359,7 +2515,7 @@ mod tests {
         let frozen = two_sided_book(dec!(0.50), dec!(0.52), 490_000);
 
         let now = 610_000;
-        let reqs = pm.check_exits(&|_| Some(frozen.clone()), now);
+        let reqs = pm.check_exits(&|_| Some(BookView::from_snapshot(&frozen)), now);
         assert!(
             reqs.is_empty(),
             "a stale bid must not price a SELL: {reqs:?}"
@@ -2383,7 +2539,7 @@ mod tests {
         // Recovery: the same bid, received NOW, is executable again and the held
         // rule exits at it.
         let now = 611_000;
-        let reqs = pm.check_exits(&|_| Some(two_sided_book(dec!(0.50), dec!(0.52), now)), now);
+        let reqs = pm.check_exits(&|_| Some(BookView::from_snapshot(&two_sided_book(dec!(0.50), dec!(0.52), now))), now);
         assert_eq!(
             reqs.len(),
             1,
@@ -2396,7 +2552,7 @@ mod tests {
         // …and the outage clock restarted: the next unpriceable tick counts from
         // itself, so what the escalation reads is a CONTINUOUS outage.
         let now = 612_000;
-        let reqs = pm.check_exits(&|_| Some(frozen.clone()), now);
+        let reqs = pm.check_exits(&|_| Some(BookView::from_snapshot(&frozen)), now);
         assert!(reqs.is_empty());
         let held = pm.drain_suppressed_stops();
         assert_eq!(held.len(), 1, "{held:?}");
@@ -2442,7 +2598,7 @@ mod tests {
 
         let now = 610_000;
         let reqs = pm.check_exits(
-            &|_| Some(two_sided_book(dec!(0.50), dec!(0.52), 490_000)),
+            &|_| Some(BookView::from_snapshot(&two_sided_book(dec!(0.50), dec!(0.52), 490_000))),
             now,
         );
         assert_eq!(
@@ -2492,7 +2648,7 @@ mod tests {
 
         // First unpriceable tick: the clock starts, nothing is escalated yet.
         let now = 501_000;
-        let reqs = pm.check_exits(&|_| Some(frozen.clone()), now);
+        let reqs = pm.check_exits(&|_| Some(BookView::from_snapshot(&frozen)), now);
         assert!(reqs.is_empty());
         assert!(
             pm.drain_suppressed_stops().is_empty(),
@@ -2501,7 +2657,7 @@ mod tests {
 
         // Past `N x` the book budget the same silence is escalated.
         let now = 532_000;
-        let reqs = pm.check_exits(&|_| Some(frozen.clone()), now);
+        let reqs = pm.check_exits(&|_| Some(BookView::from_snapshot(&frozen)), now);
         assert!(reqs.is_empty(), "an outage is never a reason to sell");
         let held = pm.drain_suppressed_stops();
         assert_eq!(held.len(), 1, "{held:?}");

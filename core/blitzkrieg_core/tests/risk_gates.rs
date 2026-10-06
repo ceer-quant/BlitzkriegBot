@@ -297,7 +297,7 @@ fn the_stop_survives_a_dead_quote_a_missing_book_and_a_collapsed_mid() {
     let mut pm = PositionManager::new(PositionConfig::default());
     position(&mut pm, "tok", dec!(0.40), dec!(10), NOW);
     let reqs = pm.check_exits(
-        &|_| Some(book(vec![], vec![(dec!(0.15), dec!(1000))], NOW + 5_000)),
+        &|_| Some(blitzkrieg_core::exit_policy::BookView::from_snapshot(&book(vec![], vec![(dec!(0.15), dec!(1000))], NOW + 5_000))),
         NOW + 5_000,
     );
     assert!(
@@ -384,11 +384,11 @@ fn the_stop_survives_a_dead_quote_a_missing_book_and_a_collapsed_mid() {
     position(&mut pm, "tok", dec!(0.40), dec!(10), NOW);
     let reqs = pm.check_exits(
         &|_| {
-            Some(book(
+            Some(blitzkrieg_core::exit_policy::BookView::from_snapshot(&book(
                 vec![(dec!(0.05), dec!(1000))],
                 vec![(dec!(0.075), dec!(1000))],
                 NOW + 5_000,
-            ))
+            )))
         },
         NOW + 5_000,
     );
@@ -421,7 +421,7 @@ fn a_one_sided_book_still_judges_the_protective_stop() {
     let mut pm = PositionManager::new(PositionConfig::default());
     position(&mut pm, "tok", dec!(0.40), dec!(10), NOW);
     let reqs = pm.check_exits(
-        &|_| Some(book(vec![], vec![(dec!(0.15), dec!(1000))], NOW + 5_000)),
+        &|_| Some(blitzkrieg_core::exit_policy::BookView::from_snapshot(&book(vec![], vec![(dec!(0.15), dec!(1000))], NOW + 5_000))),
         NOW + 5_000,
     );
     assert!(
@@ -466,7 +466,7 @@ fn a_one_sided_book_still_judges_the_protective_stop() {
     let mut pm = PositionManager::new(PositionConfig::default());
     position(&mut pm, "tok", dec!(0.40), dec!(10), NOW);
     let reqs = pm.check_exits(
-        &|_| Some(book(vec![], vec![(dec!(0.90), dec!(1000))], NOW + 5_000)),
+        &|_| Some(blitzkrieg_core::exit_policy::BookView::from_snapshot(&book(vec![], vec![(dec!(0.90), dec!(1000))], NOW + 5_000))),
         NOW + 5_000,
     );
     assert!(reqs.is_empty(), "no bid ⇒ nothing to place");
@@ -493,7 +493,7 @@ fn a_one_sided_book_still_judges_the_protective_stop() {
         NOW + 3_000,
     );
     let reqs = pm.check_exits(
-        &|_| Some(book(vec![], vec![(dec!(0.90), dec!(1000))], NOW + 5_000)),
+        &|_| Some(blitzkrieg_core::exit_policy::BookView::from_snapshot(&book(vec![], vec![(dec!(0.90), dec!(1000))], NOW + 5_000))),
         NOW + 5_000,
     );
     assert!(reqs.is_empty(), "no bid ⇒ nothing to place");
@@ -513,7 +513,7 @@ fn a_one_sided_book_still_judges_the_protective_stop() {
     let mut pm = PositionManager::new(PositionConfig::default());
     position(&mut pm, "tok", dec!(0.40), dec!(10), NOW);
     let reqs = pm.check_exits(
-        &|_| Some(book(vec![(dec!(0.15), dec!(1000))], vec![], NOW + 5_000)),
+        &|_| Some(blitzkrieg_core::exit_policy::BookView::from_snapshot(&book(vec![(dec!(0.15), dec!(1000))], vec![], NOW + 5_000))),
         NOW + 5_000,
     );
     assert_eq!(reqs.len(), 1, "a live bid must still close a breached stop");
@@ -531,7 +531,7 @@ fn a_one_sided_book_still_judges_the_protective_stop() {
     // when there is genuinely nothing to say.
     let mut pm = PositionManager::new(PositionConfig::default());
     position(&mut pm, "tok", dec!(0.40), dec!(10), NOW);
-    let reqs = pm.check_exits(&|_| Some(book(vec![], vec![], NOW + 5_000)), NOW + 5_000);
+    let reqs = pm.check_exits(&|_| Some(blitzkrieg_core::exit_policy::BookView::from_snapshot(&book(vec![], vec![], NOW + 5_000))), NOW + 5_000);
     assert!(reqs.is_empty(), "an empty book must not mint a SELL");
     assert!(
         pm.drain_suppressed_stops().is_empty(),
@@ -553,7 +553,7 @@ fn a_one_sided_book_still_judges_the_protective_stop() {
         )),
         NOW + 3_000,
     );
-    let reqs = pm.check_exits(&|_| Some(book(vec![], vec![], NOW + 4_000)), NOW + 4_000);
+    let reqs = pm.check_exits(&|_| Some(blitzkrieg_core::exit_policy::BookView::from_snapshot(&book(vec![], vec![], NOW + 4_000))), NOW + 4_000);
     assert!(reqs.is_empty(), "an empty book must not mint a SELL");
     let events = pm.drain_suppressed_stops();
     assert_eq!(events.len(), 1, "the held stop must be reported");
@@ -566,11 +566,11 @@ fn a_one_sided_book_still_judges_the_protective_stop() {
     position(&mut pm, "tok", dec!(0.40), dec!(10), NOW);
     let reqs = pm.check_exits(
         &|_| {
-            Some(book(
+            Some(blitzkrieg_core::exit_policy::BookView::from_snapshot(&book(
                 vec![(dec!(0.10), dec!(1000))],
                 vec![(dec!(0.12), dec!(1000))],
                 NOW + 5_000,
-            ))
+            )))
         },
         NOW + 5_000,
     );
@@ -584,11 +584,11 @@ fn a_one_sided_book_still_judges_the_protective_stop() {
     position(&mut pm, "tok", dec!(0.40), dec!(10), NOW);
     let reqs = pm.check_exits(
         &|_| {
-            Some(book(
+            Some(blitzkrieg_core::exit_policy::BookView::from_snapshot(&book(
                 vec![(dec!(0.39), dec!(1000))],
                 vec![(dec!(0.41), dec!(1000))],
                 NOW + 5_000,
-            ))
+            )))
         },
         NOW + 5_000,
     );
@@ -641,11 +641,11 @@ fn a_genuine_pin_bar_is_withheld_and_leaves_a_report() {
     let id = position(&mut pm, "tok", dec!(0.40), dec!(10), NOW);
     let reqs = pm.check_exits(
         &|_| {
-            Some(book(
+            Some(blitzkrieg_core::exit_policy::BookView::from_snapshot(&book(
                 vec![(dec!(0.20), dec!(1000))],
                 vec![(dec!(0.60), dec!(1000))],
                 NOW + 5_000,
-            ))
+            )))
         },
         NOW + 5_000,
     );

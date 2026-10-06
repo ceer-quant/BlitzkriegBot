@@ -234,7 +234,7 @@ pub fn replay_near_miss(rec: &NearMissRecord, cfg: &ExitConfig) -> ReplayResult 
         let time_left = rec.time_left_sec - (s.t_ms / 1000);
         let d = decide_exit(ExitTickInput {
             entry_price: entry,
-            book: Some(&book),
+            book: Some(&book as &dyn crate::exit_policy::BookScalarView),
             fallback_price: Some(s.price),
             time_left_sec: time_left,
             hold_sec: s.t_ms / 1000,
@@ -415,7 +415,7 @@ pub fn replay(rec: &ShadowRecord, cfg: &ExitConfig) -> ReplayResult {
         let time_left = (rec.expires_at_ms - now) / 1000;
         let d = decide_exit(ExitTickInput {
             entry_price: entry,
-            book: Some(&book),
+            book: Some(&book as &dyn crate::exit_policy::BookScalarView),
             fallback_price: Some(s.price),
             time_left_sec: time_left,
             hold_sec: s.t_ms / 1000,
