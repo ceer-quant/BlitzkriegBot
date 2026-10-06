@@ -13,18 +13,52 @@
     "timing_min_time_left_sec": 30
   },
   "tunables": {
-    "round_sec": { "type": "int", "default": "900" },
-    "mom_window_sec": { "type": "int", "default": "15" },
-    "mom_threshold_pct": { "type": "decimal", "default": "0.10" },
-    "mom_max_age_ms": { "type": "int", "default": "2000" },
-    "min_leading_price": { "type": "decimal", "default": "0.60" },
-    "max_leading_price": { "type": "decimal", "default": "0.80" }
+    "round_sec": {
+      "type": "int",
+      "default": "900",
+      "min": "300",
+      "max": "1800"
+    },
+    "mom_window_sec": {
+      "type": "int",
+      "default": "15",
+      "min": "5",
+      "max": "120"
+    },
+    "mom_threshold_pct": {
+      "type": "decimal",
+      "default": "0.10",
+      "min": "0.05",
+      "max": "1"
+    },
+    "mom_max_age_ms": {
+      "type": "int",
+      "default": "2000",
+      "min": "1000",
+      "max": "15000"
+    },
+    "min_leading_price": {
+      "type": "decimal",
+      "default": "0.60",
+      "min": "0.50",
+      "max": "0.75"
+    },
+    "max_leading_price": {
+      "type": "decimal",
+      "default": "0.80",
+      "min": "0.65",
+      "max": "0.95"
+    }
   },
   "modes": [
     {
       "market_type": "prediction",
       "structure": "binary_outcome_wheel",
-      "capabilities": ["websocket_feed", "level2_snapshot", "post_only"]
+      "capabilities": [
+        "websocket_feed",
+        "level2_snapshot",
+        "post_only"
+      ]
     }
   ]
 }

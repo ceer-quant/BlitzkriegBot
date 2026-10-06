@@ -4,6 +4,29 @@
   "api": "1.0",
   "entry": "strategy.lua",
   "sha256": "97aefbfa6c2bedd73396bc020677b0126cf2c087bdcbb63ec8cd7f2ce3b39474",
-  "tunables": {},
-  "modes": [{ "market_type": "prediction", "structure": "binary_outcome_wheel", "capabilities": ["websocket_feed", "level2_snapshot", "post_only"] }]
+  "tunables": {
+    "mom_window_sec": {
+      "type": "int",
+      "default": "2",
+      "min": "1",
+      "max": "30"
+    },
+    "mom_threshold_pct": {
+      "type": "decimal",
+      "default": "0.10",
+      "min": "0.05",
+      "max": "2"
+    }
+  },
+  "modes": [
+    {
+      "market_type": "prediction",
+      "structure": "binary_outcome_wheel",
+      "capabilities": [
+        "websocket_feed",
+        "level2_snapshot",
+        "post_only"
+      ]
+    }
+  ]
 }

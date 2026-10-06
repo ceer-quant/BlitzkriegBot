@@ -7,6 +7,11 @@
   "author": "BlitzkriegBot",
   "description": "Official Lua example: per-token momentum follower on the read-only bk.* surface; entries priced off fresh books only, all intents adjudicated by the kernel.",
   "tunables": {
-    "threshold": { "type": "decimal", "default": "0.04" }
+    "threshold": {
+      "type": "decimal",
+      "default": "0.04",
+      "min": "0.005",
+      "max": "1"
+    }
   }
 }

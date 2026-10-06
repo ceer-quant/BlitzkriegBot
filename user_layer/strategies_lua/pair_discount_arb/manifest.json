@@ -13,17 +13,46 @@
     "timing_min_time_left_sec": 30
   },
   "tunables": {
-    "max_pair_cost": { "type": "decimal", "default": "0.995" },
-    "min_leg_price": { "type": "decimal", "default": "0.01" },
-    "max_leg_price": { "type": "decimal", "default": "0.99" },
-    "min_pair_shares": { "type": "decimal", "default": "1" },
-    "min_time_left_sec": { "type": "int", "default": "30" }
+    "max_pair_cost": {
+      "type": "decimal",
+      "default": "0.995",
+      "min": "0.98",
+      "max": "0.999"
+    },
+    "min_leg_price": {
+      "type": "decimal",
+      "default": "0.01",
+      "min": "0.01",
+      "max": "0.10"
+    },
+    "max_leg_price": {
+      "type": "decimal",
+      "default": "0.99",
+      "min": "0.50",
+      "max": "0.995"
+    },
+    "min_pair_shares": {
+      "type": "decimal",
+      "default": "1",
+      "min": "1",
+      "max": "100"
+    },
+    "min_time_left_sec": {
+      "type": "int",
+      "default": "30",
+      "min": "0",
+      "max": "300"
+    }
   },
   "modes": [
     {
       "market_type": "prediction",
       "structure": "binary_outcome_wheel",
-      "capabilities": ["websocket_feed", "level2_snapshot", "post_only"]
+      "capabilities": [
+        "websocket_feed",
+        "level2_snapshot",
+        "post_only"
+      ]
     }
   ]
 }
