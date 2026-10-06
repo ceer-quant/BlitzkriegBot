@@ -15,7 +15,7 @@
   "tunables": {
     "max_pair_cost": {
       "type": "decimal",
-      "default": "0.995",
+      "default": "0.985",
       "min": "0.98",
       "max": "0.999"
     },
