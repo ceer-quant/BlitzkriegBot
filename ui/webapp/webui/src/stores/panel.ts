@@ -33,12 +33,42 @@ export const usePanelStore = defineStore('panel', () => {
 
   /**
    * When the orderbook counters last moved — the panel's only evidence that
-   * market data is still arriving (see `lib/feed.ts` for why nothing else in the
-   * snapshot can tell us). Tracked here rather than per-page so every page judges
-   * liveness from the same clock, and so it survives navigation.
+   * market data is still arriving (see `lib/feed.ts` for why nothing else in
+   * the snapshot can tell us). Tracked here rather than per-page so every page
+   * judges liveness from the same clock, and so it survives navigation.
    */
   const feedAt = ref<number | null>(null)
   let lastProgress = -1
+
+  /**
+   * #393: one pending cross-page navigation. Pages only ever SET it; the shell
+   * (App.vue) watches, switches its own tab (the tab ids are lib/nav.ts's —
+   * the single source the parity/separation gates parse too) and clears it.
+   * Page switching stays the shell's business; this is just the wire.
+   */
+  const navRequest = ref<{ tab: string } | null>(null)
+
+  /**
+   * #393: a strategy package the blueprint page should preload (set by the
+   * strategy page's 编辑策略 entry). Consumed exactly once, on the blueprint
+   * page's mount — a stale request must not overwrite a later manual edit.
+   */
+  const blueprintPreload = ref<string | null>(null)
+
+  function requestNav(tab: string): void {
+    navRequest.value = { tab }
+  }
+  function clearNavRequest(): void {
+    navRequest.value = null
+  }
+  function requestBlueprintPreload(name: string): void {
+    blueprintPreload.value = name
+  }
+  function takeBlueprintPreload(): string | null {
+    const v = blueprintPreload.value
+    blueprintPreload.value = null
+    return v
+  }
 
   const connected = computed(() => snapshot.value?.connected ?? plugins.value?.connected ?? false)
 
@@ -139,6 +169,8 @@ export const usePanelStore = defineStore('panel', () => {
   return {
     snapshot, plugins, error, loading, lastUpdated,
     connected, strategyRows, tradeRows, feedAt, sessionExpired,
+    navRequest, blueprintPreload,
     refresh, acknowledgeSessionReset,
+    requestNav, clearNavRequest, requestBlueprintPreload, takeBlueprintPreload,
   }
 })

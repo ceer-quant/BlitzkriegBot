@@ -1027,6 +1027,7 @@ else if (updateAvailable) console.log('  note 有新版本可用（这是发布�
 | 更新徽章 | `UPDATE 0.2.2` | Badge `可更新 0.2.2` | **三态**：有更新 / 已最新 / 未知（未检查） |
 | 「检查更新」 | `c` 键 | Button | 关闭检查时的措辞一致（见 5.3 的 `checkEnabled`） |
 | 「自动更新」开关 | `a` 键 | Switch | 默认关闭；状态来源是内核（`autoUpdate`）而不是本地缓存 |
+| 「更新检查」开关（#393） | `k` 键 | Switch | 默认关闭；状态来源是内核（`checkEnabled`），两侧共用 `system.update.configure` 落盘 |
 
 ### 6.2 TUI：新增第 6 个 Tab `Settings`
 

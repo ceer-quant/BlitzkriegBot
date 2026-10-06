@@ -408,14 +408,18 @@ export const api = {
    */
   updateCheck: () => request<{ started: boolean; running?: boolean; error?: string }>('/version/check', { method: 'POST' }),
   /**
-   * 设置页「自动更新」开关（VERSIONING.md §7.4）。内核是开关的唯一事实来源：
-   * 它落盘 + 落审计后回显新值；写盘失败必须报错（静默回退的开关比没有更糟）。
+   * 设置页「自动更新」/「更新检查」开关（VERSIONING.md §7.4，#393）。内核是
+   * 开关的唯一事实来源：它落盘 + 落审计后回显两个值；写盘失败必须报错
+   * （静默回退的开关比没有更糟）。body 里缺席的键保持内核现值不动。
    */
-  updateConfigure: (autoUpdate: boolean) =>
-    request<{ ok: boolean; autoUpdate?: boolean; error?: string }>('/version/configure', {
-      method: 'POST',
-      body: JSON.stringify({ autoUpdate }),
-    }),
+  updateConfigure: (body: { autoUpdate?: boolean; checkEnabled?: boolean }) =>
+    request<{ ok: boolean; autoUpdate?: boolean; checkEnabled?: boolean; error?: string }>(
+      '/version/configure',
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+    ),
   /**
    * 设置页「暂存下载」按钮（VERSIONING.md §7.5，#379）。让内核把较新的
    * 发布资产下载到 data/update/staging/ 并校验 SHA256 —— 校验过也只停在
@@ -524,6 +528,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /**
+   * 读回策略包的蓝图文档（`blueprint.load`，#393）：编辑策略入口的预载读 ——
+   * `blueprint.save` 的只读镜像。只保存过蓝图编译产物的包才有 blueprint.json，
+   * 手写包会被内核以明确拒绝作答（原样展示，绝不编造图）。
+   */
+  blueprintLoad: (name: string) =>
+    request<BlueprintLoadDoc>('/blueprint/load', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
 }
 
 // ── #362 蓝图编辑器（mirror core/blitzkrieg_core/src/ipc/schema.rs）──────────
@@ -552,6 +566,14 @@ export interface BlueprintSaveDoc {
   luaSha256: string
   /** blueprint/lua/manifest 三个文件的字节数。 */
   bytes: number[]
+  error?: string
+}
+
+/** `blueprint.load` 应答（#393）：包里的蓝图文档原文 + 相对路径。 */
+export interface BlueprintLoadDoc {
+  name: string
+  blueprintPath: string
+  json: string
   error?: string
 }
 

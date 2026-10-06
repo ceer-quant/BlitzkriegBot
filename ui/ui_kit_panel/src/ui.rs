@@ -1185,7 +1185,7 @@ fn render_settings_version(f: &mut Frame, area: Rect, app: &App) {
         )));
     }
     lines.push(Line::from(Span::styled(
-        "  [c] check now   [a] toggle auto-update (asks y/n)   [s] stage (needs auto on)   [i] install",
+        "  [c] check now   [a] toggle auto-update (y/n)   [k] toggle check (y/n)   [s] stage   [i] install",
         Style::default().fg(DIM),
     )));
     lines.push(Line::from(Span::styled(

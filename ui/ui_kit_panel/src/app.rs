@@ -86,6 +86,10 @@ pub enum Action {
     /// `system.update.configure` for the AUTO switch (the checked side is only
     /// written by the operator's config or the configure verb itself).
     UpdateConfigure(bool),
+    /// #393: `system.update.configure` for the CHECK switch — the outbound
+    /// "may the kernel ask the release source at all" gate. The kernel takes
+    /// both keys optional, so this write leaves the AUTO switch untouched.
+    UpdateConfigureCheck(bool),
     /// #379 (§7.5): `system.update.stage` off the render loop — the kernel
     /// downloads + verifies the newer release into its staging directory and
     /// STOPS there; applying it is the launcher's job, never the kernel's
@@ -134,6 +138,11 @@ pub const HINTS: [&str; 7] = [
 /// command: flipping the AUTO-UPDATE switch. `y` on the confirm bar routes it
 /// to [`Action::UpdateConfigure`] instead of the dispatcher.
 pub const UPDATE_AUTO_CONFIRM_PREFIX: &str = "update.auto ";
+
+/// #393 sentinel prefix: flipping the UPDATE-CHECK switch (#393). `y` routes
+/// to [`Action::UpdateConfigureCheck`] — the kernel's configure verb takes
+/// both switches optional, so only the check side moves.
+pub const UPDATE_CHECK_CONFIRM_PREFIX: &str = "update.check ";
 
 /// #364 sentinel prefix: a confirmed policy write. The confirm bar's text is
 /// `policy.set <accountId>` / `policy.reset <accountId>`; `y` routes it to
@@ -543,6 +552,12 @@ impl App {
                     if let Some(on) = text.strip_prefix(UPDATE_AUTO_CONFIRM_PREFIX) {
                         return Action::UpdateConfigure(on == "on");
                     }
+                    // #393: the check switch routes to its own configure arm —
+                    // the kernel leaves the AUTO switch untouched (both keys
+                    // optional on system.update.configure).
+                    if let Some(on) = text.strip_prefix(UPDATE_CHECK_CONFIRM_PREFIX) {
+                        return Action::UpdateConfigureCheck(on == "on");
+                    }
                     // A confirmed policy write carries its params in the
                     // pending slot (the bar text is only the display name).
                     if let Some((action, _, _)) = self.policy_pending.take() {
@@ -781,8 +796,8 @@ impl App {
             KeyCode::Char('c') if self.tab == Tab::Settings && !self.update_busy => {
                 if self.snap.system_version.as_ref().map(|v| v.check_enabled) == Some(false) {
                     self.log(
-                        "update check is disabled — enable it in user_layer/configs/update.toml \
-                         or the WebUI settings first"
+                        "update check is disabled — press k to enable it (or the WebUI \
+                         settings switch / user_layer/configs/update.toml)"
                             .to_string(),
                     );
                     Action::None
@@ -800,6 +815,23 @@ impl App {
                     .unwrap_or(false);
                 self.pending_confirmation = Some(format!(
                     "{UPDATE_AUTO_CONFIRM_PREFIX}{}",
+                    if on { "off" } else { "on" }
+                ));
+                Action::None
+            }
+            // #393: `k` toggles the outbound-check switch. Before this, the
+            // panel showed a greyed check button with NO unlock path unless
+            // the operator hand-edited update.toml — the switch is the kernel's
+            // system.update.configure verb, so it asks y/n like `a` does.
+            KeyCode::Char('k') if self.tab == Tab::Settings && !self.update_busy => {
+                let on = self
+                    .snap
+                    .system_version
+                    .as_ref()
+                    .map(|v| v.check_enabled)
+                    .unwrap_or(false);
+                self.pending_confirmation = Some(format!(
+                    "{UPDATE_CHECK_CONFIRM_PREFIX}{}",
                     if on { "off" } else { "on" }
                 ));
                 Action::None

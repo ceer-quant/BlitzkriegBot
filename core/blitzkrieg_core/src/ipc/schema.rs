@@ -303,6 +303,9 @@ pub mod method {
     // rule — and the save receipt is the caller's only proof the write landed.
     pub const BLUEPRINT_COMPILE: &str = "blueprint.compile";
     pub const BLUEPRINT_SAVE: &str = "blueprint.save";
+    /// #393: read one saved package's blueprint document back (the editor's
+    /// preload path — the read-only mirror of `blueprint.save`).
+    pub const BLUEPRINT_LOAD: &str = "blueprint.load";
 }
 
 // ── #362 — the blueprint editor surface ──────────────────────────────────────
@@ -356,6 +359,25 @@ pub struct BlueprintSaveResult {
     /// the IPC contract promises (a save that "succeeded" without saying WHAT
     /// it wrote is not auditable).
     pub bytes: [u64; 3],
+}
+
+/// `blueprint.load` params (#393): `{ "name": "<package name>" }` — the
+/// strategy whose blueprint document the editor wants back.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlueprintLoadParams {
+    pub name: String,
+}
+
+/// `blueprint.load` result: the package's blueprint document, verbatim, plus
+/// its RELATIVE path (same convention as the save receipt). Read-only — it
+/// answers from the strategy root the kernel already scans, so the editor can
+/// preload a package without the UI ever touching the filesystem.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlueprintLoadResult {
+    pub name: String,
+    pub blueprint_path: String,
+    pub json: String,
 }
 
 // ── E26 (§4.4) — systemic risk readout ──────────────────────────────────────

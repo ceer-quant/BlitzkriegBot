@@ -19,7 +19,7 @@
  * 名字、现场编译、落盘三件套并回执 sha256）；导出 = 前端把当前蓝图 JSON
  * 下载为文件。UI 从不碰文件系统 —— 落盘是内核的事，UI 只拿回执。
  */
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { VueFlow, Handle, Panel, Position, MarkerType, useVueFlow } from '@vue-flow/core'
 import type { Edge as FlowEdge, Connection } from '@vue-flow/core'
@@ -33,8 +33,9 @@ import {
   NODE_SPECS, nodeSpec, defaultParams, edgeFamily, isValueProducer,
   starterBlueprint, toBlueprintDoc,
 } from '@/lib/blueprint'
-import type { BlueprintNodeType, BpNode, BpEdge, NodeFamily } from '@/lib/blueprint'
+import type { BlueprintDoc, BlueprintNodeType, BpNode, BpEdge, NodeFamily } from '@/lib/blueprint'
 import { highlightLua } from '@/lib/lua-highlight'
+import { usePanelStore } from '@/stores/panel'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
 import Button from '@/components/ui/button/Button.vue'
@@ -352,10 +353,90 @@ function doExport(): void {
 // 复访（tab 切回）时 store 里已有节点 —— 保留现场，不重铺。
 if (storeNodes.value.length === 0) loadStarter()
 syncSaveName(strategyName.value)
+
+// ── issue 393 (⑤): 策略页「编辑策略」的预载 —— blueprint.load（只读 IPC）────────
+// 只有 blueprint.save 写出的包才带 blueprint.json；手写包内核会明确拒绝，
+// 这里把拒绝原样亮出来（画布保持当前内容），绝不编造一个图冒充「预载成功」。
+
+const store = usePanelStore()
+const preloading = ref(false)
+const preloadError = ref<string | null>(null)
+
+async function preloadPackage(name: string): Promise<void> {
+  preloading.value = true
+  preloadError.value = null
+  try {
+    const doc = await api.blueprintLoad(name)
+    if (doc.error) {
+      preloadError.value = doc.error
+      return
+    }
+    let parsed: BlueprintDoc
+    try {
+      parsed = JSON.parse(doc.json) as BlueprintDoc
+    } catch {
+      preloadError.value = '蓝图文档不是合法 JSON —— 拒绝预载。'
+      return
+    }
+    if (parsed.version !== 1 || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
+      preloadError.value = '蓝图文档不是 v1 版（内核只编译 v1）—— 拒绝预载。'
+      return
+    }
+    // 画布元素 = 蓝图语义的投影：文档里的节点 id 就是画布 id（保存时原样
+    // 序列化）。未知类型/重复 id 的行跳过 —— 编译链只产白名单类型，这里
+    // 只是防御一个被手改过的文档。
+    const seen = new Set<string>()
+    const nodes: BpNode[] = []
+    for (const n of parsed.nodes) {
+      if (!n || typeof n.id !== 'string' || seen.has(n.id)) continue
+      if (!NODE_SPECS.some((s) => s.type === n.type)) continue
+      seen.add(n.id)
+      nodes.push({ id: n.id, type: n.type, params: structuredClone(n.params ?? {}) })
+    }
+    const knownIds = new Set(nodes.map((n) => n.id))
+    clearCanvas() // 去抖编译：清空后的拒绝会被 350ms 内的下一次编译覆盖
+    let y = 40
+    for (const n of nodes) {
+      bpNodes.value.push(n)
+      addNodes([{ id: n.id, type: 'bp', position: { x: 80, y }, data: { bpType: n.type } }])
+      y += 110
+    }
+    for (const e of parsed.edges) {
+      if (!e || !knownIds.has(e.from) || !knownIds.has(e.to)) continue
+      const mapped: BpEdge = { from: e.from, to: e.to, when: !!e.when }
+      bpEdges.value.push(mapped)
+      pushFlowEdge(mapped)
+    }
+    strategyName.value = parsed.name || name
+    syncSaveName(strategyName.value)
+    selectedId.value = null
+    void scheduleCompile()
+  } catch (e) {
+    preloadError.value = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
+  } finally {
+    preloading.value = false
+  }
+}
+
+onMounted(() => {
+  const pre = store.takeBlueprintPreload()
+  if (pre) void preloadPackage(pre)
+})
 </script>
 
 <template>
   <div class="flex flex-col gap-4">
+    <AlertBanner
+      v-if="preloadError"
+      tone="warn"
+      title="未能预载策略包（内核 blueprint.load）"
+      dismissible
+      @dismiss="preloadError = null"
+    >
+      <span class="font-mono text-[12px] leading-relaxed break-all">{{ preloadError }}</span>
+    </AlertBanner>
+    <AlertBanner v-if="preloading" tone="info">正在读取策略包的蓝图文档…</AlertBanner>
+
     <AlertBanner v-if="compileError" tone="error" title="编译拒绝（内核 blueprint.compile）">
       <span class="font-mono text-[12px] leading-relaxed break-all">{{ compileError }}</span>
     </AlertBanner>

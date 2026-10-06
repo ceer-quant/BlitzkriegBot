@@ -116,6 +116,18 @@ function goOnboard(target: 'plugins' | 'strategies'): void {
   tab.value = target
 }
 
+/**
+ * issue 393: cross-page entries (the strategy page's 创建策略 / 编辑策略) ask the
+ * shell through the store's one-slot nav request. The tab ids come from
+ * lib/nav.ts either way — pages never switch pages themselves, they file a
+ * request and the shell (the only owner of `tab`) consumes it.
+ */
+watch(() => store.navRequest, (req) => {
+  if (!req) return
+  tab.value = req.tab as TabId
+  store.clearNavRequest()
+})
+
 // 15s auto-refresh; pages that need faster pacing run their own tick.
 const { pause: stopPoll } = useIntervalFn(() => { void store.refresh() }, 15_000)
 onUnmounted(() => { stopPoll() })
