@@ -235,7 +235,7 @@ impl CashflowKind {
 
     /// Inverse of [`CashflowKind::as_str`]; `None` is a fail-closed parse
     /// error, never a silent default.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_kind(s: &str) -> Option<Self> {
         match s {
             "rebate" => Some(CashflowKind::Rebate),
             "reward" => Some(CashflowKind::Reward),

@@ -319,7 +319,7 @@ pub fn event_from_json(v: &Value) -> Result<DataEvent, String> {
             let which = v
                 .get("which")
                 .and_then(Value::as_str)
-                .and_then(crate::engine::CashflowKind::from_str)
+                .and_then(crate::engine::CashflowKind::parse_kind)
                 .ok_or_else(|| "missing/invalid `which`".to_string())?;
             Ok(DataEvent::Cashflow {
                 which,
