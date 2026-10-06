@@ -75,6 +75,11 @@ DIST_DIR="ui/webapp/webui/dist"
 
 step() { printf '\n==> %s\n' "$1"; }
 die() { printf 'ERROR: %s\n' "$1" >&2; exit 1; }
+# The sourced library's fatal reporter — its contract puts it on the caller
+# (the propagate test defines one too). Without it, any of the library's
+# fatal paths dies as "ua_die: command not found" and the real diagnosis
+# is lost.
+ua_die() { die "$1"; }
 
 mode="ship"
 case "${1:-}" in
@@ -120,7 +125,14 @@ step "3. build (release workspace + reference strategy cdylib + panel bin + webu
   cd "$build_wt/ui/webapp/webui"
   # The panel serves whatever dist/ the build writes, and step 5 installs it into
   # the running checkout — a Rust-only upgrade shipped a stale panel (#244).
-  [ -d node_modules ] || npm ci
+  # The bare `[ -d node_modules ]` this replaces skipped the install forever
+  # after the first one, so a dependency ADDED to package.json never landed in
+  # the build worktree and the upgrade died at this build (2026-10-06: Rollup
+  # could not resolve @vue-flow/core). The verdict is the propagation library's
+  # file-mtime test — this script still touches no npm internals itself.
+  if ua_node_modules_stale "$build_wt/ui/webapp/webui"; then
+    npm ci
+  fi
   npm run build
 )
 
