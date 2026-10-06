@@ -9,55 +9,81 @@
   "tunables": {
     "trend_min_price": {
       "type": "decimal",
-      "default": "0.55"
+      "default": "0.55",
+      "min": "0.50",
+      "max": "0.80"
     },
     "trend_confirm_sec": {
       "type": "int",
-      "default": "60"
+      "default": "60",
+      "min": "10",
+      "max": "300"
     },
     "trend_broken_price": {
       "type": "decimal",
-      "default": "0.35"
+      "default": "0.35",
+      "min": "0.10",
+      "max": "0.50"
     },
     "trend_entry_price": {
       "type": "decimal",
-      "default": "0"
+      "default": "0",
+      "min": "0",
+      "max": "0.90"
     },
     "trend_entry_factor": {
       "type": "decimal",
-      "default": "0.88"
+      "default": "0.88",
+      "min": "0.50",
+      "max": "0.99"
     },
     "trend_max_entry_price": {
       "type": "decimal",
-      "default": "0.45"
+      "default": "0.45",
+      "min": "0.05",
+      "max": "0.90"
     },
     "entry_min_obi": {
       "type": "decimal",
-      "default": "0"
+      "default": "0",
+      "min": "0",
+      "max": "0.9"
     },
     "entry_max_spread_pct": {
       "type": "decimal",
-      "default": "0"
+      "default": "0",
+      "min": "0",
+      "max": "10"
     },
     "entry_dip_max_pct": {
       "type": "decimal",
-      "default": "0"
+      "default": "0",
+      "min": "0",
+      "max": "50"
     },
     "entry_bounce_min_pct": {
       "type": "decimal",
-      "default": "0"
+      "default": "0",
+      "min": "0",
+      "max": "10"
     },
     "entry_bounce_window_sec": {
       "type": "int",
-      "default": "5"
+      "default": "5",
+      "min": "1",
+      "max": "60"
     },
     "entry_trend_window_sec": {
       "type": "int",
-      "default": "0"
+      "default": "0",
+      "min": "0",
+      "max": "600"
     },
     "entry_trend_drop_pct": {
       "type": "decimal",
-      "default": "30"
+      "default": "30",
+      "min": "1",
+      "max": "99"
     }
   }
 }

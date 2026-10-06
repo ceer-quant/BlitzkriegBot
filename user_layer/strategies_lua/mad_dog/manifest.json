@@ -9,35 +9,51 @@
   "tunables": {
     "dominant_min_price": {
       "type": "decimal",
-      "default": "0.55"
+      "default": "0.55",
+      "min": "0.50",
+      "max": "0.80"
     },
     "dominant_hold_sec": {
       "type": "int",
-      "default": "20"
+      "default": "20",
+      "min": "5",
+      "max": "300"
     },
     "dominant_mean_sec": {
       "type": "int",
-      "default": "60"
+      "default": "60",
+      "min": "10",
+      "max": "300"
     },
     "broken_price": {
       "type": "decimal",
-      "default": "0.35"
+      "default": "0.35",
+      "min": "0.10",
+      "max": "0.50"
     },
     "dip_speed_pct": {
       "type": "decimal",
-      "default": "15"
+      "default": "15",
+      "min": "1",
+      "max": "50"
     },
     "dip_speed_sec": {
       "type": "int",
-      "default": "3"
+      "default": "3",
+      "min": "1",
+      "max": "30"
     },
     "spot_max_move_pct": {
       "type": "decimal",
-      "default": "0.5"
+      "default": "0.5",
+      "min": "0.1",
+      "max": "5"
     },
     "spot_window_sec": {
       "type": "int",
-      "default": "10"
+      "default": "10",
+      "min": "5",
+      "max": "120"
     },
     "spot_missing": {
       "type": "string",
@@ -45,23 +61,33 @@
     },
     "min_time_left_sec": {
       "type": "int",
-      "default": "180"
+      "default": "180",
+      "min": "0",
+      "max": "300"
     },
     "min_bid_depth": {
       "type": "decimal",
-      "default": "500"
+      "default": "500",
+      "min": "0",
+      "max": "5000"
     },
     "max_abs_obi": {
       "type": "decimal",
-      "default": "0.5"
+      "default": "0.5",
+      "min": "0.05",
+      "max": "1"
     },
     "min_available_usd": {
       "type": "decimal",
-      "default": "1.00"
+      "default": "1.00",
+      "min": "0",
+      "max": "1000"
     },
     "wick_offset": {
       "type": "decimal",
-      "default": "0.02"
+      "default": "0.02",
+      "min": "0",
+      "max": "0.20"
     }
   },
   "modes": [

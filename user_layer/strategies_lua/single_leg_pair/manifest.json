@@ -9,19 +9,58 @@
   "holds_to_settlement": true,
   "gate_exemptions": {},
   "tunables": {
-    "min_entry_price": { "type": "decimal", "default": "0.55" },
-    "max_entry_price": { "type": "decimal", "default": "0.85" },
-    "dead_band_floor": { "type": "decimal", "default": "0.50" },
-    "min_gap": { "type": "decimal", "default": "0.02" },
-    "min_time_left_sec": { "type": "int", "default": "45" },
-    "max_open_positions": { "type": "int", "default": "3" },
-    "min_shares": { "type": "decimal", "default": "1" }
+    "min_entry_price": {
+      "type": "decimal",
+      "default": "0.55",
+      "min": "0.50",
+      "max": "0.80"
+    },
+    "max_entry_price": {
+      "type": "decimal",
+      "default": "0.85",
+      "min": "0.60",
+      "max": "0.95"
+    },
+    "dead_band_floor": {
+      "type": "decimal",
+      "default": "0.50",
+      "min": "0.40",
+      "max": "0.55"
+    },
+    "min_gap": {
+      "type": "decimal",
+      "default": "0.02",
+      "min": "0.01",
+      "max": "0.15"
+    },
+    "min_time_left_sec": {
+      "type": "int",
+      "default": "45",
+      "min": "0",
+      "max": "300"
+    },
+    "max_open_positions": {
+      "type": "int",
+      "default": "3",
+      "min": "1",
+      "max": "10"
+    },
+    "min_shares": {
+      "type": "decimal",
+      "default": "1",
+      "min": "1",
+      "max": "100"
+    }
   },
   "modes": [
     {
       "market_type": "prediction",
       "structure": "binary_outcome_wheel",
-      "capabilities": ["websocket_feed", "level2_snapshot", "post_only"]
+      "capabilities": [
+        "websocket_feed",
+        "level2_snapshot",
+        "post_only"
+      ]
     }
   ]
 }
