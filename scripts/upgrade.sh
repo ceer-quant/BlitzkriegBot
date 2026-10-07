@@ -3,25 +3,31 @@
 #
 # Full pipeline, aborts on the first failure — never deploys a red tree, and
 # never leaves the stack stopped:
-#   0. data/ light backup (a few MB, seconds — the upgrade leaves a rollback point)
-#   1. fetch ceer and resolve the source (default: ceer/main — the deploy line
+#   0. fetch ceer and resolve the source (default: ceer/main — the deploy line
 #      moved to main with v0.3.0; it used to be the feat/trading-safety-selfcheck
 #      branch, which stalled at Wave 0 and left every upgrade a no-op at 0.2.1),
 #      override with BLITZKRIEG_UPGRADE_SOURCE
-#   2. update the production build worktree target/bk-main-build to the source
+#   1. update the production build worktree target/bk-main-build to the source
 #      (detached checkout — the branch refs and the main checkout stay untouched)
-#   3. build: release workspace + the reference strategy cdylib + the panel's
+#   2. build: release workspace + the reference strategy cdylib + the panel's
 #      webui bundle
-#   4. LOCAL GATES: core lib tests AND the panel's check:all — both must be green
-#   5. stage the whole release (binaries, cdylibs, panel bundle, config files) and
+#   3. LOCAL GATES: core lib tests AND the panel's check:all — both must be green
+#   4. stage the whole release (binaries, cdylibs, panel bundle, config files) and
 #      report what differs from what is running, before anything is stopped
-#   6. `blitzkrieg stop` (idempotent) and wait for the core to actually exit
-#   7. install it, keeping the previous set as the rollback point, and verify
+#   5. `blitzkrieg stop` (idempotent) and wait for the core to actually exit
+#   6. install it, keeping the previous set as the rollback point, and verify
 #      byte-for-byte that it landed
-#   8. `nohup blitzkrieg run`, then verify IDENTITY (the new build answers) with a
+#   7. `nohup blitzkrieg run`, then verify IDENTITY (the new build answers) with a
 #      deadline; on failure, restore the previous set and start it again
 #
-# `--check` runs steps 0–5 only: build + gates + stage, no live-stack restart.
+# The old step-0 `data/` light backup is gone (2026-10-07, owner call): `data/`
+# reached 7.1 GB / 120k+ files (onchain corpus + archive + audit), so the tar
+# dominated every upgrade's wall time, while the upgrade itself never writes
+# `data/` — binaries, cdylibs, the panel bundle and factory configs only. The
+# previous release set kept by step 6 is the rollback insurance; data protection
+# stays with the scheduled `blitzkrieg backup` system (KI-24), untouched.
+#
+# `--check` runs steps 0–4 only: build + gates + stage, no live-stack restart.
 #
 # WHAT A RELEASE CARRIES (#252, #244). The build happens in target/bk-main-build
 # but the kernel RUNS from the main checkout, and it reads more there than the
@@ -100,30 +106,27 @@ lib="$repo_root/scripts/lib/upgrade-artifacts.sh"
 [ -f "$lib" ] || die "$lib is missing — this checkout is incomplete"
 . "$lib"
 
-step "0. data/ light backup (rollback point)"
-sh scripts/data-backup-cli.sh --light
-
-step "1. fetch ceer, resolve source"
+step "0. fetch ceer, resolve source"
 git fetch ceer --quiet
 SRC_SHA=$(git rev-parse "$SOURCE_REF")
 # --short=12 because that is what the build stamps into the binary: build.rs
 # (the core/build_info crate's) runs `git rev-parse --short=12 HEAD`. A plain
 # `--short` (7) can never equal the
-# `g<sha>` in `.core-lock`, which would turn the identity check in step 8 into a
+# `g<sha>` in `.core-lock`, which would turn the identity check in step 7 into a
 # guaranteed failure — every upgrade would build, install, then roll itself back.
 SRC_SHORT=$(git rev-parse --short=12 "$SRC_SHA")
 echo "source: $SOURCE_REF @ $SRC_SHORT"
 
-step "2. production build worktree → source"
+step "1. production build worktree → source"
 git -C "$build_wt" fetch ceer --quiet
 git -C "$build_wt" checkout --detach "$SRC_SHA"
 
-step "3. build (release workspace + reference strategy cdylib + panel bin + webui bundle)"
+step "2. build (release workspace + reference strategy cdylib + panel bin + webui bundle)"
 ( cd "$build_wt" && cargo build --release --workspace --locked )
 ( cd "$build_wt/user_layer/parity_strategy" && cargo build --release --locked )
 (
   cd "$build_wt/ui/webapp/webui"
-  # The panel serves whatever dist/ the build writes, and step 5 installs it into
+  # The panel serves whatever dist/ the build writes, and step 4 installs it into
   # the running checkout — a Rust-only upgrade shipped a stale panel (#244).
   # The bare `[ -d node_modules ]` this replaces skipped the install forever
   # after the first one, so a dependency ADDED to package.json never landed in
@@ -136,7 +139,7 @@ step "3. build (release workspace + reference strategy cdylib + panel bin + webu
   npm run build
 )
 
-step "4a. local gate: blitzkrieg-core lib tests"
+step "3a. local gate: blitzkrieg-core lib tests"
 # NO pipeline: the status must be cargo's own. `| tail -1` reports tail's status,
 # which is how a red suite shipped (#244).
 if ! gate_out=$(cd "$build_wt" && CARGO_TARGET_DIR="$build_wt/target" \
@@ -146,7 +149,7 @@ if ! gate_out=$(cd "$build_wt" && CARGO_TARGET_DIR="$build_wt/target" \
 fi
 printf '%s\n' "$gate_out" | grep -E '^test result' | tail -3
 
-step "4b. local gate: panel check:all"
+step "3b. local gate: panel check:all"
 if ! panel_out=$(cd "$build_wt/ui/webapp/webui" && npm run check:all 2>&1); then
   printf '%s\n' "$panel_out" | grep -E 'RESULT: FAIL|error|✗' | head -20 >&2
   printf '%s\n' "$panel_out" | tail -20 >&2
@@ -154,7 +157,7 @@ if ! panel_out=$(cd "$build_wt/ui/webapp/webui" && npm run check:all 2>&1); then
 fi
 printf '%s\n' "$panel_out" | grep -c 'RESULT: PASS' | sed 's/^/panel gates passed: /'
 
-step "5. stage the release and report what it changes"
+step "4. stage the release and report what it changes"
 STAGE="$repo_root/target/upgrade-stage-$(date +%Y%m%dT%H%M%S)"
 export STAGE
 ua_stage
@@ -167,7 +170,7 @@ if [ "$mode" = "check" ]; then
   exit 0
 fi
 
-step "6. stop the running stack (idempotent) and wait for the core to exit"
+step "5. stop the running stack (idempotent) and wait for the core to exit"
 "$release/blitzkrieg" stop || true
 lock="$repo_root/data/trades/.core-lock"
 pid=""
@@ -181,7 +184,7 @@ done
 [ "$i" -lt 30 ] || die "the previous core is still alive after 30s (pid $pid) — refusing to swap under a running stack"
 echo "stack stopped"
 
-step "7. install the release (previous versions kept as the rollback point)"
+step "6. install the release (previous versions kept as the rollback point)"
 ROLLBACK="$repo_root/target/rollback-$(date +%Y%m%dT%H%M%S)"
 export ROLLBACK
 mkdir -p "$ROLLBACK"
@@ -207,7 +210,7 @@ rollback_and_die() {
   die "$2; the running core is now ${old:-unknown} (rollback: $ROLLBACK)"
 }
 
-step "8. start the stack and verify identity within ${READY_DEADLINE}s"
+step "7. start the stack and verify identity within ${READY_DEADLINE}s"
 : > "$RUN_LOG"
 nohup "$release/blitzkrieg" run >> "$RUN_LOG" 2>&1 &
 ready=""
