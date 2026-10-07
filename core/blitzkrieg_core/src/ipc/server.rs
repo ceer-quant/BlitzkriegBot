@@ -2748,8 +2748,12 @@ fn blueprint_save(
     let name = validate_package_name(&p.name)?;
 
     // Compile FRESH — the receipt vouches for what THIS call produced, and a
-    // structurally invalid blueprint writes nothing.
-    let lua = crate::blueprint::compile(&p.json)?;
+    // structurally invalid blueprint writes nothing. The tunables ride along:
+    // the numeric anchors the compiled source reads through `__param` are
+    // exported into the manifest (with ±half-magnitude domains), which is
+    // what registers the package as EVOLVABLE (#393 shape: the loader's
+    // specs_from_tunables needs an explicit domain to declare a knob).
+    let (lua, tunables) = crate::blueprint::compile_with_tunables(&p.json)?;
 
     let root = blueprint_strategy_root(core_cfg);
     let pkg = std::path::Path::new(&root).join(&name);
@@ -2771,11 +2775,27 @@ fn blueprint_save(
     // The manifest follows §6.4 exactly: name = directory name (one identity),
     // sha256 = the digest of the entry file we just wrote (the loader verifies
     // it and REFUSES the package on any drift), modes = the fixed declaration
-    // the codegen emits inside declare_modes().
+    // the codegen emits inside declare_modes(). The tunables export (用户裁决：
+    // 蓝图生产的策略也要支持进化) carries one entry per numeric anchor the
+    // generated source reads through `__param` — type decimal (they are all
+    // numbers by construction) + default + the ±half-magnitude domain the
+    // compiler computed, so shadow evolution can register and walk them.
     let mut hasher = sha2::Sha256::new();
     hasher.update(lua.as_bytes());
     let digest = format!("{:x}", hasher.finalize());
-    let manifest = serde_json::json!({
+    let mut tunables_map = serde_json::Map::new();
+    for t in &tunables {
+        tunables_map.insert(
+            t.name.clone(),
+            serde_json::json!({
+                "type": "decimal",
+                "default": t.default,
+                "min": t.min,
+                "max": t.max,
+            }),
+        );
+    }
+    let mut manifest = serde_json::json!({
         "name": name,
         "version": "1.0.0",
         "api": "1.0",
@@ -2795,6 +2815,9 @@ fn blueprint_save(
             }
         ],
     });
+    if !tunables_map.is_empty() {
+        manifest["tunables"] = Value::Object(tunables_map);
+    }
     let manifest_body = format!(
         "{}\n",
         serde_json::to_string_pretty(&manifest)
@@ -4770,7 +4793,10 @@ mod tests {
         assert!(reply.get("error").is_none(), "compile must answer: {reply}");
         let lua = reply["result"]["lua"].as_str().expect("lua is a string");
         assert!(lua.contains("function on_tick(tick)"), "{lua}");
-        assert!(lua.contains("tick.price <= 0.25"), "{lua}");
+        assert!(
+            lua.contains("tick.price <= __param(\"n2_value\", 0.25)"),
+            "{lua}"
+        );
         assert!(lua.contains("side = \"buy\""), "{lua}");
     }
 
