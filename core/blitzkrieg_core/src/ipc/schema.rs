@@ -17,6 +17,7 @@ use crate::model::*;
 use crate::ome::FillDelta;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub const JSONRPC: &str = "2.0";
 pub const EVENT_METHOD: &str = "core.event";
@@ -306,6 +307,14 @@ pub mod method {
     /// #393: read one saved package's blueprint document back (the editor's
     /// preload path — the read-only mirror of `blueprint.save`).
     pub const BLUEPRINT_LOAD: &str = "blueprint.load";
+    /// 手写包的「在蓝图中打开」（用户裁决：编辑入口必须能打开所有 Lua 包）：
+    /// 把手写包的 Lua 源码读回来（带 manifest 元数据），编辑器的源码模式
+    /// 展示并允许原样改写落盘 —— 画布图是蓝图编译产物的专属表示，不编造。
+    pub const BLUEPRINT_LOAD_SOURCE: &str = "blueprint.loadSource";
+    /// `blueprint.loadSource` 的写回镜像：把手写包的 `strategy.lua` 原样写
+    /// 回（sha256 重算进 manifest，装载器照常验证）。`overwrite` 显式，与
+    /// `blueprint.save` 同一裁决 —— 静默覆盖可能换掉操作员正在启用的策略。
+    pub const BLUEPRINT_SAVE_SOURCE: &str = "blueprint.saveSource";
 }
 
 // ── #362 — the blueprint editor surface ──────────────────────────────────────
@@ -378,6 +387,56 @@ pub struct BlueprintLoadResult {
     pub name: String,
     pub blueprint_path: String,
     pub json: String,
+}
+
+/// `blueprint.loadSource` params: same shape as `blueprint.load` — the
+/// hand-written package whose Lua source the editor's source mode wants back.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlueprintLoadSourceParams {
+    pub name: String,
+}
+
+/// `blueprint.loadSource` result: the package's entry file verbatim + the
+/// manifest fields the editor needs to re-seal a write-back. `manifestPath`
+/// is relative (the save-receipt convention). `modes`/`author`/`description`
+/// travel as raw JSON so the editor can round-trip them untouched.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlueprintLoadSourceResult {
+    pub name: String,
+    pub package_dir: String,
+    pub lua_path: String,
+    pub manifest_path: String,
+    pub lua: String,
+    /// The manifest's `sha256` of the CURRENT entry file, hex — the editor
+    /// shows it and the write-back re-derives it from the new bytes.
+    pub sha256: String,
+    pub manifest: Value,
+}
+
+/// `blueprint.saveSource` params: the package to overwrite (must already
+/// exist — this verb EDITS, it does not create; creation is a blueprint save)
+/// and the new entry-file body. `overwrite` must be explicit, matching
+/// `blueprint.save`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlueprintSaveSourceParams {
+    pub name: String,
+    pub lua: String,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+/// `blueprint.saveSource` result: what landed, in the save-receipt shape
+/// (relative paths + the NEW sha256 the manifest now carries + byte counts).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlueprintSaveSourceResult {
+    pub name: String,
+    pub package_dir: String,
+    pub lua_path: String,
+    pub manifest_path: String,
+    pub lua_sha256: String,
+    pub bytes: [u64; 2],
 }
 
 // ── E26 (§4.4) — systemic risk readout ──────────────────────────────────────

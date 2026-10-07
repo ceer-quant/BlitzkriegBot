@@ -368,6 +368,13 @@ async function preloadPackage(name: string): Promise<void> {
   try {
     const doc = await api.blueprintLoad(name)
     if (doc.error) {
+      // 手写包没有蓝图文档（内核明确拒绝）—— 用户裁决：编辑入口必须能
+      // 打开**所有** Lua 包，所以这个特定拒绝不展示为错误，而是自动落到
+      // 源码模式；其余拒绝（名字不合法等）仍然原样亮出来。
+      if (/no blueprint document/.test(doc.error)) {
+        await openSourceMode(name, '该包是手写策略（没有蓝图文档）—— 已按源码模式打开，画布图只对蓝图编译产物有意义。')
+        return
+      }
       preloadError.value = doc.error
       return
     }
@@ -422,6 +429,95 @@ onMounted(() => {
   const pre = store.takeBlueprintPreload()
   if (pre) void preloadPackage(pre)
 })
+
+// ── 源码模式（blueprint.loadSource / saveSource）────────────────────────────
+// 画布图是蓝图编译产物的专属表示；手写包没有蓝图文档，用户裁决：编辑入口
+// 必须能打开**所有** Lua 包 —— 预载遇到「no blueprint document」时自动落到
+// 这里：展示包的 Lua 源码与 manifest，允许原样改写落盘（内核重封 sha256）。
+
+const sourceMode = ref(false)
+const sourceLua = ref('')
+const sourceManifest = ref('')
+const sourceSha = ref('')
+const sourceName = ref('')
+const sourceDirty = ref(false)
+const sourceSaving = ref(false)
+const sourceError = ref<string | null>(null)
+const sourceReceipt = ref<string | null>(null)
+const sourceNeedOverwrite = ref(false)
+
+async function openSourceMode(name: string, hint: string): Promise<void> {
+  preloading.value = true
+  try {
+    const doc = await api.blueprintLoadSource(name)
+    if (doc.error) {
+      preloadError.value = doc.error
+      return
+    }
+    preloadError.value = null
+    sourceMode.value = true
+    sourceName.value = doc.name
+    sourceLua.value = doc.lua
+    sourceManifest.value = JSON.stringify(doc.manifest, null, 2)
+    sourceSha.value = doc.sha256
+    sourceDirty.value = false
+    sourceError.value = null
+    sourceReceipt.value = null
+    sourceNeedOverwrite.value = false
+    // 预载提示不吞掉：操作员该知道为什么落在源码模式而不是画布。
+    sourceNote.value = hint
+  } catch (e) {
+    preloadError.value = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
+  } finally {
+    preloading.value = false
+  }
+}
+
+const sourceNote = ref<string | null>(null)
+
+function onSourceInput(): void {
+  sourceDirty.value = true
+  sourceReceipt.value = null
+}
+
+async function doSaveSource(overwrite = false): Promise<void> {
+  sourceSaving.value = true
+  sourceError.value = null
+  sourceReceipt.value = null
+  try {
+    const doc = await api.blueprintSaveSource({
+      name: sourceName.value,
+      lua: sourceLua.value,
+      overwrite: overwrite || undefined,
+    })
+    if (doc.error) {
+      sourceError.value = doc.error
+      if (/must be explicit/i.test(doc.error)) sourceNeedOverwrite.value = true
+      return
+    }
+    sourceNeedOverwrite.value = false
+    sourceDirty.value = false
+    sourceSha.value = doc.luaSha256
+    // manifest 里的 sha256 已被内核重算 —— 重读一份回显，不本地拼接。
+    const refreshed = await api.blueprintLoadSource(sourceName.value)
+    if (!refreshed.error) sourceManifest.value = JSON.stringify(refreshed.manifest, null, 2)
+    sourceReceipt.value = [
+      `已写回 ${doc.luaPath}`,
+      `strategy.lua ${doc.bytes[0]}B · manifest.json ${doc.bytes[1]}B`,
+      `新 sha256 ${doc.luaSha256.slice(0, 12)}…`,
+    ].join(' · ')
+  } catch (e) {
+    sourceError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    sourceSaving.value = false
+  }
+}
+
+function exitSourceMode(): void {
+  sourceMode.value = false
+  sourceNote.value = null
+}
+
 </script>
 
 <template>
@@ -440,6 +536,56 @@ onMounted(() => {
     <AlertBanner v-if="compileError" tone="error" title="编译拒绝（内核 blueprint.compile）">
       <span class="font-mono text-[12px] leading-relaxed break-all">{{ compileError }}</span>
     </AlertBanner>
+
+    <!-- 源码模式：手写策略包的编辑面（blueprint.loadSource / saveSource）。 -->
+    <Card v-if="sourceMode" dense class="flex flex-col gap-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <p class="label-micro flex-1">
+          源码模式 · {{ sourceName }}
+          <span v-if="sourceDirty" class="ml-2 text-[11px] text-gold-400">有未保存修改</span>
+        </p>
+        <Button variant="ghost" size="sm" @click="exitSourceMode">关闭源码模式</Button>
+        <Button
+          variant="default"
+          size="sm"
+          :disabled="sourceSaving || (!sourceDirty && !sourceNeedOverwrite)"
+          @click="doSaveSource(false)"
+        >保存源码</Button>
+        <Button
+          v-if="sourceNeedOverwrite"
+          variant="default"
+          size="sm"
+          :disabled="sourceSaving"
+          @click="doSaveSource(true)"
+        >确认覆盖写回</Button>
+      </div>
+      <AlertBanner v-if="sourceNote" tone="info" dismissible @dismiss="sourceNote = null">
+        {{ sourceNote }}
+      </AlertBanner>
+      <AlertBanner
+        v-if="sourceError"
+        tone="error"
+        title="写回被拒（内核 blueprint.saveSource）"
+      >
+        <span class="font-mono text-[12px] leading-relaxed break-all">{{ sourceError }}</span>
+      </AlertBanner>
+      <AlertBanner v-if="sourceReceipt" tone="info" title="已落盘">
+        <span class="font-mono text-[12px] leading-relaxed break-all">{{ sourceReceipt }}</span>
+      </AlertBanner>
+      <label class="label-micro" for="bp-source-lua">strategy.lua（当前 sha256 {{ sourceSha.slice(0, 12) }}…）</label>
+      <textarea
+        id="bp-source-lua"
+        v-model="sourceLua"
+        class="h-80 w-full resize-y rounded-md border border-line bg-panel-2 p-3 font-mono text-[12.5px] leading-relaxed text-fg outline-none focus:border-primary"
+        spellcheck="false"
+        @input="onSourceInput"
+      ></textarea>
+      <label class="label-micro" for="bp-source-manifest">manifest.json（只读回显；sha256 由内核在写回时重算）</label>
+      <pre
+        id="bp-source-manifest"
+        class="max-h-40 overflow-auto rounded-md border border-line bg-panel-2 p-3 font-mono text-[11.5px] leading-relaxed text-faint-fg"
+      >{{ sourceManifest }}</pre>
+    </Card>
 
     <div class="grid grid-cols-[190px_minmax(0,1fr)_290px] gap-4">
       <!-- 左：8 种节点面板 -->

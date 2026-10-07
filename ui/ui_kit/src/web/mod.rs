@@ -1995,6 +1995,20 @@ impl WebServer {
                 // shows inline.
                 self.proxy_backtest_body("blueprint.load", &req.body)
             }
+            ("POST", "/api/blueprint/load-source") => {
+                // 手写包的编辑入口（用户裁决：编辑功能必须能打开所有 Lua 包）：
+                // the body IS the `blueprint.loadSource` params object
+                // (`{name}`), forwarded verbatim. Read-only kernel-side; the
+                // editor's source mode shows the entry file + manifest.
+                self.proxy_backtest_body("blueprint.loadSource", &req.body)
+            }
+            ("POST", "/api/blueprint/save-source") => {
+                // 写回镜像 — the body IS the `blueprint.saveSource` params
+                // object (`{name, lua, overwrite?}`), forwarded verbatim. The
+                // kernel re-seals the manifest sha256; the browser never
+                // touches the filesystem (repo iron rule).
+                self.proxy_backtest_body("blueprint.saveSource", &req.body)
+            }
             ("GET", "/api/risk-limits") => {
                 // E26 (§4.4): the settings page's risk card reads the EFFECTIVE
                 // systemic limits through the SAME core client the snapshot

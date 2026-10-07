@@ -2208,6 +2208,33 @@ async fn handle_line(
             .await
         }
 
+        // 手写包的编辑入口（用户裁决：编辑功能必须能打开所有 Lua 包）：读回
+        // 入口文件 + manifest，编辑器的源码模式展示、改写后经
+        // `blueprint.saveSource` 落盘。与 `blueprint.load` 同一名字闸门与
+        // 只读姿态 —— 路径永远落在策略根内的被点名包上。
+        method::BLUEPRINT_LOAD_SOURCE => {
+            let core_cfg = core.lock().await.config().clone();
+            typed(params, |p: BlueprintLoadSourceParams| async move {
+                let doc = blueprint_load_source(&p, &core_cfg)
+                    .map_err(|e| CoreError::new(CoreErrorCode::InvalidParams, e))?;
+                Ok::<_, CoreError>(serde_json::to_value(doc).unwrap_or(Value::Null))
+            })
+            .await
+        }
+
+        // 读回镜像的写侧：把手写包的入口文件原样写回，sha256 现场重算进
+        // manifest（装载器照常验证字节）。目标包必须已存在（编辑不创建），
+        // 覆盖必须显式 —— 与 `blueprint.save` 同一裁决。
+        method::BLUEPRINT_SAVE_SOURCE => {
+            let core_cfg = core.lock().await.config().clone();
+            typed(params, |p: BlueprintSaveSourceParams| async move {
+                let receipt = blueprint_save_source(&p, &core_cfg)
+                    .map_err(|e| CoreError::new(CoreErrorCode::InvalidParams, e))?;
+                Ok::<_, CoreError>(serde_json::to_value(receipt).unwrap_or(Value::Null))
+            })
+            .await
+        }
+
         other => Err((
             Failure::METHOD_NOT_FOUND,
             format!("unknown method: {other}"),
@@ -2531,6 +2558,125 @@ fn blueprint_load(
     Ok(BlueprintLoadResult {
         blueprint_path: format!("{root}/{name}/blueprint.json"),
         json,
+        name,
+    })
+}
+
+/// 手写包的读回（`blueprint.loadSource`）：`blueprint.load` 在包没有
+/// blueprint.json 时会拒绝，而编辑入口必须能打开**所有** Lua 包 —— 这里读
+/// 回入口文件与 manifest 本身，编辑器的源码模式展示它们。同一名字闸门；
+/// 入口文件按 manifest 的 `entry` 字段定位（缺省 `strategy.lua`），manifest
+/// 缺失或字段缺失按原样报错 —— 不编造元数据。
+fn blueprint_load_source(
+    p: &BlueprintLoadSourceParams,
+    core_cfg: &crate::service::CoreConfig,
+) -> Result<BlueprintLoadSourceResult, String> {
+    let name = validate_package_name(&p.name)?;
+    let root = blueprint_strategy_root(core_cfg);
+    let pkg = std::path::Path::new(&root).join(&name);
+    let manifest_raw = std::fs::read_to_string(pkg.join("manifest.json")).map_err(|_| {
+        format!(
+            "no manifest for `{name}` under {root} — not a strategy package the loader \
+             would scan"
+        )
+    })?;
+    let manifest: Value = serde_json::from_str(&manifest_raw)
+        .map_err(|e| format!("manifest for `{name}` is not valid JSON: {e}"))?;
+    let entry = manifest
+        .get("entry")
+        .and_then(|v| v.as_str())
+        .unwrap_or("strategy.lua")
+        .to_string();
+    if entry.contains("..") || entry.contains('/') || entry.contains('\\') {
+        return Err(format!(
+            "manifest entry {entry:?} for `{name}` must be a bare file name — refusing to \
+             read outside the package directory"
+        ));
+    }
+    let lua = std::fs::read_to_string(pkg.join(&entry))
+        .map_err(|e| format!("cannot read {root}/{name}/{entry}: {e}"))?;
+    let sha256 = manifest
+        .get("sha256")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Ok(BlueprintLoadSourceResult {
+        package_dir: pkg.display().to_string(),
+        lua_path: format!("{root}/{name}/{entry}"),
+        manifest_path: format!("{root}/{name}/manifest.json"),
+        lua,
+        sha256,
+        manifest,
+        name,
+    })
+}
+
+/// 手写包的写回（`blueprint.saveSource`）：`blueprint.loadSource` 的镜像 ——
+/// 入口文件原样落盘，sha256 现场重算进 manifest（§6.4：装载器验证字节，漂移
+/// 即拒载，所以 manifest 里的摘要必须跟随新字节）。目标包必须已存在（这个
+/// 动词编辑、不创建），入口文件名沿用读回时的同一闸门。
+fn blueprint_save_source(
+    p: &BlueprintSaveSourceParams,
+    core_cfg: &crate::service::CoreConfig,
+) -> Result<BlueprintSaveSourceResult, String> {
+    use sha2::Digest;
+
+    let name = validate_package_name(&p.name)?;
+    let root = blueprint_strategy_root(core_cfg);
+    let pkg = std::path::Path::new(&root).join(&name);
+    let manifest_path = pkg.join("manifest.json");
+    if !manifest_path.is_file() {
+        return Err(format!(
+            "no manifest for `{name}` under {root} — saveSource edits an EXISTING package; \
+             create one with blueprint.save first"
+        ));
+    }
+    let manifest_raw = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("cannot read {root}/{name}/manifest.json: {e}"))?;
+    let mut manifest: Value = serde_json::from_str(&manifest_raw)
+        .map_err(|e| format!("manifest for `{name}` is not valid JSON: {e}"))?;
+    let entry = manifest
+        .get("entry")
+        .and_then(|v| v.as_str())
+        .unwrap_or("strategy.lua")
+        .to_string();
+    if entry.contains("..") || entry.contains('/') || entry.contains('\\') {
+        return Err(format!(
+            "manifest entry {entry:?} for `{name}` must be a bare file name — refusing to \
+             write outside the package directory"
+        ));
+    }
+    let lua_path = pkg.join(&entry);
+    if !p.overwrite {
+        let existing = std::fs::read_to_string(&lua_path).unwrap_or_default();
+        if existing != p.lua {
+            return Err(format!(
+                "strategy package {root}/{name} exists with different source — writing over \
+                 it must be explicit (overwrite: true)"
+            ));
+        }
+    }
+    std::fs::write(&lua_path, p.lua.as_bytes())
+        .map_err(|e| format!("cannot write {root}/{name}/{entry}: {e}"))?;
+
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(p.lua.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    manifest["sha256"] = Value::String(digest.clone());
+    let manifest_body = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&manifest)
+            .map_err(|e| format!("manifest serialization failed: {e}"))?
+    );
+    std::fs::write(&manifest_path, manifest_body.as_bytes())
+        .map_err(|e| format!("cannot write {root}/{name}/manifest.json: {e}"))?;
+
+    Ok(BlueprintSaveSourceResult {
+        package_dir: pkg.display().to_string(),
+        lua_path: lua_path.display().to_string(),
+        manifest_path: format!("{root}/{name}/manifest.json"),
+        lua_sha256: digest,
+        bytes: [p.lua.len() as u64, manifest_body.len() as u64],
         name,
     })
 }
@@ -4941,6 +5087,137 @@ mod tests {
         let reply = rpc(&core, &registry, &peer, escape).await;
         let msg = reply["error"]["message"].as_str().unwrap_or_default();
         assert!(msg.contains("ASCII letters"), "{reply}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn blueprint_load_source_reads_a_handwritten_package() {
+        // 手写包的编辑入口：没有 blueprint.json 的包不再被拒 —— 入口文件与
+        // manifest 原样读回；名字闸门与 load/save 同源；不存在的包报「no
+        // manifest」而不是编造内容。
+        let root =
+            std::env::temp_dir().join(format!("bk-ipc-bpsrc-{}-{}", std::process::id(), now_ms()));
+        let (core, registry, peer) = save_fixture(&root).await;
+        let pkg = root.join("hand_poked");
+        std::fs::create_dir_all(&pkg).expect("package dir");
+        std::fs::write(pkg.join("strategy.lua"), "function bk_evaluate() end\n")
+            .expect("entry file");
+        std::fs::write(
+            pkg.join("manifest.json"),
+            r#"{"name":"hand_poked","version":"2.0.0","api":"1.0","entry":"strategy.lua","sha256":"deadbeef"}"#,
+        )
+        .expect("manifest");
+
+        let line = json_line(
+            1,
+            "blueprint.loadSource",
+            &serde_json::json!({ "name": "hand_poked" }),
+        );
+        let reply = rpc(&core, &registry, &peer, line).await;
+        assert!(reply.get("error").is_none(), "read must answer: {reply}");
+        let r = &reply["result"];
+        assert_eq!(r["lua"], serde_json::json!("function bk_evaluate() end\n"));
+        assert_eq!(r["sha256"], serde_json::json!("deadbeef"));
+        assert_eq!(r["manifest"]["version"], serde_json::json!("2.0.0"));
+
+        // A package with no manifest is refused with the honest reason.
+        let line = json_line(
+            2,
+            "blueprint.loadSource",
+            &serde_json::json!({ "name": "no_such_pkg" }),
+        );
+        let reply = rpc(&core, &registry, &peer, line).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("no manifest"), "{reply}");
+
+        // Same package-name screen as load/save: no path steering.
+        let line = json_line(
+            3,
+            "blueprint.loadSource",
+            &serde_json::json!({ "name": "../escape" }),
+        );
+        let reply = rpc(&core, &registry, &peer, line).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("ASCII letters"), "{reply}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn blueprint_save_source_reseals_the_manifest_and_refuses_implicit_writes() {
+        // 写回镜像：原样落盘 + sha256 现场重算进 manifest（装载器照常验证）；
+        // 内容不同且未显式 overwrite 时拒绝写；目标包不存在时拒绝（编辑不
+        // 创建）；manifest entry 带路径成分时拒绝（不写出包目录）。
+        let root =
+            std::env::temp_dir().join(format!("bk-ipc-bpsrcw-{}-{}", std::process::id(), now_ms()));
+        let (core, registry, peer) = save_fixture(&root).await;
+        let pkg = root.join("hand_poked");
+        std::fs::create_dir_all(&pkg).expect("package dir");
+        std::fs::write(pkg.join("strategy.lua"), "-- old\n").expect("entry file");
+        std::fs::write(
+            pkg.join("manifest.json"),
+            r#"{"name":"hand_poked","version":"1.0.0","api":"1.0","entry":"strategy.lua","sha256":"old"}"#,
+        )
+        .expect("manifest");
+
+        // Different body, no overwrite — refused, and nothing changed.
+        let line = json_line(
+            1,
+            "blueprint.saveSource",
+            &serde_json::json!({ "name": "hand_poked", "lua": "-- new\n" }),
+        );
+        let reply = rpc(&core, &registry, &peer, line).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("must be explicit"), "{reply}");
+        assert_eq!(
+            std::fs::read_to_string(pkg.join("strategy.lua")).expect("old body intact"),
+            "-- old\n"
+        );
+
+        // Explicit overwrite lands, and the manifest's sha256 now matches the
+        // NEW bytes (the loader's §6.4 verification would refuse otherwise).
+        let line = json_line(
+            2,
+            "blueprint.saveSource",
+            &serde_json::json!({ "name": "hand_poked", "lua": "-- new\n", "overwrite": true }),
+        );
+        let reply = rpc(&core, &registry, &peer, line).await;
+        assert!(reply.get("error").is_none(), "overwrite must land: {reply}");
+        let r = &reply["result"];
+        let new_sha = r["luaSha256"].as_str().expect("sha in receipt");
+        assert_eq!(
+            std::fs::read_to_string(pkg.join("strategy.lua")).expect("new body"),
+            "-- new\n"
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(pkg.join("manifest.json")).expect("m"))
+                .expect("manifest json");
+        assert_eq!(manifest["sha256"], serde_json::json!(new_sha));
+        assert_eq!(
+            manifest["version"],
+            serde_json::json!("1.0.0"),
+            "untouched fields stay"
+        );
+
+        // Identical body without overwrite is a no-op write that still answers.
+        let line = json_line(
+            3,
+            "blueprint.saveSource",
+            &serde_json::json!({ "name": "hand_poked", "lua": "-- new\n" }),
+        );
+        let reply = rpc(&core, &registry, &peer, line).await;
+        assert!(reply.get("error").is_none(), "no-op write answers: {reply}");
+
+        // A package with no manifest is refused — saveSource edits, never creates.
+        let line = json_line(
+            4,
+            "blueprint.saveSource",
+            &serde_json::json!({ "name": "no_such_pkg", "lua": "x", "overwrite": true }),
+        );
+        let reply = rpc(&core, &registry, &peer, line).await;
+        let msg = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("no manifest"), "{reply}");
 
         let _ = std::fs::remove_dir_all(&root);
     }
