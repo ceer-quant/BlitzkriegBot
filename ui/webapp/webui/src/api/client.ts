@@ -538,6 +538,26 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name }),
     }),
+  /**
+   * 读回手写包的入口源码（`blueprint.loadSource`）：编辑策略入口对**所有**
+   * Lua 包开放的那一半 —— 没有 blueprint.json 的包从这条路打开，源码模式
+   * 展示 Lua 与 manifest；内核按 manifest.entry 定位文件（同名字闸门）。
+   */
+  blueprintLoadSource: (name: string) =>
+    request<BlueprintLoadSourceDoc>('/blueprint/load-source', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+  /**
+   * 手写包源码写回（`blueprint.saveSource`）：入口文件原样落盘，sha256 现场
+   * 重算进 manifest（装载器照常验证字节）。编辑不创建：包必须已存在；内容
+   * 与磁盘不同时必须显式 `overwrite`。
+   */
+  blueprintSaveSource: (body: BlueprintSaveSourceBody) =>
+    request<BlueprintSaveSourceDoc>('/blueprint/save-source', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 }
 
 // ── #362 蓝图编辑器（mirror core/blitzkrieg_core/src/ipc/schema.rs）──────────
@@ -574,6 +594,40 @@ export interface BlueprintLoadDoc {
   name: string
   blueprintPath: string
   json: string
+  error?: string
+}
+
+/** `blueprint.loadSource` 应答：手写包的入口源码 + manifest 原文。 */
+export interface BlueprintLoadSourceDoc {
+  name: string
+  packageDir: string
+  luaPath: string
+  manifestPath: string
+  lua: string
+  /** manifest 里当前入口文件的 sha256，hex。 */
+  sha256: string
+  /** manifest 原文（任意 JSON），编辑器原样展示。 */
+  manifest: unknown
+  error?: string
+}
+
+/** `blueprint.saveSource` 请求体（camelCase wire 与内核 serde 对齐）。 */
+export interface BlueprintSaveSourceBody {
+  name: string
+  lua: string
+  /** 磁盘上已有不同源码时必须显式为 true。 */
+  overwrite?: boolean
+}
+
+/** `blueprint.saveSource` 回执：写了什么、新的 sha256、字节数。 */
+export interface BlueprintSaveSourceDoc {
+  name: string
+  packageDir: string
+  luaPath: string
+  manifestPath: string
+  luaSha256: string
+  /** lua/manifest 两个文件的字节数。 */
+  bytes: number[]
   error?: string
 }
 
