@@ -49,9 +49,17 @@ function startAddRule(): void {
   }
 }
 
+/** 深拷贝一条规则进编辑缓冲。规则对象来自内核应答（经 v-model 的响应式
+ *  代理），structuredClone 遇 Proxy 抛 DataCloneError —— 「编辑」按钮
+ *  因此静默无反应（issue #411）；JSON 往返对 JSON-able 的 PolicyRuleView
+ *  足够，且把代理还原成普通对象。 */
+function cloneRule(r: PolicyRuleView): PolicyRuleView {
+  return JSON.parse(JSON.stringify(r)) as PolicyRuleView
+}
+
 function startEditRule(i: number): void {
   ruleDraftIdx.value = i
-  ruleDraft.value = structuredClone(rules.value[i])
+  ruleDraft.value = cloneRule(rules.value[i])
 }
 
 function commitDraft(d: PolicyRuleView): void {
