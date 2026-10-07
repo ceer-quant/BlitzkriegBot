@@ -1366,8 +1366,6 @@ pub struct Core {
     /// strategies with internal time-based state; entry eligibility itself
     /// always rides the dirty-token wake).
     fast_last_eval_ms: i64,
-    /// Replay fast path: virtual time of the last kline-preview pass.
-    fast_last_kline_ms: i64,
     /// Issue #390 (replay nofast): the next virtual instant one of the
     /// every-tick maintenance passes whose OUTPUT the replay observes can
     /// change — the earliest open position's expiry passes (`TimeExit`/
@@ -1406,11 +1404,6 @@ struct CloseCredential {
 /// boundary wake (`fast_next_timing_ms`) and the dirty-input wake cover the
 /// proven inputs; this bounds anything else to a 2 s staleness.
 const FAST_EVAL_FALLBACK_MS: i64 = 2_000;
-/// Replay fast path: the kline-preview pass (per-bucket throttled to 1/s in
-/// the base path) runs at most this often on quiet ticks — the previews are
-/// live-panel decoration, never a backtest report input.
-const FAST_KLINE_MIN_MS: i64 = 250;
-
 /// Issue #390 (replay nofast): the exit ladder re-runs at least this often on
 /// quiet ticks. Bounds every THROTTLED report the ladder feeds — suppressed
 /// stops (`stop_suppression_repeat_sec` in shipped configs is 1 s+; the
@@ -1834,7 +1827,6 @@ impl Core {
             fast_next_escalation_ms: 0,
             fast_next_expiry_ms: 0,
             fast_last_eval_ms: 0,
-            fast_last_kline_ms: 0,
             // Issue #390 (nofast): 0 = due on the first tick.
             fast_next_exit_deadline_ms: 0,
         }
@@ -8748,27 +8740,30 @@ impl Core {
         // are NEVER subject to this throttle (a swallowed close would leave the
         // chart missing that bar forever). The throttle is per bucket on the
         // CORE's clock, shared by every subscribed session.
-        // Replay fast path: the per-bucket throttle makes any push more often
-        // than 1/s invisible, so on quiet ticks the pass itself runs on a
-        // FAST_KLINE_MIN_MS beat instead of every 50 ms — the previews are
-        // live-panel decoration, never a backtest report input.
-        let kline_pass =
-            !self.replay_sched() || now_ms - self.fast_last_kline_ms >= FAST_KLINE_MIN_MS;
-        if kline_pass {
-            if self.replay_sched() {
-                self.fast_last_kline_ms = now_ms;
-            }
-            if let Some(engine) = self.engine.as_ref() {
-                for bar in engine.kline_current_bars() {
-                    let key = (bar.symbol.clone(), bar.interval);
-                    let due = self
-                        .kline_preview_last_ms
-                        .get(&key)
-                        .is_none_or(|last| now_ms - *last >= 1_000);
-                    if due {
-                        self.kline_preview_last_ms.insert(key, now_ms);
-                        self.emit(Event::KlineUpdate { kline: bar });
-                    }
+        // Replay gate (issue #409 P0, 39.5× measured): the pass is skipped
+        // wholesale under `replay_sched()`. Its events are live-panel
+        // decoration and NOTHING in a replay consumes them — the backtest
+        // drain matches every event it cares about by name and drops
+        // `KlineUpdate` in `_ => {}`; the `next_replay_wake_ms` probe has
+        // never armed a wake for this pass (its only throttle state is the
+        // local 1/s fold); and `engine_on_data` pushes CLOSED bars on its
+        // own path, untouched by this gate. The per-bucket 1/s fold, the
+        // "one bar one push" contract and the close-vs-preview split are all
+        // live semantics; dropping them in replay changes no byte of the
+        // report — the A/B in docs/perf/backtest-perf-plan.md measured the
+        // output bit-identical with the pass off.
+        if !self.replay_sched()
+            && let Some(engine) = self.engine.as_ref()
+        {
+            for bar in engine.kline_current_bars() {
+                let key = (bar.symbol.clone(), bar.interval);
+                let due = self
+                    .kline_preview_last_ms
+                    .get(&key)
+                    .is_none_or(|last| now_ms - *last >= 1_000);
+                if due {
+                    self.kline_preview_last_ms.insert(key, now_ms);
+                    self.emit(Event::KlineUpdate { kline: bar });
                 }
             }
         }
