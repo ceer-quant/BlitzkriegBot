@@ -125,6 +125,15 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ### Removed
 
+- **The upgrade's step-0 `data/` light backup** — `blitzkrieg upgrade` no longer
+  tars `data/` before building (owner call, 2026-10-07): the directory grew to
+  7.1 GB / 120k+ files (onchain corpus, archive, audit), so a step still
+  described as "a few MB, seconds" dominated the upgrade's wall time, while the
+  upgrade itself never writes `data/` — binaries, cdylibs, the panel bundle and
+  factory configs only. The rollback insurance is the previous release set the
+  install keeps (`target/rollback-*`); scheduled data protection is unchanged
+  (`blitzkrieg backup`, the 04:00 loop, the LaunchAgent route). Upgrade steps
+  are renumbered 0–7; `--check` covers 0–4.
 - **The Rust `spread_arb` cdylib fixture** — `user_layer/strategies/spread_arb`
   and the one-member nested workspace with it. `user_layer/strategies/` stays
   as the operator cdylib drop-point (kernel's default `--strategy-dir` +
