@@ -2036,6 +2036,14 @@ impl WebServer {
                 // effect class (live / next_session) in the audited reply.
                 self.proxy_backtest_body("risk.setSystemic", &req.body)
             }
+            ("POST", "/api/risk/set-exit") => {
+                // 退出纪律的可编辑写路径（用户裁决：Gate 4 绑定的止损/止盈/
+                // 强平必须可以改）：the body IS the `risk.setExit` params
+                // object (`{stopLossPct?, takeProfitPct?, forceExitSec?,
+                // reason?}`), forwarded verbatim. The kernel plans first,
+                // writes later, and the audited reply names each old→new.
+                self.proxy_backtest_body("risk.setExit", &req.body)
+            }
             ("GET", "/api/execution-policy") | ("GET", "/api/execution-policy/preview") => {
                 // #364: the settings page's 生效风控 section. Effective view =
                 // `execution_policy.get` (the kernel folds `[accounts.<id>]`

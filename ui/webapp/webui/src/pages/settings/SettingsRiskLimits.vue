@@ -14,7 +14,7 @@ import { computed, onMounted, ref } from 'vue'
 import { RefreshCw, Save, ShieldCheck } from 'lucide-vue-next'
 import {
   api,
-  type RiskBound, type RiskLimitsDoc, type SystemicLimitUpdateDoc,
+  type RiskBound, type RiskLimitsDoc, type SystemicLimitUpdateDoc, type ExitSetUpdateDoc,
 } from '@/api/client'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
@@ -80,12 +80,18 @@ const editBufs = ref<Record<string, string>>({})
 const riskSaving = ref(false)
 const riskMsg = ref<string | null>(null)
 const riskReceipt = ref<SystemicLimitUpdateDoc | null>(null)
+const exitReceipt = ref<ExitSetUpdateDoc | null>(null)
 
 function syncBuffers(d: RiskLimitsDoc): void {
   const next: Record<string, string> = {}
   for (const r of ROW_DEFS) next[r.field] = r.bound()?.value ?? '0'
+  // 退出纪律三行同用一块编辑缓冲（field 不与限额行重叠）。
+  next['stopLossPct'] = String(d.exit.stopLossPct)
+  next['takeProfitPct'] = String(d.exit.takeProfitPct)
+  next['forceExitSec'] = String(d.exit.forceExitSec)
   editBufs.value = next
   riskReceipt.value = null
+  exitReceipt.value = null
 }
 
 /** 下一笔策略开仓就被这个 bound 约束（live）；其余三项重启后武装。 */
@@ -94,7 +100,13 @@ function effectLabel(effect: string): string {
   return effect === 'live' ? '立即生效' : effect === 'next_session' ? '重启后生效' : effect
 }
 function fieldLabel(field: string): string {
-  return ROW_DEFS.find((r) => r.field === field)?.label ?? field
+  return ROW_DEFS.find((r) => r.field === field)?.label ?? EXIT_ROW_DEFS.find((r) => r.field === field)?.label ?? field
+}
+/** 回执里的单位随字段：百分比行带 %，强平行带 s。 */
+function fieldUnit(field: string): string {
+  if (field === 'stopLossPct' || field === 'takeProfitPct') return '%'
+  if (field === 'forceExitSec') return 's'
+  return ''
 }
 
 /** 只发改动过的字段；空串=保持不变。非法输入就地拒绝保存。 */
@@ -113,24 +125,97 @@ function buildPatch(): Record<string, string> | string {
   return patch
 }
 
+// ── 退出纪律（Gate 4 绑定）：止损/止盈/强平三行，走 risk.setExit ──────────
+// 与系统限额同卡但不同写路径：退出纪律不是 Bound（没有来源徽标的枚举语义，
+// 内核里它是行为旋钮），percentages 拒绝 ≤ 0，forceExitSec 0 = 关闭强平
+// （出厂校准值）。生效 = live：新入场下一笔按新值绑定，已开仓位的退出扫描
+// 同步跟随 —— 内核回执逐项 old→new。
+interface ExitRowDef { field: string; label: string }
+const EXIT_ROW_DEFS: ExitRowDef[] = [
+  { field: 'stopLossPct', label: '止损' },
+  { field: 'takeProfitPct', label: '止盈' },
+  { field: 'forceExitSec', label: '强平' },
+]
+const EXIT_FIELDS = new Set(EXIT_ROW_DEFS.map((r) => r.field))
+
+/** 退出纪律行的当前值文本（单位随行）：输入框的参照。 */
+function exitCurrentText(field: string): string {
+  const e = riskDoc.value?.exit
+  if (!e) return '—'
+  if (field === 'stopLossPct') return `%（当前 ${e.stopLossPct}%）`
+  if (field === 'takeProfitPct') return `%（当前 ${e.takeProfitPct}%）`
+  return `秒（当前 ${e.forceExitSec}s${Number(e.forceExitSec) === 0 ? '，关闭' : ''}）`
+}
+function exitPlaceholder(field: string): string {
+  const e = riskDoc.value?.exit
+  if (!e) return ''
+  if (field === 'stopLossPct') return String(e.stopLossPct)
+  if (field === 'takeProfitPct') return String(e.takeProfitPct)
+  return String(e.forceExitSec)
+}
+/** 退出纪律没有 LimitSource 枚举：热改后 badge 如实写「热改」。 */
+function exitSourceLabel(): string {
+  return '行为旋钮'
+}
+
+/** 退出纪律 patch：只发改动项；百分比必须 > 0，强平 ≥ 0（0 = 关闭）。 */
+function buildExitPatch(): Record<string, string | number> | string {
+  const e = riskDoc.value?.exit
+  if (!e) return '读不到退出纪律当前值'
+  const patch: Record<string, string | number> = {}
+  const sl = (editBufs.value['stopLossPct'] ?? '').trim()
+  if (sl !== '' && String(e.stopLossPct) !== sl) {
+    const n = Number(sl)
+    if (!Number.isFinite(n) || n <= 0) return '止损：必须是 > 0 的百分比'
+    patch.stopLossPct = sl
+  }
+  const tp = (editBufs.value['takeProfitPct'] ?? '').trim()
+  if (tp !== '' && String(e.takeProfitPct) !== tp) {
+    const n = Number(tp)
+    if (!Number.isFinite(n) || n <= 0) return '止盈：必须是 > 0 的百分比'
+    patch.takeProfitPct = tp
+  }
+  const fe = (editBufs.value['forceExitSec'] ?? '').trim()
+  if (fe !== '' && String(e.forceExitSec) !== fe) {
+    const n = Number(fe)
+    if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return '强平：必须是 ≥ 0 的整数秒（0 = 关闭强平）'
+    patch.forceExitSec = n
+  }
+  return patch
+}
+
 async function saveRisk(): Promise<void> {
   riskMsg.value = null
   riskReceipt.value = null
+  exitReceipt.value = null
   const built = buildPatch()
   if (typeof built === 'string') {
     riskMsg.value = built
     return
   }
+  const builtExit = buildExitPatch()
+  if (typeof builtExit === 'string') {
+    riskMsg.value = builtExit
+    return
+  }
   const keys = Object.keys(built)
-  if (keys.length === 0) {
-    riskMsg.value = '没有改动 —— 九项都与内核当前生效值一致。'
+  const exitKeys = Object.keys(builtExit)
+  if (keys.length === 0 && exitKeys.length === 0) {
+    riskMsg.value = '没有改动 —— 九项限额与退出纪律都与内核当前生效值一致。'
     return
   }
   riskSaving.value = true
   try {
-    const res = await api.riskSetSystemic({ ...built, reason: 'webui 面板编辑（生效风控卡）' })
-    if (res.error) throw new Error(res.error)
-    riskReceipt.value = res
+    if (keys.length > 0) {
+      const res = await api.riskSetSystemic({ ...built, reason: 'webui 面板编辑（生效风控卡）' })
+      if (res.error) throw new Error(res.error)
+      riskReceipt.value = res
+    }
+    if (exitKeys.length > 0) {
+      const res = await api.riskSetExit({ ...builtExit, reason: 'webui 面板编辑（退出纪律）' })
+      if (res.error) throw new Error(res.error)
+      exitReceipt.value = res
+    }
     await loadRisk()
   } catch (e) {
     riskErr.value = e instanceof Error ? e.message : String(e)
@@ -212,11 +297,28 @@ onMounted(() => void loadRisk())
         </template>
 
         <div class="label-micro mt-3">退出纪律（Gate 4 绑定）</div>
-        <div class="mt-1 flex items-center justify-between gap-3 border-t border-line py-1.5 text-[12px]">
-          <span class="text-faint-fg">止损 / 止盈 / 强平</span>
-          <span class="num font-semibold">
-            {{ riskDoc.exit.stopLossPct }}% / {{ riskDoc.exit.takeProfitPct }}% / {{ riskDoc.exit.forceExitSec }}s
-          </span>
+        <div class="mt-1">
+          <div
+            v-for="(row, i) in EXIT_ROW_DEFS"
+            :key="row.field"
+            class="flex items-center justify-between gap-3 py-1.5 text-[12px]"
+            :class="i === 0 ? '' : 'border-t border-line'"
+          >
+            <span class="text-faint-fg">{{ row.label }}</span>
+            <span class="flex items-center gap-2">
+              <Input
+                v-model="editBufs[row.field]"
+                class="num h-7 w-24 text-right text-[12px]"
+                type="text"
+                :min="0"
+                step="any"
+                :placeholder="exitPlaceholder(row.field)"
+                :aria-label="row.label"
+              />
+              <span class="text-[10.5px] font-normal text-faint-fg">{{ exitCurrentText(row.field) }}</span>
+              <Badge variant="gold">{{ exitSourceLabel() }}</Badge>
+            </span>
+          </div>
         </div>
       </div>
 
@@ -231,7 +333,7 @@ onMounted(() => void loadRisk())
         >
           <RefreshCw class="size-3.5" />刷新
         </Button>
-        <Button size="sm" :disabled="riskSaving || riskBusy" title="把改动过的限额写入内核（risk.setSystemic）" @click="saveRisk">
+        <Button size="sm" :disabled="riskSaving || riskBusy" title="把改动过的限额与退出纪律写入内核（risk.setSystemic / risk.setExit）" @click="saveRisk">
           <Save class="size-3.5" />{{ riskSaving ? '保存中…' : '保存改动' }}
         </Button>
         <span class="text-[11px] text-faint-fg">{{ riskHint }}</span>
@@ -245,6 +347,16 @@ onMounted(() => void loadRisk())
           {{ fieldLabel(c.field) }}：{{ c.from === '0' ? '关闭' : c.from }} → {{ c.to === '0' ? '关闭' : c.to }}
           <Badge :variant="c.effect === 'live' ? 'gold' : 'default'" class="ml-1">{{ effectLabel(c.effect) }}</Badge>
         </div>
+      </div>
+      <div v-if="exitReceipt" class="mt-2 rounded border border-line bg-panel-2 px-2.5 py-2 text-[11px] leading-relaxed">
+        <div class="font-semibold text-fg">
+          退出纪律已写入 {{ exitReceipt.applied.length }} 项（未持久化，重启回到启动配置）
+        </div>
+        <div v-for="c in exitReceipt.applied" :key="c.field" class="mt-0.5 text-muted-fg">
+          {{ fieldLabel(c.field) }}：{{ c.from === '0' ? '关闭' : c.from }}{{ fieldUnit(c.field) }} → {{ c.to === '0' ? '关闭' : c.to }}{{ fieldUnit(c.field) }}
+          <Badge variant="gold" class="ml-1">{{ effectLabel(c.effect) }}</Badge>
+        </div>
+        <div class="mt-1 text-faint-fg">新入场下一笔按新值绑定；已开仓位的退出扫描同步跟随新值。</div>
       </div>
       <p v-if="riskErr" class="mt-2 text-[11px] leading-snug text-down">{{ riskErr }}</p>
     </template>
