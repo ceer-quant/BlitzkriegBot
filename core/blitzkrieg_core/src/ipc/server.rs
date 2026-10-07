@@ -2839,6 +2839,7 @@ fn blueprint_save(
             lua.len() as u64,
             manifest_body.len() as u64,
         ],
+        tunables: tunables.into_iter().map(|t| t.name).collect(),
     })
 }
 
@@ -5300,6 +5301,20 @@ mod tests {
                     .len()
             ])
         );
+        // The receipt names the evolvable knobs — the same set the manifest's
+        // tunables object carries (numeric anchors of this graph: the
+        // condition threshold plus the buy's price and budget_ratio).
+        assert_eq!(
+            r["tunables"],
+            serde_json::json!(["n2_value", "n4_price", "n4_budget_ratio"]),
+            "receipt tunables: {r}"
+        );
+        let manifest_tunables = manifest["tunables"].as_object().expect("tunables exported");
+        assert_eq!(
+            manifest_tunables.len(),
+            r["tunables"].as_array().unwrap().len()
+        );
+        assert!(lua.contains("__param(\"n2_value\", 0.25)"), "{lua}");
 
         // A second save of the SAME name refuses: the package is now on the
         // loader's scan path and a silent overwrite could swap a strategy an

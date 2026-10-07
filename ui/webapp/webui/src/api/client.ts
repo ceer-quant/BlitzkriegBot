@@ -677,6 +677,8 @@ export interface BlueprintSaveDoc {
   luaSha256: string
   /** blueprint/lua/manifest 三个文件的字节数。 */
   bytes: number[]
+  /** 可进化旋钮名（manifest tunables 导出）——空数组表示本蓝图没有数值锚点。 */
+  tunables: string[]
   error?: string
 }
 

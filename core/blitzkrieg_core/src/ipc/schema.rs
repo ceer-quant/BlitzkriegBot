@@ -381,6 +381,11 @@ pub struct BlueprintSaveResult {
     /// the IPC contract promises (a save that "succeeded" without saying WHAT
     /// it wrote is not auditable).
     pub bytes: [u64; 3],
+    /// Names of the evolvable knobs the manifest exports (`tunables`) — empty
+    /// when the blueprint has no numeric anchors. The editor shows this count
+    /// so the operator knows the saved strategy is evolution-ready.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tunables: Vec<String>,
 }
 
 /// `blueprint.load` params (#393): `{ "name": "<package name>" }` — the
