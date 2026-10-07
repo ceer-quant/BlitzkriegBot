@@ -463,15 +463,10 @@ pub async fn run(
         github_token.clone(),
         std::future::pending(),
     );
-    // The `risk.limits` readout (§4.4), assembled ONCE: the nine new
-    // systemic limits are restart-to-change (deliberately absent from
-    // `risk.setLimits`) and the exit resolution is not a #191 hot key, so
-    // the snapshot can never go stale mid-run — which is what lets the arm
-    // answer WITHOUT the Core lock, exactly like `system.version`.
-    let risk_limits = Arc::new(crate::ipc::schema::RiskLimitsResult::snapshot(
-        &config.risk.systemic,
-        &config.positions.exit,
-    ));
+    // The `risk.limits` readout (§4.4) is assembled per answer from the
+    // LIVE risk config: `risk.setLimits`/`risk.setSystemic` hot-write the
+    // matrix, so the arm takes the Core lock and reads it back rather than
+    // serving a boot snapshot that a hot edit would make a lie.
 
     // #353: the backtest job registry — the WebUI's 拉数据→配置→回测→看结果
     // flow runs as tokio tasks INSIDE this process, addressed over IPC. One
@@ -515,7 +510,6 @@ pub async fn run(
                         bus_tx.subscribe(),
                         registry.clone(),
                         update_state.clone(),
-                        risk_limits.clone(),
                         jobs.clone(),
                     )
                 }
@@ -540,7 +534,6 @@ fn spawn_session(
     events: broadcast::Receiver<Event>,
     registry: crate::market::registry::MarketPluginRegistry,
     update_state: Arc<crate::ipc::version::UpdateState>,
-    risk_limits: Arc<crate::ipc::schema::RiskLimitsResult>,
     jobs: Arc<crate::backtest_jobs::BacktestJobs>,
 ) {
     tokio::spawn(async move {
@@ -614,7 +607,6 @@ fn spawn_session(
                         line,
                         &peer,
                         &update_state,
-                        &risk_limits,
                         &jobs,
                         &mut session,
                     )
@@ -651,7 +643,6 @@ async fn handle_line(
     line: String,
     peer: &PeerAuth,
     update_state: &Arc<crate::ipc::version::UpdateState>,
-    risk_limits: &Arc<crate::ipc::schema::RiskLimitsResult>,
     jobs: &Arc<crate::backtest_jobs::BacktestJobs>,
     session: &mut SessionState,
 ) -> String {
@@ -721,12 +712,21 @@ async fn handle_line(
 
         // E26 (§4.4): the systemic-risk readout — WHAT each limit is and
         // WHERE it came from, plus the exit triple Gate 4 binds. Read-only,
-        // zero side effects, NO Core lock: the snapshot was assembled once at
-        // boot and nothing on it can change mid-run (the nine new limits are
-        // restart-to-change by design, and the exit resolution is not a #191
-        // hot key), so the readout answers even while a fill holds the
-        // trading lock.
-        method::RISK_LIMITS => Ok(serde_json::to_value(&**risk_limits).unwrap_or(Value::Null)),
+        // zero side effects, but NOT lock-free any more: `risk.setLimits`
+        // and `risk.setSystemic` hot-write the matrix, so the answer is
+        // assembled per call from the live risk config — serving a boot
+        // snapshot after a hot edit would show limits that are no longer in
+        // force, which is worse than waiting a moment for the lock.
+        method::RISK_LIMITS => {
+            let c = core.lock().await;
+            Ok(
+                serde_json::to_value(crate::ipc::schema::RiskLimitsResult::snapshot(
+                    &c.risk_config().systemic,
+                    &c.config().positions.exit,
+                ))
+                .unwrap_or(Value::Null),
+            )
+        }
 
         // VERSIONING.md §7.4: the update switches. A write lands an audit
         // record AND must persist — a switch that silently reverts on restart
@@ -942,6 +942,38 @@ async fn handle_line(
                             Ok(update) => Ok(serde_json::to_value(update).unwrap_or(Value::Null)),
                             Err(e) => Err(core_err(e)),
                         }
+                    }
+                }
+            }
+        }
+
+        // 生效风控可编辑（用户裁决：单笔最大亏损、当日最大回撤等必须都可以
+        // 被编辑）：九项系统性限额的运行时写路径。六项热生效、回撤预算与
+        // 连亏熔断对按「下次会话」语义 —— 回执逐项带 effect，不静默。
+        method::RISK_SET_SYSTEMIC => {
+            match serde_json::from_value::<SetSystemicLimitsParams>(params.clone()) {
+                Err(e) => Err((
+                    Failure::INVALID_PARAMS,
+                    format!(
+                        "{e} — nothing was applied; the nine systemic fields are \
+                         maxSingleLossUsd, maxDailyDrawdownUsd, maxPositionSize, \
+                         maxConsecutiveLosses, cooldownMinutes, maxTotalPosition, \
+                         maxTotalExposureUsd, maxCorrelationUsd, globalKillSwitchLossUsd"
+                    ),
+                    None,
+                )),
+                Ok(p) => {
+                    let actor = match peer {
+                        PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                        _ => "uid:unknown".to_string(),
+                    };
+                    match core
+                        .lock()
+                        .await
+                        .apply_systemic_limits(&p, &actor, now_ms())
+                    {
+                        Ok(update) => Ok(serde_json::to_value(update).unwrap_or(Value::Null)),
+                        Err(e) => Err(core_err(e)),
                     }
                 }
             }
@@ -3040,15 +3072,6 @@ mod tests {
         line: String,
     ) -> Value {
         let update_state = Arc::new(crate::ipc::version::UpdateState::new(false, false));
-        // The boot-time snapshot the arm serves, assembled from the SAME
-        // config this core runs under — the honest road `serve` takes.
-        let risk_limits = {
-            let c = core.lock().await;
-            Arc::new(crate::ipc::schema::RiskLimitsResult::snapshot(
-                &c.config().risk.systemic,
-                &c.config().positions.exit,
-            ))
-        };
         let jobs = Arc::new(crate::backtest_jobs::BacktestJobs::new());
         let mut session = SessionState::default();
         serde_json::from_str(
@@ -3058,7 +3081,6 @@ mod tests {
                 line,
                 peer,
                 &update_state,
-                &risk_limits,
                 &jobs,
                 &mut session,
             )
@@ -3079,26 +3101,9 @@ mod tests {
         line: String,
     ) -> Value {
         let update_state = Arc::new(crate::ipc::version::UpdateState::new(false, false));
-        let risk_limits = {
-            let c = core.lock().await;
-            Arc::new(crate::ipc::schema::RiskLimitsResult::snapshot(
-                &c.config().risk.systemic,
-                &c.config().positions.exit,
-            ))
-        };
         let jobs = Arc::new(crate::backtest_jobs::BacktestJobs::new());
         serde_json::from_str(
-            &handle_line(
-                core,
-                registry,
-                line,
-                peer,
-                &update_state,
-                &risk_limits,
-                &jobs,
-                session,
-            )
-            .await,
+            &handle_line(core, registry, line, peer, &update_state, &jobs, session).await,
         )
         .expect("every reply is one JSON object")
     }
@@ -3176,13 +3181,6 @@ mod tests {
         let line =
             format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{params}}}"#);
         let update_state = Arc::new(crate::ipc::version::UpdateState::new(false, false));
-        let risk_limits = {
-            let c = core.lock().await;
-            Arc::new(crate::ipc::schema::RiskLimitsResult::snapshot(
-                &c.config().risk.systemic,
-                &c.config().positions.exit,
-            ))
-        };
         let mut session = SessionState::default();
         serde_json::from_str(
             &handle_line(
@@ -3191,7 +3189,6 @@ mod tests {
                 line,
                 peer,
                 &update_state,
-                &risk_limits,
                 jobs,
                 &mut session,
             )
@@ -3391,6 +3388,135 @@ mod tests {
         );
     }
 
+    /// 生效风控可编辑（`risk.setSystemic`）：写路径的 wire 合同 —— patch
+    /// 落进 matrix（readout 立即读回 flag 来源的新值）、回执逐项带 effect
+    /// （live / next_session）与 old→new、空 patch 拒绝、负值拒绝且原子
+    /// （同行 ride-along 的合法字段也不落）。下一笔入场按新值裁决由
+    /// `engine_evaluate` → `process_intent` 的 §4.2 测试矩阵覆盖（arbitration/
+    /// pipeline.rs 的 judge_entry 用例），这里不重复架一台引擎。
+    #[tokio::test]
+    async fn risk_set_systemic_writes_the_matrix_and_names_each_effect() {
+        let (core, registry, peer) = hot_reload_fixture().await;
+
+        // Arm ONE live bound + the drawdown row, which must carry next_session.
+        let applied = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"risk.setSystemic","params":{"maxTotalPosition":1,"maxDailyDrawdownUsd":50,"reason":"live arm"}}"#.to_string(),
+        )
+        .await;
+        assert!(
+            applied.get("error").is_none(),
+            "the systemic patch must be accepted: {applied}"
+        );
+        let audit = &applied["result"];
+        assert_eq!(audit["persisted"], serde_json::json!(false));
+        assert_eq!(
+            audit["actor"],
+            serde_json::json!(format!("uid:{}", own_uid())),
+            "who did it must be on the record: {audit}"
+        );
+        let effect_of = |field: &str| {
+            audit["applied"]
+                .as_array()
+                .expect("an applied list")
+                .iter()
+                .find(|c| c["field"] == serde_json::json!(field))
+                .map(|c| c["effect"].as_str().expect("effect").to_string())
+        };
+        assert_eq!(
+            effect_of("maxTotalPosition").as_deref(),
+            Some("live"),
+            "the position-count cap is a live bound: {audit}"
+        );
+        assert_eq!(
+            effect_of("maxDailyDrawdownUsd").as_deref(),
+            Some("next_session"),
+            "the drawdown budget must state its next-session arming: {audit}"
+        );
+        let from_of = |field: &str| {
+            audit["applied"]
+                .as_array()
+                .expect("an applied list")
+                .iter()
+                .find(|c| c["field"] == serde_json::json!(field))
+                .map(|c| c["from"].as_str().expect("from").to_string())
+        };
+        assert_eq!(
+            from_of("maxTotalPosition").as_deref(),
+            Some("0"),
+            "the old value (0 = off) is on the record: {audit}"
+        );
+
+        // The readout answers with the new values, flag-sourced.
+        let read = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"risk.limits","params":{}}"#.to_string(),
+        )
+        .await;
+        assert!(read.get("error").is_none(), "readout must answer: {read}");
+        assert_eq!(
+            read["result"]["global"]["limits"]["maxTotalPosition"]["value"],
+            serde_json::json!("1")
+        );
+        assert_eq!(
+            read["result"]["global"]["limits"]["maxTotalPosition"]["source"],
+            serde_json::json!("flag")
+        );
+        assert_eq!(
+            read["result"]["account"]["limits"]["maxDailyDrawdownUsd"]["value"],
+            serde_json::json!("50")
+        );
+
+        // Empty patch is refused.
+        let empty = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"risk.setSystemic","params":{}}"#.to_string(),
+        )
+        .await;
+        assert!(
+            empty["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("at least one"),
+            "an empty patch is refused: {empty}"
+        );
+
+        // A negative value is refused with the field named — and the atomicity
+        // means the legal field riding along did NOT land either.
+        let negative = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":4,"method":"risk.setSystemic","params":{"maxTotalExposureUsd":"-5","maxCorrelationUsd":10}}"#.to_string(),
+        )
+        .await;
+        assert!(
+            negative["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("must be >= 0"),
+            "a negative bound is refused with the field named: {negative}"
+        );
+        let read2 = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":5,"method":"risk.limits","params":{}}"#.to_string(),
+        )
+        .await;
+        assert_eq!(
+            read2["result"]["global"]["limits"]["maxCorrelationUsd"]["value"],
+            serde_json::json!("0"),
+            "a refused patch leaves no trace: {read2}"
+        );
+    }
+
     /// #191 acceptance (b): a knob OUTSIDE the safe subset is refused BY NAME,
     /// with the reason and with what to do instead — and the refusal is atomic,
     /// so an allowed field riding along in the same patch is not applied either.
@@ -3478,26 +3604,9 @@ mod tests {
         session: &mut SessionState,
         line: String,
     ) -> Value {
-        let risk_limits = {
-            let c = core.lock().await;
-            Arc::new(crate::ipc::schema::RiskLimitsResult::snapshot(
-                &c.config().risk.systemic,
-                &c.config().positions.exit,
-            ))
-        };
         let jobs = Arc::new(crate::backtest_jobs::BacktestJobs::new());
         serde_json::from_str(
-            &handle_line(
-                core,
-                registry,
-                line,
-                peer,
-                update_state,
-                &risk_limits,
-                &jobs,
-                session,
-            )
-            .await,
+            &handle_line(core, registry, line, peer, update_state, &jobs, session).await,
         )
         .expect("every reply is one JSON object")
     }

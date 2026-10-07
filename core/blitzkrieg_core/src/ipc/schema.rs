@@ -119,6 +119,12 @@ pub mod method {
     /// with an audit record. Everything else is refused by name — see
     /// [`crate::risk::hot_reload_refusal`].
     pub const RISK_SET_LIMITS: &str = "risk.setLimits";
+    /// 生效风控可编辑（用户裁决：单笔最大亏损、当日最大回撤等设置选项必须
+    /// 都可以被编辑）：九项系统性限额的运行时写路径。六项热生效（每笔入场
+    /// 现场判读、只约束新敞口、不携带计数器）；回撤预算与连亏熔断两项按
+    /// 「下次会话」语义落盘态生效 —— 不是热旋钮（HOT_RELOAD_REFUSED 记名
+    /// 拒绝的理由仍然成立），回执里逐项注明生效时机。
+    pub const RISK_SET_SYSTEMIC: &str = "risk.setSystemic";
     pub const ORDER_PLACE: &str = "orders.place";
     pub const ORDER_CANCEL: &str = "orders.cancel";
     pub const ORDER_CANCEL_ALL: &str = "orders.cancel_all";
@@ -443,10 +449,10 @@ pub struct BlueprintSaveSourceResult {
 
 /// The whole `risk.limits` readout: WHAT each systemic limit is and WHERE it
 /// came from, plus the exit resolution the entry pipeline binds at Gate 4.
-/// Assembled ONCE at boot — the nine new limits change only with a restart
-/// (deliberately absent from `risk.setLimits`) and the exit ladder is not a
-/// #191 hot key — so the arm serves this snapshot without the Core lock,
-/// exactly like `system.version`.
+/// Assembled per answer from the LIVE risk config — `risk.setLimits` and
+/// `risk.setSystemic` hot-write the matrix, so a boot-frozen snapshot would
+/// answer with limits that are no longer in force (the arm takes the Core
+/// lock and reads `risk_config()` for exactly this reason).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RiskLimitsResult {
@@ -462,8 +468,8 @@ pub struct RiskLimitsResult {
 }
 
 impl RiskLimitsResult {
-    /// The boot-time snapshot: systemic limits + exit resolution exactly as
-    /// THIS run resolved them.
+    /// The live readout: systemic limits + exit resolution exactly as they
+    /// stand in the risk gate RIGHT NOW (hot edits included).
     pub fn snapshot(
         systemic: &crate::risk::limits::SystemicRiskLimits,
         exit: &crate::exit_policy::ExitConfig,
@@ -716,6 +722,107 @@ pub struct RiskLimitUpdate {
 /// [`RiskLimitUpdate::note`] — one spelling, used by the reply and the log.
 pub const RISK_LIMIT_UPDATE_NOTE: &str =
     "in-memory only: a restart re-applies the startup flags/env/TOML";
+
+// ── 生效风控可编辑 — risk.setSystemic（九项系统性限额的运行时写路径）─────────
+
+/// `risk.setSystemic` params: the nine systemic limits, every field optional
+/// (only the named fields change). Values are USD / shares / counts / minutes
+/// on the decimal-STRING wire (the readout's convention); `0` = off.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSystemicLimitsParams {
+    // ── 账户级（五项）──
+    /// 单笔最大亏损（USD）：Gate 2 从止损价推导，超额入场缩到帽内。
+    #[serde(default, with = "crate::decimal::opt")]
+    pub max_single_loss_usd: Option<Decimal>,
+    /// 当日最大回撤（USD）：与既有的日亏熔断是同一个预算。**下次会话生效**
+    /// —— 当日已发生的已实现亏损账本不能被一个中途改动的帽追溯改判。
+    #[serde(default, with = "crate::decimal::opt")]
+    pub max_daily_drawdown_usd: Option<Decimal>,
+    /// 单仓上限（股）：整数股，超出缩到帽内。
+    #[serde(default, with = "crate::decimal::opt")]
+    pub max_position_size: Option<Decimal>,
+    /// 连亏熔断（次）：**下次会话生效** —— 计数器已在跑，新阈值会追溯改判
+    /// 在案连亏是否熔断（HOT_RELOAD_REFUSED 的理由）。
+    #[serde(default, with = "crate::decimal::opt")]
+    pub max_consecutive_losses: Option<Decimal>,
+    /// 熔断冷静期（分钟）：**下次会话生效** —— 与连亏熔断同一裁决。
+    #[serde(default, with = "crate::decimal::opt")]
+    pub cooldown_minutes: Option<Decimal>,
+    // ── 全局级（四项）──
+    /// 全局总仓位（笔，全账户合计）。
+    #[serde(default, with = "crate::decimal::opt")]
+    pub max_total_position: Option<Decimal>,
+    /// 全局总敞口（USD，全账户开仓名义合计）。
+    #[serde(default, with = "crate::decimal::opt")]
+    pub max_total_exposure_usd: Option<Decimal>,
+    /// 同资产敞口上限（USD，逐资产取最大）。
+    #[serde(default, with = "crate::decimal::opt")]
+    pub max_correlation_usd: Option<Decimal>,
+    /// 全局急停亏损（USD）：当日全账户合计已实现亏损越过即拒新开仓。
+    #[serde(default, with = "crate::decimal::opt")]
+    pub global_kill_switch_loss_usd: Option<Decimal>,
+    /// Free-text note from the caller, echoed into the audit line.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl SetSystemicLimitsParams {
+    /// True when the patch names no field — refused, not answered with an
+    /// empty record (the same posture as `risk.setLimits`).
+    pub fn is_empty(&self) -> bool {
+        self.max_single_loss_usd.is_none()
+            && self.max_daily_drawdown_usd.is_none()
+            && self.max_position_size.is_none()
+            && self.max_consecutive_losses.is_none()
+            && self.cooldown_minutes.is_none()
+            && self.max_total_position.is_none()
+            && self.max_total_exposure_usd.is_none()
+            && self.max_correlation_usd.is_none()
+            && self.global_kill_switch_loss_usd.is_none()
+    }
+}
+
+/// One field's resolution inside a `risk.setSystemic` reply: old value, new
+/// value, and WHEN it takes effect. The three effect classes are real, not
+/// documentation: six bounds are judged per entry LIVE; the drawdown budget
+/// and the breaker pair arm at the NEXT KERNEL SESSION (a live change would
+/// either rewrite what the day already spent or retroactively judge a running
+/// streak).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemicLimitChange {
+    /// The wire (camelCase) name of the field.
+    pub field: &'static str,
+    /// Previous effective value ("0" = off), decimal string.
+    pub from: String,
+    /// New effective value ("0" = off), decimal string.
+    pub to: String,
+    /// `live` (judged on the next entry) or `next_session` (armed at boot of
+    /// a future kernel run).
+    pub effect: &'static str,
+}
+
+/// `risk.setSystemic` result: the audited change list, in the
+/// `RiskLimitUpdate` shape. `persisted` is ALWAYS false — the systemic set is
+/// a boot-time resolution ([`SystemicRiskLimits::from_file`]); a hot edit
+/// lives exactly as long as this process, and the note says so in the same
+/// breath as the drawdown/breaker "next session" rows.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemicLimitUpdate {
+    pub applied: Vec<SystemicLimitChange>,
+    pub at_ms: i64,
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub persisted: bool,
+    pub note: &'static str,
+}
+
+/// [`SystemicLimitUpdate::note`] — one spelling, used by the reply and the log.
+pub const SYSTEMIC_LIMIT_UPDATE_NOTE: &str = "six bounds live, drawdown + breaker pair arm next session; a restart \
+     re-applies the startup flags/env/TOML (in-memory, not persisted)";
 
 // ── Fee model quote (#182) ───────────────────────────────────────────────────
 
