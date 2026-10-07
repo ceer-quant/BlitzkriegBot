@@ -245,7 +245,14 @@ if [ -n "$VERIFY_DIR" ]; then
 
   if [ "$BAD" -gt 0 ]; then fail "$BAD file(s) do not match the manifest"; fi
   n="$(grep -c '^[0-9a-f]' "$MAN")"
-  echo "  ok   all $n file(s) match the manifest"
+  if [ "$n" -gt 0 ]; then
+    echo "  ok   all $n file(s) match the manifest"
+  else
+    # Light tier: the manifest carries no per-file entries (its integrity IS
+    # the archive hash above, which already matched). Not a warning — this is
+    # the format the light tier writes on purpose (2026-10-08).
+    echo "  ok   light tier: per-file manifest intentionally absent, integrity is the archive hash"
+  fi
   echo "RESULT: backup verifies."
   exit 0
 fi
@@ -544,6 +551,15 @@ SRC_BASE="$(basename "$DATA_ABS")"
 TAR_ARGS=(-czf)
 EXCLUDES=()
 [ "$EXCLUDE_ARCHIVE" -eq 1 ] && EXCLUDES+=(--exclude="$SRC_BASE/archive")
+# The light tier also skips `data/onchain/.cache/` (2026-10-08): it is a
+# REGENERABLE pull cache — 120k tiny files (avg ~400 bytes) that are 99%+ of
+# the tree's file count but only a few MB. Per-file hashing them is what made
+# a light backup take 10+ minutes; the datasets themselves are pinned by their
+# own `manifest.json` (sha256 of trades+events, verified by
+# `blitzkrieg-core verify_dataset`), and a cache miss simply re-pulls from the
+# network. Speed here is a safety property: a backup that takes minutes is a
+# backup the operator skips, and upgrade.sh runs one as its rollback point.
+[ "$EXCLUDE_ARCHIVE" -eq 1 ] && EXCLUDES+=(--exclude="$SRC_BASE/onchain/.cache")
 
 echo "== data-backup :: $STAMP =="
 echo "  source : $DATA_ABS"
@@ -566,7 +582,7 @@ TMP="$(mktemp -d)"
 trap 'rm -f "$FILES_LIST" "$TAR_LIST"; [ -n "$TMP" ] && rm -rf "$TMP"' EXIT
 
 if [ "$EXCLUDE_ARCHIVE" -eq 1 ]; then
-  find "$DATA_ABS" -path "$DATA_ABS/archive" -prune -o -type f -print
+  find "$DATA_ABS" \( -path "$DATA_ABS/archive" -o -path "$DATA_ABS/onchain/.cache" \) -prune -o -type f -print
 else
   find "$DATA_ABS" -type f -print
 fi | LC_ALL=C sort | while IFS= read -r f; do
@@ -603,6 +619,14 @@ if [ -n "$MISSING" ]; then
         else
           echo "  note  live-capture drift, tolerated: $m" >&2
         fi ;;
+      # The onchain cache is deliberately excluded on the light tier (see the
+      # tar excludes); a file there can never be a coverage gap.
+      "$SRC_BASE"/onchain/.cache/*)
+        if [ "$EXCLUDE_ARCHIVE" -eq 1 ]; then
+          printf '%s\n' "$m"
+        else
+          echo "  note  live-capture drift, tolerated: $m" >&2
+        fi ;;
       *) printf '%s\n' "$m" ;;
     esac
   done)"
@@ -613,16 +637,36 @@ $UNCOVERED"
 fi
 
 # ── manifest (hashed from the extracted archive) ────────────────────────────
+# LIGHT TIER (`--exclude-archive`): no per-file manifest. The per-file SHA-256
+# loop was ~9 minutes over 121k files (99% of them the onchain cache, itself
+# now excluded) — the exact cost that made the daily backup get skipped. The
+# light tier's integrity rests on the ARCHIVE hash (`# archive-sha256` +
+# BACKUP.json archiveSha256): `--verify` still extracts the tarball and
+# re-checks that hash byte for byte, so a corrupted light backup is still
+# caught — what is not re-checked is each file's identity inside a
+# hash-verified archive, which the tar format already pins by structure.
+# The full tier (archive included) keeps the per-file manifest: it is the
+# deep-restore artifact and its 9-minute cost runs weekly.
 N_FILES=0
 N_BYTES=0
-while IFS= read -r rel; do
-  [ -n "$rel" ] || continue
-  h="$(sha256_file "$TMP/$rel")" || fail "cannot hash $rel"
-  printf '%s  %s\n' "$h" "$rel" >> "$MAN"
-  N_FILES=$((N_FILES + 1))
-  sz="$(file_bytes "$TMP/$rel")"
-  N_BYTES=$((N_BYTES + sz))
-done < "$TAR_LIST"
+if [ "$EXCLUDE_ARCHIVE" -eq 1 ]; then
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    N_FILES=$((N_FILES + 1))
+    sz="$(file_bytes "$TMP/$rel")"
+    N_BYTES=$((N_BYTES + sz))
+  done < "$TAR_LIST"
+  printf '# light tier: no per-file manifest — integrity = archive sha256 below\n' >> "$MAN"
+else
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    h="$(sha256_file "$TMP/$rel")" || fail "cannot hash $rel"
+    printf '%s  %s\n' "$h" "$rel" >> "$MAN"
+    N_FILES=$((N_FILES + 1))
+    sz="$(file_bytes "$TMP/$rel")"
+    N_BYTES=$((N_BYTES + sz))
+  done < "$TAR_LIST"
+fi
 
 printf '# archive-sha256 %s\n' "$ARC_SHA" >> "$MAN"
 echo "  files  : $N_FILES ($N_BYTES bytes)"
@@ -638,6 +682,7 @@ cat > "$TARGET/BACKUP.json" <<JSON
   "repoHead": "$HEAD_SHA",
   "source": "$DATA_ABS",
   "excludedArchive": $([ "$EXCLUDE_ARCHIVE" -eq 1 ] && echo true || echo false),
+  "perFileManifest": $([ "$EXCLUDE_ARCHIVE" -eq 1 ] && echo false || echo true),
   "fileCount": $N_FILES,
   "sourceBytes": $N_BYTES,
   "archiveBytes": $ARC_BYTES,
