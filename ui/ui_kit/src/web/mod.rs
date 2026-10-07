@@ -2013,8 +2013,9 @@ impl WebServer {
                 // E26 (§4.4): the settings page's risk card reads the EFFECTIVE
                 // systemic limits through the SAME core client the snapshot
                 // uses — a thin proxy of `risk.limits` (read-only, no params;
-                // the core answers from a boot-time snapshot WITHOUT the Core
-                // lock). Same house pattern as /api/intent-audit above.
+                // the core answers from the LIVE risk config, so a hot edit
+                // made through the card below shows up on the next read).
+                // Same house pattern as /api/intent-audit above.
                 let doc = match self.snapshot_src.lock() {
                     Ok(mut c) => match c.call(
                         "risk.limits",
@@ -2026,6 +2027,14 @@ impl WebServer {
                     Err(_) => serde_json::json!({ "error": "core client poisoned" }),
                 };
                 (200, "application/json", doc.to_string().into_bytes())
+            }
+            ("POST", "/api/risk/set-systemic") => {
+                // 生效风控的可编辑写路径（用户裁决：九项系统限额必须都能改）：
+                // the body IS the `risk.setSystemic` params object
+                // (`{maxSingleLossUsd?, ..., reason?}`), forwarded verbatim.
+                // The kernel plans first, writes later, and names each bound's
+                // effect class (live / next_session) in the audited reply.
+                self.proxy_backtest_body("risk.setSystemic", &req.body)
             }
             ("GET", "/api/execution-policy") | ("GET", "/api/execution-policy/preview") => {
                 // #364: the settings page's 生效风控 section. Effective view =

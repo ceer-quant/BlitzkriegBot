@@ -1,22 +1,26 @@
 <script setup lang="ts">
 /**
- * 生效风控读数（E26 §4.4）：内核的 risk.limits（boot 快照，只读）。每个限额
- * 都是「值 + 来源」，来源不明的数字不是操作者能据以行动的答案。九个新限额
- * 改配置需重启内核生效，读数不会中途变陈旧；进页读一次 + 手动刷新。
+ * 生效风控读数 + 编辑（E26 §4.4 / 用户裁决：九项系统限额必须都能改）。每个限额
+ * 都是「值 + 来源」，来源不明的数字不是操作者能据以行动的答案。
  *
- * issue 393 (①): 卡片尾部开一个 #params 插槽 —— 账户生效执行参数（budget 三元组
- * / 最低权益 / 单标的持仓笔数）就地渲染为可编辑字段。它们有运行时写路径
- * （execution_policy.set），与上面九项 boot 限额（无写路径，重启生效）在
- * 同一张卡上各归各位；插槽内容（输入与缓冲）由编排壳 SettingsRisk 提供，
- * 本卡保持无 IPC。
+ * 可编辑：每行一个输入框（预填当前生效值），保存走 risk.setSystemic —— 只发
+ * 改动过的字段，内核 plan-first（一项非法整体拒）+ 逐字段审计。效果分级由
+ * 内核在回执里逐字段给出：六项 live（立即约束下一笔策略开仓），回撤预算 +
+ * 连亏熔断 + 冷静期三项 next_session（本会话不追溯改判，重启后按新值武装）。
+ * 未持久化：重启回到启动 flag/env/TOML 的解析结果 —— 来源徽标会变成
+ * 「命令行/热改」，这是内核 LimitSource::Flag 的如实呈现。
  */
 import { computed, onMounted, ref } from 'vue'
-import { RefreshCw, ShieldCheck } from 'lucide-vue-next'
-import { api, type RiskBound, type RiskLimitsDoc } from '@/api/client'
+import { RefreshCw, Save, ShieldCheck } from 'lucide-vue-next'
+import {
+  api,
+  type RiskBound, type RiskLimitsDoc, type SystemicLimitUpdateDoc,
+} from '@/api/client'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
 import Button from '@/components/ui/button/Button.vue'
+import Input from '@/components/ui/input/Input.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 
 const riskDoc = ref<RiskLimitsDoc | null>(null)
@@ -28,21 +32,21 @@ async function loadRisk(): Promise<void> {
   try {
     riskDoc.value = await api.riskLimits()
     riskErr.value = riskDoc.value.error ?? null
+    if (riskDoc.value && !riskDoc.value.error) syncBuffers(riskDoc.value)
   } catch (e) {
     riskErr.value = e instanceof Error ? e.message : String(e)
   } finally {
     riskBusy.value = false
   }
 }
-onMounted(() => void loadRisk())
 
-/** 来源词表：出厂/配置文件/环境变量/命令行，与内核 boot log 的拼法一致。 */
+/** 来源词表：出厂/配置文件/环境变量/命令行或热改，与内核 LimitSource 一致。 */
 function sourceLabel(s: RiskBound['source']): string {
   switch (s) {
     case 'default': return '出厂'
     case 'toml': return '配置文件'
     case 'env': return '环境变量'
-    case 'flag': return '命令行'
+    case 'flag': return '命令行/热改'
     default: return String(s)
   }
 }
@@ -54,40 +58,105 @@ function boundText(b: RiskBound): string {
   return boundArmed(b) ? b.value : '关闭'
 }
 
-/** 账户级五行 + 全局级四行，一行一条：标签 / 值 / 来源。 */
-const riskRows = computed(() => {
-  const d = riskDoc.value
-  if (!d) return []
-  const a = d.account.limits
-  const g = d.global.limits
-  return [
-    { label: '单笔最大亏损', unit: 'USD', bound: a.maxSingleLossUsd, group: '账户' },
-    { label: '当日最大回撤', unit: 'USD', bound: a.maxDailyDrawdownUsd, group: '账户' },
-    { label: '单仓上限', unit: '股', bound: a.maxPositionSize, group: '账户' },
-    { label: '连亏熔断', unit: '次', bound: a.maxConsecutiveLosses, group: '账户' },
-    { label: '熔断冷静期', unit: '分钟', bound: a.cooldownMinutes, group: '账户' },
-    { label: '全局总仓位', unit: '笔', bound: g.maxTotalPosition, group: '全局' },
-    { label: '全局总敞口', unit: 'USD', bound: g.maxTotalExposureUsd, group: '全局' },
-    { label: '同资产敞口上限', unit: 'USD', bound: g.maxCorrelationUsd, group: '全局' },
-    { label: '全局急停亏损', unit: 'USD', bound: g.globalKillSwitchLossUsd, group: '全局' },
-  ]
-})
+/** 一行的定义：wire 字段名（camelCase）+ 展示元数据 + 整数/小数。 */
+interface RiskRowDef {
+  field: string; label: string; unit: string; group: string; int: boolean
+  bound: () => RiskBound | undefined
+}
+const ROW_DEFS: RiskRowDef[] = [
+  { field: 'maxSingleLossUsd', label: '单笔最大亏损', unit: 'USD', group: '账户', int: false, bound: () => riskDoc.value?.account.limits.maxSingleLossUsd },
+  { field: 'maxDailyDrawdownUsd', label: '当日最大回撤', unit: 'USD', group: '账户', int: false, bound: () => riskDoc.value?.account.limits.maxDailyDrawdownUsd },
+  { field: 'maxPositionSize', label: '单仓上限', unit: '股', group: '账户', int: true, bound: () => riskDoc.value?.account.limits.maxPositionSize },
+  { field: 'maxConsecutiveLosses', label: '连亏熔断', unit: '次', group: '账户', int: true, bound: () => riskDoc.value?.account.limits.maxConsecutiveLosses },
+  { field: 'cooldownMinutes', label: '熔断冷静期', unit: '分钟', group: '账户', int: true, bound: () => riskDoc.value?.account.limits.cooldownMinutes },
+  { field: 'maxTotalPosition', label: '全局总仓位', unit: '笔', group: '全局', int: true, bound: () => riskDoc.value?.global.limits.maxTotalPosition },
+  { field: 'maxTotalExposureUsd', label: '全局总敞口', unit: 'USD', group: '全局', int: false, bound: () => riskDoc.value?.global.limits.maxTotalExposureUsd },
+  { field: 'maxCorrelationUsd', label: '同资产敞口上限', unit: 'USD', group: '全局', int: false, bound: () => riskDoc.value?.global.limits.maxCorrelationUsd },
+  { field: 'globalKillSwitchLossUsd', label: '全局急停亏损', unit: 'USD', group: '全局', int: false, bound: () => riskDoc.value?.global.limits.globalKillSwitchLossUsd },
+]
 
-/** 武装摘要：任一限额非零即「已武装」，否则出厂静默。 */
-const riskArmedCount = computed(() =>
-  riskRows.value.filter((r) => boundArmed(r.bound)).length)
+// ── 编辑缓冲 + 保存（risk.setSystemic，只发改动项）──
+const editBufs = ref<Record<string, string>>({})
+const riskSaving = ref(false)
+const riskMsg = ref<string | null>(null)
+const riskReceipt = ref<SystemicLimitUpdateDoc | null>(null)
+
+function syncBuffers(d: RiskLimitsDoc): void {
+  const next: Record<string, string> = {}
+  for (const r of ROW_DEFS) next[r.field] = r.bound()?.value ?? '0'
+  editBufs.value = next
+  riskReceipt.value = null
+}
+
+/** 下一笔策略开仓就被这个 bound 约束（live）；其余三项重启后武装。 */
+const NEXT_SESSION_FIELDS = new Set(['maxDailyDrawdownUsd', 'maxConsecutiveLosses', 'cooldownMinutes'])
+function effectLabel(effect: string): string {
+  return effect === 'live' ? '立即生效' : effect === 'next_session' ? '重启后生效' : effect
+}
+function fieldLabel(field: string): string {
+  return ROW_DEFS.find((r) => r.field === field)?.label ?? field
+}
+
+/** 只发改动过的字段；空串=保持不变。非法输入就地拒绝保存。 */
+function buildPatch(): Record<string, string> | string {
+  const patch: Record<string, string> = {}
+  for (const r of ROW_DEFS) {
+    const raw = (editBufs.value[r.field] ?? '').trim()
+    if (raw === '') continue // 空串 = 这一行不动
+    const cur = r.bound()?.value ?? '0'
+    if (raw === cur) continue
+    const n = Number(raw)
+    if (!Number.isFinite(n) || n < 0) return `${r.label}：必须是 ≥ 0 的数字（0 = 关闭）`
+    if (r.int && !Number.isInteger(n)) return `${r.label}：必须是整数`
+    patch[r.field] = raw
+  }
+  return patch
+}
+
+async function saveRisk(): Promise<void> {
+  riskMsg.value = null
+  riskReceipt.value = null
+  const built = buildPatch()
+  if (typeof built === 'string') {
+    riskMsg.value = built
+    return
+  }
+  const keys = Object.keys(built)
+  if (keys.length === 0) {
+    riskMsg.value = '没有改动 —— 九项都与内核当前生效值一致。'
+    return
+  }
+  riskSaving.value = true
+  try {
+    const res = await api.riskSetSystemic({ ...built, reason: 'webui 面板编辑（生效风控卡）' })
+    if (res.error) throw new Error(res.error)
+    riskReceipt.value = res
+    await loadRisk()
+  } catch (e) {
+    riskErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    riskSaving.value = false
+  }
+}
+
+/** 行渲染：读数（bound）驱动徽标，编辑缓冲驱动输入框。 */
+const riskRows = computed(() =>
+  ROW_DEFS.map((r) => ({ ...r, bound: r.bound() })))
+const armedRows = computed(() => riskRows.value.filter((r) => r.bound && boundArmed(r.bound)))
+
 const riskBadge = computed(() => {
   if (!riskDoc.value) return { text: '不可用', variant: 'default' as const }
-  return riskArmedCount.value > 0
-    ? { text: `已武装 ${riskArmedCount.value} 项`, variant: 'gold' as const }
+  return armedRows.value.length > 0
+    ? { text: `已武装 ${armedRows.value.length} 项`, variant: 'gold' as const }
     : { text: '出厂（全部关闭）', variant: 'up' as const }
 })
 const riskHint = computed(() => {
   if (!riskDoc.value) return ''
-  return riskArmedCount.value > 0
-    ? '新限额改配置后需重启内核生效；连亏熔断触发时暂停该账户的新开仓，平仓永不受限。'
-    : '九项系统限额全部为 0 = 关闭（出厂承诺）：内核行为与未加风控时逐位一致，改配置需重启内核。'
+  return armedRows.value.length > 0
+    ? '六项改动立即约束下一笔策略开仓；回撤 / 连亏 / 冷静期三项重启后生效（本会话不追溯改判）。连亏熔断触发时暂停该账户的新开仓，平仓永不受限。'
+    : '九项系统限额全部为 0 = 关闭（出厂承诺）：内核行为与未加风控时逐位一致。保存后六项立即生效。'
 })
+onMounted(() => void loadRisk())
 </script>
 
 <template>
@@ -103,7 +172,8 @@ const riskHint = computed(() => {
 
     <p class="text-[11.5px] leading-snug text-muted-fg">
       内核正在执行的系统性限额（risk.limits）——每个数字都带着它从哪来（出厂 / 配置文件 /
-      环境变量 / 命令行）。没来源的数字不是能据以行动的答案；0 = 关闭，不是伪装成保护措施的零。
+      环境变量 / 热改）。没来源的数字不是能据以行动的答案；0 = 关闭，不是伪装成保护措施的零。
+      改动保存进内核内存并逐字段落审计，重启后回到启动配置的解析结果。
     </p>
 
     <AlertBanner v-if="!riskDoc && !riskErr" class="mt-3" tone="info">正在读取风控读数…</AlertBanner>
@@ -118,17 +188,24 @@ const riskHint = computed(() => {
           <div class="mt-1">
             <div
               v-for="(row, i) in riskRows.filter((r) => r.group === group)"
-              :key="row.label"
+              :key="row.field"
               class="flex items-center justify-between gap-3 py-1.5 text-[12px]"
               :class="(gi === 0 && i === 0) || (gi === 1 && i === 0) ? '' : 'border-t border-line'"
             >
               <span class="text-faint-fg">{{ row.label }}</span>
               <span class="flex items-center gap-2">
-                <span
-                  class="num font-semibold"
-                  :class="boundArmed(row.bound) ? 'text-fg' : 'text-faint-fg'"
-                >{{ boundText(row.bound) }}<span v-if="boundArmed(row.bound)" class="ml-0.5 text-[10.5px] font-normal text-faint-fg">{{ row.unit }}</span></span>
-                <Badge :variant="boundArmed(row.bound) ? 'gold' : 'default'">{{ sourceLabel(row.bound.source) }}</Badge>
+                <Input
+                  v-model="editBufs[row.field]"
+                  class="num h-7 w-24 text-right text-[12px]"
+                  :type="row.int ? 'number' : 'text'"
+                  :min="0"
+                  :step="row.int ? 1 : 'any'"
+                  :placeholder="row.bound ? boundText(row.bound) : ''"
+                  :aria-label="row.label"
+                />
+                <span v-if="row.bound && boundArmed(row.bound)" class="text-[10.5px] font-normal text-faint-fg">{{ row.unit }}</span>
+                <span v-else class="text-[10.5px] font-normal text-faint-fg">关闭</span>
+                <Badge :variant="row.bound && boundArmed(row.bound) ? 'gold' : 'default'">{{ row.bound ? sourceLabel(row.bound.source) : '—' }}</Badge>
               </span>
             </div>
           </div>
@@ -144,14 +221,30 @@ const riskHint = computed(() => {
       </div>
 
       <!-- issue 393 (①): 账户生效执行参数（可编辑）插进来 —— 有运行时写路径的
-           风控参数与 boot 限额同卡呈现，各归各位（插槽内容来自编排壳）。 -->
+           风控参数与系统限额同卡呈现，各归各位（插槽内容来自编排壳）。 -->
       <slot name="params" />
 
       <div class="mt-3 flex flex-wrap items-center gap-2">
-        <Button variant="outline" size="sm" :disabled="riskBusy" title="重新读取内核的风控读数" @click="loadRisk">
+        <Button
+          variant="outline" size="sm" :disabled="riskBusy" title="重新读取内核的风控读数（放弃未保存的编辑）"
+          @click="loadRisk"
+        >
           <RefreshCw class="size-3.5" />刷新
         </Button>
+        <Button size="sm" :disabled="riskSaving || riskBusy" title="把改动过的限额写入内核（risk.setSystemic）" @click="saveRisk">
+          <Save class="size-3.5" />{{ riskSaving ? '保存中…' : '保存改动' }}
+        </Button>
         <span class="text-[11px] text-faint-fg">{{ riskHint }}</span>
+      </div>
+      <p v-if="riskMsg" class="mt-2 text-[11px] leading-snug text-gold-400">{{ riskMsg }}</p>
+      <div v-if="riskReceipt" class="mt-2 rounded border border-line bg-panel-2 px-2.5 py-2 text-[11px] leading-relaxed">
+        <div class="font-semibold text-fg">
+          已写入 {{ riskReceipt.applied.length }} 项（{{ riskReceipt.persisted ? '已持久化' : '未持久化，重启回到启动配置' }}）
+        </div>
+        <div v-for="c in riskReceipt.applied" :key="c.field" class="mt-0.5 text-muted-fg">
+          {{ fieldLabel(c.field) }}：{{ c.from === '0' ? '关闭' : c.from }} → {{ c.to === '0' ? '关闭' : c.to }}
+          <Badge :variant="c.effect === 'live' ? 'gold' : 'default'" class="ml-1">{{ effectLabel(c.effect) }}</Badge>
+        </div>
       </div>
       <p v-if="riskErr" class="mt-2 text-[11px] leading-snug text-down">{{ riskErr }}</p>
     </template>

@@ -6700,6 +6700,14 @@ impl Core {
         self.risk.config_mut()
     }
 
+    /// The live risk gate config — the read side of
+    /// [`Self::risk_config_mut`]: a `risk.setLimits`/`risk.setSystemic` write
+    /// is visible here immediately, which is what keeps the `risk.limits`
+    /// readout honest after a hot edit.
+    pub fn risk_config(&self) -> &RiskConfig {
+        self.risk.config()
+    }
+
     /// Apply a hot update of the ENTRY limits (#191) — the whole safe subset
     /// ([`crate::risk::HOT_RELOADABLE`]), in memory, with an audit record.
     ///
@@ -6848,6 +6856,224 @@ impl Core {
             reason: patch.reason.clone(),
             persisted: false,
             note: RISK_LIMIT_UPDATE_NOTE,
+        })
+    }
+
+    /// 生效风控可编辑（`risk.setSystemic`）：九项系统性限额的运行时写路径，
+    /// 仿 [`Self::apply_risk_limits`] 的 plan-first + 审计姿态。
+    ///
+    /// 三个生效档位都是真实的，不是文档话术：
+    ///
+    /// - **live（六项）**—— `max_single_loss_usd` / `max_position_size` /
+    ///   `max_total_position` / `max_total_exposure_usd` / `max_correlation_usd`
+    ///   / `global_kill_switch_loss_usd`。入场流水线每笔现场
+    ///   `systemic_snapshot()` 判读，只约束新敞口（平仓从不走这条路），不携带
+    ///   计数器 —— 写进内存后下一笔入场立即按新值裁决。
+    /// - **next_session（两项）**—— `max_consecutive_losses` /
+    ///   `cooldown_minutes`。连亏计数器已在跑（`record_with` 的 breaker 带着
+    ///   出生时的阈值对过一辈子），热改会追溯改判在案连亏 ——
+    ///   `HOT_RELOAD_REFUSED` 的理由对这两项仍然成立。读数照写（操作员的
+    ///   意图进入 matrix，重启后 `from_file` 的解析与它一致），但本会话的
+    ///   熔断行为不变，回执里逐项注明。
+    /// - **next_session（一项）**—— `max_daily_drawdown_usd`。它与日亏熔断
+    ///   是同一个预算；当日已发生的已实现亏损账本不能被中途改动的帽追溯
+    ///   改判。同上：matrix 照写、本会话的 `PositionConfig::max_daily_loss_usd`
+    ///   不动。
+    ///
+    /// Atomic：patch 先全量校验（非负）再落笔，被拒的 patch 不留半点痕迹。
+    /// 不持久化 —— 重启后 `from_file` 重走启动层，与 `risk.setLimits` 的
+    /// 「热≠永久」同一句真话。
+    pub fn apply_systemic_limits(
+        &mut self,
+        patch: &crate::ipc::schema::SetSystemicLimitsParams,
+        actor: &str,
+        now_ms: i64,
+    ) -> CoreResult<crate::ipc::schema::SystemicLimitUpdate> {
+        use crate::ipc::schema::{
+            SYSTEMIC_LIMIT_UPDATE_NOTE, SystemicLimitChange, SystemicLimitUpdate,
+        };
+
+        if patch.is_empty() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "risk.setSystemic needs at least one of the nine systemic fields; \
+                 read the current values with risk.limits"
+                    .to_string(),
+            ));
+        }
+
+        // Plan first, write later —— 被拒的 patch 一个字节都不动。
+        let matrix = self.risk.config().systemic.clone();
+        let mut changes: Vec<SystemicLimitChange> = Vec::new();
+        let mut plan = |field: &'static str,
+                        from: &crate::risk::limits::Bound,
+                        to: Option<Decimal>,
+                        effect: &'static str|
+         -> CoreResult<()> {
+            let Some(to) = to else { return Ok(()) };
+            if to < Decimal::ZERO {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!("{field} must be >= 0, got {to}; nothing was applied"),
+                ));
+            }
+            changes.push(SystemicLimitChange {
+                field,
+                from: from.value().to_string(),
+                to: to.to_string(),
+                effect,
+            });
+            Ok(())
+        };
+
+        plan(
+            "maxSingleLossUsd",
+            &matrix.account.max_single_loss_usd,
+            patch.max_single_loss_usd,
+            "live",
+        )?;
+        plan(
+            "maxDailyDrawdownUsd",
+            &matrix.account.max_daily_drawdown_usd,
+            patch.max_daily_drawdown_usd,
+            "next_session",
+        )?;
+        plan(
+            "maxPositionSize",
+            &matrix.account.max_position_size,
+            patch.max_position_size,
+            "live",
+        )?;
+        plan(
+            "maxConsecutiveLosses",
+            &matrix.account.max_consecutive_losses,
+            patch.max_consecutive_losses,
+            "next_session",
+        )?;
+        plan(
+            "cooldownMinutes",
+            &matrix.account.cooldown_minutes,
+            patch.cooldown_minutes,
+            "next_session",
+        )?;
+        plan(
+            "maxTotalPosition",
+            &matrix.global.max_total_position,
+            patch.max_total_position,
+            "live",
+        )?;
+        plan(
+            "maxTotalExposureUsd",
+            &matrix.global.max_total_exposure_usd,
+            patch.max_total_exposure_usd,
+            "live",
+        )?;
+        plan(
+            "maxCorrelationUsd",
+            &matrix.global.max_correlation_usd,
+            patch.max_correlation_usd,
+            "live",
+        )?;
+        plan(
+            "globalKillSwitchLossUsd",
+            &matrix.global.global_kill_switch_loss_usd,
+            patch.global_kill_switch_loss_usd,
+            "live",
+        )?;
+
+        if changes.is_empty() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "risk.setSystemic: no field carried a change — nothing to audit",
+            ));
+        }
+
+        // Write phase: the six live bounds land in the matrix the pipeline
+        // snapshots per entry; the three next-session rows also land there
+        // (the readout must show the operator's intent and the restart
+        // resolution agrees), but nothing re-judges this session — the
+        // breaker keeps its birth pair, the day's loss book stays closed.
+        {
+            let cfg = self.risk.config_mut();
+            let matrix = &mut cfg.systemic;
+            let set = |bound: &mut crate::risk::limits::Bound,
+                       to: Option<Decimal>,
+                       source: crate::risk::limits::LimitSource| {
+                if let Some(v) = to {
+                    *bound = crate::risk::limits::Bound::new(v, source);
+                }
+            };
+            let flag = crate::risk::limits::LimitSource::Flag;
+            set(
+                &mut matrix.account.max_single_loss_usd,
+                patch.max_single_loss_usd,
+                flag,
+            );
+            set(
+                &mut matrix.account.max_daily_drawdown_usd,
+                patch.max_daily_drawdown_usd,
+                flag,
+            );
+            set(
+                &mut matrix.account.max_position_size,
+                patch.max_position_size,
+                flag,
+            );
+            set(
+                &mut matrix.account.max_consecutive_losses,
+                patch.max_consecutive_losses,
+                flag,
+            );
+            set(
+                &mut matrix.account.cooldown_minutes,
+                patch.cooldown_minutes,
+                flag,
+            );
+            set(
+                &mut matrix.global.max_total_position,
+                patch.max_total_position,
+                flag,
+            );
+            set(
+                &mut matrix.global.max_total_exposure_usd,
+                patch.max_total_exposure_usd,
+                flag,
+            );
+            set(
+                &mut matrix.global.max_correlation_usd,
+                patch.max_correlation_usd,
+                flag,
+            );
+            set(
+                &mut matrix.global.global_kill_switch_loss_usd,
+                patch.global_kill_switch_loss_usd,
+                flag,
+            );
+        }
+
+        for c in &changes {
+            tracing::info!(
+                target: "risk",
+                actor = %actor,
+                field = c.field,
+                from = %c.from,
+                to = %c.to,
+                effect = c.effect,
+                reason = patch.reason.as_deref().unwrap_or(""),
+                "systemic limit update: {} {} -> {} ({})",
+                c.field,
+                c.from,
+                c.to,
+                SYSTEMIC_LIMIT_UPDATE_NOTE,
+            );
+        }
+        Ok(SystemicLimitUpdate {
+            applied: changes,
+            at_ms: now_ms,
+            actor: actor.to_string(),
+            reason: patch.reason.clone(),
+            persisted: false,
+            note: SYSTEMIC_LIMIT_UPDATE_NOTE,
         })
     }
     /// The ONE writer of the panel-visible last-error slot (#180). Every

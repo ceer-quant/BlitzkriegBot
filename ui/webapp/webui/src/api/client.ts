@@ -269,6 +269,43 @@ export interface RiskLimitsDoc {
   error?: string
 }
 
+/**
+ * `risk.setSystemic` 请求体：九项任选（只发改动项），小数跨线是字符串（内核
+ * serde 的 Decimal 约定）；`0` = 关闭该限额。`reason` 进审计行。
+ */
+export interface RiskSetSystemicBody {
+  maxSingleLossUsd?: string | number
+  maxDailyDrawdownUsd?: string | number
+  maxPositionSize?: string | number
+  maxConsecutiveLosses?: string | number
+  cooldownMinutes?: string | number
+  maxTotalPosition?: string | number
+  maxTotalExposureUsd?: string | number
+  maxCorrelationUsd?: string | number
+  globalKillSwitchLossUsd?: string | number
+  reason?: string
+}
+
+/** One bound's audited change（内核 SystemicLimitChange 的 wire 形状）。 */
+export interface SystemicLimitChange {
+  field: string
+  from: string
+  to: string
+  /** live = 立即约束下一笔；next_session = 重启后生效，本会话不追溯改判。 */
+  effect: 'live' | 'next_session' | string
+}
+
+/** `risk.setSystemic` 回执：改了什么、谁改的、何时、未持久化。 */
+export interface SystemicLimitUpdateDoc {
+  applied: SystemicLimitChange[]
+  atMs: number
+  actor: string
+  reason?: string
+  persisted: boolean
+  note: string
+  error?: string
+}
+
 // ── E29 K-line (mirror core/market_api/src/kline.rs wire shape) ─────────────
 
 /** Wire interval spelling (serde `snake_case`): sec1…day1. */
@@ -333,9 +370,20 @@ export const api = {
   /**
    * E26 (§4.4): the effective systemic limits and where each came from — a
    * thin proxy of the core's `risk.limits` (read-only; the core answers from
-   * a boot-time snapshot without the Core lock).
+   * the LIVE risk config, so a riskSetSystemic edit shows up on the next read).
    */
   riskLimits: () => request<RiskLimitsDoc>('/risk-limits'),
+  /**
+   * 生效风控可编辑的写路径（`risk.setSystemic`）：九项系统限额的内存热写。
+   * 只发改动过的字段；内核 plan-first（一项非法则整体拒）+ 逐字段审计，回执
+   * 里每个 bound 带效果等级（live / next_session）。未持久化：重启回到
+   * 启动 flag/env/TOML 的解析结果。
+   */
+  riskSetSystemic: (body: RiskSetSystemicBody) =>
+    request<SystemicLimitUpdateDoc>('/risk/set-systemic', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   /**
    * E29 (§12.2): the K-line chart's bars — a thin proxy of the core's
    * `kline.history` (read-only). `limit` clamps to 1..=1000 kernel-side;
