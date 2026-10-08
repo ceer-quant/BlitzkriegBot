@@ -344,6 +344,10 @@ pub struct EngineStatsView {
     pub signals: u64,
     #[serde(default)]
     pub place_rejected: u64,
+    /// #406: entry intents refused fail-closed for a non-positive price
+    /// (older cores omit the key — the default keeps old panels working).
+    #[serde(default)]
+    pub illegal_price_rejected: u64,
     /// Gate tallies. `null` from the kernel when no engine is installed (see
     /// [`de_null_default`]) — an absent engine has no gate, which reads as zero
     /// blocks, not as an unreadable snapshot.
