@@ -125,6 +125,13 @@ pub mod method {
     /// 「下次会话」语义落盘态生效 —— 不是热旋钮（HOT_RELOAD_REFUSED 记名
     /// 拒绝的理由仍然成立），回执里逐项注明生效时机。
     pub const RISK_SET_SYSTEMIC: &str = "risk.setSystemic";
+    /// 退出纪律可编辑（用户裁决：Gate 4 绑定的止损/止盈/强平必须可以改）：
+    /// 三项退出纪律的运行时写路径。**live** —— 对下一笔入场立即生效（Gate 4
+    /// 每次入场现场从活配置绑定）；已开仓位的退出扫描按 `PositionManager`
+    /// 的活配置判读，同样立即跟随新值 —— 回执逐项写明，不静默。
+    /// 未持久化：重启回到启动 flag/env/TOML 的解析结果（与 risk.setSystemic
+    /// 同一句真话）。
+    pub const RISK_SET_EXIT: &str = "risk.setExit";
     pub const ORDER_PLACE: &str = "orders.place";
     pub const ORDER_CANCEL: &str = "orders.cancel";
     pub const ORDER_CANCEL_ALL: &str = "orders.cancel_all";
@@ -374,6 +381,11 @@ pub struct BlueprintSaveResult {
     /// the IPC contract promises (a save that "succeeded" without saying WHAT
     /// it wrote is not auditable).
     pub bytes: [u64; 3],
+    /// Names of the evolvable knobs the manifest exports (`tunables`) — empty
+    /// when the blueprint has no numeric anchors. The editor shows this count
+    /// so the operator knows the saved strategy is evolution-ready.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tunables: Vec<String>,
 }
 
 /// `blueprint.load` params (#393): `{ "name": "<package name>" }` — the
@@ -823,6 +835,84 @@ pub struct SystemicLimitUpdate {
 /// [`SystemicLimitUpdate::note`] — one spelling, used by the reply and the log.
 pub const SYSTEMIC_LIMIT_UPDATE_NOTE: &str = "six bounds live, drawdown + breaker pair arm next session; a restart \
      re-applies the startup flags/env/TOML (in-memory, not persisted)";
+
+// ── 退出纪律可编辑 — risk.setExit（止损/止盈/强平的运行时写路径）────────────
+
+/// `risk.setExit` params: the exit triple Gate 4 binds per entry, every field
+/// optional (only the named fields change). Percentages are decimal STRINGS on
+/// the wire (the readout's convention); `forceExitSec` is seconds.
+///
+/// Calibration guard: `forceExitSec: 0` DISABLES the guillotine and
+/// `stopLossPct: 0` would stop on entry tick, so the percentages are refused
+/// at `<= 0` while the deadline accepts `0` as the documented off switch —
+/// the same posture the ExitConfig default documents (`force_exit_sec 0 = the
+/// guillotine is OFF`).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SetExitParams {
+    /// 止损（入场价百分比）：跌破即触发保护性离场。出厂 12。
+    #[serde(default, with = "crate::decimal::opt")]
+    pub stop_loss_pct: Option<Decimal>,
+    /// 止盈（入场价百分比）：兜底入袋规则。出厂 100（近确定二元的胜利入袋）。
+    #[serde(default, with = "crate::decimal::opt")]
+    pub take_profit_pct: Option<Decimal>,
+    /// 强平秒数（轮剩余时间降到该值即硬性离场）。**0 = 关闭强平**（出厂
+    /// 校准值：旧的 120s 截止切掉了后来赔付的轮）。负值拒绝。
+    #[serde(default)]
+    pub force_exit_sec: Option<i64>,
+    /// Free-text note from the caller, echoed into the audit line.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl SetExitParams {
+    /// True when the patch names no field — refused, not answered with an
+    /// empty record (the same posture as `risk.setSystemic`).
+    pub fn is_empty(&self) -> bool {
+        self.stop_loss_pct.is_none()
+            && self.take_profit_pct.is_none()
+            && self.force_exit_sec.is_none()
+    }
+}
+
+/// One field's resolution inside a `risk.setExit` reply. All three fields are
+/// **live** for every NEW entry (Gate 4 binds from the live config each
+/// intent) and the exit sweep reads the same live config, so a change also
+/// steers already-open positions' protective rules — the receipt says so.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExitSetChange {
+    /// The wire (camelCase) name of the field.
+    pub field: &'static str,
+    /// Previous effective value, decimal string.
+    pub from: String,
+    /// New effective value, decimal string.
+    pub to: String,
+    /// Always `live` today: every exit rule is judged per tick from the live
+    /// config. A separate class exists so a future next-session knob does not
+    /// reuse the string silently.
+    pub effect: &'static str,
+}
+
+/// `risk.setExit` result: the audited change list, in the
+/// `SystemicLimitUpdate` shape. `persisted` is ALWAYS false — the exit triple
+/// is a boot-time resolution (flags/env/TOML); a hot edit lives exactly as
+/// long as this process, and the note says so.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExitSetUpdate {
+    pub applied: Vec<ExitSetChange>,
+    pub at_ms: i64,
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub persisted: bool,
+    pub note: &'static str,
+}
+
+/// [`ExitSetUpdate::note`] — one spelling, used by the reply and the log.
+pub const EXIT_SET_UPDATE_NOTE: &str = "live for every new entry (Gate 4 binds per intent) and for the exit \
+     sweep of already-open positions; a restart re-applies the startup flags/env/TOML (in-memory, not persisted)";
 
 // ── Fee model quote (#182) ───────────────────────────────────────────────────
 

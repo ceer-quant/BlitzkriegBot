@@ -7076,6 +7076,158 @@ impl Core {
             note: SYSTEMIC_LIMIT_UPDATE_NOTE,
         })
     }
+
+    /// 退出纪律可编辑（`risk.setExit`）：Gate 4 绑定的止损/止盈/强平三项的
+    /// 运行时写路径，仿 [`Self::apply_systemic_limits`] 的 plan-first + 审计
+    /// 姿态。
+    ///
+    /// 生效语义是真实的，不是文档话术：
+    ///
+    /// - **每笔新入场 live** —— 仲裁管线（Gate 4）每个意图现场从
+    ///   `self.config.positions.exit` 取 [`ExitConfig`]（`process_intent` 的
+    ///   调用点），写入后下一笔入场立即按新值绑定退出纪律投影。
+    /// - **已开仓位的退出扫描同样 live** —— [`PositionManager`] 的退出梯
+    ///   （止损/止盈/强平判读）读自己的 `config.exit` 副本，所以写路径必须
+    ///   同步两处：`config.positions.exit`（入场绑定）+ `positions.set_config`
+    ///   （退出扫描）。漏掉后者会造出「新仓位一种纪律、旧仓位另一种纪律」
+    ///   的静默分裂。
+    ///
+    /// 校准护栏：`forceExitSec: 0` 是文档化的「关闭强平」开关（出厂校准值），
+    /// 照常接受；两个百分比拒绝 `<= 0`（`stopLossPct: 0` 会在入场 tick 就
+    /// 止损，`takeProfitPct: 0` 语义同样荒谬 —— 负数/零不是操作员想要的
+    /// 「关闭」，是笔误）。强平接受 `0`、拒绝负数。
+    ///
+    /// 不持久化 —— 重启后回到启动 flag/env/TOML 的解析结果，与
+    /// `risk.setSystemic` 的「热≠永久」同一句真话。
+    pub fn apply_exit_set(
+        &mut self,
+        patch: &crate::ipc::schema::SetExitParams,
+        actor: &str,
+        now_ms: i64,
+    ) -> CoreResult<crate::ipc::schema::ExitSetUpdate> {
+        use crate::ipc::schema::{EXIT_SET_UPDATE_NOTE, ExitSetChange, ExitSetUpdate};
+
+        if patch.is_empty() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "risk.setExit needs at least one of stopLossPct / takeProfitPct / \
+                 forceExitSec; read the current values with risk.limits"
+                    .to_string(),
+            ));
+        }
+
+        // Plan first, write later —— 被拒的 patch 一个字节都不动。
+        let current = self.config.positions.exit.clone();
+        let mut changes: Vec<ExitSetChange> = Vec::new();
+        let mut plan = |field: &'static str,
+                        from: Decimal,
+                        to: Option<Decimal>,
+                        effect: &'static str|
+         -> CoreResult<()> {
+            let Some(to) = to else { return Ok(()) };
+            if to <= Decimal::ZERO {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "{field} must be > 0 (a percentage; there is no `off` \
+                             spelling here), got {to}; nothing was applied"
+                    ),
+                ));
+            }
+            changes.push(ExitSetChange {
+                field,
+                from: from.to_string(),
+                to: to.to_string(),
+                effect,
+            });
+            Ok(())
+        };
+
+        plan(
+            "stopLossPct",
+            current.stop_loss_pct,
+            patch.stop_loss_pct,
+            "live",
+        )?;
+        plan(
+            "takeProfitPct",
+            current.take_profit_pct,
+            patch.take_profit_pct,
+            "live",
+        )?;
+
+        if let Some(sec) = patch.force_exit_sec {
+            if sec < 0 {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "forceExitSec must be >= 0 (0 = the guillotine is OFF, \
+                             the calibrated default), got {sec}; nothing was applied"
+                    ),
+                ));
+            }
+            changes.push(ExitSetChange {
+                field: "forceExitSec",
+                from: current.force_exit_sec.to_string(),
+                to: sec.to_string(),
+                effect: "live",
+            });
+        }
+
+        if changes.is_empty() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "risk.setExit: no field carried a change — nothing to audit",
+            ));
+        }
+
+        // Write phase: BOTH copies. `config.positions.exit` is what Gate 4
+        // binds per new intent; `PositionManager.config.exit` is what the exit
+        // sweep (stop/take/force judgement, the dynamic-stop ramp) reads every
+        // tick. set_config keeps everything else (budgets, cooldowns) as-is —
+        // only the exit triple's two fields move.
+        {
+            let mut exit = self.config.positions.exit.clone();
+            if let Some(v) = patch.stop_loss_pct {
+                exit.stop_loss_pct = v;
+            }
+            if let Some(v) = patch.take_profit_pct {
+                exit.take_profit_pct = v;
+            }
+            if let Some(sec) = patch.force_exit_sec {
+                exit.force_exit_sec = sec;
+            }
+            self.config.positions.exit = exit.clone();
+            let mut positions = self.config.positions.clone();
+            positions.exit = exit;
+            self.positions.set_config(positions);
+        }
+
+        for c in &changes {
+            tracing::info!(
+                target: "risk",
+                actor = %actor,
+                field = c.field,
+                from = %c.from,
+                to = %c.to,
+                effect = c.effect,
+                reason = patch.reason.as_deref().unwrap_or(""),
+                "exit discipline update: {} {} -> {} ({})",
+                c.field,
+                c.from,
+                c.to,
+                EXIT_SET_UPDATE_NOTE,
+            );
+        }
+        Ok(ExitSetUpdate {
+            applied: changes,
+            at_ms: now_ms,
+            actor: actor.to_string(),
+            reason: patch.reason.clone(),
+            persisted: false,
+            note: EXIT_SET_UPDATE_NOTE,
+        })
+    }
     /// The ONE writer of the panel-visible last-error slot (#180). Every
     /// internal refusal path funnels through here — directly, or via
     /// [`Core::emit_error`] — so the slot cannot be written with a message no
@@ -11226,6 +11378,70 @@ mod tests {
             "expected a loss, got {}",
             closed.net_pnl_usd
         );
+    }
+
+    /// 退出纪律可编辑（`risk.setExit`）：写路径的**两处落点**必须同时到位 ——
+    /// 已开仓位的退出扫描读 `PositionManager` 自己的 config 副本（每 tick
+    /// 克隆），新入场绑定读 `config.positions.exit`。只写 service 侧会让退出
+    /// 扫描静默沿用旧纪律（「新仓位一种纪律、旧仓位另一种」的分裂）；只写
+    /// manager 侧会让 readout（risk.limits）撒谎。这里用已开仓位 + 收紧的
+    /// 止损证明扫描真的跟随新值：12% 止损按住不触发，热改 1% 后下一个
+    /// tick 触发。
+    #[test]
+    fn exit_set_reaches_the_exit_sweep_of_already_open_positions() {
+        let mut c = dry_core(dec!(100));
+        // The dynamic-stop ramp needs time_left <= 300 to reach the floor; a
+        // static judgement would blend with the ramp. force_exit OFF keeps the
+        // position alive for the second phase.
+        let mut pc = c.config.positions.clone();
+        pc.exit.force_exit_sec = 0;
+        c.positions.set_config(pc);
+
+        // Open at 0.40 (FOK taker needs resting ask depth).
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 0);
+        c.place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k1"), 0, 0)
+            .unwrap();
+        assert_eq!(c.positions().open_positions().len(), 1);
+
+        // Price drops 8% (0.40 → 0.368): inside the shipped 12% stop, no exit.
+        // time_left 600s keeps the dynamic ramp at its wide end; 8% stays above
+        // the ramped threshold, so the position survives — the JUDGEMENT that
+        // holds it is the 12 we are about to edit.
+        c.book_snapshot(
+            "tok",
+            vec![(dec!(0.368), dec!(100))],
+            vec![(dec!(0.37), dec!(100))],
+            1,
+        );
+        c.tick(1_800_000 - 600_000).unwrap();
+        assert_eq!(
+            c.positions().open_positions().len(),
+            1,
+            "an 8% drawdown must not trigger the 12% stop"
+        );
+
+        // THE WRITE: tighten the stop to 1% through the verb's service path.
+        c.apply_exit_set(
+            &crate::ipc::schema::SetExitParams {
+                stop_loss_pct: Some(dec!(1)),
+                ..Default::default()
+            },
+            "test",
+            0,
+        )
+        .unwrap();
+
+        // Same drawdown, next tick: the sweep now judges on 1% and fires.
+        c.tick(1_800_000 - 599_000).unwrap();
+        assert_eq!(
+            c.positions().open_positions().len(),
+            0,
+            "after the hot edit the exit sweep must judge on the NEW stop"
+        );
+
+        // The readout agrees (config.positions.exit moved too).
+        let exit = &c.config.positions.exit;
+        assert_eq!(exit.stop_loss_pct, dec!(1), "the readout must not lie");
     }
 
     #[test]

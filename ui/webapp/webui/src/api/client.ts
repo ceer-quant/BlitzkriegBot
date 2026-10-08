@@ -306,6 +306,38 @@ export interface SystemicLimitUpdateDoc {
   error?: string
 }
 
+/**
+ * `risk.setExit` 请求体：退出纪律三项任选（只发改动项）。百分比跨线是
+ * 字符串（内核 Decimal 约定）；`forceExitSec` 是秒数，0 = 关闭强平（出厂
+ * 校准值）。`reason` 进审计行。
+ */
+export interface RiskSetExitBody {
+  stopLossPct?: string | number
+  takeProfitPct?: string | number
+  forceExitSec?: number
+  reason?: string
+}
+
+/** One exit field's audited change（内核 ExitSetChange 的 wire 形状）。 */
+export interface ExitSetChange {
+  field: string
+  from: string
+  to: string
+  /** live：新入场下一笔按新值绑定，已开仓位的退出扫描同步跟随。 */
+  effect: 'live' | string
+}
+
+/** `risk.setExit` 回执：改了什么、谁改的、何时、未持久化。 */
+export interface ExitSetUpdateDoc {
+  applied: ExitSetChange[]
+  atMs: number
+  actor: string
+  reason?: string
+  persisted: boolean
+  note: string
+  error?: string
+}
+
 // ── E29 K-line (mirror core/market_api/src/kline.rs wire shape) ─────────────
 
 /** Wire interval spelling (serde `snake_case`): sec1…day1. */
@@ -381,6 +413,17 @@ export const api = {
    */
   riskSetSystemic: (body: RiskSetSystemicBody) =>
     request<SystemicLimitUpdateDoc>('/risk/set-systemic', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * 退出纪律的写路径（`risk.setExit`）：止损/止盈/强平三项的内存热写。
+   * 只发改动过的字段；内核 plan-first（一项非法则整体拒）+ 逐字段审计，
+   * 回执里每项带 old→new 与 effect=live（新入场下一笔按新值绑定，已开仓位
+   * 的退出扫描同步跟随）。未持久化：重启回到启动 flag/env/TOML 的解析结果。
+   */
+  riskSetExit: (body: RiskSetExitBody) =>
+    request<ExitSetUpdateDoc>('/risk/set-exit', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -634,6 +677,8 @@ export interface BlueprintSaveDoc {
   luaSha256: string
   /** blueprint/lua/manifest 三个文件的字节数。 */
   bytes: number[]
+  /** 可进化旋钮名（manifest tunables 导出）——空数组表示本蓝图没有数值锚点。 */
+  tunables: string[]
   error?: string
 }
 

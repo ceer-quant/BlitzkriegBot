@@ -326,10 +326,14 @@ async function doSave(overwrite = false): Promise<void> {
       return
     }
     needOverwrite.value = false
+    const tunableNote =
+      doc.tunables.length > 0
+        ? ` · 可进化旋钮 ${doc.tunables.length} 个（${doc.tunables.join('、')}）`
+        : ' · 无数值锚点，不可进化'
     saveReceipt.value = [
       `已写入 ${doc.packageDir}`,
       `blueprint.json ${doc.bytes[0]}B · strategy.lua ${doc.bytes[1]}B · manifest.json ${doc.bytes[2]}B`,
-      `strategy.lua sha256 ${doc.luaSha256.slice(0, 12)}…`,
+      `strategy.lua sha256 ${doc.luaSha256.slice(0, 12)}…${tunableNote}`,
     ].join(' · ')
   } catch (e) {
     saveError.value = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)

@@ -1015,4 +1015,37 @@ mod tests {
         assert!(adapter.shadow_factory().is_none());
         std::fs::remove_dir_all(&tmp).ok();
     }
+
+    /// The blueprint.save export shape (用户裁决：蓝图生产的策略也要支持进化)
+    /// lands as evolvable knobs end to end: the compiler emits
+    /// `{"<node>_<param>": {type: "decimal", default, min, max}}` — a NUMBER
+    /// default serialized as a string — and the loader must register each
+    /// coherent one, name for name, so a saved blueprint is evolution-ready
+    /// without a hand-written manifest.
+    #[test]
+    fn blueprint_save_tunables_register_as_evolvable_knobs() {
+        let tmp = std::env::temp_dir().join(format!("bk-lua-bptun-{}", std::process::id()));
+        let pkg = write_package(&tmp.join("lua_bptun"), "lua_bptun", &[]);
+        with_manifest(&pkg, |m| {
+            m["tunables"] = serde_json::json!({
+                "n2_value": { "type": "decimal", "default": "0.25", "min": "0.125", "max": "0.375" },
+                "n4_price": { "type": "decimal", "default": "0.25", "min": "0.125", "max": "0.375" },
+                "n4_budget_ratio": { "type": "decimal", "default": "0.1", "min": "0.05", "max": "0.15" },
+            });
+        });
+        let loaded = load_lua_package(&pkg).expect("loads");
+        let adapter = LuaEngineAdapter::new(loaded.strategy, loaded.tunables);
+        let names: Vec<String> = adapter
+            .evolvable_knobs()
+            .into_iter()
+            .map(|k| k.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["n2_value", "n4_budget_ratio", "n4_price"],
+            "BTreeMap order: every blueprint anchor is a knob"
+        );
+        assert!(adapter.shadow_factory().is_some(), "knobs ⇒ twin factory");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 }

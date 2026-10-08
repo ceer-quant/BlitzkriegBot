@@ -143,14 +143,61 @@ impl NodeKind {
 
 // ── the public entry point ──────────────────────────────────────────────────
 
+/// One evolvable knob exported from a compiled blueprint (用户裁决：蓝图生产
+/// 的策略也要支持进化). Numeric anchors — condition values, constant values,
+/// action `price` / `budget_ratio` — compile to `__param("<node>_<param>",
+/// <literal>)` reads: the generated Lua serves the operator's hot parameter
+/// when the shadow-evolution registry carries one, and falls back to the
+/// authored literal when it does not (fail-closed: no params cell → the
+/// blueprint behaves exactly as drawn).
+///
+/// The domain (min/max) is the #393 explicit declaration the evolution
+/// machinery demands: absent bounds = not evolvable, and the kernel never
+/// invents one — so save-time export ALWAYS ships a coherent window around
+/// the authored value, ± half its own magnitude (0 widens to 0..1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlueprintTunable {
+    /// The wire name: `<nodeId>_<param>` (e.g. `c1_value`, `a1_price`).
+    pub name: String,
+    /// The authored value, decimal-string (the tunables wire rule).
+    pub default: String,
+    /// Lower domain bound, decimal-string.
+    pub min: String,
+    /// Upper domain bound, decimal-string.
+    pub max: String,
+}
+
 /// Compile a blueprint JSON document into Lua source. Every failure names the
 /// node id and the reason; success is deterministic (same input → same text).
 pub fn compile(json: &str) -> Result<String, String> {
+    compile_with_tunables(json).map(|(lua, _)| lua)
+}
+
+/// [`compile`] plus the evolvable-knob export: the same document yields the
+/// same Lua AND the tunables table `blueprint.save` writes into the package
+/// manifest so the loader registers evolution knobs for it (#393 shape).
+pub fn compile_with_tunables(json: &str) -> Result<(String, Vec<BlueprintTunable>), String> {
     let bp: Blueprint =
         serde_json::from_str(json).map_err(|e| format!("blueprint parse failed: {e}"))?;
     let graph = validate_structure(&bp)?;
     validate_semantics(&bp, &graph)?;
     generate(&bp, &graph)
+}
+
+/// The save-time domain rule: ± half the value's own magnitude, floored to a
+/// legal Decimal, with 0 widened to the 0..1 probability band. Always
+/// coherent (min <= default <= max) by construction, so `specs_from_tunables`
+/// registers the knob instead of silently skipping it.
+fn tunable_domain(v: f64) -> (String, String) {
+    let half = (v.abs() / 2.0).max(1e-6);
+    let (min, max) = if v == 0.0 {
+        (0.0, 1.0)
+    } else {
+        (v - half, v + half)
+    };
+    // 12 significant digits keeps the round-trip readable and far inside
+    // rust_decimal's 28-digit ceiling.
+    (format!("{:.12}", min), format!("{:.12}", max))
 }
 
 // ── stage 1: structure ──────────────────────────────────────────────────────
@@ -772,7 +819,29 @@ fn check_constant(n: &BpNode, v: &serde_json::Value) -> Result<(), String> {
 
 // ── stage 3: codegen ────────────────────────────────────────────────────────
 
-fn generate(bp: &Blueprint, graph: &Graph) -> Result<String, String> {
+fn generate(bp: &Blueprint, graph: &Graph) -> Result<(String, Vec<BlueprintTunable>), String> {
+    // The evolvable knobs (用户裁决：蓝图生产的策略也要支持进化)：every
+    // numeric anchor registers one, named `<nodeId>_<param>`. Collection
+    // happens exactly where the literal is emitted, so the exported table can
+    // never drift from what the generated source actually reads.
+    let mut tunables: Vec<BlueprintTunable> = Vec::new();
+
+    // Register one numeric knob; `__param` will serve the hot value or this
+    // literal at runtime. Non-numeric anchors (strings, booleans, arrays) are
+    // behaviour, not calibration — they stay inline literals.
+    let register =
+        |tunables: &mut Vec<BlueprintTunable>, node: &str, param: &str, v: &serde_json::Value| {
+            if let Some(num) = v.as_f64() {
+                let (min, max) = tunable_domain(num);
+                tunables.push(BlueprintTunable {
+                    name: format!("{node}_{param}"),
+                    default: lua_literal(v),
+                    min,
+                    max,
+                });
+            }
+        };
+
     // Value/guard expressions per node, computed in topological order so a
     // node's inputs are always ready.
     let mut value_expr: HashMap<String, String> = HashMap::new();
@@ -792,7 +861,8 @@ fn generate(bp: &Blueprint, graph: &Graph) -> Result<String, String> {
             }
             NodeKind::Source => {
                 let v = n.params.get("value").expect("checked in stage 2");
-                value_expr.insert(id.clone(), lua_literal(v));
+                register(&mut tunables, &n.id, "value", v);
+                value_expr.insert(id.clone(), param_expr(&n.id, "value", v));
             }
             NodeKind::Condition => {
                 // The left side: the node's own `field` param, else its ONE
@@ -812,7 +882,11 @@ fn generate(bp: &Blueprint, graph: &Graph) -> Result<String, String> {
                 };
                 let op = string_param(n, "op")?.expect("checked in stage 2");
                 let v = n.params.get("value").expect("checked in stage 2");
-                guard_expr.insert(id.clone(), comparison(&left, &op, v));
+                register(&mut tunables, &n.id, "value", v);
+                guard_expr.insert(
+                    id.clone(),
+                    comparison_tunable(&left, &op, v, &n.id, &mut tunables),
+                );
             }
             NodeKind::Gate => {
                 let ins = &graph.incoming[id];
@@ -858,12 +932,25 @@ fn generate(bp: &Blueprint, graph: &Graph) -> Result<String, String> {
     }
     steps.reverse();
 
-    let call = order_call(action, &steps);
+    let call = order_call_tunable(action, &steps, &mut tunables);
     let mut out = String::new();
     out.push_str(&format!(
         "-- generated by blitzkrieg-core from blueprint \"{}\" (version 1).\n",
         bp.name
     ));
+    // The evolution bridge (用户裁决：蓝图生产的策略也要支持进化)：numeric
+    // anchors read `bk.params()[name]` through `__param`, falling back to the
+    // authored literal when the registry carries no (or a non-numeric) value.
+    // The names and their ±half-magnitude domains are exported as the
+    // manifest's `tunables` by blueprint.save, which is what registers them
+    // as evolvable knobs (#393 shape, fail-closed: no domain = no evolution).
+    out.push_str("-- evolution bridge: numeric anchors read hot params with the authored literal as fallback.\n");
+    out.push_str("local function __param(name, fallback)\n");
+    out.push_str("  local p = bk.params()\n");
+    out.push_str("  local v = p and tonumber(p[name]) or nil\n");
+    out.push_str("  if v then return v end\n");
+    out.push_str("  return fallback\n");
+    out.push_str("end\n");
     // The runtime bridge (#413): the §6.5 loader contract requires
     // `bk_evaluate()` returning the intent tables, and `place_order` is not a
     // sandbox global — so the emitted package carries its OWN collector: each
@@ -958,7 +1045,7 @@ fn generate(bp: &Blueprint, graph: &Graph) -> Result<String, String> {
              emitting a non-sandboxable artifact"
         ));
     }
-    Ok(out)
+    Ok((out, tunables))
 }
 
 /// The `place_order{...}` suggestion for a buy/sell action. The limit price
@@ -966,23 +1053,56 @@ fn generate(bp: &Blueprint, graph: &Graph) -> Result<String, String> {
 /// nearest price-field condition in the guard chain, else the order is
 /// emitted without a price as a market suggestion. `budget_ratio` scales the
 /// account's available balance exactly as the blueprint states it.
-fn order_call(action: &BpNode, steps: &[(String, bool)]) -> String {
+///
+/// The tunable variant serves the action's own numeric params through the
+/// evolution bridge (`__param`) and registers their knobs. The price
+/// inherited from a guard chain is ALREADY a `__param(...)` expression (the
+/// condition emitted it), so it passes through untouched.
+fn order_call_tunable(
+    action: &BpNode,
+    steps: &[(String, bool)],
+    tunables: &mut Vec<BlueprintTunable>,
+) -> String {
     let side = match action.node_type.as_str() {
         "action_buy" => "buy",
         "action_sell" => "sell",
         _ => "hold",
     };
-    let price: Option<String> = action.params.get("price").map(lua_literal).or_else(|| {
-        // Innermost-first: the last condition on tick.price / tick.mid_price.
-        steps
-            .iter()
-            .rev()
-            .find_map(|(expr, _)| price_threshold(expr))
-    });
-    let budget = action
+    let price: Option<String> = action
         .params
-        .get("budget_ratio")
-        .map(|v| format!("tick.available_balance * {}", lua_literal(v)));
+        .get("price")
+        .map(|v| {
+            if v.as_f64().is_some() {
+                tunables.push(BlueprintTunable {
+                    name: format!("{}_price", action.id),
+                    default: lua_literal(v),
+                    min: tunable_domain(v.as_f64().expect("checked")).0,
+                    max: tunable_domain(v.as_f64().expect("checked")).1,
+                });
+            }
+            param_expr(&action.id, "price", v)
+        })
+        .or_else(|| {
+            // Innermost-first: the last condition on tick.price / tick.mid_price.
+            steps
+                .iter()
+                .rev()
+                .find_map(|(expr, _)| price_threshold(expr))
+        });
+    let budget = action.params.get("budget_ratio").map(|v| {
+        if v.as_f64().is_some() {
+            tunables.push(BlueprintTunable {
+                name: format!("{}_budget_ratio", action.id),
+                default: lua_literal(v),
+                min: tunable_domain(v.as_f64().expect("checked")).0,
+                max: tunable_domain(v.as_f64().expect("checked")).1,
+            });
+        }
+        format!(
+            "tick.available_balance * {}",
+            param_expr(&action.id, "budget_ratio", v)
+        )
+    });
 
     let mut fields: Vec<String> = vec![
         "account_id = tick.account_id".into(),
@@ -1030,6 +1150,41 @@ fn wrap_negation(expr: &str, when: bool) -> String {
     } else {
         format!("not ({expr})")
     }
+}
+
+/// A numeric anchor served through the evolution bridge: `__param(name,
+/// literal)` — the hot parameter when the registry carries one, the authored
+/// literal otherwise. Call sites register the knob BEFORE this runs (the
+/// exported table must match what the source reads), so the name here is the
+/// same `<node>_<param>` the register closure pushed.
+fn param_expr(node: &str, param: &str, v: &serde_json::Value) -> String {
+    if v.as_f64().is_some() {
+        format!(
+            "__param({}, {})",
+            lua_string(&format!("{node}_{param}")),
+            lua_literal(v)
+        )
+    } else {
+        lua_literal(v)
+    }
+}
+
+/// [`comparison`] with the evolution bridge on the value side: numeric
+/// thresholds read `bk.params()`, everything else stays a plain literal.
+/// `in` chains keep plain members (a membership set is behaviour, not a
+/// calibration knob).
+fn comparison_tunable(
+    left: &str,
+    op: &str,
+    value: &serde_json::Value,
+    node: &str,
+    tunables: &mut Vec<BlueprintTunable>,
+) -> String {
+    if op == "in" {
+        return comparison(left, op, value);
+    }
+    let _ = tunables; // registered by the caller before this runs
+    format!("{left} {op} {}", param_expr(node, "value", value))
 }
 
 /// A comparison guard: `left op value`, with `in` expanded to an equality
@@ -1126,14 +1281,17 @@ mod tests {
             lua.contains("function declare_modes()"),
             "mode declaration present"
         );
-        assert!(lua.contains("tick.price <= 0.25"), "guard chain: {lua}");
+        assert!(
+            lua.contains("tick.price <= __param(\"n2_value\", 0.25)"),
+            "guard chain: {lua}"
+        );
         assert!(
             lua.contains("tick.trend_confirmed == true"),
             "inline-field condition: {lua}"
         );
         assert!(lua.contains("side = \"buy\""), "action translated: {lua}");
         assert!(
-            lua.contains("tick.available_balance * 0.1"),
+            lua.contains("tick.available_balance * __param(\"n4_budget_ratio\", 0.1)"),
             "budget line: {lua}"
         );
     }
@@ -1243,7 +1401,9 @@ mod tests {
         .to_string();
         let lua = compile(&bp).expect("gate blueprint compiles");
         assert!(
-            lua.contains("if (tick.mid_price > 0.8 and tick.time_left_sec < 60) then"),
+            lua.contains(
+                "if (tick.mid_price > __param(\"c1_value\", 0.8) and tick.time_left_sec < __param(\"c2_value\", 60)) then"
+            ),
             "and-gate guard: {lua}"
         );
         assert!(lua.contains("side = \"sell\""), "sell side: {lua}");
@@ -1271,7 +1431,9 @@ mod tests {
         let lua = compile(&bp).expect("or blueprint compiles");
         // c2's edge carries when=false → negated at the join; c1 passes as-is.
         assert!(
-            lua.contains("if (tick.obi > 0.5 or not (tick.trend_confirmed != true)) then"),
+            lua.contains(
+                "if (tick.obi > __param(\"c1_value\", 0.5) or not (tick.trend_confirmed != true)) then"
+            ),
             "or-gate with one inverted edge: {lua}"
         );
         // action_hold emits the guard but no order — the bridge collector
@@ -1315,7 +1477,79 @@ mod tests {
         })
         .to_string();
         let lua = compile(&bp).expect("constant blueprint compiles");
-        assert!(lua.contains("0.5 < 0.25"), "constant operand: {lua}");
+        assert!(
+            lua.contains("__param(\"k1_value\", 0.5) < __param(\"c1_value\", 0.25)"),
+            "constant operand: {lua}"
+        );
+    }
+
+    /// 用户裁决（2026-10-08）：蓝图生产的策略也要支持进化 —— the compiled
+    /// Lua serves numeric anchors from `bk.params()` with the authored
+    /// literal as fallback, and the export table carries one coherent domain
+    /// per anchor so the loader's `specs_from_tunables` registers them
+    /// (fail-closed #393: no domain = no evolution; here the domain ALWAYS
+    /// ships). Booleans stay plain literals — behaviour, not calibration.
+    #[test]
+    fn numeric_anchors_export_as_tunables_and_read_params_with_fallback() {
+        let (lua, tunables) = compile_with_tunables(DOG_BLUEPRINT).expect("compiles");
+        // The guard and the budget read params; the boolean condition stays
+        // a plain literal.
+        assert!(
+            lua.contains("tick.price <= __param(\"n2_value\", 0.25)"),
+            "condition value via __param: {lua}"
+        );
+        assert!(
+            lua.contains("tick.available_balance * __param(\"n4_budget_ratio\", 0.1)"),
+            "budget_ratio via __param: {lua}"
+        );
+        assert!(
+            lua.contains("tick.trend_confirmed == true"),
+            "boolean stays a literal: {lua}"
+        );
+        assert!(
+            lua.contains("local function __param(name, fallback)"),
+            "the evolution bridge is emitted: {lua}"
+        );
+        // The export: three knobs (condition value, price, budget_ratio),
+        // each with a coherent ±half-magnitude domain containing its default.
+        let names: Vec<&str> = tunables.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["n2_value", "n4_price", "n4_budget_ratio"],
+            "one knob per numeric anchor: {names:?}"
+        );
+        for t in &tunables {
+            let (d, min, max) = (
+                t.default.parse::<f64>().expect("default parses"),
+                t.min.parse::<f64>().expect("min parses"),
+                t.max.parse::<f64>().expect("max parses"),
+            );
+            assert!(
+                min <= d && d <= max,
+                "domain must contain the default: {t:?}"
+            );
+            assert!(min < max, "domain must be coherent: {t:?}");
+        }
+        // Zero widens to the 0..1 probability band (0 has no magnitude).
+        let zero_bp = json!({
+            "version": 1, "name": "zero_test",
+            "nodes": [
+                { "id": "k1", "type": "constant", "params": { "value": 0 } },
+                { "id": "c1", "type": "condition", "params": { "op": "==", "value": 0 } },
+                { "id": "a1", "type": "action_hold" }
+            ],
+            "edges": [ { "from": "k1", "to": "c1" }, { "from": "c1", "to": "a1" } ]
+        })
+        .to_string();
+        let (_, tunables) = compile_with_tunables(&zero_bp).expect("compiles");
+        let k = tunables
+            .iter()
+            .find(|t| t.name == "k1_value")
+            .expect("zero anchor exports");
+        assert_eq!(
+            (k.min.as_str(), k.max.as_str()),
+            ("0.000000000000", "1.000000000000")
+        );
     }
 
     // ── negative: structure ─────────────────────────────────────────────────
