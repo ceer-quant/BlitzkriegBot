@@ -994,15 +994,32 @@ impl Engine {
             // A strategy-declared share count (pair legs must match in SHARES,
             // not in notional) is honoured only inside the kernel's risk band:
             // capped at the same `max_shares` ceiling the notional path obeys,
-            // so a declaration can never oversize. A declared count below one
-            // share buys NOTHING — falling back to notional sizing would open
-            // the naked leg of a pair — and `None` keeps notional sizing.
+            // so a declaration can never oversize. When the equity-relative
+            // mode is armed (#202), the declared count is ALSO capped by the
+            // strategy's whole-share equity ticket — a percentage budget is an
+            // upper bound on committed cash, and a depth-based declaration is
+            // exactly the path that would otherwise spend past it. The cap is
+            // uniform across a signal batch, so a pair's two legs (declared
+            // equal, clamped by the same budget at near-equal prices) stay
+            // mergeable. A declared count below one share buys NOTHING —
+            // falling back to notional sizing would open the naked leg of a
+            // pair — and `None` keeps notional sizing.
             let size = match sig.shares {
                 Some(n) => {
                     if n < Decimal::ONE {
                         continue;
                     }
-                    n.min(self.effective_sizing(&sig.strategy).max_shares)
+                    let sizing = self.effective_sizing(&sig.strategy);
+                    let mut capped = n.min(sizing.max_shares);
+                    if sizing.size_pct > Decimal::ZERO {
+                        let ticket = self.equity_shares(sig.price, &sizing);
+                        if ticket <= Decimal::ZERO {
+                            self.size_pct_skipped += 1;
+                            continue;
+                        }
+                        capped = capped.min(ticket);
+                    }
+                    capped
                 }
                 // #202: an equity-relative budget too small for one whole share
                 // produces NO order (counted, not emitted as a 0-size rejection).
@@ -2168,8 +2185,179 @@ mod tests {
             },
         )]));
         let s = e.effective_sizing("weird");
-        assert_eq!((s.min_shares, s.max_shares), (dec!(20), dec!(20)));
+        assert_eq!((s.min_shares, s.max_shares), (dec!(20), (dec!(20))));
         assert_eq!(e.compute_shares(dec!(0.10), "weird"), dec!(20));
+    }
+
+    // ── #202 × declared shares: the equity cap reaches depth-sized legs ────
+
+    /// Two strategies that DECLARE shares (the single_leg_pair shape), sized by
+    /// `--size-pct` per strategy: the equity ticket caps the declaration, and
+    /// the global cap still wins when it is tighter.
+    #[test]
+    fn an_armed_size_pct_caps_declared_shares_to_the_equity_ticket() {
+        // Equity 100: `pct20` gets 20% = $20; at the dip's mid 0.44 the
+        // whole-share ticket is floor(20 / 0.44) = 45 shares; `pct1` gets $1
+        // → floor(1 / 0.44) = 2 shares.
+        let mut e = engine_from(sizing_cfg(&[
+            (
+                "pct20",
+                StrategySize {
+                    size_pct: Some(dec!(20)),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pct1",
+                StrategySize {
+                    size_pct: Some(dec!(1)),
+                    ..Default::default()
+                },
+            ),
+        ]));
+        e.set_equity_usd(dec!(100));
+        e.register_user_strategy(
+            Box::new(SharesBuyer::on_assets(
+                "pct20",
+                dec!(0.45),
+                dec!(200),
+                &["BTC"],
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        e.register_user_strategy(
+            Box::new(SharesBuyer::on_assets(
+                "pct1",
+                dec!(0.45),
+                dec!(200),
+                &["ETH"],
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("pct20", true));
+        assert!(e.set_strategy_enabled("pct1", true));
+        assert!(
+            e.set_strategy_enabled("spread_arb", false),
+            "isolate the two declared dips"
+        );
+
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market_of("BTC", 1_800_000), market_of("ETH", 1_800_000)],
+            now_ms: now,
+        });
+        for asset in ["BTC", "ETH"] {
+            e.on_data(DataEvent::Book {
+                token_id: format!("{}_up", asset.to_lowercase()),
+                bids: vec![(dec!(0.43), dec!(100))],
+                asks: vec![(dec!(0.45), dec!(100))],
+                now_ms: now + 1_000,
+            });
+        }
+        let orders = e.evaluate(now + 2_000);
+        assert_eq!(orders.len(), 2, "{orders:?}");
+        let big = orders
+            .iter()
+            .find(|o| o.strategy == "pct20")
+            .expect("pct20 entry");
+        let small = orders
+            .iter()
+            .find(|o| o.strategy == "pct1")
+            .expect("pct1 entry");
+        // Declared 200 is capped by the equity ticket (45), then by the
+        // strategy's global-clamped share ceiling (20).
+        assert_eq!(big.size, dec!(20), "{big:?}");
+        assert_eq!(small.size, dec!(2), "{small:?}");
+        assert_eq!(big.price, dec!(0.44));
+        assert_eq!(small.price, dec!(0.44));
+        assert_eq!(e.size_pct_skip_count(), 0);
+    }
+
+    /// With the mode ARMED, a declared count whose price class sits above the
+    /// equity budget (ticket 0: the budget cannot buy one whole share) buys
+    /// NOTHING and is counted — the same statement `entry_ticket` makes for
+    /// the notional path (#202). A PAIR leg must never fall back to notional
+    /// sizing: that would open the naked leg.
+    #[test]
+    fn a_declared_count_above_the_armed_budget_buys_nothing() {
+        let mut c = sizing_cfg(&[(
+            "tiny",
+            StrategySize {
+                size_pct: Some(dec!(0.1)),
+                ..Default::default()
+            },
+        )]);
+        // Global ceiling 20 must not resurrect the leg either.
+        c.max_shares = dec!(20);
+        let mut e = engine_from(c);
+        e.set_equity_usd(dec!(1)); // 0.1% = $0.001 → floor(0.001/0.44) = 0
+        e.register_user_strategy(
+            Box::new(SharesBuyer::on_assets(
+                "tiny",
+                dec!(0.45),
+                dec!(5),
+                &["BTC"],
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("tiny", true));
+        assert!(e.set_strategy_enabled("spread_arb", false));
+
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market_of("BTC", 1_800_000)],
+            now_ms: now,
+        });
+        e.on_data(DataEvent::Book {
+            token_id: "btc_up".into(),
+            bids: vec![(dec!(0.43), dec!(100))],
+            asks: vec![(dec!(0.45), dec!(100))],
+            now_ms: now + 1_000,
+        });
+        let orders = e.evaluate(now + 2_000);
+        assert!(
+            orders.iter().all(|o| o.strategy != "tiny"),
+            "a zero-ticket declaration must not emit: {orders:?}"
+        );
+        assert_eq!(e.size_pct_skip_count(), 1, "the skip is counted");
+    }
+
+    /// The cap is INERT while `size_pct` is off (the default): a declared
+    /// count on the absolute path is still only bounded by `max_shares`, so
+    /// every existing replay is untouched (bit-for-bit discipline).
+    #[test]
+    fn size_pct_off_leaves_declared_shares_clamped_only_by_max_shares() {
+        let mut e = engine_from(sizing_cfg(&[]));
+        e.set_equity_usd(dec!(100));
+        e.register_user_strategy(
+            Box::new(SharesBuyer::on_assets("BTC", dec!(0.45), dec!(7), &["BTC"])),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("BTC", true));
+        assert!(e.set_strategy_enabled("spread_arb", false));
+
+        let now = 1_000_000i64;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market_of("BTC", 1_800_000)],
+            now_ms: now,
+        });
+        e.on_data(DataEvent::Book {
+            token_id: "btc_up".into(),
+            bids: vec![(dec!(0.43), dec!(100))],
+            asks: vec![(dec!(0.45), dec!(100))],
+            now_ms: now + 1_000,
+        });
+        let orders = e.evaluate(now + 2_000);
+        assert_eq!(orders.len(), 1, "{orders:?}");
+        assert_eq!(
+            orders[0].size,
+            dec!(7),
+            "declared 7 ≤ global cap 20: honoured"
+        );
     }
 
     /// Per-asset market helper (the shared `market()` only makes BTC).
@@ -2189,6 +2377,68 @@ mod tests {
             archive_verdict: false,
             neg_risk: true,
             question: format!("{asset} up or down"),
+        }
+    }
+
+    /// A hosted strategy that DECLARES its share count on every signal (the
+    /// `single_leg_pair` / `pair_discount_arb` shape): it sizes from the
+    /// visible ask depth, which has nothing to do with the account. The
+    /// declared amount is configurable so a test can place it above or below
+    /// the equity ticket.
+    struct SharesBuyer {
+        name: String,
+        buy_below: Decimal,
+        declared: Decimal,
+        assets: Vec<String>,
+    }
+    impl SharesBuyer {
+        fn on_assets(name: &str, buy_below: Decimal, declared: Decimal, assets: &[&str]) -> Self {
+            Self {
+                name: name.to_string(),
+                buy_below,
+                declared,
+                assets: assets.iter().map(|a| (*a).to_string()).collect(),
+            }
+        }
+    }
+    impl EngineStrategy for SharesBuyer {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn on_book(
+            &mut self,
+            _token_id: &str,
+            _snap: &crate::model::OrderbookSnapshot,
+            _now_ms: i64,
+        ) {
+        }
+        fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
+        fn gate_exemptions(&self) -> GateExemptions {
+            GateExemptions::none()
+        }
+        fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
+            let mut out = Vec::new();
+            for market in ctx.markets() {
+                if !self.assets.is_empty() && !self.assets.contains(&market.asset) {
+                    continue;
+                }
+                let Some(book) = ctx.fresh_book(&market.up_token_id) else {
+                    continue;
+                };
+                if book.mid_price <= self.buy_below {
+                    out.push(TradeSignal {
+                        strategy: self.name.clone(),
+                        asset: market.asset.clone(),
+                        direction: SignalDirection::Up,
+                        token_id: market.up_token_id.clone(),
+                        condition_id: market.condition_id.clone(),
+                        price: book.mid_price,
+                        reason: format!("{} depth dip", self.name),
+                        shares: Some(self.declared),
+                    });
+                }
+            }
+            out
         }
     }
 
