@@ -18,7 +18,9 @@
  *   4. `--verify` passes on a good backup and FAILS on a tampered one.
  *   5. Pruning removes only our own strict-named dirs; a stranger's directory
  *      sitting in dest survives, as does a symlink of a valid backup name.
- *   6. --exclude-archive drops the archive subtree.
+ *   6. --exclude-archive (the light tier) drops the archive subtree AND the
+ *      onchain pull cache, writes NO per-file manifest (integrity = archive
+ *      sha256), and still verifies — 2026-10-08 speed contract (<1 min).
  *   7. Live drift: the capture core appends to `data/archive/events.jsonl`
  *      continuously, so the source tree may be NEWER than any backup the
  *      moment it is finished. The manifest describes the archive, not the
@@ -120,6 +122,11 @@ function seed() {
   writeFileSync(join(SRC, 'orders', 'orders.jsonl'), '{"b":2}' + LF);
   writeFileSync(join(SRC, 'archive', 'events.1.jsonl'), 'evt' + LF);
   writeFileSync(join(SRC, 'archive', 'events.jsonl'), 'evt2' + LF);
+  // The light tier excludes the onchain pull cache (regenerable, 99%+ of the
+  // tree's file count). The fixture mirrors that shape so section 6 can pin it.
+  mkdirSync(join(SRC, 'onchain', '.cache', 'prices'), { recursive: true });
+  writeFileSync(join(SRC, 'onchain', '.cache', 'prices', 'tok_1_2.json'), '{}' + LF);
+  writeFileSync(join(SRC, 'onchain', 'dataset.manifest.json'), '{"sha256":{}}' + LF);
 }
 
 function backups() {
@@ -210,7 +217,10 @@ const actual = createHash('sha256').update(readFileSync(join(BK, 'data.tar.gz'))
 assert(actual === recHash, 'recorded archive hash matches an independent recomputation');
 
 const meta = JSON.parse(readFileSync(join(BK, 'BACKUP.json'), 'utf8'));
-assert(meta.fileCount === 4, `BACKUP.json records the file count (${meta.fileCount} == 4)`);
+// The FULL tier (no --exclude-archive) captures trades/orders/archive/plus the
+// onchain manifest = 6 files, and writes a per-file manifest.
+assert(meta.fileCount === 6, `BACKUP.json records the file count (${meta.fileCount} == 6)`);
+assert(meta.perFileManifest === true, 'BACKUP.json records that the full tier writes a per-file manifest');
 assert(meta.archiveSha256 === actual, 'BACKUP.json archive sha256 agrees with the manifest');
 assert(typeof meta.repoHead === 'string' && meta.repoHead.length >= 7, 'BACKUP.json records the repo revision');
 
@@ -224,7 +234,7 @@ console.log('');
 console.log('[4] --verify passes on a good backup, fails on a tampered one');
 r = run(['--verify', BK]);
 assert(r.code === 0 && /backup verifies/.test(r.out), '--verify passes on the fresh backup');
-assert(/all 4 file\(s\) match/.test(r.out), '--verify checked every manifest entry');
+assert(/all 6 file\(s\) match/.test(r.out), '--verify checked every manifest entry');
 
 // Corrupt one byte of the archive: verification must notice.
 const arcPath = join(BK, 'data.tar.gz');
@@ -278,18 +288,23 @@ assert(created.length === 1, `--exclude-archive created exactly one backup (got 
 const light = created[0];
 const meta6 = JSON.parse(readFileSync(join(DEST, light, 'BACKUP.json'), 'utf8'));
 assert(meta6.excludedArchive === true, 'BACKUP.json records that the archive was excluded');
-// The manifest must describe what the archive holds: an excluded subtree must
-// not be listed among the captured files either.
+assert(meta6.perFileManifest === false, 'BACKUP.json records the light tier writes no per-file manifest');
+// The light tier carries no per-file manifest entries at all: its integrity is
+// the archive hash (checked again below), and the excluded subtrees — the
+// archive itself AND the onchain pull cache — must be absent from the tarball.
 const man6 = readFileSync(join(DEST, light, 'MANIFEST.sha256'), 'utf8');
-assert(!/^[0-9a-f]+ {2}data\/archive\//m.test(man6), 'the manifest lists no excluded archive file');
-assert(/^[0-9a-f]+ {2}data\/trades\/trades\.jsonl$/m.test(man6), 'the manifest lists non-excluded files');
+assert(!/^[0-9a-f]{64} {2}/m.test(man6), 'the light manifest has no per-file hash entries');
+assert(/# archive-sha256 [0-9a-f]{64}/.test(man6), 'the light manifest still records the archive hash');
 const list2 = execFileSync('tar', ['-tzf', join(DEST, light, 'data.tar.gz')], { encoding: 'utf8' });
 assert(!/archive\/events/.test(list2), 'excluded archive segment is absent from the tarball');
+assert(!/onchain\/\.cache\//.test(list2), 'excluded onchain cache is absent from the tarball');
 assert(/trades\/trades\.jsonl/.test(list2), 'non-excluded data is still present');
+assert(/onchain\/dataset\.manifest\.json/.test(list2), 'onchain datasets (not the cache) stay in the light tier');
 // A light backup must still verify: excluding bytes is a packaging choice, not
 // permission to ship an archive that disagrees with its own manifest.
 r = run(['--verify', join(DEST, light)]);
 assert(r.code === 0, '--verify passes on an --exclude-archive backup');
+assert(/light tier/.test(r.out), 'verify names the light-tier manifest contract');
 
 // ── 7. live drift ───────────────────────────────────────────────────────────
 console.log('');
@@ -309,10 +324,10 @@ const drift = backups().filter((n) => !before7.has(n));
 assert(drift.length === 1, `the drift run created exactly one backup (got ${drift.length})`);
 const live = drift[0];
 const meta7 = JSON.parse(readFileSync(join(DEST, live, 'BACKUP.json'), 'utf8'));
-assert(meta7.fileCount === 4, `manifest still describes all captured files (${meta7.fileCount})`);
+assert(meta7.fileCount === 6, `manifest still describes all captured files (${meta7.fileCount})`);
 r = run(['--verify', join(DEST, live)]);
 assert(r.code === 0 && /backup verifies/.test(r.out), '--verify passes on the backup despite a newer live tree');
-assert(/all 4 file\(s\) match/.test(r.out), 'every captured file was checked');
+assert(/all 6 file\(s\) match/.test(r.out), 'every captured file was checked');
 
 // ── 8. the freshness verdict (issue #217) ───────────────────────────────────
 console.log('');

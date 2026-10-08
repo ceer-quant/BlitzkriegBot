@@ -473,6 +473,17 @@ async function openSourceMode(name: string, hint: string): Promise<void> {
   }
 }
 
+/** 手写包 → 蓝图编辑（用户裁决 2026-10-08）：手写 Lua 无法逆向成节点图
+ * （画布只表示蓝图编译产物），但「从零开始」不该让操作员自己去猜入口 ——
+ * 这里一键退出源码模式并载入示例模板，改名后保存就是一个新的、可进化的
+ * 蓝图包；原手写包保持原样，两包并存。 */
+function startBlueprintFromScratch(): void {
+  sourceMode.value = false
+  sourceNote.value = null
+  preloadError.value = null
+  loadStarter()
+}
+
 const sourceNote = ref<string | null>(null)
 
 function onSourceInput(): void {
@@ -561,6 +572,11 @@ function exitSourceMode(): void {
       </div>
       <AlertBanner v-if="sourceNote" tone="info" dismissible @dismiss="sourceNote = null">
         {{ sourceNote }}
+        <span class="mt-1 block text-[11px] leading-snug text-faint-fg">
+          手写源码不能逆向成画布节点图（画布只表示蓝图编译产物）。想用画布：点
+          「载入蓝图模板」从示例图起步，换个名字保存即是新的蓝图策略包，原包保持原样。
+        </span>
+        <Button variant="outline" size="sm" class="mt-2" @click="startBlueprintFromScratch">载入蓝图模板 → 画布编辑</Button>
       </AlertBanner>
       <AlertBanner
         v-if="sourceError"
