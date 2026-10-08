@@ -77,10 +77,12 @@ PF 路径全部伴随 net 大幅恶化：entry_price=0.50（train PF +43.4% 但 
 - **合法上探路径（未采纳，记录为证据）**：single_leg min_entry_price=0.60 单开 WR 70.99% / PF 1.2974（全量）——WR 与 PF 都创本语料新高但 net -20.6%，按「PF 或 net ≥+3%」规则走 PF 路径可采纳；combo 已含 0.60 且更平衡。距 PF 3 仍差 2.3×。
 - **结构性上限判断**：以 v2 语料的 microstructure（top 每 token ~60s、locked book 普遍、fee schedule 固定），65%/PF3 在当前策略族内不可达。更高的 PF 需要新的 alpha 结构（更长持有期的事件驱动方向性、或更细粒度的 book 数据喂给 book 类策略），均超出本 round 的 Charter（禁改 .lua/.rs）。
 
-## 5. 结构性发现（记档，修复属 Charter 外，未动 .rs/.lua）
+## 5. 结构性发现（记档；§5.1/§5.2 根因已由 fix/locked-top-book 修复——BOOKFIX）
 
 1. **v2 语料无 book 快照事件**（只有 `top`，per-token ~60s 一个；`feed.books=0`，tops 34,260/90h 段）。引擎 `update_top`（marketdata.rs）对 locked top（bb==ba，本语料普遍）先按 bid 清 asks 再按 ask 清 bids → 双边全清 → `mid_price=0` → 依赖 `mid>0` 的 book 类策略（spread_arb tracker、lua_momentum classify）状态机永不推进 = 结构性 0 信号。交易组（pair/single_leg/oracle）用 best_ask（locked 时幸存）故能交易。**修复需动 .rs/.lua，本 round 不做。**
+   > **【已修复，见 BOOKFIX.md / PR fix/locked-top-book】**：`update_top` 改为 inclusive bounds——locked top 双边保留共享价位、mid=该价；crossed 输入显式 clamp，snapshot 永不呈现 crossed spread。8 个新测试锁定语义。复活实证（train 中段 5×20K 切片，base→fixed）：spread_arb 0→782 closed、lua_momentum 0→5,687 closed。逐位回归红线：pair_discount_arb / single_leg_pair 全量 8/8 分块 trades JSON 与修复前全等（4,921 / 3,675 笔）。本 round §1–§3 的「结构性零信号」记录自此由数据层断供改为已修复；本 PR 的 default 变更（§7）不受影响（成交流逐位一致）。
 2. **0.00 价格 intent → 内核 physics 除零 panic**（rust_decimal Division by zero，进程崩溃）。诊断期间由 throwaway 策略包触发；建议内核对 price<=0 的 intent 在 LEGALITY gate 拒绝。
+   > **【已修复，#406】**：panic 实际位置不在 physics（`apply_physics` 只有乘法）也不在 LEGALITY gate，而在更早的 execution-policy Place 臂 `budget_usd / req.price`（service.rs，policy verdict 先于 Gate 1 执行）。修复：placement loop 头部对 `Buy && price<=0` entry fail-closed 拒绝（error 日志 + `illegalPriceRejected` 计数器 + per-strategy `illegal.price` 归因桶 + panic 回归测试）。
 3. `--backtest-knob` 的域校验与 #401 声明一致工作；`--enable-strategy` 需重复 flag 传多策略（单 arg 逗号串不解析）。
 
 ## 6. 复算路径

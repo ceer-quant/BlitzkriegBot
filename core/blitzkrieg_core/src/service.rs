@@ -3749,6 +3749,36 @@ impl Core {
         // behavior-free by charter (deviation disclosed in the PR body).
         for (token, mut req) in tokens {
             let name = req.strategy.clone();
+            // ── #406: the zero/negative-price fail-closed guard — the FIRST
+            // placement gate, before the policy arm. A strategy that names a
+            // price <= 0 on an entry is a malformed intent (a prediction
+            // market has no legal quote at or below zero), and every price
+            // the ticket touches downstream DIVIDES by it: the policy's
+            // budget shrink (`budget_usd / req.price`, service.rs Place arm)
+            // is the earliest such division, and a zero price PANICKED the
+            // process there (rust_decimal Division by zero) before the
+            // arbitration Gate 1 price-band check — which would have refused
+            // this intent — ever ran. Fail closed instead: the entry is
+            // refused with its own counter and cause bucket, the process
+            // keeps running, and the audit trail names the strategy.
+            // Closing intents are exempt: an exit prices off the book and
+            // position state, never off the strategy's entry quote, and a
+            // held position must always be closable.
+            if req.side == crate::model::Side::Buy && req.price <= Decimal::ZERO {
+                tracing::error!(target: "strategy",
+                    "entry rejected: strategy={name} cause=illegal.price token={} price={} — \
+                     non-positive entry price is refused fail-closed (#406): it would divide \
+                     by zero in sizing/policy/physics",
+                    req.token_id, req.price);
+                self.stats.place_rejected += 1;
+                self.stats.illegal_price_rejected += 1;
+                let acc = self.strategy_accounting.entry(name).or_default();
+                acc.rejected += 1;
+                *acc.rejection_causes
+                    .entry("illegal.price".to_string())
+                    .or_default() += 1;
+                continue;
+            }
             // ── #363: account-level cooldown gate. A rule that returned
             // `Cooldown` last cycle parked the ACCOUNT here for N seconds:
             // every entry this account names is refused until the clock runs
@@ -4627,6 +4657,7 @@ impl Core {
             "placeRejected": self.stats.place_rejected,
             "strategyLimitRejected": self.stats.strategy_limit_rejected,
             "venueRejected": self.stats.venue_rejected,
+            "illegalPriceRejected": self.stats.illegal_price_rejected,
             // #180: the ONE panel-visible error slot — structured (code + when +
             // what), written by every internal refusal path, and read by the
             // panel's error banner. `code` is the same `CoreErrorCode`
@@ -9676,6 +9707,10 @@ struct CoreStats {
     strategy_limit_rejected: u64,
     /// Orders the LIVE venue refused (place path), session-scoped.
     venue_rejected: u64,
+    /// #406: entry intents refused fail-closed for a non-positive price
+    /// (a prediction market has no legal quote <= 0; the ticket's sizing,
+    /// policy and physics paths all divide by the price). Session-scoped.
+    illegal_price_rejected: u64,
 }
 
 /// Backoff bookkeeping for one placement intent. Backoff is exponential from
@@ -11983,6 +12018,101 @@ mod strategy_dispatch_tests {
         let mut m = MutableParams::new();
         m.set_strategy(strategy, p);
         m
+    }
+
+    // ── #406: the zero-price fail-closed guard ──────────────────────────────
+
+    /// A dip probe whose `buy_below` threshold is 0: ANY fresh book (even a
+    /// mid of 0.00) arms an entry priced at that mid. A book whose sides are
+    /// both empty prices the signal at 0.00 — the exact intent shape that
+    /// PANICKED the kernel at the policy budget-shrink division
+    /// (`budget_usd / req.price`) before arbitration Gate 1 could refuse it.
+    /// The guard refuses the intent fail-closed: counted, bucketed, logged,
+    /// and the process survives (0 orders placed, no panic).
+    #[test]
+    fn zero_price_entry_is_refused_fail_closed_not_a_panic() {
+        let mut c = Core::new(CoreConfig {
+            dry_seed_balance: dec!(1000),
+            engine_enabled: true,
+            round_duration_sec: 900,
+            auto_exits_enabled: false,
+            assets: vec!["BTC".into()],
+            positions: crate::position::PositionConfig {
+                max_positions: 5,
+                exit: crate::exit_policy::ExitConfig {
+                    min_time_left_sec: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let cfg = c.config().engine_config();
+        let mut eng = Engine::new(cfg.clone());
+        crate::strategies::test_support::host(&mut eng, cfg.trend, cfg.spread_arb);
+        eng.register_user_strategy(
+            Box::new(TargetDip {
+                name: "zero_dip".to_string(),
+                buy_below: Decimal::ZERO,
+                assets: vec!["BTC".to_string()],
+                gates: crate::strategies::GateExemptions::none(),
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(eng.set_strategy_enabled("zero_dip", true));
+        c.enable_engine(eng);
+
+        let now = 1_000_000i64;
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: three_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
+        // An ask-only book on the BTC up token: fresh (timestamp is now) and
+        // NON-empty (so fresh_book serves it), but with no bid the F6 rule
+        // prices the mid at 0.00 — the one-sided shape a top-only feed
+        // degrades into, and the exact intent shape that PANICKED the kernel
+        // at the policy budget-shrink division before this guard existed.
+        c.engine_on_data(
+            DataEvent::Book {
+                token_id: "btc_up".into(),
+                bids: vec![],
+                asks: vec![(dec!(0.60), dec!(100))],
+                now_ms: now + 1_000,
+            },
+            now + 1_000,
+        );
+        // The evaluate itself must not panic — this is the regression the
+        // test exists for (pre-guard this panicked inside the policy arm).
+        let placed = c.engine_evaluate(now + 1_100);
+        assert_eq!(placed, 0, "a 0.00-price entry must be refused, not placed");
+        assert!(
+            c.list_orders().is_empty(),
+            "no order may reach the book: {:#?}",
+            c.list_orders()
+        );
+        let stats = c.engine_stats();
+        assert_eq!(
+            stats["illegalPriceRejected"], 1,
+            "the guard counts the refusal: {stats}"
+        );
+        assert_eq!(
+            stats["placeRejected"], 1,
+            "and it counts as a place rejection"
+        );
+        // The per-strategy accounting carries the cause bucket.
+        let rows = c.strategy_stats();
+        let row = rows
+            .iter()
+            .find(|r| r["name"] == "zero_dip")
+            .expect("the strategy's accounting row");
+        assert_eq!(
+            row["rejectionCauses"]["illegal.price"], 1,
+            "bucketed under illegal.price: {row}"
+        );
     }
 
     // ── E4-a: startup strategy selection ────────────────────────────────────
