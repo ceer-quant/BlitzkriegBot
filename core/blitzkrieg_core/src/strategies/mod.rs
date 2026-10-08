@@ -166,6 +166,27 @@ pub struct StrategyExitIntent {
     pub reason: String,
 }
 
+/// A position slice the host hands a strategy for one evaluation cycle —
+/// THIS strategy's open positions only (the engine filters by strategy name
+/// before constructing the view). Enough to see a partially-filled leg's
+/// shortfall against its pair attempt (the gap-fill loop), not enough to
+/// touch another strategy's book.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldPosition {
+    /// Owning strategy — `evaluate` slices the host's flat view by this, so a
+    /// package's `bk.holdings()` never shows another package's book.
+    pub strategy: String,
+    pub condition_id: String,
+    pub token_id: String,
+    /// "up" | "down" — the leg label the wire uses everywhere else.
+    pub direction: String,
+    /// Shares currently held, as a decimal string (the wire rule).
+    pub shares: String,
+    pub entry_price: String,
+    /// The round slot this position belongs to (a 15-minute wheel round).
+    pub round_slot: i64,
+}
+
 /// Read-only host market view handed to a strategy for one evaluation cycle.
 pub struct StrategyCtx<'a> {
     markets: &'a [CryptoMarket],
@@ -173,6 +194,11 @@ pub struct StrategyCtx<'a> {
     time_left_sec: i64,
     now_ms: i64,
     fresh_book: &'a dyn Fn(&str) -> Option<OrderbookSnapshot>,
+    /// THIS strategy's open positions, as of the start of this cycle. Empty
+    /// unless the host pushes one (`Engine::set_positions_view`) — every
+    /// existing call site keeps the old shape, and strategies that never read
+    /// the view cost nothing.
+    held_positions: &'a [HeldPosition],
 }
 
 impl<'a> StrategyCtx<'a> {
@@ -189,7 +215,16 @@ impl<'a> StrategyCtx<'a> {
             time_left_sec,
             now_ms,
             fresh_book,
+            held_positions: &[],
         }
+    }
+
+    /// The full constructor: same view plus THIS strategy's open positions
+    /// (the gap-fill surface). The engine's real evaluation cycle is the only
+    /// production caller.
+    pub fn with_positions(mut self, held: &'a [HeldPosition]) -> Self {
+        self.held_positions = held;
+        self
     }
 
     /// Markets of the current round.
@@ -204,6 +239,11 @@ impl<'a> StrategyCtx<'a> {
     }
     pub fn now_ms(&self) -> i64 {
         self.now_ms
+    }
+    /// THIS strategy's open positions for this cycle. Empty when the host did
+    /// not push a view (diagnostics paths, shadow twins).
+    pub fn held_positions(&self) -> &[HeldPosition] {
+        self.held_positions
     }
     /// Token book, but only while it is fresh enough to price off.
     pub fn fresh_book(&self, token_id: &str) -> Option<OrderbookSnapshot> {
@@ -353,5 +393,36 @@ pub trait EngineStrategy: Send + Sync {
     /// forever.
     fn poison_alert(&mut self) -> Option<String> {
         None
+    }
+}
+
+#[cfg(test)]
+mod held_position_tests {
+    use super::*;
+
+    /// The ctx's position view is exactly what the host pushed — no strategy
+    /// slicing, no re-derivation. Slicing happens in the ENGINE (engine.rs
+    /// filters by strategy name before calling `find_candidates`), so the
+    /// builder contract is: `new()` = empty, `with_positions` = the slice.
+    #[test]
+    fn ctx_positions_default_empty_and_builder_installs_the_slice() {
+        let markets: Vec<crate::model::CryptoMarket> = Vec::new();
+        let fresh = |_: &str| None;
+        let ctx = StrategyCtx::new(&markets, 1, 60, 1_000, &fresh);
+        assert!(ctx.held_positions().is_empty(), "default view is empty");
+
+        let held = vec![HeldPosition {
+            strategy: "pair_discount_arb".into(),
+            condition_id: "cond".into(),
+            token_id: "tok".into(),
+            direction: "up".into(),
+            shares: "3.00".into(),
+            entry_price: "0.42".into(),
+            round_slot: 7,
+        }];
+        let ctx = StrategyCtx::new(&markets, 1, 60, 1_000, &fresh).with_positions(&held);
+        assert_eq!(ctx.held_positions().len(), 1);
+        assert_eq!(ctx.held_positions()[0].token_id, "tok");
+        assert_eq!(ctx.held_positions()[0].shares, "3.00");
     }
 }

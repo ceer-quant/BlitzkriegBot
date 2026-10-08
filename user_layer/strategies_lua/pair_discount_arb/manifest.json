@@ -1,11 +1,11 @@
 {
   "name": "pair_discount_arb",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "6faa20cc7832493d13d41689f6becff3b520f8341e6781125e81738ba3a782d1",
+  "sha256": "78e5e995bbdad95f402f18afc554a91ef7b6d0bc8f7ca01cea8e153cfbc44e87",
   "author": "BlitzkriegBot",
-  "description": "Pair-discount collector for binary rounds (@almach mechanism): when ask_UP + ask_DOWN + entry taker fees < 0.995, buy BOTH legs at their asks with EQUAL declared share counts and collect by merging the complete pairs into $1.00/pair of collateral. Profit is locked at entry; the exit is a collection, not a decision — the kernel intercepts the strategy's merge intents before the sell ladder. Fees priced from bk.fees() (the kernel's ONE schedule); no schedule in force means no entries. Signal-only: the kernel adjudicates, sizes, gates, merges and settles every intent.",
+  "description": "Pair-discount collector for binary rounds (@almach mechanism): when ask_UP + ask_DOWN + entry taker fees < max_pair_cost, buy BOTH legs at their asks with EQUAL declared share counts and collect by merging the complete pairs into $1.00/pair of collateral. Profit is locked at entry; the exit is a collection, not a decision — the kernel intercepts the strategy's merge intents before the sell ladder. v1.1 adds the GAP-FILL loop: a partially-filled leg is topped up at its current ask (shortfall = counterpart holding − held, priced ask+fee vs $1 via max_top_up_cost) so partial fills no longer strand a naked remainder at settlement. Fees priced from bk.fees(); no schedule in force means no entries. Signal-only: the kernel adjudicates, sizes, gates, merges and settles every intent.",
   "holds_to_settlement": true,
   "gate_exemptions": {
     "timing": true,
@@ -42,6 +42,12 @@
       "default": "30",
       "min": "0",
       "max": "300"
+    },
+    "max_top_up_cost": {
+      "type": "decimal",
+      "default": "0.995",
+      "min": "0.98",
+      "max": "0.999"
     }
   },
   "modes": [

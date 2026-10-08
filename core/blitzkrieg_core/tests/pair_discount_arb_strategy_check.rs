@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 
 use blitzkrieg_core::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
-use blitzkrieg_core::strategies::{EngineStrategy, StrategyCtx, StrategyExitIntent};
+use blitzkrieg_core::strategies::{EngineStrategy, HeldPosition, StrategyCtx, StrategyExitIntent};
 use blitzkrieg_core::strategy_engine::lua_loader::{LuaEngineAdapter, load_lua_package};
 use blitzkrieg_lua_runtime::FeeScheduleView;
 use rust_decimal::Decimal;
@@ -332,4 +332,55 @@ fn the_seal_no_sells_no_breaks_even_while_firing() {
         a.take_breaks().is_empty(),
         "no resting order exists to break"
     );
+}
+
+// ── gap-fill ────────────────────────────────────────────────────────────────
+
+/// A partially-filled leg is topped up to its counterpart at the CURRENT ask:
+/// arms a pair, then re-evaluates with a holdings slice showing the UP leg
+/// fully held (3.0) and the DOWN leg missing — the gap-fill branch must emit
+/// ONE top-up entry on the DOWN leg at its own ask (ask + fee < $1), tagged
+/// with the shortfall reason. The collection merge intents still fire.
+#[test]
+fn a_partially_filled_leg_is_topped_up_to_its_counterpart() {
+    let mut a = adapter();
+    let fresh = pair_fresh(
+        Some((dec!(0.48), dec!(600))),
+        Some((dec!(0.45), dec!(600))),
+        NOW,
+    );
+    let markets = vec![market()];
+    // Pass 1: arm the pair (holdings empty).
+    let got = candidates_of(&mut a, &markets, 600, NOW, &fresh);
+    assert_eq!(got.len(), 2, "arming pass emits both legs");
+    // Pass 2: the UP leg filled, the DOWN leg did not.
+    let held = vec![HeldPosition {
+        strategy: "pair_discount_arb".into(),
+        condition_id: COND.into(),
+        token_id: UP.into(),
+        direction: "up".into(),
+        shares: "3.0".into(),
+        entry_price: "0.48".into(),
+        round_slot: NOW / 300_000,
+    }];
+    let ctx2 =
+        StrategyCtx::new(&markets, NOW / 300_000, 500, NOW + 1_000, &fresh).with_positions(&held);
+    let got2 = a.find_candidates(&ctx2);
+    assert_eq!(got2.len(), 1, "one top-up for the short leg, got {got2:?}");
+    let sig = &got2[0];
+    assert_eq!(sig.token_id, DOWN, "the SHORT leg is topped up");
+    assert_eq!(sig.price, dec!(0.45), "top-up prices the CURRENT ask");
+    assert_eq!(
+        sig.shares,
+        Some(dec!(3.00)),
+        "top-up covers the full shortfall"
+    );
+    assert!(
+        sig.reason.contains("gap-fill"),
+        "reason names the gap: {}",
+        sig.reason
+    );
+    // Collection still fires for the complete pairs already held.
+    let exits = drain_exits(&mut a);
+    assert_eq!(exits.len(), 2, "merge intents per leg, got {exits:?}");
 }
