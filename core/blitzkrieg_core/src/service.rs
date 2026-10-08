@@ -5157,7 +5157,7 @@ impl Core {
             self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
             // The rejected entry never rested: its token may be re-attempted.
             if let Some(engine) = self.engine.as_mut() {
-                engine.release_pending_token(&o.token_id);
+                engine.release_pending_token_for_strategy(&o.strategy, &o.token_id);
             }
             self.emit_order(id);
             let e = err.unwrap_or_else(|| {
@@ -7906,7 +7906,10 @@ impl Core {
                                     // The refused FOK never rested: its token may
                                     // be re-attempted on a refreshed book.
                                     if let Some(engine) = self.engine.as_mut() {
-                                        engine.release_pending_token(&order.token_id);
+                                        engine.release_pending_token_for_strategy(
+                                            &order.strategy,
+                                            &order.token_id,
+                                        );
                                     }
                                     // into the one error slot, reaches Node as an
                                     // Event::Error, lands in the log at error level and
@@ -8184,7 +8187,7 @@ impl Core {
         // entry leaves no resting order behind, so a later cycle may re-attempt
         // (the strategy's own latch still bounds it to one attempt per book).
         if was_live && let Some(engine) = self.engine.as_mut() {
-            engine.release_pending_token(&order.token_id);
+            engine.release_pending_token_for_strategy(&order.strategy, &order.token_id);
         }
         // Replay fast path: a live order just left the book — the escalation
         // sweep and the audit input changed.

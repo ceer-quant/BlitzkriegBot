@@ -1428,6 +1428,28 @@ impl Engine {
         self.pending_tokens.remove(token_id);
     }
 
+    /// The release above, scoped to the strategy that placed the order: a
+    /// hold-to-settlement strategy (the pair packages) needs the gate reopened
+    /// when its leg goes terminal — its gap-fill loop is the legitimate
+    /// re-entry. Every other strategy may EXIT mid-round and re-enter, and the
+    /// historic one-entry-per-token-per-round discipline is what keeps that
+    /// re-entry from churning the book: spread_arb measured WORSE on the
+    /// frozen exit-economics windows the moment terminal releases applied to
+    /// it (12→13, 6→9, 13→15 closes, all three nets down). The unscoped
+    /// release stays public for the TEST-ONLY callers that assert the
+    /// mechanism. Returns whether the suppression was actually lifted.
+    pub fn release_pending_token_for_strategy(&mut self, strategy: &str, token_id: &str) -> bool {
+        let is_holder = self
+            .strategies
+            .iter()
+            .any(|s| s.strategy.name() == strategy && s.strategy.holds_to_settlement());
+        if is_holder {
+            self.pending_tokens.remove(token_id)
+        } else {
+            false
+        }
+    }
+
     /// Drain strategy close intents gathered during the latest evaluate(). The
     /// host routes these into the same exit-submission path as policy exits.
     pub fn drain_strategy_exits(&mut self) -> Vec<StrategyExitIntent> {
@@ -1829,6 +1851,70 @@ mod tests {
         assert!(
             e.has_standing_candidates(),
             "the released token's candidate is standing again"
+        );
+    }
+
+    /// The service-facing release is scoped to the STRATEGY that placed the
+    /// order: a hold-to-settlement package gets its token re-opened (the
+    /// gap-fill loop), a mid-round-exiting strategy does not (the historic
+    /// one-entry-per-token-per-round discipline — the exit-economics windows
+    /// degraded the moment spread_arb could re-enter after a terminal order).
+    #[test]
+    fn the_scoped_release_opens_holder_tokens_but_not_plain_strategies() {
+        struct PlainHolder {
+            name: String,
+            holds: bool,
+        }
+        impl EngineStrategy for PlainHolder {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn on_book(&mut self, _: &str, _: &crate::model::OrderbookSnapshot, _: i64) {}
+            fn on_round(&mut self, _: i64, _: i64, _: i64) {}
+            fn gate_exemptions(&self) -> GateExemptions {
+                GateExemptions::none()
+            }
+            fn find_candidates(&mut self, _ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
+                Vec::new()
+            }
+            fn holds_to_settlement(&self) -> bool {
+                self.holds
+            }
+        }
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(PlainHolder {
+                name: "plain".into(),
+                holds: false,
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        e.register_user_strategy(
+            Box::new(PlainHolder {
+                name: "pair_like".into(),
+                holds: true,
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        e.note_order_placed("tok_plain");
+        e.note_order_placed("tok_pair");
+        assert!(
+            !e.release_pending_token_for_strategy("plain", "tok_plain"),
+            "no release for a non-holder: the suppression stands"
+        );
+        assert!(
+            e.pending_tokens.contains("tok_plain"),
+            "the plain strategy's token stays latched"
+        );
+        assert!(
+            e.release_pending_token_for_strategy("pair_like", "tok_pair"),
+            "a hold-to-settlement package's token is released"
+        );
+        assert!(
+            !e.pending_tokens.contains("tok_pair"),
+            "the holder's token re-opens"
         );
     }
 
