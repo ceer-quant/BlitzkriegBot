@@ -24,7 +24,9 @@ use crate::marketdata::LocalBook;
 use crate::model::{CryptoMarket, OrderbookSnapshot, Side, SignalDirection};
 use crate::scanner::{Scanner, ScannerConfig};
 use crate::signal::{PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig};
-use crate::strategies::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent};
+use crate::strategies::{
+    EngineStrategy, GateExemptions, HeldPosition, StrategyCtx, StrategyExitIntent,
+};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 
@@ -380,6 +382,13 @@ pub struct Engine {
     /// Strategy close intents gathered during the latest evaluate(), drained by
     /// the host (`Core`) into its shared exit-submission path.
     strategy_exits: Vec<StrategyExitIntent>,
+    /// THIS cycle's open positions, pushed by the host before each evaluation
+    /// (the pair gap-fill surface, the same shape as `set_equity_usd`'s host
+    /// push). One flat list spanning every strategy: `evaluate` slices it per
+    /// strategy before the ctx is built, so a strategy can only ever see its
+    /// own book. Empty until the host pushes — every diagnostic path keeps
+    /// today's shape.
+    positions_view: Vec<HeldPosition>,
     /// The account's cash equity, pushed by the host before each evaluation
     /// (#202). ZERO = not (yet) supplied. Only the equity-relative sizing reads
     /// it: with `size_pct = 0` the engine's tickets do not depend on this at
@@ -420,6 +429,7 @@ impl Engine {
             hot_params: None,
             strategies,
             strategy_exits: Vec::new(),
+            positions_view: Vec::new(),
             cfg,
             equity_usd: Decimal::ZERO,
             size_pct_skipped: 0,
@@ -436,6 +446,16 @@ impl Engine {
     /// about.
     pub fn set_equity_usd(&mut self, equity: Decimal) {
         self.equity_usd = equity;
+    }
+
+    /// The open-position snapshot the NEXT evaluation's ctx carries (the pair
+    /// gap-fill surface). The host pushes the full list — every strategy, the
+    /// shared PositionManager's current book — and `evaluate` slices it per
+    /// strategy, so one strategy never sees another's positions. Stale between
+    /// pushes by design: a cycle's view is the book as of its own start, the
+    /// same consistency the books and equity in that ctx have.
+    pub fn set_positions_view(&mut self, positions: Vec<HeldPosition>) {
+        self.positions_view = positions;
     }
 
     pub fn equity_usd(&self) -> Decimal {
@@ -772,15 +792,25 @@ impl Engine {
             let fresh = |token: &str| {
                 fresh_book(&self.books, token, now_ms, self.cfg.max_orderbook_stale_ms)
             };
-            let ctx = StrategyCtx::new(
-                self.scanner.markets(),
-                round.slot,
-                round.time_left_sec,
-                now_ms,
-                &fresh,
-            );
+            // The host-pushed position snapshot, sliced per strategy inside the
+            // loop: each strategy's ctx carries ONLY its own positions, so one
+            // package can never read another's book through `bk.holdings()`.
             for s in self.strategies.iter_mut() {
                 if s.enabled {
+                    let held: Vec<HeldPosition> = self
+                        .positions_view
+                        .iter()
+                        .filter(|p| p.strategy == s.strategy.name())
+                        .cloned()
+                        .collect();
+                    let ctx = StrategyCtx::new(
+                        self.scanner.markets(),
+                        round.slot,
+                        round.time_left_sec,
+                        now_ms,
+                        &fresh,
+                    )
+                    .with_positions(&held);
                     candidates.extend(s.strategy.find_candidates(&ctx));
                     // Close intents accumulate regardless of the entry timing
                     // gate: an open position's exit is never round-timing-gated.
@@ -1389,6 +1419,37 @@ impl Engine {
         self.pending_tokens.insert(token_id.to_string());
     }
 
+    /// Release the repeat-suppression on a token whose entry order reached a
+    /// terminal state (filled, cancelled, rejected). The suppression exists to
+    /// stop duplicate RESTING orders, not to pin the round: a partially-filled
+    /// leg that ended its order is exactly the gap a strategy may need to top
+    /// up this same round. No-op for a token that never had an order.
+    pub fn release_pending_token(&mut self, token_id: &str) {
+        self.pending_tokens.remove(token_id);
+    }
+
+    /// The release above, scoped to the strategy that placed the order: a
+    /// hold-to-settlement strategy (the pair packages) needs the gate reopened
+    /// when its leg goes terminal — its gap-fill loop is the legitimate
+    /// re-entry. Every other strategy may EXIT mid-round and re-enter, and the
+    /// historic one-entry-per-token-per-round discipline is what keeps that
+    /// re-entry from churning the book: spread_arb measured WORSE on the
+    /// frozen exit-economics windows the moment terminal releases applied to
+    /// it (12→13, 6→9, 13→15 closes, all three nets down). The unscoped
+    /// release stays public for the TEST-ONLY callers that assert the
+    /// mechanism. Returns whether the suppression was actually lifted.
+    pub fn release_pending_token_for_strategy(&mut self, strategy: &str, token_id: &str) -> bool {
+        let is_holder = self
+            .strategies
+            .iter()
+            .any(|s| s.strategy.name() == strategy && s.strategy.holds_to_settlement());
+        if is_holder {
+            self.pending_tokens.remove(token_id)
+        } else {
+            false
+        }
+    }
+
     /// Drain strategy close intents gathered during the latest evaluate(). The
     /// host routes these into the same exit-submission path as policy exits.
     pub fn drain_strategy_exits(&mut self) -> Vec<StrategyExitIntent> {
@@ -1583,6 +1644,7 @@ mod tests {
     use crate::risk::RiskConfig;
     use crate::service::{Core, CoreConfig};
     use rust_decimal_macros::dec;
+    use std::sync::{Arc, Mutex};
 
     fn cfg() -> EngineConfig {
         EngineConfig {
@@ -1677,6 +1739,196 @@ mod tests {
         // Enabling the (non-holder) dip buyer vetoes the fast path.
         assert!(e.set_strategy_enabled("spread_arb", true));
         assert!(!e.all_strategies_hold_to_settlement());
+    }
+
+    /// The host-pushed position view is sliced PER STRATEGY inside `evaluate`:
+    /// each strategy's `StrategyCtx::held_positions` carries only rows whose
+    /// `strategy` names it — a package can never read another package's book
+    /// through the view (the `bk.holdings()` isolation contract).
+    #[test]
+    fn evaluate_slices_the_position_view_by_strategy_name() {
+        struct HoldingsProbe {
+            name: &'static str,
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        impl EngineStrategy for HoldingsProbe {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _n: i64) {}
+            fn on_round(&mut self, _slot: i64, _left: i64, _now: i64) {}
+            fn find_candidates(
+                &mut self,
+                ctx: &StrategyCtx<'_>,
+            ) -> Vec<crate::signal::TradeSignal> {
+                let tokens: Vec<String> = ctx
+                    .held_positions()
+                    .iter()
+                    .map(|p| p.token_id.clone())
+                    .collect();
+                self.seen.lock().unwrap().push(tokens.join(","));
+                Vec::new()
+            }
+        }
+
+        let seen_a = Arc::new(Mutex::new(Vec::new()));
+        let seen_b = Arc::new(Mutex::new(Vec::new()));
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(HoldingsProbe {
+                name: "probe_a",
+                seen: Arc::clone(&seen_a),
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        e.register_user_strategy(
+            Box::new(HoldingsProbe {
+                name: "probe_b",
+                seen: Arc::clone(&seen_b),
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        e.set_strategy_enabled("probe_a", true);
+        e.set_strategy_enabled("probe_b", true);
+        e.set_positions_view(vec![
+            HeldPosition {
+                strategy: "probe_a".into(),
+                condition_id: "cond".into(),
+                token_id: "tok_a".into(),
+                direction: "up".into(),
+                shares: "1.00".into(),
+                entry_price: "0.42".into(),
+                round_slot: 1,
+            },
+            HeldPosition {
+                strategy: "probe_b".into(),
+                condition_id: "cond".into(),
+                token_id: "tok_b".into(),
+                direction: "down".into(),
+                shares: "2.00".into(),
+                entry_price: "0.44".into(),
+                round_slot: 1,
+            },
+        ]);
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: 1_000,
+        });
+        e.evaluate(1_000);
+        assert_eq!(
+            *seen_a.lock().unwrap(),
+            vec!["tok_a".to_string()],
+            "probe_a sees only its own position"
+        );
+        assert_eq!(
+            *seen_b.lock().unwrap(),
+            vec!["tok_b".to_string()],
+            "probe_b sees only its own position"
+        );
+    }
+
+    /// `release_pending_token` re-opens a token the kernel had suppressed:
+    /// a partially-filled leg whose entry order ended may signal again THIS
+    /// round (the gap-fill loop). Verified through the public surface: after
+    /// `note_order_placed`, a standing candidate on the token does not count
+    /// as standing; after the release, it does.
+    #[test]
+    fn release_pending_token_reopens_the_gate_after_a_terminal_order() {
+        let mut e = Engine::new(cfg());
+        e.note_order_placed("tok_gap");
+        e.note_order_placed("tok_resting");
+        // Both tokens suppressed: a standing set that references them is
+        // entirely suppressed → `has_standing_candidates` is false.
+        e.last_candidates = vec![test_signal("tok_gap"), test_signal("tok_resting")];
+        assert!(
+            !e.has_standing_candidates(),
+            "every candidate's token has a live entry order"
+        );
+        // The terminal-order release: only the named token re-opens.
+        e.release_pending_token("tok_gap");
+        assert!(
+            e.has_standing_candidates(),
+            "the released token's candidate is standing again"
+        );
+    }
+
+    /// The service-facing release is scoped to the STRATEGY that placed the
+    /// order: a hold-to-settlement package gets its token re-opened (the
+    /// gap-fill loop), a mid-round-exiting strategy does not (the historic
+    /// one-entry-per-token-per-round discipline — the exit-economics windows
+    /// degraded the moment spread_arb could re-enter after a terminal order).
+    #[test]
+    fn the_scoped_release_opens_holder_tokens_but_not_plain_strategies() {
+        struct PlainHolder {
+            name: String,
+            holds: bool,
+        }
+        impl EngineStrategy for PlainHolder {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn on_book(&mut self, _: &str, _: &crate::model::OrderbookSnapshot, _: i64) {}
+            fn on_round(&mut self, _: i64, _: i64, _: i64) {}
+            fn gate_exemptions(&self) -> GateExemptions {
+                GateExemptions::none()
+            }
+            fn find_candidates(&mut self, _ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
+                Vec::new()
+            }
+            fn holds_to_settlement(&self) -> bool {
+                self.holds
+            }
+        }
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(PlainHolder {
+                name: "plain".into(),
+                holds: false,
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        e.register_user_strategy(
+            Box::new(PlainHolder {
+                name: "pair_like".into(),
+                holds: true,
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        e.note_order_placed("tok_plain");
+        e.note_order_placed("tok_pair");
+        assert!(
+            !e.release_pending_token_for_strategy("plain", "tok_plain"),
+            "no release for a non-holder: the suppression stands"
+        );
+        assert!(
+            e.pending_tokens.contains("tok_plain"),
+            "the plain strategy's token stays latched"
+        );
+        assert!(
+            e.release_pending_token_for_strategy("pair_like", "tok_pair"),
+            "a hold-to-settlement package's token is released"
+        );
+        assert!(
+            !e.pending_tokens.contains("tok_pair"),
+            "the holder's token re-opens"
+        );
+    }
+
+    fn test_signal(token: &str) -> TradeSignal {
+        TradeSignal {
+            strategy: "probe".into(),
+            asset: "BTC".into(),
+            direction: SignalDirection::Up,
+            token_id: token.into(),
+            condition_id: "cond".into(),
+            price: dec!(0.42),
+            reason: "test".into(),
+            shares: None,
+        }
     }
 
     #[test]

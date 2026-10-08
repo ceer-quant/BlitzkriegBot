@@ -99,6 +99,22 @@ pub struct FreshBook {
     pub fresh: bool,
 }
 
+/// One open position of THIS strategy, as delivered to `on_holdings`. Decimal
+/// STRINGS on the wire rule; `round_slot` is the 15-minute wheel round the
+/// position belongs to.
+#[derive(Debug, Clone, Default)]
+pub struct HoldingView {
+    /// Owning strategy (the filter the host applied — always this strategy).
+    pub strategy: String,
+    pub condition_id: String,
+    pub token_id: String,
+    /// "up" | "down".
+    pub direction: String,
+    pub shares: String,
+    pub entry_price: String,
+    pub round_slot: i64,
+}
+
 /// An entry intent. `price` is a LIMIT price as an exact decimal string; the
 /// kernel validates against the live book, sizes the order and owns submission.
 /// `shares` (OPTIONAL decimal string) requests an explicit share count instead
@@ -192,6 +208,15 @@ pub trait SafeStrategy: Send + 'static {
 
     /// Called when a round starts. Default: no-op.
     fn on_round(&mut self, _round: RoundInfo) {}
+
+    /// Called before every `evaluate` with THIS strategy's open positions —
+    /// the host's PositionManager view filtered to the strategy's own book
+    /// (`strategy` field equals this strategy's name). Strategies that size
+    /// against what they already hold (pair gap-fill, inventory caps) read it
+    /// instead of tracking fills themselves; it is a snapshot, not a stream:
+    /// fills reported after the cycle started appear next cycle. Default: no-op
+    /// (a strategy that never reads it costs nothing).
+    fn on_holdings(&mut self, _holdings: &[HoldingView]) {}
 
     /// Produce this cycle's intents. REQUIRED.
     fn evaluate(&mut self, ctx: &RoundContext) -> Intents;

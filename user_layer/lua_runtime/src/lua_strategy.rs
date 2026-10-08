@@ -18,8 +18,8 @@
 use std::sync::{Arc, Mutex};
 
 use blitzkrieg_strategy_api::{
-    BookUpdate, Break, Entry, Exit, FreshBook, Intents, Kline, ParamBag, RoundContext, RoundInfo,
-    SafeStrategy, StrategyMode,
+    BookUpdate, Break, Entry, Exit, FreshBook, HoldingView, Intents, Kline, ParamBag, RoundContext,
+    RoundInfo, SafeStrategy, StrategyMode,
 };
 use mlua::Value;
 
@@ -181,6 +181,15 @@ impl SafeStrategy for LuaStrategy {
             for fb in books {
                 st.put_book(fb.book.clone(), Some(fb.fresh));
             }
+        }
+    }
+
+    fn on_holdings(&mut self, holdings: &[HoldingView]) {
+        // Mirror of `on_eval_books`: overwrite the snapshot so `bk.holdings()`
+        // is authoritative for THIS evaluation cycle. Data-only — there is no
+        // Lua entry point for this hook (a position change is not a signal).
+        if let Ok(mut st) = self.state.lock() {
+            st.holdings = holdings.to_vec();
         }
     }
 
@@ -378,6 +387,51 @@ mod tests {
         assert_eq!(intents.entries[0].shares.as_deref(), Some("10"));
         assert_eq!(intents.exits.len(), 1);
         assert_eq!(intents.breaks.len(), 1);
+        let h = s.health.lock().expect("health");
+        assert!(h.last_error.is_none());
+    }
+
+    /// `on_holdings` pushes THIS strategy's open positions into the sandbox:
+    /// `bk.holdings()` answers the pushed rows verbatim (decimal STRINGS),
+    /// and a strategy that never receives a push reads an empty table.
+    #[test]
+    fn on_holdings_feeds_bk_holdings() {
+        let mut s = strategy(
+            "function bk_evaluate() \
+               local h = bk.holdings() \
+               if #h == 0 then return { entries = {}, exits = {}, breaks = {} } end \
+               return { entries = { { token = h[1].token_id, price = '0.5', \
+                                     shares = h[1].shares, reason = h[1].direction } }, \
+                        exits = {}, breaks = {} } \
+             end",
+        );
+        // No push yet: the empty-table path.
+        let ctx = RoundContext {
+            round: RoundInfo {
+                slot: 1,
+                time_left_sec: 60,
+                now_ms: 1_000,
+            },
+            markets: vec![],
+        };
+        let intents = s.evaluate(&ctx);
+        assert!(intents.entries.is_empty(), "no holdings pushed, no entry");
+
+        // Push one holding; the strategy echoes its wire fields back.
+        s.on_holdings(&[HoldingView {
+            strategy: "t".into(),
+            condition_id: "cond".into(),
+            token_id: "0xup".into(),
+            direction: "up".into(),
+            shares: "3.00".into(),
+            entry_price: "0.42".into(),
+            round_slot: 7,
+        }]);
+        let intents = s.evaluate(&ctx);
+        assert_eq!(intents.entries.len(), 1);
+        assert_eq!(intents.entries[0].token, "0xup");
+        assert_eq!(intents.entries[0].shares.as_deref(), Some("3.00"));
+        assert_eq!(intents.entries[0].reason, "up");
         let h = s.health.lock().expect("health");
         assert!(h.last_error.is_none());
     }

@@ -36,7 +36,8 @@ use serde::Deserialize;
 
 use blitzkrieg_lua_runtime::{FeeScheduleView, LuaStrategy};
 use blitzkrieg_strategy_api::{
-    BookUpdate, FreshBook, MarketInfo, RoundContext, RoundInfo, SafeStrategy, StrategyMode,
+    BookUpdate, FreshBook, HoldingView, MarketInfo, RoundContext, RoundInfo, SafeStrategy,
+    StrategyMode,
 };
 
 use crate::model::{OrderbookSnapshot, SignalDirection};
@@ -575,6 +576,23 @@ impl EngineStrategy for LuaEngineAdapter {
             }
         }
         self.inner.on_eval_books(&books);
+        // THIS strategy's open positions, so `bk.holdings()` sees a gap-fill
+        // opportunity (a partially-filled pair leg). The host already sliced
+        // the view per strategy (engine.rs filters by name) — replay verbatim.
+        let held: Vec<HoldingView> = ctx
+            .held_positions()
+            .iter()
+            .map(|p| HoldingView {
+                strategy: self.name().to_string(),
+                condition_id: p.condition_id.clone(),
+                token_id: p.token_id.clone(),
+                direction: p.direction.clone(),
+                shares: p.shares.clone(),
+                entry_price: p.entry_price.clone(),
+                round_slot: p.round_slot,
+            })
+            .collect();
+        self.inner.on_holdings(&held);
 
         let round_ctx = RoundContext {
             round: RoundInfo {

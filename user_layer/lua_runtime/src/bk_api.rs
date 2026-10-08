@@ -17,6 +17,7 @@
 //! | `bk.params()`     | this strategy's hot parameters (`name → string value`)     |
 //! | `bk.kline(sym,iv)`| the last CLOSED bar, or `nil` (E29's aggregator owns bars) |
 //! | `bk.account()`    | public display fields only (§11.1: no credentials)         |
+//! | `bk.holdings()`   | THIS strategy's open positions (array, decimal STRINGS)    |
 //! | `bk.fees()`       | the active taker-fee schedule (`name/rate/exponent`) or nil |
 //!
 //! Prices and sizes cross as exact decimal STRINGS (the `safe.rs` boundary
@@ -31,7 +32,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use blitzkrieg_strategy_api::{BookUpdate, Kline, KlineInterval, MarketInfo, RoundInfo};
+use blitzkrieg_strategy_api::{
+    BookUpdate, HoldingView, Kline, KlineInterval, MarketInfo, RoundInfo,
+};
 use mlua::{Lua, Table, Value};
 
 /// §11.1: the public display fields of the account a strategy is authorized
@@ -78,6 +81,11 @@ pub struct BkState {
     pub fresh: HashMap<String, bool>,
     /// This strategy's hot parameters (host config + shadow-evolution bag).
     pub params: HashMap<String, String>,
+    /// THIS strategy's open positions as of the start of this evaluation
+    /// cycle (`bk.holdings()`), pushed by the adapter from the ctx's view.
+    /// Empty until a host pushes one — `bk.holdings()` honestly returns an
+    /// empty table, never another package's book.
+    pub holdings: Vec<HoldingView>,
     /// The active taker-fee schedule, as plain data (lua_runtime must not
     /// depend on the core): `name/rate/exponent` strings. `None` = no schedule
     /// in force — `bk.fees()` returns nil and a strategy that prices fees
@@ -320,6 +328,29 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                     }
                 }
                 Ok(Value::Table(t))
+            })?,
+        )?;
+    }
+
+    // -- bk.holdings() ------------------------------------------------------
+    {
+        let st = Arc::clone(&state);
+        bk.raw_set(
+            "holdings",
+            lua.create_function(move |lua, ()| {
+                let st = st.lock().expect("bk state mutex");
+                let arr = lua.create_table()?;
+                for (i, h) in st.holdings.iter().enumerate() {
+                    let t = lua.create_table()?;
+                    t.raw_set("condition_id", h.condition_id.as_str())?;
+                    t.raw_set("token_id", h.token_id.as_str())?;
+                    t.raw_set("direction", h.direction.as_str())?;
+                    t.raw_set("shares", h.shares.as_str())?;
+                    t.raw_set("entry_price", h.entry_price.as_str())?;
+                    t.raw_set("round_slot", h.round_slot)?;
+                    arr.raw_set(i as i64 + 1, t)?;
+                }
+                Ok(Value::Table(arr))
             })?,
         )?;
     }

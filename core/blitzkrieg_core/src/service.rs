@@ -1413,6 +1413,31 @@ const FAST_EVAL_FALLBACK_MS: i64 = 2_000;
 const EXIT_REPORT_BEAT_MS: i64 = 1_000;
 
 impl Core {
+    /// The open-position snapshot strategies see through `bk.holdings()`,
+    /// rebuilt once per evaluation cycle (the #202 equity push's position
+    /// sibling). Flattened to wire strings here — the engine slices it per
+    /// strategy, so a package never reads another package's book. The round
+    /// slot is re-derived from the entry time on the configured grid (the
+    /// scanner's `current_slot` formula, minus the clock offset a live kernel
+    /// adds); a position cannot outlive its round, so the exact boundary the
+    /// entry sat on is all the gap-fill loop needs.
+    fn held_position_view(&self) -> Vec<crate::strategies::HeldPosition> {
+        let duration = self.config.round_duration_sec.max(1);
+        self.positions
+            .open_positions()
+            .iter()
+            .map(|p| crate::strategies::HeldPosition {
+                strategy: p.strategy.clone(),
+                condition_id: p.condition_id.clone(),
+                token_id: p.token_id.clone(),
+                direction: p.direction.as_str().to_string(),
+                shares: p.shares.to_string(),
+                entry_price: p.entry_price.to_string(),
+                round_slot: p.entered_at_ms / 1000 / duration,
+            })
+            .collect()
+    }
+
     /// Issue #390: whether THIS core runs the replay maintenance scheduling —
     /// the deadline-driven gates the fast path pioneered, applied to the
     /// nofast replay. `backtest_fast` implies it (the fast path is the same
@@ -3627,6 +3652,10 @@ impl Core {
         // #390: read before the engine borrow opens (the re-arm below uses it
         // while `engine` is still mutably borrowed).
         let replay_sched = self.replay_sched();
+        // The position snapshot strategies see via `bk.holdings()` — built
+        // before the engine borrow opens (same once-per-cycle cadence as the
+        // equity push below).
+        let held_view = self.held_position_view();
         let engine = self.engine.as_mut().expect("engine present");
         // #202: the equity-relative sizing is a percentage of the account, and
         // the account is the ledger — pushed here, once per cycle, so a ticket
@@ -3635,6 +3664,7 @@ impl Core {
         // kernel drives strategies with no account of their own; per-account
         // routing happens when each order passes through the gates).
         engine.set_equity_usd(self.accounts.active_ledger().balance());
+        engine.set_positions_view(held_view);
         let orders = engine.evaluate(now_ms);
         // Replay fast path: recompute when the round-timing verdict can next
         // flip — quiet ticks skip the Lua call until then (or the fallback
@@ -4108,6 +4138,7 @@ impl Core {
     /// while it is enabled), and the eval-call health counters (host
     /// diagnostic, exempt host fields).
     fn engine_replay_cycle(&mut self, now_ms: i64) -> Option<usize> {
+        let held_view = self.held_position_view();
         let staged = self
             .engine
             .as_mut()
@@ -4116,6 +4147,7 @@ impl Core {
                 // so a replayed ticket is sized against the balance the
                 // process has NOW.
                 e.set_equity_usd(self.accounts.active_ledger().balance());
+                e.set_positions_view(held_view);
                 e.replay_candidates(now_ms)
             })
             .unwrap_or_else(|| Some(Vec::new()))?;
@@ -5123,6 +5155,10 @@ impl Core {
                 }
             }
             self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
+            // The rejected entry never rested: its token may be re-attempted.
+            if let Some(engine) = self.engine.as_mut() {
+                engine.release_pending_token_for_strategy(&o.strategy, &o.token_id);
+            }
             self.emit_order(id);
             let e = err.unwrap_or_else(|| {
                 crate::model::CoreError::new(
@@ -7653,11 +7689,15 @@ impl Core {
                 // regardless of the outcome, so it is not a doubling of
                 // exposure. The override is deliberately narrow: only the
                 // specific "Already in {asset}" rejection, only for a strategy
-                // that declared hold-to-settlement, only as the OPPOSITE
-                // direction of a position it already holds on the SAME
-                // condition. Same-direction stacking and multi-condition
-                // exposure remain rejected, and every other can_open reason
-                // (capacity, daily loss, cooldowns) still applies.
+                // that declared hold-to-settlement, only against a position
+                // it already holds on the SAME condition — either the
+                // OPPOSITE leg (the second leg of a fresh pair) or a TOP-UP
+                // of a partially-filled leg toward its counterpart (the
+                // gap-fill loop; the opened position itself is the evidence
+                // of the incomplete pair). Same-direction stacking across
+                // conditions and multi-condition exposure remain rejected,
+                // and every other can_open reason (capacity, daily loss,
+                // cooldowns) still applies.
                 let pair_completion = reason.starts_with("Already in")
                     && self
                         .engine
@@ -7667,7 +7707,7 @@ impl Core {
                         p.asset == req.asset
                             && p.condition_id == req.condition_id
                             && p.strategy == req.strategy
-                            && p.direction != direction
+                            && (p.direction != direction || p.shares < req.size)
                     });
                 if !pair_completion {
                     return Err(CoreError::new(CoreErrorCode::RiskRejected, reason));
@@ -7863,7 +7903,14 @@ impl Core {
                                         }
                                     }
                                     self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
-                                    // #180: a refusal is a first-class fact — it goes
+                                    // The refused FOK never rested: its token may
+                                    // be re-attempted on a refreshed book.
+                                    if let Some(engine) = self.engine.as_mut() {
+                                        engine.release_pending_token_for_strategy(
+                                            &order.strategy,
+                                            &order.token_id,
+                                        );
+                                    }
                                     // into the one error slot, reaches Node as an
                                     // Event::Error, lands in the log at error level and
                                     // travels back to the submitter on the
@@ -8136,6 +8183,12 @@ impl Core {
             }
         }
         self.ome.mark_terminal(id, OrderStatus::Cancelled, now_ms)?;
+        // The token's repeat-suppression ends with the order: a cancelled
+        // entry leaves no resting order behind, so a later cycle may re-attempt
+        // (the strategy's own latch still bounds it to one attempt per book).
+        if was_live && let Some(engine) = self.engine.as_mut() {
+            engine.release_pending_token_for_strategy(&order.strategy, &order.token_id);
+        }
         // Replay fast path: a live order just left the book — the escalation
         // sweep and the audit input changed.
         if was_live && self.replay_sched() {

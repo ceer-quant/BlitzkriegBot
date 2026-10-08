@@ -38,9 +38,19 @@
 --   * Prices run on SCALED INTEGERS (the §6.5 decimal-STRING wire rule,
 --     same helpers as flash_arb/spread_arb). Every comparison in the trigger
 --     is an exact integer comparison — no float knife-edge anywhere.
---   * One pair ATTEMPT per condition per round (`armed` latch on emission):
+--   * ONE pair ATTEMPT per condition per round (`armed` latch on emission):
 --     a rejected attempt is not retried into the same book; the declared
 --     share count carries the size.
+--   * GAP FILL — a partial fill on one leg leaves a naked remainder that
+--     rides to settlement (the strategy's only structural loss mode). The
+--     kernel releases a token's repeat-suppression once its entry order
+--     ends (filled, cancelled or rejected), so an ARMED condition reads
+--     `bk.holdings()` every cycle: a leg holding fewer shares than its
+--     counterpart is topped up AT ITS CURRENT ASK with the exact shortfall
+--     (the declared-size discipline, re-priced to the book that must fill
+--     it; the earlier attempt's price is history). The top-up pays for
+--     itself whenever the pair still merges under `max_pair_cost` — the
+--     SAME discount test as the entry, applied to the incremental cost.
 --   * Both books must be FRESH with a real ask on each leg. A stale or
 --     bid-less leg is not a discount, it is an outage.
 
@@ -132,6 +142,11 @@ local function read_config()
   local p = bk.params()
   return {
     max_pair_cost = dec_param(p, "max_pair_cost", { m = 995, s = 3 }),
+    -- A top-up share merges against a sunk-cost counterpart share, so its
+    -- ceiling is per-$1 economics, not the fresh-pair test. Default leaves
+    -- a 0.5¢ margin under $1; raising it past 1.00 would buy guaranteed
+    -- losses and is rejected by the same `<` test.
+    max_top_up_cost = dec_param(p, "max_top_up_cost", { m = 995, s = 3 }),
     min_leg_price = dec_param(p, "min_leg_price", { m = 1, s = 2 }),
     max_leg_price = dec_param(p, "max_leg_price", { m = 99, s = 2 }),
     min_pair_shares = dec_param(p, "min_pair_shares", { m = 1, s = 0 }),
@@ -159,9 +174,28 @@ end
 -- condition_id -> round_slot, set when both legs' entries are emitted;
 -- cleared whenever the round slot moves on. Collection (merge intents) fires
 -- for armed conditions regardless of the entry time floor — the collection
--- must run to the last tick, entries must not.
+-- must run to the last tick, entries must not. A top-up is NOT a new
+-- attempt: an armed condition may re-emit a shortfall leg every cycle
+-- (kernel-side dedup drops a repeat while any order is still resting on
+-- that token), so the latch stays set.
 
 local armed = {}
+
+-- ── holdings helpers ────────────────────────────────────────────────────────
+
+--- Shares of ONE token currently held, from `bk.holdings()` (this
+--- strategy's view, decimal STRING wire). `nil`-safe: no view pushed or a
+--- foreign token reads as zero.
+local function held_shares(token)
+  local hs = bk.holdings and bk.holdings() or {}
+  for _, h in ipairs(hs) do
+    if h.token_id == token then
+      local d = dec_parse(h.shares)
+      if d then return d end
+    end
+  end
+  return { m = 0, s = 2 }
+end
 
 -- ── entry points (§6.5) ─────────────────────────────────────────────────────
 
@@ -207,6 +241,55 @@ function bk_evaluate()
     if armed[m.condition_id] == slot then
       exits[#exits + 1] = { token = m.up_token, reason = "merge" }
       exits[#exits + 1] = { token = m.down_token, reason = "merge" }
+      -- GAP FILL: top up a partially-filled leg to its counterpart, at the
+      -- CURRENT ask. A top-up share merges against an ALREADY-HELD share of
+      -- the other leg (sunk cost), so its economics are ask + fee vs $1.00 —
+      -- cheaper than a fresh pair, and the ceiling is one minus a floor
+      -- margin, NOT `max_pair_cost` (the pair test prices two fresh legs).
+      -- `max_top_up_cost` keeps the discipline explicit and tunable; a
+      -- shortfall is never chased past it — an uneconomical gap rides to
+      -- settlement exactly as it does today. No holdings view (or a book
+      -- that is gone) means no top-up: fail closed, never guess a shortfall.
+      if can_enter then
+        local bu = bk.book(m.up_token)
+        local bd = bk.book(m.down_token)
+        if bu and bu.fresh == true and bd and bd.fresh == true then
+          local hu = held_shares(m.up_token)
+          local hd = held_shares(m.down_token)
+          local legs = {
+            { book = bu,  held = hu, other = hd, side = "up" },
+            { book = bd,  held = hd, other = hu, side = "down" },
+          }
+          for _, leg in ipairs(legs) do
+            local gap = dec_sub(leg.other, leg.held)
+            if gap.m > 0 then
+              local a = dec_parse(leg.book.best_ask)
+              if a and a.m > 0 then
+                local f = fee_per_share(a, rate, exponent)
+                if f then
+                  -- Incremental all-in per share: ask + fee, redeeming $1
+                  -- against a sunk-cost counterpart share.
+                  local total = dec_add(a, f)
+                  if dec_cmp(total, cfg.max_top_up_cost) < 0 then
+                    entries[#entries + 1] = {
+                      token = leg.side == "up" and m.up_token or m.down_token,
+                      price = dec_fmt(a),
+                      shares = dec_fmt(dec_floor2(gap)),
+                      reason = string.format(
+                        "gap-fill %s leg: %.2f held vs %.2f counterpart, top up at %s (cost %s vs $1)",
+                        leg.side,
+                        leg.held.m / POW10[leg.held.s],
+                        leg.other.m / POW10[leg.other.s],
+                        dec_fmt(a), dec_fmt(total)
+                      ),
+                    }
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
     elseif can_enter then
       local bu = bk.book(m.up_token)
       local bd = bk.book(m.down_token)

@@ -397,8 +397,8 @@ pub unsafe extern "C" fn bk_strategy_free_string(p: *mut c_char) {
 // the kernel.
 pub mod safe;
 pub use safe::{
-    BookUpdate, Break, Entry, Exit, FreshBook, Intents, Knob, MarketInfo, ParamBag, RoundContext,
-    RoundInfo, SafeStrategy, dec,
+    BookUpdate, Break, Entry, Exit, FreshBook, HoldingView, Intents, Knob, MarketInfo, ParamBag,
+    RoundContext, RoundInfo, SafeStrategy, dec,
 };
 
 // ── three-layer market-mode declaration (DEV_V0_3 §2.5 / §7) ────────────────
