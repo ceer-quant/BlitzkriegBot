@@ -18,7 +18,13 @@ pub mod registry;
 pub fn register_builtin_markets(reg: &registry::MarketPluginRegistry) {
     #[cfg(feature = "polymarket")]
     reg.register(Box::new(polymarket_extension::PolymarketPlugin::new()));
+    #[cfg(feature = "kalshi")]
+    reg.register(Box::new(kalshi_extension::KalshiPlugin::new()));
+    #[cfg(feature = "predictfun")]
+    reg.register(Box::new(predictfun_extension::PredictFunPlugin::new()));
     #[cfg(not(feature = "polymarket"))]
+    #[cfg(not(feature = "kalshi"))]
+    #[cfg(not(feature = "predictfun"))]
     let _ = reg; // market-free build: nothing to register
 }
 

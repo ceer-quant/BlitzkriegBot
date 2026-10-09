@@ -19,6 +19,11 @@ path = "src/lib.rs"
 default = ["polymarket", "strategy-loading", "account-precision", "test-support"]
 # Link the official Polymarket market extension as the operative market.
 polymarket = ["dep:polymarket-extension"]
+# 0.3.3 stage 2 (#424): Kalshi + predict.fun market extensions, opt-in features
+# following the same shape as `polymarket` (default stays Polymarket-only so a
+# plain build's dependency tree is unchanged).
+kalshi = ["dep:kalshi-extension"]
+predictfun = ["dep:predictfun-extension"]
 # Dynamic user-layer strategy loading (shared libraries). On by default since
 # E7 (#38): the external v2 strategy interface is the SAME full contract as an
 # in-tree strategy, and CI builds/drives a real cdylib. Exclude with
@@ -74,6 +79,8 @@ blitzkrieg-market-api = { path = "../market_api" }
 # Official Polymarket market extension (optional; the default feature links it).
 # The core never imports it directly except at the single assembly seam.
 polymarket-extension = { path = "../../extensions/polymarket", optional = true }
+kalshi-extension = { package = "blitzkrieg-kalshi", path = "../../extensions/kalshi", optional = true }
+predictfun-extension = { package = "blitzkrieg-predictfun", path = "../../extensions/predictfun", optional = true }
 async-trait = "0.1"
 # Lock-free atomic parameter swap for Shadow Evolution (strategy hot path).
 arc-swap = "1"
