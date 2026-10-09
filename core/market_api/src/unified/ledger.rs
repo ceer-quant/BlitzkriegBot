@@ -354,17 +354,16 @@ mod tests {
     }
 
     fn tmpdir(tag: &str) -> std::path::PathBuf {
-        // Disk-write policy: everything under the repo volume, never /tmp.
-        let d =
-            std::path::PathBuf::from("/Volumes/Hard Disk/bk-wt-033/target/unified-ledger-tests")
-                .join(format!(
-                    "{tag}-{}-{}",
-                    std::process::id(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.subsec_nanos())
-                        .unwrap_or(0)
-                ));
+        // Same pattern as strategy_state's tests: the platform temp dir plus
+        // pid/nanos, so parallel runs never share a path.
+        let d = std::env::temp_dir().join(format!(
+            "bk-unified-ledger-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

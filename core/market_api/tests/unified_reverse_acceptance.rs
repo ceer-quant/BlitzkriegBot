@@ -39,16 +39,16 @@ fn listing(venue: Venue, condition: &str, asset: Option<&str>, title: &str) -> P
 }
 
 fn tmpdir(tag: &str) -> PathBuf {
-    // Disk-write policy: only ever on the Hard Disk volume.
-    let d =
-        PathBuf::from("/Volumes/Hard Disk/bk-wt-033/target/unified-reverse-tests").join(format!(
-            "{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0)
-        ));
+    // Platform temp dir plus pid/nanos, same pattern as strategy_state's
+    // tests, so parallel runs never share a path.
+    let d = std::env::temp_dir().join(format!(
+        "bk-unified-reverse-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
