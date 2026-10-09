@@ -3353,6 +3353,16 @@ impl Core {
                     .active_ledger_mut()
                     .credit_cashflow(*amount_usd);
             }
+            // #427: a confirmed cross-venue mapping rides the stream as
+            // strategy-layer state. The core counts it (corpus completeness)
+            // and stores it for the read view; nothing in the trading path
+            // acts on it, so a corpus without these rows is byte-identical.
+            crate::engine::DataEvent::UnifiedMapping { event, .. } => {
+                self.stats.unified_mappings += 1;
+                if let Some(e) = self.engine.as_mut() {
+                    e.put_unified_mapping(event.clone());
+                }
+            }
             crate::engine::DataEvent::RoundMarkets { markets, .. } => {
                 self.stats.rounds += 1;
                 // #377 (治 #2): record which markets the archive promised a
@@ -9753,6 +9763,11 @@ struct CoreStats {
     cashflow_rewards: u64,
     cashflow_rebates_usd: Decimal,
     cashflow_rewards_usd: Decimal,
+    /// #427: confirmed cross-venue mapping rows replayed from the stream —
+    /// the corpus-completeness anchor for the cross-venue strategies (a
+    /// corpus that lost its `unified` rows reports zero instead of replaying
+    /// "successfully" blind).
+    unified_mappings: u64,
     evaluations: u64,
     signals: u64,
     place_rejected: u64,
@@ -10041,6 +10056,7 @@ mod books_mirror_tests {
                     round_slot: slot,
                     round_duration_sec: 900,
                     archive_verdict: false,
+                    venue: String::new(),
                     neg_risk: true,
                     question: "?".into(),
                 }],
@@ -10142,6 +10158,7 @@ mod books_mirror_tests {
                     round_slot: slot,
                     round_duration_sec: 900,
                     archive_verdict: false,
+                    venue: String::new(),
                     neg_risk: true,
                     question: "?".into(),
                 }],
@@ -12010,6 +12027,7 @@ mod strategy_dispatch_tests {
                 round_slot: 1,
                 round_duration_sec: 900,
                 archive_verdict: false,
+                venue: String::new(),
                 neg_risk: true,
                 question: format!("{a} up or down"),
             })
@@ -15665,6 +15683,7 @@ mod settlement_service_tests {
                     round_slot: 0,
                     round_duration_sec: 1,
                     archive_verdict: true,
+                    venue: String::new(),
                     neg_risk: false,
                     question: "?".into(),
                 }],

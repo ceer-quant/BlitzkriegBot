@@ -332,6 +332,15 @@ pub struct CryptoMarket {
     /// built before the field existed.
     #[serde(default)]
     pub archive_verdict: bool,
+    /// #427: which venue listed this market — pure DATA, never logic (#425
+    /// model.rs: no code may branch on a specific venue). Empty string =
+    /// undeclared (old archives, the single-plugin world the serde default
+    /// keeps byte-compatible); a cross-venue corpus declares it per market so
+    /// two venues' markets coexist in one round and one book table. The
+    /// disambiguator between same-asset markets on two venues is the
+    /// venue-tagged token id itself, not this field's value.
+    #[serde(default)]
+    pub venue: String,
     pub neg_risk: bool,
     pub question: String,
 }

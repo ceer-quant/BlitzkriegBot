@@ -316,6 +316,17 @@ pub enum DataEvent {
         amount_usd: Decimal,
         now_ms: i64,
     },
+    /// #427: an operator-confirmed cross-venue mapping (`k:"unified"`), the
+    /// #425 `UnifiedEvent` carried on the event stream. Pure state for the
+    /// strategy layer: it tells a strategy WHICH tokens across venues are the
+    /// same real-world bet, so a cross-venue view can be assembled from the
+    /// venue-tagged books already flowing. The engine does not trade on it
+    /// (no book update — same treatment as `Trade`/`Resolution`); a corpus
+    /// without these rows replays byte-identically to before.
+    UnifiedMapping {
+        event: blitzkrieg_market_api::unified::UnifiedEvent,
+        now_ms: i64,
+    },
 }
 
 /// A strategy registered with the engine, plus its enablement and provenance.
@@ -405,6 +416,14 @@ pub struct Engine {
     /// data path, whatever it carries). Closed bars dispatch `on_kline` and
     /// are drained by the host as `KLINE_UPDATE` events.
     klines: crate::kline::KlineAggregator,
+    /// #427: the latest confirmed cross-venue mapping per event id, keyed by
+    /// event id. Pure strategy-layer state — the engine never trades on it,
+    /// the read view (`unified_mappings()`) exposes it to the strategy host
+    /// so a cross-venue package can find both legs' tokens. Last write wins
+    /// (a re-confirmation overwrites; a revocation arrives as a mapping with
+    /// one listing).
+    unified_mappings:
+        std::collections::BTreeMap<String, blitzkrieg_market_api::unified::UnifiedEvent>,
 }
 
 impl Engine {
@@ -434,7 +453,23 @@ impl Engine {
             equity_usd: Decimal::ZERO,
             size_pct_skipped: 0,
             klines: crate::kline::KlineAggregator::with_default_intervals(),
+            unified_mappings: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// #427: record one confirmed cross-venue mapping (last write wins per
+    /// event id). Called by the host when a `UnifiedMapping` event arrives.
+    pub fn put_unified_mapping(&mut self, event: blitzkrieg_market_api::unified::UnifiedEvent) {
+        self.unified_mappings.insert(event.id.clone(), event);
+    }
+
+    /// #427: the confirmed cross-venue mappings, event-id ordered. The read
+    /// view behind `bk.unified_events()` — an immutable snapshot the strategy
+    /// layer assembles its cross-venue legs from.
+    pub fn unified_mappings(
+        &self,
+    ) -> &std::collections::BTreeMap<String, blitzkrieg_market_api::unified::UnifiedEvent> {
+        &self.unified_mappings
     }
 
     /// The account equity the equity-relative sizing (#202) is a percentage of
@@ -661,6 +696,13 @@ impl Engine {
                 // not a book update — no strategy acts on it here.
                 return Vec::new();
             }
+            DataEvent::UnifiedMapping { .. } => {
+                // #427: a confirmed cross-venue mapping is strategy-layer
+                // state (which tokens across venues are one bet), not a book
+                // update. The core keeps the latest mapping per event id so
+                // the strategy layer can read it through the view; the match
+                // arm stays inert to trading.
+            }
         }
         self.drain_breaks()
     }
@@ -788,6 +830,10 @@ impl Engine {
         // the shadow log lacks and the --replay entry analysis needs.
         let mut candidates: Vec<TradeSignal> = Vec::new();
         let mut exit_intents: Vec<crate::strategies::StrategyExitIntent> = Vec::new();
+        // #427: the mapping snapshot for this cycle — every strategy sees the
+        // SAME confirmed events (state of the world, not per-strategy data).
+        let unified_snapshot: Vec<blitzkrieg_market_api::unified::UnifiedEvent> =
+            self.unified_mappings.values().cloned().collect();
         {
             let fresh = |token: &str| {
                 fresh_book(&self.books, token, now_ms, self.cfg.max_orderbook_stale_ms)
@@ -810,7 +856,8 @@ impl Engine {
                         now_ms,
                         &fresh,
                     )
-                    .with_positions(&held);
+                    .with_positions(&held)
+                    .with_unified_events(&unified_snapshot);
                     candidates.extend(s.strategy.find_candidates(&ctx));
                     // Close intents accumulate regardless of the entry timing
                     // gate: an open position's exit is never round-timing-gated.
@@ -1706,6 +1753,7 @@ mod tests {
             round_slot: end_ms / 1000 / 900,
             round_duration_sec: 900,
             archive_verdict: false,
+            venue: String::new(),
             neg_risk: true,
             question: "BTC up or down".into(),
         }
@@ -2627,6 +2675,7 @@ mod tests {
             round_slot: end_ms / 1000 / 900,
             round_duration_sec: 900,
             archive_verdict: false,
+            venue: String::new(),
             neg_risk: true,
             question: format!("{asset} up or down"),
         }

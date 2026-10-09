@@ -686,7 +686,7 @@ impl EngineStrategy for ForeignStrategy {
 
         // Backing storage for the market rows must live across the FFI call.
         struct Rows {
-            strs: Vec<(CString, CString, CString, CString, CString)>,
+            strs: Vec<(CString, CString, CString, CString, CString, CString)>,
             view: Vec<BkMarket>,
         }
         let mut rows = Rows {
@@ -701,6 +701,7 @@ impl EngineStrategy for ForeignStrategy {
                 cs(&m.question_id),
                 cs(&m.up_token_id),
                 cs(&m.down_token_id),
+                cs(&m.venue),
             ));
         }
         rows.view = rows
@@ -716,6 +717,7 @@ impl EngineStrategy for ForeignStrategy {
                 expires_at_ms: m.expires_at_ms,
                 slot: m.round_slot,
                 neg_risk: if m.neg_risk { 1 } else { 0 },
+                venue: s.5.as_ptr(),
             })
             .collect();
 
@@ -776,7 +778,7 @@ impl EngineStrategy for ForeignStrategy {
             now_ms: ctx.now_ms(),
         };
         // Backing for the market rows, mirroring find_candidates.
-        let mut strs: Vec<(CString, CString, CString, CString, CString)> = Vec::new();
+        let mut strs: Vec<(CString, CString, CString, CString, CString, CString)> = Vec::new();
         for m in ctx.markets() {
             let cs = |s: &str| CString::new(s).unwrap_or_default();
             strs.push((
@@ -785,6 +787,7 @@ impl EngineStrategy for ForeignStrategy {
                 cs(&m.question_id),
                 cs(&m.up_token_id),
                 cs(&m.down_token_id),
+                cs(&m.venue),
             ));
         }
         let view: Vec<BkMarket> = strs
@@ -799,6 +802,7 @@ impl EngineStrategy for ForeignStrategy {
                 expires_at_ms: m.expires_at_ms,
                 slot: m.round_slot,
                 neg_risk: if m.neg_risk { 1 } else { 0 },
+                venue: s.5.as_ptr(),
             })
             .collect();
         let markets_ptr = if view.is_empty() {
@@ -1171,6 +1175,7 @@ mod reserved_key_tests {
             round_slot: 1,
             round_duration_sec: 900,
             archive_verdict: false,
+            venue: String::new(),
             neg_risk: false,
             question: "q".into(),
         };

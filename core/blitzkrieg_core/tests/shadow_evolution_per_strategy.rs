@@ -263,6 +263,7 @@ fn market(asset: &str, up: &str, down: &str) -> CryptoMarket {
         round_slot: T0 / ROUND_MS,
         round_duration_sec: 900,
         archive_verdict: false,
+        venue: String::new(),
         neg_risk: true,
         question: format!("{asset} up or down"),
     }

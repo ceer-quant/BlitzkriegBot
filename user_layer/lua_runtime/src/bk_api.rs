@@ -12,13 +12,14 @@
 //! |-------------------|-----------------------------------------------------------|
 //! | `bk.now_ms()`     | host clock, integer ms                                     |
 //! | `bk.round()`      | `{slot=, time_left_sec=, now_ms=}` or `nil` between rounds |
-//! | `bk.markets()`    | array of round markets (`asset/condition_id/up_token/…`)   |
+//! | `bk.markets()`    | array of round markets (`asset/condition_id/up_token/venue/…`) |
 //! | `bk.book(sym)`    | one round token's book, decimal STRINGS, or `nil`          |
 //! | `bk.params()`     | this strategy's hot parameters (`name → string value`)     |
 //! | `bk.kline(sym,iv)`| the last CLOSED bar, or `nil` (E29's aggregator owns bars) |
 //! | `bk.account()`    | public display fields only (§11.1: no credentials)         |
 //! | `bk.holdings()`   | THIS strategy's open positions (array, decimal STRINGS)    |
 //! | `bk.fees()`       | the active taker-fee schedule (`name/rate/exponent`) or nil |
+//! | `bk.unified_events()` | confirmed cross-venue mappings (#427) or empty array   |
 //!
 //! Prices and sizes cross as exact decimal STRINGS (the `safe.rs` boundary
 //! rule): a float would let a resting price drift by a tick. `bk.kline`
@@ -96,6 +97,37 @@ pub struct BkState {
     /// a host actually feeds klines — with no E29 aggregator there is no
     /// source, so `bk.kline` honestly returns `nil`.
     pub klines: HashMap<(String, String), Kline>,
+    /// #427: the confirmed cross-venue mappings (`bk.unified_events()`),
+    /// pushed by the adapter from the ctx's view. Empty until a host pushes
+    /// one — single-venue deployments answer an empty table, never an error.
+    pub unified_events: Vec<UnifiedEventView>,
+}
+
+/// #427: one confirmed cross-venue mapping as the `bk.unified_events()` wire
+/// row — plain data (lua_runtime must not depend on market_api): each venue
+/// listing carries its own token ids. Decimal-free; ids and titles are the
+/// only payload a cross-venue strategy needs.
+#[derive(Debug, Clone, Default)]
+pub struct UnifiedEventView {
+    pub id: String,
+    pub title: String,
+    /// Venue-ordered rows: `venue/up_token/down_token/status` per listing.
+    pub listings: Vec<UnifiedListingView>,
+    /// Machine-readable discrepancy marks ("settlement_source" /
+    /// "settlement_rules" / "expiry_gap") — a package that hedges must
+    /// fail closed on any mark.
+    pub discrepancies: Vec<String>,
+    /// "paired" | "singleLegAvailable" (camelCase = the kernel wire).
+    pub status: String,
+}
+
+/// One venue listing inside [`UnifiedEventView`].
+#[derive(Debug, Clone, Default)]
+pub struct UnifiedListingView {
+    pub venue: String,
+    pub up_token: String,
+    pub down_token: String,
+    pub expires_at_ms: i64,
 }
 
 impl BkState {
@@ -248,6 +280,12 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                     t.raw_set("expires_at_ms", m.expires_at_ms)?;
                     t.raw_set("slot", m.slot)?;
                     t.raw_set("neg_risk", m.neg_risk)?;
+                    // #427: the listing venue, pure data (nil = undeclared).
+                    if m.venue.is_empty() {
+                        t.raw_set("venue", Value::Nil)?;
+                    } else {
+                        t.raw_set("venue", m.venue.as_str())?;
+                    }
                     arr.raw_set(i as i64 + 1, t)?;
                 }
                 Ok(Value::Table(arr))
@@ -376,6 +414,41 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
         )?;
     }
 
+    // -- bk.unified_events() (#427) ------------------------------------------
+    {
+        let st = Arc::clone(&state);
+        bk.raw_set(
+            "unified_events",
+            lua.create_function(move |lua, ()| {
+                let st = st.lock().expect("bk state mutex");
+                let arr = lua.create_table()?;
+                for (i, e) in st.unified_events.iter().enumerate() {
+                    let t = lua.create_table()?;
+                    t.raw_set("id", e.id.as_str())?;
+                    t.raw_set("title", e.title.as_str())?;
+                    t.raw_set("status", e.status.as_str())?;
+                    let disc = lua.create_table()?;
+                    for (j, d) in e.discrepancies.iter().enumerate() {
+                        disc.raw_set(j as i64 + 1, d.as_str())?;
+                    }
+                    t.raw_set("discrepancies", disc)?;
+                    let ls = lua.create_table()?;
+                    for (j, l) in e.listings.iter().enumerate() {
+                        let lt = lua.create_table()?;
+                        lt.raw_set("venue", l.venue.as_str())?;
+                        lt.raw_set("up_token", l.up_token.as_str())?;
+                        lt.raw_set("down_token", l.down_token.as_str())?;
+                        lt.raw_set("expires_at_ms", l.expires_at_ms)?;
+                        ls.raw_set(j as i64 + 1, lt)?;
+                    }
+                    t.raw_set("listings", ls)?;
+                    arr.raw_set(i as i64 + 1, t)?;
+                }
+                Ok(Value::Table(arr))
+            })?,
+        )?;
+    }
+
     let globals = lua.globals();
     globals.raw_set("bk", bk)?;
     Ok(())
@@ -395,6 +468,7 @@ mod tests {
             expires_at_ms: 1_700_000_000_000,
             slot: 42,
             neg_risk: false,
+            venue: "polymarket".into(),
         }
     }
 
@@ -459,6 +533,26 @@ mod tests {
                 reserved: Some("500.00".into()),
             });
             s.klines.insert(("0xup".into(), "min1".into()), kline());
+            s.unified_events = vec![UnifiedEventView {
+                id: "evt-1".into(),
+                title: "Bitcoin Up or Down".into(),
+                status: "paired".into(),
+                discrepancies: vec![],
+                listings: vec![
+                    UnifiedListingView {
+                        venue: "polymarket".into(),
+                        up_token: "pm-up".into(),
+                        down_token: "pm-down".into(),
+                        expires_at_ms: 1_700_000_000_000,
+                    },
+                    UnifiedListingView {
+                        venue: "kalshi".into(),
+                        up_token: "kx-up".into(),
+                        down_token: "kx-down".into(),
+                        expires_at_ms: 1_700_000_000_000,
+                    },
+                ],
+            }];
         }
         sb.load(
             "function fail(msg) error(msg, 0) end \
@@ -468,6 +562,7 @@ mod tests {
                 if bk.now_ms() ~= 1234567 then fail('now') end \
                 local ms = bk.markets() \
                 if #ms ~= 1 or ms[1].up_token ~= '0xup' or ms[1].neg_risk ~= false then fail('markets') end \
+                if ms[1].venue ~= 'polymarket' then fail('market venue') end \
                 local b = bk.book('0xup') \
                 if b == nil or b.best_bid ~= '0.55' or b.fresh ~= true or b.bid_levels ~= nil then fail('book') end \
                 if bk.book('nope') ~= nil then fail('missing book') end \
@@ -476,6 +571,10 @@ mod tests {
                 if a == nil or a.balance ~= '10000.00' or a.id ~= 'acct-1' then fail('account') end \
                 local k = bk.kline('0xup', 'min1') \
                 if k == nil or k.close ~= '0.55' or k.is_closed ~= true then fail('kline') end \
+                local ue = bk.unified_events() \
+                if #ue ~= 1 or ue[1].id ~= 'evt-1' then fail('unified') end \
+                if ue[1].status ~= 'paired' then fail('unified status') end \
+                if #ue[1].listings ~= 2 or ue[1].listings[1].venue ~= 'polymarket' or ue[1].listings[2].up_token ~= 'kx-up' then fail('unified listings') end \
                 return {} \
              end",
             "surface",
@@ -503,6 +602,7 @@ mod tests {
                 if bk.book('x') ~= nil then fail('book') end \
                 if bk.account() ~= nil then fail('account') end \
                 if bk.kline('x', 'min1') ~= nil then fail('kline') end \
+                if #bk.unified_events() ~= 0 then fail('unified') end \
                 return {} \
              end",
             "empty",

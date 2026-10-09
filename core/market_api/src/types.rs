@@ -299,6 +299,12 @@ pub struct MarketDescriptor {
     pub down_price: Decimal,
     pub expires_at_ms: i64,
     pub round_slot: i64,
+    /// #427: the listing venue, as pure DATA (`CryptoMarket.venue`'s wire
+    /// counterpart). The plugin fills it from its own identity — no consumer
+    /// may branch on the value. Empty = the plugin predates the field (the
+    /// serde default keeps every existing producer compiling unchanged).
+    #[serde(default)]
+    pub venue: String,
     pub neg_risk: bool,
     pub question: String,
 }

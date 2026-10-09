@@ -198,6 +198,8 @@ pub(crate) fn spawn(
                         down_price,
                         expires_at_ms: close_ms,
                         round_slot: close_ms / 1000 / round_sec,
+                        // #427: this plugin's own identity, declared as data.
+                        venue: "kalshi".to_string(),
                         neg_risk: false,
                         question: m.title.clone(),
                     });

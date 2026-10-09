@@ -217,6 +217,8 @@ pub(crate) fn spawn(
                     down_price,
                     expires_at_ms: end_ms,
                     round_slot: end_ms / 1000 / round_sec,
+                    // #427: this plugin's own identity, declared as data.
+                    venue: "predictfun".to_string(),
                     neg_risk: up.is_neg_risk || down.is_neg_risk,
                     question: up.question.clone(),
                 });
