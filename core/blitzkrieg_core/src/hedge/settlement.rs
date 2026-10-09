@@ -97,20 +97,10 @@ impl SettlementAligner {
                 .next()
                 .cloned()
                 .unwrap_or_else(|| "none".to_string());
-            let pending = per_venue
-                .keys()
-                .next()
-                .map(|k| {
-                    // The OTHER venue: any listed venue that is not the
-                    // settled one. The caller names the pair; we can only
-                    // say "the second venue" generically here.
-                    if k == "polymarket" {
-                        "second venue".to_string()
-                    } else {
-                        k.clone()
-                    }
-                })
-                .unwrap_or_else(|| "second venue".to_string());
+            // The OTHER side is whoever the caller paired us with — the aligner
+            // holds no registry of that, so the honest venue-agnostic answer is
+            // the same generic label for every venue.
+            let pending = "second venue".to_string();
             return SettlementReconcile::Partial { settled, pending };
         }
         let mut it = per_venue.values();

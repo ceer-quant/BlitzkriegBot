@@ -620,12 +620,13 @@ fn render_overview(f: &mut Frame, area: Rect, s: &UiSnapshot) {
 
 fn render_positions(f: &mut Frame, area: Rect, s: &UiSnapshot) {
     let header = Row::new(vec![
-        "Asset", "Dir", "Strategy", "Entry", "Cur", "PnL", "Left",
+        "Asset", "Dir", "Venue", "Strategy", "Entry", "Cur", "PnL", "Left",
     ])
     .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD));
     let widths = [
         Constraint::Length(7),
         Constraint::Length(5),
+        Constraint::Length(9),
         Constraint::Length(11),
         Constraint::Length(7),
         Constraint::Length(7),
@@ -636,9 +637,17 @@ fn render_positions(f: &mut Frame, area: Rect, s: &UiSnapshot) {
         .positions
         .iter()
         .map(|p| {
+            // #427: the venue is DATA the row carries — a cross-venue pair
+            // shows one leg per venue. Undeclared renders as a dash.
+            let venue = if p.venue.is_empty() {
+                "—".to_string()
+            } else {
+                p.venue.clone()
+            };
             Row::new(vec![
                 Cell::from(p.asset.clone()),
                 Cell::from(p.direction.to_uppercase()),
+                Cell::from(venue),
                 Cell::from(p.strategy.clone()),
                 Cell::from(format!("{:.2}", p.entry_price)),
                 Cell::from(format!("{:.2}", p.current_price)),
@@ -662,6 +671,7 @@ fn render_trades(f: &mut Frame, area: Rect, s: &UiSnapshot) {
     let header = Row::new(vec![
         "Asset",
         "Dir",
+        "Venue",
         "Strategy",
         "Entry→Exit",
         "Net",
@@ -673,6 +683,7 @@ fn render_trades(f: &mut Frame, area: Rect, s: &UiSnapshot) {
     let widths = [
         Constraint::Length(7),
         Constraint::Length(5),
+        Constraint::Length(9),
         Constraint::Length(11),
         Constraint::Length(14),
         Constraint::Length(9),
@@ -687,9 +698,16 @@ fn render_trades(f: &mut Frame, area: Rect, s: &UiSnapshot) {
         .rev()
         .take(200)
         .map(|t| {
+            // #427: the venue is DATA the row carries; undeclared is a dash.
+            let venue = if t.venue.is_empty() {
+                "—".to_string()
+            } else {
+                t.venue.clone()
+            };
             Row::new(vec![
                 Cell::from(t.asset.clone()),
                 Cell::from(t.direction.to_uppercase()),
+                Cell::from(venue),
                 Cell::from(t.strategy.clone()),
                 Cell::from(format!("{:.2}→{:.2}", t.entry_price, t.exit_price)),
                 Cell::from(Span::styled(

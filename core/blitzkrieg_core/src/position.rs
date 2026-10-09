@@ -495,6 +495,12 @@ pub struct OpenPosition {
     /// write new).
     #[serde(default = "default_account_id")]
     pub account_id: AccountId,
+    /// #427: which venue the position trades on — copied from the market that
+    /// filled the entry (serde default keeps old snapshots loading as the
+    /// undeclared single-venue world). Pure DATA for the panel's Venue column;
+    /// nothing branches on the value.
+    #[serde(default)]
+    pub venue: String,
     /// F6: when the exit path last received a book for this token (ms epoch).
     /// A forced exit may consult it to refuse pricing off a stale quote; it is
     /// `0` until the first book arrives (serde default keeps old snapshots
@@ -574,6 +580,9 @@ pub struct ClosedPosition {
     /// (which carried it from the order), so per-account realized PnL is a field
     /// read, never a strategy-name heuristic.
     pub account_id: AccountId,
+    /// #427: the venue the trade's market listed on — carried from the
+    /// position, pure DATA for the panels' Venue column.
+    pub venue: String,
 }
 
 /// The result of one MERGE (task 2.2): complete UP+DOWN share-pairs of one
@@ -605,6 +614,8 @@ pub struct OpenParams {
     /// E28 (§9.2): the account this position spends — stamped from the entry
     /// order, so per-account PnL/positions are a field read, never a guess.
     pub account_id: AccountId,
+    /// #427: the venue the entry market listed on — empty when undeclared.
+    pub venue: String,
     /// The order's limit price; the position's actual entry price is the basis
     /// per share once its fills land (see [`PositionManager::apply_entry_fill`]).
     pub entry_price: Decimal,
@@ -1058,6 +1069,7 @@ impl PositionManager {
             entered_at_ms: now_ms,
             expires_at_ms: p.expires_at_ms,
             account_id: p.account_id,
+            venue: p.venue,
             last_book_ts: 0,
             state: ExitState::new(p.entry_price, now_ms),
             flows: CashFlows::default(),
@@ -1726,6 +1738,8 @@ impl PositionManager {
             // E28 (§9.2): the settled trade carries the position's account, so
             // per-account realized PnL is a field read.
             account_id: pos.account_id,
+            // #427: the settled trade carries the position's venue.
+            venue: pos.venue,
         };
         self.closed.push(closed.clone());
         if self.closed.len() > 5000 {
@@ -1983,6 +1997,7 @@ mod tests {
             was_maker: true,
             target_exit_price: None,
             account_id: crate::model::default_account_id(),
+            venue: String::new(),
         }
     }
 
@@ -2735,6 +2750,7 @@ mod tests {
             was_maker: true,
             target_exit_price: None,
             account_id: crate::model::default_account_id(),
+            venue: String::new(),
         }
     }
 
@@ -2924,6 +2940,7 @@ mod precision_tests {
                 was_maker: false,
                 target_exit_price: None,
                 account_id: crate::model::default_account_id(),
+                venue: String::new(),
             },
             0,
         )

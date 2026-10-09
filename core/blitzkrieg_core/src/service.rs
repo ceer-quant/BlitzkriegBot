@@ -5037,6 +5037,8 @@ impl Core {
                 // E28 (§9.2): the account the position settles into — a field
                 // read, and the row the panel filters per account.
                 account_id: p.account_id.as_str().to_string(),
+                // #427: the Venue column — a field read off the position.
+                venue: p.venue.clone(),
                 entry_price: p.entry_price,
                 current_price: p.current_price,
                 shares: p.shares,
@@ -5968,6 +5970,14 @@ impl Core {
                             // E28 (§9.2): the position belongs to the account
                             // whose fill opened it.
                             account_id: d.account_id.clone(),
+                            // #427: the venue is a field read off the market the
+                            // token belongs to — the panels' Venue column, never
+                            // a decision input.
+                            venue: self
+                                .engine
+                                .as_ref()
+                                .and_then(|e| e.venue_of(&d.token_id))
+                                .unwrap_or_default(),
                         };
                         self.positions.open(p, now_ms).id
                     }
@@ -16851,6 +16861,7 @@ mod exit_reason_table_tests {
                     was_maker: false,
                     target_exit_price: None,
                     account_id: crate::model::default_account_id(),
+                    venue: String::new(),
                 },
                 1_000,
             );

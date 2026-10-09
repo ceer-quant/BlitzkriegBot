@@ -930,6 +930,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
               <tr class="text-left">
                 <th class="label-micro px-2 pb-2">资产</th>
                 <th class="label-micro px-2 pb-2">方向</th>
+                <th class="label-micro px-2 pb-2">场地</th>
                 <th class="label-micro px-2 pb-2">策略</th>
                 <th class="label-micro px-2 pb-2 text-right">入场</th>
                 <th class="label-micro px-2 pb-2 text-right">现价</th>
@@ -949,6 +950,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
                 <td class="px-2 py-2.5">
                   <Badge :variant="p.direction === 'up' ? 'up' : 'down'">{{ p.direction.toUpperCase() }}</Badge>
                 </td>
+                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ p.venue || '—' }}</td>
                 <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ p.strategy ?? '—' }}</td>
                 <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(p.entryPrice).toFixed(3)" /></td>
                 <td class="px-2 py-2.5 text-right num"><RollingNumber :value="Number(p.currentPrice).toFixed(3)" /></td>
@@ -983,11 +985,12 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
           <!-- 13 列在手机上不可压成一列一个字符：min-width 让表格保持
                可读列宽、在容器内横向滚动（与 Plugins 页表格同一模式），
                否则 min-content 按"每列一个折行点"计算，数字会竖排。 -->
-          <table class="w-full min-w-[1100px] text-[13px]">
+          <table class="w-full min-w-[1160px] text-[13px]">
             <thead>
               <tr class="text-left">
                 <th class="label-micro px-2 pb-2">资产</th>
                 <th class="label-micro px-2 pb-2">方向</th>
+                <th class="label-micro px-2 pb-2">场地</th>
                 <th class="label-micro px-2 pb-2">策略</th>
                 <th class="label-micro px-2 pb-2 text-right">入场</th>
                 <th class="label-micro px-2 pb-2 text-right">出场</th>
@@ -1019,6 +1022,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
                 <td class="px-2 py-2.5">
                   <Badge :variant="t.direction === 'up' ? 'up' : 'down'">{{ t.direction.toUpperCase() }}</Badge>
                 </td>
+                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ t.venue || '—' }}</td>
                 <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ t.strategy ?? '—' }}</td>
                 <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(t.entryPrice).toFixed(3)" /></td>
                 <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(t.exitPrice).toFixed(3)" /></td>

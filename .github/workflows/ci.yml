@@ -445,6 +445,7 @@ jobs:
           node scripts/account-credential-check.mjs --teeth
           node scripts/account-cross-isolation-check.mjs --teeth
           node scripts/lua-sandbox-check.mjs --teeth
+          node scripts/no-venue-branch-check.mjs --teeth
       - name: v0.3 gates — the real verdicts [E24..E30]
         run: |
           node scripts/intent-audit-check.mjs
@@ -456,6 +457,7 @@ jobs:
           node scripts/account-credential-check.mjs
           node scripts/account-cross-isolation-check.mjs
           node scripts/lua-sandbox-check.mjs
+          node scripts/no-venue-branch-check.mjs
       # Assorted one-off invariants kept cheap.
       - name: Assorted gates (plugin selection / trade-log flag / TUI demo)
         run: |

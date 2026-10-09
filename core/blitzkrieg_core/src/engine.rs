@@ -1142,6 +1142,20 @@ impl Engine {
         self.near_miss.tick(now_ms)
     }
 
+    /// #427: the venue the token's market listed on, read off the current
+    /// round's market list — pure DATA for the panels' Venue column (a
+    /// cross-venue pair shows one leg per venue). `None` when the engine is
+    /// down or the token belongs to no live market; the caller renders that
+    /// as the undeclared case.
+    pub fn venue_of(&self, token_id: &str) -> Option<String> {
+        self.scanner
+            .markets()
+            .iter()
+            .find(|m| m.up_token_id == token_id || m.down_token_id == token_id)
+            .map(|m| m.venue.clone())
+            .filter(|v| !v.is_empty())
+    }
+
     /// Force-finalize every pending near-miss (used on shutdown so records are
     /// not lost when the process stops before a window elapses).
     pub fn flush_near_misses(&mut self) -> Vec<crate::shadow::NearMissRecord> {

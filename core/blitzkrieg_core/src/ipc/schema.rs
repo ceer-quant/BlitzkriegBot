@@ -1064,6 +1064,11 @@ pub struct PositionView {
     /// The read side of "account_id 贯穿持仓": the panel filters on it after
     /// `account.switch` (整页重取，不合并显示).
     pub account_id: String,
+    /// #427: the venue the position's market listed on — pure DATA for the
+    /// panels' Venue column (a cross-venue pair shows one leg per venue).
+    /// Empty = undeclared (old snapshots / the single-plugin world).
+    #[serde(default)]
+    pub venue: String,
     #[serde(with = "crate::decimal")]
     pub entry_price: Decimal,
     #[serde(with = "crate::decimal")]

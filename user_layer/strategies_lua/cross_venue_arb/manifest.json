@@ -1,0 +1,64 @@
+{
+  "name": "cross_venue_arb",
+  "version": "1.0.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "a056d2b4ee99fcf3ce27047f59368e98ce014977b2ddf9fb145060b6aee9dfa7",
+  "author": "BlitzkriegBot",
+  "description": "Cross-venue pair collector (#427 blueprint): when a confirmed unified mapping (zero discrepancies, status paired) prices the same bet on two venues and ask_UP@cheaper + ask_DOWN@other + BOTH legs' taker fees costs less than $1.00 by more than spread_open_pct, buy BOTH legs at their own asks with EQUAL declared share counts — capacity = the SMALLER leg's visible ask depth (两平台各自深度的最小值), named in every reason line. spread_close_pct is the release valve: a held pair whose all-in cost has fallen back within Y% of the money is offered back via exits at its own bids. Fees priced from bk.fees(); no schedule in force means no suggestions. Venue is data (cheapest listing wins the leg) — no branch on venue identity anywhere. Signal-only: the kernel adjudicates, sizes, gates and settles every intent.",
+  "gate_exemptions": {
+    "timing": true,
+    "momentum": true,
+    "timing_min_time_left_sec": 30
+  },
+  "holds_to_settlement": true,
+  "tunables": {
+    "spread_open_pct": {
+      "type": "decimal",
+      "default": "2.00",
+      "min": "0.10",
+      "max": "20"
+    },
+    "spread_close_pct": {
+      "type": "decimal",
+      "default": "0.50",
+      "min": "0",
+      "max": "10"
+    },
+    "min_leg_price": {
+      "type": "decimal",
+      "default": "0.01",
+      "min": "0.01",
+      "max": "0.10"
+    },
+    "max_leg_price": {
+      "type": "decimal",
+      "default": "0.99",
+      "min": "0.50",
+      "max": "0.995"
+    },
+    "min_pair_shares": {
+      "type": "decimal",
+      "default": "1",
+      "min": "1",
+      "max": "100"
+    },
+    "min_time_left_sec": {
+      "type": "int",
+      "default": "30",
+      "min": "0",
+      "max": "300"
+    }
+  },
+  "modes": [
+    {
+      "market_type": "prediction",
+      "structure": "binary_outcome_wheel",
+      "capabilities": [
+        "websocket_feed",
+        "level2_snapshot",
+        "post_only"
+      ]
+    }
+  ]
+}

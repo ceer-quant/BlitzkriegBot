@@ -5206,6 +5206,7 @@ mod tests {
                 entry_role: OrderRole::Maker,
                 exit_role: OrderRole::Taker,
                 dust_shares: Decimal::ZERO,
+                venue: String::new(),
             };
             c.positions_mut()
                 .push_closed_for_test(mk("BTC", dec!(0.40)));
