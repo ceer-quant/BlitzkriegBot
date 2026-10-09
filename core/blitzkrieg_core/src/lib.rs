@@ -36,6 +36,12 @@ pub mod engine;
 pub mod execution_policy;
 pub mod exit_policy;
 pub mod extension;
+/// #426: cross-venue hedge execution — the atomic two-leg state machine,
+/// the fully-fee-loaded feasibility gate, and the hedge audit trail. The
+/// stage-3 mapping (`blitzkrieg_market_api::unified`) is the ONLY way in:
+/// an event not confirmed (or discrepancy-marked) by the ledger never
+/// reaches a hedge.
+pub mod hedge;
 pub mod ipc;
 pub(crate) mod jsonl;
 pub mod kline;
