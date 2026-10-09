@@ -9,6 +9,8 @@ members = [
     "core/market_api",
     "core/blitzkrieg_core",
     "extensions/polymarket",
+    "extensions/kalshi",
+    "extensions/predictfun",
     "user_layer/strategy_api",
     "user_layer/strategy_logic",
     "user_layer/parity_logic",
