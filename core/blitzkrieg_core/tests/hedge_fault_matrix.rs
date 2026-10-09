@@ -149,8 +149,8 @@ impl DemandLeg for ProtectiveDemand {
 }
 
 fn tmpdir(tag: &str) -> PathBuf {
-    let d = PathBuf::from("/Volumes/Hard Disk/bk-wt-033/target/hedge-fault-matrix").join(format!(
-        "{tag}-{}-{}",
+    let d = std::env::temp_dir().join(format!(
+        "hedge-fault-matrix-{tag}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
