@@ -13,6 +13,7 @@ pub mod modes;
 pub mod net;
 pub mod plugin;
 pub mod types;
+pub mod unified;
 
 pub use account::{AccountId, DEFAULT_ACCOUNT_ID, default_account_id};
 pub use kline::{Kline, KlineInterval};
@@ -22,3 +23,4 @@ pub use plugin::{
     SubscriptionControl,
 };
 pub use types::*;
+pub use unified::{HedgeVerdict, UnifiedEvent};
