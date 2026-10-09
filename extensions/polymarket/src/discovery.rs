@@ -109,6 +109,8 @@ pub fn spawn(
                         .unwrap_or_else(|| rust_decimal::Decimal::new(5, 1)),
                     expires_at_ms: end_ms,
                     round_slot: end_ms / 1000 / round_sec,
+                    // #427: this plugin's own identity, declared as data.
+                    venue: "polymarket".to_string(),
                     neg_risk: m.neg_risk.unwrap_or(true),
                     question: m.question.clone().unwrap_or_default(),
                 });

@@ -33,6 +33,8 @@ pub fn market_from_api(d: &api::MarketDescriptor) -> m::CryptoMarket {
         // #377 (治 #2): a live market has no archive verdict — the venue
         // answers settlement queries itself.
         archive_verdict: false,
+        // #427: the plugin's own identity rides through as data.
+        venue: d.venue.clone(),
         neg_risk: d.neg_risk,
         question: d.question.clone(),
     }

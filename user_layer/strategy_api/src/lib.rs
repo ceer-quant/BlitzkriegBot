@@ -248,6 +248,9 @@ pub struct BkMarket {
     pub expires_at_ms: i64,
     pub slot: i64,
     pub neg_risk: u8,
+    /// #427: the listing venue, pure DATA ("" = undeclared, the pre-#427
+    /// single-plugin world). Borrowed, NUL-terminated.
+    pub venue: *const c_char,
 }
 
 /// Everything a strategy gets for one evaluation: round timing plus the round's

@@ -94,6 +94,8 @@ pub struct PositionView {
     #[serde(default)]
     pub strategy: String,
     pub token_id: String,
+    #[serde(default)]
+    pub venue: String,
     #[serde(deserialize_with = "de_num")]
     pub entry_price: f64,
     #[serde(deserialize_with = "de_num")]
@@ -413,6 +415,9 @@ pub struct TradeView {
     pub entry_time: i64,
     #[serde(default)]
     pub exit_time: i64,
+    /// #427: the venue the trade's market listed on (older cores omit).
+    #[serde(default)]
+    pub venue: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -199,6 +199,10 @@ pub struct StrategyCtx<'a> {
     /// existing call site keeps the old shape, and strategies that never read
     /// the view cost nothing.
     held_positions: &'a [HeldPosition],
+    /// #427: the confirmed cross-venue mappings (`UnifiedEvent`s), as of this
+    /// cycle. Empty unless the host pushes one — every existing call site and
+    /// every single-venue package keeps today's shape.
+    unified_events: &'a [blitzkrieg_market_api::unified::UnifiedEvent],
 }
 
 impl<'a> StrategyCtx<'a> {
@@ -216,6 +220,7 @@ impl<'a> StrategyCtx<'a> {
             now_ms,
             fresh_book,
             held_positions: &[],
+            unified_events: &[],
         }
     }
 
@@ -224,6 +229,16 @@ impl<'a> StrategyCtx<'a> {
     /// production caller.
     pub fn with_positions(mut self, held: &'a [HeldPosition]) -> Self {
         self.held_positions = held;
+        self
+    }
+
+    /// #427: attach the confirmed cross-venue mappings for this cycle. The
+    /// engine's real evaluation cycle is the only production caller.
+    pub fn with_unified_events(
+        mut self,
+        events: &'a [blitzkrieg_market_api::unified::UnifiedEvent],
+    ) -> Self {
+        self.unified_events = events;
         self
     }
 
@@ -244,6 +259,13 @@ impl<'a> StrategyCtx<'a> {
     /// not push a view (diagnostics paths, shadow twins).
     pub fn held_positions(&self) -> &[HeldPosition] {
         self.held_positions
+    }
+    /// #427: the confirmed cross-venue mappings for this cycle. Empty when
+    /// the host did not push one (diagnostics paths, shadow twins) — a
+    /// cross-venue package treats that as "no paired event", never as an
+    /// error.
+    pub fn unified_events(&self) -> &[blitzkrieg_market_api::unified::UnifiedEvent] {
+        self.unified_events
     }
     /// Token book, but only while it is fresh enough to price off.
     pub fn fresh_book(&self, token_id: &str) -> Option<OrderbookSnapshot> {

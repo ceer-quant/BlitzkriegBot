@@ -111,6 +111,7 @@ pub fn event_at_ms(ev: &DataEvent) -> i64 {
         | DataEvent::Trade { now_ms, .. }
         | DataEvent::Resolution { now_ms, .. }
         | DataEvent::Cashflow { now_ms, .. }
+        | DataEvent::UnifiedMapping { now_ms, .. }
         | DataEvent::RoundEnd { now_ms } => *now_ms,
     }
 }
@@ -206,6 +207,13 @@ pub fn event_to_json(ev: &DataEvent) -> Value {
             "which": which.as_str(),
             // String decimal — the exactness convention of every decimal here.
             "usd": amount_usd.to_string(),
+        }),
+        DataEvent::UnifiedMapping { event, now_ms } => json!({
+            "at": now_ms,
+            "k": "unified",
+            // The #425 UnifiedEvent's camelCase serde form rides verbatim —
+            // one spelling on the wire, no re-shaping.
+            "e": serde_json::to_value(event).unwrap_or(Value::Null),
         }),
     }
 }
@@ -326,6 +334,13 @@ pub fn event_from_json(v: &Value) -> Result<DataEvent, String> {
                 amount_usd: dec_field(v, "usd")?,
                 now_ms,
             })
+        }
+        "unified" => {
+            let raw = v.get("e").ok_or_else(|| "missing `e`".to_string())?;
+            let event: blitzkrieg_market_api::unified::UnifiedEvent =
+                serde_json::from_value(raw.clone())
+                    .map_err(|e| format!("bad unified event: {e}"))?;
+            Ok(DataEvent::UnifiedMapping { event, now_ms })
         }
         other => Err(format!("unknown event kind `{other}`")),
     }
@@ -634,6 +649,7 @@ fn stamped_event(at: i64, ev: &DataEvent) -> DataEvent {
         | DataEvent::Trade { now_ms, .. }
         | DataEvent::Resolution { now_ms, .. }
         | DataEvent::Cashflow { now_ms, .. }
+        | DataEvent::UnifiedMapping { now_ms, .. }
         | DataEvent::RoundEnd { now_ms } => *now_ms = at,
     }
     out
@@ -1214,7 +1230,45 @@ mod tests {
                 amount_usd: dec!(659.995),
                 now_ms: now + 6,
             },
+            DataEvent::UnifiedMapping {
+                event: unified_event_fixture(),
+                now_ms: now + 7,
+            },
         ]
+    }
+
+    /// One operator-confirmed cross-venue mapping (#425 model) as the fixture
+    /// for the archive round trip.
+    fn unified_event_fixture() -> blitzkrieg_market_api::unified::UnifiedEvent {
+        use blitzkrieg_market_api::unified::{
+            ListingStatus, PlatformListing, SettlementSource, UnifiedEvent, Venue,
+        };
+        let listing = |venue: Venue, cond: &str| PlatformListing {
+            venue,
+            condition_id: cond.into(),
+            up_token_id: format!("{cond}-up"),
+            down_token_id: format!("{cond}-down"),
+            asset: Some("bitcoin".into()),
+            title: "Bitcoin Up or Down".into(),
+            settlement_rules: "Binance 1m candle".into(),
+            settlement_source: SettlementSource::Chainlink,
+            expires_at_ms: 1_000_000,
+            status: ListingStatus::Active,
+        };
+        let mut e = UnifiedEvent {
+            id: "evt-1".into(),
+            title: "Bitcoin Up or Down".into(),
+            settlement_rules: "Binance 1m candle".into(),
+            settlement_source: SettlementSource::Chainlink,
+            listings: Default::default(),
+            discrepancies: Vec::new(),
+            status: blitzkrieg_market_api::unified::EventStatus::Paired,
+        };
+        e.listings
+            .insert(Venue::Polymarket, listing(Venue::Polymarket, "0xpm"));
+        e.listings
+            .insert(Venue::Kalshi, listing(Venue::Kalshi, "kx-1"));
+        e
     }
 
     fn eq(a: &DataEvent, b: &DataEvent) {
@@ -1299,6 +1353,16 @@ mod tests {
                     now_ms: n2,
                 },
             ) => assert_eq!((w1, a1, n1), (w2, a2, n2)),
+            (
+                DataEvent::UnifiedMapping {
+                    event: e1,
+                    now_ms: n1,
+                },
+                DataEvent::UnifiedMapping {
+                    event: e2,
+                    now_ms: n2,
+                },
+            ) => assert_eq!((e1, n1), (e2, n2)),
             _ => panic!("kind mismatch: {a:?} vs {b:?}"),
         }
     }

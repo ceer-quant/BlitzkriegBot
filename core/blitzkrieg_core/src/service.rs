@@ -3353,6 +3353,16 @@ impl Core {
                     .active_ledger_mut()
                     .credit_cashflow(*amount_usd);
             }
+            // #427: a confirmed cross-venue mapping rides the stream as
+            // strategy-layer state. The core counts it (corpus completeness)
+            // and stores it for the read view; nothing in the trading path
+            // acts on it, so a corpus without these rows is byte-identical.
+            crate::engine::DataEvent::UnifiedMapping { event, .. } => {
+                self.stats.unified_mappings += 1;
+                if let Some(e) = self.engine.as_mut() {
+                    e.put_unified_mapping(event.clone());
+                }
+            }
             crate::engine::DataEvent::RoundMarkets { markets, .. } => {
                 self.stats.rounds += 1;
                 // #377 (治 #2): record which markets the archive promised a
@@ -5027,6 +5037,8 @@ impl Core {
                 // E28 (§9.2): the account the position settles into — a field
                 // read, and the row the panel filters per account.
                 account_id: p.account_id.as_str().to_string(),
+                // #427: the Venue column — a field read off the position.
+                venue: p.venue.clone(),
                 entry_price: p.entry_price,
                 current_price: p.current_price,
                 shares: p.shares,
@@ -5958,6 +5970,14 @@ impl Core {
                             // E28 (§9.2): the position belongs to the account
                             // whose fill opened it.
                             account_id: d.account_id.clone(),
+                            // #427: the venue is a field read off the market the
+                            // token belongs to — the panels' Venue column, never
+                            // a decision input.
+                            venue: self
+                                .engine
+                                .as_ref()
+                                .and_then(|e| e.venue_of(&d.token_id))
+                                .unwrap_or_default(),
                         };
                         self.positions.open(p, now_ms).id
                     }
@@ -9753,6 +9773,11 @@ struct CoreStats {
     cashflow_rewards: u64,
     cashflow_rebates_usd: Decimal,
     cashflow_rewards_usd: Decimal,
+    /// #427: confirmed cross-venue mapping rows replayed from the stream —
+    /// the corpus-completeness anchor for the cross-venue strategies (a
+    /// corpus that lost its `unified` rows reports zero instead of replaying
+    /// "successfully" blind).
+    unified_mappings: u64,
     evaluations: u64,
     signals: u64,
     place_rejected: u64,
@@ -10041,6 +10066,7 @@ mod books_mirror_tests {
                     round_slot: slot,
                     round_duration_sec: 900,
                     archive_verdict: false,
+                    venue: String::new(),
                     neg_risk: true,
                     question: "?".into(),
                 }],
@@ -10142,6 +10168,7 @@ mod books_mirror_tests {
                     round_slot: slot,
                     round_duration_sec: 900,
                     archive_verdict: false,
+                    venue: String::new(),
                     neg_risk: true,
                     question: "?".into(),
                 }],
@@ -12010,6 +12037,7 @@ mod strategy_dispatch_tests {
                 round_slot: 1,
                 round_duration_sec: 900,
                 archive_verdict: false,
+                venue: String::new(),
                 neg_risk: true,
                 question: format!("{a} up or down"),
             })
@@ -15665,6 +15693,7 @@ mod settlement_service_tests {
                     round_slot: 0,
                     round_duration_sec: 1,
                     archive_verdict: true,
+                    venue: String::new(),
                     neg_risk: false,
                     question: "?".into(),
                 }],
@@ -16832,6 +16861,7 @@ mod exit_reason_table_tests {
                     was_maker: false,
                     target_exit_price: None,
                     account_id: crate::model::default_account_id(),
+                    venue: String::new(),
                 },
                 1_000,
             );

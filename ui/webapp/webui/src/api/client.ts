@@ -1150,6 +1150,8 @@ export interface Position {
   shares?: number
   strategy?: string
   remainingSec?: number
+  /** #427: the venue the position's market listed on (older cores omit). */
+  venue?: string
 }
 
 export interface TradeRow {
@@ -1168,6 +1170,8 @@ export interface TradeRow {
   /** Milliseconds since epoch (older cores omit). */
   entryTime?: number
   exitTime?: number
+  /** #427: the venue the trade's market listed on (older cores omit). */
+  venue?: string
 }
 
 export interface TradeSummary {

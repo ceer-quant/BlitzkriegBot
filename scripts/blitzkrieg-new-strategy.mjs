@@ -86,6 +86,7 @@ pub fn template_market() -> MarketInfo {
         expires_at_ms: 0,
         slot: 0,
         neg_risk: false,
+        venue: String::new(),
     }
 }
 

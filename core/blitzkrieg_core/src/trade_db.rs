@@ -62,6 +62,10 @@ pub struct TradeRecord {
     pub high_pnl_pct: Decimal,
     #[serde(with = "crate::decimal")]
     pub low_pnl_pct: Decimal,
+    /// #427: the venue the trade's market listed on. A row written before the
+    /// field existed reads as undeclared (serde default — no migration).
+    #[serde(default)]
+    pub venue: String,
 }
 
 impl TradeRecord {
@@ -104,6 +108,7 @@ impl TradeRecord {
             market_price_at_exit: c.exit_price,
             high_pnl_pct: c.high_pnl_pct,
             low_pnl_pct: c.low_pnl_pct,
+            venue: c.venue.clone(),
         }
     }
 }
@@ -300,6 +305,7 @@ mod tests {
             exit_role: OrderRole::Taker,
             dust_shares: Decimal::ZERO,
             account_id: crate::model::default_account_id(),
+            venue: String::new(),
         }
     }
 

@@ -486,6 +486,7 @@ mod tests {
             round_slot: 1,
             round_duration_sec: 900,
             archive_verdict: false,
+            venue: String::new(),
             neg_risk: false,
             question: "?".into(),
         }

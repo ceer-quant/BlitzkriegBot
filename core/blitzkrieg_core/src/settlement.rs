@@ -921,6 +921,7 @@ mod tests {
             entered_at_ms: entered_ms,
             expires_at_ms: entered_ms + 300_000,
             account_id: crate::model::default_account_id(),
+            venue: String::new(),
             // F6 (main): no book has been seen for this fixture position.
             last_book_ts: 0,
             state: crate::exit_policy::ExitState::new(dec!(0.40), entered_ms),

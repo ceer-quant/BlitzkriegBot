@@ -34,7 +34,7 @@ use arc_swap::ArcSwap;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-use blitzkrieg_lua_runtime::{FeeScheduleView, LuaStrategy};
+use blitzkrieg_lua_runtime::{FeeScheduleView, LuaStrategy, UnifiedEventView, UnifiedListingView};
 use blitzkrieg_strategy_api::{
     BookUpdate, FreshBook, HoldingView, MarketInfo, RoundContext, RoundInfo, SafeStrategy,
     StrategyMode,
@@ -594,6 +594,43 @@ impl EngineStrategy for LuaEngineAdapter {
             .collect();
         self.inner.on_holdings(&held);
 
+        // #427: the confirmed cross-venue mappings, so `bk.unified_events()`
+        // sees this cycle's world state. Same push pattern as holdings — the
+        // adapter translates the kernel type into the lua_runtime's plain-data
+        // view (lua_runtime must not depend on market_api).
+        let unified: Vec<UnifiedEventView> = ctx
+            .unified_events()
+            .iter()
+            .map(|e| UnifiedEventView {
+                id: e.id.clone(),
+                title: e.title.clone(),
+                status: match e.status {
+                    blitzkrieg_market_api::unified::EventStatus::Paired => "paired".to_string(),
+                    blitzkrieg_market_api::unified::EventStatus::SingleLegAvailable => {
+                        "singleLegAvailable".to_string()
+                    }
+                },
+                discrepancies: e
+                    .discrepancies
+                    .iter()
+                    .map(|d| d.as_str().to_string())
+                    .collect(),
+                listings: e
+                    .listings
+                    .values()
+                    .map(|l| UnifiedListingView {
+                        venue: l.venue.as_str().to_string(),
+                        up_token: l.up_token_id.clone(),
+                        down_token: l.down_token_id.clone(),
+                        expires_at_ms: l.expires_at_ms,
+                    })
+                    .collect(),
+            })
+            .collect();
+        if let Ok(mut st) = self.inner.state().lock() {
+            st.unified_events = unified;
+        }
+
         let round_ctx = RoundContext {
             round: RoundInfo {
                 slot: ctx.round_slot(),
@@ -611,6 +648,7 @@ impl EngineStrategy for LuaEngineAdapter {
                     expires_at_ms: m.expires_at_ms,
                     slot: m.round_slot,
                     neg_risk: m.neg_risk,
+                    venue: m.venue.clone(),
                 })
                 .collect(),
         };

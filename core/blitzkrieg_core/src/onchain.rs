@@ -1575,6 +1575,9 @@ fn convert(
                 &down,
             )
             .is_some(),
+            // Converter output is the historical single-venue (Polymarket)
+            // corpus — no venue declared, the serde default's world.
+            venue: String::new(),
             neg_risk: g.get("negRisk").and_then(Value::as_bool).unwrap_or(false),
             question: sample
                 .get("title")
@@ -1596,9 +1599,12 @@ fn convert(
 
     // rank: round < top < spot < trade < resolution < round_end < cashflow —
     // the canonical same-instant order. A cashflow sorts LAST at its instant:
-    // it is bookkeeping, never a decision input.
+    // it is bookkeeping, never a decision input. A unified mapping sorts
+    // with the round declaration (before the books it names): strategies
+    // must know which tokens are one bet before pricing them.
     let rank = |ev: &DataEvent| match ev {
         DataEvent::RoundMarkets { .. } => 0u8,
+        DataEvent::UnifiedMapping { .. } => 0,
         DataEvent::TopOfBook { .. } => 1,
         DataEvent::Spot { .. } => 2,
         DataEvent::Trade { .. } => 3,

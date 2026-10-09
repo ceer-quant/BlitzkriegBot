@@ -80,6 +80,9 @@ pub struct MarketInfo {
     pub expires_at_ms: i64,
     pub slot: i64,
     pub neg_risk: bool,
+    /// #427: the listing venue, pure DATA (empty = undeclared). The C ABI
+    /// default keeps every existing producer compiling unchanged.
+    pub venue: String,
 }
 
 /// One evaluation cycle's context: round timing + the round's markets.
@@ -561,6 +564,7 @@ macro_rules! export_strategy {
                                 expires_at_ms: m.expires_at_ms,
                                 slot: m.slot,
                                 neg_risk: m.neg_risk != 0,
+                                venue: unsafe { cstr(m.venue) }.unwrap_or_default(),
                             })
                             .collect()
                     };
@@ -1004,6 +1008,7 @@ mod tests {
             expires_at_ms: 0,
             slot: 0,
             neg_risk: 1,
+            venue: c"polymarket".as_ptr(),
         };
         let round = crate::BkRound {
             slot: 0,

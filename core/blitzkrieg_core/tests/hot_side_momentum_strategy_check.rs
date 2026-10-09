@@ -68,6 +68,7 @@ fn market() -> CryptoMarket {
         round_slot: SLOT,
         round_duration_sec: 900,
         archive_verdict: false,
+        venue: String::new(),
         neg_risk: false,
         question: "BTC up or down".into(),
     }
