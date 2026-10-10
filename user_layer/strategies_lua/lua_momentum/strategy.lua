@@ -1,5 +1,10 @@
 -- lua_momentum — the official Lua 5.4 example strategy (E30 / #336).
 --
+-- ⚠️ EXAMPLE ONLY, NOT FOR PRODUCTION: the v2-corpus census after #419
+-- (docs/reports/evolution/RETEST-2026-10-10.md §4) measured 20,038 closed
+-- trades at net −$17,575.78 — single-tick confirmation + naked legs to
+-- settlement. Kept as the sandbox teaching fixture; do not enable.
+--
 -- A small momentum follower that shows the whole suggested surface:
 --
 --   bk_on_book(update)   observe mids, classify per-token momentum
