@@ -1,5 +1,18 @@
 # lua_momentum — the official Lua example strategy (E30 / #336)
 
+> **⚠️ NOT FOR PRODUCTION USE — reference example only.**
+> After the #419 locked-top fix re-armed mid-dependent strategies, a full
+> replay census on the v2 corpus (90h, official fees + 1 tick slippage,
+> 10-share lot) measured this strategy at **20,038 closed trades / net
+> −$17,575.78 / PF 0.43**. 17,056 of those trades rode a naked leg all the
+> way to settlement and lost −$18,899 in settlement zeros; take-profit only
+> clawed back +$1,439. The single-tick `threshold` confirmation (~every tick
+> with a locked top) fires an entry intent nearly every tick, and the
+> surviving fills are mostly lottery tickets that expire worthless. See
+> `docs/reports/evolution/RETEST-2026-10-10.md` §4. Do NOT enable this in
+> production; keep it as the sandbox/example teaching fixture it was written
+> to be (E30/#336, `lua-sandbox-check.mjs` pins it).
+
 A small momentum follower that demonstrates the full Lua strategy surface
 inside the 5.4 sandbox: observe books, classify per-token momentum, emit
 entry/break INTENTS. It never places an order — every return value is
