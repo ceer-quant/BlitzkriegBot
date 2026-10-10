@@ -5,19 +5,19 @@
   "entry": "strategy.lua",
   "sha256": "3d8aacab8b7f80f82d00a327c3fd9c200abbcb4c31a219defdb591f595d0835c",
   "author": "BlitzkriegBot",
-  "description": "Single-leg round participant for binary rounds (@almach mechanism, issue #387): 55.1% of the wallet's 15m rounds had only ONE leg worth lifting — outside pair_discount_arb's action space. When a round exposes a sole liftable leg (the other side's ask is gone) or a declared leader (strictly higher ask, gap >= min_gap), buy that side at its ask when it prices inside [min_entry_price, max_entry_price] (default 0.55-0.85 — the favourable part of the ledger's own single-leg odds table; the 0.50-0.55 coin-flip dead band and the sub-0.50 lottery zone are refused). The position is a NAKED directional leg: survival belongs to the kernel (charter 「止损不归你管」, DEV_V0_3 §16.4 — the strategy computes no stop, monitors no stop, and expresses no stop; a leg rides its round to settlement, the kernel's force-exit, or an honest hold when no REDEEM evidence exists; no merge is ever emitted because no complete pair exists; the dead-zone deadline exit this round structure wants is a kernel exit-policy surface, issue #396), its cap is the strategy's own per-round max_open_positions, and NOTHING is waived — every kernel gate (timing, momentum, risk, sizing) applies at full strength; the fee schedule must be in force or nothing prices (fail-closed). holds_to_settlement only tells the kernel's generic exit ladder to leave the legs alone: settlement semantics are untouched — the winner redeems $1.00, the loser zero, and a leg without REDEEM evidence is honestly held. Signal-only: the kernel adjudicates, sizes, gates and settles every intent.",
+  "description": "Single-leg round participant for binary rounds (@almach mechanism, issue #387): 55.1% of the wallet's 15m rounds had only ONE leg worth lifting — outside pair_discount_arb's action space. When a round exposes a sole liftable leg (the other side's ask is gone) or a declared leader (strictly higher ask, gap >= min_gap), buy that side at its ask when it prices inside [min_entry_price, max_entry_price] (default 0.55-0.88 — the 2026-10-10 replay re-calibration on the post-#419 kernel: the 0.55-0.60 and 0.85-0.88 slices are both net-positive margins (+$35.06/1907 and +$3.90/8 trades) while the 0.50-0.55 coin-flip dead band is a measured NEGATIVE margin (−$2.17/85) and stays refused, and the sub-0.50 lottery zone is refused). The position is a NAKED directional leg: survival belongs to the kernel (charter 「止损不归你管」, DEV_V0_3 §16.4 — the strategy computes no stop, monitors no stop, and expresses no stop; a leg rides its round to settlement, the kernel's force-exit, or an honest hold when no REDEEM evidence exists; no merge is ever emitted because no complete pair exists; the dead-zone deadline exit this round structure wants is a kernel exit-policy surface, issue #396), its cap is the strategy's own per-round max_open_positions (default 10 — the 2026-10-10 replay: the per-round concurrency cap was binding and lifting 3→10 is worth +$72.79/2242 trades), and NOTHING is waived — every kernel gate (timing, momentum, risk, sizing) applies at full strength; the fee schedule must be in force or nothing prices (fail-closed). holds_to_settlement only tells the kernel's generic exit ladder to leave the legs alone: settlement semantics are untouched — the winner redeems $1.00, the loser zero, and a leg without REDEEM evidence is honestly held. Signal-only: the kernel adjudicates, sizes, gates and settles every intent.",
   "holds_to_settlement": true,
   "gate_exemptions": {},
   "tunables": {
     "min_entry_price": {
       "type": "decimal",
-      "default": "0.60",
+      "default": "0.55",
       "min": "0.50",
       "max": "0.80"
     },
     "max_entry_price": {
       "type": "decimal",
-      "default": "0.85",
+      "default": "0.88",
       "min": "0.60",
       "max": "0.95"
     },
@@ -41,7 +41,7 @@
     },
     "max_open_positions": {
       "type": "int",
-      "default": "3",
+      "default": "10",
       "min": "1",
       "max": "10"
     },
