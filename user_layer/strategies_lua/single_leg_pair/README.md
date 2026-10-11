@@ -95,7 +95,7 @@ was tested and FALSIFIED on this taker corpus: `min_time_left_sec` 300
 | `min_entry_price` | `0.55` | band floor (0.55–0.60 is a positive replay margin; 0.50–0.55 is a measured NEGATIVE one) |
 | `max_entry_price` | `0.88` | band ceiling (0.85–0.88 adds a thin but positive margin on the post-#419 kernel) |
 | `dead_band_floor` | `0.50` | coin-flip zone start — one considered look, then latched |
-| `min_gap` | `0.10` | leader verdict requires at least this raw price gap |
+| `min_gap` | `0.30` | leader verdict requires at least this raw price gap (2026-10-11: raised from 0.10 — the @almach leader-gap domain is p10 +0.215 / p50 +0.475) |
 | `min_time_left_sec` | `45` | entry time floor (stops run past it); 2026-10-10 A/B: raising it LOSES money — timing is already early |
 | `stop_deadline_sec` | `25` | seconds-left where the naked stop arms |
 | `max_open_positions` | `10` | strategy openings per round slot (the shipped 3 was binding: +$72.79 at 10) |
@@ -130,6 +130,49 @@ it is worth only $0.81 on the adopted arm and requires a .lua change;
 the @almach maker-structure hypotheses (early-entry U-shape, skewed pair
 sizing, insurance leg) are maker-side phenomena that do not transfer to
 this taker/ask-lift corpus.
+
+## Calibration record (2026-10-11, @almach on-chain profile → `min_gap`)
+
+Full behavioural extraction of the @almach wallet from the 15-day on-chain
+action archive (45,813 trades): he is 100% BUY with zero SELL legs (buy &
+hold to settlement, batched entries), participates in 100% of rounds (1–8
+tokens each — no round selection), and his P&L body is the head-of-round ×
+high-price-band × LEADER trade: leader legs (entry ask strictly above the
+opposite leg's ask) run 3,320 tokens at 81.8% WR / +9.8% ROI, with the
+leader gap (entry ask − opposite ask) at p10 +0.215 / p50 +0.475 — an
+order of magnitude above this package's shipped 0.10 floor.
+
+Pre-registered before any replay (judgement criteria written first):
+
+| arm | closed | WR% | PF | net $ | Δ vs baseline (301.59) |
+|---|---|---|---|---|---|
+| `min_gap=0.30` **(ADOPTED)** | 10,496 | 65.47 | 1.2391 | **362.56** | **+60.97** |
+| `min_gap=0.45` (REJECTED) | 11,216 | 69.83 | 1.1810 | 271.12 | −30.47 |
+
+Overfitting guard — chronological 60.5% train / 39.5% val halves, against
+the shipped-default halves run back to back (tradesSha256 of the default
+halves is bit-identical to the ceiling-recipe halves, so the comparison is
+exact):
+
+| half | shipped default | min_gap=0.30 | Δ |
+|---|---|---|---|
+| train (215,673 lines) | 248.27 | 297.26 | **+48.98** |
+| val (rest) | 53.32 | 65.30 | **+11.98** |
+
+Both halves agree in direction; no #405-style reversal. gap=0.45 loses on
+both halves too — the 0.2–0.4 opposite-ask band is the profit body
+(+$18,053 of the wallet's leader P&L) and an over-tight gap floor starves it.
+
+Honest anatomy: only +$17.37 of the +$60.97 is this package's own margin
+(158.12 → 175.49); the other +$43.59 is a second-order gain to
+pair_discount_arb (143.47 → 187.07) — once weak-gap legs are refused, this
+package stops competing with the pair for the same tokens. The
+second-order effect also agrees in direction on both halves (train
++$33.86 / val +$9.73). The heavy-side sizing tilt (size_multiple) was
+measured the same day and REJECTED — a declaration-path amplification
+converts maker-queue depth into taker chase fills (partial-fill rate
+12%→46%) and its full-corpus peak (+$93) does not survive the val half
+(−$24 there).
 
 ## Data notes
 
