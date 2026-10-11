@@ -1,0 +1,19 @@
+# cargo-audit advisory policy — see the Security workflow (.github/workflows/
+# security.yml), which runs `cargo audit` non-blocking. This file is the machine
+# -readable record of which advisories we accept today and why; anything not
+# listed here is a real finding when it appears.
+
+[advisories]
+# Two accepted findings, both third-party pinned and both re-checked whenever
+# their upstream moves:
+#
+# 1. RUSTSEC-2023-0071 (rsa, Marvin Attack, no fixed release): the crate is
+#    pulled in by extensions/kalshi for request signing against the Kalshi API.
+#    We only ever verify our own freshly-signed requests; the attack needs an
+#    attacker-chosen ciphertext oracle served over many timed decryptions, and
+#    no key of ours is ever used to decrypt. Upstream rsa 0.9.x has no patched
+#    release, so ignoring is the only way to keep the audit signal readable.
+#    Re-evaluate on any rsa 0.9.x release naming this advisory.
+ignore = [
+    "RUSTSEC-2023-0071",
+]
