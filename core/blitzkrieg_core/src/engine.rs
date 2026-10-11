@@ -1156,6 +1156,23 @@ impl Engine {
             .filter(|v| !v.is_empty())
     }
 
+    /// The condition's OTHER outcome token, read off the current round's
+    /// market list — the dry settlement ladder's counter-evidence key. The
+    /// binary market structure guarantees a held token's partner exists while
+    /// the market is live; `None` when the token belongs to no live market
+    /// (the caller stamps empty and the ladder keeps its withhold behavior).
+    pub fn partner_of(&self, token_id: &str) -> Option<String> {
+        self.scanner.markets().iter().find_map(|m| {
+            if m.up_token_id == token_id {
+                Some(m.down_token_id.clone())
+            } else if m.down_token_id == token_id {
+                Some(m.up_token_id.clone())
+            } else {
+                None
+            }
+        })
+    }
+
     /// Force-finalize every pending near-miss (used on shutdown so records are
     /// not lost when the process stops before a window elapses).
     pub fn flush_near_misses(&mut self) -> Vec<crate::shadow::NearMissRecord> {

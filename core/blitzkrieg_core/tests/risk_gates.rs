@@ -274,6 +274,7 @@ fn position(
             target_exit_price: None,
             account_id: blitzkrieg_core::model::default_account_id(),
             venue: String::new(),
+            partner_token_id: String::new(),
         },
         now,
     );

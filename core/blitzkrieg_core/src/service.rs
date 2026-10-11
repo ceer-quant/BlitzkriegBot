@@ -1132,6 +1132,12 @@ pub struct PlaceOutcome {
 /// drops the oldest otherwise; both are counted in `engine.stats.exitReasons`.
 const EXIT_REASON_TABLE_MAX: usize = 64;
 
+/// The counter-evidence bar for the dry settlement ladder: a partner-token bid
+/// at or above this names the held leg the loser. Same value as the live
+/// venue path's own decisiveness bar (Gamma's DECISIVE_HIGH, 0.99) — the two
+/// ladders demand the same strength of verdict before they book money.
+pub(crate) const COUNTER_DECISIVE_HIGH: Decimal = rust_decimal_macros::dec!(0.99);
+
 /// #351: a dry-mode taker leg in flight — the fill model prices travel time
 /// (`taker_latency_ms`) and report time (`taker_rtt_ms`), so the leg must
 /// never fill on the decision-time quote. Stage 1 (match) fires at the first
@@ -6011,6 +6017,16 @@ impl Core {
                                 .as_ref()
                                 .and_then(|e| e.venue_of(&d.token_id))
                                 .unwrap_or_default(),
+                            // The condition's other token, stamped from the
+                            // SAME market lookup: the dry settlement ladder's
+                            // counter-evidence key. Empty when no market is
+                            // live for the token — the ladder then has no
+                            // partner to consult and withholds as before.
+                            partner_token_id: self
+                                .engine
+                                .as_ref()
+                                .and_then(|e| e.partner_of(&d.token_id))
+                                .unwrap_or_default(),
                         };
                         self.positions.open(p, now_ms).id
                     }
@@ -8847,6 +8863,50 @@ impl Core {
         // zero-payout is a named loser, and naming one requires evidence above
         // the coin-flip. Anything darker is our view being broken — re-arm.
         if best <= Decimal::new(5, 1) {
+            // Counter-evidence ladder: our leg priced below the coin-flip AND
+            // the condition's OTHER token decisively bid (≥ COUNTER_DECISIVE,
+            // Gamma's own DECISIVE_HIGH). At expiry nobody pays 0.99 for a
+            // coin still in the air — the partner's bid IS the venue pricing
+            // the verdict, so our leg is the named loser and settles at 0.
+            // Without this the leg withholds forever: the venue never answers
+            // an expired round's query and the position blocks capacity until
+            // an operator flattens it by hand (the ETH/BTC zombie positions).
+            // The evidence key is the position's stamped partner token; a
+            // position without one (old snapshots) keeps the old withhold.
+            let partners: Vec<String> = positions
+                .iter()
+                .filter(|p| query.token_ids.contains(&p.token_id))
+                .filter(|p| !p.partner_token_id.is_empty())
+                .map(|p| p.partner_token_id.clone())
+                .filter(|t| !query.token_ids.contains(t))
+                .collect();
+            let counter = partners
+                .iter()
+                .filter_map(|t| {
+                    let book = self.books.get(t)?;
+                    let top_bid = book
+                        .bids
+                        .iter()
+                        .map(|(p, _)| *p)
+                        .filter(|p| *p > Decimal::ZERO)
+                        .max()?;
+                    (top_bid >= COUNTER_DECISIVE_HIGH).then(|| (t.clone(), top_bid))
+                })
+                .max_by_key(|(_, bid)| *bid);
+            if let Some((partner, _)) = counter {
+                let payouts = priced
+                    .iter()
+                    .map(|(t, _)| ((*t).to_string(), Decimal::ZERO))
+                    .chain(std::iter::once((partner, Decimal::ONE)))
+                    .collect();
+                return Some(blitzkrieg_market_api::MarketResolution {
+                    condition_id: query.condition_id.clone(),
+                    resolved: true,
+                    payouts,
+                    neg_risk: false,
+                    source: "core-dry".to_string(),
+                });
+            }
             return None;
         }
         let payouts = priced
@@ -15811,6 +15871,173 @@ mod settlement_service_tests {
         assert!(audit.ok, "audit: {}", audit.summary());
     }
 
+    /// Declare one binary market (the user's zombie scenario, issue for root
+    /// cause B): the held leg priced toward zero, the partner leg DECISIVELY
+    /// bid — the counter-evidence key the dry ladder has been blind to.
+    fn declare_partner_market(c: &mut Core, up: &str, down: &str) {
+        // The stamp reads the scanner's market table, so the fixture core
+        // needs the engine the production path has.
+        if !c.has_engine() {
+            c.enable_engine(crate::engine::Engine::new(
+                crate::engine::EngineConfig::default(),
+            ));
+        }
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![crate::model::CryptoMarket {
+                    asset: "BTC".into(),
+                    condition_id: "cond".into(),
+                    question_id: "q".into(),
+                    up_token_id: up.into(),
+                    down_token_id: down.into(),
+                    up_price: dec!(0.6),
+                    down_price: dec!(0.4),
+                    expires_at_ms: 2_000,
+                    round_slot: 0,
+                    round_duration_sec: 1,
+                    archive_verdict: false,
+                    venue: String::new(),
+                    neg_risk: false,
+                    question: "?".into(),
+                }],
+                now_ms: 1,
+            },
+            1,
+        );
+    }
+
+    /// Counter-evidence settlement: our leg's own book is dead (bid toward
+    /// zero, below the coin-flip bar) but the PARTNER token is decisively bid
+    /// at 0.99 — the market has already priced the winner. The old ladder saw
+    /// only `query.token_ids` (our own leg), found no evidence above 0.5, and
+    /// withheld forever: the position sat past expiry blocking capacity
+    /// (the ETH/BTC UP zombie positions). The partner's decisive bid is the
+    /// venue's own pricing of the verdict — at expiry nobody pays 0.99 for a
+    /// coin still in the air. Our leg settles as the loser, at 0.
+    #[test]
+    fn a_decisive_partner_bid_settles_held_leg_as_the_loser() {
+        let dir = scratch("partner-loser");
+        let mut c = settling_core(&dir, dec!(10));
+        declare_partner_market(&mut c, "tok", "d");
+
+        // Entry at 0.40 (taker) — `entry_order` stamps the partner from the
+        // market table declared above.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
+        let (_id, status) = c.place(entry_order(dec!(0.40), dec!(5)), 0, 1).unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+        assert_eq!(
+            c.positions().open_positions()[0].partner_token_id,
+            "d",
+            "the entry stamps the condition's other token"
+        );
+
+        // Expiry: our leg's book dies toward zero (bid 0.02, below the
+        // coin-flip bar) while the partner is decisively bid at 0.99.
+        c.book_snapshot("tok", vec![(dec!(0.02), dec!(100))], vec![], 1_998);
+        c.book_snapshot("d", vec![(dec!(0.99), dec!(100))], vec![], 1_998);
+
+        c.tick(2_100).unwrap();
+
+        assert!(
+            c.positions().open_positions().is_empty(),
+            "the partner's decisive bid settles our leg as the loser — no zombie"
+        );
+        let closed = &c.positions().closed_positions()[0];
+        assert_eq!(closed.exit_reason, ExitReason::Settlement);
+        assert_eq!(
+            closed.exit_price,
+            Decimal::ZERO,
+            "a named loser pays 0 — the money was lost on the trade, not invented here"
+        );
+        assert_eq!(
+            closed.net_pnl_usd,
+            dec!(-2.036),
+            "cost 2 + fee 0.036, fully realized: the loss is on the books"
+        );
+
+        // Provenance: this is a DRY synthesis naming the partner the winner —
+        // the journal must say so.
+        let journal = std::fs::read_to_string(dir.join("settlements.jsonl")).unwrap();
+        let rec = journal
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["record"]["positionId"] == c.positions().closed_positions()[0].id)
+            .expect("the settlement is journaled");
+        assert_eq!(rec["record"]["source"], "core-dry");
+        assert_eq!(
+            rec["record"]["winningTokenId"],
+            serde_json::json!("d"),
+            "the synthesized verdict names the partner the winner"
+        );
+        assert_eq!(
+            rec["record"]["payoutPerShare"],
+            serde_json::json!(0.0),
+            "our leg is the loser: nothing to redeem, nothing invented"
+        );
+
+        // The accounting identity holds end to end.
+        let audit = c.run_accounting_audit(2_500);
+        assert!(audit.ok, "audit: {}", audit.summary());
+    }
+
+    /// The gate is the partner's decisiveness, not its mere existence: a
+    /// partner bid at 0.70 (a market still in doubt) settles nothing. The
+    /// threshold is Gamma's own DECISIVE_HIGH (0.99) — the same bar the live
+    /// venue path requires before it calls a payout final.
+    #[test]
+    fn an_undecided_partner_bid_keeps_the_old_withhold() {
+        let dir = scratch("partner-undecided");
+        let mut c = settling_core(&dir, dec!(10));
+        declare_partner_market(&mut c, "tok", "d");
+
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
+        let (_id, status) = c.place(entry_order(dec!(0.40), dec!(5)), 0, 1).unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+
+        c.book_snapshot("tok", vec![(dec!(0.02), dec!(100))], vec![], 1_998);
+        c.book_snapshot("d", vec![(dec!(0.70), dec!(100))], vec![], 1_998);
+
+        c.tick(2_100).unwrap();
+
+        assert_eq!(
+            c.positions().open_positions().len(),
+            1,
+            "a 0.70 partner bid is not a verdict — the position stays open loudly"
+        );
+    }
+
+    /// Old snapshots carry no partner (empty string): no counter evidence,
+    /// no counter verdict — the old withhold stands. The pre-existing zombie
+    /// positions stay on the manual path; this fix only stops NEW ones. The
+    /// fixture opens the position with NO market declared (the restore
+    /// situation: the scanner has no row for that condition), so the entry
+    /// stamps an empty partner.
+    #[test]
+    fn a_partnerless_position_withholds_as_before() {
+        let dir = scratch("partnerless");
+        let mut c = settling_core(&dir, dec!(10));
+
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
+        let (_id, status) = c.place(entry_order(dec!(0.40), dec!(5)), 0, 1).unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+        assert_eq!(
+            c.positions().open_positions()[0].partner_token_id,
+            "",
+            "no market on the scanner — nothing to stamp"
+        );
+
+        c.book_snapshot("tok", vec![(dec!(0.02), dec!(100))], vec![], 1_998);
+        c.book_snapshot("d", vec![(dec!(0.99), dec!(100))], vec![], 1_998);
+
+        c.tick(2_100).unwrap();
+
+        assert_eq!(
+            c.positions().open_positions().len(),
+            1,
+            "no partner stamped — no counter verdict (the manual path stays)"
+        );
+    }
+
     /// Acceptance: settle → `run_accounting_audit` → ok, with the payout held as a
     /// receivable (not cash) until the redemption confirms.
     #[test]
@@ -16895,6 +17122,7 @@ mod exit_reason_table_tests {
                     target_exit_price: None,
                     account_id: crate::model::default_account_id(),
                     venue: String::new(),
+                    partner_token_id: String::new(),
                 },
                 1_000,
             );

@@ -105,6 +105,7 @@ mod tests {
             expires_at_ms: 900_000,
             account_id: crate::model::default_account_id(),
             venue: String::new(),
+            partner_token_id: String::new(),
             last_book_ts: 0,
             state: ExitState::new(dec!(0.43), 1000),
             flows: crate::position::CashFlows {
