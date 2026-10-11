@@ -1898,13 +1898,27 @@ impl PositionManager {
     }
 
     /// Capacity + cooldown gate (mirrors TS `canOpen`).
+    ///
+    /// The two capacity caps count only UNEXPIRED positions: a position
+    /// whose round has passed `expires_at_ms` is settlement-dead (the
+    /// winner redeems, the loser pays zero — no future event can grow the
+    /// exposure), yet it can be stuck on the book indefinitely when no bid
+    /// ever returns (the 2026-10-11 production incident: two expired
+    /// positions held both shipped slots for 6 days; a restart restores the
+    /// book, so the freeze never cleared on its own). Cooldowns and the
+    /// daily-loss breaker keep judging every position as before.
     pub fn can_open(
         &self,
         asset: Option<&str>,
         direction: Option<SignalDirection>,
         now_ms: i64,
     ) -> Result<(), String> {
-        if self.open.len() >= self.config.max_positions {
+        let live = self
+            .open
+            .iter()
+            .filter(|p| p.expires_at_ms > now_ms)
+            .count();
+        if live >= self.config.max_positions {
             return Err(format!("Max positions ({})", self.config.max_positions));
         }
         if self.daily_loss_tripped() {
@@ -1940,7 +1954,11 @@ impl PositionManager {
             // vocabulary, so a wording drift would be a silent telemetry break.
             // At the old cap of 1 the message reads exactly as before; above it,
             // the count rides the same line so an operator can see why.
-            let in_asset = self.open.iter().filter(|p| p.asset == asset).count();
+            let in_asset = self
+                .open
+                .iter()
+                .filter(|p| p.asset == asset && p.expires_at_ms > now_ms)
+                .count();
             if in_asset >= self.config.max_positions_per_asset as usize {
                 return Err(format!("Already in {asset}"));
             }
@@ -2333,6 +2351,103 @@ mod tests {
         // A different asset is unaffected by BTC's count.
         assert!(
             pm.can_open(Some("ETH"), Some(SignalDirection::Up), 2000)
+                .is_ok()
+        );
+    }
+
+    /// The expired-round slot leak (2026-10-11 production incident): two
+    /// positions from rounds that expired 12 days earlier held BOTH
+    /// `max_positions` slots — every entry for 6 days was refused with
+    /// "Max positions (2)" and a restart restores the book, so the freeze
+    /// was permanent. A position whose round has EXPIRED is settlement-dead
+    /// (winner redeems, loser zero — nothing new can happen to it), so it
+    /// must not count against the capacity gates; the same rule governs
+    /// `can_open`'s two caps and every `open_positions` fact the service
+    /// feeds to the policy/systemic judges.
+    #[test]
+    fn expired_round_positions_do_not_hold_capacity_slots() {
+        let cfg = PositionConfig {
+            max_positions: 2,
+            asset_cooldown_sec: 0,
+            loss_cooldown_sec: 0,
+            exit_cooldown_sec: 0,
+            ..Default::default()
+        };
+        let mut pm = PositionManager::new(cfg);
+        // Two LIVE positions: capacity is full.
+        enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
+        let second = enter(
+            &mut pm,
+            params("ETH", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
+        assert!(
+            pm.can_open(Some("SOL"), Some(SignalDirection::Up), 1000)
+                .is_err(),
+            "both slots are held by live positions"
+        );
+        // The rounds expire (900_000 = 15m): capacity must free up even
+        // though the positions cannot leave the book (no executable bid,
+        // venue never answers).
+        let expiry = second.expires_at_ms;
+        assert!(
+            pm.can_open(Some("SOL"), Some(SignalDirection::Up), expiry + 1)
+                .is_ok(),
+            "an expired round's position must not hold a capacity slot"
+        );
+        // Same rule for the per-asset count: an expired BTC position no
+        // longer blocks a new BTC entry.
+        enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
+        let btc = pm
+            .open_positions()
+            .iter()
+            .find(|p| p.asset == "BTC")
+            .map(|p| p.expires_at_ms)
+            .unwrap();
+        assert!(
+            pm.can_open(Some("BTC"), Some(SignalDirection::Up), btc + 1)
+                .is_ok(),
+            "an expired position must not count toward the per-asset cap"
+        );
+    }
+
+    /// The boundary: a round counts as expired from its `expires_at_ms`
+    /// instant — the same comparison (`expires_at_ms > now_ms` = live) the
+    /// settlement tracker uses, so the two never disagree about whether a
+    /// position is still in its running round.
+    #[test]
+    fn capacity_expiry_boundary_is_the_expiry_millisecond() {
+        let mut pm = PositionManager::new(PositionConfig {
+            max_positions: 1,
+            asset_cooldown_sec: 0,
+            loss_cooldown_sec: 0,
+            exit_cooldown_sec: 0,
+            ..Default::default()
+        });
+        let pos = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
+        let expiry = pos.expires_at_ms;
+        assert!(
+            pm.can_open(Some("ETH"), Some(SignalDirection::Up), expiry - 1)
+                .is_err()
+        );
+        assert!(
+            pm.can_open(Some("ETH"), Some(SignalDirection::Up), expiry)
                 .is_ok()
         );
     }

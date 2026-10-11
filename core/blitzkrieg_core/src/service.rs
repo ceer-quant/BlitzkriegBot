@@ -2005,7 +2005,9 @@ impl Core {
             .positions
             .open_positions()
             .iter()
-            .filter(|p| p.account_id.as_str() == account_id)
+            // The preview replays the entry gates: the count must match the
+            // entry path's LIVE-only rule (expired rounds are settlement-dead).
+            .filter(|p| p.account_id.as_str() == account_id && p.expires_at_ms > now)
             .count() as u32;
         let mut considered = 0usize;
         let mut skipped = 0usize;
@@ -3739,10 +3741,14 @@ impl Core {
             String,
             Result<crate::execution_policy::PolicyOutput, crate::execution_policy::PolicyRefusal>,
         > = if self.execution_policy.is_some() {
+            // The open_positions fact counts LIVE positions only — an expired
+            // round's stuck position is settlement-dead (same rule as
+            // PositionManager::can_open) and must not trip the shipped
+            // `open_positions >= N` backstop.
             let open = self.positions.open_positions();
             let open_for = |acct: &str| {
                 open.iter()
-                    .filter(|p| p.account_id.as_str() == acct)
+                    .filter(|p| p.account_id.as_str() == acct && p.expires_at_ms > now_ms)
                     .count() as u32
             };
             tokens
@@ -3980,7 +3986,17 @@ impl Core {
                         // and the daily-loss breaker can never disagree
                         // about what today lost.
                         let systemic_facts = crate::risk::limits::SystemicFacts {
-                            open_positions: self.positions.open_positions().len(),
+                            // The systemic COUNT judges live positions only
+                            // (expired rounds are settlement-dead — same rule
+                            // as PositionManager::can_open); the exposure sums
+                            // keep every position: their cost basis is cash
+                            // actually committed until the venue settles.
+                            open_positions: self
+                                .positions
+                                .open_positions()
+                                .iter()
+                                .filter(|p| p.expires_at_ms > now_ms)
+                                .count(),
                             open_exposure_usd: self
                                 .positions
                                 .open_positions()
@@ -4068,7 +4084,7 @@ impl Core {
                 continue;
             }
             if let Some(limit) = self.config.strategy_limits.get(&name).cloned()
-                && let Err(reason) = self.strategy_limit_ok(&req, &limit)
+                && let Err(reason) = self.strategy_limit_ok(&req, &limit, now_ms)
             {
                 // E9-c: the reason existed before but was discarded — bucket
                 // it so operator tooling can answer "why did this strategy
@@ -4183,10 +4199,12 @@ impl Core {
             // at the real cycle's verdict map).
             let policy = self.execution_policy.clone();
             let policy_verdict = policy.map(|policy| {
+                // open_positions counts LIVE positions only (expired rounds
+                // are settlement-dead; see engine_evaluate's verdict map).
                 let open = self.positions.open_positions();
                 let open_for = |acct: &str| {
                     open.iter()
-                        .filter(|p| p.account_id.as_str() == acct)
+                        .filter(|p| p.account_id.as_str() == acct && p.expires_at_ms > now_ms)
                         .count() as u32
                 };
                 let facts = crate::execution_policy::PolicyInput {
@@ -4305,8 +4323,18 @@ impl Core {
                     },
                     Ok(ledger) => {
                         let equity = ledger.balance();
+                        // The systemic COUNT judges live positions only
+                        // (expired rounds are settlement-dead — same rule as
+                        // PositionManager::can_open); the exposure sums keep
+                        // every position: their cost basis is cash actually
+                        // committed until the venue settles the round.
                         let systemic_facts = crate::risk::limits::SystemicFacts {
-                            open_positions: self.positions.open_positions().len(),
+                            open_positions: self
+                                .positions
+                                .open_positions()
+                                .iter()
+                                .filter(|p| p.expires_at_ms > now_ms)
+                                .count(),
                             open_exposure_usd: self
                                 .positions
                                 .open_positions()
@@ -4381,7 +4409,7 @@ impl Core {
                 continue;
             }
             if let Some(limit) = self.config.strategy_limits.get(&name).cloned()
-                && let Err(reason) = self.strategy_limit_ok(&req, &limit)
+                && let Err(reason) = self.strategy_limit_ok(&req, &limit, now_ms)
             {
                 let bucket = if reason.contains("position cap") {
                     "limit.positionCap"
@@ -4453,22 +4481,27 @@ impl Core {
         &self,
         req: &crate::model::OrderRequest,
         limit: &StrategyLimit,
+        now_ms: i64,
     ) -> Result<(), String> {
+        // The position-cap count judges LIVE positions only — an expired
+        // round's stuck position is settlement-dead and must not consume
+        // quota (the same rule PositionManager::can_open applies at the
+        // global cap). The notional sum below keeps ALL positions: their
+        // cost basis is cash still actually committed.
         let open: Vec<&crate::position::OpenPosition> = self
             .positions
             .open_positions()
             .iter()
             .filter(|p| p.strategy == req.strategy)
             .collect();
-        if let Some(max_pos) = limit.max_open_positions
-            && open.len() >= max_pos
-        {
-            return Err(format!(
-                "strategy {} at position cap ({}/{})",
-                req.strategy,
-                open.len(),
-                max_pos
-            ));
+        if let Some(max_pos) = limit.max_open_positions {
+            let live = open.iter().filter(|p| p.expires_at_ms > now_ms).count();
+            if live >= max_pos {
+                return Err(format!(
+                    "strategy {} at position cap ({live}/{max_pos})",
+                    req.strategy
+                ));
+            }
         }
         if let Some(max_notional) = limit.max_open_notional_usd {
             let used: Decimal = open.iter().map(|p| p.cost_usd).sum();
