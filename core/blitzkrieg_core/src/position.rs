@@ -501,6 +501,14 @@ pub struct OpenPosition {
     /// nothing branches on the value.
     #[serde(default)]
     pub venue: String,
+    /// The condition's OTHER outcome token, stamped at entry from the market
+    /// that filled it (the same stamp the venue field rides). The dry
+    /// settlement ladder reads it as the counter-evidence key: a decisive
+    /// partner bid names our leg the loser. Empty on snapshots written before
+    /// the field existed — those keep the old withhold behavior (no partner,
+    /// no counter verdict) and stay on the manual path.
+    #[serde(default)]
+    pub partner_token_id: String,
     /// F6: when the exit path last received a book for this token (ms epoch).
     /// A forced exit may consult it to refuse pricing off a stale quote; it is
     /// `0` until the first book arrives (serde default keeps old snapshots
@@ -616,6 +624,10 @@ pub struct OpenParams {
     pub account_id: AccountId,
     /// #427: the venue the entry market listed on — empty when undeclared.
     pub venue: String,
+    /// The condition's other outcome token, stamped alongside the venue from
+    /// the same market lookup. Empty when no market was found (or by older
+    /// callers): the dry ladder treats empty as "no counter evidence".
+    pub partner_token_id: String,
     /// The order's limit price; the position's actual entry price is the basis
     /// per share once its fills land (see [`PositionManager::apply_entry_fill`]).
     pub entry_price: Decimal,
@@ -1070,6 +1082,7 @@ impl PositionManager {
             expires_at_ms: p.expires_at_ms,
             account_id: p.account_id,
             venue: p.venue,
+            partner_token_id: p.partner_token_id,
             last_book_ts: 0,
             state: ExitState::new(p.entry_price, now_ms),
             flows: CashFlows::default(),
@@ -2016,6 +2029,7 @@ mod tests {
             target_exit_price: None,
             account_id: crate::model::default_account_id(),
             venue: String::new(),
+            partner_token_id: String::new(),
         }
     }
 
@@ -2866,6 +2880,7 @@ mod tests {
             target_exit_price: None,
             account_id: crate::model::default_account_id(),
             venue: String::new(),
+            partner_token_id: String::new(),
         }
     }
 
@@ -3056,6 +3071,7 @@ mod precision_tests {
                 target_exit_price: None,
                 account_id: crate::model::default_account_id(),
                 venue: String::new(),
+                partner_token_id: String::new(),
             },
             0,
         )
