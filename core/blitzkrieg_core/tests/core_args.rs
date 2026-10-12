@@ -381,6 +381,114 @@ fn a_stray_positional_argument_is_refused() {
     assert!(run.stderr.contains("start"), "stderr:\n{}", run.stderr);
 }
 
+/// #441: a WELL-SPELLED flag with a value the kernel cannot parse must refuse
+/// the boot, exactly as #228 refuses an unknown argument. The old arms read
+/// `.and_then(parse.ok()).unwrap_or(default)`, so `--tick-ms banana` started a
+/// core on the compiled 50 ms and `--mode LIVE` started a DRY core — the boot
+/// the operator asked for was never the boot they got. Each case names the
+/// flag family whose silent fallback was the hazard.
+#[test]
+fn a_value_the_kernel_cannot_parse_exits_2_without_booting() {
+    for (flag, raw, why) in [
+        ("--tick-ms", "banana", "the engine clock"),
+        ("--mode", "LIVE", "the opposite mode hazard"),
+        ("--seed-balance", "ten-k", "the dry account"),
+        ("--max-order-notional", "50usd", "the per-order cap"),
+        ("--size-pct", "20%", "the sizing knob"),
+        ("--max-positions", "many", "the position cap"),
+        ("--max-daily-loss-pct", "1o", "the daily breaker"),
+        ("--regime-confirmations", "2.5", "an integer knob"),
+        ("--exit-stop-loss-pct", "twelve", "the exit ladder"),
+        ("--update-check", "yes", "a boolean switch"),
+        ("--update-interval-secs", "-5", "a negative interval"),
+        ("--max-orderbook-stale-ms", "10s", "the freshness budget"),
+        ("--fee-model", "generous", "the replay fee schedule"),
+        ("--backtest-knob", "spread_arb", "the knob grammar"),
+        ("--backtest-mode", "fast", "the replay mode"),
+    ] {
+        let dir = sandbox("badvalue");
+        let run = run_core(&dir, &[flag, raw], Duration::from_secs(10));
+        assert_refused(&run, &format!("{flag} {raw} ({why})"));
+        assert!(
+            run.stderr.contains(flag),
+            "{flag} {raw}: the flag is named in the refusal. stderr:\n{}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains("refusing to start"),
+            "{flag} {raw}: the refusal states itself as one. stderr:\n{}",
+            run.stderr
+        );
+        let entries = sandbox_entries(&dir);
+        assert!(
+            entries.is_empty(),
+            "{flag} {raw}: a refused start writes NOTHING: {entries:?}"
+        );
+    }
+}
+
+/// A flag that takes a value, given WITHOUT one, is the same refusal: the old
+/// `unwrap_or(socket)` / `unwrap_or_default()` arms treated a missing value as
+/// "the operator said nothing", which for `--trade-log` meant the default
+/// ledger path and for `--socket` meant the default socket.
+#[test]
+fn a_missing_value_is_refused_for_value_taking_flags() {
+    for flag in [
+        "--socket",
+        "--tick-ms",
+        "--seed-balance",
+        "--mode",
+        "--trade-log",
+    ] {
+        let dir = sandbox("novalue");
+        let run = run_core(&dir, &[flag], Duration::from_secs(10));
+        assert_refused(&run, &format!("{flag} with no value"));
+        assert!(
+            run.stderr.contains("requires a value"),
+            "{flag}: the refusal says what is missing. stderr:\n{}",
+            run.stderr
+        );
+        let entries = sandbox_entries(&dir);
+        assert!(entries.is_empty(), "{flag}: wrote {entries:?}");
+    }
+}
+
+/// Every valid spelling the strictness could have eaten by accident keeps
+/// working: trimmed numbers, negative = never-escalate, 0 = off, the boolean
+/// vocabulary, and the mode words in lower case. Without this half, the
+/// refusal above could pass while breaking every script that drives the core.
+#[test]
+fn valid_value_spellings_still_boot() {
+    for args in [
+        vec!["--tick-ms", "120"],
+        vec!["--mode", "dry"],
+        vec!["--seed-balance", " 2500.5 "],
+        vec!["--max-positions", "9"],
+        vec!["--entry-maker-timeout-ms", "-1"],
+        vec!["--max-orderbook-stale-ms", "0"],
+        vec!["--update-check", "false"],
+        vec!["--backtest-mode", "mine"],
+    ] {
+        let dir = sandbox("goodvalue");
+        let run = run_core(&dir, &args, Duration::from_secs(10));
+        assert!(
+            run.killed,
+            "{args:?}: a valid spelling boots (killed = still serving). stderr:\n{}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains(BOOT_MARKER),
+            "{args:?}: the boot banner is reached. stderr:\n{}",
+            run.stderr
+        );
+        let entries = sandbox_entries(&dir);
+        assert!(
+            !entries.is_empty(),
+            "{args:?}: the booting core writes its ledgers: {entries:?}"
+        );
+    }
+}
+
 /// A sanity check on the harness itself: with valid arguments the child really
 /// does boot, serve and write into the sandbox — so "the sandbox is empty" above
 /// is a statement about the refusal, not about a child that never starts. Without

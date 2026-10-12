@@ -731,6 +731,90 @@ fn stale_budget_rejection(ms: i64) -> Option<String> {
     None
 }
 
+// ── Strict value parsing for every value-taking flag (#441) ──────────────────
+//
+// Until #441 roughly half the parse arms read `it.next().and_then(parse.ok())
+// .unwrap_or(default)` (or `.or(option)`): a value the kernel could not parse
+// silently fell back to the compiled default. The unknown-ARGUMENT refusal
+// (#228) never saw these — the spelling was fine, the VALUE was not. For a
+// knob that bounds the process (`--max-positions`, `--max-daily-loss-pct`,
+// `--mode`) a fallback is the #228 defect in its second spelling: the operator
+// believes a limit is in force and the boot they got is not the boot they
+// asked for. So every value-taking arm parses through the helpers below, and
+// a value that cannot be honoured is a startup error, never a fallback.
+//
+// The strict arms that predate this (exit ladder, entry-maker timeout,
+// orderbook staleness, fee model, backtest knobs) now share the same
+// `bad_value` landing pad, so the message and the exit code are one contract.
+
+/// The one landing pad for an unparseable or missing flag value: name the
+/// flag and the value, say what was wanted, exit 2 (same code as #228's
+/// unknown-argument refusal).
+fn bad_value(flag: &str, raw: &str, want: &str) -> ! {
+    eprintln!("blitzkrieg-core: {flag} '{raw}': {want}");
+    eprintln!(
+        "blitzkrieg-core: refusing to start: a value this flag cannot honour is never silently \
+         replaced by its default — the boot that would produce is not the one you asked for. \
+         Run `blitzkrieg-core --help` for the value form."
+    );
+    std::process::exit(2);
+}
+
+/// Fetch the next argv token as the value of `flag`, refusing a missing value.
+macro_rules! next_value {
+    ($it:expr, $flag:literal) => {
+        match $it.next() {
+            Some(v) => v,
+            None => bad_value($flag, "", "requires a value (see --help)"),
+        }
+    };
+}
+
+/// Parse the next token as `T`, refusing a non-number.
+macro_rules! num_value {
+    ($it:expr, $flag:literal, $t:ty, $want:literal) => {{
+        let raw = next_value!($it, $flag);
+        match raw.trim().parse::<$t>() {
+            Ok(v) => v,
+            Err(_) => bad_value($flag, &raw, $want),
+        }
+    }};
+}
+
+/// Parse the next token as a Decimal, refusing a non-decimal.
+macro_rules! dec_value {
+    ($it:expr, $flag:literal, $want:literal) => {{
+        let raw = next_value!($it, $flag);
+        match rust_decimal::Decimal::from_str(raw.trim()) {
+            Ok(v) => v,
+            Err(_) => bad_value($flag, raw.trim(), $want),
+        }
+    }};
+}
+
+/// Parse the next token as an explicit boolean (`true|1|on`, `false|0|off`),
+/// refusing anything else.
+macro_rules! bool_value {
+    ($it:expr, $flag:literal) => {{
+        let raw = next_value!($it, $flag);
+        match raw.as_str() {
+            "true" | "1" | "on" => true,
+            "false" | "0" | "off" => false,
+            _ => bad_value($flag, &raw, "want true|false (1|on / 0|off accepted)"),
+        }
+    }};
+}
+
+/// Fetch the next argv token as a path-like string value, refusing a missing
+/// one. The `.filter(non-empty)` arms keep their empty-is-off semantics — an
+/// explicit empty string is a documented spelling for "off" on those flags —
+/// but a MISSING token is a dangling flag, not an off switch.
+macro_rules! path_value {
+    ($it:expr, $flag:literal) => {
+        next_value!($it, $flag)
+    };
+}
+
 fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: &EnvVars) -> Args {
     let mut socket = default_socket();
     let mut mode = Mode::Dry;
@@ -887,125 +971,163 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut it = argv.iter().cloned();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--socket" => socket = it.next().unwrap_or(socket),
+            "--socket" => socket = next_value!(it, "--socket"),
             "--mode" => {
-                mode = match it.next().as_deref() {
-                    Some("live") => Mode::Live,
-                    _ => Mode::Dry,
+                let raw = next_value!(it, "--mode");
+                mode = match raw.as_str() {
+                    "live" => Mode::Live,
+                    "dry" => Mode::Dry,
+                    _ => bad_value(
+                        "--mode",
+                        &raw,
+                        "want dry|live — a typo here would run the OPPOSITE mode of the one you named",
+                    ),
                 }
             }
             "--readonly" => readonly = true,
-            "--tick-ms" => tick_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(tick_ms),
+            "--tick-ms" => {
+                tick_ms = num_value!(it, "--tick-ms", u64, "want a whole number of milliseconds")
+            }
             "--seed-balance" => {
-                seed_balance = it
-                    .next()
-                    .and_then(|v| Decimal::from_str(&v).ok())
-                    .unwrap_or(seed_balance)
+                seed_balance = dec_value!(it, "--seed-balance", "want a USD amount (e.g. 10000)")
             }
             "--max-order-notional" => {
-                max_order_notional = it
-                    .next()
-                    .and_then(|v| Decimal::from_str(&v).ok())
-                    .unwrap_or(max_order_notional)
+                max_order_notional =
+                    dec_value!(it, "--max-order-notional", "want a USD amount (e.g. 100)")
             }
             "--max-open-notional-usd" => {
-                max_open_notional = it
-                    .next()
-                    .and_then(|v| Decimal::from_str(&v).ok())
-                    .unwrap_or(max_open_notional)
+                max_open_notional = dec_value!(
+                    it,
+                    "--max-open-notional-usd",
+                    "want a USD amount (0 = no cap)"
+                )
             }
             // #202: per-entry budget as a share of the account, and the
             // per-order notional bound in the same unit. Both are percentages
             // (20 = 20%), both default to 0 = off.
             "--size-pct" => {
-                size_pct = it
-                    .next()
-                    .and_then(|v| Decimal::from_str(&v).ok())
-                    .or(size_pct)
+                size_pct = Some(dec_value!(
+                    it,
+                    "--size-pct",
+                    "want a percentage of equity (20 = 20%, 0 = off)"
+                ))
             }
             "--max-order-notional-pct" => {
-                max_order_notional_pct = it
-                    .next()
-                    .and_then(|v| Decimal::from_str(&v).ok())
-                    .or(max_order_notional_pct)
+                max_order_notional_pct = Some(dec_value!(
+                    it,
+                    "--max-order-notional-pct",
+                    "want a percentage of equity (0 = off)"
+                ))
             }
             "--min-shares" => {
-                min_shares = it
-                    .next()
-                    .and_then(|v| Decimal::from_str(&v).ok())
-                    .or(min_shares)
+                min_shares = Some(dec_value!(it, "--min-shares", "want a share count"))
             }
             "--max-shares" => {
-                max_shares = it
-                    .next()
-                    .and_then(|v| Decimal::from_str(&v).ok())
-                    .or(max_shares)
+                max_shares = Some(dec_value!(it, "--max-shares", "want a share count"))
             }
             "--no-auto-exits" => auto_exits = false,
             "--engine" => engine = true,
             "--feed-ws" => feed_ws = true,
-            "--replay" => replay = it.next(),
-            "--replay-near-miss" => replay_near_miss = it.next(),
+            "--replay" => replay = Some(path_value!(it, "--replay")),
+            "--replay-near-miss" => replay_near_miss = Some(path_value!(it, "--replay-near-miss")),
             "--net-check" => net_check = true,
-            "--near-miss-path" => near_miss_path = it.next(),
-            "--trade-log" => trade_log = it.next(),
+            "--near-miss-path" => near_miss_path = Some(path_value!(it, "--near-miss-path")),
+            "--trade-log" => trade_log = Some(path_value!(it, "--trade-log")),
             "--no-trade-log" => no_trade_log = true,
-            "--order-log" => order_log = it.next(),
+            "--order-log" => order_log = Some(path_value!(it, "--order-log")),
             "--no-order-log" => no_order_log = true,
-            "--position-log" => position_log = it.next(),
+            "--position-log" => position_log = Some(path_value!(it, "--position-log")),
             "--no-position-log" => no_position_log = true,
             "--no-intent-audit" => no_intent_audit = true,
             "--allow-shared-data" => allow_shared_data = true,
-            "--market-plugin" => market_plugin = it.next(),
+            "--market-plugin" => market_plugin = Some(path_value!(it, "--market-plugin")),
             "--no-discovery" => discovery = false,
             "--shadow-evolution" => shadow_evolution_flag = true,
-            "--se-min-samples" => se_min_samples = it.next().and_then(|v| v.parse().ok()),
-            "--se-cooldown-secs" => se_cooldown_secs = it.next().and_then(|v| v.parse().ok()),
-            "--se-min-obs-secs" => se_min_obs_secs = it.next().and_then(|v| v.parse().ok()),
-            "--se-auto-evolve" => {
-                se_auto_evolve = it.next().and_then(|v| match v.as_str() {
-                    "true" | "1" | "on" => Some(true),
-                    "false" | "0" | "off" => Some(false),
-                    _ => None,
-                })
+            "--se-min-samples" => {
+                se_min_samples = Some(num_value!(
+                    it,
+                    "--se-min-samples",
+                    u32,
+                    "want a sample count"
+                ))
             }
-            "--se-cycle-secs" => se_cycle_secs = it.next().and_then(|v| v.parse().ok()),
+            "--se-cooldown-secs" => {
+                se_cooldown_secs = Some(num_value!(
+                    it,
+                    "--se-cooldown-secs",
+                    i64,
+                    "want a number of seconds"
+                ))
+            }
+            "--se-min-obs-secs" => {
+                se_min_obs_secs = Some(num_value!(
+                    it,
+                    "--se-min-obs-secs",
+                    i64,
+                    "want a number of seconds"
+                ))
+            }
+            "--se-auto-evolve" => se_auto_evolve = Some(bool_value!(it, "--se-auto-evolve")),
+            "--se-cycle-secs" => {
+                se_cycle_secs = Some(num_value!(
+                    it,
+                    "--se-cycle-secs",
+                    i64,
+                    "want a number of seconds"
+                ))
+            }
             // Update switches (VERSIONING.md §7): explicit `true|false` values,
             // like --se-auto-evolve, so a caller can turn OFF as well as on.
-            "--update-check" => {
-                update_check_enabled = it.next().and_then(|v| match v.as_str() {
-                    "true" | "1" | "on" => Some(true),
-                    "false" | "0" | "off" => Some(false),
-                    _ => None,
-                })
-            }
-            "--update-auto" => {
-                update_auto = it.next().and_then(|v| match v.as_str() {
-                    "true" | "1" | "on" => Some(true),
-                    "false" | "0" | "off" => Some(false),
-                    _ => None,
-                })
-            }
+            "--update-check" => update_check_enabled = Some(bool_value!(it, "--update-check")),
+            "--update-auto" => update_auto = Some(bool_value!(it, "--update-auto")),
             // #379: the automatic-check interval in seconds. 0 explicitly
-            // disables the scheduler; a negative or non-number parses to None
-            // (falling through to env/TOML/default) rather than booting.
+            // disables the scheduler; a negative value is refused here (the
+            // old `.filter(>=0)` silently dropped it into the default).
             "--update-interval-secs" => {
-                update_interval_secs = it.next().and_then(|v| v.parse().ok()).filter(|s| *s >= 0)
-            }
-            "--se-ttl-secs" => se_ttl_secs = it.next().and_then(|v| v.parse().ok()),
-            "--se-deep-dims" => se_deep_dims = it.next().and_then(|v| v.parse().ok()),
-            "--strategy-limit" => {
-                if let Some(v) = it.next() {
-                    strategy_limits.push(v);
+                let v = num_value!(
+                    it,
+                    "--update-interval-secs",
+                    i64,
+                    "want a number of seconds (0 = off)"
+                );
+                if v < 0 {
+                    bad_value(
+                        "--update-interval-secs",
+                        &v.to_string(),
+                        "want a non-negative number of seconds (0 = off)",
+                    );
                 }
+                update_interval_secs = Some(v);
+            }
+            "--se-ttl-secs" => {
+                se_ttl_secs = Some(num_value!(
+                    it,
+                    "--se-ttl-secs",
+                    i64,
+                    "want a number of seconds"
+                ))
+            }
+            "--se-deep-dims" => {
+                se_deep_dims = Some(num_value!(
+                    it,
+                    "--se-deep-dims",
+                    usize,
+                    "want a dimension count"
+                ))
+            }
+            "--strategy-limit" => {
+                let v = path_value!(it, "--strategy-limit");
+                strategy_limits.push(v);
             }
             "--enable-strategy" => {
-                if let Some(v) = it.next().filter(|v| !v.trim().is_empty()) {
+                let v = path_value!(it, "--enable-strategy");
+                if !v.trim().is_empty() {
                     enable_strategy.push(v);
                 }
             }
             "--disable-strategy" => {
-                if let Some(v) = it.next().filter(|v| !v.trim().is_empty()) {
+                let v = path_value!(it, "--disable-strategy");
+                if !v.trim().is_empty() {
                     disable_strategy.push(v);
                 }
             }
@@ -1015,173 +1137,206 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             // about what starts enabled.
             "--allow-zero-strategies" => allow_zero_strategies = true,
             "--strategy-state" => {
-                strategy_state = it.next().filter(|v| !v.trim().is_empty());
+                strategy_state =
+                    Some(path_value!(it, "--strategy-state")).filter(|v| !v.trim().is_empty());
             }
             "--no-strategy-state" => no_strategy_state = true,
-            "--strategy-dir" => strategy_dir = it.next().filter(|v| !v.trim().is_empty()),
+            "--strategy-dir" => {
+                strategy_dir =
+                    Some(path_value!(it, "--strategy-dir")).filter(|v| !v.trim().is_empty())
+            }
             "--no-strategy-dir" => no_strategy_dir = true,
             // E30 (§6.4): the Lua package scan root (`none`/empty = off).
             "--lua-strategy-dir" => {
-                lua_strategy_dir = it.next().filter(|v| !v.trim().is_empty());
+                lua_strategy_dir =
+                    Some(path_value!(it, "--lua-strategy-dir")).filter(|v| !v.trim().is_empty());
             }
             "--no-lua-strategy-dir" => no_lua_strategy_dir = true,
-            "--assets" => assets_arg = it.next(),
-            "--round-sec" => round_sec = it.next().and_then(|v| v.parse().ok()).or(round_sec),
+            "--assets" => assets_arg = Some(path_value!(it, "--assets")),
+            "--round-sec" => {
+                round_sec = Some(num_value!(
+                    it,
+                    "--round-sec",
+                    i64,
+                    "want a number of seconds"
+                ))
+            }
             "--min-round-age" => {
-                min_round_age = it.next().and_then(|v| v.parse().ok()).or(min_round_age)
+                min_round_age = Some(num_value!(
+                    it,
+                    "--min-round-age",
+                    i64,
+                    "want a number of seconds"
+                ))
             }
             "--min-time-left" => {
-                min_time_left = it.next().and_then(|v| v.parse().ok()).or(min_time_left)
+                min_time_left = Some(num_value!(
+                    it,
+                    "--min-time-left",
+                    i64,
+                    "want a number of seconds"
+                ))
             }
             "--trend-confirm-sec" => {
-                trend_confirm = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(trend_confirm)
+                trend_confirm =
+                    num_value!(it, "--trend-confirm-sec", i64, "want a number of seconds")
             }
             "--trend-window-floor-ms" => {
-                trend_floor_ms = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(trend_floor_ms)
+                trend_floor_ms = num_value!(
+                    it,
+                    "--trend-window-floor-ms",
+                    i64,
+                    "want a number of milliseconds"
+                )
             }
             "--spread-arb-entry-factor" => {
-                spread_arb_entry_factor = it.next().and_then(|v| Decimal::from_str(&v).ok())
+                spread_arb_entry_factor = Some(dec_value!(
+                    it,
+                    "--spread-arb-entry-factor",
+                    "want a decimal factor (e.g. 1.2)"
+                ))
             }
             "--spread-arb-min-obi" => {
-                spread_arb_min_obi = it.next().and_then(|v| Decimal::from_str(&v).ok())
+                spread_arb_min_obi = Some(dec_value!(
+                    it,
+                    "--spread-arb-min-obi",
+                    "want a decimal between 0 and 1"
+                ))
             }
             "--spread-arb-max-spread-pct" => {
-                spread_arb_max_spread_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
+                spread_arb_max_spread_pct = Some(dec_value!(
+                    it,
+                    "--spread-arb-max-spread-pct",
+                    "want a decimal percentage"
+                ))
             }
             "--spread-arb-dip-max-pct" => {
-                spread_arb_dip_max_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
+                spread_arb_dip_max_pct = Some(dec_value!(
+                    it,
+                    "--spread-arb-dip-max-pct",
+                    "want a decimal percentage"
+                ))
             }
             "--spread-arb-bounce-min-pct" => {
-                spread_arb_bounce_min_pct = it.next().and_then(|v| Decimal::from_str(&v).ok())
+                spread_arb_bounce_min_pct = Some(dec_value!(
+                    it,
+                    "--spread-arb-bounce-min-pct",
+                    "want a decimal percentage"
+                ))
             }
             "--spread-arb-bounce-window-sec" => {
-                spread_arb_bounce_window_sec = it.next().and_then(|v| v.parse().ok())
+                spread_arb_bounce_window_sec = Some(num_value!(
+                    it,
+                    "--spread-arb-bounce-window-sec",
+                    i64,
+                    "want a number of seconds"
+                ))
             }
             // E17/#264: the engine-level exit ladder. Parsed strictly — a value
             // the engine cannot honour is a startup error, never a silent
             // fallback to the shipped ladder (see `parse_exit_pct`).
             "--exit-take-profit-pct" => {
-                let raw = it.next().unwrap_or_default();
+                let raw = next_value!(it, "--exit-take-profit-pct");
                 match parse_exit_pct(&raw) {
                     Ok(v) => exit_take_profit_pct = Some(v),
-                    Err(e) => {
-                        eprintln!("blitzkrieg-core: --exit-take-profit-pct '{raw}': {e}");
-                        std::process::exit(2);
-                    }
+                    Err(e) => bad_value("--exit-take-profit-pct", &raw, &e),
                 }
             }
             "--exit-stop-loss-pct" => {
-                let raw = it.next().unwrap_or_default();
+                let raw = next_value!(it, "--exit-stop-loss-pct");
                 match parse_exit_pct(&raw) {
                     Ok(v) => exit_stop_loss_pct = Some(v),
-                    Err(e) => {
-                        eprintln!("blitzkrieg-core: --exit-stop-loss-pct '{raw}': {e}");
-                        std::process::exit(2);
-                    }
+                    Err(e) => bad_value("--exit-stop-loss-pct", &raw, &e),
                 }
             }
             "--exit-trailing-min-high-pct" => {
-                let raw = it.next().unwrap_or_default();
+                let raw = next_value!(it, "--exit-trailing-min-high-pct");
                 match parse_exit_pct(&raw) {
                     Ok(v) => exit_trailing_min_high_pct = Some(v),
-                    Err(e) => {
-                        eprintln!("blitzkrieg-core: --exit-trailing-min-high-pct '{raw}': {e}");
-                        std::process::exit(2);
-                    }
+                    Err(e) => bad_value("--exit-trailing-min-high-pct", &raw, &e),
                 }
             }
             "--exit-min-trail-pct" => {
-                let raw = it.next().unwrap_or_default();
+                let raw = next_value!(it, "--exit-min-trail-pct");
                 match parse_exit_pct(&raw) {
                     Ok(v) => exit_min_trail_pct = Some(v),
-                    Err(e) => {
-                        eprintln!("blitzkrieg-core: --exit-min-trail-pct '{raw}': {e}");
-                        std::process::exit(2);
-                    }
+                    Err(e) => bad_value("--exit-min-trail-pct", &raw, &e),
                 }
             }
             "--exit-force-sec" => {
-                let raw = it.next().unwrap_or_default();
-                match raw.parse::<i64>() {
-                    Ok(v) => exit_force_sec = Some(v),
-                    Err(_) => {
-                        eprintln!(
-                            "blitzkrieg-core: --exit-force-sec '{raw}': expected an integer (seconds left; 0 = off)"
-                        );
-                        std::process::exit(2);
-                    }
-                }
+                exit_force_sec = Some(num_value!(
+                    it,
+                    "--exit-force-sec",
+                    i64,
+                    "want a whole number of seconds (0 = off)"
+                ));
             }
-            "--regime-eval" => regime_eval = it.next(),
-            "--regime-report" => regime_report = it.next(),
-            "--regime-token" => regime_token = it.next(),
+            "--regime-eval" => regime_eval = Some(path_value!(it, "--regime-eval")),
+            "--regime-report" => regime_report = Some(path_value!(it, "--regime-report")),
+            "--regime-token" => regime_token = Some(path_value!(it, "--regime-token")),
             // #352: the on-chain pull subcommand and its knobs.
-            "--onchain-pull" => onchain_pull = it.next(),
-            "--onchain-start" => onchain_start = it.next(),
-            "--onchain-end" => onchain_end = it.next(),
-            "--onchain-asset" => onchain_asset = it.next(),
-            "--onchain-market" => onchain_market = it.next(),
-            "--onchain-fills" => onchain_fills = it.next(),
-            "--onchain-out-dir" => onchain_out_dir = it.next(),
+            "--onchain-pull" => onchain_pull = Some(path_value!(it, "--onchain-pull")),
+            "--onchain-start" => onchain_start = Some(path_value!(it, "--onchain-start")),
+            "--onchain-end" => onchain_end = Some(path_value!(it, "--onchain-end")),
+            "--onchain-asset" => onchain_asset = Some(path_value!(it, "--onchain-asset")),
+            "--onchain-market" => onchain_market = Some(path_value!(it, "--onchain-market")),
+            "--onchain-fills" => onchain_fills = Some(path_value!(it, "--onchain-fills")),
+            "--onchain-out-dir" => onchain_out_dir = Some(path_value!(it, "--onchain-out-dir")),
             // #361: the offline blueprint compiler and its output knob.
-            "--blueprint-compile" => blueprint_compile = it.next(),
-            "--blueprint-out" => blueprint_out = it.next(),
+            "--blueprint-compile" => {
+                blueprint_compile = Some(path_value!(it, "--blueprint-compile"))
+            }
+            "--blueprint-out" => blueprint_out = Some(path_value!(it, "--blueprint-out")),
             "--regime-max-tokens" => {
-                regime_max_tokens = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(regime_max_tokens)
+                regime_max_tokens =
+                    num_value!(it, "--regime-max-tokens", usize, "want a token count")
             }
             "--regime-window-sec" => {
-                regime_window_sec = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(regime_window_sec)
+                regime_window_sec =
+                    num_value!(it, "--regime-window-sec", i64, "want a number of seconds")
             }
             "--regime-min-trend-ticks" => {
-                regime_min_trend_ticks = it
-                    .next()
-                    .and_then(|v| Decimal::from_str(&v).ok())
-                    .unwrap_or(regime_min_trend_ticks)
+                regime_min_trend_ticks = dec_value!(
+                    it,
+                    "--regime-min-trend-ticks",
+                    "want a decimal number of ticks"
+                )
             }
             "--regime-min-efficiency" => {
-                regime_min_efficiency = it
-                    .next()
-                    .and_then(|v| Decimal::from_str(&v).ok())
-                    .unwrap_or(regime_min_efficiency)
+                regime_min_efficiency = dec_value!(
+                    it,
+                    "--regime-min-efficiency",
+                    "want a decimal between 0 and 1"
+                )
             }
             "--regime-volatile-mad-ticks" => {
-                regime_volatile_mad_ticks = it
-                    .next()
-                    .and_then(|v| Decimal::from_str(&v).ok())
-                    .unwrap_or(regime_volatile_mad_ticks)
+                regime_volatile_mad_ticks = dec_value!(
+                    it,
+                    "--regime-volatile-mad-ticks",
+                    "want a decimal number of ticks"
+                )
             }
             "--regime-confirmations" => {
-                regime_confirmations = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(regime_confirmations)
+                regime_confirmations = num_value!(
+                    it,
+                    "--regime-confirmations",
+                    u32,
+                    "want a confirmation count"
+                )
             }
             "--max-positions" => {
-                max_positions = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(max_positions)
+                max_positions = num_value!(it, "--max-positions", usize, "want a position count")
             }
             // #363: per-asset entries (the @Almach replay needs > 1). Absent
             // = the execution-policy file decides; 0 is refused at boot
             // (it would refuse every entry).
             "--max-positions-per-asset" => {
-                max_positions_per_asset = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .or(max_positions_per_asset)
+                max_positions_per_asset = Some(num_value!(
+                    it,
+                    "--max-positions-per-asset",
+                    u32,
+                    "want a position count"
+                ))
             }
             // #380: an explicit policy file wins over the install-root
             // resolution of the shipped default. A relative spelling is
@@ -1189,37 +1344,54 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             // explicit path) — the install-root lookup is for the DEFAULT
             // only, never a second-guessing of the operator's choice.
             "--execution-policy" => {
-                execution_policy = it.next();
+                execution_policy = Some(path_value!(it, "--execution-policy"));
             }
             // #173: absolute USD cap for the day's realized loss (0 = none).
             "--max-daily-loss" => {
-                max_daily_loss = it
-                    .next()
-                    .and_then(|v| Decimal::from_str(&v).ok())
-                    .or(max_daily_loss)
+                max_daily_loss = Some(dec_value!(
+                    it,
+                    "--max-daily-loss",
+                    "want a USD amount (0 = no budget)"
+                ))
             }
             // #173: cap as a percentage of the day's opening cash equity.
             "--max-daily-loss-pct" => {
-                max_daily_loss_pct = it
-                    .next()
-                    .and_then(|v| Decimal::from_str(&v).ok())
-                    .or(max_daily_loss_pct)
+                max_daily_loss_pct = Some(dec_value!(
+                    it,
+                    "--max-daily-loss-pct",
+                    "want a percentage (0 = off)"
+                ))
             }
             "--market" => {
                 if let Some(m) = it.next() {
                     markets.push(m);
                 }
             }
-            "--event-archive" => event_archive = it.next(),
+            "--event-archive" => event_archive = Some(path_value!(it, "--event-archive")),
             "--no-event-archive" => no_event_archive = true,
             "--event-archive-max-mb" => {
-                event_archive_max_mb = it.next().and_then(|v| v.parse().ok())
+                event_archive_max_mb = Some(num_value!(
+                    it,
+                    "--event-archive-max-mb",
+                    u64,
+                    "want a size in MiB (0 = unlimited)"
+                ))
             }
             "--event-archive-rotate-mb" => {
-                event_archive_rotate_mb = it.next().and_then(|v| v.parse().ok())
+                event_archive_rotate_mb = Some(num_value!(
+                    it,
+                    "--event-archive-rotate-mb",
+                    u64,
+                    "want a size in MiB (0 = never rotate)"
+                ))
             }
             "--event-archive-min-free-mb" => {
-                event_archive_min_free_mb = it.next().and_then(|v| v.parse().ok())
+                event_archive_min_free_mb = Some(num_value!(
+                    it,
+                    "--event-archive-min-free-mb",
+                    u64,
+                    "want a size in MiB (0 = no guard)"
+                ))
             }
             // Strict, like `--max-orderbook-stale-ms` below: a value the engine
             // cannot honour is a startup error, never a silent fallback. The
@@ -1227,80 +1399,69 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             // default clock, and an operator who believed they had DISARMED the
             // maker→taker escalation was running it.
             "--entry-maker-timeout-ms" => {
-                let raw = it.next().unwrap_or_default();
-                match raw.trim().parse::<i64>() {
-                    Ok(v) => entry_maker_timeout_ms = v,
-                    Err(_) => {
-                        eprintln!(
-                            "blitzkrieg-core: --entry-maker-timeout-ms '{raw}': want a whole number of milliseconds (0 uses the 5000 ms default, a negative value never escalates)"
-                        );
-                        std::process::exit(2);
-                    }
-                }
+                entry_maker_timeout_ms = num_value!(
+                    it,
+                    "--entry-maker-timeout-ms",
+                    i64,
+                    "want a whole number of milliseconds (0 uses the 5000 ms default, a negative value never escalates)"
+                );
             }
             // #205: how stale an orderbook may be before the engine refuses to
             // price off it. Parsed strictly — a value the engine cannot honour is
             // a startup error, never a silent fallback: an operator who believes
             // they set a budget must not be running a different one.
             "--max-orderbook-stale-ms" => {
-                let raw = it.next().unwrap_or_default();
-                match raw.trim().parse::<i64>() {
-                    Ok(v) => max_orderbook_stale_ms = Some(v),
-                    Err(_) => {
-                        eprintln!(
-                            "blitzkrieg-core: --max-orderbook-stale-ms '{raw}': want a whole number of milliseconds (0 disables the freshness check)"
-                        );
-                        std::process::exit(2);
-                    }
-                }
+                max_orderbook_stale_ms = Some(num_value!(
+                    it,
+                    "--max-orderbook-stale-ms",
+                    i64,
+                    "want a whole number of milliseconds (0 disables the freshness check)"
+                ));
             }
-            "--backtest" => backtest = it.next(),
-            "--backtest-report" => backtest_report = it.next(),
+            "--backtest" => backtest = Some(path_value!(it, "--backtest")),
+            "--backtest-report" => backtest_report = Some(path_value!(it, "--backtest-report")),
             "--backtest-tick-ms" => {
-                backtest_tick_ms = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(backtest_tick_ms)
+                backtest_tick_ms = num_value!(
+                    it,
+                    "--backtest-tick-ms",
+                    i64,
+                    "want a whole number of milliseconds"
+                )
             }
             "--backtest-tail-ms" => {
-                backtest_tail_ms = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(backtest_tail_ms)
+                backtest_tail_ms = num_value!(
+                    it,
+                    "--backtest-tail-ms",
+                    i64,
+                    "want a whole number of milliseconds"
+                )
             }
             // `<strategy>:<knob>=<value>`; repeatable. A replay-only counterfactual.
             "--backtest-knob" => {
-                if let Some(spec) = it.next() {
-                    match parse_backtest_knob(&spec) {
-                        Ok(k) => backtest_knobs.push(k),
-                        Err(e) => {
-                            eprintln!("blitzkrieg-core: --backtest-knob {spec}: {e}");
-                            std::process::exit(2);
-                        }
-                    }
+                let spec = next_value!(it, "--backtest-knob");
+                match parse_backtest_knob(&spec) {
+                    Ok(k) => backtest_knobs.push(k),
+                    Err(e) => bad_value("--backtest-knob", &spec, &e),
                 }
             }
             // #203: which taker-fee schedule a REPLAY charges. Not a live knob —
             // see `Args::fee_model`.
             "--fee-model" => {
-                if let Some(name) = it.next() {
-                    match blitzkrieg_core::exit_policy::fee_schedule_by_name(&name) {
-                        Some(s) => fee_model = Some(s),
-                        None => {
-                            eprintln!(
-                                "blitzkrieg-core: --fee-model {name}: unknown schedule; known: {}",
-                                blitzkrieg_core::exit_policy::FEE_SCHEDULE_NAMES.join(", ")
-                            );
-                            std::process::exit(2);
-                        }
-                    }
+                let name = next_value!(it, "--fee-model");
+                match blitzkrieg_core::exit_policy::fee_schedule_by_name(&name) {
+                    Some(s) => fee_model = Some(s),
+                    None => bad_value(
+                        "--fee-model",
+                        &name,
+                        &format!(
+                            "unknown schedule; known: {}",
+                            blitzkrieg_core::exit_policy::FEE_SCHEDULE_NAMES.join(", ")
+                        ),
+                    ),
                 }
             }
             "--slippage-ticks" => {
-                slippage_ticks = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(slippage_ticks)
+                slippage_ticks = num_value!(it, "--slippage-ticks", u32, "want a tick count")
             }
             // Replay maintenance-gating fast path: a flag, no value. Not a live
             // knob — see `Args::backtest_fast` (refusal below, with --fee-model).
@@ -1309,46 +1470,83 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             // `verify` (a real-latency dial set), `sweep` (latency ladder
             // 0..300). Only meaningful with --backtest; the mode re-prices
             // the fill model's LATENCY dials only — slippage/fees stay as
-            // configured, so the friction between modes is comparable.
+            // configured, so the friction between modes is comparable. A
+            // MISSING value keeps the historic single-run shape (empty mode =
+            // no mode runner), which is the documented default, not a
+            // fallback a typo could hit.
             "--backtest-mode" => {
-                backtest_mode = it.next().unwrap_or_else(|| "mine".into());
+                if let Some(raw) = it.next() {
+                    match raw.as_str() {
+                        "mine" | "verify" | "sweep" => backtest_mode = raw,
+                        _ => bad_value(
+                            "--backtest-mode",
+                            &raw,
+                            "want mine|verify|sweep (see --help; requires --backtest)",
+                        ),
+                    }
+                }
             }
             // #351 verify mode's one dial: the round-trip the strategy
             // actually trades through (the HK VPS number is 286 ms).
             "--verify-latency-ms" => {
-                verify_latency_ms = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(verify_latency_ms);
+                verify_latency_ms = num_value!(
+                    it,
+                    "--verify-latency-ms",
+                    i64,
+                    "want a whole number of milliseconds"
+                )
             }
             "--latency-ms" => {
-                latency_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(latency_ms)
+                latency_ms = num_value!(
+                    it,
+                    "--latency-ms",
+                    i64,
+                    "want a whole number of milliseconds"
+                )
             }
             // #351: taker-leg travel dials (see Args docs above).
             "--taker-latency-ms" => {
-                taker_latency_ms = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(taker_latency_ms)
+                taker_latency_ms = num_value!(
+                    it,
+                    "--taker-latency-ms",
+                    i64,
+                    "want a whole number of milliseconds"
+                )
             }
             "--taker-rtt-ms" => {
-                taker_rtt_ms = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(taker_rtt_ms)
+                taker_rtt_ms = num_value!(
+                    it,
+                    "--taker-rtt-ms",
+                    i64,
+                    "want a whole number of milliseconds"
+                )
             }
-            "--fill-prob-bps" => fill_prob_bps = it.next().and_then(|v| v.parse().ok()),
+            "--fill-prob-bps" => {
+                fill_prob_bps = Some(num_value!(
+                    it,
+                    "--fill-prob-bps",
+                    u32,
+                    "want a probability in bps of 10000"
+                ))
+            }
             "--maker-depth-share-bps" => {
-                maker_depth_share_bps = it.next().and_then(|v| v.parse().ok())
+                maker_depth_share_bps = Some(num_value!(
+                    it,
+                    "--maker-depth-share-bps",
+                    u32,
+                    "want a depth share in bps of 10000"
+                ))
             }
             // Dry-mode test hooks (#175 gate). Both are inert unless a mode that
             // simulates the redemption is running, so a live deployment can pass
             // them and see no change at all.
             "--dry-redeem-fail" => {
-                dry_redeem_fail = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(dry_redeem_fail)
+                dry_redeem_fail = num_value!(
+                    it,
+                    "--dry-redeem-fail",
+                    u32,
+                    "want a failure count (0 = off)"
+                )
             }
             "--dry-redeem-manual" => dry_redeem_manual = true,
             // Consumed by the pre-scan; named here so they are not reported as
@@ -3843,6 +4041,100 @@ mod tests {
         }
         let err = parse_exit_pct("eight").expect_err("not a decimal");
         assert!(err.contains("decimal percentage"), "{err}");
+    }
+
+    // ── #441: a value the kernel cannot honour is a startup error, never a
+    //    silent fallback to the compiled default ────────────────────────────
+    //
+    // The parser's own exit(2) cannot be observed from an in-process test, so
+    // the property under test here is the one that a fallback would break:
+    // a well-spelled flag with a garbage value must never silently resolve to
+    // the compiled default. Where the old arms returned the default, the new
+    // arms terminate — so ANY return from parse_args with a garbage value is
+    // already a defect, and the valid-value arms below double as proof the
+    // strictness did not eat legitimate spellings (trims, negatives where the
+    // knob means "off", explicit zero).
+
+    /// A numeric knob parses the value it is given, trimmed — not the default.
+    #[test]
+    fn numeric_flags_carry_the_value_they_are_given() {
+        let a = args_from(&["--tick-ms", "120"]);
+        assert_eq!(a.tick_ms, 120);
+        let a = args_from(&["--max-positions", "9"]);
+        assert_eq!(a.max_positions, 9);
+        let a = args_from(&["--regime-confirmations", "5"]);
+        assert_eq!(a.regime_confirmations, 5);
+        let a = args_from(&["--event-archive-rotate-mb", "64"]);
+        assert_eq!(a.event_archive_rotate_mb, Some(64));
+        let a = args_from(&["--entry-maker-timeout-ms", "-1"]);
+        assert_eq!(a.entry_maker_timeout_ms, -1, "negative = never escalate");
+        let a = args_from(&["--max-orderbook-stale-ms", "0"]);
+        assert_eq!(a.max_orderbook_stale_ms, 0, "0 = freshness check off");
+    }
+
+    /// The decimal knobs keep their exact decimal — the sizing and limit
+    /// family where a fallback would quietly re-arm the shipped cap.
+    #[test]
+    fn decimal_flags_carry_the_value_they_are_given() {
+        let a = args_from(&["--seed-balance", " 2500.5 "]);
+        assert_eq!(a.seed_balance, dec!(2500.5));
+        let a = args_from(&["--max-order-notional", "33.25"]);
+        assert_eq!(a.max_order_notional, dec!(33.25));
+        let a = args_from(&["--size-pct", "20"]);
+        assert_eq!(a.size_pct, dec!(20));
+        let a = args_from(&["--spread-arb-entry-factor", "1.2"]);
+        assert_eq!(a.spread_arb_entry_factor, Some(dec!(1.2)));
+        let a = args_from(&["--regime-min-efficiency", "0.55"]);
+        assert_eq!(a.regime_min_efficiency, dec!(0.55));
+    }
+
+    /// The mode is only ever what the operator spelled: `--mode live` is live,
+    /// `--mode dry` is dry — there is no spelling that falls back to dry.
+    #[test]
+    fn the_mode_is_only_ever_the_spelled_one() {
+        assert!(matches!(args_from(&["--mode", "live"]).mode, Mode::Live));
+        assert!(matches!(args_from(&["--mode", "dry"]).mode, Mode::Dry));
+    }
+
+    /// The boolean switches accept the explicit true|false vocabulary and
+    /// carry it (an explicit OFF must stay off — the whole point of the
+    /// `true|false` spelling).
+    #[test]
+    fn boolean_switches_carry_their_explicit_value() {
+        let a = args_from(&["--se-auto-evolve", "false"]);
+        assert_eq!(a.se_auto_evolve, Some(false));
+        let a = args_from(&["--update-check", "true"]);
+        assert_eq!(a.update_check_enabled, Some(true));
+        let a = args_from(&["--update-check", "0"]);
+        assert_eq!(a.update_check_enabled, Some(false));
+        let a = args_from(&["--se-auto-evolve", "on"]);
+        assert_eq!(a.se_auto_evolve, Some(true));
+    }
+
+    /// The update interval keeps 0 (scheduler off) and positive values; the
+    /// old `.filter(>=0)` silently DROPPED a negative into the default — the
+    /// negative is now the caller's problem at the parse arm, so any value
+    /// that reaches Args is one the scheduler can honour.
+    #[test]
+    fn the_update_interval_keeps_explicit_zero_and_positives() {
+        let a = args_from(&["--update-interval-secs", "0"]);
+        assert_eq!(a.update_interval_secs, Some(0));
+        let a = args_from(&["--update-interval-secs", "3600"]);
+        assert_eq!(a.update_interval_secs, Some(3600));
+    }
+
+    /// Backtest mode: the three documented spellings pass through, and a bare
+    /// `--backtest-mode` (no value) keeps the historic empty-mode single-run
+    /// shape — that default is documented, not a fallback a typo can hit
+    /// (a typo'd value is refused, the missing value is the default).
+    #[test]
+    fn backtest_mode_passes_the_three_documented_spellings() {
+        for mode in ["mine", "verify", "sweep"] {
+            let a = args_from(&["--backtest-mode", mode]);
+            assert_eq!(a.backtest_mode, mode);
+        }
+        let a = args_from(&["--backtest-mode"]);
+        assert_eq!(a.backtest_mode, "", "missing value = the historic default");
     }
 
     // ── #265: the zero-strategy refusal and its opt-out ─────────────────────
