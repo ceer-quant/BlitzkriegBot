@@ -43,8 +43,12 @@
  *                +0.70/share. Booking anything else is the settlement
  *                double-source discrepancy made visible (checklist #4).
  *   settle-loss  same construction, UP asks-only at 0.02, DOWN two-sided at
- *                0.95 → DOWN wins on the BOOK MID alone (no fallback needed),
- *                UP pays 0: expectation −0.30/share. Airtight control.
+ *                0.99 — DECISIVE (>= the dry ladder's COUNTER_DECISIVE_HIGH,
+ *                service.rs): the held leg prices at 0.02 (below the coin-flip
+ *                bar), the partner's 0.99 bid names it the loser, UP pays 0:
+ *                expectation −0.30/share. Airtight control. (0.95 used to sit
+ *                here — BELOW the 0.99 counter-evidence bar, so the resolution
+ *                was withheld forever and the loss never booked; #447.)
  *
  * FEE MATH: legacy_quadratic, fee_per_share = 0.125*(p*(1-p))^2 — restated
  * here DELIBERATELY independently of scripts/lib/fee-model.mjs: agreement
@@ -82,7 +86,7 @@ export const PROBES = {
   'loss-sl': { jump: 0.1, jumpAtSec: 30 },
   'win-timeexit': { jump: 0.55, jumpAtSec: 30 },
   'settle-win': { asksOnlyAtSec: 700, upAsk: 0.9, downJump: 0.1 },
-  'settle-loss': { asksOnlyAtSec: 700, upAsk: 0.02, downJump: 0.95 },
+  'settle-loss': { asksOnlyAtSec: 700, upAsk: 0.02, downJump: 0.99 },
   // The settlement-booking probe: UP jumps to a PHANTOM two-sided book — bids
   // quoted at 0.95 with ZERO size, asks 500 @ 0.95. mid = 0.95 > 0.5, so the
   // dry resolver can PRICE and PAY the winner; but a zero-depth bid side

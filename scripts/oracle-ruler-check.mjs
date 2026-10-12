@@ -80,6 +80,10 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = process.env.BK_CORE_BIN || join(ROOT, 'target', 'release', 'blitzkrieg-core');
 const PKG = join(ROOT, 'user_layer', 'strategies_lua', 'oracle_ruler');
 const OUT = process.env.BK_ORACLE_OUT || join(tmpdir(), 'bk-oracle-ruler');
+// Staging root for the scratch strategy-package copy — overridable so the
+// scratch never has to land on the OS temp volume (BK_ORACLE_OUT covers the
+// reports/corpus; this covers the staging dir the OUT root does not).
+const STAGE = process.env.BK_ORACLE_TMPDIR || tmpdir();
 
 const num = (v) => Number(v);
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
@@ -92,7 +96,7 @@ function check(name, cond, detail) {
 }
 
 function stagePackage() {
-  const dir = mkdtempSync(join(tmpdir(), 'bk-oracle-pkg-'));
+  const dir = mkdtempSync(join(STAGE, 'bk-oracle-pkg-'));
   cpSync(PKG, join(dir, 'oracle_ruler'), { recursive: true });
   return dir;
 }
@@ -241,7 +245,11 @@ const ARMS = [
     verdict: 'control: must match one closed form exactly (negative)',
   },
   {
-    name: 'win-timeexit', corpus: 'win-timeexit', extra: [],
+    name: 'win-timeexit', corpus: 'win-timeexit',
+    // The guillotine ships OFF since the @almach calibration (force_exit_sec=0
+    // disables it, cli.rs) — re-arm it HERE so the arm measures the time-exit
+    // ladder it claims to measure, instead of riding to settlement (+0.70).
+    extra: ['--exit-force-sec', '120'],
     exitMaker: 0.55, exitTaker: 0.55,
     verdict: 'time/stale exit must not mangle a winner (MUST be positive)',
     mustBePositive: true,
