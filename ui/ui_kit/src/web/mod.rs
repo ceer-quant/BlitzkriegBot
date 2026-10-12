@@ -371,6 +371,12 @@ pub fn render_json_full(
         // Older cores refuse the method → null; the card says so instead of
         // inventing a version number.
         "systemVersion": s.system_version,
+        // #379: the staging state machine. The snapshot type has carried it
+        // since #379, but the gateway never WROTE the key — the WebUI's
+        // staging badge read `snapshot.stageState` and always saw null. The
+        // snapshot fills it read-only from system.version's `stage` (never
+        // the download verb); older cores → null, rendered as "cannot stage".
+        "stageState": s.stage_state,
         // Full closed-trade rows for the history tab (snapshot already capped
         // by the trade_limit the bin passes to IpcClient::snapshot).
         "tradeRows": s.trades.iter().map(|t| serde_json::json!({
@@ -2676,6 +2682,47 @@ mod tests {
         let doc: serde_json::Value =
             serde_json::from_str(&render_json(&snap, Some(&readonly))).unwrap();
         assert_eq!(doc["gateway"]["lifecycleEnabled"], serde_json::json!(false));
+    }
+
+    /// The update half of the snapshot contract: `stageState` is ON the wire
+    /// (it never was — the WebUI's staging badge read a key the gateway never
+    /// wrote), and `systemVersion` carries the failure reason + the staging
+    /// state so a poller never needs the download verb. A default snapshot
+    /// renders both as null/absent, which every consumer reads as "unknown".
+    #[test]
+    fn the_snapshot_carries_the_stage_state_and_check_error() {
+        use crate::core::types::{StageStateView, SystemVersionView};
+
+        let mut snap = UiSnapshot::default();
+        let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, None)).unwrap();
+        // Default snapshot: the key EXISTS (older cores → null, "cannot stage"),
+        // and systemVersion is absent (nothing answered).
+        assert!(
+            doc.get("stageState").is_some(),
+            "stageState must be a wire key even when the core cannot stage"
+        );
+        assert_eq!(doc["stageState"], serde_json::Value::Null);
+
+        // A snapshot with version+stage data carries both through, verbatim.
+        snap.system_version = Some(SystemVersionView {
+            version: "0.4.0".into(),
+            last_check_error: Some("GET releases/latest: HTTP 403".into()),
+            stage: Some(StageStateView {
+                phase: "staged".into(),
+                version: Some("0.4.1".into()),
+                ..StageStateView::default()
+            }),
+            ..SystemVersionView::default()
+        });
+        snap.stage_state = snap.system_version.as_ref().and_then(|v| v.stage.clone());
+        let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, None)).unwrap();
+        assert_eq!(
+            doc["systemVersion"]["lastCheckError"],
+            serde_json::json!("GET releases/latest: HTTP 403"),
+            "the failure reason must reach the panel verbatim"
+        );
+        assert_eq!(doc["stageState"]["phase"], serde_json::json!("staged"));
+        assert_eq!(doc["stageState"]["version"], serde_json::json!("0.4.1"));
     }
 
     /// #186: a supervisor that has given up must be impossible to miss.

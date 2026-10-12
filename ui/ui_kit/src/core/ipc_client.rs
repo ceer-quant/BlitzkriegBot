@@ -618,10 +618,29 @@ impl IpcClient {
         s.evolution_status = self.evolution_status().ok();
         // VERSIONING.md §5: version + update state. Older cores refuse the
         // method → None; the UI then says so instead of inventing a version.
+        // Newer cores also carry `stage` inside this payload, so the staging
+        // summary is filled from HERE below — see the stage_state assignment.
         s.system_version = self.system_version().ok();
-        // #379: the staging state machine. Older cores refuse the method →
-        // None, which the UI renders as "this core cannot stage" — honest.
-        s.stage_state = self.update_stage().ok();
+        // #379: the staging state machine. NEVER via `system.update.stage` —
+        // that verb DOWNLOADS; polling it from the snapshot used to re-hit the
+        // download path every cycle (3,679 idle audit rows in 6.5 days). The
+        // read-only source is `system.version`'s `stage` key on newer cores;
+        // an older core refuses the stage verb → None, which every adapter
+        // renders as "this core cannot stage" — honest, and now side-effect
+        // free.
+        s.stage_state = s.system_version.as_ref().and_then(|v| v.stage.clone()).or(
+            if s.system_version.is_some() {
+                // Newer system.version parsed but carried no `stage` key
+                // (never happens on a same-revision stack) — do NOT fall back
+                // to the download verb; stay None.
+                None
+            } else {
+                // Legacy path: a core that does not speak system.version at
+                // all cannot be version-matched anyway; asking the stage verb
+                // once per snapshot is the pre-existing behaviour for it.
+                self.update_stage().ok()
+            },
+        );
         s
     }
 }

@@ -127,6 +127,7 @@ impl UpdateState {
             last_check_ms: self.last_check_ms.load(Ordering::Relaxed),
             check_enabled: self.check_enabled.load(Ordering::Relaxed),
             auto_update: self.auto_update.load(Ordering::Relaxed),
+            stage: self.stage_snapshot(),
         }
     }
 
@@ -223,6 +224,7 @@ pub struct UpdateSnapshot {
     pub last_check_ms: u64,
     pub check_enabled: bool,
     pub auto_update: bool,
+    pub stage: StageState,
 }
 
 /// `system.update.configure` params. Both keys optional — a request that names
@@ -253,6 +255,17 @@ pub struct SystemVersion {
     pub check_enabled: bool,
     pub last_check_ms: Option<u64>,
     pub release_url: Option<String>,
+    /// WHY the last check failed, verbatim from the fetch/parse layer. `None`
+    /// unless the last check FAILED — a check that never ran and a check that
+    /// succeeded are both `None`, so the UI can show the reason instead of a
+    /// bare "failed" with nowhere to look. Never contains credentials (P16).
+    pub last_check_error: Option<String>,
+    /// The staging state machine, verbatim. Riding `system.version` makes the
+    /// whole update state ONE read-only answer: a snapshot poller reads this
+    /// key instead of poking `system.update.stage` — the verb that DOWNLOADS —
+    /// every cycle (the panel's 15s poll used to hit the download verb 3,679
+    /// times in 6.5 days of audit trail).
+    pub stage: StageState,
 }
 
 /// Join the build stamp and the update state into the payload. Pure — the
@@ -272,6 +285,12 @@ pub fn system_version_payload(
         }
         _ => (None, None, None), // not checked / failed → the null of three-state, never a guess
     };
+    // The failure reason is surfaced only for a FAILED check (see the field
+    // doc): "never ran" and "ran fine" both stay `None`.
+    let last_check_error = match &s.outcome {
+        CheckOutcome::Failed { detail } if s.last_check_ms > 0 => Some(detail.clone()),
+        _ => None,
+    };
     SystemVersion {
         version: build.version.to_string(),
         git_hash: build.git_hash.to_string(),
@@ -284,6 +303,8 @@ pub fn system_version_payload(
         check_enabled: s.check_enabled,
         last_check_ms: (s.last_check_ms > 0).then_some(s.last_check_ms),
         release_url: url,
+        last_check_error,
+        stage: s.stage.clone(),
     }
 }
 
@@ -528,6 +549,17 @@ pub async fn stage_once(
     if state.stage_snapshot().phase == StagePhase::Downloading {
         return;
     }
+    // The same release, already staged and byte-verified → a re-stage is a
+    // NO-OP, not a re-download. A poller that pokes the verb on a schedule
+    // (or an operator who clicks twice) must not push the release archive
+    // through the network again for bytes we already hold. A FAILED attempt
+    // or a DIFFERENT version still re-runs.
+    {
+        let staged = state.stage_snapshot();
+        if staged.phase == StagePhase::Staged && staged.version.as_deref() == Some(&version) {
+            return;
+        }
+    }
     // A FAILED run must not destroy a previously staged good copy's identity:
     // the operator still holds a restart-ready asset, and the summary saying
     // which version it is survives the failed attempt (only a successful run
@@ -743,7 +775,12 @@ async fn fetch_latest_impl(token: Option<&str>) -> Result<String, String> {
     // is read through BUILD_INFO, not env!() (the core crate has no stamps of
     // its own any more — §3.2: exactly one crate injects).
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        // 30s, not 10s: the check traverses whatever proxy path the operator's
+        // network rides, and a same-stack probe measured 5.7s of pure baseline
+        // latency — 10s turned routine jitter into "update checking is broken"
+        // with no reason visible anywhere. Still short enough that a failed
+        // check never holds anything up.
+        .timeout(std::time::Duration::from_secs(30))
         .user_agent(format!(
             "BlitzkriegBot/{}",
             blitzkrieg_build_info::BUILD_INFO.version
@@ -771,6 +808,25 @@ async fn fetch_latest_impl(token: Option<&str>) -> Result<String, String> {
 const RELEASES_LATEST: &str =
     "https://api.github.com/repos/ceer-quant/BlitzkriegBot/releases/latest";
 
+/// One check, and the verdict PERSISTED. Every real caller (startup, the
+/// auto scheduler, the manual `system.update.check` arm) wants the same two
+/// steps: `check_once` writes the state cell, then persist lands it in
+/// `data/update/state.json`. The manual arm historically skipped the second
+/// step — a failed check evaporated on restart, and the state file kept
+/// `lastCheckMs: 0` forever. Best-effort persist, like every other caller:
+/// the cell stays authoritative even when the disk write fails.
+pub async fn check_and_persist(
+    state: &Arc<UpdateState>,
+    local_version: &str,
+    at_ms: u64,
+    fetch: impl std::future::Future<Output = Result<String, String>>,
+) {
+    check_once(state, local_version, at_ms, fetch).await;
+    if let Err(e) = persist(state) {
+        tracing::warn!("update state persist failed (non-fatal): {e}");
+    }
+}
+
 /// Mount the startup check: never blocks startup, and does NOTHING at all
 /// unless the switch is on (INV-3: no spawn, no request, no packet).
 pub fn spawn_startup_check(state: Arc<UpdateState>, local_version: String, token: Option<String>) {
@@ -780,10 +836,7 @@ pub fn spawn_startup_check(state: Arc<UpdateState>, local_version: String, token
     tokio::spawn(async move {
         let at = now_ms() as u64;
         let fetch = fetch_latest(token);
-        check_once(&state, &local_version, at, fetch).await;
-        if let Err(e) = persist(&state) {
-            tracing::warn!("update state persist failed (non-fatal): {e}");
-        }
+        check_and_persist(&state, &local_version, at, fetch).await;
     });
 }
 
@@ -830,10 +883,7 @@ pub fn spawn_auto_check_scheduler(
             }
             let at = now_ms() as u64;
             let fetch = fetch_latest(token.clone());
-            check_once(&state, local_version.as_str(), at, fetch).await;
-            if let Err(e) = persist(&state) {
-                tracing::warn!("update state persist failed (non-fatal): {e}");
-            }
+            check_and_persist(&state, local_version.as_str(), at, fetch).await;
         }
     })
 }
@@ -1031,9 +1081,14 @@ mod tests {
             last_check_ms: 0,
             check_enabled: false,
             auto_update: false,
+            stage: StageState::default(),
         };
         assert_eq!(system_version_payload(b, &s).update_available, None);
         assert_eq!(system_version_payload(b, &s).last_check_ms, None);
+        // "not checked" carries no failure reason, and the stage machine rides
+        // the payload at its default (Idle).
+        assert_eq!(system_version_payload(b, &s).last_check_error, None);
+        assert_eq!(system_version_payload(b, &s).stage.phase, StagePhase::Idle);
 
         let s = UpdateSnapshot {
             outcome: CheckOutcome::Failed {
@@ -1044,8 +1099,15 @@ mod tests {
             last_check_ms: 1,
             check_enabled: true,
             auto_update: false,
+            stage: StageState::default(),
         };
         assert_eq!(system_version_payload(b, &s).update_available, None);
+        // A FAILED check surfaces its reason — the operator-facing point of
+        // the new field.
+        assert_eq!(
+            system_version_payload(b, &s).last_check_error.as_deref(),
+            Some("dns")
+        );
 
         let s = UpdateSnapshot {
             outcome: CheckOutcome::UpToDate,
@@ -1054,8 +1116,10 @@ mod tests {
             last_check_ms: 1,
             check_enabled: true,
             auto_update: false,
+            stage: StageState::default(),
         };
         assert_eq!(system_version_payload(b, &s).update_available, Some(false));
+        assert_eq!(system_version_payload(b, &s).last_check_error, None);
     }
 
     /// The wire keys are the camelCase contract, and the provenance half
@@ -1391,16 +1455,22 @@ mod tests {
         })
         .await;
         assert_eq!(state.stage_snapshot().phase, StagePhase::Staged);
-        // Second run's fetch fails at the network level.
+        // Second run for the SAME version: with the already-staged guard the
+        // fetch is never constructed, so the re-stage is a NO-OP — the
+        // strongest possible form of "a failed re-stage must not destroy a
+        // good copy" (there is no attempt left to fail). The different-
+        // version failure path is `an_already_staged_version_skips_the_
+        // download`'s tail.
         stage_once(&state, "t", 2, &dir, |_, _| async move {
-            Err("connection refused".into())
+            panic!("the same version must not re-download");
         })
         .await;
         let s = state.stage_snapshot();
-        assert_eq!(s.phase, StagePhase::Failed);
-        // …but the good copy's identity survives the failed attempt.
+        assert_eq!(s.phase, StagePhase::Staged);
+        // …the good copy's identity survives untouched.
         assert_eq!(s.version.as_deref(), Some("0.3.1"));
         assert_eq!(s.asset.as_deref(), Some(asset.as_str()));
+        assert_eq!(s.staged_at_ms, Some(1));
         assert_eq!(std::fs::read(dir.join(&asset)).unwrap(), b"good");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1427,6 +1497,50 @@ mod tests {
         .await;
         // The machine stays where it was — the second caller changed nothing.
         assert_eq!(state.stage_snapshot().phase, StagePhase::Downloading);
+    }
+
+    /// The same release, already staged → a re-stage is a NO-OP (the fetch is
+    /// never constructed): a poller poking the verb on a schedule must not
+    /// push the archive through the network again for bytes already held.
+    /// A DIFFERENT version still re-runs.
+    #[tokio::test]
+    async fn an_already_staged_version_skips_the_download() {
+        let state = Arc::new(UpdateState::new(true, true));
+        state.apply(CheckOutcome::Available, Some("0.3.1".into()), None, 1);
+        let dir = std::env::temp_dir().join(format!("bk-stage-skip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        stage_once(&state, "t", 1, &dir, |_, _| async move {
+            Ok((
+                b"good".to_vec(),
+                sums_for(&asset_name("0.3.1", "t"), b"good"),
+            ))
+        })
+        .await;
+        assert_eq!(state.stage_snapshot().phase, StagePhase::Staged);
+        // Same version again: the fetch must not even be polled.
+        stage_once(&state, "t", 2, &dir, |_, _| async move {
+            panic!("an already-staged version must not re-download");
+        })
+        .await;
+        let s = state.stage_snapshot();
+        assert_eq!(s.phase, StagePhase::Staged);
+        assert_eq!(s.staged_at_ms, Some(1), "the first run's summary survives");
+        // A different verdict version re-runs the fetch (the panic above would
+        // have fired otherwise; here the fetch errors and the phase moves).
+        state.apply(CheckOutcome::Available, Some("0.3.2".into()), None, 3);
+        stage_once(
+            &state,
+            "t",
+            4,
+            &dir,
+            |_, _| async move { Err("offline".into()) },
+        )
+        .await;
+        let s = state.stage_snapshot();
+        assert_eq!(s.phase, StagePhase::Failed);
+        // …and the good 0.3.1 copy survives the failed 0.3.2 attempt.
+        assert_eq!(s.version.as_deref(), Some("0.3.1"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The staging summary rides persist → load: a `staged` phase with a
