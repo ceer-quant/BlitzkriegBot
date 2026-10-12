@@ -4,6 +4,8 @@
 
 <div align="center">
 
+<img src="assets/logo.png" alt="BlitzkriegBot" width="160"/>
+
 [![CI](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/ci.yml/badge.svg)](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/ci.yml)
 [![Security](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/security.yml/badge.svg)](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/security.yml)
 [![Secret Scan (deep)](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/secret-scan.yml/badge.svg)](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/secret-scan.yml)
@@ -49,8 +51,8 @@ BlitzkriegBot 是一个**自己盯行情、自己下模拟单**的机器人：�
 │ 交易核心 blitzkrieg-core（市场无关）：                     │
 │   撮合 · 下单 · 持仓 · 风控 · 对账 · 账本，内核 0 策略     │
 ├────────────────────────────────────────────────────────────┤
-│ 市场扩展：extensions/polymarket（唯一官方扩展）            │
-│   CLOB 下单 · WS 行情 · Gamma 轮盘发现                     │
+│ 市场扩展：extensions/*（polymarket 默认挂接，其余可选）     │
+│   CLOB 下单 · WS 行情 · 轮盘发现；kalshi/predict.fun 可选  │
 ├────────────────────────────────────────────────────────────┤
 │ 面板 blitzkrieg（单二进制启动器）：                        │
 │   Web 面板（127.0.0.1:51888）· TUI · run/stop 生命周期     │
@@ -159,16 +161,20 @@ blitzkrieg run
 | 轮盘发现（Gamma） | 自动发现 Polymarket 的 15 分钟 UP/DOWN 轮盘市场 |
 | 行情 | Rust 原生源：Polymarket REST `POST /books` 轮询 + Binance 现货 WS |
 | 自驱动引擎 | 发现 → 扫描 → 信号 → 下单 → 出场，一条流水线自动跑 |
-| DryRun 模拟成交 | 本地撮合、估值、赎回，零资金风险 |
+| DryRun 模拟成交 | 本地撮合、估值、赎回；dry 结算读取对侧盘口证据（#438） |
 | 下单/持仓/对账 | 挂单生命周期、持仓重估、与交易所成交回报对账 |
-| 风控硬限制 | 持仓数、单笔名义额等硬上限，策略不可豁免 |
+| 风控硬限制 | 持仓数、单笔名义额等硬上限，策略不可豁免；九项系统限额与退出纪律可在面板热编辑（#415/#417） |
+| 账户执行策略 | 按账户隔离的下单执行策略规则引擎（蓝图编译产物驱动） |
 | 出场策略 | 止损、最小剩余时间等自动出场 |
-| 策略系统 | Lua 策略包（官方 spread_arb 等 9 个）+ cdylib（C ABI v2，vtable 已冻结）热加载 |
-| 影子进化 | 影子回放、近失样本、按策略参数进化（apply · rollback，生产默认关闭） |
-| 回放与回测 | `--replay` 行情回放、近失样本回放、面板内回测 |
+| 策略系统 | Lua 策略包（官方 11 个）+ cdylib（C ABI v2，vtable 已冻结）热加载 |
+| 策略蓝图 | 画布式策略编辑器 → 编译为 Lua 包，手写包也能进编辑器（#414） |
+| 影子进化 | 影子回放、近失样本、按策略参数进化（apply · rollback，生产默认关闭）；Lua 包经 manifest 声明参数域后同样可进化 |
+| 回放与回测 | `--replay` 行情回放（时间错位修正 + 三模式）、近失样本回放、面板内回测；deadline 驱动 nofast 调度 |
+| 跨平台扩展 | Kalshi / predict.fun 市场插件（opt-in feature）+ 统一事件映射 + 两腿原子对冲执行（0.3.3） |
 | Web 面板 | Vue 前端：快照 / 命令 / 插件 / 登录 API，可托管核心生命周期 |
 | TUI 终端面板 | `blitzkrieg tui` / `run --tui` |
 | 一键启停 | `blitzkrieg run` / `stop`，崩溃自动重建，只收自己拉起的进程 |
+| 自更新 | 更新检查 + 下载暂存状态机（内核永不改写正在执行的二进制，#379） |
 | 看门狗与备份 | `scripts/stack-watchdog.sh`（停机告警，不自动拉起）、数据备份与新鲜度巡检 |
 | 多市场架构 | 核心市场无关，新增交易所 = 写一个扩展 crate + feature 注册 |
 
@@ -202,7 +208,7 @@ blitzkrieg 家族进程，你启动它的 shell 永远不会被碰。
 
 **Q6：怎么升级到新版本？**
 拉最新代码重新构建即可：`git pull && cargo build --release --workspace --locked`。
-正式版本以根 `Cargo.toml` 的 `version`（当前 **0.3.0**）为准，tag 形如 `v0.3.0`，由
+正式版本以根 `Cargo.toml` 的 `version`（当前 **0.4.0**）为准，tag 形如 `v0.4.0`，由
 Release 工作流构建发布；发布与版本规则见 [`docs/VERSIONING.md`](./docs/VERSIONING.md)。
 
 **Q7：支持 Windows 吗？**
@@ -234,10 +240,13 @@ Release 工作流构建发布；发布与版本规则见 [`docs/VERSIONING.md`](
 | **Gamma** | Polymarket 的市场发现 API，轮盘市场列表从这里来 |
 | **cdylib 策略** | 编译成动态库（`.dylib`/`.so`）的策略，内核运行时通过 C ABI v2 加载，vtable 已冻结 |
 | **Lua 策略包** | 目录里带 `manifest.json` + `strategy.lua` 的策略（如官方 spread_arb），内核内嵌 Lua 运行时加载 |
+| **策略蓝图** | 面板里的画布式策略编辑器：图形蓝图编译成 Lua 策略包；手写包也能被它打开编辑（源码模式） |
 | **策略状态（strategy-state）** | `data/strategy-state.json`：记录「哪些策略被启用了」的持久文件，重启后仍生效 |
 | **影子进化（shadow evolution）** | 让策略变体在影子中并行试跑、按冻结语料证据优胜劣汰的机制（生产默认关闭） |
 | **近失样本（near-miss）** | 「差一点就成交/触发」的行情记录，用于复盘策略错过了什么 |
 | **dry 模拟成交** | 内核按真实盘口在本地模拟撮合与赎回，账本结构与 live 一致，但不动真钱 |
+| **跨平台对冲（hedge）** | 同时在两个市场下买卖两腿以锁定价差；内核的两腿状态机带保护阶梯与结算对齐，裸腿按缺口规模自动补单/强平 |
+| **执行策略（execution policy）** | 按账户隔离的下单规则引擎（预算三元组 / 权益下限 / 单资产上限），策略下单前统一过这道闸 |
 | **UDS** | Unix 域套接字，同一台电脑上两个进程间的高效通信管道（核心 ↔ 面板用这个） |
 
 ## 故障排查
@@ -278,11 +287,12 @@ Release 工作流构建发布；发布与版本规则见 [`docs/VERSIONING.md`](
 │                         blitzkrieg-core（Rust）                          │
 │  engine/ome · order · position · risk · exit_policy · reconcile        │
 │  strategy_engine（cdylib + Lua 热加载，内核 0 策略） · shadow/shadow_evolution │
+│  hedge（跨平台两腿对冲） · kline · execution_policy                    │
 │  market registry（core 市场无关，无任何交易所 SDK）                      │
 └────────────────────────────────────────┬───────────────────────────────┘
                                  │ 依 feature 挂接
                     ┌────────────┴────────────┐
-                    │ extensions/polymarket   │  CLOB 下单 · WS 行情 · Gamma 轮盘
+                    │ extensions/*            │  polymarket 默认 · kalshi / predict.fun 可选
                     └─────────────────────────┘
 ```
 
@@ -307,12 +317,15 @@ BlitzkriegBot/
 │   ├── blitzkrieg_core/   # 交易核心二进制 blitzkrieg-core（市场无关）
 │   └── market_api/        # 市场扩展契约：DataFeed / Discovery / Executor / MarketPlugin
 ├── extensions/
+│   ├── kalshi/            # Kalshi 扩展（0.3.3，opt-in feature）
+│   ├── predictfun/        # predict.fun 扩展（0.3.3，opt-in feature）
 │   └── polymarket/        # 官方 Polymarket 扩展（默认 feature 挂接）
 ├── user_layer/
 │   ├── strategy_api/      # 用户策略 trait / FFI 稳定表面
 │   ├── strategy_logic/    # 策略算法（与内核共享的纯逻辑，不含任何启用策略）
+│   ├── parity_logic/      # 对拍/蓝图共享的确定性参考逻辑（parity-logic crate）
 │   ├── lua_runtime/       # 内嵌 Lua 运行时（Lua 策略包宿主）
-│   ├── strategies_lua/    # Lua 策略包（官方 spread_arb 等 9 个；带 manifest.json）
+│   ├── strategies_lua/    # Lua 策略包（官方 11 个；带 manifest.json）
 │   ├── parity_strategy/   # C ABI v2 参考实现（独立的嵌套 workspace，产出 cdylib）
 │   ├── strategies/        # cdylib 策略投放点：内核扫描这里，当前为空（只有 README）
 │   └── configs/           # 内核会读取的运行时配置（default.toml 等）
@@ -343,6 +356,8 @@ BlitzkriegBot/
 | `strategy_engine` | 动态策略加载器（dlopen C ABI v2 + Lua 包；内核不含策略） |
 | `shadow` / `shadow_evolution` | 影子回放、近失（near-miss）样本与影子进化 |
 | `sim` | DryRun 模拟成交与估值 |
+| `hedge` | 跨平台两腿对冲（可行性门 / 腿状态机 / 保护阶梯 / 结算对齐 / 联合风控） |
+| `kline` / `execution_policy` | K 线聚合与账户级下单执行策略规则引擎 |
 | `ipc` | UDS + JSON-RPC 2.0 传输与 schema |
 | `extension` / `market` | 扩展上下文与市场注册/托管 |
 
@@ -498,9 +513,10 @@ cd ui/webapp/webui && npm run check:all
 
 官方 `spread_arb` 现在是 **Lua 策略**：`user_layer/strategies_lua/spread_arb/` 是 Rust 参考
 实现的**逐位精确移植**（移植前在冻结语料的经济门禁上复现了全部 4 个窗口的基线记录）。
-`user_layer/strategies_lua/` 现有 9 个策略包（`spread_arb` / `flash_arb` / `hot_side_momentum` /
-`kline_probe` / `lua_momentum` / `mad_dog` / `market_maker` / `oracle_ruler` /
-`pair_discount_arb`）——它们是**已安装、默认全部关闭**的，启用与否见上文。
+`user_layer/strategies_lua/` 现有 11 个策略包（`spread_arb` / `single_leg_pair` /
+`pair_discount_arb` / `cross_venue_arb` / `flash_arb` / `hot_side_momentum` /
+`kline_probe` / `lua_momentum` / `mad_dog` / `market_maker` / `oracle_ruler`）——
+它们是**已安装、默认全部关闭**的，启用与否见上文。
 
 因此本节当前**没有任何 cdylib 条目**。要新增策略时，先在这里写下它的进入条件，再让它进入
 任何默认启用清单。
