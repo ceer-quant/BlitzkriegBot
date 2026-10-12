@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "6427d4a17f227bdd1e3df92f2716540440470fabd53895c55903a6ab8272af11",
+  "sha256": "fbdf991bad32a02953d60829026c22e0315237bc8620bb151194bd2f6c5ecae7",
   "author": "BlitzkriegBot",
   "description": "Panic-wick catcher for 15-minute binary rounds: after one direction holds (mid >= 0.55 by a 20s hold or a 60s rolling mean), a fast wick below 0.35 arms a resting maker bid 0.02 under the wick low; the underlying-asset momentum gate reads engine-side sec1 spot bars. Signal-only: the kernel adjudicates, sizes and gates every intent.",
   "tunables": {

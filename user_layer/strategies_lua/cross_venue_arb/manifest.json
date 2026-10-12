@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "a056d2b4ee99fcf3ce27047f59368e98ce014977b2ddf9fb145060b6aee9dfa7",
+  "sha256": "89326b6aa4cf7b8aea1c74f1733a795e89f69d65a9123c7eaf4cab5d1b75af9d",
   "author": "BlitzkriegBot",
   "description": "Cross-venue pair collector (#427 blueprint): when a confirmed unified mapping (zero discrepancies, status paired) prices the same bet on two venues and ask_UP@cheaper + ask_DOWN@other + BOTH legs' taker fees costs less than $1.00 by more than spread_open_pct, buy BOTH legs at their own asks with EQUAL declared share counts — capacity = the SMALLER leg's visible ask depth (两平台各自深度的最小值), named in every reason line. spread_close_pct is the release valve: a held pair whose all-in cost has fallen back within Y% of the money is offered back via exits at its own bids. Fees priced from bk.fees(); no schedule in force means no suggestions. Venue is data (cheapest listing wins the leg) — no branch on venue identity anywhere. Signal-only: the kernel adjudicates, sizes, gates and settles every intent.",
   "gate_exemptions": {

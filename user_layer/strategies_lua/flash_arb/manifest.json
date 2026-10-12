@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "6606bdfbff49536ba1d2fc6fe62552a74d8caead91b8982f7eb93eade4a6f8cb",
+  "sha256": "d655987afa65b753e659aeae6fe1dd2feb315c3116272caace3cdae8b978ce81",
   "author": "BlitzkriegBot",
   "description": "Spot-to-venue lag catcher for 15-minute binary rounds: when the Binance spot price of the round's asset moves >= 0.25% inside 2s, buy the side the move implied as a post_only maker at the current ask, while that price is still <= 0.55 and within 1.5s of the trigger. Signal-only: the kernel adjudicates, sizes and gates every intent.",
   "tunables": {
