@@ -31,12 +31,13 @@
 //! read-only surface answers through another without the two drifting.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
 use blitzkrieg_strategy_api::{
     BookUpdate, HoldingView, Kline, KlineInterval, MarketInfo, RoundInfo,
 };
-use mlua::{Lua, Table, Value};
+use mlua::{Function, Lua, Table, Value};
 
 /// §11.1: the public display fields of the account a strategy is authorized
 /// to act for. `balance/available/reserved` are exact decimal STRINGS; there
@@ -128,6 +129,120 @@ pub struct UnifiedListingView {
     pub up_token: String,
     pub down_token: String,
     pub expires_at_ms: i64,
+}
+
+/// Content-keyed cache slot for one `bk.*` projection (#448/#440).
+///
+/// The bk closures rebuild their Lua tables from scratch on every call, but
+/// the host state behind them changes far less often than strategies read it
+/// (the sampling that opened #448: table rebuilds + string interning + the
+/// GC pressure they cause are ~50% of a replay's main thread). Each closure
+/// keeps the LAST fingerprint it rendered plus the pinned table; a call whose
+/// fingerprint is unchanged returns the cached table instead of rebuilding.
+///
+/// The fingerprint covers exactly the RENDERED fields (nothing more), so two
+/// host snapshots that spell the same projection share one table. A single
+/// slot per surface: the cache never grows — a content change re-renders over
+/// it, and replacing the [`mlua::RegistryKey`] un-pins the old table for the
+/// collector. The cached table is also the one a strategy may still hold from
+/// an earlier call — same numbers it saw then, exactly as without the cache.
+type CacheSlot = Option<(String, mlua::RegistryKey)>;
+
+/// Fingerprint builder: every rendered field lands in one `\u{1}`-separated
+/// string. Rendered-field-exact by construction — decimal-bearing fields
+/// fingerprint through their `String` spellings, so two renderings differ iff
+/// their fingerprints differ.
+struct Fp(String);
+
+impl Fp {
+    fn new() -> Self {
+        Fp(String::new())
+    }
+    fn field(&mut self, s: &str) -> &mut Self {
+        self.0.push_str(s);
+        self.0.push('\u{1}');
+        self
+    }
+    fn opt(&mut self, v: &Option<String>) -> &mut Self {
+        match v {
+            Some(s) => self.field(s),
+            None => {
+                let _ = self.field("\u{0}");
+                self
+            }
+        }
+    }
+    fn num<T: std::fmt::Display>(&mut self, v: T) -> &mut Self {
+        let _ = write!(self.0, "{v}\u{1}");
+        self
+    }
+    fn done(self) -> String {
+        self.0
+    }
+}
+
+/// Guard a rendered projection table against writes. §6.4 declares `bk.*` a
+/// read-only projection; with the cache a mutation would now leak across
+/// calls, so a hostile write is refused LOUDLY at the write site instead of
+/// silently corrupting a shared table. `__index` stays unset (plain field
+/// reads), `__metatable` hides the guard from `getmetatable`.
+/// Freeze a rendered projection behind a read-only proxy (#448). Returns the
+/// PROXY to hand out — the caller must never return the data table itself.
+///
+/// A plain metatable with `__newindex` does NOT suffice: Lua fires it only
+/// for keys ABSENT from the table, so `t.best_bid = '0.99'` on an existing
+/// field would land as a raw assignment. The proxy shape closes that hole by
+/// construction — the proxy table itself is always empty, so EVERY write
+/// goes through `__newindex` and errors, while reads forward through
+/// `__index` to the real data table (kept alive by the metamethod capture).
+/// `__len`/`__pairs` keep `#t`, `ipairs` and `pairs` working over the hidden
+/// data (they ignore `__index`, verified against Lua semantics); the empty
+/// table needs none of them — `#` is 0 and iteration yields nothing, which
+/// is exactly the empty answer. Nested tables inside array projections are
+/// frozen recursively, so `ms[1].asset = 'x'` is refused the same way.
+fn guard_readonly(lua: &Lua, t: &Table) -> mlua::Result<Table> {
+    // Freeze children first: array rows become proxies before anyone can
+    // reach them through __index. Plain-data trees, no cycles by construction.
+    for i in 1..=t.raw_len() {
+        let v: Value = t.raw_get(i as i64)?;
+        if let Value::Table(inner) = v {
+            let frozen = guard_readonly(lua, &inner)?;
+            t.raw_set(i as i64, frozen)?;
+        }
+    }
+    let deny = lua.create_function(|_, (key, _): (Value, Value)| {
+        let name = match &key {
+            Value::String(s) => s.to_string_lossy(),
+            other => format!("{other:?}"),
+        };
+        Err::<(), _>(mlua::Error::runtime(format!(
+            "bk.* projections are read-only (attempt to set '{name}')"
+        )))
+    })?;
+    let proxy = lua.create_table()?;
+    let mt = lua.create_table()?;
+    mt.raw_set("__index", t.clone())?;
+    mt.raw_set("__newindex", deny)?;
+    if t.raw_len() > 0 {
+        // `__len` must answer the DATA table's length — the proxy's own is 0.
+        let data = t.clone();
+        mt.raw_set(
+            "__len",
+            lua.create_function(move |_, ()| Ok(data.raw_len()))?,
+        )?;
+        // pairs() ignores __index; hand it the real table with the global next.
+        let data = t.clone();
+        mt.raw_set(
+            "__pairs",
+            lua.create_function(move |lua, ()| {
+                let next: Function = lua.globals().raw_get("next")?;
+                Ok((next, data.clone(), Value::Nil))
+            })?,
+        )?;
+    }
+    mt.raw_set("__metatable", "bk projection")?;
+    let _ = proxy.set_metatable(Some(mt));
+    Ok(proxy)
 }
 
 impl BkState {
@@ -225,7 +340,8 @@ pub fn kline_to_lua(lua: &Lua, k: &Kline) -> mlua::Result<Table> {
 }
 
 /// Install the `bk` table into the sandbox globals. Idempotent per state
-/// machine (each strategy owns its own `Lua`).
+/// machine (each strategy owns its own `Lua`). Every table-returning closure
+/// renders through a content-keyed cache ([`ProjectionCache`]) — see #448.
 pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
     let bk = lua.create_table()?;
 
@@ -244,20 +360,42 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
     // -- bk.round() ---------------------------------------------------------
     {
         let st = Arc::clone(&state);
+        let slot: std::cell::RefCell<CacheSlot> = std::cell::RefCell::new(None);
         bk.raw_set(
             "round",
             lua.create_function(move |lua, ()| {
                 let st = st.lock().expect("bk state mutex");
                 match st.round {
                     None => Ok(Value::Nil),
-                    Some((slot, time_left_sec, now)) => Ok(Value::Table(round_to_lua(
-                        lua,
-                        &RoundInfo {
-                            slot,
-                            time_left_sec,
-                            now_ms: now,
-                        },
-                    )?)),
+                    Some((slot_, time_left_sec, now)) => {
+                        let mut fp = Fp::new();
+                        let _ = fp.num(slot_).num(time_left_sec).num(now);
+                        let key = fp.done();
+                        if let Some((k, reg)) = slot.borrow().as_ref()
+                            && *k == key
+                        {
+                            let t: Table = lua.registry_value(reg)?;
+                            return Ok(Value::Table(t));
+                        }
+                        let t = round_to_lua(
+                            lua,
+                            &RoundInfo {
+                                slot: slot_,
+                                time_left_sec,
+                                now_ms: now,
+                            },
+                        )?;
+                        let t = guard_readonly(lua, &t)?;
+                        let reg = lua.create_registry_value(t)?;
+                        *slot.borrow_mut() = Some((key, reg));
+                        match slot.borrow().as_ref() {
+                            Some((_, reg)) => {
+                                let t: Table = lua.registry_value(reg)?;
+                                Ok(Value::Table(t))
+                            }
+                            None => unreachable!("slot just stored"),
+                        }
+                    }
                 }
             })?,
         )?;
@@ -266,10 +404,29 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
     // -- bk.markets() -------------------------------------------------------
     {
         let st = Arc::clone(&state);
+        let slot: std::cell::RefCell<CacheSlot> = std::cell::RefCell::new(None);
         bk.raw_set(
             "markets",
             lua.create_function(move |lua, ()| {
                 let st = st.lock().expect("bk state mutex");
+                let mut fp = Fp::new();
+                for m in &st.markets {
+                    fp.field(&m.asset)
+                        .field(&m.condition_id)
+                        .field(&m.up_token)
+                        .field(&m.down_token)
+                        .num(m.expires_at_ms)
+                        .num(m.slot)
+                        .field(if m.neg_risk { "1" } else { "0" })
+                        .field(&m.venue);
+                }
+                let key = fp.done();
+                if let Some((k, reg)) = slot.borrow().as_ref()
+                    && *k == key
+                {
+                    let t: Table = lua.registry_value(reg)?;
+                    return Ok(Value::Table(t));
+                }
                 let arr = lua.create_table()?;
                 for (i, m) in st.markets.iter().enumerate() {
                     let t = lua.create_table()?;
@@ -288,7 +445,16 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                     }
                     arr.raw_set(i as i64 + 1, t)?;
                 }
-                Ok(Value::Table(arr))
+                let arr = guard_readonly(lua, &arr)?;
+                let reg = lua.create_registry_value(arr)?;
+                *slot.borrow_mut() = Some((key, reg));
+                match slot.borrow().as_ref() {
+                    Some((_, reg)) => {
+                        let t: Table = lua.registry_value(reg)?;
+                        Ok(Value::Table(t))
+                    }
+                    None => unreachable!("slot just stored"),
+                }
             })?,
         )?;
     }
@@ -296,6 +462,7 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
     // -- bk.book(symbol) ----------------------------------------------------
     {
         let st = Arc::clone(&state);
+        let slot: std::cell::RefCell<CacheSlot> = std::cell::RefCell::new(None);
         bk.raw_set(
             "book",
             lua.create_function(move |lua, symbol: String| {
@@ -304,7 +471,47 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                     return Ok(Value::Nil);
                 };
                 let fresh = st.fresh.get(&symbol).copied();
-                Ok(Value::Table(book_to_lua(lua, u, fresh)?))
+                let mut fp = Fp::new();
+                fp.field(&u.symbol).field(&u.asset);
+                for v in [
+                    &u.best_bid,
+                    &u.best_ask,
+                    &u.mid,
+                    &u.obi,
+                    &u.spread,
+                    &u.bid_depth,
+                    &u.ask_depth,
+                    &u.spread_pct,
+                ] {
+                    let _ = fp.opt(v);
+                }
+                let _ = fp.num(u.timestamp_ms).num(u.bid_levels).num(u.ask_levels);
+                match fresh {
+                    Some(f) => {
+                        let _ = fp.field(if f { "1" } else { "0" });
+                    }
+                    None => {
+                        let _ = fp.field("\u{0}");
+                    }
+                }
+                let key = fp.done();
+                if let Some((k, reg)) = slot.borrow().as_ref()
+                    && *k == key
+                {
+                    let t: Table = lua.registry_value(reg)?;
+                    return Ok(Value::Table(t));
+                }
+                let t = book_to_lua(lua, u, fresh)?;
+                let t = guard_readonly(lua, &t)?;
+                let reg = lua.create_registry_value(t)?;
+                *slot.borrow_mut() = Some((key, reg));
+                match slot.borrow().as_ref() {
+                    Some((_, reg)) => {
+                        let t: Table = lua.registry_value(reg)?;
+                        Ok(Value::Table(t))
+                    }
+                    None => unreachable!("slot just stored"),
+                }
             })?,
         )?;
     }
@@ -312,15 +519,39 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
     // -- bk.params() --------------------------------------------------------
     {
         let st = Arc::clone(&state);
+        let slot: std::cell::RefCell<CacheSlot> = std::cell::RefCell::new(None);
         bk.raw_set(
             "params",
             lua.create_function(move |lua, ()| {
                 let st = st.lock().expect("bk state mutex");
+                let mut fp = Fp::new();
+                // HashMap order is unstable — sort so equal content equals key.
+                let mut keys: Vec<&String> = st.params.keys().collect();
+                keys.sort_unstable();
+                for k in keys {
+                    let _ = fp.field(k).field(&st.params[k]);
+                }
+                let key = fp.done();
+                if let Some((k, reg)) = slot.borrow().as_ref()
+                    && *k == key
+                {
+                    let t: Table = lua.registry_value(reg)?;
+                    return Ok(Value::Table(t));
+                }
                 let t = lua.create_table()?;
                 for (k, v) in &st.params {
                     t.raw_set(k.as_str(), v.as_str())?;
                 }
-                Ok(Value::Table(t))
+                let t = guard_readonly(lua, &t)?;
+                let reg = lua.create_registry_value(t)?;
+                *slot.borrow_mut() = Some((key, reg));
+                match slot.borrow().as_ref() {
+                    Some((_, reg)) => {
+                        let t: Table = lua.registry_value(reg)?;
+                        Ok(Value::Table(t))
+                    }
+                    None => unreachable!("slot just stored"),
+                }
             })?,
         )?;
     }
@@ -328,6 +559,7 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
     // -- bk.kline(symbol, interval) -----------------------------------------
     {
         let st = Arc::clone(&state);
+        let slot: std::cell::RefCell<CacheSlot> = std::cell::RefCell::new(None);
         bk.raw_set(
             "kline",
             lua.create_function(move |lua, (symbol, interval): (String, String)| {
@@ -336,7 +568,37 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                     // E29: no aggregator behind this yet — "no data", not an error.
                     return Ok(Value::Nil);
                 };
-                Ok(Value::Table(kline_to_lua(lua, k)?))
+                let mut fp = Fp::new();
+                let _ = fp
+                    .field(&k.symbol)
+                    .field(interval_name(k.interval))
+                    .num(k.open_time_ms)
+                    .num(k.close_time_ms)
+                    .field(&k.open.to_string())
+                    .field(&k.high.to_string())
+                    .field(&k.low.to_string())
+                    .field(&k.close.to_string())
+                    .field(&k.volume.to_string())
+                    .num(k.trade_count)
+                    .field(if k.is_closed { "1" } else { "0" });
+                let key = fp.done();
+                if let Some((k_, reg)) = slot.borrow().as_ref()
+                    && *k_ == key
+                {
+                    let t: Table = lua.registry_value(reg)?;
+                    return Ok(Value::Table(t));
+                }
+                let t = kline_to_lua(lua, k)?;
+                let t = guard_readonly(lua, &t)?;
+                let reg = lua.create_registry_value(t)?;
+                *slot.borrow_mut() = Some((key, reg));
+                match slot.borrow().as_ref() {
+                    Some((_, reg)) => {
+                        let t: Table = lua.registry_value(reg)?;
+                        Ok(Value::Table(t))
+                    }
+                    None => unreachable!("slot just stored"),
+                }
             })?,
         )?;
     }
@@ -344,6 +606,7 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
     // -- bk.account() -------------------------------------------------------
     {
         let st = Arc::clone(&state);
+        let slot: std::cell::RefCell<CacheSlot> = std::cell::RefCell::new(None);
         bk.raw_set(
             "account",
             lua.create_function(move |lua, ()| {
@@ -351,6 +614,21 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                 let Some(a) = &st.account else {
                     return Ok(Value::Nil);
                 };
+                let mut fp = Fp::new();
+                let _ = fp
+                    .field(&a.id)
+                    .field(&a.name)
+                    .field(&a.market_type)
+                    .opt(&a.balance)
+                    .opt(&a.available)
+                    .opt(&a.reserved);
+                let key = fp.done();
+                if let Some((k, reg)) = slot.borrow().as_ref()
+                    && *k == key
+                {
+                    let t: Table = lua.registry_value(reg)?;
+                    return Ok(Value::Table(t));
+                }
                 let t = lua.create_table()?;
                 t.raw_set("id", a.id.as_str())?;
                 t.raw_set("name", a.name.as_str())?;
@@ -365,7 +643,16 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                         None => t.raw_set(key, Value::Nil)?,
                     }
                 }
-                Ok(Value::Table(t))
+                let t = guard_readonly(lua, &t)?;
+                let reg = lua.create_registry_value(t)?;
+                *slot.borrow_mut() = Some((key, reg));
+                match slot.borrow().as_ref() {
+                    Some((_, reg)) => {
+                        let t: Table = lua.registry_value(reg)?;
+                        Ok(Value::Table(t))
+                    }
+                    None => unreachable!("slot just stored"),
+                }
             })?,
         )?;
     }
@@ -373,10 +660,28 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
     // -- bk.holdings() ------------------------------------------------------
     {
         let st = Arc::clone(&state);
+        let slot: std::cell::RefCell<CacheSlot> = std::cell::RefCell::new(None);
         bk.raw_set(
             "holdings",
             lua.create_function(move |lua, ()| {
                 let st = st.lock().expect("bk state mutex");
+                let mut fp = Fp::new();
+                for h in &st.holdings {
+                    let _ = fp
+                        .field(&h.condition_id)
+                        .field(&h.token_id)
+                        .field(&h.direction)
+                        .field(&h.shares)
+                        .field(&h.entry_price)
+                        .num(h.round_slot);
+                }
+                let key = fp.done();
+                if let Some((k, reg)) = slot.borrow().as_ref()
+                    && *k == key
+                {
+                    let t: Table = lua.registry_value(reg)?;
+                    return Ok(Value::Table(t));
+                }
                 let arr = lua.create_table()?;
                 for (i, h) in st.holdings.iter().enumerate() {
                     let t = lua.create_table()?;
@@ -388,7 +693,16 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                     t.raw_set("round_slot", h.round_slot)?;
                     arr.raw_set(i as i64 + 1, t)?;
                 }
-                Ok(Value::Table(arr))
+                let arr = guard_readonly(lua, &arr)?;
+                let reg = lua.create_registry_value(arr)?;
+                *slot.borrow_mut() = Some((key, reg));
+                match slot.borrow().as_ref() {
+                    Some((_, reg)) => {
+                        let t: Table = lua.registry_value(reg)?;
+                        Ok(Value::Table(t))
+                    }
+                    None => unreachable!("slot just stored"),
+                }
             })?,
         )?;
     }
@@ -396,6 +710,7 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
     // -- bk.fees() ----------------------------------------------------------
     {
         let st = Arc::clone(&state);
+        let slot: std::cell::RefCell<CacheSlot> = std::cell::RefCell::new(None);
         bk.raw_set(
             "fees",
             lua.create_function(move |lua, ()| {
@@ -405,11 +720,29 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                     // that prices fees must fail closed on nil.
                     return Ok(Value::Nil);
                 };
+                let mut fp = Fp::new();
+                let _ = fp.field(&f.name).field(&f.rate).num(f.exponent);
+                let key = fp.done();
+                if let Some((k, reg)) = slot.borrow().as_ref()
+                    && *k == key
+                {
+                    let t: Table = lua.registry_value(reg)?;
+                    return Ok(Value::Table(t));
+                }
                 let t = lua.create_table()?;
                 t.raw_set("name", f.name.as_str())?;
                 t.raw_set("rate", f.rate.as_str())?;
                 t.raw_set("exponent", f.exponent)?;
-                Ok(Value::Table(t))
+                let t = guard_readonly(lua, &t)?;
+                let reg = lua.create_registry_value(t)?;
+                *slot.borrow_mut() = Some((key, reg));
+                match slot.borrow().as_ref() {
+                    Some((_, reg)) => {
+                        let t: Table = lua.registry_value(reg)?;
+                        Ok(Value::Table(t))
+                    }
+                    None => unreachable!("slot just stored"),
+                }
             })?,
         )?;
     }
@@ -417,10 +750,34 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
     // -- bk.unified_events() (#427) ------------------------------------------
     {
         let st = Arc::clone(&state);
+        let slot: std::cell::RefCell<CacheSlot> = std::cell::RefCell::new(None);
         bk.raw_set(
             "unified_events",
             lua.create_function(move |lua, ()| {
                 let st = st.lock().expect("bk state mutex");
+                let mut fp = Fp::new();
+                for e in &st.unified_events {
+                    let _ = fp.field(&e.id).field(&e.title).field(&e.status);
+                    for d in &e.discrepancies {
+                        let _ = fp.field(d);
+                    }
+                    let _ = fp.field("\u{2}");
+                    for l in &e.listings {
+                        let _ = fp
+                            .field(&l.venue)
+                            .field(&l.up_token)
+                            .field(&l.down_token)
+                            .num(l.expires_at_ms);
+                    }
+                    let _ = fp.field("\u{2}");
+                }
+                let key = fp.done();
+                if let Some((k, reg)) = slot.borrow().as_ref()
+                    && *k == key
+                {
+                    let t: Table = lua.registry_value(reg)?;
+                    return Ok(Value::Table(t));
+                }
                 let arr = lua.create_table()?;
                 for (i, e) in st.unified_events.iter().enumerate() {
                     let t = lua.create_table()?;
@@ -444,7 +801,16 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                     t.raw_set("listings", ls)?;
                     arr.raw_set(i as i64 + 1, t)?;
                 }
-                Ok(Value::Table(arr))
+                let arr = guard_readonly(lua, &arr)?;
+                let reg = lua.create_registry_value(arr)?;
+                *slot.borrow_mut() = Some((key, reg));
+                match slot.borrow().as_ref() {
+                    Some((_, reg)) => {
+                        let t: Table = lua.registry_value(reg)?;
+                        Ok(Value::Table(t))
+                    }
+                    None => unreachable!("slot just stored"),
+                }
             })?,
         )?;
     }
@@ -625,5 +991,143 @@ mod tests {
         assert_eq!(ENTRY_POINTS.len(), 4);
         assert_eq!(interval_name(KlineInterval::Min1), "min1");
         assert_eq!(interval_name(KlineInterval::Hour4), "hour4");
+    }
+
+    // ── #448: content-keyed projection cache + the read-only guard ──────────
+
+    /// A cached table must read IDENTICALLY to a fresh render — same call,
+    /// same content, second call hits the cache and still answers every field.
+    #[test]
+    fn cached_book_table_reads_identically_across_calls() {
+        let (sb, st) = with_state();
+        {
+            let mut s = st.lock().expect("lock");
+            s.put_book(book("0xup"), Some(true));
+        }
+        sb.load(
+            "function fail(msg) error(msg, 0) end \
+             local first, second \
+             function bk_evaluate() \
+                first = bk.book('0xup') \
+                second = bk.book('0xup') \
+                if second.best_bid ~= '0.55' or second.fresh ~= true or second.ts_ms ~= 1234 then \
+                    fail('cached book lost a field') \
+                end \
+                return {} \
+             end",
+            "cache-hit",
+        )
+        .expect("loads");
+        let f: mlua::Function = sb.lua().globals().get("bk_evaluate").expect("entry");
+        sb.invoke("evaluate", |_| f.call::<Value>(()))
+            .expect("cache hit reads cleanly");
+    }
+
+    /// Content change must re-render: put a different book, the next read
+    /// answers the NEW numbers (a stale cache is a correctness bug, not a
+    /// perf trade).
+    #[test]
+    fn book_content_change_rerenders_the_table() {
+        let (sb, st) = with_state();
+        {
+            let mut s = st.lock().expect("lock");
+            s.put_book(book("0xup"), Some(true));
+        }
+        sb.load(
+            "function fail(msg) error(msg, 0) end \
+             function bk_evaluate() \
+                local b = bk.book('0xup') \
+                if b.best_ask ~= '0.57' then fail('first render') end \
+                return {} \
+             end \
+             function bk_evaluate_again() \
+                local b = bk.book('0xup') \
+                if b.best_ask ~= '0.61' or b.ts_ms ~= 9999 then fail('re-render') end \
+                return {} \
+             end",
+            "rerender",
+        )
+        .expect("loads");
+        let call = |name: &str| {
+            let f: mlua::Function = sb.lua().globals().get(name).expect(name);
+            sb.invoke(name, |_| f.call::<Value>(()))
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        };
+        call("bk_evaluate");
+        {
+            let mut s = st.lock().expect("lock");
+            let mut b2 = book("0xup");
+            b2.best_ask = Some("0.61".into());
+            b2.timestamp_ms = 9_999;
+            s.put_book(b2, Some(true));
+        }
+        call("bk_evaluate_again");
+    }
+
+    /// `fresh` is part of the rendered content: the same book stamped
+    /// fresh=false must re-render (the eval gate verdict is authoritative).
+    #[test]
+    fn fresh_verdict_change_rerenders_the_book() {
+        let (sb, st) = with_state();
+        {
+            let mut s = st.lock().expect("lock");
+            s.put_book(book("0xup"), Some(true));
+        }
+        sb.load(
+            "function fail(msg) error(msg, 0) end \
+             function bk_evaluate() \
+                if bk.book('0xup').fresh ~= true then fail('first') end \
+                return {} \
+             end \
+             function bk_evaluate_again() \
+                if bk.book('0xup').fresh ~= false then fail('fresh flip') end \
+                return {} \
+             end",
+            "fresh",
+        )
+        .expect("loads");
+        let call = |name: &str| {
+            let f: mlua::Function = sb.lua().globals().get(name).expect(name);
+            sb.invoke(name, |_| f.call::<Value>(()))
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        };
+        call("bk_evaluate");
+        {
+            let mut s = st.lock().expect("lock");
+            s.put_book(book("0xup"), Some(false));
+        }
+        call("bk_evaluate_again");
+    }
+
+    /// The read-only guard: a hostile write to a projection table must error
+    /// LOUDLY (with the cache it would otherwise leak across calls), and the
+    /// metatable must be hidden from `getmetatable` probes.
+    #[test]
+    fn projection_tables_refuse_writes_loudly() {
+        let (sb, st) = with_state();
+        {
+            let mut s = st.lock().expect("lock");
+            s.put_book(book("0xup"), Some(true));
+        }
+        sb.load(
+            "function fail(msg) error(msg, 0) end \
+             function bk_evaluate() \
+                local b = bk.book('0xup') \
+                local ok, err = pcall(function() b.best_bid = '0.99' end) \
+                if ok then fail('write to bk.book succeeded') end \
+                if not tostring(err):find('read%-only') then fail('wrong error: ' .. tostring(err)) end \
+                if getmetatable(b) ~= 'bk projection' then fail('metatable leaked') end \
+                local ok2 = pcall(function() bk.params().x = 'y' end) \
+                if ok2 then fail('write to bk.params succeeded') end \
+                local ok3 = pcall(function() bk.markets()[1] = nil end) \
+                if ok3 then fail('write to bk.markets succeeded') end \
+                return {} \
+             end",
+            "guard",
+        )
+        .expect("loads");
+        let f: mlua::Function = sb.lua().globals().get("bk_evaluate").expect("entry");
+        sb.invoke("evaluate", |_| f.call::<Value>(()))
+            .expect("guard contract holds");
     }
 }
