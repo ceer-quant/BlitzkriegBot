@@ -1306,6 +1306,16 @@ export interface SystemVersion {
   checkEnabled: boolean
   lastCheckMs: number | null
   releaseUrl: string | null
+  /**
+   * 上次检查为什么失败，内核原话。只有检查真的失败时才非 null —— 「未检查」
+   * 与「检查通过」都是 null。旧内核没有这个键 → undefined，渲染为无原因。
+   */
+  lastCheckError?: string | null
+  /**
+   * 新内核把暂存状态机附在 system.version 里返回：快照轮询由此读暂存状态，
+   * 不必再碰 system.update.stage（那是下载动词）。旧内核没有这个键。
+   */
+  stage?: StageState | null
 }
 
 /**

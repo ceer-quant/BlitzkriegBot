@@ -935,6 +935,16 @@ pub struct SystemVersionView {
     /// Release page URL, when a release is known.
     #[serde(default)]
     pub release_url: Option<String>,
+    /// WHY the last check failed, verbatim from the kernel. `None` unless the
+    /// last check FAILED — "not checked" and "checked, fine" are both `None`.
+    /// Absent on older cores (`#[serde(default)]`), rendered as no reason.
+    #[serde(default)]
+    pub last_check_error: Option<String>,
+    /// The kernel's staging state machine, riding `system.version` on newer
+    /// cores so a snapshot poller never needs the download verb. Absent on
+    /// older cores → `None`, which the adapter renders as "cannot stage".
+    #[serde(default)]
+    pub stage: Option<StageStateView>,
     /// The verbatim response line, for `blitzkrieg version --core --json` to
     /// forward without a re-serialisation that could drift.
     #[serde(skip)]

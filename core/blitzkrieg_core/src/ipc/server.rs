@@ -797,8 +797,11 @@ async fn handle_line(
                     .filter(|t| !t.trim().is_empty());
                 // Ok and Err are both values, never escapes: the fetch result is
                 // consumed by check_once, which writes whatever happened into the
-                // state cell.
-                crate::ipc::version::check_once(
+                // state cell. The verdict is PERSISTED here too (check_and_persist):
+                // the manual arm historically skipped the disk write, so a failed
+                // check evaporated on restart while the state file kept
+                // `lastCheckMs: 0` forever.
+                crate::ipc::version::check_and_persist(
                     update_state,
                     &local,
                     now_ms() as u64,
@@ -806,12 +809,20 @@ async fn handle_line(
                 )
                 .await;
                 let s = update_state.snapshot();
+                // The failure DETAIL rides the audit line: an operator reading
+                // data/update/audit.jsonl must be able to tell "proxy path down"
+                // from "rate limited" without reproducing the check by hand.
+                let failure_detail = match &s.outcome {
+                    crate::ipc::version::CheckOutcome::Failed { detail } => Some(detail.clone()),
+                    _ => None,
+                };
                 crate::ipc::version::audit_event(&serde_json::json!({
                     "ts": now_ms(),
                     "event": "update.check",
                     "actor": actor,
                     "outcome": s.outcome.token(),
                     "latest": s.latest,
+                    "detail": failure_detail,
                 }));
                 Ok(
                     serde_json::to_value(crate::ipc::version::system_version_payload(

@@ -274,6 +274,14 @@ onUnmounted(() => {
         <p v-if="stage?.detail" class="mt-1 text-[11px] leading-snug text-muted-fg">{{ stage.detail }}</p>
         <p v-if="stageErr" class="mt-1 text-[11px] leading-snug text-down">{{ stageErr }}</p>
         <p v-if="versionErr" class="mt-2 text-[11px] leading-snug text-down">{{ versionErr }}</p>
+        <!--
+          检查失败的原因，内核原话（lastCheckError）。此前失败只落 audit、
+          面板零渲染 —— 用户只看到「不可用/失败」，连「是网络断了还是限流」
+          都无法分辨。旧内核没有这个键 → 不渲染，维持原样。
+        -->
+        <p v-if="version?.lastCheckError" class="mt-1 text-[11px] leading-snug text-down">
+          上次检查失败：{{ version.lastCheckError }}
+        </p>
       </template>
     </Card>
   </div>

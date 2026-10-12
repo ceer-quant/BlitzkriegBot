@@ -16,7 +16,12 @@ export interface VersionBadge {
  */
 export function versionBadge(v: SystemVersion | null | undefined): VersionBadge | null {
   if (!v) return null
-  if (v.updateAvailable === null) return { text: '未检查', variant: 'default' }
+  if (v.updateAvailable === null) {
+    // 检查失败是「未知」而非「未检查」：原因跟着 lastCheckError 走（新内核），
+    // 徽章明说失败，绝不塌缩成「未检查」——用户点了按钮就该知道结果。
+    if (v.lastCheckError) return { text: '检查失败', variant: 'down' }
+    return { text: '未检查', variant: 'default' }
+  }
   if (v.updateAvailable === false) return { text: '已是最新', variant: 'up' }
   return { text: `可更新 ${v.latestVersion ?? ''}`.trim(), variant: 'down' }
 }
