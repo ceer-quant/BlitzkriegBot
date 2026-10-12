@@ -3,147 +3,121 @@
 All notable changes to BlitzkriegBot are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
-## [Unreleased]
+## [0.4.0] - 2026-10-12
+
+0.3.0 → 0.4.0 的 66 条提交，按主题归并。三大主线：**0.3.1 回测对标线**（链上
+数据管道 + 三模式回测 + @almach 对标与逐策略重校准）、**0.3.3 跨平台线**
+（Kalshi / predict.fun 扩展 + 统一事件映射 + 两腿对冲执行）、**0.4.0 审计线**
+（#439–#443 五项审计落地 + 热修复）。
 
 ### Added
 
-- **#393 — the settings/strategy pages become productizable: risk params edit
-  in place, blueprint entries from the strategy page, an update-check switch,
-  and a Lua evolution opt-in.** Six items, one batch:
-  *Effective-risk editing*: the 生效风控 card carries the account's effective
-  execution-policy base params (budget triple / equity floor / per-asset cap)
-  as inline editable fields fed by the SAME `execution_policy.get/set` surface
-  — one section buffer in the domain shell, because the kernel replaces the
-  whole account section on every `set` (a params-only write would wipe rules);
-  the nine boot-time limits stay read-only with their provenance badges (no
-  runtime write path exists by design). *Blueprint entries*: the strategy page
-  gains a 创建策略 header button (→ blueprint canvas) and per-row 编辑策略 on
-  Lua strategies, backed by the new read-only `blueprint.load` IPC (the mirror
-  of `blueprint.save`; a package without a blueprint document refuses with an
-  honest message, and the name is screened with the save path's own rules).
-  *Update-enable chain*: the WebUI gains the missing 更新检查 switch and the
-  TUI a `[k]` toggle — both write `system.update.configure`'s already-optional
-  `checkEnabled` key (the gateway route now forwards it); the grey buttons'
-  dependency chains (check off / auto off / nothing available) moved from
-  hover-only tooltips to inline text. *Title rows*: the shared `CardHeader`
-  renders icon-then-text in one place, and 外观与刷新 gets its icon.
-  *Lua evolution (the audit + the fix)*: the audit confirmed every Lua
-  strategy was structurally not-evolvable — `LuaEngineAdapter` left
-  `evolvable_knobs`/`shadow_factory` at trait defaults, so the evolution
-  manager skipped them (no unit, no evaluation, no proposals, `rollback`
-  errors "not evolvable", and the hot-param writeback channel never
-  activated). The fix lands on the strategy side: a manifest tunable that
-  declares a coherent `min`/`max` domain (the Lua mirror of the dylib surface's
-  `bk_strategy_evolvable_knobs` symbol) now opts the strategy into evolution —
-  the adapter declares the knobs and builds independent twin sandboxes from
-  the vaulted package source, with the fee schedule and non-domain tunables
-  carried over; nothing is invented kernel-side, and packages without domains
-  keep today's behaviour bit for bit.
-
-- **#388 — the activity ledger's MAKER_REBATE / REWARD rows become first-class
-  wallet-level cashflow events, and the replay credits them.** The converter
-  (#355 pipeline) copies each cash row into its own side file (never the fill
-  stream, same channel discipline as the REDEEM rows) and emits one
-  `{"k":"cashflow","which":"rebate|reward","usd":"<exact>"}` event per ledger
-  ROW at the row's own timestamp — no per-fill attribution is invented; the
-  stream IS the ledger's cash view. The core credits the active account's
-  ledger at that instant (new `Ledger::credit_cashflow`; zero/negative rows
-  are no-ops) without touching position/order/settlement semantics, the feed
-  counters carry the per-kind count and exact USD total, the backtest report
-  gains the `cashflows` block (`rebates`/`rebatesUsd`/`rewards`/`rewardsUsd`,
-  plus a Display line), and the manifest pins `converterVersion: 2` with a
-  `counts.cashflows` tally. A corpus without cash rows (every pre-#388
-  dataset, and a `/trades` walk) converts and replays exactly as before.
-
-- **#379 — the update flow becomes end-to-end: automatic checks and a
-  download/staging state machine close the last two gaps (§7.4/§7.5), with the
-  §7.5 iron rule intact: the kernel never rewrites the binary it is executing —
-  applying/staging-forward is and stays the launcher's job.**
-  *Automatic checks* (#379 gap 3): `spawn_auto_check_scheduler` re-runs the
-  check every `update.interval_secs` (CLI `--update-interval-secs` > env
-  `BLITZKRIEG_UPDATE_INTERVAL_SECS` > `update.toml`; default 0 = NO task
-  exists), re-reads `check_enabled` every round so `system.update.configure`
-  stops the outbound traffic without a restart, and with the shipped defaults
-  spawns nothing at all (INV-3).
-  *Staging* (#379 gap 4): `system.update.stage` (IPC) / the WebUI 暂存下载
-  button / the TUI `[s]` key drive the kernel's four-phase state machine
-  `Idle→Downloading→Staged/Failed`: the release archive + `SHA256SUMS` are
-  fetched from GitHub Releases, the full 64-hex digest is verified (missing
-  entry or a tampered byte refuse — N8/N10), and the verified bytes land in
-  `data/update/staging/` via same-directory temp+rename. Staging is gated by
-  `autoUpdate` (manual and future-auto callers alike), a failed run never
-  clobbers a prior staged copy, the summary survives restarts, and the
-  furthest the machine can go is `Staged` — the launcher re-verifies and
-  installs on the restart path (`blitzkrieg update --install`, §7.5).
-  *Surfaces*: WebUI settings card (stage badge per phase + 暂存下载 button)
-  and TUI Settings tab (`[s]` + stage line) stay phase-verbatim with the
-  kernel; both refuse up front when the governing switch is off (A4).
+- **回测对标线（0.3.1）**：链上数据管道（Polymarket Data API 拉取 → 确定性
+  JSONL 事件流，activity-ledger 全量成交面 + offset 硬顶分段 + CLOB 元数据
+  回退 + 有界并发元数据/价格阶段，#360 栈）；订单生命周期三时间戳
+  （decision/execute/report）+ InflightTaker 两段式撮合 + 回测三模式 CLI
+  （mine / verify / sweep，#356）；回测校准四钉（轮次节奏闸门 fail-closed /
+  UMA invalid 0.5 结算双源 / 费率严格等式 / 语料完整性对账，#354）；校准 A/B
+  基准工具（`almach-calib` / `almach-ground-truth` / `almach-overlay`，
+  #398）；@almach 全窗对标报告——偏差未过 20% 线，逐项如实归因（#360）。
+- **跨平台（0.3.3）**：Kalshi + predict.fun 传输层客户端（认证签名 / 令牌桶
+  限频 / 幂等对账键，#429）；两个市场插件以 MarketPlugin 形态接入（价格归一化
+  在插件边界完成，opt-in feature，默认构建仍是 Polymarket-only，#430）；市场
+  无关的统一事件映射层（#431）；两腿原子对冲执行 `hedge/`——可行性门计入
+  双腿费率、500ms 每腿提交超时、裸腿按规模差判定 + 保护阶梯（补单→强平）、
+  结算双场地三重对齐（容差 1¢，Mismatched 永不静默记平）、联合风控门（#432）；
+  `cross_venue_arb` 跨平台套利策略 + venue 全链路呈现（#433）。
+- **策略蓝图**：蓝图数据模型 + Rust 编译链（`blueprint.rs`，#365）；面板画布
+  编辑器（@vue-flow/core 8 节点调色板 + Lua 预览 + 内联报错，#370）；手写包
+  可被编辑入口打开（`blueprint.loadSource`/`saveSource` + 源码模式，#414）；
+  codegen 产出 `bk_evaluate` 桥接 §6.5 运行时（#413）。
+- **账户执行策略（0.3.1）**：按账户隔离的下单规则引擎（`execution_policy.rs`，
+  #366）+ 执行策略 UI（WebUI + TUI 合入「生效风控」，#369）；策略路径解析改为
+  相对安装根而非 cwd（#386）；编译默认不再内嵌规则——缺文件即 NEUTRAL 内核
+  （#372）。
+- **风控可编辑**：九项系统限额热编辑 `risk.setSystemic` + 面板编辑卡（#415）；
+  退出纪律（止损/止盈/强平）可编辑 `risk.setExit` + 面板三行输入（#417）；权益
+  百分比封顶覆盖 declared-shares 策略路径（#421）。
+- **策略与进化**：`single_leg_pair` 单腿轮次参与策略（#394）；`pair_discount_arb`
+  补腿闭环——部分成交的腿不再裸奔到结算（内核策略持仓视图 + 终态释放 +
+  GAP-FILL 豁免，#420）；全部 Lua 策略包经 manifest 显式参数域加入影子进化
+  （69 knobs / 10 包，#401）；设置/策略页产品化六件套 + Lua 进化审计修复
+  （#393/#395）。
+- **面板**：信息架构重构——两级导航 + SettingsPage 拆分 + TUI 同步（#383），
+  评审轮收平（#384）；策略页重设计——状态分组/重叠根除/三卡 KPI/搜索与详情行
+  （#422）。
+- **自更新**：端到端更新检查调度器 + 下载暂存状态机（内核永不改写正在执行的
+  二进制，WebUI + TUI，#379）。
+- **结算与事件流**：链上裁决进入回放事件流（REDEEM 行折叠为 per-condition
+  verdict，dry ladder 让位，#378）；MAKER_REBATE/REWARD 台账行成为钱包级
+  cashflow 事件且回放入账（#388）。
+- **0.4.0 审计线新增**：`bk.*` 投影内容键缓存 + 冻结只读代理（#449）；Args
+  快照门禁钉死 parse_args 契约（122 行逐字段 + 竞争测试，#451）；oracle_ruler
+  9 臂测量层校验（修后 RULER SOUND，#450）；`common/decimal.lua` 单一十进制
+  源 + 逐字节门禁（#446）。
 
 ### Changed
 
-- **The official `spread_arb` is a Lua strategy, and the repo ships no Rust
-  strategy.** `user_layer/strategies_lua/spread_arb/` is an EXACT port of the
-  Rust reference implementation (`strategy_logic`'s `TrendTracker` +
-  `evaluate_spread_arb` + the tracker entry gates): prices run on scaled-integer
-  decimals with rust_decimal's semantics including `round()`'s
-  MidpointNearestEven at the 0.01 grid — a float `mid * 0.88` would flip real
-  resting-bid boundaries; the only float divisions are the ratio comparisons,
-  which cannot disagree with the 28-digit decimals on market data. The port was
-  proven on the economic gate itself before the cdylib was removed: all four
-  frozen-corpus windows reproduced the recorded `BASELINE` (`75fd8140`) rows
-  VERBATIM (14/21.43%/−2.8780, 17/41.18%/−4.7336, 9/33.33%/−2.8141,
-  14/0%/−10.9323), so the economics carry over without a re-record. Knobs come
-  from the manifest tunables (`bk.params()`); the kernel's `--spread-arb-*` CLI
-  flags do not reach Lua strategies (the dylib on_params channel), and shadow
-  evolution / evolvable-knob declarations are dylib-surface capabilities the
-  Lua stack does not expose yet (production evolution is off; #393 adds the
-  manifest-domain opt-in).
+- **官方 `spread_arb` 是 Lua 策略，仓库不再附带任何 Rust 策略。**
+  `user_layer/strategies_lua/spread_arb/` 是 Rust 参考实现的逐位精确移植
+  （移植前在冻结语料经济门禁上逐字复现全部 4 窗基线 `75fd8140`，经济性原样
+  承接）。旋钮来自 manifest tunables；`--spread-arb-*` CLI 旗标不达 Lua 策略。
+  随包修复两处百分数单位 bug（滑坡门返回分数而非百分数 / tracker `move_pct`
+  同病）+ 零阈值拒全部入场的边界；滑坡门默认关（截断签名 = 负期望入场集，
+  不足以动出厂默认）。
+- **策略重普查（#434，#419 修复后全 11 臂回放）**：`lua_momentum` 退役为
+  生产危险品（−$17,575 / PF 0.43——单 tick 阈值确认几乎每 tick 开火；manifest
+  改 EXAMPLE ONLY，警告头落 README 与 strategy.lua）；`spread_arb` 重点燃为
+  负期望（−$475 / WR 10%）；生产组合 `pair_discount_arb`+`single_leg_pair`
+  保持采用默认（$240.31 / PF 1.238）。零信号可行性静态分析 + WR/PF 口径
+  定义见 #403。
+- **出厂默认校准**：`single_leg_pair` 两轮校准（带 0.55–0.88 + 每轮封顶 10，
+  #435；min_gap 0.10→0.30 对齐 @almach leader-gap 域，预注册 H1，#436）；
+  `pair_discount_arb`/`single_leg_pair` 第二轮校准采纳（#405）。
+- **CLI 严格化（#441）**：内核无法兑现的值是启动错误，绝不静默回默认——
+  `--mode LIVE` 拼写大写曾静默跑 dry；未知 flag 早已拒绝，未知 value 现在同罪。
+- **执行策略（shrink judge #382）**：缩容裁决按记录自身的 bound stop 度量
+  （时间感知止损），不再按配置止损重算。
+- **备份与升级**：light 档备份提速到 19.7s（排除可再生 onchain 缓存 +
+  档案哈希完整性，#416）；upgrade 的 step-0 `data/` 轻备份删除——data/ 长到
+  7.1GB 后该步骤主导升级耗时，而升级从不写 data/（#408）；webui lockfile 比
+  node_modules 新时强制重建依赖（#391）；shim 接管 `upgrade` 动词（此前
+  文档承诺但从未接线）。
+- **回放性能**：deadline 驱动的 nofast 调度 + 免生命周期 `BookView` 退出路径
+  （#399）；`--backtest-fast` 门控冻结盘口下冗余的维护工作（#375）；kline
+  preview pass 回放门控——只喂实时面板的静默 decoration 不再烧回放时钟
+  （#418）；OME 三级索引优化（submitted_at_ms 有序索引 / per-token live 索引 /
+  增量维护 live 视图，#371/#373/#374）。
+- **面板**：扁平导航评审轮（#384）。
+- **依赖**：rustls 0.23.45（RUSTSEC-2026-0285）+ source-map-js 1.2.2
+  （GHSA-68fv-2mgg-jv7q）+ rsa 审计豁免记录（#444）。
 
-- **spread_arb (Lua) gains the #176 long-memory slide gate — default OFF — and
-  two percent-unit bugs are fixed.** `entry_trend_window_sec` (0 = off) +
-  `entry_trend_drop_pct` (30) port `mean_reversion.rs`'s `trend_drop_pct`/
-  `in_trend_slide`: an entry is refused when the mid sits `drop_pct`% or more
-  below the high of the long window. Three correctness items landed with it:
-  the port's first cut returned a FRACTION, not a percent (the divisor dropped
-  `hi`'s own scale — a 10^scale understatement that never fired the gate; the
-  frozen fixtures could not see it because the gate ships off); the tracker's
-  `move_pct` (bounce-gate leg) carried the same latent bug (bounce also ships
-  off — unfired since the port); and a zero threshold with the window on would
-  have read `drop <= -0` and refused EVERY entry, so the gate now arms only on
-  a strictly positive threshold, mirroring the Rust knob validation (5..90).
-  The sample ring also mirrors `PriceBuffer::push`'s 2000-sample cap. Shipped
-  defaults are unchanged: the gate measured −21.3581 → −13.4863 net over the
-  four frozen windows (id tier; −28.1201 → −18.6183 under 1-tick slippage) —
-  a real bleed reduction, but the blocked fills average BETTER than the
-  survivors (−$0.33 vs −$0.45/fill), the truncation signature of a negative-EV
-  entry set rather than selection, and one window degrades in both tiers — per
-  the arm-matrix discipline that is not enough to move factory defaults. The
-  exit-economics gate itself is now isolated (`--no-strategy-dir`): the fixture
-  is the Lua package and ONLY the Lua package, so an operator cdylib in the
-  default drop-point cannot silently become the measured thing (two same-named
-  strategies would race for the registry).
+### Fixed
+
+- **#419 锁顶盘口双侧删除**：`update_top` 用严格边界应用 top 更新，best_bid ==
+  best_ask 的合法锁顶状态把共享档位从两侧同时删掉——盘口坍缩成单边、mid 被
+  F6 规则扣发、所有 mid 依赖的策略状态机永久停摆（v2 语料 100% top 事件流经
+  此路径）。修复后保持两侧；非正入场价 fail-closed 守卫。
+- **#438 dry 结算读对侧盘口**：dry 结算梯子只看持仓腿的盘口——对手腿已被
+  0.99 坚定报价（市场已定价赢家）时输腿永远悬置、过期后占着 max_positions
+  名额。对侧盘口证据关闭输腿。
+- **#437 过期轮持仓不再占名额**：生产事故（两个过期 12 天的持仓占满全部
+  max_positions 名额 6 天）——过期轮位置在轮终态即释放。
+- **重启恢复订单 id 计数器跳过恢复 id**——「order already registered」撞车
+  （与持仓恢复同形，#a94dd61c）。
+- 面板策略规则编辑按钮静默失效（structuredClone vs reactive proxy，#411）。
+
+### Performance
+
+- Lua `bk.*` 投影内容键缓存 + 冻结只读代理（#449，#440 采样定位的
+  luaH_newkey/luaS_newlstr 热点）。
 
 ### Removed
 
-- **The upgrade's step-0 `data/` light backup** — `blitzkrieg upgrade` no longer
-  tars `data/` before building (owner call, 2026-10-07): the directory grew to
-  7.1 GB / 120k+ files (onchain corpus, archive, audit), so a step still
-  described as "a few MB, seconds" dominated the upgrade's wall time, while the
-  upgrade itself never writes `data/` — binaries, cdylibs, the panel bundle and
-  factory configs only. The rollback insurance is the previous release set the
-  install keeps (`target/rollback-*`); scheduled data protection is unchanged
-  (`blitzkrieg backup`, the 04:00 loop, the LaunchAgent route). Upgrade steps
-  are renumbered 0–7; `--check` covers 0–4.
-- **The Rust `spread_arb` cdylib fixture** — `user_layer/strategies/spread_arb`
-  and the one-member nested workspace with it. `user_layer/strategies/` stays
-  as the operator cdylib drop-point (kernel's default `--strategy-dir` +
-  trust-allowlist root); its README now carries the stale-build warning (a
-  leftover `*.dylib` keeps loading after its crate is gone and can collide with
-  a same-named Lua package). `scripts/lib/strategy-dylib-freshness.mjs` is
-  retired with the last cdylib fixture: with no measurement dylib there is no
-  freshness contract to enforce. The exit-economics gate drives the Lua package
-  directly (`--lua-strategy-dir`); the CI job's nested-workspace build step is
-  gone.
+- **Rust `spread_arb` cdylib 夹具**（`user_layer/strategies/spread_arb` 与
+  随附的嵌套 workspace）；`user_layer/strategies/` 保留为操作员 cdylib 投放点；
+  `strategy-dylib-freshness.mjs` 随最后一个 cdylib 夹具退役。
+- **升级 step-0 data/ 轻备份**（见 Changed）。
 
 ## [0.3.0] - 2026-09-29
 
