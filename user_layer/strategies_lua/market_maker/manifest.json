@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "72e860688d5ebaa44258b45e6ef2af4707613a96440245947c7df08cfd4b24ec",
+  "sha256": "26c53b944f21d5b6c37c7734309649607cd0bb7910da0e111e836507c6a45bde",
   "author": "BlitzkriegBot",
   "description": "Passive spread harvester for 15-minute binary rounds: a cheap chip (mid 0.20-0.42) with a deep, balanced, non-one-sided book and a calm underlying earns one resting maker bid 0.02 under its mid; when the mid climbs 0.03 over the bid the close is suggested and the thesis re-arms. Signal-only: the kernel adjudicates, sizes, gates every intent and owns the exit ladder.",
   "tunables": {

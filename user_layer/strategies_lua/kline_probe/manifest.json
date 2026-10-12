@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "97aefbfa6c2bedd73396bc020677b0126cf2c087bdcbb63ec8cd7f2ce3b39474",
+  "sha256": "1b69154c03aaeca949f6964bc91e83338619a829232b61bf283fc68f7046c1a2",
   "tunables": {
     "mom_window_sec": {
       "type": "int",

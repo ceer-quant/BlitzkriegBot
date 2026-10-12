@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "8845ab2df7a122b82d8a8ecbc436763736a6fab7192dad7ce4d805004b421dd0",
+  "sha256": "dd078d1d1903bd5cb46d404a77f5e093cd2306731d1e609d5555a58c4824d87a",
   "author": "BlitzkriegBot",
   "description": "Trend-confirmed dip buyer — the exact Lua port of the Rust reference implementation (strategy_logic TrendTracker + evaluate_spread_arb). Prices run on scaled-integer decimals (rust_decimal semantics incl. banker's round2); entries are resting bids at factor*mid off FRESH books only; every intent is adjudicated by the kernel.",
   "tunables": {
