@@ -20,6 +20,9 @@ path = "src/bin/app.rs"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+# #460: credential comparison must be constant-time by construction, not by
+# hand-rolled XOR folklore. `subtle` is the ecosystem's audited primitive.
+subtle = { version = "2.6", default-features = false }
 
 [dev-dependencies]
 serde_json = { workspace = true }

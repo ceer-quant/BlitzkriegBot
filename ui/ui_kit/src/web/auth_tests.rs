@@ -110,7 +110,7 @@ fn login_with_wrong_password_is_rejected() {
 }
 
 #[test]
-fn login_then_session_passes_via_header_query_and_cookie() {
+fn login_then_session_passes_via_header_and_cookie() {
     let addr = start(Some(("admin", "s3cret")));
     let body = format!(
         "POST /api/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n{{\"user\":\"admin\",\"password\":\"s3cret\"}}",
@@ -134,18 +134,42 @@ fn login_then_session_passes_via_header_query_and_cookie() {
     assert_eq!(
         request(
             addr,
-            &format!("GET /api/snapshot?token={token} HTTP/1.1\r\n\r\n")
-        ),
-        200,
-        "session query passes"
-    );
-    assert_eq!(
-        request(
-            addr,
             &format!("GET /api/snapshot HTTP/1.1\r\nCookie: bk_session={token}\r\n\r\n")
         ),
         200,
         "session cookie passes"
+    );
+}
+
+#[test]
+fn a_session_token_in_the_url_query_is_no_longer_a_channel() {
+    // #460: `?token=` leaks into proxy logs, browser history and Referer
+    // headers; the authenticated channels (bearer / cookie / header) cover
+    // every legitimate caller. The query form now reads as unauthenticated,
+    // even when the token itself is perfectly valid.
+    let addr = start(Some(("admin", "s3cret")));
+    let body = format!(
+        "POST /api/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n{{\"user\":\"admin\",\"password\":\"s3cret\"}}",
+        "{\"user\":\"admin\",\"password\":\"s3cret\"}".len()
+    );
+    let (code, out) = request_body(addr, &body);
+    assert_eq!(code, 200);
+    let token = serde_json::from_str::<serde_json::Value>(&out).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    assert_eq!(
+        request(
+            addr,
+            &format!("GET /api/snapshot?token={token} HTTP/1.1\r\n\r\n")
+        ),
+        401,
+        "a valid token in the query must NOT authenticate"
+    );
+    assert_eq!(
+        request(addr, "GET /api/snapshot?token=NOPE HTTP/1.1\r\n\r\n"),
+        401
     );
 }
 
@@ -232,7 +256,7 @@ fn cross_origin_refused_and_loopback_origin_ok() {
         request(
             addr,
             &format!(
-                "GET /api/snapshot?token={token} HTTP/1.1\r\nOrigin: http://evil.example\r\n\r\n"
+                "GET /api/snapshot HTTP/1.1\r\nX-Auth-Token: {token}\r\nOrigin: http://evil.example\r\n\r\n"
             )
         ),
         403,
@@ -242,7 +266,7 @@ fn cross_origin_refused_and_loopback_origin_ok() {
         request(
             addr,
             &format!(
-                "GET /api/snapshot?token={token} HTTP/1.1\r\nOrigin: http://127.0.0.1\r\n\r\n"
+                "GET /api/snapshot HTTP/1.1\r\nX-Auth-Token: {token}\r\nOrigin: http://127.0.0.1\r\n\r\n"
             )
         ),
         200,
@@ -253,7 +277,7 @@ fn cross_origin_refused_and_loopback_origin_ok() {
         request(
             addr,
             &format!(
-                "GET /api/snapshot?token={token} HTTP/1.1\r\nOrigin: http://localhost:51888\r\n\r\n"
+                "GET /api/snapshot HTTP/1.1\r\nX-Auth-Token: {token}\r\nOrigin: http://localhost:51888\r\n\r\n"
             )
         ),
         200,
@@ -265,7 +289,7 @@ fn cross_origin_refused_and_loopback_origin_ok() {
         request(
             addr,
             &format!(
-                "GET /api/snapshot?token={token} HTTP/1.1\r\nReferer: http://evil.example/x\r\n\r\n"
+                "GET /api/snapshot HTTP/1.1\r\nX-Auth-Token: {token}\r\nReferer: http://evil.example/x\r\n\r\n"
             )
         ),
         403,
@@ -336,18 +360,23 @@ fn absent_origin_is_allowed_so_cli_clients_still_work() {
     // browser cannot produce a cross-origin POST without `Origin`, so allowing
     // this costs nothing.
     let addr = start(None); // read-only, auth off
+                            // #460: on the unauthenticated surface a POST is refused at the gate with
+                            // 403 BEFORE the origin gate's verdict even matters — the CLI story below
+                            // is about READS. (`/api/command` on this surface was already dead — no
+                            // dispatcher — it answered a 200 envelope with an error inside; the 403
+                            // now just says so up front.)
     assert_eq!(
         request(
             addr,
             "POST /api/command HTTP/1.1\r\nContent-Length: 6\r\n\r\nstatus"
         ),
-        200,
-        "a header-less POST from a CLI client passes the origin gate"
+        403,
+        "a header-less POST on an unauthenticated panel hits the write gate"
     );
     assert_eq!(
         request(addr, "GET /api/snapshot HTTP/1.1\r\n\r\n"),
         200,
-        "and so does a header-less GET"
+        "a header-less GET from a CLI client passes"
     );
 }
 
@@ -542,7 +571,9 @@ fn logout_revokes_the_session() {
     assert_eq!(
         request(
             addr,
-            &format!("POST /api/logout?token={token} HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+            &format!(
+                "POST /api/logout HTTP/1.1\r\nX-Auth-Token: {token}\r\nContent-Length: 0\r\n\r\n"
+            )
         ),
         200,
         "logout is accepted"
@@ -676,7 +707,7 @@ fn same_origin_on_a_public_ip_is_allowed_the_server_deployment_case() {
         request(
             addr,
             &format!(
-                "GET /api/snapshot?token={token} HTTP/1.1\r\n\
+                "GET /api/snapshot HTTP/1.1\r\nX-Auth-Token: {token}\r\n\
                  Host: 203.0.113.7:51888\r\n\
                  Referer: http://203.0.113.7:51888/panel/\r\n\r\n"
             )
@@ -689,7 +720,7 @@ fn same_origin_on_a_public_ip_is_allowed_the_server_deployment_case() {
         request(
             addr,
             &format!(
-                "GET /api/snapshot?token={token} HTTP/1.1\r\n\
+                "GET /api/snapshot HTTP/1.1\r\nX-Auth-Token: {token}\r\n\
                  Host: 203.0.113.7:51888\r\n\
                  Origin: http://203.0.113.7:51888\r\n\r\n"
             )
@@ -702,7 +733,7 @@ fn same_origin_on_a_public_ip_is_allowed_the_server_deployment_case() {
         request(
             addr,
             &format!(
-                "GET /api/snapshot?token={token} HTTP/1.1\r\n\
+                "GET /api/snapshot HTTP/1.1\r\nX-Auth-Token: {token}\r\n\
                  Host: 203.0.113.7:51888\r\n\
                  Referer: http://203.0.113.7:9999/panel/\r\n\r\n"
             )
@@ -716,7 +747,7 @@ fn same_origin_on_a_public_ip_is_allowed_the_server_deployment_case() {
         request(
             addr,
             &format!(
-                "GET /api/snapshot?token={token} HTTP/1.1\r\n\
+                "GET /api/snapshot HTTP/1.1\r\nX-Auth-Token: {token}\r\n\
                  Host: 203.0.113.7:51888\r\n\
                  Origin: http://evil.example\r\n\r\n"
             )
@@ -1047,18 +1078,20 @@ impl Drop for FakeCore {
 /// never picks one), `?id=` becomes exactly `{"id": …}` with nothing shaped
 /// in, and a non-JSON body is refused by the GATEWAY — it never reaches the
 /// kernel at all. The browser side never gets a filesystem or a command.
+/// Since #460 these routes sit behind the panel's session gate, so the test
+/// arms credentials and carries the token like any real client.
 #[test]
 fn the_backtest_routes_forward_verbatim_and_shape_nothing() {
     let fake = FakeCore::start("proxy");
-    let server = Arc::new(WebServer::new(
-        IpcClient::new(fake.sock.to_string_lossy().to_string()),
-        10,
-    ));
+    let mut server = WebServer::new(IpcClient::new(fake.sock.to_string_lossy().to_string()), 10);
+    server.set_panel_credentials(Some("admin".to_string()), Some("s3cret".to_string()));
+    let server = Arc::new(server);
     let serving = Arc::clone(&server);
     thread::spawn(move || {
         let _ = serving.serve("127.0.0.1:0");
     });
     let addr = wait_for_bound(&server);
+    let token = login(addr, "admin", "s3cret");
 
     // POST: the body IS the IPC params object, byte-for-byte; the METHOD is
     // fixed by the route, never by the body.
@@ -1066,7 +1099,7 @@ fn the_backtest_routes_forward_verbatim_and_shape_nothing() {
     let (code, out) = request_body(
         addr,
         &format!(
-            "POST /api/backtest/onchain-pull HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /api/backtest/onchain-pull HTTP/1.1\r\nX-Auth-Token: {token}\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         ),
     );
@@ -1081,7 +1114,10 @@ fn the_backtest_routes_forward_verbatim_and_shape_nothing() {
     );
 
     // GET with ?id=: exactly {"id": …}, nothing added.
-    let (code, out) = request_body(addr, "GET /api/backtest/status?id=bt-7 HTTP/1.1\r\n\r\n");
+    let (code, out) = request_body(
+        addr,
+        &format!("GET /api/backtest/status?id=bt-7 HTTP/1.1\r\nX-Auth-Token: {token}\r\n\r\n"),
+    );
     assert_eq!(code, 200, "{out}");
     let doc: serde_json::Value = serde_json::from_str(&out).expect("json");
     assert_eq!(doc["echoMethod"], "backtest.status");
@@ -1091,7 +1127,9 @@ fn the_backtest_routes_forward_verbatim_and_shape_nothing() {
     // fake core saw only the two well-formed calls above.
     let (code, _) = request_body(
         addr,
-        "POST /api/backtest/run HTTP/1.1\r\nContent-Length: 8\r\n\r\nnot json",
+        &format!(
+            "POST /api/backtest/run HTTP/1.1\r\nX-Auth-Token: {token}\r\nContent-Length: 8\r\n\r\nnot json"
+        ),
     );
     assert_eq!(code, 400, "a non-JSON body never reaches the kernel");
     let seen = fake.seen.lock().unwrap();
@@ -1108,26 +1146,28 @@ fn the_backtest_routes_forward_verbatim_and_shape_nothing() {
 /// method is fixed by the ROUTE (a POST body can never name one), the body
 /// travels as the params object verbatim, and a non-JSON body is refused by
 /// the gateway before the kernel sees anything. The browser side never gets a
-/// filesystem: the kernel decides where a saved package lands.
+/// filesystem: the kernel decides where a saved package lands. Since #460 the
+/// routes sit behind the panel's session gate, so the test arms credentials
+/// and carries the token like any real client.
 #[test]
 fn the_blueprint_routes_forward_verbatim_and_shape_nothing() {
     let fake = FakeCore::start("blueprint");
-    let server = Arc::new(WebServer::new(
-        IpcClient::new(fake.sock.to_string_lossy().to_string()),
-        10,
-    ));
+    let mut server = WebServer::new(IpcClient::new(fake.sock.to_string_lossy().to_string()), 10);
+    server.set_panel_credentials(Some("admin".to_string()), Some("s3cret".to_string()));
+    let server = Arc::new(server);
     let serving = Arc::clone(&server);
     thread::spawn(move || {
         let _ = serving.serve("127.0.0.1:0");
     });
     let addr = wait_for_bound(&server);
+    let token = login(addr, "admin", "s3cret");
 
     // compile: `{json}` verbatim — the preview pane's whole contract.
     let body = r#"{"json":"{\"version\":1}"}"#;
     let (code, out) = request_body(
         addr,
         &format!(
-            "POST /api/blueprint/compile HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /api/blueprint/compile HTTP/1.1\r\nX-Auth-Token: {token}\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         ),
     );
@@ -1146,7 +1186,7 @@ fn the_blueprint_routes_forward_verbatim_and_shape_nothing() {
     let (code, out) = request_body(
         addr,
         &format!(
-            "POST /api/blueprint/save HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /api/blueprint/save HTTP/1.1\r\nX-Auth-Token: {token}\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         ),
     );
@@ -1162,7 +1202,9 @@ fn the_blueprint_routes_forward_verbatim_and_shape_nothing() {
     // A non-JSON body is refused by the GATEWAY (400) and reaches nothing.
     let (code, _) = request_body(
         addr,
-        "POST /api/blueprint/save HTTP/1.1\r\nContent-Length: 8\r\n\r\nnot json",
+        &format!(
+            "POST /api/blueprint/save HTTP/1.1\r\nX-Auth-Token: {token}\r\nContent-Length: 8\r\n\r\nnot json"
+        ),
     );
     assert_eq!(code, 400, "a non-JSON body never reaches the kernel");
     let seen = fake.seen.lock().unwrap();
@@ -1173,4 +1215,81 @@ fn the_blueprint_routes_forward_verbatim_and_shape_nothing() {
     );
     assert_eq!(seen[0]["method"], "blueprint.compile");
     assert_eq!(seen[1]["method"], "blueprint.save");
+}
+
+// ── #460: an unauthenticated panel is not a write surface ──────────────────
+
+#[test]
+fn an_unauthenticated_panel_refuses_every_write_route() {
+    // `WebServer::new` (Tauri embed, ui_kit_panel read-only serve) arms no
+    // session. Before #460 its POST proxy routes reached the kernel through
+    // `snapshot_src` with no dispatcher check: risk hot-writes, execution
+    // policy, blueprint/Lua source writes, backtest runs, update switches.
+    // Every one of them must now be refused AT THE GATE with 403.
+    let addr = start(None);
+    let writes: [(&str, &str); 9] = [
+        ("/api/risk/set-systemic", r#"{"maxSingleLossUsd":99999}"#),
+        ("/api/risk/set-exit", r#"{"stopLossPct":50}"#),
+        ("/api/execution-policy/set", r#"{"accountId":"default"}"#),
+        ("/api/execution-policy/reset", r#"{"accountId":"default"}"#),
+        ("/api/blueprint/save", r#"{"name":"x","json":{"nodes":[]}}"#),
+        (
+            "/api/blueprint/save-source",
+            r#"{"name":"x","lua":"return {}"}"#,
+        ),
+        ("/api/backtest/run", r#"{}"#),
+        ("/api/backtest/onchain-pull", r#"{}"#),
+        ("/api/version/configure", r#"{"autoUpdate":true}"#),
+    ];
+    for (route, body) in writes {
+        let (code, _) = request_body(
+            addr,
+            &format!(
+                "POST {route} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert_eq!(
+            code, 403,
+            "{route} must be refused on an unauthenticated panel"
+        );
+    }
+    // Reads stay open: that is the whole point of the read-only surface.
+    assert_eq!(
+        request(addr, "GET /api/snapshot HTTP/1.1\r\n\r\n"),
+        200,
+        "reads on the read-only surface stay open"
+    );
+}
+
+#[test]
+fn an_authenticated_panel_keeps_its_write_routes() {
+    // The 403 must bind to the ABSENCE of credentials, not to the routes
+    // themselves: a gateway panel with a live session still reaches them.
+    let addr = start(Some(("admin", "s3cret")));
+    let body = format!(
+        "POST /api/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n{{\"user\":\"admin\",\"password\":\"s3cret\"}}",
+        "{\"user\":\"admin\",\"password\":\"s3cret\"}".len()
+    );
+    let (code, out) = request_body(addr, &body);
+    assert_eq!(code, 200);
+    let token = serde_json::from_str::<serde_json::Value>(&out).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // The kernel behind this fixture is offline, so the proxied call degrades
+    // to a transport error INSIDE a 200 envelope — which is exactly what
+    // proves the gate let it through (403 would have meant the gate ate it).
+    let write_body = r#"{"maxSingleLossUsd":1}"#;
+    let (code, _) = request_body(
+        addr,
+        &format!(
+            "POST /api/risk/set-systemic HTTP/1.1\r\nX-Auth-Token: {token}\r\nContent-Length: {}\r\n\r\n{write_body}",
+            write_body.len()
+        ),
+    );
+    assert_eq!(
+        code, 200,
+        "an armed panel's write route reaches the proxy layer"
+    );
 }

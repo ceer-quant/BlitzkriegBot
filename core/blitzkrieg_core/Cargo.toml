@@ -15,13 +15,16 @@ path = "src/lib.rs"
 [features]
 # The core itself is market-agnostic and has NO market SDK dependency. A market
 # is supplied by an extension crate, linked in via a feature (see below). The
-# default ships with the official Polymarket extension.
-default = ["polymarket", "strategy-loading", "account-precision", "test-support"]
+# default ships all three built-in market extensions (Polymarket, Kalshi,
+# predict.fun) so a plain build can reach every venue; `--market-plugin` still
+# picks exactly one operative venue at runtime.
+default = ["polymarket", "kalshi", "predictfun", "strategy-loading", "account-precision", "test-support"]
 # Link the official Polymarket market extension as the operative market.
 polymarket = ["dep:polymarket-extension"]
 # 0.3.3 stage 2 (#424): Kalshi + predict.fun market extensions, opt-in features
-# following the same shape as `polymarket` (default stays Polymarket-only so a
-# plain build's dependency tree is unchanged).
+# following the same shape as `polymarket`. (0.4.1: promoted into `default` so
+# they show up in the plugin list without a custom rebuild — #460's PR carries
+# the flip; the runtime contract is unchanged: still one `--market-plugin`.)
 kalshi = ["dep:kalshi-extension"]
 predictfun = ["dep:predictfun-extension"]
 # Dynamic user-layer strategy loading (shared libraries). On by default since

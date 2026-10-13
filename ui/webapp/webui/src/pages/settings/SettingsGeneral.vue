@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
- * 设置 · 通用 —— 会话与访问 token（探测 / 掩码 / 复制 / ?token= 交接），
- * 外观与刷新节奏（主题三态、提示音、行情快速轮询）。
+ * 设置 · 通用 —— 会话与访问 token（探测 / 掩码 / 复制），外观与刷新节奏
+ * （主题三态、提示音、行情快速轮询）。
  */
 import { computed, onMounted, ref } from 'vue'
 import { Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion, LogOut, Info, SlidersHorizontal } from 'lucide-vue-next'
@@ -62,11 +62,10 @@ const tokenMasked = computed(() => {
 })
 const loginTime = computed(() => {
   const at = loginAt()
-  return at ? dateTime(at) : '—（本会话由 ?token= 链接交接或来自旧版本）'
+  return at ? dateTime(at) : '—（本会话来自旧版本，或登录时间未知）'
 })
 
 const tokenCopied = ref(false)
-const linkCopied = ref(false)
 async function copyText(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text)
@@ -81,16 +80,6 @@ async function copyToken(): Promise<void> {
   if (await copyText(getToken())) {
     tokenCopied.value = true
     setTimeout(() => { tokenCopied.value = false }, 1800)
-  }
-}
-/** ?token= hand-off link — the E6-a channel, now one click away. */
-const panelLink = computed(() =>
-  `${window.location.origin}${window.location.pathname}?token=${getToken()}`,
-)
-async function copyLink(): Promise<void> {
-  if (await copyText(panelLink.value)) {
-    linkCopied.value = true
-    setTimeout(() => { linkCopied.value = false }, 1800)
   }
 }
 
@@ -135,22 +124,6 @@ const themeValue = computed<ThemeMode>({
           </div>
           <p class="mt-1.5 text-[11px] leading-snug text-faint-fg">
             登录时间：{{ loginTime }}
-          </p>
-        </div>
-
-        <div class="rounded-lg border border-line bg-panel-2 p-3">
-          <div class="label-micro">会话交接链接（?token=）</div>
-          <div class="mt-1.5 flex items-center gap-2">
-            <span class="truncate text-[12px] text-muted-fg num">{{ panelLink }}</span>
-            <Tooltip content="复制带 token 的面板地址：新浏览器打开即登录，无需输入密码。链接只在当前会话有效。">
-              <Button variant="ghost" size="sm" :title="linkCopied ? '已复制' : '复制链接'" @click="copyLink">
-                <Check v-if="linkCopied" class="size-3.5 text-up" />
-                <Copy v-else class="size-3.5" />
-              </Button>
-            </Tooltip>
-          </div>
-          <p class="mt-1.5 text-[11px] leading-snug text-faint-fg">
-            链接会随会话失效；请勿发到不受信任的聊天/邮件渠道。
           </p>
         </div>
       </div>

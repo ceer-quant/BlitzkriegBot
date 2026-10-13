@@ -4,7 +4,8 @@
  * Auth: user/password login (`POST /api/login`, set via
  * `BLITZKRIEG_PANEL_USER`/`BLITZKRIEG_PANEL_PASSWORD` on the server) issues a
  * session token kept in localStorage; every /api call carries it as
- * `X-Auth-Token`. A `?token=…` link is also accepted (session hand-off).
+ * `X-Auth-Token`. (#460: there is no `?token=` hand-off — the query channel is
+ * gone server-side because it leaks into logs/history/Referer.)
  */
 
 import type { BacktestReport } from '../backtest'
@@ -20,15 +21,7 @@ export function loginAt(): number | null {
   return Number.isFinite(n) && n > 0 ? n : null
 }
 
-let token = (() => {
-  const q = new URLSearchParams(window.location.search).get('token')
-  if (q) {
-    localStorage.setItem(LS_KEY, q)
-    history.replaceState(null, '', window.location.pathname)
-    return q
-  }
-  return localStorage.getItem(LS_KEY) ?? ''
-})()
+let token = (() => localStorage.getItem(LS_KEY) ?? '')()
 
 export function getToken(): string {
   return token
