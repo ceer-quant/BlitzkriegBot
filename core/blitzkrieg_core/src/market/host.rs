@@ -269,6 +269,14 @@ impl MarketHost for CoreHost {
         })
     }
 
+    fn on_place_timeout(&self, core_order_id: &str) -> BoxFuture<'_, ()> {
+        let core_id = core_order_id.to_string();
+        Box::pin(async move {
+            let mut c = self.core.lock().await;
+            c.note_place_timeout(&core_id);
+        })
+    }
+
     fn on_fill(&self, fill: api::MarketFill) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             eprintln!(

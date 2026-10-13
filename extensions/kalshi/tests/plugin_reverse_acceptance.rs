@@ -104,6 +104,9 @@ impl MarketHost for BookSink {
     ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
+    fn on_place_timeout(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
     fn on_fill(
         &self,
         _: blitzkrieg_market_api::MarketFill,
