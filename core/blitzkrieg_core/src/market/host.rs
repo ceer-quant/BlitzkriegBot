@@ -440,4 +440,20 @@ impl MarketHost for CoreHost {
             c.on_redemption_result(result, now);
         })
     }
+
+    fn take_pending_merges(&self) -> BoxFuture<'_, Vec<api::MergeRequest>> {
+        Box::pin(async move {
+            let now = now_ms();
+            let mut c = self.core.lock().await;
+            c.take_pending_merges(now)
+        })
+    }
+
+    fn on_merge_result(&self, result: api::MergeResult) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let now = now_ms();
+            let mut c = self.core.lock().await;
+            c.on_merge_result(result, now);
+        })
+    }
 }

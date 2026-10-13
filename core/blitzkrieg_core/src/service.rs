@@ -4043,6 +4043,10 @@ impl Core {
                     .as_ref()
                     .map(|e| e.last_time_left_sec())
                     .unwrap_or(0);
+                // E26 (§4.2) + #461: the systemic aggregates are read BEFORE
+                // the account borrow — resting BUY notional joins the
+                // exposure (cash already promised).
+                let systemic_facts = self.systemic_facts(&intent.request.asset, now_ms);
                 // E28 (§9.3): the pipeline's reserve happens in THIS account's
                 // book. An unknown account is refused — no implicit empty book,
                 // ever (reverse acceptance C) — with the same Gate-2 accounting
@@ -4062,40 +4066,6 @@ impl Core {
                         // account's live balance, same rule as the submission
                         // path.
                         let equity = ledger.balance();
-                        // E26 (§4.2): the aggregates the systemic limits
-                        // judge — process-wide facts (the global caps are
-                        // kernel-wide), read from the books the kernel
-                        // already maintains. The day number is the #173
-                        // budget's own `daily_pnl`, so the kill-switch cap
-                        // and the daily-loss breaker can never disagree
-                        // about what today lost.
-                        let systemic_facts = crate::risk::limits::SystemicFacts {
-                            // The systemic COUNT judges live positions only
-                            // (expired rounds are settlement-dead — same rule
-                            // as PositionManager::can_open); the exposure sums
-                            // keep every position: their cost basis is cash
-                            // actually committed until the venue settles.
-                            open_positions: self
-                                .positions
-                                .open_positions()
-                                .iter()
-                                .filter(|p| p.expires_at_ms > now_ms)
-                                .count(),
-                            open_exposure_usd: self
-                                .positions
-                                .open_positions()
-                                .iter()
-                                .map(|p| p.cost_usd)
-                                .sum(),
-                            same_asset_exposure_usd: self
-                                .positions
-                                .open_positions()
-                                .iter()
-                                .filter(|p| p.asset == intent.request.asset)
-                                .map(|p| p.cost_usd)
-                                .sum(),
-                            day_realized_usd: self.positions.daily_pnl(),
-                        };
                         let mut ctx = crate::arbitration::IntentCtx {
                             round_tokens: &round_tokens,
                             risk: &self.risk,
@@ -4394,6 +4364,9 @@ impl Core {
                     .as_ref()
                     .map(|e| e.round_token_ids())
                     .unwrap_or_default();
+                // #461: the systemic aggregates are read BEFORE the account
+                // borrow — resting BUY notional joins the exposure.
+                let systemic_facts = self.systemic_facts(&intent.request.asset, now_ms);
                 // E28 (§9.3): the reserve happens in THIS account's book.
                 match self.accounts.get_mut(&account_id) {
                     Err(e) => crate::arbitration::Outcome {
@@ -4407,33 +4380,6 @@ impl Core {
                     },
                     Ok(ledger) => {
                         let equity = ledger.balance();
-                        // The systemic COUNT judges live positions only
-                        // (expired rounds are settlement-dead — same rule as
-                        // PositionManager::can_open); the exposure sums keep
-                        // every position: their cost basis is cash actually
-                        // committed until the venue settles the round.
-                        let systemic_facts = crate::risk::limits::SystemicFacts {
-                            open_positions: self
-                                .positions
-                                .open_positions()
-                                .iter()
-                                .filter(|p| p.expires_at_ms > now_ms)
-                                .count(),
-                            open_exposure_usd: self
-                                .positions
-                                .open_positions()
-                                .iter()
-                                .map(|p| p.cost_usd)
-                                .sum(),
-                            same_asset_exposure_usd: self
-                                .positions
-                                .open_positions()
-                                .iter()
-                                .filter(|p| p.asset == intent.request.asset)
-                                .map(|p| p.cost_usd)
-                                .sum(),
-                            day_realized_usd: self.positions.daily_pnl(),
-                        };
                         let mut ctx = crate::arbitration::IntentCtx {
                             round_tokens: &round_tokens,
                             risk: &self.risk,
@@ -4537,6 +4483,81 @@ impl Core {
     /// Portfolio-level exposure cap (E16/#98): the sum of open notional across
     /// ALL strategies plus the incoming entry stays under
     /// `risk.max_open_notional_usd` (0 = disabled).
+    /// #461 Fix 3: the systemic aggregates the nine limits judge, with
+    /// RESTING exposure counted. Positions carry their cost basis (cash
+    /// committed); live BUY orders carry their remaining notional (cash
+    /// PROMISED — a resting bid fills at any moment and the exposure cap
+    /// must not discover the commitment only after it became a position).
+    /// SELL orders commit nothing new (they release inventory), so only the
+    /// buy side counts.
+    fn systemic_facts(&self, asset: &str, now_ms: i64) -> crate::risk::limits::SystemicFacts {
+        // The systemic COUNT judges live positions only (expired rounds are
+        // settlement-dead — same rule as PositionManager::can_open); the
+        // exposure sums keep every position: their cost basis is cash
+        // actually committed until the venue settles.
+        crate::risk::limits::SystemicFacts {
+            open_positions: self
+                .positions
+                .open_positions()
+                .iter()
+                .filter(|p| p.expires_at_ms > now_ms)
+                .count(),
+            open_exposure_usd: self
+                .positions
+                .open_positions()
+                .iter()
+                .map(|p| p.cost_usd)
+                .chain(
+                    self.ome
+                        .live_orders()
+                        .iter()
+                        .filter(|o| o.side == Side::Buy)
+                        .map(|o| (o.price * (o.size - o.filled_size)).max(Decimal::ZERO)),
+                )
+                .sum(),
+            same_asset_exposure_usd: self
+                .positions
+                .open_positions()
+                .iter()
+                .filter(|p| p.asset == asset)
+                .map(|p| p.cost_usd)
+                .chain(
+                    self.ome
+                        .live_orders()
+                        .iter()
+                        .filter(|o| o.side == Side::Buy && o.asset == asset)
+                        .map(|o| (o.price * (o.size - o.filled_size)).max(Decimal::ZERO)),
+                )
+                .sum(),
+            day_realized_usd: self.positions.daily_pnl(),
+        }
+    }
+
+    /// #461 Fix 2: the worst per-share basis ALREADY PAID on the counterpart
+    /// leg of this condition (None when no counterpart is held). One UP share
+    /// plus one DOWN share redeems exactly $1.00, so the pair economics are
+    /// per-share: `counterpart_basis/share + this leg's price ≤ 1.00`. The
+    /// WORST (highest-basis) leg prices the cap — a blend would let one
+    /// expensive leg hide behind a cheap one.
+    fn counterpart_pair_basis(
+        &self,
+        condition_id: &str,
+        asset: &str,
+        direction: &SignalDirection,
+    ) -> Option<Decimal> {
+        self.positions
+            .open_positions()
+            .iter()
+            .filter(|p| {
+                p.condition_id == condition_id
+                    && p.asset == asset
+                    && p.direction != *direction
+                    && p.shares > Decimal::ZERO
+            })
+            .map(|p| p.cost_usd / p.shares)
+            .max()
+    }
+
     fn portfolio_limit_ok(&self, req: &crate::model::OrderRequest) -> Result<(), String> {
         // Read the LIVE risk config: a runtime update (risk_config_mut /
         // IPC) lands in the gate, not in the static CoreConfig.
@@ -4549,6 +4570,16 @@ impl Core {
             .open_positions()
             .iter()
             .map(|p| p.cost_usd)
+            // #461: resting BUY orders are committed cash — they count
+            // against the portfolio cap the moment they rest, not only
+            // when they fill.
+            .chain(
+                self.ome
+                    .live_orders()
+                    .iter()
+                    .filter(|o| o.side == Side::Buy)
+                    .map(|o| (o.price * (o.size - o.filled_size)).max(Decimal::ZERO)),
+            )
             .sum();
         let incoming = req.price * req.size;
         if used + incoming > cap {
@@ -4588,7 +4619,16 @@ impl Core {
             }
         }
         if let Some(max_notional) = limit.max_open_notional_usd {
-            let used: Decimal = open.iter().map(|p| p.cost_usd).sum();
+            let used: Decimal = open.iter().map(|p| p.cost_usd).sum::<Decimal>()
+                // #461: the strategy's own resting BUY orders are committed
+                // cash too — same rule as the portfolio cap.
+                + self
+                    .ome
+                    .live_orders()
+                    .iter()
+                    .filter(|o| o.side == Side::Buy && o.strategy == req.strategy)
+                    .map(|o| (o.price * (o.size - o.filled_size)).max(Decimal::ZERO))
+                    .sum::<Decimal>();
             let incoming = req.price * req.size;
             if used + incoming > max_notional {
                 return Err(format!(
@@ -5027,8 +5067,11 @@ impl Core {
         v["anchored"] = serde_json::json!(self.audit.anchor.is_some());
         // Settled-but-unredeemed payout: money owed to us, part of the identity's
         // `total` but not of `balance` until the redeem transaction confirms
-        // (issue #175).
+        // (issue #175). `mergeReceivableUsd` splits out #461's burned-pair
+        // collateral waiting on its merge receipt — both are inside
+        // `receivableUsd` (the identity telescopes over all receivables).
         v["receivableUsd"] = dec_json(self.settlement.receivable_usd());
+        v["mergeReceivableUsd"] = dec_json(self.settlement.merge_receivable_usd());
         v["summary"] = serde_json::json!(
             self.audit
                 .report
@@ -5336,27 +5379,29 @@ impl Core {
                         // account as the maker order it replaces.
                         account_id: o.account_id.clone(),
                     };
-                    // The risk gate gets the first word here too (#261): a
-                    // cross the book offers but this core may not afford is
-                    // not an escalation, it is a second refusal — and taking
-                    // it would spend the intent's place in the placement
-                    // history on a leg that never had a chance. Falling
-                    // through books the original venue rejection instead,
-                    // which is the same handling as "no crossing depth".
-                    match self.risk.check(&req) {
+                    // The FULL risk verdict gets the first word here too (#461:
+                    // real equity + systemic limits + the pair-cost cap, the
+                    // same guard the timer escalation runs) — a cross the book
+                    // offers but this core may not afford is not an escalation,
+                    // it is a second refusal — and taking it would spend the
+                    // intent's place in the placement history on a leg that
+                    // never had a chance. Falling through books the original
+                    // venue rejection instead, which is the same handling as
+                    // "no crossing depth".
+                    match self.escalation_guard(&req, worst) {
                         Ok(()) => match self.place_escalated(req, now_ms) {
                             Ok(_) => {
                                 return Ok(());
                             }
                             Err(e2) => self.emit_error(e2),
                         },
-                        Err(e2) => tracing::info!(
+                        Err(reason) => tracing::info!(
                             order = %id,
                             strategy = %req.strategy,
                             price = %worst,
                             size = %req.size,
-                            error = %e2,
-                            "escalation skipped after WouldCross: the book's cross is refused by the risk gate"
+                            reason = %reason,
+                            "escalation skipped after WouldCross: the chase is refused by the full risk guard"
                         ),
                     }
                 }
@@ -5543,7 +5588,8 @@ impl Core {
             identity: CashIdentity {
                 balance: active.balance(),
                 // Settled but not yet redeemed: owed to us, not in the wallet.
-                receivable: self.settlement.receivable_usd(),
+                receivable: self.settlement.receivable_usd()
+                    + self.settlement.merge_receivable_usd(),
                 realized,
                 spent,
                 received,
@@ -7794,7 +7840,7 @@ impl Core {
 
     fn place_gated(
         &mut self,
-        req: OrderRequest,
+        mut req: OrderRequest,
         maker_timeout_ms: i64,
         now_ms: i64,
         entry_gates: bool,
@@ -7833,6 +7879,70 @@ impl Core {
         // an unknown account is refused, never implicitly created.
         self.risk
             .check_with_equity(&req, self.accounts.ledger_of(&req.account_id)?.balance())?;
+        // #461 Fix 2/4: the systemic nine and the pair-cost cap judge EVERY
+        // entry here — manual `orders.place` included, so there is no
+        // bypass (the arbitration pipeline runs the same verdict earlier for
+        // strategy intents; this is the submission-path enforcement point).
+        // `judge_entry`'s Reduce arm shrinks the order in place, exactly as
+        // the pipeline's Modification::SizeReduced does for strategy entries;
+        // its Reject arm refuses with the gate's own vocabulary.
+        if req.side == Side::Buy {
+            let limits = self.risk.systemic_snapshot();
+            if limits.any_armed() {
+                let facts = self.systemic_facts(&req.asset, now_ms);
+                let bound_stop_pct = crate::exit_policy::effective_stop_pct(
+                    self.config.positions.exit.stop_loss_pct,
+                    0,
+                    &self.config.positions.exit,
+                );
+                match crate::risk::limits::judge_entry(
+                    limits,
+                    &facts,
+                    req.price,
+                    req.size,
+                    bound_stop_pct,
+                ) {
+                    crate::risk::limits::EntryJudgment::Pass => {}
+                    crate::risk::limits::EntryJudgment::Reduce { approved, limit } => {
+                        tracing::info!(
+                            strategy = %req.strategy,
+                            requested = %req.size,
+                            approved = %approved,
+                            limit,
+                            "systemic: entry shrunk at the submission gate"
+                        );
+                        req.size = approved;
+                    }
+                    crate::risk::limits::EntryJudgment::Reject { detail, .. } => {
+                        return Err(CoreError::new(CoreErrorCode::RiskRejected, detail));
+                    }
+                }
+            }
+            // The pair-cost cap: a BUY whose condition already has a
+            // counterpart position may not push the pair's PER-SHARE cost
+            // past the $1.00 a share-pair redeems (a fresh pair is the
+            // strategy's own sub-$1.00 decision; this gate covers the
+            // top-up/chase paths). The worst held leg prices the pair: a
+            // position's per-share basis is `cost_usd / shares`, and one
+            // share of UP plus one share of DOWN redeems exactly $1.
+            if let Some(paid) = self.counterpart_pair_basis(
+                &req.condition_id,
+                &req.asset,
+                &parse_direction(&req.direction),
+            ) {
+                let total = paid + req.price;
+                if total > Decimal::ONE {
+                    return Err(CoreError::new(
+                        CoreErrorCode::RiskRejected,
+                        format!(
+                            "pair-cost cap: counterpart leg basis {paid}/share + buying at {} = \
+                             {total} > $1.00 a pair redeems — the merge would lock in a loss",
+                            req.price
+                        ),
+                    ));
+                }
+            }
+        }
 
         // Entry gates apply to opening BUY orders only; exits (SELL) are never
         // blocked by capacity, breaker or cooldowns.
@@ -8846,6 +8956,110 @@ impl Core {
         }
     }
 
+    /// Claims due for a merge attempt. The plugin drains this in live mode and
+    /// reports each one back through `on_merge_result`; dispatching stamps the
+    /// claim's backoff, so a result that never arrives is retried rather than
+    /// forgotten. Mirrors `take_pending_redemptions`.
+    pub fn take_pending_merges(&mut self, now_ms: i64) -> Vec<blitzkrieg_market_api::MergeRequest> {
+        self.settlement.take_merges(now_ms)
+    }
+
+    /// #461: a merge attempt came back. The SAME instant semantics as a
+    /// redemption — confirmation is the exact moment the receivable becomes
+    /// cash, on the account whose wallet held the burned pairs (the claim
+    /// carries the account; E28 §9.2). An unknown claim's confirmation is
+    /// ignored, never credited — crediting it is how a phantom payout enters
+    /// the books.
+    pub fn on_merge_result(&mut self, result: blitzkrieg_market_api::MergeResult, now_ms: i64) {
+        match result.failure {
+            None => {
+                let Some((account_id, usd)) = self.settlement.note_merge_confirmed(
+                    &result.id,
+                    result.tx_hash.clone(),
+                    result.block_number,
+                    now_ms,
+                ) else {
+                    tracing::warn!(
+                        claim = %result.id,
+                        "merge success for an unknown or already-confirmed claim — ignored"
+                    );
+                    return;
+                };
+                match self.accounts.get_mut(&AccountId::from(account_id.as_str())) {
+                    Ok(l) => {
+                        l.credit_merge(usd);
+                        tracing::info!(
+                            claim = %result.id,
+                            condition = %result.condition_id,
+                            account = %account_id,
+                            usd = %usd,
+                            tx = result.tx_hash.as_deref().unwrap_or(""),
+                            "merge confirmed on-chain — collateral credited to cash"
+                        );
+                        self.emit(Event::RiskAlert {
+                            code: blitzkrieg_market_api::CoreErrorCode::Internal,
+                            message: format!(
+                                "merge confirmed: +{usd} USDC on-chain (claim {}, tx {})",
+                                result.id,
+                                result.tx_hash.as_deref().unwrap_or("n/a")
+                            ),
+                        });
+                    }
+                    Err(e) => {
+                        // The claim's cash has no book to land in — louder than a
+                        // mint, and not silently swallowed: the receivable was
+                        // already removed, so this IS the last chance to say.
+                        tracing::error!(
+                            account = %account_id,
+                            error = %e,
+                            "merge confirmation dropped: unknown account — collateral NOT credited"
+                        );
+                        self.emit_error(CoreError::new(
+                            blitzkrieg_market_api::CoreErrorCode::Internal,
+                            format!(
+                                "merge {} confirmed {usd} USDC for unknown account {account_id} — cash NOT credited",
+                                result.id
+                            ),
+                        ));
+                    }
+                }
+            }
+            Some(failure) => {
+                let what = if failure.manual {
+                    "manual merge required"
+                } else {
+                    "will retry"
+                };
+                let message = format!(
+                    "merge of claim {} failed ({what}): {}",
+                    result.id, failure.message
+                );
+                if !self
+                    .settlement
+                    .note_merge_failure(&result.id, &failure, now_ms)
+                {
+                    tracing::error!(
+                        claim = %result.id,
+                        error = %failure.message,
+                        "merge failed for an unknown or already-confirmed claim"
+                    );
+                } else {
+                    tracing::error!(
+                        claim = %result.id,
+                        manual = failure.manual,
+                        error = %failure.message,
+                        "merge failed"
+                    );
+                }
+                eprintln!("core: {message}");
+                self.emit_error(CoreError::new(
+                    blitzkrieg_market_api::CoreErrorCode::VenueError,
+                    message,
+                ));
+            }
+        }
+    }
+
     /// Dry mode: simulate the redemption of every due claim. The claim is
     /// confirmed with a `dry-simulated` tx hash, so the ledger move is the same
     /// one a mined transaction produces and the whole path (settle → receivable →
@@ -8883,6 +9097,24 @@ impl Core {
                 at_ms: now_ms,
             };
             self.on_redemption_result(result, now_ms);
+        }
+    }
+
+    /// Dry mode: simulate the merge confirmation of every due claim — the same
+    /// shape as `simulate_redemptions`, so dry mode exercises the whole merge
+    /// path (burn → receivable → cash) with no chain. In dry there is no venue
+    /// to fail the merge, so the first dispatch always lands; `simulate_merges`
+    /// is the only consumer of the claim's dispatch stamp, and a lost tick
+    /// simply retries on the book's backoff.
+    fn simulate_merges(&mut self, now_ms: i64) {
+        for request in self.settlement.take_merges(now_ms) {
+            let result = blitzkrieg_market_api::MergeResult::success(
+                &request,
+                "dry-simulated",
+                None,
+                now_ms,
+            );
+            self.on_merge_result(result, now_ms);
         }
     }
 
@@ -9055,6 +9287,7 @@ impl Core {
             }
         }
         self.simulate_redemptions(now_ms);
+        self.simulate_merges(now_ms);
     }
 
     /// Alert once when a watched market stops being answered (see
@@ -9168,6 +9401,11 @@ impl Core {
             "redeemedClaims": self.settlement.redeemed_count(),
             "trackedMarkets": self.settlement.tracked_markets(),
             "blindSinceMs": self.settlement.blind_since_ms(as_of_ms),
+            // #461: burned-pair collateral waiting on its merge receipt —
+            // split from the redemption receivables so the panel can tell
+            // "settled, waiting to redeem" from "merged, waiting to mine".
+            "mergeReceivableUsd": dec_json(self.settlement.merge_receivable_usd()),
+            "pendingMerges": self.settlement.pending_merge_count(),
             "lastError": match self.settlement.last_error() {
                 Some((claim, message, manual)) => serde_json::json!({
                     "claim": claim, "message": message, "manual": manual,
@@ -9241,11 +9479,14 @@ impl Core {
         // skipped until the position set changes, the earliest expiry passes,
         // or a deadline arrives. A skipped tick would have dispatched nothing
         // and stamped nothing, so every dispatch keeps its exact stamp.
+        // A pending merge claim joins the deadlines: its dispatch clock must
+        // keep ticking even when nothing else in the pass moves.
         let settlement_pass = !self.replay_sched()
             || self.fast_positions_dirty
             || now_ms >= self.fast_next_expiry_ms
             || now_ms >= self.settlement.next_query_deadline_ms()
-            || now_ms >= self.settlement.next_redemption_ms();
+            || now_ms >= self.settlement.next_redemption_ms()
+            || now_ms >= self.settlement.next_merge_ms();
         if settlement_pass {
             self.drive_settlement(now_ms);
             // A market we are watching whose verdict never arrives strands the
@@ -9345,6 +9586,109 @@ impl Core {
         Ok(())
     }
 
+    /// #461 Fix 2/4: the COMPLETE risk verdict an escalated taker leg must
+    /// pass before the maker is touched. Both escalation paths (the timer
+    /// sweep and the post-only WouldCross reaction) share this ONE function —
+    /// there is no third vocabulary.
+    ///
+    /// Layers, in order:
+    ///   1. `check_with_equity` with the REAL account balance — the bare
+    ///      `risk.check` the paths used before passed equity 0, which
+    ///      silently disabled the #202 equity-relative cap at the exact
+    ///      moment the order chases the worst price on the book;
+    ///   2. `judge_entry` (the nine systemic limits) when any bound is armed
+    ///      — the same verdict the arbitration pipeline hands strategy
+    ///      entries, so chasing cannot outrun a cap the entry obeyed;
+    ///   3. the PAIR-COST hard cap: for an entry whose condition already has
+    ///      a counterpart position (a maker leg that filled or is filling),
+    ///      `pair_paid + chase_cost <= $1.00` — a binary pair redeems exactly
+    ///      $1, so a higher total is a GUARANTEED loss, not a risk. The
+    ///      "entry gate forbids" comment in `PositionManager::merge_condition`
+    ///      asserted this invariant; this is the code that makes it true.
+    ///
+    /// Returns Err with the reason; the caller keeps the maker resting (timer
+    /// path) or books the rejection (WouldCross path) — the escalation intent
+    /// survives either way via the normal re-arm/backoff machinery.
+    fn escalation_guard(&self, req: &OrderRequest, chase_price: Decimal) -> Result<(), String> {
+        // 1. The ordinary submission gate, with the account's real equity.
+        let equity = self
+            .accounts
+            .ledger_of(&req.account_id)
+            .map(|l| l.balance())
+            .unwrap_or(Decimal::ZERO);
+        if let Err(e) = self.risk.check_with_equity(req, equity) {
+            return Err(e.message);
+        }
+        // 2. The systemic nine. Armed bounds judge this entry exactly as the
+        //    pipeline would judge a fresh strategy entry (the aggregates are
+        //    built the same way — positions only, the incoming notional on top).
+        let limits = self.risk.systemic_snapshot();
+        if limits.any_armed() {
+            let now_ms = blitzkrieg_market_api::net::now_ms();
+            let facts = crate::risk::limits::SystemicFacts {
+                open_positions: self
+                    .positions
+                    .open_positions()
+                    .iter()
+                    .filter(|p| p.expires_at_ms > now_ms)
+                    .count(),
+                open_exposure_usd: self
+                    .positions
+                    .open_positions()
+                    .iter()
+                    .map(|p| p.cost_usd)
+                    .sum(),
+                same_asset_exposure_usd: self
+                    .positions
+                    .open_positions()
+                    .iter()
+                    .filter(|p| p.asset == req.asset)
+                    .map(|p| p.cost_usd)
+                    .sum(),
+                day_realized_usd: self.positions.daily_pnl(),
+            };
+            let bound_stop_pct = crate::exit_policy::effective_stop_pct(
+                self.config.positions.exit.stop_loss_pct,
+                // Time left is unknown on this path; 0 = the bound stop at its
+                // tightest (no time-adjustment relief), the conservative read.
+                0,
+                &self.config.positions.exit,
+            );
+            if let crate::risk::limits::EntryJudgment::Reject { detail, .. } =
+                crate::risk::limits::judge_entry(
+                    limits,
+                    &facts,
+                    chase_price,
+                    req.size,
+                    bound_stop_pct,
+                )
+            {
+                return Err(detail);
+            }
+        }
+        // 3. The pair-cost cap. Only entries (BUY) chase; a condition with no
+        //    counterpart position has nothing to sum against (a fresh pair is
+        //    the strategy's own <1.00 decision). Per-share: one UP share plus
+        //    one DOWN share redeems exactly $1.00.
+        if req.side == Side::Buy
+            && let Some(paid) = self.counterpart_pair_basis(
+                &req.condition_id,
+                &req.asset,
+                &parse_direction(&req.direction),
+            )
+        {
+            let total = paid + chase_price;
+            if total > Decimal::ONE {
+                return Err(format!(
+                    "pair-cost cap: counterpart leg basis {paid}/share + chasing at \
+                     {chase_price} = {total} > $1.00 a pair redeems — the merge would \
+                     lock in a loss"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Escalate due maker_then_taker orders: cancel the resting maker, cross
     /// the remainder as a taker. Extracted from `tick` so the replay fast
     /// path can gate the sweep (order-set dirty OR earliest deadline due)
@@ -9423,8 +9767,10 @@ impl Core {
                 account_id: account_id.clone(),
             };
             // The maker is about to be cancelled to make room for this leg, so
-            // the risk gate gets the first word — the same gate `place` will
-            // apply a moment later. `marketable_walk` only asks whether the
+            // the FULL risk verdict gets the first word — the same verdict the
+            // submission path will apply a moment later (#461: real equity +
+            // systemic limits + the pair-cost cap, one function for both
+            // escalation paths). `marketable_walk` only asks whether the
             // book HAS depth at the grid's extreme; it does not ask whether
             // this core may afford it. With a per-order notional cap, the
             // affordable price is `cap / size`, and a book that only offers
@@ -9434,15 +9780,15 @@ impl Core {
             // error aborts the whole tick. Skipping instead keeps the resting
             // maker alive and re-arms the clock — the same semantics as the
             // no-depth branch above — while saying so once per order.
-            if let Err(e) = self.risk.check(&req) {
+            if let Err(reason) = self.escalation_guard(&req, worst) {
                 if self.escalation_skips.insert(id.clone()) {
                     tracing::info!(
                         order = %id,
                         strategy = %req.strategy,
                         price = %worst,
                         size = %remaining,
-                        error = %e,
-                        "escalation skipped: the book's cross is refused by the risk gate; maker leg kept resting"
+                        reason = %reason,
+                        "escalation skipped: the chase is refused by the full risk guard; maker leg kept resting"
                     );
                 }
                 self.ome.set_escalation(&id, now_ms + timeout)?;
@@ -9547,16 +9893,31 @@ impl Core {
                 continue;
             };
             if outcome.pairs_merged > Decimal::ZERO {
-                // E28: the collateral belongs to the account whose wallet held
-                // the pair — an unknown account is an error, never a mint.
-                match self.accounts.get_mut(&outcome.account_id) {
-                    Ok(l) => l.credit_merge(outcome.pairs_merged),
-                    Err(e) => tracing::error!(
-                        account = %outcome.account_id,
-                        error = %e,
-                        "merge credit dropped: unknown account"
-                    ),
-                }
+                // #461: the burned pairs are a RECEIVABLE, not cash. On-chain
+                // the CTF merge mints USDC only when the transaction mines;
+                // crediting `balance` at intent time said the wallet held
+                // money it did not hold — the audit's venue leg (live) or the
+                // local cash identity (dry) goes red, correctly. The claim
+                // rides the settlement book's journal, so a restart between
+                // the burn and the receipt keeps the $1/pair.
+                let neg_risk = self
+                    .engine
+                    .as_ref()
+                    .and_then(|e| e.neg_risk_of(&intent.token_id))
+                    .unwrap_or(false);
+                let claim_id = self.settlement.note_merge_burned(
+                    &outcome.condition_id,
+                    outcome.account_id.as_str(),
+                    neg_risk,
+                    outcome.pairs_merged,
+                    now_ms,
+                );
+                tracing::info!(
+                    condition = %outcome.condition_id,
+                    pairs = %outcome.pairs_merged,
+                    claim = %claim_id,
+                    "merge burned complete pairs — collateral pending on-chain confirmation"
+                );
             }
             self.persist_positions();
             for closed in &outcome.closed {
@@ -11870,6 +12231,163 @@ mod tests {
         // A DIFFERENT strategy enters normally through the same core.
         c.place(buy("trend_follow", "B1", "tok-B1"), 0, 1_800_000)
             .unwrap();
+    }
+
+    /// #461 Fix 2 reverse acceptance: the escalation chase may not push the
+    /// pair's PER-SHARE cost past the $1.00 a share-pair redeems. A 0.60/share
+    /// DOWN leg plus a 0.99 chase prices the pair at 1.59 — the merge would
+    /// lock in a loss — so the guard refuses the chase, the maker stays
+    /// resting, and the clock re-arms instead of destroying the entry. Every
+    /// OTHER gate passes the chase (2 × 0.99 = 1.98 ≤ the 3.00 notional cap,
+    /// equity is ample), so the pair-cost cap is the only thing that can have
+    /// refused it.
+    #[test]
+    fn an_escalation_chase_that_would_price_the_pair_over_a_dollar_is_refused() {
+        let mut c = dry_core(dec!(10));
+        // The counterpart leg: 2 DOWN shares at 0.60 → basis 0.60/share.
+        c.book_snapshot("tok-down", vec![], vec![(dec!(0.60), dec!(100))], 1);
+        let down = OrderRequest {
+            token_id: "tok-down".into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode: FillPolicy::Taker,
+            price: dec!(0.60),
+            size: dec!(2),
+            internal_key: "k-down".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "down".into(),
+            round_slot: 1,
+            account_id: crate::model::default_account_id(),
+        };
+        let (_id, st) = c.place(down, 0, 1).unwrap();
+        assert_eq!(st, OrderStatus::Filled);
+        let after_counterpart = c.ledger().balance();
+
+        // The maker leg prices the pair at exactly 0.60 + 0.40 = 1.00 — the
+        // boundary PASSES (a pair that redeems a dollar may cost the dollar).
+        let outcome = c
+            .place_inner(
+                order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(2), "k-up"),
+                1000,
+                1,
+                false,
+            )
+            .unwrap();
+        assert_eq!(outcome.status, OrderStatus::Live);
+        let id = outcome.order_id;
+
+        // The only ask rests at 0.99: a naive escalation crosses it and
+        // prices the pair at 1.59.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.99), dec!(100))], 2);
+        c.tick(1002).unwrap();
+        let o = c.ome().get(&id).cloned().unwrap();
+        assert_eq!(o.status, OrderStatus::Live, "the maker stays resting");
+        assert_eq!(o.escalate_at_ms, Some(2002), "the clock re-arms");
+        assert!(
+            c.ome()
+                .all()
+                .iter()
+                .all(|o| !o.internal_key.ends_with(":escalated")),
+            "no escalated leg may exist"
+        );
+        // Only the counterpart fill moved money; the chase bought nothing.
+        assert_eq!(c.ledger().balance(), after_counterpart);
+        assert_eq!(c.positions().open_positions().len(), 1);
+    }
+
+    /// #461 Fix 3 reverse acceptance: a RESTING BUY order is cash promised —
+    /// the exposure cap must see it before, not after, it becomes a position.
+    /// With `max_total_exposure_usd` armed at 3.00, a resting 2.00 bid plus a
+    /// fresh 2.00 entry is 4.00: the second entry is refused while the bid
+    /// rests, and admitted once the bid is gone.
+    #[test]
+    fn a_resting_bid_counts_toward_the_exposure_cap() {
+        let mut c = dry_core(dec!(10));
+        c.risk_config_mut().systemic.global.max_total_exposure_usd =
+            crate::risk::limits::Bound::new(dec!(3), crate::risk::limits::LimitSource::Toml);
+
+        // A 0.40 × 5 = 2.00 bid rests (no ask to cross it).
+        let (id, st) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1)
+            .unwrap();
+        assert_eq!(st, OrderStatus::Live);
+
+        // A fresh 2.00 entry on top would commit 4.00 — past the cap. Before
+        // the fix the resting bid was invisible to the aggregates and this
+        // entry sailed through.
+        let e = c
+            .place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k2"), 0, 2)
+            .unwrap_err();
+        assert_eq!(e.code, CoreErrorCode::RiskRejected);
+        assert!(
+            e.message.contains("max_total_exposure_usd"),
+            "got {}",
+            e.message
+        );
+
+        // The refusal was the cap, not broken plumbing: once the bid is gone
+        // the same-sized entry is admitted.
+        c.cancel(&id, 3).unwrap();
+        let (_id2, st) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k3"), 0, 4)
+            .unwrap();
+        assert_eq!(st, OrderStatus::Live);
+    }
+
+    /// #461 Fix 4 reverse acceptance: `orders.place` has no bypass around the
+    /// systemic nine. With `max_total_position` armed at 1 and one position
+    /// open, a manual entry on an asset with NO position (so the one-per-asset
+    /// gate has nothing to say) is still refused — by the systemic gate, in
+    /// its own vocabulary.
+    #[test]
+    fn a_manual_entry_over_an_armed_systemic_limit_is_refused() {
+        let mut c = dry_core(dec!(10));
+        c.risk_config_mut().systemic.global.max_total_position =
+            crate::risk::limits::Bound::new(dec!(1), crate::risk::limits::LimitSource::Toml);
+
+        // One open position (taker fill at 0.40).
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
+        let (_id, st) = c
+            .place(order(FillPolicy::Taker, dec!(0.40), dec!(5), "k1"), 0, 1)
+            .unwrap();
+        assert_eq!(st, OrderStatus::Filled);
+
+        // A manual entry on ETH: no ETH position exists, so the ONLY gate
+        // that can refuse it is the systemic one.
+        let mut eth = order(FillPolicy::Taker, dec!(0.40), dec!(5), "k2");
+        eth.asset = "ETH".into();
+        eth.token_id = "tok-eth".into();
+        c.book_snapshot("tok-eth", vec![], vec![(dec!(0.40), dec!(100))], 2);
+        let e = c.place(eth, 0, 2).unwrap_err();
+        assert_eq!(e.code, CoreErrorCode::RiskRejected);
+        assert!(
+            e.message.contains("max_total_position"),
+            "got {}",
+            e.message
+        );
+        assert_eq!(c.positions().open_positions().len(), 1);
+    }
+
+    /// #461 Fix 4, the Reduce arm at the submission gate: an armed
+    /// `max_position_size` SHRINKS a manual entry in place, exactly as the
+    /// pipeline shrinks a strategy entry — the order the venue sees is the
+    /// approved size, not the requested one.
+    #[test]
+    fn an_armed_size_cap_shrinks_a_manual_entry_at_the_submission_gate() {
+        let mut c = dry_core(dec!(10));
+        c.risk_config_mut().systemic.account.max_position_size =
+            crate::risk::limits::Bound::new(dec!(5), crate::risk::limits::LimitSource::Toml);
+
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
+        let (_id, st) = c
+            .place(order(FillPolicy::Taker, dec!(0.40), dec!(7), "k1"), 0, 1)
+            .unwrap();
+        assert_eq!(st, OrderStatus::Filled);
+        let placed = &c.ome().all()[0];
+        assert_eq!(placed.size, dec!(5), "the cap shrunk 7 shares to 5");
+        assert_eq!(placed.filled_size, dec!(5));
+        assert_eq!(c.positions().open_positions()[0].shares, dec!(5));
     }
 }
 
@@ -16879,10 +17397,22 @@ mod settlement_service_tests {
             .unwrap();
         assert_eq!(up.pnl_usd, dec!(2.5) - dec!(2.4));
         assert_eq!(down.pnl_usd, dec!(2.5) - dec!(2.25));
-        // The collection: exactly $1 per share-pair, $5 total.
+        // #461: the burned $5 is a RECEIVABLE at burn time, NOT cash — the
+        // balance is untouched until the merge receipt arrives (dry simulates
+        // it on a LATER tick: the burn happens inside `run_exit_checks`, after
+        // this tick's settlement pass already ran).
+        assert_eq!(c.ledger().balance(), after_entries, "no cash until mined");
+        let audit_mid = c.engine_stats_at(4)["accountingAudit"].clone();
+        assert_eq!(
+            audit_mid["mergeReceivableUsd"],
+            serde_json::json!(5.0),
+            "the $5 pends as a merge receivable"
+        );
+        // Next tick: the dry merge receipt lands, exactly $1 per share-pair.
+        c.tick(4).unwrap();
         assert_eq!(c.ledger().balance(), after_entries + dec!(5));
         // Trade records and cash agree — the identity survives the new channel.
-        let report = c.run_accounting_audit(4);
+        let report = c.run_accounting_audit(5);
         assert!(report.ok, "audit after merge: {}", report.summary());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -16921,6 +17451,186 @@ mod settlement_service_tests {
         assert!(c.positions().closed_positions().is_empty());
         assert_eq!(c.ledger().balance(), after_entry, "no pair, no collateral");
         assert!(c.run_accounting_audit(4).ok);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #461 Fix 1 reverse acceptance: a FAILED merge receipt does NOT credit
+    /// cash — a retryable failure re-arms on the backoff and a manual one
+    /// stops the automatic retry for good. The receivable survives both.
+    #[test]
+    fn a_failed_merge_receipt_never_credits_cash() {
+        let dir = scratch("merge-failed");
+        let mut c = settling_core(&dir, dec!(10));
+        c.book_snapshot("tok-up", vec![], vec![(dec!(0.48), dec!(100))], 1);
+        let (_id, status) = c
+            .place(
+                pair_order("tok-up", "up", dec!(0.48), dec!(5), "k-up"),
+                0,
+                1,
+            )
+            .unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+        c.book_snapshot("tok-down", vec![], vec![(dec!(0.45), dec!(100))], 1);
+        let outcome = c
+            .place_inner(
+                pair_order("tok-down", "down", dec!(0.45), dec!(5), "k-down"),
+                0,
+                1,
+                false,
+            )
+            .unwrap();
+        assert_eq!(outcome.status, OrderStatus::Filled);
+        let after_entries = c.ledger().balance();
+
+        c.strategy_exits
+            .push(crate::strategies::StrategyExitIntent {
+                token_id: "tok-up".into(),
+                reason: "merge".into(),
+            });
+        c.tick(3).unwrap();
+        assert!(c.positions().open_positions().is_empty());
+        assert_eq!(c.ledger().balance(), after_entries, "burn ≠ cash");
+
+        // A retryable failure: balance untouched, claim still pending.
+        let failure = blitzkrieg_market_api::MergeResult::failure(
+            &blitzkrieg_market_api::MergeRequest {
+                id: "cond#merge".into(),
+                condition_id: "cond".into(),
+                neg_risk: false,
+                pairs_usd: dec!(5),
+            },
+            "RPC connect failed",
+            false,
+            5,
+        );
+        c.on_merge_result(failure, 5);
+        assert_eq!(
+            c.ledger().balance(),
+            after_entries,
+            "failure credits nothing"
+        );
+        assert_eq!(c.settlement.merge_receivable_usd(), dec!(5));
+
+        // Backoff stamped: nothing due within the retry window…
+        assert!(c.settlement.take_merges(5 + 4_999).is_empty());
+        // …and the claim is due again after it.
+        assert_eq!(c.settlement.take_merges(5 + 5_000).len(), 1);
+
+        // A MANUAL failure (e.g. neg-risk merge the bridge cannot run): the
+        // claim never dispatches again — it waits for the operator.
+        let manual = blitzkrieg_market_api::MergeResult::failure(
+            &blitzkrieg_market_api::MergeRequest {
+                id: "cond#merge".into(),
+                condition_id: "cond".into(),
+                neg_risk: false,
+                pairs_usd: dec!(5),
+            },
+            "neg-risk merge is not automated",
+            true,
+            6,
+        );
+        c.on_merge_result(manual, 6);
+        assert_eq!(
+            c.settlement.take_merges(i64::MAX).len(),
+            0,
+            "manual never retried"
+        );
+        assert_eq!(c.settlement.merge_receivable_usd(), dec!(5));
+        // Cash still untouched through every failure.
+        assert_eq!(c.ledger().balance(), after_entries);
+        assert!(
+            c.run_accounting_audit(7).ok,
+            "audit with a stuck merge claim"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #461 Fix 1 reverse acceptance: a merge success for an UNKNOWN claim is
+    /// ignored — no cash appears, no journal entry, nothing to replay.
+    #[test]
+    fn a_merge_result_for_an_unknown_claim_credits_nothing() {
+        let dir = scratch("merge-unknown");
+        let mut c = settling_core(&dir, dec!(10));
+        let balance = c.ledger().balance();
+        let ghost = blitzkrieg_market_api::MergeResult::success(
+            &blitzkrieg_market_api::MergeRequest {
+                id: "ghost#merge".into(),
+                condition_id: "ghost".into(),
+                neg_risk: false,
+                pairs_usd: dec!(9),
+            },
+            "0xdeadbeef",
+            Some(42),
+            5,
+        );
+        c.on_merge_result(ghost, 5);
+        assert_eq!(c.ledger().balance(), balance, "unknown claim pays nothing");
+        assert!(c.run_accounting_audit(6).ok);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #461 Fix 1: the burned-pair claim survives a restart — the journal
+    /// replays it as a pending merge receivable, the dry simulator confirms it
+    /// on the next tick, and the cash lands exactly once.
+    #[test]
+    fn a_merge_claim_survives_a_restart_and_credits_once() {
+        let dir = scratch("merge-restart");
+        let mut c = settling_core(&dir, dec!(10));
+        c.book_snapshot("tok-up", vec![], vec![(dec!(0.48), dec!(100))], 1);
+        let (_id, status) = c
+            .place(
+                pair_order("tok-up", "up", dec!(0.48), dec!(5), "k-up"),
+                0,
+                1,
+            )
+            .unwrap();
+        assert_eq!(status, OrderStatus::Filled);
+        c.book_snapshot("tok-down", vec![], vec![(dec!(0.45), dec!(100))], 1);
+        let outcome = c
+            .place_inner(
+                pair_order("tok-down", "down", dec!(0.45), dec!(5), "k-down"),
+                0,
+                1,
+                false,
+            )
+            .unwrap();
+        assert_eq!(outcome.status, OrderStatus::Filled);
+
+        c.strategy_exits
+            .push(crate::strategies::StrategyExitIntent {
+                token_id: "tok-up".into(),
+                reason: "merge".into(),
+            });
+        c.tick(3).unwrap();
+        assert_eq!(c.settlement.merge_receivable_usd(), dec!(5));
+
+        // The process dies between the burn and the receipt.
+        drop(c);
+        let mut reborn = settling_core(&dir, dec!(10));
+        reborn.restore_orders();
+        assert_eq!(
+            reborn.settlement.merge_receivable_usd(),
+            dec!(5),
+            "the claim replays from the journal"
+        );
+        // The reborn core's balance comes from its own seed/restore; what
+        // matters is that the $5 claim is NOT cash yet, and the delta after
+        // the receipt is exactly $5.
+        let reborn_base = reborn.ledger().balance();
+
+        // Next tick after restart: the dry receipt lands, exactly once.
+        reborn.tick(9).unwrap();
+        assert_eq!(reborn.ledger().balance(), reborn_base + dec!(5));
+        reborn.tick(10).unwrap();
+        assert_eq!(
+            reborn.ledger().balance(),
+            reborn_base + dec!(5),
+            "a confirmed claim is never paid twice"
+        );
+        assert_eq!(reborn.settlement.merge_receivable_usd(), dec!(0));
+        assert!(reborn.run_accounting_audit(11).ok);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

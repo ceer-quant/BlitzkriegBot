@@ -162,6 +162,9 @@ pub async fn spawn_if_configured(
         let mut redeems: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
         let mut redeem_queue: std::collections::VecDeque<RedemptionRequest> =
             std::collections::VecDeque::new();
+        // Merge claims queued behind a full in-flight window (same nonce rule).
+        let mut merge_queue: std::collections::VecDeque<blitzkrieg_market_api::MergeRequest> =
+            std::collections::VecDeque::new();
         loop {
             tick.tick().await;
 
@@ -267,6 +270,51 @@ pub async fn spawn_if_configured(
                     };
                     let result = redeem::to_result(&request, outcome, now_ms());
                     host.on_redemption_result(result).await;
+                });
+            }
+            while redeems.try_join_next().is_some() {}
+
+            // 1e) Merges: burn complete UP+DOWN pairs back into collateral. Same
+            // shape as 1d — a signed, mined transaction, run OFF this loop with
+            // the same in-flight cap (one wallet, one nonce), left queued when
+            // no slot is free (the core re-arms on its backoff).
+            while redeems.len() < REDEEM_MAX_IN_FLIGHT && merge_queue.is_empty() {
+                let due = host.take_pending_merges().await;
+                if due.is_empty() {
+                    break;
+                }
+                merge_queue.extend(due);
+            }
+            while redeems.len() < REDEEM_MAX_IN_FLIGHT {
+                let Some(request) = merge_queue.pop_front() else {
+                    break;
+                };
+                let host = Arc::clone(&host);
+                let redeem_cfg = redeem_cfg.clone();
+                redeems.spawn(async move {
+                    let result = match &redeem_cfg {
+                        Ok(config) => match redeem::merge_pairs(config, &request).await {
+                            Ok(receipt) => blitzkrieg_market_api::MergeResult::success(
+                                &request,
+                                &receipt.tx_hash,
+                                receipt.block_number,
+                                now_ms(),
+                            ),
+                            Err(failure) => blitzkrieg_market_api::MergeResult::failure(
+                                &request,
+                                &failure.message,
+                                failure.manual,
+                                now_ms(),
+                            ),
+                        },
+                        Err(failure) => blitzkrieg_market_api::MergeResult::failure(
+                            &request,
+                            &failure.message,
+                            failure.manual,
+                            now_ms(),
+                        ),
+                    };
+                    host.on_merge_result(result).await;
                 });
             }
             while redeems.try_join_next().is_some() {}

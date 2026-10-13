@@ -1,0 +1,195 @@
+# Dependencies (root Node layer removed; Vue panel installs its own)
+node_modules/
+
+# Build output (Vue panel bundle lives in ui/webapp/webui/dist, also ignored)
+dist/
+
+# Python bytecode — two gate helpers are Python (scripts/pty_capture.py,
+# scripts/ui-panel-plugin-pty-check.py); running them drops __pycache__/.
+__pycache__/
+*.pyc
+
+# Environment
+.env
+.env.local
+.env.*.local
+# Pre-merge backup of a DIFFERENT project's .env (holds its own credentials)
+.env.other-project-backup-*
+
+# --- Secrets: never version (repo-governance hardening) ---------------------
+# The ONLY env file that is ever committed is the template.
+.env.*
+!.env.example
+# Private keys / certificates / keystores
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.ppk
+*.der
+id_rsa*
+id_ed25519*
+id_ecdsa*
+# Cloud / service credentials
+.aws/
+.ssh/
+.netrc
+credentials.json
+service-account*.json
+gcp-*.json
+# Local secret bundles
+secrets/
+.secrets/
+
+# Old session/temp left after the path migration; safe to delete by hand
+polymarket-5m-bot/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Runtime state + logs (trade ledger, soak, shadow, order DB). Machine-generated,
+# may contain real trade history; kept on disk but not versioned.
+data/
+# ...but DO version committed evidence/repro data under docs (A/B runs, UI screenshots).
+!docs/reports/data/
+!docs/reports/data/**
+
+# Model/transformers cache (large, reproducible)
+.transformers-cache/
+
+# Rust build output (workspace root)
+target/
+user_layer/strategies/target/
+
+# Local agent/tooling session state (hook state, continue files)
+.mimosa/
+
+# Scratch files
+*.tmp.mjs
+
+# Coverage
+coverage/
+
+# Frontend apps - LOCAL ONLY, never push but NEVER DELETE
+# Deploy via: cd apps/docs && vercel --prod --yes
+apps/
+.nyc_output/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Local config
+.vercel/
+
+# =============================================================================
+# Development/Internal - Not for production repo
+# =============================================================================
+
+# Frontend website (separate repo, not part of this workspace)
+apps/
+
+# Placeholder folders
+vendor/
+
+# Legacy local HFT dashboards (hand-authoured HTML/JS, local-only, never pushed).
+# The tracked Rust UI crates live NEXT TO these under ui/ui_kit & ui/ui_kit_panel.
+ui/*
+!ui/ui_kit/
+!ui/ui_kit_panel/
+!ui/webapp/
+
+# Development workspace
+workspace/
+
+# Large binary files (use GitHub releases)
+*.gif
+*.mp4
+demo.tape
+assets/frames/
+
+# Internal planning docs
+PLAN.md
+TODO.md
+IMPLEMENTATION_AUDIT.md
+
+# Internal dev docs (never published)
+dev-docs/
+
+# MCP config (user-specific)
+.mcp.json
+
+# Temp files
+*.bak
+*~
+
+# =============================================================================
+# PRIVATE SERVER INFRASTRUCTURE - Never push to public GitHub
+# Deploy to hostkey only via rsync
+# =============================================================================
+
+# Standalone compute API server (monetization layer — hosted only)
+src/api/
+.vercel
+
+# Rotated/archived runtime logs (cost-opt: bounded logs)
+*.log.gz
+run.log.*
+ui/webapp/src-tauri/Cargo.lock
+
+# ---------------------------------------------------------------------------
+# Operator-local state — kept on disk, never versioned
+# ---------------------------------------------------------------------------
+# Agent/tooling session state (plans, continue files). Machine-generated, and it
+# accumulates local process ids and absolute paths as work proceeds.
+.zcode/
+
+# Internal handoff note. It is the operator's own entry point, so it stays on
+# disk and is deliberately NOT versioned: it carries local process ids, the
+# operator's machine-specific paths, and a running account of unfinished work.
+# Everything a contributor needs belongs in README.md / docs/, which ARE tracked.
+HANDOFF.md
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+bower_components/
+jspm_packages/
+site-packages/
+venv/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

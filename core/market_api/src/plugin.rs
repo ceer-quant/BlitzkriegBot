@@ -94,6 +94,13 @@ pub trait MarketHost: Send + Sync {
     fn take_pending_redemptions(&self) -> BoxFuture<'_, Vec<RedemptionRequest>>;
     /// The outcome of one redemption: a mined tx hash + block, or a failure.
     fn on_redemption_result(&self, result: RedemptionResult) -> BoxFuture<'_, ()>;
+    /// #461: complete share-pair merges the core has already burned from its
+    /// books — the venue executes the CTF merge and reports back through
+    /// [`MarketHost::on_merge_result`]. Dispatch semantics mirror the
+    /// redemption path (the core stamps each dispatch's backoff).
+    fn take_pending_merges(&self) -> BoxFuture<'_, Vec<MergeRequest>>;
+    /// The outcome of one merge: a mined tx hash + block, or a failure.
+    fn on_merge_result(&self, result: MergeResult) -> BoxFuture<'_, ()>;
 }
 
 /// The market-data component: owns a long-lived push connection (orderbook /

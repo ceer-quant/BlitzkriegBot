@@ -1173,6 +1173,17 @@ impl Engine {
         })
     }
 
+    /// #461: whether the token's market settles through the NegRisk adapter —
+    /// the merge call's routing key. `None`/`false` merge through the plain
+    /// CTF; a neg-risk market would revert there, so the request must say so.
+    pub fn neg_risk_of(&self, token_id: &str) -> Option<bool> {
+        self.scanner
+            .markets()
+            .iter()
+            .find(|m| m.up_token_id == token_id || m.down_token_id == token_id)
+            .map(|m| m.neg_risk)
+    }
+
     /// Force-finalize every pending near-miss (used on shutdown so records are
     /// not lost when the process stops before a window elapses).
     pub fn flush_near_misses(&mut self) -> Vec<crate::shadow::NearMissRecord> {

@@ -437,6 +437,129 @@ pub fn base_units_to_decimal(units: U256) -> Decimal {
     Decimal::from_str(&units.to_string()).unwrap_or_default() / Decimal::from(1_000_000u64)
 }
 
+/// #461: merge one condition's complete UP+DOWN share-pairs back into collateral.
+///
+/// Same signing/broadcast/receipt shape as `redeem_claim`: the transaction is
+/// signed locally, sent through the configured RPC endpoint, and a receipt is
+/// awaited before reporting success. The CTF's `mergePositions` mints exactly
+/// `amount` USDC for `amount` burned pairs, so the confirmation the core books
+/// carries the amount the REQUEST declared — verified against the collateral
+/// `Transfer` logs the same way a redeem is.
+pub async fn merge_pairs(
+    config: &RedeemConfig,
+    request: &blitzkrieg_market_api::MergeRequest,
+) -> Result<MergeReceipt, RedemptionFailure> {
+    let fail = |manual: bool, message: String| Err(RedemptionFailure { manual, message });
+    config.holder_check()?;
+    let Some(rpc_url) = config.rpc_url.as_deref() else {
+        return fail(false, format!("{RPC_URL_VAR} is not set"));
+    };
+    let signer = match signer_from_env() {
+        Ok(s) => s,
+        Err(e) => return fail(true, format!("merge signer unavailable: {e}")),
+    };
+    let condition_id = match B256::from_str(request.condition_id.trim()) {
+        Ok(c) => c,
+        Err(e) => {
+            return fail(
+                true,
+                format!(
+                    "condition id {} is not a bytes32: {e}",
+                    request.condition_id
+                ),
+            );
+        }
+    };
+    // An ordinary binary market merges through the CTF itself; the SDK's only
+    // merge surface is the plain CTF `mergePositions` — there is no
+    // `mergeNegRisk`. Refusing a neg-risk request as MANUAL (retryable never)
+    // beats mining a call into an adapter revert the retry loop would hammer.
+    if request.neg_risk {
+        return fail(
+            true,
+            format!(
+                "neg-risk merge is not automated — merge condition {} by hand through the NegRisk adapter",
+                request.condition_id
+            ),
+        );
+    }
+    let chain = chain_config(false)?;
+
+    let provider = match ProviderBuilder::new().wallet(signer).connect(rpc_url).await {
+        Ok(p) => p,
+        Err(e) => return fail(false, format!("RPC connect failed: {e}")),
+    };
+    let client = match CtfClient::with_neg_risk(provider, POLYGON) {
+        Ok(c) => c,
+        Err(e) => return fail(true, format!("CTF client init failed: {e}")),
+    };
+    let amount = decimal_to_base_units(request.pairs_usd);
+    if amount.is_zero() {
+        return fail(true, "merge request carries no complete pairs".to_string());
+    }
+    let req = polymarket_client_sdk_v2::ctf::types::MergePositionsRequest::builder()
+        .collateral_token(chain.collateral)
+        .condition_id(condition_id)
+        .partition(vec![U256::from(1u8), U256::from(2u8)])
+        .amount(amount)
+        .build();
+    tracing::info!(
+        claim = %request.id,
+        condition_id = %request.condition_id,
+        pairs = %request.pairs_usd,
+        "merge: sending on-chain merge"
+    );
+    let (tx_hash, block_number) = match client.merge_positions(&req).await {
+        Ok(r) => (r.transaction_hash, r.block_number),
+        Err(e) => {
+            let raw = e.to_string();
+            return fail(looks_permanent(&raw), classify_message(&raw));
+        }
+    };
+    tracing::info!(
+        claim = %request.id,
+        tx = %format!("{tx_hash:#x}"),
+        block = block_number,
+        "merge: confirmed on-chain"
+    );
+    Ok(MergeReceipt {
+        tx_hash: format!("{tx_hash:#x}"),
+        block_number: Some(block_number),
+    })
+}
+
+/// What a mined merge produced — the receipt the core books against.
+pub struct MergeReceipt {
+    pub tx_hash: String,
+    pub block_number: Option<u64>,
+}
+
+/// Report a merge outcome back to the host in the boundary shape.
+pub fn merge_to_result(
+    request: &blitzkrieg_market_api::MergeRequest,
+    outcome: Result<MergeReceipt, RedemptionFailure>,
+    now_ms: i64,
+) -> blitzkrieg_market_api::MergeResult {
+    match outcome {
+        Ok(r) => blitzkrieg_market_api::MergeResult {
+            id: request.id.clone(),
+            condition_id: request.condition_id.clone(),
+            tx_hash: Some(r.tx_hash),
+            block_number: r.block_number,
+            failure: None,
+            at_ms: now_ms,
+        },
+        Err(f) => blitzkrieg_market_api::MergeResult {
+            id: request.id.clone(),
+            condition_id: request.condition_id.clone(),
+            tx_hash: None,
+            block_number: None,
+            failure: Some(f),
+            at_ms: now_ms,
+        },
+    }
+}
+
 /// Report a `RedeemOutcome` back to the host in the boundary shape.
 pub fn to_result(
     request: &RedemptionRequest,
