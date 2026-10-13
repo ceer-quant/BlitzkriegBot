@@ -153,7 +153,10 @@ try {
     body: JSON.stringify({ user: USER, password: 'wrong-pass' }),
   });
   check('wrong password → 401', status(badLogin) === 401);
-  check('forged token → 401', status(await httpGet('/api/snapshot?token=' + 'a'.repeat(40))) === 401);
+  // #460: the query channel is gone — a forged (or even a valid) token in the
+  // URL reads as unauthenticated. The header channels are the contract.
+  check('forged token in query → 401', status(await httpGet('/api/snapshot?token=' + 'a'.repeat(40))) === 401);
+  check('forged token in header → 401', status(await httpGet('/api/snapshot', `X-Auth-Token: ${'a'.repeat(40)}\r\n`)) === 401);
 
   // ── ACCEPT direction ──────────────────────────────────────────────────────
   const login = await httpReq(PORT, 'POST', '/api/login', {
@@ -161,19 +164,23 @@ try {
   });
   const token = /"token":"([0-9a-f]{40})"/.exec(login)?.[1] ?? '';
   check('good credentials → 40-hex token', token.length === 40, token ? '' : login.slice(0, 120));
-  const ok = await httpGet(`/api/snapshot?token=${token}`);
-  check('session query → 200 snapshot', status(ok) === 200 && /connected|lastError/.test(ok));
-  check('session header → 200', status(await httpGet('/api/snapshot', `X-Auth-Token: ${token}\r\n`)) === 200);
+  const auth = `X-Auth-Token: ${token}\r\n`;
+  // Fetched here, while the session is alive — the render block below reuses
+  // this wire response, and after the revocation section a fresh snapshot
+  // would be a 401.
+  const ok = await httpGet('/api/snapshot', auth);
+  check('session header → 200 snapshot', status(ok) === 200);
   check('session bearer → 200', status(await httpGet('/api/snapshot', `Authorization: Bearer ${token}\r\n`)) === 200);
+  check('valid token in query → 401 (channel removed)', status(await httpGet(`/api/snapshot?token=${token}`)) === 401);
 
   // ── CORS policy ───────────────────────────────────────────────────────────
-  check('foreign Origin → 403', status(await httpGet(`/api/snapshot?token=${token}`, 'Origin: http://evil.example\r\n')) === 403);
-  check('loopback Origin → 200', status(await httpGet(`/api/snapshot?token=${token}`, 'Origin: http://127.0.0.1\r\n')) === 200);
+  check('foreign Origin → 403', status(await httpGet('/api/snapshot', `Origin: http://evil.example\r\n${auth}`)) === 403);
+  check('loopback Origin → 200', status(await httpGet('/api/snapshot', `Origin: http://127.0.0.1\r\n${auth}`)) === 200);
   check('lookalike host is not loopback → 403',
-    status(await httpGet(`/api/snapshot?token=${token}`, 'Origin: http://127.0.0.1.evil.example\r\n')) === 403);
+    status(await httpGet('/api/snapshot', `Origin: http://127.0.0.1.evil.example\r\n${auth}`)) === 403);
 
   // ── Command surface ───────────────────────────────────────────────────────
-  const st = await httpGet(`/api/command?cmd=${encodeURIComponent('status')}&token=${token}`);
+  const st = await httpGet(`/api/command?cmd=${encodeURIComponent('status')}`, auth);
   check('command with session → 200', status(st) === 200);
   check('command without session → 401', status(await httpGet('/api/command?cmd=status')) === 401);
 
@@ -190,10 +197,12 @@ try {
     !/balance|positions|tradeRows|strategyStats/.test(ping), ping.slice(0, 100));
 
   // ── Revocation ────────────────────────────────────────────────────────────
-  await httpGet(`/api/logout?token=${token}`);
-  check('revoked token → 401 afterwards', status(await httpGet(`/api/snapshot?token=${token}`)) === 401);
+  await httpGet('/api/logout', auth);
+  check('revoked token → 401 afterwards', status(await httpGet('/api/snapshot', auth)) === 401);
 
   // ── [0]/[4] The served panel IS the built Vue app, and the snapshot renders ─
+  // (`ok` — the authenticated snapshot wire — was captured in the ACCEPT block,
+  // before the token was revoked.)
   const panel = await httpGet('/panel');
   check('/panel → 200', status(panel) === 200);
   const panelBody = panel.slice(panel.indexOf('\r\n\r\n') + 4);
