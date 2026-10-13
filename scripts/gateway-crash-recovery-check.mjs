@@ -135,11 +135,14 @@ function isOurs(pid) {
 
 let web = null;
 let token = '';
+// #460: the query channel is gone — every authenticated call carries the
+// session in the X-Auth-Token header.
+const auth = () => (token ? `X-Auth-Token: ${token}\r\n` : '');
 let killedPid = 0;
 let replacementPid = 0;
 
 const snap = async () =>
-  parseJson(await httpReq(PORT, 'GET', `/api/snapshot?token=${token}`, { timeoutMs: 25000 }));
+  parseJson(await httpReq(PORT, 'GET', '/api/snapshot', { headers: auth(), timeoutMs: 25000 }));
 
 try {
   // --- boot the gateway with --manage --------------------------------------
@@ -189,8 +192,8 @@ try {
   );
 
   // --- start it THROUGH the gateway, so the gateway owns it ----------------
-  const started = await httpReq(PORT, 'POST', `/api/command?token=${token}`, {
-    headers: 'Content-Type: text/plain\r\n',
+  const started = await httpReq(PORT, 'POST', '/api/command', {
+    headers: `Content-Type: text/plain\r\n${auth()}`,
     body: 'start',
     timeoutMs: 30000,
   });
@@ -258,7 +261,7 @@ try {
   );
 
   // --- the replacement must WORK, not merely exist --------------------------
-  const st = await httpReq(PORT, 'GET', `/api/command?cmd=status&token=${token}`, { timeoutMs: 20000 });
+  const st = await httpReq(PORT, 'GET', '/api/command?cmd=status', { headers: auth(), timeoutMs: 20000 });
   const stDoc = parseJson(st);
   check(
     'the replaced core answers a real command',
@@ -273,8 +276,8 @@ try {
 
   // --- a stop we asked for must NOT look like a crash ----------------------
   const restartsBeforeStop = recovered.gateway.restarts;
-  const stopped = await httpReq(PORT, 'POST', `/api/command?token=${token}`, {
-    headers: 'Content-Type: text/plain\r\n',
+  const stopped = await httpReq(PORT, 'POST', '/api/command', {
+    headers: `Content-Type: text/plain\r\n${auth()}`,
     body: 'stop',
     timeoutMs: 20000,
   });

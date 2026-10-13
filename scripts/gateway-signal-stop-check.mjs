@@ -33,16 +33,18 @@ function isOurs(pid) {
 function status(raw) { return Number(raw.split('\r\n')[0]?.split(' ')[1]); }
 function bodyOf(raw) { const i = raw.indexOf('\r\n\r\n'); return i < 0 ? '' : raw.slice(i + 4); }
 function json(raw) { try { return JSON.parse(bodyOf(raw)); } catch { return null; } }
-function httpReq(method, path, { body = '', timeoutMs = 20000 } = {}) {
+function httpReq(method, path, { body = '', timeoutMs = 20000, headers = '' } = {}) {
   return new Promise((resolve) => {
     const socket = net.connect(PORT, '127.0.0.1');
     let raw = ''; let done = false;
     const finish = () => { if (done) return; done = true; try { socket.end(); } catch {} resolve(raw); };
-    socket.on('connect', () => socket.write(`${method} ${path} HTTP/1.1\r\nHost: t\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`));
+    socket.on('connect', () => socket.write(`${method} ${path} HTTP/1.1\r\nHost: t\r\n${headers}Content-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`));
     socket.on('data', (chunk) => { raw += chunk.toString(); });
     socket.on('end', finish); socket.on('error', finish); setTimeout(finish, timeoutMs);
   });
 }
+// #460: the query channel is gone — the session rides in the X-Auth-Token header.
+const auth = () => (token ? `X-Auth-Token: ${token}\r\n` : '');
 for (const [label, path] of [['core', CORE], ['gateway', WEB]]) {
   if (!existsSync(path)) { console.error(`${label} binary missing: ${path}`); process.exit(2); }
 }
@@ -59,10 +61,10 @@ try {
   const login = await httpReq('POST', '/api/login', { body: JSON.stringify({ user: USER, password: PASSWORD }) });
   token = /"token":"([0-9a-f]{40})"/.exec(login)?.[1] ?? '';
   check('gateway login succeeds', status(login) === 200 && token.length === 40, `status=${status(login)}`);
-  const started = await httpReq('POST', `/api/command?token=${token}`, { body: 'start' });
+  const started = await httpReq('POST', '/api/command', { body: 'start', headers: auth() });
   check('core starts through the gateway', status(started) === 200 && json(started)?.ok === true, bodyOf(started).slice(0, 120));
   await waitFor(async () => {
-    const snap = json(await httpReq('GET', `/api/snapshot?token=${token}`));
+    const snap = json(await httpReq('GET', '/api/snapshot', { headers: auth() }));
     corePid = snap?.gateway?.corePid ?? 0;
     return snap?.connected === true && snap?.gateway?.managed === true && isOurs(corePid);
   }, { timeoutMs: 25000, label: 'owned core' });
