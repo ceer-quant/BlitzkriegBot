@@ -52,6 +52,11 @@ pub trait MarketHost: Send + Sync {
     /// it (cooldowns, panel visibility, consecutive-failure freeze).
     fn on_order_rejected(&self, core_order_id: &str, error: Option<CoreError>)
     -> BoxFuture<'_, ()>;
+    /// The venue POST timed out — the venue MAY have accepted the order
+    /// (#462). The core must NOT release the reservation or mark the order
+    /// Rejected: it keeps the order Pending and the periodic reconciliation
+    /// sweep decides (resting → adopt; filled → gap-fill; absent → retire).
+    fn on_place_timeout(&self, core_order_id: &str) -> BoxFuture<'_, ()>;
     fn on_fill(&self, fill: MarketFill) -> BoxFuture<'_, ()>;
     fn on_order_live(&self, venue_order_id: &str) -> BoxFuture<'_, ()>;
     fn on_order_cancelled(&self, venue_order_id: &str) -> BoxFuture<'_, ()>;

@@ -168,49 +168,79 @@ pub async fn spawn_if_configured(
         loop {
             tick.tick().await;
 
-            // 1) Submit locally-accepted orders not yet on the venue. A venue
-            // rejection rides to the host WITH its error text (cooldowns,
-            // panel visibility, consecutive-failure freeze all key off it).
-            for order in host.take_pending_orders().await {
-                let core_order_id = order.core_order_id.clone();
-                match venue.place(order).await {
-                    Ok(p) => {
-                        place_failures = 0;
-                        recent_placements.push((p.venue_order_id.clone(), now_ms()));
-                        host.on_order_accepted(&core_order_id, &p.venue_order_id)
-                            .await
-                    }
-                    Err(e) => {
-                        place_failures = place_failures.saturating_add(1);
-                        host.on_order_rejected(&core_order_id, Some(e.clone()))
-                            .await;
-                        host.report_error(e).await;
-                        // A streak of venue rejections is the trading-error
-                        // signal the capability self-check exists for: probe
-                        // the venue directly (rate-limited) so the freeze
-                        // decision rests on fresh evidence, not inference.
-                        if place_failures >= 3 && now_ms() >= next_probe_ok_ms {
-                            next_probe_ok_ms = now_ms() + PROBE_COOLDOWN_MS;
-                            match venue.self_check().await {
-                                Ok(report) => host.on_self_check(report).await,
-                                Err(e) => host.report_error(e).await,
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 1b) Forward every core-side retire as a REAL venue cancel. The
-            // core already flipped the order to Cancelled locally; a cancel
-            // that never reaches the venue leaves a resting orphan.
+            // 1) Retire core-side cancels at the venue FIRST (#462): the
+            // previous order sent new POSTs before the DELETEs, so an
+            // escalation's cancel raced its replacement and both orders could
+            // rest on the book together (the double-buy window). Cancelling
+            // first serializes it: the old order is gone (or provably still
+            // failing) before anything new is submitted.
+            let mut cancel_strikes = 0u32;
             for id in host.take_pending_cancels().await {
                 match venue.cancel(id.clone()).await {
                     Ok(()) => host.note_orphan_cancelled(&id).await,
                     Err(e) => {
+                        cancel_strikes += 1;
                         eprintln!("polymarket-extension: venue cancel failed for {id}: {e}");
                         host.report_error(e).await;
                     }
                 }
+            }
+
+            // 1b) Submit locally-accepted orders not yet on the venue. A venue
+            // rejection rides to the host WITH its error text (cooldowns,
+            // panel visibility, consecutive-failure freeze all key off it).
+            // A cancel that JUST failed holds new submissions for this tick:
+            // the failed order may still be resting at the venue, and piling
+            // a replacement onto it is exactly the double-exposure the
+            // reordering above exists to prevent. The pending queue is
+            // re-read from the core next tick (500 ms), so the hold is one
+            // tick wide and the cancel is retried first.
+            if cancel_strikes == 0 {
+                for order in host.take_pending_orders().await {
+                    let core_order_id = order.core_order_id.clone();
+                    match venue.place(order).await {
+                        Ok(p) => {
+                            place_failures = 0;
+                            recent_placements.push((p.venue_order_id.clone(), now_ms()));
+                            host.on_order_accepted(&core_order_id, &p.venue_order_id)
+                                .await
+                        }
+                        // A TIMEOUT is NOT a rejection (#462): the venue may
+                        // have accepted the order, so releasing the cash
+                        // reservation would free money the venue can already
+                        // have spent, and the real BUY would strand as an
+                        // unmanaged position. Hand the order to the periodic
+                        // reconciliation sweep — resting → adopted, filled →
+                        // gap-fill, absent → retired — and count it as a
+                        // venue failure for the probe/freeze logic.
+                        Err(e) if e.code == CoreErrorCode::Timeout => {
+                            place_failures = place_failures.saturating_add(1);
+                            host.on_place_timeout(&core_order_id).await;
+                            host.report_error(e).await;
+                        }
+                        Err(e) => {
+                            place_failures = place_failures.saturating_add(1);
+                            host.on_order_rejected(&core_order_id, Some(e.clone()))
+                                .await;
+                            host.report_error(e).await;
+                            // A streak of venue rejections is the trading-error
+                            // signal the capability self-check exists for: probe
+                            // the venue directly (rate-limited) so the freeze
+                            // decision rests on fresh evidence, not inference.
+                            if place_failures >= 3 && now_ms() >= next_probe_ok_ms {
+                                next_probe_ok_ms = now_ms() + PROBE_COOLDOWN_MS;
+                                match venue.self_check().await {
+                                    Ok(report) => host.on_self_check(report).await,
+                                    Err(e) => host.report_error(e).await,
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                eprintln!(
+                    "polymarket-extension: {cancel_strikes} venue cancel(s) failed — order placement held this tick (#462)"
+                );
             }
 
             // 1c) Settlements: ask the venue what happened to every market the

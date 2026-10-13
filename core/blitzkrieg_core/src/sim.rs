@@ -22,6 +22,14 @@ pub struct Book {
     /// (price, size); best-first ordering is enforced at insertion/query.
     pub bids: Vec<(Decimal, Decimal)>,
     pub asks: Vec<(Decimal, Decimal)>,
+    /// #462: the epoch ms the snapshot was RECEIVED from the feed — the
+    /// `DataEvent::Book`/`TopOfBook` `now_ms`, mirrored alongside the levels
+    /// instead of dropped. Every freshness judgement downstream
+    /// (`book_age_ms`/`book_is_fresh` and the pricing/escalation gates) reads
+    /// THIS, so a feed outage ages the book out of pricing authority instead
+    /// of letting a stale quote pass as fresh. `0` = never stamped (synthetic
+    /// fixtures): the historical "age unknown counts as fresh" rule applies.
+    pub received_ms: i64,
 }
 
 impl Book {
@@ -380,6 +388,7 @@ mod tests {
         let book = Book {
             bids: vec![(dec!(0.39), dec!(100))],
             asks: vec![(dec!(0.45), dec!(100))],
+            ..Default::default()
         };
         assert!(book.crosses(&order(Side::Buy, dec!(0.45), FillPolicy::Maker)));
         assert!(!book.crosses(&order(Side::Buy, dec!(0.44), FillPolicy::Maker)));
@@ -396,6 +405,7 @@ mod tests {
         let book = Book {
             bids: vec![(dec!(0.30), dec!(100)), (dec!(0.95), dec!(8))],
             asks: vec![(dec!(0.70), dec!(100)), (dec!(0.35), dec!(4))],
+            ..Default::default()
         };
         // SELL walks bids from the top: 8 @ 0.95, then 2 @ 0.30.
         let (vwap, worst) = book
@@ -431,6 +441,7 @@ mod tests {
         let book = Book {
             bids: vec![(dec!(0.30), dec!(2)), (dec!(0.20), dec!(50))],
             asks: vec![(dec!(0.50), dec!(3))],
+            ..Default::default()
         };
         // BUY 0.40: no ask at or inside the limit — the quote moved.
         let (crosses, depth) = book.crossing_depth(Side::Buy, dec!(0.40));
@@ -469,6 +480,7 @@ mod tests {
     fn marketable_depth_counts_only_the_crossing_levels() {
         let book = Book {
             bids: vec![(dec!(0.30), dec!(100)), (dec!(0.39), dec!(7))],
+            received_ms: 0,
             asks: vec![
                 (dec!(0.45), dec!(100)),
                 (dec!(0.40), dec!(3)),
@@ -495,6 +507,7 @@ mod tests {
         let book = Book {
             bids: vec![(dec!(0.55), dec!(4)), (dec!(0.50), dec!(6))],
             asks: vec![(dec!(0.60), dec!(3)), (dec!(0.65), dec!(7))],
+            ..Default::default()
         };
         for (side, limit) in [
             (Side::Buy, dec!(0.65)),

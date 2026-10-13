@@ -3513,13 +3513,17 @@ impl Core {
                 token_id,
                 bids,
                 asks,
-                ..
+                now_ms: event_ms,
             } => {
                 self.books.insert(
                     token_id.clone(),
                     crate::sim::Book {
                         bids: bids.clone(),
                         asks: asks.clone(),
+                        // #462: keep the FEED's receive time — the freshness
+                        // gates downstream must age THIS book by when the
+                        // venue last spoke, not by the host's tick clock.
+                        received_ms: *event_ms,
                     },
                 );
                 Some(token_id.clone())
@@ -3528,7 +3532,7 @@ impl Core {
                 token_id,
                 best_bid,
                 best_ask,
-                ..
+                now_ms: event_ms,
             } => {
                 let mut bids = Vec::new();
                 let mut asks = Vec::new();
@@ -3545,8 +3549,14 @@ impl Core {
                 // Only overwrite when we actually have a side (don't clobber a
                 // full book with an empty top-of-book update).
                 if !bids.is_empty() || !asks.is_empty() {
-                    self.books
-                        .insert(token_id.clone(), crate::sim::Book { bids, asks });
+                    self.books.insert(
+                        token_id.clone(),
+                        crate::sim::Book {
+                            bids,
+                            asks,
+                            received_ms: *event_ms,
+                        },
+                    );
                     Some(token_id.clone())
                 } else {
                     None
@@ -5304,6 +5314,33 @@ impl Core {
         Ok(())
     }
 
+    /// The venue POST timed out — the venue MAY have accepted the order
+    /// (#462). The order stays Pending with its reservation held, and the
+    /// periodic reconciliation sweep decides: resting at the venue → adopted
+    /// as ours (ghost repair / `known_venue_order_ids`), filled → gap-fill
+    /// into the OME, absent from the venue → MarkedCancelled. Rejecting it
+    /// here (the old behaviour) would release cash the venue may already have
+    /// spent and strand a real BUY as an unmanaged position.
+    pub fn note_place_timeout(&mut self, id: &str) {
+        let Some(o) = self.ome.get(id) else {
+            return;
+        };
+        if !o.status.is_live() {
+            return;
+        }
+        tracing::warn!(
+            order = %id,
+            side = ?o.side,
+            "venue place timed out — order stays pending; reconciliation will decide"
+        );
+        self.emit(Event::RiskAlert {
+            code: blitzkrieg_market_api::CoreErrorCode::Timeout,
+            message: format!(
+                "place timed out for {id}: kept pending, reconciliation decides its fate"
+            ),
+        });
+    }
+
     /// Venue rejected/killed an order before acceptance: release any reservation.
     pub fn reject_live(&mut self, id: &str, now_ms: i64) -> CoreResult<()> {
         self.reject_live_result(id, None, now_ms)
@@ -5358,7 +5395,9 @@ impl Core {
                 } else {
                     Decimal::new(1, 2)
                 };
-                if let Some((_, worst)) = self.marketable_walk(o.side, &o.token_id, o.size, cap) {
+                if let Some((_, worst)) =
+                    self.marketable_walk(o.side, &o.token_id, o.size, cap, now_ms)
+                {
                     let req = OrderRequest {
                         token_id: o.token_id.clone(),
                         condition_id: o.condition_id.clone(),
@@ -6725,6 +6764,9 @@ impl Core {
         // on the venue): fold them into the position book so the position
         // cannot haunt the exit rules forever.
         self.apply_external_fills(&report.unknown_fills, snap.now_ms);
+        // #462: retire place-timeout orders the venue never gave evidence for
+        // (see `resolve_place_timeouts`).
+        self.resolve_place_timeouts(&snap);
         if !report.actions.is_empty()
             || !report.suspect_ghost_ids.is_empty()
             || !report.unknown_fills.is_empty()
@@ -6885,14 +6927,68 @@ impl Core {
                 "external close reconciled (manual venue sell folded into the position book)"
             );
         }
-        // Buy-side external fills and sells with no matching position are
-        // expected noise; one line per sweep keeps the log honest.
-        let unmatched = fresh.iter().filter(|t| t.side == Side::Sell).count() - applied;
-        let buys = fresh.iter().filter(|t| t.side != Side::Sell).count();
-        if unmatched > 0 || buys > 0 {
-            eprintln!(
-                "core: external fills not matched to a position: sells={unmatched} buys={buys} (buys are reconciled via venue cash realign)"
+        // #462: fold unknown BUYs into the position book — a place-timeout
+        // order the venue really filled arrives here (the OME never saw the
+        // order id), and skipping it left real shares unmanaged while the
+        // cash was already gone. Rebuilt through `apply_delta_effects`, the
+        // ONE ledger+position+event path every other fill takes, so the
+        // reconstructed position feeds exits/settlement exactly like an
+        // engine-placed one. Metadata (strategy/condition/slot/direction)
+        // comes from the engine's market registry for the token; a token no
+        // live market names stays skipped (no inventable metadata), and the
+        // default account takes the position (the ABI carries no account on
+        // venue trades — the same default the SELL fold settles into).
+        for t in fresh.iter().filter(|t| t.side == Side::Buy) {
+            let Some(market) = self.engine.as_ref().and_then(|e| {
+                e.scanner()
+                    .markets()
+                    .iter()
+                    .find(|m| m.up_token_id == t.token_id || m.down_token_id == t.token_id)
+            }) else {
+                continue;
+            };
+            let direction = if market.up_token_id == t.token_id {
+                "up"
+            } else {
+                "down"
+            };
+            let role = if t.maker == Some(true) {
+                crate::model::OrderRole::Maker
+            } else {
+                crate::model::OrderRole::Taker
+            };
+            let d = crate::ome::FillDelta {
+                order_id: format!("recon:{}", t.venue_order_id),
+                token_id: t.token_id.clone(),
+                account_id: crate::model::default_account_id(),
+                side: Side::Buy,
+                delta: t.size,
+                price: t.price,
+                cumulative: t.size,
+                strategy: "reconciled".to_string(),
+                asset: market.asset.clone(),
+                direction: direction.to_string(),
+                condition_id: market.condition_id.clone(),
+                round_slot: market.round_slot,
+                mode: crate::model::FillPolicy::Taker,
+                role,
+                limit_price: t.price,
+                trade_id: t.trade_id.clone(),
+            };
+            tracing::warn!(
+                token = %t.token_id,
+                venue_order = %t.venue_order_id,
+                size = %t.size,
+                price = %t.price,
+                "external BUY reconciled — position rebuilt (a timed-out place the venue really filled, #462)"
             );
+            self.apply_delta_effects(d, now_ms);
+        }
+        // Sells with no matching position are expected noise; one line per
+        // sweep keeps the log honest. BUYs are folded above (#462).
+        let unmatched = fresh.iter().filter(|t| t.side == Side::Sell).count() - applied;
+        if unmatched > 0 {
+            eprintln!("core: external fills not matched to a position: sells={unmatched}");
         }
         let new_mark = fresh
             .iter()
@@ -6902,6 +6998,50 @@ impl Core {
         self.recon_watermark_ms = self.recon_watermark_ms.max(new_mark);
         if let Some(db) = self.position_db.as_ref() {
             db.save_watermark(self.recon_watermark_ms);
+        }
+    }
+
+    /// Retire every order a place TIMEOUT left pending (#462) when the venue
+    /// never gave evidence for it.
+    ///
+    /// `note_place_timeout` deliberately does NOT reject: the venue may have
+    /// accepted the POST after the client gave up. But "pending forever"
+    /// leaks the cash reservation and strands the intent, and the OME-side
+    /// ghost sweep cannot judge these orders — they carry no venue id to
+    /// match, so it skips them. The three endings all resolve without
+    /// adoption:
+    ///   really filled   → the unknown BUY fold in `apply_external_fills`
+    ///                     books the position; this retirement then frees
+    ///                     the now-stale reservation;
+    ///   really resting  → the bridge's orphan sweep cancels the unknown
+    ///                     venue id (exposure removed at the venue);
+    ///   never received  → nothing at the venue; only this retirement
+    ///                     closes the local intent.
+    /// The budget clears the bridge's sweep cadence (5 s) plus the place
+    /// timeout itself, so a POST that is merely slow is never raced, and
+    /// the folded position occupies the per-asset slot in the window
+    /// before retirement — a strategy re-attempt cannot double the entry.
+    fn resolve_place_timeouts(&mut self, snap: &crate::reconcile::VenueSnapshot) {
+        for (id, submitted_at) in self
+            .ome
+            .live_orders()
+            .into_iter()
+            .filter(|o| o.venue_order_id.is_none() && o.status == OrderStatus::Pending)
+            .map(|o| (o.order_id.clone(), o.submitted_at_ms))
+            .collect::<Vec<_>>()
+        {
+            if snap.now_ms - submitted_at < PLACE_TIMEOUT_VERDICT_MS {
+                continue;
+            }
+            if let Err(e) = self.cancel(&id, snap.now_ms) {
+                tracing::warn!(order = %id, error = %e, "place-timeout retirement failed");
+            } else {
+                tracing::warn!(
+                    order = %id,
+                    waited_ms = snap.now_ms - submitted_at,
+                    "place timed out and the venue never acknowledged it — order retired, reservation released (#462)"
+                );
+            }
         }
     }
 
@@ -8053,15 +8193,29 @@ impl Core {
     /// `token`, walked off the mirrored book (best levels first, no worse
     /// than `limit`), plus the volume-weighted price the walk would fill at.
     /// `None` when the book cannot cover the size within `limit` — exactly
-    /// what a live FOK would be killed for.
+    /// what a live FOK would be killed for — or when the book is STALE
+    /// (#462): the same `max_book_age_sec` budget the exit ladder prices
+    /// under also gates what this walk may authorize. A chase priced off a
+    /// quote the feed stopped updating minutes ago is not a fill guarantee,
+    /// it is a blind limit; the walk refuses it the same way. Books with no
+    /// receive time (`received_ms <= 0`, synthetic fixtures) keep the
+    /// historical "age unknown" exemption so dry tests still walk.
     fn marketable_walk(
         &self,
         side: Side,
         token: &str,
         size: Decimal,
         limit: Decimal,
+        now_ms: i64,
     ) -> Option<(Decimal, Decimal)> {
-        self.books.get(token)?.walk_marketable(side, limit, size)
+        let book = self.books.get(token)?;
+        if book.received_ms > 0
+            && book.received_ms
+                < now_ms.saturating_sub(self.config.positions.exit.max_book_age_sec * 1_000)
+        {
+            return None;
+        }
+        book.walk_marketable(side, limit, size)
     }
 
     /// Why a dry/read-only taker leg could not be filled, as the structured
@@ -8597,7 +8751,7 @@ impl Core {
             // no bids at all nothing can fill — the request falls back to the
             // grid floor and the settle/venue rejects it honestly.
             let price = self
-                .marketable_walk(Side::Sell, &token, shares, Decimal::new(1, 2))
+                .marketable_walk(Side::Sell, &token, shares, Decimal::new(1, 2), now_ms)
                 .map(|(_, worst)| worst)
                 .filter(|p| *p > Decimal::ZERO)
                 .unwrap_or(Decimal::new(1, 2));
@@ -8636,7 +8790,14 @@ impl Core {
         asks: Vec<(Decimal, Decimal)>,
         now_ms: i64,
     ) {
-        self.books.insert(token_id.to_string(), Book { bids, asks });
+        self.books.insert(
+            token_id.to_string(),
+            Book {
+                bids,
+                asks,
+                received_ms: now_ms,
+            },
+        );
         let ids: Vec<String> = self
             .ome
             .live_orders()
@@ -9746,7 +9907,8 @@ impl Core {
             } else {
                 Decimal::new(1, 2)
             };
-            let Some((_, worst)) = self.marketable_walk(side, &token, remaining, cap) else {
+            let Some((_, worst)) = self.marketable_walk(side, &token, remaining, cap, now_ms)
+            else {
                 self.ome.set_escalation(&id, now_ms + timeout)?;
                 continue;
             };
@@ -9865,10 +10027,13 @@ impl Core {
             // token String per position per tick are gone. `from_book` does
             // the five Decimal reductions ONCE per mirrored book (the
             // closure runs once per position; identical inputs, Copy output).
+            // #462: the timestamp passed is the book's own RECEIVED time —
+            // stamping `now_ms` here would make every book age zero and
+            // blind the freshness gate to feed outages.
             let book_fn = |token: &str| {
                 self.books
                     .get(token)
-                    .map(|b| crate::exit_policy::BookView::from_book(b, now_ms))
+                    .map(|b| crate::exit_policy::BookView::from_book(b, b.received_ms))
             };
             self.positions
                 .refresh_marks(&book_fn, now_ms, marks_all, &self.fast_dirty_tokens);
@@ -9953,10 +10118,12 @@ impl Core {
         // timestamp and never the level vectors, so the two owned clones and
         // the token String per position per tick disappear; the reductions
         // run once per mirrored book and the Copy result is passed by value.
+        // #462: the timestamp is the book's own RECEIVED time (see the marks
+        // closure above) — the ladder must not re-arm a stale quote.
         let book_fn = |token: &str| {
             self.books
                 .get(token)
-                .map(|b| crate::exit_policy::BookView::from_book(b, now_ms))
+                .map(|b| crate::exit_policy::BookView::from_book(b, b.received_ms))
         };
         if all_hold {
             self.positions
@@ -10382,6 +10549,12 @@ const FREEZE_ON_REJECTS: u32 = 5;
 /// Consecutive failed reconciliation sweeps that freeze trading (E31-b): a
 /// blind sweep is the failure mode that lets ghosts and orphans accumulate.
 const SWEEP_FAILURE_FREEZE: u32 = 3;
+
+/// #462: how long a place-timeout order may sit pending with no venue evidence
+/// (no id bound, no fold, nothing) before the reconciliation sweep retires it
+/// and releases the reservation. Clears the bridge's 5 s sweep cadence plus a
+/// slow POST's place timeout, so a merely-slow placement is never raced.
+const PLACE_TIMEOUT_VERDICT_MS: i64 = 30_000;
 /// A passing accounting audit is written to the audit log this often, so the log
 /// proves the check RAN and not merely that it never failed (issue #189).
 const AUDIT_HEARTBEAT_MS: i64 = 600_000;
@@ -12036,7 +12209,7 @@ mod tests {
             "tok",
             vec![(dec!(0.30), dec!(100))],
             vec![(dec!(0.31), dec!(100))],
-            1,
+            1_800_000 - 1_000,
         );
         c.tick(1_800_000 - 100).unwrap();
         assert_eq!(
@@ -12079,11 +12252,14 @@ mod tests {
         // time_left 600s keeps the dynamic ramp at its wide end; 8% stays above
         // the ramped threshold, so the position survives — the JUDGEMENT that
         // holds it is the 12 we are about to edit.
+        // #462: the snapshot ts is the book's RECEIVED time now — put it 1s
+        // before the tick so the freshness gate judges a book the fixture just
+        // delivered, not one delivered at epoch+1ms.
         c.book_snapshot(
             "tok",
             vec![(dec!(0.368), dec!(100))],
             vec![(dec!(0.37), dec!(100))],
-            1,
+            1_800_000 - 601_000,
         );
         c.tick(1_800_000 - 600_000).unwrap();
         assert_eq!(
@@ -12139,7 +12315,7 @@ mod tests {
             "tok",
             vec![(dec!(0.20), dec!(100))],
             vec![(dec!(0.21), dec!(100))],
-            1,
+            1_800_000 - 1_000,
         );
         c.tick(1_800_000 - 100).unwrap();
         assert!(c.positions().daily_pnl() < dec!(-1));
@@ -12199,7 +12375,7 @@ mod tests {
                 token,
                 vec![(dec!(0.30), dec!(100))],
                 vec![(dec!(0.31), dec!(100))],
-                1,
+                1_800_000 - 1_000,
             );
             c.tick(1_800_000 - 100).unwrap();
         };
@@ -13917,7 +14093,7 @@ mod strategy_dispatch_tests {
             token,
             vec![(dec!(0.05), dec!(100))],
             vec![(dec!(0.06), dec!(100))],
-            now + 3_000,
+            1_800_000 - 101_000,
         );
         c.tick(1_800_000 - 100_000).unwrap();
         assert!(
@@ -18604,5 +18780,371 @@ mod audit_fix_tests {
         assert!(lines >= 3, "push, push, tombstone all landed: {lines}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// #462 验收：订单状态机与盘口时间戳修复的正向判据。helper 自带（兄弟
+/// mod 不共享 `tests` 的私有夹具），变异有牙由 PR 前的手工验证完成。
+#[cfg(test)]
+mod order_state_machine_462_tests {
+    use super::*;
+    use crate::risk::RiskConfig;
+    use rust_decimal_macros::dec;
+
+    /// Dry core, seed `balance`, the shipped per-order notional cap 3.
+    fn dry_core(balance: Decimal) -> Core {
+        let mut c = Core::new(CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(3),
+                ..Default::default()
+            },
+            dry_seed_balance: Decimal::from(10_000),
+            ..Default::default()
+        });
+        c.set_balance(balance);
+        c
+    }
+
+    /// Live-mode core: placements stay Pending until a venue ack.
+    fn live_core(balance: Decimal) -> Core {
+        let mut c = Core::new(CoreConfig {
+            mode: Mode::Live,
+            risk: RiskConfig {
+                max_order_notional: dec!(3),
+                ..Default::default()
+            },
+            dry_seed_balance: Decimal::from(10_000),
+            ..Default::default()
+        });
+        c.set_balance(balance);
+        c
+    }
+
+    fn order(mode: FillPolicy, price: Decimal, size: Decimal, key: &str) -> OrderRequest {
+        OrderRequest {
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode,
+            price,
+            size,
+            internal_key: key.into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 1,
+            account_id: crate::model::default_account_id(),
+        }
+    }
+
+    /// A CryptoMarket fed through the engine so the reconciler can look up
+    /// metadata for an external fill's token.
+    fn feed_market(c: &mut Core, up_token: &str, down_token: &str, now: i64) {
+        let slot = now / 1000 / 900;
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![crate::model::CryptoMarket {
+                    asset: "BTC".into(),
+                    condition_id: "cond".into(),
+                    question_id: "q".into(),
+                    up_token_id: up_token.into(),
+                    down_token_id: down_token.into(),
+                    up_price: dec!(0.6),
+                    down_price: dec!(0.4),
+                    expires_at_ms: (slot + 1) * 900 * 1000,
+                    round_slot: slot,
+                    round_duration_sec: 900,
+                    archive_verdict: false,
+                    venue: String::new(),
+                    neg_risk: false,
+                    question: "?".into(),
+                }],
+                now_ms: now,
+            },
+            now,
+        );
+    }
+
+    /// #462 fix 3, acceptance: a book whose receive time is past the exit
+    /// ladder's `max_book_age_sec` budget must NOT price an exit — the stop
+    /// stays silent instead of acting on a quote nobody is standing behind.
+    ///
+    /// The position opens at the 0.40 ask and NO new book ever arrives. The
+    /// one book's bid (0.35, −12.5% off entry) is already past the shipped
+    /// 12% stop, so only the
+    /// freshness gate can hold the exit back — before the fix the mirrored
+    /// timestamp was the host's tick clock, the stale book read fresh, and
+    /// this tick would have sold into a bid the feed stopped carrying 3
+    /// hours ago.
+    #[test]
+    fn an_exit_is_not_priced_off_a_stale_book() {
+        let cfg = CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(1000),
+            round_duration_sec: 900,
+            auto_exits_enabled: true,
+            ..Default::default()
+        };
+        let mut c = Core::new(cfg);
+        c.enable_engine(crate::engine::Engine::new(
+            crate::engine::EngineConfig::default(),
+        ));
+        let now = 1_000_000_000i64;
+        feed_market(&mut c, "tok", "tok-down", now);
+        c.engine_on_data(
+            crate::engine::DataEvent::Book {
+                token_id: "tok".into(),
+                // The ask prices the entry (the FOK fills at the 0.40 ask);
+                // the bid is the crash the exit ladder WOULD act on if it
+                // trusted this book forever: 0.35 is −12.5% off the 0.40
+                // entry (past the shipped 12% stop) and only a 6.7% wick
+                // (under the 8% guard), so the freshness gate is the ONLY
+                // thing that can hold the exit back.
+                bids: vec![(dec!(0.35), dec!(100))],
+                asks: vec![(dec!(0.40), dec!(100))],
+                now_ms: now,
+            },
+            now,
+        );
+        let req = crate::model::OrderRequest {
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode: FillPolicy::Taker,
+            price: dec!(0.45),
+            size: dec!(5),
+            internal_key: "entry".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: now / 1000 / 900,
+            account_id: crate::model::default_account_id(),
+        };
+        let (_, st) = c.place(req, 0, now).unwrap();
+        assert_eq!(st, OrderStatus::Filled);
+
+        // 90 s later, still no book: the mirrored snapshot's receive time is
+        // the ONLY timestamp the ladder may judge on, and it is now past the
+        // 60 s budget (the round has 13.5 min left, so the expiry gate is not
+        // what holds — the freshness gate is). The exit must hold.
+        c.tick(now + 90 * 1000).unwrap();
+        assert_eq!(
+            c.positions().open_positions().len(),
+            1,
+            "a stale book must not price an exit (#462)"
+        );
+        assert_eq!(
+            c.positions().closed_positions().len(),
+            0,
+            "nothing was sold off the stale quote"
+        );
+    }
+
+    /// #462 fix 3, acceptance (escalation side): the SAME freshness budget
+    /// gates the escalation chase. The maker rests; the only book it ever
+    /// sees is hours old by the time the clock fires; the sweep must NOT
+    /// authorize a chase priced off it — the maker stays and the clock
+    /// re-arms, exactly like the no-depth branch.
+    #[test]
+    fn an_escalation_is_not_chased_off_a_stale_book() {
+        let mut c = dry_core(dec!(10));
+        let outcome = c
+            .place_inner(
+                order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(2), "k1"),
+                1000,
+                1,
+                false,
+            )
+            .unwrap();
+        assert_eq!(outcome.status, OrderStatus::Live);
+        let id = outcome.order_id;
+
+        // Fresh at t=1 (a 0.99 ask would authorize the chase), but this is the
+        // ONLY snapshot the book ever sees.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.99), dec!(100))], 1);
+
+        // The escalation clock fires hours after the book's receive time.
+        c.tick(1 + 3 * 3600 * 1000 + 2).unwrap();
+        let o = c.ome().get(&id).cloned().unwrap();
+        assert_eq!(o.status, OrderStatus::Live, "the maker stays resting");
+        assert_eq!(
+            o.escalate_at_ms,
+            Some(1 + 3 * 3600 * 1000 + 2 + 1000),
+            "the clock re-arms (no-depth semantics)"
+        );
+        assert_eq!(
+            c.ome()
+                .all()
+                .into_iter()
+                .filter(|o| o.internal_key.ends_with(":escalated"))
+                .count(),
+            0,
+            "a stale book must not authorize a chase (#462)"
+        );
+    }
+
+    /// #462 fix 2, acceptance: a place TIMEOUT must not release the cash
+    /// reservation — the venue may have accepted the order. The order stays
+    /// Pending with its reservation held; `reject_live` (the old path) is
+    /// what releases.
+    #[test]
+    fn a_place_timeout_keeps_the_order_pending_with_its_reservation() {
+        let mut c = live_core(dec!(10));
+        let (id, st) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1)
+            .unwrap();
+        assert_eq!(st, OrderStatus::Pending);
+        let reserved_before = c.ledger().reserved();
+
+        c.note_place_timeout(&id);
+
+        let o = c.ome().get(&id).cloned().unwrap();
+        assert_eq!(
+            o.status,
+            OrderStatus::Pending,
+            "a timeout is not a rejection — reconciliation decides (#462)"
+        );
+        assert_eq!(
+            c.ledger().reserved(),
+            reserved_before,
+            "the reservation must stay held while the venue's answer is unknown"
+        );
+        // Contrast: the actual rejection path still releases (unchanged).
+        c.reject_live(&id, 2).unwrap();
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Rejected);
+        assert_eq!(c.ledger().reserved(), Decimal::ZERO);
+    }
+
+    /// #462 fix 2, acceptance: an external BUY the venue really filled (a
+    /// timed-out place) is folded into the position book through the SAME
+    /// ledger+position path every fill takes — shares exist afterwards, the
+    /// cash moved, and the position carries real market metadata.
+    #[test]
+    fn an_external_buy_from_a_timed_out_place_rebuilds_the_position() {
+        let cfg = CoreConfig {
+            mode: Mode::Live,
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(1000),
+            round_duration_sec: 900,
+            ..Default::default()
+        };
+        let mut c = Core::new(cfg);
+        c.enable_engine(crate::engine::Engine::new(
+            crate::engine::EngineConfig::default(),
+        ));
+        c.set_balance(dec!(1000));
+        let now = 1_000_000_000i64;
+        feed_market(&mut c, "tok", "tok-down", now);
+
+        let balance_before = c.ledger().balance();
+        c.reconcile(crate::reconcile::VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![crate::reconcile::VenueTrade {
+                venue_order_id: "venue-unknown-1".into(),
+                trade_id: "t-ext-1".into(),
+                token_id: "tok".into(),
+                side: Side::Buy,
+                size: dec!(5),
+                price: dec!(0.45),
+                ts_ms: now + 1,
+                tx_hash: None,
+                maker: Some(false),
+            }],
+            now_ms: now + 2,
+        })
+        .unwrap();
+
+        let pos = c
+            .positions()
+            .open_positions()
+            .iter()
+            .find(|p| p.token_id == "tok")
+            .expect("the external BUY must rebuild a position (#462)");
+        assert_eq!(pos.shares, dec!(5));
+        assert_eq!(pos.condition_id, "cond");
+        assert!(
+            c.ledger().balance() < balance_before,
+            "the cash the venue spent must leave the ledger"
+        );
+    }
+
+    /// #462 fix 2, acceptance (the closer): a timed-out place the venue never
+    /// received must not pend forever — the sweep retires it past the budget
+    /// and the reservation is released. Without this judge, the timeout
+    /// branch's "stays pending" leaks the cash for the life of the process.
+    #[test]
+    fn a_never_acked_timed_out_place_is_retired_by_the_sweep() {
+        let mut c = live_core(dec!(10));
+        let (id, st) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1)
+            .unwrap();
+        assert_eq!(st, OrderStatus::Pending);
+        c.note_place_timeout(&id);
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Pending);
+
+        // Inside the budget: the sweep leaves it alone.
+        c.reconcile(crate::reconcile::VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![],
+            now_ms: 10,
+        })
+        .unwrap();
+        assert_eq!(
+            c.ome().get(&id).unwrap().status,
+            OrderStatus::Pending,
+            "inside the budget the POST may still land — no verdict yet"
+        );
+
+        // Past the budget: retired, reservation released.
+        c.reconcile(crate::reconcile::VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![],
+            now_ms: 10 + PLACE_TIMEOUT_VERDICT_MS,
+        })
+        .unwrap();
+        assert_eq!(
+            c.ome().get(&id).unwrap().status,
+            OrderStatus::Cancelled,
+            "no venue evidence past the budget — the intent is retired (#462)"
+        );
+        assert_eq!(
+            c.ledger().reserved(),
+            Decimal::ZERO,
+            "the reservation must be released with the intent"
+        );
+    }
+
+    /// #462 fix 1, acceptance (kernel-side evidence): the escalation's
+    /// cancel-then-place is serialized through ONE queue the bridge drains
+    /// before it places anything new — `take_pending_venue_cancels` yields
+    /// the venue DELETE ahead of every POST of the same tick, because the
+    /// bridge's loop retires cancels FIRST (its step 1) and only then
+    /// submits pending orders (step 1b, skipped entirely when a cancel just
+    /// failed).
+    #[test]
+    fn the_escalation_cancel_is_forwarded_before_any_new_order() {
+        let mut c = live_core(dec!(10));
+        // A resting maker bound to a venue id, cancelled the way the
+        // escalation sweep would: the DELETE rides the queue the bridge
+        // drains ahead of any placement.
+        let (id, _st) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(2), "k1"), 0, 1)
+            .unwrap();
+        c.bind_venue(&id, "venue-resting-1".into(), 2).unwrap();
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Live);
+
+        c.cancel(&id, 3).unwrap();
+        assert_eq!(
+            c.take_pending_venue_cancels(),
+            vec!["venue-resting-1".to_string()],
+            "the escalation's cancel rides the queue the bridge drains before placing (#462)"
+        );
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Cancelled);
     }
 }
