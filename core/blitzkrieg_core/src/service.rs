@@ -1015,9 +1015,6 @@ impl AppliedFillLog {
     /// Rewrite the log as the current table (one line per live key). Called after
     /// a restore, so the file is the table rather than every mutation ever made.
     fn compact(&self, snapshot: &[AppliedFillRecord]) {
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         let mut buf = String::new();
         for r in snapshot {
             match serde_json::to_string(r) {
@@ -1028,8 +1025,10 @@ impl AppliedFillLog {
                 Err(e) => tracing::warn!(error = %e, "cannot serialize applied-fill record"),
             }
         }
-        if let Err(e) = std::fs::write(&self.path, buf) {
-            tracing::warn!(error = %e, path = %self.path.display(), "applied-fill log compact failed");
+        // #463: atomic rewrite — the compact runs right after a restore, which
+        // is exactly when a torn file would be trusted as the dedup table.
+        if !crate::jsonl::rewrite_atomic(&self.path, buf.as_bytes()) {
+            tracing::warn!(path = %self.path.display(), "applied-fill log compact failed");
         }
     }
 }
@@ -1314,7 +1313,18 @@ pub struct Core {
     /// trade FAILED, the credential is what lets the service unwind each of
     /// those ledgers instead of leaving phantom profit behind. FIFO-capped:
     /// the FAILED normally arrives seconds after the fill that created it.
+    ///
+    /// #463: the queue is JOURNALED — every push appends a line to
+    /// `close-credentials.jsonl` (beside the order log, same derivation as the
+    /// other side logs) and every consumption appends a `consumed` line. A
+    /// restart between the close fill and the venue's FAILED used to lose the
+    /// credential (the position was already out of every recovery file) and
+    /// strand phantom PnL; now boot replays the journal, keeping only lines
+    /// whose key has no later `consumed`.
     close_credentials: std::collections::VecDeque<(String, CloseCredential)>,
+    /// #463: where the credential journal appends. `None` (no order log — the
+    /// backtester, most tests) keeps the queue memory-only, as before.
+    close_credential_log: Option<std::path::PathBuf>,
     next_id: u64,
     tx: Option<mpsc::UnboundedSender<Event>>,
     /// E29 (§12.2): per-`(symbol, interval)` wall-clock (ms) of the LAST
@@ -1386,6 +1396,12 @@ pub struct Core {
 
 /// F4: what a fill-driven full close changed, so a later FAILED status for the
 /// same trade can reverse every one of those ledgers exactly.
+///
+/// #463: `Serialize`/`Deserialize` because the credential is journaled — the
+/// queue alone dies with the process, and a restart between the close fill and
+/// the venue's FAILED is precisely the window this struct exists for.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CloseCredential {
     /// The position-book row as it stood BEFORE the closing fill removed it —
     /// the exact inventory to restore.
@@ -1402,6 +1418,22 @@ struct CloseCredential {
     /// even when the account bound is off (a zero count is the truth then),
     /// so a close cannot choose whether to leave evidence.
     account_streak_before: u32,
+}
+
+/// #463: one journal line for the credential log — a push (with the credential)
+/// or a consumption tombstone (key only). Boot replays pushes whose key has no
+/// later tombstone.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum CloseCredentialLine {
+    Push {
+        trade_id: String,
+        #[serde(flatten)]
+        cred: Box<CloseCredential>,
+    },
+    Consumed {
+        trade_id: String,
+    },
 }
 
 /// Replay fast path: a quiet tick still re-runs the Lua evaluation at least
@@ -1660,6 +1692,11 @@ impl Core {
             side_log_path(&config.applied_log_path, "applied-fills.jsonl").map(AppliedFillLog::new);
         let audit_log = side_log_path(&config.audit_log_path, "reconcile.jsonl");
         let settlement_log = side_log_path(&config.settlement_log_path, "settlements.jsonl");
+        // #463: the close-credential journal rides the same derivation — a
+        // deployment that persists the order log persists the credentials that
+        // let a FAILED unwind one of its closes across a restart.
+        let close_credential_log =
+            side_log_path(&None, "close-credentials.jsonl").map(std::path::PathBuf::from);
         let settlement = SettlementBook::new(settlement_log.as_deref().map(std::path::Path::new));
         let shadow_cfg = {
             let mut c = ShadowEvolutionConfig {
@@ -1842,6 +1879,7 @@ impl Core {
             settlement,
             venue_free: None,
             close_credentials: std::collections::VecDeque::new(),
+            close_credential_log,
             next_id: 1,
             tx: None,
             kline_preview_last_ms: std::collections::HashMap::new(),
@@ -2136,6 +2174,7 @@ impl Core {
     /// those restored orders still commit (issue #181), which a fresh Ledger would
     /// otherwise start without.
     pub fn restore_orders(&mut self) -> usize {
+        self.restore_close_credentials();
         let applied = self.restore_applied();
         if applied.0 > 0 {
             self.emit(Event::RiskAlert {
@@ -2208,6 +2247,45 @@ impl Core {
             });
         }
         n
+    }
+
+    /// #463: replay the close-credential journal — pushes whose key carries no
+    /// later `consumed` tombstone re-enter the FIFO in file order, so a FAILED
+    /// arriving after the restart still finds its credential. Called from
+    /// [`Core::restore_orders`], NOT the constructor: recovery here follows the
+    /// same explicit pattern as the order and position books, and a constructor
+    /// that reads the journal would make every in-process `Core::new` (whose
+    /// default config points at the process cwd's `data/orders/`) silently
+    /// adopt credentials from unrelated tests sharing that directory.
+    fn restore_close_credentials(&mut self) {
+        let Some(path) = self.close_credential_log.clone() else {
+            return;
+        };
+        let mut q: std::collections::VecDeque<(String, CloseCredential)> =
+            std::collections::VecDeque::new();
+        for line in crate::jsonl::load::<CloseCredentialLine>(
+            &path,
+            "close-credential journal: skipped unparseable lines",
+        ) {
+            match line {
+                CloseCredentialLine::Push { trade_id, cred } => {
+                    q.push_back((trade_id, *cred));
+                }
+                CloseCredentialLine::Consumed { trade_id } => {
+                    if let Some(i) = q.iter().position(|(tid, _)| *tid == trade_id) {
+                        q.remove(i);
+                    }
+                }
+            }
+        }
+        if !q.is_empty() {
+            tracing::warn!(
+                path = %path.display(),
+                restored = q.len(),
+                "close-credential journal replayed — FAILED rollbacks survive the restart"
+            );
+            self.close_credentials = q;
+        }
     }
 
     /// Fold the persisted applied-fill journal into the OME. Returns
@@ -6138,6 +6216,18 @@ impl Core {
                             .iter()
                             .position(|(tid, _)| *tid == d.trade_id)
                             .map(|i| self.close_credentials.remove(i).unwrap().1);
+                        // #463: tombstone the consumption so a restart replay
+                        // does not resurrect a credential already unwound.
+                        if let (true, Some(path)) =
+                            (consumed.is_some(), self.close_credential_log.as_ref())
+                        {
+                            crate::jsonl::append(
+                                path,
+                                &CloseCredentialLine::Consumed {
+                                    trade_id: d.trade_id.clone(),
+                                },
+                            );
+                        }
                         match consumed {
                             Some(cred) => self.unwind_closed_trade(cred, d, now_ms),
                             // No position at all for the token: the reversal cannot
@@ -6440,12 +6530,30 @@ impl Core {
     /// F4: file a close-accounting credential under a trade key. FIFO-capped —
     /// the FAILED that consumes a credential normally arrives seconds after the
     /// fill that created it, so a small window is all the pairing needs.
+    /// #463: the push is journalled so the window survives a restart.
     fn push_close_credential(&mut self, trade_id: String, cred: CloseCredential) {
         if trade_id.is_empty() {
             return;
         }
         while self.close_credentials.len() >= 512 {
-            self.close_credentials.pop_front();
+            let (evicted, _) = self
+                .close_credentials
+                .pop_front()
+                .expect("len checked above");
+            // The journal records the eviction as consumed, so a replay after a
+            // restart does not resurrect a credential the cap already dropped.
+            if let Some(path) = &self.close_credential_log {
+                crate::jsonl::append(path, &CloseCredentialLine::Consumed { trade_id: evicted });
+            }
+        }
+        if let Some(path) = &self.close_credential_log {
+            crate::jsonl::append(
+                path,
+                &CloseCredentialLine::Push {
+                    trade_id: trade_id.clone(),
+                    cred: Box::new(cred.clone()),
+                },
+            );
         }
         self.close_credentials.push_back((trade_id, cred));
     }
@@ -17648,5 +17756,143 @@ mod audit_fix_tests {
             c.ledger().balance() > SEED,
             "default's book took the profit"
         );
+    }
+
+    /// #463: the close-credential journal survives a restart. A push is
+    /// journalled, a consumption tombstones it, and a fresh Core built on the
+    /// same data dir replays exactly the still-live credentials — the window
+    /// between a close fill and the venue's FAILED no longer dies with the
+    /// process.
+    #[test]
+    fn the_close_credential_journal_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "bk-cred-journal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let order_log = dir.join("orders.jsonl");
+        let journal = dir.join("close-credentials.jsonl");
+
+        let cred = |shares: rust_decimal::Decimal| CloseCredential {
+            restored: crate::position::OpenPosition {
+                id: "hft-1".into(),
+                strategy: "spread_arb".into(),
+                asset: "BTC".into(),
+                direction: crate::model::SignalDirection::Up,
+                token_id: "tok".into(),
+                condition_id: "cond".into(),
+                entry_price: dec!(0.43),
+                current_price: dec!(0.45),
+                prev_price: dec!(0.44),
+                shares,
+                cost_usd: dec!(4.3),
+                was_maker_entry: true,
+                entry_fee_pct: rust_decimal::Decimal::ZERO,
+                entry_role: crate::model::OrderRole::Maker,
+                exit_role: crate::model::OrderRole::Pending,
+                target_exit_price: None,
+                entered_at_ms: 1000,
+                expires_at_ms: 900_000,
+                account_id: crate::model::default_account_id(),
+                venue: String::new(),
+                partner_token_id: String::new(),
+                last_book_ts: 0,
+                state: crate::exit_policy::ExitState::new(dec!(0.43), 1000),
+                flows: crate::position::CashFlows {
+                    entry_cost_usd: dec!(4.3),
+                    opened_shares: shares,
+                    ..Default::default()
+                },
+            },
+            closed: crate::position::ClosedPosition {
+                id: "hft-1".into(),
+                strategy: "spread_arb".into(),
+                asset: "BTC".into(),
+                direction: crate::model::SignalDirection::Up,
+                token_id: "tok".into(),
+                condition_id: "cond".into(),
+                entry_price: dec!(0.43),
+                exit_price: dec!(0.50),
+                shares,
+                cost_usd: dec!(4.3),
+                was_maker_entry: true,
+                was_maker_exit: false,
+                entry_fee_pct: rust_decimal::Decimal::ZERO,
+                exit_fee_pct: rust_decimal::Decimal::ZERO,
+                pnl_usd: dec!(0.7),
+                pnl_pct: dec!(16.27),
+                net_pnl_usd: dec!(0.7),
+                net_pnl_pct: dec!(16.27),
+                high_pnl_pct: dec!(0),
+                low_pnl_pct: dec!(0),
+                hold_time_sec: 30,
+                exit_reason: crate::model::ExitReason::TakeProfit,
+                entered_at_ms: 1000,
+                exited_at_ms: 4000,
+                entry_role: crate::model::OrderRole::Maker,
+                exit_role: crate::model::OrderRole::Taker,
+                dust_shares: rust_decimal::Decimal::ZERO,
+                account_id: crate::model::default_account_id(),
+                venue: String::new(),
+            },
+            streak_before: 2,
+            account_streak_before: 1,
+        };
+
+        // Boot one core with persistence on, push two credentials, consume one.
+        let mut core = Core::new(CoreConfig {
+            order_log_path: Some(order_log.to_string_lossy().to_string()),
+            ..Default::default()
+        });
+        core.push_close_credential("trade-a".into(), cred(dec!(10)));
+        core.push_close_credential("trade-b".into(), cred(dec!(4)));
+        assert_eq!(core.close_credentials.len(), 2);
+
+        // Consume trade-b the way a FAILED status would: tombstone + remove.
+        let pos = core
+            .close_credentials
+            .iter()
+            .position(|(tid, _)| tid == "trade-b")
+            .unwrap();
+        let _ = core.close_credentials.remove(pos).unwrap();
+        if let Some(path) = &core.close_credential_log {
+            crate::jsonl::append(
+                path,
+                &CloseCredentialLine::Consumed {
+                    trade_id: "trade-b".into(),
+                },
+            );
+        }
+
+        // "Restart": a fresh Core on the same data dir, recovery re-run the way
+        // the IPC server does at boot. Only trade-a may re-enter the queue;
+        // the tombstone must keep trade-b out.
+        let mut reborn = Core::new(CoreConfig {
+            order_log_path: Some(order_log.to_string_lossy().to_string()),
+            ..Default::default()
+        });
+        assert!(
+            reborn.close_credentials.is_empty(),
+            "the constructor reads NOTHING — replay is recovery, not boot"
+        );
+        reborn.restore_orders();
+        assert_eq!(
+            reborn.close_credentials.len(),
+            1,
+            "exactly the unconsumed credential replays"
+        );
+        assert_eq!(reborn.close_credentials[0].0, "trade-a");
+        assert_eq!(reborn.close_credentials[0].1.restored.shares, dec!(10));
+
+        // The journal file exists beside the order log and every line parses.
+        let text = std::fs::read_to_string(&journal).unwrap();
+        let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+        assert!(lines >= 3, "push, push, tombstone all landed: {lines}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
