@@ -23,6 +23,7 @@
 
 - [30 秒读懂它](#30-秒读懂它)
 - [5 分钟上手](#5-分钟上手)
+  - [Windows 用户：用 WSL2 安装](#windows-用户用-wsl2-安装)
 - [安全默认与风险](#安全默认与风险)
 - [功能一览](#功能一览)
 - [常见问题 FAQ](#常见问题-faq)
@@ -66,8 +67,91 @@ BlitzkriegBot 是一个**自己盯行情、自己下模拟单**的机器人：�
 
 ## 5 分钟上手
 
-前提：一台能装 [Rust](https://rustup.rs) 的电脑（macOS / Linux；CI 只测 `ubuntu-latest`，
+前提：一台能装 [Rust](https://rustup.rs) 的电脑（macOS / Linux；**Windows 走 WSL2，见
+[Windows 用户：用 WSL2 安装](#windows-用户用-wsl2-安装)**；CI 只测 `ubuntu-latest`，
 release 产物只发 Linux x86_64 与 macOS aarch64）。**不需要** Node.js——除非你要跑开发门禁。
+
+### Windows 用户：用 WSL2 安装
+
+本机器人**原生不支持 Windows**：它依赖 Unix 域套接字（核心 ↔ 面板的进程间通信），且 CI 与
+release 产物都只覆盖 Linux/macOS。在 Windows 上唯一受支持的用法是 **WSL2**（Windows 内置的
+Linux 子系统第二版）——在 WSL2 的 Ubuntu 里，它就是一个标准的 Linux 安装，上面 macOS/Linux
+的所有步骤原样适用。
+
+#### 1. 安装 WSL2 + Ubuntu（一次性，管理员 PowerShell）
+
+以管理员身份打开 PowerShell，执行：
+
+```powershell
+wsl --install
+```
+
+它会装好 WSL2 与默认的 Ubuntu 发行版，并要求**重启电脑**。重启后 Ubuntu 会自动打开，
+提示你创建一个 Linux 用户名与密码（这与 Windows 账户无关，只是 WSL 内部的用户）。
+
+> 已装过 WSL 的老机器，先确认在用 WSL2：PowerShell 里 `wsl -l -v`，`VERSION` 列必须是
+> `2`。若是 `1`，执行 `wsl --set-version Ubuntu 2` 升级（需要几分钟）。
+> WSL2 需要 Windows 10 19044+/Windows 11，且开启虚拟化（任务管理器 → 性能 → CPU →
+> 「虚拟化：已启用」；没启用需先进 BIOS/UEFI 打开）。
+
+#### 2. 在 Ubuntu 里装 Rust 与构建工具（一次性）
+
+打开「Ubuntu」应用（开始菜单搜 Ubuntu，或终端里输 `wsl`），进入 Linux 环境后执行：
+
+```bash
+sudo apt update && sudo apt install -y build-essential pkg-config libssl-dev git curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+rustc --version   # 确认安装成功
+```
+
+#### 3. 拿到代码并构建
+
+```bash
+git clone https://github.com/ceer-quant/BlitzkriegBot.git
+cd BlitzkriegBot
+cargo build --release --workspace --locked
+```
+
+> **代码必须放在 WSL 的文件系统里**（`~` 下，如上例），**不要**放 `/mnt/c/...`（Windows
+> 盘挂载点）：跨文件系统的 I/O 走 9P 协议，构建会慢一个数量级以上，运行时日志写入也慢。
+> 如果代码已经在 Windows 盘上，先 `cp -r /mnt/c/... ~/` 搬进来再构建。
+
+#### 4. 安装 `blitzkrieg` 命令并启动
+
+```bash
+bash scripts/install-blitzkrieg-shim.sh
+blitzkrieg run
+```
+
+看到启动信息后，回到 **Windows 浏览器**打开 `http://127.0.0.1:51888/panel`——WSL2 的
+localhost 转发让 Windows 侧直接访问 Linux 侧端口，无需任何配置。（打不开时，确认面板
+地址是 `127.0.0.1:51888` 而不是 WSL 的内部 IP；`wsl hostname -I` 打出的才是内部 IP，
+不用它。）
+
+#### WSL 特有问题
+
+- **不要在两个环境里各跑一套**：`blitzkrieg stop` 只能收 WSL 内部的 blitzkrieg 进程；
+  反过来 Windows 侧（如果装过别的版本）也碰不到 WSL 里的。一套数据一处跑。
+- **重启电脑后要手动重新启动**：WSL 不随 Windows 自启服务。开 Ubuntu → `blitzkrieg run`。
+  想省事可以在 Ubuntu 里给 `~/.bashrc` 加一行 alias，或用 Windows 任务计划程序开机执行
+  `wsl -e bash -lc "cd ~/BlitzkriegBot && blitzkrieg run"`。
+- **`wsl --shutdown`（或关闭所有 Ubuntu 窗口超时）会杀掉机器人**：WSL2 虚拟机默认在
+  最后一个 WSL 进程退出约 8 秒后关机。长跑请保持 Ubuntu 窗口开着，或用上面的任务计划
+  方案常驻。
+- **文件备份**：机器人数据在 WSL 文件系统的 `~/BlitzkriegBot/data/` 下；Windows 资源
+  管理器地址栏输 `\\wsl$\Ubuntu\home\<你的用户名>\BlitzkriegBot` 可以直接浏览它。整机
+  备份用 `wsl --export Ubuntu <备份.tar>`；日常小备份在 Ubuntu 里拷贝 `data/` 即可
+  （也可用仓库自带的 `blitzkrieg backup`，见 [scripts/README.md](./scripts/README.md)）。
+- **内存占用**：WSL2 默认可吃掉一半物理内存。构建完成后机器人本身占用很小；若想限制，
+  在 Windows 用户目录建 `%UserProfile%\.wslconfig`：
+
+  ```ini
+  [wsl2]
+  memory=4GB
+  ```
+
+  然后 `wsl --shutdown` 后重开生效。
 
 ### 第 1 步：拿到代码并构建（约几分钟，看网速）
 
@@ -212,9 +296,12 @@ blitzkrieg 家族进程，你启动它的 shell 永远不会被碰。
 Release 工作流构建发布；发布与版本规则见 [`docs/VERSIONING.md`](./docs/VERSIONING.md)。
 
 **Q7：支持 Windows 吗？**
-不支持。CI 只在 `ubuntu-latest` 上测试，Release 只发布 Linux x86_64 与 macOS aarch64
-两个平台的产物（x86_64 macOS 已在 0.3.0 放弃）。Windows 没有构建目标也没有测试覆盖。
-另注意：本项目依赖 Unix 域套接字，即便能在 Windows 上编译，核心与面板的通信机制也不可用。
+原生不支持：本项目依赖 Unix 域套接字，CI 只在 `ubuntu-latest` 上测试，Release 只发布
+Linux x86_64 与 macOS aarch64 两个平台的产物（x86_64 macOS 已在 0.3.0 放弃），Windows
+没有构建目标也没有测试覆盖。Windows 用户的受支持用法是 **WSL2**——在 WSL2 的 Ubuntu 里
+它就是一个标准 Linux 安装，完整步骤见
+[Windows 用户：用 WSL2 安装](#windows-用户用-wsl2-安装)（关键三点：代码放 WSL 文件系统
+而不是 `/mnt/c`、Windows 浏览器经 localhost 转发访问面板、`wsl --shutdown` 会杀掉机器人）。
 
 **Q8：Node.js 是干什么的？我要装吗？**
 只是**本地验收门禁脚本**的运行环境（CI 里钉的是 Node 22，全部零 npm 依赖），不参与生产
@@ -268,6 +355,9 @@ Release 工作流构建发布；发布与版本规则见 [`docs/VERSIONING.md`](
 6. **机器重启后什么都没起来** — 这是**现状设计**：重启后没有任何东西自动拉起内核，需要手动
    `blitzkrieg run`。停机告警（不自动拉起）可装 `scripts/stack-watchdog.sh`；macOS 外置卷上
    的权限（TCC）限制与备份调度细节见 [`scripts/README.md`](./scripts/README.md)。
+7. **Windows（WSL）：跑着跑着没了 / 重启后 Ubuntu 也关了** — WSL2 虚拟机在最后一个 WSL
+   进程退出约 8 秒后自动关机，`wsl --shutdown` 同样全杀。保持 Ubuntu 窗口开着，或按
+   [Windows 用户：用 WSL2 安装](#windows-用户用-wsl2-安装)的「WSL 特有问题」配置常驻。
 
 ## 开发者手册
 
