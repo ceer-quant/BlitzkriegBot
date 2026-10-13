@@ -689,19 +689,17 @@ impl HttpRequest {
     }
 }
 
-/// Byte-equal compare in time proportional to the expected value, so short
-/// wrong guesses are not observably faster than long ones.
+/// Byte-equal compare in time independent of both inputs' contents (#460).
+///
+/// `subtle`'s `ConstantTimeEq` is the audited primitive; the hand-rolled XOR
+/// fold this replaced had the right shape for equal lengths but its
+/// length-mismatch branch was folklore (`subtle`'s own docs call that pattern
+/// out as easy to get subtly wrong). Both call sites feed it the env-configured
+/// panel credentials, so the expected value's length is not secret anyway —
+/// what matters is that a wrong guess never returns measurably earlier.
 fn same_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        // Do not leak length via early exit: still burn a compare pass.
-        let sink = a.iter().chain(b.iter()).fold(0u8, |acc, x| acc ^ x);
-        return sink == !0u8; // practically never true
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 /// First candidate whose canonical target is an existing `index.html` file;
@@ -1178,16 +1176,6 @@ impl WebServer {
         self.auth_required
     }
 
-    fn token_from_query(&self, req: &HttpRequest) -> Option<String> {
-        let q = req.target.split_once('?')?.1;
-        for pair in q.split('&') {
-            if let Some(v) = pair.strip_prefix("token=") {
-                return Some(url_decode(v));
-            }
-        }
-        None
-    }
-
     /// Arm user/password auth from env (`BLITZKRIEG_PANEL_USER` +
     /// `BLITZKRIEG_PANEL_PASSWORD`).
     ///
@@ -1408,9 +1396,14 @@ impl WebServer {
     }
 
     /// Every form this API accepts a session token in.
+    ///
+    /// #460: deliberately NOT the URL query. `?token=` leaks into proxy logs,
+    /// browser history and `Referer` headers; bearer/cookie/header cover every
+    /// legitimate caller (the panel uses the cookie, the gate scripts use the
+    /// header). A request that only has the query form is now just
+    /// unauthenticated.
     fn session_token(&self, req: &HttpRequest) -> Option<String> {
-        self.token_from_query(req)
-            .or_else(|| self.token_from_cookies(req))
+        self.token_from_cookies(req)
             .or_else(|| req.header("x-auth-token").map(String::from))
             .or_else(|| req.header("authorization").and_then(bearer_or_basic))
     }
@@ -1446,11 +1439,20 @@ impl WebServer {
         if !req.path().starts_with("/api/") {
             return 200; // the panel bundle itself is public; the UI gates the view
         }
-        // Read-only mode with no credentials has nothing to protect: no command
-        // route exists and lifecycle verbs are absent (`Dispatcher` is `None`).
-        // The moment either a credential pair or gateway mode is present, a
-        // session is mandatory.
+        // #460: a surface with no credentials armed (`WebServer::new` — the
+        // Tauri embed, `ui_kit_panel`'s read-only serve) has no session layer,
+        // but it is NOT a write surface. The proxy routes below
+        // (`/api/risk/set-systemic`, `/api/risk/set-exit`,
+        // `/api/execution-policy/set|reset`, `/api/blueprint/save*`,
+        // `/api/backtest/onchain-pull` + `/api/backtest/run`,
+        // `/api/version/configure`, `/api/command`) reach the kernel through
+        // `snapshot_src` with or without a dispatcher, so "no command route
+        // exists" was never true for them. Every state-changing route is a
+        // POST; on this surface all of them are refused at the gate.
         if !self.auth_required && self.panel_user.is_none() {
+            if req.method == "POST" {
+                return 403;
+            }
             return 200;
         }
         match self.session_token(req) {
@@ -1909,6 +1911,14 @@ impl WebServer {
         // Set by a route that wants a header the plain (status, ctype, body)
         // tuple cannot carry — currently only `Retry-After` on a login lockout.
         let mut retry_after: Option<u64> = None;
+        // #460: the failed-login speed bump, paid where it hurts only the
+        // attacker. The old code slept INSIDE the route — but `serve` answers
+        // one connection at a time, so a client hammering failed logins was
+        // stalling the operator's own panel (the exact DoS the throttle exists
+        // to prevent). The route reports the delay here; `handle` sleeps after
+        // the failed response is already on the wire, so the accept loop is
+        // never held and a successful login is never delayed.
+        let mut respond_then_delay_ms: Option<u64> = None;
         let (status, ctype, body): (u16, &'static str, Vec<u8>) = match (
             req.method.as_str(),
             target.as_str(),
@@ -2301,9 +2311,7 @@ impl WebServer {
                                         ""
                                     }
                                 );
-                                std::thread::sleep(std::time::Duration::from_millis(
-                                    login_failure_delay_ms(failures),
-                                ));
+                                respond_then_delay_ms = Some(login_failure_delay_ms(failures));
                                 serde_json::json!({
                                     "ok": false, "error": "用户名或密码错误",
                                 })
@@ -2326,11 +2334,13 @@ impl WebServer {
                 }
             }
             ("GET", "/api/logout") | ("POST", "/api/logout") => {
-                // Session token via any channel; revoke it. Harmless if absent.
+                // Session token via any authenticated channel; revoke it.
+                // Harmless if absent. (#460: the query channel is gone —
+                // see `session_token`.)
                 let token = self
-                    .token_from_query(&req)
-                    .or_else(|| self.token_from_cookies(&req))
+                    .token_from_cookies(&req)
                     .or_else(|| req.header("x-auth-token").map(String::from))
+                    .or_else(|| req.header("authorization").and_then(bearer_or_basic))
                     .unwrap_or_default();
                 self.logout(&token);
                 (200, "application/json", b"{\"ok\":true}".to_vec())
@@ -2415,6 +2425,11 @@ impl WebServer {
         let _ = stream.write_all(head.as_bytes());
         let _ = stream.write_all(&body);
         let _ = stream.flush();
+        // #460: the failed-login speed bump — after the response is on the
+        // wire, so only the attacker's own request pays it.
+        if let Some(delay) = respond_then_delay_ms {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
     }
 
     fn snapshot(&self) -> UiSnapshot {

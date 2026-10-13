@@ -661,6 +661,33 @@ async fn handle_line(
     let method = req.method.as_str();
     let params = req.params;
 
+    // #460: kernel-side defense in depth. A `Mode::ReadOnly` core serves
+    // observations only — until now the mode only gated venue egress, which
+    // left every CONFIGURATION verb open to any local process that can reach
+    // the socket. The panel now gates its own proxy routes, but the panel is
+    // one client; the kernel is the boundary. One list, checked before any
+    // arm: a new write verb must be added HERE, the same discipline as the
+    // method table itself.
+    const READONLY_REFUSED: &[&str] = &[
+        method::RISK_SET_SYSTEMIC,
+        method::RISK_SET_EXIT,
+        method::EXECUTION_POLICY_SET,
+        method::EXECUTION_POLICY_RESET,
+        method::BLUEPRINT_SAVE,
+        method::BLUEPRINT_SAVE_SOURCE,
+        method::SYSTEM_UPDATE_CONFIGURE,
+    ];
+    if READONLY_REFUSED.contains(&method) && core.lock().await.mode() == Mode::ReadOnly {
+        return fail(
+            id,
+            Failure::APPLICATION,
+            "this core runs in read-only mode; configuration verbs are refused \
+             (start with a writable mode to change risk, policy or strategies)"
+                .to_string(),
+            None,
+        );
+    }
+
     let reply: Result<Value, (i32, String, Option<ErrorData>)> = match method {
         method::PING => Ok(serde_json::json!({ "pong": true, "ts": now_ms() })),
 
