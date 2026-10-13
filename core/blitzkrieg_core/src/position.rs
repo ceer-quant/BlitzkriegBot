@@ -433,13 +433,13 @@ impl DailyLossStore {
     }
 
     fn save(&self, st: &DailyLossState) {
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         match serde_json::to_string_pretty(st) {
             Ok(text) => {
-                if let Err(e) = std::fs::write(&self.path, text) {
-                    tracing::warn!(error = %e, path = %self.path.display(), "daily-loss persist failed");
+                // #463: atomic rewrite. This file IS the "restart cannot launder
+                // today's losses" guarantee — a truncate-in-place write is the
+                // one crash window that defeats it.
+                if !crate::jsonl::rewrite_atomic(&self.path, text.as_bytes()) {
+                    tracing::warn!(path = %self.path.display(), "daily-loss persist failed");
                 }
             }
             Err(e) => tracing::warn!(error = %e, "daily-loss serialize failed"),
@@ -451,7 +451,20 @@ impl DailyLossStore {
         match serde_json::from_str::<DailyLossState>(&text) {
             Ok(st) => Some(st),
             Err(e) => {
-                tracing::warn!(error = %e, path = %self.path.display(), "daily-loss state unreadable — starting a fresh day");
+                // #463: unreadable is NOT "fresh day". A silent zero hands the
+                // full daily-loss budget back to a session whose earlier losses
+                // are sitting right there in a half-written file — the exact
+                // laundering this store exists to prevent. Trading continues
+                // (in-memory state stays authoritative), but the operator is
+                // told loudly and the conservative boot budget stands until the
+                // file is repaired or explicitly removed.
+                tracing::error!(
+                    error = %e,
+                    path = %self.path.display(),
+                    "daily-loss state UNREADABLE — NOT starting a fresh day; \
+                     today's realized losses may exceed what this session can see. \
+                     Repair or delete the file before trusting the loss budget."
+                );
                 None
             }
         }
@@ -545,7 +558,10 @@ impl OpenPosition {
     }
 }
 
-#[derive(Debug, Clone)]
+/// #463: `Serialize`/`Deserialize` because a close credential (which carries
+/// the closed record for unwinding) is journaled to disk — a FAILED arriving
+/// after a restart must be able to reverse every ledger the close touched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClosedPosition {
     pub id: String,
     pub strategy: String,
@@ -3266,5 +3282,55 @@ mod precision_tests {
         assert_eq!(repaired.opened_shares, dec!(10));
         assert_eq!(repaired.entry_cost_usd, dec!(4.0));
         assert!(repaired.entry_fee_usd > Decimal::ZERO);
+    }
+
+    /// #463: a corrupt daily-loss file must NOT read as "fresh day". The store
+    /// returns None either way (trading continues), but the contract here is
+    /// that a state which EXISTS and does not parse is loud, not a warn-and-
+    /// zero — the difference between a budget reset and a budget preserved is
+    /// today's realized losses.
+    #[test]
+    fn a_corrupt_daily_loss_file_does_not_read_as_a_fresh_day() {
+        let dir = std::env::temp_dir().join(format!(
+            "bk-dailyloss-bad-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("positions.daily-loss.json");
+
+        // Write a real state first (through the atomic path), then corrupt it.
+        let store = DailyLossStore { path: path.clone() };
+        let st = DailyLossState {
+            day_index: Some(20_400),
+            realized_pnl_usd: dec!(-18.5),
+            opening_equity_usd: dec!(1000),
+            equity_basis: Some(EquityBasis::Dry),
+            tripped: false,
+            tripped_at_ms: 0,
+            tripped_limit_usd: Decimal::ZERO,
+            opened_at_ms: 1000,
+            tripped_reported: false,
+        };
+        store.save(&st);
+        let loaded = store.load().expect("the healthy state loads");
+        assert_eq!(loaded.realized_pnl_usd, dec!(-18.5));
+
+        // The crash window: a half-written file.
+        std::fs::write(&path, "{\"dayIndex\": 20400, \"realized").unwrap();
+        assert!(
+            store.load().is_none(),
+            "a corrupt file yields no state — but the ERROR log is the contract"
+        );
+
+        // The atomic save never leaves a torn file behind in the first place:
+        // the successful write above left valid JSON.
+        store.save(&st);
+        assert!(store.load().is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

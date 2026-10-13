@@ -197,7 +197,9 @@ impl TradeDb {
 
     fn persist_summary(&self) {
         if let Ok(text) = serde_json::to_string_pretty(&self.summary) {
-            let _ = std::fs::write(&self.summary_path, text);
+            // #463: atomic rewrite — a torn summary.json is what the panel
+            // reconciles the headline against, not garbage to ignore.
+            crate::jsonl::rewrite_atomic(&self.summary_path, text.as_bytes());
         }
     }
 
@@ -236,7 +238,9 @@ impl TradeDb {
         if !out.is_empty() {
             out.push('\n');
         }
-        if std::fs::write(&self.jsonl_path, out).is_err() {
+        // #463: atomic rewrite — the retract window is exactly when a crash
+        // used to be able to truncate the whole trade history.
+        if !crate::jsonl::rewrite_atomic(&self.jsonl_path, out.as_bytes()) {
             return;
         }
         // Rebuild the summary from what is actually on file now.

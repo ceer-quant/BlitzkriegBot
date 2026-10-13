@@ -52,9 +52,6 @@ impl OrderDb {
     /// Rewrite the log with exactly `orders` (used after a restart to drop
     /// terminal history and keep only what still needs managing).
     pub fn compact(&self, orders: &[TrackedOrder]) {
-        if let Some(dir) = self.jsonl_path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         let mut buf = String::new();
         for o in orders {
             if let Ok(line) = serde_json::to_string(o) {
@@ -62,7 +59,9 @@ impl OrderDb {
                 buf.push('\n');
             }
         }
-        let _ = std::fs::write(&self.jsonl_path, buf);
+        // #463: atomic rewrite — the compact is the one full-file rewrite on
+        // the order log's recovery path.
+        crate::jsonl::rewrite_atomic(&self.jsonl_path, buf.as_bytes());
     }
 }
 

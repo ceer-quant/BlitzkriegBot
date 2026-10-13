@@ -36,10 +36,12 @@ impl PositionDb {
 
     /// Rewrite the file with exactly the current open positions. Best effort: a
     /// write failure must never interrupt trading (memory stays authoritative).
+    ///
+    /// #463: the write is atomic (temp + fsync + rename) AND keeps one previous
+    /// generation as `positions.bak` — the snapshot the loader falls back to
+    /// when the canonical file is unreadable. The position book is the one file
+    /// whose silent loss means unmanaged inventory, so it carries a backup.
     pub fn save(&self, positions: &[OpenPosition]) {
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         let mut buf = String::new();
         for p in positions {
             if let Ok(line) = serde_json::to_string(p) {
@@ -47,17 +49,31 @@ impl PositionDb {
                 buf.push('\n');
             }
         }
-        let _ = std::fs::write(&self.path, buf);
+        // #463: the write is atomic (temp + fsync + rename) AND mirrors the
+        // last GOOD generation into `positions.bak` — the snapshot the loader
+        // falls back to when the canonical file is unreadable. The position
+        // book is the one file whose silent loss means unmanaged inventory, so
+        // it carries a backup.
+        if crate::jsonl::rewrite_atomic(&self.path, buf.as_bytes()) {
+            let _ = std::fs::copy(&self.path, self.path.with_extension("bak"));
+        } else {
+            tracing::warn!(
+                path = %self.path.display(),
+                "position book persist failed — memory stays authoritative for the run"
+            );
+        }
     }
 
     /// Persist the newest external (unknown-order) fill timestamp already
     /// applied to the position book. Without this, a restart would re-apply
     /// every manual close the sweep still reports. Best effort.
     pub fn save_watermark(&self, ms: i64) {
-        if let Some(dir) = self.recon_path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        if !crate::jsonl::rewrite_atomic(&self.recon_path, ms.to_string().as_bytes()) {
+            tracing::warn!(
+                path = %self.recon_path.display(),
+                "recon watermark persist failed"
+            );
         }
-        let _ = std::fs::write(&self.recon_path, ms.to_string());
     }
 
     /// Load the reconciliation watermark. Missing file = 0 (apply everything
@@ -71,8 +87,90 @@ impl PositionDb {
 
     /// Load the persisted open positions. Missing file = none. Unparseable lines
     /// are skipped (a foreign/legacy file must not brick startup).
+    ///
+    /// #463: an unreadable canonical file (truncated by a crash, empty, or every
+    /// line corrupt) is NOT silently an empty book — the loader first falls back
+    /// to the `.bak` generation `save` keeps, and if that too is unusable it
+    /// errors loudly. A position book that quietly loads empty is a core that
+    /// restarts into unmanaged inventory; that must be visible, never a warn.
     pub fn load(&self) -> Vec<OpenPosition> {
-        crate::jsonl::load::<OpenPosition>(&self.path, "position log: skipped unparseable lines")
+        let canonical = std::fs::read_to_string(&self.path).ok();
+        let parsed = |text: &str| -> Vec<OpenPosition> {
+            let mut out = Vec::new();
+            let mut skipped = 0usize;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<OpenPosition>(line) {
+                    Ok(v) => out.push(v),
+                    Err(_) => skipped += 1,
+                }
+            }
+            if skipped > 0 {
+                tracing::warn!(
+                    skipped,
+                    path = %self.path.display(),
+                    "position log: skipped unparseable lines"
+                );
+            }
+            out
+        };
+        if let Some(text) = canonical {
+            let rows = parsed(&text);
+            if !text.trim().is_empty() && rows.is_empty() {
+                // The file EXISTS but nothing in it parsed — corrupt, not empty.
+                tracing::error!(
+                    path = %self.path.display(),
+                    "position book unreadable (crash-truncated or corrupt) — trying the .bak generation"
+                );
+            } else {
+                return rows;
+            }
+        } else {
+            // No canonical file at all: either a fresh data dir, or a crash
+            // before the first save. A .bak without a canonical file means the
+            // crash hit DURING the rename's sibling operations — take it, but
+            // loudly.
+            if let Some(rows) = self.load_backup() {
+                return rows;
+            }
+            return Vec::new();
+        }
+        if let Some(rows) = self.load_backup() {
+            return rows;
+        }
+        tracing::error!(
+            path = %self.path.display(),
+            "POSITION BOOK UNREADABLE and no .bak — starting with ZERO open positions; \
+             any open inventory from the previous run is now UNMANAGED (exits, expiry, \
+             settlement). Inspect the file before trusting this core with new entries."
+        );
+        Vec::new()
+    }
+
+    /// The `.bak` generation, used only when the canonical file cannot serve.
+    /// Returns None when there is no backup or it parses to nothing.
+    fn load_backup(&self) -> Option<Vec<OpenPosition>> {
+        let bak = self.path.with_extension("bak");
+        let rows = crate::jsonl::load::<OpenPosition>(
+            &bak,
+            "position log .bak: skipped unparseable lines",
+        );
+        if rows.is_empty() {
+            tracing::error!(
+                path = %bak.display(),
+                "position book .bak is empty or unparseable"
+            );
+            return None;
+        }
+        tracing::warn!(
+            path = %bak.display(),
+            count = rows.len(),
+            "position book recovered from the .bak generation"
+        );
+        Some(rows)
     }
 }
 
@@ -152,6 +250,56 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(db.path(), "not json\n{\"id\":\"x\"}\n").unwrap();
         assert!(db.load().is_empty(), "corrupt/foreign lines are skipped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #463: a truncated canonical file falls back to the .bak generation —
+    /// the crash that used to yield a silent empty book now recovers the
+    /// previous snapshot, so inventory stays managed.
+    #[test]
+    fn a_truncated_book_recovers_from_the_bak_generation() {
+        let dir = std::env::temp_dir().join(format!("positiondb-bak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = PositionDb::new(dir.join("positions.jsonl"));
+
+        // Two saves: the first writes two positions (and seeds .bak on the
+        // second), the second leaves one.
+        db.save(&[pos("hft-1", dec!(10)), pos("hft-2", dec!(4))]);
+        db.save(&[pos("hft-1", dec!(10))]);
+        assert_eq!(db.load().len(), 1);
+
+        // Simulate the crash window: the canonical file is truncated to garbage.
+        std::fs::write(db.path(), "{\"id\":\"hft-1\"").unwrap();
+        let recovered = db.load();
+        assert_eq!(recovered.len(), 1, "the .bak generation serves");
+        assert_eq!(recovered[0].id, "hft-1");
+        // And the recovered generation is exactly the last healthy one — the
+        // close of hft-2 is not undone by the recovery.
+        assert_eq!(recovered[0].shares, dec!(10));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #463: a canonical file that exists but parses to NOTHING, with no .bak,
+    /// is the one case where zero positions must be loud — the empty set is
+    /// returned (trading continues) but the contract is the error line, so the
+    /// test pins it via the tracing capture being the loader's job: here we pin
+    /// the DATA side — an empty-but-real file must not be mistaken for a
+    /// corrupt one (no .bak consultation, no error path), because a book that
+    /// legitimately closed every position writes exactly that shape.
+    #[test]
+    fn an_empty_but_present_file_is_not_a_corruption() {
+        let dir = std::env::temp_dir().join(format!("positiondb-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = PositionDb::new(dir.join("positions.jsonl"));
+
+        // An all-positions-closed book: the file exists, is newline-terminated,
+        // and carries zero rows. This is the NORMAL post-flatten shape.
+        std::fs::write(db.path(), "").unwrap();
+        assert!(db.load().is_empty());
+        // No .bak was consulted or created.
+        assert!(!dir.join("positions.bak").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

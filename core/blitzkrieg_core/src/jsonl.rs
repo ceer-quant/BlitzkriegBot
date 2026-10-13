@@ -21,6 +21,49 @@
 //! instead of calling [`append`].
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Rewrite `path` with `bytes` atomically: write to a unique temp file beside
+/// the target, fsync it, then rename over the destination.
+///
+/// #463: every snapshot-style state file (position book, daily-loss budget,
+/// order/compact rewrites, summary.json) must go through HERE, never a bare
+/// `std::fs::write` — a truncate-in-place write is exactly the window where a
+/// crash leaves an empty or half-written file, and the loader's "missing file =
+/// empty set" contract then turns one bad crash into a forgotten position book
+/// or a laundered daily-loss budget. With `rename(2)` the destination is either
+/// the previous generation or the new one, byte-complete.
+///
+/// The temp name is unique per writer (pid + in-process counter), same
+/// discipline as `onchain::write_json_atomic` — two concurrent writers must not
+/// rename the same `X.tmp` out from under each other. Returns `false` when any
+/// step failed (the caller decides whether that is warn-and-continue or fatal;
+/// memory stays authoritative either way). The write is fsynced so the rename
+/// never exposes a page-cache-only generation to a power cut.
+pub(crate) fn rewrite_atomic(path: &Path, bytes: &[u8]) -> bool {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let ok = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if ok.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    ok.is_ok()
+}
 
 /// Read `path` as one JSON value per line, skipping blank and unparseable lines.
 ///
@@ -90,6 +133,65 @@ pub(crate) fn append(path: &Path, value: &impl serde::Serialize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #463: the atomic rewrite never leaves the destination torn — a reader
+    /// concurrent with (or dying during) the write sees either the old
+    /// generation or the new one, never an empty or half file.
+    #[test]
+    fn atomic_rewrite_never_leaves_a_torn_destination() {
+        let dir = std::env::temp_dir().join(format!(
+            "bk-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("state.json");
+
+        assert!(rewrite_atomic(&path, br#"{"gen":1}"#));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"gen":1}"#);
+        // Overwrite with a LONGER payload: the truncate happens on the temp
+        // file, never on the destination.
+        assert!(rewrite_atomic(
+            &path,
+            br#"{"gen":2,"much":"longer payload"}"#
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"gen":2,"much":"longer payload"}"#
+        );
+        // No tmp litter survives a successful run.
+        let litter: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(litter.is_empty(), "tmp files cleaned up: {litter:?}");
+
+        // A failed write (unwritable parent) leaves the OLD generation intact.
+        let readonly_dir = dir.join("ro");
+        std::fs::create_dir_all(&readonly_dir).unwrap();
+        let ro_path = readonly_dir.join("state.json");
+        assert!(rewrite_atomic(&ro_path, br#"{"gen":1}"#));
+        // Make the directory read-only so the temp create fails.
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut p = std::fs::metadata(&readonly_dir).unwrap().permissions();
+        p.set_mode(0o500);
+        std::fs::set_permissions(&readonly_dir, p).unwrap();
+        assert!(!rewrite_atomic(&ro_path, br#"{"gen":2}"#));
+        assert_eq!(
+            std::fs::read_to_string(&ro_path).unwrap(),
+            r#"{"gen":1}"#,
+            "a failed rewrite must not damage the previous generation"
+        );
+        let mut q = std::fs::metadata(&readonly_dir).unwrap().permissions();
+        q.set_mode(0o700);
+        std::fs::set_permissions(&readonly_dir, q).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// #386: concurrent appenders share one journal file in production's
     /// worst case, and a torn line is a SILENT loss — the loader's
