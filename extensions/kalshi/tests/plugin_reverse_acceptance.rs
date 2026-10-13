@@ -174,6 +174,17 @@ impl MarketHost for BookSink {
     ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
+    fn take_pending_merges(
+        &self,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::MergeRequest>> {
+        Box::pin(async { Vec::new() })
+    }
+    fn on_merge_result(
+        &self,
+        _: blitzkrieg_market_api::MergeResult,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 /// Serve a fixed script of canned responses, one per accepted connection.

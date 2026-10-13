@@ -214,6 +214,43 @@ impl RedemptionClaim {
     }
 }
 
+/// A merge whose collateral is still on its way: complete share-pairs were
+/// burned on-chain at intent time, but the $1.00/pair of USDC only reaches the
+/// wallet when the venue's merge transaction mines. The pairs are an account
+/// receivable, not cash, until that receipt — the SAME principle settlement
+/// lives by, and for the same reason: crediting `balance` at intent time says
+/// the wallet holds money it does not hold, and the accounting audit's venue
+/// leg (live) or the local cash identity (dry) goes red, correctly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeClaim {
+    pub id: String,
+    pub condition_id: String,
+    pub account_id: String,
+    /// The market settles through the NegRisk adapter (drives the merge call).
+    pub neg_risk: bool,
+    /// Complete pairs burned = the USDC collateral due (1.00 per pair).
+    pub pairs_usd: Decimal,
+    pub created_at_ms: i64,
+    pub attempts: u32,
+    pub next_attempt_ms: i64,
+    pub manual: bool,
+    pub last_error: Option<String>,
+    pub tx_hash: Option<String>,
+    pub block_number: Option<u64>,
+}
+
+impl MergeClaim {
+    /// The boundary DTO the venue executes.
+    pub fn request(&self) -> blitzkrieg_market_api::MergeRequest {
+        blitzkrieg_market_api::MergeRequest {
+            id: self.id.clone(),
+            condition_id: self.condition_id.clone(),
+            neg_risk: self.neg_risk,
+            pairs_usd: self.pairs_usd,
+        }
+    }
+}
+
 /// How one market's resolution query is going.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryState {
@@ -252,6 +289,27 @@ enum JournalLine {
     /// A claim's collateral reached the wallet (`tx_hash` is `dry-simulated` in
     /// dry mode, where there is no chain to wait for).
     Redeemed {
+        at_ms: i64,
+        claim_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tx_hash: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_number: Option<u64>,
+    },
+    /// #461: complete pairs were burned and their collateral is now a
+    /// receivable. The durable commit point of a merge — replaying it re-opens
+    /// the claim, so the $1/pair is never lost across a restart.
+    MergeBurned {
+        at_ms: i64,
+        claim_id: String,
+        condition_id: String,
+        account_id: String,
+        neg_risk: bool,
+        #[serde(with = "crate::decimal")]
+        pairs_usd: Decimal,
+    },
+    /// #461: the merge's collateral reached the wallet.
+    MergeConfirmed {
         at_ms: i64,
         claim_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -298,6 +356,10 @@ pub struct SettlementBook {
     booked: u64,
     /// Whether the blind state was already alerted (edge detection).
     blind_alerted: bool,
+    /// #461: complete-pair merges burned but not yet confirmed on-chain, by id.
+    merges: BTreeMap<String, MergeClaim>,
+    /// Merge ids already confirmed, so an id is never confirmed twice.
+    merged: BTreeSet<String>,
     journal: Option<SettlementJournal>,
 }
 
@@ -313,6 +375,8 @@ impl SettlementBook {
             queries: BTreeMap::new(),
             booked: 0,
             blind_alerted: false,
+            merges: BTreeMap::new(),
+            merged: BTreeSet::new(),
             journal: path.map(|p| SettlementJournal {
                 path: p.to_path_buf(),
             }),
@@ -380,6 +444,38 @@ impl SettlementBook {
                         .or_insert(0) += 1;
                 }
                 self.redeemed.insert(claim_id);
+            }
+            JournalLine::MergeBurned {
+                claim_id,
+                condition_id,
+                account_id,
+                neg_risk,
+                pairs_usd,
+                at_ms,
+                ..
+            } => {
+                // Replay re-opens the claim unless a later MergeConfirmed line
+                // already removed it (the match arm below inserts nothing then).
+                self.merges
+                    .entry(claim_id.clone())
+                    .or_insert_with(|| MergeClaim {
+                        id: claim_id.clone(),
+                        condition_id: condition_id.clone(),
+                        account_id,
+                        neg_risk,
+                        pairs_usd,
+                        created_at_ms: at_ms,
+                        attempts: 0,
+                        next_attempt_ms: 0,
+                        manual: false,
+                        last_error: None,
+                        tx_hash: None,
+                        block_number: None,
+                    });
+            }
+            JournalLine::MergeConfirmed { claim_id, .. } => {
+                self.merges.remove(&claim_id);
+                self.merged.insert(claim_id);
             }
         }
     }
@@ -810,6 +906,21 @@ impl SettlementBook {
             .unwrap_or(i64::MAX)
     }
 
+    /// Replay fast path: the earliest instant any pending merge claim can
+    /// become due (`i64::MAX` when none). Same argument as
+    /// [`Self::next_redemption_ms`]: `take_merges` dispatches only when
+    /// `next_attempt_ms <= now`, and a dispatch moves the clock strictly
+    /// later, so skipping the drain until this instant dispatches exactly the
+    /// same set at exactly the same stamps.
+    pub fn next_merge_ms(&self) -> i64 {
+        self.merges
+            .values()
+            .filter(|m| !m.manual)
+            .map(|m| m.next_attempt_ms)
+            .min()
+            .unwrap_or(i64::MAX)
+    }
+
     /// A redemption attempt failed. Alerts on every failure (never silent) and
     /// arms the retry — `manual` failures stop the automatic retries for good.
     pub fn note_failure(&mut self, id: &str, failure: &RedemptionFailure, now_ms: i64) -> bool {
@@ -861,6 +972,155 @@ impl SettlementBook {
             self.receivable_usd(),
             self.manual_claim_count()
         )
+    }
+
+    // ── Merge receivables (#461) ────────────────────────────────────────────
+
+    /// A merge burned `pairs` complete share-pairs at intent time. The pairs
+    /// are now on-chain collateral the wallet has NOT received yet: the claim
+    /// goes into the receivable, and cash is credited only when the venue's
+    /// merge transaction is confirmed. Durable via the journal, so a restart
+    /// between the burn and the receipt never loses the $1/pair.
+    pub fn note_merge_burned(
+        &mut self,
+        condition_id: &str,
+        account_id: &str,
+        neg_risk: bool,
+        pairs: Decimal,
+        now_ms: i64,
+    ) -> String {
+        let id = format!("{condition_id}#merge");
+        let mut n = 1;
+        while self.merges.contains_key(&id) || self.merged.contains(&id) {
+            n += 1;
+            let next = format!("{condition_id}#merge-{n}");
+            if self.merges.contains_key(&next) || self.merged.contains(&next) {
+                continue;
+            }
+            return self.note_merge_burned_inner(
+                next,
+                condition_id,
+                account_id,
+                neg_risk,
+                pairs,
+                now_ms,
+            );
+        }
+        self.note_merge_burned_inner(id, condition_id, account_id, neg_risk, pairs, now_ms)
+    }
+
+    fn note_merge_burned_inner(
+        &mut self,
+        id: String,
+        condition_id: &str,
+        account_id: &str,
+        neg_risk: bool,
+        pairs: Decimal,
+        now_ms: i64,
+    ) -> String {
+        let pairs_usd = pairs;
+        self.merges.insert(
+            id.clone(),
+            MergeClaim {
+                id: id.clone(),
+                condition_id: condition_id.to_string(),
+                account_id: account_id.to_string(),
+                neg_risk,
+                pairs_usd,
+                created_at_ms: now_ms,
+                attempts: 0,
+                next_attempt_ms: 0,
+                manual: false,
+                last_error: None,
+                tx_hash: None,
+                block_number: None,
+            },
+        );
+        if let Some(j) = self.journal.as_ref() {
+            j.append(&JournalLine::MergeBurned {
+                at_ms: now_ms,
+                claim_id: id.clone(),
+                condition_id: condition_id.to_string(),
+                account_id: account_id.to_string(),
+                neg_risk,
+                pairs_usd,
+            });
+        }
+        id
+    }
+
+    /// Merge collateral due but not yet in the wallet — rides the SAME
+    /// receivable the audit's cash identity carries.
+    pub fn merge_receivable_usd(&self) -> Decimal {
+        self.merges
+            .values()
+            .fold(Decimal::ZERO, |a, m| a + m.pairs_usd)
+    }
+
+    pub fn pending_merge_count(&self) -> usize {
+        self.merges.len()
+    }
+
+    /// Merges due for an attempt. Dispatching stamps the backoff, so a lost
+    /// result retries instead of spinning.
+    pub fn take_merges(&mut self, now_ms: i64) -> Vec<blitzkrieg_market_api::MergeRequest> {
+        let due: Vec<String> = self
+            .merges
+            .values()
+            .filter(|m| !m.manual && m.next_attempt_ms <= now_ms)
+            .map(|m| m.id.clone())
+            .collect();
+        let mut out = Vec::new();
+        for id in due {
+            if let Some(m) = self.merges.get_mut(&id) {
+                m.attempts += 1;
+                m.next_attempt_ms = now_ms + backoff_ms(m.attempts);
+                out.push(m.request());
+            }
+        }
+        out
+    }
+
+    /// A merge attempt failed. Same retry vocabulary as a redemption.
+    pub fn note_merge_failure(
+        &mut self,
+        id: &str,
+        failure: &blitzkrieg_market_api::RedemptionFailure,
+        now_ms: i64,
+    ) -> bool {
+        let Some(m) = self.merges.get_mut(id) else {
+            return false;
+        };
+        m.last_error = Some(failure.message.clone());
+        m.manual = failure.manual;
+        if failure.manual {
+            m.next_attempt_ms = i64::MAX;
+        } else {
+            m.next_attempt_ms = now_ms + backoff_ms(m.attempts);
+        }
+        true
+    }
+
+    /// A merge landed: the claim leaves the receivable. Returns
+    /// `(account_id, usd)` — the collateral that must be credited (once).
+    pub fn note_merge_confirmed(
+        &mut self,
+        id: &str,
+        tx_hash: Option<String>,
+        block_number: Option<u64>,
+        now_ms: i64,
+    ) -> Option<(String, Decimal)> {
+        let m = self.merges.remove(id)?;
+        self.merged.insert(id.to_string());
+        if let Some(j) = self.journal.as_ref() {
+            j.append(&JournalLine::MergeConfirmed {
+                at_ms: now_ms,
+                claim_id: id.to_string(),
+                tx_hash,
+                block_number,
+            });
+        }
+        Some((m.account_id, m.pairs_usd))
     }
 }
 

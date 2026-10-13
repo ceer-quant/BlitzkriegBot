@@ -9,8 +9,9 @@
 //! 3. every emitted `ts_ms` is the LOCAL clock (no venue timestamp leaks).
 
 use blitzkrieg_market_api::{
-    BookUpdate, CoreError, MarketDescriptor, MarketFill, MarketHost, ReconcileSnapshot,
-    RedemptionRequest, RedemptionResult, SelfCheckReport, SettlementQuery, TokenId,
+    BookUpdate, CoreError, MarketDescriptor, MarketFill, MarketHost, MergeRequest, MergeResult,
+    ReconcileSnapshot, RedemptionRequest, RedemptionResult, SelfCheckReport, SettlementQuery,
+    TokenId,
 };
 use rust_decimal::Decimal;
 use std::io::{Read, Write};
@@ -143,6 +144,12 @@ impl MarketHost for BookSink {
         &self,
         _: RedemptionResult,
     ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn take_pending_merges(&self) -> blitzkrieg_market_api::BoxFuture<'_, Vec<MergeRequest>> {
+        Box::pin(async { Vec::new() })
+    }
+    fn on_merge_result(&self, _: MergeResult) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
 }

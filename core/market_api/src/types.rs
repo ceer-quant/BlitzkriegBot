@@ -620,6 +620,79 @@ pub struct RedemptionResult {
     pub at_ms: i64,
 }
 
+/// A merge the core wants executed on-chain: complete UP+DOWN share-pairs on
+/// one condition, burned back into their collateral ($1.00 per pair).
+///
+/// The core has ALREADY burned the pairs from its books when it filed this
+/// request — the request's only job is to turn the burned inventory into a
+/// mined transaction, whose receipt moves the receivable into cash. A plugin
+/// that cannot merge (no CTF access, disabled by config) reports the failure
+/// through [`MergeResult`]; the claim stays a receivable either way.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeRequest {
+    /// Stable claim id (`<condition_id>#merge`, `#merge-2`, … on repeats of
+    /// the same market). One id is never confirmed twice.
+    pub id: String,
+    pub condition_id: String,
+    /// The market's positions settle through the NegRisk adapter (drives the
+    /// merge call, exactly as it drives the redeem call).
+    pub neg_risk: bool,
+    /// USDC collateral due: `pairs × 1.00`.
+    #[serde(with = "crate::decimal")]
+    pub pairs_usd: Decimal,
+}
+
+/// The outcome of one [`MergeRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeResult {
+    pub id: String,
+    pub condition_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_number: Option<u64>,
+    /// `None` = confirmed; the merge receivable is now cash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<RedemptionFailure>,
+    pub at_ms: i64,
+}
+
+impl MergeResult {
+    /// A mined merge: the receivable may move to cash.
+    pub fn success(
+        request: &MergeRequest,
+        tx_hash: &str,
+        block_number: Option<u64>,
+        at_ms: i64,
+    ) -> Self {
+        Self {
+            id: request.id.clone(),
+            condition_id: request.condition_id.clone(),
+            tx_hash: Some(tx_hash.to_string()),
+            block_number,
+            failure: None,
+            at_ms,
+        }
+    }
+    /// A merge that did not mine. `manual` marks a condition the retry loop
+    /// must never re-attempt (left to the operator).
+    pub fn failure(request: &MergeRequest, message: &str, manual: bool, at_ms: i64) -> Self {
+        Self {
+            id: request.id.clone(),
+            condition_id: request.condition_id.clone(),
+            tx_hash: None,
+            block_number: None,
+            failure: Some(RedemptionFailure {
+                message: message.to_string(),
+                manual,
+            }),
+            at_ms,
+        }
+    }
+}
+
 // ── Plugin configuration ─────────────────────────────────────────────────────
 
 /// Data-feed parameters (orderbook subscription + optional spot stream).
