@@ -522,6 +522,12 @@ pub struct Supervisor {
     alert_sink: Option<Arc<dyn AlertSink>>,
     /// Tail of the current (or last) child's stderr, drained by a reader thread.
     stderr_tail: StderrTail,
+    /// The stderr reader thread, kept joinable so the give-up alert can wait
+    /// for the tail to fill before it snapshots (the flake: on a loaded
+    /// runner the child's one-line `echo` reached the pipe but the reader
+    /// thread had not been scheduled when `alert_give_up` snapshotted — the
+    /// operator saw an alert with no reason attached).
+    stderr_drain: Option<std::thread::JoinHandle<()>>,
     /// Backoff to honour before the next attempt, set when an attempt fails
     /// immediately so the retry loop does not spin on a core that cannot boot.
     next_attempt_after: Option<Instant>,
@@ -544,6 +550,7 @@ impl Supervisor {
             give_up_alert: None,
             alert_sink: None,
             stderr_tail: StderrTail::default(),
+            stderr_drain: None,
             next_attempt_after: None,
             spawned_at: None,
         }
@@ -581,6 +588,25 @@ impl Supervisor {
     fn alert_give_up(&mut self) {
         if self.give_up_alert.is_some() {
             return;
+        }
+        // The child is gone, so the stderr pipe's write end is closed and the
+        // reader thread ends at EOF — normally this join is microseconds (the
+        // tail's last lines are still in flight). Bounded because this runs
+        // on the UI's refresh tick: a core that flooded stderr before dying
+        // must freeze the panel for neither ever nor long. A spent budget
+        // leaves whatever reached the tail — partial evidence beats none.
+        if let Some(handle) = self.stderr_drain.take() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if handle.is_finished() {
+                    let _ = handle.join();
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
         let alert = GiveUpAlert {
             attempts: self.restarts,
@@ -699,7 +725,7 @@ impl Supervisor {
         // that mattered would point the operator at the wrong failure.
         self.stderr_tail.clear();
         if let Some(err) = child.stderr.take() {
-            drain_stderr(err, self.stderr_tail.clone());
+            self.stderr_drain = Some(drain_stderr(err, self.stderr_tail.clone()));
         }
         self.child = Some(child);
         self.owns = true;
@@ -960,7 +986,10 @@ fn split_extra_args(input: &str) -> Vec<String> {
 
 /// the gateway's run log keeps showing core output exactly as before) and into
 /// the bounded tail ring that the give-up alert reports.
-fn drain_stderr(err: impl std::io::Read + Send + 'static, tail: StderrTail) {
+fn drain_stderr(
+    err: impl std::io::Read + Send + 'static,
+    tail: StderrTail,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let reader = BufReader::new(err);
         for line in reader.lines() {
@@ -977,7 +1006,7 @@ fn drain_stderr(err: impl std::io::Read + Send + 'static, tail: StderrTail) {
             };
             tail.push(line);
         }
-    });
+    })
 }
 
 /// Send SIGTERM via `kill(1)`. Dependency-free; falls back to nothing on failure
