@@ -15,10 +15,10 @@ path = "src/lib.rs"
 [features]
 # The core itself is market-agnostic and has NO market SDK dependency. A market
 # is supplied by an extension crate, linked in via a feature (see below). The
-# default ships all three built-in market extensions (Polymarket, Kalshi,
-# predict.fun) so a plain build can reach every venue; `--market-plugin` still
-# picks exactly one operative venue at runtime.
-default = ["polymarket", "kalshi", "predictfun", "strategy-loading", "account-precision", "test-support"]
+# default ships all built-in market extensions (Polymarket, Kalshi,
+# predict.fun, PolySimulator) so a plain build can reach every venue;
+# `--market-plugin` still picks exactly one operative venue at runtime.
+default = ["polymarket", "kalshi", "predictfun", "polysimulator", "strategy-loading", "account-precision", "test-support"]
 # Link the official Polymarket market extension as the operative market.
 polymarket = ["dep:polymarket-extension"]
 # 0.3.3 stage 2 (#424): Kalshi + predict.fun market extensions, opt-in features
@@ -27,6 +27,11 @@ polymarket = ["dep:polymarket-extension"]
 # the flip; the runtime contract is unchanged: still one `--market-plugin`.)
 kalshi = ["dep:kalshi-extension"]
 predictfun = ["dep:predictfun-extension"]
+# 0.4.1 (#454/#455): the PolySimulator SIMULATED venue extension, same shape —
+# a third-party paper-trading venue whose fills are its own model. Declared in
+# default for parity with the other plugins; the declaration carries the
+# `simulated` capability bit so every surface can label it honestly.
+polysimulator = ["dep:polysimulator-extension"]
 # Dynamic user-layer strategy loading (shared libraries). On by default since
 # E7 (#38): the external v2 strategy interface is the SAME full contract as an
 # in-tree strategy, and CI builds/drives a real cdylib. Exclude with
@@ -84,6 +89,7 @@ blitzkrieg-market-api = { path = "../market_api" }
 polymarket-extension = { path = "../../extensions/polymarket", optional = true }
 kalshi-extension = { package = "blitzkrieg-kalshi", path = "../../extensions/kalshi", optional = true }
 predictfun-extension = { package = "blitzkrieg-predictfun", path = "../../extensions/predictfun", optional = true }
+polysimulator-extension = { package = "blitzkrieg-polysimulator", path = "../../extensions/polysimulator", optional = true }
 async-trait = "0.1"
 # Lock-free atomic parameter swap for Shadow Evolution (strategy hot path).
 arc-swap = "1"

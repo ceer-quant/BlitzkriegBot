@@ -61,13 +61,13 @@ const EXTS = ['.rs', '.lua', '.mjs', '.js', '.ts', '.vue'];
 // is a word character and the plugin-prefix branch —
 // `token.starts_with("polymarket_")`, `use kalshi_extension::…` — is exactly
 // the `if kalshi` shape #427 outlaws in another spelling.
-const VENUE_TOKEN = /\b(Polymarket|Kalshi|PredictFun|polymarket|kalshi|predictfun|predict_fun)/;
+const VENUE_TOKEN = /\b(Polymarket|Kalshi|PredictFun|PolySimulator|polymarket|kalshi|predictfun|polysimulator|predict_fun)/;
 
 // What is outlawed is a BRANCH on a venue, not the word: a data field, a log
 // line, a help page or a fee-source citation may NAME one (#427 targets
 // `if kalshi` — decisions, not vocabulary). Each rule is a decision shape
 // with a venue token in it:
-const VEN = '(?:Polymarket|Kalshi|PredictFun|polymarket|kalshi|predictfun|predict_fun)';
+const VEN = '(?:Polymarket|Kalshi|PredictFun|PolySimulator|polymarket|kalshi|predictfun|polysimulator|predict_fun)';
 // No trailing \b anywhere: `_` is a word character and `polymarket_` is the
 // prefix-branch spelling. The leading \b comes from VENUE_TOKEN gating the
 // line; these rules only classify HOW the token decides.
@@ -76,7 +76,7 @@ const BRANCH_SHAPES = [
   // `if venue == "kalshi"`, `if k == "polymarket" then`
   [new RegExp(`\\b(?:if|while|elseif|elsif)\\b[^\\n]*\\b${VEN}`), 'venue guard'],
   // dispatch: Rust match arm `Venue::Kalshi =>`, JS `case "polymarket":`
-  [new RegExp(`Venue::(?:Polymarket|Kalshi|PredictFun)\\s*=>`), 'venue match arm'],
+  [new RegExp(`Venue::(?:Polymarket|Kalshi|PredictFun|PolySimulator)\\s*=>`), 'venue match arm'],
   [new RegExp(`\\bcase\\s*['"]?${VEN}`), 'venue match arm'],
   // equality/comparison, token on the right: `venue == "kalshi"`,
   // `!= Venue::Polymarket`, Lua `~= 'polymarket'`

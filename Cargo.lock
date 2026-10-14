@@ -1187,6 +1187,7 @@ dependencies = [
  "blitzkrieg-kalshi",
  "blitzkrieg-lua-runtime",
  "blitzkrieg-market-api",
+ "blitzkrieg-polysimulator",
  "blitzkrieg-predictfun",
  "blitzkrieg-strategy-api",
  "blitzkrieg-ui-kit",
@@ -1251,6 +1252,24 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "blitzkrieg-polysimulator"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blitzkrieg-market-api",
+ "mime",
+ "reqwest",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

@@ -1,0 +1,671 @@
+//! The order executor: the market-plugin component that turns the core's
+//! locally-accepted orders into real PolySimulator orders and reconciles the
+//! venue's own state back (#454).
+//!
+//! The venue has no private push channel the extension consumes (its user WS
+//! needs JWT rotation and the free tier allows one connection), so the
+//! executor is a REST polling actor on the same shape as the kalshi
+//! executor: one tokio task owns a credentialed [`PolySimRest`], drains the
+//! host's pending orders / cancels every tick, and runs a periodic
+//! reconciliation sweep (open orders + trades + orphan cleanup + free-balance
+//! sync). Everything the core sees crosses the `MarketHost` seam; all
+//! PolySimulator knowledge stays here.
+//!
+//! Unit conventions at the boundary:
+//!   * price — the core speaks 0..1 probabilities; this venue quotes dollars
+//!     0..1 too, so prices pass through. An off-tick limit is answered with
+//!     `INVALID_ORDER_MIN_TICK_SIZE` rather than silently reinterpreted.
+//!   * identity — the venue's NATIVE order form needs `(market_id, outcome
+//!     label)` while the core routes by CLOB token id. The bridge is the
+//!     venue's OWN resolver `GET /v1/markets-by-token/{token_id}` (a public
+//!     endpoint), consulted once per token and cached — never a guessed
+//!     outcome label.
+//!   * order character — `FillPolicy::Taker` places a `FAK` limit at the
+//!     order's price (fill what crosses, cancel the rest); `Maker` places a
+//!     `GTC` limit (rest until filled or cancelled); `MakerThenTaker` rests
+//!     `GTC` and lets the sweep's fills reconcile it either way.
+//!   * fills — `GET /v1/data/trades` reports PM-shape rows whose legs split
+//!     across `taker_order_id` (the marketable side) and `maker_orders` (the
+//!     resting ids consumed). OUR fill books under whichever of the two names
+//!     our venue order id; the venue order id is an INTEGER everywhere,
+//!     stringified at this seam.
+
+use crate::into_core_error;
+use crate::rest::{Credentials, PolySimRest, RestConfig};
+use crate::types::PlaceOrderBody;
+use blitzkrieg_market_api::{
+    CoreError, CoreErrorCode, CoreResult, ExecutorConfig, FillPolicy, FillStatus, MarketFill,
+    MarketHost, PendingOrder, ReconcileSnapshot, SelfCheckItem, SelfCheckReport, Side,
+    VenueTradeInfo, net::now_ms,
+};
+use rust_decimal::Decimal;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::{MissedTickBehavior, interval};
+
+/// Executor tick: pending-order/cancel drain cadence. The venue is REST and
+/// per-user serializes order writes; a faster tick buys nothing.
+const EXECUTOR_TICK_MS: u64 = 500;
+/// Reconciliation sweep every 10 ticks (~5s), the sibling executors' cadence.
+const SWEEP_EVERY_TICKS: u64 = 10;
+/// Consecutive sweep failures before the host freezes trading (E31-b: the
+/// safety net being blind is worse than it being slow).
+const SWEEP_FAILURE_FREEZE: u32 = 3;
+/// A venue rejection streak that triggers a direct capability probe instead
+/// of letting the freeze rest on inference.
+const PLACE_FAILURE_PROBE: u32 = 3;
+
+/// Build the credentialed client, or `None` when the environment carries no
+/// API key — the executor is then INERT (dry runs). Same contract as the
+/// sibling executors' `spawn_if_configured`.
+fn credentials_from_env() -> Option<Credentials> {
+    let api_key = std::env::var("POLYSIM_API_KEY").ok()?;
+    if api_key.is_empty() {
+        return None;
+    }
+    Some(Credentials { api_key })
+}
+
+fn rest_config() -> RestConfig {
+    let mut config = RestConfig::default();
+    if std::env::var("POLYSIM_NO_PROXY").is_ok_and(|v| v == "1" || v == "true") {
+        config.no_proxy = true;
+    }
+    config
+}
+
+/// The (market_id, outcome) pair a placement needs, resolved from the venue's
+/// own token registry and cached per token. A token the venue does not know
+/// is a routing bug — refused, never guessed.
+#[derive(Debug, Clone)]
+struct TokenIdentity {
+    market_id: String,
+    outcome: String,
+}
+
+/// Spawn the executor. Inert (Ok(None)) without credentials; otherwise a
+/// background task runs until the process ends.
+pub async fn spawn_if_configured(
+    host: Arc<dyn MarketHost>,
+    _config: ExecutorConfig,
+) -> CoreResult<Option<tokio::task::JoinHandle<()>>> {
+    let Some(credentials) = credentials_from_env() else {
+        return Ok(None);
+    };
+    let client = Arc::new(
+        PolySimRest::new(rest_config(), Some(credentials)).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::VenueError,
+                format!("polysimulator client: {e}"),
+            )
+        })?,
+    );
+    let handle = tokio::spawn(executor_loop(host, client));
+    Ok(Some(handle))
+}
+
+/// Test-only entry for the executor integration suite: drive the REAL
+/// production loop against a mock server with an explicit client (env-var
+/// plumbing stays out of the test's control, and no credential is fixed in
+/// source). Not part of the public surface, exactly like the feed's
+/// `feed_tests_only_spawn`.
+#[doc(hidden)]
+pub fn executor_tests_only_spawn(host: Arc<dyn MarketHost>, client: Arc<PolySimRest>) {
+    tokio::spawn(executor_loop(host, client));
+}
+
+/// One capability probe against the paths trading actually uses: balance
+/// (auth), open orders and a one-page trades query. A failed item means
+/// order egress cannot work either.
+async fn self_check(client: &PolySimRest) -> SelfCheckReport {
+    let items = vec![
+        {
+            let ok = client.balance().await.is_ok();
+            SelfCheckItem {
+                name: "balance".into(),
+                ok,
+                detail: if ok {
+                    "balance endpoint answered".into()
+                } else {
+                    "balance failed (API key or venue down)".into()
+                },
+            }
+        },
+        {
+            let ok = client.open_orders().await.is_ok();
+            SelfCheckItem {
+                name: "orders".into(),
+                ok,
+                detail: if ok {
+                    "open orders answered".into()
+                } else {
+                    "open orders failed".into()
+                },
+            }
+        },
+        {
+            let ok = client.trades().await.is_ok();
+            SelfCheckItem {
+                name: "trades".into(),
+                ok,
+                detail: if ok {
+                    "trades answered".into()
+                } else {
+                    "trades failed".into()
+                },
+            }
+        },
+    ];
+    SelfCheckReport {
+        ok: items.iter().all(|i| i.ok),
+        ts_ms: now_ms(),
+        items,
+    }
+}
+
+/// Resolve a token's (market, outcome) through the venue's own registry, with
+/// a process-lifetime cache (a token's identity never changes within its
+/// market's life).
+async fn token_identity(
+    client: &PolySimRest,
+    token_id: &str,
+    cache: &mut HashMap<String, TokenIdentity>,
+) -> CoreResult<TokenIdentity> {
+    if let Some(hit) = cache.get(token_id) {
+        return Ok(hit.clone());
+    }
+    let resolved = match client.markets_by_token(token_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            let core = into_core_error(&e);
+            // A definitive "no such market" for a token the core routed here
+            // is a routing bug (InvalidParams); transient resolver failures
+            // keep their own semantics (timeout, venue error).
+            return Err(match core.code {
+                CoreErrorCode::MarketHalted | CoreErrorCode::UnknownOrder => CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!("token {token_id} is unknown to the venue registry"),
+                )
+                .with_raw(e.to_string()),
+                _ => core,
+            });
+        }
+    };
+    let outcome = resolved.outcome.ok_or_else(|| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("token {token_id} resolved without an outcome label"),
+        )
+    })?;
+    let identity = TokenIdentity {
+        market_id: resolved.condition_id,
+        outcome,
+    };
+    cache.insert(token_id.to_string(), identity.clone());
+    Ok(identity)
+}
+
+pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySimRest>) {
+    let mut tick = interval(Duration::from_millis(EXECUTOR_TICK_MS));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut since_sweep: u64 = 0;
+    let mut sweep_failures: u32 = 0;
+    let mut place_failures: u32 = 0;
+    // Trade rows already reported to the host (dedup by trade id so a sweep
+    // overlap never double-books).
+    let mut seen_trades: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Orders just placed, still absent from the venue's open-order list (the
+    // orphan sweep's grace window).
+    let mut recent_placements: Vec<(String, i64)> = Vec::new();
+    const ORPHAN_GRACE_MS: i64 = 30_000;
+    // token → (market_id, outcome) cache, filled from the venue's own
+    // markets-by-token resolver.
+    let mut identities: HashMap<String, TokenIdentity> = HashMap::new();
+
+    // Seed the ledger from the venue so the reserve gate reflects real cash.
+    match client.balance().await {
+        Ok(b) => {
+            host.seed_balance(b.balance).await;
+            eprintln!(
+                "polysimulator-extension: executor ready balance={}",
+                b.balance
+            );
+        }
+        Err(e) => eprintln!("polysimulator-extension: live balance fetch failed: {e}"),
+    }
+    let report = self_check(&client).await;
+    if !report.ok {
+        eprintln!("polysimulator-extension: startup self-check FAILED");
+    }
+    host.on_self_check(report).await;
+
+    // Startup orphan sweep: anything resting at the venue the core does not
+    // know about is cancelled before trading resumes.
+    match client.open_orders().await {
+        Ok(open) => {
+            let known: std::collections::HashSet<String> =
+                host.known_venue_order_ids().await.into_iter().collect();
+            for o in &open {
+                let vid = o.venue_id();
+                if known.contains(&vid) {
+                    continue;
+                }
+                if let Err(e) = client.cancel_order(&vid).await {
+                    eprintln!("polysimulator-extension: orphan cancel {vid}: {e}");
+                } else {
+                    host.note_orphan_cancelled(&vid).await;
+                }
+            }
+        }
+        Err(e) => eprintln!("polysimulator-extension: startup orphan sweep failed: {e}"),
+    }
+
+    loop {
+        tick.tick().await;
+
+        // 1) Cancels first (same serialization rule as the sibling executors:
+        //    the old order is gone before a replacement is submitted).
+        let mut cancel_strikes = 0u32;
+        for id in host.take_pending_cancels().await {
+            match client.cancel_order(&id).await {
+                Ok(_) => host.note_orphan_cancelled(&id).await,
+                Err(e) => {
+                    cancel_strikes += 1;
+                    eprintln!("polysimulator-extension: venue cancel failed for {id}: {e}");
+                    host.report_error(into_core_error(&e)).await;
+                }
+            }
+        }
+
+        // 2) Submit locally-accepted orders.
+        if cancel_strikes == 0 {
+            for order in host.take_pending_orders().await {
+                match place(&client, &order, &mut identities).await {
+                    Ok(venue_id) => {
+                        place_failures = 0;
+                        recent_placements.push((venue_id.clone(), now_ms()));
+                        host.on_order_accepted(&order.core_order_id, &venue_id)
+                            .await;
+                    }
+                    Err(e) if e.code == CoreErrorCode::Timeout => {
+                        place_failures += 1;
+                        host.on_place_timeout(&order.core_order_id).await;
+                        host.report_error(e).await;
+                    }
+                    Err(e) => {
+                        place_failures += 1;
+                        host.on_order_rejected(&order.core_order_id, Some(e.clone()))
+                            .await;
+                        host.report_error(e).await;
+                        if place_failures >= PLACE_FAILURE_PROBE {
+                            place_failures = 0;
+                            host.on_self_check(self_check(&client).await).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3) Periodic reconciliation sweep.
+        since_sweep += 1;
+        if since_sweep < SWEEP_EVERY_TICKS {
+            continue;
+        }
+        since_sweep = 0;
+        match sweep(
+            &host,
+            &client,
+            &mut seen_trades,
+            &mut recent_placements,
+            ORPHAN_GRACE_MS,
+        )
+        .await
+        {
+            Ok(()) => sweep_failures = 0,
+            Err(e) => {
+                sweep_failures += 1;
+                eprintln!("polysimulator-extension: sweep failed ({sweep_failures}): {e}");
+                if sweep_failures >= SWEEP_FAILURE_FREEZE {
+                    host.on_reconcile_failed(e).await;
+                } else {
+                    host.report_error(e).await;
+                }
+            }
+        }
+    }
+}
+
+/// The venue's TIF spelling for a fill policy: taker = FAK (fill what
+/// crosses, cancel the rest), maker = GTC (rest). MakerThenTaker rests GTC —
+/// the sweep's fills reconcile it either way.
+fn tif_for(policy: FillPolicy) -> &'static str {
+    match policy {
+        FillPolicy::Taker => "FAK",
+        FillPolicy::Maker | FillPolicy::MakerThenTaker => "GTC",
+    }
+}
+
+/// Submit one order. The core's `core_order_id` becomes the client order id
+/// (the venue's dedupe key), so a timeout can be reconciled by querying
+/// orders for it — never blindly retried.
+async fn place(
+    client: &PolySimRest,
+    order: &PendingOrder,
+    identities: &mut HashMap<String, TokenIdentity>,
+) -> CoreResult<String> {
+    if order.size < Decimal::ONE {
+        return Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            "polysimulator order size rounds to zero",
+        ));
+    }
+    // The venue order form needs (market_id, outcome label); both come from
+    // the venue's own markets-by-token resolver, cached per token. An unknown
+    // token is a routing bug — refused, never guessed into a wrong market.
+    let identity = token_identity(client, &order.token_id, identities).await?;
+    let quantity = format!("{}", order.size.trunc());
+    let body = PlaceOrderBody {
+        market_id: &identity.market_id,
+        side: match order.side {
+            Side::Buy => "BUY",
+            Side::Sell => "SELL",
+        },
+        outcome: &identity.outcome,
+        quantity: &quantity,
+        order_type: "limit",
+        price: &order.price.to_string(),
+        time_in_force: tif_for(order.fill_policy),
+        client_order_id: Some(&order.core_order_id),
+    };
+    let ack = client
+        .place_order(&body)
+        .await
+        .map_err(|e| into_core_error(&e))?;
+    Ok(ack.venue_id())
+}
+
+/// Attribute one trade row to our order ids: a row is OURS when our venue id
+/// appears as the taker (we crossed) or inside the maker set (someone crossed
+/// our resting order). Returns the venue order id that books the fill plus
+/// whether it was the maker leg — the fill's maker flag is decided by WHICH
+/// leg matched, not by which fields happen to be present.
+fn our_leg(
+    row: &crate::types::PmTradeRow,
+    our_ids: &std::collections::HashSet<String>,
+) -> Option<(String, bool)> {
+    if let Some(taker) = &row.taker_order_id
+        && our_ids.contains(taker)
+    {
+        return Some((taker.clone(), false));
+    }
+    if let Some(makers) = &row.maker_orders {
+        for m in makers {
+            if our_ids.contains(m) {
+                return Some((m.clone(), true));
+            }
+        }
+    }
+    None
+}
+
+/// Re-derive the core token id from a trade row: the row's `asset_id` IS the
+/// CLOB token id on this venue (same id the descriptors minted).
+fn row_token_id(row: &crate::types::PmTradeRow) -> Option<String> {
+    row.asset_id.clone().filter(|s| !s.is_empty())
+}
+
+/// Map one trade row onto the seam type. A row whose price or shape cannot be
+/// read is skipped by the caller with a log line — never forwarded as garbage.
+fn to_venue_trade(
+    row: &crate::types::PmTradeRow,
+    venue_order_id: String,
+    maker: bool,
+) -> Option<VenueTradeInfo> {
+    let price = row.price?;
+    let size = row.size?;
+    if size <= Decimal::ZERO || price <= Decimal::ZERO || price >= Decimal::ONE {
+        return None;
+    }
+    let side = match row.side.as_deref().map(str::to_ascii_uppercase).as_deref() {
+        Some("SELL") => Side::Sell,
+        _ => Side::Buy,
+    };
+    Some(VenueTradeInfo {
+        venue_order_id,
+        trade_id: row.id.clone(),
+        token_id: row_token_id(row)?,
+        side,
+        size,
+        price,
+        ts_ms: row.match_time.unwrap_or_else(now_ms),
+        tx_hash: row.transaction_hash.clone(),
+        maker: Some(maker),
+    })
+}
+
+fn to_fill(order_id: &str, trade: &VenueTradeInfo) -> MarketFill {
+    MarketFill {
+        order_id: order_id.to_string(),
+        trade_id: Some(trade.trade_id.clone()),
+        token_id: trade.token_id.clone(),
+        side: trade.side,
+        price: trade.price,
+        size: trade.size,
+        status: FillStatus::Matched,
+        ts_ms: trade.ts_ms,
+        tx_hash: trade.tx_hash.clone(),
+        maker: trade.maker,
+    }
+}
+
+/// One reconciliation pass: open orders + new trades + orphan cleanup + free
+/// balance. Any transport failure aborts the pass so the failure counter sees
+/// a coherent "sweep did not complete", not a half-swept ledger.
+async fn sweep(
+    host: &Arc<dyn MarketHost>,
+    client: &PolySimRest,
+    seen_trades: &mut std::collections::HashSet<String>,
+    recent_placements: &mut Vec<(String, i64)>,
+    orphan_grace_ms: i64,
+) -> CoreResult<()> {
+    let open = client
+        .open_orders()
+        .await
+        .map_err(|e| into_core_error(&e))?;
+    let trades = client.trades().await.map_err(|e| into_core_error(&e))?;
+
+    // Orphan sweep: a venue-open id the core has never heard of gets cancelled
+    // (a POST accepted after our timeout, or a resting order whose cancel
+    // failed). Fresh placements ride out a grace window.
+    let known: std::collections::HashSet<String> =
+        host.known_venue_order_ids().await.into_iter().collect();
+    let now = now_ms();
+    recent_placements.retain(|(_, at)| now - *at < orphan_grace_ms);
+    for o in &open {
+        let vid = o.venue_id();
+        if known.contains(&vid) || recent_placements.iter().any(|(rid, _)| *rid == vid) {
+            continue;
+        }
+        match client.cancel_order(&vid).await {
+            Ok(_) => {
+                eprintln!("polysimulator-extension: cancelled orphan order {vid}");
+                host.note_orphan_cancelled(&vid).await;
+            }
+            Err(e) => {
+                eprintln!("polysimulator-extension: failed to cancel orphan {vid}: {e}");
+                host.report_error(CoreError::new(
+                    CoreErrorCode::VenueError,
+                    format!("orphan cancel failed for {vid}: {e}"),
+                ))
+                .await;
+            }
+        }
+    }
+
+    // Trades → reconcile snapshot; the core matches them to its own orders
+    // and books what it owns. OUR fills are attributed through both leg
+    // sides (taker + maker); rows that are not ours and rows we cannot read
+    // are silent or logged, never forwarded as garbage.
+    let mut matched = Vec::new();
+    for row in &trades {
+        if seen_trades.contains(&row.id) {
+            continue;
+        }
+        // Mark seen regardless: an unreadable row must not be re-parsed every
+        // sweep (it would spam the log forever).
+        seen_trades.insert(row.id.clone());
+        if let Some((vid, maker)) = our_leg(row, &known) {
+            match to_venue_trade(row, vid, maker) {
+                Some(trade) => matched.push(trade),
+                None => eprintln!(
+                    "polysimulator-extension: unreadable trade row {} (market {}) — skipped",
+                    row.id, row.market
+                ),
+            }
+        }
+    }
+    let snapshot = ReconcileSnapshot {
+        open_order_ids: open.iter().map(|o| o.venue_id()).collect(),
+        trades: matched.clone(),
+        now_ms: now_ms(),
+    };
+    host.on_reconcile(snapshot).await;
+    for trade in &matched {
+        host.on_fill(to_fill(&trade.venue_order_id, trade)).await;
+    }
+
+    // Cash truth: re-align the ledger's free view every sweep.
+    match client.balance().await {
+        Ok(b) => host.venue_free_balance(b.balance).await,
+        Err(e) => host.report_error(into_core_error(&e)).await,
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tif_spelling_follows_the_fill_policy() {
+        assert_eq!(tif_for(FillPolicy::Taker), "FAK");
+        assert_eq!(tif_for(FillPolicy::Maker), "GTC");
+        assert_eq!(tif_for(FillPolicy::MakerThenTaker), "GTC");
+    }
+
+    fn trade_row(
+        id: &str,
+        taker: Option<&str>,
+        makers: Option<Vec<&str>>,
+        side: &str,
+        price: Option<&str>,
+        asset: Option<&str>,
+    ) -> crate::types::PmTradeRow {
+        crate::types::PmTradeRow {
+            id: id.to_string(),
+            market: "0xabc".to_string(),
+            asset_id: asset.map(|s| s.to_string()),
+            side: Some(side.to_string()),
+            outcome: Some("Yes".to_string()),
+            price: price.map(|p| Decimal::from_str(p).unwrap()),
+            size: Some(Decimal::from(10)),
+            fee_rate_bps: Some(0),
+            maker_orders: makers.map(|v| v.iter().map(|s| s.to_string()).collect()),
+            taker_order_id: taker.map(|s| s.to_string()),
+            transaction_hash: None,
+            bucket_index: None,
+            last_update: None,
+            match_time: Some(1_773_583_200_000),
+            owner: None,
+            status: Some("MATCHED".to_string()),
+            trader_side: None,
+        }
+    }
+    use std::str::FromStr;
+
+    #[test]
+    fn trade_rows_attribute_through_both_leg_sides() {
+        let our_ids: std::collections::HashSet<String> =
+            ["41", "77"].iter().map(|s| s.to_string()).collect();
+        // Taker leg is ours.
+        let row = trade_row(
+            "tx-1",
+            Some("41"),
+            Some(vec!["12"]),
+            "BUY",
+            Some("0.55"),
+            Some("71321"),
+        );
+        assert_eq!(our_leg(&row, &our_ids), Some(("41".into(), false)));
+        let trade = to_venue_trade(&row, "41".into(), false).expect("taker row maps");
+        assert_eq!(trade.token_id, "71321");
+        assert_eq!(trade.side, Side::Buy);
+        assert_eq!(trade.price, Decimal::from_str("0.55").unwrap());
+        assert_eq!(trade.maker, Some(false), "a taker-leg fill is not maker");
+
+        // Maker leg is ours (our resting id inside maker_orders).
+        let row_maker = trade_row(
+            "tx-1",
+            Some("9999"),
+            Some(vec!["12", "77"]),
+            "SELL",
+            Some("0.55"),
+            Some("71321"),
+        );
+        assert_eq!(our_leg(&row_maker, &our_ids), Some(("77".into(), true)));
+        let trade = to_venue_trade(&row_maker, "77".into(), true).expect("maker row maps");
+        assert_eq!(trade.side, Side::Sell);
+        assert_eq!(trade.maker, Some(true), "a maker-leg fill is maker");
+
+        // Neither leg is ours: not attributed.
+        let row_other = trade_row(
+            "tx-1",
+            Some("9999"),
+            Some(vec!["12"]),
+            "BUY",
+            Some("0.55"),
+            Some("71321"),
+        );
+        assert_eq!(our_leg(&row_other, &our_ids), None);
+    }
+
+    #[test]
+    fn unreadable_trade_rows_map_to_none_not_garbage() {
+        let base = trade_row("tx-2", Some("41"), None, "BUY", None, Some("71321"));
+        assert!(
+            to_venue_trade(&base, "41".into(), false).is_none(),
+            "no price"
+        );
+
+        let zero = trade_row("tx-2", Some("41"), None, "BUY", Some("0.55"), Some("71321"))
+            .pipe_zero_size();
+        assert!(
+            to_venue_trade(&zero, "41".into(), false).is_none(),
+            "zero size"
+        );
+
+        let out_of_band = trade_row("tx-2", Some("41"), None, "BUY", Some("1.0"), Some("71321"));
+        assert!(
+            to_venue_trade(&out_of_band, "41".into(), false).is_none(),
+            "price 1.0 is not a tradeable probability"
+        );
+
+        let no_token = trade_row("tx-2", Some("41"), None, "BUY", Some("0.55"), None);
+        assert!(
+            to_venue_trade(&no_token, "41".into(), false).is_none(),
+            "no asset_id"
+        );
+    }
+
+    /// Test helper: rebuild a row with a zero size (struct has no builder).
+    trait ZeroSize {
+        fn pipe_zero_size(self) -> crate::types::PmTradeRow;
+    }
+    impl ZeroSize for crate::types::PmTradeRow {
+        fn pipe_zero_size(mut self) -> crate::types::PmTradeRow {
+            self.size = Some(Decimal::ZERO);
+            self
+        }
+    }
+}

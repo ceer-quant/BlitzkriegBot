@@ -57,6 +57,11 @@ impl MarketCapabilities {
     pub const POST_ONLY: Self = Self(1 << 7);
     pub const CANCEL_ON_DISCONNECT: Self = Self(1 << 8);
     pub const MAKER_REBATE: Self = Self(1 << 9);
+    /// The venue fills against its own model (paper trading / simulation),
+    /// not a real market — every surface rendering capabilities can label
+    /// the plugin "模拟盘" from this bit alone, with no venue-named branch
+    /// (#454). A plugin that fills for real must NEVER declare it.
+    pub const SIMULATED: Self = Self(1 << 10);
 
     /// Superset test: does `self` satisfy `required`? One implementation, one
     /// direction — the plugin must be a superset of what the strategy requires.
@@ -82,7 +87,7 @@ impl std::ops::BitOr for MarketCapabilities {
 /// while the bits stay the u64 constants above. One table, so parsing
 /// (`parse_strategy_modes` here, the plugin side in E27) and the docs cannot
 /// drift: E27's `capability_by_name()` reads this same list.
-pub const CAPABILITY_NAMES: [(u64, &str); 10] = [
+pub const CAPABILITY_NAMES: [(u64, &str); 11] = [
     (MarketCapabilities::WEBSOCKET_FEED.0, "websocket_feed"),
     (MarketCapabilities::LEVEL2_SNAPSHOT.0, "level2_snapshot"),
     (MarketCapabilities::KLINE_STREAM.0, "kline_stream"),
@@ -96,6 +101,7 @@ pub const CAPABILITY_NAMES: [(u64, &str); 10] = [
         "cancel_on_disconnect",
     ),
     (MarketCapabilities::MAKER_REBATE.0, "maker_rebate"),
+    (MarketCapabilities::SIMULATED.0, "simulated"),
 ];
 
 /// The bit of `name`, or `None` for a name this table does not carry — the

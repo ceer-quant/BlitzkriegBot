@@ -1,0 +1,26 @@
+[package]
+name = "blitzkrieg-polysimulator"
+version.workspace = true
+edition = "2024"
+description = "PolySimulator market extension client for Blitzkrieg core (SIMULATED venue: REST, X-API-Key auth, token-bucket rate limiting). #454"
+
+[lib]
+name = "blitzkrieg_polysimulator"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+# The extension depends ONLY on the market contract. It must NOT depend on
+# blitzkrieg-core (dependency cycle once the core links this crate).
+blitzkrieg-market-api = { path = "../../core/market_api" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
+async-trait = "0.1"
+rust_decimal = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = "0.1"
+reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
+thiserror = "2"
+url = "2"
+mime = "0.3"

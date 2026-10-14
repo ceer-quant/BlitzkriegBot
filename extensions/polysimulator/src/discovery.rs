@@ -1,0 +1,200 @@
+//! PolySimulator round discovery (#454).
+//!
+//! Unlike kalshi, this venue HAS a first-class round concept: `GET
+//! /v1/markets/updown` returns the active up/down interval markets with their
+//! own `start_date`/`end_date`. Discovery polls it every `poll_sec`, keeps the
+//! rows that are open and not yet expired, and feeds them to the engine as one
+//! round's UP/DOWN descriptors.
+//!
+//! Mapping decisions (all made HERE, the plugin boundary):
+//!   * UP/DOWN tokens — `token_ids` inside the nested `markets[0]` is a
+//!     JSON-encoded string (`"[\"71321…\", \"82432…\"]"`, the PM Gamma
+//!     convention) needing a second parse; `[0]` is UP, `[1]` is DOWN. Unlike
+//!     the kalshi feed there is NO book split: each token has its own
+//!     `GET /v1/clob/book/{token_id}` on this venue, so the feed polls both
+//!     books directly.
+//!   * prices — `outcome_prices` (same double-parse) gives (up, down) as
+//!     0..1 decimals straight through.
+//!   * asset — the row carries its own `asset` field (BTC/ETH/SOL/…); a row
+//!     matching no configured asset is skipped: the engine can only price
+//!     what its strategies have a spot reference for.
+//!   * round_slot — derived from the row's own `end_date` (`end_ms / 1000 /
+//!     round_sec`), so a market that closes mid-slot is never filed under a
+//!     slot it does not belong to.
+//!   * rows whose window has already passed (start <= now < end fails) are
+//!     skipped — the venue's list is "active", but a trailing row may sit at
+//!     its final seconds; the expiry check keeps the engine clean.
+
+use crate::rest::PolySimRest;
+use blitzkrieg_market_api::net::now_ms;
+use blitzkrieg_market_api::{MarketDescriptor, MarketHost};
+use rust_decimal::Decimal;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Parse an ISO-8601 timestamp into epoch millis. The venue sends both
+/// `2026-03-15T13:00:00+00:00` and `2026-03-15T14:00:00Z` shapes; the parse
+/// is deliberately narrow (a wrong shape is a skipped market + a log line,
+/// never a panic).
+pub(crate) fn iso_to_ms(raw: &str) -> Option<i64> {
+    // Hand-rolled to keep the dependency surface flat: YYYY-MM-DDTHH:MM:SS
+    // with an optional fractional part and an optional offset suffix.
+    let b = raw.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || (b[10] != b'T' && b[10] != b' ') {
+        return None;
+    }
+    let num =
+        |from: usize, to: usize| -> Option<i64> { raw.get(from..to)?.trim().parse::<i64>().ok() };
+    let year = num(0, 4)?;
+    let month = num(5, 7)?;
+    let day = num(8, 10)?;
+    let hour = num(11, 13)?;
+    let min = num(14, 16)?;
+    let sec = num(17, 19)?;
+    // Days since civil epoch (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some((((days * 24 + hour) * 60 + min) * 60 + sec) * 1000)
+}
+
+/// Is this row's asset one of the configured ones? Exact symbol match
+/// (uppercase both sides) — unlike kalshi, the venue gives a structured
+/// field, so no prose needle-matching is needed.
+pub(crate) fn asset_matches(row_asset: &str, assets: &[String]) -> Option<String> {
+    let upper = row_asset.to_ascii_uppercase();
+    assets
+        .iter()
+        .any(|a| a.to_ascii_uppercase() == upper)
+        .then_some(upper)
+}
+
+/// Spawn the discovery loop. Returns immediately; the loop runs until the
+/// process ends.
+pub(crate) fn spawn(
+    host: Arc<dyn MarketHost>,
+    client: Arc<PolySimRest>,
+    assets: Vec<String>,
+    round_sec: i64,
+    poll_sec: u64,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut last_slot = i64::MIN;
+        let mut tick = tokio::time::interval(Duration::from_secs(poll_sec.max(3)));
+        loop {
+            tick.tick().await;
+            let now = now_ms();
+            let slot = now / 1000 / round_sec;
+            if slot == last_slot {
+                continue; // same round already fed
+            }
+
+            let rows = match client.updown_markets(None, None).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "polysimulator discovery: updown query failed");
+                    continue;
+                }
+            };
+
+            let mut markets: Vec<MarketDescriptor> = Vec::new();
+            for row in &rows {
+                if !row.is_open() {
+                    continue;
+                }
+                let Some(asset) = asset_matches(&row.asset, &assets) else {
+                    continue;
+                };
+                let Some(end_ms) = row.end_ms() else {
+                    tracing::warn!(
+                        condition = %row.condition_id,
+                        "polysimulator discovery: unreadable end_date"
+                    );
+                    continue;
+                };
+                if end_ms <= now {
+                    continue; // the window has already closed
+                }
+                let Some((up_token, down_token)) = row.parse_token_ids() else {
+                    tracing::warn!(
+                        condition = %row.condition_id,
+                        "polysimulator discovery: unreadable token_ids"
+                    );
+                    continue;
+                };
+                let (up_price, down_price) = match row.parse_outcome_prices() {
+                    Some((u, d)) => (u, d),
+                    None => (
+                        Decimal::ONE / Decimal::from(2),
+                        Decimal::ONE / Decimal::from(2),
+                    ),
+                };
+                let question = row
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| format!("{} {} Up/Down", row.asset, row.interval));
+                markets.push(MarketDescriptor {
+                    asset: asset.clone(),
+                    condition_id: row.condition_id.clone(),
+                    question_id: row.event_id.clone(),
+                    up_token_id: up_token,
+                    down_token_id: down_token,
+                    up_price,
+                    down_price,
+                    expires_at_ms: end_ms,
+                    round_slot: end_ms / 1000 / round_sec,
+                    // #427: this plugin's own identity, declared as data.
+                    venue: "polysimulator".to_string(),
+                    neg_risk: false,
+                    question,
+                });
+            }
+
+            if markets.is_empty() {
+                continue; // retry next tick (nothing open for the configured assets)
+            }
+            last_slot = slot;
+
+            let count = markets.len();
+            // Registers the round with the engine AND subscribes the tokens
+            // on the running data feed (both inside the host).
+            host.on_round_markets(markets).await;
+            eprintln!("polysimulator-extension: discovered slot={slot} ({count} markets)");
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iso_timestamps_parse_across_the_shapes_the_venue_sends() {
+        assert_eq!(
+            iso_to_ms("2026-03-15T14:00:00Z"),
+            Some(1_773_583_200_000),
+            "verified against the civil-epoch algorithm (2026-03-15T14:00:00Z)"
+        );
+        assert_eq!(
+            iso_to_ms("2026-03-15T13:00:00+00:00"),
+            Some(1_773_579_600_000),
+            "offset suffix is ignored (venue always sends UTC)"
+        );
+        assert_eq!(iso_to_ms("garbage"), None);
+        assert_eq!(iso_to_ms("2026-03-15"), None);
+    }
+
+    #[test]
+    fn asset_match_is_exact_symbol_not_prose() {
+        let assets = vec![String::from("BTC"), String::from("ETH")];
+        assert_eq!(asset_matches("btc", &assets), Some(String::from("BTC")));
+        assert_eq!(asset_matches("BTC", &assets), Some(String::from("BTC")));
+        assert_eq!(asset_matches("SOL", &assets), None);
+        // Prose must NOT match: the venue gives a structured field.
+        assert_eq!(asset_matches("Will Bitcoin go up", &assets), None);
+    }
+}

@@ -24,6 +24,7 @@ pub enum Venue {
     Polymarket,
     Kalshi,
     PredictFun,
+    PolySimulator,
 }
 
 impl Venue {
@@ -32,6 +33,7 @@ impl Venue {
             Venue::Polymarket => "polymarket",
             Venue::Kalshi => "kalshi",
             Venue::PredictFun => "predictfun",
+            Venue::PolySimulator => "polysimulator",
         }
     }
 }
