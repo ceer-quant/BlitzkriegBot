@@ -331,6 +331,29 @@ export interface ExitSetUpdateDoc {
   error?: string
 }
 
+// ── 挂单卡（issue 456；mirror core model.rs TrackedOrder wire shape）────────
+
+/** `orders.list` 的一行：内核记账的订单，status 是大写枚举（LIVE/FORCE_CLOSED/…）。 */
+export interface OrderRow {
+  orderId: string
+  strategy: string
+  asset: string
+  direction: string
+  tokenId: string
+  side: string
+  mode: string
+  price: number | string
+  size: number | string
+  filledSize: number | string
+  status: string
+  roundSlot: number
+}
+
+/** `orders.force_close` 请求体：只点名订单，判定（幽灵/活轮）在内核。 */
+export interface ForceCloseOrderBody {
+  orderId: string
+}
+
 // ── 轮次时间周期设置卡（mirror core schema RoundDurationResult / runtime cell）──
 
 /** 白名单一行（内核 RoundDurationOption 的 wire 形状；label 缺省 = 非标档位）。 */
@@ -513,6 +536,21 @@ export const api = {
    */
   systemResetTrading: (body: ResetTradingBody) =>
     request<ResetTradingResultDoc>('/system/reset-trading', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * 挂单卡的读路径（issue 456）：内核记账的全部订单（orders.list 的
+   * TrackedOrder 行）。挂单卡据此渲染，每行按 status 决定是否给强平按钮。
+   */
+  orders: () => request<{ orders: OrderRow[] }>('/orders'),
+  /**
+   * 挂单卡的强平写路径（issue 456）：把订单标记为 ForceClosed 并撤场地侧
+   * 残留。轮次仍活着的订单内核拒绝（错误信息原样抛回）——强平只兜幽灵，
+   * 活单走撤单。每次调用内核写一条 force_close 审计。
+   */
+  forceCloseOrder: (body: ForceCloseOrderBody) =>
+    request<{ success: boolean }>('/orders/force-close', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

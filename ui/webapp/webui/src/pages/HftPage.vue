@@ -7,7 +7,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
 import { Activity, Play, Square, Bell, BellOff, Search, X, TrendingUp, TrendingDown, Clock, Filter, Info } from 'lucide-vue-next'
-import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type BookSide, type BookLevel } from '@/api/client'
+import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type BookSide, type BookLevel, type OrderRow } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
 import { useTheme } from '@/lib/theme'
@@ -34,6 +34,7 @@ import EquityCurve from '@/components/charts/EquityCurve.vue'
 import BookDepth from '@/components/charts/BookDepth.vue'
 import KlineChart from '@/components/charts/KlineChart.vue'
 import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
+import ConfirmWordDialog from '@/components/ui/confirm/ConfirmWordDialog.vue'
 
 const store = usePanelStore()
 const settings = useSettingsStore()
@@ -425,8 +426,97 @@ const tradeStats = computed(() => {
   }
 })
 
-const tab = ref<'positions' | 'history'>('positions')
+const tab = ref<'positions' | 'orders' | 'history'>('positions')
 const positions = computed(() => snap.value?.positions ?? [])
+
+// ── issue 456: 挂单簿 + 强平 ────────────────────────────────────────────────
+// 轮次是否已过期：round_slot N 覆盖 [N·dur, (N+1)·dur)，与内核过期扫描同一
+// 公式；slot 0（无轮次）不参与（内核同样豁免它）。过期与否只决定按钮
+// 可用性 —— 真判定在内核，按钮点了也过不了活轮拒绝。
+const roundDurSec = 900
+function orderExpired(o: OrderRow): boolean {
+  return o.roundSlot > 0 && Date.now() / 1000 >= (o.roundSlot + 1) * roundDurSec
+}
+const orderRows = computed<OrderRow[]>(() => {
+  // snapshot 里已带 orders（网关从 orders.list 拉的同一份）；不在时回落
+  // 到专用读路径，两边都是内核的 TrackedOrder wire 形状。
+  const fromSnap = (snap.value as unknown as { orders?: OrderRow[] } | null)?.orders
+  return fromSnap ?? []
+})
+const expiredOrderRows = computed(() => orderRows.value.filter((o) => o.status === 'LIVE' || o.status === 'PARTIALLY_FILLED' || o.status === 'PENDING').filter(orderExpired))
+
+const orderBusy = ref(false)
+const orderErr = ref<string | null>(null)
+const orderMsg = ref<string | null>(null)
+const forceOpen = ref(false)
+const forceTarget = ref<OrderRow | null>(null)
+const sweepOpen = ref(false)
+
+function orderStatusLabel(s: string): string {
+  const map: Record<string, string> = {
+    PENDING: '待确认', LIVE: '挂单中', PARTIALLY_FILLED: '部分成交',
+    FILLED: '已成交', CANCELLED: '已撤销', REJECTED: '已拒绝',
+    FAILED: '失败', FORCE_CLOSED: '已强平',
+  }
+  return map[s] ?? s
+}
+function orderStatusTone(s: string): 'up' | 'down' | 'default' | 'gold' {
+  if (s === 'LIVE' || s === 'PENDING' || s === 'PARTIALLY_FILLED') return 'gold'
+  if (s === 'FILLED') return 'up'
+  if (s === 'FORCE_CLOSED' || s === 'CANCELLED') return 'down'
+  return 'default'
+}
+
+function askForceClose(o: OrderRow): void {
+  orderErr.value = null
+  forceTarget.value = o
+  forceOpen.value = true
+}
+
+async function doForceClose(): Promise<void> {
+  const target = forceTarget.value
+  if (!target || orderBusy.value) return
+  orderBusy.value = true
+  orderErr.value = null
+  try {
+    await api.forceCloseOrder({ orderId: target.orderId })
+    orderMsg.value = `已强平 ${target.orderId}（审计已写）`
+    forceOpen.value = false
+    await store.refresh()
+  } catch (e) {
+    orderErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    orderBusy.value = false
+    setTimeout(() => { orderMsg.value = null }, 5000)
+  }
+}
+
+/** 批量清理过期挂单：逐单调内核，一单失败不挡下一单（各自审计）。 */
+async function doSweepExpired(): Promise<void> {
+  if (orderBusy.value) return
+  orderBusy.value = true
+  orderErr.value = null
+  let closed = 0
+  const failed: string[] = []
+  try {
+    for (const o of expiredOrderRows.value) {
+      try {
+        await api.forceCloseOrder({ orderId: o.orderId })
+        closed += 1
+      } catch {
+        failed.push(o.orderId)
+      }
+    }
+    orderMsg.value = failed.length
+      ? `清理完成：${closed} 笔强平，${failed.length} 笔被内核拒绝（${failed.slice(0, 3).join('、')}${failed.length > 3 ? '…' : ''}）`
+      : `清理完成：${closed} 笔挂单已强平（各写一条审计）`
+    sweepOpen.value = false
+    await store.refresh()
+  } finally {
+    orderBusy.value = false
+    setTimeout(() => { orderMsg.value = null }, 6000)
+  }
+}
 const positionUnrealized = computed(() =>
   positions.value.reduce((a, p) => a + (Number(p.unrealizedPct) || 0), 0),
 )
@@ -846,17 +936,32 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
       </Card>
     </div>
 
-    <!-- ── positions / history ──────────────────────────────────────────── -->
+    <!-- ── positions / orders / history ─────────────────────────────────── -->
     <Card class="mt-3.5" dense>
       <div class="mb-3.5 flex flex-wrap items-center gap-3">
         <SegmentedControl
           v-model="tab"
           :segments="[
             { id: 'positions', label: '当前持仓', badge: positions.length },
+            { id: 'orders', label: '当前挂单', badge: orderRows.length },
             { id: 'history', label: '历史订单', badge: cumStats.total },
           ]"
           size="sm"
         />
+        <!-- issue 456: 批量清理过期挂单 —— 逐单调 orders.force_close，内核
+             逐单拒绝仍活着的轮次，逐单写审计。只清理「轮次已过期」的行，
+             活跃挂单原样保留（强平只兜幽灵，不做无差别撤单）。 -->
+        <Button
+          v-if="tab === 'orders' && expiredOrderRows.length > 0"
+          class="ml-auto"
+          variant="danger"
+          size="sm"
+          :disabled="orderBusy"
+          :title="`对 ${expiredOrderRows.length} 笔轮次已过期的挂单逐笔强平（活跃挂单不动）`"
+          @click="sweepOpen = true"
+        >
+          清理过期挂单（{{ expiredOrderRows.length }}）
+        </Button>
         <div v-if="tab === 'history'" class="ml-auto flex flex-wrap items-center gap-2">
           <select v-model="fTime" class="filter-select">
             <option value="all">全部时间</option>
@@ -979,6 +1084,67 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         <EmptyState v-else text="无持仓" hint="启用策略后，成交平仓即出现在这里。" compact />
       </div>
 
+      <!-- issue 456: 挂单簿 —— 内核记账的订单，逐行强平（确认词门） -->
+      <div v-else-if="tab === 'orders'">
+        <div v-if="orderRows.length" class="overflow-x-auto">
+          <table class="w-full min-w-[900px] text-[13px]">
+            <thead>
+              <tr class="text-left">
+                <th class="label-micro px-2 pb-2">资产</th>
+                <th class="label-micro px-2 pb-2">方向</th>
+                <th class="label-micro px-2 pb-2">侧</th>
+                <th class="label-micro px-2 pb-2">方式</th>
+                <th class="label-micro px-2 pb-2">策略</th>
+                <th class="label-micro px-2 pb-2 text-right">价格</th>
+                <th class="label-micro px-2 pb-2 text-right">数量</th>
+                <th class="label-micro px-2 pb-2 text-right">已成交</th>
+                <th class="label-micro px-2 pb-2">轮次</th>
+                <th class="label-micro px-2 pb-2">状态</th>
+                <th class="label-micro px-2 pb-2 text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="o in orderRows"
+                :key="o.orderId"
+                class="border-t border-line transition-colors hover:bg-panel-2"
+              >
+                <td class="px-2 py-2.5 font-semibold">{{ o.asset }}</td>
+                <td class="px-2 py-2.5">
+                  <Badge :variant="o.direction === 'up' ? 'up' : 'down'">{{ o.direction.toUpperCase() }}</Badge>
+                </td>
+                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ o.side }}</td>
+                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ o.mode }}</td>
+                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ o.strategy || '—' }}</td>
+                <td class="px-2 py-2.5 text-right num"><RollingNumber :value="Number(o.price).toFixed(3)" /></td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(o.size).toFixed(1)" /></td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(o.filledSize).toFixed(1)" /></td>
+                <td class="px-2 py-2.5 text-[12px] num text-faint-fg">
+                  <RollingNumber :value="`#${o.roundSlot}`" />
+                </td>
+                <td class="px-2 py-2.5">
+                  <Badge :variant="orderStatusTone(o.status)">{{ orderStatusLabel(o.status) }}</Badge>
+                </td>
+                <td class="px-2 py-2.5 text-right">
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    :disabled="orderBusy || !orderExpired(o)"
+                    :title="orderExpired(o)
+                      ? `强平 ${o.orderId}（轮次已过期，写 force_close 审计）`
+                      : '轮次仍活着，强平被内核拒绝 —— 活单等成交或自然过期'"
+                    @click="askForceClose(o)"
+                  >
+                    强平
+                  </Button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <EmptyState v-else text="无挂单" hint="策略报出的订单会出现在这里；过期残留可用强平清理。" compact />
+      </div>
+
       <!-- history waterfall -->
       <div v-else>
         <div v-if="visibleRows.length" class="overflow-x-auto">
@@ -1073,6 +1239,40 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
       hint="网关在线时会自动拉取；持续为空请确认 blitzkrieg-core 已启动。"
     />
   </Card>
+
+  <!-- issue 456: 单笔强平确认词门 —— 逐字输入 FORCE 才解锁执行。 -->
+  <ConfirmWordDialog
+    v-model:open="forceOpen"
+    word="FORCE"
+    title="强平挂单"
+    :lines="forceTarget ? [
+      `订单 ${forceTarget.orderId}（${forceTarget.asset} ${forceTarget.direction.toUpperCase()} · ${Number(forceTarget.price).toFixed(3)} × ${Number(forceTarget.size).toFixed(1)}）`,
+      '动作 = 撤场地侧残留 + 终态 ForceClosed（不可恢复）',
+      '每次强平内核写一条 force_close 审计（订单/策略/轮次/原因）',
+      '轮次仍活着的挂单会被内核拒绝 —— 强平只兜幽灵，不做无差别撤单',
+    ] : []"
+    action-label="确认强平"
+    :busy="orderBusy"
+    :error="orderErr"
+    @confirm="doForceClose"
+  />
+
+  <!-- issue 456: 批量清理过期挂单确认词门 —— 同一门，逐单审计。 -->
+  <ConfirmWordDialog
+    v-model:open="sweepOpen"
+    word="FORCE"
+    title="清理过期挂单"
+    :lines="[
+      `对 ${expiredOrderRows.length} 笔轮次已过期的挂单逐笔强平`,
+      '活跃挂单不在清理范围（按钮只统计已过期的行）',
+      '逐单调用 orders.force_close，逐单写审计；个别被拒不挡其余',
+      '被内核拒绝的订单会在结果里点名',
+    ]"
+    action-label="确认清理"
+    :busy="orderBusy"
+    :error="orderErr"
+    @confirm="doSweepExpired"
+  />
 </template>
 
 <style scoped>

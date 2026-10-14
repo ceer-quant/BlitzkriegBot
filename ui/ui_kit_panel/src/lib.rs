@@ -116,10 +116,12 @@ pub fn parse_args_from(args: impl IntoIterator<Item = String>) -> PanelArgs {
             "--tab" => {
                 tab = match iter.next().as_deref() {
                     Some("2") | Some("positions") => Tab::Positions,
-                    Some("3") | Some("trades") => Tab::Trades,
-                    Some("4") | Some("plugins") => Tab::Plugins,
-                    Some("5") | Some("evolution") => Tab::Evolution,
-                    Some("6") | Some("settings") => Tab::Settings,
+                    Some("3") | Some("orders") => Tab::Orders,
+                    Some("4") | Some("trades") => Tab::Trades,
+                    Some("5") | Some("plugins") => Tab::Plugins,
+                    Some("6") | Some("evolution") => Tab::Evolution,
+                    Some("7") | Some("decisions") => Tab::Decisions,
+                    Some("8") | Some("settings") => Tab::Settings,
                     _ => Tab::Overview,
                 }
             }
@@ -936,8 +938,8 @@ mod tests {
         let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         let mut app = App::new("/tmp/x.sock".into(), false);
 
-        // '5' enters the evolution tab; up/down move the cursor harmlessly.
-        app.on_key(key('5'));
+        // '6' enters the evolution tab; up/down move the cursor harmlessly.
+        app.on_key(key('6'));
         assert_eq!(app.tab, Tab::Evolution);
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.evo_focus, 1);
@@ -988,9 +990,9 @@ mod tests {
         assert!(app.toggle_needs_confirmation("rollback mean_reversion"));
         assert!(!app.toggle_needs_confirmation("decide prop-42 reject"));
 
-        // Tab cycles through all seven pages: from Evolution one press lands on
+        // Tab cycles through all eight pages: from Evolution one press lands on
         // the E25 Decisions face, the next on Settings (VERSIONING.md §6.2),
-        // the next wraps back to Overview, and four more come the long way
+        // the next wraps back to Overview, and five more come the long way
         // round to Evolution again.
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.tab, Tab::Decisions);
@@ -998,14 +1000,14 @@ mod tests {
         assert_eq!(app.tab, Tab::Settings);
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.tab, Tab::Overview);
-        for _ in 0..4 {
+        for _ in 0..5 {
             app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         }
         assert_eq!(app.tab, Tab::Evolution);
 
-        // --tab 5 starts directly on the evolution page.
+        // --tab 6 starts directly on the evolution page.
         assert_eq!(
-            parse_args_from(["--tab".into(), "5".into()]).tab,
+            parse_args_from(["--tab".into(), "6".into()]).tab,
             Tab::Evolution
         );
     }
@@ -1020,7 +1022,7 @@ mod tests {
 
         let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         let mut app = App::new("test.sock".into(), false);
-        app.on_key(key('6'));
+        app.on_key(key('8'));
         assert_eq!(app.tab, Tab::Settings);
 
         // `a`: auto-update starts OFF, so the toggle targets ON and asks first.

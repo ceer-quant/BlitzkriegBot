@@ -10,6 +10,9 @@ use std::time::Instant;
 pub enum Tab {
     Overview,
     Positions,
+    /// issue 456: the kernel's order book (orders.list rows), with the [F]
+    /// force-close on a selected ghost order.
+    Orders,
     Trades,
     Plugins,
     Evolution,
@@ -24,28 +27,31 @@ impl Tab {
         vec![
             "1 Overview",
             "2 Positions",
-            "3 Trades",
-            "4 Plugins",
-            "5 Evolution",
-            "6 Decisions",
-            "7 Settings",
+            "3 Orders",
+            "4 Trades",
+            "5 Plugins",
+            "6 Evolution",
+            "7 Decisions",
+            "8 Settings",
         ]
     }
     pub fn index(self) -> usize {
         match self {
             Tab::Overview => 0,
             Tab::Positions => 1,
-            Tab::Trades => 2,
-            Tab::Plugins => 3,
-            Tab::Evolution => 4,
-            Tab::Decisions => 5,
-            Tab::Settings => 6,
+            Tab::Orders => 2,
+            Tab::Trades => 3,
+            Tab::Plugins => 4,
+            Tab::Evolution => 5,
+            Tab::Decisions => 6,
+            Tab::Settings => 7,
         }
     }
     pub fn next(self) -> Self {
         match self {
             Tab::Overview => Tab::Positions,
-            Tab::Positions => Tab::Trades,
+            Tab::Positions => Tab::Orders,
+            Tab::Orders => Tab::Trades,
             Tab::Trades => Tab::Plugins,
             Tab::Plugins => Tab::Evolution,
             Tab::Evolution => Tab::Decisions,
@@ -171,6 +177,8 @@ pub struct App {
     /// Evolution-tab selection: index into the pending-proposal list (the same
     /// order `ui.rs` renders, so cursor and screen agree).
     pub evo_focus: usize,
+    /// issue 456: Orders-tab selection — index into `snap.orders` as rendered.
+    pub orders_focus: usize,
     /// Pending confirmation for a dangerous plugin toggle: `Some(text)` shows
     /// the confirm bar; `y` executes, anything else cancels.
     pub pending_confirmation: Option<String>,
@@ -485,6 +493,7 @@ impl App {
             decisions: Vec::new(),
             plugin_focus: 0,
             evo_focus: 0,
+            orders_focus: 0,
             pending_confirmation: None,
             check: CheckStage::default(),
             hints_used: [false; HINTS.len()],
@@ -768,20 +777,48 @@ impl App {
                 Action::None
             }
             KeyCode::Char('3') => {
-                self.tab = Tab::Trades;
+                self.tab = Tab::Orders;
                 Action::None
             }
             KeyCode::Char('4') => {
+                self.tab = Tab::Trades;
+                Action::None
+            }
+            KeyCode::Char('5') => {
                 self.tab = Tab::Plugins;
                 Action::RefreshPlugins
             }
-            KeyCode::Char('5') => {
+            KeyCode::Char('6') => {
                 self.tab = Tab::Evolution;
                 Action::None // the 1 s poller re-fetches proposals with the snapshot
             }
-            KeyCode::Char('6') => {
+            KeyCode::Char('7') => {
+                self.tab = Tab::Decisions;
+                Action::None
+            }
+            KeyCode::Char('8') => {
                 self.tab = Tab::Settings;
                 Action::None // the snapshot poller carries system_version
+            }
+            // issue 456: ↑/↓ move the Orders-tab cursor; [F] force-closes the
+            // selected order — as a ConfirmToggle, so the y/n bar intercepts
+            // and only a confirmed `force-order` line reaches the dispatcher.
+            KeyCode::Up if self.tab == Tab::Orders => {
+                self.orders_focus = self.orders_focus.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down if self.tab == Tab::Orders => {
+                self.orders_focus = self.orders_focus.saturating_add(1);
+                Action::None
+            }
+            KeyCode::Char('f') | KeyCode::Char('F') if self.tab == Tab::Orders => {
+                match self.selected_order_id() {
+                    Some(id) => Action::ConfirmToggle(format!("force-order {id}")),
+                    None => {
+                        self.log("no order row selected (use ↑/↓ in the Orders tab)".to_string());
+                        Action::None
+                    }
+                }
             }
             // #364: `p` on the Settings tab enters the policy editor's
             // sub-mode (its keys and the [q] return are handled above).
@@ -1258,6 +1295,16 @@ impl App {
             .collect()
     }
 
+    /// issue 456: the order id under the Orders-tab cursor, if the book is
+    /// not empty. Cursor and `ui.rs` render the same `snap.orders` order.
+    pub fn selected_order_id(&self) -> Option<String> {
+        if self.snap.orders.is_empty() {
+            return None;
+        }
+        let i = self.orders_focus.min(self.snap.orders.len() - 1);
+        Some(self.snap.orders[i].order_id.clone())
+    }
+
     /// The pending proposal under the cursor, if the list is not empty.
     fn evo_selected(&self) -> Option<&EvolutionProposalView> {
         let pending = self.evo_pending();
@@ -1336,11 +1383,14 @@ impl App {
     pub fn toggle_needs_confirmation(&self, cmd: &str) -> bool {
         // Disabling anything swaps routing (may strand an open position);
         // accepting an evolution proposal swaps live strategy parameters;
-        // rollback reverts them. Those three are the dangerous verbs here.
+        // rollback reverts them; force-order declares a live book entry dead
+        // (issue 456). Those four are the dangerous verbs here.
         cmd.contains(" off")
             || cmd.contains("disable")
             || cmd.contains(" accept")
             || cmd.starts_with("rollback ")
+            || cmd.starts_with("force-order ")
+            || cmd.starts_with("force_order ")
     }
 }
 
@@ -1357,7 +1407,7 @@ mod tests {
     /// kernel's `list`/`get`/`history` answer them (raw wire shapes).
     fn app_with_policy() -> App {
         let mut app = App::new("test.sock".into(), false);
-        app.on_key(key('6'));
+        app.on_key(key('8'));
         // Enter the policy sub-mode the way the operator does: `p`.
         app.on_key(key('p'));
         app.policy_accounts = vec![serde_json::json!({
@@ -1393,13 +1443,13 @@ mod tests {
         app
     }
 
-    /// #364: `6` enters Settings and demands a policy refresh; ←/→ walk the
+    /// #364: `8` enters Settings and demands a policy refresh; ←/→ walk the
     /// account chips (defaults first, then the kernel's list) and re-read.
     #[test]
     fn settings_tab_policy_refresh_and_account_switch() {
         let mut app = App::new("test.sock".into(), false);
-        // Plain `6` does NOT open the editor (the tab keeps its own keys).
-        assert!(matches!(app.on_key(key('6')), Action::None));
+        // Plain `8` does NOT open the editor (the tab keeps its own keys).
+        assert!(matches!(app.on_key(key('8')), Action::None));
         assert!(!app.policy_mode);
         // `p` enters the policy sub-mode and demands a refresh.
         assert!(matches!(app.on_key(key('p')), Action::PolicyRefresh));
@@ -1540,5 +1590,44 @@ mod tests {
             assert!(app.pending_confirmation.is_none());
             assert!(app.policy_draft.is_none());
         }
+    }
+
+    /// issue 456: the Orders tab's [F] routes through the y/n bar — a ghost
+    /// force-close never fires on one keypress — and the confirmed line is
+    /// `force-order <id>` for the row under the cursor. With nothing in the
+    /// book, [F] says so instead of guessing.
+    #[test]
+    fn orders_tab_force_close_asks_and_names_the_row() {
+        let mut app = App::new("test.sock".into(), false);
+        app.on_key(key('3')); // Orders tab
+        assert_eq!(app.tab, Tab::Orders);
+        // Empty book: [F] refuses, nothing is armed.
+        assert!(matches!(app.on_key(key('f')), Action::None));
+        assert!(app.pending_confirmation.is_none());
+        assert!(app.logs.last().is_some_and(|l| l.contains("no order row")));
+
+        // One ghost order under the cursor: [F] arms the y/n bar.
+        app.snap.orders = vec![blitzkrieg_ui_kit::core::types::OrderView {
+            order_id: "dry_7".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC_UP".into(),
+            direction: "up".into(),
+            token_id: "tok-1".into(),
+            side: "buy".into(),
+            mode: "maker".into(),
+            price: 0.39,
+            size: 5.0,
+            filled_size: 0.0,
+            status: "LIVE".into(),
+            round_slot: 123,
+        }];
+        assert!(matches!(app.on_key(key('f')), Action::ConfirmToggle(_)));
+        // The main loop sets the bar from a ConfirmToggle when the predicate
+        // demands it — simulate that handoff here.
+        assert!(app.toggle_needs_confirmation("force-order dry_7"));
+        app.pending_confirmation = Some("force-order dry_7".into());
+        // `y` resolves the bar into the dispatch line (what the main loop runs).
+        let action = app.on_key(key('y'));
+        assert!(matches!(action, Action::RunCommand(c) if c == "force-order dry_7"));
     }
 }
