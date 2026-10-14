@@ -5,7 +5,7 @@
   "entry": "strategy.lua",
   "sha256": "dd078d1d1903bd5cb46d404a77f5e093cd2306731d1e609d5555a58c4824d87a",
   "author": "BlitzkriegBot",
-  "description": "Trend-confirmed dip buyer — the exact Lua port of the Rust reference implementation (strategy_logic TrendTracker + evaluate_spread_arb). Prices run on scaled-integer decimals (rust_decimal semantics incl. banker's round2); entries are resting bids at factor*mid off FRESH books only; every intent is adjudicated by the kernel.",
+  "description": "DISPROVEN, keep OFF — trend-following entries in 15m rounds lose structurally: revived post-#419 locked-top fix, the full v2 corpus census measured -$475.06 / WR 10.06% (2,505 stop-loss legs -$473.80; RETEST-2026-10-10, docs/strategy-review-0.4.1.md). Trend-confirmed dip buyer — the exact Lua port of the Rust reference implementation (strategy_logic TrendTracker + evaluate_spread_arb). Prices run on scaled-integer decimals (rust_decimal semantics incl. banker's round2); entries are resting bids at factor*mid off FRESH books only; every intent is adjudicated by the kernel.",
   "tunables": {
     "trend_min_price": {
       "type": "decimal",
