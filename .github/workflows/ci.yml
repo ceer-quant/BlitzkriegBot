@@ -276,6 +276,13 @@ jobs:
         run: node scripts/core-parity.mjs
       - name: Account parity gate (dry/live ledgers bit-identical)
         run: node scripts/account-parity.mjs
+      # 轮次时间周期设置卡（round_duration.get/set）：真内核 spawn 验证
+      # readout（白名单+来源）、写路径落持久格、next_session 语义（运行中的
+      # 网格不动）、重启生效（source=runtime）、显式 --round-sec outranks
+      # 持久格（回放基线不被 UI 劫持）、白名单外/歧义写入拒绝。一切写入都在
+      # 脚本自己的 scratch cwd。
+      - name: Round-duration settings gate
+        run: node scripts/round-duration-check.mjs
 
   # KI-9: the specialized acceptance gates, promoted from "run them locally and
   # remember" to CI. Each pins a milestone acceptance (E2/E4/E5/E9/P-1) on the

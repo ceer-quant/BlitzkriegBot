@@ -676,6 +676,7 @@ async fn handle_line(
         method::BLUEPRINT_SAVE,
         method::BLUEPRINT_SAVE_SOURCE,
         method::SYSTEM_UPDATE_CONFIGURE,
+        method::ROUND_DURATION_SET,
     ];
     if READONLY_REFUSED.contains(&method) && core.lock().await.mode() == Mode::ReadOnly {
         return fail(
@@ -1042,6 +1043,37 @@ async fn handle_line(
                 }
             }
         },
+
+        // 轮次时间周期的运行时读数：当前生效秒数 + 来源 + 白名单 + 下次
+        // 会话将解析到什么。只读，组装自活 config 与持久格 —— UI 设置卡
+        // 的预填源。
+        method::ROUND_DURATION_GET => {
+            let c = core.lock().await;
+            Ok(
+                serde_json::to_value(crate::service::round_duration_readout(&c))
+                    .unwrap_or(Value::Null),
+            )
+        }
+
+        // 轮次时间周期的运行时写路径（next_session）：白名单校验 + 原子
+        // 持久格写入。被拒的 patch 不动文件；`reset` 清格回落启动解析。
+        method::ROUND_DURATION_SET => {
+            typed(params, |p: SetRoundDurationParams| {
+                let core = core.clone();
+                async move {
+                    let actor = match peer {
+                        PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                        _ => "uid:unknown".to_string(),
+                    };
+                    let update =
+                        core.lock()
+                            .await
+                            .apply_round_duration_set(&p, &actor, now_ms())?;
+                    Ok(serde_json::to_value(update).unwrap_or(Value::Null))
+                }
+            })
+            .await
+        }
 
         method::ORDER_PLACE => {
             // §9.5: an order with NO accountId of its own spends this
@@ -3771,6 +3803,217 @@ mod tests {
                 .contains("at least one"),
             "an empty patch is refused: {empty}"
         );
+    }
+
+    /// 轮次时间周期可设置（`round_duration.get`/`round_duration.set`）的
+    /// wire 合同：readout 回答「本会话生效值 + 来源 + 白名单 + 下次会话将
+    /// 解析到什么」；写路径把白名单内的值落进持久格（`nextSessionSec`
+    /// 如实回报）、格内容用独立加载器读回验证（原子写 + 重启读回同一路
+    /// 径）、白名单外的值拒绝且格不动、`reset` 清格、两者都给拒绝、无
+    /// runtime_config_path 的 core 拒绝写（回测/进程内测试不落盘）。
+    /// **next_session 语义** 由构造保证（写路径只碰持久格），测试同时钉住
+    /// 本会话的 `round_duration_sec` 一个字节不动。
+    #[tokio::test]
+    async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
+        // The cell's test path lives in a scratch dir the test owns (Hard
+        // Disk per the repo's write policy); the fixture core points at it.
+        let dir = std::env::temp_dir().join(format!("bk-round-dur-wire-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cell_path = dir.join("config.json");
+        let cell_str = cell_path.to_string_lossy().into_owned();
+
+        let (core, registry, peer) = {
+            let cfg = CoreConfig {
+                runtime_config_path: Some(cell_str.clone()),
+                trade_log_path: None,
+                order_log_path: None,
+                position_log_path: None,
+                ..Default::default()
+            };
+            let mut c = Core::new(cfg.clone());
+            c.set_balance(cfg.dry_seed_balance);
+            (
+                Arc::new(AsyncMutex::new(c)),
+                crate::market::registry::MarketPluginRegistry::new(),
+                PeerAuth::SameUid { uid: own_uid() },
+            )
+        };
+
+        // The readout before any write: effective 900 from the compiled
+        // default, nothing persisted, the whitelist with its labels.
+        let read = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"round_duration.get","params":{}}"#.to_string(),
+        )
+        .await;
+        assert!(read.get("error").is_none(), "readout must answer: {read}");
+        assert_eq!(read["result"]["effectiveSec"], serde_json::json!(900));
+        assert_eq!(read["result"]["source"], serde_json::json!("default"));
+        assert_eq!(read["result"]["persisted"], serde_json::json!(false));
+        assert_eq!(
+            read["result"]["nextSessionSec"],
+            serde_json::json!(900),
+            "no cell means the next session re-resolves to the effective value: {read}"
+        );
+        let labels: Vec<(i64, &str)> = read["result"]["allowed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| {
+                (
+                    o["sec"].as_i64().unwrap(),
+                    o["label"].as_str().unwrap_or(""),
+                )
+            })
+            .collect();
+        assert!(
+            labels.contains(&(300, "5m")) && labels.contains(&(900, "15m")),
+            "the whitelist carries the scanner's labels: {labels:?}"
+        );
+
+        // The write path: 5m lands in the cell, the reply names the NEXT
+        // session's value, and the RUNNING session is untouched.
+        let set = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"durationSec":300,"reason":"faster rounds"}}"#.to_string(),
+        )
+        .await;
+        assert!(set.get("error").is_none(), "the set must land: {set}");
+        assert_eq!(
+            set["result"]["nextSessionSec"],
+            serde_json::json!(300),
+            "the reply names what the restart will run: {set}"
+        );
+        assert_eq!(set["result"]["reset"], serde_json::json!(false));
+        assert_eq!(
+            set["result"]["actor"],
+            serde_json::json!(format!("uid:{}", own_uid()))
+        );
+        {
+            let c = core.lock().await;
+            assert_eq!(
+                c.config().round_duration_sec,
+                900,
+                "next-session semantics: the running grid does not move"
+            );
+        }
+        // The cell content, read back through the SAME loader a restart
+        // would use — the write and the boot read agree by construction.
+        let cell =
+            crate::ipc::runtime_config::load_round_duration_from(std::path::Path::new(&cell_str))
+                .expect("the cell must load");
+        assert_eq!(cell.duration_sec, 300);
+
+        // The readout now reports the cell as the next session's value while
+        // the effective value stays this session's.
+        let read2 = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"round_duration.get","params":{}}"#.to_string(),
+        )
+        .await;
+        assert_eq!(read2["result"]["effectiveSec"], serde_json::json!(900));
+        assert_eq!(read2["result"]["nextSessionSec"], serde_json::json!(300));
+        assert_eq!(read2["result"]["persisted"], serde_json::json!(true));
+
+        // An off-whitelist value is refused and the cell is untouched.
+        let bad = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":4,"method":"round_duration.set","params":{"durationSec":60}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            bad["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not on the whitelist"),
+            "an off-whitelist value is refused by name: {bad}"
+        );
+        assert_eq!(
+            crate::ipc::runtime_config::load_round_duration_from(std::path::Path::new(&cell_str))
+                .unwrap()
+                .duration_sec,
+            300,
+            "a refused write leaves the cell exactly as it was"
+        );
+
+        // durationSec + reset together is refused.
+        let both = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":5,"method":"round_duration.set","params":{"durationSec":300,"reset":true}}"#.to_string(),
+        )
+        .await;
+        assert!(
+            both["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not both"),
+            "an ambiguous write is refused: {both}"
+        );
+
+        // reset clears the cell: the next session falls back to the boot
+        // resolution, and the readout reports nothing persisted.
+        let reset = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":6,"method":"round_duration.set","params":{"reset":true}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reset.get("error").is_none(), "the reset must land: {reset}");
+        assert_eq!(reset["result"]["reset"], serde_json::json!(true));
+        assert_eq!(
+            reset["result"]["nextSessionSec"],
+            serde_json::json!(900),
+            "after a reset the next session re-resolves to the effective value: {reset}"
+        );
+        assert_eq!(
+            crate::ipc::runtime_config::load_round_duration_from(std::path::Path::new(&cell_str)),
+            None,
+            "the cell holds nothing after a reset"
+        );
+        let read3 = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":7,"method":"round_duration.get","params":{}}"#.to_string(),
+        )
+        .await;
+        assert_eq!(read3["result"]["persisted"], serde_json::json!(false));
+        assert_eq!(read3["result"]["nextSessionSec"], serde_json::json!(900));
+
+        // A core with NO runtime config path (backtests, in-process tests)
+        // refuses the write instead of dropping a file into whatever
+        // checkout the caller runs from.
+        let (bare, registry2, peer2) = hot_reload_fixture().await;
+        let refused = rpc(
+            &bare,
+            &registry2,
+            &peer2,
+            r#"{"jsonrpc":"2.0","id":1,"method":"round_duration.set","params":{"durationSec":300}}"#.to_string(),
+        )
+        .await;
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("persistence is disabled"),
+            "a path-less core refuses the write: {refused}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// #191 acceptance (b): a knob OUTSIDE the safe subset is refused BY NAME,

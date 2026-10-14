@@ -40,6 +40,18 @@ pub struct CoreConfig {
     pub breaker_cooldown_sec: i64,
     /// Round length used to derive a position's expiry from its round slot.
     pub round_duration_sec: i64,
+    /// Where the effective round length came from — one of `cli` / `env` /
+    /// `runtime` / `toml` / `default`. The boot resolution owns the spelling;
+    /// `round_duration.get` surfaces it so the UI can say "an explicit flag
+    /// outranks this card". Not a decision input anywhere.
+    pub round_duration_source: &'static str,
+    /// The round-duration UI card's durable cell (`data/runtime/config.json`
+    /// in production). `None` disables the write path — the backtester and
+    /// most in-process tests run with `None`, and a `round_duration.set` then
+    /// refuses with "persist is disabled" instead of writing into whatever
+    /// checkout the caller happens to run from (the same posture as
+    /// `strategy_state_path`).
+    pub runtime_config_path: Option<String>,
     /// When false the core never auto-submits exits on tick; positions are only
     /// closed by explicit fills/flatten. Used by order-layer tests and for a
     /// "positions managed externally" deployment. Default true.
@@ -719,6 +731,8 @@ impl Default for CoreConfig {
             max_consecutive_losses: 3,
             breaker_cooldown_sec: 300,
             round_duration_sec: 900,
+            round_duration_source: "default",
+            runtime_config_path: None,
             auto_exits_enabled: true,
             intent_audit_enabled: true,
             engine_enabled: false,
@@ -905,6 +919,45 @@ fn fee_quote_at(
         fee_pct_of_price: schedule.fee_pct(price),
         maker_fee_per_share: Decimal::ZERO,
         model_matches,
+    }
+}
+
+/// `round_duration.get` readout (`round_duration_readout`): assembled from the
+/// LIVE config and the persisted cell on every call — the boot resolution
+/// wrote `source` into the config's twin fields at startup, so a read answers
+/// "what is running" and "what will the restart run" without any cached
+/// snapshot that a write could make a lie. A core with no runtime config path
+/// (backtests, in-process tests) reports `persisted: false` — there is no cell
+/// to read, and the effective value is the truth for the next session too.
+pub fn round_duration_readout(core: &Core) -> crate::ipc::schema::RoundDurationResult {
+    use crate::ipc::schema::{RoundDurationOption, RoundDurationResult};
+    let effective = core.config().round_duration_sec;
+    let cell = core.config().runtime_config_path.as_deref().and_then(|p| {
+        crate::ipc::runtime_config::load_round_duration_from(std::path::Path::new(p))
+    });
+    let next_session = cell.map(|c| c.duration_sec).unwrap_or(effective);
+    let mut allowed: Vec<RoundDurationOption> = crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS
+        .iter()
+        .map(|&sec| RoundDurationOption {
+            sec,
+            label: crate::scanner::duration_label_for(sec),
+        })
+        .collect();
+    // A non-standard boot value (e.g. a test's 60s) is not on the whitelist —
+    // list it too, unlabeled, so the card can name what is actually running
+    // instead of silently showing the nearest allowed value.
+    if !crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS.contains(&effective) {
+        allowed.push(RoundDurationOption {
+            sec: effective,
+            label: None,
+        });
+    }
+    RoundDurationResult {
+        effective_sec: effective,
+        source: core.config().round_duration_source,
+        allowed,
+        next_session_sec: next_session,
+        persisted: cell.is_some(),
     }
 }
 
@@ -7785,6 +7838,123 @@ impl Core {
             reason: patch.reason.clone(),
             persisted: false,
             note: EXIT_SET_UPDATE_NOTE,
+        })
+    }
+
+    /// 轮次时间周期的运行时写路径（`round_duration.set`，UI 设置卡）：
+    /// **next_session** —— 白名单校验通过后只写持久格（生产
+    /// `data/runtime/config.json`），本会话的网格一个字节都不动。
+    ///
+    /// 为什么不是热旋钮：轮次周期是网格坐标系 —— `round_slot` 是用会话的
+    /// duration 推导的 UTC 网格索引，仓位恢复（`OpenParams.expires_at_ms`）、
+    /// #457 过期扫描都用**当前** config 重算存量订单/仓位的过期时间；热切
+    /// duration 会把旧 slot 全部错解（15m 轮的 slot 3 在 5m 网格里是另一个
+    /// 时间窗）。重启后启动层读回持久格，新网格从干净状态开始。
+    ///
+    /// `reset: true` 清格 —— 下次会话回落启动解析（显式 flag > env >
+    /// TOML > 默认）。`durationSec` 与 `reset` 恰好给一个，都给或都不给
+    /// 拒绝。`runtime_config_path: None`（回测器/进程内测试）拒绝写并如实
+    /// 回报 —— 测试不往调用者恰好在的 checkout 里落文件。
+    pub fn apply_round_duration_set(
+        &mut self,
+        patch: &crate::ipc::schema::SetRoundDurationParams,
+        actor: &str,
+        now_ms: i64,
+    ) -> CoreResult<crate::ipc::schema::RoundDurationUpdate> {
+        use crate::ipc::schema::{ROUND_DURATION_SET_NOTE, RoundDurationUpdate};
+
+        if patch.reset && patch.duration_sec.is_some() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "round_duration.set: give durationSec or reset, not both".to_string(),
+            ));
+        }
+        let sec = patch.duration_sec;
+        if !patch.reset && sec.is_none() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "round_duration.set needs durationSec (one of 300/900/3600/14400/86400) \
+                 or reset: true"
+                    .to_string(),
+            ));
+        }
+
+        let persist = |value: Option<i64>| -> CoreResult<()> {
+            let Some(path) = self.config.runtime_config_path.as_deref() else {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    "round_duration.set: no runtime config path configured — \
+                     persistence is disabled for this core (backtests and \
+                     in-process tests); nothing was applied"
+                        .to_string(),
+                ));
+            };
+            crate::ipc::runtime_config::persist_round_duration_to(
+                std::path::Path::new(path),
+                value,
+                actor,
+                now_ms,
+            )
+            .map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!("round_duration.set: persist failed, nothing changed: {e}"),
+                )
+            })
+        };
+
+        // reset 路径：清格，下次会话回落启动解析。
+        if patch.reset {
+            persist(None)?;
+            tracing::info!(
+                target: "risk",
+                actor = %actor,
+                reason = patch.reason.as_deref().unwrap_or(""),
+                "round duration cell cleared — next session re-resolves from \
+                 the boot flags/env/TOML ({ROUND_DURATION_SET_NOTE})"
+            );
+            return Ok(RoundDurationUpdate {
+                next_session_sec: self.config.round_duration_sec,
+                reset: true,
+                at_ms: now_ms,
+                actor: actor.to_string(),
+                reason: patch.reason.clone(),
+                note: ROUND_DURATION_SET_NOTE,
+            });
+        }
+
+        // 写路径：白名单校验（一格越界值就是一台没人能解读的网格），然后
+        // 原子写持久格。
+        let Some(sec) = sec else {
+            unreachable!("the reset path returned above; a write path has a durationSec");
+        };
+        if !crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS.contains(&sec) {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "round_duration.set: {sec} is not on the whitelist \
+                     {:?} — nothing was applied",
+                    crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS
+                ),
+            ));
+        }
+        persist(Some(sec))?;
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            from = self.config.round_duration_sec,
+            to = sec,
+            current_session_unchanged = true,
+            reason = patch.reason.as_deref().unwrap_or(""),
+            "round duration set to {sec}s — next session ({ROUND_DURATION_SET_NOTE})"
+        );
+        Ok(RoundDurationUpdate {
+            next_session_sec: sec,
+            reset: false,
+            at_ms: now_ms,
+            actor: actor.to_string(),
+            reason: patch.reason.clone(),
+            note: ROUND_DURATION_SET_NOTE,
         })
     }
     /// The ONE writer of the panel-visible last-error slot (#180). Every
