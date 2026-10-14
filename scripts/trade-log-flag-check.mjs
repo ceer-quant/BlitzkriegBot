@@ -33,7 +33,7 @@ async function runCore(extra, sock, work) {
   // run 2 restored it only to refuse the new entry ("Already in BTC").
   // A flatten's sell needs a bid to cross: mirror 0.95 before exiting.
   await rpc(sock, 'books.snapshot', { tokenId: 'tok', bids: [], asks: [{ price: 0.4, size: 100 }] });
-  await rpc(sock, 'orders.place', { tokenId: 'tok', conditionId: 'c', side: 'buy', mode: 'taker', price: 0.4, size: 5, internalKey: 'k', strategy: 't', asset: 'BTC', direction: 'up', roundSlot: 1 });
+  await rpc(sock, 'orders.place', { tokenId: 'tok', conditionId: 'c', side: 'buy', mode: 'taker', price: 0.4, size: 5, internalKey: 'k', strategy: 't', asset: 'BTC', direction: 'up', roundSlot: 0 }); // "no round" (#457)
   await rpc(sock, 'books.snapshot', { tokenId: 'tok', bids: [{ price: 0.95, size: 100 }], asks: [{ price: 0.99, size: 100 }] });
   await rpc(sock, 'positions.exit', {});
   await sleep(600);

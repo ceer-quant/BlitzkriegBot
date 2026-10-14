@@ -80,10 +80,12 @@ await waitForSocket(sock, { timeoutMs: 4000 });
 await sleep(400);
 
 // Place a resting maker order that stays LIVE — the thing that must not leak.
+// roundSlot 0 = "no round" (#457): a literal slot is a 1970 grid round the
+// kernel's expiry sweep now force-closes on sight.
 await rpc(sock, 'orders.place', {
   tokenId: 'tok1', conditionId: 'cond1', side: 'buy', mode: 'maker',
   price: 0.30, size: 10, internalKey: 'k-shutdown', strategy: 'operator',
-  asset: 'BTC', direction: 'up', roundSlot: 1,
+  asset: 'BTC', direction: 'up', roundSlot: 0,
 });
 await sleep(400);
 

@@ -120,7 +120,8 @@ function makeCore(label) {
 
 const order = (side, mode, tokenId, price, size, key, asset, account) => ({
   tokenId, conditionId: `cond-${tokenId}`, side, mode, price, size,
-  internalKey: key, strategy: 'acct', asset, direction: 'up', roundSlot: 1,
+  internalKey: key, strategy: 'acct', asset, direction: 'up',
+  roundSlot: 0, // "no round" (#457): a literal slot is a 1970 grid round the expiry sweep closes
   // E28 §9.2: an omitted accountId spends the process-active book (the 0.2
   // wire contract); an explicit one NAMES its account and always stands.
   ...(account ? { accountId: account } : {}),

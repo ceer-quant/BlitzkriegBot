@@ -59,7 +59,7 @@ const PROBE_ORDER = {
   strategy: 'crash_probe',
   asset: 'BTC',
   direction: 'up',
-  roundSlot: 1,
+  roundSlot: 0, // "no round" (#457): a literal slot is a 1970 grid round the expiry sweep closes
 };
 
 // The gates share a machine with a live panel (pids 90747 / 16697 under a

@@ -198,7 +198,7 @@ async function placeTaker(core, { tokenId, asset, price, size, key }) {
       strategy: 'obs_gate',
       asset,
       direction: 'up',
-      roundSlot: 1,
+      roundSlot: 0, // "no round" (#457): a literal slot is a 1970 grid round the expiry sweep closes
     });
     return { kind: 'result', res };
   } catch (e) {
@@ -405,7 +405,7 @@ await session('reasons', {}, async (ctx) => {
     const filled = await rpc.placeOrder(inner.core, {
       tokenId: 'OBS-OK', conditionId: 'cond-OBS-OK', side: 'buy', mode: 'taker',
       price: 0.4, size: 5, internalKey: 'obs-ok', strategy: 'obs_gate',
-      asset: 'OBS-OK', direction: 'up', roundSlot: 1,
+      asset: 'OBS-OK', direction: 'up', roundSlot: 0, // "no round" (#457)
     });
     check('an order the kernel fills leaves the error slot empty',
       filled.status === 'FILLED' && filled.code === undefined && filled.message === undefined,
