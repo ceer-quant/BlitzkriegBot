@@ -64,6 +64,8 @@ pub(crate) mod method {
     /// Network self-check: probe the paths the active venue trades over.
     pub const NET_CHECK: &str = "net.check";
     pub const POSITIONS_EXIT: &str = "positions.exit";
+    /// issue 456: declare a ghost order dead (the manual `orders.force_close`).
+    pub const ORDER_FORCE_CLOSE: &str = "orders.force_close";
     pub const SHADOW_EVOLUTION_STATUS: &str = "shadow_evolution.status";
     pub const SHADOW_EVOLUTION_PROPOSALS: &str = "shadow_evolution.proposals";
     pub const SHADOW_EVOLUTION_DECIDE: &str = "shadow_evolution.decide";
@@ -444,6 +446,16 @@ impl IpcClient {
         self.call(
             method::POSITIONS_EXIT,
             serde_json::json!({ "positionId": position_id }),
+        )
+    }
+
+    /// `orders.force_close` — declare a ghost order dead (issue 456). The
+    /// kernel refuses anything that could still fill (its round is live), so
+    /// the error text the caller shows is the kernel's own verdict.
+    pub fn force_close_order(&mut self, order_id: &str) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            method::ORDER_FORCE_CLOSE,
+            serde_json::json!({ "orderId": order_id }),
         )
     }
 

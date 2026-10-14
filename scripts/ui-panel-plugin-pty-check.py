@@ -3,7 +3,7 @@
 ui-panel-plugin-pty-check.py — E5-a acceptance: the interactive TUI panel's
 plugin-manager tab works over a REAL PTY against a live core.
 
-Covers (#32 UI-side): tab 4 renders the three panes; cursor movement highlights
+Covers (#32 UI-side): the plugin tab (5 since #456) renders the three panes; cursor movement highlights
 a row; enable toggle is immediate; disable toggle asks for confirmation (y/N);
 with the core stopped the tab degrades to an offline notice without crashing.
 Covers (#260): the `n` network self-check overlay opens, lists one row per probed
@@ -172,10 +172,10 @@ try:
     text = p.drain(2.0)
     check('panel renders Overview', 'Blitzkrieg Panel' in text and 'DRY' in text, text[:60].replace('\n', ' '))
 
-    p.send(b'4', settle=1.0)
+    p.send(b'5', settle=1.0)  # #456: Plugins moved to tab 5 (Orders is tab 3)
     redraw = p.wait_for(REF_STRATEGY)
     full = strip_ansi(bytes(p.buf))
-    check('tab 4 shows Strategies pane', 'Strategies' in full)
+    check('tab 5 shows Plugins pane', 'Plugins' in full)
     check(f'the loaded cdylib is listed: {REF_STRATEGY}', REF_STRATEGY in full, redraw)
     check('polymarket pane present', 'polymarket' in full)
     check('extensions pane present', 'Extensions' in full)
@@ -307,7 +307,7 @@ try:
         pass
     p2 = Panel(SOCK)
     p2.drain(1.5)
-    text = p2.send(b'4', settle=1.0)
+    text = p2.send(b'5', settle=1.0)  # #456: Plugins is tab 5 now
     check('offline notice (graceful degradation)', 'plugin registry offline' in text or 'offline' in text or 'not reachable' in text)
     check('panel alive after offline view', p2.pid > 0 and os.path.exists(f"/proc/{p2.pid}") if os.path.isdir('/proc') else True)
     p2.quit()

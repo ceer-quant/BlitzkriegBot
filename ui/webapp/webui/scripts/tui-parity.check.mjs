@@ -69,9 +69,21 @@ const TUI_TAB_SETS = [
     'Decisions',
     'Settings',
   ],
+  // issue 456: the Orders face — the kernel's order book with the [F]
+  // force-close, paired with the WebUI 挂单 card on the hft page.
+  [
+    'Overview',
+    'Positions',
+    'Orders',
+    'Trades',
+    'Plugins',
+    'Evolution',
+    'Decisions',
+    'Settings',
+  ],
 ]
 check(
-  'TUI tabs are a known layout (4-tab, 5-tab with Evolution, or 6-tab with Settings, 7-tab with Decisions)',
+  'TUI tabs are a known layout (4-tab, 5-tab with Evolution, 7-tab with Decisions, 8-tab with Orders)',
   () => {
     assert.ok(
       TUI_TAB_SETS.some((s) => s.join(',') === tuiVariants.join(',')),

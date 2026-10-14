@@ -363,6 +363,16 @@ pub fn render_json_full(
             // #427: the Venue column (empty = undeclared).
             "venue": p.venue,
             "remainingSec": p.remaining_sec })).collect::<Vec<_>>(),
+        // issue 456: the order book as the kernel tracks it (orders.list wire
+        // shape, camelCase). The WebUI's 挂单 card renders it and derives its
+        // per-row force-close button from `status`; the bulk sweep targets the
+        // still-live ones whose round has expired. Absent on a dead core.
+        "orders": s.orders.iter().map(|o| serde_json::json!({
+            "orderId": o.order_id, "strategy": o.strategy, "asset": o.asset,
+            "direction": o.direction, "tokenId": o.token_id, "side": o.side,
+            "mode": o.mode, "price": o.price, "size": o.size,
+            "filledSize": o.filled_size, "status": o.status,
+            "roundSlot": o.round_slot })).collect::<Vec<_>>(),
         "trades": { "count": s.trades.len(), "net": s.net_pnl(), "winRate": s.win_rate() },
         // All-time totals (trades.summary): cumulative order count + net profit
         // NOT capped by the windowed history above. Older cores omit → null.
@@ -2084,12 +2094,30 @@ impl WebServer {
                 self.proxy_backtest_body("round_duration.set", &req.body)
             }
             ("POST", "/api/system/reset-trading") => {
-                // #458 交易环境重置的写路径：the body IS the
+                // issue 458 交易环境重置卡: the body IS the
                 // `system.reset_trading` params object (`{confirm, reason?}`),
-                // forwarded verbatim — the confirm word and the mode gate are
-                // the KERNEL's checks, the gateway adds nothing. The reply
-                // carries the cleanup counts + the self-checked balances.
+                // forwarded verbatim. The kernel refuses LIVE mode, a wrong
+                // confirmation word and a missing audit sink; a dry-mode pass
+                // wipes the paper ledger and reseeds, leaving one manual-ops
+                // audit row. Same proxy shape as round-duration: nothing is
+                // reshaped here, the kernel's typed deserialization validates.
                 self.proxy_backtest_body("system.reset_trading", &req.body)
+            }
+            ("GET", "/api/orders") => {
+                // issue 456: the order book as the kernel tracks it — the
+                // 挂单 card's data source. Read-only proxy; the wire shape is
+                // `orders.list`'s own (camelCase TrackedOrder rows).
+                self.proxy_backtest(
+                    "orders.list",
+                    serde_json::Value::Object(serde_json::Map::new()),
+                )
+            }
+            ("POST", "/api/orders/force-close") => {
+                // issue 456: the 挂单 card's per-row force-close write path.
+                // The body IS the `orders.force_close` params object
+                // (`{orderId}`), forwarded verbatim; the kernel refuses an
+                // order whose round is still live and lands the audit row.
+                self.proxy_backtest_body("orders.force_close", &req.body)
             }
             ("GET", "/api/execution-policy") | ("GET", "/api/execution-policy/preview") => {
                 // #364: the settings page's 生效风控 section. Effective view =
@@ -2765,6 +2793,40 @@ mod tests {
         );
         assert_eq!(doc["stageState"]["phase"], serde_json::json!("staged"));
         assert_eq!(doc["stageState"]["version"], serde_json::json!("0.4.1"));
+    }
+
+    /// issue 456: the snapshot carries the kernel's order book (`orders`) so
+    /// the WebUI's 挂单 card can render it without a second round-trip. The
+    /// wire shape mirrors `orders.list`'s TrackedOrder rows (camelCase) —
+    /// `status` is what the card's per-row force-close gate reads, and a
+    /// default snapshot yields the key as an empty array, never absent.
+    #[test]
+    fn the_snapshot_carries_the_order_book() {
+        let mut snap = UiSnapshot::default();
+        let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, None)).unwrap();
+        assert_eq!(doc["orders"], serde_json::json!([]));
+
+        snap.orders = vec![crate::core::types::OrderView {
+            order_id: "dry_7".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC_UP".into(),
+            direction: "up".into(),
+            token_id: "tok-1".into(),
+            side: "buy".into(),
+            mode: "maker".into(),
+            price: 0.39,
+            size: 5.0,
+            filled_size: 0.0,
+            status: "LIVE".into(),
+            round_slot: 123,
+        }];
+        let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, None)).unwrap();
+        let row = &doc["orders"][0];
+        assert_eq!(row["orderId"], serde_json::json!("dry_7"));
+        assert_eq!(row["status"], serde_json::json!("LIVE"));
+        assert_eq!(row["roundSlot"], serde_json::json!(123));
+        assert_eq!(row["price"], serde_json::json!(0.39));
+        assert_eq!(doc["orders"].as_array().map(|a| a.len()), Some(1));
     }
 
     /// #186: a supervisor that has given up must be impossible to miss.

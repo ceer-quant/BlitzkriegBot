@@ -55,6 +55,7 @@ pub fn render(f: &mut Frame, app: &App) {
     match app.tab {
         Tab::Overview => render_overview(f, chunks[2], &app.snap),
         Tab::Positions => render_positions(f, chunks[2], &app.snap),
+        Tab::Orders => render_orders(f, chunks[2], app),
         Tab::Trades => render_trades(f, chunks[2], &app.snap),
         Tab::Plugins => render_plugins(f, chunks[2], app),
         Tab::Decisions => render_decisions(f, chunks[2], app),
@@ -663,6 +664,78 @@ fn render_positions(f: &mut Frame, area: Rect, s: &UiSnapshot) {
         Block::default()
             .borders(Borders::ALL)
             .title(format!("Open Positions ({})", s.positions.len())),
+    );
+    f.render_widget(table, area);
+}
+
+/// issue 456: the kernel's order book, with the cursor highlight and the
+/// force-close hint. Every row carries its `status` verbatim from
+/// `orders.list`; the [F] key sends `force-order <id>` for the highlighted
+/// row — the kernel still refuses anything whose round could still fill.
+fn render_orders(f: &mut Frame, area: Rect, app: &App) {
+    let header = Row::new(vec![
+        "Id", "Asset", "Dir", "Side", "Mode", "Strategy", "Price", "Size", "Filled", "Status",
+        "Round",
+    ])
+    .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD));
+    let widths = [
+        Constraint::Length(14),
+        Constraint::Length(8),
+        Constraint::Length(5),
+        Constraint::Length(5),
+        Constraint::Length(6),
+        Constraint::Length(11),
+        Constraint::Length(7),
+        Constraint::Length(6),
+        Constraint::Length(7),
+        Constraint::Length(14),
+        Constraint::Length(7),
+    ];
+    let rows: Vec<Row> = app
+        .snap
+        .orders
+        .iter()
+        .enumerate()
+        .map(|(i, o)| {
+            let selected = i
+                == app
+                    .orders_focus
+                    .min(app.snap.orders.len().saturating_sub(1));
+            let id = short_id(&o.order_id);
+            Row::new(vec![
+                Cell::from(id),
+                Cell::from(o.asset.clone()),
+                Cell::from(o.direction.to_uppercase()),
+                Cell::from(o.side.clone()),
+                Cell::from(o.mode.clone()),
+                Cell::from(o.strategy.clone()),
+                Cell::from(format!("{:.3}", o.price)),
+                Cell::from(format!("{:.1}", o.size)),
+                Cell::from(format!("{:.1}", o.filled_size)),
+                Cell::from(Span::styled(
+                    o.status.clone(),
+                    Style::default().fg(if o.status == "FORCE_CLOSED" {
+                        Color::Yellow
+                    } else {
+                        color_of(0.0)
+                    }),
+                )),
+                Cell::from(format!("#{}", o.round_slot)),
+            ])
+            .style(if selected {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            })
+        })
+        .collect();
+    let table = Table::new(rows, widths).header(header).block(
+        Block::default().borders(Borders::ALL).title(format!(
+            "Orders ({}) — ↑/↓ select · [F] force-close ghost",
+            app.snap.orders.len()
+        )),
     );
     f.render_widget(table, area);
 }

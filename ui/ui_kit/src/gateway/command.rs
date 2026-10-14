@@ -44,6 +44,12 @@ pub enum Command {
     Flatten {
         position_id: String,
     },
+    /// issue 456: declare one ghost order dead (`orders.force_close`). The
+    /// kernel refuses an order whose round is still live — this is for the
+    /// expired leftover a cancel never converged, not for dodging a cancel.
+    ForceOrder {
+        order_id: String,
+    },
     Markets,
     /// Network self-check: probe the paths the active venue trades over.
     NetCheck,
@@ -149,6 +155,14 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
             }
             Ok(Command::Flatten {
                 position_id: parts[1].to_string(),
+            })
+        }
+        "force-order" | "force_order" => {
+            if parts.len() != 2 || parts[1].is_empty() {
+                return Err("usage: force-order <order_id>".into());
+            }
+            Ok(Command::ForceOrder {
+                order_id: parts[1].to_string(),
             })
         }
         "extension" => {
@@ -456,6 +470,7 @@ impl Dispatcher {
                 self.cmd_plugin_set(raw, PluginKind::Extension, &name, enabled)
             }
             Command::Flatten { position_id } => self.cmd_flatten(raw, &position_id),
+            Command::ForceOrder { order_id } => self.cmd_force_order(raw, &order_id),
             Command::EvolutionProposals { limit } => self.cmd_evolution_proposals(raw, limit),
             Command::EvolutionDecide { id, decision } => {
                 self.cmd_evolution_decide(raw, &id, &decision)
@@ -727,6 +742,27 @@ impl Dispatcher {
         }
     }
 
+    /// issue 456: force-close one ghost order. Same operator gate as flatten
+    /// (manual verbs need `--manage`); the kernel owns the verdict — an order
+    /// whose round is still live comes back refused, verbatim.
+    fn cmd_force_order(&mut self, raw: &str, order_id: &str) -> CommandOutcome {
+        if !self.lifecycle_enabled {
+            return CommandOutcome::err(
+                raw,
+                "manual force-close disabled; start the gateway with --manage to enable operator controls",
+            );
+        }
+        match self.client.force_close_order(order_id) {
+            Ok(_) => CommandOutcome::ok(
+                raw,
+                "force_closed",
+                format!("order {order_id} marked ForceClosed (audited)"),
+            )
+            .with_data(serde_json::json!({ "orderId": order_id })),
+            Err(e) => CommandOutcome::err(raw, e.to_string()),
+        }
+    }
+
     fn cmd_status(&mut self, raw: &str) -> CommandOutcome {
         let snap = self.snapshot();
         if !snap.connected {
@@ -899,6 +935,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("extensions", "list extensions and state"),
     ("extension <name> on|off", "enable/disable one extension"),
     ("flatten <position_id>", "force-close one open position"),
+    (
+        "force-order <order_id>",
+        "force-close one ghost order (kernel refuses live rounds; issue 456)",
+    ),
     ("markets", "list market plugins"),
     ("netcheck", "probe the network paths the venue uses"),
     ("proposals [N]", "evolution proposals (pending first)"),
@@ -1239,6 +1279,7 @@ mod tests {
                 Command::Extensions => "extensions",
                 Command::ExtensionSet { .. } => "extension",
                 Command::Flatten { .. } => "flatten",
+                Command::ForceOrder { .. } => "force-order",
                 Command::Markets => "markets",
                 Command::NetCheck => "netcheck",
                 Command::Help => "help",
@@ -1256,6 +1297,7 @@ mod tests {
             ("strategy", "strategy alpha on"),
             ("extension", "extension market_polymarket on"),
             ("flatten", "flatten pos-1"),
+            ("force-order", "force-order dry_7"),
             ("decide", "decide prop-1 accept"),
             ("rollback", "rollback alpha"),
             ("auto-evolve", "auto-evolve on"),

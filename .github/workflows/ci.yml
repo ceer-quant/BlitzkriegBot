@@ -289,6 +289,13 @@ jobs:
       # 写行，成功追加不覆盖）。一切写入都在脚本自己的 scratch cwd。
       - name: Trading-environment reset gate
         run: node scripts/system-reset-check.mjs
+      # 挂单强平（orders.force_close，#456）：真内核 spawn 验证活轮拒绝（点名
+      # still live、订单原样、审计不写行）、60s 短轮真过期 → 过期扫描自动
+      # ForceClosed、已终态再强平拒绝（already terminal）、reconcile.jsonl 的
+      # kind=force_close 行（含订单/策略/轮次/原因）。一切写入都在脚本自己的
+      # scratch cwd。
+      - name: Force-close ghost order gate
+        run: node scripts/force-order-check.mjs
 
   # KI-9: the specialized acceptance gates, promoted from "run them locally and
   # remember" to CI. Each pins a milestone acceptance (E2/E4/E5/E9/P-1) on the
