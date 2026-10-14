@@ -61,6 +61,11 @@ pub enum ReconcileAction {
     MarkedFilled { core_order_id: OrderId },
     /// Local-live order vanished from the venue with no fill → marked cancelled.
     MarkedCancelled { core_order_id: OrderId },
+    /// Local-live order the venue no longer knows and no fill ever completed:
+    /// the kernel closed it itself (#457). The `Cancelled` vs `ForceClosed`
+    /// split is the audit trail's only way to tell "we withdrew" from
+    /// "we gave up waiting".
+    MarkedForceClosed { core_order_id: OrderId },
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -171,9 +176,12 @@ pub fn reconcile(ome: &mut Ome, snap: &VenueSnapshot) -> CoreResult<ReconcileRep
                 });
             }
             _ => {
-                ome.mark_terminal(&core_id, OrderStatus::Cancelled, snap.now_ms)?;
+                // A ghost: the venue has neither the order nor any fill for it.
+                // #457: this is the kernel closing an order nobody else closed
+                // — ForceClosed, not Cancelled.
+                ome.mark_terminal(&core_id, OrderStatus::ForceClosed, snap.now_ms)?;
                 report.suspect_ghost_ids.push(core_id.clone());
-                report.actions.push(ReconcileAction::MarkedCancelled {
+                report.actions.push(ReconcileAction::MarkedForceClosed {
                     core_order_id: core_id,
                 });
             }
@@ -795,7 +803,9 @@ mod tests {
     fn detects_ghost_order_without_fill() {
         let mut ome = Ome::new();
         live_order(&mut ome, "k1", "c1", "v1", 1);
-        // Venue no longer lists it open and there are no trades → ghost/cancelled.
+        // Venue no longer lists it open and there are no trades → ghost. #457:
+        // the KERNEL is the one closing it (nobody else did), so the terminal
+        // status is ForceClosed — "we gave up waiting", not "we withdrew".
         let snap = VenueSnapshot {
             open_order_ids: vec![],
             trades: vec![],
@@ -803,7 +813,13 @@ mod tests {
         };
         let report = reconcile(&mut ome, &snap).unwrap();
         assert_eq!(report.suspect_ghost_ids, vec!["c1".to_string()]);
-        assert_eq!(ome.get("c1").unwrap().status, OrderStatus::Cancelled);
+        assert_eq!(ome.get("c1").unwrap().status, OrderStatus::ForceClosed);
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| matches!(a, ReconcileAction::MarkedForceClosed { .. }))
+        );
     }
 
     #[test]

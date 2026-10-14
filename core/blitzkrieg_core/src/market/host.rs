@@ -52,6 +52,7 @@ fn error_code_from_api(c: api::CoreErrorCode) -> m::CoreErrorCode {
     match c {
         A::InvalidParams => C::InvalidParams,
         A::UnknownOrder => C::UnknownOrder,
+        A::InvalidOrderState => C::InvalidOrderState,
         A::WouldCross => C::WouldCross,
         A::InvalidTickSize => C::InvalidTickSize,
         A::InvalidSize => C::InvalidSize,

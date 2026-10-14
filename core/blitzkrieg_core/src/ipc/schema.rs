@@ -139,6 +139,12 @@ pub mod method {
     pub const ORDER_CANCEL_REMAINING: &str = "orders.cancel_remaining";
     /// E31-c: sell only the shares already filled behind an order.
     pub const ORDER_CLOSE_FILLED: &str = "orders.close_filled";
+    /// #457: kernel-side force-close of a GHOST order — one whose round has
+    /// expired, so it can never fill, yet no honest terminal receipt ever
+    /// arrived. Refuses a still-live round (that is `orders.cancel`'s job);
+    /// marks `ForceClosed` in the audit trail so "we withdrew" and "we gave
+    /// up waiting" stay readable apart.
+    pub const ORDER_FORCE_CLOSE: &str = "orders.force_close";
     pub const ORDER_LIST: &str = "orders.list";
     pub const LEDGER_BALANCE: &str = "ledger.balance";
     /// List open positions (enriched with current price / unrealised PnL).
@@ -615,6 +621,15 @@ pub struct CancelRemainingParams {
     pub order_id: OrderId,
 }
 
+/// #457: force-close a ghost order. Same body as a plain cancel — the distinct
+/// method exists so the audit trail reads "the operator declared this order
+/// dead", not "the operator withdrew a live order".
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForceCloseParams {
+    pub order_id: OrderId,
+}
+
 /// E31-c: flatten only the shares the fills have already accrued behind an
 /// order, leaving its resting remainder alone. The kernel prices, sizes,
 /// risk-checks and submits the SELL; the strategy only names the position.
@@ -1024,6 +1039,8 @@ pub struct ReconcileResultView {
     pub filled: usize,
     pub marked_filled: usize,
     pub marked_cancelled: usize,
+    /// #457: ghosts the kernel closed itself (ForceClosed, not Cancelled).
+    pub marked_force_closed: usize,
     pub ghost_ids: Vec<String>,
 }
 
@@ -1456,6 +1473,10 @@ pub enum Event {
         marked_filled: usize,
         #[serde(rename = "markedCancelled")]
         marked_cancelled: usize,
+        /// #457: ghosts the KERNEL closed itself (venue forgot the order, no
+        /// fill) — the "we gave up waiting" counter beside markedCancelled.
+        #[serde(rename = "markedForceClosed", default)]
+        marked_force_closed: usize,
         #[serde(rename = "ghostIds")]
         ghost_ids: Vec<String>,
     },

@@ -154,7 +154,7 @@ const order = (side, tokenId, price, size, key, account, asset = 'BTC') => ({
   strategy: 'iso',
   asset,
   direction: 'up',
-  roundSlot: 1,
+  roundSlot: 0, // "no round" (#457): a literal slot is a 1970 grid round the expiry sweep closes
   ...(account ? { accountId: account } : {}),
 });
 

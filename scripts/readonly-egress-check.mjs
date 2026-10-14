@@ -107,7 +107,7 @@ console.log('mode over IPC   :', JSON.stringify(mode));
 await rpc(sock, 'orders.place', {
   tokenId: 'tok1', conditionId: 'cond1', side: 'buy', mode: 'taker',
   price: 0.30, size: 10, internalKey: 'k-ro', strategy: 'operator',
-  asset: 'BTC', direction: 'up', roundSlot: 1,
+  asset: 'BTC', direction: 'up', roundSlot: 0, // "no round" (#457)
 });
 await sleep(600);
 

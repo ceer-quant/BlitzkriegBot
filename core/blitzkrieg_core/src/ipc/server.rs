@@ -1127,6 +1127,21 @@ async fn handle_line(
             .await
         }
 
+        method::ORDER_FORCE_CLOSE => {
+            typed(params, |p: ForceCloseParams| {
+                let core = core.clone();
+                async move {
+                    core.lock().await.force_close_order(
+                        &p.order_id,
+                        now_ms(),
+                        "manual orders.force_close",
+                    )?;
+                    Ok::<_, CoreError>(serde_json::json!({ "success": true }))
+                }
+            })
+            .await
+        }
+
         method::ORDER_CLOSE_FILLED => {
             typed(params, |p: CloseFilledParams| {
                 let core = core.clone();
@@ -1211,6 +1226,16 @@ async fn handle_line(
                                     matches!(
                                         a,
                                         crate::reconcile::ReconcileAction::MarkedCancelled { .. }
+                                    )
+                                })
+                                .count(),
+                            marked_force_closed: r
+                                .actions
+                                .iter()
+                                .filter(|a| {
+                                    matches!(
+                                        a,
+                                        crate::reconcile::ReconcileAction::MarkedForceClosed { .. }
                                     )
                                 })
                                 .count(),

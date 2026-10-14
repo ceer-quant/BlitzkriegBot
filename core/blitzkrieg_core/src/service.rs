@@ -6786,6 +6786,16 @@ impl Core {
                 .iter()
                 .filter(|a| matches!(a, crate::reconcile::ReconcileAction::MarkedCancelled { .. }))
                 .count();
+            let marked_force_closed = report
+                .actions
+                .iter()
+                .filter(|a| {
+                    matches!(
+                        a,
+                        crate::reconcile::ReconcileAction::MarkedForceClosed { .. }
+                    )
+                })
+                .count();
             // #184: a sweep that had to REPAIR something is a drift report — the
             // local book disagreed with the venue and the safety net caught it.
             // The net working is good news; the divergence is not, and an
@@ -6797,6 +6807,7 @@ impl Core {
                     filled_gaps = filled,
                     marked_filled,
                     marked_cancelled,
+                    marked_force_closed,
                     ghosts = ?report.suspect_ghost_ids,
                     "reconciliation drift repaired: the venue disagreed with the core's book"
                 );
@@ -6810,6 +6821,7 @@ impl Core {
                 filled,
                 marked_filled,
                 marked_cancelled,
+                marked_force_closed,
                 ghost_ids: report.suspect_ghost_ids.clone(),
             });
         }
@@ -7043,6 +7055,113 @@ impl Core {
                 );
             }
         }
+    }
+
+    // ── #457: ghost orders die on the clock, not only on the sweep ───────────
+    //
+    // The reconciliation sweep only closes a ghost when a snapshot proves the
+    // venue forgot it. But the dominant ghost on this market needs no proof at
+    // all: an order resting on a round that has EXPIRED can never fill — its
+    // market is settlement-dead — and if the venue never acks the cancel, the
+    // order haunted `orders.list` forever. The kernel now closes those itself:
+    //   * an order whose round ended (round_slot N covers [N·dur, (N+1)·dur))
+    //     is ForceClosed at the tick that observes the expiry — the kernel
+    //     closing an order nobody else closed. In DRY the mark IS the cancel
+    //     (nothing external can hold it); in LIVE the venue-side cancel still
+    //     rides through `queue_venue_cancel` as evidence-gathering.
+    //   * `force_close_order` is the manual verb: same semantics, operator
+    //     intent, but REFUSES live orders that could still fill — a manual
+    //     force-close is for ghosts, not for dodging a cancel.
+    //
+    // Replay sched is excluded wholesale: the sweep mutates the order set (a
+    // tradesSha256 input) and replayed archives have no ghost-relevant clock —
+    // the historical per-order flows own every transition there.
+    fn run_expiry_sweep(&mut self, now_ms: i64) {
+        if self.replay_sched() {
+            return;
+        }
+        let dur_ms = self.config.round_duration_sec * 1000;
+        if dur_ms <= 0 {
+            return;
+        }
+        let expired: Vec<String> = self
+            .ome
+            .live_orders()
+            .into_iter()
+            .filter(|o| o.round_slot > 0 && now_ms >= (o.round_slot + 1) * dur_ms)
+            .map(|o| o.order_id.clone())
+            .collect();
+        for id in expired {
+            self.force_close_order(&id, now_ms, "round expired").ok();
+        }
+    }
+
+    /// #457: close a STILL-LIVE order the kernel judges settlement-dead —
+    /// mark `ForceClosed`, release its reservation, and (live mode) queue a
+    /// venue cancel so the real venue state converges with the book. Refuses
+    /// an order that could still fill: the manual verb is for ghosts, and a
+    /// caller that wants to withdraw a live order has `cancel`.
+    pub fn force_close_order(&mut self, id: &str, now_ms: i64, reason: &str) -> CoreResult<()> {
+        let order = self
+            .ome
+            .get(id)
+            .cloned()
+            .ok_or_else(|| CoreError::new(CoreErrorCode::UnknownOrder, id.to_string()))?;
+        if !order.status.is_live() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidOrderState,
+                format!("order {id} is already terminal ({:?})", order.status),
+            ));
+        }
+        if order.round_slot > 0 {
+            let dur_ms = self.config.round_duration_sec * 1000;
+            let expires_at = (order.round_slot + 1) * dur_ms;
+            if now_ms < expires_at {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidOrderState,
+                    format!(
+                        "order {id}'s round is still live until {expires_at} — use cancel, not force-close"
+                    ),
+                ));
+            }
+        }
+        let was_live = order.status.is_live();
+        if order.side == Side::Buy
+            && let Ok(l) = self.accounts.get_mut(&order.account_id)
+        {
+            l.release(id);
+        }
+        self.ome
+            .mark_terminal(id, OrderStatus::ForceClosed, now_ms)?;
+        if let Some(engine) = self.engine.as_mut() {
+            engine.release_pending_token_for_strategy(&order.strategy, &order.token_id);
+        }
+        if self.replay_sched() {
+            self.fast_orders_dirty = true;
+        }
+        if was_live && let Some(vid) = order.venue_order_id {
+            self.queue_venue_cancel(vid);
+        }
+        tracing::warn!(
+            order = %id,
+            strategy = %order.strategy,
+            token = %order.token_id,
+            reason = %reason,
+            "order force-closed by the kernel — round expired and no honest terminal receipt arrived (#457)"
+        );
+        // The audit trail's whole point: "we withdrew" (Cancelled) and "we gave
+        // up waiting" (ForceClosed) must stay readable apart on disk.
+        self.persist_audit_value(serde_json::json!({
+            "kind": "force_close",
+            "ts_ms": now_ms,
+            "order_id": id,
+            "strategy": order.strategy,
+            "token_id": order.token_id,
+            "round_slot": order.round_slot,
+            "reason": reason,
+        }));
+        self.emit_order(id);
+        Ok(())
     }
 
     fn emit(&self, ev: Event) {
@@ -9813,6 +9932,10 @@ impl Core {
         // silent no-op — review must be able to see "should have triggered".
         self.emit_suppressed_stops();
 
+        // #457: an order resting on an EXPIRED round can never fill — close it
+        // BEFORE the escalation sweep, so a dead round is never chased.
+        // Live-clock only (see the sweep's own replay note).
+        self.run_expiry_sweep(now_ms);
         // Escalate due maker_then_taker orders: cancel maker, cross as taker.
         // Replay fast path: the sweep over every live order runs only when
         // the order set changed, or when the earliest armed escalation
@@ -11571,6 +11694,9 @@ mod tests {
                 ..Default::default()
             },
             dry_seed_balance: Decimal::from(10_000),
+            // #457: pinned so a default change cannot silently arm the expiry
+            // sweep in fixtures that jump the clock hours ahead.
+            round_duration_sec: 900,
             ..Default::default()
         });
         c.set_balance(balance);
@@ -19163,9 +19289,17 @@ mod order_state_machine_462_tests {
     #[test]
     fn an_escalation_is_not_chased_off_a_stale_book() {
         let mut c = dry_core(dec!(10));
+        // #457: the expiry sweep closes an order whose round has ended, so this
+        // fixture's long clock jump needs a round that outlives the jump —
+        // slot for a round still open at the tick instant.
+        let long_round_dur = 4 * 3600 + 60; // covers the 3h+ jump below
+        let slot = (1 + 2 * 1000) / 1000 / long_round_dur;
         let outcome = c
             .place_inner(
-                order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(2), "k1"),
+                OrderRequest {
+                    round_slot: slot,
+                    ..order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(2), "k1")
+                },
                 1000,
                 1,
                 false,
@@ -19358,5 +19492,157 @@ mod order_state_machine_462_tests {
             "the escalation's cancel rides the queue the bridge drains before placing (#462)"
         );
         assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Cancelled);
+    }
+
+    // ── #457: ForceClosed — ghosts die on the clock ─────────────────────────
+
+    fn fc_core(round_duration_sec: i64) -> Core {
+        Core::new(CoreConfig {
+            round_duration_sec,
+            ..Default::default()
+        })
+    }
+
+    /// A resting maker whose round slot N covers [N·dur, (N+1)·dur) — the
+    /// same shape `place` writes for a real engine entry.
+    fn fc_resting_maker(c: &mut Core, slot: i64, now: i64, key: &str) -> String {
+        let req = OrderRequest {
+            round_slot: slot,
+            ..order(FillPolicy::Maker, dec!(0.40), dec!(2), key)
+        };
+        let (id, _st) = c.place(req, 0, now).unwrap();
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Live);
+        id
+    }
+
+    /// #457 matrix: every path that ends an order lands in a DISTINCT terminal
+    /// status, so the audit trail can tell the three "who closed it" stories
+    /// apart. ForceClosed is terminal, not live, and is NOT Cancelled.
+    #[test]
+    fn force_closed_is_terminal_and_distinct_from_cancelled() {
+        let statuses = [
+            OrderStatus::Filled,
+            OrderStatus::Cancelled,
+            OrderStatus::Rejected,
+            OrderStatus::Failed,
+            OrderStatus::ForceClosed,
+        ];
+        for s in statuses {
+            assert!(s.is_terminal(), "{s:?} must be terminal");
+            assert!(!s.is_live(), "{s:?} must not be live");
+        }
+        for s in [
+            OrderStatus::Pending,
+            OrderStatus::Live,
+            OrderStatus::PartiallyFilled,
+        ] {
+            assert!(!s.is_terminal(), "{s:?} must not be terminal");
+        }
+        assert_ne!(OrderStatus::ForceClosed, OrderStatus::Cancelled);
+    }
+
+    /// #457, expiry sweep: a resting order whose round has ended is
+    /// force-closed by the tick — reservation released, terminal status
+    /// ForceClosed, no honest receipt ever needed.
+    #[test]
+    fn the_expiry_sweep_force_closes_an_order_on_an_expired_round() {
+        let mut c = fc_core(900);
+        // Slot 1 covers [900s, 1800s). Place at 901s (inside), sweep at
+        // 1_800_000ms (past the end).
+        let id = fc_resting_maker(&mut c, 1, 901_000, "k1");
+        c.tick(1_700_000).unwrap();
+        assert_eq!(
+            c.ome().get(&id).unwrap().status,
+            OrderStatus::Live,
+            "inside the round the order stays"
+        );
+        c.tick(1_800_000).unwrap();
+        assert_eq!(
+            c.ome().get(&id).unwrap().status,
+            OrderStatus::ForceClosed,
+            "the kernel closed an order nobody else closed (#457)"
+        );
+        assert_eq!(
+            c.ledger().reserved(),
+            Decimal::ZERO,
+            "the buy reservation must be released with the ghost"
+        );
+        // Idempotent: a second sweep over the terminal order does nothing.
+        c.tick(1_900_000).unwrap();
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::ForceClosed);
+    }
+
+    /// #457: the manual verb refuses a STILL-LIVE round — dodging a cancel
+    /// through force-close is exactly what the state machine must not allow.
+    #[test]
+    fn force_close_refuses_a_still_live_round() {
+        let mut c = fc_core(900);
+        let id = fc_resting_maker(&mut c, 1, 901_000, "k1");
+        let err = c
+            .force_close_order(&id, 1_000_000, "manual test")
+            .unwrap_err();
+        assert_eq!(err.code, CoreErrorCode::InvalidOrderState);
+        assert_eq!(
+            c.ome().get(&id).unwrap().status,
+            OrderStatus::Live,
+            "the refusal leaves the order untouched"
+        );
+        // After the round ends, the same verb succeeds.
+        c.force_close_order(&id, 1_800_000, "manual test").unwrap();
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::ForceClosed);
+    }
+
+    /// #457: a round_slot 0 order carries no expiry — the sweep must leave it
+    /// alone (0 means "no round" on every manual/test path that stamps it).
+    #[test]
+    fn the_expiry_sweep_ignores_slot_zero_orders() {
+        let mut c = fc_core(900);
+        let id = fc_resting_maker(&mut c, 0, 1000, "k1");
+        c.tick(10_000_000).unwrap();
+        assert_eq!(
+            c.ome().get(&id).unwrap().status,
+            OrderStatus::Live,
+            "slot 0 has no derivable expiry — only the sweep's clock rules, never the sweep"
+        );
+    }
+
+    /// #457: the live venue's resting order still gets its DELETE queued, so
+    /// the real venue converges with the book even after the kernel gives up.
+    #[test]
+    fn force_close_queues_the_venue_cancel_for_a_bound_order() {
+        let mut c = live_core(dec!(10));
+        let req = OrderRequest {
+            round_slot: 1,
+            ..order(FillPolicy::Maker, dec!(0.40), dec!(2), "k1")
+        };
+        let (id, _st) = c.place(req, 0, 1_000).unwrap();
+        c.bind_venue(&id, "venue-ghost".into(), 2).unwrap();
+        // Force-close past the round end.
+        c.force_close_order(&id, 1_800_000, "round expired")
+            .unwrap();
+        assert_eq!(
+            c.take_pending_venue_cancels(),
+            vec!["venue-ghost".to_string()],
+            "the kernel still asks the venue to retire its copy — evidence-gathering (#457)"
+        );
+    }
+
+    /// #457: the sweep never runs under the replay scheduler — the replayed
+    /// order set is a tradesSha256 input and replayed archives carry no
+    /// live-clock ghosts.
+    #[test]
+    fn the_expiry_sweep_is_a_no_op_under_replay_scheduling() {
+        let mut c = Core::new(CoreConfig {
+            round_duration_sec: 900,
+            replay_scheduling: true,
+            ..Default::default()
+        });
+        let id = fc_resting_maker(&mut c, 1, 901_000, "k1");
+        c.tick(10_000_000).unwrap();
+        assert_eq!(
+            c.ome().get(&id).unwrap().status,
+            OrderStatus::Live,
+            "replay owns every transition through its own flows (#457)"
+        );
     }
 }

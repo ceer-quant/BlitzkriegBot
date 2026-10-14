@@ -34,10 +34,13 @@ async function boot(sock) {
 }
 
 // 1) Boot, place a resting (maker) order that stays LIVE.
+// roundSlot 0 = "no round" (#457): a slot-N order rests on the grid round
+// [N·dur, (N+1)·dur) — a literal `1` is a 1970 round the kernel's expiry
+// sweep now force-closes on sight.
 const sock1 = join(tmpdir(), `orderdb-1-${process.pid}.sock`);
 const p1 = await boot(sock1);
 await rpc(sock1, 'orders.place', { tokenId: 'tok1', conditionId: 'cond1', side: 'buy', mode: 'maker',
-  price: 0.30, size: 10, internalKey: 'k-rest', strategy: 'operator', asset: 'BTC', direction: 'up', roundSlot: 1 });
+  price: 0.30, size: 10, internalKey: 'k-rest', strategy: 'operator', asset: 'BTC', direction: 'up', roundSlot: 0 });
 await sleep(300);
 const before = (await rpc(sock1, 'orders.list'))?.orders ?? [];
 const liveBefore = before.filter((o) => o.status === 'LIVE' || o.status === 'PENDING').length;

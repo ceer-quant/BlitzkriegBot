@@ -91,13 +91,18 @@ pub enum OrderStatus {
     Rejected,
     /// Submitted then reported failed by the venue; provisional effects rolled back.
     Failed,
+    /// The kernel closed the order itself: the round expired (or reconciliation
+    /// proved the venue forgot it) and no honest terminal receipt ever arrived.
+    /// Distinct from `Cancelled` so "we withdrew" and "we gave up waiting" stay
+    /// readable apart in the audit trail (#457).
+    ForceClosed,
 }
 
 impl OrderStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Filled | Self::Cancelled | Self::Rejected | Self::Failed
+            Self::Filled | Self::Cancelled | Self::Rejected | Self::Failed | Self::ForceClosed
         )
     }
     pub fn is_live(self) -> bool {
@@ -121,6 +126,10 @@ pub enum FillStatus {
 pub enum CoreErrorCode {
     InvalidParams,
     UnknownOrder,
+    /// The order's state refuses the action — force-closing a still-live
+    /// round, cancelling a terminal order (#457). The caller picked the wrong
+    /// verb; the state machine is the authority.
+    InvalidOrderState,
     WouldCross,
     InvalidTickSize,
     InvalidSize,
