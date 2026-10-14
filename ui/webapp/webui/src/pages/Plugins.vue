@@ -71,6 +71,15 @@ function caps(r: PluginRow): { label: string; on: boolean }[] {
   ]
 }
 
+/** Capability-name → 中文标签；未列出的名字原样展示（数据驱动，无 venue 特判）。
+ *  `simulated` 是插件自己的声明位：填充为模拟盘的插件声明它，面板据此标注 (#454)。 */
+const CAPABILITY_LABELS: Record<string, string> = {
+  simulated: '模拟盘（第三方）',
+}
+function capabilityLabel(c: string): string {
+  return CAPABILITY_LABELS[c] ?? c
+}
+
 const totals = computed(() => {
   const p = store.plugins
   return {
@@ -165,7 +174,7 @@ const segments = computed(() => [
                        structure when unanimous, capability seams by name.
                        Neither present = undeclared (implicit type-only mode). -->
                   <Badge v-if="r.structure" variant="info">{{ r.structure }}</Badge>
-                  <Badge v-for="c in r.capabilities ?? []" :key="`m-${c}`" variant="outline">{{ c }}</Badge>
+                  <Badge v-for="c in r.capabilities ?? []" :key="`m-${c}`" variant="outline">{{ capabilityLabel(c) }}</Badge>
                   <Badge
                     v-if="!r.structure && !r.capabilities?.length"
                     variant="default"

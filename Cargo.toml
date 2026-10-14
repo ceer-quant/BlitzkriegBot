@@ -11,6 +11,7 @@ members = [
     "extensions/polymarket",
     "extensions/kalshi",
     "extensions/predictfun",
+    "extensions/polysimulator",
     "user_layer/strategy_api",
     "user_layer/strategy_logic",
     "user_layer/parity_logic",
