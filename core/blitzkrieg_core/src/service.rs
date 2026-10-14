@@ -52,6 +52,13 @@ pub struct CoreConfig {
     /// checkout the caller happens to run from (the same posture as
     /// `strategy_state_path`).
     pub runtime_config_path: Option<String>,
+    /// #458: where manual, destructive operations (`system.reset_trading`,
+    /// and later `orders.force_close`) append their audit record. `None`
+    /// (the backtester, most in-process tests) means a reset REFUSES rather
+    /// than wipe records with no audit trail — the manual-ops line is the
+    /// only trace a reset leaves. Production resolves this to
+    /// `data/audit/manual-ops.jsonl` in `main.rs`, like `runtime_config_path`.
+    pub manual_ops_audit_path: Option<String>,
     /// When false the core never auto-submits exits on tick; positions are only
     /// closed by explicit fills/flatten. Used by order-layer tests and for a
     /// "positions managed externally" deployment. Default true.
@@ -733,6 +740,7 @@ impl Default for CoreConfig {
             round_duration_sec: 900,
             round_duration_source: "default",
             runtime_config_path: None,
+            manual_ops_audit_path: None,
             auto_exits_enabled: true,
             intent_audit_enabled: true,
             engine_enabled: false,
@@ -7957,6 +7965,279 @@ impl Core {
             note: ROUND_DURATION_SET_NOTE,
         })
     }
+
+    /// #458: 交易环境重置（`system.reset_trading`，UI 设置卡 + 确认词）。
+    /// 把本核拥有的交易状态整表清零并重新 seed —— 停用全部已启用策略、撤销
+    /// 全部 resting 挂单、清空订单/成交/持仓记录（内存 + 磁盘）、按
+    /// `dry_seed_balance` 复原每个账户现金、重置连亏熔断。
+    ///
+    /// 三道门：Live 拒绝（真实资金记录是 append-only 证据，不是 UI 可擦的
+    /// 演示盘）；`confirm` 必须逐字等于 `RESET`（自由文本确认门，不是勾选框
+    /// —— 误触必须不可能被归咎于双击）；`manual_ops_audit_path: None`
+    /// （回测器/进程内测试）拒绝 —— manual-ops 审计行是重置留下的唯一痕迹，
+    /// 无处审计的擦除必须失败而不是静默发生。
+    ///
+    /// 保留（显式不动）：配置、策略文件、全部既有审计流、
+    /// strategy-state.json（停用策略会走 `set_strategy_enabled` 的既有持久化
+    /// 路径重写 enabled 集 —— 这是行为语义的一部分，不是泄漏）。
+    pub fn reset_trading(
+        &mut self,
+        params: &crate::ipc::schema::ResetTradingParams,
+        actor: &str,
+        now_ms: i64,
+    ) -> CoreResult<crate::ipc::schema::ResetTradingResult> {
+        use crate::ipc::runtime_config::{append_manual_op, count_jsonl_lines};
+        use crate::ipc::schema::{RESET_TRADING_LIVE_REFUSAL, ResetPreSummary, ResetTradingResult};
+
+        if self.config.mode == Mode::Live {
+            return Err(CoreError::new(
+                CoreErrorCode::RiskRejected,
+                RESET_TRADING_LIVE_REFUSAL.to_string(),
+            ));
+        }
+        if params.confirm != "RESET" {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "system.reset_trading: confirm must be exactly \"RESET\" — \
+                 this wipes every trading record this core owns"
+                    .to_string(),
+            ));
+        }
+        let audit_path = self
+            .config
+            .manual_ops_audit_path
+            .clone()
+            .map(std::path::PathBuf::from);
+        let Some(audit_path) = audit_path.as_deref() else {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "system.reset_trading: no manual-ops audit path configured — \
+                 a wipe with no audit trail is refused (backtests and \
+                 in-process tests carry None)"
+                    .to_string(),
+            ));
+        };
+        let audit_path = std::path::Path::new(audit_path);
+
+        // 重置前快照：行数 + 余额 + 活跃集合。这是审计行与回执里唯一存活的
+        // 「删了什么」的证据 —— 记录本身不会留下。
+        let pre = ResetPreSummary {
+            order_log_lines: self
+                .order_db
+                .as_ref()
+                .map(|db| count_jsonl_lines(db.path()))
+                .unwrap_or(0),
+            trade_log_lines: self
+                .trade_db
+                .as_ref()
+                .map(|db| count_jsonl_lines(db.jsonl_path()))
+                .unwrap_or(0),
+            position_log_lines: self
+                .position_db
+                .as_ref()
+                .map(|db| count_jsonl_lines(db.path()))
+                .unwrap_or(0),
+            open_positions: self.positions.open_positions().len(),
+            live_orders: self.ome.live_orders().len(),
+            balance: self.accounts.active_ledger().balance(),
+        };
+
+        // 1) 停用全部已启用策略（复用 strategy.enable 的停用路径 —— 含
+        //    strategy-state.json 持久化与 shadow-evolution 重挂线）。
+        let disabled = self.enabled_strategy_names();
+        for name in &disabled {
+            self.set_strategy_enabled(name, false);
+        }
+
+        // 2) 撤销全部 resting 挂单。逐单走 `cancel` 释放 BUY 预留、清
+        //    engine 的 pending-token 闩、记 fast_orders_dirty —— 这些与内存
+        //    整替有交集，但 cancel 先走一遍保证所有旁路状态都被触碰；随后
+        //    的 OME 整替负责「连记录都消失」的部分。
+        let cancelled = self.cancel_all(None, now_ms).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "reset_trading: cancel_all failed mid-reset");
+            0
+        });
+
+        // 3) 内存态整表清零。OME 用全新实例 —— 订单表/live 索引/幂等表/
+        //    pending fills 全部消失。副作用（tx 事件）不重放：重置不是一个
+        //    需要逐单通知的操作。
+        let live_before = pre.live_orders;
+        self.ome = crate::ome::Ome::new();
+        self.inflight_takers.clear();
+        self.fast_dirty_tokens.clear();
+        self.fast_eval_wake = false;
+        self.fast_orders_dirty = true;
+        self.fast_positions_dirty = true;
+        self.exit_reasons.clear();
+        self.exit_reason_order.clear();
+        self.strategy_exits.clear();
+        self.place_cooldowns.clear();
+        self.escalation_skips.clear();
+        self.pending_venue_cancels.clear();
+        self.books.clear();
+        self.consecutive_venue_rejects = 0;
+        self.consecutive_sweep_failures = 0;
+        self.last_error = None;
+        if let Some(l) = self.applied_log.as_ref() {
+            l.compact(&[]);
+        }
+        self.breaker = crate::risk::LossBreakers::new(
+            self.config.max_consecutive_losses,
+            self.config.breaker_cooldown_sec,
+        );
+        self.risk.resume();
+
+        // 4) 持仓簿清空 + 磁盘记录截断重置（不重启进程）。
+        let open_before = pre.open_positions;
+        self.positions.restore_open(Vec::new());
+        if let Some(db) = &self.position_db {
+            db.save(&[]);
+        }
+        if let Some(db) = &self.order_db {
+            db.compact(&[]);
+        }
+        if let Some(db) = &mut self.trade_db {
+            db.reset();
+        }
+        // #178/#175 的幂等簿与结算簿：重置后历史结算不再需要去重（记录文件
+        // 已空，结算簿对着空文件重放会凭空恢复 claims）。
+        self.settlement = crate::settlement::SettlementBook::new(None);
+        self.recon_watermark_ms = 0;
+
+        // 5) 重新 seed 全部账户到配置值（与启动 `accounts.seed_all` 同一路径）。
+        self.accounts.seed_all(self.config.dry_seed_balance);
+
+        // 6) 自校验：live 索引空 / 记录文件 0 行 / 每个账户余额 == seed。
+        //    校验失败显式报错 —— 一个静默失败的重置比失败更糟（操作者以为
+        //    环境干净了）。
+        let mut problems: Vec<String> = Vec::new();
+        if !self.ome.live_orders().is_empty() {
+            problems.push(format!(
+                "live index not empty after reset ({} orders)",
+                self.ome.live_orders().len()
+            ));
+        }
+        if !self.positions.open_positions().is_empty() {
+            problems.push(format!(
+                "open positions not empty after reset ({} remain)",
+                self.positions.open_positions().len()
+            ));
+        }
+        if let Some(db) = &self.order_db
+            && count_jsonl_lines(db.path()) != 0
+        {
+            problems.push("order log still has lines after reset".to_string());
+        }
+        if let Some(db) = &self.trade_db
+            && count_jsonl_lines(db.jsonl_path()) != 0
+        {
+            problems.push("trade log still has lines after reset".to_string());
+        }
+        if let Some(db) = &self.position_db
+            && count_jsonl_lines(db.path()) != 0
+        {
+            problems.push("position log still has lines after reset".to_string());
+        }
+        let balances: Vec<(String, Decimal)> = self
+            .accounts
+            .account_list()
+            .iter()
+            .map(|a| {
+                (
+                    a.id.to_string(),
+                    self.accounts
+                        .ledger_of(&a.id)
+                        .map(|l| l.balance())
+                        .unwrap_or(Decimal::ZERO),
+                )
+            })
+            .collect();
+        for (id, bal) in &balances {
+            if *bal != self.config.dry_seed_balance {
+                problems.push(format!(
+                    "account {id} balance {bal} != seed {} after reset",
+                    self.config.dry_seed_balance
+                ));
+            }
+        }
+        if !problems.is_empty() {
+            let msg = format!(
+                "system.reset_trading: post-reset self-check FAILED — {}",
+                problems.join("; ")
+            );
+            // 自检失败也要留审计行（审计写失败再叠加错误）。
+            let _ = append_manual_op(
+                audit_path,
+                &serde_json::json!({
+                    "op": "reset_trading",
+                    "phase": "self_check_failed",
+                    "atMs": now_ms,
+                    "actor": actor,
+                    "reason": params.reason,
+                    "problems": problems,
+                }),
+            );
+            return Err(CoreError::new(CoreErrorCode::Internal, msg));
+        }
+
+        // 7) manual-ops 审计行：重置留下的唯一痕迹。写失败 = 整体失败
+        //    （状态已清但审计缺席是「不可追溯的擦除」，必须显式暴露）。
+        append_manual_op(
+            audit_path,
+            &serde_json::json!({
+                "op": "reset_trading",
+                "atMs": now_ms,
+                "actor": actor,
+                "reason": params.reason,
+                "mode": format!("{:?}", self.config.mode).to_lowercase(),
+                "pre": {
+                    "orderLogLines": pre.order_log_lines,
+                    "tradeLogLines": pre.trade_log_lines,
+                    "positionLogLines": pre.position_log_lines,
+                    "openPositions": pre.open_positions,
+                    "liveOrders": pre.live_orders,
+                    "balance": pre.balance.to_string(),
+                },
+                "post": {
+                    "disabledStrategies": disabled,
+                    "cancelledOrders": cancelled,
+                    "balances": balances.iter()
+                        .map(|(id, b)| serde_json::json!({
+                            "accountId": id, "balance": b.to_string()
+                        }))
+                        .collect::<Vec<_>>(),
+                },
+            }),
+        )
+        .map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::Internal,
+                format!("system.reset_trading: manual-ops audit write failed: {e}"),
+            )
+        })?;
+
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            live_orders = live_before,
+            open_positions = open_before,
+            cancelled = cancelled,
+            disabled = disabled.len(),
+            "trading environment reset — records wiped, cash re-seeded"
+        );
+
+        Ok(ResetTradingResult {
+            disabled_strategies: disabled,
+            cancelled_orders: cancelled,
+            cleared_open_positions: open_before,
+            cleared_closed_trades: pre.trade_log_lines as usize,
+            balances,
+            pre_summary: pre,
+            at_ms: now_ms,
+            actor: actor.to_string(),
+            reason: params.reason.clone(),
+        })
+    }
     /// The ONE writer of the panel-visible last-error slot (#180). Every
     /// internal refusal path funnels through here — directly, or via
     /// [`Core::emit_error`] — so the slot cannot be written with a message no
@@ -12345,6 +12626,79 @@ mod tests {
         c.cancel(&id, 2).unwrap();
         assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Cancelled);
         assert_eq!(c.ledger().available(), dec!(10));
+    }
+
+    // ── #458: system.reset_trading —— 三道门 + 重置闭环（直接单测） ─────────
+
+    fn reset_params(confirm: &str) -> crate::ipc::schema::ResetTradingParams {
+        crate::ipc::schema::ResetTradingParams {
+            confirm: confirm.to_string(),
+            reason: Some("unit".to_string()),
+        }
+    }
+
+    fn reset_audit_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bk-reset-unit-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn reset_trading_is_refused_in_live_mode() {
+        let mut c = live_core(dec!(10));
+        let err = c
+            .reset_trading(&reset_params("RESET"), "uid:t", 1)
+            .expect_err("live refuses the wipe");
+        assert_eq!(err.code, CoreErrorCode::RiskRejected);
+        assert!(
+            err.message.contains("append-only evidence"),
+            "the refusal names why: {err}"
+        );
+    }
+
+    #[test]
+    fn reset_trading_requires_the_verbatim_confirm_word() {
+        let mut c = dry_core(dec!(10));
+        for bad in ["", "reset", "RESET ", "confirm"] {
+            let err = c
+                .reset_trading(&reset_params(bad), "uid:t", 1)
+                .expect_err("a wrong confirm word is refused");
+            assert_eq!(err.code, CoreErrorCode::InvalidParams, "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn reset_trading_refuses_without_an_audit_path_and_wipes_with_one() {
+        let mut c = dry_core(dec!(10));
+        let err = c
+            .reset_trading(&reset_params("RESET"), "uid:t", 1)
+            .expect_err("no audit path = no wipe");
+        assert!(
+            err.message.contains("no manual-ops audit path"),
+            "the refusal names the missing audit: {err}"
+        );
+
+        // 有审计路径 → 重置落地：记录清空、余额复原、审计行存在。
+        let dir = reset_audit_dir("happy");
+        let audit = dir.join("manual-ops.jsonl");
+        let mut c = Core::new(CoreConfig {
+            manual_ops_audit_path: Some(audit.to_string_lossy().into_owned()),
+            trade_log_path: Some(dir.join("trades.jsonl").to_string_lossy().into_owned()),
+            dry_seed_balance: Decimal::from(5_000),
+            ..Default::default()
+        });
+        c.set_balance(Decimal::from(5_000));
+        let r = c.reset_trading(&reset_params("RESET"), "uid:t", 7).unwrap();
+        assert_eq!(
+            r.balances,
+            vec![("default".to_string(), Decimal::from(5_000))]
+        );
+        assert_eq!(c.trade_summary()["totalTrades"], serde_json::json!(0));
+        let text = std::fs::read_to_string(&audit).unwrap();
+        let rec: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(rec["op"], serde_json::json!("reset_trading"));
+        assert_eq!(rec["pre"]["balance"], serde_json::json!("5000"));
     }
 
     fn live_core(balance: Decimal) -> Core {

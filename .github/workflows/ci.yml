@@ -283,6 +283,12 @@ jobs:
       # 脚本自己的 scratch cwd。
       - name: Round-duration settings gate
         run: node scripts/round-duration-check.mjs
+      # 交易环境重置（system.reset_trading，#458）：真内核 spawn 验证确认词
+      # 门（逐字 RESET，拒绝时零副作用）、重置闭环（挂单索引空/记录文件 0 行/
+      # 余额复原 seed/回执带计数与 pre 快照）、manual-ops 审计行（失败尝试不
+      # 写行，成功追加不覆盖）。一切写入都在脚本自己的 scratch cwd。
+      - name: Trading-environment reset gate
+        run: node scripts/system-reset-check.mjs
 
   # KI-9: the specialized acceptance gates, promoted from "run them locally and
   # remember" to CI. Each pins a milestone acceptance (E2/E4/E5/E9/P-1) on the

@@ -246,6 +246,13 @@ pub mod method {
     /// this arm only advances the state machine to "restart-ready", it never
     /// touches a running binary.
     pub const SYSTEM_UPDATE_STAGE: &str = "system.update.stage";
+    /// #458: wipe this core's trading state and re-seed — stop enabled
+    /// strategies, cancel resting orders, clear the order/trade/position
+    /// records and the in-memory books, re-seed the cash to
+    /// `dry_seed_balance`. Refused in Live mode (see
+    /// `RESET_TRADING_LIVE_REFUSAL`); requires `confirm: "RESET"`. Every
+    /// invocation appends a record to the manual-ops audit file.
+    pub const SYSTEM_RESET_TRADING: &str = "system.reset_trading";
 
     // ── v0.3 Wave 0 (#329) — the two read-only envelope freezes ─────────────
     // The two arms Wave 0 lands in `server.rs`, with their wire shapes frozen
@@ -1013,6 +1020,62 @@ pub struct RoundDurationUpdate {
 pub const ROUND_DURATION_SET_NOTE: &str = "next session: the round grid is a coordinate system (round_slot is a UTC \
      grid index) and live positions/orders were slotted under the old length; \
      an explicit --round-sec flag still outranks this setting";
+
+// ── system.reset_trading (#458) ─────────────────────────────────────────────
+
+/// `system.reset_trading` params. `confirm` must be exactly `"RESET"` — a
+/// free-text confirmation gate, not a checkbox: the verb wipes every trading
+/// record this core owns (orders, trades, positions, live index) and re-seeds
+/// the cash, so a misfired call must be impossible to blame on a double-click.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetTradingParams {
+    pub confirm: String,
+    /// Audit trail only — echoed in the reply, the log line and the
+    /// manual-ops record.
+    pub reason: Option<String>,
+}
+
+/// `system.reset_trading` result: what was cleared, and the post-reset
+/// self-check (live index empty, record files empty, balance == seed).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetTradingResult {
+    pub disabled_strategies: Vec<String>,
+    pub cancelled_orders: usize,
+    pub cleared_open_positions: usize,
+    pub cleared_closed_trades: usize,
+    /// Post-reset cash per account id. Every entry must equal the configured
+    /// seed for a seeded core — the self-check asserts exactly that.
+    pub balances: Vec<(String, Decimal)>,
+    /// Pre-reset state snapshot persisted to the manual-ops audit record:
+    /// jsonl line counts of the record files plus the pre-reset balance.
+    pub pre_summary: ResetPreSummary,
+    pub at_ms: i64,
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The before-picture of a reset, carried in the reply AND the audit line so
+/// the operator can later reconstruct what was deleted (the records themselves
+/// are gone — this summary is what survives).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetPreSummary {
+    pub order_log_lines: u64,
+    pub trade_log_lines: u64,
+    pub position_log_lines: u64,
+    pub open_positions: usize,
+    pub live_orders: usize,
+    #[serde(with = "crate::decimal")]
+    pub balance: Decimal,
+}
+
+/// `system.reset_trading` refuses LIVE mode with this exact reason — real
+/// money records are append-only evidence, not a demo to wipe.
+pub const RESET_TRADING_LIVE_REFUSAL: &str = "system.reset_trading is refused in live mode: real-money records are \
+     append-only evidence and are never wiped by a UI action";
 
 // ── Fee model quote (#182) ───────────────────────────────────────────────────
 

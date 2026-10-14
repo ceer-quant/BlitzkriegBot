@@ -255,6 +255,21 @@ impl TradeDb {
     pub fn summary(&self) -> &TradeSummary {
         &self.summary
     }
+
+    /// The bound JSONL path — `reset_trading`'s pre/post self-check counts
+    /// lines here (#458).
+    pub fn jsonl_path(&self) -> &Path {
+        &self.jsonl_path
+    }
+
+    /// #458: wipe the trade history — empty JSONL, zeroed summary (written
+    /// through). The atomic rewrite keeps a crash mid-reset from leaving a
+    /// torn summary behind.
+    pub fn reset(&mut self) {
+        let _ = crate::jsonl::rewrite_atomic(&self.jsonl_path, b"");
+        self.summary = TradeSummary::default();
+        self.persist_summary();
+    }
 }
 
 /// Read the last `limit` records from a trades JSONL file (newest last).
