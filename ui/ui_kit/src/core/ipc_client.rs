@@ -146,6 +146,14 @@ impl IpcClient {
 
     /// Send one request and read until its matching response id arrives,
     /// skipping any interleaved notifications.
+    ///
+    /// There is NO cap on skipped notifications (issue 476): with no request in
+    /// flight the kernel keeps streaming `core.event` notifications, and the
+    /// response to the next request sits BEHIND that backlog — a client that
+    /// gives up after N skipped lines reports a live core as offline whenever
+    /// the panel idles for a few minutes. The real guards are the socket's own
+    /// read timeout (each skipped line must arrive within it) and EOF/IO errors;
+    /// draining the backlog at ~10k lines/s is microseconds of work.
     pub fn call(
         &mut self,
         method: &str,
@@ -176,7 +184,7 @@ impl IpcClient {
             let _ = stream.flush();
         }
 
-        for _ in 0..64 {
+        loop {
             let mut buf = String::new();
             let n = {
                 let reader = self.reader.as_mut().ok_or(IpcError::Timeout)?;
@@ -222,9 +230,6 @@ impl IpcClient {
             }
             return Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null));
         }
-        Err(IpcError::Protocol(
-            "too many interleaved notifications".into(),
-        ))
     }
 
     // ── Typed convenience wrappers (all read-only; the UI issues no orders) ──
