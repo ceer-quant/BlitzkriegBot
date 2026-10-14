@@ -7641,6 +7641,24 @@ impl Core {
                 EXIT_SET_UPDATE_NOTE,
             );
         }
+        // Issue #464, the ladder/stopLossPct semantic note: the two are
+        // INDEPENDENT mechanisms — `stop_loss_pct` is a percentage of the
+        // entry price re-judged every tick, a ladder's `move_stop_to` an
+        // absolute price floor recorded per step — so neither overwrite the
+        // other and there is no state to reconcile. The one interaction worth
+        // saying out loud: a changed `stop_loss_pct` re-bases the policy side
+        // of the ladder's `max(policy stop, ladder floor)` on the NEXT exit
+        // tick (already-open positions included), while floors already raised
+        // by fired steps stay exactly where they are.
+        if patch.stop_loss_pct.is_some() && !self.config.positions.exit_ladder.is_empty() {
+            tracing::info!(
+                target: "risk",
+                actor = %actor,
+                "exit ladder is active: the changed stop_loss_pct re-bases the \
+                 ladder's stop floor on the next exit tick (fired move_stop_to \
+                 floors are absolute and unaffected)"
+            );
+        }
         Ok(ExitSetUpdate {
             applied: changes,
             at_ms: now_ms,
@@ -7818,8 +7836,10 @@ impl Core {
             return;
         };
         let message = format!(
-            "DAILY LOSS LIMIT REACHED: realized ${} against a ${} cap ({}% of the day's opening equity ${}) — new entries are frozen until the next UTC day (positions still exit normally)",
+            "DAILY LOSS LIMIT REACHED: realized ${} + unrealized ${} = net ${} against a ${} cap ({}% of the day's opening equity ${}) — new entries are frozen until the next UTC day (positions still exit normally)",
             t.realized_pnl_usd,
+            self.positions.unrealized_pnl_usd(),
+            t.realized_pnl_usd + self.positions.unrealized_pnl_usd(),
             t.limit_usd,
             self.config.positions.max_daily_loss_equity_pct,
             t.opening_equity_usd
@@ -8462,6 +8482,19 @@ impl Core {
     /// traded. The depth reading is the taker walk's own
     /// ([`crate::sim::Book::marketable_depth`]), so dry cannot hold two
     /// different ideas of how much is available.
+    ///
+    /// #464: a maker that crosses the book AT SUBMISSION is refused here, not
+    /// filled. Live sends a post-only limit and the venue answers WouldCross
+    /// (`map_sdk_err`, extensions/polymarket/src/venue.rs) — filling the same
+    /// order at its own limit with a zero maker fee in dry handed the
+    /// simulation maker economics for what live would have paid a taker fee
+    /// to cross. The refusal routes through the SAME live machinery:
+    /// `reject_live_result` releases the reservation, and the MakerThenTaker
+    /// branch there chases at the book's real price (`escalation_guard` +
+    /// `place_escalated`), so both modes converge on one path. A maker that
+    /// crosses only LATER (rested first, then hit) is the honest maker fill
+    /// and still fills below.
+    ///
     /// #351: advance the in-flight taker legs. Runs at every clock advance —
     /// the head of [`Self::engine_on_data`] (BEFORE the incoming book is
     /// mirrored, so a match can never see the event that triggered the drain)
@@ -8565,6 +8598,27 @@ impl Core {
         self.inflight_takers = remaining;
     }
 
+    /// Fill a resting maker order if the latest book crosses its limit.
+    ///
+    /// The fill is bounded by the crossing side's DEPTH, not by the order's own
+    /// size (issue #183): a maker trades only against the volume that actually
+    /// reaches its limit, so an order bigger than the book leaves the rest
+    /// resting — partially filled — instead of pretending the whole size
+    /// traded. The depth reading is the taker walk's own
+    /// ([`crate::sim::Book::marketable_depth`]), so dry cannot hold two
+    /// different ideas of how much is available.
+    ///
+    /// #464: a maker that crosses the book AT SUBMISSION is refused here, not
+    /// filled. Live sends a post-only limit and the venue answers WouldCross
+    /// (`map_sdk_err`, extensions/polymarket/src/venue.rs) — filling the same
+    /// order at its own limit with a zero maker fee in dry handed the
+    /// simulation maker economics for what live would have paid a taker fee
+    /// to cross. The refusal routes through the SAME live machinery:
+    /// `reject_live_result` releases the reservation, and the MakerThenTaker
+    /// branch there chases at the book's real price (`escalation_guard` +
+    /// `place_escalated`), so both modes converge on one path. A maker that
+    /// crosses only LATER (rested first, then hit) is the honest maker fill
+    /// and still fills below.
     fn try_maker_fill(&mut self, id: &str, now_ms: i64) {
         let Some(order) = self.ome.get(id).cloned() else {
             return;
@@ -8576,6 +8630,35 @@ impl Core {
             return;
         };
         if !book.crosses(&order) {
+            return;
+        }
+        // #464 (see above): the venue would have refused the resting order —
+        // post-only may not cross. Only the SUBMISSION instant is gated, so a
+        // maker that rested and is hit by a later tick keeps its fill path
+        // untouched (bit-for-bit for every order that did not cross on POST).
+        // CLOSE intents are exempt: live refuses their POST too (the
+        // WouldCross escalation branch is entry-only), so the honest mirror
+        // of live is the exit runner's own reject→backoff→retry loop, not a
+        // dry refusal that would strand the position with no closer at all.
+        if order.submitted_at_ms == now_ms && !is_close_intent(&order.internal_key) {
+            let side_word = if order.side == Side::Buy {
+                "buy"
+            } else {
+                "sell"
+            };
+            self.reject_live_result(
+                id,
+                Some(CoreError::new(
+                    CoreErrorCode::WouldCross,
+                    format!(
+                        "post-only order would cross: {side_word} {} @ {} (the venue refuses \
+                         this POST; a MakerThenTaker entry escalates to taker on the same book)",
+                        order.size, order.price
+                    ),
+                )),
+                now_ms,
+            )
+            .ok();
             return;
         }
         let depth = book.marketable_depth(order.side, order.price);
@@ -10159,6 +10242,10 @@ impl Core {
             /// E28 (§9.2): the account the closing SELL spends from — the
             /// position's own book, so an exit can never debit another account.
             account_id: AccountId,
+            /// Issue #464: shares to sell (`None` = the whole sellable
+            /// position, every path's historical behavior). A ladder step's
+            /// tranche rides here from the `ExitRequest`.
+            close_shares: Option<Decimal>,
         }
 
         let mut jobs: Vec<ExitJob> = Vec::new();
@@ -10256,6 +10343,9 @@ impl Core {
                     // E28 (§9.2): the automated exit spends from the position's
                     // own account.
                     account_id: pos.account_id.clone(),
+                    // #464: a ladder step's tranche (None = the whole
+                    // position, every no-ladder path unchanged).
+                    close_shares: req.close_shares,
                 });
             }
         }
@@ -10306,6 +10396,7 @@ impl Core {
                 // E28 (§9.2): the strategy-signal exit spends from the
                 // position's own account.
                 account_id: pos.account_id.clone(),
+                close_shares: None,
             });
         }
 
@@ -10334,8 +10425,24 @@ impl Core {
             true
         };
         if self.config.auto_exits_enabled && !all_hold && residual_scan {
+            // Issue #464: a ladder tranche's SELL is a PARTIAL exit — while it
+            // works, the position has shares left on purpose. The residual
+            // backstop below re-closes exactly such remainders, so a ladder
+            // book would be re-flattened wholesale one tick after every
+            // step. A position whose token has a working or recently filled
+            // ladder SELL stays out of this scan until the ladder's own next
+            // step (or stop) takes it the rest of the way. No-ladder runs
+            // never carry tranches, so their scan is untouched.
+            let ladder_tranche_tokens: HashSet<String> = jobs
+                .iter()
+                .filter(|j| j.close_shares.is_some())
+                .map(|j| j.token.clone())
+                .collect();
             for pos in self.positions.open_positions().to_vec() {
                 if !has_job.insert(pos.id.clone()) {
+                    continue;
+                }
+                if ladder_tranche_tokens.contains(&pos.token_id) {
                     continue;
                 }
                 let has_live_sell = self
@@ -10371,6 +10478,7 @@ impl Core {
                     // E28 (§9.2): the residual re-close spends from the
                     // position's own account.
                     account_id: pos.account_id.clone(),
+                    close_shares: None,
                 });
             }
         }
@@ -10391,8 +10499,19 @@ impl Core {
             if self.placement_blocked(&job.internal_key, now_ms) {
                 continue;
             }
-            let Some(size) = self.positions.sell_shares(&job.position_id) else {
-                continue;
+            // #464: a ladder tranche sells exactly its floor-to-grid size
+            // (never more than the position still holds); `None` sells the
+            // whole sellable position — every no-ladder path, unchanged.
+            let size = if let Some(tranche) = job.close_shares {
+                let Some(whole) = self.positions.sell_shares(&job.position_id) else {
+                    continue;
+                };
+                tranche.min(whole)
+            } else {
+                let Some(size) = self.positions.sell_shares(&job.position_id) else {
+                    continue;
+                };
+                size
             };
             let mode = if job.use_maker {
                 FillPolicy::Maker
@@ -15355,6 +15474,96 @@ mod fill_model_tests {
         let audit = c.run_accounting_audit(1_200);
         assert!(audit.ok, "{}", audit.note);
     }
+
+    // ── #464: DRY post-only 对齐 LIVE —— 提交瞬间穿价的 maker 单被拒 ────────
+
+    /// #464 acceptance: a maker (post-only) BUY submitted with the ask ALREADY
+    /// at or inside its limit is refused, exactly as the venue refuses the
+    /// same POST live (`WouldCross`). Before this, dry filled it at its own
+    /// limit with a zero maker fee — maker economics for an order live would
+    /// only have executed by paying a taker fee, a systematically optimistic
+    /// bias. A MakerThenTaker entry then escalates to taker on the same book
+    /// through `reject_live_result`'s existing WouldCross branch.
+    #[test]
+    fn a_post_only_maker_that_crosses_at_submission_is_refused_like_live() {
+        let mut c = core_with(FillModel::default());
+        // The ask (0.40) is AT the buy limit — the venue's post-only check
+        // crosses on `<=`, and so does `Book::crosses`.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 900);
+        let (id, status) = c
+            .place(
+                buy(FillPolicy::MakerThenTaker, dec!(0.40), dec!(10)),
+                60_000,
+                1_000,
+            )
+            .unwrap();
+        // The passive leg itself is refused…
+        assert_eq!(status, OrderStatus::Rejected, "the POST is refused");
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Rejected);
+        // …and the MakerThenTaker contract takes over on the SAME tick: the
+        // escalation places a taker leg and fills it at the book's price —
+        // LIVE's own WouldCross reaction, reached through the same
+        // `reject_live_result` branch.
+        assert_eq!(c.positions().open_positions().len(), 1);
+        let pos = &c.positions().open_positions()[0];
+        assert_eq!(pos.entry_price, dec!(0.40));
+        assert!(
+            pos.flows.entry_fee_usd > Decimal::ZERO,
+            "the escalation pays the taker fee (dry: {})",
+            pos.flows.entry_fee_usd
+        );
+        // The refused leg's BUY reservation was released, not stranded: the
+        // books carry only the escalated leg's commitment.
+        assert!(c.ledger().is_balanced());
+    }
+
+    /// A plain `Maker` order has no escalation contract: the same crossing
+    /// POST is refused, nothing fills, no position exists — the live parity
+    /// for pure passive orders.
+    #[test]
+    fn a_refused_pure_maker_crossing_places_nothing() {
+        let mut c = core_with(FillModel::default());
+        c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 900);
+        let (_, status) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        assert_eq!(status, OrderStatus::Rejected);
+        assert!(c.positions().open_positions().is_empty());
+        assert_eq!(c.ledger().balance(), dec!(1000), "no cash committed");
+        assert_eq!(
+            c.last_error.as_ref().map(|e| e.code),
+            Some(CoreErrorCode::WouldCross)
+        );
+    }
+
+    /// Reverse acceptance: a maker that does NOT cross at submission keeps
+    /// the historic path untouched — it rests and fills at its own limit when
+    /// a later tick crosses it (the honest maker fill the old tests pin).
+    #[test]
+    fn a_maker_that_rests_first_keeps_its_honest_fill() {
+        let mut c = core_with(FillModel::default());
+        // No ask at the limit when the order posts.
+        c.book_snapshot("tok", vec![], vec![(dec!(0.41), dec!(100))], 900);
+        let (id, _) = c
+            .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+            .unwrap();
+        assert!(
+            c.ome().get(&id).unwrap().status.is_live(),
+            "rested, not refused"
+        );
+        // The ask comes down INTO the limit on a later tick: maker fill at
+        // the resting limit, zero fee.
+        c.book_snapshot(
+            "tok",
+            vec![(dec!(0.39), dec!(100))],
+            vec![(dec!(0.40), dec!(100))],
+            1_500,
+        );
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Filled);
+        let pos = &c.positions().open_positions()[0];
+        assert_eq!(pos.entry_price, dec!(0.40));
+        assert_eq!(pos.flows.entry_fee_usd, Decimal::ZERO);
+    }
 }
 
 /// ── E17: accounting precision ────────────────────────────────────────────────
@@ -15835,12 +16044,15 @@ mod account_precision_tests {
             (FillPolicy::Maker, FillPolicy::Maker),
             (FillPolicy::MakerThenTaker, FillPolicy::Taker),
         ] {
-            // DRY: submit at a crossing book so the core fills it itself.
+            // DRY: submit at a NON-crossing book (post-only would be refused
+            // on a crossing one — #464), so the fill below is the venue's
+            // own report either way and the parity subject is the LEDGER
+            // arithmetic, not the matcher's fill decision.
             let mut dry = core();
             dry.book_snapshot(
                 "tok",
                 vec![(dec!(0.43), dec!(100))],
-                vec![(dec!(0.43), dec!(100))],
+                vec![(dec!(0.44), dec!(100))],
                 1,
             );
             let (did, _) = dry
