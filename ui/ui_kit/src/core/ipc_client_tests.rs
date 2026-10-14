@@ -142,3 +142,65 @@ fn a_dead_session_is_dropped_so_the_next_call_reconnects() {
     );
     let _ = std::fs::remove_file(&sock);
 }
+
+/// Issue 476: with no request in flight the kernel keeps streaming
+/// `core.event` notifications, and the response to the NEXT request sits
+/// behind that backlog. The old client gave up after 64 skipped lines and the
+/// panel reported a live core as offline ("too many interleaved
+/// notifications"). The fix removed the cap — the guards are the socket read
+/// timeout and EOF — so this fixture floods 100 notifications first and the
+/// request must still be answered.
+#[test]
+fn a_request_behind_a_notification_backlog_is_still_answered() {
+    let sock = unique_sock("backlog");
+    let _ = std::fs::remove_file(&sock);
+    let listener = UnixListener::bind(&sock).expect("bind test socket");
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut writer = stream.try_clone().expect("clone");
+        let mut reader = BufReader::new(stream);
+        // The flood: notifications have no `id`, exactly like the kernel's
+        // `core.event` pushes. 100 > the old 64-line cap.
+        for i in 0..100u32 {
+            let note = serde_json::json!({
+                "jsonrpc": "2.0", "method": "core.event",
+                "params": { "kind": "flood", "seq": i },
+            });
+            let mut out = note.to_string();
+            out.push('\n');
+            writer
+                .write_all(out.as_bytes())
+                .and_then(|_| writer.flush())
+                .expect("notify");
+        }
+        // Then answer the one request, echo its id like the kernel does.
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read request");
+        let id: serde_json::Value = serde_json::from_str(line.trim())
+            .ok()
+            .and_then(|v: serde_json::Value| v.get("id").cloned())
+            .unwrap_or(serde_json::json!(1));
+        let reply = serde_json::json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": { "version": "0.1.0", "mode": "dry" },
+        });
+        let mut out = reply.to_string();
+        out.push('\n');
+        writer
+            .write_all(out.as_bytes())
+            .and_then(|_| writer.flush())
+            .expect("reply");
+        // Keep the session open briefly so the client's read lands.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    });
+
+    let mut client = IpcClient::new(sock.to_string_lossy().to_string());
+    client.connect().expect("connect");
+    let ready = client
+        .ready()
+        .expect("a request behind a 100-notification backlog must still be answered (issue 476)");
+    assert_eq!(ready.version, "0.1.0");
+
+    server.join().ok();
+    let _ = std::fs::remove_file(&sock);
+}
