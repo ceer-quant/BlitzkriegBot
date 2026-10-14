@@ -178,26 +178,37 @@ function isLua(r: StrategyStatsRow): boolean {
 // `strategy.params.get` 读声明域与生效值；`strategy.params.set` 原子写入
 // （内核按声明域校验，plan-first 一个非法整体拒）。回执进 flash，读数刷新。
 const paramsCache = ref<Record<string, StrategyParamsReadoutDoc>>({})
-const paramsDraft = ref<Record<string, Record<string, string>>>({})
+// Draft 键是 `strategy::knob` 的拍平表：v-model 需要普通索引访问做赋值目标
+// （可选链 `draft[s]?.[k]` 编译成非法赋值目标，esbuild 拒绝）。
+const paramsDraft = ref<Record<string, string>>({})
 const paramsBusy = ref<string | null>(null)
+
+/** One strategy's draft slice, keyed by knob. */
+function draftOf(name: string): Record<string, string> {
+  const prefix = `${name}::`
+  const out: Record<string, string> = {}
+  for (const k of Object.keys(paramsDraft.value)) {
+    if (k.startsWith(prefix)) out[k.slice(prefix.length)] = paramsDraft.value[k]
+  }
+  return out
+}
 
 async function loadParams(name: string): Promise<void> {
   try {
     const doc = await api.strategyParams(name)
     paramsCache.value = { ...paramsCache.value, [name]: doc }
-    paramsDraft.value = {
-      ...paramsDraft.value,
-      [name]: Object.fromEntries(doc.tunables.map((t) => [t.name, t.value])),
-    }
+    const fresh: Record<string, string> = {}
+    for (const t of doc.tunables) fresh[`${name}::${t.name}`] = t.value
+    paramsDraft.value = { ...paramsDraft.value, ...fresh }
   } catch {
     paramsCache.value = { ...paramsCache.value, [name]: { name, found: false, tunables: [], evolvable: false, paramsAttached: false, note: '读取失败' } }
   }
 }
 
 async function saveParams(name: string): Promise<void> {
-  const draft = paramsDraft.value[name]
+  const draft = draftOf(name)
   const cache = paramsCache.value[name]
-  if (!draft || !cache) return
+  if (!cache) return
   // 只发改动项：与声明值相同或清空的旋钮不进补丁。
   const patch: Record<string, string> = {}
   for (const t of cache.tunables) {
@@ -543,7 +554,7 @@ function onExpand(name: string): void {
                           >
                             <span class="min-w-0 flex-1 truncate text-muted-fg" :title="t.name">{{ t.name }}</span>
                             <Input
-                              v-model="paramsDraft[r.name]?.[t.name]"
+                              v-model="paramsDraft[`${r.name}::${t.name}`]"
                               size="sm"
                               class="w-24 text-right"
                               :placeholder="t.value"
