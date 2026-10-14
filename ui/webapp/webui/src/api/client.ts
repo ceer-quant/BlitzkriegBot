@@ -331,6 +331,88 @@ export interface ExitSetUpdateDoc {
   error?: string
 }
 
+// ── 策略 tunables 编辑卡（issue 481；mirror core schema StrategyParamsReadout）──
+
+/** 一个声明过的 tunable：名称 + 声明域 [min, max] + 当前生效值（十进制字符串）。 */
+export interface TunableViewDoc {
+  name: string
+  /** 当前生效值（注册表 cell 或 manifest 默认），十进制字符串。 */
+  value: string
+  min: string
+  max: string
+}
+
+/** `strategy.params.get` 回执：一个策略的声明旋钮与生效值。 */
+export interface StrategyParamsReadoutDoc {
+  name: string
+  found: boolean
+  /** 空数组 = 该策略没有可调参数（未声明 tunables 域）。 */
+  tunables: TunableViewDoc[]
+  evolvable: boolean
+  /** 注册表覆盖层是否挂载（写入后为 true）。 */
+  paramsAttached: boolean
+  note?: string
+}
+
+/**
+ * `strategy.params.set` 请求体：一个策略 + 要改的旋钮（十进制字符串）+
+ * 审计备注。多旋钮补丁是原子的：一个非法值整体拒。
+ */
+export interface StrategyParamsSetBody {
+  name: string
+  params: Record<string, string>
+  reason?: string
+}
+
+/** 一个旋钮的审计变更（内核 StrategyParamChange 的 wire 形状）。 */
+export interface StrategyParamChangeDoc {
+  knob: string
+  from: string
+  to: string
+  /** live：策略下一次 evaluate 即读到新值（cell 合并到 manifest 默认包上）。 */
+  effect: 'live' | string
+}
+
+/** `strategy.params.set` 回执：改了什么、谁改的、何时、未持久化。 */
+export interface StrategyParamsSetUpdateDoc {
+  name: string
+  applied: StrategyParamChangeDoc[]
+  atMs: number
+  actor: string
+  reason?: string
+  persisted: boolean
+  note: string
+  error?: string
+}
+
+// ── 跨所配对视图（issue 481；mirror core unified.list JSON shape）────────────
+
+/** 一个映射里的一侧 venue（数据行 —— venue 是数据，不是分支）。 */
+export interface UnifiedVenueRow {
+  venue: string
+  conditionId: string
+  asset?: string | null
+  expiresAtMs: number
+  status: string
+}
+
+/** `unified.list` 的一个事件行：配对状态 + 两侧 venue + discrepancy 标记。 */
+export interface UnifiedEventRow {
+  id: string
+  title: string
+  status: 'paired' | 'singleLegAvailable' | string
+  settlementSource?: string
+  venues: UnifiedVenueRow[]
+  discrepancies: string[]
+}
+
+/** `unified.list` 回执。 */
+export interface UnifiedListDoc {
+  version?: string
+  events: UnifiedEventRow[]
+  error?: string
+}
+
 // ── 挂单卡（issue 456；mirror core model.rs TrackedOrder wire shape）────────
 
 /** `orders.list` 的一行：内核记账的订单，status 是大写枚举（LIVE/FORCE_CLOSED/…）。 */
@@ -512,6 +594,33 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /**
+   * 策略 tunables 编辑卡的读路径（`strategy.params.get`，issue 481，只读）：
+   * 一个策略声明的全部可调参数（名称 + 声明域 [min, max]）与当前生效值。
+   * schema 源是策略自己的 manifest tunables —— 内核不发明域。
+   */
+  strategyParams: (name: string) =>
+    request<StrategyParamsReadoutDoc>(
+      `/strategy-params?name=${encodeURIComponent(name)}`,
+    ),
+  /**
+   * 策略 tunables 编辑卡的写路径（`strategy.params.set`，issue 481）：
+   * `risk.setExit` 同款姿态 —— 内核对每个旋钮按声明域校验（plan-first，
+   * 一个非法整体拒），热写注册表 cell，回执逐项 old→new 带 effect=live
+   * （策略下一次 evaluate 即读到新值）。未持久化：重启回落 manifest 默认
+   * （+ 已采纳的进化晋升）。
+   */
+  strategyParamsSet: (body: StrategyParamsSetBody) =>
+    request<StrategyParamsSetUpdateDoc>('/strategy-params/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * 跨所配对视图的读路径（`unified.list`，issue 481，只读）：已确认的
+   * 统一映射快照 —— 每个事件的配对状态、两侧 venue、discrepancy 标记。
+   * venue 一律数据渲染。
+   */
+  unifiedList: () => request<UnifiedListDoc>('/unified'),
   /**
    * 轮次时间周期设置卡的读路径（`round_duration.get`，只读）：本会话生效
    * 秒数、来源、可切换白名单、下次会话将解析到什么（持久格 outranks TOML/

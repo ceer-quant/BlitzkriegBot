@@ -344,6 +344,15 @@ impl ShadowEvolution {
     ///
     /// Re-registering is safe and keeps state: `ParamRegistry::publish` returns the
     /// strategy's existing cell, so the parameters in force survive a rebuild.
+    /// "In force" is honored literally: the cell's current values are carried
+    /// over (clamped to the new declaration — a value the fresh declaration no
+    /// longer admits falls back to that knob's declared default), so an
+    /// operator's `strategy.params.set` write survives the rewires a sibling
+    /// toggle or a later package load triggers. For the in-tree adapters the
+    /// declaration is derived from the effective config, so the carried value
+    /// equals the declared one and this is a no-op; for a Lua package whose
+    /// declaration is the static manifest default, it is the difference between
+    /// keeping and silently discarding the operator's edit (issue #481).
     ///
     /// `now_ms` is the birth stamp of every variant this rebuild creates, and it
     /// must be a real clock: `created_at_ms` is what the evaluator's observation
@@ -386,7 +395,21 @@ impl ShadowEvolution {
                 tracing::warn!(strategy = s.name(), "strategy cap reached; not evolved");
                 break;
             }
-            let params = StrategyParams::from_knobs(&specs);
+            // The value in force wins over the declaration's default: start
+            // from the declared set, then keep every knob the existing cell
+            // already answers for, clamped to the fresh declaration. A knob the
+            // cell does not know (first registration, or a knob the package
+            // just added) keeps the declared value.
+            let mut params = StrategyParams::from_knobs(&specs);
+            if let Some(cell) = self.registry.handle_for(s.name()) {
+                for (knob, value) in (**cell.load()).iter() {
+                    if let Some(spec) = specs.iter().find(|k| k.name == knob)
+                        && spec.contains(value)
+                    {
+                        params.set(knob, value);
+                    }
+                }
+            }
             let cell = self.registry.publish(s.name(), params);
             let carried_unit = carried.remove(s.name());
             let (last_evolution_ms, evolution_count, rejected_count, previous) = match carried_unit
@@ -520,6 +543,24 @@ impl ShadowEvolution {
             .find(|u| u.strategy == strategy)
             .map(|u| u.specs.clone())
             .unwrap_or_default()
+    }
+
+    /// Issue #481: record an OPERATOR tunables edit (the
+    /// `strategy.params.set` path) in the evolution audit log — the same
+    /// `record_manual` shape `apply_params` uses, so an operator edit is
+    /// inspectable next to every adopted promotion. The audit log is this
+    /// manager's private state; the kernel-side write path forwards through
+    /// here rather than reaching into the field.
+    pub fn audit_manual_override(
+        &mut self,
+        strategy: &str,
+        timestamp: i64,
+        from: &MutableParams,
+        to: &MutableParams,
+        note: &str,
+    ) {
+        self.audit
+            .record_manual(strategy, timestamp, from, to, note);
     }
 
     /// Evolvable strategy names, in registration order.
@@ -1576,6 +1617,97 @@ mod tests {
         assert!(m.params_for("inert").is_none(), "not evolvable is explicit");
         assert!(m.declared_knobs("inert").is_empty());
         assert!(m.status("inert", 0).is_none());
+    }
+
+    /// Issue #481: a re-registration must keep the value IN FORCE, not stomp it
+    /// back to the declared default. The doc on `register_strategies` promises
+    /// "keeps state"; for the knobs the in-tree adapters derive from their
+    /// effective config that promise holds trivially (the declaration already
+    /// carries the value), but a Lua package's declaration is the static
+    /// manifest default — an operator's `strategy.params.set` write would be
+    /// wiped by any rewire (a sibling strategy toggling, a package loaded
+    /// later, the engine being installed). This is the shape that exposes it:
+    /// static declarations, value moved by hand, then re-register.
+    #[test]
+    fn re_registration_keeps_the_value_in_force_within_its_domain() {
+        let (mut a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let mut m = ShadowEvolution::new(fast_cfg(false, "keep-value"), &refs);
+        assert_eq!(m.registry().get("alpha", "cap"), Some(dec!(0.40)));
+
+        // The operator moves the knob (same shape strategy.params.set lands).
+        let mut bag = m.params_for("alpha").unwrap();
+        bag.set("cap", dec!(0.60));
+        m.registry().publish("alpha", bag);
+        assert_eq!(m.registry().get("alpha", "cap"), Some(dec!(0.60)));
+
+        // A rewire hands a FRESH instance of the strategy to the manager (a
+        // toggle or a later package load builds new adapters; the declaration
+        // is the static manifest default again).
+        a.cap = dec!(0.40);
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        m.register_strategies(&refs, 2000);
+
+        assert_eq!(
+            m.registry().get("alpha", "cap"),
+            Some(dec!(0.60)),
+            "re-registering a strategy must keep the value in force, not the declared default"
+        );
+    }
+
+    /// The carry-over is bounded by the declaration: a value in force that the
+    /// NEW declaration no longer admits falls back to the declared default —
+    /// the declared domain is the hard boundary on the set path, and it stays
+    /// one on the re-registration path. Narrower manifest = the package
+    /// reloads having tightened its own tunables domain.
+    #[test]
+    fn re_registration_falls_back_when_the_value_left_the_declared_domain() {
+        struct NarrowCap {
+            name: String,
+        }
+        impl EngineStrategy for NarrowCap {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _now: i64) {}
+            fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
+            fn evolvable_knobs(&self) -> Vec<KnobSpec> {
+                // Same knob, but the domain no longer admits 0.60.
+                vec![KnobSpec::new("cap", dec!(0.40), dec!(0.05), dec!(0.50))]
+            }
+            fn shadow_factory(&self) -> Option<Box<dyn ShadowFactory>> {
+                Some(Box::new(CapFactory {
+                    name: self.name.clone(),
+                    cap: dec!(0.40),
+                }))
+            }
+            fn find_candidates(&mut self, _ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
+                Vec::new()
+            }
+        }
+        let (mut a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let mut m = ShadowEvolution::new(fast_cfg(false, "keep-value-domain"), &refs);
+
+        let mut bag = m.params_for("alpha").unwrap();
+        bag.set("cap", dec!(0.60));
+        m.registry().publish("alpha", bag);
+        assert_eq!(m.registry().get("alpha", "cap"), Some(dec!(0.60)));
+
+        // The package reloads with a narrower manifest domain that no longer
+        // admits the value in force.
+        a.cap = dec!(0.40);
+        let narrow = NarrowCap {
+            name: "alpha".to_string(),
+        };
+        let refs: Vec<&dyn EngineStrategy> = vec![&narrow];
+        m.register_strategies(&refs, 2000);
+
+        assert_eq!(
+            m.registry().get("alpha", "cap"),
+            Some(dec!(0.40)),
+            "a value outside the new declaration must fall back to the declared default"
+        );
     }
 
     #[test]

@@ -678,6 +678,7 @@ async fn handle_line(
         method::SYSTEM_UPDATE_CONFIGURE,
         method::ROUND_DURATION_SET,
         method::SYSTEM_RESET_TRADING,
+        method::STRATEGY_PARAMS_SET,
     ];
     if READONLY_REFUSED.contains(&method) && core.lock().await.mode() == Mode::ReadOnly {
         return fail(
@@ -1540,6 +1541,73 @@ async fn handle_line(
                 let outcome = core.lock().await.reload_strategy(name, path);
                 Ok(serde_json::to_value(outcome).unwrap_or(Value::Null))
             }
+        }
+
+        // Issue #481 (G3): one strategy's declared tunables + the values in
+        // force — the editor card's read path. The schema source is the
+        // strategy's OWN knob declaration; the kernel invents no domain.
+        method::STRATEGY_PARAMS_GET => {
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.is_empty() {
+                Err((Failure::INVALID_PARAMS, "name required".into(), None))
+            } else {
+                let c = core.lock().await;
+                Ok(serde_json::to_value(c.strategy_params_readout(name)).unwrap_or(Value::Null))
+            }
+        }
+
+        // Issue #481 (G3): the tunables' operator write path — the
+        // `risk.setExit` posture. The kernel validates every knob against the
+        // strategy's OWN declared domain (plan first, write later), hot-swaps
+        // the registry cell and lands the audit rows; the receipt names every
+        // old→new with effect=live (the strategy merges the cell over the
+        // manifest defaults at its next evaluate).
+        method::STRATEGY_PARAMS_SET => {
+            match serde_json::from_value::<StrategyParamsSetParams>(params.clone()) {
+                Err(e) => Err((
+                    Failure::INVALID_PARAMS,
+                    format!(
+                        "{e} — nothing was applied; the body is \
+                         {{ name, params: {{ knob: value, … }}, reason? }} and every \
+                         value is an exact decimal string"
+                    ),
+                    None,
+                )),
+                Ok(p) => {
+                    if p.name.is_empty() {
+                        Err((Failure::INVALID_PARAMS, "name required".into(), None))
+                    } else {
+                        // The actor is the peer's KERNEL-recorded uid, not a
+                        // claim by the caller (same posture as risk.setExit).
+                        let actor = match peer {
+                            PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                            _ => "uid:unknown".to_string(),
+                        };
+                        match core.lock().await.apply_strategy_params_set(
+                            &p.name,
+                            &p.params,
+                            &actor,
+                            p.reason,
+                            now_ms(),
+                        ) {
+                            Ok(update) => Ok(serde_json::to_value(update).unwrap_or(Value::Null)),
+                            Err(e) => Err(core_err(e)),
+                        }
+                    }
+                }
+            }
+        }
+
+        // Issue #481 (G4): the confirmed cross-venue mappings, read-only.
+        // The kernel serializes the whole snapshot (status, venues,
+        // discrepancies); the panel renders venue rows as data — no venue
+        // branch anywhere in the UI.
+        method::UNIFIED_LIST => {
+            let c = core.lock().await;
+            Ok(serde_json::json!({
+                "version": crate::ipc::schema::PROTOCOL_VERSION,
+                "events": c.unified_list(),
+            }))
         }
 
         method::EXTENSION_LIST => {

@@ -2753,6 +2753,284 @@ impl Core {
         }
     }
 
+    // ── 策略 tunables 读/写（issue #481 G3）─────────────────────────────────
+
+    /// `strategy.params.get`: one strategy's declared tunables plus the value
+    /// in force. The schema source is the strategy's OWN knob declaration
+    /// (manifest tunables for Lua packages) — the kernel invents no domain,
+    /// and a strategy that declared nothing reports an empty list.
+    pub fn strategy_params_readout(&self, name: &str) -> crate::ipc::schema::StrategyParamsReadout {
+        use crate::ipc::schema::{StrategyParamsReadout, TunableView};
+        let specs: Vec<_> = self
+            .engine
+            .as_ref()
+            .map(|e| {
+                e.strategy_refs()
+                    .iter()
+                    .find(|s| s.name() == name)
+                    .map(|s| s.evolvable_knobs())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let found = self.strategy_names().iter().any(|n| n == name);
+        // The current value in force: the registry cell when one exists, else
+        // the declared value (the same thing while no override ever landed).
+        let mut tunables: Vec<TunableView> = specs
+            .iter()
+            .map(|k| {
+                let value = self
+                    .shadow_evolution
+                    .params_for(name)
+                    .and_then(|p| p.get(&k.name))
+                    .unwrap_or(k.value);
+                TunableView {
+                    name: k.name.clone(),
+                    // All in-tree declarations are decimal-typed; the `int`
+                    // tag only exists on the Lua manifest surface, which the
+                    // set path re-checks against the declared domain. Expose
+                    // the knob names the kernel actually enforces.
+                    r#type: None,
+                    value: value.to_string(),
+                    min: k.min.to_string(),
+                    max: k.max.to_string(),
+                }
+            })
+            .collect();
+        tunables.sort_by(|a, b| a.name.cmp(&b.name));
+        let evolvable = !specs.is_empty();
+        let params_attached = self.has_hot_params();
+        let note = if !found {
+            Some(format!("strategy {name} is not loaded"))
+        } else if !evolvable {
+            Some("该策略没有可调参数（manifest 未声明 tunables 域）".to_string())
+        } else {
+            None
+        };
+        StrategyParamsReadout {
+            name: name.to_string(),
+            found,
+            tunables,
+            evolvable,
+            params_attached,
+            note,
+        }
+    }
+
+    /// `strategy.params.set` (issue #481 G3): the tunables' operator write
+    /// path — the `risk.setExit` posture (plan first, write later, audit the
+    /// receipt). Validation is against the strategy's OWN declared domains;
+    /// a refused patch moves nothing.
+    ///
+    /// 生效路径（本轮裁决）：写入 = `registry.publish`（该策略 cell 的新值）
+    /// 加引擎侧 attach。进化关闭时 `rewire_hot_params` 会把覆盖层脱钩，所以
+    /// 一次操作员写入要生效必须把覆盖层重新挂上。这与「关闭进化 = 行为与
+    /// 改动前一致」的验收共存：脱钩语义是「没有写入时等于没有覆盖层」，而
+    /// 一旦操作员显式写了 tunables，挂载覆盖层就是那个写入的直接后果 ——
+    /// 下次 evaluate 起生效；重启后覆盖层消失，回落 manifest 默认（回执
+    /// note 明说 `persisted: false`）。进化的梯度锁（±5%）刻意不用于此路径：
+    /// 操作员编辑不是进化的一个变体步，只有声明域是硬边界。
+    pub fn apply_strategy_params_set(
+        &mut self,
+        name: &str,
+        knobs: &std::collections::BTreeMap<String, serde_json::Value>,
+        actor: &str,
+        reason: Option<String>,
+        now_ms: i64,
+    ) -> Result<crate::ipc::schema::StrategyParamsSetUpdate, crate::model::CoreError> {
+        use crate::ipc::schema::StrategyParamChange;
+        use crate::model::{CoreError, CoreErrorCode};
+        use crate::shadow_evolution::knobs::StrategyParams as KnobBag;
+
+        let err = |msg: String| CoreError::new(CoreErrorCode::InvalidParams, msg);
+        // The declaration lives on the live instance (E2-c); a strategy that
+        // is not hosted has nothing to validate against and nothing to write.
+        let specs = self
+            .engine
+            .as_ref()
+            .and_then(|e| {
+                e.strategy_refs()
+                    .iter()
+                    .find(|s| s.name() == name)
+                    .map(|s| s.evolvable_knobs())
+            })
+            .unwrap_or_default();
+        if specs.is_empty() {
+            return Err(err(format!(
+                "strategy {name} declares no tunables (nothing is writable); \
+                 read the declared domains with strategy.params.get"
+            )));
+        }
+        if knobs.is_empty() {
+            return Err(err(
+                "strategy.params.set needs at least one knob; read the declared \
+                 domains with strategy.params.get"
+                    .into(),
+            ));
+        }
+
+        // Plan first: every knob must be declared, parse exactly (decimal
+        // string or JSON number — no float path) and sit inside its domain.
+        let mut plan: Vec<(String, Decimal)> = Vec::new();
+        for (knob, raw) in knobs {
+            let Some(spec) = specs.iter().find(|s| &s.name == knob) else {
+                return Err(err(format!(
+                    "knob {knob} is not declared by {name} — nothing was applied; \
+                     the declared tunables are: {}",
+                    specs
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            };
+            let value = match raw {
+                serde_json::Value::String(s) => Decimal::from_str_exact(s.trim()),
+                serde_json::Value::Number(n) => Decimal::from_str_exact(&n.to_string()),
+                other => {
+                    return Err(err(format!(
+                        "knob {knob}: expected a decimal string, got {other}"
+                    )));
+                }
+            };
+            let Ok(value) = value else {
+                return Err(err(format!(
+                    "knob {knob}: {raw} is not an exact decimal — nothing was applied"
+                )));
+            };
+            if !spec.contains(value) {
+                return Err(err(format!(
+                    "knob {knob}: {value} is outside the declared domain [{}, {}] — \
+                     nothing was applied",
+                    spec.min, spec.max
+                )));
+            }
+            plan.push((knob.clone(), value));
+        }
+
+        // Write phase: merge the patch over the cell's current values (a
+        // single-knob patch keeps the strategy's other knobs in force), then
+        // publish + attach so the strategy reads it on the next evaluate.
+        let registry = self.shadow_evolution.registry();
+        let mut next: KnobBag = registry
+            .handle_for(name)
+            .map(|c| (**c.load()).clone())
+            .unwrap_or_else(|| KnobBag::from_knobs(&specs));
+        let mut changes: Vec<StrategyParamChange> = Vec::new();
+        for (knob, value) in &plan {
+            let from = next.get(knob).unwrap_or(Decimal::ZERO).to_string();
+            next.set(knob, *value);
+            changes.push(StrategyParamChange {
+                knob: knob.clone(),
+                from,
+                to: value.to_string(),
+                effect: "live",
+            });
+        }
+        registry.publish(name, next);
+        // Attach the overlay to the engine (see the method doc for why this is
+        // unconditional): the set path IS an overlay write.
+        if let Some(e) = self.engine.as_mut() {
+            e.set_hot_params(Some(std::sync::Arc::clone(&registry)));
+        }
+
+        for c in &changes {
+            tracing::info!(
+                target: "strategy_params",
+                actor = %actor,
+                strategy = %name,
+                knob = c.knob,
+                from = %c.from,
+                to = %c.to,
+                effect = c.effect,
+                reason = reason.as_deref().unwrap_or(""),
+                "strategy tunables update: {}.{} {} -> {}",
+                name,
+                c.knob,
+                c.from,
+                c.to,
+            );
+        }
+        // The evolution audit log carries manual overrides; this write is one
+        // (same shape `shadow_evolution_apply` records), so an operator edit
+        // shows up next to every adopted promotion.
+        let before = {
+            let mut bag = KnobBag::from_knobs(&specs);
+            // from-values as recorded in the change list (the pre-write cell
+            // read raced nothing: both reads happened inside this lock).
+            for c in &changes {
+                if let Ok(v) = Decimal::from_str_exact(&c.from) {
+                    bag.set(&c.knob, v);
+                }
+            }
+            let mut m = crate::shadow_evolution::knobs::MutableParams::new();
+            m.set_strategy(name, bag);
+            m
+        };
+        let after = {
+            let mut m = crate::shadow_evolution::knobs::MutableParams::new();
+            if let Some(p) = registry.handle_for(name).map(|c| (**c.load()).clone()) {
+                m.set_strategy(name, p);
+            }
+            m
+        };
+        self.shadow_evolution.audit_manual_override(
+            name,
+            now_ms,
+            &before,
+            &after,
+            "operator tunables edit",
+        );
+
+        Ok(crate::ipc::schema::StrategyParamsSetUpdate {
+            name: name.to_string(),
+            applied: changes,
+            at_ms: now_ms,
+            actor: actor.to_string(),
+            reason,
+            persisted: false,
+            note: crate::ipc::schema::STRATEGY_PARAMS_SET_NOTE,
+        })
+    }
+
+    /// `unified.list` (issue #481 G4): the confirmed cross-venue mappings as a
+    /// read-only snapshot — per event: status, the venues holding a leg, and
+    /// the discrepancy marks. Data only; the panel renders venues as rows, no
+    /// venue branch anywhere.
+    pub fn unified_list(&self) -> Vec<serde_json::Value> {
+        self.engine
+            .as_ref()
+            .map(|e| {
+                e.unified_mappings()
+                    .values()
+                    .map(|ev| {
+                        serde_json::json!({
+                            "id": ev.id,
+                            "title": ev.title,
+                            "status": ev.status,
+                            "settlementSource": ev.settlement_source,
+                            "venues": ev
+                                .listings
+                                .values()
+                                .map(|l| serde_json::json!({
+                                    "venue": l.venue,
+                                    "conditionId": l.condition_id,
+                                    "asset": l.asset,
+                                    "expiresAtMs": l.expires_at_ms,
+                                    "status": l.status,
+                                }))
+                                .collect::<Vec<_>>(),
+                            "discrepancies": ev
+                                .discrepancies
+                                .iter()
+                                .map(|d| d.as_str())
+                                .collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Load an external v2 strategy shared library and register it into the
     /// driving engine's live dispatch (the IPC `strategy.load` entry). Runs
     /// the E27 handshake in ENFORCE mode: a library whose declaration the
@@ -13333,6 +13611,372 @@ mod tests {
         assert_eq!(placed.size, dec!(5), "the cap shrunk 7 shares to 5");
         assert_eq!(placed.filled_size, dec!(5));
         assert_eq!(c.positions().open_positions()[0].shares, dec!(5));
+    }
+}
+
+/// Issue #481 (G3/G4): the strategy-tunables edit surface
+/// (`strategy.params.get`/`set`) and the unified-mapping readout
+/// (`unified.list`). The write path is the `risk.setExit` posture: plan
+/// against the strategy's OWN declared domains, write later, audit the
+/// receipt; a refused patch moves nothing.
+#[cfg(test)]
+mod strategy_params_tests {
+    use super::*;
+    use crate::risk::RiskConfig;
+    use rust_decimal_macros::dec;
+
+    fn core_with_strategies() -> Core {
+        let mut c = Core::new(CoreConfig {
+            risk: RiskConfig::default(),
+            dry_seed_balance: dec!(1000),
+            ..Default::default()
+        });
+        let mut engine = crate::engine::Engine::new(crate::engine::EngineConfig::default());
+        crate::strategies::test_support::host_disabled(
+            &mut engine,
+            Default::default(),
+            Default::default(),
+        );
+        c.enable_engine(engine);
+        c
+    }
+
+    fn knob_map(knobs: &[(&str, &str)]) -> std::collections::BTreeMap<String, serde_json::Value> {
+        knobs
+            .iter()
+            .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+            .collect()
+    }
+
+    /// The readout exposes the strategy's OWN declaration (names + domains)
+    /// and the values in force; the kernel invents nothing.
+    #[test]
+    fn params_get_reports_the_declared_domains_and_values() {
+        let c = core_with_strategies();
+        let r = c.strategy_params_readout("spread_arb");
+        assert!(r.found);
+        assert!(r.evolvable);
+        assert!(
+            !r.tunables.is_empty(),
+            "spread_arb declares knobs; the readout must carry them"
+        );
+        let knob = r
+            .tunables
+            .iter()
+            .find(|t| t.name == "trend_max_entry_price")
+            .expect("the spread_arb cap knob is declared");
+        // The declared value in force, and a real domain [min, max].
+        assert_eq!(knob.value, "0.45");
+        let (min, max) = (
+            Decimal::from_str_exact(&knob.min).unwrap(),
+            Decimal::from_str_exact(&knob.max).unwrap(),
+        );
+        assert!(min <= max);
+        assert!(min <= dec!(0.45) && dec!(0.45) <= max);
+
+        // A strategy that declared nothing reports an empty list — the
+        // editor renders 「没有可调参数」, never an invented domain.
+        let inert = c.strategy_params_readout("nonexistent_strategy");
+        assert!(!inert.found);
+        assert!(!inert.evolvable);
+        assert!(inert.tunables.is_empty());
+    }
+
+    /// The happy path: one knob moves inside its domain, the receipt names
+    /// old→new with effect=live, the registry cell carries the new value,
+    /// and the OTHER knobs keep their values (a single-knob patch merges).
+    #[test]
+    fn params_set_moves_one_knob_and_keeps_the_others() {
+        let mut c = core_with_strategies();
+        let before = c.strategy_params_readout("spread_arb");
+        let other_before = before
+            .tunables
+            .iter()
+            .find(|t| t.name == "trend_max_entry_price")
+            .map(|t| t.value.clone())
+            .unwrap();
+        let target_before = before
+            .tunables
+            .iter()
+            .find(|t| t.name != "trend_max_entry_price")
+            .expect("spread_arb declares more than one knob")
+            .clone();
+
+        let update = c
+            .apply_strategy_params_set(
+                "spread_arb",
+                &knob_map(&[(&target_before.name, &format!("{}", dec!(0.30)))]),
+                "uid:tester",
+                Some("calibration".into()),
+                1_000,
+            )
+            .expect("an in-domain write applies");
+        assert_eq!(update.name, "spread_arb");
+        assert_eq!(update.applied.len(), 1);
+        assert_eq!(update.applied[0].knob, target_before.name);
+        assert_eq!(update.applied[0].from, target_before.value);
+        assert_eq!(update.applied[0].to, "0.30");
+        assert_eq!(update.applied[0].effect, "live");
+        assert_eq!(update.actor, "uid:tester");
+        assert!(!update.persisted);
+
+        // The cell in force moved; the untouched knob did not.
+        let after = c.strategy_params_readout("spread_arb");
+        let moved = after
+            .tunables
+            .iter()
+            .find(|t| t.name == target_before.name)
+            .unwrap();
+        assert_eq!(moved.value, "0.30");
+        let kept = after
+            .tunables
+            .iter()
+            .find(|t| t.name == "trend_max_entry_price")
+            .unwrap();
+        assert_eq!(kept.value, other_before);
+        // The write attached the overlay (the strategy reads the cell on its
+        // next evaluate — that is what `effect: live` means).
+        assert!(c.has_hot_params());
+    }
+
+    /// The three refusals: undeclared knob, out-of-domain value, unparsable
+    /// value — every one moves NOTHING (plan first, write later).
+    #[test]
+    fn params_set_refuses_bad_patches_without_moving_anything() {
+        let mut c = core_with_strategies();
+        let before = c.strategy_params_readout("spread_arb");
+        let snapshot = |r: &crate::ipc::schema::StrategyParamsReadout| {
+            r.tunables
+                .iter()
+                .map(|t| (t.name.clone(), t.value.clone()))
+                .collect::<Vec<_>>()
+        };
+        let before_pairs = snapshot(&before);
+
+        // 1. an undeclared knob
+        let err = c
+            .apply_strategy_params_set(
+                "spread_arb",
+                &knob_map(&[("no_such_knob", "0.5")]),
+                "uid:tester",
+                None,
+                1_000,
+            )
+            .unwrap_err();
+        assert_eq!(err.code, crate::model::CoreErrorCode::InvalidParams);
+        assert!(err.message.contains("no_such_knob"), "got {}", err.message);
+        assert!(err.message.contains("nothing was applied"));
+
+        // 2. a value outside the declared domain
+        let knob = &before.tunables[0];
+        let out_of_domain = format!("{}", knob_max(&knob.max) + dec!(1));
+        let err = c
+            .apply_strategy_params_set(
+                "spread_arb",
+                &knob_map(&[(&knob.name, &out_of_domain)]),
+                "uid:tester",
+                None,
+                1_001,
+            )
+            .unwrap_err();
+        assert!(
+            err.message.contains("outside the declared domain"),
+            "got {}",
+            err.message
+        );
+
+        // 3. an unparsable value (a float with excess precision, not a decimal)
+        let err = c
+            .apply_strategy_params_set(
+                "spread_arb",
+                &knob_map(&[(&knob.name, "not-a-decimal")]),
+                "uid:tester",
+                None,
+                1_002,
+            )
+            .unwrap_err();
+        assert!(
+            err.message.contains("not an exact decimal"),
+            "got {}",
+            err.message
+        );
+
+        // 4. an unknown strategy
+        let err = c
+            .apply_strategy_params_set(
+                "ghost",
+                &knob_map(&[("anything", "1")]),
+                "uid:tester",
+                None,
+                1_003,
+            )
+            .unwrap_err();
+        assert!(
+            err.message.contains("declares no tunables"),
+            "got {}",
+            err.message
+        );
+
+        // Nothing moved.
+        let after = snapshot(&c.strategy_params_readout("spread_arb"));
+        assert_eq!(
+            after, before_pairs,
+            "every refusal left the values in force"
+        );
+    }
+
+    fn knob_max(max: &str) -> Decimal {
+        Decimal::from_str_exact(max).unwrap()
+    }
+
+    /// A multi-knob patch is atomic: one bad value refuses the WHOLE patch.
+    #[test]
+    fn params_set_is_atomic_across_knobs() {
+        let mut c = core_with_strategies();
+        let before = c.strategy_params_readout("spread_arb");
+        let knob = &before.tunables[0];
+        let err = c
+            .apply_strategy_params_set(
+                "spread_arb",
+                &knob_map(&[
+                    (&knob.name, &knob.value), // in-domain, would apply
+                    ("no_such_knob", "1"),     // undeclared — refuses all
+                ]),
+                "uid:tester",
+                None,
+                1_000,
+            )
+            .unwrap_err();
+        assert!(err.message.contains("no_such_knob"));
+        let after = c.strategy_params_readout("spread_arb");
+        assert_eq!(
+            after
+                .tunables
+                .iter()
+                .find(|t| t.name == knob.name)
+                .unwrap()
+                .value,
+            knob.value,
+            "the good half of a refused patch must not land"
+        );
+    }
+
+    /// Issue #481: an operator's tunables write must survive the rewires the
+    /// service layer triggers elsewhere — toggling a SIBLING strategy
+    /// re-registers the whole host set, and for an adapter whose declaration
+    /// is a static manifest default (the Lua package shape) the old code
+    /// stomped the cell back to that default. The in-tree adapters derive
+    /// their declaration from the effective config, so the carried value
+    /// equals the declared one and only the end-to-end shape proves the
+    /// carry-over; the static-declaration unit tests live on
+    /// shadow_evolution (re_registration_*).
+    #[test]
+    fn params_set_survives_a_sibling_strategy_toggle() {
+        let mut c = core_with_strategies();
+        let knob = c
+            .strategy_params_readout("spread_arb")
+            .tunables
+            .into_iter()
+            .find(|t| t.name == "trend_max_entry_price")
+            .expect("spread_arb declares the cap knob");
+        assert!(
+            knob.value != "0.52",
+            "precondition: the test starts away from the value it writes"
+        );
+        c.apply_strategy_params_set(
+            "spread_arb",
+            &knob_map(&[("trend_max_entry_price", "0.52")]),
+            "uid:tester",
+            None,
+            1_000,
+        )
+        .expect("the write lands");
+
+        // Toggle a sibling off and back on: two full host re-registrations.
+        assert!(c.set_strategy_enabled("trend_follow", false));
+        assert!(c.set_strategy_enabled("trend_follow", true));
+
+        let after = c.strategy_params_readout("spread_arb");
+        assert_eq!(
+            after
+                .tunables
+                .iter()
+                .find(|t| t.name == "trend_max_entry_price")
+                .unwrap()
+                .value,
+            "0.52",
+            "a sibling toggle re-registers the host set; the operator's write must survive it"
+        );
+    }
+
+    /// G4: the unified readout serializes the confirmed mappings (venues as
+    /// data, discrepancies as names) and stays empty on an engine without
+    /// mappings.
+    #[test]
+    fn unified_list_serializes_the_confirmed_mappings() {
+        let mut c = core_with_strategies();
+        assert!(
+            c.unified_list().is_empty(),
+            "no mappings fed, none reported"
+        );
+
+        let mut event = blitzkrieg_market_api::unified::UnifiedEvent {
+            id: "evt-1".into(),
+            title: "BTC above 100k".into(),
+            settlement_rules: "resolves YES".into(),
+            settlement_source: blitzkrieg_market_api::unified::SettlementSource::Uma,
+            listings: Default::default(),
+            discrepancies: vec![],
+            status: blitzkrieg_market_api::unified::EventStatus::Paired,
+        };
+        event.listings.insert(
+            blitzkrieg_market_api::unified::Venue::Polymarket,
+            blitzkrieg_market_api::unified::PlatformListing {
+                venue: blitzkrieg_market_api::unified::Venue::Polymarket,
+                condition_id: "0xabc".into(),
+                up_token_id: "tok-up".into(),
+                down_token_id: "tok-down".into(),
+                asset: Some("bitcoin".into()),
+                title: "BTC above 100k".into(),
+                settlement_rules: "resolves YES".into(),
+                settlement_source: blitzkrieg_market_api::unified::SettlementSource::Uma,
+                expires_at_ms: 1_800_000,
+                status: blitzkrieg_market_api::unified::ListingStatus::Active,
+            },
+        );
+        event.listings.insert(
+            blitzkrieg_market_api::unified::Venue::Kalshi,
+            blitzkrieg_market_api::unified::PlatformListing {
+                venue: blitzkrieg_market_api::unified::Venue::Kalshi,
+                condition_id: "KXBTC".into(),
+                up_token_id: "k-up".into(),
+                down_token_id: "k-down".into(),
+                asset: Some("bitcoin".into()),
+                title: "BTC above 100k".into(),
+                settlement_rules: "resolves YES".into(),
+                settlement_source: blitzkrieg_market_api::unified::SettlementSource::Uma,
+                expires_at_ms: 1_800_000,
+                status: blitzkrieg_market_api::unified::ListingStatus::Active,
+            },
+        );
+        c.engine
+            .as_mut()
+            .unwrap()
+            .put_unified_mapping(event.clone());
+
+        let list = c.unified_list();
+        assert_eq!(list.len(), 1);
+        let row = &list[0];
+        assert_eq!(row["id"], "evt-1");
+        assert_eq!(row["status"], "paired");
+        let venues = row["venues"].as_array().unwrap();
+        assert_eq!(venues.len(), 2);
+        let names: Vec<&str> = venues
+            .iter()
+            .map(|v| v["venue"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"polymarket") && names.contains(&"kalshi"));
+        assert_eq!(row["discrepancies"].as_array().unwrap().len(), 0);
     }
 }
 

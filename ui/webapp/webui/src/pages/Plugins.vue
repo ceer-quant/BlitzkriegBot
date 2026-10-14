@@ -3,11 +3,16 @@
  * 插件 — 扩展/行情两类插件的注册表视图（E9-g 插件治理页；E11/D-32：策略不再
  * 作为插件在此显示——策略页是策略的唯一入口，插件页只回答「核心挂了哪些外部
  * 能力」）。身份徽标、状态、活跃行情源。
+ *
+ * Issue 481：跨所配对视图（`unified.list` 只读）也在本页 —— 已确认的统一
+ * 映射是「外部能力之间」的关系（两个行情插件各自盯住同一事件的一侧），
+ * 不是任何单一策略的账本数据，落在插件页符合两页分离的契约。venue 一律
+ * 数据渲染（no-venue-branch 门禁）。
  */
-import { computed, ref } from 'vue'
-import { Puzzle, Radio, Plug, AlertTriangle } from 'lucide-vue-next'
+import { computed, onMounted, ref } from 'vue'
+import { Puzzle, Radio, Plug, AlertTriangle, Link2 } from 'lucide-vue-next'
 import { usePanelStore } from '@/stores/panel'
-import { marketTypeLabel, type PluginRow } from '@/api/client'
+import { api, marketTypeLabel, type PluginRow, type UnifiedEventRow } from '@/api/client'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
@@ -95,6 +100,44 @@ const segments = computed(() => [
   { id: 'all', label: '全部', badge: sections.value.reduce((a, s) => a + s.rows.length, 0) },
   ...sections.value.map((s) => ({ id: s.key, label: KIND_META[s.key].label, badge: s.rows.length })),
 ])
+
+// ── 跨所配对视图（issue 481 G4）：unified.list 的只读快照 ────────────────────
+const unifiedEvents = ref<UnifiedEventRow[]>([])
+const unifiedError = ref<string | null>(null)
+const unifiedLoading = ref(false)
+
+/** 配对状态徽标：paired=可对冲，singleLegAvailable=单腿可用（黄，§425 显式
+ *  语义：executor 不再按完整对腿行事，面板必须显示它而不是藏起来）。 */
+function pairStatus(e: UnifiedEventRow): { tone: 'up' | 'gold' | 'down'; label: string } {
+  if (e.status === 'paired') return { tone: 'up', label: '已配对' }
+  if (e.status === 'singleLegAvailable') return { tone: 'gold', label: '单腿可用' }
+  return { tone: 'down', label: e.status }
+}
+
+/** discrepancy 名称 → 操作员可读的短语；未知名原样展示（数据驱动）。 */
+const DISCREPANCY_LABELS: Record<string, string> = {
+  settlement_source: '结算源不一致',
+  settlement_rules: '结算规则冲突',
+  expiry_gap: '到期时间差过大',
+}
+function discrepancyLabel(d: string): string {
+  return DISCREPANCY_LABELS[d] ?? d
+}
+
+async function loadUnified(): Promise<void> {
+  unifiedLoading.value = true
+  unifiedError.value = null
+  try {
+    const doc = await api.unifiedList()
+    unifiedEvents.value = doc.events ?? []
+    if (doc.error) unifiedError.value = doc.error
+  } catch (e) {
+    unifiedError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    unifiedLoading.value = false
+  }
+}
+onMounted(loadUnified)
 </script>
 
 <template>
@@ -124,6 +167,72 @@ const segments = computed(() => [
     <div v-if="sections.length > 1" class="mt-3.5 flex justify-center">
       <SegmentedControl v-model="filter" :segments="segments" size="sm" />
     </div>
+
+    <!-- 跨所配对视图（issue 481 G4）：已确认的统一映射。venue 是数据行。 -->
+    <Card class="mt-3.5" dense>
+      <CardHeader label="跨所配对（统一映射）">
+        <template #action>
+          <Badge variant="gold" dot><RollingNumber :value="unifiedEvents.length" /> 映射</Badge>
+        </template>
+      </CardHeader>
+      <div v-if="unifiedEvents.length" class="-mx-2 overflow-x-auto">
+        <table class="w-full min-w-[680px] text-[13px]">
+          <thead>
+            <tr class="text-left">
+              <th class="label-micro px-2 pb-2.5">事件</th>
+              <th class="label-micro px-2 pb-2.5">状态</th>
+              <th class="label-micro px-2 pb-2.5">场地</th>
+              <th class="label-micro px-2 pb-2.5">差异标记</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="e in unifiedEvents"
+              :key="e.id"
+              class="border-t border-line transition-colors hover:bg-panel-2"
+            >
+              <td class="px-2 py-2.5 font-semibold">
+                <span class="inline-flex min-w-0 items-center gap-2">
+                  <Link2 class="size-3.5 shrink-0 text-faint-fg" />
+                  <span class="truncate" :title="e.title">{{ e.title || e.id }}</span>
+                </span>
+              </td>
+              <td class="px-2 py-2.5">
+                <Badge :variant="pairStatus(e).tone" dot>{{ pairStatus(e).label }}</Badge>
+              </td>
+              <td class="px-2 py-2.5">
+                <span class="inline-flex flex-wrap gap-1.5">
+                  <!-- 每侧 venue 一个徽标 —— venue 是数据（`v.venue` 原样渲染，
+                       不特判任何名字），配对状态跟着该侧的 listing 走。 -->
+                  <Badge
+                    v-for="v in e.venues"
+                    :key="`${e.id}-${v.venue}`"
+                    variant="outline"
+                  >{{ v.venue }}</Badge>
+                </span>
+              </td>
+              <td class="px-2 py-2.5">
+                <span v-if="e.discrepancies.length" class="inline-flex flex-wrap gap-1.5">
+                  <Badge v-for="d in e.discrepancies" :key="`${e.id}-${d}`" variant="down">
+                    {{ discrepancyLabel(d) }}
+                  </Badge>
+                </span>
+                <span v-else class="text-[12px] text-faint-fg">无</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-else class="px-2 pb-2">
+        <EmptyState
+          :loading="unifiedLoading"
+          :text="unifiedError ? '统一映射读取失败' : '暂无已确认的统一映射'"
+          :hint="unifiedError
+            ? '通常是核心正在重启或未启用发现链路，稍候刷新。'
+            : '两个场地的行情插件发现同一事件并确认后，映射会出现在这里；跨所套利策略（cross_venue_arb）只交易这里的映射。'"
+        />
+      </div>
+    </Card>
 
     <Card v-for="s in visible" :key="s.key" class="mt-3.5" dense>
       <CardHeader :label="KIND_META[s.key].label">
