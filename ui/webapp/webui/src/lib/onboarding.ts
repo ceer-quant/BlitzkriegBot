@@ -38,12 +38,12 @@ export function onboardSteps(input: OnboardInput): OnboardStep[] {
     {
       id: 'market', index: 0, done: marketDone, target: 'plugins', cta: '去插件页',
       title: '① 选定行情源',
-      body: '行情插件提供盘口数据（Polymarket / Kalshi / predict.fun 任选其一）。到插件页确认一个行情源已设为活跃。',
+      body: '行情插件提供盘口数据（Polymarket / Kalshi / predict.fun 任选其一；PolySimulator 是第三方模拟盘，只用于演练）。到插件页确认一个行情源已设为活跃。',
     },
     {
       id: 'strategy', index: 1, done: strategyDone, target: 'strategies', cta: '去策略页',
       title: '② 启用一个策略',
-      body: '策略默认停用。到策略页打开开关（跨平台套利 cross_venue_arb 需至少两个场地的行情），机器人即按该策略开始出单。',
+      body: '策略默认停用。到策略页打开开关（跨平台套利 cross_venue_arb 需至少两个场地的行情，先在插件页的「跨所配对」表确认映射已生成），机器人即按该策略开始出单；策略行展开后可直接调它的可调参数。',
     },
     {
       id: 'wrap', index: 2, done: true, target: null, cta: null,

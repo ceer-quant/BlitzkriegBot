@@ -19,8 +19,8 @@
  * 跳转走 store 的 navRequest —— 页签是 App 壳的资产，页面只提请求。
  */
 import { computed, ref } from 'vue'
-import { AlertTriangle, ChevronDown, Pencil, Plus, Search, ShieldCheck, ShieldOff } from 'lucide-vue-next'
-import { api, type StrategyStatsRow } from '@/api/client'
+import { AlertTriangle, ChevronDown, Pencil, Plus, Search, ShieldCheck, ShieldOff, SlidersHorizontal } from 'lucide-vue-next'
+import { api, type StrategyStatsRow, type StrategyParamsReadoutDoc } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { num, signedMoney, pct } from '@/lib/format'
 import { refusalProfile, refusalTotals, REFUSAL_NOTE } from '@/lib/rejections'
@@ -159,7 +159,6 @@ const expanded = ref<string | null>(null)
 function toggleExpand(name: string): void {
   expanded.value = expanded.value === name ? null : name
 }
-
 // ── issue 393 (⑤): blueprint entries ─────────────────────────────────────────────
 // 「创建策略」跳蓝图的新建模式（画布首访本就铺示例模板）；「编辑策略」只在
  // Lua 策略行出现（source = `lua:<dir>`），跳蓝图并按名预载该包的蓝图文档。
@@ -173,6 +172,65 @@ function editStrategy(name: string): void {
 /** Lua 策略的来源拼法（engine.stats 的 `source`）；蓝图编辑只对 Lua 包有意义。 */
 function isLua(r: StrategyStatsRow): boolean {
   return typeof r.source === 'string' && r.source.startsWith('lua:')
+}
+
+// ── tunables 编辑卡（issue 481 G3）：详情行内的声明域编辑 ────────────────────
+// `strategy.params.get` 读声明域与生效值；`strategy.params.set` 原子写入
+// （内核按声明域校验，plan-first 一个非法整体拒）。回执进 flash，读数刷新。
+const paramsCache = ref<Record<string, StrategyParamsReadoutDoc>>({})
+const paramsDraft = ref<Record<string, Record<string, string>>>({})
+const paramsBusy = ref<string | null>(null)
+
+async function loadParams(name: string): Promise<void> {
+  try {
+    const doc = await api.strategyParams(name)
+    paramsCache.value = { ...paramsCache.value, [name]: doc }
+    paramsDraft.value = {
+      ...paramsDraft.value,
+      [name]: Object.fromEntries(doc.tunables.map((t) => [t.name, t.value])),
+    }
+  } catch {
+    paramsCache.value = { ...paramsCache.value, [name]: { name, found: false, tunables: [], evolvable: false, paramsAttached: false, note: '读取失败' } }
+  }
+}
+
+async function saveParams(name: string): Promise<void> {
+  const draft = paramsDraft.value[name]
+  const cache = paramsCache.value[name]
+  if (!draft || !cache) return
+  // 只发改动项：与声明值相同或清空的旋钮不进补丁。
+  const patch: Record<string, string> = {}
+  for (const t of cache.tunables) {
+    const v = (draft[t.name] ?? '').trim()
+    if (v && v !== t.value) patch[t.name] = v
+  }
+  if (!Object.keys(patch).length) return
+  paramsBusy.value = name
+  try {
+    const res = await api.strategyParamsSet({ name, params: patch })
+    flash.value = {
+      name,
+      ok: true,
+      msg: res.applied.length
+        ? `已应用 ${res.applied.map((c) => `${c.knob}: ${c.from} → ${c.to}`).join('，')}（下次评估生效，未持久化）`
+        : '无变更',
+    }
+    await loadParams(name)
+  } catch (e) {
+    // 内核拒绝（域外/未声明/非十进制）——如实转述，值不动。
+    flash.value = { name, ok: false, msg: e instanceof Error ? e.message : String(e) }
+  } finally {
+    paramsBusy.value = null
+    setTimeout(() => { flash.value = null }, 6000)
+  }
+}
+
+/** 详情行展开时拉一次 tunables（每名只拉一次；写回后刷新）。 */
+function onExpand(name: string): void {
+  toggleExpand(name)
+  if (expanded.value === name && paramsCache.value[name] === undefined) {
+    void loadParams(name)
+  }
 }
 </script>
 
@@ -405,7 +463,7 @@ function isLua(r: StrategyStatsRow): boolean {
                       variant="ghost"
                       size="sm"
                       :title="expanded === r.name ? '收起详情' : '展开详情'"
-                      @click="toggleExpand(r.name)"
+                      @click="onExpand(r.name)"
                     >
                       <AlertTriangle
                         v-if="profile(r).causes.length || profile(r).causesMissing"
@@ -469,6 +527,44 @@ function isLua(r: StrategyStatsRow): boolean {
                           因此上述数字是<span class="text-muted-fg">拒绝次数随时间的累积</span>，不是不同信号的笔数。
                           一个持续被挡的信号（例如同标的有持仓、持仓已满、熔断未解除）每小时可累积约 7 万次。
                         </p>
+                      </div>
+                      <!-- tunables 编辑卡（issue 481 G3）：策略自己声明的域，
+                           内核按声明校验；有域的旋钮才可编辑。 -->
+                      <div v-if="paramsCache[r.name]?.tunables?.length" class="min-w-0 lg:col-span-2">
+                        <div class="label-micro mb-1.5 flex items-center gap-1.5">
+                          <SlidersHorizontal class="size-3" />可调参数（tunables）
+                          <span class="font-normal text-faint-fg">—— 声明域外的值会被内核拒绝；改动下次评估生效，未持久化（重启回落 manifest 默认）。</span>
+                        </div>
+                        <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                          <label
+                            v-for="t in paramsCache[r.name].tunables"
+                            :key="`knob-${t.name}`"
+                            class="flex items-center gap-2 text-[12px]"
+                          >
+                            <span class="min-w-0 flex-1 truncate text-muted-fg" :title="t.name">{{ t.name }}</span>
+                            <Input
+                              v-model="paramsDraft[r.name]?.[t.name]"
+                              size="sm"
+                              class="w-24 text-right"
+                              :placeholder="t.value"
+                            />
+                            <span class="whitespace-nowrap text-[11px] text-faint-fg">[{{ t.min }}, {{ t.max }}]</span>
+                          </label>
+                        </div>
+                        <div class="mt-2 flex items-center gap-2">
+                          <Button
+                            variant="gold"
+                            size="sm"
+                            :disabled="paramsBusy === r.name"
+                            @click="saveParams(r.name)"
+                          >应用改动</Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            :disabled="paramsBusy === r.name"
+                            @click="loadParams(r.name)"
+                          >还原</Button>
+                        </div>
                       </div>
                     </div>
                   </td>

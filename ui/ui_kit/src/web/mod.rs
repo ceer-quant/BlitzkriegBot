@@ -2074,6 +2074,36 @@ impl WebServer {
                 // writes later, and the audited reply names each old→new.
                 self.proxy_backtest_body("risk.setExit", &req.body)
             }
+            ("GET", "/api/unified") => {
+                // Issue #481 (G4): the confirmed cross-venue mappings — the
+                // 配对视图 card's data source. Read-only proxy of
+                // `unified.list`; the wire shape is the kernel's own (status /
+                // venues / discrepancies as data, no venue branch).
+                self.proxy_backtest(
+                    "unified.list",
+                    serde_json::Value::Object(serde_json::Map::new()),
+                )
+            }
+            ("GET", "/api/strategy-params") => {
+                // Issue #481 (G3): one strategy's declared tunables + the
+                // values in force (`strategy.params.get`, read-only). The
+                // strategy name rides the `?name=` query param verbatim; a
+                // missing name reaches the kernel's own validation.
+                let params = match req.query_param("name") {
+                    Some(n) => serde_json::json!({ "name": n }),
+                    None => serde_json::json!({}),
+                };
+                self.proxy_backtest("strategy.params.get", params)
+            }
+            ("POST", "/api/strategy-params/set") => {
+                // Issue #481 (G3): the tunables' operator write path — the
+                // body IS the `strategy.params.set` params object
+                // (`{name, params: {knob: value, …}, reason?}`), forwarded
+                // verbatim. The kernel validates every knob against the
+                // strategy's OWN declared domain (plan first, write later)
+                // and lands the audit rows.
+                self.proxy_backtest_body("strategy.params.set", &req.body)
+            }
             ("GET", "/api/round-duration") => {
                 // 轮次时间周期设置卡的读路径：the body IS the
                 // `round_duration.get` params object (`{}`), forwarded
