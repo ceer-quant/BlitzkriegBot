@@ -11,7 +11,10 @@
 //! [`plugin::KalshiPlugin`]. Everything the core sees is the market seam; all
 //! Kalshi knowledge lives here. Normalization happens at the plugin boundary
 //! (cents → 0..1 probabilities), so the kernel never sees a Kalshi-native
-//! unit. The order executor arrives with stage 4 (#426).
+//! unit. The order executor ([`executor`]) completes the three-component
+//! contract: a REST polling actor (Kalshi has no private WebSocket push) that
+//! submits locally-accepted orders, reconciles open orders + fills, cancels
+//! orphans and seeds the ledger from the venue balance.
 //!
 //! Credentials come from the process environment only (`KALSHI_API_KEY_ID`,
 //! `KALSHI_RSA_PRIVATE_KEY` in PEM). No credential material may appear in
@@ -20,6 +23,7 @@
 
 pub mod discovery;
 pub mod error;
+pub mod executor;
 pub mod feed;
 pub mod net_check;
 pub mod plugin;

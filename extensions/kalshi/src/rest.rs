@@ -87,6 +87,27 @@ struct OrdersBody {
     orders: Vec<KalshiOrder>,
 }
 
+/// One executed trade as the fills endpoint reports it (Kalshi fills are
+/// per-match, the reconcile unit the sweep needs).
+#[derive(Debug, Clone, Deserialize)]
+pub struct KalshiFill {
+    pub trade_id: String,
+    pub order_id: String,
+    pub ticker: String,
+    pub side: String,
+    pub action: String,
+    pub count: Decimal,
+    /// The price the execution landed at, in cents (1..=99).
+    pub yes_price: Option<Decimal>,
+    pub no_price: Option<Decimal>,
+    pub created_time: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FillsBody {
+    fills: Vec<KalshiFill>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct BalanceBody {
     balance: Decimal,
@@ -318,6 +339,22 @@ impl KalshiRest {
             .request_json(Class::Write, reqwest::Method::DELETE, &path, None::<&()>)
             .await?;
         Ok(body.inner.order)
+    }
+
+    /// Recent fills (executions). `ts` bounds the query when given (epoch
+    /// seconds) — the reconcile sweep pages forward from its last run so no
+    /// fill is reported twice and none is missed while the sweep sleeps.
+    pub async fn fills(&self, ts: Option<i64>) -> Result<Vec<KalshiFill>, KalshiError> {
+        self.require_auth()?;
+        let path = match ts {
+            Some(t) => format!(
+                "/trade-api/v2/portfolio/fills?ts={}",
+                urlencode(&t.to_string())
+            ),
+            None => String::from("/trade-api/v2/portfolio/fills"),
+        };
+        let body: Envelope<FillsBody> = self.get_json(Class::Read, &path).await?;
+        Ok(body.inner.fills)
     }
 
     // ── plumbing ─────────────────────────────────────────────────────────

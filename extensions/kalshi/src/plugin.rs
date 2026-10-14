@@ -1,14 +1,17 @@
 //! Kalshi market plugin (#424).
 //!
-//! Bundles the two stage-2 components (orderbook feed, event discovery) behind
-//! the generic `MarketPlugin` contract, with the network probe wired to
-//! [`crate::net_check`]. Everything the core sees is the market-api boundary;
-//! all Kalshi knowledge lives in this crate.
+//! Bundles the market-plugin components behind the generic `MarketPlugin`
+//! contract, with the network probe wired to [`crate::net_check`]. Everything
+//! the core sees is the market-api boundary; all Kalshi knowledge lives in
+//! this crate.
 //!
-//! No executor yet: order placement is stage 4 (#426) — a plugin component may
-//! be absent by contract (`MarketPlugin::executor` defaults to `None`), and
-//! declaring no executor keeps dry-run and read-only builds honest instead of
-//! shipping an inert stub.
+//! Components: the orderbook feed and event discovery (stage 2, #424) and the
+//! order executor (stage 4 of the integration — the component #426's plan
+//! deferred and this crate now ships, closing the gap that made kalshi a
+//! read-only plugin next to polymarket). The executor is inert without
+//! credentials, exactly like the polymarket bridge: [`crate::executor::
+//! spawn_if_configured`] returns `Ok(None)` when the environment carries no
+//! key pair, so dry-run and read-only builds stay honest.
 //!
 //! Capabilities declared from what THIS extension exercises, not what the
 //! venue advertises (§7.2): the feed polls REST snapshots (so
@@ -20,8 +23,8 @@
 use crate::rest::{Credentials, KalshiRest, RestConfig};
 use blitzkrieg_market_api::{
     BoxFuture, CoreError, CoreErrorCode, CoreResult, DataFeed, DataFeedConfig, DiscoveryConfig,
-    MarketCapabilities, MarketDiscovery, MarketHost, MarketMode, MarketPlugin, MarketStructure,
-    MarketType, NetCheckReport, TokenId,
+    ExecutorConfig, MarketCapabilities, MarketDiscovery, MarketHost, MarketMode, MarketPlugin,
+    MarketStructure, MarketType, NetCheckReport, OrderExecutor, TokenId,
 };
 use std::sync::Arc;
 
@@ -78,9 +81,37 @@ impl MarketPlugin for KalshiPlugin {
     fn discovery(&self) -> Option<&dyn MarketDiscovery> {
         Some(&KALSHI_DISCOVERY)
     }
-    /// Stage 4 (#426) adds the executor; absent by contract until then.
+    fn executor(&self) -> Option<&dyn OrderExecutor> {
+        Some(&KALSHI_EXECUTOR)
+    }
     fn net_check(&self) -> BoxFuture<'_, NetCheckReport> {
         Box::pin(crate::net_check::probe())
+    }
+}
+
+// ── Executor ─────────────────────────────────────────────────────────────────
+
+struct KalshiExecutor;
+
+static KALSHI_EXECUTOR: KalshiExecutor = KalshiExecutor;
+
+impl OrderExecutor for KalshiExecutor {
+    fn name(&self) -> &str {
+        "kalshi-executor"
+    }
+
+    fn start<'a>(
+        &'a self,
+        host: Arc<dyn MarketHost>,
+        config: ExecutorConfig,
+    ) -> BoxFuture<'a, CoreResult<()>> {
+        Box::pin(async move {
+            // Inert without credentials (dry-run / read-only builds), same
+            // contract as the polymarket bridge — start() still succeeds and
+            // the core runs with no execution egress.
+            crate::executor::spawn_if_configured(host, config).await?;
+            Ok(())
+        })
     }
 }
 
