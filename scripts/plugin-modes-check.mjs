@@ -58,7 +58,7 @@ const REFERENCE_NAME = 'momentum_alpha';
 /** The §7.2 wire names ↔ bits table, mirrored from
  * `blitzkrieg_market_api::modes::CAPABILITY_NAMES`. The gate pins the wire
  * against THIS copy — a core that renumbers or renames a bit fails the
- * cross-check below. 10 bits stay far inside Number's exact range. */
+ * cross-check below. 11 bits stay far inside Number's exact range. */
 const CAPS_BIT = {
   websocket_feed: 1,
   level2_snapshot: 2,
@@ -70,6 +70,7 @@ const CAPS_BIT = {
   post_only: 128,
   cancel_on_disconnect: 256,
   maker_rebate: 512,
+  simulated: 1024,
 };
 
 /**
