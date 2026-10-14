@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 设置 · 通用 —— 会话与访问 token（探测 / 掩码 / 复制），轮次时间周期
- * （next_session 切换 5m/15m/1h/4h/日轮），交易环境重置（#458：确认词门，
+ * （next_session 切换 5m/15m/1h/4h/日轮），交易环境重置（issue 458：确认词门，
  * 停策略/撤挂单/清记录/复原 seed 一次完成），外观与刷新节奏（主题三态、
  * 提示音、行情快速轮询）。
  */
@@ -197,7 +197,7 @@ async function resetRound(): Promise<void> {
 
 onMounted(loadRound)
 
-// ── 交易环境重置（#458：确认词门；内核三道门 + manual-ops 审计）────────────
+// ── 交易环境重置（issue 458：确认词门；内核三道门 + manual-ops 审计）────────────
 const resetOpen = ref(false)
 const resetBusy = ref(false)
 const resetErr = ref<string | null>(null)
@@ -350,7 +350,7 @@ async function doResetTrading(): Promise<void> {
       </template>
     </Card>
 
-    <!-- ── 交易环境重置（#458）──────────────────────────────────────────── -->
+    <!-- ── 交易环境重置（issue 458）──────────────────────────────────────────── -->
     <Card class="mt-3.5">
       <CardHeader label="交易环境重置">
         <template #title>
