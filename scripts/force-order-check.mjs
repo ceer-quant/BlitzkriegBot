@@ -29,8 +29,16 @@ const BIN = process.env.BK_CORE_BIN || defaultBinaryPath();
 const { check, failures } = createChecks();
 const cleanup = [];
 
+// Scratch 根：本机铁律只写 /Volumes/Hard Disk；CI（Linux runner）没有该卷，
+// 回退 os.tmpdir()。两边都要 mkdir -p，mkdtemp 只造末段。
+import { mkdirSync } from 'fs';
+import { tmpdir } from 'os';
+const SCRATCH = process.env.BK_SCRATCH_DIR
+  ?? (process.platform === 'darwin' ? '/Volumes/Hard Disk/bk-scratch' : tmpdir());
+mkdirSync(SCRATCH, { recursive: true });
+
 function makeCore(label, extraArgs = []) {
-  const cwd = mkdtempSync(join(process.env.BK_SCRATCH_DIR || "/Volumes/Hard Disk/bk-scratch", `forceorder-${label}-${process.pid}`));
+  const cwd = mkdtempSync(join(SCRATCH, `forceorder-${label}-${process.pid}`));
   cleanup.push(cwd);
   return new CoreClient({
     binaryPath: BIN,
