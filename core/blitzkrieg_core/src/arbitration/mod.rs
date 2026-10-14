@@ -20,7 +20,7 @@ mod pipeline;
 pub use audit::{AuditSink, DecisionPush, IntentAuditRecord};
 pub use pipeline::{IntentCtx, Outcome, StrategyIntent, process_intent};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Which gate produced a trace. The audit carries this enum, never an index —
 /// an index is not a stable identity.
@@ -87,7 +87,10 @@ pub struct PhysicsBinding {
     pub ladder: Vec<LadderStep>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+// `Deserialize` exists only so `PositionConfig` (a serde type since the #464
+// net-mark switch) can hold the runtime `exit_ladder` hand-off; the config
+// file's rows remain the single parse surface (main.rs copies them in).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LadderStep {
     /// Trigger threshold (positive = profit %, negative = loss %).

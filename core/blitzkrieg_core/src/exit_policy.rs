@@ -92,7 +92,14 @@ impl BookScalarView for BookView {
 }
 
 /// Exit-relevant config subset. Mirrors fields read by the TS `decideExit`.
-#[derive(Debug, Clone)]
+///
+/// #464: `Serialize`/`Deserialize` exist only so the wrapper
+/// [`crate::position::PositionConfig`] can carry a serde-defaulted field
+/// (`daily_loss_marks_unrealized`) — nothing in the kernel round-trips an
+/// `ExitConfig` itself, and the derive is additive (every field type already
+/// serializes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ExitConfig {
     pub force_exit_sec: i64,
     pub min_time_left_sec: i64,

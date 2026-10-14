@@ -62,7 +62,8 @@ pub struct CashFlows {
     pub sold_shares: Decimal,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct PositionConfig {
     pub exit: ExitConfig,
     pub max_positions: usize,
@@ -96,10 +97,38 @@ pub struct PositionConfig {
     /// visible in review without flooding the panel once per tick. `0` = every
     /// tick reports.
     pub stop_suppression_repeat_sec: i64,
+    /// #464: whether the daily-loss breaker judges on the day's NET mark —
+    /// realized loss PLUS the open positions' unrealized loss — or (when
+    /// `false`) on realized alone, the pre-#464 behaviour byte for byte. `true`
+    /// by default: a position that has bled 20% of the day's budget on paper is
+    /// the loss the breaker exists to fence, and waiting for the realized close
+    /// turns the cap into a settle-late admission ticket.
+    #[serde(default = "default_true")]
+    pub daily_loss_marks_unrealized: bool,
     pub stop_loss_cooldown_sec: i64,
     pub exit_cooldown_sec: i64,
     pub asset_cooldown_sec: i64,
     pub loss_cooldown_sec: i64,
+    /// Issue #464: the operator's explicit `[[risk.ladder]]` as a per-position
+    /// exit overlay. Empty (the default) = no ladder — the exit sweep below
+    /// behaves exactly as it always has. Non-empty: when a position's own
+    /// verdict is a TakeProfit or StopLoss, the ordered ladder takes over that
+    /// verdict — the next un-executed step whose `at_pct` the position's pnl%
+    /// has reached sells `close_ratio` of the held shares (floored to the
+    /// venue's 0.01 grid), and a step's `move_stop_to` raises the protective
+    /// stop floor to that absolute price. One step fires per tick; steps never
+    /// skip ahead of an untriggered predecessor.
+    ///
+    /// `LadderStep` serializes on the arbitration face only; the config file's
+    /// rows remain the single source and are copied in at assembly (main.rs),
+    /// so this field is a runtime hand-off and not a parse surface.
+    pub exit_ladder: Vec<crate::arbitration::LadderStep>,
+}
+
+/// #464: the serde default for [`PositionConfig::daily_loss_marks_unrealized`]
+/// — the net-mark reading of "daily loss" ships ON.
+fn default_true() -> bool {
+    true
 }
 
 impl Default for PositionConfig {
@@ -116,10 +145,14 @@ impl Default for PositionConfig {
             max_daily_loss_equity_pct: Decimal::from(20),
             daily_pnl_path: None,
             stop_suppression_repeat_sec: 30,
+            // #464: the net-mark breaker (realized + unrealized) is the shipped
+            // reading of "daily loss"; `false` restores the realized-only cap.
+            daily_loss_marks_unrealized: true,
             stop_loss_cooldown_sec: 180,
             exit_cooldown_sec: 60,
             asset_cooldown_sec: 90,
             loss_cooldown_sec: 180,
+            exit_ladder: Vec::new(),
         }
     }
 }
@@ -660,6 +693,12 @@ pub struct ExitRequest {
     pub reason: ExitReason,
     pub exit_price: Decimal,
     pub use_maker: bool,
+    /// Issue #464: shares to close when this request becomes a SELL. `None` =
+    /// the whole sellable position (every historical request — the field is
+    /// `None` at every other construction site), so the no-ladder path is
+    /// byte-identical. A ladder step carries `close_ratio × current shares`
+    /// (floored to the share grid) to sell in tranches.
+    pub close_shares: Option<Decimal>,
 }
 
 pub struct PositionManager {
@@ -692,6 +731,19 @@ pub struct PositionManager {
     /// `check_exits_interval` only; every other writer of exit state is a
     /// per-event path whose clocks stay event-driven.
     exit_ladder_last_run: std::collections::HashMap<String, i64>,
+    /// Issue #464: how many `[[risk.ladder]]` steps each position has already
+    /// executed (the index of the NEXT step to arm). Ladder steps fire in
+    /// order — one per tick at most, and never a step whose predecessor has
+    /// not triggered — so a momentary spike cannot skip levels and dump the
+    /// whole position in one tick. Keyed by position id; dropped when the
+    /// position closes or the open book is replaced.
+    ladder_steps_done: std::collections::HashMap<String, usize>,
+    /// Issue #464: the protective-stop FLOOR each position's executed ladder
+    /// steps have raised (`move_stop_to`). The ladder overlay fires a full
+    /// remaining-position stop when the pnl% reaches this floor OR the
+    /// policy's own stop — `move_stop_to` only ever moves the stop UP, never
+    /// down. Dropped with the position, like the ledger above.
+    ladder_stop_floor: std::collections::HashMap<String, Decimal>,
 }
 
 fn cooldown_key(asset: &str, direction: SignalDirection) -> String {
@@ -747,6 +799,8 @@ impl PositionManager {
             last_suppression_at: Default::default(),
             unpriceable_since: Default::default(),
             exit_ladder_last_run: Default::default(),
+            ladder_steps_done: Default::default(),
+            ladder_stop_floor: Default::default(),
         }
     }
 
@@ -784,6 +838,12 @@ impl PositionManager {
         // #390: the restored book replaces the in-memory one wholesale —
         // ladder run stamps of wiped rows must not leak into the new ids.
         self.exit_ladder_last_run.clear();
+        // #464: same wholesale-replacement rule — a restored position starts
+        // with no ladder steps executed and no raised stop floor (the snapshot
+        // carries neither; re-executing a step at worst sells another tranche
+        // at the same profitable level, never a stop below the policy's own).
+        self.ladder_steps_done.clear();
+        self.ladder_stop_floor.clear();
     }
     pub fn closed_positions(&self) -> &[ClosedPosition] {
         &self.closed
@@ -823,6 +883,40 @@ impl PositionManager {
         &self.daily
     }
 
+    /// The open positions' unrealized PnL (USD, negative = paper loss), each
+    /// position marked `(current_price − entry_price) × shares` off its last
+    /// known reference price. Positions with no shares, no mark (`current_price
+    /// ≤ 0`) or an absurd share count contribute 0 — never a fabricated profit
+    /// or loss.
+    ///
+    /// `ponytail:` the mark is the LAST KNOWN price: `current_price` is
+    /// refreshed from live books per tick, but a book that has gone quiet
+    /// leaves the last value standing and there is no staleness gate on it
+    /// (Issue #464 considered one; upgrade path = a `last_book_ts`-age check
+    /// here, which `OpenPosition` already carries).
+    pub fn unrealized_pnl_usd(&self) -> Decimal {
+        self.open
+            .iter()
+            .filter(|p| p.shares > Decimal::ZERO && p.current_price > Decimal::ZERO)
+            .map(|p| (p.current_price - p.entry_price) * p.shares)
+            .sum()
+    }
+
+    /// The number the daily-loss breaker judges on (#464): the day's realized
+    /// loss plus — when [`PositionConfig::daily_loss_marks_unrealized`] is on —
+    /// the open book's unrealized loss. The realized-only reading ships OFF;
+    /// setting that flag `false` reproduces the pre-#464 input exactly. The
+    /// persisted [`DailyLossState::realized_pnl_usd`] is NOT this number: the
+    /// unrealized half is a JUDGEMENT input, never an accounting entry.
+    fn daily_drawdown_input(&self) -> Decimal {
+        let realized = self.daily.realized_pnl_usd;
+        if self.config.daily_loss_marks_unrealized {
+            realized + self.unrealized_pnl_usd()
+        } else {
+            realized
+        }
+    }
+
     /// The effective daily-loss cap in USD: the TIGHTER of the absolute cap and
     /// the percentage of the day's opening cash equity. `0` = no cap (both off,
     /// or the percentage configured but the account size still unknown).
@@ -842,14 +936,15 @@ impl PositionManager {
         }
     }
 
-    /// True when the day's realized loss reached the effective cap. Sticky for
-    /// the rest of the day so a later winning trade cannot re-open entries.
+    /// True when the day's net loss (see [`Self::daily_drawdown_input`])
+    /// reached the effective cap. Sticky for the rest of the day so a later
+    /// winning trade cannot re-open entries.
     pub fn daily_loss_tripped(&self) -> bool {
         if self.daily.tripped {
             return true;
         }
         let limit = self.effective_daily_loss_limit();
-        limit > Decimal::ZERO && self.daily.realized_pnl_usd <= -limit
+        limit > Decimal::ZERO && self.daily_drawdown_input() <= -limit
     }
 
     /// Roll the budget over when `now_ms` crosses into a new UTC day, seeding
@@ -976,7 +1071,8 @@ impl PositionManager {
         self.daily.opening_equity_usd = equity_usd;
         self.daily.equity_basis = Some(basis);
         let limit = self.effective_daily_loss_limit();
-        let breached = limit > Decimal::ZERO && self.daily.realized_pnl_usd <= -limit;
+        let breach = self.daily_drawdown_input();
+        let breached = limit > Decimal::ZERO && breach <= -limit;
         if breached {
             // The tightened cap is already spent. Latch the trip HERE rather
             // than letting the next tick rediscover it, so the day cannot read
@@ -1052,7 +1148,7 @@ impl PositionManager {
     /// the loss, not one tick later.
     fn note_daily_drawdown(&mut self, now_ms: i64) {
         let limit = self.effective_daily_loss_limit();
-        if limit > Decimal::ZERO && self.daily.realized_pnl_usd <= -limit && !self.daily.tripped {
+        if limit > Decimal::ZERO && self.daily_drawdown_input() <= -limit && !self.daily.tripped {
             self.daily.tripped = true;
             self.daily.tripped_at_ms = now_ms;
             self.daily.tripped_limit_usd = limit;
@@ -1469,6 +1565,7 @@ impl PositionManager {
                     reason: ExitReason::TakeProfit,
                     exit_price: t,
                     use_maker: true,
+                    close_shares: None,
                 });
                 continue;
             }
@@ -1554,13 +1651,74 @@ impl PositionManager {
                     now_ms,
                 }
             };
-            if let Some(d) = decision {
+            // Issue #464: the operator's explicit ladder runs on EVERY priceable
+            // tick — not only where the policy's own TP/SL verdict fired —
+            // because its stop floor (raised by `move_stop_to`) must patrol
+            // quiet ticks too: a +2.5% drift below a raised 0.42 floor over a
+            // 0.40 entry fires nothing in the policy, and the floor would be
+            // dead. A TP/SL verdict that DID fire is absorbed (the ladder owns
+            // this position's profit-taking discipline — it either acted or is
+            // exhausted); every other verdict, and every no-ladder run, keeps
+            // the original single ExitRequest below, byte-identical.
+            let ladder_owns_verdicts = !self.config.exit_ladder.is_empty();
+            if ladder_owns_verdicts && priceable {
+                let ladder = self.config.exit_ladder.clone();
+                let stop_pct =
+                    effective_stop_pct(cfg.stop_loss_pct, time_left_sec, &self.config.exit);
+                let verdict = match &decision {
+                    Some(d)
+                        if matches!(d.reason, ExitReason::TakeProfit | ExitReason::StopLoss) =>
+                    {
+                        Some((d.reason, d.use_maker))
+                    }
+                    _ => None,
+                };
+                let done = self.ladder_steps_done.entry(pos.id.clone()).or_insert(0);
+                let floor = self
+                    .ladder_stop_floor
+                    .entry(pos.id.clone())
+                    .or_insert(Decimal::ZERO);
+                let ladder_fired = if let Some(req) = Self::apply_exit_ladder_step(
+                    pos,
+                    &ladder,
+                    done,
+                    floor,
+                    stop_pct,
+                    exit_price,
+                    verdict,
+                    cfg.maker_first_exit_enabled,
+                ) {
+                    out.push(req);
+                    true
+                } else {
+                    false
+                };
+                match &decision {
+                    // Absorbed whether the ladder acted or is exhausted.
+                    Some(d)
+                        if matches!(d.reason, ExitReason::TakeProfit | ExitReason::StopLoss) =>
+                    {
+                        continue;
+                    }
+                    // A non-ladder verdict yields this tick to the ladder's own
+                    // request if there was one; otherwise it keeps its request.
+                    Some(d) if !ladder_fired => out.push(ExitRequest {
+                        position_id: pos.id.clone(),
+                        reason: d.reason,
+                        exit_price,
+                        use_maker: d.use_maker,
+                        close_shares: None,
+                    }),
+                    _ => {}
+                }
+            } else if let Some(d) = decision {
                 if priceable {
                     out.push(ExitRequest {
                         position_id: pos.id.clone(),
                         reason: d.reason,
                         exit_price,
                         use_maker: d.use_maker,
+                        close_shares: None,
                     });
                 } else {
                     // The rule fired but there is no buyer to sell to at any
@@ -1584,6 +1742,143 @@ impl PositionManager {
             self.note_suppressed_stop(ev);
         }
         out
+    }
+
+    /// Issue #464: the exit ladder overlay — the ordered `[[risk.ladder]]`
+    /// steps over this position's own TP/SL verdict. Runs ONLY when a ladder
+    /// is configured and the underlying verdict is a TakeProfit or StopLoss;
+    /// the caller then suppresses the verdict's own whole-position request.
+    ///
+    /// A free function rather than a method on purpose: the exit sweep walks
+    /// `self.open` through `iter_mut()`, so a `&mut self` call inside the loop
+    /// is a second borrow of the manager. Everything the overlay touches is
+    /// passed in as disjoint slices instead (`done`/`floor` are the position's
+    /// own entries in the manager's ledgers, default-seeded by the caller).
+    ///
+    /// Semantics, in order:
+    ///
+    /// 1. The protective stop is judged FIRST, on the raised floor: the
+    ///    effective stop price is `max(policy stop, ladder floor)` — a
+    ///    `move_stop_to` only ever lifts the stop, never lowers it. A breach
+    ///    closes the ENTIRE remaining position (a stop is not a tranche) and
+    ///    the reason stays `StopLoss`.
+    /// 2. Otherwise the next un-executed step (`*done`) is the only one that
+    ///    may fire — no skipping ahead of an untriggered predecessor, one
+    ///    step per tick. When the position's pnl% has reached that step's
+    ///    `at_pct`, it sells `close_ratio × current shares`, floored to the
+    ///    venue's 0.01 share grid; a floor of zero (a dust remainder) leaves
+    ///    the step un-executed and pushes nothing this tick.
+    /// 3. A fired step with `move_stop_to` above the current floor raises it
+    ///    before the request goes out, and `*done` advances.
+    ///
+    /// The trigger reads the SAME price the verdict judged on — the
+    /// executable bid (`exit_price`) — so the overlay and the policy cannot
+    /// disagree about what the market said. `None` = this tick's verdict is
+    /// absorbed by the ladder (the fired step was dust, or the next step has
+    /// not triggered yet) and no request is produced.
+    /// `verdict` is the policy's own (reason, use_maker) when a TP/SL verdict
+    /// fired this tick — the step inherits it. On a quiet tick (None) the step
+    /// derives its own identity: a profit step IS a take-profit (maker-first
+    /// like the policy's), a loss-side step (negative `at_pct`) IS a stop
+    /// (taker, always exitable).
+    #[allow(clippy::too_many_arguments)]
+    fn apply_exit_ladder_step(
+        pos: &mut OpenPosition,
+        ladder: &[crate::arbitration::LadderStep],
+        done: &mut usize,
+        floor: &mut Decimal,
+        stop_pct: Decimal,
+        exit_price: Decimal,
+        verdict: Option<(ExitReason, bool)>,
+        maker_first: bool,
+    ) -> Option<ExitRequest> {
+        // (1) The raised stop: policy's effective stop price vs. the ladder's
+        // absolute floor, compared at PRICE so the two sources cannot drift.
+        let policy_stop_price = pos.entry_price * (Decimal::ONE - stop_pct / Decimal::ONE_HUNDRED);
+        let stop_price = (*floor).max(policy_stop_price);
+        if pnl_pct(exit_price, pos.entry_price) <= -stop_pct || exit_price <= stop_price {
+            tracing::info!(
+                position = %pos.id,
+                token = %pos.token_id,
+                stop_price = %stop_price,
+                bid = %exit_price,
+                "exit ladder stop floor breached: closing the remaining position"
+            );
+            return Some(ExitRequest {
+                position_id: pos.id.clone(),
+                reason: ExitReason::StopLoss,
+                exit_price,
+                use_maker: false,
+                close_shares: None,
+            });
+        }
+
+        // (2) The next un-executed step. Steps before it already fired; a
+        // later step never jumps the queue.
+        let Some(step) = ladder.get(*done) else {
+            // The ladder is exhausted; the verdict that woke this tick is
+            // absorbed (the ladder owns this position's TP/SL discipline).
+            return None;
+        };
+        let pnl = pnl_pct(exit_price, pos.entry_price);
+        let triggered = if step.at_pct >= Decimal::ZERO {
+            pnl >= step.at_pct
+        } else {
+            pnl <= step.at_pct
+        };
+        if !triggered {
+            return None;
+        }
+
+        // (3) The tranche: close_ratio of the shares still held, floored to
+        // the venue grid so the SELL can never oversell. A dust remainder
+        // holds the step open — it re-arms on the next tick (the grid can
+        // only round down, so a step that floors to zero today stays zero
+        // until shares change).
+        let tranche = floor_to_grid(pos.shares * step.close_ratio);
+        if tranche <= Decimal::ZERO {
+            tracing::warn!(
+                position = %pos.id,
+                step = *done,
+                close_ratio = %step.close_ratio,
+                shares = %pos.shares,
+                "exit ladder step floored to an untradeable tranche; held open"
+            );
+            return None;
+        }
+
+        // (4) The step's stop raise, recorded BEFORE the request so a failure
+        // downstream cannot leave the floor behind the price that armed it.
+        if let Some(raise) = step.move_stop_to
+            && raise > *floor
+        {
+            *floor = raise;
+        }
+        let (reason, use_maker) = verdict.unwrap_or_else(|| {
+            if step.at_pct >= Decimal::ZERO {
+                (ExitReason::TakeProfit, maker_first)
+            } else {
+                (ExitReason::StopLoss, false)
+            }
+        });
+        let step_index = *done;
+        *done += 1;
+        tracing::info!(
+            position = %pos.id,
+            step = step_index,
+            at_pct = %step.at_pct,
+            close_ratio = %step.close_ratio,
+            close_shares = %tranche,
+            move_stop_to = ?step.move_stop_to,
+            "exit ladder step fired"
+        );
+        Some(ExitRequest {
+            position_id: pos.id.clone(),
+            reason,
+            exit_price,
+            use_maker,
+            close_shares: Some(tranche),
+        })
     }
 
     /// Record a withheld protective stop, throttled per position so a wick that
@@ -1735,6 +2030,9 @@ impl PositionManager {
         // #390: the ladder ledger is keyed by position id; a closed id is
         // never revisited, so drop its run stamp with the position.
         self.exit_ladder_last_run.remove(&pos.id);
+        // #464: the overlay ledgers die with the position for the same reason.
+        self.ladder_steps_done.remove(&pos.id);
+        self.ladder_stop_floor.remove(&pos.id);
 
         let closed = ClosedPosition {
             id: pos.id,
@@ -2032,7 +2330,9 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
 
-    fn params(asset: &str, dir: SignalDirection, entry: Decimal) -> OpenParams {
+    // `pub(crate)`: the #464 ladder fixtures live in `precision_tests` and
+    // reuse these three builders instead of cloning them.
+    pub(crate) fn params(asset: &str, dir: SignalDirection, entry: Decimal) -> OpenParams {
         OpenParams {
             strategy: "spread_arb".into(),
             asset: asset.into(),
@@ -2051,7 +2351,7 @@ mod tests {
 
     /// Open a position AND accrue its entry fill — the two steps production
     /// always performs together (service: `open` then `apply_entry_fill`).
-    fn enter(
+    pub(crate) fn enter(
         pm: &mut PositionManager,
         p: OpenParams,
         role: OrderRole,
@@ -2075,7 +2375,7 @@ mod tests {
         OrderbookSnapshot::from_levels("tok_BTC".to_string(), vec![], vec![(ask, dec!(100))], ts)
     }
 
-    fn two_sided_book(bid: Decimal, ask: Decimal, ts: i64) -> OrderbookSnapshot {
+    pub(crate) fn two_sided_book(bid: Decimal, ask: Decimal, ts: i64) -> OrderbookSnapshot {
         OrderbookSnapshot::from_levels(
             "tok_BTC".to_string(),
             vec![(bid, dec!(100))],
@@ -2558,6 +2858,123 @@ mod tests {
             pm.can_open(Some("ETH"), Some(SignalDirection::Up), 2000)
                 .is_err()
         );
+    }
+
+    // ── #464: the daily-loss breaker reads the NET mark (realized + unrealized)
+
+    /// A maker entry of `shares` at `price`, then the position's mark moved to
+    /// `mark` through the real per-tick valuation (a two-sided book whose bid
+    /// IS the mark). Returns the position id.
+    fn enter_marked(
+        pm: &mut PositionManager,
+        price: Decimal,
+        shares: Decimal,
+        mark: Decimal,
+    ) -> String {
+        let pos = pm.open(params("BTC", SignalDirection::Up, price), 0);
+        pm.apply_entry_fill(&pos.id, shares, price, Decimal::ZERO, OrderRole::Maker)
+            .unwrap();
+        pm.tick(&pos.id, Some(&two_sided_book(mark, mark, 1000)), 1000);
+        pos.id
+    }
+
+    /// #464: the breaker must read the day's NET loss. A realized −6 against a
+    /// 10 cap is still alive; the open position's −20 paper loss takes the
+    /// judgement input to ≈ −26, past the cap — entries freeze BEFORE the loss
+    /// has to be realized. Red if the judgement ever reverts to realized-only.
+    #[test]
+    fn daily_loss_breaker_trips_on_unrealized_loss() {
+        let cfg = PositionConfig {
+            max_daily_loss_usd: dec!(10),
+            asset_cooldown_sec: 0,
+            loss_cooldown_sec: 0,
+            stop_loss_cooldown_sec: 0,
+            ..Default::default()
+        };
+        let mut pm = PositionManager::new(cfg);
+        // realized leg: 20 shares 0.40 → 0.10 (taker out) ≈ −6, inside the cap.
+        let eth = enter_marked(&mut pm, dec!(0.40), dec!(20), dec!(0.40));
+        pm.close(&eth, dec!(0.10), ExitReason::StopLoss, false, 1000)
+            .unwrap();
+        let realized = pm.daily_pnl();
+        assert!(realized < Decimal::ZERO && realized > dec!(-10));
+        assert!(
+            !pm.daily_loss_tripped(),
+            "realized {realized} alone is inside the 10 cap"
+        );
+        // unrealized leg: 100 shares entered 0.40, marked 0.20 → −20 on paper.
+        enter_marked(&mut pm, dec!(0.40), dec!(100), dec!(0.20));
+        assert_eq!(pm.unrealized_pnl_usd(), dec!(-20));
+        assert!(realized + pm.unrealized_pnl_usd() <= dec!(-10));
+        assert!(
+            pm.daily_loss_tripped(),
+            "realized {realized} + unrealized −20 must breach the 10 cap"
+        );
+        assert!(
+            pm.can_open(Some("SOL"), Some(SignalDirection::Up), 2000)
+                .is_err(),
+            "the net breach freezes entries"
+        );
+    }
+
+    /// #464 reverse acceptance: `daily_loss_marks_unrealized = false` restores
+    /// the pre-#464 breaker — the same books, the same realized loss, and the
+    /// entry the net reading refuses is allowed again.
+    #[test]
+    fn realized_only_config_ignores_unrealized_loss() {
+        let cfg = PositionConfig {
+            max_daily_loss_usd: dec!(10),
+            daily_loss_marks_unrealized: false,
+            asset_cooldown_sec: 0,
+            loss_cooldown_sec: 0,
+            stop_loss_cooldown_sec: 0,
+            ..Default::default()
+        };
+        let mut pm = PositionManager::new(cfg);
+        let eth = enter_marked(&mut pm, dec!(0.40), dec!(20), dec!(0.40));
+        pm.close(&eth, dec!(0.10), ExitReason::StopLoss, false, 1000)
+            .unwrap();
+        let realized = pm.daily_pnl();
+        assert!(realized + dec!(-20) <= dec!(-10));
+        enter_marked(&mut pm, dec!(0.40), dec!(100), dec!(0.20));
+        // The paper loss still READS off the book (the panel shows it)…
+        assert_eq!(pm.unrealized_pnl_usd(), dec!(-20));
+        // …but the breaker must not judge on it.
+        assert!(
+            !pm.daily_loss_tripped(),
+            "realized-only: {realized} against a 10 cap is not a trip"
+        );
+        assert!(
+            pm.can_open(Some("SOL"), Some(SignalDirection::Up), 2000)
+                .is_ok()
+        );
+    }
+
+    /// #464 edge: a position with no mark (`current_price = 0`) contributes
+    /// nothing — a missing quote must never be read as an infinite loss (or an
+    /// infinite gain).
+    #[test]
+    fn a_zero_mark_contributes_no_unrealized_pnl() {
+        let cfg = PositionConfig {
+            max_daily_loss_usd: dec!(10),
+            asset_cooldown_sec: 0,
+            loss_cooldown_sec: 0,
+            stop_loss_cooldown_sec: 0,
+            ..Default::default()
+        };
+        let mut pm = PositionManager::new(cfg);
+        let id = enter_marked(&mut pm, dec!(0.40), dec!(100), dec!(0.30));
+        // Strip the mark the way a pre-book snapshot looks: no reference price.
+        let mut held = pm
+            .open_positions()
+            .iter()
+            .find(|p| p.id == id)
+            .unwrap()
+            .clone();
+        held.current_price = Decimal::ZERO;
+        pm.restore_open(vec![held]);
+        assert_eq!(pm.unrealized_pnl_usd(), Decimal::ZERO);
+        assert!(!pm.daily_loss_tripped());
     }
 
     // ── #267 / #268: the exit ladder must keep BOTH halves on a broken book ──
@@ -3064,6 +3481,7 @@ mod tests {
 /// ledger in `service::account_precision_tests`; these pin the arithmetic.
 #[cfg(test)]
 mod precision_tests {
+    use super::tests::{enter, params, two_sided_book};
     use super::*;
     use rust_decimal_macros::dec;
 
@@ -3260,6 +3678,178 @@ mod precision_tests {
         .unwrap();
         assert_eq!(pm.sell_shares(&pos.id), Some(dec!(10)));
         assert!(pm.sell_shares(&pos.id).unwrap() <= pm.open_positions()[0].shares);
+    }
+
+    // ── Issue #464: the exit ladder overlay ────────────────────────────────
+    //
+    // Fixture shape: entry 0.40, 10 shares, a ladder config, and books whose
+    // bid is named by pnl% (`0.42` = +5% over 0.40). Every check runs at a
+    // fixed mid-flight instant (400 s into a 900 s position) so no time rule
+    // (tighten ramp, force exit, min_time_left) can contaminate the verdict.
+
+    fn ladder_cfg(steps: Vec<crate::arbitration::LadderStep>) -> PositionConfig {
+        PositionConfig {
+            exit_ladder: steps,
+            ..Default::default()
+        }
+    }
+
+    fn step(
+        at_pct: Decimal,
+        close_ratio: Decimal,
+        move_stop_to: Option<Decimal>,
+    ) -> crate::arbitration::LadderStep {
+        crate::arbitration::LadderStep {
+            at_pct,
+            close_ratio,
+            move_stop_to,
+        }
+    }
+
+    /// Open a 10-share position at 0.40 filled as a maker (no fees).
+    fn ladder_open(pm: &mut PositionManager) {
+        let _ = enter(
+            pm,
+            params("BTC", SignalDirection::Up, dec!(0.40)),
+            OrderRole::Maker,
+            0,
+        );
+    }
+
+    /// Run one exit sweep against a two-sided book whose bid is `bid` —
+    /// NO new position: the ladder tests walk one position across ticks.
+    fn ladder_check(pm: &mut PositionManager, bid: Decimal, now_ms: i64) -> Vec<ExitRequest> {
+        pm.check_exits(
+            &|token| {
+                if token == "tok_BTC" {
+                    Some(BookView::from_snapshot(&two_sided_book(
+                        bid,
+                        bid + dec!(0.01),
+                        now_ms,
+                    )))
+                } else {
+                    None
+                }
+            },
+            now_ms,
+        )
+    }
+
+    /// a) close_ratio tranches: the first step sells HALF, the next tick the
+    ///    rest — and the residual backstop's shape (a tranche SELL followed by
+    ///    a quiet book) never appears here because the ladder itself re-arms.
+    #[test]
+    fn ladder_close_ratio_sells_in_tranches() {
+        let mut pm = PositionManager::new(ladder_cfg(vec![
+            step(dec!(5), dec!(0.5), None),
+            step(dec!(10), Decimal::ONE, None),
+        ]));
+        // bid 0.42 = +5%: step 1 arms and sells half the position.
+        ladder_open(&mut pm);
+        let reqs = ladder_check(&mut pm, dec!(0.42), 400_000);
+        assert_eq!(reqs.len(), 1, "one tranche per tick");
+        assert_eq!(reqs[0].reason, ExitReason::TakeProfit);
+        assert_eq!(reqs[0].close_shares, Some(dec!(5)), "half of 10 shares");
+        assert_eq!(reqs[0].exit_price, dec!(0.42));
+
+        // The fill lands (half sold), the bid rises to 0.45 = +12.5%: BOTH
+        // steps' thresholds are past, but only the NEXT step may fire.
+        pm.apply_exit_fill(
+            &pm.open_positions()[0].id.clone(),
+            dec!(5),
+            dec!(0.42),
+            Decimal::ZERO,
+            OrderRole::Taker,
+        );
+        let reqs = ladder_check(&mut pm, dec!(0.45), 400_100);
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            reqs[0].close_shares,
+            Some(dec!(5)),
+            "the second step closes the remaining half, not more"
+        );
+        assert_eq!(reqs[0].reason, ExitReason::TakeProfit);
+    }
+
+    /// b) move_stop_to: a fired step raises the stop floor to an absolute
+    ///    price; a later dip below the floor (but above the policy's own 12%
+    ///    stop) now closes the WHOLE remaining position — under the old
+    ///    behavior 0.41 over a 0.40 entry triggers nothing at all.
+    #[test]
+    fn ladder_move_stop_to_raises_the_stop_and_stops_out() {
+        let mut pm =
+            PositionManager::new(ladder_cfg(vec![step(dec!(8), dec!(0.5), Some(dec!(0.42)))]));
+        // bid 0.432 = +8%: step fires, half the position goes, floor 0.42.
+        ladder_open(&mut pm);
+        let reqs = ladder_check(&mut pm, dec!(0.432), 400_000);
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].close_shares, Some(dec!(5)));
+        assert_eq!(reqs[0].reason, ExitReason::TakeProfit);
+        pm.apply_exit_fill(
+            &pm.open_positions()[0].id.clone(),
+            dec!(5),
+            dec!(0.432),
+            Decimal::ZERO,
+            OrderRole::Taker,
+        );
+
+        // bid 0.41: +2.5% — far above the policy stop (0.352), below the
+        // raised floor (0.42). The overlay must stop out the remainder.
+        let reqs = ladder_check(&mut pm, dec!(0.41), 400_100);
+        assert_eq!(
+            reqs.len(),
+            1,
+            "the raised stop fires where the policy's would not"
+        );
+        assert_eq!(reqs[0].reason, ExitReason::StopLoss);
+        assert_eq!(reqs[0].close_shares, None, "a stop closes everything left");
+        assert_eq!(reqs[0].exit_price, dec!(0.41));
+    }
+
+    /// d) no skipping: a bid that clears BOTH steps' thresholds on the first
+    ///    tick still sells only the FIRST tranche — a spike cannot dump the
+    ///    whole position in one sweep.
+    #[test]
+    fn ladder_never_skips_ahead_of_an_untriggered_step() {
+        let mut pm = PositionManager::new(ladder_cfg(vec![
+            step(dec!(5), dec!(0.5), None),
+            step(dec!(10), Decimal::ONE, None),
+        ]));
+        // bid 0.45 = +12.5%: past step 1 (5%) and step 2 (10%) in one move.
+        ladder_open(&mut pm);
+        let reqs = ladder_check(&mut pm, dec!(0.45), 400_000);
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            reqs[0].close_shares,
+            Some(dec!(5)),
+            "only the first step's tranche may fire this tick"
+        );
+    }
+
+    /// The ladder exhausts itself: with every step executed, a later TP/SL
+    /// verdict is absorbed (no request, no cooldown, no error) — the ladder
+    /// owns this position's profit-taking discipline, and a residual step's
+    /// verdict must not re-flatten the remainder wholesale.
+    #[test]
+    fn an_exhausted_ladder_absorbs_tp_sl_verdicts() {
+        let mut pm = PositionManager::new(ladder_cfg(vec![step(dec!(5), dec!(0.5), None)]));
+        ladder_open(&mut pm);
+        let reqs = ladder_check(&mut pm, dec!(0.42), 400_000);
+        assert_eq!(reqs[0].close_shares, Some(dec!(5)));
+        pm.apply_exit_fill(
+            &pm.open_positions()[0].id.clone(),
+            dec!(5),
+            dec!(0.42),
+            Decimal::ZERO,
+            OrderRole::Taker,
+        );
+        // The verdict fires again (still above take-profit), but the ladder
+        // has no step left: nothing is pushed this tick.
+        let reqs = ladder_check(&mut pm, dec!(0.45), 400_100);
+        assert!(
+            reqs.is_empty(),
+            "an exhausted ladder leaves the remainder alone"
+        );
     }
 
     /// A pre-E17 snapshot has no recorded flows; they are repaired from the old

@@ -471,19 +471,26 @@ fn a_restart_re_reserves_the_unfilled_notional() {
 /// The old dry matcher filled a crossing maker WHOLE (`authoritative_fill(id,
 /// order.size, …)`), so dry could neither reproduce a partial fill nor price the
 /// entry that live leaves half-open, and every dry fill-rate read 100%.
+///
+/// #464 ordering: the maker must REST first — the book the order meets on its
+/// POST does not cross (ask 0.41 above the 0.40 limit), and only a LATER tick
+/// (ask 0.40) delivers the crossing. A post-only limit that already crosses at
+/// submission is refused like live refuses it (`a_refused_pure_maker_crossing_
+/// places_nothing` in service.rs); this test pins the honest-maker half: fill
+/// bounded by the crossing DEPTH (4 of 10).
 #[test]
 fn a_dry_maker_fills_at_most_the_crossing_depth() {
     let mut c = core();
-    // 4 shares rest at the crossing ask. A 10-share maker can trade 4 of them.
-    c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(4))], 1);
+    // The order's own POST sees a book it does NOT cross: ask 0.41 above the
+    // 0.40 limit — a resting maker, not an instant taker in disguise.
+    c.book_snapshot("tok", vec![], vec![(dec!(0.41), dec!(4))], 1);
     let (id, status) = c
         .place(buy(dec!(10), dec!(0.40), "entry:depth-183"), 0, 1)
         .expect("dry maker places");
-    assert_eq!(
-        status,
-        OrderStatus::PartiallyFilled,
-        "the book already crossed at submit: 4 of 10 filled, 6 still working"
-    );
+    assert_eq!(status, OrderStatus::Live, "the order rests below the ask");
+    // The next tick crosses the limit with only 4 shares on the ask: a
+    // 10-share maker can trade 4 of them, no more.
+    c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(4))], 2);
     assert_eq!(
         c.ome().get(&id).unwrap().status,
         OrderStatus::PartiallyFilled,

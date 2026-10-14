@@ -2706,7 +2706,7 @@ async fn main() -> anyhow::Result<()> {
             // [risk] section (factory = all off, §4.1), plus an explicit
             // [[risk.ladder]] when the operator opted in (§4.3).
             systemic,
-            explicit_ladder,
+            explicit_ladder: explicit_ladder.clone(),
             ..Default::default()
         },
         dry_seed_balance: args.seed_balance,
@@ -2816,6 +2816,12 @@ async fn main() -> anyhow::Result<()> {
                 force_exit_sec: args.exit_force_sec,
                 ..Default::default()
             },
+            // Issue #464: the operator's `[[risk.ladder]]` also drives the
+            // per-position exit overlay. The arbitration face keeps its own
+            // copy (Gate 4's trace); both read the same file rows, so there is
+            // exactly one source. Empty when the operator opted out — the
+            // exit sweep is then byte-identical to its historical behavior.
+            exit_ladder: explicit_ladder.clone(),
             ..Default::default()
         },
         entry_maker_timeout_ms: args.entry_maker_timeout_ms,
