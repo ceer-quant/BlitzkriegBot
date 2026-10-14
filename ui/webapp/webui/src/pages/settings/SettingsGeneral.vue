@@ -1,13 +1,14 @@
 <script setup lang="ts">
 /**
  * 设置 · 通用 —— 会话与访问 token（探测 / 掩码 / 复制），轮次时间周期
- * （next_session 切换 5m/15m/1h/4h/日轮），外观与刷新节奏（主题三态、
+ * （next_session 切换 5m/15m/1h/4h/日轮），交易环境重置（issue 458：确认词门，
+ * 停策略/撤挂单/清记录/复原 seed 一次完成），外观与刷新节奏（主题三态、
  * 提示音、行情快速轮询）。
  */
 import { computed, onMounted, ref } from 'vue'
-import { Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion, LogOut, Info, SlidersHorizontal, Timer } from 'lucide-vue-next'
+import { Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion, LogOut, Info, SlidersHorizontal, Timer, RotateCcw } from 'lucide-vue-next'
 import { getToken, loginAt, logout, ping, probeSession, api } from '@/api/client'
-import type { RoundDurationDoc } from '@/api/client'
+import type { RoundDurationDoc, ResetTradingResultDoc } from '@/api/client'
 import { adjudicateSession } from '@/lib/session'
 import { dateTime } from '@/lib/format'
 import { useSettingsStore } from '@/stores/settings'
@@ -20,6 +21,7 @@ import SegmentedControl from '@/components/ui/segmented/SegmentedControl.vue'
 import Switch from '@/components/ui/switch/Switch.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
+import ConfirmWordDialog from '@/components/ui/confirm/ConfirmWordDialog.vue'
 
 const settings = useSettingsStore()
 const { theme, setTheme, sound, setSoundEnabled } = useTheme()
@@ -194,6 +196,36 @@ async function resetRound(): Promise<void> {
 }
 
 onMounted(loadRound)
+
+// ── 交易环境重置（issue 458：确认词门；内核三道门 + manual-ops 审计）────────────
+const resetOpen = ref(false)
+const resetBusy = ref(false)
+const resetErr = ref<string | null>(null)
+const resetMsg = ref<string | null>(null)
+const resetResult = ref<ResetTradingResultDoc | null>(null)
+
+async function doResetTrading(): Promise<void> {
+  resetBusy.value = true
+  resetErr.value = null
+  try {
+    const res = await api.systemResetTrading({
+      confirm: 'RESET',
+      reason: 'webui 面板（交易环境重置卡）',
+    })
+    if (res.error) {
+      resetErr.value = res.error
+    } else {
+      resetResult.value = res
+      const b = res.balances[0]?.[1] ?? '?'
+      resetMsg.value = `已重置：停用 ${res.disabledStrategies.length} 个策略、撤销 ${res.cancelledOrders} 张挂单、清空 ${res.clearedClosedTrades} 条成交记录，现金已复原到 ${b}。动作已写入 manual-ops 审计。`
+    }
+  } catch (e) {
+    resetErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    resetBusy.value = false
+    resetOpen.value = false
+  }
+}
 </script>
 
 <template>
@@ -317,6 +349,49 @@ onMounted(loadRound)
         <AlertBanner v-if="roundMsg" class="mt-3" tone="info">{{ roundMsg }}</AlertBanner>
       </template>
     </Card>
+
+    <!-- ── 交易环境重置（issue 458）──────────────────────────────────────────── -->
+    <Card class="mt-3.5">
+      <CardHeader label="交易环境重置">
+        <template #title>
+          <RotateCcw class="size-4 text-faint-fg" />
+        </template>
+      </CardHeader>
+
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <div class="text-[12.5px] font-semibold">清空本地交易历史并复原虚拟资金</div>
+          <p class="mt-0.5 text-[11px] leading-snug text-faint-fg">
+            停用全部已启用策略 → 撤销全部挂单 → 清空订单/成交/持仓记录 → 按配置 seed 复原现金。
+            配置、策略文件、审计流与策略启用状态保留；动作写入 manual-ops 审计（含重置前快照）。
+            仅 DRY/模拟盘可用 —— 实盘模式下内核拒绝。
+          </p>
+        </div>
+        <Button variant="danger-solid" size="sm" class="shrink-0" :disabled="resetBusy" @click="resetOpen = true">
+          <RotateCcw class="size-3.5" />重置…
+        </Button>
+      </div>
+
+      <AlertBanner v-if="resetErr" class="mt-3" tone="error">{{ resetErr }}</AlertBanner>
+      <AlertBanner v-if="resetMsg" class="mt-3" tone="info">{{ resetMsg }}</AlertBanner>
+    </Card>
+
+    <ConfirmWordDialog
+      v-model:open="resetOpen"
+      word="RESET"
+      title="交易环境重置"
+      :lines="[
+        '停用全部已启用策略（重启后不会自动恢复）',
+        '撤销全部 resting 挂单，清空订单/成交/持仓记录（不可恢复）',
+        '每个账户的现金复原到配置 seed 值',
+        '保留：配置、策略文件、全部审计流；动作写入 manual-ops 审计',
+        '实盘模式下内核会拒绝执行',
+      ]"
+      action-label="确认重置"
+      :busy="resetBusy"
+      :error="resetErr"
+      @confirm="doResetTrading"
+    />
 
     <!-- ── 外观与节奏 ──────────────────────────────────────────────────── -->
     <Card class="mt-3.5">

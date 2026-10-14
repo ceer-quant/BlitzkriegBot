@@ -2808,6 +2808,9 @@ async fn main() -> anyhow::Result<()> {
         // like every other `data/` writer). Always on for a real process —
         // the backtester builds its own CoreConfig with None.
         runtime_config_path: Some("data/runtime/config.json".to_string()),
+        // #458: where manual destructive operations audit themselves. Always
+        // on for a real process; the backtester/tests carry None and refuse.
+        manual_ops_audit_path: Some("data/audit/manual-ops.jsonl".to_string()),
         // #363: the EXPLICIT flag only (None = let the policy file decide).
         max_positions_per_asset: args.max_positions_per_asset,
         positions: PositionConfig {

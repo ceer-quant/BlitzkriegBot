@@ -121,6 +121,40 @@ pub fn persist_round_duration_to(
     std::fs::rename(&tmp, path)
 }
 
+/// #458: append one JSONL record for a manual, destructive operation
+/// (`system.reset_trading`; #456's force-close rides the same file). The
+/// manual-ops audit is the ONLY trace a reset leaves — the wiped records are
+/// gone — so a write failure is an ERROR, not a warn-and-continue: an
+/// unaudited reset must fail loudly (the caller surfaces it as a refusal).
+///
+/// Path convention: the config carries the explicit path (production
+/// `data/audit/manual-ops.jsonl`); the config also has `manual_ops_audit_path`
+/// in the shape of the other audit paths. Appending to an existing file is the
+/// whole model — audit streams are append-only, never cleared by anything.
+pub fn append_manual_op(path: &std::path::Path, record: &serde_json::Value) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let line = serde_json::to_string(record)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    f.write_all(line.as_bytes())?;
+    f.write_all(b"\n")?;
+    Ok(())
+}
+
+/// Count non-empty lines of a JSONL record file — the pre-reset summary's
+/// "how much is about to be deleted" figure. A missing file counts as 0.
+pub fn count_jsonl_lines(path: &std::path::Path) -> u64 {
+    std::fs::read_to_string(path)
+        .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +215,19 @@ mod tests {
             load_round_duration_from(&p),
             Some(RoundDurationCell { duration_sec: 900 })
         );
+    }
+
+    #[test]
+    fn manual_ops_appends_and_counts_lines() {
+        let d = tmpdir("manualops");
+        let p = d.join("audit").join("manual-ops.jsonl");
+        append_manual_op(&p, &serde_json::json!({ "op": "reset" })).unwrap();
+        append_manual_op(&p, &serde_json::json!({ "op": "force_close" })).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.lines().all(|l| l.starts_with('{')));
+        assert_eq!(count_jsonl_lines(&p), 2);
+        // A missing file counts as 0, not an error.
+        assert_eq!(count_jsonl_lines(&d.join("nope.jsonl")), 0);
     }
 }

@@ -2083,6 +2083,14 @@ impl WebServer {
                 // next session's value and the running grid never moves.
                 self.proxy_backtest_body("round_duration.set", &req.body)
             }
+            ("POST", "/api/system/reset-trading") => {
+                // #458 交易环境重置的写路径：the body IS the
+                // `system.reset_trading` params object (`{confirm, reason?}`),
+                // forwarded verbatim — the confirm word and the mode gate are
+                // the KERNEL's checks, the gateway adds nothing. The reply
+                // carries the cleanup counts + the self-checked balances.
+                self.proxy_backtest_body("system.reset_trading", &req.body)
+            }
             ("GET", "/api/execution-policy") | ("GET", "/api/execution-policy/preview") => {
                 // #364: the settings page's 生效风控 section. Effective view =
                 // `execution_policy.get` (the kernel folds `[accounts.<id>]`
