@@ -1,11 +1,13 @@
 <script setup lang="ts">
 /**
- * 设置 · 通用 —— 会话与访问 token（探测 / 掩码 / 复制），外观与刷新节奏
- * （主题三态、提示音、行情快速轮询）。
+ * 设置 · 通用 —— 会话与访问 token（探测 / 掩码 / 复制），轮次时间周期
+ * （next_session 切换 5m/15m/1h/4h/日轮），外观与刷新节奏（主题三态、
+ * 提示音、行情快速轮询）。
  */
 import { computed, onMounted, ref } from 'vue'
-import { Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion, LogOut, Info, SlidersHorizontal } from 'lucide-vue-next'
-import { getToken, loginAt, logout, ping, probeSession } from '@/api/client'
+import { Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion, LogOut, Info, SlidersHorizontal, Timer } from 'lucide-vue-next'
+import { getToken, loginAt, logout, ping, probeSession, api } from '@/api/client'
+import type { RoundDurationDoc } from '@/api/client'
 import { adjudicateSession } from '@/lib/session'
 import { dateTime } from '@/lib/format'
 import { useSettingsStore } from '@/stores/settings'
@@ -17,6 +19,7 @@ import Button from '@/components/ui/button/Button.vue'
 import SegmentedControl from '@/components/ui/segmented/SegmentedControl.vue'
 import Switch from '@/components/ui/switch/Switch.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
+import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 
 const settings = useSettingsStore()
 const { theme, setTheme, sound, setSoundEnabled } = useTheme()
@@ -93,6 +96,104 @@ const themeValue = computed<ThemeMode>({
   get: () => theme.value,
   set: (v) => setTheme(v as ThemeMode),
 })
+
+// ── 轮次时间周期（next_session：轮次网格是坐标系，热切会错解存量 round_slot）──
+const roundDoc = ref<RoundDurationDoc | null>(null)
+const roundErr = ref<string | null>(null)
+const roundMsg = ref<string | null>(null)
+const roundBusy = ref(false)
+const roundPending = ref<number | null>(null)
+
+const roundSegments = computed(() => {
+  const allowed = roundDoc.value?.allowed ?? []
+  const seen = new Set<number>()
+  const out: { id: string; label: string }[] = []
+  for (const o of allowed) {
+    if (seen.has(o.sec)) continue
+    seen.add(o.sec)
+    out.push({ id: String(o.sec), label: o.label ?? `${o.sec}s` })
+  }
+  return out
+})
+const roundValue = computed<string>({
+  // 预填「下次会话将跑的值」（持久格优先），不是本会话生效值 —— 卡片承诺
+  // 的是「重启后是什么」。
+  get: () => String(roundPending.value ?? roundDoc.value?.nextSessionSec ?? ''),
+  set: (v) => { roundPending.value = Number(v) },
+})
+const roundDirty = computed(
+  () => roundPending.value !== null
+    && roundPending.value !== roundDoc.value?.nextSessionSec,
+)
+const roundFlagLocked = computed(
+  () => roundDoc.value?.source === 'cli_or_env_or_toml',
+)
+const roundSourceLabel = computed(() => {
+  switch (roundDoc.value?.source) {
+    case 'cli_or_env_or_toml': return '命令行/环境变量/配置文件'
+    case 'runtime': return '面板设置'
+    case 'toml': return '配置文件'
+    case 'env': return '环境变量'
+    default: return '出厂默认'
+  }
+})
+
+async function loadRound(): Promise<void> {
+  roundBusy.value = true
+  try {
+    roundDoc.value = await api.roundDuration()
+    roundErr.value = roundDoc.value.error ?? null
+    roundPending.value = null
+  } catch (e) {
+    roundErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    roundBusy.value = false
+  }
+}
+
+async function saveRound(): Promise<void> {
+  if (roundPending.value === null) return
+  roundBusy.value = true
+  roundErr.value = null
+  roundMsg.value = null
+  try {
+    const res = await api.roundDurationSet({
+      durationSec: roundPending.value,
+      reason: 'webui 面板编辑（轮次时间周期卡）',
+    })
+    if (res.error) {
+      roundErr.value = res.error
+    } else {
+      roundMsg.value = `已保存：下次会话（重启内核后）将按 ${res.nextSessionSec}s 轮次运行；本会话网格不变。`
+      await loadRound()
+    }
+  } catch (e) {
+    roundErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    roundBusy.value = false
+  }
+}
+
+async function resetRound(): Promise<void> {
+  roundBusy.value = true
+  roundErr.value = null
+  roundMsg.value = null
+  try {
+    const res = await api.roundDurationSet({ reset: true, reason: 'webui 面板清除（轮次时间周期卡）' })
+    if (res.error) {
+      roundErr.value = res.error
+    } else {
+      roundMsg.value = '已清除面板设置：下次会话回落到启动参数解析（命令行 > 环境变量 > 配置文件 > 出厂默认）。'
+      await loadRound()
+    }
+  } catch (e) {
+    roundErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    roundBusy.value = false
+  }
+}
+
+onMounted(loadRound)
 </script>
 
 <template>
@@ -142,6 +243,79 @@ const themeValue = computed<ThemeMode>({
           </Button>
         </div>
       </div>
+    </Card>
+
+    <!-- ── 轮次时间周期（next_session）────────────────────────────────── -->
+    <Card class="mt-3.5">
+      <CardHeader label="轮次时间周期">
+        <template #title>
+          <Timer class="size-4 text-faint-fg" />
+        </template>
+        <template #action>
+          <Badge v-if="roundDoc" variant="default" dot>
+            本会话 {{ roundDoc.effectiveSec }}s（{{ roundSourceLabel }}）
+          </Badge>
+        </template>
+      </CardHeader>
+
+      <AlertBanner v-if="!roundDoc && !roundErr" class="mb-3" tone="info">正在读取轮次周期…</AlertBanner>
+      <AlertBanner v-else-if="!roundDoc" class="mb-3" tone="warn">
+        读不到轮次周期读数（{{ roundErr ?? '内核离线或版本过旧' }}）。这个内核可能不认识 round_duration.get。
+      </AlertBanner>
+
+      <template v-else>
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <div class="text-[12.5px] font-semibold">下次会话的轮次长度</div>
+            <p class="mt-0.5 text-[11px] text-faint-fg">
+              切换在重启内核后生效 —— 轮次网格是坐标系（round_slot 按会话的周期推导），热切会错解存量仓位与订单。
+            </p>
+          </div>
+          <SegmentedControl
+            v-model="roundValue"
+            :segments="roundSegments"
+            size="sm"
+            :disabled="roundBusy"
+          />
+        </div>
+
+        <div class="mt-3 flex items-start justify-between gap-3 rounded-md border border-line bg-panel-2 px-3 py-2">
+          <div class="flex items-start gap-2 text-[11.5px] leading-snug text-muted-fg">
+            <Info class="mt-px size-3.5 shrink-0 text-faint-fg" />
+            <span v-if="roundFlagLocked">
+              当前轮次由启动参数显式指定（命令行/环境变量/配置文件）。面板写入仍会保存，但显式参数优先 —— 想让面板设置生效，请去掉 --round-sec 启动参数后重启。
+            </span>
+            <span v-else-if="roundDoc.persisted">
+              已有面板设置：下次会话按 {{ roundDoc.nextSessionSec }}s 运行。清除后回落到启动参数解析。
+            </span>
+            <span v-else>
+              尚无面板设置：下次会话按 {{ roundSourceLabel }}的 {{ roundDoc.effectiveSec }}s 运行。
+            </span>
+          </div>
+          <div class="flex shrink-0 items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              :disabled="roundBusy || !roundDoc.persisted"
+              title="清除面板设置，下次会话回落到启动参数解析"
+              @click="resetRound"
+            >
+              <RefreshCw class="size-3.5" />清除
+            </Button>
+            <Button
+              size="sm"
+              :disabled="roundBusy || !roundDirty"
+              title="把选中的轮次周期写入持久格（重启内核后生效）"
+              @click="saveRound"
+            >
+              <Check class="size-3.5" />保存
+            </Button>
+          </div>
+        </div>
+
+        <AlertBanner v-if="roundErr" class="mt-3" tone="warn">{{ roundErr }}</AlertBanner>
+        <AlertBanner v-if="roundMsg" class="mt-3" tone="info">{{ roundMsg }}</AlertBanner>
+      </template>
     </Card>
 
     <!-- ── 外观与节奏 ──────────────────────────────────────────────────── -->

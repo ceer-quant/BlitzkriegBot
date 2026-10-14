@@ -2690,7 +2690,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let config = CoreConfig {
+    let mut config = CoreConfig {
         mode,
         // Replay maintenance-gating fast path: replay-only, refuse-guarded in
         // the CLI parser (mirrors --fee-model). Default false = the historic
@@ -2788,6 +2788,26 @@ async fn main() -> anyhow::Result<()> {
         feed_ws_enabled: args.feed_ws,
         market_plugin: args.market_plugin,
         round_duration_sec: args.round_sec,
+        // The round-duration UI card's persisted cell (data/runtime/config.json)
+        // sits between the TOML/default tiers and an explicit spoke: if
+        // `engine.round_sec` appears in the config_report, some layer ABOVE the
+        // compiled default (flag/env/TOML) resolved it, and that layer wins —
+        // the persisted cell is applied below, only when no layer spoke. An
+        // explicit flag (replays, censuses) always outranks a UI toggle: the
+        // bit-exact gate baselines must never be hijacked by the card.
+        round_duration_source: if args
+            .config_report
+            .iter()
+            .any(|l| l.starts_with("engine.round_sec="))
+        {
+            "cli_or_env_or_toml"
+        } else {
+            "default"
+        },
+        // The durable cell the round-duration UI card writes (cwd-relative,
+        // like every other `data/` writer). Always on for a real process —
+        // the backtester builds its own CoreConfig with None.
+        runtime_config_path: Some("data/runtime/config.json".to_string()),
         // #363: the EXPLICIT flag only (None = let the policy file decide).
         max_positions_per_asset: args.max_positions_per_asset,
         positions: PositionConfig {
@@ -3190,6 +3210,26 @@ async fn main() -> anyhow::Result<()> {
     // SIGTERM/SIGINT inside the server. The handle is available for an embedded
     // caller that wants programmatic shutdown.
     let _shutdown_tx = tx;
+
+    // The round-duration UI card's persisted cell (data/runtime/config.json):
+    // applied ONLY when no boot layer above the compiled default spoke
+    // (round_duration_source == "default"). Next-session semantics by
+    // construction — this runs once at boot, so a `round_duration.set` write
+    // can never move the running session's grid.
+    if config.round_duration_source == "default"
+        && let Some(cell) = config.runtime_config_path.as_deref().and_then(|p| {
+            blitzkrieg_core::ipc::runtime_config::load_round_duration_from(std::path::Path::new(p))
+        })
+        && cell.duration_sec != config.round_duration_sec
+    {
+        eprintln!(
+            "blitzkrieg-core: round duration {}s -> {}s (persisted UI setting, \
+             data/runtime/config.json; an explicit --round-sec outranks it)",
+            config.round_duration_sec, cell.duration_sec
+        );
+        config.round_duration_sec = cell.duration_sec;
+        config.round_duration_source = "runtime";
+    }
 
     server::run(args.socket.clone(), config, args.tick_ms, rx).await?;
     eprintln!("blitzkrieg-core stopped");

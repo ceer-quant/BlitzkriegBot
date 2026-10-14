@@ -132,6 +132,18 @@ pub mod method {
     /// 未持久化：重启回到启动 flag/env/TOML 的解析结果（与 risk.setSystemic
     /// 同一句真话）。
     pub const RISK_SET_EXIT: &str = "risk.setExit";
+    /// 轮次时间周期的运行时读数（UI 设置卡）：当前生效秒数、来源（cli/env/
+    /// runtime/toml/default）、可切换的白名单档位与「下次会话生效」的回执
+    /// 语义。只读。
+    pub const ROUND_DURATION_GET: &str = "round_duration.get";
+    /// 轮次时间周期的运行时写路径（用户需求：UI 可以把 15m 切到 5m 等）。
+    /// **next_session** —— 轮次周期是网格坐标系（`round_slot` = now/dur 的
+    /// UTC 网格索引），仓位恢复、#457 过期扫描都用当前 config 重算存量订单
+    /// 的过期时间，热切会把旧 slot 全部错解；所以这里只写持久格
+    /// `data/runtime/config.json`（重启后启动层读回），本会话的网格不动。
+    /// 显式 `--round-sec`（普查/回放命令行） outranks 持久格 —— 逐位复现的
+    /// 回放基线永远不被 UI 设置劫持。
+    pub const ROUND_DURATION_SET: &str = "round_duration.set";
     pub const ORDER_PLACE: &str = "orders.place";
     pub const ORDER_CANCEL: &str = "orders.cancel";
     pub const ORDER_CANCEL_ALL: &str = "orders.cancel_all";
@@ -928,6 +940,79 @@ pub struct ExitSetUpdate {
 /// [`ExitSetUpdate::note`] — one spelling, used by the reply and the log.
 pub const EXIT_SET_UPDATE_NOTE: &str = "live for every new entry (Gate 4 binds per intent) and for the exit \
      sweep of already-open positions; a restart re-applies the startup flags/env/TOML (in-memory, not persisted)";
+
+// ── 轮次时间周期可设置 — round_duration.get / round_duration.set ────────────
+
+/// `round_duration.get` result: the effective round length, where it came
+/// from, the switchable whitelist, and what a restart would resolve to (the
+/// persisted cell outranks TOML/default but not an explicit CLI flag).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoundDurationResult {
+    /// The effective seconds this session runs on.
+    pub effective_sec: i64,
+    /// One of `cli` / `env` / `runtime` / `toml` / `default` — the boot
+    /// resolution's own report, so the UI can say "an explicit flag outranks
+    /// this card" instead of silently ignoring a write.
+    pub source: &'static str,
+    /// The switchable whitelist (`scanner::duration_label_for` is the ONE
+    /// decoder). Empty `label` rows are still listed so the UI can name a
+    /// non-standard boot value.
+    pub allowed: Vec<RoundDurationOption>,
+    /// What the NEXT session will run on: the persisted cell if one was
+    /// written (regardless of this session's source), else the effective
+    /// value. The UI reads this to prefill the card.
+    pub next_session_sec: i64,
+    /// Whether the persisted cell holds a value (a write happened at some
+    /// point; `round_duration.set` with `reset` clears it).
+    pub persisted: bool,
+}
+
+/// One row of the whitelist.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoundDurationOption {
+    pub sec: i64,
+    /// `5m` / `15m` / `1h` / `4h` / `daily` — null for a non-standard value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<&'static str>,
+}
+
+/// `round_duration.set` params: `durationSec` must be one of the whitelist
+/// values (300/900/3600/14400/86400); `reset` instead clears the persisted
+/// cell so the next session falls back to the boot flags/env/TOML. Exactly
+/// one of the two must be given.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRoundDurationParams {
+    #[serde(default)]
+    pub duration_sec: Option<i64>,
+    #[serde(default)]
+    pub reset: bool,
+    /// Audit trail only — echoed in the reply and the log line.
+    pub reason: Option<String>,
+}
+
+/// `round_duration.set` result.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoundDurationUpdate {
+    /// What the next session will run on after this write.
+    pub next_session_sec: i64,
+    /// `reset` clears the cell (falls back to boot resolution) instead of
+    /// writing a value.
+    pub reset: bool,
+    pub at_ms: i64,
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub note: &'static str,
+}
+
+/// [`RoundDurationUpdate::note`] — one spelling, used by the reply and the log.
+pub const ROUND_DURATION_SET_NOTE: &str = "next session: the round grid is a coordinate system (round_slot is a UTC \
+     grid index) and live positions/orders were slotted under the old length; \
+     an explicit --round-sec flag still outranks this setting";
 
 // ── Fee model quote (#182) ───────────────────────────────────────────────────
 

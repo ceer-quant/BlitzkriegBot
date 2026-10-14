@@ -2064,6 +2064,25 @@ impl WebServer {
                 // writes later, and the audited reply names each old→new.
                 self.proxy_backtest_body("risk.setExit", &req.body)
             }
+            ("GET", "/api/round-duration") => {
+                // 轮次时间周期设置卡的读路径：the body IS the
+                // `round_duration.get` params object (`{}`), forwarded
+                // verbatim. Read-only — the kernel answers from the live
+                // config + the persisted cell (next_session), the gateway
+                // shapes nothing.
+                self.proxy_backtest(
+                    "round_duration.get",
+                    serde_json::Value::Object(serde_json::Map::new()),
+                )
+            }
+            ("POST", "/api/round-duration/set") => {
+                // 轮次时间周期设置卡的写路径（next_session）：the body IS the
+                // `round_duration.set` params object (`{durationSec?, reset?,
+                // reason?}`), forwarded verbatim. The kernel validates the
+                // whitelist and writes the durable cell; the reply names the
+                // next session's value and the running grid never moves.
+                self.proxy_backtest_body("round_duration.set", &req.body)
+            }
             ("GET", "/api/execution-policy") | ("GET", "/api/execution-policy/preview") => {
                 // #364: the settings page's 生效风控 section. Effective view =
                 // `execution_policy.get` (the kernel folds `[accounts.<id>]`
