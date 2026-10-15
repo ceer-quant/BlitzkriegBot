@@ -152,8 +152,13 @@ const activeSide = computed<BookSide | null>(() => {
  * The aggregator keys prediction-token bars by TOKEN id (what `feed_klines`
  * was fed), not by asset name — the same key the books view now exposes.
  * Empty on older cores: the card hides rather than queries a wrong key.
+ *
+ * K线只属于 CEX 现货/合约：二元预测市场（prediction）的价格就是 0..1 概率，
+ * 没有 OHLC 概念，卡片必须藏——哪怕行情插件带了真 token id。
  */
+const KLINE_MARKET_TYPES = new Set(['spot', 'futures', 'options'])
 const klineReady = computed(() => {
+  if (!KLINE_MARKET_TYPES.has(snap.value?.marketActiveType ?? '')) return false
   const b = activeBook.value
   if (!b) return false
   return depthToken.value === 'up' ? !!b.upTokenId : !!b.downTokenId
