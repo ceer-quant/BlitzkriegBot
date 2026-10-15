@@ -2123,6 +2123,50 @@ impl WebServer {
                 // next session's value and the running grid never moves.
                 self.proxy_backtest_body("round_duration.set", &req.body)
             }
+            ("GET", "/api/market-plugin") => {
+                // Issue #485: the plugin page's market-plugin card — the
+                // running session's active plugin, the compiled-in registry
+                // and what a restart would select (`market.plugin.get`,
+                // read-only). The wire shape is the kernel's own.
+                self.proxy_backtest(
+                    "market.plugin.get",
+                    serde_json::Value::Object(serde_json::Map::new()),
+                )
+            }
+            ("POST", "/api/market-plugin/set") => {
+                // Issue #485: the market-plugin switch's write path
+                // (next_session) — the body IS the `market.plugin.set`
+                // params object (`{name?, reset?, reason?}`), forwarded
+                // verbatim. The kernel refuses an unregistered name
+                // plan-first and writes the durable cell; the running
+                // session's feed/discovery/executor never move.
+                self.proxy_backtest_body("market.plugin.set", &req.body)
+            }
+            ("POST", "/api/extension/set") => {
+                // Issue #485: the extension rows' 启用/停用 buttons — the
+                // body IS the params object (`{name, enabled}`), forwarded
+                // to the kernel's own `extension.enable` / `extension.disable`
+                // (the SAME verbs the gateway's `extension <name> on|off`
+                // command has always driven; the panel just never had an
+                // entry point). The kernel runs on_load/on_unload and answers
+                // `{name, enabled}` or names the failure.
+                let parsed = body_params(&req.body);
+                let enabled = parsed
+                    .as_ref()
+                    .ok()
+                    .and_then(|p| p.get("enabled").and_then(|v| v.as_bool()));
+                match (parsed, enabled) {
+                    (Ok(p), Some(true)) => self.proxy_backtest("extension.enable", p),
+                    (Ok(p), Some(false)) => self.proxy_backtest("extension.disable", p),
+                    _ => (
+                        400,
+                        "application/json",
+                        serde_json::json!({ "error": "body must be {\"name\": string, \"enabled\": bool}" })
+                            .to_string()
+                            .into_bytes(),
+                    ),
+                }
+            }
             ("POST", "/api/system/reset-trading") => {
                 // issue 458 交易环境重置卡: the body IS the
                 // `system.reset_trading` params object (`{confirm, reason?}`),

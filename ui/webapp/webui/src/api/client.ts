@@ -622,6 +622,32 @@ export const api = {
    */
   unifiedList: () => request<UnifiedListDoc>('/unified'),
   /**
+   * 插件页扩展行的启停写路径（#485）：`{name, enabled}` 原样转发，网关按
+   * enabled 路由到内核 `extension.enable` / `extension.disable`（on_load /
+   * on_unload 在内核里跑，回执 `{name, enabled}` 或点名失败原因）。
+   */
+  extensionSet: (name: string, enabled: boolean) =>
+    request<ExtensionSetDoc>('/extension/set', {
+      method: 'POST',
+      body: JSON.stringify({ name, enabled }),
+    }),
+  /**
+   * 插件页行情插件的读路径（`market.plugin.get`，#485，只读）：本会话
+   * active、编译进内核的注册表、下次会话将选什么、是否被显式旗标钉住。
+   */
+  marketPlugin: () => request<MarketPluginReadoutDoc>('/market-plugin'),
+  /**
+   * 插件页行情插件的写路径（`market.plugin.set`，#485）：next_session ——
+   * feed/discovery/executor 生命周期都绑定启动选择，写入只落持久格
+   * （data/runtime/config.json 的 marketPlugin），重启生效；未注册名在
+   * 内核 plan-first 拒绝。显式 `--market-plugin` 仍 outrank 持久格。
+   */
+  marketPluginSet: (body: { name?: string; reset?: boolean; reason?: string }) =>
+    request<MarketPluginUpdateDoc>('/market-plugin/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
    * 轮次时间周期设置卡的读路径（`round_duration.get`，只读）：本会话生效
    * 秒数、来源、可切换白名单、下次会话将解析到什么（持久格 outranks TOML/
    * 默认，但显式 `--round-sec` outranks 持久格 —— source 字段如实报告）。
@@ -1626,6 +1652,39 @@ export interface PluginsDoc {
   /** Boolean flag — the selected source's *name* is on the active market row. */
   marketActive: boolean
   lastError: string | null
+}
+
+// ── #485 插件启停/切换（extension.enable|disable / market.plugin.get|set）────
+
+/** `extension.enable` / `extension.disable` 回执（`{name, enabled}`）或错误。 */
+export interface ExtensionSetDoc {
+  name?: string
+  enabled?: boolean
+  error?: string
+}
+
+/** `market.plugin.get` readout：本会话 active、注册表、下次会话将选什么。 */
+export interface MarketPluginReadoutDoc {
+  activePlugin: string
+  registered: { name: string; type: string; active: boolean }[]
+  /** 下次会话将选什么：持久格里的已注册名，否则本会话 active。 */
+  nextSessionPlugin: string
+  /** 持久格里持有已注册名（写过某次；reset 清格后为 false）。 */
+  persisted: boolean
+  /** 本会话由显式 `--market-plugin` 解析 —— 写入动不了旗标钉住的会话。 */
+  flagPinned: boolean
+  error?: string
+}
+
+/** `market.plugin.set` 回执（next_session 语义，内核原样）。 */
+export interface MarketPluginUpdateDoc {
+  nextSessionPlugin?: string
+  reset?: boolean
+  atMs?: number
+  actor?: string
+  reason?: string | null
+  note?: string
+  error?: string
 }
 
 // ── E13 evolution (mirror web/mod.rs's `evolution` block) ────────────────────
