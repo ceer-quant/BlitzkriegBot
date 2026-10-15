@@ -215,6 +215,8 @@ const needsStrategyHint = computed(() =>
       <StatTile label="当前轮次" :value="round ? `#${round.slot}` : '—'">
         <template #sub>
           <span v-if="round">{{ duration(round.ageSec) }} 已过 · {{ duration(round.timeLeftSec) }} 剩余</span>
+          <!-- issue 488: 行情插件活跃但轮次空 = 数据源没到达（网络/代理），不是「等待插件」。 -->
+          <span v-else-if="snap?.marketActiveName">行情插件 {{ snap?.marketActiveName }} 活跃，等待轮次数据</span>
           <span v-else>等待行情插件</span>
         </template>
         <div v-if="round" class="mt-2">

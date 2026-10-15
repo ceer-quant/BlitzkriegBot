@@ -16,6 +16,7 @@ use crate::core::types::{NetCheckReportView, UiSnapshot};
 use crate::gateway::supervisor::{
     RestartPolicy, StartOutcome, StopOutcome, Supervisor, SupervisorConfig,
 };
+use crate::socket_served;
 use serde::Serialize;
 
 /// A parsed command.
@@ -27,6 +28,11 @@ pub enum Command {
         dry_run: bool,
     },
     Stop,
+    /// issue 488: stop this gateway's core, wait for the socket to go quiet,
+    /// then spawn a replacement with the same config. The point is the
+    /// next-session settings (round duration, market plugin): the panel writes
+    /// the persisted cell, then restarts so the boot-time resolution re-runs.
+    Restart,
     Status,
     Positions {
         limit: usize,
@@ -127,7 +133,18 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                 dry_run,
             })
         }
-        "stop" => Ok(Command::Stop),
+        "stop" => {
+            if parts.len() != 1 {
+                return Err("usage: stop".into());
+            }
+            Ok(Command::Stop)
+        }
+        "restart" => {
+            if parts.len() != 1 {
+                return Err("usage: restart".into());
+            }
+            Ok(Command::Restart)
+        }
         "status" => Ok(Command::Status),
         "positions" => {
             let limit = parts
@@ -457,6 +474,7 @@ impl Dispatcher {
                 dry_run,
             } => self.cmd_start(raw, assets, size_usd, dry_run),
             Command::Stop => self.cmd_stop(raw),
+            Command::Restart => self.cmd_restart(raw),
             Command::Status => self.cmd_status(raw),
             Command::Positions { limit } => self.cmd_positions(raw, limit),
             Command::Strategies => self.cmd_plugin_list(raw, PluginKind::Strategy),
@@ -721,6 +739,61 @@ impl Dispatcher {
         }
     }
 
+    /// issue 488: stop → wait for the socket to actually go quiet → start again.
+    ///
+    /// Synchronous on purpose: the caller (panel button) is owed a definite
+    /// answer, and the two halves are quick — TERM_GRACE at most for the exit,
+    /// STARTUP_DEADLINE at most for the boot. The socket-wait between them is
+    /// what makes this safe: spawning while the old core still holds the UDS
+    /// would make the new core adopt-or-abort against a dying socket instead
+    /// of binding it.
+    fn cmd_restart(&mut self, raw: &str) -> CommandOutcome {
+        if !self.lifecycle_enabled {
+            return CommandOutcome::err(
+                raw,
+                "lifecycle control disabled; start the gateway with --manage to enable start/stop/restart",
+            );
+        }
+        let was_running = self.sup.is_running();
+        if was_running {
+            match self.sup.stop() {
+                StopOutcome::Stopped { .. } => {
+                    // Wait until the socket is free (bounded, well past TERM_GRACE)
+                    // so the replacement bind cannot race the dying process.
+                    let socket = self.sup.config().socket_path.clone();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    while socket_served(&socket) && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+                StopOutcome::NotOwned => {
+                    return CommandOutcome::ok(
+                        raw,
+                        "not_owned",
+                        "no core spawned by this gateway; an adopted core is left running (restart not applicable — stop it with `blitzkrieg stop` and start fresh)",
+                    );
+                }
+            }
+        }
+        match self.sup.start() {
+            Ok(StartOutcome::Started { pid }) => {
+                let note = if was_running {
+                    "core restarted (next-session settings now applied)"
+                } else {
+                    "core started (was not running)"
+                };
+                CommandOutcome::ok(raw, "restarted", format!("{note} (pid {pid})"))
+                    .with_data(serde_json::json!({ "restarted": was_running, "pid": pid }))
+            }
+            Ok(StartOutcome::Adopted) => CommandOutcome::ok(
+                raw,
+                "adopted",
+                "a core is already serving this socket; adopted it (not owned)",
+            ),
+            Err(e) => CommandOutcome::err(raw, e.to_string()),
+        }
+    }
+
     fn cmd_flatten(&mut self, raw: &str, position_id: &str) -> CommandOutcome {
         if !self.lifecycle_enabled {
             return CommandOutcome::err(
@@ -928,6 +1001,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "start the core (adopts if already running)",
     ),
     ("stop", "stop the core this gateway spawned"),
+    (
+        "restart",
+        "stop + start the core (applies next-session settings; issue 488)",
+    ),
     ("status", "round / stats / positions / balance"),
     ("positions [N]", "closed-trade history (newest first)"),
     ("strategies", "list strategies and enabled state"),
@@ -1168,6 +1245,8 @@ mod tests {
         );
         assert_eq!(parse_command("STATUS").unwrap(), Command::Status);
         assert_eq!(parse_command("stop").unwrap(), Command::Stop);
+        assert_eq!(parse_command("RESTART").unwrap(), Command::Restart);
+        assert!(parse_command("restart now").is_err());
     }
 
     #[test]
@@ -1272,6 +1351,7 @@ mod tests {
             match c {
                 Command::Start { .. } => "start",
                 Command::Stop => "stop",
+                Command::Restart => "restart",
                 Command::Status => "status",
                 Command::Positions { .. } => "positions",
                 Command::Strategies => "strategies",
