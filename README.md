@@ -155,6 +155,16 @@ localhost 转发让 Windows 侧直接访问 Linux 侧端口，无需任何配置
 
 ### 第 1 步：拿到代码并构建（约几分钟，看网速）
 
+**不想装 Rust？直接下载 release 包解压即用**（「傻白甜」路线）：到
+[Releases](https://github.com/ceer-quant/BlitzkriegBot/releases) 下载对应平台的
+`tar.gz`，解开后的目录与编译出的 checkout **运行时完全等效**——`bin/`（内核 + 启动器 +
+面板）、`lib/`（策略 cdylib）、`webui/`（预编译面板）、`user_layer/configs/`（内核配置）、
+`user_layer/strategies_lua/`（Lua 策略包，官方 11 个）、`user_layer/strategies/`（cdylib
+策略投放点）、`extensions/`（插件配置落点）、`.env.example`（环境模板，复制为 `.env`
+填写）。在解压目录里 `bin/blitzkrieg run` 即可，面板已预编译，无需 Node/npm。
+
+要自己构建（推荐开发者）：
+
 ```bash
 git clone https://github.com/ceer-quant/BlitzkriegBot.git
 cd BlitzkriegBot
