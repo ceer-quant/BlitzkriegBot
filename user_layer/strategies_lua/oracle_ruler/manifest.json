@@ -17,12 +17,7 @@
   "modes": [
     {
       "market_type": "prediction",
-      "structure": "binary_outcome_wheel",
-      "capabilities": [
-        "websocket_feed",
-        "level2_snapshot",
-        "post_only"
-      ]
+      "structure": "binary_outcome_wheel"
     }
   ]
 }

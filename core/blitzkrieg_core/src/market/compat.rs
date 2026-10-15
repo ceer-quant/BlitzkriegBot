@@ -9,9 +9,13 @@
 //!
 //! One strategy mode matches one plugin mode iff
 //!   (1) market_type is equal (a strong match, never a substring game),
-//!   (2) the strategy's structure is `None` (doesn't care) or equal,
-//!   (3) the plugin's capabilities are a SUPERSET of the strategy's
-//!       requirements (`MarketCapabilities::satisfies`).
+//!   (2) the strategy's structure is `None` (doesn't care) or equal.
+//!
+//! Capabilities are NOT a handshake criterion (removed 2026-10 after the
+//! plugin-switch incompatibility): a strategy declares WHERE it works, and a
+//  binary-market strategy must serve on every binary venue. Capabilities stay
+//! plugin-side display metadata (`market.list`, the 模拟盘 badge) — a plugin
+//! still declares what it OFFERS; a strategy can no longer REQUIRE any of it.
 //! A strategy is loadable iff it is UNDECLARED (empty — participates not, the
 //! 0.2 default) or at least one declared pair matches.
 
@@ -97,11 +101,11 @@ pub fn check_compatibility(
     ))
 }
 
-/// One (strategy mode, plugin mode) pair under §7.5 (1)-(3).
+/// One (strategy mode, plugin mode) pair under §7.5 (1)-(2). Capabilities are
+/// not judged: the strategy side no longer carries requirements, so there is
+/// nothing to subset.
 fn pair_compatible(m: &StrategyMode, p: &MarketMode) -> bool {
-    m.market_type == p.market_type
-        && (m.structure.is_none() || m.structure == p.structure)
-        && p.capabilities.satisfies(m.required_capabilities)
+    m.market_type == p.market_type && (m.structure.is_none() || m.structure == p.structure)
 }
 
 /// Wire tag of a serde `snake_case` enum value, via the ONE serializer — a
@@ -114,18 +118,15 @@ fn wire_tag<T: serde::Serialize>(v: &T) -> String {
         .unwrap_or_default()
 }
 
-/// `market_type[/structure](cap,cap,…)` — the want side of the diagnostic.
-/// An absent structure renders bare (`futures`): the strategy does not care.
+/// `market_type[/structure]` — the want side of the diagnostic. A strategy
+/// declares no capabilities (the surface is removed), so there is nothing to
+/// render beside the structure.
 fn render_strategy_mode(m: &StrategyMode) -> String {
     let mut s = wire_tag(&m.market_type);
     if let Some(st) = &m.structure {
         s.push('/');
         s.push_str(&wire_tag(st));
     }
-    push_caps(
-        &mut s,
-        &blitzkrieg_market_api::modes::capabilities_to_names(m.required_capabilities),
-    );
     s
 }
 
@@ -177,19 +178,14 @@ mod tests {
         }
     }
 
-    fn strategy_mode(
-        mt: MarketType,
-        st: Option<MarketStructure>,
-        caps: MarketCapabilities,
-    ) -> StrategyMode {
+    fn strategy_mode(mt: MarketType, st: Option<MarketStructure>) -> StrategyMode {
         StrategyMode {
             market_type: mt,
             structure: st,
-            required_capabilities: caps,
         }
     }
 
-    // ── §7.5 (1)-(3), the passing half ──────────────────────────────────────
+    // ── §7.5 (1)-(2), the passing half ──────────────────────────────────────
 
     #[test]
     fn undeclared_strategy_participates_not() {
@@ -214,16 +210,15 @@ mod tests {
                 MarketCapabilities::NONE,
             )],
         );
-        let modes = vec![strategy_mode(
-            MarketType::Prediction,
-            None,
-            MarketCapabilities::NONE,
-        )];
+        let modes = vec![strategy_mode(MarketType::Prediction, None)];
         assert!(check_compatibility("s", &modes, &p).is_ok());
     }
 
     #[test]
-    fn equal_structure_and_superset_capabilities_match() {
+    fn equal_structure_matches_regardless_of_plugin_capabilities() {
+        // Capabilities are display metadata, not a handshake criterion: a
+        // plugin offering fewer bits than another venue still serves the same
+        // binary-market strategy (the plugin-switch incompatibility, 2026-10).
         let p = plugin(
             "polymarket",
             vec![plugin_mode(
@@ -235,7 +230,6 @@ mod tests {
         let modes = vec![strategy_mode(
             MarketType::Prediction,
             Some(MarketStructure::BinaryOutcomeWheel),
-            MarketCapabilities::WEBSOCKET_FEED,
         )];
         assert!(check_compatibility("s", &modes, &p).is_ok());
     }
@@ -258,11 +252,10 @@ mod tests {
             ],
         );
         let modes = vec![
-            strategy_mode(MarketType::Spot, None, MarketCapabilities::NONE),
+            strategy_mode(MarketType::Spot, None),
             strategy_mode(
                 MarketType::Prediction,
                 Some(MarketStructure::BinaryOutcomeWheel),
-                MarketCapabilities::NONE,
             ),
         ];
         assert!(check_compatibility("s", &modes, &p).is_ok());
@@ -274,7 +267,6 @@ mod tests {
         let modes = vec![strategy_mode(
             MarketType::Futures,
             Some(MarketStructure::CentralLimitOrderBook),
-            MarketCapabilities::NONE,
         )];
         assert!(check_compatibility("s", &modes, &p).is_ok());
     }
@@ -294,7 +286,6 @@ mod tests {
         let modes = vec![strategy_mode(
             MarketType::Prediction,
             Some(MarketStructure::CentralLimitOrderBook),
-            MarketCapabilities::NONE,
         )];
         let err = check_compatibility("clob_strat", &modes, &p).unwrap_err();
         assert!(err.contains("central_limit_order_book"), "{err}");
@@ -307,23 +298,26 @@ mod tests {
     }
 
     #[test]
-    fn missing_capability_is_refused_and_named() {
+    fn fewer_plugin_capabilities_never_refuse_a_matching_strategy() {
+        // The regression guard for the plugin-switch incompatibility
+        // (2026-10): a plugin that declares FEWER display bits than another
+        // venue (kalshi: level2 only vs polymarket's three) must still serve
+        // a strategy whose market_type/structure match. Capabilities were a
+        // handshake criterion once and refused every binary-market strategy
+        // off polymarket.
         let p = plugin(
-            "polymarket",
+            "kalshi",
             vec![plugin_mode(
                 MarketType::Prediction,
                 Some(MarketStructure::BinaryOutcomeWheel),
-                MarketCapabilities::NONE,
+                MarketCapabilities::LEVEL2_SNAPSHOT,
             )],
         );
         let modes = vec![strategy_mode(
             MarketType::Prediction,
-            None,
-            MarketCapabilities::LEVERAGE,
+            Some(MarketStructure::BinaryOutcomeWheel),
         )];
-        let err = check_compatibility("lev_strat", &modes, &p).unwrap_err();
-        assert!(err.contains("leverage"), "{err}");
-        assert!(err.contains("polymarket"), "{err}");
+        assert!(check_compatibility("s", &modes, &p).is_ok());
     }
 
     #[test]
@@ -338,11 +332,7 @@ mod tests {
                 MarketCapabilities::WEBSOCKET_FEED | MarketCapabilities::LEVEL2_SNAPSHOT,
             )],
         );
-        let modes = vec![strategy_mode(
-            MarketType::Futures,
-            None,
-            MarketCapabilities::NONE,
-        )];
+        let modes = vec![strategy_mode(MarketType::Futures, None)];
         let err = check_compatibility("futures_strat", &modes, &p).unwrap_err();
         for want in ["futures", "prediction", "polymarket"] {
             assert!(err.contains(want), "reason lacks {want}: {err}");
@@ -364,7 +354,6 @@ mod tests {
         let modes = vec![strategy_mode(
             MarketType::Futures,
             Some(MarketStructure::CentralLimitOrderBook),
-            MarketCapabilities::NONE,
         )];
         let err = check_compatibility("clob_strat", &modes, &p).unwrap_err();
         assert!(err.contains("central_limit_order_book"), "{err}");
@@ -381,11 +370,7 @@ mod tests {
                 MarketCapabilities::NONE,
             )],
         );
-        let modes = vec![strategy_mode(
-            MarketType::Futures,
-            None,
-            MarketCapabilities::NONE,
-        )];
+        let modes = vec![strategy_mode(MarketType::Futures, None)];
         assert!(check_compatibility("s", &modes, &p).is_ok());
     }
 
@@ -408,19 +393,13 @@ mod tests {
         assert_eq!(p.modes[0].market_type, MarketType::Prediction);
         assert_eq!(p.modes[0].structure, None);
         assert_eq!(p.modes[0].capabilities, MarketCapabilities::NONE);
-        // …so a strategy requiring capabilities is refused against it.
-        let modes = vec![strategy_mode(
-            MarketType::Prediction,
-            None,
-            MarketCapabilities::WEBSOCKET_FEED,
-        )];
+        // The implicit mode still names the plugin's market_type, so a
+        // strategy of ANOTHER market class is refused against it…
+        let modes = vec![strategy_mode(MarketType::Futures, None)];
         assert!(check_compatibility("s", &modes, &p).is_err());
-        // …while a loose prediction strategy still loads (0.2 zero-change).
-        let loose = vec![strategy_mode(
-            MarketType::Prediction,
-            None,
-            MarketCapabilities::NONE,
-        )];
+        // …while a prediction strategy still loads (0.2 zero-change) —
+        // capabilities never enter the judge.
+        let loose = vec![strategy_mode(MarketType::Prediction, None)];
         assert!(check_compatibility("s", &loose, &p).is_ok());
     }
 

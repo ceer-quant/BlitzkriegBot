@@ -438,8 +438,30 @@ impl CoreConfig {
                 );
             }
         }
+        // The persisted enabled-set survives a plugin switch: a strategy the
+        // HANDSHAKE refused at boot stays in `strategy-state.json` under its
+        // name, so switching the market plugin back (or to any other plugin
+        // that serves it) re-enables it with no manual re-toggling. What is
+        // recorded is the operator's INTENT; the handshake gate keeps the
+        // refused strategy OFF for this session without erasing the intent.
+        // (2026-10: the first cut saved the effective set only, so one
+        // plugin switch silently stripped every incompatible strategy from
+        // the file — and switching back brought nothing back.) An explicit
+        // `--disable-strategy` / runtime disable still removes the name:
+        // that is a decision, not a market mismatch.
         if let Some(path) = &self.strategy_state_path {
-            crate::strategy_state::save(std::path::Path::new(path), &core.enabled_strategy_names());
+            let mut enabled = core.enabled_strategy_names();
+            for name in &self.enabled_strategies {
+                if !enabled.contains(name) && !self.disabled_strategies.contains(name) {
+                    let known = core.strategy_names().iter().any(|n| n == name);
+                    if known {
+                        // Registered but handshake-refused this boot: keep
+                        // the intent so a future session can serve it.
+                        enabled.push(name.clone());
+                    }
+                }
+            }
+            crate::strategy_state::save(std::path::Path::new(path), &enabled);
         }
         self.strategy_startup_self_check(core)
     }
@@ -2712,6 +2734,18 @@ impl Core {
     /// (backtester, tests).
     pub fn set_plugin_modes(&mut self, modes: Option<crate::market::compat::PluginModes>) {
         self.plugin_modes = modes;
+    }
+
+    /// Test-only: record a declaration for a strategy the loader would have
+    /// registered (the test adapters carry no C ABI declaration of their
+    /// own). Same map the real load path fills.
+    #[cfg(test)]
+    pub(crate) fn set_strategy_declarations_for_test(
+        &mut self,
+        name: &str,
+        modes: Vec<blitzkrieg_strategy_api::StrategyMode>,
+    ) {
+        self.strategy_declarations.insert(name.to_string(), modes);
     }
 
     /// The enable path with the handshake. Returns `(found, applied, reason)`:
@@ -14680,6 +14714,88 @@ mod strategy_dispatch_tests {
             rebooted.enabled_strategy_names(),
             vec!["trend_follow".to_string()],
             "the persisted intent survives the restart"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The plugin-switch ratchet (2026-10): a strategy the HANDSHAKE refused
+    /// at boot keeps its name in `strategy-state.json`, so switching the
+    /// market plugin back re-enables it with no manual re-toggling. The
+    /// first cut saved the effective set only, so one plugin switch
+    /// silently stripped every incompatible strategy from the file — and
+    /// switching back brought nothing back. An explicit disable still
+    /// removes the name: that is a decision, not a market mismatch.
+    #[test]
+    fn a_handshake_refused_strategy_stays_in_the_state_file() {
+        use crate::market::compat::PluginModes;
+        use blitzkrieg_market_api::{MarketStructure, MarketType};
+
+        let dir =
+            std::env::temp_dir().join(format!("bk-strategy-state-ratchet-{}", std::process::id()));
+        let state = dir.join("strategy-state.json");
+        let _ = std::fs::remove_file(&state);
+
+        let cfg = CoreConfig {
+            dry_seed_balance: dec!(1000),
+            engine_enabled: true,
+            strategy_state_path: Some(state.to_string_lossy().into()),
+            enabled_strategies: vec!["spread_arb".into(), "trend_follow".into()],
+            ..Default::default()
+        };
+        let mut c = Core::new(cfg.clone());
+        // A declaration snapshot that refuses BOTH hosted adapters: an
+        // unspecified-structure spot plugin cannot serve anything the
+        // adapters are about to declare (prediction/binary_outcome_wheel,
+        // set below through the same registration record the loader keeps).
+        // This is the production shape of a plugin switch.
+        c.set_plugin_modes(Some(PluginModes {
+            name: "spot_venue".into(),
+            modes: vec![blitzkrieg_market_api::MarketMode {
+                market_type: MarketType::Spot,
+                structure: None,
+                capabilities: blitzkrieg_market_api::MarketCapabilities::NONE,
+            }],
+        }));
+        cfg.install_engine(&mut c).expect("engine install");
+        let cfg2 = cfg.engine_config();
+        crate::strategies::test_support::host_disabled(
+            c.engine.as_mut().expect("engine installed"),
+            cfg2.trend,
+            cfg2.spread_arb,
+        );
+        // The adapters carry declarations, the snapshot cannot serve them —
+        // so the same enable loop that install_engine ran inside refused
+        // both, and the save path must have kept their names anyway.
+        c.set_strategy_declarations_for_test(
+            "spread_arb",
+            vec![blitzkrieg_strategy_api::StrategyMode {
+                market_type: MarketType::Prediction,
+                structure: Some(MarketStructure::BinaryOutcomeWheel),
+            }],
+        );
+        assert!(
+            c.compatibility_refusal("spread_arb").is_some(),
+            "the snapshot must refuse the declared strategy (sanity)"
+        );
+
+        // Reconcile exactly as install_engine now does: live enabled set
+        // PLUS registered-but-refused intent, MINUS explicit disables.
+        let mut enabled = c.enabled_strategy_names();
+        for name in &cfg.enabled_strategies {
+            if !enabled.contains(name)
+                && !cfg.disabled_strategies.contains(name)
+                && c.strategy_names().iter().any(|n| n == name)
+            {
+                enabled.push(name.clone());
+            }
+        }
+        crate::strategy_state::save(std::path::Path::new(&state), &enabled);
+        let persisted = crate::strategy_state::load(&state);
+        assert!(
+            persisted.contains(&"spread_arb".to_string())
+                && persisted.contains(&"trend_follow".to_string()),
+            "refused strategies stay in the file for a future session: {persisted:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

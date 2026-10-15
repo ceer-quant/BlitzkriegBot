@@ -7,9 +7,7 @@
 //! the two types say WHO is declaring, not two different shapes, and the
 //! validator is one shared implementation (§7.4).
 
-use blitzkrieg_market_api::modes::{capabilities_to_names, capability_bit};
-use blitzkrieg_market_api::{MarketCapabilities, MarketStructure, MarketType};
-
+use blitzkrieg_market_api::{MarketStructure, MarketType};
 // The capability-name table lives in `blitzkrieg_market_api::modes` — one
 // definition shared by this codec, the load-time validator, E27's plugin side
 // and the docs (§7.2). E24 lands it there (with the `BitOr` impl the §A.2.1
@@ -18,18 +16,16 @@ use blitzkrieg_market_api::{MarketCapabilities, MarketStructure, MarketType};
 /// One `StrategyMode` as the §2.3 wire object: `market_type` always present
 /// (it is the only required field), `structure` only when concrete (`None` =
 /// "every structure under this market type" — emitting `null` would drag a
-/// second spelling of absence into the protocol), `capabilities` always
-/// present (an empty array is the explicit "requires nothing").
+/// second spelling of absence into the protocol). A strategy declares WHERE
+/// it works, nothing else: the capability-requirement surface is removed —
+/// capabilities are what a PLUGIN declares it offers (`market.list`
+/// metadata), never something a strategy may demand of the seam.
 pub fn mode_wire_json(mode: &StrategyMode) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     obj.insert("market_type".into(), serde_json::json!(mode.market_type));
     if let Some(structure) = mode.structure {
         obj.insert("structure".into(), serde_json::json!(structure));
     }
-    obj.insert(
-        "capabilities".into(),
-        serde_json::json!(capabilities_to_names(mode.required_capabilities)),
-    );
     serde_json::Value::Object(obj)
 }
 
@@ -114,38 +110,23 @@ pub fn parse_strategy_modes(payload: &str) -> Result<Vec<StrategyMode>, ModeErro
             }
         };
 
-        let mut caps = MarketCapabilities::NONE;
-        match mode.get("capabilities") {
-            None => {}
-            Some(v) => {
-                let Some(list) = v.as_array() else {
-                    return Err(ModeError::UnknownCapability {
-                        index,
-                        got: v.to_string(),
-                    });
-                };
-                for item in list {
-                    let Some(name) = item.as_str() else {
-                        return Err(ModeError::UnknownCapability {
-                            index,
-                            got: item.to_string(),
-                        });
-                    };
-                    let Some(bit) = capability_bit(name) else {
-                        return Err(ModeError::UnknownCapability {
-                            index,
-                            got: name.to_string(),
-                        });
-                    };
-                    caps.0 |= bit.0;
-                }
-            }
+        // A strategy names market_type and structure ONLY. The
+        // capability-requirement surface is gone: it once let a declaration
+        // demand plugin display bits, which refused binary-market strategies
+        // on every venue whose plugin declared fewer bits than the template
+        // asked for. `capabilities` in a strategy payload is now a positioned
+        // error, so an old declaration fails LOUDLY at load instead of
+        // silently requiring nothing.
+        if let Some(v) = mode.get("capabilities") {
+            return Err(ModeError::CapabilityForbidden {
+                index,
+                got: v.to_string(),
+            });
         }
 
         out.push(StrategyMode {
             market_type,
             structure,
-            required_capabilities: caps,
         });
     }
     Ok(out)
@@ -157,6 +138,14 @@ pub fn parse_strategy_modes(payload: &str) -> Result<Vec<StrategyMode>, ModeErro
 /// library that exports no such symbol yields) means "undeclared" — not
 /// "declares nothing": an undeclared strategy does not participate in the
 /// compatibility handshake at all.
+///
+/// The declaration is WHERE the strategy works — market_type and, optionally,
+/// structure. Nothing more: the former `required_capabilities` field is
+/// REMOVED. A strategy can no longer demand capability bits from the plugin —
+/// capabilities are what a plugin declares it offers (`market.list`
+/// metadata), and the handshake judges market_type and structure only. The
+/// old field let a copied declaration template refuse every binary-market
+/// strategy on any venue whose plugin declared fewer bits than polymarket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrategyMode {
     /// Required. Missing makes the whole mode invalid — it is NOT "any market".
@@ -167,8 +156,6 @@ pub struct StrategyMode {
     /// specific. A plugin declaring `structure: None` is not a match for a
     /// strategy that asks for a concrete structure.
     pub structure: Option<MarketStructure>,
-    /// Optional. Empty default = requires no capability bits.
-    pub required_capabilities: MarketCapabilities,
 }
 
 #[cfg(test)]
@@ -179,31 +166,15 @@ mod tests {
     // ── legal declarations (the gate's "3 pass" half) ───────────────────────
 
     #[test]
-    fn parses_full_mode_with_capabilities() {
+    fn parses_full_mode_with_structure() {
         let out = parse_strategy_modes(
             r#"{"modes":[{"market_type":"prediction",
-                          "structure":"binary_outcome_wheel",
-                          "capabilities":["websocket_feed","level2_snapshot"]}]}"#,
+                          "structure":"binary_outcome_wheel"}]}"#,
         )
         .expect("full mode must parse");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].market_type, MarketType::Prediction);
         assert_eq!(out[0].structure, Some(MarketStructure::BinaryOutcomeWheel));
-        assert!(
-            out[0]
-                .required_capabilities
-                .satisfies(MarketCapabilities::WEBSOCKET_FEED),
-        );
-        assert!(
-            out[0]
-                .required_capabilities
-                .satisfies(MarketCapabilities::LEVEL2_SNAPSHOT),
-        );
-        assert!(
-            !out[0]
-                .required_capabilities
-                .satisfies(MarketCapabilities::LEVERAGE),
-        );
     }
 
     #[test]
@@ -213,18 +184,30 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].market_type, MarketType::Futures);
         assert_eq!(out[0].structure, None);
-        assert_eq!(out[0].required_capabilities, MarketCapabilities::NONE);
-    }
-
-    #[test]
-    fn parses_loose_mode_with_empty_capabilities_array() {
-        let out = parse_strategy_modes(r#"{"modes":[{"market_type":"spot","capabilities":[]}]}"#)
-            .expect("explicit empty capabilities must parse");
-        assert_eq!(out[0].required_capabilities, MarketCapabilities::NONE);
     }
 
     // ── illegal declarations (the gate's "5 refused" half; each error must
     //    carry its position — `index`, plus `got` where a token exists) ──────
+
+    /// The capability-requirement surface is GONE: `capabilities` in a
+    /// strategy payload is a positioned error, not a parsed field. This is
+    /// the regression guard for the plugin-switch incompatibility (2026-10):
+    /// a copied template requiring polymarket's bits must never again refuse
+    /// the strategy on every other venue.
+    #[test]
+    fn rejects_capabilities_with_index_and_got() {
+        let err = parse_strategy_modes(
+            r#"{"modes":[{"market_type":"prediction","structure":"binary_outcome_wheel","capabilities":["websocket_feed","level2_snapshot"]}]}"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ModeError::CapabilityForbidden { index: 0, .. }),
+            "got {err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("index=0"), "{text}");
+        assert!(text.contains("forbidden"), "{text}");
+    }
 
     #[test]
     fn rejects_non_json() {
@@ -268,21 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_capability_with_index_and_got() {
-        let err = parse_strategy_modes(
-            r#"{"modes":[{"market_type":"earn","capabilities":["time_travel"]}]}"#,
-        )
-        .unwrap_err();
-        let text = err.to_string();
-        assert!(
-            matches!(err, ModeError::UnknownCapability { index: 0, .. }),
-            "got {err:?}"
-        );
-        assert!(text.contains("index=0"), "{text}");
-        assert!(text.contains("got=\"time_travel\""), "{text}");
-    }
-
-    #[test]
     fn rejects_unknown_market_type_with_index_and_got() {
         let err = parse_strategy_modes(r#"{"modes":[{"market_type":"nft_market"}]}"#).unwrap_err();
         let text = err.to_string();
@@ -301,8 +269,6 @@ mod tests {
         let modes = vec![StrategyMode {
             market_type: MarketType::Prediction,
             structure: Some(MarketStructure::BinaryOutcomeWheel),
-            required_capabilities: MarketCapabilities::WEBSOCKET_FEED
-                | MarketCapabilities::LEVEL2_SNAPSHOT,
         }];
         let payload = modes_payload_json(&modes);
         let parsed = parse_strategy_modes(&payload).expect("our own encoding must validate");

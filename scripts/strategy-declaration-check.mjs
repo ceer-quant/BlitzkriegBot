@@ -44,17 +44,18 @@ const FIXTURE_DYLIB = join(EXAMPLES, 'target', 'release', `libe24_modes_fixture.
 const EXAMPLE_DYLIB = join(EXAMPLES, 'target', 'release', `libmomentum_alpha_strategy.${DYLIB_EXT}`);
 const FIXTURE_NAME = 'e24_modes_fixture';
 
-// §7.4 case matrix — §16.4: 3 legal load, 5 illegal refuse, diagnostics carry
+// §7.4 case matrix — §16.4: 2 legal load, 6 illegal refuse, diagnostics carry
 // `index` (and `got` where a token exists). `canon` is the receipt the CURRENT
-// implementation produces; --self-test pins the judge against it.
+// implementation produces; --self-test pins the judge against it. A strategy
+// declares market_type+structure ONLY: `capabilities` in a strategy payload is
+// now ILLEGAL (CapabilityForbidden) — it once demanded plugin display bits and
+// refused every binary-market strategy off polymarket (2026-10).
 const REFUSE = 'invalid modes declaration';
 const CASES = [
-  { name: 'legal: full declaration', legal: true,
-    payload: '{"modes":[{"market_type":"prediction","structure":"binary_outcome_wheel","capabilities":["websocket_feed","level2_snapshot"]}]}' },
+  { name: 'legal: full declaration (type+structure)', legal: true,
+    payload: '{"modes":[{"market_type":"prediction","structure":"binary_outcome_wheel"}]}' },
   { name: 'legal: market_type only (loose)', legal: true,
     payload: '{"modes":[{"market_type":"prediction"}]}' },
-  { name: 'legal: empty capabilities (requires nothing)', legal: true,
-    payload: '{"modes":[{"market_type":"prediction","structure":"binary_outcome_wheel","capabilities":[]}]}' },
   { name: 'illegal: not JSON', legal: false, payload: 'not json at all',
     canon: 'modes payload is not JSON: expected value at line 1 column 1', expect: ['not JSON'] },
   { name: 'illegal: empty modes array (declared-but-empty)', legal: false, payload: '{"modes":[]}',
@@ -68,10 +69,14 @@ const CASES = [
     payload: '{"modes":[{"market_type":"prediction","structure":"nonexistent_structure"}]}',
     canon: 'mode[index=0] has unknown structure got="nonexistent_structure"',
     expect: ['index=0', 'got="nonexistent_structure"'] },
-  { name: 'illegal: unknown capability', legal: false,
-    payload: '{"modes":[{"market_type":"prediction","capabilities":["warp_drive"]}]}',
-    canon: 'mode[index=0] has unknown capability got="warp_drive"',
-    expect: ['index=0', 'got="warp_drive"'] },
+  { name: 'illegal: capabilities in a strategy payload (forbidden surface)', legal: false,
+    payload: '{"modes":[{"market_type":"prediction","capabilities":["websocket_feed"]}]}',
+    canon: 'mode[index=0] carries capabilities (forbidden on a strategy: it may declare market_type and structure only) got=["websocket_feed"]',
+    expect: ['index=0', 'forbidden'] },
+  { name: 'illegal: unknown market_type', legal: false,
+    payload: '{"modes":[{"market_type":"nft_market"}]}',
+    canon: 'mode[index=0] has unknown market_type got="nft_market"',
+    expect: ['index=0', 'got="nft_market"'] },
 ];
 
 /** The pure verdict: problems this receipt has against this case. Every
@@ -110,12 +115,12 @@ function selfTest() {
   rows.push(
     { name: 'a legal payload that is refused is red', c: CASES[0],
       receipt: `Failed { path: x, reason: ${REFUSE}: mode[index=0] has unknown structure got="x" }`, want: 1 },
-    { name: 'an illegal payload that registers is red (the R10 shape)', c: CASES[4],
+    { name: 'an illegal payload that registers is red (the R10 shape)', c: CASES[3],
       receipt: `${FIXTURE_NAME}@0.1.0 registered into the engine dispatch (disabled)`, want: 1, mention: 'Empty' },
-    { name: 'a refusal without index=0 is red', c: CASES[5],
+    { name: 'a refusal without index=0 is red', c: CASES[4],
       receipt: `Failed { path: x, reason: ${REFUSE}: missing market_type }`, want: 1 },
-    { name: 'a refusal that lost its got= diagnostic is red', c: CASES[7],
-      receipt: `Failed { path: x, reason: ${REFUSE}: mode[index=0] has unknown capability }`, want: 1 },
+    { name: 'a refusal that lost its forbidden-surface diagnostic is red', c: CASES[6],
+      receipt: `Failed { path: x, reason: ${REFUSE}: capabilities are not allowed }`, want: 1, mention: 'forbidden' },
   );
   let bad = 0;
   for (const r of rows) {
@@ -142,10 +147,14 @@ function teeth() {
       c: CASES.find((c) => c.payload === '{"modes":[]}'),
       receipt: `${FIXTURE_NAME}@0.1.0 registered into the engine dispatch (disabled)`,
       mention: 'Empty' },
-    { name: 'mutation: refusal loses its got= diagnostic',
-      c: CASES.find((c) => c.name.includes('unknown capability')),
-      receipt: `Failed { path: x, reason: ${REFUSE}: mode[index=0] has unknown capability }`,
-      mention: 'got="warp_drive"' },
+    { name: 'mutation: capabilities surface silently re-allowed (payload registers instead of refusing)',
+      c: CASES.find((c) => c.name.includes('forbidden surface')),
+      receipt: `${FIXTURE_NAME}@0.1.0 registered into the engine dispatch (disabled)`,
+      mention: 'forbidden' },
+    { name: 'mutation: refusal loses its index= diagnostic',
+      c: CASES.find((c) => c.name.includes('unknown structure')),
+      receipt: `Failed { path: x, reason: ${REFUSE}: unknown structure }`,
+      mention: 'index=0' },
   ];
   let missed = 0;
   for (const m of mutations) {

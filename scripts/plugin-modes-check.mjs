@@ -74,17 +74,20 @@ const CAPS_BIT = {
 };
 
 /**
- * One (strategy mode, plugin mode) pair under §7.5 (1)-(3), the JS mirror of
+ * One (strategy mode, plugin mode) pair under §7.5 (1)-(2), the JS mirror of
  * `core/blitzkrieg_core/src/market/compat.rs::pair_compatible`. A plugin that
  * cannot name the structure is NOT a match for a concrete-structure strategy —
  * the directionality rule, restated here because every teeth case below is
  * about a core that got it backwards.
+ *
+ * Capabilities are NOT judged (removed 2026-10): a strategy declares WHERE it
+ * works and carries no capability requirements, so there is nothing to subset.
+ * Capabilities stay plugin-side display metadata.
  */
 function pairOk(mode, plugin) {
   if (mode.market_type !== plugin.type) return false; // (1) strong equality
   if (mode.structure != null && mode.structure !== plugin.structure) return false; // (2)
-  const required = (mode.capabilities ?? []).reduce((a, n) => a | (CAPS_BIT[n] ?? 0), 0);
-  return ((plugin.capabilitiesBits ?? 0) & required) === required; // (3) superset
+  return true;
 }
 
 /** The violation vocabulary — WHAT broke, named so --teeth can demand it. */
@@ -96,8 +99,6 @@ function violations(mode, plugin) {
       ? `unspecified structure accepted: plugin declares no structure but the strategy requires ${mode.structure}`
       : `structure violated (${mode.structure} vs ${plugin.structure})`);
   }
-  const required = (mode.capabilities ?? []).reduce((a, n) => a | (CAPS_BIT[n] ?? 0), 0);
-  if (((plugin.capabilitiesBits ?? 0) & required) !== required) v.push('capability superset violated');
   return v;
 }
 
@@ -120,7 +121,7 @@ export function judgeStrategyRow(row, plugin, want = {}) {
     const expected = perMode.some((v) => v.length === 0);
     if (row?.compatible !== expected) {
       problems.push(expected
-        ? 'capability superset violated: the plugin offers a satisfying mode but the row reads incompatible'
+        ? 'a satisfying plugin mode exists but the row reads incompatible'
         : `expected incompatible: no plugin mode satisfies any declared mode (violations: ${perMode.flat().join('; ') || 'none recorded'})`);
     }
   }
@@ -157,8 +158,9 @@ export function judgeMarketRow(row) {
 }
 
 function selfTest() {
-  // The REAL wire shapes, transcribed from a live v0.3 core (§2.3 wire for
-  // modes, §8.3 rows for both lists).
+  // The REAL wire shapes, transcribed from a live core (§2.3 wire for modes —
+  // a strategy row carries market_type+structure ONLY since capabilities left
+  // the strategy surface — and §8.3 rows for both lists).
   const poly = {
     name: 'polymarket', type: 'prediction', structure: 'binary_outcome_wheel',
     capabilities: ['websocket_feed', 'level2_snapshot', 'post_only'],
@@ -166,26 +168,27 @@ function selfTest() {
   };
   const loose = {
     name: REFERENCE_NAME, enabled: false,
-    modes: [{ market_type: 'prediction', structure: 'binary_outcome_wheel', capabilities: ['websocket_feed', 'level2_snapshot'] }],
+    modes: [{ market_type: 'prediction', structure: 'binary_outcome_wheel' }],
     compatible: true, incompatibleReason: null,
   };
   const futures = {
     name: FIXTURE_NAME, enabled: false,
-    modes: [{ market_type: 'futures', structure: 'central_limit_order_book', capabilities: ['leverage'] }],
+    modes: [{ market_type: 'futures', structure: 'central_limit_order_book' }],
     compatible: false,
-    incompatibleReason: "incompatible modes: strategy 'e24_modes_fixture' wants [futures/central_limit_order_book(leverage)] but active plugin 'polymarket' offers [prediction/binary_outcome_wheel(websocket_feed,level2_snapshot,post_only)]",
+    incompatibleReason: "incompatible modes: strategy 'e24_modes_fixture' wants [futures/central_limit_order_book] but active plugin 'polymarket' offers [prediction/binary_outcome_wheel(websocket_feed,level2_snapshot,post_only)]",
   };
   const undeclared = { name: 'legacy', enabled: false, modes: null, compatible: true, incompatibleReason: null };
   const rows = [
-    ['a 0.2-declared strategy against its serving plugin is clean', judgeStrategyRow(loose, poly), 0, null],
+    ['a declared strategy against its serving plugin is clean', judgeStrategyRow(loose, poly), 0, null],
     ['the R-B row (futures vs prediction) is clean', judgeStrategyRow(futures, poly, { reasonContains: ['futures', 'prediction', 'polymarket'] }), 0, null],
     ['a refusal that drops the plugin name is red', judgeStrategyRow({ ...futures, incompatibleReason: 'incompatible modes: strategy … wants [futures] but active plugin offers [prediction]' }, poly, { reasonContains: ['polymarket'] }), 1, 'BOTH sides'],
     ['an undeclared row reads compatible', judgeStrategyRow(undeclared, poly), 0, null],
     ['an undeclared row marked incompatible is red', judgeStrategyRow({ ...undeclared, compatible: false, incompatibleReason: 'x' }, poly), 1, 'undeclared'],
     ['an incompatible row without a reason is red', judgeStrategyRow({ ...futures, incompatibleReason: null }, poly), 1, 'no incompatibleReason'],
-    ['teeth A core (satisfies flipped: incompatible read compatible) is red', judgeStrategyRow({ ...loose, modes: [{ market_type: 'prediction', structure: 'binary_outcome_wheel', capabilities: ['leverage'] }], incompatibleReason: null }, poly), 1, 'superset violated'],
+    ['teeth A core (structure guard dropped: CLOB-required strategy read compatible against the wheel) is red', judgeStrategyRow({ ...loose, modes: [{ market_type: 'prediction', structure: 'central_limit_order_book' }], incompatibleReason: null }, poly), 1, 'structure violated'],
     ['teeth B core (market-type filter dropped: futures read compatible) is red', judgeStrategyRow({ ...futures, compatible: true, incompatibleReason: null }, poly), 1, 'expected incompatible'],
-    ['teeth C core (plugin None matched a concrete structure) is red', judgeStrategyRow({ ...loose, modes: [{ market_type: 'prediction', structure: 'central_limit_order_book', capabilities: [] }] }, { ...poly, structure: null, capabilitiesBits: 0 }), 1, 'unspecified structure accepted'],
+    ['teeth C core (plugin None matched a concrete structure) is red', judgeStrategyRow({ ...loose, modes: [{ market_type: 'prediction', structure: 'central_limit_order_book' }] }, { ...poly, structure: null, capabilitiesBits: 0 }), 1, 'unspecified structure accepted'],
+    ['a strategy row that still demands capabilities reads as its modes say (capabilities are dead weight, not a verdict)', judgeStrategyRow({ ...loose, modes: [{ market_type: 'prediction', structure: 'binary_outcome_wheel', capabilities: ['leverage'] }] }, poly), 0, null],
     ['a plugin row whose names and bits agree is clean', judgeMarketRow(poly), 0, null],
     ['a plugin row whose bitmap disagrees with its names is red', judgeMarketRow({ ...poly, capabilitiesBits: 7 }), 1, 'disagree'],
     ['a plugin row naming an unknown capability is red', judgeMarketRow({ ...poly, capabilities: ['websocket_feed', 'hovercraft'] }), 1, 'drifted'],
@@ -211,14 +214,14 @@ function teeth() {
     capabilities: ['websocket_feed', 'level2_snapshot', 'post_only'], capabilitiesBits: 131,
   };
   const mutations = [
-    { name: 'A: satisfies direction flipped (required must cover plugin) → incompatible row reads compatible',
-      row: { name: FIXTURE_NAME, modes: [{ market_type: 'prediction', structure: 'binary_outcome_wheel', capabilities: ['leverage'] }], compatible: true, incompatibleReason: null },
-      mention: 'superset violated' },
+    { name: 'A: structure filter dropped → a CLOB-required strategy reads compatible against the wheel',
+      row: { name: FIXTURE_NAME, modes: [{ market_type: 'prediction', structure: 'central_limit_order_book' }], compatible: true, incompatibleReason: null },
+      mention: 'structure violated' },
     { name: 'B: market-type filter dropped → a futures strategy reads compatible against the prediction plugin',
-      row: { name: FIXTURE_NAME, modes: [{ market_type: 'futures', structure: 'central_limit_order_book', capabilities: [] }], compatible: true, incompatibleReason: null },
+      row: { name: FIXTURE_NAME, modes: [{ market_type: 'futures', structure: 'central_limit_order_book' }], compatible: true, incompatibleReason: null },
       mention: 'market-type violated' },
     { name: 'C: plugin structure None treated as "matches everything" → a CLOB-requiring strategy reads compatible',
-      row: { name: FIXTURE_NAME, modes: [{ market_type: 'prediction', structure: 'central_limit_order_book', capabilities: [] }], compatible: true, incompatibleReason: null },
+      row: { name: FIXTURE_NAME, modes: [{ market_type: 'prediction', structure: 'central_limit_order_book' }], compatible: true, incompatibleReason: null },
       plugin: { ...poly, structure: null, capabilitiesBits: 0 },
       mention: 'unspecified structure accepted' },
   ];
@@ -282,8 +285,12 @@ async function main() {
   // The R-B declaration: futures/CLOB/leverage against the compiled-in
   // prediction plugin — refused by EVERY handshake, named on both sides.
   const declarationFile = join(temp, 'declaration.txt');
+  // The R-B declaration: futures/CLOB against the compiled-in prediction
+  // plugin — refused by EVERY handshake, named on both sides. A strategy
+  // carries no capabilities (the surface is removed): market_type+structure
+  // is the whole declaration.
   writeFileSync(declarationFile,
-    '{"modes":[{"market_type":"futures","structure":"central_limit_order_book","capabilities":["leverage"]}]}');
+    '{"modes":[{"market_type":"futures","structure":"central_limit_order_book"}]}');
   // One scratch dir holds both libraries so ONE `--strategy-dir` loads them;
   // it is allow-listed for this dry core exactly so the loads pass the
   // approved-root policy (see loader.rs ENV_ALLOW_DIRS).

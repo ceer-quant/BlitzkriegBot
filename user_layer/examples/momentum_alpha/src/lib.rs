@@ -31,13 +31,12 @@ impl SafeStrategy for MomentumAlpha {
     }
 
     // ── 模式声明（API 1.0 新增；不声明则不参与兼容性校验）────────────────────
+    // 只声明在哪工作：market_type + structure。能力位不是策略的声明面——
+    // 它们是插件侧的展示元数据（market.list / 模拟盘徽章），握手只判类型+结构。
     fn declare_modes(&self) -> Vec<StrategyMode> {
         vec![StrategyMode {
             market_type: MarketType::Prediction,
             structure: Some(MarketStructure::BinaryOutcomeWheel),
-            // 要求的每一项，插件都必须具备（超集判定，§7.5）
-            required_capabilities: blitzkrieg_strategy_api::MarketCapabilities::WEBSOCKET_FEED
-                | blitzkrieg_strategy_api::MarketCapabilities::LEVEL2_SNAPSHOT,
         }]
     }
 

@@ -28,7 +28,7 @@ use blitzkrieg_core::strategy_engine::lua_loader::{LuaEngineAdapter, load_lua_pa
 use blitzkrieg_core::{kline::Kline, model::CryptoMarket, model::OrderbookSnapshot};
 use blitzkrieg_lua_runtime::bk_api::AccountView;
 use blitzkrieg_market_api::kline::KlineInterval;
-use blitzkrieg_market_api::{MarketCapabilities, MarketStructure, MarketType};
+use blitzkrieg_market_api::{MarketStructure, MarketType};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -384,29 +384,29 @@ fn seal_a_firing_evaluation_emits_no_exit_or_break() {
 
 // ── packaging ───────────────────────────────────────────────────────────────
 
-/// The declaration the E27 handshake reads: prediction / binary wheel, the
-/// three capabilities the polymarket seam actually serves.
+/// The declaration the E27 handshake reads: prediction / binary wheel, and
+/// NOTHING else — a strategy declares WHERE it works, never which capability
+/// bits it demands (that surface is removed; it once refused every
+/// binary-market strategy on any venue whose plugin declared fewer bits than
+/// the copied template asked for).
 #[test]
-fn modes_declare_what_the_seam_serves() {
+fn modes_declare_type_and_structure_only() {
     let loaded = load_lua_package(&package_dir()).expect("package loads");
     assert_eq!(loaded.name, "flash_arb");
     assert_eq!(loaded.declared_modes.len(), 1);
     let m = &loaded.declared_modes[0];
     assert_eq!(m.market_type, MarketType::Prediction);
     assert_eq!(m.structure, Some(MarketStructure::BinaryOutcomeWheel));
-    for cap in [
-        MarketCapabilities::WEBSOCKET_FEED,
-        MarketCapabilities::LEVEL2_SNAPSHOT,
-        MarketCapabilities::POST_ONLY,
-    ] {
-        assert!(
-            m.required_capabilities.satisfies(cap),
-            "missing capability {cap:?}"
-        );
-    }
+    // The validator itself refuses capabilities in a strategy payload; what
+    // this asserts is the DECLARATION the package ships carries none.
+    // And the shipped manifest genuinely carries no capabilities key: the
+    // loader would refuse the package outright if it did (CapabilityForbidden).
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(package_dir().join("manifest.json")).expect("manifest readable"),
+    )
+    .expect("manifest json");
     assert!(
-        !m.required_capabilities
-            .satisfies(MarketCapabilities::KLINE_STREAM),
-        "kline_stream is engine-side, not a seam bit — declaring it would refuse enable"
+        manifest["modes"][0].get("capabilities").is_none(),
+        "a strategy manifest must not declare capabilities: {manifest}"
     );
 }
