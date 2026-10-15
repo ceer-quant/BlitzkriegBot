@@ -26,3 +26,6 @@ reqwest = { version = "0.13.2", default-features = false, features = ["json", "r
 thiserror = "2"
 url = "2"
 mime = "0.3"
+# EIP-712 order signing (executor): same pin as polymarket's signer stack.
+alloy = { version = "1.6.3", default-features = false, features = ["signer-local"] }
+rand = "0.8"

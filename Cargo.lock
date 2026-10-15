@@ -1276,11 +1276,13 @@ dependencies = [
 name = "blitzkrieg-predictfun"
 version = "0.4.0"
 dependencies = [
+ "alloy",
  "anyhow",
  "async-trait",
  "blitzkrieg-market-api",
  "futures-util",
  "mime",
+ "rand 0.8.8",
  "reqwest",
  "rust_decimal",
  "serde",
