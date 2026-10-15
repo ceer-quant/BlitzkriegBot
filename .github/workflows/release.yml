@@ -146,6 +146,20 @@ jobs:
           BLITZKRIEG_BUILD_DATE: ${{ github.run_started_at }}
         run: cargo build --release --workspace --locked --target ${{ matrix.target }}
 
+      # issue 487: the shipped panel must be PREBUILT — a user who untars the
+      # archive runs `bin/blitzkrieg run` and gets the served Vue panel with no
+      # node, no npm, no build step ("傻白甜启动"). Same recipe as the
+      # panel-check job: npm ci (lockfile-pinned) then the production build.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Build the panel bundle (shipped prebuilt)
+        run: |
+          cd ui/webapp/webui
+          npm ci
+          npm run build
+          test -f dist/index.html
+
       - name: Assemble the archive
         env:
           VERSION: ${{ needs.guard.outputs.version }}
@@ -175,10 +189,14 @@ jobs:
               [ -f "$STAGE/lib/$b" ] || cp "$f" "$STAGE/lib/$b"
             done
           done
-          # The built panel bundle (needed to serve the UI without node_modules).
-          if [ -d ui/webapp/webui/dist ]; then
-            cp -R ui/webapp/webui/dist/. "$STAGE/webui/"
+          # The prebuilt panel bundle — REQUIRED, not best-effort: the step above
+          # hard-fails when the build produced no index.html, so an empty webui/
+          # here would mean the copy itself broke and must stop the release.
+          if [ ! -f ui/webapp/webui/dist/index.html ]; then
+            echo "FATAL: panel bundle missing dist/index.html — the archive would serve no UI" >&2
+            exit 1
           fi
+          cp -R ui/webapp/webui/dist/. "$STAGE/webui/"
           # Drop-point configs + Lua strategy source (the place users add strategies).
           cp -R user_layer/configs/. "$STAGE/configs/" 2>/dev/null || true
           cp -R user_layer/strategies_lua/. "$STAGE/user_layer/strategies_lua/" 2>/dev/null || true

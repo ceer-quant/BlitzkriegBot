@@ -731,6 +731,11 @@ fn resolve_panel_dir(candidates: &[std::path::PathBuf]) -> Option<std::path::Pat
 /// launcher staged into `<repo>/target/release`) has a dead manifest path, so
 /// also try two levels up from the executable — that repo shape puts the
 /// panel at `<repo>/ui/webapp/webui/dist`.
+///
+/// issue 487: a release archive unpacked flat (`bin/` next to `webui/`) must
+/// serve the bundled panel with NO repo around it, so the exe-sibling `webui/`
+/// is the FIRST candidate — that layout is what a "傻白甜启动" user has, and
+/// any repo checkout keeps working through the later candidates.
 fn vue_panel_dir() -> Option<std::path::PathBuf> {
     // CARGO_MANIFEST_DIR is <build>/ui/ui_kit; the built Vue app lives at
     // <build>/ui/webapp/webui/dist.
@@ -739,6 +744,9 @@ fn vue_panel_dir() -> Option<std::path::PathBuf> {
         vec![std::path::Path::new(manifest).join("../webapp/webui/dist/index.html")];
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            // Release-archive shape: <stage>/bin/blitzkrieg-core + <stage>/webui/.
+            candidates.push(dir.join("../webui/index.html"));
+            // Repo checkout shape: <repo>/target/release/<bin>.
             candidates.push(dir.join("../../ui/webapp/webui/dist/index.html"));
         }
     }
@@ -2737,6 +2745,24 @@ mod tests {
             Some(b.canonicalize().unwrap().parent().unwrap().to_path_buf())
         );
         assert_eq!(resolve_panel_dir(&[missing]), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn exe_sibling_webui_shape_resolves() {
+        // issue 487: the release-archive shape — <stage>/bin/<exe> with the
+        // bundled panel at <stage>/webui/ — must resolve with NO repo around.
+        let base = std::env::temp_dir().join(format!("bk-panel-arch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let stage = base.join("stage");
+        std::fs::create_dir_all(stage.join("bin")).unwrap();
+        std::fs::create_dir_all(stage.join("webui")).unwrap();
+        std::fs::write(stage.join("webui/index.html"), b"<html></html>").unwrap();
+        let candidate = stage.join("bin").join("../webui/index.html");
+        assert_eq!(
+            resolve_panel_dir(&[candidate]),
+            Some(stage.join("webui").canonicalize().unwrap())
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
