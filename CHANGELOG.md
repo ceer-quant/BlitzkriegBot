@@ -3,6 +3,46 @@
 All notable changes to BlitzkriegBot are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
+## [0.4.1] - 2026-10-15
+
+0.4.0 → 0.4.1 的 22 条提交，按主题归并。四大主线：**安全与风控加固**
+（#460–#464 五项审计修复 + 幽灵订单根因）、**插件版图**（PolySimulator 模拟
+盘 + Kalshi/predictfun 执行器收口）、**运维与面板**（发布包等效性 + 插件启
+停 + 强平三端 + 交易环境重置）、**策略面**（tunables 编辑 + 跨所配对监控）。
+
+### Added
+
+- **插件**：PolySimulator 模拟盘插件全链路（SIMULATED 能力位 + 查询式身份解
+  析 + 双腿成交归属，#454/#455/#480）；Kalshi OrderExecutor（cancel-first/
+  timeout→reconcile/孤儿清扫，#479）与 predictfun OrderExecutor（EIP-712 签
+  名下单，#484）——三组件合同全部收口。
+- **面板**：插件页开启/停用（extension 启停即时生效 + 行情插件 next_session
+  切换，#486）；挂单强平三端（Orders tab / force-order / 批量清理，#477）；
+  交易环境重置（三道门 + 确认词，#475）；轮次时间周期可设置（#474）；网关
+  restart 动词 + 10s 自动重启 + 行情空态诊断导向（#488）；策略 tunables 编辑
+  + 跨所配对监控（#482）。
+- **发布工程**：发布包与编译包**完全等效**——user_layer 布局修复（configs/
+  形状 bug 曾致解压后内核读不到任何配置、execution_policy 静默落
+  NEUTRAL）、交叉编译 lib/ 空目录修复、.env.example/插件配置落点/策略投放
+  点补齐、单源打包（release tarball 与 CI 尺寸门禁同一脚本）（#491）；发布
+  包 webui 预编译——解压即启动，无需 Node/npm（#489）。
+- **文档**：Windows WSL2 安装与运行指南（#467）；全策略评审报告
+  0.4.1（#473）。
+
+### Fixed
+
+- **安全**：面板认证加固——无凭据写面封死 + token 查询通道废除 + 内核只读
+  防御（#460/#465）；持久化加固——原子重写统一 + 损坏 fail-loud +
+  close_credentials 跨重启（#463/#466）。
+- **风控**：资金穿透四路封堵——merge 先烧后收/追价硬约束/挂单计敞口/
+  orders.place 过九限额（#461/#468）；订单状态机三缺陷——撤旧建新顺序化/
+  place 超时不即拒/盘口时间戳贯通（#462/#469）；回撤净值口径 + DRY post-only
+  对齐 + risk.ladder 真接线（#464/#471）。
+- **状态机**：过期幽灵订单根因——ForceClosed 终态 + 过期扫描 +
+  orders.force_close 动词（#457/#472）。
+- **面板**：长时间空闲后假死——IPC 客户端 64 行跳过上限移除（#476/#478）；
+  supervisor 放弃重启告警的 stderr 尾巴竞态（#470）。
+
 ## [0.4.0] - 2026-10-12
 
 0.3.0 → 0.4.0 的 66 条提交，按主题归并。三大主线：**0.3.1 回测对标线**（链上
