@@ -31,3 +31,6 @@ rand = "0.8"
 thiserror = "2"
 url = "2"
 mime = "0.3"
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }

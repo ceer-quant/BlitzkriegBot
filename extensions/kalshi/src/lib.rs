@@ -37,4 +37,4 @@ pub use feed::{feed_tests_only_cents_to_prob, feed_tests_only_spawn};
 pub use plugin::KalshiPlugin;
 pub use rate_limit::{RateLimit, RateLimitConfig};
 pub use rest::{KalshiRest, RestConfig};
-pub use types::{KalshiBalance, KalshiMarket, KalshiOrder, KalshiOrderBook};
+pub use types::{KalshiBalance, KalshiBidLevel, KalshiMarket, KalshiOrder, KalshiOrderBook};

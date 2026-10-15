@@ -5471,27 +5471,30 @@ impl Core {
         let now = now_ms();
         let r = engine.scanner().round_state(now);
         let can_trade = engine.scanner().can_trade(now).is_ok();
-        let market_prices = r
-            .markets
-            .iter()
-            .map(|m| {
-                let up = engine
-                    .book_snapshot(&m.up_token_id)
-                    .map(|b| b.mid_price)
-                    .filter(|p| *p > Decimal::ZERO)
-                    .unwrap_or(m.up_price);
-                let down = engine
-                    .book_snapshot(&m.down_token_id)
-                    .map(|b| b.mid_price)
-                    .filter(|p| *p > Decimal::ZERO)
-                    .unwrap_or(m.down_price);
-                MarketPriceView {
-                    asset: m.asset.clone(),
-                    up,
-                    down,
-                }
-            })
-            .collect();
+        // One price card per ASSET: a round may carry several markets for the
+        // same asset (strike ladders), and the panel keys the cards by asset —
+        // duplicates there are rendered as repeated cards with colliding keys.
+        let mut market_prices: Vec<MarketPriceView> = Vec::new();
+        for m in &r.markets {
+            if market_prices.iter().any(|p| p.asset == m.asset) {
+                continue;
+            }
+            let up = engine
+                .book_snapshot(&m.up_token_id)
+                .map(|b| b.mid_price)
+                .filter(|p| *p > Decimal::ZERO)
+                .unwrap_or(m.up_price);
+            let down = engine
+                .book_snapshot(&m.down_token_id)
+                .map(|b| b.mid_price)
+                .filter(|p| *p > Decimal::ZERO)
+                .unwrap_or(m.down_price);
+            market_prices.push(MarketPriceView {
+                asset: m.asset.clone(),
+                up,
+                down,
+            });
+        }
         Some(RoundView {
             slot: r.slot,
             age_sec: r.age_sec,
@@ -12090,6 +12093,69 @@ mod round_expiry_tests {
             time_left > 0 && time_left <= duration,
             "time_left={time_left}"
         );
+    }
+
+    /// Regression (kalshi discovery repair): `round_view` must emit ONE price
+    /// card per asset. The panel keys the cards by asset, so a round with
+    /// several markets for the same asset used to render duplicate cards
+    /// with colliding Vue keys (the "BTC ×4" panel bug).
+    #[test]
+    fn round_view_prices_dedupe_by_asset() {
+        let cfg = CoreConfig {
+            dry_seed_balance: dec!(1000),
+            round_duration_sec: 900,
+            ..Default::default()
+        };
+        let mut c = Core::new(cfg);
+        c.enable_engine(crate::engine::Engine::new(
+            crate::engine::EngineConfig::default(),
+        ));
+        let now = 1_000_000_000i64;
+        let slot = now / 1000 / 900;
+        let end = (slot + 1) * 900 * 1000;
+        let market = |asset: &str, q: &str, up: Decimal| crate::model::CryptoMarket {
+            asset: asset.into(),
+            condition_id: format!("c-{asset}-{q}"),
+            question_id: q.into(),
+            up_token_id: format!("{q}-up"),
+            down_token_id: format!("{q}-down"),
+            up_price: up,
+            down_price: Decimal::ONE - up,
+            expires_at_ms: end,
+            round_slot: slot,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: String::new(),
+            neg_risk: false,
+            question: "?".into(),
+        };
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                // Three markets for BTC (a strike ladder) + one for ETH.
+                markets: vec![
+                    market("BTC", "q1", dec!(0.60)),
+                    market("BTC", "q2", dec!(0.55)),
+                    market("BTC", "q3", dec!(0.50)),
+                    market("ETH", "e1", dec!(0.70)),
+                ],
+                now_ms: now,
+            },
+            now,
+        );
+        let view = c.round_view().expect("round view");
+        assert_eq!(view.markets, 4, "the market count itself stays honest");
+        let assets: Vec<&str> = view
+            .market_prices
+            .iter()
+            .map(|p| p.asset.as_str())
+            .collect();
+        assert_eq!(
+            assets,
+            vec!["BTC", "ETH"],
+            "one price card per asset, first market wins"
+        );
+        let btc = &view.market_prices[0];
+        assert_eq!(btc.up, dec!(0.60), "first BTC market's price is kept");
     }
 }
 

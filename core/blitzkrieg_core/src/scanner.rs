@@ -229,8 +229,19 @@ impl Scanner {
     }
 
     /// Record the venue-reported end time and derive the clock offset.
+    ///
+    /// A declaration more than two rounds out (in either direction) is
+    /// REFUSED rather than adopted: a discovery bug feeding a strike-ladder
+    /// expiry (years ahead) or a long-stale timestamp would otherwise hijack
+    /// the round clock, and every timing decision (`time_left_sec`, the exit
+    /// policy's clock, the D-31 floor) drifts with it. The slot grid keeps
+    /// running on its own cadence until an in-band declaration arrives.
     pub fn observe_end_time(&mut self, end_ms: i64, local_now_ms: i64) {
         if end_ms <= 0 {
+            return;
+        }
+        let round_ms = self.cfg.round_duration_sec * 1000;
+        if (end_ms - local_now_ms).abs() > 2 * round_ms {
             return;
         }
         self.actual_end_time_ms = end_ms;
@@ -270,6 +281,26 @@ mod tests {
         // Local expected end for slot 1 = 1_800_000; the venue says 1_800_500.
         s.observe_end_time(1_800_500, now);
         assert_eq!(s.clock_offset_ms(), 500);
+    }
+
+    #[test]
+    fn out_of_band_end_time_declarations_are_refused() {
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            ..Default::default()
+        });
+        let now = 1_000_000i64;
+        // A strike-ladder expiry years ahead (the kalshi discovery bug fed a
+        // 2045 close into this path) must not hijack the round clock.
+        s.observe_end_time(now + 10 * 365 * 86_400_000, now);
+        assert_eq!(s.actual_end_time_ms, 0, "out-of-band declaration refused");
+        assert_eq!(s.clock_offset_ms(), 0);
+        // Same for a stale timestamp far in the past.
+        s.observe_end_time(now - 3 * 900_000, now);
+        assert_eq!(s.actual_end_time_ms, 0);
+        // In-band (≤ 2 rounds out) still lands.
+        s.observe_end_time(now + 1_800_000, now);
+        assert_eq!(s.actual_end_time_ms, now + 1_800_000);
     }
 
     #[test]

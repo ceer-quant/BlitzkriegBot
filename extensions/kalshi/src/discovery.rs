@@ -1,29 +1,33 @@
-//! Kalshi round discovery (#424).
+//! Kalshi round discovery (#424, rebuilt against the live venue 2026-10-15).
 //!
-//! Kalshi has no "round" concept of its own — the trading day's events are
-//! just events. Discovery therefore mirrors the engine's round model onto
-//! whatever the venue offers: every `poll_sec` it lists recent events with
-//! their nested markets, keeps the ones whose close time is still ahead, and
-//! feeds them to the engine as one round's UP/DOWN descriptors.
+//! Kalshi's 15m crypto rounds live in the `KX{ASSET}15M` series (one series
+//! per asset, one OPEN event per round, one market per event) — discovered
+//! by querying `/events?series_ticker=KX{ASSET}15M&status=open`. The old
+//! "list every event and substring-match titles" approach was blind on the
+//! real venue: the default event listing ranks long-running events first, so
+//! the 15m rounds never reached page 1, and `"resolved"` substring-matched
+//! SOL (4× SOL rows for one asset).
 //!
 //! Mapping decisions (all made HERE, the plugin boundary):
-//!   * asset — Kalshi tickers carry no asset; the configured `assets` list is
-//!     matched against the event/market title case-insensitively (an event
-//!     titled "Will Bitcoin close above …" matches "BTC"). Markets matching
-//!     no configured asset are skipped: the engine can only price what its
-//!     strategies have a spot reference for.
+//!   * series — `series_ticker_for(asset, round_sec)`: 15m rounds map to
+//!     `KX{ASSET}15M`, daily rounds to `KX{ASSET}D`. Kalshi ships no 5m/1h/4h
+//!     crypto-round series (verified), so those configurations simply find
+//!     nothing rather than discovering wrong markets.
+//!   * asset — the series name carries the asset; the title match is only a
+//!     fallback sanity check (word-boundary, so "solved" is not SOL).
 //!   * UP/DOWN tokens — a Kalshi market is one binary with YES and NO sides.
 //!     YES maps to UP (token = ticker), NO maps to DOWN (token =
-//!     `ticker` + ":no"). The kernel's book updates are keyed by token id, so
-//!     the feed polls the market's orderbook once and splits it: the YES side
-//!     of the book becomes the UP token's book, the NO side becomes the DOWN
-//!     token's. The feed's cent→probability mapping makes the two books
-//!     consistent (NO price = 1 − YES price at the same level).
-//!   * prices — `yes_bid`/`yes_ask` cents → probabilities; `down_price` gets
-//!     the NO side's mid.
-//!   * round_slot — derived from the market's own close time (`close_ms /
-//!     1000 / round_sec`), so a market that closes mid-slot is never filed
-//!     under a slot it does not belong to.
+//!     `ticker` + ":no"). The feed polls the market's orderbook once and
+//!     splits it into the two token books (duality: a NO bid at p IS a YES
+//!     ask at 1−p).
+//!   * prices — the `_dollars` quote fields are already 0..1 probabilities;
+//!     the descriptor takes the YES mid (and 1 − mid for DOWN). A market with
+//!     no quote at all is SKIPPED — the old `(None, None) => 0.5` fallback
+//!     manufactured a fake probability out of an empty book.
+//!   * round_slot — derived from the market's own close time
+//!     (`close_ms / 1000 / round_sec`), and a close time further than two
+//!     rounds out is REJECTED: the old code filed multi-market event ladders
+//!     (strike ladder expiring in years) under the current slot.
 
 use crate::rest::KalshiRest;
 use blitzkrieg_market_api::net::now_ms;
@@ -45,17 +49,35 @@ pub(crate) struct DiscoveredMarket {
     pub asset: String,
 }
 
-/// Does this event/market title mention one of the configured assets?
-/// Substring match, case-insensitive — Kalshi titles are prose
-/// ("Will Bitcoin close above $100,000 on …"), not tickers.
+/// The Kalshi round series for one configured asset at the engine's round
+/// length. Only two crypto-round families exist on the venue (verified by
+/// query): `KX{ASSET}15M` and `KX{ASSET}D`. Anything else returns None —
+/// discovery finding nothing is honest; discovering the WRONG market is not.
+pub(crate) fn series_ticker_for(asset: &str, round_sec: i64) -> Option<String> {
+    let sym = match asset.to_ascii_uppercase().as_str() {
+        "BTC" | "XBT" => "BTC",
+        "ETH" => "ETH",
+        "SOL" => "SOL",
+        "XRP" => "XRP",
+        "DOGE" => "DOGE",
+        _ => return None,
+    };
+    match round_sec {
+        900 => Some(format!("KX{sym}15M")),
+        86_400 => Some(format!("KX{sym}D")),
+        _ => None,
+    }
+}
+
+/// Word-boundary asset match inside prose titles. `"Will SOL be up"` matches
+/// SOL; `"The market was resolved"` does NOT (the old plain-`contains` filed
+/// every resolved market under SOL).
 pub(crate) fn title_matches_asset(title: &str, assets: &[String]) -> Option<String> {
     let lower = title.to_ascii_lowercase();
-    // Longest needle first so the full asset name wins over a shorter alias
-    // that happens to be a substring of it.
     let mut best: Option<(usize, String)> = None;
     for asset in assets {
         for needle in asset_needles(asset) {
-            if lower.contains(&needle) {
+            if matches_at_word_boundary(&lower, &needle) {
                 let len = needle.len();
                 if best.as_ref().is_none_or(|(l, _)| len > *l) {
                     best = Some((len, asset.to_uppercase()));
@@ -66,10 +88,28 @@ pub(crate) fn title_matches_asset(title: &str, assets: &[String]) -> Option<Stri
     best.map(|(_, a)| a)
 }
 
+/// `needle` occurs in `hay` as a whole word (non-alphanumeric on both sides,
+/// or at the string edge). "solved" contains "sol" but not as a word.
+fn matches_at_word_boundary(hay: &str, needle: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric();
+    let mut start = 0;
+    while let Some(pos) = hay[start..].find(needle) {
+        let at = start + pos;
+        let before_ok = hay[..at].chars().next_back().is_none_or(|c| !is_word(c));
+        let after_at = at + needle.len();
+        let after_ok = hay[after_at..].chars().next().is_none_or(|c| !is_word(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        start = at + 1;
+    }
+    false
+}
+
 /// The strings that identify one configured asset inside a Kalshi title:
 /// the ticker itself plus the prose full name, where one exists. Kalshi
-/// titles are sentences ("Will Bitcoin close above …") and rarely carry the
-/// ticker verbatim.
+/// titles are sentences ("BTC price up in next 15 mins?") and rarely carry
+/// the ticker verbatim.
 fn asset_needles(asset: &str) -> Vec<String> {
     let mut needles = vec![asset.to_ascii_lowercase()];
     let alias = match asset.to_ascii_uppercase().as_str() {
@@ -84,27 +124,6 @@ fn asset_needles(asset: &str) -> Vec<String> {
         needles.push(a.to_string());
     }
     needles
-}
-
-/// YES bid/ask cents → (up_price, down_price) probabilities. The NO mid is
-/// 1 − YES mid by construction on Kalshi (the venue's own NO quotes mirror
-/// it); deriving keeps the two sides arithmetically complementary.
-pub(crate) fn prices_from_market(
-    yes_bid: Option<Decimal>,
-    yes_ask: Option<Decimal>,
-) -> (Decimal, Decimal) {
-    use std::str::FromStr;
-    let half = Decimal::from(2);
-    let mid = match (yes_bid, yes_ask) {
-        (Some(b), Some(a)) if a >= b => (b + a) / half,
-        (Some(b), Some(_)) => b, // crossed/zero book: trust the bid side
-        (Some(b), None) => b,
-        (None, Some(a)) => a,
-        (None, None) => Decimal::from_str("0.5").unwrap_or(Decimal::from(50)),
-    };
-    let prob = crate::feed::cents_to_prob(mid).unwrap_or_else(|| Decimal::from_str("0.5").unwrap());
-    let down = Decimal::ONE - prob;
-    (prob, down)
 }
 
 /// Parse an ISO-8601 close time into epoch millis. Kalshi sends
@@ -155,54 +174,84 @@ pub(crate) fn spawn(
                 continue; // same round already fed
             }
 
-            // Recent events with their nested markets, newest first.
-            let events = match client.events_with_markets(50).await {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(error = %e, "kalshi discovery: events query failed");
-                    continue;
-                }
-            };
-
+            // One series query per configured asset. A series that does not
+            // exist for this round length (e.g. 5m) is skipped silently —
+            // discovery finding nothing is the honest answer.
             let mut markets: Vec<MarketDescriptor> = Vec::new();
             let mut discovered: Vec<DiscoveredMarket> = Vec::new();
-            for (_event_ticker, kalshi_markets) in &events {
-                for m in kalshi_markets {
-                    if !m.is_active() {
+            for asset in &assets {
+                let Some(series) = series_ticker_for(asset, round_sec) else {
+                    continue;
+                };
+                let events = match client.open_events_for_series(&series).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(series = %series, error = %e, "kalshi discovery: series query failed");
                         continue;
                     }
-                    let Some(asset) =
-                        title_matches_asset(&format!("{} {}", m.event_ticker, m.title), &assets)
-                    else {
-                        continue;
-                    };
-                    let Some(close_ms) = close_time_to_ms(&m.close_time) else {
-                        tracing::warn!(ticker = %m.ticker, "kalshi discovery: unreadable close_time");
-                        continue;
-                    };
-                    if close_ms <= now {
-                        continue; // already closed
+                };
+                for (_event_ticker, kalshi_markets) in events {
+                    for m in kalshi_markets {
+                        if !m.is_active() {
+                            continue;
+                        }
+                        // Sanity: the title must still speak the asset's
+                        // language (word-boundary match — "resolved" is not
+                        // SOL). A series row whose title disagrees is a venue
+                        // surprise worth skipping loudly.
+                        if title_matches_asset(&m.title, std::slice::from_ref(asset)).is_none() {
+                            tracing::warn!(
+                                ticker = %m.ticker,
+                                title = %m.title,
+                                "kalshi discovery: series row title does not match its asset; skipping"
+                            );
+                            continue;
+                        }
+                        let Some(close_ms) = close_time_to_ms(&m.close_time) else {
+                            tracing::warn!(ticker = %m.ticker, "kalshi discovery: unreadable close_time");
+                            continue;
+                        };
+                        if close_ms <= now {
+                            continue; // already closed
+                        }
+                        // A real round closes within one round length. Anything
+                        // further out (strike ladders, stale events) must not
+                        // hijack the round clock — the old code fed a 2045
+                        // expiry into `observe_end_time` and the panel counted
+                        // down 19 years.
+                        if close_ms - now > 2 * round_sec * 1000 {
+                            tracing::warn!(
+                                ticker = %m.ticker,
+                                "kalshi discovery: close time too far out for a round; skipping"
+                            );
+                            continue;
+                        }
+                        // A market with no quote is skipped, never priced at a
+                        // made-up 0.5 (the old fallback manufactured fake
+                        // probabilities from empty books).
+                        let Some(mid) = m.yes_mid_prob() else {
+                            continue;
+                        };
+                        discovered.push(DiscoveredMarket {
+                            ticker: m.ticker.clone(),
+                            asset: asset.clone(),
+                        });
+                        markets.push(MarketDescriptor {
+                            asset: asset.clone(),
+                            condition_id: m.event_ticker.clone(),
+                            question_id: m.ticker.clone(),
+                            up_token_id: m.ticker.clone(),
+                            down_token_id: format!("{}{NO_SUFFIX}", m.ticker),
+                            up_price: mid,
+                            down_price: Decimal::ONE - mid,
+                            expires_at_ms: close_ms,
+                            round_slot: close_ms / 1000 / round_sec,
+                            // #427: this plugin's own identity, declared as data.
+                            venue: "kalshi".to_string(),
+                            neg_risk: false,
+                            question: m.title.clone(),
+                        });
                     }
-                    let (up_price, down_price) = prices_from_market(m.yes_bid, m.yes_ask);
-                    discovered.push(DiscoveredMarket {
-                        ticker: m.ticker.clone(),
-                        asset: asset.clone(),
-                    });
-                    markets.push(MarketDescriptor {
-                        asset: asset.clone(),
-                        condition_id: m.event_ticker.clone(),
-                        question_id: m.ticker.clone(),
-                        up_token_id: m.ticker.clone(),
-                        down_token_id: format!("{}{NO_SUFFIX}", m.ticker),
-                        up_price,
-                        down_price,
-                        expires_at_ms: close_ms,
-                        round_slot: close_ms / 1000 / round_sec,
-                        // #427: this plugin's own identity, declared as data.
-                        venue: "kalshi".to_string(),
-                        neg_risk: false,
-                        question: m.title.clone(),
-                    });
                 }
             }
 
@@ -229,17 +278,34 @@ pub(crate) fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn series_names_follow_the_venue_families() {
+        assert_eq!(series_ticker_for("BTC", 900).as_deref(), Some("KXBTC15M"));
+        assert_eq!(series_ticker_for("doge", 900).as_deref(), Some("KXDOGE15M"));
+        assert_eq!(series_ticker_for("XBT", 900).as_deref(), Some("KXBTC15M"));
+        assert_eq!(series_ticker_for("BTC", 86_400).as_deref(), Some("KXBTCD"));
+        // Round lengths the venue does not ship must find nothing.
+        assert_eq!(series_ticker_for("BTC", 300), None);
+        assert_eq!(series_ticker_for("BTC", 3_600), None);
+        assert_eq!(series_ticker_for("BTC", 14_400), None);
+        assert_eq!(series_ticker_for("APE", 900), None);
+    }
 
     #[test]
     fn titles_match_their_asset_case_insensitively() {
         let assets = vec![String::from("BTC"), String::from("ETH")];
         assert_eq!(
+            title_matches_asset("BTC price up in next 15 mins?", &assets),
+            Some(String::from("BTC"))
+        );
+        assert_eq!(
             title_matches_asset("Will Bitcoin close above $100k", &assets),
             Some(String::from("BTC"))
         );
         assert_eq!(
-            title_matches_asset("KXETHD-26-OCT09 Will Ethereum be up?", &assets),
+            title_matches_asset("Will Ethereum be up?", &assets),
             Some(String::from("ETH"))
         );
         assert_eq!(
@@ -250,14 +316,63 @@ mod tests {
     }
 
     #[test]
-    fn prices_are_complementary_probabilities() {
-        let (up, down) = prices_from_market(
-            Some(Decimal::from_str("43").unwrap()),
-            Some(Decimal::from_str("47").unwrap()),
+    fn resolved_does_not_substring_match_sol() {
+        // The live-venue bug: "The market was resolved" contains "sol" as a
+        // plain substring, which filed every resolved market under SOL.
+        let assets = vec![String::from("SOL")];
+        assert_eq!(title_matches_asset("Market resolved", &assets), None);
+        assert_eq!(title_matches_asset("Insolvency report", &assets), None);
+        assert_eq!(
+            title_matches_asset("Will SOL be up", &assets),
+            Some(String::from("SOL"))
         );
-        assert_eq!(up, Decimal::from_str("0.45").unwrap());
-        assert_eq!(down, Decimal::from_str("0.55").unwrap());
-        assert_eq!(up + down, Decimal::ONE);
+        assert_eq!(
+            title_matches_asset("Will Solana be up", &assets),
+            Some(String::from("SOL"))
+        );
+    }
+
+    #[test]
+    fn market_quotes_parse_as_probabilities_and_empty_books_are_none() {
+        use crate::types::KalshiMarket;
+        let quoted = KalshiMarket {
+            ticker: "T-1".into(),
+            event_ticker: "T".into(),
+            market_type: "binary".into(),
+            title: "t".into(),
+            subtitle: None,
+            close_time: "2026-10-15T12:30:00Z".into(),
+            expiration_time: None,
+            status: Some("active".into()),
+            yes_bid_dollars: Some(dec!(0.65)),
+            yes_ask_dollars: Some(dec!(0.66)),
+            no_bid_dollars: Some(dec!(0.34)),
+            no_ask_dollars: Some(dec!(0.35)),
+            volume_fp: None,
+        };
+        assert_eq!(quoted.yes_mid_prob(), Some(dec!(0.655)));
+
+        let empty = KalshiMarket {
+            yes_bid_dollars: Some(dec!(0.0000)),
+            yes_ask_dollars: Some(dec!(1.0000)),
+            no_bid_dollars: Some(dec!(0.0000)),
+            no_ask_dollars: Some(dec!(1.0000)),
+            ..quoted.clone()
+        };
+        assert_eq!(
+            empty.yes_mid_prob(),
+            None,
+            "0/1 sentinels are the venue's no-quote markers, never prices"
+        );
+
+        let blank = KalshiMarket {
+            yes_bid_dollars: None,
+            yes_ask_dollars: None,
+            no_bid_dollars: None,
+            no_ask_dollars: None,
+            ..quoted
+        };
+        assert_eq!(blank.yes_mid_prob(), None);
     }
 
     #[test]
