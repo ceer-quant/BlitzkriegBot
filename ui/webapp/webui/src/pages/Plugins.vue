@@ -10,12 +10,13 @@
  * 数据渲染（no-venue-branch 门禁）。
  */
 import { computed, onMounted, ref } from 'vue'
-import { Puzzle, Radio, Plug, AlertTriangle, Link2 } from 'lucide-vue-next'
+import { Puzzle, Radio, Plug, AlertTriangle, Link2, Power, RefreshCw } from 'lucide-vue-next'
 import { usePanelStore } from '@/stores/panel'
-import { api, marketTypeLabel, type PluginRow, type UnifiedEventRow } from '@/api/client'
+import { api, marketTypeLabel, type PluginRow, type UnifiedEventRow, type MarketPluginReadoutDoc } from '@/api/client'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
+import Button from '@/components/ui/button/Button.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import SegmentedControl from '@/components/ui/segmented/SegmentedControl.vue'
@@ -138,6 +139,122 @@ async function loadUnified(): Promise<void> {
   }
 }
 onMounted(loadUnified)
+
+// ── issue 485 插件启停/切换 ────────────────────────────────────────────────────────
+
+/** 启停操作的进行中行（名字键控），防重复点击。 */
+const toggling = ref<string | null>(null)
+/** 启停的结果提示：ok 显示为绿，错误显示为红。 */
+const toggleMsg = ref<{ tone: 'ok' | 'err'; text: string } | null>(null)
+
+/** 扩展行的 启用/停用 按钮：直接驱动内核 extension.enable/disable
+ *  （on_load / on_unload 在内核里跑），成功后刷新注册表让 state 徽标跟上。 */
+async function toggleExtension(r: PluginRow): Promise<void> {
+  if (toggling.value) return
+  toggling.value = r.name
+  toggleMsg.value = null
+  try {
+    const enable = r.enabled === false
+    const res = await api.extensionSet(r.name, enable)
+    if (res.error) {
+      toggleMsg.value = { tone: 'err', text: res.error }
+    } else {
+      toggleMsg.value = {
+        tone: 'ok',
+        text: `${r.name} 已${enable ? '启用' : '停用'}。`,
+      }
+    }
+  } catch (e) {
+    toggleMsg.value = {
+      tone: 'err',
+      text: e instanceof Error ? e.message : String(e),
+    }
+  } finally {
+    toggling.value = null
+    await store.refresh()
+  }
+}
+
+/** 行情插件的读数（market.plugin.get）：下次会话将选什么、是否旗标钉住。 */
+const marketDoc = ref<MarketPluginReadoutDoc | null>(null)
+const marketBusy = ref(false)
+const marketMsg = ref<{ tone: 'ok' | 'err'; text: string } | null>(null)
+
+async function loadMarketPlugin(): Promise<void> {
+  marketBusy.value = true
+  try {
+    marketDoc.value = await api.marketPlugin()
+  } catch (e) {
+    marketDoc.value = {
+      activePlugin: '',
+      registered: [],
+      nextSessionPlugin: '',
+      persisted: false,
+      flagPinned: false,
+      error: e instanceof Error ? e.message : String(e),
+    }
+  } finally {
+    marketBusy.value = false
+  }
+}
+
+/** 设为活跃（下次会话）：写入持久格 data/runtime/config.json，重启生效；
+ *  显式 --market-plugin 仍 outrank（内核回执与日志都写明）。 */
+async function setActivePlugin(name: string): Promise<void> {
+  if (marketBusy.value) return
+  marketBusy.value = true
+  marketMsg.value = null
+  try {
+    const res = await api.marketPluginSet({
+      name,
+      reason: 'webui 面板切换（插件页行情插件卡）',
+    })
+    if (res.error) {
+      marketMsg.value = { tone: 'err', text: res.error }
+    } else {
+      marketMsg.value = {
+        tone: 'ok',
+        text: `已保存：下次会话（重启内核后）将以 ${res.nextSessionPlugin} 为活跃行情源；本会话不变。`,
+      }
+      await loadMarketPlugin()
+    }
+  } catch (e) {
+    marketMsg.value = {
+      tone: 'err',
+      text: e instanceof Error ? e.message : String(e),
+    }
+  } finally {
+    marketBusy.value = false
+  }
+}
+
+/** 清除持久格：下次会话回落启动解析（显式旗标 > 首个注册者）。 */
+async function resetMarketPlugin(): Promise<void> {
+  if (marketBusy.value) return
+  marketBusy.value = true
+  marketMsg.value = null
+  try {
+    const res = await api.marketPluginSet({
+      reset: true,
+      reason: 'webui 面板清除（插件页行情插件卡）',
+    })
+    if (res.error) {
+      marketMsg.value = { tone: 'err', text: res.error }
+    } else {
+      marketMsg.value = { tone: 'ok', text: '已清除：下次会话回落启动解析。' }
+      await loadMarketPlugin()
+    }
+  } catch (e) {
+    marketMsg.value = {
+      tone: 'err',
+      text: e instanceof Error ? e.message : String(e),
+    }
+  } finally {
+    marketBusy.value = false
+  }
+}
+
+onMounted(loadMarketPlugin)
 </script>
 
 <template>
@@ -167,6 +284,64 @@ onMounted(loadUnified)
     <div v-if="sections.length > 1" class="mt-3.5 flex justify-center">
       <SegmentedControl v-model="filter" :segments="segments" size="sm" />
     </div>
+
+    <!-- issue 485 行情插件切换卡（next_session）：active 是启动选择，写入落
+         data/runtime/config.json 的 marketPlugin 格，重启生效；显式
+         --market-plugin 仍 outrank（旗标钉住的会话写不动）。 -->
+    <Card class="mt-3.5" dense>
+      <CardHeader label="活跃行情源（下次会话切换）">
+        <template #action>
+          <Button variant="ghost" size="sm" :disabled="marketBusy" title="刷新读数" @click="loadMarketPlugin">
+            <RefreshCw class="size-3.5" :class="marketBusy && 'animate-spin'" />
+          </Button>
+        </template>
+      </CardHeader>
+      <div v-if="marketDoc && !marketDoc.error" class="px-3 pb-3">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-[12px] text-faint-fg">本会话活跃：</span>
+          <Badge variant="gold" dot>{{ marketDoc.activePlugin || '—' }}</Badge>
+          <template v-if="marketDoc.nextSessionPlugin !== marketDoc.activePlugin">
+            <span class="text-[12px] text-faint-fg">下次会话：</span>
+            <Badge variant="info" dot>{{ marketDoc.nextSessionPlugin }}</Badge>
+          </template>
+          <Badge v-if="marketDoc.flagPinned" variant="down">旗标钉住（--market-plugin 优先）</Badge>
+          <span v-if="toggling" class="text-[11.5px] text-faint-fg">处理中…</span>
+        </div>
+        <div class="mt-2.5 flex flex-wrap gap-1.5">
+          <Button
+            v-for="p in marketDoc.registered"
+            :key="p.name"
+            :variant="p.name === marketDoc.activePlugin ? 'outline' : 'ghost'"
+            size="sm"
+            :disabled="marketBusy || p.active || marketDoc.flagPinned"
+            :title="p.active
+              ? '本会话的活跃源'
+              : marketDoc.flagPinned
+                ? '本会话由显式 --market-plugin 钉住，写入不动它（下次会话仍按旗标）'
+                : `下次会话以 ${p.name} 为活跃行情源（重启生效）`"
+            @click="setActivePlugin(p.name)"
+          >
+            {{ p.name }}
+            <Badge v-if="p.active" variant="gold" dot>活跃</Badge>
+            <Badge v-else-if="p.name === marketDoc.nextSessionPlugin" variant="info">下次会话</Badge>
+          </Button>
+          <Button
+            v-if="marketDoc.persisted"
+            variant="ghost"
+            size="sm"
+            :disabled="marketBusy"
+            title="清除持久格：下次会话回落启动解析（显式旗标 > 首个注册者）"
+            @click="resetMarketPlugin"
+          >清除格</Button>
+        </div>
+        <div v-if="marketMsg" class="mt-2 text-[12px]" :class="marketMsg.tone === 'ok' ? 'text-primary' : 'text-down'">
+          {{ marketMsg.text }}
+        </div>
+      </div>
+      <div v-else class="px-3 pb-3 text-[12px] text-faint-fg">
+        {{ marketDoc?.error ?? '行情源读数不可用（核心未连接时会自动刷新）。' }}
+      </div>
+    </Card>
 
     <!-- 跨所配对视图（issue 481 G4）：已确认的统一映射。venue 是数据行。 -->
     <Card class="mt-3.5" dense>
@@ -249,6 +424,7 @@ onMounted(loadUnified)
               <th class="label-micro px-2 pb-2.5">名称</th>
               <th class="label-micro px-2 pb-2.5">类型</th>
               <th class="label-micro px-2 pb-2.5">状态</th>
+              <th v-if="s.key === 'extension'" class="label-micro px-2 pb-2.5">操作</th>
               <th v-if="s.key === 'market'" class="label-micro px-2 pb-2.5">能力</th>
               <th class="label-micro px-2 pb-2.5">说明</th>
             </tr>
@@ -270,6 +446,22 @@ onMounted(loadUnified)
               <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ identity(r) }}</td>
               <td class="px-2 py-2.5">
                 <Badge :variant="status(r).tone" dot>{{ status(r).label }}</Badge>
+              </td>
+              <td v-if="s.key === 'extension'" class="px-2 py-2.5">
+                <!-- issue 485 启用/停用：内核 extension.enable/disable（on_load /
+                     on_unload 在内核里跑）；state 徽标在刷新后跟上。 -->
+                <Button
+                  :variant="r.enabled === false ? 'outline' : 'ghost'"
+                  size="sm"
+                  :disabled="toggling !== null"
+                  :title="r.enabled === false
+                    ? `启用 ${r.name}（内核 on_load）`
+                    : `停用 ${r.name}（内核 on_unload）`"
+                  @click="toggleExtension(r)"
+                >
+                  <Power class="size-3.5" />
+                  {{ r.enabled === false ? '启用' : '停用' }}
+                </Button>
               </td>
               <td v-if="s.key === 'market'" class="px-2 py-2.5">
                 <span class="inline-flex flex-wrap gap-1.5">
@@ -299,6 +491,12 @@ onMounted(loadUnified)
         </table>
       </div>
     </Card>
+
+    <div v-if="toggleMsg" class="mt-3.5">
+      <AlertBanner :tone="toggleMsg.tone === 'ok' ? 'info' : 'error'" :title="toggleMsg.tone === 'ok' ? '操作成功' : '操作失败'">
+        {{ toggleMsg.text }}
+      </AlertBanner>
+    </div>
 
     <div v-if="store.plugins.lastError" class="mt-3.5">
       <AlertBanner

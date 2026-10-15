@@ -283,6 +283,15 @@ jobs:
       # 脚本自己的 scratch cwd。
       - name: Round-duration settings gate
         run: node scripts/round-duration-check.mjs
+      # 插件页启停/切换（#485）：真内核 spawn 验证 market.plugin.get 读数
+      # （注册表+active+下次会话）、market.plugin.set 落持久格（next_session，
+      # 本会话 active 不动）、重启生效（重启后 active=格内插件）、显式
+      # --market-plugin outrank 持久格（回放基线不被 UI 劫持）、未注册名
+      # plan-first 拒绝、reset 清格、extension.enable/disable 真跑
+      # on_load/on_unload（state installed→enabled→disabled）。一切写入都在
+      # 脚本自己的 scratch cwd。
+      - name: Plugin toggle gate (market-plugin cell + extension lifecycle)
+        run: node scripts/market-plugin-cell-check.mjs
       # 交易环境重置（system.reset_trading，#458）：真内核 spawn 验证确认词
       # 门（逐字 RESET，拒绝时零副作用）、重置闭环（挂单索引空/记录文件 0 行/
       # 余额复原 seed/回执带计数与 pre 快照）、manual-ops 审计行（失败尝试不

@@ -279,7 +279,35 @@ pub async fn run(
     // `None` would leave the handshake inert.
     let registry = crate::market::registry::MarketPluginRegistry::new();
     crate::market::register_builtin_markets(&registry);
-    let active = crate::market::active_market_plugin(&registry, config.market_plugin.as_deref());
+    // The plugin page's persisted cell (data/runtime/config.json `marketPlugin`):
+    // applied ONLY when no explicit `--market-plugin` flag spoke — a flag-pinned
+    // session (replays, censuses, an operator's boot choice) always outranks the
+    // UI toggle, exactly the round-duration cell's precedence. A cell naming a
+    // plugin that is not compiled in is refused with a warning (fall through to
+    // the flag/first-registered resolution) — a stale cell must not brick the
+    // boot, and the readout reports the same refusal.
+    let mut plugin = config.market_plugin.clone();
+    if plugin.is_none()
+        && let Some(cell) = config.runtime_config_path.as_deref().and_then(|p| {
+            crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(p))
+        })
+    {
+        if registry.get(&cell.plugin).is_some() {
+            eprintln!(
+                "blitzkrieg-core: market plugin '{}' (persisted UI setting, \
+                 data/runtime/config.json; an explicit --market-plugin outranks it)",
+                cell.plugin
+            );
+            plugin = Some(cell.plugin);
+        } else {
+            eprintln!(
+                "blitzkrieg-core: persisted market plugin '{}' is not compiled in — \
+                 the cell is ignored (falling back to the flag/first-registered)",
+                cell.plugin
+            );
+        }
+    }
+    let active = crate::market::active_market_plugin(&registry, plugin.as_deref());
     core.set_plugin_modes(Some(crate::market::compat::PluginModes::for_plugin(
         active.as_ref(),
     )));
@@ -677,6 +705,7 @@ async fn handle_line(
         method::BLUEPRINT_SAVE_SOURCE,
         method::SYSTEM_UPDATE_CONFIGURE,
         method::ROUND_DURATION_SET,
+        method::MARKET_PLUGIN_SET,
         method::SYSTEM_RESET_TRADING,
         method::STRATEGY_PARAMS_SET,
     ];
@@ -1071,6 +1100,39 @@ async fn handle_line(
                         core.lock()
                             .await
                             .apply_round_duration_set(&p, &actor, now_ms())?;
+                    Ok(serde_json::to_value(update).unwrap_or(Value::Null))
+                }
+            })
+            .await
+        }
+
+        // 行情插件的运行时读数：本会话 active + 编译进内核的注册表 + 下次
+        // 会话将选什么（持久格 outrank 首个注册者，显式 --market-plugin
+        // outrank 持久格）。注册表在 server 启动时构建（handle_line 的共享
+        // 上下文），Core 只在 config 里带旗标 — 读数同时需要两者，所以组装
+        // 在这里而不是 Core 方法里。
+        method::MARKET_PLUGIN_GET => {
+            let c = core.lock().await;
+            Ok(
+                serde_json::to_value(crate::market::plugin_readout(registry, &c))
+                    .unwrap_or(Value::Null),
+            )
+        }
+
+        // 行情插件的 next_session 写路径：plan-first（未注册名在写盘前拒绝
+        // —— 注册表编译在内核里，一个不存在的名字不能等到重启才发现）+
+        // 原子持久格写入。本会话的 feed/discovery/executor 不动。
+        method::MARKET_PLUGIN_SET => {
+            typed(params, |p: SetMarketPluginParams| {
+                let core = core.clone();
+                async move {
+                    let actor = match peer {
+                        PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                        _ => "uid:unknown".to_string(),
+                    };
+                    let update =
+                        crate::market::apply_plugin_set(registry, &core, &p, &actor, now_ms())
+                            .await?;
                     Ok(serde_json::to_value(update).unwrap_or(Value::Null))
                 }
             })

@@ -144,6 +144,16 @@ pub mod method {
     /// 显式 `--round-sec`（普查/回放命令行） outranks 持久格 —— 逐位复现的
     /// 回放基线永远不被 UI 设置劫持。
     pub const ROUND_DURATION_SET: &str = "round_duration.set";
+    /// 行情插件的运行时读数（插件页）：本会话 active 插件、编译进内核的注册表、
+    /// 「下次会话将选什么」（持久格 outrank 首个注册者，显式 `--market-plugin`
+    /// outrank 持久格）。只读。
+    pub const MARKET_PLUGIN_GET: &str = "market.plugin.get";
+    /// 行情插件的 next_session 写路径：feed/discovery/executor 生命周期都绑定
+    /// 启动选择，热切在架构上不可行 —— 只写持久格 `marketPlugin`
+    /// （data/runtime/config.json），重启后启动层读回。plan-first：未注册名
+    /// 拒绝（注册表编译在内核里，一个不存在的名字不能等到重启才发现）。
+    /// 显式 `--market-plugin` outrank 持久格 —— 回放基线不被 UI 劫持。
+    pub const MARKET_PLUGIN_SET: &str = "market.plugin.set";
     pub const ORDER_PLACE: &str = "orders.place";
     pub const ORDER_CANCEL: &str = "orders.cancel";
     pub const ORDER_CANCEL_ALL: &str = "orders.cancel_all";
@@ -1128,6 +1138,81 @@ pub struct RoundDurationUpdate {
 pub const ROUND_DURATION_SET_NOTE: &str = "next session: the round grid is a coordinate system (round_slot is a UTC \
      grid index) and live positions/orders were slotted under the old length; \
      an explicit --round-sec flag still outranks this setting";
+
+// ── 行情插件切换（next_session）— market.plugin.get / market.plugin.set ─────
+
+/// `market.plugin.get` result: the running session's active plugin, the
+/// compiled-in registry, and what a restart would select (the persisted
+/// `marketPlugin` cell outranks first-registered but not an explicit
+/// `--market-plugin` flag).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketPluginReadout {
+    /// The plugin driving THIS session (the registry's active name).
+    pub active_plugin: String,
+    /// Every compiled-in plugin in registration order — the switchable set.
+    pub registered: Vec<MarketPluginOption>,
+    /// What the NEXT session will select: the persisted cell if one holds a
+    /// REGISTERED name, else this session's active plugin. A cell naming an
+    /// unregistered plugin is reported but NOT armed (the boot refuses it the
+    /// same way), so the next session never silently differs.
+    pub next_session_plugin: String,
+    /// Whether the persisted cell holds a registered name (a write happened
+    /// at some point; `market.plugin.set` with `reset` clears it).
+    pub persisted: bool,
+    /// True when an explicit `--market-plugin` flag resolved this session —
+    /// the UI must say a write cannot move a flag-pinned session.
+    pub flag_pinned: bool,
+}
+
+/// One row of the registered-plugin list.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketPluginOption {
+    pub name: String,
+    /// The plugin's market class (`prediction` / `spot` / …).
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// True when this plugin is driving the current session.
+    pub active: bool,
+}
+
+/// `market.plugin.set` params: `name` must name a REGISTERED plugin (the
+/// registry is compiled in — an unregistered name is refused here, plan-first,
+/// not discovered as a broken boot later); `reset` instead clears the
+/// persisted cell so the next session falls back to `--market-plugin`/
+/// first-registered. Exactly one of the two must be given.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMarketPluginParams {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub reset: bool,
+    /// Audit trail only — echoed in the reply and the log line.
+    pub reason: Option<String>,
+}
+
+/// `market.plugin.set` result.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketPluginUpdate {
+    /// What the next session will select after this write.
+    pub next_session_plugin: String,
+    /// `reset` clears the cell (falls back to boot resolution) instead of
+    /// writing a value.
+    pub reset: bool,
+    pub at_ms: i64,
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub note: &'static str,
+}
+
+/// [`MarketPluginUpdate::note`] — one spelling, used by the reply and the log.
+pub const MARKET_PLUGIN_SET_NOTE: &str = "next session: the data feed, discovery and executor are all built around \
+     the plugin chosen at boot, so a switch is a restart; an explicit \
+     --market-plugin flag still outranks this setting";
 
 // ── system.reset_trading (#458) ─────────────────────────────────────────────
 

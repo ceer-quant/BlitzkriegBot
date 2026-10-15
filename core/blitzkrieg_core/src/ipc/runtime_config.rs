@@ -37,6 +37,17 @@ struct RuntimeConfigDoc {
     /// Wall-clock of the write.
     #[serde(skip_serializing_if = "Option::is_none")]
     round_duration_at_ms: Option<i64>,
+    /// `None` = the cell holds no market-plugin override — the boot
+    /// resolution falls through to `--market-plugin`/first-registered.
+    /// Next-session: the running session's feed/discovery/executor were all
+    /// built around the plugin chosen at ITS boot, so a write cannot move
+    /// them (the same reason the round grid cannot move).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    market_plugin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    market_plugin_actor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    market_plugin_at_ms: Option<i64>,
 }
 
 /// What the boot resolution needs to know about the cell.
@@ -81,6 +92,40 @@ pub fn load_round_duration_from(path: &std::path::Path) -> Option<RoundDurationC
     Some(RoundDurationCell { duration_sec: sec })
 }
 
+/// The market-plugin cell the boot resolution reads back. Unlike the
+/// round-duration whitelist, the valid names belong to the compiled-in
+/// registry — which the config layer cannot see — so the caller (boot, in
+/// `main.rs`) validates the name against `MarketPluginRegistry::names()`
+/// itself; this reader only reports what the cell holds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarketPluginCell {
+    pub plugin: String,
+}
+
+pub fn load_market_plugin() -> Option<MarketPluginCell> {
+    load_market_plugin_from(&state_path())
+}
+
+pub fn load_market_plugin_from(path: &std::path::Path) -> Option<MarketPluginCell> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "{} is not valid JSON — the market-plugin cell is ignored: {e}",
+                path.display()
+            );
+            return None;
+        }
+    };
+    let name = v
+        .get("marketPlugin")
+        .and_then(|s| s.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    Some(MarketPluginCell { plugin: name })
+}
+
 /// Write (or, with `None`, clear) the persisted round duration. Atomic write:
 /// same-directory temp + rename, so a half-written file can never be what the
 /// next startup reads. Best-effort at the call sites — a persist failure is
@@ -91,6 +136,40 @@ pub fn persist_round_duration(
     now_ms: i64,
 ) -> std::io::Result<()> {
     persist_round_duration_to(&state_path(), duration_sec, actor, now_ms)
+}
+
+/// Write (or clear) the persisted market-plugin choice. Same atomic
+/// read-modify-write contract as the round-duration writer: both cells share
+/// one file, so neither write may clobber the other.
+pub fn persist_market_plugin(
+    plugin: Option<&str>,
+    actor: &str,
+    now_ms: i64,
+) -> std::io::Result<()> {
+    persist_market_plugin_to(&state_path(), plugin, actor, now_ms)
+}
+
+pub fn persist_market_plugin_to(
+    path: &std::path::Path,
+    plugin: Option<&str>,
+    actor: &str,
+    now_ms: i64,
+) -> std::io::Result<()> {
+    let market_plugin_actor = plugin.map(|_| actor.to_string());
+    let market_plugin_at_ms = plugin.map(|_| now_ms);
+    let mut doc: RuntimeConfigDoc = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    doc.market_plugin = plugin.map(|p| p.to_string());
+    doc.market_plugin_actor = market_plugin_actor;
+    doc.market_plugin_at_ms = market_plugin_at_ms;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&doc)?)?;
+    std::fs::rename(&tmp, path)
 }
 
 pub fn persist_round_duration_to(
@@ -229,5 +308,57 @@ mod tests {
         assert_eq!(count_jsonl_lines(&p), 2);
         // A missing file counts as 0, not an error.
         assert_eq!(count_jsonl_lines(&d.join("nope.jsonl")), 0);
+    }
+
+    #[test]
+    fn the_market_plugin_cell_round_trips() {
+        let d = tmpdir("mktrip");
+        let p = d.join("config.json");
+        persist_market_plugin_to(&p, Some("kalshi"), "uid:test", 1_000).unwrap();
+        assert_eq!(
+            load_market_plugin_from(&p),
+            Some(MarketPluginCell {
+                plugin: "kalshi".into()
+            })
+        );
+    }
+
+    #[test]
+    fn the_two_cells_share_one_file_without_clobbering() {
+        let d = tmpdir("twocells");
+        let p = d.join("config.json");
+        persist_round_duration_to(&p, Some(300), "uid:test", 1_000).unwrap();
+        persist_market_plugin_to(&p, Some("predictfun"), "uid:test", 2_000).unwrap();
+        // The later market-plugin write must NOT erase the round duration…
+        assert_eq!(
+            load_round_duration_from(&p),
+            Some(RoundDurationCell { duration_sec: 300 })
+        );
+        // …and a later round-duration reset must NOT erase the plugin.
+        persist_round_duration_to(&p, None, "uid:test", 3_000).unwrap();
+        assert_eq!(
+            load_market_plugin_from(&p),
+            Some(MarketPluginCell {
+                plugin: "predictfun".into()
+            })
+        );
+        // A plugin reset clears its own fields and leaves the other cell.
+        persist_market_plugin_to(&p, None, "uid:test", 4_000).unwrap();
+        assert_eq!(load_market_plugin_from(&p), None);
+        assert_eq!(load_round_duration_from(&p), None);
+    }
+
+    #[test]
+    fn an_empty_or_whitespace_plugin_name_loads_as_none() {
+        let d = tmpdir("blankplugin");
+        let p = d.join("config.json");
+        std::fs::write(&p, r#"{"marketPlugin": "   "}"#).unwrap();
+        assert_eq!(load_market_plugin_from(&p), None);
+    }
+
+    #[test]
+    fn a_missing_file_yields_no_plugin_cell() {
+        let d = tmpdir("noplugin");
+        assert_eq!(load_market_plugin_from(&d.join("config.json")), None);
     }
 }
