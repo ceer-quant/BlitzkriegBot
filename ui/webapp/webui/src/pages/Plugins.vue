@@ -12,7 +12,9 @@
 import { computed, onMounted, ref } from 'vue'
 import { Puzzle, Radio, Plug, AlertTriangle, Link2, Power, RefreshCw } from 'lucide-vue-next'
 import { usePanelStore } from '@/stores/panel'
-import { api, marketTypeLabel, type PluginRow, type UnifiedEventRow, type MarketPluginReadoutDoc } from '@/api/client'
+import { api, marketTypeLabel, type PluginRow, type UnifiedEventRow, type MarketPluginReadoutDoc, type NetCheckDoc } from '@/api/client'
+import { readNetCheck } from '@/lib/net-check'
+import { useRestartCore, RESTART_DELAY_SEC } from '@/lib/restart-core'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
@@ -180,6 +182,29 @@ const marketDoc = ref<MarketPluginReadoutDoc | null>(null)
 const marketBusy = ref(false)
 const marketMsg = ref<{ tone: 'ok' | 'err'; text: string } | null>(null)
 
+// issue 488：写入持久格成功后 10s 自动重启内核，让 next_session 立即落地。
+const restart = useRestartCore()
+
+// ── 网络自检（issue 488）：行情到达不了时先分辨「插件没开」还是「网络被拦」──
+const net = ref<NetCheckDoc | null>(null)
+const netLoading = ref(false)
+async function runNetCheck(): Promise<void> {
+  netLoading.value = true
+  try {
+    net.value = await api.probeNetCheck()
+    // 探测在网关侧后台跑（秒级）：轮询到结果落地为止（probing=false）。
+    for (let i = 0; i < 30 && net.value?.probing; i++) {
+      await new Promise((r) => setTimeout(r, 1000))
+      net.value = await api.netCheck()
+    }
+  } catch {
+    net.value = null
+  } finally {
+    netLoading.value = false
+  }
+}
+const netView = computed(() => readNetCheck(net.value))
+
 async function loadMarketPlugin(): Promise<void> {
   marketBusy.value = true
   try {
@@ -214,9 +239,10 @@ async function setActivePlugin(name: string): Promise<void> {
     } else {
       marketMsg.value = {
         tone: 'ok',
-        text: `已保存：下次会话（重启内核后）将以 ${res.nextSessionPlugin} 为活跃行情源；本会话不变。`,
+        text: `已保存：${RESTART_DELAY_SEC}s 后自动重启内核生效，将以 ${res.nextSessionPlugin} 为活跃行情源；本会话不变。`,
       }
       await loadMarketPlugin()
+      restart.schedule()
     }
   } catch (e) {
     marketMsg.value = {
@@ -241,8 +267,9 @@ async function resetMarketPlugin(): Promise<void> {
     if (res.error) {
       marketMsg.value = { tone: 'err', text: res.error }
     } else {
-      marketMsg.value = { tone: 'ok', text: '已清除：下次会话回落启动解析。' }
+      marketMsg.value = { tone: 'ok', text: `已清除：${RESTART_DELAY_SEC}s 后自动重启，下次会话回落启动解析。` }
       await loadMarketPlugin()
+      restart.schedule()
     }
   } catch (e) {
     marketMsg.value = {
@@ -336,6 +363,59 @@ onMounted(loadMarketPlugin)
         </div>
         <div v-if="marketMsg" class="mt-2 text-[12px]" :class="marketMsg.tone === 'ok' ? 'text-primary' : 'text-down'">
           {{ marketMsg.text }}
+        </div>
+
+        <!-- issue 488：倒计时条（写入成功后出现）。10s 自动重启；可立即执行或取消。 -->
+        <div v-if="restart.counting.value" class="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-line bg-panel-2 px-3 py-2">
+          <span class="text-[12px] font-semibold text-gold">{{ restart.countdown.value }}s 后自动重启内核</span>
+          <Button size="sm" variant="outline" :disabled="restart.restarting.value" @click="restart.now">立即重启</Button>
+          <Button size="sm" variant="ghost" :disabled="restart.restarting.value" @click="restart.cancel">取消</Button>
+        </div>
+        <AlertBanner
+          v-if="restart.restarting.value"
+          class="mt-2"
+          tone="info"
+          title="内核重启中…"
+        >本页读数会短暂断开，内核重新上线后自动恢复。</AlertBanner>
+        <AlertBanner
+          v-if="restart.restartErr.value"
+          class="mt-2"
+          tone="error"
+          :title="restart.restartErr.value"
+        />
+        <AlertBanner
+          v-if="restart.restartMsg.value && !restart.counting.value"
+          class="mt-2"
+          tone="info"
+          :title="restart.restartMsg.value"
+        />
+
+        <!-- 网络自检（issue 488）：行情到不了时的第一诊断，直接看是哪条路径被谁拦。 -->
+        <div class="mt-2.5 border-t border-line pt-2.5">
+          <div class="flex items-center justify-between">
+            <span class="text-[12px] text-faint-fg">网络自检 —— 内核拨测活跃行情源的每条出网路径</span>
+            <Button size="sm" variant="ghost" :disabled="netLoading" @click="runNetCheck">
+              <RefreshCw class="size-3.5" :class="netLoading && 'animate-spin'" />
+              {{ netLoading ? '探测中…' : '开始探测' }}
+            </Button>
+          </div>
+          <div v-if="netView.rows.length" class="mt-2 space-y-1">
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px]">
+              <Badge :variant="netView.tone === 'up' ? 'up' : netView.tone === 'down' ? 'down' : 'default'" dot>{{ netView.title }}</Badge>
+              <span class="text-faint-fg">{{ netView.summary }}</span>
+              <span v-if="netView.ageNote" class="text-faint-fg">{{ netView.ageNote }}</span>
+            </div>
+            <div v-for="r in netView.rows" :key="`${r.name}-${r.target}`" class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11.5px]">
+              <Badge :variant="r.ok ? 'up' : 'down'" dot>{{ r.ok ? '通' : '断' }}</Badge>
+              <!-- r.target 是主机名（标识符，非数字）：不放 num 槽，走 TEXT_MARKERS 之外的普通文本。 -->
+              <span class="font-mono text-fg">{{ r.target }}</span>
+              <span :class="r.ok ? 'text-faint-fg' : 'text-down'">{{ r.label }}</span>
+              <span v-if="r.fakeIp" class="text-gold">fake-IP（本机代理解析）</span>
+              <span v-if="r.ms != null" class="num text-faint-fg"><RollingNumber :value="String(r.ms)" />ms</span>
+              <span v-if="r.detail" class="text-faint-fg">{{ r.detail }}</span>
+            </div>
+            <p v-if="!netView.tone || netView.tone === 'down'" class="mt-1.5 text-[11.5px] text-muted-fg">{{ netView.hint }}</p>
+          </div>
         </div>
       </div>
       <div v-else class="px-3 pb-3 text-[12px] text-faint-fg">

@@ -153,13 +153,38 @@ jobs:
         run: |
           set -eu
           STAGE="blitzkrieg-${VERSION}-${TARGET}"
-          mkdir -p "$STAGE/bin"
+          # issue 489: the archive mirrors package-release.mjs's bundle layout —
+          # bin/ (kernel + UI + launcher), lib/ (strategy cdylibs), webui/ (the
+          # built panel bundle), configs/ (drop-point), docs/ (operator docs),
+          # user_layer/strategies_lua/ (the strategy source users edit) — NOT a
+          # bare bin/. A release that ships only binaries leaves the user nowhere
+          # to put strategies or a frontend, and the panel unwritable.
+          mkdir -p "$STAGE/bin" "$STAGE/lib" "$STAGE/webui" "$STAGE/configs" "$STAGE/docs" "$STAGE/user_layer/strategies_lua"
           # The kernel is REQUIRED. Optional artifacts ship when present
           # (same classification as package-release.mjs).
           cp "target/${TARGET}/release/blitzkrieg-core" "$STAGE/bin/"
           for b in blitzkrieg ui_kit_web ui_kit_panel ui_kit_app; do
             [ -f "target/${TARGET}/release/$b" ] && cp "target/${TARGET}/release/$b" "$STAGE/bin/" || true
           done
+          # Strategy cdylibs, if the strategy workspaces were built (same dedup
+          # as package-release.mjs: a name seen twice keeps the first).
+          for d in user_layer/strategies target/release user_layer/parity_strategy/target/release; do
+            [ -d "$d" ] || continue
+            find "$d" -maxdepth 1 -type f \( -name '*.dylib' -o -name '*.so' \) | while IFS= read -r f; do
+              b=$(basename "$f")
+              [ -f "$STAGE/lib/$b" ] || cp "$f" "$STAGE/lib/$b"
+            done
+          done
+          # The built panel bundle (needed to serve the UI without node_modules).
+          if [ -d ui/webapp/webui/dist ]; then
+            cp -R ui/webapp/webui/dist/. "$STAGE/webui/"
+          fi
+          # Drop-point configs + Lua strategy source (the place users add strategies).
+          cp -R user_layer/configs/. "$STAGE/configs/" 2>/dev/null || true
+          cp -R user_layer/strategies_lua/. "$STAGE/user_layer/strategies_lua/" 2>/dev/null || true
+          # Operator docs (README mandatory; docs/ optional per package-release.mjs).
+          [ -f README.md ] && cp README.md "$STAGE/" || true
+          cp -R docs/. "$STAGE/docs/" 2>/dev/null || true
           cp LICENSE "$STAGE/" 2>/dev/null || true
           tar -czf "${STAGE}.tar.gz" "$STAGE"
           shasum -a 256 "${STAGE}.tar.gz" | awk '{print $1"  '$STAGE'.tar.gz"}' > /tmp/sums.txt

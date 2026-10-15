@@ -11,6 +11,7 @@ import { getToken, loginAt, logout, ping, probeSession, api } from '@/api/client
 import type { RoundDurationDoc, ResetTradingResultDoc } from '@/api/client'
 import { adjudicateSession } from '@/lib/session'
 import { dateTime } from '@/lib/format'
+import { useRestartCore, RESTART_DELAY_SEC } from '@/lib/restart-core'
 import { useSettingsStore } from '@/stores/settings'
 import { useTheme, type ThemeMode } from '@/lib/theme'
 import Card from '@/components/ui/card/Card.vue'
@@ -106,6 +107,9 @@ const roundMsg = ref<string | null>(null)
 const roundBusy = ref(false)
 const roundPending = ref<number | null>(null)
 
+// issue 488：写入持久格成功后 10s 自动重启内核（可在倒计时内取消/立即）。
+const restart = useRestartCore()
+
 const roundSegments = computed(() => {
   const allowed = roundDoc.value?.allowed ?? []
   const seen = new Set<number>()
@@ -166,8 +170,9 @@ async function saveRound(): Promise<void> {
     if (res.error) {
       roundErr.value = res.error
     } else {
-      roundMsg.value = `已保存：下次会话（重启内核后）将按 ${res.nextSessionSec}s 轮次运行；本会话网格不变。`
+      roundMsg.value = `已保存：${RESTART_DELAY_SEC}s 后自动重启内核生效，将按 ${res.nextSessionSec}s 轮次运行；本会话网格不变。`
       await loadRound()
+      restart.schedule()
     }
   } catch (e) {
     roundErr.value = e instanceof Error ? e.message : String(e)
@@ -185,8 +190,9 @@ async function resetRound(): Promise<void> {
     if (res.error) {
       roundErr.value = res.error
     } else {
-      roundMsg.value = '已清除面板设置：下次会话回落到启动参数解析（命令行 > 环境变量 > 配置文件 > 出厂默认）。'
+      roundMsg.value = `已清除面板设置：${RESTART_DELAY_SEC}s 后自动重启，下次会话回落到启动参数解析（命令行 > 环境变量 > 配置文件 > 出厂默认）。`
       await loadRound()
+      restart.schedule()
     }
   } catch (e) {
     roundErr.value = e instanceof Error ? e.message : String(e)
@@ -347,6 +353,31 @@ async function doResetTrading(): Promise<void> {
 
         <AlertBanner v-if="roundErr" class="mt-3" tone="warn">{{ roundErr }}</AlertBanner>
         <AlertBanner v-if="roundMsg" class="mt-3" tone="info">{{ roundMsg }}</AlertBanner>
+
+        <!-- issue 488：倒计时条（写入成功后出现）。10s 自动重启；可立即执行或取消。 -->
+        <div v-if="restart.counting.value" class="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-line bg-panel-2 px-3 py-2">
+          <span class="text-[12px] font-semibold text-gold">{{ restart.countdown.value }}s 后自动重启内核</span>
+          <Button size="sm" variant="outline" :disabled="restart.restarting.value" @click="restart.now">立即重启</Button>
+          <Button size="sm" variant="ghost" :disabled="restart.restarting.value" @click="restart.cancel">取消</Button>
+        </div>
+        <AlertBanner
+          v-if="restart.restarting.value"
+          class="mt-3"
+          tone="info"
+          title="内核重启中…"
+        >本页读数会短暂断开，内核重新上线后自动恢复。</AlertBanner>
+        <AlertBanner
+          v-if="restart.restartErr.value"
+          class="mt-3"
+          tone="error"
+          :title="restart.restartErr.value"
+        />
+        <AlertBanner
+          v-if="restart.restartMsg.value && !restart.counting.value"
+          class="mt-3"
+          tone="info"
+          :title="restart.restartMsg.value"
+        />
       </template>
     </Card>
 
