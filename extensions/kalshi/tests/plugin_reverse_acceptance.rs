@@ -26,6 +26,7 @@ use blitzkrieg_market_api::{BookUpdate, MarketHost, TokenId};
 use rust_decimal::Decimal;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -255,9 +256,17 @@ async fn drain_books(sink: &BookSink, quiet: Duration) {
     }
 }
 
-fn orderbook_body(bid_cents: &str, ask_cents: &str) -> String {
+/// The production fp orderbook form (bid ladders only, prices already
+/// probabilities, depth = dollar notional, best bid LAST). `bid` / `ask`
+/// keep the test's old vocabulary: `bid` lands on the YES ladder, and the
+/// YES ask is derived by duality as 1 − (1 − bid)… i.e. the YES book alone
+/// must still produce a two-sided quote, so the NO ladder is synthesized
+/// from the ask side (a NO bid at 1 − ask IS the YES ask).
+fn orderbook_body(bid: &str, ask: &str) -> String {
+    let no_bid = rust_decimal::Decimal::from_str("1").unwrap()
+        - rust_decimal::Decimal::from_str(ask).unwrap();
     format!(
-        r#"{{"orderbook":{{"yes":[{{"price":{bid_cents},"quantity":40}}],"no":[{{"price":{ask_cents},"quantity":30}}]}}}}"#
+        r#"{{"orderbook_fp":{{"yes_dollars":[["{bid}","40.00"]],"no_dollars":[["{no_bid}","30.00"]]}}}}"#
     )
 }
 
@@ -272,7 +281,7 @@ async fn reverse_a_failed_poll_emits_no_book_instead_of_a_stale_repeat() {
     // Script: one good snapshot, then two 500s (the feed's retry budget in
     // tests is 0 — every poll of the window fails), then the process ends.
     let base = scripted_server(vec![
-        Some(http_ok(&orderbook_body("43", "57"))),
+        Some(http_ok(&orderbook_body("0.43", "0.57"))),
         Some(http_status(500, "Internal Server Error")),
         Some(http_status(500, "Internal Server Error")),
     ]);
@@ -294,21 +303,36 @@ async fn reverse_a_failed_poll_emits_no_book_instead_of_a_stale_repeat() {
         100, // fast poll: several failures fit in the window
     );
 
-    wait_for_books(&host, 1, Duration::from_secs(5)).await;
+    wait_for_books(&host, 2, Duration::from_secs(5)).await;
     // Give every failure in the script room to happen.
     drain_books(&host, Duration::from_millis(1200)).await;
 
     let books = host.books().await;
     assert!(
-        books.len() == 1,
-        "one good snapshot must produce exactly one book; got {} (a failed poll \
-         must emit NOTHING, not a repeat of the last snapshot)",
+        books.len() == 2,
+        "one good snapshot must produce exactly TWO books (the UP and DOWN \
+         token split of one market poll); got {} (a failed poll must emit \
+         NOTHING, not a repeat of the last snapshot)",
         books.len()
     );
-    let (book, _) = &books[0];
-    assert_eq!(book.token_id, "KXTEST");
-    assert_eq!(book.bids.len(), 1);
-    assert_eq!(book.asks.len(), 1);
+    let (up, _) = &books[0];
+    assert_eq!(up.token_id, "KXTEST");
+    assert_eq!(up.bids.len(), 1);
+    assert_eq!(up.asks.len(), 1);
+    // The fixture's YES book: bid 0.43 (40 notional ⇒ 40/0.43 shares) and,
+    // by duality, an ask at 1 − 0.43 = 0.57 (the fixture synthesizes the NO
+    // ladder from the ask, so the derived YES ask IS 0.57). Depth converts
+    // from the dollar notional (40.00 / 0.43), not a contract count.
+    assert_eq!(up.bids[0].0, Decimal::from_str("0.43").unwrap());
+    assert_eq!(up.asks[0].0, Decimal::from_str("0.57").unwrap());
+    assert_eq!(
+        up.bids[0].1,
+        Decimal::from_str("40.00").unwrap() / Decimal::from_str("0.43").unwrap()
+    );
+    let (down, _) = &books[1];
+    assert_eq!(down.token_id, "KXTEST:no");
+    assert_eq!(down.bids[0].0, Decimal::from_str("0.43").unwrap());
+    assert_eq!(down.asks[0].0, Decimal::from_str("0.57").unwrap());
 }
 
 // ═══ 2. A venue outage must not kill the feed (reconnect-or-bust) ═══════════
@@ -321,9 +345,9 @@ async fn reverse_a_failed_poll_emits_no_book_instead_of_a_stale_repeat() {
 async fn reverse_b_loop_survives_outage_and_resumes_on_recovery() {
     // Script: good → fail → good. The middle failure must not end the loop.
     let base = scripted_server(vec![
-        Some(http_ok(&orderbook_body("43", "57"))),
+        Some(http_ok(&orderbook_body("0.43", "0.57"))),
         Some(http_status(503, "Service Unavailable")),
-        Some(http_ok(&orderbook_body("44", "56"))),
+        Some(http_ok(&orderbook_body("0.44", "0.56"))),
     ]);
     let client = Arc::new(
         blitzkrieg_kalshi::RestConfig {
@@ -343,19 +367,19 @@ async fn reverse_b_loop_survives_outage_and_resumes_on_recovery() {
         100,
     );
 
-    let n = wait_for_books(&host, 2, Duration::from_secs(5)).await;
+    let n = wait_for_books(&host, 4, Duration::from_secs(5)).await;
     assert!(
-        n >= 2,
+        n >= 4,
         "after a failed poll the loop must recover and deliver the next \
-         healthy snapshot; got only {n} book(s)"
+         healthy snapshot (2 tokens per market poll); got only {n} book(s)"
     );
     let books = host.books().await;
     // The second good snapshot must carry the SECOND script's prices — proof
     // the recovered read is fresh data, not a re-emission of the first.
-    let second = &books[1].0;
+    let second = &books[2].0;
     assert_eq!(
         second.bids[0].0,
-        Decimal::new(44, 2),
+        Decimal::from_str("0.44").unwrap(),
         "recovered snapshot must be the venue's NEW book"
     );
     // And the cadence must have snapped back from any 429-style backoff
@@ -370,7 +394,7 @@ async fn reverse_b_loop_survives_outage_and_resumes_on_recovery() {
 /// book — the "mixed time domains → false signal" failure #424 names.
 #[tokio::test]
 async fn reverse_c_book_timestamps_stay_in_the_local_clock_domain() {
-    let base = scripted_server(vec![Some(http_ok(&orderbook_body("43", "57")))]);
+    let base = scripted_server(vec![Some(http_ok(&orderbook_body("0.43", "0.57")))]);
     let client = Arc::new(
         blitzkrieg_kalshi::RestConfig {
             base_url: base,
@@ -415,9 +439,10 @@ async fn reverse_c_book_timestamps_stay_in_the_local_clock_domain() {
 }
 
 /// Same clock-domain rule at the normalization seam, hostile input edition:
-/// `cents_to_prob` is fed cents that ARE timestamps by magnitude (a venue bug
-/// mixing fields); the band filter drops anything outside (0,1) — a value
-/// that would otherwise masquerade as a probability price.
+/// the probability band guard is fed values that are NOT probabilities (a
+/// venue bug mixing fields, cent-denominated values, sentinels); the band
+/// filter drops anything outside (0,1) — a value that would otherwise
+/// masquerade as a probability price.
 #[tokio::test]
 async fn reverse_c2_normalization_refuses_out_of_band_values() {
     use blitzkrieg_kalshi::feed_tests_only_cents_to_prob;
@@ -427,18 +452,23 @@ async fn reverse_c2_normalization_refuses_out_of_band_values() {
         feed_tests_only_cents_to_prob(Decimal::from_str("1760000000").unwrap()),
         None
     );
-    // Negative and ≥100 cent quotes are likewise not prices.
+    // Negative values and cent-scale quotes are likewise not probabilities —
+    // the fp book form never carries cents, so a cent value leaking in is a
+    // field mix and must be refused, not divided by 100.
     assert_eq!(
-        feed_tests_only_cents_to_prob(Decimal::from_str("-43").unwrap()),
+        feed_tests_only_cents_to_prob(Decimal::from_str("-0.43").unwrap()),
         None
     );
-    assert_eq!(
-        feed_tests_only_cents_to_prob(Decimal::from_str("157").unwrap()),
-        None
-    );
-    // The whole band in between maps.
     assert_eq!(
         feed_tests_only_cents_to_prob(Decimal::from_str("43").unwrap()),
+        None,
+        "a cent-scale value must not pass the probability band"
+    );
+    assert_eq!(feed_tests_only_cents_to_prob(Decimal::ZERO), None);
+    assert_eq!(feed_tests_only_cents_to_prob(Decimal::ONE), None);
+    // The band in between maps through unchanged.
+    assert_eq!(
+        feed_tests_only_cents_to_prob(Decimal::from_str("0.43").unwrap()),
         Some(Decimal::from_str("0.43").unwrap())
     );
 }

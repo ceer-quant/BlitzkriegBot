@@ -268,6 +268,31 @@ impl KalshiRest {
             .collect())
     }
 
+    /// Open events of ONE series with their nested markets — the round
+    /// discovery query. The default `/events` listing ranks long-running
+    /// events first and the 15m rounds never reach page 1, so discovery MUST
+    /// filter by series: `series_ticker=KXBTC15M&status=open` returns exactly
+    /// the live round (verified against production).
+    pub async fn open_events_for_series(
+        &self,
+        series_ticker: &str,
+    ) -> Result<Vec<(String, Vec<KalshiMarket>)>, KalshiError> {
+        let path = format!(
+            "/trade-api/v2/events?series_ticker={}&status=open&with_nested_markets=true&limit=200",
+            urlencode(series_ticker)
+        );
+        let body: Envelope<EventsBody> = self.get_json(Class::Read, &path).await?;
+        Ok(body
+            .inner
+            .events
+            .into_iter()
+            .map(|e| {
+                let markets = e.markets.unwrap_or_default();
+                (e.event_ticker, markets)
+            })
+            .collect())
+    }
+
     /// Full-depth order book for one market.
     pub async fn orderbook(&self, ticker: &str) -> Result<KalshiOrderBook, KalshiError> {
         let path = format!("/trade-api/v2/markets/{}/orderbook", urlencode(ticker));

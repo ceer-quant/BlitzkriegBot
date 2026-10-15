@@ -487,8 +487,13 @@ pub fn render_json_full(
         "marketPlugins": s.market_plugins.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),
         // E8-c 盘口深度: per-asset L2 depth for the HFT panel. Older cores omit
         // the verb → empty array, which the panel reads as "no depth data".
+        // E29 (§12.2): the token ids must ride along — the K-line card asks
+        // `kline.history` by TOKEN id, and without them the card hides for
+        // every plugin (the deserializer defaults the missing keys to "").
         "books": s.books.iter().map(|a| serde_json::json!({
             "asset": a.asset,
+            "upTokenId": a.up_token_id,
+            "downTokenId": a.down_token_id,
             "up": book_side_json(&a.up),
             "down": book_side_json(&a.down),
         })).collect::<Vec<_>>(),

@@ -10,6 +10,7 @@ use blitzkrieg_kalshi::error::{KalshiError, into_core_error};
 use blitzkrieg_market_api::CoreErrorCode;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::str::FromStr;
 use std::time::Duration;
 
 /// Serve `count` canned HTTP responses on an ephemeral 127.0.0.1 port.
@@ -63,38 +64,65 @@ fn client_for(base_url: &str) -> blitzkrieg_kalshi::KalshiRest {
     blitzkrieg_kalshi::KalshiRest::new(config, None).expect("client builds unauthenticated")
 }
 
-const MARKETS_JSON: &str = r#"{"markets":[{"ticker":"KXNFL-26-OCT05-SEA","event_ticker":"KXNFL-26-OCT05","market_type":"binary","title":"Will the Seahawks win?","close_time":"2026-10-05T23:30:00Z","status":"active","yes_bid":41,"yes_ask":43,"no_bid":57,"no_ask":59,"volume":12000}]}"#;
+const MARKETS_JSON: &str = r#"{"markets":[{"ticker":"KXBTC15M-26OCT150800-00","event_ticker":"KXBTC15M-26OCT150800","market_type":"binary","title":"BTC price up in next 15 mins?","close_time":"2026-10-15T12:00:00Z","status":"active","yes_bid_dollars":"0.6500","yes_ask_dollars":"0.6600","no_bid_dollars":"0.3400","no_ask_dollars":"0.3500","volume_fp":"174845.86"}]}"#;
 
 #[tokio::test]
 async fn markets_parse_into_typed_rows() {
     let (url, _guard) = mock_server(vec![http_ok(MARKETS_JSON)]);
     let client = client_for(&url);
     let markets = client
-        .markets_for_event("KXNFL-26-OCT05")
+        .markets_for_event("KXBTC15M-26OCT150800")
         .await
         .expect("markets parse");
     assert_eq!(markets.len(), 1);
-    assert_eq!(markets[0].ticker, "KXNFL-26-OCT05-SEA");
+    assert_eq!(markets[0].ticker, "KXBTC15M-26OCT150800-00");
     assert!(markets[0].is_active());
-    assert_eq!(markets[0].yes_ask, Some(rust_decimal::Decimal::from(43)));
+    // The round series quote in `_dollars` probability strings — the legacy
+    // cent fields these series never send are not modeled at all.
+    assert_eq!(
+        markets[0].yes_ask_dollars,
+        Some(rust_decimal::Decimal::from_str("0.6600").unwrap())
+    );
+    assert_eq!(
+        markets[0].yes_mid_prob(),
+        Some(rust_decimal::Decimal::from_str("0.6550").unwrap())
+    );
 }
 
 #[tokio::test]
 async fn orderbook_two_sided_probe() {
+    // The production fp form: two bid ladders of [price, notional] decimal
+    // strings, ascending (best bid last). Captured from a live KXBTC15M
+    // round on 2026-10-15 (trimmed to the ends that carry meaning).
     let (url, _guard) = mock_server(vec![http_ok(
-        r#"{"orderbook":{"yes":[{"price":42,"quantity":100}],"no":[{"price":57,"quantity":80}]}}"#,
+        r#"{"orderbook_fp":{"yes_dollars":[["0.2100","1522.92"],["0.5500","7424.96"],["0.5600","4467.73"]],"no_dollars":[["0.4400","188.14"],["0.4300","2678.99"]]}}"#,
     )]);
     let client = client_for(&url);
-    let book = client.orderbook("KXNFL-26-OCT05-SEA").await.expect("book");
+    let book = client
+        .orderbook("KXBTC15M-26OCT150800-00")
+        .await
+        .expect("book");
     assert!(book.is_two_sided());
-    assert_eq!(book.yes_levels().len(), 1);
-    assert_eq!(book.yes_levels()[0].quantity, 100);
+    let yes = book.yes_bids();
+    assert_eq!(yes.len(), 3);
+    assert_eq!(
+        yes.last().expect("best bid last").price,
+        rust_decimal::Decimal::from_str("0.5600").unwrap()
+    );
+    // contracts = notional / price: 4467.73 / 0.56.
+    let expected = rust_decimal::Decimal::from_str("4467.73").unwrap()
+        / rust_decimal::Decimal::from_str("0.56").unwrap();
+    assert_eq!(yes.last().expect("best").shares, expected);
+    assert_eq!(
+        book.no_bids().last().expect("best no bid").price,
+        rust_decimal::Decimal::from_str("0.4300").unwrap()
+    );
 }
 
 #[tokio::test]
 async fn orderbook_one_sided_is_not_two_sided() {
     let (url, _guard) = mock_server(vec![http_ok(
-        r#"{"orderbook":{"yes":[{"price":42,"quantity":100}]}}"#,
+        r#"{"orderbook_fp":{"yes_dollars":[["0.5600","4467.73"]],"no_dollars":[]}}"#,
     )]);
     let client = client_for(&url);
     let book = client.orderbook("X").await.expect("book");

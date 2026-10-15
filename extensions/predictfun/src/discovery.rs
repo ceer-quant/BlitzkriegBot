@@ -33,9 +33,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Does this question/description text mention one of the configured assets?
-/// Substring match, case-insensitive — predict.fun questions are prose
+/// Word-boundary match, case-insensitive — predict.fun questions are prose
 /// ("Will Bitcoin close above $100,000 on …"), not tickers. Same needle table
-/// as the Kalshi discovery (one asset vocabulary, two venues).
+/// as the Kalshi discovery (one asset vocabulary, two venues). The boundary
+/// rule matters in both directions: "solved"/"resolved" must not match SOL.
 pub(crate) fn title_matches_asset(title: &str, assets: &[String]) -> Option<String> {
     let lower = title.to_ascii_lowercase();
     // Longest needle first so the full asset name wins over a shorter alias
@@ -43,7 +44,7 @@ pub(crate) fn title_matches_asset(title: &str, assets: &[String]) -> Option<Stri
     let mut best: Option<(usize, String)> = None;
     for asset in assets {
         for needle in asset_needles(asset) {
-            if lower.contains(&needle) {
+            if matches_at_word_boundary(&lower, &needle) {
                 let len = needle.len();
                 if best.as_ref().is_none_or(|(l, _)| len > *l) {
                     best = Some((len, asset.to_uppercase()));
@@ -52,6 +53,24 @@ pub(crate) fn title_matches_asset(title: &str, assets: &[String]) -> Option<Stri
         }
     }
     best.map(|(_, a)| a)
+}
+
+/// `needle` occurs in `hay` as a whole word (non-alphanumeric on both sides,
+/// or at the string edge). "solved" contains "sol" but not as a word.
+fn matches_at_word_boundary(hay: &str, needle: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric();
+    let mut start = 0;
+    while let Some(pos) = hay[start..].find(needle) {
+        let at = start + pos;
+        let before_ok = hay[..at].chars().next_back().is_none_or(|c| !is_word(c));
+        let after_at = at + needle.len();
+        let after_ok = hay[after_at..].chars().next().is_none_or(|c| !is_word(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        start = at + 1;
+    }
+    false
 }
 
 /// The strings that identify one configured asset inside a question: the
@@ -271,6 +290,19 @@ mod tests {
             title_matches_asset("Will Solana be up", &assets),
             None,
             "a market for an unconfigured asset must be skipped"
+        );
+    }
+
+    #[test]
+    fn resolved_does_not_substring_match_sol() {
+        // The kalshi-discovery bug this file shared: "resolved" contains
+        // "sol" as a plain substring.
+        let assets = vec![String::from("SOL")];
+        assert_eq!(title_matches_asset("Market resolved", &assets), None);
+        assert_eq!(title_matches_asset("Insolvency clause", &assets), None);
+        assert_eq!(
+            title_matches_asset("Will SOL be up", &assets),
+            Some(String::from("SOL"))
         );
     }
 

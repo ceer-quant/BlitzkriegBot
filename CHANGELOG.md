@@ -21,6 +21,18 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   兼容插件自动复活，无需手动重开。显式 disable 仍会移除名字——那是决定，
   不是市场不匹配。首个版本保存的是有效启用集，一次切换就把所有不兼容策略
   从文件里静默剥掉、切回也带不回来。
+- **Kalshi 插件对真线重建**（此前只对 mock 自证）：轮发现改为按系列查询
+  `KX{ASSET}15M`（默认 `/events` 列表把长周期事件排前，15m 轮永远到不了
+  第 1 页）；盘口解析改为真线的 `orderbook_fp` 形态（两条 BID 阶梯、价格
+  即 0..1 概率、深度为美元名义→按名义/价格换算张数；YES asks 由 NO bids
+  对偶导出 1−p）；报价字段改为真线的 `*_dollars` 概率字符串（旧建模的
+  `yes_bid` 美分整数在这些系列上不存在——0.005 假概率的根因）；标题匹配
+  改词边界（"resolved" 不再撞 SOL，predictfun 同款复制一并修）；无报价市
+  场跳过不再造 0.5 假概率；轮终超两个轮长的声明拒绝入 scanner（19 年倒计
+  时的内核侧防线）。真线只读验收 30/30（5 资产 × 轮结构/报价/盘口对偶）。
+- **面板**：HFT 页价格卡按 asset 去重（同资产多市场不再重复卡片撞 Vue
+  key）；`engine.books` JSON 补 `upTokenId`/`downTokenId`（此前 core 带
+  了 token id 但 UI 转换层丢弃，K 线卡对所有插件永久隐藏）。
 
 ## [0.4.1] - 2026-10-15
 
