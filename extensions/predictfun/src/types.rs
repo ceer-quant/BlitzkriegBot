@@ -140,10 +140,11 @@ impl PredictPosition {
 /// A resting or filled order as the venue reports it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PredictOrder {
-    #[serde(default)]
+    #[serde(default, alias = "orderId")]
     pub id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "orderHash")]
     pub order_hash: Option<String>,
+    #[serde(alias = "tokenId")]
     pub token_id: String,
     #[serde(default)]
     pub side: Option<String>,
@@ -155,6 +156,13 @@ pub struct PredictOrder {
     pub status: Option<String>,
     #[serde(default)]
     pub timestamp: Option<i64>,
+    /// Cumulative filled shares the venue reports on its order rows — the
+    /// ONLY fill signal the venue exposes (no trades/fills endpoint). The
+    /// executor diffs this watermark per order; absent = nothing filled.
+    /// Both wire spellings accepted: the edge has been read snake_case
+    /// (stage 1's measurement) and camelCase (both production references).
+    #[serde(default, alias = "amountFilled")]
+    pub amount_filled: Option<Decimal>,
 }
 
 impl PredictOrder {

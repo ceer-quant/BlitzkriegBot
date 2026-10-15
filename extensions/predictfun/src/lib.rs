@@ -12,7 +12,7 @@
 //! all predict.fun knowledge lives here. Prices are 0..1 probabilities at the
 //! venue already — normalization is only the degenerate-band filter — so the
 //! kernel never sees a predict.fun-native unit. The order executor arrives
-//! with stage 4 (#426).
+//! arrived with #483 ([`signing`] builds the EIP-712 order; [`executor`] runs it).
 //!
 //! Auth shape (measured against the production edge and pinned here because
 //! the venue publishes no API reference): the REST root is
@@ -34,16 +34,20 @@
 
 pub mod discovery;
 pub mod error;
+pub mod executor;
 pub mod feed;
 pub mod net_check;
 pub mod plugin;
 pub mod rate_limit;
 pub mod rest;
+pub mod signing;
 pub mod types;
 
 pub use error::{PredictError, into_core_error};
+pub use executor::spawn_if_configured;
 pub use feed::{feed_tests_only_prob_in_band, feed_tests_only_spawn};
 pub use plugin::PredictFunPlugin;
 pub use rate_limit::{RateLimit, RateLimitConfig};
 pub use rest::{PredictRest, RestConfig};
+pub use signing::OrderSigner;
 pub use types::{PredictBalance, PredictMarket, PredictOrder, PredictOrderBook, PredictPosition};

@@ -28,6 +28,14 @@ use crate::types::{
 use serde::Deserialize;
 use std::time::Duration;
 
+/// What a placement returned: the venue's database id (the cancel key).
+/// The EIP-712 order hash — the reconcile key — is the executor's own
+/// knowledge (it signed the order); the transport never re-derives it.
+#[derive(Debug, Clone)]
+pub struct PlacedOrder {
+    pub venue_id: String,
+}
+
 /// Production REST API root (measured live; the venue publishes no docs page).
 pub const PRODUCTION_BASE_URL: &str = "https://api.predict.fun";
 
@@ -106,9 +114,40 @@ impl MarketsBody {
     }
 }
 
+/// Ack of a placement. The venue's id surfaces under several names across
+/// the edge and both production references (`orderId`/`id` at top level,
+/// `hash`/`orderHash` on a nested order or at top level); the database id is
+/// what `/v1/orders/remove` expects, so it is extracted tolerantly and a
+/// body with NONE of them is a schema error — never a silent success.
 #[derive(Debug, Clone, Deserialize)]
-struct OrderBody {
-    order: PredictOrder,
+struct PlaceAck {
+    #[serde(default, alias = "orderId")]
+    id: Option<String>,
+    #[serde(default)]
+    hash: Option<String>,
+    #[serde(default, alias = "orderHash")]
+    order_hash: Option<String>,
+    #[serde(default)]
+    order: Option<NestedOrderRef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NestedOrderRef {
+    #[serde(default)]
+    hash: Option<String>,
+    #[serde(default, alias = "orderHash")]
+    order_hash: Option<String>,
+    #[serde(default, alias = "orderId")]
+    id: Option<String>,
+}
+
+impl PlaceAck {
+    /// The id later used for cancels, in extraction order: db id → order.hash
+    /// → top hash → orderHash. `None` when the ack names nothing at all.
+    fn into_venue_id(self) -> Option<String> {
+        let nested = self.order.and_then(|o| o.hash.or(o.order_hash).or(o.id));
+        self.id.or(nested).or(self.hash).or(self.order_hash)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -292,6 +331,11 @@ impl PredictRest {
         *self.jwt.write().await = Some(jwt);
     }
 
+    /// Whether a bearer token is set (the executor mints one only when not).
+    pub async fn has_jwt(&self) -> bool {
+        self.jwt.read().await.is_some()
+    }
+
     // ── public market data ───────────────────────────────────────────────
 
     /// All tradeable markets (one page; paging is stage 2 discovery's job).
@@ -348,29 +392,37 @@ impl PredictRest {
     /// Submit a signed (EIP-712) order. `order_hash` is the client-side
     /// idempotency key: a timeout here does NOT imply the order was or was
     /// not accepted — reconcile by hash (see `orders`) instead of re-placing.
-    /// The order body itself is built by stage 2's executor; this layer only
+    /// The order body itself is built by the executor; this layer only
     /// carries it.
+    ///
+    /// Payload shape: `{data:{order: <signed>}}`. The order's own signature
+    /// determines its venue-side hash, so the body IS the idempotency key —
+    /// the transport's bounded retry resends a byte-identical payload (the
+    /// order is signed once, before this call) and the venue dedupes by
+    /// order hash. Measured against two independent production adapters;
+    /// the previously-carried top-level `hash` echo is not part of the
+    /// venue's contract.
     pub async fn place_order(
         &self,
         order_body: serde_json::Value,
-        order_hash: &str,
-    ) -> Result<PredictOrder, PredictError> {
+    ) -> Result<PlacedOrder, PredictError> {
         self.require_auth().await?;
-        let payload = serde_json::json!({
-            "data": {
-                "order": order_body,
-                "hash": order_hash,
-            }
-        });
-        let body: Envelope<OrderBody> =
-            self.post_json(Class::Write, "/v1/orders", &payload).await?;
-        Ok(body.into_inner("place order").order)
+        let payload = serde_json::json!({ "data": { "order": order_body } });
+        let ack: Envelope<PlaceAck> = self.post_json(Class::Write, "/v1/orders", &payload).await?;
+        let venue_id = ack
+            .into_inner("place order")
+            .into_venue_id()
+            .ok_or_else(|| {
+                PredictError::Schema(String::from("place order: ack 无任何 id/hash 字段"))
+            })?;
+        Ok(PlacedOrder { venue_id })
     }
 
-    /// Cancel by venue order ids; idempotent on the venue.
+    /// Cancel by venue order ids; idempotent on the venue. Payload shape is
+    /// the venue's `{data:{ids:[...]}}` envelope (like every other write).
     pub async fn cancel_orders(&self, ids: &[&str]) -> Result<(), PredictError> {
         self.require_auth().await?;
-        let payload = serde_json::json!({ "ids": ids });
+        let payload = serde_json::json!({ "data": { "ids": ids } });
         let _: Envelope<serde_json::Value> = self
             .post_json(Class::Write, "/v1/orders/remove", &payload)
             .await?;

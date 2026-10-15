@@ -1,14 +1,14 @@
-//! predict.fun market plugin (#424).
+//! predict.fun market plugin (#424, executor #483).
 //!
-//! Bundles the two stage-2 components (orderbook feed, market discovery) behind
-//! the generic `MarketPlugin` contract, with the network probe wired to
-//! [`crate::net_check`]. Everything the core sees is the market-api boundary;
-//! all predict.fun knowledge lives in this crate.
+//! Bundles the stage-2 components (orderbook feed, market discovery) and the
+//! stage-4 order executor behind the generic `MarketPlugin` contract, with
+//! the network probe wired to [`crate::net_check`]. Everything the core sees
+//! is the market-api boundary; all predict.fun knowledge lives in this crate.
 //!
-//! No executor yet: order placement is stage 4 (#426) — a plugin component may
-//! be absent by contract (`MarketPlugin::executor` defaults to `None`), and
-//! declaring no executor keeps dry-run and read-only builds honest instead of
-//! shipping an inert stub.
+//! The executor is inert without credentials ([`crate::executor::
+//! spawn_if_configured`] answers `Ok(None)`), so declaring it keeps dry-run
+//! and read-only builds honest — `has_executor` is true and order egress is
+//! simply absent, the same contract as the kalshi plugin (#479).
 //!
 //! Capabilities declared from what THIS extension exercises, not what the
 //! venue advertises (§7.2): the feed polls REST snapshots (so
@@ -21,8 +21,8 @@
 use crate::rest::{Credentials, PredictRest, RestConfig};
 use blitzkrieg_market_api::{
     BoxFuture, CoreError, CoreErrorCode, CoreResult, DataFeed, DataFeedConfig, DiscoveryConfig,
-    MarketCapabilities, MarketDiscovery, MarketHost, MarketMode, MarketPlugin, MarketStructure,
-    MarketType, NetCheckReport, TokenId,
+    ExecutorConfig, MarketCapabilities, MarketDiscovery, MarketHost, MarketMode, MarketPlugin,
+    MarketStructure, MarketType, NetCheckReport, OrderExecutor, TokenId,
 };
 use std::sync::Arc;
 
@@ -79,9 +79,37 @@ impl MarketPlugin for PredictFunPlugin {
     fn discovery(&self) -> Option<&dyn MarketDiscovery> {
         Some(&PREDICT_DISCOVERY)
     }
-    /// Stage 4 (#426) adds the executor; absent by contract until then.
+    fn executor(&self) -> Option<&dyn OrderExecutor> {
+        Some(&PREDICT_EXECUTOR)
+    }
     fn net_check(&self) -> BoxFuture<'_, NetCheckReport> {
         Box::pin(crate::net_check::probe())
+    }
+}
+
+// ── Executor ─────────────────────────────────────────────────────────────────
+
+struct PredictExecutor;
+
+static PREDICT_EXECUTOR: PredictExecutor = PredictExecutor;
+
+impl OrderExecutor for PredictExecutor {
+    fn name(&self) -> &str {
+        "predictfun-executor"
+    }
+
+    fn start<'a>(
+        &'a self,
+        host: Arc<dyn MarketHost>,
+        config: ExecutorConfig,
+    ) -> BoxFuture<'a, CoreResult<()>> {
+        Box::pin(async move {
+            // Inert without credentials (dry-run / read-only builds), same
+            // contract as the kalshi executor — start() still succeeds and
+            // the core runs with no execution egress.
+            crate::executor::spawn_if_configured(host, config).await?;
+            Ok(())
+        })
     }
 }
 
