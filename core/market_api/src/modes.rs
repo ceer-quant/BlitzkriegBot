@@ -161,6 +161,17 @@ pub enum ModeError {
         index: usize,
         got: String,
     },
+    /// `capabilities` appears in a STRATEGY declaration (plugin side still
+    /// accepts the key). A strategy names market_type and structure only:
+    /// the capability-requirement surface was removed after it made every
+    /// binary-market strategy refuse to serve on venues whose plugins declare
+    /// fewer display bits (2026-10, the plugin-switch incompatibility). The
+    /// plugin declares what it OFFERS (display metadata); a strategy can no
+    /// longer REQUIRE any of it.
+    CapabilityForbidden {
+        index: usize,
+        got: String,
+    },
 }
 
 impl std::fmt::Display for ModeError {
@@ -185,6 +196,12 @@ impl std::fmt::Display for ModeError {
             Self::UnknownCapability { index, got } => {
                 write!(f, "mode[index={index}] has unknown capability got={got:?}")
             }
+            Self::CapabilityForbidden { index, got } => write!(
+                f,
+                "mode[index={index}] carries capabilities (forbidden on a \
+                 strategy: it may declare market_type and structure only) \
+                 got={got:?}"
+            ),
         }
     }
 }

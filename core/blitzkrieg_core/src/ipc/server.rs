@@ -3053,8 +3053,7 @@ fn blueprint_save(
         "modes": [
             {
                 "market_type": "prediction",
-                "structure": "binary_outcome_wheel",
-                "capabilities": ["websocket_feed", "level2_snapshot"]
+                "structure": "binary_outcome_wheel"
             }
         ],
     });

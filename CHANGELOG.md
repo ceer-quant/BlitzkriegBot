@@ -3,6 +3,25 @@
 All notable changes to BlitzkriegBot are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
+## [Unreleased]
+
+### Fixed
+
+- **策略兼容性握手收敛**（插件切换全不相容的根因修复）：策略声明面回归规格
+  ——只许声明市场类型与结构，`capabilities` 是插件的 offer 面、不是策略的
+  声明面。9 个 Lua 策略包曾复制 polymarket 模板的三件套能力要求
+  （websocket_feed+level2_snapshot+post_only），在 kalshi/predictfun（仅
+  level2_snapshot）上被握手判据全拒；现判据收敛为两条——market_type 强相等
+  + 结构 None 或相等，能力位完全退出判定（插件侧 market.list 徽章数据不受
+  影响）。校验器对策略 payload 里的 `capabilities` 键 fail-loud
+  （`ModeError::CapabilityForbidden`），`StrategyMode.required_capabilities`
+  字段删除（编译期强制）。
+- **boot 棘轮不再抹持久格**：行情插件切换后，被握手拒绝的策略名字保留在
+  `strategy-state.json`（记录的是操作者意图，本会话被门禁拦下而已）；切回
+  兼容插件自动复活，无需手动重开。显式 disable 仍会移除名字——那是决定，
+  不是市场不匹配。首个版本保存的是有效启用集，一次切换就把所有不兼容策略
+  从文件里静默剥掉、切回也带不回来。
+
 ## [0.4.1] - 2026-10-15
 
 0.4.0 → 0.4.1 的 22 条提交，按主题归并。四大主线：**安全与风控加固**
