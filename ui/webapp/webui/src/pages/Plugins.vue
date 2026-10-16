@@ -1,8 +1,13 @@
 <script setup lang="ts">
 /**
- * 插件 — 扩展/行情两类插件的注册表视图（E9-g 插件治理页；E11/D-32：策略不再
- * 作为插件在此显示——策略页是策略的唯一入口，插件页只回答「核心挂了哪些外部
- * 能力」）。身份徽标、状态、活跃行情源。
+ * 插件 — 扩展/行情两类插件的注册表状态视图（E9-g 插件治理页；E11/D-32：策略
+ * 不再作为插件在此显示——策略页是策略的唯一入口，插件页只回答「核心挂了哪些
+ * 外部能力」）。身份徽标、状态、活跃行情源。
+ *
+ * 绑定即启用（2026-10-16 裁决）：插件启用由账户绑定派生，本页是纯读的状态
+ * 视图 —— 启用/停用与行情源选择等写动词已移交（绑定在账户切换器里编辑）。
+ * 这里只渲染会话事实：注册状态、模式声明、凭据解析；写动词只剩凭据录入与
+ * 统一映射确认（都不改「哪些插件启用」）。
  *
  * Issue 481：跨所配对视图（`unified.list` 只读）也在本页 —— 已确认的统一
  * 映射是「外部能力之间」的关系（两个行情插件各自盯住同一事件的一侧），
@@ -10,7 +15,7 @@
  * 数据渲染（no-venue-branch 门禁）。
  */
 import { computed, onMounted, ref } from 'vue'
-import { Puzzle, Radio, Plug, AlertTriangle, Link2, Power, RefreshCw } from 'lucide-vue-next'
+import { Puzzle, Radio, Plug, AlertTriangle, Link2, RefreshCw } from 'lucide-vue-next'
 import { usePanelStore } from '@/stores/panel'
 import { api, marketTypeLabel, type PluginRow, type UnifiedEventRow, type UnifiedCandidateRow, type MarketPluginReadoutDoc, type PluginCredentialRowDoc, type NetCheckDoc } from '@/api/client'
 import { readNetCheck } from '@/lib/net-check'
@@ -76,10 +81,14 @@ function stateLabel(s: string): string {
 }
 
 type Tone = 'up' | 'down' | 'gold' | 'default'
+
+/** 注册状态徽标（纯读）：内核注册表的 lifecycle state / enabled 位如实渲染，
+ *  不再提供改它的按钮 —— 启用集合由账户绑定派生（绑定即启用）。 */
 function status(r: PluginRow): { tone: Tone; label: string } {
   if (r.status === 'error') return { tone: 'down', label: '错误' }
-  if (r.enabled === false) return { tone: 'default', label: '停用' }
-  return { tone: 'up', label: '正常' }
+  if (r.enabled === false) return { tone: 'default', label: '未启用' }
+  if (r.state === 'disabled') return { tone: 'default', label: '未启用' }
+  return { tone: 'up', label: '已注册' }
 }
 
 /** Market-plugin capabilities — which seams the source actually implements. */
@@ -98,6 +107,28 @@ const CAPABILITY_LABELS: Record<string, string> = {
 }
 function capabilityLabel(c: string): string {
   return CAPABILITY_LABELS[c] ?? c
+}
+
+/** 模式声明（E27 §8.3）：插件的 `modes` wire 对象原样转可读串列表；数据驱动，
+ *  不特判。渲染成 name×side 摘要，缺字段时回落到 JSON 原样。 */
+function modesLabel(m: unknown): string {
+  if (m == null) return ''
+  if (typeof m === 'string') return m
+  if (Array.isArray(m)) return m.map((x) => modesLabel(x)).filter(Boolean).join('、')
+  if (typeof m === 'object') {
+    const o = m as Record<string, unknown>
+    const name = typeof o.name === 'string' ? o.name : ''
+    const side = typeof o.side === 'string' ? o.side : ''
+    if (name || side) return [name, side].filter(Boolean).join('·')
+  }
+  return JSON.stringify(m)
+}
+
+/** modes → 徽标串列表：数组拆项，单值包一元；null/undefined → 空数组。 */
+function modesList(m: unknown): string[] {
+  if (m == null) return []
+  const items = Array.isArray(m) ? m : [m]
+  return items.map((x) => modesLabel(x)).filter(Boolean)
 }
 
 const totals = computed(() => {
@@ -218,47 +249,16 @@ async function revokeEvent(e: UnifiedEventRow): Promise<void> {
 
 onMounted(loadUnifiedCandidates)
 
-// ── issue 485 插件启停/切换 ────────────────────────────────────────────────────────
+// ── issue 485 插件启停/切换 → 绑定即启用后只留读路径 ─────────────────────
+// （原扩展行 extension.enable/disable 与行情源 market.plugin.set 写路径已
+//   移交：启用集合由账户绑定派生，行情源在账户切换器绑定交易所时确定。
+//   本页的 market.plugin.get 读数仍渲染：本会话活跃谁、注册表有谁。）
 
-/** 启停操作的进行中行（名字键控），防重复点击。 */
-const toggling = ref<string | null>(null)
-/** 启停的结果提示：ok 显示为绿，错误显示为红。 */
-const toggleMsg = ref<{ tone: 'ok' | 'err'; text: string } | null>(null)
-
-/** 扩展行的 启用/停用 按钮：直接驱动内核 extension.enable/disable
- *  （on_load / on_unload 在内核里跑），成功后刷新注册表让 state 徽标跟上。 */
-async function toggleExtension(r: PluginRow): Promise<void> {
-  if (toggling.value) return
-  toggling.value = r.name
-  toggleMsg.value = null
-  try {
-    const enable = r.enabled === false
-    const res = await api.extensionSet(r.name, enable)
-    if (res.error) {
-      toggleMsg.value = { tone: 'err', text: res.error }
-    } else {
-      toggleMsg.value = {
-        tone: 'ok',
-        text: `${r.name} 已${enable ? '启用' : '停用'}。`,
-      }
-    }
-  } catch (e) {
-    toggleMsg.value = {
-      tone: 'err',
-      text: e instanceof Error ? e.message : String(e),
-    }
-  } finally {
-    toggling.value = null
-    await store.refresh()
-  }
-}
-
-/** 行情插件的读数（market.plugin.get）：下次会话将选什么、是否旗标钉住。 */
+/** 行情插件的读数（market.plugin.get）：本会话活跃谁、注册表有谁。 */
 const marketDoc = ref<MarketPluginReadoutDoc | null>(null)
 const marketBusy = ref(false)
-const marketMsg = ref<{ tone: 'ok' | 'err'; text: string } | null>(null)
 
-// issue 488：写入持久格成功后 10s 自动重启内核，让 next_session 立即落地。
+// issue 488：写入持久格成功后 10s 自动重启内核（凭据卡仍走这条路径）。
 const restart = useRestartCore()
 
 // ── 网络自检（issue 488）：行情到达不了时先分辨「插件没开」还是「网络被拦」──
@@ -293,64 +293,6 @@ async function loadMarketPlugin(): Promise<void> {
       persisted: false,
       flagPinned: false,
       error: e instanceof Error ? e.message : String(e),
-    }
-  } finally {
-    marketBusy.value = false
-  }
-}
-
-/** 设为活跃（下次会话）：写入持久格 data/runtime/config.json，重启生效；
- *  显式 --market-plugin 仍 outrank（内核回执与日志都写明）。 */
-async function setActivePlugin(name: string): Promise<void> {
-  if (marketBusy.value) return
-  marketBusy.value = true
-  marketMsg.value = null
-  try {
-    const res = await api.marketPluginSet({
-      name,
-      reason: 'webui 面板切换（插件页行情插件卡）',
-    })
-    if (res.error) {
-      marketMsg.value = { tone: 'err', text: res.error }
-    } else {
-      marketMsg.value = {
-        tone: 'ok',
-        text: `已保存：${RESTART_DELAY_SEC}s 后自动重启内核生效，将以 ${res.nextSessionPlugin} 为活跃行情源；本会话不变。`,
-      }
-      await loadMarketPlugin()
-      restart.schedule()
-    }
-  } catch (e) {
-    marketMsg.value = {
-      tone: 'err',
-      text: e instanceof Error ? e.message : String(e),
-    }
-  } finally {
-    marketBusy.value = false
-  }
-}
-
-/** 清除持久格：下次会话回落启动解析（显式旗标 > 首个注册者）。 */
-async function resetMarketPlugin(): Promise<void> {
-  if (marketBusy.value) return
-  marketBusy.value = true
-  marketMsg.value = null
-  try {
-    const res = await api.marketPluginSet({
-      reset: true,
-      reason: 'webui 面板清除（插件页行情插件卡）',
-    })
-    if (res.error) {
-      marketMsg.value = { tone: 'err', text: res.error }
-    } else {
-      marketMsg.value = { tone: 'ok', text: `已清除：${RESTART_DELAY_SEC}s 后自动重启，下次会话回落启动解析。` }
-      await loadMarketPlugin()
-      restart.schedule()
-    }
-  } catch (e) {
-    marketMsg.value = {
-      tone: 'err',
-      text: e instanceof Error ? e.message : String(e),
     }
   } finally {
     marketBusy.value = false
@@ -488,11 +430,11 @@ onMounted(loadCredentials)
       <SegmentedControl v-model="filter" :segments="segments" size="sm" />
     </div>
 
-    <!-- issue 485 行情插件切换卡（next_session）：active 是启动选择，写入落
-         data/runtime/config.json 的 marketPlugin 格，重启生效；显式
-         --market-plugin 仍 outrank（旗标钉住的会话写不动）。 -->
+    <!-- 行情插件状态卡（纯读）：本会话活跃谁是启动解析的事实（显式旗标 /
+         持久格 / 首个注册者），面板如实显示，不提供切换 —— 活跃源随账户
+         绑定走（绑定即启用）。 -->
     <Card class="mt-3.5" dense>
-      <CardHeader label="活跃行情源（下次会话切换）">
+      <CardHeader label="活跃行情源（会话事实）">
         <template #action>
           <Button variant="ghost" size="sm" :disabled="marketBusy" title="刷新读数" @click="loadMarketPlugin">
             <RefreshCw class="size-3.5" :class="marketBusy && 'animate-spin'" />
@@ -522,43 +464,25 @@ onMounted(loadCredentials)
         <div class="flex flex-wrap items-center gap-2">
           <span class="text-[12px] text-faint-fg">本会话活跃：</span>
           <Badge variant="gold" dot>{{ marketDoc.activePlugin || '—' }}</Badge>
-          <template v-if="marketDoc.nextSessionPlugin !== marketDoc.activePlugin">
-            <span class="text-[12px] text-faint-fg">下次会话：</span>
-            <Badge variant="info" dot>{{ marketDoc.nextSessionPlugin }}</Badge>
-          </template>
           <Badge v-if="marketDoc.flagPinned" variant="down">旗标钉住（--market-plugin 优先）</Badge>
-          <span v-if="toggling" class="text-[11.5px] text-faint-fg">处理中…</span>
         </div>
         <div class="mt-2.5 flex flex-wrap gap-1.5">
-          <Button
+          <span
             v-for="p in marketDoc.registered"
             :key="p.name"
-            :variant="p.name === marketDoc.activePlugin ? 'outline' : 'ghost'"
-            size="sm"
-            :disabled="marketBusy || p.active || marketDoc.flagPinned"
-            :title="p.active
-              ? '本会话的活跃源'
-              : marketDoc.flagPinned
-                ? '本会话由显式 --market-plugin 钉住，写入不动它（下次会话仍按旗标）'
-                : `下次会话以 ${p.name} 为活跃行情源（重启生效）`"
-            @click="setActivePlugin(p.name)"
+            class="inline-flex items-center"
           >
-            {{ p.name }}
-            <Badge v-if="p.active" variant="gold" dot>活跃</Badge>
-            <Badge v-else-if="p.name === marketDoc.nextSessionPlugin" variant="info">下次会话</Badge>
-          </Button>
-          <Button
-            v-if="marketDoc.persisted"
-            variant="ghost"
-            size="sm"
-            :disabled="marketBusy"
-            title="清除持久格：下次会话回落启动解析（显式旗标 > 首个注册者）"
-            @click="resetMarketPlugin"
-          >清除格</Button>
+            <Badge :variant="p.active ? 'gold' : 'outline'" dot>
+              {{ p.name }}{{ p.active ? ' · 活跃' : '' }}
+            </Badge>
+          </span>
         </div>
-        <div v-if="marketMsg" class="mt-2 text-[12px]" :class="marketMsg.tone === 'ok' ? 'text-primary' : 'text-down'">
-          {{ marketMsg.text }}
-        </div>
+        <!-- 绑定即启用（2026-10-16 裁决）：本页不再提供启停/切换写动词，
+             启用集合与活跃源由账户绑定派生 —— 在账户切换器里给账户绑定
+             交易所即启用对应插件。 -->
+        <p class="mt-2.5 text-[12px] text-muted-fg">
+          插件启用由账户绑定派生：在账户切换器里给账户绑定交易所即启用对应插件（绑定即启用）。
+        </p>
 
         <!-- issue 488：倒计时条（写入成功后出现）。10s 自动重启；可立即执行或取消。 -->
         <div v-if="restart.counting.value" class="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-line bg-panel-2 px-3 py-2">
@@ -814,15 +738,19 @@ onMounted(loadCredentials)
           <Badge variant="default"><RollingNumber :value="s.rows.length" /></Badge>
         </template>
       </CardHeader>
+      <!-- 绑定即启用（2026-10-16 裁决）：注册表是状态视图，启停写动词已移交。
+           每张插件卡都带这行说明，操作员不会在这里找不存在的开关。 -->
+      <p class="px-3 pt-2.5 text-[12px] text-muted-fg">
+        插件启用由账户绑定派生：在账户切换器里给账户绑定交易所即启用对应插件（绑定即启用）。
+      </p>
       <div class="-mx-2 overflow-x-auto">
         <table class="w-full min-w-[680px] text-[13px]">
           <thead>
             <tr class="text-left">
               <th class="label-micro px-2 pb-2.5">名称</th>
               <th class="label-micro px-2 pb-2.5">类型</th>
-              <th class="label-micro px-2 pb-2.5">状态</th>
-              <th v-if="s.key === 'extension'" class="label-micro px-2 pb-2.5">操作</th>
-              <th v-if="s.key === 'market'" class="label-micro px-2 pb-2.5">能力</th>
+              <th class="label-micro px-2 pb-2.5">注册状态</th>
+              <th v-if="s.key === 'market'" class="label-micro px-2 pb-2.5">模式与能力</th>
               <th class="label-micro px-2 pb-2.5">说明</th>
             </tr>
           </thead>
@@ -844,22 +772,6 @@ onMounted(loadCredentials)
               <td class="px-2 py-2.5">
                 <Badge :variant="status(r).tone" dot>{{ status(r).label }}</Badge>
               </td>
-              <td v-if="s.key === 'extension'" class="px-2 py-2.5">
-                <!-- issue 485 启用/停用：内核 extension.enable/disable（on_load /
-                     on_unload 在内核里跑）；state 徽标在刷新后跟上。 -->
-                <Button
-                  :variant="r.enabled === false ? 'outline' : 'ghost'"
-                  size="sm"
-                  :disabled="toggling !== null"
-                  :title="r.enabled === false
-                    ? `启用 ${r.name}（内核 on_load）`
-                    : `停用 ${r.name}（内核 on_unload）`"
-                  @click="toggleExtension(r)"
-                >
-                  <Power class="size-3.5" />
-                  {{ r.enabled === false ? '启用' : '停用' }}
-                </Button>
-              </td>
               <td v-if="s.key === 'market'" class="px-2 py-2.5">
                 <span class="inline-flex flex-wrap gap-1.5">
                   <Badge
@@ -868,13 +780,15 @@ onMounted(loadCredentials)
                     :variant="c.on ? 'up' : 'default'"
                     :class="c.on ? '' : 'opacity-45'"
                   >{{ c.label }}</Badge>
-                  <!-- E27 (§8.3): the plugin's own mode declaration — concrete
-                       structure when unanimous, capability seams by name.
-                       Neither present = undeclared (implicit type-only mode). -->
+                  <!-- E27 (§8.3): the plugin's own mode declaration — the wire
+                       `modes` object verbatim (数据驱动，不特判), plus the
+                       concrete structure when unanimous. Neither present =
+                       undeclared (implicit type-only mode). -->
+                  <Badge v-for="m in modesList(r.modes)" :key="`mode-${m}`" variant="gold">{{ m }}</Badge>
                   <Badge v-if="r.structure" variant="info">{{ r.structure }}</Badge>
                   <Badge v-for="c in r.capabilities ?? []" :key="`m-${c}`" variant="outline">{{ capabilityLabel(c) }}</Badge>
                   <Badge
-                    v-if="!r.structure && !r.capabilities?.length"
+                    v-if="!r.structure && !r.capabilities?.length && !modesList(r.modes).length"
                     variant="default"
                     class="opacity-60"
                   >未声明</Badge>
@@ -888,12 +802,6 @@ onMounted(loadCredentials)
         </table>
       </div>
     </Card>
-
-    <div v-if="toggleMsg" class="mt-3.5">
-      <AlertBanner :tone="toggleMsg.tone === 'ok' ? 'info' : 'error'" :title="toggleMsg.tone === 'ok' ? '操作成功' : '操作失败'">
-        {{ toggleMsg.text }}
-      </AlertBanner>
-    </div>
 
     <div v-if="store.plugins.lastError" class="mt-3.5">
       <AlertBanner
