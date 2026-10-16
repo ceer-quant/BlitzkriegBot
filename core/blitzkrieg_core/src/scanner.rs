@@ -6,6 +6,12 @@
 //! Polymarket extension's `gamma` module.
 
 use crate::model::CryptoMarket;
+use std::collections::HashMap;
+
+/// The clock bucket for markets (and corpora) that carry no venue tag — the
+/// pre-multi-plugin behaviour. Empty string == this bucket everywhere the
+/// scanner keys by venue.
+const DEFAULT_VENUE: &str = "";
 
 /// Duration label for a round length (5m/15m/1h/4h/daily). Kept in the core
 /// because it describes round cadence, not a venue; the extension reuses the
@@ -114,10 +120,14 @@ pub struct RoundTiming {
 pub struct Scanner {
     cfg: ScannerConfig,
     markets: Vec<CryptoMarket>,
-    /// Actual Polymarket end time (ms) when known — more accurate than the slot.
-    actual_end_time_ms: i64,
-    /// Polymarket time − local time (ms).
-    clock_offset_ms: i64,
+    /// Venue-reported actual round end (ms), keyed by the market's `venue`
+    /// tag. Multi-plugin data planes run one clock per venue: a Kalshi
+    /// declaration must not move the Polymarket expiry and vice versa. The
+    /// empty-string key is the legacy bucket — markets (or corpora) without a
+    /// venue tag — so old replays behave exactly as the single-value clock did.
+    actual_end_time_ms: HashMap<String, i64>,
+    /// Venue time − local time (ms), keyed by venue like `actual_end_time_ms`.
+    clock_offset_ms: HashMap<String, i64>,
 }
 
 impl Scanner {
@@ -125,8 +135,8 @@ impl Scanner {
         Self {
             cfg,
             markets: Vec::new(),
-            actual_end_time_ms: 0,
-            clock_offset_ms: 0,
+            actual_end_time_ms: HashMap::new(),
+            clock_offset_ms: HashMap::new(),
         }
     }
 
@@ -143,12 +153,25 @@ impl Scanner {
         self.markets.iter().find(|m| m.asset == up)
     }
 
+    /// The market a token belongs to (either side). Multi-plugin scanners hold
+    /// several venues' markets, and each venue's book has its own clock — the
+    /// exit policy reads the token's OWN market's expiry through this.
+    pub fn market_for_token(&self, token: &str) -> Option<&CryptoMarket> {
+        self.markets
+            .iter()
+            .find(|m| m.up_token_id == token || m.down_token_id == token)
+    }
+
     pub fn set_markets(&mut self, markets: Vec<CryptoMarket>) {
         self.markets = markets;
     }
 
     pub fn clock_offset_ms(&self) -> i64 {
         self.clock_offset_ms
+            .get(DEFAULT_VENUE)
+            .copied()
+            .or_else(|| self.clock_offset_ms.values().copied().min())
+            .unwrap_or(0)
     }
 
     /// Duration label used in Gamma slugs (5m/15m/1h/4h/daily).
@@ -156,10 +179,13 @@ impl Scanner {
         duration_label_for(self.cfg.round_duration_sec)
     }
 
-    /// Current round slot, floored to the round boundary using Polymarket time.
+    /// Current round slot, floored to the round boundary using venue time.
+    /// The slot grid is global this deployment (every plugin runs the same
+    /// round length); only the expiry refinements are per-venue.
     pub fn current_slot(&self, local_now_ms: i64) -> i64 {
-        let poly_now = local_now_ms + self.clock_offset_ms;
-        poly_now / 1000 / self.cfg.round_duration_sec
+        let offset = self.clock_offset_ms();
+        let venue_now = local_now_ms + offset;
+        venue_now / 1000 / self.cfg.round_duration_sec
     }
 
     fn slot_expiry_ms(&self, slot: i64) -> i64 {
@@ -172,17 +198,40 @@ impl Scanner {
     /// per call (two heap-allocated strings per market, twice per evaluate)
     /// is pure waste there. `round_state` remains for callers that want the
     /// owned markets snapshot.
+    ///
+    /// With several venues live the global clock is the EARLIEST observed
+    /// expiry (grid default when none): a round is tradeable only while every
+    /// venue's market is still open, so the most conservative expiry gates the
+    /// shared window. With one venue this is exactly the old single-value
+    /// behaviour (the observed end replaces the grid, never min'ed with it).
     pub fn round_timing(&self, local_now_ms: i64) -> RoundTiming {
+        self.round_timing_for_venue(DEFAULT_VENUE, local_now_ms)
+    }
+
+    /// The same clock, refined to ONE venue's observed expiry (empty venue =
+    /// the legacy bucket). Callers that already know the venue of the market
+    /// they judge (per-candidate gates, per-token exits) use this so one
+    /// venue's observed drift never freezes a sibling venue's trading.
+    pub fn round_timing_for_venue(&self, venue: &str, local_now_ms: i64) -> RoundTiming {
         let slot = self.current_slot(local_now_ms);
-        let expires = if self.actual_end_time_ms > 0 {
-            self.actual_end_time_ms
-        } else {
-            self.slot_expiry_ms(slot)
+        let grid = self.slot_expiry_ms(slot);
+        let earliest_observed = self
+            .actual_end_time_ms
+            .values()
+            .copied()
+            .filter(|t| *t > 0)
+            .min();
+        let effective = match self.actual_end_time_ms.get(venue) {
+            // The venue's own declaration is authoritative for its markets.
+            Some(t) if *t > 0 => *t,
+            // No own declaration: the conservative global clock — the earliest
+            // observed expiry across venues, or the grid when none has spoken.
+            _ => earliest_observed.unwrap_or(grid),
         };
-        let time_left = ((expires - local_now_ms) / 1000).max(0);
+        let time_left = ((effective - local_now_ms) / 1000).max(0);
         RoundTiming {
             slot,
-            expires_at_ms: expires,
+            expires_at_ms: effective,
             age_sec: self.cfg.round_duration_sec - time_left,
             time_left_sec: time_left,
         }
@@ -207,7 +256,10 @@ impl Scanner {
 
     /// The same check as [`Self::can_trade`], as a structured reason so the
     /// engine can tell a waivable window gate from the structural precondition
-    /// (E2-b / #27).
+    /// (E2-b / #27). The expiry gate reads the EARLIEST expiry across venues
+    /// (a round whose any-venue market is about to close is not tradeable),
+    /// while presence/age stay global — this is the whole-table verdict the
+    /// replay wake math relies on.
     pub fn can_trade_reason(&self, local_now_ms: i64) -> Result<(), TimingBlock> {
         let t = self.round_timing(local_now_ms);
         if self.markets.is_empty() {
@@ -228,7 +280,36 @@ impl Scanner {
         Ok(())
     }
 
-    /// Record the venue-reported end time and derive the clock offset.
+    /// Per-market form of [`Self::can_trade_reason`]: the expiry gate reads
+    /// THE MARKET'S OWN venue clock, so one venue running hot-to-expiry no
+    /// longer freezes a sibling venue's candidates (multi-plugin data plane).
+    /// Presence and age remain global (they describe the shared round).
+    pub fn can_trade_reason_for(
+        &self,
+        market: &CryptoMarket,
+        local_now_ms: i64,
+    ) -> Result<(), TimingBlock> {
+        if self.markets.is_empty() {
+            return Err(TimingBlock::NoMarkets);
+        }
+        let t = self.round_timing_for_venue(&market.venue, local_now_ms);
+        if t.age_sec < self.cfg.min_round_age_sec {
+            return Err(TimingBlock::TooYoung {
+                age_sec: t.age_sec,
+                min_age_sec: self.cfg.min_round_age_sec,
+            });
+        }
+        if t.time_left_sec < self.cfg.min_time_left_sec {
+            return Err(TimingBlock::TooCloseToExpiry {
+                time_left_sec: t.time_left_sec,
+                min_time_left_sec: self.cfg.min_time_left_sec,
+            });
+        }
+        Ok(())
+    }
+
+    /// Record the venue-reported end time and derive the clock offset — in the
+    /// reporting market's OWN venue slot.
     ///
     /// A declaration more than two rounds out (in either direction) is
     /// REFUSED rather than adopted: a discovery bug feeding a strike-ladder
@@ -237,6 +318,12 @@ impl Scanner {
     /// policy's clock, the D-31 floor) drifts with it. The slot grid keeps
     /// running on its own cadence until an in-band declaration arrives.
     pub fn observe_end_time(&mut self, end_ms: i64, local_now_ms: i64) {
+        self.observe_end_time_for_venue(DEFAULT_VENUE, end_ms, local_now_ms);
+    }
+
+    /// The same observation, stamped into `venue`'s clock slot. An empty
+    /// venue lands in the legacy bucket, keeping #498-era corpora identical.
+    pub fn observe_end_time_for_venue(&mut self, venue: &str, end_ms: i64, local_now_ms: i64) {
         if end_ms <= 0 {
             return;
         }
@@ -244,10 +331,11 @@ impl Scanner {
         if (end_ms - local_now_ms).abs() > 2 * round_ms {
             return;
         }
-        self.actual_end_time_ms = end_ms;
+        self.actual_end_time_ms.insert(venue.to_string(), end_ms);
         let local_slot = (local_now_ms / 1000) / self.cfg.round_duration_sec;
         let local_expected_end = (local_slot + 1) * self.cfg.round_duration_sec * 1000;
-        self.clock_offset_ms = end_ms - local_expected_end;
+        self.clock_offset_ms
+            .insert(venue.to_string(), end_ms - local_expected_end);
     }
 }
 
@@ -290,17 +378,23 @@ mod tests {
             ..Default::default()
         });
         let now = 1_000_000i64;
+        let observed = |s: &Scanner| {
+            s.actual_end_time_ms
+                .get(DEFAULT_VENUE)
+                .copied()
+                .unwrap_or(0)
+        };
         // A strike-ladder expiry years ahead (the kalshi discovery bug fed a
         // 2045 close into this path) must not hijack the round clock.
         s.observe_end_time(now + 10 * 365 * 86_400_000, now);
-        assert_eq!(s.actual_end_time_ms, 0, "out-of-band declaration refused");
+        assert_eq!(observed(&s), 0, "out-of-band declaration refused");
         assert_eq!(s.clock_offset_ms(), 0);
         // Same for a stale timestamp far in the past.
         s.observe_end_time(now - 3 * 900_000, now);
-        assert_eq!(s.actual_end_time_ms, 0);
+        assert_eq!(observed(&s), 0);
         // In-band (≤ 2 rounds out) still lands.
         s.observe_end_time(now + 1_800_000, now);
-        assert_eq!(s.actual_end_time_ms, now + 1_800_000);
+        assert_eq!(observed(&s), now + 1_800_000);
     }
 
     #[test]

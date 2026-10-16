@@ -137,11 +137,28 @@ fn snapshot_from_api(s: &api::ReconcileSnapshot) -> crate::reconcile::VenueSnaps
 #[derive(Clone)]
 pub struct CoreHost {
     core: Arc<AsyncMutex<Core>>,
+    /// The registry's active plugin name (the executor's plugin), resolved at
+    /// assembly. Untagged round lists (legacy corpora, hosts that do not
+    /// label markets) route their subscription here — the single-plugin
+    /// behaviour — instead of a hardcoded plugin name.
+    active_plugin: std::sync::Arc<std::sync::RwLock<String>>,
 }
 
 impl CoreHost {
     pub fn new(core: Arc<AsyncMutex<Core>>) -> Self {
-        Self { core }
+        Self {
+            core,
+            active_plugin: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
+        }
+    }
+
+    /// Assembly sets the active plugin name after selection (empty string =
+    /// unknown: callers keep the historical fallback).
+    pub fn set_active_plugin(&self, name: &str) {
+        *self
+            .active_plugin
+            .write()
+            .expect("core host active plugin lock poisoned") = name.to_string();
     }
 }
 
@@ -201,6 +218,23 @@ impl MarketHost for CoreHost {
                 .iter()
                 .flat_map(|mk| [mk.up_token_id.clone(), mk.down_token_id.clone()])
                 .collect();
+            // The plugin's own name: multi-plugin data planes key feeds (and
+            // the #498 top-up predicate) on the venue, so the subscription for
+            // this batch lands on the CALLING plugin's control — never on a
+            // sibling venue's. Untagged lists (legacy corpora, hosts that do
+            // not label markets) fall back to the registry's active plugin —
+            // the single-plugin behaviour; an empty fallback keeps "" (the
+            // legacy feed bucket) rather than guessing a venue.
+            let fallback = self
+                .active_plugin
+                .read()
+                .expect("core host active plugin lock poisoned")
+                .clone();
+            let plugin = markets
+                .first()
+                .map(|m| m.venue.as_str())
+                .filter(|v| !v.is_empty())
+                .unwrap_or(fallback.as_str());
             // Single lock: register the round, then subscribe its tokens (matches
             // the historical ordering exactly).
             let mut c = self.core.lock().await;
@@ -212,22 +246,29 @@ impl MarketHost for CoreHost {
                 now,
             );
             drop(c);
-            self.subscribe_tokens(tokens).await;
+            self.subscribe_tokens(plugin, tokens).await;
         })
     }
 
-    fn subscribe_tokens(&self, tokens: Vec<String>) -> BoxFuture<'_, ()> {
+    fn subscribe_tokens<'a>(&'a self, plugin: &str, tokens: Vec<String>) -> BoxFuture<'a, ()> {
+        let plugin = plugin.to_string();
         Box::pin(async move {
-            self.core.lock().await.subscribe_feed_tokens(tokens).await;
+            self.core
+                .lock()
+                .await
+                .subscribe_feed_tokens(&plugin, tokens)
+                .await;
         })
     }
 
-    fn install_subscription_control(
-        &self,
+    fn install_subscription_control<'a>(
+        &'a self,
+        plugin: &str,
         control: Arc<dyn api::SubscriptionControl>,
-    ) -> BoxFuture<'_, ()> {
+    ) -> BoxFuture<'a, ()> {
+        let plugin = plugin.to_string();
         Box::pin(async move {
-            self.core.lock().await.set_subscription(control);
+            self.core.lock().await.set_subscription(&plugin, control);
         })
     }
 

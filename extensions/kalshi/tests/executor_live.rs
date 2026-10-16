@@ -90,11 +90,16 @@ impl MarketHost for ExecSink {
     ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn subscribe_tokens(&self, _: Vec<TokenId>) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn subscribe_tokens(
+        &self,
+        _: &str,
+        _: Vec<TokenId>,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn install_subscription_control(
         &self,
+        _: &str,
         _: Arc<dyn SubscriptionControl>,
     ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
