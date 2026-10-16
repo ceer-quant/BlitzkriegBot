@@ -397,31 +397,37 @@ function onExpand(name: string): void {
               <template v-for="r in g.rows" :key="r.name">
                 <tr class="border-t border-line transition-colors hover:bg-panel-2">
                   <td class="px-2 py-2.5 font-semibold">
-                    <span class="inline-flex min-w-0 items-center gap-2">
-                      <span
-                        class="size-1.5 shrink-0 rounded-full"
-                        :style="{ background: isAbnormal(r) ? 'var(--down)' : r.enabled ? 'var(--up)' : 'var(--faint-fg)' }"
-                      />
-                      <span class="truncate" :title="r.name">{{ r.name }}</span>
-                      <!-- issue 393 (⑤): per-row 编辑策略 — jumps to the blueprint
-                           canvas and preloads this package's blueprint document
-                           (kernel `blueprint.load`). Lua rows only: the canvas
-                           edits the graph a blueprint compiles from. -->
-                      <Tooltip v-if="isLua(r)" content="在蓝图中编辑该策略（预载它的蓝图文档）">
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          title="在蓝图中编辑该策略"
-                          @click="editStrategy(r.name)"
-                        >
-                          <Pencil class="size-3.5" />
-                        </Button>
-                      </Tooltip>
-                      <!-- E27 (§8.3): incompatible = no active plugin satisfies any
-                           declared mode; the hover speaks both sides verbatim. -->
-                      <Tooltip v-if="r.compatible === false" :content="r.incompatibleReason ?? '无相容插件模式'">
-                        <Badge variant="down" dot>不相容</Badge>
-                      </Tooltip>
+                    <!-- 名称与动作分两区：名字截断在左，编辑/不相容钉在列右缘 ——
+                         按钮的 x 不随名称长度前后移动。 -->
+                    <span class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                      <span class="flex min-w-0 items-center gap-2">
+                        <span
+                          class="size-1.5 shrink-0 rounded-full"
+                          :style="{ background: isAbnormal(r) ? 'var(--down)' : r.enabled ? 'var(--up)' : 'var(--faint-fg)' }"
+                        />
+                        <span class="truncate" :title="r.name">{{ r.name }}</span>
+                      </span>
+                      <span class="flex items-center justify-end gap-2">
+                        <!-- E27 (§8.3): incompatible = no active plugin satisfies any
+                             declared mode; the hover speaks both sides verbatim. -->
+                        <Tooltip v-if="r.compatible === false" :content="r.incompatibleReason ?? '无相容插件模式'">
+                          <Badge variant="down" dot>不相容</Badge>
+                        </Tooltip>
+                        <!-- issue 393 (⑤): per-row 编辑策略 — jumps to the blueprint
+                             canvas and preloads this package's blueprint document
+                             (kernel `blueprint.load`). Lua rows only: the canvas
+                             edits the graph a blueprint compiles from. -->
+                        <Tooltip v-if="isLua(r)" content="在蓝图中编辑该策略（预载它的蓝图文档）">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            title="在蓝图中编辑该策略"
+                            @click="editStrategy(r.name)"
+                          >
+                            <Pencil class="size-3.5" />
+                          </Button>
+                        </Tooltip>
+                      </span>
                     </span>
                   </td>
                   <td class="px-2 py-2.5">
@@ -547,19 +553,22 @@ function onExpand(name: string): void {
                           <span class="font-normal text-faint-fg">—— 声明域外的值会被内核拒绝；改动下次评估生效，未持久化（重启回落 manifest 默认）。</span>
                         </div>
                         <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                          <!-- 每行三列定宽（名称截断 / 输入框 / 区间截断）：所有
+                               参数行的输入框与区间落在同一 x 上，不随名称或区间
+                               文本长度前后位移。 -->
                           <label
                             v-for="t in paramsCache[r.name].tunables"
                             :key="`knob-${t.name}`"
-                            class="flex items-center gap-2 text-[12px]"
+                            class="grid grid-cols-[minmax(0,9rem)_5.5rem_6rem] items-center gap-2 text-[12px]"
                           >
-                            <span class="min-w-0 flex-1 truncate text-muted-fg" :title="t.name">{{ t.name }}</span>
+                            <span class="truncate text-muted-fg" :title="t.name">{{ t.name }}</span>
                             <Input
                               v-model="paramsDraft[`${r.name}::${t.name}`]"
                               size="sm"
-                              class="w-24 text-right"
+                              class="w-full text-right"
                               :placeholder="t.value"
                             />
-                            <span class="whitespace-nowrap text-[11px] text-faint-fg">[{{ t.min }}, {{ t.max }}]</span>
+                            <span class="truncate whitespace-nowrap text-[11px] text-faint-fg" :title="`[${t.min}, ${t.max}]`">[{{ t.min }}, {{ t.max }}]</span>
                           </label>
                         </div>
                         <div class="mt-2 flex items-center gap-2">
