@@ -3030,8 +3030,10 @@ mod tests {
         // The gateway's snapshot mapping forwards whatever it parsed: empty
         // stays empty (the panel's "show unattributed" signal), "paper" stays
         // "paper".
-        let mut snap = UiSnapshot::default();
-        snap.positions = vec![pos, attributed];
+        let snap = UiSnapshot {
+            positions: vec![pos, attributed],
+            ..UiSnapshot::default()
+        };
         let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, None)).unwrap();
         let rows = doc["positions"].as_array().expect("positions array");
         assert_eq!(rows.len(), 2);
