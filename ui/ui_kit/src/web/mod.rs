@@ -2341,6 +2341,26 @@ impl WebServer {
                 };
                 (200, "application/json", doc.to_string().into_bytes())
             }
+            ("GET", "/api/account-journal") => {
+                // #511: the wallet's cash journal — a thin proxy of
+                // `account.journal` (read-only). Query params (`accountId` /
+                // `limit`) pass through untouched in wire shape; accountId
+                // absent = the session's default account, limit clamps
+                // 1..=500 kernel-side. The ledger answers from its append-only
+                // journal, so the panel reads the trail the balance commits
+                // against — the window (`truncated`) is disclosed, not hidden.
+                let mut params = serde_json::Map::new();
+                if let Some(v) = req.query_param("accountId") {
+                    params.insert("accountId".into(), serde_json::json!(v));
+                }
+                if let Some(n) = req
+                    .query_param("limit")
+                    .and_then(|v| v.parse::<usize>().ok())
+                {
+                    params.insert("limit".into(), serde_json::json!(n));
+                }
+                self.proxy_backtest("account.journal", serde_json::Value::Object(params))
+            }
             ("GET", "/api/plugins") => {
                 // E9-g: the registry trio the TUI Plugins page shows (strategies
                 // / extensions / market plugins) in one authenticated call.

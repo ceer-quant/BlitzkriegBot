@@ -6,13 +6,13 @@
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
-import { Activity, Play, Square, Bell, BellOff, Search, X, TrendingUp, TrendingDown, Clock, Filter, Info } from 'lucide-vue-next'
-import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type BookSide, type BookLevel, type OrderRow } from '@/api/client'
+import { Activity, Play, Square, Bell, BellOff, Search, X, TrendingUp, TrendingDown, Clock, Filter, Info, ChevronDown } from 'lucide-vue-next'
+import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type BookSide, type BookLevel, type OrderRow, type AccountJournalDoc, type AccountJournalRowDoc } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
 import { useTheme } from '@/lib/theme'
 import {
-  num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration, dateTime,
+  num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration, dateTime, clockTime,
 } from '@/lib/format'
 import { balanceView } from '@/lib/balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
@@ -272,6 +272,63 @@ const balanceAccountSuffix = (label: string): string => {
   if (!id || store.accounts.length <= 1) return label
   return `${label} · ${id}`
 }
+
+// ── 现金流水卡（account.journal，issue 509 内核 / issue 511 动词 / issue 513 面板消费面）─────
+// issue 509 给 Ledger 加的 append-only 现金流水在此可见：操作者能看见每笔钱的来去
+// （「钱包应是真实记账」的最后一公里）。折叠卡默认收起——展开时拉一次
+// account.journal（limit 100），不随 2s 快照轮询打。
+/** 九个内核 JournalKind 的中文标签——固定映射表，一处消费（本卡）。 */
+const JOURNAL_KIND_LABELS: Record<string, string> = {
+  seed: '注资',
+  buy_fill: '买入成交',
+  sell_fill: '卖出成交',
+  fee: '手续费',
+  merge: '合并赎回',
+  redemption: '结算赔付',
+  cashflow: '返现',
+  realign: '对账回正',
+  reset: '重置',
+}
+const journalOpen = ref(false)
+const journalLoading = ref(false)
+const journalErr = ref<string | null>(null)
+const journalDoc = ref<AccountJournalDoc | null>(null)
+const journalRows = computed<AccountJournalRowDoc[]>(() => journalDoc.value?.rows ?? [])
+/**
+ * 老内核没有 account.journal 动词 → 网关把 JSON-RPC 错误包成 200 + {error}
+ * 文档。照 AccountSwitcher 的容错正则判「未知动词」，整卡退化为一句升级
+ * 提示而不是崩——这份 UI 先合，内核合上后自动活。
+ */
+const journalUnsupported = computed(() => {
+  const msg = journalDoc.value?.error ?? journalErr.value ?? ''
+  return /unknown|not found|method|未知的|不支持/i.test(msg)
+})
+const journalFatal = computed(() => {
+  if (journalUnsupported.value) return '当前内核不支持流水查看，需要升级内核'
+  return journalErr.value ?? journalDoc.value?.error ?? ''
+})
+/** 展开时拉一次（缺省账户由内核按 §9.5 解析）；重展开刷新，不加轮询。 */
+function toggleJournal(): void {
+  journalOpen.value = !journalOpen.value
+  if (journalOpen.value) void loadJournal()
+}
+async function loadJournal(): Promise<void> {
+  journalLoading.value = true
+  journalErr.value = null
+  try {
+    journalDoc.value = await api.accountJournal({ limit: 100 })
+  } catch (e) {
+    journalDoc.value = null
+    journalErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    journalLoading.value = false
+  }
+}
+const journalKindLabel = (kind: string): string => JOURNAL_KIND_LABELS[kind] ?? kind
+/** ref 等宽小字超长截断：悬停看全文。 */
+const journalRef = (r: string): string => (r.length > 24 ? `${r.slice(0, 24)}…` : r || '—')
+/** 余额列渲染 balanceAfter（decimal 字符串），空窗口给一行诚实文案。 */
+const journalBalance = (v: string): string => money(v)
 
 // ── history filters ─────────────────────────────────────────────────────────
 const fTime = ref<'all' | 'today' | '7d'>('all')
@@ -1021,6 +1078,90 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         </div>
       </Card>
     </div>
+
+    <!-- ── 现金流水（account.journal）──────────────────────────────────────
+      钱包重构的最后一公里：操作者能看见每笔钱的来去。折叠卡默认收起，
+      展开时拉一次 account.journal（limit 100）——流水是审计 trail，不是
+      行情，不随 2s 快照轮询打。老内核没有该动词时整卡退化为一句升级提示。
+    -->
+    <Card class="mt-3.5" dense>
+      <button
+        class="flex w-full items-center gap-2 text-left"
+        @click="toggleJournal"
+      >
+        <ChevronDown
+          class="size-3.5 text-faint-fg transition-transform"
+          :class="journalOpen && 'rotate-180'"
+        />
+        <span class="label-micro">现金流水</span>
+        <span
+          v-if="journalDoc?.accountId"
+          class="font-mono text-[11px] text-faint-fg"
+          :title="'流水所属账户（§9.5 会话默认）'"
+        >{{ journalDoc.accountId }}</span>
+        <span
+          v-if="journalRows.length"
+          class="text-[11px] text-faint-fg num"
+        ><RollingNumber :value="journalRows.length" /> 笔</span>
+        <span class="ml-auto text-[11px] text-faint-fg">{{ journalOpen ? '收起' : '展开' }}</span>
+      </button>
+
+      <div v-if="journalOpen" class="mt-3">
+        <!-- 老内核 / 网络失败：一句话如实说，不崩卡。 -->
+        <p v-if="journalFatal" class="text-[12px]" :class="journalUnsupported ? 'text-muted-fg' : 'text-down'">
+          {{ journalFatal }}
+        </p>
+        <p v-else-if="journalLoading && !journalRows.length" class="text-[12px] text-faint-fg">
+          加载中…
+        </p>
+        <template v-else-if="journalRows.length">
+          <div class="overflow-x-auto">
+            <table class="w-full min-w-[640px] text-[12.5px]">
+              <thead>
+                <tr class="text-left">
+                  <th class="label-micro px-2 pb-2">时间</th>
+                  <th class="label-micro px-2 pb-2">类型</th>
+                  <th class="label-micro px-2 pb-2 text-right">金额</th>
+                  <th class="label-micro px-2 pb-2 text-right">余额</th>
+                  <th class="label-micro px-2 pb-2">ref</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="(r, i) in journalRows"
+                  :key="`${r.atMs}-${i}`"
+                  class="border-t border-line transition-colors hover:bg-panel-2"
+                >
+                  <td class="whitespace-nowrap px-2 py-2 font-mono text-[11.5px] text-faint-fg">{{ clockTime(r.atMs) }}</td>
+                  <td class="px-2 py-2">
+                    <Badge variant="outline">{{ journalKindLabel(r.kind) }}</Badge>
+                  </td>
+                  <td
+                    class="px-2 py-2 text-right num font-semibold"
+                    :class="Number(r.amount) >= 0 ? 'text-up' : 'text-down'"
+                  ><RollingNumber :value="signedMoney(r.amount)" /></td>
+                  <td class="px-2 py-2 text-right num text-muted-fg"><RollingNumber :value="journalBalance(r.balanceAfter)" /></td>
+                  <td
+                    class="max-w-[220px] truncate px-2 py-2 font-mono text-[11px] text-faint-fg"
+                    :title="r.ref"
+                  >{{ journalRef(r.ref) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <!-- truncated 披露：读者看到的是内存窗口（JOURNAL_CAP = 10000），不是全史。 -->
+          <p v-if="journalDoc?.truncated" class="mt-2 text-[10.5px] text-faint-fg">
+            仅显示最近 100 笔（内核窗口 10000）
+          </p>
+        </template>
+        <EmptyState
+          v-else
+          text="流水为空"
+          hint="该账户的账本还没有任何现金变动；启动引擎、注资或成交后这里会出现每一笔。"
+          compact
+        />
+      </div>
+    </Card>
 
     <!-- ── positions / orders / history ─────────────────────────────────── -->
     <Card class="mt-3.5" dense>
