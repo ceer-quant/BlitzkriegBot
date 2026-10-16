@@ -13,12 +13,14 @@
  * and this component would not render one if there were.
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Wallet, ChevronDown, Check, RefreshCw } from 'lucide-vue-next'
-import { getToken } from '../api/client'
+import { Wallet, ChevronDown, Check, RefreshCw, Link2 } from 'lucide-vue-next'
+import { getToken, api } from '../api/client'
 import { money } from '../lib/format'
 import { usePanelStore } from '../stores/panel'
 
-/** Mirror of the core's AccountView (ipc/schema.rs) — camelCase wire. */
+/** Mirror of the core's AccountView (ipc/schema.rs) — camelCase wire.
+ *  `venue` 是账户↔交易所绑定（market-plugin 名）；老内核不回该字段 →
+ *  undefined，按未绑定（''）渲染。 */
 interface AccountRow {
   id: string
   name: string
@@ -28,6 +30,9 @@ interface AccountRow {
   balance: string | number
   available: string | number
   credentialsLoaded: boolean
+  /** 账户绑定的交易所（market-plugin 名）；空串 = 未绑定（可交易任意交易所）。 */
+  venue?: string
+  reserved?: string | number
   openPositions: number
   dayRealizedUsd: string | number
 }
@@ -115,6 +120,8 @@ async function refresh(): Promise<void> {
         status: a.status,
         balance: a.balance,
         available: a.available,
+        venue: a.venue ?? '',
+        reserved: a.reserved ?? '',
       })),
     )
   } catch (e) {
@@ -128,6 +135,84 @@ function toggle(): void {
   open.value = !open.value
   if (open.value) void refresh()
 }
+
+// ── 账户↔交易所绑定（account.venue.get / account.venue.set，§9.1）────────────
+// 一个交易所 + 一套 API = 一个账户；绑定后该账户只能交易该 venue 的 token
+// （内核拒单守卫 refuse_cross_venue_order）。未绑定（''）= 可交易任意交易所，
+// 历史行为。这是插件启用的主控制面：下一批内核把「启用集合」改为 boot 时
+// 从账户派生 —— 绑定了某 venue 的账户即启用该 venue 插件。
+const venueOptions = ref<string[]>([])
+const venueLoading = ref(false)
+/** 正在编辑绑定的账户 id（一次展开一行）。 */
+const venueEditing = ref<string | null>(null)
+const venueDraft = ref('')
+const venueBusy = ref(false)
+const venueErr = ref<string | null>(null)
+const venueMsg = ref<string | null>(null)
+
+/** 已注册插件名 = 可绑定的交易所集合（market.plugin.get 的 registered）。 */
+async function loadVenueOptions(): Promise<void> {
+  venueLoading.value = true
+  try {
+    const doc = await api.marketPlugin()
+    venueOptions.value = (doc.registered ?? []).map((p) => p.name).filter(Boolean)
+  } catch {
+    venueOptions.value = []
+  } finally {
+    venueLoading.value = false
+  }
+}
+
+function editVenue(a: AccountRow): void {
+  if (venueEditing.value === a.id) {
+    venueEditing.value = null
+    return
+  }
+  venueEditing.value = a.id
+  venueDraft.value = a.venue ?? ''
+  venueErr.value = null
+  void loadVenueOptions()
+}
+
+/**
+ * 保存绑定：`account.venue.set` params `{accountId, venue, reason}`，
+ * venue 空 = 解绑。老内核没有该动词 → 命令失败，提示需要升级内核而不是崩。
+ */
+async function saveVenue(a: AccountRow): Promise<void> {
+  if (venueBusy.value) return
+  venueBusy.value = true
+  venueErr.value = null
+  venueMsg.value = null
+  const next = venueDraft.value.trim()
+  try {
+    const res = await api.command(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'account.venue.set',
+      params: { accountId: a.id, venue: next, reason: 'panel' },
+    }))
+    if (!res.ok) throw new Error(res.message ?? '绑定被内核拒绝')
+    venueMsg.value = next
+      ? `已绑定：账户 ${a.id} → ${next}（立即生效）。`
+      : `已解绑：账户 ${a.id} 可交易任意交易所（立即生效）。`
+    venueEditing.value = null
+    await refresh()
+    store.refresh()
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    // 未知动词（内核早于 account.venue.set）按「需要升级」提示 —— 这份 UI
+    // 先合，内核合上后自动活。
+    venueErr.value = /unknown|not found|method|未知的|不支持/i.test(msg)
+      ? '当前内核不支持账户↔交易所绑定，需要升级内核后生效。'
+      : msg
+  } finally {
+    venueBusy.value = false
+    setTimeout(() => { venueMsg.value = null }, 6000)
+  }
+}
+
+const venueLabel = (v: string | undefined): string =>
+  v ? v : '未绑定（可交易任意交易所）'
 
 const root = ref<HTMLElement | null>(null)
 function onOutside(e: MouseEvent): void {
@@ -210,6 +295,39 @@ onBeforeUnmount(() => {
             <span>可用 <span class="num text-fg">{{ money(a.available) }}</span></span>
             <span>持仓 <span class="num">{{ a.openPositions }}</span></span>
           </span>
+          <span class="mt-0.5 flex items-center gap-1.5 text-[11px]">
+            <Link2 class="size-3 shrink-0 text-faint-fg" />
+            <span
+              class="truncate"
+              :class="a.venue ? 'text-fg' : 'text-faint-fg'"
+              :title="a.venue ? `绑定交易所：${a.venue}（只能交易该 venue 的 token）` : '未绑定（可交易任意交易所）'"
+            >{{ venueLabel(a.venue) }}</span>
+            <button
+              class="ml-auto shrink-0 rounded px-1 text-[10.5px] text-faint-fg transition-colors hover:text-fg"
+              :title="'编辑账户绑定的交易所'"
+              @click.stop="editVenue(a)"
+            >{{ venueEditing === a.id ? '收起' : '绑定' }}</button>
+          </span>
+          <span v-if="venueEditing === a.id" class="mt-1.5 block" @click.stop>
+            <span class="flex items-center gap-1.5">
+              <select
+                v-model="venueDraft"
+                class="min-w-0 flex-1 rounded border border-line bg-panel-2 px-1.5 py-1 text-[11.5px] text-fg"
+                :disabled="venueLoading || venueBusy"
+              >
+                <option value="">未绑定（可交易任意交易所）</option>
+                <option v-for="v in venueOptions" :key="v" :value="v">{{ v }}</option>
+              </select>
+              <button
+                class="shrink-0 rounded bg-panel-2 px-2 py-1 text-[11px] font-semibold text-fg transition-colors hover:bg-panel-2/80 disabled:opacity-50"
+                :disabled="venueBusy || venueLoading"
+                @click="saveVenue(a)"
+              >{{ venueBusy ? '保存中…' : '保存' }}</button>
+            </span>
+            <span v-if="venueLoading" class="mt-0.5 block text-[10.5px] text-faint-fg">交易所清单加载中…</span>
+            <span v-if="venueErr" class="mt-0.5 block text-[10.5px] text-down">{{ venueErr }}</span>
+            <span v-else-if="venueMsg" class="mt-0.5 block text-[10.5px] text-up">{{ venueMsg }}</span>
+          </span>
           <span v-if="a.statusReason" class="mt-0.5 block truncate text-[11px] text-down">
             {{ a.statusReason }}
           </span>
@@ -222,6 +340,7 @@ onBeforeUnmount(() => {
       </p>
       <p class="mt-1 border-t border-line px-2 pt-1.5 text-[10.5px] leading-relaxed text-faint-fg">
         切换只改变本面板连接的默认账户（§9.5 会话级）；其他连接不受影响。
+        绑定交易所的账户只能交易该交易所（插件启用将随账户派生——绑定即启用）。
       </p>
     </div>
   </div>
