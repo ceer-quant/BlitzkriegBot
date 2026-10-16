@@ -24,6 +24,11 @@ export interface PanelAccountRow {
   status: string
   balance: string | number
   available: string | number
+  /** 只读：老内核回读缺该字段时以 '' 渲染（未绑定，可交易任意交易所）。 */
+  venue?: string
+  /** 账户自有账本的预留/可用（账户级余额瓦片走这里，进程级 ledger 不再是
+   *  余额来源 —— E28 §9.5：一个账户一套账本）。 */
+  reserved?: string | number
 }
 
 export const usePanelStore = defineStore('panel', () => {
@@ -83,6 +88,24 @@ export const usePanelStore = defineStore('panel', () => {
     activeAccount.value = active
     accounts.value = rows
   }
+
+  /**
+   * active 账户的绑定 venue（''/undefined = 未绑定，可交易任意交易所）。
+   * 行情页的 venue 过滤是这里的纯派生 —— 账户切换器就是交易所切换器，
+   * 页面不另设 venue 控件（账户↔venue 配对卡的下游跟随者）。
+   */
+  const activeAccountVenue = computed(() => {
+    const id = activeAccount.value
+    if (!id) return ''
+    return accounts.value.find((a) => a.id === id)?.venue ?? ''
+  })
+
+  /** active 账户的行（账户级余额瓦片读它的 balance/available/reserved）。 */
+  const activeAccountRow = computed(() => {
+    const id = activeAccount.value
+    if (!id) return null
+    return accounts.value.find((a) => a.id === id) ?? null
+  })
 
   function requestNav(tab: string): void {
     navRequest.value = { tab }
@@ -199,7 +222,7 @@ export const usePanelStore = defineStore('panel', () => {
     snapshot, plugins, error, loading, lastUpdated,
     connected, strategyRows, tradeRows, feedAt, sessionExpired,
     navRequest, blueprintPreload,
-    activeAccount, accounts, setAccounts,
+    activeAccount, accounts, setAccounts, activeAccountVenue, activeAccountRow,
     refresh, acknowledgeSessionReset,
     requestNav, clearNavRequest, requestBlueprintPreload, takeBlueprintPreload,
   }

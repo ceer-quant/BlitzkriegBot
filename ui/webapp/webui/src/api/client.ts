@@ -480,6 +480,14 @@ export interface OrderRow {
    * core — unattributed, shown regardless of the active account.
    */
   accountId?: string
+  /**
+   * #427-style venue tag. The orders wire does not carry it yet (positions
+   * and trades do), so it is always absent today: the venue filter keeps
+   * such rows visible — an order must not be silently dropped just because
+   * the kernel cannot say which venue it trades. When the kernel starts
+   * tagging orders this field lights up with no UI change.
+   */
+  venue?: string
 }
 
 /** `orders.force_close` 请求体：只点名订单，判定（幽灵/活轮）在内核。 */

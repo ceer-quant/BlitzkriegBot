@@ -48,3 +48,36 @@ export function filterByAccount<T extends AccountedRow>(
     attributed: true,
   }
 }
+
+// ── venue 层（账户绑定交易所的下游过滤）────────────────────────────────────
+/** One venue-tagged row: the only field the venue filter reads (#427 rows). */
+interface VenuedRow {
+  venue?: string
+}
+
+export interface VenueFilterResult<T> {
+  rows: T[]
+  /** True only when an active venue is bound AND rows actually carry venue tags. */
+  attributed: boolean
+}
+
+/**
+ * Filter rows to the venue the ACTIVE ACCOUNT is bound to (账户切换器就是
+ * 交易所切换器). Empty binding (or no active account) → show everything —
+ * an unbound account trades any venue, so its page must too. Rows without a
+ * venue tag (pre-#427 cores/records) stay visible for the same reason
+ * `filterByAccount` keeps unattributed rows: nobody can say where they came
+ * from, so hiding them would falsify the book.
+ */
+export function filterByVenue<T extends VenuedRow>(
+  rows: readonly T[],
+  venue: string,
+): VenueFilterResult<T> {
+  if (!venue) return { rows: [...rows], attributed: false }
+  const anyTagged = rows.some((r) => !!r.venue)
+  if (!anyTagged) return { rows: [...rows], attributed: false }
+  return {
+    rows: rows.filter((r) => !r.venue || r.venue === venue),
+    attributed: true,
+  }
+}
