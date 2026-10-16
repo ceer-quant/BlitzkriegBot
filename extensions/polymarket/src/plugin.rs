@@ -94,7 +94,8 @@ impl DataFeed for PolymarketDataFeed {
             // background tasks; register it so the host can re-subscribe tokens.
             let handle =
                 crate::feed::spawn_feed(host.clone(), initial_tokens, config.spot_assets).await;
-            host.install_subscription_control(Arc::new(handle)).await;
+            host.install_subscription_control("polymarket", Arc::new(handle))
+                .await;
             Ok(())
         })
     }

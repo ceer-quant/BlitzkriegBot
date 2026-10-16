@@ -532,6 +532,12 @@ impl Engine {
         &self.scanner
     }
 
+    /// The scanner market a token belongs to (either side), if any. Multi-plugin
+    /// callers (the rollover taker-kill) need the VENUE of a leg's token.
+    pub fn market_for_token(&self, token: &str) -> Option<&crate::model::CryptoMarket> {
+        self.scanner.market_for_token(token)
+    }
+
     pub fn set_config(&mut self, cfg: EngineConfig) {
         self.scanner.set_config(cfg.scanner.clone());
         for s in &mut self.strategies {
@@ -655,13 +661,18 @@ impl Engine {
                 // reset, no clock change (the first feed already observed the
                 // round's one expiry). A different slot is a real rollover and
                 // keeps the full replay below.
+                //
+                // Multi-plugin data plane: the check is VENUE-BLIND slot
+                // membership (`.first()` generalized to `.any()`) — in a
+                // mixed-venue table the scanner's first market may be any
+                // venue's, and a same-slot feed from a SECOND venue is exactly
+                // the same staggered-listing top-up (#498's "迟上架轮内补查",
+                // now across venues). Single-venue tables hold one slot, so
+                // `any` == the old `first` check — #498's corpus and the
+                // pre-venue baselines stay byte-identical.
                 let slot = markets.first().map(|m| m.round_slot).unwrap_or(0);
-                let scanner_holds_slot = slot != 0
-                    && self
-                        .scanner
-                        .markets()
-                        .first()
-                        .is_some_and(|m| m.round_slot == slot);
+                let scanner_holds_slot =
+                    slot != 0 && self.scanner.markets().iter().any(|m| m.round_slot == slot);
                 if scanner_holds_slot {
                     let known: std::collections::HashSet<&str> = self
                         .scanner
@@ -706,14 +717,26 @@ impl Engine {
                 // clock) must track it, not the host's wall clock. Without
                 // this, a misaligned or shifted venue schedule silently
                 // drifts every timing decision. `observe_end_time` ignores
-                // non-positive declarations and derives the clock offset.
+                // non-positive declarations and derives the clock offset —
+                // into the feeding market's OWN venue slot (multi-plugin:
+                // Kalshi's declaration must not move Polymarket's clock).
                 if let Some(m) = markets.first() {
-                    self.scanner.observe_end_time(m.expires_at_ms, now_ms);
+                    self.scanner
+                        .observe_end_time_for_venue(&m.venue, m.expires_at_ms, now_ms);
                 }
-                let slot = markets.first().map(|m| m.round_slot).unwrap_or(0);
                 // Real round timing for the transition: how much of the round
-                // was left at this instant, straight from the scanner.
-                let time_left_sec = self.scanner.round_timing(now_ms).time_left_sec;
+                // was left at this instant, straight from the scanner. The
+                // same-batch venue's own clock (a rollover REPLACES that
+                // venue's markets — its old expiry is gone with them; the
+                // conservative global window still covers the siblings).
+                let venue = markets
+                    .first()
+                    .map(|m| m.venue.as_str())
+                    .unwrap_or_default();
+                let time_left_sec = self
+                    .scanner
+                    .round_timing_for_venue(venue, now_ms)
+                    .time_left_sec;
                 for s in &mut self.strategies {
                     s.strategy.on_round(slot, time_left_sec, now_ms);
                 }
@@ -724,7 +747,25 @@ impl Engine {
                 // the old round must not leak into it.
                 self.last_candidates.clear();
                 self.candidates_stable = false;
-                self.scanner.set_markets(markets);
+                // The rollover replaces the FEEDING VENUE's markets only: a
+                // batch always lists the complete round of its own venue, so
+                // everything of `venue` in the table is stale. Sibling venues'
+                // markets (multi-plugin data plane) stay live — they roll over
+                // through their own feeds. An empty venue tag keeps the whole
+                // table replace (the historical single-plugin semantics).
+                if venue.is_empty() {
+                    self.scanner.set_markets(markets);
+                } else {
+                    let mut kept: Vec<CryptoMarket> = self
+                        .scanner
+                        .markets()
+                        .iter()
+                        .filter(|m| m.venue != venue)
+                        .cloned()
+                        .collect();
+                    kept.extend(markets);
+                    self.scanner.set_markets(kept);
+                }
                 // Seed trend with current mids so confirmation starts immediately.
                 let now = now_ms;
                 let tokens: Vec<String> = self
@@ -1020,7 +1061,6 @@ impl Engine {
         now_ms: i64,
     ) -> Vec<crate::model::OrderRequest> {
         let round = self.scanner.round_timing(now_ms);
-        let timing = self.scanner.can_trade_reason(now_ms).err();
         let mut orders = Vec::new();
         // At most one entry per token per cycle: the first candidate (in
         // registration order) wins, matching the one-live-entry-per-token rule
@@ -1033,6 +1073,17 @@ impl Engine {
             if !emitted.insert(sig.token_id.clone()) {
                 continue;
             }
+            // Multi-plugin data plane: the timing verdict is PER-CANDIDATE —
+            // the expiry gate reads the candidate's own venue clock, so a
+            // polymarket market inside its force-exit window no longer freezes
+            // a kalshi candidate in the same evaluation (and vice versa).
+            // Presence/age stay the global verdict; the per-market form only
+            // refines which expiry applies. Without a market (stale signal for
+            // a token the scanner dropped) the whole-table verdict decides.
+            let timing = match self.scanner.market_for_token(&sig.token_id) {
+                Some(m) => self.scanner.can_trade_reason_for(m, now_ms).err(),
+                None => self.scanner.can_trade_reason(now_ms).err(),
+            };
             if let Some(block) = timing {
                 // E2-b: a strategy may declare the timing WINDOW gates unnecessary
                 // for its own candidates. The structural precondition (no market
@@ -1814,6 +1865,7 @@ fn fresh_book(
 mod tests {
     use super::*;
     use crate::risk::RiskConfig;
+    use crate::scanner::TimingBlock;
     use crate::service::{Core, CoreConfig};
     use rust_decimal_macros::dec;
     use std::sync::{Arc, Mutex};
@@ -1932,6 +1984,145 @@ mod tests {
             "a genuine rollover keeps its historic semantics"
         );
         assert_eq!(e.scanner.markets().len(), 1, "a new slot replaces the list");
+    }
+
+    fn venue_market(end_ms: i64, venue: &str) -> CryptoMarket {
+        CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: format!("cond-{venue}"),
+            question_id: format!("q-{venue}"),
+            up_token_id: format!("{venue}-up"),
+            down_token_id: format!("{venue}-down"),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: end_ms,
+            round_slot: end_ms / 1000 / 900,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: venue.into(),
+            neg_risk: true,
+            question: "BTC up or down".into(),
+        }
+    }
+
+    #[test]
+    fn two_venues_same_slot_merge_and_rollover_per_venue() {
+        // Multi-plugin data plane: polymarket and kalshi both list slot 2
+        // (staggered). Each feed is a top-up for ITS venue only; a different
+        // slot from ONE venue rolls over only that venue's markets.
+        let rounds = Arc::new(Mutex::new(Vec::new()));
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(RoundProbe {
+                rounds: rounds.clone(),
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        let end = 1_800_000; // slot 2 (1_800_000 ms / 900 s grid)
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![venue_market(end, "polymarket")],
+            now_ms: 1_000,
+        });
+        assert_eq!(*rounds.lock().unwrap(), vec![2]);
+
+        // Kalshi lists the same slot a minute later: it must JOIN the scanner
+        // (top-up), and the polymarket markets must survive the merge.
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![venue_market(end, "kalshi")],
+            now_ms: 61_000,
+        });
+        assert_eq!(
+            e.scanner.markets().len(),
+            2,
+            "the second venue's same-slot feed is a merge, not a rollover"
+        );
+        assert!(
+            e.scanner.markets().iter().any(|m| m.venue == "polymarket"),
+            "the first venue's markets are not wiped by the sibling feed"
+        );
+        assert_eq!(
+            *rounds.lock().unwrap(),
+            vec![2],
+            "a same-slot cross-venue feed is not a round transition"
+        );
+
+        // Kalshi lists the NEXT slot while polymarket still sits in slot 2:
+        // kalshi's rollover fires on_round and replaces ITS OWN markets, while
+        // the polymarket markets stay live in the table.
+        let next_end = 2_700_000; // slot 3
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![venue_market(next_end, "kalshi")],
+            now_ms: 1_800_000,
+        });
+        assert_eq!(
+            *rounds.lock().unwrap(),
+            vec![2, 3],
+            "the single-venue slot change is a real rollover"
+        );
+        let venues: Vec<&str> = e
+            .scanner
+            .markets()
+            .iter()
+            .map(|m| m.venue.as_str())
+            .collect();
+        assert_eq!(
+            venues,
+            vec!["polymarket", "kalshi"],
+            "the rollover replaces the feeding venue's list; the sibling survives"
+        );
+        // ...and the polymarket clock/expiry observation survives in its own
+        // slot, reachable for the sibling's timing decisions.
+        assert!(
+            e.scanner()
+                .round_timing_for_venue("polymarket", 1_000_001)
+                .expires_at_ms
+                > 0,
+            "the sibling venue's clock slot survives the kalshi rollover"
+        );
+    }
+
+    #[test]
+    fn one_venue_expiring_does_not_freeze_the_other_venue() {
+        // Both venues observed their (identical-grid) expiries. At a clock
+        // inside polymarket's force-exit window, a polymarket candidate is
+        // refused while a kalshi candidate (same grid, later observed expiry)
+        // is not — the per-market timing gate reads the market's OWN venue
+        // clock instead of one table-wide verdict.
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            min_round_age_sec: 0,
+            min_time_left_sec: 180,
+            ..Default::default()
+        });
+        let poly_end = 1_800_000i64;
+        let kalshi_end = 1_950_000i64; // a later observed close, in-band
+        s.observe_end_time_for_venue("polymarket", poly_end, 900_000);
+        s.observe_end_time_for_venue("kalshi", kalshi_end, 900_000);
+        let poly = venue_market(poly_end, "polymarket");
+        let kalshi = venue_market(kalshi_end, "kalshi");
+        s.set_markets(vec![poly.clone(), kalshi.clone()]);
+
+        // t = 1_630_000: 170s to the POLYMARKET close (< 180 → blocked), 320s
+        // to the KALSHI close (≥ 180 → ok).
+        let now = 1_630_000i64;
+        assert_eq!(
+            s.can_trade_reason_for(&poly, now),
+            Err(TimingBlock::TooCloseToExpiry {
+                time_left_sec: 170,
+                min_time_left_sec: 180
+            }),
+            "the polymarket market is inside its own force-exit window"
+        );
+        assert!(
+            s.can_trade_reason_for(&kalshi, now).is_ok(),
+            "the kalshi market must NOT be frozen by the polymarket window"
+        );
+        // The whole-table verdict stays conservative (earliest expiry).
+        assert!(
+            s.can_trade_reason(now).is_err(),
+            "the global window keeps the earliest-expiry semantics"
+        );
     }
 
     fn cfg() -> EngineConfig {

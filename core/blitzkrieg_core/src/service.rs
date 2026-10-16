@@ -1315,8 +1315,15 @@ pub struct Core {
     /// handshake sites judge against the same view. `None` (backtester,
     /// tests) leaves the handshake inert: nothing to be incompatible with.
     plugin_modes: Option<crate::market::compat::PluginModes>,
-    /// Optional Rust-native feed handle (P4); set when `--feed-ws` is enabled.
-    feed: Option<std::sync::Arc<dyn blitzkrieg_market_api::SubscriptionControl>>,
+    /// Per-plugin subscription controls (P4 → multi-plugin data plane). The
+    /// key is the market-plugin name; with one active plugin this map holds a
+    /// single entry and behaves exactly as the old `feed: Option<...>` slot.
+    /// A set of tokens always reaches ONLY the named plugin's control — a
+    /// Polymarket rollover must never replace a Kalshi subscription set.
+    feeds: std::collections::BTreeMap<
+        String,
+        std::sync::Arc<dyn blitzkrieg_market_api::SubscriptionControl>,
+    >,
     /// Extension registry (plugin lifecycle).
     extensions: crate::extension::ExtensionRegistry,
     /// Shadow Evolution (opt-in; disabled by default).
@@ -1981,7 +1988,7 @@ impl Core {
             engine: None,
             strategy_declarations: HashMap::new(),
             plugin_modes: None,
-            feed: None,
+            feeds: std::collections::BTreeMap::new(),
             extensions: {
                 use crate::extension::Extension;
                 let mut reg = crate::extension::ExtensionRegistry::new();
@@ -3920,20 +3927,23 @@ impl Core {
         self.engine.as_ref().is_some_and(|e| e.has_hot_params())
     }
 
-    /// Install the running data feed's subscription control (P4). Called by the
-    /// market plugin when its `DataFeed` starts, so the core stays unaware of
-    /// any concrete feed implementation.
+    /// Install the running data feed's subscription control (P4), keyed by the
+    /// market-plugin name. Called by the market plugin when its `DataFeed`
+    /// starts, so the core stays unaware of any concrete feed implementation.
+    /// A second install for the same name replaces the first (feed restart).
     pub fn set_subscription(
         &mut self,
+        plugin: &str,
         control: std::sync::Arc<dyn blitzkrieg_market_api::SubscriptionControl>,
     ) {
-        self.feed = Some(control);
+        self.feeds.insert(plugin.to_string(), control);
     }
 
-    /// Subscribe the round's tokens on the running orderbook feed (P4).
-    /// No-op when feeds are disabled.
-    pub async fn subscribe_feed_tokens(&self, tokens: Vec<String>) {
-        if let Some(feed) = &self.feed
+    /// Subscribe the round's tokens on the NAMED plugin's orderbook feed (P4).
+    /// Only that plugin's control sees the set — replacement semantics stay
+    /// per-venue. Unknown name or empty token list: no-op.
+    pub async fn subscribe_feed_tokens(&self, plugin: &str, tokens: Vec<String>) {
+        if let Some(feed) = self.feeds.get(plugin)
             && !tokens.is_empty()
         {
             feed.set_tokens(tokens);
@@ -4050,16 +4060,22 @@ impl Core {
                 // would kill in-flight taker legs whose token the top-up's
                 // partial list doesn't carry, sweep live exit reasons and wake
                 // the replay fast path for a round that never changed. The
-                // predicate mirrors the engine's: the scanner already holds
-                // this slot means "top-up", not "new round". The event still
-                // reaches `engine.on_data` below — only THIS arm's extras skip.
+                // predicate mirrors the engine's VENUE-BLIND slot membership
+                // (`.first()` generalized to `.any()`): a same-slot feed from
+                // ANY venue in a mixed table is the same staggered-listing
+                // top-up. Single-venue tables hold one slot, so `any` == the
+                // old `first` check — #498's corpus stays byte-identical.
+                // The event still reaches `engine.on_data` below — only THIS
+                // arm's extras skip.
                 let slot = markets.first().map(|m| m.round_slot).unwrap_or(0);
+                let venue = markets
+                    .first()
+                    .map(|m| m.venue.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let top_up = slot != 0
                     && self.engine.as_ref().is_some_and(|e| {
-                        e.scanner()
-                            .markets()
-                            .first()
-                            .is_some_and(|m| m.round_slot == slot)
+                        e.scanner().markets().iter().any(|m| m.round_slot == slot)
                     });
                 if !top_up {
                     self.stats.rounds += 1;
@@ -4088,19 +4104,38 @@ impl Core {
                     // reason whose position is gone can no longer belong to
                     // anything live (issue #190).
                     self.sweep_exit_reasons();
-                    // #351: the rollover closed every market of the old round. A
-                    // taker leg still un-matched for a token the new round does
-                    // not carry can never fill — the venue rejects a FOK for a
-                    // closed market — so the honest model kills it NOW (it
-                    // reports as a rejection at its report time, reservation
-                    // released). A leg that already matched keeps its fill: the
-                    // venue matched it before the close.
+                    // #351: the rollover closed every market of THIS VENUE's old
+                    // round (multi-plugin data plane: a Polymarket rollover does
+                    // not close Kalshi markets). A taker leg still un-matched for
+                    // a token the feeding venue's new round does not carry can
+                    // never fill — the venue rejects a FOK for a closed market —
+                    // so the honest model kills it NOW (it reports as a rejection
+                    // at its report time, reservation released). A leg that
+                    // already matched keeps its fill: the venue matched it before
+                    // the close.
                     let tokens: Vec<String> = markets
                         .iter()
                         .flat_map(|m| [m.up_token_id.clone(), m.down_token_id.clone()])
                         .collect();
                     for leg in self.inflight_takers.iter_mut() {
                         if leg.matched_price.is_none() && leg.rejected_msg.is_none() {
+                            // Only legs on the ROLLED-OVER venue are in scope: a
+                            // sibling venue's leg is not closed by this feed.
+                            // The leg's token comes from its own OME order.
+                            let leg_token = self
+                                .ome
+                                .get(&leg.order_id)
+                                .map(|o| o.token_id.clone())
+                                .unwrap_or_default();
+                            let leg_venue = self
+                                .engine
+                                .as_ref()
+                                .and_then(|e| e.market_for_token(&leg_token))
+                                .map(|m| m.venue.clone())
+                                .unwrap_or_default();
+                            if leg_venue != venue {
+                                continue;
+                            }
                             let ended = self
                                 .ome
                                 .get(&leg.order_id)
@@ -12870,6 +12905,80 @@ mod tests {
     use super::*;
     use crate::risk::RiskConfig;
     use rust_decimal_macros::dec;
+
+    /// Records every `set_tokens` call — the mock the multi-plugin routing
+    /// test observes through.
+    struct RecordingControl(std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>);
+
+    impl blitzkrieg_market_api::SubscriptionControl for RecordingControl {
+        fn set_tokens(&self, tokens: Vec<blitzkrieg_market_api::TokenId>) {
+            self.0.lock().unwrap().push(tokens);
+        }
+    }
+
+    #[tokio::test]
+    async fn subscription_controls_route_per_plugin() {
+        // Multi-plugin data plane: two installed controls, two subscribe calls —
+        // each control must see ONLY its own plugin's token set (replacement
+        // semantics are per-venue; a Polymarket rollover must not wipe a
+        // Kalshi subscription).
+        let mut c = Core::new(CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let poly_log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kalshi_log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        c.set_subscription(
+            "polymarket",
+            std::sync::Arc::new(RecordingControl(poly_log.clone())),
+        );
+        c.set_subscription(
+            "kalshi",
+            std::sync::Arc::new(RecordingControl(kalshi_log.clone())),
+        );
+
+        c.subscribe_feed_tokens("polymarket", vec!["poly-up".into(), "poly-down".into()])
+            .await;
+        c.subscribe_feed_tokens("kalshi", vec!["kalshi-up".into()])
+            .await;
+
+        assert_eq!(
+            *poly_log.lock().unwrap(),
+            vec![vec!["poly-up".to_string(), "poly-down".to_string()]],
+            "the polymarket control receives exactly the polymarket tokens"
+        );
+        assert_eq!(
+            *kalshi_log.lock().unwrap(),
+            vec![vec!["kalshi-up".to_string()]],
+            "the kalshi control receives exactly the kalshi tokens"
+        );
+
+        // A same-token replacement only touches the named control.
+        c.subscribe_feed_tokens("kalshi", vec!["kalshi-next".into()])
+            .await;
+        assert_eq!(
+            poly_log.lock().unwrap().len(),
+            1,
+            "the sibling venue's subscription set is untouched"
+        );
+        assert_eq!(
+            *kalshi_log.lock().unwrap(),
+            vec![
+                vec!["kalshi-up".to_string()],
+                vec!["kalshi-next".to_string()]
+            ],
+            "the named control keeps its replacement semantics"
+        );
+
+        // An unknown plugin name is an inert no-op (no panic, no cross-talk).
+        c.subscribe_feed_tokens("predictfun", vec!["x".into()])
+            .await;
+        assert_eq!(poly_log.lock().unwrap().len(), 1);
+        assert_eq!(kalshi_log.lock().unwrap().len(), 2);
+    }
 
     #[test]
     fn strategy_lib_collector_finds_dylibs_and_skips_other_files() {

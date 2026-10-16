@@ -292,7 +292,14 @@ pub async fn run(
             crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(p))
         })
     {
-        if registry.get(&cell.plugin).is_some() {
+        // Multi-plugin data plane: the value is a comma-separated list
+        // ("polymarket,kalshi"; a single name is the historical form). A cell
+        // naming ANY plugin that is not compiled in is refused as a whole
+        // (same posture as the single-value cell — a stale entry must not
+        // silently boot half a data plane), falling back to the
+        // flag/first-registered resolution.
+        let names = crate::market::parse_plugin_list(&cell.plugin);
+        if !names.is_empty() && names.iter().all(|n| registry.get(n).is_some()) {
             eprintln!(
                 "blitzkrieg-core: market plugin '{}' (persisted UI setting, \
                  data/runtime/config.json; an explicit --market-plugin outranks it)",
@@ -301,19 +308,21 @@ pub async fn run(
             plugin = Some(cell.plugin);
         } else {
             eprintln!(
-                "blitzkrieg-core: persisted market plugin '{}' is not compiled in — \
+                "blitzkrieg-core: persisted market plugin '{}' is not fully compiled in — \
                  the cell is ignored (falling back to the flag/first-registered)",
                 cell.plugin
             );
         }
     }
-    let active = crate::market::active_market_plugin(&registry, plugin.as_deref());
+    let actives = crate::market::active_market_plugins(&registry, plugin.as_deref());
+    // Strategy handshake stays SINGLE-plugin this batch: the executor (and the
+    // PluginModes snapshot it shares) routes through the FIRST selected
+    // plugin. Handshake multi-value is the next batch.
     core.set_plugin_modes(Some(crate::market::compat::PluginModes::for_plugin(
-        active.as_ref(),
+        actives[0].as_ref(),
     )));
 
     if config.engine_enabled {
-        // One mapping shared with the backtester (`CoreConfig::install_engine`).
         // A refusal here (the #265 startup self-check: an explicit
         // `--enable-strategy` that resolved to nothing) ends the boot BEFORE the
         // socket is bound or a feed is started — the failure mode is a kernel
@@ -325,37 +334,62 @@ pub async fn run(
     }
     let core = Arc::new(AsyncMutex::new(core));
 
-    let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
-        Arc::new(crate::market::host::CoreHost::new(core.clone()));
+    let host: Arc<dyn blitzkrieg_market_api::MarketHost> = {
+        let h = crate::market::host::CoreHost::new(core.clone());
+        // Untagged round lists (legacy corpora / Node bridge) route their
+        // orderbook subscription to the active plugin — the historical
+        // single-plugin behaviour, resolved at assembly instead of hardcoded.
+        h.set_active_plugin(actives[0].name());
+        Arc::new(h)
+    };
 
     // P4: Rust-native feeds. Start Binance spot now (symbols known at boot); the
     // orderbook subscriptions are added when `engine.markets` arrives (from Node)
     // or from Rust-native round discovery below.
-    if config.feed_ws_enabled
-        && let Some(feed) = active.data_feed()
-    {
+    //
+    // Multi-plugin data plane: EVERY selected plugin's feed starts (each on the
+    // shared CoreHost — the Core lock just queues the pushes). Tokens stay
+    // per-plugin: each feed only ever receives the tokens its own venue reports.
+    if config.feed_ws_enabled {
         let cfg = blitzkrieg_market_api::DataFeedConfig {
             spot_assets: config.binance_assets.clone(),
         };
-        if let Err(e) = feed.start(host.clone(), cfg, Vec::new()).await {
-            eprintln!("blitzkrieg-core: data feed start failed: {e}");
+        for p in &actives {
+            if let Some(feed) = p.data_feed() {
+                if let Err(e) = feed.start(host.clone(), cfg.clone(), Vec::new()).await {
+                    eprintln!(
+                        "blitzkrieg-core: data feed start failed for {}: {e}",
+                        p.name()
+                    );
+                } else {
+                    eprintln!("blitzkrieg-core: feed started for {}", p.name());
+                }
+            }
         }
         eprintln!("blitzkrieg-core: rust-native feeds enabled (binance spot; poly on first round)");
     }
 
     // P5: Rust-native round discovery — the plugin finds its own markets and feeds
     // the engine + orderbook subscriptions, so Node is out of the data path.
-    if config.engine_enabled
-        && config.discovery_enabled
-        && let Some(disc) = active.discovery()
-    {
+    // Per-plugin loops: each discovery reports ONLY its own venue's markets and
+    // subscribes only its own tokens.
+    if config.engine_enabled && config.discovery_enabled {
         let cfg = blitzkrieg_market_api::DiscoveryConfig {
             assets: config.assets.clone(),
             round_duration_sec: config.round_duration_sec,
             poll_sec: 5,
         };
-        if let Err(e) = disc.start(host.clone(), cfg).await {
-            eprintln!("blitzkrieg-core: discovery start failed: {e}");
+        for p in &actives {
+            if let Some(disc) = p.discovery() {
+                if let Err(e) = disc.start(host.clone(), cfg.clone()).await {
+                    eprintln!(
+                        "blitzkrieg-core: discovery start failed for {}: {e}",
+                        p.name()
+                    );
+                } else {
+                    eprintln!("blitzkrieg-core: discovery started for {}", p.name());
+                }
+            }
         }
         eprintln!("blitzkrieg-core: rust-native round discovery enabled");
     }
@@ -372,7 +406,11 @@ pub async fn run(
     // why `may_trade()` is the single predicate rather than a chain of conditions
     // each future edit could widen back open.
     if config.mode.may_trade() {
-        if let Some(exec) = active.executor() {
+        // Data-plane multi-plugin ONLY this batch: the executor stays
+        // single-plugin and starts for the first selected plugin (the
+        // registry's `active`). Order / cancel / settlement routing per
+        // plugin is the NEXT batch — do not loop this block.
+        if let Some(exec) = actives[0].executor() {
             let cfg = blitzkrieg_market_api::ExecutorConfig {
                 markets: config.markets.clone(),
             };
@@ -2152,6 +2190,11 @@ async fn handle_line(
                 let core = core.clone();
                 async move {
                     let now = now_ms();
+                    let venue = p
+                        .markets
+                        .first()
+                        .map(|m| m.venue.clone())
+                        .unwrap_or_default();
                     let tokens: Vec<String> = p
                         .markets
                         .iter()
@@ -2168,8 +2211,17 @@ async fn handle_line(
                         );
                     }
                     // P4: if Rust-native feeds are on, subscribe the round's tokens so
-                    // Node no longer pushes books for them.
-                    c.subscribe_feed_tokens(tokens).await;
+                    // Node no longer pushes books for them. Multi-plugin data
+                    // plane: tokens route to the FEEDING venue's own control —
+                    // the tokens carry the venue tag, and untagged (legacy
+                    // corpus / Node bridge) lists fall back to the registry's
+                    // active plugin, the single-plugin behaviour.
+                    let plugin = if venue.is_empty() {
+                        registry.active().unwrap_or_default()
+                    } else {
+                        venue
+                    };
+                    c.subscribe_feed_tokens(&plugin, tokens).await;
                     Ok::<_, CoreError>(serde_json::json!({ "ok": true }))
                 }
             })

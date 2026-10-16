@@ -28,14 +28,21 @@ pub trait MarketHost: Send + Sync {
     fn on_top_of_book(&self, update: TopOfBookUpdate) -> BoxFuture<'_, ()>;
     fn on_spot(&self, update: SpotUpdate) -> BoxFuture<'_, ()>;
     fn on_round_markets(&self, markets: Vec<MarketDescriptor>) -> BoxFuture<'_, ()>;
-    /// Replace the live orderbook subscription set (new round tokens).
-    fn subscribe_tokens(&self, tokens: Vec<TokenId>) -> BoxFuture<'_, ()>;
-    /// A [`DataFeed`] registers its control handle here at start-up so later
-    /// `subscribe_tokens` calls (and the `engine.markets` bridge) reach it.
-    fn install_subscription_control(
-        &self,
+    /// Replace the live orderbook subscription set (new round tokens) on the
+    /// NAMED plugin's feed. `plugin` is the market-plugin name (`self.name()`
+    /// of the caller's own plugin): with multiple data plugins running
+    /// concurrently, each plugin's tokens must reach only ITS feed — a
+    /// Polymarket rollover must never replace the Kalshi subscription set.
+    /// Single-plugin sessions route by the one registered name.
+    fn subscribe_tokens<'a>(&'a self, plugin: &str, tokens: Vec<TokenId>) -> BoxFuture<'a, ()>;
+    /// A [`DataFeed`] of the NAMED plugin registers its control handle here at
+    /// start-up so later `subscribe_tokens` calls reach it (and only it).
+    /// `plugin` is the market-plugin name; one control slot per name.
+    fn install_subscription_control<'a>(
+        &'a self,
+        plugin: &str,
         control: Arc<dyn SubscriptionControl>,
-    ) -> BoxFuture<'_, ()>;
+    ) -> BoxFuture<'a, ()>;
 
     // ── Execution egress ────────────────────────────────────────────────────
     /// Orders accepted locally with no venue id yet.

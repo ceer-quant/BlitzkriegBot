@@ -63,6 +63,62 @@ pub fn active_market_plugin(
     std::sync::Arc::new(NoopMarketPlugin)
 }
 
+/// Split a `--market-plugin` value (or the persisted `marketPlugin` cell) into
+/// plugin names. Comma-separated multi-value — `"polymarket,kalshi"` runs both
+/// data planes — with a single value being the historical form. Whitespace is
+/// trimmed; empty items are dropped. An empty result means "not configured".
+pub fn parse_plugin_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Select EVERY operative market plugin for this process (multi-plugin data
+/// plane). `preferred` is the configured value (`--market-plugin` / the
+/// persisted cell) — a comma-separated list; each registered name is enabled
+/// and returned in configuration order. Names that are not registered are
+/// warned and skipped. When nothing resolves (no preference, or no name
+/// registered) the fallback is the FIRST registered plugin — the historical
+/// single-plugin behaviour. The registry's `active` slot keeps pointing at the
+/// FIRST selected plugin (the executor still routes through it this batch;
+/// order/withdraw/settlement routing per plugin is the next batch).
+pub fn active_market_plugins(
+    registry: &registry::MarketPluginRegistry,
+    preferred: Option<&str>,
+) -> Vec<std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>> {
+    if let Some(spec) = preferred {
+        let names = parse_plugin_list(spec);
+        let picked: Vec<std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>> = names
+            .iter()
+            .filter_map(|name| match registry.get(name) {
+                Some(p) => {
+                    registry.set_enabled(name, true);
+                    Some(p)
+                }
+                None => {
+                    eprintln!(
+                        "blitzkrieg-core: requested market plugin '{name}' not registered — skipped"
+                    );
+                    None
+                }
+            })
+            .collect();
+        if let Some(first) = picked.first() {
+            registry.set_active(first.name());
+            return picked;
+        }
+        eprintln!(
+            "blitzkrieg-core: none of the requested market plugins {names:?} is registered — \
+             using first available"
+        );
+    }
+    let fallback = active_market_plugin(registry, None);
+    vec![fallback]
+}
+
 /// Fallback plugin used when no market is compiled in / registered. Visible to
 /// the IPC layer so `net.check` can still answer with a report (its default
 /// probe reports `unsupported`) instead of an error.
@@ -101,15 +157,21 @@ pub fn plugin_readout(
             active: p.name == active,
         })
         .collect();
-    // The persisted cell is only ARMED when it names a registered plugin —
-    // the boot refuses anything else, and the readout must report the same
-    // next session the boot would actually pick (no silently-differs).
+    // The persisted cell is only ARMED when EVERY name it lists is a
+    // registered plugin — the boot refuses a cell naming anything uncompiled,
+    // and the readout must report the same next session the boot would
+    // actually pick (no silently-differs). Multi-value ("polymarket,kalshi")
+    // is the same rule, per name.
     let cell = core
         .config()
         .runtime_config_path
         .as_deref()
         .and_then(|p| crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(p)))
-        .filter(|c| registry.get(&c.plugin).is_some());
+        .filter(|c| {
+            parse_plugin_list(&c.plugin)
+                .iter()
+                .all(|n| registry.get(n).is_some())
+        });
     MarketPluginReadout {
         next_session_plugin: cell
             .as_ref()

@@ -137,7 +137,8 @@ impl DataFeed for KalshiDataFeed {
             // Register the handle so later `subscribe_tokens` calls (round
             // rollovers from discovery) reach the poll loop.
             let handle = crate::feed::spawn_feed_with(host.clone(), client, initial_tokens, 0);
-            host.install_subscription_control(Arc::new(handle)).await;
+            host.install_subscription_control("kalshi", Arc::new(handle))
+                .await;
             Ok(())
         })
     }

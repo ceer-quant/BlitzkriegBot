@@ -143,7 +143,8 @@ impl DataFeed for PredictDataFeed {
 
 async fn install_control(host: &Arc<dyn MarketHost>, handle: crate::feed::FeedHandle) {
     host.install_subscription_control(
-        Arc::new(handle) as Arc<dyn blitzkrieg_market_api::SubscriptionControl>
+        "predictfun",
+        Arc::new(handle) as Arc<dyn blitzkrieg_market_api::SubscriptionControl>,
     )
     .await;
 }
