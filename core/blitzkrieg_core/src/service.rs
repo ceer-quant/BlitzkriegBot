@@ -11412,10 +11412,20 @@ impl Core {
             // quote). Selling LOWER only widens the marketable range — the
             // venue still fills at the bid or better, so the slip is a floor
             // for where we agree to sell, not a price we pay.
+            //
+            // #496: a resting (maker) sell priced AT the bid is a crossing
+            // post-only order — the venue refuses it every time, so a live TP
+            // exit could never rest (the rejection storm #163 only backs off;
+            // dry's close-intent exemption masked it). The resting sell goes
+            // one tick ABOVE the bid, clamped to stay strictly inside the
+            // ask (a price at/above the ask would cross the other side and
+            // be refused too). No bid or no book: there is nothing to rest
+            // against, so the job's judged price stands and the venue's own
+            // refusal (or the dry book aging) reports it.
             let price = if mode == FillPolicy::Taker {
                 marketable_exit_price(job.price, self.config.exit_taker_slip_ticks)
             } else {
-                job.price
+                self.maker_exit_price(&job.token, job.price)
             };
             let order = OrderRequest {
                 token_id: job.token.clone(),
@@ -11460,6 +11470,41 @@ fn marketable_exit_price(executable_bid: Decimal, slip_ticks: i64) -> Decimal {
     }
     let slipped = executable_bid - Decimal::new(slip_ticks.max(0), 2);
     slipped.max(Decimal::new(1, 2))
+}
+
+impl Core {
+    /// #496: price a RESTING (maker) exit one tick above the best bid, clamped
+    /// to stay strictly below the best ask — the only shape a post-only SELL
+    /// can be accepted at. A sell AT the bid crosses the book (`Book::crosses`
+    /// on the sell side is `best_bid >= price`), so the venue refuses the POST
+    /// every time; a sell at/above the ask crosses the other side. Without a
+    /// live book there is nothing to rest against: the judged price stands and
+    /// the venue's own refusal (or dry's book aging) reports it.
+    fn maker_exit_price(&self, token: &str, judged: Decimal) -> Decimal {
+        let tick = Decimal::new(1, 2); // 0.01 — the binary-market price grid
+        let Some(book) = self.books.get(token) else {
+            return judged;
+        };
+        let Some(bid) = book.best_bid() else {
+            return judged;
+        };
+        let mut price = bid + tick;
+        if let Some(ask) = book.best_ask()
+            && ask > Decimal::ZERO
+            && price >= ask
+        {
+            // A one-tick spread leaves no inside price: the closest legal
+            // rest would be above the bid but there is no grid point strictly
+            // between bid and ask. The band is too tight to rest honestly —
+            // the judged price stands and the venue's answer reports it.
+            if ask > bid + tick {
+                price = ask - tick;
+            } else {
+                return judged;
+            }
+        }
+        price.min(Decimal::new(99, 2))
+    }
 }
 
 /// The narrowed surface handed to an extension when it is enabled. It carries
@@ -11770,6 +11815,121 @@ mod books_mirror_tests {
     use crate::risk::RiskConfig;
     use rust_decimal_macros::dec;
 
+    // ── #496: TP maker-first 退出单必须挂买一上方一档（真 post-only 单）────
+
+    /// Reverse acceptance: a TP maker-first exit priced AT the best bid is a
+    /// crossing post-only SELL — the venue refuses it every time (`WouldCross`),
+    /// so live's TP exit can never rest: the storm #163 only backs off. The fix
+    /// prices the resting SELL one tick ABOVE the bid (clamped inside the band
+    /// so it never crosses the ask either), which is what a post-only order
+    /// requires to be accepted at all. Taker exits (stop/force/time) keep
+    /// `marketable_exit_price` and are untouched.
+    #[test]
+    fn tp_maker_exit_rests_one_tick_above_the_bid_not_at_the_touch() {
+        let cfg = CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(1000),
+            round_duration_sec: 900,
+            auto_exits_enabled: true,
+            ..Default::default()
+        };
+        let mut c = Core::new(cfg);
+        c.enable_engine(crate::engine::Engine::new(
+            crate::engine::EngineConfig::default(),
+        ));
+        let now = 1_000_000_000i64;
+        let slot = now / 1000 / 900;
+        let end = (slot + 1) * 900 * 1000;
+
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![crate::model::CryptoMarket {
+                    asset: "BTC".into(),
+                    condition_id: "c".into(),
+                    question_id: "q".into(),
+                    up_token_id: "tok".into(),
+                    down_token_id: "d".into(),
+                    up_price: dec!(0.6),
+                    down_price: dec!(0.4),
+                    expires_at_ms: end,
+                    round_slot: slot,
+                    round_duration_sec: 900,
+                    archive_verdict: false,
+                    venue: String::new(),
+                    neg_risk: true,
+                    question: "?".into(),
+                }],
+                now_ms: now,
+            },
+            now,
+        );
+        c.engine_on_data(
+            crate::engine::DataEvent::Book {
+                token_id: "tok".into(),
+                bids: vec![(dec!(0.43), dec!(100))],
+                asks: vec![(dec!(0.45), dec!(100))],
+                now_ms: now,
+            },
+            now,
+        );
+        let req = crate::model::OrderRequest {
+            token_id: "tok".into(),
+            condition_id: "c".into(),
+            side: crate::model::Side::Buy,
+            mode: crate::model::FillPolicy::Taker,
+            price: dec!(0.45),
+            size: dec!(10),
+            internal_key: "k".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: slot,
+            account_id: crate::model::default_account_id(),
+        };
+        c.place(req, 0, now).unwrap();
+        assert_eq!(c.positions().open_positions().len(), 1);
+
+        // Profitable book with a TWO-tick spread: bid 0.95 / ask 0.97. TP
+        // fires (+137%), and a resting post-only SELL has room one tick above
+        // the bid (0.96 < 0.97 ask). The pre-fix order priced AT the bid
+        // (0.95) — live refuses that POST every time.
+        c.engine_on_data(
+            crate::engine::DataEvent::Book {
+                token_id: "tok".into(),
+                bids: vec![(dec!(0.95), dec!(100))],
+                asks: vec![(dec!(0.97), dec!(100))],
+                now_ms: now + 1000,
+            },
+            now + 1000,
+        );
+        c.tick(now + 1200).unwrap();
+
+        // The TP exit must be a LIVE maker SELL resting one tick above the
+        // bid — not filled at the touch (the old optimistic dry fill), not
+        // sitting at the bid where live would refuse it.
+        assert_eq!(c.positions().open_positions().len(), 1, "not closed yet");
+        let sells: Vec<_> = c
+            .ome()
+            .all()
+            .into_iter()
+            .filter(|o| o.side == crate::model::Side::Sell && o.status.is_live())
+            .collect();
+        assert_eq!(sells.len(), 1, "one live exit SELL: {:?}", sells);
+        assert_eq!(
+            sells[0].mode,
+            crate::model::FillPolicy::Maker,
+            "TP exits are maker-first"
+        );
+        assert_eq!(
+            sells[0].price,
+            dec!(0.96),
+            "one tick ABOVE the bid — the only price a post-only SELL can rest at"
+        );
+    }
+
     /// Regression: a Rust-native feed tick (engine_on_data) must mirror the book
     /// into Core.books so the exit path can value open positions. Previously
     /// Core.books stayed empty under --feed-ws, so currentPrice never moved and
@@ -11859,6 +12019,21 @@ mod books_mirror_tests {
             now + 1000,
         );
         c.tick(now + 1200).unwrap();
+
+        // #496: the maker-first TP exit now RESTS one tick above the bid
+        // (0.96) instead of filling optimistically at the touch — the shape a
+        // live post-only order requires. The bid rising into the resting
+        // limit is the honest maker fill that closes the position.
+        c.engine_on_data(
+            crate::engine::DataEvent::Book {
+                token_id: "tok".into(),
+                bids: vec![(dec!(0.96), dec!(100))],
+                asks: vec![(dec!(0.98), dec!(100))],
+                now_ms: now + 2000,
+            },
+            now + 2000,
+        );
+        c.tick(now + 2200).unwrap();
 
         // Position closed with a profit, and the recorded exit reflects the
         // higher price (not frozen at entry).
@@ -15989,6 +16164,15 @@ mod strategy_dispatch_tests {
             now + 14_000,
         );
         c.tick(now + 14_200).unwrap();
+        // #496: the maker-first TP exit rests at 0.96 (one tick above the
+        // bid) and the bid rising into it is the honest fill that closes.
+        c.book_snapshot(
+            "up",
+            vec![(dec!(0.96), dec!(100))],
+            vec![(dec!(0.98), dec!(100))],
+            now + 15_000,
+        );
+        c.tick(now + 15_200).unwrap();
         assert_eq!(
             c.positions().open_positions().len(),
             0,
@@ -16082,6 +16266,14 @@ mod strategy_dispatch_tests {
             now + 14_000,
         );
         c.tick(now + 14_200).unwrap();
+        // #496: the TP exit rests at 0.96; the bid rising into it fills it.
+        c.book_snapshot(
+            "up",
+            vec![(dec!(0.96), dec!(100))],
+            vec![(dec!(0.98), dec!(100))],
+            now + 15_000,
+        );
+        c.tick(now + 15_200).unwrap();
         assert_eq!(c.positions().open_positions().len(), 0);
         assert_eq!(c.ledger().reserved(), Decimal::ZERO);
 
